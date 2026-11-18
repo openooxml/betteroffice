@@ -8839,6 +8839,30 @@ mod tests {
         assert_eq!(inlines[2]["text"], json!("Version Control Table"));
     }
 
+    #[test]
+    fn a_field_counting_its_code_and_result_paragraphs_binds_its_code_marks() {
+        let data = json!({
+            "type":"complexField", "fieldType":"QUOTE", "instruction":"QUOTE x",
+            "fieldCode":[], "fieldResult":[],
+            "structuredCode":{"inline":[], "blockCount":1},
+            "structuredResult":{"inline":[], "blockCount":1}
+        });
+        let data = Value::String(data.to_string());
+        let payload = JsonObject::from([("fieldData".to_owned(), data)]);
+        let mut units = [embed_unit("field", payload, &[], 1)];
+        let blocks = [
+            json!({"type":"paragraph","paraId":"owner","content":[]}),
+            json!({"type":"paragraph","paraId":"code","content":[run("Code")]}),
+            json!({"type":"paragraph","paraId":"result","content":[run("Result")]}),
+        ];
+        bind_field_code_blocks(&mut units, "body", &blocks, 0, BlockCursor::default());
+        let UnitContent::Embed { payload, .. } = &units[0].content else {
+            panic!("the field is an embed");
+        };
+        assert_eq!(payload.get("fieldCodeMarks"), Some(&json!(["code"])));
+        assert_eq!(payload.get("fieldCodeTarget"), Some(&json!("result")));
+    }
+
     fn block_field(instruction: &str, blocks: &[Value]) -> Value {
         json!({
             "type":"complexField", "fieldType":"UNKNOWN", "instruction":instruction,

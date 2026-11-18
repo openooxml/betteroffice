@@ -669,3 +669,13 @@ fn a_click_in_either_part_of_a_joined_header_line_edits_that_part() {
         assert_eq!(text_of(other), before, "{text}");
     }
 }
+
+#[test]
+fn spanning_field_gates_ask_the_shared_predicate() {
+    let seed = include_str!("../src/seed.rs");
+    let plan = include_str!("../src/paragraph_patch_plan.rs");
+    for pattern in [r#"contains("\"blocks\"")"#, r#""blocks")).is_empty()"#] {
+        assert!(!seed.contains(pattern), "seed.rs: {pattern}");
+    }
+    assert!(!plan.contains(r#"get("blocks")"#));
+}

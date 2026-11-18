@@ -254,6 +254,41 @@ describe('DOCX engine seeding', () => {
     }
   });
 
+  it('binds the hidden code paragraphs of a field that counts its code and result paragraphs', async () => {
+    const text = (value: string): Run => ({ type: 'run', content: [{ type: 'text', text: value }] });
+    const field = {
+      type: 'complexField',
+      fieldType: 'QUOTE',
+      instruction: 'QUOTE x',
+      fieldCode: [],
+      fieldResult: [],
+      structuredCode: { inline: [], blockCount: 1 },
+      structuredResult: { inline: [], blockCount: 1 },
+    } as unknown as ComplexField;
+    const document: Document = {
+      package: {
+        document: {
+          content: [
+            { type: 'paragraph', paraId: '0000000A', content: [field] },
+            { type: 'paragraph', paraId: '0000000B', content: [text('Code')] },
+            { type: 'paragraph', paraId: '0000000C', content: [text('Result')] },
+          ],
+        },
+      },
+    };
+    const session = await createYrsSession({ clientId: 47043 });
+    try {
+      documentToYrs(session, document);
+      const payloads = session.storySegments('body').flatMap((segment) =>
+        segment.kind === 'embed' && segment.embedKind === 'field' ? [segment.payload] : []
+      );
+      expect(payloads).toHaveLength(1);
+      expect(payloads[0]).toMatchObject({ fieldCodeMarks: ['0000000B'], fieldCodeTarget: '0000000C' });
+    } finally {
+      session.destroy();
+    }
+  });
+
   it.each(['field', 'hyperlink', 'sdt'])('collects nested SEQ names from field trees with Rust token and case semantics (%s)', async (placement) => {
     const run: Run = { type: 'run', content: [{ type: 'text', text: '2' }] };
     const simple = (instruction: string, cached = '2'): SimpleField => ({
@@ -901,4 +936,13 @@ describe('DOCX engine seeding', () => {
     }
   });
 
+});
+
+describe('spanning field gates', () => {
+  it('ask the shared predicate whether a field spans paragraphs', () => {
+    const source = readFileSync(resolve(import.meta.dir, 'documentToYrs.ts'), 'utf8');
+    for (const pattern of [`includes('"blocks"')`, 'resultBlocks.length > 0']) {
+      expect({ pattern, found: source.includes(pattern) }).toEqual({ pattern, found: false });
+    }
+  });
 });

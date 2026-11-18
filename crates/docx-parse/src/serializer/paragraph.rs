@@ -1324,6 +1324,8 @@ pub(super) fn on_off(writer: &mut XmlWriter, name: &'static str, value: Option<b
 
 #[cfg(test)]
 mod tests {
+    use serde_json::{Value, json};
+
     use crate::inline::{Run, RunContent, RunType};
     use crate::serializer::s10::SerializerDeterminism;
 
@@ -1591,5 +1593,59 @@ mod tests {
         assert!(serialize_sdt_properties(&properties).is_err());
         properties.raw_properties_xml = None;
         assert!(serialize_sdt_properties(&properties).is_ok());
+    }
+
+    fn run_value(content: Value) -> Value {
+        json!({"type": "run", "content": [content]})
+    }
+
+    fn instruction_run() -> Value {
+        run_value(json!({"type": "instrText", "text": "QUOTE x"}))
+    }
+
+    fn spanning_field(code: Value, result: Value, field_result: Value) -> ComplexField {
+        serde_json::from_value(json!({
+            "type": "complexField",
+            "instruction": "QUOTE x",
+            "fieldType": "QUOTE",
+            "fieldCode": [instruction_run()],
+            "fieldResult": field_result,
+            "structuredCode": code,
+            "structuredResult": result
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_field_whose_code_spans_paragraphs_writes_its_code_runs() {
+        let code = json!({"inline": [
+            {"type": "bookmarkStart", "id": 5, "name": "CodeMark"},
+            instruction_run()
+        ], "blockCount": 1});
+        let field = spanning_field(code, Value::Null, json!([]));
+        let output = serialize_complex_field(&field, &mut context()).unwrap();
+        assert!(output.contains("QUOTE x"), "{output}");
+        assert!(!output.contains("CodeMark"), "{output}");
+    }
+
+    #[test]
+    fn a_field_whose_result_spans_paragraphs_writes_its_result_runs() {
+        let copy = run_value(json!({"type": "text", "text": "InlineCopy"}));
+        let written = run_value(json!({"type": "text", "text": "RunResult"}));
+        let result = json!({"inline": [copy], "blockCount": 1});
+        let field = spanning_field(Value::Null, result, json!([written]));
+        let output = serialize_complex_field(&field, &mut context()).unwrap();
+        assert!(output.contains("RunResult"), "{output}");
+        assert!(!output.contains("InlineCopy"), "{output}");
+    }
+
+    #[test]
+    fn a_field_whose_result_spans_paragraphs_holds_the_references_of_its_result_runs() {
+        let reference = |id: u32| run_value(json!({"type": "commentReference", "id": id}));
+        let result = json!({"inline": [reference(3)], "blockCount": 1});
+        let field = spanning_field(Value::Null, result, json!([reference(4)]));
+        let node = InlineNode::ComplexField(Box::new(field));
+        assert!(has_comment_reference(&node, 4.0));
+        assert!(!has_comment_reference(&node, 3.0));
     }
 }

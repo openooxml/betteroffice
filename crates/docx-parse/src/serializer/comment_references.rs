@@ -313,3 +313,56 @@ impl Remover<'_> {
         run.content.is_empty() && run.content.len() < before
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use super::*;
+
+    fn reference() -> Value {
+        json!({"type": "run", "content": [{"type": "commentReference", "id": 1}]})
+    }
+
+    /// The field after normalizing a paragraph that ends comment 1 and references it before a
+    /// field spanning paragraphs.
+    fn normalized_field(inline: Value, field_result: Value) -> Value {
+        let mut story: Vec<BlockContent> = serde_json::from_value(json!([{
+            "type": "paragraph",
+            "content": [
+                {"type": "commentRangeEnd", "id": 1},
+                reference(),
+                {
+                    "type": "complexField",
+                    "instruction": "QUOTE x",
+                    "fieldType": "QUOTE",
+                    "fieldCode": [],
+                    "fieldResult": field_result,
+                    "structuredResult": {"inline": inline, "blockCount": 1}
+                }
+            ]
+        }]))
+        .unwrap();
+        normalize_comment_references(&mut [&mut story], |_| true);
+        let story = serde_json::to_value(&story).unwrap();
+        assert!(holds_reference(&story[0]["content"][1]));
+        story[0]["content"][2].clone()
+    }
+
+    fn holds_reference(value: &Value) -> bool {
+        value.to_string().contains("commentReference")
+    }
+
+    #[test]
+    fn a_field_spanning_paragraphs_drops_a_repeated_reference_from_its_written_runs() {
+        let field = normalized_field(json!([]), json!([reference()]));
+        assert!(!holds_reference(&field["fieldResult"]));
+    }
+
+    #[test]
+    fn a_field_spanning_paragraphs_leaves_its_inline_copy_alone() {
+        let field = normalized_field(json!([reference()]), json!([]));
+        let inline = &field["structuredResult"]["inline"];
+        assert!(holds_reference(inline), "{inline}");
+    }
+}

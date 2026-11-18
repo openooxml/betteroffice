@@ -2013,6 +2013,23 @@ mod tests {
     }
 
     #[test]
+    fn a_complex_field_counting_later_paragraphs_is_not_closed() {
+        let payload = |data: Value| {
+            Attrs::from([
+                ("modelKind".to_owned(), json!("field")),
+                ("fieldKind".to_owned(), json!("complex")),
+                ("fieldData".to_owned(), json!(data.to_string())),
+            ])
+        };
+        let closed = json!({"structuredResult": {"inline": []}});
+        assert!(closed_complex_field(&payload(closed)));
+        for key in ["structuredCode", "structuredResult"] {
+            let spanning = json!({ key: {"inline": [], "blockCount": 1} });
+            assert!(!closed_complex_field(&payload(spanning)), "{key}");
+        }
+    }
+
+    #[test]
     fn retained_drawing_atoms_allow_neighbour_text_but_no_payload_or_format_changes() {
         let mut before = paragraph("old", json!({}));
         before.insert(
