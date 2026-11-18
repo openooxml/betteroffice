@@ -88,6 +88,27 @@ test('d2c_projection_reads_only_the_active_paragraph_and_caret_page', () => {
   expect(reads).toEqual([{ story: 'body', paraIds: ['p'], view: 'accepted' }]);
 });
 
+test('projection reads a paragraph of a body table cell, one an edit minted with its client suffix too', () => {
+  const read = (story: string) => {
+    const source = input();
+    const reads: unknown[] = [];
+    const readParagraphs = source.engine.proposalEngine.readParagraphs;
+    source.engine.proposalEngine.readParagraphs = (request) => {
+      reads.push(request);
+      return readParagraphs(request);
+    };
+    const at = { story, paraId: 'p', offset: 3 };
+    projectCommandEchoContext({ ...source, selection: { anchor: at, focus: at } });
+    return reads;
+  };
+  for (const story of ['body:t0:r0c1', 'body:t0:r0c1~1', 'body:t0:r1c0~12:t0:r0c0~12']) {
+    expect(read(story)).toEqual([{ story, paraIds: ['p'], view: 'accepted' }]);
+  }
+  for (const story of ['body:t0:r0c1~', 'body:t0:r0c1~x', 'body~1', 'header1:t0:r0c0', 'body:t0:r0c0:sdt1']) {
+    expect(read(story)).toEqual([]);
+  }
+});
+
 test('d2c_projection_reads_the_active_paragraph_from_its_segments_when_the_engine_has_them', () => {
   const source = input();
   const reads: unknown[] = [];

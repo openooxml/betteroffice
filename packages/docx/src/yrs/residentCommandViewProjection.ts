@@ -128,8 +128,8 @@ export function projectCommandEchoContext(
   input: ProjectCommandEchoContextInput
 ): DocxCommandEchoContext | undefined {
   const { engine, selection, layout } = input;
-  // the body and its table cells, whose display positions are the body's
-  if (!selection || !/^body(?::t\d+:r\d+c\d+)*$/.test(selection.focus.story) ||
+  // the body and its table cells (a cell an edit minted carries its client: `c1~1`), whose display positions are the body's
+  if (!selection || !/^body(?::t\d+:r\d+c\d+(?:~\d+)?)*$/.test(selection.focus.story) ||
     selection.anchor.story !== selection.focus.story || selection.anchor.paraId !== selection.focus.paraId) return undefined;
   const story = selection.focus.story;
   const snapshot = engine.residentCaretSnapshot();

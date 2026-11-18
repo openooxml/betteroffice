@@ -2933,21 +2933,28 @@ thread_local! {
 }
 
 /// Whether `story` is the body or a table cell in it, however deeply nested
-/// (`body:t0:r1c2:t0:r0c0`): the stories whose paragraphs take the body's display positions.
+/// (`body:t0:r1c2:t0:r0c0`), a cell an edit minted with its client suffix too (`body:t0:r0c1~1`):
+/// the stories whose paragraphs take the body's display positions.
 pub(crate) fn body_or_body_cell_story(story: &str) -> bool {
+    fn number(rest: &str) -> Option<&str> {
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        (digits > 0).then(|| &rest[digits..])
+    }
     let Some(mut rest) = story.strip_prefix("body") else {
         return false;
     };
     while !rest.is_empty() {
         for tag in [":t", ":r", "c"] {
-            let Some(after) = rest.strip_prefix(tag) else {
+            let Some(after) = rest.strip_prefix(tag).and_then(number) else {
                 return false;
             };
-            let digits = after.bytes().take_while(u8::is_ascii_digit).count();
-            if digits == 0 {
+            rest = after;
+        }
+        if let Some(client) = rest.strip_prefix('~') {
+            let Some(after) = number(client) else {
                 return false;
-            }
-            rest = &after[digits..];
+            };
+            rest = after;
         }
     }
     true
@@ -29049,7 +29056,13 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
 
     #[test]
     fn body_cell_stories_are_the_body_and_its_table_cells_however_nested() {
-        for story in ["body", "body:t0:r1c2", "body:t0:r0c0:t3:r12c4"] {
+        for story in [
+            "body",
+            "body:t0:r1c2",
+            "body:t0:r0c0:t3:r12c4",
+            "body:t0:r0c1~1",
+            "body:t0:r1c0~12:t0:r0c0~12",
+        ] {
             assert!(body_or_body_cell_story(story), "{story}");
         }
         for story in [
@@ -29061,6 +29074,11 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             "body:t0:r1c",
             "body:tx:r0c0",
             "body:t0:r0c0:sdt1",
+            "body~1",
+            "body:t0~1:r0c0",
+            "body:t0:r0c0~",
+            "body:t0:r0c0~x",
+            "body:t0:r0c0~1~2",
             "fn:1:t0:r0c0",
             "header1:t0:r0c0",
         ] {
