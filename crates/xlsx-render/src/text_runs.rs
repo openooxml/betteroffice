@@ -118,10 +118,35 @@ pub fn wrap_run_lines(
     text: &str,
     pieces: &[TextPiece],
     width: f32,
-    measure: impl FnMut(&TextPiece, &str) -> f32,
+    mut measure: impl FnMut(&TextPiece, &str) -> f32,
 ) -> Vec<Vec<TextPiece>> {
-    let _ = (text, pieces, width, measure);
-    Vec::new()
+    let spans = crate::wrap::wrap_spans(text, width, |span| {
+        within(pieces, span)
+            .map(|(piece, part)| measure(piece, &text[part]))
+            .sum()
+    });
+    spans
+        .into_iter()
+        .map(|span| {
+            within(pieces, span)
+                .map(|(piece, part)| TextPiece {
+                    range: part,
+                    ..piece.clone()
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// The pieces that reach into `span`, each with the part of it inside.
+fn within(
+    pieces: &[TextPiece],
+    span: Range<usize>,
+) -> impl Iterator<Item = (&TextPiece, Range<usize>)> {
+    pieces.iter().filter_map(move |piece| {
+        let part = piece.range.start.max(span.start)..piece.range.end.min(span.end);
+        (!part.is_empty()).then_some((piece, part))
+    })
 }
 
 /// Whether `text` holds a right-to-left letter (Hebrew, Arabic, Syriac,
