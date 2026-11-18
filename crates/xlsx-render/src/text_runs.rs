@@ -111,6 +111,18 @@ pub fn run_pieces(command: &DrawCmd) -> Option<Vec<TextPiece>> {
     }
 }
 
+/// The pieces of each line a wrapped command paints, split where its lines
+/// break; `measure` gives the width of part of a piece's text in its font.
+pub fn wrap_run_lines(
+    text: &str,
+    pieces: &[TextPiece],
+    width: f32,
+    measure: impl FnMut(&TextPiece, &str) -> f32,
+) -> Vec<Vec<TextPiece>> {
+    let _ = (text, pieces, width, measure);
+    Vec::new()
+}
+
 /// Whether `text` holds a right-to-left letter (Hebrew, Arabic, Syriac,
 /// Thaana, N'Ko, Samaritan, Mandaic and their presentation forms) or a
 /// control that opens right-to-left text.

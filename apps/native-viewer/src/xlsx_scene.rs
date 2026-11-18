@@ -1206,6 +1206,7 @@ mod tests {
     struct Painted {
         colors: Vec<u32>,
         pens: Vec<f32>,
+        baselines: Vec<f32>,
         sizes: Vec<f32>,
         clips: u32,
         skipped: usize,
@@ -1223,6 +1224,7 @@ mod tests {
                 .filter(|word| [RED, BLACK].contains(word))
                 .collect(),
             pens: runs.iter().map(|run| run.transform.translation[0]).collect(),
+            baselines: runs.iter().map(|run| run.transform.translation[1]).collect(),
             sizes: runs.iter().map(|run| run.font_size).collect(),
             clips: encoding.n_clips,
             skipped: page.skipped.total(),
@@ -1272,25 +1274,40 @@ mod tests {
     }
 
     #[test]
-    fn wrapped_rotated_and_stacked_text_paints_as_without_runs() {
-        let mut wrapped = text("AB CD");
-        let mut rotated = text("ABCD");
-        let mut stacked = text("ABCD");
+    fn a_wrapped_command_paints_each_line_s_pieces_in_their_own_colours_and_sizes() {
+        let mut wrapped = text("AB CDE FG");
         if let DrawCmd::Text { wrap, .. } = &mut wrapped {
             *wrap = Some(TextWrap {
-                width: 20.0,
-                line_height: 14.0,
+                width: measure_text("CDE", 14.0) + 1.0,
+                line_height: 16.0,
                 valign: TextValign::Top,
                 max_lines: None,
             });
         }
+        let larger = TextRun {
+            font_size: Some(14.0),
+            ..span(3, 9)
+        };
+        let rich = painted(with_runs(wrapped, vec![red_bold(0, 2), larger]));
+        assert_eq!(rich.colors, vec![RED, RED, BLACK, BLACK]);
+        assert_eq!(rich.pens, vec![4.0, 4.0 + BOLD_OFFSET_PX, 4.0, 4.0]);
+        assert_eq!(rich.baselines, vec![20.0, 20.0, 36.0, 52.0]);
+        let (small, large) = (11.0 * PX_PER_PT, 14.0 * PX_PER_PT);
+        assert_eq!(rich.sizes, vec![small, small, large, large]);
+        assert_eq!(rich.skipped, 0);
+    }
+
+    #[test]
+    fn rotated_and_stacked_text_paints_as_without_runs() {
+        let mut rotated = text("ABCD");
+        let mut stacked = text("ABCD");
         if let DrawCmd::Text { rotation_deg, .. } = &mut rotated {
             *rotation_deg = Some(90.0);
         }
         if let DrawCmd::Text { stacked: flag, .. } = &mut stacked {
             *flag = true;
         }
-        for command in [wrapped, rotated, stacked] {
+        for command in [rotated, stacked] {
             assert_eq!(
                 painted(with_runs(command.clone(), vec![red_bold(0, 2)])),
                 painted(command)

@@ -1,13 +1,17 @@
+import hashlib
 import io
+import json
 import re
 import xml.sax.saxutils
 import zipfile
+from pathlib import Path
 
 import pytest
 
 import betteroffice_xlsx as bo
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+RICH_TEXT_PNG = Path(__file__).resolve().parents[2] / "xlsx-rich-text-png.json"
 
 
 def test_open_exposes_sheets(sample_bytes):
@@ -307,6 +311,16 @@ def test_render_png_write(sample_bytes, tmp_path):
     target = tmp_path / "sheet.png"
     bo.Workbook.open(sample_bytes).render_png({"sheet": 0, "range": "A1:D12"}).write(target)
     assert target.read_bytes()[:8] == PNG_MAGIC
+
+
+def test_rich_text_png_matches_the_native_binding():
+    shared = json.loads(RICH_TEXT_PNG.read_text(encoding="utf-8"))
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as package:
+        for name, content in shared["parts"].items():
+            package.writestr(name, content)
+    png = bo.Workbook.open(buffer.getvalue()).render_png(shared["target"])
+    assert hashlib.sha256(png.bytes).hexdigest() == shared["sha256"]
 
 
 def test_save_round_trip_preserves_edits(sample_bytes):

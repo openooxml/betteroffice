@@ -1,5 +1,6 @@
 import initPreflight, { font_preflight as wasmFontPreflight } from '../../packages/xlsx/src/wasm/generated/preflight/xlsx_preflight.js';
 import { fontPreflightFixture } from '../../packages/xlsx/src/wasm/__fixtures__/fontPreflight';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -557,6 +558,23 @@ describe('xlsx native engine parity', () => {
     } finally {
       wasmDoc.free();
       nativeDoc.free();
+    }
+  });
+
+  test('renderPngTarget paints the shared rich text fixture to the PNG the Python binding paints', async () => {
+    const shared = JSON.parse(readFileSync(new URL('../xlsx-rich-text-png.json', import.meta.url), 'utf8')) as {
+      target: unknown;
+      sha256: string;
+      parts: Record<string, string>;
+    };
+    const zip = new JSZip();
+    for (const [name, content] of Object.entries(shared.parts)) zip.file(name, content);
+    const doc = native.XlsxDocument.open(await zip.generateAsync({ type: 'uint8array' })) as EngineDocument;
+    try {
+      const png = doc.renderPngTarget(JSON.stringify(shared.target), '{}');
+      expect(createHash('sha256').update(png).digest('hex')).toBe(shared.sha256);
+    } finally {
+      doc.free();
     }
   });
 

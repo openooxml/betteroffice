@@ -117,17 +117,45 @@ async function buildProtectedFixture(source: Uint8Array): Promise<Uint8Array> {
   return zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
 }
 
+const RICH_SHEET = `<worksheet xmlns="${MAIN}"><sheetData>` +
+  '<row r="1"><c r="A1" t="s"><v>0</v></c><c r="C1" t="inlineStr"><is><r><rPr><b/><color rgb="FFFF0000"/></rPr><t>Inline</t></r>' +
+  '<r><t xml:space="preserve"> text</t></r></is></c></row>' +
+  '<row r="2" ht="45" customHeight="1"><c r="A2" s="2" t="s"><v>1</v></c></row></sheetData></worksheet>';
+const RICH_STRINGS = `<sst xmlns="${MAIN}" count="2" uniqueCount="2">` +
+  '<si><r><rPr><b/><i/><sz val="14"/><rFont val="Cambria"/></rPr><t>Ab</t></r>' +
+  '<r><rPr><u val="double"/><color rgb="FF0000FF"/></rPr><t xml:space="preserve"> 中</t></r>' +
+  '<r><rPr><vertAlign val="superscript"/></rPr><t>😀</t></r></si>' +
+  '<si><r><rPr><b/></rPr><t xml:space="preserve">Wrapped </t></r><r><rPr><sz val="20"/></rPr><t>text in a narrow cell</t></r></si></sst>';
+
+async function buildRichFixture(source: Uint8Array): Promise<Uint8Array> {
+  const zip = await JSZip.loadAsync(source);
+  const date = new Date('2024-01-01T00:00:00Z');
+  const wrapped = '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment wrapText="1"/></xf>';
+  zip.file('xl/styles.xml', STYLES.replace('<cellXfs count="2">', '<cellXfs count="3">').replace('</cellXfs>', `${wrapped}</cellXfs>`), { date });
+  zip.file('xl/worksheets/sheet1.xml', RICH_SHEET, { date });
+  zip.file('xl/sharedStrings.xml', RICH_STRINGS, { date });
+  const types = await zip.file('[Content_Types].xml')!.async('string');
+  const strings = `<Override PartName="/xl/sharedStrings.xml" ContentType="${OFFICE}.spreadsheetml.sharedStrings+xml"/>`;
+  zip.file('[Content_Types].xml', types.replace('</Types>', `${strings}</Types>`), { date });
+  const workbookRels = await zip.file('xl/_rels/workbook.xml.rels')!.async('string');
+  const relationship = `<Relationship Id="rId4" Type="${REL}/sharedStrings" Target="sharedStrings.xml"/>`;
+  zip.file('xl/_rels/workbook.xml.rels', workbookRels.replace('</Relationships>', `${relationship}</Relationships>`), { date });
+  return zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
+}
+
 const wasmEngine: XlsxEngine = { ...wasmXlsx, font_preflight: wasmFontPreflight };
 const nativeEngine = createRequire(import.meta.url)('../xlsx-native/index.js') as XlsxEngine;
 const ENGINES = [['wasm', wasmEngine], ['native', nativeEngine]] as const;
 let fixture: Uint8Array;
 let protectedFixture: Uint8Array;
+let richFixture: Uint8Array;
 
 beforeAll(async () => {
   await initWasm({ module_or_path: readFileSync(new URL('../../packages/xlsx/src/wasm/generated/xlsx_wasm_bg.wasm', import.meta.url)) });
   await initPreflight({ module_or_path: readFileSync(new URL('../../packages/xlsx/src/wasm/generated/preflight/xlsx_preflight_bg.wasm', import.meta.url)) });
   fixture = await buildFixture();
   protectedFixture = await buildProtectedFixture(fixture);
+  richFixture = await buildRichFixture(fixture);
 });
 
 // documentVersion() is "{nonce:32 hex}-{epoch}"; the nonce is minted per open.
@@ -733,6 +761,18 @@ const rows: Row<Xlsx>[] = [
       if (wraps.length === 0 || wraps.some((wrap) => wrap.maxLines === undefined)) throw new Error(`no line limit: ${JSON.stringify(wraps)}`);
       return wraps;
     },
+  },
+  {
+    method: 'XlsxDocument.displayListJson',
+    name: 'XlsxDocument.displayListJson (rich text cells carry their runs on the screen, png and print paths)',
+    call: ({ engine }) => scoped(engine.XlsxDocument.open(richFixture), (d) => {
+      const print = json({ sheet: 0, range: 'A1:C2', metrics: METRICS, gridlines: false });
+      const lists = [d.displayListJson(VIEWPORT), d.rangePngDisplayListJson('{}'), d.printDisplayListJson(print)];
+      const runs = lists.map((list) =>
+        (JSON.parse(list) as { commands: { runs?: unknown[] }[] }).commands.flatMap((command) => (command.runs ? [command.runs] : [])));
+      if (runs.some((found) => found.length !== 3)) throw new Error(`rich text cells painted without runs: ${JSON.stringify(runs)}`);
+      return lists;
+    }),
   },
   { method: 'XlsxDocument.displayListForJson', call: ({ doc }) => doc.displayListForJson(1, VIEWPORT) },
   { method: 'XlsxDocument.pngDisplayListJson', call: ({ doc }) => doc.pngDisplayListJson(VIEWPORT) },

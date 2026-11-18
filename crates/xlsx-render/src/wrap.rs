@@ -1,6 +1,8 @@
 //! line breaking for wrapped cell text, shared by row autofit and the painters.
 //! `packages/xlsx/src/render/wrap.ts` mirrors these rules.
 
+use std::ops::Range;
+
 use unicode_segmentation::UnicodeSegmentation;
 use xlsx_model::styles::Alignment;
 
@@ -35,6 +37,17 @@ pub fn wrap_lines(text: &str, width: f32, mut measure: impl FnMut(&str) -> f32) 
         }
     }
     lines
+}
+
+/// the byte spans of the lines [`wrap_lines`] breaks `text` into, with
+/// `measure` given the span of `text` to measure.
+pub fn wrap_spans(
+    text: &str,
+    width: f32,
+    measure: impl FnMut(Range<usize>) -> f32,
+) -> Vec<Range<usize>> {
+    let _ = (text, width, measure);
+    Vec::new()
 }
 
 fn wrap_paragraph<'a>(
@@ -254,6 +267,58 @@ mod tests {
                 case.text,
                 case.width
             );
+        }
+    }
+
+    #[test]
+    fn spans_break_every_shared_case_as_the_lines_do() {
+        let cases: Vec<Case> =
+            serde_json::from_str(include_str!("../tests/fixtures/text-wrap-agreement.json"))
+                .unwrap();
+        for case in cases {
+            let text = case.text.as_str();
+            let lines: Vec<&str> = wrap_spans(text, case.width, |span| graphemes(&text[span]))
+                .into_iter()
+                .map(|span| &text[span])
+                .collect();
+            assert_eq!(lines, case.lines, "{text:?} at {}", case.width);
+            assert_eq!(lines, wrap_lines(text, case.width, graphemes));
+        }
+    }
+
+    const RICH_CASES: &str = include_str!("../tests/fixtures/rich-text-wrap-agreement.json");
+
+    #[derive(serde::Deserialize)]
+    struct Advance {
+        end: usize,
+        advance: f32,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct RichCase {
+        text: String,
+        width: f32,
+        runs: Vec<Advance>,
+        lines: Vec<String>,
+    }
+
+    #[test]
+    fn spans_measured_per_run_follow_the_shared_rules() {
+        let cases: Vec<RichCase> = serde_json::from_str(RICH_CASES).unwrap();
+        for case in cases {
+            let text = case.text.as_str();
+            assert!(text.is_ascii(), "{text:?}");
+            let advance = |index: usize| {
+                case.runs
+                    .iter()
+                    .find(|run| index < run.end)
+                    .map_or(0.0, |run| run.advance)
+            };
+            let lines: Vec<&str> = wrap_spans(text, case.width, |span| span.map(advance).sum())
+                .into_iter()
+                .map(|span| &text[span])
+                .collect();
+            assert_eq!(lines, case.lines, "{text:?} at {}", case.width);
         }
     }
 

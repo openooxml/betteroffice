@@ -29,8 +29,8 @@ use xlsx_model::styles::{BorderEdge, BorderStyle, FormatCode, Stylesheet};
 use xlsx_model::value::CellValue;
 use xlsx_model::workbook::{ColumnDefaults, Hyperlink, Sheet};
 use xlsx_model::{
-    CellRange, CellRef, DifferentialFormat, Fill, HAlign, MAX_COLS, MAX_ROWS, SheetChart, SheetId,
-    SheetPicture, Table, VAlign, Workbook,
+    CellRange, CellRef, DifferentialFormat, Fill, HAlign, MAX_COLS, MAX_ROWS, RichRun, SheetChart,
+    SheetId, SheetPicture, Table, VAlign, Workbook,
 };
 
 use table_style::SheetTables;
@@ -48,7 +48,11 @@ pub use geometry::{GridGeometry, PrintMetrics, autofit_relevant};
 pub use hit::chart_at_point;
 pub use number_format::{NumberFormatLayout, paint_number_format};
 pub use region::{viewport_for_range, viewport_for_used_range, viewport_for_used_range_within};
-pub use text_runs::{TextPiece, has_right_to_left, run_pieces};
+pub use text_runs::{TextPiece, has_right_to_left, run_pieces, wrap_run_lines};
+
+/// The source runs of the text stored in a cell, as UTF-8 byte ranges into
+/// it, or `None` when it has none.
+pub type CellTextRuns<'r> = dyn Fn(CellRef) -> Option<&'r [RichRun]> + 'r;
 
 /// a scrolled window in pixels; `x`/`y` offset the non-frozen body.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -616,6 +620,18 @@ pub fn build_display_list(
     build_display_list_with_ghosts(wb, sheet, viewport, &[])
 }
 
+/// [`build_display_list`] with the source runs of each cell's text: a cell
+/// that paints its stored text as it is paints its runs.
+pub fn build_display_list_with_text_runs(
+    wb: &Workbook,
+    sheet: SheetId,
+    viewport: &Viewport,
+    text_runs: Option<&CellTextRuns<'_>>,
+) -> Result<DisplayList, RenderError> {
+    let _ = text_runs;
+    build_display_list(wb, sheet, viewport)
+}
+
 /// Builds a chart-placeholder display list with pending edit ghosts.
 pub fn build_display_list_with_ghosts(
     wb: &Workbook,
@@ -685,6 +701,67 @@ where
         None,
         Some(geometry),
         max_cells,
+    )
+}
+
+/// [`build_display_list_with_geometry`] with the source runs of each cell's
+/// text.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn build_display_list_with_geometry_and_text_runs<F, R>(
+    wb: &Workbook,
+    sheet: SheetId,
+    viewport: &Viewport,
+    ghosts: &[GhostEdit],
+    geometry: &GridGeometry,
+    max_cells: Option<u64>,
+    pictures: &[SheetPicture],
+    text_runs: Option<&CellTextRuns<'_>>,
+    resolver: F,
+) -> Result<DisplayList, RenderError>
+where
+    F: FnMut(&SheetChart) -> Result<R, RenderError>,
+    R: Into<Arc<ChartSpace>>,
+{
+    let _ = text_runs;
+    build_display_list_with_geometry(
+        wb,
+        sheet,
+        viewport,
+        ghosts,
+        geometry,
+        max_cells,
+        pictures,
+        resolver,
+    )
+}
+
+/// [`build_print_display_list_with_charts`] with the source runs of each
+/// cell's text.
+#[allow(clippy::too_many_arguments)]
+pub fn build_print_display_list_with_text_runs<F, R>(
+    wb: &Workbook,
+    sheet: SheetId,
+    viewport: &Viewport,
+    metrics: &PrintMetrics,
+    gridlines: bool,
+    pictures: &[SheetPicture],
+    text_runs: Option<&CellTextRuns<'_>>,
+    resolver: F,
+) -> Result<DisplayList, RenderError>
+where
+    F: FnMut(&SheetChart) -> Result<R, RenderError>,
+    R: Into<Arc<ChartSpace>>,
+{
+    let _ = text_runs;
+    build_print_display_list_with_charts(
+        wb,
+        sheet,
+        viewport,
+        metrics,
+        gridlines,
+        pictures,
+        resolver,
     )
 }
 
@@ -2562,6 +2639,9 @@ mod merged_grid_tests;
 
 #[cfg(test)]
 mod wrap_tests;
+
+#[cfg(test)]
+mod text_runs_tests;
 
 #[cfg(test)]
 mod tests {

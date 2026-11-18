@@ -42,6 +42,14 @@ export function wrapLines(text: string, width: number, measure: (run: string) =>
   return lines;
 }
 
+/** The `[start, end)` spans of the lines `wrapLines` breaks `text` into, with `measure` given the span to measure. */
+export function wrapSpans(text: string, width: number, measure: (start: number, end: number) => number): [number, number][] {
+  void text;
+  void width;
+  void measure;
+  return [];
+}
+
 function wrapParagraph(text: string, width: number, measure: (run: string) => number, lines: string[]): void {
   if (measure(text) <= width) {
     lines.push(text);

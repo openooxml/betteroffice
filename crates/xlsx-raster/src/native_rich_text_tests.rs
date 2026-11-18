@@ -1,12 +1,13 @@
 use serde_json::{Value, json};
 use tiny_skia::Pixmap;
-use xlsx_render::{DisplayList, DrawCmd, GridMeta};
+use xlsx_model::{Cell, CellRef, CellValue, Color, RichRun, RunStyle, Sheet, SheetId, Workbook};
+use xlsx_render::{DisplayList, DrawCmd, GridMeta, Viewport};
 
 use super::{RasterFonts, render_png_with_fonts};
 use crate::font;
 
 const WIDTH: f32 = 160.0;
-const HEIGHT: f32 = 30.0;
+const HEIGHT: f32 = 60.0;
 const CARLITO: &[u8] = include_bytes!("../assets/Carlito-Regular.ttf");
 const SANS: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
 const RED_BOLD: &str = r##"{"start":0,"end":2,"bold":true,"color":"#ff0000"}"##;
@@ -26,7 +27,11 @@ fn fonts() -> RasterFonts {
 }
 
 fn measure(fonts: &RasterFonts, family: &str, bold: bool, text: &str) -> f32 {
-    font::measure_text_with_fonts(fonts.chain(family, bold, false), &fonts.stack, text, 11.0)
+    measure_at(fonts, family, bold, text, 11.0)
+}
+
+fn measure_at(fonts: &RasterFonts, family: &str, bold: bool, text: &str, size: f32) -> f32 {
+    font::measure_text_with_fonts(fonts.chain(family, bold, false), &fonts.stack, text, size)
 }
 
 fn merged(mut base: Value, extra: Value) -> Value {
@@ -204,11 +209,10 @@ fn a_superscript_run_paints_at_its_own_size_on_the_common_baseline() {
 }
 
 #[test]
-fn wrapped_rotated_and_stacked_text_paints_as_without_runs() {
+fn rotated_and_stacked_text_paints_as_without_runs() {
     let fonts = fonts();
     let cell = json!({ "x": 0.0, "y": 0.0, "w": WIDTH, "h": HEIGHT });
     for layout in [
-        json!({ "wrap": { "width": 20.0, "lineHeight": 14.0, "valign": "top" } }),
         json!({ "rotationDeg": 90.0, "rotationBox": cell }),
         json!({ "stacked": true, "rotationBox": cell }),
     ] {
@@ -217,6 +221,109 @@ fn wrapped_rotated_and_stacked_text_paints_as_without_runs() {
             png(&fonts, vec![text(layout)])
         );
     }
+}
+
+#[test]
+fn a_wrapped_command_paints_each_line_s_pieces_in_their_own_fonts() {
+    let fonts = fonts();
+    let ab = measure(&fonts, "Body", true, "AB");
+    let cde = measure_at(&fonts, "Calibri", false, "CDE", 14.0);
+    let fg = measure_at(&fonts, "Calibri", false, "FG", 14.0);
+    let wrap = json!({ "width": cde + 1.0, "lineHeight": 16.0, "valign": "top" });
+    let second = r##"{"start":3,"end":9,"fontSize":14.0,"color":"#0000ff"}"##;
+    for (align, x) in [("left", 10.0), ("center", 80.0), ("right", 150.0)] {
+        let left = |width: f32| match align {
+            "left" => x,
+            "center" => x - width / 2.0,
+            _ => x - width,
+        };
+        let layout = json!({ "x": x, "y": 14.0, "align": align, "text": "AB CDE FG" });
+        let layout = merged(layout, json!({ "wrap": wrap }));
+        let painted = rich(layout, &[RED_BOLD_BODY, second]);
+        let piece = |x: f32, y: f32, value: &str, style: Value| {
+            text(merged(json!({ "x": x, "y": y, "text": value }), style))
+        };
+        let body = json!({ "fontFamily": "Body", "bold": true, "color": "#ff0000" });
+        let larger = json!({ "fontSize": 14.0, "color": "#0000ff" });
+        let pieces = vec![
+            piece(left(ab), 14.0, "AB", body),
+            piece(left(cde), 30.0, "CDE", larger.clone()),
+            piece(left(fg), 46.0, "FG", larger),
+        ];
+        assert_eq!(png(&fonts, vec![painted]), png(&fonts, pieces), "{align}");
+    }
+}
+
+fn spill_list(neighbour: bool) -> DisplayList {
+    let text = |value: &str| Cell {
+        value: CellValue::Text {
+            value: value.into(),
+        },
+        ..Cell::default()
+    };
+    let mut sheet = Sheet::new("Sheet1");
+    sheet.set_cell(CellRef::new(0, 0), text("Sales figures rise"));
+    if neighbour {
+        sheet.set_cell(CellRef::new(0, 1), text("x"));
+    }
+    let mut workbook = Workbook::default();
+    workbook.sheets.push(sheet);
+    let coloured = |start, end, rgb: &str, bold| {
+        let mut style = RunStyle::default();
+        style.bold = Some(bold);
+        style.color = Some(Color::Rgb(rgb.into()));
+        RichRun::new(start, end, style)
+    };
+    let runs = [
+        coloured(0, 5, "#ff0000", true),
+        coloured(6, 13, "#0000ff", false),
+    ];
+    let lookup = |at: CellRef| (at == CellRef::new(0, 0)).then_some(&runs[..]);
+    let viewport = Viewport {
+        x: 0.0,
+        y: 0.0,
+        width: WIDTH,
+        height: HEIGHT,
+    };
+    xlsx_render::build_display_list_with_text_runs(&workbook, SheetId(0), &viewport, Some(&lookup))
+        .unwrap()
+}
+
+fn rich_cell(list: &DisplayList) -> (f32, xlsx_render::Rect, usize) {
+    list.commands
+        .iter()
+        .find_map(|command| match command {
+            DrawCmd::Text { x, clip, runs, .. } if !runs.is_empty() => {
+                Some((*x, *clip, runs.len()))
+            }
+            _ => None,
+        })
+        .expect("a text command with runs")
+}
+
+#[test]
+fn a_rich_cell_spills_into_an_empty_neighbour_and_is_cut_at_a_filled_one() {
+    let fonts = fonts();
+    let (spill, cut) = (spill_list(false), spill_list(true));
+    let (x, spill_clip, spill_runs) = rich_cell(&spill);
+    let (_, cut_clip, cut_runs) = rich_cell(&cut);
+    assert_eq!((spill_runs, cut_runs), (2, 2));
+    assert!(spill_clip.w > cut_clip.w, "{spill_clip:?} {cut_clip:?}");
+    let edge = (cut_clip.x + cut_clip.w) as u32;
+    let spilled = pixels(&fonts, spill.commands);
+    let kept = pixels(&fonts, cut.commands);
+    assert!(has_ink(&spilled, edge..WIDTH as u32, blue));
+    assert!(!has_ink(&kept, edge..WIDTH as u32, red));
+    assert!(!has_ink(&kept, edge..WIDTH as u32, blue));
+    let sales = measure(&fonts, "Calibri", true, "Sales");
+    let before = (x + sales + measure(&fonts, "Calibri", false, " ")).floor() as u32;
+    assert!(before < edge, "{before} {edge}");
+    for y in 0..kept.height() {
+        for x in 0..before {
+            assert_eq!(kept.pixel(x, y), spilled.pixel(x, y), "({x}, {y})");
+        }
+    }
+    assert!(has_ink(&kept, 0..before, red));
 }
 
 #[test]

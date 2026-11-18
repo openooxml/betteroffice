@@ -4,7 +4,8 @@ import type { DisplayList, GeometryPathCommand, PatternType, TextCmd } from '../
 import { paintDisplayList } from './canvas2d';
 import { PATTERN_MASKS } from './patterns';
 import wrapFixture from '../../../../crates/xlsx-render/tests/fixtures/text-wrap-agreement.json';
-import { wrapLines } from './wrap';
+import richWrapFixture from '../../../../crates/xlsx-render/tests/fixtures/rich-text-wrap-agreement.json';
+import { wrapLines, wrapSpans } from './wrap';
 
 describe('Canvas2D pattern masks', () => {
   it('cover the specified share of each 8x8 tile', () => {
@@ -775,13 +776,27 @@ describe('Canvas2D text runs', () => {
     expect(record({ runs: [{ ...redBold, baseline: 'subscript' as const }] }).calls).toEqual(plain);
   });
 
-  it('paints wrapped, rotated and stacked text as without runs', () => {
+  it('paints rotated and stacked text as without runs', () => {
     const layouts: Partial<TextCmd>[] = [
-      { wrap: { width: 20, lineHeight: 14, valign: 'top' } },
       { rotationDeg: 90, rotationBox: clip },
       { stacked: true, rotationBox: clip },
     ];
     for (const layout of layouts) expect(record({ ...layout, runs: [redBold] }).calls).toEqual(record(layout).calls);
+  });
+
+  it("wraps runs where their own fonts break the line and paints each line's pieces in those fonts", () => {
+    const wrap = { width: 35, lineHeight: 16, valign: 'top' } as const;
+    const runs = [redBold, { start: 3, end: 9, fontSize: 15 }];
+    const { fills } = record({ text: 'AB CDE FG', wrap, runs });
+    expect(fills).toEqual([
+      { text: 'AB', x: 10, y: 20, font: 'bold 12px sans-serif', fillStyle: '#ff0000', textAlign: 'left' },
+      { text: 'CDE', x: 10, y: 36, font: '20px sans-serif', fillStyle: '#000000', textAlign: 'left' },
+      { text: 'FG', x: 10, y: 52, font: '20px sans-serif', fillStyle: '#000000', textAlign: 'left' },
+    ]);
+    const centred = record({ text: 'AB CDE FG', wrap, runs, align: 'center', x: 100 }).fills;
+    expect(centred.map((fill) => fill.x)).toEqual([100 - 18 / 2, 100 - 30 / 2, 100 - 20 / 2]);
+    const kept = record({ text: 'AB CDE FG', wrap: { ...wrap, maxLines: 2 }, runs }).fills;
+    expect(kept.map((fill) => [fill.text, fill.y])).toEqual([['AB', 20], ['CDE', 36]]);
   });
 
   it('paints right-to-left text as without runs', () => {
@@ -817,6 +832,30 @@ describe('wrapped text breaker', () => {
     const segmenter = new Segmenter(undefined, { granularity: 'grapheme' });
     const graphemes = (run: string) => [...segmenter.segment(run)].length;
     for (const { text, width, lines } of wrapFixture) expect(wrapLines(text, width, graphemes)).toEqual(lines);
+  });
+
+  it('breaks spans as it breaks lines on every shared case', () => {
+    const Segmenter = (Intl as unknown as {
+      Segmenter: new (locales: undefined, options: { granularity: 'grapheme' }) => { segment(value: string): Iterable<unknown> };
+    }).Segmenter;
+    const segmenter = new Segmenter(undefined, { granularity: 'grapheme' });
+    for (const { text, width, lines } of wrapFixture) {
+      const spans = wrapSpans(text, width, (start, end) => [...segmenter.segment(text.slice(start, end))].length);
+      expect(spans.map(([start, end]) => text.slice(start, end))).toEqual(lines);
+    }
+  });
+
+  it('breaks spans measured per run as the Rust breaker does', () => {
+    for (const { text, width, runs, lines } of richWrapFixture) {
+      expect([...text].every((char) => char.charCodeAt(0) < 128)).toBe(true);
+      const advance = (index: number) => runs.find((run) => index < run.end)?.advance ?? 0;
+      const measure = (start: number, end: number) => {
+        let sum = 0;
+        for (let index = start; index < end; index += 1) sum += advance(index);
+        return sum;
+      };
+      expect(wrapSpans(text, width, measure).map(([start, end]) => text.slice(start, end))).toEqual(lines);
+    }
   });
 
   it('measures each text a bounded number of times', () => {
