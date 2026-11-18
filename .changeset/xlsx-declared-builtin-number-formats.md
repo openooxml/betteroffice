@@ -1,9 +1,9 @@
 ---
-'@betteroffice/xlsx': patch
-'@betteroffice/xlsx-native': patch
-'@betteroffice/python-xlsx': patch
-'@betteroffice/rust-crates': patch
-'@betteroffice/xlsx-react': patch
+'@betteroffice/xlsx': minor
+'@betteroffice/xlsx-native': minor
+'@betteroffice/python-xlsx': minor
+'@betteroffice/rust-crates': minor
+'@betteroffice/xlsx-react': minor
 ---
 
-A number format a workbook declares under a built-in id is shown as declared, in cell text, the structured export, `CELL("format")` and typed input: an accounting format with a minus sign or an East Asian date no longer shows the built-in reading. General keeps its reading whatever the workbook declares for it. Shared states from earlier releases keep the built-in display until the workbook is opened again. Collaborating peers must update together: older peers refuse the new schema.
+Number formats a workbook declares for built-in ids are shown as declared, as in Excel: an accounting format with a minus sign or an East Asian date no longer shows the built-in format. General stays General whatever the workbook declares for it. Shared sessions created before this version keep their previous display until the workbook is opened again. Sessions shared with clients on an older version cannot open states created by this one.
