@@ -313,7 +313,7 @@ def test_render_png_write(sample_bytes, tmp_path):
     assert target.read_bytes()[:8] == PNG_MAGIC
 
 
-def test_rich_text_png_matches_the_native_binding():
+def test_rich_text_png_matches_the_pin_the_native_binding_checks():
     shared = json.loads(RICH_TEXT_PNG.read_text(encoding="utf-8"))
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as package:
