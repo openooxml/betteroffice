@@ -785,16 +785,18 @@ impl EditSession {
     /// Typing echo model of one font at one shaping size from this session's
     /// resident font store: `{"horizontal","glyphIds","advances","kerning",
     /// "unsafePairs"}`, indexed by the characters of `alphabet`. `kern` is the
-    /// run's kerning gate. Errors for an unknown font or a non-positive size.
+    /// run's kerning gate and `language` its BCP-47 shaping language (absent for
+    /// none). Errors for an unknown font or a non-positive size.
     pub fn echo_glyph_set_json(
         &self,
         font_id: u32,
         size: f32,
         kern: bool,
         alphabet: &str,
+        language: Option<String>,
     ) -> Result<String, JsValue> {
         self.core
-            .echo_glyph_set_json(font_id, size, kern, alphabet)
+            .echo_glyph_set_json(font_id, size, kern, language.as_deref(), alphabet)
             .map_err(JsValue::from)
     }
 

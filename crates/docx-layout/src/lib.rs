@@ -1206,6 +1206,7 @@ pub fn echo_glyph_set_json(
     font_id: u32,
     size: f32,
     kern: bool,
+    language: Option<&str>,
     alphabet: &str,
 ) -> Result<String, String> {
     if !size.is_finite() || size <= 0.0 {
@@ -1213,11 +1214,12 @@ pub fn echo_glyph_set_json(
     }
     let alphabet: Vec<char> = alphabet.chars().collect();
     let set = with_measure_fonts(|store| {
-        ooxml_text::echo_glyph_set(
+        ooxml_text::echo_glyph_set_with_language(
             &store.borrow(),
             ooxml_text::FontId::from_u32(font_id),
             size,
             kern,
+            language,
             &alphabet,
         )
     })
@@ -1381,12 +1383,12 @@ mod tests {
     fn echo_glyph_set_json_reads_the_resident_font_store() {
         clear_measure_fonts();
         let font_id = register_measure_font_bytes(LIBERATION_SANS).expect("register fixture font");
-        let json = echo_glyph_set_json(font_id, 16.0, false, "Ax").expect("echo json");
+        let json = echo_glyph_set_json(font_id, 16.0, false, None, "Ax").expect("echo json");
         let v: serde_json::Value = serde_json::from_str(&json).expect("valid json");
         assert_eq!(v["glyphIds"][0], 36);
         assert_eq!(v["advances"].as_array().map(Vec::len), Some(2));
         assert!(v["horizontal"].as_f64().is_some_and(|value| value > 0.0));
-        assert!(echo_glyph_set_json(font_id, 0.0, false, "A").is_err());
+        assert!(echo_glyph_set_json(font_id, 0.0, false, None, "A").is_err());
         clear_measure_fonts();
     }
 

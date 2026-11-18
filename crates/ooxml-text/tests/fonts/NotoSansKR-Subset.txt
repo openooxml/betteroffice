@@ -1,0 +1,10 @@
+NotoSansKR-Subset.otf is Noto Sans KR Regular (packages/fonts-cjk/assets/NotoSansKR-Regular.otf.zst,
+SIL Open Font License 1.1, see LICENSE-OFL-NotoCJK.txt) cut down with fontTools 4.63.0 to the
+characters Hangul typing echo tests use, keeping every layout feature:
+
+  pyftsubset NotoSansKR-Regular.otf --text-file=syllables.txt \
+    --unicodes="U+0020-007E,U+2018,U+2019,U+201C,U+201D,U+2013,U+2014,U+2026,U+3131-318E,U+2160-2169" \
+    --layout-features='*' --name-IDs='*' --notdef-outline --output-file=NotoSansKR-Subset.otf
+
+syllables.txt holds these 367 syllables:
+가각간갇갈감갑강개객거건걸검것게겨격견결경계고공과관광교구국군굴권귀규그극근글금기긴길김까나난날남내너넣네년노놓누는늘니다단달담당대더덕도독동되된두둘드든들등디따때또라란람랑래러려력련렬령로록론료루류르른를름리린림마막만많말망매머먹멀메며면명모목몬못무문물므미민바박반발방배버번벌범법베벽변별병보복본봉부북분불브비빈사산살삼상새생서석선설섬성세소속손송수숙순술스슬습시식신실심아악안알암압앙애야약양어억언얼엄업에여역연열염영예오옥온올와완왕외요용우운울원월위유육윤으은을음응의이익인일임입있자작잔장재저적전절점정제조족존종주죽준중즈즉지직진질집차착찬참창채처천철청체초촌총최추축출충치칙친칠카커코쿠크키타탁탄태터테토통투트특티파판팔패퍼페편평포표푸품프피필하학한할함합항해행향허험혁현혈형혜호혹홍화확환활황회효후훈휘휴흐흑흔흘흥희히힘

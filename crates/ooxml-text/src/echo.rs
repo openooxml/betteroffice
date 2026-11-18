@@ -14,7 +14,7 @@ use std::collections::{BTreeSet, HashMap};
 use serde::Serialize;
 
 use crate::font_store::{FontError, FontId, FontStore, covered_character};
-use crate::shape::{ShapeDirection, ShapedGlyph, shape_with_direction};
+use crate::shape::{ShapeDirection, ShapedGlyph, shape_with_properties};
 use crate::word_metrics::kern_features;
 
 /// The echo model of one font at one shaping size. Indices refer to the
@@ -43,6 +43,19 @@ pub fn echo_glyph_set(
     kern: bool,
     alphabet: &[char],
 ) -> Result<EchoGlyphSet, FontError> {
+    echo_glyph_set_with_language(store, font, size, kern, None, alphabet)
+}
+
+/// [`echo_glyph_set`] for a run shaped with the BCP-47 `language` tag, which
+/// selects the font's language-specific forms as the run's shaping does.
+pub fn echo_glyph_set_with_language(
+    store: &FontStore,
+    font: FontId,
+    size: f32,
+    kern: bool,
+    language: Option<&str>,
+    alphabet: &[char],
+) -> Result<EchoGlyphSet, FontError> {
     let features = kern_features(kern);
     let upem = store.metrics(font)?.units_per_em as f32;
     let scale = size / upem;
@@ -51,8 +64,17 @@ pub fn echo_glyph_set(
     } else {
         scale * store.advance_scale(font)?
     };
-    let shape =
-        |text: &str| shape_with_direction(store, font, text, size, &features, ShapeDirection::Ltr);
+    let shape = |text: &str| {
+        shape_with_properties(
+            store,
+            font,
+            text,
+            size,
+            &features,
+            ShapeDirection::Ltr,
+            language,
+        )
+    };
     let units = |glyph: &ShapedGlyph| {
         let value = (glyph.x_advance / horizontal).round() as i32;
         (horizontal > 0.0
@@ -287,9 +309,21 @@ fn shaping_barriers(
                     SubstitutionSubtable::Context(_)
                     | SubstitutionSubtable::ChainContext(_)
                     | SubstitutionSubtable::ReverseChainSingle(_) => {
-                        if context_may_match(subtable, &nominal) {
+                        if !context_may_match(subtable, &nominal) {
+                            continue;
+                        }
+                        // a context substitutes only glyphs of its input sequence; one whose
+                        // input coverages are known leaves every other glyph as shaped alone
+                        let Some(inputs) = context_inputs(subtable) else {
                             glyph_ids.fill(0);
                             return Ok(ligatures);
+                        };
+                        for (other, id) in nominal.iter().enumerate() {
+                            if id.is_some_and(|id| {
+                                inputs.iter().any(|coverage| coverage.contains(GlyphId(id)))
+                            }) {
+                                glyph_ids[other] = 0;
+                            }
                         }
                     }
                     _ => glyph_ids[index] = 0,
@@ -352,6 +386,11 @@ fn contextual_positioning(
         let tags = match buffer.script() {
             script::LATIN => [*b"latn", *b"DFLT", *b"dflt"],
             script::COMMON | script::INHERITED | script::UNKNOWN => [*b"DFLT", *b"dflt", *b"latn"],
+            // Hangul syllables and compatibility jamo shape as single glyphs; the
+            // conjoining jamo that the Hangul shaper composes are not an alphabet's
+            script::HANGUL if !alphabet.iter().any(|&ch| is_conjoining_jamo(ch)) => {
+                [*b"hang", *b"DFLT", *b"dflt"]
+            }
             _ => return true,
         };
         if let Some(selected) = tags.into_iter().find_map(|tag| {
@@ -414,6 +453,36 @@ fn contextual_positioning(
         }
     }
     false
+}
+
+/// The coverages of a contextual substitution's input sequence, for the formats
+/// that name them; `None` for the glyph and class formats.
+fn context_inputs(
+    subtable: rustybuzz::ttf_parser::gsub::SubstitutionSubtable<'_>,
+) -> Option<Vec<rustybuzz::ttf_parser::opentype_layout::Coverage<'_>>> {
+    use rustybuzz::ttf_parser::{
+        gsub::SubstitutionSubtable,
+        opentype_layout::{ChainedContextLookup, ContextLookup},
+    };
+    match subtable {
+        SubstitutionSubtable::Context(ContextLookup::Format3 {
+            coverage,
+            coverages,
+            ..
+        }) => Some(std::iter::once(coverage).chain(coverages).collect()),
+        SubstitutionSubtable::ChainContext(ChainedContextLookup::Format3 {
+            coverage,
+            input_coverages,
+            ..
+        }) => Some(std::iter::once(coverage).chain(input_coverages).collect()),
+        SubstitutionSubtable::ReverseChainSingle(table) => Some(vec![table.coverage]),
+        _ => None,
+    }
+}
+
+/// Jamo the Hangul shaper composes into syllables (`ljmo` · `vjmo` · `tjmo`).
+fn is_conjoining_jamo(ch: char) -> bool {
+    matches!(ch as u32, 0x1100..=0x11ff | 0xa960..=0xa97f | 0xd7b0..=0xd7ff)
 }
 
 fn context_may_match(
@@ -490,6 +559,7 @@ fn record(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shape::shape_with_direction;
 
     const LIBERATION_SANS: &[u8] = include_bytes!("../tests/fonts/LiberationSans-Regular.ttf");
 
@@ -543,6 +613,70 @@ mod tests {
                 assert_eq!(advance(&set, &alphabet, text), shaped, "{text} kern={kern}");
             }
         }
+    }
+
+    const NOTO_SANS_KR: &[u8] = include_bytes!("../tests/fonts/NotoSansKR-Subset.otf");
+
+    fn hangul_alphabet() -> Vec<char> {
+        let mut alphabet: Vec<char> = (' '..='~').collect();
+        alphabet.extend("한글입력시다문장가각".chars());
+        alphabet.extend('\u{3131}'..='\u{318e}');
+        alphabet
+    }
+
+    #[test]
+    fn hangul_echo_advances_equal_the_advances_of_the_run_language() {
+        let mut store = FontStore::new();
+        let font = store.register(NOTO_SANS_KR.to_vec()).unwrap();
+        let alphabet = hangul_alphabet();
+        for language in [None, Some("ko-KR")] {
+            for kern in [false, true] {
+                let set = echo_glyph_set_with_language(
+                    &store, font, 13.333_333, kern, language, &alphabet,
+                )
+                .unwrap();
+                for ch in "한글입력ㄱㅎㅏ가각AV".chars() {
+                    let index = alphabet.iter().position(|&a| a == ch).unwrap();
+                    assert_ne!(set.glyph_ids[index], 0, "{ch} {language:?} kern={kern}");
+                }
+                // a space between syllables takes another glyph (calt), and digits and
+                // punctuation have language forms (locl): those alone are not echoed
+                for ch in " .0".chars() {
+                    let index = alphabet.iter().position(|&a| a == ch).unwrap();
+                    assert_eq!(set.glyph_ids[index], 0, "{ch:?} {language:?} kern={kern}");
+                }
+                for text in ["한글입력", "입력ㅎ", "가각시다", "문장AV", "ㄱ가각"] {
+                    let shaped: Vec<f32> = shape_with_properties(
+                        &store,
+                        font,
+                        text,
+                        13.333_333,
+                        &kern_features(kern),
+                        ShapeDirection::Ltr,
+                        language,
+                    )
+                    .unwrap()
+                    .iter()
+                    .map(|glyph| glyph.x_advance)
+                    .collect();
+                    assert_eq!(
+                        advance(&set, &alphabet, text),
+                        shaped,
+                        "{text} {language:?} kern={kern}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn conjoining_jamo_decline_hangul_echo() {
+        let mut store = FontStore::new();
+        let font = store.register(NOTO_SANS_KR.to_vec()).unwrap();
+        let mut alphabet = hangul_alphabet();
+        alphabet.push('\u{1100}');
+        let set = echo_glyph_set(&store, font, 13.333_333, false, &alphabet).unwrap();
+        assert!(set.glyph_ids.iter().all(|&id| id == 0));
     }
 
     #[test]
