@@ -1737,12 +1737,13 @@ impl WorkbookAuthority {
             return None;
         };
         let count = self.plain_style_cells.load(Ordering::Relaxed);
+        let version = self.schema_version().ok()?;
         if !self.projection_valid.load(Ordering::Relaxed)
             || count == u64::MAX
             || at.row >= MAX_ROWS
             || at.col >= MAX_COLS
             || matches!(cell.value, CellValue::Number { value } if !value.is_finite())
-            || self.schema_version().ok()? != SCHEMA_VERSION
+            || version != current_schema_version(&self.base.styles)
             || !self.has_current_base_fingerprint()
         {
             return None;
@@ -1750,8 +1751,7 @@ impl WorkbookAuthority {
         let txn = self.doc.transact();
         let cell_formats = txn.get_map(CELL_FORMATS)?;
         let (mut styles, indices) =
-            materialize_cell_formats(&cell_formats, &txn, &self.base.styles, SCHEMA_VERSION)
-                .ok()?;
+            materialize_cell_formats(&cell_formats, &txn, &self.base.styles, version).ok()?;
         let plain = (count != 0).then(|| styles.plain_xf());
         styles.bind_plain_xf();
         let order = txn.get_array(SHEET_ORDER)?;
@@ -1835,10 +1835,11 @@ impl WorkbookAuthority {
             _ => return None,
         };
         let plain_style_cells = self.plain_style_cells.load(Ordering::Relaxed);
+        let version = self.schema_version().ok()?;
         if !matches!(origin, SyncOrigin::User | SyncOrigin::Agent)
             || !self.projection_valid.load(Ordering::Relaxed)
             || plain_style_cells == u64::MAX
-            || self.schema_version().ok()? != SCHEMA_VERSION
+            || version != current_schema_version(&self.base.styles)
             || !self.has_current_base_fingerprint()
             || range.start.row > range.end.row
             || range.start.col > range.end.col
@@ -1853,8 +1854,7 @@ impl WorkbookAuthority {
         let txn = self.doc.transact();
         let cell_formats = txn.get_map(CELL_FORMATS)?;
         let (mut stylesheet, indices) =
-            materialize_cell_formats(&cell_formats, &txn, &self.base.styles, SCHEMA_VERSION)
-                .ok()?;
+            materialize_cell_formats(&cell_formats, &txn, &self.base.styles, version).ok()?;
         let plain = (plain_style_cells != 0).then(|| stylesheet.plain_xf());
         stylesheet.bind_plain_xf();
         let order = txn.get_array(SHEET_ORDER)?;
@@ -1921,7 +1921,7 @@ impl WorkbookAuthority {
             catalog.insert(key.clone(), decode_cell_format_entry(key, payload).ok()?);
         }
         let (_, next_indices) =
-            materialize_cell_format_catalog(catalog, &self.base.styles, SCHEMA_VERSION).ok()?;
+            materialize_cell_format_catalog(catalog, &self.base.styles, version).ok()?;
         let mut cells = Vec::new();
         let mut next_plain = 0;
         for row in range.start.row..=range.end.row {
