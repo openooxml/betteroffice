@@ -2738,9 +2738,7 @@ impl Workbook {
         }
         let ops = move_range_ops(&self.model, sheet, source, target)?;
         self.carry_moved_answers(sheet, source, target, &ops);
-        let result = self.apply_carried_ops(ops, options)?;
-        self.conditional_cells_moved();
-        Ok(result)
+        self.apply_carried_ops(ops, options)
     }
 
     /// a move writes the cells it changes as plain values and formulas, and

@@ -501,7 +501,7 @@ export interface DisplayList {
     charts?: ChartRegion[];
     /** The cell budget omitted the bottom of this viewport. */
     truncated?: boolean;
-    /** Visible cells whose conditional formats this frame left undecided; they paint without them until a later frame of the same view decides them. */
+    /** Visible cells whose conditional formats this frame left undecided; until a later frame of the same view decides them, each paints its result from before the last direct edit of one cell or recalculation, or no conditional format. */
     conditionalPending?: number;
 }
 

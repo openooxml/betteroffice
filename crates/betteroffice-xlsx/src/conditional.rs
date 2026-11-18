@@ -84,8 +84,9 @@ impl<F: Fn() -> f64> FrameClock for F {
 #[derive(Clone, Copy)]
 pub(crate) enum Budget<'c> {
     /// One frame's budget, ended early once the clock passes the frame's
-    /// time; a cell it leaves undecided paints its result from the epoch
-    /// before when it has one, and later frames decide the rest.
+    /// time; later frames decide the rest. A cell it leaves undecided paints
+    /// its result from before the last direct edit of one cell or
+    /// recalculation when it has one, and no conditional format otherwise.
     Frame(Option<&'c dyn FrameClock>),
     /// Every visible cell, for output no later frame replaces.
     Complete,
@@ -169,8 +170,9 @@ pub(crate) struct Cache {
     results: HashMap<(SheetId, u32, u32), Option<Arc<DifferentialFormat>>>,
     /// The epoch before's results of the cells not yet decided in this one.
     previous: HashMap<(SheetId, u32, u32), Option<Arc<DifferentialFormat>>>,
-    /// Whether a change since the epoch may have moved a cell or changed a
-    /// rule, so that no result of the epoch belongs to the next.
+    /// Whether a change since the epoch was other than a direct edit of one
+    /// cell or a recalculation, so that no result of the epoch is painted in
+    /// the next.
     moved: bool,
     parsed: HashMap<String, Option<Arc<Expr>>>,
     budget: u64,
@@ -294,8 +296,8 @@ impl Cache {
         }
     }
 
-    /// Marks the change that ends the epoch as one that may move cells or
-    /// change rules.
+    /// Marks the change that ends the epoch as one whose earlier results are
+    /// not painted.
     pub(crate) fn cells_moved(&mut self) {
         self.moved = true;
     }
@@ -471,8 +473,8 @@ impl Cache {
     }
 
     /// Holds a decided cell in place of its result from the epoch before,
-    /// first dropping the cells outside the frame when full; false when the
-    /// frame alone fills the cap.
+    /// first dropping the cells outside the frame and every whole-range build
+    /// when full; false when the frame alone fills the cap.
     fn keep(
         &mut self,
         sheet: SheetId,
@@ -482,6 +484,7 @@ impl Cache {
         cols: &[Range<u32>],
     ) -> bool {
         if self.results.len() >= CONDITIONAL_RESULT_CAP {
+            self.aggregates.clear();
             self.results.retain(|&(owner, row, col), _| {
                 owner == sheet && within(rows, row) && within(cols, col)
             });
