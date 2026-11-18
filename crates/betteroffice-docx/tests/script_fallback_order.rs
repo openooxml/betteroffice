@@ -269,3 +269,106 @@ fn a_character_both_faces_cover_keeps_the_family_face_next_to_kana() {
         mismatches.join("\n")
     );
 }
+
+/// Arial text with a Han character Liberation Sans lacks, then an Arial
+/// paragraph whose mark is a tracked insertion when `marked`.
+fn tracked_mark_input(marked: bool) -> LayoutInput {
+    let mut value = json!({
+        "measured": [
+            {
+                "block": {"kind": "paragraph", "id": 1, "pmStart": 0, "pmEnd": 5, "runs": [
+                    {"kind": "text", "text": "A日B", "fontFamily": "Arial",
+                     "fontSize": FONT_SIZE_PT, "pmStart": 1, "pmEnd": 4}
+                ]},
+                "measure": {"kind": "paragraph", "lines": [], "totalHeight": 0}
+            },
+            {
+                "block": {"kind": "paragraph", "id": 2, "pmStart": 5, "pmEnd": 9, "runs": [
+                    {"kind": "text", "text": "Hi", "fontFamily": "Arial",
+                     "fontSize": FONT_SIZE_PT, "pmStart": 6, "pmEnd": 8}
+                ]},
+                "measure": {"kind": "paragraph", "lines": [], "totalHeight": 0}
+            }
+        ],
+        "options": {"pageSize": {"w": 816, "h": 1056},
+                    "margins": {"top": 96, "right": 96, "bottom": 96, "left": 96}}
+    });
+    if marked {
+        value["measured"][1]["block"]["attrs"] = json!({
+            "pPrIns": {"revisionId": 1, "author": "Ada", "date": "2026-01-01T00:00:00Z"}
+        });
+    }
+    serde_json::from_value(value).unwrap()
+}
+
+/// Every glyph outside revision marks as (character, font id, glyph id, advance, x).
+fn unrevised_glyphs(result: &LayoutResult) -> Vec<(char, u32, u32, f64, f64)> {
+    result
+        .display_list
+        .pages
+        .iter()
+        .flat_map(|page| &page.primitives)
+        .filter_map(|primitive| match primitive {
+            Primitive::GlyphRun(run) if run.attrs.structural_revision.is_none() => Some(run),
+            _ => None,
+        })
+        .flat_map(|run| {
+            run.glyphs.iter().filter_map(move |glyph| {
+                let character = run.text.get(glyph.cluster as usize..)?.chars().next()?;
+                Some((character, run.font_id, glyph.id, glyph.advance, glyph.x))
+            })
+        })
+        .collect()
+}
+
+/// Every text item outside revision marks as (text, font shorthand).
+fn unrevised_text(result: &LayoutResult) -> Vec<(String, String)> {
+    result
+        .display_list
+        .pages
+        .iter()
+        .flat_map(|page| &page.primitives)
+        .filter_map(|primitive| match primitive {
+            Primitive::Text(text) if text.attrs.structural_revision.is_none() => {
+                Some((text.text.clone(), text.font.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_tracked_paragraph_mark_leaves_the_faces_of_other_text_alone() {
+    let package = common::sample_docx();
+    let lay_out = |marked: bool| {
+        Document::open(&package)
+            .unwrap()
+            .layout(tracked_mark_input(marked))
+            .unwrap()
+    };
+    let plain = lay_out(false);
+    let marked = lay_out(true);
+
+    assert!(
+        marked
+            .display_list
+            .pages
+            .iter()
+            .flat_map(|page| &page.primitives)
+            .any(|primitive| matches!(primitive, Primitive::GlyphRun(run)
+                if run.text == "¶" && run.attrs.structural_revision.is_some())),
+        "the tracked paragraph mark drew no glyph run"
+    );
+    let drawn = unrevised_glyphs(&plain);
+    assert_eq!(unrevised_glyphs(&marked), drawn);
+    assert_eq!(unrevised_text(&marked), unrevised_text(&plain));
+    let font_of = |wanted: char| {
+        drawn
+            .iter()
+            .find(|glyph| glyph.0 == wanted)
+            .map(|glyph| glyph.1)
+    };
+    let latin = font_of('A').expect("'A' drew no glyph");
+    let han = font_of('日').expect("'日' drew no glyph");
+    assert_ne!(han, latin, "'日' did not resolve past the run's own face");
+}
