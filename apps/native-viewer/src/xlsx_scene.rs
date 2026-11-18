@@ -1246,8 +1246,14 @@ mod tests {
                 .copied()
                 .filter(|word| [RED, BLACK].contains(word))
                 .collect(),
-            pens: runs.iter().map(|run| run.transform.translation[0]).collect(),
-            baselines: runs.iter().map(|run| run.transform.translation[1]).collect(),
+            pens: runs
+                .iter()
+                .map(|run| run.transform.translation[0])
+                .collect(),
+            baselines: runs
+                .iter()
+                .map(|run| run.transform.translation[1])
+                .collect(),
             sizes: runs.iter().map(|run| run.font_size).collect(),
             clips: encoding.n_clips,
             skipped: page.skipped.total(),
