@@ -1,4 +1,5 @@
 import { readFontBytes } from './bytes';
+import { cachedFontAsset } from './asset-cache';
 
 /**
  * Reads a pack file the way {@link readFontBytes} does, except that a `data:`
@@ -6,6 +7,9 @@ import { readFontBytes } from './bytes';
  * CSP `connect-src` without `data:` refuses a fetch of one.
  */
 export async function readFontAsset(file: string, url: URL, timeoutMs?: number): Promise<ArrayBuffer> {
+  if (url.protocol === 'https:' || url.protocol === 'http:') {
+    return cachedFontAsset(`${url.href}|${timeoutMs ?? ''}`, () => readFontBytes(file, url, timeoutMs));
+  }
   if (url.protocol !== 'data:') return readFontBytes(file, url, timeoutMs);
   const comma = url.href.indexOf(',');
   if (comma < 0) throw new Error(`Malformed data: URL for bundled font ${file}`);
