@@ -770,6 +770,13 @@ fn serialize_complex_field(
             output.push_str(&serialize_context_run(run, context)?);
         }
     }
+    let mut result_scopes = None;
+    for run in &field.field_result {
+        merge_run_direction_scopes(run, &mut result_scopes);
+    }
+    if let Some(scopes) = result_scopes.filter(|scopes| !scopes.is_empty()) {
+        output.push_str(&context.direction.transition(scopes));
+    }
     output.push_str("<w:r>");
     output.push_str(&properties);
     output.push_str("<w:fldChar w:fldCharType=\"separate\"/></w:r>");
