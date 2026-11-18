@@ -34,6 +34,8 @@ mod auto_filters;
 #[cfg(test)]
 mod cascade_composition_tests;
 mod conditional_formats;
+#[cfg(test)]
+mod declared_number_format_tests;
 mod defined_names;
 #[cfg(test)]
 mod fingerprint_composition_tests;
@@ -10628,9 +10630,11 @@ mod tests {
     #[test]
     fn a_state_written_by_this_release_carries_schema_8() {
         assert_eq!(SCHEMA_VERSION, 8);
-        let model = rich_model();
+        let model = declared_number_format_model(41);
         let authority = WorkbookAuthority::from_model_with_client_id(&model, 111).unwrap();
         assert_eq!(authority.schema_version().unwrap(), 8);
+        let unaffected = WorkbookAuthority::from_model_with_client_id(&rich_model(), 114).unwrap();
+        assert_eq!(unaffected.schema_version(), Ok(7));
     }
 
     #[test]
