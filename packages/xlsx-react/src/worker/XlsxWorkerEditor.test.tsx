@@ -9389,7 +9389,7 @@ it('peerless shows the indicator in a status layer over the editor that leaves t
   const onError = mock((_error: Error) => {});
   const view = render(host.asyncEditor({ onReady: ready, onError,
     loadingIndicator: <div data-testid="host-indicator" style={{ height: '100%' }}>Workbook opening</div> }));
-  await waitFor(() => expect(view.queryByTestId('host-indicator')).not.toBeNull());
+  await waitFor(() => expect(view.queryByTestId('xlsx-workspace')).not.toBeNull());
   const root = view.getByRole('application');
   const indicator = view.getByTestId('host-indicator');
   const layer = Array.from(root.children).find((child) => child.contains(indicator)) as HTMLElement;
