@@ -20,6 +20,7 @@ pub(crate) struct SnapshotValidation {
     pending_cell: Option<(CellRef, bool)>,
     spill_after: Option<(u32, u32)>,
     version: i64,
+    builtins: bool,
     base_section: u8,
     base_index: usize,
     base_child: usize,
@@ -815,6 +816,7 @@ impl SnapshotValidation {
                 .and_then(|value| value.cast::<i64>().ok())
                 .ok_or_else(invalid)?;
             validate_schema_version(self.version).map_err(SnapshotError::new)?;
+            self.builtins = reads_builtins(self.version, &base.styles);
             structure_generation(&meta, &txn).map_err(SnapshotError::new)?;
             atomic(&meta, &txn, BASE_FINGERPRINT)?;
             if order.len(&txn) as usize != model.sheets.len()
@@ -909,7 +911,7 @@ impl SnapshotValidation {
                 return Ok(false);
             };
             let start = self.json.bytes;
-            let builtins = reads_builtins(self.version, &base.styles);
+            let builtins = self.builtins;
             let (done, bytes) =
                 json_window(&mut self.json, budget, &mut self.unit_bytes, |window| {
                     window.format(
