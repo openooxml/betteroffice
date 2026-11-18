@@ -1006,7 +1006,7 @@ impl Workbook {
     /// must be `model`.
     #[allow(clippy::too_many_arguments)]
     fn from_source_deferring(
-        model: WorkbookModel,
+        mut model: WorkbookModel,
         source_package: Option<xlsx_parse::PreservedPackage>,
         active_sheet: SheetId,
         build_graph: bool,
@@ -1015,6 +1015,7 @@ impl Workbook {
         legacy_styles: (Option<&Stylesheet>, &[Stylesheet]),
         defer: bool,
     ) -> Result<Self> {
+        model.styles.read_declared_number_formats();
         validate_model(&model)?;
         validate_chart_source(&model, source_package.is_some())?;
         let active_sheet = if (active_sheet.0 as usize) < model.sheets.len() {
@@ -2198,14 +2199,26 @@ impl Workbook {
     ) -> Result<SelectionFormatting> {
         self.validate_bounded_range(sheet, range)?;
         let formats = self.range_formats(sheet, range)?;
+        let styles = &self.model.styles;
+        let mut defaults = xlsx_model::workbook::ColumnDefaults::new(self.sheet(sheet)?);
         let number_formats = formats
             .iter()
-            .map(|(_, format)| number_format_kind(&format.number_format))
+            .map(|(at, format)| {
+                let (kind, pattern) = number_format_kind(&format.number_format);
+                let style = defaults.effective_style(*at).unwrap_or(0);
+                let id = styles.xf(style).and_then(|xf| xf.num_fmt_id);
+                let kind = match (id, &format.number_format) {
+                    (Some(id @ 1..=163), NumberFormat::Custom { .. }) => {
+                        number_format_kind(&NumberFormat::Builtin { id }).0
+                    }
+                    _ => kind,
+                };
+                (kind, pattern)
+            })
             .collect::<Vec<_>>();
         let number_format = uniform(number_formats.iter().map(|(kind, _)| *kind));
         let number_format_pattern =
             uniform(number_formats.iter().map(|(_, pattern)| pattern.clone())).flatten();
-        let styles = &self.model.styles;
         Ok(SelectionFormatting {
             number_format,
             number_format_pattern,
