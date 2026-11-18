@@ -8304,6 +8304,26 @@ mod tests {
     }
 
     #[test]
+    fn tracked_paragraph_mark_requests_the_default_run_face() {
+        for mark in ["pPrIns", "pPrDel"] {
+            let block: LayoutBlock = serde_json::from_value(json!({
+                "kind": "paragraph", "id": "p",
+                "attrs": {(mark): {"revisionId": 1, "author": "Ada"}},
+                "runs": [{"kind": "text", "text": "Latin"}]
+            }))
+            .unwrap();
+            let requirements = collect_font_requirements([&block], "Arial");
+            let characters: Vec<char> = requirements
+                .iter()
+                .filter(|requirement| requirement.key == "calibri|0|0")
+                .flat_map(|requirement| requirement.characters.iter())
+                .collect();
+
+            assert!(characters.contains(&'\u{b6}'), "{mark}");
+        }
+    }
+
+    #[test]
     fn tab_font_requirements_skip_script_slots() {
         for complex_script in [false, true] {
             let keys = font_requirement_keys(json!({
