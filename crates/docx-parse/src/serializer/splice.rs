@@ -225,7 +225,8 @@ fn source_with_gained_breaks<'s>(
         let edited = changed.contains(&ordinal);
         let kept = if edited {
             let candidate = patched.get(&ordinal).map_or(xml.as_str(), String::as_str);
-            if format_only.contains(&ordinal) && !dropped_structure(paragraph, candidate).is_empty()
+            if format_only.contains(&ordinal)
+                && !dropped_by_format_edit(paragraph, candidate).is_empty()
             {
                 breaks(paragraph)?
             } else if let Some(patch) = patched.get(&ordinal) {
@@ -852,6 +853,38 @@ pub(crate) fn dropped_structure(source: &str, written: &str) -> Vec<&'static str
         .filter(|(index, _)| after[*index] < before[*index])
         .map(|(_, name)| *name)
         .collect()
+}
+
+/// The [`dropped_structure`] of a save that changes only run formatting, or, when that is
+/// empty, the `w:ins` and `w:del` elements of `source` that hold a note reference.
+pub(crate) fn dropped_by_format_edit(source: &str, written: &str) -> Vec<&'static str> {
+    let dropped = dropped_structure(source, written);
+    if !dropped.is_empty() {
+        return dropped;
+    }
+    let mut open = Vec::new();
+    let mut held = Vec::new();
+    for tag in tags(source).unwrap_or_default() {
+        let revision = match tag.name {
+            "w:ins" => Some("w:ins"),
+            "w:del" => Some("w:del"),
+            _ => None,
+        };
+        if let Some(revision) = revision.filter(|_| !tag.empty) {
+            if tag.end {
+                open.pop();
+            } else {
+                open.push(revision);
+            }
+        } else if !tag.end
+            && matches!(tag.name, "w:footnoteReference" | "w:endnoteReference")
+            && let Some(&revision) = open.last()
+            && !held.contains(&revision)
+        {
+            held.push(revision);
+        }
+    }
+    held
 }
 
 /// The elements outside paragraphs that `written` holds fewer of than `source`: table, cell and
@@ -1954,7 +1987,7 @@ fn splice_story_part_inner(
         if !edited && (!formatting_alone || changed.contains(ordinal)) {
             return true;
         }
-        let dropped = dropped_structure(&source[spans[ordinal].clone()], &written[ordinal]);
+        let dropped = dropped_by_format_edit(&source[spans[ordinal].clone()], &written[ordinal]);
         if !dropped.is_empty() && edited {
             options
                 .replace_reasons
@@ -2467,7 +2500,7 @@ pub(crate) fn replace_story_part(
             };
             let edited = format_only.contains(&ordinal);
             if edited || (formatting_alone && !changed.contains(&ordinal)) {
-                let dropped = dropped_structure(paragraph, &xml);
+                let dropped = dropped_by_format_edit(paragraph, &xml);
                 if !dropped.is_empty() {
                     if edited {
                         reasons.push(kept_reason(ordinal, &dropped));
@@ -2676,7 +2709,7 @@ pub(crate) fn splice_source_direct(
     for &ordinal in &changed {
         let xml = &patched[&ordinal];
         if format_only.contains(&ordinal) {
-            let dropped = dropped_structure(&source[span(ordinal)?], xml);
+            let dropped = dropped_by_format_edit(&source[span(ordinal)?], xml);
             if !dropped.is_empty() {
                 replace_reasons.push(kept_reason(ordinal, &dropped));
                 continue;
