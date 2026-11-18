@@ -393,6 +393,23 @@ describe.each(PATHS)('$name', (path) => {
       expect(first).toMatch(BOLD_HEAD);
       expect(first).toMatch(new RegExp(`${opening(shape)}${left}${reference}</w:${shape.tag}>`));
     });
+
+    it('keeps its source paragraph when text is bolded beside a revision of a reference alone and one with text around a reference, or both wrappers where the paragraph is rewritten', async () => {
+      const words = shape.tag === 'del' ? deletedText : text;
+      const around = revisionSpan(shape, `${words('left')}${referenceRun(shape.note)}${words('right')}`);
+      const alone = revisionSpan({ ...shape, id: shape.id + 10 }, referenceRun(shape.note, 2));
+      const original = firstParagraph(`${around}${text(' and ')}${alone}`);
+      const first = bodyParagraphs(await path.open(fixture(original, [1, 2]), boldHead))[0] ?? '';
+      if (path.keepsSourceBytes) {
+        expect(first).toBe(original);
+      } else {
+        const run = (value: string) => `<w:r>${RUN_PROPERTIES}<w:(?:t|delText)(?:\\s[^>]*)?>${value}</w:(?:t|delText)></w:r>`;
+        const reference = (id: number) => `<w:r>${RUN_PROPERTIES}<w:${shape.note}Reference w:id="${id}"/></w:r>`;
+        expect(first).toMatch(BOLD_HEAD);
+        expect(first).toMatch(new RegExp(`${opening(shape)}${run('left')}${reference(1)}${run('right')}</w:${shape.tag}>`));
+        expect(first).toMatch(new RegExp(`${opening(shape)}${reference(2)}</w:${shape.tag}>`));
+      }
+    });
   });
 
   describe.each(['footnote', 'endnote'] as const)('untracked %s reference', (note) => {
