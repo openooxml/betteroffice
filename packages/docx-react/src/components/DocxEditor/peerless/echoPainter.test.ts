@@ -3,7 +3,7 @@ import type {
   CommandAck, CommandConnection, CommandEnvelope, CommandTicket, EchoEntry,
 } from '../../../../../../shared/office-session/commands/types';
 import { createWorkerEditSession } from '../../../../../../shared/office-session/commands/session';
-import type { DocxCommandEchoContext, DocxCommandFrame, DocxEchoGlyphSet } from '@betteroffice/docx/worker';
+import type { DocxCommandEchoContext, DocxCommandFrame, DocxEchoGlyphLine, DocxEchoGlyphSet } from '@betteroffice/docx/worker';
 import { createEchoPainter, type PeerlessEchoIntent, type PeerlessEchoPainter, type PeerlessPredictedCaret } from './echoPainter';
 import type { PeerlessTextIntent } from './inputEvents';
 import { testEchoGlyphLine, testEchoGlyphSet } from './echoGlyphs.testing';
@@ -42,13 +42,14 @@ scope.Path2D = class { glyph?: number; moveTo(x: number) { this.glyph ??= x; } l
 
 function setup(options: { requestFullFrame?(): void; onPaint?(predicted?: PeerlessPredictedCaret): void } = {}) {
   const draws: unknown[][] = [];
+  const rects: number[][] = [];
   const texts: string[] = [];
   const transforms: number[][] = [];
   const bitmap = { width: 100, height: 20, close() {} } as ImageBitmap;
   const background = { width: 100, height: 20, close() {} } as ImageBitmap;
   const ctx = {
     save() {}, restore() {}, setTransform(...values: number[]) { transforms.push(values); },
-    transform() {}, beginPath() {}, rect() {}, clip() {}, translate() {}, scale() {},
+    transform() {}, beginPath() {}, rect(...values: number[]) { rects.push(values); }, clip() {}, translate() {}, scale() {},
     clearRect() {}, fillRect() {}, fillText() { throw new Error('the echo paints glyph outlines only'); },
     fill(path: { glyph: number }) { texts.push(texts.pop()! + String.fromCodePoint(path.glyph)); },
     drawImage(...args: unknown[]) { draws.push(args); if (args.length === 3) texts.push(''); },
@@ -65,7 +66,7 @@ function setup(options: { requestFullFrame?(): void; onPaint?(predicted?: Peerle
   } };
   painter.reconcile(frame, [], []);
   const paints = () => draws.filter(([image]) => image === background).length;
-  return { painter, draws, texts, transforms, canvas, background, bitmap, frame, paints,
+  return { painter, draws, rects, texts, transforms, canvas, background, bitmap, frame, paints,
     mountPages(pages: ReadonlySet<string>) { mountedPages = pages; },
   };
 }
@@ -714,4 +715,115 @@ test('disable, drop and dispose clear a published prediction', () => {
   const disposed = predictedSetup();
   disposed.painter.dispose();
   expect(disposed.calls.at(-1)).toBeUndefined();
+});
+
+/** Hangul at twelve pixels a syllable; each outline starts at its own code point. */
+function hangulSet(key = 'kr', alphabet = '가나다', outlined = alphabet): DocxEchoGlyphSet {
+  return { key, fontId: 2, alphabet, horizontal: 0.01, glyphIds: [...alphabet].map((char) => char.codePointAt(0)!),
+    advances: [...alphabet].map(() => 1200), kerning: [], unsafePairs: [],
+    outlines: Object.fromEntries([...outlined].map((char) => [char.codePointAt(0)!,
+      JSON.stringify({ upem: 1000, cmds: [{ t: 'M', x: char.codePointAt(0)!, y: 0 }, { t: 'L', x: 0, y: 700 }, { t: 'Z' }] })])) };
+}
+
+function faceContext(revision: number, text: string, charFaces: number[], caret: number,
+  line: Partial<DocxEchoGlyphLine> = {}): DocxCommandEchoContext {
+  return { ...context(), frameEpoch: revision, text,
+    boundaries: Array.from({ length: text.length + 1 }, (_, utf16) => ({ utf16, grapheme: utf16,
+      caret: { x: utf16 * 10, y: 0, width: 1, height: 20 } })),
+    selection: { anchorGrapheme: caret, focusGrapheme: caret },
+    glyphs: testEchoGlyphLine({ right: 100, faces: [{ glyphSet: 'test', fontId: 1, metrics: 1 },
+      { glyphSet: 'kr', fontId: 2, metrics: 2 }], charFaces, typed: [testEchoGlyphSet.alphabet, '가나다'],
+    typedRun: [0, text.length], shapingSize: 12, ...line }) };
+}
+
+/** A painter holding the Latin and Hangul sets, on a line that mixes them. */
+function faceSetup(text: string, charFaces: number[], caret = text.length, line: Partial<DocxEchoGlyphLine> = {}) {
+  const requests: number[] = [];
+  const result = setup({ requestFullFrame: () => { requests.push(1); } });
+  const install = (revision: number, echo: DocxCommandEchoContext, sets: DocxEchoGlyphSet[]) => {
+    result.painter.reconcile({ ...result.frame, revision, payload: { ...result.frame.payload,
+      echoContext: echo, echoGlyphSets: sets, stagedPresentation: { frameEpoch: revision,
+        pages: result.frame.payload.stagedPresentation!.pages.map((item) => ({ ...item, frameEpoch: revision })),
+      },
+    } }, [], []);
+  };
+  install(2, faceContext(2, text, charFaces, caret, line), [testEchoGlyphSet, hangulSet()]);
+  return { ...result, requests, install };
+}
+
+const insert = (text: string): PeerlessTextIntent => ({ kind: 'insertText', payload: { text } });
+
+test('a line mixing fonts types each character in the face the engine routes it to, one run per face', () => {
+  const { painter, texts } = faceSetup('a가', [0, 1]);
+  const hangul = painter.preview(insert('나'));
+  const latin = painter.preview(insert('x'));
+  expect(hangul).toBeDefined();
+  expect(latin).toBeDefined();
+  painter.paint([entry(2, hangul!), entry(3, painter.preview(insert('b'))!)]);
+  expect(texts.at(-1)).toBe('a가나b');
+  // a character no face types is the engine's to route
+  expect(painter.preview(insert('라'))).toBeUndefined();
+  expect(faceSetup('a가', [0, 1], 2, { typed: ['', '가나다'] }).painter.preview(insert('x'))).toBeUndefined();
+});
+
+test('typing on a mixed line declines outside the run typing goes into', () => {
+  expect(faceSetup('a가', [0, 1], 1).painter.preview(insert('나'))).toBeDefined();
+  // the character left of the caret sits in another run, which may route typing differently
+  expect(faceSetup('a가', [0, 1], 1, { typedRun: [1, 2] }).painter.preview(insert('나'))).toBeUndefined();
+  expect(faceSetup('a가', [0, 1], 0).painter.preview(insert('나'))).toBeUndefined();
+  // a line without a typing route echoes no insertion at all, but still its deletions
+  const { typed: _, typedRun: __, ...unrouted } = faceContext(2, 'ab가', [0, 0, 1], 2).glyphs!;
+  for (const [intent, echoed] of [[insert('나'), false], [{ kind: 'deleteBackward', payload: {} }, true]] as const) {
+    const { painter } = faceSetup('ab가', [0, 0, 1], 2);
+    painter.installContext({ ...faceContext(2, 'ab가', [0, 0, 1], 2), glyphs: unrouted });
+    expect(painter.preview(intent) !== undefined).toBe(echoed);
+  }
+});
+
+test('an edit that adds or removes a line metrics face declines, since the line height may change', () => {
+  // a line of Hangul alone has no Latin metrics face to type a letter with
+  expect(faceSetup('가나', [1, 1]).painter.preview(insert('x'))).toBeUndefined();
+  expect(faceSetup('가나', [1, 1]).painter.preview(insert('다'))).toBeDefined();
+  expect(faceSetup('a가', [0, 1], 1).painter.preview({ kind: 'deleteBackward', payload: {} })).toBeUndefined();
+  expect(faceSetup('a가', [0, 1], 2).painter.preview({ kind: 'deleteBackward', payload: {} })).toBeUndefined();
+  expect(faceSetup('ab가', [0, 0, 1], 2).painter.preview({ kind: 'deleteBackward', payload: {} })).toBeDefined();
+});
+
+test('a grown glyph set completes the set it extends; one whose base is missing waits for the whole set', () => {
+  const { painter, texts, requests, install } = faceSetup('a가', [0, 1]);
+  const grown = { ...hangulSet('kr2', '가나다라', '라'), extends: 'kr' };
+  const naming = (revision: number, key: string, typed: string) => {
+    const echo = faceContext(revision, 'a가', [0, 1], 2, { typed: [testEchoGlyphSet.alphabet, typed] });
+    return { ...echo, glyphs: { ...echo.glyphs!, faces: [echo.glyphs!.faces![0]!, { glyphSet: key, fontId: 2, metrics: 2 }] } };
+  };
+  install(3, naming(3, 'kr2', '가나다라'), [grown]);
+  const typed = painter.preview(insert('라'));
+  expect(typed).toBeDefined();
+  painter.paint([entry(2, typed!)]);
+  expect(texts.at(-1)).toBe('a가라');
+  expect(requests).toEqual([]);
+  // the set it grew is dropped once no context names it
+  painter.installContext(naming(3, 'kr', '가나다'));
+  expect(painter.preview(insert('나'))).toBeUndefined();
+  expect(requests).toEqual([1]);
+  install(4, naming(4, 'kr9', '가나다라'), [{ ...grown, key: 'kr9', extends: 'missing' }]);
+  expect(painter.preview(insert('라'))).toBeUndefined();
+  expect(requests).toEqual([1, 1]);
+});
+
+test('a table cell line paints inside the clip the page raster paints its text with', () => {
+  const { painter, rects } = faceSetup('a가', [0, 1], 2, { clip: { x: 2, y: 1, w: 50, h: 18 } });
+  painter.paint([entry(2, painter.preview(insert('나'))!)]);
+  expect(rects.slice(-2)).toEqual([[0, 0, 100, 20], [2, 1, 50, 18]]);
+});
+
+test('a line wrapped between East Asian characters keeps its break only while its last character stays', () => {
+  // the line wraps before 가 with no space: a break may follow a syllable, not every character
+  const wrapped = (caret: number, next: string) => faceSetup('ab', [0, 0], caret, { next, nextFace: next === '가' ? 1 : 0 });
+  expect(wrapped(1, '가').painter.preview(insert('x'))).toBeDefined();
+  expect(wrapped(1, '가').painter.preview({ kind: 'deleteBackward', payload: {} })).toBeDefined();
+  expect(wrapped(2, '가').painter.preview(insert('x'))).toBeUndefined();
+  expect(wrapped(2, '가').painter.preview({ kind: 'deleteBackward', payload: {} })).toBeUndefined();
+  // a word wrapped before a letter grows into the next line's word
+  expect(wrapped(1, 'c').painter.preview(insert('x'))).toBeUndefined();
 });

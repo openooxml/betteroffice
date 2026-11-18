@@ -70,7 +70,13 @@ test('echo rounding rounds halves away from zero and never yields negative zero'
 
 test('leading word width stops at the first character a break can follow', () => {
   expect(leadingWordWidth('ab1 cd', [1, 2, 4, 8, 16, 32])).toBe(7);
-  expect(leadingWordWidth('-ab', [1, 2, 4])).toBe(0);
+  // Hangul breaks between any two syllables; a leading mark moves at least itself
+  expect(leadingWordWidth('가나다', [3, 5, 7])).toBe(3);
+  expect(leadingWordWidth('-ab', [1, 2, 4])).toBe(1);
+  expect(leadingWordWidth('ab가', [1, 2, 4])).toBe(3);
+  // a leading space hangs past the line above, so nothing is sure to stay
+  expect(leadingWordWidth(' ab', [1, 2, 4])).toBe(0);
+  expect(leadingWordWidth('', [])).toBe(0);
 });
 
 test('outline bounds cover every point and control point', () => {

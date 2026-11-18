@@ -1,5 +1,6 @@
 import type {
   DocxCommandEchoContext,
+  DocxEchoGlyphFace,
   DocxEchoGlyphLine,
   DocxEchoRect,
   DocxCommandSelection,
@@ -9,7 +10,9 @@ import type { DocxCommandSelectionLayout } from './residentCommandSelection';
 import type { DisplayPrimitive, GlyphRunPrimitive } from '../layout/render/displayList';
 import type { RetainedFrame } from '../layout/render/frameDelta';
 import { displayPrimitiveRect } from '../layout/render/displayListGeometry';
-import { echoRound3, placeEchoLine, type EchoGlyphIndex } from './residentEchoGlyphs';
+import {
+  DOCX_ECHO_ALPHABET, DOCX_ECHO_JAMO, echoRound3, placeEchoFaceGlyphs, placeEchoLine, type EchoGlyphIndex,
+} from './residentEchoGlyphs';
 
 /** @internal */
 export const DOCX_ECHO_MAX_CONTEXT_BYTES = 16 * 1024;
@@ -30,7 +33,8 @@ export interface EchoGlyphSource {
 
 /** @internal The worker's shaping facts for exact echo placement. */
 export interface EchoGlyphProvider {
-  glyphSet(fontId: number, size: number, kern: boolean): EchoGlyphSource | undefined;
+  /** The set of a font at a size, kerning gate and shaping language whose alphabet holds `chars`. */
+  glyphSet(fontId: number, size: number, kern: boolean, language?: string, chars?: string): EchoGlyphSource | undefined;
   /** Ink box of one glyph in font units with the font's units per em; null without ink, undefined when unknown. */
   glyphInk(fontId: number, glyphId: number): { upem: number; xMin: number; xMax: number; yMin: number; yMax: number } | null | undefined;
   pixelRatio: number;
@@ -124,8 +128,10 @@ export function projectCommandEchoContext(
   input: ProjectCommandEchoContextInput
 ): DocxCommandEchoContext | undefined {
   const { engine, selection, layout } = input;
-  if (!selection || selection.anchor.story !== 'body' || selection.focus.story !== 'body' ||
-    selection.anchor.paraId !== selection.focus.paraId) return undefined;
+  // the body and its table cells, whose display positions are the body's
+  if (!selection || !/^body(?::t\d+:r\d+c\d+)*$/.test(selection.focus.story) ||
+    selection.anchor.story !== selection.focus.story || selection.anchor.paraId !== selection.focus.paraId) return undefined;
+  const story = selection.focus.story;
   const snapshot = engine.residentCaretSnapshot();
   const caret = snapshot.caretRect;
   if (!caret || snapshot.frameEpoch !== layout.frame.frameEpoch) return undefined;
@@ -133,17 +139,17 @@ export function projectCommandEchoContext(
   if (!activePage || activePage.pageId.toString() !== caret.pageId || activePage.page.unbuilt) return undefined;
   let length: number;
   try {
-    const span = engine.geometryReader.locateParagraph('body', selection.focus.paraId);
+    const span = engine.geometryReader.locateParagraph(story, selection.focus.paraId);
     length = span.end - span.start;
   } catch { return undefined; }
   if (!Number.isSafeInteger(length) || length <= 0 || length > DOCX_ECHO_MAX_CONTEXT_BYTES) return undefined;
-  const fast = readEchoParagraph(engine, 'body', selection.focus.paraId);
+  const fast = readEchoParagraph(engine, story, selection.focus.paraId);
   const read = fast ? undefined
-    : engine.proposalEngine.readParagraphs({ story: 'body', paraIds: [selection.focus.paraId], view: 'accepted' });
+    : engine.proposalEngine.readParagraphs({ story, paraIds: [selection.focus.paraId], view: 'accepted' });
   const paragraph = fast ? { paraId: selection.focus.paraId, text: fast.text, atoms: fast.hasAtoms ? [0] : [] }
     : read?.ok ? read.paragraphs[0] : undefined;
   // paragraph offsets count the block embeds the paragraph starts with; its text does not
-  const lead = fast ? fast.lead : leadingBlockUnits(engine, 'body', selection.focus.paraId);
+  const lead = fast ? fast.lead : leadingBlockUnits(engine, story, selection.focus.paraId);
   const anchorOffset = selection.anchor.offset - (lead ?? 0);
   const focusOffset = selection.focus.offset - (lead ?? 0);
   if (lead === undefined || anchorOffset < 0 || focusOffset < 0) return undefined;
@@ -210,7 +216,8 @@ export function projectCommandEchoContext(
       if (run.docStart !== cursor || run.docEnd !== cursor + run.text.length || !run.glyphs.length ||
         run.rtl || run.bidiLevel || run.rotationDeg || run.horizontalScale && run.horizontalScale !== 100 ||
         run.allCaps || run.smallCaps || run.hidden || run.opacity !== undefined && run.opacity !== 1 ||
-        run.wordSpacing || run.paintClip || run.clipGroup || run.modernEffects ||
+        run.wordSpacing || run.paintClip || !sameClip(run.clipGroup, runs[0]!.clipGroup) ||
+        run.clipGroup?.opacity !== undefined && run.clipGroup.opacity !== 1 || run.modernEffects ||
         run.textShadow || run.textOutline || run.emphasisMark || run.textEffect || run.leaderGlyphs || run.revision) {
         supported = false;
         break;
@@ -261,6 +268,7 @@ export function projectCommandEchoContext(
       ? retained.page.contentBounds.x + retained.page.contentBounds.width : retained.page.width;
     let edge = contentEdge;
     const active = new Set(runs);
+    const cell = runs[0]!.clipGroup;
     const omitted = new Set<number>();
     for (let index = 0; index < retained.page.primitives.length; index += 1) {
       const primitive = retained.page.primitives[index]!;
@@ -280,8 +288,10 @@ export function projectCommandEchoContext(
         primitive.y < y + height && primitive.y + primitive.h > y && primitive.x + primitive.w > x) {
         edge = Math.min(edge, primitive.x);
       }
-      // an empty text primitive only marks a blank line's position for hit testing and paints nothing
+      // an empty text primitive only marks a blank line's position for hit testing and paints nothing;
+      // another table cell's text keeps its place, and whatever paints over the band declines below
       if ((primitive.kind === 'text' && primitive.text !== '' || primitive.kind === 'glyphRun') && !omitted.has(index) &&
+        !(cell?.id !== undefined && primitive.clipGroup?.id !== undefined && primitive.clipGroup.id !== cell.id) &&
         (primitive.kind === 'text' ? Math.abs(primitive.baselineY - baseline) < size :
           primitive.glyphs.some((glyph) => Math.abs(glyph.y - baseline) < size))) supported = false;
     }
@@ -290,8 +300,17 @@ export function projectCommandEchoContext(
     let damageRect: DocxEchoRect = { x, y, width: edge - x, height };
     let glyphLine: DocxEchoGlyphLine | undefined;
     if (input.glyphs) {
+      const facesJson = engine.echoFacesJson?.bind(engine);
+      // a table cell clips its text; the echo paints inside the clip the engine paints with
+      const finite = (value: number | undefined) => typeof value === 'number' && Number.isFinite(value) ? value : 0;
+      const clip = cell?.clip && { x: finite(cell.clip.x), y: finite(cell.clip.y),
+        w: Math.max(0, finite(cell.clip.w)), h: Math.max(0, finite(cell.clip.h)) };
       const projected = projectGlyphLine({ provider: input.glyphs, retained, runs, omitted, text, baseline, edge,
-        obstructed: edge < contentEdge,
+        obstructed: edge < contentEdge, caret: focusOffset - lineOffset, ...(clip ? { clip } : {}),
+        ...(facesJson ? { faces: (position: number, alphabet: string, lineStart: number, lineEnd: number) => {
+          const json = facesJson(position, alphabet, lineStart, lineEnd);
+          return json === undefined ? undefined : JSON.parse(json) as EchoFacesAnswer;
+        } } : {}),
         paragraphText: paragraph.text, lineOffset, start, end, paragraphStart, paragraphEnd });
       if (!projected) return undefined;
       ({ line: glyphLine, rect: damageRect } = projected);
@@ -319,6 +338,13 @@ export function projectCommandEchoContext(
 
 type EchoStyleRun = DocxCommandEchoContext['styleRuns'][number];
 
+/** Whether two runs paint under the same clip group, or neither under one. */
+function sameClip(a: GlyphRunPrimitive['clipGroup'], b: GlyphRunPrimitive['clipGroup']): boolean {
+  if (!a || !b) return a === b;
+  return a.id === b.id && a.opacity === b.opacity && a.clip?.x === b.clip?.x && a.clip?.y === b.clip?.y &&
+    a.clip?.w === b.clip?.w && a.clip?.h === b.clip?.h;
+}
+
 /** Cluster-positioned lines carry one primitive per cluster; the echo needs one run per style. */
 function mergeStyleRuns(runs: readonly EchoStyleRun[]): EchoStyleRun[] {
   const merged: EchoStyleRun[] = [];
@@ -334,8 +360,22 @@ function mergeStyleRuns(runs: readonly EchoStyleRun[]): EchoStyleRun[] {
   return merged;
 }
 
+/** The engine's `echoFacesJson` answer: `[display, measured, metrics, eastAsian]` per character. */
+interface EchoFacesAnswer {
+  faces: (readonly (number | null)[])[];
+  line: ((readonly (number | null)[]) | null)[];
+  latin: string | null;
+  eastAsia: string | null;
+  /** Display positions of the text run typing goes into. */
+  run?: [number, number];
+}
+
 interface GlyphLineInput {
   provider: EchoGlyphProvider;
+  /** The engine's font routing for the line, for a line the display list does not draw with its primary font. */
+  faces?(position: number, alphabet: string, lineStart: number, lineEnd: number): EchoFacesAnswer | undefined;
+  /** UTF-16 offset of the caret in the line text. */
+  caret: number;
   retained: RetainedFrame['pages'][number];
   runs: readonly GlyphRunPrimitive[];
   omitted: ReadonlySet<number>;
@@ -344,6 +384,8 @@ interface GlyphLineInput {
   edge: number;
   /** Whether an image or shape beside the line, not the page's content box, sets `edge`. */
   obstructed: boolean;
+  /** The table cell clip the engine paints the line inside, in page px. */
+  clip?: { x: number; y: number; w: number; h: number };
   paragraphText: string;
   lineOffset: number;
   start: number;
@@ -358,23 +400,31 @@ const CSS_FONT = /^(italic )?(400|700) (\d+(?:\.\d+)?)px (.+), sans-serif$/;
  * The echoed line in the engine's own placement: verifies that one glyph set reproduces every glyph
  * and pen position of the line, then bounds the ink a single-character edit can paint. Undefined
  * when the line, its neighbours or later paint fall outside what the echo can reproduce exactly.
+ * A line the display list draws through more than one face, or not with its primary font, places
+ * each character with its own face's glyph set and types only what the engine's font routing
+ * draws and measures with one face that keeps the line's height.
  */
 function projectGlyphLine(input: GlyphLineInput): { line: DocxEchoGlyphLine; rect: DocxEchoRect } | undefined {
   const { provider, retained, runs, text, baseline } = input;
   const first = runs[0]!;
   const facts = first.echo;
   const kern = facts?.kern ?? false;
-  if (!facts || facts.primaryFont === false || runs.some(run => !run.echo || run.echo.primaryFont === false ||
+  if (!facts || runs.some(run => !run.echo ||
     run.echo.x !== facts.x || run.echo.right !== facts.right || (run.echo.kern ?? false) !== kern ||
-    (run.echo.kerning ?? 0) !== (facts.kerning ?? 0) ||
-    run.echo.letterSpacing || run.echo.position || run.echo.scale !== undefined && run.echo.scale !== 100 ||
+    (run.echo.kerning ?? 0) !== (facts.kerning ?? 0) || (run.echo.letterSpacing ?? 0) !== (facts.letterSpacing ?? 0) ||
+    (run.echo.autoSpaceOff ?? 0) !== (facts.autoSpaceOff ?? 0) ||
+    run.echo.position || run.echo.scale !== undefined && run.echo.scale !== 100 ||
     run.echo.stretch !== undefined || run.echo.centerWidth !== facts.centerWidth)) return undefined;
+  // the engine's font routing places a line that mixes faces, or writes outside the base alphabet
+  const routed = runs.some((run) => run.echo!.primaryFont === false || run.fontId !== first.fontId ||
+    run.lang !== first.lang) || [...input.paragraphText].some((char) => !DOCX_ECHO_ALPHABET.includes(char));
+  if (!routed && facts.letterSpacing) return undefined;
   // a centered line moves as a whole when its width changes, so only a paragraph of one line is placed
   const center = facts.centerWidth;
-  if (center !== undefined && (input.lineOffset !== 0 || text.length !== input.paragraphText.length ||
+  if (center !== undefined && (routed || input.lineOffset !== 0 || text.length !== input.paragraphText.length ||
     text.endsWith(' '))) return undefined;
-  if (runs.some((run) => run.fontId !== first.fontId || run.size !== first.size || run.color !== first.color ||
-    run.fallbackFont !== first.fallbackFont) ||
+  if (runs.some((run) => run.size !== first.size || run.color !== first.color ||
+    !routed && (run.fontId !== first.fontId || run.fallbackFont !== first.fallbackFont)) ||
     [...input.omitted].some((index) => retained.page.primitives[index]!.kind !== 'glyphRun')) return undefined;
   const font = CSS_FONT.exec(first.fallbackFont ?? '');
   const halfPoints = Math.round(first.size * 1.5);
@@ -382,7 +432,9 @@ function projectGlyphLine(input: GlyphLineInput): { line: DocxEchoGlyphLine; rec
   const shapingSize = Math.fround(Math.fround(halfPoints / 2 * 96) / 72);
   const glyphIds: number[] = [];
   const xs: number[] = [];
+  const charRuns: GlyphRunPrimitive[] = [];
   for (const run of runs) {
+    if (routed && !CSS_FONT.test(run.fallbackFont ?? '')) return undefined;
     let byte = 0;
     let glyph = 0;
     for (const char of run.text) {
@@ -390,6 +442,7 @@ function projectGlyphLine(input: GlyphLineInput): { line: DocxEchoGlyphLine; rec
       if (!placed || placed.cluster !== byte || run.glyphs[glyph + 1]?.cluster === byte) return undefined;
       glyphIds.push(placed.id);
       xs.push(placed.x);
+      charRuns.push(run);
       byte += utf8CodePointBytes(char);
       glyph += 1;
     }
@@ -397,17 +450,109 @@ function projectGlyphLine(input: GlyphLineInput): { line: DocxEchoGlyphLine; rec
   }
   const after = input.paragraphText.codePointAt(input.lineOffset + text.length);
   const next = after === undefined ? '' : String.fromCodePoint(after);
-  const source = provider.glyphSet(first.fontId, shapingSize, kern);
-  if (!source) return undefined;
-  let previous: number | undefined;
-  const count = source.glyphs.set.glyphIds.length;
-  for (const character of input.paragraphText) {
-    const index = source.glyphs.chars.get(character);
-    if (index === undefined || previous !== undefined && source.glyphs.unsafe.has(previous * count + index)) return undefined;
-    previous = index;
-  }
   const page = retained.page;
-  const placement = placeEchoLine(source.glyphs, text, next, facts.x, center);
+  let placement: ReturnType<typeof placeEchoLine>;
+  let inkSources: EchoGlyphSource[];
+  let spaceAdvance: (() => number | undefined) | undefined;
+  let route: Pick<DocxEchoGlyphLine, 'glyphSet' | 'fontId' | 'faces' | 'charFaces' | 'nextFace' | 'typed' | 'typedRun' |
+    'letterSpacing' | 'shapingSize' | 'autoSpaceOff'>;
+  if (!routed) {
+    const source = provider.glyphSet(first.fontId, shapingSize, kern);
+    if (!source) return undefined;
+    let previous: number | undefined;
+    const count = source.glyphs.set.glyphIds.length;
+    for (const character of input.paragraphText) {
+      const index = source.glyphs.chars.get(character);
+      if (index === undefined || previous !== undefined && source.glyphs.unsafe.has(previous * count + index)) return undefined;
+      previous = index;
+    }
+    placement = placeEchoLine(source.glyphs, text, next, facts.x, center);
+    inkSources = [source];
+    spaceAdvance = () => {
+      const space = source.glyphs.chars.get(' ');
+      return space === undefined ? undefined : source.glyphs.advance(source.glyphs.set.advances[space]!);
+    };
+    route = { glyphSet: source.key, fontId: first.fontId };
+  } else {
+    // pairs kern within one face only where the line does not mix faces
+    if (kern || !input.faces) return undefined;
+    const lineChars = [...text];
+    const alphabet = [...new Set(DOCX_ECHO_ALPHABET + DOCX_ECHO_JAMO + input.paragraphText)].join('');
+    const caretPosition = input.start + Math.max(0, input.caret - 1);
+    const answer = input.faces(caretPosition, alphabet, input.start, input.end + next.length);
+    if (!answer || answer.faces.length !== [...alphabet].length) return undefined;
+    const languageOf = (eastAsian: number | null | undefined) =>
+      (eastAsian ? answer.eastAsia ?? answer.latin : answer.latin) ?? undefined;
+    const faces: { fontId: number; language: string | undefined; metrics: number; chars: Set<string>; typed: string }[] = [];
+    const faceOf = (fontId: number, language: string | undefined, metrics: number) => {
+      let index = faces.findIndex((face) => face.fontId === fontId && face.language === language && face.metrics === metrics);
+      if (index < 0) index = faces.push({ fontId, language, metrics, chars: new Set(), typed: '' }) - 1;
+      return index;
+    };
+    const charFaces: number[] = [];
+    const lineMetrics = new Set<number>();
+    let utf16 = 0;
+    for (let index = 0; index < lineChars.length; index += 1) {
+      const entry = answer.line[utf16];
+      const run = charRuns[index]!;
+      // the display list draws it with the face measurement placed it with
+      if (!entry || entry[0] !== run.fontId || entry[1] !== run.fontId || typeof entry[2] !== 'number') return undefined;
+      lineMetrics.add(entry[2]);
+      const face = faceOf(run.fontId, run.lang, entry[2]);
+      faces[face]!.chars.add(lineChars[index]!);
+      charFaces.push(face);
+      utf16 += lineChars[index]!.length;
+    }
+    // the character after the line shapes with the last one where both take one face
+    const following = next ? answer.line[text.length] : undefined;
+    const nextFace = following && typeof following[0] === 'number'
+      ? faces.findIndex((face) => face.fontId === following[0]) : -1;
+    if (nextFace >= 0) faces[nextFace]!.chars.add(next);
+    // typing goes into the run left of the caret; a character types where both paths take one face
+    // whose line metrics the line already holds
+    const run = answer.run;
+    const typedRun: [number, number] | undefined = run && input.caret > 0
+      ? [Math.max(0, run[0] - input.start), Math.min(text.length, run[1] - input.start)] : undefined;
+    if (typedRun && typedRun[0] < input.caret && typedRun[1] >= input.caret) {
+      [...alphabet].forEach((char, index) => {
+        const [display, measured, metrics, eastAsian] = answer.faces[index]!;
+        if (typeof display !== 'number' || display !== measured || typeof metrics !== 'number' ||
+          !lineMetrics.has(metrics)) return;
+        const face = faces[faceOf(display, languageOf(eastAsian), metrics)]!;
+        face.chars.add(char);
+        face.typed += char;
+      });
+    }
+    // faces of one font and language share a glyph set, asked for once with all their characters
+    const wanted = new Map<string, { fontId: number; language: string | undefined; chars: Set<string> }>();
+    for (const face of faces) {
+      const key = `${face.fontId}\u0000${face.language ?? ''}`;
+      const entry = wanted.get(key) ?? { fontId: face.fontId, language: face.language, chars: new Set<string>() };
+      for (const char of face.chars) entry.chars.add(char);
+      wanted.set(key, entry);
+    }
+    const shaped = new Map<string, EchoGlyphSource>();
+    for (const [key, entry] of wanted) {
+      const source = provider.glyphSet(entry.fontId, shapingSize, false, entry.language, [...entry.chars].join(''));
+      if (!source) return undefined;
+      shaped.set(key, source);
+    }
+    const sources = faces.map((face) => shaped.get(`${face.fontId}\u0000${face.language ?? ''}`)!);
+    // a following character of the last one's face that its set cannot echo may shape with it
+    if (nextFace >= 0 && !sources[nextFace]!.glyphs.chars.has(next)) return undefined;
+    placement = placeEchoFaceGlyphs({ sets: sources.map((source) => source.glyphs), charFaces,
+      ...(nextFace >= 0 ? { nextFace } : {}), letterSpacing: facts.letterSpacing,
+      autoSpaceOff: facts.autoSpaceOff, size: shapingSize }, text, next, facts.x);
+    inkSources = sources;
+    const lineFaces: DocxEchoGlyphFace[] = faces.map((face, index) =>
+      ({ glyphSet: sources[index]!.key, fontId: face.fontId, metrics: face.metrics }));
+    const typed = faces.map((face, index) => [...face.typed].filter((char) => sources[index]!.glyphs.chars.has(char)).join(''));
+    route = { glyphSet: lineFaces[0]!.glyphSet, fontId: lineFaces[0]!.fontId, faces: lineFaces, charFaces,
+      ...(nextFace >= 0 ? { nextFace } : {}),
+      ...(typed.some(Boolean) && typedRun ? { typed, typedRun } : {}),
+      ...(facts.letterSpacing ? { letterSpacing: Math.fround(facts.letterSpacing) } : {}),
+      shapingSize, ...(facts.autoSpaceOff ? { autoSpaceOff: facts.autoSpaceOff } : {}) };
+  }
   if (!placement || placement.glyphIds.some((id, index) => id !== glyphIds[index]) ||
     placement.xs.some((value, index) => value !== xs[index]) || !Number.isFinite(facts.x + facts.right) ||
     // the content box is serialized to 0.001 px, so its edge may round just short of the line's
@@ -416,7 +561,7 @@ function projectGlyphLine(input: GlyphLineInput): { line: DocxEchoGlyphLine; rec
   const right = facts.right;
   let inkEnd = chosen.x;
   [...text].forEach((char, index) => {
-    if (char !== ' ') inkEnd = placement.xs[index]! + placement.advances[index]!;
+    if (char !== ' ') inkEnd = placement!.xs[index]! + placement!.advances[index]!;
   });
   // a filled line may be justified, which a shorter line would stretch
   if (inkEnd >= right - 0.5) return undefined;
@@ -438,11 +583,10 @@ function projectGlyphLine(input: GlyphLineInput): { line: DocxEchoGlyphLine; rec
     else {
       // a justified line takes a word that fits once a quarter of its space width is squeezed out
       const line = previous.filter((run) => run.glyphs[0]!.y === last.glyphs[0]!.y);
-      const space = source.glyphs.chars.get(' ');
+      const space = spaceAdvance?.();
       if (space === undefined || line.some((run) => run.fontId !== first.fontId || run.size !== first.size)) return undefined;
       const spaces = line.reduce((count, run) => count + [...run.text].filter((char) => char === ' ').length, 0);
-      previousSlack = last.echo.right - (last.echo.x + last.echo.stretch) +
-        (spaces / 4 + 1) * source.glyphs.advance(source.glyphs.set.advances[space]!);
+      previousSlack = last.echo.right - (last.echo.x + last.echo.stretch) + (spaces / 4 + 1) * space;
     }
   }
   let nextWord: number | undefined;
@@ -450,31 +594,43 @@ function projectGlyphLine(input: GlyphLineInput): { line: DocxEchoGlyphLine; rec
     const following = lineRuns(input.end, input.paragraphEnd, false);
     nextWord = 0;
     for (const run of following) {
-      if (run.glyphs[0]!.y !== following[0]!.glyphs[0]!.y || !/^[A-Za-z0-9]+$/.test(run.text)) break;
+      if (run.glyphs[0]!.y !== following[0]!.glyphs[0]!.y) break;
+      if (!/^[A-Za-z0-9]+$/.test(run.text)) {
+        // the least a break can move up is the first character, where it is not a letter or digit
+        if (run === following[0] && !/^[A-Za-z0-9]/.test(run.text)) nextWord = run.glyphs[0]!.advance ?? 0;
+        break;
+      }
       nextWord += run.glyphs.reduce((width, glyph) => width + (glyph.advance ?? 0), 0);
     }
   }
-  const ink = { xMin: Math.min(0, source.ink.xMin / source.ink.upem), yMin: Math.min(0, source.ink.yMin / source.ink.upem),
-    yMax: Math.max(0, source.ink.yMax / source.ink.upem), overhang: Math.max(0, source.ink.overhang / source.ink.upem) };
+  const ink = { xMin: 0, yMin: 0, yMax: 0, overhang: 0 };
+  for (const source of inkSources) {
+    ink.xMin = Math.min(ink.xMin, source.ink.xMin / source.ink.upem);
+    ink.yMin = Math.min(ink.yMin, source.ink.yMin / source.ink.upem);
+    ink.yMax = Math.max(ink.yMax, source.ink.yMax / source.ink.upem);
+    ink.overhang = Math.max(ink.overhang, source.ink.overhang / source.ink.upem);
+  }
   const ratio = provider.pixelRatio;
   const left = Math.floor(((center === undefined ? xs[0]! : chosen.x) + ink.xMin * first.size) * ratio) - 1;
   const top = Math.floor((baseline - ink.yMax * first.size) * ratio) - 1;
   const inkRight = Math.ceil((Math.max(right, placement.end) + ink.overhang * first.size) * ratio) + 1;
   const bottom = Math.ceil((baseline - ink.yMin * first.size) * ratio) + 1;
-  const device = {
-    x: Math.max(0, left), y: Math.max(0, top),
-    width: Math.min(Math.ceil(page.width * ratio), inkRight) - Math.max(0, left),
-    height: Math.min(Math.ceil(page.height * ratio), bottom) - Math.max(0, top),
-  };
+  // the line paints nothing outside its cell's clip, so the band stops at the pixels the clip touches
+  const clip = input.clip;
+  const x0 = Math.max(0, left, clip ? Math.floor(clip.x * ratio) : 0);
+  const y0 = Math.max(0, top, clip ? Math.floor(clip.y * ratio) : 0);
+  const x1 = Math.min(Math.ceil(page.width * ratio), inkRight, clip ? Math.ceil((clip.x + clip.w) * ratio) : Infinity);
+  const y1 = Math.min(Math.ceil(page.height * ratio), bottom, clip ? Math.ceil((clip.y + clip.h) * ratio) : Infinity);
+  const device = { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
   if (device.width <= 0 || device.height <= 0) return undefined;
   const band = { x: device.x / ratio, y: device.y / ratio, w: device.width / ratio, h: device.height / ratio };
   if (paintedOver(provider, page, input.omitted, band)) return undefined;
   return {
-    line: { glyphSet: source.key, fontId: first.fontId, size: first.size,
+    line: { ...route, size: first.size,
       color: first.color, x: chosen.x, y: baseline, next, right, ...(center === undefined ? {} : { center }),
       ...(facts.canEmpty === undefined ? {} : { canEmpty: facts.canEmpty }),
       ...(previousSlack === undefined ? {} : { previousSlack }), ...(nextWord === undefined ? {} : { nextWord }),
-      device, pixelRatio: ratio },
+      device, pixelRatio: ratio, ...(clip ? { clip } : {}) },
     rect: { x: band.x, y: band.y, width: band.w, height: band.h },
   };
 }
