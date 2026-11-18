@@ -764,13 +764,15 @@ const rows: Row<Xlsx>[] = [
     call: ({ engine }) => scoped(engine.XlsxDocument.openWithCalculationJson(conditionalFixture, CONTEXT), (d) => {
       const viewport = json({ x: 0, y: 0, width: 640, height: 600 });
       let frames = 0;
-      let list: { commands: unknown[]; conditionalPending?: number };
+      let list: { commands: { op?: string; color?: string }[]; conditionalPending?: number };
       do {
         list = JSON.parse(d.displayListJson(viewport)) as typeof list;
         frames++;
       } while (list.conditionalPending && frames < 50);
       if (list.conditionalPending) throw new Error(`conditional formats still pending after ${frames} frames`);
-      return { settled: list.commands, export: d.pngDisplayListJson(viewport) };
+      const fills = list.commands.filter((command) => command.op === 'fillRect' && command.color === '#ffc7ce').length;
+      if (fills === 0) throw new Error('the settled frame paints no conditional fill');
+      return { settled: list.commands, fills, export: d.pngDisplayListJson(viewport) };
     }),
   },
   { method: 'XlsxDocument.displayListForJson', call: ({ doc }) => doc.displayListForJson(1, VIEWPORT) },

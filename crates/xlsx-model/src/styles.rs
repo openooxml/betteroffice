@@ -849,6 +849,9 @@ pub struct Stylesheet {
     pub indexed_colors: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dxfs: Vec<DifferentialFormat>,
+    /// read from the source only; not snapshotted.
+    #[serde(skip)]
+    dxf_fills_differ: BTreeSet<u32>,
     /// not snapshotted: a restored stylesheet knows none and appends its own.
     #[serde(skip)]
     saved_plain: SavedPlain,
@@ -897,6 +900,17 @@ impl Stylesheet {
             && self.xfs_with_extra_xml == other.xfs_with_extra_xml
             && self.exact_style_indices == other.exact_style_indices
             && self.released_xfs == other.released_xfs
+    }
+
+    /// Whether the source gives `dxfs[index]` a solid fill whose foreground
+    /// and background colors differ.
+    pub fn dxf_fill_colors_differ(&self, index: u32) -> bool {
+        self.dxf_fills_differ.contains(&index)
+    }
+
+    #[doc(hidden)]
+    pub fn note_dxf_fill_colors_differ(&mut self, index: u32) {
+        self.dxf_fills_differ.insert(index);
     }
 }
 

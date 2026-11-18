@@ -2,8 +2,8 @@ use std::cell::Cell;
 
 use betteroffice_xlsx::{
     CONDITIONAL_FRAME_BUDGET, CONDITIONAL_FRAME_MS, CONDITIONAL_RESULT_CAP, CalculationOptions,
-    CellInput, CellRange, CellRef, DifferentialFormat, DisplayList, DrawCmd, FrameClock,
-    GridGeometry, Op, RenderOptions, SheetId, Viewport, Workbook,
+    CellInput, CellRange, CellRef, CellState, CellValue, DifferentialFormat, DisplayList, DrawCmd,
+    FrameClock, GridGeometry, Op, RenderOptions, SheetId, Viewport, Workbook,
 };
 
 const RED: &str = "#ffc7ce";
@@ -145,6 +145,18 @@ fn edit(workbook: &mut Workbook, sheet: SheetId, edits: &[(u32, u32, &str)]) {
         .unwrap();
 }
 
+/// A direct edit of one cell of the first sheet.
+fn edit_one(workbook: &mut Workbook, row: u32, col: u32, input: &str) {
+    workbook
+        .edit_cell(
+            SheetId(0),
+            CellRef::new(row, col),
+            input,
+            CalculationOptions::default(),
+        )
+        .unwrap();
+}
+
 #[test]
 fn a_second_frame_of_the_same_view_evaluates_no_rule() {
     let workbook = workbook(&sheet(
@@ -227,12 +239,19 @@ fn editing_a_cell_repaints_the_rules_that_read_it() {
     let before = frame(&workbook, &viewport);
     assert_eq!(painted(&before).len(), 3);
     let built = workbook.conditional_stats().aggregate_builds;
+    edit(&mut workbook, SheetId(1), &[(2, 0, "1")]);
+    let data_only = frame(&workbook, &viewport);
+    assert_eq!(data_only.conditional_pending, 0);
+    assert_eq!(painted(&data_only).len(), 4);
+    assert_eq!(
+        painted(&data_only),
+        painted(&book(1, 0, 1, 1).display_list(&viewport).unwrap())
+    );
     edit(
         &mut workbook,
         SheetId(0),
         &[(0, 0, "100"), (1, 2, "1"), (0, 4, "50")],
     );
-    edit(&mut workbook, SheetId(1), &[(2, 0, "1")]);
     let after = frame(&workbook, &viewport);
     assert_eq!(after.conditional_pending, 0);
     assert_eq!(painted(&after).len(), 6);
@@ -240,7 +259,7 @@ fn editing_a_cell_repaints_the_rules_that_read_it() {
         painted(&after),
         painted(&book(100, 1, 50, 1).display_list(&viewport).unwrap())
     );
-    assert_eq!(workbook.conditional_stats().aggregate_builds, built + 1);
+    assert_eq!(workbook.conditional_stats().aggregate_builds, built + 2);
     for _ in 0..2 {
         assert!(
             workbook
@@ -385,13 +404,16 @@ fn a_view_beyond_one_frame_budget_settles_without_input() {
 
 #[test]
 fn an_undecided_cell_paints_its_previous_result_under_the_same_rules_or_nothing() {
-    let book = |a: u32| {
+    let book = |zero: Option<u32>| {
         workbook(&sheet(
-            rows(30, numbers(4, move |_, col| if col == 0 { a } else { 1 })),
+            rows(
+                30,
+                numbers(4, move |row, col| u32::from(col > 0 || zero != Some(row - 1))),
+            ),
             greater_than("A1:D30", "0"),
         ))
     };
-    let mut workbook = book(1);
+    let mut workbook = book(None);
     let geometry = GridGeometry::new(
         workbook.sheet(SheetId(0)).unwrap(),
         &workbook.model().styles,
@@ -409,9 +431,11 @@ fn an_undecided_cell_paints_its_previous_result_under_the_same_rules_or_nothing(
         .max()
         .unwrap();
     workbook.set_conditional_budget(10);
-    let zeros: Vec<(u32, u32, &str)> = (0..30).map(|row| (row, 0, "0")).collect();
-    edit(&mut workbook, SheetId(0), &zeros);
-    let reference = cells(&geometry, &book(0).display_list(&viewport).unwrap());
+    edit_one(&mut workbook, deepest.0, 0, "0");
+    let reference = cells(
+        &geometry,
+        &book(Some(deepest.0)).display_list(&viewport).unwrap(),
+    );
     assert!(!reference.contains(&deepest));
     let (next, decided) = counted(&workbook, &viewport);
     assert!(next.conditional_pending > 0);
@@ -419,8 +443,7 @@ fn an_undecided_cell_paints_its_previous_result_under_the_same_rules_or_nothing(
     let shown = cells(&geometry, &next);
     assert!(shown.iter().all(|at| early.contains(at)), "{shown:?}");
     assert!(shown.contains(&deepest), "{shown:?}");
-    assert!(!shown.contains(&(0, 0)), "{shown:?}");
-    edit(&mut workbook, SheetId(0), &[(0, 1, "2")]);
+    edit_one(&mut workbook, 0, 1, "2");
     let later = cells(&geometry, &frame(&workbook, &viewport));
     assert!(!later.contains(&deepest), "{later:?}");
     assert!(later.iter().all(|at| reference.contains(at)), "{later:?}");
@@ -492,7 +515,7 @@ fn after_an_edit_that_changes_no_result_undecided_cells_paint_their_previous_for
     let before = painted(&frame(&workbook, &viewport));
     assert_eq!(before.len(), 120);
     workbook.set_conditional_budget(10);
-    edit(&mut workbook, SheetId(0), &[(29, 3, "7")]);
+    edit_one(&mut workbook, 29, 3, "7");
     let mut frames = 0;
     loop {
         let list = frame(&workbook, &viewport);
@@ -513,7 +536,7 @@ fn after_an_edit_that_changes_a_result_its_cell_paints_the_previous_format_until
     let before = painted(&frame(&workbook, &viewport));
     assert_eq!(before.len(), 120);
     workbook.set_conditional_budget(10);
-    edit(&mut workbook, SheetId(0), &[(29, 3, "0")]);
+    edit_one(&mut workbook, 29, 3, "0");
     let first = frame(&workbook, &viewport);
     assert!(first.conditional_pending > 0);
     assert_eq!(painted(&first), before);
@@ -543,7 +566,7 @@ fn a_cell_with_no_previous_result_paints_unformatted_until_decided() {
     assert!(opened.conditional_pending > 0);
     assert_eq!(painted(&opened).len() as u64, decided);
     settle(&workbook, &top, 20);
-    edit(&mut workbook, SheetId(0), &[(0, 0, "5")]);
+    edit_one(&mut workbook, 0, 0, "5");
     let geometry = GridGeometry::new(
         workbook.sheet(SheetId(0)).unwrap(),
         &workbook.model().styles,
@@ -563,7 +586,7 @@ fn a_one_shot_render_after_an_edit_shows_no_previous_result() {
     let viewport = view(0.0, 800.0);
     assert_eq!(painted(&frame(&workbook, &viewport)).len(), 120);
     workbook.set_conditional_budget(1);
-    edit(&mut workbook, SheetId(0), &[(29, 3, "0")]);
+    edit_one(&mut workbook, 29, 3, "0");
     assert!(frame(&workbook, &viewport).conditional_pending > 0);
     let fresh = positive(&["Sheet1"], &[(29, 3, 0)]);
     let reference = painted(&fresh.display_list(&viewport).unwrap());
@@ -755,26 +778,137 @@ fn a_refused_operation_keeps_every_decided_result() {
 }
 
 #[test]
-fn undo_and_redo_of_a_value_edit_paint_previous_formats_until_decided() {
+fn undo_and_redo_of_a_single_edit_paint_no_previous_result() {
     let mut workbook = positive(&["Sheet1"], &[]);
     let viewport = view(0.0, 800.0);
     let options = CalculationOptions::default();
     let before = painted(&frame(&workbook, &viewport));
     assert_eq!(before.len(), 120);
     workbook.set_conditional_budget(10);
-    edit(&mut workbook, SheetId(0), &[(29, 3, "0")]);
+    edit_one(&mut workbook, 29, 3, "0");
     let edited = painted(&settle(&workbook, &viewport, 20).0);
     assert_eq!(edited.len(), 119);
     assert!(workbook.undo(options).unwrap().applied);
-    let undone = frame(&workbook, &viewport);
-    assert!(undone.conditional_pending > 0);
-    assert_eq!(painted(&undone), edited);
+    paints_only_decided(&workbook, &viewport, "undo");
     assert_eq!(painted(&settle(&workbook, &viewport, 20).0), before);
     assert!(workbook.redo(options).unwrap().applied);
-    let redone = frame(&workbook, &viewport);
-    assert!(redone.conditional_pending > 0);
-    assert_eq!(painted(&redone), before);
+    paints_only_decided(&workbook, &viewport, "redo");
     assert_eq!(painted(&settle(&workbook, &viewport, 20).0), edited);
+}
+
+/// The single-sheet workbook of [`positive`] with its 120 visible cells
+/// decided, limited to 10 cells a frame from here on.
+fn decided_one_sheet(viewport: &Viewport) -> Workbook {
+    let workbook = positive(&["Sheet1"], &[]);
+    assert_eq!(painted(&frame(&workbook, viewport)).len(), 120);
+    workbook.set_conditional_budget(10);
+    workbook
+}
+
+#[test]
+fn edits_of_several_cells_paint_no_previous_result() {
+    let viewport = view(0.0, 800.0);
+    let mut workbook = decided_one_sheet(&viewport);
+    edit(&mut workbook, SheetId(0), &[(29, 3, "7"), (29, 2, "8")]);
+    paints_only_decided(&workbook, &viewport, "edit cells");
+}
+
+#[test]
+fn a_paste_paints_no_previous_result() {
+    let viewport = view(0.0, 800.0);
+    let mut workbook = decided_one_sheet(&viewport);
+    let pasted = [(29, 3, "7"), (29, 2, "8")].map(|(row, col, input)| CellInput {
+        cell: CellRef::new(row, col),
+        input: input.to_owned(),
+    });
+    workbook
+        .edit_pasted_cells(
+            SheetId(0),
+            &pasted,
+            &[false, false],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    paints_only_decided(&workbook, &viewport, "paste");
+}
+
+#[test]
+fn a_sort_written_as_cell_writes_paints_no_previous_result() {
+    let viewport = view(0.0, 800.0);
+    let mut workbook = decided_one_sheet(&viewport);
+    let write = |row: u32, value: f64| Op::SetCell {
+        sheet: SheetId(0),
+        at: CellRef::new(row, 0),
+        cell: CellState {
+            value: CellValue::Number { value },
+            ..CellState::default()
+        },
+    };
+    workbook
+        .apply_ops(
+            vec![write(0, 2.0), write(1, 1.0)],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    paints_only_decided(&workbook, &viewport, "sort");
+}
+
+#[test]
+fn undoing_a_range_move_paints_no_previous_result() {
+    let viewport = view(0.0, 800.0);
+    let mut workbook = positive(&["Sheet1"], &[]);
+    edit_one(&mut workbook, 0, 5, "7");
+    workbook
+        .move_range(
+            SheetId(0),
+            CellRange::parse_a1("F1").unwrap(),
+            CellRef::new(0, 7),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(painted(&frame(&workbook, &viewport)).len(), 120);
+    workbook.set_conditional_budget(10);
+    assert!(
+        workbook
+            .undo(CalculationOptions::default())
+            .unwrap()
+            .applied
+    );
+    paints_only_decided(&workbook, &viewport, "undo of a range move");
+}
+
+#[test]
+fn a_direct_edit_or_a_recalculation_keeps_previous_results_until_decided() {
+    let viewport = view(0.0, 800.0);
+    for direct in [true, false] {
+        let mut workbook = decided_one_sheet(&viewport);
+        if direct {
+            edit_one(&mut workbook, 29, 3, "7");
+        } else {
+            workbook.recalculate_all(CalculationOptions::default());
+        }
+        let list = frame(&workbook, &viewport);
+        assert!(list.conditional_pending > 0, "{direct}");
+        assert_eq!(painted(&list).len(), 120, "{direct}");
+    }
+}
+
+#[test]
+fn a_range_move_that_changes_no_cell_keeps_previous_results() {
+    let viewport = view(0.0, 800.0);
+    let mut workbook = decided_one_sheet(&viewport);
+    workbook
+        .move_range(
+            SheetId(0),
+            CellRange::parse_a1("F1").unwrap(),
+            CellRef::new(0, 7),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    edit_one(&mut workbook, 29, 3, "7");
+    let list = frame(&workbook, &viewport);
+    assert!(list.conditional_pending > 0);
+    assert_eq!(painted(&list).len(), 120);
 }
 
 #[test]
@@ -783,11 +917,11 @@ fn only_the_latest_previous_generation_is_painted() {
     let viewport = view(0.0, 800.0);
     assert_eq!(painted(&frame(&workbook, &viewport)).len(), 120);
     workbook.set_conditional_budget(10);
-    edit(&mut workbook, SheetId(0), &[(29, 3, "7")]);
+    edit_one(&mut workbook, 29, 3, "7");
     let (second, kept) = counted(&workbook, &viewport);
     assert!(second.conditional_pending > 0);
     assert_eq!(painted(&second).len(), 120);
-    edit(&mut workbook, SheetId(0), &[(29, 2, "7")]);
+    edit_one(&mut workbook, 29, 2, "7");
     let (third, decided) = counted(&workbook, &viewport);
     assert!(third.conditional_pending > 0);
     assert_eq!(painted(&third).len() as u64, decided);
@@ -796,7 +930,7 @@ fn only_the_latest_previous_generation_is_painted() {
 }
 
 #[test]
-fn a_formula_refused_budget_is_pending_not_false() {
+fn a_frame_whose_budget_a_count_table_spends_leaves_the_rest_pending() {
     let workbook = workbook(&sheet(
         rows(50_000, numbers(1, |row, _| row)),
         expression("B1:B20", 1, "COUNTIF($A$1:$A$50000,A1)&gt;0"),
@@ -839,6 +973,20 @@ fn an_absolute_aggregate_is_computed_once_per_edit() {
     assert_eq!(painted(&edited).len(), painted(&first).len() - 1);
 }
 
+/// The renders that decide every visible cell before they return.
+fn one_shot() -> [fn(&Workbook, &Viewport) -> DisplayList; 3] {
+    [
+        |workbook, viewport| workbook.display_list(viewport).unwrap(),
+        |workbook, viewport| workbook.display_list_for(SheetId(0), viewport).unwrap(),
+        |workbook, viewport| {
+            workbook
+                .png_display_list_for(SheetId(0), viewport)
+                .unwrap()
+                .0
+        },
+    ]
+}
+
 #[test]
 fn one_shot_renders_decide_every_cell() {
     let book = || {
@@ -847,20 +995,14 @@ fn one_shot_renders_decide_every_cell() {
             greater_than("A1:D30", "0"),
         ))
     };
-    let workbook = book();
     let viewport = view(0.0, 800.0);
     let reference = book().display_list(&viewport).unwrap();
     assert_eq!(painted(&reference).len(), 120);
-    workbook.set_conditional_budget(1);
-    assert!(frame(&workbook, &viewport).conditional_pending > 0);
-    for list in [
-        workbook.display_list(&viewport).unwrap(),
-        workbook.display_list_for(SheetId(0), &viewport).unwrap(),
-        workbook
-            .png_display_list_for(SheetId(0), &viewport)
-            .unwrap()
-            .0,
-    ] {
+    for entry in one_shot() {
+        let workbook = book();
+        workbook.set_conditional_budget(1);
+        assert!(frame(&workbook, &viewport).conditional_pending > 0);
+        let list = entry(&workbook, &viewport);
         assert_eq!(list.conditional_pending, 0);
         assert_eq!(painted(&list), painted(&reference));
     }
@@ -912,7 +1054,7 @@ fn decided_and_previous_cells_stay_within_the_cap_across_a_long_scroll_and_an_ed
         "{stats:?}"
     );
     assert!(stats.cached_cells <= CONDITIONAL_RESULT_CAP);
-    edit(&mut workbook, SheetId(0), &[(0, 0, "2")]);
+    edit_one(&mut workbook, 0, 0, "2");
     let list = frame(&workbook, &at(0.0));
     assert_eq!(list.conditional_pending, 0);
     let stats = workbook.conditional_stats();
@@ -1074,14 +1216,10 @@ fn one_shot_renders_decide_every_cell_of_rules_on_the_general_path() {
         workbook.conditional_stats().slow_rules,
         start.slow_rules + 3
     );
-    for list in [
-        workbook.display_list(&viewport).unwrap(),
-        workbook.display_list_for(SheetId(0), &viewport).unwrap(),
-        workbook
-            .png_display_list_for(SheetId(0), &viewport)
-            .unwrap()
-            .0,
-    ] {
+    for entry in one_shot() {
+        let workbook = book();
+        assert!(frame(&workbook, &viewport).conditional_pending > 0);
+        let list = entry(&workbook, &viewport);
         assert_eq!(list.conditional_pending, 0);
         assert_eq!(cells(&geometry, &list), expected);
     }
@@ -1180,4 +1318,78 @@ fn a_timed_frame_stops_when_its_clock_runs_out() {
     }
     assert!(frames > 1);
     assert_eq!(painted(&last), reference);
+}
+
+/// Asserts that a frame the budget stops and a one-shot render of `workbook`
+/// both paint nothing and leave nothing pending.
+fn settles_unpainted(workbook: &Workbook) {
+    let viewport = view(0.0, 800.0);
+    workbook.set_conditional_budget(1);
+    let stopped = frame(workbook, &viewport);
+    assert_eq!(stopped.conditional_pending, 0);
+    assert!(painted(&stopped).is_empty());
+    let complete = workbook.display_list(&viewport).unwrap();
+    assert_eq!(complete.conditional_pending, 0);
+    assert!(painted(&complete).is_empty());
+}
+
+#[test]
+fn cells_whose_first_rule_is_unsupported_are_not_pending() {
+    settles_unpainted(&workbook(&sheet(
+        rows(30, numbers(4, |row, col| row + col)),
+        rule(
+            "A1:D30",
+            r#"<cfRule type="timePeriod" dxfId="0" priority="1" timePeriod="today"><formula>FLOOR(A1,1)=TODAY()</formula></cfRule><cfRule type="cellIs" dxfId="0" priority="2" operator="greaterThan"><formula>0</formula></cfRule>"#,
+        ),
+    )));
+}
+
+#[test]
+fn a_sheet_whose_only_rule_reads_the_clock_has_nothing_pending() {
+    settles_unpainted(&workbook(&sheet(
+        rows(30, numbers(4, |row, col| row + col)),
+        expression("A1:D30", 1, "ISERROR(TODAY())"),
+    )));
+}
+
+#[test]
+fn range_statistics_too_large_for_the_units_left_wait_for_a_frame_that_starts_with_them() {
+    let workbook = workbook(&sheet(
+        rows(100_000, numbers(2, |row, _| row)),
+        [
+            greater_than("A1:A30", "0"),
+            rule(
+                "B1:B100000",
+                r#"<cfRule type="top10" dxfId="0" priority="2" rank="5"/>"#,
+            ),
+        ]
+        .concat(),
+    ));
+    let viewport = view(0.0, 400.0);
+    workbook.set_conditional_budget(1_000);
+    let start = workbook.conditional_stats().aggregate_builds;
+    let first = frame(&workbook, &viewport);
+    assert!(first.conditional_pending > 0);
+    assert_eq!(workbook.conditional_stats().aggregate_builds, start);
+    frame(&workbook, &viewport);
+    assert_eq!(workbook.conditional_stats().aggregate_builds, start + 1);
+}
+
+#[test]
+fn compiling_the_rules_is_charged_to_the_frame_that_compiles_them() {
+    let workbook = workbook(&sheet(
+        rows(10, numbers(1, |row, _| row)),
+        [
+            expression("A500:A600", 1, "A500&gt;0"),
+            expression("B500:B600", 2, "B500&gt;1"),
+            expression("C500:C600", 3, "C500&gt;2"),
+        ]
+        .concat(),
+    ));
+    let viewport = view(0.0, 300.0);
+    frame(&workbook, &viewport);
+    let compiled = workbook.conditional_stats().units;
+    frame(&workbook, &viewport);
+    let scanned = workbook.conditional_stats().units;
+    assert_eq!(compiled.checked_sub(scanned), Some(3));
 }

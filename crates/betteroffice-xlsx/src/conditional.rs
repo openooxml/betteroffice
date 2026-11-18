@@ -110,6 +110,21 @@ pub struct ConditionalStats {
     pub previous_cells: usize,
     /// Model epoch the cache holds.
     pub epoch: u64,
+    /// Cells withheld because a between rule's bound is an error.
+    pub withheld_error_bound: u64,
+    /// Cells withheld because a rule formula did not translate or parse there.
+    pub withheld_unparsable: u64,
+    /// Cells withheld because the calc engine refused a rule formula for size.
+    pub withheld_refused: u64,
+    /// Cells withheld because a rule's kind, operator or rank is unsupported.
+    pub withheld_unsupported: u64,
+    /// Cells withheld because a rule reads the clock or random numbers.
+    pub withheld_volatile: u64,
+    /// Cells withheld because a range rule's areas overlap.
+    pub withheld_overlapping: u64,
+    /// Cells whose conditional fill is withheld because its format names two
+    /// different fill colors.
+    pub withheld_fill: u64,
 }
 
 /// Each sheet's rules, aggregates and decided cells for one model epoch, the
@@ -1289,6 +1304,36 @@ mod tests {
             let rule = expression_rule(sqref, source);
             mismatches.extend(disagreements(&mut Cache::default(), &model, &rule));
         }
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    #[test]
+    fn an_absolute_call_reading_a_range_as_one_value_is_evaluated_per_cell() {
+        let mut sheet = xlsx_model::Sheet::new("Sheet1");
+        for (row, (b, c)) in [(1.0, 1.0), (2.0, 3.0)].into_iter().enumerate() {
+            put(&mut sheet, CellRef::new(row as u32, 1), number(b), None);
+            put(&mut sheet, CellRef::new(row as u32, 2), number(c), None);
+        }
+        let mut model = Workbook::default();
+        model.sheets.push(sheet);
+        let anchor = CellRef::new(0, 0);
+        for source in [
+            "COUNTIF($B$1:$B$2,$C$1:$C$2)>0",
+            "SUMIF($B$1:$B$2,$C$1:$C$2)>0",
+            "LARGE($B$1:$B$2,$C$1:$C$2)>0",
+            "COUNTIFS($B$1:$B$2,$C$1:$C$2)>0",
+        ] {
+            assert!(compile(source, anchor).constants.is_empty(), "{source}");
+        }
+        for source in [
+            "COUNTIF($B$1:$B$2,$C$1)>0",
+            "SUMIF($B$1:$B$2,\">0\",$C$1:$C$2)>0",
+            "SUM($B$1:$B$2,$C$1:$C$2)>0",
+        ] {
+            assert_eq!(compile(source, anchor).constants, [vec![0]], "{source}");
+        }
+        let rule = expression_rule("A1:A2", "COUNTIF($B$1:$B$2,$C$1:$C$2)>0");
+        let mismatches = disagreements(&mut Cache::default(), &model, &rule);
         assert!(mismatches.is_empty(), "{mismatches:#?}");
     }
 
