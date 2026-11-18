@@ -855,36 +855,99 @@ pub(crate) fn dropped_structure(source: &str, written: &str) -> Vec<&'static str
         .collect()
 }
 
-/// The [`dropped_structure`] of a save that changes only run formatting, or, when that is
-/// empty, the `w:ins` and `w:del` elements of `source` that hold a note reference.
+const REVISIONS: [&str; 2] = ["w:ins", "w:del"];
+
+/// The [`dropped_structure`] of a save that changes only run formatting, with each of `w:ins`
+/// and `w:del` that `written` would hold fewer of than `source` had it written every note
+/// reference outside its revision.
 pub(crate) fn dropped_by_format_edit(source: &str, written: &str) -> Vec<&'static str> {
-    let dropped = dropped_structure(source, written);
-    if !dropped.is_empty() {
-        return dropped;
-    }
-    let mut open = Vec::new();
-    let mut held = Vec::new();
-    for tag in tags(source).unwrap_or_default() {
-        let revision = match tag.name {
-            "w:ins" => Some("w:ins"),
-            "w:del" => Some("w:del"),
-            _ => None,
-        };
-        if let Some(revision) = revision.filter(|_| !tag.empty) {
-            if tag.end {
-                open.pop();
-            } else {
-                open.push(revision);
-            }
-        } else if !tag.end
-            && matches!(tag.name, "w:footnoteReference" | "w:endnoteReference")
-            && let Some(&revision) = open.last()
-            && !held.contains(&revision)
-        {
-            held.push(revision);
+    let mut dropped = dropped_structure(source, written);
+    let (held, kept) = (revisions(source, false), revisions(written, true));
+    for (index, name) in REVISIONS.into_iter().enumerate() {
+        if kept[index] < held[index] && !dropped.contains(&name) {
+            dropped.push(name);
         }
     }
-    held
+    dropped
+}
+
+/// The outermost `w:ins` and `w:del` elements of `xml` that have content, by [`REVISIONS`]
+/// index. With `split`, each counts once per stretch of its children between children that hold
+/// only note reference runs, so one that holds nothing else counts as none.
+fn revisions(xml: &str, split: bool) -> [usize; 2] {
+    fn stretches(children: &[bool]) -> usize {
+        children
+            .iter()
+            .enumerate()
+            .filter(|&(at, &only)| !only && (at == 0 || children[at - 1]))
+            .count()
+    }
+    let mut counts = [0; 2];
+    let mut depth = 0usize;
+    let mut revision: Option<(usize, usize)> = None;
+    let mut children = Vec::new();
+    let mut child: Option<(usize, bool, bool)> = None;
+    let mut properties: Option<usize> = None;
+    let container = |name: &str| matches!(name, "w:r" | "w:hyperlink" | "w:ins" | "w:del");
+    for tag in tags(xml).unwrap_or_default() {
+        if tag.end {
+            depth = depth.saturating_sub(1);
+            if properties.is_some() {
+                if properties == Some(depth) {
+                    properties = None;
+                }
+                continue;
+            }
+            if let Some((at, only, reference)) = child
+                && at == depth
+            {
+                children.push(only && reference);
+                child = None;
+            } else if let Some((index, opened)) = revision
+                && opened == depth
+            {
+                counts[index] += if split { stretches(&children) } else { 1 };
+                revision = None;
+            }
+            continue;
+        }
+        let at = depth;
+        if !tag.empty {
+            depth += 1;
+        }
+        if properties.is_some() {
+            continue;
+        }
+        match revision {
+            None => {
+                if !tag.empty
+                    && let Some(index) = REVISIONS.iter().position(|name| *name == tag.name)
+                {
+                    revision = Some((index, at));
+                    children.clear();
+                }
+            }
+            Some((_, opened)) if at == opened + 1 => {
+                if tag.empty {
+                    children.push(false);
+                } else {
+                    child = Some((at, container(tag.name), false));
+                }
+            }
+            Some(_) => {
+                if let Some((_, only, reference)) = child.as_mut() {
+                    if tag.name == "w:rPr" && !tag.empty {
+                        properties = Some(at);
+                    } else if matches!(tag.name, "w:footnoteReference" | "w:endnoteReference") {
+                        *reference = true;
+                    } else if !container(tag.name) {
+                        *only = false;
+                    }
+                }
+            }
+        }
+    }
+    counts
 }
 
 /// The elements outside paragraphs that `written` holds fewer of than `source`: table, cell and
