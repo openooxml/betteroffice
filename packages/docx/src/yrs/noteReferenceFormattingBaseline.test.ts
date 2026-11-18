@@ -152,13 +152,13 @@ describe.each(PATHS)('$name', (path) => {
     });
   });
 
-  it('writes the default character style on a rewritten text run and none on a bare footnote reference', async () => {
+  it('writes the default character style with a colour reset on a rewritten text run and none on a bare footnote reference', async () => {
     const saved = firstParagraph(await path.open(fixture(DEFAULT_STYLE_PARAGRAPH, DEFAULT_STYLE), (session) => typeAt(session, 2)));
     expect({
       text: enclosingRun(saved, '<w:t xml:space="preserve">HeXad </w:t>'),
       reference: enclosingRun(saved, '<w:footnoteReference w:id="1"/>'),
     }).toEqual({
-      text: '<w:r><w:rPr><w:rStyle w:val="Quiet"/></w:rPr><w:t xml:space="preserve">HeXad </w:t></w:r>',
+      text: '<w:r><w:rPr><w:rStyle w:val="Quiet"/><w:color w:val="auto"/></w:rPr><w:t xml:space="preserve">HeXad </w:t></w:r>',
       reference: BARE_REFERENCE,
     });
   });
