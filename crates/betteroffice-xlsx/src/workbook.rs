@@ -2632,7 +2632,7 @@ impl Workbook {
             CommitHistory::Separate,
             None,
         )?;
-        let update = self.commit_prepared(prepared)?;
+        let update = self.commit_prepared_cell_inputs(prepared)?;
         for (sheet, cell, formula) in &touched {
             self.graph.as_mut().expect("graph initialized").set_formula(
                 *sheet,
@@ -4347,7 +4347,7 @@ impl Workbook {
             let mut model = staged.model;
             retain_formula_caches(&self.model, &mut model);
             retain_array_formulas(&self.model, &mut model);
-            self.install_model_with_ops(model, ops)?;
+            self.install_model_with_ops(model, ops, false)?;
             self.mode = WorkbookMode::Collaborative {
                 structure: Box::new(new_structure),
             };
@@ -5381,9 +5381,10 @@ impl Workbook {
         self.conditional_cells_moved();
     }
 
-    /// [`Self::bump_model_epoch`] for a direct edit of one cell or a
-    /// recalculation, after which screen frames may paint a cell's conditional
-    /// result from before it until the cell is decided again.
+    /// [`Self::bump_model_epoch`] for cell inputs written in place, typed into
+    /// one cell or sent as a batch, or a recalculation, after which screen
+    /// frames may paint a cell's conditional result from before it until the
+    /// cell is decided again.
     fn bump_model_epoch_keeping_results(&mut self) {
         self.model_epoch = self.model_epoch.wrapping_add(1);
     }
