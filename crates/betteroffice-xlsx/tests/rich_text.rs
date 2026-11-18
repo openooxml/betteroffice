@@ -334,14 +334,14 @@ fn recovery_without_run_provenance_stays_plain() {
 const EXCEL_ITEMS: [&str; 4] = [
     r#"<si><r><rPr><b/><sz val="11"/><color theme="1"/><rFont val="Calibri"/><family val="2"/><scheme val="minor"/></rPr><t>Bold</t></r><r><rPr><sz val="11"/><color rgb="FFFF0000"/><rFont val="Calibri"/><family val="2"/><scheme val="minor"/></rPr><t xml:space="preserve"> red</t></r></si>"#,
     r#"<si><r><rPr><sz val="10"/><rFont val="NanumGothic"/><family val="3"/><charset val="129"/></rPr><t>합계</t></r><r><rPr><b/><sz val="10"/><rFont val="NanumGothic"/><family val="3"/><charset val="129"/></rPr><t xml:space="preserve"> 금액</t></r><phoneticPr fontId="1" type="noConversion"/></si>"#,
-    r#"<si><r><rPr><b/><outline/><shadow/><condense val="0"/><extend val="0"/></rPr><t>Shaped</t></r><r><rPr><i/></rPr><t xml:space="preserve"> text</t></r></si>"#,
+    r#"<si><r><rPr><b/><condense val="0"/><extend val="0"/><outline/><shadow/></rPr><t>Shaped</t></r><r><rPr><i/></rPr><t xml:space="preserve"> text</t></r></si>"#,
     r#"<si><r><rPr><b/></rPr><t>漢</t></r><r><t>字</t></r><rPh sb="0" eb="2"><t>かんじ</t></rPh><phoneticPr fontId="1"/></si>"#,
 ];
 
 const EXCEL_ROW: &str = concat!(
     r#"<row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c><c r="C1" t="s"><v>2</v></c><c r="D1" t="s"><v>3</v></c>"#,
     r#"<c r="E1" t="inlineStr"><is><r><rPr><i/><rFont val="Calibri"/><family val="2"/><scheme val="minor"/></rPr><t>Inline</t></r><r><rPr><rFont val="Calibri"/><family val="2"/><scheme val="minor"/></rPr><t xml:space="preserve"> text</t></r></is></c>"#,
-    r#"<c r="F1" t="inlineStr"><is><r><rPr><u/><shadow/></rPr><t>Under</t></r><r><t>lined</t></r></is></c>"#,
+    r#"<c r="F1" t="inlineStr"><is><r><rPr><shadow/><u/></rPr><t>Under</t></r><r><t>lined</t></r></is></c>"#,
     r#"<c r="G1" t="inlineStr"><is><r><rPr><rFont val="MS PGothic"/><charset val="128"/></rPr><t>字</t></r><rPh sb="0" eb="1"><t>じ</t></rPh></is></c></row>"#,
 );
 
@@ -438,9 +438,9 @@ fn phonetic_runs_keep_the_base_runs() {
 fn no_edit_save_keeps_excel_written_items_byte_for_byte() {
     let bytes = excel_source();
     let workbook = Workbook::open(&bytes).unwrap();
-    for col in 0..7 {
-        let _ = workbook.cell_text_runs(SheetId(0), CellRef::new(0, col));
-    }
+    let before: Vec<Vec<RichRun>> = (0..7)
+        .map(|col| cell_runs(&workbook, col).to_vec())
+        .collect();
     let saved = workbook.save().unwrap();
     let strings = part(&saved, "xl/sharedStrings.xml");
     for item in EXCEL_ITEMS {
@@ -448,6 +448,38 @@ fn no_edit_save_keeps_excel_written_items_byte_for_byte() {
     }
     assert_eq!(strings, part(&bytes, "xl/sharedStrings.xml"));
     assert_eq!(saved, bytes);
+    let reopened = Workbook::open(&saved).unwrap();
+    for (col, runs) in (0..7).zip(&before) {
+        assert_eq!(cell_runs(&reopened, col), runs.as_slice(), "{col}");
+    }
+}
+
+#[test]
+fn editing_another_cell_keeps_the_rich_items_and_their_runs() {
+    let mut workbook = Workbook::open(&excel_source()).unwrap();
+    let before: Vec<Vec<RichRun>> = (0..4)
+        .map(|col| cell_runs(&workbook, col).to_vec())
+        .collect();
+    workbook
+        .edit_cell(
+            SheetId(0),
+            CellRef::new(1, 0),
+            "2",
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    for (col, runs) in (0..4).zip(&before) {
+        assert_eq!(cell_runs(&workbook, col), runs.as_slice(), "{col}");
+    }
+    let saved = workbook.save().unwrap();
+    let strings = part(&saved, "xl/sharedStrings.xml");
+    for item in EXCEL_ITEMS {
+        assert!(strings.contains(item), "{item}");
+    }
+    let reopened = Workbook::open(&saved).unwrap();
+    for (col, runs) in (0..4).zip(&before) {
+        assert_eq!(cell_runs(&reopened, col), runs.as_slice(), "{col}");
+    }
 }
 
 #[test]

@@ -159,21 +159,24 @@ fn inter_run_whitespace_keeps_legacy_plain_text() {
 
 #[test]
 fn unmodelled_properties_keep_the_run_and_its_known_properties() {
-    for property in [
-        r#"<family val="2"/>"#,
-        r#"<charset val="129"/>"#,
-        r#"<scheme val="minor"/>"#,
-        r#"<outline/>"#,
-        r#"<shadow val="1"/>"#,
-        r#"<condense val="0"/>"#,
-        r#"<extend val="0"/>"#,
-        r#"<unknown kind="future"/>"#,
+    for (before_size, property) in [
+        (true, r#"<condense val="0"/>"#),
+        (true, r#"<extend val="0"/>"#),
+        (true, r#"<outline/>"#),
+        (true, r#"<shadow val="1"/>"#),
+        (false, r#"<family val="2"/>"#),
+        (false, r#"<charset val="129"/>"#),
+        (false, r#"<scheme val="minor"/>"#),
+        (false, r#"<unknown kind="future"/>"#),
     ] {
+        let properties = if before_size {
+            format!(r#"<b/>{property}<sz val="9"/>"#)
+        } else {
+            format!(r#"<b/><sz val="9"/>{property}"#)
+        };
         let parsed = rich_package(
-            &format!(
-                r#"<si><r><t>first</t></r><r><rPr><b/>{property}<sz val="9"/></rPr><t>last</t></r></si>"#
-            ),
-            &format!(r#"<r><rPr>{property}<i/></rPr><t>inline</t></r>"#),
+            &format!(r#"<si><r><t>first</t></r><r><rPr>{properties}</rPr><t>last</t></r></si>"#),
+            &format!(r#"<r><rPr><i/>{property}</rPr><t>inline</t></r>"#),
         );
         let runs = parsed
             .package
@@ -216,6 +219,63 @@ fn malformed_or_repeated_known_properties_discard_the_whole_item() {
             "{property}"
         );
         assert!(parsed.package.shared_string_text_runs(1).is_some());
+    }
+}
+
+#[test]
+fn phonetic_markup_inside_run_properties_keeps_the_item_plain() {
+    for (properties, value) in [
+        ("<b/><rPh><t>guide</t></rPh>", "guidebase"),
+        (r#"<b/><rPh sb="0" eb="1"/>"#, "base"),
+        (r#"<b/><phoneticPr fontId="1"/>"#, "base"),
+    ] {
+        let run = format!("<r><rPr>{properties}</rPr><t>base</t></r>");
+        let parsed = rich_package(&format!("<si>{run}</si>"), &run);
+        assert_eq!(parsed.workbook.shared_strings[0], value, "{properties}");
+        assert!(
+            parsed.package.shared_string_text_runs(0).is_none(),
+            "{properties}"
+        );
+        assert_eq!(
+            parsed.workbook.sheets[0]
+                .cell(CellRef::new(0, 1))
+                .unwrap()
+                .value,
+            CellValue::Text {
+                value: value.into()
+            },
+            "{properties}"
+        );
+        assert!(
+            parsed
+                .package
+                .inline_string_text_runs(0, CellRef::new(0, 1))
+                .is_none(),
+            "{properties}"
+        );
+    }
+}
+
+#[test]
+fn zero_tint_on_a_colour_that_is_not_a_theme_colour_keeps_the_runs() {
+    let red = Some(Color::Rgb("#ff0000".into()));
+    let indexed = Some(Color::Indexed(10));
+    for (color, expected) in [
+        (r#"<color rgb="FFFF0000" tint="0"/>"#, red.clone()),
+        (r#"<color rgb="FFFF0000" tint="0.0"/>"#, red),
+        (r#"<color indexed="10" tint="0"/>"#, indexed),
+        (r#"<color rgb="FFFF0000" tint="-0.25"/>"#, None),
+        (r#"<color indexed="10" tint="0.5"/>"#, None),
+    ] {
+        let parsed = rich_package(
+            &format!(r#"<si><r><rPr><b/>{color}</rPr><t>x</t></r></si>"#),
+            "<t/>",
+        );
+        let run_color = parsed
+            .package
+            .shared_string_text_runs(0)
+            .and_then(|runs| runs[0].style.color.clone());
+        assert_eq!(run_color, expected, "{color}");
     }
 }
 
@@ -357,7 +417,7 @@ fn package_run_budget_keeps_runs_first_come_and_counts_unmodelled_properties() {
     let per_item = 4_000;
     let full_items = crate::MAX_RICH_TEXT_RUNS / per_item;
     assert_eq!(full_items * per_item, crate::MAX_RICH_TEXT_RUNS);
-    let family = r#"<r><rPr><family val="2"/><b/></rPr><t>x</t></r>"#;
+    let family = r#"<r><rPr><b/><family val="2"/></rPr><t>x</t></r>"#;
     let plain = "<r><t>x</t></r>";
     let last = full_items - 1;
     let tail = full_items;
