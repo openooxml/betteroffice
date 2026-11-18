@@ -79,6 +79,12 @@ impl EditSessionCore {
         self.engine.clear_measurement_templates();
     }
 
+    /// [`crate::EngineSession::echo_faces_json`] through this session's resident font store.
+    pub fn echo_faces_json(&self, position: f64, alphabet: &str) -> Option<String> {
+        let _fonts = self.fonts.enter();
+        self.engine.echo_faces_json(position, alphabet)
+    }
+
     /// Typing echo model of one font at one shaping size from this session's
     /// resident font store: `{"horizontal","glyphIds","advances","kerning",
     /// "unsafePairs"}`, indexed by the characters of `alphabet`. `kern` is the

@@ -178,6 +178,9 @@ struct PlainWorkerMeasurement {
 
 #[derive(Debug)]
 struct ResidentRegionState {
+    /// The measurement configuration of `request_json`, which the typing echo resolves the
+    /// faces of typed characters through.
+    measurement: Rc<docx_layout::measure_blocks::MeasurementConfig>,
     request_json: String,
     /// [`layout_options_fingerprint`] of `request_json`.
     request_fingerprint: String,
@@ -8597,7 +8600,9 @@ impl EngineSession {
             measured_font_dependencies,
             resident_body.then_some(&measurement.font_chains),
         );
+        let measurement = Rc::new(measurement);
         self.regions.replace(Some(ResidentRegionState {
+            measurement: Rc::clone(&measurement),
             request_json: input_json,
             request_fingerprint,
             region_request_fingerprint: None,
@@ -8608,7 +8613,7 @@ impl EngineSession {
             fast_path: regional.map(|(regional, render_env)| RegionFastPathState {
                 cached_page_totals,
                 regions: Rc::new(regions),
-                measurement: Rc::new(measurement),
+                measurement,
                 measurement_fingerprint,
                 fonts,
                 regional,
@@ -9192,7 +9197,9 @@ impl EngineSession {
             measured_font_dependencies,
             resident_body.then_some(&measurement.font_chains),
         );
+        let measurement = Rc::new(measurement);
         self.regions.replace(Some(ResidentRegionState {
+            measurement: Rc::clone(&measurement),
             request_json: input_json,
             request_fingerprint,
             region_request_fingerprint,
@@ -9203,7 +9210,7 @@ impl EngineSession {
             fast_path: regional.map(|(regional, render_env)| RegionFastPathState {
                 cached_page_totals,
                 regions: Rc::new(regions),
-                measurement: Rc::new(measurement),
+                measurement,
                 measurement_fingerprint,
                 fonts,
                 regional,
@@ -12495,6 +12502,58 @@ impl EngineSession {
             &mut || {},
         )
         .map(|(resident, list)| (list, resident.unreadable().to_vec()))
+    }
+
+    /// The faces of each character of `alphabet` typed into the laid-out text run at display
+    /// position `position` (a body glyph's `docStart`, table cells included), as
+    /// [`docx_layout::echo_character_faces`] gives them, with the run's shaping languages:
+    /// `{"faces":[[display,measured,metrics],…],"latin":…,"eastAsia":…}`. `None` before a
+    /// region pass or where no text run holds `position`.
+    pub fn echo_faces_json(&self, position: f64, alphabet: &str) -> Option<String> {
+        fn find(block: &LayoutBlock, position: f64) -> Option<&docx_layout::types::TextRun> {
+            match block {
+                LayoutBlock::Table(table) => table
+                    .rows
+                    .iter()
+                    .flat_map(|row| &row.cells)
+                    .flat_map(|cell| &cell.blocks)
+                    .find_map(|nested| find(nested, position)),
+                LayoutBlock::Paragraph(paragraph) => {
+                    paragraph.runs.iter().find_map(|run| match run {
+                        docx_layout::types::Run::Text(text)
+                            if text.pm_start.is_some_and(|start| start <= position)
+                                && text.pm_end.is_some_and(|end| position < end) =>
+                        {
+                            Some(text)
+                        }
+                        _ => None,
+                    })
+                }
+                _ => None,
+            }
+        }
+        let measurement = Rc::clone(&self.regions.borrow().as_ref()?.measurement);
+        let pagination = self.pagination.borrow();
+        let run = pagination
+            .input
+            .as_ref()?
+            .measured
+            .iter()
+            .find_map(|measured| find(&measured.block, position))?;
+        let display = self.display.borrow();
+        let chains = display.resident_input.as_ref()?.font_chains();
+        let faces = docx_layout::with_measure_fonts_ref(|store| {
+            docx_layout::echo_character_faces(store, chains, &measurement, &run.fmt, alphabet)
+        });
+        let language = run.fmt.language.as_ref();
+        Some(
+            serde_json::json!({
+                "faces": faces,
+                "latin": language.and_then(|language| language.latin.as_deref()),
+                "eastAsia": language.and_then(|language| language.east_asia.as_deref()),
+            })
+            .to_string(),
+        )
     }
 
     pub fn resident_caret_snapshot(
@@ -28865,6 +28924,176 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             ("word/document.xml".to_owned(), document.into_bytes()),
         ])
         .expect("zip the fixture")
+    }
+
+    #[test]
+    fn echo_faces_name_the_face_each_painted_glyph_run_was_drawn_with() {
+        const NOTO_KR: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/NotoSansKR-Subset.otf");
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let latin = docx_layout::register_measure_font_bytes(LIBERATION).unwrap();
+        let hangul = docx_layout::register_measure_font_bytes(NOTO_KR).unwrap();
+        let run = |properties: &str, text: &str| {
+            format!(
+                r#"<w:p><w:r><w:rPr>{properties}</w:rPr><w:t xml:space="preserve">{text}</w:t></w:r></w:p>"#
+            )
+        };
+        let korean = r#"<w:rFonts w:eastAsia="Noto Sans KR"/>"#;
+        let cell = run(
+            &format!(r#"{korean}<w:spacing w:val="-4"/>"#),
+            "Cell 표 시간",
+        );
+        let body = [
+            run(korean, "Hello 가나다 world"),
+            run(
+                r#"<w:rFonts w:ascii="Noto Sans KR" w:hAnsi="Noto Sans KR" w:eastAsia="Noto Sans KR"/>"#,
+                "한국 Korea",
+            ),
+            format!(
+                r#"<w:tbl><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>{cell}</w:tc></w:tr></w:tbl>"#
+            ),
+            run(&format!("<w:b/>{korean}"), "강 Bold"),
+            // the measured East Asian chain cannot draw Hangul; the display chain falls back
+            run(r#"<w:rFonts w:eastAsia="Latin Only"/>"#, "Plain 문"),
+        ]
+        .concat();
+        // run languages reach layout through styles; a run's own w:lang is not seeded
+        let bytes = docx_bytes(
+            r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:rPr><w:lang w:val="en-US" w:eastAsia="ko-KR"/></w:rPr></w:style>"#,
+            &body,
+        );
+        let engine = EngineSession::new(9491);
+        crate::seed::seed_from_docx(engine.doc(), &bytes).unwrap();
+        let mut request = json!({
+            "bodyStory": "body",
+            "regions": {"sections": [{
+                "sectionId": "main",
+                "pageSize": {"w": 600, "h": 800},
+                "margins": {"top": 40, "right": 40, "bottom": 40, "left": 40,
+                    "header": 10, "footer": 10}
+            }]},
+            "renderEnv": {}
+        });
+        let requirements: Vec<serde_json::Value> = serde_json::from_str(
+            &engine
+                .layout_font_requirements_json(&request.to_string())
+                .unwrap(),
+        )
+        .unwrap();
+        let chains: serde_json::Map<String, serde_json::Value> = requirements
+            .iter()
+            .map(|requirement| {
+                let key = requirement["key"].as_str().unwrap();
+                // bold Liberation Sans draws with the Hangul face, which also covers ASCII
+                let chain = match key {
+                    "liberation sans|1|0" => json!([hangul, latin]),
+                    _ if key.starts_with("noto sans kr|") => json!([hangul, latin]),
+                    _ if key.starts_with("latin only|") => json!([latin]),
+                    _ => json!([latin, hangul]),
+                };
+                (key.to_owned(), chain)
+            })
+            .collect();
+        assert!(
+            chains.contains_key("latin only|0|0") && chains.contains_key("liberation sans|1|0"),
+            "{chains:?}"
+        );
+        request["measurement"] = json!({
+            "fontChains": chains,
+            "defaults": {"fontSize": 11, "fontFamily": "Liberation Sans"},
+            "authoritativeShaping": true,
+        });
+        engine
+            .layout_document_with_regions_retained(&request.to_string())
+            .unwrap();
+        engine
+            .build_display_list_frame(&json!({"fontChains": chains}).to_string(), 0)
+            .unwrap();
+        let runs: Vec<(String, u32, i64, bool)> = engine
+            .with_display_list(|list| {
+                list.pages
+                    .iter()
+                    .flat_map(|page| &page.primitives)
+                    .filter_map(|primitive| match primitive {
+                        docx_layout::display_list::Primitive::GlyphRun(run) => Some((
+                            run.text.clone(),
+                            run.font_id,
+                            run.attrs.doc_start?,
+                            run.attrs.cell.is_some(),
+                        )),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap();
+        let mut seen = String::new();
+        let mut differing = 0;
+        for (text, font, start, in_cell) in &runs {
+            let faces: serde_json::Value =
+                serde_json::from_str(&engine.echo_faces_json(*start as f64, text).unwrap())
+                    .unwrap();
+            let faces = faces["faces"].as_array().unwrap();
+            assert_eq!(faces.len(), text.chars().count(), "{text:?}");
+            for (ch, face) in text.chars().zip(faces) {
+                assert_eq!(face[0], json!(font), "display face of {ch:?} in {text:?}");
+                assert!(
+                    face[1].is_u64() && face[2].is_u64(),
+                    "{ch:?} in {text:?}: {face}"
+                );
+                if face[0] != face[1] {
+                    differing += 1;
+                    assert_eq!(
+                        (ch, face[1].clone()),
+                        ('문', json!(latin)),
+                        "only the Latin Only run's Hangul measures with another face"
+                    );
+                }
+            }
+            // letter spacing places the cell's line cluster by cluster, one run per character
+            if *in_cell {
+                assert!("Cell 표 시간".contains(text.as_str()), "{text:?}");
+            }
+            seen.push_str(text);
+        }
+        assert_eq!(differing, 1);
+        for expected in [
+            "Hello",
+            "가나다",
+            "한국",
+            "Korea",
+            "표",
+            "시간",
+            "강",
+            "Bold",
+            "문",
+        ] {
+            assert!(
+                seen.contains(expected),
+                "{expected} was not painted as glyphs"
+            );
+        }
+        assert!(runs.iter().any(|(_, _, _, in_cell)| *in_cell));
+        assert!(
+            runs.iter()
+                .any(|(text, font, ..)| text == "B" && *font == hangul),
+            "bold Latin draws through the bold chain"
+        );
+        let hello = runs
+            .iter()
+            .find(|(text, ..)| text.starts_with('H'))
+            .unwrap();
+        let first: serde_json::Value =
+            serde_json::from_str(&engine.echo_faces_json(hello.2 as f64, "a가").unwrap()).unwrap();
+        assert_eq!(
+            (&first["latin"], &first["eastAsia"]),
+            (&json!("en-US"), &json!("ko-KR"))
+        );
+        assert_eq!(
+            first["faces"],
+            json!([[latin, latin, latin], [hangul, hangul, hangul]]),
+            "typed Hangul measures, and takes line metrics, from the East Asian chain"
+        );
+        assert!(engine.echo_faces_json(-1.0, "a").is_none());
     }
 
     #[test]

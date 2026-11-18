@@ -1201,6 +1201,49 @@ pub fn outline_glyph_json_resident(font_id: u32, glyph_id: u32) -> Result<String
     .map_err(|e| e.to_string())
 }
 
+/// Which faces each character of `alphabet` typed into a text run of formatting `fmt` takes,
+/// as `[display, measured, metrics]`: the face the display list shapes it with (from the
+/// display input's `display_chains`), the face measurement shapes it with and the face
+/// measurement takes its line metrics from (from `measurement`). Each is `None` where that
+/// path would not take the character as plain text. The typing echo places a character only
+/// where the display and measured faces agree.
+pub fn echo_character_faces(
+    store: &ooxml_text::FontStore,
+    display_chains: &std::collections::HashMap<String, Vec<u32>>,
+    measurement: &measure_blocks::MeasurementConfig,
+    fmt: &types::RunFormatting,
+    alphabet: &str,
+) -> Vec<[Option<u32>; 3]> {
+    let display = display_list::display_character_faces(
+        store,
+        display_chains,
+        fmt.font_family.as_deref(),
+        fmt.bold == Some(true),
+        fmt.italic == Some(true),
+        alphabet,
+    );
+    let measured = typed_measure::defaults_in(&measurement.defaults).and_then(|defaults| {
+        ooxml_text::measure::run_character_faces(
+            store,
+            ooxml_text::measure::FontChains::BTree(&measurement.font_chains),
+            &defaults,
+            &typed_measure::measured_text_run(fmt),
+            alphabet,
+        )
+    });
+    (0..alphabet.chars().count())
+        .map(|index| {
+            let shown = display.as_ref().and_then(|faces| faces[index]);
+            let measured = measured.as_ref().and_then(|faces| faces[index]);
+            [
+                shown.map(ooxml_text::FontId::to_u32),
+                measured.map(|(face, _)| face.to_u32()),
+                measured.map(|(_, metrics)| metrics.to_u32()),
+            ]
+        })
+        .collect()
+}
+
 /// [`ooxml_text::echo_glyph_set`] against the resident font store, as JSON.
 pub fn echo_glyph_set_json(
     font_id: u32,

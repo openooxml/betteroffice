@@ -46,7 +46,7 @@ use crate::shape::{
 use crate::word_metrics::{kern_enabled, kern_features};
 
 use super::font_slots::{FontSlot, char_slot};
-use super::input::{FontChains, MeasureRequest, RunIn, validate_pt_size};
+use super::input::{DefaultsIn, FontChains, MeasureRequest, RunIn, validate_pt_size};
 use super::packed_glyphs::MeasuredGlyph;
 use super::{MAX_RUN_TEXT_BYTES, MeasureError, needs_glyph, pt_to_px, symbol_character};
 
@@ -979,6 +979,63 @@ pub(super) fn measure_plain_text(
         seg_start = seg_end;
     }
     Ok(width)
+}
+
+/// The faces measurement gives each character of `text` typed alone into `run`, as it
+/// resolves a run's characters: the face the character shapes with and the face its line
+/// metrics come from (the head of its `w:rFonts` slot's chain). `None` for a run measurement
+/// transforms as a whole (caps, small caps, `w:cs`), and per character for one in the
+/// complex-script slot, a combining mark, or one no face of its chain takes.
+pub fn run_character_faces(
+    store: &FontStore,
+    font_chains: FontChains<'_>,
+    defaults: &DefaultsIn,
+    run: &RunIn,
+    text: &str,
+) -> Option<Vec<Option<(FontId, FontId)>>> {
+    if run.all_caps || run.small_caps || run.complex_script {
+        return None;
+    }
+    let east_asia_hint =
+        run.font_slots.as_ref().and_then(|s| s.hint.as_deref()) == Some("eastAsia");
+    let mut chains: [Option<Option<(Vec<FontId>, FontResolver)>>; 4] = [None, None, None, None];
+    let mut faces = Vec::with_capacity(text.len());
+    for ch in text.chars() {
+        // a character typed alone follows no slot it could keep
+        let slot = char_slot(ch, false, east_asia_hint, FontSlot::HAnsi);
+        if slot == FontSlot::Cs || crate::shape::is_nonspacing_mark(ch) {
+            faces.push(None);
+            continue;
+        }
+        let family = family_for_slot(run, slot, &defaults.font_family);
+        let entry = chains[slot.index()].get_or_insert_with(|| {
+            let resolved = match font_chains.chain_for(family, run.bold, run.italic) {
+                // as measurement: text can reach a script slot after its fonts were collected
+                Err(_) if slot == FontSlot::EastAsia => {
+                    let base = family_for_slot(run, FontSlot::HAnsi, &defaults.font_family);
+                    font_chains
+                        .chain_for(base, run.bold, run.italic)
+                        .or_else(|_| font_chains.chain_for(base, false, false))
+                        .ok()?
+                }
+                resolved => resolved.ok()?,
+            };
+            validate_chain(store, &resolved).ok()?;
+            let resolver = styled_font_resolver(
+                font_chains.coverage_only(&resolved),
+                font_chains.symbols_shape(),
+                run.bold,
+                run.italic,
+            );
+            Some((resolved, resolver))
+        });
+        faces.push(entry.as_ref().and_then(|(chain, resolver)| {
+            resolver
+                .resolve(store, chain, ch, family, false)
+                .map(|font| (font, chain[0]))
+        }));
+    }
+    Some(faces)
 }
 
 fn family_for_slot<'a>(run: &'a RunIn, slot: FontSlot, fallback: &'a str) -> &'a str {

@@ -238,6 +238,18 @@ impl MeasureRequest<'_> {
         bold: bool,
         italic: bool,
     ) -> Result<Vec<FontId>, MeasureError> {
+        self.font_chains.chain_for(family, bold, italic)
+    }
+}
+
+impl FontChains<'_> {
+    /// The fallback chain for a `(family, bold, italic)` combination.
+    pub(super) fn chain_for(
+        &self,
+        family: &str,
+        bold: bool,
+        italic: bool,
+    ) -> Result<Vec<FontId>, MeasureError> {
         let key = format!(
             "{}|{}|{}",
             family.to_lowercase(),
@@ -245,7 +257,6 @@ impl MeasureRequest<'_> {
             u8::from(italic)
         );
         let ids = self
-            .font_chains
             .get(&key)
             .ok_or_else(|| MeasureError::Unsupported(format!("no font chain for key {key:?}")))?;
         if ids.is_empty() {
