@@ -571,7 +571,10 @@ fn a_same_code_preset_in_a_collaborative_session_saves_under_a_custom_id_as_it_d
     assert!(id.is_some_and(|id| id >= 164), "{id:?}");
     let num_fmts = &saved.styles.num_fmts;
     assert!(num_fmts.contains(&(4, "#,##0.00".into())), "{num_fmts:?}");
-    assert!(num_fmts.contains(&(id.unwrap(), "#,##0.00".into())), "{num_fmts:?}");
+    assert!(
+        num_fmts.contains(&(id.unwrap(), "#,##0.00".into())),
+        "{num_fmts:?}"
+    );
 }
 
 fn kind_of(book: &Workbook) -> (Option<NumberFormatKind>, Option<String>) {
