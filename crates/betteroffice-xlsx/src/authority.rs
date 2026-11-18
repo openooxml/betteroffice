@@ -4071,7 +4071,11 @@ fn seed_in_chunks(
     #[cfg(not(test))]
     let marked = true;
     if marked {
-        meta.insert(&mut txn, "schemaVersion", current_schema_version(&base.styles));
+        meta.insert(
+            &mut txn,
+            "schemaVersion",
+            current_schema_version(&base.styles),
+        );
     }
     let update = txn.encode_update_v1();
     drop(txn);
@@ -10158,7 +10162,10 @@ mod tests {
             authority
                 .apply_staged_update_v1(&staged.commit_update)
                 .unwrap();
-            assert_eq!(authority.schema_version().unwrap(), current_schema_version(&model.styles));
+            assert_eq!(
+                authority.schema_version().unwrap(),
+                current_schema_version(&model.styles)
+            );
             assert_eq!(authority.strict_materialize().unwrap().0, model);
         }
     }
@@ -10174,7 +10181,10 @@ mod tests {
             authority
                 .apply_staged_update_v1(&staged.commit_update)
                 .unwrap();
-            assert_eq!(authority.schema_version().unwrap(), current_schema_version(&model.styles));
+            assert_eq!(
+                authority.schema_version().unwrap(),
+                current_schema_version(&model.styles)
+            );
             assert_eq!(authority.strict_materialize().unwrap().0, model);
         }
     }
@@ -10424,12 +10434,18 @@ mod tests {
         let current = WorkbookAuthority::from_model_with_client_id(&model, 301).unwrap();
         let previous = schema_six_replica(&model, &current.base);
         assert_eq!(doc_schema_version(&previous), 6);
-        assert_eq!(current.schema_version().unwrap(), current_schema_version(&model.styles));
+        assert_eq!(
+            current.schema_version().unwrap(),
+            current_schema_version(&model.styles)
+        );
         let known = previous.transact().state_vector();
         let diff = current.doc.transact().encode_diff_v1(&known);
         assert!(diff.len() < 64);
         hydrate_doc(&previous, &diff).unwrap();
-        assert_eq!(doc_schema_version(&previous), current_schema_version(&model.styles));
+        assert_eq!(
+            doc_schema_version(&previous),
+            current_schema_version(&model.styles)
+        );
         assert_eq!(
             previous.transact().state_vector(),
             current.doc.transact().state_vector()
@@ -10450,7 +10466,10 @@ mod tests {
         current
             .apply_staged_update_v1(&staged.commit_update)
             .unwrap();
-        assert_eq!(current.schema_version().unwrap(), current_schema_version(&model.styles));
+        assert_eq!(
+            current.schema_version().unwrap(),
+            current_schema_version(&model.styles)
+        );
     }
 
     #[test]
@@ -10866,7 +10885,10 @@ mod tests {
             let mut authority = WorkbookAuthority::from_model_with_client_id(&model, 119).unwrap();
             let mut oracle =
                 WorkbookAuthority::from_source_oracle(&model, Some(119), &[], None, &[]).unwrap();
-            assert_eq!(authority.schema_version().unwrap(), current_schema_version(&model.styles));
+            assert_eq!(
+                authority.schema_version().unwrap(),
+                current_schema_version(&model.styles)
+            );
             assert_eq!(authority.base.fingerprint, oracle.base.fingerprint);
             assert_eq!(
                 authority.base.bootstrap_client_id,
@@ -10882,7 +10904,10 @@ mod tests {
                 panic!("schema six snapshot refused")
             };
             assert_eq!(resumed.encode_state_as_update_v1(), state);
-            assert_eq!(resumed.schema_version().unwrap(), current_schema_version(&model.styles));
+            assert_eq!(
+                resumed.schema_version().unwrap(),
+                current_schema_version(&model.styles)
+            );
             let ops = [Op::SetCell {
                 sheet: SheetId(0),
                 at: CellRef::new(20, 0),
@@ -11435,7 +11460,10 @@ mod tests {
             let mut authority = WorkbookAuthority::from_model_with_client_id(&model, 229).unwrap();
             let mut oracle =
                 WorkbookAuthority::from_source_oracle(&model, Some(229), &[], None, &[]).unwrap();
-            assert_eq!(authority.schema_version().unwrap(), current_schema_version(&model.styles));
+            assert_eq!(
+                authority.schema_version().unwrap(),
+                current_schema_version(&model.styles)
+            );
             assert_eq!(authority.base.fingerprint, oracle.base.fingerprint);
             assert_eq!(
                 authority.base.bootstrap_client_id,
@@ -11451,7 +11479,10 @@ mod tests {
                 panic!("schema six snapshot refused")
             };
             assert_eq!(resumed.encode_state_as_update_v1(), state);
-            assert_eq!(resumed.schema_version().unwrap(), current_schema_version(&model.styles));
+            assert_eq!(
+                resumed.schema_version().unwrap(),
+                current_schema_version(&model.styles)
+            );
             let ops = [Op::SetCell {
                 sheet: SheetId(0),
                 at: CellRef::new(20, 0),
@@ -12927,7 +12958,11 @@ mod tests {
                 )
                 .unwrap();
             }
-            meta.insert(&mut txn, "schemaVersion", current_schema_version(&base.styles));
+            meta.insert(
+                &mut txn,
+                "schemaVersion",
+                current_schema_version(&base.styles),
+            );
         }
         doc.transact()
             .encode_state_as_update_v1(&StateVector::default())

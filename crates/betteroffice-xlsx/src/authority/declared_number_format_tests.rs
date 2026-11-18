@@ -107,7 +107,10 @@ fn custom_format_model() -> WorkbookModel {
         ..WorkbookModel::default()
     };
     model.styles.num_fmts.push((164, "#,##0.0".into()));
-    model.styles.cell_xfs.push(xlsx_model::styles::Xf::default());
+    model
+        .styles
+        .cell_xfs
+        .push(xlsx_model::styles::Xf::default());
     model.styles.cell_xfs.push(xlsx_model::styles::Xf {
         num_fmt_id: Some(164),
         ..xlsx_model::styles::Xf::default()
@@ -132,7 +135,10 @@ fn declared_model() -> WorkbookModel {
     };
     model.styles.num_fmts.push((2, "0.000".into()));
     model.styles.num_fmts.push((41, MINUS_ACCOUNTING.into()));
-    model.styles.cell_xfs.push(xlsx_model::styles::Xf::default());
+    model
+        .styles
+        .cell_xfs
+        .push(xlsx_model::styles::Xf::default());
     for id in [41, 2] {
         model.styles.cell_xfs.push(xlsx_model::styles::Xf {
             num_fmt_id: Some(id),
@@ -163,7 +169,10 @@ fn single_format_model(id: u16, code: &str) -> WorkbookModel {
         ..WorkbookModel::default()
     };
     model.styles.num_fmts.push((id, code.into()));
-    model.styles.cell_xfs.push(xlsx_model::styles::Xf::default());
+    model
+        .styles
+        .cell_xfs
+        .push(xlsx_model::styles::Xf::default());
     model.styles.cell_xfs.push(xlsx_model::styles::Xf {
         num_fmt_id: Some(id),
         ..xlsx_model::styles::Xf::default()
@@ -220,7 +229,10 @@ fn formats_model(declared: &[(u16, &str)]) -> WorkbookModel {
     for &(id, code) in declared {
         model.styles.num_fmts.push((id, code.into()));
     }
-    model.styles.cell_xfs.push(xlsx_model::styles::Xf::default());
+    model
+        .styles
+        .cell_xfs
+        .push(xlsx_model::styles::Xf::default());
     for (a1, _, _, value) in presets() {
         model.sheets[0].set_cell(
             at(a1),
@@ -254,15 +266,24 @@ fn formatted(declared: &[(u16, &str)]) -> Workbook {
 #[test]
 fn unaffected_workbooks_seed_the_previous_versions_bytes() {
     let checkpoint = seeded(&recovery_checkpoint_model());
-    assert_eq!(checkpoint.encode_state_as_update_v1(), fixture(UNAFFECTED_SEED));
+    assert_eq!(
+        checkpoint.encode_state_as_update_v1(),
+        fixture(UNAFFECTED_SEED)
+    );
     let custom = seeded(&custom_format_model());
     assert_eq!(custom.encode_state_as_update_v1(), fixture(CUSTOM_SEED));
-    assert_eq!(custom.encode_recovery_state().ok(), Some(fixture(CUSTOM_RECOVERY)));
+    assert_eq!(
+        custom.encode_recovery_state().ok(),
+        Some(fixture(CUSTOM_RECOVERY))
+    );
 }
 
 #[test]
 fn a_workbook_declaring_a_builtin_id_seeds_schema_8_under_another_fingerprint() {
-    assert!(holds(&fixture(DECLARED_SEED), DECLARED_FINGERPRINT.as_bytes()));
+    assert!(holds(
+        &fixture(DECLARED_SEED),
+        DECLARED_FINGERPRINT.as_bytes()
+    ));
     let book = Workbook::from_model_collaborative(declared_model(), 1001).unwrap();
     let authority = book.authority_for_test();
     assert_eq!(authority.schema_version(), Ok(8));
@@ -330,8 +351,14 @@ fn adopting_a_pre_facet_state_of_a_declared_builtin_id_keeps_every_style_index()
 #[test]
 fn currency_symbols_follow_the_previous_rule_in_every_reading() {
     let restored = adopted(&fixture(DECLARED_SEED), 2021);
-    assert_eq!(xlsx_calc::currency_symbols(restored.model()), Vec::<char>::new());
-    assert_eq!(xlsx_calc::currency_symbols(&declared_model()), Vec::<char>::new());
+    assert_eq!(
+        xlsx_calc::currency_symbols(restored.model()),
+        Vec::<char>::new()
+    );
+    assert_eq!(
+        xlsx_calc::currency_symbols(&declared_model()),
+        Vec::<char>::new()
+    );
     let dollars = single_format_model(5, "0.00");
     let legacy = schema_6_authority(&dollars, 2022).materialize().unwrap();
     assert_eq!(xlsx_calc::currency_symbols(&legacy), Vec::<char>::new());
@@ -345,7 +372,11 @@ fn toolbar_presets_and_typed_entries_mean_the_builtin_codes() {
     let declaring = formatted(&REDEFINED);
     let plain = formatted(&[]);
     for a1 in ["A1", "A2", "A3", "A4", "A5", "A6", "A7"] {
-        assert_eq!(shown(declaring.model(), a1), shown(plain.model(), a1), "{a1}");
+        assert_eq!(
+            shown(declaring.model(), a1),
+            shown(plain.model(), a1),
+            "{a1}"
+        );
     }
     assert_eq!(value_of(declaring.model(), "A6"), text("0012"));
     let saved = declaring.save();
@@ -473,7 +504,10 @@ fn a_cell_without_a_style_index_shows_the_default_xf_but_calculates_as_general()
     let model = book.model();
     assert_eq!(shown(model, "A1"), "45000.1");
     assert_eq!(value_of(model, "B1"), text("G"));
-    assert_eq!(value_of(model, "C1"), CellValue::Number { value: 45_000.123 });
+    assert_eq!(
+        value_of(model, "C1"),
+        CellValue::Number { value: 45_000.123 }
+    );
     assert_eq!(shown(model, "C1"), "45000.1");
 }
 
