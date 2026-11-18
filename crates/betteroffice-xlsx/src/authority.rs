@@ -2145,6 +2145,7 @@ impl WorkbookAuthority {
         use snapshot::ReleasedLayout;
         let base = styles_read_at(&self.base.styles, self.schema_version()?);
         let base = &*base;
+        let renamed = keys_as_read(&self.base.styles, base)?;
         let mut sources = HashMap::new();
         for index in 0..base.cell_xfs.len() {
             let index =
@@ -2190,6 +2191,7 @@ impl WorkbookAuthority {
                     .as_ref()
                     .and_then(|styles| styles.get(&source_txn, cell))
                     .and_then(|value| value.cast::<String>().ok())
+                    .map(|own| renamed.get(&own).cloned().unwrap_or(own))
                     .filter(|own| *own != restored);
                 let Some((own, (format, _))) =
                     own.and_then(|own| sources.get(&own).map(|source| (own, source)))
@@ -2982,9 +2984,11 @@ impl WorkbookAuthority {
         }
         let mut txn = self.doc.transact_mut_with(HYDRATE_ORIGIN);
         if !current && fingerprint.as_deref().is_some_and(released_fingerprint) {
+            let styles = styles_read_at(&self.base.styles, version);
             migrate_pre_facet_formats(
                 &mut txn,
-                &styles_read_at(&self.base.styles, version),
+                &styles,
+                &keys_as_read(&self.base.styles, &styles)?,
                 source,
                 fingerprint_reading(fingerprint.as_deref().unwrap_or_default()),
             )?;
@@ -5696,12 +5700,13 @@ fn pre_facet_format(format: &CellFormat) -> CellFormat {
 }
 
 /// Moves cells keyed by a release before format facets onto the formats of
-/// `styles`. A cell takes its counterpart's format in `source` when that
-/// reads the same, and otherwise the first one that does, as such a release
-/// resolved it.
+/// `styles`. A cell takes its counterpart's format in `source`, keyed through
+/// `renamed`, when that reads the same, and otherwise the first one that does,
+/// as such a release resolved it.
 fn migrate_pre_facet_formats(
     txn: &mut TransactionMut<'_>,
     styles: &Stylesheet,
+    renamed: &HashMap<String, String>,
     source: Option<&Doc>,
     reading: FingerprintReading,
 ) -> Result<(), String> {
@@ -5772,7 +5777,8 @@ fn migrate_pre_facet_formats(
                 .as_ref()
                 .zip(source.as_ref())
                 .and_then(|(styles, source)| styles.get(source, &cell))
-                .and_then(|value| value.cast::<String>().ok());
+                .and_then(|value| value.cast::<String>().ok())
+                .map(|key| renamed.get(&key).cloned().unwrap_or(key));
             let target = match counterpart {
                 Some(counterpart) if readings.get(&counterpart) == Some(released_reading) => {
                     counterpart
@@ -6882,6 +6888,28 @@ fn styles_read_at(styles: &Stylesheet, version: i64) -> Cow<'_, Stylesheet> {
     let mut styles = styles.clone();
     styles.read_builtin_number_formats();
     Cow::Owned(styles)
+}
+
+/// Each key `written` gives a cell format, mapped to the key `read`, the same
+/// table as a state reads it, gives that format where the two differ.
+fn keys_as_read(
+    written: &Stylesheet,
+    read: &Stylesheet,
+) -> Result<HashMap<String, String>, String> {
+    let mut keys = HashMap::new();
+    if std::ptr::eq(written, read) {
+        return Ok(keys);
+    }
+    for index in 0..read.cell_xfs.len() {
+        let index =
+            u32::try_from(index).map_err(|_| "cell format table is too large".to_string())?;
+        let (key, _) = style_entry(written, index)?;
+        let (own, _) = style_entry(read, index)?;
+        if key != own {
+            keys.insert(key, own);
+        }
+    }
+    Ok(keys)
 }
 
 /// `fingerprint` hashed again under [`NUMBER_FORMATS_FINGERPRINT_DOMAIN`],
