@@ -185,6 +185,7 @@ export interface EditorProps {
   onSave(bytes: Uint8Array): void;
   onSaveRequest?: () => boolean | void | Promise<boolean | void>;
   downloadOnSave?: boolean;
+  remoteFonts?: ComponentProps<typeof XlsxEditor>["remoteFonts"];
   onChange(): void;
   onLocalUpdate?(): void;
   onError(error: Error): void;
@@ -226,6 +227,7 @@ export default function Editor({
   onSave,
   onSaveRequest,
   downloadOnSave,
+  remoteFonts,
   onChange,
   onLocalUpdate,
   onError,
@@ -526,6 +528,7 @@ export default function Editor({
         fileName={name}
         {...(onSaveRequest ? { onSaveRequest: requestSave } : {})}
         {...(downloadOnSave !== undefined ? { downloadOnSave } : {})}
+        {...(remoteFonts !== undefined ? { remoteFonts } : {})}
         onSave={(bytes) => {
           if (serialization.current) serialization.current.bytes = bytes;
           else saveBytes(bytes);
