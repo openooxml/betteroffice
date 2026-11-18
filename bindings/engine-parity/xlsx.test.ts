@@ -80,7 +80,7 @@ const STYLES = `<styleSheet xmlns="${MAIN}"><fonts count="2"><font><sz val="11"/
   '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>' +
   '<cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs></styleSheet>';
 
-async function buildFixture(): Promise<Uint8Array> {
+async function buildFixture(replaced: Record<string, string> = {}): Promise<Uint8Array> {
   const zip = new JSZip();
   const date = new Date('2024-01-01T00:00:00Z');
   const override = (part: string, type: string) => `<Override PartName="/${part}" ContentType="${OFFICE}.${type}"/>`;
@@ -103,9 +103,23 @@ async function buildFixture(): Promise<Uint8Array> {
     'xl/drawings/_rels/drawing1.xml.rels': rels([['rIdChart', 'chart', '../charts/chart1.xml']]),
     'xl/charts/chart1.xml': CHART,
   };
-  for (const [name, content] of Object.entries(parts)) zip.file(name, content, { date });
+  for (const [name, content] of Object.entries({ ...parts, ...replaced })) zip.file(name, content, { date });
   return zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
 }
+
+const ACCOUNTING = '_-* #,##0_-;\\-* #,##0_-;_-* &quot;-&quot;_-;_-@_-';
+const EAST_ASIAN_DATE = 'yyyy&quot;年&quot;m&quot;月&quot;d&quot;日&quot;';
+
+// The fixture with `code` declared under `id`, and the Notes sheet's A1 down holding `values` in an xf that points at it.
+const declaredFormat = (id: number, code: string, values: number[]) => buildFixture({
+  'xl/styles.xml': STYLES.replace('<fonts', `<numFmts count="1"><numFmt numFmtId="${id}" formatCode="${code}"/></numFmts><fonts`)
+    .replace('<cellXfs count="2">', '<cellXfs count="3">')
+    .replace('</cellXfs>', `<xf numFmtId="${id}" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/></cellXfs>`),
+  'xl/worksheets/sheet2.xml': `<worksheet xmlns="${MAIN}"><sheetData>${values.map((value, row) => `<row r="${row + 1}"><c r="A${row + 1}" s="2"><v>${value}</v></c></row>`).join('')}</sheetData></worksheet>`,
+});
+const notesText = (engine: XlsxEngine, bytes: Uint8Array, rows: number) => scoped(engine.XlsxDocument.open(bytes), (doc) =>
+  (JSON.parse(doc.readCellsJson(json({ ranges: [at(`A1:A${rows}`, 'sheet:1')] }))) as { ranges: { cells: { displayText: string }[][] }[] })
+    .ranges[0]!.cells.map((row) => row[0]!.displayText));
 
 const wasmEngine: XlsxEngine = { ...wasmXlsx, font_preflight: wasmFontPreflight };
 const nativeEngine = createRequire(import.meta.url)('../xlsx-native/index.js') as XlsxEngine;
@@ -889,6 +903,22 @@ describe('xlsx native and wasm parity table', () => {
       const clients = [0, 1].map(() => scoped(engine.XlsxDocument.openRecoveryCheckpoint(checkpoint, CHECKPOINT_SEQ), (d) => d.clientId));
       console.log(`RECOVERY-OPEN-CLIENT-PROBE ${side} ${JSON.stringify(clients)}`);
       expect(clients[0]).not.toBe(clients[1]);
+    }
+  });
+
+  test('a declared built-in number format id displays like its custom twin on both engines', async () => {
+    for (const [id, code, values] of [[41, ACCOUNTING, [-1234, 1234]], [31, EAST_ASIAN_DATE, [45000]]] as const) {
+      const declared = await declaredFormat(id, code, [...values]);
+      const custom = await declaredFormat(164, code, [...values]);
+      const [wasm, native] = ENGINES.map(([, engine]) => notesText(engine, declared, values.length));
+      expect(native).toEqual(wasm);
+      expect(wasm).toEqual(notesText(wasmEngine, custom, values.length));
+      if (id === 41) {
+        expect(wasm![0]).toContain('-');
+        expect(wasm![0]).not.toContain('(');
+      } else {
+        expect(wasm![0]).toContain('年');
+      }
     }
   });
 
