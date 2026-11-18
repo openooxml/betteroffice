@@ -704,15 +704,7 @@ where
     R: Into<Arc<ChartSpace>>,
 {
     build_display_list_with_geometry_and_text_runs(
-        wb,
-        sheet,
-        viewport,
-        ghosts,
-        geometry,
-        max_cells,
-        pictures,
-        None,
-        resolver,
+        wb, sheet, viewport, ghosts, geometry, max_cells, pictures, None, resolver,
     )
 }
 
@@ -792,14 +784,7 @@ where
     R: Into<Arc<ChartSpace>>,
 {
     build_print_display_list_with_text_runs(
-        wb,
-        sheet,
-        viewport,
-        metrics,
-        gridlines,
-        pictures,
-        None,
-        resolver,
+        wb, sheet, viewport, metrics, gridlines, pictures, None, resolver,
     )
 }
 
@@ -816,16 +801,7 @@ where
     F: FnMut(&SheetChart) -> Result<R, RenderError>,
     R: Into<Arc<ChartSpace>>,
 {
-    build_frame_with_text_runs(
-        wb,
-        sheet,
-        viewport,
-        ghosts,
-        pictures,
-        resolver,
-        print,
-        None,
-    )
+    build_frame_with_text_runs(wb, sheet, viewport, ghosts, pictures, resolver, print, None)
 }
 
 #[allow(clippy::too_many_arguments)]

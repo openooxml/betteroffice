@@ -713,7 +713,12 @@ fn wrapped_lines(
         .into_iter()
         .take(count)
         .enumerate()
-        .map(|(index, line)| (xlsx_render::wrap::wrapped_line_y(y, index, count, wrap), line))
+        .map(|(index, line)| {
+            (
+                xlsx_render::wrap::wrapped_line_y(y, index, count, wrap),
+                line,
+            )
+        })
         .collect()
 }
 

@@ -475,7 +475,7 @@ fn wrapped_pieces_break_inside_the_second_run() {
     let lines = wrap_run_lines(text, &pieces, 35.0, |piece, part| {
         part.len() as f32 * piece.font_size / 2.0
     });
-    let laid_out: Vec<Vec<(&str, f32, bool, Arc<str>)>> = lines
+    let laid_out: Vec<Vec<_>> = lines
         .iter()
         .map(|line| {
             line.iter()

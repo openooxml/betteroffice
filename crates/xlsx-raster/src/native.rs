@@ -467,7 +467,10 @@ fn paint_pieces(
     text: &str,
     pieces: &[xlsx_render::TextPiece],
 ) -> Result<(), String> {
-    let faces: Vec<_> = pieces.iter().map(|piece| piece_faces(fonts, piece)).collect();
+    let faces: Vec<_> = pieces
+        .iter()
+        .map(|piece| piece_faces(fonts, piece))
+        .collect();
     let widths: Vec<f32> = pieces
         .iter()
         .zip(&faces)

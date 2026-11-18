@@ -200,7 +200,12 @@ fn a_wrapped_command_paints_each_line_s_pieces_in_their_own_fonts() {
         };
         let larger = json!({ "fontSize": 14.0, "color": "#0000ff" });
         let pieces = vec![
-            piece(left(ab), 14.0, "AB", json!({ "bold": true, "color": "#ff0000" })),
+            piece(
+                left(ab),
+                14.0,
+                "AB",
+                json!({ "bold": true, "color": "#ff0000" }),
+            ),
             piece(left(cde), 30.0, "CDE", larger.clone()),
             piece(left(fg), 46.0, "FG", larger),
         ];
