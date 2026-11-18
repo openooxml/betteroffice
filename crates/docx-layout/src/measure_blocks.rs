@@ -1002,16 +1002,6 @@ fn collect_paragraph_font_requirements(
             collector.characters(family, bold, italic, characters);
         }
     }
-    // A tracked paragraph mark paints a pilcrow in the default run formatting.
-    if let Some(attrs) = &paragraph.attrs
-        && (attrs.p_pr_ins.is_some() || attrs.p_pr_del.is_some())
-    {
-        let family = crate::display_list::DEFAULT_FONT_FAMILY;
-        collector.name(family, false, false, &[], true);
-        let mut characters = FontCharacters::default();
-        characters.insert('\u{b6}');
-        collector.characters(family, false, false, characters);
-    }
     if let Some(attrs) = &paragraph.attrs
         && attrs
             .list_marker
