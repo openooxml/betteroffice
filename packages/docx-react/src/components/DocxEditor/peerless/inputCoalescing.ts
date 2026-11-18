@@ -23,7 +23,7 @@ export function coalesceInputDrafts(
   const previous = _previous.payload;
   const next = _next.payload;
   if (!('text' in previous) || !('text' in next) || 'selection' in previous || 'selection' in next ||
-    'suggesting' in previous || 'suggesting' in next) return undefined;
+    'suggesting' in previous || 'suggesting' in next || 'replaceBefore' in previous || 'replaceBefore' in next) return undefined;
   if (!!a.echo !== !!b.echo || (a.echo && b.echo &&
     (a.echo.contextFrameEpoch !== b.echo.contextFrameEpoch ||
       a.echo.intent.kind !== 'insertText' || b.echo.intent.kind !== 'insertText'))) return undefined;

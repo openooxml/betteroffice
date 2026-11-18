@@ -1092,3 +1092,93 @@ test('a refused paste fragment is reported, an applied one is not, and a held on
   expect(refused).toBe(2);
   admission.dispose();
 });
+
+test('composition_steps_type_into_the_document_and_a_matching_commit_sends_nothing_more', async () => {
+  const { admission, submitted } = lane();
+  admitIntent(admission, { kind: 'insertText', payload: { text: 'a' } });
+  const reservation = admission.reserveComposition(100);
+  expect(admission.composeText(reservation.slot, 'ㄱ', 110)).toMatchObject({ status: 'submitted', echoEnabled: false });
+  expect(admission.composeText(reservation.slot, '가', 120)).toMatchObject({ status: 'submitted' });
+  expect(admission.composeText(reservation.slot, '가', 125)).toBeUndefined();
+  expect(submitted.map(({ kind, payload }) => [kind, payload]) as unknown[]).toEqual([
+    ['insertText', { text: 'a' }], ['replaceSelection', { text: 'ㄱ' }], ['insertText', { text: '가', replaceBefore: 'ㄱ' }],
+  ]);
+  expect(submitted[1]!.options).toMatchObject({ after: submitted[0]!.ticket, fence: true, inputTime: 100, lastInputTime: 110 });
+  expect(submitted[2]!.options).toMatchObject({ after: submitted[1]!.ticket, fence: true, inputTime: 100, lastInputTime: 120 });
+  expect(submitted[1]!.options.echo).toBeUndefined();
+  expect(submitted[2]!.options.echo).toBeUndefined();
+  expect(admitIntent(admission, { kind: 'insertText', payload: { text: 'later' } }).status).toBe('held');
+  const settled = admission.whenCompositionSettled!();
+  const result = admission.settleComposition(reservation.slot, { text: '가', target: reservation.target }, 130);
+  expect(result).toEqual({ status: 'submitted', ticket: submitted[2]!.ticket, echoEnabled: false });
+  expect(submitted.map(({ kind }) => kind)).toEqual(['insertText', 'replaceSelection', 'insertText', 'insertText']);
+  expect(submitted[3]!.payload).toEqual({ text: 'later' });
+  expect(submitted[3]!.options.after).toBe(submitted[2]!.ticket);
+  await settled;
+  expect(admission.getSnapshot()).toMatchObject({ compositionSlot: null, heldIntents: 0 });
+  expect(() => admission.composeText(reservation.slot, 'late')).toThrow('Composition slot is not active');
+  admission.dispose();
+});
+
+test('a_commit_that_differs_from_the_last_step_types_one_more_step_over_it', () => {
+  const { admission, submitted } = lane();
+  const reservation = admission.reserveComposition(100);
+  admission.composeText(reservation.slot, '가', 110);
+  const result = admission.settleComposition(reservation.slot, { text: '각', target: reservation.target }, 140);
+  expect(result).toMatchObject({ status: 'submitted', ticket: submitted[1]!.ticket });
+  expect(submitted[1]).toMatchObject({ kind: 'insertText', payload: { text: '각', replaceBefore: '가' },
+    options: { after: submitted[0]!.ticket, inputTime: 100, lastInputTime: 140 } });
+  admission.dispose();
+});
+
+test('a_cancelled_composition_removes_what_its_steps_typed_and_a_bare_one_sends_nothing', () => {
+  const { admission, submitted } = lane();
+  const bare = admission.reserveComposition(10);
+  expect(admission.settleComposition(bare.slot, null, 20)).toEqual({ status: 'ignored', reason: 'empty-composition' });
+  expect(submitted).toHaveLength(0);
+  const reservation = admission.reserveComposition(100);
+  admission.composeText(reservation.slot, 'ㄱ', 110);
+  admission.composeText(reservation.slot, '가', 120);
+  expect(admission.settleComposition(reservation.slot, null, 130)).toEqual({ status: 'ignored', reason: 'empty-composition' });
+  expect(submitted[2]).toMatchObject({ kind: 'insertText', payload: { text: '', replaceBefore: '가' },
+    options: { after: submitted[1]!.ticket, inputTime: 100, lastInputTime: 130 } });
+  expect(submitted).toHaveLength(3);
+  admission.dispose();
+});
+
+test('a_step_emptied_mid_composition_removes_the_text_and_the_next_step_types_afresh', () => {
+  const { admission, submitted } = lane();
+  const reservation = admission.reserveComposition();
+  admission.composeText(reservation.slot, 'ㄱ');
+  admission.composeText(reservation.slot, '');
+  admission.composeText(reservation.slot, 'ㄴ');
+  const workerSelection = admission.viewStore.getSnapshot().workerSelection;
+  expect(submitted.map(({ kind, payload }) => [kind, payload]) as unknown[]).toEqual([
+    ['replaceSelection', { text: 'ㄱ', selection: workerSelection }], ['insertText', { text: '', replaceBefore: 'ㄱ' }],
+    ['replaceSelection', { text: 'ㄴ' }],
+  ]);
+  expect(submitted[2]!.options.after).toBe(submitted[1]!.ticket);
+  expect(submitted[0]!.options).not.toHaveProperty('inputTime');
+  admission.settleComposition(reservation.slot, { text: 'ㄴ', target: reservation.target });
+  expect(submitted).toHaveLength(3);
+  admission.dispose();
+});
+
+test('composition_steps_target_the_worker_selection_once_and_carry_one_suggesting_author', () => {
+  const { admission, submitted } = lane();
+  admission.setSuggesting!('Writer');
+  const reservation = admission.reserveComposition(100);
+  expect(reservation.target.kind).toBe('worker-selection');
+  admission.setSuggesting!('Later writer');
+  admission.composeText(reservation.slot, 'ㅎ', 110);
+  admission.composeText(reservation.slot, '하', 120);
+  admission.settleComposition(reservation.slot, { text: '한', target: reservation.target }, 130);
+  const workerSelection = admission.viewStore.getSnapshot().workerSelection;
+  expect(submitted[0]!.payload).toMatchObject({ text: 'ㅎ', selection: workerSelection });
+  expect(submitted[1]!.payload).not.toHaveProperty('selection');
+  expect(submitted[2]!.payload).not.toHaveProperty('selection');
+  const authors = submitted.map(({ payload }) => (payload as { suggesting?: { name: string; date: string } }).suggesting);
+  expect(authors.map((author) => author?.name)).toEqual(['Writer', 'Writer', 'Writer']);
+  expect(new Set(authors.map((author) => author?.date)).size).toBe(1);
+  admission.dispose();
+});

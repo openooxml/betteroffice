@@ -32,6 +32,9 @@ function fakeAdmission() {
   let nextSlot = 0;
   let settlements = 0;
   let ignored = false;
+  let failSteps = false;
+  const steps: Array<[number, string, number | undefined]> = [];
+  const times: { reserved?: number; settled?: number } = {};
   const held: string[] = [];
   const commands: {
     kind: string;
@@ -116,16 +119,24 @@ function fakeAdmission() {
       compositionSlot: slot,
       heldIntents: held.length,
     }),
-    reserveComposition() {
+    reserveComposition(inputTime) {
       if (slot !== null) throw new Error('composition already reserved');
+      times.reserved = inputTime;
       slot = ++nextSlot;
       const target: PeerlessAdmissionTarget = tail
         ? { kind: 'predecessor', ticket: tail }
         : { kind: 'worker-selection', snapshot };
       return { slot, target };
     },
-    settleComposition(reserved, commit) {
+    composeText(reserved, text, inputTime) {
       expect(reserved).toBe(slot!);
+      if (failSteps) throw new Error('step failed');
+      steps.push([reserved, text, inputTime]);
+      return undefined;
+    },
+    settleComposition(reserved, commit, inputTime) {
+      expect(reserved).toBe(slot!);
+      times.settled = inputTime;
       settlements += 1;
       slot = null;
       const ticket = commit && !ignored
@@ -146,9 +157,30 @@ function fakeAdmission() {
     commands,
     hold: (text: string) => { held.push(text); },
     ignore: () => { ignored = true; },
+    failSteps: () => { failSteps = true; },
+    steps,
+    times,
     settlements: () => settlements,
   };
 }
+
+test('composition_updates_type_each_step_through_the_admission_and_stamp_its_times', () => {
+  const fake = fakeAdmission();
+  const initial = beginComposition(fake.admission, 13, 100);
+  expect(fake.times.reserved).toBe(100);
+  const first = updateComposition(initial, 'ㄱ', fake.admission, 110);
+  const second = updateComposition(first, '가', fake.admission, 120);
+  expect(updateComposition(second, 'record only').text).toBe('record only');
+  expect(fake.steps).toEqual([[1, 'ㄱ', 110], [1, '가', 120]]);
+  fake.failSteps();
+  const third = updateComposition(second, '각', fake.admission, 130);
+  expect(third).toMatchObject({ text: '각', phase: 'active' });
+  const result = endComposition(fake.admission, third, '각', 140);
+  expect(result.status).toBe('committed');
+  expect(fake.times.settled).toBe(140);
+  expect(updateComposition(result.state, 'late', fake.admission, 150)).toBe(result.state);
+  expect(fake.steps).toHaveLength(2);
+});
 
 test('d2d_composition_emits_zero_commands_then_one_commit', async () => {
   const fake = fakeAdmission();

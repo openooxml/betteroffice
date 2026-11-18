@@ -11,6 +11,8 @@ export interface PeerlessCompositionState {
   target: PeerlessAdmissionTarget;
   text: string;
   phase: 'active' | 'committed' | 'cancelled' | 'refused';
+  /** The first step that typed the composition into the document; the caret shows once a frame covers it. */
+  typed?: CommandTicket;
   ticket?: CommandTicket;
   recoverableText?: string;
 }
@@ -36,27 +38,40 @@ function recordFor(state: PeerlessCompositionState): CompositionRecord {
   return record;
 }
 
-/** @internal */
+/** @internal `inputTime` is when the composition started. */
 export function beginComposition(
   admission: PeerlessInputAdmission,
-  id: number
+  id: number,
+  inputTime?: number
 ): PeerlessCompositionState {
-  const { slot, target } = admission.reserveComposition();
+  const { slot, target } = admission.reserveComposition(inputTime);
   const state: PeerlessCompositionState = { id, slot, target, text: '', phase: 'active' };
   records.set(state, { state });
   return state;
 }
 
-/** @internal */
+/**
+ * @internal Records the composition's text; with `admission`, also types it into the document as this step, over the
+ * text the step before it typed. A step that cannot be sent is left to the end of the composition, which types the
+ * committed text in one more step.
+ */
 export function updateComposition(
   state: PeerlessCompositionState,
-  text: string
+  text: string,
+  admission?: PeerlessInputAdmission,
+  inputTime?: number
 ): PeerlessCompositionState {
   const record = recordFor(state);
   if (record.state.phase !== 'active') return record.state;
   const updated = { ...record.state, text };
   record.state = updated;
   records.set(updated, record);
+  if (admission) {
+    try {
+      const step = admission.composeText(updated.slot, text, inputTime);
+      if (step?.status === 'submitted' && !updated.typed) updated.typed = step.ticket;
+    } catch {}
+  }
   return updated;
 }
 
@@ -64,7 +79,8 @@ export function updateComposition(
 export function endComposition(
   admission: PeerlessInputAdmission,
   state: PeerlessCompositionState,
-  text: string
+  text: string,
+  inputTime?: number
 ): PeerlessCompositionEndResult {
   const record = recordFor(state);
   if (record.result) return record.result;
@@ -79,7 +95,8 @@ export function endComposition(
   const settled: PeerlessCompositionState = { ...record.state, text, phase: 'cancelled' };
   const admissionResult = admission.settleComposition(
     settled.slot,
-    text.length ? { text, target: settled.target } : null
+    text.length ? { text, target: settled.target } : null,
+    inputTime
   );
   if (admissionResult.status === 'held') {
     throw new Error('composition settlement must release its slot');

@@ -60,10 +60,18 @@ export interface PeerlessInputAdmission {
   setReadOnly(readOnly: boolean): CommandTicket;
   setSuggesting?(author: string | null): void;
   subscribeReadOnly(listener: () => void): () => void;
-  reserveComposition(): { slot: number; target: PeerlessAdmissionTarget };
+  /** `inputTime` is when the composition started; every step of it is stamped with it, so it undoes as one edit. */
+  reserveComposition(inputTime?: number): { slot: number; target: PeerlessAdmissionTarget };
+  /**
+   * Types the composition's text into the document as it is composed: the first step at the reserved target, each
+   * later one over the text the step before it typed. Undefined when the document already shows `text`.
+   */
+  composeText(slot: number, text: string, inputTime?: number): PeerlessAdmissionResult | undefined;
+  /** Ends the composition with `commit`'s text in the document, or with none for a cancelled composition. */
   settleComposition(
     slot: number,
-    commit: { text: string; target: PeerlessAdmissionTarget } | null
+    commit: { text: string; target: PeerlessAdmissionTarget } | null,
+    inputTime?: number
   ): PeerlessAdmissionResult;
   dispose(): void;
 }
@@ -101,6 +109,8 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
   let echoFence: { ticket?: CommandTicket; outcome?: TicketOutcome; tickets: Array<{ ticket?: CommandTicket; settled?: boolean; dropped?: boolean }> } | undefined;
   let attachingEcho = false;
   let compositionSlot: number | null = null;
+  /** The text the composition's steps have typed into the document, and the last step's ticket. */
+  let composed: { target: PeerlessAdmissionTarget; text: string; ticket?: CommandTicket; startTime?: number } | null = null;
   let nextSlot = 0;
   let nextTicket = 0;
   let disposed = false;
@@ -380,6 +390,26 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
       throw error;
     }
   };
+  const compose = (
+    current: NonNullable<typeof composed>, text: string, inputTime: number | undefined
+  ): PeerlessAdmissionResult | undefined => {
+    if (text === current.text) return undefined;
+    const intent: AdmissionIntent = current.text
+      ? { kind: 'insertText', payload: { text, replaceBefore: current.text } }
+      : { kind: 'replaceSelection', payload: { text } };
+    const target: PeerlessAdmissionTarget = current.ticket
+      ? { kind: 'predecessor', ticket: current.ticket, suggesting: current.target.suggesting } : current.target;
+    const start = current.startTime;
+    const result = submit(intent, {
+      source: 'composition', fence: true,
+      ...(start === undefined ? {} : { inputTime: start, lastInputTime: Math.max(start, inputTime ?? start) }),
+    }, false, target);
+    if (result.status === 'submitted') {
+      current.ticket = result.ticket;
+      current.text = text;
+    }
+    return result;
+  };
   const resumeEcho = (throughSeq: number) => {
     const barrier = echoFence;
     const seq = barrier?.ticket?.seq;
@@ -468,7 +498,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
       modeListeners.add(listener);
       return () => { modeListeners.delete(listener); };
     },
-    reserveComposition() {
+    reserveComposition(inputTime) {
       if (disposed) throw disposedError();
       if (compositionSlot !== null) throw new Error('Composition is already active');
       viewStore.setProvisionalCaret(null);
@@ -478,22 +508,31 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
       const target: PeerlessAdmissionTarget = tail
         ? { kind: 'predecessor', ticket: tail, suggesting: suggesting === null ? undefined : { name: suggesting, date: new Date().toISOString() } }
         : { kind: 'worker-selection', snapshot: viewStore.getSnapshot(), suggesting: suggesting === null ? undefined : { name: suggesting, date: new Date().toISOString() } };
+      composed = { target, text: '', ...(inputTime === undefined ? {} : { startTime: inputTime }) };
       const fence = () => { void session.flush().catch(() => {}); return undefined; };
       if (tail && deferred.has(tail)) defer(tail, false, fence, undefined, true);
       else fence();
       if (echoDisabledReason !== 'intent-cap') disableEcho('fence');
       return { slot: compositionSlot, target };
     },
-    settleComposition(slot, commit) {
+    composeText(slot, text, inputTime) {
       if (disposed) throw disposedError();
-      if (slot !== compositionSlot) throw new Error('Composition slot is not active');
+      if (slot !== compositionSlot || !composed) throw new Error('Composition slot is not active');
+      return compose(composed, text, inputTime);
+    },
+    settleComposition(slot, commit, inputTime) {
+      if (disposed) throw disposedError();
+      if (slot !== compositionSlot || !composed) throw new Error('Composition slot is not active');
+      const current = composed;
       compositionSlot = null;
+      composed = null;
       let failed = false;
       let failure: unknown;
       let result: PeerlessAdmissionResult = { status: 'ignored', reason: 'empty-composition' };
       try {
-        if (commit?.text) result = submit({ kind: 'replaceSelection', payload: { text: commit.text } },
-          { source: 'composition', fence: true }, false, commit.target);
+        const text = commit?.text ?? '';
+        const sent = compose(current, text, inputTime);
+        if (text) result = sent ?? { status: 'submitted', ticket: current.ticket!, echoEnabled: false };
       } catch (error) { failed = true; failure = error; }
       const compositionFailed = failed;
       for (const entry of held.splice(0)) {
@@ -525,6 +564,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
       modeListeners.clear();
       tail = undefined;
       compositionSlot = null;
+      composed = null;
       originalUnackedIntents = 0;
       admissions.delete(admission);
     },
