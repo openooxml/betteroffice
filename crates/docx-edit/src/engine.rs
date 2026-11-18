@@ -27305,7 +27305,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         let field = serde_json::json!({
             "type": "complexField", "fieldType": "UNKNOWN", "instruction": "0",
             "fieldCode": [], "fieldResult": [font_preflight_run("First", "Calibri")],
-            "structuredResult": {"blocks": [cached, table, sdt, end]}
+            "structuredResult": {"blockCount": 4}
         });
         let blocks = [
             serde_json::json!({"type": "paragraph", "content": [field]}),

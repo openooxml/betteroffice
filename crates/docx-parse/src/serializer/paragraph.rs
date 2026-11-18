@@ -631,7 +631,7 @@ fn serialize_complex_field(
     let code_nodes = field
         .structured_code
         .as_ref()
-        .filter(|content| content.blocks.is_none())
+        .filter(|content| !content.spans_paragraphs())
         .and_then(|content| content.inline.as_deref())
         .filter(|nodes| nodes.iter().any(|node| !matches!(node, InlineNode::Run(_))));
     let in_place = code_nodes.filter(|nodes| {
@@ -677,7 +677,7 @@ fn serialize_complex_field(
     let structured = field
         .structured_result
         .as_ref()
-        .filter(|content| content.blocks.is_none())
+        .filter(|content| !content.spans_paragraphs())
         .and_then(|content| content.inline.as_ref());
     if let Some(nodes) = structured {
         for node in nodes {
@@ -1005,7 +1005,7 @@ fn has_comment_reference(node: &InlineNode, id: f64) -> bool {
                 || field
                     .structured_result
                     .as_ref()
-                    .filter(|content| content.blocks.is_none())
+                    .filter(|content| !content.spans_paragraphs())
                     .and_then(|content| content.inline.as_ref())
                     .map_or_else(
                         || {

@@ -25,6 +25,7 @@ import type {
   Shape,
   SimpleField,
   SdtProperties,
+  StructuredFieldContent,
   Table,
   TableBorders,
   TableCell,
@@ -1869,15 +1870,26 @@ function numericFieldInstruction(instruction: string): boolean {
   return /^\d+$/.test(instruction.trim());
 }
 
-/** How many story blocks a suppressed field's cached result duplicates. */
-function cachedResultBlockCount(field: SimpleField | ComplexField): number | null {
-  const blocks = field.structuredResult?.blocks ?? [];
-  const last = blocks[blocks.length - 1];
-  if (!last || last.type !== 'paragraph' || (last.content?.length ?? 0) > 0) return null;
-  return blocks.length;
+/** Whether a field's structured code or result runs past the field's own paragraph. */
+function spansParagraphs(content: StructuredFieldContent | undefined): boolean {
+  return content?.blocks != null || content?.blockCount != null;
 }
 
-/** Binds each suppressed field to the story blocks its cached result duplicates. */
+/** Where the story blocks a suppressed field's cached result spans start, and how many it spans. */
+function cachedResultBlocks(
+  field: SimpleField | ComplexField,
+  blocks: readonly BlockContent[],
+  owner: number
+): { start: number; count: number } | null {
+  const code = field.type === 'complexField' ? (field.structuredCode?.blockCount ?? 0) : 0;
+  const count = field.structuredResult?.blockCount ?? 0;
+  const start = owner + 1 + code;
+  const last = count > 0 ? blocks[start + count - 1] : undefined;
+  if (!last || isRawXml(last) || last.type !== 'paragraph' || (last.content?.length ?? 0) > 0) return null;
+  return { start, count };
+}
+
+/** Binds each suppressed field to the story blocks its cached result spans. */
 function bindFieldResultBlocks(
   units: readonly InlineUnit[],
   storyId: string,
@@ -1898,15 +1910,15 @@ function bindFieldResultBlocks(
     } catch {
       continue;
     }
-    const count = cachedResultBlockCount(parsed);
-    if (count === null || owner + 1 + count > blocks.length) continue;
+    const span = cachedResultBlocks(parsed, blocks, owner);
+    if (span === null) continue;
     const cursor = { ...afterOwner };
     const ids: string[] = [];
-    for (let offset = 0; offset < count; offset += 1) {
-      const block = blocks[owner + 1 + offset]!;
+    for (let index = owner + 1; index < span.start + span.count; index += 1) {
+      const block = blocks[index]!;
       const id = takeBlockId(cursor, storyId, block);
-      if (id === null) continue;
-      if (block.type === 'table') tableIds.set(owner + 1 + offset, id);
+      if (id === null || index < span.start) continue;
+      if (block.type === 'table') tableIds.set(index, id);
       ids.push(id);
     }
     if (ids.length > 0) unit.payload.fieldResultBlocks = ids;
@@ -1936,7 +1948,7 @@ function bindFieldCodeBlocks(
   for (const unit of units) {
     if (unit.kind !== 'embed' || unit.embedKind !== 'field') continue;
     const data = unit.payload.fieldData;
-    if (typeof data !== 'string' || !data.includes('"blocks"')) continue;
+    if (typeof data !== 'string' || !data.includes('"blockCount"')) continue;
     let parsed: ComplexField;
     try {
       parsed = JSON.parse(data) as ComplexField;
@@ -1944,10 +1956,8 @@ function bindFieldCodeBlocks(
       continue;
     }
     if (!parsed || typeof parsed !== 'object') continue;
-    const codeBlocks = parsed.structuredCode?.blocks;
-    const resultBlocks = parsed.structuredResult?.blocks;
-    const code = Array.isArray(codeBlocks) ? codeBlocks.length : 0;
-    const hasResult = Array.isArray(resultBlocks) && resultBlocks.length > 0;
+    const code = parsed.structuredCode?.blockCount ?? 0;
+    const hasResult = spansParagraphs(parsed.structuredResult);
     let hidden: number;
     if (code === 0) {
       const next = blocks[owner + 1];

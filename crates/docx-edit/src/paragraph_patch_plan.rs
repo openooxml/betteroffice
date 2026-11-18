@@ -2,6 +2,7 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
+use docx_parse::StructuredFieldContent;
 use docx_parse::paragraph_patch::{
     AttrDeltaV1, Attrs, DonorV1, InheritanceStateV1, InheritanceV1, InsertedTextV1,
     LegacyParagraphV1, ParagraphPatchV1, PatchErrorCode, RunEditV1, SeedV1, SlotV1, TextEditV1,
@@ -1012,11 +1013,8 @@ fn closed_complex_field(payload: &Attrs) -> bool {
         .iter()
         .any(|key| payload.contains_key(*key))
         && data.is_some_and(|data| {
-            ["structuredCode", "structuredResult"].iter().all(|key| {
-                data.get(*key)
-                    .and_then(|content| content.get("blocks"))
-                    .is_none_or(Value::is_null)
-            })
+            let spans = |key: &str| StructuredFieldContent::value_spans_paragraphs(data.get(key));
+            !spans("structuredCode") && !spans("structuredResult")
         })
 }
 

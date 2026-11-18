@@ -2778,7 +2778,7 @@ fn inline_has_drawing_image(node: &InlineNode, control: bool, revision: bool) ->
                 || field
                     .structured_result
                     .as_ref()
-                    .filter(|result| result.blocks.is_none())
+                    .filter(|result| !result.spans_paragraphs())
                     .and_then(|result| result.inline.as_ref())
                     .map_or_else(
                         || {
@@ -2897,7 +2897,7 @@ fn visit_inline_images(
             if let Some(nodes) = field
                 .structured_result
                 .as_mut()
-                .filter(|result| result.blocks.is_none())
+                .filter(|result| !result.spans_paragraphs())
                 .and_then(|result| result.inline.as_mut())
             {
                 for node in nodes {
@@ -3339,7 +3339,7 @@ fn inline_has_hyperlink(node: &InlineNode, control: bool, revision: bool) -> boo
         InlineNode::ComplexField(field) => field
             .structured_result
             .as_ref()
-            .filter(|result| result.blocks.is_none())
+            .filter(|result| !result.spans_paragraphs())
             .and_then(|result| result.inline.as_ref())
             .is_some_and(|nodes| {
                 nodes
@@ -3377,7 +3377,7 @@ fn visit_inline_hyperlinks(
             let Some(nodes) = field
                 .structured_result
                 .as_mut()
-                .filter(|result| result.blocks.is_none())
+                .filter(|result| !result.spans_paragraphs())
                 .and_then(|result| result.inline.as_mut())
             else {
                 return;
@@ -3635,7 +3635,7 @@ impl<'a> SelectiveParagraphIndex<'a> {
                 match field
                     .structured_result
                     .as_ref()
-                    .filter(|result| result.blocks.is_none())
+                    .filter(|result| !result.spans_paragraphs())
                     .and_then(|result| result.inline.as_ref())
                 {
                     Some(nodes) => {

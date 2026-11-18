@@ -5822,19 +5822,24 @@ impl BlockCursor {
     }
 }
 
-/// How many story blocks a suppressed field's cached result duplicates.
-fn cached_result_block_count(data: &Value) -> Option<usize> {
-    let blocks = array(field(field(Some(data), "structuredResult"), "blocks"));
-    blocks
-        .last()
-        .is_some_and(|block| {
-            string(field(Some(block), "type")) == Some("paragraph")
-                && array(field(Some(block), "content")).is_empty()
-        })
-        .then(|| blocks.len())
+/// The story blocks a field's structured code or result spans after the field's paragraph.
+fn field_block_count(data: &Value, key: &str) -> Option<usize> {
+    field(field(Some(data), key), "blockCount")
+        .and_then(Value::as_u64)
+        .and_then(|count| usize::try_from(count).ok())
 }
 
-/// Binds each suppressed field to the story blocks its cached result duplicates.
+/// Where the story blocks a suppressed field's cached result spans start, and how many it spans.
+fn cached_result_blocks(data: &Value, blocks: &[Value], owner: usize) -> Option<(usize, usize)> {
+    let start = owner + 1 + field_block_count(data, "structuredCode").unwrap_or(0);
+    let count = field_block_count(data, "structuredResult")?;
+    let last = blocks.get(start + count.checked_sub(1)?)?;
+    let empty_paragraph = string(field(Some(last), "type")) == Some("paragraph")
+        && array(field(Some(last), "content")).is_empty();
+    empty_paragraph.then_some((start, count))
+}
+
+/// Binds each suppressed field to the story blocks its cached result spans.
 fn bind_field_result_blocks(
     units: &mut [InlineUnit],
     story_id: &str,
@@ -5858,27 +5863,24 @@ fn bind_field_result_blocks(
         {
             continue;
         }
-        let Some(count) = payload
+        let Some((start, count)) = payload
             .get("fieldData")
             .and_then(Value::as_str)
             .and_then(|data| serde_json::from_str::<Value>(data).ok())
-            .as_ref()
-            .and_then(cached_result_block_count)
+            .and_then(|data| cached_result_blocks(&data, blocks, owner))
         else {
             continue;
         };
-        let Some(duplicated) = blocks.get(owner + 1..owner + 1 + count) else {
-            continue;
-        };
         let mut cursor = after_owner;
-        let mut ids = Vec::with_capacity(duplicated.len());
-        for (offset, block) in duplicated.iter().enumerate() {
+        let mut ids = Vec::with_capacity(count);
+        for (offset, block) in blocks[owner + 1..start + count].iter().enumerate() {
+            let index = owner + 1 + offset;
             let is_table = string(field(Some(block), "type")) == Some("table");
-            let Some(id) = cursor.take(story_id, block) else {
+            let Some(id) = cursor.take(story_id, block).filter(|_| index >= start) else {
                 continue;
             };
             if is_table {
-                table_ids.insert(owner + 1 + offset, id.clone());
+                table_ids.insert(index, id.clone());
             }
             ids.push(Value::String(id));
         }
@@ -5911,13 +5913,14 @@ fn bind_field_code_blocks(
         let Some(data) = payload
             .get("fieldData")
             .and_then(Value::as_str)
-            .filter(|data| data.contains("\"blocks\""))
+            .filter(|data| data.contains("\"blockCount\""))
             .and_then(|data| serde_json::from_str::<Value>(data).ok())
         else {
             continue;
         };
-        let code = array(field(field(Some(&data), "structuredCode"), "blocks")).len();
-        let has_result = !array(field(field(Some(&data), "structuredResult"), "blocks")).is_empty();
+        let code = field_block_count(&data, "structuredCode").unwrap_or(0);
+        let result = field(Some(&data), "structuredResult");
+        let has_result = docx_parse::StructuredFieldContent::value_spans_paragraphs(result);
         let hidden = match (code, has_result) {
             (0, true)
                 if blocks
@@ -8863,13 +8866,13 @@ mod tests {
         assert_eq!(payload.get("fieldCodeTarget"), Some(&json!("result")));
     }
 
-    fn block_field(instruction: &str, blocks: &[Value]) -> Value {
+    fn block_field(instruction: &str, count: usize) -> Value {
         json!({
             "type":"complexField", "fieldType":"UNKNOWN", "instruction":instruction,
             "fieldCode":[], "fieldResult":[run("Cached first")],
             "structuredResult":{
                 "inline":[{"type":"hyperlink","anchor":"bookmark","children":[run("Cached first")]}],
-                "blocks":blocks
+                "blockCount":count
             }
         })
     }
@@ -8883,7 +8886,7 @@ mod tests {
             let cached =
                 json!({"type":"paragraph","paraId":id("cached"),"content":[run("Cached second") ]});
             let end = json!({"type":"paragraph","paraId":id("end"),"content":[]});
-            let field = block_field(instruction, &[cached.clone(), end.clone()]);
+            let field = block_field(instruction, 2);
             let document = seed_body(&[
                 json!({"type":"paragraph","paraId":id("owner"),"content":[field]}),
                 cached,
@@ -8908,7 +8911,7 @@ mod tests {
     fn a_numeric_field_the_preview_leaves_out_releases_its_cached_blocks() {
         let cached = json!({"type":"paragraph","paraId":"cached","content":[run("Cached second")]});
         let end = json!({"type":"paragraph","paraId":"end","content":[]});
-        let field = block_field("0", &[cached.clone(), end.clone()]);
+        let field = block_field("0", 2);
         let document = seed_body(&[
             json!({"type":"paragraph","paraId":"owner","content":[field]}),
             cached,
@@ -8955,7 +8958,7 @@ mod tests {
                 json!({"type":"paragraph","content":[run("Cached sdt")]})
             ]});
             let end = json!({"type":"paragraph","content":[]});
-            let field = block_field(instruction, &[table.clone(), sdt.clone(), end.clone()]);
+            let field = block_field(instruction, 3);
             let document = seed_body(&[
                 json!({"type":"paragraph","content":[field]}),
                 table,
@@ -8989,7 +8992,7 @@ mod tests {
         let cached = json!({"type":"paragraph","content":[run("Cached second")]});
         let end = json!({"type":"paragraph","content":[]});
         let document = seed_body(&[
-            json!({"type":"paragraph","content":[block_field("0", &[cached.clone(), end.clone()])]}),
+            json!({"type":"paragraph","content":[block_field("0", 2)]}),
             cached,
             end,
             json!({"type":"paragraph","content":[run("After")]}),

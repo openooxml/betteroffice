@@ -165,6 +165,11 @@ export interface StructuredFieldContent {
   inline?: FieldInlineContent[];
   /** Multi-paragraph/table result children in source order. */
   blocks?: BlockContent[];
+  /**
+   * Story blocks after the field's paragraph that this content spans, raw
+   * blocks included; code first, then result.
+   */
+  blockCount?: number;
 }
 
 /** Field-capable inline grammar used by nested field code/results. */

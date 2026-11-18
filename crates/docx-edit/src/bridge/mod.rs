@@ -2013,63 +2013,15 @@ fn field_code_join<T: ReadTxn>(
     txn: &T,
 ) -> Option<(Vec<FieldCodeParagraph>, String)> {
     let target = shared_map_string(field, txn, "fieldCodeTarget")?;
-    let data = shared_map_string(field, txn, "fieldData")
-        .and_then(|data| serde_json::from_str::<Value>(&data).ok());
-    let code = data
-        .as_ref()
-        .and_then(|data| data.get("structuredCode"))
-        .and_then(|code| code.get("blocks"))
-        .and_then(Value::as_array);
     let hidden = match shared_any(field, txn, "fieldCodeMarks") {
         Some(Any::Array(ids)) => ids
             .iter()
             .filter_map(any_str)
-            .enumerate()
-            .map(|(index, id)| {
-                let mut fields = Vec::new();
-                if let Some(content) = code
-                    .and_then(|blocks| blocks.get(index))
-                    .and_then(|block| block.get("content"))
-                {
-                    nested_code_fields(content, &mut fields);
-                }
-                FieldCodeParagraph {
-                    id: id.to_owned(),
-                    fields,
-                }
-            })
+            .map(|id| FieldCodeParagraph { id: id.to_owned() })
             .collect(),
         _ => Vec::new(),
     };
     Some((hidden, target))
-}
-
-fn nested_code_fields(value: &Value, fields: &mut Vec<Value>) {
-    match value {
-        Value::Object(object)
-            if matches!(
-                object.get("type").and_then(Value::as_str),
-                Some("simpleField" | "complexField")
-            ) =>
-        {
-            fields.push(value.clone());
-        }
-        Value::Object(object) => {
-            if let Some(content) = object
-                .get("structuredChildren")
-                .or_else(|| object.get("children"))
-                .or_else(|| object.get("content"))
-            {
-                nested_code_fields(content, fields);
-            }
-        }
-        Value::Array(values) => {
-            for child in values {
-                nested_code_fields(child, fields);
-            }
-        }
-        _ => {}
-    }
 }
 
 /// Headers and footers show a field whose code spans paragraph marks on one line, as Word
@@ -2080,21 +2032,14 @@ fn joins_field_code_paragraphs(story_id: &str) -> bool {
 
 struct FieldCodeParagraph {
     id: String,
-    fields: Vec<Value>,
 }
 
 impl FieldCodeParagraph {
     fn allows(&self, runs: &[RawRun], env: &RenderEnv) -> bool {
-        let mut fields = self.fields.iter();
         runs.iter()
             .filter(|run| run.visible(env) && !run.anchored())
             .all(|run| match &run.kind {
-                RawRunKind::Field {
-                    source: Some(source),
-                    ..
-                } => serde_json::from_str::<Value>(source)
-                    .ok()
-                    .is_some_and(|source| fields.any(|field| *field == source)),
+                RawRunKind::Field { source, .. } => source.is_some(),
                 _ => false,
             })
     }

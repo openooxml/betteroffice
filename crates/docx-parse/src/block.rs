@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::chart::ChartPartsMap;
 use crate::inline::{
-    ComplexField, InlineNode, MathEquation, MathType, RunContent, SdtProperties,
+    ComplexField, InlineNode, MathEquation, MathType, Run, RunContent, SdtProperties,
     StructuredFieldContent, inline_holds_field, parse_sdt_properties,
 };
 use crate::media::MediaMap;
@@ -95,8 +95,8 @@ struct FieldEvents {
 struct FieldRecord {
     owner_block: usize,
     owner_content: usize,
-    code_blocks: Vec<usize>,
-    result_blocks: Vec<usize>,
+    code_end: Option<usize>,
+    result_end: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -384,8 +384,8 @@ impl StoryParser<'_, '_> {
             for open in &open_fields {
                 let target = &mut records[open.record];
                 match open.mode {
-                    FieldMode::Code => target.code_blocks.push(parsed_index),
-                    FieldMode::Result => target.result_blocks.push(parsed_index),
+                    FieldMode::Code => target.code_end = Some(parsed_index),
+                    FieldMode::Result => target.result_end = Some(parsed_index),
                 }
             }
             for _ in 0..events.external_ends {
@@ -415,8 +415,8 @@ impl StoryParser<'_, '_> {
                     records.push(FieldRecord {
                         owner_block: parsed_index,
                         owner_content: content_index,
-                        code_blocks: Vec::new(),
-                        result_blocks: Vec::new(),
+                        code_end: None,
+                        result_end: None,
                     });
                     open_fields.push(OpenField { record, mode });
                 }
@@ -976,61 +976,35 @@ fn top_level_complex_field_indices(block: &BlockContent) -> Vec<usize> {
 
 fn attach_recorded_field_blocks(content: &mut [BlockContent], records: Vec<FieldRecord>) {
     for record in records.into_iter().rev() {
-        let code: Vec<_> = record
-            .code_blocks
-            .iter()
-            .filter_map(|index| content.get(*index).cloned())
-            .collect();
-        let result: Vec<_> = record
-            .result_blocks
-            .iter()
-            .filter_map(|index| content.get(*index).cloned())
-            .collect();
-        let Some(field) = complex_field_mut(content, record.owner_block, record.owner_content)
-        else {
+        let owner = record.owner_block;
+        let Some(end) = record.result_end.or(record.code_end) else {
             continue;
         };
-        if code.is_empty() && result.is_empty() {
+        let (head, later) = content.split_at_mut(owner + 1);
+        let Some(field) = complex_field_mut(head, owner, record.owner_content) else {
             continue;
+        };
+        if let Some(code_end) = record.code_end {
+            let code = structured_or_runs(&mut field.structured_code, &field.field_code);
+            code.block_count = Some(code_end - owner);
         }
-        if !code.is_empty() {
-            let structured = field
-                .structured_code
-                .get_or_insert_with(|| StructuredFieldContent {
-                    inline: Some(
-                        field
-                            .field_code
-                            .iter()
-                            .cloned()
-                            .map(InlineNode::Run)
-                            .collect(),
-                    ),
-                    blocks: None,
-                });
-            structured.blocks.get_or_insert_with(Vec::new).extend(code);
+        if let Some(result_end) = record.result_end {
+            let result = structured_or_runs(&mut field.structured_result, &field.field_result);
+            result.block_count = Some(result_end - record.code_end.unwrap_or(owner));
         }
-        if !result.is_empty() {
-            let structured =
-                field
-                    .structured_result
-                    .get_or_insert_with(|| StructuredFieldContent {
-                        inline: Some(
-                            field
-                                .field_result
-                                .iter()
-                                .cloned()
-                                .map(InlineNode::Run)
-                                .collect(),
-                        ),
-                        blocks: None,
-                    });
-            structured
-                .blocks
-                .get_or_insert_with(Vec::new)
-                .extend(result);
-        }
-        field.project_leaf_tree();
+        field.project_leaf_tree(&later[..end - owner]);
     }
+}
+
+fn structured_or_runs<'a>(
+    content: &'a mut Option<StructuredFieldContent>,
+    runs: &[Run],
+) -> &'a mut StructuredFieldContent {
+    content.get_or_insert_with(|| StructuredFieldContent {
+        inline: Some(runs.iter().cloned().map(InlineNode::Run).collect()),
+        blocks: None,
+        block_count: None,
+    })
 }
 
 pub(crate) fn blocks_hold_field(blocks: &[BlockContent]) -> bool {
@@ -1356,11 +1330,9 @@ mod tests {
             })
             .unwrap();
         let result = field.structured_result.as_ref().unwrap();
-        assert_eq!(result.blocks.as_ref().unwrap().len(), 3);
-        assert!(matches!(
-            result.blocks.as_ref().unwrap()[1],
-            BlockContent::Table(_)
-        ));
+        assert_eq!(result.block_count, Some(3));
+        assert!(result.blocks.is_none());
+        assert!(matches!(blocks[2], BlockContent::Table(_)));
         let BlockContent::Paragraph(closing) = &blocks[3] else {
             panic!("closing")
         };
@@ -1578,10 +1550,8 @@ mod tests {
             field
                 .structured_result
                 .as_ref()
-                .and_then(|result| result.blocks.as_ref())
-                .unwrap()
-                .len(),
-            3
+                .and_then(|result| result.block_count),
+            Some(3)
         );
     }
 

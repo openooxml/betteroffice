@@ -243,7 +243,7 @@ fn written_result(field: &crate::inline::ComplexField) -> Option<&Vec<InlineNode
     field
         .structured_result
         .as_ref()
-        .filter(|content| content.blocks.is_none())
+        .filter(|content| !content.spans_paragraphs())
         .and_then(|content| content.inline.as_ref())
 }
 
@@ -285,7 +285,7 @@ impl Remover<'_> {
                 let written = field
                     .structured_result
                     .as_mut()
-                    .filter(|content| content.blocks.is_none())
+                    .filter(|content| !content.spans_paragraphs())
                     .and_then(|content| content.inline.as_mut());
                 match written {
                     Some(nodes) => self.nodes(nodes),
