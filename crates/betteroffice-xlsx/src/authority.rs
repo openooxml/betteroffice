@@ -8639,6 +8639,8 @@ mod tests {
         7, 1, 187, 136, 232, 167, 239, 183, 153, 12, 1, 2, 1, 0,
     ];
 
+    const CHECKPOINT_SCHEMA_VERSION_AT: usize = 1866;
+
     fn recovery_checkpoint_model() -> WorkbookModel {
         let mut model = WorkbookModel::default();
         model.sheets.push(Sheet::new("Data"));
@@ -8680,7 +8682,18 @@ mod tests {
     fn recovery_state_without_column_defaults_keeps_main_bytes() {
         let model = recovery_checkpoint_model();
         let authority = WorkbookAuthority::from_model_with_client_id(&model, 109).unwrap();
-        assert_eq!(authority.encode_recovery_state().unwrap(), MAIN_CHECKPOINT);
+        let bytes = authority.encode_recovery_state().unwrap();
+        assert_eq!(bytes.len(), MAIN_CHECKPOINT.len());
+        let differing = bytes
+            .iter()
+            .zip(MAIN_CHECKPOINT)
+            .enumerate()
+            .filter(|(_, (ours, main))| ours != main)
+            .map(|(at, _)| at)
+            .collect::<Vec<usize>>();
+        assert_eq!(differing, vec![CHECKPOINT_SCHEMA_VERSION_AT]);
+        assert_eq!(MAIN_CHECKPOINT[CHECKPOINT_SCHEMA_VERSION_AT], 7);
+        assert_eq!(bytes[CHECKPOINT_SCHEMA_VERSION_AT], SCHEMA_VERSION as u8);
     }
 
     #[test]
