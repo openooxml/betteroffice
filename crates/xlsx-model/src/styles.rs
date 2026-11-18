@@ -1223,12 +1223,10 @@ impl Stylesheet {
             self.borders.push(Border::default());
         }
         let authored;
-        let format = match self.redefined_builtin_code(&format.number_format) {
-            Some(pattern) => {
+        let format = match self.authored_number_format(&format.number_format) {
+            Some(number_format) => {
                 authored = CellFormat {
-                    number_format: NumberFormat::Custom {
-                        pattern: pattern.to_string(),
-                    },
+                    number_format,
                     ..format.clone()
                 };
                 &authored
@@ -1407,20 +1405,24 @@ impl Stylesheet {
         Ok(index)
     }
 
-    /// the builtin code an authored builtin id means where the workbook
-    /// declares that id with another code.
-    fn redefined_builtin_code(&self, format: &NumberFormat) -> Option<&'static str> {
+    /// what an authored builtin id means where the workbook's first entry for
+    /// that id has another code: the builtin code, or General for an id
+    /// without one.
+    fn authored_number_format(&self, format: &NumberFormat) -> Option<NumberFormat> {
         let NumberFormat::Builtin { id } = format else {
             return None;
         };
-        let code = crate::numfmt::builtin_format_code(*id)?;
-        let redefined = *id != 0
-            && !self.builtin_number_formats
-            && self
-                .num_fmts
-                .iter()
-                .any(|(declared, own)| declared == id && own != code);
-        redefined.then_some(code)
+        if *id == 0 || *id >= 164 || self.builtin_number_formats {
+            return None;
+        }
+        let (_, own) = self.num_fmts.iter().find(|(declared, _)| declared == id)?;
+        match crate::numfmt::builtin_format_code(*id) {
+            Some(code) if own != code => Some(NumberFormat::Custom {
+                pattern: code.to_string(),
+            }),
+            Some(_) => None,
+            None => Some(NumberFormat::Builtin { id: 0 }),
+        }
     }
 
     #[inline(never)]
