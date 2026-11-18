@@ -760,8 +760,8 @@ fn moved_columns_paint_no_previous_result() {
 #[test]
 fn a_moved_range_paints_no_previous_result() {
     let viewport = view(0.0, 800.0);
-    let mut workbook = positive(&["Sheet1", "Sheet2"], &[]);
-    edit(&mut workbook, SheetId(0), &[(0, 5, "7")]);
+    let mut workbook = positive_authored();
+    edit_one(&mut workbook, 0, 5, "7");
     assert_eq!(painted(&frame(&workbook, &viewport)).len(), 120);
     workbook.set_conditional_budget(10);
     workbook
@@ -834,6 +834,29 @@ fn undo_and_redo_of_a_single_edit_paint_no_previous_result() {
 
 /// The single-sheet workbook of [`positive`] with its 120 visible cells
 /// decided, limited to 10 cells a frame from here on.
+/// The sheet of `positive` with its rule added in this session, so the
+/// engine lets a cell outside the rule's range move.
+fn positive_authored() -> Workbook {
+    let mut workbook = workbook(&sheet(rows(30, numbers(4, |row, col| row + col)), String::new()));
+    workbook
+        .apply_ops(
+            vec![Op::AddConditionalFormat {
+                sheet: SheetId(0),
+                range: CellRange::parse_a1("A1:D30").unwrap(),
+                kind: "cellIs".into(),
+                operator: Some("greaterThan".into()),
+                formulas: vec!["0".into()],
+                format: DifferentialFormat {
+                    fill: Some(RED.into()),
+                    ..DifferentialFormat::default()
+                },
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    workbook
+}
+
 fn decided_one_sheet(viewport: &Viewport) -> Workbook {
     let workbook = positive(&["Sheet1"], &[]);
     assert_eq!(painted(&frame(&workbook, viewport)).len(), 120);
@@ -892,7 +915,7 @@ fn a_sort_written_as_cell_writes_paints_no_previous_result() {
 #[test]
 fn undoing_a_range_move_paints_no_previous_result() {
     let viewport = view(0.0, 800.0);
-    let mut workbook = positive(&["Sheet1"], &[]);
+    let mut workbook = positive_authored();
     edit_one(&mut workbook, 0, 5, "7");
     workbook
         .move_range(
@@ -932,7 +955,9 @@ fn a_direct_edit_or_a_recalculation_keeps_previous_results_until_decided() {
 #[test]
 fn a_range_move_that_changes_no_cell_keeps_previous_results() {
     let viewport = view(0.0, 800.0);
-    let mut workbook = decided_one_sheet(&viewport);
+    let mut workbook = positive_authored();
+    assert_eq!(painted(&frame(&workbook, &viewport)).len(), 120);
+    workbook.set_conditional_budget(10);
     workbook
         .move_range(
             SheetId(0),

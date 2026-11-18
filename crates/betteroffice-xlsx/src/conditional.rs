@@ -331,7 +331,15 @@ impl Cache {
             Budget::Frame(Some(clock)) => (self.budget.saturating_mul(TIMED_FRAMES), Some(clock)),
             Budget::Complete => (u64::MAX, None),
         };
-        let deadline = clock.map(|clock| clock.now_ms() + CONDITIONAL_FRAME_MS);
+        let ruled = match self.rules.get(&sheet) {
+            Some(rules) => !rules.is_empty(),
+            None => model
+                .sheet(sheet)
+                .is_some_and(|sheet| !sheet.conditional_formats.is_empty()),
+        };
+        let deadline = clock
+            .filter(|_| ruled)
+            .map(|clock| clock.now_ms() + CONDITIONAL_FRAME_MS);
         let mut scanned = 0u64;
         if !self.rules.contains_key(&sheet) {
             let built: Arc<[Rule]> = rules(model, sheet).into();
@@ -1181,8 +1189,8 @@ fn reads_a_range(name: &str, index: usize) -> bool {
     match name {
         "LARGE" | "SMALL" => index == 0,
         "COUNTIF" | "SUMIF" | "AVERAGEIF" => index != 1,
-        "COUNTIFS" => index % 2 == 0,
-        "SUMIFS" | "AVERAGEIFS" | "MAXIFS" | "MINIFS" => index == 0 || index % 2 == 1,
+        "COUNTIFS" => index.is_multiple_of(2),
+        "SUMIFS" | "AVERAGEIFS" | "MAXIFS" | "MINIFS" => index == 0 || !index.is_multiple_of(2),
         _ => true,
     }
 }
