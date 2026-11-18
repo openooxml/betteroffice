@@ -404,6 +404,16 @@ export interface CellEdit {
   isArrayFormula?: boolean;
 }
 
+/**
+ * Options for a direct cell or format write. `protectedSheets: 'allow'` writes locked cells,
+ * formats and chart moves and resizes on protected sheets, as edit batches' opt-in does; the protection
+ * itself is kept. The default `'refuse'` throws like Excel. `'allow'` throws on a collaborative
+ * workbook, and any other value throws as an invalid request.
+ */
+export interface XlsxWriteOptions {
+  protectedSheets?: 'refuse' | 'allow';
+}
+
 export interface XlsxTextSearchOptions {
   /** Defaults to false. */
   caseSensitive?: boolean;
@@ -601,7 +611,7 @@ export interface WorkbookHandle extends CollaborationReplica {
    * is written back on save. throws for a chart pinned to the sheet by an
    * absolute anchor.
    */
-  moveChart(sheet: number, chart: string, dx: number, dy: number): EditResult;
+  moveChart(sheet: number, chart: string, dx: number, dy: number, options?: XlsxWriteOptions): EditResult;
   /**
    * move the edges of the chart frame `chart` names — a {@link ChartRegion} id
    * — by content-pixel deltas, clamped to the grid and a 1x1px minimum, as one
@@ -609,18 +619,18 @@ export interface WorkbookHandle extends CollaborationReplica {
    * chart pinned by an absolute anchor or held by a one-cell extent, neither of
    * which a save can rewrite.
    */
-  resizeChart(sheet: number, chart: string, edges: ChartResizeEdges): EditResult;
+  resizeChart(sheet: number, chart: string, edges: ChartResizeEdges, options?: XlsxWriteOptions): EditResult;
   setActiveSheet(index: number): void;
   /**
    * apply one user input to a cell (parses number/bool/formula/text) and
    * recalc its transitive dependents. one undo step; moved dependents come back
    * in `EditResult.changed`.
    */
-  editCell(sheet: number, row: number, col: number, input: string): EditResult;
+  editCell(sheet: number, row: number, col: number, input: string, options?: XlsxWriteOptions): EditResult;
   /** `editCell` with the facade's stage timings attached. */
   editCellProfiled(sheet: number, row: number, col: number, input: string): ProfiledEditResult;
   /** apply a batch of inputs (paste path) as one undo step; dependents recalc. */
-  editCells(sheet: number, edits: CellInputEdit[]): EditResult;
+  editCells(sheet: number, edits: CellInputEdit[], options?: XlsxWriteOptions): EditResult;
   /**
    * Fill copies `source` over the complete rectangle `destination` as one undo
    * step. `destination` includes the source and must start at its top-left
@@ -652,11 +662,11 @@ export interface WorkbookHandle extends CollaborationReplica {
   selectionData(sheet: number, row: number, col: number, direction?: Direction | 'usedRange' | 'rowEnd' | 'merge'): SelectionData;
   /** row-major editable views for a range, e.g. "A1:C3" (clipboard copy). */
   rangeCells(sheet: number, range: string): CellEdit[][];
-  patchRangeStyle(sheet: number, range: string, patch: RangeStylePatch): EditResult;
-  setNumberFormat(sheet: number, range: string, format: NumberFormatMutation): EditResult;
+  patchRangeStyle(sheet: number, range: string, patch: RangeStylePatch, options?: XlsxWriteOptions): EditResult;
+  setNumberFormat(sheet: number, range: string, format: NumberFormatMutation, options?: XlsxWriteOptions): EditResult;
   selectionFormatting(sheet: number, range: string): SelectionFormatting;
   captureFormat(sheet: number, range: string): CapturedFormat;
-  applyFormat(sheet: number, range: string, format: CapturedFormat): EditResult;
+  applyFormat(sheet: number, range: string, format: CapturedFormat, options?: XlsxWriteOptions): EditResult;
   mergedRanges(sheet: number, range: string): MergedRange[];
   visibleMergedRanges(sheet: number, viewport: Viewport): MergedRange[];
   historyState(): HistoryState;
@@ -1241,17 +1251,23 @@ function wrapWorkbookDocument(
     mediaBytes(assetId: string): Uint8Array {
       return wasmCall(() => doc.mediaBytes(assetId));
     },
-    moveChart(sheet: number, chart: string, dx: number, dy: number): EditResult {
-      return parseJson(() => doc.moveChartJson(JSON.stringify({ sheet, chart, dx, dy })), true);
+    moveChart(sheet: number, chart: string, dx: number, dy: number, options?: XlsxWriteOptions): EditResult {
+      return parseJson(() => doc.moveChartJson(JSON.stringify({
+        sheet, chart, dx, dy, protectedSheets: options?.protectedSheets,
+      })), true);
     },
-    resizeChart(sheet: number, chart: string, edges: ChartResizeEdges): EditResult {
-      return parseJson(() => doc.resizeChartJson(JSON.stringify({ sheet, chart, ...edges })), true);
+    resizeChart(sheet: number, chart: string, edges: ChartResizeEdges, options?: XlsxWriteOptions): EditResult {
+      return parseJson(() => doc.resizeChartJson(JSON.stringify({
+        sheet, chart, ...edges, protectedSheets: options?.protectedSheets,
+      })), true);
     },
     setActiveSheet(index: number): void {
       mutatingWasmCall(() => doc.setActiveSheet(index));
     },
-    editCell(sheet: number, row: number, col: number, input: string): EditResult {
-      return parseJson(() => doc.editCellJson(JSON.stringify({ sheet, row, col, input })), true);
+    editCell(sheet: number, row: number, col: number, input: string, options?: XlsxWriteOptions): EditResult {
+      return parseJson(() => doc.editCellJson(JSON.stringify({
+        sheet, row, col, input, protectedSheets: options?.protectedSheets,
+      })), true);
     },
     editCellProfiled(sheet: number, row: number, col: number, input: string): ProfiledEditResult {
       return parseJson(
@@ -1259,8 +1275,10 @@ function wrapWorkbookDocument(
         true
       );
     },
-    editCells(sheet: number, edits: CellInputEdit[]): EditResult {
-      return parseJson(() => doc.editCellsJson(JSON.stringify({ sheet, edits })), true);
+    editCells(sheet: number, edits: CellInputEdit[], options?: XlsxWriteOptions): EditResult {
+      return parseJson(() => doc.editCellsJson(JSON.stringify({
+        sheet, edits, protectedSheets: options?.protectedSheets,
+      })), true);
     },
     fillRange(sheet: number, source: string, destination: string): EditResult {
       return parseJson(() => doc.fillRangeJson(JSON.stringify({ sheet, source, destination })), true);
@@ -1340,20 +1358,25 @@ function wrapWorkbookDocument(
       );
       return parsed.cells;
     },
-    patchRangeStyle(sheet: number, range: string, patch: RangeStylePatch): EditResult {
+    patchRangeStyle(sheet: number, range: string, patch: RangeStylePatch, options?: XlsxWriteOptions): EditResult {
       return parseJson(
-        () => doc.patchRangeStyleJson(JSON.stringify({ sheet, range, patch })),
+        () => doc.patchRangeStyleJson(JSON.stringify({
+          sheet, range, patch, protectedSheets: options?.protectedSheets,
+        })),
         true
       );
     },
     setNumberFormat(
       sheet: number,
       range: string,
-      format: NumberFormatMutation
+      format: NumberFormatMutation,
+      options?: XlsxWriteOptions
     ): EditResult {
       const wire = typeof format === 'string' ? { type: format } : format;
       return parseJson(
-        () => doc.setRangeNumberFormatJson(JSON.stringify({ sheet, range, format: wire })),
+        () => doc.setRangeNumberFormatJson(JSON.stringify({
+          sheet, range, format: wire, protectedSheets: options?.protectedSheets,
+        })),
         true
       );
     },
@@ -1363,9 +1386,11 @@ function wrapWorkbookDocument(
     captureFormat(sheet: number, range: string): CapturedFormat {
       return parseJson(() => doc.captureFormatJson(JSON.stringify({ sheet, range })));
     },
-    applyFormat(sheet: number, range: string, format: CapturedFormat): EditResult {
+    applyFormat(sheet: number, range: string, format: CapturedFormat, options?: XlsxWriteOptions): EditResult {
       return parseJson(
-        () => doc.applyFormatJson(JSON.stringify({ sheet, range, format })),
+        () => doc.applyFormatJson(JSON.stringify({
+          sheet, range, format, protectedSheets: options?.protectedSheets,
+        })),
         true
       );
     },

@@ -14,7 +14,7 @@ export { resolveColor, resolveColorToHex, resolveHighlightColor, resolveShadingC
 export type { ThemeMatrixCell } from './colorResolver';
 export { toArrayBuffer } from './docxInput';
 export type { DocxInput } from './docxInput';
-export { loadFont, loadFonts, loadFontFromBuffer, loadFontFromUrl, loadFontDefinitions, loadFontWithMapping, loadFontsWithMapping, preloadCommonFonts, loadDocumentFonts, isFontLoaded, setGoogleFontsEnabled, isGoogleFontsEnabled, isLoading, getLoadedFonts, onFontsLoaded, onFontError, canRenderFont, FONT_MAPPING, getGoogleFontEquivalent, extractFontsFromDocument, createFontLoadScope, registerDocumentFaces, } from './fontLoader';
+export { loadFont, loadFonts, loadFontFromBuffer, loadFontFromUrl, loadFontDefinitions, loadFontWithMapping, loadFontsWithMapping, preloadCommonFonts, loadDocumentFonts, isFontLoaded, setGoogleFontsEnabled, isGoogleFontsEnabled, setRemoteFontProvider, getRemoteFontProvider, isLoading, getLoadedFonts, onFontsLoaded, onFontError, canRenderFont, FONT_MAPPING, getGoogleFontEquivalent, extractFontsFromDocument, createFontLoadScope, registerDocumentFaces, } from './fontLoader';
 export type { BufferFaceInput, FontDefinition, FontLoadScope } from './fontLoader';
 export { deobfuscateFont, isValidFontKey } from './fontDeobfuscation';
 export { getEmbeddedFontFaces, extractEmbeddedFontFaces, loadEmbeddedFonts, loadEmbeddedFontFamilies, getEmbeddedFontFamilies, } from './embeddedFonts';

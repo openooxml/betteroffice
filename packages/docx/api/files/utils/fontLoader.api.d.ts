@@ -9,6 +9,7 @@
  * - Callback notifications
  * - Font availability detection
  */
+import { type RemoteFontProvider } from '@betteroffice/fonts/remote';
 /**
  * The loads and notifications of one editor instance; see
  * {@link createFontLoadScope}.
@@ -61,32 +62,30 @@ export declare function loadFonts(families: string[], options?: {
  */
 export declare function isFontLoaded(fontFamily: string): boolean;
 /**
- * Enable or disable the editor's automatic Google Fonts lookup.
+ * Choose where the editor fetches document fonts it does not bundle (families
+ * with no bundled metric-compatible face): `'bunny'` (fonts.bunny.net, the
+ * default), `'google'`, `{ cssUrl }` for your own Google-compatible endpoint,
+ * or `'off'` for no remote font requests at all. Page-global, like the rest of
+ * this module; call it before loading documents.
  *
- * Defaults to enabled. Set to `false` in no-egress embedders (strict CSP,
- * offline) so `loadFont` / `loadFontWithMapping` never inject a
- * `fonts.googleapis.com` stylesheet `<link>`. This gates ONLY the implicit
- * Google Fonts lookup — font URLs you register yourself (the `fonts` prop /
- * `loadFontFromUrl`) are still fetched by the browser, and embedded blobs
- * (`loadFontFromBuffer`) and system fonts still resolve.
+ * @public
+ */
+export declare function setRemoteFontProvider(provider: RemoteFontProvider): void;
+/**
+ * The provider set with {@link setRemoteFontProvider}.
  *
- * The flag is page-global (module-level), not per-editor: with multiple
- * editors on one page the last caller wins. Call it before loading documents;
- * disabling does not cancel fetches already in flight. A document font that
- * is neither local nor registered then resolves `loadFont` to `false`
- * silently (no `onFontError`) and renders via its CSS fallback stack.
- *
- * @see isGoogleFontsEnabled
- * @see loadFontFromBuffer
- * @see loadFontFromUrl
+ * @public
+ */
+export declare function getRemoteFontProvider(): RemoteFontProvider;
+/**
+ * @deprecated Use {@link setRemoteFontProvider}: `true` selects `'google'`,
+ * `false` selects `'off'`.
  *
  * @public
  */
 export declare function setGoogleFontsEnabled(enabled: boolean): void;
 /**
- * Whether the automatic Google Fonts lookup is currently enabled.
- *
- * @see setGoogleFontsEnabled
+ * @deprecated Use {@link getRemoteFontProvider}.
  *
  * @public
  */
@@ -233,17 +232,18 @@ export interface FontDefinition {
  */
 export declare function loadFontDefinitions(defs: ReadonlyArray<FontDefinition> | undefined): Promise<void>;
 /**
- * Mapping from common Office/system fonts to Google Fonts equivalents
+ * Look-alike families for common Office fonts, as served by Google-compatible
+ * font services.
  *
- * Google Fonts doesn't have exact matches for many Microsoft fonts,
- * but these are close alternatives that work well for document rendering.
+ * @deprecated Use `resolveWordFamilySubstitute` from `@betteroffice/fonts/remote`,
+ * which covers every family this table did and more.
  */
 export declare const FONT_MAPPING: Record<string, string>;
 /**
- * Get the Google Fonts equivalent for a font name
+ * The look-alike family for a font name from the shared substitution table,
+ * or the name itself when the table has none.
  *
  * @param fontName - The original font name from the document
- * @returns The Google Fonts equivalent, or the original name if no mapping exists
  */
 export declare function getGoogleFontEquivalent(fontName: string): string;
 /**

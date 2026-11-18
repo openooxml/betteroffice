@@ -8,6 +8,7 @@ test('distinguishes an omitted table look from explicit empty and zero settings'
     type: 'table',
     styleId: 'Grid',
     pPr: { spaceAfter: 10 },
+    tblPr: { styleRowBandSize: 1, styleColBandSize: 1 },
     tblStylePr: [
       { type: 'firstRow', pPr: { spaceAfter: 110 } },
       { type: 'firstCol', pPr: { spaceAfter: 130 } },

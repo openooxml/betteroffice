@@ -16,8 +16,8 @@ use betteroffice_xlsx::{
     CalculationOptions, CalculationResult, CapturedFormat, CellAddress, CellInput, CellRange,
     CellRef, CellValue, ChartMutation, Error as CoreError, HorizontalAlignment,
     MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID, MutationResult, NumberFormatMutation, Op,
-    Proposal, ProposalEditInput, ProposalRequest, RenderOptions, SheetId, StylePatch, TextWrapping,
-    VerticalAlignment, Workbook as CoreWorkbook,
+    Proposal, ProposalEditInput, ProposalRequest, ProtectedSheets, RenderOptions, SheetId,
+    StylePatch, TextWrapping, VerticalAlignment, Workbook as CoreWorkbook,
 };
 use pyo3::types::PyDict;
 
@@ -177,6 +177,30 @@ fn map_error(error: CoreError) -> PyErr {
         | CoreError::Raster(_) => RenderError::new_err(message),
         _ => XlsxError::new_err(message),
     }
+}
+
+/// The `protected_sheets` keyword of a direct write: absent means refuse, and a supplied value
+/// other than the strings `"refuse"` and `"allow"`, `None` included, is an invalid request.
+fn protected_sheets(options: Option<&Bound<'_, PyDict>>) -> PyResult<ProtectedSheets> {
+    let Some(options) = options else {
+        return Ok(ProtectedSheets::Refuse);
+    };
+    for (key, _) in options.iter() {
+        let key = key.extract::<String>()?;
+        if key != "protected_sheets" {
+            return Err(PyTypeError::new_err(format!(
+                "unexpected keyword argument {key:?}"
+            )));
+        }
+    }
+    let Some(value) = options.get_item("protected_sheets")? else {
+        return Ok(ProtectedSheets::Refuse);
+    };
+    match value.extract::<String>() {
+        Ok(value) => ProtectedSheets::parse(&value),
+        Err(_) => ProtectedSheets::parse(""),
+    }
+    .map_err(map_error)
 }
 
 fn map_style_error(error: CoreError) -> PyErr {
@@ -699,19 +723,27 @@ impl PyWorkbook {
     }
 
     /// Takes what a user would type; returns whether anything changed.
-    #[pyo3(signature = (sheet, address, value, *, now_serial = None))]
+    #[pyo3(signature = (sheet, address, value, *, now_serial = None, **options))]
     fn set(
         &mut self,
         sheet: &Bound<'_, PyAny>,
         address: &str,
         value: &str,
         now_serial: Option<f64>,
+        options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyMutation> {
+        let protection = protected_sheets(options)?;
         let sheet = self.resolve_sheet(sheet)?;
         let cell = parse_cell(address)?;
         let result = self
             .inner
-            .edit_cell(sheet, cell, value, CalculationOptions { now_serial })
+            .edit_cell_with_protection(
+                sheet,
+                cell,
+                value,
+                CalculationOptions { now_serial },
+                protection,
+            )
             .map_err(map_error)?;
         Ok(PyMutation::from_core(&self.inner, &result))
     }
@@ -960,13 +992,15 @@ impl PyWorkbook {
     }
 
     /// Write many cells as one undo step.
-    #[pyo3(signature = (sheet, edits, *, now_serial = None))]
+    #[pyo3(signature = (sheet, edits, *, now_serial = None, **options))]
     fn set_many(
         &mut self,
         sheet: &Bound<'_, PyAny>,
         edits: Vec<(String, String)>,
         now_serial: Option<f64>,
+        options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyMutation> {
+        let protection = protected_sheets(options)?;
         let sheet = self.resolve_sheet(sheet)?;
         let inputs = edits
             .into_iter()
@@ -974,7 +1008,12 @@ impl PyWorkbook {
             .collect::<PyResult<Vec<_>>>()?;
         let result = self
             .inner
-            .edit_cells(sheet, &inputs, CalculationOptions { now_serial })
+            .edit_cells_with_protection(
+                sheet,
+                &inputs,
+                CalculationOptions { now_serial },
+                protection,
+            )
             .map_err(map_error)?;
         Ok(PyMutation::from_core(&self.inner, &result))
     }
@@ -1315,14 +1354,16 @@ impl PyWorkbook {
 
     /// Set a number format over a range. `format` is one of automatic, text,
     /// number, percent, scientific, currency, date, time, or a custom pattern.
-    #[pyo3(signature = (sheet, range, format, *, now_serial = None))]
+    #[pyo3(signature = (sheet, range, format, *, now_serial = None, **options))]
     fn set_number_format(
         &mut self,
         sheet: &Bound<'_, PyAny>,
         range: &str,
         format: &str,
         now_serial: Option<f64>,
+        options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyMutation> {
+        let protection = protected_sheets(options)?;
         let sheet = self.resolve_sheet(sheet)?;
         let range = parse_range(range)?;
         let format = match format.to_ascii_lowercase().as_str() {
@@ -1340,7 +1381,13 @@ impl PyWorkbook {
         };
         let result = self
             .inner
-            .set_range_number_format(sheet, range, format, CalculationOptions { now_serial })
+            .set_range_number_format_with_protection(
+                sheet,
+                range,
+                format,
+                CalculationOptions { now_serial },
+                protection,
+            )
             .map_err(map_error)?;
         Ok(PyMutation::from_core(&self.inner, &result))
     }
@@ -1353,7 +1400,7 @@ impl PyWorkbook {
         font_family = None, font_size = None,
         text_color = None, fill_color = None,
         horizontal_alignment = None, vertical_alignment = None, text_wrapping = None,
-        now_serial = None
+        now_serial = None, **options
     ))]
     #[allow(clippy::too_many_arguments)]
     fn set_style(
@@ -1371,7 +1418,9 @@ impl PyWorkbook {
         vertical_alignment: Option<String>,
         text_wrapping: Option<String>,
         now_serial: Option<f64>,
+        options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyMutation> {
+        let protection = protected_sheets(options)?;
         let sheet = self.resolve_sheet(sheet)?;
         let range = parse_range(range)?;
 
@@ -1425,7 +1474,13 @@ impl PyWorkbook {
         };
         let result = self
             .inner
-            .patch_range_style(sheet, range, patch, CalculationOptions { now_serial })
+            .patch_range_style_with_protection(
+                sheet,
+                range,
+                patch,
+                CalculationOptions { now_serial },
+                protection,
+            )
             .map_err(map_style_error)?;
         Ok(PyMutation::from_core(&self.inner, &result))
     }
@@ -1466,6 +1521,7 @@ fn render_xlsx_markdown_json(py: Python<'_>, content: &str, options: &str) -> Py
 #[pymodule]
 fn _betteroffice_xlsx(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(python_common::decode_font_face, module)?)?;
+    module.add_function(wrap_pyfunction!(python_common::font_substitute, module)?)?;
     module.add_function(wrap_pyfunction!(python_common::font_packs, module)?)?;
     let py = module.py();
     python_common::install_font_packs(py)?;

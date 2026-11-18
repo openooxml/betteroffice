@@ -5,6 +5,7 @@ import { join } from "node:path";
 const docsPath = join(import.meta.dir, "..", "..", "..", "apps", "docs", "content", "docs", "wopi.mdx");
 
 const HOST_OWNED_WOPI_VARS = new Set(["WOPI_ACCESS_TOKEN_EXPIRATION"]);
+const REPOSITORY_CI_VARS = new Set(["WOPI_IMAGE_PUBLISH"]);
 
 function wopiVars(source: string): Set<string> {
   return new Set(source.match(/(?<![A-Z0-9_])WOPI_[A-Z][A-Z0-9_]*/g) ?? []);
@@ -25,6 +26,14 @@ describe("wopi admin docs", () => {
     const docs = readFileSync(docsPath, "utf8");
     const docsVars = wopiVars(docs);
     for (const hostVar of HOST_OWNED_WOPI_VARS) docsVars.delete(hostVar);
+    const paragraphs = docs.split(/\n\n+/);
+    for (const ciVar of REPOSITORY_CI_VARS) {
+      expect(expected.has(ciVar)).toBe(false);
+      const mentioning = paragraphs.filter((paragraph) => wopiVars(paragraph).has(ciVar));
+      expect(mentioning).toHaveLength(1);
+      expect(mentioning[0]).toContain("The published container image is");
+      docsVars.delete(ciVar);
+    }
     expect([...docsVars].sort()).toEqual([...expected].sort());
     expect(docs).toContain("`PORT`");
   });
