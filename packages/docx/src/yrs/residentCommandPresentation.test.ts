@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import type { RetainedFrame } from '../layout/render/frameDelta';
 import type { DocxCommandEchoContext, DocxCommandFrame } from './residentCommandProtocol';
-import { discardCommandPresentation, stageCommandPresentation } from './residentCommandPresentation';
+import { discardCommandPresentation, echoBackgroundPage, stageCommandPresentation } from './residentCommandPresentation';
 import { buildCommandFrame } from './residentCommandFrame';
 
 const page = { pageId: '1', pageIndex: 0 };
@@ -77,4 +77,30 @@ test('d2c_discard_closes_aliased_page_and_background_bitmaps_once', () => {
   discardCommandPresentation(frame);
   discardCommandPresentation({ ...frame });
   expect(closed).toEqual(['page', 'background']);
+});
+
+test('echo_background_drops_clipped_paint_whose_clip_misses_the_band', () => {
+  const band = { x: 100, y: 100, width: 50, height: 12 };
+  const box = (x: number, y: number) => ({ kind: 'rect' as const, x, y, w: 10, h: 10, fill: '#000' });
+  const clip = (x: number, y: number) => ({ clipGroup: { id: `${x}:${y}`, clip: { x, y, w: 100, h: 20 } } });
+  const primitives = [
+    { ...box(110, 101), ...clip(95, 95) }, // the band's own cell
+    { ...box(300, 101), ...clip(290, 95) }, // the next cell of its row
+    { ...box(110, 300), ...clip(95, 295) }, // a cell below
+    { ...box(110, 300), ...clip(95, 95) }, // painted far off, under a clip over the band
+    { ...box(300, 300), clipGroup: { id: 'fade', opacity: 0.5 } }, // a group without a clip
+    { ...box(160, 101), ...clip(150.5, 95) }, // a clip within a pixel of the band
+    { ...box(160, 101), ...clip(151, 95) }, // a clip a pixel past it
+    box(300, 300), // far and unclipped
+    { ...box(110, 101), ...clip(400, 400) }, // inside the band, clipped away from it
+    // within a pixel of the band's left, top and bottom edges, then a pixel past each
+    ...[[-0.5, 95], [-1, 95], [95, 79.5], [95, 79], [95, 112.5], [95, 113]]
+      .map(([x, y]) => ({ ...box(110, 101), ...clip(x!, y!) })),
+  ];
+  const retained = {
+    pageId: 1n, pageIndex: 0, primitiveIds: primitives.map((_, index) => BigInt(index + 1)),
+    page: { width: 600, height: 800, primitives },
+  } as unknown as RetainedFrame['pages'][number];
+  const kept = echoBackgroundPage(retained, { page, rect: band, backgroundId: 'band', omittedPrimitiveIds: [] }).primitives;
+  expect(kept.map((primitive) => primitives.indexOf(primitive as (typeof primitives)[number]) + 1)).toEqual([1, 4, 5, 6, 10, 12, 14]);
 });
