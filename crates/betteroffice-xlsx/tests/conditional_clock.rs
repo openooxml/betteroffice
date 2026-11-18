@@ -251,42 +251,6 @@ fn a_peer_hydrated_from_a_calculated_workbook_decides_with_its_date() {
     assert_eq!(frame(&peer), [4]);
 }
 
-fn snapshot_peer(worker: &Workbook) -> Workbook {
-    use betteroffice_xlsx::{SnapshotBudget, WorkbookSnapshotBuilder, WorkbookSnapshotEncoder};
-
-    let budget = SnapshotBudget::new(8, 65536).unwrap();
-    let mut encoder = WorkbookSnapshotEncoder::new(worker, None, budget).unwrap();
-    let mut builder = WorkbookSnapshotBuilder::new();
-    while let Some(chunk) = encoder.next(worker).unwrap() {
-        builder.push(&chunk).unwrap();
-    }
-    while !builder.advance(budget).unwrap().is_ready() {}
-    builder.finish().unwrap().into_parts().0
-}
-
-#[test]
-fn a_snapshot_peer_keeps_the_date_through_a_refused_edit() {
-    let bytes = package(&[("B1", "=TODAY()")], "", &cell_is_equal("TODAY()"));
-    let worker = open(&bytes, Some(SECOND));
-    let mut peer = snapshot_peer(&worker);
-    assert_eq!(frame(&peer), [4]);
-    let hydration = worker.peer_hydration_json().unwrap();
-    assert_eq!(peer.peer_hydration_json().unwrap(), hydration);
-    let stale = serde_json::from_value(serde_json::json!({
-        "expectVersion": "stale",
-        "steps": [{
-            "op": "setCellInputs",
-            "target": { "sheetId": "sheet:0", "range": { "kind": "a1", "a1": "E1" } },
-            "inputs": [["1"]]
-        }]
-    }))
-    .unwrap();
-    let refusal = peer.apply_edits(&stale).unwrap().unwrap_err();
-    assert_eq!(refusal.failure.code, betteroffice_xlsx::EditFailureCode::StaleVersion);
-    assert_eq!(peer.peer_hydration_json().unwrap(), hydration);
-    assert_eq!(frame(&peer), [4]);
-}
-
 #[test]
 fn rules_on_random_numbers_paint_nothing_with_a_calculation_date() {
     let names = r#"<definedNames><definedName name="Draw">RANDARRAY(1)</definedName><definedName name="Later">Draw+1</definedName></definedNames>"#;

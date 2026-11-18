@@ -39,7 +39,6 @@ pub(crate) struct SnapshotHeader {
     pub(crate) committed_changes: u64,
     pub(crate) last_calculation: CalculationResult,
     pub(crate) calculation_context: Option<CalculationOptions>,
-    pub(crate) calculated_now: Option<f64>,
     pub(crate) client_id: u64,
     pub(crate) guid: String,
     pub(crate) next_sheet_id: u64,
@@ -62,7 +61,6 @@ impl SnapshotHeader {
             committed_changes,
             last_calculation,
             calculation_context,
-            calculated_now,
             client_id,
             guid,
             next_sheet_id,
@@ -113,7 +111,6 @@ impl SnapshotHeader {
             let CalculationOptions { now_serial } = options;
             w.option(now_serial, Writer::f64);
         });
-        w.option(*calculated_now, Writer::f64);
         w.var_u64(*client_id);
         w.str(guid);
         w.var_u64(*next_sheet_id);
@@ -171,7 +168,6 @@ impl SnapshotHeader {
                 now_serial: r.option(Reader::f64)?,
             })
         })?;
-        let calculated_now = r.option(Reader::f64)?;
         let client_id = r.var_u64()?;
         let guid = r.str()?.to_owned();
         let next_sheet_id = r.var_u64()?;
@@ -194,7 +190,6 @@ impl SnapshotHeader {
             committed_changes,
             last_calculation,
             calculation_context,
-            calculated_now,
             client_id,
             guid,
             next_sheet_id,
@@ -255,7 +250,6 @@ mod tests {
                 unevaluated_cells: Vec::new(),
             },
             calculation_context: None,
-            calculated_now: None,
             client_id: 123,
             guid: "snapshot-guid".into(),
             next_sheet_id: u64::MAX,
@@ -273,8 +267,6 @@ mod tests {
             }),
         ] {
             header.calculation_context = context;
-            let calculated_now = context.map_or(Some(46_000.5), |options| options.now_serial);
-            header.calculated_now = calculated_now;
             for seed in [None, Some(0), Some(u32::MAX)] {
                 header.rand_seed = seed;
                 let bytes = header.encode();
@@ -288,10 +280,6 @@ mod tests {
                         .calculation_context
                         .map(|options| options.now_serial.map(f64::to_bits)),
                     context.map(|options| options.now_serial.map(f64::to_bits)),
-                );
-                assert_eq!(
-                    decoded.calculated_now.map(f64::to_bits),
-                    calculated_now.map(f64::to_bits),
                 );
             }
         }
