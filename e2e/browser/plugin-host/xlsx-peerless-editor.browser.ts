@@ -59,6 +59,32 @@ test('asyncApi mounts a peer-less editor without a main-thread engine', async ({
   expect(await page.evaluate(() => window.__xlsxWorkerEditor.errors)).toEqual([]);
 });
 
+test('a full-height loading indicator in a fixed-height parent leaves the grid its height', async ({ page }) => {
+  await page.goto('/xlsx-worker-editor.html?asyncApi=1&fixedIndicator=1');
+  await page.waitForFunction(() => '__xlsxWorkerEditor' in window);
+  await expect.poll(() => page.evaluate(() =>
+    document.querySelector('[data-testid="xlsx-workspace"]')?.getBoundingClientRect().height ?? 0)).toBeGreaterThan(0);
+  await pinnedEvaluate(page, () => window.__xlsxWorkerEditor.ready);
+  await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.paintedTexts())).toContain('initial');
+  await expect(page.locator('#worker-editor-root')).toHaveAttribute('data-indicator-shown', 'true');
+  await expect(page.getByTestId('harness-loading')).toHaveCount(0);
+  await expect(page.getByTestId('xlsx-loading')).toHaveCount(0);
+  const layout = await page.evaluate(() => {
+    const height = (id: string) => document.querySelector(`[data-testid="${id}"]`)?.getBoundingClientRect().height ?? 0;
+    const canvas = document.querySelector<HTMLCanvasElement>('[data-paint-source="worker"]');
+    return { parent: height('harness-fixed-parent'), toolbar: height('xlsx-toolbar'), workspace: height('xlsx-workspace'),
+      tabs: height('xlsx-sheet-tabs'), canvas: canvas ? [canvas.width, canvas.height] : null };
+  });
+  expect(layout.parent).toBe(600);
+  expect(layout.workspace).toBeGreaterThan(0);
+  expect(Math.abs(layout.workspace - (layout.parent - layout.toolbar - layout.tabs))).toBeLessThan(1);
+  expect(layout.canvas).not.toBeNull();
+  expect(layout.canvas).not.toEqual([300, 150]);
+  expect(Math.min(...layout.canvas!)).toBeGreaterThan(0);
+  expect(await page.evaluate(() => window.__xlsxWorkerEditor.peerless!.failure())).toBeNull();
+  expect(await page.evaluate(() => window.__xlsxWorkerEditor.errors)).toEqual([]);
+});
+
 test('hybrid control still creates a main-thread engine', async ({ page }) => {
   await open(page, '');
   expect(await page.evaluate(() => window.__xlsxWorkerEditor.mainThreadEngines())).toBeGreaterThan(0);

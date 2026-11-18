@@ -28,6 +28,7 @@ const parameters = new URLSearchParams(location.search);
 const variant = parameters.get('variant') ?? 'plain';
 const collaboration = parameters.has('collaboration');
 const peerless = parameters.has('asyncApi') || collaboration;
+const fixedIndicator = parameters.has('fixedIndicator');
 let mainThreadEngines = 0;
 globalThis.__xlsxMainEngineProbe = { capture() { mainThreadEngines += 1; } };
 
@@ -337,6 +338,15 @@ function renderPeerlessEditor(bytes: Uint8Array, index: number) {
       file={bytes}
       readOnly={readOnly}
       toolbar={retainToolbar ? <EditorToolbar mode="commands"><EditorToolbar.Toolbar /><EditorToolbar.FormulaBar /></EditorToolbar> : undefined}
+      loadingIndicator={fixedIndicator ? (
+        <div
+          data-testid="harness-loading"
+          ref={(element) => { if (element) rootElement.dataset.indicatorShown = 'true'; }}
+          style={{ height: '100%', display: 'grid', placeItems: 'center' }}
+        >
+          Opening workbook
+        </div>
+      ) : undefined}
       plugins={[slotPlugin]}
       pluginGrants={{ routes: { document: 'write', editBatches: true } }}
       collaboration={
@@ -407,6 +417,10 @@ const open = (bytes: Uint8Array) => {
           {renderPeerlessEditor(bytes, index)}
         </div>
       ))}
+    </div>
+  ) : peerless && fixedIndicator ? (
+    <div data-testid="harness-fixed-parent" style={{ height: 600 }}>
+      {renderPeerlessEditor(bytes, 0)}
     </div>
   ) : peerless ? (
     renderPeerlessEditor(bytes, 0)
