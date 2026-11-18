@@ -499,18 +499,52 @@ fn proposals_refuse_a_number_format_on_a_sheet_that_does_not_allow_formatting() 
     );
     assert!(book.proposals().is_empty());
     assert_eq!(book.version(), version);
-    for (sheet, number_format) in [(FORM, None), (STYLED, None), (STYLED, percent)] {
+    let general = NumberFormat::Builtin { id: 0 };
+    let percent_format = NumberFormat::Builtin { id: 10 };
+    let cases = [
+        (FORM, None, &general),
+        (STYLED, None, &general),
+        (STYLED, percent, &percent_format),
+    ];
+    for (sheet, number_format, expected) in cases {
+        assert_eq!(format(&book, sheet, "B1").number_format, general);
         let proposal = book
-            .propose(request(sheet, number_format.clone()), options())
+            .propose(request(sheet, number_format), options())
             .unwrap();
         book.accept_proposal(&proposal.id, false, options())
             .unwrap();
         assert_eq!(input(&book, sheet, "B1"), "9");
-        assert_eq!(
-            format(&book, sheet, "B1").number_format == NumberFormat::Builtin { id: 10 },
-            number_format.is_some()
-        );
+        assert_eq!(&format(&book, sheet, "B1").number_format, expected);
     }
+}
+
+#[test]
+fn a_proposal_refused_on_its_second_sheet_keeps_nothing_of_its_first() {
+    let mut book = workbook();
+    let edit = |sheet, input: &str| ProposalEditInput {
+        sheet,
+        cell: cell("B1"),
+        input: input.to_owned(),
+        number_format: Some(NumberFormatMutation::Percent),
+    };
+    let request = ProposalRequest {
+        agent_id: "agent".to_owned(),
+        note: None,
+        edits: vec![edit(STYLED, "11"), edit(FORM, "12")],
+    };
+    let version = book.version();
+    let formats = |book: &Workbook| [format(book, STYLED, "B1"), format(book, FORM, "B1")];
+    let before = formats(&book);
+    assert_eq!(before[0].number_format, NumberFormat::Builtin { id: 0 });
+    assert_eq!(
+        locked(book.propose(request, options())),
+        r#"sheet "Form" is protected"#
+    );
+    assert!(book.proposals().is_empty());
+    assert_eq!(book.version(), version);
+    assert_eq!(input(&book, STYLED, "B1"), "7");
+    assert_eq!(input(&book, FORM, "B1"), "2");
+    assert_eq!(formats(&book), before);
 }
 
 #[test]

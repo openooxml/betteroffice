@@ -924,12 +924,19 @@ fn accept_refuses_a_number_format_proposed_before_the_sheet_was_protected() {
         }],
     };
     let input = |workbook: &Workbook| workbook.cell(SheetId(0), r("A1")).unwrap().input;
+    let format = |workbook: &Workbook| {
+        let style = workbook.model().sheets[0].cell(r("A1")).unwrap().style;
+        workbook.model().styles.cell_format(style)
+    };
+    let general = xlsx_model::NumberFormat::Builtin { id: 0 };
     for number_format in [None, Some(NumberFormatMutation::Percent)] {
         let refused = number_format.is_some();
         let proposal = open.propose(request(number_format), options()).unwrap();
         let mut protected = Workbook::open(&package(cell_xfs, cells, true)).unwrap();
         protected.proposals.add(proposal.clone());
         let version = protected.version();
+        let before = format(&protected);
+        assert_eq!(before.number_format, general);
         let accepted = protected.accept_proposal(&proposal.id, false, options());
         if refused {
             let Err(Error::LockedTarget(message)) = &accepted else {
@@ -937,11 +944,13 @@ fn accept_refuses_a_number_format_proposed_before_the_sheet_was_protected() {
             };
             assert_eq!(message, r#"sheet "Sheet1" is protected"#);
             assert_eq!(input(&protected), "7");
+            assert_eq!(format(&protected), before);
             assert_eq!(protected.version(), version);
-            assert_eq!(protected.proposals().len(), 1);
+            assert_eq!(protected.proposals(), [proposal]);
         } else {
             accepted.unwrap();
             assert_eq!(input(&protected), "9");
+            assert_eq!(format(&protected).number_format, general);
             assert!(protected.proposals().is_empty());
         }
     }
