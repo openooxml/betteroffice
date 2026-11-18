@@ -698,8 +698,6 @@ pub struct PeerHydration {
     recalculated_since_open: bool,
     calculations_since_open: u64,
     rand_seed: Option<u32>,
-    #[serde(default)]
-    calculated_now: Option<f64>,
     active_sheet: SheetId,
     version_nonce: String,
     committed_changes: u64,
@@ -757,7 +755,6 @@ impl Workbook {
             recalculated_since_open: self.recalculated_since_open,
             calculations_since_open: self.calculations_since_open,
             rand_seed: self.rand_seed,
-            calculated_now: self.calculated_now,
             active_sheet: self.active_sheet,
             version_nonce: self.version_nonce.clone(),
             committed_changes: self.committed_changes,
@@ -825,7 +822,6 @@ impl Workbook {
         workbook.recalculated_since_open = hydration.recalculated_since_open;
         workbook.calculations_since_open = hydration.calculations_since_open;
         workbook.rand_seed = hydration.rand_seed;
-        workbook.calculated_now = hydration.calculated_now;
         workbook.set_active_sheet(hydration.active_sheet)?;
         workbook.version_nonce = hydration.version_nonce;
         workbook.committed_changes = hydration.committed_changes;

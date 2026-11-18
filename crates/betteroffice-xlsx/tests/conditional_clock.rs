@@ -241,13 +241,18 @@ fn the_calculation_date_is_no_part_of_the_model_or_the_saved_file() {
 }
 
 #[test]
-fn a_peer_hydrated_from_a_calculated_workbook_decides_with_its_date() {
+fn a_workbook_hydrated_from_a_calculated_one_has_no_date_until_it_recalculates() {
     let bytes = package(&[("B1", "=TODAY()")], "", &cell_is_equal("TODAY()"));
     let worker = open(&bytes, Some(SECOND));
-    let peer =
+    assert_eq!(frame(&worker), [4]);
+    let mut peer =
         Workbook::open_with_peer_hydration_json(&bytes, &worker.peer_hydration_json().unwrap())
             .unwrap();
     assert_eq!(value(&peer, 0, 1), number(46_003.0));
+    assert!(frame(&peer).is_empty());
+    assert!(complete(&peer).is_empty());
+    assert_eq!(peer.conditional_stats().withheld_volatile, 8);
+    peer.recalculate_all(options(Some(SECOND)));
     assert_eq!(frame(&peer), [4]);
 }
 
