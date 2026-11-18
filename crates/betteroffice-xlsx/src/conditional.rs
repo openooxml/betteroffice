@@ -308,13 +308,14 @@ impl Cache {
     /// below a matching `stopIfTrue` rule applies.
     pub(crate) fn effects(
         &mut self,
-        epoch: u64,
+        epoch: (u64, Option<f64>),
         model: &Workbook,
         sheet: SheetId,
         rows: &[Range<u32>],
         cols: &[Range<u32>],
         budget: Budget<'_>,
     ) -> (CellFormats, u32) {
+        let (epoch, _) = epoch;
         if self.epoch != Some(epoch) {
             self.epoch = Some(epoch);
             self.rules.clear();
@@ -1693,7 +1694,7 @@ mod tests {
     ) {
         let rows = rule.ranges[0].end.row + 1;
         cache.effects(
-            epoch,
+            (epoch, None),
             model,
             SheetId(0),
             std::slice::from_ref(&(0..rows)),
@@ -1814,5 +1815,53 @@ mod tests {
             Some(text("ABC"))
         );
         check_counts(&mut cache, workbook.model(), &rule, 1, [4.0, 0.0]);
+    }
+
+    #[test]
+    fn a_rule_on_the_clock_is_decided_again_when_only_the_calculation_date_changes() {
+        let mut sheet = xlsx_model::Sheet::new("Sheet1");
+        for row in 0..8 {
+            put(
+                &mut sheet,
+                CellRef::new(row, 0),
+                number(45_999.0 + f64::from(row)),
+                None,
+            );
+        }
+        sheet.conditional_formats.push(xlsx_model::ConditionalFormatting {
+            sqref: "A1:A8".to_owned(),
+            rules: vec![xlsx_model::ConditionalFormatRule {
+                id: String::new(),
+                rule_type: "expression".to_owned(),
+                operator: None,
+                formulas: vec!["A1=TODAY()".to_owned()],
+                priority: 1,
+                dxf_id: None,
+                format: DifferentialFormat {
+                    bold: Some(true),
+                    ..DifferentialFormat::default()
+                },
+                raw_xml: None,
+            }],
+        });
+        let mut model = Workbook::default();
+        model.sheets.push(sheet);
+        let mut cache = Cache::default();
+        let mut painted = |now_serial: Option<f64>| {
+            let (formats, pending) = cache.effects(
+                (1, now_serial),
+                &model,
+                SheetId(0),
+                std::slice::from_ref(&(0..8)),
+                std::slice::from_ref(&(0..1)),
+                Budget::Complete,
+            );
+            assert_eq!(pending, 0);
+            formats.keys().map(|&(row, _)| row).collect::<Vec<u32>>()
+        };
+        assert_eq!(painted(Some(46_000.25)), [1]);
+        assert_eq!(painted(Some(46_003.75)), [4]);
+        assert!(painted(None).is_empty());
+        assert_eq!(painted(Some(46_000.25)), [1]);
     }
 }

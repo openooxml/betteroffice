@@ -462,10 +462,10 @@ fn a_table_style_with_two_fill_colors_paints_and_saves_as_read_before() {
 }
 
 #[test]
-fn a_rule_reading_the_clock_or_random_numbers_paints_nothing() {
-    let names = r#"<definedNames><definedName name="Stamp">NOW()</definedName><definedName name="Later">Stamp+1</definedName></definedNames>"#;
+fn a_rule_reading_random_numbers_paints_nothing() {
+    let names = r#"<definedNames><definedName name="Draw">RAND()</definedName><definedName name="Later">Draw+1</definedName></definedNames>"#;
     for formula in [
-        "ISERROR(TODAY())",
+        "SUM(RANDARRAY(1))&gt;=0",
         "RAND()&gt;=0",
         "RANDBETWEEN(1,1)=1",
         "ISERROR(Later)",

@@ -6812,7 +6812,14 @@ impl Workbook {
         self.conditional_cache
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .effects(self.model_epoch, &self.model, sheet, rows, cols, budget)
+            .effects(
+                (self.model_epoch, None),
+                &self.model,
+                sheet,
+                rows,
+                cols,
+                budget,
+            )
     }
 
     /// Sets the evaluation one frame on screen spends on conditional formats.

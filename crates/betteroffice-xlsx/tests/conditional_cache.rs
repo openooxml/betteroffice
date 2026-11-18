@@ -1404,10 +1404,10 @@ fn cells_whose_first_rule_is_unsupported_are_not_pending() {
 }
 
 #[test]
-fn a_sheet_whose_only_rule_reads_the_clock_has_nothing_pending() {
+fn a_sheet_whose_only_rule_reads_random_numbers_has_nothing_pending() {
     settles_unpainted(&workbook(&sheet(
         rows(30, numbers(4, |row, col| row + col)),
-        expression("A1:D30", 1, "ISERROR(TODAY())"),
+        expression("A1:D30", 1, "RAND()&gt;=0"),
     )));
 }
 
