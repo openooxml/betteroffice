@@ -413,7 +413,7 @@ describe('two adjacent untracked hyperlinks to the same address', () => {
     ]);
   };
 
-  const TWO = `${wt('HeXad ')}${link(wt('first'), FIRST_LINK)}${link(wt('second'), 'r:id="rIdLink2" w:tooltip="Second"')}${wt(' tail')}`;
+  const TWO = `${wt('HeXad ')}${inner}${wt(' tail')}`;
   const ONE = `${wt('HeXad ')}${link(`${wt('first')}${wt('second')}`, FIRST_LINK)}${wt(' tail')}`;
   const WRITTEN: Array<[Path, string, string, string[][]]> = [
     ['path that seeds in Rust', 'two links', TWO, [['rIdLink', TARGET], ['rIdLink2', TARGET]]],
