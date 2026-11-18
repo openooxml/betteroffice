@@ -277,6 +277,51 @@ describe('provider stylesheets', () => {
     }
   });
 
+  test('a caller that has already aborted starts no request at all', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const fetch = mock(async () => new Response(BUNNY_CSS));
+    const options = { fetch: fetch as unknown as typeof globalThis.fetch, signal: controller.signal, provider: { cssUrl: 'https://fonts.example.com/pre-aborted/css' } };
+    const face = { weight: 400, style: 'normal' } as const;
+    const fontSet = { add: mock(() => {}) } as unknown as FontFaceSet;
+    await expect(fetchRemoteFontRules('Open Sans', [face], options)).rejects.toThrow();
+    await expect(remoteFontSlices('Tahoma', face, options)).rejects.toThrow();
+    await expect(loadRemoteFontFaces('Tahoma', 'Tahoma', face, fontSet, options)).rejects.toThrow();
+    await expect(loadRemoteFontFaces('Tahoma', 'Tahoma', face, fontSet, { ...options, text: 'Hello' })).rejects.toThrow();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  test('an abort raised inside one font file request dispatches no later file and leaves no rejection unhandled', async () => {
+    const original = globalThis.FontFace;
+    globalThis.FontFace = class { async load() { return this; } } as unknown as typeof FontFace;
+    const unhandled: unknown[] = [];
+    const record = (reason: unknown) => { unhandled.push(reason); };
+    process.on('unhandledRejection', record);
+    try {
+      for (const text of ['Hello Ł', undefined]) {
+        const controller = new AbortController();
+        const fetch = mock(async (url: string | URL | Request) => {
+          if (String(url).includes('/css?')) return new Response(BUNNY_CSS);
+          controller.abort();
+          return new Response(new Uint8Array([1]));
+        });
+        const fontSet = { add: mock(() => {}) } as unknown as FontFaceSet;
+        await expect(loadRemoteFontFaces('Tahoma', 'Tahoma', { weight: 400, style: 'normal' }, fontSet, {
+          fetch: fetch as unknown as typeof globalThis.fetch, signal: controller.signal,
+          provider: { cssUrl: `https://fonts.example.com/abort-inside-${text === undefined ? 'whole' : 'text'}/css` }, ...(text === undefined ? {} : { text }),
+        })).rejects.toThrow();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(fetch.mock.calls.map((call) => String(call[0])).filter((url) => !url.includes('/css?'))).toHaveLength(1);
+        expect((fontSet.add as unknown as ReturnType<typeof mock>)).not.toHaveBeenCalled();
+      }
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', record);
+      globalThis.FontFace = original;
+    }
+  });
+
   test('unicode-range values match single points, spans and wildcards', () => {
     expect(unicodeRangeIncludes('U+0000-00FF,U+0131', 0x41)).toBe(true);
     expect(unicodeRangeIncludes('U+0000-00FF,U+0131', 0x131)).toBe(true);
