@@ -188,8 +188,14 @@ fn a_superscript_run_paints_at_its_own_size_on_the_common_baseline() {
     let lowered = r##"{"start":2,"end":4,"color":"#ff0000","baseline":"subscript"}"##;
     let level = r##"{"start":2,"end":4,"color":"#ff0000"}"##;
     assert_eq!(
-        png(&fonts, vec![rich(json!({ "fontFamily": "Body" }), &[raised])]),
-        png(&fonts, vec![rich(json!({ "fontFamily": "Body" }), &[RED_BOLD])])
+        png(
+            &fonts,
+            vec![rich(json!({ "fontFamily": "Body" }), &[raised])]
+        ),
+        png(
+            &fonts,
+            vec![rich(json!({ "fontFamily": "Body" }), &[RED_BOLD])]
+        )
     );
     assert_eq!(
         png(&fonts, vec![rich(json!({}), &[lowered])]),
