@@ -438,16 +438,24 @@ ${large ? LARGE_END : END}`;
 const ENGINES = ['published', 'commit', 'libreoffice'];
 
 /** The large set block from a run's aggregate.json, byte-identical to renderSection(report, { privateCorpus: true }). */
-export function renderLargeSection(aggregate, { date = new Date().toISOString().slice(0, 10) } = {}) {
+export function renderLargeSection(aggregate, { date = new Date().toISOString().slice(0, 10), timingSampleSize, missingReference } = {}) {
   if (aggregate?.schema_version !== 1 || !FORMATS.every((format) => aggregate.formats?.[format]))
     throw new Error('Expected an aggregate.json of schema version 1');
   if (!/^[a-f0-9]{40}$/.test(aggregate.commit))
     throw new Error('Expected a full commit SHA');
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date))
     throw new Error('Invalid date');
+  for (const [name, value] of [['--timing-sample-size', timingSampleSize], ['--missing-reference', missingReference]])
+    if (value !== undefined && !(Number.isSafeInteger(value) && value >= 0))
+      throw new Error(`${name} must be a non-negative integer`);
   const { formats } = aggregate;
-  const required = (value, field) => {
-    if (value === undefined) throw new Error(`aggregate.json has no ${field}; render this run from its report.json`);
+  const given = (value, argument, name, field, needed = true) => {
+    if (value === undefined) {
+      if (argument === undefined && needed) throw new Error(`aggregate.json has no ${field}; pass ${name}`);
+      return argument;
+    }
+    if (argument !== undefined && argument !== value)
+      throw new Error(`${name} ${argument} disagrees with ${field} ${value} in aggregate.json`);
     return value;
   };
   const short = aggregate.commit.slice(0, 8);
@@ -493,16 +501,16 @@ export function renderLargeSection(aggregate, { date = new Date().toISOString().
   const sequential = Object.fromEntries(FORMATS.filter((format) => formats[format].timing).map((format) => {
     const timing = formats[format].timing;
     return [format, {
-      sample_size: required(timing.sample_size, `${format} timing.sample_size`),
+      sample_size: given(timing.sample_size, timingSampleSize, '--timing-sample-size', `${format} timing.sample_size`),
       rounds: timing.rounds,
       summary: { total: timing.sample, common: timing.timed_by_every_engine, notes_not_converged: timing.notes_not_converged, channels: timing.channels },
     }];
   }));
   const { recalc } = formats.xlsx;
   const workbooks = recalc?.commit.workbooks ?? 0;
+  const missing = given(formats.xlsx.recalc_missing_reference, missingReference, '--missing-reference', 'xlsx recalc_missing_reference', workbooks > 0);
   const recalcText = workbooks
-    ? recalcNote({ workbooks, channels: recalc }, formats.xlsx.libreoffice_version,
-      required(formats.xlsx.recalc_missing_reference, 'xlsx recalc_missing_reference'), versions.xlsx, short)
+    ? recalcNote({ workbooks, channels: recalc }, formats.xlsx.libreoffice_version, missing, versions.xlsx, short)
     : '';
   const docx = table('docx');
   const pptx = table('pptx');
@@ -625,7 +633,7 @@ export function updateReadme(readme, section) {
   )}`;
 }
 
-const USAGE = 'usage: readme.mjs report.json [README.md] | readme.mjs --as large [--date YYYY-MM-DD] [--public README.md] report.json|aggregate.json [README.md] | readme.mjs --section section.md [README.md]';
+const USAGE = 'usage: readme.mjs report.json [README.md] | readme.mjs --as large [--date YYYY-MM-DD] [--public README.md] report.json|aggregate.json [README.md] (an aggregate.json also takes [--timing-sample-size N] [--missing-reference N]) | readme.mjs --section section.md [README.md]';
 
 async function readRegular(path) {
   if (!(await lstat(path)).isFile()) throw new Error(`${path} must be a regular file`);
@@ -635,13 +643,26 @@ async function readRegular(path) {
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const { values, positionals } = parseArgs({
     allowPositionals: true,
-    options: { section: { type: 'string' }, as: { type: 'string' }, date: { type: 'string' }, public: { type: 'string' } },
+    options: {
+      section: { type: 'string' }, as: { type: 'string' }, date: { type: 'string' }, public: { type: 'string' },
+      'timing-sample-size': { type: 'string' }, 'missing-reference': { type: 'string' },
+    },
   });
   const sectionRun = values.section !== undefined;
   const large = values.as === 'large';
+  const counts = ['timing-sample-size', 'missing-reference'].filter((name) => values[name] !== undefined);
   if ((values.as !== undefined && !large) || (sectionRun && (values.as !== undefined || positionals.length > 1)) ||
-      (!sectionRun && (!positionals.length || positionals.length > 2)) || (!large && (values.date !== undefined || values.public !== undefined)))
+      (!sectionRun && (!positionals.length || positionals.length > 2)) ||
+      (!large && (values.date !== undefined || values.public !== undefined || counts.length)))
     throw new Error(USAGE);
+  const argument = (name) => {
+    if (values[name] === undefined) return undefined;
+    if (!/^\d+$/.test(values[name]) || !Number.isSafeInteger(Number(values[name])))
+      throw new Error(`--${name} must be a non-negative integer`);
+    return Number(values[name]);
+  };
+  const timingSampleSize = argument('timing-sample-size');
+  const missingReference = argument('missing-reference');
   const readmePath = (sectionRun ? positionals[0] : positionals[1]) ?? 'README.md';
   let readme = await readRegular(readmePath);
   let section;
@@ -652,8 +673,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
       throw new Error('The generated section does not match this run');
   } else {
     const input = JSON.parse(await readFile(positionals[0], 'utf8'));
-    if (Array.isArray(input.samples)) section = renderSection(input, { privateCorpus: large, date: values.date });
-    else if (large) section = renderLargeSection(input, { date: values.date });
+    if (Array.isArray(input.samples)) {
+      if (counts.length) throw new Error(`--${counts[0]} applies only to an aggregate.json`);
+      section = renderSection(input, { privateCorpus: large, date: values.date });
+    } else if (large) section = renderLargeSection(input, { date: values.date, timingSampleSize, missingReference });
     else throw new Error(`${positionals[0]} has no samples: an aggregate.json renders only the large set block (--as large)`);
     if (values.public !== undefined) readme = updateReadme(readme, generatedBlock(await readFile(values.public, 'utf8')));
   }
