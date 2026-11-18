@@ -15,6 +15,56 @@ export const LARGE_BEGIN = '<!-- BEGIN GENERATED LARGE SET -->';
 export const LARGE_END = '<!-- END GENERATED LARGE SET -->';
 const PAIRS = [[BEGIN, END], [LARGE_BEGIN, LARGE_END]];
 export const FORMATS = ['docx', 'pptx', 'xlsx'];
+export const RUN_KINDS = ['public', 'private'];
+export const PRIVATE_SECTION_PHRASES = [
+  'per-document results are not published',
+  'aggregates only; documents are not public',
+  'Times: mean per document over a seeded sample',
+  '## Benchmarks: large set',
+];
+const PRIVATE_ONLY = 'a private run writes only the large set block (--as large)';
+
+const RELEASE = String.raw`\d+\.\d+\.\d+(?:[-+][\w.-]+)?`;
+const FONT_PACKAGE = new RegExp(`^@betteroffice/fonts@${RELEASE}$`);
+const FONT_CJK = new RegExp(`^@betteroffice/fonts-cjk@${RELEASE}$`);
+const FONT_COPIES = ['local release copy', 'workspace'];
+const FONT_SOURCE = new RegExp(`^@betteroffice/fonts@${RELEASE}(?: and @betteroffice/fonts-cjk@${RELEASE})? \\((?:${FONT_COPIES.join('|')})\\)$`);
+
+const CHECKS = {
+  count: [(value) => Number.isSafeInteger(value) && value >= 0, 'a non-negative integer'],
+  mean: [(value) => value === null || Number.isFinite(value), 'a finite number or null'],
+  fontPackage: [(value) => typeof value === 'string' && FONT_PACKAGE.test(value), 'an @betteroffice/fonts release'],
+  fontCjk: [(value) => typeof value === 'string' && FONT_CJK.test(value), 'an @betteroffice/fonts-cjk release'],
+  fontCopy: [(value) => FONT_COPIES.includes(value), `one of: ${FONT_COPIES.join(', ')}`],
+  fontSource: [(value) => typeof value === 'string' && FONT_SOURCE.test(value), 'a font source of @betteroffice/fonts releases'],
+  runKind: [(value) => RUN_KINDS.includes(value), `one of: ${RUN_KINDS.join(', ')}`],
+};
+
+/** Refuses a stored value the README would print, naming the field and never the value. */
+export function checked(kind, value, field) {
+  const [accepts, expected] = CHECKS[kind];
+  if (!accepts(value)) throw new Error(`Invalid ${field}: expected ${expected}`);
+  return value;
+}
+
+function checkFields(root, prefix, fields) {
+  for (const [path, kind, optional = false] of fields) {
+    const value = path.split('.').reduce((node, key) => node?.[key], root);
+    if (!(optional && value === undefined)) checked(kind, value, `${prefix}${path}`);
+  }
+}
+
+const isDate = (value) =>
+  typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) &&
+  new Date(Date.parse(`${value}T00:00:00Z`) || 0).toISOString().slice(0, 10) === value;
+
+const fixed = (value, digits) => {
+  const text = value.toFixed(digits);
+  return /^-0(?:\.0+)?$/.test(text) ? text.slice(1) : text;
+};
+const ms = (value) => (value === null ? '—' : `${fixed(value, 0)} ms`);
+const percent = (part, total) => (total ? `${fixed(100 * part / total, 2)}%` : '—');
+const ENGINES = ['published', 'commit', 'libreoffice'];
 
 const LABEL_PX = 180;
 const VALUE_PX = 230;
@@ -63,9 +113,7 @@ function score(samples, channel, revision) {
       ? scores.reduce((sum, result) => sum + result.penalized_ssim, 0) / scores.length
       : null,
     value: scores.length
-      ? (
-          scores.reduce((sum, result) => sum + result.penalized_ssim, 0) / scores.length
-        ).toFixed(4)
+      ? fixed(scores.reduce((sum, result) => sum + result.penalized_ssim, 0) / scores.length, 4)
       : '—',
     exact: paged.filter((result) => result.reference_pages === result.actual_pages).length,
     paged: paged.length,
@@ -76,8 +124,10 @@ function score(samples, channel, revision) {
   };
 }
 
-const fontSourceLabel = (fonts) =>
-  `${fonts.package}${fonts.cjk ? ` and ${fonts.cjk}` : ''} (${fonts.copy})`;
+const fontSourceLabel = (fonts) => {
+  checkFields(fonts, 'fonts.', [['package', 'fontPackage'], ['cjk', 'fontCjk', true], ['copy', 'fontCopy']]);
+  return `${fonts.package}${fonts.cjk ? ` and ${fonts.cjk}` : ''} (${fonts.copy})`;
+};
 
 /** One arm's font source and face load counts across its captures. */
 export function fontSummary(samples, channel) {
@@ -255,7 +305,7 @@ export function chart(headline, perf = []) {
 export function renderSection(report, { privateCorpus = false, date = new Date().toISOString().slice(0, 10) } = {}) {
   if (!/^[a-f0-9]{40}$/.test(report.commit))
     throw new Error('Expected a full commit SHA');
-  if (privateCorpus && !/^\d{4}-\d{2}-\d{2}$/.test(date))
+  if (privateCorpus && !isDate(date))
     throw new Error('Invalid date');
   const short = report.commit.slice(0, 8);
   const commitLink = link(
@@ -293,6 +343,12 @@ export function renderSection(report, { privateCorpus = false, date = new Date()
       (report.xlsx_benchmark && report.xlsx_benchmark.libreoffice_version !== xlsxFidelity.libreoffice_version)))
     throw new Error('XLSX fidelity does not match the report revision or LibreOffice version');
   const sequential = report.timing_benchmark ?? {};
+  for (const format of FORMATS.filter((name) => sequential[name]))
+    checkFields(sequential[format], `timing_benchmark.${format}.`, [
+      ['rounds', 'count'], ['sample_size', 'count'], ['summary.total', 'count'], ['summary.common', 'count'],
+      ['summary.notes_not_converged', 'count', true],
+      ...ENGINES.flatMap((channel) => [[`summary.channels.${channel}.successful`, 'count'], [`summary.channels.${channel}.mean_ms`, 'mean']]),
+    ]);
   const timings = Object.fromEntries(['docx', 'pptx'].map(format =>
     [format, privateCorpus ? sequential[format]?.summary ?? null
       : report[`${format}_benchmark`] ? timingSummary(report.samples, format) : null]));
@@ -322,15 +378,14 @@ export function renderSection(report, { privateCorpus = false, date = new Date()
     ];
     if (timings[format]) {
       const channels = ['published', 'commit', 'libreoffice'].map((channel) => timings[format].channels[channel]);
-      rows.push(['Render time (avg)', ...channels.map((channel) => channel.mean_ms === null ? '—' : `${channel.mean_ms.toFixed(0)} ms`)]);
+      rows.push(['Render time (avg)', ...channels.map((channel) => ms(channel.mean_ms))]);
     }
     if (format === 'xlsx' && calculation) {
       const channels = ['published', 'commit', 'libreoffice'].map(channel => calculation.channels[channel]);
-      rows.push(['Recalc accuracy', ...channels.map(channel => channel.total
-        ? `${(100 * channel.correct / channel.total).toFixed(2)}%` : '—')]);
+      rows.push(['Recalc accuracy', ...channels.map(channel => percent(channel.correct, channel.total))]);
       if (recalcTiming) {
         const times = ['published', 'commit', 'libreoffice'].map(channel => recalcTiming.channels[channel]);
-        rows.push(['Recalc time (avg)', ...times.map(channel => channel.mean_ms === null ? '—' : `${channel.mean_ms.toFixed(0)} ms`)]);
+        rows.push(['Recalc time (avg)', ...times.map(channel => ms(channel.mean_ms))]);
       }
     }
     if (preservation) {
@@ -338,8 +393,7 @@ export function renderSection(report, { privateCorpus = false, date = new Date()
           preservation.builds?.commit?.source_sha !== report.source_sha)
         throw new Error('Roundtrip results do not match the report revision');
       const summary = roundtripSummary(report.samples, format);
-      const values = ['published', 'commit', 'libreoffice'].map(channel => summary[channel].total
-        ? `${(100 * summary[channel].parsed / summary[channel].total).toFixed(2)}%` : '—');
+      const values = ['published', 'commit', 'libreoffice'].map(channel => percent(summary[channel].parsed, summary[channel].total));
       rows.push(['Parse success', ...values]);
     }
     for (const label of CHART_ROWS) {
@@ -435,7 +489,36 @@ For how scores, timings and coverage are measured, see the [benchmark methodolog
 ${large ? LARGE_END : END}`;
 }
 
-const ENGINES = ['published', 'commit', 'libreoffice'];
+function checkAggregate(aggregate) {
+  checkFields(aggregate, '', [['run_kind', 'runKind', true]]);
+  for (const format of FORMATS) {
+    const entry = aggregate.formats[format];
+    const fields = [['samples', 'count'], ['recalc_missing_reference', 'count', true]];
+    for (const side of ENGINES)
+      if (side !== 'libreoffice' || entry.fidelity?.libreoffice !== null)
+        fields.push([`fidelity.${side}.ssim`, 'mean'],
+          ...['scored', 'total', 'exact_pages', 'paged', 'page_error'].map((key) => [`fidelity.${side}.${key}`, 'count']));
+    if (entry.timing !== undefined)
+      fields.push(...['rounds', 'sample', 'timed_by_every_engine', 'notes_not_converged'].map((key) => [`timing.${key}`, 'count']),
+        ['timing.sample_size', 'count', true],
+        ...ENGINES.flatMap((channel) => [[`timing.channels.${channel}.successful`, 'count'], [`timing.channels.${channel}.mean_ms`, 'mean']]));
+    if (entry.recalc !== undefined)
+      fields.push(...ENGINES.flatMap((channel) => [
+        ...['workbooks', 'correct', 'total', 'fully_matching'].map((key) => [`recalc.${channel}.${key}`, 'count']),
+        [`recalc.${channel}.mean_ms`, 'mean'],
+      ]));
+    if (entry.roundtrip !== undefined)
+      fields.push(...ENGINES.flatMap((channel) => ['parsed', 'preserved', 'total'].map((key) => [`roundtrip.${channel}.${key}`, 'count'])));
+    checkFields(entry, `${format} `, fields);
+    for (const channel of ['published', 'commit']) {
+      const fonts = entry.fonts?.[channel];
+      if (fonts === undefined) continue;
+      const field = `${format} fonts.${channel}.sources`;
+      if (!Array.isArray(fonts?.sources)) throw new Error(`Invalid ${field}: expected a list`);
+      for (const source of fonts.sources) checked('fontSource', source, field);
+    }
+  }
+}
 
 /** The large set block from a run's aggregate.json, byte-identical to renderSection(report, { privateCorpus: true }). */
 export function renderLargeSection(aggregate, { date = new Date().toISOString().slice(0, 10), timingSampleSize, missingReference } = {}) {
@@ -443,12 +526,14 @@ export function renderLargeSection(aggregate, { date = new Date().toISOString().
     throw new Error('Expected an aggregate.json of schema version 1');
   if (!/^[a-f0-9]{40}$/.test(aggregate.commit))
     throw new Error('Expected a full commit SHA');
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date))
+  if (!isDate(date))
     throw new Error('Invalid date');
   for (const [name, value] of [['--timing-sample-size', timingSampleSize], ['--missing-reference', missingReference]])
     if (value !== undefined && !(Number.isSafeInteger(value) && value >= 0))
       throw new Error(`${name} must be a non-negative integer`);
+  checkAggregate(aggregate);
   const { formats } = aggregate;
+  const sampled = Math.max(1, ...FORMATS.filter((format) => formats[format].timing).map((format) => formats[format].timing.sample));
   const given = (value, argument, name, field, needed = true) => {
     if (value === undefined) {
       if (argument === undefined && needed) throw new Error(`aggregate.json has no ${field}; pass ${name}`);
@@ -461,8 +546,6 @@ export function renderLargeSection(aggregate, { date = new Date().toISOString().
   const short = aggregate.commit.slice(0, 8);
   const commitLink = link(short, `https://github.com/openooxml/betteroffice/commit/${aggregate.commit}`);
   const versions = Object.fromEntries(FORMATS.map((format) => [format, formats[format].published_version]));
-  const ms = (value) => (value === null ? '—' : `${value.toFixed(0)} ms`);
-  const percent = (part, total) => (total ? `${(100 * part / total).toFixed(2)}%` : '—');
   const table = (format) => {
     const entry = formats[format];
     const version = entry.published_version;
@@ -484,7 +567,7 @@ export function renderLargeSection(aggregate, { date = new Date().toISOString().
       ['Absolute page error', ...sides.map((side) => (side?.paged ? String(side.page_error) : '—'))],
     ];
     rows.push(
-      ['SSIM', ...sides.map((side) => (side && side.ssim !== null ? side.ssim.toFixed(4) : '—'))],
+      ['SSIM', ...sides.map((side) => (side && side.ssim !== null ? fixed(side.ssim, 4) : '—'))],
       ['Scored/total', ...sides.map((side) => (side ? `${side.scored}/${side.total}` : '—'))],
     );
     if (format !== 'xlsx' && entry.timing)
@@ -500,8 +583,13 @@ export function renderLargeSection(aggregate, { date = new Date().toISOString().
   };
   const sequential = Object.fromEntries(FORMATS.filter((format) => formats[format].timing).map((format) => {
     const timing = formats[format].timing;
+    const size = given(timing.sample_size, timingSampleSize, '--timing-sample-size', `${format} timing.sample_size`);
+    if (size < sampled)
+      throw new Error(timing.sample_size === undefined
+        ? `--timing-sample-size ${size} must be at least 1 and at least the ${sampled} documents a format sampled`
+        : `Invalid ${format} timing.sample_size: below the ${sampled} documents a format sampled`);
     return [format, {
-      sample_size: given(timing.sample_size, timingSampleSize, '--timing-sample-size', `${format} timing.sample_size`),
+      sample_size: size,
       rounds: timing.rounds,
       summary: { total: timing.sample, common: timing.timed_by_every_engine, notes_not_converged: timing.notes_not_converged, channels: timing.channels },
     }];
@@ -528,7 +616,7 @@ export function renderLargeSection(aggregate, { date = new Date().toISOString().
 export function aggregateReport(report) {
   renderSection(report);
   const side = (result) => ({
-    ssim: result.mean === null ? null : Number(result.mean.toFixed(4)),
+    ssim: result.mean === null ? null : Number(fixed(result.mean, 4)),
     scored: result.count,
     total: result.total,
     exact_pages: result.exact,
@@ -612,34 +700,44 @@ function generatedBlock(readme, begin = BEGIN, end = END) {
   return readme.slice(...range);
 }
 
+const occurrences = (text, marker) => text.split(marker).length - 1;
+
 export function updateReadme(readme, section) {
   const kind = PAIRS.findIndex(([begin, end]) => section.startsWith(begin) && section.endsWith(end));
-  if (kind < 0) throw new Error('Invalid generated section');
+  if (kind < 0 || !PAIRS.every((pair, index) => pair.every((marker) => occurrences(section, marker) === (index === kind ? 1 : 0))))
+    throw new Error('Invalid generated section');
   const [visual, large] = PAIRS.map(([begin, end]) => blockRange(readme, begin, end));
   if (visual && large && visual[1] > large[0] && large[1] > visual[0])
     throw new Error('Broken generated markers');
   const own = kind ? large : visual;
   if (own) return readme.slice(0, own[0]) + section + readme.slice(own[1]);
-  if (kind && visual) return `${readme.slice(0, visual[1])}\n\n${section}${readme.slice(visual[1])}`;
-  if (!kind && large) return `${readme.slice(0, large[0])}${section}\n\n${readme.slice(large[0])}`;
-  const stripped = readme.replace(/^## Visual fidelity\n[\s\S]*?(?=^## |$(?![\s\S]))/m, '');
-  const packages = /^## Packages\r?\n/m.exec(stripped);
-  if (!packages) throw new Error('README has no Packages section');
-  const afterPackages = packages.index + packages[0].length;
-  const nextSection = /^## /m.exec(stripped.slice(afterPackages));
-  const position = nextSection ? afterPackages + nextSection.index : stripped.length;
-  return `${stripped.slice(0, position).trimEnd()}\n\n${section}\n\n${stripped.slice(
-    position
-  )}`;
+  const eol = readme.includes('\r\n') ? '\r\n' : '\n';
+  if (kind && visual) return `${readme.slice(0, visual[1])}${eol}${eol}${section}${readme.slice(visual[1])}`;
+  if (!kind && large) return `${readme.slice(0, large[0])}${section}${eol}${eol}${readme.slice(large[0])}`;
+  throw new Error('README has no generated block');
 }
 
-const RUN_URL = /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/actions\/runs\/\d+$/;
+const RUN_PATH = /^\/(?!\.+\/)[\w.-]+\/(?!\.+\/)[\w.-]+\/actions\/runs\/\d+$/;
 
-/** The section with a badge linking the workflow run that wrote it, dated like its block. */
+function isRunUrl(runUrl) {
+  let url;
+  try {
+    url = new URL(runUrl);
+  } catch {
+    return false;
+  }
+  return url.href === runUrl && url.protocol === 'https:' && url.host === 'github.com' &&
+    !url.username && !url.password && !url.search && !url.hash && RUN_PATH.test(url.pathname);
+}
+
+/** The section with a badge linking the workflow run that wrote it, dated like its block or by the given run date. */
 export function withRunBadge(section, runUrl, today = new Date().toISOString().slice(0, 10)) {
-  if (!RUN_URL.test(runUrl))
+  if (typeof runUrl !== 'string' || !isRunUrl(runUrl))
     throw new Error('--run-url must be https://github.com/<owner>/<repository>/actions/runs/<run id>');
-  const date = section.startsWith(LARGE_BEGIN) ? / on (\d{4}-\d{2}-\d{2}); aggregates only;/.exec(section)?.[1] : today;
+  if (/betteroffice\.dev\/api\/badge/.test(section)) throw new Error('Invalid generated section');
+  const large = section.startsWith(LARGE_BEGIN);
+  if (!large && !isDate(today)) throw new Error('Invalid date');
+  const date = large ? / on (\d{4}-\d{2}-\d{2}); aggregates only;/.exec(section)?.[1] : today;
   const generated = /^\*Generated by .*\*$/m.exec(section);
   if (!date || !generated) throw new Error('Invalid generated section');
   const at = generated.index + generated[0].length;
@@ -647,7 +745,7 @@ export function withRunBadge(section, runUrl, today = new Date().toISOString().s
   return `${section.slice(0, at)}\n\n${badge}${section.slice(at)}`;
 }
 
-const USAGE = 'usage: readme.mjs report.json [README.md] | readme.mjs --as large [--date YYYY-MM-DD] [--public README.md] report.json|aggregate.json [README.md] (an aggregate.json also takes [--timing-sample-size N] [--missing-reference N]) | readme.mjs --section section.md [README.md]; each also takes [--run-url https://github.com/<owner>/<repository>/actions/runs/<run id>]';
+const USAGE = 'usage: readme.mjs [--as public] report.json [README.md] | readme.mjs --as large [--public README.md] report.json|aggregate.json [README.md] (an aggregate.json also takes [--timing-sample-size N] [--missing-reference N]) | readme.mjs --section section.md [README.md]; each also takes [--date YYYY-MM-DD] [--run-url https://github.com/<owner>/<repository>/actions/runs/<run id>]';
 
 async function readRegular(path) {
   if (!(await lstat(path)).isFile()) throw new Error(`${path} must be a regular file`);
@@ -665,10 +763,12 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   const sectionRun = values.section !== undefined;
   const large = values.as === 'large';
   const counts = ['timing-sample-size', 'missing-reference'].filter((name) => values[name] !== undefined);
-  if ((values.as !== undefined && !large) || (sectionRun && (values.as !== undefined || positionals.length > 1)) ||
+  if ((values.as !== undefined && !['public', 'large'].includes(values.as)) || (sectionRun && (values.as !== undefined || positionals.length > 1)) ||
       (!sectionRun && (!positionals.length || positionals.length > 2)) ||
-      (!large && (values.date !== undefined || values.public !== undefined || counts.length)))
+      (!large && (values.public !== undefined || counts.length)))
     throw new Error(USAGE);
+  if (values.date !== undefined && !isDate(values.date)) throw new Error('Invalid date');
+  if (!sectionRun && privateMode() && !large) throw new Error(PRIVATE_ONLY);
   const argument = (name) => {
     if (values[name] === undefined) return undefined;
     if (!/^\d+$/.test(values[name]) || !Number.isSafeInteger(Number(values[name])))
@@ -683,10 +783,14 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   if (sectionRun) {
     section = await readFile(values.section, 'utf8');
     const [begin, end] = privateMode() ? [LARGE_BEGIN, LARGE_END] : [BEGIN, END];
-    if (!section.startsWith(begin) || !section.endsWith(end))
+    if (!section.startsWith(begin) || !section.endsWith(end) ||
+        (!privateMode() && PRIVATE_SECTION_PHRASES.some((phrase) => section.includes(phrase))))
       throw new Error('The generated section does not match this run');
   } else {
     const input = JSON.parse(await readFile(positionals[0], 'utf8'));
+    if (input.run_kind !== undefined) checked('runKind', input.run_kind, 'run_kind');
+    if (input.run_kind === 'private' && !large) throw new Error(PRIVATE_ONLY);
+    if (input.run_kind === 'public' && large) throw new Error('run_kind public does not match --as large');
     if (Array.isArray(input.samples)) {
       if (counts.length) throw new Error(`--${counts[0]} applies only to an aggregate.json`);
       section = renderSection(input, { privateCorpus: large, date: values.date });
@@ -694,6 +798,6 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     else throw new Error(`${positionals[0]} has no samples: an aggregate.json renders only the large set block (--as large)`);
     if (values.public !== undefined) readme = updateReadme(readme, generatedBlock(await readFile(values.public, 'utf8')));
   }
-  if (values['run-url'] !== undefined) section = withRunBadge(section, values['run-url']);
+  if (values['run-url'] !== undefined) section = withRunBadge(section, values['run-url'], values.date);
   await writeFile(readmePath, updateReadme(readme, section));
 }
