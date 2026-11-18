@@ -517,9 +517,17 @@ test('a README without a large set block gets it right after the public block, a
   const replaced = updateReadme(inserted, second);
   expect(replaced).toBe(shell(`${visual}\n\n${second}`));
   expect(replaced.split(LARGE_BEGIN).length).toBe(2);
-  const today = await readFile(join(import.meta.dir, '..', '..', 'README.md'), 'utf8');
-  const end = today.indexOf(VISUAL_END) + VISUAL_END.length;
-  expect(updateReadme(today, first)).toBe(`${today.slice(0, end)}\n\n${first}${today.slice(end)}`);
+});
+
+test('a README shaped like the published one gets the large set block right after its badged public block, and a later run replaces it', () => {
+  const visual = badged(renderSection(report()), DATE);
+  const first = renderSection(report(), { privateCorpus: true, date: DATE });
+  const second = renderSection(later(), { privateCorpus: true, date: '2026-11-18' });
+  const head = '# BetterOffice\n\n## Packages\n\n| Package | Version |\n| --- | --- |\n| docx | 0.1.0 |\n\n## Fonts\n\nFonts.\n\n';
+  const tail = '\n\n## Development\n\nCommands.\n\n## Evals\n\nEvals.\n';
+  const fixture = `${head}${visual}${tail}`;
+  expect(updateReadme(fixture, first)).toBe(`${head}${visual}\n\n${first}${tail}`);
+  expect(updateReadme(`${head}${visual}\n\n${first}${tail}`, second)).toBe(`${head}${visual}\n\n${second}${tail}`);
 });
 
 test('refuses a README with a repeated or broken pair of either kind', () => {
@@ -551,6 +559,8 @@ test('the large set section carries one generated line and aggregates only: no i
 const script = join(import.meta.dir, 'readme.mjs');
 const cli = (args: string[], cwd: string, privateRun: boolean) =>
   spawnSync(process.execPath, [script, ...args], { cwd, encoding: 'utf8', env: { ...process.env, QUALITY_PRIVATE: privateRun ? 'true' : 'false' } });
+const refused = (result: { status: number | null; stderr: string }, text: string) =>
+  expect({ refused: result.status !== 0, stderr: result.stderr }).toEqual({ refused: true, stderr: expect.stringContaining(text) });
 
 test('the CLI writes a section only into the block of its own run kind', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'readme-cli-'));
@@ -563,15 +573,15 @@ test('the CLI writes a section only into the block of its own run kind', async (
     await writeFile(path, readme);
     await writeFile(join(dir, 'public.md'), next);
     await writeFile(join(dir, 'large.md'), large);
-    expect(cli(['--section', 'public.md', 'README.md'], dir, true).status).not.toBe(0);
-    expect(cli(['--section', 'large.md', 'README.md'], dir, false).status).not.toBe(0);
+    refused(cli(['--section', 'public.md', 'README.md'], dir, true), 'The generated section does not match this run');
+    refused(cli(['--section', 'large.md', 'README.md'], dir, false), 'The generated section does not match this run');
     expect(await readFile(path, 'utf8')).toBe(readme);
     expect(cli(['--section', 'large.md', 'README.md'], dir, true).status).toBe(0);
     expect(await readFile(path, 'utf8')).toBe(shell(`${visual}\n\n${large}`));
     expect(cli(['--section', 'public.md', 'README.md'], dir, false).status).toBe(0);
     expect(await readFile(path, 'utf8')).toBe(shell(`${next}\n\n${large}`));
     await symlink('README.md', join(dir, 'link.md'));
-    expect(cli(['--section', 'large.md', 'link.md'], dir, true).status).not.toBe(0);
+    refused(cli(['--section', 'large.md', 'link.md'], dir, true), 'must be a regular file');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -587,7 +597,7 @@ test('--as large repairs a README whose public block an older private run overwr
     await writeFile(path, shell(stale));
     await writeFile(join(dir, 'main.md'), shell(visual));
     await writeFile(join(dir, 'report.json'), JSON.stringify(stored));
-    expect(cli(['--as', 'small', 'report.json', 'README.md'], dir, false).status).not.toBe(0);
+    refused(cli(['--as', 'small', 'report.json', 'README.md'], dir, false), 'usage: readme.mjs');
     expect(cli(['--as', 'large', '--public', 'main.md', '--date', DATE, 'report.json', 'README.md'], dir, false).status).toBe(0);
     expect(await readFile(path, 'utf8')).toBe(shell(`${visual}\n\n${renderSection(stored, { privateCorpus: true, date: DATE })}`));
   } finally {
@@ -660,7 +670,7 @@ test('--as large renders the same block from the run artifact aggregate.json as 
     expect(await readFile(join(dir, 'from-report.md'), 'utf8')).toBe(expected);
     expect(await readFile(join(dir, 'from-aggregate.md'), 'utf8')).toBe(expected);
     await writeFile(join(dir, 'public.md'), shell(visual));
-    expect(cli(['aggregate.json', 'public.md'], dir, false).status).not.toBe(0);
+    refused(cli(['aggregate.json', 'public.md'], dir, false), 'renders only the large set block');
     expect(await readFile(join(dir, 'public.md'), 'utf8')).toBe(shell(visual));
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -682,24 +692,16 @@ test('--as large takes the timing sample size and missing reference count as arg
     const run = (args: string[]) => cli(['--as', 'large', '--date', DATE, ...args, 'README.md'], dir, false);
 
     await writeFile(path, shell(visual));
-    const bare = run(['old.json']);
-    expect(bare.status).not.toBe(0);
-    expect(bare.stderr).toContain('--timing-sample-size');
-    const unsized = run(['--missing-reference', '1', 'old.json']);
-    expect(unsized.status).not.toBe(0);
-    expect(unsized.stderr).toContain('--timing-sample-size');
-    const uncovered = run(['--timing-sample-size', '200', 'old.json']);
-    expect(uncovered.status).not.toBe(0);
-    expect(uncovered.stderr).toContain('--missing-reference');
+    refused(run(['old.json']), '--timing-sample-size');
+    refused(run(['--missing-reference', '1', 'old.json']), '--timing-sample-size');
+    refused(run(['--timing-sample-size', '200', 'old.json']), '--missing-reference');
     expect(await readFile(path, 'utf8')).toBe(shell(visual));
     expect(run(['--timing-sample-size', '200', '--missing-reference', '1', 'old.json']).status).toBe(0);
     expect(await readFile(path, 'utf8')).toBe(expected);
 
     for (const args of [['--timing-sample-size', '199'], ['--missing-reference', '2']]) {
       await writeFile(path, shell(visual));
-      const refused = run([...args, 'new.json']);
-      expect(refused.status).not.toBe(0);
-      expect(refused.stderr).toContain(args[0]);
+      refused(run([...args, 'new.json']), args[0]);
       expect(await readFile(path, 'utf8')).toBe(shell(visual));
     }
     for (const args of [['--timing-sample-size', '200'], ['--missing-reference', '1'], ['--timing-sample-size', '200', '--missing-reference', '1']]) {
@@ -710,11 +712,8 @@ test('--as large takes the timing sample size and missing reference count as arg
 
     await writeFile(path, shell(visual));
     for (const value of ['-1', '1.5', 'abc', '', '1e2', ' 1'])
-      for (const [name, other] of [['--timing-sample-size', ['--missing-reference=1']], ['--missing-reference', ['--timing-sample-size=200']]]) {
-        const refused = run([`${name}=${value}`, ...other, 'old.json']);
-        expect(refused.status).not.toBe(0);
-        expect(refused.stderr).toContain(name);
-      }
+      for (const [name, other] of [['--timing-sample-size', ['--missing-reference=1']], ['--missing-reference', ['--timing-sample-size=200']]] as const)
+        refused(run([`${name}=${value}`, ...other, 'old.json']), name);
     expect(await readFile(path, 'utf8')).toBe(shell(visual));
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -771,9 +770,7 @@ test('the CLI puts a badge linking the run into the block it writes when given t
     expect(fromReport).toBe(shell(badged(next, reportDay)));
 
     await writeFile(path, shell(visual));
-    const refused = cli(['--section', 'large.md', '--run-url', 'https://example.com/actions/runs/1', 'README.md'], dir, true);
-    expect(refused.status).not.toBe(0);
-    expect(refused.stderr).toContain('--run-url');
+    refused(cli(['--section', 'large.md', '--run-url', 'https://example.com/actions/runs/1', 'README.md'], dir, true), '--run-url must be');
     expect(await readFile(path, 'utf8')).toBe(shell(visual));
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -807,13 +804,261 @@ test('--as large takes --run-url for the badge and refuses a URL that is not a G
       'https://github.com/openooxml/betteroffice/actions/runs/1"><img src=x>',
       ` ${RUN}`,
       `${RUN}\n`,
-    ]) {
-      const refused = cli(['--as', 'large', '--date', DATE, `--run-url=${url}`, 'aggregate.json', 'README.md'], dir, false);
-      expect(refused.status).not.toBe(0);
-      expect(refused.stderr).toContain('--run-url');
-    }
+    ])
+      refused(cli(['--as', 'large', '--date', DATE, `--run-url=${url}`, 'aggregate.json', 'README.md'], dir, false), '--run-url must be');
     expect(await readFile(path, 'utf8')).toBe(shell(visual));
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test('updateReadme refuses a section that carries markers other than its own outer pair', () => {
+  const visual = renderSection(report());
+  const large = renderSection(report(), { privateCorpus: true, date: DATE });
+  const readme = shell(`${visual}\n\n${large}`);
+  for (const section of [
+    `${LARGE_BEGIN}\n${visual}\n${LARGE_END}`,
+    large.replace('<details>', `${LARGE_END}\n\n${LARGE_BEGIN}\n<details>`),
+    visual.replace('<details>', `${LARGE_BEGIN}\nOther block.\n${LARGE_END}\n\n<details>`),
+    visual.replace('<details>', `${VISUAL_END}\n\n${VISUAL_BEGIN}\n<details>`),
+    `${VISUAL_BEGIN}\n${large}\n${VISUAL_END}`,
+  ])
+    expect(() => updateReadme(readme, section)).toThrow('Invalid generated section');
+});
+
+test('the CLI --section refuses a large set section that carries the public pair and leaves the README unchanged', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'readme-nested-'));
+  try {
+    const visual = renderSection(report());
+    const readme = shell(`${visual}\n\n${renderSection(report(), { privateCorpus: true, date: DATE })}`);
+    const path = join(dir, 'README.md');
+    await writeFile(path, readme);
+    await writeFile(join(dir, 'nested.md'), `${LARGE_BEGIN}\n${renderSection(later())}\n${LARGE_END}`);
+    refused(cli(['--section', 'nested.md', 'README.md'], dir, true), 'Invalid generated section');
+    expect(await readFile(path, 'utf8')).toBe(readme);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('the CLI --section refuses a README without the generated block of its kind and leaves it unchanged', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'readme-unmarked-'));
+  try {
+    const readme = '# P\n\n## Packages\n\nL.\n\n## Visual fidelity\n\nHand text.\n\n## Evals\n';
+    const path = join(dir, 'README.md');
+    await writeFile(path, readme);
+    await writeFile(join(dir, 'public.md'), renderSection(later()));
+    await writeFile(join(dir, 'large.md'), renderSection(report(), { privateCorpus: true, date: DATE }));
+    for (const [file, privateRun] of [['large.md', true], ['public.md', false]] as const) {
+      refused(cli(['--section', file, 'README.md'], dir, privateRun), 'README has no generated block');
+      expect(await readFile(path, 'utf8')).toBe(readme);
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+const STORED_PATH = '/private/acme.bin';
+const assign = (target: any, path: string, value: unknown) => {
+  const keys = path.split('.');
+  keys.slice(0, -1).reduce((node, key) => node[key], target)[keys.at(-1)!] = value;
+};
+const refusesNaming = (render: () => unknown, field: string, value: unknown) => {
+  let message = '';
+  try {
+    render();
+  } catch (error) {
+    message = String((error as Error)?.message ?? error);
+  }
+  expect({ field, named: message.includes(field), leaked: typeof value === 'string' && message.includes(value) })
+    .toEqual({ field, named: true, leaked: false });
+};
+
+test('the large set renderers refuse a stored count, round or font label that is not valid, naming the field and not the value', async () => {
+  const { renderLargeSection } = (await import('./readme.mjs')) as any;
+  const fields: [string, string, unknown][] = [
+    ['docx', 'samples', STORED_PATH],
+    ['docx', 'fidelity.published.scored', STORED_PATH],
+    ['docx', 'fidelity.published.scored', -1],
+    ['docx', 'fidelity.published.total', STORED_PATH],
+    ['docx', 'fidelity.commit.exact_pages', STORED_PATH],
+    ['docx', 'fidelity.commit.paged', STORED_PATH],
+    ['docx', 'fidelity.commit.page_error', STORED_PATH],
+    ['docx', 'timing.rounds', STORED_PATH],
+    ['docx', 'timing.rounds', 2.5],
+    ['docx', 'timing.sample', STORED_PATH],
+    ['docx', 'timing.timed_by_every_engine', STORED_PATH],
+    ['docx', 'timing.notes_not_converged', STORED_PATH],
+    ['docx', 'timing.channels.commit.successful', STORED_PATH],
+    ['docx', 'timing.channels.commit.mean_ms', STORED_PATH],
+    ['xlsx', 'timing.rounds', STORED_PATH],
+    ['xlsx', 'recalc.commit.workbooks', STORED_PATH],
+    ['xlsx', 'recalc.commit.correct', STORED_PATH],
+    ['xlsx', 'recalc.commit.total', STORED_PATH],
+    ['xlsx', 'recalc.commit.fully_matching', STORED_PATH],
+    ['xlsx', 'roundtrip.commit.parsed', STORED_PATH],
+    ['xlsx', 'roundtrip.commit.total', STORED_PATH],
+  ];
+  for (const [format, path, value] of fields) {
+    const aggregate = written(fullReport());
+    assign(aggregate, `formats.${format}.${path}`, value);
+    refusesNaming(() => renderLargeSection(aggregate, { date: DATE }), `${format} ${path}`, value);
+  }
+  for (const label of [`${STORED_PATH} (workspace)`, `@betteroffice/fonts@0.5.0 (${STORED_PATH})`, `@betteroffice/fonts@0.4.2 and ${STORED_PATH} (local release copy)`]) {
+    const aggregate = written(fontsReport());
+    aggregate.formats.docx.fonts.published.sources = [label];
+    refusesNaming(() => renderLargeSection(aggregate, { date: DATE }), 'docx fonts.published.sources', STORED_PATH);
+  }
+  for (const path of ['rounds', 'sample_size', 'summary.total', 'summary.common', 'summary.channels.commit.successful', 'summary.channels.commit.mean_ms']) {
+    const input = fullReport();
+    assign(input.timing_benchmark.docx, path, STORED_PATH);
+    refusesNaming(() => renderSection(input, { privateCorpus: true, date: DATE }), `timing_benchmark.docx.${path}`, STORED_PATH);
+  }
+  for (const key of ['package', 'cjk', 'copy']) {
+    const input: any = fontsReport();
+    input.samples[0].comparisons[0].fonts[key] = STORED_PATH;
+    refusesNaming(() => renderSection(input, { privateCorpus: true, date: DATE }), `fonts.${key}`, STORED_PATH);
+  }
+});
+
+const PRIVATE_PHRASES = [
+  'per-document results are not published',
+  'aggregates only; documents are not public',
+  'Times: mean per document over a seeded sample',
+  '## Benchmarks: large set',
+];
+
+test('the positional CLI refuses a private run report as the public block', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'readme-private-positional-'));
+  try {
+    const visual = renderSection(report());
+    const path = join(dir, 'README.md');
+    await writeFile(path, shell(visual));
+    await writeFile(join(dir, 'report.json'), JSON.stringify(later()));
+    await writeFile(join(dir, 'marked.json'), JSON.stringify({ ...later(), run_kind: 'private' }));
+    refused(cli(['report.json', 'README.md'], dir, true), 'a private run writes only the large set block');
+    refused(cli(['marked.json', 'README.md'], dir, false), 'a private run writes only the large set block');
+    expect(await readFile(path, 'utf8')).toBe(shell(visual));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('the public --section check refuses an older private run section', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'readme-stale-section-'));
+  try {
+    const visual = renderSection(report());
+    const stale = `${VISUAL_BEGIN}\n## Benchmarks\n\n*Generated by the [Benchmarks action](.github/workflows/visual-fidelity.yml); per-document results are not published.*\n\nOlder private numbers.\n\n${VISUAL_END}`;
+    const path = join(dir, 'README.md');
+    await writeFile(path, shell(visual));
+    await writeFile(join(dir, 'stale.md'), stale);
+    refused(cli(['--section', 'stale.md', 'README.md'], dir, false), 'The generated section does not match this run');
+    expect(await readFile(path, 'utf8')).toBe(shell(visual));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('the phrases that mark a private section are kept in one list', async () => {
+  const { PRIVATE_SECTION_PHRASES } = (await import('./readme.mjs')) as any;
+  expect(PRIVATE_SECTION_PHRASES).toEqual(PRIVATE_PHRASES);
+});
+
+for (const phrase of PRIVATE_PHRASES)
+  test(`the public --section check refuses an otherwise valid public section holding: ${phrase}`, async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'readme-private-phrase-'));
+    try {
+      const visual = renderSection(report());
+      const path = join(dir, 'README.md');
+      await writeFile(path, shell(visual));
+      await writeFile(join(dir, 'public.md'), renderSection(later()).replace('<details>', `${phrase}\n\n<details>`));
+      refused(cli(['--section', 'public.md', 'README.md'], dir, false), 'The generated section does not match this run');
+      expect(await readFile(path, 'utf8')).toBe(shell(visual));
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+test('first insertion keeps a CRLF README line endings around both blocks', () => {
+  const visual = renderSection(report());
+  const large = renderSection(report(), { privateCorpus: true, date: DATE });
+  expect(updateReadme(`# P\r\n\r\n## Packages\r\n\r\n${visual}\r\n\r\n## Evals\r\n`, large))
+    .toBe(`# P\r\n\r\n## Packages\r\n\r\n${visual}\r\n\r\n${large}\r\n\r\n## Evals\r\n`);
+});
+
+test('--timing-sample-size below a format sampled count is refused', async () => {
+  const { renderLargeSection } = (await import('./readme.mjs')) as any;
+  const aggregate = written(fullReport());
+  for (const format of ['docx', 'xlsx']) delete aggregate.formats[format].timing.sample_size;
+  expect([aggregate.formats.docx.timing.sample, aggregate.formats.xlsx.timing.sample]).toEqual([2, 2]);
+  for (const size of [0, 1])
+    expect(() => renderLargeSection(aggregate, { date: DATE, timingSampleSize: size })).toThrow('--timing-sample-size');
+  expect(renderLargeSection(aggregate, { date: DATE, timingSampleSize: 200 })).toBe(renderSection(fullReport(), { privateCorpus: true, date: DATE }));
+});
+
+test('a mean just below zero renders 0.0000 byte-identically on the report and the aggregate path', async () => {
+  const { renderLargeSection } = (await import('./readme.mjs')) as any;
+  const input = report();
+  for (const comparison of input.samples[0].comparisons) comparison.penalized_ssim = -0.00001;
+  const shown = renderSection(input, { privateCorpus: true, date: DATE });
+  expect(renderLargeSection(written(input), { date: DATE })).toBe(shown);
+  expect(shown).toContain(row('SSIM', '0.0000', '0.0000'));
+});
+
+test('--run-url refuses dot segments', async () => {
+  const { withRunBadge } = (await import('./readme.mjs')) as any;
+  const visual = renderSection(report());
+  for (const url of [
+    'https://github.com/openooxml/../actions/runs/1',
+    'https://github.com/openooxml/./actions/runs/1',
+    'https://github.com/../betteroffice/actions/runs/1',
+    'https://github.com/./betteroffice/actions/runs/1',
+    'https://github.com/openooxml/.../actions/runs/1',
+  ])
+    expect(() => withRunBadge(visual, url, DATE)).toThrow('--run-url must be');
+  expect(withRunBadge(visual, RUN, DATE)).toBe(badged(visual, DATE));
+});
+
+test('withRunBadge refuses a section that already carries a run badge', async () => {
+  const { withRunBadge } = (await import('./readme.mjs')) as any;
+  const visual = renderSection(report());
+  const large = renderSection(report(), { privateCorpus: true, date: DATE });
+  expect(() => withRunBadge(withRunBadge(visual, RUN, DATE), RUN, DATE)).toThrow('Invalid generated section');
+  expect(() => withRunBadge(withRunBadge(large, RUN), RUN)).toThrow('Invalid generated section');
+});
+
+test('the public block badge takes its date from --date, and two runs write identical bytes', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'readme-badge-date-'));
+  try {
+    const visual = renderSection(report());
+    const next = renderSection(later());
+    const dated = '2026-01-02';
+    const expected = shell(badged(next, dated));
+    const path = join(dir, 'README.md');
+    await writeFile(path, shell(visual));
+    await writeFile(join(dir, 'public.md'), next);
+    const run = () => cli(['--section', 'public.md', '--date', dated, '--run-url', RUN, 'README.md'], dir, false);
+    const first = run();
+    expect({ status: first.status, readme: await readFile(path, 'utf8') }).toEqual({ status: 0, readme: expected });
+    const second = run();
+    expect({ status: second.status, readme: await readFile(path, 'utf8') }).toEqual({ status: 0, readme: expected });
+    refused(cli(['--section', 'public.md', '--date', '2026-1-2', '--run-url', RUN, 'README.md'], dir, false), 'Invalid date');
+    expect(await readFile(path, 'utf8')).toBe(expected);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('the website reads the writer output: the badged public block only, with the large set block beside it', async () => {
+  const { withRunBadge } = (await import('./readme.mjs')) as any;
+  const { parseFidelity } = await import('../../apps/web/lib/fidelity.ts');
+  const visual = withRunBadge(renderSection(fullReport()), RUN, DATE);
+  const large = withRunBadge(renderSection(fullReport(), { privateCorpus: true, date: DATE }), RUN);
+  const readme = updateReadme(updateReadme(shell(renderSection(report())), visual), large);
+  const formats = parseFidelity(readme);
+  expect(formats.map((format) => format.format)).toEqual(['xlsx']);
+  expect(formats).toEqual(parseFidelity(renderSection(fullReport())));
+  const config = await readFile(join(import.meta.dir, '..', '..', 'apps', 'web', 'next.config.ts'), 'utf8');
+  const pattern = config.match(/README\.match\(\/(.+?)\/\)/)![1];
+  expect(readme.match(new RegExp(pattern))?.[0]).toBe(visual);
 });

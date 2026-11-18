@@ -428,8 +428,33 @@ test('the README step writes only the block of its own run kind through readme.m
   const step = publish.steps.find((step: any) => step.name === 'Replace the generated README section');
   expect(step.if).toBe(README);
   expect(step.env).toEqual({ QUALITY_PRIVATE: '${{ inputs.private_corpus }}' });
-  expect(String(step.run).trim()).toBe('node scripts/office-quality/readme.mjs --section "$RUNNER_TEMP/fidelity-report/section.md" --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" README.md');
+  const run = String(step.run).trim();
+  expect(run).toStartWith('node .workflow-tools/scripts/office-quality/readme.mjs --section "$RUNNER_TEMP/fidelity-report/section.md" ');
+  expect(run).toContain(' --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" ');
+  expect(run).toContain(' --date ');
+  expect(run).toEndWith(' README.md');
   expect(step.run).not.toContain('GENERATED');
+});
+
+test('the README writer runs from the workflow revision, not the measured branch', () => {
+  const [branch] = publish.steps.filter((step: any) => step.uses?.startsWith('actions/checkout@'));
+  const tools = publish.steps.filter((step: any) => step.uses?.startsWith('actions/checkout@') && step.with?.ref === '${{ github.workflow_sha }}');
+  expect(tools.map((step: any) => ({ uses: step.uses, with: step.with }))).toEqual([{
+    uses: branch.uses,
+    with: expect.objectContaining({
+      ref: '${{ github.workflow_sha }}',
+      path: '.workflow-tools',
+      'sparse-checkout': expect.stringMatching(/^scripts\/office-quality\n?$/),
+      'persist-credentials': false,
+    }),
+  }]);
+  const writer = publish.steps.find((step: any) => step.name === 'Replace the generated README section');
+  expect(publish.steps.indexOf(tools[0])).toBeLessThan(publish.steps.indexOf(writer));
+  expect(String(writer.run).trim()).toStartWith('node .workflow-tools/scripts/office-quality/readme.mjs ');
+  expect(String(writer.run).split('.workflow-tools').length).toBe(2);
+  const users = steps.filter(({ step }) => JSON.stringify(step).includes('.workflow-tools'))
+    .map(({ job, step }) => `${job}/${step.uses?.startsWith('actions/checkout@') ? step.with?.ref : step.name}`);
+  expect(users).toEqual(['publish/${{ github.workflow_sha }}', 'publish/Replace the generated README section']);
 });
 
 test('the reconciled artifact always carries the aggregate, and the private bundle keeps it too', () => {
