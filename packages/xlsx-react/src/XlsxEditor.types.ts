@@ -120,7 +120,7 @@ interface XlsxHostProps {
   downloadOnSave?: boolean;
   /** Initial scale, clamped to the supported zoom range. Defaults to 1. */
   initialZoom?: number;
-  /** Rendered while a supplied file is opening. */
+  /** Rendered while a supplied file is opening, in an overlay whose size does not affect the editor's layout. */
   loadingIndicator?: React.ReactNode;
   /** Inline style overrides for the editor root. */
   style?: React.CSSProperties;
