@@ -324,7 +324,7 @@ async function loadCoveringSlices(
   const slices = await remoteFontSlices(family, face, options);
   options.signal?.throwIfAborted();
   if (slices.length === 0) return [];
-  const keyOf =(rule: RemoteFontFaceRule) => JSON.stringify([alias, rule.weight, rule.style, rule.unicodeRange, preferredSource(rule).url]);
+  const keyOf = (rule: RemoteFontFaceRule) => JSON.stringify([alias, rule.weight, rule.style, rule.unicodeRange, preferredSource(rule).url]);
   const present = (entry: RegisteredSlice) => !entry.loaded || typeof fontSet.has !== 'function' || fontSet.has(entry.loaded);
   for (const rule of slices) {
     const entry = registered.get(keyOf(rule));
