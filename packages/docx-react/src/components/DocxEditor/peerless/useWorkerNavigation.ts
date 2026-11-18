@@ -3,6 +3,7 @@ import type { DocxEditorProps } from '../../DocxEditor';
 import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession';
 import { WorkerReadSupersededError, type createPeerlessShellController } from './shellController';
 import { workerDocumentVersion } from './workerPluginGeometry';
+import type { PeerlessFrameGeometry } from './viewStore';
 import { workerPageAtViewport } from './pageNavigation';
 import type { DocxCommandSelection, DocxOutlineHeading, DocxReviewTarget } from '@betteroffice/docx/yrs';
 import { createDisplayListQueries, loadRustDisplayListQueryEngine } from '@betteroffice/docx/layout/render';
@@ -12,6 +13,8 @@ const samePoint = (a: DocxCommandSelection['anchor'], b: DocxCommandSelection['a
   a.story === b.story && a.paraId === b.paraId && a.offset === b.offset;
 const samePosition = (shown: DocxCommandSelection | null | undefined, ours: DocxCommandSelection) =>
   !!shown && samePoint(shown.anchor, ours.anchor) && samePoint(shown.focus, ours.focus);
+const samePagePlacement = (a: PeerlessFrameGeometry, b: PeerlessFrameGeometry) => a.layoutRevision === b.layoutRevision &&
+  a.layoutEpoch === b.layoutEpoch && a.rasterScale === b.rasterScale && a.documentWidth === b.documentWidth;
 
 export function useWorkerNavigation(controller: ReturnType<typeof createPeerlessShellController>,
   binding: () => PeerlessEditSessionBinding | null, scroller: RefObject<HTMLDivElement | null>,
@@ -137,7 +140,7 @@ export function useWorkerNavigation(controller: ReturnType<typeof createPeerless
     if (selection.anchor.story !== selection.focus.story || selection.anchor.paraId !== selection.focus.paraId || selection.anchor.offset !== selection.focus.offset) {
       if (!await select({ anchor: selection.focus, focus: selection.anchor })) return false;
       const final = current.viewStore.getSnapshot().geometry;
-      shown = final?.caret ?? final?.selectionFocus ?? (final?.layoutRevision === first.layoutRevision ? shown : null);
+      shown = final?.caret ?? final?.selectionFocus ?? (final && samePagePlacement(first, final) ? shown : null);
       if (!shown) return !requireGeometry;
     }
     if (!scroller.current || !host.current) return false;
