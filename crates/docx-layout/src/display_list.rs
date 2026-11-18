@@ -1010,6 +1010,10 @@ pub struct EchoRunFacts {
     pub primary_font: bool,
     #[serde(default, skip_serializing_if = "echo_zero")]
     pub letter_spacing: f64,
+    /// East Asian auto-spacing the paragraph turns off: bit 1 `w:autoSpaceDE` (against Latin
+    /// letters), bit 2 `w:autoSpaceDN` (against digits). Both default to on.
+    #[serde(default, skip_serializing_if = "echo_no_bits")]
+    pub auto_space_off: u8,
     #[serde(default, skip_serializing_if = "echo_zero")]
     pub position: f64,
     #[serde(default = "echo_scale", skip_serializing_if = "echo_default_scale")]
@@ -1034,6 +1038,10 @@ fn echo_coordinate<S: serde::Serializer>(value: &f64, serializer: S) -> Result<S
 
 fn echo_zero(value: &f64) -> bool {
     *value == 0.0
+}
+
+fn echo_no_bits(value: &u8) -> bool {
+    *value == 0
 }
 
 fn echo_primary() -> bool {
@@ -9455,6 +9463,7 @@ fn try_emit_glyph_runs(
             kerning: fmt.kerning_min_pt.unwrap_or(0.0),
             primary_font: echo_font_route && chain.ids.first() == Some(&font),
             letter_spacing: fmt.letter_spacing.unwrap_or(0.0),
+            auto_space_off: u8::from(!auto_space.latin) | (u8::from(!auto_space.numeric) << 1),
             position: fmt.position_px.unwrap_or(0.0),
             scale: fmt.horizontal_scale.unwrap_or(100.0),
             can_empty: false,

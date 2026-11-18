@@ -786,15 +786,24 @@ impl EditSession {
     /// at display position `position`: `{"faces":[[display,measured,metrics],…],
     /// "latin","eastAsia"}`, each face null where that path would not take the
     /// character as plain text; undefined before a region pass or off any text run.
-    pub fn echo_faces_json(&self, position: f64, alphabet: &str) -> Option<String> {
-        self.core.echo_faces_json(position, alphabet)
+    pub fn echo_faces_json(
+        &self,
+        position: f64,
+        alphabet: &str,
+        line_start: f64,
+        line_end: f64,
+    ) -> Option<String> {
+        self.core
+            .echo_faces_json(position, alphabet, line_start, line_end)
     }
 
     /// Typing echo model of one font at one shaping size from this session's
     /// resident font store: `{"horizontal","glyphIds","advances","kerning",
     /// "unsafePairs"}`, indexed by the characters of `alphabet`. `kern` is the
     /// run's kerning gate and `language` its BCP-47 shaping language (absent for
-    /// none). Errors for an unknown font or a non-positive size.
+    /// none). With `known`, the pairs are only those with a character from
+    /// `known` on, for a caller that holds the pairs of the first `known`.
+    /// Errors for an unknown font or a non-positive size.
     pub fn echo_glyph_set_json(
         &self,
         font_id: u32,
@@ -802,9 +811,17 @@ impl EditSession {
         kern: bool,
         alphabet: &str,
         language: Option<String>,
+        known: Option<u32>,
     ) -> Result<String, JsValue> {
         self.core
-            .echo_glyph_set_json(font_id, size, kern, language.as_deref(), alphabet)
+            .echo_glyph_set_json(
+                font_id,
+                size,
+                kern,
+                language.as_deref(),
+                alphabet,
+                known.unwrap_or(0) as usize,
+            )
             .map_err(JsValue::from)
     }
 

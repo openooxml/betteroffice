@@ -56,6 +56,25 @@ pub fn echo_glyph_set_with_language(
     language: Option<&str>,
     alphabet: &[char],
 ) -> Result<EchoGlyphSet, FontError> {
+    echo_glyph_set_extending(store, font, size, kern, language, alphabet, 0)
+}
+
+/// [`echo_glyph_set_with_language`] for an `alphabet` whose first `known` characters an
+/// earlier set of the same font, size, gate and language already paired with one another.
+/// Every character is shaped alone again (the isolated glyphs and advances cover the whole
+/// alphabet), but only pairs with a character from `known` on are shaped, so `kerning` and
+/// `unsafe_pairs` hold those pairs (and every ligature barrier) for the caller to add to the
+/// earlier set's. Shaping a pair costs the pair sequence, which grows with the square of the
+/// alphabet; an alphabet that gains a few characters pays only for them.
+pub fn echo_glyph_set_extending(
+    store: &FontStore,
+    font: FontId,
+    size: f32,
+    kern: bool,
+    language: Option<&str>,
+    alphabet: &[char],
+    known: usize,
+) -> Result<EchoGlyphSet, FontError> {
     let features = kern_features(kern);
     let upem = store.metrics(font)?.units_per_em as f32;
     let scale = size / upem;
@@ -105,11 +124,15 @@ pub fn echo_glyph_set_with_language(
         .collect();
 
     let mut pairs: HashMap<(usize, usize), Option<i32>> = HashMap::new();
-    if !supported.is_empty() {
-        let sequence: Vec<usize> = pair_sequence(supported.len())
+    let sequence: Vec<usize> = if known == 0 {
+        pair_sequence(supported.len())
             .into_iter()
             .map(|index| supported[index])
-            .collect();
+            .collect()
+    } else {
+        extension_sequence(&supported, known)
+    };
+    if sequence.len() > 1 {
         let mut text = String::with_capacity(sequence.len() * 2);
         let mut offsets = Vec::with_capacity(sequence.len());
         for &index in &sequence {
@@ -529,6 +552,20 @@ fn context_may_match(
 /// A sequence over `count` symbols in which every ordered pair occurs exactly
 /// once: the Lyndon words of length one and two in order, closed by its first
 /// symbol (a linear de Bruijn sequence of order two).
+/// A sequence of `supported` alphabet indices whose neighbours are exactly the ordered pairs
+/// with at least one index from `known` on: `n x n y n …` for every new `n`.
+fn extension_sequence(supported: &[usize], known: usize) -> Vec<usize> {
+    let mut sequence = Vec::new();
+    for &new in supported.iter().filter(|&&index| index >= known) {
+        sequence.push(new);
+        for &other in supported {
+            sequence.push(other);
+            sequence.push(new);
+        }
+    }
+    sequence
+}
+
 fn pair_sequence(count: usize) -> Vec<usize> {
     let mut sequence = Vec::with_capacity(count * count + 1);
     for left in 0..count {
@@ -622,6 +659,77 @@ mod tests {
         alphabet.extend("한글입력시다문장가각".chars());
         alphabet.extend('\u{3131}'..='\u{318e}');
         alphabet
+    }
+
+    #[test]
+    fn an_extended_glyph_set_adds_exactly_the_pairs_its_new_characters_make() {
+        let mut store = FontStore::new();
+        let fonts = [
+            (
+                store.register(NOTO_SANS_KR.to_vec()).unwrap(),
+                Some("ko-KR"),
+            ),
+            (store.register(LIBERATION_SANS.to_vec()).unwrap(), None),
+        ];
+        let alphabet: Vec<char> = "AVTo.,가각한글ㄱㅏ fi".chars().collect();
+        for (font, language) in fonts {
+            for kern in [false, true] {
+                let full = echo_glyph_set_with_language(
+                    &store, font, 13.333_333, kern, language, &alphabet,
+                )
+                .unwrap();
+                for known in [1, 4, alphabet.len() - 1, alphabet.len()] {
+                    let earlier = echo_glyph_set_with_language(
+                        &store,
+                        font,
+                        13.333_333,
+                        kern,
+                        language,
+                        &alphabet[..known],
+                    )
+                    .unwrap();
+                    let extended = echo_glyph_set_extending(
+                        &store, font, 13.333_333, kern, language, &alphabet, known,
+                    )
+                    .unwrap();
+                    assert_eq!(extended.glyph_ids, full.glyph_ids);
+                    assert_eq!(extended.advances, full.advances);
+                    assert_eq!(extended.horizontal, full.horizontal);
+                    let new = |left: usize, right: usize| left >= known || right >= known;
+                    assert!(
+                        extended
+                            .kerning
+                            .iter()
+                            .all(|&[left, right, _]| new(left as usize, right as usize))
+                    );
+                    let mut kerning = earlier.kerning.clone();
+                    kerning.extend(&extended.kerning);
+                    kerning.sort_unstable();
+                    assert_eq!(kerning, full.kerning, "kern={kern} known={known}");
+                    let mut unsafe_pairs = earlier
+                        .unsafe_pairs
+                        .iter()
+                        .filter(|&&[left, right]| {
+                            full.glyph_ids[left as usize] != 0
+                                && full.glyph_ids[right as usize] != 0
+                        })
+                        .copied()
+                        .collect::<Vec<_>>();
+                    unsafe_pairs.extend(&extended.unsafe_pairs);
+                    unsafe_pairs.sort_unstable();
+                    unsafe_pairs.dedup();
+                    let mut expected = full.unsafe_pairs.clone();
+                    expected.retain(|&[left, right]| {
+                        full.glyph_ids[left as usize] != 0 && full.glyph_ids[right as usize] != 0
+                    });
+                    unsafe_pairs.retain(|&[left, right]| {
+                        full.glyph_ids[left as usize] != 0 && full.glyph_ids[right as usize] != 0
+                    });
+                    assert_eq!(unsafe_pairs, expected, "kern={kern} known={known}");
+                }
+                assert!(!kern || language.is_some() || !full.kerning.is_empty());
+            }
+        }
     }
 
     #[test]

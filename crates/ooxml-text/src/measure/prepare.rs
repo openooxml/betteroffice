@@ -982,8 +982,9 @@ pub(super) fn measure_plain_text(
 }
 
 /// The faces measurement gives each character of `text` typed alone into `run`, as it
-/// resolves a run's characters: the face the character shapes with and the face its line
-/// metrics come from (the head of its `w:rFonts` slot's chain). `None` for a run measurement
+/// resolves a run's characters: the face the character shapes with, the face its line metrics
+/// come from (the head of its `w:rFonts` slot's chain), and whether that slot is the East Asian
+/// one (which shapes with the run's East Asian language). `None` for a run measurement
 /// transforms as a whole (caps, small caps, `w:cs`), and per character for one in the
 /// complex-script slot, a combining mark, or one no face of its chain takes.
 pub fn run_character_faces(
@@ -992,7 +993,7 @@ pub fn run_character_faces(
     defaults: &DefaultsIn,
     run: &RunIn,
     text: &str,
-) -> Option<Vec<Option<(FontId, FontId)>>> {
+) -> Option<Vec<Option<(FontId, FontId, bool)>>> {
     if run.all_caps || run.small_caps || run.complex_script {
         return None;
     }
@@ -1032,7 +1033,7 @@ pub fn run_character_faces(
         faces.push(entry.as_ref().and_then(|(chain, resolver)| {
             resolver
                 .resolve(store, chain, ch, family, false)
-                .map(|font| (font, chain[0]))
+                .map(|font| (font, chain[0], slot == FontSlot::EastAsia))
         }));
     }
     Some(faces)

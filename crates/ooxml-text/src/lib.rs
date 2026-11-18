@@ -76,7 +76,9 @@ pub use bidi::{
 pub use caps::{
     BROWSER_SMALL_CAPS_ADVANCE_SCALE, WORD_SMALL_CAPS_ADVANCE_SCALE, uppercase_for_language,
 };
-pub use echo::{EchoGlyphSet, echo_glyph_set, echo_glyph_set_with_language};
+pub use echo::{
+    EchoGlyphSet, echo_glyph_set, echo_glyph_set_extending, echo_glyph_set_with_language,
+};
 pub use font_store::{
     FontError, FontId, FontMetrics, FontStore, OutlineUpdateError, RequestedLineMetrics,
     covered_character,

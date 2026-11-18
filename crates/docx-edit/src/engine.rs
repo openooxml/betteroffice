@@ -12504,51 +12504,114 @@ impl EngineSession {
         .map(|(resident, list)| (list, resident.unreadable().to_vec()))
     }
 
-    /// The faces of each character of `alphabet` typed into the laid-out text run at display
-    /// position `position` (a body glyph's `docStart`, table cells included), as
-    /// [`docx_layout::echo_character_faces`] gives them, with the run's shaping languages:
-    /// `{"faces":[[display,measured,metrics],…],"latin":…,"eastAsia":…}`. `None` before a
-    /// region pass or where no text run holds `position`.
-    pub fn echo_faces_json(&self, position: f64, alphabet: &str) -> Option<String> {
-        fn find(block: &LayoutBlock, position: f64) -> Option<&docx_layout::types::TextRun> {
+    /// The faces the typing echo needs for the line from display position `line_start` to
+    /// `line_end` of the paragraph whose laid-out text run holds `position` (a glyph's
+    /// `docStart`, table cells included), as [`docx_layout::echo_character_faces`] gives them:
+    /// `faces` for each character of `alphabet` typed into that run, with the run's shaping
+    /// languages, and `line` for each character the paragraph's text runs hold from
+    /// `line_start` to `line_end`, in their own runs (`null` for a position no text run holds):
+    /// `{"faces":[[display,measured,metrics,eastAsian],…],"line":[…],"latin":…,"eastAsia":…}`.
+    /// `None` before a region pass or where no text run holds `position`.
+    pub fn echo_faces_json(
+        &self,
+        position: f64,
+        alphabet: &str,
+        line_start: f64,
+        line_end: f64,
+    ) -> Option<String> {
+        fn paragraph(
+            block: &LayoutBlock,
+            position: f64,
+        ) -> Option<&docx_layout::types::ParagraphBlock> {
             match block {
                 LayoutBlock::Table(table) => table
                     .rows
                     .iter()
                     .flat_map(|row| &row.cells)
                     .flat_map(|cell| &cell.blocks)
-                    .find_map(|nested| find(nested, position)),
-                LayoutBlock::Paragraph(paragraph) => {
-                    paragraph.runs.iter().find_map(|run| match run {
-                        docx_layout::types::Run::Text(text)
-                            if text.pm_start.is_some_and(|start| start <= position)
-                                && text.pm_end.is_some_and(|end| position < end) =>
-                        {
-                            Some(text)
-                        }
-                        _ => None,
-                    })
+                    .find_map(|nested| paragraph(nested, position)),
+                LayoutBlock::Paragraph(paragraph)
+                    if paragraph.runs.iter().any(|run| holds(run, position)) =>
+                {
+                    Some(paragraph)
                 }
                 _ => None,
             }
         }
+        fn holds(run: &docx_layout::types::Run, position: f64) -> bool {
+            matches!(run, docx_layout::types::Run::Text(text)
+                if text.pm_start.is_some_and(|start| start <= position)
+                    && text.pm_end.is_some_and(|end| position < end))
+        }
         let measurement = Rc::clone(&self.regions.borrow().as_ref()?.measurement);
         let pagination = self.pagination.borrow();
-        let run = pagination
+        let paragraph = pagination
             .input
             .as_ref()?
             .measured
             .iter()
-            .find_map(|measured| find(&measured.block, position))?;
+            .find_map(|measured| paragraph(&measured.block, position))?;
         let display = self.display.borrow();
         let chains = display.resident_input.as_ref()?.font_chains();
-        let faces = docx_layout::with_measure_fonts_ref(|store| {
-            docx_layout::echo_character_faces(store, chains, &measurement, &run.fmt, alphabet)
+        let span = (line_end - line_start).max(0.0);
+        if !span.is_finite() || span > f64::from(u16::MAX) {
+            return None;
+        }
+        let mut line = vec![None; span as usize];
+        let mut typed = None;
+        docx_layout::with_measure_fonts_ref(|store| {
+            for run in &paragraph.runs {
+                let docx_layout::types::Run::Text(text) = run else {
+                    continue;
+                };
+                let Some(start) = text.pm_start else { continue };
+                if holds(run, position) {
+                    typed = Some((
+                        docx_layout::echo_character_faces(
+                            store,
+                            chains,
+                            &measurement,
+                            &text.fmt,
+                            alphabet,
+                        ),
+                        text.fmt.language.as_ref(),
+                    ));
+                }
+                // text runs hold one position per UTF-16 unit
+                let mut at = start;
+                let chars: String = text
+                    .text
+                    .chars()
+                    .filter(|ch| {
+                        let inside = at >= line_start && at < line_end;
+                        at += ch.len_utf16() as f64;
+                        inside
+                    })
+                    .collect();
+                if chars.is_empty() {
+                    continue;
+                }
+                let faces = docx_layout::echo_character_faces(
+                    store,
+                    chains,
+                    &measurement,
+                    &text.fmt,
+                    &chars,
+                );
+                let mut at = start.max(line_start);
+                for (ch, face) in chars.chars().zip(faces) {
+                    if let Some(slot) = line.get_mut((at - line_start) as usize) {
+                        *slot = Some(face);
+                    }
+                    at += ch.len_utf16() as f64;
+                }
+            }
         });
-        let language = run.fmt.language.as_ref();
+        let (faces, language) = typed?;
         Some(
             serde_json::json!({
                 "faces": faces,
+                "line": line,
                 "latin": language.and_then(|language| language.latin.as_deref()),
                 "eastAsia": language.and_then(|language| language.east_asia.as_deref()),
             })
@@ -28955,6 +29018,8 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             run(&format!("<w:b/>{korean}"), "강 Bold"),
             // the measured East Asian chain cannot draw Hangul; the display chain falls back
             run(r#"<w:rFonts w:eastAsia="Latin Only"/>"#, "Plain 문"),
+            r#"<w:p><w:pPr><w:autoSpaceDE w:val="0"/></w:pPr><w:r><w:t>Off</w:t></w:r></w:p>"#
+                .to_owned(),
         ]
         .concat();
         // run languages reach layout through styles; a run's own w:lang is not seeded
@@ -29009,31 +29074,53 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         engine
             .build_display_list_frame(&json!({"fontChains": chains}).to_string(), 0)
             .unwrap();
+        let mut auto_space_off = Vec::new();
         let runs: Vec<(String, u32, i64, bool)> = engine
             .with_display_list(|list| {
                 list.pages
                     .iter()
                     .flat_map(|page| &page.primitives)
                     .filter_map(|primitive| match primitive {
-                        docx_layout::display_list::Primitive::GlyphRun(run) => Some((
-                            run.text.clone(),
-                            run.font_id,
-                            run.attrs.doc_start?,
-                            run.attrs.cell.is_some(),
-                        )),
+                        docx_layout::display_list::Primitive::GlyphRun(run) => {
+                            auto_space_off
+                                .push((run.text.clone(), run.echo.as_ref()?.auto_space_off));
+                            Some((
+                                run.text.clone(),
+                                run.font_id,
+                                run.attrs.doc_start?,
+                                run.attrs.cell.is_some(),
+                            ))
+                        }
                         _ => None,
                     })
                     .collect()
             })
             .unwrap();
+        // the echo spaces East Asian text against Latin letters only where the paragraph does
+        let off: Vec<_> = auto_space_off
+            .iter()
+            .filter(|(_, bits)| *bits != 0)
+            .collect();
+        assert_eq!(
+            off.iter()
+                .map(|(text, bits)| (text.as_str(), *bits))
+                .collect::<Vec<_>>(),
+            [("O", 1), ("f", 1), ("f", 1)]
+        );
         let mut seen = String::new();
         let mut differing = 0;
         for (text, font, start, in_cell) in &runs {
-            let faces: serde_json::Value =
-                serde_json::from_str(&engine.echo_faces_json(*start as f64, text).unwrap())
-                    .unwrap();
-            let faces = faces["faces"].as_array().unwrap();
+            let end = *start as f64 + text.encode_utf16().count() as f64;
+            let answer: serde_json::Value = serde_json::from_str(
+                &engine
+                    .echo_faces_json(*start as f64, text, *start as f64, end)
+                    .unwrap(),
+            )
+            .unwrap();
+            let faces = answer["faces"].as_array().unwrap();
             assert_eq!(faces.len(), text.chars().count(), "{text:?}");
+            // a run's own characters have the faces they would take typed into it
+            assert_eq!(&answer["line"], &answer["faces"], "{text:?}");
             for (ch, face) in text.chars().zip(faces) {
                 assert_eq!(face[0], json!(font), "display face of {ch:?} in {text:?}");
                 assert!(
@@ -29082,18 +29169,29 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             .iter()
             .find(|(text, ..)| text.starts_with('H'))
             .unwrap();
-        let first: serde_json::Value =
-            serde_json::from_str(&engine.echo_faces_json(hello.2 as f64, "a가").unwrap()).unwrap();
+        let first: serde_json::Value = serde_json::from_str(
+            &engine
+                .echo_faces_json(hello.2 as f64, "a가", hello.2 as f64, hello.2 as f64 + 17.0)
+                .unwrap(),
+        )
+        .unwrap();
+        // the whole first paragraph, then two positions past its mark
+        let line = first["line"].as_array().unwrap();
+        assert_eq!(line.len(), 17);
+        assert!(line[..15].iter().all(serde_json::Value::is_array));
+        assert!(line[15..].iter().all(serde_json::Value::is_null));
+        assert_eq!(line[6], json!([hangul, hangul, hangul, 1]));
+        assert_eq!(line[5], json!([latin, latin, latin, 0]));
         assert_eq!(
             (&first["latin"], &first["eastAsia"]),
             (&json!("en-US"), &json!("ko-KR"))
         );
         assert_eq!(
             first["faces"],
-            json!([[latin, latin, latin], [hangul, hangul, hangul]]),
+            json!([[latin, latin, latin, 0], [hangul, hangul, hangul, 1]]),
             "typed Hangul measures, and takes line metrics, from the East Asian chain"
         );
-        assert!(engine.echo_faces_json(-1.0, "a").is_none());
+        assert!(engine.echo_faces_json(-1.0, "a", 0.0, 1.0).is_none());
     }
 
     #[test]

@@ -80,16 +80,25 @@ impl EditSessionCore {
     }
 
     /// [`crate::EngineSession::echo_faces_json`] through this session's resident font store.
-    pub fn echo_faces_json(&self, position: f64, alphabet: &str) -> Option<String> {
+    pub fn echo_faces_json(
+        &self,
+        position: f64,
+        alphabet: &str,
+        line_start: f64,
+        line_end: f64,
+    ) -> Option<String> {
         let _fonts = self.fonts.enter();
-        self.engine.echo_faces_json(position, alphabet)
+        self.engine
+            .echo_faces_json(position, alphabet, line_start, line_end)
     }
 
     /// Typing echo model of one font at one shaping size from this session's
     /// resident font store: `{"horizontal","glyphIds","advances","kerning",
     /// "unsafePairs"}`, indexed by the characters of `alphabet`. `kern` is the
-    /// run's kerning gate and `language` its BCP-47 shaping language. Errors for
-    /// an unknown font or a non-positive size.
+    /// run's kerning gate and `language` its BCP-47 shaping language. The pairs
+    /// are those with a character from `known` on, for a caller that holds the
+    /// pairs of the first `known` (`0` for every pair). Errors for an unknown
+    /// font or a non-positive size.
     pub fn echo_glyph_set_json(
         &self,
         font_id: u32,
@@ -97,9 +106,10 @@ impl EditSessionCore {
         kern: bool,
         language: Option<&str>,
         alphabet: &str,
+        known: usize,
     ) -> EngineResult<String> {
         let _fonts = self.fonts.enter();
-        docx_layout::echo_glyph_set_json(font_id, size, kern, language, alphabet)
+        docx_layout::echo_glyph_set_json(font_id, size, kern, language, alphabet, known)
             .map_err(EngineError::message)
     }
 }
