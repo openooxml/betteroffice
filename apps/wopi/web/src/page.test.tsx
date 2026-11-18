@@ -1010,6 +1010,12 @@ test("Action_Save with DontSaveIfUnmodified saves before idle change notificatio
   } finally { doc.destroy(); }
 });
 
+test("every editor the page mounts has the remote font source off", async () => {
+  await mount(true);
+  expect(mounts).toHaveLength(2);
+  expect(mounts.map((props) => props.remoteFonts)).toEqual(["off", "off"]);
+});
+
 test("replacement after join but before socket attach refetches exactly once", async () => {
   const h = await mount(true);
   expect(h.calls.filter((path) => path.endsWith("/source"))).toHaveLength(1);

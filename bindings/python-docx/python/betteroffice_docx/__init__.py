@@ -7,6 +7,7 @@ from typing import Any, TypedDict, Iterator, Mapping, Sequence, Union
 
 from ._betteroffice_docx import (
     decode_font_face,
+    font_substitute,
     DisplayList,
     DroppedParagraph,
     DroppedStructure,
@@ -44,6 +45,7 @@ class PngTarget(TypedDict):
 __all__ = [
     "PngTarget",
     "decode_font_face",
+    "font_substitute",
     "DisplayList",
     "Document",
     "DocxError",

@@ -9,15 +9,18 @@
  */
 
 import {
-  hasConfiguredFontSource,
   hasDefaultFontSource,
   hostedFontFamilies,
   ImplicitFontAbsentError,
   isImplicitFontProvider,
   resolveDefaultFontProvider,
 } from '../layout/measure/defaultFontProvider';
+import {
+  DEFAULT_REMOTE_FONT_PROVIDER,
+  resolveWordFamilySubstitute,
+  type RemoteFontProvider,
+} from '@betteroffice/fonts/remote';
 import type { BundledFontProvider } from '../layout/measure/fontRegistry';
-import { resolveFontFamily } from './fontResolver';
 
 // Track loaded fonts to avoid duplicate requests
 const loadedFonts = new Set<string>();
@@ -121,16 +124,7 @@ function joinRequesters(
 // Track overall loading state
 let isLoadingAny = false;
 
-// When false, the automatic Google Fonts fetch path is disabled. Embedders
-// that must not egress (e.g. a CSP-locked review surface rendering privileged
-// content from embedded font blobs, or any offline host) call
-// setGoogleFontsEnabled(false) to suppress the redundant remote fetches at the
-// source. Embedded faces (loadFontFromBuffer) and consumer-hosted faces
-// (loadFontFromUrl / the `fonts` prop) are unaffected — only the implicit
-// Google Fonts lookup in loadFont / loadFontWithMapping is gated. With a
-// bundled font source configured (configureDefaultFonts), faces come from it
-// and the Google lookup is never made.
-let googleFontsEnabled = true;
+let remoteFontProvider: RemoteFontProvider = DEFAULT_REMOTE_FONT_PROVIDER;
 
 // Families registered through this module's face loaders — raw buffers
 // (DOCX-embedded fonts) and consumer URLs (the `fonts` prop). Both are
@@ -149,20 +143,6 @@ const registeredFamilies = new Set<string>();
 // @font-face can make a font appear at any time, and the re-probe is two
 // measureText calls on a shared canvas.
 const probeSatisfied = new Set<string>();
-
-// Google Fonts stylesheet URLs that failed, by when. A family Google does not
-// serve (Calibri, Cambria, Aptos, …) fails the same way every time; a network
-// error may not, so a failure is retried once it is this old.
-const failedGoogleStylesheets = new Map<string, number>();
-const GOOGLE_STYLESHEET_RETRY_MS = 5 * 60_000;
-
-function googleStylesheetFailed(url: string): boolean {
-  const failedAt = failedGoogleStylesheets.get(url);
-  if (failedAt === undefined) return false;
-  if (Date.now() - failedAt < GOOGLE_STYLESHEET_RETRY_MS) return true;
-  failedGoogleStylesheets.delete(url);
-  return false;
-}
 
 function reportFontError(
   error: unknown,
@@ -470,40 +450,6 @@ function markFaceLoaded(key: string, family: string, requesters: Requesters): vo
 }
 
 /**
- * Generate Google Fonts CSS URL for a font family
- *
- * @param fontFamily - The font family name (e.g., "Roboto", "Open Sans")
- * @param weights - Font weights to load (default: 400, 700)
- * @param styles - Font styles to load (default: normal, italic)
- * @returns Google Fonts CSS URL
- */
-function getGoogleFontsUrl(
-  fontFamily: string,
-  weights: number[] = [400, 700],
-  styles: ('normal' | 'italic')[] = ['normal', 'italic']
-): string {
-  // Encode font family name for URL
-  const encodedFamily = encodeURIComponent(fontFamily);
-
-  // Build weight/style combinations
-  // Format: ital,wght@0,400;0,700;1,400;1,700
-  const combinations: string[] = [];
-
-  for (const style of styles) {
-    const italVal = style === 'italic' ? 1 : 0;
-    for (const weight of weights) {
-      combinations.push(`${italVal},${weight}`);
-    }
-  }
-
-  // Sort and join
-  combinations.sort();
-  const spec = combinations.join(';');
-
-  return `https://fonts.googleapis.com/css2?family=${encodedFamily}:ital,wght@${spec}&display=swap`;
-}
-
-/**
  * Load a font from the default font provider
  *
  * @param fontFamily - The font family name to load
@@ -589,11 +535,7 @@ async function loadFontFrom(
   // that could change the answer — statically false. Skip the promise
   // machinery instead of re-paying it on every loadDocumentFonts pass.
   const bundled = hasDefaultFontSource();
-  if (!googleFontsEnabled && !bundled && pendingFaces.promises.length === 0) {
-    return false;
-  }
-  const googleUrl = getGoogleFontsUrl(normalizedFamily, options?.weights, options?.styles);
-  if (!bundled && pendingFaces.promises.length === 0 && googleStylesheetFailed(googleUrl)) {
+  if (!bundled && pendingFaces.promises.length === 0) {
     return false;
   }
 
@@ -605,7 +547,7 @@ async function loadFontFrom(
     try {
       // Settle in-flight registrations and re-check, so we neither issue the
       // redundant fetch this path exists to skip nor report a spurious
-      // failure under googleFontsEnabled=false. Skipped when nothing was in
+      // failure. Skipped when nothing was in
       // flight — the synchronous checks above already gave the answer.
       if (pendingFaces.promises.length > 0) {
         await Promise.all(pendingFaces.promises);
@@ -632,71 +574,17 @@ async function loadFontFrom(
         );
         if (registration === 'absent') bundledAbsentFamilies.add(normalizedFamily);
         else bundledAbsentFamilies.delete(normalizedFamily);
-        const remoteFallback = registration === 'absent' && !hasConfiguredFontSource();
-        if (registration === 'none' || (registration === 'absent' && !remoteFallback)) return false;
-        if (registration !== 'absent') {
-          if (registration === 'complete') {
-            partialBundledFamilies.delete(normalizedFamily);
-            markFamilyLoaded(normalizedFamily);
-          } else {
-            partialBundledFamilies.add(normalizedFamily);
-          }
-          notifyCallbacks([normalizedFamily], requesters);
-          return true;
+        if (registration === 'none' || registration === 'absent') return false;
+        if (registration === 'complete') {
+          partialBundledFamilies.delete(normalizedFamily);
+          markFamilyLoaded(normalizedFamily);
+        } else {
+          partialBundledFamilies.add(normalizedFamily);
         }
-      }
-
-      // Remote fetch disabled (no-egress embedder). The font is not locally
-      // available, so don't inject a Google Fonts <link> — report failure and
-      // let the caller's CSS fallback stack render with what is available.
-      if (!googleFontsEnabled || googleStylesheetFailed(googleUrl)) {
-        return false;
-      }
-
-      // Create link element
-      const link = document.createElement('link');
-      link.rel = 'stylesheet';
-      link.href = googleUrl;
-
-      // Wait for load or error, with a 5s timeout. Clear the timer once
-      // settled so no handle dangles past the load (keeps test runners and
-      // watch cycles from waiting on dead timers).
-      let failed = false;
-      const loaded = await new Promise<boolean>((resolve) => {
-        const timer = setTimeout(() => resolve(false), 5000);
-        link.onload = () => {
-          clearTimeout(timer);
-          resolve(true);
-        };
-        link.onerror = () => {
-          clearTimeout(timer);
-          failed = true;
-          resolve(false);
-        };
-
-        // Append to head
-        document.head.appendChild(link);
-      });
-
-      if (loaded) {
-        // Wait a bit for the font to be available
-        await waitForFontAvailable(normalizedFamily, 3000);
-
-        markFamilyLoaded(normalizedFamily);
-
-        // Notify callbacks
         notifyCallbacks([normalizedFamily], requesters);
-
         return true;
       }
 
-      // Remember a failure so the next mounts neither re-request it nor add a
-      // link until it may be retried. A timeout only drops the link, so a
-      // later call can try again.
-      link.onload = null;
-      link.onerror = null;
-      link.remove();
-      if (failed) failedGoogleStylesheets.set(googleUrl, Date.now());
       return false;
     } catch (error) {
       reportFontError(error, `failed to load "${normalizedFamily}"`, requesters);
@@ -705,7 +593,7 @@ async function loadFontFrom(
       loadingFonts.delete(normalizedFamily);
       fontRequesters.delete(normalizedFamily);
 
-      // Check if still loading any fonts (Google or face-based)
+      // Check if still loading any fonts (family or face-based)
       if (loadingFonts.size === 0 && loadingFaces.size === 0) {
         isLoadingAny = false;
       }
@@ -757,40 +645,44 @@ export function isFontLoaded(fontFamily: string): boolean {
 }
 
 /**
- * Enable or disable the editor's automatic Google Fonts lookup.
+ * Choose where the editor fetches document fonts it does not bundle (families
+ * with no bundled metric-compatible face): `'bunny'` (fonts.bunny.net, the
+ * default), `'google'`, `{ cssUrl }` for your own Google-compatible endpoint,
+ * or `'off'` for no remote font requests at all. Page-global, like the rest of
+ * this module; call it before loading documents.
  *
- * Defaults to enabled. Set to `false` in no-egress embedders (strict CSP,
- * offline) so `loadFont` / `loadFontWithMapping` never inject a
- * `fonts.googleapis.com` stylesheet `<link>`. This gates ONLY the implicit
- * Google Fonts lookup — font URLs you register yourself (the `fonts` prop /
- * `loadFontFromUrl`) are still fetched by the browser, and embedded blobs
- * (`loadFontFromBuffer`) and system fonts still resolve.
+ * @public
+ */
+export function setRemoteFontProvider(provider: RemoteFontProvider): void {
+  remoteFontProvider = typeof provider === 'object' ? { cssUrl: String(provider.cssUrl) } : provider;
+}
+
+/**
+ * The provider set with {@link setRemoteFontProvider}.
  *
- * The flag is page-global (module-level), not per-editor: with multiple
- * editors on one page the last caller wins. Call it before loading documents;
- * disabling does not cancel fetches already in flight. A document font that
- * is neither local nor registered then resolves `loadFont` to `false`
- * silently (no `onFontError`) and renders via its CSS fallback stack.
- *
- * @see isGoogleFontsEnabled
- * @see loadFontFromBuffer
- * @see loadFontFromUrl
+ * @public
+ */
+export function getRemoteFontProvider(): RemoteFontProvider {
+  return remoteFontProvider;
+}
+
+/**
+ * @deprecated Use {@link setRemoteFontProvider}: `true` selects `'google'`,
+ * `false` selects `'off'`.
  *
  * @public
  */
 export function setGoogleFontsEnabled(enabled: boolean): void {
-  googleFontsEnabled = enabled;
+  setRemoteFontProvider(enabled ? 'google' : 'off');
 }
 
 /**
- * Whether the automatic Google Fonts lookup is currently enabled.
- *
- * @see setGoogleFontsEnabled
+ * @deprecated Use {@link getRemoteFontProvider}.
  *
  * @public
  */
 export function isGoogleFontsEnabled(): boolean {
-  return googleFontsEnabled;
+  return remoteFontProvider === 'google';
 }
 
 /**
@@ -1532,10 +1424,11 @@ async function loadDefinitionsFor(
 }
 
 /**
- * Mapping from common Office/system fonts to Google Fonts equivalents
+ * Look-alike families for common Office fonts, as served by Google-compatible
+ * font services.
  *
- * Google Fonts doesn't have exact matches for many Microsoft fonts,
- * but these are close alternatives that work well for document rendering.
+ * @deprecated Use `resolveWordFamilySubstitute` from `@betteroffice/fonts/remote`,
+ * which covers every family this table did and more.
  */
 export const FONT_MAPPING: Record<string, string> = {
   // Microsoft Office fonts → Google Fonts equivalents
@@ -1546,11 +1439,11 @@ export const FONT_MAPPING: Record<string, string> = {
   'Courier New': 'Cousine',
   Garamond: 'EB Garamond',
   'Book Antiqua': 'EB Garamond',
-  Georgia: 'Tinos',
+  Georgia: 'Gelasio',
   Verdana: 'Open Sans',
   Tahoma: 'Open Sans',
-  'Trebuchet MS': 'Source Sans Pro',
-  'Century Gothic': 'Poppins',
+  'Trebuchet MS': 'Fira Sans',
+  'Century Gothic': 'Questrial',
   'Franklin Gothic': 'Libre Franklin',
   Palatino: 'EB Garamond',
   'Palatino Linotype': 'EB Garamond',
@@ -1560,24 +1453,18 @@ export const FONT_MAPPING: Record<string, string> = {
   'Comic Sans MS': 'Comic Neue',
   Consolas: 'Inconsolata',
   'Lucida Console': 'Inconsolata',
-  Monaco: 'Fira Code',
+  Monaco: 'Fira Mono',
 };
 
 /**
- * Get the Google Fonts equivalent for a font name
+ * The look-alike family for a font name from the shared substitution table,
+ * or the name itself when the table has none.
  *
  * @param fontName - The original font name from the document
- * @returns The Google Fonts equivalent, or the original name if no mapping exists
  */
 export function getGoogleFontEquivalent(fontName: string): string {
   const trimmed = fontName.trim();
-  // FONT_MAPPING is the loader's small override table for a few Latin Office
-  // fonts. For everything else — notably CJK, and any-case spellings — defer to
-  // the single source of truth in fontResolver, whose lookup is case-insensitive
-  // and carries the full font→Noto mapping (so the family the loader fetches
-  // matches the one fontResolver puts in the CSS fallback stack). Falls back to
-  // the raw name when neither maps it.
-  return FONT_MAPPING[trimmed] || resolveFontFamily(trimmed).googleFont || trimmed;
+  return resolveWordFamilySubstitute(trimmed)?.remote ?? trimmed;
 }
 
 /**
