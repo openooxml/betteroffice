@@ -3,6 +3,7 @@ import { defineConfig } from 'tsup';
 import { rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { nativeEnginePlugin } from '../../../scripts/native-engine';
+import { buildWorkerStubs } from '../../../scripts/worker-stub';
 
 const source = '../../../packages/xlsx';
 const dist = '../dist';
@@ -15,7 +16,7 @@ export default defineConfig({
     headless: `${source}/src/headless.ts`,
     worker: `${source}/src/worker.ts`,
     collaboration: `${source}/src/collaboration/index.ts`,
-    xlsxSessionWorker: `${source}/src/session/worker.ts`,
+    xlsxWorkerStart: `${source}/src/session/workerStart.ts`,
     'xlsxSessionWorker.node': `${source}/src/session/worker.node.ts`,
     'sessionWorker.node': `${source}/src/session/sessionWorker.node.ts`,
     'sessionWorker.missing': `${source}/src/session/sessionWorker.missing.ts`,
@@ -39,7 +40,7 @@ export default defineConfig({
     options.chunkNames = 'chunk-[hash]';
   },
   onSuccess: async () => {
-    await rename(join(dist, 'xlsxSessionWorker.js'), join(dist, 'xlsxSessionWorker.mjs'));
+    await buildWorkerStubs('xlsx', dist);
     await rename(join(dist, 'xlsxSessionWorker.node.js'), join(dist, 'xlsxSessionWorker.node.mjs'));
     await writeFile(join(dist, 'package.json'), JSON.stringify({
       type: 'module',

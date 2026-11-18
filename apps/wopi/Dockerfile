@@ -66,6 +66,7 @@ COPY --from=build --chown=root:root /app/packages/docx/tsconfig.json ./packages/
 COPY --from=build --chown=root:root /app/packages/xlsx/tsconfig.json ./packages/xlsx/tsconfig.json
 COPY --from=build --chown=root:root /app/packages/pptx/tsconfig.json ./packages/pptx/tsconfig.json
 COPY --from=build --chown=root:root /app/packages/fonts/assets ./packages/fonts/assets
+COPY --from=build --chown=root:root /app/packages/fonts/dist/remote.js ./packages/fonts/dist/remote.js
 COPY --from=build --chown=root:root /app/packages/fonts-cjk/assets ./packages/fonts-cjk/assets
 COPY --from=build --chown=root:root /app/shared/collaboration-limits.ts ./shared/collaboration-limits.ts
 COPY --from=build --chown=root:root /app/shared/collaboration-pipe ./shared/collaboration-pipe

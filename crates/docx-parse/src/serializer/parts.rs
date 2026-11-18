@@ -23,7 +23,7 @@ use super::xml_writer::{escape_xml, js_number};
 
 const XML_DECLARATION: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>";
 
-const DOCUMENT_NAMESPACES: &str = concat!(
+pub(crate) const DOCUMENT_NAMESPACES: &str = concat!(
     "xmlns:wpc=\"http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas\" ",
     "xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" ",
     "xmlns:o=\"urn:schemas-microsoft-com:office:office\" ",
@@ -1037,6 +1037,7 @@ mod tests {
                 hdr_ftr_type: "default".to_owned(),
                 content: Vec::new(),
                 watermark: None,
+                watermark_box: None,
                 custom_root_bindings: Vec::new(),
             },
             &mut context(),

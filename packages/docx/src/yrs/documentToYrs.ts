@@ -37,7 +37,13 @@ import type {
 import { ensureHexPrefix, resolveColorToHex } from '../utils/colorResolver';
 import { resolveThemeFont } from '../utils/fontResolver';
 import { mergeStyleRunFormatting, mergeTextFormatting } from '../utils/textFormattingMerge';
-import { tableCellParagraphFormatting, tableCellRunFormatting, tableColumnCount } from './tableParagraphFormatting';
+import {
+  cellOuterEdges,
+  tableCellParagraphFormatting,
+  tableCellRunFormatting,
+  tableCellStyleProperties,
+  tableColumnCount,
+} from './tableParagraphFormatting';
 import type { Style } from '../types/styles';
 import type { YrsOpeningOptions, YrsRawOp, YrsSession } from './index';
 import { noteYrsStoriesDirty } from './yrsToDocument';
@@ -1484,6 +1490,7 @@ function revisionAttrs(info: TrackedChangeInfo): Attrs {
 function cellBorders(
   formatting: TableCellFormatting | undefined,
   tableBorders: TableBorders | undefined,
+  styleBorders: TableBorders | undefined,
   firstRow: boolean,
   lastRow: boolean,
   firstColumn: boolean,
@@ -1497,8 +1504,8 @@ function cellBorders(
         right: lastColumn ? tableBorders.right : tableBorders.insideV,
       }
     : undefined;
-  return inherited || formatting?.borders
-    ? { ...(inherited ?? {}), ...(formatting?.borders ?? {}) }
+  return inherited || styleBorders || formatting?.borders
+    ? { ...(inherited ?? {}), ...(styleBorders ?? {}), ...(formatting?.borders ?? {}) }
     : undefined;
 }
 
@@ -1513,13 +1520,18 @@ function projectCell(
     firstColumn: boolean;
     lastColumn: boolean;
     tableBorders?: TableBorders;
+    styleCell?: Pick<TableCellFormatting, 'shading' | 'borders'>;
     defaultMargins?: { top?: number; bottom?: number; left?: number; right?: number };
     theme: Theme | null;
     tableBidi: boolean;
   }
 ): ProjectedCell {
   const formatting = cell.formatting;
-  const backgroundColor = resolveColorToHex(formatting?.shading?.fill, options.theme);
+  const shading = formatting?.shading ?? options.styleCell?.shading;
+  const backgroundColor =
+    shading?.pattern === 'solid'
+      ? (resolveColorToHex(shading.color, options.theme) ?? '000000')
+      : resolveColorToHex(shading?.fill, options.theme);
   const width = formatting?.width?.value ?? options.gridWidth;
   const widthType = formatting?.width?.type ?? (options.gridWidth !== undefined ? 'pct' : null);
   const attrs: Attrs = {
@@ -1533,6 +1545,7 @@ function projectCell(
       cellBorders(
         formatting,
         options.tableBorders,
+        options.styleCell?.borders,
         options.firstRow,
         options.lastRow,
         options.firstColumn,
@@ -1609,7 +1622,7 @@ function projectRow(
   const columnWidths = table.columnWidths;
   const totalWidth = columnWidths?.reduce((sum, width) => sum + width, 0) ?? 0;
   const totalColumns =
-    columnWidths?.length ??
+    columnWidths?.length ||
     Math.max(
       0,
       ...table.rows.map((candidate) =>
@@ -1636,6 +1649,7 @@ function projectRow(
     }
     column += colspan;
     if (rowSpan?.skip) return;
+    const outer = cellOuterEdges(table.rows.length, rowIndex, startColumn, column, totalColumns);
     cells.push({
       extraRunFormatting: tableCellRunFormatting(table, tableStyle, rowIndex, startColumn, column, styleColumns),
       paragraphFormatting: tableCellParagraphFormatting(
@@ -1650,11 +1664,21 @@ function projectRow(
         isHeader: rowIndex === 0 && !!table.formatting?.look?.firstRow,
         rowspan: rowSpan?.rowSpan ?? 1,
         gridWidth,
-        firstRow: rowIndex === 0,
-        lastRow: rowIndex === table.rows.length - 1,
-        firstColumn: startColumn === 0,
-        lastColumn: column === totalColumns,
+        firstRow: outer[0],
+        lastRow: outer[1],
+        firstColumn: outer[2],
+        lastColumn: outer[3],
         tableBorders,
+        styleCell: tableCellStyleProperties(
+          table,
+          tableStyle,
+          rowIndex,
+          startColumn,
+          column,
+          styleColumns,
+          rowSpan?.rowSpan ?? 1,
+          outer
+        ),
         defaultMargins,
         theme,
         tableBidi: Boolean(table.formatting?.bidi),
@@ -1662,6 +1686,7 @@ function projectRow(
     });
   });
   if (cells.length === 0) {
+    const outer = cellOuterEdges(table.rows.length, rowIndex, 0, totalColumns, totalColumns);
     cells.push({
       extraRunFormatting: tableCellRunFormatting(table, tableStyle, rowIndex, 0, totalColumns, styleColumns),
       paragraphFormatting: tableCellParagraphFormatting(
@@ -1682,11 +1707,12 @@ function projectRow(
           isHeader: rowIndex === 0 && !!table.formatting?.look?.firstRow,
           rowspan: 1,
           gridWidth: totalWidth > 0 ? 100 : undefined,
-          firstRow: rowIndex === 0,
-          lastRow: rowIndex === table.rows.length - 1,
-          firstColumn: true,
-          lastColumn: true,
+          firstRow: outer[0],
+          lastRow: outer[1],
+          firstColumn: outer[2],
+          lastColumn: outer[3],
           tableBorders,
+          styleCell: tableCellStyleProperties(table, tableStyle, rowIndex, 0, totalColumns, styleColumns, 1, outer),
           defaultMargins,
           theme,
           tableBidi: Boolean(table.formatting?.bidi),

@@ -613,9 +613,9 @@ export interface TableFormatting {
   floating?: FloatingTableProperties;
   /** Right to left table */
   bidi?: boolean;
-  /** Horizontal band size (`w:tblStyleRowBandSize`). Undefined = 1. */
+  /** Horizontal band size (`w:tblStyleRowBandSize`). Undefined = no banding. */
   styleRowBandSize?: number;
-  /** Vertical band size (`w:tblStyleColBandSize`). Undefined = 1. */
+  /** Vertical band size (`w:tblStyleColBandSize`). Undefined = no banding. */
   styleColBandSize?: number;
   /** Optional resolved style provenance. Undefined = legacy cascade. */
   styleCascade?: TableStyleCascade;

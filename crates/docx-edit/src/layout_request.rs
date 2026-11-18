@@ -78,6 +78,25 @@ fn raw_request(package: &Value, page_gap: f64) -> Value {
     if let Some(watermark) = final_properties.and_then(|properties| properties.get("watermark")) {
         regions.insert("watermark".into(), watermark.clone());
     }
+    let header_watermarks: Map<String, Value> = package["headerEntries"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let part = entry.get(1)?;
+            let mut watermark = part
+                .get("watermark")
+                .filter(|value| !value.is_null())?
+                .clone();
+            if let Some(shape_box) = part.get("watermarkBox").filter(|value| !value.is_null()) {
+                watermark["box"] = shape_box.clone();
+            }
+            Some((entry.get(0)?.as_str()?.to_owned(), watermark))
+        })
+        .collect();
+    if !header_watermarks.is_empty() {
+        regions.insert("headerWatermarks".into(), Value::Object(header_watermarks));
+    }
     let mut options = Map::new();
     copy_field(&mut options, package, "contractVersion");
     options.insert("pageGap".into(), json!(page_gap));

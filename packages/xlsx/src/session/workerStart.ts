@@ -6,7 +6,12 @@ import { engineKind } from '../wasm/engine';
 import { initWasm } from '../wasm/loader';
 import { createWorkbookSessionHost } from './host';
 
+const WORKER_STARTED = Symbol.for('betteroffice.xlsx.worker.started');
+
 export function startSessionWorker(scope: SessionScope): void {
+  const flags = scope as unknown as Record<symbol, unknown>;
+  if (flags[WORKER_STARTED]) return;
+  flags[WORKER_STARTED] = true;
   const transport = createScopeTransport(scope);
   let module: WebAssembly.Module | undefined;
   let retainedHydration = false;

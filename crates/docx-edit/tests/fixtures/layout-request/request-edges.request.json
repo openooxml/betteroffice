@@ -18,6 +18,16 @@
     "pageGap": 24
   },
   "regions": {
+    "headerWatermarks": {
+      "rIdHeader": {
+        "color": "#C0C0C0",
+        "font": "Calibri",
+        "kind": "text",
+        "layout": "diagonal",
+        "semitransparent": true,
+        "text": "DRAFT"
+      }
+    },
     "sections": [
       {
         "properties": {

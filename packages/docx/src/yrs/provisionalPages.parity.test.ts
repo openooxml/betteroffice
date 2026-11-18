@@ -60,6 +60,10 @@ beforeAll(async () => {
     plugins: [{
       name: 'resident-worker-real-engine',
       setup(build) {
+        build.onLoad({ filter: /\/docxWorker\.browser\.ts$/ }, () => ({
+          contents: "import { startWorker } from './residentEngineWorker';\nstartWorker(self);\n",
+          loader: 'ts',
+        }));
         build.onLoad({ filter: /\/residentCommandPresentation\.ts$/ }, () => ({
           contents: `
             export const echoBackgroundPage = (...args) => testHarness.echoBackgroundPage(...args);

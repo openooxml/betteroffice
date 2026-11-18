@@ -1478,7 +1478,7 @@ fn text_watermark_emits_rotated_translucent_text_primitive() {
     };
     assert_eq!(t.text, "DRAFT");
     assert_eq!(t.color, "#C0C0C0");
-    assert_eq!(t.font, "700 180px Calibri, sans-serif");
+    assert_eq!(t.font, "400 180px Calibri, sans-serif");
     assert_eq!(t.opacity.as_ref().and_then(|n| n.as_f64()), Some(0.5));
     assert_eq!(
         t.rotation_deg.as_ref().and_then(|n| n.as_f64()),
@@ -1488,6 +1488,40 @@ fn text_watermark_emits_rotated_translucent_text_primitive() {
     assert_eq!(t.baseline_y.as_f64(), Some(564.0));
     assert_eq!(t.width.as_f64(), Some(558.0));
     assert_eq!(t.attrs.doc_start, None);
+}
+
+#[test]
+fn text_watermark_paints_its_face_unbolded_at_its_fill_opacity() {
+    for (semitransparent, opacity) in [(true, Some(0.5)), (false, None)] {
+        let input = serde_json::json!({
+            "measured": [],
+            "options": {},
+            "headersFooters": {
+                "variants": [],
+                "watermark": {
+                    "kind": "text",
+                    "text": "SAMPLE",
+                    "font": "Arial",
+                    "color": "#808080",
+                    "semitransparent": semitransparent,
+                    "layout": "diagonal"
+                }
+            },
+            "layout": { "pages": [
+                { "number": 1, "size": { "w": 816.0, "h": 1056.0 },
+                  "margins": { "top": 96.0, "right": 96.0, "bottom": 96.0, "left": 96.0 },
+                  "fragments": [] }
+            ] }
+        });
+        let json = build_display_list_json(&input.to_string()).expect("builds");
+        let dl: DisplayList = serde_json::from_str(&json).unwrap();
+        let Primitive::Text(t) = &dl.pages[0].primitives[0] else {
+            panic!("watermark should emit text");
+        };
+        assert_eq!(t.font, "400 180px Arial, sans-serif");
+        assert!(!t.text_outline);
+        assert_eq!(t.opacity.as_ref().and_then(|n| n.as_f64()), opacity);
+    }
 }
 
 #[test]
@@ -1529,6 +1563,115 @@ fn picture_watermark_emits_decorative_washout_image_primitive() {
     assert_eq!(img.filter.as_deref(), Some("brightness(1.4) contrast(0.4)"));
     assert!(img.decorative);
     assert_eq!(img.alt_text, None);
+}
+
+#[test]
+fn header_text_watermark_paints_on_the_pages_its_header_heads() {
+    let page = |number: u64| {
+        serde_json::json!({
+            "number": number, "sectionIndex": 0, "sectionPageIndex": number - 1,
+            "size": { "w": 816.0, "h": 1056.0 },
+            "margins": { "top": 96.0, "right": 96.0, "bottom": 96.0, "left": 96.0 },
+            "fragments": []
+        })
+    };
+    let input = serde_json::json!({
+        "measured": [],
+        "options": {},
+        "headersFooters": {
+            "titlePg": true,
+            "variants": [
+                { "rId": "rId8", "kind": "header", "type": "default", "watermark": {
+                    "kind": "text",
+                    "text": "SAMPLE",
+                    "font": "Liberation Serif",
+                    "color": "silver",
+                    "semitransparent": true,
+                    "layout": "diagonal",
+                    "widthEmu": 6550025,
+                    "heightEmu": 1871345
+                } },
+                { "rId": "rId11", "kind": "header", "type": "first" }
+            ]
+        },
+        "layout": { "pages": [page(1), page(2)] }
+    });
+    let json = build_display_list_json(&input.to_string()).expect("builds");
+    let dl: DisplayList = serde_json::from_str(&json).unwrap();
+    assert!(dl.pages[0].primitives.is_empty());
+    assert_eq!(dl.pages[0].watermark_primitive_count, None);
+    assert_eq!(dl.pages[1].watermark_primitive_count, Some(1));
+    let Primitive::Text(t) = &dl.pages[1].primitives[0] else {
+        panic!("watermark should emit text");
+    };
+    let n = |value: &serde_json::Number| value.as_f64().unwrap();
+    assert_eq!(t.text, "SAMPLE");
+    assert_eq!(t.color, "silver");
+    assert_eq!(t.opacity.as_ref().map(n), Some(0.5));
+    assert_eq!(t.rotation_deg.as_ref().map(n), Some(-45.0));
+    assert_eq!(t.font, "400 180px Liberation Serif, sans-serif");
+    assert_eq!(t.horizontal_scale, None);
+    assert_eq!(n(&t.x), 73.2);
+    assert_eq!(n(&t.baseline_y), 564.0);
+    assert_eq!(n(&t.width), 669.6);
+}
+
+#[test]
+fn a_page_whose_header_has_no_watermark_ignores_the_document_watermark() {
+    let watermark = serde_json::json!({"kind": "text", "text": "SAMPLE", "layout": "diagonal"});
+    let page = |number: u64| {
+        serde_json::json!({
+            "number": number, "sectionIndex": 0, "sectionPageIndex": number - 1,
+            "size": { "w": 816.0, "h": 1056.0 },
+            "margins": { "top": 96.0, "right": 96.0, "bottom": 96.0, "left": 96.0 },
+            "fragments": []
+        })
+    };
+    let input = serde_json::json!({
+        "measured": [],
+        "options": {},
+        "headersFooters": {
+            "titlePg": true,
+            "watermark": watermark,
+            "variants": [
+                { "rId": "rId8", "kind": "header", "type": "default", "watermark": watermark },
+                { "rId": "rId11", "kind": "header", "type": "first" }
+            ]
+        },
+        "layout": { "pages": [page(1), page(2)] }
+    });
+    let json = build_display_list_json(&input.to_string()).expect("builds");
+    let dl: DisplayList = serde_json::from_str(&json).unwrap();
+    assert_eq!(dl.pages[0].watermark_primitive_count, None);
+    assert_eq!(dl.pages[1].watermark_primitive_count, Some(1));
+}
+
+#[test]
+fn a_header_picture_watermark_paints_only_through_the_document_watermark() {
+    let input = serde_json::json!({
+        "measured": [],
+        "options": {},
+        "headersFooters": {
+            "variants": [
+                { "rId": "rId8", "kind": "header", "type": "default", "watermark": {
+                    "kind": "picture",
+                    "dataUrl": "data:image/png;base64,abc",
+                    "relId": "rId9",
+                    "washout": true,
+                    "widthEmu": 1828800,
+                    "heightEmu": 914400
+                } }
+            ]
+        },
+        "layout": { "pages": [
+            { "number": 1, "size": { "w": 816.0, "h": 1056.0 },
+              "margins": { "top": 96.0, "right": 96.0, "bottom": 96.0, "left": 96.0 },
+              "fragments": [] }
+        ] }
+    });
+    let json = build_display_list_json(&input.to_string()).expect("builds");
+    let dl: DisplayList = serde_json::from_str(&json).unwrap();
+    assert_eq!(dl.pages[0].watermark_primitive_count, None);
 }
 
 #[test]
