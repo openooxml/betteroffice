@@ -747,7 +747,8 @@ impl DeckSession {
                 && !inherited_strikes[paragraph_markers(&story, &txn)
                     .iter()
                     .position(|(offset, _)| *offset >= index)
-                    .unwrap()];
+                    .unwrap()]
+                && strike_beside(&story, &txn, index).as_deref() != Some("noStrike");
             if clear_strike {
                 style.strike = None;
             }
@@ -1419,6 +1420,28 @@ fn paragraph_markers<T: ReadTxn>(story: &TextRef, txn: &T) -> Vec<(u32, MapRef)>
         offset += length;
     }
     markers
+}
+
+/// The literal strike of the run text typed at `index` joins: the text before the
+/// caret in its paragraph, else the text after it.
+fn strike_beside<T: ReadTxn>(story: &TextRef, txn: &T, index: u32) -> Option<String> {
+    let mut offset = 0;
+    for diff in story.diff(txn, YChange::identity) {
+        let length = out_len(&diff.insert);
+        if index <= offset + length {
+            if matches!(diff.insert, Out::Any(Any::String(_))) {
+                return diff
+                    .attributes
+                    .as_deref()
+                    .and_then(|attrs| any_string(attrs.get("strike")));
+            }
+            if index == offset {
+                return None;
+            }
+        }
+        offset += length;
+    }
+    None
 }
 
 fn source_paragraphs<T: ReadTxn>(map: &MapRef, txn: &T) -> Vec<ParagraphSource> {
