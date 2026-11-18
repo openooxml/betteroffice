@@ -496,7 +496,13 @@ pub fn scaled(dl: DisplayList, factor: f32) -> DisplayList {
                     valign: wrap.valign,
                     max_lines: wrap.max_lines,
                 }),
-                runs,
+                runs: runs
+                    .into_iter()
+                    .map(|run| TextRun {
+                        font_size: run.font_size.map(|size| size * factor),
+                        ..run
+                    })
+                    .collect(),
             },
             DrawCmd::Image {
                 x,

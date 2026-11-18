@@ -360,6 +360,10 @@ pub fn render_png_with_fonts_and_images(
                 wrap,
                 runs: _,
             } => {
+                if let Some(pieces) = xlsx_render::run_pieces(cmd) {
+                    paint_pieces(&mut pixmap, fonts, (*x, *y), *align, clip, text, &pieces)?;
+                    continue;
+                }
                 let run = font::TextRun {
                     x: *x,
                     y: *y,
@@ -439,6 +443,58 @@ pub fn render_png_with_fonts_and_images(
     }
 
     ooxml_raster::encode_png(pixmap, w, h)
+}
+
+fn paint_pieces(
+    pixmap: &mut Pixmap,
+    fonts: &RasterFonts,
+    (x, y): (f32, f32),
+    align: Align,
+    clip: &DlRect,
+    text: &str,
+    pieces: &[xlsx_render::TextPiece],
+) -> Result<(), String> {
+    let faces: Vec<&[font::FontFace]> = pieces
+        .iter()
+        .map(|piece| {
+            let family = piece.font_family.as_deref().unwrap_or("Calibri");
+            fonts.chain(family, piece.bold, piece.italic)
+        })
+        .collect();
+    let widths: Vec<f32> = pieces
+        .iter()
+        .zip(&faces)
+        .map(|(piece, faces)| {
+            let text = &text[piece.range.clone()];
+            font::measure_text_with_fonts(faces, &fonts.stack, text, piece.font_size)
+        })
+        .collect();
+    let mut pen = aligned_left(x, align, widths.iter().sum());
+    for ((piece, faces), width) in pieces.iter().zip(faces).zip(widths) {
+        font::paint_text(
+            pixmap,
+            &font::TextRun {
+                faces,
+                stack: &fonts.stack,
+                x: pen,
+                y,
+                text: &text[piece.range.clone()],
+                font_size_pt: piece.font_size,
+                color: parse_color(&piece.color)?,
+                align: Align::Left,
+                clip,
+                bold: piece.bold,
+                italic: piece.italic,
+                underline: piece.underline,
+                double_underline: double_underline(piece.underline_style),
+                strike: piece.strike,
+                highlight: None,
+                dashed_underline: false,
+            },
+        );
+        pen += width;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

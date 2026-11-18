@@ -86,31 +86,34 @@ impl Workbook {
     ) -> Result<MutexGuard<'_, FontRegistry>> {
         let mut registry = self.fonts.lock().unwrap_or_else(PoisonError::into_inner);
         for command in &display.commands {
-            if let DrawCmd::Text {
+            let DrawCmd::Text {
                 font_family,
                 bold,
                 italic,
                 text,
                 ..
             } = command
-            {
+            else {
+                continue;
+            };
+            let pieces = xlsx_render::run_pieces(command).unwrap_or_default();
+            let own = (font_family, *bold, *italic, text.as_ref());
+            let runs = pieces.iter().map(|piece| {
+                let text = &text[piece.range.clone()];
+                (&piece.font_family, piece.bold, piece.italic, text)
+            });
+            for (font_family, bold, italic, text) in std::iter::once(own).chain(runs) {
                 let family = font_family.as_deref().unwrap_or("Calibri");
                 let requested = primary_family(family);
-                let scripts =
-                    ooxml_text::paragraph_scripts_with_han_fallback([text.as_ref()], false);
-                let key = (
-                    family.trim().to_lowercase(),
-                    *bold,
-                    *italic,
-                    scripts.clone(),
-                );
+                let scripts = ooxml_text::paragraph_scripts_with_han_fallback([text], false);
+                let key = (family.trim().to_lowercase(), bold, italic, scripts.clone());
                 if registry.resolved.contains(&key) {
                     continue;
                 }
                 let faces = self.font_manager.resolve(
                     requested,
-                    *bold,
-                    *italic,
+                    bold,
+                    italic,
                     &scripts,
                     LastResortOffice::Word,
                 );
@@ -135,8 +138,8 @@ impl Workbook {
                         .fonts
                         .register_shared_font(
                             family,
-                            *bold,
-                            *italic,
+                            bold,
+                            italic,
                             Arc::clone(&data),
                             face.bold,
                             face.italic,
@@ -227,7 +230,7 @@ pub(crate) fn supplied_fonts(
     let mut seen = HashSet::new();
     for command in &display.commands {
         let DrawCmd::Text {
-            font_family: Some(family),
+            font_family,
             bold,
             italic,
             chart,
@@ -236,24 +239,34 @@ pub(crate) fn supplied_fonts(
         else {
             continue;
         };
-        if !seen.insert((family.trim().to_lowercase(), *bold, *italic, *chart)) {
-            continue;
-        }
-        if let Some(face) = suppliable_family(family, *chart)
-            .and_then(|name| supplied_face(faces, name, *bold, *italic))
-        {
-            fonts
-                .register_font(
-                    family,
-                    *bold,
-                    *italic,
-                    face.bytes.to_vec(),
-                    face.bold,
-                    face.italic,
-                )
-                .map_err(|_| Error::FontUnavailable {
-                    family: face.family.to_owned(),
-                })?;
+        let pieces = xlsx_render::run_pieces(command).unwrap_or_default();
+        let own = (font_family, *bold, *italic);
+        let runs = pieces
+            .iter()
+            .map(|piece| (&piece.font_family, piece.bold, piece.italic));
+        for (font_family, bold, italic) in std::iter::once(own).chain(runs) {
+            let Some(family) = font_family else {
+                continue;
+            };
+            if !seen.insert((family.trim().to_lowercase(), bold, italic, *chart)) {
+                continue;
+            }
+            if let Some(face) = suppliable_family(family, *chart)
+                .and_then(|name| supplied_face(faces, name, bold, italic))
+            {
+                fonts
+                    .register_font(
+                        family,
+                        bold,
+                        italic,
+                        face.bytes.to_vec(),
+                        face.bold,
+                        face.italic,
+                    )
+                    .map_err(|_| Error::FontUnavailable {
+                        family: face.family.to_owned(),
+                    })?;
+            }
         }
     }
     Ok(fonts)

@@ -238,6 +238,10 @@ pub fn render_png_with_images(dl: &DisplayList, images: &ImageMap<'_>) -> Result
                 wrap,
                 runs: _,
             } => {
+                if let Some(pieces) = xlsx_render::run_pieces(cmd) {
+                    paint_pieces(&mut pixmap, (*x, *y), *align, clip, text, &pieces)?;
+                    continue;
+                }
                 let run = font::TextRun {
                     x: *x,
                     y: *y,
@@ -646,6 +650,54 @@ fn path_coord(value: f64) -> Result<f32, String> {
         .is_finite()
         .then_some(value)
         .ok_or_else(|| "path contains a non-finite coordinate".to_string())
+}
+
+#[cfg(not(feature = "fonts"))]
+fn paint_pieces(
+    pixmap: &mut Pixmap,
+    (x, y): (f32, f32),
+    align: Align,
+    clip: &DlRect,
+    text: &str,
+    pieces: &[xlsx_render::TextPiece],
+) -> Result<(), String> {
+    let widths: Vec<f32> = pieces
+        .iter()
+        .map(|piece| font::measure_text(&text[piece.range.clone()], piece.font_size))
+        .collect();
+    let mut pen = aligned_left(x, align, widths.iter().sum());
+    for (piece, width) in pieces.iter().zip(widths) {
+        font::paint_text(
+            pixmap,
+            &font::TextRun {
+                x: pen,
+                y,
+                text: &text[piece.range.clone()],
+                font_size_pt: piece.font_size,
+                color: parse_color(&piece.color)?,
+                align: Align::Left,
+                clip,
+                bold: piece.bold,
+                italic: piece.italic,
+                underline: piece.underline,
+                double_underline: double_underline(piece.underline_style),
+                strike: piece.strike,
+                highlight: None,
+                dashed_underline: false,
+            },
+        );
+        pen += width;
+    }
+    Ok(())
+}
+
+/// The left edge of a line `width` wide anchored at `x` by `align`.
+fn aligned_left(x: f32, align: Align, width: f32) -> f32 {
+    match align {
+        Align::Left => x,
+        Align::Center => x - width / 2.0,
+        Align::Right => x - width,
+    }
 }
 
 fn double_underline(style: Option<xlsx_render::RunUnderline>) -> bool {

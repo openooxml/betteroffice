@@ -10,6 +10,7 @@ pub mod number_format;
 mod picture;
 pub mod region;
 mod table_style;
+pub mod text_runs;
 pub mod wrap;
 
 pub use ooxml_drawingml::GeometryPathCommand;
@@ -47,6 +48,7 @@ pub use geometry::{GridGeometry, PrintMetrics, autofit_relevant};
 pub use hit::chart_at_point;
 pub use number_format::{NumberFormatLayout, paint_number_format};
 pub use region::{viewport_for_range, viewport_for_used_range, viewport_for_used_range_within};
+pub use text_runs::{TextPiece, has_right_to_left, run_pieces};
 
 /// a scrolled window in pixels; `x`/`y` offset the non-frozen body.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]

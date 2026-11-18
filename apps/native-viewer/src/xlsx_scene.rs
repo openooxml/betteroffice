@@ -283,6 +283,8 @@ fn translate_command(
                         prepare(*x, y, line, *align)
                     })
                     .collect::<Result<Vec<_>, _>>()?
+            } else if let Some(pieces) = xlsx_render::run_pieces(command) {
+                prepare_pieces(*x, *y, *align, text, &pieces)?
             } else {
                 vec![prepare(*x, *y, text, *align)?]
             };
@@ -293,6 +295,45 @@ fn translate_command(
             })
         }
     }
+}
+
+fn prepare_pieces(
+    x: f32,
+    y: f32,
+    align: Align,
+    text: &str,
+    pieces: &[xlsx_render::TextPiece],
+) -> Result<Vec<PreparedText>, String> {
+    let widths: Vec<f32> = pieces
+        .iter()
+        .map(|piece| measure_text(&text[piece.range.clone()], piece.font_size))
+        .collect();
+    let total: f32 = widths.iter().sum();
+    let mut pen = match align {
+        Align::Left => x,
+        Align::Center => x - total / 2.0,
+        Align::Right => x - total,
+    };
+    let mut prepared = Vec::with_capacity(pieces.len());
+    for (piece, width) in pieces.iter().zip(widths) {
+        prepared.push(PreparedText::new(
+            pen,
+            y,
+            &text[piece.range.clone()],
+            piece.font_size,
+            &piece.color,
+            Align::Left,
+            piece.bold,
+            piece.italic,
+            piece.underline,
+            double_underline(piece.underline_style),
+            piece.strike,
+            None,
+            false,
+        )?);
+        pen += width;
+    }
+    Ok(prepared)
 }
 
 fn double_underline(style: Option<RunUnderline>) -> bool {
