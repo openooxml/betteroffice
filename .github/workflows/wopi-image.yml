@@ -53,6 +53,10 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
 concurrency:
   group: wopi-image-${{ github.event.pull_request.number || (inputs.publish && 'publish') || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
