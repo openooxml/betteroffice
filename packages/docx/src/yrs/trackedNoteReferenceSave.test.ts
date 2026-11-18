@@ -319,7 +319,7 @@ describe.each(PATHS)('$name', (path) => {
       expect(references).toHaveLength(1);
       expect(Number(references[0]!.payload[`${shape.note}RefId`])).toBe(1);
       const mark = (references[0]!.attributes[shape.tag] ?? {}) as Record<string, unknown>;
-      expect({ id: String(mark.revisionId), author: mark.author, date: mark.date })
+      expect({ id: String(mark.id), author: mark.author, date: mark.date })
         .toEqual({ id: String(shape.id), author: shape.author, date: DATE });
       expect(plainText(savedNote(saved, shape.note))).toBe(` ${shape.note} body`);
     });
