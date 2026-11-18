@@ -77,17 +77,21 @@ test('reports DOCX page agreement apart from SSIM, and only where pages are know
   expect(mixed).toContain(row('Exact page counts', '—', '1/1'));
 });
 
-test('replaces and moves the generated block without touching other sections', () => {
-  const section = renderSection(report());
+test('refuses a README without generated markers and leaves every section in it untouched', async () => {
   const readme =
     '# Project\n\n## Packages\n\n### DOCX\n\nPackage list.\n\n## Development\n\nCommands.\n\n## Visual fidelity\n\nOld text.\n\n## Contributing\n\nPolicy.\n';
-  const updated = updateReadme(readme, section);
-  expect(updated).not.toContain('Old text.');
-  expect(updated).toContain('Package list.\n\n<!-- BEGIN GENERATED');
-  expect(updated).toContain('<!-- END GENERATED VISUAL FIDELITY -->\n\n## Development');
-  expect(updated).toContain('Commands.\n\n## Contributing');
-  expect(updated.endsWith('Policy.\n')).toBe(true);
-  expect(updateReadme(updated, section)).toBe(updated);
+  for (const section of [renderSection(report()), renderSection(report(), { privateCorpus: true, date: DATE })])
+    expect(() => updateReadme(readme, section)).toThrow('README has no generated block');
+  const dir = await mkdtemp(join(tmpdir(), 'readme-no-markers-'));
+  try {
+    const path = join(dir, 'README.md');
+    await writeFile(path, readme);
+    await writeFile(join(dir, 'report.json'), JSON.stringify(report()));
+    refused(cli(['--as', 'public', 'report.json', 'README.md'], dir, false), 'README has no generated block');
+    expect(await readFile(path, 'utf8')).toBe(readme);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('refuses failed or mismatched render records', () => {
@@ -504,8 +508,24 @@ test('a public run replaces its block in place and leaves the large set block by
   const updated = updateReadme(readme, visual);
   expect(span(updated, LARGE_BEGIN, LARGE_END)).toBe(large);
   expect(updated).toBe(shell(`${visual}\n\n${large}`));
-  const head = '# Project\n\n## Packages\n\nList.\n\n';
-  expect(updateReadme(`${head}${large}\n\n## Evals\n`, visual)).toBe(`${head}${visual}\n\n${large}\n\n## Evals\n`);
+});
+
+test('a public run refuses a README that has only the large set block and leaves it unchanged', async () => {
+  const large = renderSection(report(), { privateCorpus: true, date: DATE });
+  const readme = shell(large);
+  expect(() => updateReadme(readme, renderSection(later()))).toThrow('README has no generated block');
+  const dir = await mkdtemp(join(tmpdir(), 'readme-public-without-pair-'));
+  try {
+    const path = join(dir, 'README.md');
+    await writeFile(path, readme);
+    await writeFile(join(dir, 'public.md'), renderSection(later()));
+    await writeFile(join(dir, 'report.json'), JSON.stringify(later()));
+    refused(cli(['--section', 'public.md', 'README.md'], dir, false), 'README has no generated block');
+    refused(cli(['--as', 'public', 'report.json', 'README.md'], dir, false), 'README has no generated block');
+    expect(await readFile(path, 'utf8')).toBe(readme);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('a README without a large set block gets it right after the public block, and a second private run replaces it', async () => {
@@ -670,7 +690,7 @@ test('--as large renders the same block from the run artifact aggregate.json as 
     expect(await readFile(join(dir, 'from-report.md'), 'utf8')).toBe(expected);
     expect(await readFile(join(dir, 'from-aggregate.md'), 'utf8')).toBe(expected);
     await writeFile(join(dir, 'public.md'), shell(visual));
-    refused(cli(['aggregate.json', 'public.md'], dir, false), 'renders only the large set block');
+    refused(cli(['--as', 'public', 'aggregate.json', 'public.md'], dir, false), 'renders only the large set block');
     expect(await readFile(join(dir, 'public.md'), 'utf8')).toBe(shell(visual));
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -763,7 +783,7 @@ test('the CLI puts a badge linking the run into the block it writes when given t
 
     await writeFile(join(dir, 'report.json'), JSON.stringify(later()));
     await writeFile(path, shell(visual));
-    expect(cli(['report.json', '--run-url', RUN, 'README.md'], dir, false).status).toBe(0);
+    expect(cli(['--as', 'public', 'report.json', '--run-url', RUN, 'README.md'], dir, false).status).toBe(0);
     const fromReport = await readFile(path, 'utf8');
     const reportDay = fromReport.match(/benchmark run (\d{4}-\d{2}-\d{2})/)?.[1] ?? '';
     expect([before, utcDay()]).toContain(reportDay);
@@ -936,8 +956,25 @@ test('the positional CLI refuses a private run report as the public block', asyn
     await writeFile(path, shell(visual));
     await writeFile(join(dir, 'report.json'), JSON.stringify(later()));
     await writeFile(join(dir, 'marked.json'), JSON.stringify({ ...later(), run_kind: 'private' }));
-    refused(cli(['report.json', 'README.md'], dir, true), 'a private run writes only the large set block');
-    refused(cli(['marked.json', 'README.md'], dir, false), 'a private run writes only the large set block');
+    refused(cli(['--as', 'public', 'report.json', 'README.md'], dir, true), 'a private run writes only the large set block');
+    refused(cli(['--as', 'public', 'marked.json', 'README.md'], dir, false), 'a private run writes only the large set block');
+    expect(await readFile(path, 'utf8')).toBe(shell(visual));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('the positional CLI refuses a call without --as and leaves the README unchanged', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'readme-positional-as-'));
+  try {
+    const visual = renderSection(report());
+    const path = join(dir, 'README.md');
+    await writeFile(path, shell(visual));
+    await writeFile(join(dir, 'report.json'), JSON.stringify(later()));
+    await writeFile(join(dir, 'aggregate.json'), `${JSON.stringify(aggregateReport(fullReport()), null, 2)}\n`);
+    for (const privateRun of [false, true])
+      for (const args of [['report.json'], ['report.json', 'README.md'], ['--date', DATE, 'aggregate.json', 'README.md']])
+        refused(cli(args, dir, privateRun), 'the positional command requires --as public or --as large');
     expect(await readFile(path, 'utf8')).toBe(shell(visual));
   } finally {
     await rm(dir, { recursive: true, force: true });
