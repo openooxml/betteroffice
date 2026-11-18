@@ -289,9 +289,14 @@ export function projectCommandEchoContext(
         edge = Math.min(edge, primitive.x);
       }
       // an empty text primitive only marks a blank line's position for hit testing and paints nothing;
-      // another table cell's text keeps its place, and whatever paints over the band declines below
+      // another table cell's text keeps its place, and whatever paints over the band declines below.
+      // The paragraph's list marker sits left of its first line and stays put while that line is typed
+      // (a centered line moves it with the text).
+      const ownMarker = primitive.kind === 'glyphRun' && primitive.listMarker && lineOffset === 0 &&
+        runs[0]!.echo?.centerWidth === undefined &&
+        primitive.glyphs.every((glyph) => glyph.x + (glyph.advance ?? Infinity) <= x + 0.01);
       if ((primitive.kind === 'text' && primitive.text !== '' || primitive.kind === 'glyphRun') && !omitted.has(index) &&
-        !(cell?.id !== undefined && primitive.clipGroup?.id !== undefined && primitive.clipGroup.id !== cell.id) &&
+        !ownMarker && !(cell?.id !== undefined && primitive.clipGroup?.id !== undefined && primitive.clipGroup.id !== cell.id) &&
         (primitive.kind === 'text' ? Math.abs(primitive.baselineY - baseline) < size :
           primitive.glyphs.some((glyph) => Math.abs(glyph.y - baseline) < size))) supported = false;
     }
@@ -429,7 +434,7 @@ function projectGlyphLine(input: GlyphLineInput): { line: DocxEchoGlyphLine; rec
   const font = CSS_FONT.exec(first.fallbackFont ?? '');
   const halfPoints = Math.round(first.size * 1.5);
   if (!font || echoRound3(halfPoints / 2 * 96 / 72) !== first.size) return undefined;
-  const shapingSize = Math.fround(Math.fround(halfPoints / 2 * 96) / 72);
+  const shapingSize = echoShapingSize(first.size);
   const glyphIds: number[] = [];
   const xs: number[] = [];
   const charRuns: GlyphRunPrimitive[] = [];
@@ -583,10 +588,31 @@ function projectGlyphLine(input: GlyphLineInput): { line: DocxEchoGlyphLine; rec
     else {
       // a justified line takes a word that fits once a quarter of its space width is squeezed out
       const line = previous.filter((run) => run.glyphs[0]!.y === last.glyphs[0]!.y);
-      const space = spaceAdvance?.();
-      if (space === undefined || line.some((run) => run.fontId !== first.fontId || run.size !== first.size)) return undefined;
-      const spaces = line.reduce((count, run) => count + [...run.text].filter((char) => char === ' ').length, 0);
-      previousSlack = last.echo.right - (last.echo.x + last.echo.stretch) + (spaces / 4 + 1) * space;
+      if (!routed) {
+        const space = spaceAdvance?.();
+        if (space === undefined || line.some((run) => run.fontId !== first.fontId || run.size !== first.size)) return undefined;
+        const spaces = line.reduce((count, run) => count + [...run.text].filter((char) => char === ' ').length, 0);
+        previousSlack = last.echo.right - (last.echo.x + last.echo.stretch) + (spaces / 4 + 1) * space;
+      } else {
+        // on a line that mixes faces each space is as wide as its own face makes it; letter spacing
+        // that narrows a space is left out, which only widens the slack and so declines more
+        let squeezable = 0;
+        let widest = 0;
+        for (const run of line) {
+          const count = [...run.text].filter((char) => char === ' ').length;
+          if (!count) continue;
+          if (echoRound3(Math.round(run.size * 1.5) / 2 * 96 / 72) !== run.size) return undefined;
+          const source = provider.glyphSet(run.fontId, echoShapingSize(run.size), false, run.lang, ' ');
+          const index = source?.glyphs.chars.get(' ');
+          if (!source || index === undefined) return undefined;
+          const space = source.glyphs.advance(source.glyphs.set.advances[index]!) +
+            Math.max(0, run.echo?.letterSpacing ?? 0);
+          squeezable += count * space;
+          widest = Math.max(widest, space);
+        }
+        if (!widest) return undefined;
+        previousSlack = last.echo.right - (last.echo.x + last.echo.stretch) + squeezable / 4 + widest;
+      }
     }
   }
   let nextWord: number | undefined;
@@ -633,6 +659,11 @@ function projectGlyphLine(input: GlyphLineInput): { line: DocxEchoGlyphLine; rec
       device, pixelRatio: ratio, ...(clip ? { clip } : {}) },
     rect: { x: band.x, y: band.y, width: band.w, height: band.h },
   };
+}
+
+/** The size a run shapes at: its half points as the engine measures them, in px. */
+function echoShapingSize(size: number): number {
+  return Math.fround(Math.fround(Math.round(size * 1.5) / 2 * 96) / 72);
 }
 
 /** Whether anything painted after the echoed line reaches into its repaint band. */
