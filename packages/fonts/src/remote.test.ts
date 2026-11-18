@@ -277,6 +277,27 @@ describe('provider stylesheets', () => {
     }
   });
 
+  test('a load abandoned right after its slices resolve to none rejects instead of settling empty', async () => {
+    const sliced = Array.from({ length: 13 }, (_, index) => `@font-face { font-family: 'Open Sans'; font-style: normal; font-weight: 400; src: url(https://fonts.bunny.net/o/${index}.woff2) format('woff2'); unicode-range: U+${(0x4e00 + index * 16).toString(16)}-${(0x4e0f + index * 16).toString(16)}; }`).join('\n');
+    for (const [name, css, text] of [['text', BUNNY_CSS, '日'], ['whole', sliced, undefined]] as const) {
+      const controller = new AbortController();
+      const check = controller.signal.throwIfAborted.bind(controller.signal);
+      let checks = 0;
+      controller.signal.throwIfAborted = () => {
+        check();
+        if (++checks === 1) queueMicrotask(() => controller.abort());
+      };
+      const fetch = mock(async () => new Response(css));
+      const fontSet = { add: mock(() => {}) } as unknown as FontFaceSet;
+      await expect(loadRemoteFontFaces('Tahoma', 'Tahoma', { weight: 400, style: 'normal' }, fontSet, {
+        fetch: fetch as unknown as typeof globalThis.fetch, signal: controller.signal,
+        provider: { cssUrl: `https://fonts.example.com/abandoned-empty-${name}/css` }, ...(text === undefined ? {} : { text }),
+      })).rejects.toThrow();
+      expect(checks).toBe(2);
+      expect(fetch).toHaveBeenCalledTimes(1);
+    }
+  });
+
   test('a caller that has already aborted starts no request at all', async () => {
     const controller = new AbortController();
     controller.abort();
