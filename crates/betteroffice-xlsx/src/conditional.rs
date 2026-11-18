@@ -1,6 +1,6 @@
 //! Conditional-format effects of the cells a display list draws.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -61,6 +61,12 @@ const AGGREGATES: &[&str] = &[
     "VAR.P",
     "VAR.S",
 ];
+
+/// Functions whose value changes with no edit: the calc engine's volatile
+/// functions less INDIRECT, whose value follows the cells it reads.
+const VOLATILE: &[&str] = &["TODAY", "NOW", "RAND", "RANDBETWEEN", "RANDARRAY"];
+/// Defined names one volatility scan expands, the calc engine's name depth.
+const NAME_DEPTH: usize = 256;
 
 /// A monotonic clock in milliseconds that bounds a frame's conditional-format
 /// work; the host supplies it, since the engine reads no clock of its own.
@@ -134,6 +140,8 @@ impl ConditionalStats {
             Unknown::Unparsable => &mut self.withheld_unparsable,
             Unknown::Refused => &mut self.withheld_refused,
             Unknown::Unsupported => &mut self.withheld_unsupported,
+            Unknown::Volatile => &mut self.withheld_volatile,
+            Unknown::Overlapping => &mut self.withheld_overlapping,
         };
         *counter += 1;
     }
@@ -147,6 +155,8 @@ enum Unknown {
     Unparsable,
     Refused,
     Unsupported,
+    Volatile,
+    Overlapping,
 }
 
 /// Each sheet's rules, aggregates and decided cells for one model epoch, the
@@ -782,10 +792,10 @@ fn compare(ctx: &EvalContext<'_>, op: BinaryOp, lhs: &CellValue, rhs: &CellValue
 
 /// The sheet's rules that paint a differential format, highest priority first.
 fn rules(model: &Workbook, sheet: SheetId) -> Vec<Rule> {
-    let Some(sheet) = model.sheet(sheet) else {
+    let Some(owner) = model.sheet(sheet) else {
         return Vec::new();
     };
-    let mut rules: Vec<(u32, Rule)> = sheet
+    let mut rules: Vec<(u32, Rule)> = owner
         .conditional_formats
         .iter()
         .flat_map(|group| {
@@ -849,6 +859,27 @@ fn rules(model: &Workbook, sheet: SheetId) -> Vec<Rule> {
                     None => return None,
                 };
                 let anchor = ranges.first()?.start;
+                let formulas: Vec<Formula> = sources
+                    .iter()
+                    .map(|source| compile(source, anchor))
+                    .collect();
+                let reads_volatile = formulas.iter().any(|formula| {
+                    formula
+                        .base
+                        .as_deref()
+                        .is_some_and(|base| volatile(model, sheet, base))
+                });
+                let whole_range = matches!(
+                    test,
+                    Test::Top { .. } | Test::Average { .. } | Test::Duplicates { .. }
+                );
+                let test = if reads_volatile {
+                    Test::Undecidable(Unknown::Volatile)
+                } else if whole_range && overlapping(&ranges) {
+                    Test::Undecidable(Unknown::Overlapping)
+                } else {
+                    test
+                };
                 let fill_unknown = rule.dxf_id.is_some_and(|id| {
                     model.styles.dxf_fill_colors_differ(id)
                         && model.styles.dxfs.get(id as usize) == Some(&rule.format)
@@ -867,10 +898,7 @@ fn rules(model: &Workbook, sheet: SheetId) -> Vec<Rule> {
                         anchor,
                         ranges: ranges.clone(),
                         test,
-                        formulas: sources
-                            .iter()
-                            .map(|source| compile(source, anchor))
-                            .collect(),
+                        formulas,
                         format: Arc::new(format),
                         fill_unknown,
                         stop,
@@ -881,6 +909,78 @@ fn rules(model: &Workbook, sheet: SheetId) -> Vec<Rule> {
         .collect();
     rules.sort_by_key(|(priority, _)| *priority);
     rules.into_iter().map(|(_, rule)| rule).collect()
+}
+
+fn overlapping(ranges: &[CellRange]) -> bool {
+    ranges
+        .iter()
+        .enumerate()
+        .any(|(index, range)| ranges[..index].iter().any(|seen| seen.overlaps(range)))
+}
+
+/// Whether `expr` at `sheet`, or a defined name it reads at any depth, calls
+/// a function whose value changes with no edit; names past `NAME_DEPTH`
+/// count as such a call.
+fn volatile(model: &Workbook, sheet: SheetId, expr: &Expr) -> bool {
+    let mut names = Vec::new();
+    if calls_volatile(model, sheet, expr, &mut names) {
+        return true;
+    }
+    let mut expanded = HashSet::new();
+    while let Some((owner, name)) = names.pop() {
+        if !expanded.insert((owner, name.to_lowercase())) {
+            continue;
+        }
+        if expanded.len() > NAME_DEPTH {
+            return true;
+        }
+        let Some(defined) = model.defined_name(owner, &name) else {
+            continue;
+        };
+        let formula = &defined.formula;
+        let Ok(definition) = parse_formula(formula.strip_prefix('=').unwrap_or(formula)) else {
+            continue;
+        };
+        let scope = defined.local_sheet.unwrap_or(owner);
+        if calls_volatile(model, scope, &definition, &mut names) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether `expr` calls a function in `VOLATILE`, collecting the defined
+/// names it reads into `names`.
+fn calls_volatile(
+    model: &Workbook,
+    sheet: SheetId,
+    expr: &Expr,
+    names: &mut Vec<(SheetId, String)>,
+) -> bool {
+    match expr {
+        Expr::FuncCall { name, args, .. } => {
+            let upper = name.to_ascii_uppercase();
+            let bare = upper.strip_prefix("_XLFN.").unwrap_or(&upper);
+            VOLATILE.contains(&bare)
+                || args
+                    .iter()
+                    .any(|arg| calls_volatile(model, sheet, arg, names))
+        }
+        Expr::Name { scope, name } => {
+            let owner = match scope {
+                Some(scope) => model.sheet_by_name(scope).map(|(id, _)| id),
+                None => Some(sheet),
+            };
+            names.extend(owner.map(|owner| (owner, name.clone())));
+            false
+        }
+        Expr::RangeJoin { start, end } => {
+            calls_volatile(model, sheet, start, names) || calls_volatile(model, sheet, end, names)
+        }
+        other => children(other)
+            .into_iter()
+            .any(|child| calls_volatile(model, sheet, child, names)),
+    }
 }
 
 fn operator(name: &str) -> Option<Op> {
