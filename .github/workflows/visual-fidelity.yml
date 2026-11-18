@@ -1690,25 +1690,9 @@ jobs:
 
       - name: Replace the generated README section
         if: ${{ (!inputs.private_corpus && !inputs.report_only && inputs.corpus_origin == '' && inputs.samples == '' && inputs.collection == 'office-quality') || (inputs.private_corpus && inputs.publish_readme && !inputs.report_only) }}
-        run: |
-          python3 - <<'PY'
-          import os
-          from pathlib import Path
-          section = (Path(os.environ['RUNNER_TEMP']) / 'fidelity-report/section.md').read_text()
-          begin = '<!-- BEGIN GENERATED VISUAL FIDELITY -->'
-          end = '<!-- END GENERATED VISUAL FIDELITY -->'
-          if not section.startswith(begin) or not section.endswith(end):
-              raise SystemExit('Invalid generated report')
-          path = Path('README.md')
-          if path.is_symlink() or not path.is_file():
-              raise SystemExit('README must be a regular file')
-          readme = path.read_text()
-          if readme.count(begin) != 1 or readme.count(end) != 1:
-              raise SystemExit('README must contain exactly one generated block')
-          before, tail = readme.split(begin)
-          _, after = tail.split(end)
-          path.write_text(before + section + after)
-          PY
+        env:
+          QUALITY_PRIVATE: ${{ inputs.private_corpus }}
+        run: node scripts/office-quality/readme.mjs --section "$RUNNER_TEMP/fidelity-report/section.md" README.md
 
       - name: Detect a changed report
         id: changed
