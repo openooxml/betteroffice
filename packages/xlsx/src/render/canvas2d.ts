@@ -17,11 +17,12 @@ import type {
   Rect,
   TextAlign,
   TextCmd,
+  TextWrap,
 } from '../display-list/types';
 import { fontSizePx, fontString } from './fontString';
 import { PATTERN_MASKS } from './patterns';
 import { paintNumberFormat } from './number-format';
-import { runPieces, type TextPiece } from './textRuns';
+import { runPieces, wrapRunLines, type TextPiece } from './textRuns';
 import { wrapLines, wrappedLineY } from './wrap';
 
 const STACKED_LINE_HEIGHT_RATIO = 1.2;
@@ -288,8 +289,10 @@ function paintText(ctx: CanvasRenderingContext2D, cmd: TextCmd): void {
   (ctx as CanvasRenderingContext2D & { textRendering?: string }).textRendering = 'geometricPrecision';
   ctx.textBaseline = 'alphabetic';
   const pieces = runPieces(cmd);
-  if (pieces) {
-    paintPieces(ctx, cmd, pieces);
+  if (pieces && cmd.wrap) {
+    paintWrappedPieces(ctx, cmd, cmd.wrap, pieces);
+  } else if (pieces) {
+    paintPieces(ctx, cmd, pieces, cmd.y);
   } else if (cmd.stacked) {
     paintStackedText(ctx, cmd);
   } else if (cmd.rotationDeg !== undefined && cmd.rotationDeg !== null) {
@@ -313,7 +316,7 @@ function paintText(ctx: CanvasRenderingContext2D, cmd: TextCmd): void {
   ctx.restore();
 }
 
-function paintPieces(ctx: CanvasRenderingContext2D, cmd: TextCmd, pieces: TextPiece[]): void {
+function paintPieces(ctx: CanvasRenderingContext2D, cmd: TextCmd, pieces: TextPiece[], y: number): void {
   const widths = pieces.map((piece) => {
     ctx.font = fontString(piece.cmd);
     return ctx.measureText(piece.text).width;
@@ -324,9 +327,18 @@ function paintPieces(ctx: CanvasRenderingContext2D, cmd: TextCmd, pieces: TextPi
   ctx.textAlign = 'left';
   pieces.forEach((piece, index) => {
     ctx.font = fontString(piece.cmd);
-    paintRun(ctx, piece.cmd, piece.text, x, 'left');
+    paintRun(ctx, { ...piece.cmd, y }, piece.text, x, 'left');
     x += widths[index]!;
   });
+}
+
+function paintWrappedPieces(ctx: CanvasRenderingContext2D, cmd: TextCmd, wrap: TextWrap, pieces: TextPiece[]): void {
+  const lines = wrapRunLines(cmd.text, pieces, wrap.width, (piece, part) => {
+    ctx.font = fontString(piece.cmd);
+    return ctx.measureText(part).width;
+  });
+  const count = Math.min(lines.length, wrap.maxLines ?? lines.length);
+  lines.slice(0, count).forEach((line, index) => paintPieces(ctx, cmd, line, wrappedLineY(cmd.y, index, count, wrap)));
 }
 
 function rotatedAvailableLength(box: Rect, deg: number, fontSize: number): number {

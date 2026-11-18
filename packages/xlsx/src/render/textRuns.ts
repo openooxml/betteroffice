@@ -1,11 +1,17 @@
 import type { TextCmd, TextRun } from '../display-list/types';
+import { wrapSpans } from './wrap';
 
 /** A text run as a painter may carry it, with the CSS family list a PNG export resolved for it. */
 export type PaintedTextRun = TextRun & { cssFontFamily?: string };
 
-/** A span of a text command's text with the command it paints as: the command's own font with the run's properties over it. */
+/**
+ * A span of a text command's text, `[start, end)` in UTF-16 code units, with the command it paints as: the command's
+ * own font with the run's properties over it.
+ */
 export interface TextPiece {
   text: string;
+  start: number;
+  end: number;
   cmd: TextCmd & { cssFontFamily?: string };
   baseline?: TextRun['baseline'];
 }
@@ -55,22 +61,27 @@ function sameStyle(a: TextPiece, b: TextPiece): boolean {
 }
 
 /**
- * The pieces a painter draws for a text command left to right on one baseline, or `undefined` when it paints the
- * command as one plain run: no runs, runs that all carry the command's own font, and the cases the pieces do not
- * cover yet (wrapped, rotated, stacked, number-formatted or highlighted text, and text with a right-to-left
- * character). Neighbouring pieces in the same font join into one. Follows `run_pieces` in the Rust display list.
+ * The pieces a painter draws for a text command left to right on one baseline, or on each line `wrapRunLines` breaks
+ * them into, or `undefined` when it paints the command as one plain run: no runs, runs that all carry the command's
+ * own font, and the cases the pieces do not cover yet (rotated, stacked, number-formatted or highlighted text, and
+ * text with a right-to-left character). Neighbouring pieces in the same font join into one. Follows `run_pieces` in
+ * the Rust display list.
  */
 export function runPieces(cmd: TextCmd & { cssFontFamily?: string }): TextPiece[] | undefined {
   const runs = cmd.runs as PaintedTextRun[] | undefined;
-  if (!runs?.length || cmd.wrap || cmd.stacked || (cmd.rotationDeg !== undefined && cmd.rotationDeg !== null)
+  if (!runs?.length || cmd.stacked || (cmd.rotationDeg !== undefined && cmd.rotationDeg !== null)
     || cmd.numberFormat || cmd.highlight || cmd.dashedUnderline || hasRightToLeft(cmd.text)) return undefined;
-  const base: TextPiece = { text: '', cmd: styled(cmd) };
+  const base: TextPiece = { text: '', start: 0, end: 0, cmd: styled(cmd) };
   const pieces: TextPiece[] = [];
   const push = (from: number, to: number, style: TextPiece) => {
     if (to <= from) return;
     const last = pieces[pieces.length - 1];
-    if (last && sameStyle(last, style)) last.text += cmd.text.slice(from, to);
-    else pieces.push({ ...style, text: cmd.text.slice(from, to) });
+    if (last && sameStyle(last, style)) {
+      last.text += cmd.text.slice(from, to);
+      last.end = to;
+    } else {
+      pieces.push({ ...style, text: cmd.text.slice(from, to), start: from, end: to });
+    }
   };
   let cursor = 0;
   for (const run of runs) {
@@ -78,10 +89,29 @@ export function runPieces(cmd: TextCmd & { cssFontFamily?: string }): TextPiece[
     const end = boundary(cmd.text, run.end);
     if (end <= start) continue;
     push(cursor, start, base);
-    push(start, end, { text: '', cmd: styled(cmd, run), baseline: run.baseline });
+    push(start, end, { text: '', start: 0, end: 0, cmd: styled(cmd, run), baseline: run.baseline });
     cursor = end;
   }
   push(cursor, cmd.text.length, base);
   if (pieces.length === 0 || (pieces.length === 1 && sameStyle(pieces[0]!, base))) return undefined;
   return pieces;
+}
+
+/**
+ * The pieces of each line a wrapped command paints, split where its lines break; `measure` gives the width of part of
+ * a piece's text in its font. Follows `wrap_run_lines` in the Rust display list.
+ */
+export function wrapRunLines(
+  text: string,
+  pieces: TextPiece[],
+  width: number,
+  measure: (piece: TextPiece, part: string) => number,
+): TextPiece[][] {
+  const within = (start: number, end: number): TextPiece[] => pieces.flatMap((piece) => {
+    const from = Math.max(piece.start, start);
+    const to = Math.min(piece.end, end);
+    return from < to ? [{ ...piece, text: text.slice(from, to), start: from, end: to }] : [];
+  });
+  const spans = wrapSpans(text, width, (start, end) => within(start, end).reduce((sum, piece) => sum + measure(piece, piece.text), 0));
+  return spans.map(([start, end]) => within(start, end));
 }
