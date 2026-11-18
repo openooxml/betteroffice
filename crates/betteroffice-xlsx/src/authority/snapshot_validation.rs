@@ -256,7 +256,7 @@ mod pattern_tests {
                     &mut position,
                     SnapshotBudget::new(1, 768).unwrap(),
                     &mut meter,
-                    |window| window.format(&model, xf, &BTreeMap::new(), None),
+                    |window| window.format(&model, xf, &BTreeMap::new(), false, None),
                 )
                 .unwrap();
                 bytes.extend(chunk);
@@ -416,6 +416,7 @@ impl JsonWindow<'_> {
         model: &WorkbookModel,
         xf: Option<&xlsx_model::styles::Xf>,
         formats: &BTreeMap<u16, usize>,
+        builtins: bool,
         source_xf: Option<u32>,
     ) -> JsonResult {
         let default = CellFormat::default();
@@ -492,7 +493,8 @@ impl JsonWindow<'_> {
         }
         self.raw(b"},\"numberFormat\":")?;
         let id = xf.and_then(|xf| xf.num_fmt_id).unwrap_or(0);
-        if let Some(&index) = formats.get(&id).filter(|_| id >= 164) {
+        let declared = id != 0 && (id >= 164 || !builtins);
+        if let Some(&index) = formats.get(&id).filter(|_| declared) {
             self.raw(b"{\"kind\":\"custom\",\"pattern\":")?;
             self.string(&model.styles.num_fmts[index].1)?;
             self.raw(b"}")?;
@@ -844,11 +846,16 @@ impl SnapshotValidation {
         if self.phase == 8 {
             let fingerprint = atomic(&meta, &txn, BASE_FINGERPRINT)?;
             let fingerprint = string(&fingerprint)?;
-            let candidate = base
-                .fingerprints
-                .get(&self.version.min(FINGERPRINT_SCHEMA_VERSION))
-                .and_then(|values| values.get(self.metadata_child))
-                .ok_or_else(invalid)?;
+            let declared = self.version >= NUMBER_FORMATS_SCHEMA_VERSION
+                && declares_builtin_number_formats(&base.styles);
+            let candidate = if declared {
+                (self.metadata_child == 0).then_some(&base.fingerprint)
+            } else {
+                base.fingerprints
+                    .get(&self.version.min(FINGERPRINT_SCHEMA_VERSION))
+                    .and_then(|values| values.get(self.metadata_child))
+            }
+            .ok_or_else(invalid)?;
             allowance(128, budget, &mut self.unit_bytes)?;
             let Some(matches) = compare_text(
                 fingerprint,
@@ -902,12 +909,14 @@ impl SnapshotValidation {
                 return Ok(false);
             };
             let start = self.json.bytes;
+            let builtins = reads_builtins(self.version, &base.styles);
             let (done, bytes) =
                 json_window(&mut self.json, budget, &mut self.unit_bytes, |window| {
                     window.format(
                         model,
                         xf,
                         &self.number_formats,
+                        builtins,
                         (index != 0 && !self.plain_format).then(|| index - 1),
                     )
                 })?;
@@ -2423,7 +2432,7 @@ mod tests {
             for _ in 0..=expected.len() {
                 let mut meter = 0;
                 let (done, bytes) = json_window(&mut position, budget, &mut meter, |window| {
-                    window.format(&model, xf, &formats, None)
+                    window.format(&model, xf, &formats, false, None)
                 })
                 .unwrap();
                 assert!(meter <= budget.max_bytes());

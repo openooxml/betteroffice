@@ -862,6 +862,11 @@ pub struct Stylesheet {
     /// format facets.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     released_xfs: Vec<bool>,
+    /// set while the stylesheet stands for a shared state made before a
+    /// workbook's own entries for builtin ids were read: those entries are not
+    /// consulted.
+    #[serde(skip)]
+    builtin_number_formats: bool,
     #[serde(skip)]
     derived_memo: HashMap<(u32, Xf), u32>,
     #[serde(skip)]
@@ -880,6 +885,7 @@ pub struct Stylesheet {
 
 #[derive(Debug, Clone)]
 struct CurrencyMemo {
+    builtin_number_formats: bool,
     formats: Vec<(u16, String)>,
     xf_formats: Vec<Option<u16>>,
     used_styles: Vec<u32>,
@@ -895,6 +901,7 @@ impl Stylesheet {
             && self.xfs_with_extra_xml == other.xfs_with_extra_xml
             && self.exact_style_indices == other.exact_style_indices
             && self.released_xfs == other.released_xfs
+            && self.builtin_number_formats == other.builtin_number_formats
     }
 }
 
@@ -1005,6 +1012,7 @@ impl Stylesheet {
             .lock()
             .unwrap_or_else(|err| err.into_inner());
         if let Some(cached) = memo.as_ref()
+            && cached.builtin_number_formats == self.builtin_number_formats
             && cached.formats == self.num_fmts
             && cached.used_styles == used_styles
             && cached
@@ -1017,6 +1025,7 @@ impl Stylesheet {
         }
         let symbols = compute();
         *memo = Some(CurrencyMemo {
+            builtin_number_formats: self.builtin_number_formats,
             formats: self.num_fmts.clone(),
             xf_formats: self.cell_xfs.iter().map(|xf| xf.num_fmt_id).collect(),
             used_styles: used_styles.to_vec(),
@@ -1042,6 +1051,7 @@ impl Stylesheet {
             xfs_with_extra_xml: _,
             exact_style_indices: _,
             released_xfs: _,
+            builtin_number_formats: _,
             derived_memo: _,
             font_memo: _,
             fill_memo: _,
@@ -1127,6 +1137,7 @@ impl Stylesheet {
     /// [`Stylesheet::format_code_for`] resolves it.
     pub fn format_code_for_id(&self, id: u16) -> FormatCode<'_> {
         if id != 0
+            && (id >= 164 || !self.builtin_number_formats)
             && let Some((_, code)) = self.num_fmts.iter().find(|(k, _)| *k == id)
         {
             return FormatCode::Custom(code);
@@ -1284,6 +1295,13 @@ impl Stylesheet {
     #[doc(hidden)]
     pub fn preserve_style_identity(&mut self) {
         self.exact_style_indices = true;
+    }
+
+    /// reads the workbook's own entries for builtin ids as the builtins, as a
+    /// shared state made before those entries were read does.
+    #[doc(hidden)]
+    pub fn read_builtin_number_formats(&mut self) {
+        self.builtin_number_formats = true;
     }
 
     #[doc(hidden)]

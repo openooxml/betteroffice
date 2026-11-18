@@ -81,9 +81,12 @@ const FREEZE_PANE_SCHEMA_VERSION: i64 = 4;
 const HYPERLINK_SCHEMA_VERSION: i64 = 5;
 const CHARTS_SCHEMA_VERSION: i64 = 6;
 const SHEET_APPEND_SCHEMA_VERSION: i64 = 7;
-const SCHEMA_VERSION: i64 = SHEET_APPEND_SCHEMA_VERSION;
+const NUMBER_FORMATS_SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = NUMBER_FORMATS_SCHEMA_VERSION;
 /// The newest schema a fingerprint can tell apart. Schema 7 changed nothing a
 /// fingerprint hashes, so a state at it pairs with the same base as one at 6.
+/// Schema 8 moves only the current fingerprint of a workbook declaring its own
+/// entry for a builtin id, under [`NUMBER_FORMATS_FINGERPRINT_DOMAIN`].
 const FINGERPRINT_SCHEMA_VERSION: i64 = CHARTS_SCHEMA_VERSION;
 /// What a seed writes first. Its later writes keep the identifiers a schema 6
 /// bootstrap gave them, so such a replica receives the current version as the
@@ -309,6 +312,12 @@ impl WorkbookBase {
             Ok(fingerprints)
         })?;
         let (fingerprint, bootstrap_client_id, fingerprints) = builder.finish(fingerprints)?;
+        let declared = declares_builtin_number_formats(&model.styles);
+        let (fingerprint, bootstrap_client_id) = if declared {
+            number_formats_fingerprint(&fingerprint)
+        } else {
+            (fingerprint, bootstrap_client_id)
+        };
         Ok(Self {
             bootstrap_client_id,
             date_system: model.date_system,
@@ -581,8 +590,24 @@ impl WorkbookBase {
     }
 
     fn accepts_fingerprint(&self, version: i64, fingerprint: &str) -> bool {
+        if version >= NUMBER_FORMATS_SCHEMA_VERSION
+            && declares_builtin_number_formats(&self.styles)
+        {
+            return fingerprint == self.fingerprint;
+        }
         self.fingerprints
             .accepts(version.min(FINGERPRINT_SCHEMA_VERSION), fingerprint)
+    }
+
+    /// The fingerprint a state reading the workbook's own entries for builtin
+    /// ids as the builtins carries: the current one, hashed without
+    /// [`NUMBER_FORMATS_FINGERPRINT_DOMAIN`].
+    fn builtin_reading_fingerprint(&self) -> Option<String> {
+        let fingerprints = &self.fingerprints;
+        if fingerprints.accepts(FINGERPRINT_SCHEMA_VERSION, &self.fingerprint) {
+            return Some(self.fingerprint.clone());
+        }
+        fingerprints.first(FINGERPRINT_SCHEMA_VERSION)
     }
 
     fn workbook(&self) -> WorkbookModel {
@@ -1412,6 +1437,13 @@ impl WorkbookAuthority {
         dormant_names(&self.doc.transact(), keys).map_err(AuthorityError::InvalidState)
     }
 
+    /// Whether this state reads the workbook's own entries for builtin ids as
+    /// the builtins.
+    pub(crate) fn reads_builtin_number_formats(&self) -> bool {
+        self.schema_version()
+            .is_ok_and(|version| reads_builtins(version, &self.base.styles))
+    }
+
     pub(crate) fn inherit_xf_xml_markers(&mut self, source: &Stylesheet) {
         if !self.base.styles.has_xf_xml_markers() {
             Arc::make_mut(&mut self.base)
@@ -1464,11 +1496,13 @@ impl WorkbookAuthority {
     }
 
     fn count_plain_style_cells(&self) -> Result<u64, String> {
+        let version = self.schema_version()?;
         let txn = self.doc.transact();
         let cell_formats = txn
             .get_map(CELL_FORMATS)
             .ok_or_else(|| "missing cell format catalog".to_string())?;
-        let (_, indices) = materialize_cell_formats(&cell_formats, &txn, &self.base.styles)?;
+        let (_, indices) =
+            materialize_cell_formats(&cell_formats, &txn, &self.base.styles, version)?;
         let order = txn
             .get_array(SHEET_ORDER)
             .ok_or_else(|| "missing sheet order".to_string())?;
@@ -1715,7 +1749,7 @@ impl WorkbookAuthority {
         let txn = self.doc.transact();
         let cell_formats = txn.get_map(CELL_FORMATS)?;
         let (mut styles, indices) =
-            materialize_cell_formats(&cell_formats, &txn, &self.base.styles).ok()?;
+            materialize_cell_formats(&cell_formats, &txn, &self.base.styles, SCHEMA_VERSION).ok()?;
         let plain = (count != 0).then(|| styles.plain_xf());
         styles.bind_plain_xf();
         let order = txn.get_array(SHEET_ORDER)?;
@@ -1817,7 +1851,7 @@ impl WorkbookAuthority {
         let txn = self.doc.transact();
         let cell_formats = txn.get_map(CELL_FORMATS)?;
         let (mut stylesheet, indices) =
-            materialize_cell_formats(&cell_formats, &txn, &self.base.styles).ok()?;
+            materialize_cell_formats(&cell_formats, &txn, &self.base.styles, SCHEMA_VERSION).ok()?;
         let plain = (plain_style_cells != 0).then(|| stylesheet.plain_xf());
         stylesheet.bind_plain_xf();
         let order = txn.get_array(SHEET_ORDER)?;
@@ -1883,7 +1917,8 @@ impl WorkbookAuthority {
         for (key, payload) in &formats {
             catalog.insert(key.clone(), decode_cell_format_entry(key, payload).ok()?);
         }
-        let (_, next_indices) = materialize_cell_format_catalog(catalog, &self.base.styles).ok()?;
+        let (_, next_indices) =
+            materialize_cell_format_catalog(catalog, &self.base.styles, SCHEMA_VERSION).ok()?;
         let mut cells = Vec::new();
         let mut next_plain = 0;
         for row in range.start.row..=range.end.row {
@@ -2105,7 +2140,8 @@ impl WorkbookAuthority {
     /// writers still reference.
     fn keep_released_source_formats(&self, source: &Self) -> Result<(), String> {
         use snapshot::ReleasedLayout;
-        let base = &self.base.styles;
+        let base = styles_read_at(&self.base.styles, self.schema_version()?);
+        let base = &*base;
         let mut sources = HashMap::new();
         for index in 0..base.cell_xfs.len() {
             let index =
@@ -2900,14 +2936,26 @@ impl WorkbookAuthority {
 
     /// `source` is the replica adopting this state, whose cells hold the
     /// formats a state persisted before format facets keyed only by its
-    /// reading of them.
+    /// reading of them. A state reading the workbook's own entries for builtin
+    /// ids as the builtins keeps that reading: it moves no further than the
+    /// last schema made with it.
     fn upgrade_schema_from(&self, source: Option<&Doc>) -> Result<bool, String> {
         let version = self.schema_version()?;
         validate_schema_version(version)?;
         self.deduplicate_sheet_order()?;
+        let builtins = reads_builtins(version, &self.base.styles);
+        let (target, base_fingerprint) = if builtins {
+            let fingerprint = self
+                .base
+                .builtin_reading_fingerprint()
+                .ok_or_else(|| "missing workbook base fingerprint".to_string())?;
+            (SHEET_APPEND_SCHEMA_VERSION, fingerprint)
+        } else {
+            (SCHEMA_VERSION, self.base.fingerprint.clone())
+        };
         let fingerprint = self.state_fingerprint();
-        let current = fingerprint.as_deref() == Some(self.base.fingerprint.as_str());
-        if version == SCHEMA_VERSION && current {
+        let current = fingerprint.as_deref() == Some(base_fingerprint.as_str());
+        if version == target && current {
             return Ok(false);
         }
         let (model, structure) = self.materialize_internal(false)?;
@@ -2932,7 +2980,7 @@ impl WorkbookAuthority {
         if !current && fingerprint.as_deref().is_some_and(released_fingerprint) {
             migrate_pre_facet_formats(
                 &mut txn,
-                &self.base.styles,
+                &styles_read_at(&self.base.styles, version),
                 source,
                 fingerprint_reading(fingerprint.as_deref().unwrap_or_default()),
             )?;
@@ -2971,8 +3019,8 @@ impl WorkbookAuthority {
         let meta = txn
             .get_map(META)
             .ok_or_else(|| "missing workbook metadata".to_string())?;
-        meta.try_update(&mut txn, BASE_FINGERPRINT, self.base.fingerprint.as_str());
-        meta.try_update(&mut txn, "schemaVersion", SCHEMA_VERSION);
+        meta.try_update(&mut txn, BASE_FINGERPRINT, base_fingerprint.as_str());
+        meta.try_update(&mut txn, "schemaVersion", target);
         Ok(true)
     }
 
@@ -3052,7 +3100,7 @@ impl WorkbookAuthority {
             .get_map(CELL_FORMATS)
             .ok_or_else(|| "missing cell format catalog".to_string())?;
         let (styles, style_indices) =
-            materialize_cell_formats(&cell_formats, &txn, &self.base.styles)?;
+            materialize_cell_formats(&cell_formats, &txn, &self.base.styles, version)?;
 
         let order = txn
             .get_array(SHEET_ORDER)
@@ -5390,8 +5438,9 @@ fn materialize_cell_formats<T: ReadTxn>(
     map: &MapRef,
     txn: &T,
     base: &Stylesheet,
+    version: i64,
 ) -> Result<(Stylesheet, BTreeMap<String, Option<u32>>), String> {
-    materialize_cell_format_catalog(read_cell_format_catalog(map, txn)?, base)
+    materialize_cell_format_catalog(read_cell_format_catalog(map, txn)?, base, version)
 }
 
 fn decode_cell_format_entry(key: &str, payload: &str) -> Result<StoredCellFormat, String> {
@@ -5424,14 +5473,15 @@ fn read_cell_format_catalog<T: ReadTxn>(
 fn materialize_cell_format_catalog(
     catalog: BTreeMap<String, StoredCellFormat>,
     base: &Stylesheet,
+    version: i64,
 ) -> Result<(Stylesheet, BTreeMap<String, Option<u32>>), String> {
-    let mut styles = base.clone();
+    let mut styles = styles_read_at(base, version).into_owned();
     styles.preserve_style_identity();
     let mut known = BTreeMap::new();
     for index in 0..base.cell_xfs.len() {
         let index =
             u32::try_from(index).map_err(|_| "cell format table is too large".to_string())?;
-        known.entry(style_key(base, index)?).or_insert(Some(index));
+        known.entry(style_key(&styles, index)?).or_insert(Some(index));
     }
     let mut indices = BTreeMap::new();
     for (key, stored) in catalog {
@@ -6792,6 +6842,47 @@ const PATTERN_FILLS_FINGERPRINT_DOMAIN: &[u8] = b"betteroffice-xlsx-yrs-v7-patte
 /// its writer read the fills and borders as written.
 const PATTERN_FILLS_FINGERPRINT_TAG: &str = "pattern-fills:";
 
+/// The domain the current fingerprint of styles declaring their own entry for
+/// a builtin id is hashed again under. States before schema 8 read those
+/// entries as the builtins and pair with the fingerprints hashed without it.
+const NUMBER_FORMATS_FINGERPRINT_DOMAIN: &[u8] = b"betteroffice-xlsx-yrs-v8-number-formats";
+
+/// Whether `styles` declares its own entry for a builtin id other than General.
+fn declares_builtin_number_formats(styles: &Stylesheet) -> bool {
+    styles.num_fmts.iter().any(|(id, _)| (1..164).contains(id))
+}
+
+/// Whether a state at `version` reads the entries `styles` declares for
+/// builtin ids as the builtins, as states before schema 8 were made.
+fn reads_builtins(version: i64, styles: &Stylesheet) -> bool {
+    version < NUMBER_FORMATS_SCHEMA_VERSION && declares_builtin_number_formats(styles)
+}
+
+/// `styles` as a state at `version` reads them.
+fn styles_read_at(styles: &Stylesheet, version: i64) -> Cow<'_, Stylesheet> {
+    if !reads_builtins(version, styles) {
+        return Cow::Borrowed(styles);
+    }
+    let mut styles = styles.clone();
+    styles.read_builtin_number_formats();
+    Cow::Owned(styles)
+}
+
+/// `fingerprint` hashed again under [`NUMBER_FORMATS_FINGERPRINT_DOMAIN`],
+/// keeping its reading's tag, and the bootstrap client it seeds.
+fn number_formats_fingerprint(fingerprint: &str) -> (String, u64) {
+    let mut hasher = Sha256::new();
+    hasher.update(NUMBER_FORMATS_FINGERPRINT_DOMAIN);
+    hasher.update(fingerprint.as_bytes());
+    let digest = hasher.finalize();
+    let mut head = [0; 8];
+    head.copy_from_slice(&digest[..8]);
+    (
+        fingerprint_text(fingerprint_reading(fingerprint), format!("{digest:x}")),
+        client_id_of_digest(u64::from_be_bytes(head)),
+    )
+}
+
 /// Whether releases before patterned fills read `styles` as written.
 pub(crate) fn released_styles(styles: &Stylesheet) -> bool {
     use snapshot::ReleasedLayout;
@@ -7546,7 +7637,7 @@ impl WorkbookAuthority {
             .get_map(CELL_FORMATS)
             .ok_or_else(|| "missing cell format catalog".to_string())?;
         let (styles, style_indices) =
-            materialize_cell_formats(&cell_formats, &txn, &self.base.styles)?;
+            materialize_cell_formats(&cell_formats, &txn, &self.base.styles, version)?;
 
         let order = txn
             .get_array(SHEET_ORDER)
@@ -10514,7 +10605,7 @@ mod tests {
         };
         assert_eq!(
             error,
-            "unsupported schema version 8; supported versions are 3 through 7"
+            "unsupported schema version 9; supported versions are 3 through 8"
         );
     }
 
