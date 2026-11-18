@@ -1207,8 +1207,9 @@ pub fn outline_glyph_json_resident(font_id: u32, glyph_id: u32) -> Result<String
 /// face measurement takes its line metrics from (from `measurement`), and `1` where the
 /// character's font slot is the East Asian one, whose language both paths shape it with (`0`
 /// for the Latin language). Each is `None` where that path would not take the character as
-/// plain text. The typing echo places a character only where the display and measured faces
-/// agree.
+/// plain text. A measured face that shapes the character as the display face does (one font's
+/// bytes at one pitch, measured through another slot's family) is named by the display face.
+/// The typing echo places a character only where the display and measured faces agree.
 pub fn echo_character_faces(
     store: &ooxml_text::FontStore,
     display_chains: &std::collections::HashMap<String, Vec<u32>>,
@@ -1233,13 +1234,20 @@ pub fn echo_character_faces(
             alphabet,
         )
     });
-    (0..alphabet.chars().count())
-        .map(|index| {
+    alphabet
+        .chars()
+        .enumerate()
+        .map(|(index, ch)| {
             let shown = display.as_ref().and_then(|faces| faces[index]);
             let measured = measured.as_ref().and_then(|faces| faces[index]);
             [
                 shown.map(ooxml_text::FontId::to_u32),
-                measured.map(|(face, ..)| face.to_u32()),
+                measured.map(|(face, ..)| {
+                    shown
+                        .filter(|&shown| store.shapes_alike(shown, face, ch))
+                        .unwrap_or(face)
+                        .to_u32()
+                }),
                 measured.map(|(_, metrics, _)| metrics.to_u32()),
                 measured.map(|(.., east_asian)| u32::from(east_asian)),
             ]

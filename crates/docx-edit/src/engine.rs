@@ -29137,6 +29137,9 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         let _scope = fonts.enter();
         let latin = docx_layout::register_measure_font_bytes(LIBERATION).unwrap();
         let hangul = docx_layout::register_measure_font_bytes(NOTO_KR).unwrap();
+        // a substitute for Dotum: the Hangul face with Dotum's line metrics, at its own pitch
+        let dotum = docx_layout::register_substitute_measure_font_id(hangul, "돋움").unwrap();
+        assert_ne!(dotum, hangul);
         let run = |properties: &str, text: &str| {
             format!(
                 r#"<w:p><w:r><w:rPr>{properties}</w:rPr><w:t xml:space="preserve">{text}</w:t></w:r></w:p>"#
@@ -29159,6 +29162,8 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             run(&format!("<w:b/>{korean}"), "강 Bold"),
             // the measured East Asian chain cannot draw Hangul; the display chain falls back
             run(r#"<w:rFonts w:eastAsia="Latin Only"/>"#, "Plain 문"),
+            // measured through the Dotum view, drawn with the face it views
+            run(r#"<w:rFonts w:eastAsia="돋움"/>"#, "Wide 가"),
             r#"<w:p><w:pPr><w:autoSpaceDE w:val="0"/></w:pPr><w:r><w:t>Off</w:t></w:r></w:p>"#
                 .to_owned(),
         ]
@@ -29195,13 +29200,16 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                     "liberation sans|1|0" => json!([hangul, latin]),
                     _ if key.starts_with("noto sans kr|") => json!([hangul, latin]),
                     _ if key.starts_with("latin only|") => json!([latin]),
+                    _ if key.starts_with("돋움|") => json!([dotum, latin]),
                     _ => json!([latin, hangul]),
                 };
                 (key.to_owned(), chain)
             })
             .collect();
         assert!(
-            chains.contains_key("latin only|0|0") && chains.contains_key("liberation sans|1|0"),
+            chains.contains_key("latin only|0|0")
+                && chains.contains_key("liberation sans|1|0")
+                && chains.contains_key("돋움|0|0"),
             "{chains:?}"
         );
         request["measurement"] = json!({
@@ -29250,6 +29258,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         );
         let mut seen = String::new();
         let mut differing = 0;
+        let mut viewed = 0;
         for (text, font, start, in_cell) in &runs {
             let end = *start as f64 + text.encode_utf16().count() as f64;
             let answer: serde_json::Value = serde_json::from_str(
@@ -29264,6 +29273,15 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             assert_eq!(&answer["line"], &answer["faces"], "{text:?}");
             for (ch, face) in text.chars().zip(faces) {
                 assert_eq!(face[0], json!(font), "display face of {ch:?} in {text:?}");
+                // the view shapes as the face it views, so it is named by it; its line metrics stay
+                if face[2] == json!(dotum) {
+                    viewed += 1;
+                    assert_eq!(
+                        (ch, face),
+                        ('가', &json!([hangul, hangul, dotum, 1])),
+                        "{text:?}"
+                    );
+                }
                 assert!(
                     face[1].is_u64() && face[2].is_u64(),
                     "{ch:?} in {text:?}: {face}"
@@ -29283,7 +29301,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             }
             seen.push_str(text);
         }
-        assert_eq!(differing, 1);
+        assert_eq!((differing, viewed), (1, 1));
         for expected in [
             "Hello",
             "가나다",
