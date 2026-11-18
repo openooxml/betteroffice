@@ -94,6 +94,7 @@ impl Lineage {
             chart_cache: _,
             conditional_cache: _,
             source_part_hashes: _,
+            calculated_now: _,
         } = workbook;
         workbook.require_snapshot_standalone()?;
         if *edited_since_open
@@ -2135,6 +2136,7 @@ impl WorkbookSnapshotBuilder {
             chart_cache: Mutex::new(ChartCache::default()),
             conditional_cache: Mutex::default(),
             source_part_hashes: Mutex::new(BTreeMap::new()),
+            calculated_now: None,
         });
         Ok(())
     }

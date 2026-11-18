@@ -1848,22 +1848,24 @@ mod tests {
                 None,
             );
         }
-        sheet.conditional_formats.push(xlsx_model::ConditionalFormatting {
-            sqref: "A1:A8".to_owned(),
-            rules: vec![xlsx_model::ConditionalFormatRule {
-                id: String::new(),
-                rule_type: "expression".to_owned(),
-                operator: None,
-                formulas: vec!["A1=TODAY()".to_owned()],
-                priority: 1,
-                dxf_id: None,
-                format: DifferentialFormat {
-                    bold: Some(true),
-                    ..DifferentialFormat::default()
-                },
-                raw_xml: None,
-            }],
-        });
+        sheet
+            .conditional_formats
+            .push(xlsx_model::ConditionalFormatting {
+                sqref: "A1:A8".to_owned(),
+                rules: vec![xlsx_model::ConditionalFormatRule {
+                    id: String::new(),
+                    rule_type: "expression".to_owned(),
+                    operator: None,
+                    formulas: vec!["A1=TODAY()".to_owned()],
+                    priority: 1,
+                    dxf_id: None,
+                    format: DifferentialFormat {
+                        bold: Some(true),
+                        ..DifferentialFormat::default()
+                    },
+                    raw_xml: None,
+                }],
+            });
         let mut model = Workbook::default();
         model.sheets.push(sheet);
         let mut cache = Cache::default();
