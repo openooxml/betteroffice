@@ -383,6 +383,16 @@ describe.each(PATHS)('$name', (path) => {
         expect(wrapperSpan(shape, first)).toBe(exactSpan);
       }
     });
+
+    it('saves a bold edit beside one revision that holds text and the reference, with the reference inside its wrapper', async () => {
+      const words = shape.tag === 'del' ? deletedText : text;
+      const span = revisionSpan(shape, `${words('left')}${referenceRun(shape.note)}`);
+      const first = bodyParagraphs(await path.open(fixture(firstParagraph(span)), boldHead))[0] ?? '';
+      const left = `<w:r>${RUN_PROPERTIES}<w:(?:t|delText)(?:\\s[^>]*)?>left</w:(?:t|delText)></w:r>`;
+      const reference = `<w:r>${RUN_PROPERTIES}<w:${shape.note}Reference w:id="1"/></w:r>`;
+      expect(first).toMatch(BOLD_HEAD);
+      expect(first).toMatch(new RegExp(`${opening(shape)}${left}${reference}</w:${shape.tag}>`));
+    });
   });
 
   describe.each(['footnote', 'endnote'] as const)('untracked %s reference', (note) => {

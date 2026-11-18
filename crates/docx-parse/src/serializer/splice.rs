@@ -3821,6 +3821,29 @@ mod tests {
         assert_eq!(reasons, [kept_reason(0, &["w:del"])]);
     }
 
+    #[test]
+    fn a_formatting_edit_drops_only_a_revision_left_with_nothing_but_note_references() {
+        let reference = "<w:r><w:footnoteReference w:id=\"1\"/></w:r>";
+        let text = "<w:r><w:delText>Old</w:delText></w:r>";
+        let tab = "<w:r><w:tab/></w:r>";
+        let deleted = |id: u32, content: &str| format!("<w:del w:id=\"{id}\">{content}</w:del>");
+        let linked = format!("<w:hyperlink w:anchor=\"a\">{reference}</w:hyperlink>");
+        let split = format!("{text}{reference}{text}");
+        let cases = [
+            (deleted(1, reference), vec!["w:del"]),
+            (deleted(1, &format!("{reference}{reference}")), vec!["w:del"]),
+            (deleted(1, &format!("{text}{reference}")), vec![]),
+            (deleted(1, &format!("{reference}{text}")), vec![]),
+            (deleted(1, &format!("{tab}{reference}")), vec![]),
+            (deleted(1, &linked), vec!["w:del"]),
+            (deleted(1, &split) + &deleted(2, reference), vec![]),
+        ];
+        for (content, dropped) in cases {
+            let xml = format!("<w:p>{content}</w:p>");
+            assert_eq!(dropped_by_format_edit(&xml, &xml), dropped, "{xml}");
+        }
+    }
+
     fn body(paragraphs: &str) -> String {
         format!("{ROOT}<w:body>{paragraphs}</w:body></w:document>")
     }
