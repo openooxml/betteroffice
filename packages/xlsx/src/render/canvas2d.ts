@@ -21,6 +21,7 @@ import type {
 import { fontSizePx, fontString } from './fontString';
 import { PATTERN_MASKS } from './patterns';
 import { paintNumberFormat } from './number-format';
+import { runPieces, type TextPiece } from './textRuns';
 import { wrapLines, wrappedLineY } from './wrap';
 
 const STACKED_LINE_HEIGHT_RATIO = 1.2;
@@ -286,7 +287,10 @@ function paintText(ctx: CanvasRenderingContext2D, cmd: TextCmd): void {
   ctx.font = fontString(cmd);
   (ctx as CanvasRenderingContext2D & { textRendering?: string }).textRendering = 'geometricPrecision';
   ctx.textBaseline = 'alphabetic';
-  if (cmd.stacked) {
+  const pieces = runPieces(cmd);
+  if (pieces) {
+    paintPieces(ctx, cmd, pieces);
+  } else if (cmd.stacked) {
     paintStackedText(ctx, cmd);
   } else if (cmd.rotationDeg !== undefined && cmd.rotationDeg !== null) {
     paintRotatedText(ctx, cmd, cmd.rotationDeg);
@@ -307,6 +311,22 @@ function paintText(ctx: CanvasRenderingContext2D, cmd: TextCmd): void {
     paintRun(ctx, cmd, cmd.text, cmd.x, align);
   }
   ctx.restore();
+}
+
+function paintPieces(ctx: CanvasRenderingContext2D, cmd: TextCmd, pieces: TextPiece[]): void {
+  const widths = pieces.map((piece) => {
+    ctx.font = fontString(piece.cmd);
+    return ctx.measureText(piece.text).width;
+  });
+  const total = widths.reduce((sum, width) => sum + width, 0);
+  const align = cmd.align ?? 'left';
+  let x = align === 'right' ? cmd.x - total : align === 'center' ? cmd.x - total / 2 : cmd.x;
+  ctx.textAlign = 'left';
+  pieces.forEach((piece, index) => {
+    ctx.font = fontString(piece.cmd);
+    paintRun(ctx, piece.cmd, piece.text, x, 'left');
+    x += widths[index]!;
+  });
 }
 
 function rotatedAvailableLength(box: Rect, deg: number, fontSize: number): number {
