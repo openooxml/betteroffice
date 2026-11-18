@@ -6,6 +6,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use betteroffice_docx::fonts::{FontLoading, FontManager, FontSource, LastResortOffice};
 use betteroffice_docx::{Document, LayoutInput, LayoutResult, Primitive};
+use docx_layout::display_list::StructuralRevisionScope;
 use docx_layout::types::{Fragment, Layout};
 use ooxml_text::auto_space::AUTO_SPACE_EM;
 use ooxml_text::family_metrics::family_metrics;
@@ -371,4 +372,71 @@ fn a_tracked_paragraph_mark_leaves_the_faces_of_other_text_alone() {
     let latin = font_of('A').expect("'A' drew no glyph");
     let han = font_of('日').expect("'日' drew no glyph");
     assert_ne!(han, latin, "'日' did not resolve past the run's own face");
+}
+
+/// A paragraph of tracked-inserted Latin and Japanese text whose mark is a
+/// tracked insertion too when `marked`.
+fn inserted_east_asian_input(marked: bool) -> LayoutInput {
+    let mut value = json!({
+        "measured": [{
+            "block": {"kind": "paragraph", "id": 1, "pmStart": 0, "pmEnd": 20, "runs": [
+                {"kind": "text", "text": "Inserted ", "fontFamily": "Arial",
+                 "fontSize": FONT_SIZE_PT, "isInsertion": true, "pmStart": 1, "pmEnd": 10},
+                {"kind": "text", "text": JAPANESE, "fontFamily": "Arial",
+                 "fontSlots": {"eastAsia": "MS Mincho"}, "fontSize": FONT_SIZE_PT,
+                 "isInsertion": true, "pmStart": 10, "pmEnd": 19}
+            ]},
+            "measure": {"kind": "paragraph", "lines": [], "totalHeight": 0}
+        }],
+        "options": {"pageSize": {"w": 816, "h": 1056},
+                    "margins": {"top": 96, "right": 96, "bottom": 96, "left": 96}}
+    });
+    if marked {
+        value["measured"][0]["block"]["attrs"] = json!({
+            "pPrIns": {"revisionId": 1, "author": "Ada", "date": "2026-01-01T00:00:00Z"}
+        });
+    }
+    serde_json::from_value(value).unwrap()
+}
+
+/// Every primitive outside the paragraph mark's own revision cues.
+fn outside_the_mark(result: &LayoutResult) -> Vec<&Primitive> {
+    result
+        .display_list
+        .pages
+        .iter()
+        .flat_map(|page| &page.primitives)
+        .filter(|primitive| {
+            let attrs = match primitive {
+                Primitive::Text(text) => &text.attrs,
+                Primitive::GlyphRun(run) => &run.attrs,
+                Primitive::Rect(rect) => &rect.attrs,
+                Primitive::Decoration(decoration) => &decoration.attrs,
+                _ => return true,
+            };
+            attrs
+                .structural_revision
+                .as_deref()
+                .is_none_or(|revision| revision.scope != StructuralRevisionScope::Pmark)
+        })
+        .collect()
+}
+
+#[test]
+fn a_tracked_paragraph_mark_leaves_inserted_east_asian_text_alone() {
+    let package = common::sample_docx();
+    let lay_out = |marked: bool| {
+        Document::open(&package)
+            .unwrap()
+            .layout(inserted_east_asian_input(marked))
+            .unwrap()
+    };
+    let plain = lay_out(false);
+    let marked = lay_out(true);
+    let underlined = outside_the_mark(&plain)
+        .into_iter()
+        .any(|primitive| matches!(primitive, Primitive::Decoration(rule) if rule.dashed));
+
+    assert!(underlined, "the inserted text drew no dashed underline");
+    assert_eq!(outside_the_mark(&marked), outside_the_mark(&plain));
 }

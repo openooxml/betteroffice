@@ -2135,3 +2135,55 @@ fn tracked_paragraph_marks_stay_text_without_font_chains() {
         );
     }
 }
+
+/// Asserts every paragraph mark primitive of `list` equals the one the input
+/// without font chains draws: the browser text item and its chrome.
+fn assert_marks_stay_bare_text(list: &DisplayList) {
+    let json = build_display_list_json(&tracked_mark_input(None)).unwrap();
+    let bare: DisplayList = serde_json::from_str(&json).unwrap();
+    for kind in [StructuralRevisionKind::Ins, StructuralRevisionKind::Del] {
+        let expected = pmark_primitives(&bare, kind);
+        let content = mark_content(&expected);
+        assert_eq!(content.len(), 1, "{kind:?}");
+        assert!(matches!(content[0], Primitive::Text(_)), "{kind:?}");
+        assert_eq!(pmark_primitives(list, kind), expected, "{kind:?}");
+    }
+}
+
+// With the base-latin feature the implicit backstop covers the pilcrow, so no
+// default-family chain lacks it there.
+#[cfg(not(feature = "base-latin"))]
+#[test]
+fn tracked_paragraph_marks_stay_text_when_the_default_face_lacks_the_pilcrow() {
+    const NOTO_HEBREW: &[u8] =
+        include_bytes!("../../../packages/fonts/assets/NotoSansHebrew-Regular.ttf");
+    const NOTO_NASKH: &[u8] =
+        include_bytes!("../../../packages/fonts/assets/NotoNaskhArabic-Regular.ttf");
+    let mut store = FontStore::new();
+    let mut lacking = None;
+    for bytes in [NOTO_HEBREW, NOTO_NASKH] {
+        let face = store.register(bytes.to_vec()).unwrap();
+        if lacking.is_none() && !store.covers(face, '\u{b6}').unwrap() {
+            lacking = Some(face.to_u32());
+        }
+    }
+    let lacking = lacking.expect("a bundled face without a pilcrow");
+    let input = tracked_mark_input(Some(&[lacking]));
+    let json = build_display_list_json_with_fonts(&input, &store).unwrap();
+    let list: DisplayList = serde_json::from_str(&json).unwrap();
+
+    assert_marks_stay_bare_text(&list);
+}
+
+#[test]
+fn tracked_paragraph_marks_stay_text_without_a_default_family_chain() {
+    let mut store = FontStore::new();
+    let font = store.register(LIBERATION.to_vec()).unwrap();
+    let mut input: serde_json::Value = serde_json::from_str(&tracked_mark_input(None)).unwrap();
+    input["fontChains"] = serde_json::json!({ "times new roman|0|0": [font.to_u32()] });
+    let input = input.to_string();
+    let json = build_display_list_json_with_fonts(&input, &store).unwrap();
+    let list: DisplayList = serde_json::from_str(&json).unwrap();
+
+    assert_marks_stay_bare_text(&list);
+}

@@ -8314,22 +8314,36 @@ mod tests {
     }
 
     #[test]
-    fn tracked_paragraph_mark_requests_the_default_run_face() {
-        for mark in ["pPrIns", "pPrDel"] {
-            let block: LayoutBlock = serde_json::from_value(json!({
-                "kind": "paragraph", "id": "p",
-                "attrs": {(mark): {"revisionId": 1, "author": "Ada"}},
+    fn a_tracked_paragraph_mark_leaves_the_font_requirements_alone() {
+        let paragraphs = [
+            json!({"runs": [{"kind": "text", "text": "Latin"}]}),
+            json!({"runs": [{
+                "kind": "text", "text": "日本語の文章",
+                "fontSlots": {"eastAsia": "MS Mincho", "hint": "eastAsia"}
+            }]}),
+            json!({
+                "attrs": {"defaultFontFamily": "Courier New"},
                 "runs": [{"kind": "text", "text": "Latin"}]
-            }))
-            .unwrap();
-            let requirements = collect_font_requirements([&block], "Arial");
-            let characters: Vec<char> = requirements
-                .iter()
-                .filter(|requirement| requirement.key == "calibri|0|0")
-                .flat_map(|requirement| requirement.characters.iter())
-                .collect();
+            }),
+        ];
+        for (case, paragraph) in paragraphs.iter().enumerate() {
+            let requirements = |mark: Option<&str>| {
+                let mut value = paragraph.clone();
+                value["kind"] = json!("paragraph");
+                value["id"] = json!("p");
+                if let Some(mark) = mark {
+                    value["attrs"][mark] = json!({"revisionId": 1, "author": "Ada"});
+                }
+                let block: LayoutBlock = serde_json::from_value(value).unwrap();
+                let all = collect_font_requirements([&block], "Arial");
+                let measured = collect_measured_font_requirements([&block], "Arial");
+                serde_json::to_value((all, measured)).unwrap()
+            };
+            let plain = requirements(None);
 
-            assert!(characters.contains(&'\u{b6}'), "{mark}");
+            for mark in ["pPrIns", "pPrDel"] {
+                assert_eq!(requirements(Some(mark)), plain, "{case} {mark}");
+            }
         }
     }
 
