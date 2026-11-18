@@ -637,9 +637,11 @@ test('an aggregate.json without a field the large set block shows is refused, na
   const unsized = written(fullReport());
   delete unsized.formats.docx.timing.sample_size;
   expect(() => renderLargeSection(unsized, { date: DATE })).toThrow('docx timing.sample_size');
+  expect(() => renderLargeSection(unsized, { date: DATE })).toThrow('--timing-sample-size');
   const uncovered = written(fullReport());
   delete uncovered.formats.xlsx.recalc_missing_reference;
   expect(() => renderLargeSection(uncovered, { date: DATE })).toThrow('xlsx recalc_missing_reference');
+  expect(() => renderLargeSection(uncovered, { date: DATE })).toThrow('--missing-reference');
   expect(() => renderLargeSection({ ...written(report()), schema_version: 2 }, { date: DATE })).toThrow('schema version 1');
 });
 
@@ -660,6 +662,60 @@ test('--as large renders the same block from the run artifact aggregate.json as 
     await writeFile(join(dir, 'public.md'), shell(visual));
     expect(cli(['aggregate.json', 'public.md'], dir, false).status).not.toBe(0);
     expect(await readFile(join(dir, 'public.md'), 'utf8')).toBe(shell(visual));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('--as large takes the timing sample size and missing reference count as arguments for an aggregate.json without them', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'readme-old-aggregate-'));
+  try {
+    const visual = renderSection(report());
+    const stored = fullReport();
+    const expected = shell(`${visual}\n\n${renderSection(stored, { privateCorpus: true, date: DATE })}`);
+    const old = written(stored);
+    for (const format of ['docx', 'xlsx']) delete old.formats[format].timing.sample_size;
+    delete old.formats.xlsx.recalc_missing_reference;
+    await writeFile(join(dir, 'old.json'), `${JSON.stringify(old, null, 2)}\n`);
+    await writeFile(join(dir, 'new.json'), `${JSON.stringify(aggregateReport(stored), null, 2)}\n`);
+    const path = join(dir, 'README.md');
+    const run = (args: string[]) => cli(['--as', 'large', '--date', DATE, ...args, 'README.md'], dir, false);
+
+    await writeFile(path, shell(visual));
+    const bare = run(['old.json']);
+    expect(bare.status).not.toBe(0);
+    expect(bare.stderr).toContain('--timing-sample-size');
+    const unsized = run(['--missing-reference', '1', 'old.json']);
+    expect(unsized.status).not.toBe(0);
+    expect(unsized.stderr).toContain('--timing-sample-size');
+    const uncovered = run(['--timing-sample-size', '200', 'old.json']);
+    expect(uncovered.status).not.toBe(0);
+    expect(uncovered.stderr).toContain('--missing-reference');
+    expect(await readFile(path, 'utf8')).toBe(shell(visual));
+    expect(run(['--timing-sample-size', '200', '--missing-reference', '1', 'old.json']).status).toBe(0);
+    expect(await readFile(path, 'utf8')).toBe(expected);
+
+    for (const args of [['--timing-sample-size', '199'], ['--missing-reference', '2']]) {
+      await writeFile(path, shell(visual));
+      const refused = run([...args, 'new.json']);
+      expect(refused.status).not.toBe(0);
+      expect(refused.stderr).toContain(args[0]);
+      expect(await readFile(path, 'utf8')).toBe(shell(visual));
+    }
+    for (const args of [['--timing-sample-size', '200'], ['--missing-reference', '1'], ['--timing-sample-size', '200', '--missing-reference', '1']]) {
+      await writeFile(path, shell(visual));
+      expect(run([...args, 'new.json']).status).toBe(0);
+      expect(await readFile(path, 'utf8')).toBe(expected);
+    }
+
+    await writeFile(path, shell(visual));
+    for (const value of ['-1', '1.5', 'abc', '', '1e2', ' 1'])
+      for (const [name, other] of [['--timing-sample-size', ['--missing-reference=1']], ['--missing-reference', ['--timing-sample-size=200']]]) {
+        const refused = run([`${name}=${value}`, ...other, 'old.json']);
+        expect(refused.status).not.toBe(0);
+        expect(refused.stderr).toContain(name);
+      }
+    expect(await readFile(path, 'utf8')).toBe(shell(visual));
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
