@@ -169,6 +169,9 @@ function commandFrames(options: { cell?: boolean; range?: boolean; splitEnd?: bo
       return { bytes, delta, caret: engine.residentCaretSnapshot() };
     },
     readCellSelection, readDocxSelectionFocus: () => null, readResidentCellSelectionRects,
+    // no stored marks: typing takes the caret's own formatting
+    storedMarksChangeTyping: () => false,
+    rememberTyped() {}, recentTyped: new Set<string>(),
     projectCommandEchoContext: () => undefined,
     commandEchoGlyphs: () => ({ provider: () => undefined, unsent: () => [], sent() {} }),
     readResidentRangeHighlights: async () => ({ rects: [[{ pageIndex: caretPage, x: offsetDelta, y: 0, width: 10, height: 20 }]] }),
