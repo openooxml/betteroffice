@@ -2890,27 +2890,46 @@ fn windowed_full_build_pages(
     )
 }
 
-/// The display position of `offset` in the paragraph `para_id`, in table cells too.
+/// The display position of `offset` in the paragraph `para_id`, in table cells too. The body's
+/// own blocks come first: a caret in a long, table-heavy body would otherwise walk every cell of
+/// the tables before its paragraph on each key.
 fn resident_paragraph_position(input: &LayoutInput, para_id: &str, offset: u32) -> Option<i64> {
-    fn start(block: &LayoutBlock, para_id: &str) -> Option<f64> {
-        match block {
-            LayoutBlock::Table(table) => table
-                .rows
-                .iter()
-                .flat_map(|row| &row.cells)
-                .flat_map(|cell| &cell.blocks)
-                .find_map(|nested| start(nested, para_id)),
-            _ => {
-                let (id, start) = paragraph_identity(block)?;
-                (block_key(id) == para_id).then_some(start?)
-            }
-        }
+    fn own(block: &LayoutBlock, para_id: &str) -> Option<f64> {
+        let (id, start) = paragraph_identity(block)?;
+        (block_key(id) == para_id).then_some(start?)
+    }
+    fn in_cells(block: &LayoutBlock, para_id: &str) -> Option<f64> {
+        let LayoutBlock::Table(table) = block else {
+            return None;
+        };
+        table
+            .rows
+            .iter()
+            .flat_map(|row| &row.cells)
+            .flat_map(|cell| &cell.blocks)
+            .find_map(|nested| {
+                #[cfg(test)]
+                CELL_BLOCKS_WALKED.with(|walked| walked.set(walked.get() + 1));
+                own(nested, para_id).or_else(|| in_cells(nested, para_id))
+            })
     }
     let start = input
         .measured
         .iter()
-        .find_map(|measured| start(&measured.block, para_id))?;
+        .find_map(|measured| own(&measured.block, para_id))
+        .or_else(|| {
+            input
+                .measured
+                .iter()
+                .find_map(|measured| in_cells(&measured.block, para_id))
+        })?;
     paragraph_offset_position(start, offset)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Table cell blocks the resident caret looked through for its paragraph.
+    static CELL_BLOCKS_WALKED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Whether `story` is the body or a table cell in it, however deeply nested
@@ -29054,7 +29073,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         let fonts = docx_layout::MeasureFonts::default();
         let _scope = fonts.enter();
         let latin = docx_layout::register_measure_font_bytes(LIBERATION).unwrap();
-        let body = r#"<w:p><w:r><w:t>Before</w:t></w:r></w:p><w:tbl><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>ABCDE</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#;
+        let body = r#"<w:p><w:r><w:t>Before</w:t></w:r></w:p><w:tbl><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>ABCDE</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p><w:r><w:t>After</w:t></w:r></w:p>"#;
         let engine = EngineSession::new(9492);
         crate::seed::seed_from_docx(engine.doc(), &docx_bytes("", body)).unwrap();
         let mut request = json!({
@@ -29093,7 +29112,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         engine
             .build_display_list_frame(&json!({"fontChains": chains}).to_string(), 0)
             .unwrap();
-        let (para_id, before) = {
+        let (para_id, before, after) = {
             let pagination = engine.pagination.borrow();
             let measured = &pagination.input.as_ref().unwrap().measured;
             let cell = measured
@@ -29106,28 +29125,37 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                     _ => None,
                 })
                 .unwrap();
-            let before = paragraph_identity(&measured[0].block)
-                .map(|(id, _)| block_key(id).into_owned())
-                .unwrap();
-            (cell, before)
+            let id = |block: &LayoutBlock| {
+                paragraph_identity(block).map(|(id, _)| block_key(id).into_owned())
+            };
+            let after = id(&measured.last().unwrap().block).unwrap();
+            (cell, id(&measured[0].block).unwrap(), after)
         };
+        // how many table cell blocks the caret looked through
         let caret = |para_id: &str, offset| {
-            engine
+            let walked = CELL_BLOCKS_WALKED.with(std::cell::Cell::get);
+            let rect = engine
                 .resident_caret_snapshot(Some((para_id, offset)))
                 .unwrap()
                 .caret_rect
-                .expect("a caret rect")
+                .expect("a caret rect");
+            (rect, CELL_BLOCKS_WALKED.with(std::cell::Cell::get) - walked)
         };
-        let (start, inside, above) = (caret(&para_id, 0), caret(&para_id, 2), caret(&before, 0));
+        let ((start, walked), (inside, _)) = (caret(&para_id, 0), caret(&para_id, 2));
+        let ((above, above_walked), (below, below_walked)) = (caret(&before, 0), caret(&after, 0));
         assert_eq!((start.page_index, inside.page_index), (0, 0));
         assert_eq!(inside.y, start.y);
         assert!(inside.x > start.x + 1.0, "{} after {}", inside.x, start.x);
         assert!(
-            start.y > above.y,
-            "the cell line {} sits below the body line {}",
+            start.y > above.y && below.y > start.y,
+            "the cell line {} sits between the body lines {} and {}",
             start.y,
-            above.y
+            above.y,
+            below.y
         );
+        assert!(walked > 0);
+        // a body paragraph past a table does not look through its cells
+        assert_eq!((above_walked, below_walked), (0, 0));
     }
 
     #[test]
