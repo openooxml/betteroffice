@@ -105,6 +105,8 @@ pub struct ConditionalStats {
     pub units: u64,
     /// Decided cells held.
     pub cached_cells: usize,
+    /// Results of the epoch before held for cells not yet decided again.
+    pub previous_cells: usize,
     /// Model epoch the cache holds.
     pub epoch: u64,
 }
