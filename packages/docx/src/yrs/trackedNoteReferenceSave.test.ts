@@ -33,24 +33,38 @@ const SHAPES: Shape[] = (['footnote', 'endnote'] as const).flatMap((note) => [
 ]);
 
 const text = (value: string) => `<w:r><w:t xml:space="preserve">${value}</w:t></w:r>`;
+const deletedText = (value: string) => `<w:r><w:delText xml:space="preserve">${value}</w:delText></w:r>`;
 const style = (note: NoteKind) => (note === 'footnote' ? 'FootnoteReference' : 'EndnoteReference');
-const referenceRun = (note: NoteKind) =>
-  `<w:r><w:rPr><w:rStyle w:val="${style(note)}"/></w:rPr><w:${note}Reference w:id="1"/></w:r>`;
-const wrapped = (shape: Shape) =>
-  `<w:${shape.tag} w:id="${shape.id}" w:author="${shape.author}" w:date="${DATE}">${referenceRun(shape.note)}</w:${shape.tag}>`;
+const referenceRun = (note: NoteKind, id = 1) =>
+  `<w:r><w:rPr><w:rStyle w:val="${style(note)}"/></w:rPr><w:${note}Reference w:id="${id}"/></w:r>`;
+const revisionSpan = (shape: Shape, content: string) =>
+  `<w:${shape.tag} w:id="${shape.id}" w:author="${shape.author}" w:date="${DATE}">${content}</w:${shape.tag}>`;
+const wrapped = (shape: Shape) => revisionSpan(shape, referenceRun(shape.note));
 const paragraph = (id: string, content: string) => `<w:p w14:paraId="${id}" w14:textId="${id}">${content}</w:p>`;
 const firstParagraph = (reference: string) => paragraph('0D000001', `${text('Head ')}${reference}${text(' tail')}`);
 const SECOND = paragraph('0D000002', text('Other'));
+const shapeOf = (note: NoteKind, revision: Revision) =>
+  SHAPES.find((shape) => shape.note === note && shape.revision === revision)!;
+const fieldParagraph = (note: NoteKind) => paragraph('0D000001',
+  `${text('Head ')}<w:r><w:fldChar w:fldCharType="begin"/></w:r>` +
+  '<w:r><w:instrText xml:space="preserve"> HYPERLINK \\l "target" </w:instrText></w:r>' +
+  '<w:r><w:fldChar w:fldCharType="separate"/></w:r>' +
+  `<w:hyperlink w:anchor="target">${text('Link')}${referenceRun(note)}</w:hyperlink>` +
+  `<w:r><w:fldChar w:fldCharType="end"/></w:r>${text(' tail')}`
+);
+const SUGGESTER = { name: 'B', date: '2025-03-05T00:00:00Z' };
 
-function notesXml(note: NoteKind): string {
+function notesXml(note: NoteKind, ids: number[]): string {
   return `<w:${note}s xmlns:w="${W}">` +
     `<w:${note} w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:${note}>` +
     `<w:${note} w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:${note}>` +
-    `<w:${note} w:id="1"><w:p><w:r><w:rPr><w:rStyle w:val="${style(note)}"/></w:rPr><w:${note}Ref/></w:r>${text(` ${note} body`)}</w:p></w:${note}>` +
+    ids.map((id) =>
+      `<w:${note} w:id="${id}"><w:p><w:r><w:rPr><w:rStyle w:val="${style(note)}"/></w:rPr><w:${note}Ref/></w:r>${text(` ${note} body`)}</w:p></w:${note}>`
+    ).join('') +
     `</w:${note}s>`;
 }
 
-function fixture(first: string): Uint8Array {
+function fixture(first: string, noteIds = [1]): Uint8Array {
   const parts: PartsMap = new Map([
     ['[Content_Types].xml', toBytes(
       '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
@@ -76,8 +90,8 @@ function fixture(first: string): Uint8Array {
       '<w:style w:type="character" w:styleId="FootnoteReference"><w:name w:val="footnote reference"/><w:rPr><w:vertAlign w:val="superscript"/></w:rPr></w:style>' +
       '<w:style w:type="character" w:styleId="EndnoteReference"><w:name w:val="endnote reference"/><w:rPr><w:vertAlign w:val="superscript"/></w:rPr></w:style></w:styles>'
     )],
-    ['word/footnotes.xml', toBytes(notesXml('footnote'))],
-    ['word/endnotes.xml', toBytes(notesXml('endnote'))],
+    ['word/footnotes.xml', toBytes(notesXml('footnote', noteIds))],
+    ['word/endnotes.xml', toBytes(notesXml('endnote', noteIds))],
     ['word/document.xml', toBytes(
       `<w:document xmlns:w="${W}" xmlns:r="${R}" xmlns:w14="${W14}"><w:body>${first}${SECOND}<w:sectPr/></w:body></w:document>`
     )],
@@ -98,21 +112,30 @@ function savedNote(bytes: Uint8Array, note: NoteKind): string {
   return new RegExp(`<w:${note}\\b[^>]*\\bw:id="1"[^>]*>[\\s\\S]*?</w:${note}>`).exec(part(bytes, `word/${note}s.xml`))?.[0] ?? '';
 }
 
-const RPR = '<w:rPr>(?:(?!</w:rPr>)[\\s\\S])*</w:rPr>';
-const RUN_PROPERTIES = `(?:${RPR})?`;
+const IN_RPR = '(?:(?!</w:rPr>)[\\s\\S])*';
+const RUN_PROPERTIES = `(?:<w:rPr>${IN_RPR}</w:rPr>)?`;
+const styled = (note: NoteKind) => `<w:rPr>${IN_RPR}<w:rStyle w:val="${style(note)}"/>${IN_RPR}</w:rPr>`;
+const styledReference = (note: NoteKind) => `<w:r>${styled(note)}<w:${note}Reference w:id="1"/></w:r>`;
+const opening = (shape: Shape) => `<w:${shape.tag} w:id="\\d+" w:author="${shape.author}" w:date="${DATE}">`;
 
 function wrapperPattern(shape: Shape): RegExp {
-  return new RegExp(
-    `<w:${shape.tag} w:id="\\d+" w:author="${shape.author}" w:date="${DATE}"><w:r>${RUN_PROPERTIES}<w:${shape.note}Reference w:id="1"/></w:r></w:${shape.tag}>`
-  );
+  return new RegExp(`${opening(shape)}${styledReference(shape.note)}</w:${shape.tag}>`);
 }
 
 function liveReferencePattern(note: NoteKind): RegExp {
   return new RegExp(`<w:r>${RUN_PROPERTIES}<w:${note}Reference w:id="1"/></w:r>`);
 }
 
+function styledReferencePattern(note: NoteKind): RegExp {
+  return new RegExp(styledReference(note));
+}
+
 function wrapperSpan(shape: Shape, xml: string): string {
-  return (wrapperPattern(shape).exec(xml)?.[0] ?? '').replace(new RegExp(RPR), '');
+  return wrapperPattern(shape).exec(xml)?.[0] ?? '';
+}
+
+function count(xml: string, pattern: string): number {
+  return xml.match(new RegExp(pattern, 'g'))?.length ?? 0;
 }
 
 const plainText = (xml: string) => [...xml.matchAll(/<w:t(?:\s[^>]*)?>([^<]*)<\/w:t>/g)].map((match) => match[1]).join('');
@@ -127,6 +150,34 @@ function typeInto(session: YrsSession, index: number): void {
   const target = session.paragraphs('body')[index];
   if (!target) throw new Error(`no body paragraph ${index}`);
   session.insertText({ story: 'body', paraId: target.paraId, offset: 2 }, 'X');
+}
+
+function firstParagraphId(session: YrsSession): string {
+  const target = session.paragraphs('body')[0];
+  if (!target) throw new Error('no body paragraph');
+  return target.paraId;
+}
+
+function referenceOffset(session: YrsSession): number {
+  let offset = 0;
+  for (const segment of session.storySegments('body')) {
+    if (segment.kind === 'pilcrow') break;
+    if (segment.kind === 'embed' && segment.embedKind === 'noteRef') return offset;
+    offset += segment.kind === 'text' ? segment.text.length : 1;
+  }
+  throw new Error('no note reference in the first paragraph');
+}
+
+function suggestDeletingReference(session: YrsSession): void {
+  const paraId = firstParagraphId(session);
+  const offset = referenceOffset(session);
+  session.deleteRange({ story: 'body', start: { paraId, offset }, end: { paraId, offset: offset + 1 } }, SUGGESTER);
+  expect(noteReferences(session)[0]?.attributes.del).toMatchObject({ author: SUGGESTER.name });
+}
+
+function boldHead(session: YrsSession): void {
+  const paraId = firstParagraphId(session);
+  session.toggleMark({ story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 4 } }, { type: 'bold' });
 }
 
 function resolveEach(session: YrsSession, decision: 'accept' | 'reject'): void {
@@ -181,7 +232,7 @@ const noop: Apply = () => {};
 describe.each(PATHS)('$name', (path) => {
   describe.each(SHAPES)('$name at paragraph level', (shape) => {
     const source = () => fixture(firstParagraph(wrapped(shape)));
-    const exactSpan = `<w:${shape.tag} w:id="${shape.id}" w:author="${shape.author}" w:date="${DATE}"><w:r><w:${shape.note}Reference w:id="1"/></w:r></w:${shape.tag}>`;
+    const exactSpan = wrapped(shape);
     const revision = { kind: shape.revision, author: shape.author };
     const listed = (session: YrsSession) => session.listRevisions().map(({ kind, author }) => ({ kind, author }));
 
@@ -245,16 +296,101 @@ describe.each(PATHS)('$name', (path) => {
         else expect(first).toMatch(liveReferencePattern(shape.note));
         expect(plainText(savedNote(saved, shape.note))).toBe(` ${shape.note} body`);
       });
+
+      it(`${decision}s the revision of a reopened edited save, then saves ${removes ? 'no reference and keeps the note body' : 'a live reference with its style'}`, async () => {
+        const edited = await path.open(source(), (session) => typeInto(session, 0));
+        const saved = await path.open(edited, (session) => resolveEach(session, decision));
+        const first = bodyParagraphs(saved)[0] ?? '';
+        expect(plainText(first)).toBe('HeXad  tail');
+        expect(first).not.toMatch(/<w:(?:del|ins)\b/);
+        if (removes) expect(first).not.toContain(`<w:${shape.note}Reference`);
+        else expect(first).toMatch(styledReferencePattern(shape.note));
+        expect(plainText(savedNote(saved, shape.note))).toBe(` ${shape.note} body`);
+      });
     }
+
+    it('reopens an edited save with its revision id, author and date, one reference and the note body', async () => {
+      const saved = await path.open(source(), (session) => typeInto(session, 0));
+      let references: ReturnType<typeof noteReferences> = [];
+      await path.open(saved, (session) => {
+        references = noteReferences(session);
+      });
+      expect(count(part(saved, 'word/document.xml'), `<w:${shape.note}Reference\\b`)).toBe(1);
+      expect(references).toHaveLength(1);
+      expect(Number(references[0]!.payload[`${shape.note}RefId`])).toBe(1);
+      const mark = (references[0]!.attributes[shape.tag] ?? {}) as Record<string, unknown>;
+      expect({ id: String(mark.revisionId), author: mark.author, date: mark.date })
+        .toEqual({ id: String(shape.id), author: shape.author, date: DATE });
+      expect(plainText(savedNote(saved, shape.note))).toBe(` ${shape.note} body`);
+    });
+
+    it('keeps text and the reference of one revision in one wrapper, in order, when its paragraph is edited', async () => {
+      const words = shape.tag === 'del' ? deletedText : text;
+      const span = revisionSpan(shape, `${words('left')}${referenceRun(shape.note)}${words('right')}`);
+      const saved = await path.open(fixture(firstParagraph(span)), (session) => typeInto(session, 0));
+      const first = bodyParagraphs(saved)[0] ?? '';
+      const run = (value: string) => `<w:r>${RUN_PROPERTIES}<w:(?:t|delText)(?:\\s[^>]*)?>${value}</w:(?:t|delText)></w:r>`;
+      expect(count(first, `<w:${shape.tag}\\b`)).toBe(1);
+      expect(first).toMatch(new RegExp(
+        `${opening(shape)}${run('left')}${styledReference(shape.note)}${run('right')}</w:${shape.tag}>`
+      ));
+    });
+
+    it('keeps an untracked reference beside it byte for byte when its paragraph is edited', async () => {
+      const untracked = referenceRun(shape.note, 2);
+      const saved = await path.open(fixture(firstParagraph(`${wrapped(shape)}${untracked}`), [1, 2]), (session) => typeInto(session, 0));
+      const first = bodyParagraphs(saved)[0] ?? '';
+      expect(plainText(first)).toBe('HeXad  tail');
+      expect(first).toContain(untracked);
+      expect(first).toMatch(wrapperPattern(shape));
+    });
   });
 
   describe.each(['footnote', 'endnote'] as const)('untracked %s reference', (note) => {
-    it('stays live and unwrapped when its paragraph is edited', async () => {
+    it('stays live, unwrapped and styled when its paragraph is edited', async () => {
       const saved = await path.open(fixture(firstParagraph(referenceRun(note))), (session) => typeInto(session, 0));
       const first = bodyParagraphs(saved)[0] ?? '';
       expect(plainText(first)).toBe('HeXad  tail');
-      expect(first).toMatch(liveReferencePattern(note));
+      expect(first).toMatch(styledReferencePattern(note));
       expect(first).not.toMatch(/<w:(?:del|ins)\b/);
+    });
+
+    it('keeps its run byte for byte, and a deleted reference beside it, when text in its paragraph is bolded', async () => {
+      const deleted = shapeOf(note, 'deletion');
+      const untracked = referenceRun(note, 2);
+      const saved = await path.open(fixture(firstParagraph(`${wrapped(deleted)}${untracked}`), [1, 2]), boldHead);
+      const first = bodyParagraphs(saved)[0] ?? '';
+      expect(first).toContain(untracked);
+      expect(first).toMatch(wrapperPattern(deleted));
+      expect(first).toMatch(new RegExp(`<w:r><w:rPr>${IN_RPR}<w:b/>${IN_RPR}</w:rPr><w:t(?:\\s[^>]*)?>Head</w:t></w:r>`));
+    });
+  });
+
+  describe.each(['footnote', 'endnote'] as const)('%s reference in a field result', (note) => {
+    it('stays once in the field result when suggested for deletion', async () => {
+      const saved = await path.open(fixture(fieldParagraph(note)), suggestDeletingReference);
+      const xml = part(saved, 'word/document.xml');
+      const references = [...xml.matchAll(new RegExp(`<w:${note}Reference w:id="1"/>`, 'g'))];
+      expect(references).toHaveLength(1);
+      const at = references[0]!.index!;
+      expect(xml.indexOf('w:fldCharType="separate"')).toBeGreaterThan(-1);
+      expect(xml.indexOf('w:fldCharType="separate"')).toBeLessThan(at);
+      expect(xml.indexOf('w:fldCharType="end"')).toBeGreaterThan(at);
+    });
+  });
+
+  describe.each(['footnote', 'endnote'] as const)('%s reference with both marks', (note) => {
+    it('is saved inside its insertion only, without the suggested deletion', async () => {
+      const inserted = shapeOf(note, 'insertion');
+      const saved = await path.open(fixture(firstParagraph(wrapped(inserted))), (session) => {
+        suggestDeletingReference(session);
+        expect(noteReferences(session)[0]?.attributes.ins).toMatchObject({ author: inserted.author });
+      });
+      const first = bodyParagraphs(saved)[0] ?? '';
+      expect(first).toMatch(new RegExp(
+        `${opening(inserted)}<w:r>${RUN_PROPERTIES}<w:${note}Reference w:id="1"/></w:r></w:ins>`
+      ));
+      expect(first).not.toMatch(/<w:del\b/);
     });
   });
 });
