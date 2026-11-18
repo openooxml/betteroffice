@@ -1301,6 +1301,13 @@ impl Stylesheet {
         self.builtin_number_formats = true;
     }
 
+    /// reads the workbook's own entries for builtin ids as declared, as a new
+    /// seed of the workbook does.
+    #[doc(hidden)]
+    pub fn read_declared_number_formats(&mut self) {
+        self.builtin_number_formats = false;
+    }
+
     #[doc(hidden)]
     pub fn has_style_identity(&self) -> bool {
         self.exact_style_indices

@@ -1005,7 +1005,7 @@ impl Workbook {
     /// must be `model`.
     #[allow(clippy::too_many_arguments)]
     fn from_source_deferring(
-        model: WorkbookModel,
+        mut model: WorkbookModel,
         source_package: Option<xlsx_parse::PreservedPackage>,
         active_sheet: SheetId,
         build_graph: bool,
@@ -1014,6 +1014,7 @@ impl Workbook {
         legacy_styles: (Option<&Stylesheet>, &[Stylesheet]),
         defer: bool,
     ) -> Result<Self> {
+        model.styles.read_declared_number_formats();
         validate_model(&model)?;
         validate_chart_source(&model, source_package.is_some())?;
         let active_sheet = if (active_sheet.0 as usize) < model.sheets.len() {
