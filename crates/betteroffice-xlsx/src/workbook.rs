@@ -68,9 +68,10 @@ use xlsx_render::region::{
 use xlsx_render::scaled;
 use xlsx_render::{
     ChartRegion, ChartResize, DisplayList, GhostEdit, GridGeometry, PrintMetrics, RenderError,
-    Viewport, build_display_list_with_geometry, build_print_display_list_with_charts,
-    chart_at_point, display_text, display_viewport_with_geometry, moved_chart_anchor,
-    resized_chart_anchor, resolve_chart_anchor, visible_merged_ranges_with_geometry,
+    Viewport, build_display_list_with_geometry_and_text_runs,
+    build_print_display_list_with_text_runs, chart_at_point, display_text,
+    display_viewport_with_geometry, moved_chart_anchor, resized_chart_anchor, resolve_chart_anchor,
+    visible_merged_ranges_with_geometry,
 };
 
 #[cfg(feature = "raster")]
@@ -3492,13 +3493,14 @@ impl Workbook {
             visible_count(rows, |rows| sheet_ref.hidden_row_spans(rows)),
             visible_count(columns, |columns| sheet_ref.hidden_col_spans(columns)),
         )?;
-        let mut frame = build_print_display_list_with_charts(
+        let mut frame = build_print_display_list_with_text_runs(
             &self.model,
             sheet,
             &viewport,
             metrics,
             gridlines,
             &self.sheet_pictures(sheet),
+            Some(&|at: CellRef| self.painted_text_runs(sheet, at)),
             |chart| self.resolve_chart_space(&sheet_ref.name, chart),
         )
         .map_err(Error::from)?;
@@ -3557,7 +3559,7 @@ impl Workbook {
         }
         let ghosts: Vec<GhostEdit> = ghosts.into_values().collect();
         let owner = sheet_ref.name.clone();
-        build_display_list_with_geometry(
+        build_display_list_with_geometry_and_text_runs(
             &self.model,
             sheet,
             viewport,
@@ -3565,6 +3567,7 @@ impl Workbook {
             &geometry,
             Some(MAX_DISPLAY_CELLS),
             &self.sheet_pictures(sheet),
+            Some(&|at: CellRef| self.painted_text_runs(sheet, at)),
             |chart| self.resolve_chart_space(&owner, chart),
         )
         .map_err(Error::from)
@@ -3914,7 +3917,7 @@ impl Workbook {
         validate_render_size(width, height)?;
         validate_display_region(sheet_ref, &geometry, &viewport)?;
         let owner = sheet_ref.name.clone();
-        let display_list = build_display_list_with_geometry(
+        let display_list = build_display_list_with_geometry_and_text_runs(
             &self.model,
             sheet,
             &viewport,
@@ -3922,6 +3925,7 @@ impl Workbook {
             &geometry,
             None,
             &self.sheet_pictures(sheet),
+            Some(&|at: CellRef| self.painted_text_runs(sheet, at)),
             |chart| self.resolve_chart_space(&owner, chart),
         )?;
         let display_list = if options.scale == 1.0 {

@@ -6,6 +6,13 @@ use xlsx_model::{CellRef, CellValue, RichRun, SheetId};
 use super::Workbook;
 
 impl Workbook {
+    /// [`Self::cell_text_runs`] for painting: `None` while a deferred source
+    /// package is unparsed, so building a display list never parses it.
+    pub(crate) fn painted_text_runs(&self, sheet: SheetId, cell: CellRef) -> Option<&[RichRun]> {
+        self.source_package.as_ref()?.materialized()?;
+        self.cell_text_runs(sheet, cell)
+    }
+
     /// Source runs in UTF-8 bytes; unavailable after content writes, including undo.
     /// No-op inputs retain runs. Collaborative and recovered sessions return `None`.
     pub fn cell_text_runs(&self, sheet: SheetId, cell: CellRef) -> Option<&[RichRun]> {

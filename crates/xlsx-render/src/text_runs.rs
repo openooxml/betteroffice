@@ -3,7 +3,8 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use xlsx_model::RunUnderline;
+use xlsx_model::styles::Stylesheet;
+use xlsx_model::{RichRun, RunBaseline, RunUnderline};
 
 use crate::display_list::{DrawCmd, TextRun, TextRunBaseline};
 
@@ -141,6 +142,118 @@ pub fn has_right_to_left(text: &str) -> bool {
                 | 0x2067
         )
     })
+}
+
+/// A cell's source runs as its text command carries them: UTF-16 offsets into
+/// `text`, colours resolved by `styles` as the cell font's is. A hyperlink
+/// keeps its colour and underline over the whole cell, so the runs of a
+/// hyperlink cell carry neither.
+pub(crate) fn cell_runs(
+    text: &str,
+    runs: &[RichRun],
+    styles: &Stylesheet,
+    hyperlink: bool,
+) -> Vec<TextRun> {
+    let mut offsets = Utf16Offsets::new(text);
+    runs.iter()
+        .filter_map(|run| {
+            let start = offsets.at(run.start as usize);
+            let end = offsets.at(run.end as usize);
+            if end <= start {
+                return None;
+            }
+            let style = &run.style;
+            let underline = style.underline.filter(|_| !hyperlink);
+            Some(TextRun {
+                start,
+                end,
+                font_family: style
+                    .name
+                    .as_deref()
+                    .filter(|name| !name.trim().is_empty())
+                    .map(Arc::from),
+                font_size: style.size_pt.map(|size| size as f32),
+                bold: style.bold,
+                italic: style.italic,
+                underline: underline.map(|kind| kind != RunUnderline::None),
+                underline_style: underline.and_then(|kind| underline_kind(true, Some(kind))),
+                strike: style.strike,
+                color: style
+                    .color
+                    .as_ref()
+                    .filter(|_| !hyperlink)
+                    .and_then(|color| styles.resolve_color(color))
+                    .map(Arc::from),
+                baseline: match style.baseline {
+                    Some(RunBaseline::Superscript) => Some(TextRunBaseline::Superscript),
+                    Some(RunBaseline::Subscript) => Some(TextRunBaseline::Subscript),
+                    _ => None,
+                },
+            })
+        })
+        .collect()
+}
+
+/// The largest size, in points, any of `text` paints at: a run's own or, for
+/// text a run without a size or no run covers, `size`.
+pub(crate) fn largest_size(size: f32, text: &str, runs: &[TextRun]) -> f32 {
+    let units = text.encode_utf16().count() as u32;
+    let mut covered = 0;
+    let mut cursor = 0;
+    let mut largest = None::<f32>;
+    for run in runs {
+        let start = run.start.max(cursor);
+        let end = run.end.min(units);
+        if end <= start {
+            continue;
+        }
+        covered += end - start;
+        cursor = end;
+        let own = run.font_size.unwrap_or(size);
+        largest = Some(largest.map_or(own, |largest| largest.max(own)));
+    }
+    if covered < units {
+        largest = Some(largest.map_or(size, |largest| largest.max(size)));
+    }
+    largest.unwrap_or(size)
+}
+
+/// UTF-8 byte offsets of one text as UTF-16 code units, read forward from
+/// the last offset asked for.
+struct Utf16Offsets<'t> {
+    text: &'t str,
+    byte: usize,
+    unit: u32,
+}
+
+impl<'t> Utf16Offsets<'t> {
+    fn new(text: &'t str) -> Self {
+        Self {
+            text,
+            byte: 0,
+            unit: 0,
+        }
+    }
+
+    /// `byte` in UTF-16 code units; an offset inside a character counts from
+    /// that character's start and one past the end from the end.
+    fn at(&mut self, byte: usize) -> u32 {
+        let mut byte = byte.min(self.text.len());
+        while !self.text.is_char_boundary(byte) {
+            byte -= 1;
+        }
+        if byte < self.byte {
+            self.byte = 0;
+            self.unit = 0;
+        }
+        let units: usize = self.text[self.byte..byte]
+            .chars()
+            .map(char::len_utf16)
+            .sum();
+        self.unit += units as u32;
+        self.byte = byte;
+        self.unit
+    }
 }
 
 fn push(pieces: &mut Vec<TextPiece>, range: Range<usize>, style: &TextPiece) {

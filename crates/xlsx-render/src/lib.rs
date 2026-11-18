@@ -628,8 +628,20 @@ pub fn build_display_list_with_text_runs(
     viewport: &Viewport,
     text_runs: Option<&CellTextRuns<'_>>,
 ) -> Result<DisplayList, RenderError> {
-    let _ = text_runs;
-    build_display_list(wb, sheet, viewport)
+    build_frame_with_text_runs(
+        wb,
+        sheet,
+        viewport,
+        &[],
+        &[],
+        |chart| {
+            Err::<ChartSpace, _>(RenderError::ChartSourceUnavailable {
+                part: chart.part.clone(),
+            })
+        },
+        None,
+        text_runs,
+    )
 }
 
 /// Builds a chart-placeholder display list with pending edit ghosts.
@@ -691,16 +703,16 @@ where
     F: FnMut(&SheetChart) -> Result<R, RenderError>,
     R: Into<Arc<ChartSpace>>,
 {
-    build_frame_with_geometry(
+    build_display_list_with_geometry_and_text_runs(
         wb,
         sheet,
         viewport,
         ghosts,
-        pictures,
-        resolver,
-        None,
-        Some(geometry),
+        geometry,
         max_cells,
+        pictures,
+        None,
+        resolver,
     )
 }
 
@@ -723,16 +735,17 @@ where
     F: FnMut(&SheetChart) -> Result<R, RenderError>,
     R: Into<Arc<ChartSpace>>,
 {
-    let _ = text_runs;
-    build_display_list_with_geometry(
+    build_frame_with_geometry(
         wb,
         sheet,
         viewport,
         ghosts,
-        geometry,
-        max_cells,
         pictures,
         resolver,
+        None,
+        Some(geometry),
+        max_cells,
+        text_runs,
     )
 }
 
@@ -753,15 +766,15 @@ where
     F: FnMut(&SheetChart) -> Result<R, RenderError>,
     R: Into<Arc<ChartSpace>>,
 {
-    let _ = text_runs;
-    build_print_display_list_with_charts(
+    build_frame_with_text_runs(
         wb,
         sheet,
         viewport,
-        metrics,
-        gridlines,
+        &[],
         pictures,
         resolver,
+        Some((metrics, gridlines)),
+        text_runs,
     )
 }
 
@@ -778,14 +791,15 @@ where
     F: FnMut(&SheetChart) -> Result<R, RenderError>,
     R: Into<Arc<ChartSpace>>,
 {
-    build_frame(
+    build_print_display_list_with_text_runs(
         wb,
         sheet,
         viewport,
-        &[],
+        metrics,
+        gridlines,
         pictures,
+        None,
         resolver,
-        Some((metrics, gridlines)),
     )
 }
 
@@ -797,6 +811,33 @@ fn build_frame<F, R>(
     pictures: &[SheetPicture],
     resolver: F,
     print: Option<(&PrintMetrics, bool)>,
+) -> Result<DisplayList, RenderError>
+where
+    F: FnMut(&SheetChart) -> Result<R, RenderError>,
+    R: Into<Arc<ChartSpace>>,
+{
+    build_frame_with_text_runs(
+        wb,
+        sheet,
+        viewport,
+        ghosts,
+        pictures,
+        resolver,
+        print,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_frame_with_text_runs<F, R>(
+    wb: &Workbook,
+    sheet: SheetId,
+    viewport: &Viewport,
+    ghosts: &[GhostEdit],
+    pictures: &[SheetPicture],
+    resolver: F,
+    print: Option<(&PrintMetrics, bool)>,
+    text_runs: Option<&CellTextRuns<'_>>,
 ) -> Result<DisplayList, RenderError>
 where
     F: FnMut(&SheetChart) -> Result<R, RenderError>,
@@ -818,6 +859,7 @@ where
         print,
         geometry.as_ref(),
         None,
+        text_runs,
     )
 }
 
@@ -832,6 +874,7 @@ fn build_frame_with_geometry<F, R>(
     print: Option<(&PrintMetrics, bool)>,
     geometry: Option<&GridGeometry>,
     max_cells: Option<u64>,
+    text_runs: Option<&CellTextRuns<'_>>,
 ) -> Result<DisplayList, RenderError>
 where
     F: FnMut(&SheetChart) -> Result<R, RenderError>,
@@ -1134,6 +1177,26 @@ where
                 .map_or(text, |symbol| symbol.text.into()),
             _ => text,
         };
+        let runs = match (text_runs, &cell.value) {
+            (Some(lookup), CellValue::Text { value })
+                if !hyperlink_only
+                    && parts.is_empty()
+                    && cell.formula.is_none()
+                    && *text == **value
+                    && !has_right_to_left(&text)
+                    && resolve_text_rotation(xf.text_rotation) == (None, false) =>
+            {
+                lookup(at).map_or_else(Vec::new, |runs| {
+                    text_runs::cell_runs(&text, runs, styles, hyperlink.is_some())
+                })
+            }
+            _ => Vec::new(),
+        };
+        let line_size = if wraps && !runs.is_empty() {
+            text_runs::largest_size(size, &text, &runs)
+        } else {
+            size
+        };
 
         let left_pad = print.map_or(TEXT_PAD_PX, |(m, _)| 3.0 * 96.0 / m.dpi);
         let right_pad = print.map_or(TEXT_PAD_PX, |(m, _)| 2.0 * 96.0 / m.dpi);
@@ -1149,7 +1212,7 @@ where
             Align::Right => cell_box.x + cell_box.w - right_pad - right_indent,
             Align::Center => cell_box.x + cell_box.w / 2.0,
         };
-        let ty = text_baseline(cell_box, size, valign, print.map(|(m, _)| m));
+        let ty = text_baseline(cell_box, line_size, valign, print.map(|(m, _)| m));
         let text_width = (cell_box.w - pad_width - left_indent - right_indent).max(0.0);
         let number_format = (!parts.is_empty() || matches!(cell.value, CellValue::Number { .. }))
             .then(|| NumberFormatLayout {
@@ -1226,14 +1289,14 @@ where
             }))
         .then(|| {
             let line_height = geometry::row_pt_to_px(geometry::line_pitch_pt(
-                f64::from(size),
+                f64::from(line_size),
                 print.map(|(m, _)| f64::from(m.dpi)),
             ));
             TextWrap {
                 width: text_width,
                 line_height,
                 valign: resolve_rotation_valign(valign),
-                max_lines: wrap::max_wrapped_lines(cell_box.whole_h + 1.0, line_height, size),
+                max_lines: wrap::max_wrapped_lines(cell_box.whole_h + 1.0, line_height, line_size),
             }
         });
         let number_format = number_format.filter(|_| wrap.is_none());
@@ -1283,7 +1346,7 @@ where
             rotation_valign,
             stacked,
             wrap,
-            runs: Vec::new(),
+            runs,
         });
     }
 
