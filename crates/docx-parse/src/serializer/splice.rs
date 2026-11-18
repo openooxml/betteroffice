@@ -3781,6 +3781,46 @@ mod tests {
         assert_eq!(reasons, [kept_reason(0, &["w:hyperlink"])]);
     }
 
+    #[test]
+    fn a_direct_splice_keeps_a_formatting_change_beside_a_tracked_note_reference() {
+        let reference = "<w:del w:id=\"1\"><w:r><w:footnoteReference w:id=\"1\"/></w:r></w:del>";
+        let head = "<w:r><w:t>Head</w:t></w:r>";
+        let bold = "<w:r><w:rPr><w:b/></w:rPr><w:t>Head</w:t></w:r>";
+        let source = body(&format!("<w:p>{head}{reference}</w:p>"));
+        let written = format!("<w:p>{bold}{reference}</w:p>");
+        let serialized = body(&written);
+        let recorded = RecordedParagraphs {
+            written: HashMap::from([(0, written.clone())]),
+            order: vec![Some(0)],
+            ..RecordedParagraphs::default()
+        };
+        let part = S13SplicedPart {
+            format_only: vec![0],
+            part: "word/document.xml".to_owned(),
+            sha256: String::new(),
+            paragraphs: vec![0],
+            changed: vec![0],
+            inserted: Vec::new(),
+            removed: Vec::new(),
+            paragraph_patches: Vec::new(),
+            legacy_paragraphs: Vec::new(),
+            table_patches: Vec::new(),
+        };
+        let mut reasons = Vec::new();
+        let saved = splice_source_direct(
+            &source,
+            &serialized,
+            &recorded,
+            &part,
+            &BTreeMap::new(),
+            &BTreeMap::from([(0, written)]),
+            &mut reasons,
+        )
+        .expect("the source is kept");
+        assert_eq!(saved, source);
+        assert_eq!(reasons, [kept_reason(0, &["w:del"])]);
+    }
+
     fn body(paragraphs: &str) -> String {
         format!("{ROOT}<w:body>{paragraphs}</w:body></w:document>")
     }
