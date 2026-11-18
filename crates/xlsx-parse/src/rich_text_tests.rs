@@ -351,3 +351,59 @@ fn source_clones_share_the_index_even_when_cloned_before_first_query() {
         clone.shared_string_text_runs(0).unwrap()
     ));
 }
+
+#[test]
+fn package_run_budget_keeps_runs_first_come_and_counts_unmodelled_properties() {
+    let per_item = 4_000;
+    let full_items = crate::MAX_RICH_TEXT_RUNS / per_item;
+    assert_eq!(full_items * per_item, crate::MAX_RICH_TEXT_RUNS);
+    let family = r#"<r><rPr><family val="2"/><b/></rPr><t>x</t></r>"#;
+    let plain = "<r><t>x</t></r>";
+    let last = full_items - 1;
+    let tail = full_items;
+    for extra in [0, 1] {
+        let mut items = String::new();
+        for item in 0..full_items {
+            let run = if item % 2 == 0 { family } else { plain };
+            let count = if item == last {
+                per_item + extra
+            } else {
+                per_item
+            };
+            items.push_str(&format!("<si>{}</si>", run.repeat(count)));
+        }
+        items.push_str("<si><r><rPr><i/></rPr><t>ta</t></r><r><t>il</t></r></si>");
+        let parsed = rich_package(&items, "<r><t>inline</t></r>");
+        for item in 0..last {
+            let runs = parsed.package.shared_string_text_runs(item).unwrap();
+            assert_eq!(runs.len(), per_item, "{item}");
+        }
+        let first = parsed.package.shared_string_text_runs(0).unwrap();
+        assert_eq!(first[0].style.bold, Some(true));
+        assert_eq!(
+            parsed.workbook.shared_strings[last],
+            "x".repeat(per_item + extra)
+        );
+        assert_eq!(
+            parsed.package.shared_string_text_runs(last).is_some(),
+            extra == 0
+        );
+        assert_eq!(parsed.workbook.shared_strings[tail], "tail");
+        assert!(parsed.package.shared_string_text_runs(tail).is_none());
+        assert_eq!(
+            parsed.workbook.sheets[0]
+                .cell(CellRef::new(0, 1))
+                .unwrap()
+                .value,
+            CellValue::Text {
+                value: "inline".into()
+            }
+        );
+        assert!(
+            parsed
+                .package
+                .inline_string_text_runs(0, CellRef::new(0, 1))
+                .is_none()
+        );
+    }
+}
