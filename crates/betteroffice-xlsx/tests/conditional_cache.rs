@@ -1036,10 +1036,7 @@ fn one_shot_renders_decide_every_cell() {
         let workbook = book();
         workbook.set_conditional_budget(1);
         assert!(frame(&workbook, &viewport).conditional_pending > 0);
-        assert_eq!(
-            painted(&entry(&workbook, &viewport)),
-            painted(&reference)
-        );
+        assert_eq!(painted(&entry(&workbook, &viewport)), painted(&reference));
     }
     let fresh = book();
     fresh.set_conditional_budget(1);
