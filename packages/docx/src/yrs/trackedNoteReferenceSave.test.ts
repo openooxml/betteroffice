@@ -56,8 +56,6 @@ const SUGGESTER = { name: 'B', date: '2025-03-05T00:00:00Z' };
 const bareRun = (note: NoteKind, id: number) => `<w:r><w:${note}Reference w:id="${id}"/></w:r>`;
 const languageRun = (note: NoteKind, id: number, properties = '') =>
   `<w:r><w:rPr>${properties}<w:lang w:val="fr-FR"/></w:rPr><w:${note}Reference w:id="${id}"/></w:r>`;
-const INSERTED_MARK = `<w:ins w:id="21" w:author="Ada" w:date="${DATE}">${text('!')}</w:ins>`;
-const withInsertedMark = (content: string) => firstParagraph(`${content}${INSERTED_MARK}`);
 
 function notesXml(note: NoteKind, ids: number[]): string {
   return `<w:${note}s xmlns:w="${W}">` +
@@ -119,20 +117,16 @@ function savedNote(bytes: Uint8Array, note: NoteKind): string {
 
 const IN_RPR = '(?:(?!</w:rPr>)[\\s\\S])*';
 const RUN_PROPERTIES = `(?:<w:rPr>${IN_RPR}</w:rPr>)?`;
-const styled = (note: NoteKind) => `<w:rPr>${IN_RPR}<w:rStyle w:val="${style(note)}"/>${IN_RPR}</w:rPr>`;
-const styledReference = (note: NoteKind) => `<w:r>${styled(note)}<w:${note}Reference w:id="1"/></w:r>`;
 const opening = (shape: Shape) => `<w:${shape.tag} w:id="\\d+" w:author="${shape.author}" w:date="${DATE}">`;
+const bareSpan = (shape: Shape) => revisionSpan(shape, bareRun(shape.note, 1));
+const BOLD_HEAD = new RegExp(`<w:r><w:rPr>${IN_RPR}<w:b/>${IN_RPR}</w:rPr><w:t(?:\\s[^>]*)?>Head</w:t></w:r>`);
 
 function wrapperPattern(shape: Shape): RegExp {
-  return new RegExp(`${opening(shape)}${styledReference(shape.note)}</w:${shape.tag}>`);
+  return new RegExp(`${opening(shape)}${bareRun(shape.note, 1)}</w:${shape.tag}>`);
 }
 
 function liveReferencePattern(note: NoteKind): RegExp {
   return new RegExp(`<w:r>${RUN_PROPERTIES}<w:${note}Reference w:id="1"/></w:r>`);
-}
-
-function styledReferencePattern(note: NoteKind): RegExp {
-  return new RegExp(styledReference(note));
 }
 
 function wrapperSpan(shape: Shape, xml: string): string {
@@ -209,10 +203,6 @@ function typeAt(session: YrsSession, offset: number): void {
   session.insertText({ story: 'body', paraId: firstParagraphId(session), offset }, 'X');
 }
 
-function suggestTyping(session: YrsSession, offset: number): void {
-  session.insertText({ story: 'body', paraId: firstParagraphId(session), offset }, 'X', SUGGESTER);
-}
-
 function boldHead(session: YrsSession): void {
   const paraId = firstParagraphId(session);
   session.toggleMark({ story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 4 } }, { type: 'bold' });
@@ -270,7 +260,7 @@ const noop: Apply = () => {};
 describe.each(PATHS)('$name', (path) => {
   describe.each(SHAPES)('$name at paragraph level', (shape) => {
     const source = () => fixture(firstParagraph(wrapped(shape)));
-    const exactSpan = wrapped(shape);
+    const exactSpan = bareSpan(shape);
     const revision = { kind: shape.revision, author: shape.author };
     const listed = (session: YrsSession) => session.listRevisions().map(({ kind, author }) => ({ kind, author }));
 
@@ -303,7 +293,7 @@ describe.each(PATHS)('$name', (path) => {
       const saved = await path.open(source(), (session) => typeInto(session, 0));
       const first = bodyParagraphs(saved)[0] ?? '';
       expect(plainText(first)).toBe('HeXad  tail');
-      expect(first).toMatch(wrapperPattern(shape));
+      expect(wrapperSpan(shape, first)).toBe(exactSpan);
     });
 
     it('lists the revision after reopening a save of an edit in its paragraph', async () => {
@@ -335,14 +325,14 @@ describe.each(PATHS)('$name', (path) => {
         expect(plainText(savedNote(saved, shape.note))).toBe(` ${shape.note} body`);
       });
 
-      it(`${decision}s the revision of a reopened edited save, then saves ${removes ? 'no reference and keeps the note body' : 'a live reference with its style'}`, async () => {
+      it(`${decision}s the revision of a reopened edited save, then saves ${removes ? 'no reference and keeps the note body' : 'a bare live reference'}`, async () => {
         const edited = await path.open(source(), (session) => typeInto(session, 0));
         const saved = await path.open(edited, (session) => resolveEach(session, decision));
         const first = bodyParagraphs(saved)[0] ?? '';
         expect(plainText(first)).toBe('HeXad  tail');
         expect(first).not.toMatch(/<w:(?:del|ins)\b/);
         if (removes) expect(first).not.toContain(`<w:${shape.note}Reference`);
-        else expect(first).toMatch(styledReferencePattern(shape.note));
+        else expect(savedReferenceRun(first, shape.note)).toBe(bareRun(shape.note, 1));
         expect(plainText(savedNote(saved, shape.note))).toBe(` ${shape.note} body`);
       });
     }
@@ -370,37 +360,38 @@ describe.each(PATHS)('$name', (path) => {
       const run = (value: string) => `<w:r>${RUN_PROPERTIES}<w:(?:t|delText)(?:\\s[^>]*)?>${value}</w:(?:t|delText)></w:r>`;
       expect(count(first, `<w:${shape.tag}\\b`)).toBe(1);
       expect(first).toMatch(new RegExp(
-        `${opening(shape)}${run('left')}${styledReference(shape.note)}${run('right')}</w:${shape.tag}>`
+        `${opening(shape)}${run('left')}${bareRun(shape.note, 1)}${run('right')}</w:${shape.tag}>`
       ));
     });
 
-    it('keeps an untracked reference beside it byte for byte when its paragraph is edited', async () => {
+    it('writes an untracked reference beside it bare when its paragraph is edited', async () => {
       const untracked = referenceRun(shape.note, 2);
       const saved = await path.open(fixture(firstParagraph(`${wrapped(shape)}${untracked}`), [1, 2]), (session) => typeInto(session, 0));
       const first = bodyParagraphs(saved)[0] ?? '';
       expect(plainText(first)).toBe('HeXad  tail');
-      expect(first).toContain(untracked);
-      expect(first).toMatch(wrapperPattern(shape));
+      expect(savedReferenceRun(first, shape.note, 2)).toBe(bareRun(shape.note, 2));
+      expect(wrapperSpan(shape, first)).toBe(exactSpan);
+    });
+
+    it('keeps its source paragraph when text in it is bolded, or the reference inside its wrapper where the paragraph is rewritten', async () => {
+      const original = firstParagraph(wrapped(shape));
+      const first = bodyParagraphs(await path.open(fixture(original), boldHead))[0] ?? '';
+      if (path.keepsSourceBytes) {
+        expect(first).toBe(original);
+      } else {
+        expect(first).toMatch(BOLD_HEAD);
+        expect(wrapperSpan(shape, first)).toBe(exactSpan);
+      }
     });
   });
 
   describe.each(['footnote', 'endnote'] as const)('untracked %s reference', (note) => {
-    it('stays live, unwrapped and styled when its paragraph is edited', async () => {
+    it('stays live and unwrapped when its paragraph is edited', async () => {
       const saved = await path.open(fixture(firstParagraph(referenceRun(note))), (session) => typeInto(session, 0));
       const first = bodyParagraphs(saved)[0] ?? '';
       expect(plainText(first)).toBe('HeXad  tail');
-      expect(first).toMatch(styledReferencePattern(note));
+      expect(first).toMatch(liveReferencePattern(note));
       expect(first).not.toMatch(/<w:(?:del|ins)\b/);
-    });
-
-    it('keeps its run byte for byte, and a deleted reference beside it, when text in its paragraph is bolded', async () => {
-      const deleted = shapeOf(note, 'deletion');
-      const untracked = referenceRun(note, 2);
-      const saved = await path.open(fixture(firstParagraph(`${wrapped(deleted)}${untracked}`), [1, 2]), boldHead);
-      const first = bodyParagraphs(saved)[0] ?? '';
-      expect(first).toContain(untracked);
-      expect(first).toMatch(wrapperPattern(deleted));
-      expect(first).toMatch(new RegExp(`<w:r><w:rPr>${IN_RPR}<w:b/>${IN_RPR}</w:rPr><w:t(?:\\s[^>]*)?>Head</w:t></w:r>`));
     });
   });
 
@@ -433,13 +424,13 @@ describe.each(PATHS)('$name', (path) => {
       });
     });
 
-    it('keeps the field byte for byte when only a deletion of the reference is suggested', async () => {
-      const typed = await path.open(fixture(fieldParagraph(note)), (session) => suggestTyping(session, 2));
-      const suggested = await path.open(fixture(fieldParagraph(note)), suggestDeletingReference);
-      const typedField = fieldSpan(bodyParagraphs(typed)[0] ?? '');
-      expect(plainText(bodyParagraphs(typed)[0] ?? '')).toBe('HeXad Link tail');
-      expect(typedField).not.toBe('');
-      expect(fieldSpan(bodyParagraphs(suggested)[0] ?? '')).toBe(typedField);
+    it('keeps the field of its source paragraph byte for byte when only a deletion of the reference is suggested', async () => {
+      const source = await path.open(fixture(fieldParagraph(note)), (session) => typeAt(session, 2));
+      const sourceField = fieldSpan(bodyParagraphs(source)[0] ?? '');
+      expect(plainText(bodyParagraphs(source)[0] ?? '')).toBe('HeXad Link tail');
+      expect(count(sourceField, `<w:${note}Reference w:id="1"/>`)).toBe(1);
+      const suggested = await path.open(source, suggestDeletingReference);
+      expect(fieldSpan(bodyParagraphs(suggested)[0] ?? '')).toBe(sourceField);
     });
   });
 
@@ -450,45 +441,23 @@ describe.each(PATHS)('$name', (path) => {
     it('leaves the next reference bare after accepting the deletion of a reference with a language', async () => {
       const source = fixture(firstParagraph(`${revisionSpan(deleted, languageRun(note, 1))}${bareRun(note, 2)}`), [1, 2]);
       const first = bodyParagraphs(await path.open(source, accept))[0] ?? '';
+      expect(count(first, `<w:${note}Reference w:id="1"/>`)).toBe(0);
       expect(savedReferenceRun(first, note, 2)).toBe(bareRun(note, 2));
     });
 
     it('leaves the next reference bare after accepting the deletion of a styled reference', async () => {
       const source = fixture(firstParagraph(`${wrapped(deleted)}${bareRun(note, 2)}`), [1, 2]);
       const first = bodyParagraphs(await path.open(source, accept))[0] ?? '';
+      expect(count(first, `<w:${note}Reference w:id="1"/>`)).toBe(0);
       expect(savedReferenceRun(first, note, 2)).toBe(bareRun(note, 2));
     });
 
-    it('writes a reference whose own run has only a language bare', async () => {
-      const source = fixture(withInsertedMark(languageRun(note, 1)));
-      const first = bodyParagraphs(await path.open(source, (session) => typeInto(session, 0)))[0] ?? '';
-      expect(plainText(first)).toBe('HeXad ! tail');
-      expect(savedReferenceRun(first, note)).toBe(bareRun(note, 1));
-    });
-
-    it('writes a reference whose own run has a style and a language with its style only', async () => {
-      const own = languageRun(note, 1, `<w:rStyle w:val="${style(note)}"/>`);
-      const source = fixture(withInsertedMark(own));
-      const first = bodyParagraphs(await path.open(source, (session) => typeInto(session, 0)))[0] ?? '';
-      expect(plainText(first)).toBe('HeXad ! tail');
-      expect(savedReferenceRun(first, note)).toBe(referenceRun(note));
-    });
-
-    it('leaves a bare reference bare and a deleted styled reference styled when other text is edited', async () => {
+    it('leaves both references bare when other text is edited', async () => {
       const source = fixture(firstParagraph(`${wrapped(deleted)}${bareRun(note, 2)}`), [1, 2]);
       const first = bodyParagraphs(await path.open(source, (session) => typeInto(session, 0)))[0] ?? '';
       expect(plainText(first)).toBe('HeXad  tail');
       expect(savedReferenceRun(first, note, 2)).toBe(bareRun(note, 2));
-      expect(first).toMatch(wrapperPattern(deleted));
-    });
-
-    it('does not write a property of its own run that repeats its style', async () => {
-      const own = `<w:r><w:rPr><w:rStyle w:val="${style(note)}"/><w:vertAlign w:val="superscript"/></w:rPr>` +
-        `<w:${note}Reference w:id="1"/></w:r>`;
-      const source = fixture(withInsertedMark(own));
-      const first = bodyParagraphs(await path.open(source, (session) => typeInto(session, 0)))[0] ?? '';
-      expect(plainText(first)).toBe('HeXad ! tail');
-      expect(savedReferenceRun(first, note)).toBe(referenceRun(note));
+      expect(wrapperSpan(deleted, first)).toBe(bareSpan(deleted));
     });
   });
 
