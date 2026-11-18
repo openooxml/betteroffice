@@ -1112,14 +1112,21 @@ impl Stylesheet {
         self.xf(style_index)?.alignment.as_ref()
     }
 
-    /// the number-format for a cell style: custom code when id >= 164, else the
-    /// builtin id. a missing/unset xf resolves to builtin `0` (General).
+    /// the number-format for a cell style: the workbook's own code when it
+    /// declares the id (General, id `0`, excepted), else the builtin id. a
+    /// missing/unset xf resolves to builtin `0` (General).
     pub fn format_code_for(&self, style_index: u32) -> FormatCode<'_> {
         let id = self
             .xf(style_index)
             .and_then(|xf| xf.num_fmt_id)
             .unwrap_or(0);
-        if id >= 164
+        self.format_code_for_id(id)
+    }
+
+    /// the number-format a cell using number format `id` reads, as
+    /// [`Stylesheet::format_code_for`] resolves it.
+    pub fn format_code_for_id(&self, id: u16) -> FormatCode<'_> {
+        if id != 0
             && let Some((_, code)) = self.num_fmts.iter().find(|(k, _)| *k == id)
         {
             return FormatCode::Custom(code);
@@ -2183,6 +2190,14 @@ mod tests {
 
         ss.cell_xfs[1].num_fmt_id = Some(14);
         assert_eq!(ss.format_code_for(1), FormatCode::Builtin(14));
+
+        ss.num_fmts.push((14, "yyyy-mm-dd".into()));
+        assert_eq!(ss.format_code_for(1), FormatCode::Custom("yyyy-mm-dd"));
+
+        ss.num_fmts.push((0, "0.00".into()));
+        ss.cell_xfs[1].num_fmt_id = Some(0);
+        assert_eq!(ss.format_code_for(1), FormatCode::Builtin(0));
+        assert_eq!(ss.format_code_for(0), FormatCode::Builtin(0));
     }
 
     #[test]
