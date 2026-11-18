@@ -246,8 +246,9 @@ fn read_item(
         match next_event(xml, buffer, depth)? {
             Event::Start(element) => {
                 let name = local_name(&element);
-                match (stack.last().map(Vec::as_slice), name.as_slice()) {
-                    (None, b"r") => {
+                let parent = stack.last().map(Vec::as_slice);
+                match (stack.len(), parent, name.as_slice()) {
+                    (0, _, b"r") => {
                         item_runs += 1;
                         if valid && (item_runs > MAX_RICH_TEXT_RUNS_PER_ITEM || !budget.run()) {
                             valid = false;
@@ -257,10 +258,13 @@ fn read_item(
                         saw_text = false;
                         saw_properties = false;
                     }
-                    (Some(b"r"), b"rPr") if !saw_properties && !saw_text => saw_properties = true,
-                    (Some(b"r"), b"t") if !saw_text => saw_text = true,
-                    (None, b"rPh" | b"phoneticPr") | (Some(b"rPh"), b"t") => {}
-                    (Some(b"rPr"), _) if valid => {
+                    (1, Some(b"r"), b"rPr") if !saw_properties && !saw_text => {
+                        saw_properties = true;
+                    }
+                    (1, Some(b"r"), b"t") if !saw_text => saw_text = true,
+                    (0, _, b"rPh" | b"phoneticPr") | (1, Some(b"rPh"), b"t") => {}
+                    (2, Some(b"rPr"), b"rPh" | b"phoneticPr") => valid = false,
+                    (2, Some(b"rPr"), _) if valid => {
                         if !read_property(&element, &mut style, budget)? {
                             valid = false;
                         }
@@ -465,7 +469,10 @@ fn read_property(
                     crate::styles::parse_color(element)?
                 };
                 style.color.is_some()
-                    && (tint.is_none() || matches!(style.color, Some(Color::Theme { .. })))
+                    && (matches!(style.color, Some(Color::Theme { .. }))
+                        || tint
+                            .and_then(|value| value.parse::<f64>().ok())
+                            .is_none_or(|value| value == 0.0))
             }
         }
         _ => false,
