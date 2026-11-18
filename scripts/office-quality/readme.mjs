@@ -170,14 +170,15 @@ export function fontArmLine(channel, summary) {
   return `${channel} arm: ${summary.failed} of ${summary.requested} faces did not load (${requestedDefinition(summary)}), by reason: ${reasonText(summary.reasons)}${summary.missing ? `; ${summary.missing} captures recorded no font loads` : ''}${slicedText}${unattributedText(summary)}${notMeasuredText(summary)}`;
 }
 
-function fontNote(samples) {
+function fontSourcesNote(sources) {
   const lines = [];
-  for (const [channel, label] of [['published', 'Published'], ['commit', 'Commit']]) {
-    const { sources } = fontSummary(samples, channel);
-    if (sources.length) lines.push(`- ${label} fonts: ${sources.join('; ')}`);
-  }
+  for (const [channel, label] of [['published', 'Published'], ['commit', 'Commit']])
+    if (sources[channel]?.length) lines.push(`- ${label} fonts: ${sources[channel].join('; ')}`);
   return lines.length ? `\n\n${lines.join('\n')}` : '';
 }
+
+const fontNote = (samples) =>
+  fontSourcesNote(Object.fromEntries(['published', 'commit'].map((channel) => [channel, fontSummary(samples, channel).sources])));
 
 const count = (value) => value.toLocaleString('en-US');
 const NOUNS = { docx: ['DOCX documents', 'pages'], pptx: ['PPTX presentations', 'slides'], xlsx: ['XLSX workbooks', 'printed pages'] };
@@ -203,12 +204,11 @@ function corpusNote(corpus) {
     corpus.xlsx ? ' XLSX is compared per Excel print range, one range per page, so its page counts always match and are not reported.' : ''}`;
 }
 
-function recalcNote(calculation, benchmark, version, short) {
+function recalcNote(calculation, libreoffice, missing, version, short) {
   const { workbooks, channels } = calculation;
   if (!workbooks) return '';
-  const missing = benchmark.reference_coverage?.missing_reference?.length ?? 0;
   const matching = (channel) => `${channels[channel].fully_matching}/${workbooks}`;
-  return `Recalc rows: ${count(workbooks)} workbooks with formulas (${count(channels.commit.total)} formula results), each recalculated from cleared caches and compared with the values Excel saved. Workbooks fully matching: BetterOffice ${version} ${matching('published')}, BetterOffice at ${short} ${matching('commit')}, LibreOffice ${benchmark.libreoffice_version} ${matching('libreoffice')}.${
+  return `Recalc rows: ${count(workbooks)} workbooks with formulas (${count(channels.commit.total)} formula results), each recalculated from cleared caches and compared with the values Excel saved. Workbooks fully matching: BetterOffice ${version} ${matching('published')}, BetterOffice at ${short} ${matching('commit')}, LibreOffice ${libreoffice} ${matching('libreoffice')}.${
     missing ? ` ${count(missing)} further ${missing === 1 ? 'workbook has' : 'workbooks have'} no Excel calculation reference and ${missing === 1 ? 'is' : 'are'} not counted.` : ''}`;
 }
 
@@ -353,14 +353,7 @@ export function renderSection(report, { privateCorpus = false, date = new Date()
       if (row && /^[\d.,]+ ms$/.test(row[2] ?? '') && /^[\d.,]+ ms$/.test(row[3] ?? ''))
         perf.push([format, label, row[2], row[3]]);
     }
-    const value = (text) => `<td align="right">${text}</td>`;
-    const head = (text) => `<th width="${VALUE_PX}" align="right">${text}</th>`;
-    return [
-      '<table>',
-      `<tr><th width="${LABEL_PX}"></th>${headings.map(head).join('')}</tr>`,
-      ...rows.map(([label, ...cells]) => `<tr><td>${label}</td>${cells.map(value).join('')}</tr>`),
-      '</table>',
-    ].join('\n');
+    return tableHtml(headings, rows);
   };
   const docxTable = table('docx', [
     ['Exact page counts', pages],
@@ -375,17 +368,45 @@ export function renderSection(report, { privateCorpus = false, date = new Date()
   const formatSamples = (format) => report.samples.filter((sample) => sample.format === format);
   const notes = {
     corpus: corpusNote(report.corpus),
-    recalc: calculation ? recalcNote(calculation, report.xlsx_benchmark, versionOf('xlsx'), short) : '',
+    recalc: calculation ? recalcNote(calculation, report.xlsx_benchmark.libreoffice_version,
+      report.xlsx_benchmark.reference_coverage?.missing_reference?.length ?? 0, versionOf('xlsx'), short) : '',
     timing: privateCorpus ? timingNote(sequential, report.versions, short) : '',
   };
-  const note = (text) => (text ? `\n\n${text}` : '');
-  const documents = FORMATS.map((format) => `${count(formatSamples(format).length)} ${format.toUpperCase()}`);
   const generated = privateCorpus
-    ? ` from ${documents.slice(0, -1).join(', ')} and ${documents.at(-1)} documents at ${commitLink} on ${date}; aggregates only; documents are not public`
+    ? largeGenerated(Object.fromEntries(FORMATS.map((format) => [format, formatSamples(format).length])), commitLink, date)
     : '; per-document results are on the [benchmarks site](https://benchmarks.betteroffice.dev)';
   const lead = [notes.corpus, privateCorpus ? '' : chart(headline, perf)].filter(Boolean).join('\n\n');
-  return `${privateCorpus ? LARGE_BEGIN : BEGIN}
-## Benchmarks${privateCorpus ? ': large set' : ''}
+  return layout({
+    large: privateCorpus,
+    generated,
+    lead,
+    docx: `${docxTable}${fontNote(formatSamples('docx'))}`,
+    pptx: `${pptxTable}${fontNote(formatSamples('pptx'))}`,
+    xlsx: `${xlsxTable}${fontNote(formatSamples('xlsx'))}${note(notes.recalc)}${note(notes.timing)}`,
+  });
+}
+
+function tableHtml(headings, rows) {
+  const value = (text) => `<td align="right">${text}</td>`;
+  const head = (text) => `<th width="${VALUE_PX}" align="right">${text}</th>`;
+  return [
+    '<table>',
+    `<tr><th width="${LABEL_PX}"></th>${headings.map(head).join('')}</tr>`,
+    ...rows.map(([label, ...cells]) => `<tr><td>${label}</td>${cells.map(value).join('')}</tr>`),
+    '</table>',
+  ].join('\n');
+}
+
+const note = (text) => (text ? `\n\n${text}` : '');
+
+function largeGenerated(documents, commitLink, date) {
+  const counts = FORMATS.map((format) => `${count(documents[format])} ${format.toUpperCase()}`);
+  return ` from ${counts.slice(0, -1).join(', ')} and ${counts.at(-1)} documents at ${commitLink} on ${date}; aggregates only; documents are not public`;
+}
+
+function layout({ large, generated, lead, docx, pptx, xlsx }) {
+  return `${large ? LARGE_BEGIN : BEGIN}
+## Benchmarks${large ? ': large set' : ''}
 
 *Generated by the [Benchmarks action](.github/workflows/visual-fidelity.yml)${generated}.*
 
@@ -396,22 +417,104 @@ ${lead ? `${lead}\n\n` : ''}<details>
 
 Page agreement is reported separately from SSIM.
 
-${docxTable}${fontNote(formatSamples('docx'))}
+${docx}
 
 
 ### PPTX
 
-${pptxTable}${fontNote(formatSamples('pptx'))}
+${pptx}
 
 ### XLSX
 
-${xlsxTable}${fontNote(formatSamples('xlsx'))}${note(notes.recalc)}${note(notes.timing)}
+${xlsx}
 
 </details>
 
 For how scores, timings and coverage are measured, see the [benchmark methodology](scripts/office-quality/README.md).
 
-${privateCorpus ? LARGE_END : END}`;
+${large ? LARGE_END : END}`;
+}
+
+const ENGINES = ['published', 'commit', 'libreoffice'];
+
+/** The large set block from a run's aggregate.json, byte-identical to renderSection(report, { privateCorpus: true }). */
+export function renderLargeSection(aggregate, { date = new Date().toISOString().slice(0, 10) } = {}) {
+  if (aggregate?.schema_version !== 1 || !FORMATS.every((format) => aggregate.formats?.[format]))
+    throw new Error('Expected an aggregate.json of schema version 1');
+  if (!/^[a-f0-9]{40}$/.test(aggregate.commit))
+    throw new Error('Expected a full commit SHA');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date))
+    throw new Error('Invalid date');
+  const { formats } = aggregate;
+  const required = (value, field) => {
+    if (value === undefined) throw new Error(`aggregate.json has no ${field}; render this run from its report.json`);
+    return value;
+  };
+  const short = aggregate.commit.slice(0, 8);
+  const commitLink = link(short, `https://github.com/openooxml/betteroffice/commit/${aggregate.commit}`);
+  const versions = Object.fromEntries(FORMATS.map((format) => [format, formats[format].published_version]));
+  const ms = (value) => (value === null ? '—' : `${value.toFixed(0)} ms`);
+  const percent = (part, total) => (total ? `${(100 * part / total).toFixed(2)}%` : '—');
+  const table = (format) => {
+    const entry = formats[format];
+    const version = entry.published_version;
+    if (!/^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(version))
+      throw new Error(`Invalid ${format} version`);
+    const sides = [entry.fidelity.published, entry.fidelity.commit];
+    const headings = [
+      `BetterOffice (${link(version, `https://www.npmjs.com/package/@betteroffice/${format}/v/${version}`)})`,
+      `BetterOffice (${commitLink})`,
+    ];
+    if (entry.libreoffice_version !== null) {
+      if (!/^\d+(?:\.\d+){2,3}$/.test(entry.libreoffice_version ?? ''))
+        throw new Error('Invalid LibreOffice version');
+      sides.push(entry.fidelity.libreoffice);
+      headings.push(`LibreOffice (${entry.libreoffice_version})`);
+    }
+    const rows = format === 'xlsx' ? [] : [
+      ['Exact page counts', ...sides.map((side) => (side?.paged ? `${side.exact_pages}/${side.paged}` : '—'))],
+      ['Absolute page error', ...sides.map((side) => (side?.paged ? String(side.page_error) : '—'))],
+    ];
+    rows.push(
+      ['SSIM', ...sides.map((side) => (side && side.ssim !== null ? side.ssim.toFixed(4) : '—'))],
+      ['Scored/total', ...sides.map((side) => (side ? `${side.scored}/${side.total}` : '—'))],
+    );
+    if (format !== 'xlsx' && entry.timing)
+      rows.push(['Render time (avg)', ...ENGINES.map((channel) => ms(entry.timing.channels[channel].mean_ms))]);
+    if (format === 'xlsx' && entry.recalc) {
+      rows.push(['Recalc accuracy', ...ENGINES.map((channel) => percent(entry.recalc[channel].correct, entry.recalc[channel].total))]);
+      if (entry.timing)
+        rows.push(['Recalc time (avg)', ...ENGINES.map((channel) => ms(entry.timing.channels[channel].mean_ms))]);
+    }
+    if (entry.roundtrip)
+      rows.push(['Parse success', ...ENGINES.map((channel) => percent(entry.roundtrip[channel].parsed, entry.roundtrip[channel].total))]);
+    return `${tableHtml(headings, rows)}${fontSourcesNote({ published: entry.fonts?.published?.sources, commit: entry.fonts?.commit?.sources })}`;
+  };
+  const sequential = Object.fromEntries(FORMATS.filter((format) => formats[format].timing).map((format) => {
+    const timing = formats[format].timing;
+    return [format, {
+      sample_size: required(timing.sample_size, `${format} timing.sample_size`),
+      rounds: timing.rounds,
+      summary: { total: timing.sample, common: timing.timed_by_every_engine, notes_not_converged: timing.notes_not_converged, channels: timing.channels },
+    }];
+  }));
+  const { recalc } = formats.xlsx;
+  const workbooks = recalc?.commit.workbooks ?? 0;
+  const recalcText = workbooks
+    ? recalcNote({ workbooks, channels: recalc }, formats.xlsx.libreoffice_version,
+      required(formats.xlsx.recalc_missing_reference, 'xlsx recalc_missing_reference'), versions.xlsx, short)
+    : '';
+  const docx = table('docx');
+  const pptx = table('pptx');
+  const xlsx = table('xlsx');
+  return layout({
+    large: true,
+    generated: largeGenerated(Object.fromEntries(FORMATS.map((format) => [format, formats[format].samples])), commitLink, date),
+    lead: corpusNote(Object.fromEntries(FORMATS.filter((format) => formats[format].corpus).map((format) => [format, formats[format].corpus]))),
+    docx,
+    pptx,
+    xlsx: `${xlsx}${note(recalcText)}${note(timingNote(sequential, versions, short))}`,
+  });
 }
 
 export function aggregateReport(report) {
@@ -456,6 +559,7 @@ export function aggregateReport(report) {
         const { correct, total, fully_matching, mean_ms } = calculation.channels[channel];
         return [channel, { correct, total, workbooks: calculation.workbooks, fully_matching, mean_ms: meanMs(mean_ms) }];
       }));
+      entry.recalc_missing_reference = report.xlsx_benchmark.reference_coverage?.missing_reference?.length ?? 0;
     }
     if (report.roundtrip_benchmark?.[format]) {
       const summary = roundtripSummary(report.samples, format);
@@ -468,7 +572,7 @@ export function aggregateReport(report) {
     if (sequential) {
       const { summary } = sequential;
       entry.timing = {
-        method: sequential.method, sample: summary.total, timed_by_every_engine: summary.common, rounds: sequential.rounds,
+        method: sequential.method, sample_size: sequential.sample_size, sample: summary.total, timed_by_every_engine: summary.common, rounds: sequential.rounds,
         notes_not_converged: summary.notes_not_converged ?? 0,
         processors: sequential.runner.processors,
         channels: Object.fromEntries(Object.entries(summary.channels).map(([channel, value]) => [channel, {
@@ -521,7 +625,7 @@ export function updateReadme(readme, section) {
   )}`;
 }
 
-const USAGE = 'usage: readme.mjs [--as large [--date YYYY-MM-DD] [--public README.md]] report.json [README.md] | readme.mjs --section section.md [README.md]';
+const USAGE = 'usage: readme.mjs report.json [README.md] | readme.mjs --as large [--date YYYY-MM-DD] [--public README.md] report.json|aggregate.json [README.md] | readme.mjs --section section.md [README.md]';
 
 async function readRegular(path) {
   if (!(await lstat(path)).isFile()) throw new Error(`${path} must be a regular file`);
@@ -547,7 +651,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     if (!section.startsWith(begin) || !section.endsWith(end))
       throw new Error('The generated section does not match this run');
   } else {
-    section = renderSection(JSON.parse(await readFile(positionals[0], 'utf8')), { privateCorpus: large, date: values.date });
+    const input = JSON.parse(await readFile(positionals[0], 'utf8'));
+    if (Array.isArray(input.samples)) section = renderSection(input, { privateCorpus: large, date: values.date });
+    else if (large) section = renderLargeSection(input, { date: values.date });
+    else throw new Error(`${positionals[0]} has no samples: an aggregate.json renders only the large set block (--as large)`);
     if (values.public !== undefined) readme = updateReadme(readme, generatedBlock(await readFile(values.public, 'utf8')));
   }
   await writeFile(readmePath, updateReadme(readme, section));
