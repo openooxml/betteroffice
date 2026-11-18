@@ -71,7 +71,10 @@ function deadline(options: RemoteFontLoadOptions, shared = false): AbortSignal {
 }
 
 function within<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
-  if (signal.aborted) return Promise.reject(signal.reason);
+  if (signal.aborted) {
+    void work.catch(() => {});
+    return Promise.reject(signal.reason);
+  }
   return new Promise<T>((resolve, reject) => {
     const abort = () => reject(signal.reason);
     signal.addEventListener('abort', abort, { once: true });
@@ -148,6 +151,7 @@ export function fetchRemoteFontRules(
 ): Promise<RemoteFontFaceRule[]> {
   const url = remoteFontStylesheetUrl(family, faces, options.provider ?? DEFAULT_REMOTE_FONT_PROVIDER);
   if (!url) return Promise.resolve([]);
+  if (options.signal?.aborted) return Promise.reject(options.signal.reason);
   let pending = stylesheets.get(url);
   if (!pending) {
     const request = options.fetch ?? globalThis.fetch;
@@ -234,6 +238,7 @@ export async function remoteFontSlices(
 }
 
 async function fetchSlice(rule: RemoteFontFaceRule, options: RemoteFontLoadOptions, signal: AbortSignal): Promise<ArrayBuffer> {
+  if (signal.aborted) throw signal.reason;
   const request = options.fetch ?? globalThis.fetch;
   const response = await request(preferredSource(rule).url, { credentials: 'omit', referrerPolicy: 'no-referrer', signal });
   if (!response.ok) throw new Error(`Remote font failed: ${response.status} ${response.url}`);
@@ -336,6 +341,7 @@ async function loadCoveringSlices(
   }
   if (registered.size + fresh.length > MAX_REGISTERED_SLICES) throw new Error('Remote font slice record is full');
   for (const rule of fresh) {
+    options.signal?.throwIfAborted();
     const key = keyOf(rule);
     const waiting = new Set<AbortSignal | null>();
     const signal = deadline(options, true);
