@@ -151,7 +151,7 @@ fn seeded_sequence_fields<'a>(ops: impl IntoIterator<Item = &'a RawOp>) -> Optio
                 }
             }
             RawOp::Insert { .. } | RawOp::Format { .. } | RawOp::InsertEmbed { .. } => {}
-            RawOp::SetComment { .. } | RawOp::RemoveComment { .. } => {}
+            RawOp::SetComment { .. } | RawOp::OpenComment { .. } | RawOp::RemoveComment { .. } => {}
             RawOp::Delete { .. } | RawOp::SetEmbedAttr { .. } => return None,
         }
     }
@@ -194,6 +194,9 @@ struct StoryPlan {
     units: Vec<InlineUnit>,
     comment_marks: Vec<CommentMark>,
     comment_coverage: Vec<(String, Vec<(u32, u32)>)>,
+    /// Comments whose range here continues from ("start", "before") or into ("end") another
+    /// story.
+    comment_open: Vec<(String, &'static str)>,
     /// How many units [`StoryPlan::width`] has measured, and their width.
     measured: (usize, u32),
 }
@@ -5981,6 +5984,7 @@ fn add_comment_coverage(plan: &mut StoryPlan) {
             }
         };
     let mut offset = 0u32;
+    let mut paragraph_start = 0u32;
     let mut open: Vec<(String, u32, Option<u32>)> = Vec::new();
     let mut marks = plan.comment_marks.iter().peekable();
     for unit_index in 0..=plan.units.len() {
@@ -5997,6 +6001,17 @@ fn add_comment_coverage(plan: &mut StoryPlan) {
             } else if let Some(index) = open.iter().position(|(id, _, _)| id == &mark.id) {
                 let (id, start, _) = open.remove(index);
                 add_range(&mut plan.comment_coverage, &id, start, offset);
+            } else {
+                if !plan.comment_coverage.iter().any(|(id, _)| id == &mark.id) {
+                    plan.comment_coverage.push((mark.id.clone(), Vec::new()));
+                }
+                let (start, end, side) = if offset > paragraph_start {
+                    (paragraph_start, offset, "start")
+                } else {
+                    (offset, offset + 1, "before")
+                };
+                add_range(&mut plan.comment_coverage, &mark.id, start, end);
+                plan.comment_open.push((mark.id.clone(), side));
             }
         }
         if let Some(unit) = plan.units.get(unit_index) {
@@ -6004,17 +6019,17 @@ fn add_comment_coverage(plan: &mut StoryPlan) {
                 for (_, _, paragraph_end) in &mut open {
                     paragraph_end.get_or_insert(offset);
                 }
+                paragraph_start = offset + unit_width(unit);
             }
             offset += unit_width(unit);
         }
     }
     for (id, start, paragraph_end) in open {
-        add_range(
-            &mut plan.comment_coverage,
-            &id,
-            start,
-            paragraph_end.unwrap_or(offset),
-        );
+        let end = paragraph_end.unwrap_or(offset);
+        if end > start {
+            plan.comment_open.push((id.clone(), "end"));
+        }
+        add_range(&mut plan.comment_coverage, &id, start, end);
     }
     plan.comment_coverage
         .retain(|(_, ranges)| !ranges.is_empty());
@@ -6248,6 +6263,7 @@ fn visit_story(
         units: Vec::new(),
         comment_marks: Vec::new(),
         comment_coverage: Vec::new(),
+        comment_open: Vec::new(),
         measured: (0, 0),
     });
     let empty_story;
@@ -6796,6 +6812,7 @@ fn seed_plan_sharing(
         story_id,
         units,
         comment_coverage,
+        comment_open,
         ..
     } = plan;
     let mut referenced_fonts = BTreeSet::new();
@@ -6812,6 +6829,12 @@ fn seed_plan_sharing(
                     body: Any::Null,
                 }),
         );
+    }
+    for (id, side) in comment_open {
+        ops.push(RawOp::OpenComment {
+            id,
+            side: side.to_owned(),
+        });
     }
     Ok((story_id, ops, referenced_fonts))
 }
@@ -12140,8 +12163,13 @@ mod tests {
                 ("4".to_owned(), vec![(1, 3)]),
                 ("5".to_owned(), vec![(11, 23)]),
                 ("6".to_owned(), vec![(30, 34)]),
+                ("7".to_owned(), vec![(35, 36)]),
                 ("0".to_owned(), vec![(35, 37)]),
             ]
+        );
+        assert_eq!(
+            context.plans[0].comment_open,
+            [("7".to_owned(), "before"), ("6".to_owned(), "end")]
         );
     }
 

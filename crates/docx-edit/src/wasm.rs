@@ -2260,6 +2260,7 @@ impl EditSession {
     /// - `{"op":"insertEmbed","index","kind"?,"payload"?,"attrs"?}`
     /// - `{"op":"setEmbedAttr","index","key","value"?}`
     /// - `{"op":"setComment","id","ranges":[[start,end], …],"author"?,"date"?,"body"?}`
+    /// - `{"op":"openComment","id","side":"start"|"end"|"before"}`
     /// - `{"op":"removeComment","id"}`
     ///
     /// Each op's `index`, and each `setComment` range, is read against the

@@ -66,7 +66,7 @@ import type {
   HeaderFooter,
   SectionProperties,
 } from '../types/document';
-import type { YrsRunInheritance, YrsSession, YrsTableInheritance } from './index';
+import type { YrsCommentOpenSide, YrsRunInheritance, YrsSession, YrsTableInheritance } from './index';
 import { isUnavailableTablePayload, markGated, refuseUnavailableTables, tableUnavailableError } from './tableUnavailable';
 
 type Attrs = Record<string, unknown>;
@@ -3057,8 +3057,8 @@ function commentRanges(
   session: YrsSession,
   comments: readonly Comment[] | undefined,
   sessionIds: ReadonlyMap<number, string> | undefined
-): Map<string, Array<{ id: number; start: number; end: number }>> {
-  const byStory = new Map<string, Array<{ id: number; start: number; end: number }>>();
+): Map<string, ProjectedCommentRange[]> {
+  const byStory = new Map<string, ProjectedCommentRange[]>();
   for (const comment of comments ?? []) {
     let anchors: ReturnType<YrsSession['resolveComment']>;
     try {
@@ -3076,12 +3076,21 @@ function commentRanges(
       if (group.length === 0) continue;
       const start = Math.min(...group.map((anchor) => anchor.start));
       const end = Math.max(...group.map((anchor) => anchor.end));
+      const open = group.find((anchor) => anchor.open)?.open;
       const ranges = byStory.get(story) ?? [];
-      ranges.push({ id: comment.id, start, end });
+      ranges.push({ id: comment.id, start, end, ...(open ? { open } : {}) });
       byStory.set(story, ranges);
     }
   }
   return byStory;
+}
+
+/** A comment's range in one story; `open` is the side on which it continues in another story. */
+interface ProjectedCommentRange {
+  id: number;
+  start: number;
+  end: number;
+  open?: YrsCommentOpenSide;
 }
 
 /** Chart placements recoverable from the base document, keyed per story. */
@@ -3621,7 +3630,7 @@ class SaveContext {
   private readonly hasCommentReferenceStyle: boolean;
   private readonly baseStories: Map<string, readonly BlockContent[]>;
   private readonly baseChartDrawings = new Map<string, Map<string, string>>();
-  private readonly comments: Map<string, Array<{ id: number; start: number; end: number }>>;
+  private readonly comments: Map<string, ProjectedCommentRange[]>;
   /** Per story, the comment ranges of it and of the stories nested in it, which key its blocks. */
   private readonly subtreeComments = new Map<string, Map<string, unknown>>();
   private readonly memo: SessionProjectionMemo;
@@ -4093,12 +4102,13 @@ class SaveContext {
     const paragraphCommentBoundaries = (end: number): CommentBoundary[] => {
       const boundaries: CommentBoundary[] = [];
       for (const range of storyComments) {
-        if (range.start >= paragraphStart && range.start <= end) {
-          const offset = Math.max(0, range.start - inlineStart);
-          boundaries.push({ id: range.id, kind: 'start', offset });
+        const from = range.open === 'start' || range.open === 'before' ? undefined : range.start;
+        const to = range.open === 'end' ? undefined : range.open === 'before' ? range.start : range.end;
+        if (from !== undefined && from >= paragraphStart && from <= end) {
+          boundaries.push({ id: range.id, kind: 'start', offset: Math.max(0, from - inlineStart) });
         }
-        if (range.end >= paragraphStart && range.end <= end) {
-          boundaries.push({ id: range.id, kind: 'end', offset: Math.max(0, range.end - inlineStart) });
+        if (to !== undefined && to >= paragraphStart && to <= end) {
+          boundaries.push({ id: range.id, kind: 'end', offset: Math.max(0, to - inlineStart) });
         }
       }
       return boundaries;

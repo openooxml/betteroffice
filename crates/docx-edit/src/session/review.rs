@@ -264,20 +264,29 @@ impl EditSessionCore {
     }
 
     /// Where a comment's sticky anchors currently sit:
-    /// `[{"story","start","end"}, …]`, one entry per anchored range, in
-    /// story-global UTF-16 units. Errors on an unknown comment id and when an
-    /// anchor no longer resolves.
+    /// `[{"story","start","end","open"?}, …]`, one entry per anchored range, in
+    /// story-global UTF-16 units; `open`, "start" or "end", is the side on which
+    /// the range continues in another story, and "before" marks a range from
+    /// another story that ends where the anchor starts. Errors on an unknown
+    /// comment id and when an anchor no longer resolves.
     pub fn resolve_comment(&self, comment_id: &str) -> EngineResult<String> {
-        let anchors = self
-            .engine
-            .doc()
+        let doc = self.engine.doc();
+        let anchors = doc
             .resolve_comment(comment_id)
+            .map_err(EngineError::message)?;
+        let sources = doc
+            .comment_anchors(comment_id)
             .map_err(EngineError::message)?;
         let items: Vec<Value> = anchors
             .into_iter()
-            .map(
-                |anchor| json!({ "story": anchor.story, "start": anchor.start, "end": anchor.end }),
-            )
+            .zip(sources)
+            .map(|(at, source)| {
+                let mut item = json!({ "story": at.story, "start": at.start, "end": at.end });
+                if let Some(open) = source.open {
+                    item["open"] = json!(open);
+                }
+                item
+            })
             .collect();
         serde_json::to_string(&items).map_err(EngineError::message)
     }
