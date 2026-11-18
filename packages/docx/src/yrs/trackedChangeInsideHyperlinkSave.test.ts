@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, describe, expect, it, spyOn } from 'bun:test';
+import { beforeAll, describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parseDocx } from '../docx';
@@ -10,8 +10,7 @@ import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
 import { documentToYrs } from './documentToYrs';
 import { DirtyProjectionStories, mergeDocxHostMetadata, saveEditorDocument } from './editorSave';
 import { createYrsSession, decodeDocxHostJson, saveYrsDocx, type YrsSession } from './index';
-import { closeCommandEngines, openCommandEngine } from './residentCommandTestSupport';
-import * as residentEngine from './residentEngineSession';
+import { createResidentEngineSession } from './residentEngineSession';
 import { yrsToDocument } from './yrsToDocument';
 
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
@@ -23,14 +22,22 @@ const NAMESPACES = [
   'xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"',
   'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"',
   'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"',
+  'xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"',
   'xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"',
 ].join(' ');
 const AUTHOR = 'Grace';
 const DATE = '2025-03-04T05:06:07Z';
 const HEAD = 'Head ';
+const PARA_ID = '0C000001';
+const TARGET = 'https://example.com/';
+const PNG = Uint8Array.from(
+  atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='),
+  (char) => char.charCodeAt(0)
+);
 
-const PATHS = ['Rust loader', 'TypeScript loader', 'worker engine'] as const;
+const PATHS = ['path that seeds in Rust', 'path that seeds in TypeScript', 'worker engine'] as const;
 type Path = (typeof PATHS)[number];
+const SEEDS_IN_TYPESCRIPT: Path = 'path that seeds in TypeScript';
 
 const t = (text: string) => `<w:r><w:t xml:space="preserve">${text}</w:t></w:r>`;
 const dt = (text: string) => `<w:r><w:delText xml:space="preserve">${text}</w:delText></w:r>`;
@@ -39,29 +46,29 @@ const tracked = (tag: string, id: string, content: string) =>
   `<w:${tag} w:id="${id}" w:author="${AUTHOR}" w:date="${DATE}">${content}</w:${tag}>`;
 const link = (content: string, attributes = 'r:id="rIdLink"') =>
   `<w:hyperlink ${attributes} w:history="1">${content}</w:hyperlink>`;
-const FIRST = '<w:p w14:paraId="0C000001" w14:textId="0C000001">';
+const FIRST = `<w:p w14:paraId="${PARA_ID}" w14:textId="${PARA_ID}">`;
 const firstParagraph = (inner: string) => `${FIRST}${t(HEAD)}${inner}${t(' tail')}</w:p>`;
 const OTHER = `<w:p w14:paraId="0C000002" w14:textId="0C000002">${t('Other')}</w:p>`;
 
 const preserved = (text: string) => (/^ | $| {2}/.test(text) ? ' xml:space="preserve"' : '');
-/** A plain run as the writer writes it. */
 const wt = (text: string) => `<w:r><w:t${preserved(text)}>${text}</w:t></w:r>`;
 
 type Notes = 'footnotes' | 'endnotes';
 
 interface Parts {
   notes?: Notes;
-  /** A comments part holding comment 7. */
   comments?: boolean;
+  media?: boolean;
   relationships?: string;
 }
 
-function docx(body: string, { notes, comments = false, relationships = '' }: Parts = {}): Uint8Array {
-  const parts: Array<[string, string]> = [
+function docx(body: string, { notes, comments = false, media = false, relationships = '' }: Parts = {}): Uint8Array {
+  const parts: Array<[string, string | Uint8Array]> = [
     [
       '[Content_Types].xml',
       '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
         '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>' +
+        (media ? '<Default Extension="png" ContentType="image/png"/>' : '') +
         `<Override PartName="/word/document.xml" ContentType="${OFFICE_DOC}.document.main+xml"/>` +
         (notes ? `<Override PartName="/word/${notes}.xml" ContentType="${OFFICE_DOC}.${notes}+xml"/>` : '') +
         (comments ? `<Override PartName="/word/comments.xml" ContentType="${OFFICE_DOC}.comments+xml"/>` : '') +
@@ -77,7 +84,8 @@ function docx(body: string, { notes, comments = false, relationships = '' }: Par
         `<Relationship Id="rIdStyles" Type="${R}/styles" Target="styles.xml"/>` +
         (notes ? `<Relationship Id="rIdNotes" Type="${R}/${notes}" Target="${notes}.xml"/>` : '') +
         (comments ? `<Relationship Id="rIdComments" Type="${R}/comments" Target="comments.xml"/>` : '') +
-        `<Relationship Id="rIdLink" Type="${R}/hyperlink" Target="https://example.com/" TargetMode="External"/>${relationships}</Relationships>`,
+        (media ? `<Relationship Id="rIdImage" Type="${R}/image" Target="media/image1.png"/>` : '') +
+        `<Relationship Id="rIdLink" Type="${R}/hyperlink" Target="${TARGET}" TargetMode="External"/>${relationships}</Relationships>`,
     ],
     [
       'word/styles.xml',
@@ -85,6 +93,7 @@ function docx(body: string, { notes, comments = false, relationships = '' }: Par
     ],
     ['word/document.xml', `<w:document ${NAMESPACES}><w:body>${body}<w:sectPr/></w:body></w:document>`],
   ];
+  if (media) parts.push(['word/media/image1.png', PNG]);
   if (comments) {
     parts.push([
       'word/comments.xml',
@@ -102,28 +111,32 @@ function docx(body: string, { notes, comments = false, relationships = '' }: Par
         `<w:${note} w:id="1"><w:p><w:r><w:${note}Ref/></w:r><w:r><w:t xml:space="preserve"> Note</w:t></w:r></w:p></w:${note}></w:${notes}>`,
     ]);
   }
-  return new Uint8Array(rezipPartsToArrayBuffer(new Map(parts.map(([name, xml]) => [name, toBytes(xml)]))));
+  return new Uint8Array(rezipPartsToArrayBuffer(new Map(parts.map(([name, data]) => [name, toBytes(data)]))));
 }
 
-const documentXml = (bytes: Uint8Array) => new TextDecoder().decode(unzipContainer(bytes)['word/document.xml']);
+const partXml = (bytes: Uint8Array, name: string) => new TextDecoder().decode(unzipContainer(bytes)[name]);
+const documentXml = (bytes: Uint8Array) => partXml(bytes, 'word/document.xml');
 const body = (xml: string) => xml.slice(xml.indexOf('<w:body>'), xml.indexOf('<w:sectPr'));
-/** The saved first body paragraph, start tag included. */
-const savedFirst = (xml: string) => body(xml).match(/<w:p\b[^>]*>[\s\S]*?<\/w:p>/)?.[0] ?? '';
-/** The saved first body paragraph without its start tag and end tag. */
+const bodyParagraphs = (xml: string) => body(xml).match(/<w:p\b[^>]*>[\s\S]*?<\/w:p>/g) ?? [];
+const savedFirst = (xml: string) => bodyParagraphs(xml)[0] ?? '';
 const savedFirstInner = (xml: string) =>
   savedFirst(xml)
     .replace(/^<w:p\b[^>]*>/, '')
     .replace(/<\/w:p>$/, '');
+const paraIdOf = (paragraph: string) => /^<w:p\b[^>]*\bw14:paraId="([^"]*)"/.exec(paragraph)?.[1];
+const rewrittenFirst = (xml: string) => [paraIdOf(savedFirst(xml)), savedFirstInner(xml)];
+const textOf = (paragraph: string) =>
+  [...paragraph.matchAll(/<w:t\b[^>]*>([^<]*)<\/w:t>/g)].map(([, text]) => text).join('');
+const otherTexts = (xml: string) => bodyParagraphs(xml).slice(1).map(textOf);
 
 interface Opened {
-  session: Pick<YrsSession, 'paragraphs' | 'insertText'>;
-  /** The path writes every paragraph again on each save: it has no source package. */
+  session: Pick<YrsSession, 'paragraphs' | 'insertText' | 'storySegments'>;
   rewrites: boolean;
   revisions(): ReadonlyArray<{ revisionId: string; kind: string }>;
   saves(): Promise<Array<[string, Uint8Array]>>;
+  destroy(): void;
 }
 
-const sessions: YrsSession[] = [];
 let clientId = 79600;
 
 beforeAll(async () => {
@@ -134,21 +147,9 @@ beforeAll(async () => {
     new Uint8Array(readFileSync(resolve(import.meta.dir, '../wasm/generated/opc/ooxml_opc_bg.wasm')))
   );
 }, 30_000);
-afterEach(() => {
-  sessions.splice(0).forEach((session) => session.destroy());
-  closeCommandEngines();
-});
 
-async function yrs(): Promise<YrsSession> {
-  const session = await createYrsSession({ clientId: (clientId += 1) });
-  sessions.push(session);
-  return session;
-}
-
-/** The comments the host holds for the opened document, which the editor hands to its save. */
 const hostComments = (document: Document): Comment[] => document.package.document.comments ?? [];
 
-/** The editor's main-thread save: the body projected onto `base`, merged with the opening host when there is one. */
 async function editorSave(session: YrsSession, base: Document, comments: Comment[], host?: Document): Promise<Uint8Array> {
   const dirty = new DirtyProjectionStories();
   dirty.add('body');
@@ -157,8 +158,8 @@ async function editorSave(session: YrsSession, base: Document, comments: Comment
 }
 
 async function open(path: Path, bytes: Uint8Array): Promise<Opened> {
-  if (path === 'Rust loader') {
-    const session = await yrs();
+  if (path === 'path that seeds in Rust') {
+    const session = await createYrsSession({ clientId: (clientId += 1) });
     const host = session.openDocx(bytes, true).document;
     return {
       session,
@@ -168,10 +169,11 @@ async function open(path: Path, bytes: Uint8Array): Promise<Opened> {
         ['saveYrsDocx', (await saveYrsDocx(session, { updateModifiedDate: false })).bytes],
         ['editor', await editorSave(session, session.materializeDocx()!, hostComments(host), host)],
       ],
+      destroy: () => session.destroy(),
     };
   }
-  if (path === 'TypeScript loader') {
-    const session = await yrs();
+  if (path === SEEDS_IN_TYPESCRIPT) {
+    const session = await createYrsSession({ clientId: (clientId += 1) });
     const parsed = await parseDocx(bytes.slice().buffer, { preloadFonts: false });
     documentToYrs(session, parsed);
     const base = { ...parsed, originalBuffer: parsed.originalBuffer ?? bytes.slice().buffer };
@@ -180,30 +182,30 @@ async function open(path: Path, bytes: Uint8Array): Promise<Opened> {
       rewrites: true,
       revisions: () => session.listRevisions(),
       saves: async () => [['editor', await editorSave(session, base, hostComments(parsed))]],
+      destroy: () => session.destroy(),
     };
   }
-  let hostJson = '';
-  const create = residentEngine.createResidentEngineSession;
-  const capture = spyOn(residentEngine, 'createResidentEngineSession').mockImplementation(async (...args) => {
-    const session = await create(...args);
-    const openDocx = session.openDocx;
-    session.openDocx = (...input) => (hostJson = openDocx(...input));
-    return session;
-  });
-  const { engine } = await openCommandEngine([], { bytes, clientId: (clientId += 1) }).finally(() =>
-    capture.mockRestore()
-  );
+  const engine = await createResidentEngineSession(undefined, (clientId += 1));
+  const hostJson = engine.openDocx(bytes, undefined, 'd1-synthetic');
   return {
     session: engine,
     rewrites: false,
     revisions: () => engine.proposalEngine.listRevisions(),
     saves: async () => {
       const comments = hostComments(decodeDocxHostJson(hostJson, bytes).document);
-      return [
-        ['worker', new Uint8Array(await engine.save(bytes.slice(), hostJson, undefined, comments, { full: false }))],
-      ];
+      return [['worker', new Uint8Array(await engine.save(bytes.slice(), hostJson, undefined, comments, { full: false }))]];
     },
+    destroy: () => engine.destroy(),
   };
+}
+
+async function opened(path: Path, bytes: Uint8Array, run: (opened: Opened) => Promise<void> | void): Promise<void> {
+  const session = await open(path, bytes);
+  try {
+    await run(session);
+  } finally {
+    session.destroy();
+  }
 }
 
 function typedAt({ session }: Opened, paragraph: number, offset: number): void {
@@ -212,6 +214,8 @@ function typedAt({ session }: Opened, paragraph: number, offset: number): void {
 }
 
 const texts = ({ session }: Opened) => session.paragraphs('body').map(({ text }) => text);
+const embeds = ({ session }: Opened) =>
+  session.storySegments('body').flatMap((segment) => (segment.kind === 'embed' ? [segment.embedKind] : []));
 
 interface Change {
   tag: 'ins' | 'del' | 'moveFrom' | 'moveTo';
@@ -232,8 +236,8 @@ const MOVED_TO: Side = { name: 'a moved-to change', change: { tag: 'moveTo', id:
 interface Kind {
   name: string;
   notes?: Notes;
-  /** The document holds comment 7, whose reference run follows the hyperlink. */
   comments?: boolean;
+  media?: boolean;
   sides?: Side[];
   content(deleted: boolean): string;
 }
@@ -241,10 +245,13 @@ interface Kind {
 const COMMENT_REFERENCE = '<w:r><w:commentReference w:id="7"/></w:r>';
 const afterLink = (kind: Kind) => (kind.comments ? COMMENT_REFERENCE : '');
 
-const DRAWING =
+const PICTURE =
   '<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="9525" cy="9525"/>' +
-  '<wp:docPr id="1" name="Shape"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"/>' +
-  '</a:graphic></wp:inline></w:drawing></w:r>';
+  '<wp:docPr id="1" name="Picture 1"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">' +
+  '<pic:pic><pic:nvPicPr><pic:cNvPr id="1" name="Picture 1"/><pic:cNvPicPr/></pic:nvPicPr>' +
+  '<pic:blipFill><a:blip r:embed="rIdImage"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>' +
+  '<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="9525" cy="9525"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>' +
+  '</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>';
 
 const TEXT_KINDS: Kind[] = [
   {
@@ -278,7 +285,7 @@ const KINDS: Kind[] = [
       );
     },
   },
-  { name: 'a drawing', content: () => DRAWING },
+  { name: 'an inline picture', media: true, content: () => PICTURE },
   { name: 'a symbol', content: () => '<w:r><w:sym w:font="Wingdings" w:char="F04A"/></w:r>' },
   { name: 'an equation', content: () => '<m:oMath><m:r><m:t>x</m:t></m:r></m:oMath>' },
   {
@@ -304,7 +311,6 @@ const MIXED: Kind = {
     `${textRun(deleted, 'lost')}<w:r><w:footnoteReference w:id="1"/></w:r>${textRun(deleted, 'more')}`,
 };
 
-/** The paragraph written without the tracked change: the link keeps its remaining text as two plain runs. */
 const rewritten = (head: string, kind: Kind) =>
   `${wt(head)}${link(`${wt('see ')}${wt(' here')}`)}${afterLink(kind)}${wt(' tail')}`;
 
@@ -319,7 +325,7 @@ const cells = (kinds: Kind[]): Cell[] =>
 
 const KEPT = 'keeps its paragraph as opened';
 const DROPPED = 'is written without the tracked change';
-const keepsSource = (path: Path, kind: Kind) => path !== 'TypeScript loader' && !kind.comments;
+const keepsSource = (path: Path, kind: Kind) => path !== SEEDS_IN_TYPESCRIPT && !kind.comments;
 
 const elsewhereCells = (kinds: Kind[]) =>
   cells(kinds).map(
@@ -331,44 +337,61 @@ const source = (kind: Kind, change: Change) =>
   firstParagraph(
     `${link(`${t('see ')}${tracked(change.tag, change.id, kind.content(change.deleted))}${t(' here')}`)}${afterLink(kind)}`
   );
+const withoutChange = (kind: Kind) => firstParagraph(`${link(`${t('see ')}${t(' here')}`)}${afterLink(kind)}`);
 
 const packageOf = (kind: Kind, paragraph: string) =>
-  docx(`${paragraph}${OTHER}`, { notes: kind.notes, comments: kind.comments });
+  docx(`${paragraph}${OTHER}`, { notes: kind.notes, comments: kind.comments, media: kind.media });
 
 function describeInsideLink(title: string, kinds: Kind[]): void {
   describe(title, () => {
     it.each(cells(kinds))('%s inside a hyperlink, opened by the %s, is not loaded', async (_name, path, kind, change) => {
-      const opened = await open(path, packageOf(kind, source(kind, change)));
-      expect(opened.revisions()).toEqual([]);
-      expect(texts(opened)).toEqual([`${HEAD}see  here tail`, 'Other']);
+      let unchanged: string[] = [];
+      await opened(path, packageOf(kind, withoutChange(kind)), (control) => {
+        unchanged = embeds(control);
+      });
+      await opened(path, packageOf(kind, source(kind, change)), (session) => {
+        expect([session.revisions(), texts(session), embeds(session)]).toEqual([
+          [],
+          [`${HEAD}see  here tail`, 'Other'],
+          unchanged,
+        ]);
+      });
     });
 
     it.each(elsewhereCells(kinds))(
       '%s inside a hyperlink, opened by the %s, %s after an edit in another paragraph',
       async (_name, path, _outcome, kind, change) => {
         const paragraph = source(kind, change);
-        const opened = await open(path, packageOf(kind, paragraph));
-        typedAt(opened, 1, 0);
-        for (const [save, saved] of await opened.saves()) {
-          const xml = documentXml(saved);
-          if (opened.rewrites) expect([save, savedFirstInner(xml)]).toEqual([save, rewritten(HEAD, kind)]);
-          else
-            expect([save, savedFirst(xml)]).toEqual([
-              save,
-              keepsSource(path, kind) ? paragraph : `${FIRST}${rewritten(HEAD, kind)}</w:p>`,
-            ]);
-        }
+        await opened(path, packageOf(kind, paragraph), async (session) => {
+          typedAt(session, 1, 0);
+          for (const [save, saved] of await session.saves()) {
+            const xml = documentXml(saved);
+            const first = session.rewrites ? rewrittenFirst(xml) : savedFirst(xml);
+            const want = session.rewrites
+              ? [PARA_ID, rewritten(HEAD, kind)]
+              : keepsSource(path, kind)
+                ? paragraph
+                : `${FIRST}${rewritten(HEAD, kind)}</w:p>`;
+            expect([save, first, otherTexts(xml)]).toEqual([save, want, ['XOther']]);
+          }
+        });
       }
     );
 
     it.each(cells(kinds))(
       '%s inside a hyperlink, opened by the %s, is written without the tracked change after an edit in that paragraph',
       async (_name, path, kind, change) => {
-        const opened = await open(path, packageOf(kind, source(kind, change)));
-        typedAt(opened, 0, 2);
-        for (const [save, saved] of await opened.saves()) {
-          expect([save, savedFirstInner(documentXml(saved))]).toEqual([save, rewritten('HeXad ', kind)]);
-        }
+        await opened(path, packageOf(kind, source(kind, change)), async (session) => {
+          typedAt(session, 0, 2);
+          for (const [save, saved] of await session.saves()) {
+            const xml = documentXml(saved);
+            expect([save, rewrittenFirst(xml), otherTexts(xml)]).toEqual([
+              save,
+              [PARA_ID, rewritten('HeXad ', kind)],
+              ['Other'],
+            ]);
+          }
+        });
       }
     );
   });
@@ -379,77 +402,96 @@ describeInsideLink('a tracked change inside a hyperlink that holds more than tex
 describeInsideLink('a tracked change inside a hyperlink that holds text and a footnote reference', [MIXED]);
 
 describe('two adjacent untracked hyperlinks to the same address', () => {
-  const TOOLTIPS = `<Relationship Id="rIdLink2" Type="${R}/hyperlink" Target="https://example.com/" TargetMode="External"/>`;
-  const inner = `${link(t('first'), 'r:id="rIdLink" w:tooltip="First"')}${link(t('second'), 'r:id="rIdLink2" w:tooltip="Second"')}`;
-  const HYPERLINK = /<w:hyperlink\b((?:[^>/]|\/(?!>))*)>([\s\S]*?)<\/w:hyperlink>/g;
-  const attribute = (attributes: string, name: string) => attributes.match(new RegExp(`${name}="([^"]*)"`))?.[1];
-  const linked = (xml: string) =>
-    [...body(xml).matchAll(HYPERLINK)].map(([, attributes, content]) => [
-      attribute(attributes!, 'r:id'),
-      attribute(attributes!, 'w:tooltip'),
-      [...content!.matchAll(/<w:t\b[^>]*>([^<]*)<\/w:t>/g)].map(([, text]) => text).join(''),
+  const SECOND_LINK = `<Relationship Id="rIdLink2" Type="${R}/hyperlink" Target="${TARGET}" TargetMode="External"/>`;
+  const FIRST_LINK = 'r:id="rIdLink" w:tooltip="First"';
+  const inner = `${link(t('first'), FIRST_LINK)}${link(t('second'), 'r:id="rIdLink2" w:tooltip="Second"')}`;
+  const targets = (bytes: Uint8Array, xml: string) => {
+    const rels = partXml(bytes, 'word/_rels/document.xml.rels');
+    return [...body(xml).matchAll(/<w:hyperlink\b[^>]*\br:id="([^"]*)"/g)].map(([, id]) => [
+      id,
+      new RegExp(`<Relationship\\b(?=[^>]*\\bId="${id}")[^>]*\\bTarget="([^"]*)"`).exec(rels)?.[1],
     ]);
+  };
 
-  const TWO = [
-    ['rIdLink', 'First', 'first'],
-    ['rIdLink2', 'Second', 'second'],
-  ];
-  const ONE = [['rIdLink', 'First', 'firstsecond']];
-  const WRITTEN: Array<[Path, string, string[][]]> = [
-    ['Rust loader', 'two links', TWO],
-    ['TypeScript loader', 'one link under the first link', ONE],
-    ['worker engine', 'two links', TWO],
+  const TWO = `${wt('HeXad ')}${link(wt('first'), FIRST_LINK)}${link(wt('second'), 'r:id="rIdLink2" w:tooltip="Second"')}${wt(' tail')}`;
+  const ONE = `${wt('HeXad ')}${link(`${wt('first')}${wt('second')}`, FIRST_LINK)}${wt(' tail')}`;
+  const WRITTEN: Array<[Path, string, string, string[][]]> = [
+    ['path that seeds in Rust', 'two links', TWO, [['rIdLink', TARGET], ['rIdLink2', TARGET]]],
+    [SEEDS_IN_TYPESCRIPT, "one link with the first link's id and tooltip", ONE, [['rIdLink', TARGET]]],
+    ['worker engine', 'two links', TWO, [['rIdLink', TARGET], ['rIdLink2', TARGET]]],
   ];
 
-  it.each(WRITTEN)('opened by the %s, are written as %s after an edit in their paragraph', async (path, _shape, written) => {
-    const opened = await open(path, docx(`${firstParagraph(inner)}${OTHER}`, { relationships: TOOLTIPS }));
-    typedAt(opened, 0, 2);
-    for (const [save, saved] of await opened.saves()) {
-      expect([save, linked(documentXml(saved))]).toEqual([save, written]);
+  it.each(WRITTEN)(
+    'opened by the %s, are written as %s after an edit in their paragraph',
+    async (path, _shape, paragraph, links) => {
+      await opened(path, docx(`${firstParagraph(inner)}${OTHER}`, { relationships: SECOND_LINK }), async (session) => {
+        typedAt(session, 0, 2);
+        for (const [save, saved] of await session.saves()) {
+          const xml = documentXml(saved);
+          expect([save, rewrittenFirst(xml), targets(saved, xml)]).toEqual([save, [PARA_ID, paragraph], links]);
+        }
+      });
     }
-  });
+  );
 });
 
 describe('a deleted page break that ends a hyperlink and its paragraph', () => {
   const DELETED_BREAK = tracked('del', '12', '<w:r><w:br w:type="page"/></w:r>');
   const paragraph = `${FIRST}${t(HEAD)}${link(`${t('see ')}${DELETED_BREAK}`)}</w:p>`;
+  const control = `${FIRST}${t(HEAD)}${link(t('see '))}</w:p>`;
   const BREAKS = /<w:br\b|<w:pageBreakBefore\b/g;
-  /** What the save writes after the first paragraph: the count of paragraphs and of breaks of any kind. */
-  const afterFirst = (xml: string) => {
-    const rest = body(xml).slice(body(xml).indexOf(savedFirst(xml)) + savedFirst(xml).length);
-    return [rest.match(/<w:p\b/g)?.length ?? 0, rest.match(BREAKS)?.length ?? 0];
-  };
+  const afterFirst = (xml: string) => [
+    otherTexts(xml),
+    bodyParagraphs(xml)
+      .slice(1)
+      .join('')
+      .match(BREAKS)?.length ?? 0,
+  ];
   const byPath = PATHS.map((path) => [path] as [Path]);
   const elsewhere = PATHS.map(
-    (path) => [path, path === 'TypeScript loader' ? 'is written without the break' : 'keeps its paragraph as opened'] as [Path, string]
+    (path) =>
+      [path, path === SEEDS_IN_TYPESCRIPT ? 'is written without the break' : 'keeps its paragraph as opened'] as [
+        Path,
+        string,
+      ]
   );
 
   it.each(byPath)('opened by the %s, is not loaded', async (path) => {
-    const opened = await open(path, docx(`${paragraph}${OTHER}`));
-    expect(opened.revisions()).toEqual([]);
-    expect(texts(opened)).toEqual([`${HEAD}see `, 'Other']);
+    let unchanged: string[] = [];
+    await opened(path, docx(`${control}${OTHER}`), (session) => {
+      unchanged = embeds(session);
+    });
+    await opened(path, docx(`${paragraph}${OTHER}`), (session) => {
+      expect([session.revisions(), texts(session), embeds(session)]).toEqual([[], [`${HEAD}see `, 'Other'], unchanged]);
+    });
   });
 
   it.each(elsewhere)('opened by the %s, %s after an edit in another paragraph', async (path) => {
-    const opened = await open(path, docx(`${paragraph}${OTHER}`));
-    typedAt(opened, 1, 0);
-    for (const [save, saved] of await opened.saves()) {
-      const xml = documentXml(saved);
-      const first = opened.rewrites ? savedFirstInner(xml) : savedFirst(xml);
-      expect([save, first, afterFirst(xml)]).toEqual([
-        save,
-        opened.rewrites ? `${wt(HEAD)}${link(wt('see '))}` : paragraph,
-        [1, 0],
-      ]);
-    }
+    await opened(path, docx(`${paragraph}${OTHER}`), async (session) => {
+      typedAt(session, 1, 0);
+      for (const [save, saved] of await session.saves()) {
+        const xml = documentXml(saved);
+        const first = session.rewrites ? rewrittenFirst(xml) : savedFirst(xml);
+        expect([save, first, afterFirst(xml)]).toEqual([
+          save,
+          session.rewrites ? [PARA_ID, `${wt(HEAD)}${link(wt('see '))}`] : paragraph,
+          [['XOther'], 0],
+        ]);
+      }
+    });
   });
 
   it.each(byPath)('opened by the %s, is written without the break after an edit in that paragraph', async (path) => {
-    const opened = await open(path, docx(`${paragraph}${OTHER}`));
-    typedAt(opened, 0, 2);
-    for (const [save, saved] of await opened.saves()) {
-      const xml = documentXml(saved);
-      expect([save, savedFirstInner(xml), afterFirst(xml)]).toEqual([save, `${wt('HeXad ')}${link(wt('see '))}`, [1, 0]]);
-    }
+    await opened(path, docx(`${paragraph}${OTHER}`), async (session) => {
+      typedAt(session, 0, 2);
+      for (const [save, saved] of await session.saves()) {
+        const xml = documentXml(saved);
+        expect([save, rewrittenFirst(xml), afterFirst(xml)]).toEqual([
+          save,
+          [PARA_ID, `${wt('HeXad ')}${link(wt('see '))}`],
+          [['Other'], 0],
+        ]);
+      }
+    });
   });
 });
