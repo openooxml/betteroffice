@@ -2738,7 +2738,9 @@ impl Workbook {
         }
         let ops = move_range_ops(&self.model, sheet, source, target)?;
         self.carry_moved_answers(sheet, source, target, &ops);
-        self.apply_carried_ops(ops, options)
+        let result = self.apply_carried_ops(ops, options)?;
+        self.conditional_cells_moved();
+        Ok(result)
     }
 
     /// a move writes the cells it changes as plain values and formulas, and
@@ -3046,7 +3048,7 @@ impl Workbook {
         let rebased = self.rebased_proposals(&ops);
         self.apply_model_history(|undo, model| undo.undo(model))?;
         self.rebase_answers(&names_before, &ops);
-        self.bump_model_epoch();
+        self.bump_model_epoch_after(&ops);
         self.queue_geometry_delta(delta);
         self.edited_since_open = true;
         self.update_sheet_info_cache(&ops, &prior_styles);
@@ -3110,7 +3112,7 @@ impl Workbook {
         let rebased = self.rebased_proposals(&ops);
         self.apply_model_history(|undo, model| undo.redo(model))?;
         self.rebase_answers(&names_before, &ops);
-        self.bump_model_epoch();
+        self.bump_model_epoch_after(&ops);
         self.queue_geometry_delta(delta);
         self.edited_since_open = true;
         self.update_sheet_info_cache(&ops, &prior_styles);
@@ -3523,8 +3525,10 @@ impl Workbook {
     }
 
     /// [`Self::display_list_for`] for a frame on screen: conditional formats
-    /// spend one frame's budget, and the cells it leaves undecided paint
-    /// without them and count in `conditional_pending` until a later frame.
+    /// spend one frame's budget, and the cells it leaves undecided count in
+    /// `conditional_pending` until a later frame. Until then such a cell paints
+    /// its result from before the last change when that change kept cells and
+    /// rules in place, and no conditional format otherwise.
     pub fn display_list_frame_for(
         &self,
         sheet: SheetId,
@@ -4338,7 +4342,7 @@ impl Workbook {
             };
             let transaction = Transaction::new(ops.to_vec(), Provenance::User);
             self.apply_model_history(|undo, model| undo.commit(model, &transaction))?;
-            self.bump_model_epoch();
+            self.bump_model_epoch_after(ops);
             self.queue_geometry_delta(delta);
             self.update_sheet_info_cache(ops, &prior_styles);
             update
@@ -4563,7 +4567,7 @@ impl Workbook {
     ) -> CalculationResult {
         match scope {
             CalculationScope::Kept => {
-                self.bump_model_epoch();
+                self.bump_model_epoch_after(&[]);
                 self.last_calculation.changed.clear();
                 CalculationResult::default()
             }
@@ -4581,7 +4585,7 @@ impl Workbook {
         rewritten: &[(SheetId, CellRef)],
         options: CalculationOptions,
     ) -> CalculationResult {
-        self.bump_model_epoch();
+        self.bump_model_epoch_after(&[]);
         let graph = self.graph.as_mut().expect("graph initialized");
         let seeds = graph.rename_sheets(&self.model, rewritten);
         let (result, recomputed) = recalc_after_with_recomputed(
@@ -4625,7 +4629,7 @@ impl Workbook {
         let keep = self.graph_current();
         #[cfg(test)]
         let fresh = keep.then(|| self.fresh_full_recalculation(options));
-        self.bump_model_epoch();
+        self.bump_model_epoch_after(&[]);
         self.recalculated_since_open = true;
         self.calculations_since_open = self.calculations_since_open.saturating_add(1);
         self.count_graph_reuse(keep);
@@ -5343,9 +5347,29 @@ impl StagedApply {
 
 impl Workbook {
     /// Model writes funnel through here, `commit_*` or `rebuild_and_recalculate`;
-    /// charts revalidate against their refresh value after the bump.
+    /// charts revalidate against their refresh value after the bump. Screen
+    /// frames paint no conditional result from before a write no ops explain.
     fn bump_model_epoch(&mut self) {
         self.model_epoch = self.model_epoch.wrapping_add(1);
+        self.conditional_cells_moved();
+    }
+
+    /// [`Self::bump_model_epoch`] for a write that applied `ops`, none for a
+    /// recalculation: when each keeps every cell and rule in place, screen
+    /// frames may paint a cell's conditional result from before it until the
+    /// cell is decided again.
+    fn bump_model_epoch_after(&mut self, ops: &[Op]) {
+        self.model_epoch = self.model_epoch.wrapping_add(1);
+        if !ops.iter().all(keeps_cells) {
+            self.conditional_cells_moved();
+        }
+    }
+
+    fn conditional_cells_moved(&mut self) {
+        self.conditional_cache
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .cells_moved();
     }
 
     /// The one way a model becomes this workbook's own. Per-op commit paths
@@ -5360,6 +5384,32 @@ impl Workbook {
         self.model = model;
         Ok(())
     }
+}
+
+/// Whether `op` leaves every cell at its address and every conditional-format
+/// rule as it was, so a cell's earlier conditional result still answers it.
+fn keeps_cells(op: &Op) -> bool {
+    matches!(
+        op,
+        Op::SetCell { .. }
+            | Op::PatchRangeStyle { .. }
+            | Op::SetRangeNumberFormat { .. }
+            | Op::ApplyRangeFormat { .. }
+            | Op::RestoreColStyles { .. }
+            | Op::RestoreRowStyles { .. }
+            | Op::SetColWidth { .. }
+            | Op::SetColVisibility { .. }
+            | Op::SetColsVisibility { .. }
+            | Op::RestoreColDimension { .. }
+            | Op::SetRowHeight { .. }
+            | Op::SetRowVisibility { .. }
+            | Op::SetRowsVisibility { .. }
+            | Op::RestoreRowDimension { .. }
+            | Op::SetFreezePane { .. }
+            | Op::SetHyperlinks { .. }
+            | Op::SetHyperlink { .. }
+            | Op::RemoveHyperlink { .. }
+    )
 }
 
 /// Everything a single sheet must satisfy on its own. A batch of ops passes

@@ -78,7 +78,8 @@ impl<F: Fn() -> f64> FrameClock for F {
 #[derive(Clone, Copy)]
 pub(crate) enum Budget<'c> {
     /// One frame's budget, ended early once the clock passes the frame's
-    /// time; later frames decide the rest.
+    /// time; a cell it leaves undecided paints its result from the epoch
+    /// before when it has one, and later frames decide the rest.
     Frame(Option<&'c dyn FrameClock>),
     /// Every visible cell, for output no later frame replaces.
     Complete,
@@ -111,13 +112,18 @@ pub struct ConditionalStats {
     pub epoch: u64,
 }
 
-/// Each sheet's rules, aggregates and decided cells for one model epoch, and
-/// shifted formulas parsed in any.
+/// Each sheet's rules, aggregates and decided cells for one model epoch, the
+/// decided cells of the epoch before, and shifted formulas parsed in any.
 pub(crate) struct Cache {
     epoch: Option<u64>,
     rules: HashMap<SheetId, Arc<[Rule]>>,
     aggregates: HashMap<(SheetId, usize), Arc<Aggregate>>,
     results: HashMap<(SheetId, u32, u32), Option<Arc<DifferentialFormat>>>,
+    /// The epoch before's results of the cells not yet decided in this one.
+    previous: HashMap<(SheetId, u32, u32), Option<Arc<DifferentialFormat>>>,
+    /// Whether a change since the epoch may have moved a cell or changed a
+    /// rule, so that no result of the epoch belongs to the next.
+    moved: bool,
     parsed: HashMap<String, Option<Arc<Expr>>>,
     budget: u64,
     stats: ConditionalStats,
@@ -130,6 +136,8 @@ impl Default for Cache {
             rules: HashMap::new(),
             aggregates: HashMap::new(),
             results: HashMap::new(),
+            previous: HashMap::new(),
+            moved: false,
             parsed: HashMap::new(),
             budget: CONDITIONAL_FRAME_BUDGET,
             stats: ConditionalStats::default(),
@@ -221,9 +229,16 @@ impl Cache {
     pub(crate) fn stats(&self) -> ConditionalStats {
         ConditionalStats {
             cached_cells: self.results.len(),
+            previous_cells: self.previous.len(),
             epoch: self.epoch.unwrap_or_default(),
             ..self.stats
         }
+    }
+
+    /// Marks the change that ends the epoch as one that may move cells or
+    /// change rules.
+    pub(crate) fn cells_moved(&mut self) {
+        self.moved = true;
     }
 
     /// The effects on the cells of `sheet` in the `rows` by `cols` runs, and
@@ -243,7 +258,12 @@ impl Cache {
             self.epoch = Some(epoch);
             self.rules.clear();
             self.aggregates.clear();
-            self.results.clear();
+            if std::mem::take(&mut self.moved) {
+                self.previous.clear();
+                self.results.clear();
+            } else {
+                self.previous = std::mem::take(&mut self.results);
+            }
         }
         if !self.rules.contains_key(&sheet) {
             let built: Arc<[Rule]> = rules(model, sheet).into();
@@ -299,43 +319,46 @@ impl Cache {
                 if !candidates.iter().any(|&index| rules[index].covers(at)) {
                     continue;
                 }
-                let result = match self.results.get(&(sheet, row, col)).cloned() {
+                let key = (sheet, row, col);
+                let result = match self.results.get(&key).cloned() {
                     Some(result) => {
                         self.stats.hits += 1;
                         result
                     }
-                    None if stopped || spent >= limit => {
-                        pending += 1;
-                        continue;
-                    }
                     None => {
-                        if let Some(clock) = clock
+                        if !stopped
+                            && spent < limit
+                            && let Some(clock) = clock
                             && (decided.is_multiple_of(CLOCK_STRIDE)
                                 || spent >= checked + CLOCK_UNITS)
                         {
                             let now = clock.now_ms();
                             checked = spent;
-                            if now >= *deadline.get_or_insert(now + CONDITIONAL_FRAME_MS) {
-                                stopped = true;
-                                pending += 1;
-                                continue;
+                            stopped = now >= *deadline.get_or_insert(now + CONDITIONAL_FRAME_MS);
+                        }
+                        if stopped || spent >= limit {
+                            pending += 1;
+                            match self.previous.get(&key) {
+                                Some(result) => result.clone(),
+                                None => continue,
                             }
+                        } else {
+                            decided += 1;
+                            self.stats.evaluated_cells += 1;
+                            let result = self.decide(
+                                model,
+                                sheet,
+                                &rules,
+                                &candidates,
+                                at,
+                                &mut context,
+                                &mut spent,
+                            );
+                            if caching {
+                                caching = self.keep(sheet, at, result.clone(), rows, cols);
+                            }
+                            result
                         }
-                        decided += 1;
-                        self.stats.evaluated_cells += 1;
-                        let result = self.decide(
-                            model,
-                            sheet,
-                            &rules,
-                            &candidates,
-                            at,
-                            &mut context,
-                            &mut spent,
-                        );
-                        if caching {
-                            caching = self.keep(sheet, at, result.clone(), rows, cols);
-                        }
-                        result
                     }
                 };
                 if let Some(format) = result {
@@ -348,8 +371,9 @@ impl Cache {
         (formats, pending)
     }
 
-    /// Holds a decided cell, first dropping the cells outside the frame when
-    /// full; false when the frame alone fills the cap.
+    /// Holds a decided cell in place of its result from the epoch before,
+    /// first dropping the cells outside the frame when full; false when the
+    /// frame alone fills the cap.
     fn keep(
         &mut self,
         sheet: SheetId,
@@ -366,7 +390,9 @@ impl Cache {
                 return false;
             }
         }
-        self.results.insert((sheet, at.row, at.col), result);
+        let key = (sheet, at.row, at.col);
+        self.previous.remove(&key);
+        self.results.insert(key, result);
         true
     }
 

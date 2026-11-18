@@ -196,7 +196,8 @@ impl Workbook {
         ops: &[Op],
     ) -> Result<()> {
         let mut delta = self.geometry_delta(ops);
-        if self.is_collaborative() {
+        let collaborative = self.is_collaborative();
+        if collaborative {
             delta.full = true;
         }
         let old = &self.model.styles;
@@ -213,7 +214,11 @@ impl Workbook {
                 .iter()
                 .zip(&model.sheets)
                 .any(|(old, new)| old.format != new.format);
-        self.bump_model_epoch();
+        if collaborative {
+            self.bump_model_epoch();
+        } else {
+            self.bump_model_epoch_after(ops);
+        }
         self.model = model;
         self.invalidate_sheet_info();
         self.queue_geometry_delta(delta);
