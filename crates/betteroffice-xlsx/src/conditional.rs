@@ -995,9 +995,25 @@ fn aggregates_absolute(expr: &Expr) -> bool {
     let name = upper.strip_prefix("_XLFN.").unwrap_or(&upper);
     AGGREGATES.contains(&name)
         && args.iter().any(is_reference)
-        && args.iter().all(|arg| {
-            is_reference(arg) || matches!(arg, Expr::Number(_) | Expr::Text(_) | Expr::Bool(_))
+        && args.iter().enumerate().all(|(index, arg)| match arg {
+            Expr::Range { .. } | Expr::ColumnRange { .. } | Expr::RowRange { .. } => {
+                reads_a_range(name, index)
+            }
+            Expr::Ref { .. } | Expr::Number(_) | Expr::Text(_) | Expr::Bool(_) => true,
+            _ => false,
         })
+}
+
+/// Whether `name` reads its argument at `index` as a range rather than as
+/// one value, which a multi-cell reference would give per cell.
+fn reads_a_range(name: &str, index: usize) -> bool {
+    match name {
+        "LARGE" | "SMALL" => index == 0,
+        "COUNTIF" | "SUMIF" | "AVERAGEIF" => index != 1,
+        "COUNTIFS" => index % 2 == 0,
+        "SUMIFS" | "AVERAGEIFS" | "MAXIFS" | "MINIFS" => index == 0 || index % 2 == 1,
+        _ => true,
+    }
 }
 
 /// `expr` with its relative references moved `down` rows and `right` columns,
