@@ -206,6 +206,9 @@ pub struct EvalContext<'a> {
     pub(crate) spill_index: Option<&'a DepGraph>,
     /// recalc-wide parse memo; `None` for one-off `evaluate` calls.
     pub(crate) parse_cache: Option<&'a ParseCache>,
+    /// defined-name definitions parsed while `parse_cache` is `None`, keyed
+    /// by their text and shared with every context derived from this one.
+    parsed_definitions: Rc<RefCell<HashMap<String, Arc<Expr>>>>,
     /// a graph whose names match the provider's, looked up instead of
     /// scanning them; `None` reads names through the provider.
     pub(crate) name_index: Option<&'a DepGraph>,
@@ -284,6 +287,7 @@ impl<'a> EvalContext<'a> {
                 .unwrap_or_default(),
             criteria_cache: Rc::new(RefCell::new(CriteriaCache::default())),
             parse_cache: None,
+            parsed_definitions: Rc::new(RefCell::new(HashMap::new())),
             name_index: None,
             spill_index: None,
             held_cells: None,
@@ -331,6 +335,7 @@ impl<'a> EvalContext<'a> {
                 .unwrap_or_default(),
             criteria_cache: Rc::new(RefCell::new(CriteriaCache::default())),
             parse_cache: None,
+            parsed_definitions: Rc::new(RefCell::new(HashMap::new())),
             name_index: None,
             spill_index: None,
             held_cells: None,
@@ -368,6 +373,7 @@ impl<'a> EvalContext<'a> {
             criteria_cache: Rc::clone(&budget.criteria_cache),
             shared_budget: Some(budget),
             parse_cache: None,
+            parsed_definitions: Rc::new(RefCell::new(HashMap::new())),
             name_index: None,
             spill_index: None,
             held_cells: None,
@@ -399,6 +405,7 @@ impl<'a> EvalContext<'a> {
             currency_coercion: self.currency_coercion.clone(),
             criteria_cache: Rc::clone(&self.criteria_cache),
             parse_cache: self.parse_cache,
+            parsed_definitions: Rc::clone(&self.parsed_definitions),
             name_index: self.name_index,
             spill_index: self.spill_index,
             held_cells: self.held_cells,
@@ -725,6 +732,19 @@ impl<'a> EvalContext<'a> {
         self.defined_name_stack.borrow_mut().pop();
         value
     }
+
+    /// a definition parsed once per context however often its name is read.
+    /// a failed parse is not kept, so each read records its gap again.
+    fn parsed_definition(&self, formula: &str) -> Option<Arc<Expr>> {
+        if let Some(expression) = self.parsed_definitions.borrow().get(formula) {
+            return Some(Arc::clone(expression));
+        }
+        let expression = parse_definition(formula)?;
+        self.parsed_definitions
+            .borrow_mut()
+            .insert(formula.to_owned(), Arc::clone(&expression));
+        Some(expression)
+    }
 }
 
 /// one stream per unseeded context, so sibling cells draw different values and
@@ -995,7 +1015,7 @@ fn bind_defined_name(
         .unwrap_or(&defined.formula);
     let expression = match ctx.parse_cache {
         Some(cache) => parse_cached(cache, formula),
-        None => parse_definition(formula),
+        None => ctx.parsed_definition(formula),
     }
     .ok_or_else(|| {
         if mentions_workbook_index(formula) {
