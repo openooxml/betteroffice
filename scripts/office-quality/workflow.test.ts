@@ -64,7 +64,7 @@ test('only the reconciler publishes reports and renders after every format succe
     step.uses?.startsWith('oven-sh/setup-bun@')
   );
   const readme = publish.steps.findIndex(
-    (step: any) => step.name === 'Replace the generated README section'
+    (step: any) => step.name === PUBLIC_WRITER
   );
   expect(merge).toBeGreaterThan(-1);
   expect(runtime).toBeGreaterThan(merge);
@@ -215,6 +215,10 @@ const CORPUS_FREE = new Set(['build-native.mjs', 'build-format.mjs', 'build-roun
   'install-libreoffice.sh', 'fetch-libreoffice.sh', 'asset-cache.mjs', 'publish-renders.mjs', 'private-store.mjs', 'shards.mjs', 'readme.mjs']);
 const BINARY_ARTIFACTS = /^(docx-native-\$\{\{ matrix\.channel \}\}|docx-native-fonts|xlsx-native-\$\{\{ matrix\.channel \}\}|pptx-native-\$\{\{ matrix\.channel \}\}|roundtrip-native-\$\{\{ matrix\.format \}\}-\$\{\{ matrix\.channel \}\})$/;
 const README = "${{ (!inputs.private_corpus && !inputs.report_only && inputs.corpus_origin == '' && inputs.samples == '' && inputs.collection == 'office-quality') || (inputs.private_corpus && inputs.publish_readme && !inputs.report_only) }}";
+const PUBLIC_README = "${{ !inputs.private_corpus && !inputs.report_only && inputs.corpus_origin == '' && inputs.samples == '' && inputs.collection == 'office-quality' }}";
+const LARGE_README = '${{ inputs.private_corpus && inputs.publish_readme && !inputs.report_only }}';
+const PUBLIC_WRITER = 'Replace the generated public README block';
+const LARGE_WRITER = 'Replace the generated large set README block';
 const PRIVATE_OFF = /(^|&& |^\$\{\{ )!inputs\.private_corpus( &&|$| \}\}$)/;
 
 test('private corpus runs are an explicit input that refuses sample lists and render publishing', () => {
@@ -265,7 +269,9 @@ test('private runs upload no per-document artifact and touch no asset cache, ren
         ['oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6'].includes(uses) && job === 'publish' ||
         false)
       expect({ job, name: step.name ?? uses, if: step.if }).toEqual({ job, name: step.name ?? uses, if: expect.stringMatching(PRIVATE_OFF) });
-    if (['Replace the generated README section', 'Detect a changed report'].includes(step.name)) expect(step.if).toBe(README);
+    if (step.name === 'Detect a changed report') expect(step.if).toBe(README);
+    if (step.name === PUBLIC_WRITER) expect(step.if).toBe(PUBLIC_README);
+    if (step.name === LARGE_WRITER) expect(step.if).toBe(LARGE_README);
     const cache = step.env?.QUALITY_ASSET_CACHE;
     if (cache !== undefined) expect(cache).toStartWith('${{ !inputs.private_corpus && ');
   }
@@ -418,29 +424,35 @@ test('only a default showcase run commits the README; report-only runs publish n
   expect(guard.if).toBe('inputs.report_only && inputs.publish_renders');
   expect(guard.run).toContain('exit 1');
   expect(prepare.steps.indexOf(guard)).toBeLessThan(prepare.steps.findIndex((step: any) => step.id === 'plan'));
-  const readme = publish.steps.filter((step: any) => ['Replace the generated README section', 'Detect a changed report'].includes(step.name));
-  expect(readme.map((step: any) => step.if)).toEqual([README, README]);
+  const readme = publish.steps.filter((step: any) => [PUBLIC_WRITER, LARGE_WRITER, 'Detect a changed report'].includes(step.name));
+  expect(readme.map((step: any) => step.if)).toEqual([PUBLIC_README, LARGE_README, README]);
   for (const step of publish.steps.filter((step: any) => /README|bot token/.test(step.name ?? '') && !readme.includes(step)))
     expect(step.if).toBe("steps.changed.outputs.value == 'true'");
 });
 
-test('the README step writes only the block of its own run kind through readme.mjs', () => {
-  const step = publish.steps.find((step: any) => step.name === 'Replace the generated README section');
-  expect(step.if).toBe(README);
-  expect(step.env).toEqual({ QUALITY_PRIVATE: '${{ inputs.private_corpus }}' });
-  const run = String(step.run).trim();
-  expect(run).toStartWith('node .workflow-tools/scripts/office-quality/readme.mjs --section "$RUNNER_TEMP/fidelity-report/section.md" ');
-  expect(run).toContain(' --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" ');
-  expect(run).toContain(' --date ');
-  expect(run).toEndWith(' README.md');
-  expect(step.run).not.toContain('GENERATED');
+test('a public run writes the public block from section.md and a private run the large set block from aggregate.json, both dated by prepare', () => {
+  const runUrl = '--run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"';
+  const date = '--date "${{ needs.prepare.outputs.run-date }}"';
+  const writers = steps.filter(({ step }) => String(step.run ?? '').includes('readme.mjs'))
+    .map(({ job, step }) => ({ job, name: step.name, if: step.if, run: String(step.run).trim() }));
+  expect(writers).toEqual([
+    { job: 'publish', name: PUBLIC_WRITER, if: PUBLIC_README,
+      run: `node .workflow-tools/scripts/office-quality/readme.mjs --section "$RUNNER_TEMP/fidelity-report/section.md" ${runUrl} ${date} README.md` },
+    { job: 'publish', name: LARGE_WRITER, if: LARGE_README,
+      run: `node .workflow-tools/scripts/office-quality/readme.mjs --as large "$RUNNER_TEMP/fidelity-report/aggregate.json" ${runUrl} ${date} README.md` },
+  ]);
+  expect(README).toBe(`\${{ (${PUBLIC_README.slice(4, -3)}) || (${LARGE_README.slice(4, -3)}) }}`);
+  expect(publish.needs).toContain('prepare');
+  expect(prepare.outputs['run-date']).toBe('${{ steps.run-date.outputs.date }}');
+  expect(String(prepare.steps.find((step: any) => step.id === 'run-date')?.run ?? '').trim()).toBe('echo "date=$(date -u +%F)" >> "$GITHUB_OUTPUT"');
 });
 
 test('the README writer runs from the workflow revision, not the measured branch', () => {
   const [branch] = publish.steps.filter((step: any) => step.uses?.startsWith('actions/checkout@'));
   const tools = publish.steps.filter((step: any) => step.uses?.startsWith('actions/checkout@') && step.with?.ref === '${{ github.workflow_sha }}');
-  expect(tools.map((step: any) => ({ uses: step.uses, with: step.with }))).toEqual([{
+  expect(tools.map((step: any) => ({ uses: step.uses, if: step.if, with: step.with }))).toEqual([{
     uses: branch.uses,
+    if: README,
     with: expect.objectContaining({
       ref: '${{ github.workflow_sha }}',
       path: '.workflow-tools',
@@ -448,13 +460,16 @@ test('the README writer runs from the workflow revision, not the measured branch
       'persist-credentials': false,
     }),
   }]);
-  const writer = publish.steps.find((step: any) => step.name === 'Replace the generated README section');
-  expect(publish.steps.indexOf(tools[0])).toBeLessThan(publish.steps.indexOf(writer));
-  expect(String(writer.run).trim()).toStartWith('node .workflow-tools/scripts/office-quality/readme.mjs ');
-  expect(String(writer.run).split('.workflow-tools').length).toBe(2);
+  const writers = publish.steps.filter((step: any) => [PUBLIC_WRITER, LARGE_WRITER].includes(step.name));
+  expect(writers.map((step: any) => step.name)).toEqual([PUBLIC_WRITER, LARGE_WRITER]);
+  for (const writer of writers) {
+    expect(publish.steps.indexOf(tools[0])).toBeLessThan(publish.steps.indexOf(writer));
+    expect(String(writer.run).trim()).toStartWith('node .workflow-tools/scripts/office-quality/readme.mjs ');
+    expect(String(writer.run).split('.workflow-tools').length).toBe(2);
+  }
   const users = steps.filter(({ step }) => JSON.stringify(step).includes('.workflow-tools'))
     .map(({ job, step }) => `${job}/${step.uses?.startsWith('actions/checkout@') ? step.with?.ref : step.name}`);
-  expect(users).toEqual(['publish/${{ github.workflow_sha }}', 'publish/Replace the generated README section']);
+  expect(users).toEqual(['publish/${{ github.workflow_sha }}', `publish/${PUBLIC_WRITER}`, `publish/${LARGE_WRITER}`]);
 });
 
 test('the reconciled artifact always carries the aggregate, and the private bundle keeps it too', () => {
