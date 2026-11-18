@@ -2,7 +2,8 @@ import { layoutMetaSummary, type LayoutMetaV1 } from '../yrs/layoutMeta';
 import type { ResidentMeasurementConfig } from '../layout/measure';
 import type { Layout, LayoutOptions, MeasuredBlock } from '../layout/pagination';
 import type { DisplayListHeadersFooters } from '../layout/render/rustDisplayList';
-import type { Document, NoteKind, SectionProperties } from '../types/document';
+import { getHeaderWatermarks } from '../docx/watermarkApi';
+import type { Document, NoteKind, SectionProperties, Watermark } from '../types/document';
 import type { YrsRenderEnv, YrsSession } from '../yrs';
 import { resolvedFinalSectionProperties } from './finalSection';
 
@@ -29,6 +30,7 @@ export interface ResidentRegionLayoutRequest {
     }>;
     settings?: Document['package']['settings'];
     watermark?: SectionProperties['watermark'];
+    headerWatermarks?: Record<string, Watermark>;
   };
   notes: {
     contents: Array<{
@@ -110,6 +112,7 @@ export function buildResidentRegionLayoutRequest(
       sections: orderedSections(document),
       settings: document?.package.settings,
       watermark: resolvedFinalSectionProperties(document?.package.document)?.watermark,
+      headerWatermarks: getHeaderWatermarks(document),
     },
     notes: { contents },
     renderEnv: {

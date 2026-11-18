@@ -127,6 +127,30 @@ describe('workbook edit peers', () => {
     }
   });
 
+  test('refuses protectedSheets options on replayed writes and stays usable', async () => {
+    const peer = openWorkbook(fixture, { calculation });
+    const session = await createTestWorkbookSession(fixture, undefined, { calculation });
+    const edits = createWorkbookEditPeer({ session, peer, ...deterministicOptions() });
+    try {
+      const before = peer.cell(0, 0, 0).input;
+      const allow = { protectedSheets: 'allow' as const };
+      for (const write of [
+        () => edits.editCell(0, 0, 0, 'through', allow),
+        () => edits.editCells(0, [{ row: 0, col: 0, input: 'through' }], allow),
+        () => edits.patchRangeStyle(0, 'A1', { bold: true }, allow),
+        () => edits.setNumberFormat(0, 'A1', 'percent', allow),
+      ]) expect(write).toThrow(TypeError);
+      expect(peer.cell(0, 0, 0).input).toBe(before);
+      expect(edits.state).toBe('ready');
+      edits.editCell(0, 0, 0, 'typed');
+      await matchingDigest(1, 'editCell', edits, peer, session);
+    } finally {
+      edits.dispose();
+      peer.dispose();
+      await session.dispose();
+    }
+  });
+
   test('rebases proposals through structural edits and history on both peer and worker', async () => {
     const session = await createTestWorkbookSession(fixture, batchRequests, {
       calculation, wasm: wasmBytes.buffer, retainPeerHydration: true,
@@ -952,6 +976,9 @@ describe('workbook edit peers', () => {
         { ...envelope, sequence: 2, op: { method: 'editCell', args: [0, , 1, 'invalid'] } },
         { ...envelope, sequence: 2, op: { method: 'editCells', args: [0, [{ row: 1, col: 1, input: 4 }]] } },
         { ...envelope, sequence: 2, op: { method: 'applyEdits', args: [{ expectVersion: '', steps: [null] }] } },
+        { ...envelope, sequence: 2, op: { method: 'applyEdits', args: [{
+          ...request(peer, 'B3', 'through'), source: 'agent', protectedSheets: 'allow',
+        }] } },
         { ...envelope, sequence: 2, op: { method: 'patchRangeStyle', args: [0, 'B3', { bold: 1 }] } },
         { ...envelope, sequence: 2, op: { method: 'undo', args: [0] } },
         { ...envelope, sequence: 2, op: { method: 'applyOps', args: [[{ op: 'insertRows' }]] } },

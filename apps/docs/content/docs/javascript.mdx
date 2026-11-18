@@ -351,6 +351,30 @@ const answers = await geometry.readAnchorGeometries(cards.map((card) => card.tar
 const tops = answers.map((answer) => (answer.ok ? answer.anchor.y : null));
 ```
 
+`useDocxSelectionPlacement(context, { width, height, geometry })` places a box of
+that size above the selection, or below when there is no room, inside
+`geometry.viewport`, in overlay-layer pixels, and places it again on every render.
+`createDocxSelectionPlacement()` returns the same placer for code outside React;
+call it again whenever the selection, viewport or layout changes. The answer is
+`null` without a selection box. `hidden` means no part of the selection is
+visible, and `kept` means the box is the last one placed while the unchanged
+selection's geometry is `pending`, `stale-version` or `layout-unavailable`; any
+other failure answers `null`. `placeFloating({ anchor, size, viewport, page })`
+places a box by any rectangle the same way. A selection toolbar:
+
+```tsx
+overlay: ({ context, geometry }) => {
+  const placement = useDocxSelectionPlacement(context, { width: 160, height: 32, geometry });
+  if (!placement || placement.hidden) return null;
+  return (
+    <div style={{ position: 'absolute', left: placement.x, top: placement.y, width: placement.width,
+      height: placement.height, pointerEvents: 'auto', opacity: placement.kept ? 0.6 : 1 }}>
+      <SelectionTools />
+    </div>
+  );
+},
+```
+
 An answer that reaches pages not built yet lists them in `unbuiltPages` and is
 provisional. `geometry.getPageRect(pageIndex)` returns a page box in
 overlay-layer pixels with `built`, and `geometry.isPageBuilt(pageIndex)` says

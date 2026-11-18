@@ -2,9 +2,9 @@ use betteroffice_xlsx::{
     CalculationOptions, CapturedFormat, CellAddress, CellInput as WorkbookCellInput, CellRange,
     CellRef, EditProfile, Error, HydratedWorkbook, MutationResult, NumberFormatMutation, Op,
     PeerHydration as WorkbookPeerHydration, PrintMetrics, Proposal,
-    ProposalEditInput as WorkbookProposalEditInput, ProposalRequest, RenderOptions,
-    SelectionDirection, SheetId, SheetInfoWire as SheetInfo, SnapshotBudget, StylePatch,
-    UpdateEvent, UpdateSubscription, Viewport, Workbook, WorkbookSnapshotEncoder,
+    ProposalEditInput as WorkbookProposalEditInput, ProposalRequest, ProtectedSheets,
+    RenderOptions, SelectionDirection, SheetId, SheetInfoWire as SheetInfo, SnapshotBudget,
+    StylePatch, UpdateEvent, UpdateSubscription, Viewport, Workbook, WorkbookSnapshotEncoder,
 };
 use serde::{Deserialize, Serialize};
 
@@ -69,12 +69,16 @@ struct EditArgs {
     row: u32,
     col: u32,
     input: String,
+    #[serde(default, rename = "protectedSheets", deserialize_with = "supplied")]
+    protected_sheets: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
 struct EditBatchArgs {
     sheet: u32,
     edits: Vec<CellEditInput>,
+    #[serde(default, rename = "protectedSheets", deserialize_with = "supplied")]
+    protected_sheets: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -178,6 +182,8 @@ struct MoveChartArgs {
     chart: String,
     dx: f32,
     dy: f32,
+    #[serde(default, rename = "protectedSheets", deserialize_with = "supplied")]
+    protected_sheets: Option<serde_json::Value>,
 }
 
 /// Pixel movement of each frame edge; an omitted edge stays put.
@@ -194,6 +200,8 @@ struct ResizeChartArgs {
     right: f32,
     #[serde(default)]
     bottom: f32,
+    #[serde(default, rename = "protectedSheets", deserialize_with = "supplied")]
+    protected_sheets: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -201,6 +209,8 @@ struct StyleArgs {
     sheet: u32,
     range: String,
     patch: StylePatch,
+    #[serde(default, rename = "protectedSheets", deserialize_with = "supplied")]
+    protected_sheets: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -208,6 +218,8 @@ struct NumberFormatArgs {
     sheet: u32,
     range: String,
     format: NumberFormatMutation,
+    #[serde(default, rename = "protectedSheets", deserialize_with = "supplied")]
+    protected_sheets: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -215,6 +227,8 @@ struct ApplyFormatArgs {
     sheet: u32,
     range: String,
     format: CapturedFormat,
+    #[serde(default, rename = "protectedSheets", deserialize_with = "supplied")]
+    protected_sheets: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -666,12 +680,13 @@ impl Session {
             serde_json::from_str(args).map_err(|error| format!("bad chart move args: {error}"))?;
         let result = self
             .workbook
-            .move_chart(
+            .move_chart_with_protection(
                 SheetId(args.sheet),
                 &args.chart,
                 args.dx,
                 args.dy,
                 self.calculation_options(now_serial),
+                protected_sheets(args.protected_sheets.as_ref())?,
             )
             .map_err(|error| error.to_string())?;
         self.edit_result(result)
@@ -686,7 +701,7 @@ impl Session {
             .map_err(|error| format!("bad chart resize args: {error}"))?;
         let result = self
             .workbook
-            .resize_chart(
+            .resize_chart_with_protection(
                 SheetId(args.sheet),
                 &args.chart,
                 betteroffice_xlsx::ChartResize {
@@ -696,6 +711,7 @@ impl Session {
                     bottom: args.bottom,
                 },
                 self.calculation_options(now_serial),
+                protected_sheets(args.protected_sheets.as_ref())?,
             )
             .map_err(|error| error.to_string())?;
         self.edit_result(result)
@@ -929,11 +945,12 @@ impl Session {
             serde_json::from_str(args).map_err(|error| format!("bad edit args: {error}"))?;
         let result = self
             .workbook
-            .edit_cell(
+            .edit_cell_with_protection(
                 SheetId(args.sheet),
                 CellRef::new(args.row, args.col),
                 &args.input,
                 self.calculation_options(now_serial),
+                protected_sheets(args.protected_sheets.as_ref())?,
             )
             .map_err(|error| error.to_string())?;
         self.edit_result(result)
@@ -950,11 +967,12 @@ impl Session {
             serde_json::from_str(args).map_err(|error| format!("bad edit args: {error}"))?;
         let (result, profile) = self
             .workbook
-            .edit_cell_profiled(
+            .edit_cell_profiled_with_protection(
                 SheetId(args.sheet),
                 CellRef::new(args.row, args.col),
                 &args.input,
                 self.calculation_options(now_serial),
+                protected_sheets(args.protected_sheets.as_ref())?,
                 now,
             )
             .map_err(|error| error.to_string())?;
@@ -968,6 +986,7 @@ impl Session {
     ) -> Result<String, String> {
         let args: EditBatchArgs =
             serde_json::from_str(args).map_err(|error| format!("bad edit args: {error}"))?;
+        let protection = protected_sheets(args.protected_sheets.as_ref())?;
         let (edits, copied): (Vec<_>, Vec<_>) = args
             .edits
             .into_iter()
@@ -995,11 +1014,12 @@ impl Session {
             .unzip();
         let result = self
             .workbook
-            .edit_pasted_cells(
+            .edit_pasted_cells_with_protection(
                 SheetId(args.sheet),
                 &edits,
                 &copied,
                 self.calculation_options(now_serial),
+                protection,
             )
             .map_err(|error| error.to_string())?;
         self.edit_result(result)
@@ -1183,11 +1203,12 @@ impl Session {
         let range = parse_range(&args.range)?;
         let result = self
             .workbook
-            .patch_range_style(
+            .patch_range_style_with_protection(
                 SheetId(args.sheet),
                 range,
                 args.patch,
                 self.calculation_options(now_serial),
+                protected_sheets(args.protected_sheets.as_ref())?,
             )
             .map_err(|error| error.to_string())?;
         self.edit_result(result)
@@ -1203,11 +1224,12 @@ impl Session {
         let range = parse_range(&args.range)?;
         let result = self
             .workbook
-            .set_range_number_format(
+            .set_range_number_format_with_protection(
                 SheetId(args.sheet),
                 range,
                 args.format,
                 self.calculation_options(now_serial),
+                protected_sheets(args.protected_sheets.as_ref())?,
             )
             .map_err(|error| error.to_string())?;
         self.edit_result(result)
@@ -1241,11 +1263,12 @@ impl Session {
         let range = parse_range(&args.range)?;
         let result = self
             .workbook
-            .apply_format(
+            .apply_format_with_protection(
                 SheetId(args.sheet),
                 range,
                 args.format,
                 self.calculation_options(now_serial),
+                protected_sheets(args.protected_sheets.as_ref())?,
             )
             .map_err(|error| error.to_string())?;
         self.edit_result(result)
@@ -1556,6 +1579,24 @@ fn parse_range(range: &str) -> Result<CellRange, String> {
     CellRange::parse_a1(&range.to_ascii_uppercase()).map_err(|error| format!("bad range: {error}"))
 }
 
+/// Keeps a supplied `null` apart from an absent field, which `default` leaves `None`.
+fn supplied<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<serde_json::Value>, D::Error> {
+    serde_json::Value::deserialize(deserializer).map(Some)
+}
+
+/// A direct write's `protectedSheets` option: absent means `refuse`, and a supplied value
+/// other than the strings `refuse` and `allow` is an invalid request.
+fn protected_sheets(value: Option<&serde_json::Value>) -> Result<ProtectedSheets, String> {
+    match value {
+        None => Ok(ProtectedSheets::Refuse),
+        Some(serde_json::Value::String(value)) => ProtectedSheets::parse(value),
+        Some(_) => ProtectedSheets::parse(""),
+    }
+    .map_err(|error| error.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -1571,6 +1612,59 @@ mod tests {
 
     use super::*;
     use xlsx_model::{Cell, CellValue, Sheet, Workbook as WorkbookModel};
+
+    #[test]
+    fn protected_sheets_supplied_values_other_than_refuse_or_allow_are_invalid_requests() {
+        let mut session = Session::open(&sample_xlsx(), None).unwrap();
+        let invalid = Err("malformed request: protectedSheets must be refuse or allow".to_owned());
+        for value in [
+            "null",
+            "5",
+            "true",
+            "\"Allow\"",
+            "\"\"",
+            "{}",
+            "[\"allow\"]",
+        ] {
+            let cell = format!(
+                r#"{{"sheet":0,"row":0,"col":0,"input":"written","protectedSheets":{value}}}"#
+            );
+            let cells = format!(
+                r#"{{"sheet":0,"edits":[{{"row":0,"col":0,"input":"written"}}],"protectedSheets":{value}}}"#
+            );
+            let style = format!(
+                r#"{{"sheet":0,"range":"A1","patch":{{"bold":true}},"protectedSheets":{value}}}"#
+            );
+            let format = format!(
+                r#"{{"sheet":0,"range":"A1","format":{{"type":"percent"}},"protectedSheets":{value}}}"#
+            );
+            assert_eq!(session.edit_cell_json(&cell, None), invalid, "{cell}");
+            assert_eq!(session.edit_cells_json(&cells, None), invalid, "{cells}");
+            assert_eq!(
+                session.patch_range_style_json(&style, None),
+                invalid,
+                "{style}"
+            );
+            assert_eq!(
+                session.set_range_number_format_json(&format, None),
+                invalid,
+                "{format}"
+            );
+        }
+        let read = || -> serde_json::Value {
+            serde_json::from_str(&session.cell_json(r#"{"sheet":0,"row":0,"col":0}"#).unwrap())
+                .unwrap()
+        };
+        assert_eq!(read()["input"], "Hello");
+        for value in [
+            "",
+            r#","protectedSheets":"refuse""#,
+            r#","protectedSheets":"allow""#,
+        ] {
+            let edit = format!(r#"{{"sheet":0,"row":0,"col":0,"input":"written"{value}}}"#);
+            assert!(session.edit_cell_json(&edit, None).is_ok(), "{edit}");
+        }
+    }
 
     const VIEWPORT: &str = r#"{"x":0,"y":0,"width":300,"height":120}"#;
 

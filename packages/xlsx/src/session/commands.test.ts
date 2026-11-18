@@ -17,6 +17,7 @@ import { batchRequests, capturedWorkbookCommand, createTestWorkbookSession } fro
 
 let bytes: Uint8Array;
 let plainBytes: Uint8Array;
+let protectedBytes: Uint8Array;
 
 beforeAll(async () => {
   await wasm.initWasm(await readFile(new URL('../wasm/generated/xlsx_wasm_bg.wasm', import.meta.url)));
@@ -40,6 +41,14 @@ beforeAll(async () => {
   plain.file('xl/worksheets/sheet1.xml', '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>1</v></c><c r="B1"><f>A1*2</f><v>2</v></c></row></sheetData></worksheet>');
   plain.file('xl/worksheets/sheet2.xml', '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>');
   plainBytes = await plain.generateAsync({ type: 'uint8array' });
+  const guarded = new JSZip();
+  guarded.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>');
+  guarded.file('_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>');
+  guarded.file('xl/workbook.xml', '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Protected" sheetId="1" r:id="rId1"/></sheets></workbook>');
+  guarded.file('xl/_rels/workbook.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>');
+  guarded.file('xl/styles.xml', '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font/></fonts><fills count="1"><fill/></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf/></cellStyleXfs><cellXfs count="2"><xf/><xf applyProtection="1"><protection locked="0"/></xf></cellXfs></styleSheet>');
+  guarded.file('xl/worksheets/sheet1.xml', '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>1</v></c><c r="B1" s="1"><v>2</v></c></row><row r="2"><c r="B2" s="1"><v>4</v></c></row></sheetData><sheetProtection sheet="1"/></worksheet>');
+  protectedBytes = await guarded.generateAsync({ type: 'uint8array' });
 });
 
 function command<K extends WorkbookCommand['kind']>(
@@ -2207,6 +2216,58 @@ describe('workbook commands', () => {
         .filter((cell) => cell.input !== '').map((cell) => cell.a1)).toEqual(['A1', 'B1']);
     } finally { await refusing.dispose(); }
   });
+
+  test('fillRange refuses locked or restyled destinations on a protected sheet and fills unlocked ones', async () => {
+    const session = await createTestWorkbookSession(protectedBytes);
+    const inputs = async () => (await session.call.cellInputs(0, 'A1:C2')).cells
+      .map((row) => row.map((cell) => cell.input));
+    try {
+      const version = session.confirmedBasis.version;
+      let seq = 0;
+      for (const [source, destination, message] of [
+        ['B1', 'B1:C1', 'C1 is locked on protected sheet "Protected"'],
+        ['B1', 'B1:C2', 'C1 is locked on protected sheet "Protected"'],
+        ['A1', 'A1:B1', 'sheet "Protected" is protected'],
+      ] as const) {
+        expect(await session.submit(command(session, ++seq, 'fillRange', { args: [0, source, destination] })))
+          .toMatchObject({ status: 'refused', reason: 'locked-target', committed: false,
+            result: { failure: { code: 'locked-target', message } } });
+        expect(session.confirmedBasis.version).toBe(version);
+        expect(await inputs()).toEqual([['1', '2', ''], ['', '4', '']]);
+      }
+      expect(await session.submit(command(session, ++seq, 'fillRange', { args: [0, 'B1', 'B1:B2'] })))
+        .toMatchObject({ status: 'applied', committed: true });
+      expect(await inputs()).toEqual([['1', '2', ''], ['', '2', '']]);
+    } finally { await session.dispose(); }
+  });
+
+  for (const calculation of [undefined, { nowSerial: 46_000.5, randSeed: 123456789 }]) {
+    test(`applyEdits commands refuse a protectedSheets override ${calculation ? 'with' : 'without'} a calculation context`, async () => {
+      const session = await createTestWorkbookSession(protectedBytes, undefined, { calculation });
+      const edit = (a1: string, input: string) => ({
+        expectVersion: session.confirmedBasis.version, source: 'agent',
+        steps: [{ op: 'setCellInputs', target: { sheetId: 'sheet:0', range: { kind: 'a1', a1 } }, inputs: [[input]] }],
+      });
+      const inputs = async () => (await session.call.cellInputs(0, 'A1:B1')).cells[0].map((cell) => cell.input);
+      try {
+        const version = session.confirmedBasis.version;
+        let seq = 0;
+        for (const a1 of ['A1', 'B1']) {
+          expect(await session.submit(command(session, ++seq, 'applyEdits', {
+            args: [{ ...edit(a1, 'through'), protectedSheets: 'allow' }],
+          }))).toMatchObject({ status: 'refused', reason: 'invalid-command', committed: false });
+          expect(session.confirmedBasis.version).toBe(version);
+          expect(await inputs()).toEqual(['1', '2']);
+        }
+        expect(await session.submit(command(session, ++seq, 'applyEdits', { args: [edit('A1', 'through')] })))
+          .toMatchObject({ status: 'refused', reason: 'locked-target', committed: false });
+        expect(await inputs()).toEqual(['1', '2']);
+        expect(await session.submit(command(session, ++seq, 'applyEdits', { args: [edit('B1', 'typed')] })))
+          .toMatchObject({ status: 'applied', committed: true });
+        expect(await inputs()).toEqual(['1', 'typed']);
+      } finally { await session.dispose(); }
+    });
+  }
 
   test('moveRange rewrites dependent formulas and undoes through worker commands', async () => {
     const session = await createTestWorkbookSession(plainBytes);

@@ -289,9 +289,13 @@ class Workbook:
         value: object,
         *,
         now_serial: "float | None" = None,
+        protected_sheets: str = "refuse",
     ) -> Mutation:
-        """Set a cell from what a user would type."""
-        return self._inner.set(sheet, address, _as_input(value), now_serial=now_serial)
+        """Set a cell from what a user would type. A locked cell on a protected sheet raises
+        unless ``protected_sheets="allow"``, which keeps the protection."""
+        return self._inner.set(
+            sheet, address, _as_input(value), now_serial=now_serial, protected_sheets=protected_sheets
+        )
 
     def render_png(
         self,
@@ -431,13 +435,15 @@ class Workbook:
         edits: "Mapping[str, object] | Iterable[tuple[str, object]]",
         *,
         now_serial: "float | None" = None,
+        protected_sheets: str = "refuse",
     ) -> Mutation:
-        """Write many cells as one undo step."""
+        """Write many cells as one undo step; ``protected_sheets`` works as in :meth:`set`."""
         pairs = edits.items() if hasattr(edits, "items") else edits
         return self._inner.set_many(
             sheet,
             [(address, _as_input(value)) for address, value in pairs],
             now_serial=now_serial,
+            protected_sheets=protected_sheets,
         )
 
     def apply_ops(
@@ -738,10 +744,14 @@ class Workbook:
         format: str,
         *,
         now_serial: "float | None" = None,
+        protected_sheets: str = "refuse",
     ) -> Mutation:
         """One of automatic, text, number, percent, scientific, currency, date,
-        time, or a custom pattern such as ``#,##0.00``."""
-        return self._inner.set_number_format(sheet, range, format, now_serial=now_serial)
+        time, or a custom pattern such as ``#,##0.00``. ``protected_sheets`` works as in
+        :meth:`set`."""
+        return self._inner.set_number_format(
+            sheet, range, format, now_serial=now_serial, protected_sheets=protected_sheets
+        )
 
     def set_style(
         self,
@@ -759,8 +769,10 @@ class Workbook:
         vertical_alignment: "str | None" = None,
         text_wrapping: "str | None" = None,
         now_serial: "float | None" = None,
+        protected_sheets: str = "refuse",
     ) -> Mutation:
-        """Patch styling over a range. Omitted arguments are left as they are."""
+        """Patch styling over a range. Omitted arguments are left as they are.
+        ``protected_sheets`` works as in :meth:`set`."""
         return self._inner.set_style(
             sheet,
             range,
@@ -775,6 +787,7 @@ class Workbook:
             vertical_alignment=vertical_alignment,
             text_wrapping=text_wrapping,
             now_serial=now_serial,
+            protected_sheets=protected_sheets,
         )
 
     def __getitem__(self, key: SheetKey) -> Sheet:

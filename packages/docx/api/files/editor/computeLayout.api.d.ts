@@ -4,7 +4,7 @@ import { type LayoutMetaV1 } from '../yrs/layoutMeta';
 import type { ResidentMeasurementConfig } from '../layout/measure';
 import type { Layout, LayoutOptions, MeasuredBlock } from '../layout/pagination';
 import type { DisplayListHeadersFooters } from '../layout/render/rustDisplayList';
-import type { Document, NoteKind, SectionProperties } from '../types/document';
+import type { Document, NoteKind, SectionProperties, Watermark } from '../types/document';
 import type { YrsRenderEnv, YrsSession } from '../yrs';
 export interface ResidentRegionLayoutRequest {
     bodyStory: 'body';
@@ -18,6 +18,7 @@ export interface ResidentRegionLayoutRequest {
         }>;
         settings?: Document['package']['settings'];
         watermark?: SectionProperties['watermark'];
+        headerWatermarks?: Record<string, Watermark>;
     };
     notes: {
         contents: Array<{

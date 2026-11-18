@@ -77,8 +77,8 @@ pub use workbook::reads::{
 pub use workbook::selection::{SelectionData, SelectionDirection, SelectionRegion};
 pub use workbook::target::{
     CellPosition, CellRead, CellTarget, CellsRead, FindMatch, FindOutcome, FindRequest,
-    RangeAddress, RangeRead, RangeTarget, ReadCalculation, ReadOutcome, ReadRequest, SheetEntry,
-    TextFound, UnevaluatedTarget,
+    ProtectedSheets, RangeAddress, RangeRead, RangeTarget, ReadCalculation, ReadOutcome,
+    ReadRequest, SheetEntry, TextFound, UnevaluatedTarget,
 };
 pub use workbook::{
     DEFAULT_TEXT_SEARCH_LIMIT, MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID,

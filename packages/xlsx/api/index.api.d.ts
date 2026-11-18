@@ -1255,7 +1255,7 @@ export type { PaintOptions, PictureSource } from './render/canvas2d';
 export { initWasm, decodeFontFace, isWasmAvailable, isPngExportAvailable, isProposalsAvailable, openWorkbook, wasmVersion, StaleProposalError, DisplayTooLargeError, getDisplayListCellLimit, exportXlsxMarkdown, exportXlsxStructured, renderXlsxMarkdown, } from './wasm/loader';
 /** @internal */
 export { translateFormulasOn } from './wasm/loader';
-export type { WasmInitInput, WasmInitOptions, OpenWorkbookOptions, WorkbookCalculationContext, Viewport, PrintMetrics, SheetInfo, WorkbookHandle, XlsxTextMatch, XlsxTextSearchOptions, WorkbookUpdateInfo, WorkbookUpdateListener, WorkbookUpdateOrigin, CellEdit, CellPosition, CellInputEdit, EditResult, EditProfile, ProfiledEditResult, DisplayListProfile, ProfiledDisplayList, CalculationStatus, UnevaluatedCellStatus, BorderPatch, BorderPreset, BorderStyle, CapturedFormat, CapturedColor, CapturedFill, CapturedBorderStyle, CapturedBorderEdge, CapturedCellFormat, CellPoint, ConditionalFormatInfo, XlsxAutoFilterOp, ConditionalFormatOp, ConditionalFormatRuleInput, DifferentialFormatInput, HistoryState, HorizontalAlignment, MergedRange, WorkbookHyperlink, NumberFormat, NumberFormatMutation, Proposal, ProposalCell, ProposalEdit, RangeStylePatch, SelectionFormatting, StaleProposalTarget, StyleProperty, TextWrapping, VerticalAlignment, } from './wasm/loader';
+export type { WasmInitInput, WasmInitOptions, OpenWorkbookOptions, WorkbookCalculationContext, Viewport, PrintMetrics, SheetInfo, WorkbookHandle, XlsxTextMatch, XlsxTextSearchOptions, XlsxWriteOptions, WorkbookUpdateInfo, WorkbookUpdateListener, WorkbookUpdateOrigin, CellEdit, CellPosition, CellInputEdit, EditResult, EditProfile, ProfiledEditResult, DisplayListProfile, ProfiledDisplayList, CalculationStatus, UnevaluatedCellStatus, BorderPatch, BorderPreset, BorderStyle, CapturedFormat, CapturedColor, CapturedFill, CapturedBorderStyle, CapturedBorderEdge, CapturedCellFormat, CellPoint, ConditionalFormatInfo, XlsxAutoFilterOp, ConditionalFormatOp, ConditionalFormatRuleInput, DifferentialFormatInput, HistoryState, HorizontalAlignment, MergedRange, WorkbookHyperlink, NumberFormat, NumberFormatMutation, Proposal, ProposalCell, ProposalEdit, RangeStylePatch, SelectionFormatting, StaleProposalTarget, StyleProperty, TextWrapping, VerticalAlignment, } from './wasm/loader';
 export type { EditSuccess, OperationFailure, OperationRefusal, ValidationSuccess, XlsxCellAddress, XlsxCellGuard, XlsxCellPosition, XlsxCellRead, XlsxCellValue, XlsxEditCalculation, XlsxEditFailure, XlsxEditFailureCode, XlsxEditHistory, XlsxEditOperation, XlsxEditPreview, XlsxEditReceipt, XlsxEditRefusal, XlsxEditRequest, XlsxEditResult, XlsxEditSource, XlsxEditStep, XlsxErrorValue, XlsxFindMatch, XlsxFindRequest, XlsxFindResult, XlsxRangeAddress, XlsxRangeRead, XlsxRangeTarget, XlsxReadCalculation, XlsxReadRequest, XlsxReplaceStats, XlsxUnevaluatedCell, XlsxReadResult, XlsxSheetEntry, XlsxHeaderFooterText, XlsxHeaderFooterPair, XlsxSheetHeaderFooter, XlsxValidationResult, } from './edits';
 export type { ExportCompletion, ExportDiagnostic, ExportSeverity, MarkdownAnchor, XlsxAnchor, XlsxExportCell, XlsxExportDefinedName, XlsxExportDiagnostic, XlsxExportDiagnosticCode, XlsxExportFailure, XlsxExportFailureCode, XlsxExportHyperlink, XlsxExportMerge, XlsxExportObject, XlsxExportOptions, XlsxExportResult, XlsxExportScope, XlsxExportSheet, XlsxExportTable, XlsxExportValue, XlsxFormulaResult, XlsxMarkdownContent, XlsxMarkdownOptions, XlsxObjectKind, XlsxSheetIdentity, XlsxSheetVisibility, XlsxSourcePart, XlsxStructuredContent, } from './exports';
 export type { XlsxDefinedNameOp, XlsxDefinedName, XlsxDefinedNamesRequest, XlsxDefinedNamesResult } from './definedNames';
@@ -2089,10 +2089,14 @@ export declare const WORKBOOK_REPLAY_MUTATORS: {
     setActiveSheet: true;
 };
 export type WorkbookReplayMethod = keyof typeof WORKBOOK_REPLAY_MUTATORS;
+type DirectWriteMethod = 'editCell' | 'editCells' | 'patchRangeStyle' | 'setNumberFormat' | 'applyFormat' | 'moveChart' | 'resizeChart';
+type WithoutLast<P extends unknown[]> = P extends [...infer Head, unknown] ? Head : P;
+/** Replayed arguments; a direct write's trailing `XlsxWriteOptions` never replays. */
+type WorkbookReplayArgs<K extends WorkbookReplayMethod> = K extends DirectWriteMethod ? WithoutLast<Required<Parameters<WorkbookHandle[K]>>> : Parameters<WorkbookHandle[K]>;
 export type WorkbookReplayOp = {
     [K in WorkbookReplayMethod]: {
         method: K;
-        args: Parameters<WorkbookHandle[K]>;
+        args: WorkbookReplayArgs<K>;
     };
 }[WorkbookReplayMethod] & {
     calculation?: WorkbookCalculationContext;
@@ -2147,6 +2151,7 @@ export declare const workbookSessionInternals: WeakMap<WorkbookSession, {
 export declare function validateWorkbookReplayEnvelope(value: unknown): asserts value is WorkbookReplayEnvelope;
 export declare function workbookReplayRefused(result: unknown): boolean;
 export declare function applyWorkbookReplayOp(handle: WorkbookHandle, op: WorkbookReplayOp): WorkbookReplayReply['result'];
+export {};
 
 // ---- shared/collaboration-pipe/main.d.ts ----
 import { type PipeCursor, type PipeErrorCode, type PipeOp, type PipeOutput, type PipePeer, type PipeProviderOptions } from './protocol';
@@ -4248,6 +4253,15 @@ export interface CellEdit {
     isFormula: boolean;
     isArrayFormula?: boolean;
 }
+/**
+ * Options for a direct cell or format write. `protectedSheets: 'allow'` writes locked cells,
+ * formats and chart moves and resizes on protected sheets, as edit batches' opt-in does; the protection
+ * itself is kept. The default `'refuse'` throws like Excel. `'allow'` throws on a collaborative
+ * workbook, and any other value throws as an invalid request.
+ */
+export interface XlsxWriteOptions {
+    protectedSheets?: 'refuse' | 'allow';
+}
 export interface XlsxTextSearchOptions {
     /** Defaults to false. */
     caseSensitive?: boolean;
@@ -4388,7 +4402,7 @@ export interface WorkbookHandle extends CollaborationReplica {
      * is written back on save. throws for a chart pinned to the sheet by an
      * absolute anchor.
      */
-    moveChart(sheet: number, chart: string, dx: number, dy: number): EditResult;
+    moveChart(sheet: number, chart: string, dx: number, dy: number, options?: XlsxWriteOptions): EditResult;
     /**
      * move the edges of the chart frame `chart` names — a {@link ChartRegion} id
      * — by content-pixel deltas, clamped to the grid and a 1x1px minimum, as one
@@ -4396,18 +4410,18 @@ export interface WorkbookHandle extends CollaborationReplica {
      * chart pinned by an absolute anchor or held by a one-cell extent, neither of
      * which a save can rewrite.
      */
-    resizeChart(sheet: number, chart: string, edges: ChartResizeEdges): EditResult;
+    resizeChart(sheet: number, chart: string, edges: ChartResizeEdges, options?: XlsxWriteOptions): EditResult;
     setActiveSheet(index: number): void;
     /**
      * apply one user input to a cell (parses number/bool/formula/text) and
      * recalc its transitive dependents. one undo step; moved dependents come back
      * in `EditResult.changed`.
      */
-    editCell(sheet: number, row: number, col: number, input: string): EditResult;
+    editCell(sheet: number, row: number, col: number, input: string, options?: XlsxWriteOptions): EditResult;
     /** `editCell` with the facade's stage timings attached. */
     editCellProfiled(sheet: number, row: number, col: number, input: string): ProfiledEditResult;
     /** apply a batch of inputs (paste path) as one undo step; dependents recalc. */
-    editCells(sheet: number, edits: CellInputEdit[]): EditResult;
+    editCells(sheet: number, edits: CellInputEdit[], options?: XlsxWriteOptions): EditResult;
     /**
      * Fill copies `source` over the complete rectangle `destination` as one undo
      * step. `destination` includes the source and must start at its top-left
@@ -4439,11 +4453,11 @@ export interface WorkbookHandle extends CollaborationReplica {
     selectionData(sheet: number, row: number, col: number, direction?: Direction | 'usedRange' | 'rowEnd' | 'merge'): SelectionData;
     /** row-major editable views for a range, e.g. "A1:C3" (clipboard copy). */
     rangeCells(sheet: number, range: string): CellEdit[][];
-    patchRangeStyle(sheet: number, range: string, patch: RangeStylePatch): EditResult;
-    setNumberFormat(sheet: number, range: string, format: NumberFormatMutation): EditResult;
+    patchRangeStyle(sheet: number, range: string, patch: RangeStylePatch, options?: XlsxWriteOptions): EditResult;
+    setNumberFormat(sheet: number, range: string, format: NumberFormatMutation, options?: XlsxWriteOptions): EditResult;
     selectionFormatting(sheet: number, range: string): SelectionFormatting;
     captureFormat(sheet: number, range: string): CapturedFormat;
-    applyFormat(sheet: number, range: string, format: CapturedFormat): EditResult;
+    applyFormat(sheet: number, range: string, format: CapturedFormat, options?: XlsxWriteOptions): EditResult;
     mergedRanges(sheet: number, range: string): MergedRange[];
     visibleMergedRanges(sheet: number, viewport: Viewport): MergedRange[];
     historyState(): HistoryState;

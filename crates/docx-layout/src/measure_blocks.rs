@@ -463,6 +463,27 @@ impl FontRequirementCollector {
         }
     }
 
+    /// Adds the face a text watermark stretched to its shape box paints with.
+    pub fn collect_watermark(&mut self, watermark: &Value) {
+        if watermark["kind"] != "text" || watermark["box"].is_null() {
+            return;
+        }
+        let Some(text) = watermark["text"].as_str().filter(|text| !text.is_empty()) else {
+            return;
+        };
+        let family = watermark["font"]
+            .as_str()
+            .unwrap_or(crate::display_list::DEFAULT_FONT_FAMILY);
+        let scripts =
+            ooxml_text::paragraph_scripts_with_languages(std::iter::once((text, None)), false);
+        let mut characters = FontCharacters::default();
+        for ch in text.chars() {
+            characters.insert(ch);
+        }
+        self.name(family, false, false, &scripts, true);
+        self.characters(family, false, false, characters);
+    }
+
     /// Adds preview fonts and returns whether marker characters stay valid.
     pub fn collect_preview<'a>(
         &mut self,

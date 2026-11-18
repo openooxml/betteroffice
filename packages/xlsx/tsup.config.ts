@@ -1,6 +1,7 @@
 import { defineConfig } from 'tsup';
 import { copyFile, mkdir, rename } from 'node:fs/promises';
 import { join } from 'node:path';
+import { buildWorkerStubs } from '../../scripts/worker-stub';
 
 export default defineConfig((options) => ({
   entry: {
@@ -9,7 +10,7 @@ export default defineConfig((options) => ({
     headless: 'src/headless.ts',
     worker: 'src/worker.ts',
     collaboration: 'src/collaboration/index.ts',
-    xlsxSessionWorker: 'src/session/worker.ts',
+    xlsxWorkerStart: 'src/session/workerStart.ts',
     'xlsxSessionWorker.node': 'src/session/worker.node.ts',
     'sessionWorker.node': 'src/session/sessionWorker.node.ts',
     'sessionWorker.missing': 'src/session/sessionWorker.missing.ts',
@@ -27,7 +28,7 @@ export default defineConfig((options) => ({
   },
   onSuccess: async () => {
     const out = options.outDir ?? 'dist';
-    await rename(join(out, 'xlsxSessionWorker.js'), join(out, 'xlsxSessionWorker.mjs'));
+    await buildWorkerStubs('xlsx', out);
     await rename(join(out, 'xlsxSessionWorker.node.js'), join(out, 'xlsxSessionWorker.node.mjs'));
     await mkdir(join(out, 'generated'), { recursive: true });
     await mkdir(join(out, 'generated/preflight'), { recursive: true });

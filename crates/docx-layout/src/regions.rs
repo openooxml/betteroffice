@@ -21,6 +21,9 @@ pub struct DocumentRegions {
     pub note_areas: Option<Vec<NoteAreaContract>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watermark: Option<Value>,
+    /// Each header part's own watermark, by relationship id.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub header_watermarks: BTreeMap<String, Value>,
     #[serde(default)]
     pub note_settings: NoteSettings,
     #[serde(default)]

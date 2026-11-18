@@ -90,6 +90,10 @@ export async function residentWorkerFactory(options: { transferBuffers?: boolean
       {
         name: 'in-process-resident-worker',
         setup(build) {
+          build.onLoad({ filter: /\/docxWorker\.browser\.ts$/ }, () => ({
+            contents: "import { startWorker } from './residentEngineWorker';\nstartWorker(self);\n",
+            loader: 'ts',
+          }));
           build.onLoad({ filter: /\/rustDisplayList\.ts$/ }, () => ({
             contents: `
               export const encodeDisplayListFrameExtras = (...args) => testHarness.encodeDisplayListFrameExtras(...args);

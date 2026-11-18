@@ -1037,6 +1037,7 @@ mod tests {
                 hdr_ftr_type: "default".to_owned(),
                 content: Vec::new(),
                 watermark: None,
+                watermark_box: None,
                 custom_root_bindings: Vec::new(),
             },
             &mut context(),
