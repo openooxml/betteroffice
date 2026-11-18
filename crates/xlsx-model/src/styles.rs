@@ -50,6 +50,14 @@ pub struct DifferentialFormat {
 }
 
 impl DifferentialFormat {
+    /// this format as releases before italic read it: no italic.
+    pub fn released_reading(&self) -> Self {
+        Self {
+            italic: None,
+            ..self.clone()
+        }
+    }
+
     /// Whether this is `source` as an earlier release read it: releases before
     /// italic read none, and releases before bare fills read no fill for a
     /// `patternFill` without `patternType` and `fgColor` for a solid one.
@@ -1977,6 +1985,20 @@ fn indexed_color(i: u8) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_differential_format_read_before_italic_is_its_released_reading() {
+        let source = DifferentialFormat {
+            bold: Some(true),
+            italic: Some(true),
+            fill: Some("#ffc7ce".into()),
+            ..DifferentialFormat::default()
+        };
+        let released = source.released_reading();
+        assert_eq!(released.italic, None);
+        assert_eq!(released.fill, source.fill);
+        assert!(released.is_released_reading_of(&source));
+    }
 
     #[test]
     fn format_facets_intern_and_serialize_in_small_and_large_pools() {

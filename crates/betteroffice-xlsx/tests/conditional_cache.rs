@@ -101,9 +101,44 @@ fn view(y: f32, height: f32) -> Viewport {
     }
 }
 
+/// A screen frame and how many visible cells its conditional formats left
+/// undecided.
+#[derive(Debug, PartialEq)]
+struct Frame {
+    list: DisplayList,
+    conditional_pending: u32,
+}
+
+impl From<(DisplayList, u32)> for Frame {
+    fn from((list, conditional_pending): (DisplayList, u32)) -> Self {
+        Self {
+            list,
+            conditional_pending,
+        }
+    }
+}
+
+/// A screen frame or a one-shot render.
+trait Painted {
+    fn list(&self) -> &DisplayList;
+}
+
+impl Painted for DisplayList {
+    fn list(&self) -> &DisplayList {
+        self
+    }
+}
+
+impl Painted for Frame {
+    fn list(&self) -> &DisplayList {
+        &self.list
+    }
+}
+
 /// Where a display list paints the rules' red fill.
-fn painted(list: &DisplayList) -> Vec<(u32, u32)> {
-    list.commands
+fn painted(list: &impl Painted) -> Vec<(u32, u32)> {
+    list.list()
+        .commands
         .iter()
         .filter_map(|command| match command {
             DrawCmd::FillRect { x, y, color, .. } if &**color == RED => {
@@ -114,15 +149,16 @@ fn painted(list: &DisplayList) -> Vec<(u32, u32)> {
         .collect()
 }
 
-fn frame(workbook: &Workbook, viewport: &Viewport) -> DisplayList {
+fn frame(workbook: &Workbook, viewport: &Viewport) -> Frame {
     workbook
         .display_list_frame_for(SheetId(0), viewport)
         .unwrap()
+        .into()
 }
 
 /// Frames of `viewport` with no input between them until one decides every
 /// cell, and how many that took; fails past `limit` frames.
-fn settle(workbook: &Workbook, viewport: &Viewport, limit: usize) -> (DisplayList, usize) {
+fn settle(workbook: &Workbook, viewport: &Viewport, limit: usize) -> (Frame, usize) {
     for count in 1..=limit {
         let list = frame(workbook, viewport);
         if list.conditional_pending == 0 {
@@ -347,7 +383,8 @@ fn adding_or_removing_a_rule_and_deleting_a_sheet_drop_the_cached_results() {
     let second = painted(
         &workbook
             .display_list_frame_for(SheetId(1), &viewport)
-            .unwrap(),
+            .unwrap()
+            .0,
     );
     assert_eq!(second.len(), 1);
     workbook
@@ -398,7 +435,7 @@ fn a_view_beyond_one_frame_budget_settles_without_input() {
     let (settled, frames) = settle(&workbook, &viewport, 10);
     assert!(frames > 1);
     let reference = book().display_list_for(SheetId(0), &viewport).unwrap();
-    assert_eq!(settled.commands, reference.commands);
+    assert_eq!(settled.list.commands, reference.commands);
     assert!(!painted(&settled).is_empty());
 }
 
@@ -490,7 +527,7 @@ fn positive(names: &[&'static str], changed: &[(u32, u32, u32)]) -> Workbook {
 }
 
 /// A frame of `viewport` and how many cells it decided.
-fn counted(workbook: &Workbook, viewport: &Viewport) -> (DisplayList, u64) {
+fn counted(workbook: &Workbook, viewport: &Viewport) -> (Frame, u64) {
     let start = workbook.conditional_stats().evaluated_cells;
     let list = frame(workbook, viewport);
     (list, workbook.conditional_stats().evaluated_cells - start)
@@ -548,7 +585,7 @@ fn after_an_edit_that_changes_a_result_its_cell_paints_the_previous_format_until
     assert_eq!(painted(&reference).len(), 119);
     assert_eq!(painted(&settled), painted(&reference));
     let one_shot = workbook.display_list_for(SheetId(0), &viewport).unwrap();
-    assert_eq!(settled.commands, one_shot.commands);
+    assert_eq!(settled.list.commands, one_shot.commands);
 }
 
 #[test]
@@ -599,7 +636,6 @@ fn a_one_shot_render_after_an_edit_shows_no_previous_result() {
             .unwrap()
             .0,
     ] {
-        assert_eq!(list.conditional_pending, 0);
         assert_eq!(painted(&list), reference);
     }
     let range = |book: &Workbook| {
@@ -614,9 +650,7 @@ fn a_one_shot_render_after_an_edit_shows_no_previous_result() {
             .unwrap();
         list
     };
-    let edited = range(&workbook);
-    assert_eq!(edited.conditional_pending, 0);
-    assert_eq!(painted(&edited), painted(&range(&fresh)));
+    assert_eq!(painted(&range(&workbook)), painted(&range(&fresh)));
 }
 
 /// A two-sheet workbook whose 120 visible cells are decided, limited to 10
@@ -1002,9 +1036,10 @@ fn one_shot_renders_decide_every_cell() {
         let workbook = book();
         workbook.set_conditional_budget(1);
         assert!(frame(&workbook, &viewport).conditional_pending > 0);
-        let list = entry(&workbook, &viewport);
-        assert_eq!(list.conditional_pending, 0);
-        assert_eq!(painted(&list), painted(&reference));
+        assert_eq!(
+            painted(&entry(&workbook, &viewport)),
+            painted(&reference)
+        );
     }
     let fresh = book();
     fresh.set_conditional_budget(1);
@@ -1017,7 +1052,6 @@ fn one_shot_renders_decide_every_cell() {
             },
         )
         .unwrap();
-    assert_eq!(range.conditional_pending, 0);
     assert_eq!(painted(&range).len(), 120);
 }
 
@@ -1159,7 +1193,7 @@ fn a_relative_whole_row_or_column_rule_parses_each_cell() {
 
 /// The `(row, col)` of each cell a display list from the sheet's top-left
 /// corner paints red, sorted.
-fn cells(geometry: &GridGeometry, list: &DisplayList) -> Vec<(u32, u32)> {
+fn cells(geometry: &GridGeometry, list: &impl Painted) -> Vec<(u32, u32)> {
     let at = |offset: f32, start: fn(&GridGeometry, u32) -> f32| {
         (0..1000)
             .rfind(|&index| start(geometry, index) <= offset + 0.5)
@@ -1219,9 +1253,7 @@ fn one_shot_renders_decide_every_cell_of_rules_on_the_general_path() {
     for entry in one_shot() {
         let workbook = book();
         assert!(frame(&workbook, &viewport).conditional_pending > 0);
-        let list = entry(&workbook, &viewport);
-        assert_eq!(list.conditional_pending, 0);
-        assert_eq!(cells(&geometry, &list), expected);
+        assert_eq!(cells(&geometry, &entry(&workbook, &viewport)), expected);
     }
     let (range, _, _) = book()
         .range_png_display_list_for(
@@ -1232,7 +1264,6 @@ fn one_shot_renders_decide_every_cell_of_rules_on_the_general_path() {
             },
         )
         .unwrap();
-    assert_eq!(range.conditional_pending, 0);
     assert_eq!(cells(&geometry, &range), expected);
     let (settled, frames) = settle(&book(), &viewport, 64);
     assert!(frames > 1);
@@ -1296,10 +1327,11 @@ fn a_timed_frame_stops_when_its_clock_runs_out() {
     assert_eq!(reference.len(), 120);
     assert_eq!(frame(&book(), &viewport).conditional_pending, 0);
     let clock = Ticks(Cell::new(0.0));
-    let timed = || {
+    let timed = || -> Frame {
         workbook
             .display_list_frame_timed(SheetId(0), &viewport, &clock)
             .unwrap()
+            .into()
     };
     let first = timed();
     assert!(first.conditional_pending > 0);
@@ -1320,17 +1352,15 @@ fn a_timed_frame_stops_when_its_clock_runs_out() {
     assert_eq!(painted(&last), reference);
 }
 
-/// Asserts that a frame the budget stops and a one-shot render of `workbook`
-/// both paint nothing and leave nothing pending.
+/// Asserts that a frame the budget stops leaves nothing pending, and that it
+/// and a one-shot render of `workbook` paint nothing.
 fn settles_unpainted(workbook: &Workbook) {
     let viewport = view(0.0, 800.0);
     workbook.set_conditional_budget(1);
     let stopped = frame(workbook, &viewport);
     assert_eq!(stopped.conditional_pending, 0);
     assert!(painted(&stopped).is_empty());
-    let complete = workbook.display_list(&viewport).unwrap();
-    assert_eq!(complete.conditional_pending, 0);
-    assert!(painted(&complete).is_empty());
+    assert!(painted(&workbook.display_list(&viewport).unwrap()).is_empty());
 }
 
 #[test]

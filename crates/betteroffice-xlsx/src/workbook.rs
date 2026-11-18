@@ -68,7 +68,7 @@ use xlsx_render::region::{
 use xlsx_render::scaled;
 use xlsx_render::{
     ChartRegion, ChartResize, DisplayList, GhostEdit, GridGeometry, PrintMetrics, RenderError,
-    Viewport, build_display_list_with_geometry, build_print_display_list_with_charts,
+    Viewport, build_display_list_with_geometry_and_formats, build_print_display_list_with_charts,
     chart_at_point, display_text, display_viewport_with_geometry, moved_chart_anchor,
     resized_chart_anchor, resolve_chart_anchor, visible_merged_ranges_with_geometry,
 };
@@ -3522,18 +3522,20 @@ impl Workbook {
     /// proposal cell whose base drifted paints its committed text instead.
     pub fn display_list_for(&self, sheet: SheetId, viewport: &Viewport) -> Result<DisplayList> {
         self.display_list_within(sheet, viewport, Budget::Complete)
+            .map(|(display_list, _)| display_list)
     }
 
-    /// [`Self::display_list_for`] for a frame on screen: conditional formats
-    /// spend one frame's budget, and the cells it leaves undecided count in
-    /// `conditional_pending` until a later frame. Until then such a cell paints
-    /// its result from before the last change when that change kept cells and
-    /// rules in place, and no conditional format otherwise.
+    /// [`Self::display_list_for`] for a frame on screen, and how many visible
+    /// cells its conditional formats left undecided: a frame spends one
+    /// frame's budget and later frames decide the rest. Until then an
+    /// undecided cell paints its result from before the last direct edit of
+    /// one cell or recalculation when it has one, and no conditional format
+    /// otherwise.
     pub fn display_list_frame_for(
         &self,
         sheet: SheetId,
         viewport: &Viewport,
-    ) -> Result<DisplayList> {
+    ) -> Result<(DisplayList, u32)> {
         self.display_list_within(sheet, viewport, Budget::Frame(None))
     }
 
@@ -3544,7 +3546,7 @@ impl Workbook {
         sheet: SheetId,
         viewport: &Viewport,
         clock: &dyn crate::FrameClock,
-    ) -> Result<DisplayList> {
+    ) -> Result<(DisplayList, u32)> {
         self.display_list_within(sheet, viewport, Budget::Frame(Some(clock)))
     }
 
@@ -3553,7 +3555,7 @@ impl Workbook {
         sheet: SheetId,
         viewport: &Viewport,
         budget: Budget<'_>,
-    ) -> Result<DisplayList> {
+    ) -> Result<(DisplayList, u32)> {
         let sheet_ref = self.sheet(sheet)?;
         validate_viewport(viewport)?;
         let geometry = self.sheet_geometry(sheet)?;
@@ -3596,7 +3598,7 @@ impl Workbook {
         let ghosts: Vec<GhostEdit> = ghosts.into_values().collect();
         let owner = sheet_ref.name.clone();
         let mut pending = 0;
-        let mut display_list = build_display_list_with_geometry(
+        let display_list = build_display_list_with_geometry_and_formats(
             &self.model,
             sheet,
             viewport,
@@ -3611,8 +3613,7 @@ impl Workbook {
                 formats
             },
         )?;
-        display_list.conditional_pending = pending;
-        Ok(display_list)
+        Ok((display_list, pending))
     }
 
     /// The chart under a viewport-local point on the active sheet, resolved
@@ -3959,7 +3960,7 @@ impl Workbook {
         validate_render_size(width, height)?;
         validate_display_region(sheet_ref, &geometry, &viewport)?;
         let owner = sheet_ref.name.clone();
-        let display_list = build_display_list_with_geometry(
+        let display_list = build_display_list_with_geometry_and_formats(
             &self.model,
             sheet,
             &viewport,

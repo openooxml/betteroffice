@@ -288,18 +288,6 @@ pub struct DisplayList {
     pub charts: Vec<ChartRegion>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub truncated: bool,
-    /// visible cells whose conditional formats this frame left undecided;
-    /// they paint without them until a later frame decides them.
-    #[serde(
-        default,
-        rename = "conditionalPending",
-        skip_serializing_if = "is_none_pending"
-    )]
-    pub conditional_pending: u32,
-}
-
-fn is_none_pending(count: &u32) -> bool {
-    *count == 0
 }
 
 /// scale every coordinate, size, stroke width, and font size by `factor`,
@@ -465,7 +453,6 @@ pub fn scaled(dl: DisplayList, factor: f32) -> DisplayList {
 
     DisplayList {
         truncated: dl.truncated,
-        conditional_pending: dl.conditional_pending,
         width: dl.width * factor,
         height: dl.height * factor,
         commands,
@@ -577,7 +564,6 @@ mod tests {
     fn sample() -> DisplayList {
         DisplayList {
             truncated: false,
-            conditional_pending: 0,
             width: 100.0,
             height: 50.0,
             commands: vec![

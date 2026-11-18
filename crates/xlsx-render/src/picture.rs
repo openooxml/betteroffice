@@ -113,7 +113,7 @@ fn placement(crop: PictureCrop, frame: Rect) -> Option<(ImageCrop, Rect)> {
 mod tests {
     use super::*;
     use crate::geometry::col_chars_to_px;
-    use crate::{CellFormats, RenderError, build_display_list_with_geometry};
+    use crate::{RenderError, build_display_list_with_geometry};
     use ooxml_drawingml::chart::ChartSpace;
     use xlsx_model::{
         AnchorCell, AnchorEditAs, AnchorExtent, ChartAnchor, Sheet, SheetId, Workbook,
@@ -167,7 +167,6 @@ mod tests {
                     part: chart.part.clone(),
                 })
             },
-            |_, _| CellFormats::new(),
         )
         .unwrap()
         .commands

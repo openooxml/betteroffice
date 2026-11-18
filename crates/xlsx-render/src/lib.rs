@@ -661,11 +661,41 @@ where
     build_frame(wb, sheet, viewport, ghosts, &[], resolver, None)
 }
 
-/// `formats` receives the visible row and column runs and returns the
-/// conditional-format effects of the cells inside them.
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
 pub fn build_display_list_with_geometry<F, R>(
+    wb: &Workbook,
+    sheet: SheetId,
+    viewport: &Viewport,
+    ghosts: &[GhostEdit],
+    geometry: &GridGeometry,
+    max_cells: Option<u64>,
+    pictures: &[SheetPicture],
+    resolver: F,
+) -> Result<DisplayList, RenderError>
+where
+    F: FnMut(&SheetChart) -> Result<R, RenderError>,
+    R: Into<Arc<ChartSpace>>,
+{
+    build_display_list_with_geometry_and_formats(
+        wb,
+        sheet,
+        viewport,
+        ghosts,
+        geometry,
+        max_cells,
+        pictures,
+        resolver,
+        |_, _| CellFormats::new(),
+    )
+}
+
+/// [`build_display_list_with_geometry`] whose `formats` receives the visible
+/// row and column runs and returns the conditional-format effects of the
+/// cells inside them.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn build_display_list_with_geometry_and_formats<F, R>(
     wb: &Workbook,
     sheet: SheetId,
     viewport: &Viewport,
@@ -789,7 +819,6 @@ where
             hyperlinks: Vec::new(),
             charts: Vec::new(),
             truncated: false,
-            conditional_pending: 0,
         });
     };
 
@@ -1366,7 +1395,6 @@ where
         hyperlinks,
         charts,
         truncated: rows.truncated,
-        conditional_pending: 0,
     })
 }
 
@@ -4807,5 +4835,61 @@ mod tests {
         assert_px(xs[2] - xs[3], 12.0);
         let xs = indent_xs(Some(("Courier New", 11.0)), 1, None);
         assert_px(xs[1] - xs[0], 27.0);
+    }
+
+    #[test]
+    fn the_geometry_builder_without_formats_paints_no_conditional_format() {
+        let mut wb = Workbook::default();
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.set_cell(CellRef::new(0, 0), num_cell(5.0));
+        wb.sheets.push(sheet);
+        let geometry = GridGeometry::new(&wb.sheets[0], &wb.styles);
+        let viewport = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 100.0,
+        };
+        let resolver = |chart: &SheetChart| {
+            Err::<ChartSpace, _>(RenderError::ChartSourceUnavailable {
+                part: chart.part.clone(),
+            })
+        };
+        let red = |list: &DisplayList| {
+            list.commands
+                .iter()
+                .any(|command| {
+                    matches!(command, DrawCmd::FillRect { color, .. } if &**color == "#ff0000")
+                })
+        };
+        let plain = build_display_list_with_geometry(
+            &wb,
+            SheetId(0),
+            &viewport,
+            &[],
+            &geometry,
+            None,
+            &[],
+            resolver,
+        )
+        .unwrap();
+        let format = Arc::new(DifferentialFormat {
+            fill: Some("#ff0000".into()),
+            ..DifferentialFormat::default()
+        });
+        let formatted = build_display_list_with_geometry_and_formats(
+            &wb,
+            SheetId(0),
+            &viewport,
+            &[],
+            &geometry,
+            None,
+            &[],
+            resolver,
+            |_, _| CellFormats::from([((0, 0), format)]),
+        )
+        .unwrap();
+        assert!(!red(&plain));
+        assert!(red(&formatted));
     }
 }

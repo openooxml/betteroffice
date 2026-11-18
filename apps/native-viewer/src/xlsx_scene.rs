@@ -868,7 +868,6 @@ mod tests {
             hyperlinks: Vec::new(),
             charts: Vec::new(),
             truncated: false,
-            conditional_pending: 0,
         }
     }
 

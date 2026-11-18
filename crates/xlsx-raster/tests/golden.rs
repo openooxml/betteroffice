@@ -119,7 +119,6 @@ fn full(w: f32, h: f32) -> Rect {
 fn dl(width: f32, height: f32, commands: Vec<DrawCmd>) -> DisplayList {
     DisplayList {
         truncated: false,
-        conditional_pending: 0,
         width,
         height,
         commands,

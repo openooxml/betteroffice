@@ -1,7 +1,7 @@
 use betteroffice_xlsx::{
     CalculationOptions, CapturedFormat, CellAddress, CellInput as WorkbookCellInput, CellRange,
-    CellRef, EditProfile, Error, HydratedWorkbook, MutationResult, NumberFormatMutation, Op,
-    PeerHydration as WorkbookPeerHydration, PrintMetrics, Proposal,
+    CellRef, DisplayList, EditProfile, Error, HydratedWorkbook, MutationResult,
+    NumberFormatMutation, Op, PeerHydration as WorkbookPeerHydration, PrintMetrics, Proposal,
     ProposalEditInput as WorkbookProposalEditInput, ProposalRequest, ProtectedSheets,
     RenderOptions, SelectionDirection, SheetId, SheetInfoWire as SheetInfo, SnapshotBudget,
     StylePatch, UpdateEvent, UpdateSubscription, Viewport, Workbook, WorkbookSnapshotEncoder,
@@ -252,6 +252,20 @@ struct ProfiledEditResult {
 struct DisplayListProfile {
     build_ms: f64,
     encode_ms: f64,
+}
+
+/// A screen frame's display list with the visible cells whose conditional
+/// formats it left undecided.
+#[derive(Serialize)]
+struct ScreenFrame<'a> {
+    #[serde(flatten)]
+    display_list: &'a DisplayList,
+    #[serde(rename = "conditionalPending", skip_serializing_if = "is_zero")]
+    pending: u32,
+}
+
+fn is_zero(count: &u32) -> bool {
+    *count == 0
 }
 
 #[derive(Deserialize)]
@@ -617,14 +631,18 @@ impl Session {
     ) -> Result<String, String> {
         let viewport: Viewport = serde_json::from_str(viewport_json)
             .map_err(|error| format!("bad viewport: {error}"))?;
-        let display_list = match clock {
+        let (display_list, pending) = match clock {
             Some(clock) => self
                 .workbook
                 .display_list_frame_timed(sheet, &viewport, clock),
             None => self.workbook.display_list_frame_for(sheet, &viewport),
         }
         .map_err(display_error)?;
-        serde_json::to_string(&display_list).map_err(|error| error.to_string())
+        serde_json::to_string(&ScreenFrame {
+            display_list: &display_list,
+            pending,
+        })
+        .map_err(|error| error.to_string())
     }
 
     /// `display_list_json` split into build and encode time by `now`, returned
@@ -640,12 +658,16 @@ impl Session {
         let now = std::cell::RefCell::new(now);
         let clock = || (*now.borrow_mut())();
         let started = clock();
-        let display_list = self
+        let (display_list, pending) = self
             .workbook
             .display_list_frame_timed(self.workbook.active_sheet(), &viewport, &clock)
             .map_err(display_error)?;
         let built = clock();
-        let json = serde_json::to_string(&display_list).map_err(|error| error.to_string())?;
+        let json = serde_json::to_string(&ScreenFrame {
+            display_list: &display_list,
+            pending,
+        })
+        .map_err(|error| error.to_string())?;
         let encoded = clock();
         let profile = serde_json::to_string(&DisplayListProfile {
             build_ms: built - started,

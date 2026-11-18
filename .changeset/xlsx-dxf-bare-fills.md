@@ -5,4 +5,4 @@
 '@betteroffice/rust-crates': minor
 ---
 
-A conditional format's fill without `patternType`, as Excel writes its presets, keeps its color; a conditional fill naming two different colors paints none. Rust `DifferentialFormat::released_reading` becomes `is_released_reading_of`.
+A conditional format's fill without `patternType`, as Excel writes its presets, keeps its color; a conditional fill naming two different colors paints none. Rust `DifferentialFormat` gains `is_released_reading_of`.
