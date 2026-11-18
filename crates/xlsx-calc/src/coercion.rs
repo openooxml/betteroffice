@@ -1,5 +1,7 @@
+use std::collections::HashSet;
+
+use xlsx_model::Workbook;
 use xlsx_model::numfmt::builtin_format_code;
-use xlsx_model::{FormatCode, Workbook};
 
 #[derive(Clone, Default, PartialEq, Eq)]
 pub(crate) struct CurrencyCoercion {
@@ -35,10 +37,9 @@ impl CurrencyCoercion {
         #[cfg(test)]
         EVIDENCE_SCANS.set(EVIDENCE_SCANS.get() + 1);
         let mut result = Self::default();
-        for (id, code) in &wb.styles.num_fmts {
-            if *id != 0 {
-                result.format_symbols(code);
-            }
+        let custom: HashSet<u16> = wb.styles.num_fmts.iter().map(|(id, _)| *id).collect();
+        for (_, code) in &wb.styles.num_fmts {
+            result.format_symbols(code);
         }
         for &index in used {
             if let Some(id) = wb
@@ -46,7 +47,7 @@ impl CurrencyCoercion {
                 .cell_xfs
                 .get(index as usize)
                 .and_then(|xf| xf.num_fmt_id)
-                && let FormatCode::Builtin(id) = wb.styles.format_code_for_id(id)
+                && !custom.contains(&id)
                 && let Some(code) = builtin_format_code(id)
             {
                 result.format_symbols(code);

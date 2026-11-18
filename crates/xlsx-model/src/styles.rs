@@ -885,7 +885,6 @@ pub struct Stylesheet {
 
 #[derive(Debug, Clone)]
 struct CurrencyMemo {
-    builtin_number_formats: bool,
     formats: Vec<(u16, String)>,
     xf_formats: Vec<Option<u16>>,
     used_styles: Vec<u32>,
@@ -1012,7 +1011,6 @@ impl Stylesheet {
             .lock()
             .unwrap_or_else(|err| err.into_inner());
         if let Some(cached) = memo.as_ref()
-            && cached.builtin_number_formats == self.builtin_number_formats
             && cached.formats == self.num_fmts
             && cached.used_styles == used_styles
             && cached
@@ -1025,7 +1023,6 @@ impl Stylesheet {
         }
         let symbols = compute();
         *memo = Some(CurrencyMemo {
-            builtin_number_formats: self.builtin_number_formats,
             formats: self.num_fmts.clone(),
             xf_formats: self.cell_xfs.iter().map(|xf| xf.num_fmt_id).collect(),
             used_styles: used_styles.to_vec(),
