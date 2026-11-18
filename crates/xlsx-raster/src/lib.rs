@@ -236,6 +236,7 @@ pub fn render_png_with_images(dl: &DisplayList, images: &ImageMap<'_>) -> Result
                 rotation_valign,
                 stacked,
                 wrap,
+                runs: _,
             } => {
                 let run = font::TextRun {
                     x: *x,
@@ -998,6 +999,7 @@ mod tests {
                     rotation_valign: None,
                     stacked: false,
                     wrap: None,
+                    runs: Vec::new(),
                 },
             ],
             grid: xlsx_render::GridMeta::default(),
@@ -1049,6 +1051,7 @@ mod tests {
                 rotation_valign: Some(xlsx_render::TextValign::Bottom),
                 stacked: false,
                 wrap: None,
+                runs: Vec::new(),
             }],
             grid: xlsx_render::GridMeta::default(),
             hyperlinks: Vec::new(),
@@ -1112,6 +1115,7 @@ mod tests {
                 rotation_valign: Some(xlsx_render::TextValign::Top),
                 stacked,
                 wrap: None,
+                runs: Vec::new(),
             }],
             grid: xlsx_render::GridMeta::default(),
             hyperlinks: Vec::new(),
@@ -1714,6 +1718,9 @@ mod tests {
         assert_eq!(render(40.0, 40.0, rails).pixel(10, 4).unwrap().red(), 0);
     }
 }
+
+#[cfg(all(test, not(feature = "fonts")))]
+mod rich_text_tests;
 
 #[cfg(feature = "fonts")]
 mod native;

@@ -234,6 +234,7 @@ fn translate_command(
             rotation_valign: _,
             stacked,
             wrap,
+            runs: _,
         } => {
             if *stacked {
                 return Err("stacked text is not translated".to_owned());
@@ -856,7 +857,8 @@ fn loose_extents(x1: f32, y1: f32, x2: f32, y2: f32) -> Option<Rect> {
 mod tests {
     use super::*;
     use xlsx_render::{
-        GridMeta, NumberFormatLayout, PathStroke, RunUnderline, TextValign, TextWrap,
+        GridMeta, NumberFormatLayout, PathStroke, RunUnderline, TextRun, TextRunBaseline,
+        TextValign, TextWrap,
     };
 
     fn display_list(commands: Vec<DrawCmd>) -> DisplayList {
@@ -966,6 +968,7 @@ mod tests {
             rotation_valign: None,
             stacked: false,
             wrap: None,
+            runs: Vec::new(),
         });
         let page = translate_sheet(&display_list(commands)).unwrap();
         assert_eq!(page.skipped.total(), 0);
@@ -1001,6 +1004,7 @@ mod tests {
             rotation_valign: None,
             stacked: false,
             wrap: None,
+            runs: Vec::new(),
         }
     }
 
@@ -1129,6 +1133,170 @@ mod tests {
                 .keys()
                 .any(|reason| reason.contains("stacked text"))
         );
+    }
+
+    const RED: u32 = 0xff00_00ff;
+    const BLACK: u32 = 0xff00_0000;
+
+    fn span(start: u32, end: u32) -> TextRun {
+        TextRun {
+            start,
+            end,
+            ..TextRun::default()
+        }
+    }
+
+    fn red_bold(start: u32, end: u32) -> TextRun {
+        TextRun {
+            bold: Some(true),
+            color: Some("#ff0000".into()),
+            ..span(start, end)
+        }
+    }
+
+    fn with_runs(mut command: DrawCmd, runs: Vec<TextRun>) -> DrawCmd {
+        if let DrawCmd::Text { runs: slot, .. } = &mut command {
+            *slot = runs;
+        }
+        command
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct Painted {
+        colors: Vec<u32>,
+        pens: Vec<f32>,
+        sizes: Vec<f32>,
+        clips: u32,
+        skipped: usize,
+    }
+
+    fn painted(command: DrawCmd) -> Painted {
+        let page = translate_sheet(&display_list(vec![command])).unwrap();
+        let encoding = page.scene.encoding();
+        let runs = &encoding.resources.glyph_runs;
+        Painted {
+            colors: encoding
+                .draw_data
+                .iter()
+                .copied()
+                .filter(|word| [RED, BLACK].contains(word))
+                .collect(),
+            pens: runs.iter().map(|run| run.transform.translation[0]).collect(),
+            sizes: runs.iter().map(|run| run.font_size).collect(),
+            clips: encoding.n_clips,
+            skipped: page.skipped.total(),
+        }
+    }
+
+    #[test]
+    fn runs_paint_a_glyph_run_per_piece_in_its_colour() {
+        let plain = painted(text("ABCD"));
+        assert_eq!(plain.colors, vec![BLACK]);
+        let larger = TextRun {
+            font_size: Some(14.0),
+            ..span(2, 4)
+        };
+        let rich = painted(with_runs(text("ABCD"), vec![red_bold(0, 2), larger]));
+        let ab = measure_text("AB", 11.0);
+        assert_eq!(rich.colors, vec![RED, RED, BLACK]);
+        assert_eq!(rich.pens, vec![4.0, 4.0 + BOLD_OFFSET_PX, 4.0 + ab]);
+        assert_eq!(
+            rich.sizes,
+            vec![11.0 * PX_PER_PT, 11.0 * PX_PER_PT, 14.0 * PX_PER_PT]
+        );
+        assert_eq!((rich.clips, rich.skipped), (plain.clips, 0));
+    }
+
+    #[test]
+    fn text_without_runs_or_with_its_own_style_paints_as_before() {
+        let plain = painted(text("ABCD"));
+        assert_eq!(plain.pens, vec![4.0]);
+        assert_eq!(painted(with_runs(text("ABCD"), Vec::new())), plain);
+        assert_eq!(
+            painted(with_runs(text("ABCD"), vec![span(0, 2), span(2, 4)])),
+            plain
+        );
+    }
+
+    #[test]
+    fn a_superscript_run_paints_at_its_own_size_on_the_common_baseline() {
+        let raised = TextRun {
+            baseline: Some(TextRunBaseline::Superscript),
+            ..red_bold(0, 2)
+        };
+        assert_eq!(
+            painted(with_runs(text("ABCD"), vec![raised])),
+            painted(with_runs(text("ABCD"), vec![red_bold(0, 2)]))
+        );
+    }
+
+    #[test]
+    fn wrapped_rotated_and_stacked_text_paints_as_without_runs() {
+        let mut wrapped = text("AB CD");
+        let mut rotated = text("ABCD");
+        let mut stacked = text("ABCD");
+        if let DrawCmd::Text { wrap, .. } = &mut wrapped {
+            *wrap = Some(TextWrap {
+                width: 20.0,
+                line_height: 14.0,
+                valign: TextValign::Top,
+                max_lines: None,
+            });
+        }
+        if let DrawCmd::Text { rotation_deg, .. } = &mut rotated {
+            *rotation_deg = Some(90.0);
+        }
+        if let DrawCmd::Text { stacked: flag, .. } = &mut stacked {
+            *flag = true;
+        }
+        for command in [wrapped, rotated, stacked] {
+            assert_eq!(
+                painted(with_runs(command.clone(), vec![red_bold(0, 2)])),
+                painted(command)
+            );
+        }
+    }
+
+    #[test]
+    fn right_to_left_text_paints_as_without_runs() {
+        for whole in ["שלום עולם", "abc אבג 123", "مرحبا"] {
+            assert_eq!(
+                painted(with_runs(text(whole), vec![red_bold(0, 2)])),
+                painted(text(whole)),
+                "{whole:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_boundary_inside_a_combining_mark_or_surrogate_pair_paints_all_the_text() {
+        let red = |start, end| TextRun {
+            color: Some("#ff0000".into()),
+            ..span(start, end)
+        };
+        let mark = painted(with_runs(text("e\u{301}x"), vec![red(1, 3)]));
+        assert_eq!(mark.colors, vec![BLACK, RED]);
+        assert_eq!(mark.pens, vec![4.0, 4.0 + measure_text("e", 11.0)]);
+        let pair = painted(with_runs(text("A😀B"), vec![red(0, 2)]));
+        assert_eq!(pair.colors, vec![RED, BLACK]);
+        assert_eq!(pair.pens, vec![4.0, 4.0 + measure_text("A", 11.0)]);
+        let ligature = painted(with_runs(text("office"), vec![red(0, 2)]));
+        assert_eq!(ligature.pens, vec![4.0, 4.0 + measure_text("of", 11.0)]);
+    }
+
+    #[test]
+    fn a_narrow_clip_wraps_every_piece_in_one_clip_layer() {
+        let narrow = |mut command: DrawCmd| {
+            if let DrawCmd::Text { clip, .. } = &mut command {
+                clip.w = 12.0;
+            }
+            command
+        };
+        let runs = vec![red_bold(0, 2), span(2, 4)];
+        let plain = painted(narrow(text("ABCD")));
+        let rich = painted(narrow(with_runs(text("ABCD"), runs.clone())));
+        assert_eq!(rich.clips, plain.clips);
+        assert_eq!(rich, painted(with_runs(text("ABCD"), runs)));
     }
 
     #[test]

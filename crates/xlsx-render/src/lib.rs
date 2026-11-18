@@ -41,7 +41,7 @@ pub use chart::{
 };
 pub use display_list::{
     Align, ChartA11yAttrs, ChartRegion, DisplayList, DrawCmd, GridMeta, HyperlinkRegion, ImageCrop,
-    PathStroke, Rect, TextValign, TextWrap, border_dash, scaled,
+    PathStroke, Rect, TextRun, TextRunBaseline, TextValign, TextWrap, border_dash, scaled,
 };
 pub use geometry::{GridGeometry, PrintMetrics, autofit_relevant};
 pub use hit::chart_at_point;
@@ -1204,6 +1204,7 @@ where
             rotation_valign,
             stacked,
             wrap,
+            runs: Vec::new(),
         });
     }
 
@@ -1245,6 +1246,7 @@ where
             rotation_valign: None,
             stacked: false,
             wrap: None,
+            runs: Vec::new(),
         });
     }
 
@@ -1386,6 +1388,7 @@ fn emit_ghost(
             rotation_valign: None,
             stacked: false,
             wrap: None,
+            runs: Vec::new(),
         });
     };
 

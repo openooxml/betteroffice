@@ -429,6 +429,61 @@ mod tests {
         );
     }
 
+    fn with_runs(display: &mut DisplayList, runs: &[xlsx_render::TextRun]) {
+        for command in &mut display.commands {
+            if let DrawCmd::Text { runs: slot, .. } = command {
+                *slot = runs.to_vec();
+            }
+        }
+    }
+
+    #[cfg(feature = "fonts-latin")]
+    #[test]
+    fn a_run_resolves_a_font_of_its_own() {
+        let workbook = Workbook::open(&fixture()).unwrap();
+        let mut display = workbook.display_list(&viewport()).unwrap();
+        let regular_run = xlsx_render::TextRun {
+            start: 0,
+            end: 3,
+            bold: Some(false),
+            ..Default::default()
+        };
+        with_runs(&mut display, &[regular_run]);
+        let fonts = workbook.raster_fonts(&display).unwrap();
+        let regular = BundledFonts::default()
+            .resolve_family("Calibri", false, false)
+            .unwrap()
+            .load()
+            .unwrap();
+        assert_eq!(
+            fonts.fonts.font_data("Calibri", false, false),
+            Some(&regular[..])
+        );
+    }
+
+    #[test]
+    fn a_run_takes_the_supplied_face_of_its_family() {
+        let bytes = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+        let workbook = Workbook::open(&fixture()).unwrap();
+        let mut display = workbook.display_list(&viewport()).unwrap();
+        let run = xlsx_render::TextRun {
+            start: 0,
+            end: 3,
+            font_family: Some("Cambria".into()),
+            bold: Some(false),
+            ..Default::default()
+        };
+        with_runs(&mut display, &[run]);
+        let faces = [PngFontFace {
+            family: "Cambria",
+            bold: false,
+            italic: false,
+            bytes,
+        }];
+        let fonts = supplied_fonts(&display, &faces).unwrap();
+        assert_eq!(fonts.font_data("Cambria", false, false), Some(&bytes[..]));
+    }
+
     #[test]
     fn backstop_preserves_the_embedded_carlito_raster() {
         let workbook = Workbook::open_with_options(

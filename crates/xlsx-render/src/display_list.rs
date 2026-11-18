@@ -3,6 +3,7 @@
 
 use ooxml_drawingml::GeometryPathCommand;
 use serde::{Deserialize, Serialize};
+use std::ops::Range;
 use std::sync::Arc;
 use xlsx_model::{PatternType, RunUnderline};
 
@@ -37,6 +38,66 @@ pub struct TextWrap {
     pub valign: TextValign,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_lines: Option<u32>,
+}
+
+/// Where a run's glyphs sit against the line's baseline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TextRunBaseline {
+    Superscript,
+    Subscript,
+}
+
+/// A span of a text command's text in a font of its own. `start` and `end`
+/// count UTF-16 code units, half-open; the runs of a command are sorted and do
+/// not overlap. A property left out takes the command's own, and text no run
+/// covers paints in the command's font. `font_size` is in points, `color` a
+/// resolved `#rrggbb`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextRun {
+    pub start: u32,
+    pub end: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_family: Option<Arc<str>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_size: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bold: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub italic: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub underline: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub underline_style: Option<RunUnderline>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strike: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<Arc<str>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline: Option<TextRunBaseline>,
+}
+
+impl TextRun {
+    /// The run as byte offsets into `text`. An offset inside a character, such
+    /// as between the halves of a surrogate pair, moves back to that
+    /// character's start; offsets past the end clamp to it.
+    pub fn byte_range(&self, text: &str) -> Range<usize> {
+        let start = utf16_to_byte(text, self.start);
+        start..utf16_to_byte(text, self.end).max(start)
+    }
+}
+
+fn utf16_to_byte(text: &str, offset: u32) -> usize {
+    let offset = offset as usize;
+    let mut units = 0;
+    for (byte, ch) in text.char_indices() {
+        units += ch.len_utf16();
+        if units > offset {
+            return byte;
+        }
+    }
+    text.len()
 }
 
 /// a rectangle in viewport-local pixels.
@@ -165,6 +226,10 @@ pub enum DrawCmd {
         stacked: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         wrap: Option<TextWrap>,
+        /// spans of `text` in fonts of their own; empty when the whole text
+        /// paints in the command's font.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        runs: Vec<TextRun>,
     },
     /// a picture: the image part `asset_id` names, its `crop` discarded and the
     /// rest stretched over the rect. The host supplies the encoded bytes.
@@ -397,6 +462,7 @@ pub fn scaled(dl: DisplayList, factor: f32) -> DisplayList {
                 rotation_valign,
                 stacked,
                 wrap,
+                runs,
             } => DrawCmd::Text {
                 x: x * factor,
                 y: y * factor,
@@ -430,6 +496,7 @@ pub fn scaled(dl: DisplayList, factor: f32) -> DisplayList {
                     valign: wrap.valign,
                     max_lines: wrap.max_lines,
                 }),
+                runs,
             },
             DrawCmd::Image {
                 x,
@@ -642,6 +709,7 @@ mod tests {
                         valign: TextValign::Top,
                         max_lines: Some(2),
                     }),
+                    runs: Vec::new(),
                 },
                 DrawCmd::Image {
                     x: 5.0,
@@ -808,5 +876,146 @@ mod tests {
     fn scaled_by_one_is_identity() {
         let dl = sample();
         assert_eq!(scaled(dl.clone(), 1.0), dl);
+    }
+
+    fn styled_text(runs: Vec<TextRun>) -> DrawCmd {
+        DrawCmd::Text {
+            x: 3.0,
+            y: 8.0,
+            text: "hi".into(),
+            font_size: 11.0,
+            color: "#000000".into(),
+            clip: Rect {
+                x: 2.0,
+                y: 6.0,
+                w: 12.0,
+                h: 16.0,
+            },
+            align: Align::Left,
+            bold: true,
+            italic: false,
+            underline: true,
+            underline_style: Some(RunUnderline::Double),
+            strike: false,
+            highlight: None,
+            dashed_underline: false,
+            font_family: Some("Calibri".into()),
+            number_format: None,
+            ghost: false,
+            chart: false,
+            rotation_deg: None,
+            rotation_box: None,
+            rotation_valign: None,
+            stacked: false,
+            wrap: Some(TextWrap {
+                width: 8.0,
+                line_height: 18.0,
+                valign: TextValign::Top,
+                max_lines: Some(2),
+            }),
+            runs,
+        }
+    }
+
+    const STYLED_TEXT_JSON: &str = concat!(
+        r##"{"op":"text","x":3.0,"y":8.0,"text":"hi","fontSize":11.0,"color":"#000000","##,
+        r#""clip":{"x":2.0,"y":6.0,"w":12.0,"h":16.0},"align":"left","bold":true,"#,
+        r#""underline":true,"underlineStyle":"double","fontFamily":"Calibri","#,
+        r#""wrap":{"width":8.0,"lineHeight":18.0,"valign":"top","maxLines":2}}"#,
+    );
+
+    fn two_runs() -> Vec<TextRun> {
+        vec![
+            TextRun {
+                start: 0,
+                end: 1,
+                bold: Some(true),
+                color: Some("#ff0000".into()),
+                ..TextRun::default()
+            },
+            TextRun {
+                start: 1,
+                end: 2,
+                font_family: Some("Cambria".into()),
+                font_size: Some(14.0),
+                italic: Some(false),
+                underline: Some(true),
+                underline_style: Some(RunUnderline::Double),
+                strike: Some(true),
+                baseline: Some(TextRunBaseline::Superscript),
+                ..TextRun::default()
+            },
+        ]
+    }
+
+    #[test]
+    fn text_without_runs_serializes_as_before() {
+        let json = serde_json::to_string(&styled_text(Vec::new())).unwrap();
+        assert_eq!(json, STYLED_TEXT_JSON);
+        assert_eq!(
+            serde_json::from_str::<DrawCmd>(STYLED_TEXT_JSON).unwrap(),
+            styled_text(Vec::new())
+        );
+    }
+
+    #[test]
+    fn text_runs_serialize_last_in_camel_case_without_unset_properties() {
+        let json = serde_json::to_string(&styled_text(two_runs())).unwrap();
+        let runs = concat!(
+            r##","runs":[{"start":0,"end":1,"bold":true,"color":"#ff0000"},"##,
+            r#"{"start":1,"end":2,"fontFamily":"Cambria","fontSize":14.0,"italic":false,"#,
+            r#""underline":true,"underlineStyle":"double","strike":true,"#,
+            r#""baseline":"superscript"}]}"#,
+        );
+        let expected = format!("{}{runs}", STYLED_TEXT_JSON.strip_suffix('}').unwrap());
+        assert_eq!(json, expected);
+        assert_eq!(
+            serde_json::from_str::<DrawCmd>(&json).unwrap(),
+            styled_text(two_runs())
+        );
+    }
+
+    #[test]
+    fn scaled_scales_run_font_sizes() {
+        let dl = DisplayList {
+            commands: vec![styled_text(two_runs())],
+            ..sample()
+        };
+        let DrawCmd::Text {
+            font_size, runs, ..
+        } = &scaled(dl, 2.0).commands[0]
+        else {
+            panic!("expected text");
+        };
+        assert_eq!(*font_size, 22.0);
+        assert_eq!(
+            runs.iter().map(|run| run.font_size).collect::<Vec<_>>(),
+            vec![None, Some(28.0)]
+        );
+        assert_eq!(runs[1].start, 1);
+        assert_eq!(runs[1].end, 2);
+    }
+
+    fn span(start: u32, end: u32) -> TextRun {
+        TextRun {
+            start,
+            end,
+            ..TextRun::default()
+        }
+    }
+
+    #[test]
+    fn run_byte_range_converts_utf16_offsets() {
+        let text = "A中😀B";
+        let range = |start, end| span(start, end).byte_range(text);
+        assert_eq!(range(0, 1), 0..1);
+        assert_eq!(range(1, 2), 1..4);
+        assert_eq!(range(2, 4), 4..8);
+        assert_eq!(range(4, 5), 8..9);
+        assert_eq!(range(1, 3), 1..4);
+        assert_eq!(range(3, 5), 4..9);
+        assert_eq!(range(0, 99), 0..9);
+        assert_eq!(range(7, 99), 9..9);
+        assert_eq!(range(4, 2), 8..8);
     }
 }

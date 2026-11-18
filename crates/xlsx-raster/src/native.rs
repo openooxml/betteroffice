@@ -358,6 +358,7 @@ pub fn render_png_with_fonts_and_images(
                 rotation_valign,
                 stacked,
                 wrap,
+                runs: _,
             } => {
                 let run = font::TextRun {
                     x: *x,
@@ -439,3 +440,7 @@ pub fn render_png_with_fonts_and_images(
 
     ooxml_raster::encode_png(pixmap, w, h)
 }
+
+#[cfg(test)]
+#[path = "native_rich_text_tests.rs"]
+mod rich_text_tests;
