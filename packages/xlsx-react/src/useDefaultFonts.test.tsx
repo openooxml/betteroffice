@@ -122,3 +122,57 @@ test('changing the remote font source hands the painted frame to the new painter
   expect(module.create.mock.calls.map((call) => (call as unknown as [unknown, unknown, { remoteFonts?: unknown }])[2].remoteFonts)).toEqual(['off', 'bunny']);
   expect(module.painter.adopt.mock.calls.map(([list]) => list)).toEqual([text]);
 });
+
+function sourceHook(owner: unknown) {
+  return renderHook(
+    ({ owner, remote }: { owner: unknown; remote: 'off' | 'bunny' }) => useDefaultFonts(owner, decoder, undefined, () => {}, undefined, remote),
+    { initialProps: { owner, remote: 'off' as 'off' | 'bunny' } });
+}
+
+const flush = () => act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+test('a remote font source change right after the opening frame hands that frame to the new painter', async () => {
+  const module = painterModule();
+  const { result, rerender } = sourceHook(null);
+  const text = frame('Tahoma');
+  await settleModule(module);
+  result.current(text, () => {});
+  rerender({ owner: 'workbook', remote: 'off' });
+  await flush();
+  module.painter.adopt.mockClear();
+  rerender({ owner: 'workbook', remote: 'bunny' });
+  await flush();
+  expect(module.painter.adopt.mock.calls.map(([list]) => list)).toEqual([text]);
+});
+
+test('a frame painted while default fonts were off is the one handed over when they come back', async () => {
+  const module = painterModule();
+  const { result, rerender } = renderHook(
+    ({ fonts }: { fonts: boolean | undefined }) => useDefaultFonts('workbook', decoder, fonts, () => {}),
+    { initialProps: { fonts: undefined as boolean | undefined } });
+  await settleModule(module);
+  result.current(frame('Calibri'), () => {});
+  rerender({ fonts: false });
+  await flush();
+  const latest = frame('Tahoma');
+  result.current(latest, () => {});
+  module.painter.adopt.mockClear();
+  rerender({ fonts: undefined });
+  await flush();
+  expect(module.painter.adopt.mock.calls.map(([list]) => list)).toEqual([latest]);
+});
+
+test('a closed workbook leaves no frame behind for its owner coming back', async () => {
+  const module = painterModule();
+  const { result, rerender } = sourceHook('workbook');
+  await settleModule(module);
+  result.current(frame('Tahoma'), () => {});
+  rerender({ owner: null, remote: 'off' });
+  await flush();
+  module.painter.adopt.mockClear();
+  rerender({ owner: 'workbook', remote: 'off' });
+  await flush();
+  rerender({ owner: 'workbook', remote: 'bunny' });
+  await flush();
+  expect(module.painter.adopt).not.toHaveBeenCalled();
+});

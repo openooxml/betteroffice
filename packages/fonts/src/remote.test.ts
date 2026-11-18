@@ -249,6 +249,34 @@ describe('provider stylesheets', () => {
     }
   });
 
+  test('a load abandoned right after its slices resolve requests no font file', async () => {
+    const original = globalThis.FontFace;
+    globalThis.FontFace = class { async load() { return this; } } as unknown as typeof FontFace;
+    try {
+      for (const text of ['Hello', undefined]) {
+        const controller = new AbortController();
+        const check = controller.signal.throwIfAborted.bind(controller.signal);
+        let checks = 0;
+        controller.signal.throwIfAborted = () => {
+          check();
+          if (++checks === 1) queueMicrotask(() => controller.abort());
+        };
+        const fetch = mock(async (url: string | URL | Request) =>
+          String(url).includes('/css?') ? new Response(BUNNY_CSS) : new Response(new Uint8Array([1])));
+        const fontSet = { add: mock(() => {}) } as unknown as FontFaceSet;
+        await expect(loadRemoteFontFaces('Tahoma', 'Tahoma', { weight: 400, style: 'normal' }, fontSet, {
+          fetch: fetch as unknown as typeof globalThis.fetch, signal: controller.signal,
+          provider: { cssUrl: `https://fonts.example.com/abandoned-${text ?? 'whole'}/css` }, ...(text === undefined ? {} : { text }),
+        })).rejects.toThrow();
+        expect(checks).toBeGreaterThan(1);
+        expect(fetch.mock.calls.map((call) => String(call[0])).filter((url) => !url.includes('/css?'))).toEqual([]);
+        expect((fontSet.add as unknown as ReturnType<typeof mock>)).not.toHaveBeenCalled();
+      }
+    } finally {
+      globalThis.FontFace = original;
+    }
+  });
+
   test('unicode-range values match single points, spans and wildcards', () => {
     expect(unicodeRangeIncludes('U+0000-00FF,U+0131', 0x41)).toBe(true);
     expect(unicodeRangeIncludes('U+0000-00FF,U+0131', 0x131)).toBe(true);
