@@ -652,19 +652,6 @@ pub(crate) fn parse_raw_op(value: &Value) -> EngineResult<RawOp> {
                 .ok_or_else(|| EngineError::message("removeComment requires a string \"id\""))?
                 .to_owned(),
         }),
-        "openComment" => Ok(RawOp::OpenComment {
-            id: value
-                .get("id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| EngineError::message("openComment requires a string \"id\""))?
-                .to_owned(),
-            side: value
-                .get("side")
-                .and_then(Value::as_str)
-                .filter(|side| matches!(*side, "start" | "end" | "before"))
-                .ok_or_else(|| EngineError::message("openComment requires a \"side\""))?
-                .to_owned(),
-        }),
         other => Err(EngineError::message(format!("unknown raw op {other:?}"))),
     }
 }

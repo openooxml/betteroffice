@@ -116,8 +116,10 @@ interface Built {
   last: string;
   bold: { story: string; to: number };
   typing: Partial<Record<ActionName, Typing>>;
-  /** Each comment's anchors after opening, as `[story, open side]`. */
-  anchors: Record<number, Array<[string, string | null]>>;
+  /** The stories each comment is shown in after opening. */
+  anchors: Record<number, string[]>;
+  /** The comments the session lists. */
+  listed: string[];
 }
 
 const BUILT: Built[] = [
@@ -136,7 +138,8 @@ const BUILT: Built[] = [
       'typing in the next paragraph': { story: 'body', paragraph: 1, offset: 5, text: 'one.Beta Xtwo.Gamma' },
       'typing where the range ends': { story: CELL_A, paragraph: 0, offset: 2, text: 'one.Beta two.GaXmma' },
     },
-    anchors: { 1: [['body', 'end'], [CELL_A, 'start']] },
+    anchors: { 1: ['body'] },
+    listed: ['1', '2'],
   },
   {
     name: 'a comment that ends in a later body paragraph',
@@ -150,7 +153,8 @@ const BUILT: Built[] = [
       'typing in the next paragraph': { story: 'body', paragraph: 1, offset: 5, text: 'one.Beta Xtwo.Gamma' },
       'typing where the range ends': { story: 'body', paragraph: 2, offset: 2, text: 'one.Beta two.GaXmma' },
     },
-    anchors: { 1: [['body', null]] },
+    anchors: { 1: ['body'] },
+    listed: ['1', '2'],
   },
   {
     name: 'a comment that ends in a text box',
@@ -166,7 +170,8 @@ const BUILT: Built[] = [
       'typing where the range starts': { story: 'body', paragraph: 0, offset: 7, text: 'oXne.Beta two.Box Gamma' },
       'typing in the next paragraph': { story: 'body', paragraph: 1, offset: 5, text: 'one.Beta Xtwo.Box Gamma' },
     },
-    anchors: { 1: [['body', 'end']] },
+    anchors: { 1: ['body'] },
+    listed: ['1', '2'],
   },
   {
     name: 'a comment from one cell to the start of the next',
@@ -184,7 +189,8 @@ const BUILT: Built[] = [
       'typing where the range starts': { story: CELL_A, paragraph: 0, offset: 2, text: 'LeXft cell text.' },
       'typing where the range ends': { story: CELL_B, paragraph: 0, offset: 2, after: 'RiXght' },
     },
-    anchors: { 1: [[CELL_A, 'end'], [CELL_B, 'before']] },
+    anchors: { 1: [CELL_A] },
+    listed: ['1', '2'],
   },
   {
     name: 'three comments from one cell to the start of the next',
@@ -205,11 +211,8 @@ const BUILT: Built[] = [
       'typing where the range starts': { story: CELL_A, paragraph: 0, offset: 2, text: 'LeXft cell text.' },
       'typing where the range ends': { story: CELL_B, paragraph: 0, offset: 2, after: 'RiXght' },
     },
-    anchors: {
-      1: [[CELL_A, 'end'], [CELL_B, 'before']],
-      4: [[CELL_A, 'end'], [CELL_B, 'start']],
-      5: [[CELL_A, 'end'], [CELL_B, 'start']],
-    },
+    anchors: { 1: [CELL_A], 4: [CELL_A], 5: [CELL_A] },
+    listed: ['1', '2', '4', '5'],
   },
 ];
 
@@ -217,10 +220,14 @@ const ROUTES = ['path that seeds in Rust', 'worker engine', 'path that seeds in 
 type Route = (typeof ROUTES)[number];
 const KEEPS_BYTES = (route: Route) => route !== 'path that seeds in TypeScript';
 
-type Editable = Pick<YrsSession, 'paragraphs' | 'insertText' | 'toggleMark' | 'applyRawOps'>;
+type Editable = Pick<
+  YrsSession,
+  'paragraphs' | 'insertText' | 'toggleMark' | 'applyRawOps' | 'resolveComment' | 'listComments'
+>;
 
 interface Opened {
   session: Editable;
+  revisions(): number;
   save(comments: (list: Comment[]) => Comment[]): Promise<Uint8Array>;
   destroy(): void;
 }
@@ -251,6 +258,7 @@ async function open(route: Route, bytes: Uint8Array): Promise<Opened> {
     const host = session.openDocx(bytes.slice(), true).document;
     return {
       session,
+      revisions: () => session.listRevisions().length,
       save: async (comments) => editorSave(session, session.materializeDocx()!, comments(hostComments(host)), host),
       destroy: () => session.destroy(),
     };
@@ -262,6 +270,7 @@ async function open(route: Route, bytes: Uint8Array): Promise<Opened> {
     const base = { ...parsed, originalBuffer: parsed.originalBuffer ?? bytes.slice().buffer };
     return {
       session,
+      revisions: () => session.listRevisions().length,
       save: async (comments) => editorSave(session, base, comments(hostComments(parsed))),
       destroy: () => session.destroy(),
     };
@@ -270,6 +279,7 @@ async function open(route: Route, bytes: Uint8Array): Promise<Opened> {
   const hostJson = engine.openDocx(bytes.slice(), undefined, 'comment-range');
   return {
     session: engine,
+    revisions: () => engine.proposalEngine.listRevisions().length,
     save: async (comments) => {
       const listed = comments(hostComments(decodeDocxHostJson(hostJson, bytes.slice()).document));
       return new Uint8Array(await engine.save(bytes.slice(), hostJson, undefined, listed, { full: false }));
@@ -419,15 +429,81 @@ describe('a comment range whose end lies in another story', () => {
   );
 });
 
-describe('the anchors both loaders give a comment range that crosses stories', () => {
-  const anchorsOf = (session: YrsSession, id: number) =>
-    session
+const anchorsOf = (session: Pick<YrsSession, 'resolveComment'>, id: number) => {
+  try {
+    return session
       .resolveComment(String(id))
       .slice()
       .sort((a, b) => a.story.localeCompare(b.story) || a.start - b.start);
+  } catch {
+    return [];
+  }
+};
+const shownIn = (session: Pick<YrsSession, 'resolveComment'>, id: number) => [
+  ...new Set(anchorsOf(session, id).map((anchor) => anchor.story)),
+];
+const listedIds = (session: Pick<YrsSession, 'listComments'>) =>
+  session
+    .listComments()
+    .map((comment) => comment.id)
+    .sort();
 
+describe('a comment range end whose start is not in its story', () => {
+  it.each(BUILT.flatMap((built) => ROUTES.map((route) => [built.name, route, built] as [string, Route, Built])))(
+    '%s, opened by the %s, is shown and listed only as opened after an edit and a save',
+    async (_name, route, built) => {
+      const opened = await open(route, built.bytes);
+      try {
+        const action = built.typing['typing where the range ends'] ? 'typing where the range ends' : 'no edit';
+        await opened.save(act(opened.session, built, action));
+        expect([
+          built.ids.map((id) => shownIn(opened.session, id)),
+          listedIds(opened.session),
+          opened.revisions(),
+        ]).toEqual([built.ids.map((id) => built.anchors[id]), built.listed, 0]);
+      } finally {
+        opened.destroy();
+      }
+    },
+    TIMEOUT
+  );
+
+  const LONE = (id: number, ids: number[]) =>
+    docx(para(run('Plain one.')) + para(`${run('Lone')}${end(id)}${run(' end.')}`) + para(run('Last.')), ids);
+  const ORPHANS: Array<[string, number, Uint8Array]> = [
+    ['an end whose comment has no start anywhere', 3, LONE(3, [3])],
+    ['an end whose id has no comment', 9, LONE(9, [])],
+  ];
+
+  it.each(ORPHANS.flatMap(([name, id, bytes]) => ROUTES.map((route) => [name, route, id, bytes] as [string, Route, number, Uint8Array])))(
+    '%s, opened by the %s, is saved as main saves it and shows nothing after an edit in its paragraph',
+    async (_name, route, id, bytes) => {
+      const source = documentBody(bytes);
+      const opened = await open(route, bytes);
+      try {
+        const { paraId } = opened.session.paragraphs('body')[1]!;
+        opened.session.insertText({ story: 'body', paraId, offset: 1 }, 'X');
+        const xml = documentBody(await opened.save((list) => list));
+        const kinds = placed(xml, id).marks.split(' ').filter(Boolean);
+        const kept = id === 9 ? null : placed(source, id);
+        expect([
+          kept ? placed(xml, id) : kinds.filter((kind) => kind === 'Start').length,
+          kinds.filter((kind) => kind === 'End').length <= 1,
+          shownIn(opened.session, id),
+          listedIds(opened.session).includes('9'),
+          opened.revisions(),
+        ]).toEqual([kept ?? 0, true, [], false, 0]);
+      } finally {
+        opened.destroy();
+      }
+    },
+    TIMEOUT
+  );
+});
+
+describe('the anchors both loaders give a comment range that crosses stories', () => {
   it.each(BUILT.map((built) => [built.name, built] as [string, Built]))(
-    '%s is seeded with the same anchors and open sides by the Rust and the TypeScript loader',
+    '%s gets the same anchors, in the story where it starts, from the Rust and the TypeScript loader',
     async (_name, built) => {
       const rust = await createYrsSession({ clientId: (clientId += 1) });
       const typescript = await createYrsSession({ clientId: (clientId += 1) });
@@ -435,9 +511,8 @@ describe('the anchors both loaders give a comment range that crosses stories', (
         rust.openDocx(built.bytes.slice(), true);
         documentToYrs(typescript, await parseDocx(built.bytes.slice().buffer, { preloadFonts: false }));
         for (const id of built.ids) {
-          const seeded = anchorsOf(rust, id);
-          expect([id, seeded.map((anchor) => [anchor.story, anchor.open ?? null])]).toEqual([id, built.anchors[id]]);
-          expect([id, anchorsOf(typescript, id)]).toEqual([id, seeded]);
+          expect([id, shownIn(rust, id)]).toEqual([id, built.anchors[id]]);
+          expect([id, anchorsOf(typescript, id)]).toEqual([id, anchorsOf(rust, id)]);
         }
       } finally {
         rust.destroy();

@@ -225,7 +225,6 @@ pub(crate) fn write_data_urls<'a>(
             RawOp::Insert { .. }
             | RawOp::Delete { .. }
             | RawOp::Format { .. }
-            | RawOp::OpenComment { .. }
             | RawOp::RemoveComment { .. } => {}
         }
     }

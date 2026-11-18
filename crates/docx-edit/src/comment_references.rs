@@ -87,9 +87,6 @@ fn range_ends<T: ReadTxn>(txn: &T, comment_id: &str) -> BTreeMap<String, u32> {
         return ends;
     };
     for anchor in anchors.iter().filter_map(|value| decode_anchor(value).ok()) {
-        if matches!(anchor.open.as_deref(), Some("end" | "before")) {
-            continue;
-        }
         if crate::story_text(txn, &anchor.story).is_none() {
             continue;
         }

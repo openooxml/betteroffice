@@ -45,7 +45,7 @@ import {
   tableColumnCount,
 } from './tableParagraphFormatting';
 import type { Style } from '../types/styles';
-import type { YrsCommentOpenSide, YrsOpeningOptions, YrsRawOp, YrsSession } from './index';
+import type { YrsOpeningOptions, YrsRawOp, YrsSession } from './index';
 import { noteYrsStoriesDirty } from './yrsToDocument';
 import { calculateRowSpans, type RowSpanInfo } from './tableRowSpans';
 import { recoverGroupedStorySeeds } from './groupedStorySeed';
@@ -163,8 +163,6 @@ interface StoryPlan {
   units: InlineUnit[];
   commentMarks: CommentMark[];
   commentCoverage: Map<number, Array<[number, number]>>;
-  /** Comments whose range here continues from (`start`, `before`) or into (`end`) another story. */
-  commentOpen: Array<[number, YrsCommentOpenSide]>;
 }
 
 interface StoryOptions {
@@ -1820,7 +1818,6 @@ function addCommentCoverage(plan: StoryPlan): void {
   };
   const open: Array<{ id: number; start: number; paragraphEnd?: number }> = [];
   let offset = 0;
-  let paragraphStart = 0;
   let markIndex = 0;
   for (let unitIndex = 0; unitIndex <= plan.units.length; unitIndex += 1) {
     while (plan.commentMarks[markIndex]?.unit === unitIndex) {
@@ -1834,29 +1831,18 @@ function addCommentCoverage(plan: StoryPlan): void {
         if (index !== -1) {
           const [range] = open.splice(index, 1);
           addRange(range!.id, range!.start, offset);
-        } else {
-          if (!plan.commentCoverage.has(mark.id)) plan.commentCoverage.set(mark.id, []);
-          const within = offset > paragraphStart;
-          addRange(mark.id, within ? paragraphStart : offset, within ? offset : offset + 1);
-          plan.commentOpen.push([mark.id, within ? 'start' : 'before']);
         }
       }
     }
     const unit = plan.units[unitIndex];
     if (unit) {
-      const width = unit.kind === 'text' ? unit.text.length : 1;
       if (unit.kind === 'embed' && unit.embedKind === 'pilcrow') {
         for (const range of open) range.paragraphEnd ??= offset;
-        paragraphStart = offset + width;
       }
-      offset += width;
+      offset += unit.kind === 'text' ? unit.text.length : 1;
     }
   }
-  for (const range of open) {
-    const end = range.paragraphEnd ?? offset;
-    if (end > range.start) plan.commentOpen.push([range.id, 'end']);
-    addRange(range.id, range.start, end);
-  }
+  for (const range of open) addRange(range.id, range.start, range.paragraphEnd ?? offset);
   for (const [id, intervals] of plan.commentCoverage) {
     if (intervals.length === 0) plan.commentCoverage.delete(id);
   }
@@ -1997,7 +1983,6 @@ function visitStory(
     units: [],
     commentMarks: [],
     commentCoverage: new Map(),
-    commentOpen: [],
   };
   context.plans.push(plan);
   const source = sourceBlocks.length > 0;
@@ -2164,7 +2149,6 @@ function seedPlan(session: YrsSession, plan: StoryPlan): void {
       body: null,
     });
   }
-  for (const [id, side] of plan.commentOpen) ops.push({ op: 'openComment', id: String(id), side });
   session.applySeedRawOps(plan.storyId, ops);
 }
 

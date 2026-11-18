@@ -57,10 +57,6 @@ pub enum RawOp {
         date: String,
         body: Any,
     },
-    /// Marks the comment's anchors in this story as continuing from (`side` "start") or into
-    /// ("end") another story: a save writes no range mark on that side of them. With "before"
-    /// the range comes from another story and ends where the anchor starts.
-    OpenComment { id: String, side: String },
     /// Remove the side-map comment keyed by `id`. Errors when it does not exist.
     RemoveComment { id: String },
 }
@@ -493,10 +489,7 @@ fn authors_last_paragraph(ops: &[RawOp], mut len: u32) -> bool {
                 len = len.saturating_sub(*removed);
                 continue;
             }
-            RawOp::Format { .. }
-            | RawOp::SetComment { .. }
-            | RawOp::OpenComment { .. }
-            | RawOp::RemoveComment { .. } => {
+            RawOp::Format { .. } | RawOp::SetComment { .. } | RawOp::RemoveComment { .. } => {
                 continue;
             }
         };
@@ -562,9 +555,7 @@ fn apply_raw_ops_to_story(
             op => {
                 run.flush(&story, txn, shared)?;
                 match &op {
-                    RawOp::SetComment { .. }
-                    | RawOp::OpenComment { .. }
-                    | RawOp::RemoveComment { .. } => {}
+                    RawOp::SetComment { .. } | RawOp::RemoveComment { .. } => {}
                     RawOp::Insert { .. } | RawOp::InsertEmbed { .. } => {
                         run.seed_candidate = false;
                         run.seed_range = None;
@@ -743,29 +734,6 @@ fn apply_raw_op_absolute(
             comment.insert(txn, "body", body);
             comment.insert(txn, "anchors", Any::Array(Arc::from(anchors)));
         }
-        RawOp::OpenComment { id, side } => {
-            let comment = txn
-                .get_map(COMMENTS)
-                .expect("comments root is declared by EditingDoc::new")
-                .get(txn, id.as_str())
-                .and_then(|value| value.cast::<MapRef>().ok())
-                .ok_or_else(|| OpError::UnknownComment(id.clone()))?;
-            let Some(Out::Any(Any::Array(anchors))) = comment.get(txn, "anchors") else {
-                return Err(OpError::InvalidComment("anchors must be an array".into()));
-            };
-            let anchors: Vec<Any> = anchors
-                .iter()
-                .map(|anchor| match anchor {
-                    Any::Map(map) if map.get("story") == Some(&Any::from(story_id)) => {
-                        let mut map = (**map).clone();
-                        map.insert("open".into(), Any::from(side.as_str()));
-                        Any::Map(Arc::new(map))
-                    }
-                    anchor => anchor.clone(),
-                })
-                .collect();
-            comment.insert(txn, "anchors", Any::Array(Arc::from(anchors)));
-        }
         RawOp::RemoveComment { id } => {
             let comments = txn
                 .get_map(COMMENTS)
@@ -931,7 +899,6 @@ mod tests {
                     comment.insert(txn, "body", body);
                     comment.insert(txn, "anchors", Any::Array(Arc::from(anchors)));
                 }
-                RawOp::OpenComment { .. } => {}
                 RawOp::RemoveComment { id } => {
                     let comments = txn
                         .get_map(COMMENTS)

@@ -568,18 +568,11 @@ export type YrsStorySegment =
       attributes: Record<string, unknown>;
     };
 
-/**
- * How a comment anchor continues in another story: `start` and `end` name the side on which its
- * range does, and `before` a range from another story that ends where the anchor starts.
- */
-export type YrsCommentOpenSide = 'start' | 'end' | 'before';
-
 /** Current offsets of one sticky comment anchor. */
 export interface YrsResolvedCommentAnchor {
   story: string;
   start: number;
   end: number;
-  open?: YrsCommentOpenSide;
 }
 
 /** A paragraph's story span; `end` is its pilcrow, so `end - start` is the paragraph length. */
@@ -652,12 +645,6 @@ export type YrsRawOp =
       author?: string;
       date?: string;
       body?: unknown;
-    }
-  | {
-      /** Marks the comment's anchors in this story as continuing in another story. */
-      op: 'openComment';
-      id: string;
-      side: YrsCommentOpenSide;
     }
   | {
       /** Removes the side-map comment keyed by `id`; errors when missing. */

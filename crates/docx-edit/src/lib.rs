@@ -532,9 +532,6 @@ pub struct CommentAnchor {
     pub story: StoryId,
     pub start: StickyIndex,
     pub end: StickyIndex,
-    /// The side, "start" or "end", on which the range continues in another story; "before"
-    /// when it comes from another story and ends where this anchor starts.
-    pub open: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2552,10 +2549,6 @@ fn decode_anchor(value: &Any) -> EditResult<CommentAnchor> {
         story,
         start: decode_sticky("start")?,
         end: decode_sticky("end")?,
-        open: match value.get("open") {
-            Some(Any::String(open)) => Some(open.to_string()),
-            _ => None,
-        },
     })
 }
 
