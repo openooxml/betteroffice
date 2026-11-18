@@ -122,14 +122,16 @@ fn inline_runs_follow_implicit_cell_addresses() {
 }
 
 #[test]
-fn phonetics_and_inter_run_whitespace_keep_legacy_plain_text() {
+fn phonetic_text_stays_in_the_value_outside_the_base_runs() {
     let parsed = rich_package(
-        "<si><r><t>漢</t></r><rPh sb=\"0\" eb=\"1\"><t>kan</t></rPh></si><si>\n<r><t>x</t></r>\n</si>",
-        "<r><t>字</t></r><rPh><t>ji</t></rPh>",
+        r#"<si><r><rPr><b/></rPr><t>漢</t></r><rPh sb="0" eb="1"><t>kan</t></rPh><phoneticPr fontId="1" type="noConversion"/></si>"#,
+        r#"<r><rPr><i/></rPr><t>字</t></r><rPh sb="0" eb="1"><t>ji</t></rPh><phoneticPr fontId="1"/>"#,
     );
-    assert_eq!(parsed.workbook.shared_strings, ["漢kan", "\nx\n"]);
-    assert!(parsed.package.shared_string_text_runs(0).is_none());
-    assert!(parsed.package.shared_string_text_runs(1).is_none());
+    assert_eq!(parsed.workbook.shared_strings[0], "漢kan");
+    let runs = parsed.package.shared_string_text_runs(0).unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!((runs[0].start, runs[0].end), (0, 3));
+    assert_eq!(runs[0].style.bold, Some(true));
     assert_eq!(
         parsed.workbook.sheets[0]
             .cell(CellRef::new(0, 1))
@@ -139,16 +141,58 @@ fn phonetics_and_inter_run_whitespace_keep_legacy_plain_text() {
             value: "字ji".into()
         }
     );
-    assert!(
-        parsed
-            .package
-            .inline_string_text_runs(0, CellRef::new(0, 1))
-            .is_none()
-    );
+    let runs = parsed
+        .package
+        .inline_string_text_runs(0, CellRef::new(0, 1))
+        .unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!((runs[0].start, runs[0].end), (0, 3));
+    assert_eq!(runs[0].style.italic, Some(true));
 }
 
 #[test]
-fn unsupported_or_invalid_styles_discard_the_whole_item() {
+fn inter_run_whitespace_keeps_legacy_plain_text() {
+    let parsed = rich_package("<si>\n<r><t>x</t></r>\n</si>", "<t/>");
+    assert_eq!(parsed.workbook.shared_strings, ["\nx\n"]);
+    assert!(parsed.package.shared_string_text_runs(0).is_none());
+}
+
+#[test]
+fn unmodelled_properties_keep_the_run_and_its_known_properties() {
+    for property in [
+        r#"<family val="2"/>"#,
+        r#"<charset val="129"/>"#,
+        r#"<scheme val="minor"/>"#,
+        r#"<outline/>"#,
+        r#"<shadow val="1"/>"#,
+        r#"<condense val="0"/>"#,
+        r#"<extend val="0"/>"#,
+        r#"<unknown kind="future"/>"#,
+    ] {
+        let parsed = rich_package(
+            &format!(
+                r#"<si><r><t>first</t></r><r><rPr><b/>{property}<sz val="9"/></rPr><t>last</t></r></si>"#
+            ),
+            &format!(r#"<r><rPr>{property}<i/></rPr><t>inline</t></r>"#),
+        );
+        let runs = parsed
+            .package
+            .shared_string_text_runs(0)
+            .unwrap_or_else(|| panic!("{property}"));
+        assert_eq!(runs.len(), 2, "{property}");
+        assert_eq!((runs[1].start, runs[1].end), (5, 9), "{property}");
+        assert_eq!(runs[1].style.bold, Some(true), "{property}");
+        assert_eq!(runs[1].style.size_pt, Some(9.0), "{property}");
+        let runs = parsed
+            .package
+            .inline_string_text_runs(0, CellRef::new(0, 1))
+            .unwrap_or_else(|| panic!("{property}"));
+        assert_eq!(runs[0].style.italic, Some(true), "{property}");
+    }
+}
+
+#[test]
+fn malformed_or_repeated_known_properties_discard_the_whole_item() {
     for property in [
         r#"<sz val="NaN"/>"#,
         r#"<sz val="0"/>"#,
@@ -157,8 +201,8 @@ fn unsupported_or_invalid_styles_discard_the_whole_item() {
         r#"<vertAlign val="raised"/>"#,
         r#"<color theme="2" tint="inf"/>"#,
         r#"<color rgb="invalid"/>"#,
-        r#"<outline/>"#,
-        r#"<unknown/>"#,
+        r#"<b/><b/>"#,
+        r#"<rFont val="Aptos"/><rFont val="Calibri"/>"#,
     ] {
         let parsed = rich_package(
             &format!(

@@ -533,7 +533,7 @@ mod tests {
     fn invalid_items_do_not_charge_subsequent_runs_or_styles() {
         for (prefix, charged) in [
             ("<unsupported/>", 0),
-            ("<r><rPr><unsupported/></rPr><t>x</t></r>", 1),
+            (r#"<r><rPr><sz val="0"/></rPr><t>x</t></r>"#, 1),
             ("<r><t>mismatch</t></r>", 1),
         ] {
             let mut index = RichTextIndex::default();
