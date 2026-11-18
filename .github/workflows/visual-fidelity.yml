@@ -1692,7 +1692,7 @@ jobs:
         if: ${{ (!inputs.private_corpus && !inputs.report_only && inputs.corpus_origin == '' && inputs.samples == '' && inputs.collection == 'office-quality') || (inputs.private_corpus && inputs.publish_readme && !inputs.report_only) }}
         env:
           QUALITY_PRIVATE: ${{ inputs.private_corpus }}
-        run: node scripts/office-quality/readme.mjs --section "$RUNNER_TEMP/fidelity-report/section.md" README.md
+        run: node scripts/office-quality/readme.mjs --section "$RUNNER_TEMP/fidelity-report/section.md" --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" README.md
 
       - name: Detect a changed report
         id: changed
