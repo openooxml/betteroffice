@@ -108,7 +108,8 @@ pub struct ConditionalStats {
     /// Rules built whose cells parse their translated formula text instead of
     /// shifting the anchor's parse.
     pub slow_rules: u64,
-    /// Rule checks plus cell visits the last display list spent.
+    /// Rule checks, cell visits, formulas compiled and rule range tests the
+    /// last display list spent.
     pub units: u64,
     /// Decided cells held.
     pub cached_cells: usize,
@@ -221,6 +222,13 @@ enum Test {
     Undecidable(Unknown),
 }
 
+/// A cell's conditional format, or a whole-range build the frame has no
+/// room left for, which waits for a frame it starts.
+enum Decision {
+    Paint(Option<Arc<DifferentialFormat>>),
+    Later,
+}
+
 #[derive(Clone, Copy)]
 enum Op {
     Compare(BinaryOp),
@@ -316,8 +324,19 @@ impl Cache {
                 self.previous = std::mem::take(&mut self.results);
             }
         }
+        let (limit, clock) = match budget {
+            Budget::Frame(None) => (self.budget, None),
+            Budget::Frame(Some(clock)) => (self.budget.saturating_mul(TIMED_FRAMES), Some(clock)),
+            Budget::Complete => (u64::MAX, None),
+        };
+        let deadline = clock.map(|clock| clock.now_ms() + CONDITIONAL_FRAME_MS);
+        let mut scanned = 0u64;
         if !self.rules.contains_key(&sheet) {
             let built: Arc<[Rule]> = rules(model, sheet).into();
+            scanned += built
+                .iter()
+                .map(|rule| rule.formulas.len() as u64)
+                .sum::<u64>();
             self.stats.formula_parses += built
                 .iter()
                 .flat_map(|rule| &rule.formulas)
@@ -336,16 +355,14 @@ impl Cache {
         let rules = Arc::clone(&self.rules[&sheet]);
         let mut formats = CellFormats::new();
         self.stats.pending = 0;
-        self.stats.units = 0;
+        self.stats.units = scanned;
         if rules.is_empty() {
             return (formats, 0);
         }
-        let (limit, clock) = match budget {
-            Budget::Frame(None) => (self.budget, None),
-            Budget::Frame(Some(clock)) => (self.budget.saturating_mul(TIMED_FRAMES), Some(clock)),
-            Budget::Complete => (u64::MAX, None),
-        };
-        let mut deadline = None;
+        let range_tests = rules
+            .iter()
+            .map(|rule| rule.ranges.len() as u64)
+            .sum::<u64>();
         let mut decided = 0u64;
         let mut checked = 0u64;
         let mut stopped = false;
@@ -354,6 +371,9 @@ impl Cache {
         let mut pending = 0u32;
         let mut caching = true;
         for row in rows.iter().cloned().flatten() {
+            if !stopped {
+                scanned += range_tests;
+            }
             let candidates: Vec<usize> = (0..rules.len())
                 .filter(|&index| {
                     rules[index]
@@ -367,6 +387,9 @@ impl Cache {
             }
             for col in cols.iter().cloned().flatten() {
                 let at = CellRef::new(row, col);
+                if !stopped {
+                    scanned += candidates.len() as u64;
+                }
                 let Some(first) = candidates
                     .iter()
                     .map(|&index| &rules[index])
@@ -375,7 +398,19 @@ impl Cache {
                     continue;
                 };
                 let key = (sheet, row, col);
-                let result = match (self.results.get(&key).cloned(), first.undecidable()) {
+                let cached = self.results.get(&key).cloned();
+                if !stopped && decided > 0 {
+                    if spent >= limit {
+                        stopped = true;
+                    } else if let (Some(clock), Some(deadline)) = (clock, deadline)
+                        && (spent + scanned >= checked + CLOCK_UNITS
+                            || (cached.is_none() && decided.is_multiple_of(CLOCK_STRIDE)))
+                    {
+                        checked = spent + scanned;
+                        stopped = clock.now_ms() >= deadline;
+                    }
+                }
+                let result = match (cached, first.undecidable()) {
                     (Some(result), _) => {
                         self.stats.hits += 1;
                         result
@@ -387,39 +422,41 @@ impl Cache {
                         }
                         None
                     }
-                    (None, None) => {
-                        if !stopped
-                            && spent < limit
-                            && let Some(clock) = clock
-                            && (decided.is_multiple_of(CLOCK_STRIDE)
-                                || spent >= checked + CLOCK_UNITS)
-                        {
-                            let now = clock.now_ms();
-                            checked = spent;
-                            stopped = now >= *deadline.get_or_insert(now + CONDITIONAL_FRAME_MS);
+                    (None, None) if stopped => {
+                        pending += 1;
+                        match self.previous.get(&key) {
+                            Some(result) => result.clone(),
+                            None => continue,
                         }
-                        if stopped || spent >= limit {
-                            pending += 1;
-                            match self.previous.get(&key) {
-                                Some(result) => result.clone(),
-                                None => continue,
+                    }
+                    (None, None) => {
+                        let decision = self.decide(
+                            model,
+                            sheet,
+                            &rules,
+                            &candidates,
+                            at,
+                            &mut context,
+                            &mut spent,
+                            (decided > 0).then_some(limit),
+                        );
+                        match decision {
+                            Decision::Paint(result) => {
+                                decided += 1;
+                                self.stats.evaluated_cells += 1;
+                                if caching {
+                                    caching = self.keep(sheet, at, result.clone(), rows, cols);
+                                }
+                                result
                             }
-                        } else {
-                            decided += 1;
-                            self.stats.evaluated_cells += 1;
-                            let result = self.decide(
-                                model,
-                                sheet,
-                                &rules,
-                                &candidates,
-                                at,
-                                &mut context,
-                                &mut spent,
-                            );
-                            if caching {
-                                caching = self.keep(sheet, at, result.clone(), rows, cols);
+                            Decision::Later => {
+                                stopped = true;
+                                pending += 1;
+                                match self.previous.get(&key) {
+                                    Some(result) => result.clone(),
+                                    None => continue,
+                                }
                             }
-                            result
                         }
                     }
                 };
@@ -429,7 +466,7 @@ impl Cache {
             }
         }
         self.stats.pending = pending;
-        self.stats.units = spent;
+        self.stats.units = spent + scanned;
         (formats, pending)
     }
 
@@ -468,7 +505,8 @@ impl Cache {
         at: CellRef,
         context: &mut EvalContext<'_>,
         spent: &mut u64,
-    ) -> Option<Arc<DifferentialFormat>> {
+        limit: Option<u64>,
+    ) -> Decision {
         let value = model
             .sheet(sheet)
             .and_then(|owner| owner.cell(at))
@@ -480,13 +518,20 @@ impl Cache {
             if !rule.covers(at) {
                 continue;
             }
+            if let Some(limit) = limit
+                && rule.undecidable().is_none()
+                && !self.aggregates.contains_key(&(sheet, index))
+                && build_cost(model, sheet, rule) > limit.saturating_sub(*spent)
+            {
+                return Decision::Later;
+            }
             *spent += 1;
             match self.matches(model, sheet, index, rule, &value, at, context, spent) {
                 Ok(true) => {}
                 Ok(false) => continue,
                 Err(reason) => {
                     self.stats.withhold(reason);
-                    return None;
+                    return Decision::Paint(None);
                 }
             }
             merged = Some(match merged {
@@ -513,7 +558,7 @@ impl Cache {
         if fill_unknown {
             self.stats.withheld_fill += 1;
         }
-        merged
+        Decision::Paint(merged)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1341,6 +1386,73 @@ fn stats(model: &Workbook, sheet: SheetId, rule: &Rule) -> (Stats, u64) {
         }
     };
     (stats, read)
+}
+
+/// Cells a rule's whole-range statistics, constant calls and count tables
+/// read at most, each area cut to the rows its sheet uses.
+fn build_cost(model: &Workbook, sheet: SheetId, rule: &Rule) -> u64 {
+    let whole_range = matches!(
+        rule.test,
+        Test::Top { .. } | Test::Average { .. } | Test::Duplicates { .. }
+    );
+    let ranges: u64 = if whole_range {
+        rule.ranges
+            .iter()
+            .map(|range| cells_used(model, sheet, range))
+            .sum()
+    } else {
+        0
+    };
+    let calls: u64 = rule
+        .formulas
+        .iter()
+        .flat_map(|formula| {
+            formula
+                .constants
+                .iter()
+                .chain(&formula.counts)
+                .filter_map(move |path| formula.base.as_deref().and_then(|base| node(base, path)))
+        })
+        .flat_map(children)
+        .map(|arg| reference_cells(model, sheet, arg))
+        .sum();
+    ranges + calls
+}
+
+fn reference_cells(model: &Workbook, sheet: SheetId, arg: &Expr) -> u64 {
+    let (name, area) = match arg {
+        Expr::Ref { .. } => return 1,
+        Expr::Range { sheet: name, range } => (name, *range),
+        Expr::ColumnRange { sheet: name, range } => (
+            name,
+            CellRange::new(
+                CellRef::new(0, range.start),
+                CellRef::new(MAX_ROWS - 1, range.end),
+            ),
+        ),
+        Expr::RowRange { sheet: name, range } => (
+            name,
+            CellRange::new(
+                CellRef::new(range.start, 0),
+                CellRef::new(range.end, MAX_COLS - 1),
+            ),
+        ),
+        _ => return 0,
+    };
+    let owner = match name {
+        Some(name) => model.sheet_by_name(name).map_or(sheet, |(id, _)| id),
+        None => sheet,
+    };
+    cells_used(model, owner, &area)
+}
+
+/// The cells of `range` on `sheet` above the last row the sheet uses.
+fn cells_used(model: &Workbook, sheet: SheetId, range: &CellRange) -> u64 {
+    let used = xlsx_model::CellProvider::used_rows(model, sheet);
+    let rows = used
+        .min(range.end.row.saturating_add(1))
+        .saturating_sub(range.start.row);
+    u64::from(rows) * u64::from(range.end.col - range.start.col + 1)
 }
 
 fn key(value: &CellValue) -> Option<Key> {
