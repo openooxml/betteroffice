@@ -4,6 +4,7 @@
 "@betteroffice/xlsx-native": patch
 "@betteroffice/python-xlsx": patch
 "@betteroffice/agents": patch
+"@betteroffice/xlsx-react": patch
 ---
 
-XLSX text draw commands gain optional `runs`, spans of the text in their own font, size, style and colour; the canvas, both rasters and the native viewer paint them on single-line text. Nothing emits runs yet, so sheets look the same.
+XLSX cells with rich text now paint each run in its own font, size, style and colour, wrapped or on one line, on screen, in PNG exports and in print. Rotated, stacked and right-to-left cells still paint plain.
