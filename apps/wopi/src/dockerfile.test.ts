@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync, statSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, normalize } from "node:path";
 
 const repoRoot = join(import.meta.dir, "..", "..", "..");
@@ -112,9 +112,28 @@ function resolveImport(fromFile: string, specifier: string): { tsconfig: string;
   return { tsconfig, target: resolveRelative(tsconfig, mapped) };
 }
 
-function walkGraph(): { files: Set<string>; bare: Set<string> } {
+function workspaceEntry(specifier: string): string | undefined {
+  const name = specifier.split("/").slice(0, 2).join("/");
+  const subpath = `.${specifier.slice(name.length)}`;
+  for (const dir of readdirSync(join(repoRoot, "packages"))) {
+    const manifest = `packages/${dir}/package.json`;
+    if (!isFile(manifest)) continue;
+    const pkg = JSON.parse(readFileSync(join(repoRoot, manifest), "utf8")) as {
+      name?: string;
+      exports?: Record<string, string | { import?: string; default?: string }>;
+    };
+    if (pkg.name !== name) continue;
+    const entry = pkg.exports?.[subpath];
+    const file = typeof entry === "string" ? entry : entry?.import ?? entry?.default;
+    return file ? normalize(join("packages", dir, file)).split("\\").join("/") : undefined;
+  }
+  return undefined;
+}
+
+function walkGraph(): { files: Set<string>; bare: Set<string>; workspace: Set<string> } {
   const files = new Set<string>();
   const bare = new Set<string>();
+  const workspace = new Set<string>();
   const stack = ["apps/wopi/src/server.ts"];
   while (stack.length > 0) {
     const file = stack.pop()!;
@@ -140,8 +159,13 @@ function walkGraph(): { files: Set<string>; bare: Set<string> } {
         bare.add(name);
       }
     }
+    const code = text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    for (const match of code.matchAll(SPECIFIER)) {
+      const specifier = match[2] ?? match[3];
+      if (specifier?.startsWith("@betteroffice/") && !match[1]) workspace.add(specifier);
+    }
   }
-  return { files, bare };
+  return { files, bare, workspace };
 }
 
 describe("apps/wopi/Dockerfile", () => {
@@ -193,6 +217,19 @@ describe("apps/wopi/Dockerfile", () => {
       expect(Object.hasOwn(pkg.dependencies, name)).toBe(true);
     }
     expect(bare.has("jszip")).toBe(true);
+  });
+
+  test("runtime copies every workspace package entry the import graph loads statically", () => {
+    const all = stages(readDockerfile());
+    const prefixes = runtimeCoverage(all[all.length - 1]!);
+    const { workspace } = walkGraph();
+    expect([...workspace]).toContain("@betteroffice/fonts/remote");
+    for (const specifier of workspace) {
+      const target = workspaceEntry(specifier);
+      const copied = target !== undefined
+        && prefixes.some((prefix) => target === prefix || target.startsWith(`${prefix}/`));
+      expect({ specifier, target, copied }).toEqual({ specifier, target, copied: true });
+    }
   });
 
   test("test files are pruned before the runtime copy", () => {
