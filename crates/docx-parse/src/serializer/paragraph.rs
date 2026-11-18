@@ -1845,6 +1845,25 @@ mod tests {
     }
 
     #[test]
+    fn complex_field_result_scope_holds_its_separate_character() {
+        let source = format!(
+            r#"<w:p xmlns:w="{WORD}"><w:r><w:t xml:space="preserve">Before </w:t></w:r>{FIELD_OPEN}<w:r><w:t>two</w:t></w:r>{FIELD_CLOSE}<w:r><w:t xml:space="preserve"> after</w:t></w:r></w:p>"#
+        );
+        let output = round_trip(&source);
+        assert_eq!(shown(&output), "Before two after", "{output}");
+        let scoped = region(&output, DIR.0, DIR.1);
+        assert!(
+            scoped.starts_with(r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#),
+            "{output}"
+        );
+        assert!(
+            scoped.ends_with(r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#),
+            "{output}"
+        );
+        assert_eq!(shown(scoped), "two", "{output}");
+    }
+
+    #[test]
     fn unmodeled_word_inline_elements_save_back_verbatim() {
         let output = round_trip(&format!(
             r#"<w:p xmlns:w="{WORD}"><w:r><w:t>a</w:t></w:r><w:zzz><w:r><w:t>x</w:t></w:r></w:zzz><w:r><w:t>b</w:t></w:r></w:p>"#

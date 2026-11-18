@@ -27,14 +27,24 @@ const DEL = (inner: string) => `<w:del w:id="42" w:author="Grace" w:date="2025-0
 const SDT = (inner: string) => `<w:sdt><w:sdtPr><w:id w:val="1"/><w:tag w:val="cc"/></w:sdtPr><w:sdtContent>${inner}</w:sdtContent></w:sdt>`;
 const fldChar = (type: string) => run(`<w:fldChar w:fldCharType="${type}"/>`);
 
+type Spelling = { t: (value: string) => string; dt: (value: string) => string };
+const SOURCE: Spelling = { t, dt };
+const preserved = (value: string) => (/^ | $| {2}/.test(value) ? ' xml:space="preserve"' : '');
+const REWRITTEN: Spelling = {
+  t: value => run(`<w:t${preserved(value)}>${value}</w:t>`),
+  dt: value => run(`<w:delText${preserved(value)}>${value}</w:delText>`),
+};
+
 const paragraph = (inner: string) => `<w:p w14:paraId="1A2B3C01" w14:textId="1A2B3C01">${t('Head ')}${inner}${t(' tail')}</w:p>`;
-const OTHER = `<w:p w14:paraId="1A2B3C02" w14:textId="1A2B3C02">${t('Other')}</w:p>`;
+const other = (spelling: Spelling) => `<w:p w14:paraId="1A2B3C02" w14:textId="1A2B3C02">${spelling.t('Other')}</w:p>`;
+const documentXml = (inner: string, spelling: Spelling = SOURCE) =>
+  `<w:document xmlns:w="${W}" xmlns:r="${R}" xmlns:w14="${W14}"><w:body>${paragraph(inner)}${other(spelling)}${SECTION}</w:body></w:document>`;
 
 function docx(inner: string): Uint8Array {
   return new Uint8Array(rezipPartsToArrayBuffer(new Map([
     ['[Content_Types].xml', toBytes('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')],
     ['_rels/.rels', toBytes(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${R}/officeDocument" Target="word/document.xml"/></Relationships>`)],
-    ['word/document.xml', toBytes(`<w:document xmlns:w="${W}" xmlns:r="${R}" xmlns:w14="${W14}"><w:body>${paragraph(inner)}${OTHER}${SECTION}</w:body></w:document>`)],
+    ['word/document.xml', toBytes(documentXml(inner))],
   ])));
 }
 
@@ -86,20 +96,22 @@ async function savedAsTheEditorSaves(session: YrsSession, base: Document): Promi
 const sessions: YrsSession[] = [];
 let clientId = 78100;
 
-const LOADERS: Array<[string, (bytes: Uint8Array) => Promise<{ session: YrsSession; base: Document }>]> = [
+type Load = (bytes: Uint8Array) => Promise<{ session: YrsSession; base: Document }>;
+
+const LOADERS: Array<[string, Load, Spelling, string]> = [
   ['the Rust loader', async bytes => {
     const session = await createYrsSession({ clientId: (clientId += 1) });
     sessions.push(session);
     session.openDocx(bytes, true);
     return { session, base: session.materializeDocx()! };
-  }],
+  }, SOURCE, 'the source document part unchanged'],
   ['the TypeScript loader', async bytes => {
     const session = await createYrsSession({ clientId: (clientId += 1) });
     sessions.push(session);
     const parsed = await parseDocx(bytes.slice().buffer as ArrayBuffer, { preloadFonts: false });
     documentToYrs(session, parsed);
     return { session, base: { ...parsed, originalBuffer: parsed.originalBuffer ?? (bytes.slice().buffer as ArrayBuffer) } };
-  }],
+  }, REWRITTEN, 'the document part as a rewritten paragraph spells it'],
 ];
 
 beforeAll(async () => {
@@ -110,7 +122,7 @@ afterEach(() => { sessions.splice(0).forEach(session => session.destroy()); });
 
 type Container = {
   name: string;
-  inner: string;
+  inner: (spelling: Spelling) => string;
   scopes: Array<[string, string]>;
   text: string;
   embedded?: true;
@@ -121,32 +133,32 @@ type Container = {
 };
 
 const CONTAINERS: Container[] = [
-  { name: 'a w:dir rtl in a plain paragraph', inner: dir('rtl', t('two')), scopes: [['dir', 'rtl']], text: 'Head two tail' },
-  { name: 'a w:bdo ltr in a plain paragraph', inner: bdo('ltr', t('two')), scopes: [['bdo', 'ltr']], text: 'Head two tail' },
+  { name: 'a w:dir rtl in a plain paragraph', inner: s => dir('rtl', s.t('two')), scopes: [['dir', 'rtl']], text: 'Head two tail' },
+  { name: 'a w:bdo ltr in a plain paragraph', inner: s => bdo('ltr', s.t('two')), scopes: [['bdo', 'ltr']], text: 'Head two tail' },
   {
     name: 'a w:dir inside a hyperlink',
-    inner: `<w:hyperlink w:anchor="target">${dir('rtl', t('two'))}</w:hyperlink>`,
+    inner: s => `<w:hyperlink w:anchor="target">${dir('rtl', s.t('two'))}</w:hyperlink>`,
     scopes: [['dir', 'rtl']],
     text: 'Head two tail',
     container: ['hyperlink', 'dir'],
   },
   {
     name: 'a w:dir inside a tracked insertion',
-    inner: INS(dir('rtl', t('two'))),
+    inner: s => INS(dir('rtl', s.t('two'))),
     scopes: [['dir', 'rtl']],
     text: 'Head two tail',
     refused: true,
   },
   {
     name: 'a w:dir inside a tracked deletion',
-    inner: DEL(dir('rtl', dt('two'))),
+    inner: s => DEL(dir('rtl', s.dt('two'))),
     scopes: [['dir', 'rtl']],
     text: 'Head two tail',
     container: ['del', 'dir'],
   },
   {
     name: 'a w:dir inside a run-level content control',
-    inner: SDT(dir('rtl', t('two'))),
+    inner: s => SDT(dir('rtl', s.t('two'))),
     scopes: [['dir', 'rtl']],
     text: 'Head  tail',
     embedded: true,
@@ -154,7 +166,7 @@ const CONTAINERS: Container[] = [
   },
   {
     name: 'a w:dir inside a simple field',
-    inner: `<w:fldSimple w:instr=" PAGE ">${dir('rtl', t('two'))}</w:fldSimple>`,
+    inner: () => `<w:fldSimple w:instr=" PAGE ">${dir('rtl', t('two'))}</w:fldSimple>`,
     scopes: [['dir', 'rtl']],
     text: 'Head  tail',
     embedded: true,
@@ -162,21 +174,21 @@ const CONTAINERS: Container[] = [
   },
   {
     name: 'a w:dir nested in a w:bdo',
-    inner: bdo('ltr', dir('rtl', t('two'))),
+    inner: s => bdo('ltr', dir('rtl', s.t('two'))),
     scopes: [['bdo', 'ltr'], ['dir', 'rtl']],
     text: 'Head two tail',
     container: ['bdo', 'dir'],
   },
   {
     name: 'two adjacent w:dir with different values',
-    inner: `${dir('rtl', t('two'))}${dir('ltr', t('three'))}`,
+    inner: s => `${dir('rtl', s.t('two'))}${dir('ltr', s.t('three'))}`,
     scopes: [['dir', 'rtl']],
     text: 'Head twothree tail',
     untouched: ['dir', 'ltr', 'three'],
   },
   {
     name: 'a w:dir spanning a complex field from separate to end',
-    inner: `${fldChar('begin')}${run('<w:instrText xml:space="preserve"> PAGE </w:instrText>')}${dir('rtl', `${fldChar('separate')}${t('two')}${fldChar('end')}`)}`,
+    inner: () => `${fldChar('begin')}${run('<w:instrText xml:space="preserve"> PAGE </w:instrText>')}${dir('rtl', `${fldChar('separate')}${t('two')}${fldChar('end')}`)}`,
     scopes: [['dir', 'rtl']],
     text: 'Head  tail',
     embedded: true,
@@ -188,37 +200,37 @@ const fieldOrControlText = (session: YrsSession) =>
   session.storySegments('body').filter(segment => segment.kind === 'embed' && JSON.stringify(segment.payload).includes('two'));
 
 for (const container of CONTAINERS) {
-  const source = paragraph(container.inner);
+  const inner = container.inner(SOURCE);
+  const source = paragraph(inner);
   const typedText = container.embedded ? `X${render(source)}` : render(source).replace('two', 'twXo');
   const scopeText = container.embedded ? 'two' : 'twXo';
 
   describe(container.name, () => {
-    for (const [loader, load] of LOADERS) {
+    for (const [loader, load, spelling, saved] of LOADERS) {
       it(`${loader}: the session holds the inner text in order`, async () => {
-        const { session } = await load(docx(container.inner));
+        const { session } = await load(docx(inner));
         expect(session.paragraphs('body').map(entry => entry.text)).toEqual([container.text, 'Other']);
         if (container.embedded) expect(fieldOrControlText(session)).toHaveLength(1);
       });
 
       if (!container.embedded) {
         it(`${loader}: searching finds the inner text once`, async () => {
-          const { session } = await load(docx(container.inner));
+          const { session } = await load(docx(inner));
           const found = session.searchText('two');
           expect(found).toHaveLength(1);
           expect(found[0]).toMatchObject({ story: 'body', start: 5, end: 8, text: 'two' });
         });
       }
 
-      it(`${loader}: saving without an edit writes the source document part unchanged`, async () => {
-        const bytes = docx(container.inner);
-        const { session, base } = await load(bytes);
-        expect(part(await savedAsTheEditorSaves(session, base))).toBe(part(bytes));
+      it(`${loader}: saving without an edit writes ${saved}`, async () => {
+        const { session, base } = await load(docx(inner));
+        expect(part(await savedAsTheEditorSaves(session, base))).toBe(documentXml(container.inner(spelling), spelling));
       });
 
       if (container.refused) {
         it(`${loader}: typing inside the inserted text is refused, as it is without the wrapper`, async () => {
-          for (const inner of [container.inner, INS(t('two'))]) {
-            const { session } = await load(docx(inner));
+          for (const opened of [inner, INS(t('two'))]) {
+            const { session } = await load(docx(opened));
             const read = session.readParagraphs({ story: 'body', view: 'accepted' });
             if (!read.ok) throw new Error(read.failure.message);
             const refused = session.applyEdits({
@@ -237,7 +249,7 @@ for (const container of CONTAINERS) {
       }
 
       it(`${loader}: typing ${container.embedded ? 'beside' : 'inside'} the scoped text keeps the wrapper and its value`, async () => {
-        const bytes = docx(container.inner);
+        const bytes = docx(inner);
         const { session, base } = await load(bytes);
         if (container.embedded) {
           session.insertText({ story: 'body', paraId: session.paragraphs('body')[0]!.paraId, offset: 0 }, 'X');
@@ -259,8 +271,8 @@ for (const container of CONTAINERS) {
         expect(render(body(xml))).toBe(`${typedText}Other`);
         expect(deleted(xml).replace('X', '')).toBe(deleted(source));
         expect(structure(xml)).toEqual(structure(source));
-        expect(xml).toContain(OTHER);
-        if (container.inner.includes('w:anchor="target"')) expect(xml).toContain('w:anchor="target"');
+        expect(xml).toContain(other(spelling));
+        if (inner.includes('w:anchor="target"')) expect(xml).toContain('w:anchor="target"');
       });
     }
   });
@@ -269,13 +281,13 @@ for (const container of CONTAINERS) {
 describe('editing across the edge of a w:dir', () => {
   const inner = dir('rtl', t('two'));
 
-  const opened = async (load: (bytes: Uint8Array) => Promise<{ session: YrsSession; base: Document }>) => {
+  const opened = async (load: Load) => {
     const { session, base } = await load(docx(inner));
     const [match] = session.searchText('two');
     return { session, base, paraId: match!.paraId, start: match!.start };
   };
 
-  for (const [loader, load] of LOADERS) {
+  for (const [loader, load, spelling] of LOADERS) {
     for (const [edge, shift, expected] of [['start', 0, 'Head Xtwo tail'], ['end', 3, 'Head twoX tail']] as const) {
       it(`${loader}: typing at the ${edge} of the scope loses no text and keeps the scope around its text`, async () => {
         const { session, base, paraId, start } = await opened(load);
@@ -285,7 +297,7 @@ describe('editing across the edge of a w:dir', () => {
         const wrapper = scoped(xml, 'dir', 'rtl');
         expect(wrapper.wrappers).toBeGreaterThan(0);
         expect(render(wrapper.raw).replace('X', '')).toBe('two');
-        expect(xml).toContain(OTHER);
+        expect(xml).toContain(other(spelling));
       });
     }
 
@@ -301,7 +313,7 @@ describe('editing across the edge of a w:dir', () => {
         expect(render(body(xml))).toBe(`${expected}Other`);
         const wrapper = scoped(xml, 'dir', 'rtl');
         expect([wrapper.wrappers, render(wrapper.raw)]).toEqual([1, remaining]);
-        expect(xml).toContain(OTHER);
+        expect(xml).toContain(other(spelling));
       });
     }
 
@@ -314,7 +326,7 @@ describe('editing across the edge of a w:dir', () => {
       expect([render(first!), render(second!), render(third!)]).toEqual(['Head tw', 'o tail', 'Other']);
       expect(render(scoped(first!, 'dir', 'rtl').raw)).toBe('tw');
       expect(render(scoped(second!, 'dir', 'rtl').raw)).toBe('o');
-      expect(third).toBe(OTHER);
+      expect(third).toBe(other(spelling));
     });
   }
 });
