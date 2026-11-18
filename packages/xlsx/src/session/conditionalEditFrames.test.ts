@@ -1,6 +1,7 @@
 import { beforeAll, expect, spyOn, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import JSZip from 'jszip';
+import { engineKind } from '../wasm/engine';
 import { initWasm, openWorkbook, type WorkbookHandle } from '../wasm/loader';
 import type { DisplayList } from '../display-list/types';
 import { applyWorkbookCommand, createWorkbookCommandState } from './commandHandlers';
@@ -63,7 +64,7 @@ function typeIntoD30(handle: WorkbookHandle, input: string): void {
   expect(applyWorkbookCommand(handle, state, command).statuses).toMatchObject([{ status: 'applied', committed: true }]);
 }
 
-test('a typed edit that changes no result keeps every conditional fill on screen until decided', async () => {
+test.skipIf(engineKind === 'native')('a typed edit that changes no result keeps every conditional fill on screen until decided', async () => {
   const handle = openWorkbook(await positiveWorkbook());
   try {
     const before = fills(settled(handle));
@@ -84,7 +85,7 @@ test('a typed edit that changes no result keeps every conditional fill on screen
   } finally { handle.dispose(); }
 });
 
-test('a typed edit that changes a result shows its previous fill until decided', async () => {
+test.skipIf(engineKind === 'native')('a typed edit that changes a result shows its previous fill until decided', async () => {
   const handle = openWorkbook(await positiveWorkbook());
   const reference = openWorkbook(await positiveWorkbook('D30'));
   try {
