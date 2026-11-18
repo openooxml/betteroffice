@@ -304,12 +304,13 @@ export async function mergeFromPaths({
       JSON.parse(await readFile(resolve(parts, `timing-report-${format}`, 'report.json'), 'utf8'))));
     report = mergeTiming(plan, report, benchmarks, digest(planBytes));
   }
-  report = { ...report, corpus: corpusSummary(plan) };
+  const privateRun = privateMode();
+  report = { ...report, corpus: corpusSummary(plan), run_kind: privateRun ? 'private' : 'public' };
   const rows = coverage(report);
   if (coveragePath) await writeFile(coveragePath, coverageMarkdown(rows));
   if (requireCoverage) assertCoverage(rows);
-  const section = renderSection(report, { privateCorpus: privateMode() });
-  const aggregate = aggregateReport(report);
+  const section = renderSection(report, { privateCorpus: privateRun });
+  const aggregate = { ...aggregateReport(report), run_kind: report.run_kind };
   const failures = { schema_version: 1, commit: report.commit, clusters: failureClusters(report) };
   await emptyOutput(output);
   await mkdir(dirname(output), { recursive: true });

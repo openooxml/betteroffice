@@ -2037,6 +2037,9 @@ impl WorkbookSnapshotBuilder {
             return Err(error("snapshot calculation precision differs"));
         }
         authority.restore_full_precision(model.full_precision);
+        if authority.reads_builtin_number_formats() {
+            model.styles.read_builtin_number_formats();
+        }
         if !model.styles.has_xf_xml_markers()
             && let Some(source) = &source_container
             && let Some(styles) = super::source_style_xml_markers(source.as_bytes())
