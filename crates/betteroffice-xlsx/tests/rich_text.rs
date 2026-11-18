@@ -460,14 +460,12 @@ fn editing_another_cell_keeps_the_rich_items_and_their_runs() {
     let before: Vec<Vec<RichRun>> = (0..4)
         .map(|col| cell_runs(&workbook, col).to_vec())
         .collect();
-    workbook
-        .edit_cell(
-            SheetId(0),
-            CellRef::new(1, 0),
-            "2",
-            CalculationOptions::default(),
-        )
+    let at = CellRef::new(1, 0);
+    let receipt = workbook
+        .edit_cell(SheetId(0), at, "2", CalculationOptions::default())
         .unwrap();
+    assert!(receipt.applied);
+    assert!(receipt.changed.iter().any(|changed| changed.cell == at));
     for (col, runs) in (0..4).zip(&before) {
         assert_eq!(cell_runs(&workbook, col), runs.as_slice(), "{col}");
     }
@@ -477,6 +475,10 @@ fn editing_another_cell_keeps_the_rich_items_and_their_runs() {
         assert!(strings.contains(item), "{item}");
     }
     let reopened = Workbook::open(&saved).unwrap();
+    assert_eq!(
+        reopened.model().sheets[0].cell(at).map(|cell| &cell.value),
+        Some(&CellValue::Number { value: 2.0 })
+    );
     for (col, runs) in (0..4).zip(&before) {
         assert_eq!(cell_runs(&reopened, col), runs.as_slice(), "{col}");
     }

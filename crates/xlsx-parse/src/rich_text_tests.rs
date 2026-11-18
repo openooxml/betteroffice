@@ -261,9 +261,9 @@ fn zero_tint_on_a_colour_that_is_not_a_theme_colour_keeps_the_runs() {
     let red = Some(Color::Rgb("#ff0000".into()));
     let indexed = Some(Color::Indexed(10));
     for (color, expected) in [
-        (r#"<color rgb="FFFF0000" tint="0"/>"#, red.clone()),
-        (r#"<color rgb="FFFF0000" tint="0.0"/>"#, red),
-        (r#"<color indexed="10" tint="0"/>"#, indexed),
+        (r#"<color rgb="FFFF0000" tint="0"/>"#, Some(red.clone())),
+        (r#"<color rgb="FFFF0000" tint="0.0"/>"#, Some(red)),
+        (r#"<color indexed="10" tint="0"/>"#, Some(indexed)),
         (r#"<color rgb="FFFF0000" tint="-0.25"/>"#, None),
         (r#"<color indexed="10" tint="0.5"/>"#, None),
     ] {
@@ -274,7 +274,7 @@ fn zero_tint_on_a_colour_that_is_not_a_theme_colour_keeps_the_runs() {
         let run_color = parsed
             .package
             .shared_string_text_runs(0)
-            .and_then(|runs| runs[0].style.color.clone());
+            .map(|runs| runs[0].style.color.clone());
         assert_eq!(run_color, expected, "{color}");
     }
 }
@@ -445,8 +445,11 @@ fn package_run_budget_keeps_runs_first_come_and_counts_unmodelled_properties() {
             "x".repeat(per_item + extra)
         );
         assert_eq!(
-            parsed.package.shared_string_text_runs(last).is_some(),
-            extra == 0
+            parsed
+                .package
+                .shared_string_text_runs(last)
+                .map(|runs| runs.len()),
+            (extra == 0).then_some(per_item)
         );
         assert_eq!(parsed.workbook.shared_strings[tail], "tail");
         assert!(parsed.package.shared_string_text_runs(tail).is_none());
