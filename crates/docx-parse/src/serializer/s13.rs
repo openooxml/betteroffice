@@ -1882,7 +1882,7 @@ fn without_spans(xml: &str, mut spans: Vec<std::ops::Range<usize>>) -> String {
 
 /// The names of the elements a whole write of a part changing only formatting would lose.
 fn dropped_names(source: &str, written: &str) -> Vec<String> {
-    let mut dropped: Vec<String> = super::splice::dropped_by_format_edit(source, written)
+    let mut dropped: Vec<String> = super::splice::dropped_structure(source, written)
         .into_iter()
         .map(str::to_owned)
         .collect();
