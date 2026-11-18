@@ -3,4 +3,4 @@
 "@betteroffice/xlsx": patch
 ---
 
-Rich text written by Excel keeps its runs in `Workbook::cell_text_runs`. Font family, scheme and charset, run properties the reader does not model, and phonetic guides no longer turn the whole string into plain text. Replacing text in such a cell now says it holds rich text, instead of that it may.
+Rich text written by Excel keeps its runs in `Workbook::cell_text_runs`: font family, scheme or charset, other run properties and phonetic guides no longer make the string plain. Replacing text in such a cell now says it holds rich text.
