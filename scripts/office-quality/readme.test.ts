@@ -594,3 +594,73 @@ test('--as large repairs a README whose public block an older private run overwr
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+function fullReport() {
+  const input: any = xlsxReport();
+  input.corpus = { docx: { documents: 1776, pages: 20204 }, xlsx: { documents: 3297, pages: 5384 } };
+  input.xlsx_fidelity_benchmark = { libreoffice_version: lo, source_sha: sourceSha };
+  input.roundtrip_benchmark = { xlsx: { libreoffice_version: lo, published_version: '0.1.0', builds: { commit: { source_sha: sourceSha } } } };
+  const scored = (penalized_ssim: number) => ({ source_verified: true, reference: { status: 'ok', sha256: 'source' }, actual: { status: 'ok', sha256: 'source' }, penalized_ssim });
+  const parsed = { parse: { status: 'ok' }, roundtrip: { status: 'failed', error: 'changed parts' } };
+  const unreadable = { parse: { status: 'failed', error: 'unreadable' }, roundtrip: { status: 'failed', error: 'unreadable' } };
+  input.samples.filter((sample: any) => sample.format === 'xlsx').forEach((sample: any, index: number) => {
+    sample.comparisons = [
+      { ...scored(0.91 + index / 100), channel: 'published', version: '0.1.0' },
+      { ...scored(0.95), channel: 'commit', renderer_source_commit: commit },
+      { ...scored(0.85005), channel: 'libreoffice', version: lo },
+    ];
+    sample.roundtrip = { published: parsed, commit: parsed, libreoffice: index ? unreadable : parsed };
+  });
+  const docx = timed({ published: 300.5, commit: 199.49, libreoffice: 500 });
+  docx.summary = { ...docx.summary, format: 'docx', notes_not_converged: 1 } as any;
+  input.timing_benchmark = { docx, xlsx: timed({ published: 120.4, commit: 99.6, libreoffice: 410 }) };
+  return input;
+}
+
+const written = (input: any) => JSON.parse(`${JSON.stringify(aggregateReport(input), null, 2)}\n`);
+
+test('the large set block renders byte-identical from the aggregate.json the merge writes and from the full report', async () => {
+  const { renderLargeSection } = (await import('./readme.mjs')) as any;
+  const failedPptx: any = report();
+  failedPptx.samples.push({ id: 'hidden-name', format: 'pptx', comparisons: [{ channel: 'commit', renderer_source_commit: commit, status: 'failed', stage: 'capture', error: 'navigation failed' }] });
+  for (const input of [report(), later(), fontsReport(), xlsxReport(), failedPptx, fullReport()])
+    expect(renderLargeSection(written(input), { date: DATE })).toBe(renderSection(input, { privateCorpus: true, date: DATE }));
+  const shown = renderSection(fullReport(), { privateCorpus: true, date: DATE });
+  for (const text of ['Corpus: 1,776 DOCX documents', `<th width="230" align="right">LibreOffice (${lo})</th>`, '<td>Parse success</td>', '<td>Render time (avg)</td>',
+    '<td>Recalc time (avg)</td>', '1 further workbook has no Excel calculation reference', 'up to 200 documents', '1 of them with notes', '<td align="right">0.9150</td>'])
+    expect(shown.includes(text) && text).toBe(text);
+  expect(() => renderLargeSection(written(fullReport()), { date: '17.11.2026' })).toThrow('Invalid date');
+});
+
+test('an aggregate.json without a field the large set block shows is refused, naming the field', async () => {
+  const { renderLargeSection } = (await import('./readme.mjs')) as any;
+  const unsized = written(fullReport());
+  delete unsized.formats.docx.timing.sample_size;
+  expect(() => renderLargeSection(unsized, { date: DATE })).toThrow('docx timing.sample_size');
+  const uncovered = written(fullReport());
+  delete uncovered.formats.xlsx.recalc_missing_reference;
+  expect(() => renderLargeSection(uncovered, { date: DATE })).toThrow('xlsx recalc_missing_reference');
+  expect(() => renderLargeSection({ ...written(report()), schema_version: 2 }, { date: DATE })).toThrow('schema version 1');
+});
+
+test('--as large renders the same block from the run artifact aggregate.json as from report.json', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'readme-aggregate-'));
+  try {
+    const visual = renderSection(report());
+    const stored = fullReport();
+    await writeFile(join(dir, 'from-report.md'), shell(visual));
+    await writeFile(join(dir, 'from-aggregate.md'), shell(visual));
+    await writeFile(join(dir, 'report.json'), JSON.stringify(stored));
+    await writeFile(join(dir, 'aggregate.json'), `${JSON.stringify(aggregateReport(stored), null, 2)}\n`);
+    expect(cli(['--as', 'large', '--date', DATE, 'report.json', 'from-report.md'], dir, false).status).toBe(0);
+    expect(cli(['--as', 'large', '--date', DATE, 'aggregate.json', 'from-aggregate.md'], dir, false).status).toBe(0);
+    const expected = shell(`${visual}\n\n${renderSection(stored, { privateCorpus: true, date: DATE })}`);
+    expect(await readFile(join(dir, 'from-report.md'), 'utf8')).toBe(expected);
+    expect(await readFile(join(dir, 'from-aggregate.md'), 'utf8')).toBe(expected);
+    await writeFile(join(dir, 'public.md'), shell(visual));
+    expect(cli(['aggregate.json', 'public.md'], dir, false).status).not.toBe(0);
+    expect(await readFile(join(dir, 'public.md'), 'utf8')).toBe(shell(visual));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
