@@ -31,7 +31,7 @@ import {
 } from './createPluginClients';
 import { definitionProblem, pluginDefinition } from './defineDocxPlugin';
 import { scopePluginGeometry } from './geometry';
-import { createDocxSelectionObserver, type DocxSelectionIdentity } from './selectionIdentity';
+import { createDocxSelectionObserver, pluginSelectionKeys, type DocxSelectionIdentity } from './selectionIdentity';
 import { observeProposals, proposalSnapshot, type DocxProposalSnapshot } from './proposalPreview';
 import type {
   DocxPlugin,
@@ -206,7 +206,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
   let emittedSelection = EMPTY_SELECTION;
   let emittedResolvedSelection = 'null';
   let selectionSettleKey = 'null';
-  const selectionIdentities = new WeakMap<DocxPluginSnapshot, string>();
+  const selectionIdentities = pluginSelectionKeys;
   const resolvedSelectionKeys = new WeakMap<DocxPluginSnapshot, string>();
   let settledSelection: string | null = null;
   let settleEvent: Extract<DocxPluginEvent, { type: 'selection-settle' }> | null = null;
