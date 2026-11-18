@@ -101,10 +101,10 @@ type ActionName =
 interface Typing {
   story: string;
   paragraph: number;
-  offset: number;
-  /** What the commented text, and the text right after the end, read once typed. */
+  /** An offset in the paragraph, or its end. */
+  offset: number | 'end';
+  /** What the commented text reads once typed. */
   text?: string;
-  after?: string;
 }
 
 interface Built {
@@ -187,7 +187,7 @@ const BUILT: Built[] = [
     bold: { story: CELL_A, to: 4 },
     typing: {
       'typing where the range starts': { story: CELL_A, paragraph: 0, offset: 2, text: 'LeXft cell text.' },
-      'typing where the range ends': { story: CELL_B, paragraph: 0, offset: 2, after: 'RiXght' },
+      'typing where the range ends': { story: CELL_B, paragraph: 0, offset: 'end' },
     },
     anchors: { 1: [CELL_A] },
     listed: ['1', '2'],
@@ -209,7 +209,7 @@ const BUILT: Built[] = [
     bold: { story: CELL_A, to: 4 },
     typing: {
       'typing where the range starts': { story: CELL_A, paragraph: 0, offset: 2, text: 'LeXft cell text.' },
-      'typing where the range ends': { story: CELL_B, paragraph: 0, offset: 2, after: 'RiXght' },
+      'typing where the range ends': { story: CELL_B, paragraph: 0, offset: 'end' },
     },
     anchors: { 1: [CELL_A], 4: [CELL_A], 5: [CELL_A] },
     listed: ['1', '2', '4', '5'],
@@ -227,6 +227,8 @@ type Editable = Pick<
 
 interface Opened {
   session: Editable;
+  /** The length of each paragraph of the story, in the session's offsets. */
+  lengths: YrsSession['paragraphSpans'];
   revisions(): number;
   save(comments: (list: Comment[]) => Comment[]): Promise<Uint8Array>;
   destroy(): void;
@@ -258,6 +260,7 @@ async function open(route: Route, bytes: Uint8Array): Promise<Opened> {
     const host = session.openDocx(bytes.slice(), true).document;
     return {
       session,
+      lengths: (story) => session.paragraphSpans(story),
       revisions: () => session.listRevisions().length,
       save: async (comments) => editorSave(session, session.materializeDocx()!, comments(hostComments(host)), host),
       destroy: () => session.destroy(),
@@ -270,6 +273,7 @@ async function open(route: Route, bytes: Uint8Array): Promise<Opened> {
     const base = { ...parsed, originalBuffer: parsed.originalBuffer ?? bytes.slice().buffer };
     return {
       session,
+      lengths: (story) => session.paragraphSpans(story),
       revisions: () => session.listRevisions().length,
       save: async (comments) => editorSave(session, base, comments(hostComments(parsed))),
       destroy: () => session.destroy(),
@@ -279,6 +283,7 @@ async function open(route: Route, bytes: Uint8Array): Promise<Opened> {
   const hostJson = engine.openDocx(bytes.slice(), undefined, 'comment-range');
   return {
     session: engine,
+    lengths: (story) => engine.geometryReader.paragraphSpans(story),
     revisions: () => engine.proposalEngine.listRevisions().length,
     save: async (comments) => {
       const listed = comments(hostComments(decodeDocxHostJson(hostJson, bytes.slice()).document));
@@ -288,11 +293,13 @@ async function open(route: Route, bytes: Uint8Array): Promise<Opened> {
   };
 }
 
-function act(session: Editable, built: Built, action: ActionName): (list: Comment[]) => Comment[] {
+function act({ session, lengths }: Opened, built: Built, action: ActionName): (list: Comment[]) => Comment[] {
   const typing = built.typing[action];
   if (typing) {
     const { paraId } = session.paragraphs(typing.story)[typing.paragraph]!;
-    session.insertText({ story: typing.story, paraId, offset: typing.offset }, 'X');
+    const end = () => lengths(typing.story).find((paragraph) => paragraph.paraId === paraId)!.length;
+    const offset = typing.offset === 'end' ? end() : typing.offset;
+    session.insertText({ story: typing.story, paraId, offset }, 'X');
   }
   if (action === 'bold where the range starts') {
     const { paraId } = session.paragraphs(built.bold.story)[0]!;
@@ -389,13 +396,12 @@ describe('a comment range whose end lies in another story', () => {
       const source = documentBody(built.bytes);
       const opened = await open(route, built.bytes);
       try {
-        const comments = act(opened.session, built, action);
+        const comments = act(opened, built, action);
         const xml = documentBody(await opened.save(comments));
         const typing = built.typing[action];
         for (const id of built.ids) {
           const want = { ...placed(source, id) };
           if (typing?.text) want.text = typing.text;
-          if (typing?.after) want.after = typing.after;
           expect([id, placed(xml, id)]).toEqual([id, want]);
         }
         if (KEEPS_BYTES(route) && KEPT_ELSEWHERE.includes(action)) {
@@ -414,7 +420,7 @@ describe('a comment range whose end lies in another story', () => {
       const source = documentBody(built.bytes);
       const opened = await open(route, built.bytes);
       try {
-        const comments = act(opened.session, built, 'deleting the comment');
+        const comments = act(opened, built, 'deleting the comment');
         const xml = documentBody(await opened.save(comments));
         const [removed, ...kept] = built.ids;
         expect(placed(xml, removed!).marks).toBe('');
@@ -455,7 +461,7 @@ describe('a comment range end whose start is not in its story', () => {
       const opened = await open(route, built.bytes);
       try {
         const action = built.typing['typing where the range ends'] ? 'typing where the range ends' : 'no edit';
-        await opened.save(act(opened.session, built, action));
+        await opened.save(act(opened, built, action));
         expect([
           built.ids.map((id) => shownIn(opened.session, id)),
           listedIds(opened.session),
