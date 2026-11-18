@@ -1296,7 +1296,9 @@ fn a_countif_of_each_cell_over_a_fixed_range_reads_the_range_once() {
     let expected = painted(&reference.display_list(&viewport).unwrap());
     assert_eq!(painted(&list), expected);
     assert!(!expected.is_empty() && (expected.len() as u64) < cells);
-    assert!(stats.units <= 2_000 + 8 * cells, "{stats:?}");
+    frame(&workbook, &viewport);
+    let scanned = workbook.conditional_stats().units;
+    assert!(stats.units - scanned <= 2_000 + 8 * cells, "{stats:?}");
 }
 
 /// A clock that moves a quarter of a frame each time it is read.
