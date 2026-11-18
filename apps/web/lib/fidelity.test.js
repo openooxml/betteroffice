@@ -41,6 +41,19 @@ describe("fidelity summary", () => {
     ]);
   });
 
+  test("reads the public block when a large set block sits before or after it", () => {
+    const ssim = '<tr><td>SSIM</td><td align="right">0.8519</td><td align="right">0.7694</td></tr>';
+    const visual = block(`### DOCX\n\n${table(ssim)}`);
+    const large = `<!-- BEGIN GENERATED LARGE SET -->\n## Benchmarks: large set\n### DOCX\n\n${table(ssim).replaceAll("abc12345", "def67890").replace("1.2.3", "9.9.9")}\n<!-- END GENERATED LARGE SET -->`;
+    const pattern = readFileSync(join(import.meta.dir, "..", "next.config.ts"), "utf8").match(/README\.match\(\/(.+?)\/\)/)[1];
+    for (const readme of [`${large}\n${visual}`, `${visual}\n${large}`]) {
+      expect(parseFidelity(readme).map((f) => [f.format, f.commit, f.libreoffice])).toEqual([["docx", "abc12345", "1.2.3"]]);
+      const injected = readme.match(new RegExp(pattern))?.[0] ?? "";
+      expect(injected.startsWith("<!-- BEGIN GENERATED VISUAL FIDELITY -->")).toBe(true);
+      expect(injected).not.toContain("LARGE SET");
+    }
+  });
+
   test("yields nothing without the generated block", () => {
     expect(parseFidelity("# readme\nno benchmarks here")).toEqual([]);
   });

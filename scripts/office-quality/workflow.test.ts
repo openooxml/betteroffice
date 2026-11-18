@@ -212,7 +212,7 @@ test('a custom corpus origin never publishes renders, and a dispatch asking for 
 const steps = Object.entries<any>(workflow.jobs).flatMap(([job, definition]) =>
   (definition.steps ?? []).map((step: any) => ({ job, step })));
 const CORPUS_FREE = new Set(['build-native.mjs', 'build-format.mjs', 'build-roundtrip.mjs', 'native-fonts.ts',
-  'install-libreoffice.sh', 'fetch-libreoffice.sh', 'asset-cache.mjs', 'publish-renders.mjs', 'private-store.mjs', 'shards.mjs']);
+  'install-libreoffice.sh', 'fetch-libreoffice.sh', 'asset-cache.mjs', 'publish-renders.mjs', 'private-store.mjs', 'shards.mjs', 'readme.mjs']);
 const BINARY_ARTIFACTS = /^(docx-native-\$\{\{ matrix\.channel \}\}|docx-native-fonts|xlsx-native-\$\{\{ matrix\.channel \}\}|pptx-native-\$\{\{ matrix\.channel \}\}|roundtrip-native-\$\{\{ matrix\.format \}\}-\$\{\{ matrix\.channel \}\})$/;
 const README = "${{ (!inputs.private_corpus && !inputs.report_only && inputs.corpus_origin == '' && inputs.samples == '' && inputs.collection == 'office-quality') || (inputs.private_corpus && inputs.publish_readme && !inputs.report_only) }}";
 const PRIVATE_OFF = /(^|&& |^\$\{\{ )!inputs\.private_corpus( &&|$| \}\}$)/;
@@ -422,6 +422,14 @@ test('only a default showcase run commits the README; report-only runs publish n
   expect(readme.map((step: any) => step.if)).toEqual([README, README]);
   for (const step of publish.steps.filter((step: any) => /README|bot token/.test(step.name ?? '') && !readme.includes(step)))
     expect(step.if).toBe("steps.changed.outputs.value == 'true'");
+});
+
+test('the README step writes only the block of its own run kind through readme.mjs', () => {
+  const step = publish.steps.find((step: any) => step.name === 'Replace the generated README section');
+  expect(step.if).toBe(README);
+  expect(step.env).toEqual({ QUALITY_PRIVATE: '${{ inputs.private_corpus }}' });
+  expect(String(step.run).trim()).toBe('node scripts/office-quality/readme.mjs --section "$RUNNER_TEMP/fidelity-report/section.md" README.md');
+  expect(step.run).not.toContain('GENERATED');
 });
 
 test('the reconciled artifact always carries the aggregate, and the private bundle keeps it too', () => {

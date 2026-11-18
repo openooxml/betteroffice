@@ -1,3 +1,7 @@
+import { spawnSync } from 'node:child_process';
+import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { expect, test } from 'bun:test';
 import { aggregateReport, renderSection, updateReadme } from './readme.mjs';
 
@@ -260,7 +264,7 @@ test('a private run headline names no per-document site and lists no document', 
   const input = report();
   const shown = renderSection(input, { privateCorpus: true });
   expect(shown).not.toContain('benchmarks.betteroffice.dev');
-  expect(shown).toContain('per-document results are not published');
+  expect(shown).toContain('aggregates only; documents are not public');
   for (const sample of input.samples) expect(shown).not.toContain(sample.id);
   expect(renderSection(input)).toContain('https://benchmarks.betteroffice.dev');
 });
@@ -294,7 +298,9 @@ test('the corpus line is generated from document and page counts, aggregates onl
   const section = renderSection(input, { privateCorpus: true });
   expect(section).toContain('Corpus: 1,776 DOCX documents (20,204 pages), 656 PPTX presentations (12,477 slides) and 3,297 XLSX workbooks (5,384 printed pages), each with a Microsoft Office reference.');
   expect(section).toContain('XLSX is compared per Excel print range, one range per page, so its page counts always match and are not reported.');
-  expect(section.indexOf('Corpus: ')).toBeLessThan(section.indexOf('<picture>'));
+  const visual = renderSection(input);
+  expect(visual.indexOf('Corpus: ')).toBeLessThan(visual.indexOf('<picture>'));
+  expect(section).not.toContain('<picture>');
   expect(renderSection(report())).not.toContain('Corpus: ');
   expect(aggregateReport(input).formats.pptx.corpus).toEqual({ documents: 656, pages: 12477 });
   expect(() => renderSection({ ...input, corpus: { docx: { documents: 2, pages: 1 } } })).toThrow('Invalid corpus summary');
@@ -353,7 +359,7 @@ test('private runs show time rows only from the sequential timing job, as the me
   input.timing_benchmark = { xlsx: timed({ published: 120.4, commit: 99.6, libreoffice: 410 }) };
   const shown = renderSection(input, { privateCorpus: true });
   expect(shown).toContain(three('Recalc time (avg)', '120 ms', '100 ms', '410 ms'));
-  expect(shown).toContain('XLSX Recalc time (avg) 100 ms vs 410 ms');
+  expect(shown).not.toContain('<picture>');
   expect(shown).toContain(`Times: mean per document over a seeded sample of up to 200 documents per format. A document counts only when every engine timed it in every round: XLSX 2 of 2 sampled (timed per engine: BetterOffice 0.1.0 2, BetterOffice at ${commit.slice(0, 8)} 2, LibreOffice 2). They run one after another on one machine per format`);
   expect(shown).not.toContain('w1');
   const timing = aggregateReport(input).formats.xlsx.timing;
@@ -466,4 +472,125 @@ test('the arm line states how many advertised faces did not load and why', async
   expect(fontArmLine('commit', fontSummary(samples, 'commit'))).toBe(
     "commit arm: 0 of 2 faces did not load (M = faces the documents requested that the arm's provider offers, base latin included), by reason: none; sliced faces are observed only through their whole-face fallback at open; a chunk that fails or times out after open paints blank glyphs and is not observed"
   );
+});
+
+const VISUAL_BEGIN = '<!-- BEGIN GENERATED VISUAL FIDELITY -->';
+const VISUAL_END = '<!-- END GENERATED VISUAL FIDELITY -->';
+const LARGE_BEGIN = '<!-- BEGIN GENERATED LARGE SET -->';
+const LARGE_END = '<!-- END GENERATED LARGE SET -->';
+const DATE = '2026-11-17';
+const span = (text: string, begin: string, end: string) => text.slice(text.indexOf(begin), text.indexOf(end) + end.length);
+const shell = (blocks: string) => `# Project\n\n## Packages\n\nList.\n\n## Fonts\n\nFonts.\n\n${blocks}\n\n## Evals\n\nEvals.\n`;
+function later() {
+  const input = report();
+  input.commit = 'b'.repeat(40);
+  (input.samples[0].comparisons[1] as any).renderer_source_commit = input.commit;
+  return input;
+}
+
+test('a private run replaces only the large set block and leaves the public block byte-identical', () => {
+  const visual = renderSection(report());
+  const readme = shell(`${visual}\n\n${LARGE_BEGIN}\nold large set\n${LARGE_END}`);
+  const large = renderSection(later(), { privateCorpus: true, date: DATE });
+  const updated = updateReadme(readme, large);
+  expect(span(updated, VISUAL_BEGIN, VISUAL_END)).toBe(visual);
+  expect(updated).toBe(shell(`${visual}\n\n${large}`));
+});
+
+test('a public run replaces its block in place and leaves the large set block byte-identical', () => {
+  const large = renderSection(report(), { privateCorpus: true, date: DATE });
+  const readme = shell(`${renderSection(report())}\n\n${large}`);
+  const visual = renderSection(later());
+  const updated = updateReadme(readme, visual);
+  expect(span(updated, LARGE_BEGIN, LARGE_END)).toBe(large);
+  expect(updated).toBe(shell(`${visual}\n\n${large}`));
+  const head = '# Project\n\n## Packages\n\nList.\n\n';
+  expect(updateReadme(`${head}${large}\n\n## Evals\n`, visual)).toBe(`${head}${visual}\n\n${large}\n\n## Evals\n`);
+});
+
+test('a README without a large set block gets it right after the public block, and a second private run replaces it', async () => {
+  const visual = renderSection(report());
+  const first = renderSection(report(), { privateCorpus: true, date: DATE });
+  const inserted = updateReadme(shell(visual), first);
+  expect(inserted).toBe(shell(`${visual}\n\n${first}`));
+  const second = renderSection(later(), { privateCorpus: true, date: '2026-11-18' });
+  const replaced = updateReadme(inserted, second);
+  expect(replaced).toBe(shell(`${visual}\n\n${second}`));
+  expect(replaced.split(LARGE_BEGIN).length).toBe(2);
+  const today = await readFile(join(import.meta.dir, '..', '..', 'README.md'), 'utf8');
+  const end = today.indexOf(VISUAL_END) + VISUAL_END.length;
+  expect(updateReadme(today, first)).toBe(`${today.slice(0, end)}\n\n${first}${today.slice(end)}`);
+});
+
+test('refuses a README with a repeated or broken pair of either kind', () => {
+  const visual = renderSection(report());
+  const large = renderSection(report(), { privateCorpus: true, date: DATE });
+  expect(() => updateReadme(shell(`${visual}\n\n${large}\n\n${large}`), large)).toThrow('Broken generated markers');
+  expect(() => updateReadme(shell(`${LARGE_BEGIN}\n${visual}`), visual)).toThrow('Broken generated markers');
+});
+
+test('the large set section carries one generated line and aggregates only: no ids, site link or chart', () => {
+  const input: any = report();
+  input.samples.push({
+    id: 'hidden-name', format: 'pptx', metadata_url: 'https://corpus.betteroffice.dev/hidden-name/metadata.json',
+    comparisons: [{ channel: 'commit', renderer_source_commit: commit, status: 'failed', stage: 'capture',
+      error: 'navigation to https://corpus.betteroffice.dev/hidden-name/source.pptx failed' }],
+  });
+  const section = renderSection(input, { privateCorpus: true, date: DATE });
+  expect(section.startsWith(LARGE_BEGIN)).toBe(true);
+  expect(section.endsWith(LARGE_END)).toBe(true);
+  expect(section).toContain('\n## Benchmarks: large set\n');
+  expect(section.split('\n').filter((line) => line.startsWith('*Generated'))).toEqual([
+    `*Generated by the [Benchmarks action](.github/workflows/visual-fidelity.yml) from 1 DOCX, 1 PPTX and 0 XLSX documents at <a href="https://github.com/openooxml/betteroffice/commit/${commit}">${commit.slice(0, 8)}</a> on ${DATE}; aggregates only; documents are not public.*`,
+  ]);
+  for (const leak of ['demo', 'hidden-name', 'metadata', 'navigation', 'benchmarks.betteroffice.dev', 'api/charts', '<picture>', 'GENERATED VISUAL FIDELITY'])
+    expect(section.includes(leak) && leak).toBe(false);
+  expect(() => renderSection(input, { privateCorpus: true, date: '17.11.2026' })).toThrow('Invalid date');
+});
+
+const script = join(import.meta.dir, 'readme.mjs');
+const cli = (args: string[], cwd: string, privateRun: boolean) =>
+  spawnSync(process.execPath, [script, ...args], { cwd, encoding: 'utf8', env: { ...process.env, QUALITY_PRIVATE: privateRun ? 'true' : 'false' } });
+
+test('the CLI writes a section only into the block of its own run kind', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'readme-cli-'));
+  try {
+    const visual = renderSection(report());
+    const next = renderSection(later());
+    const large = renderSection(report(), { privateCorpus: true, date: DATE });
+    const readme = shell(visual);
+    const path = join(dir, 'README.md');
+    await writeFile(path, readme);
+    await writeFile(join(dir, 'public.md'), next);
+    await writeFile(join(dir, 'large.md'), large);
+    expect(cli(['--section', 'public.md', 'README.md'], dir, true).status).not.toBe(0);
+    expect(cli(['--section', 'large.md', 'README.md'], dir, false).status).not.toBe(0);
+    expect(await readFile(path, 'utf8')).toBe(readme);
+    expect(cli(['--section', 'large.md', 'README.md'], dir, true).status).toBe(0);
+    expect(await readFile(path, 'utf8')).toBe(shell(`${visual}\n\n${large}`));
+    expect(cli(['--section', 'public.md', 'README.md'], dir, false).status).toBe(0);
+    expect(await readFile(path, 'utf8')).toBe(shell(`${next}\n\n${large}`));
+    await symlink('README.md', join(dir, 'link.md'));
+    expect(cli(['--section', 'large.md', 'link.md'], dir, true).status).not.toBe(0);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('--as large repairs a README whose public block an older private run overwrote', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'readme-repair-'));
+  try {
+    const visual = renderSection(report());
+    const stale = `${VISUAL_BEGIN}\n## Benchmarks\n\n*Generated by the [Benchmarks action](.github/workflows/visual-fidelity.yml); per-document results are not published.*\n\nOlder private numbers.\n\n${VISUAL_END}`;
+    const stored = later();
+    const path = join(dir, 'README.md');
+    await writeFile(path, shell(stale));
+    await writeFile(join(dir, 'main.md'), shell(visual));
+    await writeFile(join(dir, 'report.json'), JSON.stringify(stored));
+    expect(cli(['--as', 'small', 'report.json', 'README.md'], dir, false).status).not.toBe(0);
+    expect(cli(['--as', 'large', '--public', 'main.md', '--date', DATE, 'report.json', 'README.md'], dir, false).status).toBe(0);
+    expect(await readFile(path, 'utf8')).toBe(shell(`${visual}\n\n${renderSection(stored, { privateCorpus: true, date: DATE })}`));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
