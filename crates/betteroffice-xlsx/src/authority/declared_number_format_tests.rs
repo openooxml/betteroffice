@@ -1,8 +1,8 @@
 use std::sync::Mutex;
 
 use super::*;
-use crate::{CalculationOptions, UpdateEvent, UpdateOrigin, Workbook};
-use xlsx_ops::NumberFormatMutation;
+use crate::{CalculationOptions, NumberFormatKind, UpdateEvent, UpdateOrigin, Workbook};
+use xlsx_ops::{CapturedFormat, NumberFormatMutation};
 
 const UNAFFECTED_SEED: &str = include_str!("fixtures/previous_version/unaffected_seed.hex");
 const CUSTOM_SEED: &str = include_str!("fixtures/previous_version/custom_format_seed.hex");
@@ -547,4 +547,156 @@ fn an_unedited_save_of_a_declared_builtin_id_keeps_its_declaration_and_style_ind
     assert_eq!(style_of(&parsed, "B1"), Some(1));
     assert_eq!(format_id(&parsed, "A1"), Some(2));
     assert_eq!(format_id(&parsed, "B1"), Some(2));
+}
+
+#[test]
+fn a_same_code_preset_in_a_collaborative_session_saves_under_a_custom_id_as_it_does_now() {
+    let model = formats_model(&[(4, "#,##0.00")]);
+    let mut book = Workbook::from_model_collaborative(model, 3001).unwrap();
+    let range = CellRange::new(at("A1"), at("A1"));
+    let number = NumberFormatMutation::Number;
+    let result = book.set_range_number_format(SheetId(0), range, number, calculation());
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(shown(book.model(), "A1"), "1,234.50");
+    let saved = book.save();
+    assert!(saved.is_ok(), "{:?}", saved.as_ref().err());
+    let saved = parse(&saved.unwrap());
+    assert_eq!(shown(&saved, "A1"), "1,234.50");
+    let format = saved.styles.cell_format(style_of(&saved, "A1"));
+    let expected = xlsx_model::NumberFormat::Custom {
+        pattern: "#,##0.00".into(),
+    };
+    assert_eq!(format.number_format, expected);
+    let id = format_id(&saved, "A1");
+    assert!(id.is_some_and(|id| id >= 164), "{id:?}");
+    let num_fmts = &saved.styles.num_fmts;
+    assert!(num_fmts.contains(&(4, "#,##0.00".into())), "{num_fmts:?}");
+    assert!(num_fmts.contains(&(id.unwrap(), "#,##0.00".into())), "{num_fmts:?}");
+}
+
+fn kind_of(book: &Workbook) -> (Option<NumberFormatKind>, Option<String>) {
+    let range = CellRange::new(at("A1"), at("A1"));
+    let formatting = book.selection_formatting(SheetId(0), range).unwrap();
+    (formatting.number_format, formatting.number_format_pattern)
+}
+
+#[test]
+fn a_redefined_builtin_id_keeps_the_format_kind_of_its_id() {
+    let cases = [
+        (41, MINUS_ACCOUNTING, NumberFormatKind::Currency),
+        (14, "0.00", NumberFormatKind::Date),
+    ];
+    for (index, (id, code, kind)) in cases.into_iter().enumerate() {
+        let expected = (Some(kind), Some(String::from(code)));
+        let model = single_format_model(id, code);
+        let standalone = Workbook::from_model(model.clone()).unwrap();
+        assert_eq!(kind_of(&standalone), expected, "{id}");
+        let client_id = 3011 + index as u64;
+        let collaborative = Workbook::from_model_collaborative(model, client_id).unwrap();
+        assert_eq!(kind_of(&collaborative), expected, "{id}");
+    }
+}
+
+#[test]
+fn a_preset_follows_the_first_of_two_declarations_of_a_builtin_id() {
+    let declared = [(4, "#,##0.00"), (4, "0.000")];
+    let mut book = Workbook::from_model(formats_model(&declared)).unwrap();
+    let range = CellRange::new(at("A1"), at("A1"));
+    let number = NumberFormatMutation::Number;
+    let result = book.set_range_number_format(SheetId(0), range, number, calculation());
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(format_id(book.model(), "A1"), Some(4));
+    assert_eq!(shown(book.model(), "A1"), "1,234.50");
+}
+
+fn painter_book(declared: Option<&str>) -> Workbook {
+    let mut model = WorkbookModel {
+        sheets: vec![Sheet::new("Data")],
+        ..WorkbookModel::default()
+    };
+    if let Some(code) = declared {
+        model.styles.num_fmts.push((31, code.into()));
+    }
+    model
+        .styles
+        .cell_xfs
+        .push(xlsx_model::styles::Xf::default());
+    model.styles.cell_xfs.push(xlsx_model::styles::Xf {
+        num_fmt_id: Some(31),
+        ..xlsx_model::styles::Xf::default()
+    });
+    for (a1, style) in [("A1", Some(1)), ("B1", None)] {
+        model.sheets[0].set_cell(
+            at(a1),
+            Cell {
+                value: CellValue::Number { value: 45_000.0 },
+                style,
+                ..Cell::default()
+            },
+        );
+    }
+    Workbook::from_model(model).unwrap()
+}
+
+fn capture(book: &Workbook) -> CapturedFormat {
+    let captured = book.capture_format(SheetId(0), CellRange::new(at("A1"), at("A1")));
+    assert!(captured.is_ok(), "{:?}", captured.as_ref().err());
+    captured.unwrap()
+}
+
+fn paint(book: &mut Workbook, format: CapturedFormat) {
+    let range = CellRange::new(at("B1"), at("B1"));
+    let result = book.apply_format(SheetId(0), range, format, calculation());
+    assert!(result.is_ok(), "{result:?}");
+}
+
+#[test]
+fn a_painted_undeclared_builtin_id_shows_general_where_the_id_is_declared() {
+    let source = painter_book(None);
+    let mut target = painter_book(Some("yyyy-mm-dd"));
+    assert_eq!(shown(source.model(), "A1"), "45000");
+    paint(&mut target, capture(&source));
+    assert_eq!(shown(target.model(), "B1"), "45000");
+}
+
+#[test]
+fn a_painted_declared_builtin_id_shows_the_declared_code_in_its_own_workbook() {
+    let mut book = painter_book(Some("yyyy-mm-dd"));
+    assert_eq!(shown(book.model(), "A1"), "2023-03-15");
+    let format = capture(&book);
+    paint(&mut book, format);
+    assert_eq!(shown(book.model(), "B1"), "2023-03-15");
+}
+
+#[test]
+fn a_painted_declared_builtin_id_shows_the_declared_code_in_another_workbook() {
+    let source = painter_book(Some("yyyy-mm-dd"));
+    let mut target = painter_book(None);
+    paint(&mut target, capture(&source));
+    assert_eq!(shown(target.model(), "B1"), "2023-03-15");
+}
+
+#[test]
+fn a_schema_3_state_of_a_declared_builtin_id_upgrades_to_7_and_is_adopted() {
+    let mut written = declared_model();
+    written.styles.read_builtin_number_formats();
+    let update = super::tests::legacy_update(&written, 3, true);
+    let authority = super::tests::authority_from_update(&declared_model(), &update, 3021);
+    let materialized = authority.strict_materialize().map(|(model, _)| model);
+    assert!(materialized.is_ok(), "{:?}", materialized.as_ref().err());
+    assert_eq!(shown(&materialized.unwrap(), "A1"), " (1,234)");
+    let staged = authority
+        .stage_updates_v1(&[Update::EMPTY_V1], None)
+        .unwrap();
+    assert!(staged.effective);
+    authority
+        .apply_staged_update_v1(&staged.commit_update)
+        .unwrap();
+    assert_eq!(authority.schema_version(), Ok(7));
+    let upgraded = authority.strict_materialize().map(|(model, _)| model);
+    assert!(upgraded.is_ok(), "{:?}", upgraded.as_ref().err());
+    assert_eq!(shown(&upgraded.unwrap(), "A1"), " (1,234)");
+    let peer = adopted(&authority.encode_state_as_update_v1(), 3022);
+    assert_eq!(schema(&peer), Ok(7));
+    assert_eq!(shown(peer.model(), "A1"), " (1,234)");
 }
