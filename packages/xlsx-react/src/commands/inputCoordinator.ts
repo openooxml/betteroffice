@@ -36,7 +36,7 @@ export interface InputCoordinatorHooks {
  * Orders every input write and the commands admitted after it in one queue.
  * A draft whose write failed stays rejected, at its own cell, until it is
  * written, discarded or superseded by a queued write of that cell; until then
- * every command fails with `input-failed`.
+ * every command fails with the code its write was refused with, else `input-failed`.
  */
 export interface InputCoordinator {
   readonly draft: InputDraft | null;
