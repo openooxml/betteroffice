@@ -209,3 +209,17 @@ fn text_typed_after_struck_text_stays_struck_unless_strike_is_turned_off() {
     assert!(typed[1].ends_with("<a:t>_X_</a:t>"), "{}", typed[1]);
     assert!(!typed[1].contains("strike="), "{}", typed[1]);
 }
+
+#[test]
+fn text_typed_without_a_strike_of_its_own_stays_in_a_no_strike_run() {
+    let paragraphs = one_run(r#"lang="en-US" u="none" strike="noStrike""#);
+    let style = TextStyle {
+        underline: Some("none".to_owned()),
+        ..TextStyle::default()
+    };
+    let (source, saved) = type_into(&paragraphs, 5, "_X_", Some(style));
+    assert_eq!(
+        saved,
+        source.replace("<a:t>Hello</a:t>", "<a:t>Hello_X_</a:t>")
+    );
+}
