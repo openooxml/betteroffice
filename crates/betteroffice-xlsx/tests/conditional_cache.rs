@@ -596,79 +596,142 @@ fn a_one_shot_render_after_an_edit_shows_no_previous_result() {
     assert_eq!(painted(&edited), painted(&range(&fresh)));
 }
 
-#[test]
-fn a_rule_sheet_or_structural_change_paints_no_previous_result() {
-    let sheet = SheetId(0);
-    let options = CalculationOptions::default();
+/// A two-sheet workbook whose 120 visible cells are decided, limited to 10
+/// cells a frame from here on.
+fn decided_then_limited(viewport: &Viewport) -> Workbook {
+    let workbook = positive(&["Sheet1", "Sheet2"], &[]);
+    assert_eq!(painted(&frame(&workbook, viewport)).len(), 120);
+    workbook.set_conditional_budget(10);
+    workbook
+}
+
+fn paints_no_previous_result_after(op: Op) {
     let viewport = view(0.0, 800.0);
-    let decided = || {
-        let workbook = positive(&["Sheet1", "Sheet2"], &[]);
-        assert_eq!(painted(&frame(&workbook, &viewport)).len(), 120);
-        workbook.set_conditional_budget(10);
-        workbook
-    };
-    for op in [
-        Op::AddConditionalFormat {
-            sheet,
-            range: CellRange::parse_a1("A1:D30").unwrap(),
-            kind: "cellIs".into(),
-            operator: Some("lessThan".into()),
-            formulas: vec!["2.5".into()],
-            format: DifferentialFormat {
-                fill: Some(RED.into()),
-                ..DifferentialFormat::default()
-            },
-        },
-        Op::InsertRows {
-            sheet,
-            at: 0,
-            count: 1,
-        },
-        Op::DeleteRows {
-            sheet,
-            at: 0,
-            count: 1,
-        },
-        Op::InsertCols {
-            sheet,
-            at: 0,
-            count: 1,
-        },
-        Op::DeleteCols {
-            sheet,
-            at: 0,
-            count: 1,
-        },
-        Op::MoveRows {
-            sheet,
-            row: 0,
-            count: 1,
-            before: 5,
-        },
-        Op::MoveCols {
-            sheet,
-            col: 0,
-            count: 1,
-            before: 3,
-        },
-        Op::RemoveSheet { index: 0 },
-        Op::MoveSheet { from: 0, to: 1 },
-    ] {
-        let change = format!("{op:?}");
-        let mut workbook = decided();
-        workbook.apply_ops(vec![op], options).unwrap();
-        paints_only_decided(&workbook, &viewport, &change);
+    let change = format!("{op:?}");
+    let mut workbook = decided_then_limited(&viewport);
+    if let Err(error) = workbook.apply_ops(vec![op], CalculationOptions::default()) {
+        panic!("{change}: {error:?}");
     }
-    let mut workbook = decided();
+    paints_only_decided(&workbook, &viewport, &change);
+}
+
+#[test]
+fn an_added_rule_paints_no_previous_result() {
+    paints_no_previous_result_after(Op::AddConditionalFormat {
+        sheet: SheetId(0),
+        range: CellRange::parse_a1("A1:D30").unwrap(),
+        kind: "cellIs".into(),
+        operator: Some("lessThan".into()),
+        formulas: vec!["2.5".into()],
+        format: DifferentialFormat {
+            fill: Some(RED.into()),
+            ..DifferentialFormat::default()
+        },
+    });
+}
+
+#[test]
+fn inserted_rows_paint_no_previous_result() {
+    paints_no_previous_result_after(Op::InsertRows {
+        sheet: SheetId(0),
+        at: 0,
+        count: 1,
+    });
+}
+
+#[test]
+fn deleted_rows_paint_no_previous_result() {
+    paints_no_previous_result_after(Op::DeleteRows {
+        sheet: SheetId(0),
+        at: 0,
+        count: 1,
+    });
+}
+
+#[test]
+fn inserted_columns_paint_no_previous_result() {
+    paints_no_previous_result_after(Op::InsertCols {
+        sheet: SheetId(0),
+        at: 0,
+        count: 1,
+    });
+}
+
+#[test]
+fn deleted_columns_paint_no_previous_result() {
+    paints_no_previous_result_after(Op::DeleteCols {
+        sheet: SheetId(0),
+        at: 0,
+        count: 1,
+    });
+}
+
+#[test]
+fn a_removed_sheet_paints_no_previous_result() {
+    paints_no_previous_result_after(Op::RemoveSheet { index: 0 });
+}
+
+#[test]
+fn a_moved_sheet_paints_no_previous_result() {
+    paints_no_previous_result_after(Op::MoveSheet { from: 0, to: 1 });
+}
+
+#[cfg(feature = "unstable-track-moves")]
+#[test]
+fn moved_rows_paint_no_previous_result() {
+    paints_no_previous_result_after(Op::MoveRows {
+        sheet: SheetId(0),
+        row: 0,
+        count: 1,
+        before: 5,
+    });
+}
+
+#[cfg(feature = "unstable-track-moves")]
+#[test]
+fn moved_columns_paint_no_previous_result() {
+    paints_no_previous_result_after(Op::MoveCols {
+        sheet: SheetId(0),
+        col: 0,
+        count: 1,
+        before: 3,
+    });
+}
+
+#[test]
+fn a_moved_range_paints_no_previous_result() {
+    let viewport = view(0.0, 800.0);
+    let mut workbook = decided_then_limited(&viewport);
     workbook
         .move_range(
-            sheet,
+            SheetId(0),
             CellRange::parse_a1("A1:A5").unwrap(),
             CellRef::new(0, 5),
-            options,
+            CalculationOptions::default(),
         )
         .unwrap();
     paints_only_decided(&workbook, &viewport, "move range");
+}
+
+#[cfg(not(feature = "unstable-track-moves"))]
+#[test]
+fn a_refused_operation_keeps_every_decided_result() {
+    let viewport = view(0.0, 800.0);
+    let mut workbook = decided_then_limited(&viewport);
+    let refused = workbook.apply_ops(
+        vec![Op::MoveRows {
+            sheet: SheetId(0),
+            row: 0,
+            count: 1,
+            before: 5,
+        }],
+        CalculationOptions::default(),
+    );
+    assert!(refused.is_err());
+    let (list, decided) = counted(&workbook, &viewport);
+    assert_eq!(decided, 0);
+    assert_eq!(list.conditional_pending, 0);
+    assert_eq!(painted(&list).len(), 120);
 }
 
 #[test]
