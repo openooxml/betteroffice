@@ -16,15 +16,8 @@ export const LARGE_END = '<!-- END GENERATED LARGE SET -->';
 const PAIRS = [[BEGIN, END], [LARGE_BEGIN, LARGE_END]];
 export const FORMATS = ['docx', 'pptx', 'xlsx'];
 export const RUN_KINDS = ['public', 'private'];
-export const PRIVATE_SECTION_PHRASES = [
-  'per-document results are not published',
-  'aggregates only; documents are not public',
-  'Times: mean per document over a seeded sample',
-  '## Benchmarks: large set',
-];
-const PRIVATE_ONLY = 'a private run writes only the large set block (--as large)';
 
-const RELEASE = String.raw`\d+\.\d+\.\d+(?:[-+][\w.-]+)?`;
+const RELEASE = String.raw`\d+\.\d+\.\d+`;
 const FONT_PACKAGE = new RegExp(`^@betteroffice/fonts@${RELEASE}$`);
 const FONT_CJK = new RegExp(`^@betteroffice/fonts-cjk@${RELEASE}$`);
 const FONT_COPIES = ['local release copy', 'workspace'];
@@ -38,6 +31,9 @@ const CHECKS = {
   fontCopy: [(value) => FONT_COPIES.includes(value), `one of: ${FONT_COPIES.join(', ')}`],
   fontSource: [(value) => typeof value === 'string' && FONT_SOURCE.test(value), 'a font source of @betteroffice/fonts releases'],
   runKind: [(value) => RUN_KINDS.includes(value), `one of: ${RUN_KINDS.join(', ')}`],
+  commit: [(value) => typeof value === 'string' && /^[a-f0-9]{40}$/.test(value), 'a full commit SHA'],
+  version: [(value) => typeof value === 'string' && /^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(value), 'a release version'],
+  libreoffice: [(value) => value === null || (typeof value === 'string' && /^\d+(?:\.\d+){2,3}$/.test(value)), 'a LibreOffice version or null'],
 };
 
 /** Refuses a stored value the README would print, naming the field and never the value. */
@@ -262,9 +258,13 @@ function recalcNote(calculation, libreoffice, missing, version, short) {
     missing ? ` ${count(missing)} further ${missing === 1 ? 'workbook has' : 'workbooks have'} no Excel calculation reference and ${missing === 1 ? 'is' : 'are'} not counted.` : ''}`;
 }
 
-function timingNote(sequential, versions, short) {
+function timingNote(sequential, versions, short, sizeField = (format) => `timing_benchmark.${format}.sample_size`) {
   const formats = FORMATS.filter((format) => sequential[format]);
   if (!formats.length) return '';
+  const sampled = Math.max(1, ...formats.map((format) => sequential[format].summary.total));
+  for (const format of formats)
+    if (sequential[format].sample_size < sampled)
+      throw new Error(`Invalid ${sizeField(format)}: below the documents a format sampled`);
   const { sample_size: size, rounds } = sequential[formats[0]];
   const timed = formats.map((format) => {
     const { summary } = sequential[format];
@@ -313,9 +313,7 @@ export function renderSection(report, { privateCorpus = false, date = new Date()
     `https://github.com/openooxml/betteroffice/commit/${report.commit}`
   );
   const measure = (format) => {
-    const version = report.versions[format];
-    if (!/^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(version))
-      throw new Error(`Invalid ${format} version`);
+    const version = checked('version', report.versions[format], `${format} version`);
     const samples = report.samples.filter((sample) => sample.format === format);
     return {
       version,
@@ -490,17 +488,21 @@ ${large ? LARGE_END : END}`;
 }
 
 function checkAggregate(aggregate) {
-  checkFields(aggregate, '', [['run_kind', 'runKind', true]]);
+  checkFields(aggregate, '', [['run_kind', 'runKind', true], ['commit', 'commit']]);
+  if (Object.keys(aggregate.formats).sort().join() !== FORMATS.join())
+    throw new Error(`Invalid formats: expected exactly ${FORMATS.join(', ')}`);
   for (const format of FORMATS) {
     const entry = aggregate.formats[format];
-    const fields = [['samples', 'count'], ['recalc_missing_reference', 'count', true]];
+    const fields = [['samples', 'count'], ['recalc_missing_reference', 'count', true],
+      ['published_version', 'version'], ['libreoffice_version', 'libreoffice']];
+    if (entry.corpus !== undefined) fields.push(['corpus.documents', 'count'], ['corpus.pages', 'count']);
     for (const side of ENGINES)
       if (side !== 'libreoffice' || entry.fidelity?.libreoffice !== null)
         fields.push([`fidelity.${side}.ssim`, 'mean'],
           ...['scored', 'total', 'exact_pages', 'paged', 'page_error'].map((key) => [`fidelity.${side}.${key}`, 'count']));
     if (entry.timing !== undefined)
-      fields.push(...['rounds', 'sample', 'timed_by_every_engine', 'notes_not_converged'].map((key) => [`timing.${key}`, 'count']),
-        ['timing.sample_size', 'count', true],
+      fields.push(...['rounds', 'sample', 'timed_by_every_engine'].map((key) => [`timing.${key}`, 'count']),
+        ['timing.sample_size', 'count', true], ['timing.notes_not_converged', 'count', true],
         ...ENGINES.flatMap((channel) => [[`timing.channels.${channel}.successful`, 'count'], [`timing.channels.${channel}.mean_ms`, 'mean']]));
     if (entry.recalc !== undefined)
       fields.push(...ENGINES.flatMap((channel) => [
@@ -523,9 +525,7 @@ function checkAggregate(aggregate) {
 /** The large set block from a run's aggregate.json, byte-identical to renderSection(report, { privateCorpus: true }). */
 export function renderLargeSection(aggregate, { date = new Date().toISOString().slice(0, 10), timingSampleSize, missingReference } = {}) {
   if (aggregate?.schema_version !== 1 || !FORMATS.every((format) => aggregate.formats?.[format]))
-    throw new Error('Expected an aggregate.json of schema version 1');
-  if (!/^[a-f0-9]{40}$/.test(aggregate.commit))
-    throw new Error('Expected a full commit SHA');
+    throw new Error('The large set block is written only from an aggregate.json of schema version 1');
   if (!isDate(date))
     throw new Error('Invalid date');
   for (const [name, value] of [['--timing-sample-size', timingSampleSize], ['--missing-reference', missingReference]])
@@ -533,7 +533,6 @@ export function renderLargeSection(aggregate, { date = new Date().toISOString().
       throw new Error(`${name} must be a non-negative integer`);
   checkAggregate(aggregate);
   const { formats } = aggregate;
-  const sampled = Math.max(1, ...FORMATS.filter((format) => formats[format].timing).map((format) => formats[format].timing.sample));
   const given = (value, argument, name, field, needed = true) => {
     if (value === undefined) {
       if (argument === undefined && needed) throw new Error(`aggregate.json has no ${field}; pass ${name}`);
@@ -549,16 +548,12 @@ export function renderLargeSection(aggregate, { date = new Date().toISOString().
   const table = (format) => {
     const entry = formats[format];
     const version = entry.published_version;
-    if (!/^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(version))
-      throw new Error(`Invalid ${format} version`);
     const sides = [entry.fidelity.published, entry.fidelity.commit];
     const headings = [
       `BetterOffice (${link(version, `https://www.npmjs.com/package/@betteroffice/${format}/v/${version}`)})`,
       `BetterOffice (${commitLink})`,
     ];
     if (entry.libreoffice_version !== null) {
-      if (!/^\d+(?:\.\d+){2,3}$/.test(entry.libreoffice_version ?? ''))
-        throw new Error('Invalid LibreOffice version');
       sides.push(entry.fidelity.libreoffice);
       headings.push(`LibreOffice (${entry.libreoffice_version})`);
     }
@@ -583,13 +578,8 @@ export function renderLargeSection(aggregate, { date = new Date().toISOString().
   };
   const sequential = Object.fromEntries(FORMATS.filter((format) => formats[format].timing).map((format) => {
     const timing = formats[format].timing;
-    const size = given(timing.sample_size, timingSampleSize, '--timing-sample-size', `${format} timing.sample_size`);
-    if (size < sampled)
-      throw new Error(timing.sample_size === undefined
-        ? `--timing-sample-size ${size} must be at least 1 and at least the ${sampled} documents a format sampled`
-        : `Invalid ${format} timing.sample_size: below the ${sampled} documents a format sampled`);
     return [format, {
-      sample_size: size,
+      sample_size: given(timing.sample_size, timingSampleSize, '--timing-sample-size', `${format} timing.sample_size`),
       rounds: timing.rounds,
       summary: { total: timing.sample, common: timing.timed_by_every_engine, notes_not_converged: timing.notes_not_converged, channels: timing.channels },
     }];
@@ -609,7 +599,8 @@ export function renderLargeSection(aggregate, { date = new Date().toISOString().
     lead: corpusNote(Object.fromEntries(FORMATS.filter((format) => formats[format].corpus).map((format) => [format, formats[format].corpus]))),
     docx,
     pptx,
-    xlsx: `${xlsx}${note(recalcText)}${note(timingNote(sequential, versions, short))}`,
+    xlsx: `${xlsx}${note(recalcText)}${note(timingNote(sequential, versions, short,
+      (format) => (formats[format].timing.sample_size === undefined ? '--timing-sample-size' : `${format} timing.sample_size`)))}`,
   });
 }
 
@@ -686,18 +677,15 @@ export function aggregateReport(report) {
 }
 
 function blockRange(readme, begin, end) {
-  const begins = readme.split(begin).length - 1;
-  const start = readme.indexOf(begin);
-  const stop = readme.indexOf(end);
-  if (begins !== readme.split(end).length - 1 || begins > 1 || stop < start)
-    throw new Error('Broken generated markers');
-  return begins ? [start, stop + end.length] : null;
-}
-
-function generatedBlock(readme, begin = BEGIN, end = END) {
-  const range = blockRange(readme, begin, end);
-  if (!range) throw new Error('README has no generated block');
-  return readme.slice(...range);
+  const [start, stop] = [begin, end].map((marker) => {
+    const at = readme.indexOf(marker);
+    if (at >= 0 && (readme.includes(marker, at + 1) || (at > 0 && readme[at - 1] !== '\n') ||
+        !/^(?:\r?\n|$)/.test(readme.slice(at + marker.length, at + marker.length + 2))))
+      throw new Error('Broken generated markers');
+    return at;
+  });
+  if ((start < 0) !== (stop < 0) || stop < start) throw new Error('Broken generated markers');
+  return start < 0 ? null : [start, stop + end.length];
 }
 
 const occurrences = (text, marker) => text.split(marker).length - 1;
@@ -710,9 +698,10 @@ export function updateReadme(readme, section) {
   if (visual && large && visual[1] > large[0] && large[1] > visual[0])
     throw new Error('Broken generated markers');
   const own = kind ? large : visual;
-  if (own) return readme.slice(0, own[0]) + section + readme.slice(own[1]);
   const eol = readme.includes('\r\n') ? '\r\n' : '\n';
-  if (kind && visual) return `${readme.slice(0, visual[1])}${eol}${eol}${section}${readme.slice(visual[1])}`;
+  const block = section.replace(/\r?\n/g, eol);
+  if (own) return readme.slice(0, own[0]) + block + readme.slice(own[1]);
+  if (kind && visual) return `${readme.slice(0, visual[1])}${eol}${eol}${block}${readme.slice(visual[1])}`;
   throw new Error('README has no generated block');
 }
 
@@ -729,46 +718,57 @@ function isRunUrl(runUrl) {
     !url.username && !url.password && !url.search && !url.hash && RUN_PATH.test(url.pathname);
 }
 
-/** The section with a badge linking the workflow run that wrote it, dated like its block or by the given run date. */
-export function withRunBadge(section, runUrl, today = new Date().toISOString().slice(0, 10)) {
+const isBadgeUrl = (text) => {
+  try {
+    const url = new URL(text.replaceAll('&amp;', '&'), 'https://invalid.');
+    return url.hostname === 'betteroffice.dev' && decodeURIComponent(url.pathname).toLowerCase().replace(/\/+$/, '') === '/api/badge';
+  } catch {
+    return false;
+  }
+};
+
+/** The section with a badge linking the workflow run that wrote it, dated by the given run date. */
+export function withRunBadge(section, runUrl, date = new Date().toISOString().slice(0, 10)) {
   if (typeof runUrl !== 'string' || !isRunUrl(runUrl))
     throw new Error('--run-url must be https://github.com/<owner>/<repository>/actions/runs/<run id>');
-  if (/betteroffice\.dev\/api\/badge/.test(section)) throw new Error('Invalid generated section');
-  const large = section.startsWith(LARGE_BEGIN);
-  if (!large && !isDate(today)) throw new Error('Invalid date');
-  const date = large ? / on (\d{4}-\d{2}-\d{2}); aggregates only;/.exec(section)?.[1] : today;
+  if ([...section.matchAll(/[\w+.-]*:?\/\/[^\s"'<>()]+/g)].some(([text]) => isBadgeUrl(text)))
+    throw new Error('Invalid generated section');
+  if (!isDate(date)) throw new Error('Invalid date');
   const generated = /^\*Generated by .*\*$/m.exec(section);
-  if (!date || !generated) throw new Error('Invalid generated section');
+  if (!generated) throw new Error('Invalid generated section');
   const at = generated.index + generated[0].length;
   const badge = `<a href="${runUrl}"><img src="https://betteroffice.dev/api/badge?label=benchmark%20run&amp;message=${date}&amp;color=0a0a0a" alt="benchmark run ${date}"></a>`;
   return `${section.slice(0, at)}\n\n${badge}${section.slice(at)}`;
 }
 
-const USAGE = 'usage: readme.mjs --as public report.json [README.md] | readme.mjs --as large [--public README.md] report.json|aggregate.json [README.md] (an aggregate.json also takes [--timing-sample-size N] [--missing-reference N]) | readme.mjs --section section.md [README.md]; each also takes [--date YYYY-MM-DD] [--run-url https://github.com/<owner>/<repository>/actions/runs/<run id>]';
+const USAGE = 'usage: readme.mjs --section section.md [README.md] | readme.mjs --as large aggregate.json [--timing-sample-size N] [--missing-reference N] [README.md]; each also takes [--date YYYY-MM-DD] [--run-url https://github.com/<owner>/<repository>/actions/runs/<run id>]';
 
-async function readRegular(path) {
+async function readText(path) {
   if (!(await lstat(path)).isFile()) throw new Error(`${path} must be a regular file`);
-  return readFile(path, 'utf8');
+  const bytes = await readFile(path);
+  const text = bytes.toString('utf8');
+  if (!Buffer.from(text, 'utf8').equals(bytes)) throw new Error(`${path} is not valid UTF-8`);
+  return text;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const { values, positionals } = parseArgs({
     allowPositionals: true,
     options: {
-      section: { type: 'string' }, as: { type: 'string' }, date: { type: 'string' }, public: { type: 'string' },
+      section: { type: 'string' }, as: { type: 'string' }, date: { type: 'string' },
       'timing-sample-size': { type: 'string' }, 'missing-reference': { type: 'string' }, 'run-url': { type: 'string' },
     },
   });
   const sectionRun = values.section !== undefined;
-  const large = values.as === 'large';
   const counts = ['timing-sample-size', 'missing-reference'].filter((name) => values[name] !== undefined);
-  if ((values.as !== undefined && !['public', 'large'].includes(values.as)) || (sectionRun && (values.as !== undefined || positionals.length > 1)) ||
-      (!sectionRun && (!positionals.length || positionals.length > 2)) ||
-      (!large && (values.public !== undefined || counts.length)))
+  if (values.as === 'public') throw new Error('the public block is written only by --section');
+  if ((values.as !== undefined && values.as !== 'large') || (sectionRun && (values.as !== undefined || counts.length || positionals.length > 1)) ||
+      (!sectionRun && (!positionals.length || positionals.length > 2)))
     throw new Error(USAGE);
-  if (!sectionRun && values.as === undefined) throw new Error('the positional command requires --as public or --as large');
-  if (values.date !== undefined && !isDate(values.date)) throw new Error('Invalid date');
-  if (!sectionRun && privateMode() && !large) throw new Error(PRIVATE_ONLY);
+  if (!sectionRun && values.as === undefined) throw new Error('the positional command requires --as large');
+  if (sectionRun && privateMode()) throw new Error('a private run writes the large set block only from aggregate.json');
+  const date = values.date ?? new Date().toISOString().slice(0, 10);
+  if (!isDate(date)) throw new Error('Invalid date');
   const argument = (name) => {
     if (values[name] === undefined) return undefined;
     if (!/^\d+$/.test(values[name]) || !Number.isSafeInteger(Number(values[name])))
@@ -778,26 +778,13 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   const timingSampleSize = argument('timing-sample-size');
   const missingReference = argument('missing-reference');
   const readmePath = (sectionRun ? positionals[0] : positionals[1]) ?? 'README.md';
-  let readme = await readRegular(readmePath);
+  const readme = await readText(readmePath);
   let section;
   if (sectionRun) {
-    section = await readFile(values.section, 'utf8');
-    const [begin, end] = privateMode() ? [LARGE_BEGIN, LARGE_END] : [BEGIN, END];
-    if (!section.startsWith(begin) || !section.endsWith(end) ||
-        (!privateMode() && PRIVATE_SECTION_PHRASES.some((phrase) => section.includes(phrase))))
+    section = await readText(values.section);
+    if (!section.startsWith(BEGIN) || !section.endsWith(END))
       throw new Error('The generated section does not match this run');
-  } else {
-    const input = JSON.parse(await readFile(positionals[0], 'utf8'));
-    if (input.run_kind !== undefined) checked('runKind', input.run_kind, 'run_kind');
-    if (input.run_kind === 'private' && !large) throw new Error(PRIVATE_ONLY);
-    if (input.run_kind === 'public' && large) throw new Error('run_kind public does not match --as large');
-    if (Array.isArray(input.samples)) {
-      if (counts.length) throw new Error(`--${counts[0]} applies only to an aggregate.json`);
-      section = renderSection(input, { privateCorpus: large, date: values.date });
-    } else if (large) section = renderLargeSection(input, { date: values.date, timingSampleSize, missingReference });
-    else throw new Error(`${positionals[0]} has no samples: an aggregate.json renders only the large set block (--as large)`);
-    if (values.public !== undefined) readme = updateReadme(readme, generatedBlock(await readFile(values.public, 'utf8')));
-  }
-  if (values['run-url'] !== undefined) section = withRunBadge(section, values['run-url'], values.date);
+  } else section = renderLargeSection(JSON.parse(await readText(positionals[0])), { date, timingSampleSize, missingReference });
+  if (values['run-url'] !== undefined) section = withRunBadge(section, values['run-url'], date);
   await writeFile(readmePath, updateReadme(readme, section));
 }

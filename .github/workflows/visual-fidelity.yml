@@ -1701,11 +1701,13 @@ jobs:
           sparse-checkout: scripts/office-quality
           persist-credentials: false
 
-      - name: Replace the generated README section
-        if: ${{ (!inputs.private_corpus && !inputs.report_only && inputs.corpus_origin == '' && inputs.samples == '' && inputs.collection == 'office-quality') || (inputs.private_corpus && inputs.publish_readme && !inputs.report_only) }}
-        env:
-          QUALITY_PRIVATE: ${{ inputs.private_corpus }}
+      - name: Replace the generated public README block
+        if: ${{ !inputs.private_corpus && !inputs.report_only && inputs.corpus_origin == '' && inputs.samples == '' && inputs.collection == 'office-quality' }}
         run: node .workflow-tools/scripts/office-quality/readme.mjs --section "$RUNNER_TEMP/fidelity-report/section.md" --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --date "${{ needs.prepare.outputs.run-date }}" README.md
+
+      - name: Replace the generated large set README block
+        if: ${{ inputs.private_corpus && inputs.publish_readme && !inputs.report_only }}
+        run: node .workflow-tools/scripts/office-quality/readme.mjs --as large "$RUNNER_TEMP/fidelity-report/aggregate.json" --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --date "${{ needs.prepare.outputs.run-date }}" README.md
 
       - name: Detect a changed report
         id: changed
