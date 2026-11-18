@@ -117,9 +117,23 @@ const declaredFormat = (id: number, code: string, values: number[]) => buildFixt
     .replace('</cellXfs>', `<xf numFmtId="${id}" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/></cellXfs>`),
   'xl/worksheets/sheet2.xml': `<worksheet xmlns="${MAIN}"><sheetData>${values.map((value, row) => `<row r="${row + 1}"><c r="A${row + 1}" s="2"><v>${value}</v></c></row>`).join('')}</sheetData></worksheet>`,
 });
-const notesText = (engine: XlsxEngine, bytes: Uint8Array, rows: number) => scoped(engine.XlsxDocument.open(bytes), (doc) =>
+const notesCells = (doc: Doc, rows: number) =>
   (JSON.parse(doc.readCellsJson(json({ ranges: [at(`A1:A${rows}`, 'sheet:1')] }))) as { ranges: { cells: { displayText: string }[][] }[] })
-    .ranges[0]!.cells.map((row) => row[0]!.displayText));
+    .ranges[0]!.cells.map((row) => row[0]!.displayText);
+const notesText = (engine: XlsxEngine, bytes: Uint8Array, rows: number) => scoped(engine.XlsxDocument.open(bytes), (doc) => notesCells(doc, rows));
+// The Notes sheet's A1 down as `engine` shows it once it has restored the peer snapshot `chunks`.
+const restoredNotesText = (engine: XlsxEngine, chunks: Uint8Array[], rows: number) => {
+  const builder = new engine.XlsxSnapshotBuilder();
+  let consumed = false;
+  try {
+    for (const chunk of chunks) builder.push(chunk);
+    advanceUntilReady(builder);
+    consumed = true;
+    return scoped(builder.finish(), (doc) => notesCells(doc, rows));
+  } finally {
+    if (!consumed) builder.free();
+  }
+};
 
 const wasmEngine: XlsxEngine = { ...wasmXlsx, font_preflight: wasmFontPreflight };
 const nativeEngine = createRequire(import.meta.url)('../xlsx-native/index.js') as XlsxEngine;
@@ -919,6 +933,16 @@ describe('xlsx native and wasm parity table', () => {
       } else {
         expect(wasm![0]).toContain('年');
       }
+    }
+  });
+
+  test('a declared built-in number format id keeps the file code in a snapshot restored on the other engine', async () => {
+    const declared = await declaredFormat(41, ACCOUNTING, [-1234, 1234]);
+    for (const [, engine] of ENGINES) {
+      const chunks = scoped(engine.XlsxDocument.openWithCalculationJson(declared, CONTEXT), snapshotChain);
+      const [shown] = restoredNotesText(otherEngine(engine), chunks, 2);
+      expect(shown).toContain('-');
+      expect(shown).not.toContain('(');
     }
   });
 

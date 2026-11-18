@@ -3413,6 +3413,65 @@ fn snapshots_of_a_workbook_declaring_general_restore() {
     }
 }
 
+const MINUS_ACCOUNTING: &str = r#"_-* #,##0_-;\-* #,##0_-;_-* "-"_-;_-@_-"#;
+
+/// A1 holds -1234 under builtin id 41, which the workbook declares as an
+/// accounting code with a minus sign.
+fn declared_accounting_model() -> WorkbookModel {
+    let mut model = WorkbookModel {
+        sheets: vec![crate::Sheet::new("Data")],
+        ..WorkbookModel::default()
+    };
+    model.styles.num_fmts.push((41, MINUS_ACCOUNTING.into()));
+    model.styles.cell_xfs.push(xlsx_model::styles::Xf {
+        num_fmt_id: Some(41),
+        ..xlsx_model::styles::Xf::default()
+    });
+    model.sheets[0].set_cell(
+        CellRef::new(0, 0),
+        Cell {
+            value: CellValue::Number { value: -1234.0 },
+            style: Some(0),
+            ..Cell::default()
+        },
+    );
+    model
+}
+
+#[test]
+fn a_new_seed_of_a_declared_builtin_id_restores_the_workbooks_own_code() {
+    let worker = Workbook::from_model(declared_accounting_model()).unwrap();
+    let custom = xlsx_model::NumberFormat::Custom {
+        pattern: MINUS_ACCOUNTING.into(),
+    };
+    for budget in budgets() {
+        let (peer, _) = completed_builder(&encode(&worker, budget), budget)
+            .finish()
+            .unwrap()
+            .into_parts();
+        let shown = a1_display(&peer.model);
+        assert!(shown.contains('-') && !shown.contains('('), "{shown}");
+        let cell = peer.model.sheets[0].cell(CellRef::new(0, 0)).unwrap();
+        let format = peer.model.styles.cell_format(cell.style);
+        assert_eq!(format.number_format, custom);
+    }
+}
+
+#[test]
+fn schema_6_snapshot_of_a_declared_accounting_id_keeps_the_builtin_parentheses() {
+    let model = declared_accounting_model();
+    let mut worker = Workbook::from_model(model.clone()).unwrap();
+    worker.set_authority_for_test(crate::authority::schema_6_authority(&model, 91));
+    for budget in budgets() {
+        let (peer, _) = completed_builder(&encode(&worker, budget), budget)
+            .finish()
+            .unwrap()
+            .into_parts();
+        let shown = a1_display(&peer.model);
+        assert!(shown.contains('(') && !shown.contains('-'), "{shown}");
+    }
+}
+
 #[path = "invariant_tests.rs"]
 mod invariants;
 

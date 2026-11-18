@@ -10518,6 +10518,96 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_state_written_by_this_release_carries_schema_8() {
+        assert_eq!(SCHEMA_VERSION, 8);
+        let model = rich_model();
+        let authority = WorkbookAuthority::from_model_with_client_id(&model, 111).unwrap();
+        assert_eq!(authority.schema_version().unwrap(), 8);
+    }
+
+    #[test]
+    fn a_schema_9_state_is_refused_up_to_schema_8() {
+        let model = rich_model();
+        let authority = WorkbookAuthority::from_model_with_client_id(&model, 112).unwrap();
+        {
+            let mut txn = authority.doc.transact_mut_with("test:unknown-schema");
+            let meta = txn.get_map(META).unwrap();
+            meta.try_update(&mut txn, "schemaVersion", 9_i64);
+        }
+        let AuthorityError::InvalidState(error) = authority.materialize().unwrap_err() else {
+            panic!("expected invalid state");
+        };
+        assert_eq!(
+            error,
+            "unsupported schema version 9; supported versions are 3 through 8"
+        );
+    }
+
+    const MINUS_ACCOUNTING: &str = r#"_-* #,##0_-;\-* #,##0_-;_-* "-"_-;_-@_-"#;
+
+    /// A1 holds -1234 under number format `id`, which the workbook declares as
+    /// an accounting code with a minus sign.
+    fn declared_number_format_model(id: u16) -> WorkbookModel {
+        let mut model = WorkbookModel {
+            sheets: vec![Sheet::new("Data")],
+            ..WorkbookModel::default()
+        };
+        model.styles.num_fmts.push((id, MINUS_ACCOUNTING.into()));
+        model.styles.cell_xfs.push(Xf {
+            num_fmt_id: Some(id),
+            ..Xf::default()
+        });
+        model.sheets[0].set_cell(
+            CellRef::new(0, 0),
+            Cell {
+                value: CellValue::Number { value: -1234.0 },
+                style: Some(0),
+                ..Cell::default()
+            },
+        );
+        model
+    }
+
+    #[test]
+    fn a_new_seed_stores_a_declared_builtin_id_as_the_workbooks_own_code() {
+        let model = declared_number_format_model(41);
+        let authority = WorkbookAuthority::from_model_with_client_id(&model, 113).unwrap();
+        let txn = authority.doc.transact();
+        let catalog = txn.get_map(CELL_FORMATS).unwrap();
+        let formats = catalog
+            .iter(&txn)
+            .map(|(_, value)| {
+                let payload = value.cast::<String>().unwrap();
+                serde_json::from_str::<StoredCellFormat>(&payload)
+                    .unwrap()
+                    .format
+                    .number_format
+            })
+            .collect::<Vec<_>>();
+        let custom = xlsx_model::NumberFormat::Custom {
+            pattern: MINUS_ACCOUNTING.into(),
+        };
+        assert!(formats.contains(&custom), "{formats:?}");
+        let builtin = xlsx_model::NumberFormat::Builtin { id: 41 };
+        assert!(!formats.contains(&builtin), "{formats:?}");
+    }
+
+    #[test]
+    fn only_a_declared_builtin_id_moves_the_base_fingerprint() {
+        let released = |model: &WorkbookModel| {
+            fingerprint_model_with_domain_oracle(model, 6, true, true, FACETS_FINGERPRINT_DOMAIN)
+                .unwrap()
+                .0
+        };
+        let custom = declared_number_format_model(164);
+        let base = WorkbookBase::from_model(&custom).unwrap();
+        assert_eq!(base.fingerprint, released(&custom));
+        let declared = declared_number_format_model(41);
+        let base = WorkbookBase::from_model(&declared).unwrap();
+        assert_ne!(base.fingerprint, released(&declared));
+    }
+
     fn charted(name: &str, formula: &str) -> Sheet {
         let mut sheet = Sheet::new(name);
         sheet.charts.push(xlsx_model::SheetChart {
