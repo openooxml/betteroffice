@@ -44,6 +44,12 @@ export class WorkbookEditPeerFailedError extends Error {
   }
 }
 
+/** Arguments a replayed direct write carries; a trailing `XlsxWriteOptions` never replays. */
+const DIRECT_WRITE_ARITY: Partial<Record<WorkbookReplayMethod, number>> = {
+  editCell: 4, editCells: 2, patchRangeStyle: 3, setNumberFormat: 3, applyFormat: 3, moveChart: 4,
+  resizeChart: 3,
+};
+
 function randomSeed(): number {
   return globalThis.crypto.getRandomValues(new Uint32Array(1))[0];
 }
@@ -243,9 +249,15 @@ export function createWorkbookEditPeer(options: WorkbookEditPeerOptions): Workbo
 
   const mutators = {} as Pick<WorkbookHandle, WorkbookReplayMethod>;
   for (const method of Object.keys(WORKBOOK_REPLAY_MUTATORS) as WorkbookReplayMethod[]) {
+    const arity = DIRECT_WRITE_ARITY[method];
     Object.defineProperty(mutators, method, { enumerable: true, value: (
       ...args: Parameters<WorkbookHandle[typeof method]>
-    ) => applyQueuedOp({ method, args } as WorkbookReplayOp) });
+    ) => {
+      if (arity !== undefined && args.length > arity) {
+        throw new TypeError(`An edit peer ${method} takes no write options; protected sheets refuse its writes`);
+      }
+      return applyQueuedOp({ method, args } as WorkbookReplayOp);
+    } });
   }
 
   internal.editPeerAttached = true;

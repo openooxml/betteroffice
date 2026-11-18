@@ -485,6 +485,59 @@ describe('wasm loader', () => {
     }
   });
 
+  async function protectedChartBytes(): Promise<Uint8Array> {
+    const zip = await JSZip.loadAsync(chartBytes());
+    const sheet = await zip.file('xl/worksheets/sheet1.xml')!.async('string');
+    zip.file('xl/worksheets/sheet1.xml', sheet.replace('</sheetData>', '</sheetData><sheetProtection sheet="1"/>'));
+    return zip.generateAsync({ type: 'uint8array' });
+  }
+
+  const RESIZE = { left: 0, top: 0, right: 40, bottom: 30 };
+
+  it('refuses a chart resize on a protected sheet unless protectedSheets allows it', async () => {
+    const viewport = { x: 0, y: 0, width: 800, height: 800 };
+    const handle = openWorkbook(await protectedChartBytes());
+    try {
+      const before = (handle.displayList(viewport).charts ?? [])[0];
+      const version = handle.version();
+      const saved = handle.save();
+      expect(() => handle.resizeChart(0, before.id, RESIZE)).toThrow('sheet "Charts" is protected');
+      expect(() => handle.resizeChart(0, before.id, RESIZE, { protectedSheets: 'refuse' }))
+        .toThrow('sheet "Charts" is protected');
+      expect(handle.version()).toBe(version);
+      expect(handle.save()).toEqual(saved);
+
+      expect(handle.resizeChart(0, before.id, RESIZE, { protectedSheets: 'allow' }).applied).toBe(true);
+      const resized = (handle.displayList(viewport).charts ?? [])[0];
+      expect(resized.rect.w).toBeCloseTo(before.rect.w + 40, 1);
+      const sheet = await (await JSZip.loadAsync(handle.save())).file('xl/worksheets/sheet1.xml')!.async('string');
+      expect(sheet).toContain('<sheetProtection');
+    } finally {
+      handle.dispose();
+    }
+
+    const open = openWorkbook(chartBytes());
+    try {
+      const chart = (open.displayList(viewport).charts ?? [])[0];
+      expect(open.resizeChart(0, chart.id, RESIZE).applied).toBe(true);
+    } finally {
+      open.dispose();
+    }
+  });
+
+  it('refuses a protectedSheets allow chart resize on a collaborative workbook', async () => {
+    const handle = openWorkbook(await protectedChartBytes(), { collaborative: true, clientId: 7 });
+    try {
+      const chart = (handle.displayList({ x: 0, y: 0, width: 800, height: 800 }).charts ?? [])[0];
+      const version = handle.version();
+      expect(() => handle.resizeChart(0, chart.id, RESIZE, { protectedSheets: 'allow' }))
+        .toThrow('protectedSheets allow requires a standalone agent workbook');
+      expect(handle.version()).toBe(version);
+    } finally {
+      handle.dispose();
+    }
+  });
+
   it('refuses a row insert inside a multi-level chart range before it applies', async () => {
     const zip = await JSZip.loadAsync(chartBytes());
     const chart = await zip.file('xl/charts/chart1.xml')!.async('string');
