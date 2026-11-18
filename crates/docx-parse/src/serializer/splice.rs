@@ -5310,6 +5310,104 @@ mod tests {
         }
     }
 
+    /// Splices `xml` as paragraph `changed` of the body holding `paragraphs`, both through the
+    /// planned splice and through the direct one, giving each result.
+    fn splice_both(paragraphs: &[&str], changed: u32, xml: &str) -> [Option<String>; 2] {
+        let source = body(&paragraphs.concat());
+        let mut written = paragraphs.to_vec();
+        written[changed as usize] = xml;
+        let numbered: Vec<(u32, &str)> = (0..).zip(written.iter().copied()).collect();
+        let ordinals: Vec<u32> = numbered.iter().map(|&(ordinal, _)| ordinal).collect();
+        let recorded = RecordedParagraphs {
+            written: numbered
+                .iter()
+                .map(|&(ordinal, xml)| (ordinal, xml.to_owned()))
+                .collect(),
+            order: ordinals.iter().copied().map(Some).collect(),
+            ..RecordedParagraphs::default()
+        };
+        let part = S13SplicedPart {
+            format_only: Vec::new(),
+            part: "word/document.xml".to_owned(),
+            sha256: String::new(),
+            paragraphs: ordinals,
+            changed: vec![changed],
+            inserted: Vec::new(),
+            removed: Vec::new(),
+            paragraph_patches: Vec::new(),
+            legacy_paragraphs: Vec::new(),
+            table_patches: Vec::new(),
+        };
+        [
+            splice(&source, &numbered, &[changed]),
+            splice_source_direct(
+                &source,
+                &body(&written.concat()),
+                &recorded,
+                &part,
+                &BTreeMap::new(),
+                &BTreeMap::from([(changed, xml.to_owned())]),
+                &mut Vec::new(),
+            ),
+        ]
+    }
+
+    fn bookmarked(id: u32, text: &str) -> String {
+        format!(
+            "<w:p><w:bookmarkStart w:id=\"{id}\" w:name=\"{text}\"/><w:r><w:t>{text}</w:t></w:r>\
+             <w:bookmarkEnd w:id=\"{id}\"/></w:p>"
+        )
+    }
+
+    const PLAIN: &str = "<w:p><w:r><w:t>b</w:t></w:r></w:p>";
+
+    #[test]
+    fn a_range_id_the_source_holds_twice_does_not_refuse_the_splice() {
+        let first = bookmarked(4, "a");
+        let third = bookmarked(4, "c");
+        let edited = PLAIN.replace("b<", "b, edited<");
+        let expected = body(&format!("{first}{edited}{third}"));
+        for (route, spliced) in ["planned", "direct"]
+            .into_iter()
+            .zip(splice_both(&[&first, PLAIN, &third], 1, &edited))
+        {
+            let spliced = spliced.unwrap_or_else(|| panic!("{route}: refused"));
+            assert!(spliced == expected, "{route}: not paragraph 2 alone");
+            assert_eq!(spliced.matches("<w:bookmarkStart w:id=\"4\"").count(), 2);
+            assert_eq!(spliced.matches("<w:bookmarkEnd w:id=\"4\"/>").count(), 2);
+        }
+    }
+
+    #[test]
+    fn a_splice_cannot_add_an_occurrence_of_a_range_id() {
+        let first = bookmarked(4, "a");
+        let third = bookmarked(4, "c");
+        let reused = bookmarked(4, "b");
+        for spliced in splice_both(&[&first, PLAIN, &third], 1, &reused) {
+            assert!(spliced.is_none(), "a third pair of id 4 was spliced");
+        }
+        for spliced in splice_both(&[&first, PLAIN], 1, &reused) {
+            assert!(spliced.is_none(), "a second pair of id 4 was spliced");
+        }
+    }
+
+    #[test]
+    fn a_range_added_by_an_edit_is_spliced_once() {
+        let first = bookmarked(4, "a");
+        let added = bookmarked(9, "b");
+        let expected = body(&format!("{first}{added}"));
+        for (route, spliced) in ["planned", "direct"]
+            .into_iter()
+            .zip(splice_both(&[&first, PLAIN], 1, &added))
+        {
+            assert!(spliced.as_ref() == Some(&expected), "{route}: added bookmark not spliced");
+        }
+        let twice = format!("{added}{added}").replace("</w:p><w:p>", "");
+        for spliced in splice_both(&[&first, PLAIN], 1, &twice) {
+            assert!(spliced.is_none(), "an added id written twice was spliced");
+        }
+    }
+
     #[test]
     fn a_proofing_mark_across_paragraphs_does_not_hold_back_rewriting_one_end() {
         for keep in [true, false] {

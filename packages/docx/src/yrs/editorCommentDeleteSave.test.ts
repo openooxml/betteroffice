@@ -45,7 +45,10 @@ const para = (n: number, inner: string) => `<w:p w14:paraId="0A00000${n}" w14:te
 const paraId = (id: number) => `0D00000${id}`;
 const durableId = (id: number) => `1E00000${id}`;
 
-function body(ids: number[]): string {
+const bookmark = (twice: boolean, name: string, inner: string) =>
+  twice ? `<w:bookmarkStart w:id="7" w:name="${name}"/>${inner}<w:bookmarkEnd w:id="7"/>` : inner;
+
+function body(ids: number[], twice = false): string {
   const has = (id: number) => ids.includes(id);
   const ranged = (id: number, inner: string) =>
     has(id) ? `<w:commentRangeStart w:id="${id}"/>${inner}<w:commentRangeEnd w:id="${id}"/>${reference(id)}` : inner;
@@ -53,10 +56,10 @@ function body(ids: number[]): string {
   const field = `<w:fldSimple w:instr=" PAGE ">${run('1')}</w:fldSimple>`;
   const cell =
     '<w:tbl><w:tblPr><w:tblW w:w="4000" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid>' +
-    `<w:tr><w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>${para(3, run('Cell paragraph'))}</w:tc></w:tr></w:tbl>`;
+    `<w:tr><w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>${para(3, bookmark(twice, 'Cell', run('Cell paragraph')))}</w:tc></w:tr></w:tbl>`;
   return (
     para(1, `${run('Opening page ')}${field}${ranged(1, run('first note'))}${run(' after')}`) +
-    para(2, run('Second paragraph stays')) +
+    para(2, bookmark(twice, 'Second', run('Second paragraph stays'))) +
     cell +
     para(
       4,
@@ -70,7 +73,7 @@ function body(ids: number[]): string {
   );
 }
 
-function built(ids: number[] = ALL, companions = true): Uint8Array {
+function built(ids: number[] = ALL, companions = true, twice = false): Uint8Array {
   const extra = companions
     ? [
         ['commentsExtended', 'http://schemas.microsoft.com/office/2011/relationships/commentsExtended'],
@@ -99,7 +102,7 @@ function built(ids: number[] = ALL, companions = true): Uint8Array {
       '</Relationships>'
     )],
     ['word/document.xml', toBytes(
-      `<w:document xmlns:w="${W}" xmlns:r="${REL}" xmlns:w14="${W14}"><w:body>${body(ids)}<w:sectPr/></w:body></w:document>`
+      `<w:document xmlns:w="${W}" xmlns:r="${REL}" xmlns:w14="${W14}"><w:body>${body(ids, twice)}<w:sectPr/></w:body></w:document>`
     )],
     ['word/comments.xml', toBytes(
       `<w:comments xmlns:w="${W}" xmlns:w14="${W14}">` +
@@ -183,6 +186,10 @@ const marks = (bytes: Uint8Array, id: number) =>
 
 /** The markers of each comment in `ids`, keyed by id. */
 const marksOf = (bytes: Uint8Array, ids: number[]) => Object.fromEntries(ids.map((id) => [id, marks(bytes, id)]));
+
+/** The body's bookmark ranges with id 7, each from its start to its end, byte for byte. */
+const bookmarkPairs = (bytes: Uint8Array) =>
+  part(bytes, 'word/document.xml').match(/<w:bookmarkStart w:id="7"[\s\S]*?<w:bookmarkEnd w:id="7"\/>/g) ?? [];
 
 const commentIds = (bytes: Uint8Array) =>
   [...part(bytes, 'word/comments.xml').matchAll(/<w:comment\b[^>]*?\bw:id="(\d+)"/g)].map((match) => Number(match[1]));
@@ -370,6 +377,17 @@ for (const [route, save] of Object.entries(ROUTES)) {
       const reread = await reopened(saved.bytes);
       expect(reread.ids).toEqual([2, 3, 4, 5]);
       expect([reread.anchored(2), reread.anchored(5)]).toEqual(['discussed words', 'fifth note']);
+      expect(saved.full).toBe(false);
+    }, TIMEOUT);
+
+    test('deleting a comment beside a bookmark id the source holds twice rewrites only its paragraph', async () => {
+      const source = built(ALL, true, true);
+      expect(bookmarkPairs(source)).toHaveLength(2);
+      const saved = await save(source, { remove: 1 });
+      expect(differing(source, saved.bytes)).toEqual([0]);
+      expect(bookmarkPairs(saved.bytes)).toEqual(bookmarkPairs(source));
+      expect(marks(saved.bytes, 1)).toEqual([]);
+      expect(marksOf(saved.bytes, [2, 3, 4, 5])).toEqual(marksOf(source, [2, 3, 4, 5]));
       expect(saved.full).toBe(false);
     }, TIMEOUT);
 
