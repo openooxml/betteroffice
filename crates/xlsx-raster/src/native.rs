@@ -361,7 +361,20 @@ pub fn render_png_with_fonts_and_images(
                 runs: _,
             } => {
                 if let Some(pieces) = xlsx_render::run_pieces(cmd) {
-                    paint_pieces(&mut pixmap, fonts, (*x, *y), *align, clip, text, &pieces)?;
+                    let lines = match wrap {
+                        Some(wrap) => wrapped_lines(*y, wrap, text, &pieces, |piece, part| {
+                            font::measure_text_with_fonts(
+                                piece_faces(fonts, piece),
+                                &fonts.stack,
+                                part,
+                                piece.font_size,
+                            )
+                        }),
+                        None => vec![(*y, pieces)],
+                    };
+                    for (y, pieces) in lines {
+                        paint_pieces(&mut pixmap, fonts, (*x, y), *align, clip, text, &pieces)?;
+                    }
                     continue;
                 }
                 let run = font::TextRun {
@@ -454,13 +467,7 @@ fn paint_pieces(
     text: &str,
     pieces: &[xlsx_render::TextPiece],
 ) -> Result<(), String> {
-    let faces: Vec<&[font::FontFace]> = pieces
-        .iter()
-        .map(|piece| {
-            let family = piece.font_family.as_deref().unwrap_or("Calibri");
-            fonts.chain(family, piece.bold, piece.italic)
-        })
-        .collect();
+    let faces: Vec<_> = pieces.iter().map(|piece| piece_faces(fonts, piece)).collect();
     let widths: Vec<f32> = pieces
         .iter()
         .zip(&faces)
@@ -495,6 +502,11 @@ fn paint_pieces(
         pen += width;
     }
     Ok(())
+}
+
+fn piece_faces<'f>(fonts: &'f RasterFonts, piece: &xlsx_render::TextPiece) -> &'f [font::FontFace] {
+    let family = piece.font_family.as_deref().unwrap_or("Calibri");
+    fonts.chain(family, piece.bold, piece.italic)
 }
 
 #[cfg(test)]

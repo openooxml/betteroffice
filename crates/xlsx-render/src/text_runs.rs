@@ -40,12 +40,13 @@ impl TextPiece {
     }
 }
 
-/// The pieces a painter draws for `command` left to right on one baseline, or
-/// `None` when it paints the command as one plain run: a command without
-/// runs, runs that all carry the command's own font, and the cases the pieces
-/// do not cover yet (wrapped, rotated, stacked, number-formatted or
-/// highlighted text, and text with a right-to-left character). Neighbouring
-/// pieces in the same font join into one.
+/// The pieces a painter draws for `command` left to right on one baseline,
+/// or on each line [`wrap_run_lines`] breaks them into, or `None` when it
+/// paints the command as one plain run: a command without runs, runs that
+/// all carry the command's own font, and the cases the pieces do not cover
+/// yet (rotated, stacked, number-formatted or highlighted text, and text with
+/// a right-to-left character). Neighbouring pieces in the same font join into
+/// one.
 pub fn run_pieces(command: &DrawCmd) -> Option<Vec<TextPiece>> {
     let DrawCmd::Text {
         text,
@@ -62,7 +63,6 @@ pub fn run_pieces(command: &DrawCmd) -> Option<Vec<TextPiece>> {
         number_format,
         rotation_deg,
         stacked,
-        wrap,
         runs,
         ..
     } = command
@@ -70,7 +70,6 @@ pub fn run_pieces(command: &DrawCmd) -> Option<Vec<TextPiece>> {
         return None;
     };
     if runs.is_empty()
-        || wrap.is_some()
         || rotation_deg.is_some()
         || *stacked
         || number_format.is_some()

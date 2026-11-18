@@ -239,7 +239,15 @@ pub fn render_png_with_images(dl: &DisplayList, images: &ImageMap<'_>) -> Result
                 runs: _,
             } => {
                 if let Some(pieces) = xlsx_render::run_pieces(cmd) {
-                    paint_pieces(&mut pixmap, (*x, *y), *align, clip, text, &pieces)?;
+                    let lines = match wrap {
+                        Some(wrap) => wrapped_lines(*y, wrap, text, &pieces, |piece, part| {
+                            font::measure_text(part, piece.font_size)
+                        }),
+                        None => vec![(*y, pieces)],
+                    };
+                    for (y, pieces) in lines {
+                        paint_pieces(&mut pixmap, (*x, y), *align, clip, text, &pieces)?;
+                    }
                     continue;
                 }
                 let run = font::TextRun {
@@ -689,6 +697,24 @@ fn paint_pieces(
         pen += width;
     }
     Ok(())
+}
+
+/// The baseline and pieces of each line a wrapped command keeps.
+fn wrapped_lines(
+    y: f32,
+    wrap: &xlsx_render::TextWrap,
+    text: &str,
+    pieces: &[xlsx_render::TextPiece],
+    measure: impl FnMut(&xlsx_render::TextPiece, &str) -> f32,
+) -> Vec<(f32, Vec<xlsx_render::TextPiece>)> {
+    let lines = xlsx_render::wrap_run_lines(text, pieces, wrap.width, measure);
+    let count = xlsx_render::wrap::wrapped_lines_kept(lines.len(), wrap);
+    lines
+        .into_iter()
+        .take(count)
+        .enumerate()
+        .map(|(index, line)| (xlsx_render::wrap::wrapped_line_y(y, index, count, wrap), line))
+        .collect()
 }
 
 /// The left edge of a line `width` wide anchored at `x` by `align`.

@@ -269,6 +269,11 @@ fn translate_command(
                     |literal, x| runs.push(prepare(x, *y, literal, Align::Left)),
                 );
                 runs.into_iter().collect::<Result<Vec<_>, _>>()?
+            } else if let Some(pieces) = xlsx_render::run_pieces(command) {
+                match wrap {
+                    Some(wrap) => prepare_wrapped_pieces(*x, *y, *align, wrap, text, &pieces)?,
+                    None => prepare_pieces(*x, *y, *align, text, &pieces)?,
+                }
             } else if let Some(wrap) = wrap {
                 let lines = xlsx_render::wrap::wrap_lines(text, wrap.width, |line| {
                     measure_text(line, *font_size)
@@ -283,8 +288,6 @@ fn translate_command(
                         prepare(*x, y, line, *align)
                     })
                     .collect::<Result<Vec<_>, _>>()?
-            } else if let Some(pieces) = xlsx_render::run_pieces(command) {
-                prepare_pieces(*x, *y, *align, text, &pieces)?
             } else {
                 vec![prepare(*x, *y, text, *align)?]
             };
@@ -295,6 +298,26 @@ fn translate_command(
             })
         }
     }
+}
+
+fn prepare_wrapped_pieces(
+    x: f32,
+    y: f32,
+    align: Align,
+    wrap: &xlsx_render::TextWrap,
+    text: &str,
+    pieces: &[xlsx_render::TextPiece],
+) -> Result<Vec<PreparedText>, String> {
+    let lines = xlsx_render::wrap_run_lines(text, pieces, wrap.width, |piece, part| {
+        measure_text(part, piece.font_size)
+    });
+    let count = xlsx_render::wrap::wrapped_lines_kept(lines.len(), wrap);
+    let mut prepared = Vec::new();
+    for (index, line) in lines.iter().take(count).enumerate() {
+        let y = xlsx_render::wrap::wrapped_line_y(y, index, count, wrap);
+        prepared.extend(prepare_pieces(x, y, align, text, line)?);
+    }
+    Ok(prepared)
 }
 
 fn prepare_pieces(
