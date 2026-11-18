@@ -35,6 +35,7 @@ const MAX_LAMBDA_DEPTH: usize = 64;
 #[cfg(test)]
 thread_local! {
     static DEFINED_NAME_EXPANSIONS: Cell<usize> = const { Cell::new(0) };
+    static DEFINED_NAME_PARSES: Cell<usize> = const { Cell::new(0) };
     static LAMBDA_CALLS: Cell<usize> = const { Cell::new(0) };
 }
 
@@ -752,6 +753,12 @@ pub(crate) fn parse_cached(cache: &ParseCache, src: &str) -> Option<Arc<Expr>> {
     Some(expr)
 }
 
+fn parse_definition(formula: &str) -> Option<Arc<Expr>> {
+    #[cfg(test)]
+    DEFINED_NAME_PARSES.with(|count| count.set(count.get() + 1));
+    parse_formula(formula).ok().map(Arc::new)
+}
+
 pub(crate) fn err(value: ErrorValue) -> CellValue {
     CellValue::Error { value }
 }
@@ -988,7 +995,7 @@ fn bind_defined_name(
         .unwrap_or(&defined.formula);
     let expression = match ctx.parse_cache {
         Some(cache) => parse_cached(cache, formula),
-        None => parse_formula(formula).ok().map(Arc::new),
+        None => parse_definition(formula),
     }
     .ok_or_else(|| {
         if mentions_workbook_index(formula) {
@@ -2027,6 +2034,162 @@ mod tests {
             }
         );
         assert_eq!(expansions, DEPTH + 1);
+    }
+
+    #[test]
+    fn a_context_without_a_parse_cache_parses_each_definition_once() {
+        let mut workbook = Workbook::default();
+        let mut data = Sheet::new("Data");
+        for (at, value) in [("A1", 1.0), ("A2", 2.0), ("A3", 3.0)] {
+            data.set_cell(CellRef::parse_a1(at).unwrap(), number(value));
+        }
+        workbook.sheets.extend([data, Sheet::new("Other")]);
+        workbook.defined_names.extend([
+            defined_name("Inner", "Data!$A$1:$A$3"),
+            defined_name("Outer", "Inner"),
+        ]);
+        let context = EvalContext::new(&workbook, SheetId(0));
+        let other = context.for_sheet(SheetId(1));
+        let rows = parse_formula("ROWS(Outer)").unwrap();
+        let total = parse_formula("SUM(Outer)+SUM(Inner)").unwrap();
+
+        DEFINED_NAME_PARSES.with(|count| count.set(0));
+        for _ in 0..8 {
+            assert_eq!(evaluate(&rows, &other), num(3.0));
+            assert_eq!(evaluate(&rows, &context), num(3.0));
+            assert_eq!(evaluate(&total, &context), num(12.0));
+        }
+        let parses = DEFINED_NAME_PARSES.with(std::cell::Cell::get);
+
+        assert_eq!(parses, 2);
+    }
+
+    fn names_workbook() -> Workbook {
+        let mut workbook = Workbook::default();
+        let mut data = Sheet::new("Data");
+        for (at, value) in [("A1", 1.0), ("A2", 2.0), ("A3", 3.0), ("B1", 2.0)] {
+            data.set_cell(CellRef::parse_a1(at).unwrap(), number(value));
+        }
+        workbook.sheets.extend([data, Sheet::new("Other")]);
+        workbook.defined_names.extend([
+            defined_name("Block", "Data!$A$1:$A$3"),
+            defined_name("Rate", "0.25"),
+            defined_name(
+                "Pick",
+                "IF(Data!$B$1>1,SWITCH(Data!$B$1,2,\"two\",3,\"three\",\"many\"),\"few\")",
+            ),
+            defined_name("Input", "Data!$A$1"),
+            DefinedName {
+                name: "Input".into(),
+                formula: "Data!$A$2".into(),
+                local_sheet: Some(SheetId(1)),
+                hidden: false,
+            },
+            defined_name("Loop", "Loop+1"),
+            defined_name("Broken", "[1]Sheet1!$A$1"),
+            defined_name("Garbled", "SUM(1,"),
+        ]);
+        for index in 0..MAX_DEFINED_NAME_DEPTH + 4 {
+            let next = index + 1;
+            workbook.defined_names.push(defined_name(
+                &format!("Deep_{index}"),
+                &format!("Deep_{next}"),
+            ));
+        }
+        workbook.defined_names.push(defined_name(
+            &format!("Deep_{}", MAX_DEFINED_NAME_DEPTH + 4),
+            "7",
+        ));
+        workbook
+    }
+
+    /// a value, the engine gaps its evaluation added, and whether the context
+    /// has read another workbook.
+    fn observed(formula: &Expr, context: &EvalContext<'_>) -> (CellValue, u64, bool) {
+        let gaps = context.unsupported_checkpoint();
+        let value = evaluate(formula, context);
+        let added = context.unsupported_checkpoint() - gaps;
+        (value, added, context.read_other_workbook())
+    }
+
+    #[test]
+    fn one_context_answers_name_formulas_as_fresh_contexts_do() {
+        let workbook = names_workbook();
+        let sources = [
+            "SUM(Block)",
+            "ROWS(Block)+Rate*4",
+            "Rate*2",
+            "Pick",
+            "Input",
+            "Other!Input+Input",
+            "Loop",
+            "Deep_0",
+            "Broken",
+            "IFERROR(Broken,0)",
+            "Garbled",
+        ];
+        let formulas: Vec<Expr> = sources
+            .iter()
+            .map(|source| parse_formula(source).unwrap())
+            .collect();
+        let fresh: Vec<_> = formulas
+            .iter()
+            .map(|formula| observed(formula, &EvalContext::new(&workbook, SheetId(0))))
+            .collect();
+        for (source, (_, _, other)) in sources.iter().zip(&fresh) {
+            assert_eq!(*other, source.contains("Broken"), "{source}");
+        }
+        assert_eq!(fresh[8], (err(ErrorValue::Name), 1, true));
+        assert_eq!(fresh[6].0, err(ErrorValue::Name));
+        assert_eq!(fresh[7].0, err(ErrorValue::Num));
+
+        let shared = EvalContext::new(&workbook, SheetId(0));
+        for _ in 0..2 {
+            for (index, formula) in formulas.iter().enumerate() {
+                let (source, (value, gaps, _)) = (sources[index], &fresh[index]);
+                let (again, added, _) = observed(formula, &shared);
+                assert_eq!(&again, value, "{source}");
+                assert_eq!(added, *gaps, "{source}");
+            }
+        }
+        assert!(shared.read_other_workbook());
+
+        let broken = EvalContext::new(&workbook, SheetId(0));
+        for _ in 0..3 {
+            assert_eq!(
+                observed(&formulas[8], &broken),
+                (err(ErrorValue::Name), 1, true)
+            );
+        }
+
+        let local = parse_formula("Input*10+SUM(Block)").unwrap();
+        assert_eq!(
+            evaluate(&local, &shared.for_sheet(SheetId(1))),
+            evaluate(&local, &EvalContext::new(&workbook, SheetId(1)))
+        );
+        assert_eq!(evaluate(&local, &shared.for_sheet(SheetId(1))), num(26.0));
+    }
+
+    #[test]
+    fn a_redefined_name_reads_its_new_definition_in_a_new_context() {
+        let mut workbook = Workbook::default();
+        let mut data = Sheet::new("Data");
+        data.set_cell(CellRef::parse_a1("A1").unwrap(), number(5.0));
+        data.set_cell(CellRef::parse_a1("A2").unwrap(), number(9.0));
+        workbook.sheets.push(data);
+        workbook
+            .defined_names
+            .push(defined_name("Input", "Data!$A$1"));
+        let formula = parse_formula("Input*2+ROWS(Input)").unwrap();
+
+        let before = EvalContext::new(&workbook, SheetId(0));
+        assert_eq!(evaluate(&formula, &before), num(11.0));
+        assert_eq!(evaluate(&formula, &before), num(11.0));
+
+        workbook.defined_names[0].formula = "Data!$A$2".into();
+        let after = EvalContext::new(&workbook, SheetId(0));
+        assert_eq!(evaluate(&formula, &after), num(19.0));
+        assert_eq!(evaluate(&formula, &after), num(19.0));
     }
 
     #[test]
