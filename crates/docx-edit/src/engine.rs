@@ -12507,10 +12507,11 @@ impl EngineSession {
     /// The faces the typing echo needs for the line from display position `line_start` to
     /// `line_end` of the paragraph whose laid-out text run holds `position` (a glyph's
     /// `docStart`, table cells included), as [`docx_layout::echo_character_faces`] gives them:
-    /// `faces` for each character of `alphabet` typed into that run, with the run's shaping
-    /// languages, and `line` for each character the paragraph's text runs hold from
-    /// `line_start` to `line_end`, in their own runs (`null` for a position no text run holds):
-    /// `{"faces":[[display,measured,metrics,eastAsian],…],"line":[…],"latin":…,"eastAsia":…}`.
+    /// `faces` for each character of `alphabet` typed into that run, with the run's display
+    /// positions (`run`) and shaping languages, and `line` for each character the paragraph's
+    /// text runs hold from `line_start` to `line_end`, in their own runs (`null` for a position
+    /// no text run holds): `{"faces":[[display,measured,metrics,eastAsian],…],"line":[…],
+    /// "run":[start,end],"latin":…,"eastAsia":…}`.
     /// `None` before a region pass or where no text run holds `position`.
     pub fn echo_faces_json(
         &self,
@@ -12575,6 +12576,7 @@ impl EngineSession {
                             alphabet,
                         ),
                         text.fmt.language.as_ref(),
+                        [start, text.pm_end.unwrap_or(start)],
                     ));
                 }
                 // text runs hold one position per UTF-16 unit
@@ -12607,11 +12609,12 @@ impl EngineSession {
                 }
             }
         });
-        let (faces, language) = typed?;
+        let (faces, language, typed_run) = typed?;
         Some(
             serde_json::json!({
                 "faces": faces,
                 "line": line,
+                "run": typed_run,
                 "latin": language.and_then(|language| language.latin.as_deref()),
                 "eastAsia": language.and_then(|language| language.east_asia.as_deref()),
             })
@@ -29182,6 +29185,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         assert!(line[15..].iter().all(serde_json::Value::is_null));
         assert_eq!(line[6], json!([hangul, hangul, hangul, 1]));
         assert_eq!(line[5], json!([latin, latin, latin, 0]));
+        assert_eq!(first["run"], json!([hello.2 as f64, hello.2 as f64 + 15.0]));
         assert_eq!(
             (&first["latin"], &first["eastAsia"]),
             (&json!("en-US"), &json!("ko-KR"))
