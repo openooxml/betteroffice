@@ -701,16 +701,36 @@ fn moved_columns_paint_no_previous_result() {
 #[test]
 fn a_moved_range_paints_no_previous_result() {
     let viewport = view(0.0, 800.0);
-    let mut workbook = decided_then_limited(&viewport);
+    let mut workbook = positive(&["Sheet1", "Sheet2"], &[]);
+    edit(&mut workbook, SheetId(0), &[(0, 5, "7")]);
+    assert_eq!(painted(&frame(&workbook, &viewport)).len(), 120);
+    workbook.set_conditional_budget(10);
     workbook
         .move_range(
             SheetId(0),
-            CellRange::parse_a1("A1:A5").unwrap(),
-            CellRef::new(0, 5),
+            CellRange::parse_a1("F1").unwrap(),
+            CellRef::new(0, 7),
             CalculationOptions::default(),
         )
         .unwrap();
     paints_only_decided(&workbook, &viewport, "move range");
+}
+
+#[test]
+fn a_refused_range_move_keeps_every_decided_result() {
+    let viewport = view(0.0, 800.0);
+    let mut workbook = decided_then_limited(&viewport);
+    let refused = workbook.move_range(
+        SheetId(0),
+        CellRange::parse_a1("A1:A5").unwrap(),
+        CellRef::new(0, 5),
+        CalculationOptions::default(),
+    );
+    assert!(refused.is_err());
+    let (list, decided) = counted(&workbook, &viewport);
+    assert_eq!(decided, 0);
+    assert_eq!(list.conditional_pending, 0);
+    assert_eq!(painted(&list).len(), 120);
 }
 
 #[cfg(not(feature = "unstable-track-moves"))]
