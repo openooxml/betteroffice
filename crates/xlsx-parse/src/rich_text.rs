@@ -259,6 +259,7 @@ fn read_item(
                     }
                     (Some(b"r"), b"rPr") if !saw_properties && !saw_text => saw_properties = true,
                     (Some(b"r"), b"t") if !saw_text => saw_text = true,
+                    (None, b"rPh" | b"phoneticPr") | (Some(b"rPh"), b"t") => {}
                     (Some(b"rPr"), _) if valid => {
                         if !read_property(&element, &mut style, budget)? {
                             valid = false;
@@ -367,8 +368,14 @@ fn read_property(
     style: &mut RunStyle,
     budget: &mut Budget,
 ) -> Result<bool, ParseError> {
-    let value = attr(element, b"val")?;
     let name = local_name(element);
+    if !matches!(
+        name.as_slice(),
+        b"rFont" | b"sz" | b"b" | b"i" | b"strike" | b"u" | b"vertAlign" | b"color"
+    ) {
+        return Ok(true);
+    }
+    let value = attr(element, b"val")?;
     for attribute in element.attributes() {
         let attribute = attribute.map_err(xml_err)?;
         let attribute = attribute.key.local_name();
