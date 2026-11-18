@@ -3100,6 +3100,7 @@ function crossStoryComments(stories: ReadonlyMap<string, readonly BlockContent[]
       const node = item as { type?: unknown; id?: unknown; content?: unknown; children?: unknown };
       if (typeof node.id === 'number' && node.type === 'commentRangeStart') starts.add(node.id);
       if (typeof node.id === 'number' && node.type === 'commentRangeEnd') ends.add(node.id);
+      if (node.type === 'textBox' || node.type === 'shape') continue;
       if (Array.isArray(node.content)) visit(node.content, starts, ends);
       if (Array.isArray(node.children)) visit(node.children, starts, ends);
     }
