@@ -837,7 +837,10 @@ fn undo_and_redo_of_a_single_edit_paint_no_previous_result() {
 /// The sheet of `positive` with its rule added in this session, so the
 /// engine lets a cell outside the rule's range move.
 fn positive_authored() -> Workbook {
-    let mut workbook = workbook(&sheet(rows(30, numbers(4, |row, col| row + col)), String::new()));
+    let mut workbook = workbook(&sheet(
+        rows(30, numbers(4, |row, col| row + col)),
+        String::new(),
+    ));
     workbook
         .apply_ops(
             vec![Op::AddConditionalFormat {
