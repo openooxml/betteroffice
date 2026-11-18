@@ -552,8 +552,8 @@ impl Cache {
                         .or_else(|| rule.format.fill.clone().filter(|_| !fill_unknown)),
                 }),
             });
-            fill_unknown |= rule.fill_unknown
-                && merged.as_ref().is_some_and(|format| format.fill.is_none());
+            fill_unknown |=
+                rule.fill_unknown && merged.as_ref().is_some_and(|format| format.fill.is_none());
             if rule.stop {
                 break;
             }

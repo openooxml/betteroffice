@@ -445,7 +445,9 @@ fn an_undecided_cell_paints_its_previous_result_under_the_same_rules_or_nothing(
         workbook(&sheet(
             rows(
                 30,
-                numbers(4, move |row, col| u32::from(col > 0 || zero != Some(row - 1))),
+                numbers(4, move |row, col| {
+                    u32::from(col > 0 || zero != Some(row - 1))
+                }),
             ),
             greater_than("A1:D30", "0"),
         ))

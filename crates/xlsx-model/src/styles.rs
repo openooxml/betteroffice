@@ -1073,6 +1073,7 @@ impl Stylesheet {
             exact_style_indices: _,
             released_xfs: _,
             builtin_number_formats: _,
+            dxf_fills_differ: _,
             derived_memo: _,
             font_memo: _,
             fill_memo: _,
