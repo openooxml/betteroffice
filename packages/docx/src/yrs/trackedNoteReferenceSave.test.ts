@@ -205,6 +205,10 @@ function linkOffset(session: YrsSession): number {
   throw new Error('no Link text in the first paragraph');
 }
 
+function typeAt(session: YrsSession, offset: number): void {
+  session.insertText({ story: 'body', paraId: firstParagraphId(session), offset }, 'X');
+}
+
 function suggestTyping(session: YrsSession, offset: number): void {
   session.insertText({ story: 'body', paraId: firstParagraphId(session), offset }, 'X', SUGGESTER);
 }
@@ -413,7 +417,7 @@ describe.each(PATHS)('$name', (path) => {
     });
 
     it('is saved bare between bare field characters when the result text is edited', async () => {
-      const saved = await path.open(fixture(fieldParagraph(note)), (session) => suggestTyping(session, linkOffset(session) + 2));
+      const saved = await path.open(fixture(fieldParagraph(note)), (session) => typeAt(session, linkOffset(session) + 2));
       const first = bodyParagraphs(saved)[0] ?? '';
       expect(plainText(first)).toBe('Head LiXnk tail');
       expect({
