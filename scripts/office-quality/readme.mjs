@@ -713,7 +713,6 @@ export function updateReadme(readme, section) {
   if (own) return readme.slice(0, own[0]) + section + readme.slice(own[1]);
   const eol = readme.includes('\r\n') ? '\r\n' : '\n';
   if (kind && visual) return `${readme.slice(0, visual[1])}${eol}${eol}${section}${readme.slice(visual[1])}`;
-  if (!kind && large) return `${readme.slice(0, large[0])}${section}${eol}${eol}${readme.slice(large[0])}`;
   throw new Error('README has no generated block');
 }
 
@@ -745,7 +744,7 @@ export function withRunBadge(section, runUrl, today = new Date().toISOString().s
   return `${section.slice(0, at)}\n\n${badge}${section.slice(at)}`;
 }
 
-const USAGE = 'usage: readme.mjs [--as public] report.json [README.md] | readme.mjs --as large [--public README.md] report.json|aggregate.json [README.md] (an aggregate.json also takes [--timing-sample-size N] [--missing-reference N]) | readme.mjs --section section.md [README.md]; each also takes [--date YYYY-MM-DD] [--run-url https://github.com/<owner>/<repository>/actions/runs/<run id>]';
+const USAGE = 'usage: readme.mjs --as public report.json [README.md] | readme.mjs --as large [--public README.md] report.json|aggregate.json [README.md] (an aggregate.json also takes [--timing-sample-size N] [--missing-reference N]) | readme.mjs --section section.md [README.md]; each also takes [--date YYYY-MM-DD] [--run-url https://github.com/<owner>/<repository>/actions/runs/<run id>]';
 
 async function readRegular(path) {
   if (!(await lstat(path)).isFile()) throw new Error(`${path} must be a regular file`);
@@ -767,6 +766,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
       (!sectionRun && (!positionals.length || positionals.length > 2)) ||
       (!large && (values.public !== undefined || counts.length)))
     throw new Error(USAGE);
+  if (!sectionRun && values.as === undefined) throw new Error('the positional command requires --as public or --as large');
   if (values.date !== undefined && !isDate(values.date)) throw new Error('Invalid date');
   if (!sectionRun && privateMode() && !large) throw new Error(PRIVATE_ONLY);
   const argument = (name) => {
