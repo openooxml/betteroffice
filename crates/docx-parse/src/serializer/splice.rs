@@ -5371,9 +5371,10 @@ mod tests {
         let third = bookmarked(4, "c");
         let edited = PLAIN.replace("b<", "b, edited<");
         let expected = body(&format!("{first}{edited}{third}"));
-        for (route, spliced) in ["planned", "direct"]
-            .into_iter()
-            .zip(splice_both(&[&first, PLAIN, &third], 1, &edited))
+        for (route, spliced) in
+            ["planned", "direct"]
+                .into_iter()
+                .zip(splice_both(&[&first, PLAIN, &third], 1, &edited))
         {
             let spliced = spliced.unwrap_or_else(|| panic!("{route}: refused"));
             assert!(spliced == expected, "{route}: not paragraph 2 alone");
@@ -5400,11 +5401,15 @@ mod tests {
         let first = bookmarked(4, "a");
         let added = bookmarked(9, "b");
         let expected = body(&format!("{first}{added}"));
-        for (route, spliced) in ["planned", "direct"]
-            .into_iter()
-            .zip(splice_both(&[&first, PLAIN], 1, &added))
+        for (route, spliced) in
+            ["planned", "direct"]
+                .into_iter()
+                .zip(splice_both(&[&first, PLAIN], 1, &added))
         {
-            assert!(spliced.as_ref() == Some(&expected), "{route}: added bookmark not spliced");
+            assert!(
+                spliced.as_ref() == Some(&expected),
+                "{route}: added bookmark not spliced"
+            );
         }
         let twice = format!("{added}{added}").replace("</w:p><w:p>", "");
         for spliced in splice_both(&[&first, PLAIN], 1, &twice) {
