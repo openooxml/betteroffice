@@ -55,8 +55,6 @@ export interface PeerlessInputProps {
   pasteOptions?: boolean;
   onReplacePasteFragment?(fragment: DocxClipboardFragment, selection: DocxCommandSelection, variant?: 'plain' | 'merge'): PeerlessAdmissionResult | false;
   pasteRecorder?: RefObject<PeerlessPasteRecorder | null>;
-  /** True from the submit of a paste that offers Paste Options until that offer ends. */
-  onPasteChoicePending?(pending: boolean): void;
   caretHostRef?: RefObject<HTMLDivElement | null>;
   zoom?: number;
   onNavigateCell?(direction: 'forward' | 'backward'): void;
@@ -89,18 +87,8 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
   const readOnly = useSyncExternalStore(admission.subscribeReadOnly, getReadOnly, getReadOnly);
   const snapshot = useSyncExternalStore(viewStore.subscribe, viewStore.getSnapshot, viewStore.getServerSnapshot);
   const pasteRecordRef = useRef<PasteRecord | null>(null);
-  const pasteChoicePending = useRef(false);
   const setPasteRecord = useCallback((record: PasteRecord | null): void => {
     pasteRecordRef.current = record;
-    const pending = record !== null;
-    if (pasteChoicePending.current === pending) return;
-    pasteChoicePending.current = pending;
-    callbacks.current.onPasteChoicePending?.(pending);
-  }, []);
-  useLayoutEffect(() => () => {
-    if (!pasteChoicePending.current) return;
-    pasteChoicePending.current = false;
-    callbacks.current.onPasteChoicePending?.(false);
   }, []);
   const positionRef = useRef<(() => void) | null>(null);
   const dropPasteRecord = useCallback((record: PasteRecord): void => {

@@ -261,7 +261,7 @@ function PeerlessPreedit({ viewStore, composition, geometryCaret, selectionRects
     color: paint.color, background: paint.background, borderBottom: '1px solid currentColor', pointerEvents: 'none' }}>{composition!.text}</span>;
 }
 
-function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, inputRef, onRecoverableText, displayWindow, onDisplayWindowChange, onClipboard, onPasteFragment, pasteOptions, onReplacePasteFragment, pasteRecorder, onPasteChoicePending, highlights, onNavigateCell, onPartPoint, onDragSelectionChange, pageOverlays, pageMirror, unbuiltPageMirror, readPageTexts, mirrorReadBlocked, scrollToPage, overlay, pictures, tables, queryEngineReady }: {
+function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, inputRef, onRecoverableText, displayWindow, onDisplayWindowChange, onClipboard, onPasteFragment, pasteOptions, onReplacePasteFragment, pasteRecorder, highlights, onNavigateCell, onPartPoint, onDragSelectionChange, pageOverlays, pageMirror, unbuiltPageMirror, readPageTexts, mirrorReadBlocked, scrollToPage, overlay, pictures, tables, queryEngineReady }: {
   binding: PeerlessEditSessionBinding;
   canvasForPage(page: DocxCommandPageIdentity): HTMLCanvasElement | null;
   zoom: number;
@@ -275,7 +275,6 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, inputRef, onRe
   pasteOptions?: boolean;
   onReplacePasteFragment?(fragment: DocxClipboardFragment, selection: import('@betteroffice/docx/yrs').DocxCommandSelection, variant?: 'plain' | 'merge'): PeerlessAdmissionResult | false;
   pasteRecorder?: RefObject<PeerlessPasteRecorder | null>;
-  onPasteChoicePending(pending: boolean): void;
   highlights?: readonly (DocxEchoRect & { current: boolean })[];
   onNavigateCell?(direction: 'forward' | 'backward'): void;
   onPartPoint?(point: { page: PageGeometry; x: number; y: number; clickCount: number; intent: import('@betteroffice/docx/yrs').DocxSelectionPointIntent }): boolean | { bodyY: number };
@@ -841,7 +840,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, inputRef, onRe
       <PeerlessInput admission={binding.admission} viewStore={binding.viewStore} textareaRef={input} autoFocus={autoFocus}
         onCompositionChange={onCompositionChange} onRecoverableText={onRecoverableText} onClipboard={onClipboard} onPasteFragment={onPasteFragment}
         pasteOptions={pasteOptions} onReplacePasteFragment={onReplacePasteFragment} pasteRecorder={pasteRecorder}
-        onPasteChoicePending={onPasteChoicePending} caretHostRef={column} zoom={zoom} onNavigateCell={onNavigateCell} />
+        caretHostRef={column} zoom={zoom} onNavigateCell={onNavigateCell} />
       <div data-docx-pages-host data-table-resize={tableAxis && (tableAxis === 'x' ? 'col' : 'row')} style={{ position: 'relative', width, height, transform: `scale(${zoom})`, transformOrigin: 'top left', touchAction: 'pan-x pan-y' }}
         onMouseDown={(event) => {
           if (event.button === 0 && !(event.target as HTMLElement).closest('button, input, select, [data-docx-escape-layer]')) event.preventDefault();
@@ -1136,10 +1135,7 @@ export function PeerlessPagedEditor({ sessionOptions, zoom = 1, className, autoF
     }
     return geometry;
   }, [options.prepareGeometry, canvasForPage]);
-  const pasteChoicePending = useRef(false);
-  const reportPasteChoicePending = useCallback((pending: boolean) => { pasteChoicePending.current = pending; }, []);
-  const session = usePeerlessEditSession(useMemo(() => ({ ...options, rasterScale, canvasForPage: residentCanvasForPage, prepareGeometry,
-    holdCheckpoints: pasteChoicePending }), [
+  const session = usePeerlessEditSession(useMemo(() => ({ ...options, rasterScale, canvasForPage: residentCanvasForPage, prepareGeometry }), [
     options.source, options.openConnection, options.recovery, prepareGeometry, options.onError, options.onRecoverableError,
     residentCanvasForPage, rasterScale,
   ]));
@@ -1181,7 +1177,7 @@ export function PeerlessPagedEditor({ sessionOptions, zoom = 1, className, autoF
   }, [sessionOptions.source, session.status === 'failed']);
   return <div className={className} data-docx-worker-editor="true" aria-busy={session.status === 'opening'}>
     {session.status === 'ready' && <PeerlessReady binding={session.binding} canvasForPage={canvasForPage} zoom={pageZoom} autoFocus={autoFocus} inputRef={inputRef}
-      onRecoverableText={retainText} displayWindow={pageWindow} onDisplayWindowChange={changeWindow} onClipboard={onClipboard} onPasteFragment={onPasteFragment} pasteOptions={pasteOptions} onReplacePasteFragment={onReplacePasteFragment} pasteRecorder={pasteRecorder} onPasteChoicePending={reportPasteChoicePending} highlights={highlights} onNavigateCell={onNavigateCell} onPartPoint={onPartPoint} onDragSelectionChange={onDragSelectionChange} pageOverlays={pageOverlays} pageMirror={pageMirror} unbuiltPageMirror={unbuiltPageMirror} readPageTexts={readPageTexts} mirrorReadBlocked={mirrorReadBlocked} scrollToPage={scrollToPage} overlay={overlay} pictures={pictures} tables={tables} queryEngineReady={queryEngineReady} />}
+      onRecoverableText={retainText} displayWindow={pageWindow} onDisplayWindowChange={changeWindow} onClipboard={onClipboard} onPasteFragment={onPasteFragment} pasteOptions={pasteOptions} onReplacePasteFragment={onReplacePasteFragment} pasteRecorder={pasteRecorder} highlights={highlights} onNavigateCell={onNavigateCell} onPartPoint={onPartPoint} onDragSelectionChange={onDragSelectionChange} pageOverlays={pageOverlays} pageMirror={pageMirror} unbuiltPageMirror={unbuiltPageMirror} readPageTexts={readPageTexts} mirrorReadBlocked={mirrorReadBlocked} scrollToPage={scrollToPage} overlay={overlay} pictures={pictures} tables={tables} queryEngineReady={queryEngineReady} />}
     {session.status === 'failed' && <div role="alert">{t('errors.failedToLoad')}</div>}
     {recoverableText.map((text, index) => <div key={index} role="status">
       {t('editor.recoverableTextNotice')}

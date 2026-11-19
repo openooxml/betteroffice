@@ -3520,52 +3520,6 @@ async function pasteOptionsSession() {
   };
 }
 
-test('a worker crash met by the paste choice recovers with the choice applied', async () => {
-  const editor = await pasteOptionsSession();
-  await editor.paste();
-  await editor.offer();
-  editor.first.outOfMemory = true;
-  act(() => { editor.choose('Merge Formatting'); });
-  await waitFor(() => expect(workers).toHaveLength(2));
-  await waitFor(() => expect(workers[1]!.text).toBe(`${PASTE_PREFIX}<merge>Bold`));
-  expect(editor.onError).not.toHaveBeenCalled();
-});
-
-test('a worker crash after the paste choice restores the document with the chosen variant', async () => {
-  const editor = await pasteOptionsSession();
-  await editor.paste();
-  await editor.offer();
-  act(() => { editor.choose('Keep Text Only'); });
-  await waitFor(() => expect(editor.first.text).toBe(`${PASTE_PREFIX}<plain>Bold`));
-  await act(async () => { await new Promise<void>(resolve => setImmediate(resolve)); });
-  editor.first.outOfMemory = true;
-  let status: string | undefined;
-  await act(async () => {
-    const submitted = binding!.commands.submit({ kind: 'insertText', payload: { text: ' later' } });
-    if (submitted.status !== 'submitted') throw new Error('edit not submitted');
-    status = await submitted.ticket.ack.then(outcome => outcome.status, () => 'rejected');
-  });
-  expect(status).toBe('applied');
-  expect(workers).toHaveLength(2);
-  expect(workers[1]!.text).toBe(`${PASTE_PREFIX}<plain>Bold later`);
-  expect(editor.onError).not.toHaveBeenCalled();
-});
-
-test('no checkpoint is taken while paste options are offered, and one is taken after typing removes the control', async () => {
-  const editor = await pasteOptionsSession();
-  await editor.paste();
-  await editor.offer();
-  await act(async () => { await new Promise<void>(resolve => setTimeout(resolve, 20)); });
-  expect(editor.first.checkpoints).toHaveLength(0);
-  act(() => {
-    editor.textarea.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'insertText', data: 'x' }));
-  });
-  expect(editor.control() !== null).toBe(false);
-  await waitFor(() => expect(editor.first.text).toBe(`${PASTE_PREFIX}Boldx`));
-  await waitFor(() => expect(editor.first.checkpoints.length).toBeGreaterThan(0));
-  expect(new TextDecoder().decode(editor.first.checkpoints[0]!.state).startsWith(`${PASTE_PREFIX}Bold`)).toBe(true);
-});
-
 test('a recovered worker receives plugin reservations versioned to its own document', async () => {
   surface.mockRestore();
   realSurface = true;
