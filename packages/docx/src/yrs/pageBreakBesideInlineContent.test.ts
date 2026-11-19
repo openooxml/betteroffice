@@ -27,8 +27,14 @@ const dec = new TextDecoder();
 
 type Parts = Record<string, Uint8Array>;
 type Route = 'worker' | 'loader';
-type Kind = { name: string; xml: string; marker: string };
-type Position = { name: string; content: (child: string) => string; breaks: number; order: 'break-first' | 'child-first' };
+type Kind = { name: string; xml: string; marker: string; result?: string };
+type Position = {
+  name: string;
+  content: (child: string) => string;
+  breaks: number;
+  order: 'break-first' | 'child-first';
+  text?: (word: (needle: string) => string, kind: Kind) => string;
+};
 type Edit = { name: string; forced: boolean; target?: { id: string; needle: string; at: number } };
 
 const run = (text: string) => `<w:r><w:t xml:space="preserve">${text}</w:t></w:r>`;
@@ -39,6 +45,7 @@ const KINDS: Kind[] = [
     name: 'a complex field',
     xml: '<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> REF _Ref1 \\h </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>Res</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>',
     marker: 'w:fldCharType="begin"',
+    result: 'Res',
   },
   {
     name: 'a simple field',
@@ -49,6 +56,7 @@ const KINDS: Kind[] = [
     name: 'a hyperlink',
     xml: '<w:hyperlink w:anchor="_Ref1"><w:r><w:t>Link</w:t></w:r></w:hyperlink>',
     marker: '<w:hyperlink',
+    result: 'Link',
   },
   {
     name: 'an inline content control',
@@ -96,12 +104,59 @@ const TWO_BREAKS: Position = {
   breaks: 2,
   order: 'break-first',
 };
+const IN_RUN: Position = {
+  name: 'inside a run between text, before',
+  content: (child) => `<w:r><w:t xml:space="preserve">Head</w:t><w:br w:type="page"/><w:t xml:space="preserve">Tail</w:t></w:r>${child}`,
+  breaks: 1,
+  order: 'break-first',
+};
+const RIGHT_BEFORE: Position = {
+  name: 'in its own run directly before',
+  content: (child) => `${run('Head')}${BREAK_RUN}${child}${run('Tail')}`,
+  breaks: 1,
+  order: 'break-first',
+  text: (word, kind) => `${word('Head')}[PB]${kind.result ?? ''}${word('Tail')}`,
+};
+const KB3: Position = {
+  name: 'in its own run between A and B before',
+  content: () => {
+    const source = fixtureDoc.match(new RegExp(`<w:p w14:paraId="${BREAK_ID}">[\\s\\S]*?<\\/w:p>`))?.[0];
+    if (!source) throw new Error(`the fixture has no paragraph ${BREAK_ID}`);
+    const field = source.slice(source.indexOf('<w:r><w:fldChar w:fldCharType="begin"/>'), source.lastIndexOf('</w:p>'));
+    return `<w:r><w:t>A</w:t></w:r>${BREAK_RUN}<w:r><w:t>B</w:t></w:r>${field}`;
+  },
+  breaks: 1,
+  order: 'break-first',
+  text: (word) => `${word('A')}[PB]${word('B')}`,
+};
+
+const FORMATTED_RESULT = '<w:r><w:rPr><w:b/></w:rPr><w:t>Bold</w:t></w:r><w:r><w:tab/><w:t>result</w:t></w:r>';
+const FORMATTED_FIELD: Kind = {
+  name: 'a complex field whose result is a bold run and a tabbed run',
+  xml: `<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> REF _Ref1 \\h </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>${FORMATTED_RESULT}<w:r><w:fldChar w:fldCharType="end"/></w:r>`,
+  marker: 'w:fldCharType="begin"',
+  result: 'Boldresult',
+};
+const FORMATTED_LINK: Kind = {
+  name: 'a hyperlink holding a bold run and a tabbed run',
+  xml: `<w:hyperlink w:anchor="_Ref1">${FORMATTED_RESULT}</w:hyperlink>`,
+  marker: '<w:hyperlink',
+  result: 'Boldresult',
+};
+const PRINCIPAL_FIELD: Kind = {
+  name: "principal.docx's REF field",
+  xml: '',
+  marker: 'w:fldCharType="begin"',
+  result: 'Boldresult',
+};
 
 const NO_EDIT: Edit = { name: 'no edit', forced: false };
 const EDIT_BEFORE: Edit = { name: 'the paragraph edited before the break', forced: false, target: { id: BREAK_ID, needle: 'Head', at: 2 } };
 const EDIT_AFTER: Edit = { name: 'the paragraph edited after the break', forced: false, target: { id: BREAK_ID, needle: 'Tail', at: 2 } };
 const EDIT_OTHER: Edit = { name: 'another paragraph edited on a forced-full document', forced: true, target: { id: OTHER_ID, needle: 'Section two', at: 11 } };
 const EDIT_AFTER_LEADING: Edit = { name: 'the paragraph edited after the break', forced: false, target: { id: BREAK_ID, needle: 'Head', at: 2 } };
+const EDIT_AT_BREAK: Edit = { name: 'the paragraph edited right at the break', forced: false, target: { id: BREAK_ID, needle: 'Head', at: 4 } };
+const EDIT_END_OF_A: Edit = { name: "the paragraph edited at the end of 'A', right at the break", forced: false, target: { id: BREAK_ID, needle: 'A', at: 1 } };
 
 const ROUTES: Route[] = ['worker', 'loader'];
 
@@ -254,8 +309,9 @@ function typedInto(edit: Edit, needle: string): string {
   return `${needle.slice(0, edit.target.at)}${TYPED}${needle.slice(edit.target.at)}`;
 }
 
-function expectedText(position: Position, edit: Edit): string {
+function expectedText(position: Position, kind: Kind, edit: Edit): string {
   const word = (needle: string) => typedInto(edit, needle);
+  if (position.text) return position.text(word, kind);
   if (position === AT_START) return `[PB]${word('Head')}`;
   if (position === TWO_BREAKS) return `${word('Head')}[PB]${word('Mid')}[PB]${word('Tail')}`;
   return `${word('Head')}[PB]${word('Tail')}`;
@@ -273,7 +329,9 @@ function expectKeptInPlace(xml: string, position: Position, kind: Kind, edit: Ed
   expect(xml.match(PAGE_BREAK) ?? []).toHaveLength(position.breaks);
   const paragraph = savedParagraph(xml, BREAK_ID);
   expect(savedParagraph(xml, NEXT_ID).text).not.toContain('[PB]');
-  expect(paragraph.text).toContain(expectedText(position, edit));
+  const expected = expectedText(position, kind, edit);
+  const either = [expected, expected.replace(`${TYPED}[PB]`, `[PB]${TYPED}`), expected.replace(`[PB]${TYPED}`, `${TYPED}[PB]`)];
+  expect(paragraph.text).toContain(either.find((text) => paragraph.text.includes(text)) ?? expected);
   const breaks = [...paragraph.xml.matchAll(PAGE_BREAK)].map((m) => m.index!);
   const child = paragraph.xml.indexOf(kind.marker);
   expect(child).toBeGreaterThan(-1);
@@ -301,11 +359,21 @@ beforeAll(async () => {
 
 describe('a page break beside inline content keeps its place on save', () => {
   const COMPLEX_FIELD = KINDS[0]!;
+  const SIMPLE_FIELD = KINDS[1]!;
+  const HYPERLINK = KINDS[2]!;
   const cells: Array<[Kind, Position, Edit]> = [
     ...KINDS.flatMap((kind) => [BEFORE, AFTER].flatMap((position) =>
       [EDIT_BEFORE, EDIT_AFTER, EDIT_OTHER, NO_EDIT].map((edit): [Kind, Position, Edit] => [kind, position, edit]))),
     ...[EDIT_AFTER_LEADING, EDIT_OTHER].map((edit): [Kind, Position, Edit] => [COMPLEX_FIELD, AT_START, edit]),
     ...[EDIT_BEFORE, EDIT_OTHER].map((edit): [Kind, Position, Edit] => [COMPLEX_FIELD, TWO_BREAKS, edit]),
+    ...[COMPLEX_FIELD, SIMPLE_FIELD, HYPERLINK].flatMap((kind) =>
+      [EDIT_BEFORE, EDIT_AFTER, EDIT_OTHER].map((edit): [Kind, Position, Edit] => [kind, IN_RUN, edit])),
+    ...[COMPLEX_FIELD, HYPERLINK].flatMap((kind) =>
+      [EDIT_BEFORE, EDIT_AFTER].map((edit): [Kind, Position, Edit] => [kind, RIGHT_BEFORE, edit])),
+    ...[FORMATTED_FIELD, FORMATTED_LINK].flatMap((kind) =>
+      [EDIT_BEFORE, EDIT_AFTER].map((edit): [Kind, Position, Edit] => [kind, BEFORE, edit])),
+    ...[COMPLEX_FIELD, HYPERLINK].map((kind): [Kind, Position, Edit] => [kind, BEFORE, EDIT_AT_BREAK]),
+    ...[EDIT_END_OF_A, EDIT_OTHER].map((edit): [Kind, Position, Edit] => [PRINCIPAL_FIELD, KB3, edit]),
   ];
 
   for (const [kind, position, edit] of cells) {
