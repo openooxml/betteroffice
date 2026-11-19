@@ -61,6 +61,7 @@ impl ListState {
             .as_ref()
     }
 
+    /// Resolve the definition's bullet glyph, including symbol-font conversion.
     pub(crate) fn defined_bullet(&self, num_id: f64, level: f64) -> Option<String> {
         let rendering = docx_parse::compute_list_rendering(
             Some(num_id),
@@ -80,6 +81,7 @@ impl ListState {
 
 pub(crate) const DEFAULT_BULLET: &str = "\u{2022}";
 
+/// Convert symbol-font bullets to visible Unicode markers.
 pub(crate) fn bullet_text(marker: &str, font_family: Option<&str>) -> String {
     let mut characters = marker.trim_ascii().chars();
     font_family
