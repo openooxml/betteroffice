@@ -4,7 +4,7 @@ use ooxml_drawingml::{Theme, resolve_color_value_to_hex_with_theme};
 use pptx_parse::{RunProperties, TextBody};
 use yrs::branch::{Branch, BranchPtr};
 use yrs::types::Attrs;
-use yrs::types::text::YChange;
+use yrs::types::text::{Diff, YChange};
 use yrs::updates::{decoder::Decode, encoder::Encode};
 use yrs::{
     Any, Assoc, IndexedSequence, Map, MapPrelim, MapRef, Out, ReadTxn, StickyIndex, Text,
@@ -743,12 +743,15 @@ impl DeckSession {
         }
         if !text.is_empty() {
             let mut style = style.clone();
-            let clear_strike = style.strike.as_deref() == Some("noStrike")
-                && !inherited_strikes[paragraph_markers(&story, &txn)
+            let clear_strike = style.strike.as_deref() == Some("noStrike") && {
+                let diffs = story.diff(&txn, YChange::identity);
+                let paragraph = markers_in(&diffs)
                     .iter()
                     .position(|(offset, _)| *offset >= index)
-                    .unwrap()]
-                && strike_beside(&story, &txn, index).as_deref() != Some("noStrike");
+                    .unwrap();
+                !inherited_strikes[paragraph]
+                    && strike_beside(&diffs, index).as_deref() != Some("noStrike")
+            };
             if clear_strike {
                 style.strike = None;
             }
@@ -1410,23 +1413,26 @@ fn selected_pilcrows<T: ReadTxn>(
 }
 
 fn paragraph_markers<T: ReadTxn>(story: &TextRef, txn: &T) -> Vec<(u32, MapRef)> {
+    markers_in(&story.diff(txn, YChange::identity))
+}
+
+fn markers_in(diffs: &[Diff<YChange>]) -> Vec<(u32, MapRef)> {
     let mut markers = Vec::new();
     let mut offset = 0;
-    for diff in story.diff(txn, YChange::identity) {
-        let length = out_len(&diff.insert);
-        if let Out::YMap(map) = diff.insert {
-            markers.push((offset, map));
+    for diff in diffs {
+        if let Out::YMap(map) = &diff.insert {
+            markers.push((offset, map.clone()));
         }
-        offset += length;
+        offset += out_len(&diff.insert);
     }
     markers
 }
 
 /// The literal strike of the run text typed at `index` joins: the text before the
 /// caret in its paragraph, else the text after it.
-fn strike_beside<T: ReadTxn>(story: &TextRef, txn: &T, index: u32) -> Option<String> {
+fn strike_beside(diffs: &[Diff<YChange>], index: u32) -> Option<String> {
     let mut offset = 0;
-    for diff in story.diff(txn, YChange::identity) {
+    for diff in diffs {
         let length = out_len(&diff.insert);
         if index <= offset + length {
             if matches!(diff.insert, Out::Any(Any::String(_))) {
