@@ -66,4 +66,10 @@ export declare function createRustMeasureSource(options: {
     progressive?: boolean;
     /** With the default provider, give families it doesn't carry the last-resort face. On unless `false`. */
     standIns?: boolean;
+    /**
+     * With `progressive`, script fallbacks to register even when no text asks for them yet; their sliced faces are
+     * marked to load whole in the editor worker, so text typed in those scripts later never waits for an outline.
+     * Chains and measurement stay as the requirements make them.
+     */
+    fill?: readonly FontScript[];
 }): RustMeasureSource;

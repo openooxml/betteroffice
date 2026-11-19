@@ -201,6 +201,8 @@ export declare class TextMeasureFontRegistry {
     prepareBaseLatin(family: string, bold: boolean, italic: boolean, characters: readonly string[], earlier: readonly number[], key?: string): Promise<boolean>;
     /** Resolves unique script fallbacks in order; stable misses cache and failures retry. */
     getScriptFallbackIds(scripts: FontScript[], family?: string): Promise<number[]>;
+    /** Registers the sliced face of each script's bundled fallback; a fallback that is not sliced or does not open is skipped, never loaded whole. */
+    getSlicedScriptFallbackIds(scripts: readonly FontScript[]): Promise<number[]>;
     /** Synchronous settled view; retryable results are evicted after one pass. */
     getCachedScriptFallbackIds(scripts: FontScript[], consumeRetryable?: boolean, family?: string): readonly number[] | undefined;
     /**
@@ -236,7 +238,7 @@ export declare class TextMeasureFontRegistry {
     private registerBuffer;
     /** Replaces a known lower bound by the face's exact coverage. */
     private exactCoverage;
-    /** Registers a sliced face's skeleton and core when progressive loading is on, else the whole face. */
+    /** Registers a sliced face's skeleton and core when progressive loading is on, else the whole face; `whole` false fails instead. */
     private registerFaceLoader;
     private registerLoader;
     private registerFace;
