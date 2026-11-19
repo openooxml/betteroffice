@@ -35,7 +35,16 @@ type Position = {
   order: 'break-first' | 'child-first';
   text?: (word: (needle: string) => string, kind: Kind) => string;
 };
-type Edit = { name: string; forced: boolean; target?: { id: string; needle: string; at: number } };
+type Edit = {
+  name: string;
+  forced: boolean;
+  target?: { id: string; needle: string; at: number };
+  text?: string;
+  remove?: number;
+  resolve?: { accept: boolean; kind: 'insertion' | 'deletion' };
+};
+type BreakType = 'page' | 'column';
+type Place = 'right' | 'mains';
 
 const run = (text: string) => `<w:r><w:t xml:space="preserve">${text}</w:t></w:r>`;
 const BREAK_RUN = '<w:r><w:br w:type="page"/></w:r>';
@@ -207,14 +216,54 @@ function built(paragraph: string, forced: boolean): Uint8Array {
 
 type SavedParagraph = { xml: string; text: string };
 
-function savedParagraph(xml: string, id: string): SavedParagraph {
+const flowBreak = (type: BreakType) => new RegExp(`<w:br\\b[^>]*w:type="${type}"[^>]*\\/>`, 'g');
+const LINE_BREAK = '<w:br(?:\\s+w:type="textWrapping")?\\s*\\/>';
+
+function savedParagraph(xml: string, id: string, type: BreakType = 'page'): SavedParagraph {
   const body = xml.slice(xml.indexOf('<w:body'), xml.lastIndexOf('</w:body>'));
   const found = (body.match(/<w:p(?:\s[^>]*?)?\/>|<w:p(?:\s[^>]*)?>[\s\S]*?<\/w:p>/g) ?? [])
     .find((p) => (p.match(/^<w:p\b[^>]*?paraId="([0-9A-Fa-f]+)"/)?.[1] ?? '').toUpperCase() === id);
   if (!found) throw new Error(`the saved body has no paragraph ${id}`);
-  const text = [...found.matchAll(/<w:t(?:\s[^>]*)?>([^<]*)<\/w:t>|<w:br\b[^>]*w:type="page"[^>]*\/>/g)]
+  const text = [...found.matchAll(new RegExp(`<w:t(?:\\s[^>]*)?>([^<]*)<\\/w:t>|<w:br\\b[^>]*w:type="${type}"[^>]*\\/>`, 'g'))]
     .map((m) => (m[1] !== undefined ? m[1] : '[PB]')).join('');
   return { xml: found, text };
+}
+
+function decodeXmlText(text: string): string {
+  return text
+    .replace(/&#x([0-9A-Fa-f]+);/g, (_, hex: string) => String.fromCodePoint(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_, digits: string) => String.fromCodePoint(Number(digits)))
+    .replaceAll('&lt;', '<').replaceAll('&gt;', '>').replaceAll('&quot;', '"').replaceAll('&apos;', "'").replaceAll('&amp;', '&');
+}
+
+function flowText(paragraphXml: string, type: BreakType | 'textWrapping'): string {
+  const breakPattern = type === 'textWrapping' ? LINE_BREAK : `<w:br\\b[^>]*w:type="${type}"[^>]*\\/>`;
+  const token = new RegExp(
+    `<w:t(?:\\s[^>]*)?>([^<]*)<\\/w:t>|<w:fldChar\\b[^>]*w:fldCharType="(begin|end)"[^>]*\\/>|(${breakPattern})|` +
+    '<w:sym\\b[^>]*\\/>|<w:hyperlink\\b[^>]*>|<\\/w:hyperlink>|<w:fldSimple\\b[^>]*>|<\\/w:fldSimple>', 'g');
+  return [...paragraphXml.matchAll(token)].map(([match, text, field, flow]) => {
+    if (text !== undefined) return decodeXmlText(text);
+    if (field) return field === 'begin' ? '«' : '»';
+    if (flow) return type === 'textWrapping' ? '[LB]' : '[PB]';
+    if (match.startsWith('<w:sym')) return '[SYM]';
+    if (match.startsWith('<w:hyperlink')) return '{';
+    if (match === '</w:hyperlink>') return '}';
+    return match.startsWith('<w:fldSimple') ? '«' : '»';
+  }).join('');
+}
+
+function expectRightPlaceOrMains(xml: string, right: RegExp, type: BreakType = 'page'): Place {
+  expect(xml.match(flowBreak(type)) ?? []).toHaveLength(1);
+  const paragraph = flowText(savedParagraph(xml, BREAK_ID, type).xml, type);
+  const next = savedParagraph(xml, NEXT_ID, type).text;
+  if (!paragraph.includes('[PB]')) {
+    expect(paragraph).toMatch(new RegExp(right.source.replace('\\[PB\\]', ''), right.flags));
+    expect(next.startsWith('[PB]')).toBe(true);
+    return 'mains';
+  }
+  expect(next).not.toContain('[PB]');
+  expect(paragraph).toMatch(right);
+  return 'right';
 }
 
 function savedBody(bytes: Uint8Array): string {
@@ -252,13 +301,27 @@ function editPoint(session: Identities & Segmented, target: NonNullable<Edit['ta
   throw new Error(`no paragraph ${target.id} in the body story`);
 }
 
+function revisionOf(revisions: readonly { revisionId: string; kind: string }[], kind: 'insertion' | 'deletion'): string {
+  const matching = revisions.filter((revision) => revision.kind === kind);
+  if (matching.length !== 1) throw new Error(`expected one ${kind}, found ${matching.length}`);
+  return matching[0]!.revisionId;
+}
+
 async function saveThroughLoader(bytes: Uint8Array, edit: Edit): Promise<Uint8Array> {
   const session: YrsSession = await createYrsSession({ clientId: (clientId += 1) });
   try {
     session.seedFromDocx(Uint8Array.from(bytes), { generation: createHash('sha256').update(bytes).digest('hex').slice(0, 32) });
     if (edit.target) {
       const at = editPoint(session as unknown as Identities & Segmented, edit.target);
-      session.replaceRange({ story: 'body', start: { paraId: at.paraId, offset: at.offset }, end: { paraId: at.paraId, offset: at.offset } }, TYPED);
+      if (edit.resolve) {
+        const target = { revisionId: revisionOf(session.listRevisions(), edit.resolve.kind) };
+        if (edit.resolve.accept) session.acceptChange(target);
+        else session.rejectChange(target);
+      } else if (edit.remove) {
+        session.deleteRange({ story: 'body', start: { paraId: at.paraId, offset: at.offset }, end: { paraId: at.paraId, offset: at.offset + edit.remove } });
+      } else {
+        session.replaceRange({ story: 'body', start: { paraId: at.paraId, offset: at.offset }, end: { paraId: at.paraId, offset: at.offset } }, edit.text ?? TYPED);
+      }
     }
     return (await saveYrsDocx(session, { updateModifiedDate: false })).bytes;
   } finally {
@@ -286,10 +349,15 @@ async function saveThroughWorker(bytes: Uint8Array, edit: Edit): Promise<Uint8Ar
         extras: JSON.stringify({ fontChains: { ...measurement.fontChains, 'calibri|0|0': [fontId] } }),
       };
       await client.commandInit(init);
-      const command: DocxCommandEnvelope = {
-        session: COMMAND_SESSION, incarnation: 1, seq: 1, basis: { epoch: 1, version: 0 },
-        kind: 'insertText', payload: { selection: { anchor: at, focus: at }, text: TYPED },
-      };
+      const intent = (kind: string, payload: DocxCommandEnvelope['payload']): DocxCommandEnvelope =>
+        ({ session: COMMAND_SESSION, incarnation: 1, seq: 1, basis: { epoch: 1, version: 0 }, kind, payload });
+      const command = edit.resolve
+        ? intent(edit.resolve.accept ? 'acceptRevision' : 'rejectRevision', {
+          revisionId: revisionOf(engine.geometryReader.listRevisions(), edit.resolve.kind), expectVersion: engine.proposalEngine.version(),
+        })
+        : edit.remove
+          ? intent('deleteForward', { selection: { anchor: at, focus: { ...at, offset: at.offset + edit.remove } } })
+          : intent('insertText', { selection: { anchor: at, focus: at }, text: edit.text ?? TYPED });
       const typed = await client.edit(command);
       expect(typed.outcomes[0]?.status).toBe('applied');
     }
@@ -324,15 +392,15 @@ function expectEditLanded(xml: string, edit: Edit): void {
   expect(savedParagraph(xml, id).text.replaceAll('[PB]', '')).toContain(edited);
 }
 
-function expectKeptInPlace(xml: string, position: Position, kind: Kind, edit: Edit): void {
+function expectKeptInPlace(xml: string, position: Position, kind: Kind, edit: Edit, type: BreakType = 'page'): void {
   expectEditLanded(xml, edit);
-  expect(xml.match(PAGE_BREAK) ?? []).toHaveLength(position.breaks);
-  const paragraph = savedParagraph(xml, BREAK_ID);
-  expect(savedParagraph(xml, NEXT_ID).text).not.toContain('[PB]');
+  expect(xml.match(flowBreak(type)) ?? []).toHaveLength(position.breaks);
+  const paragraph = savedParagraph(xml, BREAK_ID, type);
+  expect(savedParagraph(xml, NEXT_ID, type).text).not.toContain('[PB]');
   const expected = expectedText(position, kind, edit);
   const either = [expected, expected.replace(`${TYPED}[PB]`, `[PB]${TYPED}`), expected.replace(`[PB]${TYPED}`, `${TYPED}[PB]`)];
   expect(paragraph.text).toContain(either.find((text) => paragraph.text.includes(text)) ?? expected);
-  const breaks = [...paragraph.xml.matchAll(PAGE_BREAK)].map((m) => m.index!);
+  const breaks = [...paragraph.xml.matchAll(flowBreak(type))].map((m) => m.index!);
   const child = paragraph.xml.indexOf(kind.marker);
   expect(child).toBeGreaterThan(-1);
   if (position.order === 'break-first') expect(Math.max(...breaks)).toBeLessThan(child);
@@ -376,14 +444,116 @@ describe('a page break beside inline content keeps its place on save', () => {
     ...[EDIT_END_OF_A, EDIT_OTHER].map((edit): [Kind, Position, Edit] => [PRINCIPAL_FIELD, KB3, edit]),
   ];
 
-  for (const [kind, position, edit] of cells) {
+  const typed: Array<[Kind, Position, Edit, BreakType]> = [
+    ...cells.map(([kind, position, edit]): [Kind, Position, Edit, BreakType] => [kind, position, edit, 'page']),
+    ...KINDS.flatMap((kind) => [BEFORE, AFTER].flatMap((position) =>
+      [EDIT_BEFORE, EDIT_AFTER, EDIT_OTHER].map((edit): [Kind, Position, Edit, BreakType] => [kind, position, edit, 'column']))),
+  ];
+
+  for (const [kind, position, edit, type] of typed) {
     for (const route of ROUTES) {
-      it(`${route} route: a page break ${position.name} ${kind.name}, ${edit.name}, stays between its neighbours`, async () => {
-        const bytes = built(position.content(kind.xml), edit.forced);
+      it(`${route} route: a ${type} break ${position.name} ${kind.name}, ${edit.name}, stays between its neighbours`, async () => {
+        const bytes = built(position.content(kind.xml).replaceAll('w:type="page"', `w:type="${type}"`), edit.forced);
         const xml = savedBody(await save(route, bytes, edit));
-        expectKeptInPlace(xml, position, kind, edit);
+        expectKeptInPlace(xml, position, kind, edit, type);
       }, TIMEOUT);
     }
+  }
+});
+
+describe('a page break is put back only where its place is certain', () => {
+  const COMPLEX_FIELD = KINDS[0]!;
+  const BREAK_WITH_Z = '<w:r><w:br w:type="page"/><w:t>Z</w:t></w:r>';
+  const SYMBOL_LINK =
+    '<w:hyperlink w:anchor="_Ref1"><w:r><w:rPr><w:rFonts w:ascii="Wingdings" w:hAnsi="Wingdings" w:eastAsia="Wingdings" w:cs="Wingdings"/></w:rPr>' +
+    '<w:t>&#xF021;</w:t></w:r></w:hyperlink>';
+  const REPEATED_LINK = '<w:hyperlink w:anchor="_Ref1"><w:r><w:t>aaa</w:t></w:r></w:hyperlink>';
+  const hyperlinks = (xml: string) => (savedParagraph(xml, BREAK_ID).xml.match(/<w:hyperlink\b/g) ?? []).length;
+  const fieldBegins = (xml: string) => (savedParagraph(xml, BREAK_ID).xml.match(/w:fldCharType="begin"/g) ?? []).length;
+
+  const APPEND_TO_Z: Edit = { name: "'X' appended after 'Z' on a forced-full document", forced: true, target: { id: BREAK_ID, needle: 'Z', at: 1 } };
+  const typeInLink = (forced: boolean): Edit => ({
+    name: `'a' typed between the first two linked letters${forced ? ' on a forced-full document' : ''}`,
+    forced, target: { id: BREAK_ID, needle: 'Aaaa', at: 2 }, text: 'a',
+  });
+  const DELETE_FIRST_FIELD: Edit = { name: 'the first field deleted', forced: false, target: { id: BREAK_ID, needle: '￼', at: 0 }, remove: 1 };
+  const resolve = (accept: boolean, kind: 'insertion' | 'deletion'): Edit => ({
+    name: `the tracked ${kind} ${accept ? 'accepted' : 'rejected'}`,
+    forced: false, target: { id: BREAK_ID, needle: 'A', at: 0 }, resolve: { accept, kind },
+  });
+  const REVISION_DATE = 'w:author="Writer" w:date="2026-10-01T00:00:00Z"';
+
+  type Cell = { name: string; content: string; edit: Edit; routes: Route[]; check: (xml: string) => void };
+  const cells: Cell[] = [
+    {
+      name: 'a hyperlink holding a symbol-font character',
+      content: `<w:r><w:t>A</w:t></w:r>${SYMBOL_LINK}${BREAK_WITH_Z}`,
+      edit: APPEND_TO_Z,
+      routes: ROUTES,
+      check: (xml) => {
+        expectRightPlaceOrMains(xml, /^A\{(?:\[SYM\]|)\}\[PB\]ZX$/);
+        expect(hyperlinks(xml)).toBe(1);
+      },
+    },
+    ...[false, true].map((forced): Cell => ({
+      name: "a hyperlink of repeated letters 'aaa'",
+      content: `<w:r><w:t>A</w:t></w:r>${REPEATED_LINK}${BREAK_WITH_Z}`,
+      edit: typeInLink(forced),
+      routes: ROUTES,
+      check: (xml) => {
+        expectRightPlaceOrMains(xml, /^A\{aaaa\}\[PB\]Z$/);
+        expect(hyperlinks(xml)).toBe(1);
+      },
+    })),
+    {
+      name: 'two identical REF fields',
+      content: `<w:r><w:t>A</w:t></w:r>${COMPLEX_FIELD.xml}${BREAK_RUN}${COMPLEX_FIELD.xml}<w:r><w:t>Z</w:t></w:r>`,
+      edit: DELETE_FIRST_FIELD,
+      routes: ROUTES,
+      check: (xml) => {
+        expectRightPlaceOrMains(xml, /^A\[PB\]«Res»Z$/);
+        expect(fieldBegins(xml)).toBe(1);
+      },
+    },
+    ...([[true, 'deletion'], [false, 'insertion']] as const).map(([accept, kind]): Cell => ({
+      name: `a tracked ${kind} of 'a' beside a plain 'a'`,
+      content: `<w:r><w:t>A</w:t></w:r>` +
+        (kind === 'deletion'
+          ? `<w:del w:id="12" ${REVISION_DATE}><w:r><w:delText>a</w:delText></w:r></w:del>`
+          : `<w:ins w:id="11" ${REVISION_DATE}><w:r><w:t>a</w:t></w:r></w:ins>`) +
+        `<w:r><w:t>a</w:t></w:r>${BREAK_WITH_Z}`,
+      edit: resolve(accept, kind),
+      routes: ROUTES,
+      check: (xml) => {
+        expectRightPlaceOrMains(xml, /^Aa\[PB\]Z$/);
+        expect(savedParagraph(xml, BREAK_ID).xml).not.toMatch(/<w:(?:ins|del)\b/);
+      },
+    })),
+  ];
+
+  for (const { name, content, edit, routes, check } of cells) {
+    for (const route of routes) {
+      it(`${route} route: a page break beside ${name}, ${edit.name}, is put back between its neighbours or where main puts it`, async () => {
+        const bytes = built(content, edit.forced);
+        check(savedBody(await save(route, bytes, edit)));
+      }, TIMEOUT);
+    }
+  }
+});
+
+describe('a line break beside inline content saves as on main', () => {
+  for (const route of ROUTES) {
+    it(`${route} route: a line break in its own run before a complex field, the paragraph edited before it, stays inside its run`, async () => {
+      const bytes = built(`${run('Head')}<w:r><w:br/></w:r>${run('Tail')}${KINDS[0]!.xml}`, false);
+      const xml = savedBody(await save(route, bytes, EDIT_BEFORE));
+      const paragraph = savedParagraph(xml, BREAK_ID).xml;
+      expect(xml.match(PAGE_BREAK) ?? []).toHaveLength(0);
+      expect(xml.match(flowBreak('column')) ?? []).toHaveLength(0);
+      expect(paragraph.match(new RegExp(LINE_BREAK, 'g')) ?? []).toHaveLength(1);
+      expect(paragraph).toMatch(new RegExp(`<w:r(?:\\s[^>]*)?>(?:(?!<\\/w:r>)[\\s\\S])*?${LINE_BREAK}`));
+      expect(flowText(paragraph, 'textWrapping')).toBe('HeXad[LB]Tail«Res»');
+      expect(savedParagraph(xml, NEXT_ID).xml).not.toMatch(/<w:br\b/);
+    }, TIMEOUT);
   }
 });
 
