@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 import { rezipPartsToArrayBuffer, toBytes } from '../docx/rezip/parts';
 import { applyFrameDeltaOwned, decodeFrameDelta, type RetainedFrame } from '../layout/render/frameDelta';
 import { displayPrimitiveRect } from '../layout/render/displayListGeometry';
+import { loadRustDisplayListQueryEngine } from '../layout/render/rustDisplayList';
 import { preloadEditWasm } from './wasm/index';
 import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
 import { createResidentEngineSession } from './residentEngineSession';
@@ -216,6 +217,315 @@ test('worker frames include highlights for keyboard and point range selections',
       modifiers: { shift: true, alt: false, ctrl: false, meta: false },
     }));
     expect(pointer.frame!.payload.selectionRects?.length).toBeGreaterThan(0);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+function deepValues(value: unknown, key: string, found: unknown[] = []): unknown[] {
+  if (!value || typeof value !== 'object' || ArrayBuffer.isView(value) || value instanceof ArrayBuffer) return found;
+  for (const [name, entry] of Object.entries(value)) {
+    if (name === key) found.push(entry);
+    deepValues(entry, key, found);
+  }
+  return found;
+}
+
+test('each pointer drag step gets one reply from the worker carrying its selection and highlight without frame geometry', async () => {
+  const { client, worker, point } = await openWorker();
+  try {
+    const selected = await editWithFrame(client, intent(1, 0, 'select', { selection: { anchor: { ...point, offset: 0 }, focus: point } }));
+    const rect = selected.frame!.payload.selectionRects![0]!;
+    const received: DocxEngineWorkerResponse[] = [];
+    const deliver = worker.onmessage!;
+    worker.onmessage = (event) => {
+      received.push(event.data);
+      deliver.call(worker, event);
+    };
+    let frameEpoch = selected.frame!.revision;
+    const layoutRevision = selected.frame!.payload.layoutRevision;
+    const pointAt = (fraction: number) => ({
+      page: { pageId: '1', pageIndex: rect.pageIndex }, x: rect.x + Math.min(rect.width - 0.5, Math.max(0.5, rect.width * fraction)),
+      y: rect.y + rect.height / 2, layoutRevision, frameEpoch, clickCount: 1,
+      modifiers: { shift: false, alt: false, ctrl: false, meta: false },
+    });
+    const settle = () => new Promise<void>(resolve => setTimeout(resolve, 100));
+    const latestFrame = () => {
+      for (const reply of received) {
+        if (!reply.ok) continue;
+        for (const frame of [reply.commandFrame?.frame, reply.commandAck?.frame]) if (frame) frameEpoch = Math.max(frameEpoch, frame.revision);
+      }
+    };
+    await client.edit(intent(2, 0, 'selectPoint', pointAt(0)));
+    await settle();
+    latestFrame();
+    for (const [index, fraction] of [0.5, 1, 0.75].entries()) {
+      const before = received.length;
+      const ack = await client.edit(intent(3 + index, 0, 'extendSelection', pointAt(fraction)));
+      expect(ack.outcomes[0]?.status).toBe('noop');
+      await settle();
+      const replies = received.slice(before).filter(reply => !(reply.ok && reply.progress !== undefined));
+      latestFrame();
+      expect(replies.map(reply => reply.ok ? Object.keys(reply).filter(key => key.startsWith('command')).join('+') : 'failure'),
+        `worker replies to drag step ${index + 1}`).toHaveLength(1);
+      const selections = deepValues(replies, 'selection') as ({ anchor?: { offset: number }; focus?: { offset: number } } | null)[];
+      expect(selections.some(selection => !!selection?.anchor && !!selection.focus && selection.anchor.offset !== selection.focus.offset)).toBe(true);
+      expect(deepValues(replies, 'selectionRects').some(rects => Array.isArray(rects) && rects.length > 0)).toBe(true);
+      expect(deepValues(replies, 'geometry').filter(value => value !== undefined)).toEqual([]);
+    }
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+function pointerIntent(frame: DocxCommandFrame, rect: { pageIndex: number; y: number; height: number }, x: number, clickCount = 1) {
+  return {
+    page: { pageId: '1', pageIndex: rect.pageIndex }, x, y: rect.y + rect.height / 2,
+    layoutRevision: frame.payload.layoutRevision, frameEpoch: frame.revision, clickCount,
+    modifiers: { shift: false, alt: false, ctrl: false, meta: false },
+  };
+}
+
+test('a drag selection step transfers no page bitmap', async () => {
+  const texts = ['Alpha beta gamma', 'Second paragraph', 'Third paragraph', 'Fourth paragraph'];
+  const { client, worker, engine } = await openWorker({ bodyXml: texts.map((text, index) =>
+    `<w:p w14:paraId="0000000${index + 1}"><w:r><w:t>${text}</w:t></w:r></w:p>`).join('') });
+  try {
+    const spans = engine.geometryReader.paragraphSpans('body');
+    const whole = await editWithFrame(client, intent(1, 0, 'select', { selection: {
+      anchor: { story: 'body', paraId: spans[0]!.paraId, offset: 0 },
+      focus: { story: 'body', paraId: spans.at(-1)!.paraId, offset: spans.at(-1)!.length },
+    } }));
+    const lines = new Map<number, NonNullable<DocxCommandFrame['payload']['selectionRects']>[number]>();
+    for (const rect of whole.frame!.payload.selectionRects!) {
+      const key = Math.round(rect.y);
+      if (!lines.has(key) || lines.get(key)!.width < rect.width) lines.set(key, rect);
+    }
+    const rows = [...lines.values()].sort((a, b) => a.y - b.y);
+    expect(rows).toHaveLength(texts.length);
+    const staged: string[] = [];
+    const deliver = worker.onmessage!;
+    worker.onmessage = (event) => {
+      const reply = event.data as DocxEngineWorkerResponse;
+      if (reply.ok) {
+        for (const frame of [reply.commandAck?.frame, reply.commandFrame?.frame]) {
+          if (!frame || frame.coversThroughSeq < 2) continue;
+          for (const page of frame.payload.stagedPresentation?.pages ?? []) {
+            staged.push(`step ${frame.coversThroughSeq}: page ${page.page.pageId}`);
+            for (const background of page.backgrounds ?? []) staged.push(`step ${frame.coversThroughSeq}: background ${background.id}`);
+          }
+        }
+      }
+      deliver.call(worker, event);
+    };
+    let frame = whole.frame!;
+    const steps: ['selectPoint' | 'extendSelection', number, number][] = [
+      ['selectPoint', 0, 0], ['extendSelection', 0, 0.6], ['extendSelection', 1, 0.5],
+      ['extendSelection', 2, 0.5], ['extendSelection', 3, 0.8], ['extendSelection', 3, 0.3],
+    ];
+    for (const [index, [kind, row, fraction]] of steps.entries()) {
+      const rect = rows[row]!;
+      const x = rect.x + Math.min(rect.width - 0.5, Math.max(0.5, rect.width * fraction));
+      frame = (await editWithFrame(client, intent(2 + index, 0, kind, pointerIntent(frame, rect, x)))).frame!;
+    }
+    await new Promise<void>(resolve => setTimeout(resolve, 100));
+    expect(staged).toEqual([]);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('drag selection steps feed the query engine an unchanged page at most once and an edited page again', async () => {
+  const texts = ['Alpha beta gamma', 'Second paragraph', 'Third paragraph', 'Fourth paragraph'];
+  const { client, engine } = await openWorker({ bodyXml: texts.map((text, index) =>
+    `<w:p w14:paraId="0000000${index + 1}"><w:r><w:t>${text}</w:t></w:r></w:p>`).join('') });
+  const queryEngine = await loadRustDisplayListQueryEngine();
+  const { openDisplayList, updateDisplayList } = queryEngine;
+  const fed: number[] = [];
+  const feed = (pages: [number, { primitives?: unknown[] }][]) => {
+    for (const [index, page] of pages) if (page.primitives?.length) fed.push(index);
+  };
+  queryEngine.openDisplayList = (json: string) => {
+    feed((JSON.parse(json) as { pages: { primitives?: unknown[] }[] }).pages.map((page, index) => [index, page]));
+    return openDisplayList!.call(queryEngine, json);
+  };
+  queryEngine.updateDisplayList = (handle: number, json: string) => {
+    feed((JSON.parse(json) as { replace?: [number, { primitives?: unknown[] }][] }).replace ?? []);
+    updateDisplayList!.call(queryEngine, handle, json);
+  };
+  try {
+    const spans = engine.geometryReader.paragraphSpans('body');
+    const whole = await editWithFrame(client, intent(1, 0, 'select', { selection: {
+      anchor: { story: 'body', paraId: spans[0]!.paraId, offset: 0 },
+      focus: { story: 'body', paraId: spans.at(-1)!.paraId, offset: spans.at(-1)!.length },
+    } }));
+    const lines = new Map<number, NonNullable<DocxCommandFrame['payload']['selectionRects']>[number]>();
+    for (const rect of whole.frame!.payload.selectionRects!) {
+      const key = Math.round(rect.y);
+      if (!lines.has(key) || lines.get(key)!.width < rect.width) lines.set(key, rect);
+    }
+    const rows = [...lines.values()].sort((a, b) => a.y - b.y);
+    expect(rows).toHaveLength(texts.length);
+    let frame = whole.frame!;
+    let version = 0;
+    const step = async (seq: number, kind: 'selectPoint' | 'extendSelection', row: number, fraction: number) => {
+      const rect = rows[row]!;
+      const x = rect.x + Math.min(rect.width - 0.5, Math.max(0.5, rect.width * fraction));
+      const ack = await editWithFrame(client, intent(seq, version, kind, pointerIntent(frame, rect, x)));
+      frame = ack.frame!;
+      return ack;
+    };
+    const timesFed = () => {
+      const counts = new Map<number, number>();
+      for (const index of fed) counts.set(index, (counts.get(index) ?? 0) + 1);
+      return counts;
+    };
+    fed.length = 0;
+    const steps: ['selectPoint' | 'extendSelection', number, number][] = [
+      ['selectPoint', 0, 0.2], ['extendSelection', 0, 0.6], ['extendSelection', 1, 0.5],
+      ['extendSelection', 2, 0.5], ['extendSelection', 3, 0.8], ['extendSelection', 3, 0.3],
+    ];
+    for (const [index, [kind, row, fraction]] of steps.entries()) await step(2 + index, kind, row, fraction);
+    expect([...timesFed()].filter(([, times]) => times > 1), 'pages fed more than once during the drag').toEqual([]);
+    const pressed = await step(8, 'selectPoint', 0, 0.3);
+    fed.length = 0;
+    const typed = await client.edit(intent(9, version, 'insertText', { text: 'X', selection: pressed.selection! }));
+    expect(typed.outcomes[0]?.status).toBe('applied');
+    version = typed.version;
+    if (typed.frame) frame = typed.frame;
+    await step(10, 'extendSelection', 1, 0.5);
+    await step(11, 'extendSelection', 2, 0.5);
+    expect(timesFed().get(rows[0]!.pageIndex), 'times the edited page was fed after the edit').toBe(1);
+  } finally {
+    queryEngine.openDisplayList = openDisplayList;
+    queryEngine.updateDisplayList = updateDisplayList;
+    client.destroy();
+  }
+}, TIMEOUT);
+
+test('the first keystroke after a click, and after a click that follows a drag ending collapsed, has a staged echo page on main', async () => {
+  const texts = ['Alpha beta gamma', 'Second paragraph', 'Third paragraph', 'Fourth paragraph'];
+  const { client, worker, engine, initial } = await openWorker({ bodyXml: texts.map((text, index) =>
+    `<w:p w14:paraId="0000000${index + 1}"><w:r><w:t>${text}</w:t></w:r></w:p>`).join('') });
+  try {
+    const held = new Map<string, { frameEpoch: number; backgrounds: Set<string> }>();
+    const glyphSets = new Set<string>();
+    const ackInstalls = new Map<number, boolean>();
+    const receive = (frame: DocxCommandFrame | undefined) => {
+      if (!frame) return;
+      for (const set of frame.payload.echoGlyphSets ?? []) glyphSets.add(set.key);
+      for (const { page, frameEpoch, backgrounds } of frame.payload.stagedPresentation?.pages ?? []) {
+        held.set(page.pageId, { frameEpoch, backgrounds: new Set((backgrounds ?? []).map(({ id }) => id)) });
+      }
+    };
+    receive(initial.frame);
+    const deliver = worker.onmessage!;
+    worker.onmessage = (event) => {
+      const reply = event.data as DocxEngineWorkerResponse;
+      if (reply.ok) {
+        const context = reply.commandAck?.echoContext;
+        if (reply.commandAck && context) {
+          ackInstalls.set(reply.commandAck.throughSeq, held.get(context.page.pageId)?.frameEpoch === context.frameEpoch);
+        }
+        receive(reply.commandAck?.frame);
+        receive(reply.commandFrame?.frame);
+      }
+      deliver.call(worker, event);
+    };
+    const spans = engine.geometryReader.paragraphSpans('body');
+    const whole = await editWithFrame(client, intent(1, 0, 'select', { selection: {
+      anchor: { story: 'body', paraId: spans[0]!.paraId, offset: 0 },
+      focus: { story: 'body', paraId: spans.at(-1)!.paraId, offset: spans.at(-1)!.length },
+    } }));
+    const lines = new Map<number, NonNullable<DocxCommandFrame['payload']['selectionRects']>[number]>();
+    for (const rect of whole.frame!.payload.selectionRects!) {
+      const key = Math.round(rect.y);
+      if (!lines.has(key) || lines.get(key)!.width < rect.width) lines.set(key, rect);
+    }
+    const rows = [...lines.values()].sort((a, b) => a.y - b.y);
+    expect(rows).toHaveLength(texts.length);
+    let frame = whole.frame!;
+    const step = async (seq: number, kind: 'selectPoint' | 'extendSelection', row: number, fraction: number) => {
+      const rect = rows[row]!;
+      const x = rect.x + Math.min(rect.width - 0.5, Math.max(0.5, rect.width * fraction));
+      const ack = await editWithFrame(client, intent(seq, 0, kind, pointerIntent(frame, rect, x)));
+      frame = ack.frame!;
+      return ack;
+    };
+    const echoReadiness = (seq: number) => {
+      const context = frame.payload.echoContext;
+      return {
+        seq,
+        ackContextInstalls: ackInstalls.get(seq) ?? 'no ack context',
+        frameContext: context ? { shaping: context.shaping, glyphSetReceived: glyphSets.has(context.glyphs?.glyphSet ?? '') } : null,
+        restorableBackgrounds: (context?.damage ?? []).map(({ page, backgroundId }) => held.get(page.pageId)?.backgrounds.has(backgroundId) ?? false),
+      };
+    };
+    await step(2, 'selectPoint', 0, 0.6);
+    await step(3, 'selectPoint', 0, 0.3);
+    const click = echoReadiness(3);
+    await step(4, 'selectPoint', 1, 0.2);
+    await step(5, 'extendSelection', 3, 0.5);
+    const ended = await step(6, 'extendSelection', 1, 0.2);
+    expect([ended.selection?.anchor.paraId, ended.selection?.anchor.offset])
+      .toEqual([ended.selection?.focus.paraId, ended.selection?.focus.offset]);
+    await step(7, 'selectPoint', 2, 0.4);
+    const afterDrag = echoReadiness(7);
+    for (const readiness of [click, afterDrag]) {
+      expect(readiness.ackContextInstalls, `ack context of step ${readiness.seq}`).not.toBe(false);
+      expect(readiness.frameContext, `frame context of step ${readiness.seq}`).toEqual({ shaping: 'simple-ltr', glyphSetReceived: true });
+      expect(readiness.restorableBackgrounds, `staged echo backgrounds of step ${readiness.seq}`).toEqual([true]);
+    }
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('a drag after a double or triple click keeps the word or paragraph start as its anchor', async () => {
+  const { client, engine } = await openWorker({ bodyXml:
+    '<w:p w14:paraId="00000001"><w:r><w:t>Alpha beta gamma</w:t></w:r></w:p>' +
+    '<w:p w14:paraId="00000002"><w:r><w:t>Second paragraph</w:t></w:r></w:p>',
+  });
+  try {
+    const { paraId, length } = engine.geometryReader.paragraphSpans('body')[0]!;
+    const at = (offset: number) => ({ story: 'body', paraId, offset });
+    const whole = await editWithFrame(client, intent(1, 0, 'select', { selection: { anchor: at(0), focus: at(length) } }));
+    const rect = whole.frame!.payload.selectionRects![0]!;
+    const x = (fraction: number) => rect.x + Math.min(rect.width - 0.5, Math.max(0.5, rect.width * fraction));
+    let frame = whole.frame!;
+    const step = async (seq: number, kind: 'selectPoint' | 'extendSelection', fraction: number, clickCount: number) => {
+      const ack = await editWithFrame(client, intent(seq, 0, kind, pointerIntent(frame, rect, x(fraction), clickCount)));
+      frame = ack.frame!;
+      return ack.selection;
+    };
+    expect(await step(2, 'selectPoint', 0.43, 2)).toMatchObject({ anchor: at(6), focus: at(10) });
+    expect(await step(3, 'extendSelection', 1, 1)).toMatchObject({ anchor: at(6), focus: at(length) });
+    expect(await step(4, 'selectPoint', 0.43, 3)).toMatchObject({ anchor: at(0), focus: at(length) });
+    const fromParagraph = await step(5, 'extendSelection', 0.43, 1);
+    expect(fromParagraph?.anchor).toMatchObject(at(0));
+    expect(fromParagraph!.focus.offset).toBeGreaterThan(0);
+    expect(fromParagraph!.focus.offset).toBeLessThan(length);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('a drag across tracked changes selects the raw range a keyboard selection does and suggesting typing replaces it', async () => {
+  const tracked = 'w:author="Writer" w:date="2026-01-01T00:00:00Z"';
+  const { client, engine } = await openWorker({ bodyXml:
+    `<w:p w14:paraId="00000001"><w:del w:id="1" ${tracked}><w:r><w:delText>Gone </w:delText></w:r></w:del>` +
+    `<w:r><w:t>Alpha beta</w:t></w:r><w:ins w:id="2" ${tracked}><w:r><w:t> added</w:t></w:r></w:ins></w:p>`,
+  });
+  try {
+    const { paraId } = engine.geometryReader.paragraphSpans('body')[0]!;
+    const at = (offset: number) => ({ story: 'body', paraId, offset });
+    const keyboard = await editWithFrame(client, intent(1, 0, 'select', { selection: { anchor: at(7), focus: at(15) } }));
+    const rects = keyboard.frame!.payload.selectionRects!;
+    expect(rects.length).toBeGreaterThan(0);
+    const first = rects[0]!;
+    const last = rects.at(-1)!;
+    const pressed = await editWithFrame(client, intent(2, 0, 'selectPoint', pointerIntent(keyboard.frame!, first, first.x + 0.5)));
+    expect(pressed.selection).toMatchObject({ anchor: at(7), focus: at(7) });
+    const dragged = await editWithFrame(client, intent(3, 0, 'extendSelection',
+      pointerIntent(pressed.frame!, last, last.x + last.width - 0.5)));
+    expect(dragged.selection).toMatchObject({ anchor: at(7), focus: at(15) });
+    expect(dragged.frame!.payload.selectionRects).toEqual(rects);
+    const revisions = engine.geometryReader.listRevisions().length;
+    const typed = await client.edit(intent(4, 0, 'insertText', {
+      text: 'X', selection: dragged.selection!, suggesting: { name: 'Ada', date: '2026-01-01' },
+    }));
+    expect(typed.outcomes[0]?.status).toBe('applied');
+    expect(engine.geometryReader.listRevisions().length).toBeGreaterThan(revisions);
   } finally { client.destroy(); }
 }, TIMEOUT);
 
@@ -1809,6 +2119,85 @@ test('worker frames publish selection and distinct stable image handles', async 
     }));
     expect(typed.frame!.payload.geometry!.objects.filter(object => object.kind === 'image').map(object => object.handle))
       .toEqual(images.map(object => object.handle));
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+function pictureFlags(ack: { frame?: DocxCommandAck['frame'] }): Array<[string, boolean | undefined]> {
+  return ack.frame!.payload.geometry!.objects.filter(object => object.kind === 'image').map(object => [object.handle, object.selected]);
+}
+
+test('a click on a picture reads fresh frame geometry that flags it under its stable handle', async () => {
+  const { client, initial, point } = await openWorker({ objects: true });
+  try {
+    const [first, second] = pictureFlags(initial).map(([handle]) => handle);
+    const caret = await editWithFrame(client, intent(1, 0, 'select', { selection: {
+      anchor: { ...point, offset: 0 }, focus: { ...point, offset: 0 },
+    } }));
+    expect(caret.frame!.payload.geometryKept).toBe(true);
+    const clicked = await editWithFrame(client, intent(2, 0, 'select', { object: {
+      handle: second!, expectVersion: initial.frame.payload.documentVersion!,
+    } }));
+    expect(clicked.frame!.payload.geometryKept).toBeUndefined();
+    expect(pictureFlags(clicked)).toEqual([[first!, undefined], [second!, true]]);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('keyboard steps onto and past a picture read fresh frame geometry with its flag under its stable handle', async () => {
+  const { client, initial, point } = await openWorker({ objects: true });
+  try {
+    const [first, second] = pictureFlags(initial).map(([handle]) => handle);
+    const caret = await editWithFrame(client, intent(1, 0, 'select', { selection: {
+      anchor: { ...point, offset: 1 }, focus: { ...point, offset: 1 },
+    } }));
+    expect(caret.frame!.payload.geometryKept).toBe(true);
+    const onto = await editWithFrame(client, intent(2, 0, 'navigate', { unit: 'character', direction: 'forward', extend: true }));
+    expect(onto.selection).toMatchObject({ anchor: { offset: 1 }, focus: { offset: 2 } });
+    expect(onto.frame!.payload.geometryKept).toBeUndefined();
+    expect(pictureFlags(onto)).toEqual([[first!, true], [second!, undefined]]);
+    const past = await editWithFrame(client, intent(3, 0, 'navigate', { unit: 'character', direction: 'forward', extend: true }));
+    expect(past.selection).toMatchObject({ anchor: { offset: 1 }, focus: { offset: 3 } });
+    expect(past.frame!.payload.geometryKept).toBeUndefined();
+    expect(pictureFlags(past)).toEqual([[first!, undefined], [second!, undefined]]);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('a range containing a picture flags no picture, so it keeps frame geometry unless it leaves a selected picture', async () => {
+  const { readResidentFrameGeometry } = await import('./residentObjectGeometry');
+  const { client, engine, initial, point } = await openWorker({ objects: true });
+  try {
+    const [first, second] = pictureFlags(initial).map(([handle]) => handle);
+    const range = { anchor: { ...point, offset: 0 }, focus: { ...point, offset: 2 } };
+    const kept = await editWithFrame(client, intent(1, 0, 'select', { selection: range }));
+    expect(kept.frame!.payload.geometryKept).toBe(true);
+    expect(kept.frame!.payload.selectionRects?.length).toBeGreaterThan(0);
+    const fresh = await readResidentFrameGeometry(engine, applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame)),
+      range, kept.frame!.payload.layoutRevision);
+    expect(fresh.objects.filter(object => object.kind === 'image').map(object => object.selected))
+      .toEqual([undefined, undefined]);
+    const picture = await editWithFrame(client, intent(2, 0, 'select', { object: {
+      handle: first!, expectVersion: initial.frame.payload.documentVersion!,
+    } }));
+    expect(pictureFlags(picture)).toEqual([[first!, true], [second!, undefined]]);
+    const around = await editWithFrame(client, intent(3, 0, 'select', { selection: range }));
+    expect(around.frame!.payload.geometryKept).toBeUndefined();
+    expect(pictureFlags(around)).toEqual([[first!, undefined], [second!, undefined]]);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('leaving a selected picture reads fresh frame geometry that clears its flag under the same handle', async () => {
+  const { client, initial } = await openWorker({ objects: true });
+  try {
+    const [first, second] = pictureFlags(initial).map(([handle]) => handle);
+    const picture = await editWithFrame(client, intent(1, 0, 'select', { object: {
+      handle: first!, expectVersion: initial.frame.payload.documentVersion!,
+    } }));
+    expect(pictureFlags(picture)).toEqual([[first!, true], [second!, undefined]]);
+    const left = await editWithFrame(client, intent(2, 0, 'navigate', { unit: 'character', direction: 'forward', extend: false }));
+    expect(left.selection).toMatchObject({ anchor: { offset: 2 }, focus: { offset: 2 } });
+    expect(left.frame!.payload.geometryKept).toBeUndefined();
+    expect(pictureFlags(left)).toEqual([[first!, undefined], [second!, undefined]]);
+    const moved = await editWithFrame(client, intent(3, 0, 'navigate', { unit: 'character', direction: 'forward', extend: false }));
+    expect(moved.frame!.payload.geometryKept).toBe(true);
   } finally { client.destroy(); }
 }, TIMEOUT);
 

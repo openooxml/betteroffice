@@ -68,6 +68,11 @@ import {
 let startWorker: (scope: unknown, canvas: unknown, harness: unknown, clock: unknown, fetch: unknown, decode: unknown, schedule: unknown, unschedule: unknown) => void;
 const retireWorkerTimers: (() => void)[] = [];
 
+interface WorkerEditCaches {
+  fontRequirements: { version: string; layoutInput: string; requirementsJson: string } | null;
+  completedLayout: { extras: string; layoutJson: string; headersFootersJson: string | undefined } | null;
+}
+
 afterEach(() => {
   for (const retire of retireWorkerTimers.splice(0)) retire();
 });
@@ -174,7 +179,7 @@ beforeAll(async () => {
             loader: 'js',
           }));
           build.onLoad({ filter: /\/residentEngineWorker\.ts$/ }, ({ path }) => ({
-            contents: `${readFileSync(path, 'utf8')}\ntestHarness.installCommands = setResidentCommandHooksFactory; testHarness.pendingPages = pendingOffscreenPageIds; testHarness.saveWarmupState = () => ({ attempts: typeof saveWarmupAttempts === 'undefined' ? 0 : saveWarmupAttempts, active: typeof saveWarmup !== 'undefined' && saveWarmup !== null, finished: typeof saveWarmupFinished !== 'undefined' && saveWarmupFinished, record: editorSaves, saveDelayMs: typeof saveWarmupStats === 'undefined' ? null : saveWarmupStats.saveDelayMs });`,
+            contents: `${readFileSync(path, 'utf8')}\ntestHarness.installCommands = setResidentCommandHooksFactory; testHarness.pendingPages = pendingOffscreenPageIds; testHarness.saveWarmupState = () => ({ attempts: typeof saveWarmupAttempts === 'undefined' ? 0 : saveWarmupAttempts, active: typeof saveWarmup !== 'undefined' && saveWarmup !== null, finished: typeof saveWarmupFinished !== 'undefined' && saveWarmupFinished, record: editorSaves, saveDelayMs: typeof saveWarmupStats === 'undefined' ? null : saveWarmupStats.saveDelayMs }); testHarness.editCaches = () => ({ fontRequirements, completedLayout }); testHarness.seedEditCaches = (caches) => { fontRequirements = caches.fontRequirements; completedLayout = caches.completedLayout; };`,
             loader: 'ts',
           }));
           build.onResolve({ filter: /.*/ }, ({ path, importer }) =>
@@ -284,6 +289,8 @@ function worker() {
     }),
     setEngineKind: null as ((kind: 'wasm' | 'native') => void) | null,
     saveWarmupState: null as (() => { attempts: number; active: boolean; finished: boolean; record: ResidentSaveRecord; saveDelayMs: number | null }) | null,
+    editCaches: null as (() => WorkerEditCaches) | null,
+    seedEditCaches: null as ((caches: WorkerEditCaches) => void) | null,
     async preloadFrom(source: Promise<WebAssembly.Module | null>): Promise<void> {
       await harness.preload((await source) ?? undefined);
     },
@@ -773,6 +780,93 @@ test('selection noop sends its retained echo context before building the deferre
     expect((await pushed).coversThroughSeq).toBe(1);
     expect(builds).toBe(1);
   } finally { client.destroy(); }
+});
+
+async function selectionStepWorker() {
+  const arm = await commandWorker();
+  const { w } = arm;
+  const at = (seq: number) => ({ story: 'body', paraId: 'p', offset: seq % 2 });
+  Object.assign(w.harness.session.geometryReader, {
+    version: () => w.harness.session.proposalEngine.version(),
+    hasStory: (story: string) => story === 'body',
+    paragraphSpans: () => [{ paraId: 'p', length: 2 }],
+    locateParagraph: () => ({ start: 0, end: 2 }),
+    storySegments: () => [
+      { kind: 'text', text: 'ab', attributes: {} },
+      { kind: 'pilcrow', paraId: 'p', properties: {}, attributes: {} },
+    ],
+  });
+  const state: DocxEditState = { readOnly: false, toolbar: null, effectiveFormatting: null, storedMarks: null,
+    canUndo: false, canRedo: false, hyperlink: null, tableContext: null };
+  let selected = { anchor: at(0), focus: at(0) };
+  w.harness.installCommands!(() => ({
+    preflight: command => ({ status: 'ready', prepared: {
+      command: { ...command, kind: 'select', payload: { selection: { anchor: at(command.seq), focus: at(command.seq) } } },
+      selection: { anchor: at(command.seq), focus: at(command.seq) }, range: null,
+    } }),
+    apply: ({ command }) => {
+      selected = { anchor: at(command.seq), focus: at(command.seq) };
+      return { status: 'noop' };
+    },
+    selection: () => selected, editState: () => state,
+  }));
+  const initial = await arm.client.commandInit(COMMAND_INIT);
+  w.harness.session.buildDisplayPagesFrame = (pages: number[]) => {
+    const { docEpoch, layoutEpoch } = w.harness.delta!;
+    w.delta(pages.map(index => index + 1), false, 100, 1);
+    Object.assign(w.harness.delta!, { docEpoch, layoutEpoch });
+    return new Uint8Array([w.harness.delta!.frameEpoch]);
+  };
+  const step = (seq: number) => arm.client.edit({ ...commandEnvelope(seq), kind: 'extendSelection', payload: {
+    page: { pageId: '1', pageIndex: 0 }, x: 20, y: 10, frameEpoch: initial.frame.revision, layoutRevision: 1,
+    clickCount: 1, modifiers: { shift: false, alt: false, ctrl: false, meta: false },
+  } });
+  return { ...arm, step, settle: () => new Promise<void>(resolve => setTimeout(resolve, 50)) };
+}
+
+test('a drag selection step leaves the scheduler stamps, earlier stamped work and the layout caches alone', async () => {
+  const arm = await selectionStepWorker();
+  const { w } = arm;
+  try {
+    await arm.settle();
+    const scheduler = w.harness.scheduler!;
+    const caches: WorkerEditCaches = {
+      fontRequirements: { version: 'v', layoutInput: '{}', requirementsJson: '[]' },
+      completedLayout: { extras: '{}', layoutJson: '{}', headersFootersJson: undefined },
+    };
+    w.harness.seedEditCaches!(caches);
+    const stamps = { version: scheduler.version, generation: scheduler.generation };
+    await arm.step(1);
+    await arm.settle();
+    expect(w.harness.messages.at(-1)).not.toMatchObject({ mutates: true });
+    expect({ version: scheduler.version, generation: scheduler.generation }).toEqual(stamps);
+    const outcome = new Promise<'ran' | 'cancelled'>((resolve) => scheduler.schedule({
+      kind: 'pageBuild', version: stamps.version, generation: stamps.generation,
+      onStale: () => 'cancel', cancel: () => resolve('cancelled'),
+      run: () => { resolve('ran'); return 'done'; },
+    }));
+    expect(await outcome).toBe('ran');
+    expect(w.harness.editCaches!()).toEqual(caches);
+  } finally { arm.client.destroy(); }
+});
+
+test('a drag selection step answers main with one message carrying the selection and no frame geometry', async () => {
+  const arm = await selectionStepWorker();
+  try {
+    await arm.settle();
+    for (const seq of [1, 2, 3]) {
+      const before = arm.replies.length;
+      await arm.step(seq);
+      await arm.settle();
+      const answered = arm.replies.slice(before).filter(reply => !(reply.ok && reply.progress !== undefined));
+      expect(answered.map(reply => reply.ok && reply.commandFrame ? 'commandFrame' : reply.ok && reply.commandAck ? 'commandAck' : 'other'),
+        `replies to selection step ${seq}`).toHaveLength(1);
+      const [only] = answered;
+      expect(JSON.stringify(only)).toContain('"selection"');
+      expect(Object.keys(only!.ok && only!.commandFrame ? only!.commandFrame.frame.payload : {})).not.toContain('geometry');
+      expect(only!.ok && only!.commandAck?.frame?.payload.geometry).toBeFalsy();
+    }
+  } finally { arm.client.destroy(); }
 });
 
 test('command raster scale sizes the initial bitmaps before presentation', async () => {

@@ -1216,3 +1216,232 @@ describe('createDisplayListQueries page loads in the real store', () => {
     expect(answers.every((rects) => rects.length > 0)).toBe(true);
   });
 });
+
+describe('createDisplayListQueries adopting a previous layout in the real store', () => {
+  function linesPage(
+    pageIndex: number,
+    first: number,
+    lines: number,
+    box: { width?: number; height?: number; x?: number; advance?: number } = {}
+  ): DisplayPage {
+    return {
+      pageIndex,
+      width: box.width ?? 816,
+      height: box.height ?? 1056,
+      primitives: Array.from(
+        { length: lines },
+        (_, line) =>
+          ({
+            kind: 'text',
+            text: `Line ${first + line}`,
+            x: box.x ?? 100,
+            baselineY: 100 + line * 20,
+            width: (box.advance ?? 10) * 12,
+            font: '400 16px Arial',
+            color: '#000000',
+            docStart: (first + line) * 20 + 1,
+            docEnd: (first + line) * 20 + 13,
+          }) as DisplayPage['primitives'][number]
+      ),
+    };
+  }
+
+  const base = () => ({ pages: [0, 1, 2, 3].map((index) => linesPage(index, index * 3, 3)) });
+
+  const changes: [string, (pages: DisplayPage[]) => DisplayPage[]][] = [
+    [
+      'an edit',
+      (pages) => [
+        pages[0]!,
+        { ...linesPage(1, 3, 3), primitives: linesPage(1, 3, 3).primitives.map((primitive) =>
+          ({ ...primitive, text: 'Edited', width: 70 }) as DisplayPage['primitives'][number]) },
+        pages[2]!,
+        pages[3]!,
+      ],
+    ],
+    [
+      'a reflow',
+      () => [0, 1, 2, 3, 4, 5].map((index) => linesPage(index, index * 2, 2)),
+    ],
+    [
+      'a font arriving',
+      (pages) => pages.map((page) => linesPage(page.pageIndex, page.pageIndex * 3, 3, { x: 96, advance: 14 })),
+    ],
+    [
+      'a page size change',
+      (pages) =>
+        pages.map((page) => linesPage(page.pageIndex, page.pageIndex * 3, 3, { width: 600, height: 800, x: 72 })),
+    ],
+    ['a zoom that keeps the display list', (pages) => pages],
+  ];
+
+  async function realEngine() {
+    const { preloadLayoutWasm } = await import('../../wasm/layout');
+    const { loadRustDisplayListQueryEngine } = await import('./rustDisplayList');
+    await preloadLayoutWasm();
+    return loadRustDisplayListQueryEngine();
+  }
+
+  function answers(queries: DisplayListQueries, pageCount: number) {
+    return {
+      hits: Array.from({ length: pageCount }, (_, index) => queries.hitTestRegions(index, 130, 100)),
+      ranges: Array.from({ length: pageCount }, (_, index) => queries.rangeRects(index * 60 + 2, index * 60 + 45)),
+      whole: queries.rangeRects(1, pageCount * 60),
+    };
+  }
+
+  for (const document of ['the same document', 'a swapped document'] as const) {
+    for (const [name, change] of changes) {
+      test(`after ${name} in ${document} it answers as a fresh engine fed the same display list`, async () => {
+        const engine = await realEngine();
+        const line = {};
+        const original = base();
+        const before = createDisplayListQueries(original, engine, null, line, 3);
+        answers(before, original.pages.length);
+        const next = { pages: change(original.pages) };
+        const adopted = createDisplayListQueries(next, engine, before, document === 'the same document' ? line : {}, 3);
+        const fresh = createDisplayListQueries(next, engine);
+        expect(answers(adopted, next.pages.length)).toEqual(answers(fresh, next.pages.length));
+        expect(answers(fresh, next.pages.length).whole.length).toBeGreaterThan(0);
+      });
+    }
+  }
+});
+
+describe('createDisplayListQueries store page bound', () => {
+  function textPage(pageIndex: number): DisplayPage {
+    return {
+      pageIndex,
+      width: 100,
+      height: 100,
+      primitives: [
+        {
+          kind: 'text',
+          text: 'x',
+          x: 0,
+          baselineY: 10,
+          width: 10,
+          font: '10px serif',
+          color: '#000',
+          docStart: pageIndex * 10 + 1,
+          docEnd: pageIndex * 10 + 9,
+        } as DisplayPage['primitives'][number],
+      ],
+    };
+  }
+
+  function storeEngine() {
+    const { engine, calls } = fakeEngine();
+    const parsed = new Set<number>();
+    const updates: Array<{ replace?: Array<[number, DisplayPage]> }> = [];
+    engine.openDisplayList = () => {
+      calls.open += 1;
+      parsed.clear();
+      return calls.open;
+    };
+    engine.updateDisplayList = (_handle: number, json: string) => {
+      calls.update += 1;
+      const update = JSON.parse(json) as { replace?: Array<[number, DisplayPage]> };
+      updates.push(update);
+      for (const [index, stored] of update.replace ?? []) {
+        if (stored.primitives.length) parsed.add(index);
+        else parsed.delete(index);
+      }
+    };
+    engine.hitTestRegionsByHandle = () => 'null';
+    return { engine, calls, parsed, updates };
+  }
+
+  test('keeps at most its page cap parsed and parses an evicted page again when a query reads it', () => {
+    const { engine, parsed, updates } = storeEngine();
+    const pages = Array.from({ length: 12 }, (_, index) => textPage(index));
+    const queries = createDisplayListQueries({ pages }, engine, null, null, 4);
+    for (let index = 0; index < pages.length; index += 1) {
+      queries.rangeRects(index * 10 + 2, index * 10 + 3);
+      expect(parsed.size, `pages parsed after reading page ${index}`).toBeLessThanOrEqual(4);
+      expect(parsed.has(index)).toBe(true);
+    }
+    expect(parsed.has(0)).toBe(false);
+    queries.hitTestRegions(0, 5, 5);
+    expect(parsed.has(0)).toBe(true);
+    expect(parsed.size).toBeLessThanOrEqual(4);
+    expect(updates.at(-1)!.replace!.filter(([, stored]) => stored.primitives.length).map(([index]) => index)).toEqual([0]);
+  });
+
+  test('a query reading more pages than the cap parses all of them and later queries shrink the store again', () => {
+    const { engine, parsed } = storeEngine();
+    const pages = Array.from({ length: 10 }, (_, index) => textPage(index));
+    const queries = createDisplayListQueries({ pages }, engine, null, null, 3);
+    queries.rangeRects(1, 100);
+    expect(parsed.size).toBe(10);
+    queries.rangeRects(52, 53);
+    expect(parsed.size).toBeLessThanOrEqual(3);
+    expect(parsed.has(5)).toBe(true);
+  });
+
+  test('pages adopted from a previous layout count against the cap of the new one', () => {
+    const { engine, parsed } = storeEngine();
+    const pages = Array.from({ length: 8 }, (_, index) => textPage(index));
+    const line = {};
+    const first = createDisplayListQueries({ pages }, engine, null, line, 3);
+    for (const index of [0, 1, 2]) first.rangeRects(index * 10 + 2, index * 10 + 3);
+    const second = createDisplayListQueries({ pages: [...pages] }, engine, first, line, 3);
+    second.rangeRects(72, 73);
+    expect(parsed.size).toBeLessThanOrEqual(3);
+    expect(parsed.has(7)).toBe(true);
+  });
+
+  test('a bounded facade answers as one holding every page', async () => {
+    const { preloadLayoutWasm } = await import('../../wasm/layout');
+    const { loadRustDisplayListQueryEngine } = await import('./rustDisplayList');
+    await preloadLayoutWasm();
+    const engine = await loadRustDisplayListQueryEngine();
+    const page = (pageIndex: number): DisplayPage => ({
+      pageIndex,
+      width: 816,
+      height: 1056,
+      primitives: [0, 1, 2].map(
+        (line) =>
+          ({
+            kind: 'text',
+            text: `Page ${pageIndex} line ${line}`,
+            x: 100,
+            baselineY: 100 + line * 20,
+            width: 200,
+            font: '400 16px Arial',
+            color: '#000000',
+            docStart: pageIndex * 100 + line * 20 + 1,
+            docEnd: pageIndex * 100 + line * 20 + 15,
+          }) as DisplayPage['primitives'][number]
+      ),
+    });
+    const list = { pages: Array.from({ length: 12 }, (_, index) => page(index)) };
+    const bounded = createDisplayListQueries(list, engine, null, null, 2);
+    const order = [7, 2, 11, 2, 0, 5, 7];
+    const answers = order.map((index) => [
+      bounded.rangeRects(index * 100 + 3, index * 100 + 50),
+      bounded.hitTestRegions(index, 150, 100),
+    ]);
+    const eager = createDisplayListQueries(list, engine);
+    eager.rangeRects(1, 1200);
+    expect(order.map((index) => [
+      eager.rangeRects(index * 100 + 3, index * 100 + 50),
+      eager.hitTestRegions(index, 150, 100),
+    ])).toEqual(answers);
+    expect(answers.every(([rects]) => (rects as DisplayListRect[]).length > 0)).toBe(true);
+  });
+
+  test('closes its store handle on dispose and when its document line ends', () => {
+    const { engine, calls } = storeEngine();
+    const pages = Array.from({ length: 4 }, (_, index) => textPage(index));
+    const disposed = createDisplayListQueries({ pages }, engine, null, null, 2);
+    disposed.rangeRects(2, 3);
+    disposed.dispose();
+    expect(calls.close).toBe(1);
+    const line = {};
+    const ended = createDisplayListQueries({ pages }, engine, null, line, 2);
+    ended.rangeRects(2, 3);
+    endDisplayListQueriesLine(line);
+    expect(calls.close).toBe(2);
+  });
+});
