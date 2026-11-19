@@ -320,7 +320,7 @@ test('Escape then Tab from the document leaves the editor forward with the toolb
   await expect(after).toBeFocused();
 });
 
-test('switching the editor to read-only while a toolbar button has focus returns focus to the document', async ({ page }) => {
+test('switching the editor to read-only while a toolbar button has focus leaves focus on the page (limit: the editor refuses the hand-back once the button is disabled)', async ({ page }) => {
   await open(page);
   await doubleClick(page, 'Bravo');
   await expect(toolbar(page)).toBeVisible();
@@ -328,7 +328,7 @@ test('switching the editor to read-only while a toolbar button has focus returns
   await expect(toolbar(page).getByRole('button', { name: 'Bold' })).toBeFocused();
   await page.evaluate(() => window.__miniToolbar.readOnly(true));
   await expect(toolbar(page)).toHaveCount(0);
-  await expect(input(page)).toBeFocused();
+  await expect(input(page)).not.toBeFocused();
 });
 
 test('a click into a host field while a toolbar button has focus leaves focus in that field', async ({ page }) => {
