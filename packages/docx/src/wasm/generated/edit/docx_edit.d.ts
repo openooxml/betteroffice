@@ -439,6 +439,11 @@ export class EditSession {
      */
     end_shared_reads(): void;
     /**
+     * The paragraph attributes, as JSON, that put a paragraph on a list of `kind`, `bullet` or
+     * `numbered`, creating a list definition when no adjacent paragraph's list is of that kind.
+     */
+    ensure_list_definition(story: string, para_id: string, kind: string): string;
+    /**
      * [`EditSession::export_structured_json`] rendered as Markdown from the same read:
      * `{"ok":true,"version","content":{"markdown","anchors","diagnostics","truncated"}}`.
      */
@@ -1906,6 +1911,7 @@ export interface InitOutput {
     readonly editsession_encode_sticky_position: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly editsession_encoded_selection: (a: number) => [number, number, number, number];
     readonly editsession_end_shared_reads: (a: number) => void;
+    readonly editsession_ensure_list_definition: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly editsession_export_markdown_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_export_snapshot_with_private_fonts_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly editsession_export_structured_json: (a: number, b: number, c: number) => [number, number, number, number];

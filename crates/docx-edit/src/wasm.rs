@@ -1350,6 +1350,19 @@ impl EditSession {
             .map_err(JsValue::from)
     }
 
+    /// The paragraph attributes, as JSON, that put a paragraph on a list of `kind`, `bullet` or
+    /// `numbered`, creating a list definition when no adjacent paragraph's list is of that kind.
+    pub fn ensure_list_definition(
+        &self,
+        story: &str,
+        para_id: &str,
+        kind: &str,
+    ) -> Result<String, JsValue> {
+        self.core
+            .ensure_list_definition(story, para_id, kind)
+            .map_err(JsValue::from)
+    }
+
     pub fn list_sections_json(&self) -> Result<String, JsValue> {
         self.core.list_sections_json().map_err(JsValue::from)
     }

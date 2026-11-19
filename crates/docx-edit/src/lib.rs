@@ -92,6 +92,7 @@ mod heading;
 mod identity;
 mod inline_content;
 pub mod layout_request;
+mod list_definitions;
 mod list_marker;
 pub mod media;
 mod paragraph_facts;
@@ -162,6 +163,10 @@ pub use identity::{
     ParagraphIdDiagnostic, ParagraphIdOrigin, ParagraphIdRefusal, ParagraphIdentities,
     ParagraphIdentity, ParagraphOrigin, ParagraphRef, ParagraphSavePlan, PersistedParagraphIds,
     SourceParagraphRef, SourceStory, SourceStoryKind, SpliceAnchor, SplicedPart,
+};
+pub use list_definitions::{
+    CreatedListDefinition, LIST_DEF, LIST_DEFINITIONS, ListIdentity, ListKind,
+    resolve_list_identity,
 };
 pub use op::{Loc, LocRange, OpError, OpResult, Receipt, SplitReceipt};
 pub use ops::paragraph::{

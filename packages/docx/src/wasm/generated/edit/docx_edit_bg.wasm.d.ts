@@ -82,6 +82,7 @@ export const editsession_encode_state_vector: (a: number) => [number, number];
 export const editsession_encode_sticky_position: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
 export const editsession_encoded_selection: (a: number) => [number, number, number, number];
 export const editsession_end_shared_reads: (a: number) => void;
+export const editsession_ensure_list_definition: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
 export const editsession_export_markdown_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_export_snapshot_with_private_fonts_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
 export const editsession_export_structured_json: (a: number, b: number, c: number) => [number, number, number, number];

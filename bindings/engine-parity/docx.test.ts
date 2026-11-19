@@ -2480,6 +2480,11 @@ const rows: Row<Docx>[] = [
     mutates: true,
     call: ({ session: s }) => ({ result: s.set_style_language('Normal', JSON.stringify({ lang: 'de-DE' })), after: s.style_languages_json() }),
   },
+  {
+    method: 'EditSession.ensure_list_definition',
+    mutates: true,
+    call: ({ session: s }) => s.ensure_list_definition('body', paraId(s, 'Second body'), 'bullet'),
+  },
   defineRow({
     method: 'EditSession.edit_text_resident',
     mutates: true,

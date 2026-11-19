@@ -1,7 +1,7 @@
 use serde_json::json;
 
 use super::{EditSessionCore, EngineError, EngineResult};
-use crate::EditCtx;
+use crate::{EditCtx, ListKind};
 
 impl EditSessionCore {
     pub fn part_metadata_json(&self) -> String {
@@ -53,6 +53,27 @@ impl EditSessionCore {
             .doc()
             .patch_style_languages_xml(source)
             .map_err(EngineError::message)
+    }
+
+    /// The paragraph attributes, as JSON, that put a paragraph on a list of `kind`, `bullet` or
+    /// `numbered`; see [`crate::EditingDoc::ensure_list_definition`].
+    pub fn ensure_list_definition(
+        &self,
+        story: &str,
+        para_id: &str,
+        kind: &str,
+    ) -> EngineResult<String> {
+        let kind = match kind {
+            "bullet" => ListKind::Bullet,
+            "numbered" => ListKind::Numbered,
+            _ => return Err(EngineError::message(format!("unknown list kind {kind:?}"))),
+        };
+        let attrs = self
+            .engine
+            .doc()
+            .ensure_list_definition(&EditCtx::local("", ""), story, para_id, kind)
+            .map_err(EngineError::from)?;
+        serde_json::to_string(&attrs).map_err(EngineError::message)
     }
 
     pub fn list_sections_json(&self) -> EngineResult<String> {
