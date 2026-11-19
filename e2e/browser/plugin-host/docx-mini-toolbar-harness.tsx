@@ -9,10 +9,12 @@ import '../../../packages/docx-react/src/styles/editor.css';
 setGoogleFontsEnabled(false);
 const params = new URLSearchParams(location.search);
 let open: (buffer: ArrayBuffer) => void = () => {};
+let setReadOnly: (value: boolean) => void = () => {};
 const probe = {
   editor: null as DocxEditorRef | null,
   geometry: null as DocxPluginGeometry | null,
   load(bytes: number[]) { open(Uint8Array.from(bytes).buffer); },
+  readOnly(value: boolean) { setReadOnly(value); },
   async saved() { return [...new Uint8Array((await this.editor!.save())!)]; },
 };
 (window as unknown as { __miniToolbar: typeof probe }).__miniToolbar = probe;
@@ -36,10 +38,12 @@ const editorMode = params.get('mode') === 'viewing' ? { mode: 'viewing' as const
 
 function Harness() {
   const [state, setState] = useState<{ buffer: ArrayBuffer; key: number } | null>(null);
+  const [readOnly, changeReadOnly] = useState(params.get('readonly') === '1');
   open = (buffer) => setState((previous) => ({ buffer, key: (previous?.key ?? 0) + 1 }));
+  setReadOnly = changeReadOnly;
   return state && <><DocxEditor key={state.key} ref={(editor) => { probe.editor = editor; }} documentBuffer={state.buffer}
     fonts={fonts} measurementFontProvider={measurementFontProvider} plugins={PLUGINS} pluginGrants={GRANTS}
-    readOnly={params.get('readonly') === '1'} {...editorMode} />
+    readOnly={readOnly} {...editorMode} />
     <button type="button" style={{ position: 'fixed', right: 0, bottom: 0 }}>After the editor</button></>;
 }
 createRoot(document.getElementById('root')!).render(<Harness />);

@@ -12,6 +12,7 @@ interface MiniToolbarProbe {
     readAnchorGeometries(targets: unknown[]): Promise<({ ok: true; rects: Box[] } | { ok: false })[]>;
   } | null;
   load(bytes: number[]): void;
+  readOnly(value: boolean): void;
   saved(): Promise<number[]>;
 }
 declare global { interface Window { __miniToolbar: MiniToolbarProbe } }
@@ -317,4 +318,15 @@ test('Escape then Tab from the document leaves the editor forward with the toolb
     await page.keyboard.press('Tab');
   }
   await expect(after).toBeFocused();
+});
+
+test('switching the editor to read-only while a toolbar button has focus returns focus to the document', async ({ page }) => {
+  await open(page);
+  await doubleClick(page, 'Bravo');
+  await expect(toolbar(page)).toBeVisible();
+  await page.keyboard.press('Alt+F10');
+  await expect(toolbar(page).getByRole('button', { name: 'Bold' })).toBeFocused();
+  await page.evaluate(() => window.__miniToolbar.readOnly(true));
+  await expect(toolbar(page)).toHaveCount(0);
+  await expect(input(page)).toBeFocused();
 });

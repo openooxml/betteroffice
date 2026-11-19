@@ -461,22 +461,55 @@ describe('focus hand-back', () => {
     expect(calls.focusedFrom[0]).toBe(bold);
   });
 
-  test('a refused focusDocument leaves Tab and Escape to the browser and keeps the toolbar', () => {
-    const { view, bold, calls } = focusedToolbar(() => DIALOG_REFUSAL);
+  test('a refused focusDocument leaves Tab and Escape to the browser, and the toolbar still hides when the selection goes', () => {
+    const { view, bold, calls, after } = focusedToolbar(() => DIALOG_REFUSAL);
     expect(fireEvent.keyDown(bold, { key: 'Tab' })).toBe(true);
     expect(fireEvent.keyDown(bold, { key: 'Escape' })).toBe(true);
     expect(calls.focused).toBe(2);
-    expect(view.getByRole('toolbar')).not.toBeNull();
     expect(document.activeElement).toBe(bold);
     expect(calls.states.some((state) => state.dismissed !== null)).toBe(false);
+    const hidden = after({ selection: collapsed });
+    expect(hidden.focused).toBe(1);
+    expect(view.queryByRole('toolbar')).toBeNull();
   });
 
-  test('in the in-thread editor, which refuses focusDocument, the toolbar stays under its focus when it would hide', () => {
+  test('in the in-thread editor, which refuses focusDocument, the toolbar asks once and hides when the selection goes', () => {
     const { view, bold, after } = focusedToolbar(() => NO_INPUT_REFUSAL);
+    expect(fireEvent.keyDown(bold, { key: 'Tab' })).toBe(true);
     const calls = after({ selection: collapsed });
     expect(calls.focused).toBe(1);
-    expect(view.getByRole('toolbar')).not.toBeNull();
-    expect(document.activeElement).toBe(bold);
-    expect(fireEvent.keyDown(bold, { key: 'Tab' })).toBe(true);
+    expect(calls.focusedFrom[0]).toBe(bold);
+    expect(view.queryByRole('toolbar')).toBeNull();
+  });
+
+  test('a button that loses focus to nothing, as a disabled button does, still hands focus back when the toolbar hides', () => {
+    const { view, bold, after } = focusedToolbar();
+    act(() => bold.blur());
+    expect(document.activeElement).not.toBe(bold);
+    const calls = after({ selection: collapsed });
+    expect(calls.focused).toBe(1);
+    expect(view.queryByRole('toolbar')).toBeNull();
+  });
+
+  test('a button that loses focus to nothing still hands focus back when the toolbar unmounts', () => {
+    const { view, bold, calls } = focusedToolbar();
+    act(() => bold.blur());
+    view.unmount();
+    expect(calls.focused).toBe(1);
+  });
+
+  test('focus moved to another element is not taken back when the toolbar hides', () => {
+    const other = document.createElement('button');
+    document.body.append(other);
+    try {
+      const { view, after } = focusedToolbar();
+      act(() => other.focus());
+      const calls = after({ selection: collapsed });
+      expect(calls.focused).toBe(0);
+      expect(document.activeElement).toBe(other);
+      expect(view.queryByRole('toolbar')).toBeNull();
+    } finally {
+      other.remove();
+    }
   });
 });
