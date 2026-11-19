@@ -364,23 +364,16 @@ pub fn render_png_with_fonts_and_images(
                     #[cfg(test)]
                     count(&RUN_PATHS);
                     if let Some(pieces) = xlsx_render::run_pieces(cmd) {
+                        let mut measured = PieceWidths::new(piece_measure(fonts));
                         let lines = match wrap {
-                            Some(wrap) => wrapped_lines(*y, wrap, text, &pieces, |piece, part| {
-                                #[cfg(test)]
-                                count(&PIECE_MEASURES);
-                                font::measure_text_with_fonts(
-                                    piece_faces(fonts, piece),
-                                    &fonts.stack,
-                                    part,
-                                    piece.font_size,
-                                )
-                            }),
+                            Some(wrap) => wrapped_lines(*y, wrap, text, &pieces, &mut measured),
                             None => vec![(*y, pieces)],
                         };
                         for (y, pieces) in lines {
                             paint_pieces(
                                 &mut pixmap,
                                 fonts,
+                                &mut measured,
                                 (*x, y),
                                 *align,
                                 clip,
@@ -472,35 +465,39 @@ pub fn render_png_with_fonts_and_images(
     ooxml_raster::encode_png(pixmap, w, h)
 }
 
+/// What part of a piece's text measures in the piece's faces.
+fn piece_measure(fonts: &RasterFonts) -> impl FnMut(&xlsx_render::TextPiece, &str) -> f32 {
+    move |piece: &xlsx_render::TextPiece, part: &str| {
+        font::measure_text_with_fonts(
+            piece_faces(fonts, piece),
+            &fonts.stack,
+            part,
+            piece.font_size,
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn paint_pieces(
     pixmap: &mut Pixmap,
     fonts: &RasterFonts,
+    measured: &mut PieceWidths<impl FnMut(&xlsx_render::TextPiece, &str) -> f32>,
     (x, y): (f32, f32),
     align: Align,
     clip: &DlRect,
     text: &str,
     pieces: &[xlsx_render::TextPiece],
 ) -> Result<(), String> {
-    let faces: Vec<_> = pieces
-        .iter()
-        .map(|piece| piece_faces(fonts, piece))
-        .collect();
     let widths: Vec<f32> = pieces
         .iter()
-        .zip(&faces)
-        .map(|(piece, faces)| {
-            #[cfg(test)]
-            count(&PIECE_MEASURES);
-            let text = &text[piece.range.clone()];
-            font::measure_text_with_fonts(faces, &fonts.stack, text, piece.font_size)
-        })
+        .map(|piece| measured.width(piece, &text[piece.range.clone()]))
         .collect();
     let mut pen = aligned_left(x, align, widths.iter().sum());
-    for ((piece, faces), width) in pieces.iter().zip(faces).zip(widths) {
+    for (piece, width) in pieces.iter().zip(widths) {
         font::paint_text(
             pixmap,
             &font::TextRun {
-                faces,
+                faces: piece_faces(fonts, piece),
                 stack: &fonts.stack,
                 x: pen,
                 y,

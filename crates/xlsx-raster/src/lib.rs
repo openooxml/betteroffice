@@ -261,16 +261,21 @@ pub fn render_png_with_images(dl: &DisplayList, images: &ImageMap<'_>) -> Result
                     #[cfg(test)]
                     count(&RUN_PATHS);
                     if let Some(pieces) = xlsx_render::run_pieces(cmd) {
+                        let mut measured = PieceWidths::new(measure_piece);
                         let lines = match wrap {
-                            Some(wrap) => wrapped_lines(*y, wrap, text, &pieces, |piece, part| {
-                                #[cfg(test)]
-                                count(&PIECE_MEASURES);
-                                font::measure_text(part, piece.font_size)
-                            }),
+                            Some(wrap) => wrapped_lines(*y, wrap, text, &pieces, &mut measured),
                             None => vec![(*y, pieces)],
                         };
                         for (y, pieces) in lines {
-                            paint_pieces(&mut pixmap, (*x, y), *align, clip, text, &pieces)?;
+                            paint_pieces(
+                                &mut pixmap,
+                                &mut measured,
+                                (*x, y),
+                                *align,
+                                clip,
+                                text,
+                                &pieces,
+                            )?;
                         }
                         continue;
                     }
@@ -686,8 +691,14 @@ fn path_coord(value: f64) -> Result<f32, String> {
 }
 
 #[cfg(not(feature = "fonts"))]
+fn measure_piece(piece: &xlsx_render::TextPiece, part: &str) -> f32 {
+    font::measure_text(part, piece.font_size)
+}
+
+#[cfg(not(feature = "fonts"))]
 fn paint_pieces(
     pixmap: &mut Pixmap,
+    measured: &mut PieceWidths<impl FnMut(&xlsx_render::TextPiece, &str) -> f32>,
     (x, y): (f32, f32),
     align: Align,
     clip: &DlRect,
@@ -696,11 +707,7 @@ fn paint_pieces(
 ) -> Result<(), String> {
     let widths: Vec<f32> = pieces
         .iter()
-        .map(|piece| {
-            #[cfg(test)]
-            count(&PIECE_MEASURES);
-            font::measure_text(&text[piece.range.clone()], piece.font_size)
-        })
+        .map(|piece| measured.width(piece, &text[piece.range.clone()]))
         .collect();
     let mut pen = aligned_left(x, align, widths.iter().sum());
     for (piece, width) in pieces.iter().zip(widths) {
@@ -728,15 +735,54 @@ fn paint_pieces(
     Ok(())
 }
 
+/// The widths of the parts of one text command's pieces, each part measured
+/// once in its piece's face while the command's lines break and paint.
+struct PieceWidths<M> {
+    measure: M,
+    widths: HashMap<PieceFace, HashMap<String, f32>>,
+}
+
+/// A piece's family, bold, italic and size bits.
+type PieceFace = (Option<std::sync::Arc<str>>, bool, bool, u32);
+
+impl<M: FnMut(&xlsx_render::TextPiece, &str) -> f32> PieceWidths<M> {
+    fn new(measure: M) -> Self {
+        Self {
+            measure,
+            widths: HashMap::new(),
+        }
+    }
+
+    fn width(&mut self, piece: &xlsx_render::TextPiece, part: &str) -> f32 {
+        let face = (
+            piece.font_family.clone(),
+            piece.bold,
+            piece.italic,
+            piece.font_size.to_bits(),
+        );
+        let widths = self.widths.entry(face).or_default();
+        if let Some(&width) = widths.get(part) {
+            return width;
+        }
+        #[cfg(test)]
+        count(&PIECE_MEASURES);
+        let width = (self.measure)(piece, part);
+        widths.insert(part.to_owned(), width);
+        width
+    }
+}
+
 /// The baseline and pieces of each line a wrapped command keeps.
 fn wrapped_lines(
     y: f32,
     wrap: &xlsx_render::TextWrap,
     text: &str,
     pieces: &[xlsx_render::TextPiece],
-    measure: impl FnMut(&xlsx_render::TextPiece, &str) -> f32,
+    measured: &mut PieceWidths<impl FnMut(&xlsx_render::TextPiece, &str) -> f32>,
 ) -> Vec<(f32, Vec<xlsx_render::TextPiece>)> {
-    let lines = xlsx_render::wrap_run_lines(text, pieces, wrap.width, measure);
+    let lines = xlsx_render::wrap_run_lines(text, pieces, wrap.width, |piece, part| {
+        measured.width(piece, part)
+    });
     let count = xlsx_render::wrap::wrapped_lines_kept(lines.len(), wrap);
     lines
         .into_iter()
