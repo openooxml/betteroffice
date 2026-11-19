@@ -35,13 +35,19 @@ const other = (spelling: Spelling) => `<w:p w14:paraId="1A2B3C02" w14:textId="1A
 const documentXml = (inner: string, spelling: Spelling = SOURCE) =>
   `<w:document xmlns:w="${W}" xmlns:r="${R}" xmlns:w14="${W14}"><w:body>${paragraph(inner)}${other(spelling)}${SECTION}</w:body></w:document>`;
 
-function docx(inner: string): Uint8Array {
-  return new Uint8Array(rezipPartsToArrayBuffer(new Map([
-    ['[Content_Types].xml', toBytes('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')],
+const COMMENTS_XML =
+  `<w:comments xmlns:w="${W}" xmlns:w14="${W14}"><w:comment w:id="1" w:author="Grace" w:date="2025-03-04T05:06:07Z" w:initials="G">` +
+  '<w:p w14:paraId="0D000001" w14:textId="77777777"><w:r><w:t>Note 1</w:t></w:r></w:p></w:comment></w:comments>';
+
+function docx(inner: string, comments = false): Uint8Array {
+  const parts = new Map([
+    ['[Content_Types].xml', toBytes(`<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>${comments ? '<Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/>' : ''}</Types>`)],
     ['_rels/.rels', toBytes(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${R}/officeDocument" Target="word/document.xml"/></Relationships>`)],
-    ['word/_rels/document.xml.rels', toBytes(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId9" Type="${R}/subDocument" Target="part.docx" TargetMode="External"/></Relationships>`)],
+    ['word/_rels/document.xml.rels', toBytes(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId9" Type="${R}/subDocument" Target="part.docx" TargetMode="External"/>${comments ? `<Relationship Id="rIdComments" Type="${R}/comments" Target="comments.xml"/>` : ''}</Relationships>`)],
     ['word/document.xml', toBytes(documentXml(inner))],
-  ])));
+  ]);
+  if (comments) parts.set('word/comments.xml', toBytes(COMMENTS_XML));
+  return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
 const part = (bytes: Uint8Array) => new TextDecoder().decode(unzipContainer(bytes)['word/document.xml']);
@@ -297,6 +303,48 @@ describe('a w:subDoc after deleting across it, undoing, and typing elsewhere', (
     typeAt(10)(session, paraId);
     expect(traces(await savedAsTheEditorSaves(session, base))).toEqual(['Head [subDoc] tailX', 'Other']);
   });
+});
+
+describe("a w:subDoc inside a comment range over 'middle'", () => {
+  const inner =
+    `${SOURCE.t('Head ')}<w:commentRangeStart w:id="1"/>${SOURCE.t('mid')}${SUB_DOC}${SOURCE.t('dle')}` +
+    `<w:commentRangeEnd w:id="1"/>${run('<w:commentReference w:id="1"/>')}${SOURCE.t(' tail')}`;
+  const RANGE = /<w:commentRangeStart\b[^>]*\bw:id="1"[^>]*\/>([\s\S]*?)<w:commentRangeEnd\b[^>]*\bw:id="1"[^>]*\/>/;
+
+  const liveRange = (session: YrsSession) => {
+    const [comment] = session.listComments();
+    const [anchor] = session.resolveComment(comment!.id);
+    let offset = 0;
+    let text = '';
+    for (const segment of session.storySegments(anchor!.story)) {
+      if (segment.kind !== 'text') {
+        offset += 1;
+        continue;
+      }
+      text += segment.text.slice(Math.max(0, anchor!.start - offset), Math.max(0, anchor!.end - offset));
+      offset += segment.text.length;
+    }
+    return text;
+  };
+
+  for (const [loader, load] of LOADERS) {
+    it(`${loader}: deleting across the range start and the mark, then undoing, keeps the range on 'middle' and the mark in it`, async () => {
+      const { session, base } = await load(docx(inner, true));
+      const paraId = session.paragraphs('body')[0]!.paraId;
+      expect(session.paragraphs('body')[0]!.text).toBe('Head middle tail');
+      expect(liveRange(session)).toBe('middle');
+      session.beginUndoCapture();
+      deleteBetween(3, 10)(session, paraId);
+      expect(session.paragraphs('body')[0]!.text).toBe('Heae tail');
+      expect(session.undo()).toBe(true);
+      while (session.canUndo()) session.undo();
+      expect(session.paragraphs('body')[0]!.text).toBe('Head middle tail');
+      expect(liveRange(session)).toBe('middle');
+      const saved = await savedAsTheEditorSaves(session, base);
+      expect(traces(saved)).toEqual(['Head mid[subDoc]dle tail', 'Other']);
+      expect(trace(saved.match(RANGE)?.[1] ?? '')).toBe('mid[subDoc]dle');
+    });
+  }
 });
 
 const PAGE_BREAK = '<w:r><w:br w:type="page"/></w:r>';
