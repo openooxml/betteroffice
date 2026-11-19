@@ -14,6 +14,7 @@ import type {
   YrsLoc,
   YrsOpeningOptions,
   YrsParagraph,
+  YrsParagraphAttrs,
   YrsParagraphLength,
   YrsParagraphSpan,
   YrsRegionLayoutProgress,
@@ -1730,6 +1731,14 @@ export function wrapSession(
     },
     styleLanguages: () => JSON.parse(session.style_languages_json()),
     patchStyleLanguagesXml: source => session.patch_style_languages_xml(source),
+    ensureListDefinition: (story, paraId, kind) => {
+      ensureUndo(story);
+      const { listDef, ...attrs } = mutate(
+        () => JSON.parse(session.ensure_list_definition(story, paraId, kind)) as YrsParagraphAttrs & { listDef?: unknown }
+      );
+      return listDef === undefined ? attrs : { ...attrs, other: { ...attrs.other, listDef } };
+    },
+    createdListDefinitions: () => JSON.parse(session.created_list_definitions_json()),
     formatTextTarget: (target, delta) => {
       ensureUndo(targetStory(target));
       return mutate(

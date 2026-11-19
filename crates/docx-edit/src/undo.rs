@@ -202,6 +202,12 @@ impl DocUndoManager {
             .get_map(crate::style_languages::STYLE_LANGUAGES)
             .expect("style languages root is declared");
         inner.expand_scope(doc.yrs_doc(), &languages);
+        let lists = doc
+            .yrs_doc()
+            .transact()
+            .get_map(crate::list_definitions::LIST_DEFINITIONS)
+            .expect("list definitions root is declared");
+        inner.expand_scope(doc.yrs_doc(), &lists);
         let margins = doc
             .yrs_doc()
             .transact()
