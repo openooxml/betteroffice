@@ -13,8 +13,9 @@ use crate::inline::{
     ContentPosition, Hyperlink, InlineNode, InlineSdt, InlineSdtType, MathEquation, MathType,
     OpenComplexField, Run, RunContent, SimpleField, SimpleFieldType, StructuredFieldContent,
     StructuredFieldTree, absorb_beyond_field_nesting, check_container_beyond_field_nesting,
-    field_depth_error, has_bookmark_id, parse_bookmark_end, parse_bookmark_start, parse_field_type,
-    parse_hyperlink, parse_run, parse_sdt_properties, run_content_length,
+    field_depth_error, field_run_source, has_bookmark_id, keep_field_run, parse_bookmark_end,
+    parse_bookmark_start, parse_field_type, parse_hyperlink, parse_run, parse_sdt_properties,
+    run_content_length,
 };
 use crate::media::MediaMap;
 use crate::numbering::{ListRendering, NumberingMap, compute_list_rendering};
@@ -597,6 +598,15 @@ fn parse_paragraph_contents(
         check_container_beyond_field_nesting(beyond_nesting, child, part)?;
         match child.local_name() {
             "r" => {
+                let source = if element.matches_name("w", "p")
+                    && !deletion
+                    && !in_control
+                    && fields.is_empty()
+                {
+                    field_run_source(child)
+                } else {
+                    None
+                };
                 let run = parse_run_with_context(
                     child,
                     relationships,
@@ -610,6 +620,12 @@ fn parse_paragraph_contents(
                 )?;
                 let before = output.len();
                 process_field_run(run, &mut fields, &mut beyond_nesting, &mut output, part)?;
+                if let Some(source) = source
+                    && let Some(ParagraphContent::Inline(node)) = output.last_mut()
+                    && let InlineNode::ComplexField(field) = node
+                {
+                    keep_field_run(field, source);
+                }
                 runs.push(
                     (output.len() == before + 1
                         && matches!(
