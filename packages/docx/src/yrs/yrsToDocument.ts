@@ -9,7 +9,13 @@ import { engineProgressTick } from '../utils/engineProgress';
 import { serializeRun } from '../docx/serializer';
 import { headerFooterAliasOf, markHeaderFooterAlias } from '../docx/headerFooterAliasProjection';
 import { markRevisionInfo } from '../docx/sessionRevisionIds';
-import { headerFooterStory, sessionSourcePackage } from './sessionInternals';
+import { headerFooterStory, sessionMaterializedSource, sessionSourcePackage } from './sessionInternals';
+import {
+  crossStoryComments,
+  holdsCommentMark,
+  type CommentMarkKind,
+  type CrossingComment,
+} from './crossStoryComments';
 import { createStyleResolver, type StyleResolver } from '../styles';
 import { hasTrackedControlContent } from '../utils/trackedControlContent';
 import { isRawXml } from '../types/content/rawXml';
@@ -66,7 +72,7 @@ import type {
   HeaderFooter,
   SectionProperties,
 } from '../types/document';
-import type { YrsRunInheritance, YrsSession, YrsTableInheritance } from './index';
+import type { YrsRunInheritance, YrsSession, YrsStorySegment, YrsTableInheritance } from './index';
 import { isUnavailableTablePayload, markGated, refuseUnavailableTables, tableUnavailableError } from './tableUnavailable';
 
 type Attrs = Record<string, unknown>;
@@ -3084,38 +3090,25 @@ function commentRanges(
   return byStory;
 }
 
+const openedCrossings = new WeakMap<object, ReadonlyMap<number, CrossingComment>>();
+
 /**
- * Per story, the comments whose source range starts there and ends in another story (`open`),
- * and those whose source range ends there and starts in another story or nowhere (`far`).
+ * The comments crossing stories in the document `session` was opened from, scanned once per
+ * opened document; for a session seeded without one, in the first `base` it was projected with.
  */
-function crossStoryComments(stories: ReadonlyMap<string, readonly BlockContent[]>): {
-  open: Map<string, Set<number>>;
-  far: Map<string, Set<number>>;
-} {
-  const open = new Map<string, Set<number>>();
-  const far = new Map<string, Set<number>>();
-  const visit = (items: readonly unknown[], starts: Set<number>, ends: Set<number>): void => {
-    for (const item of items) {
-      if (!item || typeof item !== 'object') continue;
-      const node = item as { type?: unknown; id?: unknown; content?: unknown; children?: unknown };
-      if (typeof node.id === 'number' && node.type === 'commentRangeStart') starts.add(node.id);
-      if (typeof node.id === 'number' && node.type === 'commentRangeEnd') ends.add(node.id);
-      if (node.type === 'textBox' || node.type === 'shape') continue;
-      if (Array.isArray(node.content)) visit(node.content, starts, ends);
-      if (Array.isArray(node.children)) visit(node.children, starts, ends);
-    }
-  };
-  for (const [story, blocks] of stories) {
-    const starts = new Set<number>();
-    const ends = new Set<number>();
-    for (const block of blocks) if (block.type === 'paragraph') visit(block.content, starts, ends);
-    const opens = [...starts].filter((id) => !ends.has(id));
-    const fars = [...ends].filter((id) => !starts.has(id));
-    if (opens.length) open.set(story, new Set(opens));
-    if (fars.length) far.set(story, new Set(fars));
+function openedCrossingComments(session: YrsSession, base: Document): ReadonlyMap<number, CrossingComment> {
+  const opened = sessionMaterializedSource(session);
+  const key: object = opened ?? session;
+  let crossing = openedCrossings.get(key);
+  if (!crossing) {
+    crossing = crossStoryComments(session, opened ?? base);
+    openedCrossings.set(key, crossing);
   }
-  return { open, far };
+  return crossing;
 }
+
+/** Whether `story` is `root` or one of the stories nested in it. */
+const withinStory = (story: string, root: string): boolean => story === root || story.startsWith(`${root}:`);
 
 /** Chart placements recoverable from the base document, keyed per story. */
 interface ChartRecovery {
@@ -3655,8 +3648,14 @@ class SaveContext {
   private readonly baseStories: Map<string, readonly BlockContent[]>;
   private readonly baseChartDrawings = new Map<string, Map<string, string>>();
   private readonly comments: Map<string, Array<{ id: number; start: number; end: number }>>;
-  private readonly crossStory: ReturnType<typeof crossStoryComments>;
+  private readonly base: Document;
+  private crossing: ReadonlyMap<number, CrossingComment> | undefined;
+  /** Per comment, whether this save writes its source range across stories whole. */
+  private readonly whole = new Map<number, boolean>();
+  private readonly liveSegments = new Map<string, YrsStorySegment[]>();
   private readonly savedComments: Set<number>;
+  /** The comments with a listed reply whose range marks are taken from the comment's own. */
+  private readonly repliedWithoutRange: Set<number>;
   /** Per story, the comment ranges of it and of the stories nested in it, which key its blocks. */
   private readonly subtreeComments = new Map<string, Map<string, unknown>>();
   private readonly memo: SessionProjectionMemo;
@@ -3713,8 +3712,14 @@ class SaveContext {
     this.hasCommentReferenceStyle = (base.package.styles?.styles ?? [])
       .some(style => style.styleId === 'CommentReference' && style.type === 'character');
     this.comments = commentRanges(session, base.package.document.comments, commentIds);
-    this.crossStory = crossStoryComments(this.baseStories);
+    this.base = base;
     this.savedComments = new Set((base.package.document.comments ?? []).map((comment) => comment.id));
+    const ranged = new Set([...this.comments.values()].flatMap((ranges) => ranges.map((range) => range.id)));
+    this.repliedWithoutRange = new Set(
+      (base.package.document.comments ?? []).flatMap((comment) =>
+        comment.parentId != null && !ranged.has(comment.id) ? [comment.parentId] : []
+      )
+    );
     this.memo = sessionProjectionMemo(session);
     this.styleDefinitions = base.package.styles;
     this.fontScheme = base.package.theme?.fontScheme;
@@ -3741,6 +3746,96 @@ class SaveContext {
     return this.memo.wholesale
       ? this.memo.clean.has(storyId)
       : !this.memo.dirty.has(storyId);
+  }
+
+  /** The source comments crossing stories; no scan when the document lists no comment. */
+  private crossingComments(): ReadonlyMap<number, CrossingComment> {
+    return (this.crossing ??=
+      this.savedComments.size > 0 ? openedCrossingComments(this.session, this.base) : new Map());
+  }
+
+  private segmentsOf(story: string): YrsStorySegment[] {
+    let segments = this.liveSegments.get(story);
+    if (!segments) {
+      segments = this.session.storySegments(story);
+      this.liveSegments.set(story, segments);
+    }
+    return segments;
+  }
+
+  /**
+   * Whether this save writes the source range of `id` across stories whole: its start, its end
+   * before its reference in the far story, and the reference. Otherwise the range is written as
+   * the session holds it, cut at the end of the paragraph it starts in. Decided once per projection.
+   */
+  private writesWhole(id: number): boolean {
+    let whole = this.whole.get(id);
+    if (whole === undefined) {
+      const source = this.crossingComments().get(id);
+      whole =
+        source !== undefined &&
+        this.startLive(id, source) &&
+        this.farStoryLive(source) &&
+        this.referenceLive(id, source) &&
+        this.savedComments.has(id) &&
+        !this.repliedWithoutRange.has(id);
+      this.whole.set(id, whole);
+    }
+    return whole;
+  }
+
+  /** The start is live: ranged by the session in its source story alone, or in a live drawing. */
+  private startLive(id: number, { start }: CrossingComment): boolean {
+    const stories = [...this.comments].flatMap(([story, ranges]) =>
+      ranges.some((range) => range.id === id) ? [story] : []
+    );
+    if (start.carried) return stories.length === 0 && this.carriedLive(start.story, id, ['start']);
+    return stories.length === 1 && stories[0] === start.story;
+  }
+
+  /** The story the source end was found in is live. */
+  private farStoryLive({ end }: CrossingComment): boolean {
+    return this.storyIds.has(end.story);
+  }
+
+  /**
+   * The reference is live where the end goes: exactly one reference run of the comment in the far
+   * story and none in the story it starts in, or the live drawing carrying both end and reference.
+   */
+  private referenceLive(id: number, { start, end }: CrossingComment): boolean {
+    if (end.carried) return this.carriedLive(end.story, id, ['end', 'reference']);
+    const references = (story: string): number =>
+      this.segmentsOf(story).filter((segment) =>
+        segment.kind === 'embed' &&
+        segment.payload.modelKind === 'commentReference' &&
+        Number(segment.payload.commentId) === id
+      ).length;
+    return references(end.story) === 1 && (start.story === end.story || references(start.story) === 0);
+  }
+
+  private carriedLive(story: string, id: number, kinds: CommentMarkKind[]): boolean {
+    return this.storyIds.has(story) && this.segmentsOf(story).some((segment) =>
+      segment.kind === 'embed' && kinds.every((kind) => holdsCommentMark(segment.payload, kind, id))
+    );
+  }
+
+  /**
+   * Of the comments crossing into or out of `storyId` or a story nested in it, the ones written
+   * whole: those whose session end in this story is not written, and those whose end goes before
+   * their reference here.
+   */
+  private crossingIn(storyId: string): { key: string; heldOpen: Set<number>; endsHere: Set<number> } {
+    const heldOpen = new Set<number>();
+    const endsHere = new Set<number>();
+    const whole: number[] = [];
+    for (const [id, { start, end }] of this.crossingComments()) {
+      if (!withinStory(start.story, storyId) && !withinStory(end.story, storyId)) continue;
+      if (!this.writesWhole(id)) continue;
+      whole.push(id);
+      if (!start.carried && start.story === storyId) heldOpen.add(id);
+      if (!end.carried && end.story === storyId) endsHere.add(id);
+    }
+    return { key: whole.length > 0 ? `|whole:${whole.join(',')}` : '', heldOpen, endsHere };
   }
 
   sectionChanged(paraId: string, properties: Paragraph['sectionProperties']): boolean {
@@ -4057,11 +4152,10 @@ class SaveContext {
   storyToBlocks(storyId: string): BlockContent[] {
     const baseBlocks = this.baseStories.get(storyId);
     const storyComments = this.comments.get(storyId) ?? [];
-    const openHere = this.crossStory.open.get(storyId);
-    const farHere = this.crossStory.far.get(storyId);
+    const crossing = this.crossingIn(storyId);
     const farEnds: Array<{ id: number; offset: number }> = [];
     const nestedComments = this.subtreeComments.get(storyId);
-    const commentsKey = nestedComments ? stableStringify(Object.fromEntries(nestedComments)) : '';
+    const commentsKey = (nestedComments ? stableStringify(Object.fromEntries(nestedComments)) : '') + crossing.key;
     const priorStory = this.memo.stories.get(storyId);
     // Nested stories are mapped positionally, so a different array means
     // drift, not divergence — mutation paths mark them dirty anyway. A root
@@ -4137,7 +4231,7 @@ class SaveContext {
           const offset = Math.max(0, range.start - inlineStart);
           boundaries.push({ id: range.id, kind: 'start', offset });
         }
-        if (range.end >= paragraphStart && range.end <= end && !openHere?.has(range.id)) {
+        if (range.end >= paragraphStart && range.end <= end && !crossing.heldOpen.has(range.id)) {
           boundaries.push({ id: range.id, kind: 'end', offset: Math.max(0, range.end - inlineStart) });
         }
       }
@@ -4329,14 +4423,7 @@ class SaveContext {
         }
       } else {
         const referenced = segment.payload.modelKind === 'commentReference' ? Number(segment.payload.commentId) : NaN;
-        if (
-          farHere?.has(referenced) &&
-          this.savedComments.has(referenced) &&
-          !storyComments.some((range) => range.id === referenced) &&
-          !farEnds.some((far) => far.id === referenced)
-        ) {
-          farEnds.push({ id: referenced, offset: storyOffset });
-        }
+        if (crossing.endsHere.has(referenced)) farEnds.push({ id: referenced, offset: storyOffset });
         items.push(segment as EmbedItem);
       }
       const kind = blockBreakKind(segment.embedKind);
