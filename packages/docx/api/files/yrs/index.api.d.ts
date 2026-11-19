@@ -402,6 +402,16 @@ export interface YrsResolvedCommentAnchor {
     start: number;
     end: number;
 }
+/**
+ * A kept empty inline element of the source where its sticky anchor sits now: `offset` in story
+ * units, `ordinal` its source order among the story's kept elements. @internal
+ */
+export interface YrsRawMark {
+    story: string;
+    offset: number;
+    ordinal: number;
+    xml: string;
+}
 /** A paragraph's story span; `end` is its pilcrow, so `end - start` is the paragraph length. */
 export interface YrsParagraphSpan {
     start: number;
@@ -1274,6 +1284,8 @@ export interface YrsSession extends CollaborationReplica {
     resolveComment(commentId: string): YrsResolvedCommentAnchor[];
     /** Every comment the session holds, sorted by id. @internal */
     listComments(): YrsCommentInfo[];
+    /** Where the kept empty inline elements of the source sit now, by story, offset and source order. @internal */
+    resolveRawMarks(): YrsRawMark[];
     /** Story ids in the document, sorted. */
     storyIds(): string[];
     /** Whether the document has a story with this id, without listing them all. */
