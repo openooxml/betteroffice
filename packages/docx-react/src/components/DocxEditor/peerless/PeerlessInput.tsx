@@ -28,6 +28,7 @@ type PasteRecord = {
   ticket: CommandTicket | null;
   end: PastePoint | null;
   version: number;
+  incarnation: number;
   reveal: 'show' | 'anchor' | null;
 };
 
@@ -118,7 +119,8 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
     const admitted = admission.getSnapshot();
     const view = viewStore.getSnapshot();
     const caret = caretPoint(view.workerSelection);
-    if (view.version !== record.version || !caret || !samePoint(caret, record.end) ||
+    if (view.identity.incarnation !== record.incarnation ||
+      view.version !== record.version || !caret || !samePoint(caret, record.end) ||
       admitted.originalUnackedIntents !== 0 || admitted.pendingInputs !== 0) {
       dropPasteRecord(record);
       return false;
@@ -157,9 +159,10 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
     if (callbacks.current.pasteOptions === false) return;
     const offered = pasteOptionsOffered(fragment);
     if (offered.length === 0) return;
+    const view = viewStore.getSnapshot();
     awaitPaste({
       fragment: structuredClone(fragment), offered, ticket: null, end: null,
-      version: viewStore.getSnapshot().version, reveal: 'show',
+      version: view.version, incarnation: view.identity.incarnation, reveal: 'show',
     }, submission);
   }, [awaitPaste, setPasteRecord, viewStore]);
   const pasteRecorder = props.pasteRecorder;
@@ -188,7 +191,9 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       const state = viewStore.getSnapshot();
       const pasteRecord = pasteRecordRef.current;
       const pasteSeq = pasteRecord?.ticket?.seq;
-      if (pasteRecord && !pasteRecord.end && pasteSeq !== undefined && state.throughSeq >= pasteSeq) {
+      if (pasteRecord && pasteRecord.incarnation !== state.identity.incarnation) {
+        dropPasteRecord(pasteRecord);
+      } else if (pasteRecord && !pasteRecord.end && pasteSeq !== undefined && state.throughSeq >= pasteSeq) {
         const tail = admission.getSnapshot().tail;
         const own = state.throughSeq === pasteSeq && (tail === undefined || tail === pasteRecord.ticket);
         const caret = caretPoint(state.workerSelection);
@@ -252,6 +257,13 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
     window.addEventListener('scroll', follow, true);
     return () => window.removeEventListener('scroll', follow, true);
   }, [pasteOptions.visible]);
+
+  useLayoutEffect(() => {
+    const record = pasteRecordRef.current;
+    if (!record || record.incarnation === snapshot.identity.incarnation) return;
+    setPasteRecord(null);
+    pasteOptionsRef.current.dismiss();
+  }, [snapshot.identity.incarnation, setPasteRecord]);
 
   useLayoutEffect(() => {
     const record = pasteRecordRef.current;
