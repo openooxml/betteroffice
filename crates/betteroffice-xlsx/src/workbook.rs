@@ -68,9 +68,10 @@ use xlsx_render::region::{
 use xlsx_render::scaled;
 use xlsx_render::{
     ChartRegion, ChartResize, DisplayList, GhostEdit, GridGeometry, PrintMetrics, RenderError,
-    Viewport, build_display_list_with_geometry_and_formats, build_print_display_list_with_text_runs,
-    chart_at_point, display_text, display_viewport_with_geometry, moved_chart_anchor,
-    resized_chart_anchor, resolve_chart_anchor, visible_merged_ranges_with_geometry,
+    Viewport, build_display_list_with_geometry_and_formats,
+    build_print_display_list_with_text_runs, chart_at_point, display_text,
+    display_viewport_with_geometry, moved_chart_anchor, resized_chart_anchor, resolve_chart_anchor,
+    visible_merged_ranges_with_geometry,
 };
 
 #[cfg(feature = "raster")]
