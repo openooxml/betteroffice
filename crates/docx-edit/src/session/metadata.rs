@@ -57,7 +57,9 @@ impl EditSessionCore {
     }
 
     /// The paragraph attributes, as JSON, that put a paragraph on a list of `kind`, `bullet` or
-    /// `numbered`; see [`crate::EditingDoc::ensure_list_definition`].
+    /// `numbered`: its own list when that is of that kind, else the list of the paragraph directly
+    /// above, else below, else a new one; a paragraph already on a list keeps its own level. See
+    /// [`crate::EditingDoc::ensure_list_definition`].
     pub fn ensure_list_definition(
         &self,
         story: &str,

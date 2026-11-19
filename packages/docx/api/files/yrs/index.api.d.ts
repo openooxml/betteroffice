@@ -1378,8 +1378,9 @@ export interface YrsSession extends CollaborationReplica {
     styleLanguages(): Record<string, YrsLanguagePatch>;
     patchStyleLanguagesXml(source: string): string;
     /**
-     * The attributes that put `paraId` on a list of `kind`: the list of the paragraph directly
-     * above or below when it is of that kind, otherwise a list definition this call creates.
+     * The attributes that put `paraId` on a list of `kind`: its own list when that is of that kind,
+     * else the list of the paragraph directly above, else below, when it is of that kind, otherwise a
+     * list definition this call creates. A paragraph already on a list keeps its own level.
      * @internal
      */
     ensureListDefinition(story: string, paraId: string, kind: 'bullet' | 'numbered'): YrsParagraphAttrs;
