@@ -242,7 +242,6 @@ export const docx: Format = {
     let document: Document = await parse(bytes);
     let session: YrsSession | undefined;
     let saved: Uint8Array | undefined;
-    let editedModel: Document | undefined;
     const close = () => {
       session?.destroy();
       session = undefined;
@@ -252,7 +251,6 @@ export const docx: Format = {
       bytes = Uint8Array.from(next);
       document = await parse(bytes);
       saved = undefined;
-      editedModel = undefined;
       return null;
     };
     const read = () => {
@@ -399,26 +397,14 @@ export const docx: Format = {
           const paragraph = story.paragraphs.find((entry) => entry.paraId === key);
           const { bytes: edits } = await saveYrsDocx(editing, { updateModifiedDate: false });
           const model = await parse(edits);
-          editedModel = model;
-          const except = new Set(
-            ((args.exceptParaIds ?? []) as string[]).map((key) => key.toUpperCase())
-          );
           return {
             paragraph: paragraph?.text ?? null,
             story: joinText(
-              storyParagraphs(model.package.document.content)
-                .filter((entry) => !except.has(entry.paraId?.toUpperCase() ?? ''))
-                .map((entry) => paragraphResult(entry).text)
+              storyParagraphs(model.package.document.content).map(
+                (entry) => paragraphResult(entry).text
+              )
             )
           };
-        },
-        pageBreakMove: (args) => {
-          if (editedModel === undefined) throw new Error('pageBreakMove needs readEdited first');
-          const story = storyParagraphs(editedModel.package.document.content);
-          return (args.paraIds as string[]).map((key) => {
-            const entry = story.find((item) => item.paraId?.toUpperCase() === key.toUpperCase());
-            return { id: key, text: entry === undefined ? null : paragraphResult(entry).text };
-          });
         },
         save: async () => (await save()).bytes,
         saveReport: async () => {
