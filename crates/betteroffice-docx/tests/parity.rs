@@ -461,7 +461,11 @@ fn scripted_api_parity_matches_shared_golden() {
     }
     let engine_expected: Vec<Value> =
         serde_json::from_str(&fs::read_to_string(&engine_path).unwrap()).unwrap();
-    assert_eq!(engine_expected.len(), engine.len(), "engine golden step count differs");
+    assert_eq!(
+        engine_expected.len(),
+        engine.len(),
+        "engine golden step count differs"
+    );
     for (index, (expected, actual)) in engine_expected.iter().zip(&engine).enumerate() {
         assert!(
             equal_json(expected, actual),
