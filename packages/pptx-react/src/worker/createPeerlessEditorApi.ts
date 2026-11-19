@@ -58,8 +58,15 @@ export function peerlessPositionAtPoint(run: PeerlessPresentation, canvas: HTMLC
   return hit ? { ...hit, slide: frame.frame.slideIndex + 1, slideId: frame.frame.slideId } : null;
 }
 
+export function notifyingSaveApi(api: PptxAsyncEditorApi, saved: (bytes: Uint8Array) => void): PptxAsyncEditorApi {
+  const save = async () => { const bytes = await api.save(); saved(bytes); return bytes; };
+  return new Proxy(api, {
+    get: (target, key, receiver) => key === 'save' || key === 'saveAsync' ? save : Reflect.get(target, key, receiver),
+  });
+}
+
 export function createPeerlessEditorApi(run: PeerlessPresentation, canvas: HTMLCanvasElement,
-  focus: () => void, commands?: PptxCommandStore, saved?: (bytes: Uint8Array) => void): PptxAsyncEditorApi {
+  focus: () => void, commands?: PptxCommandStore): PptxAsyncEditorApi {
   function admit(): void {
     run.require();
     if (peerlessGestureActive(run.store)) throw new PptxCommandAdmissionError('gesture-active');
@@ -100,7 +107,7 @@ export function createPeerlessEditorApi(run: PeerlessPresentation, canvas: HTMLC
     get commands() { run.require(); return commands ?? unsupported('commands'); },
     get hydrated() { run.require(); return run.hydrated; },
     get failure() { return run.failure; },
-    save: async () => { const bytes = await fenced(() => run.client.save()); saved?.(bytes); return bytes; },
+    save: () => fenced(() => run.client.save()),
     saveAsync: () => api.save(),
     recoverySave: () => run.recover(),
     whenHydrated: installed,

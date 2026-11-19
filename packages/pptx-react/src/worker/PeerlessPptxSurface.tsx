@@ -43,7 +43,7 @@ import {
   type PeerlessConfirmedFrame,
 } from './peerlessViewStore';
 import { usePeerlessPresentation, type PeerlessPresentation } from './usePeerlessPresentation';
-import { createPeerlessEditorApi, type PptxAsyncEditorApi } from './createPeerlessEditorApi';
+import { createPeerlessEditorApi, notifyingSaveApi, type PptxAsyncEditorApi } from './createPeerlessEditorApi';
 import { usePeerlessTextSelection } from './usePeerlessTextSelection';
 import { PeerlessShapeOverlay } from './PeerlessShapeOverlay';
 import { usePeerlessShapeGestures, type PeerlessShapePreviewStore } from './usePeerlessShapeGestures';
@@ -239,6 +239,7 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
       if (request && await request() !== true) return;
       const bytes = await value.save();
       if (api.current !== value) return;
+      callbacks.current.onSave?.(bytes);
       if (!(callbacks.current.downloadOnSave ?? !callbacks.current.onSave)) return;
       const url = URL.createObjectURL(new Blob([new Uint8Array(bytes)], {
         type: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
@@ -263,7 +264,7 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
   useLayoutEffect(() => {
     api.current = null;
     if (!presentation?.current || !canvas.current) return;
-    const value = createPeerlessEditorApi(presentation, canvas.current, focus, commands, (bytes) => callbacks.current.onSave?.(bytes));
+    const value = createPeerlessEditorApi(presentation, canvas.current, focus, commands);
     api.current = value;
     let current = true;
     let cleanup: void | (() => void);
@@ -271,7 +272,7 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
       while (current && presentation.current) {
         await presentation.ready;
         if (current && presentation.current && presentation.hydrated) {
-          cleanup = callbacks.current.onReady?.(value);
+          cleanup = callbacks.current.onReady?.(notifyingSaveApi(value, (bytes) => callbacks.current.onSave?.(bytes)));
           return;
         }
       }
