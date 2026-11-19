@@ -102,6 +102,21 @@ impl Fingerprints {
         })
     }
 
+    /// The first fingerprint accepted at `version`, without hashing the others.
+    pub(super) fn first(&self, version: i64) -> Option<String> {
+        if let Some(values) = self.values.get() {
+            return values.get(&version)?.first().cloned();
+        }
+        let sources = self.sources.lock().unwrap();
+        match sources.first()? {
+            Source::Ready(values) => values.get(&version)?.first().cloned(),
+            Source::Planned(plan) => {
+                let &index = plan.accepted.get(&version)?.first()?;
+                Some(plan.hash(index).0.clone())
+            }
+        }
+    }
+
     pub(super) fn contains_client(&self, client: u64) -> bool {
         let sources = self.sources.lock().unwrap();
         if let Some(values) = self.values.get() {

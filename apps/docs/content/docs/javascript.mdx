@@ -198,6 +198,25 @@ contains the canonical `i18n._lang` (`en` by default); `locale-change` carries
 `locale`. The load snapshot includes both fields. These signals are on by default
 for installed plugins.
 
+**Input focus and focus return (experimental).** `snapshot.inputFocused` is true
+only while the document's text input itself has focus. It is false while a menu,
+Find, a dialog or a content control holds focus, even where `focused` stays true.
+No event fires for a focus-only change. Read it from `context.snapshot` in
+`render`, where a change shows on the next commit, not from a retained context or
+in an event handler, where it can be stale during a focus transfer.
+`context.focusDocument()` moves focus back to the text input without changing the
+selection or scrolling, also in a read-only editor. It never throws. The call is
+admitted while focus is in the plugin's own UI or during its own user action; a
+background callback that runs while the plugin's UI has focus is admitted too.
+`{ ok: true }` means the input has focus now. A refusal does not mean the input
+lacks focus, and a refusal after an attempted focus does not put focus back:
+`unsupported-policy` when focus is neither in the plugin's UI nor in its user
+action, while an editor dialog is open (an open color picker counts), or when the
+input cannot take focus; `document-replaced`, `plugin-unavailable` or `aborted`
+for an expired context. `inputFocused` is tracked in the in-thread editor and the
+worker editor, but `focusDocument()` works only in the worker editor; the
+in-thread editor always refuses it with `unsupported-policy`.
+
 `geometry.viewport` is the scroller's visible client box intersected with the
 editor root, in overlay-layer pixels. Its `y` changes as the pages scroll.
 `viewport-change` carries the new rectangle on scroll, resize, or zoom, or `null`

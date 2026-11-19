@@ -2,6 +2,7 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
+use docx_parse::StructuredFieldContent;
 use docx_parse::paragraph_patch::{
     AttrDeltaV1, Attrs, DonorV1, InheritanceStateV1, InheritanceV1, InsertedTextV1,
     LegacyParagraphV1, ParagraphPatchV1, PatchErrorCode, RunEditV1, SeedV1, SlotV1, TextEditV1,
@@ -1012,11 +1013,8 @@ fn closed_complex_field(payload: &Attrs) -> bool {
         .iter()
         .any(|key| payload.contains_key(*key))
         && data.is_some_and(|data| {
-            ["structuredCode", "structuredResult"].iter().all(|key| {
-                data.get(*key)
-                    .and_then(|content| content.get("blocks"))
-                    .is_none_or(Value::is_null)
-            })
+            let spans = |key: &str| StructuredFieldContent::value_spans_paragraphs(data.get(key));
+            !spans("structuredCode") && !spans("structuredResult")
         })
 }
 
@@ -2009,6 +2007,23 @@ mod tests {
             source: None,
             seeded_markers: &[],
             live_markers: &[],
+        }
+    }
+
+    #[test]
+    fn a_complex_field_counting_later_paragraphs_is_not_closed() {
+        let payload = |data: Value| {
+            Attrs::from([
+                ("modelKind".to_owned(), json!("field")),
+                ("fieldKind".to_owned(), json!("complex")),
+                ("fieldData".to_owned(), json!(data.to_string())),
+            ])
+        };
+        let closed = json!({"structuredResult": {"inline": []}});
+        assert!(closed_complex_field(&payload(closed)));
+        for key in ["structuredCode", "structuredResult"] {
+            let spanning = json!({ key: {"inline": [], "blockCount": 1} });
+            assert!(!closed_complex_field(&payload(spanning)), "{key}");
         }
     }
 

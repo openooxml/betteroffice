@@ -5,6 +5,7 @@ import { createDisplayListQueries, type DisplayListQueries, type DisplayListRect
 import { loadedRustDisplayListQueryEngine } from '../layout/render/rustDisplayList';
 import { findWordBoundaries } from '../utils/textSelection';
 import { DisplayPositionIndex } from './displayPositionIndex';
+import { residentDisplayListQueries } from './residentDisplayListQueries';
 import { displayPositionToYrsLoc } from './inputPositionMap';
 import { commandSelectionRange, readCommandSelection, resolveCommandSelection } from './residentCommandAnchors';
 import { cellSelectionHeadPosition, resolvePointerCellRange, resolveShiftArrowCellRange } from './residentCommandTableSelection';
@@ -218,7 +219,10 @@ function scopedList(list: DisplayList, root: string, pageIndex?: number): Displa
   };
 }
 
-function queriesFor(reads: SelectionReads, frame: RetainedFrame, root = 'body'): DisplayListQueries {
+function queriesFor(
+  reads: SelectionReads, engine: DocxWorkerCommandEngine | null, frame: RetainedFrame, root = 'body'
+): DisplayListQueries {
+  if (root === 'body' && engine) return residentDisplayListQueries(engine, frame.displayList);
   if (reads.frame !== frame || reads.frameEpoch !== frame.frameEpoch) {
     for (const queries of reads.queries.values()) queries.dispose();
     reads.queries.clear();
@@ -271,7 +275,7 @@ export function readDocxSelectionFocus(
   const root = rootFor(reads, engine, selection.focus);
   const position = indexFor(reads, engine, root).positionOf(selection.focus, root);
   if (position === null) return null;
-  const queries = queriesFor(reads, layout.frame, root);
+  const queries = queriesFor(reads, engine, layout.frame, root);
   const rect = caretAt(queries, position);
   return rect && { ...rect, pageIndex: queries.displayList.pages[rect.pageIndex]?.pageIndex ?? rect.pageIndex };
 }
@@ -399,7 +403,7 @@ export function resolveDocxSelectionIntent(
       const layout = input.readLayout();
       const origin = navigation.unit === 'page' ? cellSelectionHeadPosition(engine, focus) ?? focus : focus;
       const root = rootFor(reads, engine, origin);
-      const queries = queriesFor(reads, layout.frame, root);
+      const queries = queriesFor(reads, null, layout.frame, root);
       const position = indexFor(reads, engine, root).positionOf(origin, root);
       if (position !== null && queries.isReady()) {
         if (navigation.direction === 'up' || navigation.direction === 'down') {
@@ -475,7 +479,7 @@ export function resolveDocxSelectionIntent(
     const page = exact ?? pages[Math.max(0, Math.min(pages.length - 1, Math.trunc(point.page.pageIndex)))];
     clamped = !exact || (point.story !== undefined && !reader.hasStory(point.story));
     if (!page || !layout || page.page.unbuilt) return preserve();
-    const queries = queriesFor(reads, layout.frame);
+    const queries = queriesFor(reads, engine, layout.frame);
     if (!queries.isReady()) return preserve();
     const x = Math.max(0, Math.min(point.x, page.page.width));
     const y = !exact && point.page.pageIndex >= pages.length ? page.page.height : Math.max(0, Math.min(point.y, page.page.height));

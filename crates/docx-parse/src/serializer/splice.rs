@@ -8,11 +8,13 @@ use crate::paragraph_identity::{
     ParagraphOccurrence, Tag, attribute, ensure_ignorable, paragraph_occurrences,
     patch_paragraph_ids, tags, unescaped,
 };
+use crate::xml::parse_javascript_integer_prefix;
 
 use super::context::RecordedParagraphs;
 use super::paragraph_ids::{S13SpliceAnchor, S13SplicedPart};
 use super::paragraph_patch::NamespaceScopes;
 use super::s13::element_span;
+use super::xml_writer::js_number;
 
 const W_NAMESPACE: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
 
@@ -1150,16 +1152,42 @@ fn ranges(xml: &str) -> Option<Ranges<'_>> {
     })
 }
 
-fn unique_ranges<'x>(fragments: impl IntoIterator<Item = &'x str>) -> Option<bool> {
+/// The largest integer an ID's number holds exactly.
+const MAX_EXACT_ID: f64 = 9_007_199_254_740_991.0;
+
+/// A range or comment ID as the number the parser reads, where its text is a decimal integer
+/// the parser reads exactly, or else its text.
+fn canonical_id(id: String) -> String {
+    let digits = id.trim();
+    let digits = digits.strip_prefix(['+', '-']).unwrap_or(digits);
+    let plain = !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit());
+    match parse_javascript_integer_prefix(&id) {
+        Some(value) if plain && value.abs() <= MAX_EXACT_ID => js_number(value),
+        _ => id,
+    }
+}
+
+/// Whether `fragments` hold each range end, by the value of its ID, at most as often as
+/// `source`, the spliced part, or at most once.
+fn unique_ranges<'x>(source: &str, fragments: impl IntoIterator<Item = &'x str>) -> Option<bool> {
+    fn by_value(ends: Ends<'_>) -> Ends<'_> {
+        let mut values = Ends::new();
+        for ((kind, id, opens), count) in ends {
+            *values.entry((kind, canonical_id(id), opens)).or_insert(0) += count;
+        }
+        values
+    }
+    let held = by_value(ranges(source).map_or_else(Ends::new, |ranges| ranges.all));
     let mut ends = Ends::new();
     for fragment in fragments {
-        for ((kind, id, opens), count) in ranges(fragment)?.all {
-            if matches!(kind, "spell" | "gram") {
+        for (end, count) in by_value(ranges(fragment)?.all) {
+            if matches!(end.0, "spell" | "gram") {
                 continue;
             }
-            let total = ends.entry((kind, id, opens)).or_insert(0);
+            let allowed = held.get(&end).copied().unwrap_or(0).max(1);
+            let total = ends.entry(end).or_insert(0);
             *total += count;
-            if *total > 1 {
+            if *total > allowed {
                 return Some(false);
             }
         }
@@ -1287,7 +1315,7 @@ fn comment_removal_spans(
             continue;
         }
         if let Some(id) = attribute(tag, "w:id").and_then(|range| unescaped(xml, range))
-            && remove(tag.name, &id)
+            && remove(tag.name, &canonical_id(id))
         {
             removed.insert(index);
         }
@@ -1357,7 +1385,7 @@ fn changed_comment_ranges(source: &str, written: &str) -> Option<String> {
             .map(|tag| {
                 Some((
                     tag.name.to_owned(),
-                    unescaped(xml, attribute(tag, "w:id")?)?,
+                    canonical_id(unescaped(xml, attribute(tag, "w:id")?)?),
                 ))
             })
             .collect()
@@ -2217,7 +2245,7 @@ fn splice_story_part_inner(
         .map(|(range, rank, xml)| (range.clone(), *rank, xml.as_str()))
         .collect();
     let fragments = splice_fragments(&source, edits)?;
-    if !unique_ranges(fragments.iter().copied())? {
+    if !unique_ranges(&source, fragments.iter().copied())? {
         return None;
     }
     options.replace_reasons.extend(tables.reasons);
@@ -2757,7 +2785,7 @@ pub(crate) fn splice_source_direct(
         .map(|(range, rank, xml)| (range.clone(), *rank, xml.as_str()))
         .collect();
     let fragments = splice_fragments(&source, edits)?;
-    if !unique_ranges(fragments.iter().copied())? {
+    if !unique_ranges(&source, fragments.iter().copied())? {
         return None;
     }
     Some(fragments.concat())
@@ -2909,6 +2937,35 @@ mod tests {
             remove_comment_markers(xml, &HashSet::from(["1".to_owned()])).unwrap(),
             r#"<w:p><w:r><w:rPr/><w:commentReference w:id="2"/></w:r></w:p>"#,
         );
+    }
+
+    #[test]
+    fn removing_comment_markers_matches_a_padded_id_by_its_value() {
+        let xml = r#"<w:p><w:commentRangeStart w:id="05"/><w:r><w:t>Kept</w:t></w:r><w:commentRangeEnd w:id="05"/><w:r><w:rPr/><w:commentReference w:id="05"/></w:r></w:p>"#;
+        assert_eq!(
+            remove_comment_markers(xml, &HashSet::from(["5".to_owned()])).unwrap(),
+            "<w:p><w:r><w:t>Kept</w:t></w:r></w:p>",
+        );
+    }
+
+    #[test]
+    fn removing_comment_markers_matches_a_plain_id() {
+        let xml = r#"<w:p><w:commentRangeStart w:id="5"/><w:r><w:t>Kept</w:t></w:r><w:commentRangeEnd w:id="5"/><w:r><w:rPr/><w:commentReference w:id="5"/></w:r></w:p>"#;
+        assert_eq!(
+            remove_comment_markers(xml, &HashSet::from(["5".to_owned()])).unwrap(),
+            "<w:p><w:r><w:t>Kept</w:t></w:r></w:p>",
+        );
+    }
+
+    #[test]
+    fn removing_comment_markers_matches_an_id_written_as_an_exponent_by_its_text() {
+        let xml = r#"<w:p><w:commentRangeStart w:id="1e+21"/><w:r><w:t>Kept</w:t></w:r><w:commentRangeEnd w:id="1e+21"/><w:r><w:rPr/><w:commentReference w:id="1e+21"/></w:r></w:p>"#;
+        assert_eq!(
+            remove_comment_markers(xml, &HashSet::from(["1e+21".to_owned()])).unwrap(),
+            "<w:p><w:r><w:t>Kept</w:t></w:r></w:p>",
+        );
+        let other = HashSet::from(["1".to_owned()]);
+        assert_eq!(remove_comment_markers(xml, &other).unwrap(), xml);
     }
 
     #[test]
@@ -5414,6 +5471,156 @@ mod tests {
                 };
                 assert_eq!(splice(&source, &written, &[ordinal]), None, "{rebuilt}");
             }
+        }
+    }
+
+    /// Splices `xml` as paragraph `changed` of the body holding `paragraphs`, both through the
+    /// planned splice and through the direct one, giving each result.
+    fn splice_both(paragraphs: &[&str], changed: u32, xml: &str) -> [Option<String>; 2] {
+        let source = body(&paragraphs.concat());
+        let mut written = paragraphs.to_vec();
+        written[changed as usize] = xml;
+        let numbered: Vec<(u32, &str)> = (0..).zip(written.iter().copied()).collect();
+        let ordinals: Vec<u32> = numbered.iter().map(|&(ordinal, _)| ordinal).collect();
+        let recorded = RecordedParagraphs {
+            written: numbered
+                .iter()
+                .map(|&(ordinal, xml)| (ordinal, xml.to_owned()))
+                .collect(),
+            order: ordinals.iter().copied().map(Some).collect(),
+            ..RecordedParagraphs::default()
+        };
+        let part = S13SplicedPart {
+            format_only: Vec::new(),
+            part: "word/document.xml".to_owned(),
+            sha256: String::new(),
+            paragraphs: ordinals,
+            changed: vec![changed],
+            inserted: Vec::new(),
+            removed: Vec::new(),
+            paragraph_patches: Vec::new(),
+            legacy_paragraphs: Vec::new(),
+            table_patches: Vec::new(),
+        };
+        [
+            splice(&source, &numbered, &[changed]),
+            splice_source_direct(
+                &source,
+                &body(&written.concat()),
+                &recorded,
+                &part,
+                &BTreeMap::new(),
+                &BTreeMap::from([(changed, xml.to_owned())]),
+                &mut Vec::new(),
+            ),
+        ]
+    }
+
+    fn bookmarked(id: u32, text: &str) -> String {
+        format!(
+            "<w:p><w:bookmarkStart w:id=\"{id}\" w:name=\"{text}\"/><w:r><w:t>{text}</w:t></w:r>\
+             <w:bookmarkEnd w:id=\"{id}\"/></w:p>"
+        )
+    }
+
+    #[test]
+    fn a_range_id_the_source_holds_twice_does_not_refuse_the_splice() {
+        let first = bookmarked(4, "a");
+        let third = bookmarked(4, "c");
+        let edited = PLAIN.replace("Plain<", "Plain, edited<");
+        let expected = body(&format!("{first}{edited}{third}"));
+        for (route, spliced) in
+            ["planned", "direct"]
+                .into_iter()
+                .zip(splice_both(&[&first, PLAIN, &third], 1, &edited))
+        {
+            let spliced = spliced.unwrap_or_else(|| panic!("{route}: refused"));
+            assert!(spliced == expected, "{route}: not paragraph 2 alone");
+            assert_eq!(spliced.matches("<w:bookmarkStart w:id=\"4\"").count(), 2);
+            assert_eq!(spliced.matches("<w:bookmarkEnd w:id=\"4\"/>").count(), 2);
+        }
+    }
+
+    #[test]
+    fn a_splice_cannot_add_an_occurrence_of_a_range_id() {
+        let first = bookmarked(4, "a");
+        let third = bookmarked(4, "c");
+        let reused = bookmarked(4, "b");
+        for spliced in splice_both(&[&first, PLAIN, &third], 1, &reused) {
+            assert!(spliced.is_none(), "a third pair of id 4 was spliced");
+        }
+        for spliced in splice_both(&[&first, PLAIN], 1, &reused) {
+            assert!(spliced.is_none(), "a second pair of id 4 was spliced");
+        }
+    }
+
+    #[test]
+    fn a_range_added_by_an_edit_is_spliced_once() {
+        let first = bookmarked(4, "a");
+        let added = bookmarked(9, "b");
+        let expected = body(&format!("{first}{added}"));
+        for (route, spliced) in
+            ["planned", "direct"]
+                .into_iter()
+                .zip(splice_both(&[&first, PLAIN], 1, &added))
+        {
+            assert!(
+                spliced.as_ref() == Some(&expected),
+                "{route}: added bookmark not spliced"
+            );
+        }
+        let twice = format!("{added}{added}").replace("</w:p><w:p>", "");
+        for spliced in splice_both(&[&first, PLAIN], 1, &twice) {
+            assert!(spliced.is_none(), "an added id written twice was spliced");
+        }
+    }
+
+    fn padded(text: &str) -> String {
+        bookmarked(5, text).replace("w:id=\"5\"", "w:id=\"05\"")
+    }
+
+    #[test]
+    fn a_splice_cannot_add_an_occurrence_of_a_range_id_spelled_another_way() {
+        let first = padded("a");
+        let third = padded("c");
+        let reused = bookmarked(5, "b");
+        for spliced in splice_both(&[&first, PLAIN, &third], 1, &reused) {
+            assert!(spliced.is_none(), "a third pair of id 5 was spliced");
+        }
+    }
+
+    #[test]
+    fn a_range_written_again_in_another_spelling_is_spliced() {
+        let first = padded("a");
+        let second = padded("b");
+        let respelled = bookmarked(5, "b");
+        let expected = body(&format!("{first}{respelled}"));
+        for (route, spliced) in
+            ["planned", "direct"]
+                .into_iter()
+                .zip(splice_both(&[&first, &second], 1, &respelled))
+        {
+            assert!(
+                spliced.as_ref() == Some(&expected),
+                "{route}: respelled pair not spliced"
+            );
+        }
+    }
+
+    #[test]
+    fn range_ids_too_large_to_read_exactly_are_told_apart_by_their_text() {
+        let first = bookmarked(4, "a").replace("w:id=\"4\"", "w:id=\"9007199254740992\"");
+        let added = bookmarked(4, "b").replace("w:id=\"4\"", "w:id=\"9007199254740993\"");
+        let expected = body(&format!("{first}{added}"));
+        for (route, spliced) in
+            ["planned", "direct"]
+                .into_iter()
+                .zip(splice_both(&[&first, PLAIN], 1, &added))
+        {
+            assert!(
+                spliced.as_ref() == Some(&expected),
+                "{route}: a pair with another id not spliced"
+            );
         }
     }
 

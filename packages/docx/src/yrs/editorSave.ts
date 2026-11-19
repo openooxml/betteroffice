@@ -8,6 +8,8 @@ import type { Document, Endnote, Footnote, HeaderFooter, Section } from '../type
 import { editorSaveKeys } from './editorSaveKeys';
 import type { YrsSession } from './index';
 import { dirtyProjectionStory } from './dirtyProjectionStories';
+import { checkedSaveModel, type SaveModel } from './commentRangeCheck';
+import { crossingWrittenWhole, withCrossingFallback } from './crossStoryComments';
 import { captureSessionSave, writeSessionSave, type DocxSavedDocument, type DocxSessionSave } from './saveYrsDocx';
 import { sessionSourcePackage } from './sessionInternals';
 import { carryGate, refuseUnavailableTables } from './tableUnavailable';
@@ -160,7 +162,6 @@ async function writeEditorDocument(
   if (
     !source ||
     keys.metadata !== source.keys.metadata ||
-    source.keys.commentIds.some((id) => !new Set(keys.commentIds).has(id)) ||
     saves.full ||
     (original !== saves.saved && !sameBytes(original, source.buffer))
   ) {
@@ -224,14 +225,20 @@ function sameBytes(a: ArrayBuffer, b: ArrayBuffer): boolean {
  * in projected again with them: the editor projects its host's comments.
  * With replies, its body paragraphs are its own for their range markers.
  */
-function withSavedComments(document: Document, session: YrsSession, comments: Comment[], record?: EditorSaveRecord): Document {
+function withSavedComments(
+  document: Document,
+  session: YrsSession,
+  comments: Comment[],
+  record?: EditorSaveRecord,
+  fallback: ReadonlyMap<number, string> = new Map()
+): SaveModel {
   const commentIds = record?.commentIds;
   const base: Document = {
     ...document,
     package: { ...document.package, document: { ...document.package.document, comments } },
   };
   carryGate(document, base);
-  const storyIds = new Set<string>();
+  const storyIds = new Set<string>(fallback.values());
   for (const comment of comments) {
     try {
       for (const anchor of session.resolveComment(commentIds?.get(comment.id) ?? String(comment.id))) {
@@ -242,12 +249,15 @@ function withSavedComments(document: Document, session: YrsSession, comments: Co
     }
   }
   const saved = storyIds.size > 0
-    ? yrsToDocument(session, base, {
+    ? withCrossingFallback(session, new Set(fallback.keys()), () => yrsToDocument(session, base, {
       storyIds,
       ...(commentIds?.size ? { commentIds } : {}),
-    })
+    }))
     : base;
-  if (!comments.some((comment) => comment.parentId != null)) return saved;
+  const whole = new Map(
+    [...crossingWrittenWhole(document), ...crossingWrittenWhole(saved)].filter(([id]) => !fallback.has(id))
+  );
+  if (!comments.some((comment) => comment.parentId != null)) return { document: saved, whole };
   const body = saved.package.document;
   const owned: Document = {
     ...saved,
@@ -257,7 +267,7 @@ function withSavedComments(document: Document, session: YrsSession, comments: Co
     },
   };
   carryGate(saved, owned);
-  return owned;
+  return { document: owned, whole };
 }
 
 /**
@@ -282,14 +292,17 @@ export async function saveEditorDocument(
   const capture = projected.originalBuffer ? captureSessionSave(session, identities) : null;
   engineProgress();
   if (yieldSave) await yieldSave();
-  const document = withSavedComments(projected, session, comments, record);
-  engineProgress();
+  const { document, injected } = checkedSaveModel((fallback) => {
+    const model = withSavedComments(projected, session, comments, record, fallback);
+    engineProgress();
 
-  // Inject commentRangeStart/End for reply comments that share the parent's range.
-  // Pages/Word require every comment (including replies) to have range markers in document.xml.
-  const injectedReplies = injectReplyRangeMarkers(document.package.document.content, comments);
-  // Also inject range markers for comments that reply to tracked changes.
-  const injectedTCReplies = injectTCReplyRangeMarkers(document.package.document.content, comments);
+    // Inject commentRangeStart/End for reply comments that share the parent's range.
+    // Pages/Word require every comment (including replies) to have range markers in document.xml.
+    const injectedReplies = injectReplyRangeMarkers(model.document.package.document.content, comments);
+    // Also inject range markers for comments that reply to tracked changes.
+    const injectedTCReplies = injectTCReplyRangeMarkers(model.document.package.document.content, comments);
+    return { ...model, injected: injectedReplies || injectedTCReplies };
+  });
 
   engineProgress();
   return writeEditorDocument(
@@ -297,7 +310,7 @@ export async function saveEditorDocument(
     session,
     capture,
     comments,
-    injectedReplies || injectedTCReplies,
+    injected,
     record,
     yieldSave
   );

@@ -67,6 +67,8 @@ export declare function isFloatingImagePayload(payload: Record<string, unknown>)
 export declare function isAnchoredImagePayload(payload: Record<string, unknown>): boolean;
 /** Whether `selection` covers exactly the one embed at `at`. */
 export declare function embedSelected(selection: DocxCommandSelection | null, at: YrsLoc): boolean;
+/** Whether `selection` covers exactly one picture, the only selection frame geometry marks on an object. */
+export declare function selectsImage(engine: ResidentEngineSession, selection: DocxCommandSelection | null): boolean;
 export declare function imagePlacement(payload: Record<string, unknown>): Pick<ResidentObjectGeometry, 'floating' | 'behindText' | 'noChangeAspect' | 'rotation'>;
 export interface ResidentFrameGeometry {
     version: string;

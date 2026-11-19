@@ -2694,13 +2694,13 @@ impl IdAllocator {
     }
 
     /// The next `clientId:counter` key no paragraph has carried.
-    pub(crate) fn session_key(&mut self, doc: &EditingDoc) -> String {
+    pub(crate) fn session_key<T: ReadTxn>(&mut self, doc: &EditingDoc, txn: &T) -> String {
         let mut guard = self.seen.lock().unwrap();
         let seen = guard
             .as_mut()
             .expect("IdAllocator::new builds the seen identities");
         loop {
-            let key = doc.next_id();
+            let key = doc.next_id(txn);
             if seen.keys.insert(key.clone()) {
                 return key;
             }
