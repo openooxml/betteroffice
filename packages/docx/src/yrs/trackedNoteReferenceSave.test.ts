@@ -1,11 +1,19 @@
-import { describe, expect, it } from 'bun:test';
+import { afterEach, beforeAll, describe, expect, it, spyOn } from 'bun:test';
 import { parseDocx } from '../docx';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
 import { unzipContainer } from '../wasm/opc';
+import { residentWorkerFactory, type InProcessResidentWorker } from './__fixtures__/residentWorker';
 import { documentToYrs } from './documentToYrs';
 import type { Document } from '../types/document';
-import { DirtyProjectionStories, editorSaveKeptUnchanged, mergeDocxHostMetadata, saveEditorDocument } from './editorSave';
-import { createYrsSession, type YrsSession } from './index';
+import {
+  DirtyProjectionStories,
+  editorSaveKeptUnchanged,
+  hostSaveMetadata,
+  mergeDocxHostMetadata,
+  saveEditorDocument,
+} from './editorSave';
+import { createYrsSession, decodeDocxHostJson, type YrsSession } from './index';
+import { ResidentEngineWorkerClient } from './residentEngineWorkerClient';
 import { setupStructuralPackageSaves, type SavePath } from './structuralSaveTestSupport';
 import { yrsToDocument } from './yrsToDocument';
 
@@ -272,6 +280,42 @@ async function saveOnMainThreadWithReport(source: Uint8Array, apply: Apply) {
     return { bytes, kept: editorSaveKeptUnchanged(session) };
   } finally {
     session.destroy();
+  }
+}
+
+const reporting: Array<{ destroy(): void }> = [];
+let startReportingWorker: (clientId?: number) => InProcessResidentWorker;
+
+beforeAll(async () => {
+  startReportingWorker = await residentWorkerFactory();
+});
+
+afterEach(() => {
+  for (const owned of reporting.splice(0)) owned.destroy();
+});
+
+async function saveOnWorkerWithReport(source: Uint8Array, apply: Apply) {
+  const worker = startReportingWorker(412);
+  const client = new ResidentEngineWorkerClient(worker);
+  reporting.push(client);
+  const { hostJson } = await client.open(source.slice());
+  const host = decodeDocxHostJson(hostJson, source.slice()).document;
+  const resident = worker.sessions[0]!;
+  const peer = await createYrsSession();
+  reporting.push(peer);
+  peer.openDocx(source.slice(), false);
+  peer.loadState(resident.encodeStateAsUpdate());
+  apply(peer);
+  resident.applyUpdate(peer.encodeStateAsUpdate());
+  const save = spyOn(resident, 'save');
+  const saveDocument = spyOn(resident, 'saveDocument');
+  try {
+    const saved = await client.save({ comments: [], host: hostSaveMetadata(host) });
+    const record = save.mock.calls[0]?.[4] ?? saveDocument.mock.calls[0]?.[2];
+    return { bytes: new Uint8Array(saved.bytes), kept: record?.keptUnchanged };
+  } finally {
+    save.mockRestore();
+    saveDocument.mockRestore();
   }
 }
 
@@ -567,10 +611,15 @@ describe.each(PATHS.filter(({ keepsSourceBytes }) => keepsSourceBytes))('$name',
   });
 });
 
-describe(PATHS[0]!.name, () => {
+const REPORTING = [
+  { name: 'Rust loader session', save: saveOnMainThreadWithReport },
+  { name: 'worker engine', save: saveOnWorkerWithReport },
+];
+
+describe.each(REPORTING)('$name', (route) => {
   describe.each([shapeOf('footnote', 'deletion')])('$name at paragraph level', (shape) => {
     const keptAndReported = async (original: string, noteIds: number[], apply: Apply = boldHead) => {
-      const { bytes, kept } = await saveOnMainThreadWithReport(fixture(original, noteIds), apply);
+      const { bytes, kept } = await route.save(fixture(original, noteIds), apply);
       expect(bodyParagraphs(bytes)[0]).toBe(original);
       expect(kept?.structure ?? 0).toBeGreaterThanOrEqual(1);
       expect(kept?.paragraphs).toContainEqual(expect.objectContaining({

@@ -217,8 +217,10 @@ describe.each(PATHS)('$name', (path) => {
 });
 
 describe.each(PATHS.filter((path) => path.keepsSourceBytes))('$name', (path) => {
-  it('keeps the source paragraph when text beside a deleted footnote reference is bolded', async () => {
+  it('saves bold text beside a deleted footnote reference and writes the reference as its source run', async () => {
     const saved = firstParagraph(await path.open(fixture(DELETED_REFERENCE_PARAGRAPH), boldHead));
-    expect(saved).toBe(DELETED_REFERENCE_PARAGRAPH);
+    expect(saved).toMatch(/<w:r><w:rPr>(?:(?!<\/w:rPr>)[\s\S])*<w:b\/>(?:(?!<\/w:rPr>)[\s\S])*<\/w:rPr><w:t(?:\s[^>]*)?>Head<\/w:t><\/w:r>/);
+    expect(saved).toContain(`<w:del w:id="12" w:author="Bo" w:date="${DATE}">${STYLED_REFERENCE}</w:del>`);
+    expect(referenceRun(saved)).toBe(STYLED_REFERENCE);
   });
 });
