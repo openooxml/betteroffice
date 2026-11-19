@@ -5,7 +5,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, mock, spy
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import JSZip from 'jszip';
-import { StrictMode, createRef } from 'react';
+import { StrictMode, createRef, useState } from 'react';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -2504,6 +2504,24 @@ describe('DocxEditor plugins (peer-less engine)', () => {
     unmount = view.unmount;
     await until(() => painted === 1);
     await settle(200);
+    expect(painted).toBe(1);
+    expect(onReady).not.toHaveBeenCalled();
+  });
+
+  test('onReady is not called when onFirstPagePainted hides the editor through host state', async () => {
+    const onReady = mock((_api: DocxEditorRef) => {});
+    const bytes = documentBytes();
+    let painted = 0;
+    function Host() {
+      const [show, setShow] = useState(true);
+      const props = { onReady, onFirstPagePainted: () => { painted += 1; setShow(false); } } as
+        Omit<Partial<DocxEditorBaseProps>, 'experimentalWorkerOpen' | 'onChange'>;
+      return show ? <DocxEditor documentBuffer={bytes} {...props} /> : <p data-testid="hidden" />;
+    }
+    const view = render(<Host />);
+    await until(() => painted === 1);
+    await settle(200);
+    expect(view.queryByTestId('hidden')).not.toBeNull();
     expect(painted).toBe(1);
     expect(onReady).not.toHaveBeenCalled();
   });
