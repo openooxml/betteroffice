@@ -1356,3 +1356,100 @@ fn typing_inside_the_first_of_two_adjacent_direction_scopes_stays_in_it() {
     let ltr = scoped_text(&xml, r#"<w:dir w:val="ltr">"#, "</w:dir>");
     assert_eq!(ltr, " runs", "{xml}");
 }
+
+/// The kept empty inline elements of the session, each at the story offset its anchor resolves
+/// to, in offset and then source order.
+fn raw_marks(doc: &EditingDoc) -> Vec<(u32, String)> {
+    let txn = doc.yrs_doc().transact();
+    let Some(marks) = txn.get_map("rawInlines") else {
+        return Vec::new();
+    };
+    let mut found: Vec<(u32, u32, String)> = marks
+        .iter(&txn)
+        .map(|(_, value)| {
+            let yrs::Out::Any(Any::Map(mark)) = value else {
+                panic!("a kept inline mark is a map");
+            };
+            let (Some(Any::Buffer(at)), Some(Any::Number(ordinal)), Some(Any::String(xml))) =
+                (mark.get("at"), mark.get("ordinal"), mark.get("xml"))
+            else {
+                panic!("a kept inline mark has an anchor, an ordinal and its XML");
+            };
+            let offset = yrs::StickyIndex::decode_v1(at)
+                .unwrap()
+                .get_offset(&txn)
+                .unwrap()
+                .index;
+            (offset, *ordinal as u32, xml.to_string())
+        })
+        .collect();
+    found.sort();
+    found
+        .into_iter()
+        .map(|(offset, _, xml)| (offset, xml))
+        .collect()
+}
+
+#[test]
+fn kept_empty_inline_elements_follow_direct_edits_and_keep_their_source_order() {
+    let start = r#"<w:customXmlInsRangeStart w:id="7" w:author="Grace"/>"#;
+    let end = r#"<w:customXmlInsRangeEnd w:id="7"/>"#;
+    let sub_doc = r#"<w:subDoc r:id="rIdImage"/>"#;
+    let body = format!(
+        "{start}{}{end}{}{sub_doc}{}",
+        r("Head"),
+        r(" tail"),
+        r(" more")
+    );
+    let bytes = docx(&direction_body(&body));
+    let doc = open(&bytes);
+    assert_eq!(first_text(&doc), "Head tail more");
+    let marks = |expected: [(u32, &str); 3]| {
+        expected
+            .into_iter()
+            .map(|(offset, xml)| (offset, xml.to_owned()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(raw_marks(&doc), marks([(0, start), (4, end), (9, sub_doc)]));
+    doc.set_direct_batches(true);
+    apply(&doc, &UndoSession::new(), vec![insert(range("00000001", 0, 0), "X")]);
+    assert_eq!(doc.direct_batches_applied(), 1);
+    assert_eq!(first_text(&doc), "XHead tail more");
+    assert_eq!(raw_marks(&doc), marks([(1, start), (5, end), (10, sub_doc)]));
+    apply(&doc, &UndoSession::new(), vec![delete(range("00000001", 1, 5))]);
+    assert_eq!(doc.direct_batches_applied(), 2);
+    assert_eq!(first_text(&doc), "X tail more");
+    assert_eq!(raw_marks(&doc), marks([(1, start), (1, end), (6, sub_doc)]));
+}
+
+#[test]
+fn an_unknown_inline_element_holding_runs_seeds_as_one_embed_that_moves_with_edits() {
+    let wrapper = format!("<w:zzz>{}</w:zzz>", r("inner"));
+    let content = format!("{}{wrapper}{}", r("Head "), r(" tail"));
+    let bytes = docx(&direction_body(&content));
+    let doc = open(&bytes);
+    let embedded = |doc: &EditingDoc| {
+        let mut offset = 0u32;
+        let mut found = Vec::new();
+        for segment in doc.story_segments("body").unwrap() {
+            match segment.content {
+                SegmentContent::Text(text) => offset += text.encode_utf16().count() as u32,
+                SegmentContent::Pilcrow(_) => offset += 1,
+                SegmentContent::OtherEmbed { payload, .. } => {
+                    if let Some(Any::String(xml)) = payload.get("xml") {
+                        found.push((offset, xml.to_string()));
+                    }
+                    offset += 1;
+                }
+            }
+        }
+        found
+    };
+    assert_eq!(embedded(&doc), [(5, wrapper.clone())]);
+    assert_eq!(first_text(&doc), "Head  tail");
+    apply(&doc, &UndoSession::new(), vec![insert(range("00000001", 0, 0), "X")]);
+    assert_eq!(embedded(&doc), [(6, wrapper.clone())]);
+    apply(&doc, &UndoSession::new(), vec![delete(range("00000001", 1, 4))]);
+    assert_eq!(embedded(&doc), [(3, wrapper)]);
+    assert_eq!(first_text(&doc), "Xd  tail");
+}
