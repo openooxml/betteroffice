@@ -3,7 +3,7 @@ import * as bundled from '@betteroffice/fonts';
 import { PngExportError } from '../../../../shared/office-session/pngExportError';
 import type { DisplayList } from '../display-list/types';
 import { engineKind, renderPng, type XlsxPngEngine } from '../wasm/enginePng';
-import { displayListToPng } from './png';
+import { displayListToPng, sheetFonts } from './png';
 
 const text = { op: 'text', x: 4, y: 12, text: 'Total', fontSize: 11, color: '#000000', fontFamily: 'Brand Sans' } as const;
 const list = (commands: DisplayList['commands'] = [text]): DisplayList => ({ width: 120.5, height: 40, commands });
@@ -134,6 +134,39 @@ describe('supplied faces', () => {
       { family: 'Calibri', bytes: new Uint8Array([1]) }, { family: 'Calibri', bold: true, bytes: new Uint8Array([2]) },
     ] });
     expect(calls.faces.map((face) => face.weight)).toEqual(['700']);
+  });
+
+  test('a bold text run inside a regular cell paints with the supplied bold face', async () => {
+    const calls = stubBrowser();
+    await displayListToPng(list([{ ...calibri, runs: [{ start: 0, end: 2, bold: true }] }]), { dpr: 1, width: 121, height: 40, fonts: [
+      { family: 'Calibri', bytes: new Uint8Array([1]) }, { family: 'Calibri', bold: true, bytes: new Uint8Array([2]) },
+    ] });
+    expect(calls.faces.map((face) => face.weight).sort()).toEqual(['400', '700']);
+    const fills = calls.painted.filter((font) => font.includes('px'));
+    const bold = fills.filter((font) => font.startsWith('bold ') && /"bo-xlsx-png-\d+-\d+", sans-serif$/.test(font));
+    const regular = fills.filter((font) => !font.startsWith('bold ') && /"bo-xlsx-png-\d+-\d+", sans-serif$/.test(font));
+    expect(bold.length).toBeGreaterThan(0);
+    expect(regular.length).toBeGreaterThan(0);
+    expect(new Set(bold.map((font) => font.slice(font.indexOf('"')))).size).toBe(1);
+    expect(bold[0]!.slice(bold[0]!.indexOf('"'))).not.toBe(regular[0]!.slice(regular[0]!.indexOf('"')));
+  });
+});
+
+describe('text runs', () => {
+  test('sheet fonts include the fonts of text runs', () => {
+    const runs = [{ start: 0, end: 2, fontFamily: 'Cambria', italic: true }, { start: 2, end: 5, bold: true }];
+    expect(sheetFonts(list([{ ...text, runs }]))).toEqual([
+      { family: 'Brand Sans', bold: false, italic: false },
+      { family: 'Cambria', bold: false, italic: true },
+      { family: 'Brand Sans', bold: true, italic: false },
+    ]);
+  });
+
+  test('the export waits for the faces of text runs before painting', async () => {
+    const calls = stubBrowser();
+    await displayListToPng(list([{ ...text, runs: [{ start: 0, end: 2, fontFamily: 'Cambria' }, { start: 2, end: 5, bold: true }] }]), { dpr: 1, width: 121, height: 40 });
+    expect(calls.loads.some((font) => !font.startsWith('bold ') && font.endsWith('px "Cambria", sans-serif'))).toBe(true);
+    expect(calls.loads.some((font) => font.startsWith('bold ') && font.endsWith('px "Brand Sans", sans-serif'))).toBe(true);
   });
 });
 

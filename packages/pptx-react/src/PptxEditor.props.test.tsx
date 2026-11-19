@@ -31,3 +31,23 @@ test('in-thread async props report the handle version and control zoom, style an
     expect(click).toHaveBeenCalledTimes(1);
   } finally { click.mockRestore(); }
 });
+
+test('in-thread async save hands its bytes to onSave once without downloading', async () => {
+  const initial = await open();
+  initial.view.unmount();
+  const saved = mock((_bytes: Uint8Array) => {});
+  const click = spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+  const font = await readFile(new URL('../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url));
+  let api: PptxAsyncEditorApi | undefined;
+  try {
+    render(<PptxEditor file={initial.bytes} fonts={[{ family: 'Liberation Sans', bytes: new Uint8Array(font) }]}
+      experimentalWorkerOpen={false} onSave={saved} onReady={(value) => { api = value; }} />);
+    await waitFor(() => expect(api).toBeDefined());
+    let bytes!: Uint8Array;
+    await act(async () => { bytes = await api!.save(); });
+    expect(bytes.byteLength).toBeGreaterThan(0);
+    expect(saved).toHaveBeenCalledTimes(1);
+    expect(saved.mock.calls[0]![0]).toBe(bytes);
+    expect(click).not.toHaveBeenCalled();
+  } finally { click.mockRestore(); }
+});
