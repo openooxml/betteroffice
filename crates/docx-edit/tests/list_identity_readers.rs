@@ -6,7 +6,12 @@ use std::path::{Path, PathBuf};
 const PATTERNS: [&str; 3] = ["\"numId\"", "ListState::new(", ".numbering()"];
 
 /// Each source file and pattern allowed outside test code, with why.
-const ALLOWED: [(&str, &str, &str); 4] = [
+const ALLOWED: [(&str, &str, &str); 5] = [
+    (
+        "batch.rs",
+        "\"numId\"",
+        "whether the paragraph style a batch applies names a list, not the list a paragraph is on",
+    ),
     (
         "list_definitions.rs",
         "\"numId\"",
