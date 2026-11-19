@@ -1939,6 +1939,7 @@ fn defines_numbering(properties: &[(String, yrs::Any)]) -> bool {
     })
 }
 
+/// Discard style numbering with no nonzero `numId`; retain actual numbered styles.
 fn settle_style_numbering(properties: &mut Vec<(String, yrs::Any)>) -> bool {
     if defines_numbering(properties) {
         return true;
