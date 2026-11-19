@@ -196,3 +196,17 @@ export function writeListDefinitionParts(parts: Record<string, Uint8Array>, defi
     parts['[Content_Types].xml'] = encoder.encode(appendChild(types, 'Types', entry));
   }
 }
+
+/**
+ * The key of the list the editor created that a paragraph with the attributes `properties` is on,
+ * by the engine's rule: its `listDef` names the key while `numPr.numId` equals the numId recorded
+ * beside it; `undefined` otherwise.
+ */
+export function createdListKey(_properties: Record<string, unknown>): string | undefined {
+  return undefined;
+}
+
+/** Numbering part `xml`, or a new one when it is undefined, holding `definitions` after its own. */
+export function numberingWithListDefinitions(xml: string | undefined, _definitions: readonly DocxSavedListDefinition[]): string {
+  return xml ?? '';
+}
