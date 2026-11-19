@@ -60,6 +60,42 @@ impl ListState {
             .first_picture_bullet
             .as_ref()
     }
+
+    /// The bullet the definitions give list `num_id` at `level`, with a symbol-font character
+    /// (Symbol's `U+F0B7`) shaped to the Unicode it draws. `None` when the session retains no
+    /// definitions or that level is not a bullet.
+    pub(crate) fn defined_bullet(&self, num_id: f64, level: f64) -> Option<String> {
+        let rendering = docx_parse::compute_list_rendering(
+            Some(num_id),
+            Some(level),
+            self.numbering.as_ref()?,
+        )?;
+        if !rendering.is_bullet {
+            return None;
+        }
+        Some(bullet_text(
+            &rendering.marker,
+            rendering.marker_font_family.as_deref(),
+        ))
+        .filter(|marker| !marker.is_empty())
+    }
+}
+
+/// The marker a bullet paragraph gets when neither it nor the definitions name one.
+pub(crate) const DEFAULT_BULLET: &str = "\u{2022}";
+
+/// A bullet level's text as drawn: a single symbol-font character is shaped to its Unicode
+/// equivalent, anything else goes through the private-use bullet table.
+pub(crate) fn bullet_text(marker: &str, font_family: Option<&str>) -> String {
+    let mut characters = marker.trim_ascii().chars();
+    font_family
+        .and_then(ooxml_text::SymbolFont::named)
+        .and_then(|face| match (characters.next(), characters.next()) {
+            (Some(character), None) => face.shape(character),
+            _ => None,
+        })
+        .map(|shape| shape.to_string())
+        .unwrap_or_else(|| docx_parse::convert_bullet_to_unicode(marker))
 }
 
 /// The level a numbering property names, when it is one of the nine OOXML defines.
@@ -309,7 +345,13 @@ pub(crate) fn list_marker(
         return marker.map(Ok);
     }
     if values.get("listIsBullet").and_then(any_bool) == Some(true) {
-        return Some(Ok(marker.unwrap_or_default()));
+        // A bullet applied by a command carries no marker (`listMarker: null`); without this the
+        // paragraph renders with an empty marker and shows no bullet at all. An authored empty
+        // marker is kept.
+        let marker = marker
+            .or_else(|| state.defined_bullet(num_id, map_number(num_pr, "ilvl").unwrap_or(0.0)))
+            .unwrap_or_else(|| DEFAULT_BULLET.to_owned());
+        return Some(Ok(marker));
     }
 
     let level = numbering_level(map_number(num_pr, "ilvl").unwrap_or(0.0))?;
@@ -801,5 +843,80 @@ mod tests {
             None
         );
         assert!(state.counters.is_empty());
+    }
+
+    /// A bullet toggled on by a command: `listIsBullet` with no `listMarker` (7171938398).
+    fn command_bullet(num_id: f64, level: f64) -> BTreeMap<String, Any> {
+        BTreeMap::from([
+            (
+                "numPr".to_owned(),
+                Any::from(std::collections::HashMap::from([
+                    ("numId".to_owned(), Any::Number(num_id)),
+                    ("ilvl".to_owned(), Any::Number(level)),
+                ])),
+            ),
+            ("listIsBullet".to_owned(), Any::Bool(true)),
+        ])
+    }
+
+    #[test]
+    fn a_command_bullet_without_definitions_draws_the_default_bullet() {
+        let mut state = ListState::default();
+        assert_eq!(
+            compute_list_marker(&command_bullet(1.0, 0.0), &mut state).as_deref(),
+            Some(DEFAULT_BULLET)
+        );
+    }
+
+    #[test]
+    fn a_command_bullet_draws_the_defined_symbol_bullet() {
+        let numbering = definitions(
+            r#"<w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/><w:lvlText w:val="&#xF0B7;"/><w:rPr><w:rFonts w:ascii="Symbol" w:hAnsi="Symbol"/></w:rPr></w:lvl><w:lvl w:ilvl="1"><w:numFmt w:val="bullet"/><w:lvlText w:val="o"/><w:rPr><w:rFonts w:ascii="Courier New" w:hAnsi="Courier New"/></w:rPr></w:lvl>"#,
+            r#"<w:num w:numId="1"><w:abstractNumId w:val="4"/></w:num>"#,
+        );
+        let mut state = ListState::new(Some(numbering));
+        let first = compute_list_marker(&command_bullet(1.0, 0.0), &mut state);
+        assert!(
+            first.as_deref().is_some_and(|marker| !marker.is_empty()),
+            "Symbol's U+F0B7 shapes to a visible bullet, got {first:?}"
+        );
+        assert_eq!(
+            first,
+            Some(bullet_text("\u{F0B7}", Some("Symbol"))),
+            "the command bullet matches the bullet an imported paragraph of that list shows"
+        );
+        assert_eq!(
+            compute_list_marker(&command_bullet(1.0, 1.0), &mut state),
+            Some(bullet_text("o", Some("Courier New")))
+        );
+    }
+
+    #[test]
+    fn a_command_bullet_on_a_numbered_definition_falls_back_to_the_default_bullet() {
+        let numbering = definitions(
+            &decimal_level(1),
+            r#"<w:num w:numId="1"><w:abstractNumId w:val="4"/></w:num>"#,
+        );
+        let mut state = ListState::new(Some(numbering));
+        assert_eq!(
+            compute_list_marker(&command_bullet(1.0, 0.0), &mut state).as_deref(),
+            Some(DEFAULT_BULLET)
+        );
+    }
+
+    #[test]
+    fn an_authored_bullet_marker_is_kept() {
+        let mut state = ListState::default();
+        let mut values = command_bullet(1.0, 0.0);
+        values.insert("listMarker".to_owned(), Any::from("\u{25AA}"));
+        assert_eq!(
+            compute_list_marker(&values, &mut state).as_deref(),
+            Some("\u{25AA}")
+        );
+        values.insert("listMarker".to_owned(), Any::from(""));
+        assert_eq!(
+            compute_list_marker(&values, &mut state).as_deref(),
+            Some("")
+        );
     }
 }

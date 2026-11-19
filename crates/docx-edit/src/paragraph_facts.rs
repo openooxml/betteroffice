@@ -8,7 +8,8 @@ use yrs::{Any, Map, MapRef, Out, ReadTxn, Text};
 use crate::batch::DocumentVersion;
 use crate::heading::{OutlineInputs, current_inputs, resolve_heading};
 use crate::list_marker::{
-    ListState, Unrenderable, list_level_formats, list_marker, numbering_level, renders_format,
+    ListState, Unrenderable, bullet_text, list_level_formats, list_marker, numbering_level,
+    renders_format,
 };
 use crate::read_types::HeadingInfo;
 use crate::seed::SourceMetadata;
@@ -99,17 +100,7 @@ pub(crate) fn numbering_properties<'a>(
             values.insert("listNumFmt".into(), rendering.num_fmt.into());
             values.insert("listIsBullet".into(), Any::Bool(rendering.is_bullet));
             let marker = if rendering.is_bullet {
-                let mut characters = rendering.marker.trim_ascii().chars();
-                rendering
-                    .marker_font_family
-                    .as_deref()
-                    .and_then(ooxml_text::SymbolFont::named)
-                    .and_then(|face| match (characters.next(), characters.next()) {
-                        (Some(character), None) => face.shape(character),
-                        _ => None,
-                    })
-                    .map(|shape| shape.to_string())
-                    .unwrap_or_else(|| docx_parse::convert_bullet_to_unicode(&rendering.marker))
+                bullet_text(&rendering.marker, rendering.marker_font_family.as_deref())
             } else {
                 rendering.marker
             };
