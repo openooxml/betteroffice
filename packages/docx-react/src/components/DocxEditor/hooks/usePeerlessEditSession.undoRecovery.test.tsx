@@ -42,10 +42,12 @@ const LETTERS = 'abcdefghijklmnopqrstuvwxyz';
 
 type Resume = Parameters<NonNullable<UsePeerlessEditSessionOptions['recovery']>['reopen']>[0];
 
-function mount() {
+function mount({ holdFirstCheckpoint = false } = {}) {
   const source = documentBytes();
   const workers: InProcessResidentWorker[] = [];
   const checkpoints: DocxCommandCheckpoint[] = [];
+  const resumes: Resume[] = [];
+  let checkpointRequests = 0;
   const phases: string[] = [];
   const errors: Error[] = [];
   let pendingCheckpoint: Promise<unknown> | undefined;
@@ -75,13 +77,17 @@ function mount() {
     openConnection: () => openResident(),
     recovery: {
       checkpoint: async (resident) => {
+        if (holdFirstCheckpoint && checkpointRequests++ === 0) return new Promise<DocxCommandCheckpoint>(() => {});
         const running = resident.client.call.checkpoint();
         pendingCheckpoint = running;
         const value = await running;
         checkpoints.push(value);
         return value;
       },
-      reopen: (resume) => openResident(resume),
+      reopen: (resume) => {
+        resumes.push(resume);
+        return openResident(resume);
+      },
       onRecovery: (event) => { phases.push(event.phase); },
     },
     canvasForPage: () => null,
@@ -91,7 +97,7 @@ function mount() {
   const view = renderHook(() => usePeerlessEditSession(options));
   const settle = () => act(async () => { await new Promise<void>((resolve) => setImmediate(resolve)); });
   const session = {
-    view, checkpoints, phases, errors,
+    view, checkpoints, phases, errors, resumes,
     async ready() { await waitFor(() => expect(view.result.current.status).toBe('ready'), { timeout: 30_000 }); },
     async submit(kind: string, payload: Record<string, unknown> = {}) {
       let status = '';
@@ -219,6 +225,18 @@ test('undo before any edit checkpoint survives a worker restart', async () => {
   await session.crash();
   expect(session.checkpoints.map((checkpoint) => checkpoint.throughSeq)).toEqual([0]);
   session.expectRecovered(expected);
+}, TIMEOUT);
+
+test('a crash before the base checkpoint is acknowledged reopens the source with an empty log', async () => {
+  const session = mount({ holdFirstCheckpoint: true });
+  await session.ready();
+  await session.crash();
+  expect(session.resumes).toHaveLength(1);
+  expect(session.resumes[0]!.checkpoint).toBeUndefined();
+  expect(session.resumes[0]!.replayAppliedSeqs).toEqual([]);
+  session.expectRecovered('Seed');
+  expect(await session.submit('insertText', { text: 'a' })).toBe('applied');
+  expect(session.checkpoints.map((checkpoint) => checkpoint.throughSeq)).toEqual([0]);
 }, TIMEOUT);
 
 test('an edit at a worker-issued position before any edit checkpoint survives a worker restart', async () => {

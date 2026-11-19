@@ -1,6 +1,7 @@
 import { beforeAll, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { withoutEffect } from '../../../../shared/office-session/testing/outcomes';
 import { rezipPartsToArrayBuffer, toBytes } from '../docx/rezip/parts';
 import { applyFrameDeltaOwned, decodeFrameDelta, type RetainedFrame } from '../layout/render/frameDelta';
 import { displayPrimitiveRect } from '../layout/render/displayListGeometry';
@@ -1198,7 +1199,7 @@ test('history_commands_order_typing_undo_redo_and_readonly_without_duplicates', 
     expect(engine.paragraphs('body')[0]?.text).toBe('Seed');
     expect(undone.editState).toMatchObject({ canUndo: false, canRedo: true });
     const duplicate = await client.edit(intent(2, 0, 'undo', {}));
-    expect(undone.outcomes).toMatchObject(duplicate.outcomes);
+    expect(duplicate.outcomes).toEqual(undone.outcomes.map(withoutEffect));
     expect(frameText(applyFrameDeltaOwned(null, decodeFrameDelta((await client.requestFullFrame()).frame!.payload.frame)))).toBe('Seed');
     const redone = await client.edit(intent(3, 2, 'redo', {}));
     expect(redone.outcomes[0]?.status).toBe('applied');
@@ -1773,7 +1774,7 @@ test('review_commands_own_comment_crud_and_versioned_snapshots', async () => {
     const added = await client.edit(intent(1, 0, 'addComment', { ranges: [range], author: 'Ada', date: '2026-01-01', body: 'Before', expectVersion: version }));
     expect(added.outcomes[0]?.status).toBe('applied');
     const duplicate = await client.edit(intent(1, 0, 'addComment', { ranges: [range], author: 'Ada', date: '2026-01-01', body: 'Before', expectVersion: version }));
-    expect(added.outcomes).toMatchObject(duplicate.outcomes);
+    expect(duplicate.outcomes).toEqual(added.outcomes.map(withoutEffect));
     const read = await client.documentRead({ kind: 'reviewSnapshot' });
     const review = read.value!;
     expect(review.comments).toHaveLength(1);
@@ -2071,7 +2072,7 @@ test('toolbar_metadata_and_insertion_commands_are_versioned_worker_services', as
     const undone = await client.edit(intent(4, 3, 'undo', {}));
     expect(undone.outcomes[0]?.status).toBe('applied');
     expect(undone).toMatchObject({ version: 4, selection: { focus: { story: 'body' } }, editState: { canRedo: true } });
-    expect(undone.outcomes).toMatchObject((await client.edit(intent(4, 3, 'undo', {}))).outcomes);
+    expect((await client.edit(intent(4, 3, 'undo', {}))).outcomes).toEqual(undone.outcomes.map(withoutEffect));
     expect(engine.paragraphs('body').map(paragraph => paragraph.text)).toEqual(['Seed']);
     expect(engine.geometryReader.storyIds()).toEqual(['body']);
     expect(frameText(applyFrameDeltaOwned(null, decodeFrameDelta((await client.requestFullFrame()).frame!.payload.frame)))).toBe(listedText);
@@ -4231,7 +4232,7 @@ test('worker orders table structure commands with single version steps duplicate
     expect(cellObjects(inserted).map((cell) => cell.rects[0]))
       .not.toEqual(cellObjects(initial).map((cell) => cell.rects[0]));
     const duplicate = await client.edit(intent(2, 0, 'insertTableColumn', { side: 'right' }));
-    expect(inserted.outcomes).toMatchObject(duplicate.outcomes);
+    expect(duplicate.outcomes).toEqual(inserted.outcomes.map(withoutEffect));
     expect(duplicate.version).toBe(1);
     expect(cellObjects(await client.requestFullFrame())).toHaveLength(6);
     const refused = await client.edit(intent(3, 1, 'mergeTableCells', {}));
@@ -4310,7 +4311,7 @@ test('worker_table_formatting_saves_and_reopens', async () => {
     const duplicate = await client.edit(intent(3, 1, 'setTableProperties', {
       op: 'patch', patch: { width: 2500, widthType: 'pct', justification: 'center' },
     }));
-    expect(styled.outcomes).toMatchObject(duplicate.outcomes);
+    expect(duplicate.outcomes).toEqual(styled.outcomes.map(withoutEffect));
     const saved = await client.save({ comments: [] });
     const xml = new TextDecoder().decode(unzipContainer(new Uint8Array(saved.bytes))['word/document.xml']!);
     expect(xml).toContain('w:tcBorders');

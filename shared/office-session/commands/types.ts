@@ -386,7 +386,7 @@ export type WorkerEditSessionOptions<O, P, S, E, F, X, Q extends QueryTable = {}
   maxEchoEntries?: number;
   maxRecoveryAttempts?: number;
   checkpointPolicy?(stats: { applied: number; bytes: number }): boolean;
-  /** @internal Checkpoints the opened document before any command, so every recovery replays effects onto a checkpoint. */
+  /** @internal Holds every send until a checkpoint of the opened document is acknowledged, so each recovery replays effects onto a checkpoint. */
   baseCheckpoint?: boolean;
   commandBytes?(envelope: CommandEnvelope<P>): number;
   /** @internal May share caller data only with a transport that copies before returning. */
