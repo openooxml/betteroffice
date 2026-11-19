@@ -1,10 +1,12 @@
-import { describe, expect, it } from 'bun:test';
+import { describe, expect, it, spyOn } from 'bun:test';
 import fixture from '../../test-fixtures/path-backend-agreement.json';
 import type { DisplayList, GeometryPathCommand, PatternType, TextCmd } from '../display-list/types';
 import { paintDisplayList } from './canvas2d';
 import { PATTERN_MASKS } from './patterns';
 import wrapFixture from '../../../../crates/xlsx-render/tests/fixtures/text-wrap-agreement.json';
 import richWrapFixture from '../../../../crates/xlsx-render/tests/fixtures/rich-text-wrap-agreement.json';
+import * as textRuns from './textRuns';
+import * as breaker from './wrap';
 import { wrapLines, wrapSpans } from './wrap';
 
 describe('Canvas2D pattern masks', () => {
@@ -690,13 +692,23 @@ describe('Canvas2D text runs', () => {
   interface Fill { text: string; x: number; y: number; font: unknown; fillStyle: unknown; textAlign: unknown }
 
   function record(cmd: Partial<TextCmd>) {
+    return recordAll([cmd]);
+  }
+
+  function recordAll(cmds: Partial<TextCmd>[]) {
     const calls: unknown[][] = [];
     const fills: Fill[] = [];
+    const measures: string[] = [];
     const state: Record<string, unknown> = {};
     const context = new Proxy(state, {
       get(target, property) {
         if (typeof property !== 'string') return undefined;
-        if (property === 'measureText') return (value: string) => ({ width: measure(value, String(target.font)) });
+        if (property === 'measureText') {
+          return (value: string) => {
+            measures.push(value);
+            return { width: measure(value, String(target.font)) };
+          };
+        }
         if (property in target) return target[property];
         return (...args: unknown[]) => {
           calls.push([property, ...args]);
@@ -713,9 +725,10 @@ describe('Canvas2D text runs', () => {
       },
     });
     paintDisplayList(context as unknown as CanvasRenderingContext2D, {
-      width: 200, height: 30, commands: [{ ...base, ...cmd } as TextCmd],
+      width: 200, height: 30, commands: cmds.map((cmd) => ({ ...base, ...cmd }) as TextCmd),
     }, 1);
-    return { calls, fills };
+    const fonts = calls.filter((call) => call[0] === 'set' && call[1] === 'font').map((call) => call[2]);
+    return { calls, fills, measures, fonts };
   }
 
   it('paints a command without runs with the calls it made before', () => {
@@ -822,6 +835,63 @@ describe('Canvas2D text runs', () => {
     expect(painted).toEqual(['save', 'beginPath', 'rect', 'clip', 'fillText', 'fillText', 'restore', 'restore']);
     expect(calls.filter((call) => call[0] === 'rect')[1]).toEqual(['rect', 0, 0, 25, 30]);
   });
+
+  it('never enters the run code or the span breaker for commands without runs', () => {
+    const pieces = spyOn(textRuns, 'runPieces');
+    const runLines = spyOn(textRuns, 'wrapRunLines');
+    const spans = spyOn(breaker, 'wrapSpans');
+    const wrap = { width: 35, lineHeight: 16, valign: 'top' } as const;
+    try {
+      recordAll([
+        {},
+        { runs: [] },
+        { text: 'AB CDE FG', wrap },
+        { rotationDeg: 90, rotationBox: clip },
+        { stacked: true, rotationBox: clip },
+      ]);
+      expect(pieces).not.toHaveBeenCalled();
+      expect(runLines).not.toHaveBeenCalled();
+      expect(spans).not.toHaveBeenCalled();
+      recordAll([{ text: 'AB CDE FG', wrap, runs: [redBold] }]);
+      expect(pieces).toHaveBeenCalledTimes(1);
+      expect(runLines).toHaveBeenCalledTimes(1);
+      expect(spans).toHaveBeenCalledTimes(1);
+    } finally {
+      pieces.mockRestore();
+      runLines.mockRestore();
+      spans.mockRestore();
+    }
+  });
+
+  it('sets each font only when it changes and measures each piece once on one line', () => {
+    const blueBold = { start: 2, end: 4, bold: true, color: '#0000ff' };
+    const { fills, fonts, measures } = record({ text: 'ABCDEF', runs: [redBold, blueBold] });
+    expect(fills.map(({ text, x, font, fillStyle }) => [text, x, font, fillStyle])).toEqual([
+      ['AB', 10, 'bold 12px sans-serif', '#ff0000'],
+      ['CD', 28, 'bold 12px sans-serif', '#0000ff'],
+      ['EF', 46, '12px sans-serif', '#000000'],
+    ]);
+    expect(fonts).toEqual([
+      '12px sans-serif', 'bold 12px sans-serif', '12px sans-serif', 'bold 12px sans-serif', '12px sans-serif',
+    ]);
+    expect(measures).toEqual(['AB', 'CD', 'EF']);
+  });
+
+  it('measures each piece of a wrapped command once, reusing the widths found while breaking', () => {
+    const wrap = { width: 35, lineHeight: 16, valign: 'top' } as const;
+    const runs = [redBold, { start: 3, end: 9, fontSize: 15 }];
+    const { fills, fonts, measures } = record({ text: 'AB CDE FG', wrap, runs });
+    expect(fills.map(({ text, y, font }) => [text, y, font])).toEqual([
+      ['AB', 20, 'bold 12px sans-serif'],
+      ['CDE', 36, '20px sans-serif'],
+      ['FG', 52, '20px sans-serif'],
+    ]);
+    expect(fonts).toEqual([
+      '12px sans-serif', 'bold 12px sans-serif', '12px sans-serif', '20px sans-serif', 'bold 12px sans-serif',
+      '20px sans-serif',
+    ]);
+    expect(measures).toEqual(['AB', ' ', 'CDE FG', 'CDE', 'FG']);
+  });
 });
 
 describe('wrapped text breaker', () => {
@@ -839,9 +909,11 @@ describe('wrapped text breaker', () => {
       Segmenter: new (locales: undefined, options: { granularity: 'grapheme' }) => { segment(value: string): Iterable<unknown> };
     }).Segmenter;
     const segmenter = new Segmenter(undefined, { granularity: 'grapheme' });
+    const graphemes = (run: string) => [...segmenter.segment(run)].length;
     for (const { text, width, lines } of wrapFixture) {
-      const spans = wrapSpans(text, width, (start, end) => [...segmenter.segment(text.slice(start, end))].length);
+      const spans = wrapSpans(text, width, (start, end) => graphemes(text.slice(start, end)));
       expect(spans.map(([start, end]) => text.slice(start, end))).toEqual(lines);
+      expect(spans.map(([start, end]) => text.slice(start, end))).toEqual(wrapLines(text, width, graphemes));
     }
   });
 
