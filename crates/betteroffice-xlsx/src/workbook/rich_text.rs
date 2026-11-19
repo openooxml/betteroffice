@@ -1,8 +1,10 @@
 use std::cell::OnceCell;
 use std::collections::HashSet;
+use std::sync::Arc;
 
+use xlsx_model::styles::DifferentialFormat;
 use xlsx_model::{CellRef, CellValue, RichRun, SheetId};
-use xlsx_render::CellTextRuns;
+use xlsx_render::{CellFormats, CellTextRuns};
 
 use super::Workbook;
 
@@ -41,6 +43,33 @@ impl Workbook {
         TEXT_RUN_LOOKUPS.set(TEXT_RUN_LOOKUPS.get() + 1);
         self.source_package.as_ref()?.materialized()?;
         self.cell_text_runs(sheet, cell)
+    }
+
+    /// Leaves each cell of `formats` that has rich text runs only the fill of
+    /// its conditional format, and returns how many lost a font color, bold or
+    /// italic. How those combine with the runs' own is not settled, so such a
+    /// cell keeps the font it is painted with.
+    pub(crate) fn keep_rich_text_fonts(&self, sheet: SheetId, formats: &mut CellFormats) -> u32 {
+        if !self.paints_text_runs() {
+            return 0;
+        }
+        let mut kept = 0;
+        for (&(row, col), format) in formats.iter_mut() {
+            let sets_font =
+                format.font_color.is_some() || format.bold.is_some() || format.italic.is_some();
+            if sets_font
+                && self
+                    .painted_text_runs(sheet, CellRef::new(row, col))
+                    .is_some_and(|runs| !runs.is_empty())
+            {
+                *format = Arc::new(DifferentialFormat {
+                    fill: format.fill.clone(),
+                    ..DifferentialFormat::default()
+                });
+                kept += 1;
+            }
+        }
+        kept
     }
 
     /// Source runs in UTF-8 bytes; unavailable after content writes, including undo.

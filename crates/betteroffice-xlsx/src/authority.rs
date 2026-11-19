@@ -2095,9 +2095,9 @@ impl WorkbookAuthority {
                 .is_some_and(|fingerprint| fingerprint_reading(&fingerprint).as_written())
     }
 
-    /// Points each sheet's conditional formats back at the source's where a
-    /// release before italic wrote them without it, so the state reads as the
-    /// source does.
+    /// Points each sheet's conditional formats back at the source's where an
+    /// earlier release wrote them without italic or a bare fill, so the state
+    /// reads as the source does.
     fn keep_source_italic(&self, source: &Self) -> Result<(), String> {
         let mut txn = self.doc.transact_mut_with(HYDRATE_ORIGIN);
         let source_txn = source.doc.transact();

@@ -15,6 +15,7 @@ use super::source::{
     story_root,
 };
 use super::*;
+use crate::list_definitions::effective_list_state;
 use crate::list_marker::ListState;
 use crate::ops::{Chunk, ChunkKind};
 use crate::queries::revision_parts;
@@ -730,10 +731,6 @@ impl<'a> Exporter<'a> {
 
     fn read(&self) -> Option<&'a ReadSource> {
         self.source.map(SourceMetadata::read)
-    }
-
-    fn numbering(&self) -> Option<Arc<docx_parse::NumberingMap>> {
-        self.source.map(SourceMetadata::numbering)
     }
 
     /// The move revisions of a story's provenance.
@@ -1474,7 +1471,7 @@ impl<'a> Exporter<'a> {
         owner: Option<Anchor>,
         part: Option<String>,
     ) {
-        let mut list = ListState::new(self.numbering());
+        let mut list = effective_list_state(self.source, views.txn());
         self.story_blocks(views, story, prov, owner, part, 0, &mut list, true);
         if !self.pending.is_empty() && !self.stopped {
             self.commit_notes();
@@ -3632,7 +3629,6 @@ impl<'a> Exporter<'a> {
                 return None;
             }
         };
-        let mut list = ListState::new(self.numbering());
         let prov = Prov::Scratch(Rc::new(ScratchProv {
             provenance,
             raw_anchors: HashMap::new(),
@@ -3642,6 +3638,7 @@ impl<'a> Exporter<'a> {
         self.reading += 1;
         let built = {
             let txn = doc.yrs_doc().transact();
+            let mut list = effective_list_state(self.source, &txn);
             let mut views = Views::new(&doc, &txn);
             self.story_blocks(
                 &mut views,

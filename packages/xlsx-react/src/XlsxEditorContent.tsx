@@ -1317,6 +1317,7 @@ export function XlsxEditorContent({
     paintWaitersRef.current = waiters.filter((waiter) => !covers(painted, waiter.mark));
     for (const waiter of waiters) if (covers(painted, waiter.mark)) waiter.resolve(true);
     releaseReady(pendingReadyRef, handle);
+    return dl;
   }, [activeSheet, paintWithDefaultFonts, presentGrid, t, zoom]);
 
   // paint loop: repaint on scroll/resize (rAF-coalesced) and whenever the open
@@ -1324,14 +1325,17 @@ export function XlsxEditorContent({
   useEffect(() => {
     const scroll = scrollRef.current;
     if (!scroll) return;
+    const paint = () => {
+      if (doPaint()?.conditionalPending) schedulePaint();
+    };
     const schedulePaint = () => {
       if (rafRef.current != null) return;
       rafRef.current = requestAnimationFrame(() => {
         rafRef.current = null;
-        doPaint();
+        paint();
       });
     };
-    doPaint();
+    paint();
     scroll.addEventListener('scroll', schedulePaint, { passive: true });
     const observer = new ResizeObserver(schedulePaint);
     observer.observe(scroll);

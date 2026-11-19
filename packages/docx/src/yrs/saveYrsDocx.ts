@@ -30,6 +30,9 @@ import type {
 import {
   assertCommentBookmarkReplacement, projectedSessionKey, restoreBlockBookmarks, yrsToDocument,
 } from './yrsToDocument';
+import {
+  savedListDefinitions, withCreatedListIds, writeListDefinitionParts,
+} from './listDefinitionSave';
 
 /** A saved paragraph's session anchor and the persisted anchor that resolves to it once reopened. */
 export interface DocxSavedParagraph {
@@ -607,6 +610,8 @@ export async function writeSessionSave(
   if (yieldSave) await yieldSave();
   engineProgress();
   const refuse = (message: string) => new DocxSectionError('unsupported', message);
+  const created = session.createdListDefinitions?.() ?? [];
+  if (created.length) await preloadOpcWasm();
   const write = async (sectionEdits: RustParagraphIds['sectionEdits']) => {
     const modelBody = (part: string) => sectionPlan !== undefined && !sectionEdits && part === bodyPart;
     const spliced = splicesFor(sectionEdits).filter(({ part }) => !modelBody(part));
@@ -647,8 +652,13 @@ export async function writeSessionSave(
     const source = options.commentDeletion && options.commentBaseline ? Uint8Array.from(options.commentBaseline.bytes).buffer
       : options.commentBaseline ? commentSourceBuffer(sectionEdits ? sourceBuffer : originalBuffer, options.commentBaseline.bytes)
         : sectionEdits ? sourceBuffer : originalBuffer;
+    const lists = created.length
+      ? savedListDefinitions(session, created, unzipContainer(new Uint8Array(source)), sessionMaterializedSource(session)?.package.numbering)
+      : [];
+    const modelled = withSourceOrdinals(output, spliced);
+    const numIds = new Map(lists.map(definition => [definition.key, definition.numId]));
     const { buffer, warnings } = await writeDocumentWithRust(
-      withSourceOrdinals(output, spliced), source, options, undefined, undefined, plan, skipMutations, yieldSave
+      lists.length ? withCreatedListIds(modelled, numIds) : modelled, source, options, undefined, undefined, plan, skipMutations, yieldSave
     );
     let structure = 0;
     const keptParagraphs: DocxKeptParagraph[] = [];
@@ -669,7 +679,7 @@ export async function writeSessionSave(
         console.warn(warning);
       }
     }
-    return { buffer, plan, structure, keptParagraphs, structureDropped };
+    return { buffer, plan, structure, keptParagraphs, structureDropped, lists };
   };
   let sectionEdits = sectionPlan?.plan;
   if (sectionEdits && !sectionEdits.onlySections && !splicesFor(sectionEdits).some(({ part }) => part === bodyPart)) {
@@ -685,7 +695,7 @@ export async function writeSessionSave(
     if (sectionPlan?.strict) throw refuse('Cannot safely locate section boundaries after this structural edit');
     result = await write(undefined);
   }
-  const { buffer, plan, structure, keptParagraphs, structureDropped } = result;
+  const { buffer, plan, structure, keptParagraphs, structureDropped, lists } = result;
   if (yieldSave) await yieldSave();
   const paragraphs = savedParagraphs(output, capture.identities);
   let bytes: Uint8Array = new Uint8Array(buffer);
@@ -695,6 +705,10 @@ export async function writeSessionSave(
     if (!source) throw new Error('Language edits require a styles part');
     parts['word/styles.xml'] = new TextEncoder().encode(session.patchStyleLanguagesXml(new TextDecoder().decode(source)));
     bytes = rezipContainer(parts);
+  }
+  if (lists.length) {
+    const parts = unzipContainer(bytes);
+    if (writeListDefinitionParts(parts, lists)) bytes = rezipContainer(parts);
   }
   engineProgress();
   const held = session.writtenParagraphIds(bytes);

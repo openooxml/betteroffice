@@ -7,7 +7,10 @@ use std::sync::Arc;
 use docx_parse::NumberingMap;
 use yrs::Any;
 
-use crate::bridge::{any_bool, any_str, map_number, value_number, value_string};
+use crate::bridge::{any_bool, any_str, value_number, value_string};
+use crate::list_definitions::{
+    CreatedListDefinition, ListIdentity, ListKind, numbered_level, resolve_list_identity,
+};
 
 /// The numbering levels OOXML defines, `0..=8`.
 pub(crate) const LEVELS: usize = 9;
@@ -35,6 +38,8 @@ pub(crate) struct ListState {
     seen_num_ids: BTreeSet<String>,
     /// The document's numbering definitions, when the session retains them.
     numbering: Option<Arc<NumberingMap>>,
+    /// The list definitions the editor created, by key.
+    created: Arc<BTreeMap<String, CreatedListDefinition>>,
 }
 
 impl ListState {
@@ -45,12 +50,42 @@ impl ListState {
         }
     }
 
-    pub(crate) fn marker_fonts(&self, num_id: f64, level: f64) -> Option<docx_parse::FontFamily> {
+    /// This state over the list definitions the editor created as well.
+    pub(crate) fn with_created(self, created: BTreeMap<String, CreatedListDefinition>) -> Self {
+        Self {
+            created: Arc::new(created),
+            ..self
+        }
+    }
+
+    /// The marker fonts of level `level` of the list the paragraph with `values` is on, which
+    /// names it by `num_id`; a list the editor created defines none.
+    pub(crate) fn marker_fonts(
+        &self,
+        values: &BTreeMap<String, Any>,
+        num_id: f64,
+        level: f64,
+    ) -> Option<docx_parse::FontFamily> {
+        if self.created_list(values).is_some() {
+            return None;
+        }
         self.numbering
             .as_ref()?
             .get_level(num_id, level)?
             .r_pr?
             .font_family
+    }
+
+    /// The definition of the list the editor created that the paragraph with `values` is on, and
+    /// the paragraph's level, while that definition is present.
+    pub(crate) fn created_list(
+        &self,
+        values: &BTreeMap<String, Any>,
+    ) -> Option<(&CreatedListDefinition, f64)> {
+        let Some(ListIdentity::Created { key, level }) = resolve_list_identity(values) else {
+            return None;
+        };
+        Some((self.created.get(&key)?, level))
     }
 
     pub(crate) fn first_picture_bullet(&self) -> Option<&docx_parse::numbering::PictureBulletSize> {
@@ -292,27 +327,26 @@ pub(crate) fn compute_list_marker(
 /// markers pass through; a marker containing `%` is a template resolved against the counter stack,
 /// and a paragraph with no marker at all gets the dotted counter path (`"1.2."`). With retained
 /// definitions, lists are counted as [`List`] describes; without them numbering a level resets
-/// every deeper level. A level outside `0..=8` has no marker, and a number the level's format
-/// cannot write is reported instead of written.
+/// every deeper level. A list the editor created is marked and counted as its own definition
+/// describes the paragraph's level. A level outside `0..=8` has no marker, and a number the
+/// level's format cannot write is reported instead of written.
 pub(crate) fn list_marker(
     values: &BTreeMap<String, Any>,
     state: &mut ListState,
 ) -> Option<Result<String, Unrenderable>> {
-    let marker = value_string(values.get("listMarker"));
-    let Some(Any::Map(num_pr)) = values.get("numPr") else {
-        return marker.map(Ok);
-    };
-    let Some(num_id) = map_number(num_pr, "numId") else {
-        return marker.map(Ok);
-    };
-    if num_id == 0.0 {
-        return marker.map(Ok);
+    if let Some((definition, level)) = state.created_list(values) {
+        let definition = definition.clone();
+        return created_marker(&definition, numbering_level(level)?, state);
     }
+    let marker = value_string(values.get("listMarker"));
+    let Some((num_id, level)) = numbered_level(values) else {
+        return marker.map(Ok);
+    };
     if values.get("listIsBullet").and_then(any_bool) == Some(true) {
         return Some(Ok(marker.unwrap_or_default()));
     }
 
-    let level = numbering_level(map_number(num_pr, "ilvl").unwrap_or(0.0))?;
+    let level = numbering_level(level)?;
     let mut formats = list_level_formats(values);
     formats.truncate(LEVELS);
     let level_format = formats
@@ -388,6 +422,33 @@ pub(crate) fn list_marker(
     } else {
         format!("{}.", parts.join("."))
     }))
+}
+
+/// The marker of `level` of a list the editor created, as its definition describes the level,
+/// advancing the list's own counters: every level starts at 1 and restarts below a level that is
+/// numbered.
+fn created_marker(
+    definition: &CreatedListDefinition,
+    level: usize,
+    state: &mut ListState,
+) -> Option<Result<String, Unrenderable>> {
+    let text = definition.level_texts.get(level)?;
+    if definition.kind == ListKind::Bullet {
+        return Some(Ok(docx_parse::convert_bullet_to_unicode(text)));
+    }
+    let counters = state
+        .counters
+        .entry(format!("created:{}", definition.key))
+        .or_insert_with(|| vec![0; LEVELS]);
+    counters[level] = counters[level].saturating_add(1);
+    for value in counters.iter_mut().skip(level + 1) {
+        *value = 0;
+    }
+    Some(resolve_list_template(
+        text,
+        counters,
+        &definition.level_formats(),
+    ))
 }
 
 #[cfg(test)]

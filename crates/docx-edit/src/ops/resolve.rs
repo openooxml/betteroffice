@@ -243,6 +243,7 @@ fn restore_paragraph_properties(txn: &mut TransactionMut<'_>, map: &MapRef, chan
         {
             for key in [
                 "numPr",
+                crate::LIST_DEF,
                 "listIsBullet",
                 "listNumFmt",
                 "listMarker",
