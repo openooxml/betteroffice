@@ -4,4 +4,4 @@
 '@betteroffice/rust-crates': minor
 ---
 
-A field that spans paragraphs no longer repeats the later paragraphs inside itself. Its structured code and result give their count in the new optional `blockCount` instead, and 0 means they are no longer tracked.
+A field spanning paragraphs no longer repeats the later paragraphs inside itself: its structured code and result carry `blockCount` (0: not tracked). Read those paragraphs from the story, not `blocks`. Rust code building `StructuredFieldContent` must add the new `block_count` member.
