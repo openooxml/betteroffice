@@ -21,7 +21,7 @@ import {
 } from './contentControlValues';
 import { sdtAttrsToProps } from '../types/sdtAttributes';
 import { tableRowGrid } from './storyPlainText';
-import { savedListProperties } from './listDefinitionSave';
+import { markCreatedListParagraph } from './listDefinitionSave';
 import {
   paragraphAttrsToFormatting,
   tableAttrsToFormatting,
@@ -4162,12 +4162,9 @@ class SaveContext {
           const snapshot = inputs.map((input, index) =>
             index === 4 ? (input as InlineItem[]).map((item) => ({ ...item })) : input
           );
-          paragraph = paragraphFromStory(
+          paragraph = markCreatedListParagraph(paragraphFromStory(
             savedParaId,
-            savedListProperties(
-              this.session,
-              baseParagraph ? segment.properties : this.copiedParagraphProperties(storyId, segment.properties, items, precedingBaseParagraphs)
-            ),
+            baseParagraph ? segment.properties : this.copiedParagraphProperties(storyId, segment.properties, items, precedingBaseParagraphs),
             items,
             boundaries,
             baseParagraph,
@@ -4176,7 +4173,7 @@ class SaveContext {
             this.runFormatter(storyId, segment.properties),
             this.revisionIds,
             this.inheritedFormatting(storyId, segment.properties)
-          );
+          ), segment.properties);
           this.restoreCommentReferences(paragraph);
           const trailing = trailingBlockBreaks(paragraph);
           const leading = leadingBlockBreaks(paragraph);

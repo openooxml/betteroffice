@@ -85,14 +85,11 @@ impl EditSessionCore {
             .created_list_definitions()
             .into_iter()
             .map(|definition| {
-                let formats: Vec<_> = (0..definition.level_texts.len())
-                    .map(|level| definition.kind.level_format(level))
-                    .collect();
                 json!({
                     "key": definition.key,
                     "kind": definition.kind.name(),
                     "levelTexts": definition.level_texts,
-                    "levelFormats": formats,
+                    "levelFormats": definition.level_formats(),
                 })
             })
             .collect();

@@ -29,7 +29,9 @@ import type {
 import {
   assertCommentBookmarkReplacement, projectedSessionKey, restoreBlockBookmarks, yrsToDocument,
 } from './yrsToDocument';
-import { sessionListDefinitions, writeListDefinitionParts } from './listDefinitionSave';
+import {
+  createdListOf, savedListDefinitions, writeListDefinitionParts, type DocxSavedListDefinition,
+} from './listDefinitionSave';
 
 /** A saved paragraph's session anchor and the persisted anchor that resolves to it once reopened. */
 export interface DocxSavedParagraph {
@@ -395,6 +397,17 @@ function withSourceOrdinals(
   });
 }
 
+/** `document` with each paragraph on a created list pointing at the `w:numId` this save gives the list. */
+function withCreatedListIds(document: Document, lists: readonly DocxSavedListDefinition[]): Document {
+  const numIds = new Map(lists.map(definition => [definition.key, definition.numId]));
+  return mapStoryParagraphs(document, (paragraph) => {
+    const numPr = paragraph.formatting?.numPr;
+    const key = createdListOf(numPr);
+    const numId = key === undefined ? undefined : numIds.get(key);
+    return numId === undefined ? paragraph : { ...paragraph, formatting: { ...paragraph.formatting, numPr: { ...numPr, numId } } };
+  });
+}
+
 /** The identities and paragraph ID plan a session save applies. @internal */
 export interface DocxSessionSave {
   identities: DocxParagraphIdentitySnapshot;
@@ -607,6 +620,8 @@ export async function writeSessionSave(
   if (yieldSave) await yieldSave();
   engineProgress();
   const refuse = (message: string) => new DocxSectionError('unsupported', message);
+  const created = session.createdListDefinitions?.() ?? [];
+  if (created.length) await preloadOpcWasm();
   const write = async (sectionEdits: RustParagraphIds['sectionEdits']) => {
     const modelBody = (part: string) => sectionPlan !== undefined && !sectionEdits && part === bodyPart;
     const spliced = splicesFor(sectionEdits).filter(({ part }) => !modelBody(part));
@@ -647,8 +662,10 @@ export async function writeSessionSave(
     const source = options.commentDeletion && options.commentBaseline ? Uint8Array.from(options.commentBaseline.bytes).buffer
       : options.commentBaseline ? commentSourceBuffer(sectionEdits ? sourceBuffer : originalBuffer, options.commentBaseline.bytes)
         : sectionEdits ? sourceBuffer : originalBuffer;
+    const lists = created.length ? savedListDefinitions(session, created, unzipContainer(new Uint8Array(source))) : [];
+    const modelled = withSourceOrdinals(output, spliced);
     const { buffer, warnings } = await writeDocumentWithRust(
-      withSourceOrdinals(output, spliced), source, options, undefined, undefined, plan, skipMutations, yieldSave
+      lists.length ? withCreatedListIds(modelled, lists) : modelled, source, options, undefined, undefined, plan, skipMutations, yieldSave
     );
     let structure = 0;
     const keptParagraphs: DocxKeptParagraph[] = [];
@@ -669,7 +686,7 @@ export async function writeSessionSave(
         console.warn(warning);
       }
     }
-    return { buffer, plan, structure, keptParagraphs, structureDropped };
+    return { buffer, plan, structure, keptParagraphs, structureDropped, lists };
   };
   let sectionEdits = sectionPlan?.plan;
   if (sectionEdits && !sectionEdits.onlySections && !splicesFor(sectionEdits).some(({ part }) => part === bodyPart)) {
@@ -685,7 +702,7 @@ export async function writeSessionSave(
     if (sectionPlan?.strict) throw refuse('Cannot safely locate section boundaries after this structural edit');
     result = await write(undefined);
   }
-  const { buffer, plan, structure, keptParagraphs, structureDropped } = result;
+  const { buffer, plan, structure, keptParagraphs, structureDropped, lists } = result;
   if (yieldSave) await yieldSave();
   const paragraphs = savedParagraphs(output, capture.identities);
   let bytes: Uint8Array = new Uint8Array(buffer);
@@ -696,11 +713,9 @@ export async function writeSessionSave(
     parts['word/styles.xml'] = new TextEncoder().encode(session.patchStyleLanguagesXml(new TextDecoder().decode(source)));
     bytes = rezipContainer(parts);
   }
-  const lists = sessionListDefinitions(session);
   if (lists.length) {
     const parts = unzipContainer(bytes);
-    writeListDefinitionParts(parts, lists);
-    bytes = rezipContainer(parts);
+    if (writeListDefinitionParts(parts, lists)) bytes = rezipContainer(parts);
   }
   engineProgress();
   const held = session.writtenParagraphIds(bytes);
