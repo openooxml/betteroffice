@@ -10,14 +10,14 @@ import type {
 interface StagedEchoPage {
   page: DocxCommandPageIdentity;
   frameEpoch: number;
-  displayPage: DisplayPage;
+  displayPage: WeakRef<DisplayPage>;
   revision: number;
   layoutRevision: number;
   pixelRatio: number;
   backgrounds: readonly { id: string; rect: DocxEchoRect; omitted: string }[];
 }
 
-/** The page bitmaps and echo backgrounds main holds, as this worker staged them, by page id. */
+/** The page bitmaps and echo backgrounds main holds, as this worker staged them, by page id; never a page the frame released. */
 export class StagedEchoPages {
   private readonly pages = new Map<string, StagedEchoPage>();
 
@@ -35,11 +35,16 @@ export class StagedEchoPages {
       }
       const sent = new Set((staged.backgrounds ?? []).map(({ id }) => id));
       this.pages.set(staged.page.pageId, {
-        page: staged.page, frameEpoch: staged.frameEpoch, displayPage: retained.page,
+        page: staged.page, frameEpoch: staged.frameEpoch, displayPage: new WeakRef(retained.page),
         revision: displayPageRevision(retained.page), layoutRevision, pixelRatio,
         backgrounds: (echo?.damage ?? []).filter((damage) => damage.page.pageId === staged.page.pageId && sent.has(damage.backgroundId))
           .map((damage) => ({ id: damage.backgroundId, rect: damage.rect, omitted: damage.omittedPrimitiveIds.join(',') })),
       });
+    }
+    for (const [pageId, held] of this.pages) {
+      const page = held.displayPage.deref();
+      const retained = retainedFramePageById(frame, BigInt(pageId))?.page;
+      if (!page || retained !== page || retained.unbuilt) this.pages.delete(pageId);
     }
   }
 
@@ -56,7 +61,7 @@ export class StagedEchoPages {
       held.page.pageIndex !== context.page.pageIndex || held.layoutRevision !== layoutRevision ||
       held.pixelRatio !== pixelRatio) return undefined;
     const retained = retainedFramePageById(frame, BigInt(context.page.pageId));
-    if (!retained || retained.page !== held.displayPage || displayPageRevision(retained.page) !== held.revision) return undefined;
+    if (!retained || retained.page !== held.displayPage.deref() || displayPageRevision(retained.page) !== held.revision) return undefined;
     const omitted = damage.omittedPrimitiveIds.join(',');
     const background = held.backgrounds.find((candidate) => candidate.omitted === omitted &&
       candidate.rect.x === damage.rect.x && candidate.rect.y === damage.rect.y &&
