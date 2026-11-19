@@ -1533,17 +1533,16 @@ test('a selection change while a paste is pending leaves no Paste Options contro
   }
 });
 
-test('a refused or cancelled paste leaves no Paste Options control', async () => {
-  for (const status of ['refused', 'cancelled'] as const) {
+test('a refused or cancelled paste leaves no Paste Options control, an applied one shows it', async () => {
+  for (const status of ['applied', 'refused', 'cancelled'] as const) {
     const paste = mountPasteOptions();
     const end = { story: 'body', paraId: 'a', offset: 4 };
     try {
       act(() => paste.record(boldFragment(), 'Bold'));
-      await paste.settle(0, status);
-      act(() => { paste.input.snapshot.workerSelection = { anchor: end, focus: end }; });
+      await paste.settle(0, status, { anchor: end, focus: end });
       paste.present(1);
       await paste.idle();
-      expect(`${status}: ${paste.control() !== null}`).toBe(`${status}: false`);
+      expect(`${status}: ${paste.control() !== null}`).toBe(`${status}: ${status === 'applied'}`);
     } finally {
       paste.dispose();
     }
@@ -1591,5 +1590,149 @@ test('the paste options control follows a window scroll only while it is shown',
     expect(control() !== null).toBe(false);
   } finally {
     paste.dispose();
+  }
+});
+
+function mountPasteChoices() {
+  const host = document.createElement('div');
+  host.style.position = 'relative';
+  document.body.appendChild(host);
+  host.getBoundingClientRect = () => ({ x: 0, y: 100, top: 100, bottom: 700, left: 0, right: 600, width: 600, height: 600, toJSON() {} });
+  const replaced: Array<{ fragment: DocxClipboardFragment; selection: DocxCommandSelection; variant: 'plain' | 'merge' | undefined }> = [];
+  const recorder: { current: PeerlessPasteRecorder | null } = { current: null };
+  const admitted: { current: PeerlessInputAdmission | null } = { current: null };
+  const callbacks: Pick<PeerlessInputProps, 'caretHostRef' | 'pasteRecorder' | 'onPasteFragment' | 'onReplacePasteFragment'> = {
+    caretHostRef: { current: host },
+    pasteRecorder: recorder,
+    onPasteFragment: (fragment, _inputTime, plainText) => {
+      recorder.current?.(fragment, plainText, submitPasteFragment(admitted.current!, fragment, { source: 'paste', fence: true }, () => {}));
+      return true;
+    },
+    onReplacePasteFragment: (fragment, selection, variant) => {
+      replaced.push({ fragment, selection, variant });
+      return false;
+    },
+  };
+  const input = mount(false, callbacks);
+  admitted.current = input.admission;
+  const geometry: PeerlessFrameGeometry = {
+    identity: input.snapshot.identity, coversThroughSeq: 0, frameEpoch: 1, layoutRevision: 1,
+    pages: [], caret: { x: 80, y: 200, width: 1, height: 12 }, selectionRects: [],
+  };
+  act(() => { input.viewStore.installFrameGeometry(geometry); input.refresh(); });
+  let frameEpoch = 1;
+  const present = (version: number) => act(() => {
+    frameEpoch += 1;
+    input.snapshot.version = version;
+    input.viewStore.installFrameGeometry({ ...geometry, coversThroughSeq: input.snapshot.throughSeq, frameEpoch });
+    input.refresh();
+  });
+  const settleLast = (status: TicketOutcome['status'], selection: DocxCommandSelection) => act(async () => {
+    const index = input.entries.length - 1;
+    input.entries[index]!.settle({ status, seq: index + 1 }, selection);
+  });
+  const end = { story: 'body', paraId: 'a', offset: 4 };
+  const control = () => host.querySelector<HTMLElement>('[data-paste-options]');
+  return {
+    input, replaced, end, control, present, settleLast,
+    async offer() {
+      pasteWith(input, clipboardFragmentHtml(boldFragment()), 'Bold');
+      expect(input.submitted.at(-1)).toBe('pasteFragment');
+      await settleLast('applied', { anchor: end, focus: end });
+      present(input.snapshot.version + 1);
+      await waitFor(() => expect(control() !== null).toBe(true));
+    },
+    dispose() {
+      input.unmount();
+      input.admission.dispose();
+      host.remove();
+    },
+  };
+}
+
+test('Backspace, undo and redo after a paste each remove the Paste Options control', async () => {
+  const edits: Array<[string, (textarea: HTMLTextAreaElement) => void, string]> = [
+    ['Backspace', (textarea) => {
+      fireEvent.keyDown(textarea, { key: 'Backspace' });
+      beforeinput(textarea, 'deleteContentBackward');
+      fireEvent.keyUp(textarea, { key: 'Backspace' });
+    }, 'deleteBackward'],
+    ['undo', (textarea) => {
+      fireEvent.keyDown(textarea, { key: 'z', ctrlKey: true });
+      fireEvent.keyUp(textarea, { key: 'z' });
+    }, 'undo'],
+    ['redo', (textarea) => {
+      fireEvent.keyDown(textarea, { key: 'y', ctrlKey: true });
+      fireEvent.keyUp(textarea, { key: 'y' });
+    }, 'redo'],
+  ];
+  for (const [name, edit, kind] of edits) {
+    const choices = mountPasteChoices();
+    try {
+      await choices.offer();
+      edit(choices.input.textarea);
+      expect(`${name}: ${choices.input.submitted.at(-1)} ${choices.control() !== null}`).toBe(`${name}: ${kind} false`);
+    } finally {
+      choices.dispose();
+    }
+  }
+});
+
+test('a formatting command that changes the document after the paste removes the Paste Options control', async () => {
+  const choices = mountPasteChoices();
+  try {
+    await choices.offer();
+    act(() => { submitFormattingIntent(choices.input.admission, { kind: 'toggleMark', payload: { mark: { type: 'bold' } } }); });
+    expect(choices.input.submitted.at(-1)).toBe('toggleMark');
+    await choices.settleLast('applied', { anchor: choices.end, focus: choices.end });
+    choices.present(choices.input.snapshot.version + 1);
+    expect(choices.control() !== null).toBe(false);
+  } finally {
+    choices.dispose();
+  }
+});
+
+test('a remote change that moves the document version removes the Paste Options control', async () => {
+  const choices = mountPasteChoices();
+  try {
+    await choices.offer();
+    const submitted = choices.input.submitted.length;
+    choices.present(choices.input.snapshot.version + 1);
+    expect(choices.input.submitted).toHaveLength(submitted);
+    expect(choices.control() !== null).toBe(false);
+  } finally {
+    choices.dispose();
+  }
+});
+
+test('switching the editor to read-only, as viewing mode does, removes the Paste Options control', async () => {
+  const choices = mountPasteChoices();
+  try {
+    await choices.offer();
+    act(() => { choices.input.admission.setReadOnly(true); });
+    expect(choices.control() !== null).toBe(false);
+  } finally {
+    choices.dispose();
+  }
+});
+
+test('a choice made after the selection moved away from the paste at the same document version replaces nothing', async () => {
+  const choices = mountPasteChoices();
+  const moved = { story: 'body', paraId: 'b', offset: 9 };
+  try {
+    await choices.offer();
+    fireEvent.click(choices.control()!.querySelector('button')!);
+    await waitFor(() => expect(document.activeElement?.closest('[data-paste-options]') != null).toBe(true));
+    choices.input.session.submit('navigate', { unit: 'document-boundary', direction: 'forward', extend: false });
+    await choices.settleLast('applied', { anchor: moved, focus: moved });
+    choices.present(choices.input.snapshot.version);
+    expect(choices.control() !== null).toBe(true);
+    const textOnly = Array.from(choices.control()!.querySelectorAll('[role="menuitemradio"]'))
+      .find((item) => item.textContent?.includes('Keep Text Only'));
+    expect(textOnly !== undefined).toBe(true);
+    fireEvent.click(textOnly!);
+    expect(choices.replaced).toEqual([]);
+  } finally {
+    choices.dispose();
   }
 });

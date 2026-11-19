@@ -28,3 +28,14 @@ test('paste options are offered after an in-editor copy only when its runs carry
   const unmarked = { paragraphs: [{ text: 'Plain', runs: [{ text: 'Plain', format: { other: {} } }] }] };
   expect(pasteOptionsApply(unmarked, 'Plain')).toBe(false);
 });
+
+test('a formatted paste that holds a picture offers no paste options and a plain table paste offers them', () => {
+  const bold = { text: 'Bold', format: { other: { bold: true } } };
+  expect(pasteOptionsApply({ paragraphs: [{ text: 'Bold', runs: [bold] }] }, 'Bold')).toBe(true);
+  expect(pasteOptionsApply({ paragraphs: [{ text: 'Bold', runs: [bold],
+    inlines: [{ text: 'Bold' }, { image: { src: 'data:image/png;base64,AA==' } }] }] }, 'Bold')).toBe(false);
+  const cell = (text: string) => ({ tcPr: {}, content: [{ kind: 'text' as const, text }, { kind: 'pilcrow' as const }] });
+  const table = { paragraphs: [{ text: '', tables: [{ tblPr: {}, grid: [], rows: [{ trPr: {}, cells: [cell('a'), cell('b')] }] }] }] };
+  expect(clipboardFragmentPlainText(table)).toBe('a\tb');
+  expect(pasteOptionsApply(table, clipboardFragmentPlainText(table))).toBe(true);
+});

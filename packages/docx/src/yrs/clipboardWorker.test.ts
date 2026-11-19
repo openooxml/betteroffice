@@ -10,6 +10,7 @@ import type { DocxCommandEnvelope, DocxCommandInitRequest } from './residentComm
 import type { DocxClipboardFragment } from './clipboardFragment';
 import { mergeFormattingFragment } from './clipboardFragmentTransforms';
 import type { YrsCellLoc } from './index';
+import { createYrsSession } from './index';
 
 const TIMEOUT = 20_000;
 const LAYOUT = JSON.stringify({
@@ -799,6 +800,95 @@ for (const another of [false, true]) {
     } finally {
       source.client.destroy();
       if (another) target.client.destroy();
+    }
+  }, TIMEOUT);
+}
+
+test('replacePasteFragment after a remote update is refused, changes nothing, and a second choice is refused too', async () => {
+  const { client, engine } = await openTableWorker();
+  const remote = await createYrsSession({ clientId: 8432 });
+  try {
+    let version = 0;
+    let seq = 0;
+    const paragraphs = engine.paragraphs('body');
+    const last = paragraphs[paragraphs.length - 1]!;
+    const lastSpan = engine.geometryReader.locateParagraph('body', last.paraId);
+    const split = engine.splitParagraph({ story: 'body', paraId: last.paraId, offset: lastSpan.end - lastSpan.start });
+    const base = { story: 'body', paraId: split.secondParaId, offset: 0 };
+    const texts = () => engine.paragraphs('body').map((paragraph) => paragraph.text);
+    const boldText = () => engine.storySegments('body')
+      .map((segment) => segment.kind === 'text' && segment.attributes.bold === true ? segment.text : '').join('');
+    const pasted = await client.edit(intent(++seq, version, 'pasteFragment', {
+      selection: { anchor: base, focus: base },
+      fragment: { paragraphs: [{ text: 'BAR', runs: [{ text: 'BAR', format: { other: { bold: true } } }] }] },
+    }));
+    expect(pasted.outcomes[0]?.status).toBe('applied');
+    version = pasted.version;
+    const end = pasted.selection!.focus;
+    remote.loadState(engine.encodeState());
+    remote.insertText({ story: 'body', paraId: last.paraId, offset: 0 }, 'R');
+    await client.applyRemoteUpdate(remote.encodeStateAsUpdate(engine.encodeStateVector()));
+    expect(engine.paragraphs('body').find((paragraph) => paragraph.paraId === last.paraId)?.text).toBe('RSeed');
+    const before = texts();
+    expect(boldText()).toBe('BAR');
+    for (const attempt of ['first', 'second']) {
+      const replaced = await client.edit(intent(++seq, version, 'replacePasteFragment', {
+        selection: { anchor: end, focus: end },
+        fragment: { paragraphs: [{ text: 'BAR' }] },
+        plain: true,
+      }));
+      expect({ attempt, outcome: replaced.outcomes[0] }).toMatchObject({ attempt, outcome: { status: 'refused', reason: 'paste-changed' } });
+      expect(texts()).toEqual(before);
+      expect(boldText()).toBe('BAR');
+    }
+  } finally {
+    remote.destroy();
+    client.destroy();
+  }
+}, TIMEOUT);
+
+for (const variant of ['plain', 'merge'] as const) {
+  test(`after ${variant === 'plain' ? 'keep text only' : 'merge formatting'} one undo returns to the document before the paste and redo brings the choice back`, async () => {
+    const { client, engine } = await openTableWorker();
+    try {
+      let version = 0;
+      let seq = 0;
+      const paragraphs = engine.paragraphs('body');
+      const atPara = paragraphs[paragraphs.length - 1]!;
+      const atSpan = engine.geometryReader.locateParagraph('body', atPara.paraId);
+      const at = { story: 'body', paraId: atPara.paraId, offset: atSpan.end - atSpan.start };
+      const texts = () => engine.paragraphs('body').map((paragraph) => paragraph.text);
+      const pastedBold = () => engine.storySegments('body')
+        .flatMap((segment) => segment.kind === 'text' && segment.text.includes('Rich') ? [segment.attributes.bold === true] : []);
+      const before = texts();
+      const source: DocxClipboardFragment = { paragraphs: [{ text: 'Rich', runs: [{ text: 'Rich', format: { other: { bold: true } } }] }] };
+      const pasted = await client.edit(intent(++seq, version, 'pasteFragment', { selection: { anchor: at, focus: at }, fragment: source }));
+      expect(pasted.outcomes[0]?.status).toBe('applied');
+      version = pasted.version;
+      expect(pastedBold()).toEqual([true]);
+      const end = pasted.selection!.focus;
+      const replaced = await client.edit(intent(++seq, version, 'replacePasteFragment', {
+        selection: { anchor: end, focus: end },
+        ...(variant === 'plain'
+          ? { fragment: { paragraphs: [{ text: 'Rich' }] }, plain: true as const }
+          : { fragment: mergeFormattingFragment(source), merge: true as const }),
+      }));
+      expect(replaced.outcomes[0]?.status).toBe('applied');
+      version = replaced.version;
+      const chosen = texts();
+      expect(chosen).toContain('SeedRich');
+      expect(pastedBold()).toEqual([variant === 'merge']);
+      const undone = await client.edit(intent(++seq, version, 'undo', {}));
+      expect(undone.outcomes[0]?.status).toBe('applied');
+      version = undone.version;
+      expect(texts()).toEqual(before);
+      expect(pastedBold()).toEqual([]);
+      const redone = await client.edit(intent(++seq, version, 'redo', {}));
+      expect(redone.outcomes[0]?.status).toBe('applied');
+      expect(texts()).toEqual(chosen);
+      expect(pastedBold()).toEqual([variant === 'merge']);
+    } finally {
+      client.destroy();
     }
   }, TIMEOUT);
 }

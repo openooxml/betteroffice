@@ -2912,6 +2912,14 @@ test('replacing a paste checks the replacement fragment and submits only an allo
   expect(replacements()[0]).toMatchObject({ command: { payload: { fragment: kept, selection: { anchor: at, focus: at } } } });
 });
 
+test('suggesting mode offers no paste options and editing mode offers them', async () => {
+  const view = render(<DocxEditor {...peerlessProps} mode="suggesting" author="Writer" showToolbar={false} />);
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
+  expect(surface.mock.calls.at(-1)![0].pasteOptions).toBe(false);
+  view.rerender(<DocxEditor {...peerlessProps} mode="editing" author="Writer" showToolbar={false} />);
+  await waitFor(() => expect(surface.mock.calls.at(-1)![0].pasteOptions).not.toBe(false));
+});
+
 test('worker shell reserves the widest scaled page and retains host styling', async () => {
   const view = render(<DocxEditor {...peerlessProps} showToolbar={false} initialZoom={1.5} />);
   await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
