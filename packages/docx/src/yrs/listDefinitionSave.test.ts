@@ -8,7 +8,9 @@ import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
 import { documentToYrs } from './documentToYrs';
 import { saveEditorDocument } from './editorSave';
 import { createYrsSession, saveYrsDocx, yrsToDocument, type YrsSession } from './index';
-import { savedListDefinitionIds, writeListDefinitionParts, type DocxSavedListDefinition } from './listDefinitionSave';
+import {
+  numberingWithListDefinitions, savedListDefinitionIds, writeListDefinitionParts, type DocxSavedListDefinition,
+} from './listDefinitionSave';
 import { captureSessionSave, writeSessionSave } from './saveYrsDocx';
 
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
@@ -470,3 +472,86 @@ describe('the numbering part a save adds, its content type and relationship', ()
     expect(result).toBe(`<Relationships xmlns="${PACKAGE_RELATIONSHIPS}"><Relationship Id="rId1" Type="${R}/numbering" Target="numbering.xml"/></Relationships>`);
   });
 });
+
+const decimalLevel = (prefix: string) =>
+  `<${prefix}lvl ${prefix}ilvl="0"><${prefix}start ${prefix}val="1"/><${prefix}numFmt ${prefix}val="decimal"/><${prefix}lvlText ${prefix}val="%1."/></${prefix}lvl>`;
+
+/** Numbering parts whose list elements are not all spelled with the root's prefix, and how a created list is spelled in each. */
+const SPELLINGS: Array<{ name: string; xml: string; abstractStart: string; numStart: string }> = [
+  {
+    name: 'with the main namespace as its default namespace',
+    xml: `<numbering xmlns="${W}"><abstractNum abstractNumId="0">${decimalLevel('')}</abstractNum><num numId="1"><abstractNumId val="0"/></num></numbering>`,
+    abstractStart: '<abstractNum abstractNumId="2">',
+    numStart: '<num numId="3">',
+  },
+  {
+    name: 'whose lists sit under a second prefix bound on the root',
+    xml: `<w:numbering xmlns:w="${W}" xmlns:x="${W}"><x:abstractNum x:abstractNumId="0">${decimalLevel('x:')}</x:abstractNum><x:num x:numId="1"><x:abstractNumId x:val="0"/></x:num></w:numbering>`,
+    abstractStart: '<w:abstractNum w:abstractNumId="2">',
+    numStart: '<w:num w:numId="3">',
+  },
+  {
+    name: 'with lists that bind the main namespace themselves',
+    xml: `<w:numbering xmlns:w="${W}"><w:abstractNum w:abstractNumId="0">${decimalLevel('w:')}</w:abstractNum>` +
+      `<w2:abstractNum xmlns:w2="${W}" w2:abstractNumId="1">${decimalLevel('w2:')}</w2:abstractNum>` +
+      `<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num><w2:num xmlns:w2="${W}" w2:numId="2"><w2:abstractNumId w2:val="1"/></w2:num></w:numbering>`,
+    abstractStart: '<w:abstractNum w:abstractNumId="2">',
+    numStart: '<w:num w:numId="3">',
+  },
+];
+
+/** Where the list elements of `numbering` start, in any spelling, and the ids their start tags name. */
+function listStarts(numbering: string, local: 'abstractNum' | 'num', id: 'abstractNumId' | 'numId') {
+  return [...numbering.matchAll(new RegExp(`<(?:[\\w.-]+:)?${local}(?=[\\s/>])[^>]*>`, 'g'))].map(match => ({
+    index: match.index ?? 0,
+    id: Number(new RegExp(`\\s(?:[\\w.-]+:)?${id}\\s*=\\s*["'](\\d+)["']`).exec(match[0])?.[1]),
+  }));
+}
+
+/** That the list `numId` and the definition it points at stand in schema order among the lists of `numbering`. */
+function expectInSchemaOrder(numbering: string, numId: number): void {
+  const nums = listStarts(numbering, 'num', 'numId');
+  const abstracts = listStarts(numbering, 'abstractNum', 'abstractNumId');
+  const num = nums.find(entry => entry.id === numId);
+  expect(num).toBeDefined();
+  const pointer = Number(/<(?:[\w.-]+:)?abstractNumId\s[^>]*\bval\s*=\s*["'](\d+)["']/.exec(numbering.slice(num!.index))?.[1]);
+  const abstract = abstracts.find(entry => entry.id === pointer);
+  expect(abstract).toBeDefined();
+  expect(abstracts.every(entry => entry.index <= abstract!.index)).toBe(true);
+  expect(nums.every(entry => entry.index > abstract!.index)).toBe(true);
+  expect(nums.every(entry => entry.index <= num!.index)).toBe(true);
+}
+
+describe('created lists in numbering parts spelled with other prefixes', () => {
+  const CREATED: DocxSavedListDefinition = {
+    key: '9:1',
+    kind: 'numbered',
+    levelTexts: LEVELS.map(level => `%${level + 1}.`),
+    levelFormats: LEVELS.map(() => 'decimal'),
+    numId: 3,
+    abstractNumId: 2,
+  };
+  for (const { name, xml, abstractStart, numStart } of SPELLINGS) {
+    test(`a numbering part ${name} takes a created list in its own spelling and schema order, and recognises it again`, () => {
+      const result = numberingWithListDefinitions(xml, [CREATED]);
+      expect(result.indexOf(abstractStart)).toBeGreaterThan(-1);
+      expect(result.indexOf(numStart)).toBeGreaterThan(-1);
+      expectInSchemaOrder(result, CREATED.numId);
+      expect(numberingWithListDefinitions(result, [CREATED])).toBe(result);
+    });
+  }
+});
+
+for (const [saveName, save] of Object.entries(SAVES)) {
+  for (const { name, xml } of SPELLINGS) {
+    test(`${saveName}: a created list saved into a numbering part ${name} stands in schema order above its ids`, async () => {
+      const session = await seeded(makeDocx(documentOf(paragraph('First'), paragraph('Second')), xml));
+      createList(session, 'Second', 'numbered');
+      const parts = unzipContainer(await save(session));
+      const numId = savedNumId(text(parts['word/document.xml']) ?? '', 'Second');
+      const numbering = text(parts['word/numbering.xml']) ?? '';
+      expect(numId).toBeGreaterThan(Math.max(...listStarts(xml, 'num', 'numId').map(entry => entry.id)));
+      expectInSchemaOrder(numbering, numId!);
+    });
+  }
+}
