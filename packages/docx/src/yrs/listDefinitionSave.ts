@@ -238,21 +238,65 @@ function xmlText(value: string): string {
 
 const attributeValue = (value: string | number) => escapeXml(xmlText(String(value)));
 
-/** `<{prefix}{name} ...>` elements of `masked`, with where they start and end. */
-function elementsOf(masked: string, qualified: string): Array<{ index: number; start: string; body: string; end: number }> {
-  const found: Array<{ index: number; start: string; body: string; end: number }> = [];
-  for (const match of masked.matchAll(new RegExp(`<${qualified.replace(/\./g, '\\.')}(?=[\\s/>])[^>]*>`, 'g'))) {
+/** An element of a part, with the namespace its name is bound to where it stands. */
+interface ElementSpan {
+  /** The name as written, prefix included. */
+  name: string;
+  prefix: string;
+  local: string;
+  namespace: string | undefined;
+  /** The namespace bindings in scope inside the element, by prefix ('' for the default namespace). */
+  bindings: ReadonlyMap<string, string>;
+  start: string;
+  index: number;
+  bodyStart: number;
+  bodyEnd: number;
+  end: number;
+  selfClosing: boolean;
+  closed: boolean;
+}
+
+const TAG = /<(\/?)([\w.-]+(?::[\w.-]+)?)((?:\s+[\w.:-]+\s*=\s*(?:"[^"]*"|'[^']*'))*)\s*(\/?)>/g;
+const DECLARATION = /\sxmlns(?::([\w.-]+))?\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
+
+/** The root element of `masked` and its children, each with the namespace bindings in scope at it. */
+function rootAndChildren(masked: string): { root: ElementSpan; children: ElementSpan[] } | undefined {
+  const stack: ElementSpan[] = [];
+  const children: ElementSpan[] = [];
+  let root: ElementSpan | undefined;
+  for (const match of masked.matchAll(TAG)) {
+    const tag = match[0];
+    const [, closing, name, attributes, selfClosing] = match;
     const index = match.index ?? 0;
-    const after = index + match[0].length;
-    if (match[0].endsWith('/>')) {
-      found.push({ index, start: match[0], body: '', end: after });
+    if (closing) {
+      const open = stack.pop();
+      if (!open) break;
+      open.bodyEnd = index;
+      open.end = index + tag.length;
+      open.closed = true;
+      if (stack.length === 0) break;
       continue;
     }
-    const close = masked.indexOf(`</${qualified}>`, after);
-    const end = close < 0 ? masked.length : close + `</${qualified}>`.length;
-    found.push({ index, start: match[0], body: masked.slice(after, close < 0 ? masked.length : close), end });
+    const bindings = new Map<string, string>(stack.at(-1)?.bindings ?? []);
+    for (const declared of (attributes ?? '').matchAll(DECLARATION)) {
+      bindings.set(declared[1] ?? '', unescapeXml(declared[2] ?? declared[3] ?? ''));
+    }
+    const colon = name!.indexOf(':');
+    const prefix = colon < 0 ? '' : name!.slice(0, colon);
+    const span: ElementSpan = {
+      name: name!, prefix, local: name!.slice(colon + 1), namespace: bindings.get(prefix), bindings, start: tag, index,
+      bodyStart: index + tag.length, bodyEnd: index + tag.length, end: index + tag.length,
+      selfClosing: selfClosing === '/', closed: selfClosing === '/',
+    };
+    if (stack.length === 0) root = span;
+    if (stack.length === 1) children.push(span);
+    if (span.selfClosing) {
+      if (stack.length === 0) break;
+      continue;
+    }
+    stack.push(span);
   }
-  return found;
+  return root === undefined ? undefined : { root, children };
 }
 
 /** The value, in either quoting, of attribute `name` of the start tag `start`. */
@@ -274,12 +318,12 @@ const childValue = (xml: string, name: string) => {
 };
 
 /** The level formats and texts of an `abstractNum` body, by level, as the writer controls them. */
-function levelsOf(body: string, own: string): Array<{ format?: string; text?: string } | undefined> {
+function levelsOf(body: string): Array<{ format?: string; text?: string } | undefined> {
   const levels: Array<{ format?: string; text?: string } | undefined> = [];
-  for (const level of elementsOf(body, `${own}lvl`)) {
-    const index = numberAttribute(level.start, 'ilvl');
+  for (const level of body.matchAll(/(<(?:[\w.-]+:)?lvl(?=[\s/>])[^>]*(?<!\/)>)([\s\S]*?)<\/(?:[\w.-]+:)?lvl\s*>/g)) {
+    const index = numberAttribute(level[1] ?? '', 'ilvl');
     if (index === undefined || index >= LEVELS) continue;
-    levels[index] = { format: childValue(level.body, 'numFmt'), text: childValue(level.body, 'lvlText') };
+    levels[index] = { format: childValue(level[2] ?? '', 'numFmt'), text: childValue(level[2] ?? '', 'lvlText') };
   }
   return levels;
 }
@@ -298,19 +342,23 @@ const referencedNumIds = (xml: string) =>
 /** What a numbering part holds: its ids, the created lists it carries and where its elements are. */
 function scanNumbering(xml: string) {
   const masked = xml.replace(/<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>/g, match => ' '.repeat(match.length));
-  const root = /<(?:([\w.-]+):)?numbering\b[^>]*>/.exec(masked) ?? undefined;
-  const own = root?.[1] === undefined ? '' : `${root[1]}:`;
-  const abstractNums = elementsOf(masked, `${own}abstractNum`);
-  const nums = elementsOf(masked, `${own}num`);
+  const tree = rootAndChildren(masked);
+  const root = tree?.root.local === 'numbering' ? tree.root : undefined;
+  const children = (tree?.children ?? []).filter(child => root !== undefined && child.namespace === root.namespace);
+  const named = (local: string) => children.filter(child => child.local === local);
+  const abstractNums = named('abstractNum');
+  const nums = named('num');
+  const cleanup = named('numIdMacAtCleanup')[0];
+  const body = (element: ElementSpan) => masked.slice(element.bodyStart, element.bodyEnd);
   const carriers: Array<{ key: string; abstractNumId: number; levels: ReturnType<typeof levelsOf> }> = [];
   const abstractNumIds: number[] = looseIds(xml, 'abstractNumId');
   for (const element of abstractNums) {
     const id = numberAttribute(element.start, 'abstractNumId');
     if (id === undefined) continue;
     abstractNumIds.push(id);
-    const value = childValue(element.body, 'name');
+    const value = childValue(body(element), 'name');
     if (value?.startsWith(CARRIER)) {
-      carriers.push({ key: value.slice(CARRIER.length), abstractNumId: id, levels: levelsOf(element.body, own) });
+      carriers.push({ key: value.slice(CARRIER.length), abstractNumId: id, levels: levelsOf(body(element)) });
     }
   }
   const pointers = new Map<number, number>();
@@ -319,10 +367,32 @@ function scanNumbering(xml: string) {
     const id = numberAttribute(element.start, 'numId');
     if (id === undefined) continue;
     numIds.push(id);
-    const pointer = childValue(element.body, 'abstractNumId');
+    const pointer = childValue(body(element), 'abstractNumId');
     if (pointer !== undefined && /^\d+$/.test(pointer) && !pointers.has(Number(pointer))) pointers.set(Number(pointer), id);
   }
-  return { masked, root, own, abstractNums, nums, carriers, pointers, numIds, abstractNumIds };
+  return { root, abstractNums, nums, cleanup, carriers, pointers, numIds, abstractNumIds };
+}
+
+/**
+ * How list elements are spelled in the numbering part `scan` reads: the prefix the root binds to
+ * its namespace, attributes qualified or not as its lists write them (qualified when it has none),
+ * and the declaration a qualified attribute needs when no prefix is bound on the root.
+ */
+function numberingSpelling(scan: ReturnType<typeof scanNumbering>): { element: string; attribute: string; declaration: string } {
+  const root = scan.root!;
+  const namespace = root.namespace ?? W;
+  const element = root.namespace === undefined ? 'w:' : root.prefix === '' ? '' : `${root.prefix}:`;
+  const declaration = root.namespace === undefined ? ` xmlns:w="${W}"` : '';
+  const sample = [...scan.abstractNums, ...scan.nums][0];
+  const sampleId = sample === undefined
+    ? undefined
+    : /\s(?:([\w.-]+):)?(?:abstractNumId|numId)\s*=/.exec(sample.start);
+  if (sampleId !== undefined && sampleId !== null && sampleId[1] === undefined) return { element, attribute: '', declaration };
+  if (element !== '') return { element, attribute: element, declaration };
+  const bound = [...root.bindings].find(([prefix, uri]) => prefix !== '' && uri === namespace)?.[0];
+  return bound === undefined
+    ? { element, attribute: 'w:', declaration: ` xmlns:w="${namespace}"` }
+    : { element, attribute: `${bound}:`, declaration };
 }
 
 /** The abstractNumId of the abstractNum `scan` carries for `definition` with what the writer writes for it. */
@@ -440,23 +510,26 @@ function appendToRoot(xml: string, name: string, child: (prefix: string) => stri
   return `${xml.slice(0, close)}${entry}${xml.slice(close)}`;
 }
 
-function abstractNumXml(w: string, declaration: string, definition: DocxSavedListDefinition): string {
+type NumberingSpelling = ReturnType<typeof numberingSpelling>;
+
+function abstractNumXml(spelling: NumberingSpelling, definition: DocxSavedListDefinition): string {
+  const { element: e, attribute: a, declaration } = spelling;
   const levels = definition.levelTexts.slice(0, LEVELS).map((value, level) => {
     const format = definition.levelFormats[level] ?? 'decimal';
     const right = format === 'lowerRoman';
     const font = definition.kind === 'bullet' ? BULLET_FONTS.get(value) : undefined;
-    const fonts = font === undefined ? '' : `<${w}rPr><${w}rFonts ${w}ascii="${font}" ${w}hAnsi="${font}" ${w}hint="default"/></${w}rPr>`;
-    return `<${w}lvl ${w}ilvl="${level}"><${w}start ${w}val="1"/><${w}numFmt ${w}val="${attributeValue(format)}"/>` +
-      `<${w}lvlText ${w}val="${attributeValue(value)}"/><${w}lvlJc ${w}val="${right ? 'right' : 'left'}"/>` +
-      `<${w}pPr><${w}ind ${w}left="${720 * (level + 1)}" ${w}hanging="${right ? 180 : 360}"/></${w}pPr>${fonts}</${w}lvl>`;
+    const fonts = font === undefined ? '' : `<${e}rPr><${e}rFonts ${a}ascii="${font}" ${a}hAnsi="${font}" ${a}hint="default"/></${e}rPr>`;
+    return `<${e}lvl ${a}ilvl="${level}"><${e}start ${a}val="1"/><${e}numFmt ${a}val="${attributeValue(format)}"/>` +
+      `<${e}lvlText ${a}val="${attributeValue(value)}"/><${e}lvlJc ${a}val="${right ? 'right' : 'left'}"/>` +
+      `<${e}pPr><${e}ind ${a}left="${720 * (level + 1)}" ${a}hanging="${right ? 180 : 360}"/></${e}pPr>${fonts}</${e}lvl>`;
   });
-  return `<${w}abstractNum${declaration} ${w}abstractNumId="${attributeValue(definition.abstractNumId)}">` +
-    `<${w}multiLevelType ${w}val="hybridMultilevel"/><${w}name ${w}val="${attributeValue(CARRIER + definition.key)}"/>` +
-    `${levels.join('')}</${w}abstractNum>`;
+  return `<${e}abstractNum${declaration} ${a}abstractNumId="${attributeValue(definition.abstractNumId)}">` +
+    `<${e}multiLevelType ${a}val="hybridMultilevel"/><${e}name ${a}val="${attributeValue(CARRIER + definition.key)}"/>` +
+    `${levels.join('')}</${e}abstractNum>`;
 }
 
-const numXml = (w: string, declaration: string, definition: DocxSavedListDefinition) =>
-  `<${w}num${declaration} ${w}numId="${attributeValue(definition.numId)}"><${w}abstractNumId ${w}val="${attributeValue(definition.abstractNumId)}"/></${w}num>`;
+const numXml = ({ element: e, attribute: a, declaration }: NumberingSpelling, definition: DocxSavedListDefinition) =>
+  `<${e}num${declaration} ${a}numId="${attributeValue(definition.numId)}"><${e}abstractNumId ${a}val="${attributeValue(definition.abstractNumId)}"/></${e}num>`;
 
 /**
  * Numbering part `xml`, or a new one when it is undefined, holding `definitions` after its own in
@@ -469,27 +542,25 @@ export function numberingWithListDefinitions(xml: string | undefined, definition
   const scan = scanNumbering(source);
   const root = scan.root;
   if (!root) throw new Error('The numbering part has no numbering element');
-  const bound = [...root[0].matchAll(/\sxmlns:([\w.-]+)\s*=\s*(["'])(.*?)\2/g)].find(match => match[3] === W)?.[1];
-  const w = bound === undefined ? 'w:' : `${bound}:`;
-  const declaration = bound === undefined ? ` xmlns:w="${W}"` : '';
+  const spelling = numberingSpelling(scan);
   const abstracts = definitions
     .filter(definition => carriedAbstractNum(scan, definition) !== definition.abstractNumId)
-    .map(definition => abstractNumXml(w, declaration, definition))
+    .map(definition => abstractNumXml(spelling, definition))
     .join('');
   const nums = definitions
     .filter(definition => scan.pointers.get(definition.abstractNumId) !== definition.numId)
-    .map(definition => numXml(w, declaration, definition))
+    .map(definition => numXml(spelling, definition))
     .join('');
   if (abstracts === '' && nums === '') return source;
-  if (root[0].endsWith('/>')) {
-    const open = `${source.slice(root.index, root.index + root[0].length - 2).trimEnd()}>`;
-    return `${source.slice(0, root.index)}${open}${abstracts}${nums}</${scan.own}numbering>${source.slice(root.index + root[0].length)}`;
+  if (root.selfClosing) {
+    const open = `${source.slice(root.index, root.end - 2).trimEnd()}>`;
+    return `${source.slice(0, root.index)}${open}${abstracts}${nums}</${root.name}>${source.slice(root.end)}`;
   }
-  const close = scan.masked.lastIndexOf(`</${scan.own}numbering>`);
-  if (close < 0) throw new Error('The numbering part has no numbering end');
-  const cleanup = elementsOf(scan.masked, `${scan.own}numIdMacAtCleanup`)[0]?.index;
-  const lastAbstractNum = scan.abstractNums[scan.abstractNums.length - 1];
-  const lastNum = scan.nums[scan.nums.length - 1];
+  if (!root.closed) throw new Error('The numbering part has no numbering end');
+  const close = root.bodyEnd;
+  const cleanup = scan.cleanup?.index;
+  const lastAbstractNum = scan.abstractNums.at(-1);
+  const lastNum = scan.nums.at(-1);
   const abstractAt = lastAbstractNum?.end ?? scan.nums[0]?.index ?? cleanup ?? close;
   const numAt = Math.max(abstractAt, lastNum?.end ?? cleanup ?? close);
   return `${source.slice(0, abstractAt)}${abstracts}${source.slice(abstractAt, numAt)}${nums}${source.slice(numAt)}`;
