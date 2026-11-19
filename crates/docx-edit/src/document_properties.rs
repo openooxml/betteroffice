@@ -74,13 +74,8 @@ impl EditingDoc {
                     MapPrelim::default(),
                     crate::insertion_attrs(None, None),
                 );
-                crate::write_pilcrow_properties(
-                    &pilcrow,
-                    &mut txn,
-                    &self.next_id(),
-                    "Normal",
-                    "left",
-                );
+                let para_id = self.next_id(&txn);
+                crate::write_pilcrow_properties(&pilcrow, &mut txn, &para_id, "Normal", "left");
             }
         }
         properties.insert(&mut txn, key, json);

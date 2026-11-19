@@ -1,0 +1,138 @@
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+use yrs::types::text::YChange;
+use yrs::{Any, Array, Map, Out, ReadTxn, Text};
+
+/// Draws a replica's `{client_id}:{counter}` ids.
+pub(crate) struct SessionIds {
+    client_id: u64,
+    counter: AtomicU64,
+    floored: AtomicBool,
+}
+
+impl SessionIds {
+    pub(crate) fn new(client_id: u64) -> Self {
+        Self {
+            client_id,
+            counter: AtomicU64::new(0),
+            floored: AtomicBool::new(false),
+        }
+    }
+
+    /// The next id. The first draw after construction or [`Self::refloor`] first moves the
+    /// counter past every `{client_id}:N` the document read through `txn` holds.
+    pub(crate) fn draw<T: ReadTxn>(&self, txn: &T) -> String {
+        if !self.floored.swap(true, Ordering::Relaxed) {
+            self.counter.fetch_max(self.floor(txn), Ordering::Relaxed);
+        }
+        let counter = self.counter.fetch_add(1, Ordering::Relaxed);
+        format!("{}:{counter}", self.client_id)
+    }
+
+    /// Makes the next draw floor the counter again.
+    pub(crate) fn refloor(&self) {
+        self.floored.store(false, Ordering::Relaxed);
+    }
+
+    /// Continues from `other`'s counter and floor.
+    pub(crate) fn adopt(&self, other: &SessionIds) {
+        self.counter
+            .store(other.counter.load(Ordering::Relaxed), Ordering::Relaxed);
+        self.floored
+            .store(other.floored.load(Ordering::Relaxed), Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn drawn(&self) -> u64 {
+        self.counter.load(Ordering::Relaxed)
+    }
+
+    /// One past the highest `N` of a `{client_id}:N` in a live map key, text attribute or value.
+    fn floor<T: ReadTxn>(&self, txn: &T) -> u64 {
+        let prefix = format!("{}:", self.client_id);
+        let mut floor = 0;
+        let mut pending: Vec<Out> = txn.root_refs().map(|(_, value)| value).collect();
+        while let Some(value) = pending.pop() {
+            match value {
+                Out::Any(any) => note_any(&any, &prefix, &mut floor),
+                Out::YMap(map) => {
+                    for (key, value) in map.iter(txn) {
+                        note(key, &prefix, &mut floor);
+                        pending.push(value);
+                    }
+                }
+                Out::YText(text) => {
+                    for chunk in text.diff(txn, YChange::identity) {
+                        if let Some(attrs) = &chunk.attributes {
+                            for (key, value) in attrs.iter() {
+                                note(key, &prefix, &mut floor);
+                                note_any(value, &prefix, &mut floor);
+                            }
+                        }
+                        if !matches!(chunk.insert, Out::Any(Any::String(_))) {
+                            pending.push(chunk.insert);
+                        }
+                    }
+                }
+                Out::YArray(array) => pending.extend(array.iter(txn)),
+                _ => {}
+            }
+        }
+        floor
+    }
+}
+
+fn note_any(any: &Any, prefix: &str, floor: &mut u64) {
+    let mut pending = vec![any];
+    while let Some(any) = pending.pop() {
+        match any {
+            Any::String(text) => note(text, prefix, floor),
+            Any::Array(items) => pending.extend(items.iter()),
+            Any::Map(entries) => {
+                for (key, value) in entries.iter() {
+                    note(key, prefix, floor);
+                    pending.push(value);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Raises `floor` past each `N` in `text` written as `prefix` then digits, where `prefix` does
+/// not continue a longer number.
+fn note(text: &str, prefix: &str, floor: &mut u64) {
+    for (at, _) in text.match_indices(prefix) {
+        if text[..at].ends_with(|c: char| c.is_ascii_digit()) {
+            continue;
+        }
+        let digits = &text[at + prefix.len()..];
+        let end = digits
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(digits.len());
+        if let Ok(n) = digits[..end].parse::<u64>() {
+            *floor = (*floor).max(n.saturating_add(1));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::note;
+
+    fn floor(text: &str) -> u64 {
+        let mut floor = 0;
+        note(text, "41:", &mut floor);
+        floor
+    }
+
+    #[test]
+    fn only_this_clients_prefix_counts() {
+        assert_eq!(floor("41:3"), 4);
+        assert_eq!(floor("141:3"), 0);
+        assert_eq!(floor("body:repeat:41:7"), 8);
+        assert_eq!(floor("41:2:repeat:41:9"), 10);
+        assert_eq!(floor("41:x"), 0);
+        assert_eq!(floor("x41:5"), 6);
+    }
+}

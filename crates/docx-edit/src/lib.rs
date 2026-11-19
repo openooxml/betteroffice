@@ -118,6 +118,7 @@ mod script_fonts;
 mod search;
 mod section_margins;
 mod sections;
+mod session_ids;
 mod shape_styles;
 pub use sections::SectionInfo;
 mod seed;
@@ -802,7 +803,7 @@ impl Drop for CommitHook {
 pub struct EditingDoc {
     doc: Doc,
     client_id: u64,
-    id_counter: AtomicU64,
+    ids: session_ids::SessionIds,
     direct_batches: AtomicBool,
     direct_batches_applied: AtomicU64,
     host_edit_depth: Arc<AtomicU32>,
@@ -925,7 +926,7 @@ impl EditingDoc {
         Self {
             doc,
             client_id,
-            id_counter: AtomicU64::new(0),
+            ids: session_ids::SessionIds::new(client_id),
             direct_batches: AtomicBool::new(false),
             direct_batches_applied: AtomicU64::new(0),
             host_edit_depth: Arc::new(AtomicU32::new(0)),
@@ -1540,7 +1541,7 @@ impl EditingDoc {
         p_style: &str,
         alignment: &str,
     ) -> EditResult<ParagraphId> {
-        let para_id = self.next_id();
+        let para_id = self.next_id(&self.doc.transact());
         self.create_story_with_paragraph_id(story_id, para_id, initial_text, p_style, alignment)
     }
 
@@ -1550,7 +1551,7 @@ impl EditingDoc {
             .get_map(STORIES)
             .expect("stories root is declared by EditingDoc::new");
         for story_id in story_ids {
-            let para_id = self.next_id();
+            let para_id = self.next_id(&txn);
             if story_id_taken(&stories, &txn, story_id) {
                 return Err(EditError::StoryExists(story_id.clone()));
             }
@@ -1632,7 +1633,7 @@ impl EditingDoc {
                     Some(attrs.clone()),
                 ));
             }
-            let para_id = self.next_id();
+            let para_id = self.next_id(&txn);
             deltas.push(Delta::Inserted(
                 In::Map(MapPrelim::from_iter([
                     (KIND_KEY.to_owned(), Any::from(PILCROW_KIND)),
@@ -1725,8 +1726,8 @@ impl EditingDoc {
         for range in ranges {
             self.refuse_cell_write(&range.story)?;
         }
-        let comment_id = self.next_id();
         let mut txn = self.doc.transact_mut_with(self.client_id);
+        let comment_id = self.next_id(&txn);
         let mut anchors = Vec::with_capacity(ranges.len());
         for range in ranges {
             let len = range.len()?;
@@ -2164,6 +2165,7 @@ impl EditingDoc {
             .then(|| batch::HostEditGuard::new(&self.host_edit_depth));
         let watch = identity::IdentityWatch::new(self.yrs_doc());
         let reanchored = comment_references::CommentWatch::new(self);
+        let own_clock = self.own_clock();
         let result = match origin {
             UpdateOrigin::Remote => {
                 let mut integration = self.remote_deletions.integrate(self.doc.transact_mut());
@@ -2184,6 +2186,9 @@ impl EditingDoc {
             }
         };
         result.map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
+        if self.own_clock() > own_clock {
+            self.ids.refloor();
+        }
         if watch.changed() {
             drop(watch);
             self.repair_paragraph_identities();
@@ -2220,10 +2225,15 @@ impl EditingDoc {
     pub(crate) fn apply_verbatim_v1(&self, bytes: &[u8]) -> EditResult<()> {
         let update = Update::decode_v1(bytes)
             .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
+        let own_clock = self.own_clock();
         self.doc
             .transact_mut()
             .apply_update(update)
-            .map_err(|error| EditError::InvalidUpdate(error.to_string()))
+            .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
+        if self.own_clock() > own_clock {
+            self.ids.refloor();
+        }
+        Ok(())
     }
 
     /// A private replica of `state`, this document's committed state, that allocates identities
@@ -2234,8 +2244,7 @@ impl EditingDoc {
     pub(crate) fn fork(&self, state: &[u8]) -> EditResult<Self> {
         let fork = Self::build(self.client_id, self.keeps_deleted());
         fork.apply_verbatim_v1(state)?;
-        fork.id_counter
-            .store(self.id_counter.load(Ordering::Relaxed), Ordering::Relaxed);
+        fork.ids.adopt(&self.ids);
         if let Some(index) = self.source_index() {
             fork.retain_source(identity::SourcePackage::Ready(index));
         }
@@ -2266,9 +2275,15 @@ impl EditingDoc {
         self.integrate_update(update, UpdateOrigin::Host)
     }
 
-    fn next_id(&self) -> String {
-        let counter = self.id_counter.fetch_add(1, Ordering::Relaxed);
-        format!("{}:{counter}", self.client_id)
+    fn next_id<T: ReadTxn>(&self, txn: &T) -> String {
+        self.ids.draw(txn)
+    }
+
+    fn own_clock(&self) -> u32 {
+        self.doc
+            .transact()
+            .state_vector()
+            .get(&self.doc.client_id())
     }
 }
 

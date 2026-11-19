@@ -1934,7 +1934,7 @@ impl EditingDoc {
                 _ => Vec::new(),
             };
             if changes.is_empty() {
-                let id = new_id.get_or_insert_with(|| self.next_id());
+                let id = new_id.get_or_insert_with(|| self.next_id(txn));
                 let previous: HashMap<_, _> = chunk
                     .attrs
                     .iter()

@@ -3615,10 +3615,7 @@ impl EditingDoc {
         };
         history.add_undo_barrier();
         self.drop_values(&valued);
-        self.id_counter.store(
-            staged.stage.id_counter.load(Ordering::Relaxed),
-            Ordering::Relaxed,
-        );
+        self.ids.adopt(&staged.stage.ids);
         Ok(Ok(EditApplication {
             base_version: plan.base_version,
             version: self.version(),
@@ -3773,8 +3770,7 @@ impl EditingDoc {
                 .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
         }
         history.add_undo_barrier();
-        self.id_counter
-            .store(stage.id_counter.load(Ordering::Relaxed), Ordering::Relaxed);
+        self.ids.adopt(&stage.ids);
         Ok(Ok(resolved))
     }
 
@@ -4252,10 +4248,7 @@ mod direct_tests {
             direct.story_segments("body").unwrap(),
             replica.story_segments("body").unwrap()
         );
-        assert_eq!(
-            direct.id_counter.load(Ordering::Relaxed),
-            replica.id_counter.load(Ordering::Relaxed)
-        );
+        assert_eq!(direct.ids.drawn(), replica.ids.drawn());
         let direct = document();
         let replica = document();
         direct.set_direct_batches(true);
@@ -4415,10 +4408,7 @@ mod direct_tests {
             .apply_update(Update::decode_v1(&staged.update).unwrap())
             .unwrap();
         history.add_undo_barrier();
-        doc.id_counter.store(
-            staged.stage.id_counter.load(Ordering::Relaxed),
-            Ordering::Relaxed,
-        );
+        doc.ids.adopt(&staged.stage.ids);
         let application = EditApplication {
             base_version: plan.base_version,
             version: doc.version(),
@@ -4596,10 +4586,7 @@ mod direct_tests {
             } else {
                 assert_eq!(a.receipts[0].revision_ids, previous);
             }
-            assert_eq!(
-                direct.id_counter.load(Ordering::Relaxed),
-                replica.id_counter.load(Ordering::Relaxed)
-            );
+            assert_eq!(direct.ids.drawn(), replica.ids.drawn());
             assert_eq!(
                 direct.story_segments("body").unwrap(),
                 replica.story_segments("body").unwrap()
