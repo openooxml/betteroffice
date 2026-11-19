@@ -2066,7 +2066,7 @@ fn tracked_paragraph_marks_shape_into_glyph_runs() {
     let pilcrow = u32::from(store.glyph_id(font, '\u{b6}').unwrap().unwrap());
     let json = build_display_list_json(&tracked_mark_input(None)).unwrap();
     let plain: DisplayList = serde_json::from_str(&json).unwrap();
-    let input = tracked_mark_input(Some(&[font.to_u32()]));
+    let input = tracked_mark_input_with_face(&[font.to_u32()], Some(font.to_u32()));
     let json = build_display_list_json_with_fonts(&input, &store).unwrap();
     let shaped: DisplayList = serde_json::from_str(&json).unwrap();
 
@@ -2150,8 +2150,6 @@ fn assert_marks_stay_bare_text(list: &DisplayList) {
     }
 }
 
-// With the base-latin feature the implicit backstop covers the pilcrow, so no
-// default-family chain lacks it there.
 #[cfg(not(feature = "base-latin"))]
 #[test]
 fn tracked_paragraph_marks_stay_text_when_the_default_face_lacks_the_pilcrow() {
