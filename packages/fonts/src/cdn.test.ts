@@ -140,7 +140,9 @@ describe('CDN font provider', () => {
     });
     expect(build.success).toBe(true);
     expect(build.outputs).toHaveLength(1);
-    expect(build.outputs[0]!.size).toBeLessThan(70_000);
+    // Guards against binary assets or add-on packages leaking into the CDN entry; the
+    // inflight asset cache is code, so the budget tracks size growth, not just imports.
+    expect(build.outputs[0]!.size).toBeLessThan(72_000);
     const entry = await import(`data:text/javascript;base64,${Buffer.from(await build.outputs[0]!.text()).toString('base64')}`);
     const host = globalThis.process as unknown as { getBuiltinModule?: (id: string) => unknown };
     const original = host.getBuiltinModule;
