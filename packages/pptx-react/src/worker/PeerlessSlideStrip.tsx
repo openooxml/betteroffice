@@ -18,6 +18,14 @@ import { peerlessPainterFactories, type PeerlessPresentation } from './usePeerle
 
 const SLIDE_PREVIEW_SETTLE_MS = 400;
 
+function activateSlide(run: PeerlessPresentation, id: string, onNavigate: () => void) {
+  const presented = run.store.getSnapshot().confirmed?.frame.slideId !== id &&
+    run.presentPrerendered?.(id) === true;
+  const activation = activatePeerlessSlide(run, id).catch(() => {});
+  if (presented) void activation.then(() => run.settlePrerendered?.(id));
+  onNavigate();
+}
+
 function afterNextPaint(callback: () => void): () => void {
   let timer: number | undefined;
   const frame = window.requestAnimationFrame(() => { timer = window.setTimeout(callback, 0); });
@@ -142,17 +150,24 @@ const Slide = memo(function Slide({ id, name, index, total, active, disabled, fr
     onPointerCancel={() => run.dropPrerender?.()}
     onPointerLeave={() => run.dropPrerender?.()}
     onKeyDown={(event) => {
-      if (!event.altKey || !['ArrowUp', 'ArrowDown'].includes(event.key)) return;
+      if (!['ArrowUp', 'ArrowDown'].includes(event.key)) return;
+      if (event.altKey) {
+        event.preventDefault();
+        const next = index + (event.key === 'ArrowUp' ? -1 : 1);
+        if (next >= 0 && next < run.client.state.slides.length) void peerlessMoveSlide(run, id, next).catch(() => {});
+        return;
+      }
+      if (event.ctrlKey || event.metaKey || event.shiftKey || event.nativeEvent.isComposing) return;
       event.preventDefault();
       const next = index + (event.key === 'ArrowUp' ? -1 : 1);
-      if (next >= 0 && next < run.client.state.slides.length) void peerlessMoveSlide(run, id, next).catch(() => {});
+      const targetSlide = run.client.state.slides[next];
+      if (!targetSlide) return;
+      const target = event.currentTarget.parentElement?.children.item(next);
+      if (target?.getAttribute('data-slide-id') !== targetSlide.id) return;
+      (target as HTMLElement).focus();
+      activateSlide(run, targetSlide.id, onNavigate);
     }}
-    onClick={() => {
-      const presented = !active && run.presentPrerendered?.(id) === true;
-      const activation = activatePeerlessSlide(run, id).catch(() => {});
-      if (presented) void activation.then(() => run.settlePrerendered?.(id));
-      onNavigate();
-    }}>
+    onClick={() => activateSlide(run, id, onNavigate)}>
     <span style={styles.number}>{index + 1}</span>
     <span style={styles.preview}>
       {settled && fit ? <Preview frame={settled} run={run} fit={fit} previewFit={previewFit} current={current} /> : <span style={styles.title}>{name ?? t('slides.fallbackTitle', { number: index + 1 })}</span>}

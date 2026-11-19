@@ -3043,7 +3043,7 @@ describe('peerless stage fit', () => {
       fileGeneration: {}, session: {} } as unknown as PeerlessPresentation;
     const strip = (value = run) => <PeerlessSlideStrip run={value} commands={UNAVAILABLE_PPTX_COMMANDS}
       previewFit={() => ({ scale: 0.25, dpr: 2, generation: 1 })} current={() => true} onNavigate={() => {}} />;
-    return { run, strip, store, dispose() { store.dispose(); images.dispose(); },
+    return { run, client, strip, store, dispose() { store.dispose(); images.dispose(); },
       confirm(slideId: string, slideRevision: number) {
         const seq = client.state.throughSeq + 1;
         const frame = { ...coveringFrame(client, `revision ${slideRevision}`, seq), slideId, slideRevision,
@@ -3054,6 +3054,31 @@ describe('peerless stage fit', () => {
         return store.getSnapshot().confirmed!;
       } };
   }
+
+  test('strip_arrow_keys_focus_and_activate_adjacent_slides', async () => {
+    const value = stripRun();
+    const view = render(value.strip());
+    try {
+      await flushStage();
+      const buttons = [...view.container.querySelectorAll<HTMLButtonElement>('button[data-slide-id]')];
+      expect(buttons).toHaveLength(2);
+      buttons[0]!.focus();
+      expect(fireEvent.keyDown(buttons[0]!, { key: 'ArrowDown' })).toBe(false);
+      expect(document.activeElement).toBe(buttons[1]);
+      expect(value.client.sent[value.client.sent.length - 1]).toMatchObject({
+        kind: 'activateSlide', payload: { slideId: 'other' },
+      });
+      const sent = value.client.sent.length;
+      expect(fireEvent.keyDown(buttons[1]!, { key: 'ArrowDown' })).toBe(false);
+      expect(document.activeElement).toBe(buttons[1]);
+      expect(value.client.sent).toHaveLength(sent);
+      expect(fireEvent.keyDown(buttons[1]!, { key: 'ArrowUp' })).toBe(false);
+      expect(document.activeElement).toBe(buttons[0]);
+      expect(value.client.sent[value.client.sent.length - 1]).toMatchObject({
+        kind: 'activateSlide', payload: { slideId: 'slide' },
+      });
+    } finally { view.unmount(); value.dispose(); }
+  });
 
   test('strip_paints_only_the_latest_active_revision_after_idle', async () => {
     const clock = stripClock();
