@@ -790,6 +790,9 @@ impl Workbook {
         let projection = authority.materialize().map_err(authority_error)?;
         pulse();
         let mut model = checkpoint.calculation.apply(projection)?;
+        if authority.reads_builtin_number_formats() {
+            model.styles.read_builtin_number_formats();
+        }
         if let Some(styles) = &source_markers {
             model.styles.inherit_xf_xml_markers(styles);
         }

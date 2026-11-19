@@ -7335,6 +7335,9 @@ impl EngineSession {
                 }
             }
         }
+        for watermark in regions.header_watermarks.values() {
+            collector.collect_watermark(watermark);
+        }
         let requirements = collector.finish();
         let preview_superset_safe = stable_markers
             && requirements
@@ -9730,7 +9733,21 @@ impl EngineSession {
             };
             #[cfg(test)]
             HEADER_FOOTER_MEASUREMENTS.with(|count| count.set(count.get() + 1));
-            if let Some(variant) = measure_header_footer(
+            let watermark = regions.header_watermarks.get(&r_id).cloned();
+            let blank = watermark.is_some().then(|| HeaderFooterVariant {
+                r_id: r_id.clone(),
+                kind,
+                hf_type,
+                section_index,
+                measured: Vec::new(),
+                height: 0.0,
+                flow_height: 0.0,
+                visual_top: 0.0,
+                visual_bottom: 0.0,
+                field_widths: Vec::new(),
+                watermark: None,
+            });
+            if let Some(mut variant) = measure_header_footer(
                 r_id,
                 kind,
                 hf_type,
@@ -9739,7 +9756,10 @@ impl EngineSession {
                 content_width,
                 metrics,
                 measurement,
-            )? {
+            )?
+            .or(blank)
+            {
+                variant.watermark = watermark;
                 variants.push(variant);
             }
         }
@@ -9772,6 +9792,10 @@ impl EngineSession {
                 .collect(),
             variants,
             watermark: regions.watermark.clone(),
+            header_watermarks: regions
+                .header_watermarks
+                .values()
+                .any(|watermark| watermark["kind"] == "text"),
         }))
     }
 
@@ -12434,6 +12458,45 @@ impl EngineSession {
         self.display.borrow().list.as_ref().map(read)
     }
 
+    /// The retained region layout's display list with only `page` built, shaped with `font_chains`,
+    /// and what the conversion left unpainted because it could not be read.
+    // Used by betteroffice-docx; not part of the stable API.
+    #[doc(hidden)]
+    pub fn retained_page_display_list(
+        &self,
+        font_chains: &BTreeMap<String, Vec<u32>>,
+        page: usize,
+    ) -> Result<
+        (
+            DisplayList,
+            Vec<docx_layout::display_list::UnreadableDisplayInput>,
+        ),
+        String,
+    > {
+        let pagination = self.pagination.borrow();
+        let input = pagination
+            .input
+            .as_ref()
+            .ok_or_else(|| "resident pagination input is not built".to_owned())?;
+        let layout = pagination
+            .layout
+            .as_ref()
+            .ok_or_else(|| "resident layout is not built".to_owned())?;
+        let regions = self.regions.borrow();
+        let extras = serde_json::json!({
+            "headersFooters": regions.as_ref().and_then(|state| state.headers_footers.as_ref()),
+            "fontChains": font_chains,
+        });
+        docx_layout::build_resident_display_list_partial_observed(
+            input,
+            layout,
+            &extras.to_string(),
+            &|index| index == page,
+            &mut || {},
+        )
+        .map(|(resident, list)| (list, resident.unreadable().to_vec()))
+    }
+
     pub fn resident_caret_snapshot(
         &self,
         paragraph: Option<(&str, u32)>,
@@ -13039,13 +13102,15 @@ impl EngineSession {
     }
 
     /// A fingerprint of the fonts, fallback order and measurement defaults of `request`, by font
-    /// content rather than store ids. `None` when a font it names is not registered.
+    /// content rather than store ids. `None` when a font it names is not registered. The face
+    /// of the tracked paragraph mark is left out: it moves no text.
     fn font_set_fingerprint(&self, request: &serde_json::Value) -> Option<String> {
         let measurement = request.get("measurement").cloned().unwrap_or_default();
         let store = docx_layout::measure_store_id();
         let mut chains = BTreeMap::new();
         if let Some(serde_json::Value::Object(font_chains)) = measurement.get("fontChains") {
-            for (key, ids) in font_chains {
+            let mark = docx_layout::display_list::PARAGRAPH_MARK_FACE;
+            for (key, ids) in font_chains.iter().filter(|(key, _)| key.as_str() != mark) {
                 let mut faces = Vec::new();
                 for id in ids.as_array().into_iter().flatten() {
                     let id = u32::try_from(id.as_u64()?).ok()?;
@@ -13120,6 +13185,25 @@ mod tests {
     mod preview_refresh_tests;
 
     mod command_relayout_tests;
+
+    #[test]
+    fn the_paragraph_mark_face_leaves_the_font_set_fingerprint_alone() {
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        let engine = EngineSession::new(7);
+        let fingerprint = |chains: serde_json::Value| {
+            let defaults = json!({"fontFamily": "Calibri", "fontSize": 11});
+            let request = json!({"measurement": {"fontChains": chains, "defaults": defaults}});
+            engine.font_set_fingerprint(&request)
+        };
+        let plain = fingerprint(json!({"calibri|0|0": [font]}));
+        let marked = fingerprint(json!({
+            "calibri|0|0": [font],
+            "@betteroffice/fonts/paragraph-mark": [font],
+        }));
+
+        assert!(plain.is_some());
+        assert_eq!(marked, plain);
+    }
 
     fn table_wrap_section(content_width: f64, columns: serde_json::Value) -> serde_json::Value {
         json!({
@@ -14973,6 +15057,153 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn region_layout_paints_a_header_watermark_only_where_that_header_applies() {
+        let engine = EngineSession::new(133);
+        for r_id in ["rId1", "rId2"] {
+            engine
+                .doc()
+                .create_story(format!("hf:{r_id}"), "Header", "Normal", "left")
+                .unwrap();
+        }
+        let request = |title_pg: bool| {
+            serde_json::json!({
+                "measured": [],
+                "options": {
+                    "pageSize": {"w": 300, "h": 200},
+                    "margins": {"top": 20, "right": 20, "bottom": 20, "left": 20, "header": 5, "footer": 5}
+                },
+                "regions": {
+                    "sections": [{
+                        "sectionId": "main",
+                        "pageSize": {"w": 300, "h": 200},
+                        "margins": {"top": 20, "right": 20, "bottom": 20, "left": 20, "header": 5, "footer": 5},
+                        "titlePg": title_pg,
+                        "headerFooterRefs": {"headerDefault": "rId1", "headerFirst": "rId2"}
+                    }],
+                    "headerWatermarks": {
+                        "rId1": {"kind": "text", "text": "DRAFT", "widthEmu": 1828800, "heightEmu": 457200}
+                    }
+                },
+                "measurement": {"defaults": {"fontSize": 24, "fontFamily": "Liberation Sans"}},
+                "renderEnv": {}
+            })
+            .to_string()
+        };
+        let watermarks = |title_pg: bool| {
+            let output = engine
+                .layout_document_with_regions_json(&request(title_pg))
+                .unwrap();
+            let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+            let display: serde_json::Value =
+                serde_json::from_str(&engine.build_display_list_json(&output).unwrap()).unwrap();
+            let watermark = |r_id: &str| {
+                value["headersFooters"]["variants"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|variant| variant["rId"] == r_id)
+                    .and_then(|variant| variant["watermark"]["text"].as_str())
+            };
+            assert_eq!(watermark("rId1"), Some("DRAFT"));
+            assert_eq!(watermark("rId2"), None);
+            display["pages"][0]["watermarkPrimitiveCount"].clone()
+        };
+        assert_eq!(watermarks(true), serde_json::Value::Null);
+        assert_eq!(watermarks(false), serde_json::json!(1));
+    }
+
+    #[test]
+    fn region_layout_keeps_a_clean_header_clean_when_only_an_unused_header_has_a_watermark() {
+        let engine = EngineSession::new(1339);
+        for r_id in ["rId1", "rId2"] {
+            engine
+                .doc()
+                .create_story(format!("hf:{r_id}"), "Header", "Normal", "left")
+                .unwrap();
+        }
+        let request = json!({
+            "measured": [],
+            "options": {
+                "pageSize": {"w": 300, "h": 200},
+                "margins": {"top": 20, "right": 20, "bottom": 20, "left": 20, "header": 5, "footer": 5}
+            },
+            "regions": {
+                "sections": [{
+                    "sectionId": "main",
+                    "pageSize": {"w": 300, "h": 200},
+                    "margins": {"top": 20, "right": 20, "bottom": 20, "left": 20, "header": 5, "footer": 5},
+                    "titlePg": false,
+                    "headerFooterRefs": {"headerDefault": "rId1", "headerFirst": "rId2"}
+                }],
+                "watermark": {"kind": "text", "text": "DRAFT"},
+                "headerWatermarks": {
+                    "rId2": {"kind": "text", "text": "DRAFT"}
+                }
+            },
+            "measurement": {"defaults": {"fontSize": 24, "fontFamily": "Liberation Sans"}},
+            "renderEnv": {}
+        });
+        let output = engine
+            .layout_document_with_regions_json(&request.to_string())
+            .unwrap();
+        let display: serde_json::Value =
+            serde_json::from_str(&engine.build_display_list_json(&output).unwrap()).unwrap();
+        assert_eq!(display["pages"][0]["header"]["rId"], "rId1");
+        assert_eq!(
+            display["pages"][0]["watermarkPrimitiveCount"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
+    fn region_layout_paints_the_watermark_of_a_header_with_no_blocks() {
+        let engine = EngineSession::new(1338);
+        engine
+            .doc()
+            .create_story("hf:rId1", "", "Normal", "left")
+            .unwrap();
+        engine
+            .doc()
+            .apply_raw_ops(
+                "hf:rId1",
+                vec![crate::RawOp::Delete { index: 0, len: 1 }],
+                &crate::EditCtx::local("", ""),
+            )
+            .unwrap();
+        assert!(
+            crate::bridge::yrs_doc_to_layout_blocks(engine.doc(), "hf:rId1", &RenderEnv::default())
+                .unwrap()
+                .is_empty()
+        );
+        let request = json!({
+            "measured": [],
+            "options": {
+                "pageSize": {"w": 300, "h": 200},
+                "margins": {"top": 20, "right": 20, "bottom": 20, "left": 20, "header": 5, "footer": 5}
+            },
+            "regions": {
+                "sections": [{
+                    "sectionId": "main",
+                    "pageSize": {"w": 300, "h": 200},
+                    "margins": {"top": 20, "right": 20, "bottom": 20, "left": 20, "header": 5, "footer": 5},
+                    "headerFooterRefs": {"headerDefault": "rId1"}
+                }],
+                "headerWatermarks": {
+                    "rId1": {"kind": "text", "text": "DRAFT", "widthEmu": 1828800, "heightEmu": 457200}
+                }
+            },
+            "measurement": {"defaults": {"fontSize": 24, "fontFamily": "Liberation Sans"}},
+            "renderEnv": {}
+        });
+        let output = engine
+            .layout_document_with_regions_json(&request.to_string())
+            .unwrap();
+        let display: serde_json::Value =
+            serde_json::from_str(&engine.build_display_list_json(&output).unwrap()).unwrap();
+        assert_eq!(display["pages"][0]["watermarkPrimitiveCount"], json!(1));
     }
 
     #[test]
@@ -27095,7 +27326,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         let field = serde_json::json!({
             "type": "complexField", "fieldType": "UNKNOWN", "instruction": "0",
             "fieldCode": [], "fieldResult": [font_preflight_run("First", "Calibri")],
-            "structuredResult": {"blocks": [cached, table, sdt, end]}
+            "structuredResult": {"blockCount": 4}
         });
         let blocks = [
             serde_json::json!({"type": "paragraph", "content": [field]}),
@@ -33038,6 +33269,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             visual_top: 0.0,
             visual_bottom: 100.0,
             field_widths: Vec::new(),
+            watermark: None,
         }];
         extend_input_for_header_footer(&mut input, &regions, &variants, None);
         let margins = input.options.margins.expect("extended margins");

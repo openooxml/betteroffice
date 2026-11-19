@@ -5,6 +5,7 @@ import { fontPreflightFixture } from '../../packages/xlsx/src/wasm/__fixtures__/
 import { readFileSync } from 'node:fs';
 import JSZip from 'jszip';
 import { beforeAll, describe, expect, test } from 'bun:test';
+import JSZip from 'jszip';
 import * as wasm from '../../packages/xlsx/src/wasm/loader';
 import { FORMATS } from '../../scripts/api-surface';
 import { expectSavedPartsEqual } from '../native-parity';
@@ -174,6 +175,85 @@ describe('xlsx native/wasm package parity', () => {
       const accepted = workbook.acceptProposal(proposal.id);
       return [proposal, listed, accepted, workbook.listProposals(), workbook.cell(0, 3, 2)];
     });
+  });
+
+  test('locked cells on a protected sheet refuse cell edits', async () => {
+    const zip = await JSZip.loadAsync(fixture);
+    const sheet = await zip.file('xl/worksheets/sheet1.xml')!.async('string');
+    zip.file('xl/worksheets/sheet1.xml', sheet.replace('</sheetData>', '</sheetData><sheetProtection sheet="1"/>'));
+    const locked = await zip.generateAsync({ type: 'uint8array' });
+    const refusal = (edit: () => unknown) => {
+      try {
+        edit();
+        return null;
+      } catch (error) {
+        return (error as Error).message;
+      }
+    };
+    await compare((workbook) => {
+      const version = workbook.version();
+      const refusals = [
+        refusal(() => workbook.editCell(0, 2, 1, '1')),
+        refusal(() => workbook.editCells(0, [{ row: 2, col: 1, input: '1' }])),
+        refusal(() => workbook.patchRangeStyle(0, 'B3', { bold: true })),
+      ];
+      expect(refusals).toEqual([
+        'B3 is locked on protected sheet "Budget"',
+        'B3 is locked on protected sheet "Budget"',
+        'sheet "Budget" is protected',
+      ]);
+      expect(workbook.version()).toBe(version);
+      return [refusals, workbook.cell(0, 2, 1), workbook.editCell(1, 0, 0, 'open')];
+    }, locked);
+  });
+
+  test('protectedSheets refuse and allow agree on direct writes', async () => {
+    const zip = await JSZip.loadAsync(fixture);
+    const sheet = await zip.file('xl/worksheets/sheet1.xml')!.async('string');
+    zip.file('xl/worksheets/sheet1.xml', sheet.replace('</sheetData>', '</sheetData><sheetProtection sheet="1"/>'));
+    const locked = await zip.generateAsync({ type: 'uint8array' });
+    const attempt = (edit: () => unknown) => {
+      try {
+        return edit();
+      } catch (error) {
+        return (error as Error).message;
+      }
+    };
+    await compare((workbook) => {
+      const refused = [
+        attempt(() => workbook.editCell(0, 2, 1, '1', { protectedSheets: 'refuse' })),
+        attempt(() => workbook.editCells(0, [{ row: 2, col: 1, input: '1' }], { protectedSheets: 'refuse' })),
+        attempt(() => workbook.patchRangeStyle(0, 'B3', { bold: true }, { protectedSheets: 'refuse' })),
+        attempt(() => workbook.setNumberFormat(0, 'B3', 'percent', { protectedSheets: 'refuse' })),
+        attempt(() => workbook.editCell(0, 2, 1, '1', { protectedSheets: 'maybe' as 'allow' })),
+      ];
+      const unprotected = workbook.cell(1, 0, 0);
+      const supplied = [null, 5, true, '', 'Allow', ['allow'], {}] as unknown as 'allow'[];
+      const invalid = supplied.flatMap((protectedSheets) => [
+        attempt(() => workbook.editCell(1, 0, 0, 'written', { protectedSheets })),
+        attempt(() => workbook.editCells(1, [{ row: 0, col: 0, input: 'written' }], { protectedSheets })),
+        attempt(() => workbook.patchRangeStyle(1, 'A1', { bold: true }, { protectedSheets })),
+        attempt(() => workbook.setNumberFormat(1, 'A1', 'percent', { protectedSheets })),
+      ]);
+      expect(invalid).toEqual(invalid.map(() => 'malformed request: protectedSheets must be refuse or allow'));
+      expect(workbook.cell(1, 0, 0)).toEqual(unprotected);
+      expect(refused).toEqual([
+        'B3 is locked on protected sheet "Budget"',
+        'B3 is locked on protected sheet "Budget"',
+        'sheet "Budget" is protected',
+        'sheet "Budget" is protected',
+        'malformed request: protectedSheets must be refuse or allow',
+      ]);
+      const allowed = [
+        workbook.editCell(0, 2, 1, '1000', { protectedSheets: 'allow' }),
+        workbook.editCells(0, [{ row: 2, col: 2, input: '7' }], { protectedSheets: 'allow' }),
+        workbook.patchRangeStyle(0, 'B3', { bold: true }, { protectedSheets: 'allow' }),
+        workbook.setNumberFormat(0, 'B3', 'percent', { protectedSheets: 'allow' }),
+      ];
+      expect(workbook.cell(0, 2, 1).input).toBe('1000');
+      expect(attempt(() => workbook.editCell(0, 2, 1, '2'))).toBe('B3 is locked on protected sheet "Budget"');
+      return [refused, invalid, allowed, workbook.cell(0, 2, 1), workbook.cell(0, 2, 3)];
+    }, locked);
   });
 
   test('structural edits retain rebased and stale proposals', async () => {

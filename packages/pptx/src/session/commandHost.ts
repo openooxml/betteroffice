@@ -8,6 +8,7 @@ import { createMetafileSvg } from './metafileSvg';
 import { PptxDocument, engineKind } from '../wasm/engine';
 import { deferReply, transferable, type TransferResult } from '../../../../shared/office-session/protocol';
 import { isCommandEnvelope } from '../../../../shared/office-session/commands/types';
+import { isEngineTrap } from '../../../../shared/office-session/trap';
 import { setFontCdnConfiguration, type FontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import { extendTextRange, graphemeBoundaries, textRangeAt } from '../../../../shared/textSelection';
 import { SessionFailure, type MethodHandlers, type MethodPolicies } from '../../../../shared/office-session/types';
@@ -560,7 +561,17 @@ export function registerPresentationCommandHandlers(
   function target(value: PresentationCommandSelection): PptxStoryText | undefined {
     if (!value || typeof value.slideId !== 'string' ||
       typeof value.shapeId !== 'string' || typeof value.storyId !== 'string') return undefined;
-    return stories.get(storyKey(value))?.text;
+    const story = stories.get(storyKey(value))?.text;
+    return story && liveStory(value.storyId) ? story : undefined;
+  }
+
+  function liveStory(storyId: string): boolean {
+    const opened = presentation();
+    try { return opened.resolveCaretAnchor(opened.anchorCaret(storyId, 0)) !== null; }
+    catch (error) {
+      if (isEngineTrap(error)) throw error;
+      return false;
+    }
   }
 
   function refreshStory(value: PresentationCommandSelection, start: number, end: number): void {

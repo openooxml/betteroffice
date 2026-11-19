@@ -15,6 +15,25 @@ use tiny_skia::{
 };
 
 use xlsx_render::{Align, DisplayList, DrawCmd, GeometryPathCommand, Rect as DlRect};
+
+#[cfg(test)]
+thread_local! {
+    static RUN_PATHS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static PIECE_MEASURES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many text commands have entered the run path on this thread, and how
+/// many piece widths that path has measured.
+#[cfg(test)]
+fn run_counts() -> (usize, usize) {
+    (RUN_PATHS.get(), PIECE_MEASURES.get())
+}
+
+#[cfg(test)]
+fn count(counter: &'static std::thread::LocalKey<std::cell::Cell<usize>>) {
+    counter.set(counter.get() + 1);
+}
+
 #[cfg(not(feature = "fonts"))]
 /// paint a display list and encode it as png bytes.
 pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
@@ -236,7 +255,31 @@ pub fn render_png_with_images(dl: &DisplayList, images: &ImageMap<'_>) -> Result
                 rotation_valign,
                 stacked,
                 wrap,
+                runs,
             } => {
+                if !runs.is_empty() {
+                    #[cfg(test)]
+                    count(&RUN_PATHS);
+                    if let Some(pieces) = xlsx_render::run_pieces(cmd) {
+                        let mut measured = PieceWidths::new(measure_piece);
+                        let lines = match wrap {
+                            Some(wrap) => wrapped_lines(*y, wrap, text, &pieces, &mut measured),
+                            None => vec![(*y, pieces)],
+                        };
+                        for (y, pieces) in lines {
+                            paint_pieces(
+                                &mut pixmap,
+                                &mut measured,
+                                (*x, y),
+                                *align,
+                                clip,
+                                text,
+                                &pieces,
+                            )?;
+                        }
+                        continue;
+                    }
+                }
                 let run = font::TextRun {
                     x: *x,
                     y: *y,
@@ -293,11 +336,12 @@ pub fn render_png_with_images(dl: &DisplayList, images: &ImageMap<'_>) -> Result
                     let lines = xlsx_render::wrap::wrap_lines(text, wrap.width, |line| {
                         font::measure_text(line, *font_size)
                     });
-                    for (index, line) in lines.iter().enumerate() {
+                    let count = xlsx_render::wrap::wrapped_lines_kept(lines.len(), wrap);
+                    for (index, line) in lines.iter().take(count).enumerate() {
                         font::paint_text(
                             &mut pixmap,
                             &font::TextRun {
-                                y: xlsx_render::wrap::wrapped_line_y(*y, index, lines.len(), wrap),
+                                y: xlsx_render::wrap::wrapped_line_y(*y, index, count, wrap),
                                 text: line,
                                 ..run
                             },
@@ -644,6 +688,122 @@ fn path_coord(value: f64) -> Result<f32, String> {
         .is_finite()
         .then_some(value)
         .ok_or_else(|| "path contains a non-finite coordinate".to_string())
+}
+
+#[cfg(not(feature = "fonts"))]
+fn measure_piece(piece: &xlsx_render::TextPiece, part: &str) -> f32 {
+    font::measure_text(part, piece.font_size)
+}
+
+#[cfg(not(feature = "fonts"))]
+fn paint_pieces(
+    pixmap: &mut Pixmap,
+    measured: &mut PieceWidths<impl FnMut(&xlsx_render::TextPiece, &str) -> f32>,
+    (x, y): (f32, f32),
+    align: Align,
+    clip: &DlRect,
+    text: &str,
+    pieces: &[xlsx_render::TextPiece],
+) -> Result<(), String> {
+    let widths: Vec<f32> = pieces
+        .iter()
+        .map(|piece| measured.width(piece, &text[piece.range.clone()]))
+        .collect();
+    let mut pen = aligned_left(x, align, widths.iter().sum());
+    for (piece, width) in pieces.iter().zip(widths) {
+        font::paint_text(
+            pixmap,
+            &font::TextRun {
+                x: pen,
+                y,
+                text: &text[piece.range.clone()],
+                font_size_pt: piece.font_size,
+                color: parse_color(&piece.color)?,
+                align: Align::Left,
+                clip,
+                bold: piece.bold,
+                italic: piece.italic,
+                underline: piece.underline,
+                double_underline: double_underline(piece.underline_style),
+                strike: piece.strike,
+                highlight: None,
+                dashed_underline: false,
+            },
+        );
+        pen += width;
+    }
+    Ok(())
+}
+
+/// The widths of the parts of one text command's pieces, each part measured
+/// once in its piece's face while the command's lines break and paint.
+struct PieceWidths<M> {
+    measure: M,
+    widths: HashMap<PieceFace, HashMap<String, f32>>,
+}
+
+/// A piece's family, bold, italic and size bits.
+type PieceFace = (Option<std::sync::Arc<str>>, bool, bool, u32);
+
+impl<M: FnMut(&xlsx_render::TextPiece, &str) -> f32> PieceWidths<M> {
+    fn new(measure: M) -> Self {
+        Self {
+            measure,
+            widths: HashMap::new(),
+        }
+    }
+
+    fn width(&mut self, piece: &xlsx_render::TextPiece, part: &str) -> f32 {
+        let face = (
+            piece.font_family.clone(),
+            piece.bold,
+            piece.italic,
+            piece.font_size.to_bits(),
+        );
+        let widths = self.widths.entry(face).or_default();
+        if let Some(&width) = widths.get(part) {
+            return width;
+        }
+        #[cfg(test)]
+        count(&PIECE_MEASURES);
+        let width = (self.measure)(piece, part);
+        widths.insert(part.to_owned(), width);
+        width
+    }
+}
+
+/// The baseline and pieces of each line a wrapped command keeps.
+fn wrapped_lines(
+    y: f32,
+    wrap: &xlsx_render::TextWrap,
+    text: &str,
+    pieces: &[xlsx_render::TextPiece],
+    measured: &mut PieceWidths<impl FnMut(&xlsx_render::TextPiece, &str) -> f32>,
+) -> Vec<(f32, Vec<xlsx_render::TextPiece>)> {
+    let lines = xlsx_render::wrap_run_lines(text, pieces, wrap.width, |piece, part| {
+        measured.width(piece, part)
+    });
+    let count = xlsx_render::wrap::wrapped_lines_kept(lines.len(), wrap);
+    lines
+        .into_iter()
+        .take(count)
+        .enumerate()
+        .map(|(index, line)| {
+            (
+                xlsx_render::wrap::wrapped_line_y(y, index, count, wrap),
+                line,
+            )
+        })
+        .collect()
+}
+
+/// The left edge of a line `width` wide anchored at `x` by `align`.
+fn aligned_left(x: f32, align: Align, width: f32) -> f32 {
+    match align {
+        Align::Left => x,
+        Align::Center => x - width / 2.0,
+        Align::Right => x - width,
+    }
 }
 
 fn double_underline(style: Option<xlsx_render::RunUnderline>) -> bool {
@@ -997,6 +1157,7 @@ mod tests {
                     rotation_valign: None,
                     stacked: false,
                     wrap: None,
+                    runs: Vec::new(),
                 },
             ],
             grid: xlsx_render::GridMeta::default(),
@@ -1048,6 +1209,7 @@ mod tests {
                 rotation_valign: Some(xlsx_render::TextValign::Bottom),
                 stacked: false,
                 wrap: None,
+                runs: Vec::new(),
             }],
             grid: xlsx_render::GridMeta::default(),
             hyperlinks: Vec::new(),
@@ -1111,6 +1273,7 @@ mod tests {
                 rotation_valign: Some(xlsx_render::TextValign::Top),
                 stacked,
                 wrap: None,
+                runs: Vec::new(),
             }],
             grid: xlsx_render::GridMeta::default(),
             hyperlinks: Vec::new(),
@@ -1271,6 +1434,112 @@ mod tests {
             );
             assert!(((left + right) / 2.0 - cell_w / 2.0).abs() < 2.0, "{word}");
         }
+    }
+
+    #[test]
+    fn wrapped_text_paints_at_most_the_lines_its_display_list_keeps() {
+        let cell = DlRect {
+            x: 0.0,
+            y: 0.0,
+            w: 60.0,
+            h: 100.0,
+        };
+        let bands = |max_lines: Option<u32>| {
+            let wrap = serde_json::json!({
+                "width": 30.0,
+                "lineHeight": 20.0,
+                "valign": "center",
+                "maxLines": max_lines,
+            });
+            let mut dl = text_dl("one two six", cell, false, None, false);
+            if let DrawCmd::Text { wrap: slot, .. } = &mut dl.commands[0] {
+                *slot = Some(serde_json::from_value(wrap).unwrap());
+            }
+            ink_row_bands(&dl).len()
+        };
+        let kept = [Some(1), Some(2), Some(u32::MAX), None].map(bands);
+        assert_eq!(kept, [1, 2, 4, 4]);
+    }
+
+    fn wrapped_row(row: u32, row_pt: f64, scroll: f32, zoom: f32) -> DisplayList {
+        let mut workbook = xlsx_model::Workbook::default();
+        workbook.styles.cell_xfs.push(xlsx_model::Xf {
+            alignment: Some(xlsx_model::Alignment {
+                v: Some(xlsx_model::VAlign::Center),
+                wrap_text: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let mut sheet = xlsx_model::Sheet::new("Sheet1");
+        sheet.col_widths.insert(0, 6.0);
+        sheet.row_heights.insert(row, row_pt);
+        if row > 0 {
+            let top_left = xlsx_model::CellRef::new(row, 0);
+            sheet.freeze_pane = Some(xlsx_model::FreezePane::new(row, 0, top_left));
+        }
+        sheet.set_cell(
+            xlsx_model::CellRef::new(row, 0),
+            xlsx_model::Cell {
+                value: xlsx_model::CellValue::Text {
+                    value: "xxxxx xxxx xxxx xxxx".into(),
+                },
+                style: Some(0),
+                ..Default::default()
+            },
+        );
+        workbook.sheets.push(sheet);
+        let dl = xlsx_render::build_display_list(
+            &workbook,
+            xlsx_model::SheetId(0),
+            &xlsx_render::Viewport {
+                x: 0.0,
+                y: scroll,
+                width: 60.0,
+                height: 100.0,
+            },
+        )
+        .unwrap();
+        xlsx_render::scaled(dl, zoom)
+    }
+
+    #[test]
+    fn a_row_scrolled_partly_under_a_frozen_row_keeps_its_wrapped_lines() {
+        let frozen =
+            xlsx_render::geometry::row_pt_to_px(xlsx_render::geometry::DEFAULT_ROW_HEIGHT_PT);
+        let lines = |scroll: f32| {
+            ink_row_bands(&wrapped_row(1, 40.0, scroll, 1.0))
+                .into_iter()
+                .filter(|&(_, bottom)| bottom as f32 > frozen + 2.0)
+                .count()
+        };
+        assert_eq!([lines(0.0), lines(6.0)], [3, 3]);
+    }
+
+    #[test]
+    fn a_wrapped_row_paints_the_same_lines_at_every_zoom() {
+        for zoom in [1u32, 2, 4] {
+            let widths = ink_band_widths(&wrapped_row(0, 24.5, 0.0, zoom as f32));
+            assert_eq!(widths.len(), 2, "zoom {zoom}: {widths:?}");
+            assert!(
+                widths[0] > widths[1] + 3 * zoom,
+                "zoom {zoom}: the first word should lead: {widths:?}"
+            );
+        }
+    }
+
+    fn ink_band_widths(dl: &DisplayList) -> Vec<u32> {
+        let pixels = Pixmap::decode_png(&render_png(dl).unwrap()).unwrap();
+        let dark = |x: u32, y: u32| pixels.pixel(x, y).unwrap().red() < 128;
+        ink_row_bands(dl)
+            .into_iter()
+            .map(|(top, bottom)| {
+                let ink: Vec<u32> = (0..pixels.width())
+                    .filter(|&x| (top..=bottom).any(|y| dark(x, y)))
+                    .collect();
+                ink.last().unwrap() - ink[0] + 1
+            })
+            .collect()
     }
 
     #[test]
@@ -1607,6 +1876,9 @@ mod tests {
         assert_eq!(render(40.0, 40.0, rails).pixel(10, 4).unwrap().red(), 0);
     }
 }
+
+#[cfg(all(test, not(feature = "fonts")))]
+mod rich_text_tests;
 
 #[cfg(feature = "fonts")]
 mod native;

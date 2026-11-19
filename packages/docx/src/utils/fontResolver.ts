@@ -7,19 +7,20 @@
  * This module provides mappings to metrically-compatible Google Fonts alternatives.
  */
 
+import { resolveWordFamilySubstitute } from '@betteroffice/fonts/remote';
 import type { ThemeFontScheme, ThemeFont } from '../types';
 
 /**
  * Result of resolving a font family
  */
 export interface ResolvedFont {
-  /** Google Font name to load (null if no mapping available) */
+  /** Look-alike family from the shared substitution table (null if none) */
   googleFont: string | null;
   /** CSS font-family value with proper fallback stack */
   cssFallback: string;
   /** Original font name from the DOCX */
   originalFont: string;
-  /** Whether this font has a Google Fonts equivalent */
+  /** Whether this font has a look-alike in the shared substitution table */
   hasGoogleEquivalent: boolean;
   /** OS/2 single-line ratio: (usWinAscent + usWinDescent) / unitsPerEm (no external leading) */
   singleLineRatio: number;
@@ -34,7 +35,6 @@ type FontCategory = 'sans-serif' | 'serif' | 'monospace' | 'cursive' | 'fantasy'
  * Font mapping entry
  */
 interface FontMapping {
-  googleFont: string;
   category: FontCategory;
   fallbackStack: string[];
   /** OS/2 single-line ratio: (usWinAscent + usWinDescent) / unitsPerEm (no external leading) */
@@ -62,31 +62,26 @@ export const DEFAULT_SINGLE_LINE_RATIO = 1.15;
 const FONT_MAPPINGS: Record<string, FontMapping> = {
   // Microsoft Office fonts -> Google equivalents (via Croscore)
   calibri: {
-    googleFont: 'Carlito',
     category: 'sans-serif',
     fallbackStack: ['Calibri', 'Carlito', 'Arial', 'Helvetica', 'sans-serif'],
     singleLineRatio: 1.2207, // 2500/2048
   },
   cambria: {
-    googleFont: 'Caladea',
     category: 'serif',
     fallbackStack: ['Cambria', 'Caladea', 'Georgia', 'serif'],
     singleLineRatio: 1.2676, // 2596/2048
   },
   arial: {
-    googleFont: 'Arimo',
     category: 'sans-serif',
     fallbackStack: ['Arial', 'Arimo', 'Helvetica', 'sans-serif'],
     singleLineRatio: 1.1172, // (1854+434)/2048 — no sTypoLineGap
   },
   'times new roman': {
-    googleFont: 'Tinos',
     category: 'serif',
     fallbackStack: ['Times New Roman', 'Tinos', 'Times', 'serif'],
     singleLineRatio: 1.1074, // (1825+443)/2048 — no sTypoLineGap
   },
   'courier new': {
-    googleFont: 'Cousine',
     category: 'monospace',
     fallbackStack: ['Courier New', 'Cousine', 'Courier', 'monospace'],
     singleLineRatio: 1.1328, // 2320/2048
@@ -94,79 +89,66 @@ const FONT_MAPPINGS: Record<string, FontMapping> = {
 
   // Additional common fonts
   georgia: {
-    googleFont: 'Tinos', // Similar but not perfect match
     category: 'serif',
-    fallbackStack: ['Georgia', 'Tinos', 'Times New Roman', 'serif'],
+    fallbackStack: ['Georgia', 'Gelasio', 'Times New Roman', 'serif'],
     singleLineRatio: 1.1362, // 2327/2048
   },
   verdana: {
-    googleFont: 'Open Sans', // Similar sans-serif
     category: 'sans-serif',
     fallbackStack: ['Verdana', 'Open Sans', 'Arial', 'sans-serif'],
     singleLineRatio: 1.2153, // 2489/2048
   },
   tahoma: {
-    googleFont: 'Open Sans',
     category: 'sans-serif',
     fallbackStack: ['Tahoma', 'Open Sans', 'Arial', 'sans-serif'],
     singleLineRatio: 1.2075, // 2472/2048
   },
   'trebuchet ms': {
-    googleFont: 'Fira Sans',
     category: 'sans-serif',
     fallbackStack: ['Trebuchet MS', 'Fira Sans', 'Arial', 'sans-serif'],
     singleLineRatio: 1.1431, // 2341/2048
   },
   'comic sans ms': {
-    googleFont: 'Comic Neue',
     category: 'cursive',
     fallbackStack: ['Comic Sans MS', 'Comic Neue', 'cursive'],
     singleLineRatio: 1.3936, // 2854/2048
   },
   impact: {
-    googleFont: 'Anton',
     category: 'sans-serif',
     fallbackStack: ['Impact', 'Anton', 'Arial Black', 'sans-serif'],
     singleLineRatio: 1.2197, // 2498/2048
   },
   'palatino linotype': {
-    googleFont: 'EB Garamond',
     category: 'serif',
     fallbackStack: ['Palatino Linotype', 'EB Garamond', 'Palatino', 'Georgia', 'serif'],
     singleLineRatio: 1.0259, // 2101/2048
   },
   'book antiqua': {
-    googleFont: 'EB Garamond',
     category: 'serif',
     fallbackStack: ['Book Antiqua', 'EB Garamond', 'Palatino', 'Georgia', 'serif'],
     singleLineRatio: 1.0259, // 2101/2048
   },
   garamond: {
-    googleFont: 'EB Garamond',
     category: 'serif',
     fallbackStack: ['Garamond', 'EB Garamond', 'Georgia', 'serif'],
     singleLineRatio: 1.068, // 1068/1000
   },
   'century gothic': {
-    googleFont: 'Questrial',
     category: 'sans-serif',
     fallbackStack: ['Century Gothic', 'Questrial', 'Arial', 'sans-serif'],
     singleLineRatio: 1.1611, // 2378/2048
   },
   'lucida sans': {
-    googleFont: 'Open Sans',
     category: 'sans-serif',
     fallbackStack: ['Lucida Sans', 'Open Sans', 'Arial', 'sans-serif'],
     singleLineRatio: 1.1655, // 2387/2048
   },
   'lucida console': {
-    googleFont: 'Cousine',
     category: 'monospace',
-    fallbackStack: ['Lucida Console', 'Cousine', 'Courier New', 'monospace'],
+    fallbackStack: ['Lucida Console', 'Inconsolata', 'Courier New', 'monospace'],
     singleLineRatio: 1.1387, // 2332/2048
   },
   consolas: {
-    googleFont: 'Inconsolata',
     category: 'monospace',
     fallbackStack: ['Consolas', 'Inconsolata', 'Cousine', 'Courier New', 'monospace'],
     singleLineRatio: 1.1626, // 2381/2048
@@ -174,7 +156,6 @@ const FONT_MAPPINGS: Record<string, FontMapping> = {
 
   // CJK fonts
   'ms mincho': {
-    googleFont: 'Noto Serif JP',
     category: 'serif',
     fallbackStack: ['MS Mincho', 'Noto Serif JP', 'serif'],
     singleLineRatio: DEFAULT_SINGLE_LINE_RATIO,
@@ -185,49 +166,41 @@ const FONT_MAPPINGS: Record<string, FontMapping> = {
   // NOTE: keys are matched against `name.toLowerCase()`, and full-width Latin
   // letters lowercase too (Ｍ→ｍ, Ｓ→ｓ, Ｐ→ｐ) — so these keys are lowercased.
   'ｍｓ 明朝': {
-    googleFont: 'Noto Serif JP',
     category: 'serif',
     fallbackStack: ['MS Mincho', 'ＭＳ 明朝', 'Noto Serif JP', 'serif'],
     singleLineRatio: DEFAULT_SINGLE_LINE_RATIO,
   },
   'ｍｓ ｐ明朝': {
-    googleFont: 'Noto Serif JP',
     category: 'serif',
     fallbackStack: ['MS PMincho', 'ＭＳ Ｐ明朝', 'Noto Serif JP', 'serif'],
     singleLineRatio: DEFAULT_SINGLE_LINE_RATIO,
   },
   'ms gothic': {
-    googleFont: 'Noto Sans JP',
     category: 'sans-serif',
     fallbackStack: ['MS Gothic', 'Noto Sans JP', 'sans-serif'],
     singleLineRatio: DEFAULT_SINGLE_LINE_RATIO,
   },
   'ｍｓ ゴシック': {
-    googleFont: 'Noto Sans JP',
     category: 'sans-serif',
     fallbackStack: ['MS Gothic', 'ＭＳ ゴシック', 'Noto Sans JP', 'sans-serif'],
     singleLineRatio: DEFAULT_SINGLE_LINE_RATIO,
   },
   'ｍｓ ｐゴシック': {
-    googleFont: 'Noto Sans JP',
     category: 'sans-serif',
     fallbackStack: ['MS PGothic', 'ＭＳ Ｐゴシック', 'Noto Sans JP', 'sans-serif'],
     singleLineRatio: DEFAULT_SINGLE_LINE_RATIO,
   },
   simhei: {
-    googleFont: 'Noto Sans SC',
     category: 'sans-serif',
     fallbackStack: ['SimHei', 'Noto Sans SC', 'sans-serif'],
     singleLineRatio: DEFAULT_SINGLE_LINE_RATIO,
   },
   simsun: {
-    googleFont: 'Noto Serif SC',
     category: 'serif',
     fallbackStack: ['SimSun', 'Noto Serif SC', 'serif'],
     singleLineRatio: DEFAULT_SINGLE_LINE_RATIO,
   },
   'malgun gothic': {
-    googleFont: 'Noto Sans KR',
     category: 'sans-serif',
     fallbackStack: ['Malgun Gothic', 'Noto Sans KR', 'sans-serif'],
     singleLineRatio: DEFAULT_SINGLE_LINE_RATIO,
@@ -241,37 +214,31 @@ const FONT_MAPPINGS: Record<string, FontMapping> = {
 
   // Simplified Chinese
   宋体: {
-    googleFont: 'Noto Serif SC',
     category: 'serif',
     fallbackStack: ['SimSun', '宋体', 'Noto Serif SC', 'serif'],
     singleLineRatio: DEFAULT_SINGLE_LINE_RATIO,
   },
   黑体: {
-    googleFont: 'Noto Sans SC',
     category: 'sans-serif',
     fallbackStack: ['SimHei', '黑体', 'Noto Sans SC', 'sans-serif'],
     singleLineRatio: DEFAULT_SINGLE_LINE_RATIO,
   },
   微软雅黑: {
-    googleFont: 'Noto Sans SC',
     category: 'sans-serif',
     fallbackStack: ['Microsoft YaHei', '微软雅黑', 'Noto Sans SC', 'sans-serif'],
     singleLineRatio: DEFAULT_SINGLE_LINE_RATIO,
   },
   等线: {
-    googleFont: 'Noto Sans SC',
     category: 'sans-serif',
     fallbackStack: ['DengXian', '等线', 'Noto Sans SC', 'sans-serif'],
     singleLineRatio: DEFAULT_SINGLE_LINE_RATIO,
   },
   仿宋: {
-    googleFont: 'Noto Serif SC',
     category: 'serif',
     fallbackStack: ['FangSong', '仿宋', 'Noto Serif SC', 'serif'],
     singleLineRatio: DEFAULT_SINGLE_LINE_RATIO,
   },
   楷体: {
-    googleFont: 'Noto Serif SC',
     category: 'serif',
     fallbackStack: ['KaiTi', '楷体', 'Noto Serif SC', 'serif'],
     singleLineRatio: DEFAULT_SINGLE_LINE_RATIO,
@@ -279,25 +246,21 @@ const FONT_MAPPINGS: Record<string, FontMapping> = {
 
   // Traditional Chinese
   新細明體: {
-    googleFont: 'Noto Serif TC',
     category: 'serif',
     fallbackStack: ['PMingLiU', '新細明體', 'Noto Serif TC', 'serif'],
     singleLineRatio: DEFAULT_SINGLE_LINE_RATIO,
   },
   細明體: {
-    googleFont: 'Noto Serif TC',
     category: 'serif',
     fallbackStack: ['MingLiU', '細明體', 'Noto Serif TC', 'serif'],
     singleLineRatio: DEFAULT_SINGLE_LINE_RATIO,
   },
   微軟正黑體: {
-    googleFont: 'Noto Sans TC',
     category: 'sans-serif',
     fallbackStack: ['Microsoft JhengHei', '微軟正黑體', 'Noto Sans TC', 'sans-serif'],
     singleLineRatio: DEFAULT_SINGLE_LINE_RATIO,
   },
   標楷體: {
-    googleFont: 'Noto Serif TC',
     category: 'serif',
     fallbackStack: ['DFKai-SB', '標楷體', 'Noto Serif TC', 'serif'],
     singleLineRatio: DEFAULT_SINGLE_LINE_RATIO,
@@ -305,31 +268,26 @@ const FONT_MAPPINGS: Record<string, FontMapping> = {
 
   // Korean
   '맑은 고딕': {
-    googleFont: 'Noto Sans KR',
     category: 'sans-serif',
     fallbackStack: ['Malgun Gothic', '맑은 고딕', 'Noto Sans KR', 'sans-serif'],
     singleLineRatio: DEFAULT_SINGLE_LINE_RATIO,
   },
   굴림: {
-    googleFont: 'Noto Sans KR',
     category: 'sans-serif',
     fallbackStack: ['Gulim', '굴림', 'Noto Sans KR', 'sans-serif'],
     singleLineRatio: DEFAULT_SINGLE_LINE_RATIO,
   },
   돋움: {
-    googleFont: 'Noto Sans KR',
     category: 'sans-serif',
     fallbackStack: ['Dotum', '돋움', 'Noto Sans KR', 'sans-serif'],
     singleLineRatio: DEFAULT_SINGLE_LINE_RATIO,
   },
   바탕: {
-    googleFont: 'Noto Serif KR',
     category: 'serif',
     fallbackStack: ['Batang', '바탕', 'Noto Serif KR', 'serif'],
     singleLineRatio: DEFAULT_SINGLE_LINE_RATIO,
   },
   궁서: {
-    googleFont: 'Noto Serif KR',
     category: 'serif',
     fallbackStack: ['Gungsuh', '궁서', 'Noto Serif KR', 'serif'],
     singleLineRatio: DEFAULT_SINGLE_LINE_RATIO,
@@ -451,7 +409,7 @@ export function resolveFontFamily(docxFontName: string): ResolvedFont {
 
   if (mapping) {
     return {
-      googleFont: mapping.googleFont,
+      googleFont: resolveWordFamilySubstitute(normalizedName)?.remote ?? null,
       cssFallback: mapping.fallbackStack.map(quoteFontName).join(', '),
       originalFont: docxFontName,
       hasGoogleEquivalent: true,

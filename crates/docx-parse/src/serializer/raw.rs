@@ -1,6 +1,12 @@
 //! Validation for the narrowly allowed lossless XML replay fields.
 
+use quick_xml::NsReader;
+use quick_xml::events::Event;
+use quick_xml::name::{Namespace, ResolveResult};
+
 use crate::xml::{ParseBudget, ParseError, ParseLimits, XmlElement, parse_xml_strict};
+
+const XSI_NAMESPACE: &str = "http://www.w3.org/2001/XMLSchema-instance";
 
 /// Complete namespace context used by WordprocessingML content fragments.
 /// The wrapper is never emitted; it only makes captured prefixed subtrees
@@ -30,6 +36,9 @@ pub(crate) const CONTENT_FRAGMENT_PREFIX: &str = concat!(
     "xmlns:wpi=\"http://schemas.microsoft.com/office/word/2010/wordprocessingInk\" ",
     "xmlns:wps=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\">"
 );
+
+/// A fragment wrapper declaring no prefix.
+const BARE_FRAGMENT_PREFIX: &str = "<s11:root>";
 
 /// A replayed foreign fragment must still be exactly one well-formed
 /// element; the resolver-free reader accepts its authored prefixes as-is.
@@ -61,7 +70,67 @@ pub(crate) fn validate_raw_subtree(
     expected_prefix: &str,
     expected_local_name: &str,
 ) -> Result<(), ParseError> {
-    let source = format!("{CONTENT_FRAGMENT_PREFIX}{xml}</s11:root>");
+    with_raw_subtree(xml, CONTENT_FRAGMENT_PREFIX, |_, child| {
+        require_name(child, expected_prefix, expected_local_name)
+    })
+}
+
+/// Validates a kept `w:ffData` whose prefixes are each declared in it or by every story root.
+pub(crate) fn validate_form_field_data(xml: &str) -> Result<(), ParseError> {
+    with_raw_subtree(xml, BARE_FRAGMENT_PREFIX, |_, child| {
+        require_name(child, "w", "ffData")
+    })?;
+    let used = super::splice::required_prefixes(xml).ok_or_else(|| {
+        ParseError::Canonical("validated XML fragment is not well-formed".to_owned())
+    })?;
+    if let Some(prefix) = used
+        .into_iter()
+        .find(|prefix| !super::parts::is_story_root_prefix(prefix))
+    {
+        return Err(ParseError::Canonical(format!("unbound prefix {prefix}")));
+    }
+    if carries_schema_instance_attribute(xml) {
+        return Err(ParseError::Canonical(
+            "schema instance attributes are not supported".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// True when an attribute of `xml` is in the schema instance namespace.
+fn carries_schema_instance_attribute(xml: &str) -> bool {
+    let source = format!("<root {}>{xml}</root>", super::parts::DOCUMENT_NAMESPACES);
+    let mut reader = NsReader::from_str(&source);
+    loop {
+        let element = match reader.read_resolved_event() {
+            Ok((_, Event::Start(element) | Event::Empty(element))) => element,
+            Ok((_, Event::Eof)) => return false,
+            Ok(_) => continue,
+            Err(_) => return true,
+        };
+        for attribute in element.attributes() {
+            let Ok(attribute) = attribute else {
+                return true;
+            };
+            if let (ResolveResult::Bound(Namespace(uri)), _) =
+                reader.resolver().resolve_attribute(attribute.key)
+                && std::str::from_utf8(uri)
+                    .ok()
+                    .and_then(|uri| quick_xml::escape::unescape(uri).ok())
+                    .is_none_or(|uri| uri == XSI_NAMESPACE)
+            {
+                return true;
+            }
+        }
+    }
+}
+
+fn with_raw_subtree(
+    xml: &str,
+    wrapper: &str,
+    check: impl for<'e> FnOnce(&'e XmlElement, &'e XmlElement) -> Result<(), ParseError>,
+) -> Result<(), ParseError> {
+    let source = format!("{wrapper}{xml}</s11:root>");
     let limits = ParseLimits::default();
     let document = parse_xml_strict(
         source.as_bytes(),
@@ -80,7 +149,7 @@ pub(crate) fn validate_raw_subtree(
             "validated XML fragment must contain exactly one subtree".to_owned(),
         ));
     }
-    require_name(child, expected_prefix, expected_local_name)
+    check(root, child)
 }
 
 pub(crate) fn validate_math_subtree(xml: &str) -> Result<(), ParseError> {
@@ -143,6 +212,29 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn form_field_data_requires_each_prefix_bound_in_the_fragment_or_by_every_story_root() {
+        validate_form_field_data(
+            r#"<w:ffData xmlns:ext="urn:x"><w:name w:val="T"/><ext:foo w14:x="1" xml:space="preserve"/></w:ffData>"#,
+        )
+        .unwrap();
+        for (xml, prefix) in [
+            (r#"<w:ffData><ext:foo/></w:ffData>"#, "ext"),
+            (r#"<w:ffData><w:name ext:val="T"/></w:ffData>"#, "ext"),
+            (
+                r#"<w:ffData><w:name><ext:foo xmlns:ext="urn:x"/></w:name><ext:bar/></w:ffData>"#,
+                "ext",
+            ),
+            (r#"<w:ffData><w16du:foo/></w:ffData>"#, "w16du"),
+        ] {
+            let error = validate_form_field_data(xml).unwrap_err().to_string();
+            assert!(
+                error.contains(&format!("unbound prefix {prefix}")),
+                "{xml}: {error}"
+            );
+        }
     }
 }
 

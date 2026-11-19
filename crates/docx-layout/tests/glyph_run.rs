@@ -1,8 +1,8 @@
 //! Glyph-run shaping, fallback, geometry, and determinism tests.
 
 use docx_layout::display_list::{
-    DisplayList, GlyphRunPrimitive, Primitive, TextRunPrimitive, build_display_list_json,
-    build_display_list_json_with_fonts,
+    DisplayList, GlyphRunPrimitive, Primitive, StructuralRevisionKind, StructuralRevisionScope,
+    TextRunPrimitive, build_display_list_json, build_display_list_json_with_fonts,
 };
 use docx_layout::hit::{caret_rect, hit_test, range_rects};
 use ooxml_text::{FontId, FontStore, ShapeDirection, kern_features, shape, shape_with_direction};
@@ -1970,4 +1970,296 @@ fn text_runs_carry_the_scripts_their_paragraph_resolves() {
         let json = serde_json::to_value(&run).unwrap();
         assert_eq!(json.get("scripts").is_some(), !expected.is_empty());
     }
+}
+
+/// Two paragraphs in the default family, the first with an inserted paragraph
+/// mark, the second with a deleted one. `chain` is the `fontChains` value for
+/// `"calibri|0|0"` (None ⇒ no fontChains at all).
+fn tracked_mark_input(chain: Option<&[u32]>) -> String {
+    let paragraph = |id: i64, start: i64, mark: &str| {
+        serde_json::json!({
+            "block": {
+                "kind": "paragraph", "id": id, "pmStart": start, "pmEnd": start + 6,
+                "attrs": {
+                    (mark): { "revisionId": id, "author": "Ada", "date": "2026-01-01T00:00:00Z" }
+                },
+                "runs": [{
+                    "kind": "text", "text": "Hello", "pmStart": start, "pmEnd": start + 5
+                }]
+            },
+            "measure": {
+                "kind": "paragraph", "totalHeight": 20.0,
+                "lines": [{
+                    "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 5,
+                    "width": 40.0, "ascent": 16.0, "descent": 4.0, "lineHeight": 20.0
+                }]
+            }
+        })
+    };
+    let fragment = |id: i64, y: f64, start: i64| {
+        serde_json::json!({
+            "kind": "paragraph", "blockId": id,
+            "x": FRAG_X, "y": y, "width": FRAG_WIDTH, "height": 20.0,
+            "fromLine": 0, "toLine": 1, "pmStart": start, "pmEnd": start + 6
+        })
+    };
+    let mut input = serde_json::json!({
+        "measured": [paragraph(1, 1, "pPrIns"), paragraph(2, 8, "pPrDel")],
+        "options": {},
+        "layout": {
+            "pages": [{
+                "size": {"w": 816.0, "h": 1056.0},
+                "margins": {"top": 96.0, "right": 96.0, "bottom": 96.0, "left": 96.0},
+                "number": 1,
+                "fragments": [fragment(1, 96.0, 1), fragment(2, 116.0, 8)]
+            }]
+        }
+    });
+    if let Some(ids) = chain {
+        input["fontChains"] = serde_json::json!({ "calibri|0|0": ids });
+    }
+    input.to_string()
+}
+
+/// The primitives `list`'s first page carries for a paragraph mark revision of `kind`.
+fn pmark_primitives(list: &DisplayList, kind: StructuralRevisionKind) -> Vec<Primitive> {
+    list.pages[0]
+        .primitives
+        .iter()
+        .filter(|primitive| {
+            let attrs = match primitive {
+                Primitive::Text(text) => &text.attrs,
+                Primitive::GlyphRun(run) => &run.attrs,
+                Primitive::Rect(rect) => &rect.attrs,
+                Primitive::Decoration(decoration) => &decoration.attrs,
+                _ => return false,
+            };
+            let Some(rev) = attrs.structural_revision.as_deref() else {
+                return false;
+            };
+            rev.scope == StructuralRevisionScope::Pmark && rev.kind == kind
+        })
+        .cloned()
+        .collect()
+}
+
+fn mark_content(marks: &[Primitive]) -> Vec<&Primitive> {
+    marks
+        .iter()
+        .filter(|primitive| matches!(primitive, Primitive::Text(_) | Primitive::GlyphRun(_)))
+        .collect()
+}
+
+fn mark_chrome(marks: &[Primitive]) -> Vec<&Primitive> {
+    marks
+        .iter()
+        .filter(|primitive| matches!(primitive, Primitive::Rect(_) | Primitive::Decoration(_)))
+        .collect()
+}
+
+#[test]
+fn tracked_paragraph_marks_shape_into_glyph_runs() {
+    let mut store = FontStore::new();
+    let font = store
+        .register(include_bytes!("../../../packages/fonts/assets/Carlito-Regular.ttf").to_vec())
+        .unwrap();
+    let pilcrow = u32::from(store.glyph_id(font, '\u{b6}').unwrap().unwrap());
+    let json = build_display_list_json(&tracked_mark_input(None)).unwrap();
+    let plain: DisplayList = serde_json::from_str(&json).unwrap();
+    let input = tracked_mark_input_with_face(&[font.to_u32()], Some(font.to_u32()));
+    let json = build_display_list_json_with_fonts(&input, &store).unwrap();
+    let shaped: DisplayList = serde_json::from_str(&json).unwrap();
+
+    assert!(
+        !shaped.pages[0]
+            .primitives
+            .iter()
+            .any(|primitive| matches!(primitive, Primitive::Text(text) if text.text == "¶")),
+        "a paragraph mark stayed a text item"
+    );
+    for kind in [StructuralRevisionKind::Ins, StructuralRevisionKind::Del] {
+        let plain_marks = pmark_primitives(&plain, kind);
+        let shaped_marks = pmark_primitives(&shaped, kind);
+        let plain_content = mark_content(&plain_marks);
+        assert_eq!(plain_content.len(), 1, "{kind:?}");
+        let Primitive::Text(text) = plain_content[0] else {
+            panic!("{kind:?} mark without fonts: {:?}", plain_content[0]);
+        };
+        let shaped_content = mark_content(&shaped_marks);
+        assert_eq!(shaped_content.len(), 1, "{kind:?}");
+        assert!(
+            matches!(shaped_content[0], Primitive::GlyphRun(_)),
+            "{kind:?} mark with fonts: {:?}",
+            shaped_content[0]
+        );
+        let Primitive::GlyphRun(run) = shaped_content[0] else {
+            unreachable!();
+        };
+        assert_eq!(run.text, "¶");
+        assert_eq!(run.glyphs.len(), 1, "{kind:?}");
+        assert_eq!(run.glyphs[0].id, pilcrow, "{kind:?}");
+        assert_eq!(run.glyphs[0].x, text.x.as_f64().unwrap(), "{kind:?}");
+        assert_eq!(
+            run.glyphs[0].y,
+            text.baseline_y.as_f64().unwrap(),
+            "{kind:?}"
+        );
+        assert_eq!(run.color, text.color, "{kind:?}");
+        assert_eq!((text.attrs.doc_start, text.attrs.doc_end), (None, None));
+        assert_eq!((run.attrs.doc_start, run.attrs.doc_end), (None, None));
+        let advance: f64 = run.glyphs.iter().map(|glyph| glyph.advance).sum();
+        assert!((advance - 8.0).abs() < 0.001, "{kind:?} advance {advance}");
+        let plain_chrome = mark_chrome(&plain_marks);
+        let expected = if kind == StructuralRevisionKind::Del {
+            2
+        } else {
+            1
+        };
+        assert_eq!(plain_chrome.len(), expected, "{kind:?}");
+        assert_eq!(mark_chrome(&shaped_marks), plain_chrome, "{kind:?}");
+    }
+}
+
+#[test]
+fn tracked_paragraph_marks_stay_text_without_font_chains() {
+    let json = build_display_list_json(&tracked_mark_input(None)).unwrap();
+    let list: DisplayList = serde_json::from_str(&json).unwrap();
+    for kind in [StructuralRevisionKind::Ins, StructuralRevisionKind::Del] {
+        let marks = pmark_primitives(&list, kind);
+        let content = mark_content(&marks);
+        assert_eq!(content.len(), 1, "{kind:?}");
+        assert!(
+            matches!(content[0], Primitive::Text(text) if text.text == "¶"),
+            "{kind:?} mark: {:?}",
+            content[0]
+        );
+    }
+}
+
+/// Asserts every paragraph mark primitive of `list` equals the one the input
+/// without font chains draws: the browser text item and its chrome.
+fn assert_marks_stay_bare_text(list: &DisplayList) {
+    let json = build_display_list_json(&tracked_mark_input(None)).unwrap();
+    let bare: DisplayList = serde_json::from_str(&json).unwrap();
+    for kind in [StructuralRevisionKind::Ins, StructuralRevisionKind::Del] {
+        let expected = pmark_primitives(&bare, kind);
+        let content = mark_content(&expected);
+        assert_eq!(content.len(), 1, "{kind:?}");
+        assert!(matches!(content[0], Primitive::Text(_)), "{kind:?}");
+        assert_eq!(pmark_primitives(list, kind), expected, "{kind:?}");
+    }
+}
+
+#[test]
+fn tracked_paragraph_marks_stay_text_when_the_default_face_lacks_the_pilcrow() {
+    const NOTO_HEBREW: &[u8] =
+        include_bytes!("../../../packages/fonts/assets/NotoSansHebrew-Regular.ttf");
+    const NOTO_NASKH: &[u8] =
+        include_bytes!("../../../packages/fonts/assets/NotoNaskhArabic-Regular.ttf");
+    let mut store = FontStore::new();
+    let mut lacking = None;
+    for bytes in [NOTO_HEBREW, NOTO_NASKH] {
+        let face = store.register(bytes.to_vec()).unwrap();
+        if lacking.is_none() && !store.covers(face, '\u{b6}').unwrap() {
+            lacking = Some(face.to_u32());
+        }
+    }
+    let lacking = lacking.expect("a bundled face without a pilcrow");
+    let input = tracked_mark_input(Some(&[lacking]));
+    let json = build_display_list_json_with_fonts(&input, &store).unwrap();
+    let list: DisplayList = serde_json::from_str(&json).unwrap();
+
+    assert_eq!(mark_kinds(&list), ["text", "text"]);
+    #[cfg(not(feature = "base-latin"))]
+    assert_marks_stay_bare_text(&list);
+}
+
+#[test]
+fn tracked_paragraph_marks_stay_text_without_a_default_family_chain() {
+    let mut store = FontStore::new();
+    let font = store.register(LIBERATION.to_vec()).unwrap();
+    let mut input: serde_json::Value = serde_json::from_str(&tracked_mark_input(None)).unwrap();
+    input["fontChains"] = serde_json::json!({ "times new roman|0|0": [font.to_u32()] });
+    let input = input.to_string();
+    let json = build_display_list_json_with_fonts(&input, &store).unwrap();
+    let list: DisplayList = serde_json::from_str(&json).unwrap();
+
+    assert_marks_stay_bare_text(&list);
+}
+
+const CARLITO: &[u8] = include_bytes!("../../../packages/fonts/assets/Carlito-Regular.ttf");
+
+/// Registers bundled faces until one lacks the pilcrow and returns its id.
+fn face_without_a_pilcrow(store: &mut FontStore) -> u32 {
+    const NOTO_HEBREW: &[u8] =
+        include_bytes!("../../../packages/fonts/assets/NotoSansHebrew-Regular.ttf");
+    const NOTO_NASKH: &[u8] =
+        include_bytes!("../../../packages/fonts/assets/NotoNaskhArabic-Regular.ttf");
+    for bytes in [NOTO_HEBREW, NOTO_NASKH] {
+        let face = store.register(bytes.to_vec()).unwrap();
+        if !store.covers(face, '\u{b6}').unwrap() {
+            return face.to_u32();
+        }
+    }
+    panic!("no bundled face lacks the pilcrow");
+}
+
+/// `tracked_mark_input` with `chain` for `"calibri|0|0"` and, when given,
+/// `mark` as the face layout shapes the paragraph mark with.
+fn tracked_mark_input_with_face(chain: &[u32], mark: Option<u32>) -> String {
+    let mut input: serde_json::Value =
+        serde_json::from_str(&tracked_mark_input(Some(chain))).unwrap();
+    if let Some(face) = mark {
+        input["fontChains"]["@betteroffice/fonts/paragraph-mark"] = serde_json::json!([face]);
+    }
+    input.to_string()
+}
+
+/// The primitive kind each paragraph mark on `list`'s first page is drawn as.
+fn mark_kinds(list: &DisplayList) -> Vec<&'static str> {
+    [StructuralRevisionKind::Ins, StructuralRevisionKind::Del]
+        .into_iter()
+        .flat_map(|kind| pmark_primitives(list, kind))
+        .filter_map(|primitive| match primitive {
+            Primitive::Text(text) if text.text == "¶" => Some("text"),
+            Primitive::GlyphRun(run) if run.text == "¶" => Some("glyphRun"),
+            _ => None,
+        })
+        .collect()
+}
+
+fn mark_kinds_of(input: &str, store: &FontStore) -> Vec<&'static str> {
+    let json = build_display_list_json_with_fonts(input, store).unwrap();
+    mark_kinds(&serde_json::from_str(&json).unwrap())
+}
+
+#[cfg(feature = "base-latin")]
+#[test]
+fn tracked_paragraph_marks_stay_text_when_their_face_lacks_the_pilcrow_beside_the_backstop() {
+    let mut store = FontStore::new();
+    let lacking = face_without_a_pilcrow(&mut store);
+    let input = tracked_mark_input_with_face(&[lacking], Some(lacking));
+
+    assert_eq!(mark_kinds_of(&input, &store), ["text", "text"]);
+}
+
+#[test]
+fn a_later_face_of_the_default_chain_never_draws_the_paragraph_mark() {
+    let mut store = FontStore::new();
+    let lacking = face_without_a_pilcrow(&mut store);
+    let carlito = store.register(CARLITO.to_vec()).unwrap().to_u32();
+    for mark in [Some(lacking), None] {
+        let input = tracked_mark_input_with_face(&[lacking, carlito], mark);
+
+        assert_eq!(mark_kinds_of(&input, &store), ["text", "text"], "{mark:?}");
+    }
+}
+
+#[test]
+fn a_default_family_chain_without_a_mark_face_leaves_the_mark_text() {
+    let mut store = FontStore::new();
+    let carlito = store.register(CARLITO.to_vec()).unwrap().to_u32();
+    let input = tracked_mark_input_with_face(&[carlito], None);
+
+    assert_eq!(mark_kinds_of(&input, &store), ["text", "text"]);
 }

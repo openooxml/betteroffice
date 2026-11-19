@@ -359,6 +359,9 @@ test('writes a public aggregate beside the section that names no sample', async 
     expect([aggregate.formats.docx.samples, aggregate.formats.pptx.samples, aggregate.formats.xlsx.samples]).toEqual([2, 1, 0]);
     for (const leak of ['docx-a', 'docx-b', 'pptx-c', 'a'.repeat(64), 'corpus.example'])
       expect(text.includes(leak) && leak).toBe(false);
+    const { renderLargeSection, renderSection } = (await import('./readme.mjs')) as any;
+    const report = JSON.parse(await readFile(join(paths.output, 'report.json'), 'utf8'));
+    expect(renderLargeSection(aggregate, { date: '2026-11-17' })).toBe(renderSection(report, { privateCorpus: true, date: '2026-11-17' }));
   } finally {
     await rm(root, { recursive: true, force: true });
   }

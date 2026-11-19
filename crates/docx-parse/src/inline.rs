@@ -96,6 +96,8 @@ pub enum RunContent {
         dirty: Option<bool>,
         #[serde(rename = "formData", skip_serializing_if = "Option::is_none")]
         form_data: Option<FieldFormData>,
+        #[serde(skip)]
+        raw_form_data_xml: Option<String>,
     },
     #[serde(rename = "instrText")]
     InstrText { text: String },
@@ -480,6 +482,10 @@ fn parse_field_char(element: &XmlElement) -> RunContent {
             .then_some(true),
         dirty: (element.parse_boolean_attribute(Some("w"), "dirty") == Some(true)).then_some(true),
         form_data: parse_field_form_data(element),
+        raw_form_data_xml: element
+            .child_elements()
+            .find(|child| child.name == "w:ffData")
+            .map(XmlElement::to_raw_inline_xml),
     }
 }
 
@@ -1160,9 +1166,45 @@ pub struct StructuredFieldContent {
     pub inline: Option<Vec<InlineNode>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blocks: Option<Vec<crate::block::BlockContent>>,
+    /// How many blocks of the story holding the field's paragraph this content spans after that
+    /// paragraph: the code's come first, then the result's. Raw blocks count, each with the
+    /// phase the field is in when it appears, so one before an external separator is code. The
+    /// count is relative to the field's paragraph in the parsed story; a reader checks it against
+    /// the story it reads before using it. Zero means the field spans paragraphs but its later
+    /// paragraphs are no longer tracked, so no block after the field's paragraph belongs to it.
+    #[serde(
+        rename = "blockCount",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub block_count: Option<usize>,
 }
 
 impl StructuredFieldContent {
+    /// Whether this content runs past the field's own paragraph.
+    pub fn spans_paragraphs(&self) -> bool {
+        self.blocks.is_some() || self.block_count.is_some()
+    }
+
+    /// [`Self::spans_paragraphs`] for content held as JSON.
+    pub fn value_spans_paragraphs(content: Option<&serde_json::Value>) -> bool {
+        let Some(content) = content else {
+            return false;
+        };
+        Self {
+            inline: None,
+            blocks: content
+                .get("blocks")
+                .filter(|blocks| !blocks.is_null())
+                .map(|_| Vec::new()),
+            block_count: content
+                .get("blockCount")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|count| usize::try_from(count).ok()),
+        }
+        .spans_paragraphs()
+    }
+
     /// Whether another field nests in this content, including one kept as plain runs.
     pub(crate) fn holds_field(&self) -> bool {
         self.inline.as_deref().is_some_and(inline_holds_field)
@@ -1224,6 +1266,8 @@ pub struct ComplexField {
     pub fld_lock: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dirty: Option<bool>,
+    #[serde(rename = "rawFormDataXml", skip_serializing_if = "Option::is_none")]
+    pub raw_form_data_xml: Option<String>,
     #[serde(rename = "structuredCode", skip_serializing_if = "Option::is_none")]
     pub structured_code: Option<StructuredFieldContent>,
     #[serde(rename = "structuredResult", skip_serializing_if = "Option::is_none")]
@@ -1234,16 +1278,18 @@ pub struct ComplexField {
 
 impl ComplexField {
     /// Repeats the structured code and result in the field tree only when no other field nests
-    /// in either, so each level's content is stored once.
-    pub(crate) fn project_leaf_tree(&mut self) {
+    /// in either, so each level's content is stored once. `later` are the story blocks the field
+    /// spans after its paragraph.
+    pub(crate) fn project_leaf_tree(&mut self, later: &[crate::block::BlockContent]) {
         let Some(tree) = self.field_tree.as_mut() else {
             return;
         };
-        let leaf = !self
-            .structured_code
-            .iter()
-            .chain(&self.structured_result)
-            .any(StructuredFieldContent::holds_field);
+        let leaf = !crate::block::blocks_hold_field(later)
+            && !self
+                .structured_code
+                .iter()
+                .chain(&self.structured_result)
+                .any(StructuredFieldContent::holds_field);
         tree.code = self.structured_code.as_ref().filter(|_| leaf).cloned();
         tree.result = self.structured_result.as_ref().filter(|_| leaf).cloned();
     }
@@ -1310,6 +1356,7 @@ fn parse_simple_field_at_depth(
     let structured_result = (!structured.is_empty()).then(|| StructuredFieldContent {
         inline: Some(structured),
         blocks: None,
+        block_count: None,
     });
     let field_tree = structured_result
         .as_ref()
@@ -2193,6 +2240,7 @@ pub(crate) struct OpenComplexField {
     mode: FieldMode,
     fld_lock: bool,
     dirty: bool,
+    raw_form_data_xml: Option<String>,
     formatting: Option<TextFormatting>,
 }
 
@@ -2203,8 +2251,13 @@ impl OpenComplexField {
                 char_type,
                 fld_lock,
                 dirty,
+                raw_form_data_xml,
                 ..
-            } if char_type == "begin" => Some((*fld_lock == Some(true), *dirty == Some(true))),
+            } if char_type == "begin" => Some((
+                *fld_lock == Some(true),
+                *dirty == Some(true),
+                raw_form_data_xml.clone(),
+            )),
             _ => None,
         });
         Self {
@@ -2216,8 +2269,9 @@ impl OpenComplexField {
             instruction_runs: Vec::new(),
             children: Vec::new(),
             mode: FieldMode::Code,
-            fld_lock: flags.is_some_and(|flags| flags.0),
-            dirty: flags.is_some_and(|flags| flags.1),
+            fld_lock: flags.as_ref().is_some_and(|flags| flags.0),
+            dirty: flags.as_ref().is_some_and(|flags| flags.1),
+            raw_form_data_xml: flags.and_then(|flags| flags.2),
             formatting: run.formatting.clone(),
         }
     }
@@ -2297,11 +2351,13 @@ impl OpenComplexField {
         let structured_code = (!self.structured_code.is_empty()).then(|| StructuredFieldContent {
             inline: Some(self.structured_code),
             blocks: None,
+            block_count: None,
         });
         let structured_result =
             (!self.structured_result.is_empty()).then(|| StructuredFieldContent {
                 inline: Some(self.structured_result),
                 blocks: None,
+                block_count: None,
             });
         let field_tree = StructuredFieldTree {
             version: Some(1.0),
@@ -2320,11 +2376,12 @@ impl OpenComplexField {
             formatting: self.formatting,
             fld_lock: self.fld_lock.then_some(true),
             dirty: self.dirty.then_some(true),
+            raw_form_data_xml: self.raw_form_data_xml,
             structured_code,
             structured_result,
             field_tree: Some(field_tree),
         };
-        field.project_leaf_tree();
+        field.project_leaf_tree(&[]);
         field
     }
 }
@@ -2689,6 +2746,7 @@ fn parse_rich_simple_field(
     let structured_result = (!result.is_empty()).then(|| StructuredFieldContent {
         inline: Some(result),
         blocks: None,
+        block_count: None,
     });
     let field_tree = structured_result
         .as_ref()

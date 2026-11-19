@@ -3,7 +3,6 @@ import { DocxEditor, type DocxEditorRef, type DocxErrorInfo, type TrackedChanges
 import { XlsxEditor, type XlsxAsyncEditorApi } from "@betteroffice/xlsx-react";
 import { PptxEditor, type PptxAsyncEditorApi } from "@betteroffice/pptx-react";
 import { configureDefaultFonts } from "@betteroffice/docx/layout";
-import { setGoogleFontsEnabled } from "@betteroffice/docx/utils";
 import { CollaborationProvider as DocxProvider, type AsyncReplicaAdapter } from "@betteroffice/docx/collaboration";
 import { CollaborationProvider as XlsxProvider } from "@betteroffice/xlsx/collaboration";
 import { CollaborationProvider as PptxProvider, type AsyncCollaborationReplica } from "@betteroffice/pptx/collaboration";
@@ -48,7 +47,6 @@ export interface EditorTranslations {
 }
 
 configureDefaultFonts({ load: () => import("@betteroffice/fonts") });
-setGoogleFontsEnabled(false);
 
 export function legacyDocx() {
   if (typeof location === "undefined") return false;
@@ -187,6 +185,7 @@ export interface EditorProps {
   onSave(bytes: Uint8Array): void;
   onSaveRequest?: () => boolean | void | Promise<boolean | void>;
   downloadOnSave?: boolean;
+  remoteFonts?: ComponentProps<typeof XlsxEditor>["remoteFonts"];
   onChange(): void;
   onLocalUpdate?(): void;
   onError(error: Error): void;
@@ -228,6 +227,7 @@ export default function Editor({
   onSave,
   onSaveRequest,
   downloadOnSave,
+  remoteFonts,
   onChange,
   onLocalUpdate,
   onError,
@@ -528,6 +528,7 @@ export default function Editor({
         fileName={name}
         {...(onSaveRequest ? { onSaveRequest: requestSave } : {})}
         {...(downloadOnSave !== undefined ? { downloadOnSave } : {})}
+        {...(remoteFonts !== undefined ? { remoteFonts } : {})}
         onSave={(bytes) => {
           if (serialization.current) serialization.current.bytes = bytes;
           else saveBytes(bytes);

@@ -246,8 +246,9 @@ fn read_item(
         match next_event(xml, buffer, depth)? {
             Event::Start(element) => {
                 let name = local_name(&element);
-                match (stack.last().map(Vec::as_slice), name.as_slice()) {
-                    (None, b"r") => {
+                let parent = stack.last().map(Vec::as_slice);
+                match (stack.len(), parent, name.as_slice()) {
+                    (0, _, b"r") => {
                         item_runs += 1;
                         if valid && (item_runs > MAX_RICH_TEXT_RUNS_PER_ITEM || !budget.run()) {
                             valid = false;
@@ -257,9 +258,13 @@ fn read_item(
                         saw_text = false;
                         saw_properties = false;
                     }
-                    (Some(b"r"), b"rPr") if !saw_properties && !saw_text => saw_properties = true,
-                    (Some(b"r"), b"t") if !saw_text => saw_text = true,
-                    (Some(b"rPr"), _) if valid => {
+                    (1, Some(b"r"), b"rPr") if !saw_properties && !saw_text => {
+                        saw_properties = true;
+                    }
+                    (1, Some(b"r"), b"t") if !saw_text => saw_text = true,
+                    (0, _, b"rPh" | b"phoneticPr") | (1, Some(b"rPh"), b"t") => {}
+                    (2, Some(b"rPr"), b"rPh" | b"phoneticPr") => valid = false,
+                    (2, Some(b"rPr"), _) if valid => {
                         if !read_property(&element, &mut style, budget)? {
                             valid = false;
                         }
@@ -367,8 +372,14 @@ fn read_property(
     style: &mut RunStyle,
     budget: &mut Budget,
 ) -> Result<bool, ParseError> {
-    let value = attr(element, b"val")?;
     let name = local_name(element);
+    if !matches!(
+        name.as_slice(),
+        b"rFont" | b"sz" | b"b" | b"i" | b"strike" | b"u" | b"vertAlign" | b"color"
+    ) {
+        return Ok(true);
+    }
+    let value = attr(element, b"val")?;
     for attribute in element.attributes() {
         let attribute = attribute.map_err(xml_err)?;
         let attribute = attribute.key.local_name();
@@ -458,7 +469,10 @@ fn read_property(
                     crate::styles::parse_color(element)?
                 };
                 style.color.is_some()
-                    && (tint.is_none() || matches!(style.color, Some(Color::Theme { .. })))
+                    && (matches!(style.color, Some(Color::Theme { .. }))
+                        || tint
+                            .and_then(|value| value.parse::<f64>().ok())
+                            .is_none_or(|value| value == 0.0))
             }
         }
         _ => false,
@@ -533,7 +547,7 @@ mod tests {
     fn invalid_items_do_not_charge_subsequent_runs_or_styles() {
         for (prefix, charged) in [
             ("<unsupported/>", 0),
-            ("<r><rPr><unsupported/></rPr><t>x</t></r>", 1),
+            (r#"<r><rPr><sz val="0"/></rPr><t>x</t></r>"#, 1),
             ("<r><t>mismatch</t></r>", 1),
         ] {
             let mut index = RichTextIndex::default();

@@ -463,6 +463,27 @@ impl FontRequirementCollector {
         }
     }
 
+    /// Adds the face a text watermark stretched to its shape box paints with.
+    pub fn collect_watermark(&mut self, watermark: &Value) {
+        if watermark["kind"] != "text" || watermark["box"].is_null() {
+            return;
+        }
+        let Some(text) = watermark["text"].as_str().filter(|text| !text.is_empty()) else {
+            return;
+        };
+        let family = watermark["font"]
+            .as_str()
+            .unwrap_or(crate::display_list::DEFAULT_FONT_FAMILY);
+        let scripts =
+            ooxml_text::paragraph_scripts_with_languages(std::iter::once((text, None)), false);
+        let mut characters = FontCharacters::default();
+        for ch in text.chars() {
+            characters.insert(ch);
+        }
+        self.name(family, false, false, &scripts, true);
+        self.characters(family, false, false, characters);
+    }
+
     /// Adds preview fonts and returns whether marker characters stay valid.
     pub fn collect_preview<'a>(
         &mut self,
@@ -8280,6 +8301,40 @@ mod tests {
             .collect();
 
         assert_eq!(keys, ["arial|0|0", "calibri|0|0"]);
+    }
+
+    #[test]
+    fn a_tracked_paragraph_mark_leaves_the_font_requirements_alone() {
+        let paragraphs = [
+            json!({"runs": [{"kind": "text", "text": "Latin"}]}),
+            json!({"runs": [{
+                "kind": "text", "text": "日本語の文章",
+                "fontSlots": {"eastAsia": "MS Mincho", "hint": "eastAsia"}
+            }]}),
+            json!({
+                "attrs": {"defaultFontFamily": "Courier New"},
+                "runs": [{"kind": "text", "text": "Latin"}]
+            }),
+        ];
+        for (case, paragraph) in paragraphs.iter().enumerate() {
+            let requirements = |mark: Option<&str>| {
+                let mut value = paragraph.clone();
+                value["kind"] = json!("paragraph");
+                value["id"] = json!("p");
+                if let Some(mark) = mark {
+                    value["attrs"][mark] = json!({"revisionId": 1, "author": "Ada"});
+                }
+                let block: LayoutBlock = serde_json::from_value(value).unwrap();
+                let all = collect_font_requirements([&block], "Arial");
+                let measured = collect_measured_font_requirements([&block], "Arial");
+                serde_json::to_value((all, measured)).unwrap()
+            };
+            let plain = requirements(None);
+
+            for mark in ["pPrIns", "pPrDel"] {
+                assert_eq!(requirements(Some(mark)), plain, "{case} {mark}");
+            }
+        }
     }
 
     #[test]

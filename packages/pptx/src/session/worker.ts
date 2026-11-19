@@ -1,4 +1,9 @@
 import type { SessionScope } from '../../../../shared/office-session/transport';
-import { startSessionWorker } from './workerStart';
+import { bootWorker, type WorkerBootScope } from '../../../../shared/office-session/workerBoot';
 
-startSessionWorker(self as unknown as SessionScope);
+bootWorker(
+  self as unknown as SessionScope & WorkerBootScope,
+  () => import('./workerStart').then((module) => module.startSessionWorker),
+  (message) => ({ protocol: 1, kind: 'failure', code: 'crash', message }),
+  'betteroffice.pptx.worker',
+);

@@ -1626,14 +1626,14 @@ fn persisted_dxf_base_fingerprints_keep_pre_filter_pool_readings() {
         let xf = format!(r#"<xf numFmtId="164" fontId="0" fillId="0" borderId="0" {flags}/>"#);
         let extension_xf = format!(r#"<xf numFmtId="164" fontId="0" {flags}/>"#);
         let legacy_projection = format!(
-            r#"<styleSheet><numFmts><numFmt numFmtId="164" formatCode="0.000"/><numFmt numFmtId="14" formatCode="0%"/><numFmt numFmtId="165" formatCode="@"/></numFmts><fonts>{fonts}</fonts><fills>{fills}</fills><borders>{borders}</borders><cellXfs>{xf}{extension_xf}</cellXfs></styleSheet>"#
+            r#"<styleSheet><numFmts><numFmt numFmtId="164" formatCode="0.000"/><numFmt numFmtId="166" formatCode="0%"/><numFmt numFmtId="165" formatCode="@"/></numFmts><fonts>{fonts}</fonts><fills>{fills}</fills><borders>{borders}</borders><cellXfs>{xf}{extension_xf}</cellXfs></styleSheet>"#
         );
         set_test_part(&mut parts, "xl/styles.xml", legacy_projection.into_bytes());
         let pre_fix = xlsx_parse::parse_workbook(&parts).unwrap();
         let legacy = Workbook::from_model_collaborative(pre_fix, 901).unwrap();
         let state = legacy.encode_state_as_update_v1();
         let source_xml = format!(
-            r#"<styleSheet>{prefix}<fonts><font/></fonts><dxfs><dxf><font><b/></font></dxf></dxfs><fills><fill/></fills><extLst><ext><fills><fill><patternFill patternType="solid"><fgColor rgb="FFFF0000"/></patternFill></fill></fills></ext></extLst><borders><border/></borders><dxfs><dxf><border><left style="thin"/></border></dxf></dxfs><cellXfs>{xf}</cellXfs><dxfs><dxf><numFmt numFmtId="14" formatCode="0%"/></dxf></dxfs><extLst><ext><numFmt numFmtId="165" formatCode="@"/><cellXfs>{extension_xf}</cellXfs></ext></extLst></styleSheet>"#
+            r#"<styleSheet>{prefix}<fonts><font/></fonts><dxfs><dxf><font><b/></font></dxf></dxfs><fills><fill/></fills><extLst><ext><fills><fill><patternFill patternType="solid"><fgColor rgb="FFFF0000"/></patternFill></fill></fills></ext></extLst><borders><border/></borders><dxfs><dxf><border><left style="thin"/></border></dxf></dxfs><cellXfs>{xf}</cellXfs><dxfs><dxf><numFmt numFmtId="166" formatCode="0%"/></dxf></dxfs><extLst><ext><numFmt numFmtId="165" formatCode="@"/><cellXfs>{extension_xf}</cellXfs></ext></extLst></styleSheet>"#
         );
         set_test_part(&mut parts, "xl/styles.xml", source_xml.into_bytes());
         let source = ooxml_opc::rezip_parts(&parts).unwrap();
@@ -11091,6 +11091,81 @@ fn a_drag_repins_every_sheet_sharing_the_drawing() {
     );
     assert_eq!(workbook.model().sheets[0].charts[0].anchor, before);
     assert_eq!(workbook.model().sheets[1].charts[0].anchor, before);
+}
+
+/// [`shared_drawing_fixture`] with only the Mirror sheet protected.
+fn protected_mirror_fixture() -> Vec<u8> {
+    let mut parts = ooxml_opc::unzip_parts(&shared_drawing_fixture()).unwrap();
+    let mirror = test_part_text(&parts, "xl/worksheets/sheet2.xml").replace(
+        "<sheetData/>",
+        r#"<sheetData/><sheetProtection sheet="1"/>"#,
+    );
+    set_test_part(&mut parts, "xl/worksheets/sheet2.xml", mirror.into_bytes());
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+fn shared_frame_edit(
+    workbook: &mut Workbook,
+    resize: bool,
+    protection: betteroffice_xlsx::ProtectedSheets,
+) -> betteroffice_xlsx::Result<betteroffice_xlsx::MutationResult> {
+    if resize {
+        workbook.resize_chart_with_protection(
+            SheetId(0),
+            MOVED_FRAME,
+            ChartResize {
+                left: 0.0,
+                top: 0.0,
+                right: 48.0,
+                bottom: 24.0,
+            },
+            CalculationOptions::default(),
+            protection,
+        )
+    } else {
+        workbook.move_chart_with_protection(
+            SheetId(0),
+            MOVED_FRAME,
+            18.0,
+            9.0,
+            CalculationOptions::default(),
+            protection,
+        )
+    }
+}
+
+/// A frame shared with a protected sheet cannot be moved or resized through
+/// an unprotected sheet holding it, since that would repin the protected one.
+#[test]
+fn a_shared_frame_is_not_moved_or_resized_when_another_owner_is_protected() {
+    use betteroffice_xlsx::ProtectedSheets;
+    for resize in [false, true] {
+        let mut workbook = Workbook::open(&protected_mirror_fixture()).unwrap();
+        let version = workbook.version();
+        let before = workbook.model().sheets[0].charts[0].anchor;
+        assert_eq!(workbook.model().sheets[1].charts[0].anchor, before);
+
+        let message = match shared_frame_edit(&mut workbook, resize, ProtectedSheets::Refuse) {
+            Err(Error::LockedTarget(message)) => message,
+            other => panic!("expected a protection refusal, got {other:?}"),
+        };
+        assert_eq!(message, r#"sheet "Mirror" is protected"#);
+        assert_eq!(workbook.version(), version);
+        assert!(!workbook.can_undo());
+        assert_eq!(workbook.model().sheets[0].charts[0].anchor, before);
+        assert_eq!(workbook.model().sheets[1].charts[0].anchor, before);
+
+        assert!(
+            shared_frame_edit(&mut workbook, resize, ProtectedSheets::Allow)
+                .unwrap()
+                .applied
+        );
+        let edited = workbook.model().sheets[0].charts[0].anchor;
+        assert_ne!(edited, before);
+        assert_eq!(workbook.model().sheets[1].charts[0].anchor, edited);
+        let parts = ooxml_opc::unzip_parts(&workbook.save().unwrap()).unwrap();
+        assert!(test_part_text(&parts, "xl/worksheets/sheet2.xml").contains("<sheetProtection"));
+    }
 }
 
 const MOVED_FRAME: &str = "xl/drawings/drawing1.xml#0";

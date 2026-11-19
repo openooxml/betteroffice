@@ -81,12 +81,14 @@ import {
   type InputDraft,
 } from './commands/inputCoordinator';
 import { inPluginChrome, pluginEventStore } from './commands/pluginEvents';
+import type { XlsxCommandFailureCode } from './commands/types';
 import { xlsxContextMenuSections, type XlsxContextFreezeTarget } from './contextMenu/menus';
 import { useContextMenu } from '../../../shared/react-toolbar/ContextMenu';
 import type { OverflowMenuEntry } from '../../../shared/react-toolbar/MenuList';
 import { useCommandShortcuts } from './commands/useCommandShortcuts';
 import { useSaveRequest } from './commands/useSaveRequest';
 import { useXlsxCommandBinding, type XlsxEditorBridge } from './commands/useXlsxCommands';
+import { isSheetProtectedError } from './commands/workerInputErrors';
 import { XlsxCommandContext } from './commands/XlsxCommandProvider';
 import { EditorToolbar } from './components/EditorToolbar';
 import { FillHandle, fillHandleAnchor } from './components/FillHandle';
@@ -130,6 +132,7 @@ import { useXlsxPluginHost } from './plugins/useXlsxPluginHost';
 
 import { initialZoomScale } from './commands/evaluate';
 import { WorkbookFailure } from './components/WorkbookFailure';
+import { LoadingLayer } from './components/LoadingLayer';
 
 import type { XlsxEditorApi, XlsxInThreadEditorProps, XlsxPointPosition } from './XlsxEditor.types';
 import { XlsxSaveRefusedError } from './XlsxSaveRefusedError';
@@ -455,6 +458,7 @@ export function XlsxEditorContent({
   fillHandle = false,
   allowHostProposals = false,
   defaultFonts,
+  remoteFonts,
   toolbar,
   showToolbar = true,
   i18n,
@@ -551,7 +555,12 @@ export function XlsxEditorContent({
 
   const [sheetInfo, setSheetInfo, sheetInfoRef] = useSyncedState<SheetInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [refusal, setRefusal] = useState<string | null>(null);
+  const [refusal, setRefusal] = useState<{ code: XlsxCommandFailureCode } | { message: string } | null>(null);
+  /** Shows a failed edit: a sheet protection refusal as a notice, anything else as a failure. */
+  const reportEditFailure = useCallback((cause: unknown) => {
+    if (isSheetProtectedError(cause)) setRefusal({ code: 'sheet-protected' });
+    else setError(cause instanceof Error ? cause.message : String(cause));
+  }, []);
   const [renderError, setRenderError] = useState<string | null>(null);
   const [frame, setFrame] = useState<DisplayList | null>(null);
   const [selection, setRawSelection, selectionRef] = useSyncedState<Selection | null>(null);
@@ -891,7 +900,7 @@ export function XlsxEditorContent({
   const [openedHandle, setOpenedHandle] = useState<WorkbookHandle | null>(null);
   const paintWithDefaultFonts = useDefaultFonts(openedHandle, null, defaultFonts,
     () => setRevision((revision) => revision + 1),
-    () => { if (canvasRef.current) canvasRef.current.dataset.defaultFonts = 'settled'; });
+    () => { if (canvasRef.current) canvasRef.current.dataset.defaultFonts = 'settled'; }, remoteFonts);
   const pluginSelection = useMemo<XlsxPluginSelection>(() => {
     const sheetId = sheetInfo?.sheetIds[activeSheet];
     if (sheetId === undefined) return null;
@@ -941,7 +950,7 @@ export function XlsxEditorContent({
 
   /** Shows a plugin refusal, or passes the inputs a gate let through. */
   const gateOutcome = useCallback((gated: CellInputEdit[] | XlsxHostRefusalError) => {
-    if (!Array.isArray(gated)) setRefusal(gated.message);
+    if (!Array.isArray(gated)) setRefusal({ message: gated.message });
     return gated;
   }, []);
   const presentGrid = pluginHost.presentGrid;
@@ -1549,8 +1558,8 @@ export function XlsxEditorContent({
         }
         return true;
       } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
-        return false;
+        reportEditFailure(e);
+        return isSheetProtectedError(e) ? new XlsxCommandAdmissionError('sheet-protected') : false;
       }
     },
     close(draft) {
@@ -1639,7 +1648,9 @@ export function XlsxEditorContent({
           applyResult(handle.fillRange(sheet, from === sourceEnd ? from : `${from}:${sourceEnd}`, `${from}:${end}`));
           return true;
         } catch (error) {
-          setRefusal(error instanceof Error ? error.message : String(error));
+          setRefusal(isSheetProtectedError(error)
+            ? { code: 'sheet-protected' }
+            : { message: error instanceof Error ? error.message : String(error) });
           return true;
         }
       });
@@ -1698,12 +1709,12 @@ export function XlsxEditorContent({
           applyResult(handle.moveChart(sheet, id, dx, dy));
           return true;
         } catch (e) {
-          setError(e instanceof Error ? e.message : String(e));
+          reportEditFailure(e);
           return false;
         }
       });
     },
-    [activeSheet, applyResult, readOnly, coordinator]
+    [activeSheet, applyResult, readOnly, coordinator, reportEditFailure]
   );
 
   // resize the selected chart's anchor as one undoable edit. every pointer
@@ -1721,12 +1732,12 @@ export function XlsxEditorContent({
           applyResult(handle.resizeChart(sheet, chart.id, edges));
           return true;
         } catch (e) {
-          setError(e instanceof Error ? e.message : String(e));
+          reportEditFailure(e);
           return false;
         }
       });
     },
-    [activeSheet, applyResult, readOnly, coordinator]
+    [activeSheet, applyResult, readOnly, coordinator, reportEditFailure]
   );
   resizeChartRef.current = resizeChartBy;
 
@@ -1898,11 +1909,11 @@ export function XlsxEditorContent({
         applyResult(handle.editCells(sheet, cleared));
         return true;
       } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
+        reportEditFailure(e);
         return false;
       }
     },
-    [applyResult, gatedClear]
+    [applyResult, gatedClear, reportEditFailure]
   );
 
   const clearCells = useCallback(() => {
@@ -1981,7 +1992,7 @@ export function XlsxEditorContent({
         applyResult(target.handle.editCells(target.sheet, cleared));
         return true;
       } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
+        reportEditFailure(e);
         return false;
       }
     };
@@ -2017,7 +2028,7 @@ export function XlsxEditorContent({
       if (write) resolve(new Blob([decided.text], { type: 'text/plain' }));
       return clear(write ?? writeText(decided.text), decided.cleared);
     });
-  }, [captureTarget, cellClipboard, copyTarget, gatedClear, applyResult, readOnly, coordinator]);
+  }, [captureTarget, cellClipboard, copyTarget, gatedClear, applyResult, readOnly, coordinator, reportEditFailure]);
 
   const pasteSelection = useCallback((plain = false) => {
     const handle = handleRef.current;
@@ -2063,11 +2074,11 @@ export function XlsxEditorContent({
         }
         return true;
       } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
+        reportEditFailure(e);
         return false;
       }
     });
-  }, [selectionRef, activeSheetRef, applyResult, readOnly, coordinator, setSelection, cellClipboard, gateOutcome, editGate, t]);
+  }, [selectionRef, activeSheetRef, applyResult, readOnly, coordinator, setSelection, cellClipboard, gateOutcome, editGate, t, reportEditFailure]);
 
   useEffect(() => {
     const handle = handleRef.current;
@@ -2088,7 +2099,7 @@ export function XlsxEditorContent({
         focusContainer();
         return true;
       } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
+        reportEditFailure(e);
         return false;
       }
     });
@@ -2102,6 +2113,7 @@ export function XlsxEditorContent({
     focusContainer,
     readOnly,
     coordinator,
+    reportEditFailure,
   ]);
 
   const deliverSave = useCallback(
@@ -2829,6 +2841,7 @@ export function XlsxEditorContent({
     translate: t,
     apply: applyResult,
     fail: (cause) => setError(cause instanceof Error ? cause.message : String(cause)),
+    refuse: (code) => setRefusal({ code }),
     setZoom,
     setProposalsPanelOpen,
     setReplaceOpen: (open) => { if (open) openReplaceDialog(); else setReplaceOpen(false); },
@@ -2989,7 +3002,6 @@ export function XlsxEditorContent({
         ...style,
       }}
     >
-      {file && !handleRef.current && !error && loadingIndicator}
       {toolbarContent != null && (
         <div
           data-testid="xlsx-toolbar"
@@ -3269,6 +3281,9 @@ export function XlsxEditorContent({
           {renderDock('bottom')}
         </div>
         {renderDock('right')}
+        {file && !handleRef.current && !error ? (
+          <LoadingLayer>{loadingIndicator}</LoadingLayer>
+        ) : null}
       </div>
 
       {a11yGrid && (
@@ -3300,7 +3315,11 @@ export function XlsxEditorContent({
       )}
 
       {error && <WorkbookFailure kind="open" details={error} />}
-      {refusal && <div data-testid="xlsx-input-refusal" role="alert">{refusal}</div>}
+      {refusal && (
+        <div data-testid="xlsx-input-refusal" role="alert">
+          {'code' in refusal ? commandReason(refusal.code, { translate: t }).message : refusal.message}
+        </div>
+      )}
 
       {sheetInfo && sheetInfo.sheetNames.length > 0 && (
         <div

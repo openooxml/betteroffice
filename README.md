@@ -77,13 +77,17 @@ its family's Regular; Latin faces also use a WOFF2-style glyph transform.
 **Browser editors.** While the main engine initializes, a small preflight WebAssembly module scans
 the document in parallel and starts loading only the fonts it needs from jsDelivr, with CJK fonts
 arriving in slices. Open fonts that aren't in BetterOffice's packs come from Bunny Fonts, a
-GDPR-compliant Google Fonts alternative. You can also bundle the font packs yourself.
+GDPR-compliant Google Fonts alternative; switch to Google Fonts or your own URL, or turn remote
+fonts off. The spreadsheet editor paints with those fetched faces today; the document and
+presentation editors use a generic fallback for them until they measure with the fetched faces.
+You can also bundle the font packs yourself.
 
 **Headless engines (`-native`, Python, Rust).** All fonts are included by default, so nothing is
 fetched.
 
 **Resolution order.** Fonts embedded in the document, fonts supplied by your app, BetterOffice's
-font packs, then a last-resort fallback face.
+font packs, then a last-resort fallback face. See [Fonts](https://docs.betteroffice.dev/docs/fonts)
+for runtimes and remote font settings.
 
 <!-- BEGIN GENERATED VISUAL FIDELITY -->
 ## Benchmarks

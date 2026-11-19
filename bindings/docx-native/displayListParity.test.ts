@@ -8,7 +8,7 @@ import { describe, expect, test } from 'bun:test';
 import { canonicalFaceIds, dumpDisplayLists, firstDifferences, type DisplayListDump } from './displayListParity';
 
 const dumps = new Map<string, DisplayListDump>();
-const fixtures = ['demo', 'leaders', 'picture-corrupt', 'picture-drawn', 'picture-missing', 'picture-none', 'typography'];
+const fixtures = ['demo', 'leaders', 'picture-corrupt', 'picture-drawn', 'picture-missing', 'picture-none', 'tracked-mark', 'typography'];
 
 function dump(engine: 'wasm' | 'native', run: 1 | 2, fonts: 'pinned' | 'default' = 'pinned'): DisplayListDump {
   const key = `${engine} ${run} ${fonts}`;
@@ -29,6 +29,30 @@ for (const [fonts, label] of [['pinned', 'with the same fonts'], ['default', 'wi
     expect(Object.keys(wasm.pages).sort()).toEqual(fixtures);
     expect(Object.entries(wasm.pages).filter(([, pages]) => pages.length === 0).map(([name]) => name)).toEqual([]);
     expect(firstDifferences(wasm, native)).toEqual([]);
+  }, 240_000);
+}
+
+/** The kind of every primitive drawing a tracked paragraph mark on the recorded pages of `fixture`. */
+function markKinds(dump: DisplayListDump, fixture: string): string[] {
+  const kinds: string[] = [];
+  const walk = (value: unknown): void => {
+    if (Array.isArray(value)) value.forEach(walk);
+    else if (value !== null && typeof value === 'object') {
+      const primitive = value as { kind?: unknown; structuralRevision?: { scope?: unknown } };
+      if ((primitive.kind === 'text' || primitive.kind === 'glyphRun') && primitive.structuralRevision?.scope === 'pmark') kinds.push(primitive.kind);
+      else Object.values(value).forEach(walk);
+    }
+  };
+  for (const page of dump.pages[fixture] ?? []) walk((JSON.parse(page) as { page: unknown }).page);
+  return kinds;
+}
+
+for (const fonts of ['pinned', 'default'] as const) {
+  test(`with ${fonts} fonts, a tracked paragraph mark is the same primitive kind on the native and wasm engines`, () => {
+    const wasm = markKinds(dump('wasm', 1, fonts), 'tracked-mark');
+    expect(wasm.length).toBeGreaterThan(0);
+    if (fonts === 'pinned') expect(new Set(wasm)).toEqual(new Set(['glyphRun']));
+    expect(markKinds(dump('native', 1, fonts), 'tracked-mark')).toEqual(wasm);
   }, 240_000);
 }
 

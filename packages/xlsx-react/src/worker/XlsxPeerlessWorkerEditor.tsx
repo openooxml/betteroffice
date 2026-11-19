@@ -85,6 +85,7 @@ import {
 } from './PeerlessWorkerSurface';
 import { PeerlessWorkerAnnouncer } from './PeerlessWorkerAnnouncer';
 import { WorkbookFailure } from '../components/WorkbookFailure';
+import { LoadingLayer } from '../components/LoadingLayer';
 
 const BRAND = '#217346';
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
@@ -298,7 +299,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   ownerRef.current = run;
   const paintWithDefaultFonts = useDefaultFonts(run, run?.session.call.decodeFontFace, props.defaultFonts,
     () => { if (run?.current && !run.failure) sourceRef.current?.schedule(); },
-    () => { if (canvasRef.current) canvasRef.current.dataset.defaultFonts = 'settled'; });
+    () => { if (canvasRef.current) canvasRef.current.dataset.defaultFonts = 'settled'; }, props.remoteFonts);
   const sheetSelections = useMemo(() => new Map<string, Selection>(), [run]);
   const sheetScrolls = useMemo(() => new Map<string, { x: number; y: number }>(), [run]);
   const neighborFrames = useMemo(() => new Map<number, NeighborFrame>(), [run]);
@@ -2211,7 +2212,6 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
         }}
         style={{ position: 'relative', display: 'flex', flexDirection: 'column', width: '100%', height: '100%',
           minWidth: 0, color: '#202124', background: '#ffffff', fontFamily: 'ui-sans-serif, system-ui, sans-serif', ...props.style }}>
-        {props.file && !run?.ready && !error && props.loadingIndicator}
         <PeerlessSelectionEffect store={presentation} onChange={applySelectionFormat} />
         {toolbar != null && <div data-testid="xlsx-toolbar" style={{ flex: '0 0 auto' }}>{toolbar}</div>}
         <div ref={dockAreaRef} data-testid="xlsx-workspace" style={{ position: 'relative', display: 'flex', flex: 1, minHeight: 0 }}>
@@ -2270,6 +2270,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
           {error && sheets.length === 0 && <WorkbookFailure kind="open" details={error.message} />}
           {!props.file && !error && <div data-testid="xlsx-empty" role="status" style={{ position: 'absolute', inset: 0,
             display: 'grid', placeItems: 'center', color: '#5f6368', pointerEvents: 'none' }}>{t('editor.openPrompt')}</div>}
+          {props.file && !run?.ready && !error ? <LoadingLayer>{props.loadingIndicator}</LoadingLayer> : null}
         </div>
         <PeerlessWorkerAccessibility store={presentation} active={active} sheets={sheets} onFollowLink={followLinkFromMirror} />
         <PeerlessWorkerAnnouncer store={presentation} active={active} sheets={sheets} focusTarget={scrollRef} announceRef={announceRef} />

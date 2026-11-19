@@ -62,6 +62,7 @@ from .render import (
 
 from ._betteroffice_pptx import (
     decode_font_face,
+    font_substitute,
     AdjustEdit,
     CaretAnchor,
     CollaborativeStateError,
@@ -108,6 +109,7 @@ class PngTarget(TypedDict):
 __all__ = [
     "PngTarget",
     "decode_font_face",
+    "font_substitute",
     "AdjustEdit",
     "CaretAnchor",
     "PptxShapeAdjustStep",

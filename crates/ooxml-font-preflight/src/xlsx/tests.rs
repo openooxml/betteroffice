@@ -282,7 +282,7 @@ fn existing_unstyled_cells_use_normal_font_in_styled_rows_and_columns() {
 }
 
 #[test]
-fn shared_and_inline_strings_attach_only_used_scripts() {
+fn shared_and_inline_strings_attach_only_used_scripts_and_request_their_run_fonts() {
     let sheet = worksheet(
         r#"<row r="1"><c r="A1" t="s"><v>1</v></c><c r="B1" s="1" t="inlineStr"><is><r><rPr><rFont val="Unused"/></rPr><t>العربية</t></r><r><t>אב</t></r><rPh><t>かな</t></rPh></is></c></row>"#,
         "",
@@ -292,11 +292,37 @@ fn shared_and_inline_strings_attach_only_used_scripts() {
     );
     let result = xlsx_font_preflight(&fixture(&sheet, STYLES, Some(&strings), &[], false)).unwrap();
     assert!(result.complete);
-    assert_eq!(result.faces[0].scripts, ["cjk-jp"]);
-    assert_eq!(result.faces[1].scripts, ["cjk-jp", "arabic", "hebrew"]);
     assert_eq!(
         keys(&result),
-        [("Base", false, false), ("Styled", true, true)]
+        [
+            ("Base", false, false),
+            ("Styled", true, true),
+            ("Unused", true, true)
+        ]
+    );
+    assert_eq!(result.faces[0].scripts, ["cjk-jp"]);
+    assert_eq!(result.faces[1].scripts, ["cjk-jp", "arabic", "hebrew"]);
+    assert_eq!(result.faces[2].scripts, ["arabic"]);
+}
+
+#[test]
+fn run_fonts_of_used_strings_are_requested_and_unused_strings_request_nothing() {
+    let sheet = worksheet(
+        r#"<row r="1"><c r="A1" t="s"><v>1</v></c><c r="B1" t="inlineStr"><is><r><rPr><b/><rFont val="Inline Face"/></rPr><t>x</t></r></is></c></row>"#,
+        "",
+    );
+    let strings = format!(
+        r#"<sst xmlns="{S}"><si><r><rPr><i/><rFont val="Never"/></rPr><t>never</t></r></si><si><r><rPr><b/><rFont val="Used Face"/></rPr><t>used</t></r><r><t xml:space="preserve"> plain</t></r></si></sst>"#
+    );
+    let result = xlsx_font_preflight(&fixture(&sheet, STYLES, Some(&strings), &[], false)).unwrap();
+    assert!(result.complete);
+    assert_eq!(
+        keys(&result),
+        [
+            ("Base", false, false),
+            ("Inline Face", true, false),
+            ("Used Face", true, false)
+        ]
     );
 }
 
