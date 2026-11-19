@@ -13102,13 +13102,15 @@ impl EngineSession {
     }
 
     /// A fingerprint of the fonts, fallback order and measurement defaults of `request`, by font
-    /// content rather than store ids. `None` when a font it names is not registered.
+    /// content rather than store ids. `None` when a font it names is not registered. The face
+    /// of the tracked paragraph mark is left out: it moves no text.
     fn font_set_fingerprint(&self, request: &serde_json::Value) -> Option<String> {
         let measurement = request.get("measurement").cloned().unwrap_or_default();
         let store = docx_layout::measure_store_id();
         let mut chains = BTreeMap::new();
         if let Some(serde_json::Value::Object(font_chains)) = measurement.get("fontChains") {
-            for (key, ids) in font_chains {
+            let mark = docx_layout::display_list::PARAGRAPH_MARK_FACE;
+            for (key, ids) in font_chains.iter().filter(|(key, _)| key.as_str() != mark) {
                 let mut faces = Vec::new();
                 for id in ids.as_array().into_iter().flatten() {
                     let id = u32::try_from(id.as_u64()?).ok()?;
