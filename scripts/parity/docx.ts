@@ -81,7 +81,6 @@ function runResult(run: Run, separators: boolean) {
     fontSize: formatting?.fontSize === undefined ? null : formatting.fontSize / 2,
     fontFamily: formatting?.fontFamily?.ascii ?? formatting?.fontFamily?.hAnsi ?? null,
     color: formatting?.color?.rgb ?? null,
-    highlight: formatting?.highlight ?? null,
     styleId: formatting?.styleId ?? null
   };
 }
@@ -136,8 +135,6 @@ function tableResult(table: Table): unknown {
       return {
         paragraphs,
         tables: collectTables(cell.content).map(tableResult),
-        gridSpan: cell.formatting?.gridSpan ?? null,
-        vMerge: cell.formatting?.vMerge ?? null,
         text: joinText(paragraphs.map(({ text }) => text))
       };
     });
@@ -147,6 +144,24 @@ function tableResult(table: Table): unknown {
     rows,
     columnWidths: table.columnWidths ?? null,
     text: joinText(rows.map(({ text }) => text))
+  };
+}
+
+function runHighlights(paragraph: Paragraph) {
+  return {
+    id: paragraph.paraId ?? null,
+    highlights: paragraphRuns(paragraph).map(([run]) => run.formatting?.highlight ?? null)
+  };
+}
+
+function cellMerges(table: Table) {
+  return {
+    rows: table.rows.map((row) =>
+      row.cells.map((cell) => ({
+        gridSpan: cell.formatting?.gridSpan ?? null,
+        vMerge: cell.formatting?.vMerge ?? null
+      }))
+    )
   };
 }
 
@@ -284,6 +299,7 @@ export const docx: Format = {
         },
         paragraphIds: () => paragraphs().map((paragraph) => paragraph.paraId ?? null),
         paragraphs: () => paragraphs().map(paragraphResult),
+        runHighlights: () => paragraphs().map(runHighlights),
         paragraph: (args) => {
           const all = paragraphs();
           if (typeof args.index === 'number') {
@@ -295,6 +311,7 @@ export const docx: Format = {
           return matches.length === 1 ? paragraphResult(matches[0]!) : null;
         },
         tables: () => collectTables(read().package.document.content).map(tableResult),
+        cellMerges: () => collectTables(read().package.document.content).map(cellMerges),
         sections: () => (read().package.document.sections ?? []).map(sectionResult),
         headers: () => headerFooterResults(read().package.headers),
         footers: () => headerFooterResults(read().package.footers),

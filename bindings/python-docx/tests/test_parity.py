@@ -38,7 +38,6 @@ def run_result(run):
         "fontSize": run.font_size,
         "fontFamily": run.font_family,
         "color": run.color,
-        "highlight": None,
         "styleId": run.style_id,
     }
 
@@ -57,8 +56,6 @@ def cell_result(cell):
     return {
         "paragraphs": [paragraph_result(paragraph) for paragraph in cell.paragraphs],
         "tables": [table_result(table) for table in cell.tables],
-        "gridSpan": None,
-        "vMerge": None,
         "text": cell.text,
     }
 

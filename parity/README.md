@@ -23,14 +23,16 @@ The xlsx and pptx goldens stay plain step arrays.
 
 The read projections compare these fields, with absent values as `null`:
 
-- `paragraphs`, `paragraph` and every nested paragraph: `id`, `style`, `alignment`, `text` and `runs`, each run with `text`, `bold`, `italic`, `underline`, `strike`, `fontSize` (points), `fontFamily` (ascii, else hAnsi), `color`, `highlight` and `styleId`.
-- `tables`: `rows` of `cells` and `text`, each cell with `paragraphs`, nested `tables`, `gridSpan`, `vMerge` and `text`, plus each table's `columnWidths` and `text`.
+- `paragraphs`, `paragraph` and every nested paragraph: `id`, `style`, `alignment`, `text` and `runs`, each run with `text`, `bold`, `italic`, `underline`, `strike`, `fontSize` (points), `fontFamily` (ascii, else hAnsi), `color` and `styleId`.
+- `runHighlights`: per body paragraph, `id` and `highlights`, the `highlight` of each run.
+- `tables`: `rows` of `cells` and `text`, each cell with `paragraphs`, nested `tables` and `text`, plus each table's `columnWidths` and `text`.
+- `cellMerges`: per table, `rows` of cells, each with `gridSpan` and `vMerge`.
 - `sections`: `id`, `pageWidth`, `pageHeight`, `orientation`, the four margins, `paragraphs` and `text`; `headers` and `footers`: `relId`, `kind`, `paragraphs` and `text`.
 - `structure`: body paragraph and table counts and the section, header, footer, footnote and endnote counts.
 - `readEdited`: the edited paragraph's text and the body story's text, read without a save; the story leaves out table cells.
 - `save` and `saveReport`: the parts record above; `saveReport` adds `keptUnchanged` and `structureDropped` of the same save.
 
-The Python binding exposes no run highlight or cell merge properties, so Python records `null` for `highlight`, `gridSpan` and `vMerge`.
+The Python binding exposes no run highlight or cell merge properties, so those steps list `"targets": ["ts", "rust"]` and Python skips them.
 
 For a new format, add its script, golden and `scripts/parity/<format>.ts` op table.
 Register the table in `harness.ts`, add Rust/Python tests and hook up native CI after its build.

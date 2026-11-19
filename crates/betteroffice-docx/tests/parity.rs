@@ -95,7 +95,6 @@ fn run_result(run: &Run, separators: bool) -> Value {
         "color": formatting
             .and_then(|format| format.color.as_ref())
             .and_then(|color| color.rgb.clone()),
-        "highlight": formatting.and_then(|format| format.highlight.clone()),
         "styleId": formatting.and_then(|format| format.style_id.clone()),
     })
 }
@@ -182,14 +181,7 @@ fn cell_result(cell: &TableCell) -> Value {
     let mut tables = Vec::new();
     collect_tables(&cell.content, &mut tables);
     let tables: Vec<Value> = tables.into_iter().map(table_result).collect();
-    let formatting = cell.formatting.as_ref();
-    json!({
-        "paragraphs": paragraphs,
-        "tables": tables,
-        "gridSpan": formatting.and_then(|format| format.grid_span),
-        "vMerge": formatting.and_then(|format| format.v_merge.clone()),
-        "text": texts(&paragraphs),
-    })
+    json!({ "paragraphs": paragraphs, "tables": tables, "text": texts(&paragraphs) })
 }
 
 fn row_result(row: &TableRow) -> Value {
@@ -202,6 +194,35 @@ fn table_result(table: &Table) -> Value {
     let rows: Vec<Value> = table.rows.iter().map(row_result).collect();
     let text = join_text(rows.iter().map(text_of));
     json!({ "rows": rows, "columnWidths": table.column_widths, "text": text })
+}
+
+fn run_highlights(paragraphs: Vec<&Paragraph>) -> Value {
+    let mut results = Vec::new();
+    for paragraph in paragraphs {
+        let mut highlights = Vec::new();
+        for (run, _) in paragraph_runs(paragraph) {
+            let formatting = run.formatting.as_ref();
+            highlights.push(formatting.and_then(|format| format.highlight.clone()));
+        }
+        results.push(json!({ "id": paragraph.para_id, "highlights": highlights }));
+    }
+    Value::Array(results)
+}
+
+fn cell_merges(table: &Table) -> Value {
+    let mut rows = Vec::new();
+    for row in &table.rows {
+        let mut cells = Vec::new();
+        for cell in &row.cells {
+            let formatting = cell.formatting.as_ref();
+            cells.push(json!({
+                "gridSpan": formatting.and_then(|format| format.grid_span),
+                "vMerge": formatting.and_then(|format| format.v_merge.clone()),
+            }));
+        }
+        rows.push(Value::Array(cells));
+    }
+    json!({ "rows": rows })
 }
 
 fn section_result(section: &Section) -> Value {
@@ -352,7 +373,9 @@ impl Runner {
                     .paragraph(args["id"].as_str().unwrap())
                     .map_or(Value::Null, paragraph_result),
             },
+            "runHighlights" => run_highlights(document.paragraphs()),
             "tables" => Value::Array(document.tables().into_iter().map(table_result).collect()),
+            "cellMerges" => Value::Array(document.tables().into_iter().map(cell_merges).collect()),
             "sections" => Value::Array(document.sections().iter().map(section_result).collect()),
             "headers" => header_footer_results(document.headers()),
             "footers" => header_footer_results(document.footers()),
