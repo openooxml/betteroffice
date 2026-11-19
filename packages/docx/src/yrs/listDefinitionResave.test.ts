@@ -305,6 +305,55 @@ describe('created lists carried by a saved file', () => {
   });
 });
 
+describe('created definitions no paragraph names', () => {
+  const takeOff = (target: YrsSession, value: string) => {
+    const paraId = target.paragraphs('body').find(entry => entry.text === value)!.paraId;
+    target.setParagraphAttrs({ story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 0 } }, {
+      numPr: null, listIsBullet: null, listNumFmt: null, listMarker: null, other: { listDef: null },
+    });
+  };
+  const createdNames = (bytes: Uint8Array) =>
+    [...text(unzipContainer(bytes)['word/numbering.xml']).matchAll(/<w:name w:val="betteroffice-list:([^"]*)"/g)].map(match => match[1]);
+  const keyOf = (target: YrsSession, value: string) =>
+    createdListKey(target.paragraphs('body').find(entry => entry.text === value)!.properties);
+
+  test('a list put on, taken off and put on again saves only the definition its paragraph is on', async () => {
+    const created = await session();
+    created.seedFromDocx(makeDocx(DOCUMENT, LISTS_NUMBERING));
+    createList(created, 'Alpha', 'bullet');
+    takeOff(created, 'Alpha');
+    createList(created, 'Alpha', 'bullet');
+    expect(created.createdListDefinitions()).toHaveLength(2);
+    const bytes = (await saveYrsDocx(created, { updateModifiedDate: false })).bytes;
+    expect(counts(bytes)).toEqual({ abstractNums: SOURCE.abstractNums + 1, nums: SOURCE.nums + 1 });
+    expect(createdNames(bytes)).toEqual([keyOf(created, 'Alpha')]);
+    expect(savedFormat(bytes, savedNumId(bytes, 'Alpha'))).toBe('bullet');
+  });
+
+  test('a definition its paragraphs left is not saved, and an undo that brings them back saves it under its ids', async () => {
+    const created = await session();
+    created.seedFromDocx(makeDocx(DOCUMENT, LISTS_NUMBERING));
+    created.beginUndoCapture();
+    createList(created, 'Alpha', 'bullet');
+    const first = (await saveYrsDocx(created, { updateModifiedDate: false })).bytes;
+    const alpha = savedNumId(first, 'Alpha');
+    expect(alpha).toBeGreaterThan(3);
+    created.addUndoBoundary();
+    takeOff(created, 'Alpha');
+    created.addUndoBoundary();
+    const off = (await saveYrsDocx(created, { updateModifiedDate: false })).bytes;
+    expect(savedNumId(off, 'Alpha')).toBeUndefined();
+    expect(counts(off)).toEqual(SOURCE);
+    expect(createdNames(off)).toEqual([]);
+    expect(created.createdListDefinitions()).toHaveLength(1);
+    expect(created.undo()).toBe(true);
+    const back = (await saveYrsDocx(created, { updateModifiedDate: false })).bytes;
+    expect(savedNumId(back, 'Alpha')).toBe(alpha);
+    expect(savedFormat(back, alpha)).toBe('bullet');
+    expect(counts(back)).toEqual({ abstractNums: SOURCE.abstractNums + 1, nums: SOURCE.nums + 1 });
+  });
+});
+
 describe('a paragraph that joins a created list without its numPr changing', () => {
   const ITEM = `<w:document xmlns:w="${W}"><w:body>${[
     paragraph('Lead'), paragraph('Item', 1), paragraph('Tail'),
