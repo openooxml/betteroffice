@@ -616,7 +616,7 @@ export async function writeSessionSave(
     ? new Set([...session.listDefinitionKeysInUse(), ...references.keys])
     : undefined;
   const created = defined.filter(definition => inUse?.has(definition.key));
-  if (created.length) await preloadOpcWasm();
+  if (created.length) await Promise.all([preloadOpcWasm(), preloadParseWasm()]);
   const write = async (sectionEdits: RustParagraphIds['sectionEdits']) => {
     const modelBody = (part: string) => sectionPlan !== undefined && !sectionEdits && part === bodyPart;
     const spliced = splicesFor(sectionEdits).filter(({ part }) => !modelBody(part));

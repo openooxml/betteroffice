@@ -1,5 +1,6 @@
 import { headerFooterAliasOf, markHeaderFooterAlias } from '../docx/headerFooterAliasProjection';
-import type { HeaderFooter, NumberingDefinitions, Paragraph } from '../types/document';
+import { parseRelationshipsXmlWithRust } from '../docx/rustParseFacade';
+import type { HeaderFooter, NumberingDefinitions, Paragraph, Relationship } from '../types/document';
 import type { YrsSession } from './index';
 
 /** The `w:numId` and `w:abstractNumId` a save gives a list definition the editor created. */
@@ -327,20 +328,22 @@ function carriedAbstractNum(
   )?.abstractNumId;
 }
 
-/** Where the numbering part of the package `parts` is, or goes, and whether a relationship names it. */
+/** The relationships the relationships part `xml` at `path` holds, read by the engine's parser. */
+const relationshipsIn = (xml: string | undefined, path: string): Relationship[] =>
+  xml === undefined ? [] : [...parseRelationshipsXmlWithRust(xml, path).values()];
+
+/** Where the numbering part of the package `parts` is, or goes, and the relationships that name parts of the main document. */
 function numberingPart(parts: Readonly<Record<string, Uint8Array>>) {
-  const roots = decode(parts['_rels/.rels'])?.match(/<Relationship\b[^>]*>/g) ?? [];
-  const main = (roots
-    .find(entry => /\bType="[^"]*\/officeDocument"/.test(entry))
-    ?.match(/\bTarget="([^"]*)"/)?.[1] ?? 'word/document.xml').replace(/^\//, '');
+  const main = (relationshipsIn(decode(parts['_rels/.rels']), '_rels/.rels')
+    .find(relationship => relationship.type.endsWith('/officeDocument'))?.target ?? 'word/document.xml').replace(/^\//, '');
   const folder = main.slice(0, main.lastIndexOf('/') + 1);
   const relationshipsPath = `${folder}_rels/${main.slice(folder.length)}.rels`;
   const relationships = decode(parts[relationshipsPath]);
-  const related = (relationships?.match(/<Relationship\b[^>]*>/g) ?? [])
-    .find(entry => /\bType="[^"]*\/numbering"/.test(entry) && !/\bTargetMode="External"/.test(entry));
-  const target = related?.match(/\bTarget="([^"]*)"/)?.[1];
+  const listed = relationshipsIn(relationships, relationshipsPath);
+  const related = listed.find(relationship => relationship.type.endsWith('/numbering') && relationship.targetMode !== 'External');
+  const target = related?.target;
   const path = target === undefined ? `${folder}numbering.xml` : target.startsWith('/') ? target.slice(1) : `${folder}${target}`;
-  return { folder, relationshipsPath, relationships, related: related !== undefined, path };
+  return { folder, relationshipsPath, relationships, ids: listed.map(relationship => relationship.id), related: related !== undefined, path };
 }
 
 /**
@@ -398,14 +401,30 @@ export function savedListDefinitions(
   });
 }
 
-/** `xml` with `child` as the last child of its element `name`. */
-function appendChild(xml: string, name: string, child: string): string {
-  const close = xml.lastIndexOf(`</${name}>`);
-  if (close >= 0) return `${xml.slice(0, close)}${child}${xml.slice(close)}`;
-  const empty = new RegExp(`<${name}\\b[^>]*?/>`).exec(xml);
-  if (!empty) throw new Error(`The package part has no ${name} element`);
-  const open = `${empty[0].slice(0, -2).trimEnd()}>`;
-  return `${xml.slice(0, empty.index)}${open}${child}</${name}>${xml.slice(empty.index + empty[0].length)}`;
+/** `xml` with comments and CDATA sections blanked out, offsets kept. */
+const masked = (xml: string) => xml.replace(/<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>/g, match => ' '.repeat(match.length));
+
+/** The start tags of the `{any prefix}name` elements of `xml`, outside comments and CDATA. */
+const startTags = (xml: string, name: string) =>
+  [...masked(xml).matchAll(new RegExp(`<(?:[\\w.-]+:)?${name}(?=[\\s/>])[^>]*>`, 'g'))].map(match => match[0]);
+
+/**
+ * `xml` with the element `child` writes, given the prefix of the root element `name` (`r:` or ''),
+ * as the root's last child.
+ */
+function appendToRoot(xml: string, name: string, child: (prefix: string) => string): string {
+  const blanked = masked(xml);
+  const root = new RegExp(`<(?:([\\w.-]+):)?${name}(?=[\\s/>])[^>]*>`).exec(blanked);
+  if (!root) throw new Error(`The package part has no ${name} element`);
+  const prefix = root[1] === undefined ? '' : `${root[1]}:`;
+  const entry = child(prefix);
+  if (root[0].endsWith('/>')) {
+    const open = `${xml.slice(root.index, root.index + root[0].length - 2).trimEnd()}>`;
+    return `${xml.slice(0, root.index)}${open}${entry}</${prefix}${name}>${xml.slice(root.index + root[0].length)}`;
+  }
+  const close = blanked.lastIndexOf(`</${prefix}${name}`);
+  if (close < 0) throw new Error(`The package part has no ${name} end`);
+  return `${xml.slice(0, close)}${entry}${xml.slice(close)}`;
 }
 
 function abstractNumXml(w: string, declaration: string, definition: DocxSavedListDefinition): string {
@@ -477,16 +496,22 @@ export function writeListDefinitionParts(parts: Record<string, Uint8Array>, defi
   parts[located.path] = encoder.encode(written);
   if (!located.related) {
     const relationships = located.relationships ?? `${XML_DECLARATION}<Relationships xmlns="${RELATIONSHIPS}"></Relationships>`;
-    const taken = new Set([...relationships.matchAll(/\bId="([^"]*)"/g)].map(match => match[1]));
+    const taken = new Set([
+      ...located.ids,
+      ...startTags(relationships, 'Relationship').flatMap(tag => attributeOf(tag, 'Id') ?? []),
+    ]);
     let next = 1;
     while (taken.has(`rId${next}`)) next += 1;
-    const entry = `<Relationship Id="rId${next}" Type="${NUMBERING_RELATIONSHIP}" Target="${escapeXml(located.path.slice(located.folder.length))}"/>`;
-    parts[located.relationshipsPath] = encoder.encode(appendChild(relationships, 'Relationships', entry));
+    const target = escapeXml(located.path.slice(located.folder.length));
+    parts[located.relationshipsPath] = encoder.encode(appendToRoot(relationships, 'Relationships', prefix =>
+      `<${prefix}Relationship Id="rId${next}" Type="${NUMBERING_RELATIONSHIP}" Target="${target}"/>`));
   }
   const types = decode(parts['[Content_Types].xml']);
-  if (source === undefined && types !== undefined && !types.includes(`PartName="/${located.path}"`)) {
-    const entry = `<Override PartName="/${escapeXml(located.path)}" ContentType="${NUMBERING_CONTENT_TYPE}"/>`;
-    parts['[Content_Types].xml'] = encoder.encode(appendChild(types, 'Types', entry));
+  const named = `/${located.path}`.toLowerCase();
+  if (source === undefined && types !== undefined &&
+    !startTags(types, 'Override').some(tag => attributeOf(tag, 'PartName')?.toLowerCase() === named)) {
+    parts['[Content_Types].xml'] = encoder.encode(appendToRoot(types, 'Types', prefix =>
+      `<${prefix}Override PartName="/${escapeXml(located.path)}" ContentType="${NUMBERING_CONTENT_TYPE}"/>`));
   }
   return true;
 }
