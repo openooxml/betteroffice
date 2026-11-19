@@ -34,6 +34,10 @@ pub(crate) type PatchTableStyles = BTreeMap<String, (Option<Value>, Option<Value
 /// lacks this key and keeps cached SEQ results.
 pub(crate) const OPAQUE_SEQUENCES: &str = "opaqueSequences";
 
+/// `_kind` of the embed a kept inline element holding content seeds as: its `xml` is written back
+/// as it was, and it shows and searches as nothing.
+pub(crate) const RAW_INLINE_KIND: &str = "rawInline";
+
 /// Writes the first marker, so a seed keeps the operation ids an earlier seed of the same
 /// document gave its stories and session: replicas that seeded it before still converge.
 const SEQUENCE_METADATA_CLIENT: u64 = 0x1_0000_05e9;
@@ -4660,6 +4664,7 @@ fn paragraph_units(
     let style_formatting = paragraph_style_formatting(paragraph, styles, extra_run_formatting);
     for content in array(field(Some(paragraph), "content")) {
         let start = units.len();
+        let mut seeded_raw = false;
         match string(field(Some(content), "type")).unwrap_or_default() {
             "commentRangeStart" | "commentRangeEnd" => {
                 if let Some(id) = field(Some(content), "id") {
@@ -4743,6 +4748,11 @@ fn paragraph_units(
                         assoc,
                         xml: xml.to_owned(),
                     });
+                } else {
+                    boundaries = None;
+                    seeded_raw = true;
+                    let payload = JsonObject::from([("xml".to_owned(), json!(xml))]);
+                    units.push(embed_unit(RAW_INLINE_KIND, payload, &[], 1));
                 }
             }
             "bookmarkStart" | "bookmarkEnd" => {}
@@ -4750,7 +4760,9 @@ fn paragraph_units(
         }
         content_breaks(content, start, styles, source, &mut breaks, true, false);
         let mut elements = Vec::new();
-        unmodelled_nodes(content, &mut elements);
+        if !seeded_raw {
+            unmodelled_nodes(content, &mut elements);
+        }
         if !elements.is_empty() {
             let kind = string(field(Some(content), "type")).unwrap_or_default();
             let (unit, in_control) = match kind {

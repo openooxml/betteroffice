@@ -12,7 +12,7 @@ import { markRevisionInfo } from '../docx/sessionRevisionIds';
 import { headerFooterStory, sessionSourcePackage } from './sessionInternals';
 import { createStyleResolver, type StyleResolver } from '../styles';
 import { hasTrackedControlContent } from '../utils/trackedControlContent';
-import { isRawXml } from '../types/content/rawXml';
+import { isRawXml, type RawXml } from '../types/content/rawXml';
 import { seededCellIndices } from './tableRowSpans';
 import { pixelsToEmu } from '../utils/units';
 import {
@@ -820,6 +820,20 @@ function fieldFromPayload(
   };
 }
 
+/** `_kind` of the embed a kept inline element holding content seeds as. @internal */
+export const RAW_INLINE_KIND = 'rawInline';
+
+/** Kept inline elements written back from their embed, one story unit each. */
+const rawInlineEmbeds = new WeakSet<RawXml>();
+
+function rawInlineFromPayload(payload: Attrs): RawXml | null {
+  const xml = asString(payload.xml);
+  if (xml === undefined) return null;
+  const raw: RawXml = { type: 'rawXml', xml };
+  rawInlineEmbeds.add(raw);
+  return raw;
+}
+
 function mathFromPayload(payload: Attrs): MathEquation {
   return {
     type: 'mathEquation',
@@ -1293,6 +1307,8 @@ function inlineContentForItem(
       );
     case 'math':
       return mathFromPayload(item.payload);
+    case RAW_INLINE_KIND:
+      return rawInlineFromPayload(item.payload);
     case 'sdt':
       return inlineSdtFromPayload(item.payload, recovery, format);
     case 'noteRef': {
@@ -1533,6 +1549,13 @@ function buildParagraphContent(
       flushHyperlink();
       const note = ordinaryContentForItem(item, recovery, format);
       if (note) content.push(note);
+      continue;
+    }
+    if (item.kind === 'embed' && item.embedKind === RAW_INLINE_KIND) {
+      flushRun();
+      flushHyperlink();
+      const kept = rawInlineFromPayload(item.payload);
+      if (kept) content.push(kept);
       continue;
     }
 
@@ -1955,6 +1978,8 @@ function paragraphContentLength(content: ParagraphContent): number {
     case 'moveFrom':
     case 'moveTo':
       return content.content.reduce((sum, child) => sum + paragraphContentLength(child), 0);
+    case 'rawXml':
+      return rawInlineEmbeds.has(content) ? 1 : 0;
     default:
       return 0;
   }
@@ -2166,20 +2191,20 @@ function restoreNestedOrdinals(content: ParagraphContent[], base: readonly Parag
   });
 }
 
-const EMPTY_ELEMENT = /^\s*<([^\s/>]+)(?:[^>"']|"[^"]*"|'[^']*')*?\/>\s*$/;
-
-function restoreRawInlines(content: ParagraphContent[], base: Paragraph | undefined): ParagraphContent[] {
-  if (!base) return content;
-  const length = content.reduce((sum, child) => sum + paragraphContentLength(child), 0);
-  const boundaries: CommentBoundary[] = [];
-  let offset = 0;
-  for (const [index, child] of base.content.entries()) {
-    if (child.type === 'rawXml' && !EMPTY_ELEMENT.test(child.xml)) {
-      boundaries.push({ id: index, kind: 'start', offset: Math.min(offset, length) });
+/** Gives each kept inline element written back from its embed the source occurrence its base counterpart carries. */
+function restoreRawInlineOrdinals(content: ParagraphContent[], base: readonly ParagraphContent[]): void {
+  const ordinals = new Map<string, number>();
+  for (const child of base) {
+    if (child.type === 'rawXml' && child.sourceOrdinal !== undefined && !ordinals.has(child.xml)) {
+      ordinals.set(child.xml, child.sourceOrdinal);
     }
-    offset += paragraphContentLength(child);
   }
-  return insertBoundaries(content, boundaries, (boundary) => base.content[boundary.id]!);
+  if (ordinals.size === 0) return;
+  for (const child of content) {
+    if (child.type !== 'rawXml') continue;
+    const ordinal = ordinals.get(child.xml);
+    if (ordinal !== undefined) child.sourceOrdinal = ordinal;
+  }
 }
 
 function paragraphAttrs(properties: Attrs): ParagraphSaveAttrs {
@@ -2454,12 +2479,12 @@ function paragraphFromStory(
     liveBreaks
   );
   restoreLineBreaks(content, baseParagraph);
-  content = restoreRawInlines(content, baseParagraph);
   content = insertBoundaries(content, rawMarks, (boundary) => ({
     type: 'rawXml',
     xml: (boundary as RawMarkBoundary).xml,
   }));
   if (baseParagraph) {
+    restoreRawInlineOrdinals(content, baseParagraph.content);
     restoreNestedOrdinals(content, baseParagraph.content);
     restoreTextBoxBookmarks(content, baseParagraph.content);
   }

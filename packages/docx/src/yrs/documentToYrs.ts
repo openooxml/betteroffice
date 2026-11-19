@@ -46,7 +46,7 @@ import {
 } from './tableParagraphFormatting';
 import type { Style } from '../types/styles';
 import type { YrsOpeningOptions, YrsRawOp, YrsSession } from './index';
-import { noteYrsStoriesDirty } from './yrsToDocument';
+import { RAW_INLINE_KIND, noteYrsStoriesDirty } from './yrsToDocument';
 import { calculateRowSpans, type RowSpanInfo } from './tableRowSpans';
 import { recoverGroupedStorySeeds } from './groupedStorySeed';
 import { sessionMaterializedSource } from './sessionInternals';
@@ -188,7 +188,7 @@ const EMPTY_ELEMENT = /^\s*<([^\s/>]+)(?:[^>"']|"[^"]*"|'[^']*')*?\/>\s*$/;
 /**
  * The side a kept inline element's anchor sticks to when it is written without content: the unit
  * before it for an element whose name ends in `End`, the unit after it otherwise. Null for an
- * element holding content.
+ * element holding content, which seeds as one {@link RAW_INLINE_KIND} embed.
  */
 function rawMarkAssoc(xml: string): RawMark['assoc'] | null {
   const name = EMPTY_ELEMENT.exec(xml)?.[1];
@@ -1454,7 +1454,12 @@ function paragraphUnits(
       units.push(embedUnit('math', mathPayload(content)));
     } else if (content.type === 'rawXml') {
       const assoc = rawMarkAssoc(content.xml);
-      if (assoc) rawMarks.push({ unit: start, assoc, xml: content.xml });
+      if (assoc) {
+        rawMarks.push({ unit: start, assoc, xml: content.xml });
+      } else {
+        boundaries = undefined;
+        units.push(embedUnit(RAW_INLINE_KIND, { xml: content.xml }));
+      }
     } else if (content.type !== 'bookmarkStart' && content.type !== 'bookmarkEnd') {
       boundaries = undefined;
     }
