@@ -43,7 +43,7 @@ export async function pageToPng(list: PageDisplayList, options: PageToPngOptions
 
 function createCanvas(width: number, height: number): ExportCanvas {
   if (typeof OffscreenCanvas === 'function') return new OffscreenCanvas(width, height);
-  if (typeof document === 'undefined') throw new PngExportError('canvas-unavailable', 'PNG export needs a canvas, and this environment has none. Use @betteroffice/vsdx-native.');
+  if (typeof document === 'undefined') throw new PngExportError('canvas-unavailable', 'PNG export needs OffscreenCanvas or a DOM canvas, and this environment has neither. Run it in a browser or a web worker.');
   const canvas = document.createElement('canvas');
   canvas.width = width;
   canvas.height = height;
