@@ -311,6 +311,37 @@ describe('pptx native engine parity', () => {
     expect(run(native)).toEqual(run(wasm));
   });
 
+  test('text typed at the end of a run with explicit default formatting stays in that run on native and wasm', async () => {
+    const zip = new JSZip();
+    const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+    const ns = `xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="${rel}"`;
+    zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/></Types>');
+    zip.file('_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/officeDocument" Target="ppt/presentation.xml"/></Relationships>`);
+    zip.file('ppt/presentation.xml', `<p:presentation ${ns}><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst><p:sldSz cx="9144000" cy="6858000"/></p:presentation>`);
+    zip.file('ppt/_rels/presentation.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/slide" Target="slides/slide1.xml"/></Relationships>`);
+    const paragraph = '<a:p><a:r><a:rPr lang="en-US" sz="1800" b="0" i="0" u="none" strike="noStrike" baseline="0" dirty="0"><a:latin typeface="Arial"/></a:rPr><a:t>Hello</a:t></a:r><a:endParaRPr lang="en-GB" dirty="0"/></a:p>';
+    const slide = `<p:sld ${ns}><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p:sp><p:nvSpPr><p:cNvPr id="2" name="Text"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="6000000" cy="1200000"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/>${paragraph}</p:txBody></p:sp></p:spTree></p:cSld></p:sld>`;
+    zip.file('ppt/slides/slide1.xml', slide);
+    const input = await zip.generateAsync({ type: 'uint8array' });
+    type Story = { id: string; paragraphs: { runs: { text: string; style: unknown }[] }[] };
+    const run = (engine: Engine) => {
+      const doc = engine.PptxDocument.openCollaborative(input.slice(), 7);
+      try {
+        const snapshot = JSON.parse(doc.snapshotJson()) as { slides: { shapes: { textStories: Story[] }[] }[] };
+        const story = snapshot.slides[0]!.shapes.flatMap((shape) => shape.textStories)[0]!;
+        expect(story.paragraphs.map((entry) => entry.runs.map((item) => item.text))).toEqual([['Hello']]);
+        doc.insertTextJson(JSON.stringify({ storyId: story.id, index: 5, text: '_X_', style: story.paragraphs[0]!.runs[0]!.style }));
+        return doc.saveBytes();
+      } finally {
+        doc.free();
+      }
+    };
+    const savedSlide = async (zipped: Uint8Array) => (await JSZip.loadAsync(zipped)).file('ppt/slides/slide1.xml')!.async('string');
+    const expected = slide.replace('<a:t>Hello</a:t>', '<a:t>Hello_X_</a:t>');
+    expect(await savedSlide(run(wasm))).toBe(expected);
+    expect(await savedSlide(run(native))).toBe(expected);
+  });
+
   test('browser coverage fallback is opt-in and toggles equally in native and wasm', () => {
     const font = readFileSync(new URL('../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url));
     const run = (engine: Engine) => {
