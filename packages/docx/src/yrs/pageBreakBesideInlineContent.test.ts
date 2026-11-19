@@ -41,10 +41,10 @@ type Edit = {
   target?: { id: string; needle: string; at: number };
   text?: string;
   remove?: number;
+  replace?: number;
   resolve?: { accept: boolean; kind: 'insertion' | 'deletion' };
 };
 type BreakType = 'page' | 'column';
-type Place = 'right' | 'mains';
 
 const run = (text: string) => `<w:r><w:t xml:space="preserve">${text}</w:t></w:r>`;
 const BREAK_RUN = '<w:r><w:br w:type="page"/></w:r>';
@@ -252,18 +252,49 @@ function flowText(paragraphXml: string, type: BreakType | 'textWrapping'): strin
   }).join('');
 }
 
-function expectRightPlaceOrMains(xml: string, right: RegExp, type: BreakType = 'page'): Place {
+function paragraphChildren(paragraphXml: string): string {
+  return paragraphXml
+    .replace(/^<w:p\b[^>]*>/, '')
+    .replace(/<\/w:p>$/, '')
+    .replace(/^<w:pPr\b[^>]*\/>|^<w:pPr\b[^>]*>[\s\S]*?<\/w:pPr>/, '');
+}
+
+function runsOf(xml: string): string[] {
+  return xml.match(/<w:r(?:\s[^>]*)?>[\s\S]*?<\/w:r>/g) ?? [];
+}
+
+function runContent(runXml: string, type: BreakType = 'page'): string[] {
+  const inner = runXml
+    .replace(/^<w:r(?:\s[^>]*)?>/, '')
+    .replace(/<\/w:r>$/, '')
+    .replace(/<w:rPr\b[^>]*\/>|<w:rPr\b[^>]*>[\s\S]*?<\/w:rPr>/, '');
+  return (inner.match(/<w:[A-Za-z]+\b[^>]*\/>|<w:([A-Za-z]+)\b[^>]*>[\s\S]*?<\/w:\1>/g) ?? []).map((entry) => {
+    if (new RegExp(`^<w:br\\b[^>]*w:type="${type}"[^>]*\\/>$`).test(entry)) return `br:${type}`;
+    const text = entry.match(/^<w:t(?:\s[^>]*)?>([^<]*)<\/w:t>$/);
+    return text ? `t:${decodeXmlText(text[1]!)}` : entry;
+  });
+}
+
+function expectInPlace(xml: string, exact: string, type: BreakType = 'page'): void {
+  const breaks = exact.split('[PB]').length - 1;
+  expect(xml.match(flowBreak(type)) ?? []).toHaveLength(breaks);
+  expect(flowText(savedParagraph(xml, BREAK_ID, type).xml, type)).toBe(exact);
+  expect(savedParagraph(xml, NEXT_ID, type).text).not.toContain('[PB]');
+}
+
+function expectAtMainsPlace(xml: string, paragraph: RegExp, type: BreakType = 'page'): void {
   expect(xml.match(flowBreak(type)) ?? []).toHaveLength(1);
-  const paragraph = flowText(savedParagraph(xml, BREAK_ID, type).xml, type);
-  const next = savedParagraph(xml, NEXT_ID, type).text;
-  if (!paragraph.includes('[PB]')) {
-    expect(paragraph).toMatch(new RegExp(right.source.replace('\\[PB\\]', ''), right.flags));
-    expect(next.startsWith('[PB]')).toBe(true);
-    return 'mains';
-  }
-  expect(next).not.toContain('[PB]');
-  expect(paragraph).toMatch(right);
-  return 'right';
+  const source = flowText(savedParagraph(xml, BREAK_ID, type).xml, type);
+  expect(source).not.toContain('[PB]');
+  expect(source).toMatch(paragraph);
+  const children = paragraphChildren(savedParagraph(xml, NEXT_ID, type).xml);
+  const [first, second] = runsOf(children);
+  expect(first).toBeDefined();
+  expect(second).toBeDefined();
+  expect(children.startsWith(first!)).toBe(true);
+  expect(runContent(first!, type)).toEqual([`br:${type}`]);
+  expect(children.slice(first!.length).startsWith(second!)).toBe(true);
+  expect(runContent(second!, type)).toEqual(['t:End of section one']);
 }
 
 function savedBody(bytes: Uint8Array): string {
@@ -317,6 +348,8 @@ async function saveThroughLoader(bytes: Uint8Array, edit: Edit): Promise<Uint8Ar
         const target = { revisionId: revisionOf(session.listRevisions(), edit.resolve.kind) };
         if (edit.resolve.accept) session.acceptChange(target);
         else session.rejectChange(target);
+      } else if (edit.replace) {
+        session.replaceRange({ story: 'body', start: { paraId: at.paraId, offset: at.offset }, end: { paraId: at.paraId, offset: at.offset + edit.replace } }, edit.text ?? TYPED);
       } else if (edit.remove) {
         session.deleteRange({ story: 'body', start: { paraId: at.paraId, offset: at.offset }, end: { paraId: at.paraId, offset: at.offset + edit.remove } });
       } else {
@@ -357,7 +390,7 @@ async function saveThroughWorker(bytes: Uint8Array, edit: Edit): Promise<Uint8Ar
         })
         : edit.remove
           ? intent('deleteForward', { selection: { anchor: at, focus: { ...at, offset: at.offset + edit.remove } } })
-          : intent('insertText', { selection: { anchor: at, focus: at }, text: edit.text ?? TYPED });
+          : intent('insertText', { selection: { anchor: at, focus: { ...at, offset: at.offset + (edit.replace ?? 0) } }, text: edit.text ?? TYPED });
       const typed = await client.edit(command);
       expect(typed.outcomes[0]?.status).toBe('applied');
     }
@@ -483,15 +516,17 @@ describe('a page break is put back only where its place is certain', () => {
   });
   const REVISION_DATE = 'w:author="Writer" w:date="2026-10-01T00:00:00Z"';
 
-  type Cell = { name: string; content: string; edit: Edit; routes: Route[]; check: (xml: string) => void };
+  type Cell = { name: string; content: string; edit: Edit; outcome: string; check: (xml: string) => void };
+  const MAINS = 'opens the next paragraph in a run of its own, as on main';
+  const RIGHT = 'is put back between its neighbours';
   const cells: Cell[] = [
     {
       name: 'a hyperlink holding a symbol-font character',
       content: `<w:r><w:t>A</w:t></w:r>${SYMBOL_LINK}${BREAK_WITH_Z}`,
       edit: APPEND_TO_Z,
-      routes: ROUTES,
+      outcome: MAINS,
       check: (xml) => {
-        expectRightPlaceOrMains(xml, /^A\{(?:\[SYM\]|)\}\[PB\]ZX$/);
+        expectAtMainsPlace(xml, /^A\{(?:\[SYM\]|)\}ZX$/);
         expect(hyperlinks(xml)).toBe(1);
       },
     },
@@ -499,9 +534,9 @@ describe('a page break is put back only where its place is certain', () => {
       name: "a hyperlink of repeated letters 'aaa'",
       content: `<w:r><w:t>A</w:t></w:r>${REPEATED_LINK}${BREAK_WITH_Z}`,
       edit: typeInLink(forced),
-      routes: ROUTES,
+      outcome: MAINS,
       check: (xml) => {
-        expectRightPlaceOrMains(xml, /^A\{aaaa\}\[PB\]Z$/);
+        expectAtMainsPlace(xml, /^A\{aaaa\}Z$/);
         expect(hyperlinks(xml)).toBe(1);
       },
     })),
@@ -509,9 +544,9 @@ describe('a page break is put back only where its place is certain', () => {
       name: 'two identical REF fields',
       content: `<w:r><w:t>A</w:t></w:r>${COMPLEX_FIELD.xml}${BREAK_RUN}${COMPLEX_FIELD.xml}<w:r><w:t>Z</w:t></w:r>`,
       edit: DELETE_FIRST_FIELD,
-      routes: ROUTES,
+      outcome: MAINS,
       check: (xml) => {
-        expectRightPlaceOrMains(xml, /^A\[PB\]«Res»Z$/);
+        expectAtMainsPlace(xml, /^A«Res»Z$/);
         expect(fieldBegins(xml)).toBe(1);
       },
     },
@@ -523,21 +558,61 @@ describe('a page break is put back only where its place is certain', () => {
           : `<w:ins w:id="11" ${REVISION_DATE}><w:r><w:t>a</w:t></w:r></w:ins>`) +
         `<w:r><w:t>a</w:t></w:r>${BREAK_WITH_Z}`,
       edit: resolve(accept, kind),
-      routes: ROUTES,
+      outcome: RIGHT,
       check: (xml) => {
-        expectRightPlaceOrMains(xml, /^Aa\[PB\]Z$/);
+        expectInPlace(xml, 'Aa[PB]Z');
         expect(savedParagraph(xml, BREAK_ID).xml).not.toMatch(/<w:(?:ins|del)\b/);
       },
     })),
   ];
 
-  for (const { name, content, edit, routes, check } of cells) {
-    for (const route of routes) {
-      it(`${route} route: a page break beside ${name}, ${edit.name}, is put back between its neighbours or where main puts it`, async () => {
+  for (const { name, content, edit, outcome, check } of cells) {
+    for (const route of ROUTES) {
+      it(`${route} route: a page break beside ${name}, ${edit.name}, ${outcome}`, async () => {
         const bytes = built(content, edit.forced);
         check(savedBody(await save(route, bytes, edit)));
       }, TIMEOUT);
     }
+  }
+
+  const REPLACE_QA: Edit = { name: "'QA' replaced with 'QAB'", forced: false, target: { id: BREAK_ID, needle: 'Q', at: 0 }, replace: 2, text: 'QAB' };
+  const shapes = [
+    '<w:hyperlink w:anchor="_Ref1"><w:r><w:t>A</w:t></w:r></w:hyperlink>',
+    '<w:r><w:t>A</w:t></w:r>',
+  ];
+
+  for (const route of ROUTES) {
+    it(`${route} route: text inserted exactly at a break's place is written after it, beside a link as in plain runs`, async () => {
+      const places: number[] = [];
+      for (const a of shapes) {
+        const bytes = built(`<w:r><w:t>Q</w:t></w:r>${a}${BREAK_RUN}<w:r><w:t>BZ</w:t></w:r>`, REPLACE_QA.forced);
+        const xml = savedBody(await save(route, bytes, REPLACE_QA));
+        expect(xml.match(PAGE_BREAK) ?? []).toHaveLength(1);
+        const text = savedParagraph(xml, BREAK_ID).text;
+        expect(text).toBe('QA[PB]BBZ');
+        expect(savedParagraph(xml, NEXT_ID).text).not.toContain('[PB]');
+        places.push(text.indexOf('[PB]'));
+      }
+      expect(places).toHaveLength(2);
+      expect(places[0]).toBe(places[1]!);
+    }, TIMEOUT);
+  }
+
+  const MANY = 300;
+  const APPEND_TO_END: Edit = { name: "'X' appended after 'END' on a forced-full document", forced: true, target: { id: BREAK_ID, needle: 'END', at: 3 } };
+  const manyBreaks =
+    `${run('H')}<w:hyperlink w:anchor="_Ref1"><w:r><w:t>L</w:t></w:r></w:hyperlink>` +
+    Array.from({ length: MANY }, (_, n) => `<w:r><w:br w:type="page"/><w:t>t${n}</w:t></w:r>`).join('') +
+    run('END');
+  const manyExpected = `H{L}${Array.from({ length: MANY }, (_, n) => `[PB]t${n}`).join('')}ENDX`;
+
+  for (const route of ROUTES) {
+    it(`${route} route: three hundred page breaks after a link, ${APPEND_TO_END.name}, each stay directly before their text`, async () => {
+      const bytes = built(manyBreaks, APPEND_TO_END.forced);
+      const xml = savedBody(await save(route, bytes, APPEND_TO_END));
+      expectInPlace(xml, manyExpected);
+      expect(hyperlinks(xml)).toBe(1);
+    }, TIMEOUT);
   }
 });
 
