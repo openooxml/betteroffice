@@ -31,6 +31,7 @@ export interface Format {
   engineKind: string;
   open(bytes: Uint8Array, script: Script): Promise<Target>;
   versionPattern?: RegExp;
+  saveRecord?(bytes: Uint8Array): Record<string, unknown>;
 }
 
 export const formats: Record<string, Format> = { xlsx, pptx, docx };
@@ -106,8 +107,10 @@ export async function run(format: string): Promise<StepResult[]> {
           const saved = result instanceof Uint8Array ? { bytes: result } : result as { bytes?: unknown; warnings?: unknown };
           if (!(saved.bytes instanceof Uint8Array)) throw new TypeError('save must return bytes');
           result = {
-            sha256: createHash('sha256').update(saved.bytes).digest('hex'),
-            byteLength: saved.bytes.byteLength,
+            ...(formats[format].saveRecord?.(saved.bytes) ?? {
+              sha256: createHash('sha256').update(saved.bytes).digest('hex'),
+              byteLength: saved.bytes.byteLength
+            }),
             ...('warnings' in saved ? { warnings: saved.warnings } : {})
           };
         }

@@ -1,5 +1,7 @@
 import hashlib
+import io
 import json
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -167,6 +169,25 @@ def png_result(png):
     }
 
 
+def parts_result(data):
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        parts = [
+            (info.filename, archive.read(info))
+            for info in archive.infolist()
+            if not info.is_dir()
+        ]
+    return {
+        "parts": [
+            {
+                "name": name,
+                "sha256": hashlib.sha256(part).hexdigest(),
+                "byteLength": len(part),
+            }
+            for name, part in sorted(parts)
+        ]
+    }
+
+
 def includes_target(step, target):
     return "targets" not in step or target in step["targets"]
 
@@ -195,7 +216,7 @@ def run():
     def save(args):
         nonlocal saved
         saved = document.save(now=now, update_modified_date=False)
-        return {"sha256": hashlib.sha256(saved).hexdigest(), "byteLength": len(saved)}
+        return parts_result(saved)
 
     def save_report(args):
         nonlocal saved
@@ -249,7 +270,14 @@ def run():
             results.append({"op": op, "result": operations[op](step["args"])})
         except Exception as error:
             raise AssertionError(f"Parity step {index} ({op}) failed") from error
-    return results
+    engine = []
+    for index, step in enumerate(script["engineSteps"]):
+        op = step["op"]
+        try:
+            engine.append({"op": op, "result": operations[op](step["args"])})
+        except Exception as error:
+            raise AssertionError(f"Engine step {index} ({op}) failed") from error
+    return results, engine
 
 
 def assert_json_equal(expected, actual, path="$"):
@@ -300,7 +328,7 @@ def test_step_targets_default_to_all_and_filter_explicit_lists():
 
 
 def test_scripted_api_parity_matches_shared_golden():
-    actual = run()
+    actual, engine = run()
     script = json.loads((PARITY / "script.json").read_text(encoding="utf-8"))
     expected = json.loads((PARITY / "expected.json").read_text(encoding="utf-8"))
     assert len(expected) == len(script["steps"]), "Golden step count differs"
@@ -309,3 +337,5 @@ def test_scripted_api_parity_matches_shared_golden():
         if includes_target(step, "python")
     ]
     assert_json_equal(expected, actual)
+    engine_path = PARITY / "engine-expected.json"
+    assert_json_equal(json.loads(engine_path.read_text(encoding="utf-8")), engine)

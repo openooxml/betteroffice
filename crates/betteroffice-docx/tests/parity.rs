@@ -245,6 +245,22 @@ fn report_result(report: &SaveReport) -> Value {
     })
 }
 
+fn parts_result(bytes: &[u8]) -> Value {
+    let mut parts = ooxml_opc::unzip_parts(bytes).unwrap();
+    parts.sort_by(|left, right| left.0.cmp(&right.0));
+    let parts: Vec<Value> = parts
+        .iter()
+        .map(|(name, data)| {
+            json!({
+                "name": name,
+                "sha256": format!("{:x}", Sha256::digest(data)),
+                "byteLength": data.len(),
+            })
+        })
+        .collect();
+    json!({ "parts": parts })
+}
+
 fn png_size(bytes: &[u8]) -> (u32, u32) {
     (
         u32::from_be_bytes(bytes[16..20].try_into().unwrap()),
@@ -353,10 +369,7 @@ impl Runner {
             }
             "save" => {
                 let bytes = document.save_with_options(self.save_options()).unwrap();
-                let result = json!({
-                    "sha256": format!("{:x}", Sha256::digest(&bytes)),
-                    "byteLength": bytes.len(),
-                });
+                let result = parts_result(&bytes);
                 self.saved = Some(bytes);
                 result
             }
@@ -429,6 +442,32 @@ fn scripted_api_parity_matches_shared_golden() {
             "parity step {index} ({op}) differs\n- expected: {}\n+ actual: {}",
             serde_json::to_string_pretty(&expected[index]).unwrap(),
             serde_json::to_string_pretty(&actual).unwrap(),
+        );
+    }
+    let engine: Vec<Value> = script["engineSteps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|step| {
+            let op = step["op"].as_str().unwrap();
+            json!({ "op": op, "result": runner.execute(op, &step["args"]) })
+        })
+        .collect();
+    let engine_path = parity.join("engine-expected.json");
+    if std::env::var("BETTEROFFICE_PARITY_WRITE").as_deref() == Ok("1") {
+        let mut text = serde_json::to_string_pretty(&engine).unwrap();
+        text.push('\n');
+        fs::write(&engine_path, text).unwrap();
+    }
+    let engine_expected: Vec<Value> =
+        serde_json::from_str(&fs::read_to_string(&engine_path).unwrap()).unwrap();
+    assert_eq!(engine_expected.len(), engine.len(), "engine golden step count differs");
+    for (index, (expected, actual)) in engine_expected.iter().zip(&engine).enumerate() {
+        assert!(
+            equal_json(expected, actual),
+            "engine step {index} differs\n- expected: {}\n+ actual: {}",
+            serde_json::to_string_pretty(expected).unwrap(),
+            serde_json::to_string_pretty(actual).unwrap(),
         );
     }
 }

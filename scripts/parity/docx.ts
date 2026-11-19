@@ -21,7 +21,7 @@ import type {
 import type { Document } from '../../packages/docx/src/types/document';
 import { preloadEditWasm } from '../../packages/docx/src/wasm/edit';
 import { engineKind } from '../../packages/docx/src/wasm/engineEdit';
-import { preloadOpcWasm } from '../../packages/docx/src/wasm/opc';
+import { preloadOpcWasm, unzipContainer } from '../../packages/docx/src/wasm/opc';
 import { preloadParseWasm } from '../../packages/docx/src/wasm/parse';
 import {
   createYrsSession,
@@ -190,9 +190,21 @@ function pngSize(bytes: Uint8Array): [number, number] {
   return [view.getUint32(16), view.getUint32(20)];
 }
 
+function partsResult(bytes: Uint8Array) {
+  const parts = Object.entries(unzipContainer(bytes))
+    .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+    .map(([name, data]) => ({
+      name,
+      sha256: createHash('sha256').update(data).digest('hex'),
+      byteLength: data.byteLength
+    }));
+  return { parts };
+}
+
 export const docx: Format = {
   engineKind,
   versionPattern: /(?!)/,
+  saveRecord: partsResult,
   async open(fixture) {
     await preloadEditWasm(wasmBytes('edit/docx_edit_bg.wasm'));
     await preloadOpcWasm(wasmBytes('opc/ooxml_opc_bg.wasm'));
