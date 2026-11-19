@@ -149,7 +149,7 @@ fn text_typed_before_a_differently_formatted_run_joins_the_run_before_the_caret(
 }
 
 #[test]
-fn text_typed_into_an_empty_paragraph_keeps_the_explicit_defaults_it_is_given() {
+fn text_typed_into_an_empty_paragraph_keeps_its_explicit_defaults_but_no_strike_value() {
     let end = format!("<a:endParaRPr {EXPLICIT_DEFAULTS}/>");
     let paragraphs = format!("<a:p>{end}</a:p>");
     let style = TextStyle {
@@ -184,6 +184,7 @@ fn text_typed_into_an_empty_paragraph_keeps_the_explicit_defaults_it_is_given() 
             "{attribute} missing from {properties}"
         );
     }
+    assert!(!properties.contains("strike="), "{properties}");
     assert!(paragraph(&saved).ends_with(&end), "{}", paragraph(&saved));
 }
 
