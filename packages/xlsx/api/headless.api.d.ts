@@ -316,7 +316,7 @@ export interface TextCmd {
     rotationValign?: 'top' | 'center' | 'bottom';
     stacked?: boolean;
     wrap?: TextWrap;
-    /** Spans of `text` in fonts of their own; absent when the cell has no source runs or does not paint its stored text as it is. */
+    /** Spans of `text` in fonts of their own; absent when the cell has no source runs, does not paint its stored text as it is, or its row has no room for the runs' layout. */
     runs?: TextRun[];
 }
 export interface NumberFormatLayout {
