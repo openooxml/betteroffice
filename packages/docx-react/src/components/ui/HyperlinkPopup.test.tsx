@@ -29,20 +29,3 @@ test('copying a link announces it in the editor locale', async () => {
   expect(onCopy).toHaveBeenCalledWith('https://example.com/');
   await waitFor(() => expect(view.getByText(de.editor!.linkCopied!)).toBeTruthy());
 });
-
-test('a link with a ScreenTip shows it in the popup and on hover', () => {
-  const view = render(
-    <HyperlinkPopup data={{ ...data, tooltip: 'Open the example' }} onNavigate={() => {}} onCopy={() => {}} onEdit={() => {}}
-      onRemove={() => {}} onClose={() => {}} />
-  );
-  expect(view.getByText('Open the example')).toBeTruthy();
-  expect(view.getByText('https://example.com/').getAttribute('title')).toBe('Open the example');
-});
-
-test('a link without a ScreenTip keeps its address as the hover text', () => {
-  const view = render(
-    <HyperlinkPopup data={data} onNavigate={() => {}} onCopy={() => {}} onEdit={() => {}} onRemove={() => {}} onClose={() => {}} />
-  );
-  expect(view.getByText('https://example.com/').getAttribute('title')).toBe('https://example.com/');
-  expect(view.container.querySelector('.oox-hyperlink-popup__tooltip')).toBeNull();
-});

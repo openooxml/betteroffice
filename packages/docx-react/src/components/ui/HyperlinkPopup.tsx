@@ -98,22 +98,6 @@ const URL_LINK_STYLE: CSSProperties = {
   cursor: 'pointer',
 };
 
-const LINK_STACK_STYLE: CSSProperties = {
-  display: 'flex',
-  flexDirection: 'column',
-  minWidth: 0,
-};
-
-const TOOLTIP_TEXT_STYLE: CSSProperties = {
-  color: 'var(--doc-text-muted)',
-  overflow: 'hidden',
-  textOverflow: 'ellipsis',
-  whiteSpace: 'nowrap',
-  maxWidth: '220px',
-  fontSize: '12px',
-  lineHeight: '16px',
-};
-
 const ICON_BUTTON_STYLE: CSSProperties = {
   width: '28px',
   height: '28px',
@@ -373,7 +357,6 @@ export function HyperlinkPopup({
   // that container so the browser repositions it on scroll automatically.
   const popupTop = data.position.top;
   const popupLeft = data.position.left;
-  const screenTip = data.tooltip?.trim();
 
   if (mode === 'edit') {
     return (
@@ -454,26 +437,20 @@ export function HyperlinkPopup({
         <GlobeIcon />
       </span>
 
-      <span style={LINK_STACK_STYLE}>
-        <a
-          href={data.href}
-          style={URL_LINK_STYLE}
-          title={screenTip || data.href}
-          target="_blank"
-          rel="noopener noreferrer"
-          onClick={(e) => {
-            e.preventDefault();
-            onNavigate(data.href);
-          }}
-        >
-          {data.href}
-        </a>
-        {screenTip && (
-          <span className="oox-hyperlink-popup__tooltip" style={TOOLTIP_TEXT_STYLE} title={screenTip}>
-            {screenTip}
-          </span>
-        )}
-      </span>
+      {/* Clickable URL */}
+      <a
+        href={data.href}
+        style={URL_LINK_STYLE}
+        title={data.href}
+        target="_blank"
+        rel="noopener noreferrer"
+        onClick={(e) => {
+          e.preventDefault();
+          onNavigate(data.href);
+        }}
+      >
+        {data.href}
+      </a>
 
       <span style={SEPARATOR_STYLE} />
 
