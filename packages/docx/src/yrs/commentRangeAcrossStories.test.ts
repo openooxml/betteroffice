@@ -1029,6 +1029,8 @@ interface Malformed {
   routes: readonly Route[];
   edit(opened: Opened): Promise<Uint8Array>;
   saved: { body: LaidOut; header?: LaidOut };
+  /** Comments the saved body holds with exactly one start, one end and one reference. */
+  once?: number[];
 }
 
 const AS_SAVED_BEFORE = 'is saved cut at the end of the paragraph it starts in, its text and every mark as before';
@@ -1073,6 +1075,7 @@ const MALFORMED: Malformed[] = [
         covered: { 1: 'Top right.' },
       },
     },
+    once: [1],
   },
   {
     name: 'a comment into a text box holding two of its ends',
@@ -1139,6 +1142,9 @@ describe('a comment range across stories that a whole save would leave malformed
       const opened = await open(route, shape.bytes);
       try {
         const saved = await shape.edit(opened);
+        for (const id of shape.once ?? []) {
+          expect([id, counted(documentBody(saved), id)]).toEqual([id, { starts: 1, ends: 1, references: 1 }]);
+        }
         expect({
           body: laidOut(documentBody(saved)),
           ...(shape.saved.header ? { header: laidOut(headerXml(saved), 'header') } : {}),
