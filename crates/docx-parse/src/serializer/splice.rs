@@ -1110,9 +1110,19 @@ fn ranges(xml: &str) -> Option<Ranges<'_>> {
     })
 }
 
-/// A range or comment ID as the parser reads it, or its text where it reads no number.
+/// The largest integer an ID's number holds exactly.
+const MAX_EXACT_ID: f64 = 9_007_199_254_740_991.0;
+
+/// A range or comment ID as the number the parser reads, where its text is a decimal integer
+/// the parser reads exactly, or else its text.
 fn canonical_id(id: String) -> String {
-    parse_javascript_integer_prefix(&id).map_or(id, js_number)
+    let digits = id.trim();
+    let digits = digits.strip_prefix(['+', '-']).unwrap_or(digits);
+    let plain = !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit());
+    match parse_javascript_integer_prefix(&id) {
+        Some(value) if plain && value.abs() <= MAX_EXACT_ID => js_number(value),
+        _ => id,
+    }
 }
 
 /// Whether `fragments` hold each range end, by the value of its ID, at most as often as
