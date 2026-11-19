@@ -4,7 +4,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use xlsx_model::styles::{DifferentialFormat, Stylesheet, Xf};
+use xlsx_model::styles::{Stylesheet, Xf};
 use xlsx_model::{Cell, CellRef, ConditionalFormatRule, ConditionalFormatting, Sheet};
 
 use crate::axis::SheetAxes;
@@ -136,8 +136,8 @@ pub fn keeps_source<T: PartialEq>(
 }
 
 /// Whether `current` writes as the source conditional formats. A source rule
-/// writes its own XML, so one read by a release before italic still writes as
-/// that rule.
+/// writes its own XML, so one an earlier release read still writes as that
+/// rule.
 pub fn keeps_source_conditional_formats(
     current: &[ConditionalFormatting],
     source: &[ConditionalFormatting],
@@ -153,7 +153,7 @@ pub fn keeps_source_conditional_formats(
                     .all(|(rule, original)| {
                         rule == original
                             || (rule.raw_xml.is_some()
-                                && rule.format == original.format.released_reading()
+                                && rule.format.is_released_reading_of(&original.format)
                                 && *rule
                                     == ConditionalFormatRule {
                                         format: rule.format.clone(),
@@ -173,8 +173,8 @@ pub(crate) fn keeps_source_xf(current: &Stylesheet, source: &Stylesheet, index: 
 }
 
 /// Whether `current` writes back as the source stylesheet. Nothing edits a
-/// differential format in place, so one that reads as a release before italic
-/// read its source entry still writes as that entry.
+/// differential format in place, so one that reads as an earlier release read
+/// its source entry still writes as that entry.
 pub(crate) fn retains_source_styles(current: &Stylesheet, source: &Stylesheet) -> bool {
     if current == source {
         return true;
@@ -186,9 +186,7 @@ pub(crate) fn retains_source_styles(current: &Stylesheet, source: &Stylesheet) -
             .dxfs
             .iter()
             .zip(&source.dxfs)
-            .all(|(dxf, original)| {
-                keeps_source(dxf, original, true, DifferentialFormat::released_reading)
-            })
+            .all(|(dxf, original)| dxf.is_released_reading_of(original))
     {
         return false;
     }

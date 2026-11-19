@@ -344,6 +344,7 @@ export class ViewerSession {
             this.ready = true;
             this.onReady();
           }
+          if (frame.displayList.conditionalPending) this.schedule();
         } catch (error) {
           if (!this.current) break;
           if (error instanceof Error && error.name === 'SessionSuperseded') {

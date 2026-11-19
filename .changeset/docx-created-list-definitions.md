@@ -1,7 +1,7 @@
 ---
-'@betteroffice/docx': patch
+'@betteroffice/docx': minor
 '@betteroffice/docx-native': patch
-'@betteroffice/rust-crates': patch
+'@betteroffice/rust-crates': minor
 ---
 
-The DOCX engine can hold list definitions the editor creates and writes them to the numbering part on save, adding the part when the document has none. Documents in which no list was created save and display as before.
+The DOCX engine holds list definitions the editor creates and writes them on save. Documents without one are unchanged. New in the edit crate: `ListKind`, `ListIdentity`, `CreatedListDefinition`, `resolve_list_identity`, `ensure_list_definition` and `created_list_definitions`.

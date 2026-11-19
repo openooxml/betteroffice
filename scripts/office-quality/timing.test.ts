@@ -1,4 +1,6 @@
-import { expect, test } from 'bun:test';
+import { expect, spyOn, test } from 'bun:test';
+import { failureClusters } from './failures.mjs';
+import { aggregateReport, renderSection } from './readme.mjs';
 import { METHOD, ROUNDS, SAMPLE_SIZE, SEED, mergeTiming, pairedRatio, summarizeTiming, timingFormats, timingSamples } from './timing.mjs';
 
 const source = 'a'.repeat(40);
@@ -23,7 +25,7 @@ const part = (input: any, format: string, timings = (_: any, index: number) => (
   schema_version: 1, plan_sha256: hash, format,
   benchmark: { method: METHOD, rounds: ROUNDS, seed: SEED, sample_size: SAMPLE_SIZE, published_version: '1.0.0',
     libreoffice_version: '26.2.3.2', builds: { published: { source_sha: published }, commit: { source_sha: source } } },
-  runner: { processors: 4 },
+  runner: { processors: 4, image_version: '20251110.1' },
   samples: timingSamples(input, format).map((entry: any, index: number) =>
     ({ id: entry.id, source_sha256: entry.metadata.source.sha256, notes_not_converged: false, timings: timings(entry, index) })),
 });
@@ -147,4 +149,69 @@ test('documents whose note layout did not converge are timed and counted, not dr
   const summary = mergeTiming(input, {}, [part0], hash).timing_benchmark.docx.summary;
   expect(summary.common).toBe(3);
   expect(summary.notes_not_converged).toBe(2);
+});
+
+test('the merged report, its aggregate, its section and its failures carry no host name and no kernel string', () => {
+  const input = plan({ docx: 3, pptx: 3 });
+  const parts = () => [part(input, 'docx'), part(input, 'pptx')];
+  const report = { commit: source, source_sha: source, versions: input.versions,
+    samples: input.samples.map((entry) => ({ ...entry, comparisons: [] })) };
+  const named = parts();
+  named[0].runner = { name: 'host-a', platform: 'Linux-test-x86_64', processors: 4, image_version: '20251110.1' } as any;
+  named[1].runner = { name: 'host-b', platform: 'Linux-test-x86_64', processors: 2, image_version: '20251110.1.2' } as any;
+  const merged = mergeTiming(input, report, named, hash, { hosted: true });
+  expect(merged.timing_benchmark.docx.runner).toEqual({ processors: 4, image_version: '20251110.1' });
+  expect(merged.timing_benchmark.pptx.runner).toEqual({ processors: 2, image_version: '20251110.1.2' });
+  const text = JSON.stringify([merged, aggregateReport(merged), renderSection(merged, { privateCorpus: true, date: '2026-11-19' }),
+    failureClusters(merged)]);
+  for (const leak of ['host-a', 'host-b', 'Linux-test-x86_64']) expect(text.includes(leak) && leak).toBe(false);
+});
+
+test('a hosted merge refuses an image version outside the dated form; a local merge leaves it out with a notice', () => {
+  const input = plan({ docx: 3 });
+  const report = { commit: source, source_sha: source, versions: input.versions, samples: [] };
+  const shard = (image_version: unknown) => {
+    const entry = part(input, 'docx');
+    entry.runner = { processors: 4, image_version } as any;
+    return [entry];
+  };
+  for (const image_version of ['odd-image-7', '2025-11-10', '20251110', '20251110.1.1.1', 'local', undefined])
+    expect(() => mergeTiming(input, report, shard(image_version), hash, { hosted: true })).toThrow('Invalid timing benchmark');
+  const notice = spyOn(console, 'warn').mockImplementation(() => {});
+  try {
+    expect(mergeTiming(input, report, shard('local'), hash, { hosted: false }).timing_benchmark.docx.runner)
+      .toEqual({ processors: 4, image_version: 'local' });
+    expect(notice).not.toHaveBeenCalled();
+    expect(mergeTiming(input, report, shard('odd-image-7'), hash, { hosted: false }).timing_benchmark.docx.runner)
+      .toEqual({ processors: 4 });
+    expect(notice).toHaveBeenCalledTimes(1);
+    const message = String(notice.mock.calls[0][0]);
+    expect(message).toContain('runner.image_version');
+    expect(message).toContain('not publishable');
+    expect(message).not.toContain('odd-image-7');
+  } finally {
+    notice.mockRestore();
+  }
+});
+
+test('an image version that is not a plain ASCII dated string is refused hosted and left out locally', () => {
+  const input = plan({ docx: 3 });
+  const report = { commit: source, source_sha: source, versions: input.versions, samples: [] };
+  const shard = (image_version: unknown) => {
+    const entry = part(input, 'docx');
+    entry.runner = { processors: 4, image_version } as any;
+    return [entry];
+  };
+  const values = [['20251110.1'], 20251110.1, '٢٠٢٥١١١٠.1', ' 20251110.1', '20251110.1 ', '20251110.1\n'];
+  for (const image_version of values)
+    expect(() => mergeTiming(input, report, shard(image_version), hash, { hosted: true })).toThrow('Invalid timing benchmark');
+  const notice = spyOn(console, 'warn').mockImplementation(() => {});
+  try {
+    for (const image_version of values)
+      expect(mergeTiming(input, report, shard(image_version), hash, { hosted: false }).timing_benchmark.docx.runner)
+        .toEqual({ processors: 4 });
+    expect(notice).toHaveBeenCalledTimes(values.length);
+  } finally {
+    notice.mockRestore();
+  }
 });
