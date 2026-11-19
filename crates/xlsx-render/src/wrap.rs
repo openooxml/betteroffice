@@ -294,7 +294,7 @@ pub fn estimated_line_count(text: &str, width: f32, size_pt: f64) -> usize {
 /// zero-width marks take none, wide East Asian forms a full em, and anything
 /// else a digit's advance.
 pub fn estimate_text_width(text: &str, size_pt: f64) -> f32 {
-    let units: u32 = text.chars().map(advance_units).sum();
+    let units = text.chars().map(advance_units).fold(0, u32::saturating_add);
     (f64::from(units) * size_pt * crate::geometry::PX_PER_PT / UNITS_PER_EM) as f32
 }
 
@@ -501,5 +501,12 @@ mod tests {
         assert!((estimate_text_width("\u{65e5}", 11.0) - em).abs() < 1e-4);
         assert_eq!(estimated_line_count("a\nb\r\nc", 100.0, 11.0), 3);
         assert_eq!(estimated_line_count("a\nb\r\n", 100.0, 11.0), 2);
+    }
+
+    #[test]
+    fn the_estimate_of_a_text_past_the_unit_range_saturates() {
+        let wide = "\u{65e5}".repeat(2_100_000);
+        let most = f64::from(u32::MAX) * 11.0 * crate::geometry::PX_PER_PT / UNITS_PER_EM;
+        assert_eq!(estimate_text_width(&wide, 11.0), most as f32);
     }
 }
