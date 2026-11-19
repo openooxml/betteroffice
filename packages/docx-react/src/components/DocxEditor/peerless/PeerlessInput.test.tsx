@@ -190,7 +190,7 @@ test('autofocus prevents browser scrolling', () => {
   const focus = spyOn(HTMLTextAreaElement.prototype, 'focus');
   const input = mount(false, { autoFocus: true });
   try {
-    expect(document.activeElement === input.textarea).toBe(true);
+    expect(document.activeElement).toBe(input.textarea);
     expect(focus.mock.calls).toEqual([[{ preventScroll: true }]]);
   } finally { input.unmount(); input.admission.dispose(); focus.mockRestore(); }
 });
@@ -204,7 +204,7 @@ test('autofocus applies on mount only, so enabling editing later keeps focus whe
   try {
     other.focus();
     view.rerender(<PeerlessInput admission={input.admission} viewStore={input.viewStore} autoFocus />);
-    expect(document.activeElement === other).toBe(true);
+    expect(document.activeElement).toBe(other);
   } finally { view.unmount(); input.admission.dispose(); other.remove(); }
 });
 
@@ -218,11 +218,11 @@ test('a hidden and revealed editor does not take focus back after mount', () => 
   </Activity>;
   const view = render(tree('visible'));
   try {
-    expect(document.activeElement === view.container.querySelector('textarea')).toBe(true);
+    expect(document.activeElement).toBe(view.container.querySelector('textarea'));
     other.focus();
     view.rerender(tree('hidden'));
     view.rerender(tree('visible'));
-    expect(document.activeElement === other).toBe(true);
+    expect(document.activeElement).toBe(other);
   } finally { view.unmount(); input.admission.dispose(); other.remove(); }
 });
 
@@ -237,7 +237,7 @@ test('input uses its content host before the parent ref attaches', () => {
   </div>);
   try {
     const textarea = view.getByRole('textbox') as HTMLTextAreaElement;
-    expect(textarea.parentElement === caretHostRef.current).toBe(true);
+    expect(textarea.parentElement).toBe(caretHostRef.current);
     expect(textarea.style.position).toBe('absolute');
     expect(textarea.style.left).toBe('20px');
     expect(textarea.style.top).toBe('40px');
@@ -443,7 +443,7 @@ test.each([false, true])('shift_page_down_reveals_the_landing_with_cell_rects=%s
     act(() => { fireEvent.scroll(scroller); });
     expect(scroller.scrollTop).toBe(86);
     expect(Number.parseFloat(input.textarea.style.top)).toBe(650);
-    expect(document.activeElement === input.textarea).toBe(true);
+    expect(document.activeElement).toBe(input.textarea);
   } finally {
     input.unmount();
     input.admission.dispose();
@@ -1432,23 +1432,6 @@ test('paste_fragment_callback_false_falls_back_to_text', () => {
     expect(calls).toBe(1);
     expect(input.submitted).toEqual(['replaceSelection']);
     expect(input.entries.map(({ payload }) => payload)).toEqual([{ text: 'fallback' }]);
-  } finally {
-    input.unmount();
-    input.admission.dispose();
-  }
-});
-
-test('a rejected clipboard payload pastes as its plain text', () => {
-  let calls = 0;
-  const input = mount(false, { onPasteFragment: () => { calls += 1; return true; } });
-  try {
-    const payload = JSON.stringify({ v: 1, fragment: { paragraphs: [{ text: 'text', runs: [
-      { text: 'text', format: { other: { runStyle: { styleId: 'Evil' } } } },
-    ] }] } }).replaceAll('&', '&amp;').replaceAll('"', '&quot;');
-    pasteWith(input, `<div data-betteroffice-docx="${payload}"><b>text</b></div>`, 'text');
-    expect(calls).toBe(0);
-    expect(input.submitted).toEqual(['replaceSelection']);
-    expect(input.entries.map(({ payload: submitted }) => submitted)).toEqual([{ text: 'text' }]);
   } finally {
     input.unmount();
     input.admission.dispose();

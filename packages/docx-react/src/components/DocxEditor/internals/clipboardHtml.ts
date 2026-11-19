@@ -1,6 +1,5 @@
 import {
   DOCX_CLIPBOARD_FRAGMENT_VERSION,
-  clipboardFragmentHasFormatting,
   clipboardFragmentHasPictures,
   clipboardParagraphUnits,
   validClipboardFragment,
@@ -24,11 +23,7 @@ const DEFAULT_BORDERS = () => ({
 });
 
 const BLOCK_TAGS = new Set(['P', 'DIV', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'LI', 'SECTION', 'ARTICLE', 'HEADER', 'FOOTER']);
-const SKIP_TAGS = new Set(['STYLE', 'SCRIPT', 'TEMPLATE', 'IFRAME', 'OBJECT', 'EMBED', 'SVG', 'MATH', 'TITLE', 'META', 'HEAD', 'LINK', 'BASE', 'NOSCRIPT']);
-const MAX_HTML_LENGTH = 2_000_000;
-const MAX_DEPTH = 64;
-const MAX_ELEMENTS = 50_000;
-const MAX_STYLE_LENGTH = 4_096;
+const SKIP_TAGS = new Set(['STYLE', 'SCRIPT', 'TITLE', 'META', 'HEAD']);
 
 function escapeHtml(value: string): string {
   return value
@@ -269,102 +264,39 @@ function widthAttrTwips(element: Element): number | null {
   return Math.round(value * (match[2]!.toLowerCase() === 'px' ? 15 : 20));
 }
 
-const COLOR_NAMES: Record<string, string> = {
-  black: '000000', silver: 'C0C0C0', gray: '808080', grey: '808080', white: 'FFFFFF',
-  maroon: '800000', red: 'FF0000', purple: '800080', fuchsia: 'FF00FF', magenta: 'FF00FF',
-  green: '008000', lime: '00FF00', olive: '808000', yellow: 'FFFF00', navy: '000080',
-  blue: '0000FF', teal: '008080', aqua: '00FFFF', cyan: '00FFFF', orange: 'FFA500',
-  pink: 'FFC0CB', brown: 'A52A2A', gold: 'FFD700', beige: 'F5F5DC', coral: 'FF7F50',
-  crimson: 'DC143C', indigo: '4B0082', ivory: 'FFFFF0', khaki: 'F0E68C', lavender: 'E6E6FA',
-  salmon: 'FA8072', skyblue: '87CEEB', tan: 'D2B48C', tomato: 'FF6347', turquoise: '40E0D0',
-  violet: 'EE82EE', darkblue: '00008B', darkgreen: '006400', darkred: '8B0000',
-  lightblue: 'ADD8E6', lightgreen: '90EE90', lightgray: 'D3D3D3', lightgrey: 'D3D3D3',
-  darkgray: 'A9A9A9', darkgrey: 'A9A9A9', transparent: '000000',
-};
-
 function colorToHex(value: string | null | undefined): string | null {
   if (!value) return null;
-  const text = value.trim().toLowerCase();
-  if (Object.prototype.hasOwnProperty.call(COLOR_NAMES, text)) {
-    return text === 'transparent' ? null : COLOR_NAMES[text]!;
-  }
-  const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/.exec(text);
+  const text = value.trim();
+  const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(text);
   if (hex) {
     const digits = hex[1]!;
     const full = digits.length === 3 ? digits.split('').map((c) => c + c).join('') : digits;
     return full.toUpperCase();
   }
-  const rgb = /^rgb\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*\)$/.exec(text);
+  const rgb = /^rgba?\(\s*([\d.]+%?)\s*,\s*([\d.]+%?)\s*,\s*([\d.]+%?)/i.exec(text);
   if (rgb) {
-    const parts = [rgb[1]!, rgb[2]!, rgb[3]!].map((part) => Number.parseInt(part, 10));
-    if (parts.some((part) => part > 255)) return null;
+    const parts = [rgb[1]!, rgb[2]!, rgb[3]!].map((part) => {
+      const number = part.includes('%') ? (Number.parseFloat(part) / 100) * 255 : Number.parseFloat(part);
+      return Math.max(0, Math.min(255, Math.round(number)));
+    });
     return parts.map((part) => part.toString(16).padStart(2, '0')).join('').toUpperCase();
-  }
-  const rgbPct = /^rgb\(\s*(\d{1,3})%\s*,\s*(\d{1,3})%\s*,\s*(\d{1,3})%\s*\)$/.exec(text);
-  if (rgbPct) {
-    const parts = [rgbPct[1]!, rgbPct[2]!, rgbPct[3]!].map((part) => Number.parseInt(part, 10));
-    if (parts.some((part) => part > 100)) return null;
-    return parts.map((part) => Math.round((part / 100) * 255).toString(16).padStart(2, '0')).join('').toUpperCase();
   }
   return null;
 }
 
 function fontSizeToPt(value: string | null | undefined): number | null {
   if (!value) return null;
-  const match = /^(\d+(?:\.\d+)?)\s*(pt|px)$/i.exec(value.trim());
+  const match = /([\d.]+)\s*(pt|px)/i.exec(value.trim());
   if (!match) return null;
   const number = Number.parseFloat(match[1]!);
-  if (!Number.isFinite(number)) return null;
-  const pt = match[2]!.toLowerCase() === 'px' ? number * 0.75 : number;
-  if (pt < 1 || pt > 1638) return null;
-  return pt;
+  if (!Number.isFinite(number) || number <= 0) return null;
+  return match[2]!.toLowerCase() === 'px' ? number * 0.75 : number;
 }
 
 function fontFamilyFirst(value: string | null | undefined): string | null {
   if (!value) return null;
-  if (/url\s*\(|expression\s*\(|\\/i.test(value)) return null;
-  if (/[(){}<>;\/]/.test(value.replace(/["']/g, ''))) return null;
   const first = value.split(',')[0]!.trim().replace(/^["']+|["']+$/g, '').trim();
-  if (!first) return null;
-  if (!/^[\p{L}\p{N}][\p{L}\p{N} \-.']*$/u.test(first)) return null;
-  return first;
-}
-
-function sanitizeHref(raw: string | null | undefined): string | undefined {
-  if (!raw) return undefined;
-  const cleaned = raw.replace(/[\u0000-\u0020\u007f]+/g, '');
-  const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(cleaned);
-  if (!scheme) return undefined;
-  const name = scheme[1]!.toLowerCase();
-  if (name !== 'http' && name !== 'https' && name !== 'mailto') return undefined;
-  return cleaned;
-}
-
-/** @internal Whether a paste offers Paste Options: it has formatting to choose about, text to keep and no pictures. */
-export function pasteOptionsApply(fragment: DocxClipboardFragment, plainText: string): boolean {
-  return plainText.trim() !== '' && !clipboardFragmentHasPictures(fragment) && clipboardFragmentHasFormatting(fragment);
-}
-
-/** @internal Fragment for a plain-text string, one paragraph per line. */
-export function plainTextClipboardFragment(plain: string): DocxClipboardFragment {
-  const lines = plain.split(/\r\n|[\r\n\u000B\u2028\u2029]/u);
-  return { paragraphs: lines.map((text) => ({ text })) };
-}
-
-function tableFragmentText(table: DocxTableFragment): string {
-  return table.rows.map((row) => row.cells.map((cell) => cell.content.map((segment) =>
-    segment.kind === 'text' ? segment.text
-      : segment.kind === 'tab' ? '\t'
-        : segment.kind === 'table' ? tableFragmentText(segment.table)
-          : ' '
-  ).join('').trim()).join('\t')).join('\n');
-}
-
-/** @internal Plain text a fragment was pasted from: tables row by row with tab-separated cells, then the paragraph text. */
-export function clipboardFragmentPlainText(fragment: DocxClipboardFragment): string {
-  return fragment.paragraphs.map((paragraph) =>
-    [...(paragraph.tables ?? []).map(tableFragmentText), ...(paragraph.text !== '' || !paragraph.tables?.length ? [paragraph.text] : [])].join('\n')
-  ).join('\n');
+  return first ? first : null;
 }
 
 function fontWeightBold(value: string | null | undefined): boolean | undefined {
@@ -448,24 +380,6 @@ function formatDelta(state: InlineFormatState): YrsInlineFormatDelta | undefined
   if (state.fontFamily) delta.fontFamily = { ascii: state.fontFamily };
   if (state.highlight) delta.highlight = state.highlight;
   return Object.keys(delta).length > 0 ? delta : undefined;
-}
-
-function runAttributes(state: InlineFormatState): Record<string, unknown> {
-  const attributes: Record<string, unknown> = {};
-  if (state.bold) attributes.bold = true;
-  if (state.italic) attributes.italic = true;
-  if (state.underline) attributes.underline = { style: 'single' };
-  if (state.strike) attributes.strike = { double: false };
-  if (state.color) attributes.textColor = { rgb: state.color };
-  if (state.fontSize !== null) {
-    const size = Math.round(state.fontSize * 2);
-    if (size >= 1 && size <= 3276) attributes.fontSize = { size, sizeCs: size };
-  }
-  if (state.fontFamily && state.fontFamily.length <= 128) {
-    attributes.fontFamily = { ascii: state.fontFamily, hAnsi: state.fontFamily };
-  }
-  if (state.highlight) attributes.highlight = state.highlight;
-  return attributes;
 }
 
 function normalizeTextPart(part: string): string {
@@ -624,7 +538,6 @@ function parseCellContent(cell: Element): DocxFragmentSegment[] {
       flushCurrent(true);
       return;
     }
-    if (SKIP_TAGS.has(tag) || tag === 'IMG') return;
     if (tag === 'TABLE') {
       flushCurrent(false);
       segments.push({ kind: 'table', table: parseTableElement(element as HTMLTableElement) });
@@ -740,116 +653,25 @@ function parseTableElement(table: HTMLTableElement): DocxTableFragment {
   };
 }
 
-function finishRuns(runs: DocxClipboardRun[], preformatted = false): DocxClipboardRun[] {
-  const finished = runs.filter(run => run.text !== '');
-  if (finished.length > 0 && !preformatted) {
-    finished[0] = { ...finished[0]!, text: finished[0]!.text.replace(/^ +/, '') };
-    const last = finished[finished.length - 1]!;
-    finished[finished.length - 1] = { ...last, text: last.text.replace(/ +$/, '') };
+/** Parsed table fragment from HTML, or null when the HTML holds no table. */
+export function parseClipboardHtml(html: string): DocxClipboardFragment | null {
+  const parser = new DOMParser();
+  const document_ = parser.parseFromString(html, 'text/html');
+  const payloadElement = document_.querySelector('[data-betteroffice-docx]');
+  if (payloadElement) {
+    const raw = payloadElement.getAttribute('data-betteroffice-docx');
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw) as { v?: unknown; fragment?: unknown };
+        if ((parsed.v === DOCX_CLIPBOARD_FRAGMENT_VERSION || parsed.v === 1) && validClipboardFragment(parsed.fragment)) {
+          return parsed.fragment;
+        }
+      } catch {
+      }
+    }
   }
-  return finished.filter(run => run.text !== '');
-}
-
-function runsHaveFormatting(runs: DocxClipboardRun[]): boolean {
-  return runs.some(run => run.href !== undefined || Object.keys(run.format?.other ?? {}).length > 0);
-}
-
-function inlineParagraphs(
-  nodes: Node[],
-  ancestors: Element[],
-  extra: { pStyle?: string; list?: 'bullet' | 'numbered' } = {}
-): DocxClipboardParagraph[] {
-  const paragraphs: DocxClipboardParagraph[] = [];
-  let runs: DocxClipboardRun[] = [];
-  let blockProperties = extra;
-  let preformattedLine = false;
-  let nonBreakingLine = false;
-  const flush = (keepEmpty = nonBreakingLine) => {
-    const finished = finishRuns(runs, preformattedLine);
-    runs = [];
-    preformattedLine = false;
-    nonBreakingLine = false;
-    const text = finished.map(run => run.text).join('');
-    if (text === '' && !keepEmpty) return;
-    paragraphs.push({
-      text,
-      ...(runsHaveFormatting(finished) ? { runs: finished } : {}),
-      ...blockProperties,
-    });
-  };
-  let collapsibleEnd = false;
-  const pushText = (raw: string, chain: Element[]) => {
-    if (chain.some(element => element.tagName.toUpperCase() === 'PRE')) {
-      raw.split(NBSP).join(' ').split(/\r\n|\r|\n/).forEach((line, index) => {
-        if (index > 0) flush(true);
-        preformattedLine = true;
-        collapsibleEnd = false;
-        if (line !== '') appendRun(line, chain);
-      });
-      return;
-    }
-    let text = raw.split('\t').map(part => part.split(NBSP).map(normalizeTextPart).join(NBSP)).join('\t');
-    if (runs.length === 0 || collapsibleEnd) text = text.replace(/^ +/, '');
-    if (text === '') return;
-    collapsibleEnd = text.endsWith(' ');
-    appendRun(text.split(NBSP).join(' '), chain);
-  };
-  const appendRun = (text: string, chain: Element[]) => {
-    const state = blankInlineFormat();
-    for (const ancestor of chain) applyInlineElement(state, ancestor, false);
-    const format = { other: runAttributes(state) };
-    const link = [...chain].reverse().find(element => element.tagName.toUpperCase() === 'A');
-    const href = link ? sanitizeHref(link.getAttribute('href')) : undefined;
-    const last = runs[runs.length - 1];
-    if (last && JSON.stringify(last.format) === JSON.stringify(format) && last.href === href) {
-      last.text += text;
-    } else {
-      runs.push({ text, format, ...(href ? { href } : {}) });
-    }
-  };
-  const walk = (node: Node, chain: Element[]) => {
-    if (node.nodeType === 8) return;
-    if (node.nodeType === 3) {
-      if ((node as Text).data.includes(NBSP)) nonBreakingLine = true;
-      pushText((node as Text).data, chain);
-      return;
-    }
-    if (node.nodeType !== 1) return;
-    const element = node as Element;
-    const tag = element.tagName.toUpperCase();
-    if (tag === 'BR') {
-      flush(true);
-      return;
-    }
-    if (tag === 'TABLE' || SKIP_TAGS.has(tag) || tag === 'IMG') return;
-    if (BLOCK_TAGS.has(tag)) {
-      flush();
-      const outer = blockProperties;
-      blockProperties = { ...outer, ...blockExtra(element) };
-      for (const child of Array.from(element.childNodes)) walk(child, [...chain, element]);
-      flush();
-      blockProperties = outer;
-      return;
-    }
-    for (const child of Array.from(element.childNodes)) walk(child, [...chain, element]);
-  };
-  for (const node of nodes) walk(node, ancestors);
-  flush();
-  return paragraphs;
-}
-
-function blockExtra(element: Element): { pStyle?: string; list?: 'bullet' | 'numbered' } {
-  const tag = element.tagName.toUpperCase();
-  const heading = /^H([1-6])$/.exec(tag);
-  if (heading) return { pStyle: `Heading${heading[1]}` };
-  if (tag === 'LI') {
-    const parent = element.parentElement?.tagName.toUpperCase();
-    return { list: parent === 'OL' ? 'numbered' : 'bullet' };
-  }
-  return {};
-}
-
-function parseRejectedPayloadFallback(body: HTMLElement): DocxClipboardFragment | null {
+  const body = document_.body;
+  if (!body) return null;
   const paragraphs: DocxClipboardParagraph[] = [];
   let activeTablePara: DocxClipboardParagraph | null = null;
   const pushTextLines = (lines: string[]) => {
@@ -944,154 +766,6 @@ function parseRejectedPayloadFallback(body: HTMLElement): DocxClipboardFragment 
   walkTop(Array.from(body.childNodes));
   const cleaned = paragraphs.filter((paragraph) => (paragraph.tables ?? []).length > 0 || paragraph.text !== '');
   if (!cleaned.some((paragraph) => (paragraph.tables ?? []).length > 0)) return null;
-  const fragment: DocxClipboardFragment = { paragraphs: cleaned };
-  return validClipboardFragment(fragment) ? fragment : null;
-}
-
-/** Parsed table fragment from HTML, or null when the HTML holds no table. */
-export function parseClipboardHtml(html: string): DocxClipboardFragment | null {
-  if (html.length > MAX_HTML_LENGTH) return null;
-  const parser = new DOMParser();
-  const document_ = parser.parseFromString(html, 'text/html');
-  {
-    let count = 0;
-    let tooBig = false;
-    const stack: Array<{ node: Element; depth: number }> = [];
-    if (document_.documentElement) stack.push({ node: document_.documentElement, depth: 1 });
-    while (stack.length > 0) {
-      const { node, depth } = stack.pop()!;
-      count += 1;
-      if (count > MAX_ELEMENTS || depth > MAX_DEPTH) { tooBig = true; break; }
-      const styleAttr = node.getAttribute?.('style');
-      if (styleAttr && styleAttr.length > MAX_STYLE_LENGTH) { tooBig = true; break; }
-      for (const child of Array.from(node.children)) stack.push({ node: child, depth: depth + 1 });
-    }
-    if (tooBig) return null;
-  }
-  const payloadElement = document_.querySelector('[data-betteroffice-docx]');
-  if (payloadElement) {
-    const raw = payloadElement.getAttribute('data-betteroffice-docx');
-    if (raw) {
-      try {
-        const parsed = JSON.parse(raw) as { v?: unknown; fragment?: unknown };
-        if ((parsed.v === DOCX_CLIPBOARD_FRAGMENT_VERSION || parsed.v === 1) && validClipboardFragment(parsed.fragment)) {
-          return parsed.fragment;
-        }
-      } catch {
-      }
-    }
-  }
-  const body = document_.body;
-  if (!body) return null;
-  if (payloadElement) return parseRejectedPayloadFallback(body);
-  const paragraphs: DocxClipboardParagraph[] = [];
-  let activeTablePara: DocxClipboardParagraph | null = null;
-  const pushParagraphs = (parsed: DocxClipboardParagraph[]) => {
-    for (const paragraph of parsed) {
-      if (activeTablePara && activeTablePara.text === '') {
-        activeTablePara.text = paragraph.text;
-        if (paragraph.runs) activeTablePara.runs = paragraph.runs;
-        if (paragraph.pStyle) activeTablePara.pStyle = paragraph.pStyle;
-        if (paragraph.list) activeTablePara.list = paragraph.list;
-        activeTablePara = null;
-      } else {
-        paragraphs.push(paragraph);
-      }
-    }
-  };
-  const pushTable = (table: DocxTableFragment) => {
-    if (activeTablePara) {
-      activeTablePara.tables!.push(table);
-    } else {
-      const paragraph: DocxClipboardParagraph = { tables: [table], text: '' };
-      paragraphs.push(paragraph);
-      activeTablePara = paragraph;
-    }
-  };
-  const collectInlineRaw = (node: Node, out: string[]) => {
-    if (node.nodeType === 8) return;
-    if (node.nodeType === 3) {
-      out.push(textNodeText(node as Text));
-      return;
-    }
-    if (node.nodeType !== 1) return;
-    const element = node as Element;
-    const tag = element.tagName.toUpperCase();
-    if (tag === 'BR') {
-      out.push(LINE_SEP);
-      return;
-    }
-    if (tag === 'TABLE' || SKIP_TAGS.has(tag)) return;
-    for (const child of Array.from(element.childNodes)) collectInlineRaw(child, out);
-  };
-  const walkTop = (nodes: Node[]) => {
-    let pendingInline: Node[] = [];
-    const flushPendingInline = () => {
-      if (pendingInline.length === 0) return;
-      const pending = pendingInline;
-      pendingInline = [];
-      pushParagraphs(inlineParagraphs(pending, []));
-    };
-    for (const node of nodes) {
-      if (node.nodeType === 8) continue;
-      if (node.nodeType === 3) {
-        const raw = textNodeText(node as Text);
-        if (raw.trim() === '' && !raw.includes('\t')) continue;
-        pendingInline.push(node);
-        continue;
-      }
-      if (node.nodeType !== 1) continue;
-      const element = node as Element;
-      const tag = element.tagName.toUpperCase();
-      if (SKIP_TAGS.has(tag)) continue;
-      if (tag === 'BR') {
-        pendingInline.push(node);
-        continue;
-      }
-      if (tag === 'TABLE') {
-        flushPendingInline();
-        pushTable(parseTableElement(element as HTMLTableElement));
-        continue;
-      }
-      if (tag === 'UL' || tag === 'OL') {
-        flushPendingInline();
-        walkTop(Array.from(element.childNodes));
-        continue;
-      }
-      if (BLOCK_TAGS.has(tag)) {
-        if (containsTable(element)) {
-          flushPendingInline();
-          walkTop(Array.from(element.childNodes));
-          continue;
-        }
-        flushPendingInline();
-        pushParagraphs(inlineParagraphs(Array.from(element.childNodes), [element], blockExtra(element)));
-        continue;
-      }
-      if (containsTable(element)) {
-        flushPendingInline();
-        walkTop(Array.from(element.childNodes));
-        continue;
-      }
-      const parts: string[] = [];
-      collectInlineRaw(element, parts);
-      const raw = parts.join('');
-      if (raw.trim() === '' && !raw.includes('\t') && !raw.includes(LINE_SEP)) continue;
-      pendingInline.push(node);
-    }
-    flushPendingInline();
-  };
-  walkTop(Array.from(body.childNodes));
-  const blank = (paragraph: DocxClipboardParagraph) => (paragraph.tables ?? []).length === 0 && paragraph.text === '';
-  let first = 0;
-  let end = paragraphs.length;
-  while (first < end && blank(paragraphs[first]!)) first += 1;
-  while (end > first && blank(paragraphs[end - 1]!)) end -= 1;
-  const cleaned = paragraphs.slice(first, end);
-  const hasRichContent = cleaned.some((paragraph) =>
-    (paragraph.tables ?? []).length > 0 || paragraph.runs !== undefined ||
-    paragraph.pStyle !== undefined || paragraph.list !== undefined);
-  if (!hasRichContent) return null;
   const fragment: DocxClipboardFragment = { paragraphs: cleaned };
   return validClipboardFragment(fragment) ? fragment : null;
 }

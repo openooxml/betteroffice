@@ -9,7 +9,8 @@ import { storeAriaShortcut, storeShortcutLabel } from '../../../commands/shortcu
 import { normalizeInputEvent } from './inputEvents';
 import { admitInputIntents, submitPasteFragment } from './inputAdmission';
 import { isPasteFragmentAllowed } from './clipboard';
-import { clipboardFragmentPlainText, readClipboardFragment } from '../internals/clipboardHtml';
+import { readClipboardFragment } from '../internals/clipboardHtml';
+import { clipboardFragmentPlainText } from '../pasteOptions/pasteText';
 import { WorkerObjectDialog } from './WorkerObjectDialog';
 import type { PeerlessPasteRecorder } from './PeerlessInput';
 import type { PeerlessPropertyIntent } from './inputEvents';

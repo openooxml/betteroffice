@@ -1,6 +1,6 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, expect, test } from 'bun:test';
-import { validClipboardFragment, type DocxClipboardFragment, type DocxTableFragment, type DocxTableFragmentCell } from '@betteroffice/docx/yrs';
+import type { DocxClipboardFragment, DocxTableFragment, DocxTableFragmentCell } from '@betteroffice/docx/yrs';
 import { clipboardFragmentHtml, parseClipboardHtml } from './clipboardHtml';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -144,32 +144,8 @@ test('huge colspan is clamped to a bounded table', () => {
 });
 
 test('text only html returns null', () => {
+  expect(parseClipboardHtml(`<body><p>Hello <b>world</b></p></body>`)).toBeNull();
   expect(parseClipboardHtml(`<body><div>Just text</div></body>`)).toBeNull();
-  expect(parseClipboardHtml(`<body><p>Plain paragraph</p></body>`)).toBeNull();
-});
-
-test('rich html parses formatted runs with font, size, colour and link', () => {
-  const parsed = parseClipboardHtml(
-    `<body><p><span style="font-family:Georgia;font-size:20pt;color:#FF0000;font-weight:bold">Rich</span> ` +
-    `<a href="https://example.com">link</a></p><h2>Head</h2></body>`
-  );
-  expect(parsed).not.toBeNull();
-  expect(parsed!.paragraphs[0]).toEqual({
-    text: 'Rich link',
-    runs: [
-      { text: 'Rich', format: { other: { bold: true, textColor: { rgb: 'FF0000' }, fontSize: { size: 40, sizeCs: 40 }, fontFamily: { ascii: 'Georgia', hAnsi: 'Georgia' } } } },
-      { text: ' ', format: { other: {} } },
-      { text: 'link', format: { other: {} }, href: 'https://example.com' },
-    ],
-  });
-  expect(parsed!.paragraphs[1]).toEqual({ text: 'Head', pStyle: 'Heading2' });
-});
-
-test('list html keeps bullet and numbered kinds', () => {
-  const parsed = parseClipboardHtml(`<body><ul><li>One</li></ul><ol><li>Two</li></ol></body>`);
-  expect(parsed).not.toBeNull();
-  expect(parsed!.paragraphs[0]).toEqual({ text: 'One', list: 'bullet' });
-  expect(parsed!.paragraphs[1]).toEqual({ text: 'Two', list: 'numbered' });
 });
 
 test('unknown payload version or invalid shape falls back to the html table', () => {
@@ -245,92 +221,6 @@ test('a crafted payload is refused and nothing of it reaches a paste', () => {
   }
 });
 
-test('a rejected payload reads as plain text even around formatted markup', () => {
-  const payload = JSON.stringify({ v: 1, fragment: { paragraphs: [{ text: 'text', runs: [
-    { text: 'text', format: { other: { runStyle: { styleId: 'Evil' } } } },
-  ] }] } }).replaceAll('&', '&amp;').replaceAll('"', '&quot;');
-  expect(parseClipboardHtml(`<div data-betteroffice-docx="${payload}"><b>text</b></div>`)).toBeNull();
-  expect(parseClipboardHtml(`<p><i>before</i></p><div data-betteroffice-docx="${payload}"><b>text</b></div>`)).toBeNull();
-  expect(parseClipboardHtml(`<div data-betteroffice-docx="${payload}">text</div>`)).toBeNull();
-});
-
-test('a rejected payload is read exactly as the plain fallback reads it', () => {
-  const crafted = JSON.stringify({ v: 1, fragment: { paragraphs: [{ text: 'text', runs: [
-    { text: 'text', format: { other: { runStyle: { styleId: 'Evil' } } } },
-  ] }] } }).replaceAll('&', '&amp;').replaceAll('"', '&quot;');
-  const unknownVersion = JSON.stringify({ v: 99, fragment: { paragraphs: [{ text: 'x' }] } }).replaceAll('"', '&quot;');
-  const table = '<table><tr><td>C</td></tr></table>';
-  const parsedTable: DocxTableFragment = {
-    tblPr: { width: 9360, widthType: 'dxa' },
-    grid: [],
-    rows: [{ trPr: {}, cells: [{ tcPr: { borders }, content: [{ kind: 'text', text: 'C' }, { kind: 'pilcrow' }] }] }],
-  };
-  const cases: Array<{ name: string; html: string; expected: DocxClipboardFragment | null }> = [
-    {
-      name: 'line breaks before a table',
-      html: `<div data-betteroffice-docx="{}"><p>A<br><br>B</p>${table}</div>`,
-      expected: { paragraphs: [{ text: 'A' }, { text: 'B' }, { tables: [parsedTable], text: '' }] },
-    },
-    {
-      name: 'bold markup without a table',
-      html: `<div data-betteroffice-docx="${crafted}"><b>text</b></div>`,
-      expected: null,
-    },
-    {
-      name: 'plain text only',
-      html: `<div data-betteroffice-docx="${unknownVersion}">plain text</div>`,
-      expected: null,
-    },
-    {
-      name: 'blank lines and non-breaking spaces',
-      html: `<div data-betteroffice-docx="${unknownVersion}"><p>&nbsp;</p><p>X&nbsp;&nbsp;Y</p><p></p><p>Z</p>${table}</div>`,
-      expected: { paragraphs: [{ text: 'X Y' }, { text: 'Z' }, { tables: [parsedTable], text: '' }] },
-    },
-    {
-      name: 'a list before a table',
-      html: `<div data-betteroffice-docx="${crafted}"><ul><li>One</li><li>Two</li></ul>${table}</div>`,
-      expected: { paragraphs: [{ text: 'OneTwo' }, { tables: [parsedTable], text: '' }] },
-    },
-    {
-      name: 'a heading before a table',
-      html: `<div data-betteroffice-docx="{}"><h1><b>Title</b></h1>${table}</div>`,
-      expected: { paragraphs: [{ text: 'Title' }, { tables: [parsedTable], text: '' }] },
-    },
-  ];
-  for (const { name, html, expected } of cases) {
-    expect({ name, parsed: parseClipboardHtml(html) }).toEqual({ name, parsed: expected });
-  }
-});
-
-test('a valid payload beside external markup reads as the payload', () => {
-  const fragment: DocxClipboardFragment = { paragraphs: [{ text: 'Kept', runs: [{ text: 'Kept', format: { other: { italic: true } } }] }] };
-  expect(parseClipboardHtml(`<p><b>outside</b></p>${clipboardFragmentHtml(fragment)}`)).toEqual(fragment);
-});
-
-test('external bold markup without a payload still reads as bold', () => {
-  const parsed = parseClipboardHtml('<b>text</b>');
-  expect(parsed?.paragraphs.map((paragraph) => paragraph.text)).toEqual(['text']);
-  expect(parsed?.paragraphs[0]?.runs?.[0]?.format?.other?.bold).toBe(true);
-});
-
-test('external html without a payload pastes only allow-listed formatting', () => {
-  const parsed = parseClipboardHtml(
-    '<p><b class="loud" style="color:red;position:absolute;margin-left:4px">bold</b> ' +
-    '<a href="https://example.test" target="_blank">link</a></p>'
-  );
-  expect(parsed).toEqual({ paragraphs: [{ text: 'bold link', runs: [
-    { text: 'bold', format: { other: { bold: true, textColor: { rgb: 'FF0000' } } } },
-    { text: ' ', format: { other: {} } },
-    { text: 'link', format: { other: {} }, href: 'https://example.test' },
-  ] }] });
-  expect(validClipboardFragment(parsed)).toBe(true);
-  const allowed = new Set(['bold', 'italic', 'underline', 'strike', 'textColor', 'fontSize', 'fontFamily', 'highlight']);
-  for (const run of parsed!.paragraphs[0]!.runs!) {
-    expect(Object.keys(run.format!)).toEqual(['other']);
-    expect(Object.keys(run.format!.other!).every((key) => allowed.has(key))).toBe(true);
-  }
-  const serialized = JSON.stringify(parsed);
-  for (const dropped of ['loud', 'absolute', 'margin', '_blank', 'target', 'class', 'position']) {
-    expect(serialized).not.toContain(dropped);
-  }
+test('external html without a payload stays plain text', () => {
+  expect(parseClipboardHtml('<p><b style="color:red">bold</b> <a href="https://example.test">link</a></p>')).toBeNull();
 });

@@ -124,7 +124,7 @@ function cloneFragment(fragment: DocxClipboardFragment): DocxClipboardFragment {
 
 /**
  * @internal Merge-formatting variant of a pasted fragment: bold, italic,
- * underline, strikethrough, hyperlinks and list numbering survive; font
+ * underline, strikethrough and hyperlinks survive; font
  * family, size, colour, highlight and paragraph style are dropped so the
  * destination paragraph's formatting applies.
  */
@@ -145,7 +145,6 @@ export function mergeFormattingFragment(fragment: DocxClipboardFragment): DocxCl
             })),
           }
         : {}),
-      ...(paragraph.list ? { list: paragraph.list } : {}),
     })),
   };
 }
@@ -176,8 +175,6 @@ export function clipboardFragmentHasFormatting(fragment: DocxClipboardFragment |
     return false;
   };
   return fragment.paragraphs.some(paragraph =>
-    paragraph.pStyle !== undefined ||
-    paragraph.list !== undefined ||
     (paragraph.tables ?? []).length > 0 ||
     (paragraph.inlines ?? []).some(inline => 'image' in inline) ||
     (paragraph.runs ?? []).some(run => run.href !== undefined || Object.keys(run.format?.other ?? {}).length > 0) ||

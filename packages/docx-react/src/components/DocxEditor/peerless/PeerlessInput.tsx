@@ -9,7 +9,8 @@ import {
   type PasteFormattingOption,
 } from '@betteroffice/docx/yrs';
 import { scrollIntoViewDelta, scrollViewport } from '../internals/viewportBand';
-import { clipboardFragmentPlainText, parseClipboardHtml, pasteOptionsApply, plainTextClipboardFragment } from '../internals/clipboardHtml';
+import { parseClipboardHtml } from '../internals/clipboardHtml';
+import { clipboardFragmentPlainText, pasteOptionsApply, plainTextClipboardFragment } from '../pasteOptions/pasteText';
 import { beginComposition, updateComposition, endComposition, type PeerlessCompositionEndResult, type PeerlessCompositionState } from './composition';
 import type { CommandTicket } from '../../../../../../shared/office-session/commands/types';
 import { admitInputIntents, admitIntent, appliedTicket, submitFormattingIntent, type PeerlessAdmissionResult, type PeerlessInputAdmission } from './inputAdmission';
@@ -373,9 +374,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
         event.preventDefault();
       }
     };
-    const keyup = () => {
-      if (active?.keyboard) active = null;
-    };
+    const keyup = () => { if (active?.keyboard) active = null; };
     const compatible = (inputType: string) => active !== null &&
       (!inputType || active.inputType === null || active.inputType === inputType ||
         (active.inputType === 'insertParagraph' && inputType === 'insertLineBreak') ||

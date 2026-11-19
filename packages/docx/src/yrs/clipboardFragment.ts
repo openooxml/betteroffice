@@ -69,8 +69,6 @@ export interface DocxClipboardParagraph {
   text: string;
   inlines?: DocxClipboardInline[];
   runs?: DocxClipboardRun[];
-  pStyle?: string;
-  list?: 'bullet' | 'numbered';
 }
 
 /** @internal Copied or pasted content in document order; consecutive paragraphs are separate paragraphs. */
@@ -409,9 +407,6 @@ export function validClipboardFragment(value: unknown): value is DocxClipboardFr
   return value.paragraphs.every(paragraph => {
     if (!plainObject(paragraph) || !text(paragraph.text, true) ||
       !(paragraph.tables === undefined || (Array.isArray(paragraph.tables) && paragraph.tables.every(entry => table(entry, 1))))) return false;
-    if (paragraph.pStyle !== undefined &&
-      (typeof paragraph.pStyle !== 'string' || paragraph.pStyle === '' || paragraph.pStyle.length > 255)) return false;
-    if (paragraph.list !== undefined && paragraph.list !== 'bullet' && paragraph.list !== 'numbered') return false;
     if (paragraph.runs !== undefined) {
       if (!Array.isArray(paragraph.runs) || paragraph.runs.length === 0) return false;
       budget.runs -= paragraph.runs.length;
@@ -458,7 +453,7 @@ export type ClipboardTableReader = Pick<YrsSession, 'tablePayload' | 'storySegme
 export type ClipboardPasteEngine = Pick<
   YrsSession,
   'deleteRange' | 'splitParagraph' | 'insertText' | 'insertTableFragment' | 'validateTableFragment' | 'insertImage' |
-  'clearFormatting' | 'formatRange' | 'setHyperlink' | 'applyParagraphStyle' | 'setParagraphAttrs'
+  'clearFormatting' | 'formatRange' | 'setHyperlink'
 >;
 
 /** @internal Inclusive grid bounds for {@link readTableFragment}. */
@@ -944,8 +939,7 @@ function formatInsertedRun(
   engine: ClipboardPasteEngine,
   range: YrsStoryRange,
   run: DocxClipboardRun,
-  runLinks: boolean,
-  inheritedMarks: ReadonlySet<string> | null,
+  inheritedMarks: ReadonlySet<string> | null = null,
 ): void {
   if (inheritedMarks) {
     const delta: Record<string, unknown> = {};
@@ -957,7 +951,6 @@ function formatInsertedRun(
     if (Object.keys(typed).length > 0 || Object.keys(other ?? {}).length > 0) engine.formatRange(range, run.format!);
   }
   if (run.href) engine.setHyperlink(range, { href: run.href, ...(run.tooltip ? { tooltip: run.tooltip } : {}) });
-  else if (runLinks) engine.setHyperlink(range, null);
 }
 
 /**
@@ -995,8 +988,6 @@ export function applyClipboardFragment(
       offset: removed.range.start.offset,
     };
   }
-  const paragraphProperties: Array<{ range: YrsStoryRange; pStyle?: string; list?: 'bullet' | 'numbered' }> = [];
-  const runLinks = fragment.paragraphs.some(paragraph => (paragraph.runs ?? []).some(run => run.href));
   const inheritedMarks = keepInherited
     ? new Set(INHERITED_MARKS.filter(key => fragment.paragraphs.some(paragraph =>
       (paragraph.runs ?? []).some(run => run.format?.other?.[key] !== undefined))))
@@ -1006,7 +997,6 @@ export function applyClipboardFragment(
       const split = engine.splitParagraph(caret, suggesting);
       caret = { story: caret.story, paraId: split.secondParaId, offset: 0 };
     }
-    const paragraphStart = { ...caret };
     for (const table of paragraph.tables ?? []) {
       caret = engine.insertTableFragment(caret, table, suggesting).after;
     }
@@ -1016,26 +1006,8 @@ export function applyClipboardFragment(
         : engine.insertText(caret, unit.text, suggesting);
       if (!inserted.range) throw new Error('Clipboard insertion receipt lacks range');
       caret = { story: inserted.range.story, ...inserted.range.end };
-      if ('text' in unit && paragraph.runs) formatInsertedRun(engine, inserted.range, unit, runLinks, inheritedMarks);
-    }
-    if (paragraph.pStyle || paragraph.list) {
-      paragraphProperties.push({
-        range: { story: caret.story, start: { paraId: paragraphStart.paraId, offset: 0 }, end: { paraId: caret.paraId, offset: 0 } },
-        pStyle: paragraph.pStyle,
-        list: paragraph.list,
-      });
+      if ('text' in unit && (!inheritedMarks || paragraph.runs)) formatInsertedRun(engine, inserted.range, unit, inheritedMarks);
     }
   });
-  for (const { range: target, pStyle, list } of paragraphProperties) {
-    if (pStyle) engine.applyParagraphStyle(target, pStyle, suggesting);
-    if (list) {
-      const bullet = list === 'bullet';
-      engine.setParagraphAttrs(
-        { story: target.story, start: target.end, end: target.end },
-        { numPr: { numId: bullet ? 1 : 2, ilvl: 0 }, listIsBullet: bullet, listNumFmt: bullet ? null : 'decimal', listMarker: null },
-        suggesting
-      );
-    }
-  }
   return caret;
 }

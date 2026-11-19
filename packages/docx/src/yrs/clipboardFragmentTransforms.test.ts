@@ -11,8 +11,6 @@ function richFragment(): DocxClipboardFragment {
     paragraphs: [
       {
         text: 'Rich link',
-        pStyle: 'Heading1',
-        list: 'numbered',
         runs: [
           {
             text: 'Rich ',
@@ -38,11 +36,9 @@ function richFragment(): DocxClipboardFragment {
 }
 
 describe('mergeFormattingFragment', () => {
-  test('keeps bold italic underline strike, links and lists but drops font, size, colour, highlight and paragraph style', () => {
+  test('keeps bold italic underline strike and links but drops font, size, colour and highlight', () => {
     const merged = mergeFormattingFragment(richFragment());
     const paragraph = merged.paragraphs[0]!;
-    expect(paragraph.pStyle).toBeUndefined();
-    expect(paragraph.list).toBe('numbered');
     expect(paragraph.runs![0]!.format).toEqual({
       other: { bold: true, italic: true, underline: { style: 'single' }, strike: { double: false } },
     });
@@ -68,7 +64,6 @@ describe('mergeFormattingFragment', () => {
   test('does not mutate the source fragment', () => {
     const source = richFragment();
     mergeFormattingFragment(source);
-    expect(source.paragraphs[0]!.pStyle).toBe('Heading1');
     expect(source.paragraphs[0]!.runs![0]!.format?.other?.fontSize).toEqual({ size: 40, sizeCs: 40 });
   });
 
@@ -172,10 +167,8 @@ describe('textOnlyFragment', () => {
 });
 
 describe('clipboardFragmentHasFormatting', () => {
-  test('detects run formatting, paragraph style, links and lists', () => {
+  test('detects run formatting and links', () => {
     expect(clipboardFragmentHasFormatting(richFragment())).toBe(true);
-    expect(clipboardFragmentHasFormatting({ paragraphs: [{ text: 'x', pStyle: 'Heading1' }] })).toBe(true);
-    expect(clipboardFragmentHasFormatting({ paragraphs: [{ text: 'x', list: 'bullet' }] })).toBe(true);
     expect(clipboardFragmentHasFormatting({
       paragraphs: [{ text: 'x', runs: [{ text: 'x', href: 'https://example.com' }] }],
     })).toBe(true);

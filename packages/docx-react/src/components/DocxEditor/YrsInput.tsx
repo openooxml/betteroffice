@@ -3,9 +3,7 @@
 import { isKeyReleasedFromInput, takeClipboardGesture } from '../../../../../shared/keyboard/nativeGesture';
 import type { DocxClipboardFragment } from '@betteroffice/docx/yrs';
 import React, {
-  Suspense,
   forwardRef,
-  lazy,
   memo,
   useCallback,
   useEffect,
@@ -20,12 +18,10 @@ import {
   applyClipboardFragment,
   clipboardFragmentIsTextOnly,
   isCellHasNoStoryRefusal,
-  mergeFormattingFragment,
   sameYrsSelection,
   tableBoundaryDeleteTarget,
   withYrsSelectionCause,
   yrsSelectionCause,
-  type PasteFormattingOption,
   type YrsAuthor,
   type YrsInputPositionMap,
   type YrsInlineFormatDelta,
@@ -52,7 +48,7 @@ import {
   yrsSelectionPlainText,
   yrsTableSelectionRange,
 } from './yrsCommands';
-import { clipboardFragmentHtml, clipboardFragmentPlainText, parseClipboardHtml, pasteOptionsApply, plainTextClipboardFragment } from './internals/clipboardHtml';
+import { clipboardFragmentHtml, parseClipboardHtml } from './internals/clipboardHtml';
 import { cutRefusalFrom, DocxCutRefusedError } from './internals/cutRefused';
 import { toast } from 'sonner';
 import { InputOperationQueue } from './inputOperationQueue';
@@ -67,19 +63,6 @@ import {
   type LayoutUpdateOrigin,
 } from './internals/viewportAnchoring';
 import { useTranslation } from '../../i18n';
-import { usePasteOptions } from './pasteOptions/usePasteOptions';
-
-const LazyPasteOptionsControl = lazy(() => import('./pasteOptions/PasteOptionsControl'));
-
-interface PasteRecord {
-  fragment: DocxClipboardFragment;
-  plainText: string;
-  range: YrsStoryRange;
-  end: YrsLoc;
-  version: string;
-  stored: YrsStoredFormatting | undefined;
-}
-
 
 const READER_SCROLL = ['wheel', 'touchmove'] as const;
 const READER_SCROLL_KEYS = new Set(['PageDown', 'PageUp', ' ', 'ArrowDown', 'ArrowUp', 'Home', 'End']);
@@ -160,7 +143,6 @@ export interface YrsInputProps {
   /** Whether a missing selection starts as a caret at the story start; input always starts one. */
   seedSelection?: boolean;
   session: YrsSession | null;
-  pasteOptions?: boolean;
   story?: string;
   isSuggesting?: boolean;
   author?: string;
@@ -351,7 +333,6 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     applyPendingSelection,
     seedSelection = true,
     session,
-    pasteOptions: pasteOptionsEnabled = true,
     story = 'body',
     isSuggesting = false,
     author = 'User',
@@ -768,117 +749,6 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     [emitSelection, onCaretInput, onDirectInput, requestLocalCaretReveal, session]
   );
 
-  const pasteRecordRef = useRef<PasteRecord | null>(null);
-  const pasteReplacingRef = useRef(false);
-  const pastePendingAnchorRef = useRef(false);
-  const choosePasteOption = useCallback((option: PasteFormattingOption): void => {
-    const record = pasteRecordRef.current;
-    if (!record || !session || readOnly) return;
-    const variant = option === 'merge'
-      ? mergeFormattingFragment(record.fragment)
-      : option === 'keep-source'
-        ? structuredClone(record.fragment)
-        : null;
-    enqueueInputOperation(() => {
-      if (!isCurrentInput(session)) return;
-      if (pasteRecordRef.current !== record || session.canRedo() || session.version() !== record.version) {
-        if (pasteRecordRef.current === record) pasteRecordRef.current = null;
-        pastePendingAnchorRef.current = false;
-        pasteOptionsRef.current.dismiss();
-        return;
-      }
-      pasteReplacingRef.current = true;
-      session.addUndoBoundary();
-      let chosen: PasteRecord | null = null;
-      try {
-        if (!session.undo()) {
-          pasteRecordRef.current = null;
-          pastePendingAnchorRef.current = false;
-          pasteOptionsRef.current.dismiss();
-          return;
-        }
-        let caret: YrsLoc;
-        if (option === 'text-only') {
-          const range = record.range;
-          const hasSelection = range.start.paraId !== range.end.paraId || range.start.offset !== range.end.offset;
-          const pieces = plainTextClipboardFragment(record.plainText).paragraphs.map((paragraph) => paragraph.text);
-          caret = { story: range.story, ...range.start };
-          for (let i = 0; i < pieces.length; i += 1) {
-            const piece = pieces[i]!;
-            if (piece || (i === 0 && hasSelection)) {
-              let insertedAt = caret;
-              if (i === 0 && hasSelection) {
-                const receipt = session.replaceRange(range, piece, suggestingAuthor());
-                if (receipt.range) {
-                  insertedAt = { story: receipt.range.story, ...receipt.range.start };
-                  caret = { story: receipt.range.story, ...receipt.range.end };
-                } else caret = { ...caret, offset: caret.offset + piece.length };
-              } else {
-                const landed = session.insertText(caret, piece, suggestingAuthor()).range;
-                if (landed) insertedAt = { story: landed.story, ...landed.start };
-                caret = landed ? { story: landed.story, ...landed.end } : { ...caret, offset: caret.offset + piece.length };
-              }
-              if (i === 0 && piece && record.stored) {
-                const typed: YrsStoryRange = {
-                  story: insertedAt.story,
-                  start: { paraId: insertedAt.paraId, offset: insertedAt.offset },
-                  end: { paraId: caret.paraId, offset: caret.offset },
-                };
-                if (record.stored.clear) session.clearFormatting(typed);
-                if (Object.keys(record.stored.delta).length > 0) session.formatRange(typed, record.stored.delta);
-              }
-            }
-            if (i < pieces.length - 1) {
-              const receipt = session.splitParagraph(caret, suggestingAuthor());
-              caret = { story: caret.story, paraId: receipt.secondParaId, offset: 0 };
-            }
-          }
-        } else {
-          caret = applyClipboardFragment(session, record.range, variant!, suggestingAuthor(), option === 'merge');
-        }
-        session.setSelection(caret);
-        finishMutation();
-        chosen = { ...record, end: caret, version: '' };
-        pasteRecordRef.current = chosen;
-      } finally {
-        if (isCurrentInput(session)) session.addUndoBoundary();
-        pasteReplacingRef.current = false;
-      }
-      if (chosen && pasteRecordRef.current === chosen) chosen.version = session.version();
-    }, 'mutation');
-  }, [enqueueInputOperation, finishMutation, isCurrentInput, readOnly, session, suggestingAuthor]);
-  const pasteOptions = usePasteOptions({
-    enabled: pasteOptionsEnabled && !readOnly,
-    onChoose: choosePasteOption,
-    focusEditor: () => { textareaRef.current?.focus(); },
-  });
-  const pasteOptionsRef = useRef(pasteOptions);
-  pasteOptionsRef.current = pasteOptions;
-  const pasteOptionsVisible = pasteOptions.visible;
-  useEffect(() => {
-    if (!pasteOptionsVisible || !displayListQueries) return;
-    const follow = () => {
-      const record = pasteRecordRef.current;
-      const host = canvasHostRef?.current;
-      if (!record || !host || !displayListQueries.isReady()) return;
-      const position = locToDisplayPosition(record.end);
-      const caret = position === null ? null : displayListQueries.caretRect(position);
-      if (!caret) return;
-      const pageRect = resolveDisplayPageClientRect(host, displayListQueries, caret.pageIndex);
-      const pageSize = displayListQueries.pageSize(caret.pageIndex);
-      if (!pageRect || !pageSize) return;
-      const scaleX = pageSize.width > 0 ? pageRect.width / pageSize.width : 1;
-      const scaleY = pageSize.height > 0 ? pageRect.height / pageSize.height : 1;
-      const top = pageRect.top + caret.y * scaleY;
-      pasteOptionsRef.current.setAnchor({
-        left: pageRect.left + caret.x * scaleX + 6,
-        top: top + Math.max(1, caret.height * scaleY) + 4,
-      });
-    };
-    window.addEventListener('scroll', follow, true);
-    return () => window.removeEventListener('scroll', follow, true);
-  }, [canvasHostRef, displayListQueries, locToDisplayPosition, pasteOptionsVisible]);
-
   const finishResidentMutation = useCallback(
     (result: ResidentFrameApplyResult): void => {
       if (result.frameEpoch !== null) {
@@ -983,9 +853,6 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 
   const insertText = useCallback(
     (text: string, inputTime?: number, composition = false): void => {
-      pasteRecordRef.current = null;
-      pastePendingAnchorRef.current = false;
-      pasteOptionsRef.current.dismiss();
       verticalCaretGoalRef.current.reset();
       if (!session || readOnly || text.length === 0) return;
       if (holdOperation({ kind: composition ? 'composition' : 'text', text, inputTime })) return;
@@ -1247,9 +1114,6 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   // Deletes queued behind busy input join one batch, applied with one layout.
   const deleteDirection = useCallback(
     (direction: 'backward' | 'forward'): void => {
-      pasteRecordRef.current = null;
-      pastePendingAnchorRef.current = false;
-      pasteOptionsRef.current.dismiss();
       if (holdOperation({ kind: 'delete', direction })) return;
       verticalCaretGoalRef.current.reset();
       dispatchCaretInput();
@@ -1273,9 +1137,6 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   );
 
   const splitParagraph = useCallback((): void => {
-    pasteRecordRef.current = null;
-    pastePendingAnchorRef.current = false;
-    pasteOptionsRef.current.dismiss();
     if (holdOperation({ kind: 'split' })) return;
     verticalCaretGoalRef.current.reset();
     dispatchCaretInput();
@@ -2070,38 +1931,19 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
             return;
           }
           session.addUndoBoundary();
-          let recorded: PasteRecord | null = null;
-          const stored = storedFormattingByParagraphRef.current.get(`${current.head.story}\u0000${current.head.paraId}`);
           try {
             const caret = applyClipboardFragment(session, range, fragment, suggestingAuthor());
             session.setSelection(caret);
-            const plainText = plain !== '' ? plain : clipboardFragmentPlainText(fragment);
-            if (pasteOptionsEnabled && pasteOptionsApply(fragment, plainText)) {
-              recorded = {
-                fragment: structuredClone(fragment),
-                plainText,
-                range,
-                end: caret,
-                version: '',
-                stored,
-              };
-              pasteRecordRef.current = recorded;
-              pastePendingAnchorRef.current = true;
-            } else {
-              pasteRecordRef.current = null;
-              pasteOptionsRef.current.dismiss();
-            }
             finishMutation();
           } finally {
             if (isCurrentInput(session)) session.addUndoBoundary();
           }
-          if (recorded && pasteRecordRef.current === recorded) recorded.version = session.version();
         }, 'mutation');
         return;
       }
       insertText(plain);
     },
-    [dispatchCaretInput, enqueueInputOperation, ensureSelection, finishMutation, holdInput, inputPositionMap, insertText, isCurrentInput, isSuggesting, pasteOptionsEnabled, readOnly, session, suggestingAuthor]
+    [dispatchCaretInput, enqueueInputOperation, ensureSelection, finishMutation, holdInput, inputPositionMap, insertText, isCurrentInput, isSuggesting, readOnly, session, suggestingAuthor]
   );
 
   const handlePaste = useCallback(
@@ -2485,30 +2327,6 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         ? current
         : style
     );
-    const pasteRecord = pasteRecordRef.current;
-    if (pasteRecord && session) {
-      const focusInControl = typeof document !== 'undefined' && !!document.activeElement?.closest?.('[data-paste-options]');
-      const current = session.selection();
-      const end = pasteRecord.end;
-      const atEnd = !!current && [current.anchor, current.head].every((at) =>
-        at.story === end.story && at.paraId === end.paraId && at.offset === end.offset);
-      const anchor = { left: nextLeft + 6, top: nextTop + nextHeight + 4 };
-      const pending = pastePendingAnchorRef.current;
-      const changed = session.canRedo() || session.version() !== pasteRecord.version;
-      if (pasteReplacingRef.current) {
-      } else if (changed || (!atEnd && !focusInControl)) {
-        pasteRecordRef.current = null;
-        pastePendingAnchorRef.current = false;
-        pasteOptionsRef.current.dismiss();
-      } else if (pending) {
-        if (atEnd) {
-          pastePendingAnchorRef.current = false;
-          pasteOptionsRef.current.show(anchor);
-        }
-      } else if (atEnd && pasteOptionsRef.current.visible) {
-        pasteOptionsRef.current.setAnchor(anchor);
-      }
-    }
     const stickySelection = session?.selection() ?? null;
     const previousStickySelection = lastCaretScrollSelectionRef.current;
     lastCaretScrollSelectionRef.current = stickySelection;
@@ -2557,7 +2375,6 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     layoutCommit,
     layoutCommitVersion,
     layoutUpdateOrigin,
-    locToDisplayPosition,
     onStateChange,
     readOnly,
     residentCaret,
@@ -2603,27 +2420,9 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       }}
     />
   );
-  const pasteControl = pasteOptions.visible && pasteOptions.anchor
-    ? (
-      <Suspense fallback={null}>
-        <LazyPasteOptionsControl
-          anchor={pasteOptions.anchor}
-          menuOpen={pasteOptions.menuOpen}
-          selected={pasteOptions.selected}
-          onMenuOpenChange={pasteOptions.setMenuOpen}
-          onChoose={pasteOptions.choose}
-          onCloseMenu={pasteOptions.closeMenu}
-        />
-      </Suspense>
-    )
-    : null;
-  const body = typeof document !== 'undefined' ? document.body : null;
-  return (
-    <>
-      {body ? createPortal(textarea, body) : textarea}
-      {pasteControl && body ? createPortal(pasteControl, body) : pasteControl}
-    </>
-  );
+  return typeof document !== 'undefined' && document.body
+    ? createPortal(textarea, document.body)
+    : textarea;
 });
 
 export const YrsInput = memo(YrsInputComponent);
