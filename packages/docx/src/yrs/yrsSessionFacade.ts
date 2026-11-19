@@ -1739,6 +1739,7 @@ export function wrapSession(
       return listDef === undefined ? attrs : { ...attrs, other: { ...attrs.other, listDef } };
     },
     createdListDefinitions: () => JSON.parse(session.created_list_definitions_json()),
+    listDefinitionKeysInUse: () => JSON.parse(session.list_definition_keys_in_use_json()),
     formatTextTarget: (target, delta) => {
       ensureUndo(targetStory(target));
       return mutate(

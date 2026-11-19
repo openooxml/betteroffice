@@ -610,7 +610,9 @@ export async function writeSessionSave(
   if (yieldSave) await yieldSave();
   engineProgress();
   const refuse = (message: string) => new DocxSectionError('unsupported', message);
-  const created = session.createdListDefinitions?.() ?? [];
+  const defined = session.createdListDefinitions?.() ?? [];
+  const inUse = defined.length ? new Set(session.listDefinitionKeysInUse()) : undefined;
+  const created = defined.filter(definition => inUse?.has(definition.key));
   if (created.length) await preloadOpcWasm();
   const write = async (sectionEdits: RustParagraphIds['sectionEdits']) => {
     const modelBody = (part: string) => sectionPlan !== undefined && !sectionEdits && part === bodyPart;

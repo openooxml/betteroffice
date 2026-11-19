@@ -303,7 +303,8 @@ function numberingPart(parts: Readonly<Record<string, Uint8Array>>) {
 /**
  * The list definitions the editor created, `definitions` as `session` lists them, with the ids a
  * save into the package `parts` gives them: a definition the package already carries, under its key
- * and with what the writer writes for it, keeps the ids it has there; one an earlier save of the
+ * and with what the writer writes for it, keeps the ids it has there unless `model` holds them, as
+ * a list the session opened with; one an earlier save of the
  * session numbered keeps those while they are above every id of the package and of `model`, the
  * numbering of the session's source; every other one takes the next ids above those.
  */
@@ -324,12 +325,15 @@ export function savedListDefinitions(
   for (const [key, ids] of previous) {
     if (ids.numId > highestNumId && ids.abstractNumId > highestAbstractNumId) kept.set(key, ids);
   }
+  const sourceAbstractNumIds = new Set((model?.abstractNums ?? []).map(abstract => abstract.abstractNumId));
+  const sourceNumIds = new Set((model?.nums ?? []).map(num => num.numId));
   const carried = new Map<string, number>();
   for (const definition of definitions) {
     const abstractNumId = carriedAbstractNum(scan, definition);
-    if (abstractNumId === undefined) continue;
-    carried.set(definition.key, abstractNumId);
+    if (abstractNumId === undefined || sourceAbstractNumIds.has(abstractNumId)) continue;
     const numId = scan.pointers.get(abstractNumId);
+    if (numId !== undefined && sourceNumIds.has(numId)) continue;
+    carried.set(definition.key, abstractNumId);
     if (numId !== undefined) kept.set(definition.key, { numId, abstractNumId });
   }
   const ids = savedListDefinitionIds(

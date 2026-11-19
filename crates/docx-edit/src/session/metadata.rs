@@ -97,6 +97,11 @@ impl EditSessionCore {
         serde_json::Value::Array(definitions).to_string()
     }
 
+    /// The keys of the created list definitions some paragraph is on, as a JSON array.
+    pub fn list_definition_keys_in_use_json(&self) -> String {
+        json!(self.engine.doc().list_definition_keys_in_use()).to_string()
+    }
+
     pub fn list_sections_json(&self) -> EngineResult<String> {
         let sections = self
             .engine
