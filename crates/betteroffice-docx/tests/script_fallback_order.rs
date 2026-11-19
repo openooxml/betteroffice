@@ -482,8 +482,9 @@ fn mark_kinds(result: &LayoutResult) -> Vec<&'static str> {
 #[cfg(feature = "raster")]
 #[test]
 fn a_tracked_paragraph_mark_keeps_its_kind_once_its_page_is_rasterized() {
+    type Case = (fn() -> LayoutInput, &'static str);
     let package = common::sample_docx();
-    let cases: [(fn() -> LayoutInput, &str); 2] = [
+    let cases: [Case; 2] = [
         (|| tracked_mark_input(true), "glyphRun"),
         (tracked_mark_input_in_arial, "text"),
     ];
