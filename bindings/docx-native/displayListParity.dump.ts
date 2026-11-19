@@ -53,10 +53,17 @@ await preloadOpcWasm(new Uint8Array(readFileSync(resolve(root, 'packages/docx/sr
 const fontProvider = fonts === 'pinned' ? await resolveCompleteFontProvider() : undefined;
 if (fonts === 'pinned' && !fontProvider) throw new Error('the complete font provider did not resolve');
 
+function trackedMarkDocument(): Promise<Uint8Array> {
+  const stamp = 'w:author="Ada" w:date="2026-01-01T00:00:00Z"';
+  const paragraph = (mark: string, text: string) => `<w:p><w:pPr><w:rPr>${mark}</w:rPr></w:pPr><w:r><w:t>${text}</w:t></w:r></w:p>`;
+  return documentWithBody(paragraph(`<w:ins w:id="1" ${stamp}/>`, 'Inserted paragraph') + paragraph(`<w:del w:id="2" ${stamp}/>`, 'Deleted paragraph'));
+}
+
 const fixtures: Record<string, Uint8Array> = {
   demo: new Uint8Array(readFileSync(resolve(root, 'apps/demo/public/betteroffice-demo.docx'))),
   typography: await typographyDocument(),
   leaders: await leaderDocument(),
+  'tracked-mark': await trackedMarkDocument(),
 };
 for (const part of ['none', 'drawn', 'missing', 'corrupt'] satisfies PicturePart[]) fixtures[`picture-${part}`] = await pictureDocument(part);
 

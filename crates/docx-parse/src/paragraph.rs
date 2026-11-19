@@ -938,6 +938,7 @@ fn parse_simple_field_composed(
     let structured_result = (!result.is_empty()).then(|| StructuredFieldContent {
         inline: Some(result),
         blocks: None,
+        block_count: None,
     });
     let field_tree = structured_result
         .as_ref()

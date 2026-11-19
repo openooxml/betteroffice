@@ -28,6 +28,9 @@ const parameters = new URLSearchParams(location.search);
 const variant = parameters.get('variant') ?? 'plain';
 const collaboration = parameters.has('collaboration');
 const peerless = parameters.has('asyncApi') || collaboration;
+const fixedIndicator = parameters.has('fixedIndicator');
+const staticRoot = parameters.has('staticRoot');
+const gridRoot = parameters.has('gridRoot');
 let mainThreadEngines = 0;
 globalThis.__xlsxMainEngineProbe = { capture() { mainThreadEngines += 1; } };
 
@@ -233,8 +236,16 @@ let activeSession: WorkbookSession | null = null;
 let latestFrame: WorkbookFrame | null = null;
 let cellInputHold: ReturnType<typeof deferred<void>> | null = null;
 let heldCellInputs = 0;
+const holdingOpen = parameters.has('holdOpen');
+let openWaiting = false;
+const openRelease = deferred<void>();
 const backendOpen = editableWorkbookSessionBackend.open;
 editableWorkbookSessionBackend.open = async (...args) => {
+  if (holdingOpen) {
+    openWaiting = true;
+    await openRelease.promise;
+    openWaiting = false;
+  }
   const token = ++generation;
   const slotIndex =
     args[1]?.clientId !== undefined ? args[1].clientId - 4200 : 0;
@@ -321,6 +332,28 @@ let retainToolbar = false;
 const saves: number[][] = [];
 let readyCount = 0;
 
+const boxOf = (element: Element) => {
+  const { x, y, width, height } = element.getBoundingClientRect();
+  return [x, y, width, height];
+};
+
+function recordIndicator(element: HTMLDivElement | null) {
+  if (!element) return;
+  rootElement.dataset.indicatorShown = 'true';
+  if (rootElement.querySelector('[data-testid="xlsx-workspace"]')) rootElement.dataset.indicatorWithWorkspace = 'true';
+  const layer = element.closest<HTMLElement>('[data-testid="xlsx-loading"]');
+  const editor = layer?.closest<HTMLElement>('[role="application"]');
+  const workspace = editor?.querySelector('[data-testid="xlsx-workspace"]');
+  if (!layer || !editor || !workspace) return;
+  rootElement.dataset.indicatorInLayer = 'true';
+  rootElement.dataset.layerAnchor = JSON.stringify({
+    inside: editor.contains(layer.offsetParent),
+    layer: boxOf(layer),
+    editor: boxOf(editor),
+    workspace: boxOf(workspace),
+  });
+}
+
 function renderPeerlessEditor(bytes: Uint8Array, index: number) {
   const slot = slots[index]!;
   const slotPlugin = defineXlsxPlugin({
@@ -337,6 +370,16 @@ function renderPeerlessEditor(bytes: Uint8Array, index: number) {
       file={bytes}
       readOnly={readOnly}
       toolbar={retainToolbar ? <EditorToolbar mode="commands"><EditorToolbar.Toolbar /><EditorToolbar.FormulaBar /></EditorToolbar> : undefined}
+      loadingIndicator={fixedIndicator ? (
+        <div
+          data-testid="harness-loading"
+          ref={recordIndicator}
+          style={{ height: '100%', display: 'grid', placeItems: 'center' }}
+        >
+          Opening workbook
+        </div>
+      ) : undefined}
+      style={gridRoot ? { position: 'static', display: 'grid', gap: 8 } : staticRoot ? { position: 'static' } : undefined}
       plugins={[slotPlugin]}
       pluginGrants={{ routes: { document: 'write', editBatches: true } }}
       collaboration={
@@ -407,6 +450,12 @@ const open = (bytes: Uint8Array) => {
           {renderPeerlessEditor(bytes, index)}
         </div>
       ))}
+    </div>
+  ) : peerless && (fixedIndicator || gridRoot) ? (
+    <div data-testid="harness-host-panel" style={{ position: 'relative', height: 800 }}>
+      <div data-testid="harness-fixed-parent" style={{ height: 600 }}>
+        {renderPeerlessEditor(bytes, 0)}
+      </div>
     </div>
   ) : peerless ? (
     renderPeerlessEditor(bytes, 0)
@@ -527,6 +576,8 @@ window.__xlsxWorkerEditor = {
     } finally { await session.dispose(); }
   },
   releaseHydration() { holdingHydration = false; hydrationRelease.resolve(); },
+  openHeld: () => openWaiting,
+  releaseOpen() { openRelease.resolve(); },
   holdCellInputs() { cellInputHold = deferred<void>(); },
   heldCellInputs: () => heldCellInputs,
   releaseCellInputs() { cellInputHold?.resolve(); cellInputHold = null; },

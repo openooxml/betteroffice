@@ -572,6 +572,18 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
     });
   }
 
+  test('snapshot.inputFocused follows the portaled document input', async () => {
+    let latest: DocxPluginContext<null> | undefined;
+    const plugin = defineDocxPlugin<null>({ id: 'input-focus', createState: () => null,
+      panel: { title: 'Focus', placement: 'right', render: (props) => { latest = props.context; return <input data-testid="input-focus-panel" />; } } });
+    const { ref, view } = await mount({ plugins: [plugin] });
+    await act(async () => { ref.current!.focus(); });
+    await until(() => latest?.snapshot.inputFocused === true);
+    await act(async () => { view.getByTestId('input-focus-panel').focus(); });
+    await until(() => latest?.snapshot.inputFocused === false);
+    expect(latest!.snapshot.focused).toBe(false);
+  });
+
   const focusRecorder = () => {
     const focus: boolean[] = [];
     let loads = 0;
@@ -3892,7 +3904,7 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
   });
 
   if (engine !== 'DL') test('T2: a direction-only reversal settles once and refuses retained geometry', async () => {
-    const h = await matrixEditor(engine);
+    const h = await matrixEditor(engine, documentBytes(), undefined, true);
     try {
       await h.selection('body', h.first.paraId, 0, 3);
       await h.quiet();
@@ -4201,9 +4213,12 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
   });
 
   if (engine !== 'DL') test('T7: reload drops a pending settle and refuses retained geometry', async () => {
-    const h = await matrixEditor(engine);
+    const h = await matrixEditor(engine, documentBytes(), undefined, true);
     try {
       await h.selection('body', h.first.paraId, 0, 3);
+      await h.selectionLayout();
+      expect(h.settles).toHaveLength(0);
+      expect(h.context().snapshot.selectionSettled).toBe(false);
       const retained = h.context();
       const generation = retained.snapshot.generation;
       h.reset();
@@ -4262,7 +4277,7 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
 
   if (engine !== 'DL') for (const story of ['fn:1', 'en:1']) {
     test(`T3: moving within one note settles again (${story})`, async () => {
-      const h = await matrixEditor(engine, await matrixDocument());
+      const h = await matrixEditor(engine, await matrixDocument(), undefined, true);
       try {
         const paraId = story === 'fn:1' ? '60000001' : '70000001';
         await h.openStory(story);

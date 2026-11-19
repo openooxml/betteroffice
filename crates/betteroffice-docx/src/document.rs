@@ -467,11 +467,7 @@ impl Document {
                 display_list,
             });
         }
-        let chains: BTreeMap<String, Vec<u32>> = fonts
-            .chains
-            .iter()
-            .map(|(key, ids)| (key.clone(), ids.iter().map(|id| id.to_u32()).collect()))
-            .collect();
+        let chains = fonts.layout_chains(&requirements);
         let package = serde_json::json!({
             "settings": { "compatibilityFlags": &self.model.settings.compatibility_flags }
         });

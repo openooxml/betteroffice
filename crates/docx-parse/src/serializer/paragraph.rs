@@ -731,7 +731,7 @@ fn serialize_complex_field(
     let code_nodes = field
         .structured_code
         .as_ref()
-        .filter(|content| content.blocks.is_none())
+        .filter(|content| !content.spans_paragraphs())
         .and_then(|content| content.inline.as_deref())
         .filter(|nodes| nodes.iter().any(|node| !matches!(node, InlineNode::Run(_))));
     let in_place = code_nodes.filter(|nodes| {
@@ -784,7 +784,7 @@ fn serialize_complex_field(
     let structured = field
         .structured_result
         .as_ref()
-        .filter(|content| content.blocks.is_none())
+        .filter(|content| !content.spans_paragraphs())
         .and_then(|content| content.inline.as_ref());
     if let Some(nodes) = structured {
         for node in nodes {
@@ -1120,7 +1120,7 @@ fn has_comment_reference(node: &InlineNode, id: f64) -> bool {
                 || field
                     .structured_result
                     .as_ref()
-                    .filter(|content| content.blocks.is_none())
+                    .filter(|content| !content.spans_paragraphs())
                     .and_then(|content| content.inline.as_ref())
                     .map_or_else(
                         || {
@@ -1439,6 +1439,8 @@ pub(super) fn on_off(writer: &mut XmlWriter, name: &'static str, value: Option<b
 
 #[cfg(test)]
 mod tests {
+    use serde_json::{Value, json};
+
     use crate::inline::{Run, RunContent, RunType};
     use crate::serializer::s10::SerializerDeterminism;
 
@@ -1918,5 +1920,61 @@ mod tests {
         assert!(serialize_sdt_properties(&properties).is_err());
         properties.raw_properties_xml = None;
         assert!(serialize_sdt_properties(&properties).is_ok());
+    }
+
+    fn run_value(content: Value) -> Value {
+        json!({"type": "run", "content": [content]})
+    }
+
+    fn instruction_run() -> Value {
+        run_value(json!({"type": "instrText", "text": "QUOTE x"}))
+    }
+
+    fn spanning_field(code: Value, result: Value, field_result: Value) -> ComplexField {
+        serde_json::from_value(json!({
+            "type": "complexField",
+            "instruction": "QUOTE x",
+            "fieldType": "QUOTE",
+            "fieldCode": [instruction_run()],
+            "fieldResult": field_result,
+            "structuredCode": code,
+            "structuredResult": result
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_field_whose_code_spans_paragraphs_writes_its_code_runs() {
+        let code = json!({"inline": [
+            {"type": "bookmarkStart", "id": 5, "name": "CodeMark"},
+            instruction_run()
+        ], "blockCount": 1});
+        let field = spanning_field(code, Value::Null, json!([]));
+        let output = serialize_complex_field(&field, &mut context()).unwrap();
+        assert!(output.contains("QUOTE x"), "{output}");
+        assert!(!output.contains("CodeMark"), "{output}");
+    }
+
+    #[test]
+    fn a_field_whose_result_spans_paragraphs_writes_its_result_runs() {
+        let copy = run_value(json!({"type": "text", "text": "InlineCopy"}));
+        let written = run_value(json!({"type": "text", "text": "RunResult"}));
+        for count in [0, 1] {
+            let result = json!({"inline": [copy.clone()], "blockCount": count});
+            let field = spanning_field(Value::Null, result, json!([written.clone()]));
+            let output = serialize_complex_field(&field, &mut context()).unwrap();
+            assert!(output.contains("RunResult"), "{count}: {output}");
+            assert!(!output.contains("InlineCopy"), "{count}: {output}");
+        }
+    }
+
+    #[test]
+    fn a_field_whose_result_spans_paragraphs_holds_the_references_of_its_result_runs() {
+        let reference = |id: u32| run_value(json!({"type": "commentReference", "id": id}));
+        let result = json!({"inline": [reference(3)], "blockCount": 1});
+        let field = spanning_field(Value::Null, result, json!([reference(4)]));
+        let node = InlineNode::ComplexField(Box::new(field));
+        assert!(has_comment_reference(&node, 4.0));
+        assert!(!has_comment_reference(&node, 3.0));
     }
 }

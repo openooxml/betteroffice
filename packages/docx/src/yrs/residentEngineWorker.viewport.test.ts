@@ -11,6 +11,7 @@ import { ResidentSessionFonts } from './residentFontEnvironment';
 import { readPartGeometry } from './residentParts';
 import { readCellSelection } from './residentCommandTableSelection';
 import { readResidentCellSelectionRects } from './residentObjectGeometry';
+import { StagedEchoPages } from './residentStagedEcho';
 
 function commandFrames(options: { cell?: boolean; range?: boolean; splitEnd?: boolean; queryEngine?: RustDisplayListQueryEngine;
   pageCount?: number; noWindow?: boolean } = {}) {
@@ -126,6 +127,7 @@ function commandFrames(options: { cell?: boolean; range?: boolean; splitEnd?: bo
     source.slice(source.indexOf('      const input = JSON.parse(init.layoutInput);', environmentStart),
       source.indexOf('      if (!init.layoutWithRegions)', environmentStart)),
   )).bind(null, init);
+  const stagedEcho = new StagedEchoPages();
   const dependencies = { engine, fonts: new ResidentSessionFonts(engine), init, revision: 0,
     relayout() { state.layoutDirty = true; relaidBuild = true; },
     preparedFonts: new WeakMap(), registerCommandFonts, GlyphCache,
@@ -162,6 +164,7 @@ function commandFrames(options: { cell?: boolean; range?: boolean; splitEnd?: bo
       }
       return state.selectionQueries!.queries;
     },
+    residentDisplayListQueries: (): unknown => dependencies.queriesFor(),
     decodeFrameDelta: (bytes: Uint8Array) => deltas.get(bytes[0]!)!,
     applyWorkerFrame: () => { state.retainedFrame.frameEpoch = revision; return delta; },
     async finalizeResidentFrame(bytes: Uint8Array) {
@@ -178,6 +181,7 @@ function commandFrames(options: { cell?: boolean; range?: boolean; splitEnd?: bo
       value: { frameEpoch: input.layout.frame.frameEpoch,
         pages: input.pages.map((page) => ({ page, frameEpoch: input.layout.frame.frameEpoch })) }, transfer: [],
     }),
+    stagedEcho,
     buildCommandFrame(input: { coversThroughSeq: number; stagedPresentation: unknown; metadata: typeof delta }) {
       return { value: { revision, baseRevision: input.metadata.full ? undefined : input.metadata.baseFrameEpoch,
         coversThroughSeq: input.coversThroughSeq, payload: input }, transfer: [] };
@@ -193,7 +197,7 @@ function commandFrames(options: { cell?: boolean; range?: boolean; splitEnd?: bo
     const checked = await workerHooks.preflight(command, context);
     return checked.status === 'ready' ? workerHooks.apply(checked.prepared, context) : checked;
   };
-  return { state, init, built, released, windows, nativeBuilds, projections, engine, work, queueCommand,
+  return { state, init, built, released, windows, nativeBuilds, projections, engine, work, queueCommand, stagedEcho,
     setRetainedHeadersFooters(value: string) { retainedHeadersFooters = value; },
     get delta() { return delta; },
     preparePage(pageIndex: number) {
@@ -531,4 +535,23 @@ test('selection_preflight_page_builds_publish_incrementally_from_the_previous_fr
     { partStory: (id: string) => `header:${id}` } as Parameters<typeof readPartGeometry>[0],
     worker.state.retainedFrame as unknown as Parameters<typeof readPartGeometry>[1],
   ));
+});
+
+const heldEchoPages = (echo: StagedEchoPages) => [...(echo as unknown as { pages: Map<string, unknown> }).pages.keys()];
+
+test('staged echo bookkeeping keeps no entry for a page the worker released after a drag through the document', async () => {
+  const worker = commandFrames({ pageCount: 40 });
+  let mostHeld = 0;
+  for (let start = 3; start < 36; start += 3) {
+    await worker.viewport(start, start + 3);
+    await worker.command(start + 1, false);
+    mostHeld = Math.max(mostHeld, heldEchoPages(worker.stagedEcho).length);
+  }
+  await worker.viewport(0, 3);
+  await worker.command(1, false);
+  const released = new Set(worker.released.flat());
+  expect(released.size).toBeGreaterThan(20);
+  expect(mostHeld).toBeGreaterThan(0);
+  const held = heldEchoPages(worker.stagedEcho);
+  expect(held.filter((pageId) => worker.state.retainedFrame.pages[Number(pageId) - 1]?.page.unbuilt !== false)).toEqual([]);
 });

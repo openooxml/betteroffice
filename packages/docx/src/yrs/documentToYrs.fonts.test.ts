@@ -477,3 +477,31 @@ for (const path of ['native', 'typescript'] as const) {
     }
   }
 }
+
+test('a tracked paragraph mark leaves the layout font requirements alone', async () => {
+  const stamp = 'w:id="1" w:author="Ada" w:date="2026-01-01T00:00:00Z"';
+  const body = (mark: string) =>
+    `<w:p><w:pPr>${mark}</w:pPr><w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/></w:rPr><w:t>Latin</w:t></w:r></w:p>` +
+    `<w:p><w:pPr>${mark}</w:pPr><w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:eastAsia="MS Mincho" w:hint="eastAsia"/></w:rPr><w:t>日本語の文章</w:t></w:r></w:p>`;
+  const requirements = async (mark: string) => {
+    const bytes = fontPackage(undefined, '', '', body(mark));
+    const document = await parseDocx(bytes.buffer, { preloadFonts: false });
+    const session = await createYrsSession();
+    try {
+      session.seedFromDocx(bytes);
+      const request = buildResidentRegionLayoutRequest(document, 24, {});
+      const blocks = session.yrsBlocksForStory('body', request.renderEnv) as LayoutBlock[];
+      const marked = blocks.filter(block => block.kind === 'paragraph' && Boolean(block.attrs?.pPrIns || block.attrs?.pPrDel));
+      return { marked: marked.length, json: session.layoutFontRequirementsJson(JSON.stringify(request)) };
+    } finally {
+      session.destroy();
+    }
+  };
+  const plain = await requirements('');
+  expect(plain.marked).toBe(0);
+  for (const mark of [`<w:rPr><w:ins ${stamp}/></w:rPr>`, `<w:rPr><w:del ${stamp}/></w:rPr>`]) {
+    const tracked = await requirements(mark);
+    expect(tracked.marked).toBeGreaterThan(0);
+    expect(tracked.json).toBe(plain.json);
+  }
+});

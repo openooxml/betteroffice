@@ -428,3 +428,36 @@ def test_a_display_list_keeps_its_json_for_every_reader(
         display_list.write(target)
         assert target.read_bytes() == display_list.json.encode()
         assert display_list.json is text
+
+
+def _mark_kinds(display_list: DisplayList) -> "list[str]":
+    return [
+        primitive["kind"]
+        for page in display_list.to_dict()["pages"]
+        for primitive in page["primitives"]
+        if primitive["kind"] in ("text", "glyphRun")
+        and (primitive.get("structuralRevision") or {}).get("scope") == "pmark"
+    ]
+
+
+@pytest.mark.parametrize(("default_family", "expected"), [(None, "glyphRun"), ("Arial", "text")])
+def test_a_tracked_paragraph_mark_keeps_its_kind_once_its_page_is_rendered(
+    minimal_bytes: bytes,
+    layout_input: "dict[str, Any]",
+    default_family: "str | None",
+    expected: str,
+) -> None:
+    envelope = json.loads(json.dumps(layout_input))
+    revision = {"revisionId": 1, "author": "Ada", "date": "2026-01-01T00:00:00Z"}
+    envelope["measured"][0]["block"]["attrs"]["pPrIns"] = revision
+    if default_family is not None:
+        for measured in envelope["measured"]:
+            measured["block"]["attrs"]["defaultFontFamily"] = default_family
+            for run in measured["block"]["runs"]:
+                run["fontFamily"] = default_family
+    document = Document.open(minimal_bytes)
+    first = document.layout(envelope).display_list
+    document.render_display_list_png(first, 0)
+    second = document.layout(envelope).display_list
+
+    assert (_mark_kinds(first), _mark_kinds(second)) == ([expected], [expected])

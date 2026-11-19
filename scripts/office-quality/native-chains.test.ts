@@ -347,3 +347,91 @@ test('a rejected embedded font is counted and named per document, not failed', (
   expect(chains.rejectedEmbedded).toEqual([{ family: 'Brand Sans', reason: 'bad sfnt' }]);
   expect(serializeChains([], { fontChains: {} }).chains.rejectedEmbedded).toEqual([]);
 });
+
+async function failingChainsJob(root: string) {
+  const output = join(root, 'output');
+  const native = join(root, 'native');
+  const published = join(root, 'published');
+  const commit = join(root, 'commit');
+  const fonts = join(commit, 'node_modules', '@betteroffice', 'fonts');
+  const cjkFace = JSON.parse(await readFile(join(repo, 'packages/fonts-cjk/assets/manifest.json'), 'utf8')).faces[0].file;
+  const plan = new TextEncoder().encode('{}');
+  for (const path of [join(output, 'doc-17'), join(native, 'published'), published, fonts]) await mkdir(path, { recursive: true });
+  await writeFile(join(root, 'plan.json'), plan);
+  await writeFile(join(output, 'job.json'), JSON.stringify({ plan_sha256: hash(plan), published_version: '0.5.1', samples: [{ id: 'doc-17' }] }));
+  await writeFile(join(output, 'doc-17', 'source.docx'), 'docx');
+  await writeFile(join(native, 'published', 'build.json'), JSON.stringify({ package_version: '0.5.1' }));
+  await writeFile(join(published, 'package.json'), JSON.stringify({ name: '@betteroffice/docx', version: '0.5.1' }));
+  await writeFile(join(commit, 'package.json'), JSON.stringify({ name: '@betteroffice/docx', version: '0.6.0',
+    exports: Object.fromEntries(['yrs', 'layout', 'utils', 'editor'].map((name) => [`./${name}`, './product.mjs'])) }));
+  await writeFile(join(commit, 'product.mjs'), [
+    "const requirements = JSON.stringify([{ key: 'x', family: 'Font Name X', bold: false, italic: false }]);",
+    'export const createYrsSession = async () => ({ openDocx: () => ({ document: {} }), materializeDocx: () => null,',
+    '  layoutFontRequirementsJson: () => requirements, registerFont: () => 0, clearFonts: () => {}, destroy: () => {} });',
+    'export const createRustMeasureSource = () => ({ setCompat: () => {}, setEmbeddedFaces: () => {} });',
+    'export const resolveCompleteFontProvider = async () => undefined;',
+    'export const extractEmbeddedFontFaces = async () => [];',
+    'export const buildResidentRegionLayoutRequest = () => ({});',
+    'export const documentRenderEnv = () => ({});',
+  ].join('\n'));
+  await writeFile(join(fonts, 'package.json'), JSON.stringify({
+    name: '@betteroffice/fonts', version: '0.4.2', main: 'index.mjs', peerDependencies: { '@betteroffice/fonts-cjk': '^0' },
+  }));
+  await writeFile(join(fonts, 'index.mjs'), `export const resolveBundledFamilyFace = () => ({ file: ${JSON.stringify(cjkFace)} });\nexport const resolveScriptFallbackFace = () => undefined;\n`);
+  return (summary: string, extra: Record<string, string>) => spawnSync(process.execPath, [join(import.meta.dir, 'native-chains.ts')], {
+    encoding: 'utf8',
+    env: { ...process.env, QUALITY_PRIVATE: '', ...extra, GITHUB_STEP_SUMMARY: summary, QUALITY_OUTPUT: output, QUALITY_CHAINS: join(root, 'chains'),
+      QUALITY_PLAN: join(root, 'plan.json'), QUALITY_NATIVE: native, QUALITY_PRODUCT_PUBLISHED: published, QUALITY_PRODUCT_COMMIT: commit },
+  });
+}
+
+test('a private run puts only counts in the job summary and names no document in its error', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'native-chains-summary-'));
+  try {
+    const run = await failingChainsJob(root);
+    const privateSummary = join(root, 'private.md');
+    const privateRun = run(privateSummary, { QUALITY_PRIVATE: 'true' });
+    expect(privateRun.status).not.toBe(0);
+    expect(privateRun.stdout).toContain('commit doc-17: Font Name X');
+    const summary = await readFile(privateSummary, 'utf8');
+    expect(summary).toContain('\n- 1 documents failed\n');
+    for (const leak of ['doc-17', 'Font Name X', 'needs @betteroffice']) {
+      expect(summary.includes(leak) && leak).toBe(false);
+      expect(privateRun.stderr.includes(leak) && leak).toBe(false);
+    }
+    const publicSummary = join(root, 'public.md');
+    const publicRun = run(publicSummary, {});
+    expect(publicRun.status).not.toBe(0);
+    expect(publicRun.stderr).toContain('commit doc-17: Font Name X');
+    expect(await readFile(publicSummary, 'utf8')).toContain('\n- FAILED commit doc-17: Font Name X');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}, 60_000);
+
+test('a private run names a failed add-on in the job summary by its name only and keeps its error in the step log', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'native-chains-addon-'));
+  try {
+    const run = await failingChainsJob(root);
+    const latin = join(root, 'commit', 'node_modules', '@betteroffice', 'fonts-latin');
+    await mkdir(join(latin, 'assets'), { recursive: true });
+    await writeFile(join(latin, 'package.json'), JSON.stringify({ name: '@betteroffice/fonts-latin', version: '1.0.0', main: 'index.mjs' }));
+    await writeFile(join(latin, 'assets', 'manifest.json'), JSON.stringify({ faces: [] }));
+    await writeFile(join(latin, 'index.mjs'), "throw new Error('host-a could not read /tmp/x/runner/addon.js');\n");
+    const privateSummary = join(root, 'private.md');
+    const privateRun = run(privateSummary, { QUALITY_PRIVATE: 'true' });
+    expect(privateRun.status).not.toBe(0);
+    expect(privateRun.stdout).toContain('host-a could not read /tmp/x/runner/addon.js');
+    const summary = await readFile(privateSummary, 'utf8');
+    expect(summary).toContain('fonts-latin failed');
+    for (const leak of ['/tmp/x/runner/addon.js', 'host-a', 'could not read', 'failed to load']) {
+      expect(summary.includes(leak) && leak).toBe(false);
+      expect(privateRun.stderr.includes(leak) && leak).toBe(false);
+    }
+    const publicSummary = join(root, 'public.md');
+    expect(run(publicSummary, {}).status).not.toBe(0);
+    expect(await readFile(publicSummary, 'utf8')).toContain('fonts-latin 1.0.0 (failed: @betteroffice/fonts-latin@1.0.0 failed to load: host-a could not read /tmp/x/runner/addon.js)');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}, 60_000);
