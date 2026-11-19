@@ -379,12 +379,22 @@ export class EditSession {
      */
     drain_update_event(): Uint8Array;
     /**
+     * The faces of each character of `alphabet` typed into the laid-out text run
+     * at display position `position`: `{"faces":[[display,measured,metrics],…],
+     * "latin","eastAsia"}`, each face null where that path would not take the
+     * character as plain text; undefined before a region pass or off any text run.
+     */
+    echo_faces_json(position: number, alphabet: string, line_start: number, line_end: number): string | undefined;
+    /**
      * Typing echo model of one font at one shaping size from this session's
      * resident font store: `{"horizontal","glyphIds","advances","kerning",
      * "unsafePairs"}`, indexed by the characters of `alphabet`. `kern` is the
-     * run's kerning gate. Errors for an unknown font or a non-positive size.
+     * run's kerning gate and `language` its BCP-47 shaping language (absent for
+     * none). With `known`, the pairs are only those with a character from
+     * `known` on, for a caller that holds the pairs of the first `known`.
+     * Errors for an unknown font or a non-positive size.
      */
-    echo_glyph_set_json(font_id: number, size: number, kern: boolean, alphabet: string): string;
+    echo_glyph_set_json(font_id: number, size: number, kern: boolean, alphabet: string, language?: string | null, known?: number | null): string;
     /**
      * A plain local text edit that the resident lowering records, so the next
      * [`Self::layout_document_with_regions_after_edit`] re-lowers and
@@ -1898,7 +1908,8 @@ export interface InitOutput {
     readonly editsession_display_vertical_move_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_document_properties_json: (a: number) => [number, number];
     readonly editsession_drain_update_event: (a: number) => [number, number];
-    readonly editsession_echo_glyph_set_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
+    readonly editsession_echo_faces_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number];
+    readonly editsession_echo_glyph_set_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly editsession_edit_text_resident: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number, number, number];
     readonly editsession_encode_diff: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_encode_diff_chunks: (a: number, b: number, c: number, d: number) => [number, number, number];
