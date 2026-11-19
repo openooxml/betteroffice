@@ -498,9 +498,17 @@ mod tests {
                 matches!(&segment.content, crate::SegmentContent::OtherEmbed { payload, .. }
                 if payload.get("fieldData").is_some_and(|data| {
                     matches!(data, yrs::Any::String(data)
-                        if data.contains("Entry 2") && data.contains("Entry 3"))
+                        if data.contains("\"blockCount\"") && !data.contains("Entry 2"))
                 }))
             }));
+            let text: String = segments
+                .iter()
+                .filter_map(|segment| match &segment.content {
+                    crate::SegmentContent::Text(text) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert!(text.contains("Entry 2") && text.contains("Entry 3"));
             let txn = doc.yrs_doc().transact();
             let story = crate::story_ref(&txn, story_id).unwrap();
             let chunks = story.diff(&txn, YChange::identity);
