@@ -59,6 +59,7 @@ export * from './inputPositionMap';
 export { subscribeYrsSelection, withYrsSelectionCause, yrsSelectionCause } from './selectionChanges';
 export * from './storyPlainText';
 export { tableBoundaryDeleteTarget } from './tableBoundaryDelete';
+export { applyListToggle, LIST_OFF_ATTRS } from './listCommands';
 export { isCellHasNoStoryRefusal } from './cellRefusal';
 export * from './clipboardFragment';
 export * from './stories';
@@ -1389,6 +1390,8 @@ export interface YrsSession extends CollaborationReplica {
         levelTexts: string[];
         levelFormats: string[];
     }>;
+    /** The keys of the created list definitions some paragraph is on. @internal */
+    listDefinitionKeysInUse(): string[];
     /** Resolves a text target and formats it in one call. @internal */
     formatTextTarget(target: DocxTextTarget, delta: YrsInlineFormatDelta): YrsTargetEditResult;
     /** Resolves a text target and anchors side-map comment `id` over it in one call. @internal */

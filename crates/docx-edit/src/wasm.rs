@@ -1368,6 +1368,11 @@ impl EditSession {
         self.core.created_list_definitions_json()
     }
 
+    /// The keys of the created list definitions some paragraph is on, as JSON.
+    pub fn list_definition_keys_in_use_json(&self) -> String {
+        self.core.list_definition_keys_in_use_json()
+    }
+
     pub fn list_sections_json(&self) -> Result<String, JsValue> {
         self.core.list_sections_json().map_err(JsValue::from)
     }

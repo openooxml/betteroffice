@@ -1,8 +1,8 @@
 //! List definitions the editor creates, beside the numbering definitions of the source package.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use yrs::{Any, Map, MapRef, Out, ReadTxn, Transact};
+use yrs::{Any, Map, MapRef, Out, ReadTxn, TextRef, Transact};
 
 use crate::bridge::{any_bool, map_number};
 use crate::list_marker::{LEVELS, ListState, numbering_level};
@@ -342,6 +342,26 @@ impl EditingDoc {
     pub fn created_list_definitions(&self) -> Vec<CreatedListDefinition> {
         created_definitions(&self.yrs_doc().transact())
             .into_values()
+            .collect()
+    }
+
+    /// The keys of the created definitions some paragraph of a live story is on.
+    pub fn list_definition_keys_in_use(&self) -> BTreeSet<String> {
+        let txn = self.yrs_doc().transact();
+        let definitions = created_definitions(&txn);
+        let Some(stories) = txn.get_map(crate::STORIES) else {
+            return BTreeSet::new();
+        };
+        crate::live_stories(&stories, &txn)
+            .filter_map(|(_, story)| story.cast::<TextRef>().ok())
+            .flat_map(|story| crate::pilcrows(&story, &txn))
+            .filter_map(|(_, pilcrow)| {
+                let values = pilcrow_values(&pilcrow, &txn);
+                let ListIdentity::Created { key, .. } = resolve_list_identity(&values)? else {
+                    return None;
+                };
+                definitions.contains_key(&key).then_some(key)
+            })
             .collect()
     }
 

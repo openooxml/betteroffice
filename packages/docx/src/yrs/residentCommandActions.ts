@@ -4,6 +4,7 @@ import { isTableUnavailableRefusal } from './tableUnavailable';
 import { isCellHasNoStoryRefusal } from './cellRefusal';
 import { createProposalRegistry } from './proposals';
 import { applyReviewCommand, grantedHostProposal, preflightReviewCommand, reviewCommandKeys, type ReviewCommand } from './residentReviewCommands';
+import { applyListToggle } from './listCommands';
 import { planResidentListChanges } from './residentCommandLists';
 import { breakRefusedWhileSuggesting, leadingBlockCount } from './sectionBreak';
 import { tableBoundaryDeleteTarget } from './tableBoundaryDelete';
@@ -164,9 +165,13 @@ function validMark(value: unknown): value is YrsRunMark {
     ['fontFamily', 'fontSize', 'color'].includes(String(value.type)) && value.value !== undefined;
 }
 
+const validListDef = nullable((entry) => fields(entry, { key: string, numId: number }) && object(entry) &&
+  string(entry.key) && number(entry.numId));
+
 function validParagraphAttrs(value: unknown): boolean {
   if (!object(value) || !json(value) || Object.keys(value).some((key) => IDENTITY_KEYS.has(key))) return false;
   const validators: Record<string, (value: unknown) => boolean> = {
+    listDef: validListDef,
     alignment: nullable(oneOf('left', 'center', 'right', 'both', 'distribute', 'mediumKashida', 'highKashida', 'lowKashida', 'thaiDistribute')),
     lineSpacingRule: nullable(oneOf('auto', 'exact', 'atLeast')),
     hangingIndent: nullable(boolean),
@@ -180,7 +185,8 @@ function validParagraphAttrs(value: unknown): boolean {
     listMarkerColor: nullable((entry) => object(entry) && json(entry)),
     listMarkerSuffix: nullable(oneOf('tab', 'space', 'nothing')),
     listLevelNumFmts: nullable((entry) => Array.isArray(entry) && entry.every(string)),
-    other: (entry) => object(entry) && json(entry) && Object.keys(entry).every((key) => !IDENTITY_KEYS.has(key)),
+    other: (entry) => object(entry) && json(entry) && Object.keys(entry).every((key) => !IDENTITY_KEYS.has(key)) &&
+      (!Object.hasOwn(entry, 'listDef') || validListDef(entry.listDef)),
   };
   for (const key of ['lineSpacing', 'spaceBefore', 'spaceAfter', 'indentLeft', 'indentRight', 'indentFirstLine',
     'listMarkerFontSize', 'listAbstractNumId', 'listStartOverride']) validators[key] = nullable(number);
@@ -766,7 +772,7 @@ export function preflightDocxCommand(
   }
   if (command.kind === 'toggleList' || command.kind === 'changeIndent') return { status: 'ready', prepared: {
     command: structuredClone(command), selection: resolved.selection, range: resolved.range,
-    paragraphChanges: planResidentListChanges(engine, resolved.range, command.payload),
+    ...(command.kind === 'changeIndent' ? { paragraphChanges: planResidentListChanges(engine, resolved.range, command.payload) } : {}),
   } };
   let range = resolved.range;
   if ((command.kind === 'insertText' || command.kind === 'replaceSelection' || command.kind === 'lineBreak') && state.storedMarks &&
@@ -1310,7 +1316,10 @@ function applyPreparedDocxCommand(
       caret(second);
       break;
     }
-    case 'toggleList': case 'changeIndent':
+    case 'toggleList':
+      applyListToggle(engine, range, command.payload.kind, command.payload.suggesting);
+      break;
+    case 'changeIndent':
       for (const change of prepared.paragraphChanges ?? []) engine.setParagraphAttrs(change.range, change.attrs, command.payload.suggesting);
       break;
     case 'insertImage': case 'insertTable': case 'insertPageBreak': case 'insertSectionBreak': {

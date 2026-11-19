@@ -671,6 +671,10 @@ export class EditSession {
      */
     list_content_controls_json(options: string): string;
     /**
+     * The keys of the created list definitions some paragraph is on, as JSON.
+     */
+    list_definition_keys_in_use_json(): string;
+    /**
      * Every pending tracked change across all stories, in deterministic
      * story-then-position order:
      * `[{"revisionId","author","date","kind","story","preview",
@@ -1954,6 +1958,7 @@ export interface InitOutput {
     readonly editsession_layout_font_requirements_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_list_comments: (a: number) => [number, number, number, number];
     readonly editsession_list_content_controls_json: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_list_definition_keys_in_use_json: (a: number) => [number, number];
     readonly editsession_list_revisions: (a: number) => [number, number, number, number];
     readonly editsession_list_sections_json: (a: number) => [number, number, number, number];
     readonly editsession_list_stories_json: (a: number) => [number, number, number, number];
