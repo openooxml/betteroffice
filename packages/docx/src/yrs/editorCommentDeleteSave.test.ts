@@ -706,16 +706,15 @@ for (const [route, save] of Object.entries(ROUTES)) {
       expect(saved.full).toBe(false);
     }, TIMEOUT);
 
-    test('deleting a comment whose range spans two paragraphs rewrites only those two', async () => {
+    test('deleting a comment whose range spans two paragraphs writes every paragraph again, as before', async () => {
       const content =
         para(1, `${run('Lead ')}<w:commentRangeStart w:id="1"/>${run('first half')}`) +
         para(2, `${run('second half')}<w:commentRangeEnd w:id="1"/>${reference(1)}${run(' after')}`) +
         para(3, `${run('Plain ')}${commented(5, 'fifth note')}${run(' end')}`);
       const source = built([1, 5], true, false, content);
       const saved = await save(source, { remove: 1 });
-      expect(differing(source, saved.bytes)).toEqual([0, 1]);
-      expect([textAt(saved.bytes, 0), textAt(saved.bytes, 1)]).toEqual([textAt(source, 0), textAt(source, 1)]);
-      expect(untouchedFormatting(saved.bytes, [0, 1])).toEqual(untouchedFormatting(source, [0, 1]));
+      expect(differing(source, saved.bytes)).toEqual([0, 1, 2]);
+      expect([0, 1, 2].map((at) => textAt(saved.bytes, at))).toEqual([0, 1, 2].map((at) => textAt(source, at)));
       expect(changedParts(source, saved.bytes)).toEqual([]);
       expect(marks(saved.bytes, 1)).toEqual([]);
       expect(marks(saved.bytes, 5)).toEqual(marks(source, 5));
