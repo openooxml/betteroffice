@@ -15,6 +15,25 @@ use tiny_skia::{
 };
 
 use xlsx_render::{Align, DisplayList, DrawCmd, GeometryPathCommand, Rect as DlRect};
+
+#[cfg(test)]
+thread_local! {
+    static RUN_PATHS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static PIECE_MEASURES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many text commands have entered the run path on this thread, and how
+/// many piece widths that path has measured.
+#[cfg(test)]
+fn run_counts() -> (usize, usize) {
+    (RUN_PATHS.get(), PIECE_MEASURES.get())
+}
+
+#[cfg(test)]
+fn count(counter: &'static std::thread::LocalKey<std::cell::Cell<usize>>) {
+    counter.set(counter.get() + 1);
+}
+
 #[cfg(not(feature = "fonts"))]
 /// paint a display list and encode it as png bytes.
 pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
@@ -238,9 +257,13 @@ pub fn render_png_with_images(dl: &DisplayList, images: &ImageMap<'_>) -> Result
                 wrap,
                 runs: _,
             } => {
+                #[cfg(test)]
+                count(&RUN_PATHS);
                 if let Some(pieces) = xlsx_render::run_pieces(cmd) {
                     let lines = match wrap {
                         Some(wrap) => wrapped_lines(*y, wrap, text, &pieces, |piece, part| {
+                            #[cfg(test)]
+                            count(&PIECE_MEASURES);
                             font::measure_text(part, piece.font_size)
                         }),
                         None => vec![(*y, pieces)],
@@ -671,7 +694,11 @@ fn paint_pieces(
 ) -> Result<(), String> {
     let widths: Vec<f32> = pieces
         .iter()
-        .map(|piece| font::measure_text(&text[piece.range.clone()], piece.font_size))
+        .map(|piece| {
+            #[cfg(test)]
+            count(&PIECE_MEASURES);
+            font::measure_text(&text[piece.range.clone()], piece.font_size)
+        })
         .collect();
     let mut pen = aligned_left(x, align, widths.iter().sum());
     for (piece, width) in pieces.iter().zip(widths) {

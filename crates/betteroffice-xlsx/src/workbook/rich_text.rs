@@ -5,10 +5,17 @@ use xlsx_model::{CellRef, CellValue, RichRun, SheetId};
 
 use super::Workbook;
 
+#[cfg(test)]
+thread_local! {
+    static TEXT_RUN_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl Workbook {
     /// [`Self::cell_text_runs`] for painting: `None` while a deferred source
     /// package is unparsed, so building a display list never parses it.
     pub(crate) fn painted_text_runs(&self, sheet: SheetId, cell: CellRef) -> Option<&[RichRun]> {
+        #[cfg(test)]
+        TEXT_RUN_LOOKUPS.set(TEXT_RUN_LOOKUPS.get() + 1);
         self.source_package.as_ref()?.materialized()?;
         self.cell_text_runs(sheet, cell)
     }
@@ -144,6 +151,79 @@ impl Workbook {
             source_sheet,
             CellRef::new(axes.rows.source(cell.row)?, axes.cols.source(cell.col)?),
         ))
+    }
+}
+
+#[cfg(test)]
+mod paint_tests {
+    use super::{TEXT_RUN_LOOKUPS, Workbook};
+    use crate::workbook::edit_tests::workbook_bytes;
+    use crate::{CellRange, PrintMetrics, RenderOptions, SheetId, Viewport};
+
+    /// The test workbook with every shared string plain.
+    fn plain_bytes() -> Vec<u8> {
+        let mut parts = ooxml_opc::unzip_parts(&workbook_bytes()).unwrap();
+        let (_, strings) = parts
+            .iter_mut()
+            .find(|(path, _)| path == "xl/sharedStrings.xml")
+            .unwrap();
+        *strings = r#"<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="3" uniqueCount="3"><si><t>Alpha</t></si><si><t>Alpha rich</t></si><si><t>Beta</t></si></sst>"#.as_bytes().to_vec();
+        ooxml_opc::rezip_parts(&parts).unwrap()
+    }
+
+    fn lookups(build: impl FnOnce()) -> usize {
+        let before = TEXT_RUN_LOOKUPS.get();
+        build();
+        TEXT_RUN_LOOKUPS.get() - before
+    }
+
+    /// The runs lookups a screen frame, a PNG display list and a printed page
+    /// of the first sheet make.
+    fn frame_lookups(bytes: &[u8]) -> [usize; 3] {
+        let workbook = Workbook::open(bytes).unwrap();
+        let viewport = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 400.0,
+            height: 200.0,
+        };
+        let range = CellRange::parse_a1("A1:D5").unwrap();
+        let options = RenderOptions {
+            range: Some(range),
+            ..RenderOptions::default()
+        };
+        let metrics = PrintMetrics {
+            dpi: 96.0,
+            max_digit_width: 7.0,
+            default_row_height_pt: 15.0,
+            default_column_width: None,
+            font_size_pt: 11.0,
+            font_family: "Calibri".into(),
+            font_ascent: 10.0,
+            font_descent: 3.0,
+        };
+        [
+            lookups(|| {
+                workbook.display_list_for(SheetId(0), &viewport).unwrap();
+            }),
+            lookups(|| {
+                workbook
+                    .range_png_display_list_for(SheetId(0), &options)
+                    .unwrap();
+            }),
+            lookups(|| {
+                workbook
+                    .print_display_list(SheetId(0), range, &metrics, false)
+                    .unwrap();
+            }),
+        ]
+    }
+
+    #[test]
+    fn frames_of_a_workbook_without_rich_text_never_look_up_runs() {
+        assert_eq!(frame_lookups(&plain_bytes()), [0, 0, 0]);
+        let rich = frame_lookups(&workbook_bytes());
+        assert!(rich.iter().all(|&count| count > 0), "{rich:?}");
     }
 }
 

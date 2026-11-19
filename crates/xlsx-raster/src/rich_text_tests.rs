@@ -343,3 +343,45 @@ fn a_clip_narrower_than_the_runs_cuts_them_at_its_edge() {
     assert!(has_ink(&cut, 0..before, red));
     assert!(has_ink(&cut, (10.0 + ab).ceil() as u32..edge as u32, blue));
 }
+
+/// What painting `commands` adds on this thread to the commands entering the
+/// run path, the span breaker's entries and the piece widths measured.
+fn run_work(commands: Vec<DrawCmd>) -> (usize, u64, usize) {
+    let (paths, measures) = crate::run_counts();
+    let spans = xlsx_render::wrap::span_breaks();
+    png(commands);
+    let (paths_after, measures_after) = crate::run_counts();
+    let spans_after = xlsx_render::wrap::span_breaks();
+    (
+        paths_after - paths,
+        spans_after - spans,
+        measures_after - measures,
+    )
+}
+
+#[test]
+fn text_without_runs_never_enters_the_run_path_or_the_span_breaker() {
+    let cell = json!({ "x": 0.0, "y": 0.0, "w": WIDTH, "h": HEIGHT });
+    let wrap = json!({ "width": 20.0, "lineHeight": 16.0, "valign": "top" });
+    let plain = vec![
+        text(json!({})),
+        text(json!({ "text": "AB CDE FG", "wrap": wrap.clone() })),
+        text(json!({ "rotationDeg": 90.0, "rotationBox": cell.clone() })),
+        text(json!({ "stacked": true, "rotationBox": cell })),
+    ];
+    assert_eq!(run_work(plain), (0, 0, 0));
+    let wrapped = rich(json!({ "text": "AB CDE FG", "wrap": wrap }), &[RED_BOLD]);
+    let (paths, spans, _) = run_work(vec![wrapped]);
+    assert_eq!((paths, spans), (1, 1));
+}
+
+#[test]
+fn a_wrapped_command_measures_each_piece_once() {
+    let wrap = json!({ "width": 1000.0, "lineHeight": 16.0, "valign": "top" });
+    let blue_bold = r##"{"start":3,"end":5,"bold":true,"color":"#0000ff"}"##;
+    let painted = rich(
+        json!({ "text": "AB CD\nEF", "wrap": wrap }),
+        &[RED_BOLD, blue_bold],
+    );
+    assert_eq!(run_work(vec![painted]), (1, 1, 4));
+}

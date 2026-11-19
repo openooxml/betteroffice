@@ -8,6 +8,18 @@ use xlsx_model::styles::Alignment;
 
 use crate::display_list::{TextValign, TextWrap};
 
+#[cfg(any(test, feature = "test-counters"))]
+thread_local! {
+    static SPAN_BREAKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// How many times [`wrap_spans`] has been entered on this thread.
+#[cfg(any(test, feature = "test-counters"))]
+#[doc(hidden)]
+pub fn span_breaks() -> u64 {
+    SPAN_BREAKS.get()
+}
+
 /// whether an alignment wraps its text: wrapText without shrinkToFit, and
 /// neither rotated nor stacked.
 pub fn wraps(alignment: &Alignment) -> bool {
@@ -35,6 +47,8 @@ pub fn wrap_spans(
     width: f32,
     mut measure: impl FnMut(Range<usize>) -> f32,
 ) -> Vec<Range<usize>> {
+    #[cfg(any(test, feature = "test-counters"))]
+    SPAN_BREAKS.set(SPAN_BREAKS.get() + 1);
     let width = if width.is_nan() { f32::INFINITY } else { width };
     let body = text
         .strip_suffix('\n')
@@ -291,6 +305,16 @@ mod tests {
             assert_eq!(lines, case.lines, "{text:?} at {}", case.width);
             assert_eq!(lines, wrap_lines(text, case.width, graphemes));
         }
+    }
+
+    #[test]
+    fn lines_break_without_the_span_breaker() {
+        let before = span_breaks();
+        let lines = wrap_lines("ab cd\nef", 2.0, graphemes);
+        assert_eq!(lines, ["ab", "cd", "ef"]);
+        assert_eq!(span_breaks() - before, 0);
+        wrap_spans("ab cd", 2.0, |span| span.len() as f32);
+        assert_eq!(span_breaks() - before, 1);
     }
 
     const RICH_CASES: &str = include_str!("../tests/fixtures/rich-text-wrap-agreement.json");

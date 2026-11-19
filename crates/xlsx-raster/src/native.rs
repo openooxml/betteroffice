@@ -360,9 +360,13 @@ pub fn render_png_with_fonts_and_images(
                 wrap,
                 runs: _,
             } => {
+                #[cfg(test)]
+                count(&RUN_PATHS);
                 if let Some(pieces) = xlsx_render::run_pieces(cmd) {
                     let lines = match wrap {
                         Some(wrap) => wrapped_lines(*y, wrap, text, &pieces, |piece, part| {
+                            #[cfg(test)]
+                            count(&PIECE_MEASURES);
                             font::measure_text_with_fonts(
                                 piece_faces(fonts, piece),
                                 &fonts.stack,
@@ -475,6 +479,8 @@ fn paint_pieces(
         .iter()
         .zip(&faces)
         .map(|(piece, faces)| {
+            #[cfg(test)]
+            count(&PIECE_MEASURES);
             let text = &text[piece.range.clone()];
             font::measure_text_with_fonts(faces, &fonts.stack, text, piece.font_size)
         })
