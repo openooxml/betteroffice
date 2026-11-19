@@ -33,11 +33,35 @@ const NUMBERED_HEADING_STYLES: &str = concat!(
     r#"<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/>"#,
     r#"<w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr><w:outlineLvl w:val="0"/></w:pPr></w:style></w:styles>"#
 );
+/// List 1 a bullet list whose marker is hidden, in Symbol and followed by nothing; list 2 decimal.
+const MARKED_NUMBERING: &str = concat!(
+    r#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">"#,
+    r#"<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:suff w:val="nothing"/><w:lvlText w:val="o"/>"#,
+    r#"<w:rPr><w:rFonts w:ascii="Symbol" w:hAnsi="Symbol"/><w:vanish/></w:rPr></w:lvl></w:abstractNum>"#,
+    r#"<w:abstractNum w:abstractNumId="1"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl></w:abstractNum>"#,
+    r#"<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>"#,
+    r#"<w:num w:numId="2"><w:abstractNumId w:val="1"/></w:num></w:numbering>"#
+);
+/// The marker look attributes a paragraph's list gives it.
+const MARKER_LOOK: [&str; 7] = [
+    "listMarkerHidden",
+    "listMarkerBold",
+    "listMarkerItalic",
+    "listMarkerColor",
+    "listMarkerFontFamily",
+    "listMarkerFontSize",
+    "listMarkerSuffix",
+];
 const SHAPES: &str =
     include_str!("../../../packages/docx/src/yrs/__fixtures__/created-list-shapes.json");
 
 fn docx(paragraphs: &[(&str, Option<u32>)]) -> Vec<u8> {
-    let body: String = paragraphs
+    styled_docx(&body_of(paragraphs), None)
+}
+
+/// The body XML of `paragraphs`, each on the list its numId names at level 0, or on none.
+fn body_of(paragraphs: &[(&str, Option<u32>)]) -> String {
+    paragraphs
         .iter()
         .map(|(text, num_id)| {
             let properties = num_id.map_or_else(String::new, |num_id| {
@@ -47,12 +71,17 @@ fn docx(paragraphs: &[(&str, Option<u32>)]) -> Vec<u8> {
             });
             format!("<w:p>{properties}<w:r><w:t>{text}</w:t></w:r></w:p>")
         })
-        .collect();
-    styled_docx(&body, None)
+        .collect()
 }
 
 /// A package holding `body` and [`NUMBERING`], with the styles part `styles` when given.
 fn styled_docx(body: &str, styles: Option<&str>) -> Vec<u8> {
+    numbered_docx(body, styles, NUMBERING)
+}
+
+/// A package holding `body` and the numbering part `numbering`, with the styles part `styles`
+/// when given.
+fn numbered_docx(body: &str, styles: Option<&str>, numbering: &str) -> Vec<u8> {
     let mut parts = vec![
         (
             "[Content_Types].xml".to_owned(),
@@ -75,7 +104,7 @@ fn styled_docx(body: &str, styles: Option<&str>) -> Vec<u8> {
         ),
         (
             "word/numbering.xml".to_owned(),
-            NUMBERING.as_bytes().to_vec(),
+            numbering.as_bytes().to_vec(),
         ),
     ];
     if let Some(styles) = styles {
@@ -355,6 +384,61 @@ fn a_style_numbered_neighbour_is_not_joined_and_a_direct_one_is() {
     };
     assert_eq!(resolve_list_identity(&attrs(&doc, "Below")), Some(joined));
     assert_eq!(doc.created_list_definitions().len(), 1);
+}
+
+/// A document of `paragraphs` over [`MARKED_NUMBERING`], whose bullet paragraph `bullet` is checked
+/// to carry the marker look of list 1.
+fn marked(client: u64, paragraphs: &[(&str, Option<u32>)], bullet: &str) -> EditingDoc {
+    let doc = EditingDoc::new(client);
+    let bytes = numbered_docx(&body_of(paragraphs), None, MARKED_NUMBERING);
+    seed_from_docx(&doc, &bytes).unwrap();
+    let seeded = attrs(&doc, bullet);
+    let hidden = seeded.get("listMarkerHidden");
+    assert_eq!(hidden, Some(&Any::Bool(true)), "{seeded:?}");
+    let family = seeded.get("listMarkerFontFamily");
+    assert_eq!(family, Some(&Any::from("Symbol")), "{seeded:?}");
+    let suffix = seeded.get("listMarkerSuffix");
+    assert_eq!(suffix, Some(&Any::from("nothing")), "{seeded:?}");
+    doc
+}
+
+#[test]
+fn a_created_list_leaves_no_marker_look_of_the_list_the_paragraph_left() {
+    let doc = marked(
+        710,
+        &[("Lead", None), ("Bullet", Some(1)), ("Gap", None)],
+        "Bullet",
+    );
+    let ensured = create(&doc, "Bullet", ListKind::Numbered);
+    let written = attrs(&doc, "Bullet");
+    for key in MARKER_LOOK {
+        assert_eq!(ensured.get(key), Some(&Any::Null), "{key}");
+        let value = written.get(key);
+        assert!(matches!(value, None | Some(Any::Null)), "{key}: {value:?}");
+    }
+    assert!(created_key(&doc, "Bullet").is_some());
+    assert_eq!(markers(&doc)[1], Some("1.".to_owned()));
+}
+
+#[test]
+fn a_paragraph_joining_a_source_list_takes_its_marker_look() {
+    let doc = marked(
+        711,
+        &[("Plain", Some(2)), ("Bullet", Some(1)), ("Gap", None)],
+        "Bullet",
+    );
+    let plain = attrs(&doc, "Plain");
+    create(&doc, "Bullet", ListKind::Numbered);
+    let written = attrs(&doc, "Bullet");
+    let joined = ListIdentity::Source {
+        num_id: 2.0,
+        level: 0.0,
+    };
+    assert_eq!(resolve_list_identity(&written), Some(joined));
+    let shown = |value: Option<&Any>| value.filter(|value| **value != Any::Null).cloned();
+    for key in MARKER_LOOK {
+        assert_eq!(shown(written.get(key)), shown(plain.get(key)), "{key}");
+    }
 }
 
 #[test]
