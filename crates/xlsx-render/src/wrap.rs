@@ -34,14 +34,102 @@ pub fn wraps(alignment: &Alignment) -> bool {
 /// the text's last line keeps its trailing spaces, and a final line break
 /// opens no empty line (Excel centres "a\nb\n" as two lines).
 pub fn wrap_lines(text: &str, width: f32, mut measure: impl FnMut(&str) -> f32) -> Vec<&str> {
-    wrap_spans(text, width, |span| measure(&text[span]))
-        .into_iter()
-        .map(|span| &text[span])
-        .collect()
+    let width = if width.is_nan() { f32::INFINITY } else { width };
+    let text = text
+        .strip_suffix('\n')
+        .map_or(text, |rest| rest.strip_suffix('\r').unwrap_or(rest));
+    let mut lines = Vec::new();
+    let mut paragraphs = text.split('\n').peekable();
+    while let Some(paragraph) = paragraphs.next() {
+        let paragraph = paragraph.strip_suffix('\r').unwrap_or(paragraph);
+        let last = paragraphs.peek().is_none();
+        wrap_paragraph(paragraph, width, &mut measure, &mut lines);
+        if !last && let Some(line) = lines.last_mut() {
+            *line = line.trim_end_matches(' ');
+        }
+    }
+    lines
 }
 
-/// the byte spans of the lines [`wrap_lines`] breaks `text` into, with
-/// `measure` given the span of `text` to measure.
+fn wrap_paragraph<'a>(
+    text: &'a str,
+    width: f32,
+    measure: &mut impl FnMut(&str) -> f32,
+    lines: &mut Vec<&'a str>,
+) {
+    if measure(text) <= width {
+        lines.push(text);
+        return;
+    }
+    let mut start = 0;
+    let mut end = None;
+    for (word_start, word_end) in words(text) {
+        if let Some(line_end) = end {
+            if measure(&text[start..word_end]) <= width {
+                end = Some(word_end);
+                continue;
+            }
+            lines.push(&text[start..line_end]);
+            start = word_start;
+        }
+        end = Some(word_end);
+        if measure(&text[start..word_end]) <= width {
+            continue;
+        }
+        let ends: Vec<usize> = text[start..word_end]
+            .grapheme_indices(true)
+            .map(|(offset, grapheme)| start + offset + grapheme.len())
+            .collect();
+        let mut first = 0;
+        while let Some(fits) = last_fitting(text, start, &ends, first, width, measure) {
+            lines.push(&text[start..ends[fits]]);
+            start = ends[fits];
+            first = fits + 1;
+        }
+    }
+    lines.push(&text[start..]);
+}
+
+/// the last of the graphemes ending at `ends[first..]` that still fits on a
+/// line from `start`, or `None` when they all do; a line keeps at least one.
+/// A run only widens as it grows, so doubling then bisecting finds the break
+/// in logarithmically many measures.
+fn last_fitting(
+    text: &str,
+    start: usize,
+    ends: &[usize],
+    first: usize,
+    width: f32,
+    measure: &mut impl FnMut(&str) -> f32,
+) -> Option<usize> {
+    let mut fits = first;
+    let mut step = 1;
+    let mut over = loop {
+        let probe = (fits + step).min(ends.len() - 1);
+        if probe == fits {
+            return None;
+        }
+        if measure(&text[start..ends[probe]]) > width {
+            break probe;
+        }
+        fits = probe;
+        step *= 2;
+    };
+    while over - fits > 1 {
+        let mid = fits + (over - fits) / 2;
+        if measure(&text[start..ends[mid]]) > width {
+            over = mid;
+        } else {
+            fits = mid;
+        }
+    }
+    Some(fits)
+}
+
+/// the byte spans of the lines [`wrap_lines`] breaks `text` into, by the same
+/// rules, with `measure` given the span of `text` to measure: the breaker of
+/// text painted in runs, whose widths are sums over the runs a span reaches
+/// into.
 pub fn wrap_spans(
     text: &str,
     width: f32,
@@ -61,7 +149,7 @@ pub fn wrap_spans(
         at += paragraph.len() + 1;
         let end = start + paragraph.strip_suffix('\r').unwrap_or(paragraph).len();
         let last = paragraphs.peek().is_none();
-        wrap_paragraph(text, start..end, width, &mut measure, &mut lines);
+        wrap_span_paragraph(text, start..end, width, &mut measure, &mut lines);
         if !last && let Some(line) = lines.last_mut() {
             line.end = line.start + text[line.start..line.end].trim_end_matches(' ').len();
         }
@@ -69,7 +157,7 @@ pub fn wrap_spans(
     lines
 }
 
-fn wrap_paragraph(
+fn wrap_span_paragraph(
     text: &str,
     paragraph: Range<usize>,
     width: f32,
@@ -102,7 +190,7 @@ fn wrap_paragraph(
             .map(|(offset, grapheme)| start + offset + grapheme.len())
             .collect();
         let mut first = 0;
-        while let Some(fits) = last_fitting(start, &ends, first, width, measure) {
+        while let Some(fits) = last_fitting_span(start, &ends, first, width, measure) {
             lines.push(start..ends[fits]);
             start = ends[fits];
             first = fits + 1;
@@ -111,11 +199,8 @@ fn wrap_paragraph(
     lines.push(start..paragraph.end);
 }
 
-/// the last of the graphemes ending at `ends[first..]` that still fits on a
-/// line from `start`, or `None` when they all do; a line keeps at least one.
-/// A run only widens as it grows, so doubling then bisecting finds the break
-/// in logarithmically many measures.
-fn last_fitting(
+/// [`last_fitting`] with `measure` given the span to measure.
+fn last_fitting_span(
     start: usize,
     ends: &[usize],
     first: usize,

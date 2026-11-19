@@ -31,10 +31,95 @@ function graphemeEnds(text: string): number[] {
 }
 
 export function wrapLines(text: string, width: number, measure: (run: string) => number): string[] {
-  return wrapSpans(text, width, (start, end) => measure(text.slice(start, end))).map(([start, end]) => text.slice(start, end));
+  const limit = Number.isNaN(width) ? Number.POSITIVE_INFINITY : width;
+  const lines: string[] = [];
+  const body = text.endsWith('\n') ? text.slice(0, text.endsWith('\r\n') ? -2 : -1) : text;
+  const paragraphs = body.split('\n');
+  paragraphs.forEach((raw, index) => {
+    wrapParagraph(raw.endsWith('\r') ? raw.slice(0, -1) : raw, limit, measure, lines);
+    if (index < paragraphs.length - 1) lines[lines.length - 1] = lines[lines.length - 1].replace(/ +$/, '');
+  });
+  return lines;
 }
 
-/** The `[start, end)` spans of the lines `wrapLines` breaks `text` into, with `measure` given the span to measure. */
+function wrapParagraph(text: string, width: number, measure: (run: string) => number, lines: string[]): void {
+  if (measure(text) <= width) {
+    lines.push(text);
+    return;
+  }
+  let start = 0;
+  let end: number | null = null;
+  for (const [wordStart, wordEnd] of words(text)) {
+    if (end !== null) {
+      if (measure(text.slice(start, wordEnd)) <= width) {
+        end = wordEnd;
+        continue;
+      }
+      lines.push(text.slice(start, end));
+      start = wordStart;
+    }
+    end = wordEnd;
+    if (measure(text.slice(start, wordEnd)) <= width) continue;
+    const base = start;
+    const ends = graphemeEnds(text.slice(base, wordEnd)).map((offset) => base + offset);
+    let first = 0;
+    for (let fits = lastFitting(text, start, ends, first, width, measure); fits !== null; ) {
+      lines.push(text.slice(start, ends[fits]));
+      start = ends[fits];
+      first = fits + 1;
+      fits = lastFitting(text, start, ends, first, width, measure);
+    }
+  }
+  lines.push(text.slice(start));
+}
+
+/**
+ * The last of the graphemes ending at `ends[first..]` that still fits on a line
+ * from `start`, or `null` when they all do; a line keeps at least one. A run only
+ * widens as it grows, so doubling then bisecting finds the break in
+ * logarithmically many measures.
+ */
+function lastFitting(
+  text: string,
+  start: number,
+  ends: number[],
+  first: number,
+  width: number,
+  measure: (run: string) => number,
+): number | null {
+  let fits = first;
+  let over: number;
+  for (let step = 1; ; step *= 2) {
+    const probe = Math.min(fits + step, ends.length - 1);
+    if (probe === fits) return null;
+    if (measure(text.slice(start, ends[probe])) > width) {
+      over = probe;
+      break;
+    }
+    fits = probe;
+  }
+  while (over - fits > 1) {
+    const mid = fits + Math.floor((over - fits) / 2);
+    if (measure(text.slice(start, ends[mid])) > width) over = mid;
+    else fits = mid;
+  }
+  return fits;
+}
+
+function words(text: string): [number, number][] {
+  const spans: [number, number][] = [];
+  let at = 0;
+  for (const word of text.split(' ')) {
+    if (word.length > 0) spans.push([at, at + word.length]);
+    at += word.length + 1;
+  }
+  return spans;
+}
+
+/**
+ * The `[start, end)` spans of the lines `wrapLines` breaks `text` into, by the same rules, with `measure` given the
+ * span to measure: the breaker of text painted in runs, whose widths are sums over the runs a span reaches into.
+ */
 export function wrapSpans(text: string, width: number, measure: (start: number, end: number) => number): [number, number][] {
   const limit = Number.isNaN(width) ? Number.POSITIVE_INFINITY : width;
   const spans: [number, number][] = [];
@@ -44,14 +129,14 @@ export function wrapSpans(text: string, width: number, measure: (start: number, 
   paragraphs.forEach((raw, index) => {
     const start = at;
     at += raw.length + 1;
-    wrapParagraph(text, start, start + (raw.endsWith('\r') ? raw.length - 1 : raw.length), limit, measure, spans);
+    wrapSpanParagraph(text, start, start + (raw.endsWith('\r') ? raw.length - 1 : raw.length), limit, measure, spans);
     const last = spans[spans.length - 1]!;
     if (index < paragraphs.length - 1) last[1] = last[0] + text.slice(last[0], last[1]).replace(/ +$/, '').length;
   });
   return spans;
 }
 
-function wrapParagraph(
+function wrapSpanParagraph(
   text: string,
   from: number,
   to: number,
@@ -65,7 +150,8 @@ function wrapParagraph(
   }
   let start = from;
   let end: number | null = null;
-  for (const [wordStart, wordEnd] of words(text.slice(from, to), from)) {
+  const spanWords = words(text.slice(from, to)).map(([wordStart, wordEnd]): [number, number] => [from + wordStart, from + wordEnd]);
+  for (const [wordStart, wordEnd] of spanWords) {
     if (end !== null) {
       if (measure(start, wordEnd) <= width) {
         end = wordEnd;
@@ -79,23 +165,18 @@ function wrapParagraph(
     const base = start;
     const ends = graphemeEnds(text.slice(base, wordEnd)).map((offset) => base + offset);
     let first = 0;
-    for (let fits = lastFitting(start, ends, first, width, measure); fits !== null; ) {
+    for (let fits = lastFittingSpan(start, ends, first, width, measure); fits !== null; ) {
       spans.push([start, ends[fits]!]);
       start = ends[fits]!;
       first = fits + 1;
-      fits = lastFitting(start, ends, first, width, measure);
+      fits = lastFittingSpan(start, ends, first, width, measure);
     }
   }
   spans.push([start, to]);
 }
 
-/**
- * The last of the graphemes ending at `ends[first..]` that still fits on a line
- * from `start`, or `null` when they all do; a line keeps at least one. A run only
- * widens as it grows, so doubling then bisecting finds the break in
- * logarithmically many measures.
- */
-function lastFitting(
+/** `lastFitting` with `measure` given the span to measure. */
+function lastFittingSpan(
   start: number,
   ends: number[],
   first: number,
@@ -119,16 +200,6 @@ function lastFitting(
     else fits = mid;
   }
   return fits;
-}
-
-function words(text: string, offset: number): [number, number][] {
-  const spans: [number, number][] = [];
-  let at = offset;
-  for (const word of text.split(' ')) {
-    if (word.length > 0) spans.push([at, at + word.length]);
-    at += word.length + 1;
-  }
-  return spans;
 }
 
 /** baseline of line `index` of `count`, from the single-line baseline `y`. */
