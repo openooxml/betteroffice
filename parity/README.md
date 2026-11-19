@@ -29,7 +29,7 @@ The read projections compare these fields, with absent values as `null`:
 - `cellMerges`: per table, `rows` of cells, each with `gridSpan` and `vMerge`.
 - `sections`: `id`, `pageWidth`, `pageHeight`, `orientation`, the four margins, `paragraphs` and `text`; `headers` and `footers`: `relId`, `kind`, `paragraphs` and `text`.
 - `structure`: body paragraph and table counts and the section, header, footer, footnote and endnote counts.
-- `readEdited`: the edited paragraph's text and the body story's text, read without a save; the story leaves out table cells.
+- `readEdited`: the edited paragraph's text and the body story's text, read without a save; the story leaves out table cells. The editing session's own paragraph read is the accepted view (fields as an object character, tracked insertions included, a block content control's paragraph left out) and is not what this step compares.
 - `save` and `saveReport`: the parts record above; `saveReport` adds `keptUnchanged` and `structureDropped` of the same save.
 
 The Python binding exposes no run highlight or cell merge properties, so those steps list `"targets": ["ts", "rust"]` and Python skips them.

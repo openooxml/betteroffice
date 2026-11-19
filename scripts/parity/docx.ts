@@ -108,6 +108,14 @@ function collectParagraphs(blocks: BlockContent[], output: Paragraph[] = []): Pa
   return output;
 }
 
+function storyParagraphs(blocks: BlockContent[], output: Paragraph[] = []): Paragraph[] {
+  for (const block of blocks) {
+    if (block.type === 'paragraph') output.push(block);
+    else if (block.type === 'blockSdt') storyParagraphs(block.content, output);
+  }
+  return output;
+}
+
 function collectTables(blocks: BlockContent[], output: Table[] = []): Table[] {
   for (const block of blocks) {
     if (block.type === 'table') {
@@ -387,9 +395,15 @@ export const docx: Format = {
           );
           const key = identity?.session?.paraId;
           const paragraph = story.paragraphs.find((entry) => entry.paraId === key);
+          const { bytes: edits } = await saveYrsDocx(editing, { updateModifiedDate: false });
+          const model = await parse(edits);
           return {
             paragraph: paragraph?.text ?? null,
-            story: joinText(story.paragraphs.map(({ text }) => text))
+            story: joinText(
+              storyParagraphs(model.package.document.content).map(
+                (entry) => paragraphResult(entry).text
+              )
+            )
           };
         },
         save: async () => (await save()).bytes,
