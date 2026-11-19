@@ -1961,8 +1961,11 @@ impl EditingDoc {
             })
             .collect();
         resolved.sort_by(|left, right| {
-            (&left.story, left.offset, left.ordinal)
-                .cmp(&(&right.story, right.offset, right.ordinal))
+            (&left.story, left.offset, left.ordinal).cmp(&(
+                &right.story,
+                right.offset,
+                right.ordinal,
+            ))
         });
         resolved
     }

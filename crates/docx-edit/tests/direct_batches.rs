@@ -1412,11 +1412,22 @@ fn kept_empty_inline_elements_follow_direct_edits_and_keep_their_source_order() 
     };
     assert_eq!(raw_marks(&doc), marks([(0, start), (4, end), (9, sub_doc)]));
     doc.set_direct_batches(true);
-    apply(&doc, &UndoSession::new(), vec![insert(range("00000001", 0, 0), "X")]);
+    apply(
+        &doc,
+        &UndoSession::new(),
+        vec![insert(range("00000001", 0, 0), "X")],
+    );
     assert_eq!(doc.direct_batches_applied(), 1);
     assert_eq!(first_text(&doc), "XHead tail more");
-    assert_eq!(raw_marks(&doc), marks([(1, start), (5, end), (10, sub_doc)]));
-    apply(&doc, &UndoSession::new(), vec![delete(range("00000001", 1, 5))]);
+    assert_eq!(
+        raw_marks(&doc),
+        marks([(1, start), (5, end), (10, sub_doc)])
+    );
+    apply(
+        &doc,
+        &UndoSession::new(),
+        vec![delete(range("00000001", 1, 5))],
+    );
     assert_eq!(doc.direct_batches_applied(), 2);
     assert_eq!(first_text(&doc), "X tail more");
     assert_eq!(raw_marks(&doc), marks([(1, start), (1, end), (6, sub_doc)]));
@@ -1447,9 +1458,17 @@ fn an_unknown_inline_element_holding_runs_seeds_as_one_embed_that_moves_with_edi
     };
     assert_eq!(embedded(&doc), [(5, wrapper.clone())]);
     assert_eq!(first_text(&doc), "Head  tail");
-    apply(&doc, &UndoSession::new(), vec![insert(range("00000001", 0, 0), "X")]);
+    apply(
+        &doc,
+        &UndoSession::new(),
+        vec![insert(range("00000001", 0, 0), "X")],
+    );
     assert_eq!(embedded(&doc), [(6, wrapper.clone())]);
-    apply(&doc, &UndoSession::new(), vec![delete(range("00000001", 1, 4))]);
+    apply(
+        &doc,
+        &UndoSession::new(),
+        vec![delete(range("00000001", 1, 4))],
+    );
     assert_eq!(embedded(&doc), [(3, wrapper)]);
     assert_eq!(first_text(&doc), "Xd  tail");
 }

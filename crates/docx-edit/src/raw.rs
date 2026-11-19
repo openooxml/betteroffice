@@ -790,7 +790,11 @@ fn apply_raw_op_absolute(
             let marks = txn
                 .get_map(RAW_INLINES)
                 .expect("raw inlines root is declared by EditingDoc::new");
-            marks.insert(txn, id.as_str(), raw_mark_value(story_id, &anchor, ordinal, &xml));
+            marks.insert(
+                txn,
+                id.as_str(),
+                raw_mark_value(story_id, &anchor, ordinal, &xml),
+            );
         }
     }
     Ok(())
