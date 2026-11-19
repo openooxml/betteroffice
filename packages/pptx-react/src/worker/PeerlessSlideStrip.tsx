@@ -18,12 +18,12 @@ import { peerlessPainterFactories, type PeerlessPresentation } from './usePeerle
 
 const SLIDE_PREVIEW_SETTLE_MS = 400;
 
-function activateSlide(run: PeerlessPresentation, id: string, onNavigate: () => void) {
+function activateSlide(run: PeerlessPresentation, id: string, onNavigate?: () => void) {
   const presented = run.store.getSnapshot().confirmed?.frame.slideId !== id &&
     run.presentPrerendered?.(id) === true;
   const activation = activatePeerlessSlide(run, id).catch(() => {});
   if (presented) void activation.then(() => run.settlePrerendered?.(id));
-  onNavigate();
+  onNavigate?.();
 }
 
 function afterNextPaint(callback: () => void): () => void {
@@ -165,7 +165,7 @@ const Slide = memo(function Slide({ id, name, index, total, active, disabled, fr
       const target = event.currentTarget.parentElement?.children.item(next);
       if (target?.getAttribute('data-slide-id') !== targetSlide.id) return;
       (target as HTMLElement).focus();
-      activateSlide(run, targetSlide.id, onNavigate);
+      activateSlide(run, targetSlide.id);
     }}
     onClick={() => activateSlide(run, id, onNavigate)}>
     <span style={styles.number}>{index + 1}</span>

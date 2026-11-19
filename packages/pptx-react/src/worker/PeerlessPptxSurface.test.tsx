@@ -3033,7 +3033,7 @@ describe('peerless stage fit', () => {
       .map((entry) => entry.args[0]).filter((source): source is HTMLCanvasElement => source instanceof HTMLCanvasElement);
   }
 
-  function stripRun() {
+  function stripRun(onNavigate = () => {}) {
     const client = new FakeCommandClient();
     client.state.slides.push({ id: 'other', index: 1, name: null, layoutPartPath: null });
     const store = createPeerlessViewStore(client, { paintFrame() {}, paintEcho() {}, restoreLine() {} });
@@ -3042,7 +3042,7 @@ describe('peerless stage fit', () => {
     const run = { client, store, images, current: true, failure: undefined,
       fileGeneration: {}, session: {} } as unknown as PeerlessPresentation;
     const strip = (value = run) => <PeerlessSlideStrip run={value} commands={UNAVAILABLE_PPTX_COMMANDS}
-      previewFit={() => ({ scale: 0.25, dpr: 2, generation: 1 })} current={() => true} onNavigate={() => {}} />;
+      previewFit={() => ({ scale: 0.25, dpr: 2, generation: 1 })} current={() => true} onNavigate={onNavigate} />;
     return { run, client, strip, store, dispose() { store.dispose(); images.dispose(); },
       confirm(slideId: string, slideRevision: number) {
         const seq = client.state.throughSeq + 1;
@@ -3056,7 +3056,10 @@ describe('peerless stage fit', () => {
   }
 
   test('strip_arrow_keys_focus_and_activate_adjacent_slides', async () => {
-    const value = stripRun();
+    const stage = document.createElement('button');
+    document.body.appendChild(stage);
+    const navigate = mock(() => stage.focus());
+    const value = stripRun(navigate);
     const view = render(value.strip());
     try {
       await flushStage();
@@ -3077,7 +3080,11 @@ describe('peerless stage fit', () => {
       expect(value.client.sent[value.client.sent.length - 1]).toMatchObject({
         kind: 'activateSlide', payload: { slideId: 'slide' },
       });
-    } finally { view.unmount(); value.dispose(); }
+      expect(navigate).not.toHaveBeenCalled();
+      fireEvent.click(buttons[0]!);
+      expect(navigate).toHaveBeenCalledTimes(1);
+      expect(document.activeElement).toBe(stage);
+    } finally { view.unmount(); value.dispose(); stage.remove(); }
   });
 
   test('strip_paints_only_the_latest_active_revision_after_idle', async () => {
