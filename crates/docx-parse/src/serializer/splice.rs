@@ -1125,7 +1125,7 @@ fn unique_ranges<'x>(source: &str, fragments: impl IntoIterator<Item = &'x str>)
         }
         values
     }
-    let held = ranges(source).map_or_else(Ends::new, |ranges| by_value(ranges.all));
+    let held = by_value(ranges(source).map_or_else(Ends::new, |ranges| ranges.all));
     let mut ends = Ends::new();
     for fragment in fragments {
         for (end, count) in by_value(ranges(fragment)?.all) {
