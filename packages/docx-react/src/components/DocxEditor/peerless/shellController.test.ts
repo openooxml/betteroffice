@@ -344,6 +344,69 @@ test('onReady receives the ref once, after the first page paints', () => {
   expect(onReady).toHaveBeenCalledTimes(1);
 });
 
+function paintFirstPage(viewStore: ReturnType<typeof fixture>['viewStore'], frameEpoch: number) {
+  viewStore.installFrameGeometry({ identity: viewStore.getSnapshot().identity, coversThroughSeq: 0,
+    frameEpoch, layoutRevision: frameEpoch, pages: [{ page: { pageId: '1', pageIndex: 0 },
+      bounds: { x: 0, y: 0, width: 600, height: 800 }, transform: [1, 0, 0, 1, 0, 0] }], caret: null, selectionRects: [] });
+}
+
+test('onReady skips the preview paint and fires once the opened document paints, when its reads resolve', async () => {
+  const { controller, binding, viewStore, read } = fixture(-1);
+  const order: string[] = [];
+  let identities!: Promise<unknown>;
+  const onReady = mock((api: typeof controller.ref) => { order.push('ready'); identities = api.getParagraphIdentities(); });
+  controller.update({ read: read as never, focus() {}, zoom: 1, onReady,
+    onFirstPagePainted: () => { order.push('painted'); } } as Parameters<typeof controller.update>[0]);
+  controller.opening();
+  const preview = { frame: Uint8Array.of(1), documentPreview: true } as never;
+  controller.preview(preview);
+  controller.previewPresented(preview);
+  controller.painted();
+  expect(order).toEqual(['painted']);
+  controller.attach(binding);
+  expect(order).toEqual(['painted']);
+  paintFirstPage(viewStore, 2);
+  expect(order).toEqual(['painted', 'ready']);
+  expect(onReady.mock.calls[0]![0]).toBe(controller.ref);
+  expect(await identities.then(() => 'resolved', (error: Error) => error.name)).toBe('resolved');
+  paintFirstPage(viewStore, 3);
+  expect(onReady).toHaveBeenCalledTimes(1);
+});
+
+test('onReady is not called when onFirstPagePainted closes the editor', () => {
+  const { controller, binding, viewStore, read } = fixture(-1);
+  const onReady = mock((_api: unknown) => {});
+  const painted = mock(() => { controller.dispose(); });
+  controller.update({ read: read as never, focus() {}, zoom: 1, onReady,
+    onFirstPagePainted: painted } as Parameters<typeof controller.update>[0]);
+  controller.opening();
+  controller.attach(binding);
+  paintFirstPage(viewStore, 2);
+  expect(painted).toHaveBeenCalledTimes(1);
+  expect(onReady).not.toHaveBeenCalled();
+});
+
+test('a document replaced inside onFirstPagePainted gets no onReady, and its replacement gets one once it paints', () => {
+  const first = fixture(-1);
+  const second = fixture(-1);
+  const { controller } = first;
+  const ready: unknown[] = [];
+  let replace = true;
+  controller.update({ read: first.read as never, focus() {}, zoom: 1, onReady: (api: unknown) => { ready.push(api); },
+    onFirstPagePainted: () => { if (replace) { replace = false; controller.opening({}); } } } as Parameters<typeof controller.update>[0]);
+  controller.opening({});
+  controller.attach(first.binding);
+  paintFirstPage(first.viewStore, 2);
+  expect(replace).toBe(false);
+  expect(ready).toEqual([]);
+  expect(controller.getSnapshot().status).toBe('opening');
+  controller.attach(second.binding);
+  expect(ready).toEqual([]);
+  paintFirstPage(second.viewStore, 2);
+  expect(ready).toHaveLength(1);
+  expect(ready[0]).toBe(controller.ref);
+});
+
 test('worker insertBreak stays a loud sync-API failure', () => {
   const { controller } = toolbarFixture();
   expect(() => controller.ref.insertBreak({ paraId: 'p1', type: 'page' })).toThrow(LEGACY_SYNC_API_PROP);

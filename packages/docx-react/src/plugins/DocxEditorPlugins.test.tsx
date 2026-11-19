@@ -2494,6 +2494,20 @@ describe('DocxEditor plugins (peer-less engine)', () => {
     expect(order).toEqual(['painted', 'ready']);
   });
 
+  test('onReady is not called when onFirstPagePainted unmounts the editor', async () => {
+    const onReady = mock((_api: DocxEditorRef) => {});
+    let painted = 0;
+    let unmount = () => {};
+    const props = { onReady, onFirstPagePainted: () => { painted += 1; unmount(); } } as
+      Omit<Partial<DocxEditorBaseProps>, 'experimentalWorkerOpen' | 'onChange'>;
+    const view = render(<DocxEditor documentBuffer={documentBytes()} {...props} />);
+    unmount = view.unmount;
+    await until(() => painted === 1);
+    await settle(200);
+    expect(painted).toBe(1);
+    expect(onReady).not.toHaveBeenCalled();
+  });
+
   test('the default worker emits one settled selection after keyboard navigation', async () => {
     const events: DocxPluginEvent[] = [];
     const plugin = defineDocxPlugin({ id: 'settle', createState: () => null,
