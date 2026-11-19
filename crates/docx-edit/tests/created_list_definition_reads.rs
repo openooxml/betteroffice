@@ -259,6 +259,41 @@ fn definitions_from_a_peer_are_read_as_nine_levels_of_xml_text() {
 }
 
 #[test]
+fn a_neighbour_whose_format_is_bullet_is_a_bullet_list() {
+    let doc = seeded(707, &[("Source", Some(1)), ("Next", None), ("Tail", None)]);
+    let source = paragraph_id(&doc, "Source");
+    doc.set_paragraph_attr(&source, "listIsBullet", Any::Null)
+        .unwrap();
+    doc.set_paragraph_attr(&source, "listNumFmt", Any::from("bullet"))
+        .unwrap();
+    create(&doc, "Next", ListKind::Bullet);
+    let joined = ListIdentity::Source {
+        num_id: 1.0,
+        level: 0.0,
+    };
+    assert_eq!(resolve_list_identity(&attrs(&doc, "Next")), Some(joined));
+    assert!(doc.created_list_definitions().is_empty());
+}
+
+#[test]
+fn a_created_list_resets_the_marker_formatting_of_the_list_the_paragraph_left() {
+    let doc = seeded(708, &[("Lead", None), ("Alpha", Some(1)), ("Gap", None)]);
+    let alpha = paragraph_id(&doc, "Alpha");
+    doc.set_paragraph_attr(&alpha, "listMarkerBold", Any::Bool(true))
+        .unwrap();
+    let ensured = create(&doc, "Alpha", ListKind::Bullet);
+    for key in [
+        "listMarkerHidden",
+        "listMarkerBold",
+        "listMarkerItalic",
+        "listMarkerColor",
+        "listMarkerFontSize",
+    ] {
+        assert_eq!(ensured.get(key), Some(&Any::Null), "{key}");
+    }
+}
+
+#[test]
 fn the_created_list_rule_over_odd_attribute_shapes() {
     let cases: Vec<serde_json::Value> = serde_json::from_str(SHAPES).unwrap();
     for case in cases {
