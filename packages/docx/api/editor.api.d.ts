@@ -103,7 +103,6 @@ files/wasm/generated/edit/docx_edit.api.d.ts
 files/wasm/loadWasmAsset.api.d.ts
 files/yrs/cellRefusal.api.d.ts
 files/yrs/clipboardFragment.api.d.ts
-files/yrs/clipboardFragmentTransforms.api.d.ts
 files/yrs/contentControls.api.d.ts
 files/yrs/dirtyProjectionStories.api.d.ts
 files/yrs/displayPositionIndex.api.d.ts

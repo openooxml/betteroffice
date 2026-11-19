@@ -101,7 +101,6 @@ files/wasm/loadWasmAsset.api.d.ts
 files/worker.api.d.ts
 files/yrs/cellRefusal.api.d.ts
 files/yrs/clipboardFragment.api.d.ts
-files/yrs/clipboardFragmentTransforms.api.d.ts
 files/yrs/contentControls.api.d.ts
 files/yrs/createDocxWorkerEditSession.api.d.ts
 files/yrs/dirtyProjectionStories.api.d.ts
