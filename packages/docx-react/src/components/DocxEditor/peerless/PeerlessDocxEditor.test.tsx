@@ -116,6 +116,7 @@ class FakeWorker {
   outOfMemory = false;
   checkpoints: { state: Uint8Array; epoch: number; version: number; throughSeq: number }[] = [];
   lastPaste: { version: number; length: number } | null = null;
+  selection: yrs.DocxCommandSelection | null = null;
 
   constructor() {
     workers.push(this);
@@ -153,7 +154,7 @@ class FakeWorker {
     } else if (message.type === 'checkpoint' && this.initial) {
       const { epoch, version, throughSeq } = this.initial;
       const checkpoint = { state: new TextEncoder().encode(this.text), epoch, version, throughSeq,
-        recoveryState: { selection: null, storedMarks: null, stickyPositions: [], cellSelection: null,
+        recoveryState: { selection: this.selection, storedMarks: null, stickyPositions: [], cellSelection: null,
           proposals: { previewVersion: 0, entries: [] }, selections: [] } };
       this.checkpoints.push(checkpoint);
       response = { id: message.id, ok: true, checkpoint: { ...checkpoint, state: checkpoint.state.slice() } };
@@ -190,9 +191,10 @@ class FakeWorker {
     } else if (message.type === 'requestFullFrame' && this.initial) {
       response = { id: message.id, ok: true, commandAck: { ...this.initial, frame: { ...commandFrame(this.initial.throughSeq + 1), coversThroughSeq: this.initial.throughSeq } } };
     } else if (message.type === 'commandInit') {
-      const { session, incarnation, epoch, version = 0, throughSeq = 0, readOnly, layoutRevision } = message.request;
+      const { session, incarnation, epoch, version = 0, throughSeq = 0, readOnly, layoutRevision, recoveryState } = message.request;
+      this.selection = recoveryState?.selection ?? null;
       const initial: DocxCommandInitReply = {
-        session, incarnation, epoch, version, throughSeq, outcomes: [], selection: null,
+        session, incarnation, epoch, version, throughSeq, outcomes: [], selection: this.selection,
         editState: {
           readOnly, toolbar: null, effectiveFormatting: null, storedMarks: null, ...this.documentVersion(),
           canUndo: false, canRedo: false, hyperlink: null, tableContext: null,
@@ -220,6 +222,10 @@ class FakeWorker {
       const readOnly = !refused && !cancelled && command.kind === 'setReadOnly'
         ? (command.payload as { readOnly: boolean }).readOnly : state.editState.readOnly;
       if (!refused && !cancelled && command.kind === 'insertText') this.text += (command.payload as { text: string }).text;
+      if (pasted === 'applied') {
+        const caret = { story: 'body', paraId: 'a', offset: this.text.length };
+        this.selection = { anchor: caret, focus: caret };
+      }
       const ack = {
         session: state.session, incarnation: state.incarnation, epoch: state.epoch,
         version: state.version + ((!refused && !cancelled && command.kind === 'insertText') || pasted === 'applied' ? 1 : 0), throughSeq: command.seq,
@@ -232,7 +238,7 @@ class FakeWorker {
         }],
         editState: { ...state.editState, readOnly, ...this.documentVersion() },
         ...((command.kind === 'select' || (command.kind === 'navigate' && (command.payload as yrs.DocxCommandPayloads['navigate']).extend)) ? { selection: { anchor: { story: 'body', paraId: 'a', offset: 0 }, focus: { story: 'body', paraId: 'a', offset: 13 } } } : {}),
-        ...(pasted === 'applied' ? { selection: { anchor: { story: 'body', paraId: 'a', offset: this.text.length }, focus: { story: 'body', paraId: 'a', offset: this.text.length } } } : {}),
+        ...(pasted === 'applied' ? { selection: this.selection } : {}),
         ...(realSurface ? { frame: { ...commandFrame(command.seq + 1), coversThroughSeq: command.seq } } : {}),
       };
       this.initial = { ...state, ...ack };
@@ -3504,21 +3510,46 @@ async function pasteOptionsSession() {
       });
       await act(async () => { await new Promise<void>(resolve => setImmediate(resolve)); });
     },
-    async offer() {
+    showCaret() {
       act(() => {
         const snapshot = binding!.viewStore.getSnapshot();
         const geometry = snapshot.geometry!;
         binding!.viewStore.installFrameGeometry({ ...geometry, frameEpoch: geometry.frameEpoch + 0.5,
           coversThroughSeq: snapshot.throughSeq, caret: { x: 10, y: 10, width: 1, height: 12 } });
       });
-      await waitFor(() => expect(control() !== null).toBe(true));
     },
-    choose(name: 'Merge Formatting' | 'Keep Text Only') {
-      fireEvent.click(control()!.querySelector('button')!);
-      fireEvent.click(view.getByRole('menuitemradio', { name }));
+    async offer() {
+      this.showCaret();
+      await waitFor(() => expect(control() !== null).toBe(true));
     },
   };
 }
+
+test('a worker restart while Paste Options are offered removes the control without an error, and typing afterwards is applied', async () => {
+  const editor = await pasteOptionsSession();
+  await editor.paste();
+  await editor.offer();
+  await waitFor(() => expect(editor.first.checkpoints).toHaveLength(1));
+  const incarnation = binding!.viewStore.getSnapshot().identity.incarnation;
+  editor.first.outOfMemory = true;
+  await act(async () => { await binding!.session.submit('setReadOnly', { readOnly: false }).ack.catch(() => {}); });
+  expect(workers).toHaveLength(2);
+  await waitFor(() => {
+    const snapshot = binding!.viewStore.getSnapshot();
+    expect(snapshot.identity.incarnation).toBe(incarnation + 1);
+    expect(snapshot.geometry?.identity.incarnation).toBe(incarnation + 1);
+    expect(snapshot.version).toBe(128);
+    expect(snapshot.workerSelection?.focus.offset).toBe(PASTE_PREFIX.length + 4);
+  });
+  editor.showCaret();
+  await act(async () => { await new Promise<void>(resolve => setImmediate(resolve)); });
+  expect(editor.control() !== null).toBe(false);
+  act(() => {
+    editor.textarea.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'insertText', data: 'x' }));
+  });
+  await waitFor(() => expect(workers[1]!.text).toBe(`${PASTE_PREFIX}Boldx`));
+  expect(editor.onError).not.toHaveBeenCalled();
+});
 
 test('a recovered worker receives plugin reservations versioned to its own document', async () => {
   surface.mockRestore();

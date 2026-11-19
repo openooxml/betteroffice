@@ -1706,6 +1706,21 @@ test('a remote change that moves the document version removes the Paste Options 
   }
 });
 
+test('a restarted worker at the same document version and caret removes the Paste Options control', async () => {
+  const choices = mountPasteChoices();
+  try {
+    await choices.offer();
+    const submitted = choices.input.submitted.length;
+    choices.input.snapshot.identity = { ...choices.input.snapshot.identity, incarnation: choices.input.snapshot.identity.incarnation + 1 };
+    choices.present(choices.input.snapshot.version);
+    expect(choices.input.snapshot.workerSelection?.focus).toEqual(choices.end);
+    expect(choices.input.submitted).toHaveLength(submitted);
+    expect(choices.control() !== null).toBe(false);
+  } finally {
+    choices.dispose();
+  }
+});
+
 test('switching the editor to read-only, as viewing mode does, removes the Paste Options control', async () => {
   const choices = mountPasteChoices();
   try {
