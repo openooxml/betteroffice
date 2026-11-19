@@ -32,6 +32,7 @@ export interface Format {
   open(bytes: Uint8Array, script: Script): Promise<Target>;
   versionPattern?: RegExp;
   saveRecord?(bytes: Uint8Array): Record<string, unknown>;
+  hashesScript?: boolean;
 }
 
 export const formats: Record<string, Format> = { xlsx, pptx, docx };
@@ -42,12 +43,31 @@ function expectedPath(format: string): URL {
   return new URL(`parity/${format}/expected.json`, root);
 }
 
+function scriptSha256(format: string): string {
+  const script = readFileSync(new URL(`parity/${format}/script.json`, root));
+  return createHash('sha256').update(script).digest('hex');
+}
+
 export function readExpected(format: string): StepResult[] {
-  return JSON.parse(readFileSync(expectedPath(format), 'utf8'));
+  const golden = JSON.parse(readFileSync(expectedPath(format), 'utf8'));
+  if (formats[format].hashesScript !== true) return golden;
+  if (golden.scriptSha256 !== scriptSha256(format)) {
+    throw new Error(`parity/${format}/expected.json was written for another script.json`);
+  }
+  return golden.results;
 }
 
 export function compareOrWrite(format: string, results: StepResult[], write = false): void {
-  if (write) writeFileSync(expectedPath(format), `${JSON.stringify(results, null, 2)}\n`);
+  if (write) {
+    if (process.env.CI !== undefined) {
+      throw new Error('refusing to write a parity golden while CI is set');
+    }
+    const golden =
+      formats[format].hashesScript === true
+        ? { scriptSha256: scriptSha256(format), results }
+        : results;
+    writeFileSync(expectedPath(format), `${JSON.stringify(golden, null, 2)}\n`);
+  }
   deepStrictEqual(results, readExpected(format));
 }
 

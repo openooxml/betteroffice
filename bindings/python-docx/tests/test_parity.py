@@ -38,6 +38,7 @@ def run_result(run):
         "fontSize": run.font_size,
         "fontFamily": run.font_family,
         "color": run.color,
+        "highlight": None,
         "styleId": run.style_id,
     }
 
@@ -56,6 +57,8 @@ def cell_result(cell):
     return {
         "paragraphs": [paragraph_result(paragraph) for paragraph in cell.paragraphs],
         "tables": [table_result(table) for table in cell.tables],
+        "gridSpan": None,
+        "vMerge": None,
         "text": cell.text,
     }
 
@@ -157,6 +160,7 @@ def report_result(report):
         "structureDropped": None if dropped is None else [
             dropped_structure_result(structure) for structure in dropped
         ],
+        **parts_result(report.bytes),
     }
 
 
@@ -186,6 +190,37 @@ def parts_result(data):
             for name, part in sorted(parts)
         ]
     }
+
+
+def cell_paragraph_ids(tables):
+    ids = set()
+    for table in tables:
+        for row in table.rows:
+            for cell in row.cells:
+                ids.update(paragraph.id for paragraph in cell.paragraphs)
+    ids.discard(None)
+    return ids
+
+
+def edited_result(document, para_id):
+    in_cells = cell_paragraph_ids(document.tables())
+    story = [
+        paragraph.text
+        for paragraph in document.paragraphs()
+        if paragraph.id not in in_cells and paragraph.text
+    ]
+    return {"paragraph": document.paragraph(para_id).text, "story": "\n".join(story)}
+
+
+def script_sha256():
+    return hashlib.sha256((PARITY / "script.json").read_bytes()).hexdigest()
+
+
+def read_golden(name):
+    golden = json.loads((PARITY / name).read_text(encoding="utf-8"))
+    recorded = golden.get("scriptSha256") if isinstance(golden, dict) else None
+    assert recorded == script_sha256(), f"{name} was written for another script.json"
+    return golden["results"]
 
 
 def includes_target(step, target):
@@ -256,6 +291,7 @@ def run():
         "replaceParagraphTextAt": lambda args: receipt_result(
             document.replace_paragraph_text_at(args["index"], args["text"])
         ),
+        "readEdited": lambda args: edited_result(document, args["paraId"]),
         "save": save,
         "saveReport": save_report,
     }
@@ -327,15 +363,14 @@ def test_step_targets_default_to_all_and_filter_explicit_lists():
     assert not includes_target({"op": "text", "targets": ["ts", "rust"]}, "python")
 
 
-def test_scripted_api_parity_matches_shared_golden():
+def test_shared_and_engine_only_scripted_steps_match_their_goldens():
     actual, engine = run()
     script = json.loads((PARITY / "script.json").read_text(encoding="utf-8"))
-    expected = json.loads((PARITY / "expected.json").read_text(encoding="utf-8"))
+    expected = read_golden("expected.json")
     assert len(expected) == len(script["steps"]), "Golden step count differs"
     expected = [
         result for step, result in zip(script["steps"], expected)
         if includes_target(step, "python")
     ]
     assert_json_equal(expected, actual)
-    engine_path = PARITY / "engine-expected.json"
-    assert_json_equal(json.loads(engine_path.read_text(encoding="utf-8")), engine)
+    assert_json_equal(read_golden("engine-expected.json"), engine)

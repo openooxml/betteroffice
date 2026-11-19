@@ -95,6 +95,7 @@ fn run_result(run: &Run, separators: bool) -> Value {
         "color": formatting
             .and_then(|format| format.color.as_ref())
             .and_then(|color| color.rgb.clone()),
+        "highlight": formatting.and_then(|format| format.highlight.clone()),
         "styleId": formatting.and_then(|format| format.style_id.clone()),
     })
 }
@@ -160,6 +161,16 @@ fn collect_tables<'a>(blocks: &'a [BlockContent], output: &mut Vec<&'a Table>) {
     }
 }
 
+fn story_paragraphs<'a>(blocks: &'a [BlockContent], output: &mut Vec<&'a Paragraph>) {
+    for block in blocks {
+        match block {
+            BlockContent::Paragraph(paragraph) => output.push(paragraph),
+            BlockContent::BlockSdt(sdt) => story_paragraphs(&sdt.content, output),
+            BlockContent::Table(_) | BlockContent::RawXml(_) => {}
+        }
+    }
+}
+
 fn paragraphs_of(blocks: &[BlockContent]) -> Vec<Value> {
     let mut found = Vec::new();
     collect_paragraphs(blocks, &mut found);
@@ -171,7 +182,14 @@ fn cell_result(cell: &TableCell) -> Value {
     let mut tables = Vec::new();
     collect_tables(&cell.content, &mut tables);
     let tables: Vec<Value> = tables.into_iter().map(table_result).collect();
-    json!({ "paragraphs": paragraphs, "tables": tables, "text": texts(&paragraphs) })
+    let formatting = cell.formatting.as_ref();
+    json!({
+        "paragraphs": paragraphs,
+        "tables": tables,
+        "gridSpan": formatting.and_then(|format| format.grid_span),
+        "vMerge": formatting.and_then(|format| format.v_merge.clone()),
+        "text": texts(&paragraphs),
+    })
 }
 
 fn row_result(row: &TableRow) -> Value {
@@ -242,13 +260,14 @@ fn report_result(report: &SaveReport) -> Value {
             "paragraphs": kept.paragraphs,
         })),
         "structureDropped": report.structure_dropped,
+        "parts": parts_of(&report.bytes),
     })
 }
 
-fn parts_result(bytes: &[u8]) -> Value {
+fn parts_of(bytes: &[u8]) -> Vec<Value> {
     let mut parts = ooxml_opc::unzip_parts(bytes).unwrap();
     parts.sort_by(|left, right| left.0.cmp(&right.0));
-    let parts: Vec<Value> = parts
+    parts
         .iter()
         .map(|(name, data)| {
             json!({
@@ -257,8 +276,18 @@ fn parts_result(bytes: &[u8]) -> Value {
                 "byteLength": data.len(),
             })
         })
-        .collect();
-    json!({ "parts": parts })
+        .collect()
+}
+
+fn read_golden(path: &Path, script_sha256: &str) -> Vec<Value> {
+    let golden: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+    assert_eq!(
+        golden["scriptSha256"].as_str(),
+        Some(script_sha256),
+        "{} was written for another script.json",
+        path.display()
+    );
+    golden["results"].as_array().unwrap().clone()
 }
 
 fn png_size(bytes: &[u8]) -> (u32, u32) {
@@ -367,9 +396,20 @@ impl Runner {
                 let receipt = self.document.replace_paragraph_text_at(index, text);
                 receipt_result(receipt.unwrap())
             }
+            "readEdited" => {
+                let mut story = Vec::new();
+                story_paragraphs(&document.body().content, &mut story);
+                let texts: Vec<String> = story.into_iter().map(get_paragraph_text).collect();
+                json!({
+                    "paragraph": document
+                        .paragraph(args["paraId"].as_str().unwrap())
+                        .map(get_paragraph_text),
+                    "story": join_text(texts.iter().map(String::as_str)),
+                })
+            }
             "save" => {
                 let bytes = document.save_with_options(self.save_options()).unwrap();
-                let result = parts_result(&bytes);
+                let result = json!({ "parts": parts_of(&bytes) });
                 self.saved = Some(bytes);
                 result
             }
@@ -415,13 +455,13 @@ fn step_targets_default_to_all_and_filter_explicit_lists() {
 }
 
 #[test]
-fn scripted_api_parity_matches_shared_golden() {
+fn shared_and_engine_only_scripted_steps_match_their_goldens() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let parity = root.join("parity/docx");
-    let script: Value =
-        serde_json::from_str(&fs::read_to_string(parity.join("script.json")).unwrap()).unwrap();
-    let expected: Vec<Value> =
-        serde_json::from_str(&fs::read_to_string(parity.join("expected.json")).unwrap()).unwrap();
+    let script_bytes = fs::read(parity.join("script.json")).unwrap();
+    let script_sha256 = format!("{:x}", Sha256::digest(&script_bytes));
+    let script: Value = serde_json::from_slice(&script_bytes).unwrap();
+    let expected = read_golden(&parity.join("expected.json"), &script_sha256);
     let steps = script["steps"].as_array().unwrap();
     assert_eq!(expected.len(), steps.len(), "golden step count differs");
     let fixture = fs::read(root.join(script["fixture"].as_str().unwrap())).unwrap();
@@ -431,18 +471,14 @@ fn scripted_api_parity_matches_shared_golden() {
         saved: None,
         root,
     };
+    let mut shared = Vec::new();
     for (index, step) in steps.iter().enumerate() {
         if !includes(step, "rust") {
             continue;
         }
         let op = step["op"].as_str().unwrap();
-        let actual = json!({ "op": op, "result": runner.execute(op, &step["args"]) });
-        assert!(
-            equal_json(&expected[index], &actual),
-            "parity step {index} ({op}) differs\n- expected: {}\n+ actual: {}",
-            serde_json::to_string_pretty(&expected[index]).unwrap(),
-            serde_json::to_string_pretty(&actual).unwrap(),
-        );
+        let result = runner.execute(op, &step["args"]);
+        shared.push((index, json!({ "op": op, "result": result })));
     }
     let engine: Vec<Value> = script["engineSteps"]
         .as_array()
@@ -455,12 +491,25 @@ fn scripted_api_parity_matches_shared_golden() {
         .collect();
     let engine_path = parity.join("engine-expected.json");
     if std::env::var("BETTEROFFICE_PARITY_WRITE").as_deref() == Ok("1") {
-        let mut text = serde_json::to_string_pretty(&engine).unwrap();
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "refusing to write a parity golden while CI is set"
+        );
+        let golden = json!({ "scriptSha256": script_sha256, "results": engine });
+        let mut text = serde_json::to_string_pretty(&golden).unwrap();
         text.push('\n');
         fs::write(&engine_path, text).unwrap();
     }
-    let engine_expected: Vec<Value> =
-        serde_json::from_str(&fs::read_to_string(&engine_path).unwrap()).unwrap();
+    for (index, actual) in &shared {
+        let op = actual["op"].as_str().unwrap();
+        assert!(
+            equal_json(&expected[*index], actual),
+            "parity step {index} ({op}) differs\n- expected: {}\n+ actual: {}",
+            serde_json::to_string_pretty(&expected[*index]).unwrap(),
+            serde_json::to_string_pretty(actual).unwrap(),
+        );
+    }
+    let engine_expected = read_golden(&engine_path, &script_sha256);
     assert_eq!(
         engine_expected.len(),
         engine.len(),

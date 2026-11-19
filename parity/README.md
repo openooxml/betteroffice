@@ -12,7 +12,25 @@ Normalization spec: Visit steps in script order, arrays in index order and objec
 To add a step, edit the script and map its op in TS and each selected runner.
 Regenerate with `bun scripts/parity/harness.ts xlsx --write` (the wasm engine); add `--preload scripts/native-engine-preload.ts` to run the TS target on the native engine.
 `BETTEROFFICE_PARITY_WRITE=1` also enables golden writing in the TS runner.
+A TS golden write (`--write` or `BETTEROFFICE_PARITY_WRITE=1`) and the docx Rust engine golden write fail while the environment has `CI` set; compare mode runs as usual there.
 All selected targets must pass before accepting a golden.
+
+## docx
+
+Both docx goldens are `{ "scriptSha256", "results": [{ "op", "result" }] }`, where `scriptSha256` is the SHA-256 of the exact bytes of `docx/script.json`.
+The TS, Rust and Python runners fail when it does not match the current script, so any script change needs both goldens written again: `bun scripts/parity/harness.ts docx --write` for `expected.json`, then `BETTEROFFICE_PARITY_WRITE=1 cargo test -p betteroffice-docx --test parity` for `engine-expected.json`.
+The xlsx and pptx goldens stay plain step arrays.
+
+The read projections compare these fields, with absent values as `null`:
+
+- `paragraphs`, `paragraph` and every nested paragraph: `id`, `style`, `alignment`, `text` and `runs`, each run with `text`, `bold`, `italic`, `underline`, `strike`, `fontSize` (points), `fontFamily` (ascii, else hAnsi), `color`, `highlight` and `styleId`.
+- `tables`: `rows` of `cells` and `text`, each cell with `paragraphs`, nested `tables`, `gridSpan`, `vMerge` and `text`, plus each table's `columnWidths` and `text`.
+- `sections`: `id`, `pageWidth`, `pageHeight`, `orientation`, the four margins, `paragraphs` and `text`; `headers` and `footers`: `relId`, `kind`, `paragraphs` and `text`.
+- `structure`: body paragraph and table counts and the section, header, footer, footnote and endnote counts.
+- `readEdited`: the edited paragraph's text and the body story's text, read without a save; the story leaves out table cells.
+- `save` and `saveReport`: the parts record above; `saveReport` adds `keptUnchanged` and `structureDropped` of the same save.
+
+The Python binding exposes no run highlight or cell merge properties, so Python records `null` for `highlight`, `gridSpan` and `vMerge`.
 
 For a new format, add its script, golden and `scripts/parity/<format>.ts` op table.
 Register the table in `harness.ts`, add Rust/Python tests and hook up native CI after its build.

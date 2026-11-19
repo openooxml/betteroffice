@@ -81,6 +81,7 @@ function runResult(run: Run, separators: boolean) {
     fontSize: formatting?.fontSize === undefined ? null : formatting.fontSize / 2,
     fontFamily: formatting?.fontFamily?.ascii ?? formatting?.fontFamily?.hAnsi ?? null,
     color: formatting?.color?.rgb ?? null,
+    highlight: formatting?.highlight ?? null,
     styleId: formatting?.styleId ?? null
   };
 }
@@ -135,6 +136,8 @@ function tableResult(table: Table): unknown {
       return {
         paragraphs,
         tables: collectTables(cell.content).map(tableResult),
+        gridSpan: cell.formatting?.gridSpan ?? null,
+        vMerge: cell.formatting?.vMerge ?? null,
         text: joinText(paragraphs.map(({ text }) => text))
       };
     });
@@ -205,6 +208,7 @@ export const docx: Format = {
   engineKind,
   versionPattern: /(?!)/,
   saveRecord: partsResult,
+  hashesScript: true,
   async open(fixture) {
     await preloadEditWasm(wasmBytes('edit/docx_edit_bg.wasm'));
     await preloadOpcWasm(wasmBytes('opc/ooxml_opc_bg.wasm'));
@@ -357,12 +361,27 @@ export const docx: Format = {
           }
           return replace(editing, identity.session.paraId, String(args.text));
         },
+        readEdited: async (args) => {
+          const editing = await edited();
+          const story = editing.readParagraphs({ story: 'body', view: 'accepted' });
+          if (!story.ok) throw new Error('The body story cannot be read', { cause: story });
+          const identity = bodyParagraphs(editing).find(
+            (entry) => entry.ooxmlParaId?.toUpperCase() === String(args.paraId)
+          );
+          const key = identity?.session?.paraId;
+          const paragraph = story.paragraphs.find((entry) => entry.paraId === key);
+          return {
+            paragraph: paragraph?.text ?? null,
+            story: joinText(story.paragraphs.map(({ text }) => text))
+          };
+        },
         save: async () => (await save()).bytes,
         saveReport: async () => {
-          const { keptUnchanged, structureDropped } = await save();
+          const { bytes: reported, keptUnchanged, structureDropped } = await save();
           return {
             keptUnchanged: keptUnchanged ?? null,
-            structureDropped: structureDropped ?? null
+            structureDropped: structureDropped ?? null,
+            ...partsResult(reported)
           };
         }
       },
