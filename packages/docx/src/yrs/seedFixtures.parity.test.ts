@@ -27,6 +27,7 @@ const REQUIRED_NODES: Record<string, string[]> = {
   math: ['mathEquation'],
   notes: ['footnoteRef', 'endnoteRef'],
   'opaque-drawings': ['opaqueDrawing', 'image'],
+  'page-break-beside-field': ['complexField', 'break'],
   'rtl-cjk': ['tab', 'break', 'symbol', 'softHyphen', 'noBreakHyphen'],
   'sections-headers': ['paragraph'],
   shapes: ['shape', 'table'],
