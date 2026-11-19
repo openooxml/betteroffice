@@ -59,6 +59,7 @@ import type {
   TableBorders,
   SimpleField,
   ComplexField,
+  StructuredFieldContent,
   FieldType,
   FieldInlineContent,
   MathEquation,
@@ -3417,6 +3418,162 @@ function restoreRawBlocks(projected: BlockContent[], base: readonly BlockContent
   return projected;
 }
 
+/** Story blocks a complex field's code and result span after its paragraph. */
+interface FieldBlockSpan {
+  code: number;
+  result: number;
+}
+
+function spansParagraphs(field: ComplexField): boolean {
+  return [field.structuredCode, field.structuredResult].some(
+    (part) => part?.blockCount != null || part?.blocks != null
+  );
+}
+
+/** Whether a field embed's payload holds a complex field spanning paragraphs. */
+function payloadSpansParagraphs(payload: Attrs): boolean {
+  const data = payload.fieldData;
+  if (typeof data !== 'string' || !data.includes('"block')) return false;
+  try {
+    const field = JSON.parse(data) as ComplexField | null;
+    return field?.type === 'complexField' && spansParagraphs(field);
+  } catch {
+    return false;
+  }
+}
+
+/** How many story blocks a structured code or result spans: its count, or its copies. */
+function parsedBlockCount(content: StructuredFieldContent | undefined): number {
+  return content?.blockCount ?? content?.blocks?.length ?? 0;
+}
+
+/**
+ * The story blocks a spanning field's code and result span in `blocks`, the projected story its
+ * paragraph sits at `owner` in, with `keys` its block ids. While the blocks its embed recorded
+ * at seed time (`fieldSpanBlocks`) still follow its paragraph in order with nothing between
+ * them, or it recorded none, this is the parsed span. Otherwise it is the blocks up to the last
+ * of the leading recorded blocks that still do. Raw blocks count as they did when parsed.
+ */
+function keptSpan(
+  field: ComplexField,
+  payload: Attrs | undefined,
+  owner: number,
+  blocks: readonly BlockContent[],
+  keys: ReadonlyArray<string | undefined>
+): FieldBlockSpan {
+  const code = parsedBlockCount(field.structuredCode);
+  const result = parsedBlockCount(field.structuredResult);
+  const recorded = payload?.fieldSpanBlocks;
+  if (!Array.isArray(recorded)) return { code, result };
+  let index = owner + 1;
+  let end = owner;
+  for (const id of recorded) {
+    while (index < blocks.length && isRawXml(blocks[index]!)) index += 1;
+    if (index >= blocks.length || keys[index] !== id) {
+      const kept = end - owner;
+      return { code: Math.min(code, kept), result: Math.max(0, kept - code) };
+    }
+    end = index;
+    index += 1;
+  }
+  return { code, result };
+}
+
+/**
+ * Structured code or result counting `count` story blocks, its copies of them dropped. A part
+ * that spans paragraphs keeps a count, zero included, so it is written as a spanning part.
+ */
+function countedPart(content: StructuredFieldContent | undefined, count: number): StructuredFieldContent | undefined {
+  if (content?.blockCount == null && content?.blocks == null && count === 0) return content;
+  const next: StructuredFieldContent = { ...content };
+  delete next.blocks;
+  next.blockCount = count;
+  return next;
+}
+
+/** `field` counting the story blocks of `span`. */
+function withBlockCounts(field: ComplexField, span: FieldBlockSpan): ComplexField {
+  const { code, result } = span;
+  const counts = (content: StructuredFieldContent | undefined, count: number): boolean =>
+    content?.blocks === undefined && (content?.blockCount ?? 0) === count;
+  if (counts(field.structuredCode, code) && counts(field.structuredResult, result)) return field;
+  const next: ComplexField = { ...field };
+  const structuredCode = countedPart(field.structuredCode, code);
+  const structuredResult = countedPart(field.structuredResult, result);
+  if (structuredCode === undefined) delete next.structuredCode;
+  else next.structuredCode = structuredCode;
+  if (structuredResult === undefined) delete next.structuredResult;
+  else next.structuredResult = structuredResult;
+  if (field.fieldTree) {
+    next.fieldTree = { ...field.fieldTree };
+    if (field.fieldTree.code) next.fieldTree.code = structuredCode;
+    if (field.fieldTree.result) next.fieldTree.result = structuredResult;
+  }
+  return next;
+}
+
+/** The complex fields spanning paragraphs in `content`, tracked ones included, in order. */
+function spanningFields(content: readonly ParagraphContent[]): ComplexField[] {
+  return content.flatMap((item) =>
+    item.type === 'complexField' && spansParagraphs(item)
+      ? [item]
+      : isTrackedWrapper(item)
+        ? spanningFields(item.content as ParagraphContent[])
+        : []
+  );
+}
+
+/** `content` with each field `replacements` names replaced, or `content` when none is. */
+function replaceFields(
+  content: ParagraphContent[],
+  replacements: ReadonlyMap<ComplexField, ComplexField>
+): ParagraphContent[] {
+  let changed = false;
+  const next = content.map((item): ParagraphContent => {
+    let replaced: ParagraphContent = item;
+    if (item.type === 'complexField') replaced = replacements.get(item) ?? item;
+    else if (isTrackedWrapper(item)) {
+      const inner = replaceFields(item.content as ParagraphContent[], replacements);
+      if (inner !== item.content) replaced = { ...item, content: inner } as ParagraphContent;
+    }
+    if (replaced !== item) changed = true;
+    return replaced;
+  });
+  return changed ? next : content;
+}
+
+/**
+ * `blocks` with each complex field spanning paragraphs counting the story blocks it still spans
+ * in this projection, read from `payloads`, each paragraph's spanning field embeds by session
+ * key.
+ */
+function withKeptBlockCounts(
+  blocks: BlockContent[],
+  storyId: string,
+  payloads: ReadonlyMap<string, Attrs[]>
+): BlockContent[] {
+  if (payloads.size === 0) return blocks;
+  const keys = storyBlockKeys(blocks, storyId).map((key) => key?.slice(1));
+  let changed = false;
+  const next = blocks.map((block, owner) => {
+    const key = keys[owner];
+    const embeds = key === undefined ? undefined : payloads.get(key);
+    if (embeds === undefined || block.type !== 'paragraph') return block;
+    const fields = spanningFields(block.content);
+    const replacements = new Map(
+      fields.map((field, index) => {
+        const payload = fields.length === embeds.length ? embeds[index] : undefined;
+        return [field, withBlockCounts(field, keptSpan(field, payload, owner, blocks, keys))] as const;
+      })
+    );
+    const content = replaceFields(block.content, replacements);
+    if (content === block.content) return block;
+    changed = true;
+    return cloneProjectedParagraph(block, { content });
+  });
+  return changed ? next : blocks;
+}
+
 /** A projected block plus a fingerprint of the story inputs it was built from. */
 interface ProjectedBlockMemo {
   tableBaseline?: YrsTableInheritance;
@@ -4194,12 +4351,19 @@ class SaveContext {
     const paragraphIds = this.session.storyParagraphIds(storyId);
     const segments = this.session.storySegments(storyId);
     const trailingByParagraph = new Map<string, BlockBreakKind[]>();
+    const spanningEmbeds = new Map<string, Attrs[]>();
+    let paragraphSpanning: Attrs[] = [];
     let closing: string | undefined;
     for (const segment of segments) {
       if (segment.kind === 'pilcrow') {
         closing = segment.paraId;
         trailingByParagraph.set(closing, []);
+        if (paragraphSpanning.length > 0) spanningEmbeds.set(segment.paraId, paragraphSpanning);
+        paragraphSpanning = [];
       } else {
+        if (segment.kind === 'embed' && segment.embedKind === 'field' && payloadSpansParagraphs(segment.payload)) {
+          paragraphSpanning.push(segment.payload);
+        }
         const kind = segment.kind === 'embed' ? blockBreakKind(segment.embedKind) : null;
         if (kind && closing !== undefined) trailingByParagraph.get(closing)!.push(kind);
         else closing = undefined;
@@ -4481,7 +4645,11 @@ class SaveContext {
         blocks.push({ type: 'paragraph', content: pendingBreaks });
       }
     }
-    const projected = restoreRawBlocks(blocks, baseBlocks ?? [], storyId);
+    const projected = withKeptBlockCounts(
+      restoreRawBlocks(blocks, baseBlocks ?? [], storyId),
+      storyId,
+      spanningEmbeds
+    );
     this.memo.stories.set(storyId, { commentsKey, blocks: projected });
     this.memo.dirty.delete(storyId);
     this.memo.clean.add(storyId);
