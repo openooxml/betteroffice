@@ -15,6 +15,7 @@ import type { YrsLoc, YrsStoryRange, YrsStorySegment, YrsTableRange } from './in
 import { mintCommandSelection } from './residentCommandAnchors';
 import { cellSelectionHeadPosition } from './residentCommandTableSelection';
 import { ResidentSessionFonts } from './residentFontEnvironment';
+import { releaseResidentDisplayListQueries, residentDisplayListQueries } from './residentDisplayListQueries';
 import { createProposalRegistry, proposalRevisionPreview } from './proposals';
 import { applyDocxCommand, createResidentDocxCommandHooks, preflightDocxCommand } from './residentCommandActions';
 import { createResidentCommandHost } from './residentCommandHost';
@@ -551,6 +552,7 @@ function workerSelectionHooks(arm: CommandArm, frame: RetainedFrame, buildPages?
     sessionFonts: null, ResidentSessionFonts, scope: { fonts: undefined },
     createResidentCommandHost: (options: DocxCommandHostOptions) => options.hooks,
     displayPositionIndex: () => index, createDisplayListQueries: queryModule.createDisplayListQueries,
+    residentDisplayListQueries, releaseResidentDisplayListQueries,
     loadRustDisplayListQueryEngine: async () => {}, loadedRustDisplayListQueryEngine: () => undefined,
     applyFrameDelta: (_frame: RetainedFrame, next: RetainedFrame) => next,
     decodeFrameDelta: (next: RetainedFrame) => next,
@@ -784,7 +786,7 @@ test('d2a_line_navigation_reuses_caches_and_reads_lines_only_on_the_caret_page',
     expect(segments).toHaveBeenCalledTimes(1);
     expect(lineReads).toBe(4);
     expect(disposed).toBe(0);
-    runNavigation(arm, { ...frame, frameEpoch: 2 }, { unit: 'line', direction: 'forward', extend: false });
+    runNavigation(arm, { ...frame, frameEpoch: 2, displayList: { pages: [...frame.displayList.pages] } }, { unit: 'line', direction: 'forward', extend: false });
     expect(queries).toHaveBeenCalledTimes(2);
     expect(segments).toHaveBeenCalledTimes(1);
     expect(disposed).toBe(1);
@@ -927,6 +929,7 @@ test('d2a_worker_vertical_navigation_builds_unbuilt_neighbours_before_chained_ty
     sessionFonts: null, ResidentSessionFonts, scope: { fonts: undefined },
     createResidentCommandHost: (options: DocxCommandHostOptions) => options.hooks,
     displayPositionIndex: () => index, createDisplayListQueries: queryModule.createDisplayListQueries,
+    residentDisplayListQueries, releaseResidentDisplayListQueries,
     loadRustDisplayListQueryEngine, loadedRustDisplayListQueryEngine, applyFrameDelta, decodeFrameDelta,
     retainedPageByKey: (frame: RetainedFrame, pageId: string) => retainedFramePageById(frame, BigInt(pageId)),
   };
@@ -1047,7 +1050,7 @@ test('d2a_worker_navigation_reuses_queries_within_a_frame_and_refreshes_after_in
     for (const direction of ['down', 'up', 'down', 'up'] as const) await navigate(direction);
     expect(queries).toHaveBeenCalledTimes(2);
     expect(disposed).toBe(0);
-    const next = { ...frame, frameEpoch: 2 };
+    const next = { ...frame, frameEpoch: 2, displayList: { pages: [...frame.displayList.pages] } };
     worker.install(next, 1);
     await navigate('down');
     expect(queries).toHaveBeenCalledTimes(4);
@@ -1057,8 +1060,8 @@ test('d2a_worker_navigation_reuses_queries_within_a_frame_and_refreshes_after_in
     expect(disposed).toBe(2);
     worker.install(next, 2);
     await navigate('down');
-    expect(queries).toHaveBeenCalledTimes(5);
-    expect(disposed).toBe(3);
+    expect(queries).toHaveBeenCalledTimes(4);
+    expect(disposed).toBe(2);
   } finally {
     queries.mockRestore();
   }

@@ -12,6 +12,7 @@ import { createResidentDocxCommandHooks } from './residentCommandActions';
 import { releaseResidentSelectionReads } from './residentCommandSelection';
 import { cellSelectionHeadPosition } from './residentCommandTableSelection';
 import { ResidentSessionFonts } from './residentFontEnvironment';
+import { releaseResidentDisplayListQueries, residentDisplayListQueries } from './residentDisplayListQueries';
 import type { DocxCommandApplyContext, DocxCommandEnvelope, DocxCommandIntent, DocxCommandHooks, DocxCommandHooksFactory, DocxCommandHostOptions, DocxCommandInitRequest } from './residentCommandProtocol';
 
 const releasesAfterTest: (() => void)[] = [];
@@ -187,6 +188,7 @@ function splitRowWorker(direction: 'up' | 'down', queryEngine?: RustDisplayListQ
       };
     },
     loadRustDisplayListQueryEngine: async () => {}, loadedRustDisplayListQueryEngine: () => queryEngine,
+    residentDisplayListQueries, releaseResidentDisplayListQueries,
     applyFrameDelta: (_frame: RetainedFrame, next: RetainedFrame) => next,
     decodeFrameDelta: (next: RetainedFrame) => next,
     retainedPageByKey: (current: RetainedFrame, pageId: string) => retainedFramePageById(current, BigInt(pageId)),

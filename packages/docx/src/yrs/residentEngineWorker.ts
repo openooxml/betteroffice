@@ -5,6 +5,7 @@ import { isCellHasNoStoryRefusal } from './cellRefusal';
 import { resolveReservations, validReservationsPayload, type DocxResolvedReservations } from './reservations';
 import { readParsedToolbarMetadata, readResidentToolbarMetadata, type DocxToolbarMetadata } from './residentToolbarMetadata';
 import { readResidentRangeHighlights } from './residentRangeHighlights';
+import { releaseResidentDisplayListQueries, residentDisplayListQueries } from './residentDisplayListQueries';
 import { readResidentReviewSnapshot, readReviewTarget } from './residentReview';
 import { createResidentCollaboration, readResidentCollaborationState, readResidentPresence } from './residentCollaboration';
 import { stateVectorClock } from '../collaboration/protocol';
@@ -146,7 +147,7 @@ let collaboration: ReturnType<typeof createResidentCollaboration> | null = null;
 let commandHost: DocxCommandHost | null = null;
 const deferredSelectionFrames = new WeakSet<DocxCommandAck>();
 let releaseCommandHost: (() => void) | null = null;
-let commandQueries: ((frame: RetainedFrame, version: string) => ReturnType<typeof createDisplayListQueries>) | null = null;
+let commandQueries: ((frame: RetainedFrame) => ReturnType<typeof createDisplayListQueries>) | null = null;
 let commandInit: DocxCommandInitRequest | null = null;
 /** Pictures the host decoded because this worker cannot (SVG), by media token and by data URL. */
 const hostImages = new Map<string, ImageBitmap>();
@@ -335,21 +336,7 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
   let selectionNavigation: {
     focus: YrsLoc; direction: 'up' | 'down'; distance?: number; queryFrame?: { frame: RetainedFrame; version: string };
   } | undefined;
-  let selectionQueries: {
-    frame: RetainedFrame; frameEpoch: number; layoutRevision: number; version: string;
-    queries: ReturnType<typeof createDisplayListQueries>;
-  } | undefined;
-  const queriesFor = (frame: RetainedFrame, version: string) => {
-    if (selectionQueries?.frame !== frame || selectionQueries.frameEpoch !== frame.frameEpoch ||
-      selectionQueries.layoutRevision !== layoutRevision || selectionQueries.version !== version) {
-      selectionQueries?.queries.dispose();
-      selectionQueries = {
-        frame, frameEpoch: frame.frameEpoch, layoutRevision, version,
-        queries: createDisplayListQueries(frame.displayList, loadedRustDisplayListQueryEngine() ?? undefined),
-      };
-    }
-    return selectionQueries.queries;
-  };
+  const queriesFor = (frame: RetainedFrame) => residentDisplayListQueries(engine, frame.displayList);
   const readSelectionFrame = () => {
     const version = engine.proposalEngine.version();
     if (layoutDirty || !retainedFrame) {
@@ -382,7 +369,7 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
         for (const page of pages) commandFrameChanges?.pages.add(page);
       }
     }
-    const queries = queriesFor(frame, version);
+    const queries = queriesFor(frame);
     const forward = queries.rangeRects(position, position + 1).find((rect) =>
       rect.height > 0 && rect.pageIndex < limit && frame.pages[rect.pageIndex] && !frame.pages[rect.pageIndex]!.page.unbuilt);
     if (forward) return forward.pageIndex;
@@ -443,7 +430,7 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
         const position = displayPositionIndex(engine).positionOf(focus, root);
         if (position !== null && root === 'body') {
           const queryFailed = () => {
-            const state = queriesFor(frame, version).sourceState?.();
+            const state = queriesFor(frame).sourceState?.();
             if (state?.status !== 'error') return false;
             reportQueryParseFailure(frame, version, state.error);
             return true;
@@ -454,7 +441,7 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
               const paragraph = engine.geometryReader.locateParagraph(focus.story, focus.paraId);
               atTextEnd = focus.offset === paragraph.end - paragraph.start;
             }
-            const queries = queriesFor(frame, version);
+            const queries = queriesFor(frame);
             let rect = atTextEnd && position > 0
               ? queries.rangeRectsOnPages?.(position - 1, position, pageIndex, pageIndex).at(-1)
               : undefined;
@@ -464,7 +451,7 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
             }
             return rect && rect.height > 0 ? { ...rect, x: rect.x + rect.width, width: 0 } : null;
           };
-          let caret = queriesFor(frame, version).caretRect(position);
+          let caret = queriesFor(frame).caretRect(position);
           let failed = queryFailed();
           if (!caret || caret.height <= 0 || frame.pages[caret.pageIndex]?.page.unbuilt) {
             for (const { page, pageIndex } of frame.pages) {
@@ -488,7 +475,7 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
               if (failed && probes > 0 && pageIndex !== probePage + 1) continue;
               probes += 1;
               installSelectionFrame(engine.buildDisplayPagesFrame([pageIndex], frame.frameEpoch));
-              caret = queriesFor(frame, version).caretRect(position);
+              caret = queriesFor(frame).caretRect(position);
               if (!caret || caret.height <= 0 || frame.pages[caret.pageIndex]?.page.unbuilt) {
                 caret = trailingCaretOnPage(pageIndex) ?? caret;
               }
@@ -578,10 +565,10 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
         result.anchor.offset !== result.focus.offset || result.focus.story !== 'body') return false;
       const pageIndex = selectionPageOf(result.focus, prefix.pages);
       if (pageIndex === undefined) return false;
-      const { frame, version } = readSelectionFrame();
+      const { frame } = readSelectionFrame();
       const position = displayPositionIndex(engine).positionOf(result.focus, 'body');
       if (position === null) return false;
-      const queries = queriesFor(frame, version);
+      const queries = queriesFor(frame);
       const caret = queries.caretRect(position);
       if (!caret || caret.height <= 0 || caret.pageIndex !== pageIndex || queries.imageByPos(position)) return false;
       if (!frame.pages[pageIndex]!.page.primitives.some(primitive =>
@@ -884,10 +871,9 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
             }
             const caretPosition = position ?? displayPositionIndex(engine).positionOf(focus, 'body');
             if (caretPosition !== null) {
-              const version = engine.proposalEngine.version();
               const trailingCaretOnPage = (pageIndex: number) => {
                 const rect = focus.offset === length && caretPosition > 0
-                  ? queriesFor(retainedFrame!, version).rangeRectsOnPages?.(caretPosition - 1, caretPosition, pageIndex, pageIndex).at(-1)
+                  ? queriesFor(retainedFrame!).rangeRectsOnPages?.(caretPosition - 1, caretPosition, pageIndex, pageIndex).at(-1)
                   : undefined;
                 return rect && rect.height > 0 ? { ...rect, x: rect.x + rect.width, width: 0 } : null;
               };
@@ -898,7 +884,7 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
                 trackBuilt(finalized.delta);
                 probed = true;
               };
-              let caret = queriesFor(retainedFrame, version).caretRect(caretPosition);
+              let caret = queriesFor(retainedFrame).caretRect(caretPosition);
               if (!caret || caret.height <= 0 || retainedFrame.pages[caret.pageIndex]?.page.unbuilt) {
                 for (const [pageId, pageIndex] of builtPages!) {
                   const page = retainedFrame.pages[pageIndex];
@@ -916,7 +902,7 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
                 if (caret && retainedFrame.pages[caret.pageIndex]?.page.unbuilt) candidates.add(caret.pageIndex);
                 for (const index of candidates) {
                   await install(engine.buildDisplayPagesFrame([index], retainedFrame!.frameEpoch));
-                  caret = queriesFor(retainedFrame!, version).caretRect(caretPosition);
+                  caret = queriesFor(retainedFrame!).caretRect(caretPosition);
                   if (!caret || caret.height <= 0 || retainedFrame!.pages[caret.pageIndex]?.page.unbuilt) {
                     caret = trailingCaretOnPage(index) ?? caret;
                   }
@@ -965,10 +951,6 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
           residency.caretPageId = caretPage === undefined ? undefined : retainedFrame!.pages[caretPage]?.pageId.toString();
           residency.caretFocus = focus ? { story: focus.story, paraId: focus.paraId } : undefined;
           if (modelCaret) finalized.caret = { frameEpoch: retainedFrame!.frameEpoch, caretRect: modelCaret };
-          if (probed || entering.length || distant.length) {
-            selectionQueries?.queries.dispose();
-            selectionQueries = undefined;
-          }
         }
         const layout = { frame: retainedFrame!, layoutRevision };
         const scaleOnlyViewport = viewport?.rasterScale !== undefined && !pages.length && !updates.length && !relaid &&
@@ -1132,8 +1114,7 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
   releaseCommandHost = () => {
     commandQueries = null;
     commandShownText = null;
-    selectionQueries?.queries.dispose();
-    selectionQueries = undefined;
+    releaseResidentDisplayListQueries(engine);
     releaseResidentSelectionReads(engine);
   };
   commandHost = host;
@@ -2405,7 +2386,7 @@ async function handle(request: ScheduledRequest): Promise<void> {
           (commandHost && (published?.frameEpoch !== frame.frameEpoch || published?.previewVersion !== previewVersion)) ||
           (request.read.expectPreviewVersion !== undefined && request.read.expectPreviewVersion !== previewVersion)
           ? null : await readResidentReviewSnapshot(session, registry, frame, layoutRevision, {
-            queries: (at, version) => commandQueries?.(at, version), index: displayPositionIndex(session),
+            queries: (at) => commandQueries?.(at), index: displayPositionIndex(session),
           });
         value = commandHost && review && (review.previewVersion !== previewVersion || review.version !== layoutVersion ||
           registry.snapshot().previewVersion !== previewVersion || engine.version() !== layoutVersion || retainedFrame?.frameEpoch !== frame?.frameEpoch)
@@ -3573,6 +3554,7 @@ function destroySession(keepSurfaces = false): void {
   proposals = null;
   releaseCommandHost?.();
   releaseCommandHost = null;
+  if (session) releaseResidentDisplayListQueries(session);
   session?.destroy();
   closeHostImages();
   lastProposalMirrorVersion = null;

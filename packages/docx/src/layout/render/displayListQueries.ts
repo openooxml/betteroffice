@@ -450,6 +450,21 @@ function placeholderPage(page: DisplayPage): Pick<DisplayPage, 'pageIndex' | 'wi
   return { pageIndex: page.pageIndex, width: page.width, height: page.height, primitives: [] };
 }
 
+/** Parsed pages to return to placeholders so at most `limit` stay parsed once `read` is: the farthest from `read` first. */
+function storePagesToUnload(revisions: readonly number[], read: readonly number[], limit: number): number[] {
+  const reading = [...new Set(read.filter((index) => index >= 0 && index < revisions.length))];
+  if (reading.length === 0) return [];
+  const kept = new Set(reading);
+  const parsed: number[] = [];
+  revisions.forEach((revision, index) => {
+    if (revision !== UNLOADED && !kept.has(index)) parsed.push(index);
+  });
+  const excess = parsed.length + reading.length - limit;
+  if (excess <= 0) return [];
+  const distance = (index: number) => Math.min(...reading.map((page) => Math.abs(page - index)));
+  return parsed.sort((a, b) => distance(b) - distance(a)).slice(0, excess);
+}
+
 /** The baseline of a primitive that forms part of a visual line, or null. */
 function visualLineBaseline(primitive: DisplayPrimitive): number | null {
   if (primitive.kind !== 'text' && primitive.kind !== 'glyphRun') return null;
@@ -634,12 +649,17 @@ function pagesTouchingPositions(
  * document starts a new line and ends the previous one, so a facade of the
  * replaced document never answers from the new one. Without `line` a superseded
  * facade answers from its own list.
+ *
+ * `storePages` caps the pages the Rust store keeps parsed: past it, the parsed
+ * pages farthest from the ones a query reads go back to placeholders, parsed
+ * again when a query reads them. Without it every page read stays parsed.
  */
 export function createDisplayListQueries(
   list: DisplayList,
   engine?: RustDisplayListQueryEngine | ResidentDisplayListQueryEngine,
   previous?: DisplayListQueries | null,
-  line?: object | null
+  line?: object | null,
+  storePages?: number
 ): DisplayListQueries {
   let json: string | null = null;
   const getJson = (): string => {
@@ -841,10 +861,15 @@ export function createDisplayListQueries(
   const ensurePages = (pageIndices: readonly number[]): void => {
     if (cell.handle === null || !storeRevisions || !cell.eng?.updateDisplayList) return;
     const revisions = storeRevisions;
-    const replace: Array<[number, DisplayPage]> = [];
+    const replace: Array<[number, DisplayPage | ReturnType<typeof placeholderPage>]> = [];
     for (const index of pageIndices) {
       const page = list.pages[index];
       if (page && revisions[index] !== displayPageRevision(page)) replace.push([index, page]);
+    }
+    if (storePages !== undefined) {
+      for (const index of storePagesToUnload(revisions, pageIndices, storePages)) {
+        replace.push([index, placeholderPage(list.pages[index]!)]);
+      }
     }
     if (replace.length === 0) return;
     try {
@@ -859,7 +884,10 @@ export function createDisplayListQueries(
           replace,
         })
       );
-      for (const [index, page] of replace) revisions[index] = displayPageRevision(page);
+      for (const [index, page] of replace) {
+        const loaded = list.pages[index];
+        revisions[index] = loaded !== undefined && page === loaded ? displayPageRevision(loaded) : UNLOADED;
+      }
     } catch (error) {
       if (isWorkerEngineTrap(error)) {
         killSource('display-list page load', error);
