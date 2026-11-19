@@ -2,12 +2,12 @@ import { afterEach, beforeAll, describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { rezipPartsToArrayBuffer, toBytes } from '../docx/rezip/parts';
-import type { BlockContent, Paragraph } from '../types/document';
+import type { BlockContent, NumberingDefinitions, Paragraph } from '../types/document';
 import { preloadEditWasm } from '../wasm/edit';
 import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
 import { saveEditorDocument } from './editorSave';
 import { createYrsSession, saveYrsDocx, yrsToDocument, type YrsSession } from './index';
-import { createdListKey, numberingWithListDefinitions } from './listDefinitionSave';
+import { createdListKey, numberingWithListDefinitions, savedListDefinitions } from './listDefinitionSave';
 
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 const R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
@@ -213,4 +213,97 @@ describe('definitions written from peer text', () => {
     expect(created).not.toContain('bullet"/>"');
     expect(xml.startsWith(LISTS_NUMBERING.slice(0, LISTS_NUMBERING.indexOf('<w:abstractNum ')))).toBe(true);
   });
+});
+
+const numberingParts = (numbering: string) => unzipContainer(makeDocx(DOCUMENT, numbering));
+const uniqueIds = (xml: string, name: 'numId' | 'abstractNumId') => {
+  const ids = [...xml.matchAll(new RegExp(`:${name}\\s*=\\s*["'](\\d+)["']`, 'g'))].map(match => match[1]);
+  return new Set(ids).size === ids.length;
+};
+const BULLETS = {
+  key: '1:0',
+  kind: 'bullet' as const,
+  levelTexts: LEVELS.map(level => `b${level}`),
+  levelFormats: LEVELS.map(() => 'bullet'),
+};
+
+describe('the ids a save reads from a numbering part', () => {
+  test('single quotes and spaces around = are read, so the created list goes above them', () => {
+    const quoted = LISTS_NUMBERING.replace(/"/g, "'").replace(/='/g, " = '");
+    const saved = savedListDefinitions({} as YrsSession, [BULLETS], numberingParts(quoted));
+    expect(saved.map(({ numId, abstractNumId }) => ({ numId, abstractNumId }))).toEqual([{ numId: 4, abstractNumId: 2 }]);
+    const written = numberingWithListDefinitions(quoted, saved);
+    expect(uniqueIds(written, 'numId')).toBe(true);
+    expect(uniqueIds(written, 'abstractNumId')).toBe(true);
+  });
+
+  test('an id the element scan misses still raises the ids handed out, as does the model of the source', () => {
+    const foreign = LISTS_NUMBERING.replace(
+      '</w:numbering>',
+      `<ns0:abstractNum xmlns:ns0="${W}" ns0:abstractNumId="7"/><ns0:num xmlns:ns0="${W}" ns0:numId="12"><ns0:abstractNumId ns0:val="7"/></ns0:num></w:numbering>`
+    );
+    const [scanned] = savedListDefinitions({} as YrsSession, [BULLETS], numberingParts(foreign));
+    expect(scanned?.numId).toBeGreaterThan(12);
+    expect(scanned?.abstractNumId).toBeGreaterThan(7);
+    const model = { abstractNums: [{ abstractNumId: 30 }], nums: [{ numId: 40, abstractNumId: 30 }] } as unknown as NumberingDefinitions;
+    const [modelled] = savedListDefinitions({} as YrsSession, [BULLETS], numberingParts(LISTS_NUMBERING), model);
+    expect(modelled?.numId).toBeGreaterThan(40);
+    expect(modelled?.abstractNumId).toBeGreaterThan(30);
+  });
+});
+
+describe('created lists carried by a saved file', () => {
+  test('a key drawn again by a new session on the saved file names a different definition', async () => {
+    const first = await session(77);
+    first.seedFromDocx(makeDocx(DOCUMENT, LISTS_NUMBERING));
+    createList(first, 'Alpha', 'bullet');
+    const earlier = (await saveYrsDocx(first, { updateModifiedDate: false })).bytes;
+    const reopened = await session(77);
+    reopened.seedFromDocx(earlier.slice());
+    createList(reopened, 'Beta', 'numbered');
+    const keys = (target: YrsSession) => target.createdListDefinitions().map(definition => definition.key);
+    expect(keys(reopened)).toEqual(keys(first));
+    const bytes = (await saveYrsDocx(reopened, { updateModifiedDate: false })).bytes;
+    expect(counts(bytes)).toEqual({ abstractNums: SOURCE.abstractNums + 2, nums: SOURCE.nums + 2 });
+    const alpha = savedNumId(bytes, 'Alpha');
+    const beta = savedNumId(bytes, 'Beta');
+    expect(beta).not.toBe(alpha);
+    expect(savedFormat(bytes, alpha)).toBe('bullet');
+    expect(savedFormat(bytes, beta)).toBe('decimal');
+  });
+
+  test('a structural copy of the projection still saves the created ids', async () => {
+    const created = await session();
+    created.seedFromDocx(makeDocx(DOCUMENT, LISTS_NUMBERING));
+    createList(created, 'Alpha', 'bullet');
+    const projected = structuredClone(yrsToDocument(created, created.materializeDocx()!));
+    const bytes = new Uint8Array(await saveEditorDocument(created, projected, [], { full: true }));
+    const alpha = savedNumId(bytes, 'Alpha');
+    expect(alpha).toBeGreaterThan(3);
+    expect(savedFormat(bytes, alpha)).toBe('bullet');
+  });
+});
+
+describe('a paragraph that joins a created list without its numPr changing', () => {
+  const ITEM = `<w:document xmlns:w="${W}"><w:body>${[
+    paragraph('Lead'), paragraph('Item', 1), paragraph('Tail'),
+  ].join('')}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>`;
+  const saves: Record<string, (target: YrsSession) => Promise<Uint8Array>> = {
+    saveYrsDocx: async target => (await saveYrsDocx(target, { updateModifiedDate: false })).bytes,
+    editor: async target => {
+      const projected = yrsToDocument(target, target.materializeDocx()!);
+      return new Uint8Array(await saveEditorDocument(target, projected, projected.package.document.comments ?? []));
+    },
+  };
+  for (const [name, save] of Object.entries(saves)) {
+    test(`${name}: the saved paragraph points at the created definition`, async () => {
+      const created = await session();
+      created.seedFromDocx(makeDocx(ITEM, LISTS_NUMBERING));
+      createList(created, 'Item', 'bullet');
+      const bytes = await save(created);
+      const item = savedNumId(bytes, 'Item');
+      expect(item).toBeGreaterThan(3);
+      expect(savedFormat(bytes, item)).toBe('bullet');
+    });
+  }
 });

@@ -202,6 +202,30 @@ fn ensuring_the_list_a_paragraph_is_on_creates_nothing() {
 }
 
 #[test]
+fn ensuring_a_list_where_a_key_has_no_definition_treats_the_paragraph_by_its_num_id() {
+    let doc = seeded(706, &[("Lead", None), ("Orphan", None), ("Tail", None)]);
+    let orphan = paragraph_id(&doc, "Orphan");
+    let reference = HashMap::from([
+        ("key".to_owned(), Any::from("88:0")),
+        ("numId".to_owned(), Any::Number(2.0)),
+    ]);
+    for (key, value) in [
+        ("numPr", num_pr(2.0, 0.0)),
+        (LIST_DEF, Any::from(reference)),
+        ("listIsBullet", Any::Bool(false)),
+    ] {
+        doc.set_paragraph_attr(&orphan, key, value).unwrap();
+    }
+    create(&doc, "Orphan", ListKind::Numbered);
+    let legacy = ListIdentity::Source {
+        num_id: 2.0,
+        level: 0.0,
+    };
+    assert_eq!(resolve_list_identity(&attrs(&doc, "Orphan")), Some(legacy));
+    assert!(doc.created_list_definitions().is_empty());
+}
+
+#[test]
 fn definitions_from_a_peer_are_read_as_nine_levels_of_xml_text() {
     let doc = EditingDoc::new(705);
     let root = doc.yrs_doc().get_or_insert_map(LIST_DEFINITIONS);

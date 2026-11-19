@@ -1,4 +1,4 @@
-import type { Paragraph } from '../types/document';
+import type { NumberingDefinitions, Paragraph } from '../types/document';
 import type { YrsSession } from './index';
 
 /** The `w:numId` and `w:abstractNumId` a save gives a list definition the editor created. */
@@ -224,7 +224,8 @@ function numberingPart(parts: Readonly<Record<string, Uint8Array>>) {
 export function savedListDefinitions(
   session: YrsSession,
   definitions: ReturnType<YrsSession['createdListDefinitions']>,
-  parts: Readonly<Record<string, Uint8Array>>
+  parts: Readonly<Record<string, Uint8Array>>,
+  _model?: NumberingDefinitions
 ): DocxSavedListDefinition[] {
   if (definitions.length === 0) return [];
   const scan = scanNumbering(decode(parts[numberingPart(parts).path]) ?? '');
