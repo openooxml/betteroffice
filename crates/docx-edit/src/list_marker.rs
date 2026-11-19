@@ -61,9 +61,6 @@ impl ListState {
             .as_ref()
     }
 
-    /// The bullet the definitions give list `num_id` at `level`, with a symbol-font character
-    /// (Symbol's `U+F0B7`) shaped to the Unicode it draws. `None` when the session retains no
-    /// definitions or that level is not a bullet.
     pub(crate) fn defined_bullet(&self, num_id: f64, level: f64) -> Option<String> {
         let rendering = docx_parse::compute_list_rendering(
             Some(num_id),
@@ -81,11 +78,8 @@ impl ListState {
     }
 }
 
-/// The marker a bullet paragraph gets when neither it nor the definitions name one.
 pub(crate) const DEFAULT_BULLET: &str = "\u{2022}";
 
-/// A bullet level's text as drawn: a single symbol-font character is shaped to its Unicode
-/// equivalent, anything else goes through the private-use bullet table.
 pub(crate) fn bullet_text(marker: &str, font_family: Option<&str>) -> String {
     let mut characters = marker.trim_ascii().chars();
     font_family
@@ -345,9 +339,6 @@ pub(crate) fn list_marker(
         return marker.map(Ok);
     }
     if values.get("listIsBullet").and_then(any_bool) == Some(true) {
-        // A bullet applied by a command carries no marker (`listMarker: null`); without this the
-        // paragraph renders with an empty marker and shows no bullet at all. An authored empty
-        // marker is kept.
         let marker = marker
             .or_else(|| state.defined_bullet(num_id, map_number(num_pr, "ilvl").unwrap_or(0.0)))
             .unwrap_or_else(|| DEFAULT_BULLET.to_owned());
@@ -845,7 +836,6 @@ mod tests {
         assert!(state.counters.is_empty());
     }
 
-    /// A bullet toggled on by a command: `listIsBullet` with no `listMarker`.
     fn command_bullet(num_id: f64, level: f64) -> BTreeMap<String, Any> {
         BTreeMap::from([
             (
