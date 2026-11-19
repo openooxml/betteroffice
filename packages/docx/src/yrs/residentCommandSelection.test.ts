@@ -1053,7 +1053,7 @@ test('d2a_worker_navigation_reuses_queries_within_a_frame_and_refreshes_after_in
     for (const direction of ['down', 'up', 'down', 'up'] as const) await navigate(direction);
     expect(queries).toHaveBeenCalledTimes(2);
     expect(disposed).toBe(0);
-    const next = { ...frame, frameEpoch: 2, displayList: { pages: [...frame.displayList.pages] } };
+    const next = { ...frame, frameEpoch: 2 };
     worker.install(next, 1);
     await navigate('down');
     expect(queries).toHaveBeenCalledTimes(4);
@@ -1063,8 +1063,8 @@ test('d2a_worker_navigation_reuses_queries_within_a_frame_and_refreshes_after_in
     expect(disposed).toBe(2);
     worker.install(next, 2);
     await navigate('down');
-    expect(queries).toHaveBeenCalledTimes(4);
-    expect(disposed).toBe(2);
+    expect(queries).toHaveBeenCalledTimes(5);
+    expect(disposed).toBe(3);
   } finally {
     queries.mockRestore();
   }
