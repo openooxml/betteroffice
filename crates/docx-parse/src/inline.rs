@@ -1166,8 +1166,12 @@ pub struct StructuredFieldContent {
     pub inline: Option<Vec<InlineNode>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blocks: Option<Vec<crate::block::BlockContent>>,
-    /// The story blocks this content spans after the field's paragraph, raw blocks included:
-    /// code first, then result.
+    /// How many blocks of the story holding the field's paragraph this content spans after that
+    /// paragraph: the code's come first, then the result's. Raw blocks count, each with the
+    /// phase the field is in when it appears, so one before an external separator is code. The
+    /// count is relative to the field's paragraph in the parsed story; a reader checks it against
+    /// the story it reads before using it. Zero means the field spans paragraphs but its later
+    /// paragraphs are no longer tracked, so no block after the field's paragraph belongs to it.
     #[serde(
         rename = "blockCount",
         skip_serializing_if = "Option::is_none",

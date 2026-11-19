@@ -324,6 +324,7 @@ impl StoryParser<'_, '_> {
                     crate::inline::raw_foreign_node(child, self.budget)
                 };
                 if let Some(raw) = raw {
+                    extend_open_fields(&mut records, &open_fields, content.len());
                     content.push(BlockContent::RawXml(Arc::new(raw)));
                     weight = weight.saturating_add(
                         self.budget
@@ -381,13 +382,7 @@ impl StoryParser<'_, '_> {
 
             remove_external_field_end_runs(&mut parsed, events.external_ends);
             let parsed_index = content.len();
-            for open in &open_fields {
-                let target = &mut records[open.record];
-                match open.mode {
-                    FieldMode::Code => target.code_end = Some(parsed_index),
-                    FieldMode::Result => target.result_end = Some(parsed_index),
-                }
-            }
+            extend_open_fields(&mut records, &open_fields, parsed_index);
             for _ in 0..events.external_ends {
                 if open_fields.pop().is_none() {
                     break;
@@ -972,6 +967,17 @@ fn top_level_complex_field_indices(block: &BlockContent) -> Vec<usize> {
             .then_some(index)
         })
         .collect()
+}
+
+/// Extends every open field's span to the block at `index`, in the phase the field is in.
+fn extend_open_fields(records: &mut [FieldRecord], open_fields: &[OpenField], index: usize) {
+    for open in open_fields {
+        let target = &mut records[open.record];
+        match open.mode {
+            FieldMode::Code => target.code_end = Some(index),
+            FieldMode::Result => target.result_end = Some(index),
+        }
+    }
 }
 
 fn attach_recorded_field_blocks(content: &mut [BlockContent], records: Vec<FieldRecord>) {

@@ -5822,17 +5822,73 @@ impl BlockCursor {
     }
 }
 
-/// The story blocks a field's structured code or result spans after the field's paragraph.
-fn field_block_count(data: &Value, key: &str) -> Option<usize> {
-    field(field(Some(data), key), "blockCount")
-        .and_then(Value::as_u64)
-        .and_then(|count| usize::try_from(count).ok())
+/// A field embed's data when it may span paragraphs.
+fn spanning_field_data(payload: &JsonObject) -> Option<Value> {
+    payload
+        .get("fieldData")
+        .and_then(Value::as_str)
+        .filter(|data| data.contains("\"block"))
+        .and_then(|data| serde_json::from_str(data).ok())
+}
+
+/// How many story blocks a field's structured code or result spans after the field's paragraph:
+/// its count, or the number of copies of those blocks a model holding them carries. `Some(None)`
+/// when it does not span paragraphs, `None` when its count is not a block count.
+fn part_block_count(data: &Value, key: &str) -> Option<Option<usize>> {
+    let part = field(Some(data), key);
+    let copies = field(part, "blocks").and_then(Value::as_array);
+    match field(part, "blockCount").filter(|count| !count.is_null()) {
+        Some(count) => count
+            .as_u64()
+            .and_then(|count| usize::try_from(count).ok())
+            .map(Some),
+        None => Some(copies.map(Vec::len)),
+    }
+}
+
+/// The story blocks a field's structured code and result span after the field's paragraph at
+/// `owner`, checked against `blocks`: `None` when neither spans paragraphs, a count is not a
+/// block count, or the span runs past the story.
+fn field_spans(data: &Value, blocks: &[Value], owner: usize) -> Option<(usize, usize)> {
+    let code = part_block_count(data, "structuredCode")?;
+    let result = part_block_count(data, "structuredResult")?;
+    if code.is_none() && result.is_none() {
+        return None;
+    }
+    let (code, result) = (code.unwrap_or(0), result.unwrap_or(0));
+    let end = owner
+        .checked_add(1)?
+        .checked_add(code)?
+        .checked_add(result)?;
+    (end <= blocks.len()).then_some((code, result))
+}
+
+/// The sequences of SEQ fields in the story blocks the fields of a paragraph span.
+fn spanned_sequence_names(units: &[InlineUnit], blocks: &[Value], owner: usize) -> Vec<String> {
+    let mut names = Vec::new();
+    for unit in units {
+        let UnitContent::Embed { kind, payload } = &unit.content else {
+            continue;
+        };
+        if kind.as_str() != "field" {
+            continue;
+        }
+        let Some((code, result)) =
+            spanning_field_data(payload).and_then(|data| field_spans(&data, blocks, owner))
+        else {
+            continue;
+        };
+        for block in &blocks[owner + 1..owner + 1 + code + result] {
+            names.extend(nested_sequence_names(block));
+        }
+    }
+    names
 }
 
 /// Where the story blocks a suppressed field's cached result spans start, and how many it spans.
 fn cached_result_blocks(data: &Value, blocks: &[Value], owner: usize) -> Option<(usize, usize)> {
-    let start = owner + 1 + field_block_count(data, "structuredCode").unwrap_or(0);
-    let count = field_block_count(data, "structuredResult")?;
+    let (code, count) = field_spans(data, blocks, owner)?;
+    let start = owner + 1 + code;
     let last = blocks.get(start + count.checked_sub(1)?)?;
     let empty_paragraph = string(field(Some(last), "type")) == Some("paragraph")
         && array(field(Some(last), "content")).is_empty();
@@ -5863,10 +5919,7 @@ fn bind_field_result_blocks(
         {
             continue;
         }
-        let Some((start, count)) = payload
-            .get("fieldData")
-            .and_then(Value::as_str)
-            .and_then(|data| serde_json::from_str::<Value>(data).ok())
+        let Some((start, count)) = spanning_field_data(payload)
             .and_then(|data| cached_result_blocks(&data, blocks, owner))
         else {
             continue;
@@ -5893,9 +5946,10 @@ fn bind_field_result_blocks(
 
 /// Binds each field whose code runs past its paragraph's mark to the paragraph that paragraph
 /// joins (`fieldCodeTarget`) and the paragraphs in between whose marks the code hides
-/// (`fieldCodeMarks`). Word shows the field's paragraph and the target, the paragraph holding the
-/// field's separator or, when the field ends within its code, its code's last paragraph, as one
-/// paragraph. Tables among those blocks leave the field unbound.
+/// (`fieldCodeMarks`), with the fields each of those holds (`fieldCodeFields`). Word shows the
+/// field's paragraph and the target, the paragraph holding the field's separator or, when the
+/// field ends within its code, its code's last paragraph, as one paragraph. Tables among those
+/// blocks leave the field unbound.
 fn bind_field_code_blocks(
     units: &mut [InlineUnit],
     story_id: &str,
@@ -5910,18 +5964,12 @@ fn bind_field_code_blocks(
         if kind.as_str() != "field" {
             continue;
         }
-        let Some(data) = payload
-            .get("fieldData")
-            .and_then(Value::as_str)
-            .filter(|data| data.contains("\"blockCount\""))
-            .and_then(|data| serde_json::from_str::<Value>(data).ok())
+        let Some((code, result)) =
+            spanning_field_data(payload).and_then(|data| field_spans(&data, blocks, owner))
         else {
             continue;
         };
-        let code = field_block_count(&data, "structuredCode").unwrap_or(0);
-        let result = field(Some(&data), "structuredResult");
-        let has_result = docx_parse::StructuredFieldContent::value_spans_paragraphs(result);
-        let hidden = match (code, has_result) {
+        let hidden = match (code, result > 0) {
             (0, true)
                 if blocks
                     .get(owner + 1)
@@ -5951,8 +5999,55 @@ fn bind_field_code_blocks(
         let Some(target) = ids.pop() else {
             continue;
         };
+        let fields = joined[..ids.len()]
+            .iter()
+            .map(|block| {
+                let mut found = Vec::new();
+                if let Some(content) = field(Some(block), "content") {
+                    crate::bridge::nested_code_fields(content, &mut found);
+                }
+                let found = found
+                    .into_iter()
+                    .map(|(kind, instruction)| Value::from(vec![kind, instruction]));
+                Value::Array(found.collect())
+            })
+            .collect();
         payload.insert("fieldCodeMarks".to_owned(), Value::Array(ids));
         payload.insert("fieldCodeTarget".to_owned(), target);
+        payload.insert("fieldCodeFields".to_owned(), Value::Array(fields));
+    }
+}
+
+/// Records, for each spanning field, the ids of the story blocks its span covers, raw blocks
+/// aside (`fieldSpanBlocks`).
+fn record_field_span_blocks(
+    units: &mut [InlineUnit],
+    story_id: &str,
+    blocks: &[Value],
+    owner: usize,
+    after_owner: BlockCursor,
+) {
+    for unit in units {
+        let UnitContent::Embed { kind, payload } = &mut unit.content else {
+            continue;
+        };
+        if kind.as_str() != "field" {
+            continue;
+        }
+        let Some((code, result)) =
+            spanning_field_data(payload).and_then(|data| field_spans(&data, blocks, owner))
+        else {
+            continue;
+        };
+        let mut cursor = after_owner;
+        let ids: Vec<Value> = blocks[owner + 1..owner + 1 + code + result]
+            .iter()
+            .filter_map(|block| cursor.take(story_id, block))
+            .map(Value::String)
+            .collect();
+        if !ids.is_empty() {
+            payload.insert("fieldSpanBlocks".to_owned(), Value::Array(ids));
+        }
     }
 }
 
@@ -6405,6 +6500,11 @@ fn visit_story(
                         .map(|ordinal| ordinal as u32),
                     source,
                 });
+                context.opaque_sequences.extend(spanned_sequence_names(
+                    &units,
+                    blocks,
+                    block_index,
+                ));
                 bind_field_result_blocks(
                     &mut units,
                     &story_id,
@@ -6414,6 +6514,7 @@ fn visit_story(
                     &mut result_table_ids,
                 );
                 bind_field_code_blocks(&mut units, &story_id, blocks, block_index, cursor);
+                record_field_span_blocks(&mut units, &story_id, blocks, block_index, cursor);
                 let unit_base = context.plans[plan_index].units.len();
                 context.plans[plan_index]
                     .comment_marks
@@ -9055,7 +9156,10 @@ mod tests {
             json!({"type":"paragraph","paraId":"after","content":[run("After")]}),
         ]);
         let recorded = Any::Array(vec![Any::from("first"), Any::from("second")].into());
-        assert_eq!(field_values(&document, "fieldSpanBlocks"), vec![Some(recorded)]);
+        assert_eq!(
+            field_values(&document, "fieldSpanBlocks"),
+            vec![Some(recorded)]
+        );
         assert_eq!(bound_result_blocks(&document), vec![None]);
     }
 

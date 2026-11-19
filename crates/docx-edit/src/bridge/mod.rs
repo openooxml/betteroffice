@@ -2013,15 +2013,104 @@ fn field_code_join<T: ReadTxn>(
     txn: &T,
 ) -> Option<(Vec<FieldCodeParagraph>, String)> {
     let target = shared_map_string(field, txn, "fieldCodeTarget")?;
+    let fields: Vec<Vec<CodeField>> = match shared_any(field, txn, "fieldCodeFields") {
+        Some(Any::Array(paragraphs)) => paragraphs
+            .iter()
+            .map(|fields| match fields {
+                Any::Array(fields) => fields.iter().filter_map(any_code_field).collect(),
+                _ => Vec::new(),
+            })
+            .collect(),
+        _ => copied_code_fields(field, txn),
+    };
+    let mut fields = fields.into_iter();
     let hidden = match shared_any(field, txn, "fieldCodeMarks") {
         Some(Any::Array(ids)) => ids
             .iter()
             .filter_map(any_str)
-            .map(|id| FieldCodeParagraph { id: id.to_owned() })
+            .map(|id| FieldCodeParagraph {
+                id: id.to_owned(),
+                fields: fields.next().unwrap_or_default(),
+            })
             .collect(),
         _ => Vec::new(),
     };
     Some((hidden, target))
+}
+
+/// The fields of each hidden code paragraph, read from the copies of those paragraphs a field's
+/// data holds when its code paragraphs were bound without their fields.
+fn copied_code_fields<T: ReadTxn>(field: &MapRef, txn: &T) -> Vec<Vec<CodeField>> {
+    let data = shared_map_string(field, txn, "fieldData")
+        .and_then(|data| serde_json::from_str::<Value>(&data).ok());
+    let copies = data
+        .as_ref()
+        .and_then(|data| data.get("structuredCode"))
+        .and_then(|code| code.get("blocks"))
+        .and_then(Value::as_array);
+    copies
+        .into_iter()
+        .flatten()
+        .map(|block| {
+            let mut fields = Vec::new();
+            if let Some(content) = block.get("content") {
+                nested_code_fields(content, &mut fields);
+            }
+            fields
+        })
+        .collect()
+}
+
+/// A field's kind and instruction, as the seeds record each field of a hidden code paragraph.
+pub(crate) type CodeField = (String, String);
+
+/// The kind and instruction of a field value, or `None` for anything else.
+fn code_field(value: &Value) -> Option<CodeField> {
+    let kind = value
+        .get("type")
+        .and_then(Value::as_str)
+        .filter(|kind| matches!(*kind, "simpleField" | "complexField"))?;
+    let instruction = value.get("instruction").and_then(Value::as_str);
+    Some((kind.to_owned(), instruction.unwrap_or_default().to_owned()))
+}
+
+/// A field's kind and instruction as `fieldCodeFields` stores them.
+fn any_code_field(value: &Any) -> Option<CodeField> {
+    match value {
+        Any::Array(parts) => match &parts[..] {
+            [kind, instruction] => {
+                Some((any_str(kind)?.to_owned(), any_str(instruction)?.to_owned()))
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The kind and instruction of each field a code paragraph's content holds, outermost first,
+/// in order.
+pub(crate) fn nested_code_fields(value: &Value, fields: &mut Vec<CodeField>) {
+    if let Some(field) = code_field(value) {
+        fields.push(field);
+        return;
+    }
+    match value {
+        Value::Object(object) => {
+            if let Some(content) = object
+                .get("structuredChildren")
+                .or_else(|| object.get("children"))
+                .or_else(|| object.get("content"))
+            {
+                nested_code_fields(content, fields);
+            }
+        }
+        Value::Array(values) => {
+            for child in values {
+                nested_code_fields(child, fields);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Headers and footers show a field whose code spans paragraph marks on one line, as Word
@@ -2030,16 +2119,26 @@ fn joins_field_code_paragraphs(story_id: &str) -> bool {
     story_id.starts_with("hf:")
 }
 
+/// A hidden code paragraph and the fields it held when the field was bound.
 struct FieldCodeParagraph {
     id: String,
+    fields: Vec<CodeField>,
 }
 
 impl FieldCodeParagraph {
+    /// Whether the paragraph shows nothing but the fields it held when the field was bound.
     fn allows(&self, runs: &[RawRun], env: &RenderEnv) -> bool {
+        let mut fields = self.fields.iter();
         runs.iter()
             .filter(|run| run.visible(env) && !run.anchored())
             .all(|run| match &run.kind {
-                RawRunKind::Field { source, .. } => source.is_some(),
+                RawRunKind::Field {
+                    source: Some(source),
+                    ..
+                } => serde_json::from_str::<Value>(source)
+                    .ok()
+                    .and_then(|source| code_field(&source))
+                    .is_some_and(|source| fields.any(|field| *field == source)),
                 _ => false,
             })
     }
