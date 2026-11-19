@@ -9381,19 +9381,26 @@ it('peerless shows the supplied indicator while the workbook opens', async () =>
   await waitFor(() => expect(view.queryByText('Workbook opening')).toBeNull());
 });
 
-it('peerless shows the indicator in a status layer over the editor that leaves the workspace in flow', async () => {
+it('peerless shows the indicator in a status layer over the workspace that leaves the root children as they are', async () => {
   const host = peerlessHarness();
   const pending = deferred<WorkbookSession>();
   host.open.mockReturnValue(pending.promise);
   const ready = mock((_api: XlsxAsyncEditorApi) => {});
   const onError = mock((_error: Error) => {});
-  const view = render(host.asyncEditor({ onReady: ready, onError,
-    loadingIndicator: <div data-testid="host-indicator" style={{ height: '100%' }}>Workbook opening</div> }));
+  const rootChildren = (root: HTMLElement) => Array.from(root.children)
+    .map((child) => child.getAttribute('data-testid') ?? child.getAttribute('role') ?? child.tagName);
+  const view = render(host.asyncEditor({ onReady: ready, onError }));
   await waitFor(() => expect(view.queryByTestId('xlsx-workspace')).not.toBeNull());
+  const plain = rootChildren(view.getByRole('application'));
+  expect(plain).toContain('xlsx-toolbar');
+  expect(plain).toContain('xlsx-workspace');
+  view.rerender(host.asyncEditor({ onReady: ready, onError,
+    loadingIndicator: <div data-testid="host-indicator" style={{ height: '100%' }}>Workbook opening</div> }));
+  await waitFor(() => expect(view.queryByTestId('host-indicator')).not.toBeNull());
   const root = view.getByRole('application');
+  expect(rootChildren(root)).toEqual(plain);
   const indicator = view.getByTestId('host-indicator');
   const layer = indicator.closest('[data-testid="xlsx-loading"]') as HTMLElement;
-  expect(root.contains(layer)).toBe(true);
   expect(root.style.position).toBe('relative');
   expect(layer).not.toBe(indicator);
   expect(layer.getAttribute('data-testid')).toBe('xlsx-loading');
@@ -9401,8 +9408,8 @@ it('peerless shows the indicator in a status layer over the editor that leaves t
   expect(layer.style.position).toBe('absolute');
   expect(layer.style.pointerEvents).toBe('none');
   const workspace = view.getByTestId('xlsx-workspace');
-  expect(workspace.parentElement).toBe(layer.parentElement);
-  expect(layer.compareDocumentPosition(workspace) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
+  expect(layer.parentElement).toBe(workspace);
+  expect(workspace.parentElement).toBe(root);
   await act(async () => { pending.resolve(host.session); });
   await opened();
   await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
@@ -9411,7 +9418,7 @@ it('peerless shows the indicator in a status layer over the editor that leaves t
   expect(onError).not.toHaveBeenCalled();
 });
 
-it('peerless anchors the loading layer inside the editor when the host style makes the root static', async () => {
+it('peerless anchors the loading layer to the workspace when the host style makes the root static', async () => {
   const host = peerlessHarness();
   const pending = deferred<WorkbookSession>();
   host.open.mockReturnValue(pending.promise);
@@ -9423,11 +9430,8 @@ it('peerless anchors the loading layer inside the editor when the host style mak
   expect(root.style.position).toBe('static');
   let anchor = layer.parentElement;
   while (anchor && !['relative', 'absolute', 'fixed', 'sticky'].includes(anchor.style.position)) anchor = anchor.parentElement;
-  expect(anchor).not.toBeNull();
-  expect(anchor).not.toBe(root);
+  expect(anchor).toBe(view.getByTestId('xlsx-workspace'));
   expect(root.contains(anchor)).toBe(true);
-  expect(anchor!.contains(view.getByTestId('xlsx-toolbar'))).toBe(true);
-  expect(anchor!.contains(view.getByTestId('xlsx-workspace'))).toBe(true);
   await act(async () => { pending.resolve(host.session); });
   await opened();
   await waitFor(() => expect(view.queryByTestId('xlsx-loading')).toBeNull());

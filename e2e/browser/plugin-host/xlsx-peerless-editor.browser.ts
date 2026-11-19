@@ -87,7 +87,7 @@ test('a full-height loading indicator in a fixed-height parent leaves the grid i
   expect(await page.evaluate(() => window.__xlsxWorkerEditor.errors)).toEqual([]);
 });
 
-test('a loading layer stays on the editor when the host style makes the editor root static', async ({ page }) => {
+test('a loading layer stays on the workspace when the host style makes the editor root static', async ({ page }) => {
   await page.goto('/xlsx-worker-editor.html?asyncApi=1&fixedIndicator=1&staticRoot=1');
   await page.waitForFunction(() => '__xlsxWorkerEditor' in window);
   await pinnedEvaluate(page, () => window.__xlsxWorkerEditor.ready);
@@ -96,12 +96,46 @@ test('a loading layer stays on the editor when the host style makes the editor r
   expect(await page.getByRole('application').evaluate((element) => element.style.position)).toBe('static');
   expect(await page.getByTestId('harness-host-panel').evaluate((element) => element.getBoundingClientRect().height)).toBe(800);
   const anchor = JSON.parse(await harness.getAttribute('data-layer-anchor') ?? 'null') as
-    { inside: boolean; layer: number[]; editor: number[] } | null;
+    { inside: boolean; layer: number[]; editor: number[]; workspace: number[] } | null;
   expect(anchor).not.toBeNull();
   expect(anchor!.inside).toBe(true);
   expect(Math.abs(anchor!.editor[3]! - 600)).toBeLessThan(1);
-  anchor!.layer.forEach((value, index) => expect(Math.abs(value - anchor!.editor[index]!)).toBeLessThan(1));
+  expect(anchor!.workspace[3]).toBeGreaterThan(0);
+  anchor!.layer.forEach((value, index) => expect(Math.abs(value - anchor!.workspace[index]!)).toBeLessThan(1));
   await expect(page.getByTestId('xlsx-loading')).toHaveCount(0);
+  expect(await page.evaluate(() => window.__xlsxWorkerEditor.errors)).toEqual([]);
+});
+
+test('a host grid style on the editor root lays out the toolbar, workspace and tabs alike with and without an indicator', async ({ page }) => {
+  const layout = async (query: string) => {
+    await page.goto(`/xlsx-worker-editor.html?asyncApi=1&gridRoot=1${query}`);
+    await page.waitForFunction(() => '__xlsxWorkerEditor' in window);
+    await pinnedEvaluate(page, () => window.__xlsxWorkerEditor.ready);
+    await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.paintedTexts())).toContain('initial');
+    await expect(page.getByTestId('xlsx-loading')).toHaveCount(0);
+    return page.evaluate(() => {
+      const root = document.querySelector<HTMLElement>('[role="application"]')!;
+      const parts = ['xlsx-toolbar', 'xlsx-workspace', 'xlsx-sheet-tabs']
+        .map((id) => document.querySelector<HTMLElement>(`[data-testid="${id}"]`)!);
+      return {
+        style: [root.style.position, root.style.display, root.style.gap],
+        direct: parts.map((part) => part.parentElement === root),
+        boxes: parts.map((part) => {
+          const { top, bottom, left, right } = part.getBoundingClientRect();
+          return [top, bottom, left, right];
+        }),
+      };
+    });
+  };
+  const plain = await layout('');
+  const indicated = await layout('&fixedIndicator=1');
+  await expect(page.locator('#worker-editor-root')).toHaveAttribute('data-indicator-in-layer', 'true');
+  expect(plain.style).toEqual(['static', 'grid', '8px']);
+  expect(plain.direct).toEqual([true, true, true]);
+  expect(indicated).toEqual(plain);
+  const [toolbar, workspace] = plain.boxes;
+  expect(Math.abs(workspace![0]! - toolbar![1]! - 8)).toBeLessThan(0.5);
+  expect(workspace![1]! - workspace![0]!).toBeGreaterThan(0);
   expect(await page.evaluate(() => window.__xlsxWorkerEditor.errors)).toEqual([]);
 });
 

@@ -30,6 +30,7 @@ const collaboration = parameters.has('collaboration');
 const peerless = parameters.has('asyncApi') || collaboration;
 const fixedIndicator = parameters.has('fixedIndicator');
 const staticRoot = parameters.has('staticRoot');
+const gridRoot = parameters.has('gridRoot');
 let mainThreadEngines = 0;
 globalThis.__xlsxMainEngineProbe = { capture() { mainThreadEngines += 1; } };
 
@@ -334,12 +335,14 @@ function recordIndicator(element: HTMLDivElement | null) {
   if (rootElement.querySelector('[data-testid="xlsx-workspace"]')) rootElement.dataset.indicatorWithWorkspace = 'true';
   const layer = element.closest<HTMLElement>('[data-testid="xlsx-loading"]');
   const editor = layer?.closest<HTMLElement>('[role="application"]');
-  if (!layer || !editor) return;
+  const workspace = editor?.querySelector('[data-testid="xlsx-workspace"]');
+  if (!layer || !editor || !workspace) return;
   rootElement.dataset.indicatorInLayer = 'true';
   rootElement.dataset.layerAnchor = JSON.stringify({
     inside: editor.contains(layer.offsetParent),
     layer: boxOf(layer),
     editor: boxOf(editor),
+    workspace: boxOf(workspace),
   });
 }
 
@@ -368,7 +371,7 @@ function renderPeerlessEditor(bytes: Uint8Array, index: number) {
           Opening workbook
         </div>
       ) : undefined}
-      style={staticRoot ? { position: 'static' } : undefined}
+      style={gridRoot ? { position: 'static', display: 'grid', gap: 8 } : staticRoot ? { position: 'static' } : undefined}
       plugins={[slotPlugin]}
       pluginGrants={{ routes: { document: 'write', editBatches: true } }}
       collaboration={
@@ -440,7 +443,7 @@ const open = (bytes: Uint8Array) => {
         </div>
       ))}
     </div>
-  ) : peerless && fixedIndicator ? (
+  ) : peerless && (fixedIndicator || gridRoot) ? (
     <div data-testid="harness-host-panel" style={{ position: 'relative', height: 800 }}>
       <div data-testid="harness-fixed-parent" style={{ height: 600 }}>
         {renderPeerlessEditor(bytes, 0)}
