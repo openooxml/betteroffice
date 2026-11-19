@@ -53,6 +53,8 @@ export interface WorkerEditorProbe {
   readOnlyEditRefusal(): string;
   savedInputs(): Promise<string[]>;
   releaseHydration(): void;
+  openHeld(): boolean;
+  releaseOpen(): void;
   holdCellInputs(): void;
   heldCellInputs(): number;
   releaseCellInputs(): void;
