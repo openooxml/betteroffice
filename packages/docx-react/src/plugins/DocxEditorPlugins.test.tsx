@@ -2470,6 +2470,29 @@ describe('DocxEditor plugins (peer-less engine)', () => {
     return { ref, view };
   };
 
+  test('onReady receives the ref api once, after the first page paints, and not again on later paints or edits', async () => {
+    const order: string[] = [];
+    const onReady = mock((_api: DocxEditorRef) => { order.push('ready'); });
+    const props = { onReady, onFirstPagePainted: () => { order.push('painted'); } } as Partial<DocxEditorBaseProps>;
+    const ref = createRef<DocxEditorRef>();
+    render(<DocxEditor ref={ref} documentBuffer={documentBytes()} {...props} />);
+    await until(() => order.includes('painted'));
+    await settle(100);
+    expect(order).toEqual(['painted', 'ready']);
+    expect(onReady).toHaveBeenCalledTimes(1);
+    expect(onReady.mock.calls[0]![0]).toBe(ref.current!);
+    await until(() => ref.current?.commands.getState('save').enabled === true);
+    await act(async () => { await ref.current!.whenLayoutComplete({ timeoutMs: 3000 }); });
+    await act(async () => ref.current!.setZoom(1.5));
+    const { version, paragraph } = await firstParagraph(ref);
+    await act(async () => {
+      expect(await ref.current!.applyEdits(appendRequest(version, paragraph.paraId))).toMatchObject({ ok: true });
+    });
+    await act(async () => { await ref.current!.whenLayoutComplete({ timeoutMs: 3000 }); });
+    await settle(300);
+    expect(order).toEqual(['painted', 'ready']);
+  });
+
   test('the default worker emits one settled selection after keyboard navigation', async () => {
     const events: DocxPluginEvent[] = [];
     const plugin = defineDocxPlugin({ id: 'settle', createState: () => null,

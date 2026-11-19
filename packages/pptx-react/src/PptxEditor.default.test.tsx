@@ -31,14 +31,21 @@ test('default readiness uses one worker engine and no eager main-thread engine',
   } finally { hybrid.mockRestore(); engines.mockRestore(); warn.mockRestore(); }
 });
 
-test('save resolves the bytes like the deprecated saveAsync alias without calling onSave', async () => {
+test('save hands its bytes to onSave once without downloading, like the deprecated saveAsync alias', async () => {
   const onSave = mock((_bytes: Uint8Array) => {});
-  const { api } = await open({ onSave });
-  const saved = await api.save();
-  expect(saved).toBeInstanceOf(Uint8Array);
-  expect(saved.byteLength).toBeGreaterThan(0);
-  expect(await api.saveAsync()).toEqual(saved);
-  expect(onSave).not.toHaveBeenCalled();
+  const click = spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+  try {
+    const { api } = await open({ onSave });
+    const saved = await api.save();
+    expect(saved).toBeInstanceOf(Uint8Array);
+    expect(saved.byteLength).toBeGreaterThan(0);
+    expect(onSave).toHaveBeenCalledTimes(1);
+    expect(onSave.mock.calls[0]![0]).toBe(saved);
+    expect(click).not.toHaveBeenCalled();
+    expect(await api.saveAsync()).toEqual(saved);
+    expect(onSave).toHaveBeenCalledTimes(2);
+    expect(click).not.toHaveBeenCalled();
+  } finally { click.mockRestore(); }
 });
 
 for (const operation of ['handle', 'host'] as const) {

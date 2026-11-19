@@ -325,6 +325,25 @@ test('worker highlightColor formats and clears through formatRange', async () =>
   }
 });
 
+test('onReady receives the ref once, after the first page paints', () => {
+  const { controller, binding, viewStore } = fixture(-1);
+  const order: string[] = [];
+  const onReady = mock((_api: unknown) => { order.push('ready'); });
+  controller.update({ read: async () => ({} as never), focus() {}, zoom: 1, onReady,
+    onFirstPagePainted: () => { order.push('painted'); } } as Parameters<typeof controller.update>[0]);
+  controller.opening();
+  controller.attach(binding);
+  expect(order).toEqual([]);
+  const geometry = (frameEpoch: number) => viewStore.installFrameGeometry({ identity: viewStore.getSnapshot().identity, coversThroughSeq: 0,
+    frameEpoch, layoutRevision: frameEpoch, pages: [{ page: { pageId: '1', pageIndex: 0 },
+      bounds: { x: 0, y: 0, width: 600, height: 800 }, transform: [1, 0, 0, 1, 0, 0] }], caret: null, selectionRects: [] });
+  geometry(2);
+  expect(order).toEqual(['painted', 'ready']);
+  expect(onReady.mock.calls[0]![0]).toBe(controller.ref);
+  geometry(3);
+  expect(onReady).toHaveBeenCalledTimes(1);
+});
+
 test('worker insertBreak stays a loud sync-API failure', () => {
   const { controller } = toolbarFixture();
   expect(() => controller.ref.insertBreak({ paraId: 'p1', type: 'page' })).toThrow(LEGACY_SYNC_API_PROP);
