@@ -1780,6 +1780,60 @@ fn paragraph_styles_apply_their_full_effect_in_rust() {
     }
 }
 
+#[test]
+fn paragraph_styles_without_a_numbering_id_apply_like_plain_styles() {
+    // Word's built-in Subtitle carries `<w:numPr><w:ilvl w:val="1"/></w:numPr>` with no
+    // `w:numId`; a style with `numId` 0 explicitly turns numbering off. Neither numbers the
+    // paragraph, so neither may be refused as a numbered style.
+    let body = format!(
+        "{}{}",
+        p("00000001", &r("plain")),
+        styled("00000002", "ListNumber", &r("listed"))
+    );
+    let mut parts = ooxml_opc::unzip_parts(&docx(&body)).unwrap();
+    let styles = format!(
+        r#"<w:styles {NS}>{STYLES}<w:style w:type="paragraph" w:styleId="Subtitle"><w:name w:val="Subtitle"/><w:basedOn w:val="Normal"/><w:pPr><w:numPr><w:ilvl w:val="1"/></w:numPr><w:jc w:val="center"/></w:pPr><w:rPr><w:color w:val="5A5A5A"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Unnumbered"><w:name w:val="Unnumbered"/><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="0"/></w:numPr></w:pPr></w:style></w:styles>"#
+    );
+    parts
+        .iter_mut()
+        .find(|(name, _)| name == "word/styles.xml")
+        .unwrap()
+        .1 = styles.into_bytes();
+    let doc = open_package(&ooxml_opc::rezip_parts(&parts).unwrap());
+    let undo = UndoSession::new();
+
+    apply(&doc, &undo, vec![set_style("00000001", "Subtitle")]);
+    let subtitle = properties(&doc, "00000001");
+    assert_eq!(subtitle.get("pStyle"), Some(&Any::from("Subtitle")));
+    assert_eq!(subtitle.get("alignment"), Some(&Any::from("center")));
+    assert!(!subtitle.contains_key("numPr"));
+    assert!(!subtitle.contains_key("numPrFromStyle"));
+
+    apply(&doc, &undo, vec![set_style("00000002", "Unnumbered")]);
+    let cleared = properties(&doc, "00000002");
+    assert_eq!(cleared.get("pStyle"), Some(&Any::from("Unnumbered")));
+    assert!(!cleared.contains_key("numPr"));
+
+    let applied = apply(
+        &doc,
+        &undo,
+        vec![insert_paragraphs(
+            "00000001",
+            TargetEdge::End,
+            vec![new_paragraph("sub", Some("Subtitle"))],
+        )],
+    );
+    let inserted = properties(&doc, &applied.receipts[0].new_paragraphs[0].para_id);
+    assert_eq!(inserted.get("pStyle"), Some(&Any::from("Subtitle")));
+    assert!(!inserted.contains_key("numPr"));
+
+    // A style that really numbers is still refused.
+    assert_eq!(
+        code(&doc, vec![set_style("00000001", "ListNumber")]),
+        EditFailureCode::Unsupported
+    );
+}
+
 fn open_numbered_restyle(body: &str) -> EditingDoc {
     open_package(&numbered_restyle_package(body))
 }
