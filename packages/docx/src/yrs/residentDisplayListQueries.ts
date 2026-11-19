@@ -1,6 +1,7 @@
 import type { DisplayList } from '../layout/render/displayList';
 import {
   createDisplayListQueries,
+  displayListQueriesHoldParsedList,
   endDisplayListQueriesLine,
   type DisplayListQueries,
 } from '../layout/render/displayListQueries';
@@ -18,16 +19,18 @@ interface HeldQueries {
 const held = new WeakMap<object, HeldQueries>();
 
 /**
- * The query engine over `list` for the session `owner`: one per display list, built from the
- * previous one so the parsed pages both lists share stay parsed.
+ * The query engine over `list` for the session `owner`: one per display list, built by `create`
+ * from the previous one so the parsed pages both lists share stay parsed.
  */
-export function residentDisplayListQueries(owner: object, list: DisplayList): DisplayListQueries {
+export function residentDisplayListQueries(
+  owner: object, list: DisplayList, create: typeof createDisplayListQueries = createDisplayListQueries
+): DisplayListQueries {
   const engine = loadedRustDisplayListQueryEngine();
   const current = held.get(owner);
   if (current && current.list === list && current.engine === engine) return current.queries;
-  const queries = createDisplayListQueries(list, engine ?? undefined,
-    current && current.engine === engine ? current.queries : null, owner, RESIDENT_QUERY_STORE_PAGES);
-  queries.prime();
+  const donor = current && current.engine === engine ? current.queries : null;
+  const queries = create(list, engine ?? undefined, donor, owner, RESIDENT_QUERY_STORE_PAGES);
+  if (donor && displayListQueriesHoldParsedList(donor)) queries.prime();
   current?.queries.dispose();
   held.set(owner, { list, engine, queries });
   return queries;

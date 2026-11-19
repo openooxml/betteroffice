@@ -413,6 +413,11 @@ export function endDisplayListQueriesLine(line: object): void {
   lineage.handles.clear();
 }
 
+/** True while `queries` holds its list parsed in the Rust store, for a facade built from it to adopt. */
+export function displayListQueriesHoldParsedList(queries: DisplayListQueries): boolean {
+  return facadeDeltaSeeds.get(queries)?.hasHandle() ?? false;
+}
+
 type DisplayListQuerySource = RustDisplayListQueryEngine | ResidentDisplayListQueryEngine;
 
 /**
