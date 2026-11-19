@@ -6,4 +6,4 @@
 '@betteroffice/rust-crates': minor
 ---
 
-Conditional formats evaluate once per edit within a frame budget; after a direct edit a cell keeps its previous format until decided. Rule formula names parse once per frame. Display lists gain `conditionalPending`, cells left undecided; the editor asks for frames until 0.
+Conditional formats are decided once per edit, at most 10 ms a frame after rule compilation and range statistics, so frames can run over. Rule formula names parse once per frame. Display lists gain `conditionalPending`, cells left undecided; the editor asks for frames until 0.

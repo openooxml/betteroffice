@@ -1482,7 +1482,7 @@ fn range_statistics_too_large_for_the_units_left_wait_for_a_frame_that_starts_wi
 }
 
 #[test]
-fn compiling_the_rules_is_charged_to_the_frame_that_compiles_them() {
+fn the_frame_that_compiles_the_rules_counts_one_unit_per_rule_formula() {
     let workbook = workbook(&sheet(
         rows(10, numbers(1, |row, _| row)),
         [

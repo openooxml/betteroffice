@@ -5,4 +5,4 @@
 '@betteroffice/rust-crates': minor
 ---
 
-Conditional formatting rules paint their fill, font color, bold and italic on matching cells, on screen and in PNG renders, only where the result is certain; otherwise a cell paints none. On by default. Rust `xlsx_render` gains `CellFormats` and `build_display_list_with_geometry_and_formats`.
+Conditional formats paint fill, font color, bold and italic, on screen and in PNG renders, only where the result is certain; after a cell edit, value paste or recalculation, an undecided cell keeps its previous format. On by default. Rust `xlsx_render` gains `CellFormats` and `build_display_list_with_geometry_and_formats`.
