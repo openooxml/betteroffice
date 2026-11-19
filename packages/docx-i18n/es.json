@@ -874,6 +874,7 @@
     "toolbarGroup": "Complementos",
     "panelTabs": "Paneles de complementos",
     "collapsePanel": "Contraer {title}",
-    "expandPanel": "Expandir {title}"
+    "expandPanel": "Expandir {title}",
+    "miniToolbar": "Formato de la selección"
   }
 }
