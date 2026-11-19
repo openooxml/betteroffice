@@ -4110,14 +4110,16 @@ fn block_control_fill_with_unnumbered_style_adds_paragraphs() {
 
     let fill = |tag: &str| {
         step(EditOperation::SetContentControlText {
-            target: ContentControlSelector::Tag { tag: tag.to_owned() },
+            target: ContentControlSelector::Tag {
+                tag: tag.to_owned(),
+            },
             text: "first\nsecond".to_owned(),
         })
     };
     for (style_id, num_pr) in [
         ("Subtitle", r#"<w:ilvl w:val="1"/>"#),
         ("Unnumbered", r#"<w:ilvl w:val="0"/><w:numId w:val="0"/>"#),
-        ("ListNumber", r#"<w:ilvl w:val="0"/><w:numId w:val="1"/>"#),
+        ("Numbered1", r#"<w:ilvl w:val="0"/><w:numId w:val="1"/>"#),
     ] {
         let body = format!(
             r#"<w:sdt><w:sdtPr><w:tag w:val="fill"/></w:sdtPr><w:sdtContent>{}</w:sdtContent></w:sdt>"#,
@@ -4128,18 +4130,28 @@ fn block_control_fill_with_unnumbered_style_adds_paragraphs() {
             r#"<w:styles {NS}>{STYLES}<w:style w:type="paragraph" w:styleId="{style_id}"><w:name w:val="{style_id}"/><w:pPr><w:numPr>{num_pr}</w:numPr></w:pPr></w:style></w:styles>"#,
         ).into_bytes();
         let doc = open_package(&ooxml_opc::rezip_parts(&parts).unwrap());
-        if style_id == "ListNumber" {
+        if style_id == "Numbered1" {
             assert_eq!(code(&doc, vec![fill("fill")]), EditFailureCode::Unsupported);
             continue;
         }
         let applied = apply(&doc, &UndoSession::new(), vec![fill("fill")]);
-        assert_eq!(texts(&doc, "body:sdt0", EditTextView::Accepted), ["first", "second"]);
+        assert_eq!(
+            texts(&doc, "body:sdt0", EditTextView::Accepted),
+            ["first", "second"]
+        );
         let added = &applied.receipts[0].new_paragraphs;
         assert_eq!(added.len(), 1);
-        let paragraph = doc.paragraphs("body:sdt0").unwrap().into_iter()
-            .find(|paragraph| paragraph.para_id == added[0].para_id).unwrap();
+        let paragraph = doc
+            .paragraphs("body:sdt0")
+            .unwrap()
+            .into_iter()
+            .find(|paragraph| paragraph.para_id == added[0].para_id)
+            .unwrap();
         assert_eq!(paragraph.text, "second");
-        assert_eq!(paragraph.properties.get("pStyle"), Some(&Any::from(style_id)));
+        assert_eq!(
+            paragraph.properties.get("pStyle"),
+            Some(&Any::from(style_id))
+        );
         assert!(!paragraph.properties.contains_key("numPr"));
         assert!(!paragraph.properties.contains_key("numPrFromStyle"));
     }
