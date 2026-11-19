@@ -272,6 +272,27 @@ describe('created lists carried by a saved file', () => {
     expect(savedFormat(bytes, beta)).toBe('decimal');
   });
 
+  test('a key drawn again by a new session for a list of the same kind names a new definition, not the saved one', async () => {
+    const first = await session(78);
+    first.seedFromDocx(makeDocx(DOCUMENT, LISTS_NUMBERING));
+    createList(first, 'Alpha', 'bullet');
+    const earlier = (await saveYrsDocx(first, { updateModifiedDate: false })).bytes;
+    const alpha = savedNumId(earlier, 'Alpha');
+    expect(alpha).toBeGreaterThan(3);
+    const reopened = await session(78);
+    reopened.seedFromDocx(earlier.slice());
+    createList(reopened, 'Beta', 'bullet');
+    const keys = (target: YrsSession) => target.createdListDefinitions().map(definition => definition.key);
+    expect(keys(reopened)).toEqual(keys(first));
+    const bytes = (await saveYrsDocx(reopened, { updateModifiedDate: false })).bytes;
+    const beta = savedNumId(bytes, 'Beta');
+    expect(savedNumId(bytes, 'Alpha')).toBe(alpha);
+    expect(beta).toBeGreaterThan(alpha!);
+    expect(counts(bytes)).toEqual({ abstractNums: SOURCE.abstractNums + 2, nums: SOURCE.nums + 2 });
+    expect(savedFormat(bytes, alpha)).toBe('bullet');
+    expect(savedFormat(bytes, beta)).toBe('bullet');
+  });
+
   test('a structural copy of the projection still saves the created ids', async () => {
     const created = await session();
     created.seedFromDocx(makeDocx(DOCUMENT, LISTS_NUMBERING));
