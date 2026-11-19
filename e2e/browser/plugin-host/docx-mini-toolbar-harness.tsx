@@ -37,8 +37,9 @@ const editorMode = params.get('mode') === 'viewing' ? { mode: 'viewing' as const
 function Harness() {
   const [state, setState] = useState<{ buffer: ArrayBuffer; key: number } | null>(null);
   open = (buffer) => setState((previous) => ({ buffer, key: (previous?.key ?? 0) + 1 }));
-  return state && <DocxEditor key={state.key} ref={(editor) => { probe.editor = editor; }} documentBuffer={state.buffer}
+  return state && <><DocxEditor key={state.key} ref={(editor) => { probe.editor = editor; }} documentBuffer={state.buffer}
     fonts={fonts} measurementFontProvider={measurementFontProvider} plugins={PLUGINS} pluginGrants={GRANTS}
-    readOnly={params.get('readonly') === '1'} {...editorMode} />;
+    readOnly={params.get('readonly') === '1'} {...editorMode} />
+    <button type="button" style={{ position: 'fixed', right: 0, bottom: 0 }}>After the editor</button></>;
 }
 createRoot(document.getElementById('root')!).render(<Harness />);

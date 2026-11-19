@@ -259,3 +259,62 @@ for (const query of ['?readonly=1', '?mode=viewing']) {
     await expect(toolbar(page)).toHaveCount(0);
   });
 }
+
+const focusInToolbar = (page: Page) => page.evaluate(() => !!document.activeElement?.closest('[role="toolbar"][aria-label="Selection formatting"]'));
+const bodyText = (page: Page) => pinnedEvaluate(page, async () => {
+  const read = await window.__miniToolbar.editor!.readParagraphs({ story: 'body', view: 'accepted' });
+  return read.ok ? read.paragraphs.map((value) => value.text).join('\n') : '';
+});
+
+test('Paste as plain text from the keyboard returns focus to the document and typing reaches it', async ({ page }) => {
+  await open(page);
+  await page.evaluate(() => navigator.clipboard.writeText('PastedX'));
+  await doubleClick(page, 'Alpha');
+  await expect(toolbar(page)).toBeVisible();
+  await page.keyboard.press('Alt+F10');
+  await page.keyboard.press('End');
+  await expect(toolbar(page).getByRole('button', { name: 'Paste as Plain Text' })).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect.poll(() => bodyText(page)).toContain('PastedX');
+  await expect(input(page)).toBeFocused();
+  await page.keyboard.type('Q');
+  await expect.poll(() => bodyText(page)).toContain('PastedXQ');
+});
+
+test('scrolling the selection out of view while a toolbar button has focus returns focus to the document', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 420 });
+  await open(page);
+  const word = await doubleClick(page, 'Bravo');
+  await expect(toolbar(page)).toBeVisible();
+  await page.keyboard.press('Alt+F10');
+  await expect(toolbar(page).getByRole('button', { name: 'Bold' })).toBeFocused();
+  await page.mouse.move(word.x + word.width / 2, word.y + word.height / 2);
+  await page.mouse.wheel(0, 3000);
+  await expect(toolbar(page)).toHaveCount(0);
+  await expect(input(page)).toBeFocused();
+});
+
+test('a Tab that leaves the document with the toolbar shown does not land on a toolbar button', async ({ page }) => {
+  await open(page);
+  await doubleClick(page, 'Bravo');
+  await expect(toolbar(page)).toBeVisible();
+  await page.keyboard.press('Escape');
+  await page.keyboard.press('Tab');
+  expect(await focusInToolbar(page)).toBe(false);
+  await expect(input(page)).not.toBeFocused();
+});
+
+test('Escape then Tab from the document leaves the editor forward with the toolbar shown', async ({ page }) => {
+  await open(page);
+  await doubleClick(page, 'Bravo');
+  await expect(toolbar(page)).toBeVisible();
+  const after = page.getByRole('button', { name: 'After the editor' });
+  await page.keyboard.press('Escape');
+  await page.keyboard.press('Tab');
+  for (let step = 0; step < 60 && !await after.evaluate((element) => element === document.activeElement); step += 1) {
+    expect(await focusInToolbar(page)).toBe(false);
+    await expect(input(page)).not.toBeFocused();
+    await page.keyboard.press('Tab');
+  }
+  await expect(after).toBeFocused();
+});

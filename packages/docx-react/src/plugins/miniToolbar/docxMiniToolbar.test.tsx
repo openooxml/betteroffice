@@ -29,6 +29,8 @@ type Context = DocxPluginContext<MiniToolbarState>;
 type CommandStates = Record<string, { enabled: boolean; active?: boolean | 'mixed'; disabledReason?: { code: string; message: string } }>;
 
 const REFUSED = { enabled: false, disabledReason: { code: 'permission-denied', message: 'not granted' } };
+type FocusAnswer = { ok: true } | { ok: false; failure: { code: string; message: string } };
+const NO_INPUT_REFUSAL: FocusAnswer = { ok: false, failure: { code: 'unsupported-policy', message: 'The document input cannot take focus now' } };
 
 function definitionOf(plugin = docxMiniToolbar()): DocxPluginDefinition<MiniToolbarState> {
   return pluginDefinition(plugin) as unknown as DocxPluginDefinition<MiniToolbarState>;
@@ -69,8 +71,8 @@ function geometry(rect = { x: 300, y: 300, width: 80, height: 20 }): DocxPluginG
   } as unknown as DocxPluginGeometry;
 }
 
-function context(options: { states?: CommandStates; state?: Partial<MiniToolbarState>; snapshot?: Partial<DocxPluginSnapshot> } = {}) {
-  const calls = { executed: [] as string[], focused: 0, states: [] as MiniToolbarState[] };
+function context(options: { states?: CommandStates; state?: Partial<MiniToolbarState>; snapshot?: Partial<DocxPluginSnapshot>; focus?: () => FocusAnswer } = {}) {
+  const calls = { executed: [] as string[], focused: 0, focusedFrom: [] as (Element | null)[], states: [] as MiniToolbarState[] };
   let current: MiniToolbarState = { ...INITIAL_MINI_TOOLBAR_STATE, ...options.state };
   const value = {
     pluginId: DOCX_MINI_TOOLBAR_ID,
@@ -92,6 +94,8 @@ function context(options: { states?: CommandStates; state?: Partial<MiniToolbarS
     },
     focusDocument: () => {
       calls.focused += 1;
+      calls.focusedFrom.push(document.activeElement);
+      if (options.focus) return options.focus();
       return { ok: true };
     },
     run: async (action: (next: Context) => unknown) => { await action(value as unknown as Context); },
@@ -268,7 +272,7 @@ describe('the overlay', () => {
     const { context: ctx, calls } = context({ states });
     const view = renderOverlay(docxMiniToolbar(), ctx);
     const buttons = [...view.getByRole('toolbar').querySelectorAll('button')];
-    expect(buttons.map((button) => button.tabIndex)).toEqual([0, -1, -1, -1, -1, -1]);
+    expect(buttons.map((button) => button.tabIndex)).toEqual([-1, -1, -1, -1, -1, -1]);
     act(() => buttons[0]!.focus());
     fireEvent.keyDown(buttons[0]!, { key: 'ArrowRight' });
     expect(document.activeElement).toBe(buttons[2]!);
@@ -388,5 +392,91 @@ describe('focus and pointer presses', () => {
     } finally {
       spy.restore();
     }
+  });
+});
+
+describe('focus hand-back', () => {
+  const DIALOG_REFUSAL: FocusAnswer = { ok: false, failure: { code: 'unsupported-policy', message: 'An editor dialog is open' } };
+  const collapsed = { formatting: { hasSelection: false }, displayRange: { story: 'body', from: 9, to: 9, layoutId: 'layout-1' } } as unknown as DocxPluginSelection;
+  const scrolled = { ...geometry(), viewport: { x: 0, y: 2000, width: 1000, height: 800 } } as DocxPluginGeometry;
+
+  function documentInput() {
+    const input = document.createElement('textarea');
+    document.body.append(input);
+    return input;
+  }
+
+  function focusedToolbar(focus?: () => FocusAnswer) {
+    const plugin = docxMiniToolbar();
+    const Overlay = definitionOf(plugin).overlay!;
+    const first = context({ states: GRANTED, state: { shown: true }, focus });
+    const view = render(<Overlay context={first.context} geometry={geometry()} />);
+    const bold = view.getByRole('button', { name: 'Bold' });
+    act(() => bold.focus());
+    const after = (snapshotOverrides: Partial<DocxPluginSnapshot>, geo = geometry()) => {
+      const next = context({ states: GRANTED, state: first.context.state, snapshot: { inputFocused: false, ...snapshotOverrides }, focus });
+      view.rerender(<Overlay context={next.context} geometry={geo} />);
+      return next.calls;
+    };
+    return { view, bold, calls: first.calls, after };
+  }
+
+  test('every button stays out of the tab order', () => {
+    for (const states of [GRANTED, { ...GRANTED, bold: REFUSED }, {}]) {
+      const { context: ctx } = context({ states });
+      const view = renderOverlay(docxMiniToolbar(), ctx);
+      const buttons = [...view.getByRole('toolbar').querySelectorAll('button')];
+      expect(buttons.map((button) => button.tabIndex)).toEqual(buttons.map(() => -1));
+      cleanup();
+    }
+  });
+
+  for (const [cause, overrides, geo] of [
+    ['the selection collapses', { selection: collapsed }, undefined],
+    ['the mode changes to viewing', { mode: 'viewing' as const }, undefined],
+    ['the selection scrolls out of view', {}, scrolled],
+  ] as const) {
+    test(`when ${cause} with a button focused, focus returns to the document before the toolbar goes`, () => {
+      const input = documentInput();
+      try {
+        const { view, bold, after } = focusedToolbar(() => {
+          input.focus();
+          return { ok: true };
+        });
+        const calls = after(overrides, geo);
+        expect(calls.focused).toBe(1);
+        expect(calls.focusedFrom[0]).toBe(bold);
+        expect(document.activeElement).toBe(input);
+        expect(view.queryByRole('toolbar')).toBeNull();
+      } finally {
+        input.remove();
+      }
+    });
+  }
+
+  test('unmounting with a button focused returns focus to the document first', () => {
+    const { view, bold, calls } = focusedToolbar();
+    view.unmount();
+    expect(calls.focused).toBe(1);
+    expect(calls.focusedFrom[0]).toBe(bold);
+  });
+
+  test('a refused focusDocument leaves Tab and Escape to the browser and keeps the toolbar', () => {
+    const { view, bold, calls } = focusedToolbar(() => DIALOG_REFUSAL);
+    expect(fireEvent.keyDown(bold, { key: 'Tab' })).toBe(true);
+    expect(fireEvent.keyDown(bold, { key: 'Escape' })).toBe(true);
+    expect(calls.focused).toBe(2);
+    expect(view.getByRole('toolbar')).not.toBeNull();
+    expect(document.activeElement).toBe(bold);
+    expect(calls.states.some((state) => state.dismissed !== null)).toBe(false);
+  });
+
+  test('in the in-thread editor, which refuses focusDocument, the toolbar stays under its focus when it would hide', () => {
+    const { view, bold, after } = focusedToolbar(() => NO_INPUT_REFUSAL);
+    const calls = after({ selection: collapsed });
+    expect(calls.focused).toBe(1);
+    expect(view.getByRole('toolbar')).not.toBeNull();
+    expect(document.activeElement).toBe(bold);
+    expect(fireEvent.keyDown(bold, { key: 'Tab' })).toBe(true);
   });
 });
