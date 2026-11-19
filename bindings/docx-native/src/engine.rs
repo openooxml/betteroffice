@@ -1782,6 +1782,34 @@ impl EditSession {
             .map_err(|error| map_error(env, error))
     }
 
+    #[napi(catch_unwind, js_name = "edit_text_resident_marked")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn edit_text_resident_marked(
+        &self,
+        env: Env,
+        story: String,
+        start_para: String,
+        start_offset: u32,
+        end_para: String,
+        end_offset: u32,
+        text: String,
+        delta_json: String,
+    ) -> Result<Either<String, Undefined>> {
+        let _call = EngineCall::new(env);
+        self.document(env)?
+            .edit_text_resident_marked(
+                &story,
+                &start_para,
+                start_offset,
+                &end_para,
+                end_offset,
+                &text,
+                &delta_json,
+            )
+            .map(optional_result)
+            .map_err(|error| map_error(env, error))
+    }
+
     #[napi(
         catch_unwind,
         js_name = "encode_diff_chunks",

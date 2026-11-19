@@ -2490,6 +2490,19 @@ const rows: Row<Docx>[] = [
       return { receipt: s.edit_text_resident('body', id, at, id, at, 'Resident '), after: s.paragraphs('body') };
     },
   }),
+  defineRow({
+    method: 'EditSession.edit_text_resident_marked',
+    mutates: true,
+    setup: ({ session: s }: Docx) => layout(s),
+    call: ({ session: s }) => {
+      const id = paraId(s, 'Second body');
+      const at = textAt(s, 'Second body', 0);
+      // a delta that sets nothing changes nothing; a bold one types the text bold as one edit
+      const declined = s.edit_text_resident_marked('body', id, at, id, at, 'Plain ', '{}');
+      const receipt = s.edit_text_resident_marked('body', id, at, id, at, 'Bold ', JSON.stringify({ bold: true }));
+      return { declined, receipt, after: s.paragraphs('body') };
+    },
+  }),
   {
     method: 'EditSession.set_part_metadata',
     mutates: true,

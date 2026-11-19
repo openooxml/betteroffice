@@ -105,6 +105,7 @@ export declare class EditSession {
   document_properties_json(): string
   drain_update_event(): Uint8Array
   edit_text_resident(story: string, startPara: string, startOffset: number, endPara: string, endOffset: number, text?: string | undefined | null): string
+  edit_text_resident_marked(story: string, startPara: string, startOffset: number, endPara: string, endOffset: number, text: string, deltaJson: string): string | undefined
   encode_diff_chunks(remoteStateVector: Uint8Array, maxChunkBytes: number): Array<any>
   encode_diff(remoteStateVector: Uint8Array): Uint8Array
   encode_peer_metadata(): Uint8Array
