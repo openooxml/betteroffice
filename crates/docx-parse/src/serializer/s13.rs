@@ -2778,7 +2778,7 @@ fn inline_has_drawing_image(node: &InlineNode, control: bool, revision: bool) ->
                 || field
                     .structured_result
                     .as_ref()
-                    .filter(|result| result.blocks.is_none())
+                    .filter(|result| !result.spans_paragraphs())
                     .and_then(|result| result.inline.as_ref())
                     .map_or_else(
                         || {
@@ -2897,7 +2897,7 @@ fn visit_inline_images(
             if let Some(nodes) = field
                 .structured_result
                 .as_mut()
-                .filter(|result| result.blocks.is_none())
+                .filter(|result| !result.spans_paragraphs())
                 .and_then(|result| result.inline.as_mut())
             {
                 for node in nodes {
@@ -3339,7 +3339,7 @@ fn inline_has_hyperlink(node: &InlineNode, control: bool, revision: bool) -> boo
         InlineNode::ComplexField(field) => field
             .structured_result
             .as_ref()
-            .filter(|result| result.blocks.is_none())
+            .filter(|result| !result.spans_paragraphs())
             .and_then(|result| result.inline.as_ref())
             .is_some_and(|nodes| {
                 nodes
@@ -3377,7 +3377,7 @@ fn visit_inline_hyperlinks(
             let Some(nodes) = field
                 .structured_result
                 .as_mut()
-                .filter(|result| result.blocks.is_none())
+                .filter(|result| !result.spans_paragraphs())
                 .and_then(|result| result.inline.as_mut())
             else {
                 return;
@@ -3635,7 +3635,7 @@ impl<'a> SelectiveParagraphIndex<'a> {
                 match field
                     .structured_result
                     .as_ref()
-                    .filter(|result| result.blocks.is_none())
+                    .filter(|result| !result.spans_paragraphs())
                     .and_then(|result| result.inline.as_ref())
                 {
                     Some(nodes) => {
@@ -5314,5 +5314,94 @@ mod tests {
             .collect();
         assert_eq!(media_rels.len(), 1, "{rels}");
         assert_eq!(parts["word/media/image1.png"], [1, 2, 3]);
+    }
+
+    /// A field whose result spans paragraphs, holding `inline` as its structured result and
+    /// `field_result` as the runs a save writes.
+    fn spanning_field(inline: serde_json::Value, field_result: serde_json::Value) -> InlineNode {
+        serde_json::from_value(json!({
+            "type": "complexField",
+            "instruction": "QUOTE x",
+            "fieldType": "QUOTE",
+            "fieldCode": [],
+            "fieldResult": field_result,
+            "structuredResult": { "inline": inline, "blockCount": 1 }
+        }))
+        .unwrap()
+    }
+
+    fn drawing_run(relationship_id: &str) -> serde_json::Value {
+        json!({
+            "type": "run",
+            "content": [{
+                "type": "drawing",
+                "image": {
+                    "type": "image",
+                    "rId": relationship_id,
+                    "src": "data:image/png;base64,AQID",
+                    "size": { "width": 9525, "height": 9525 },
+                    "wrap": { "type": "inline" }
+                }
+            }]
+        })
+    }
+
+    fn hyperlink_value() -> serde_json::Value {
+        json!({ "type": "hyperlink", "anchor": "top", "children": [] })
+    }
+
+    #[test]
+    fn a_field_spanning_paragraphs_finds_drawings_in_its_written_runs_only() {
+        let written = spanning_field(json!([]), json!([drawing_run("rIdResult")]));
+        assert!(inline_has_drawing_image(&written, true, true));
+        let copied = spanning_field(json!([drawing_run("rIdInline")]), json!([]));
+        assert!(!inline_has_drawing_image(&copied, true, true));
+    }
+
+    #[test]
+    fn a_field_spanning_paragraphs_visits_the_images_of_its_written_runs() {
+        let mut node = spanning_field(
+            json!([drawing_run("rIdInline")]),
+            json!([drawing_run("rIdResult")]),
+        );
+        let mut visited = Vec::new();
+        visit_inline_images(
+            &mut node,
+            &mut |image| {
+                visited.push(image.relationship_id.clone());
+                Ok(())
+            },
+            true,
+            true,
+        )
+        .unwrap();
+        assert_eq!(visited, ["rIdResult"]);
+    }
+
+    #[test]
+    fn a_field_spanning_paragraphs_holds_no_hyperlink_of_its_inline_copy() {
+        let node = spanning_field(json!([hyperlink_value()]), json!([]));
+        assert!(!inline_has_hyperlink(&node, true, true));
+    }
+
+    #[test]
+    fn a_field_spanning_paragraphs_visits_no_hyperlink_of_its_inline_copy() {
+        let mut node = spanning_field(json!([hyperlink_value()]), json!([]));
+        let mut visited = 0;
+        visit_inline_hyperlinks(&mut node, &mut |_| visited += 1, true, true);
+        assert_eq!(visited, 0);
+    }
+
+    #[test]
+    fn a_field_spanning_paragraphs_allocates_drawing_ids_for_its_written_runs_only() {
+        let allocates = |node: &InlineNode| {
+            let mut index = SelectiveParagraphIndex::new(&[]);
+            index.inline(node).unwrap();
+            index.allocates_ids
+        };
+        let written = spanning_field(json!([]), json!([drawing_run("")]));
+        assert!(allocates(&written));
+        let copied = spanning_field(json!([drawing_run("")]), json!([]));
+        assert!(!allocates(&copied));
     }
 }

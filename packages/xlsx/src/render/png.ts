@@ -5,6 +5,7 @@ import type { DisplayList, TextCmd } from '../display-list/types';
 import { MAX_PNG_PIXELS, MAX_PNG_SIDE } from '../wasm/pngResolve';
 import { paintDisplayList } from './canvas2d';
 import { fontString } from './fontString';
+import { runPieces, type PaintedTextRun } from './textRuns';
 
 export interface DisplayListToPngOptions {
   /** Device pixels per display-list pixel. */
@@ -96,6 +97,11 @@ function runFont(cmd: TextCmd): PngRunFont | undefined {
   return family === undefined ? undefined : { family, bold: cmd.bold === true, italic: cmd.italic === true };
 }
 
+/** The command's own text and font, then each of its run pieces with theirs. */
+function textFonts(cmd: TextCmd): { text: string; font: PngRunFont | undefined }[] {
+  return [{ text: cmd.text, font: runFont(cmd) }, ...(runPieces(cmd) ?? []).map((piece) => ({ text: piece.text, font: runFont(piece.cmd) }))];
+}
+
 /** A font the sheet's text asks for, with the script buckets of one text in it. */
 export interface SheetFontRequest {
   font: PngRunFont;
@@ -109,11 +115,13 @@ export interface SheetFontRequest {
 export function sheetFontRequests(list: DisplayList): SheetFontRequest[] {
   const requests = new Map<string, SheetFontRequest>();
   for (const cmd of list.commands) {
-    const font = cmd.op === 'text' ? runFont(cmd) : undefined;
-    if (!font || cmd.op !== 'text') continue;
-    const scripts = textScripts(cmd.text);
-    const key = JSON.stringify([pngFontKey(font), scripts]);
-    if (!requests.has(key)) requests.set(key, { font, scripts });
+    if (cmd.op !== 'text') continue;
+    for (const { text, font } of textFonts(cmd)) {
+      if (!font) continue;
+      const scripts = textScripts(text);
+      const key = JSON.stringify([pngFontKey(font), scripts]);
+      if (!requests.has(key)) requests.set(key, { font, scripts });
+    }
   }
   return [...requests.values()];
 }
@@ -122,8 +130,8 @@ export function sheetFontRequests(list: DisplayList): SheetFontRequest[] {
 export function sheetFonts(list: DisplayList): PngRunFont[] {
   const fonts = new Map<string, PngRunFont>();
   for (const cmd of list.commands) {
-    const font = cmd.op === 'text' ? runFont(cmd) : undefined;
-    if (font) fonts.set(JSON.stringify(font), font);
+    if (cmd.op !== 'text') continue;
+    for (const { font } of textFonts(cmd)) if (font) fonts.set(JSON.stringify(font), font);
   }
   return [...fonts.values()];
 }
@@ -147,15 +155,34 @@ function withFaces(list: DisplayList, families: (font: PngRunFont) => string[]):
   const commands = list.commands.map((cmd) => {
     const font = cmd.op === 'text' ? runFont(cmd) : undefined;
     const aliases = font ? families(font) : [];
-    if (!aliases.length || cmd.op !== 'text') return cmd;
+    const runs = cmd.op === 'text' ? runsWithFaces(cmd, families, aliases.length > 0) : undefined;
+    if ((!aliases.length && !runs) || cmd.op !== 'text') return cmd;
     changed = true;
+    if (!aliases.length) return { ...cmd, runs };
     const head = aliases.map((alias) => `"${alias}"`).join(', ');
     return {
       ...cmd, fontFamily: cmd.chart ? `"${aliases[0]}", ${cmd.fontFamily}` : aliases[0],
       cssFontFamily: `${head}, ${cmd.chart ? cmd.fontFamily : 'sans-serif'}`,
+      ...(runs ? { runs } : {}),
     };
   });
   return changed ? { ...list, commands } : list;
+}
+
+/**
+ * The command's runs with the faces their own fonts paint with, or `undefined` when it paints no runs. A run whose
+ * font has no supplied face names its family, so it does not take the face supplied for the command's font.
+ */
+function runsWithFaces(cmd: TextCmd, families: (font: PngRunFont) => string[], commandFaced: boolean): PaintedTextRun[] | undefined {
+  const family = primaryFamily(cmd);
+  if (!cmd.runs || !runPieces(cmd)) return undefined;
+  return cmd.runs.map((run) => {
+    const own = run.fontFamily ?? family;
+    if (own === undefined) return run;
+    const aliases = families({ family: own, bold: run.bold ?? cmd.bold === true, italic: run.italic ?? cmd.italic === true });
+    if (aliases.length) return { ...run, fontFamily: aliases[0], cssFontFamily: `${aliases.map((alias) => `"${alias}"`).join(', ')}, sans-serif` };
+    return commandFaced ? { ...run, fontFamily: own } : run;
+  });
 }
 
 /** Text with no family of its own to supply a face for (generic chart lists, unnamed fonts); wait for it as the editor would. */

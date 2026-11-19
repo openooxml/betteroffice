@@ -5,6 +5,8 @@ import type { BundledFontProvider } from './fontRegistry';
 import type { FontDecoder } from '../../../../../shared/office-session/fontDecoder';
 export declare const IMPLICIT_FONT_COVERAGE = "@betteroffice/fonts/coverage";
 export declare const IMPLICIT_SYMBOL_SHAPING = "@betteroffice/fonts/coverage-symbols";
+/** The `fontChains` key whose one id is the face layout draws the tracked paragraph mark with. */
+export declare const PARAGRAPH_MARK_FACE = "@betteroffice/fonts/paragraph-mark";
 export declare class ImplicitFontAbsentError extends Error {
 }
 export declare function isImplicitFontProvider(provider: BundledFontProvider | undefined): boolean;

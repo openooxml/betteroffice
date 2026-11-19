@@ -10,6 +10,7 @@ pub mod number_format;
 mod picture;
 pub mod region;
 mod table_style;
+pub mod text_runs;
 pub mod wrap;
 
 pub use ooxml_drawingml::GeometryPathCommand;
@@ -28,8 +29,8 @@ use xlsx_model::styles::{BorderEdge, BorderStyle, FormatCode, Stylesheet};
 use xlsx_model::value::CellValue;
 use xlsx_model::workbook::{ColumnDefaults, Hyperlink, Sheet};
 use xlsx_model::{
-    CellRange, CellRef, DifferentialFormat, Fill, HAlign, MAX_COLS, MAX_ROWS, SheetChart, SheetId,
-    SheetPicture, Table, VAlign, Workbook,
+    CellRange, CellRef, DifferentialFormat, Fill, HAlign, MAX_COLS, MAX_ROWS, RichRun, SheetChart,
+    SheetId, SheetPicture, Table, VAlign, Workbook,
 };
 
 use table_style::SheetTables;
@@ -41,12 +42,17 @@ pub use chart::{
 };
 pub use display_list::{
     Align, ChartA11yAttrs, ChartRegion, DisplayList, DrawCmd, GridMeta, HyperlinkRegion, ImageCrop,
-    PathStroke, Rect, TextValign, TextWrap, border_dash, scaled,
+    PathStroke, Rect, TextRun, TextRunBaseline, TextValign, TextWrap, border_dash, scaled,
 };
 pub use geometry::{GridGeometry, PrintMetrics, autofit_relevant};
 pub use hit::chart_at_point;
 pub use number_format::{NumberFormatLayout, paint_number_format};
 pub use region::{viewport_for_range, viewport_for_used_range, viewport_for_used_range_within};
+pub use text_runs::{TextPiece, has_right_to_left, run_pieces, wrap_run_lines};
+
+/// The source runs of the text stored in a cell, as UTF-8 byte ranges into
+/// it, or `None` when it has none.
+pub type CellTextRuns<'r> = dyn Fn(CellRef) -> Option<&'r [RichRun]> + 'r;
 
 /// a scrolled window in pixels; `x`/`y` offset the non-frozen body.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -618,6 +624,30 @@ pub fn build_display_list(
     build_display_list_with_ghosts(wb, sheet, viewport, &[])
 }
 
+/// [`build_display_list`] with the source runs of each cell's text: a cell
+/// that paints its stored text as it is paints its runs.
+pub fn build_display_list_with_text_runs(
+    wb: &Workbook,
+    sheet: SheetId,
+    viewport: &Viewport,
+    text_runs: Option<&CellTextRuns<'_>>,
+) -> Result<DisplayList, RenderError> {
+    build_frame_with_text_runs(
+        wb,
+        sheet,
+        viewport,
+        &[],
+        &[],
+        |chart| {
+            Err::<ChartSpace, _>(RenderError::ChartSourceUnavailable {
+                part: chart.part.clone(),
+            })
+        },
+        None,
+        text_runs,
+    )
+}
+
 /// Builds a chart-placeholder display list with pending edit ghosts.
 pub fn build_display_list_with_ghosts(
     wb: &Workbook,
@@ -685,14 +715,48 @@ where
         geometry,
         max_cells,
         pictures,
+        None,
         resolver,
         |_, _| CellFormats::new(),
     )
 }
 
-/// [`build_display_list_with_geometry`] whose `formats` receives the visible
-/// row and column runs and returns the conditional-format effects of the
-/// cells inside them.
+/// [`build_display_list_with_geometry`] with the source runs of each cell's
+/// text.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn build_display_list_with_geometry_and_text_runs<F, R>(
+    wb: &Workbook,
+    sheet: SheetId,
+    viewport: &Viewport,
+    ghosts: &[GhostEdit],
+    geometry: &GridGeometry,
+    max_cells: Option<u64>,
+    pictures: &[SheetPicture],
+    text_runs: Option<&CellTextRuns<'_>>,
+    resolver: F,
+) -> Result<DisplayList, RenderError>
+where
+    F: FnMut(&SheetChart) -> Result<R, RenderError>,
+    R: Into<Arc<ChartSpace>>,
+{
+    build_display_list_with_geometry_and_formats(
+        wb,
+        sheet,
+        viewport,
+        ghosts,
+        geometry,
+        max_cells,
+        pictures,
+        text_runs,
+        resolver,
+        |_, _| CellFormats::new(),
+    )
+}
+
+/// [`build_display_list_with_geometry_and_text_runs`] whose `formats`
+/// receives the visible row and column ranges and returns the
+/// conditional-format effects of the cells inside them.
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
 pub fn build_display_list_with_geometry_and_formats<F, R>(
@@ -703,6 +767,7 @@ pub fn build_display_list_with_geometry_and_formats<F, R>(
     geometry: &GridGeometry,
     max_cells: Option<u64>,
     pictures: &[SheetPicture],
+    text_runs: Option<&CellTextRuns<'_>>,
     resolver: F,
     formats: impl FnOnce(&[Range<u32>], &[Range<u32>]) -> CellFormats,
 ) -> Result<DisplayList, RenderError>
@@ -720,7 +785,37 @@ where
         None,
         Some(geometry),
         max_cells,
+        text_runs,
         formats,
+    )
+}
+
+/// [`build_print_display_list_with_charts`] with the source runs of each
+/// cell's text.
+#[allow(clippy::too_many_arguments)]
+pub fn build_print_display_list_with_text_runs<F, R>(
+    wb: &Workbook,
+    sheet: SheetId,
+    viewport: &Viewport,
+    metrics: &PrintMetrics,
+    gridlines: bool,
+    pictures: &[SheetPicture],
+    text_runs: Option<&CellTextRuns<'_>>,
+    resolver: F,
+) -> Result<DisplayList, RenderError>
+where
+    F: FnMut(&SheetChart) -> Result<R, RenderError>,
+    R: Into<Arc<ChartSpace>>,
+{
+    build_frame_with_text_runs(
+        wb,
+        sheet,
+        viewport,
+        &[],
+        pictures,
+        resolver,
+        Some((metrics, gridlines)),
+        text_runs,
     )
 }
 
@@ -737,14 +832,8 @@ where
     F: FnMut(&SheetChart) -> Result<R, RenderError>,
     R: Into<Arc<ChartSpace>>,
 {
-    build_frame(
-        wb,
-        sheet,
-        viewport,
-        &[],
-        pictures,
-        resolver,
-        Some((metrics, gridlines)),
+    build_print_display_list_with_text_runs(
+        wb, sheet, viewport, metrics, gridlines, pictures, None, resolver,
     )
 }
 
@@ -756,6 +845,24 @@ fn build_frame<F, R>(
     pictures: &[SheetPicture],
     resolver: F,
     print: Option<(&PrintMetrics, bool)>,
+) -> Result<DisplayList, RenderError>
+where
+    F: FnMut(&SheetChart) -> Result<R, RenderError>,
+    R: Into<Arc<ChartSpace>>,
+{
+    build_frame_with_text_runs(wb, sheet, viewport, ghosts, pictures, resolver, print, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_frame_with_text_runs<F, R>(
+    wb: &Workbook,
+    sheet: SheetId,
+    viewport: &Viewport,
+    ghosts: &[GhostEdit],
+    pictures: &[SheetPicture],
+    resolver: F,
+    print: Option<(&PrintMetrics, bool)>,
+    text_runs: Option<&CellTextRuns<'_>>,
 ) -> Result<DisplayList, RenderError>
 where
     F: FnMut(&SheetChart) -> Result<R, RenderError>,
@@ -777,6 +884,7 @@ where
         print,
         geometry.as_ref(),
         None,
+        text_runs,
         |_, _| CellFormats::new(),
     )
 }
@@ -792,6 +900,7 @@ fn build_frame_with_geometry<F, R>(
     print: Option<(&PrintMetrics, bool)>,
     geometry: Option<&GridGeometry>,
     max_cells: Option<u64>,
+    text_runs: Option<&CellTextRuns<'_>>,
     formats: impl FnOnce(&[Range<u32>], &[Range<u32>]) -> CellFormats,
 ) -> Result<DisplayList, RenderError>
 where
@@ -1126,6 +1235,23 @@ where
                 .map_or(text, |symbol| symbol.text.into()),
             _ => text,
         };
+        let runs = match (text_runs, &cell.value) {
+            (Some(lookup), CellValue::Text { value })
+                if !hyperlink_only && parts.is_empty() && cell.formula.is_none() =>
+            {
+                match lookup(at) {
+                    Some(runs)
+                        if *text == **value
+                            && !has_right_to_left(&text)
+                            && resolve_text_rotation(xf.text_rotation) == (None, false) =>
+                    {
+                        text_runs::cell_runs(&text, runs, styles, hyperlink.is_some())
+                    }
+                    _ => Vec::new(),
+                }
+            }
+            _ => Vec::new(),
+        };
 
         let left_pad = print.map_or(TEXT_PAD_PX, |(m, _)| 3.0 * 96.0 / m.dpi);
         let right_pad = print.map_or(TEXT_PAD_PX, |(m, _)| 2.0 * 96.0 / m.dpi);
@@ -1141,8 +1267,26 @@ where
             Align::Right => cell_box.x + cell_box.w - right_pad - right_indent,
             Align::Center => cell_box.x + cell_box.w / 2.0,
         };
-        let ty = text_baseline(cell_box, size, valign, print.map(|(m, _)| m));
         let text_width = (cell_box.w - pad_width - left_indent - right_indent).max(0.0);
+        let print_dpi = print.map(|(m, _)| f64::from(m.dpi));
+        let run_size = (!runs.is_empty())
+            .then(|| text_runs::largest_size(size, &text, &runs))
+            .filter(|&run_size| {
+                rich_runs_have_room(
+                    &text,
+                    text_width,
+                    cell_box.whole_h,
+                    size,
+                    run_size,
+                    wraps,
+                    print.map(|(m, _)| m),
+                )
+            });
+        let (runs, line_size) = match run_size {
+            Some(run_size) => (runs, run_size),
+            None => (Vec::new(), size),
+        };
+        let ty = text_baseline(cell_box, line_size, valign, print.map(|(m, _)| m));
         let number_format = (!parts.is_empty() || matches!(cell.value, CellValue::Number { .. }))
             .then(|| NumberFormatLayout {
                 left: cell_box.x + left_pad + left_indent,
@@ -1217,15 +1361,12 @@ where
                     .all(|part| part.kind == xlsx_model::numfmt::FormatPartKind::Padding)
             }))
         .then(|| {
-            let line_height = geometry::row_pt_to_px(geometry::line_pitch_pt(
-                f64::from(size),
-                print.map(|(m, _)| f64::from(m.dpi)),
-            ));
+            let line_height = wrapped_line_height(line_size, print_dpi);
             TextWrap {
                 width: text_width,
                 line_height,
                 valign: resolve_rotation_valign(valign),
-                max_lines: wrap::max_wrapped_lines(cell_box.whole_h + 1.0, line_height, size),
+                max_lines: wrap::max_wrapped_lines(cell_box.whole_h + 1.0, line_height, line_size),
             }
         });
         let number_format = number_format.filter(|_| wrap.is_none());
@@ -1275,6 +1416,7 @@ where
             rotation_valign,
             stacked,
             wrap,
+            runs,
         });
     }
 
@@ -1316,6 +1458,7 @@ where
             rotation_valign: None,
             stacked: false,
             wrap: None,
+            runs: Vec::new(),
         });
     }
 
@@ -1457,6 +1600,7 @@ fn emit_ghost(
             rotation_valign: None,
             stacked: false,
             wrap: None,
+            runs: Vec::new(),
         });
     };
 
@@ -2490,6 +2634,59 @@ fn resolve_rotation_valign(v: Option<VAlign>) -> TextValign {
     }
 }
 
+/// Pixel step between the baselines of wrapped text `size_pt` tall.
+fn wrapped_line_height(size_pt: f32, print_dpi: Option<f64>) -> f32 {
+    geometry::row_pt_to_px(geometry::line_pitch_pt(f64::from(size_pt), print_dpi))
+}
+
+/// Whether a cell box `height` px tall, the whole row or merged area, has room
+/// for the layout of a rich cell whose largest run is `run_size`; without it
+/// the cell paints as plain text. Unwrapped, that run's ascent and descent as
+/// its baseline takes them must fit the box. Wrapped, in the box and a pixel
+/// as the line limit takes it, the lines row autofit counts for the text must
+/// fit at that run's pitch, and no fewer of them may show than in the cell's
+/// own `size`, up to that size's limit. Geometry that is not finite never fits.
+fn rich_runs_have_room(
+    text: &str,
+    width: f32,
+    height: f32,
+    size: f32,
+    run_size: f32,
+    wraps: bool,
+    print: Option<&PrintMetrics>,
+) -> bool {
+    if !wraps {
+        let extent = match print {
+            None => {
+                let size_px = run_size * geometry::PX_PER_PT as f32;
+                size_px * ASCENT_RATIO + size_px * DESCENT_RATIO
+            }
+            Some(metrics) => {
+                let ratio = run_size / metrics.font_size_pt * 96.0 / metrics.dpi;
+                metrics.font_ascent * ratio + metrics.font_descent * ratio
+            }
+        };
+        return extent <= height;
+    }
+    let height = height + 1.0;
+    let print_dpi = print.map(|metrics| f64::from(metrics.dpi));
+    let shown = wrap::estimated_line_count(text, width, f64::from(size));
+    let lines_fit = shown as f32 * wrapped_line_height(run_size, print_dpi) <= height;
+    if !lines_fit {
+        return false;
+    }
+    let limit = |pt: f32| wrap::max_wrapped_lines(height, wrapped_line_height(pt, print_dpi), pt);
+    let Some(rich) = limit(run_size) else {
+        return true;
+    };
+    let plain = limit(size);
+    if plain.is_some_and(|plain| rich >= plain) {
+        return true;
+    }
+    let shown = plain.map_or(shown, |plain| shown.min(plain as usize));
+    (rich as usize) >= shown
+}
+
 /// Alphabetic baseline in pixels for a point-sized cell font.
 fn baseline_y(cy0: f32, ch: f32, size: f32, valign: Option<VAlign>) -> f32 {
     let size_px = size * geometry::PX_PER_PT as f32;
@@ -2633,6 +2830,9 @@ mod merged_grid_tests;
 
 #[cfg(test)]
 mod wrap_tests;
+
+#[cfg(test)]
+mod text_runs_tests;
 
 #[cfg(test)]
 mod tests {
@@ -4885,6 +5085,7 @@ mod tests {
             &geometry,
             None,
             &[],
+            None,
             resolver,
             |_, _| CellFormats::from([((0, 0), format)]),
         )

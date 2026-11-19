@@ -166,7 +166,8 @@ export function useRustMeasurement(
         );
         const ready =
           source.measurementConfigForRequirements(
-            [...requirements, ...kept].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
+            [...requirements, ...kept].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)),
+            requirements
           ) ?? current;
         latestFontChainsRef.current = ready.fontChains;
         return ready;

@@ -77,7 +77,8 @@ export function mergePptxBenchmark(plan, report, parts, planHash) {
     const expected = ids.map(id => plan.samples.find(sample => sample.id === id));
     for (const [id, row] of mergePart(plan, part, planHash, expected)) results.set(id, row);
   }
-  const benchmark = parts[0].benchmark;
+  const benchmark = { ...parts[0].benchmark };
+  delete benchmark.platform;
   const samples = report.samples.map(sample => sample.format === 'pptx' ? {
     ...sample, comparisons: [...sample.comparisons, results.get(sample.id).libreoffice],
     native_timings: results.get(sample.id).timings,

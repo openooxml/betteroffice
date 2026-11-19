@@ -419,6 +419,23 @@ test('a text-only mirror keeps image names and table semantics and removes visua
   ].join(', '))).toBeNull();
 });
 
+test('a paragraph mark shaped as a glyph run mirrors as the text mark does', () => {
+  const mark = (kind: 'ins' | 'del'): DisplayPrimitive => ({
+    kind: 'glyphRun', fontId: 1, size: 14.667, color: '#2e7d32', text: '¶',
+    glyphs: [{ id: 1, x: 40, y: 20, cluster: 0, advance: 8 }],
+    structuralRevision: { scope: 'pmark', kind, author: 'Author', revisionId: 'revision' },
+  });
+  const page: DisplayPage = { pageIndex: 0, width: 100, height: 100, primitives: [mark('ins'), mark('del')] };
+  const marks = Array.from(buildMirrorPage(page).querySelectorAll('.layout-revision-pmark-glyph'));
+  expect(marks.map((element) => [
+    element.textContent,
+    element.classList.contains('layout-revision-ins'),
+    element.classList.contains('layout-revision-del'),
+    element.getAttribute('aria-hidden'),
+  ])).toEqual([['¶', true, false, 'true'], ['¶', false, true, 'true']]);
+  expect(buildMirrorPageText(page).textContent).toBe('');
+});
+
 test('a text-only mirror keeps labels and attributes of ancestors of retained content', () => {
   const full = buildMirrorPage({
     pageIndex: 0,

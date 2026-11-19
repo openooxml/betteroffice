@@ -68,7 +68,7 @@ use xlsx_render::region::{
 use xlsx_render::scaled;
 use xlsx_render::{
     ChartRegion, ChartResize, DisplayList, GhostEdit, GridGeometry, PrintMetrics, RenderError,
-    Viewport, build_display_list_with_geometry_and_formats, build_print_display_list_with_charts,
+    Viewport, build_display_list_with_geometry_and_formats, build_print_display_list_with_text_runs,
     chart_at_point, display_text, display_viewport_with_geometry, moved_chart_anchor,
     resized_chart_anchor, resolve_chart_anchor, visible_merged_ranges_with_geometry,
 };
@@ -3517,13 +3517,14 @@ impl Workbook {
             visible_count(rows, |rows| sheet_ref.hidden_row_spans(rows)),
             visible_count(columns, |columns| sheet_ref.hidden_col_spans(columns)),
         )?;
-        let mut frame = build_print_display_list_with_charts(
+        let mut frame = build_print_display_list_with_text_runs(
             &self.model,
             sheet,
             &viewport,
             metrics,
             gridlines,
             &self.sheet_pictures(sheet),
+            self.text_runs_lookup(&|at: CellRef| self.painted_text_runs(sheet, at)),
             |chart| self.resolve_chart_space(&sheet_ref.name, chart),
         )
         .map_err(Error::from)?;
@@ -3626,6 +3627,7 @@ impl Workbook {
             &geometry,
             Some(MAX_DISPLAY_CELLS),
             &self.sheet_pictures(sheet),
+            self.text_runs_lookup(&|at: CellRef| self.painted_text_runs(sheet, at)),
             |chart| self.resolve_chart_space(&owner, chart),
             |rows, cols| {
                 let (formats, undecided) = self.conditional_effects(sheet, rows, cols, budget);
@@ -3988,6 +3990,7 @@ impl Workbook {
             &geometry,
             None,
             &self.sheet_pictures(sheet),
+            self.text_runs_lookup(&|at: CellRef| self.painted_text_runs(sheet, at)),
             |chart| self.resolve_chart_space(&owner, chart),
             |rows, cols| {
                 self.conditional_effects(sheet, rows, cols, Budget::Complete)

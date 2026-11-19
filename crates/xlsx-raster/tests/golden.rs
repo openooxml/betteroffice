@@ -42,6 +42,7 @@ fn text(x: f32, y: f32, s: &str, align: Align, clip: Rect) -> DrawCmd {
         rotation_valign: None,
         stacked: false,
         wrap: None,
+        runs: Vec::new(),
     }
 }
 
@@ -82,6 +83,7 @@ fn styled_text(
         rotation_valign: None,
         stacked: false,
         wrap: None,
+        runs: Vec::new(),
     }
 }
 

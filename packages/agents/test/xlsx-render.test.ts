@@ -131,6 +131,29 @@ test('XLSX canvas previews in one process keep each workbook\'s faces apart', as
   expect(GlobalFonts.has('Host Face')).toBe(true);
 });
 
+test('XLSX canvas previews paint a text run with the face of its own family', async () => {
+  const base = createFontProvider(undefined, { decoder: decodeFontFace });
+  const hebrew = await base.resolveFamily('Noto Sans Hebrew', false, false)!();
+  const sans = await base.resolve('Arial', false, false)!();
+  const asked: string[] = [];
+  const provider = { ...base, resolve: (family: string, bold: boolean, italic: boolean) => {
+    asked.push(`${family}/${bold}/${italic}`);
+    return async () => family === 'Run Face' ? sans : hebrew;
+  } };
+  const book = (cmd: object) => ({
+    sheetInfo: () => ({ activeSheet: 0 }),
+    setActiveSheet: () => {},
+    displayList: () => ({ width: 120, height: 24, commands: [{ op: 'text', x: 4, y: 18, text: 'Quarterly', fontSize: 12, color: '#000000', ...cmd }] }),
+    renderPngFonts: () => [],
+  });
+  const viewport = { x: 0, y: 0, width: 120, height: 24 };
+  const plain = await renderXlsxRange(book({ fontFamily: 'Run Face' }) as never, 0, 'A1', viewport, 1, provider);
+  asked.length = 0;
+  const run = await renderXlsxRange(book({ fontFamily: 'Cell Face', runs: [{ start: 0, end: 9, fontFamily: 'Run Face' }] }) as never, 0, 'A1', viewport, 1, provider);
+  expect(asked).toEqual(['Cell Face/false/false', 'Run Face/false/false']);
+  expect(Buffer.from(run).equals(Buffer.from(plain))).toBe(true);
+});
+
 test('XLSX canvas preview sizes match the engine\'s 32-bit range extent', () => {
   const first = { x: 0, y: Math.fround(1.1) };
   const last = { x: Math.fround(10.3), y: Math.fround(799.9), w: Math.fround(20.7), h: Math.fround(1.2) };

@@ -15,6 +15,25 @@ use tiny_skia::{
 };
 
 use xlsx_render::{Align, DisplayList, DrawCmd, GeometryPathCommand, Rect as DlRect};
+
+#[cfg(test)]
+thread_local! {
+    static RUN_PATHS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static PIECE_MEASURES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many text commands have entered the run path on this thread, and how
+/// many piece widths that path has measured.
+#[cfg(test)]
+fn run_counts() -> (usize, usize) {
+    (RUN_PATHS.get(), PIECE_MEASURES.get())
+}
+
+#[cfg(test)]
+fn count(counter: &'static std::thread::LocalKey<std::cell::Cell<usize>>) {
+    counter.set(counter.get() + 1);
+}
+
 #[cfg(not(feature = "fonts"))]
 /// paint a display list and encode it as png bytes.
 pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
@@ -236,7 +255,31 @@ pub fn render_png_with_images(dl: &DisplayList, images: &ImageMap<'_>) -> Result
                 rotation_valign,
                 stacked,
                 wrap,
+                runs,
             } => {
+                if !runs.is_empty() {
+                    #[cfg(test)]
+                    count(&RUN_PATHS);
+                    if let Some(pieces) = xlsx_render::run_pieces(cmd) {
+                        let mut measured = PieceWidths::new(measure_piece);
+                        let lines = match wrap {
+                            Some(wrap) => wrapped_lines(*y, wrap, text, &pieces, &mut measured),
+                            None => vec![(*y, pieces)],
+                        };
+                        for (y, pieces) in lines {
+                            paint_pieces(
+                                &mut pixmap,
+                                &mut measured,
+                                (*x, y),
+                                *align,
+                                clip,
+                                text,
+                                &pieces,
+                            )?;
+                        }
+                        continue;
+                    }
+                }
                 let run = font::TextRun {
                     x: *x,
                     y: *y,
@@ -647,6 +690,122 @@ fn path_coord(value: f64) -> Result<f32, String> {
         .ok_or_else(|| "path contains a non-finite coordinate".to_string())
 }
 
+#[cfg(not(feature = "fonts"))]
+fn measure_piece(piece: &xlsx_render::TextPiece, part: &str) -> f32 {
+    font::measure_text(part, piece.font_size)
+}
+
+#[cfg(not(feature = "fonts"))]
+fn paint_pieces(
+    pixmap: &mut Pixmap,
+    measured: &mut PieceWidths<impl FnMut(&xlsx_render::TextPiece, &str) -> f32>,
+    (x, y): (f32, f32),
+    align: Align,
+    clip: &DlRect,
+    text: &str,
+    pieces: &[xlsx_render::TextPiece],
+) -> Result<(), String> {
+    let widths: Vec<f32> = pieces
+        .iter()
+        .map(|piece| measured.width(piece, &text[piece.range.clone()]))
+        .collect();
+    let mut pen = aligned_left(x, align, widths.iter().sum());
+    for (piece, width) in pieces.iter().zip(widths) {
+        font::paint_text(
+            pixmap,
+            &font::TextRun {
+                x: pen,
+                y,
+                text: &text[piece.range.clone()],
+                font_size_pt: piece.font_size,
+                color: parse_color(&piece.color)?,
+                align: Align::Left,
+                clip,
+                bold: piece.bold,
+                italic: piece.italic,
+                underline: piece.underline,
+                double_underline: double_underline(piece.underline_style),
+                strike: piece.strike,
+                highlight: None,
+                dashed_underline: false,
+            },
+        );
+        pen += width;
+    }
+    Ok(())
+}
+
+/// The widths of the parts of one text command's pieces, each part measured
+/// once in its piece's face while the command's lines break and paint.
+struct PieceWidths<M> {
+    measure: M,
+    widths: HashMap<PieceFace, HashMap<String, f32>>,
+}
+
+/// A piece's family, bold, italic and size bits.
+type PieceFace = (Option<std::sync::Arc<str>>, bool, bool, u32);
+
+impl<M: FnMut(&xlsx_render::TextPiece, &str) -> f32> PieceWidths<M> {
+    fn new(measure: M) -> Self {
+        Self {
+            measure,
+            widths: HashMap::new(),
+        }
+    }
+
+    fn width(&mut self, piece: &xlsx_render::TextPiece, part: &str) -> f32 {
+        let face = (
+            piece.font_family.clone(),
+            piece.bold,
+            piece.italic,
+            piece.font_size.to_bits(),
+        );
+        let widths = self.widths.entry(face).or_default();
+        if let Some(&width) = widths.get(part) {
+            return width;
+        }
+        #[cfg(test)]
+        count(&PIECE_MEASURES);
+        let width = (self.measure)(piece, part);
+        widths.insert(part.to_owned(), width);
+        width
+    }
+}
+
+/// The baseline and pieces of each line a wrapped command keeps.
+fn wrapped_lines(
+    y: f32,
+    wrap: &xlsx_render::TextWrap,
+    text: &str,
+    pieces: &[xlsx_render::TextPiece],
+    measured: &mut PieceWidths<impl FnMut(&xlsx_render::TextPiece, &str) -> f32>,
+) -> Vec<(f32, Vec<xlsx_render::TextPiece>)> {
+    let lines = xlsx_render::wrap_run_lines(text, pieces, wrap.width, |piece, part| {
+        measured.width(piece, part)
+    });
+    let count = xlsx_render::wrap::wrapped_lines_kept(lines.len(), wrap);
+    lines
+        .into_iter()
+        .take(count)
+        .enumerate()
+        .map(|(index, line)| {
+            (
+                xlsx_render::wrap::wrapped_line_y(y, index, count, wrap),
+                line,
+            )
+        })
+        .collect()
+}
+
+/// The left edge of a line `width` wide anchored at `x` by `align`.
+fn aligned_left(x: f32, align: Align, width: f32) -> f32 {
+    match align {
+        Align::Left => x,
+        Align::Center => x - width / 2.0,
+        Align::Right => x - width,
+    }
+}
+
 fn double_underline(style: Option<xlsx_render::RunUnderline>) -> bool {
     use xlsx_render::RunUnderline::{Double, DoubleAccounting};
     matches!(style, Some(Double | DoubleAccounting))
@@ -998,6 +1157,7 @@ mod tests {
                     rotation_valign: None,
                     stacked: false,
                     wrap: None,
+                    runs: Vec::new(),
                 },
             ],
             grid: xlsx_render::GridMeta::default(),
@@ -1049,6 +1209,7 @@ mod tests {
                 rotation_valign: Some(xlsx_render::TextValign::Bottom),
                 stacked: false,
                 wrap: None,
+                runs: Vec::new(),
             }],
             grid: xlsx_render::GridMeta::default(),
             hyperlinks: Vec::new(),
@@ -1112,6 +1273,7 @@ mod tests {
                 rotation_valign: Some(xlsx_render::TextValign::Top),
                 stacked,
                 wrap: None,
+                runs: Vec::new(),
             }],
             grid: xlsx_render::GridMeta::default(),
             hyperlinks: Vec::new(),
@@ -1714,6 +1876,9 @@ mod tests {
         assert_eq!(render(40.0, 40.0, rails).pixel(10, 4).unwrap().red(), 0);
     }
 }
+
+#[cfg(all(test, not(feature = "fonts")))]
+mod rich_text_tests;
 
 #[cfg(feature = "fonts")]
 mod native;
