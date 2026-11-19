@@ -24,7 +24,7 @@ const BULLET_TEXTS: [&str; 3] = ["\u{f0b7}", "o", "\u{f0a7}"];
 const NUMBER_FORMATS: [&str; 3] = ["decimal", "lowerLetter", "lowerRoman"];
 
 /// The list attributes a paragraph joining a source list takes from its neighbour.
-const SOURCE_LIST_KEYS: [&str; 9] = [
+const SOURCE_LIST_KEYS: [&str; 14] = [
     "numPr",
     "listIsBullet",
     "listNumFmt",
@@ -32,7 +32,12 @@ const SOURCE_LIST_KEYS: [&str; 9] = [
     "listLevelNumFmts",
     "listAbstractNumId",
     "listStartOverride",
+    "listMarkerHidden",
+    "listMarkerBold",
+    "listMarkerItalic",
+    "listMarkerColor",
     "listMarkerFontFamily",
+    "listMarkerFontSize",
     "listMarkerSuffix",
 ];
 
@@ -314,7 +319,9 @@ fn created_attrs(kind: ListKind, key: &str, level: f64) -> BTreeMap<String, Any>
         ("listMarkerBold".to_owned(), Any::Null),
         ("listMarkerItalic".to_owned(), Any::Null),
         ("listMarkerColor".to_owned(), Any::Null),
+        ("listMarkerFontFamily".to_owned(), Any::Null),
         ("listMarkerFontSize".to_owned(), Any::Null),
+        ("listMarkerSuffix".to_owned(), Any::Null),
     ])
 }
 
