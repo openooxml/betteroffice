@@ -300,6 +300,24 @@ for (const fixture of FIXTURES) {
   });
 }
 
+describe('a w:subDoc after deleting across it, undoing, and typing elsewhere', () => {
+  const inner = `${SOURCE.t('Head ')}${SUB_DOC}${SOURCE.t(' tail')}`;
+  const [loader, load] = LOADERS.find(([name]) => name === 'the Rust loader')!;
+
+  it(`${loader}: typing at the end saves the mark where undo left it (limit: after delete-then-undo the mark sits at the start of the restored text on both loaders; this loader shows it once the paragraph changes again)`, async () => {
+    const { session, base } = await load(docx(inner));
+    session.beginUndoCapture();
+    const paraId = session.paragraphs('body')[0]!.paraId;
+    deleteBetween(3, 7)(session, paraId);
+    expect(traces(await savedAsTheEditorSaves(session, base))).toEqual(['Hea[subDoc]ail', 'Other']);
+    expect(session.undo()).toBe(true);
+    while (session.canUndo()) session.undo();
+    expect(traces(await savedAsTheEditorSaves(session, base))).toEqual([trace(paragraph(inner)), 'Other']);
+    typeAt(10)(session, paraId);
+    expect(traces(await savedAsTheEditorSaves(session, base))).toEqual(['Hea[subDoc]d  tailX', 'Other']);
+  });
+});
+
 const PAGE_BREAK = '<w:r><w:br w:type="page"/></w:r>';
 const pages = (xml: string) => xml.replaceAll('<w:br w:type="page"/>', '<w:t>[page]</w:t>');
 const BREAK_RUN = /<w:r>(?:<w:rPr>(?:(?!<\/w:rPr>)[\s\S])*<\/w:rPr>)?<w:br w:type="page"\/><\/w:r>/;
