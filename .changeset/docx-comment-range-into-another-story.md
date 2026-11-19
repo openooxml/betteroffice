@@ -2,4 +2,4 @@
 '@betteroffice/docx': patch
 ---
 
-A comment that starts in a paragraph and ends in a table cell, a text box or the next cell keeps its range when edited and saved: it is no longer cut at the end of its first paragraph or given a second end.
+A comment that ends in a different table cell, content control or text box keeps its range on save when its end survives in the saved file; otherwise it is cut at its first paragraph's end as before. Text boxes are carried as they are.
