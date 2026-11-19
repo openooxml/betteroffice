@@ -171,6 +171,11 @@ export interface DocxPluginSelection {
 export interface DocxPluginSnapshot {
   /** @experimental Focus inside the document surface. */
   focused: boolean;
+  /**
+   * @experimental Focus on the document's text input itself; false while focus is in other editor
+   * UI inside the document surface, such as a content control, a menu or a dialog.
+   */
+  inputFocused: boolean;
   /** @experimental The editor's resolved locale tag. */
   locale: string;
   /** The open document; changes when a document replaces it. */
@@ -377,6 +382,11 @@ export interface DocxPluginContext<S> {
   onCleanup(cleanup: (reason: PluginCleanupReason) => MaybePromise<void>): void;
   /** Runs an event-handler action with a fresh context, isolating its failure. */
   run(action: (context: DocxPluginContext<S>) => MaybePromise<void>): Promise<void>;
+  /**
+   * @experimental Moves focus to the document's text input without changing the selection or
+   * scrolling. `{ ok: true }` means the input has focus now; otherwise a refusal. Never throws.
+   */
+  focusDocument(): { ok: true } | DocxPluginRefusal;
 }
 
 export interface DocxPluginPanel<S> {
