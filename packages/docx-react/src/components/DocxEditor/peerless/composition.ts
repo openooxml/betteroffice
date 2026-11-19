@@ -20,7 +20,7 @@ export interface PeerlessCompositionState {
 /** @internal */
 export type PeerlessCompositionEndResult =
   | { status: 'committed'; state: PeerlessCompositionState; ticket: CommandTicket }
-  | { status: 'cancelled'; state: PeerlessCompositionState };
+  | { status: 'cancelled'; state: PeerlessCompositionState; removal?: CommandTicket };
 
 type CompositionRecord = {
   state: PeerlessCompositionState;
@@ -108,7 +108,13 @@ export function endComposition(
       settled.phase = 'refused';
       settled.recoverableText = text;
     }
-    record.result = { status: 'cancelled', state: settled };
+    const removal = admissionResult.removal;
+    record.result = removal ? { status: 'cancelled', state: settled, removal } : { status: 'cancelled', state: settled };
+    // A refused removal leaves the composed text in the document; the composition ends refused, not cancelled.
+    const refuse = () => { settled.phase = 'refused'; };
+    void removal?.ack.then((outcome) => {
+      if (outcome.status === 'refused' || outcome.status === 'cancelled' || outcome.committed === false) refuse();
+    }, refuse);
     return record.result;
   }
 

@@ -321,7 +321,14 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
           if (outcome.status !== 'refused' && outcome.status !== 'cancelled' && outcome.committed !== false) return;
           recover(committed);
         }, () => recover(committed));
-      } else if (result.state.recoverableText) callbacks.current.onRecoverableText?.(result.state.recoverableText);
+      } else {
+        if (result.state.recoverableText) callbacks.current.onRecoverableText?.(result.state.recoverableText);
+        const cancelled = result.state;
+        const refused = () => { if (mounted) callbacks.current.onCompositionChange?.({ ...cancelled, phase: 'refused' }); };
+        void result.removal?.ack.then((outcome) => {
+          if (outcome.status === 'refused' || outcome.status === 'cancelled' || outcome.committed === false) refused();
+        }, refused);
+      }
     };
     const compositionend = (event: CompositionEvent) => finishComposition(event.data ?? composition?.text ?? element.value, event.timeStamp);
     const blur = () => { clearEscape(); if (composition) finishComposition(composition.text); active = null; };

@@ -1139,7 +1139,8 @@ test('a_cancelled_composition_removes_what_its_steps_typed_and_a_bare_one_sends_
   const reservation = admission.reserveComposition(100);
   admission.composeText(reservation.slot, 'ㄱ', 110);
   admission.composeText(reservation.slot, '가', 120);
-  expect(admission.settleComposition(reservation.slot, null, 130)).toEqual({ status: 'ignored', reason: 'empty-composition' });
+  expect(admission.settleComposition(reservation.slot, null, 130))
+    .toEqual({ status: 'ignored', reason: 'empty-composition', removal: submitted[2]!.ticket });
   expect(submitted[2]).toMatchObject({ kind: 'insertText', payload: { text: '', replaceBefore: '가' },
     options: { after: submitted[1]!.ticket, inputTime: 100, lastInputTime: 130 } });
   expect(submitted).toHaveLength(3);

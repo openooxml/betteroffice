@@ -33,6 +33,7 @@ function fakeAdmission() {
   let settlements = 0;
   let ignored = false;
   let failSteps = false;
+  let removeOnCancel = false;
   const steps: Array<[number, string, number | undefined]> = [];
   const times: { reserved?: number; settled?: number } = {};
   const held: string[] = [];
@@ -145,10 +146,11 @@ function fakeAdmission() {
             fence: true,
           })
         : undefined;
+      const removal = !commit && removeOnCancel ? submit('insertText', { text: '' }, { after: tail, fence: true }) : undefined;
       for (const text of held.splice(0)) submit('insertText', { text }, { after: tail });
       return ticket
         ? { status: 'submitted', ticket, echoEnabled: false }
-        : { status: 'ignored', reason: ignored ? 'read-only' : 'empty-composition' };
+        : { status: 'ignored', reason: ignored ? 'read-only' : 'empty-composition', ...(removal ? { removal } : {}) };
     },
     dispose() {},
   };
@@ -158,6 +160,7 @@ function fakeAdmission() {
     hold: (text: string) => { held.push(text); },
     ignore: () => { ignored = true; },
     failSteps: () => { failSteps = true; },
+    removeOnCancel: () => { removeOnCancel = true; },
     steps,
     times,
     settlements: () => settlements,
@@ -314,5 +317,20 @@ test('d2d_frames_preserve_preedit_and_refusal_retains_text', async () => {
     expect(updateComposition(result.state, '')).toBe(result.state);
     expect(endComposition(fake.admission, state, 'duplicate')).toBe(result);
     expect(fake.settlements()).toBe(1);
+  }
+});
+
+test('a_cancelled_composition_whose_removal_is_refused_ends_refused_with_nothing_to_recover', async () => {
+  for (const outcome of ['refused', 'applied'] as const) {
+    const fake = fakeAdmission();
+    fake.removeOnCancel();
+    const state = updateComposition(beginComposition(fake.admission, 4, 10), 'かな', fake.admission, 20);
+    const result = endComposition(fake.admission, state, '', 30);
+    if (result.status !== 'cancelled' || !result.removal) throw new Error('the cancel sent no removal');
+    expect(result.state.phase).toBe('cancelled');
+    fake.commands.at(-1)!.resolve(outcome === 'refused' ? { status: 'refused', reason: 'replaced-text-mismatch' } : { status: 'applied' });
+    await result.removal.ack;
+    expect(result.state.phase).toBe(outcome === 'refused' ? 'refused' : 'cancelled');
+    expect(result.state.recoverableText).toBeUndefined();
   }
 });

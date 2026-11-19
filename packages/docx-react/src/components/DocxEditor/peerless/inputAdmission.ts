@@ -48,7 +48,9 @@ export interface PeerlessAdmissionOptions extends Omit<SubmitOptions<PeerlessEch
 export type PeerlessAdmissionResult =
   | { status: 'submitted'; ticket: CommandTicket; echoEnabled: boolean }
   | { status: 'held'; slot: number; echoEnabled: false; released: Promise<PeerlessAdmissionResult> }
-  | { status: 'ignored'; reason: 'read-only' | 'empty-composition' };
+  | { status: 'ignored'; reason: 'read-only' | 'empty-composition';
+    /** The step that removes what a cancelled composition typed. */
+    removal?: CommandTicket };
 
 /** @internal */
 export interface PeerlessInputAdmission {
@@ -533,6 +535,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
         const text = commit?.text ?? '';
         const sent = compose(current, text, inputTime);
         if (text) result = sent ?? { status: 'submitted', ticket: current.ticket!, echoEnabled: false };
+        else if (sent?.status === 'submitted') result = { status: 'ignored', reason: 'empty-composition', removal: sent.ticket };
       } catch (error) { failed = true; failure = error; }
       const compositionFailed = failed;
       for (const entry of held.splice(0)) {
