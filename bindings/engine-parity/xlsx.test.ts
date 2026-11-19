@@ -148,7 +148,7 @@ async function buildProtectedFixture(source: Uint8Array): Promise<Uint8Array> {
 const RICH_SHEET = `<worksheet xmlns="${MAIN}"><sheetData>` +
   '<row r="1"><c r="A1" t="s"><v>0</v></c><c r="C1" t="inlineStr"><is><r><rPr><b/><color rgb="FFFF0000"/></rPr><t>Inline</t></r>' +
   '<r><t xml:space="preserve"> text</t></r></is></c></row>' +
-  '<row r="2" ht="45" customHeight="1"><c r="A2" s="2" t="s"><v>1</v></c></row></sheetData></worksheet>';
+  '<row r="2" ht="150" customHeight="1"><c r="A2" s="2" t="s"><v>1</v></c></row></sheetData></worksheet>';
 const RICH_STRINGS = `<sst xmlns="${MAIN}" count="2" uniqueCount="2">` +
   '<si><r><rPr><b/><i/><sz val="14"/><rFont val="Cambria"/></rPr><t>Ab</t></r>' +
   '<r><rPr><u val="double"/><color rgb="FF0000FF"/></rPr><t xml:space="preserve"> 中</t></r>' +
