@@ -1204,7 +1204,11 @@ where
             Some(run_size) if wraps => (runs, run_size),
             _ => (runs, size),
         };
-        let ty = text_baseline(cell_box, line_size, valign, print.map(|(m, _)| m));
+        let baseline_size = match run_size {
+            Some(run_size) if !wraps && run_size > size => run_size,
+            _ => line_size,
+        };
+        let ty = text_baseline(cell_box, baseline_size, valign, print.map(|(m, _)| m));
         let number_format = (!parts.is_empty() || matches!(cell.value, CellValue::Number { .. }))
             .then(|| NumberFormatLayout {
                 left: cell_box.x + left_pad + left_indent,
