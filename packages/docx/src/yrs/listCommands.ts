@@ -1,10 +1,11 @@
 import type { YrsAuthor, YrsParagraphAttrs, YrsSession, YrsStoryRange } from './index';
 
 /** The attributes that take a paragraph off its list. @internal */
-export const LIST_OFF_ATTRS: YrsParagraphAttrs = {
+export const LIST_OFF_ATTRS: Readonly<YrsParagraphAttrs> = Object.freeze({
   numPr: null, listIsBullet: null, listNumFmt: null, listMarker: null, listLevelNumFmts: null, listAbstractNumId: null,
-  listStartOverride: null, listMarkerFontFamily: null, listMarkerSuffix: null, other: { listDef: null },
-};
+  listStartOverride: null, listMarkerFontFamily: null, listMarkerSuffix: null, listMarkerHidden: null, listMarkerBold: null,
+  listMarkerItalic: null, listMarkerColor: null, listMarkerFontSize: null, other: Object.freeze({ listDef: null }),
+});
 
 /** Whether a paragraph with `properties` is on a list shown as `kind`. */
 function isOnListOfKind(properties: Readonly<Record<string, unknown>>, kind: 'bullet' | 'numbered'): boolean {

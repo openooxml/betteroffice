@@ -127,6 +127,29 @@ export function withCreatedListIds<T>(value: T, numIds: ReadonlyMap<string, numb
   return visit(value) as T;
 }
 
+/** The keys of the created lists that some `numPr` of `value`, a projected document or any part of it, marks. */
+export function markedCreatedListKeys(value: unknown): Set<string> {
+  const keys = new Set<string>();
+  const seen = new Set<object>();
+  const visit = (node: unknown): void => {
+    if (node === null || typeof node !== 'object' || ArrayBuffer.isView(node) || node instanceof ArrayBuffer) return;
+    if (seen.has(node)) return;
+    seen.add(node);
+    if (node instanceof Map) {
+      for (const entry of node.values()) visit(entry);
+    } else if (Array.isArray(node)) {
+      for (const item of node) visit(item);
+    } else if ([Object.prototype, null].includes(Object.getPrototypeOf(node))) {
+      const record = node as Record<string, unknown>;
+      const key = record[CREATED_LIST];
+      if (typeof key === 'string') keys.add(key);
+      else for (const entry of Object.values(record)) visit(entry);
+    }
+  };
+  visit(value);
+  return keys;
+}
+
 /**
  * The ids a save gives the list definitions the editor created, by key, whatever order the keys
  * come in: a definition an earlier save numbered, in `previous`, keeps its ids, and every other
