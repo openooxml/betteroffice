@@ -273,3 +273,59 @@ test('keys_the_engine_cannot_type_with_stored_marks_are_typed_then_formatted', a
     suggestedMarked.mockRestore();
   }
 }, TIMEOUT);
+
+function timed(arm: CommandArm, kind: 'insertText' | 'replaceSelection', payload: Record<string, unknown>, inputTime: number, lastInputTime = inputTime) {
+  return execute(arm, command(arm, kind, payload as never, { inputTime, lastInputTime }));
+}
+
+test('cancelling_a_composition_over_a_selection_gives_the_selection_back_with_its_formatting', async () => {
+  const arm = await openCommandEngine(['abc def']);
+  const id = arm.engine.paragraphs('body')[0]!.paraId;
+  expect(execute(arm, command(arm, 'toggleMark', { mark: { type: 'bold' }, selection: selection(id, 4, 7) })).status).toBe('applied');
+  expect(timed(arm, 'insertText', { text: 'Z', selection: selection(id, 0) }, 10).status).toBe('applied');
+  expect(timed(arm, 'replaceSelection', { text: 'ㄱ', selection: selection(id, 5, 8) }, 100).status).toBe('applied');
+  expect(timed(arm, 'insertText', { text: '가', replaceBefore: 'ㄱ' }, 100, 200).status).toBe('applied');
+  expect(texts(arm)).toEqual(['Zabc 가']);
+  expect(timed(arm, 'insertText', { text: '', replaceBefore: '가' }, 100, 300).status).toBe('applied');
+  expect(texts(arm)).toEqual(['Zabc def']);
+  expect(arm.engine.selectionContext(storyRange(selection(id, 5, 8))).bold).toBe(true);
+  // The typing before the composition is a step of its own.
+  execute(arm, command(arm, 'undo', {}));
+  expect(texts(arm)).toEqual(['abc def']);
+}, TIMEOUT);
+
+test('a_composition_over_a_selection_is_one_undo_step_apart_from_the_typing_before_it', async () => {
+  const arm = await openCommandEngine(['abc def']);
+  const id = arm.engine.paragraphs('body')[0]!.paraId;
+  timed(arm, 'insertText', { text: 'Z', selection: selection(id, 0) }, 10);
+  timed(arm, 'replaceSelection', { text: 'ㄱ', selection: selection(id, 5, 8) }, 100);
+  timed(arm, 'insertText', { text: '가', replaceBefore: 'ㄱ' }, 100, 200);
+  expect(texts(arm)).toEqual(['Zabc 가']);
+  execute(arm, command(arm, 'undo', {}));
+  expect(texts(arm)).toEqual(['Zabc def']);
+  execute(arm, command(arm, 'undo', {}));
+  expect(texts(arm)).toEqual(['abc def']);
+}, TIMEOUT);
+
+test('cancelling_a_composition_over_a_selection_keeps_what_a_collaborator_typed_inside_it_and_elsewhere', async () => {
+  const { arm, peer, id, sync } = await collaborators(['abc def']);
+  timed(arm, 'replaceSelection', { text: 'x', selection: selection(id, 4, 7) }, 100);
+  timed(arm, 'insertText', { text: 'xy', replaceBefore: 'x' }, 100, 200);
+  sync(peer, arm);
+  expect(execute(peer, command(peer, 'insertText', { text: 'Q', selection: selection(id, 5) })).status).toBe('applied');
+  expect(execute(peer, command(peer, 'insertText', { text: 'P', selection: selection(id, 0) })).status).toBe('applied');
+  sync(arm, peer);
+  expect(texts(arm)).toEqual(['Pabc xQy']);
+  expect(timed(arm, 'insertText', { text: '', replaceBefore: 'xy' }, 100, 300).status).toBe('applied');
+  sync(peer, arm);
+  expect(texts(arm)[0]).toMatch(/^Pabc (Qdef|defQ)$/);
+  expect(texts(peer)).toEqual(texts(arm));
+}, TIMEOUT);
+
+test('an_empty_step_without_an_input_time_removes_text_typed_over_a_selection_instead_of_undoing', async () => {
+  const arm = await openCommandEngine(['abc def']);
+  const id = arm.engine.paragraphs('body')[0]!.paraId;
+  execute(arm, command(arm, 'replaceSelection', { text: 'ㄱ', selection: selection(id, 4, 7) }));
+  expect(step(arm, '', 'ㄱ').status).toBe('applied');
+  expect(texts(arm)).toEqual(['abc ']);
+}, TIMEOUT);

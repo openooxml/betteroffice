@@ -512,14 +512,13 @@ function typedTextOf(
   }
 }
 
-/**
- * The text the typing command that left `caret` wrote, if it still reads `expected` with nothing inserted inside it;
- * null if edits deleted or split it, undefined if `caret` was not left by that command.
- */
-function typedTextBefore(
-  engine: DocxWorkerCommandEngine, typed: DocxTypedText | undefined, caret: DocxCommandPosition, expected: string
-): YrsStoryRange | null | undefined {
-  if (!typed || !caret.sticky || caret.story !== typed.story || !sameBytes(caret.sticky, typed.caret)) return undefined;
+/** Whether `caret` is the one the typing command that wrote `typed` left. */
+function leftBy(typed: DocxTypedText | undefined, caret: DocxCommandPosition): typed is DocxTypedText {
+  return !!typed && !!caret.sticky && caret.story === typed.story && sameBytes(caret.sticky, typed.caret);
+}
+
+/** Where `typed` is, if it still reads `expected` with nothing inserted inside it; null if edits deleted or split it. */
+function typedTextBefore(engine: DocxWorkerCommandEngine, typed: DocxTypedText, expected: string): YrsStoryRange | null {
   const first = engine.resolveStickyPosition({ story: typed.story, encoded: typed.first });
   const last = engine.resolveStickyPosition({ story: typed.story, encoded: typed.last });
   if (!first || !last || first.story !== typed.story || last.story !== typed.story || first.paraId !== last.paraId) return null;
@@ -850,12 +849,17 @@ export function preflightDocxCommand(
   let range = resolved.range;
   if ((command.kind === 'insertText' || command.kind === 'replaceSelection' || command.kind === 'lineBreak') && state.storedMarks &&
     (typeof state.storedMarks.clear !== 'boolean' || !validDelta(state.storedMarks.delta))) return refuse('invalid-stored-marks');
+  let typedOver: DocxTypedText | undefined;
   if (command.kind === 'insertText' && command.payload.replaceBefore !== undefined) {
-    const typed = collapsed(range)
-      ? typedTextBefore(engine, state.typed, resolved.selection.focus, command.payload.replaceBefore) : undefined;
-    const replaced = typed === undefined ? textRangeBefore(engine, range, command.payload.replaceBefore) : typed;
-    if (!replaced) return refuse('replaced-text-mismatch');
-    range = replaced;
+    const run = collapsed(range) && leftBy(state.typed, resolved.selection.focus) ? state.typed : undefined;
+    if (!command.payload.text && run?.undoes !== undefined && run.undoes === command.inputTime) typedOver = run;
+    else {
+      const typed = run ? typedTextBefore(engine, run, command.payload.replaceBefore) : undefined;
+      const replaced = typed === undefined ? textRangeBefore(engine, range, command.payload.replaceBefore) : typed;
+      if (!replaced) return refuse('replaced-text-mismatch');
+      range = replaced;
+      if (typed) typedOver = run;
+    }
   }
   if (command.kind === 'deleteBackward' || command.kind === 'deleteForward') {
     const story = range.story;
@@ -890,7 +894,7 @@ export function preflightDocxCommand(
     range = expanded;
   }
   return { status: 'ready', prepared: {
-    command: structuredClone(command), selection: resolved.selection, range,
+    command: structuredClone(command), selection: resolved.selection, range, ...(typedOver ? { typedOver } : {}),
   } };
 }
 
@@ -1002,6 +1006,7 @@ export function applyDocxCommand(
 ): DocxCommandApplyResult {
   const { inputTime, lastInputTime } = prepared.command;
   const version = engine.proposalEngine.version();
+  const typed = state.typed;
   try {
     if (inputTime === undefined) return applyPreparedDocxCommand(engine, state, prepared, context, environment);
     engine.setUndoInputTime([inputTime, lastInputTime ?? inputTime]);
@@ -1019,6 +1024,9 @@ export function applyDocxCommand(
     const corrected = state.selection ? readCommandSelection(engine, state) : null;
     return { status: 'refused', reason: unavailable ? 'table-unavailable' : 'unsupported', selection: corrected?.ok ? corrected.selection : null,
       editState: projectDocxEditState(engine, state, corrected) };
+  } finally {
+    // Any other local edit ends the typed text, so no later step types over it or undoes past that edit.
+    if (state.typed === typed && engine.proposalEngine.version() !== version) state.typed = undefined;
   }
 }
 
@@ -1220,12 +1228,16 @@ function applyPreparedDocxCommand(
     if (applied.applied) state.storedMarks = null;
     return result(applied.applied ? 'applied' : 'noop');
   }
-  if (command.kind === 'undo' || command.kind === 'redo') {
+  // Emptying text that replaced a selection as its own undo step undoes that step, which gives the selection back and
+  // leaves collaborators' edits.
+  const undoesTyped = command.kind === 'insertText' && !command.payload.text && prepared.typedOver?.undoes !== undefined &&
+    prepared.typedOver.undoes === command.inputTime;
+  if (command.kind === 'undo' || command.kind === 'redo' || undoesTyped) {
     const beforeHead = engine.selection()?.head ?? null;
     const tables = beforeHead ? liveTableAncestors(engine, beforeHead.story) : [];
     const nearby = tables.map((table) => nearTable(engine, table)).filter((at): at is YrsLoc => !!at);
     engine.addUndoBoundary();
-    const changed = command.kind === 'undo' ? engine.undo() : engine.redo();
+    const changed = command.kind === 'redo' ? engine.redo() : engine.undo();
     if (!changed) return result('noop');
     state.storedMarks = null;
     if (state.activePart && !engine.geometryReader.hasStory(state.activePart.story)) {
@@ -1319,9 +1331,10 @@ function applyPreparedDocxCommand(
   if (command.kind === 'setParagraphAttrs' && Object.keys(command.payload.attrs).length === 0) return result('noop');
   const version = engine.proposalEngine.version();
   engine.beginUndoCapture();
+  const ownStep = command.kind === 'replaceSelection' && command.payload.text !== '' && !collapsed(range);
   const discrete = ['setTabStops', 'removeTabStop', 'toggleList', 'changeIndent', 'insertImage', 'moveEmbed', 'insertTable', 'pasteFragment', 'insertPageBreak', 'insertSectionBreak', 'lineBreak'].includes(command.kind) ||
     isTableCommandKind(command.kind);
-  if (discrete) engine.addUndoBoundary();
+  if (discrete || ownStep) engine.addUndoBoundary();
   const caret = (at: YrsLoc) => publish({ anchor: at, focus: at }, true);
   switch (command.kind) {
     case 'setTabStops':
@@ -1359,6 +1372,8 @@ function applyPreparedDocxCommand(
       }
       caret({ story: receipt.range.story, ...receipt.range.end });
       state.typed = typedTextOf(engine, receipt.range, command.payload.text, state.selection?.focus.sticky);
+      const undoes = ownStep ? command.inputTime : prepared.typedOver?.undoes;
+      if (state.typed && undoes !== undefined && undoes === command.inputTime) state.typed.undoes = undoes;
       break;
     }
     case 'deleteBackward': case 'deleteForward': {

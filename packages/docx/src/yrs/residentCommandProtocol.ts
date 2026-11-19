@@ -500,6 +500,8 @@ export interface PreparedDocxCommand {
   table?: DocxTableCommandTarget;
   paragraphChanges?: Array<{ range: YrsStoryRange; attrs: YrsParagraphAttrs }>;
   sectionBreakProperties?: SectionProperties;
+  /** The typed text an `insertText` step with `replaceBefore` types over, or undoes when it empties it. */
+  typedOver?: DocxTypedText;
 }
 
 export type DocxCommandPreflightResult =
@@ -651,6 +653,8 @@ export interface DocxTypedText {
   /** UTF-16 length of the last character. */
   lastLength: number;
   caret: Uint8Array;
+  /** The input time of every step since the text replaced a selection as its own undo step; emptying it undoes that step. */
+  undoes?: number;
 }
 
 export type DocxWorkerCommandEngine = ResidentEngineSession & Pick<YrsSession,
