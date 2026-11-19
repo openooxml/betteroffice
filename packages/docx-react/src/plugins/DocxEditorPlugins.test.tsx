@@ -2474,21 +2474,24 @@ describe('DocxEditor plugins (peer-less engine)', () => {
     const events: DocxPluginEvent[] = [];
     const plugin = defineDocxPlugin({ id: 'settle', createState: () => null,
       onEvent(_context, event) { events.push(event); } });
-    const { view } = await mount({ plugins: [plugin] });
-    await settle(400);
-    events.length = 0;
-    const input = view.container.querySelector<HTMLTextAreaElement>('[data-docx-worker-editor] textarea')!;
-    await act(async () => {
-      input.focus();
-      fireEvent.keyDown(input, { key: 'ArrowRight', shiftKey: true });
-    });
-    await until(() => events.some((event) => event.type === 'selection-change'));
-    expect(events.filter((event) => event.type === 'selection-settle')).toHaveLength(0);
-    await settle(400);
-    expect(events.filter((event) => event.type === 'selection-settle')).toMatchObject([{ source: 'keyboard' }]);
-    expect(events.filter((event) => event.type === 'selection-settle')).toHaveLength(1);
-    await settle(400);
-    expect(events.filter((event) => event.type === 'selection-settle')).toHaveLength(1);
+    const clock = selectionClock();
+    try {
+      const { view } = await mount({ plugins: [plugin] });
+      await act(async () => { await clock.tick(400); });
+      events.length = 0;
+      const input = view.container.querySelector<HTMLTextAreaElement>('[data-docx-worker-editor] textarea')!;
+      await act(async () => {
+        input.focus();
+        fireEvent.keyDown(input, { key: 'ArrowRight', shiftKey: true });
+      });
+      await until(() => events.some((event) => event.type === 'selection-change'));
+      expect(events.filter((event) => event.type === 'selection-settle')).toHaveLength(0);
+      await act(async () => { await clock.tick(400); });
+      expect(events.filter((event) => event.type === 'selection-settle')).toMatchObject([{ source: 'keyboard' }]);
+      expect(events.filter((event) => event.type === 'selection-settle')).toHaveLength(1);
+      await act(async () => { await clock.tick(400); });
+      expect(events.filter((event) => event.type === 'selection-settle')).toHaveLength(1);
+    } finally { clock.restore(); }
   });
 
   test('a slow worker selection mapping settles once with the pointer source and mapped range', async () => {
