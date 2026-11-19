@@ -269,3 +269,28 @@ for (const fixture of FIXTURES) {
     }
   });
 }
+
+const PAGE_BREAK = '<w:r><w:br w:type="page"/></w:r>';
+const pages = (xml: string) => xml.replaceAll('<w:br w:type="page"/>', '<w:t>[page]</w:t>');
+const BREAK_RUN = /<w:r>(?:<w:rPr>(?:(?!<\/w:rPr>)[\s\S])*<\/w:rPr>)?<w:br w:type="page"\/><\/w:r>/;
+
+const BEFORE_A_BREAK: Array<[string, string]> = [['a w:subDoc', SUB_DOC], ['an unknown element holding a run', ZZZ]];
+
+for (const [name, kept] of BEFORE_A_BREAK) {
+  describe(`${name} before a page break in the same paragraph`, () => {
+    const inner = `${SOURCE.t('Head ')}${kept}${SOURCE.t(' Mid')}${PAGE_BREAK}${SOURCE.t('End')}`;
+    const keptTrace = trace(paragraph(kept));
+
+    for (const [loader, load] of LOADERS) {
+      it(`${loader}: typing before both keeps the break in its run and in place`, async () => {
+        const { session, base } = await load(docx(inner));
+        const first = session.paragraphs('body')[0]!;
+        expect(first.properties._originalRunBoundaries).toHaveLength(4);
+        typeAt(0)(session, first.paraId);
+        const saved = paragraphsOf(await savedAsTheEditorSaves(session, base));
+        expect(saved.map(entry => trace(pages(entry)))).toEqual([`XHead ${keptTrace} Mid[page]End`, 'Other']);
+        expect(saved[0]).toMatch(BREAK_RUN);
+      });
+    }
+  });
+}
