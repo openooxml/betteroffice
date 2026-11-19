@@ -170,6 +170,17 @@ fn story_paragraphs<'a>(blocks: &'a [BlockContent], output: &mut Vec<&'a Paragra
     }
 }
 
+fn excepted(paragraph: &Paragraph, ids: &Value) -> bool {
+    let Some(id) = paragraph.para_id.as_deref() else {
+        return false;
+    };
+    ids.as_array().is_some_and(|ids| {
+        ids.iter()
+            .filter_map(Value::as_str)
+            .any(|item| item.eq_ignore_ascii_case(id))
+    })
+}
+
 fn paragraphs_of(blocks: &[BlockContent]) -> Vec<Value> {
     let mut found = Vec::new();
     collect_paragraphs(blocks, &mut found);
@@ -422,7 +433,11 @@ impl Runner {
             "readEdited" => {
                 let mut story = Vec::new();
                 story_paragraphs(&document.body().content, &mut story);
-                let texts: Vec<String> = story.into_iter().map(get_paragraph_text).collect();
+                let texts: Vec<String> = story
+                    .into_iter()
+                    .filter(|paragraph| !excepted(paragraph, &args["exceptParaIds"]))
+                    .map(get_paragraph_text)
+                    .collect();
                 json!({
                     "paragraph": document
                         .paragraph(args["paraId"].as_str().unwrap())
