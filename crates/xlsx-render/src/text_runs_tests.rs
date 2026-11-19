@@ -159,9 +159,11 @@ fn a_rich_cell_carries_runs_with_utf16_offsets_and_styles() {
         ]
     );
     let plain = build_display_list(&workbook, SheetId(0), &VIEW).unwrap();
+    let clip = clip_of(command(&plain, stored));
+    let baseline = crate::baseline_y(clip.y, clip.h, 14.0, None);
     assert_eq!(
         without_runs(command(&list, stored)),
-        *command(&plain, stored)
+        with_y(command(&plain, stored), baseline)
     );
 }
 
@@ -317,9 +319,11 @@ fn a_hyperlink_cell_keeps_the_link_colour_and_underline() {
     };
     assert!(*underline);
     assert_ne!(&**color, "#000000");
+    let clip = clip_of(command(&plain, "Open site"));
+    let baseline = crate::baseline_y(clip.y, clip.h, 14.0, None);
     assert_eq!(
         without_runs(command(&list, "Open site")),
-        *command(&plain, "Open site")
+        with_y(command(&plain, "Open site"), baseline)
     );
 }
 
