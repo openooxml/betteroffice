@@ -134,6 +134,12 @@ def highlight_and_merge_bytes() -> bytes:
         + cell("", "left")
         + "<w:tc><w:p><w:r><w:t>bare</w:t></w:r></w:p></w:tc>"
         + cell("<w:vMerge/>", "below")
+        + "</w:tr><w:tr>"
+        + cell('<w:gridSpan w:val="1"/>', "single")
+        + cell("", "middle")
+        + cell('<w:vMerge w:val="continue"/>', "lower")
+        + "</w:tr><w:tr>"
+        + cell("", "alone")
         + "</w:tr></w:tbl><w:sectPr/></w:body></w:document>"
     )
     return _package({**PARTS, "word/document.xml": document})

@@ -106,6 +106,8 @@ def test_a_cell_carries_its_column_span_and_vertical_merge(
     assert merges == [
         [("wide", 2, None), ("tall", None, "restart")],
         [("left", None, None), ("bare", None, None), ("below", None, "continue")],
+        [("single", None, None), ("middle", None, None), ("lower", None, "continue")],
+        [("alone", 3, None)],
     ]
     assert type(table.rows[0].cells[0].grid_span) is int
 
