@@ -8,7 +8,7 @@ import type { Document } from '../types/document';
 import { preloadEditWasm } from '../wasm/edit';
 import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
 import { documentToYrs } from './documentToYrs';
-import { DirtyProjectionStories, mergeDocxHostMetadata, saveEditorDocument } from './editorSave';
+import { DirtyProjectionStories, hostSaveMetadata, mergeDocxHostMetadata, saveEditorDocument } from './editorSave';
 import { createYrsSession, decodeDocxHostJson, saveYrsDocx, type YrsSession } from './index';
 import { createResidentEngineSession } from './residentEngineSession';
 import type { ResidentSaveRecord } from './residentSave';
@@ -252,6 +252,8 @@ interface Opened {
   revisions(): number;
   /** Saves as the route's editor does; `stories` are marked changed besides the body. */
   save(comments: (list: Comment[]) => Comment[], stories?: readonly string[]): Promise<Uint8Array>;
+  /** Changes the top page margin of the host document the next saves receive. */
+  changeMargins(): void;
   /** The route's content-control setter, where its session object has one. */
   controls?: Pick<YrsSession, 'setContentControlValue'>;
   destroy(): void;
@@ -269,6 +271,11 @@ beforeAll(async () => {
 }, 30_000);
 
 const hostComments = (document: Document): Comment[] => document.package.document.comments ?? [];
+
+function changeMargins(host: Document): void {
+  const document = host.package.document;
+  document.finalSectionProperties = { ...document.finalSectionProperties, marginTop: 2000 };
+}
 
 async function editorSave(
   session: YrsSession,
@@ -297,6 +304,7 @@ async function open(route: Route, bytes: Uint8Array): Promise<Opened> {
         projected = saved.projected;
         return saved.bytes;
       },
+      changeMargins: () => changeMargins(host),
       controls: session,
       destroy: () => session.destroy(),
     };
@@ -312,6 +320,7 @@ async function open(route: Route, bytes: Uint8Array): Promise<Opened> {
       revisions: () => session.listRevisions().length,
       save: async (comments, stories) =>
         (await editorSave(session, base, comments(hostComments(parsed)), undefined, stories)).bytes,
+      changeMargins: () => changeMargins(parsed),
       controls: session,
       destroy: () => session.destroy(),
     };
@@ -319,13 +328,18 @@ async function open(route: Route, bytes: Uint8Array): Promise<Opened> {
   const engine = await createResidentEngineSession(undefined, (clientId += 1));
   const hostJson = engine.openDocx(bytes.slice(), undefined, 'comment-range');
   const record: ResidentSaveRecord = { full: false };
+  let host: Document | undefined;
   return {
     session: engine,
     lengths: (story) => engine.geometryReader.paragraphSpans(story),
     revisions: () => engine.proposalEngine.listRevisions().length,
     save: async (comments) => {
       const listed = comments(hostComments(decodeDocxHostJson(hostJson, bytes.slice()).document));
-      return new Uint8Array(await engine.save(bytes.slice(), hostJson, undefined, listed, record));
+      return new Uint8Array(await engine.save(bytes.slice(), hostJson, host && hostSaveMetadata(host), listed, record));
+    },
+    changeMargins: () => {
+      host = decodeDocxHostJson(hostJson, bytes.slice()).document;
+      changeMargins(host);
     },
     destroy: () => engine.destroy(),
   };
@@ -768,6 +782,7 @@ const CROSSINGS: Crossing[] = [
     edit: async (opened) => {
       removeOther(opened);
       opened.session.mergeCells({ anchor: cell(0), head: cell(1) });
+      opened.changeMargins();
       return opened.save(withoutOther);
     },
     check: cutIn,
@@ -842,6 +857,7 @@ const CROSSINGS: Crossing[] = [
     edit: async (opened) => {
       removeOther(opened);
       typeIn(opened, HEADER, 0, 1);
+      opened.changeMargins();
       return opened.save(withoutOther, [HEADER]);
     },
     check: (saved) => [
