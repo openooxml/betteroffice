@@ -1815,14 +1815,14 @@ function restoreRecordedBreaks(
   const live = items
     .map((item) => (item.kind === 'text' ? item.text : isBlockBreak(item) ? '' : '\uFFFC'))
     .join('');
+  const alignment = textAlignment(recorded, live, true);
+  const length = content.reduce((sum, child) => sum + paragraphContentLength(child), 0);
   if (
     boundaries.some((boundary) => boundary.inline) &&
-    !kept.every(({ offset }) => breakPlaceIsCertain(offset, recorded, live, content))
+    !breakPlacesAreCertain(kept.map(({ offset }) => offset), recorded, live, content, alignment, length)
   ) {
     return content;
   }
-  const alignment = textAlignment(recorded, live, true);
-  const length = content.reduce((sum, child) => sum + paragraphContentLength(child), 0);
   const placed = insertBoundaries(
     content,
     kept.map(({ offset }, id) => {
@@ -1875,47 +1875,47 @@ function mapRecordedOffset(
       : Math.min(offset, live.length - suffix);
 }
 
-function atChildBoundary(content: ParagraphContent[], offset: number): boolean {
+function atChildBoundaries(content: ParagraphContent[], offsets: number[]): boolean {
+  let index = 0;
   let start = 0;
   for (const child of content) {
     const end = start + paragraphContentLength(child);
-    if (start < offset && offset < end) {
+    while (index < offsets.length && offsets[index]! <= start) index += 1;
+    if (index < offsets.length && offsets[index]! < end) {
       if (child.type !== 'run') return false;
       let at = start;
       for (const entry of child.content) {
         const next = at + runContentLength(entry);
-        if (entry.type !== 'text' && at < offset && offset < next) return false;
+        while (index < offsets.length && offsets[index]! <= at) index += 1;
+        if (entry.type !== 'text' && index < offsets.length && offsets[index]! < next) return false;
         at = next;
       }
-      return true;
     }
     start = end;
   }
   return true;
 }
 
-function breakPlaceIsCertain(
-  offset: number,
+function breakPlacesAreCertain(
+  offsets: number[],
   recorded: string,
   live: string,
-  content: ParagraphContent[]
+  content: ParagraphContent[],
+  first: TextAlignment,
+  length: number
 ): boolean {
-  if (content.reduce((sum, child) => sum + paragraphContentLength(child), 0) !== live.length) {
-    return false;
-  }
-  const first = textAlignment(recorded, live, true);
+  if (length !== live.length) return false;
   const last = textAlignment(recorded, live, false);
-  const inside = ({ prefix, suffix }: TextAlignment): boolean =>
+  const inside = (offset: number, { prefix, suffix }: TextAlignment): boolean =>
     prefix < offset && offset < recorded.length - suffix;
-  if (inside(first) || inside(last)) return false;
-  const mapped = mapRecordedOffset(offset, recorded, live, first);
-  const insertion =
-    first.prefix === last.prefix &&
-    first.suffix === last.suffix &&
-    first.prefix === recorded.length - first.suffix &&
-    offset === first.prefix;
-  if (!insertion && mapped !== mapRecordedOffset(offset, recorded, live, last)) return false;
-  return atChildBoundary(content, mapped);
+  const mapped: number[] = [];
+  for (const offset of offsets) {
+    if (inside(offset, first) || inside(offset, last)) return false;
+    const place = mapRecordedOffset(offset, recorded, live, first);
+    if (place !== mapRecordedOffset(offset, recorded, live, last)) return false;
+    mapped.push(place);
+  }
+  return atChildBoundaries(content, mapped.sort((left, right) => left - right));
 }
 
 function restoreOriginalRuns(
