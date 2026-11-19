@@ -2096,7 +2096,8 @@ test('worker frames publish selection and distinct stable image handles', async 
     const selected = await editWithFrame(client, intent(1, 0, 'select', { selection: {
       anchor: { ...point, offset: 0 }, focus: { ...point, offset: 1 },
     } }));
-    expect(selected.frame!.payload.geometry!.selection.length).toBeGreaterThan(0);
+    expect(selected.frame!.payload.geometryKept).toBe(true);
+    expect(selected.frame!.payload.selectionRects?.length).toBeGreaterThan(0);
     const typed = await client.edit(intent(2, 0, 'insertText', {
       text: '+', selection: { anchor: { ...point, offset: 0 }, focus: { ...point, offset: 0 } },
     }));

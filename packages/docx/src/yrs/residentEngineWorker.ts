@@ -88,7 +88,7 @@ import { readCommentInsertionRange } from './residentCommentProjection';
 import { partMetadata } from './residentParts';
 import { readControlHandles } from './residentControls';
 import { readResidentProperties } from './residentProperties';
-import { readResidentFrameGeometry, readResidentCellSelectionRects, resetResidentObjectHandles } from './residentObjectGeometry';
+import { readResidentFrameGeometry, readResidentCellSelectionRects, resetResidentObjectHandles, selectsImage } from './residentObjectGeometry';
 import { cellSelectionHeadPosition, readCellSelection, rootOf, shownStory } from './residentCommandTableSelection';
 import {
   resolveBookmarkPosition,
@@ -1093,10 +1093,8 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
           })].sort((a, b) => a.pageIndex - b.pageIndex);
         }
         const readOnly = hooks.editState().readOnly;
-        const selectsOneUnit = !!selected && selected.anchor.story === selected.focus.story &&
-          selected.anchor.paraId === selected.focus.paraId && Math.abs(selected.anchor.offset - selected.focus.offset) === 1;
         const geometryKept = selectionOnly && reuseGeometry && !geometryPages.size && !shown.layoutProvisional && !readOnly &&
-          publishedGeometry!.objects && !publishedGeometry!.selectedImage && !selectsOneUnit;
+          publishedGeometry!.objects && !publishedGeometry!.selectedImage && !selectsImage(engine, selected);
         const geometry = geometryKept || readOnly || shown.layoutProvisional ? undefined
           : await readResidentFrameGeometry(engine, retainedFrame!, selected, layoutRevision);
         const built = buildCommandFrame({
