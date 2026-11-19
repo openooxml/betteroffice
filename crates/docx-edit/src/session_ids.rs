@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use yrs::types::text::YChange;
-use yrs::{Any, Array, Map, Out, ReadTxn, Text};
+use yrs::{Any, Array, ClientID, Map, Out, ReadTxn, Text};
 
 /// Draws a replica's `{client_id}:{counter}` ids.
 pub(crate) struct SessionIds {
@@ -47,8 +47,12 @@ impl SessionIds {
         self.counter.load(Ordering::Relaxed)
     }
 
-    /// One past the highest `N` of a `{client_id}:N` in a live map key, text attribute or value.
+    /// One past the highest `N` of a `{client_id}:N` in a live map key, text attribute or value;
+    /// 0 without reading when this client has written nothing to the document.
     fn floor<T: ReadTxn>(&self, txn: &T) -> u64 {
+        if txn.state_vector().get(&ClientID::new(self.client_id)) == 0 {
+            return 0;
+        }
         let prefix = format!("{}:", self.client_id);
         let mut floor = 0;
         let mut pending: Vec<Out> = txn.root_refs().map(|(_, value)| value).collect();
