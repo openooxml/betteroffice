@@ -329,13 +329,15 @@ fn a_style_numbered_neighbour_is_not_joined_and_a_direct_one_is() {
         paragraph(r#"<w:pStyle w:val="Heading1"/>"#, "Heading"),
         paragraph("", "Body"),
         paragraph("", "Gap"),
-        paragraph(r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="2"/></w:numPr>"#, "Item"),
+        paragraph(
+            r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="2"/></w:numPr>"#,
+            "Item",
+        ),
         paragraph("", "Below"),
     ]
     .concat();
     let doc = EditingDoc::new(709);
-    seed_from_docx(&doc, &styled_docx(&body, Some(NUMBERED_HEADING_STYLES)))
-        .unwrap();
+    seed_from_docx(&doc, &styled_docx(&body, Some(NUMBERED_HEADING_STYLES))).unwrap();
     let heading = attrs(&doc, "Heading");
     let shapes = format!(
         "numPr={:?} numPrFromStyle={:?} _originalFormatting={:?}",
