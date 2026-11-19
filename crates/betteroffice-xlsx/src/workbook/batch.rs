@@ -1583,6 +1583,7 @@ impl Workbook {
         self.graph = Some(graph);
         self.mark_graph_current();
         self.last_calculation = calculation_result(&recalculated);
+        self.calculated_now = request.calculation.now_serial;
         self.publish(update);
         Ok(Ok(application))
     }

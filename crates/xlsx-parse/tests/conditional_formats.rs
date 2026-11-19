@@ -245,6 +245,52 @@ fn differential_colors_resolve_theme_tint_and_indexed_palettes() {
 }
 
 #[test]
+fn differential_fills_read_a_bare_background_and_note_two_different_colors() {
+    let source = parts(
+        r#"<sheetData/><conditionalFormatting sqref="A1"><cfRule type="expression" priority="1" dxfId="0"><formula>A1&gt;0</formula></cfRule></conditionalFormatting>"#,
+        Some(concat!(
+            r#"<dxfs count="6">"#,
+            r#"<dxf><fill><patternFill><bgColor rgb="FFFFC7CE"/></patternFill></fill></dxf>"#,
+            r#"<dxf><fill><patternFill patternType="solid"><fgColor rgb="FF111111"/><bgColor rgb="FF222222"/></patternFill></fill></dxf>"#,
+            r#"<dxf><fill><patternFill patternType="solid"><fgColor rgb="FF333333"/></patternFill></fill></dxf>"#,
+            r#"<dxf><fill><patternFill patternType="lightUp"><bgColor rgb="FF444444"/></patternFill></fill></dxf>"#,
+            r#"<dxf><fill><patternFill patternType="solid"><bgColor rgb="FF555555"/><fgColor rgb="FF666666"/></patternFill></fill></dxf>"#,
+            r#"<dxf><fill><patternFill patternType="solid"><fgColor rgb="FF777777"/><bgColor rgb="FF777777"/></patternFill></fill></dxf>"#,
+            r#"</dxfs>"#,
+        )),
+    );
+    let workbook = parse_workbook(&source).unwrap();
+    let fills: Vec<_> = workbook
+        .styles
+        .dxfs
+        .iter()
+        .map(|dxf| dxf.fill.as_deref())
+        .collect();
+    assert_eq!(
+        fills,
+        [
+            Some("#ffc7ce"),
+            Some("#111111"),
+            Some("#333333"),
+            None,
+            Some("#666666"),
+            Some("#777777"),
+        ]
+    );
+    let differ: Vec<bool> = (0..6)
+        .map(|index| workbook.styles.dxf_fill_colors_differ(index))
+        .collect();
+    assert_eq!(differ, [false, true, false, false, true, false]);
+    assert_eq!(
+        workbook.sheets[0].conditional_formats[0].rules[0]
+            .format
+            .fill
+            .as_deref(),
+        Some("#ffc7ce")
+    );
+}
+
+#[test]
 fn authored_italic_differential_formats_round_trip() {
     for italic in [true, false] {
         let font = if italic {
