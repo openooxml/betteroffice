@@ -138,7 +138,17 @@ export function summarizeTiming(format, samples) {
     ratio_to_libreoffice: { published: ratio('published'), commit: ratio('commit') } };
 }
 
-export function mergeTiming(plan, report, parts, planHash) {
+const IMAGE_VERSION = /^[0-9]{8}\.[0-9]{1,5}(?:\.[0-9]{1,3})?$/;
+const publishable = (value) => typeof value === 'string' && IMAGE_VERSION.test(value);
+
+function runnerOf(format, runner, hosted) {
+  const { processors, image_version } = runner;
+  if (publishable(image_version) || (!hosted && image_version === 'local')) return { processors, image_version };
+  console.warn(`${format} timing runner.image_version is not publishable; left out of the merged report`);
+  return { processors };
+}
+
+export function mergeTiming(plan, report, parts, planHash, { hosted = process.env.GITHUB_ACTIONS === 'true' } = {}) {
   const formats = timingFormats(plan);
   if (!Array.isArray(parts) || parts.length !== formats.length) fail('missing or unexpected format reports');
   const result = {};
@@ -152,7 +162,8 @@ export function mergeTiming(plan, report, parts, planHash) {
         Object.keys(config.builds ?? {}).length !== 2 ||
         config.builds.published?.source_sha !== publishedSource(plan, format) ||
         config.builds.commit?.source_sha !== plan.source_sha ||
-        !Number.isInteger(part.runner?.processors) || part.runner.processors < 1)
+        !Number.isInteger(part.runner?.processors) || part.runner.processors < 1 ||
+        (hosted && !publishable(part.runner.image_version)))
       fail(`invalid ${format} identity`);
     const office = format === 'xlsx' ? report.xlsx_benchmark : report[`${format}_benchmark`];
     if (office && (office.libreoffice_version !== config.libreoffice_version ||
@@ -171,7 +182,8 @@ export function mergeTiming(plan, report, parts, planHash) {
       if (typeof row.notes_not_converged !== 'boolean') fail(`unexpected ${format} sample`);
       for (const channel of CHANNELS) validateChannel(row.timings[channel]);
     });
-    result[format] = { ...config, runner: part.runner, summary: summarizeTiming(format, part.samples), samples: part.samples };
+    result[format] = { ...config, runner: runnerOf(format, part.runner, hosted), summary: summarizeTiming(format, part.samples),
+      samples: part.samples };
   }
   return { ...report, timing_benchmark: result };
 }

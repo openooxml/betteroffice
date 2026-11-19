@@ -183,7 +183,7 @@ class NativeBenchmarkTests(unittest.TestCase):
             self.assertNotIn('host-a', json.dumps(report))
 
     def test_no_benchmark_producer_records_the_runner_platform_string(self):
-        for name in ['docx_benchmark.py', 'pptx_benchmark.py', 'xlsx_benchmark.py']:
+        for name in ['docx_benchmark.py', 'pptx_benchmark.py', 'xlsx_benchmark.py', 'timing.py']:
             self.assertNotIn('platform.platform()', (Path(__file__).parent / name).read_text(), name)
 
     def test_the_pptx_and_xlsx_shard_reports_record_no_runner_platform(self):
