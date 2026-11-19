@@ -444,7 +444,11 @@ fn created_marker(
     for value in counters.iter_mut().skip(level + 1) {
         *value = 0;
     }
-    Some(resolve_list_template(text, counters, &definition.level_formats()))
+    Some(resolve_list_template(
+        text,
+        counters,
+        &definition.level_formats(),
+    ))
 }
 
 #[cfg(test)]

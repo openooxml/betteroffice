@@ -311,20 +311,18 @@ fn source_attrs(values: &BTreeMap<String, Any>) -> BTreeMap<String, Any> {
 }
 
 /// The attributes that put a paragraph on the list of the paragraph with `values` when that list
-/// shows as `kind`.
+/// shows as `kind`; a paragraph naming a created list whose definition is absent is on the list
+/// its numId names.
 fn joined_list(
     values: &BTreeMap<String, Any>,
     definitions: &BTreeMap<String, CreatedListDefinition>,
     kind: ListKind,
 ) -> Option<BTreeMap<String, Any>> {
     match resolve_list_identity(values)? {
-        ListIdentity::Created { key, level } => {
-            let shown = definitions
-                .get(&key)
-                .map_or_else(|| shown_kind(values), |definition| definition.kind);
-            (shown == kind).then(|| created_attrs(kind, &key, level))
+        ListIdentity::Created { key, level } if definitions.contains_key(&key) => {
+            (definitions[&key].kind == kind).then(|| created_attrs(kind, &key, level))
         }
-        ListIdentity::Source { .. } => (shown_kind(values) == kind).then(|| source_attrs(values)),
+        _ => (shown_kind(values) == kind).then(|| source_attrs(values)),
     }
 }
 

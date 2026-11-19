@@ -30,7 +30,7 @@ import {
   assertCommentBookmarkReplacement, projectedSessionKey, restoreBlockBookmarks, yrsToDocument,
 } from './yrsToDocument';
 import {
-  createdListOf, savedListDefinitions, writeListDefinitionParts, type DocxSavedListDefinition,
+  savedListDefinitions, withCreatedListIds, writeListDefinitionParts,
 } from './listDefinitionSave';
 
 /** A saved paragraph's session anchor and the persisted anchor that resolves to it once reopened. */
@@ -397,17 +397,6 @@ function withSourceOrdinals(
   });
 }
 
-/** `document` with each paragraph on a created list pointing at the `w:numId` this save gives the list. */
-function withCreatedListIds(document: Document, lists: readonly DocxSavedListDefinition[]): Document {
-  const numIds = new Map(lists.map(definition => [definition.key, definition.numId]));
-  return mapStoryParagraphs(document, (paragraph) => {
-    const numPr = paragraph.formatting?.numPr;
-    const key = createdListOf(numPr);
-    const numId = key === undefined ? undefined : numIds.get(key);
-    return numId === undefined ? paragraph : { ...paragraph, formatting: { ...paragraph.formatting, numPr: { ...numPr, numId } } };
-  });
-}
-
 /** The identities and paragraph ID plan a session save applies. @internal */
 export interface DocxSessionSave {
   identities: DocxParagraphIdentitySnapshot;
@@ -662,10 +651,13 @@ export async function writeSessionSave(
     const source = options.commentDeletion && options.commentBaseline ? Uint8Array.from(options.commentBaseline.bytes).buffer
       : options.commentBaseline ? commentSourceBuffer(sectionEdits ? sourceBuffer : originalBuffer, options.commentBaseline.bytes)
         : sectionEdits ? sourceBuffer : originalBuffer;
-    const lists = created.length ? savedListDefinitions(session, created, unzipContainer(new Uint8Array(source))) : [];
+    const lists = created.length
+      ? savedListDefinitions(session, created, unzipContainer(new Uint8Array(source)), sessionMaterializedSource(session)?.package.numbering)
+      : [];
     const modelled = withSourceOrdinals(output, spliced);
+    const numIds = new Map(lists.map(definition => [definition.key, definition.numId]));
     const { buffer, warnings } = await writeDocumentWithRust(
-      lists.length ? withCreatedListIds(modelled, lists) : modelled, source, options, undefined, undefined, plan, skipMutations, yieldSave
+      lists.length ? withCreatedListIds(modelled, numIds) : modelled, source, options, undefined, undefined, plan, skipMutations, yieldSave
     );
     let structure = 0;
     const keptParagraphs: DocxKeptParagraph[] = [];

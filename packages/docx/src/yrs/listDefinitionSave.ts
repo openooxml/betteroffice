@@ -1,4 +1,5 @@
-import type { NumberingDefinitions, Paragraph } from '../types/document';
+import { headerFooterAliasOf, markHeaderFooterAlias } from '../docx/headerFooterAliasProjection';
+import type { HeaderFooter, NumberingDefinitions, Paragraph } from '../types/document';
 import type { YrsSession } from './index';
 
 /** The `w:numId` and `w:abstractNumId` a save gives a list definition the editor created. */
@@ -28,10 +29,14 @@ const BULLET_FONTS: ReadonlyMap<string, string> = new Map([
 /** The numbers Rust's `f64` parser reads from a string, as the engine reads attribute values. */
 const ENGINE_NUMBER = /^[+-]?(?:inf|infinity|nan|(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)$/i;
 
+/**
+ * The property a projection adds to the `numPr` of a paragraph on a created list, holding the
+ * list's key; `writeSessionSave` takes it off before the writer sees the document.
+ */
+const CREATED_LIST = 'createdList';
+
 /** The ids the saves of each session gave the list definitions it created, so later saves give the same. */
 const assigned = new WeakMap<YrsSession, ReadonlyMap<string, DocxListDefinitionIds>>();
-/** The `numPr` objects a projection wrote for paragraphs on created lists, by the list's key. */
-const createdNumPrs = new WeakMap<object, string>();
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -76,14 +81,50 @@ export function markCreatedListParagraph(paragraph: Paragraph, properties: Recor
   const key = createdListKey(properties);
   const numPr = paragraph.formatting?.numPr;
   if (key === undefined || numPr === undefined) return paragraph;
-  const marked = { ...numPr };
-  createdNumPrs.set(marked, key);
+  const marked = { ...numPr, [CREATED_LIST]: key } as typeof numPr;
   return { ...paragraph, formatting: { ...paragraph.formatting, numPr: marked } };
 }
 
-/** The key of the created list a projected `numPr` belongs to. */
-export function createdListOf(numPr: object | undefined): string | undefined {
-  return numPr === undefined ? undefined : createdNumPrs.get(numPr);
+/**
+ * `value`, a projected document or any part of it, with the created-list mark taken off every
+ * `numPr` that carries one and, where `numIds` names its list, that list's numId in its place. The
+ * objects on the way to a changed one are copied, header and footer aliases kept; every other
+ * object is returned as it is.
+ */
+export function withCreatedListIds<T>(value: T, numIds: ReadonlyMap<string, number>): T {
+  const done = new Map<object, unknown>();
+  const visit = (node: unknown): unknown => {
+    if (node === null || typeof node !== 'object' || ArrayBuffer.isView(node) || node instanceof ArrayBuffer) return node;
+    if (done.has(node)) return done.get(node);
+    done.set(node, node);
+    let result: unknown = node;
+    if (node instanceof Map) {
+      const entries = [...node].map(([key, entry]) => [key, visit(entry)] as const);
+      if (entries.some(([key, entry]) => entry !== node.get(key))) result = new Map(entries);
+    } else if (Array.isArray(node)) {
+      const items = node.map(visit);
+      if (items.some((item, index) => item !== node[index])) result = items;
+    } else if ([Object.prototype, null].includes(Object.getPrototypeOf(node))) {
+      const record = node as Record<string, unknown>;
+      const key = record[CREATED_LIST];
+      if (typeof key === 'string') {
+        const unmarked = Object.fromEntries(Object.entries(record).filter(([name]) => name !== CREATED_LIST));
+        const numId = numIds.get(key);
+        result = numId === undefined ? unmarked : { ...unmarked, numId };
+      } else {
+        const entries = Object.entries(record).map(([name, entry]) => [name, visit(entry)] as const);
+        if (entries.some(([name, entry]) => entry !== record[name])) {
+          const copy = Object.fromEntries(entries);
+          const alias = headerFooterAliasOf(node as HeaderFooter);
+          if (alias !== undefined) markHeaderFooterAlias(copy as HeaderFooter, alias);
+          result = copy;
+        }
+      }
+    }
+    done.set(node, result);
+    return result;
+  };
+  return visit(value) as T;
 }
 
 /**
@@ -164,10 +205,38 @@ function elementsOf(masked: string, qualified: string): Array<{ index: number; s
   return found;
 }
 
-const numberAttribute = (start: string, name: string) => {
-  const value = new RegExp(`\\s(?:[\\w.-]+:)?${name}\\s*=\\s*"(\\d+)"`).exec(start)?.[1];
-  return value === undefined ? undefined : Number(value);
+/** The value, in either quoting, of attribute `name` of the start tag `start`. */
+const attributeOf = (start: string, name: string) => {
+  const match = new RegExp(`\\s(?:[\\w.-]+:)?${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`).exec(start);
+  const value = match?.[1] ?? match?.[2];
+  return value === undefined ? undefined : unescapeXml(value);
 };
+
+const numberAttribute = (start: string, name: string) => {
+  const value = attributeOf(start, name);
+  return value !== undefined && /^\d+$/.test(value) ? Number(value) : undefined;
+};
+
+/** The `val` of the first `<{any prefix}{name}>` element in `xml`. */
+const childValue = (xml: string, name: string) => {
+  const start = new RegExp(`<(?:[\\w.-]+:)?${name}(?=[\\s/>])[^>]*>`).exec(xml)?.[0];
+  return start === undefined ? undefined : attributeOf(start, 'val');
+};
+
+/** The level formats and texts of an `abstractNum` body, by level, as the writer controls them. */
+function levelsOf(body: string, own: string): Array<{ format?: string; text?: string } | undefined> {
+  const levels: Array<{ format?: string; text?: string } | undefined> = [];
+  for (const level of elementsOf(body, `${own}lvl`)) {
+    const index = numberAttribute(level.start, 'ilvl');
+    if (index === undefined || index >= LEVELS) continue;
+    levels[index] = { format: childValue(level.body, 'numFmt'), text: childValue(level.body, 'lvlText') };
+  }
+  return levels;
+}
+
+/** Every id written as attribute `name` in `xml`, in either quoting, wherever it stands. */
+const looseIds = (xml: string, name: string) =>
+  [...xml.matchAll(new RegExp(`(?:^|[\\s:])${name}\\s*=\\s*["'](\\d+)["']`, 'g'))].map(match => Number(match[1]));
 
 /** What a numbering part holds: its ids, the created lists it carries and where its elements are. */
 function scanNumbering(xml: string) {
@@ -176,27 +245,43 @@ function scanNumbering(xml: string) {
   const own = root?.[1] === undefined ? '' : `${root[1]}:`;
   const abstractNums = elementsOf(masked, `${own}abstractNum`);
   const nums = elementsOf(masked, `${own}num`);
-  const carriers = new Map<string, number>();
-  const abstractNumIds: number[] = [];
+  const carriers: Array<{ key: string; abstractNumId: number; levels: ReturnType<typeof levelsOf> }> = [];
+  const abstractNumIds: number[] = looseIds(xml, 'abstractNumId');
   for (const element of abstractNums) {
     const id = numberAttribute(element.start, 'abstractNumId');
     if (id === undefined) continue;
     abstractNumIds.push(id);
-    const name = /<(?:[\w.-]+:)?name\b[^>]*?\s(?:[\w.-]+:)?val\s*=\s*"([^"]*)"/.exec(element.body)?.[1];
-    const value = name === undefined ? undefined : unescapeXml(name);
-    const key = value?.startsWith(CARRIER) ? value.slice(CARRIER.length) : undefined;
-    if (key !== undefined && !carriers.has(key)) carriers.set(key, id);
+    const value = childValue(element.body, 'name');
+    if (value?.startsWith(CARRIER)) {
+      carriers.push({ key: value.slice(CARRIER.length), abstractNumId: id, levels: levelsOf(element.body, own) });
+    }
   }
   const pointers = new Map<number, number>();
-  const numIds: number[] = [];
+  const numIds: number[] = looseIds(xml, 'numId');
   for (const element of nums) {
     const id = numberAttribute(element.start, 'numId');
     if (id === undefined) continue;
     numIds.push(id);
-    const pointer = /<(?:[\w.-]+:)?abstractNumId\b[^>]*?\s(?:[\w.-]+:)?val\s*=\s*"(\d+)"/.exec(element.body)?.[1];
-    if (pointer !== undefined && !pointers.has(Number(pointer))) pointers.set(Number(pointer), id);
+    const pointer = childValue(element.body, 'abstractNumId');
+    if (pointer !== undefined && /^\d+$/.test(pointer) && !pointers.has(Number(pointer))) pointers.set(Number(pointer), id);
   }
   return { masked, root, own, abstractNums, nums, carriers, pointers, numIds, abstractNumIds };
+}
+
+/** The abstractNumId of the abstractNum `scan` carries for `definition` with what the writer writes for it. */
+function carriedAbstractNum(
+  scan: ReturnType<typeof scanNumbering>,
+  definition: ReturnType<YrsSession['createdListDefinitions']>[number]
+): number | undefined {
+  const written = definition.levelTexts.slice(0, LEVELS).map((text, level) => ({
+    format: xmlText(definition.levelFormats[level] ?? 'decimal'),
+    text: xmlText(text),
+  }));
+  return scan.carriers.find(carrier =>
+    carrier.key === definition.key &&
+    carrier.levels.length === written.length &&
+    written.every((level, index) => carrier.levels[index]?.format === level.format && carrier.levels[index]?.text === level.text)
+  )?.abstractNumId;
 }
 
 /** Where the numbering part of the package `parts` is, or goes, and whether a relationship names it. */
@@ -217,31 +302,38 @@ function numberingPart(parts: Readonly<Record<string, Uint8Array>>) {
 
 /**
  * The list definitions the editor created, `definitions` as `session` lists them, with the ids a
- * save into the package `parts` gives them: a definition the package already carries keeps the ids
- * it has there, one an earlier save of the session numbered keeps those while they are above the
- * package's, and every other one takes the next ids above the package's.
+ * save into the package `parts` gives them: a definition the package already carries, under its key
+ * and with what the writer writes for it, keeps the ids it has there; one an earlier save of the
+ * session numbered keeps those while they are above every id of the package and of `model`, the
+ * numbering of the session's source; every other one takes the next ids above those.
  */
 export function savedListDefinitions(
   session: YrsSession,
   definitions: ReturnType<YrsSession['createdListDefinitions']>,
   parts: Readonly<Record<string, Uint8Array>>,
-  _model?: NumberingDefinitions
+  model?: NumberingDefinitions
 ): DocxSavedListDefinition[] {
   if (definitions.length === 0) return [];
   const scan = scanNumbering(decode(parts[numberingPart(parts).path]) ?? '');
-  const highestNumId = highest(scan.numIds, 0);
-  const highestAbstractNumId = highest(scan.abstractNumIds, -1);
+  const numIds = [...scan.numIds, ...(model?.nums ?? []).map(num => num.numId)];
+  const abstractNumIds = [...scan.abstractNumIds, ...(model?.abstractNums ?? []).map(abstract => abstract.abstractNumId)];
+  const highestNumId = highest(numIds, 0);
+  const highestAbstractNumId = highest(abstractNumIds, -1);
   const previous = assigned.get(session) ?? new Map<string, DocxListDefinitionIds>();
   const kept = new Map<string, DocxListDefinitionIds>();
   for (const [key, ids] of previous) {
     if (ids.numId > highestNumId && ids.abstractNumId > highestAbstractNumId) kept.set(key, ids);
   }
-  for (const [key, abstractNumId] of scan.carriers) {
+  const carried = new Map<string, number>();
+  for (const definition of definitions) {
+    const abstractNumId = carriedAbstractNum(scan, definition);
+    if (abstractNumId === undefined) continue;
+    carried.set(definition.key, abstractNumId);
     const numId = scan.pointers.get(abstractNumId);
-    if (numId !== undefined) kept.set(key, { numId, abstractNumId });
+    if (numId !== undefined) kept.set(definition.key, { numId, abstractNumId });
   }
   const ids = savedListDefinitionIds(
-    { numIds: scan.numIds, abstractNumIds: scan.abstractNumIds },
+    { numIds, abstractNumIds },
     definitions.map(definition => definition.key),
     kept
   );
@@ -249,7 +341,7 @@ export function savedListDefinitions(
   return definitions.flatMap(definition => {
     const saved = ids.get(definition.key);
     if (!saved) return [];
-    return [{ ...definition, ...saved, abstractNumId: scan.carriers.get(definition.key) ?? saved.abstractNumId }];
+    return [{ ...definition, ...saved, abstractNumId: carried.get(definition.key) ?? saved.abstractNumId }];
   });
 }
 
@@ -296,7 +388,7 @@ export function numberingWithListDefinitions(xml: string | undefined, definition
   const w = bound === undefined ? 'w:' : `${bound}:`;
   const declaration = bound === undefined ? ` xmlns:w="${W}"` : '';
   const abstracts = definitions
-    .filter(definition => !scan.carriers.has(definition.key))
+    .filter(definition => carriedAbstractNum(scan, definition) !== definition.abstractNumId)
     .map(definition => abstractNumXml(w, declaration, definition))
     .join('');
   const nums = definitions

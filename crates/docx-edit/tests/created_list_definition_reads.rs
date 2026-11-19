@@ -16,9 +16,8 @@ const NUMBERING: &str = concat!(
     r#"<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>"#,
     r#"<w:num w:numId="2"><w:abstractNumId w:val="1"/></w:num></w:numbering>"#
 );
-const SHAPES: &str = include_str!(
-    "../../../packages/docx/src/yrs/__fixtures__/created-list-shapes.json"
-);
+const SHAPES: &str =
+    include_str!("../../../packages/docx/src/yrs/__fixtures__/created-list-shapes.json");
 
 fn docx(paragraphs: &[(&str, Option<u32>)]) -> Vec<u8> {
     let body: String = paragraphs
