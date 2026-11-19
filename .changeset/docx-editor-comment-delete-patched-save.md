@@ -4,4 +4,4 @@
 '@betteroffice/rust-crates': patch
 ---
 
-Deleting a comment in the editor and saving now changes only the paragraphs that held it and its replies, even where the document already repeats a bookmark id, unless such a paragraph also opens another comment that ends later. Other paragraphs keep their source bytes.
+Deleting a comment in the editor and saving keeps the source bytes of the other paragraphs when the save can patch the parts, which it cannot when the same save also carries a host-side change such as page margins. Comment and range ids match by value.
