@@ -3778,6 +3778,113 @@ mod tests {
         assert_eq!(revision_author(&legal, DEL).as_deref(), Some("Alice"));
         assert_eq!(revision_author(&legal, INS).as_deref(), Some("Bob"));
     }
+
+    fn restarted(doc: &EditingDoc, client_id: u64) -> EditingDoc {
+        let restarted = EditingDoc::new(client_id);
+        restarted
+            .apply_update_v1(&doc.encode_state_as_update_v1())
+            .unwrap();
+        restarted
+    }
+
+    #[test]
+    fn a_comment_added_after_a_same_client_restart_keeps_the_earlier_comment() {
+        let before = restarted(&seed("first second"), 41);
+        let first = before
+            .add_comment(
+                &[StoryRange::new("body", 0, 5)],
+                "Ada",
+                DATE,
+                Any::from("First"),
+            )
+            .unwrap();
+        let after = restarted(&before, 41);
+        let second = after
+            .add_comment(
+                &[StoryRange::new("body", 6, 12)],
+                "Ada",
+                DATE,
+                Any::from("Second"),
+            )
+            .unwrap();
+
+        assert_ne!(first, second);
+        let comments = after.list_comments().unwrap();
+        let bodies: BTreeMap<String, Any> = comments
+            .iter()
+            .map(|comment| (comment.id.clone(), comment.body.clone()))
+            .collect();
+        assert_eq!(comments.len(), 2);
+        assert_eq!(bodies.get(&first), Some(&Any::from("First")));
+        assert_eq!(bodies.get(&second), Some(&Any::from("Second")));
+    }
+
+    #[test]
+    fn suggesting_inserts_after_a_same_client_restart_get_their_own_revision_ids() {
+        let before = restarted(&seed("alpha beta gamma delta"), 41);
+        let first = before
+            .insert_text(
+                &suggesting("Ada"),
+                Position::new("body", 0),
+                "One ",
+                FormatPolicy::Plain,
+            )
+            .unwrap()
+            .revision_ids;
+        let after = restarted(&before, 41);
+        let second = after
+            .insert_text(
+                &suggesting("Ada"),
+                Position::new("body", 20),
+                " Two",
+                FormatPolicy::Plain,
+            )
+            .unwrap()
+            .revision_ids;
+
+        assert_ne!(first, second);
+        let ids: BTreeSet<String> = after
+            .list_revisions()
+            .unwrap()
+            .into_iter()
+            .map(|revision| revision.change.revision_id)
+            .collect();
+        assert_eq!(ids.len(), 2, "{ids:?}");
+    }
+
+    #[test]
+    fn a_fresh_document_draws_ids_from_zero() {
+        let doc = EditingDoc::new(41);
+        let para = doc
+            .create_story("body", "Alpha link Omega", "Normal", "left")
+            .unwrap();
+        let split = doc
+            .split_paragraph(&suggesting("Bob"), Position::new("body", 10), None)
+            .unwrap();
+        let insertion = doc
+            .insert_text(
+                &suggesting("Alice"),
+                Position::new("body", 12),
+                "NEW",
+                FormatPolicy::Inherit,
+            )
+            .unwrap();
+        let comment = doc
+            .add_comment(
+                &[StoryRange::new("body", 6, 10)],
+                "Reviewer",
+                DATE,
+                Any::from("anchor"),
+            )
+            .unwrap();
+
+        assert_eq!(para, "41:0");
+        assert_eq!(split.first_para_id, "41:0");
+        assert_eq!(split.second_para_id, "41:1");
+        assert_eq!(split.revision_ids, ["41:2"]);
+        assert_eq!(insertion.revision_ids, ["41:3"]);
+        assert_eq!(comment, "41:4");
+    }
 }
 
 pub mod bridge;
