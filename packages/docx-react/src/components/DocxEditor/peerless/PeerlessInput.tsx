@@ -117,7 +117,10 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
     const record = pasteRecordRef.current;
     if (!record?.end) return;
     const admitted = admission.getSnapshot();
-    if (viewStore.getSnapshot().version !== record.version || admitted.originalUnackedIntents !== 0 || admitted.pendingInputs !== 0) {
+    const view = viewStore.getSnapshot();
+    const caret = caretPoint(view.workerSelection);
+    if (view.version !== record.version || !caret || !samePoint(caret, record.end) ||
+      admitted.originalUnackedIntents !== 0 || admitted.pendingInputs !== 0) {
       dropPasteRecord(record);
       return;
     }
