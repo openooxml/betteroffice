@@ -33,7 +33,7 @@ The read projections compare these fields, with absent values as `null`:
 - `readEdited`: the edited paragraph's text, and the body story's text from the parsed model (on TypeScript after a save with the parity options and a re-parse); the story leaves out table cells. The editing session's own paragraph read is the accepted view (fields as an object character, tracked insertions included, a block content control's paragraph left out) and is not what this step compares. The story also leaves out the paragraphs named in `exceptParaIds` (principal.docx's `00000019` and `00000016`, between which TypeScript's save of an edited document moves a page break that sits inside a run), and the TypeScript-only `pageBreakMove` step pins both paragraphs' texts after that save, so a fix of the move removes the exception and the pin in the same change.
 - `save` and `saveReport`: the parts record above; `saveReport` adds `keptUnchanged` and `structureDropped` of the same save.
 
-The Python binding exposes no run highlight or cell merge properties, so those steps list `"targets": ["ts", "rust"]` and Python skips them.
+Every read step runs on all targets. The one step with a `targets` list is `pageBreakMove`, on TS only, which pins a move that only TypeScript's save makes.
 
 For a new format, add its script, golden and `scripts/parity/<format>.ts` op table.
 Register the table in `harness.ts`, add Rust/Python tests and hook up native CI after its build.
