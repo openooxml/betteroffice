@@ -1187,22 +1187,23 @@ where
         };
         let text_width = (cell_box.w - pad_width - left_indent - right_indent).max(0.0);
         let print_dpi = print.map(|(m, _)| f64::from(m.dpi));
-        let run_size = (!runs.is_empty()).then(|| text_runs::largest_size(size, &text, &runs));
-        let loses_lines = wraps
-            && run_size.is_some_and(|run_size| {
-                wrapped_runs_lose_lines(
+        let run_size = (!runs.is_empty())
+            .then(|| text_runs::largest_size(size, &text, &runs))
+            .filter(|&run_size| {
+                rich_runs_have_room(
                     &text,
                     text_width,
-                    cell_box.whole_h + 1.0,
+                    cell_box.whole_h,
                     size,
                     run_size,
-                    print_dpi,
+                    wraps,
+                    print.map(|(m, _)| m),
                 )
             });
         let (runs, line_size) = match run_size {
-            Some(_) if loses_lines => (Vec::new(), size),
             Some(run_size) if wraps => (runs, run_size),
-            _ => (runs, size),
+            Some(_) => (runs, size),
+            None => (Vec::new(), size),
         };
         let baseline_size = match run_size {
             Some(run_size) if !wraps && run_size > size => run_size,
@@ -2556,28 +2557,52 @@ fn wrapped_line_height(size_pt: f32, print_dpi: Option<f64>) -> f32 {
     geometry::row_pt_to_px(geometry::line_pitch_pt(f64::from(size_pt), print_dpi))
 }
 
-/// Whether a wrapped cell whose lines step by its largest run, `run_size`,
-/// keeps fewer lines in a row `height` px tall than it shows in its own
-/// `size`: the lines row autofit counts for it, up to that size's limit.
-fn wrapped_runs_lose_lines(
+/// Whether a cell box `height` px tall, the whole row or merged area, has room
+/// for the layout of a rich cell whose largest run is `run_size`; without it
+/// the cell paints as plain text. Unwrapped, that run's ascent and descent as
+/// its baseline takes them must fit the box. Wrapped, in the box and a pixel
+/// as the line limit takes it, the lines row autofit counts for the text must
+/// fit at that run's pitch, and no fewer of them may show than in the cell's
+/// own `size`, up to that size's limit. Geometry that is not finite never fits.
+fn rich_runs_have_room(
     text: &str,
     width: f32,
     height: f32,
     size: f32,
     run_size: f32,
-    print_dpi: Option<f64>,
+    wraps: bool,
+    print: Option<&PrintMetrics>,
 ) -> bool {
+    if !wraps {
+        let extent = match print {
+            None => {
+                let size_px = run_size * geometry::PX_PER_PT as f32;
+                size_px * ASCENT_RATIO + size_px * DESCENT_RATIO
+            }
+            Some(metrics) => {
+                let ratio = run_size / metrics.font_size_pt * 96.0 / metrics.dpi;
+                metrics.font_ascent * ratio + metrics.font_descent * ratio
+            }
+        };
+        return extent <= height;
+    }
+    let height = height + 1.0;
+    let print_dpi = print.map(|metrics| f64::from(metrics.dpi));
+    let shown = wrap::estimated_line_count(text, width, f64::from(size));
+    let lines_fit = shown as f32 * wrapped_line_height(run_size, print_dpi) <= height;
+    if !lines_fit {
+        return false;
+    }
     let limit = |pt: f32| wrap::max_wrapped_lines(height, wrapped_line_height(pt, print_dpi), pt);
     let Some(rich) = limit(run_size) else {
-        return false;
+        return true;
     };
     let plain = limit(size);
     if plain.is_some_and(|plain| rich >= plain) {
-        return false;
+        return true;
     }
-    let shown = wrap::estimated_line_count(text, width, f64::from(size));
     let shown = plain.map_or(shown, |plain| shown.min(plain as usize));
-    (rich as usize) < shown
+    (rich as usize) >= shown
 }
 
 /// Alphabetic baseline in pixels for a point-sized cell font.
