@@ -321,7 +321,7 @@ for (const [saveName, save] of Object.entries(SAVES)) {
     const session = await seeded(bytes);
     const parts = unzipContainer(await save(session));
     for (const part of ['word/document.xml', 'word/numbering.xml', 'word/_rels/document.xml.rels', '[Content_Types].xml']) {
-      expect(text(parts[part])).toBe(text(source[part]));
+      expect(parts[part]).toEqual(source[part]);
     }
   });
 }
