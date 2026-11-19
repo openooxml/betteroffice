@@ -2906,6 +2906,17 @@ mod tests {
     }
 
     #[test]
+    fn removing_comment_markers_matches_an_id_written_as_an_exponent_by_its_text() {
+        let xml = r#"<w:p><w:commentRangeStart w:id="1e+21"/><w:r><w:t>Kept</w:t></w:r><w:commentRangeEnd w:id="1e+21"/><w:r><w:rPr/><w:commentReference w:id="1e+21"/></w:r></w:p>"#;
+        assert_eq!(
+            remove_comment_markers(xml, &HashSet::from(["1e+21".to_owned()])).unwrap(),
+            "<w:p><w:r><w:t>Kept</w:t></w:r></w:p>",
+        );
+        let other = HashSet::from(["1".to_owned()]);
+        assert_eq!(remove_comment_markers(xml, &other).unwrap(), xml);
+    }
+
+    #[test]
     fn changed_comment_markers_keep_source_bytes() {
         let source = r#"<w:p keep='yes'><w:commentRangeStart w:id="1"/><w:r><w:t>Kept</w:t></w:r><w:commentRangeEnd w:id="1"/><w:r><w:commentReference w:id="1"/></w:r></w:p>"#;
         let written =
@@ -5475,6 +5486,23 @@ mod tests {
             assert!(
                 spliced.as_ref() == Some(&expected),
                 "{route}: respelled pair not spliced"
+            );
+        }
+    }
+
+    #[test]
+    fn range_ids_too_large_to_read_exactly_are_told_apart_by_their_text() {
+        let first = bookmarked(4, "a").replace("w:id=\"4\"", "w:id=\"9007199254740992\"");
+        let added = bookmarked(4, "b").replace("w:id=\"4\"", "w:id=\"9007199254740993\"");
+        let expected = body(&format!("{first}{added}"));
+        for (route, spliced) in
+            ["planned", "direct"]
+                .into_iter()
+                .zip(splice_both(&[&first, PLAIN], 1, &added))
+        {
+            assert!(
+                spliced.as_ref() == Some(&expected),
+                "{route}: a pair with another id not spliced"
             );
         }
     }

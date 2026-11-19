@@ -603,6 +603,30 @@ for (const [route, save] of Object.entries(ROUTES)) {
       );
     }, TIMEOUT);
 
+    test('a save that writes every part removes the markers of a comment whose id is beyond exact numbers', async () => {
+      const large = '1000000000000000000000';
+      const noted =
+        `<w:commentRangeStart w:id="${large}"/>${run('fifth note')}<w:commentRangeEnd w:id="${large}"/>` +
+        `<w:r><w:commentReference w:id="${large}"/></w:r>`;
+      const content = para(1, run('Lead paragraph')) + para(2, `${run('Plain ')}${noted}${run(' end')}`);
+      const source = withPart(built([5], false, false, content), 'word/comments.xml', (xml) =>
+        xml.replace('w:id="5"', `w:id="${large}"`)
+      );
+      const markers = /<w:comment(RangeStart|RangeEnd|Reference)\b/g;
+      expect(part(source, 'word/document.xml').match(markers)).toHaveLength(3);
+      const saved = await save(source, {
+        comments: () => [],
+        host: (host) => {
+          const document = host.package.document;
+          document.finalSectionProperties = { ...document.finalSectionProperties, marginTop: 2000 };
+        },
+      });
+      expect(saved.full).toBe(true);
+      expect(part(saved.bytes, 'word/document.xml').match(markers) ?? []).toEqual([]);
+      expect(part(saved.bytes, 'word/comments.xml')).not.toContain('<w:comment ');
+      expect(textAt(saved.bytes, 1)).toBe(textAt(source, 1));
+    }, TIMEOUT);
+
     test('deleting a comment anchored in a header removes it from the header alone', async () => {
       const content = para(1, `${run('Body ')}${commented(1, 'body note')}`);
       const source = withParts(built([1, 6], true, false, content), [header(`${run('Header ')}${commented(6, 'header words')}`)], HEADED);
@@ -730,7 +754,9 @@ for (const [route, save] of Object.entries(ROUTES)) {
       expect(part(source, name)).toContain('<w:t>A & B</w:t>');
       const typed = await save(source, { type: '0A000001', text: 'x' });
       const deleted = await save(source, { remove: 1 });
-      expect(part(deleted.bytes, name)).toBe(part(typed.bytes, name));
+      const held = (bytes: Uint8Array) => Array.from(unzipContainer(bytes)[name] ?? []);
+      expect(held(typed.bytes).length).toBeGreaterThan(0);
+      expect(held(deleted.bytes)).toEqual(held(typed.bytes));
     }, TIMEOUT);
 
     test('typing and deleting a comment treat a bookmark nested in an insertion alike', async () => {
@@ -742,11 +768,16 @@ for (const [route, save] of Object.entries(ROUTES)) {
         para(2, `${run('Lead ')}${inserted}${commented(1, 'noted')}${run(' end')}`) +
         para(3, bookmark(true, 'Third', run('Third paragraph')));
       const source = built([1], false, false, content);
-      const nested = (bytes: Uint8Array) => (paragraphs(bytes)[1] ?? '').match(/<w:bookmark(?:Start|End) w:id="7"/g)?.length ?? 0;
-      expect(nested(source)).toBe(2);
+      const tags = (xml: string) => xml.match(/<w:bookmark(?:Start|End)\b[^>]*>/g) ?? [];
+      const nested = (bytes: Uint8Array) => {
+        const xml = paragraphs(bytes)[1] ?? '';
+        const insertion = xml.match(/<w:ins\b[\s\S]*?<\/w:ins>/)?.[0] ?? '';
+        return { insertion, inside: tags(insertion), all: tags(xml) };
+      };
+      expect(nested(source).inside).toHaveLength(2);
       const typed = await save(source, { type: '0A000002', text: 'x' });
       const deleted = await save(source, { remove: 1 });
-      expect(nested(deleted.bytes)).toBe(nested(typed.bytes));
+      expect(nested(deleted.bytes)).toEqual(nested(typed.bytes));
     }, TIMEOUT);
 
     test('typing and deleting a comment write the paragraphs after the edit alike', async () => {
