@@ -132,6 +132,7 @@ export type PresentationCommandPayloads = {
   compositionEnd: PresentationCommandInput & {
     compositionId: string; cancelled?: boolean; at?: PresentationCommandSelectionReference;
   };
+  compositionUpdate: PresentationCommandTextInput & { compositionId: string; text: string; style?: TextStyle };
   compositionCommit: PresentationCommandTextInput & { compositionId: string; text: string; style?: TextStyle };
   setReadOnly: PresentationCommandInput & { readOnly: boolean };
 };
@@ -148,7 +149,8 @@ export const PRESENTATION_COMMAND_ADMISSION = Object.freeze({
   moveShape: 'local-write', setShapeRect: 'local-write', undo: 'local-write', redo: 'local-write',
   insertText: 'local-write', replaceText: 'local-write', formatText: 'local-write',
   setParagraphAlignment: 'local-write', deleteBackward: 'local-write', deleteForward: 'local-write',
-  paragraphBreak: 'local-write', compositionStart: 'local-write', compositionCommit: 'local-write',
+  paragraphBreak: 'local-write', compositionStart: 'local-write', compositionUpdate: 'local-write',
+  compositionCommit: 'local-write',
   activateSlide: 'view', selectObject: 'view', moveSelection: 'view', selectAtPoint: 'view',
   setSelection: 'view', compositionEnd: 'view', setReadOnly: 'mode',
 } as const satisfies Record<PresentationCommandKind, PresentationCommandAdmission>);

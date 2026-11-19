@@ -277,18 +277,20 @@ test('p3_composition_selection_and_reference_rebase_together_before_preedit_rebu
     expect(value.store.getSnapshot().echo).toBeNull();
     expect(value.store.getSnapshot().pending).toHaveLength(1);
     expect(value.store.getSnapshot().pending[0]).toMatchObject({ status: 'pending', echoed: false });
-    expect(value.store.getSnapshot().waitingInputCount).toBe(2);
+    // The click, the composition start and its stage edit wait.
+    expect(value.store.getSnapshot().waitingInputCount).toBe(3);
     await held;
     value.release();
     await value.store.fence();
     expectApplied(await Promise.all([inserted, selected]), 2);
-    expect(value.store.getSnapshot().activeLine?.text).toBe('aabc');
-    expect(value.store.getSnapshot().selection).toMatchObject({ anchor: 4, focus: 4 });
+    expect(value.store.getSnapshot().activeLine?.text).toBe('aabcc');
+    expect(value.store.getSnapshot().selection).toMatchObject({ anchor: 5, focus: 5 });
     expect(value.store.getSnapshot().composition?.selection).toMatchObject({ anchor: 4, focus: 4 });
     expect(value.store.getSnapshot().composition?.text).toBe('c');
     expect(value.store.getSnapshot()).toMatchObject({ pending: [], waitingInputCount: 0, echo: null });
     const committed = await commitComposition(value.store, 'c', 101);
-    expect(committed?.outcomes[committed.outcomes.length - 1]?.status).toBe('applied');
+    // The stage already put 'c' in the story, so the matching commit changes nothing.
+    expect(committed?.outcomes[committed.outcomes.length - 1]?.status).toBe('noop');
     expect(await value.savedText()).toBe('aabcc');
     expect(value.store.getSnapshot().activeLine?.text).toBe('aabcc');
     expect(value.store.getSnapshot().selection).toMatchObject({ anchor: 5, focus: 5 });

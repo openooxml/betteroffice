@@ -932,6 +932,115 @@ test('p1_confirmed_basis_surrogate_boundary_is_checked_before_rebase', async () 
   } finally { await session.dispose(); }
 });
 
+// Composition stages are edits in the story, replaced stage by stage and undone as one step.
+async function composeSession(texts = ['alpha'], position = 5) {
+  const session = await open(texts);
+  const story = (await session.read()).stories[0]!;
+  const payload = { ...input, undoGroup: 'ime', at: { source: 'confirmed' as const, selection: selection(story, position) },
+    compositionId: 'ime' };
+  let seq = 0;
+  let state: PresentationCommandAck = session.state;
+  const send = async (intent: PresentationCommandIntent) => {
+    seq += 1;
+    state = await session.rpc.call.command(envelope(state, seq, intent));
+    return state.outcomes[0]!;
+  };
+  const text = async () => (await session.read(seq)).stories[0]!.text;
+  return { session, story, payload, send, text, state: () => state,
+    start: () => send({ kind: 'compositionStart', payload }),
+    stage: (value: string) => send({ kind: 'compositionUpdate', payload: { ...payload, text: value } }),
+    commit: (value: string) => send({ kind: 'compositionCommit', payload: { ...payload, text: value } }),
+    end: (cancelled = false) => send({ kind: 'compositionEnd', payload: { ...input, undoGroup: 'ime', compositionId: 'ime',
+      ...(cancelled ? { cancelled } : {}) } }),
+    undo: () => send({ kind: 'undo', payload: input }) };
+}
+
+test('p1_composition_stages_replace_in_story_and_undo_as_one_step', async () => {
+  const value = await composeSession();
+  try {
+    expect(await value.start()).toMatchObject({ status: 'applied', committed: false });
+    for (const [stage, expected] of [['ㅎ', 'alphaㅎ'], ['하', 'alpha하'], ['한', 'alpha한']] as const) {
+      expect(await value.stage(stage)).toMatchObject({ status: 'applied', committed: true });
+      expect(await value.text()).toBe(expected);
+    }
+    expect(await value.commit('한')).toMatchObject({ status: 'noop', committed: false });
+    expect(await value.text()).toBe('alpha한');
+    expect(await value.end()).toMatchObject({ status: 'applied' });
+    expect(await value.undo()).toMatchObject({ status: 'applied', committed: true });
+    expect(await value.text()).toBe('alpha');
+    expect(value.state().editState.canUndo).toBe(false);
+  } finally { await value.session.dispose(); }
+});
+
+test('p1_composition_commit_different_from_stage_replaces_it', async () => {
+  const value = await composeSession(['alpha'], 2);
+  try {
+    await value.start();
+    await value.stage('漢');
+    expect(await value.text()).toBe('al漢pha');
+    expect(await value.commit('漢字')).toMatchObject({ status: 'applied', committed: true });
+    expect(await value.text()).toBe('al漢字pha');
+    await value.end();
+    await value.undo();
+    expect(await value.text()).toBe('alpha');
+  } finally { await value.session.dispose(); }
+});
+
+test('p1_composition_cancel_removes_stage_text', async () => {
+  const value = await composeSession(['alpha'], 2);
+  try {
+    await value.start();
+    await value.stage('ㅎ');
+    expect(await value.text()).toBe('alㅎpha');
+    expect(await value.commit('')).toMatchObject({ status: 'applied', committed: true });
+    expect(await value.end(true)).toMatchObject({ status: 'applied' });
+    expect(await value.text()).toBe('alpha');
+  } finally { await value.session.dispose(); }
+});
+
+test('p1_composition_undo_keeps_typing_before_it', async () => {
+  const value = await composeSession(['alpha'], 5);
+  try {
+    expect(await value.send(insert(selection(value.story, 5), 'X'))).toMatchObject({ status: 'applied', committed: true });
+    const payload = { ...value.payload, at: { source: 'confirmed' as const, selection: selection(value.story, 6) } };
+    await value.send({ kind: 'compositionStart', payload });
+    await value.send({ kind: 'compositionUpdate', payload: { ...payload, text: '하' } });
+    await value.send({ kind: 'compositionUpdate', payload: { ...payload, text: '한' } });
+    await value.send({ kind: 'compositionCommit', payload: { ...payload, text: '한' } });
+    await value.end();
+    expect(await value.text()).toBe('alphaX한');
+    await value.undo();
+    expect(await value.text()).toBe('alphaX');
+  } finally { await value.session.dispose(); }
+});
+
+test('p1_cancelled_composition_does_not_take_an_undo_step', async () => {
+  const value = await composeSession(['alpha'], 5);
+  try {
+    await value.send(insert(selection(value.story, 5), 'X'));
+    const payload = { ...value.payload, at: { source: 'confirmed' as const, selection: selection(value.story, 6) } };
+    await value.send({ kind: 'compositionStart', payload });
+    await value.send({ kind: 'compositionUpdate', payload: { ...payload, text: '하' } });
+    await value.send({ kind: 'compositionCommit', payload: { ...payload, text: '' } });
+    await value.end(true);
+    expect(await value.text()).toBe('alphaX');
+    await value.undo();
+    expect(await value.text()).toBe('alpha');
+  } finally { await value.session.dispose(); }
+});
+
+test('p1_composition_refused_stage_closes_composition', async () => {
+  const value = await composeSession();
+  try {
+    await value.start();
+    await value.stage('하');
+    expect(await value.send({ kind: 'compositionUpdate', payload: { ...value.payload, compositionId: 'other', text: '한' } }))
+      .toMatchObject({ status: 'refused', reason: 'invalid-composition' });
+    expect(await value.stage('한')).toMatchObject({ status: 'applied' });
+    expect(await value.text()).toBe('alpha한');
+  } finally { await value.session.dispose(); }
+});
+
 test('p1_composition_commit_uses_rebased_confirmed_caret', async () => {
   const session = await open(['alpha']);
   try {
@@ -2623,6 +2732,43 @@ for (const [name, intent] of deadStoryCommands) {
     } finally { await session.dispose(); }
   });
 }
+
+test('p1_composition_stage_follows_a_remote_edit_before_it', async () => {
+  await wasm.initWasm(await readFile(new URL('../wasm/generated/pptx_wasm_bg.wasm', import.meta.url)));
+  const { PptxDocument: Document } = await import('../wasm/engine');
+  const author = Document.openCollaborative(await deck(['alpha']), 9002);
+  const seed = author.encodeStateAsUpdate();
+  const story = content(JSON.parse(author.readContentJson('{}')) as PptxReadResult).stories[0]!;
+  const vector = author.encodeStateVector();
+  expect(JSON.parse(author.applyEditsJson(JSON.stringify({ expectVersion: author.documentVersion(), steps: [{ op: 'insertText',
+    target: { kind: 'range', slideId: story.slideId, shapeId: story.shapeId, storyId: story.storyId, start: 0, end: 0 },
+    at: 'start', text: 'R ' }] }))).ok).toBe(true);
+  const update = author.encodeDiff(vector);
+  author.free();
+  const host = await engineHost();
+  const rpc: Rpc = createSessionClient<PresentationCommandMethods, PresentationCommandEvents>(host.transport, { methods: PRESENTATION_COMMAND_METHODS });
+  try {
+    let state = await rpc.call.openCommandEditor(new Uint8Array(await deck(['alpha'])).buffer,
+      { ...host.options, initialUpdate: seed }) as unknown as PresentationCommandAck;
+    const payload = { ...input, undoGroup: 'ime', compositionId: 'ime', at: { source: 'confirmed' as const, selection: selection(story, 2) } };
+    const send = async (seq: number, intent: PresentationCommandIntent) => {
+      state = await rpc.call.command(envelope(state, seq, intent));
+      return state.outcomes[0]!;
+    };
+    const text = async (seq: number) => content((await rpc.call.readEditor({ ...identity, seq })).result).stories[0]!.text;
+    await send(1, { kind: 'compositionStart', payload });
+    expect(await send(2, { kind: 'compositionUpdate', payload: { ...payload, text: '하' } })).toMatchObject({ status: 'applied' });
+    expect(await text(2)).toBe('al하pha');
+    expect(await send(3, { kind: 'applyRemoteUpdate', payload: { ...input, undoGroup: 'remote', bytes: update.slice().buffer } }))
+      .toMatchObject({ status: 'applied', committed: true });
+    expect(await text(3)).toBe('R al하pha');
+    expect(await send(4, { kind: 'compositionUpdate', payload: { ...payload, text: '한' } })).toMatchObject({ status: 'applied' });
+    expect(await send(5, { kind: 'compositionCommit', payload: { ...payload, text: '한' } })).toMatchObject({ status: 'noop' });
+    expect(await text(5)).toBe('R al한pha');
+  } finally {
+    try { await rpc.dispose(); } finally { host.dispose(); }
+  }
+});
 
 test('recovery update leaves client state and can be taken only once', async () => {
   const host = await engineHost();

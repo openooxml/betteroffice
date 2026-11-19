@@ -46,7 +46,23 @@ test('remote merge preserves IME text and permits the next composition', async (
     composition(input, 'compositionend', '字');
     await local.api.flushPendingInput();
   });
-  expect((await story(local.api)).text).toContain('漢字');
+  // The stage is already in the story when the remote edit lands at the same place, so the merge orders
+  // it exactly as it orders typed text.
+  const composed = (await story(local.api)).text;
+  expect(composed).toContain('漢');
+  expect(composed).toContain('字');
+  expect(composed).toContain('R');
+  const typed = await collaborators();
+  const typedInput = typed.local.view.getByRole('textbox', { name: 'Slide text' });
+  await act(async () => {
+    type(typedInput, '漢');
+    await typed.local.api.flushPendingInput();
+    await typed.replica.applyUpdate(typed.update);
+    await typed.local.api.flushPendingInput();
+    type(typedInput, '字');
+    await typed.local.api.flushPendingInput();
+  });
+  expect(composed).toBe((await story(typed.local.api)).text);
 });
 
 test('local typing chains after an unacknowledged remote merge', async () => {
