@@ -4,4 +4,4 @@
 '@betteroffice/rust-crates': patch
 ---
 
-A document reopened with the same `clientId`, such as after a page reload, now gives new comments, tracked changes and paragraphs ids of their own, instead of reusing ids the document already holds.
+Fixes comment and tracked-change ID reuse when reopening with the same `clientId` from a checkpoint containing the client's earlier comments and tracked changes.
