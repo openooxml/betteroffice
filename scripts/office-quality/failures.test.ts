@@ -102,3 +102,19 @@ test('a failure is scrubbed of its own document even when the plan holds thousan
   expect(performance.now() - started).toBeLessThan(5000);
   expect(clusters.find((cluster) => cluster.area === 'render')).toMatchObject({ reason: 'timeout opening <sample>.docx', count: 6000 });
 });
+
+test('a stage or channel outside the fixed sets counts as other and is never echoed', () => {
+  const report = { samples: [{
+    id: 'alpha', format: 'docx',
+    comparisons: [{ channel: 'host-a', status: 'failed', stage: '/tmp/x/y.ttf', error: 'failed' }],
+    native_timings: { 'host-a': { status: 'failed', error: 'failed' } },
+    roundtrip: { published: { parse: { status: 'ok' }, roundtrip: { status: 'failed', stage: '/tmp/x/y.ttf', error: 'failed' } } },
+  }] };
+  expect(failureCounts(report, 'docx')).toEqual([
+    { area: 'render', channel: 'other', stage: 'other', count: 1 },
+    { area: 'roundtrip', channel: 'published', stage: 'other', count: 1 },
+    { area: 'timing', channel: 'other', stage: 'timing', count: 1 },
+  ]);
+  const text = JSON.stringify([failureCounts(report, 'docx'), failureClusters(report)]);
+  for (const leak of ['host-a', '/tmp/x/y.ttf']) expect(text.includes(leak) && leak).toBe(false);
+});

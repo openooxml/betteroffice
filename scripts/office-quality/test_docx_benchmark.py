@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,7 +8,7 @@ from unittest.mock import patch
 
 from PIL import Image, ImageDraw
 
-from docx_benchmark import (CHANNELS, LAST_RELEASE_WITHOUT_REGISTRY_EXPORTS, edge_adjust, font_path_notes, measure_sample,
+from docx_benchmark import (CHANNELS, LAST_RELEASE_WITHOUT_REGISTRY_EXPORTS, edge_adjust, font_path_notes, main, measure_sample,
                             semver_key, sha256, validate_font_paths, validate_png)
 
 FACES = ['a' * 64, 'b' * 64, 'a' * 64 + '~Calibri']
@@ -148,6 +149,36 @@ class NativeBenchmarkTests(unittest.TestCase):
             self.assertEqual(result['commit']['status'], 'failed')
             self.assertNotIn('elapsed_ms', result['commit'])
             self.assertEqual(len(result['libreoffice']['elapsed_ms']), 5)
+
+    def test_the_shard_report_records_no_runner_name_and_no_font_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output, native = root / 'output', root / 'native'
+            (output / 'fixture').mkdir(parents=True)
+            (output / 'fixture' / 'source.docx').write_bytes(b'docx fixture')
+            for channel, source in [('published', 'b' * 40), ('commit', 'a' * 40)]:
+                binary = native / channel / 'docx-native-bench'
+                binary.parent.mkdir(parents=True)
+                binary.write_bytes(channel.encode())
+                (binary.parent / 'build.json').write_text(json.dumps(dict(source_sha=source, binary_sha256=sha256(binary))))
+            sample = dict(id='fixture', metadata=dict(source=dict(sha256=sha256(output / 'fixture' / 'source.docx')), reference_pages=[]))
+            (output / 'job.json').write_text(json.dumps(dict(
+                plan_sha256='c' * 64, shard=0, samples=[sample], source_sha='a' * 40, published_source_sha='b' * 40,
+                method='docx-cli-page1-v2', trials=1, published_version='0.5.1')))
+            environment = dict(QUALITY_OUTPUT=str(output), QUALITY_NATIVE=str(native), QUALITY_FONTS=str(root / 'manifest.json'),
+                               QUALITY_NATIVE_FONT_MAP='bench-manifest', RUNNER_NAME='host-a', SOFFICE='libreoffice')
+            with patch.dict(os.environ, environment), \
+                    patch('docx_benchmark.font_environment', lambda *args: 'f' * 64), \
+                    patch('docx_benchmark.execute', lambda command, **kwargs: (0, 'LibreOffice 26.2.3.2 ' + 'd' * 40)), \
+                    patch('docx_benchmark.measure_sample', lambda *args, **kwargs: {channel: dict(status='ok') for channel in CHANNELS}), \
+                    patch('docx_benchmark.libreoffice_fidelity', lambda *args: dict(status='ok')), \
+                    patch('docx_benchmark.summarize_font_paths', lambda *args: None), patch('builtins.print'):
+                os.environ.pop('QUALITY_CHAINS', None)
+                main()
+            report = json.loads((output / 'report.json').read_text())
+            self.assertNotIn('font_paths', report['benchmark'])
+            self.assertNotIn('name', report['runner'])
+            self.assertNotIn('host-a', json.dumps(report))
 
     def test_dimensions_and_nonblank_output_are_required(self):
         with tempfile.TemporaryDirectory() as directory:

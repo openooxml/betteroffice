@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import { CHANNELS, METHOD, TRIALS, docxShards, mergeDocxBenchmarks, timingSummary } from './docx-benchmark.mjs';
 import { dependencyLine, nativeFeatures } from './build-native.mjs';
-import { renderSection } from './readme.mjs';
+import { aggregateReport, renderSection } from './readme.mjs';
 
 function fixture() {
   const current = 'a'.repeat(40);
@@ -60,6 +60,19 @@ test('reconciles all shards and renders three versioned columns with native mean
   expect(text).not.toContain('Native CLI timing:');
   expect(text).toContain('[benchmark methodology](scripts/office-quality/README.md)');
   expect(() => renderSection({ ...merged, versions: { ...plan.versions, docx: '9.0.0' } })).toThrow('revision');
+});
+
+test('the merged report, its aggregate and its section carry no runner name and no font paths', () => {
+  const { plan, report, parts, hash } = fixture();
+  for (const part of parts) {
+    Object.assign(part.benchmark, { font_paths: { published: { path: '/tmp/x/y.ttf' }, commit: { path: '/tmp/x/y.ttf' } } });
+    Object.assign(part, { runner: { name: 'host-a', platform: 'Linux', processors: 4 } });
+  }
+  const merged = mergeDocxBenchmarks(plan, report, parts, hash);
+  expect('font_paths' in merged.docx_benchmark).toBe(false);
+  expect(merged.docx_runners).toEqual(parts.map((part) => ({ shard: part.shard, platform: 'Linux', processors: 4 })));
+  const text = JSON.stringify([merged, aggregateReport(merged), renderSection(merged)]);
+  for (const leak of ['host-a', '/tmp/x/y.ttf']) expect(text.includes(leak) && leak).toBe(false);
 });
 
 test('all averages use the common successful set, while coverage counts every engine', () => {
