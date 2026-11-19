@@ -158,11 +158,42 @@ interface CommentMark {
   id: number;
 }
 
+/** A kept inline element written without content, before the unit at `unit`. */
+interface RawMark {
+  unit: number;
+  assoc: 'after' | 'before';
+  xml: string;
+}
+
 interface StoryPlan {
   storyId: string;
   units: InlineUnit[];
   commentMarks: CommentMark[];
+  rawMarks: RawMark[];
   commentCoverage: Map<number, Array<[number, number]>>;
+}
+
+/** Keeps a kept empty inline element by one sticky anchor; only seeding writes it. */
+interface RawMarkOp {
+  op: 'setRawMark';
+  id: string;
+  at: number;
+  assoc: RawMark['assoc'];
+  ordinal: number;
+  xml: string;
+}
+
+const EMPTY_ELEMENT = /^\s*<([^\s/>]+)(?:[^>"']|"[^"]*"|'[^']*')*?\/>\s*$/;
+
+/**
+ * The side a kept inline element's anchor sticks to when it is written without content: the unit
+ * before it for an element whose name ends in `End`, the unit after it otherwise. Null for an
+ * element holding content.
+ */
+function rawMarkAssoc(xml: string): RawMark['assoc'] | null {
+  const name = EMPTY_ELEMENT.exec(xml)?.[1];
+  if (name === undefined) return null;
+  return name.endsWith('End') ? 'before' : 'after';
 }
 
 interface StoryOptions {
@@ -1380,10 +1411,11 @@ function paragraphUnits(
   styleResolver: StyleResolver | null,
   extraRunFormatting?: TextFormatting,
   tableParagraphFormatting?: ParagraphFormatting
-): { units: InlineUnit[]; commentMarks: CommentMark[]; ppr: Attrs; opaqueSequences: string[] } {
+): { units: InlineUnit[]; commentMarks: CommentMark[]; rawMarks: RawMark[]; ppr: Attrs; opaqueSequences: string[] } {
   const units: InlineUnit[] = [];
   const opaqueSequences: string[] = [];
   const commentMarks: CommentMark[] = [];
+  const rawMarks: RawMark[] = [];
   let boundaries: Attrs[] | undefined = [];
   const styleFormatting = paragraphStyleFormatting(paragraph, styleResolver, extraRunFormatting);
 
@@ -1420,13 +1452,16 @@ function paragraphUnits(
     } else if (content.type === 'mathEquation') {
       boundaries = undefined;
       units.push(embedUnit('math', mathPayload(content)));
-    } else if (content.type !== 'bookmarkStart' && content.type !== 'bookmarkEnd' && content.type !== 'rawXml') {
+    } else if (content.type === 'rawXml') {
+      const assoc = rawMarkAssoc(content.xml);
+      if (assoc) rawMarks.push({ unit: start, assoc, xml: content.xml });
+    } else if (content.type !== 'bookmarkStart' && content.type !== 'bookmarkEnd') {
       boundaries = undefined;
     }
     paragraphContentUnitCounts.set(content as object, units.length - start);
   }
   const attrs = paragraphAttrs(paragraph, styleResolver, units, boundaries, tableParagraphFormatting, extraRunFormatting);
-  return { units, commentMarks, ppr: paraAttrsToPpr(attrs), opaqueSequences };
+  return { units, commentMarks, rawMarks, ppr: paraAttrsToPpr(attrs), opaqueSequences };
 }
 
 type ParagraphToken = 'pageBreak' | 'visible';
@@ -1989,6 +2024,7 @@ function visitStory(
     storyId,
     units: [],
     commentMarks: [],
+    rawMarks: [],
     commentCoverage: new Map(),
   };
   context.plans.push(plan);
@@ -2023,6 +2059,9 @@ function visitStory(
       const unitBase = plan.units.length;
       plan.commentMarks.push(
         ...paragraph.commentMarks.map((mark) => ({ ...mark, unit: unitBase + mark.unit }))
+      );
+      plan.rawMarks.push(
+        ...paragraph.rawMarks.map((mark) => ({ ...mark, unit: unitBase + mark.unit }))
       );
       plan.units.push(...paragraph.units);
       plan.units.push(
@@ -2145,7 +2184,7 @@ function unitsToRawOps(units: readonly InlineUnit[]): YrsRawOp[] {
 }
 
 function seedPlan(session: YrsSession, plan: StoryPlan): void {
-  const ops = unitsToRawOps(plan.units);
+  const ops: Array<YrsRawOp | RawMarkOp> = unitsToRawOps(plan.units);
   for (const [id, ranges] of plan.commentCoverage) {
     ops.push({
       op: 'setComment',
@@ -2156,7 +2195,23 @@ function seedPlan(session: YrsSession, plan: StoryPlan): void {
       body: null,
     });
   }
-  session.applySeedRawOps(plan.storyId, ops);
+  let offset = 0;
+  let measured = 0;
+  plan.rawMarks.forEach((mark, ordinal) => {
+    for (; measured < Math.min(mark.unit, plan.units.length); measured += 1) {
+      const unit = plan.units[measured]!;
+      offset += unit.kind === 'text' ? unit.text.length : 1;
+    }
+    ops.push({
+      op: 'setRawMark',
+      id: `${plan.storyId}#${ordinal}`,
+      at: offset,
+      assoc: mark.assoc,
+      ordinal,
+      xml: mark.xml,
+    });
+  });
+  session.applySeedRawOps(plan.storyId, ops as readonly YrsRawOp[]);
 }
 
 function seedFontNames(document: Document): () => void {

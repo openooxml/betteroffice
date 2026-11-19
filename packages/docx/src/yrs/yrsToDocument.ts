@@ -66,7 +66,7 @@ import type {
   HeaderFooter,
   SectionProperties,
 } from '../types/document';
-import type { YrsRunInheritance, YrsSession, YrsTableInheritance } from './index';
+import type { YrsRawMark, YrsRunInheritance, YrsSession, YrsTableInheritance } from './index';
 import { isUnavailableTablePayload, markGated, refuseUnavailableTables, tableUnavailableError } from './tableUnavailable';
 
 type Attrs = Record<string, unknown>;
@@ -227,6 +227,10 @@ interface CommentBoundary {
   id: number;
   kind: 'start' | 'end';
   offset: number;
+}
+
+interface RawMarkBoundary extends CommentBoundary {
+  xml: string;
 }
 
 interface BookmarkBoundary extends CommentBoundary {
@@ -2162,13 +2166,17 @@ function restoreNestedOrdinals(content: ParagraphContent[], base: readonly Parag
   });
 }
 
+const EMPTY_ELEMENT = /^\s*<([^\s/>]+)(?:[^>"']|"[^"]*"|'[^']*')*?\/>\s*$/;
+
 function restoreRawInlines(content: ParagraphContent[], base: Paragraph | undefined): ParagraphContent[] {
   if (!base) return content;
   const length = content.reduce((sum, child) => sum + paragraphContentLength(child), 0);
   const boundaries: CommentBoundary[] = [];
   let offset = 0;
   for (const [index, child] of base.content.entries()) {
-    if (child.type === 'rawXml') boundaries.push({ id: index, kind: 'start', offset: Math.min(offset, length) });
+    if (child.type === 'rawXml' && !EMPTY_ELEMENT.test(child.xml)) {
+      boundaries.push({ id: index, kind: 'start', offset: Math.min(offset, length) });
+    }
     offset += paragraphContentLength(child);
   }
   return insertBoundaries(content, boundaries, (boundary) => base.content[boundary.id]!);
@@ -2394,6 +2402,7 @@ function paragraphFromStory(
   properties: Attrs,
   items: InlineItem[],
   commentBoundaries: CommentBoundary[],
+  rawMarks: RawMarkBoundary[],
   baseParagraph: Paragraph | undefined,
   liveBreaks: LiveParagraphBreaks,
   recovery: ChartRecovery,
@@ -2446,6 +2455,10 @@ function paragraphFromStory(
   );
   restoreLineBreaks(content, baseParagraph);
   content = restoreRawInlines(content, baseParagraph);
+  content = insertBoundaries(content, rawMarks, (boundary) => ({
+    type: 'rawXml',
+    xml: (boundary as RawMarkBoundary).xml,
+  }));
   if (baseParagraph) {
     restoreNestedOrdinals(content, baseParagraph.content);
     restoreTextBoxBookmarks(content, baseParagraph.content);
@@ -3637,6 +3650,7 @@ class SaveContext {
   private readonly comments: Map<string, Array<{ id: number; start: number; end: number }>>;
   /** Per story, the comment ranges of it and of the stories nested in it, which key its blocks. */
   private readonly subtreeComments = new Map<string, Map<string, unknown>>();
+  private rawMarks: Map<string, YrsRawMark[]> | null = null;
   private readonly memo: SessionProjectionMemo;
   private readonly styles: StyleResolver;
   private readonly syntheticDefaults: boolean;
@@ -3711,6 +3725,19 @@ class SaveContext {
         this.subtreeComments.set(owner, nested);
       }
     }
+  }
+
+  /** The kept empty inline elements of `storyId`, by offset and source order. */
+  private storyRawMarks(storyId: string): readonly YrsRawMark[] {
+    if (!this.rawMarks) {
+      this.rawMarks = new Map();
+      for (const mark of this.session.resolveRawMarks()) {
+        const marks = this.rawMarks.get(mark.story) ?? [];
+        marks.push(mark);
+        this.rawMarks.set(mark.story, marks);
+      }
+    }
+    return this.rawMarks.get(storyId) ?? [];
   }
 
   private storyIsClean(storyId: string): boolean {
@@ -4117,6 +4144,17 @@ class SaveContext {
       return boundaries;
     };
 
+    const storyRawMarks = this.storyRawMarks(storyId);
+    const paragraphRawMarks = (end: number): RawMarkBoundary[] =>
+      storyRawMarks
+        .filter((mark) => mark.offset >= paragraphStart && mark.offset <= end)
+        .map((mark) => ({
+          id: mark.ordinal,
+          kind: 'start' as const,
+          offset: Math.max(0, mark.offset - inlineStart),
+          xml: mark.xml,
+        }));
+
     const pushText = (text: string, attributes: Attrs): void => {
       let cursor = 0;
       for (let index = 0; index < text.length; index += 1) {
@@ -4146,6 +4184,7 @@ class SaveContext {
         const baseParagraph = this.baseParagraphs.get(segment.paraId);
         if (baseParagraph) precedingBaseParagraphs.push(baseParagraph);
         const boundaries = paragraphCommentBoundaries(storyOffset);
+        const rawMarks = paragraphRawMarks(storyOffset);
         const source = sourceBreakBoundaries(baseParagraph);
         const sourceRuns = source.some(boundary => boundary.breaks?.length) ? source : undefined;
         const inputs = [
@@ -4158,6 +4197,7 @@ class SaveContext {
           breaks,
           liveTrailing,
           sourceRuns,
+          rawMarks,
         ] as const;
         const priorMemo =
           baseParagraph !== undefined ? projectedBlocks.get(baseParagraph) : undefined;
@@ -4179,6 +4219,7 @@ class SaveContext {
             baseParagraph ? segment.properties : this.copiedParagraphProperties(storyId, segment.properties, items, precedingBaseParagraphs),
             items,
             boundaries,
+            rawMarks,
             baseParagraph,
             { leading: breaks, trailing: liveTrailing, leadingPage: segment.properties.pageBreakBeforeRun === true },
             this.recovery(storyId),

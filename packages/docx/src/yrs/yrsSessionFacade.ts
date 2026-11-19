@@ -16,6 +16,7 @@ import type {
   YrsParagraph,
   YrsParagraphLength,
   YrsParagraphSpan,
+  YrsRawMark,
   YrsRegionLayoutProgress,
   YrsRenderEnv,
   YrsReplaceReceipt,
@@ -1534,6 +1535,7 @@ export function wrapSession(
     resolveComment: (commentId) =>
       JSON.parse(session.resolve_comment(commentId)) as YrsResolvedCommentAnchor[],
     listComments: () => JSON.parse(session.list_comments()) as YrsCommentInfo[],
+    resolveRawMarks: () => JSON.parse(session.resolve_raw_marks()) as YrsRawMark[],
     storyIds: () => session.story_ids(),
     hasStory: (story) => !LONE_SURROGATE.test(story) && session.has_story(story),
     storyLength: (story) => session.story_len(story),

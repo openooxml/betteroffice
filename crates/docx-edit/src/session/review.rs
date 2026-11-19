@@ -281,4 +281,25 @@ impl EditSessionCore {
             .collect();
         serde_json::to_string(&items).map_err(EngineError::message)
     }
+
+    /// Where the kept empty inline elements of the source sit now:
+    /// `[{"story","offset","ordinal","xml"}, …]` in story-global UTF-16 units, by story, offset
+    /// and source order.
+    pub fn resolve_raw_marks(&self) -> EngineResult<String> {
+        let items: Vec<Value> = self
+            .engine
+            .doc()
+            .resolve_raw_marks()
+            .into_iter()
+            .map(|mark| {
+                json!({
+                    "story": mark.story,
+                    "offset": mark.offset,
+                    "ordinal": mark.ordinal,
+                    "xml": mark.xml,
+                })
+            })
+            .collect();
+        serde_json::to_string(&items).map_err(EngineError::message)
+    }
 }

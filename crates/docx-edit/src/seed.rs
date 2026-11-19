@@ -151,7 +151,7 @@ fn seeded_sequence_fields<'a>(ops: impl IntoIterator<Item = &'a RawOp>) -> Optio
                 }
             }
             RawOp::Insert { .. } | RawOp::Format { .. } | RawOp::InsertEmbed { .. } => {}
-            RawOp::SetComment { .. } | RawOp::RemoveComment { .. } => {}
+            RawOp::SetComment { .. } | RawOp::RemoveComment { .. } | RawOp::SetRawMark { .. } => {}
             RawOp::Delete { .. } | RawOp::SetEmbedAttr { .. } => return None,
         }
     }
@@ -193,6 +193,7 @@ struct StoryPlan {
     story_id: String,
     units: Vec<InlineUnit>,
     comment_marks: Vec<CommentMark>,
+    raw_marks: Vec<RawMark>,
     comment_coverage: Vec<(String, Vec<(u32, u32)>)>,
     /// How many units [`StoryPlan::width`] has measured, and their width.
     measured: (usize, u32),
@@ -4593,10 +4594,53 @@ fn unmodelled_nodes(content: &Value, output: &mut Vec<String>) {
 struct ParagraphUnits {
     units: Vec<InlineUnit>,
     comment_marks: Vec<CommentMark>,
+    raw_marks: Vec<RawMark>,
     ppr: JsonObject,
     omitted: Vec<Omitted>,
     breaks: Vec<FlowBreak>,
     opaque_sequences: Vec<String>,
+}
+
+/// A kept inline element written without content, before the unit at `unit`.
+struct RawMark {
+    unit: usize,
+    assoc: yrs::Assoc,
+    xml: String,
+}
+
+/// The side a kept inline element's anchor sticks to when it is written without content: the
+/// unit before it for an element whose name ends in `End`, the unit after it otherwise. `None`
+/// for an element holding content, which seeds as one embed.
+fn raw_mark_assoc(xml: &str) -> Option<yrs::Assoc> {
+    let tag = xml.trim().strip_prefix('<')?;
+    let mut quote = None;
+    let mut close = None;
+    for (index, ch) in tag.char_indices() {
+        match quote {
+            Some(open) if ch == open => quote = None,
+            Some(_) => {}
+            None if ch == '"' || ch == '\'' => quote = Some(ch),
+            None if ch == '>' => {
+                close = Some(index);
+                break;
+            }
+            None => {}
+        }
+    }
+    let close = close?;
+    let head = tag[..close].strip_suffix('/')?;
+    if close + 1 != tag.len() {
+        return None;
+    }
+    let name = head
+        .split(|ch: char| ch.is_whitespace() || ch == '/')
+        .next()
+        .filter(|name| !name.is_empty())?;
+    Some(if name.ends_with("End") {
+        yrs::Assoc::Before
+    } else {
+        yrs::Assoc::After
+    })
 }
 
 fn paragraph_units(
@@ -4610,6 +4654,7 @@ fn paragraph_units(
     let mut breaks = Vec::new();
     let mut opaque_sequences = Vec::new();
     let mut comment_marks = Vec::new();
+    let mut raw_marks = Vec::new();
     let mut boundaries = Some(Vec::new());
     let mut unit_counts = Vec::new();
     let style_formatting = paragraph_style_formatting(paragraph, styles, extra_run_formatting);
@@ -4690,7 +4735,17 @@ fn paragraph_units(
                 boundaries = None;
                 units.push(embed_unit("math", math_payload(content), &[], 1));
             }
-            "bookmarkStart" | "bookmarkEnd" | "rawXml" => {}
+            "rawXml" => {
+                let xml = string(field(Some(content), "xml")).unwrap_or_default();
+                if let Some(assoc) = raw_mark_assoc(xml) {
+                    raw_marks.push(RawMark {
+                        unit: start,
+                        assoc,
+                        xml: xml.to_owned(),
+                    });
+                }
+            }
+            "bookmarkStart" | "bookmarkEnd" => {}
             _ => boundaries = None,
         }
         content_breaks(content, start, styles, source, &mut breaks, true, false);
@@ -4717,6 +4772,7 @@ fn paragraph_units(
         ppr: para_attrs_to_ppr(attrs),
         units,
         comment_marks,
+        raw_marks,
         omitted,
         breaks,
         opaque_sequences,
@@ -6263,6 +6319,7 @@ fn visit_story(
         story_id: story_id.clone(),
         units: Vec::new(),
         comment_marks: Vec::new(),
+        raw_marks: Vec::new(),
         comment_coverage: Vec::new(),
         measured: (0, 0),
     });
@@ -6356,6 +6413,7 @@ fn visit_story(
                 let ParagraphUnits {
                     mut units,
                     comment_marks,
+                    raw_marks,
                     mut ppr,
                     omitted,
                     breaks,
@@ -6431,6 +6489,12 @@ fn visit_story(
                 context.plans[plan_index]
                     .comment_marks
                     .extend(comment_marks.into_iter().map(|mark| CommentMark {
+                        unit: unit_base + mark.unit,
+                        ..mark
+                    }));
+                context.plans[plan_index]
+                    .raw_marks
+                    .extend(raw_marks.into_iter().map(|mark| RawMark {
                         unit: unit_base + mark.unit,
                         ..mark
                     }));
@@ -6811,9 +6875,25 @@ fn seed_plan_sharing(
     let StoryPlan {
         story_id,
         units,
+        raw_marks,
         comment_coverage,
         ..
     } = plan;
+    let mut marks = Vec::with_capacity(raw_marks.len());
+    let (mut offset, mut measured) = (0u32, 0usize);
+    for (ordinal, mark) in raw_marks.into_iter().enumerate() {
+        while measured < mark.unit.min(units.len()) {
+            offset += unit_width(&units[measured]);
+            measured += 1;
+        }
+        marks.push(RawOp::SetRawMark {
+            id: format!("{story_id}#{ordinal}"),
+            at: offset,
+            assoc: mark.assoc,
+            ordinal: ordinal as u32,
+            xml: mark.xml,
+        });
+    }
     let mut referenced_fonts = BTreeSet::new();
     let mut ops = units_to_raw_ops(units, &mut referenced_fonts, script_fonts, shared)?;
     if !comment_coverage.is_empty() {
@@ -6829,6 +6909,7 @@ fn seed_plan_sharing(
                 }),
         );
     }
+    ops.extend(marks);
     Ok((story_id, ops, referenced_fonts))
 }
 
