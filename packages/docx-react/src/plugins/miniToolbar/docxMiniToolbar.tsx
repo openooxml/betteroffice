@@ -74,12 +74,24 @@ function returnFocus(context: Context): boolean {
   return answer.ok;
 }
 
-function HandBackOnHide({ owns, context, children }: { owns: { current: boolean }; context: { current: Context }; children: ReactNode }) {
+const focusInsideOrNowhere = (element: HTMLElement) => {
+  const owner = element.ownerDocument;
+  const active = owner.activeElement;
+  return !active || active === owner.body || active === owner.documentElement || element.contains(active);
+};
+
+function HandBackOnHide({ owns, toolbar, context, children }: {
+  owns: { current: boolean };
+  toolbar: { current: HTMLElement | null };
+  context: { current: Context };
+  children: ReactNode;
+}) {
   useLayoutEffect(() => () => {
+    const element = toolbar.current;
     if (!owns.current) return;
     owns.current = false;
-    returnFocus(context.current);
-  }, [owns, context]);
+    if (element && focusInsideOrNowhere(element)) returnFocus(context.current);
+  }, [owns, toolbar, context]);
   return <>{children}</>;
 }
 
@@ -118,6 +130,7 @@ function MiniToolbar({ context, geometry, items }: { context: Context; geometry:
     const owner = element.ownerDocument;
     const onPress = (event: PointerEvent) => {
       if (element.contains(event.target as Node | null)) return;
+      owns.current = false;
       void latest.current.run((next) => { next.setState((state) => dismissMiniToolbar(state, next.snapshot)); });
     };
     owner.addEventListener('pointerdown', onPress, true);
@@ -153,7 +166,7 @@ function MiniToolbar({ context, geometry, items }: { context: Context; geometry:
   };
 
   return (
-    <HandBackOnHide owns={owns} context={latest}>
+    <HandBackOnHide owns={owns} toolbar={toolbar} context={latest}>
       <div
         ref={toolbar}
         role="toolbar"
