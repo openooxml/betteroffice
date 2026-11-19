@@ -7,8 +7,9 @@ import type { PeerlessFrameGeometry, PeerlessViewSnapshot, PeerlessViewStore } f
 import { Activity } from 'react';
 import { PeerlessInput, type PeerlessInputProps, type PeerlessPasteRecorder } from './PeerlessInput';
 import { clipboardFragmentHtml } from '../internals/clipboardHtml';
-import type { DocxClipboardFragment } from '@betteroffice/docx/yrs';
-import { admitIntent, createInputAdmission, submitFormattingIntent, submitPasteFragment, type PeerlessInputAdmission } from './inputAdmission';
+import type { DocxClipboardFragment, DocxTableFragment } from '@betteroffice/docx/yrs';
+import { admitIntent, createInputAdmission, submitFormattingIntent, submitInputIntent, submitPasteFragment, type PeerlessInputAdmission } from './inputAdmission';
+import { clipboardFragmentPlainText, plainTextClipboardFragment } from '../pasteOptions/pasteText';
 import { installCompositionEventPolyfill } from './compositionEventPolyfill.testing';
 import { PLAIN_CONTEXT } from '../../../commands/testing';
 
@@ -1732,6 +1733,212 @@ test('a choice made after the selection moved away from the paste at the same do
     expect(textOnly !== undefined).toBe(true);
     fireEvent.click(textOnly!);
     expect(choices.replaced).toEqual([]);
+  } finally {
+    choices.dispose();
+  }
+});
+
+const PASTE_OPTION_LABELS = ['Keep Source Formatting', 'Merge Formatting', 'Keep Text Only'] as const;
+
+function cellTableFragment(cellTexts: readonly string[]): DocxTableFragment {
+  const rows: DocxTableFragment['rows'] = [];
+  for (const text of cellTexts) rows.push({ trPr: {}, cells: [{ tcPr: {}, content: [{ kind: 'text', text }, { kind: 'pilcrow' }] }] });
+  return { tblPr: { width: 9360, widthType: 'dxa' }, grid: [], rows };
+}
+
+function mountPasteMenu(options: { pasteOptions?: boolean; replace: 'refuse' | 'submit' }) {
+  const host = document.createElement('div');
+  host.style.position = 'relative';
+  document.body.appendChild(host);
+  host.getBoundingClientRect = () => ({ x: 0, y: 100, top: 100, bottom: 700, left: 0, right: 600, width: 600, height: 600, toJSON() {} });
+  const replaced: Array<{ fragment: DocxClipboardFragment; variant: 'plain' | 'merge' | undefined }> = [];
+  const recorder: { current: PeerlessPasteRecorder | null } = { current: null };
+  const admitted: { current: PeerlessInputAdmission | null } = { current: null };
+  const submit = (fragment: DocxClipboardFragment) =>
+    submitPasteFragment(admitted.current!, fragment, { source: 'paste', fence: true }, () => {});
+  const callbacks: Pick<PeerlessInputProps, 'caretHostRef' | 'pasteRecorder' | 'pasteOptions' | 'onPasteFragment' | 'onReplacePasteFragment'> = {
+    caretHostRef: { current: host },
+    pasteRecorder: recorder,
+    ...(options.pasteOptions === undefined ? {} : { pasteOptions: options.pasteOptions }),
+    onPasteFragment: (fragment, _inputTime, plainText) => {
+      recorder.current?.(fragment, plainText, submit(fragment));
+      return true;
+    },
+    onReplacePasteFragment: (fragment, selection, variant) => {
+      replaced.push({ fragment, variant });
+      if (options.replace === 'refuse') return false;
+      return submitInputIntent(admitted.current!, { kind: 'replacePasteFragment', payload: {
+        fragment, selection, ...(variant === 'plain' ? { plain: true as const } : variant === 'merge' ? { merge: true as const } : {}),
+      } }, { source: 'paste', fence: true });
+    },
+  };
+  const input = mount(false, callbacks);
+  admitted.current = input.admission;
+  const geometry: PeerlessFrameGeometry = {
+    identity: input.snapshot.identity, coversThroughSeq: 0, frameEpoch: 1, layoutRevision: 1,
+    pages: [], caret: { x: 80, y: 200, width: 1, height: 12 }, selectionRects: [],
+  };
+  act(() => { input.viewStore.installFrameGeometry(geometry); input.refresh(); });
+  let frameEpoch = 1;
+  const present = (version: number) => act(() => {
+    frameEpoch += 1;
+    input.snapshot.version = version;
+    input.viewStore.installFrameGeometry({ ...geometry, coversThroughSeq: input.snapshot.throughSeq, frameEpoch });
+    input.refresh();
+  });
+  const end = { story: 'body', paraId: 'a', offset: 4 };
+  const control = () => host.querySelector<HTMLElement>('[data-paste-options]');
+  const menuItems = () => Array.from(control()?.querySelectorAll('[role="menuitemradio"]') ?? []);
+  const label = (item: Element) => PASTE_OPTION_LABELS.find((name) => item.textContent?.includes(name));
+  return {
+    input, replaced, control,
+    async offer(fragment: DocxClipboardFragment, plain: string, route: 'keyboard' | 'context menu') {
+      if (route === 'keyboard') pasteWith(input, clipboardFragmentHtml(fragment), plain);
+      else act(() => { recorder.current?.(fragment, clipboardFragmentPlainText(fragment), submit(fragment)); });
+      expect(input.submitted.at(-1)).toBe('pasteFragment');
+      await act(async () => {
+        const index = input.entries.length - 1;
+        input.entries[index]!.settle({ status: 'applied', seq: index + 1 }, { anchor: end, focus: end });
+      });
+      present(input.snapshot.version + 1);
+      await waitFor(() => expect(control() !== null).toBe(true));
+    },
+    present,
+    openMenu() { fireEvent.click(control()!.querySelector('button')!); },
+    choose(name: typeof PASTE_OPTION_LABELS[number]) {
+      const item = menuItems().find((candidate) => label(candidate) === name);
+      expect(`${name}: ${item !== undefined}`).toBe(`${name}: true`);
+      fireEvent.click(item!);
+    },
+    offered: () => menuItems().map(label),
+    checked: () => menuItems().filter((item) => item.getAttribute('aria-checked') === 'true').map(label),
+    menuOpen: () => document.querySelector('[role="menu"]') !== null,
+    idle: () => act(() => new Promise<void>((resolve) => { setTimeout(resolve, 50); })),
+    dispose() {
+      input.unmount();
+      input.admission.dispose();
+      host.remove();
+    },
+  };
+}
+
+test('Ctrl tapped in a field outside the editor leaves the Paste Options menu closed and focus in that field', async () => {
+  const choices = mountPasteMenu({ replace: 'refuse' });
+  const outside = document.createElement('input');
+  document.body.appendChild(outside);
+  try {
+    await choices.offer(boldFragment(), 'Bold', 'keyboard');
+    act(() => { outside.focus(); });
+    expect(document.activeElement === outside).toBe(true);
+    fireEvent.keyDown(outside, { key: 'Control' });
+    fireEvent.keyUp(outside, { key: 'Control' });
+    expect(choices.menuOpen()).toBe(false);
+    expect(document.activeElement === outside).toBe(true);
+    expect(choices.control() !== null).toBe(true);
+  } finally {
+    outside.remove();
+    choices.dispose();
+  }
+});
+
+test('Ctrl tapped in the editor input opens the Paste Options menu', async () => {
+  const choices = mountPasteMenu({ replace: 'refuse' });
+  try {
+    await choices.offer(boldFragment(), 'Bold', 'keyboard');
+    act(() => { choices.input.textarea.focus(); });
+    fireEvent.keyDown(choices.input.textarea, { key: 'Control' });
+    fireEvent.keyUp(choices.input.textarea, { key: 'Control' });
+    expect(choices.menuOpen()).toBe(true);
+    expect(choices.offered()).toEqual([...PASTE_OPTION_LABELS]);
+  } finally {
+    choices.dispose();
+  }
+});
+
+for (const route of ['keyboard', 'context menu'] as const) {
+  test(`keep text only after a ${route} paste replaces with the text of the pasted fragment, not the clipboard plain text`, async () => {
+    const choices = mountPasteMenu({ replace: 'refuse' });
+    const fragment: DocxClipboardFragment = { paragraphs: [{ tables: [cellTableFragment(['new'])], text: '' }] };
+    try {
+      await choices.offer(fragment, 'oldnew', route);
+      choices.openMenu();
+      choices.choose('Keep Text Only');
+      expect(choices.replaced.map(({ fragment: replacement, variant }) => ({ variant, text: replacement.paragraphs.map(({ text }) => text) })))
+        .toEqual([{ variant: 'plain', text: ['new'] }]);
+    } finally {
+      choices.dispose();
+    }
+  });
+}
+
+test('a paste whose text-only form is over the worker paragraph limit offers keep source and merge but not keep text only', async () => {
+  const choices = mountPasteMenu({ replace: 'refuse' });
+  const fragment: DocxClipboardFragment = { paragraphs: [0, 1].map((table) => ({
+    tables: [cellTableFragment(Array.from({ length: 501 }, (_, row) => `table ${table} row ${row}`))], text: '',
+  })) };
+  try {
+    expect(fragment.paragraphs).toHaveLength(2);
+    expect(plainTextClipboardFragment(clipboardFragmentPlainText(fragment)).paragraphs.length).toBeGreaterThan(1000);
+    await choices.offer(fragment, clipboardFragmentPlainText(fragment), 'context menu');
+    choices.openMenu();
+    expect(choices.offered()).toEqual(['Keep Source Formatting', 'Merge Formatting']);
+  } finally {
+    choices.dispose();
+  }
+});
+
+test('with paste options off a keyboard paste of an accepted fragment never reads the clipboard plain text', () => {
+  const choices = mountPasteMenu({ pasteOptions: false, replace: 'refuse' });
+  const reads: string[] = [];
+  const html = clipboardFragmentHtml(boldFragment());
+  try {
+    fireEvent.paste(choices.input.textarea, { clipboardData: { getData: (type: string) => {
+      reads.push(type);
+      return type === 'text/html' ? html : 'Bold';
+    } } });
+    expect(choices.input.submitted).toEqual(['pasteFragment']);
+    expect(reads).toEqual(['text/html']);
+  } finally {
+    choices.dispose();
+  }
+});
+
+for (const hide of ['an outside click', 'a window resize'] as const) {
+  test(`after ${hide} hides the Paste Options control a frame at the same version and caret neither shows it nor lets a choice through`, async () => {
+    const choices = mountPasteMenu({ replace: 'refuse' });
+    try {
+      await choices.offer(boldFragment(), 'Bold', 'keyboard');
+      if (hide === 'an outside click') act(() => { fireEvent.pointerDown(document.body); });
+      else act(() => { fireEvent(window, new Event('resize')); });
+      expect(choices.control() !== null).toBe(false);
+      choices.present(choices.input.snapshot.version);
+      await choices.idle();
+      expect(choices.control() !== null).toBe(false);
+      act(() => { choices.input.textarea.focus(); });
+      fireEvent.keyDown(choices.input.textarea, { key: 'Control' });
+      fireEvent.keyUp(choices.input.textarea, { key: 'Control' });
+      expect(choices.menuOpen()).toBe(false);
+      expect(choices.replaced).toEqual([]);
+    } finally {
+      choices.dispose();
+    }
+  });
+}
+
+test('a second choice made while the first replacement is pending leaves the first choice checked', async () => {
+  const choices = mountPasteMenu({ replace: 'submit' });
+  try {
+    await choices.offer(boldFragment(), 'Bold', 'keyboard');
+    choices.openMenu();
+    choices.choose('Keep Text Only');
+    expect(choices.input.submitted.at(-1)).toBe('replacePasteFragment');
+    expect(choices.control() !== null).toBe(true);
+    choices.openMenu();
+    choices.choose('Merge Formatting');
+    expect(choices.replaced.map(({ variant }) => variant)).toEqual(['plain']);
+    expect(choices.input.submitted.filter((kind) => kind === 'replacePasteFragment')).toHaveLength(1);
+    choices.openMenu();
+    expect(choices.checked()).toEqual(['Keep Text Only']);
   } finally {
     choices.dispose();
   }

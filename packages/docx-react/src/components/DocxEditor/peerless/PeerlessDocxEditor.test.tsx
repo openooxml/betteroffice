@@ -39,6 +39,8 @@ import { createFramePresentation } from './framePresentation';
 import { inputs, proposalHost } from './workerProposalHost.testing';
 import { peerlessPreviewPaint } from './WorkerDocumentPreview';
 import * as clipboard from './clipboard';
+import * as clipboardHtml from '../internals/clipboardHtml';
+import * as pasteText from '../pasteOptions/pasteText';
 import * as reviewLayer from '../../sidebar/TrackedChangesReview';
 import * as sidebarView from '../../UnifiedSidebar';
 import type { ReactSidebarItem } from '../../../plugin-api/types';
@@ -113,9 +115,28 @@ class FakeWorker {
   pendingReplies: DocxEngineWorkerResponse[] = [];
   outOfMemory = false;
   checkpoints: { state: Uint8Array; epoch: number; version: number; throughSeq: number }[] = [];
+  lastPaste: { version: number; length: number } | null = null;
 
   constructor() {
     workers.push(this);
+  }
+
+  paste(command: { kind: string; payload: unknown }, version: number): 'applied' | 'refused' | null {
+    if (command.kind !== 'pasteFragment' && command.kind !== 'replacePasteFragment') return null;
+    const payload = command.payload as { fragment: yrs.DocxClipboardFragment; merge?: boolean; plain?: boolean };
+    const text = payload.fragment.paragraphs.map(paragraph => paragraph.text).join('\n');
+    const last = this.lastPaste;
+    this.lastPaste = null;
+    if (command.kind === 'pasteFragment') {
+      this.text += text;
+      this.lastPaste = { version: version + 1, length: text.length };
+      return 'applied';
+    }
+    if (!last || last.version !== version) return 'refused';
+    const chosen = `${payload.merge ? '<merge>' : payload.plain ? '<plain>' : '<source>'}${text}`;
+    this.text = this.text.slice(0, this.text.length - last.length) + chosen;
+    this.lastPaste = { version: version + 1, length: chosen.length };
+    return 'applied';
   }
 
   documentVersion() {
@@ -194,21 +215,24 @@ class FakeWorker {
       this.refuseNextEdit = false;
       const cancelled = command.afterSeq !== undefined && this.refused.has(command.afterSeq);
       if (refused || cancelled) this.refused.add(command.seq);
+      const pasted = refused || cancelled ? null : this.paste(command, state.version);
+      if (pasted === 'refused') this.refused.add(command.seq);
       const readOnly = !refused && !cancelled && command.kind === 'setReadOnly'
         ? (command.payload as { readOnly: boolean }).readOnly : state.editState.readOnly;
       if (!refused && !cancelled && command.kind === 'insertText') this.text += (command.payload as { text: string }).text;
       const ack = {
         session: state.session, incarnation: state.incarnation, epoch: state.epoch,
-        version: state.version + (!refused && !cancelled && command.kind === 'insertText' ? 1 : 0), throughSeq: command.seq,
+        version: state.version + ((!refused && !cancelled && command.kind === 'insertText') || pasted === 'applied' ? 1 : 0), throughSeq: command.seq,
         outcomes: [{
           seq: command.seq,
-          status: refused ? 'refused' as const : cancelled ? 'cancelled' as const :
-            command.kind === 'insertText' ? 'applied' as const : 'noop' as const,
+          status: refused ? 'refused' as const : cancelled ? 'cancelled' as const : pasted === 'refused' ? 'refused' as const :
+            command.kind === 'insertText' || pasted === 'applied' ? 'applied' as const : 'noop' as const,
           ...(refused ? { reason: readOnlyRefusal ? 'read-only' : 'stale-version' } :
-            cancelled ? { reason: 'dependency-refused' } : {}),
+            cancelled ? { reason: 'dependency-refused' } : pasted === 'refused' ? { reason: 'paste-changed' } : {}),
         }],
         editState: { ...state.editState, readOnly, ...this.documentVersion() },
         ...((command.kind === 'select' || (command.kind === 'navigate' && (command.payload as yrs.DocxCommandPayloads['navigate']).extend)) ? { selection: { anchor: { story: 'body', paraId: 'a', offset: 0 }, focus: { story: 'body', paraId: 'a', offset: 13 } } } : {}),
+        ...(pasted === 'applied' ? { selection: { anchor: { story: 'body', paraId: 'a', offset: this.text.length }, focus: { story: 'body', paraId: 'a', offset: this.text.length } } } : {}),
         ...(realSurface ? { frame: { ...commandFrame(command.seq + 1), coversThroughSeq: command.seq } } : {}),
       };
       this.initial = { ...state, ...ack };
@@ -2912,6 +2936,22 @@ test('replacing a paste checks the replacement fragment and submits only an allo
   expect(replacements()[0]).toMatchObject({ command: { payload: { fragment: kept, selection: { anchor: at, focus: at } } } });
 });
 
+test('with paste options off a context menu paste of a fragment derives no plain text from it', async () => {
+  const bold: yrs.DocxClipboardFragment = { paragraphs: [{ text: 'Bold', runs: [{ text: 'Bold', format: { other: { bold: true } } }] }] };
+  const allowed = spyOn(clipboard, 'isPasteFragmentAllowed').mockImplementation(() => true);
+  const read = spyOn(clipboardHtml, 'readClipboardFragment').mockImplementation(async () => structuredClone(bold));
+  const readText = spyOn(navigator.clipboard, 'readText').mockImplementation(async () => 'Bold');
+  const derived = spyOn(pasteText, 'clipboardFragmentPlainText');
+  restorers.push(() => allowed.mockRestore(), () => read.mockRestore(), () => readText.mockRestore(), () => derived.mockRestore());
+  const view = render(<DocxEditor {...peerlessProps} pasteOptions={false} showToolbar={false} />);
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
+  fireEvent.contextMenu(view.getByTestId('docx-worker-paged-editor'));
+  fireEvent.click(view.getByRole('menuitem', { name: /^Paste$/ }));
+  await waitFor(() => expect(requests.some(request => request.type === 'edit' && request.command.kind === 'pasteFragment')).toBe(true));
+  expect(read).toHaveBeenCalledTimes(1);
+  expect(derived).not.toHaveBeenCalled();
+});
+
 test('suggesting mode offers no paste options and editing mode offers them', async () => {
   const view = render(<DocxEditor {...peerlessProps} mode="suggesting" author="Writer" showToolbar={false} />);
   await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
@@ -3417,6 +3457,114 @@ test('the real paged editor recovers the full checkpoint document and fails on a
   expect(onError.mock.calls[0]![0]).toMatchObject({ code: 'out-of-memory' });
   expect(workers).toHaveLength(2);
   expect(view.getByRole('alert')).toBeDefined();
+});
+
+const PASTE_PREFIX = 'kept' + '.'.repeat(126);
+
+async function pasteOptionsSession() {
+  surface.mockRestore();
+  realSurface = true;
+  const allowed = spyOn(clipboard, 'isPasteFragmentAllowed').mockImplementation(() => true);
+  restorers.push(() => allowed.mockRestore());
+  const original = sessionHook.usePeerlessEditSession;
+  const hook = spyOn(sessionHook, 'usePeerlessEditSession').mockImplementation(options => {
+    const result = original(options);
+    if (result.binding) binding = result.binding;
+    return result;
+  });
+  restorers.push(() => hook.mockRestore());
+  await import('../pasteOptions/PasteOptionsControl');
+  const onError = mock((_error: Error) => {});
+  const view = render(<DocxEditor {...peerlessProps} onError={onError} showToolbar={false} />);
+  await waitFor(() => expect(binding).toBeDefined());
+  const first = workers[0]!;
+  for (let index = 0; index < 127; index++) {
+    await act(async () => {
+      const submitted = binding!.commands.submit({ kind: 'insertText', payload: { text: index === 0 ? 'kept' : '.' } });
+      if (submitted.status !== 'submitted') throw new Error('edit not submitted');
+      expect((await submitted.ticket.ack).status).toBe('applied');
+    });
+  }
+  await act(async () => { await new Promise<void>(resolve => setImmediate(resolve)); });
+  expect(first.text).toBe(PASTE_PREFIX);
+  expect(first.checkpoints).toHaveLength(0);
+  const textarea = view.container.querySelector<HTMLTextAreaElement>('textarea.paged-editor__input');
+  if (!textarea) throw new Error('worker editor input is missing');
+  const control = () => view.container.querySelector<HTMLElement>('[data-paste-options]');
+  const bold: yrs.DocxClipboardFragment = { paragraphs: [{ text: 'Bold', runs: [{ text: 'Bold', format: { other: { bold: true } } }] }] };
+  const html = clipboardHtml.clipboardFragmentHtml(bold);
+  return {
+    first, onError, textarea, control,
+    async paste() {
+      act(() => { fireEvent.paste(textarea, { clipboardData: { getData: (type: string) => type === 'text/html' ? html : 'Bold' } }); });
+      await waitFor(() => expect(first.text).toBe(`${PASTE_PREFIX}Bold`));
+      await waitFor(() => {
+        const snapshot = binding!.viewStore.getSnapshot();
+        expect(snapshot.workerSelection?.focus.offset).toBe(PASTE_PREFIX.length + 4);
+        expect((snapshot.geometry?.coversThroughSeq ?? -1) >= snapshot.throughSeq).toBe(true);
+      });
+      await act(async () => { await new Promise<void>(resolve => setImmediate(resolve)); });
+    },
+    async offer() {
+      act(() => {
+        const snapshot = binding!.viewStore.getSnapshot();
+        const geometry = snapshot.geometry!;
+        binding!.viewStore.installFrameGeometry({ ...geometry, frameEpoch: geometry.frameEpoch + 0.5,
+          coversThroughSeq: snapshot.throughSeq, caret: { x: 10, y: 10, width: 1, height: 12 } });
+      });
+      await waitFor(() => expect(control() !== null).toBe(true));
+    },
+    choose(name: 'Merge Formatting' | 'Keep Text Only') {
+      fireEvent.click(control()!.querySelector('button')!);
+      fireEvent.click(view.getByRole('menuitemradio', { name }));
+    },
+  };
+}
+
+test('a worker crash met by the paste choice recovers with the choice applied', async () => {
+  const editor = await pasteOptionsSession();
+  await editor.paste();
+  await editor.offer();
+  editor.first.outOfMemory = true;
+  act(() => { editor.choose('Merge Formatting'); });
+  await waitFor(() => expect(workers).toHaveLength(2));
+  await waitFor(() => expect(workers[1]!.text).toBe(`${PASTE_PREFIX}<merge>Bold`));
+  expect(editor.onError).not.toHaveBeenCalled();
+});
+
+test('a worker crash after the paste choice restores the document with the chosen variant', async () => {
+  const editor = await pasteOptionsSession();
+  await editor.paste();
+  await editor.offer();
+  act(() => { editor.choose('Keep Text Only'); });
+  await waitFor(() => expect(editor.first.text).toBe(`${PASTE_PREFIX}<plain>Bold`));
+  await act(async () => { await new Promise<void>(resolve => setImmediate(resolve)); });
+  editor.first.outOfMemory = true;
+  let status: string | undefined;
+  await act(async () => {
+    const submitted = binding!.commands.submit({ kind: 'insertText', payload: { text: ' later' } });
+    if (submitted.status !== 'submitted') throw new Error('edit not submitted');
+    status = await submitted.ticket.ack.then(outcome => outcome.status, () => 'rejected');
+  });
+  expect(status).toBe('applied');
+  expect(workers).toHaveLength(2);
+  expect(workers[1]!.text).toBe(`${PASTE_PREFIX}<plain>Bold later`);
+  expect(editor.onError).not.toHaveBeenCalled();
+});
+
+test('no checkpoint is taken while paste options are offered, and one is taken after typing removes the control', async () => {
+  const editor = await pasteOptionsSession();
+  await editor.paste();
+  await editor.offer();
+  await act(async () => { await new Promise<void>(resolve => setTimeout(resolve, 20)); });
+  expect(editor.first.checkpoints).toHaveLength(0);
+  act(() => {
+    editor.textarea.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'insertText', data: 'x' }));
+  });
+  expect(editor.control() !== null).toBe(false);
+  await waitFor(() => expect(editor.first.text).toBe(`${PASTE_PREFIX}Boldx`));
+  await waitFor(() => expect(editor.first.checkpoints.length).toBeGreaterThan(0));
+  expect(new TextDecoder().decode(editor.first.checkpoints[0]!.state).startsWith(`${PASTE_PREFIX}Bold`)).toBe(true);
 });
 
 test('a recovered worker receives plugin reservations versioned to its own document', async () => {

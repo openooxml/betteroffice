@@ -10,6 +10,7 @@ import { residentWorkerFactory } from './__fixtures__/residentWorker';
 import { DocxSourceWorkerClient as ResidentEngineWorkerClient } from './residentSourceWorkerClient';
 import { ResidentEngineWorkerClient as DefaultWorkerClient } from './residentEngineWorkerClient';
 import type { DocxCommandPayloads, DocxCommandInitRequest } from './residentCommandProtocol';
+import type { DocxClipboardFragment } from './clipboardFragment';
 import { applyFrameDelta, decodeFrameDelta } from '../layout/render/frameDelta';
 import { extractEmbeddedFontFaces } from '../utils/embeddedFonts';
 import { deobfuscateFont } from '../utils/fontDeobfuscation';
@@ -640,3 +641,52 @@ test('recovery keeps reservations from a replayed render-settings update', async
     expect(Object.values(recovered?.values ?? {})).toMatchObject([{ owner: 'layout', id: 'space', height: 50 }]);
   } finally { clients.forEach(client => client.destroy()); }
 }, TIMEOUT);
+
+const RICH_PASTE: DocxClipboardFragment = { paragraphs: [{ text: 'Rich', runs: [{ text: 'Rich', format: { other: { bold: true } } }] }] };
+
+for (const checkpointed of [true, false]) {
+  test(checkpointed
+    ? 'a checkpoint taken before the paste, then the paste and the choice replayed after a restart: the document holds the chosen variant'
+    : 'the paste and the choice replayed without a checkpoint in between give the same document as the live session', async () => {
+    const bytes = source(1);
+    const workers = [startWorker(), startWorker()];
+    const clients = workers.map(worker => new ResidentEngineWorkerClient(worker));
+    const [first, second] = clients;
+    try {
+      await first!.openSource({ bytes });
+      const initial = await first!.commandInit(init());
+      const edit = (seq: number, version: number, kind: string, payload: object) => ({
+        session: initial.session, incarnation: 1, seq, basis: { epoch: 1, version }, kind, payload,
+      });
+      const typing = edit(1, 0, 'insertText', { text: 'kept' });
+      const typed = await first!.edit(typing);
+      expect(typed.outcomes[0]?.status).toBe('applied');
+      const checkpoint = checkpointed ? await first!.checkpoint() : null;
+      const at = typed.selection!.focus;
+      const paste = edit(2, typed.version, 'pasteFragment', { selection: { anchor: at, focus: at }, fragment: RICH_PASTE });
+      const pasted = await first!.edit(paste);
+      expect(pasted.outcomes[0]?.status).toBe('applied');
+      const end = pasted.selection!.focus;
+      const choice = edit(3, pasted.version, 'replacePasteFragment', checkpointed
+        ? { selection: { anchor: end, focus: end }, fragment: { paragraphs: [{ text: 'Rich' }] }, plain: true }
+        : { selection: { anchor: end, focus: end }, fragment: { paragraphs: [{ text: 'Rich', runs: [{ text: 'Rich', format: { other: { bold: true } } }] }] }, merge: true });
+      expect((await first!.edit(choice)).outcomes[0]?.status).toBe('applied');
+      const live = workers[0]!.sessions[0]!;
+      const expected = { text: live.paragraphs('body')[0]!.text, segments: live.paragraphSegments('body', [0]) };
+      expect(expected.text).toBe('keptRichParagraph 1');
+      await second!.openSource(checkpoint ? { bytes, state: checkpoint.state } : { bytes });
+      await second!.commandInit(checkpoint
+        ? { ...init(), incarnation: 2, version: checkpoint.version, throughSeq: checkpoint.throughSeq,
+          recoveryState: checkpoint.recoveryState, replayAppliedSeqs: [2, 3] }
+        : { ...init(), incarnation: 2, replayAppliedSeqs: [1, 2, 3] });
+      const replays = checkpoint ? [paste, choice] : [typing, paste, choice];
+      const outcomes: unknown[] = [];
+      for (const command of replays) {
+        outcomes.push((await second!.edit({ ...command, incarnation: 2, replay: true })).outcomes[0]?.status);
+      }
+      expect(outcomes).toEqual(replays.map(() => 'applied'));
+      const restored = workers[1]!.sessions[0]!;
+      expect({ text: restored.paragraphs('body')[0]!.text, segments: restored.paragraphSegments('body', [0]) }).toEqual(expected);
+    } finally { clients.forEach(client => client.destroy()); }
+  }, TIMEOUT);
+}

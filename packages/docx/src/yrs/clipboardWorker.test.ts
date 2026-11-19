@@ -1,4 +1,4 @@
-import { beforeAll, expect, test } from 'bun:test';
+import { beforeAll, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { rezipPartsToArrayBuffer, toBytes } from '../docx/rezip/parts';
@@ -7,7 +7,7 @@ import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
 import { residentWorkerFactory } from './__fixtures__/residentWorker';
 import { ResidentEngineWorkerClient } from './residentEngineWorkerClient';
 import type { DocxCommandEnvelope, DocxCommandInitRequest } from './residentCommandProtocol';
-import type { DocxClipboardFragment } from './clipboardFragment';
+import type { DocxClipboardFragment, DocxTableFragment } from './clipboardFragment';
 import { mergeFormattingFragment } from './clipboardFragmentTransforms';
 import type { YrsCellLoc } from './index';
 import { createYrsSession } from './index';
@@ -892,3 +892,65 @@ for (const variant of ['plain', 'merge'] as const) {
     }
   }, TIMEOUT);
 }
+
+async function untimedTextAndTablePaste(opened: Awaited<ReturnType<typeof openTableWorker>>) {
+  const { client, engine } = opened;
+  const paragraphs = engine.paragraphs('body');
+  const last = paragraphs[paragraphs.length - 1]!;
+  const copy = await client.documentRead({
+    kind: 'clipboardSlice',
+    selection: {
+      anchor: { story: 'body', paraId: paragraphs[0]!.paraId, offset: 0 },
+      focus: { story: 'body', paraId: last.paraId, offset: last.text.length },
+    },
+  });
+  const table: DocxTableFragment | undefined = copy.value.fragment?.paragraphs[0]?.tables?.[0];
+  expect(table).toBeDefined();
+  const fragment: DocxClipboardFragment = { paragraphs: [
+    { text: 'pre', runs: [{ text: 'pre', format: { other: { bold: true } } }] },
+    { tables: [table!], text: 'post' },
+  ] };
+  const atPara = engine.paragraphs('body').at(-1)!;
+  const atSpan = engine.geometryReader.locateParagraph('body', atPara.paraId);
+  const at = { story: 'body', paraId: atPara.paraId, offset: atSpan.end - atSpan.start };
+  const before = { texts: engine.paragraphs('body').map((paragraph) => paragraph.text), tables: bodyTables(engine) };
+  let clock = Date.now();
+  const now = spyOn(Date, 'now').mockImplementation(() => (clock += 1000));
+  const pasted = await client.edit(intent(1, 0, 'pasteFragment', { selection: { anchor: at, focus: at }, fragment }))
+    .finally(() => { now.mockRestore(); });
+  expect(pasted.outcomes[0]?.status).toBe('applied');
+  expect(bodyTables(engine)).toBe(before.tables + 1);
+  return { before, at, pasted };
+}
+
+test('a paste of text and a table without an input time is one undo step even when the clock moves between its writes', async () => {
+  const opened = await openTableWorker();
+  const { client, engine } = opened;
+  try {
+    const { before, pasted } = await untimedTextAndTablePaste(opened);
+    const undone = await client.edit(intent(2, pasted.version, 'undo', {}));
+    expect(undone.outcomes[0]?.status).toBe('applied');
+    expect({ texts: engine.paragraphs('body').map((paragraph) => paragraph.text), tables: bodyTables(engine) }).toEqual(before);
+  } finally {
+    client.destroy();
+  }
+}, TIMEOUT);
+
+test('keep text only after a paste of text and a table without an input time holds the pasted text exactly once', async () => {
+  const opened = await openTableWorker();
+  const { client, engine } = opened;
+  try {
+    const { before, at, pasted } = await untimedTextAndTablePaste(opened);
+    const replaced = await client.edit(intent(2, pasted.version, 'replacePasteFragment', {
+      selection: { anchor: at, focus: pasted.selection!.focus },
+      fragment: { paragraphs: [{ text: 'pre' }, { text: 'post' }] },
+      plain: true,
+    }));
+    expect(replaced.outcomes[0]?.status).toBe('applied');
+    const body = engine.paragraphs('body').map((paragraph) => paragraph.text).join('\n');
+    expect({ pre: body.split('pre').length - 1, post: body.split('post').length - 1, tables: bodyTables(engine) })
+      .toEqual({ pre: 1, post: 1, tables: before.tables });
+  } finally {
+    client.destroy();
+  }
+}, TIMEOUT);

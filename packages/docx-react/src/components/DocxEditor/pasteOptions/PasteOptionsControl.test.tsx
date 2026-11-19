@@ -1,6 +1,6 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, test } from 'bun:test';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import type { PasteFormattingOption } from '@betteroffice/docx/yrs';
 import { PasteOptionsControl, menuPlacement } from './PasteOptionsControl';
 import { usePasteOptions } from './usePasteOptions';
@@ -13,16 +13,21 @@ afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
 });
 
-function Harness(props: { enabled?: boolean; onChoose?: (option: PasteFormattingOption) => void }) {
+function Harness(props: { enabled?: boolean; onChoose?: (option: PasteFormattingOption) => void | boolean; onHide?: () => void }) {
   const [focused, setFocused] = useState(0);
-  const paste = usePasteOptions({
+  const surface = useRef<HTMLDivElement | null>(null);
+  const options = {
     enabled: props.enabled ?? true,
     onChoose: props.onChoose ?? (() => {}),
     focusEditor: () => setFocused(count => count + 1),
-  });
+    surface,
+    onHide: props.onHide,
+  };
+  const paste = usePasteOptions(options);
   return (
     <div>
       <div
+        ref={surface}
         data-testid="surface"
         tabIndex={0}
         onKeyDown={(event) => { paste.handleKeyDown(event); }}
@@ -139,4 +144,46 @@ test('the menu opens below the button and flips above it or shifts left at the v
   expect(menuPlacement({ left: 100, top: 100, bottom: 124 }, menu, viewport)).toEqual({ left: 0, top: 28 });
   expect(menuPlacement({ left: 100, top: 740, bottom: 764 }, menu, viewport)).toEqual({ left: 0, top: -114 });
   expect(menuPlacement({ left: 900, top: 100, bottom: 124 }, menu, viewport)).toEqual({ left: -128, top: 28 });
+});
+
+test('Ctrl tapped in a field outside the editor neither opens the menu nor moves focus', () => {
+  render(<Harness />);
+  const outside = document.createElement('input');
+  document.body.appendChild(outside);
+  try {
+    fireEvent.click(screen.getByText('show'));
+    act(() => { outside.focus(); });
+    fireEvent.keyDown(outside, { key: 'Control' });
+    fireEvent.keyUp(outside, { key: 'Control' });
+    expect(screen.queryByRole('menu')).toBeNull();
+    expect(document.activeElement === outside).toBe(true);
+  } finally {
+    outside.remove();
+  }
+});
+
+test('a choice the editor does not accept leaves the checked option unchanged', () => {
+  const chosen: PasteFormattingOption[] = [];
+  render(<Harness onChoose={(option) => { chosen.push(option); return false; }} />);
+  fireEvent.click(screen.getByText('show'));
+  const button = screen.getByRole('button', { name: 'Paste Options (Ctrl)' });
+  fireEvent.click(button);
+  fireEvent.click(screen.getByRole('menuitemradio', { name: 'Merge Formatting' }));
+  expect(chosen).toEqual(['merge']);
+  fireEvent.click(button);
+  expect(screen.getByRole('menuitemradio', { name: 'Keep Source Formatting' }).getAttribute('aria-checked')).toBe('true');
+  expect(screen.getByRole('menuitemradio', { name: 'Merge Formatting' }).getAttribute('aria-checked')).toBe('false');
+});
+
+test('hiding the control by an outside pointer or a resize reports the hide each time', () => {
+  let hidden = 0;
+  render(<Harness onHide={() => { hidden += 1; }} />);
+  fireEvent.click(screen.getByText('show'));
+  fireEvent.pointerDown(document.body);
+  expect(screen.queryByRole('button', { name: 'Paste Options (Ctrl)' })).toBeNull();
+  expect(hidden).toBe(1);
+  fireEvent.click(screen.getByText('show'));
+  fireEvent(window, new Event('resize'));
+  expect(screen.queryByRole('button', { name: 'Paste Options (Ctrl)' })).toBeNull();
+  expect(hidden).toBe(2);
 });
