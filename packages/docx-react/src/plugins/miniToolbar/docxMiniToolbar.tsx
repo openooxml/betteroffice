@@ -74,6 +74,15 @@ function returnFocus(context: Context): boolean {
   return answer.ok;
 }
 
+function HandBackOnHide({ owns, context, children }: { owns: { current: boolean }; context: { current: Context }; children: ReactNode }) {
+  useLayoutEffect(() => () => {
+    if (!owns.current) return;
+    owns.current = false;
+    returnFocus(context.current);
+  }, [owns, context]);
+  return <>{children}</>;
+}
+
 function MiniToolbar({ context, geometry, items }: { context: Context; geometry: DocxPluginGeometry; items: readonly DocxMiniToolbarItem[] }) {
   const { t } = useTranslation();
   const coarse = useSyncExternalStore(subscribeCoarse, readCoarse, () => false);
@@ -89,14 +98,7 @@ function MiniToolbar({ context, geometry, items }: { context: Context; geometry:
   const toolbarFocused = context.state.toolbarFocused || holdsFocus;
   const view = miniToolbarView(miniToolbarEligible(context.snapshot, { ...context.state, toolbarFocused }), placement);
   const shown = view !== 'hidden';
-  const [, rerender] = useState(0);
-  const lastPlacement = useRef(placement);
-  const handedBack = useRef(false);
-  if (shown) {
-    lastPlacement.current = placement;
-    handedBack.current = false;
-  }
-  const frame = shown ? placement : holdsFocus && !handedBack.current ? lastPlacement.current : null;
+  const owns = useRef(false);
   const commandStates = () => items.map((item) => JSON.stringify(context.commands.getState(item))).join('\n');
   useSyncExternalStore(context.commands.subscribe, commandStates, commandStates);
   const states = items.map((item) => buttonState(item, context.commands.getState(item)));
@@ -130,20 +132,10 @@ function MiniToolbar({ context, geometry, items }: { context: Context; geometry:
   });
   useLayoutEffect(() => {
     const element = toolbar.current;
-    if (!element) return;
-    const focused = focusInside(element);
-    if (view === 'hidden' && focused && returnFocus(latest.current)) {
-      handedBack.current = true;
-      rerender((count) => count + 1);
-      return;
-    }
-    element.inert = view === 'kept' && !focused;
+    if (element) element.inert = view === 'kept' && !focusInside(element);
   });
-  useLayoutEffect(() => () => {
-    if (focusInside(toolbar.current)) returnFocus(latest.current);
-  }, []);
 
-  if (!frame) return null;
+  if (!shown || !placement) return null;
 
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.key === 'Escape' || event.key === 'Tab') {
@@ -161,65 +153,69 @@ function MiniToolbar({ context, geometry, items }: { context: Context; geometry:
   };
 
   return (
-    <div
-      ref={toolbar}
-      role="toolbar"
-      aria-label={t('plugins.miniToolbar')}
-      aria-orientation="horizontal"
-      data-docx-mini-toolbar={view}
-      onMouseDown={(event) => event.preventDefault()}
-      onFocus={() => {
-        if (!context.state.toolbarFocused) void context.run((next) => { next.setState((state) => ({ ...state, toolbarFocused: true })); });
-      }}
-      onBlur={(event) => {
-        if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
-        void context.run((next) => { next.setState((state) => ({ ...state, toolbarFocused: false })); });
-      }}
-      onKeyDown={onKeyDown}
-      style={{
-        position: 'absolute',
-        left: avoidCommentButton(frame.x, size.width, page.current),
-        top: frame.y,
-        width: size.width,
-        height: size.height,
-        boxSizing: 'border-box',
-        display: 'flex',
-        alignItems: 'center',
-        gap: MINI_TOOLBAR_GAP,
-        padding: MINI_TOOLBAR_PADDING,
-        borderRadius: 8,
-        border: '1px solid var(--doc-border)',
-        backgroundColor: 'var(--doc-surface)',
-        boxShadow: '0 2px 8px var(--doc-shadow)',
-        opacity: view === 'kept' ? 0.5 : 1,
-        pointerEvents: view === 'kept' ? 'none' : 'auto',
-      }}
-    >
-      {items.map((item, index) => {
-        const Icon = ICONS[item];
-        const state = states[index]!;
-        const label = t(context.commands.getDescriptor(item).labelKey);
-        return (
-          <button
-            key={item}
-            ref={(element) => { buttons.current[index] = element; }}
-            type="button"
-            className="oox-toolbar-toggle inline-flex items-center justify-center rounded"
-            aria-label={label}
-            title={label}
-            aria-pressed={state.pressed}
-            data-active={state.pressed === 'true' ? 'true' : undefined}
-            disabled={state.disabled}
-            tabIndex={-1}
-            onFocus={() => setCurrent(index)}
-            onClick={() => void context.run(async (next) => { await next.commands.execute(item, null); })}
-            style={{ width: size.button, height: size.button, flexShrink: 0, border: 0, background: 'transparent', opacity: state.disabled ? 0.38 : 1 }}
-          >
-            <Icon size={ICON_SIZE} />
-          </button>
-        );
-      })}
-    </div>
+    <HandBackOnHide owns={owns} context={latest}>
+      <div
+        ref={toolbar}
+        role="toolbar"
+        aria-label={t('plugins.miniToolbar')}
+        aria-orientation="horizontal"
+        data-docx-mini-toolbar={view}
+        onMouseDown={(event) => event.preventDefault()}
+        onFocus={() => {
+          owns.current = true;
+          if (!context.state.toolbarFocused) void context.run((next) => { next.setState((state) => ({ ...state, toolbarFocused: true })); });
+        }}
+        onBlur={(event) => {
+          if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+          if (event.relatedTarget) owns.current = false;
+          void context.run((next) => { next.setState((state) => ({ ...state, toolbarFocused: false })); });
+        }}
+        onKeyDown={onKeyDown}
+        style={{
+          position: 'absolute',
+          left: avoidCommentButton(placement.x, size.width, page.current),
+          top: placement.y,
+          width: size.width,
+          height: size.height,
+          boxSizing: 'border-box',
+          display: 'flex',
+          alignItems: 'center',
+          gap: MINI_TOOLBAR_GAP,
+          padding: MINI_TOOLBAR_PADDING,
+          borderRadius: 8,
+          border: '1px solid var(--doc-border)',
+          backgroundColor: 'var(--doc-surface)',
+          boxShadow: '0 2px 8px var(--doc-shadow)',
+          opacity: view === 'kept' ? 0.5 : 1,
+          pointerEvents: view === 'kept' ? 'none' : 'auto',
+        }}
+      >
+        {items.map((item, index) => {
+          const Icon = ICONS[item];
+          const state = states[index]!;
+          const label = t(context.commands.getDescriptor(item).labelKey);
+          return (
+            <button
+              key={item}
+              ref={(element) => { buttons.current[index] = element; }}
+              type="button"
+              className="oox-toolbar-toggle inline-flex items-center justify-center rounded"
+              aria-label={label}
+              title={label}
+              aria-pressed={state.pressed}
+              data-active={state.pressed === 'true' ? 'true' : undefined}
+              disabled={state.disabled}
+              tabIndex={-1}
+              onFocus={() => setCurrent(index)}
+              onClick={() => void context.run(async (next) => { await next.commands.execute(item, null); })}
+              style={{ width: size.button, height: size.button, flexShrink: 0, border: 0, background: 'transparent', opacity: state.disabled ? 0.38 : 1 }}
+            >
+              <Icon size={ICON_SIZE} />
+            </button>
+          );
+        })}
+      </div>
+    </HandBackOnHide>
   );
 }
 
