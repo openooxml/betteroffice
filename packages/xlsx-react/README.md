@@ -42,7 +42,7 @@ The default props are described by `XlsxAsyncEditorProps`:
 | `downloadOnSave` | `boolean` | Save also downloads; defaults to `!onSave`. |
 | `onDocumentChange` | `(change: XlsxDocumentChange) => void` | Receives `{ version }` after a committed edit. |
 | `initialZoom` | `number` | Initial scale, clamped to 0.1 through 5; defaults to 1. |
-| `loadingIndicator` | `React.ReactNode` | Shown while a supplied file opens, in an overlay whose size does not affect the editor's layout. |
+| `loadingIndicator` | `React.ReactNode` | Shown while a supplied file opens, in an overlay whose size does not affect the editor's layout. The indicator is not interactive: it receives no pointer input. |
 | `style` | `React.CSSProperties` | Overrides root inline styles. |
 | `onChange` | `() => void` | Called after a user edit changes the workbook. |
 | `onError` | `(error: Error) => void` | Receive engine errors. |
