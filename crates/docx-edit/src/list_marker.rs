@@ -845,7 +845,7 @@ mod tests {
         assert!(state.counters.is_empty());
     }
 
-    /// A bullet toggled on by a command: `listIsBullet` with no `listMarker` (7171938398).
+    /// A bullet toggled on by a command: `listIsBullet` with no `listMarker`.
     fn command_bullet(num_id: f64, level: f64) -> BTreeMap<String, Any> {
         BTreeMap::from([
             (
