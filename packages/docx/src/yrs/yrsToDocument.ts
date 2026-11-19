@@ -253,6 +253,7 @@ interface OriginalRunBoundary {
   marksKey?: string;
   formatting?: TextFormatting;
   propertyChanges?: Run['propertyChanges'];
+  inline?: boolean;
 }
 
 interface LiveParagraphBreaks {
@@ -1691,7 +1692,10 @@ function sourceBreakBoundaries(paragraph: Paragraph | undefined): OriginalRunBou
         child.type === 'commentRangeStart' || child.type === 'commentRangeEnd' ||
         child.type === 'bookmarkStart' || child.type === 'bookmarkEnd' || child.type === 'rawXml'
       ) continue;
-      return [];
+      const span = inlineSpanText(child);
+      if (span === null) return [];
+      boundaries.push({ text: span, inline: true });
+      continue;
     }
     let text = '';
     const breaks: NonNullable<OriginalRunBoundary['breaks']> = [];
@@ -1705,6 +1709,41 @@ function sourceBreakBoundaries(paragraph: Paragraph | undefined): OriginalRunBou
     boundaries.push({ text, breaks });
   }
   return boundaries;
+}
+
+function inlineSpanText(child: ParagraphContent): string | null {
+  switch (child.type) {
+    case 'simpleField':
+    case 'inlineSdt':
+    case 'mathEquation':
+      return '￼';
+    case 'complexField':
+      return [...(child.structuredCode?.inline ?? []), ...(child.structuredResult?.inline ?? [])]
+        .some((nested) => nested.type === 'hyperlink' || nested.type === 'simpleField')
+        ? null
+        : '￼';
+    case 'hyperlink':
+      return plainRunsText(child.structuredChildren ?? child.children);
+    case 'insertion':
+    case 'deletion':
+    case 'moveFrom':
+    case 'moveTo':
+      return plainRunsText(child.content);
+    default:
+      return null;
+  }
+}
+
+function plainRunsText(children: readonly unknown[]): string | null {
+  let text = '';
+  for (const child of children as ParagraphContent[]) {
+    if (child.type !== 'run') return null;
+    for (const entry of child.content) {
+      if (entry.type !== 'text') return null;
+      text += entry.text;
+    }
+  }
+  return text;
 }
 
 function liveRunBoundaries(
@@ -1779,25 +1818,18 @@ function restoreRecordedBreaks(
   const live = items
     .map((item) => (item.kind === 'text' ? item.text : isBlockBreak(item) ? '' : '\uFFFC'))
     .join('');
-  let prefix = 0;
-  const shared = Math.min(recorded.length, live.length);
-  while (prefix < shared && recorded[prefix] === live[prefix]) prefix += 1;
-  let suffix = 0;
-  while (
-    suffix < shared - prefix &&
-    recorded[recorded.length - 1 - suffix] === live[live.length - 1 - suffix]
-  ) {
-    suffix += 1;
-  }
+  const alignment = textAlignment(recorded, live, true);
   const length = content.reduce((sum, child) => sum + paragraphContentLength(child), 0);
+  if (
+    boundaries.some((boundary) => boundary.inline) &&
+    !breakPlacesAreCertain(kept.map(({ offset }) => offset), recorded, live, content, alignment, length)
+  ) {
+    return content;
+  }
   const placed = insertBoundaries(
     content,
     kept.map(({ offset }, id) => {
-      const mapped = offset <= prefix
-        ? offset
-        : offset >= recorded.length - suffix
-          ? offset + live.length - recorded.length
-          : Math.min(offset, live.length - suffix);
+      const mapped = mapRecordedOffset(offset, recorded, live, alignment);
       return { id, kind: 'start', offset: Math.min(Math.max(mapped, 0), length) };
     }),
     (boundary) => ({ type: 'run', content: [{ type: 'break', breakType: kept[boundary.id]!.type }] })
@@ -1808,6 +1840,85 @@ function restoreRecordedBreaks(
     paragraphBreaksAreLive(placed, liveBreaks)
     ? placed
     : content;
+}
+
+interface TextAlignment {
+  prefix: number;
+  suffix: number;
+}
+
+function textAlignment(recorded: string, live: string, prefixFirst: boolean): TextAlignment {
+  const shared = Math.min(recorded.length, live.length);
+  const same = (index: number, fromEnd: boolean): boolean =>
+    fromEnd
+      ? recorded[recorded.length - 1 - index] === live[live.length - 1 - index]
+      : recorded[index] === live[index];
+  let prefix = 0;
+  let suffix = 0;
+  if (prefixFirst) {
+    while (prefix < shared && same(prefix, false)) prefix += 1;
+    while (suffix < shared - prefix && same(suffix, true)) suffix += 1;
+  } else {
+    while (suffix < shared && same(suffix, true)) suffix += 1;
+    while (prefix < shared - suffix && same(prefix, false)) prefix += 1;
+  }
+  return { prefix, suffix };
+}
+
+function mapRecordedOffset(
+  offset: number,
+  recorded: string,
+  live: string,
+  { prefix, suffix }: TextAlignment
+): number {
+  return offset <= prefix
+    ? offset
+    : offset >= recorded.length - suffix
+      ? offset + live.length - recorded.length
+      : Math.min(offset, live.length - suffix);
+}
+
+function atChildBoundaries(content: ParagraphContent[], offsets: number[]): boolean {
+  let index = 0;
+  let start = 0;
+  for (const child of content) {
+    const end = start + paragraphContentLength(child);
+    while (index < offsets.length && offsets[index]! <= start) index += 1;
+    if (index < offsets.length && offsets[index]! < end) {
+      if (child.type !== 'run') return false;
+      let at = start;
+      for (const entry of child.content) {
+        const next = at + runContentLength(entry);
+        while (index < offsets.length && offsets[index]! <= at) index += 1;
+        if (entry.type !== 'text' && index < offsets.length && offsets[index]! < next) return false;
+        at = next;
+      }
+    }
+    start = end;
+  }
+  return true;
+}
+
+function breakPlacesAreCertain(
+  offsets: number[],
+  recorded: string,
+  live: string,
+  content: ParagraphContent[],
+  first: TextAlignment,
+  length: number
+): boolean {
+  if (length !== live.length) return false;
+  const last = textAlignment(recorded, live, false);
+  const inside = (offset: number, { prefix, suffix }: TextAlignment): boolean =>
+    prefix < offset && offset < recorded.length - suffix;
+  const mapped: number[] = [];
+  for (const offset of offsets) {
+    if (inside(offset, first) || inside(offset, last)) return false;
+    const place = mapRecordedOffset(offset, recorded, live, first);
+    if (place !== mapRecordedOffset(offset, recorded, live, last)) return false;
+    mapped.push(place);
+  }
+  return atChildBoundaries(content, mapped.sort((left, right) => left - right));
 }
 
 function restoreOriginalRuns(
