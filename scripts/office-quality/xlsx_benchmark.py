@@ -2,7 +2,6 @@ import hashlib
 import json
 import math
 import os
-import platform
 import re
 from pathlib import Path
 
@@ -121,7 +120,7 @@ def main():
     config = dict(method=job['method'],trials=job['trials'],absolute_tolerance=job['absolute_tolerance'],relative_tolerance=job['relative_tolerance'],
         published_version=job['published_version'],libreoffice_version=version,libreoffice_build=version_text.strip(),builds=builds)
     report = dict(schema_version=1,plan_sha256=job['plan_sha256'],shard=job['shard'],benchmark=config,samples=[],
-        runner=dict(platform=platform.platform(),processors=os.cpu_count()))
+        runner=dict(processors=os.cpu_count()))
     for index,sample in enumerate(job['samples']):
         print(f"XLSX calculation shard {job['shard']}: {index+1}/{len(job['samples'])} {sample['id']}",flush=True)
         calculation = measure_sample(sample,root/sample['id'],binaries,soffice,config,index)

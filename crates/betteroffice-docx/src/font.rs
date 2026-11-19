@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 #[cfg(feature = "fonts")]
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::PoisonError;
 
 #[cfg(feature = "fonts")]
@@ -25,6 +25,10 @@ pub(crate) struct FontRegistry {
     resolved: HashSet<(String, Vec<String>)>,
     #[cfg(feature = "fonts")]
     views: HashMap<(ooxml_text::FontId, String), ooxml_text::FontId>,
+    /// Faces each chain key draws its family with: the family's embedded and
+    /// application faces and the face the font manager resolves it to.
+    #[cfg(feature = "fonts")]
+    own: HashSet<(String, ooxml_text::FontId)>,
     registrations: usize,
 }
 
@@ -68,6 +72,10 @@ impl FontRegistry {
     }
 
     fn insert(&mut self, key: String, id: ooxml_text::FontId, priority: u8) -> u32 {
+        #[cfg(feature = "fonts")]
+        if priority < 2 {
+            self.own.insert((key.clone(), id));
+        }
         let chain = self.chains.entry(key.clone()).or_default();
         if priority == 2 && chain.contains(&id) {
             return id.to_u32();
@@ -129,6 +137,7 @@ impl FontRegistry {
                 &request.scripts,
                 LastResortOffice::Word,
             );
+            let primary = manager.resolves_family_face(family, request.bold, request.italic);
             let own = (!request.scripts.is_empty()).then(|| {
                 manager.resolve(
                     family,
@@ -153,6 +162,9 @@ impl FontRegistry {
                     scripts.push(base);
                 } else {
                     let id = self.measured_as(base, face.measure_as.as_deref().unwrap_or(family));
+                    if primary && index == 0 {
+                        self.own.insert((key.clone(), id));
+                    }
                     if glyph == Some(index) {
                         deferred = Some(id);
                     } else {
@@ -166,6 +178,35 @@ impl FontRegistry {
             self.resolved.insert(resolved_key);
         }
         Ok(())
+    }
+
+    /// Every chain as layout reads it, plus the face of the tracked paragraph
+    /// mark when `requirements` name the default family and its chain starts
+    /// with that family's own face.
+    #[cfg(feature = "fonts")]
+    pub(crate) fn layout_chains(
+        &self,
+        requirements: &[FontRequirement],
+    ) -> BTreeMap<String, Vec<u32>> {
+        let mut chains: BTreeMap<String, Vec<u32>> = self
+            .chains
+            .iter()
+            .map(|(key, ids)| (key.clone(), ids.iter().map(|id| id.to_u32()).collect()))
+            .collect();
+        let key = chain_key(DEFAULT_LAYOUT_FAMILY, false, false);
+        let named = requirements.iter().any(|requirement| {
+            chain_key(&requirement.family, requirement.bold, requirement.italic) == key
+        });
+        if let Some(&head) = self.chains.get(&key).and_then(|chain| chain.first())
+            && named
+            && self.own.contains(&(key, head))
+        {
+            chains.insert(
+                docx_layout::display_list::PARAGRAPH_MARK_FACE.to_owned(),
+                vec![head.to_u32()],
+            );
+        }
+        chains
     }
 }
 

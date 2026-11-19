@@ -121,8 +121,10 @@ export function mergeDocxBenchmarks(plan, report, inputs, planHash) {
     return { ...sample, comparisons: [...sample.comparisons, row.libreoffice], native_timings: row.timings };
   });
   timingSummary(samples);
-  return { ...report, samples, docx_benchmark: JSON.parse(identity),
-    docx_runners: inputs.map((part) => ({ shard: part.shard, ...part.runner })) };
+  const benchmark = JSON.parse(identity);
+  delete benchmark.font_paths;
+  return { ...report, samples, docx_benchmark: benchmark,
+    docx_runners: inputs.map((part) => ({ shard: part.shard, processors: part.runner?.processors })) };
 }
 
 export async function stageDocx(planPath, shard, output, cacheDir) {
