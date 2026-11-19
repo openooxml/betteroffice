@@ -17,6 +17,7 @@ import { captureSelectionIntent } from './selection';
 import { holdPointerExtension } from './inputAdmission';
 import { geometryMatchesDocument, type PeerlessFrameGeometry, type PeerlessProvisionalCaret, type PeerlessViewStore } from './viewStore';
 import { clientPointToPage } from './pagePoint';
+import { hyperlinkHoverTitle } from './linkHover';
 import { beginPictureDrag, floatingPictureAt, inlinePictureAt, movePictureDrag, pictureAt, pictureDropIntent, pictureInSelection, type PictureDrag } from './pictureDrag';
 import { beginPictureResize, movePictureResize, pictureResizeIntent, type PictureResize, type PictureResizeHandle } from './pictureResize';
 import { tableHandleAt, tableResizeHandles, tableResizeIntent, tableRowHandleAt, tableRowResizeHandles, tableRowResizeIntent, type TableResizeHandle, type TableRowHandle } from './tableResize';
@@ -668,6 +669,14 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
     intent: (delta) => tableResizeIntent(binding.viewStore.getSnapshot().geometry, handle, delta) });
   const rowDrag = (handle: TableRowHandle): TableBorderDrag => ({ id: handle.id, axis: 'y', min: handle.minDelta, max: Infinity,
     intent: (delta) => tableRowResizeIntent(binding.viewStore.getSnapshot().geometry, handle, delta) });
+  const showLinkTitle = (event: PointerEvent<HTMLDivElement>) => {
+    const host = event.currentTarget;
+    const point = event.pointerType === 'touch' ? null
+      : clientPointToPage(event.clientX, event.clientY, host.getBoundingClientRect(), zoom, pages);
+    const title = point ? hyperlinkHoverTitle(point.page.displayPage, point.x, point.y) : null;
+    if (title) { if (host.getAttribute('title') !== title) host.setAttribute('title', title); }
+    else if (host.hasAttribute('title')) host.removeAttribute('title');
+  };
   const tableBorderAt = (event: PointerEvent<HTMLDivElement>): TableBorderDrag | null => {
     if (event.pointerType === 'touch' || (tableHandles.length === 0 && tableRowHandles.length === 0)) return null;
     const point = clientPointToPage(event.clientX, event.clientY, event.currentTarget.getBoundingClientRect(), zoom, pages);
@@ -876,6 +885,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
           if (event.buttons === 0) {
             const border = tableBorderAt(event);
             if (border?.id !== tableHover?.id) setTableHover(border && { id: border.id, axis: border.axis });
+            showLinkTitle(event);
           }
           const resizing = resize.current;
           if (resizing?.pointerId === event.pointerId) {
@@ -935,7 +945,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
           }
           releasePointer(event);
         }}
-        onPointerLeave={() => setTableHover(null)}
+        onPointerLeave={(event) => { setTableHover(null); event.currentTarget.removeAttribute('title'); }}
         onPointerCancel={releasePointer}
         onLostPointerCapture={(event) => {
           if (event.target === event.currentTarget) releasePointer(event);

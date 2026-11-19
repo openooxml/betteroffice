@@ -6,6 +6,7 @@ import { useWorkerRulerControls } from './workerPropertyControls';
 import { useWorkerPropertyDialogs } from './useWorkerPropertyDialogs';
 import { useWorkerQuery } from './useWorkerQuery';
 import { bodyEdgeY } from './pagePoint';
+import { popupWithLink } from './linkHover';
 import { useCommentSidebarItems } from '../../../hooks/useCommentSidebarItems';
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import {
@@ -1241,7 +1242,10 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       if (href.startsWith('#')) {
         const story = region.kind === 'body' ? 'body' : selection.focus.story;
         await navigation.scrollToBookmark(href.slice(1), story);
-      } else setHyperlinkPopup(data);
+      } else {
+        const link = await propertyDialogs.readLinkAtCaret().catch(() => null);
+        if (gesture === linkGesture.current) setHyperlinkPopup(popupWithLink(data, link));
+      }
     }).catch(error => reportRecoverableError(error instanceof Error ? error : new Error(String(error))));
     return true;
   };
