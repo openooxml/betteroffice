@@ -38,6 +38,28 @@ function makeDocx(document: string, numbering?: string, styles = STYLES): Uint8A
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
+const PACKAGE_RELATIONSHIPS = 'http://schemas.openxmlformats.org/package/2006/relationships';
+
+/** `bytes` with the parts `replaced` written over. */
+function repackaged(bytes: Uint8Array, replaced: Record<string, string>): Uint8Array {
+  const parts = new Map(Object.entries(unzipContainer(bytes)));
+  for (const [path, xml] of Object.entries(replaced)) parts.set(path, toBytes(xml));
+  return new Uint8Array(rezipPartsToArrayBuffer(parts));
+}
+
+/** `promise`'s value, or the error it rejects with. */
+async function settled<T>(promise: Promise<T>): Promise<{ value?: T; error?: unknown }> {
+  try {
+    return { value: await promise };
+  } catch (error) {
+    return { error };
+  }
+}
+
+const relationshipEntries = (xml: string) => xml.match(/<(?:[\w.-]+:)?Relationship\b[^>]*>/g) ?? [];
+const numberingRelationships = (xml: string) =>
+  relationshipEntries(xml).filter(entry => /\sType\s*=\s*["'][^"']*\/numbering["']/.test(entry));
+
 const paragraph = (value: string, numId?: number) =>
   `<w:p>${numId === undefined ? '' : `<w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="${numId}"/></w:numPr></w:pPr>`}<w:r><w:t>${value}</w:t></w:r></w:p>`;
 const documentOf = (...paragraphs: string[]) =>
@@ -238,6 +260,59 @@ for (const [saveName, save] of Object.entries(SAVES)) {
     const document = text(unzipContainer(await save(session))['word/document.xml']) ?? '';
     expect(savedNumId(document, 'Fresh')).toBeGreaterThan(1);
     expect(savedNumId(document, 'Bare')).toBe(1);
+  });
+
+  test(`${saveName}: relationships written with a prefix gain one numbering relationship in that prefix`, async () => {
+    const session = await seeded(repackaged(makeDocx(documentOf(paragraph('First'), paragraph('Second'))), {
+      'word/_rels/document.xml.rels': `<r:Relationships xmlns:r="${PACKAGE_RELATIONSHIPS}"><r:Relationship Id="rId1" Type="${R}/styles" Target="styles.xml"/></r:Relationships>`,
+    }));
+    createList(session, 'Second', 'numbered');
+    const saved = await settled(save(session));
+    expect(saved.error).toBeUndefined();
+    const parts = unzipContainer(saved.value!);
+    const relationships = text(parts['word/_rels/document.xml.rels']) ?? '';
+    const numbering = numberingRelationships(relationships);
+    expect(numbering).toHaveLength(1);
+    expect(numbering[0]).toMatch(/^<r:Relationship\s/);
+    expect(relationships).not.toMatch(/<\/?Relationships?\b/);
+    expect(elements(text(parts['word/numbering.xml']) ?? '', 'num')).toHaveLength(1);
+    expect(text(parts['[Content_Types].xml'])).toContain('PartName="/word/numbering.xml"');
+  });
+
+  test(`${saveName}: relationships written with a prefix that name the numbering part keep one numbering relationship`, async () => {
+    const session = await seeded(repackaged(makeDocx(documentOf(paragraph('First'), paragraph('Second')), LISTS_NUMBERING), {
+      'word/_rels/document.xml.rels': `<r:Relationships xmlns:r="${PACKAGE_RELATIONSHIPS}"><r:Relationship Id="rId1" Type="${R}/styles" Target="styles.xml"/><r:Relationship Id="rId2" Type="${R}/numbering" Target="numbering.xml"/></r:Relationships>`,
+    }));
+    createList(session, 'Second', 'numbered');
+    const saved = await settled(save(session));
+    expect(saved.error).toBeUndefined();
+    const parts = unzipContainer(saved.value!);
+    expect(numberingRelationships(text(parts['word/_rels/document.xml.rels']) ?? '')).toHaveLength(1);
+    const numbering = text(parts['word/numbering.xml']) ?? '';
+    expect(elements(numbering, 'abstractNum')).toHaveLength(elements(LISTS_NUMBERING, 'abstractNum').length + 1);
+    expect(elements(numbering, 'num')).toHaveLength(elements(LISTS_NUMBERING, 'num').length + 1);
+  });
+
+  test(`${saveName}: a relationship id written in single quotes is not given again`, async () => {
+    const session = await seeded(repackaged(makeDocx(documentOf(paragraph('First'), paragraph('Second'))), {
+      'word/_rels/document.xml.rels': `<Relationships xmlns="${PACKAGE_RELATIONSHIPS}"><Relationship Id='rId1' Type="${R}/styles" Target="styles.xml"/></Relationships>`,
+    }));
+    createList(session, 'Second', 'numbered');
+    const relationships = text(unzipContainer(await save(session))['word/_rels/document.xml.rels']) ?? '';
+    const ids = relationshipEntries(relationships).map(entry => /\sId\s*=\s*["']([^"']*)["']/.exec(entry)?.[1]);
+    expect(ids).toHaveLength(2);
+    expect(new Set(ids).size).toBe(2);
+    expect(numberingRelationships(relationships)).toHaveLength(1);
+  });
+
+  test(`${saveName}: a numbering relationship whose type is written in single quotes is not added again`, async () => {
+    const session = await seeded(repackaged(makeDocx(documentOf(paragraph('First'), paragraph('Second')), LISTS_NUMBERING), {
+      'word/_rels/document.xml.rels': `<Relationships xmlns="${PACKAGE_RELATIONSHIPS}"><Relationship Id="rId1" Type="${R}/styles" Target="styles.xml"/><Relationship Id="rId2" Type='${R}/numbering' Target="numbering.xml"/></Relationships>`,
+    }));
+    createList(session, 'Second', 'numbered');
+    const parts = unzipContainer(await save(session));
+    expect(numberingRelationships(text(parts['word/_rels/document.xml.rels']) ?? '')).toHaveLength(1);
+    expect(elements(text(parts['word/numbering.xml']) ?? '', 'num')).toHaveLength(elements(LISTS_NUMBERING, 'num').length + 1);
   });
 
   test(`${saveName}: a document where no list was created keeps its numbering, relationships and content types byte for byte`, async () => {
