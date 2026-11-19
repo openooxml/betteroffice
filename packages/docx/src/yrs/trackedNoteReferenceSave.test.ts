@@ -608,6 +608,22 @@ describe.each(PATHS.filter(({ keepsSourceBytes }) => keepsSourceBytes))('$name',
       const both = bodyParagraphs(await path.open(fixture(original, [1, 2]), boldHead))[0] ?? '';
       expect(both).toContain(alone);
     });
+
+    it('keeps the source paragraph when text is bolded beside a revision of a reference alone and an untracked styled reference', async () => {
+      const original = firstParagraph(`${wrapped(shape)}${text(' and ')}${referenceRun(shape.note, 2)}`);
+      const first = bodyParagraphs(await path.open(fixture(original, [1, 2]), boldHead))[0] ?? '';
+      expect(first).toContain(referenceRun(shape.note, 2));
+      expect(first).toBe(original);
+    });
+
+    it('keeps the source paragraph when text is bolded beside a revision of a reference alone and one that ends with a styled reference', async () => {
+      const words = shape.tag === 'del' ? deletedText : text;
+      const ending = revisionSpan(shape, `${words('left')}${referenceRun(shape.note)}`);
+      const alone = revisionSpan({ ...shape, id: shape.id + 10 }, referenceRun(shape.note, 2));
+      const original = firstParagraph(`${ending}${text(' and ')}${alone}`);
+      const first = bodyParagraphs(await path.open(fixture(original, [1, 2]), boldHead))[0] ?? '';
+      expect(first).toBe(original);
+    });
   });
 });
 
@@ -637,6 +653,10 @@ describe.each(REPORTING)('$name', (route) => {
     it('keeps the source paragraph and reports it when bold text sits beside two wrappers of one revision that hold a reference alone', async () => {
       const twice = `${wrapped(shape)}${text(' and ')}${revisionSpan(shape, referenceRun(shape.note, 2))}`;
       await keptAndReported(firstParagraph(twice), [1, 2]);
+    });
+
+    it('keeps the source paragraph and reports it when bold text sits beside a revision of a reference alone and an untracked styled reference', async () => {
+      await keptAndReported(firstParagraph(`${wrapped(shape)}${text(' and ')}${referenceRun(shape.note, 2)}`), [1, 2]);
     });
 
     it('saves bold over the whole paragraph and writes the reference of a revision of a reference alone as its source run', async () => {
