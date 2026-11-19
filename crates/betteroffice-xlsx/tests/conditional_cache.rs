@@ -964,6 +964,45 @@ fn a_direct_edit_or_a_recalculation_keeps_previous_results_until_decided() {
 }
 
 #[test]
+fn a_rule_reading_a_cell_whose_recalculation_was_refused_paints_nothing() {
+    let book = |sum: &str, formats: String| {
+        let a1 = format!(r#"<c r="A1"><f>{sum}</f><v>1</v></c>"#);
+        let row = format!(r#"<row r="1">{a1}<c r="B1"><v>1</v></c></row>"#);
+        workbook(&sheet(row, formats))
+    };
+    let viewport = view(0.0, 200.0);
+    let average = rule(
+        "A1:B1",
+        r#"<cfRule type="aboveAverage" dxfId="0" priority="1"/>"#,
+    );
+    for (formats, cells) in [(greater_than("A1", "0"), 1), (average, 2)] {
+        let mut limited = book("SUM($B$1:$Z$50000)", formats.clone());
+        edit_one(&mut limited, 0, 1, "0");
+        assert!(
+            painted(&limited.display_list(&viewport).unwrap()).is_empty(),
+            "{formats}"
+        );
+        assert_eq!(
+            limited.conditional_stats().withheld_refused,
+            cells,
+            "{formats}"
+        );
+        let mut computed = book("SUM($B$1:$Z$2)+1", formats.clone());
+        edit_one(&mut computed, 0, 1, "2");
+        assert_eq!(
+            painted(&computed.display_list(&viewport).unwrap()).len(),
+            1,
+            "{formats}"
+        );
+        assert_eq!(
+            computed.conditional_stats().withheld_refused,
+            0,
+            "{formats}"
+        );
+    }
+}
+
+#[test]
 fn a_range_move_that_changes_no_cell_keeps_previous_results() {
     let viewport = view(0.0, 800.0);
     let mut workbook = positive_authored();

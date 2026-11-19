@@ -508,3 +508,74 @@ fn a_range_rule_over_overlapping_areas_paints_nothing() {
         );
     }
 }
+
+/// The cells withheld for `reason`, read from the counters by name: none
+/// when no counter has that name.
+fn withheld(workbook: &Workbook, reason: &str) -> u64 {
+    let stats = format!("{:?}", workbook.conditional_stats());
+    let Some((_, rest)) = stats.split_once(&format!(" withheld_{reason}: ")) else {
+        return 0;
+    };
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().unwrap()
+}
+
+/// A call to a function the calc engine does not implement, whose error a
+/// handler turns into `TRUE` where Excel computes `FALSE`.
+const GAP: &str = r#"ISERROR(REGEXTEST("abc","^a"))"#;
+
+fn gap_book(sqref: &str, rules: &str) -> Workbook {
+    workbook(
+        &[
+            ("A1", "1"),
+            ("A2", "1"),
+            ("A3", "1"),
+            ("B1", "abc"),
+            ("B2", "abc"),
+            ("B3", "abc"),
+        ],
+        &rule(sqref, rules),
+        &[&fill(RED), &fill(GREEN)],
+    )
+}
+
+#[test]
+fn a_rule_the_calc_engine_cannot_evaluate_in_full_paints_nothing() {
+    for (sqref, formula, cells) in [
+        ("A1", GAP.to_owned(), 1),
+        ("A1:A3", GAP.to_owned(), 3),
+        ("A1:A3", r#"ISERROR(REGEXTEST(B1,"^a"))"#.to_owned(), 3),
+        ("A1:A3", format!("AND({GAP},SUM(1:1)&gt;=0)"), 3),
+        ("A1:A3", "ISERROR(SUM('[1]Data'!$B$1:$B$2))".to_owned(), 3),
+    ] {
+        let workbook = gap_book(sqref, &expression(1, &formula));
+        assert_unpainted(&workbook, &formula);
+        assert_eq!(withheld(&workbook, "engine_gap"), cells, "{formula}");
+    }
+}
+
+#[test]
+fn a_rule_the_calc_engine_cannot_evaluate_withholds_the_certain_rules_beside_it() {
+    for rules in [
+        expression(1, GAP) + &positive(2),
+        positive(1) + &expression(2, GAP),
+    ] {
+        let workbook = gap_book("A1", &rules);
+        assert_unpainted(&workbook, &rules);
+        assert_eq!(withheld(&workbook, "engine_gap"), 1, "{rules}");
+    }
+    let stopping = r#"<cfRule type="cellIs" dxfId="1" priority="1" stopIfTrue="1" operator="greaterThan"><formula>0</formula></cfRule>"#;
+    let stopped = gap_book("A1", &(stopping.to_owned() + &expression(2, GAP)));
+    assert_eq!(
+        fills(&stopped, &viewport(0.0)),
+        [((0, 0), GREEN.to_owned())]
+    );
+    assert_eq!(withheld(&stopped, "engine_gap"), 0);
+}
+
+#[test]
+fn a_rule_whose_formula_meets_an_error_value_still_paints() {
+    let workbook = gap_book("A1", &expression(1, "ISERROR(1/0)"));
+    assert_eq!(fills(&workbook, &viewport(0.0)), red(&[0]));
+    assert_eq!(withheld(&workbook, "engine_gap"), 0);
+}
