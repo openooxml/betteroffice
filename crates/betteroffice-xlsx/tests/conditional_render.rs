@@ -1,5 +1,6 @@
 use betteroffice_xlsx::{
-    CalculationOptions, CellRef, DrawCmd, GridGeometry, SheetId, Viewport, Workbook,
+    CalculationOptions, CellRef, DrawCmd, GridGeometry, Sheet, SheetId, Viewport, Workbook,
+    WorkbookModel,
 };
 
 const RED: &str = "#ffc7ce";
@@ -785,4 +786,84 @@ fn each_edit_starts_the_whole_range_budget_again() {
     edit_outside(&mut alone);
     assert_eq!(sorted_fills(&alone), red_at(&[(0, 2), (1, 2)]));
     assert_eq!(alone.conditional_stats().aggregate_builds, 2);
+}
+
+/// A workbook whose A1 is a shared string with a bold run, A2 a plain text and
+/// B1 the number 1, with `dxf` as the format `formats` names.
+fn rich_book(formats: &str, dxf: &str) -> Workbook {
+    let model = WorkbookModel {
+        sheets: vec![Sheet::new("Sheet1")],
+        ..WorkbookModel::default()
+    };
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    let sheet = format!(
+        r#"<worksheet><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1"><v>1</v></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>plain</t></is></c></row></sheetData>{formats}</worksheet>"#
+    );
+    let strings = r#"<sst><si><r><rPr><b/></rPr><t>Rich</t></r><r><t>text</t></r></si></sst>"#;
+    let styles = format!(
+        r#"<styleSheet><cellXfs count="1"><xf/></cellXfs><dxfs count="1"><dxf>{dxf}</dxf></dxfs></styleSheet>"#
+    );
+    for (path, xml) in [
+        ("xl/worksheets/sheet1.xml", sheet.as_str()),
+        ("xl/sharedStrings.xml", strings),
+        ("xl/styles.xml", styles.as_str()),
+    ] {
+        match parts.iter_mut().find(|(part, _)| part == path) {
+            Some(part) => part.1 = xml.as_bytes().to_vec(),
+            None => parts.push((path.into(), xml.as_bytes().to_vec())),
+        }
+    }
+    Workbook::open(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap()
+}
+
+fn text_command(workbook: &Workbook, wanted: &str) -> DrawCmd {
+    workbook
+        .display_list(&viewport(0.0))
+        .unwrap()
+        .commands
+        .into_iter()
+        .find(|command| matches!(command, DrawCmd::Text { text, .. } if &**text == wanted))
+        .unwrap()
+}
+
+/// Paints [`rich_book`] under a rule whose format holds `font` and a fill,
+/// asserts that the rich cell is painted as it is without the rule, on the
+/// rule's fill, and returns the `(color, bold, italic)` of the plain cell.
+fn plain_beside_rich(font: &str) -> (String, bool, bool) {
+    let ruled = rich_book(
+        &rule("A1:A2", &expression(1, "$B$1&gt;0")),
+        &format!("<font>{font}</font>{}", fill(RED)),
+    );
+    let rich = text_command(&ruled, "Richtext");
+    let painted_runs = matches!(&rich, DrawCmd::Text { runs, .. } if !runs.is_empty());
+    assert!(painted_runs, "{rich:?}");
+    assert_eq!(rich, text_command(&rich_book("", ""), "Richtext"));
+    assert_eq!(fills(&ruled, &viewport(0.0)), red(&[0, 1]));
+    match text_command(&ruled, "plain") {
+        DrawCmd::Text {
+            color,
+            bold,
+            italic,
+            ..
+        } => (color.to_string(), bold, italic),
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn a_conditional_font_color_leaves_a_rich_text_cell_as_painted_without_it() {
+    let plain = plain_beside_rich(r#"<color rgb="FF9C0006"/>"#);
+    assert_eq!(plain, ("#9c0006".to_owned(), false, false));
+}
+
+#[test]
+fn a_conditional_bold_leaves_a_rich_text_cell_as_painted_without_it() {
+    let (_, bold, italic) = plain_beside_rich("<b/>");
+    assert_eq!((bold, italic), (true, false));
+}
+
+#[test]
+fn a_conditional_italic_leaves_a_rich_text_cell_as_painted_without_it() {
+    let (_, bold, italic) = plain_beside_rich("<i/>");
+    assert_eq!((bold, italic), (false, true));
 }
