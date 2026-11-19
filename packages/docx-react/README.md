@@ -51,7 +51,7 @@ All props below are optional. Omit the document source to show the placeholder.
 | `showHiddenText` | `boolean` | Include hidden text in layout; defaults to `false`. |
 | `previewFirstPage` | `boolean` | Paint a display-only first page while the document opens; off by default and ignored with collaboration. |
 | `onFirstPagePainted` | `() => void` | Called once per document when its first pages paint. |
-| `onReady` | `(api: DocxEditorRef) => void` | Worker editor: called once per document after `onFirstPagePainted`, with the api the ref exposes. |
+| `onReady` | `(api: DocxEditorRef) => void` | Worker editor: called once per document after its first page has painted, on a later turn, with the api the ref exposes, and never after the editor has unmounted or the file has changed. |
 | `pageMirror` | `'full' \| 'text'` | Accessible page DOM; defaults to `'full'`. |
 | `measurementFontProvider` | `BundledFontProvider` | Override the measurement font provider for this editor. |
 | `i18n` | `Translations` | Locale overrides from `@betteroffice/docx-i18n`. |
