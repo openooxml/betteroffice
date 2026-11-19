@@ -4264,7 +4264,7 @@ fn set_identities_aside(value: &mut Value, prefix: &str) {
     match value {
         Value::Object(object) => {
             object.remove(crate::PARA_ID);
-            for key in ["fieldResultBlocks", "fieldCodeMarks"] {
+            for key in ["fieldResultBlocks", "fieldCodeMarks", "fieldSpanBlocks"] {
                 if let Some(Value::Array(ids)) = object.get_mut(key) {
                     ids.iter_mut().for_each(|id| *id = Value::Null);
                 }

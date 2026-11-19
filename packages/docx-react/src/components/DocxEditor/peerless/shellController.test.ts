@@ -325,6 +325,121 @@ test('worker highlightColor formats and clears through formatRange', async () =>
   }
 });
 
+function announceLikeTheEditor(controller: ReturnType<typeof fixture>['controller']) {
+  let seen: unknown = null;
+  controller.subscribeShell(() => {
+    const token = controller.getShellSnapshot().readyFor;
+    if (token === seen) return;
+    seen = token;
+    if (token) setTimeout(() => controller.announceReady(token));
+  });
+}
+
+const laterTurn = () => new Promise(resolve => setTimeout(resolve, 0));
+
+function paintFirstPage(viewStore: ReturnType<typeof fixture>['viewStore'], frameEpoch: number) {
+  viewStore.installFrameGeometry({ identity: viewStore.getSnapshot().identity, coversThroughSeq: 0,
+    frameEpoch, layoutRevision: frameEpoch, pages: [{ page: { pageId: '1', pageIndex: 0 },
+      bounds: { x: 0, y: 0, width: 600, height: 800 }, transform: [1, 0, 0, 1, 0, 0] }], caret: null, selectionRects: [] });
+}
+
+test('onReady receives the ref once, on a later turn after the first page paints', async () => {
+  const { controller, binding, viewStore } = fixture(-1);
+  const order: string[] = [];
+  const onReady = mock((_api: unknown) => { order.push('ready'); });
+  controller.update({ read: async () => ({} as never), focus() {}, zoom: 1, onReady,
+    onFirstPagePainted: () => { order.push('painted'); } } as Parameters<typeof controller.update>[0]);
+  announceLikeTheEditor(controller);
+  controller.opening();
+  controller.attach(binding);
+  await laterTurn();
+  expect(order).toEqual([]);
+  paintFirstPage(viewStore, 2);
+  expect(order).toEqual(['painted']);
+  expect(controller.getSnapshot().readyFor).toBe(binding);
+  await laterTurn();
+  expect(order).toEqual(['painted', 'ready']);
+  expect(onReady.mock.calls[0]![0]).toBe(controller.ref);
+  paintFirstPage(viewStore, 3);
+  controller.announceReady(binding);
+  await laterTurn();
+  expect(onReady).toHaveBeenCalledTimes(1);
+});
+
+test('onReady skips the preview paint and fires on a later turn once the opened document paints, when its reads resolve', async () => {
+  const { controller, binding, viewStore, read } = fixture(-1);
+  const order: string[] = [];
+  let identities!: Promise<unknown>;
+  const onReady = mock((api: typeof controller.ref) => { order.push('ready'); identities = api.getParagraphIdentities(); });
+  controller.update({ read: read as never, focus() {}, zoom: 1, onReady,
+    onFirstPagePainted: () => { order.push('painted'); } } as Parameters<typeof controller.update>[0]);
+  announceLikeTheEditor(controller);
+  controller.opening();
+  const preview = { frame: Uint8Array.of(1), documentPreview: true } as never;
+  controller.preview(preview);
+  controller.previewPresented(preview);
+  controller.painted();
+  expect(order).toEqual(['painted']);
+  expect(controller.getSnapshot().readyFor).toBeNull();
+  await laterTurn();
+  expect(order).toEqual(['painted']);
+  controller.attach(binding);
+  await laterTurn();
+  expect(order).toEqual(['painted']);
+  paintFirstPage(viewStore, 2);
+  expect(order).toEqual(['painted']);
+  await laterTurn();
+  expect(order).toEqual(['painted', 'ready']);
+  expect(onReady.mock.calls[0]![0]).toBe(controller.ref);
+  expect(await identities.then(() => 'resolved', (error: Error) => error.name)).toBe('resolved');
+  paintFirstPage(viewStore, 3);
+  await laterTurn();
+  expect(onReady).toHaveBeenCalledTimes(1);
+});
+
+test('onReady is not called when onFirstPagePainted closes the editor', async () => {
+  const { controller, binding, viewStore, read } = fixture(-1);
+  const onReady = mock((_api: unknown) => {});
+  const painted = mock(() => { controller.dispose(); });
+  controller.update({ read: read as never, focus() {}, zoom: 1, onReady,
+    onFirstPagePainted: painted } as Parameters<typeof controller.update>[0]);
+  announceLikeTheEditor(controller);
+  controller.opening();
+  controller.attach(binding);
+  paintFirstPage(viewStore, 2);
+  expect(painted).toHaveBeenCalledTimes(1);
+  await laterTurn();
+  expect(onReady).not.toHaveBeenCalled();
+});
+
+test('a document replaced inside onFirstPagePainted gets no onReady, and its replacement gets one on a later turn once it paints', async () => {
+  const first = fixture(-1);
+  const second = fixture(-1);
+  const { controller } = first;
+  const order: unknown[] = [];
+  let replace = true;
+  controller.update({ read: first.read as never, focus() {}, zoom: 1, onReady: (api: unknown) => { order.push(api); },
+    onFirstPagePainted: () => { order.push('painted'); if (replace) { replace = false; controller.opening({}); } } } as Parameters<typeof controller.update>[0]);
+  announceLikeTheEditor(controller);
+  controller.opening({});
+  controller.attach(first.binding);
+  paintFirstPage(first.viewStore, 2);
+  expect(replace).toBe(false);
+  await laterTurn();
+  expect(order).toEqual(['painted']);
+  expect(controller.getSnapshot().status).toBe('opening');
+  controller.attach(second.binding);
+  await laterTurn();
+  expect(order).toEqual(['painted']);
+  paintFirstPage(second.viewStore, 2);
+  expect(order).toEqual(['painted', 'painted']);
+  await laterTurn();
+  expect(order).toEqual(['painted', 'painted', controller.ref]);
+  paintFirstPage(second.viewStore, 3);
+  await laterTurn();
+  expect(order).toHaveLength(3);
+});
+
 test('worker insertBreak stays a loud sync-API failure', () => {
   const { controller } = toolbarFixture();
   expect(() => controller.ref.insertBreak({ paraId: 'p1', type: 'page' })).toThrow(LEGACY_SYNC_API_PROP);

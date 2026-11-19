@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import { mergePptxBenchmark, pptxShards, METHOD } from './pptx-benchmark.mjs';
-import { renderSection } from './readme.mjs';
+import { aggregateReport, renderSection } from './readme.mjs';
 
 const hash = 'a'.repeat(64);
 const commit = 'b'.repeat(40);
@@ -67,4 +67,13 @@ test('a presentation set too large for one job is split into budgeted shards, al
   expect(() => mergePptxBenchmark(big(),bigReport(),differing,hash)).toThrow('PPTX benchmark shard environments differ');
   const swapped = parts(); [swapped[0].samples[0], swapped[1].samples[0]] = [swapped[1].samples[0], swapped[0].samples[0]];
   expect(() => mergePptxBenchmark(big(),bigReport(),swapped,hash)).toThrow('Invalid PPTX LibreOffice sample identity');
+});
+
+test('the merged report, its aggregate and its section carry no runner platform', () => {
+  const input = part();
+  Object.assign(input.benchmark, { platform: 'Linux-host-a-x86_64-with-glibc' });
+  const merged = mergePptxBenchmark(plan(),report(),[input],hash);
+  expect('platform' in merged.pptx_benchmark).toBe(false);
+  const text = JSON.stringify([merged, aggregateReport(merged), renderSection(merged)]);
+  expect(text.includes('host-a')).toBe(false);
 });

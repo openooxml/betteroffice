@@ -9,7 +9,15 @@ import { engineProgressTick } from '../utils/engineProgress';
 import { serializeRun } from '../docx/serializer';
 import { headerFooterAliasOf, markHeaderFooterAlias } from '../docx/headerFooterAliasProjection';
 import { markRevisionInfo } from '../docx/sessionRevisionIds';
-import { headerFooterStory, sessionSourcePackage } from './sessionInternals';
+import { headerFooterStory, sessionMaterializedSource, sessionSourcePackage } from './sessionInternals';
+import {
+  crossingFallback,
+  crossStoryComments,
+  holdsCommentMark,
+  noteWrittenWhole,
+  type CommentMarkKind,
+  type CrossingComment,
+} from './crossStoryComments';
 import { createStyleResolver, type StyleResolver } from '../styles';
 import { hasTrackedControlContent } from '../utils/trackedControlContent';
 import { isRawXml } from '../types/content/rawXml';
@@ -52,6 +60,7 @@ import type {
   TableBorders,
   SimpleField,
   ComplexField,
+  StructuredFieldContent,
   FieldType,
   FieldInlineContent,
   MathEquation,
@@ -67,7 +76,7 @@ import type {
   HeaderFooter,
   SectionProperties,
 } from '../types/document';
-import type { YrsRunInheritance, YrsSession, YrsTableInheritance } from './index';
+import type { YrsRunInheritance, YrsSession, YrsStorySegment, YrsTableInheritance } from './index';
 import { isUnavailableTablePayload, markGated, refuseUnavailableTables, tableUnavailableError } from './tableUnavailable';
 
 type Attrs = Record<string, unknown>;
@@ -3085,6 +3094,26 @@ function commentRanges(
   return byStory;
 }
 
+const openedCrossings = new WeakMap<object, ReadonlyMap<number, CrossingComment>>();
+
+/**
+ * The comments crossing stories in the document `session` was opened from, scanned once per
+ * opened document; for a session seeded without one, in `base`, scanned once per base document.
+ */
+function openedCrossingComments(session: YrsSession, base: Document): ReadonlyMap<number, CrossingComment> {
+  const opened = sessionMaterializedSource(session);
+  const key: object = opened ?? base;
+  let crossing = openedCrossings.get(key);
+  if (!crossing) {
+    crossing = crossStoryComments(session, opened ?? base);
+    openedCrossings.set(key, crossing);
+  }
+  return crossing;
+}
+
+/** Whether `story` is `root` or one of the stories nested in it. */
+const withinStory = (story: string, root: string): boolean => story === root || story.startsWith(`${root}:`);
+
 /** Chart placements recoverable from the base document, keyed per story. */
 interface ChartRecovery {
   drawingFor(rId: string | undefined, path: string | undefined): string | undefined;
@@ -3390,6 +3419,162 @@ function restoreRawBlocks(projected: BlockContent[], base: readonly BlockContent
   return projected;
 }
 
+/** Story blocks a complex field's code and result span after its paragraph. */
+interface FieldBlockSpan {
+  code: number;
+  result: number;
+}
+
+function spansParagraphs(field: ComplexField): boolean {
+  return [field.structuredCode, field.structuredResult].some(
+    (part) => part?.blockCount != null || part?.blocks != null
+  );
+}
+
+/** Whether a field embed's payload holds a complex field spanning paragraphs. */
+function payloadSpansParagraphs(payload: Attrs): boolean {
+  const data = payload.fieldData;
+  if (typeof data !== 'string' || !data.includes('"block')) return false;
+  try {
+    const field = JSON.parse(data) as ComplexField | null;
+    return field?.type === 'complexField' && spansParagraphs(field);
+  } catch {
+    return false;
+  }
+}
+
+/** How many story blocks a structured code or result spans: its count, or its copies. */
+function parsedBlockCount(content: StructuredFieldContent | undefined): number {
+  return content?.blockCount ?? content?.blocks?.length ?? 0;
+}
+
+/**
+ * The story blocks a spanning field's code and result span in `blocks`, the projected story its
+ * paragraph sits at `owner` in, with `keys` its block ids. While the blocks its embed recorded
+ * at seed time (`fieldSpanBlocks`) still follow its paragraph in order with nothing between
+ * them, or it recorded none, this is the parsed span. Otherwise it is the blocks up to the last
+ * of the leading recorded blocks that still do. Raw blocks count as they did when parsed.
+ */
+function keptSpan(
+  field: ComplexField,
+  payload: Attrs | undefined,
+  owner: number,
+  blocks: readonly BlockContent[],
+  keys: ReadonlyArray<string | undefined>
+): FieldBlockSpan {
+  const code = parsedBlockCount(field.structuredCode);
+  const result = parsedBlockCount(field.structuredResult);
+  const recorded = payload?.fieldSpanBlocks;
+  if (!Array.isArray(recorded)) return { code, result };
+  let index = owner + 1;
+  let end = owner;
+  for (const id of recorded) {
+    while (index < blocks.length && isRawXml(blocks[index]!)) index += 1;
+    if (index >= blocks.length || keys[index] !== id) {
+      const kept = end - owner;
+      return { code: Math.min(code, kept), result: Math.max(0, kept - code) };
+    }
+    end = index;
+    index += 1;
+  }
+  return { code, result };
+}
+
+/**
+ * Structured code or result counting `count` story blocks, its copies of them dropped. A part
+ * that spans paragraphs keeps a count, zero included, so it is written as a spanning part.
+ */
+function countedPart(content: StructuredFieldContent | undefined, count: number): StructuredFieldContent | undefined {
+  if (content?.blockCount == null && content?.blocks == null && count === 0) return content;
+  const next: StructuredFieldContent = { ...content };
+  delete next.blocks;
+  next.blockCount = count;
+  return next;
+}
+
+/** `field` counting the story blocks of `span`. */
+function withBlockCounts(field: ComplexField, span: FieldBlockSpan): ComplexField {
+  const { code, result } = span;
+  const counts = (content: StructuredFieldContent | undefined, count: number): boolean =>
+    content?.blocks === undefined && (content?.blockCount ?? 0) === count;
+  if (counts(field.structuredCode, code) && counts(field.structuredResult, result)) return field;
+  const next: ComplexField = { ...field };
+  const structuredCode = countedPart(field.structuredCode, code);
+  const structuredResult = countedPart(field.structuredResult, result);
+  if (structuredCode === undefined) delete next.structuredCode;
+  else next.structuredCode = structuredCode;
+  if (structuredResult === undefined) delete next.structuredResult;
+  else next.structuredResult = structuredResult;
+  if (field.fieldTree) {
+    next.fieldTree = { ...field.fieldTree };
+    if (field.fieldTree.code) next.fieldTree.code = structuredCode;
+    if (field.fieldTree.result) next.fieldTree.result = structuredResult;
+  }
+  return next;
+}
+
+/** The complex fields spanning paragraphs in `content`, tracked ones included, in order. */
+function spanningFields(content: readonly ParagraphContent[]): ComplexField[] {
+  return content.flatMap((item) =>
+    item.type === 'complexField' && spansParagraphs(item)
+      ? [item]
+      : isTrackedWrapper(item)
+        ? spanningFields(item.content as ParagraphContent[])
+        : []
+  );
+}
+
+/** `content` with each field `replacements` names replaced, or `content` when none is. */
+function replaceFields(
+  content: ParagraphContent[],
+  replacements: ReadonlyMap<ComplexField, ComplexField>
+): ParagraphContent[] {
+  let changed = false;
+  const next = content.map((item): ParagraphContent => {
+    let replaced: ParagraphContent = item;
+    if (item.type === 'complexField') replaced = replacements.get(item) ?? item;
+    else if (isTrackedWrapper(item)) {
+      const inner = replaceFields(item.content as ParagraphContent[], replacements);
+      if (inner !== item.content) replaced = { ...item, content: inner } as ParagraphContent;
+    }
+    if (replaced !== item) changed = true;
+    return replaced;
+  });
+  return changed ? next : content;
+}
+
+/**
+ * `blocks` with each complex field spanning paragraphs counting the story blocks it still spans
+ * in this projection, read from `payloads`, each paragraph's spanning field embeds by session
+ * key.
+ */
+function withKeptBlockCounts(
+  blocks: BlockContent[],
+  storyId: string,
+  payloads: ReadonlyMap<string, Attrs[]>
+): BlockContent[] {
+  if (payloads.size === 0) return blocks;
+  const keys = storyBlockKeys(blocks, storyId).map((key) => key?.slice(1));
+  let changed = false;
+  const next = blocks.map((block, owner) => {
+    const key = keys[owner];
+    const embeds = key === undefined ? undefined : payloads.get(key);
+    if (embeds === undefined || block.type !== 'paragraph') return block;
+    const fields = spanningFields(block.content);
+    const replacements = new Map(
+      fields.map((field, index) => {
+        const payload = fields.length === embeds.length ? embeds[index] : undefined;
+        return [field, withBlockCounts(field, keptSpan(field, payload, owner, blocks, keys))] as const;
+      })
+    );
+    const content = replaceFields(block.content, replacements);
+    if (content === block.content) return block;
+    changed = true;
+    return cloneProjectedParagraph(block, { content });
+  });
+  return changed ? next : blocks;
+}
+
 /** A projected block plus a fingerprint of the story inputs it was built from. */
 interface ProjectedBlockMemo {
   tableBaseline?: YrsTableInheritance;
@@ -3623,6 +3808,14 @@ class SaveContext {
   private readonly baseStories: Map<string, readonly BlockContent[]>;
   private readonly baseChartDrawings = new Map<string, Map<string, string>>();
   private readonly comments: Map<string, Array<{ id: number; start: number; end: number }>>;
+  private readonly base: Document;
+  private crossing: ReadonlyMap<number, CrossingComment> | undefined;
+  /** Per comment, whether this save writes its source range across stories whole. */
+  private readonly whole = new Map<number, boolean>();
+  private readonly liveSegments = new Map<string, YrsStorySegment[]>();
+  private readonly savedComments: Set<number>;
+  /** The comments with a listed reply whose range marks are taken from the comment's own. */
+  private readonly repliedWithoutRange: Set<number>;
   /** Per story, the comment ranges of it and of the stories nested in it, which key its blocks. */
   private readonly subtreeComments = new Map<string, Map<string, unknown>>();
   private readonly memo: SessionProjectionMemo;
@@ -3647,7 +3840,8 @@ class SaveContext {
     private readonly session: YrsSession,
     base: Document,
     commentIds?: ReadonlyMap<number, string>,
-    private readonly revisionIds?: RevisionIds
+    private readonly revisionIds?: RevisionIds,
+    private readonly fallback: ReadonlySet<number> = new Set()
   ) {
     this.storyIds = new Set(session.storyIds());
     this.baseStories = collectBaseStories(session, base);
@@ -3679,6 +3873,14 @@ class SaveContext {
     this.hasCommentReferenceStyle = (base.package.styles?.styles ?? [])
       .some(style => style.styleId === 'CommentReference' && style.type === 'character');
     this.comments = commentRanges(session, base.package.document.comments, commentIds);
+    this.base = base;
+    this.savedComments = new Set((base.package.document.comments ?? []).map((comment) => comment.id));
+    const ranged = new Set([...this.comments.values()].flatMap((ranges) => ranges.map((range) => range.id)));
+    this.repliedWithoutRange = new Set(
+      (base.package.document.comments ?? []).flatMap((comment) =>
+        comment.parentId != null && !ranged.has(comment.id) ? [comment.parentId] : []
+      )
+    );
     this.memo = sessionProjectionMemo(session);
     this.styleDefinitions = base.package.styles;
     this.fontScheme = base.package.theme?.fontScheme;
@@ -3705,6 +3907,107 @@ class SaveContext {
     return this.memo.wholesale
       ? this.memo.clean.has(storyId)
       : !this.memo.dirty.has(storyId);
+  }
+
+  /** The source comments crossing stories; no scan when the document lists no comment. */
+  private crossingComments(): ReadonlyMap<number, CrossingComment> {
+    return (this.crossing ??=
+      this.savedComments.size > 0 ? openedCrossingComments(this.session, this.base) : new Map());
+  }
+
+  private segmentsOf(story: string): YrsStorySegment[] {
+    let segments = this.liveSegments.get(story);
+    if (!segments) {
+      segments = this.session.storySegments(story);
+      this.liveSegments.set(story, segments);
+    }
+    return segments;
+  }
+
+  /**
+   * Whether this save writes the source range of `id` across stories whole: its start, its end
+   * before its reference in the far story, and the reference. Otherwise the range is written as
+   * the session holds it, cut at the end of the paragraph it starts in. Decided once per projection.
+   */
+  private writesWhole(id: number): boolean {
+    let whole = this.whole.get(id);
+    if (whole === undefined) {
+      const source = this.crossingComments().get(id);
+      whole =
+        source !== undefined &&
+        !this.fallback.has(id) &&
+        this.startLive(id, source) &&
+        this.farStoryLive(source) &&
+        this.referenceLive(id, source) &&
+        this.savedComments.has(id) &&
+        !this.repliedWithoutRange.has(id);
+      this.whole.set(id, whole);
+    }
+    return whole;
+  }
+
+  /** The comments this projection writes across stories, each with the root story it starts in. */
+  writtenWhole(): Map<number, string> {
+    const written = new Map<number, string>();
+    for (const [id, whole] of this.whole) {
+      const source = this.crossing?.get(id);
+      if (whole && source) written.set(id, source.start.part);
+    }
+    return written;
+  }
+
+  /** The start is live: ranged by the session in its source story alone, or in a live drawing. */
+  private startLive(id: number, { start }: CrossingComment): boolean {
+    const stories = [...this.comments].flatMap(([story, ranges]) =>
+      ranges.some((range) => range.id === id) ? [story] : []
+    );
+    if (start.carried) return stories.length === 0 && this.carriedLive(start.story, id, ['start']);
+    return stories.length === 1 && stories[0] === start.story;
+  }
+
+  /** The story the source end was found in is live. */
+  private farStoryLive({ end }: CrossingComment): boolean {
+    return this.storyIds.has(end.story);
+  }
+
+  /**
+   * The reference is live where the end goes: exactly one reference run of the comment in the far
+   * story and none in the story it starts in, or the live drawing carrying both end and reference.
+   */
+  private referenceLive(id: number, { start, end }: CrossingComment): boolean {
+    if (end.carried) return this.carriedLive(end.story, id, ['end', 'reference']);
+    const references = (story: string): number =>
+      this.segmentsOf(story).filter((segment) =>
+        segment.kind === 'embed' &&
+        segment.payload.modelKind === 'commentReference' &&
+        Number(segment.payload.commentId) === id
+      ).length;
+    return references(end.story) === 1 && (start.story === end.story || references(start.story) === 0);
+  }
+
+  private carriedLive(story: string, id: number, kinds: CommentMarkKind[]): boolean {
+    return this.storyIds.has(story) && this.segmentsOf(story).some((segment) =>
+      segment.kind === 'embed' && kinds.every((kind) => holdsCommentMark(segment.payload, kind, id))
+    );
+  }
+
+  /**
+   * Of the comments crossing into or out of `storyId` or a story nested in it, the ones written
+   * whole: those whose session end in this story is not written, and those whose end goes before
+   * their reference here.
+   */
+  private crossingIn(storyId: string): { key: string; heldOpen: Set<number>; endsHere: Set<number> } {
+    const heldOpen = new Set<number>();
+    const endsHere = new Set<number>();
+    const whole: number[] = [];
+    for (const [id, { start, end }] of this.crossingComments()) {
+      if (!withinStory(start.story, storyId) && !withinStory(end.story, storyId)) continue;
+      if (!this.writesWhole(id)) continue;
+      whole.push(id);
+      if (!start.carried && start.story === storyId) heldOpen.add(id);
+      if (!end.carried && end.story === storyId) endsHere.add(id);
+    }
+    return { key: whole.length > 0 ? `|whole:${whole.join(',')}` : '', heldOpen, endsHere };
   }
 
   sectionChanged(paraId: string, properties: Paragraph['sectionProperties']): boolean {
@@ -4021,14 +4324,21 @@ class SaveContext {
   storyToBlocks(storyId: string): BlockContent[] {
     const baseBlocks = this.baseStories.get(storyId);
     const storyComments = this.comments.get(storyId) ?? [];
+    const crossing = this.crossingIn(storyId);
+    const farEnds: Array<{ id: number; offset: number }> = [];
     const nestedComments = this.subtreeComments.get(storyId);
-    const commentsKey = nestedComments ? stableStringify(Object.fromEntries(nestedComments)) : '';
+    const cut = this.fallback.size > 0;
+    const commentsKey =
+      (nestedComments ? stableStringify(Object.fromEntries(nestedComments)) : '') +
+      crossing.key +
+      (cut ? `|cut:${[...this.fallback].sort((a, b) => a - b).join(',')}` : '');
     const priorStory = this.memo.stories.get(storyId);
     // Nested stories are mapped positionally, so a different array means
     // drift, not divergence — mutation paths mark them dirty anyway. A root
     // story on a different array is genuine divergence and forces a fresh
-    // projection.
+    // projection. A projection that cuts comments reuses no story.
     if (
+      !cut &&
       priorStory !== undefined &&
       priorStory.commentsKey === commentsKey &&
       this.storyIsClean(storyId) &&
@@ -4042,12 +4352,19 @@ class SaveContext {
     const paragraphIds = this.session.storyParagraphIds(storyId);
     const segments = this.session.storySegments(storyId);
     const trailingByParagraph = new Map<string, BlockBreakKind[]>();
+    const spanningEmbeds = new Map<string, Attrs[]>();
+    let paragraphSpanning: Attrs[] = [];
     let closing: string | undefined;
     for (const segment of segments) {
       if (segment.kind === 'pilcrow') {
         closing = segment.paraId;
         trailingByParagraph.set(closing, []);
+        if (paragraphSpanning.length > 0) spanningEmbeds.set(segment.paraId, paragraphSpanning);
+        paragraphSpanning = [];
       } else {
+        if (segment.kind === 'embed' && segment.embedKind === 'field' && payloadSpansParagraphs(segment.payload)) {
+          paragraphSpanning.push(segment.payload);
+        }
         const kind = segment.kind === 'embed' ? blockBreakKind(segment.embedKind) : null;
         if (kind && closing !== undefined) trailingByParagraph.get(closing)!.push(kind);
         else closing = undefined;
@@ -4098,8 +4415,13 @@ class SaveContext {
           const offset = Math.max(0, range.start - inlineStart);
           boundaries.push({ id: range.id, kind: 'start', offset });
         }
-        if (range.end >= paragraphStart && range.end <= end) {
+        if (range.end >= paragraphStart && range.end <= end && !crossing.heldOpen.has(range.id)) {
           boundaries.push({ id: range.id, kind: 'end', offset: Math.max(0, range.end - inlineStart) });
+        }
+      }
+      for (const far of farEnds) {
+        if (far.offset >= paragraphStart && far.offset <= end) {
+          boundaries.push({ id: far.id, kind: 'end', offset: Math.max(0, far.offset - inlineStart) });
         }
       }
       return boundaries;
@@ -4284,6 +4606,8 @@ class SaveContext {
           // documented opaque carry gap.
         }
       } else {
+        const referenced = segment.payload.modelKind === 'commentReference' ? Number(segment.payload.commentId) : NaN;
+        if (crossing.endsHere.has(referenced)) farEnds.push({ id: referenced, offset: storyOffset });
         items.push(segment as EmbedItem);
       }
       const kind = blockBreakKind(segment.embedKind);
@@ -4322,7 +4646,11 @@ class SaveContext {
         blocks.push({ type: 'paragraph', content: pendingBreaks });
       }
     }
-    const projected = restoreRawBlocks(blocks, baseBlocks ?? [], storyId);
+    const projected = withKeptBlockCounts(
+      restoreRawBlocks(blocks, baseBlocks ?? [], storyId),
+      storyId,
+      spanningEmbeds
+    );
     this.memo.stories.set(storyId, { commentsKey, blocks: projected });
     this.memo.dirty.delete(storyId);
     this.memo.clean.add(storyId);
@@ -4378,9 +4706,10 @@ function projectDocument(
   projectedMedia = (token) => session.mediaDataUrl?.(token) ?? null;
   let context: SaveContext | undefined;
   try {
-    context = new SaveContext(session, base, options.commentIds, revisionIds);
+    context = new SaveContext(session, base, options.commentIds, revisionIds, crossingFallback(session));
     const projected = projectStories(context, session, base, options);
     markGated(session, projected, scanned);
+    noteWrittenWhole(projected, context.writtenWhole());
     return projected;
   } finally {
     context?.dispose();

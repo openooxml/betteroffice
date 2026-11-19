@@ -38,7 +38,7 @@ type State = { count: number };
 
 function Panel({ context }: { context: DocxPluginContext<State> }) {
   const mark = useDocxCommand('plugin:acme.review/mark');
-  return <button onClick={() => void mark.execute()}>{context.state.count} {mark.label}</button>;
+  return <button onClick={() => void mark.execute()} onKeyDown={() => { const answer: { ok: true } | { ok: false } = context.focusDocument(); void answer; }}>{context.state.count} {mark.label}</button>;
 }
 
 const card: DocxPluginSidebarItem<State> = {
@@ -54,10 +54,11 @@ export const review = defineDocxPlugin<State>({
     const focused: boolean = context.snapshot.focused;
     const locale: string = context.snapshot.locale;
     const settled: boolean = context.snapshot.selectionSettled;
+    const inputFocused: boolean = context.snapshot.inputFocused;
     const target: DocxGeometryTarget = { kind: 'selection' };
     const anchor = context.geometry?.getAnchorGeometry(target);
     const anchors = await context.geometry?.readAnchorGeometries([target]);
-    void [focused, locale, settled, anchor, anchors];
+    void [focused, locale, settled, inputFocused, anchor, anchors];
     const viewport: DocxPluginRect | undefined = context.geometry?.viewport;
     void viewport;
     switch (event.type) {

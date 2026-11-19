@@ -40,6 +40,9 @@ pub struct PreservedPackage {
     pub(crate) drawing_anchors: Arc<OnceLock<Vec<Vec<crate::drawing_anchors::SheetDrawing>>>>,
     pub(crate) rich_shared_strings: BTreeSet<usize>,
     pub(crate) text_runs: Arc<OnceLock<crate::rich_text::RichTextIndex>>,
+    /// Whether a shared string or an inline string of a source sheet carried
+    /// formatted runs.
+    pub(crate) holds_text_runs: bool,
 }
 
 impl PreservedPackage {
@@ -172,6 +175,10 @@ impl PreservedPackage {
             .map(parse_relationships)
             .transpose()?
             .unwrap_or_default();
+        let holds_text_runs = !rich_shared_strings.is_empty()
+            || sheets
+                .iter()
+                .any(|sheet| !sheet.cell_facts.rich_inline.is_empty());
 
         Ok(Self {
             parts,
@@ -195,6 +202,7 @@ impl PreservedPackage {
             drawing_anchors: Arc::new(OnceLock::new()),
             rich_shared_strings,
             text_runs: Arc::new(OnceLock::new()),
+            holds_text_runs,
         })
     }
 
@@ -569,6 +577,13 @@ impl PreservedPackage {
     /// reads as plain text.
     pub fn shared_string_is_rich(&self, index: usize) -> bool {
         self.rich_shared_strings.contains(&index)
+    }
+
+    /// Whether any source string carried formatted runs: `false` means no
+    /// cell has runs to report, known without reading a part.
+    #[doc(hidden)]
+    pub fn holds_text_runs(&self) -> bool {
+        self.holds_text_runs
     }
 
     /// Whether a source sheet enables `sheetProtection`. A declaration that cannot be read
