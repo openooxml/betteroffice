@@ -207,6 +207,7 @@ export class WorkerPaintSource {
             displayList: frame.displayList, mergedRanges: frame.mergedRanges ?? [], version: frame.version,
           }, frame.sequence);
         } catch (error) { this.fail(error); }
+        if (frame.displayList.conditionalPending) this.schedule();
       }
     } finally { this.running = false; this.inFlight = null; }
   }

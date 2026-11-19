@@ -212,15 +212,12 @@ def cell_paragraph_ids(tables):
     return ids
 
 
-def edited_result(document, para_id, except_ids):
+def edited_result(document, para_id):
     in_cells = cell_paragraph_ids(document.tables())
-    excepted = {key.upper() for key in except_ids}
     story = [
         paragraph.text
         for paragraph in document.paragraphs()
-        if paragraph.id not in in_cells
-        and (paragraph.id or "").upper() not in excepted
-        and paragraph.text
+        if paragraph.id not in in_cells and paragraph.text
     ]
     return {"paragraph": document.paragraph(para_id).text, "story": "\n".join(story)}
 
@@ -308,9 +305,7 @@ def run():
         "replaceParagraphTextAt": lambda args: receipt_result(
             document.replace_paragraph_text_at(args["index"], args["text"])
         ),
-        "readEdited": lambda args: edited_result(
-            document, args["paraId"], args.get("exceptParaIds", [])
-        ),
+        "readEdited": lambda args: edited_result(document, args["paraId"]),
         "save": save,
         "saveReport": save_report,
     }

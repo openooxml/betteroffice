@@ -1,6 +1,8 @@
 //! excel criteria strings shared by the *IF / *IFS family: optional comparison
 //! operator prefix, numeric or case-insensitive text compare, `*`/`?`/`~` wildcards.
 
+use std::collections::HashMap;
+
 use xlsx_model::{CellValue, ErrorValue};
 
 use crate::eval::{Area, EvalContext, as_area, cmp_text, evaluate, used_height, used_width};
@@ -329,6 +331,60 @@ pub(crate) fn aligned(mut area: Area, rows: usize, cols: usize) -> Option<Area> 
     (area.rows == rows && area.cols == cols).then_some(area)
 }
 
+/// How often each value occurs in one range, so `COUNTIF(range, x)` for many
+/// `x` reads the range once.
+#[derive(Debug, Default)]
+pub struct CountTable {
+    numbers: HashMap<u64, u64>,
+    texts: HashMap<String, u64>,
+}
+
+impl CountTable {
+    /// The table of `range`, or `None` when it is not a reference or reading
+    /// it ran out of budget.
+    pub fn build(range: &Expr, ctx: &EvalContext<'_>) -> Option<CountTable> {
+        let area = as_area(range, ctx)?;
+        let values = area.values_ref(ctx).ok()?;
+        if ctx.exhausted() {
+            return None;
+        }
+        let mut table = CountTable::default();
+        for value in &values {
+            let value = value.as_ref();
+            if let Some(number) = cell_number(value, ctx) {
+                *table.numbers.entry((number + 0.0).to_bits()).or_default() += 1;
+            }
+            if !matches!(value, CellValue::Number { .. }) {
+                let text = cell_text_lower(value);
+                if !text.is_empty() {
+                    *table.texts.entry(text).or_default() += 1;
+                }
+            }
+        }
+        Some(table)
+    }
+
+    /// `COUNTIF(range, criterion)` when the criterion asks for one value;
+    /// `None` for an operator, a wildcard, a blank, or text a number could
+    /// print as.
+    pub fn count(&self, criterion: &CellValue, ctx: &EvalContext<'_>) -> Option<u64> {
+        let criterion = Criterion::from_value(criterion, ctx);
+        if criterion.op != Op::Eq || criterion.wildcard {
+            return None;
+        }
+        let numeric_text = criterion
+            .text
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | '+' | 'e'));
+        let count = match criterion.number {
+            Some(number) if number.is_finite() => self.numbers.get(&(number + 0.0).to_bits()),
+            None if !numeric_text => self.texts.get(&criterion.text),
+            _ => return None,
+        };
+        Some(count.copied().unwrap_or(0))
+    }
+}
+
 /// flat row-major indices where every criterion matches its aligned cell.
 pub(crate) fn matching_indices(
     pairs: &[(Area, Criterion)],
@@ -558,5 +614,72 @@ mod tests {
         assert!(wildcard_match("a*b*c", "aXXbYYc"));
         assert!(wildcard_match("", ""));
         assert!(!wildcard_match("", "x"));
+    }
+
+    #[test]
+    fn a_count_table_answers_as_countif_does() {
+        let values = vec![
+            num(5.0),
+            num(-0.0),
+            num(0.0),
+            txt("5"),
+            txt("Apple"),
+            txt("APPLE"),
+            txt("apple "),
+            txt(""),
+            CellValue::Bool { value: true },
+            CellValue::Bool { value: false },
+            CellValue::Error {
+                value: ErrorValue::NA,
+            },
+            CellValue::Empty,
+            num(100.0),
+        ];
+        let mut sheet = xlsx_model::Sheet::new("Data");
+        for (row, value) in values.iter().enumerate() {
+            sheet.set_cell(
+                xlsx_model::CellRef::new(row as u32, 0),
+                xlsx_model::Cell {
+                    value: value.clone(),
+                    ..xlsx_model::Cell::default()
+                },
+            );
+        }
+        let mut wb = xlsx_model::Workbook::default();
+        wb.sheets.push(sheet);
+        let ctx = EvalContext::new(&wb, xlsx_model::SheetId(0));
+        let range = Expr::Range {
+            sheet: None,
+            range: xlsx_model::CellRange::parse_a1("A1:A20").unwrap(),
+        };
+        let table = CountTable::build(&range, &ctx).unwrap();
+        let mut answered = 0;
+        for criterion in [
+            num(5.0),
+            num(0.0),
+            num(-0.0),
+            num(1.0),
+            num(7.0),
+            txt("apple"),
+            txt("5"),
+            txt("1e2"),
+            txt("=apple"),
+            txt(">3"),
+            txt("a*"),
+            txt("pear"),
+            txt(""),
+            CellValue::Bool { value: true },
+            CellValue::Empty,
+        ] {
+            let expected = crate::functions::stats::countif(
+                &[range.clone(), Expr::Literal(criterion.clone())],
+                &ctx,
+            );
+            if let Some(count) = table.count(&criterion, &ctx) {
+                answered += 1;
+                assert_eq!(num(count as f64), expected, "{criterion:?}");
+            }
+        }
+        assert!(answered >= 8, "{answered}");
     }
 }

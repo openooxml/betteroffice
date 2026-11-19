@@ -8,6 +8,7 @@ pub use fonts::OpenOptions;
 pub use open_options::OpenOptions;
 
 mod authority;
+mod conditional;
 mod error;
 mod fill;
 #[cfg(all(feature = "fonts", feature = "raster"))]
@@ -26,6 +27,11 @@ pub mod fuzzing {
     pub use crate::workbook::recovery::decode as recovery_decode;
 }
 
+#[doc(hidden)]
+pub use conditional::{
+    CONDITIONAL_FRAME_BUDGET, CONDITIONAL_FRAME_MS, CONDITIONAL_RESULT_CAP, ConditionalStats,
+    FrameClock,
+};
 pub use error::Error;
 pub use snapshot::{
     HydratedWorkbook, SnapshotBudget, SnapshotError, SnapshotProgress, SnapshotResult,

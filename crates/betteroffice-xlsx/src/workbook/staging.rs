@@ -120,6 +120,24 @@ impl Workbook {
     /// anything, then the model and history, which cannot fail. Returns the update to publish
     /// once the caller has recalculated.
     pub(super) fn commit_prepared(&mut self, prepared: PreparedCommit) -> Result<Option<Vec<u8>>> {
+        self.adopt_prepared(prepared, false)
+    }
+
+    /// [`Self::commit_prepared`] for cell inputs written in place, after which screen frames
+    /// may paint a cell's conditional result from before it until the cell is decided again, as
+    /// after a direct edit of one cell. In collaboration they paint none, as every commit there.
+    pub(super) fn commit_prepared_cell_inputs(
+        &mut self,
+        prepared: PreparedCommit,
+    ) -> Result<Option<Vec<u8>>> {
+        self.adopt_prepared(prepared, true)
+    }
+
+    fn adopt_prepared(
+        &mut self,
+        prepared: PreparedCommit,
+        cell_inputs: bool,
+    ) -> Result<Option<Vec<u8>>> {
         let PreparedCommit {
             ops,
             model,
@@ -182,7 +200,7 @@ impl Workbook {
         if self.authority.built.get().is_some() {
             self.authority.deferred = None;
         }
-        self.install_model_with_ops(model, &ops)?;
+        self.install_model_with_ops(model, &ops, cell_inputs && !collaborative)?;
         self.adopt_rebased_proposals(rebased);
         if let Some(structure) = new_structure {
             self.mode = WorkbookMode::Collaborative {

@@ -18,7 +18,7 @@ export async function renderXlsxRange(
   let fonts: ReturnType<WorkbookHandle['renderPngFonts']>;
   try {
     if (sheet !== active) handle.setActiveSheet(sheet);
-    list = handle.displayList(viewport);
+    do { list = handle.displayList(viewport); } while (list.conditionalPending);
     fonts = handle.renderPngFonts({ sheet, range }, { scale });
   } finally {
     if (sheet !== active) handle.setActiveSheet(active);

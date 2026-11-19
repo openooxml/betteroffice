@@ -312,6 +312,7 @@ export class PeerlessWorkerPaintSource {
     if (this.pipeFrame && coversThroughSeq !== undefined &&
       coversThroughSeq >= this.pipeFrame.frame.coversThroughSeq) this.cancelPipeFrame();
     this.options.onInstalled?.(painted);
+    if (!provisional && !this.pipeFrame && paint.displayList.conditionalPending) this.schedule();
     return painted;
   }
 
