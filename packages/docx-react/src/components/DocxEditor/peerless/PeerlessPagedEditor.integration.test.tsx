@@ -483,6 +483,26 @@ test('refused_ime_retains_recoverable_draft', async () => {
   expect(editor.textarea.value).toBe('');
 });
 
+test('a_refused_composition_step_keeps_the_composed_text_recoverable', async () => {
+  // A collaborator's edit deleted or split what the step before typed; the worker refuses the step without writing.
+  const editor = await mount();
+  preedit(editor.textarea, 'compositionstart');
+  preedit(editor.textarea, 'compositionupdate', 'ㅎ');
+  await waitFor(() => { expect(editor.commands).toHaveLength(1); });
+  preedit(editor.textarea, 'compositionupdate', '한');
+  await waitFor(() => { expect(editor.commands).toHaveLength(2); });
+  preedit(editor.textarea, 'compositionend', '한');
+  await editor.acknowledge(0, 'applied');
+  const step = editor.commands[1]!;
+  await editor.acknowledge(1, 'refused', { outcomes: [{ seq: step.seq, status: 'refused', reason: 'replaced-text-mismatch' }] });
+  expect(editor.commands).toHaveLength(2);
+  await waitFor(() => {
+    const recovered = editor.queryByRole('textbox', { name: 'Recoverable document text' }) as HTMLTextAreaElement | null;
+    expect(recovered?.value).toBe('한');
+  });
+  expect(editor.binding.admission.getSnapshot().compositionSlot).toBeNull();
+});
+
 test('composition_steps_are_typed_into_the_document_and_the_caret_shows_once_a_frame_covers_them', async () => {
   const editor = await mount();
   const caret = () => editor.container.querySelector<HTMLElement>('[data-docx-caret]');

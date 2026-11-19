@@ -343,6 +343,29 @@ test('update push precedes command ack and queued typing survives a merge', asyn
   } finally { off(); a.session.dispose(); b.session.dispose(); }
 }, TIMEOUT);
 
+test('a composition types over its own text when a collaborator types at its caret between steps', async () => {
+  const a = await open(9201);
+  const b = await open(9202, a.engine.encodeState());
+  try {
+    const id = a.engine.paragraphs('body')[0]!.paraId;
+    const first = a.session.submit('replaceSelection', { text: 'ㄱ' });
+    expect((await first.ack).status).toBe('applied');
+    expect((await b.session.submit('applyRemoteUpdate', { update: remoteUpdate(b, a.engine) }, merge).ack).status).toBe('applied');
+    const at = { story: 'body', paraId: id, offset: 5 };
+    expect((await b.session.submit('insertText', { selection: { anchor: at, focus: at }, text: 'X' }).ack).status).toBe('applied');
+    expect((await a.session.submit('applyRemoteUpdate', { update: remoteUpdate(a, b.engine) }, merge).ack).status).toBe('applied');
+    expect(a.engine.paragraphs('body')[0]!.text).toBe('SeedㄱX');
+    // Each step follows the one before it, as the editor sends them.
+    const second = a.session.submit('insertText', { text: '가', replaceBefore: 'ㄱ' }, { after: first });
+    const third = a.session.submit('insertText', { text: '각', replaceBefore: '가' }, { after: second });
+    expect((await second.ack).status).toBe('applied');
+    expect((await third.ack).status).toBe('applied');
+    expect(a.engine.paragraphs('body')[0]!.text).toBe('Seed각X');
+    expect((await b.session.submit('applyRemoteUpdate', { update: remoteUpdate(b, a.engine) }, merge).ack).status).toBe('applied');
+    expect(b.engine.paragraphs('body')[0]!.text).toBe('Seed각X');
+  } finally { a.session.dispose(); b.session.dispose(); }
+}, TIMEOUT);
+
 test('presence reads are tied to the covering frame and unresolved anchors are marked', async () => {
   const a = await open(9201);
   const remote = await createYrsSession({ clientId: 9203 });

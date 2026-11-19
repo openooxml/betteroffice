@@ -130,6 +130,108 @@ test('one_composition_is_one_undo_step_however_long_it_is_composed', async () =>
   expect(texts(arm)).toEqual(['Alpha']);
 }, TIMEOUT);
 
+/** This editor and a collaborator on the same document; `sync` sends one side's missing edits to the other. */
+async function collaborators(paragraphs: string[]) {
+  const arm = await openCommandEngine(paragraphs, { clientId: 8301 });
+  const peer = await openCommandEngine(paragraphs, { clientId: 8302, checkpoint: arm.engine.encodeState() });
+  const sync = (to: CommandArm, from: CommandArm) => to.engine.applyUpdate(from.engine.encodeStateAsUpdate(to.engine.encodeStateVector()));
+  return { arm, peer, id: arm.engine.paragraphs('body')[0]!.paraId, sync };
+}
+
+test('a_composition_types_over_its_own_text_when_a_collaborator_types_right_after_it', async () => {
+  const { arm, peer, id, sync } = await collaborators(['abc']);
+  execute(arm, command(arm, 'select', { selection: selection(id, 1) }));
+  expect(step(arm, 'ㄱ').status).toBe('applied');
+  sync(peer, arm);
+  // Exactly at the caret, between the composed text and what followed it.
+  peer.engine.insertText({ story: 'body', paraId: id, offset: 2 }, 'X');
+  sync(arm, peer);
+  expect(texts(arm)).toEqual(['aㄱXbc']);
+  const typed = step(arm, '가', 'ㄱ');
+  expect(typed.status).toBe('applied');
+  expect(texts(arm)).toEqual(['a가Xbc']);
+  expectCaret(typed, { story: 'body', paraId: id, offset: 2 });
+  expect(step(arm, '각', '가').status).toBe('applied');
+  sync(peer, arm);
+  expect(texts(arm)).toEqual(['a각Xbc']);
+  expect(texts(peer)).toEqual(['a각Xbc']);
+}, TIMEOUT);
+
+test('a_composition_keeps_text_a_collaborator_types_before_it_and_further_on', async () => {
+  const { arm, peer, id, sync } = await collaborators(['abc']);
+  execute(arm, command(arm, 'select', { selection: selection(id, 1) }));
+  expect(step(arm, 'ㅎ').status).toBe('applied');
+  sync(peer, arm);
+  peer.engine.insertText({ story: 'body', paraId: id, offset: 1 }, 'P');
+  peer.engine.insertText({ story: 'body', paraId: id, offset: 4 }, 'Q');
+  sync(arm, peer);
+  expect(texts(arm)).toEqual(['aPㅎbQc']);
+  expect(step(arm, '하', 'ㅎ').status).toBe('applied');
+  expect(step(arm, '한', '하').status).toBe('applied');
+  expect(texts(arm)).toEqual(['aP한bQc']);
+}, TIMEOUT);
+
+test('a_composition_step_is_refused_and_writes_nothing_when_a_collaborator_deleted_the_composed_text', async () => {
+  // The text before the deleted composition reads the same as it: comparing text alone would type over it.
+  const { arm, peer, id, sync } = await collaborators(['하bc']);
+  execute(arm, command(arm, 'select', { selection: selection(id, 1) }));
+  expect(step(arm, '하').status).toBe('applied');
+  sync(peer, arm);
+  peer.engine.deleteRange({ story: 'body', start: { paraId: id, offset: 1 }, end: { paraId: id, offset: 2 } });
+  sync(arm, peer);
+  expect(texts(arm)).toEqual(['하bc']);
+  const before = snapshot(arm);
+  expect(step(arm, '한', '하')).toMatchObject({ status: 'refused', reason: 'replaced-text-mismatch' });
+  expect(snapshot(arm)).toEqual(before);
+}, TIMEOUT);
+
+test('a_composition_step_is_refused_when_a_collaborator_typed_inside_the_composed_text', async () => {
+  const { arm, peer, id, sync } = await collaborators(['abc']);
+  execute(arm, command(arm, 'select', { selection: selection(id, 3) }));
+  expect(step(arm, 'か').status).toBe('applied');
+  expect(step(arm, 'かん', 'か').status).toBe('applied');
+  sync(peer, arm);
+  peer.engine.insertText({ story: 'body', paraId: id, offset: 4 }, 'X');
+  sync(arm, peer);
+  expect(texts(arm)).toEqual(['abcかXん']);
+  const before = snapshot(arm);
+  expect(step(arm, 'かんじ', 'かん')).toMatchObject({ status: 'refused', reason: 'replaced-text-mismatch' });
+  expect(snapshot(arm)).toEqual(before);
+}, TIMEOUT);
+
+test('a_composition_types_over_its_text_after_a_collaborator_formats_it', async () => {
+  const { arm, peer, id, sync } = await collaborators(['abc']);
+  execute(arm, command(arm, 'select', { selection: selection(id, 3) }));
+  expect(step(arm, 'ㄱ').status).toBe('applied');
+  sync(peer, arm);
+  peer.engine.formatRange({ story: 'body', start: { paraId: id, offset: 3 }, end: { paraId: id, offset: 4 } }, { bold: true });
+  sync(arm, peer);
+  expect(step(arm, '가', 'ㄱ').status).toBe('applied');
+  expect(texts(arm)).toEqual(['abc가']);
+}, TIMEOUT);
+
+test('a_composition_is_one_undo_step_with_a_collaborator_edit_between_its_steps', async () => {
+  const { arm, peer, id, sync } = await collaborators(['Alpha']);
+  let now = 1_000_000;
+  const clock = spyOn(Date, 'now').mockImplementation(() => now);
+  try {
+    execute(arm, command(arm, 'insertText', { text: 'ㅎ' }, { inputTime: 10, lastInputTime: 10 }));
+    now += 700;
+    sync(peer, arm);
+    peer.engine.insertText({ story: 'body', paraId: id, offset: 1 }, 'X');
+    sync(arm, peer);
+    now += 700;
+    execute(arm, command(arm, 'insertText', { text: '하', replaceBefore: 'ㅎ' }, { inputTime: 10, lastInputTime: 1_400 }));
+    now += 700;
+    execute(arm, command(arm, 'insertText', { text: '한', replaceBefore: '하' }, { inputTime: 10, lastInputTime: 2_100 }));
+  } finally {
+    clock.mockRestore();
+  }
+  expect(texts(arm)).toEqual(['한XAlpha']);
+  execute(arm, command(arm, 'undo', {}));
+  expect(texts(arm)).toEqual(['XAlpha']);
+}, TIMEOUT);
+
 test('suggested_composition_steps_remove_their_own_insertion_instead_of_striking_it', async () => {
   const arm = await openCommandEngine(['abc']);
   const id = arm.engine.paragraphs('body')[0]!.paraId;

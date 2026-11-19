@@ -639,6 +639,18 @@ export interface DocxWorkerCommandState {
   proposals?: DocxProposalRegistry;
   /** Host versions in `(from, to]`, all produced by applied remote merges and none by a local command. */
   remoteMerges?: { from: number; to: number };
+  /** What the last local typing command wrote, until the next local command that edits or selects. */
+  typed?: DocxTypedText;
+}
+
+/** Sticky positions of the first and last characters one typing command wrote, and of the caret it left. */
+export interface DocxTypedText {
+  story: string;
+  first: Uint8Array;
+  last: Uint8Array;
+  /** UTF-16 length of the last character. */
+  lastLength: number;
+  caret: Uint8Array;
 }
 
 export type DocxWorkerCommandEngine = ResidentEngineSession & Pick<YrsSession,

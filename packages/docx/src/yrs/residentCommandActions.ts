@@ -36,6 +36,7 @@ import type {
   DocxCommandEnvelope,
   DocxCommandIntent,
   DocxCommandKind,
+  DocxCommandPosition,
   DocxCommandPreflightResult,
   DocxCommandSelection,
   PreparedDocxCommand,
@@ -43,6 +44,7 @@ import type {
   DocxCommandHooksEnvironment,
   DocxWorkerCommandEngine,
   DocxWorkerCommandState,
+  DocxTypedText,
 } from './residentCommandProtocol';
 
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u;
@@ -466,18 +468,72 @@ function collapsed(range: YrsStoryRange): boolean {
 function textRangeBefore(engine: DocxWorkerCommandEngine, range: YrsStoryRange, expected: string): YrsStoryRange | null {
   const end = range.start;
   if (!collapsed(range) || end.offset < expected.length) return null;
-  // The caret's paragraph alone: a composition step must not read the whole story.
-  const index = engine.paragraphUnit(range.story, end.paraId);
-  if (index < 0) return null;
-  let text = '';
-  for (const segment of engine.paragraphSegments(range.story, [index])[0] ?? []) {
-    if (text.length >= end.offset) break;
-    text += segment.kind === 'text' ? segment.text : segment.kind === 'pilcrow' ? '\n' : '\uFFFC';
-  }
-  if (text.slice(end.offset - expected.length, end.offset) !== expected) return null;
+  const text = paragraphTextTo(engine, range.story, end.paraId, end.offset);
+  if (text === null || text.slice(end.offset - expected.length, end.offset) !== expected) return null;
   const start = { paraId: end.paraId, offset: end.offset - expected.length };
   return commandSelectionRange(engine, { anchor: { story: range.story, ...start }, focus: { story: range.story, ...end } })
     ? { story: range.story, start, end } : null;
+}
+
+/** A paragraph's text up to at least `offset`, objects as U+FFFC; null when the paragraph is not in the story. */
+function paragraphTextTo(engine: DocxWorkerCommandEngine, story: string, paraId: string, offset: number): string | null {
+  // The paragraph alone: a composition step must not read the whole story.
+  const index = engine.paragraphUnit(story, paraId);
+  if (index < 0) return null;
+  let text = '';
+  for (const segment of engine.paragraphSegments(story, [index])[0] ?? []) {
+    if (text.length >= offset) break;
+    text += segment.kind === 'text' ? segment.text : segment.kind === 'pilcrow' ? '\n' : '\uFFFC';
+  }
+  return text;
+}
+
+function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
+  return left.length === right.length && left.every((byte, index) => byte === right[index]);
+}
+
+/** Holds typed text by its first and last characters, which collaborators' edits move but do not rename. */
+function typedTextOf(
+  engine: DocxWorkerCommandEngine, range: YrsStoryRange, text: string, caret: Uint8Array | undefined
+): DocxTypedText | undefined {
+  if (!text || !caret || range.start.paraId !== range.end.paraId || range.end.offset - range.start.offset !== text.length) return undefined;
+  const lastLength = text.length > 1 && /[\uDC00-\uDFFF]/u.test(text.at(-1)!) && /[\uD800-\uDBFF]/u.test(text.at(-2)!) ? 2 : 1;
+  const at = { story: range.story, paraId: range.start.paraId };
+  try {
+    return {
+      story: range.story,
+      first: engine.encodeStickyPosition({ ...at, offset: range.start.offset }).encoded.slice(),
+      last: engine.encodeStickyPosition({ ...at, offset: range.end.offset - lastLength }).encoded.slice(),
+      lastLength,
+      caret: caret.slice(),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The text the typing command that left `caret` wrote, if it still reads `expected` with nothing inserted inside it;
+ * null if edits deleted or split it, undefined if `caret` was not left by that command.
+ */
+function typedTextBefore(
+  engine: DocxWorkerCommandEngine, typed: DocxTypedText | undefined, caret: DocxCommandPosition, expected: string
+): YrsStoryRange | null | undefined {
+  if (!typed || !caret.sticky || caret.story !== typed.story || !sameBytes(caret.sticky, typed.caret)) return undefined;
+  const first = engine.resolveStickyPosition({ story: typed.story, encoded: typed.first });
+  const last = engine.resolveStickyPosition({ story: typed.story, encoded: typed.last });
+  if (!first || !last || first.story !== typed.story || last.story !== typed.story || first.paraId !== last.paraId) return null;
+  // A deleted character's position resolves to where it was and encodes there as the character after it.
+  if (!sameBytes(engine.encodeStickyPosition(first).encoded, typed.first) ||
+    !sameBytes(engine.encodeStickyPosition(last).encoded, typed.last)) return null;
+  const end = last.offset + typed.lastLength;
+  if (end - first.offset !== expected.length) return null;
+  const text = paragraphTextTo(engine, typed.story, first.paraId, end);
+  if (text === null || text.slice(first.offset, end) !== expected) return null;
+  const start = { paraId: first.paraId, offset: first.offset };
+  const stop = { paraId: first.paraId, offset: end };
+  return commandSelectionRange(engine, { anchor: { story: typed.story, ...start }, focus: { story: typed.story, ...stop } })
+    ? { story: typed.story, start, end: stop } : null;
 }
 
 function deleteRange(
@@ -795,7 +851,9 @@ export function preflightDocxCommand(
   if ((command.kind === 'insertText' || command.kind === 'replaceSelection' || command.kind === 'lineBreak') && state.storedMarks &&
     (typeof state.storedMarks.clear !== 'boolean' || !validDelta(state.storedMarks.delta))) return refuse('invalid-stored-marks');
   if (command.kind === 'insertText' && command.payload.replaceBefore !== undefined) {
-    const replaced = textRangeBefore(engine, range, command.payload.replaceBefore);
+    const typed = collapsed(range)
+      ? typedTextBefore(engine, state.typed, resolved.selection.focus, command.payload.replaceBefore) : undefined;
+    const replaced = typed === undefined ? textRangeBefore(engine, range, command.payload.replaceBefore) : typed;
     if (!replaced) return refuse('replaced-text-mismatch');
     range = replaced;
   }
@@ -1212,6 +1270,7 @@ function applyPreparedDocxCommand(
     return result('noop');
   }
   if (!range || !selection) throw new Error('Prepared command lacks selection');
+  state.typed = undefined;
   const prior = state.selection ? readCommandSelection(engine, state) : null;
   const priorSelection = prior?.ok ? prior.selection : null;
   const publish = (selected: DocxCommandSelection, force = false) => {
@@ -1299,6 +1358,7 @@ function applyPreparedDocxCommand(
         if (Object.keys(stored.delta).length) engine.formatRange(receipt.range, stored.delta);
       }
       caret({ story: receipt.range.story, ...receipt.range.end });
+      state.typed = typedTextOf(engine, receipt.range, command.payload.text, state.selection?.focus.sticky);
       break;
     }
     case 'deleteBackward': case 'deleteForward': {
