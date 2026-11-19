@@ -160,7 +160,6 @@ async function writeEditorDocument(
   if (
     !source ||
     keys.metadata !== source.keys.metadata ||
-    source.keys.commentIds.some((id) => !new Set(keys.commentIds).has(id)) ||
     saves.full ||
     (original !== saves.saved && !sameBytes(original, source.buffer))
   ) {
