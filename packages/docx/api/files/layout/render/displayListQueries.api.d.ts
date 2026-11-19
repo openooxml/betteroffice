@@ -241,6 +241,8 @@ export interface DisplayListQueries {
  * same line is built. Call it when the session behind the line goes away.
  */
 export declare function endDisplayListQueriesLine(line: object): void;
+/** True while `queries` holds its list parsed in the Rust store, for a facade built from it to adopt. */
+export declare function displayListQueriesHoldParsedList(queries: DisplayListQueries): boolean;
 type DisplayListQuerySource = RustDisplayListQueryEngine | ResidentDisplayListQueryEngine;
 /** True once a query trapped in this engine's wasm instance. */
 export declare function isDisplayListQuerySourceDead(engine: DisplayListQuerySource | null | undefined): boolean;
@@ -261,6 +263,10 @@ export declare function onDisplayListQuerySourceFailure(listener: (error: Error)
  * document starts a new line and ends the previous one, so a facade of the
  * replaced document never answers from the new one. Without `line` a superseded
  * facade answers from its own list.
+ *
+ * `storePages` caps the pages the Rust store keeps parsed: past it, the parsed
+ * pages farthest from the ones a query reads go back to placeholders, parsed
+ * again when a query reads them. Without it every page read stays parsed.
  */
-export declare function createDisplayListQueries(list: DisplayList, engine?: RustDisplayListQueryEngine | ResidentDisplayListQueryEngine, previous?: DisplayListQueries | null, line?: object | null): DisplayListQueries;
+export declare function createDisplayListQueries(list: DisplayList, engine?: RustDisplayListQueryEngine | ResidentDisplayListQueryEngine, previous?: DisplayListQueries | null, line?: object | null, storePages?: number): DisplayListQueries;
 export {};

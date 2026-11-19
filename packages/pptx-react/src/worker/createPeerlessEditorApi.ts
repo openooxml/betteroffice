@@ -29,7 +29,7 @@ export type PptxAsyncEditorApi = Omit<PptxWorkerEditorApi,
   [K in keyof AsyncOperations]: (...args: Parameters<AsyncOperations[K]>) => Promise<ReturnType<AsyncOperations[K]>>;
 } & Pick<PptxAsyncEditorAccess, 'exportStructured' | 'exportMarkdown'> & {
   handleAsync(): Promise<PptxAsyncEditorAccess>;
-  /** Flushes pending input, then serializes the presentation to .pptx bytes. Does not call onSave or download. */
+  /** Flushes pending input, serializes the presentation to .pptx bytes and hands them to onSave. Does not download. */
   save(): Promise<Uint8Array>;
   /** @deprecated Use {@link save}, which is async on the default editor. */
   saveAsync(): Promise<Uint8Array>;
@@ -56,6 +56,16 @@ export function peerlessPositionAtPoint(run: PeerlessPresentation, canvas: HTMLC
     y: (clientY - bounds.top) * frame.displayList.height / bounds.height };
   const hit = hitGeometry(indexGeometry(frame.displayList), point);
   return hit ? { ...hit, slide: frame.frame.slideIndex + 1, slideId: frame.frame.slideId } : null;
+}
+
+export function notifyingSaveApi(api: PptxAsyncEditorApi, saved: (bytes: Uint8Array) => void): PptxAsyncEditorApi {
+  const save = async () => { const bytes = await api.save(); saved(bytes); return bytes; };
+  const descriptors = Object.getOwnPropertyDescriptors(api);
+  return Object.defineProperties({}, {
+    ...descriptors,
+    save: { ...descriptors.save, value: save },
+    saveAsync: { ...descriptors.saveAsync, value: save },
+  }) as PptxAsyncEditorApi;
 }
 
 export function createPeerlessEditorApi(run: PeerlessPresentation, canvas: HTMLCanvasElement,

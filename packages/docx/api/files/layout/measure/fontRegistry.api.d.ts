@@ -165,6 +165,8 @@ export declare class TextMeasureFontRegistry {
     private generation;
     /** Script-fallback faces registered from their skeleton and core, by font id. */
     private progressiveIds;
+    /** The id each measurement view measures the bytes of. */
+    private viewBases;
     private readonly progressive?;
     private readonly standInTail;
     /** `progressive` opens sliced faces, which register from their skeleton and core. */
@@ -177,6 +179,8 @@ export declare class TextMeasureFontRegistry {
     });
     /** The sliced faces registered from their skeleton and core, by font id. */
     progressiveFaces(): ReadonlyMap<number, ProgressiveFontFace>;
+    /** Whether `id`, or the face a measurement view `id` measures, was registered from a sliced face's skeleton and core. */
+    isProgressive(id: number): boolean;
     /** Shares in-flight resolution but evicts misses for retry. */
     private bundled;
     /**
@@ -194,6 +198,8 @@ export declare class TextMeasureFontRegistry {
     getFontIdChain(family: string, bold: boolean, italic: boolean): Promise<number[]>;
     /** Synchronous settled view; retryable results are evicted after one read. */
     getCachedFontIdChain(family: string, bold: boolean, italic: boolean, consumeRetryable?: boolean): readonly number[] | undefined;
+    /** The settled head of a family's chain when it is the family's own face: an embedded or app face, or the face the provider resolves it to; never a last-resort or glyph fallback face. */
+    getCachedFamilyFace(family: string, bold: boolean, italic: boolean): number | undefined;
     coverageOf(id: number): FontCoverage | undefined;
     /** Characters the base Latin tier settled for `key`, without those whose face failed to load. */
     settledBaseLatinCharacters(key: string): Set<string>;

@@ -43,7 +43,7 @@ import {
   type PeerlessConfirmedFrame,
 } from './peerlessViewStore';
 import { usePeerlessPresentation, type PeerlessPresentation } from './usePeerlessPresentation';
-import { createPeerlessEditorApi, type PptxAsyncEditorApi } from './createPeerlessEditorApi';
+import { createPeerlessEditorApi, notifyingSaveApi, type PptxAsyncEditorApi } from './createPeerlessEditorApi';
 import { usePeerlessTextSelection } from './usePeerlessTextSelection';
 import { PeerlessShapeOverlay } from './PeerlessShapeOverlay';
 import { usePeerlessShapeGestures, type PeerlessShapePreviewStore } from './usePeerlessShapeGestures';
@@ -272,7 +272,7 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
       while (current && presentation.current) {
         await presentation.ready;
         if (current && presentation.current && presentation.hydrated) {
-          cleanup = callbacks.current.onReady?.(value);
+          cleanup = callbacks.current.onReady?.(notifyingSaveApi(value, (bytes) => callbacks.current.onSave?.(bytes)));
           return;
         }
       }

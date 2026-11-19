@@ -159,6 +159,28 @@ test('local cursor publication suppresses broadcast on document changes and clea
   expect(presence.setCursor).toHaveBeenLastCalledWith(null);
 });
 
+test('a drag broadcasts confirmed worker selections only and ends on the last one', async () => {
+  const s = setup();
+  const setCursor = mock((_cursor: unknown, _broadcast?: boolean) => {});
+  const presence: CollaborationPresence = { peers: [], setCursor, onPeers: () => () => {} };
+  const view = render(<PeerlessRemotePresence binding={s.binding} client={s.client} presence={presence} pages={[0, 1]} />);
+  await waitFor(() => expect(setCursor).toHaveBeenCalledTimes(1));
+  const identity = s.viewStore.getSnapshot().identity;
+  const at = (offset: number) => ({ story: 'body', paraId: 'p', offset, sticky: new Uint8Array([offset]) });
+  await act(async () => s.viewStore.setProvisionalCaret({ source: 'click', throughSeq: 1, pageIndex: 0, rect: { x: 4, y: 2, width: 1, height: 12 } }));
+  for (const [index, offset] of [3, 6, 9].entries()) {
+    await act(async () => s.viewStore.acceptWorkerState(identity, { epoch: 1, version: 0, throughSeq: index + 1, presentedThroughSeq: index + 1,
+      editState: undefined, selection: { anchor: at(0), focus: at(offset) } }));
+  }
+  await act(async () => s.viewStore.installFrameGeometry({ identity, coversThroughSeq: 3, frameEpoch: 2, layoutRevision: 1, pages: [],
+    caret: null, selectionRects: [{ x: 0, y: 0, width: 40, height: 12 }] }));
+  await waitFor(() => expect(setCursor).toHaveBeenLastCalledWith({ story: 'body', anchor: new Uint8Array([0]), head: new Uint8Array([9]) }, true));
+  const published = setCursor.mock.calls.slice(1);
+  expect(published.map(([, broadcast]) => broadcast)).toEqual(published.map(() => true));
+  expect(published.map(([cursor]) => Array.from((cursor as { head: Uint8Array }).head)[0]).every(head => [3, 6, 9].includes(head!))).toBe(true);
+  view.unmount();
+});
+
 test('presence overlay ignores a reply from an older installed geometry', async () => {
   const s = setup();
   let resolveRead: (value: unknown) => void;

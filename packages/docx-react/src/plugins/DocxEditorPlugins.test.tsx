@@ -5,7 +5,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, mock, spy
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import JSZip from 'jszip';
-import { StrictMode, createRef } from 'react';
+import { StrictMode, createRef, useState } from 'react';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -571,6 +571,18 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
       expect(snapshots).toEqual([true, false]);
     });
   }
+
+  test('snapshot.inputFocused follows the portaled document input', async () => {
+    let latest: DocxPluginContext<null> | undefined;
+    const plugin = defineDocxPlugin<null>({ id: 'input-focus', createState: () => null,
+      panel: { title: 'Focus', placement: 'right', render: (props) => { latest = props.context; return <input data-testid="input-focus-panel" />; } } });
+    const { ref, view } = await mount({ plugins: [plugin] });
+    await act(async () => { ref.current!.focus(); });
+    await until(() => latest?.snapshot.inputFocused === true);
+    await act(async () => { view.getByTestId('input-focus-panel').focus(); });
+    await until(() => latest?.snapshot.inputFocused === false);
+    expect(latest!.snapshot.focused).toBe(false);
+  });
 
   const focusRecorder = () => {
     const focus: boolean[] = [];
@@ -2470,6 +2482,62 @@ describe('DocxEditor plugins (peer-less engine)', () => {
     return { ref, view };
   };
 
+  test('onReady receives the ref api once, after the first page paints, and not again on later paints or edits', async () => {
+    const order: string[] = [];
+    const onReady = mock((_api: DocxEditorRef) => { order.push('ready'); });
+    const props = { onReady, onFirstPagePainted: () => { order.push('painted'); } } as
+      Omit<Partial<DocxEditorBaseProps>, 'experimentalWorkerOpen' | 'onChange'>;
+    const ref = createRef<DocxEditorRef>();
+    render(<DocxEditor ref={ref} documentBuffer={documentBytes()} {...props} />);
+    await until(() => order.includes('painted'));
+    await settle(100);
+    expect(order).toEqual(['painted', 'ready']);
+    expect(onReady).toHaveBeenCalledTimes(1);
+    expect(onReady.mock.calls[0]![0]).toBe(ref.current!);
+    await until(() => ref.current?.commands.getState('save').enabled === true);
+    await act(async () => { await ref.current!.whenLayoutComplete({ timeoutMs: 3000 }); });
+    await act(async () => ref.current!.setZoom(1.5));
+    const { version, paragraph } = await firstParagraph(ref);
+    await act(async () => {
+      expect(await ref.current!.applyEdits(appendRequest(version, paragraph.paraId))).toMatchObject({ ok: true });
+    });
+    await act(async () => { await ref.current!.whenLayoutComplete({ timeoutMs: 3000 }); });
+    await settle(300);
+    expect(order).toEqual(['painted', 'ready']);
+  });
+
+  test('onReady is not called when onFirstPagePainted unmounts the editor', async () => {
+    const onReady = mock((_api: DocxEditorRef) => {});
+    let painted = 0;
+    let unmount = () => {};
+    const props = { onReady, onFirstPagePainted: () => { painted += 1; unmount(); } } as
+      Omit<Partial<DocxEditorBaseProps>, 'experimentalWorkerOpen' | 'onChange'>;
+    const view = render(<DocxEditor documentBuffer={documentBytes()} {...props} />);
+    unmount = view.unmount;
+    await until(() => painted === 1);
+    await settle(200);
+    expect(painted).toBe(1);
+    expect(onReady).not.toHaveBeenCalled();
+  });
+
+  test('onReady is not called when onFirstPagePainted hides the editor through host state', async () => {
+    const onReady = mock((_api: DocxEditorRef) => {});
+    const bytes = documentBytes();
+    let painted = 0;
+    function Host() {
+      const [show, setShow] = useState(true);
+      const props = { onReady, onFirstPagePainted: () => { painted += 1; setShow(false); } } as
+        Omit<Partial<DocxEditorBaseProps>, 'experimentalWorkerOpen' | 'onChange'>;
+      return show ? <DocxEditor documentBuffer={bytes} {...props} /> : <p data-testid="hidden" />;
+    }
+    const view = render(<Host />);
+    await until(() => painted === 1);
+    await settle(200);
+    expect(view.queryByTestId('hidden')).not.toBeNull();
+    expect(painted).toBe(1);
+    expect(onReady).not.toHaveBeenCalled();
+  });
+
   test('the default worker emits one settled selection after keyboard navigation', async () => {
     const events: DocxPluginEvent[] = [];
     const plugin = defineDocxPlugin({ id: 'settle', createState: () => null,
@@ -3892,7 +3960,7 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
   });
 
   if (engine !== 'DL') test('T2: a direction-only reversal settles once and refuses retained geometry', async () => {
-    const h = await matrixEditor(engine);
+    const h = await matrixEditor(engine, documentBytes(), undefined, true);
     try {
       await h.selection('body', h.first.paraId, 0, 3);
       await h.quiet();
@@ -4201,9 +4269,12 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
   });
 
   if (engine !== 'DL') test('T7: reload drops a pending settle and refuses retained geometry', async () => {
-    const h = await matrixEditor(engine);
+    const h = await matrixEditor(engine, documentBytes(), undefined, true);
     try {
       await h.selection('body', h.first.paraId, 0, 3);
+      await h.selectionLayout();
+      expect(h.settles).toHaveLength(0);
+      expect(h.context().snapshot.selectionSettled).toBe(false);
       const retained = h.context();
       const generation = retained.snapshot.generation;
       h.reset();
@@ -4262,7 +4333,7 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
 
   if (engine !== 'DL') for (const story of ['fn:1', 'en:1']) {
     test(`T3: moving within one note settles again (${story})`, async () => {
-      const h = await matrixEditor(engine, await matrixDocument());
+      const h = await matrixEditor(engine, await matrixDocument(), undefined, true);
       try {
         const paraId = story === 'fn:1' ? '60000001' : '70000001';
         await h.openStory(story);
