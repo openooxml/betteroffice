@@ -171,7 +171,9 @@ pub fn has_right_to_left(text: &str) -> bool {
 /// A cell's source runs as its text command carries them: UTF-16 offsets into
 /// `text`, colours resolved by `styles` as the cell font's is. A hyperlink
 /// keeps its colour and underline over the whole cell, so the runs of a
-/// hyperlink cell carry neither.
+/// hyperlink cell carry neither. A run keeps its size only when it is a
+/// positive finite number of points in the command's precision, the sizes row
+/// autofit accepts of a cell font.
 pub(crate) fn cell_runs(
     text: &str,
     runs: &[RichRun],
@@ -196,7 +198,10 @@ pub(crate) fn cell_runs(
                     .as_deref()
                     .filter(|name| !name.trim().is_empty())
                     .map(Arc::from),
-                font_size: style.size_pt.map(|size| size as f32),
+                font_size: style
+                    .size_pt
+                    .map(|size| size as f32)
+                    .filter(|size| size.is_finite() && *size > 0.0),
                 bold: style.bold,
                 italic: style.italic,
                 underline: underline.map(|kind| kind != RunUnderline::None),
