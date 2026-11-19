@@ -582,7 +582,7 @@ fn a_rule_whose_formula_meets_an_error_value_still_paints() {
     assert_eq!(withheld(&workbook, "engine_gap"), 0);
 }
 
-/// The cells the whole-range builds of one edit may hold: twice the calc
+/// The cells the whole-range builds of one edit may read: twice the calc
 /// engine's cell visits per evaluation.
 const WHOLE_RANGE_BUDGET: u64 = 2 * xlsx_calc::eval::MAX_EVALUATION_CELL_VISITS;
 /// The rows a budget sheet uses, its last cell being in this one.
@@ -632,7 +632,7 @@ fn budget_book(column_c: [&str; 2], extra: &[(&str, &str)], rules: &[String]) ->
     workbook(&values, &rules.concat(), &[&fill(RED), &fill(GREEN)])
 }
 
-/// Duplicate rules over A and over B, each holding one value once built.
+/// Duplicate rules over A and over B, each reading two cells once built.
 fn first_rules() -> Vec<String> {
     vec![
         rule(&format!("A1:A{USED_ROWS}"), &duplicates(1)),

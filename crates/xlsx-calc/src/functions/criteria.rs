@@ -364,11 +364,6 @@ impl CountTable {
         Some(table)
     }
 
-    /// The distinct values the table holds.
-    pub fn entries(&self) -> usize {
-        self.numbers.len() + self.texts.len()
-    }
-
     /// `COUNTIF(range, criterion)` when the criterion asks for one value;
     /// `None` for an operator, a wildcard, a blank, or text a number could
     /// print as.

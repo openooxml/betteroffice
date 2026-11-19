@@ -27,7 +27,7 @@ const CLOCK_STRIDE: u64 = 8;
 const CLOCK_UNITS: u64 = 4_096;
 /// Decided cells kept per model epoch; past it, cells outside the frame go.
 pub const CONDITIONAL_RESULT_CAP: usize = 262_144;
-/// Cells the whole-range builds of one model epoch hold, twice the calc engine's
+/// Cells the whole-range builds of one model epoch read, twice the calc engine's
 /// cell visits per evaluation: bounds the time and memory rules spend per edit.
 const WHOLE_RANGE_BUDGET: u64 = 2 * MAX_EVALUATION_CELL_VISITS;
 /// Parsed shifted formulas kept across epochs; cleared when full.
@@ -197,7 +197,7 @@ pub(crate) struct Cache {
     /// The cells whose last recalculation the calc engine refused or cut
     /// short, as of the epoch.
     limited: HashSet<(SheetId, u32, u32)>,
-    /// Values the whole-range builds in `aggregates` hold, against
+    /// Cells the whole-range builds in `aggregates` read, against
     /// `WHOLE_RANGE_BUDGET`.
     whole_range: u64,
     budget: u64,
@@ -824,10 +824,10 @@ impl Cache {
             if self.whole_range.saturating_add(bound) > WHOLE_RANGE_BUDGET {
                 aggregate.refused = true;
             } else {
-                let (stats, read, held) = stats(model, sheet, rule);
+                let (stats, read) = stats(model, sheet, rule);
                 aggregate.stats = Some(stats);
                 aggregate.refused = rule.covers_any(sheet, &self.limited);
-                self.whole_range += held;
+                self.whole_range += read;
                 *spent += read;
                 built = true;
             }
@@ -864,10 +864,10 @@ impl Cache {
                 }
                 context.restart();
                 context.cell = Some(rule.anchor);
-                let table = range.and_then(|range| CountTable::build(range, &*context));
-                self.whole_range += table.as_ref().map_or(0, |table| table.entries() as u64);
-                tables.push(table);
-                *spent += MAX_EVALUATION_CELL_VISITS.saturating_sub(context.remaining_cells());
+                tables.push(range.and_then(|range| CountTable::build(range, &*context)));
+                let read = MAX_EVALUATION_CELL_VISITS.saturating_sub(context.remaining_cells());
+                self.whole_range += read;
+                *spent += read;
                 aggregate.gap |= context.has_unhandled_unsupported_function();
                 built = true;
             }
@@ -1420,9 +1420,8 @@ fn node_mut<'e>(expr: &'e mut Expr, path: &[usize]) -> Option<&'e mut Expr> {
     node_mut(child, rest)
 }
 
-/// Statistics over the rule's whole range, how many cells they read, and how
-/// many values they collected or keep.
-fn stats(model: &Workbook, sheet: SheetId, rule: &Rule) -> (Stats, u64, u64) {
+/// Statistics over the rule's whole range, and how many cells they read.
+fn stats(model: &Workbook, sheet: SheetId, rule: &Rule) -> (Stats, u64) {
     let cells: Vec<&CellValue> = model
         .sheet(sheet)
         .into_iter()
@@ -1440,7 +1439,7 @@ fn stats(model: &Workbook, sheet: SheetId, rule: &Rule) -> (Stats, u64, u64) {
             _ => None,
         })
     };
-    let (stats, held) = match rule.test {
+    let stats = match rule.test {
         Test::Top {
             rank,
             percent,
@@ -1459,11 +1458,12 @@ fn stats(model: &Workbook, sheet: SheetId, rule: &Rule) -> (Stats, u64, u64) {
             } else {
                 rank as usize
             };
-            let threshold = count
-                .checked_sub(1)
-                .and_then(|last| values.get(last.min(values.len().saturating_sub(1))))
-                .copied();
-            (Stats::Threshold(threshold), values.len())
+            Stats::Threshold(
+                count
+                    .checked_sub(1)
+                    .and_then(|last| values.get(last.min(values.len().saturating_sub(1))))
+                    .copied(),
+            )
         }
         Test::Average { .. } => {
             let values: Vec<f64> = numbers().collect();
@@ -1471,22 +1471,20 @@ fn stats(model: &Workbook, sheet: SheetId, rule: &Rule) -> (Stats, u64, u64) {
             let mean = values.iter().sum::<f64>() / n;
             let variance =
                 values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (n - 1.0).max(1.0);
-            let average = Stats::Average {
+            Stats::Average {
                 mean,
                 deviation: variance.sqrt(),
-            };
-            (average, values.len())
+            }
         }
         _ => {
             let mut counts = HashMap::new();
             for key in cells.iter().copied().filter_map(key) {
                 *counts.entry(key).or_insert(0) += 1;
             }
-            let held = counts.len();
-            (Stats::Counts(counts), held)
+            Stats::Counts(counts)
         }
     };
-    (stats, read, held as u64)
+    (stats, read)
 }
 
 /// Cells a rule's whole-range statistics, constant calls and count tables
