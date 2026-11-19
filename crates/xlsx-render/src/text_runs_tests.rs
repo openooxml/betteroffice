@@ -457,7 +457,8 @@ fn clip_of(command: &DrawCmd) -> Rect {
 fn a_single_line_rich_cell_differs_from_plain_only_in_the_baseline_of_its_largest_run() {
     let stored = "AB CDE FG";
     let source = [rich_run(3, 9, |style| style.size_pt = Some(20.0))];
-    let workbook = workbook(vec![("A1", text(stored))]);
+    let mut workbook = workbook(vec![("A1", text(stored))]);
+    workbook.sheets[0].row_heights.insert(0, 24.0);
     let list = with_runs(&workbook, &[("A1", &source)]);
     assert_eq!(runs_of(&list, stored).len(), 1);
     let plain = build_display_list(&workbook, SheetId(0), &VIEW).unwrap();
@@ -494,12 +495,88 @@ fn aligned_workbook(value: &str, alignment: Alignment, height: Option<f64>) -> W
 }
 
 fn single_line_workbook(value: &str, valign: VAlign) -> Workbook {
+    single_line_workbook_in(value, valign, 36.0)
+}
+
+fn single_line_workbook_in(value: &str, valign: VAlign, height: f64) -> Workbook {
     let alignment = Alignment {
         h: Some(HAlign::Left),
         v: Some(valign),
         ..Alignment::default()
     };
-    aligned_workbook(value, alignment, Some(36.0))
+    aligned_workbook(value, alignment, Some(height))
+}
+
+fn assert_paints_plain(workbook: &Workbook, stored: &str, source: &[RichRun]) {
+    let rich = with_runs(workbook, &[("A1", source)]);
+    let plain = build_display_list(workbook, SheetId(0), &VIEW).unwrap();
+    assert_eq!(command(&rich, stored), command(&plain, stored));
+}
+
+#[test]
+fn an_unwrapped_rich_cell_in_a_row_shorter_than_its_largest_run_paints_plain() {
+    let stored = "0000  W";
+    let source = [rich_run(6, 7, |style| style.size_pt = Some(36.0))];
+    let workbook = single_line_workbook_in(stored, VAlign::Top, 15.0);
+    assert_paints_plain(&workbook, stored, &source);
+}
+
+fn descender_runs() -> [RichRun; 2] {
+    [
+        rich_run(0, 2, |style| style.size_pt = Some(36.0)),
+        rich_run(2, 3, |style| style.size_pt = Some(11.0)),
+    ]
+}
+
+#[test]
+fn a_rich_cell_whose_largest_run_does_not_fit_its_row_paints_plain() {
+    let stored = "HgI";
+    let workbook = single_line_workbook_in(stored, VAlign::Top, 15.0);
+    assert_paints_plain(&workbook, stored, &descender_runs());
+}
+
+fn a_row_with_room_keeps_the_runs_on_the_baseline_of_the_largest(valign: VAlign) {
+    let stored = "HgI";
+    let workbook = single_line_workbook_in(stored, valign, 45.0);
+    let rich = with_runs(&workbook, &[("A1", &descender_runs())]);
+    assert!(!runs_of(&rich, stored).is_empty());
+    let plain = build_display_list(&workbook, SheetId(0), &VIEW).unwrap();
+    let clip = clip_of(command(&plain, stored));
+    let baseline = crate::baseline_y(clip.y, clip.h, 36.0, Some(valign));
+    assert_eq!(
+        without_runs(command(&rich, stored)),
+        with_y(command(&plain, stored), baseline)
+    );
+}
+
+#[test]
+fn a_top_aligned_rich_cell_in_a_row_with_room_keeps_its_runs() {
+    a_row_with_room_keeps_the_runs_on_the_baseline_of_the_largest(VAlign::Top);
+}
+
+#[test]
+fn a_centred_rich_cell_in_a_row_with_room_keeps_its_runs() {
+    a_row_with_room_keeps_the_runs_on_the_baseline_of_the_largest(VAlign::Center);
+}
+
+#[test]
+fn a_bottom_aligned_rich_cell_in_a_row_with_room_keeps_its_runs() {
+    a_row_with_room_keeps_the_runs_on_the_baseline_of_the_largest(VAlign::Bottom);
+}
+
+#[test]
+fn a_wrapped_rich_cell_whose_lines_at_its_largest_pitch_pass_the_row_paints_plain() {
+    let stored = "H\n.";
+    let source = [rich_run(0, 1, |style| style.size_pt = Some(24.0))];
+    let alignment = Alignment {
+        h: Some(HAlign::Left),
+        v: Some(VAlign::Top),
+        wrap_text: true,
+        ..Alignment::default()
+    };
+    let mut workbook = aligned_workbook(stored, alignment, Some(45.0));
+    workbook.sheets[0].col_widths.insert(0, 10.0);
+    assert_paints_plain(&workbook, stored, &source);
 }
 
 fn wrapped_bottom_workbook(value: &str, height: Option<f64>) -> Workbook {
@@ -655,7 +732,7 @@ fn run_sizes_at_the_edges_of_the_accepted_range() {
     let cases = [
         ("A1", "least", f64::from(smallest), Some(smallest)),
         ("C1", "under", 1e-50, None),
-        ("E1", "most", f64::from(f32::MAX), Some(f32::MAX)),
+        ("E1", "most", f64::from(f32::MAX), None),
         ("G1", "over", 1e39, None),
     ];
     let cells = cases.map(|(address, value, ..)| (address, text(value)));
@@ -673,6 +750,17 @@ fn run_sizes_at_the_edges_of_the_accepted_range() {
             "{value}"
         );
     }
+}
+
+#[test]
+fn a_run_too_large_for_any_row_leaves_the_plain_command() {
+    let stored = "HI";
+    let workbook = workbook(vec![("A1", text(stored))]);
+    let rich = with_runs(&workbook, &[("A1", &sized_run(f64::from(f32::MAX)))]);
+    let floats = command_floats(command(&rich, stored));
+    assert!(floats.iter().all(|value| value.is_finite()), "{floats:?}");
+    let plain = build_display_list(&workbook, SheetId(0), &VIEW).unwrap();
+    assert_eq!(command(&rich, stored), command(&plain, stored));
 }
 
 #[test]
