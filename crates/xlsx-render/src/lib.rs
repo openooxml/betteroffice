@@ -1170,11 +1170,6 @@ where
             }
             _ => Vec::new(),
         };
-        let line_size = if wraps && !runs.is_empty() {
-            text_runs::largest_size(size, &text, &runs)
-        } else {
-            size
-        };
 
         let left_pad = print.map_or(TEXT_PAD_PX, |(m, _)| 3.0 * 96.0 / m.dpi);
         let right_pad = print.map_or(TEXT_PAD_PX, |(m, _)| 2.0 * 96.0 / m.dpi);
@@ -1190,8 +1185,26 @@ where
             Align::Right => cell_box.x + cell_box.w - right_pad - right_indent,
             Align::Center => cell_box.x + cell_box.w / 2.0,
         };
-        let ty = text_baseline(cell_box, line_size, valign, print.map(|(m, _)| m));
         let text_width = (cell_box.w - pad_width - left_indent - right_indent).max(0.0);
+        let print_dpi = print.map(|(m, _)| f64::from(m.dpi));
+        let run_size = (!runs.is_empty()).then(|| text_runs::largest_size(size, &text, &runs));
+        let loses_lines = wraps
+            && run_size.is_some_and(|run_size| {
+                wrapped_runs_lose_lines(
+                    &text,
+                    text_width,
+                    cell_box.whole_h + 1.0,
+                    size,
+                    run_size,
+                    print_dpi,
+                )
+            });
+        let (runs, line_size) = match run_size {
+            Some(_) if loses_lines => (Vec::new(), size),
+            Some(run_size) if wraps => (runs, run_size),
+            _ => (runs, size),
+        };
+        let ty = text_baseline(cell_box, line_size, valign, print.map(|(m, _)| m));
         let number_format = (!parts.is_empty() || matches!(cell.value, CellValue::Number { .. }))
             .then(|| NumberFormatLayout {
                 left: cell_box.x + left_pad + left_indent,
@@ -1266,10 +1279,7 @@ where
                     .all(|part| part.kind == xlsx_model::numfmt::FormatPartKind::Padding)
             }))
         .then(|| {
-            let line_height = geometry::row_pt_to_px(geometry::line_pitch_pt(
-                f64::from(line_size),
-                print.map(|(m, _)| f64::from(m.dpi)),
-            ));
+            let line_height = wrapped_line_height(line_size, print_dpi);
             TextWrap {
                 width: text_width,
                 line_height,
@@ -2535,6 +2545,35 @@ fn resolve_rotation_valign(v: Option<VAlign>) -> TextValign {
         Some(VAlign::Center | VAlign::Justify | VAlign::Distributed) => TextValign::Center,
         Some(VAlign::Bottom) | None => TextValign::Bottom,
     }
+}
+
+/// Pixel step between the baselines of wrapped text `size_pt` tall.
+fn wrapped_line_height(size_pt: f32, print_dpi: Option<f64>) -> f32 {
+    geometry::row_pt_to_px(geometry::line_pitch_pt(f64::from(size_pt), print_dpi))
+}
+
+/// Whether a wrapped cell whose lines step by its largest run, `run_size`,
+/// keeps fewer lines in a row `height` px tall than it shows in its own
+/// `size`: the lines row autofit counts for it, up to that size's limit.
+fn wrapped_runs_lose_lines(
+    text: &str,
+    width: f32,
+    height: f32,
+    size: f32,
+    run_size: f32,
+    print_dpi: Option<f64>,
+) -> bool {
+    let limit = |pt: f32| wrap::max_wrapped_lines(height, wrapped_line_height(pt, print_dpi), pt);
+    let Some(rich) = limit(run_size) else {
+        return false;
+    };
+    let plain = limit(size);
+    if plain.is_some_and(|plain| rich >= plain) {
+        return false;
+    }
+    let shown = wrap::estimated_line_count(text, width, f64::from(size));
+    let shown = plain.map_or(shown, |plain| shown.min(plain as usize));
+    (rich as usize) < shown
 }
 
 /// Alphabetic baseline in pixels for a point-sized cell font.
