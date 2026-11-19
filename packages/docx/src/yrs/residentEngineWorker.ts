@@ -894,10 +894,9 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
             }
             const caretPosition = position ?? displayPositionIndex(engine).positionOf(focus, 'body');
             if (caretPosition !== null) {
-              const version = engine.proposalEngine.version();
               const trailingCaretOnPage = (pageIndex: number) => {
                 const rect = focus.offset === length && caretPosition > 0
-                  ? queriesFor(retainedFrame!, version).rangeRectsOnPages?.(caretPosition - 1, caretPosition, pageIndex, pageIndex).at(-1)
+                  ? residentDisplayListQueries(engine, retainedFrame!.displayList).rangeRectsOnPages?.(caretPosition - 1, caretPosition, pageIndex, pageIndex).at(-1)
                   : undefined;
                 return rect && rect.height > 0 ? { ...rect, x: rect.x + rect.width, width: 0 } : null;
               };
@@ -908,7 +907,7 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
                 trackBuilt(finalized.delta);
                 probed = true;
               };
-              let caret = queriesFor(retainedFrame, version).caretRect(caretPosition);
+              let caret = residentDisplayListQueries(engine, retainedFrame.displayList).caretRect(caretPosition);
               if (!caret || caret.height <= 0 || retainedFrame.pages[caret.pageIndex]?.page.unbuilt) {
                 for (const [pageId, pageIndex] of builtPages!) {
                   const page = retainedFrame.pages[pageIndex];
@@ -926,7 +925,7 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
                 if (caret && retainedFrame.pages[caret.pageIndex]?.page.unbuilt) candidates.add(caret.pageIndex);
                 for (const index of candidates) {
                   await install(engine.buildDisplayPagesFrame([index], retainedFrame!.frameEpoch));
-                  caret = queriesFor(retainedFrame!, version).caretRect(caretPosition);
+                  caret = residentDisplayListQueries(engine, retainedFrame!.displayList).caretRect(caretPosition);
                   if (!caret || caret.height <= 0 || retainedFrame!.pages[caret.pageIndex]?.page.unbuilt) {
                     caret = trailingCaretOnPage(index) ?? caret;
                   }
