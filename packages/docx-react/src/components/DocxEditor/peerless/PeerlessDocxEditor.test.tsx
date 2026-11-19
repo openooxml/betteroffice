@@ -48,6 +48,7 @@ import { ToolbarCommandButton } from '../../toolbar/ToolbarCommand';
 import * as toolbarView from '../DocxEditorToolbar';
 import { useEditorChrome } from '../../EditorToolbarContext';
 import { loadMenuList } from '../../../../../../shared/react-toolbar/menuListLoader';
+import * as focusTracker from '../../../../../../shared/plugin-host/focusTracker';
 
 await loadMenuList();
 
@@ -3552,4 +3553,88 @@ test('a plain mount opens the document once', async () => {
   expect(workers).toHaveLength(1);
   expect(requests.filter(({ type }) => type === 'openSource')).toHaveLength(1);
   expect(requests.filter(({ type }) => type === 'commandInit')).toHaveLength(1);
+});
+
+function focusPanelPlugin(id: string) {
+  const seen: { context?: DocxPluginContext<null> } = {};
+  const plugin = defineDocxPlugin<null>({ id, createState: () => null, panel: {
+    title: 'Focus', placement: 'right', render: (props) => { seen.context = props.context; return <button data-testid={`${id}-button`} />; },
+  } });
+  return { plugin, seen };
+}
+
+function attachDocumentInput(root: HTMLElement) {
+  const input = document.createElement('textarea');
+  input.className = 'paged-editor__input';
+  root.append(input);
+  surface.mock.calls.at(-1)![0].inputRef!.current = input;
+  return input;
+}
+
+test('worker plugins see the document input focus apart from focus in other editor UI', async () => {
+  const { plugin, seen } = focusPanelPlugin('input-focus');
+  const view = render(<DocxEditor {...peerlessProps} showToolbar={false} plugins={[plugin]} />);
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
+  const editorSurface = view.getByTestId('docx-worker-paged-editor');
+  editorSurface.setAttribute('data-docx-worker-editor', 'true');
+  const input = attachDocumentInput(editorSurface);
+  const control = document.createElement('button');
+  editorSurface.append(control);
+  await waitFor(() => expect(seen.context).toBeDefined());
+  expect(seen.context!.snapshot.inputFocused).toBe(false);
+  await act(async () => { input.focus(); });
+  await waitFor(() => expect(seen.context!.snapshot).toMatchObject({ focused: true, inputFocused: true }));
+  await act(async () => { control.focus(); });
+  await waitFor(() => expect(seen.context!.snapshot).toMatchObject({ focused: true, inputFocused: false }));
+  await act(async () => { input.focus(); });
+  await waitFor(() => expect(seen.context!.snapshot.inputFocused).toBe(true));
+  await act(async () => { view.getByTestId('input-focus-button').focus(); });
+  await waitFor(() => expect(seen.context!.snapshot).toMatchObject({ focused: false, inputFocused: false }));
+});
+
+test('focusDocument from a worker plugin focuses its editor’s own input and refuses while an editor dialog is open', async () => {
+  const { plugin, seen } = focusPanelPlugin('focus-probe');
+  const view = render(<DocxEditor {...peerlessProps} showToolbar={false} plugins={[plugin]} />);
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
+  const editorSurface = view.getByTestId('docx-worker-paged-editor');
+  const decoy = document.createElement('textarea');
+  decoy.className = 'paged-editor__input';
+  editorSurface.append(decoy);
+  const input = attachDocumentInput(editorSurface);
+  const button = await waitFor(() => view.getByTestId('focus-probe-button'));
+  const dialog = document.createElement('div');
+  dialog.setAttribute('role', 'dialog');
+  editorSurface.append(dialog);
+  button.focus();
+  expect(seen.context!.focusDocument()).toMatchObject({ ok: false, failure: { code: 'unsupported-policy' } });
+  expect(document.activeElement).toBe(button);
+  dialog.remove();
+  expect(seen.context!.focusDocument()).toEqual({ ok: true });
+  expect(document.activeElement).toBe(input);
+});
+
+test('a worker editor without plugins tracks no focus and commits nothing when its input takes focus', async () => {
+  const track = spyOn(focusTracker, 'trackFocus');
+  restorers.push(() => track.mockRestore());
+  for (const plugins of [undefined, []]) {
+    let commits = 0;
+    const view = render(<Profiler id="editor" onRender={() => { commits += 1; }}>
+      <DocxEditor {...peerlessProps} showToolbar={false} plugins={plugins} />
+    </Profiler>);
+    await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
+    const input = attachDocumentInput(view.getByTestId('docx-worker-paged-editor'));
+    await act(async () => { await new Promise<void>((resolve) => setTimeout(resolve, 0)); });
+    const settled = commits;
+    await act(async () => { input.focus(); });
+    await act(async () => { input.blur(); });
+    await act(async () => { await new Promise<void>((resolve) => setTimeout(resolve, 0)); });
+    expect(commits).toBe(settled);
+    expect(track).not.toHaveBeenCalled();
+    view.unmount();
+  }
+  const { plugin } = focusPanelPlugin('tracked');
+  const view = render(<DocxEditor {...peerlessProps} showToolbar={false} plugins={[plugin]} />);
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
+  const input = attachDocumentInput(view.getByTestId('docx-worker-paged-editor'));
+  expect(track.mock.calls.some(([roots]) => roots().includes(input))).toBe(true);
 });

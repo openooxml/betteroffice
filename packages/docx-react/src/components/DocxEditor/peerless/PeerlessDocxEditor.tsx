@@ -151,6 +151,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const loadDocument = useCallback((document: ParsedDocument) => load(null, document), [load]);
   const host = useRef<HTMLDivElement>(null);
   const container = useRef<HTMLDivElement>(null);
+  const documentInput = useRef<HTMLTextAreaElement>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const [hostWidth, setHostWidth] = useState(0);
   const hostObserver = useRef<ResizeObserver | null>(null);
@@ -296,6 +297,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         (view) => commit(() => pluginHost.workerChanged(workerDocumentVersion(view)))) },
       workerNavigation: pluginGeometry.navigation,
       workerRefusal: (error) => workerReadRefusal(controller, error),
+      documentInput: () => documentInput.current, editorRoot: () => container.current,
     });
     const lifetime = createDeferredRelease(() => {
       loadRequest.current?.reject(new Error('Editor was closed')); loadRequest.current = null;
@@ -419,10 +421,12 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       const surface = host.current?.querySelector('[data-docx-worker-editor]');
       return surface ? [surface] : [];
     }, (focused) => pluginHost.focusChanged(focused));
-    pluginHost.setFocusCheck(tracker.recheck);
+    const input = trackFocus(() => documentInput.current ? [documentInput.current] : [], (focused) => pluginHost.inputFocusChanged(focused));
+    pluginHost.setFocusCheck(() => { tracker.recheck(); input.recheck(); });
     return () => {
       pluginHost.setFocusCheck(null);
       tracker();
+      input();
     };
   }, [pluginHost, managedPlugins]);
   const activations = useSyncExternalStore(pluginHost.subscribe, pluginHost.activations, pluginHost.activations);
@@ -1494,7 +1498,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         onEdit={(displayText, href) => { void propertyDialogs.applyPopupLink(displayText, href, hyperlinkPopup?.tooltip).then(applied => { if (applied) setHyperlinkPopup(null); }); }}
         onRemove={() => { void propertyDialogs.removeLinkAtCaret().then(applied => { if (applied) { setHyperlinkPopup(null); toast(t('editor.linkRemoved')); } }); }} />
       {shellState.status === 'failed' && shellState.error ? <ParseError message={shellState.error.message} /> : sessionOptions ? (
-        <MirrorLinkRouteContext.Provider value={mirrorLinkRoute}><PeerlessPagedEditor sessionOptions={sessionOptions} zoom={zoom} onReady={onReady} autoFocus={!effectiveReadOnly}
+        <MirrorLinkRouteContext.Provider value={mirrorLinkRoute}><PeerlessPagedEditor sessionOptions={sessionOptions} zoom={zoom} onReady={onReady} autoFocus={!effectiveReadOnly} inputRef={documentInput}
           overlay={workerCollaboration.overlay(displayWindow)}
           displayWindow={displayWindow} onDisplayWindowChange={showWindow} onClipboard={onClipboard} onPasteFragment={onPasteFragment} highlights={searchState.highlights} onNavigateCell={controller.navigateCell} onPartPoint={onPartPoint} onDragSelectionChange={dragSelection} pictures={pictureMoves} tables={tableResize}
           pageMirror={props.pageMirror} unbuiltPageMirror={props.unbuiltPageMirror} readPageTexts={readPageTexts} mirrorReadBlocked={mirrorReadBlocked} scrollToPage={navigation.scrollToPage} pageOverlays={<>{partChrome}<WorkerContentControls controller={controller} onError={reportRecoverableError} /></>} /></MirrorLinkRouteContext.Provider>

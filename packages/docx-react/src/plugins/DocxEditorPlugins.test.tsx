@@ -572,6 +572,18 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
     });
   }
 
+  test('snapshot.inputFocused follows the portaled document input', async () => {
+    let latest: DocxPluginContext<null> | undefined;
+    const plugin = defineDocxPlugin<null>({ id: 'input-focus', createState: () => null,
+      panel: { title: 'Focus', placement: 'right', render: (props) => { latest = props.context; return <input data-testid="input-focus-panel" />; } } });
+    const { ref, view } = await mount({ plugins: [plugin] });
+    await act(async () => { ref.current!.focus(); });
+    await until(() => latest?.snapshot.inputFocused === true);
+    await act(async () => { view.getByTestId('input-focus-panel').focus(); });
+    await until(() => latest?.snapshot.inputFocused === false);
+    expect(latest!.snapshot.focused).toBe(false);
+  });
+
   const focusRecorder = () => {
     const focus: boolean[] = [];
     let loads = 0;
