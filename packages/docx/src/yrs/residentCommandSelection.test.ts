@@ -16,6 +16,7 @@ import { mintCommandSelection } from './residentCommandAnchors';
 import { cellSelectionHeadPosition } from './residentCommandTableSelection';
 import { ResidentSessionFonts } from './residentFontEnvironment';
 import { releaseResidentDisplayListQueries, residentDisplayListQueries } from './residentDisplayListQueries';
+import { StagedEchoPages } from './residentStagedEcho';
 import { createProposalRegistry, proposalRevisionPreview } from './proposals';
 import { applyDocxCommand, createResidentDocxCommandHooks, preflightDocxCommand } from './residentCommandActions';
 import { createResidentCommandHost } from './residentCommandHost';
@@ -552,7 +553,7 @@ function workerSelectionHooks(arm: CommandArm, frame: RetainedFrame, buildPages?
     sessionFonts: null, ResidentSessionFonts, scope: { fonts: undefined },
     createResidentCommandHost: (options: DocxCommandHostOptions) => options.hooks,
     displayPositionIndex: () => index, createDisplayListQueries: queryModule.createDisplayListQueries,
-    residentDisplayListQueries, releaseResidentDisplayListQueries,
+    residentDisplayListQueries, releaseResidentDisplayListQueries, StagedEchoPages,
     loadRustDisplayListQueryEngine: async () => {}, loadedRustDisplayListQueryEngine: () => undefined,
     applyFrameDelta: (_frame: RetainedFrame, next: RetainedFrame) => next,
     decodeFrameDelta: (next: RetainedFrame) => next,
@@ -929,7 +930,7 @@ test('d2a_worker_vertical_navigation_builds_unbuilt_neighbours_before_chained_ty
     sessionFonts: null, ResidentSessionFonts, scope: { fonts: undefined },
     createResidentCommandHost: (options: DocxCommandHostOptions) => options.hooks,
     displayPositionIndex: () => index, createDisplayListQueries: queryModule.createDisplayListQueries,
-    residentDisplayListQueries, releaseResidentDisplayListQueries,
+    residentDisplayListQueries, releaseResidentDisplayListQueries, StagedEchoPages,
     loadRustDisplayListQueryEngine, loadedRustDisplayListQueryEngine, applyFrameDelta, decodeFrameDelta,
     retainedPageByKey: (frame: RetainedFrame, pageId: string) => retainedFramePageById(frame, BigInt(pageId)),
   };

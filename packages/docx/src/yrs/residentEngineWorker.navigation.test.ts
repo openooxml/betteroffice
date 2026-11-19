@@ -13,6 +13,7 @@ import { releaseResidentSelectionReads } from './residentCommandSelection';
 import { cellSelectionHeadPosition } from './residentCommandTableSelection';
 import { ResidentSessionFonts } from './residentFontEnvironment';
 import { releaseResidentDisplayListQueries, residentDisplayListQueries } from './residentDisplayListQueries';
+import { StagedEchoPages } from './residentStagedEcho';
 import type { DocxCommandApplyContext, DocxCommandEnvelope, DocxCommandIntent, DocxCommandHooks, DocxCommandHooksFactory, DocxCommandHostOptions, DocxCommandInitRequest } from './residentCommandProtocol';
 
 const releasesAfterTest: (() => void)[] = [];
@@ -191,7 +192,7 @@ function splitRowWorker(direction: 'up' | 'down', queryEngine?: RustDisplayListQ
     loadRustDisplayListQueryEngine: async () => {}, loadedRustDisplayListQueryEngine: () => queryEngine,
     residentDisplayListQueries: (owner: object, list: RetainedFrame['displayList']): queryModule.DisplayListQueries =>
       residentDisplayListQueries(owner, list, options.productionHooks ? undefined : harnessQueries),
-    releaseResidentDisplayListQueries,
+    releaseResidentDisplayListQueries, StagedEchoPages,
     applyFrameDelta: (_frame: RetainedFrame, next: RetainedFrame) => next,
     decodeFrameDelta: (next: RetainedFrame) => next,
     retainedPageByKey: (current: RetainedFrame, pageId: string) => retainedFramePageById(current, BigInt(pageId)),

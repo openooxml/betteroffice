@@ -740,7 +740,9 @@ test('selection noop sends its retained echo context before building the deferre
   w.harness.projectEchoContext = ({ layout }) => {
     projected.push(layout.frame.frameEpoch);
     return { page, frameEpoch: layout.frame.frameEpoch, layoutRevision: 1, serializedBytes: 100, text: 'ab',
-      styleRuns: [], boundaries: [], damage: [], selection: { anchorGrapheme: 1, focusGrapheme: 1 },
+      styleRuns: [], boundaries: [], selection: { anchorGrapheme: 1, focusGrapheme: 1 },
+      damage: [{ page, rect: { x: 0, y: 0, width: 100, height: 20 },
+        backgroundId: `${layout.frame.frameEpoch}:1:echo`, omittedPrimitiveIds: [] }],
       transform: [1, 0, 0, 1, 0, 0], shaping: 'simple-ltr', glyphs: {
         glyphSet: 'set', fontId: 1, size: 12, color: '#000', x: 0, y: 14, next: '', right: 100,
         device: { x: 0, y: 0, width: 100, height: 20 }, pixelRatio: 1,

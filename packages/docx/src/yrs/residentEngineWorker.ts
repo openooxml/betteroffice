@@ -21,6 +21,7 @@ import { currentSelectionRange, readCommandStickyPosition } from './residentComm
 import { projectCommandEchoContext } from './residentCommandViewProjection';
 import { EchoGlyphSources, type EchoGlyphEngine } from './residentEchoGlyphSource';
 import { echoBackgroundPage, stageCommandPresentation } from './residentCommandPresentation';
+import { StagedEchoPages } from './residentStagedEcho';
 import { registerCommandFonts } from './residentCommandFonts';
 import { residentSourceMetadata, validateResidentSource, type DocxSourceOpenRequest, type DocxSourcePreviewOptions } from './residentSource';
 import { decodeDocxHostJson } from './yrsSessionFacade';
@@ -604,6 +605,7 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
     }
   };
   let revision = 0;
+  const stagedEcho = new StagedEchoPages();
   const host = createResidentCommandHost({
     init,
     registry: { handlers: {}, policies: {} },
@@ -617,7 +619,8 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
           layout: { frame: retainedFrame, layoutRevision },
           glyphs: echoGlyphState.sources.provider(offscreenDpr * offscreenZoom, true),
         });
-        return projected?.glyphs ? projected : undefined;
+        return projected?.glyphs
+          ? stagedEcho.reuse(projected, retainedFrame, layoutRevision, offscreenDpr * offscreenZoom) : undefined;
       },
       deferFrame(ack) { deferredSelectionFrames.add(ack); },
     },
@@ -788,6 +791,9 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
         const relaid = layoutDirty;
         if (relaid) extras = frameExtras();
         layoutDirty = false;
+        const selectionStep = selectionOnly ||
+          (!!selectionContext && !full && !relaid && !updates.length && !pages.length && !viewport);
+        let enteredPages: readonly number[] = [];
         const preceding: Uint8Array[] = selectionOnly ? selectionFrames : [];
         let reuseGeometry = selectionOnly;
         const geometryPages = new Set<number>();
@@ -929,6 +935,7 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
           if (caretPage !== undefined) keep.add(caretPage);
           for (let index = start; index < Math.min(end, retainedFrame.pages.length); index += 1) keep.add(index);
           const entering = [...keep].filter((index) => retainedFrame!.pages[index]?.page.unbuilt);
+          enteredPages = entering;
           if (entering.length) {
             first ??= finalized.delta;
             preceding.push(finalized.bytes);
@@ -966,7 +973,11 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
         if (viewport && !scaleOnlyViewport) {
           for (let index = viewport.start; index < Math.min(viewport.end, layout.frame.pages.length); index += 1) requestedPages.add(index);
         }
-        if ((frameWindow || viewport) && caretPage !== undefined && !scaleOnlyViewport) requestedPages.add(caretPage);
+        const caretPageId = caretPage === undefined ? undefined : layout.frame.pages[caretPage]?.pageId.toString();
+        if ((frameWindow || viewport) && caretPage !== undefined && !scaleOnlyViewport && (!selectionStep || probed ||
+          enteredPages.includes(caretPage) || (caretPageId !== undefined && pendingOffscreenPageIds.has(caretPageId)))) {
+          requestedPages.add(caretPage);
+        }
         if (!glyphCache) glyphCache = new GlyphCache({ provider: (fontId, glyphId) => engine.outlineGlyphJson(fontId, glyphId) });
         const pixelRatio = offscreenDpr * offscreenZoom;
         const echoRaster = changes.echoRaster;
@@ -976,10 +987,14 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
           engine: engine as DocxWorkerCommandEngine, selection: hooks.selection(), layout,
           glyphs: echoGlyphs.provider(pixelRatio),
         });
-        if (selectionContext && projectedEcho?.glyphs) requestedPages.add(projectedEcho.page.pageIndex);
-        const echoContext = projectedEcho?.glyphs && (full || requestedPages.has(projectedEcho.page.pageIndex) ||
+        const heldEcho = projectedEcho?.glyphs && !full && !requestedPages.has(projectedEcho.page.pageIndex) &&
+          !pendingOffscreenPageIds.has(projectedEcho.page.pageId)
+          ? stagedEcho.reuse(projectedEcho, layout.frame, layoutRevision, pixelRatio) : undefined;
+        if (selectionContext && projectedEcho?.glyphs && !heldEcho) requestedPages.add(projectedEcho.page.pageIndex);
+        const stagedEchoContext = projectedEcho?.glyphs && (full || requestedPages.has(projectedEcho.page.pageIndex) ||
           pendingOffscreenPageIds.has(projectedEcho.page.pageId))
           ? projectedEcho : undefined;
+        const echoContext = stagedEchoContext ?? heldEcho;
         const echoGlyphSets = echoGlyphs.unsent(echoContext);
         const images = new Map<string, ImageBitmap>();
         const failedImages = new Set<string>();
@@ -1034,7 +1049,7 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
           return [{ pageId, pageIndex: retained.pageIndex }];
         });
         const presentation = await stageCommandPresentation({
-          layout, pixelRatio, echoContext,
+          layout, pixelRatio, echoContext: stagedEchoContext,
           pages: stagedPages,
           async rasterizePage(page) {
             const retained = retainedPageByKey(layout.frame, page.pageId);
@@ -1055,6 +1070,7 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
             return buffer.transferToImageBitmap();
           },
         }).finally(() => { for (const image of images.values()) image.close(); });
+        stagedEcho.record(presentation.value, layout.frame, layoutRevision, pixelRatio, stagedEchoContext, full);
         if (echoContext) changes.echoRaster = { pageId: echoContext.page.pageId, pixelRatio };
         else if (stagedPages.some((page) => page.pageId === echoRaster?.pageId)) changes.echoRaster = undefined;
         for (const page of stagedPages) pendingOffscreenPageIds.delete(page.pageId);
