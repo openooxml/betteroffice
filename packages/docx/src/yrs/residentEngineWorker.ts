@@ -1277,7 +1277,8 @@ function replyCommandWithFrame(id: number, result: DocxCommandReply): void {
       return;
     }
     const frame = isTransferResult(rendered) ? rendered.value : rendered;
-    reply({ id, ok: true, commandAck: { ...ack, frame } },
+    const { echoContext: _early, ...withoutContext } = ack;
+    reply({ id, ok: true, commandAck: { ...(frame.payload.echoContext ? withoutContext : ack), frame } },
       [...(isTransferResult(result) ? result.transfer : []), ...(isTransferResult(rendered) ? rendered.transfer : [])]);
   }).catch((error: unknown) => commandFrameFailed(id, host, error));
 }
