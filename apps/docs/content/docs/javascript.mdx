@@ -229,8 +229,11 @@ dialog or a content control. A pointer press anywhere outside the toolbar, mouse
 pen or touch, dismisses it for the current selection, also when that press keeps
 the selection, as on an editor toolbar menu; it comes back once the selection
 changes and settles. A press inside it keeps it. `Alt+F10` (its command
-`plugin:betteroffice.mini-toolbar/focus`) moves focus into it, and Escape there
-dismisses it for that selection and returns focus to the document:
+`plugin:betteroffice.mini-toolbar/focus`) moves focus into it; it is never a Tab
+stop. Escape there dismisses it for that selection and returns focus to the
+document, and before it hides with focus inside it hands focus back first. When the
+editor cannot take focus back, Escape and Tab keep their browser behaviour and the
+toolbar stays until focus leaves it:
 
 ```tsx
 import { DocxEditor } from "@betteroffice/docx-react";
