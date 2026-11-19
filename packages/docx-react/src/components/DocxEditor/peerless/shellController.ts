@@ -60,7 +60,7 @@ export interface WorkerCommentDraft { binding: PeerlessEditSessionBinding; selec
 export type WorkerCommentAction = { kind: 'add'; draft: WorkerCommentDraft; text: string } | { kind: 'reply'; id: number; text: string } |
   { kind: 'resolve' | 'reopen' | 'delete'; id: number };
 
-interface Options extends Pick<DocxEditorProps, 'i18n' | 'theme' | 'mode' | 'readOnly' | 'allowHostProposals' | 'onDocumentChange' | 'onSelectionChange' | 'onCommentsChange' | 'onCommentAdd' | 'onCommentResolve' | 'onCommentDelete' | 'onCommentReply' | 'onError' | 'onSave' | 'showFileOpen' | 'showHelpMenu' | 'author' | 'onModeChange' | 'fontFamilies' | 'onFontsLoaded' | 'onFirstPagePainted' | 'onMemoryPressure' | 'memoryBudget'> {
+interface Options extends Pick<DocxEditorProps, 'i18n' | 'theme' | 'mode' | 'readOnly' | 'allowHostProposals' | 'onDocumentChange' | 'onSelectionChange' | 'onCommentsChange' | 'onCommentAdd' | 'onCommentResolve' | 'onCommentDelete' | 'onCommentReply' | 'onError' | 'onSave' | 'showFileOpen' | 'showHelpMenu' | 'author' | 'onModeChange' | 'fontFamilies' | 'onFontsLoaded' | 'onFirstPagePainted' | 'onReady' | 'onMemoryPressure' | 'memoryBudget'> {
   reviewTimeoutMs?: number;
   openTimeoutMs?: number;
   imagePropertiesAvailable?: boolean;
@@ -177,7 +177,7 @@ export function createPeerlessShellController(initial: Options) {
     if (shellChanged) for (const listener of shellListeners) listener();
     for (const wait of [...waits]) wait();
   };
-  const painted = () => { if (firstPainted) return; firstPainted = true; emit(options.onFirstPagePainted, undefined); };
+  const painted = () => { if (firstPainted) return; firstPainted = true; emit(options.onFirstPagePainted, undefined); emit(options.onReady, ref); };
   const reportMemory = () => {
     const stats = memoryStats();
     const next = memoryPressureLevel(stats, options.memoryBudget);

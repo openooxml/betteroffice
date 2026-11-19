@@ -492,6 +492,11 @@ export interface DocxEditorBaseProps extends DocxEditorPluginProps {
    */
   onFirstPagePainted?: () => void;
   /**
+   * Called once per document on the worker editor, right after {@link onFirstPagePainted},
+   * with the api the ref exposes.
+   */
+  onReady?: (api: DocxEditorRef) => void;
+  /**
    * Unmanaged overlay content, drawn under managed plugin overlays.
    * @deprecated Contribute an `overlay` through `plugins` instead.
    */
