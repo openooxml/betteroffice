@@ -454,7 +454,6 @@ export function HyperlinkPopup({
         <GlobeIcon />
       </span>
 
-      {/* Clickable URL; the ScreenTip, when the link has one, shows under it and on hover */}
       <span style={LINK_STACK_STYLE}>
         <a
           href={data.href}
