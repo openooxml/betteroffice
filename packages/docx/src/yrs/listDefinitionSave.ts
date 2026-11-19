@@ -73,17 +73,30 @@ export function createdListKey(properties: Record<string, unknown>): string | un
   return typeof listDef.key === 'string' && recorded === numId ? listDef.key : undefined;
 }
 
+/** `change`, a property change, with the `numPr` of its earlier formatting marked when that names a created list. */
+function markEarlierCreatedList<T>(change: T): T {
+  const previous = isRecord(change) ? change.previousFormatting : undefined;
+  if (!isRecord(previous) || !isRecord(previous.numPr)) return change;
+  const key = createdListKey(previous);
+  if (key === undefined) return change;
+  return { ...change, previousFormatting: { ...previous, numPr: { ...previous.numPr, [CREATED_LIST]: key } } };
+}
+
 /**
- * `paragraph`, projected from `properties`, with its `numPr` recognisable to a save as that of the
- * created list it is on; it keeps the numId earlier versions read until a save gives the list its
- * own.
+ * `paragraph`, projected from `properties`, with its `numPr`, and the earlier `numPr` of each of its
+ * property changes, recognisable to a save as that of the created list it names; each keeps the
+ * numId earlier versions read until a save gives the list its own.
  */
 export function markCreatedListParagraph(paragraph: Paragraph, properties: Record<string, unknown>): Paragraph {
   const key = createdListKey(properties);
   const numPr = paragraph.formatting?.numPr;
-  if (key === undefined || numPr === undefined) return paragraph;
-  const marked = { ...numPr, [CREATED_LIST]: key } as typeof numPr;
-  return { ...paragraph, formatting: { ...paragraph.formatting, numPr: marked } };
+  const changes = paragraph.propertyChanges?.map(markEarlierCreatedList);
+  const marked = changes?.some((change, index) => change !== paragraph.propertyChanges![index])
+    ? { ...paragraph, propertyChanges: changes }
+    : paragraph;
+  if (key === undefined || numPr === undefined) return marked;
+  const markedNumPr = { ...numPr, [CREATED_LIST]: key } as typeof numPr;
+  return { ...marked, formatting: { ...marked.formatting, numPr: markedNumPr } };
 }
 
 /**
