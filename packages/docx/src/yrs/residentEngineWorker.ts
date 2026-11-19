@@ -14,7 +14,7 @@ import { isCommandOutcomeUnknownError } from '../../../../shared/office-session/
 import { isTransferResult, type TransferResult } from '../../../../shared/office-session/protocol';
 import { SessionFailure } from '../../../../shared/office-session/types';
 import { buildCommandFrame, exactFrameBuffer, packResidentFrame } from './residentCommandFrame';
-import { createResidentCommandHost } from './residentCommandHost';
+import { createResidentCommandHost, isSelectionStepCommand } from './residentCommandHost';
 import { createResidentDocxCommandHooks } from './residentCommandActions';
 import { readDocxSelectionFocus, releaseResidentSelectionReads } from './residentCommandSelection';
 import { currentSelectionRange, readCommandStickyPosition } from './residentCommandAnchors';
@@ -35,6 +35,7 @@ import type {
   DocxCommandEnvelope,
   DocxCommandFramePayload,
   DocxCommandPageIdentity,
+  DocxCommandReply,
   DocxCommandSelection,
   DocxFrameReservations,
   DocxNavigationIntent,
@@ -199,6 +200,8 @@ let commandFrameChanges: {
     frameEpoch: number; docEpoch: number; layoutEpoch: number; documentVersion: string;
     layoutRevision: number; layoutInput: string; extras: string; pixelRatio: number;
     provisional: boolean; parts: ReturnType<ResidentEngineSession['partGeometry']>;
+    /** Main holds object geometry for this frame; `selectedImage` when a picture in it is selected. */
+    objects: boolean; selectedImage: boolean;
   };
   selectionContext?: boolean;
   /** The document changed outside a command and its layout has not followed yet. */
@@ -1089,6 +1092,13 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
             ...retainedFrame!, pages: [...geometryPages].map(index => retainedFrame!.pages[index]!),
           })].sort((a, b) => a.pageIndex - b.pageIndex);
         }
+        const readOnly = hooks.editState().readOnly;
+        const selectsOneUnit = !!selected && selected.anchor.story === selected.focus.story &&
+          selected.anchor.paraId === selected.focus.paraId && Math.abs(selected.anchor.offset - selected.focus.offset) === 1;
+        const geometryKept = selectionOnly && reuseGeometry && !geometryPages.size && !shown.layoutProvisional && !readOnly &&
+          publishedGeometry!.objects && !publishedGeometry!.selectedImage && !selectsOneUnit;
+        const geometry = geometryKept || readOnly || shown.layoutProvisional ? undefined
+          : await readResidentFrameGeometry(engine, retainedFrame!, selected, layoutRevision);
         const built = buildCommandFrame({
           frame: finalized.bytes,
           metadata: first
@@ -1101,8 +1111,7 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
             ? readDocxSelectionFocus(engine, selected, layout) ?? undefined : undefined,
           ...(fonts.snapshot ? { fontEnvironment: fonts.snapshot } : {}),
           parts,
-          geometry: hooks.editState().readOnly || shown.layoutProvisional ? undefined
-            : await readResidentFrameGeometry(engine, retainedFrame!, hooks.selection(), layoutRevision),
+          ...(geometry ? { geometry } : {}), ...(geometryKept ? { geometryKept: true as const } : {}),
           ...shown, echoContext, ...(echoGlyphSets.length ? { echoGlyphSets } : {}), stagedPresentation: presentation.value,
           ...(laidOutReservations ? { reservations: laidOutReservations } : {}),
         });
@@ -1112,6 +1121,8 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
           frameEpoch: retainedFrame!.frameEpoch, docEpoch: retainedFrame!.docEpoch, layoutEpoch: retainedFrame!.layoutEpoch,
           documentVersion, layoutRevision, layoutInput: init.layoutInput, extras, pixelRatio,
           provisional: prefix !== null, parts,
+          objects: geometryKept || geometry !== undefined,
+          selectedImage: !geometryKept && !!geometry?.objects.some((object) => object.kind === 'image' && object.selected === true),
         };
         changes.reviewFrame = { frameEpoch: retainedFrame!.frameEpoch, previewVersion: framePreviewVersion };
         pendingUpdates = [];
@@ -1235,14 +1246,31 @@ function postCommandFrame(
       ...(frame.payload.pageFrames ? { pageFrames: [...frame.payload.pageFrames, frame.payload.frame] } : {}),
       commandFrame: { session: init.session, incarnation: init.incarnation, epoch: init.epoch, frame },
     }, [...transfer, ...(isTransferResult(result) ? result.transfer : [])]);
-  }).catch((error: unknown) => {
+  }).catch((error: unknown) => commandFrameFailed(id, host, error));
+}
+
+/** Answers `id` with the ack in `result` and the next command frame on it, in one message. */
+function replyCommandWithFrame(id: number, result: DocxCommandReply): void {
+  const host = requireCommandHost();
+  const ack = isTransferResult(result) ? result.value : result;
+  void host.frame().then((rendered) => {
     if (commandHost !== host) {
       replyFailure(id, new SessionFailure('disposed', 'Worker command document was replaced'));
       return;
     }
-    reply({ id, ok: false, terminal: true, error: error instanceof Error ? error.message : String(error),
-      failureCode: error instanceof SessionFailure ? error.code : 'message' });
-  });
+    const frame = isTransferResult(rendered) ? rendered.value : rendered;
+    reply({ id, ok: true, commandAck: { ...ack, frame } },
+      [...(isTransferResult(result) ? result.transfer : []), ...(isTransferResult(rendered) ? rendered.transfer : [])]);
+  }).catch((error: unknown) => commandFrameFailed(id, host, error));
+}
+
+function commandFrameFailed(id: number, host: DocxCommandHost, error: unknown): void {
+  if (commandHost !== host) {
+    replyFailure(id, new SessionFailure('disposed', 'Worker command document was replaced'));
+    return;
+  }
+  reply({ id, ok: false, terminal: true, error: error instanceof Error ? error.message : String(error),
+    failureCode: error instanceof SessionFailure ? error.code : 'message' });
 }
 let positionIndex: { session: ResidentEngineSession; index: DisplayPositionIndex } | null = null;
 
@@ -1794,13 +1822,19 @@ async function handle(request: ScheduledRequest): Promise<void> {
   }
   if (request.type === 'edit') {
     if (!commandLayout) await completeProvisionalLayout();
-    noteDocumentChange();
-    fontRequirements = null;
-    completedLayout = null;
+    if (!isSelectionStepCommand(request.command.kind)) {
+      noteDocumentChange();
+      fontRequirements = null;
+      completedLayout = null;
+    }
     const result = await requireCommandHost().handler(undefined, request.command);
-    replyCommand(request.id, 'commandAck', result);
     const ack = isTransferResult(result) ? result.value : result;
-    if (deferredSelectionFrames.delete(ack)) postCommandFrame(0);
+    if (!deferredSelectionFrames.delete(ack)) replyCommand(request.id, 'commandAck', result);
+    else if (scheduler.pending().foreground === 0) replyCommandWithFrame(request.id, result);
+    else {
+      replyCommand(request.id, 'commandAck', result);
+      postCommandFrame(0);
+    }
     return;
   }
   if (request.type === 'checkpoint') {

@@ -166,32 +166,15 @@ export function intent(seq: number, version: number, kind: string, payload: Docx
 }
 
 async function editWithFrame(client: ResidentEngineWorkerClient, command: DocxCommandEnvelope): Promise<DocxCommandAck> {
-  let resolveFrame!: (frame: DocxCommandFrame) => void;
-  const deferred = new Promise<DocxCommandFrame>((resolve) => { resolveFrame = resolve; });
-  const unsubscribe = client.onFrame((frame) => {
-    if (frame.coversThroughSeq === command.seq) resolveFrame(frame);
-  });
-  let timeout: ReturnType<typeof setTimeout> | undefined;
-  try {
-    const ack = await client.edit(command);
-    if (ack.frame) return ack;
-    expect(['select', 'navigate', 'selectPoint', 'extendSelection', 'selectTableCells', 'navigateCell']).toContain(command.kind);
-    expect(ack.outcomes[0]?.status).toBe('noop');
-    expect(ack.throughSeq).toBe(command.seq);
-    const frame = await Promise.race([
-      deferred,
-      new Promise<never>((_, reject) => {
-        timeout = setTimeout(() => reject(new Error(`Missing command frame through seq ${ack.throughSeq}`)), 5_000);
-      }),
-    ]);
-    expect(frame.coversThroughSeq).toBe(ack.throughSeq);
-    expect(frame.revision).toBe(decodeFrameDelta(frame.payload.frame).frameEpoch);
-    expect(frame.payload.caret.frameEpoch).toBe(frame.revision);
-    return { ...ack, frame };
-  } finally {
-    if (timeout !== undefined) clearTimeout(timeout);
-    unsubscribe();
+  const ack = await client.edit(command);
+  const frame = ack.frame;
+  expect(frame, `the ack of ${command.kind} ${command.seq} carries its frame`).toBeDefined();
+  if (['select', 'navigate', 'selectPoint', 'extendSelection', 'selectTableCells', 'navigateCell'].includes(command.kind)) {
+    expect(frame!.coversThroughSeq).toBe(ack.throughSeq);
+    expect(frame!.revision).toBe(decodeFrameDelta(frame!.payload.frame).frameEpoch);
+    expect(frame!.payload.caret.frameEpoch).toBe(frame!.revision);
   }
+  return ack;
 }
 
 function frameText(frame: RetainedFrame): string {
@@ -4175,12 +4158,16 @@ test('resident geometry, object rects and selection after inline controls match 
       .toEqual(sorted(images.map(position => located([queries.imageByPos(position, 'body')!.rect]))));
 
     const end = layout.find(block => block.paraId === '00000004')!.runs!.find(run => run.text === 'End')!;
-    const selected = await editWithFrame(client, intent(1, 0, 'select', { selection: {
+    const selection = {
       anchor: { story: 'body', paraId: '00000004', offset: 6 }, focus: { story: 'body', paraId: '00000004', offset: 9 },
-    } }));
+    };
+    const selected = await editWithFrame(client, intent(1, 0, 'select', { selection }));
     const expected = located(queries.rangeRects(end.pmStart!, end.pmEnd!));
     expect(expected.length).toBeGreaterThan(0);
-    expect(selected.frame!.payload.geometry!.selection).toEqual(expected);
+    expect(selected.frame!.payload.geometryKept).toBe(true);
+    expect(located(selected.frame!.payload.selectionRects!)).toEqual(expected);
+    const { readResidentFrameGeometry } = await import('./residentObjectGeometry');
+    expect((await readResidentFrameGeometry(engine, frame, selection, selected.frame!.payload.layoutRevision)).selection).toEqual(expected);
   } finally { queries.dispose(); client.destroy(); }
 }, TIMEOUT);
 

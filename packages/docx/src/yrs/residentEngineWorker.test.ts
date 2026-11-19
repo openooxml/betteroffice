@@ -712,7 +712,7 @@ test('font decoding initializes the resident engine before open and transfers fo
   expect(w.harness.sessionsCreated).toBe(0);
 });
 
-test('selection noop sends its retained echo context before building the deferred frame', async () => {
+test('selection noop answers in one message carrying its retained echo context and its frame', async () => {
   const arm = await commandWorker();
   const { client, w } = arm;
   const at = { story: 'body', paraId: 'p', offset: 1 };
@@ -751,35 +751,31 @@ test('selection noop sends its retained echo context before building the deferre
   try {
     const initial = await client.commandInit(COMMAND_INIT);
     projected.length = 0;
-    let ackSent = false;
     let builds = 0;
     const build = w.harness.session.buildDisplayListFrame;
     w.harness.session.buildDisplayListFrame = (...args: Parameters<typeof build>) => {
-      expect(ackSent).toBe(true);
       builds += 1;
       return build(...args);
     };
     w.harness.session.buildDisplayPagesFrame = (pages: number[]) => {
-      expect(ackSent).toBe(true);
       builds += 1;
       const { docEpoch, layoutEpoch } = w.harness.delta!;
       w.delta(pages.map(index => index + 1), false, 100, 1);
       Object.assign(w.harness.delta!, { docEpoch, layoutEpoch });
       return new Uint8Array([w.harness.delta!.frameEpoch]);
     };
+    const answered: DocxEngineWorkerResponse[] = [];
     const post = w.scope.postMessage;
     w.scope.postMessage = (response, transfer) => {
-      if (response.ok && response.commandAck) {
-        expect(projected).toEqual([initial.frame.revision]);
-        ackSent = true;
-      }
+      if (response.ok && (response.commandAck || response.commandFrame)) answered.push(response);
       post(response, transfer);
     };
-    const pushed = new Promise<DocxCommandFrame>(resolve => client.onFrame(resolve));
     const ack = await client.edit({ ...commandEnvelope(1), kind: 'selectPoint', payload: {} });
-    expect(ack.frame).toBeUndefined();
+    expect(answered).toHaveLength(1);
+    expect(projected[0]).toBe(initial.frame.revision);
     expect(ack.echoContext).toMatchObject({ frameEpoch: initial.frame.revision, selection: { focusGrapheme: 1 } });
-    expect((await pushed).coversThroughSeq).toBe(1);
+    expect(ack.frame?.coversThroughSeq).toBe(1);
+    expect(ack.frame!.payload.echoContext).toMatchObject({ frameEpoch: initial.frame.revision });
     expect(builds).toBe(1);
   } finally { client.destroy(); }
 });

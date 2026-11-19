@@ -31,7 +31,7 @@ import { createDocxCommandConnection, discardCommandPresentation, SessionFailure
 import type { DocxEditorProps, DocxEditorRef } from '../../DocxEditor';
 import { createPeerlessShellController } from './shellController';
 import { registerTableActionExecutor } from './browserHarness';
-import { frameGeometry, type PreparedFrameGeometry } from './commandPageGeometry';
+import { frameGeometry, keptFrameObjects, type PreparedFrameGeometry } from './commandPageGeometry';
 import { createDocxPluginHost, type DocxPluginHost } from '../../../plugins/createDocxPluginHost';
 import { usePluginReservations } from '../../../plugins/reservations';
 import { DocxCommandProvider } from '../../../commands/DocxCommandProvider';
@@ -489,6 +489,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   }, [owned]);
   const identity = useRef<PeerlessViewIdentity | null>(null);
   const retained = useRef<RetainedFrame | null>(null);
+  const retainedObjects = useRef<PeerlessFrameGeometry['objects']>(undefined);
   const pageIndexes = useRef(new Map<string, number>());
   const prepared = useRef(new WeakMap<DocxCommandFrame, PreparedFrameGeometry>());
   const geometrySources = useRef(new WeakMap<PeerlessFrameGeometry, PreparedFrameGeometry>());
@@ -801,6 +802,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         epoch: connection.initial.epoch,
       };
       retained.current = null;
+      retainedObjects.current = undefined;
       pageIndexes.current = new Map();
       prepared.current = new WeakMap();
       geometrySources.current = new WeakMap();
@@ -1056,10 +1058,12 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       if (!next) return undefined;
       const caret = residentCaretSnapshotForFrame(frame.payload.caret, next);
       if (!caret) return undefined;
-      const geometry = frameGeometry({ frame, retained: next, caret, identity: identity.current }, rasterScale);
+      const keptObjects = keptFrameObjects(retainedObjects.current, frame, next);
+      const geometry = frameGeometry({ frame, retained: next, caret, identity: identity.current, keptObjects }, rasterScale);
       retained.current = next;
+      retainedObjects.current = geometry.objects;
       pageIndexes.current = new Map(next.pages.map(({ pageId, pageIndex }) => [pageId.toString(), pageIndex]));
-      const source = { frame, retained: next, caret, identity: identity.current, geometry };
+      const source = { frame, retained: next, caret, identity: identity.current, keptObjects, geometry };
       prepared.current.set(frame, source);
       geometrySources.current.set(geometry, source);
       return geometry;
