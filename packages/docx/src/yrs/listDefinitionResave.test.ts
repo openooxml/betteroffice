@@ -369,6 +369,32 @@ describe('created definitions no paragraph names', () => {
   });
 });
 
+describe('a tracked change of a created list', () => {
+  test('the earlier formatting a tracked change keeps names the created list under its saved id', async () => {
+    const created = await session();
+    created.seedFromDocx(makeDocx(DOCUMENT, LISTS_NUMBERING));
+    createList(created, 'Alpha', 'numbered');
+    const alpha = () => created.paragraphs('body').find(entry => entry.text === 'Alpha')!;
+    const key = createdListKey(alpha().properties);
+    expect(key).toBeDefined();
+    const paraId = alpha().paraId;
+    created.setParagraphAttrs({ story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 0 } }, {
+      numPr: null, listIsBullet: null, listNumFmt: null, listMarker: null, other: { listDef: null },
+    }, { name: 'Ada', date: '2026-01-01T00:00:00Z' });
+    const bytes = (await saveYrsDocx(created, { updateModifiedDate: false })).bytes;
+    const document = text(unzipContainer(bytes)['word/document.xml']);
+    const saved = (document.match(/<w:p\b[\s\S]*?<\/w:p>/g) ?? []).find(entry => entry.includes('>Alpha<')) ?? '';
+    const change = /<w:pPrChange\b[\s\S]*?<\/w:pPrChange>/.exec(saved)?.[0] ?? '';
+    const earlier = attribute(change, /<w:numId w:val="(\d+)"/);
+    expect(earlier).toBeGreaterThan(3);
+    expect(savedFormat(bytes, earlier)).toBe('decimal');
+    const revision = created.listRevisions().find(entry => entry.kind === 'pPrChange');
+    expect(revision).toBeDefined();
+    created.rejectChange({ revisionId: revision!.revisionId });
+    expect(createdListKey(alpha().properties)).toBe(key);
+  });
+});
+
 describe('a paragraph that joins a created list without its numPr changing', () => {
   const ITEM = `<w:document xmlns:w="${W}"><w:body>${[
     paragraph('Lead'), paragraph('Item', 1), paragraph('Tail'),
