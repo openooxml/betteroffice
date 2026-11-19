@@ -2,6 +2,7 @@ import { deepStrictEqual } from 'node:assert';
 import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 
+import { docx } from './docx';
 import { pptx } from './pptx';
 import { xlsx } from './xlsx';
 
@@ -32,7 +33,7 @@ export interface Format {
   versionPattern?: RegExp;
 }
 
-export const formats: Record<string, Format> = { xlsx, pptx };
+export const formats: Record<string, Format> = { xlsx, pptx, docx };
 const DEFAULT_VERSION_PATTERN = /^[0-9a-f]{32}-[0-9]+$/;
 const root = new URL('../../', import.meta.url);
 
