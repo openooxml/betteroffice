@@ -480,9 +480,11 @@ test('the aggregate counts a roundtrip stage or a font reason outside the fixed 
 });
 
 test('a font count that is not a non-negative integer fails naming the job and the field, never the value', () => {
-  for (const [field, value] of [['loaded', 'host-a'], ['failed', -3]] as const) {
+  for (const [field, value] of [['unattributed.loaded', 'host-a'], ['unattributed.failed', -3], ['advertised', 1e20], ['advertised', -3]] as const) {
     const input = fontsReport();
-    (input.samples[1] as any).comparisons[0].fonts.unattributed = { loaded: 0, failed: 0, [field]: value };
+    const fonts = (input.samples[1] as any).comparisons[0].fonts;
+    if (field === 'advertised') fonts.advertised = value;
+    else fonts.unattributed = { loaded: 0, failed: 0, [field.split('.')[1]]: value };
     let message = '';
     try {
       aggregateReport(input);
@@ -490,7 +492,7 @@ test('a font count that is not a non-negative integer fails naming the job and t
       message = (error as Error).message;
     }
     expect(message).toContain('docx measure job');
-    expect(message).toContain(`fonts.unattributed.${field}`);
+    expect(message).toContain(`fonts.${field}`);
     expect(message.includes(String(value)) && String(value)).toBe(false);
   }
 });

@@ -186,6 +186,46 @@ class NativeBenchmarkTests(unittest.TestCase):
         for name in ['docx_benchmark.py', 'pptx_benchmark.py', 'xlsx_benchmark.py']:
             self.assertNotIn('platform.platform()', (Path(__file__).parent / name).read_text(), name)
 
+    def test_the_pptx_and_xlsx_shard_reports_record_no_runner_platform(self):
+        import pptx_benchmark
+        import xlsx_benchmark
+        for module, binary_name in [(pptx_benchmark, 'pptx-native-bench'), (xlsx_benchmark, 'xlsx-native-bench')]:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                output, native = root / 'output', root / 'native'
+                (output / 'fixture').mkdir(parents=True)
+                (output / 'fixture' / 'source.pptx').write_bytes(b'pptx fixture')
+                for channel, source in [('published', 'b' * 40), ('commit', 'a' * 40)]:
+                    binary = native / channel / binary_name
+                    binary.parent.mkdir(parents=True)
+                    binary.write_bytes(channel.encode())
+                    (binary.parent / 'build.json').write_text(json.dumps(dict(source_sha=source, binary_sha256=sha256(binary))))
+                sample = dict(id='fixture', metadata=dict(source=dict(sha256=sha256(output / 'fixture' / 'source.pptx')), reference_pages=[],
+                                                          calculation=dict(reference=dict(sha256='e' * 64))))
+                (output / 'job.json').write_text(json.dumps(dict(
+                    plan_sha256='c' * 64, shard=0, samples=[sample], source_sha='a' * 40, published_source_sha='b' * 40,
+                    method='fixture-v1', trials=1, published_version='0.5.1', absolute_tolerance=0, relative_tolerance=0)))
+                environment = dict(QUALITY_OUTPUT=str(output), QUALITY_NATIVE=str(native), QUALITY_FONTS=str(root / 'manifest.json'),
+                                   RUNNER_NAME='host-a', SOFFICE='libreoffice')
+                patches = [patch(f'{module.__name__}.execute', lambda command, **kwargs: (0, 'LibreOffice 26.2.3.2 ' + 'd' * 40)),
+                           patch(f'{module.__name__}.measure_sample', lambda *args, **kwargs: {channel: dict(status='ok') for channel in CHANNELS})]
+                if module is pptx_benchmark:
+                    patches += [patch('pptx_benchmark.font_environment', lambda *args: 'f' * 64),
+                                patch('pptx_benchmark.libreoffice_fidelity', lambda *args: dict(status='ok'))]
+                with patch.dict(os.environ, environment), \
+                        patch('platform.platform', lambda *args, **kwargs: 'Linux-host-a-x86_64-with-glibc'), patch('builtins.print'):
+                    for active in patches:
+                        active.start()
+                    try:
+                        module.main()
+                    finally:
+                        for active in patches:
+                            active.stop()
+                report = json.loads((output / 'report.json').read_text())
+                self.assertNotIn('platform', report['benchmark'], module.__name__)
+                self.assertNotIn('platform', report.get('runner', {}), module.__name__)
+                self.assertNotIn('host-a', json.dumps(report), module.__name__)
+
     def test_dimensions_and_nonblank_output_are_required(self):
         with tempfile.TemporaryDirectory() as directory:
             png = Path(directory) / 'page.png'

@@ -408,3 +408,30 @@ test('a private run puts only counts in the job summary and names no document in
     await rm(root, { recursive: true, force: true });
   }
 }, 60_000);
+
+test('a private run names a failed add-on in the job summary by its name only and keeps its error in the step log', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'native-chains-addon-'));
+  try {
+    const run = await failingChainsJob(root);
+    const latin = join(root, 'commit', 'node_modules', '@betteroffice', 'fonts-latin');
+    await mkdir(join(latin, 'assets'), { recursive: true });
+    await writeFile(join(latin, 'package.json'), JSON.stringify({ name: '@betteroffice/fonts-latin', version: '1.0.0', main: 'index.mjs' }));
+    await writeFile(join(latin, 'assets', 'manifest.json'), JSON.stringify({ faces: [] }));
+    await writeFile(join(latin, 'index.mjs'), "throw new Error('host-a could not read /tmp/x/runner/addon.js');\n");
+    const privateSummary = join(root, 'private.md');
+    const privateRun = run(privateSummary, { QUALITY_PRIVATE: 'true' });
+    expect(privateRun.status).not.toBe(0);
+    expect(privateRun.stdout).toContain('host-a could not read /tmp/x/runner/addon.js');
+    const summary = await readFile(privateSummary, 'utf8');
+    expect(summary).toContain('fonts-latin failed');
+    for (const leak of ['/tmp/x/runner/addon.js', 'host-a', 'could not read', 'failed to load']) {
+      expect(summary.includes(leak) && leak).toBe(false);
+      expect(privateRun.stderr.includes(leak) && leak).toBe(false);
+    }
+    const publicSummary = join(root, 'public.md');
+    expect(run(publicSummary, {}).status).not.toBe(0);
+    expect(await readFile(publicSummary, 'utf8')).toContain('fonts-latin 1.0.0 (failed: @betteroffice/fonts-latin@1.0.0 failed to load: host-a could not read /tmp/x/runner/addon.js)');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}, 60_000);
