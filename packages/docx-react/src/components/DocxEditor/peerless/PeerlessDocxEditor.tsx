@@ -491,6 +491,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     if (!owned.lifetime.acquire()) renewOwned(createOwned());
     return owned.lifetime.release;
   }, [owned]);
+  const readyFor = shellState.readyFor;
+  useEffect(() => { if (readyFor) controller.announceReady(readyFor); }, [controller, readyFor]);
   const identity = useRef<PeerlessViewIdentity | null>(null);
   const retained = useRef<RetainedFrame | null>(null);
   const retainedObjects = useRef<PeerlessFrameGeometry['objects']>(undefined);
