@@ -168,7 +168,8 @@ export function echoAutoSpace(left: string, right: string, size: number, off = 0
  * Places `text` as the engine lays out a cluster-positioned line that mixes fonts: each character
  * advances by its own face's shaped units (and the pair adjustment with the next character of the
  * same face), scaled in f32, widened by measurement's East Asian auto-spacing and letter spacing
- * in f32. Undefined when a character or a pair is outside its face's glyph set.
+ * in f32. Undefined when a character or a pair is outside its face's glyph set, or when letter
+ * spacing condenses a character to a negative advance.
  */
 export function placeEchoFaceGlyphs(
   line: EchoLineFaces, text: string, next: string, x: number
@@ -202,7 +203,8 @@ export function placeEchoFaceGlyphs(
     if (extra) advance = Math.fround(advance + extra);
     if (spacing) advance = Math.fround(advance + spacing);
     const widened = widenF32(advance);
-    if (!Number.isFinite(widened)) return undefined;
+    // a pen that moves left could leave the band the echo draws in, as in placeEchoGlyphs
+    if (!Number.isFinite(widened) || widened < 0) return undefined;
     placement.glyphIds.push(glyphs.set.glyphIds[left]!);
     placement.xs.push(echoRound3(pen));
     placement.advances.push(widened);

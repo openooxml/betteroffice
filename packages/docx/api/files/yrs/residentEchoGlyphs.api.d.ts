@@ -67,7 +67,8 @@ export declare function echoAutoSpace(left: string, right: string, size: number,
  * Places `text` as the engine lays out a cluster-positioned line that mixes fonts: each character
  * advances by its own face's shaped units (and the pair adjustment with the next character of the
  * same face), scaled in f32, widened by measurement's East Asian auto-spacing and letter spacing
- * in f32. Undefined when a character or a pair is outside its face's glyph set.
+ * in f32. Undefined when a character or a pair is outside its face's glyph set, or when letter
+ * spacing condenses a character to a negative advance.
  */
 export declare function placeEchoFaceGlyphs(line: EchoLineFaces, text: string, next: string, x: number): EchoGlyphPlacement | undefined;
 /** @internal Ink extent of a glyph outline in font units; undefined for a blank glyph. */

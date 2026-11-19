@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import type { DocxEchoGlyphSet } from './residentCommandProtocol';
-import { echoRound3, indexEchoGlyphSet, leadingWordWidth, outlineBounds, placeEchoGlyphs, widenF32 } from './residentEchoGlyphs';
+import { echoRound3, indexEchoGlyphSet, leadingWordWidth, outlineBounds, placeEchoFaceGlyphs, placeEchoGlyphs, widenF32 } from './residentEchoGlyphs';
 
 function glyphSet(overrides: Partial<DocxEchoGlyphSet> = {}): DocxEchoGlyphSet {
   const alphabet = 'AVabx ';
@@ -84,4 +84,12 @@ test('outline bounds cover every point and control point', () => {
     { t: 'Q', cx: 50, cy: 800, x: 90, y: 0 }, { t: 'Z' }] })))
     .toEqual({ upem: 1000, xMin: 10, xMax: 90, yMin: -20, yMax: 800 });
   expect(outlineBounds(JSON.stringify({ upem: 1000, cmds: [] }))).toBeUndefined();
+});
+
+test('mixed-font placement declines letter spacing that moves the pen left, as single-font placement does', () => {
+  const latin = indexEchoGlyphSet(glyphSet());
+  const line = (letterSpacing: number) => ({ sets: [latin], charFaces: [0, 0, 0], size: 13, letterSpacing: Math.fround(letterSpacing) });
+  const narrow = widenF32(Math.fround(1139 * latin.set.horizontal));
+  expect(placeEchoFaceGlyphs(line(-1), 'aab', '', 10)!.end).toBeLessThan(10 + 3 * narrow);
+  expect(placeEchoFaceGlyphs(line(-narrow - 1), 'aab', '', 10)).toBeUndefined();
 });
