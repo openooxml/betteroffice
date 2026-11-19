@@ -1688,7 +1688,10 @@ function sourceBreakBoundaries(paragraph: Paragraph | undefined): OriginalRunBou
         child.type === 'commentRangeStart' || child.type === 'commentRangeEnd' ||
         child.type === 'bookmarkStart' || child.type === 'bookmarkEnd' || child.type === 'rawXml'
       ) continue;
-      return [];
+      const span = inlineSpanText(child);
+      if (span === null) return [];
+      boundaries.push({ text: span });
+      continue;
     }
     let text = '';
     const breaks: NonNullable<OriginalRunBoundary['breaks']> = [];
@@ -1702,6 +1705,42 @@ function sourceBreakBoundaries(paragraph: Paragraph | undefined): OriginalRunBou
     boundaries.push({ text, breaks });
   }
   return boundaries;
+}
+
+/** The text a non-run child of a paragraph takes in the live story, or null when it cannot be told from the source. */
+function inlineSpanText(child: ParagraphContent): string | null {
+  switch (child.type) {
+    case 'simpleField':
+    case 'inlineSdt':
+    case 'mathEquation':
+      return '￼';
+    case 'complexField':
+      return [...(child.structuredCode?.inline ?? []), ...(child.structuredResult?.inline ?? [])]
+        .some((nested) => nested.type === 'hyperlink' || nested.type === 'simpleField')
+        ? null
+        : '￼';
+    case 'hyperlink':
+      return plainRunsText(child.structuredChildren ?? child.children);
+    case 'insertion':
+    case 'deletion':
+    case 'moveFrom':
+    case 'moveTo':
+      return plainRunsText(child.content);
+    default:
+      return null;
+  }
+}
+
+function plainRunsText(children: readonly unknown[]): string | null {
+  let text = '';
+  for (const child of children as ParagraphContent[]) {
+    if (child.type !== 'run') return null;
+    for (const entry of child.content) {
+      if (entry.type !== 'text') return null;
+      text += entry.text;
+    }
+  }
+  return text;
 }
 
 function liveRunBoundaries(
