@@ -1,0 +1,8 @@
+[
+  { "text": "ab cd ef", "width": 5, "runs": [{ "end": 3, "advance": 1 }, { "end": 8, "advance": 2 }], "lines": ["ab", "cd", "ef"] },
+  { "text": "ab cd ef", "width": 5, "runs": [{ "end": 8, "advance": 1 }], "lines": ["ab cd", "ef"] },
+  { "text": "abcdef", "width": 7, "runs": [{ "end": 2, "advance": 1 }, { "end": 6, "advance": 3 }], "lines": ["abc", "de", "f"] },
+  { "text": "aa\nbbb ccc", "width": 7, "runs": [{ "end": 3, "advance": 1 }, { "end": 10, "advance": 2 }], "lines": ["aa", "bbb", "ccc"] },
+  { "text": "AB CDE FG", "width": 35, "runs": [{ "end": 2, "advance": 5 }, { "end": 3, "advance": 5 }, { "end": 9, "advance": 10 }], "lines": ["AB", "CDE", "FG"] },
+  { "text": "x  \ny", "width": 10, "runs": [{ "end": 1, "advance": 4 }, { "end": 5, "advance": 1 }], "lines": ["x", "y"] }
+]

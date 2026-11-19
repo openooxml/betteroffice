@@ -116,6 +116,92 @@ function words(text: string): [number, number][] {
   return spans;
 }
 
+/**
+ * The `[start, end)` spans of the lines `wrapLines` breaks `text` into, by the same rules, with `measure` given the
+ * span to measure: the breaker of text painted in runs, whose widths are sums over the runs a span reaches into.
+ */
+export function wrapSpans(text: string, width: number, measure: (start: number, end: number) => number): [number, number][] {
+  const limit = Number.isNaN(width) ? Number.POSITIVE_INFINITY : width;
+  const spans: [number, number][] = [];
+  const body = text.endsWith('\n') ? text.slice(0, text.endsWith('\r\n') ? -2 : -1) : text;
+  const paragraphs = body.split('\n');
+  let at = 0;
+  paragraphs.forEach((raw, index) => {
+    const start = at;
+    at += raw.length + 1;
+    wrapSpanParagraph(text, start, start + (raw.endsWith('\r') ? raw.length - 1 : raw.length), limit, measure, spans);
+    const last = spans[spans.length - 1]!;
+    if (index < paragraphs.length - 1) last[1] = last[0] + text.slice(last[0], last[1]).replace(/ +$/, '').length;
+  });
+  return spans;
+}
+
+function wrapSpanParagraph(
+  text: string,
+  from: number,
+  to: number,
+  width: number,
+  measure: (start: number, end: number) => number,
+  spans: [number, number][],
+): void {
+  if (measure(from, to) <= width) {
+    spans.push([from, to]);
+    return;
+  }
+  let start = from;
+  let end: number | null = null;
+  const spanWords = words(text.slice(from, to)).map(([wordStart, wordEnd]): [number, number] => [from + wordStart, from + wordEnd]);
+  for (const [wordStart, wordEnd] of spanWords) {
+    if (end !== null) {
+      if (measure(start, wordEnd) <= width) {
+        end = wordEnd;
+        continue;
+      }
+      spans.push([start, end]);
+      start = wordStart;
+    }
+    end = wordEnd;
+    if (measure(start, wordEnd) <= width) continue;
+    const base = start;
+    const ends = graphemeEnds(text.slice(base, wordEnd)).map((offset) => base + offset);
+    let first = 0;
+    for (let fits = lastFittingSpan(start, ends, first, width, measure); fits !== null; ) {
+      spans.push([start, ends[fits]!]);
+      start = ends[fits]!;
+      first = fits + 1;
+      fits = lastFittingSpan(start, ends, first, width, measure);
+    }
+  }
+  spans.push([start, to]);
+}
+
+/** `lastFitting` with `measure` given the span to measure. */
+function lastFittingSpan(
+  start: number,
+  ends: number[],
+  first: number,
+  width: number,
+  measure: (start: number, end: number) => number,
+): number | null {
+  let fits = first;
+  let over: number;
+  for (let step = 1; ; step *= 2) {
+    const probe = Math.min(fits + step, ends.length - 1);
+    if (probe === fits) return null;
+    if (measure(start, ends[probe]!) > width) {
+      over = probe;
+      break;
+    }
+    fits = probe;
+  }
+  while (over - fits > 1) {
+    const mid = fits + Math.floor((over - fits) / 2);
+    if (measure(start, ends[mid]!) > width) over = mid;
+    else fits = mid;
+  }
+  return fits;
+}
+
 /** baseline of line `index` of `count`, from the single-line baseline `y`. */
 export function wrappedLineY(y: number, index: number, count: number, wrap: TextWrap): number {
   const last = Math.max(count - 1, 0);
