@@ -61,7 +61,7 @@ test('resident command edits leave a frozen envelope and its buffers untouched',
       const buffers = freezeDeep(command);
       expect(buffers.length).toBeGreaterThan(0);
       const ack = await connection.client.call.edit(command);
-      expect(ack.outcomes).toEqual([{ seq: command.seq, status: 'applied' }]);
+      expect(ack.outcomes).toMatchObject([{ seq: command.seq, status: 'applied' }]);
       expect(detachedBuffers(buffers)).toEqual([]);
     }
     expect(worker.received).toEqual(commands);

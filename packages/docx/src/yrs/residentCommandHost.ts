@@ -1,9 +1,11 @@
 import { createCommandHost } from '../../../../shared/office-session/commands/host';
-import { isCommandEnvelope } from '../../../../shared/office-session/commands/types';
+import { isCommandEnvelope, type CommandEffect } from '../../../../shared/office-session/commands/types';
 import { isTransferResult, transferable, type TransferResult } from '../../../../shared/office-session/protocol';
 import type {
   DocxCommandApplyContext,
   DocxCommandAck,
+  DocxCommandEffectState,
+  DocxCommandPayloads,
   DocxCommandFramePayload,
   DocxCommandPayload,
   DocxCommandReply,
@@ -44,6 +46,25 @@ export function createResidentCommandHost(options: DocxCommandHostOptions): Docx
   let selectionCause: 'remote' | undefined;
   const selections = new Map<number, DocxCommandSelection | null>(structuredClone(init.recoveryState?.selections ?? []));
   const selectionLimit = Math.max(256, options.retainedOutcomes ?? 256);
+  const effects = options.effects;
+  let issued = hooks.issuedPositions?.(Number.MAX_SAFE_INTEGER).count ?? 0;
+
+  function captureEffect(
+    stateVector: Uint8Array, before: ReturnType<NonNullable<DocxCommandHooks['commandState']>>
+  ): CommandEffect {
+    const after = hooks.commandState!();
+    const state = Object.fromEntries(Object.entries(after).filter(([key, value]) =>
+      !sameCommandState(before[key as keyof typeof before], value))) as DocxCommandEffectState;
+    const positions = hooks.issuedPositions?.(issued);
+    if (positions) {
+      issued = positions.count;
+      if (positions.entries.length) state.stickyPositions = positions.entries;
+    }
+    const update = effects!.updateSince(stateVector).slice().buffer;
+    const payload: DocxCommandPayloads['applyUpdate'] = Object.keys(state).length
+      ? { update, state: structuredClone(state) } : { update };
+    return { kind: 'applyUpdate', payload };
+  }
   const shared = createCommandHost<
     DocxCommandPayload, DocxCommandSelection | null, DocxEditState, DocxCommandFramePayload
   >({
@@ -63,6 +84,8 @@ export function createResidentCommandHost(options: DocxCommandHostOptions): Docx
       };
       const selectionCommand = options.selectionAck && ['select', 'navigate', 'selectPoint', 'extendSelection', 'selectTableCells', 'navigateCell'].includes(command.kind);
       const previousEditState = selectionCommand ? structuredClone(selectionIndependentEditState(hooks.editState())) : undefined;
+      const capture = effects && hooks.commandState && command.kind !== 'applyUpdate' && !isSelectionStepCommand(command.kind)
+        ? { stateVector: effects.stateVector(), state: structuredClone(hooks.commandState()) } : undefined;
       const preflight = await hooks.preflight(command, applyContext);
       const result = preflight.status === 'ready'
         ? await hooks.apply(preflight.prepared, applyContext) : preflight;
@@ -79,7 +102,9 @@ export function createResidentCommandHost(options: DocxCommandHostOptions): Docx
       const nextEditState = hooks.editState();
       selectionOnly = !!selectionCommand && result.status === 'noop' &&
         sameCommandState(previousEditState, selectionIndependentEditState(nextEditState));
-      return { ...result, selection, editState: nextEditState };
+      const effect = capture && result.status === 'applied' && result.committed !== false
+        ? captureEffect(capture.stateVector, capture.state) : undefined;
+      return { ...result, selection, editState: nextEditState, ...(effect ? { effect } : {}) };
     },
     deferFrame: () => selectionOnly,
     frame: (input) => renderFrame({ ...input, full: false }),

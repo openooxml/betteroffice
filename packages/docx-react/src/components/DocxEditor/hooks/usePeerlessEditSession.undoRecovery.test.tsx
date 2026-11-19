@@ -120,6 +120,18 @@ function mount() {
       const engine = workers.at(-1)!.sessions.at(-1)!;
       return engine.paragraphs('body').map((paragraph) => paragraph.text).join('|');
     },
+    version() {
+      return view.result.current.binding!.session.state.version;
+    },
+    selection() {
+      return view.result.current.binding!.session.state.selection!;
+    },
+    boldBeforeCaret() {
+      const { focus } = session.selection();
+      const engine = workers.at(-1)!.sessions.at(-1)!;
+      return engine.selectionContext({ story: focus.story,
+        start: { paraId: focus.paraId, offset: focus.offset - 1 }, end: { paraId: focus.paraId, offset: focus.offset } }).bold;
+    },
     async crash() {
       const worker = workers.at(-1)!;
       await act(async () => { worker.onerror?.({ message: 'simulated worker crash' } as ErrorEvent); });
@@ -141,13 +153,15 @@ test('undo after a checkpoint survives a worker restart', async () => {
   const session = mount();
   await session.ready();
   await session.typeUntilApplied(128);
-  await session.checkpointTaken(1);
+  await session.checkpointTaken(2);
   const typed = session.text();
   expect(await session.submit('undo')).toBe('applied');
   const expected = session.text();
+  const version = session.version();
   expect(expected).not.toBe(typed);
   await session.crash();
   session.expectRecovered(expected);
+  expect(session.version()).toBe(version);
 }, TIMEOUT);
 
 test('redo after a checkpoint survives a worker restart', async () => {
@@ -155,32 +169,36 @@ test('redo after a checkpoint survives a worker restart', async () => {
   await session.ready();
   await session.typeUntilApplied(127);
   expect(await session.submit('undo')).toBe('applied');
-  await session.checkpointTaken(1);
+  await session.checkpointTaken(2);
   const undone = session.text();
   expect(await session.submit('redo')).toBe('applied');
   const expected = session.text();
+  const version = session.version();
   expect(expected).not.toBe(undone);
   await session.crash();
   session.expectRecovered(expected);
+  expect(session.version()).toBe(version);
 }, TIMEOUT);
 
 test('undo reaching across a checkpoint recovers the document the user saw', async () => {
   const session = mount();
   await session.ready();
   await session.typeUntilApplied(128);
-  await session.checkpointTaken(1);
+  await session.checkpointTaken(2);
   for (const text of ['Z', 'Y', 'X']) expect(await session.submit('insertText', { text })).toBe('applied');
   expect(await session.submit('undo')).toBe('applied');
   const expected = session.text();
+  const version = session.version();
   await session.crash();
   session.expectRecovered(expected);
+  expect(session.version()).toBe(version);
 }, TIMEOUT);
 
 test('after recovery from an undo across a checkpoint, a further undo and redo change nothing the user never saw', async () => {
   const session = mount();
   await session.ready();
   await session.typeUntilApplied(128);
-  await session.checkpointTaken(1);
+  await session.checkpointTaken(2);
   for (const text of ['Z', 'Y', 'X']) expect(await session.submit('insertText', { text })).toBe('applied');
   expect(await session.submit('undo')).toBe('applied');
   const expected = session.text();
@@ -192,15 +210,89 @@ test('after recovery from an undo across a checkpoint, a further undo and redo c
   expect(session.text()).toBe(expected);
 }, TIMEOUT);
 
-test('undo without a checkpoint survives a worker restart', async () => {
+test('undo before any edit checkpoint survives a worker restart', async () => {
   const session = mount();
   await session.ready();
   await session.type(5);
   expect(await session.submit('undo')).toBe('applied');
   const expected = session.text();
   await session.crash();
-  expect(session.checkpoints).toEqual([]);
+  expect(session.checkpoints.map((checkpoint) => checkpoint.throughSeq)).toEqual([0]);
   session.expectRecovered(expected);
+}, TIMEOUT);
+
+test('an edit at a worker-issued position before any edit checkpoint survives a worker restart', async () => {
+  const session = mount();
+  await session.ready();
+  await session.type(3);
+  const issued = session.selection();
+  expect(issued.focus.sticky).toBeDefined();
+  expect(await session.submit('insertText', { text: 'W', selection: { anchor: issued.anchor, focus: issued.focus } })).toBe('applied');
+  const expected = session.text();
+  const version = session.version();
+  await session.crash();
+  expect(session.checkpoints.map((checkpoint) => checkpoint.throughSeq)).toEqual([0]);
+  session.expectRecovered(expected);
+  expect(session.version()).toBe(version);
+}, TIMEOUT);
+
+test('a caret-only bold after a checkpoint still applies to typing after a worker restart', async () => {
+  const live = mount();
+  await live.ready();
+  await live.typeUntilApplied(128);
+  await live.checkpointTaken(2);
+  expect(await live.submit('insertText', { text: 'Z' })).toBe('applied');
+  expect(await live.submit('toggleMark', { mark: { type: 'bold' } })).not.toBe('refused');
+  const liveBefore = live.text();
+  const liveCaret = live.selection().focus.offset;
+  expect(await live.submit('insertText', { text: 'q' })).toBe('applied');
+  const liveTyped = live.text();
+  const liveBold = live.boldBeforeCaret();
+  expect(liveTyped).toBe(liveBefore.slice(0, liveCaret) + 'q' + liveBefore.slice(liveCaret));
+  expect(liveBold).toBe(true);
+  cleanup();
+
+  const restarted = mount();
+  await restarted.ready();
+  await restarted.typeUntilApplied(128);
+  await restarted.checkpointTaken(2);
+  expect(await restarted.submit('insertText', { text: 'Z' })).toBe('applied');
+  expect(await restarted.submit('toggleMark', { mark: { type: 'bold' } })).not.toBe('refused');
+  const before = restarted.text();
+  const caret = restarted.selection().focus.offset;
+  await restarted.crash();
+  restarted.expectRecovered(before);
+  expect(restarted.selection().focus.offset).toBe(caret);
+  expect(await restarted.submit('insertText', { text: 'q' })).toBe('applied');
+  expect(restarted.text()).toBe(before.slice(0, caret) + 'q' + before.slice(caret));
+  expect(restarted.boldBeforeCaret()).toBe(liveBold);
+}, TIMEOUT);
+
+test('an effect over the byte limit after a checkpoint brings the next checkpoint', async () => {
+  const session = mount();
+  await session.ready();
+  await session.typeUntilApplied(128);
+  await session.checkpointTaken(2);
+  const taken = session.checkpoints.length;
+  expect(await session.submit('insertText', { text: 'x'.repeat(1_150_000) })).toBe('applied');
+  await session.checkpointTaken(taken + 1);
+  expect(session.checkpoints.at(-1)!.throughSeq).toBeGreaterThan(session.checkpoints[taken - 1]!.throughSeq);
+}, TIMEOUT);
+
+test('the base checkpoint of the largest DOCX fixture', async () => {
+  const bytes = new Uint8Array(readFileSync(resolve(import.meta.dir, '../../../../../docx/src/yrs/__fixtures__/comment-ranges/structure.docx')));
+  const worker = start();
+  liveWorkers.push(worker);
+  const client = new DocxSourceWorkerClient(worker);
+  await client.openSource({ bytes: bytes.slice() });
+  const initial = await client.commandInit({
+    session: 'base-size', incarnation: 1, epoch: 1, readOnly: false, fonts: [FONT], fontRegistrationSlots: true,
+    layoutInput: LAYOUT, layoutWithRegions: true, layoutRevision: 1,
+    extras: JSON.stringify({ fontChains: { 'liberation sans|0|0': [0] } }), displayWindow: [0, 3],
+  });
+  const checkpoint = await createDocxCommandConnection(client, initial).client.call.checkpoint();
+  console.log(`G244-BASE bytes=${checkpoint.state.byteLength} source=${bytes.byteLength}`);
+  expect(checkpoint.state.byteLength).toBeGreaterThan(0);
 }, TIMEOUT);
 
 test('one undo after a worker restart removes a measured amount of the typing before it', async () => {

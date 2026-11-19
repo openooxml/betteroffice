@@ -413,6 +413,20 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
         layoutInput = JSON.stringify(layout);
       }
     },
+    restoreCommandState(state) {
+      if (state.comments) engine.initializeComments(state.comments);
+      if (!state.layoutReservations) return;
+      appliedReservations = state.layoutReservations.set;
+      const reservations = state.layoutReservations.values;
+      const input = JSON.parse(init.layoutInput);
+      input.renderEnv = { ...input.renderEnv, reservations };
+      init.layoutInput = JSON.stringify(input);
+      if (!init.layoutWithRegions) {
+        const layout = JSON.parse(layoutInput);
+        layout.workerOwned.renderEnv = { ...layout.workerOwned.renderEnv, reservations };
+        layoutInput = JSON.stringify(layout);
+      }
+    },
     supportsFontEnvironment: true,
     proposals: registry,
     collaboration: collaboration !== null,
@@ -540,15 +554,17 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
     causes: new Set(['other']), pages: new Set<number>(), updates: [], layoutPreviewVersion, layoutStale: init.recoveryState !== undefined,
   };
   const wrapped = collaboration?.wrap(baseHooks) ?? baseHooks;
+  const workerState = () => ({
+    comments: engine.commentRecoveryState?.(),
+    layoutReservations: {
+      values: (JSON.parse(init.layoutInput) as { renderEnv?: YrsRenderEnv }).renderEnv?.reservations ?? {},
+      set: appliedReservations,
+    },
+  });
   const hooks = { ...wrapped, ...(wrapped.recoveryState ? {
-    recoveryState: () => ({
-      ...wrapped.recoveryState!(),
-      comments: engine.commentRecoveryState?.(),
-      layoutReservations: {
-        values: (JSON.parse(init.layoutInput) as { renderEnv?: YrsRenderEnv }).renderEnv?.reservations ?? {},
-        set: appliedReservations,
-      },
-    }),
+    recoveryState: () => ({ ...wrapped.recoveryState!(), ...workerState() }),
+  } : {}), ...(wrapped.commandState ? {
+    commandState: () => ({ ...wrapped.commandState!(), ...workerState() }),
   } : {}) };
   const applyCommand = hooks.apply;
   const showsHiddenText = () => JSON.parse(init.layoutInput).renderEnv?.showHiddenText === true;
@@ -626,6 +642,10 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
   const host = createResidentCommandHost({
     init,
     registry: { handlers: {}, policies: {} },
+    effects: {
+      stateVector: () => engine.encodeStateVector(),
+      updateSince: (stateVector) => engine.encodeStateAsUpdate(stateVector),
+    },
     selectionAck: {
       echoContext() {
         if (layoutDirty || !retainedFrame || retainedFrame.frameEpoch !== revision ||

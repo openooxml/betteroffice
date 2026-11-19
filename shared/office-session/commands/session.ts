@@ -8,7 +8,7 @@ import { hasOwn } from '../protocol';
 import { isQueryReply, type ArgsOf, type Hold, type HoldReason, type QueryReply, type QueryTable,
   type Read, type ReadOptions, type RefusalOf, type ResultOf, type WorkerEditSession } from './spec';
 import type {
-  Checkpoint, CommandAck, CommandConnection, CommandDraft, CommandEnvelope,
+  Checkpoint, CommandAck, CommandConnection, CommandDraft, CommandEffect, CommandEnvelope,
   CommandOutcome, CommandTicket, EditSessionState, OutboxEntry,
   FrameEnvelope, PresentationStatus, RecoveryEvent, SubmitOptions, TicketOutcome, WorkerEditSessionOptions,
 } from './types';
@@ -39,6 +39,9 @@ type LogEntry<P> = {
   presentationStatus?: PresentationStatus;
   rpcSettled: boolean;
   bytes: number;
+  /** Replaces `envelope` in a replay onto a checkpoint; kept apart only while no checkpoint exists. */
+  effect?: CommandEnvelope<P>;
+  effectBytes: number;
 };
 
 type ConnectionRecord<P, S, E, F> = {
@@ -83,6 +86,15 @@ function blocked(outcome: TicketOutcome | undefined): boolean {
 
 function isCommittedApplied(outcome: TicketOutcome | undefined): boolean {
   return outcome?.status === 'applied' && outcome.committed !== false;
+}
+
+function binaryBytes(value: unknown): number {
+  if (!value || typeof value !== 'object') return 0;
+  let total = 0;
+  for (const item of Object.values(value)) {
+    if (item instanceof ArrayBuffer || ArrayBuffer.isView(item)) total += item.byteLength;
+  }
+  return total;
 }
 
 function limit(value: number | undefined, fallback: number): number {
@@ -453,15 +465,36 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
     } catch {}
   }
 
-  function recordOutcome(entry: LogEntry<P>, outcome: CommandOutcome, replay: boolean, force = false): void {
+  function recordEffect(entry: LogEntry<P>, effect: CommandEffect): void {
+    const envelope = cloneData<CommandEnvelope<P>>({ ...entry.envelope, kind: effect.kind, payload: effect.payload as P });
+    const counted = options.commandBytes?.(envelope) ?? binaryBytes(envelope.payload);
+    const bytes = Number.isFinite(counted) && counted >= 0 ? counted : 0;
+    if (checkpoint) {
+      retainedBytes += bytes - entry.bytes - entry.effectBytes;
+      entry.envelope = envelope;
+      entry.bytes = bytes;
+      entry.effect = undefined;
+      entry.effectBytes = 0;
+      return;
+    }
+    retainedBytes += bytes - entry.effectBytes;
+    entry.effect = envelope;
+    entry.effectBytes = bytes;
+  }
+
+  function recordOutcome(entry: LogEntry<P>, reported: CommandOutcome, replay: boolean, force = false): void {
     if (entry.outcome && !replay && !force) return;
-    if (entry.outcome && outcome.status === 'duplicate') return;
+    if (entry.outcome && reported.status === 'duplicate') return;
+    const { effect, ...outcome } = reported;
     const previous = entry.outcome;
     const group = entry.group;
     if (!previous) unknownCount -= 1;
     if (isCommittedApplied(previous)) appliedCount -= 1;
     entry.outcome = outcome;
-    if (isCommittedApplied(outcome)) appliedCount += 1;
+    if (isCommittedApplied(outcome)) {
+      appliedCount += 1;
+      if (effect) recordEffect(entry, effect);
+    }
     inFlight.delete(outcome.seq);
     if (blocked(outcome)) blockSequence(outcome.seq);
     group.outcome = outcome;
@@ -837,7 +870,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
         for (const entry of entries) {
           if (!live(record)) throw record.failure;
           if (blocked(entry.outcome)) continue;
-          const envelope = { ...entry.envelope, incarnation, replay: true as const };
+          const envelope = { ...(retainedCheckpoint ? entry.effect ?? entry.envelope : entry.envelope), incarnation, replay: true as const };
           let ack: CommandAck<S, E, F>;
           try {
             ack = await replayCall(record, envelope);
@@ -861,6 +894,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
         record.seenMark = highSeq;
         recovering = false;
         checkpointAttemptedAt = -1;
+        if (!checkpoint) takeBaseCheckpoint(record);
         report('recovered');
         diverged.clear();
         if (waitingReads.size) checkReads();
@@ -1009,12 +1043,31 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
     });
   }
 
+  function takeBaseCheckpoint(record: ConnectionRecord<P, S, E, F>): void {
+    if (maxAttempts === 0 || !options.baseCheckpoint || !options.recovery.checkpoint || checkpoint) return;
+    let snapshot: Promise<Checkpoint>;
+    try { snapshot = options.recovery.checkpoint(record.connection); }
+    catch (error) {
+      if (error instanceof SessionFailure) fail(error);
+      return;
+    }
+    void snapshot.then((value) => {
+      if (!live(record) || checkpoint || !validCheckpoint(value)) return;
+      checkpoint = { ...value, state: value.state.slice() };
+      pruneLog(value.throughSeq);
+    }, (error) => {
+      if (live(record) && error instanceof SessionFailure) fail(error);
+    }).catch((error) => {
+      if (live(record)) fail(failureFor(error));
+    });
+  }
+
   function pruneLog(throughSeq: number, knownPrefix = false): void {
     for (const [seq, entry] of log) {
       if (seq > throughSeq) break;
       if (knownPrefix && (!entry.outcome || !entry.rpcSettled)) break;
       if (isCommittedApplied(entry.outcome)) appliedCount -= 1;
-      retainedBytes -= entry.bytes;
+      retainedBytes -= entry.bytes + entry.effectBytes;
       const afterSeq = entry.envelope.afterSeq;
       if (afterSeq !== undefined) {
         const children = dependencies.get(afterSeq);
@@ -1064,7 +1117,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
     };
     const group = records.get(entry.tickets[0]!)!;
     const logged: LogEntry<P> = {
-      envelope, ticket: entry.tickets[0]!, group, rpcSettled: false, bytes: 0,
+      envelope, ticket: entry.tickets[0]!, group, rpcSettled: false, bytes: 0, effectBytes: 0,
     };
     log.set(seq, logged);
     presentations.set(seq, logged);
@@ -1277,5 +1330,6 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
   const first = attach(options.connection);
   acceptAck(first, initial);
   if (options.connection.client.failure) fail(options.connection.client.failure);
+  else takeBaseCheckpoint(first);
   return session;
 }

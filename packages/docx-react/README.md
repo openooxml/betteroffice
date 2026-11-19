@@ -194,7 +194,7 @@ threshold crossings; `memoryBudget` defaults to warning at 75% and critical at 9
 `memoryBudget.workerLimitBytes` caps worker editing-core allocations.
 
 A failed worker can be replaced once per editor, reopening the source and replaying edits.
-For byte sources, recovery uses the last checkpoint, so undo history reaches back to that checkpoint.
+After a recovery, the undo history starts at the recovery.
 If recovery fails, `onError` reports the failure and editing stops. Collaboration sessions report
 worker failure without automatic replacement.
 

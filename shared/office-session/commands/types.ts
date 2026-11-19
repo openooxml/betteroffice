@@ -44,6 +44,14 @@ export type CommandOutcome = {
   reason?: string;
   committed?: false;
   affectedSeqs?: number[];
+  /** @internal The command that reproduces an applied command's effect when recovery replays it. */
+  effect?: CommandEffect;
+};
+
+/** @internal Replacement command a recovery replay sends in place of the applied command it stands for. */
+export type CommandEffect = {
+  kind: string;
+  payload: unknown;
 };
 
 /** @internal Full or incremental frame identified by command coverage and revision. */
@@ -199,7 +207,7 @@ export type ApplyContext = {
 
 /** @internal Format apply result; noop, refusal, cancellation, and applied with committed: false must preserve the version. */
 export type ApplyResult<S, E> =
-  | { status: 'applied'; committed?: false; selection?: S; editState?: E }
+  | { status: 'applied'; committed?: false; selection?: S; editState?: E; effect?: CommandEffect }
   | { status: 'noop'; selection?: S; editState?: E }
   | { status: 'cancelled'; reason?: string; selection?: S; editState?: E }
   | {
@@ -378,6 +386,8 @@ export type WorkerEditSessionOptions<O, P, S, E, F, X, Q extends QueryTable = {}
   maxEchoEntries?: number;
   maxRecoveryAttempts?: number;
   checkpointPolicy?(stats: { applied: number; bytes: number }): boolean;
+  /** @internal Checkpoints the opened document before any command, so every recovery replays effects onto a checkpoint. */
+  baseCheckpoint?: boolean;
   commandBytes?(envelope: CommandEnvelope<P>): number;
   /** @internal May share caller data only with a transport that copies before returning. */
   copyCommandForDispatch?(envelope: CommandEnvelope<P>): CommandEnvelope<P>;
@@ -462,7 +472,9 @@ function outcome(value: unknown): value is CommandOutcome {
     (value.reason === undefined || typeof value.reason === 'string') &&
     (value.committed === undefined || value.committed === false) &&
     (value.affectedSeqs === undefined ||
-      (Array.isArray(value.affectedSeqs) && value.affectedSeqs.every(sequence)));
+      (Array.isArray(value.affectedSeqs) && value.affectedSeqs.every(sequence))) &&
+    (value.effect === undefined || (value.status === 'applied' && record(value.effect) &&
+      typeof value.effect.kind === 'string' && hasOwn(value.effect, 'payload')));
 }
 
 function frame(value: unknown): value is FrameEnvelope<unknown> {

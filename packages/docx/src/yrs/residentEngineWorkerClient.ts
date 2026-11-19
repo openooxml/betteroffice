@@ -379,6 +379,9 @@ export class ResidentEngineWorkerClient implements DocxCommandClient {
     if (command.kind === 'applyRemoteUpdate' && command.payload && typeof command.payload === 'object' &&
       'update' in command.payload && command.payload.update instanceof ArrayBuffer) {
       command = { ...command, payload: { ...command.payload, update: owned(command.payload.update) } };
+    } else if (command.kind === 'applyUpdate' && command.payload && typeof command.payload === 'object' &&
+      'update' in command.payload && command.payload.update instanceof ArrayBuffer) {
+      command = { ...command, payload: { ...command.payload, update: owned(command.payload.update) } };
     } else if (command.kind === 'applyRemoteUpdateChunks' && command.payload && typeof command.payload === 'object' &&
       'updates' in command.payload && Array.isArray(command.payload.updates) &&
       command.payload.updates.every(update => update instanceof ArrayBuffer)) {

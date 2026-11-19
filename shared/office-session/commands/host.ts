@@ -117,6 +117,12 @@ function copyOutcome(outcome: CommandOutcome): CommandOutcome {
   };
 }
 
+function retainedOutcome(outcome: CommandOutcome): CommandOutcome {
+  const copy = copyOutcome(outcome);
+  delete copy.effect;
+  return copy;
+}
+
 function unknownOutcome(seq: number, cause: unknown): CommandOutcomeUnknownError {
   const message = cause instanceof Error ? cause.message : String(cause);
   const data: Pick<CommandOutcomeUnknownError, 'name' | 'refusal'> = {
@@ -257,7 +263,7 @@ export function createCommandHost<P, S, E, F>(
     }
     throughSeq = outcome.seq;
     if (retainedLimit > 0) {
-      outcomes.set(outcome.seq, copyOutcome(outcome));
+      outcomes.set(outcome.seq, retainedOutcome(outcome));
       if (outcomes.size > retainedLimit) outcomes.delete(outcomes.keys().next().value!);
     }
     if (queryBarriers.size) {
@@ -401,7 +407,9 @@ export function createCommandHost<P, S, E, F>(
         ? { seq: command.seq, status: 'cancelled', committed: false, ...(result.reason === undefined ? {} : { reason: result.reason }) }
         : result.status === 'applied' && result.committed === false
           ? { seq: command.seq, status: 'applied', committed: false }
-          : { seq: command.seq, status: result.status };
+          : result.status === 'applied' && result.effect !== undefined
+            ? { seq: command.seq, status: 'applied', effect: result.effect }
+            : { seq: command.seq, status: result.status };
     const reply = ack(settle(outcome), result);
     return result.status === 'noop' && options.deferFrame?.(command, result) ? reply : withFrame(reply);
   }

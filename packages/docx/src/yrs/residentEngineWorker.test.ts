@@ -7006,7 +7006,7 @@ test('package_image_remains_decodable_after_edit_on_its_page', async () => {
     w.harness.resolvedImages.length = 0;
     const edited = await w.send({ type: 'edit', command: commandEnvelope(1) });
     if (!edited.ok) throw new Error(edited.error);
-    expect(edited.commandAck?.outcomes).toEqual([{ seq: 1, status: 'applied' }]);
+    expect(edited.commandAck?.outcomes).toMatchObject([{ seq: 1, status: 'applied' }]);
     expect(edited.commandAck?.frame?.coversThroughSeq).toBe(1);
     expect(w.harness.resolvedImages.length).toBeGreaterThan(0);
     expect(w.harness.resolvedImages.every((image) => image instanceof Surface)).toBe(true);
