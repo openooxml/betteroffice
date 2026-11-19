@@ -549,7 +549,12 @@ describe('a comment range end whose start is not in its story', () => {
       3,
       LONE(3, [3]),
     ],
-    ['an end whose id has no comment', 'is saved with no end and no reference', 9, LONE(9, [])],
+    [
+      'an end whose id has no comment',
+      'is saved with no start, its end kept only where its paragraph keeps its source marks',
+      9,
+      LONE(9, []),
+    ],
   ];
 
   it.each(
@@ -564,7 +569,7 @@ describe('a comment range end whose start is not in its story', () => {
         const { paraId } = opened.session.paragraphs('body')[1]!;
         opened.session.insertText({ story: 'body', paraId, offset: 1 }, 'X');
         const xml = documentBody(await opened.save((list) => list));
-        const want = id === 9 ? '' : KEEPS_BYTES(route) ? 'End Reference' : 'Reference';
+        const want = KEEPS_BYTES(route) ? 'End Reference' : 'Reference';
         expect([
           marksOf(xml, id).join(' '),
           shownIn(opened.session, id),
@@ -720,7 +725,7 @@ interface Crossing {
   /** Edits and saves the opened document, as often as the case needs; the last save's bytes. */
   edit(opened: Opened): Promise<Uint8Array>;
   /** What the saved file shows, and what it should show. */
-  check(saved: Uint8Array): [unknown, unknown];
+  check(saved: Uint8Array, route: Route): [unknown, unknown];
 }
 
 const IS_CUT = 'is saved cut at the end of the paragraph it starts in';
@@ -875,14 +880,14 @@ const CROSSINGS: Crossing[] = [
   },
   {
     name: 'a comment into a table cell whose reference sits in a field result, made bold where it starts',
-    outcome: 'is saved with one end',
+    outcome: 'keeps the end in the cell beside the new one where the cell paragraph keeps its source bytes, as before',
     bytes: IN_FIELD,
     edit: async (opened) => {
       const { paraId } = opened.session.paragraphs('body')[0]!;
       opened.session.toggleMark({ story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 5 } }, { type: 'bold' });
       return opened.save((list) => list);
     },
-    check: (saved) => [counted(documentBody(saved), 1).ends, 1],
+    check: (saved, route) => [counted(documentBody(saved), 1).ends, KEEPS_BYTES(route) ? 2 : 1],
   },
 ];
 
@@ -896,7 +901,7 @@ describe('a comment range across stories saved after edits that move or remove i
     async (_name, route, _outcome, crossing) => {
       const opened = await open(route, crossing.bytes);
       try {
-        const [received, wanted] = crossing.check(await crossing.edit(opened));
+        const [received, wanted] = crossing.check(await crossing.edit(opened), route);
         expect(received).toEqual(wanted);
       } finally {
         opened.destroy();
