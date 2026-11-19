@@ -90,6 +90,10 @@ const GHOST_GAP_PX: f32 = 6.0;
 const GHOST_MIN_SCALE: f32 = 0.6;
 const GHOST_FIT_EPSILON_PX: f32 = 1e-3;
 
+/// Conditional-format effects by `(row, col)`, painted over the cells' own
+/// fill, font color, bold and italic.
+pub type CellFormats = BTreeMap<(u32, u32), Arc<DifferentialFormat>>;
+
 /// a pending edit rendered as a ghost pair in place of the cell's committed
 /// text: `old_text` struck in red, `new_text` in green.
 #[derive(Debug, Clone, PartialEq)]
@@ -703,8 +707,17 @@ where
     F: FnMut(&SheetChart) -> Result<R, RenderError>,
     R: Into<Arc<ChartSpace>>,
 {
-    build_display_list_with_geometry_and_text_runs(
-        wb, sheet, viewport, ghosts, geometry, max_cells, pictures, None, resolver,
+    build_display_list_with_geometry_and_formats(
+        wb,
+        sheet,
+        viewport,
+        ghosts,
+        geometry,
+        max_cells,
+        pictures,
+        None,
+        resolver,
+        |_, _| CellFormats::new(),
     )
 }
 
@@ -727,6 +740,41 @@ where
     F: FnMut(&SheetChart) -> Result<R, RenderError>,
     R: Into<Arc<ChartSpace>>,
 {
+    build_display_list_with_geometry_and_formats(
+        wb,
+        sheet,
+        viewport,
+        ghosts,
+        geometry,
+        max_cells,
+        pictures,
+        text_runs,
+        resolver,
+        |_, _| CellFormats::new(),
+    )
+}
+
+/// [`build_display_list_with_geometry_and_text_runs`] whose `formats`
+/// receives the visible row and column ranges and returns the
+/// conditional-format effects of the cells inside them.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn build_display_list_with_geometry_and_formats<F, R>(
+    wb: &Workbook,
+    sheet: SheetId,
+    viewport: &Viewport,
+    ghosts: &[GhostEdit],
+    geometry: &GridGeometry,
+    max_cells: Option<u64>,
+    pictures: &[SheetPicture],
+    text_runs: Option<&CellTextRuns<'_>>,
+    resolver: F,
+    formats: impl FnOnce(&[Range<u32>], &[Range<u32>]) -> CellFormats,
+) -> Result<DisplayList, RenderError>
+where
+    F: FnMut(&SheetChart) -> Result<R, RenderError>,
+    R: Into<Arc<ChartSpace>>,
+{
     build_frame_with_geometry(
         wb,
         sheet,
@@ -738,6 +786,7 @@ where
         Some(geometry),
         max_cells,
         text_runs,
+        formats,
     )
 }
 
@@ -836,6 +885,7 @@ where
         geometry.as_ref(),
         None,
         text_runs,
+        |_, _| CellFormats::new(),
     )
 }
 
@@ -851,6 +901,7 @@ fn build_frame_with_geometry<F, R>(
     geometry: Option<&GridGeometry>,
     max_cells: Option<u64>,
     text_runs: Option<&CellTextRuns<'_>>,
+    formats: impl FnOnce(&[Range<u32>], &[Range<u32>]) -> CellFormats,
 ) -> Result<DisplayList, RenderError>
 where
     F: FnMut(&SheetChart) -> Result<R, RenderError>,
@@ -905,6 +956,7 @@ where
     let (rows, cols, frozen_rows, frozen_cols) =
         viewport_axes(sheet_ref, viewport, geom, print.is_some(), max_cells);
     let paint_viewport = viewport_for_axes(viewport, &rows);
+    let formats = formats(&rows.ranges, &cols.ranges);
 
     let grid = GridMeta {
         start_row: rows.start(),
@@ -1041,6 +1093,25 @@ where
         commands.push(fill.command(clip, origin));
     }
 
+    for (&(row, col), format) in &formats {
+        let at = CellRef::new(row, col);
+        if let Some(fill) = &format.fill
+            && merge_index
+                .covering(at)
+                .is_none_or(|merge| merge.start == at)
+            && let Some(cell_box) = cell_box(geom, &rows, &cols, &merge_index, at)
+        {
+            commands.push(DrawCmd::FillRect {
+                x: cell_box.clip.x,
+                y: cell_box.clip.y,
+                w: cell_box.clip.w,
+                h: cell_box.clip.h,
+                color: fill.as_str().into(),
+                clip: None,
+            });
+        }
+    }
+
     if print.is_none() {
         commands.extend(grid_commands);
     }
@@ -1108,7 +1179,14 @@ where
         }
         let hyperlink = link_index.at(at);
         let xf = &**xf;
-        let primary = cell_display_text(xf, wb.date_system, cell, &text_color);
+        let conditional = formats.get(&(at.row, at.col));
+        let primary = cell_display_text(
+            xf,
+            wb.date_system,
+            cell,
+            conditional.and_then(|format| format.font_color.as_deref()),
+            &text_color,
+        );
         let hyperlink_only = primary.is_none();
         let Some((text, color, parts)) = primary.or_else(|| {
             hyperlink
@@ -1136,8 +1214,12 @@ where
         let align = resolve_align(xf.h, &cell.value);
         let valign = xf.v;
         let wraps = xf.wrap;
-        let bold = font.is_some_and(|f| f.bold);
-        let italic = font.is_some_and(|f| f.italic);
+        let bold = conditional
+            .and_then(|format| format.bold)
+            .unwrap_or_else(|| font.is_some_and(|f| f.bold));
+        let italic = conditional
+            .and_then(|format| format.italic)
+            .unwrap_or_else(|| font.is_some_and(|f| f.italic));
         let underline = font.is_some_and(|f| f.underline);
         let underline_style = font.and_then(|f| f.underline_style);
         let strike = font.is_some_and(|f| f.strike);
@@ -1992,7 +2074,8 @@ fn spill_clip(
         let neighbour = CellRef::new(at.row, col);
         merges.covering(neighbour).is_none()
             && sheet.cell(neighbour).is_none_or(|cell| {
-                cell_display_text(fx.xf(cell.style), date_system, cell, default_color).is_none()
+                cell_display_text(fx.xf(cell.style), date_system, cell, None, default_color)
+                    .is_none()
             })
             && !draws_hyperlink_label(links, neighbour)
     };
@@ -2442,11 +2525,13 @@ impl<'a> FrameStyles<'a> {
 }
 
 /// display string and resolved font color for a cell, or `None` when it renders
-/// nothing. a `[Red]`-style number-format color overrides the font color.
+/// nothing. a `[Red]`-style number-format color overrides `font_color`, which
+/// overrides the xf's font color.
 fn cell_display_text(
     xf: &ResolvedXf,
     date_system: xlsx_model::DateSystem,
     cell: &xlsx_model::Cell,
+    font_color: Option<&str>,
     default_color: &Arc<str>,
 ) -> Option<(Arc<str>, Arc<str>, Vec<xlsx_model::numfmt::FormatPart>)> {
     if matches!(cell.value, CellValue::Empty) {
@@ -2458,10 +2543,12 @@ fn cell_display_text(
     }
     let color = formatted.color.map_or_else(
         || {
-            xf.font
-                .as_ref()
-                .and_then(|font| font.color.clone())
-                .unwrap_or_else(|| default_color.clone())
+            font_color.map(Arc::from).unwrap_or_else(|| {
+                xf.font
+                    .as_ref()
+                    .and_then(|font| font.color.clone())
+                    .unwrap_or_else(|| default_color.clone())
+            })
         },
         Arc::from,
     );
@@ -4948,5 +5035,62 @@ mod tests {
         assert_px(xs[2] - xs[3], 12.0);
         let xs = indent_xs(Some(("Courier New", 11.0)), 1, None);
         assert_px(xs[1] - xs[0], 27.0);
+    }
+
+    #[test]
+    fn the_geometry_builder_without_formats_paints_no_conditional_format() {
+        let mut wb = Workbook::default();
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.set_cell(CellRef::new(0, 0), num_cell(5.0));
+        wb.sheets.push(sheet);
+        let geometry = GridGeometry::new(&wb.sheets[0], &wb.styles);
+        let viewport = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 100.0,
+        };
+        let resolver = |chart: &SheetChart| {
+            Err::<ChartSpace, _>(RenderError::ChartSourceUnavailable {
+                part: chart.part.clone(),
+            })
+        };
+        let red = |list: &DisplayList| {
+            list.commands
+                .iter()
+                .any(|command| {
+                    matches!(command, DrawCmd::FillRect { color, .. } if &**color == "#ff0000")
+                })
+        };
+        let plain = build_display_list_with_geometry(
+            &wb,
+            SheetId(0),
+            &viewport,
+            &[],
+            &geometry,
+            None,
+            &[],
+            resolver,
+        )
+        .unwrap();
+        let format = Arc::new(DifferentialFormat {
+            fill: Some("#ff0000".into()),
+            ..DifferentialFormat::default()
+        });
+        let formatted = build_display_list_with_geometry_and_formats(
+            &wb,
+            SheetId(0),
+            &viewport,
+            &[],
+            &geometry,
+            None,
+            &[],
+            None,
+            resolver,
+            |_, _| CellFormats::from([((0, 0), format)]),
+        )
+        .unwrap();
+        assert!(!red(&plain));
+        assert!(red(&formatted));
     }
 }
