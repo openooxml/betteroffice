@@ -1,5 +1,6 @@
-import { expect, test } from 'bun:test';
+import { expect, spyOn, test } from 'bun:test';
 import type { DisplayPage } from '../layout/render/displayList';
+import { createDisplayListQueries, type DisplayListQueries } from '../layout/render/displayListQueries';
 import { loadRustDisplayListQueryEngine } from '../layout/render/rustDisplayList';
 import {
   RESIDENT_QUERY_STORE_PAGES,
@@ -92,4 +93,73 @@ test('a session parses at most its page cap of a long document', async () => {
     releaseResidentDisplayListQueries(owner);
     expect(store.parsed.size).toBe(0);
   } finally { store.restore(); }
+});
+
+function malformedPage(pageIndex: number): DisplayPage {
+  const page = textPage(pageIndex);
+  return { ...page, primitives: page.primitives.map((primitive) => ({ ...primitive, table: { tableId: 't0' } }) as DisplayPage['primitives'][number]) };
+}
+
+test('a session closes a query engine whose read failed and answers the next query from a fresh one', async () => {
+  await loadRustDisplayListQueryEngine();
+  const built: { queries: DisplayListQueries; donor: DisplayListQueries | null | undefined; disposed: boolean }[] = [];
+  const create: typeof createDisplayListQueries = (...args) => {
+    const queries = createDisplayListQueries(...args);
+    const entry = { queries, donor: args[2], disposed: false };
+    const dispose = queries.dispose;
+    queries.dispose = () => {
+      entry.disposed = true;
+      dispose();
+    };
+    built.push(entry);
+    return queries;
+  };
+  const owner = {};
+  const list = { pages: [textPage(0), malformedPage(1)] };
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  try {
+    const failed = residentDisplayListQueries(owner, list, create);
+    expect(failed.rangeRects(22, 25)).toEqual([]);
+    expect(failed.sourceState().status).toBe('error');
+    const again = residentDisplayListQueries(owner, list, create);
+    expect(again).not.toBe(failed);
+    expect(built.map((entry) => [entry.donor ?? null, entry.disposed])).toEqual([[null, true], [null, false]]);
+    expect(again.rangeRects(22, 25)).toEqual([]);
+    expect(again.sourceState().status).toBe('error');
+    const healthy = residentDisplayListQueries(owner, list, create);
+    expect(healthy).not.toBe(again);
+    expect(built.map((entry) => [entry.donor ?? null, entry.disposed])).toEqual([[null, true], [null, true], [null, false]]);
+    expect(healthy.rangeRects(2, 5)).toHaveLength(1);
+    expect(healthy.sourceState().status).toBe('ready');
+    expect(residentDisplayListQueries(owner, list, create)).toBe(healthy);
+    expect(built).toHaveLength(3);
+  } finally {
+    warn.mockRestore();
+    releaseResidentDisplayListQueries(owner);
+  }
+});
+
+test('a session answers a hit on a page of its list after eight later lists opened in the same store', async () => {
+  await loadRustDisplayListQueryEngine();
+  const owner = {};
+  const list = { pages: [textPage(0), textPage(1)] };
+  const others = Array.from({ length: 8 }, () => ({}));
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  try {
+    const first = residentDisplayListQueries(owner, list);
+    expect(first.rangeRects(2, 5)).toHaveLength(1);
+    for (const other of others) {
+      expect(residentDisplayListQueries(other, { pages: [textPage(0)] }).rangeRects(2, 5)).toHaveLength(1);
+    }
+    const hit = first.hitTestRegions(1, 120, 95);
+    expect(hit?.region).toBe('body');
+    expect(hit?.pos).toBeGreaterThanOrEqual(21);
+    expect(hit?.pos).toBeLessThanOrEqual(28);
+    expect(first.sourceState().status).toBe('ready');
+    expect(residentDisplayListQueries(owner, list)).toBe(first);
+  } finally {
+    warn.mockRestore();
+    for (const other of others) releaseResidentDisplayListQueries(other);
+    releaseResidentDisplayListQueries(owner);
+  }
 });

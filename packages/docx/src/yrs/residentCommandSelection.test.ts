@@ -17,6 +17,8 @@ import { cellSelectionHeadPosition } from './residentCommandTableSelection';
 import { ResidentSessionFonts } from './residentFontEnvironment';
 import { releaseResidentDisplayListQueries, residentDisplayListQueries } from './residentDisplayListQueries';
 import { StagedEchoPages } from './residentStagedEcho';
+import { readResidentRangeHighlights } from './residentRangeHighlights';
+import type { ResidentEngineSession } from './residentEngineSession';
 import { createProposalRegistry, proposalRevisionPreview } from './proposals';
 import { applyDocxCommand, createResidentDocxCommandHooks, preflightDocxCommand } from './residentCommandActions';
 import { createResidentCommandHost } from './residentCommandHost';
@@ -1428,3 +1430,52 @@ test('positions_table_build_looks_up_one_node_per_plain_paragraph_and_scans_only
     nodes.mockRestore();
   }
 });
+
+function malformedSecondPage() {
+  const arm = fakeArm({ body: ['Alpha', 'Bravo'] });
+  Object.assign(arm.engine, { proposalEngine: { version: () => '0' } });
+  const session = arm.engine as unknown as ResidentEngineSession;
+  const index = new DisplayPositionIndex({ ...arm.engine.geometryReader, selectionText: arm.engine.selectionText });
+  const at = (paraId: string, offset: number) => index.positionOf({ story: 'body', paraId, offset }, 'body')!;
+  const page = (pageIndex: number, paraId: string, malformed = false): DisplayPage => ({
+    pageIndex, width: 600, height: 800, primitives: [{
+      kind: 'text', text: paraId === 'body-0' ? 'Alpha' : 'Bravo', x: 100, baselineY: 100, width: 50, font: '400 16px Arial', color: '#000000',
+      docStart: at(paraId, 0), docEnd: at(paraId, 5), paraId, ...(malformed ? { table: { tableId: 't0' } } : {}),
+    } as DisplayPage['primitives'][number]],
+  });
+  const frame = fakeFrame([page(0, 'body-0'), page(1, 'body-1', true)]);
+  const range = (paraId: string): YrsStoryRange => ({ story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 5 } });
+  const pagesOf = async (paraId: string) =>
+    (await readResidentRangeHighlights(session, frame, [range(paraId)], 0)).rects[0]!.map((rect) => rect.pageIndex);
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  releasesAfterTest.push(() => {
+    warn.mockRestore();
+    releaseResidentDisplayListQueries(arm.engine);
+  });
+  return { arm, frame, pagesOf };
+}
+
+test('after a range read fails on a malformed page, a click on a healthy page moves the caret', async () => {
+  await loadRustDisplayListQueryEngine();
+  const { arm, frame, pagesOf } = malformedSecondPage();
+  await expect(pagesOf('body-1')).rejects.toThrow('Range highlight layout is unavailable');
+  arm.state.selection = selection('body-1', 2);
+  const intent = command(arm, 'selectPoint', {
+    page: { pageId: '1', pageIndex: 0 }, x: 125, y: 95, layoutRevision: 0, frameEpoch: 1, clickCount: 1,
+    modifiers: { shift: false, alt: false, ctrl: false, meta: false },
+  }) as DocxSelectionCommandIntent;
+  const clicked = resolveDocxSelectionIntent({
+    engine: arm.engine, state: arm.state, command: intent, context: context(arm, intent),
+    readLayout: () => ({ frame, layoutRevision: 0 }),
+  }).selection;
+  expect(clicked.focus.paraId).toBe('body-0');
+  expect(clicked.anchor).toEqual(clicked.focus);
+}, TIMEOUT);
+
+test('a range read on a malformed page fails again on the next read, and a read on a healthy page after it is answered', async () => {
+  await loadRustDisplayListQueryEngine();
+  const { pagesOf } = malformedSecondPage();
+  await expect(pagesOf('body-1')).rejects.toThrow('Range highlight layout is unavailable');
+  await expect(pagesOf('body-1')).rejects.toThrow('Range highlight layout is unavailable');
+  await expect(pagesOf('body-0')).resolves.toEqual([0]);
+}, TIMEOUT);
