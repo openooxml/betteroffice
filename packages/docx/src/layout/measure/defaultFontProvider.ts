@@ -6,6 +6,8 @@ import { decodeFontFace } from '../../wasm/fontDecoder';
 
 export const IMPLICIT_FONT_COVERAGE = '@betteroffice/fonts/coverage';
 export const IMPLICIT_SYMBOL_SHAPING = '@betteroffice/fonts/coverage-symbols';
+/** The `fontChains` key whose one id is the face layout draws the tracked paragraph mark with. */
+export const PARAGRAPH_MARK_FACE = '@betteroffice/fonts/paragraph-mark';
 
 export class ImplicitFontAbsentError extends Error {}
 

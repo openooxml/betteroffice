@@ -96,6 +96,19 @@ export interface StructuredFieldContent {
     inline?: FieldInlineContent[];
     /** Multi-paragraph/table result children in source order. */
     blocks?: BlockContent[];
+    /**
+     * How many blocks of the story holding the field's paragraph this content
+     * spans after that paragraph: the code's come first, then the result's, so
+     * the result's paragraphs are the `structuredResult.blockCount` blocks after
+     * the field's paragraph and its `structuredCode.blockCount` code blocks. Raw
+     * blocks count, each with the phase the field is in when it appears, so one
+     * before an external separator is code. The count is relative to the
+     * field's paragraph in the parsed story; check it against the story you read
+     * before using it. Zero means the field spans paragraphs but its later
+     * paragraphs are no longer tracked, so no block after the field's paragraph
+     * belongs to it.
+     */
+    blockCount?: number;
 }
 /** Field-capable inline grammar used by nested field code/results. */
 export type FieldInlineContent = Run | Hyperlink | InlineSdt | MathEquation | SimpleField | ComplexField;

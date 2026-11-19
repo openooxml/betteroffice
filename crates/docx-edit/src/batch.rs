@@ -1625,10 +1625,10 @@ fn plan_insert_paragraphs<T: ReadTxn>(
             ));
         }
         let style = paragraph.style_id.as_deref().or(anchor_style.as_deref());
-        let styled = source
+        let mut styled = source
             .styled_paragraph(style)
             .map_err(|message| invalid(message, &requested))?;
-        if styled.properties.iter().any(|(key, _)| key == "numPr") {
+        if settle_style_numbering(&mut styled.properties) {
             let named = style.map_or_else(
                 || "the default paragraph style".to_owned(),
                 |id| format!("style {id:?}"),
@@ -1931,6 +1931,23 @@ fn plan_delete_paragraphs<T: ReadTxn>(
     })
 }
 
+fn defines_numbering(properties: &[(String, yrs::Any)]) -> bool {
+    properties.iter().any(|(key, value)| {
+        key == "numPr"
+            && matches!(value, yrs::Any::Map(num_pr)
+                if crate::bridge::map_number(num_pr, "numId").is_some_and(|id| id != 0.0))
+    })
+}
+
+/// Discard style numbering with no nonzero `numId`; retain actual numbered styles.
+fn settle_style_numbering(properties: &mut Vec<(String, yrs::Any)>) -> bool {
+    if defines_numbering(properties) {
+        return true;
+    }
+    properties.retain(|(key, _)| !matches!(key.as_str(), "numPr" | "numPrFromStyle"));
+    false
+}
+
 fn plan_style<T: ReadTxn>(
     views: &mut Views<'_, T>,
     source: Option<&SourceMetadata>,
@@ -1959,10 +1976,10 @@ fn plan_style<T: ReadTxn>(
             &requested,
         ));
     }
-    let next = source
+    let mut next = source
         .styled_paragraph(Some(style_id))
         .map_err(|message| invalid(message, &requested))?;
-    if next.properties.iter().any(|(key, _)| key == "numPr") {
+    if settle_style_numbering(&mut next.properties) {
         return Err(unsupported(
             format!(
                 "style {style_id:?} defines list numbering; set_paragraph_style cannot apply a numbered style yet"
@@ -2589,11 +2606,11 @@ fn plan_block_fill<T: ReadTxn>(
                 .collect();
         }
         if lines.len() > view.paragraphs.len() {
-            let styled = fill
+            let mut styled = fill
                 .source
                 .styled_paragraph(first.mark.style_id().as_deref())
                 .map_err(|message| invalid(message, &fill.resolved))?;
-            if styled.properties.iter().any(|(key, _)| key == "numPr") {
+            if settle_style_numbering(&mut styled.properties) {
                 return Err(failure(
                     EditFailureCode::Unsupported,
                     format!(

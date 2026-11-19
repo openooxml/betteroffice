@@ -33,12 +33,14 @@ interface ProbeWindow {
   navigation: unknown;
   marks: number;
   reload(): Promise<void>;
+  focus: { result: unknown; background(): unknown };
 }
 
 const fonts = createFontProvider();
 const repeatedHeader = new URLSearchParams(location.search).get('doc') === 'repeated-header';
 const fileProp = new URLSearchParams(location.search).get('prop') === 'file';
 const inThread = new URLSearchParams(location.search).get('engine') === 'in-thread';
+const focusProbe = new URLSearchParams(location.search).get('focus') === '1';
 
 const probe: ProbeWindow = {
   events: [],
@@ -54,6 +56,7 @@ const probe: ProbeWindow = {
     const buffer = await (await fetch(documentUrl)).arrayBuffer();
     await probe.editor!.loadDocumentBuffer(buffer);
   },
+  focus: { result: null, background: () => null },
 };
 (window as unknown as { __probe: ProbeWindow }).__probe = probe;
 
@@ -308,7 +311,25 @@ const second = defineDocxPlugin({
   },
 });
 
-const PLUGINS = [alignment, second];
+function FocusOverlay({ context }: { context: DocxPluginContext<null> }) {
+  probe.focus.background = () => context.focusDocument();
+  return (
+    <div data-testid="focus-probe" data-input-focused={String(context.snapshot.inputFocused)}
+      data-focused={String(context.snapshot.focused)} style={{ position: 'absolute', left: 0, top: 0, pointerEvents: 'auto' }}>
+      <button type="button" data-testid="focus-probe-button" onKeyDown={(event) => {
+        if (event.key !== 'Enter') return;
+        event.preventDefault();
+        probe.focus.result = context.focusDocument();
+      }}>
+        Return to document
+      </button>
+    </div>
+  );
+}
+
+const focusPlugin = defineDocxPlugin({ id: 'probe.focus', createState: () => null, overlay: FocusOverlay });
+
+const PLUGINS = focusProbe ? [alignment, second, focusPlugin] : [alignment, second];
 const GRANTS = { 'probe.alignment': { document: 'write', editBatches: true, commands: ['clearFormatting', 'bold'] } } as const;
 
 function Harness() {

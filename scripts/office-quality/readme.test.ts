@@ -467,6 +467,36 @@ test('the aggregate counts advertised, loaded and failed faces per arm by reason
   expect(aggregateReport(report()).formats.docx.fonts).toBeUndefined();
 });
 
+test('the aggregate counts a roundtrip stage or a font reason outside the fixed sets as other', async () => {
+  const { fontArmLine, fontSummary } = await import('./readme.mjs');
+  const input = fontsReport();
+  Object.assign(input.samples[0], { roundtrip: { published: { parse: { status: 'ok' }, roundtrip: { status: 'failed', stage: '/tmp/x/y.ttf', error: 'failed' } } } });
+  (input.samples[1] as any).comparisons[0].fonts.failed_faces['Inter-Regular.ttf'] = 'host-a /tmp/x/y.ttf';
+  const aggregate = aggregateReport(input);
+  expect(aggregate.formats.docx.fonts.published.reasons).toEqual({ 'http 404': 1, blocked: 1, other: 1 });
+  expect(aggregate.formats.docx.failures).toEqual([{ area: 'roundtrip', channel: 'published', stage: 'other', count: 1 }]);
+  const text = JSON.stringify([aggregate, renderSection(input), fontArmLine('published', fontSummary(input.samples, 'published'))]);
+  for (const leak of ['host-a', '/tmp/x/y.ttf']) expect(text.includes(leak) && leak).toBe(false);
+});
+
+test('a font count that is not a non-negative integer fails naming the job and the field, never the value', () => {
+  for (const [field, value] of [['unattributed.loaded', 'host-a'], ['unattributed.failed', -3], ['advertised', 1e20], ['advertised', -3]] as const) {
+    const input = fontsReport();
+    const fonts = (input.samples[1] as any).comparisons[0].fonts;
+    if (field === 'advertised') fonts.advertised = value;
+    else fonts.unattributed = { loaded: 0, failed: 0, [field.split('.')[1]]: value };
+    let message = '';
+    try {
+      aggregateReport(input);
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toContain('docx measure job');
+    expect(message).toContain(`fonts.${field}`);
+    expect(message.includes(String(value)) && String(value)).toBe(false);
+  }
+});
+
 test('the arm line states how many advertised faces did not load and why', async () => {
   const { fontArmLine, fontSummary } = await import('./readme.mjs');
   const { samples } = fontsReport();
