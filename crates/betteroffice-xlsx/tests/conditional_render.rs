@@ -1,4 +1,6 @@
-use betteroffice_xlsx::{DrawCmd, GridGeometry, SheetId, Viewport, Workbook};
+use betteroffice_xlsx::{
+    CalculationOptions, CellRef, DrawCmd, GridGeometry, SheetId, Viewport, Workbook,
+};
 
 const RED: &str = "#ffc7ce";
 const GREEN: &str = "#c6efce";
@@ -578,4 +580,209 @@ fn a_rule_whose_formula_meets_an_error_value_still_paints() {
     let workbook = gap_book("A1", &expression(1, "ISERROR(1/0)"));
     assert_eq!(fills(&workbook, &viewport(0.0)), red(&[0]));
     assert_eq!(withheld(&workbook, "engine_gap"), 0);
+}
+
+/// The cells the whole-range builds of one edit may hold: twice the calc
+/// engine's cell visits per evaluation.
+const WHOLE_RANGE_BUDGET: u64 = 2 * xlsx_calc::eval::MAX_EVALUATION_CELL_VISITS;
+/// The rows a budget sheet uses, its last cell being in this one.
+const USED_ROWS: u64 = 50_000;
+
+/// The letters of the 0-based column `index`.
+fn column(index: u64) -> String {
+    let mut letters = Vec::new();
+    let mut rest = index + 1;
+    while rest > 0 {
+        rest -= 1;
+        letters.push(char::from(b'A' + (rest % 26) as u8));
+        rest /= 26;
+    }
+    letters.iter().rev().collect()
+}
+
+/// The last column of a band from column C whose used rows hold `cells`.
+fn band_end(cells: u64) -> String {
+    assert_eq!(cells % USED_ROWS, 0);
+    column(2 + cells / USED_ROWS - 1)
+}
+
+/// The band from column C whose used rows hold `cells`.
+fn band(cells: u64) -> String {
+    format!("C1:{}{USED_ROWS}", band_end(cells))
+}
+
+fn duplicates(priority: u32) -> String {
+    format!(r#"<cfRule type="duplicateValues" dxfId="0" priority="{priority}"/>"#)
+}
+
+/// A sheet using `USED_ROWS` rows whose duplicate pairs are 7 in A1:A2 and 8
+/// in B1:B2, with `column_c` in C1:C2, `extra` and `rules`.
+fn budget_book(column_c: [&str; 2], extra: &[(&str, &str)], rules: &[String]) -> Workbook {
+    let end = format!("AU{USED_ROWS}");
+    let mut values = vec![
+        ("A1", "7"),
+        ("A2", "7"),
+        ("B1", "8"),
+        ("B2", "8"),
+        ("C1", column_c[0]),
+        ("C2", column_c[1]),
+        (end.as_str(), "1"),
+    ];
+    values.extend_from_slice(extra);
+    workbook(&values, &rules.concat(), &[&fill(RED), &fill(GREEN)])
+}
+
+/// Duplicate rules over A and over B, each holding one value once built.
+fn first_rules() -> Vec<String> {
+    vec![
+        rule(&format!("A1:A{USED_ROWS}"), &duplicates(1)),
+        rule(&format!("B1:B{USED_ROWS}"), &duplicates(2)),
+    ]
+}
+
+fn sorted_fills(workbook: &Workbook) -> Vec<((u32, u32), String)> {
+    let mut painted = fills(workbook, &viewport(0.0));
+    painted.sort();
+    painted
+}
+
+fn red_at(cells: &[(u32, u32)]) -> Vec<((u32, u32), String)> {
+    cells.iter().map(|&at| (at, RED.to_owned())).collect()
+}
+
+const PAIRS_OF_A_AND_B: [(u32, u32); 4] = [(0, 0), (0, 1), (1, 0), (1, 1)];
+
+/// Cells evaluated rendering `workbook` less those evaluated rendering
+/// `without`, the same sheet without the rule past the budget.
+fn evaluated_beyond(workbook: &Workbook, without: &Workbook) -> u64 {
+    fills(without, &viewport(0.0));
+    let beyond =
+        workbook.conditional_stats().evaluated_cells - without.conditional_stats().evaluated_cells;
+    assert!(beyond > 0);
+    beyond
+}
+
+/// A direct edit of AV1, a cell no budget rule covers.
+fn edit_outside(workbook: &mut Workbook) {
+    workbook
+        .edit_cell(
+            SheetId(0),
+            CellRef::new(0, 47),
+            "1",
+            CalculationOptions::default(),
+        )
+        .unwrap();
+}
+
+#[test]
+fn a_duplicate_rule_past_the_edit_budget_paints_nothing() {
+    let mut rules = first_rules();
+    rules.push(rule(&band(WHOLE_RANGE_BUDGET), &duplicates(3)));
+    let mut workbook = budget_book(["9", "9"], &[], &rules);
+    assert_eq!(sorted_fills(&workbook), red_at(&PAIRS_OF_A_AND_B));
+    assert_eq!(workbook.conditional_stats().aggregate_builds, 2);
+    let without = budget_book(["9", "9"], &[], &first_rules());
+    let refused = workbook.conditional_stats().withheld_refused;
+    assert_eq!(refused, evaluated_beyond(&workbook, &without));
+
+    edit_outside(&mut workbook);
+    assert_eq!(sorted_fills(&workbook), red_at(&PAIRS_OF_A_AND_B));
+    let stats = workbook.conditional_stats();
+    assert_eq!(stats.aggregate_builds, 4);
+    assert_eq!(stats.withheld_refused, 2 * refused);
+}
+
+#[test]
+fn a_count_table_past_the_edit_budget_is_not_built_and_paints_nothing() {
+    let range = format!("$C$1:${}${USED_ROWS}", band_end(WHOLE_RANGE_BUDGET));
+    let rules = [
+        rule(&format!("A1:A{USED_ROWS}"), &duplicates(1)),
+        rule(
+            "C1:C2",
+            &expression(2, &format!("COUNTIF({range},C1)&gt;1")),
+        ),
+    ];
+    let workbook = budget_book(["9", "9"], &[], &rules);
+    assert_eq!(sorted_fills(&workbook), red_at(&[(0, 0), (1, 0)]));
+    assert_eq!(workbook.conditional_stats().withheld_refused, 2);
+    assert_eq!(workbook.conditional_stats().aggregate_builds, 1);
+}
+
+#[test]
+fn a_top_rule_past_the_edit_budget_paints_nothing() {
+    let first = rule(&format!("A1:A{USED_ROWS}"), &duplicates(1));
+    let top = rule(
+        &band(WHOLE_RANGE_BUDGET),
+        r#"<cfRule type="top10" dxfId="0" priority="2" rank="1"/>"#,
+    );
+    let workbook = budget_book(["9", "3"], &[], &[first.clone(), top]);
+    assert_eq!(sorted_fills(&workbook), red_at(&[(0, 0), (1, 0)]));
+    assert_eq!(workbook.conditional_stats().aggregate_builds, 1);
+    let without = budget_book(["9", "3"], &[], &[first]);
+    assert_eq!(
+        workbook.conditional_stats().withheld_refused,
+        evaluated_beyond(&workbook, &without)
+    );
+}
+
+/// The duplicate pairs of A, B and C.
+const PAIRS_OF_A_B_AND_C: [(u32, u32); 6] = [(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2)];
+
+#[test]
+fn whole_range_builds_within_the_edit_budget_all_paint() {
+    let mut rules = first_rules();
+    rules.push(rule(&band(WHOLE_RANGE_BUDGET - USED_ROWS), &duplicates(3)));
+    let workbook = budget_book(["9", "9"], &[], &rules);
+    assert_eq!(sorted_fills(&workbook), red_at(&PAIRS_OF_A_B_AND_C));
+    assert_eq!(workbook.conditional_stats().aggregate_builds, 3);
+    assert_eq!(workbook.conditional_stats().withheld_refused, 0);
+
+    let wide = format!(
+        "A1:{}{USED_ROWS}",
+        column(WHOLE_RANGE_BUDGET / 2 / USED_ROWS - 1)
+    );
+    let sparse = budget_book(
+        ["9", "9"],
+        &[],
+        &[
+            rule(&wide, &duplicates(1)),
+            rule(&wide, &duplicates(2)),
+            rule(&wide, &duplicates(3)),
+        ],
+    );
+    assert_eq!(sorted_fills(&sparse), red_at(&PAIRS_OF_A_B_AND_C));
+    assert_eq!(sparse.conditional_stats().aggregate_builds, 3);
+    assert_eq!(sparse.conditional_stats().withheld_refused, 0);
+}
+
+#[test]
+fn a_rule_without_a_whole_range_build_paints_beside_a_rule_past_the_budget() {
+    let mut rules = first_rules();
+    rules.push(rule(&band(WHOLE_RANGE_BUDGET), &duplicates(3)));
+    rules.push(rule(
+        "A3:A4",
+        r#"<cfRule type="cellIs" dxfId="1" priority="4" operator="greaterThan"><formula>0</formula></cfRule>"#,
+    ));
+    let workbook = budget_book(["9", "9"], &[("A3", "5"), ("A4", "6")], &rules);
+    let green: Vec<_> = sorted_fills(&workbook)
+        .into_iter()
+        .filter(|(_, color)| color == GREEN)
+        .collect();
+    assert_eq!(
+        green,
+        [((2, 0), GREEN.to_owned()), ((3, 0), GREEN.to_owned())]
+    );
+}
+
+#[test]
+fn each_edit_starts_the_whole_range_budget_again() {
+    let mut alone = budget_book(
+        ["9", "9"],
+        &[],
+        &[rule(&band(WHOLE_RANGE_BUDGET), &duplicates(1))],
+    );
+    assert_eq!(sorted_fills(&alone), red_at(&[(0, 2), (1, 2)]));
+    edit_outside(&mut alone);
+    assert_eq!(sorted_fills(&alone), red_at(&[(0, 2), (1, 2)]));
+    assert_eq!(alone.conditional_stats().aggregate_builds, 2);
 }
