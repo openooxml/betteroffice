@@ -124,7 +124,7 @@ export function mergeDocxBenchmarks(plan, report, inputs, planHash) {
   const benchmark = JSON.parse(identity);
   delete benchmark.font_paths;
   return { ...report, samples, docx_benchmark: benchmark,
-    docx_runners: inputs.map((part) => ({ shard: part.shard, platform: part.runner?.platform, processors: part.runner?.processors })) };
+    docx_runners: inputs.map((part) => ({ shard: part.shard, processors: part.runner?.processors })) };
 }
 
 export async function stageDocx(planPath, shard, output, cacheDir) {

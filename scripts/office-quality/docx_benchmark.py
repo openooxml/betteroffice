@@ -307,7 +307,7 @@ def main():
                                      python=platform.python_version(), rasterizer=RASTERIZER,
                                      numpy=numpy.__version__, pillow=PIL.__version__, skimage=skimage.__version__,
                                      font_policy='bundled-fontconfig' if platform.system() == 'Linux' else 'system-fonts')),
-                  runner=dict(platform=platform.platform(), processors=os.cpu_count()))
+                  runner=dict(processors=os.cpu_count()))
     for index, sample in enumerate(job['samples']):
         directory = root / sample['id']
         if sha256(directory / 'source.docx') != sample['metadata']['source']['sha256']:

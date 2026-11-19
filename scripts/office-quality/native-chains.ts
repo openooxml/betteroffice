@@ -3,6 +3,7 @@ import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { privateMode } from './private-step.mjs';
 
 type Module = Record<string, any>;
 
@@ -448,6 +449,19 @@ export function checkPublishedVersion(installed: string, source: unknown, planne
     throw new Error(`published @betteroffice/docx ${installed} differs from the published native source's ${String(source)} (planned ${String(planned)})`);
 }
 
+export async function reportChains(lines: string[], failures: string[], env: NodeJS.ProcessEnv = process.env) {
+  const isPrivate = privateMode(env);
+  const summary = isPrivate
+    ? [...lines, ...(failures.length ? [`${failures.length} documents failed`] : [])]
+    : [...lines, ...failures.map((failure) => `FAILED ${failure}`)];
+  if (env.GITHUB_STEP_SUMMARY)
+    await appendFile(env.GITHUB_STEP_SUMMARY, `### DOCX native font chains\n\n${summary.map((line) => `- ${line}`).join('\n')}\n`);
+  if (failures.length)
+    throw new Error(isPrivate
+      ? `${failures.length} documents need font add-ons their channel lacks; they are listed in the private log`
+      : `documents need font add-ons their channel lacks:\n${failures.join('\n')}`);
+}
+
 async function main(env: NodeJS.ProcessEnv) {
   const required = (name: string) => {
     const value = env[name]?.trim();
@@ -503,10 +517,7 @@ async function main(env: NodeJS.ProcessEnv) {
     lines.push(describeFontPath(channel, version));
     console.log(lines.at(-1));
   }
-  const summary = [...lines, ...failures.map((failure) => `FAILED ${failure}`)];
-  if (env.GITHUB_STEP_SUMMARY)
-    await appendFile(env.GITHUB_STEP_SUMMARY, `### DOCX native font chains\n\n${summary.map((line) => `- ${line}`).join('\n')}\n`);
-  if (failures.length) throw new Error(`documents need font add-ons their channel lacks:\n${failures.join('\n')}`);
+  await reportChains(lines, failures, env);
   await mkdir(chainsRoot, { recursive: true });
   await writeFile(join(chainsRoot, 'paths.json'), JSON.stringify(paths, null, 2) + '\n');
 }

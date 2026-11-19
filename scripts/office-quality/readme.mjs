@@ -155,9 +155,15 @@ export function fontSummary(samples, channel) {
     }
     captures++;
     advertised = Math.max(advertised, fonts.advertised);
-    baseLatin = Math.max(baseLatin, fonts.base_latin ?? 0);
-    unattributed.loaded += fonts.unattributed?.loaded ?? 0;
-    unattributed.failed += fonts.unattributed?.failed ?? 0;
+    const count = (value, field) => {
+      if (value === undefined) return 0;
+      if (!Number.isSafeInteger(value) || value < 0)
+        throw new Error(`the ${sample.format} measure job's ${channel} comparison has fonts.${field} that is not a non-negative integer`);
+      return value;
+    };
+    baseLatin = Math.max(baseLatin, count(fonts.base_latin, 'base_latin'));
+    unattributed.loaded += count(fonts.unattributed?.loaded, 'unattributed.loaded');
+    unattributed.failed += count(fonts.unattributed?.failed, 'unattributed.failed');
     for (const face of fonts.loaded_faces ?? []) loaded.add(face);
     for (const [face, reason] of Object.entries(fonts.failed_faces ?? {}))
       if (!failed.has(face)) failed.set(face, reason);

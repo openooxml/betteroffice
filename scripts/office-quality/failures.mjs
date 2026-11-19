@@ -8,7 +8,7 @@ export function failureRecords(sample) {
   const records = [];
   const add = (area, channel, stage, error) => records.push({
     area,
-    channel: channel == null ? channel : known(CHANNELS, channel),
+    channel: area === 'probe' ? null : known(CHANNELS, channel),
     stage: stage == null ? area : known(STAGES, stage),
     error: String(error ?? ''),
   });
