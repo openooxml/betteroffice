@@ -487,6 +487,10 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     if (!owned.lifetime.acquire()) renewOwned(createOwned());
     return owned.lifetime.release;
   }, [owned]);
+  useLayoutEffect(() => {
+    controller.setMounted(true);
+    return () => controller.setMounted(false);
+  }, [controller]);
   const identity = useRef<PeerlessViewIdentity | null>(null);
   const retained = useRef<RetainedFrame | null>(null);
   const pageIndexes = useRef(new Map<string, number>());

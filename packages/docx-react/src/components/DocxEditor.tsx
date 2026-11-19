@@ -492,8 +492,8 @@ export interface DocxEditorBaseProps extends DocxEditorPluginProps {
    */
   onFirstPagePainted?: () => void;
   /**
-   * Called once per document on the worker editor, right after {@link onFirstPagePainted},
-   * with the api the ref exposes.
+   * Called once per document on the worker editor, with the api the ref exposes, when the opened
+   * document first paints and that api is usable; never at a `previewFirstPage` preview.
    */
   onReady?: (api: DocxEditorRef) => void;
   /**

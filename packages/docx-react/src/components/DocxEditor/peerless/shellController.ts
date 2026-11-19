@@ -120,6 +120,8 @@ export function createPeerlessShellController(initial: Options) {
   let fontFamilies: string[] = [];
   let metadata: { binding: PeerlessEditSessionBinding; version: number; value: DocxDocumentReadValues['toolbarMetadata'] } | null = null;
   let firstPainted = false;
+  let readyAnnounced = false;
+  let mounted = true;
   let workerMemory: WasmModuleMemory[] | null = null;
   let pressure: DocxMemoryPressureLevel = 'normal';
   let reviewValue: DocxReviewSnapshot | null = null;
@@ -160,7 +162,7 @@ export function createPeerlessShellController(initial: Options) {
   };
   const reset = (status: typeof snapshot.status, error: Error | null = null) => {
     const selected = snapshot.view?.workerSelection;
-    fontRevision = 0; fontFamilies = []; metadata = null; revisions = null; firstPainted = false; workerMemory = null;
+    fontRevision = 0; fontFamilies = []; metadata = null; revisions = null; firstPainted = false; readyAnnounced = false; workerMemory = null;
     unsubscribe?.(); binding = null; reviewValue = null; reviewBinding = null; reviewIdentity = null; nativeProbe = null;
     batchResults.clear(); commentResults.clear(); appliedBatches.clear(); commentList = null; snapshot = { status, view: null, error, mode: mode(), preview: null, previewPainted: false }; publish();
     if (selected) selectionChanged(null);
@@ -177,7 +179,11 @@ export function createPeerlessShellController(initial: Options) {
     if (shellChanged) for (const listener of shellListeners) listener();
     for (const wait of [...waits]) wait();
   };
-  const painted = () => { if (firstPainted) return; firstPainted = true; emit(options.onFirstPagePainted, undefined); emit(options.onReady, ref); };
+  const painted = () => { if (firstPainted) return; firstPainted = true; emit(options.onFirstPagePainted, undefined); };
+  const announceReady = (current: PeerlessEditSessionBinding) => {
+    if (readyAnnounced || closed || !mounted || binding !== current || snapshot.status !== 'ready') return;
+    readyAnnounced = true; emit(options.onReady, ref);
+  };
   const reportMemory = () => {
     const stats = memoryStats();
     const next = memoryPressureLevel(stats, options.memoryBudget);
@@ -1048,6 +1054,7 @@ export function createPeerlessShellController(initial: Options) {
       snapshot = { ...snapshot, previewPainted: true }; publish();
     },
     painted,
+    setMounted(value: boolean) { mounted = value; },
     stalled(error: Error) {
       if (snapshot.status === 'opening') for (const fail of [...waiting]) fail(error);
     },
@@ -1113,7 +1120,7 @@ export function createPeerlessShellController(initial: Options) {
           }
         }
         publish(true);
-        if (ready && view.geometry?.pages.some(page => page.displayPage?.unbuilt !== true)) painted();
+        if (ready && view.geometry?.pages.some(page => page.displayPage?.unbuilt !== true)) { painted(); announceReady(next); }
         if (previous && view.version !== previous.version) {
           const change = { version: String(view.version) };
           emit(options.onDocumentChange, change);
