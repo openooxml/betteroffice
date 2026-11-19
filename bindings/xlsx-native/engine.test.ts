@@ -1,5 +1,6 @@
 import initPreflight, { font_preflight as wasmFontPreflight } from '../../packages/xlsx/src/wasm/generated/preflight/xlsx_preflight.js';
 import { fontPreflightFixture } from '../../packages/xlsx/src/wasm/__fixtures__/fontPreflight';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -554,6 +555,37 @@ describe('xlsx native engine parity', () => {
       expect(new Uint8Array(nativeDoc.saveBytes())).toEqual(wasmSaved);
       const saved = await (await JSZip.loadAsync(wasmSaved)).file('xl/drawings/drawing1.xml')!.async('string');
       expect(fromMarker(saved)).toEqual(fromMarker(drawing));
+    } finally {
+      wasmDoc.free();
+      nativeDoc.free();
+    }
+  });
+
+  test('renderPngTarget paints the shared rich text fixture from the runs both engines build, to the pin the Python binding checks', async () => {
+    const shared = JSON.parse(readFileSync(new URL('../xlsx-rich-text-png.json', import.meta.url), 'utf8')) as {
+      target: { sheet: number; range: string };
+      sha256: string;
+      parts: Record<string, string>;
+    };
+    const zip = new JSZip();
+    for (const [name, content] of Object.entries(shared.parts)) zip.file(name, content);
+    const bytes = await zip.generateAsync({ type: 'uint8array' });
+    const wasmDoc = WasmDocument.open(bytes) as EngineDocument;
+    const nativeDoc = native.XlsxDocument.open(bytes) as EngineDocument;
+    try {
+      const range = JSON.stringify({ range: shared.target.range });
+      const list = nativeDoc.rangePngDisplayListJson(range);
+      expect(list).toBe(wasmDoc.rangePngDisplayListJson(range));
+      const texts = (JSON.parse(list) as { commands: { op: string; text?: string; runs?: unknown[] }[] }).commands
+        .filter((command) => command.op === 'text')
+        .map((command) => [command.text ?? '', (command.runs?.length ?? 0) > 0] as const);
+      expect(Object.fromEntries(texts)).toEqual({
+        'Total due now by Friday': true,
+        'Wrapped words in a narrow cell': true,
+        'plain text': false,
+      });
+      const png = nativeDoc.renderPngTarget(JSON.stringify(shared.target), '{}');
+      expect(createHash('sha256').update(png).digest('hex')).toBe(shared.sha256);
     } finally {
       wasmDoc.free();
       nativeDoc.free();
