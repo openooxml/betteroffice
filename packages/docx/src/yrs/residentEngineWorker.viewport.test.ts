@@ -164,6 +164,7 @@ function commandFrames(options: { cell?: boolean; range?: boolean; splitEnd?: bo
       }
       return state.selectionQueries!.queries;
     },
+    residentDisplayListQueries: (): unknown => dependencies.queriesFor(),
     decodeFrameDelta: (bytes: Uint8Array) => deltas.get(bytes[0]!)!,
     applyWorkerFrame: () => { state.retainedFrame.frameEpoch = revision; return delta; },
     async finalizeResidentFrame(bytes: Uint8Array) {
