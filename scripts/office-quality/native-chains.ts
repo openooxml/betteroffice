@@ -161,9 +161,10 @@ export async function loadFontPackages(root: string, planAbsent: ReadonlySet<Add
   return { version, fonts, addons };
 }
 
-export function describeAddons(packages: FontPackages) {
+export function describeAddons(packages: FontPackages, withoutErrors = false) {
   return Object.entries(packages.addons).map(([name, addon]) =>
-    `${name} ${addon.absent ? 'absent (not declared)' : addon.version === undefined ? 'missing' : addon.error ? `${addon.version} (failed: ${addon.error})` : addon.version}`).join(', ');
+    addon.error && withoutErrors ? `${name} failed`
+      : `${name} ${addon.absent ? 'absent (not declared)' : addon.version === undefined ? 'missing' : addon.error ? `${addon.version} (failed: ${addon.error})` : addon.version}`).join(', ');
 }
 
 export function absentAddonUse(packages: FontPackages, requirements: Requirement[], loads: Iterable<[AddonName, string]> = []): AbsentAddon[] {
@@ -468,6 +469,7 @@ async function main(env: NodeJS.ProcessEnv) {
     if (!value) throw new Error(`${name} is required`);
     return resolve(value);
   };
+  const isPrivate = privateMode(env);
   const output = required('QUALITY_OUTPUT');
   const chainsRoot = required('QUALITY_CHAINS');
   const job = JSON.parse(await readFile(join(output, 'job.json'), 'utf8'));
@@ -495,8 +497,9 @@ async function main(env: NodeJS.ProcessEnv) {
       if (!(error instanceof MissingExport)) throw error;
       throw new Error(missingExportsFailure(channel, version, error.message));
     }
-    lines.push(`${channel}: @betteroffice/fonts@${product.fonts.version}, ${describeAddons(product.fonts)}`);
-    console.log(lines.at(-1));
+    const fontsLine = `${channel}: @betteroffice/fonts@${product.fonts.version}, `;
+    lines.push(fontsLine + describeAddons(product.fonts, isPrivate));
+    console.log(fontsLine + describeAddons(product.fonts));
     let absentDocuments = 0;
     for (const sample of job.samples) {
       try {
