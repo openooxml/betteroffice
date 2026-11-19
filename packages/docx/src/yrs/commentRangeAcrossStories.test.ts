@@ -252,6 +252,8 @@ interface Opened {
   revisions(): number;
   /** Saves as the route's editor does; `stories` are marked changed besides the body. */
   save(comments: (list: Comment[]) => Comment[], stories?: readonly string[]): Promise<Uint8Array>;
+  /** The route's content-control setter, where its session object has one. */
+  controls?: Pick<YrsSession, 'setContentControlValue'>;
   destroy(): void;
 }
 
@@ -295,6 +297,7 @@ async function open(route: Route, bytes: Uint8Array): Promise<Opened> {
         projected = saved.projected;
         return saved.bytes;
       },
+      controls: session,
       destroy: () => session.destroy(),
     };
   }
@@ -309,6 +312,7 @@ async function open(route: Route, bytes: Uint8Array): Promise<Opened> {
       revisions: () => session.listRevisions().length,
       save: async (comments, stories) =>
         (await editorSave(session, base, comments(hostComments(parsed)), undefined, stories)).bytes,
+      controls: session,
       destroy: () => session.destroy(),
     };
   }
@@ -940,6 +944,235 @@ describe('the source scan for comment ranges across stories', () => {
         expect(scans).toHaveBeenCalledTimes(1);
       } finally {
         scans.mockRestore();
+        session.destroy();
+      }
+    },
+    TIMEOUT
+  );
+});
+
+const dropdown = (inner: string) =>
+  '<w:sdt><w:sdtPr><w:id w:val="42"/><w:dropDownList>' +
+  '<w:listItem w:displayText="Gamma" w:value="g"/><w:listItem w:displayText="Omega" w:value="o"/>' +
+  `</w:dropDownList></w:sdtPr><w:sdtContent>${inner}</w:sdtContent></w:sdt>`;
+const grid = (...rows: string[][]) =>
+  '<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="dxa"/></w:tblPr><w:tblGrid>' +
+  rows[0]!.map(() => '<w:gridCol w:w="2500"/>').join('') +
+  '</w:tblGrid>' +
+  rows
+    .map((cells) => `<w:tr>${cells.map((cell) => `<w:tc><w:tcPr><w:tcW w:w="2500" w:type="dxa"/></w:tcPr>${cell}</w:tc>`).join('')}</w:tr>`)
+    .join('') +
+  '</w:tbl>';
+const IN_DROPDOWN = docx(
+  para(OPENING) + para(run('Beta two.')) + dropdown(para(`${run('Gamma')}${end(1)}`)) + para(run('Delta four.')),
+  [1, 2]
+);
+const INTO_NESTED_TABLE = docx(
+  BEFORE_ROW +
+    grid(
+      [para(run('Top left.')), para(`${start(1)}${run('Top right.')}`)],
+      [table(para(`${run('Inner')}${end(1)}`)) + para(run('Below.')), para(run('Bottom right.'))]
+    ) +
+    para(run('After row.')),
+  [1, 2]
+);
+const TWO_ENDS_IN_A_BOX = docx(
+  para(OPENING) +
+    para(run('Beta two.')) +
+    para(`${run('Box ')}${textBox(para(`${run('Gamma')}<w:commentRangeEnd w:id="1"/>${run(' more')}${end(1)}`))}`) +
+    para(run('Delta four.')),
+  [1, 2]
+);
+const REPLY_IN_HEADER = docx(
+  para(OPENING) +
+    para(run('Beta two.')) +
+    `<w:sdt><w:sdtPr><w:id w:val="77"/></w:sdtPr><w:sdtContent>${para(ENDING)}</w:sdtContent></w:sdt>` +
+    para(run('Delta four.')),
+  [1, 2, 10],
+  para(`${run('Head ')}${start(10)}${run('note')}${end(10)}${run('.')}`)
+);
+const TEXT_BEFORE_REFERENCE = docx(
+  para(OPENING) +
+    para(run('Beta two.')) +
+    table(
+      para(
+        `${run('Gamma')}<w:commentRangeEnd w:id="1"/>` +
+          `<w:r><w:t xml:space="preserve">outside</w:t><w:commentReference w:id="1"/></w:r>${run(' three.')}`
+      )
+    ) +
+    para(run('Delta four.')),
+  [1, 2]
+);
+
+/** The part's text, every comment mark in document order with where it sits, and the text each range covers. */
+function laidOut(xml: string, outside = 'body') {
+  const { text, markers } = scan(xml);
+  const covered: Record<number, string | null> = {};
+  for (const id of new Set(markers.map((marker) => marker.id))) {
+    const opening = markers.find((marker) => marker.id === id && marker.kind === 'Start');
+    const closing = markers.find((marker) => marker.id === id && marker.kind === 'End');
+    covered[id] = opening && closing && opening.xml < closing.xml ? text.slice(opening.text, closing.text) : null;
+  }
+  const where = (at: number) => {
+    const found = container(xml, at);
+    return found === 'body' ? outside : found;
+  };
+  return { text, marks: markers.map((marker) => `${marker.id} ${marker.kind} ${where(marker.xml)}`), covered };
+}
+
+type LaidOut = ReturnType<typeof laidOut>;
+
+interface Malformed {
+  name: string;
+  outcome: string;
+  bytes: Uint8Array;
+  routes: readonly Route[];
+  edit(opened: Opened): Promise<Uint8Array>;
+  saved: { body: LaidOut; header?: LaidOut };
+}
+
+const AS_SAVED_BEFORE = 'is saved cut at the end of the paragraph it starts in, its text and every mark as before';
+const typedWhereItStarts = (opened: Opened) => {
+  removeOther(opened);
+  typeIn(opened, 'body', 0, 7);
+};
+const cutAtTheStart = (text: string, covered: string) => ({
+  body: { text, marks: ['1 Start body', '1 End body', '1 Reference body'], covered: { 1: covered } },
+});
+
+const MALFORMED: Malformed[] = [
+  {
+    name: 'a comment into a dropdown whose item is chosen',
+    outcome: AS_SAVED_BEFORE,
+    bytes: IN_DROPDOWN,
+    routes: ['path that seeds in Rust', 'path that seeds in TypeScript'],
+    edit: async (opened) => {
+      removeOther(opened);
+      opened.controls!.setContentControlValue('42', { kind: 'dropdown', value: 'o' });
+      return opened.save(withoutOther);
+    },
+    saved: cutAtTheStart('Alpha one.Beta two.OmegaDelta four.', 'one.'),
+  },
+  {
+    name: 'a comment from a cell into a table nested in the cell below, whose left cells are merged',
+    outcome: AS_SAVED_BEFORE,
+    bytes: INTO_NESTED_TABLE,
+    routes: ROUTES,
+    edit: async (opened) => {
+      removeOther(opened);
+      opened.session.mergeCells({
+        anchor: { story: 'body', tableIndex: 0, row: 0, column: 0 },
+        head: { story: 'body', tableIndex: 0, row: 1, column: 0 },
+      });
+      return opened.save(withoutOther);
+    },
+    saved: {
+      body: {
+        text: 'Before row.Top left.InnerBelow.Top right.Bottom right.After row.',
+        marks: ['1 Start cell 3', '1 End cell 3', '1 Reference cell 3'],
+        covered: { 1: 'Top right.' },
+      },
+    },
+  },
+  {
+    name: 'a comment into a text box holding two of its ends',
+    outcome: 'is saved as before this change, cut where it starts and both ends kept in the text box',
+    bytes: TWO_ENDS_IN_A_BOX,
+    routes: ROUTES,
+    edit: async (opened) => {
+      typedWhereItStarts(opened);
+      return opened.save(withoutOther);
+    },
+    saved: {
+      body: {
+        text: 'Alpha oXne.Beta two.Box Gamma moreDelta four.',
+        marks: ['1 Start body', '1 End body', '1 Reference body', '1 End text box', '1 End text box', '1 Reference text box'],
+        covered: { 1: 'oXne.' },
+      },
+    },
+  },
+  {
+    name: 'a comment into a block content control whose reply has its own range in a header',
+    outcome: "is saved as before this change, cut where it starts with the reply's marks beside its own, the reply's range in the header kept",
+    bytes: REPLY_IN_HEADER,
+    routes: ROUTES,
+    edit: async (opened) => {
+      typedWhereItStarts(opened);
+      return opened.save((list) =>
+        withoutOther(list).map((comment) => (comment.id === 10 ? { ...comment, parentId: 1 } : comment))
+      );
+    },
+    saved: {
+      body: {
+        text: 'Alpha oXne.Beta two.Gamma three.Delta four.',
+        marks: ['1 Start body', '10 Start body', '1 End body', '1 Reference body', '10 End body', '10 Reference body'],
+        covered: { 1: 'oXne.', 10: 'oXne.' },
+      },
+      header: {
+        text: 'Head note.',
+        marks: ['10 Start header', '10 End header', '10 Reference header'],
+        covered: { 10: 'note' },
+      },
+    },
+  },
+  {
+    name: 'a comment into a table cell whose reference shares its run with text after the end',
+    outcome: AS_SAVED_BEFORE,
+    bytes: TEXT_BEFORE_REFERENCE,
+    routes: ROUTES,
+    edit: async (opened) => {
+      typedWhereItStarts(opened);
+      return opened.save(withoutOther);
+    },
+    saved: cutAtTheStart('Alpha oXne.Beta two.Gammaoutside three.Delta four.', 'oXne.'),
+  },
+];
+
+describe('a comment range across stories that a whole save would leave malformed', () => {
+  it.each(
+    MALFORMED.flatMap((shape) =>
+      shape.routes.map((route) => [shape.name, route, shape.outcome, shape] as [string, Route, string, Malformed])
+    )
+  )(
+    '%s, opened by the %s, %s',
+    async (_name, route, _outcome, shape) => {
+      const opened = await open(route, shape.bytes);
+      try {
+        const saved = await shape.edit(opened);
+        expect({
+          body: laidOut(documentBody(saved)),
+          ...(shape.saved.header ? { header: laidOut(headerXml(saved), 'header') } : {}),
+        }).toEqual(shape.saved);
+      } finally {
+        opened.destroy();
+      }
+    },
+    TIMEOUT
+  );
+});
+
+describe('a session seeded in TypeScript again with another document', () => {
+  it(
+    'saves a comment that ends in a table cell whole, read from the document seeded last',
+    async () => {
+      const session = await createYrsSession({ clientId: (clientId += 1) });
+      try {
+        const first = await parseDocx(
+          docx(para(`${run('Plain ')}${start(5)}${run('five')}${end(5)}${run('.')}`), [5]).slice().buffer,
+          { preloadFonts: false }
+        );
+        documentToYrs(session, first);
+        yrsToDocument(session, first);
+        for (const story of session.storyIds()) session.deleteStory(story);
+        const bytes = BUILT[0]!.bytes;
+        const second = await parseDocx(bytes.slice().buffer, { preloadFonts: false });
+        documentToYrs(session, second);
+        const { paraId } = session.paragraphs('body')[0]!;
+        session.insertText({ story: 'body', paraId, offset: 7 }, 'X');
+        const base = { ...second, originalBuffer: second.originalBuffer ?? bytes.slice().buffer };
+        const xml = documentBody((await editorSave(session, base, hostComments(second))).bytes);
+        expect(placed(xml, 1)).toEqual({ ...placed(documentBody(bytes), 1), text: 'oXne.Beta two.Gamma' });
+      } finally {
         session.destroy();
       }
     },
