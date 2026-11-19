@@ -1015,6 +1015,91 @@ impl<'a> Fragment<'a> {
         }
         Some((kept, &xml[tag.range.clone()]))
     }
+
+    /// The bytes of each run of the fragment, in document order and at any depth, that holds an
+    /// optional `w:rPr` followed by one empty note reference tag and nothing else.
+    fn reference_runs(&self) -> Vec<&'a str> {
+        let xml = self.xml;
+        (0..self.elements.len())
+            .filter(|index| self.reference_run(*index, true).is_some())
+            .map(|index| &xml[self.elements[index].range.clone()])
+            .collect()
+    }
+
+    /// Whether the element `element` holds a note reference tag at any depth.
+    fn holds_note_reference(&self, element: usize) -> bool {
+        let range = &self.elements[element].range;
+        self.tags.iter().any(|tag| {
+            let note = matches!(tag.name, "w:footnoteReference" | "w:endnoteReference");
+            note && range.contains(&tag.range.start)
+        })
+    }
+
+    /// Whether the element `element` has a child other than a `w:rPr`.
+    fn holds_more_than_properties(&self, element: usize) -> bool {
+        let properties = |child: &usize| self.tag(*child).name == "w:rPr";
+        !self.elements[element].children.iter().all(properties)
+    }
+}
+
+/// Whether the runs of `written` that hold an optional `w:rPr` followed by one empty note
+/// reference tag and nothing else have, in document order, the bytes of those of `source`.
+fn keeps_reference_runs(source: &str, written: &str) -> Option<bool> {
+    let source = Fragment::new(source, tags(source)?)?;
+    let written = Fragment::new(written, tags(written)?)?;
+    Some(source.reference_runs() == written.reference_runs())
+}
+
+/// The number of `w:ins` and of `w:del` elements the paragraph `written` would hold if each note
+/// reference stood outside its revision: a revision counts once for each stretch of its runs that
+/// a note reference does not interrupt; `None` when a revision that holds a note reference is not
+/// a child of the paragraph or holds anything but runs.
+fn base_revision_counts(written: &str) -> Option<[usize; 2]> {
+    let written = Fragment::new(written, tags(written)?)?;
+    let mut counts = [0; REVISIONS.len()];
+    for element in 0..written.elements.len() {
+        let tag = written.tag(element);
+        let Some(index) = REVISIONS.iter().position(|name| *name == tag.name) else {
+            continue;
+        };
+        if !written.holds_note_reference(element) {
+            counts[index] += 1;
+            continue;
+        }
+        let runs = &written.elements[element].children;
+        if !written.paragraph_children()?.contains(&element)
+            || runs.iter().any(|run| written.tag(*run).name != "w:r")
+        {
+            return None;
+        }
+        let mut open = false;
+        for &run in runs {
+            if written.reference_run(run, true).is_some() {
+                open = false;
+            } else if written.holds_more_than_properties(run) {
+                counts[index] += usize::from(!open);
+                open = true;
+            }
+        }
+    }
+    Some(counts)
+}
+
+/// Whether the paragraph `written`, with each note reference outside its revision, holds at least
+/// as many `w:ins` and as many `w:del` elements as `source`.
+fn base_writes_paragraph(source: &str, written: &str) -> bool {
+    let Some(counts) = base_revision_counts(written) else {
+        return false;
+    };
+    let mut held = [0; REVISIONS.len()];
+    for tag in tags(source).unwrap_or_default() {
+        if !tag.end
+            && let Some(index) = REVISIONS.iter().position(|name| *name == tag.name)
+        {
+            held[index] += 1;
+        }
+    }
+    counts[0] >= held[0] && counts[1] >= held[1]
 }
 
 /// Whether the element `counterpart` of `written` holds the runs of the element `element` of
@@ -1090,8 +1175,9 @@ fn restorations(
 
 /// What a save that changes only run formatting writes for the paragraph `source` given its
 /// rewrite `written`: `written` with each `w:ins` or `w:del` of `source` whose runs hold note
-/// references and nothing else put back as its source bytes, or the elements writing it would
-/// drop when that is not possible.
+/// references and nothing else put back as its source bytes, when every other run of a note
+/// reference keeps its source bytes or [`base_writes_paragraph`] holds for `written`; otherwise
+/// the elements writing it would drop.
 pub(crate) fn format_edit<'a>(
     source: &str,
     written: &'a str,
@@ -1114,10 +1200,15 @@ pub(crate) fn format_edit<'a>(
         restored.replace_range(range, &source[bytes]);
     }
     let dropped = dropped_structure(source, &restored);
-    if dropped.is_empty() {
+    if !dropped.is_empty() {
+        return Err(dropped);
+    }
+    if keeps_reference_runs(source, &restored) == Some(true)
+        || base_writes_paragraph(source, written)
+    {
         Ok(Cow::Owned(restored))
     } else {
-        Err(dropped)
+        Err(dropped_by_format_edit(source, written))
     }
 }
 
@@ -4315,6 +4406,128 @@ mod tests {
         let unlinked = format!("<w:p>{BOLD_HEAD}</w:p>");
         let dropped = format_edit(&linked, &unlinked).unwrap_err();
         assert_eq!(dropped, ["w:hyperlink"]);
+    }
+
+    fn text_run(value: &str) -> String {
+        format!("<w:r><w:t>{value}</w:t></w:r>")
+    }
+
+    fn beside_a_reference_alone(tag: &str, content: &str, reference: &str) -> String {
+        revision(tag, 1, content) + &revision("del", 2, reference)
+    }
+
+    #[test]
+    fn base_revision_counts_count_each_stretch_a_note_reference_does_not_interrupt() {
+        let text = text_run("old");
+        let reference = bare_reference("footnote");
+        let empty = "<w:r><w:rPr><w:b/></w:rPr></w:r>";
+        let rows = [
+            (reference.clone(), 0),
+            (format!("{text}{reference}{text}"), 2),
+            (format!("{text}{reference}"), 1),
+            (format!("{reference}{text}"), 1),
+            (format!("{text}{reference}{text}{reference}{text}"), 3),
+            (format!("{reference}{reference}"), 0),
+            (format!("{text}{text}"), 1),
+            (format!("{text}{empty}{text}{reference}"), 1),
+            (format!("{empty}{reference}{empty}"), 0),
+        ];
+        for (content, count) in rows {
+            for (tag, counts) in [("ins", [count, 0]), ("del", [0, count])] {
+                let xml = format!("<w:p>{HEAD}{}</w:p>", revision(tag, 1, &content));
+                assert_eq!(base_revision_counts(&xml), Some(counts), "{xml}");
+            }
+        }
+    }
+
+    #[test]
+    fn base_revision_counts_count_insertions_and_deletions_apart() {
+        let text = text_run("old");
+        let reference = bare_reference("footnote");
+        let inserted = revision("ins", 1, &format!("{text}{reference}{text}"));
+        let deleted = revision("del", 2, &reference);
+        let xml = format!("<w:p>{HEAD}{inserted}{deleted}</w:p>");
+        assert_eq!(base_revision_counts(&xml), Some([2, 0]));
+    }
+
+    #[test]
+    fn base_revision_counts_need_note_reference_revisions_to_be_paragraph_children_of_runs() {
+        let reference = bare_reference("footnote");
+        let deleted = revision("del", 1, &reference);
+        let linked = format!("<w:p><w:hyperlink>{deleted}</w:hyperlink></w:p>");
+        assert_eq!(base_revision_counts(&linked), None);
+        let link = format!("<w:hyperlink>{}</w:hyperlink>", text_run("x"));
+        let bookmark = "<w:bookmarkStart w:id=\"0\" w:name=\"b\"/>";
+        for other in [link.as_str(), bookmark] {
+            let deleted = revision("del", 1, &format!("{other}{reference}"));
+            assert_eq!(base_revision_counts(&format!("<w:p>{deleted}</w:p>")), None);
+        }
+    }
+
+    #[test]
+    fn format_edit_keeps_the_source_when_an_untracked_note_reference_loses_its_style() {
+        let (styled, bare) = (styled_reference("footnote"), bare_reference("footnote"));
+        let wrapper = revision("del", 1, &styled);
+        let source = format!("<w:p>{HEAD}{wrapper}{styled}</w:p>");
+        let rewritten = revision("del", 1, &bare);
+        let written = format!("<w:p>{BOLD_HEAD}{rewritten}{bare}</w:p>");
+        let dropped = format_edit(&source, &written).expect_err("the source is kept");
+        assert_eq!(dropped, dropped_by_format_edit(&source, &written));
+    }
+
+    #[test]
+    fn format_edit_writes_a_revision_of_a_reference_alone_beside_an_untouched_note_reference() {
+        let (styled, bare) = (styled_reference("footnote"), bare_reference("footnote"));
+        let wrapper = revision("del", 1, &styled);
+        let source = format!("<w:p>{HEAD}{wrapper}{bare}</w:p>");
+        let rewritten = revision("del", 1, &bare);
+        let written = format!("<w:p>{BOLD_HEAD}{rewritten}{bare}</w:p>");
+        let restored = format_edit(&source, &written).expect("the edit is written");
+        assert_eq!(
+            restored.into_owned(),
+            format!("<w:p>{BOLD_HEAD}{wrapper}{bare}</w:p>")
+        );
+    }
+
+    #[test]
+    fn format_edit_writes_the_rewrite_of_a_text_revision_around_an_endnote_reference() {
+        let text = text_run("old");
+        let (styled, bare) = (styled_reference("endnote"), bare_reference("endnote"));
+        let alone = revision("del", 2, &styled);
+        let source_around = revision("del", 1, &format!("{text}{styled}{text}"));
+        let source = format!("<w:p>{HEAD}{source_around}{alone}</w:p>");
+        let around = revision("del", 1, &format!("{text}{bare}{text}"));
+        let written_alone = revision("del", 2, &bare);
+        let written = format!("<w:p>{BOLD_HEAD}{around}{written_alone}</w:p>");
+        let restored = format_edit(&source, &written).expect("the edit is written");
+        assert_eq!(
+            restored.into_owned(),
+            format!("<w:p>{BOLD_HEAD}{around}{alone}</w:p>")
+        );
+    }
+
+    #[test]
+    fn format_edit_keeps_the_source_when_a_text_revision_ends_with_a_styled_note_reference() {
+        let text = text_run("old");
+        let (styled, bare) = (styled_reference("footnote"), bare_reference("footnote"));
+        assert_kept(
+            &beside_a_reference_alone("del", &format!("{text}{styled}"), &styled),
+            &beside_a_reference_alone("del", &format!("{text}{bare}"), &bare),
+        );
+    }
+
+    #[test]
+    fn format_edit_counts_insertions_and_deletions_apart_beside_a_deleted_reference_alone() {
+        let text = text_run("new");
+        let (styled, bare) = (styled_reference("footnote"), bare_reference("footnote"));
+        assert_kept(
+            &beside_a_reference_alone("ins", &format!("{text}{styled}"), &styled),
+            &beside_a_reference_alone("ins", &format!("{text}{bare}"), &bare),
+        );
+        assert_kept(
+            &beside_a_reference_alone("ins", &format!("{text}{styled}{text}"), &styled),
+            &beside_a_reference_alone("ins", &format!("{text}{bare}{text}"), &bare),
+        );
     }
 
     fn body(paragraphs: &str) -> String {
