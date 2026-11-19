@@ -1,12 +1,15 @@
 import { afterEach, beforeAll, describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { parseDocx } from '../docx';
 import { rezipPartsToArrayBuffer, toBytes } from '../docx/rezip/parts';
 import { preloadEditWasm } from '../wasm/edit';
 import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
+import { documentToYrs } from './documentToYrs';
 import { saveEditorDocument } from './editorSave';
 import { createYrsSession, saveYrsDocx, yrsToDocument, type YrsSession } from './index';
-import { savedListDefinitionIds } from './listDefinitionSave';
+import { savedListDefinitionIds, writeListDefinitionParts, type DocxSavedListDefinition } from './listDefinitionSave';
+import { captureSessionSave, writeSessionSave } from './saveYrsDocx';
 
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 const R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
@@ -325,3 +328,145 @@ for (const [saveName, save] of Object.entries(SAVES)) {
     }
   });
 }
+
+/** A session opened from `bytes` by one loader, and how it saves. */
+type Loaded = { session: YrsSession; save: () => Promise<Uint8Array> };
+const LOADERS: Record<string, (bytes: Uint8Array) => Promise<Loaded>> = {
+  'engine seed, saveYrsDocx': async (bytes) => {
+    const session = await seeded(bytes);
+    return { session, save: () => SAVES.saveYrsDocx!(session) };
+  },
+  'engine seed, editor save': async (bytes) => {
+    const session = await seeded(bytes);
+    return { session, save: () => SAVES.editor!(session) };
+  },
+  'TypeScript loader, session save': async (bytes) => {
+    const source = bytes.slice().buffer as ArrayBuffer;
+    const parsed = await parseDocx(source, { preloadFonts: false });
+    const session = await createYrsSession();
+    open.push(session);
+    documentToYrs(session, parsed);
+    return {
+      session,
+      save: async () => (await writeSessionSave(
+        session, yrsToDocument(session, parsed), captureSessionSave(session), parsed.originalBuffer ?? source, {}, () => false
+      )).bytes,
+    };
+  },
+};
+
+for (const [loader, load] of Object.entries(LOADERS)) {
+  for (const [spelling, numPr] of [
+    ['with its level', '<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>'],
+    ['without a level', '<w:numPr><w:numId w:val="1"/></w:numPr>'],
+  ] as const) {
+    test(`${loader}: bullets on a paragraph numbered by its style ${spelling} save a direct created list and leave the next on the style's list`, async () => {
+      const styles = STYLES.replace(
+        '</w:styles>',
+        `<w:style w:type="paragraph" w:styleId="Listed"><w:name w:val="Listed"/><w:pPr>${numPr}</w:pPr></w:style></w:styles>`
+      );
+      const styled = (value: string) => `<w:p><w:pPr><w:pStyle w:val="Listed"/></w:pPr><w:r><w:t>${value}</w:t></w:r></w:p>`;
+      const { session, save } = await load(makeDocx(documentOf(styled('Styled A'), styled('Styled B')), LISTS_NUMBERING, styles));
+      createList(session, 'Styled A', 'bullet');
+      const bytes = await save();
+      const parts = unzipContainer(bytes);
+      const document = text(parts['word/document.xml']) ?? '';
+      const ownProperties = (value: string) => {
+        const saved = (document.match(/<w:p\b[\s\S]*?<\/w:p>/g) ?? []).find(entry => entry.includes(`>${value}<`)) ?? '';
+        return /<w:pPr>[\s\S]*?<\/w:pPr>/.exec(saved)?.[0] ?? '';
+      };
+      const created = attribute(ownProperties('Styled A'), /<w:numId w:val="(\d+)"/);
+      expect(created).toBeGreaterThan(3);
+      expect(ownProperties('Styled B')).not.toContain('numPr');
+      const numbering = text(parts['word/numbering.xml']) ?? '';
+      const num = elements(numbering, 'num').find(entry => attribute(entry, NUM_ID) === created);
+      const abstract = elements(numbering, 'abstractNum').find(entry => attribute(entry, ABSTRACT_ID) === attribute(num, POINTER));
+      expect(formats(abstract ?? '')[0]).toBe('bullet');
+      const reopened = await seeded(bytes);
+      const reopenedProperties = (value: string) => reopened.paragraphs('body').find(entry => entry.text === value)?.properties;
+      expect(reopenedProperties('Styled A')).toMatchObject({ numPr: { numId: created }, listIsBullet: true });
+      expect(reopenedProperties('Styled B')).toMatchObject({ numPr: { numId: 1 }, listNumFmt: 'decimal' });
+    });
+  }
+}
+
+describe('the numbering part a save adds, its content type and relationship', () => {
+  const TYPES = 'http://schemas.openxmlformats.org/package/2006/content-types';
+  const NUMBERING_TYPE = `${OFFICE}.numbering+xml`;
+  const ROOT_RELATIONSHIPS = `<Relationships xmlns="${PACKAGE_RELATIONSHIPS}"><Relationship Id="doc" Type="${R}/officeDocument" Target="word/document.xml"/></Relationships>`;
+  const DOCUMENT_RELATIONSHIPS = `<Relationships xmlns="${PACKAGE_RELATIONSHIPS}"><Relationship Id="rId1" Type="${R}/styles" Target="styles.xml"/></Relationships>`;
+  const DEFINITION: DocxSavedListDefinition = {
+    key: '1:0',
+    kind: 'bullet',
+    levelTexts: LEVELS.map(() => 'b'),
+    levelFormats: LEVELS.map(() => 'bullet'),
+    numId: 1,
+    abstractNumId: 0,
+  };
+  const written = (types: string, relationships = DOCUMENT_RELATIONSHIPS) => {
+    const parts: Record<string, Uint8Array> = {
+      '[Content_Types].xml': toBytes(types),
+      '_rels/.rels': toBytes(ROOT_RELATIONSHIPS),
+      'word/_rels/document.xml.rels': toBytes(relationships),
+    };
+    expect(writeListDefinitionParts(parts, [DEFINITION])).toBe(true);
+    expect(parts['word/numbering.xml']).toBeDefined();
+    return { types: text(parts['[Content_Types].xml']) ?? '', relationships: text(parts['word/_rels/document.xml.rels']) ?? '' };
+  };
+  /** That `result` is `source` with exactly one `inserted` at `at`. */
+  const insertedOnce = (source: string, result: string, at: number, inserted: RegExp) => {
+    expect(result.slice(0, at)).toBe(source.slice(0, at));
+    expect(result.endsWith(source.slice(at))).toBe(true);
+    expect(result.slice(at, result.length - (source.length - at))).toMatch(inserted);
+  };
+
+  const present: Array<[string, string]> = [
+    ['an override in double quotes', `<Override PartName="/word/numbering.xml" ContentType="${NUMBERING_TYPE}"/>`],
+    ['an override in single quotes', `<Override PartName='/word/numbering.xml' ContentType='${NUMBERING_TYPE}'/>`],
+    ['an override with its attributes in another order', `<Override ContentType="${NUMBERING_TYPE}" PartName="/word/numbering.xml"/>`],
+    ['an override with white space and line breaks in its start tag', `<Override\n  PartName = "/word/numbering.xml"\r\n\tContentType="${NUMBERING_TYPE}"\n/>`],
+    ['an override naming the part in another case', `<Override PartName="/WORD/Numbering.XML" ContentType="${NUMBERING_TYPE}"/>`],
+  ];
+  for (const [name, override] of present) {
+    test(`content types with ${name} are kept as they are`, () => {
+      const types = `<Types xmlns="${TYPES}"><Default Extension="xml" ContentType="application/xml"/>${override}</Types>`;
+      expect(written(types).types).toBe(types);
+    });
+  }
+
+  test('content types with a prefixed root that names the part are kept as they are', () => {
+    const types = `<ct:Types xmlns:ct="${TYPES}"><ct:Default Extension="xml" ContentType="application/xml"/><ct:Override PartName="/word/numbering.xml" ContentType="${NUMBERING_TYPE}"/></ct:Types>`;
+    expect(written(types).types).toBe(types);
+  });
+
+  test('content types with a prefixed root gain one override in that prefix', () => {
+    const types = `<ct:Types xmlns:ct="${TYPES}"><ct:Default Extension="xml" ContentType="application/xml"/></ct:Types>`;
+    const result = written(types).types;
+    insertedOnce(types, result, types.lastIndexOf('</ct:Types>'), /^<ct:Override PartName="\/word\/numbering\.xml" ContentType="[^"]+"\/>$/);
+  });
+
+  test('content types with a self-closing root gain one override inside it', () => {
+    const types = `<?xml version="1.0"?>\n<Types xmlns="${TYPES}"/>`;
+    const result = written(types).types;
+    expect(result).toBe(`<?xml version="1.0"?>\n<Types xmlns="${TYPES}"><Override PartName="/word/numbering.xml" ContentType="${NUMBERING_TYPE}"/></Types>`);
+  });
+
+  test('content types without the override gain exactly one before the root end', () => {
+    const types = `<Types xmlns="${TYPES}">\n  <Default Extension="xml" ContentType="application/xml"/>\n</Types >\n`;
+    const result = written(types).types;
+    insertedOnce(types, result, types.lastIndexOf('</Types'), /^<Override PartName="\/word\/numbering\.xml" ContentType="[^"]+"\/>$/);
+  });
+
+  test('relationships with a prefixed root gain one numbering relationship in that prefix', () => {
+    const relationships = `<r:Relationships xmlns:r="${PACKAGE_RELATIONSHIPS}"><r:Relationship Id="rId1" Type="${R}/styles" Target="styles.xml"/></r:Relationships>`;
+    const result = written(`<Types xmlns="${TYPES}"/>`, relationships).relationships;
+    insertedOnce(relationships, result, relationships.lastIndexOf('</r:Relationships>'),
+      /^<r:Relationship Id="rId2" Type="[^"]+\/numbering" Target="numbering\.xml"\/>$/);
+  });
+
+  test('relationships with a self-closing root gain one numbering relationship inside it', () => {
+    const relationships = `<Relationships xmlns="${PACKAGE_RELATIONSHIPS}"/>`;
+    const result = written(`<Types xmlns="${TYPES}"/>`, relationships).relationships;
+    expect(result).toBe(`<Relationships xmlns="${PACKAGE_RELATIONSHIPS}"><Relationship Id="rId1" Type="${R}/numbering" Target="numbering.xml"/></Relationships>`);
+  });
+});

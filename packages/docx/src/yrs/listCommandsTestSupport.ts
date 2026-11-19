@@ -460,6 +460,20 @@ export function listCommandScenarios(path: string, open: OpenListCommandDriver, 
     expect(propertiesOf(driver, NEXT_HEADING).numPr).toEqual(heading);
   }, timeout);
 
+  test(`${path}: bullets on a heading numbered by its style save a direct list of its own and leave the next heading on the style's list`, async () => {
+    const driver = await open('D');
+    driver.toggle('bullet', HEADING);
+    const key = keyOf(driver, HEADING);
+    expect(key).toBeDefined();
+    expect(driver.marker(HEADING)).toBe('•');
+    const bytes = await driver.save();
+    const heading = savedList(bytes, HEADING);
+    expect(heading.numId ?? '').toMatch(/^\d+$/);
+    expect(SOURCE_NUM_IDS.D.includes(heading.numId ?? '')).toBe(false);
+    expect(heading).toMatchObject({ paragraphs: 1, name: `betteroffice-list:${key}`, numFmt: 'bullet' });
+    expect(savedList(bytes, NEXT_HEADING)).toEqual({ paragraphs: 1, numId: undefined });
+  }, timeout);
+
   test(`${path}: a paragraph joining a created list takes the level of the item above`, async () => {
     const driver = await open('C', { after: [FOLLOWER] });
     driver.toggle('numbered', PLAIN);
