@@ -8,7 +8,6 @@ import { residentWorkerFactory } from './__fixtures__/residentWorker';
 import { ResidentEngineWorkerClient } from './residentEngineWorkerClient';
 import type { DocxCommandEnvelope, DocxCommandInitRequest } from './residentCommandProtocol';
 import type { DocxClipboardFragment, DocxTableFragment } from './clipboardFragment';
-import { mergeFormattingFragment } from './clipboardFragmentTransforms';
 import type { YrsCellLoc } from './index';
 import { createYrsSession } from './index';
 
@@ -415,7 +414,7 @@ test('merge formatting keeps the source marks and the destination run formatting
     const end = pasted.selection!.focus;
     const replaced = await client.edit(intent(++seq, version, 'replacePasteFragment', {
       selection: { anchor: end, focus: end },
-      fragment: mergeFormattingFragment(source),
+      fragment: { paragraphs: [{ text: 'Bold', runs: [{ text: 'Bold', format: { other: { bold: true } } }] }] },
       merge: true,
     }));
     expect(replaced.outcomes[0]?.status).toBe('applied');
@@ -546,7 +545,9 @@ for (const option of ['keep source', 'merge formatting', 'keep text only'] as co
       const end = pasted.selection!.focus;
       const replaced = await client.edit(intent(++seq, version, 'replacePasteFragment', {
         selection: { anchor: end, focus: end },
-        ...(option === 'merge formatting' ? { fragment: mergeFormattingFragment(source), merge: true as const }
+        ...(option === 'merge formatting' ? { fragment: { paragraphs: [{ text: 'Link', runs: [
+          { text: 'Link', format: { other: { bold: true } }, href: 'https://example.test/', tooltip: 'Tip' },
+        ] }] }, merge: true as const }
           : option === 'keep text only' ? { fragment: { paragraphs: [{ text: 'Link' }] }, plain: true as const }
             : { fragment: source }),
       }));
@@ -871,7 +872,7 @@ for (const variant of ['plain', 'merge'] as const) {
         selection: { anchor: end, focus: end },
         ...(variant === 'plain'
           ? { fragment: { paragraphs: [{ text: 'Rich' }] }, plain: true as const }
-          : { fragment: mergeFormattingFragment(source), merge: true as const }),
+          : { fragment: { paragraphs: [{ text: 'Rich', runs: [{ text: 'Rich', format: { other: { bold: true } } }] }] }, merge: true as const }),
       }));
       expect(replaced.outcomes[0]?.status).toBe('applied');
       version = replaced.version;

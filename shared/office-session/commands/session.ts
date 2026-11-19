@@ -1,6 +1,7 @@
 import { SessionFailure } from '../types';
 import { cancelOutboxAfter, createOutbox, fenceOutbox } from './outbox';
 import { createPresenter } from './presenter';
+import { defaultCheckpointPolicy } from './checkpointPolicy';
 import { cloneData } from './clone';
 import { createBlockedLedger } from './ledger';
 import { isCommandAck, isCommandOutcomeUnknownError } from './types';
@@ -957,7 +958,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
     const bytes = retainedBytes;
     if (applied === 0 && bytes === 0) return false;
     return options.checkpointPolicy ? options.checkpointPolicy({ applied, bytes }) :
-      applied >= 128 || bytes >= 1024 * 1024;
+      defaultCheckpointPolicy({ applied, bytes });
   }
 
   function validCheckpoint(value: Checkpoint): boolean {

@@ -1,9 +1,8 @@
 import { describe, expect, test } from 'bun:test';
-import { validClipboardFragment, type DocxClipboardFragment } from './clipboardFragment';
+import { validClipboardFragment, type DocxClipboardFragment } from '@betteroffice/docx/yrs';
 import {
   clipboardFragmentHasFormatting,
   mergeFormattingFragment,
-  textOnlyFragment,
 } from './clipboardFragmentTransforms';
 
 function richFragment(): DocxClipboardFragment {
@@ -58,7 +57,6 @@ describe('mergeFormattingFragment', () => {
     expect(mergeFormattingFragment(linked).paragraphs[0]!.runs).toEqual([
       { text: 'Link', format: { other: { bold: true } }, href: 'https://example.test/', tooltip: 'Tip' },
     ]);
-    expect(textOnlyFragment(linked).paragraphs).toEqual([{ text: 'Link' }]);
   });
 
   test('does not mutate the source fragment', () => {
@@ -127,44 +125,6 @@ function editorCopyFragment(): DocxClipboardFragment {
     }],
   };
 }
-
-describe('textOnlyFragment', () => {
-  test('keeps one plain paragraph per source paragraph with no formatting', () => {
-    const textOnly = textOnlyFragment(richFragment());
-    expect(textOnly.paragraphs).toEqual([{ text: 'Rich link' }, { text: 'Second' }]);
-  });
-
-  test('removes table cell formatting but keeps cell text', () => {
-    const fragment: DocxClipboardFragment = {
-      paragraphs: [{
-        text: '',
-        tables: [{
-          tblPr: {},
-          grid: [1000],
-          rows: [{
-            trPr: {},
-            cells: [{
-              tcPr: {},
-              content: [
-                { kind: 'text', text: 'Cell', format: { bold: true } },
-                { kind: 'pilcrow', properties: { pStyle: 'Heading1' } },
-              ],
-            }],
-          }],
-        }],
-      }],
-    };
-    const textOnly = textOnlyFragment(fragment);
-    const content = textOnly.paragraphs[0]!.tables![0]!.rows[0]!.cells[0]!.content;
-    expect(content).toEqual([{ kind: 'text', text: 'Cell' }, { kind: 'pilcrow' }]);
-  });
-
-  test('does not mutate the source fragment', () => {
-    const source = richFragment();
-    textOnlyFragment(source);
-    expect(source.paragraphs[0]!.runs).toHaveLength(2);
-  });
-});
 
 describe('clipboardFragmentHasFormatting', () => {
   test('detects run formatting and links', () => {

@@ -1150,12 +1150,12 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   }, [controller, props.onCopy, props.onCut, reportRecoverableError, t]);
   const notifyPasteRefused = useCallback(() => { toast(t('editor.pasteFailed')); }, [t]);
   const pasteRecorder = useRef<PeerlessPasteRecorder | null>(null);
-  const onPasteFragment = useCallback((fragment: DocxClipboardFragment, inputTime: number, plainText: string): boolean => {
+  const onPasteFragment = useCallback((fragment: DocxClipboardFragment, inputTime: number): boolean => {
     const current = active.current;
     if (!current) return false;
     if (!isPasteFragmentAllowed(controller.commands.store, fragment)) return false;
     const submission = submitPasteFragment(current.binding.admission, fragment, { inputTime, source: 'paste', fence: true }, notifyPasteRefused);
-    pasteRecorder.current?.(fragment, plainText, submission);
+    pasteRecorder.current?.(fragment, submission);
     props.onPaste?.();
     return true;
   }, [controller, notifyPasteRefused, props.onPaste]);
@@ -1198,7 +1198,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const contextMenu = useWorkerContextMenu({ binding: () => active.current?.binding ?? null,
     environment: controller.environment, commands: controller.commands.store, clipboard: onClipboard,
     submit: controller.submit, onWrapImage: (handle, wrap) => propertyDialogs.applyImageWrap(wrap, handle),
-    onPaste: props.onPaste, onPasteRefused: notifyPasteRefused, recordPaste: (fragment, plainText, submission) => pasteRecorder.current?.(fragment, plainText, submission), onError: reportRecoverableError, beginAddComment: workerComments.beginAddComment, focusEditor: focus });
+    onPaste: props.onPaste, onPasteRefused: notifyPasteRefused, recordPaste: (fragment, submission) => pasteRecorder.current?.(fragment, submission), onError: reportRecoverableError, beginAddComment: workerComments.beginAddComment, focusEditor: focus });
   inputCommand.current = contextMenu.input;
   useLayoutEffect(() => {
     active.current?.clipboard?.dispose();

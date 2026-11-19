@@ -1,6 +1,6 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, ReactElement } from 'react';
-import type { PasteFormattingOption } from '@betteroffice/docx/yrs';
+import type { PasteFormattingOption } from './clipboardFragmentTransforms';
 import { useTranslation } from '../../../i18n';
 import { MaterialSymbol } from '../../ui/Icons';
 import type { PasteOptionsAnchor } from './usePasteOptions';
@@ -40,12 +40,15 @@ export function PasteOptionsControl(props: {
   anchor: PasteOptionsAnchor;
   menuOpen: boolean;
   selected: PasteFormattingOption;
+  options: readonly PasteFormattingOption[];
   onMenuOpenChange(open: boolean): void;
   onChoose(option: PasteFormattingOption): void;
   onCloseMenu(): void;
 }): ReactElement {
   const { t } = useTranslation();
   const { anchor, menuOpen, selected, onMenuOpenChange, onChoose, onCloseMenu } = props;
+  const offered = props.options;
+  const items = useMemo(() => OPTIONS.filter((option) => offered.includes(option.kind)), [offered]);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const menuRef = useRef<HTMLDivElement | null>(null);
@@ -73,13 +76,13 @@ export function PasteOptionsControl(props: {
 
   useEffect(() => {
     if (!menuOpen) return;
-    const index = Math.max(0, OPTIONS.findIndex(option => option.kind === selected));
+    const index = Math.max(0, items.findIndex(option => option.kind === selected));
     setFocusIndex(index);
     itemRefs.current[index]?.focus();
-  }, [menuOpen, selected]);
+  }, [menuOpen, selected, items]);
 
   const move = (next: number) => {
-    const index = (next + OPTIONS.length) % OPTIONS.length;
+    const index = (next + items.length) % items.length;
     setFocusIndex(index);
     itemRefs.current[index]?.focus();
   };
@@ -152,11 +155,11 @@ export function PasteOptionsControl(props: {
               move(0);
             } else if (event.key === 'End') {
               event.preventDefault();
-              move(OPTIONS.length - 1);
+              move(items.length - 1);
             }
           }}
         >
-          {OPTIONS.map((option, index) => (
+          {items.map((option, index) => (
             <button
               key={option.kind}
               ref={(element) => { itemRefs.current[index] = element; }}

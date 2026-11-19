@@ -1,13 +1,20 @@
 import {
-  clipboardFragmentHasFormatting,
   clipboardFragmentHasPictures,
+  validClipboardFragment,
   type DocxClipboardFragment,
   type DocxTableFragment,
 } from '@betteroffice/docx/yrs';
+import { clipboardFragmentHasFormatting, type PasteFormattingOption } from './clipboardFragmentTransforms';
 
-/** @internal Whether a paste offers Paste Options: it has formatting to choose about, text to keep and no pictures. */
-export function pasteOptionsApply(fragment: DocxClipboardFragment, plainText: string): boolean {
-  return plainText.trim() !== '' && !clipboardFragmentHasPictures(fragment) && clipboardFragmentHasFormatting(fragment);
+/**
+ * @internal The Paste Options a paste offers: none unless it has formatting to choose about, text to keep and no
+ * pictures, and Keep Text Only only when its text-only fragment is one the worker accepts.
+ */
+export function pasteOptionsOffered(fragment: DocxClipboardFragment): PasteFormattingOption[] {
+  if (clipboardFragmentHasPictures(fragment) || !clipboardFragmentHasFormatting(fragment)) return [];
+  const plain = clipboardFragmentPlainText(fragment);
+  if (plain.trim() === '') return [];
+  return validClipboardFragment(plainTextClipboardFragment(plain)) ? ['keep-source', 'merge', 'text-only'] : ['keep-source', 'merge'];
 }
 
 /** @internal Fragment for a plain-text string, one paragraph per line. */

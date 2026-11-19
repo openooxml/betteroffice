@@ -913,6 +913,15 @@ function markDelta(mark: YrsRunMark, context: NonNullable<ReturnType<typeof proj
   }
 }
 
+const DISCRETE_COMMANDS = new Set(['setTabStops', 'removeTabStop', 'toggleList', 'changeIndent', 'insertImage', 'moveEmbed', 'insertTable',
+  'pasteFragment', 'replacePasteFragment', 'insertPageBreak', 'insertSectionBreak', 'lineBreak']);
+
+function isDiscreteCommand(kind: string): boolean {
+  return DISCRETE_COMMANDS.has(kind) || isTableCommandKind(kind);
+}
+
+const UNTIMED_DISCRETE_SPAN = [0, 0] as const;
+
 export function applyDocxCommand(
   engine: DocxWorkerCommandEngine,
   state: DocxWorkerCommandState,
@@ -922,11 +931,13 @@ export function applyDocxCommand(
 ): DocxCommandApplyResult {
   const { inputTime, lastInputTime } = prepared.command;
   const version = engine.proposalEngine.version();
+  const span = inputTime !== undefined ? [inputTime, lastInputTime ?? inputTime] as const
+    : isDiscreteCommand(prepared.command.kind) ? UNTIMED_DISCRETE_SPAN : null;
   try {
-    if (inputTime === undefined) return applyPreparedDocxCommand(engine, state, prepared, context, environment);
-    engine.setUndoInputTime([inputTime, lastInputTime ?? inputTime]);
+    if (!span) return applyPreparedDocxCommand(engine, state, prepared, context, environment);
+    engine.setUndoInputTime(span);
     try {
-      return applyPreparedDocxCommand(engine, state, prepared, context, environment);
+      return applyPreparedDocxCommand(engine, state, prepared, context, environment, true);
     } finally {
       engine.setUndoInputTime(null);
     }
@@ -947,7 +958,8 @@ function applyPreparedDocxCommand(
   state: DocxWorkerCommandState,
   prepared: PreparedDocxCommand,
   _context: DocxCommandApplyContext,
-  environment?: DocxCommandHooksEnvironment
+  environment?: DocxCommandHooksEnvironment,
+  inputPinned = false
 ): DocxCommandApplyResult {
   const { command, range, selection } = prepared;
   const result = (status: 'applied' | 'noop', toolbar?: YrsSelectionContext): DocxCommandApplyResult => {
@@ -1238,8 +1250,7 @@ function applyPreparedDocxCommand(
   if (command.kind === 'setParagraphAttrs' && Object.keys(command.payload.attrs).length === 0) return result('noop');
   const version = engine.proposalEngine.version();
   engine.beginUndoCapture();
-  const discrete = ['setTabStops', 'removeTabStop', 'toggleList', 'changeIndent', 'insertImage', 'moveEmbed', 'insertTable', 'pasteFragment', 'replacePasteFragment', 'insertPageBreak', 'insertSectionBreak', 'lineBreak'].includes(command.kind) ||
-    isTableCommandKind(command.kind);
+  const discrete = isDiscreteCommand(command.kind);
   if (discrete) engine.addUndoBoundary();
   const caret = (at: YrsLoc) => publish({ anchor: at, focus: at }, true);
   let replacePasteRefused: 'nothing-to-undo' | 'paste-changed' | null = null;
@@ -1401,7 +1412,9 @@ function applyPreparedDocxCommand(
   }
   resetCellSelectionForEdit(engine, state, command.kind);
   if (discrete) engine.addUndoBoundary();
-  if (pastedOver) state.lastPaste = { range: pastedOver, version: engine.proposalEngine.version(), storedMarks: pastedMarks };
+  if (pastedOver) {
+    state.lastPaste = inputPinned ? { range: pastedOver, version: engine.proposalEngine.version(), storedMarks: pastedMarks } : null;
+  }
   if (replacePasteRefused) {
     state.lastPaste = null;
     return { ...result('noop'), status: 'refused', reason: replacePasteRefused };

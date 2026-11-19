@@ -131,7 +131,6 @@ export * from './storyPlainText';
 export { tableBoundaryDeleteTarget } from './tableBoundaryDelete';
 export { isCellHasNoStoryRefusal } from './cellRefusal';
 export * from './clipboardFragment';
-export * from './clipboardFragmentTransforms';
 export * from './stories';
 export type { DocxResolvedPointPosition } from './pointPosition';
 export type { DocxRangeHighlights } from './residentRangeHighlights';

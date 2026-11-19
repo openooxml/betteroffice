@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { ResidentWorkerOutOfMemoryError } from '@betteroffice/docx/yrs';
 import { createDocxWorkerEditSession, discardCommandPresentation, SessionFailure } from '@betteroffice/docx/worker';
+import { defaultCheckpointPolicy } from '../../../../../../shared/office-session/commands/checkpointPolicy';
 import type {
   DocxCommandFrame,
   DocxCommandPageIdentity,
@@ -33,6 +34,8 @@ export interface UsePeerlessEditSessionOptions {
   onError?(error: Error): void;
   /** Failures the editor survives, such as pages that cannot be painted until the viewport or zoom changes. */
   onRecoverableError?(error: Error): void;
+  /** While `current` is true the session takes no recovery checkpoint. */
+  holdCheckpoints?: { readonly current: boolean };
 }
 
 /** @internal */
@@ -198,6 +201,7 @@ export function usePeerlessEditSession(
           holdForCoalescing: holdInputForCoalescing,
           transactionalPresentation: true, echoOverflow: 'decline', maxEchoEntries: 256,
           maxRecoveryAttempts: callbacks.current.recovery ? 1 : 0,
+          checkpointPolicy: (stats) => callbacks.current.holdCheckpoints?.current !== true && defaultCheckpointPolicy(stats),
           recovery: {
             checkpoint: callbacks.current.recovery?.checkpoint
               ? (resident) => callbacks.current.recovery?.checkpoint?.(resident) ?? resident.client.call.checkpoint() : undefined,

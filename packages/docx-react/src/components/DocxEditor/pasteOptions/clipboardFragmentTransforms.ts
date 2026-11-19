@@ -1,9 +1,9 @@
-import type { YrsInlineFormatDelta } from './index';
 import type {
   DocxClipboardFragment,
   DocxFragmentSegment,
   DocxTableFragment,
-} from './clipboardFragment';
+  YrsInlineFormatDelta,
+} from '@betteroffice/docx/yrs';
 
 /** @internal The three variants a paste can be re-applied as. */
 export type PasteFormattingOption = 'keep-source' | 'merge' | 'text-only';
@@ -90,34 +90,6 @@ function mergeTable(table: DocxTableFragment): DocxTableFragment {
   };
 }
 
-function textOnlySegment(segment: DocxFragmentSegment): DocxFragmentSegment {
-  switch (segment.kind) {
-    case 'text':
-      return { kind: 'text', text: segment.text };
-    case 'pilcrow':
-      return { kind: 'pilcrow' };
-    case 'table':
-      return { kind: 'table', table: textOnlyTable(segment.table) };
-    default:
-      return { kind: segment.kind };
-  }
-}
-
-function textOnlyTable(table: DocxTableFragment): DocxTableFragment {
-  return {
-    tblPr: { ...table.tblPr },
-    grid: [...table.grid],
-    rows: table.rows.map(row => ({
-      trPr: { ...row.trPr },
-      cells: row.cells.map(cell => ({
-        tcPr: { ...cell.tcPr },
-        content: cell.content.map(textOnlySegment),
-        ...(cell.shading !== undefined ? { shading: cell.shading } : {}),
-      })),
-    })),
-  };
-}
-
 function cloneFragment(fragment: DocxClipboardFragment): DocxClipboardFragment {
   return structuredClone(fragment) as DocxClipboardFragment;
 }
@@ -145,20 +117,6 @@ export function mergeFormattingFragment(fragment: DocxClipboardFragment): DocxCl
             })),
           }
         : {}),
-    })),
-  };
-}
-
-/**
- * @internal Text-only variant of a pasted fragment: one plain paragraph per
- * source paragraph, with no run, paragraph or list formatting of its own.
- */
-export function textOnlyFragment(fragment: DocxClipboardFragment): DocxClipboardFragment {
-  const source = cloneFragment(fragment);
-  return {
-    paragraphs: source.paragraphs.map(paragraph => ({
-      ...(paragraph.tables ? { tables: paragraph.tables.map(textOnlyTable) } : {}),
-      text: paragraph.text,
     })),
   };
 }

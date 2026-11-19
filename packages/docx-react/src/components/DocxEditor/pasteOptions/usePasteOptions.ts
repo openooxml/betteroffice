@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import type { PasteFormattingOption } from '@betteroffice/docx/yrs';
+import { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
+import type { PasteFormattingOption } from './clipboardFragmentTransforms';
 
 /** @internal Client coordinates of the end of the pasted range. */
 export interface PasteOptionsAnchor {
@@ -10,8 +10,13 @@ export interface PasteOptionsAnchor {
 /** @internal State and event handling for the post-paste formatting control. */
 export function usePasteOptions(options: {
   enabled: boolean;
-  onChoose(option: PasteFormattingOption): void;
+  /** Returns whether the choice was accepted; only an accepted choice becomes the checked option. */
+  onChoose(option: PasteFormattingOption): boolean;
   focusEditor(): void;
+  /** The editor input; a Ctrl tap opens the menu only from inside it or the control. */
+  surface: RefObject<HTMLElement | null>;
+  /** Called when an outside pointer or a window resize hides the control. */
+  onHide?(): void;
 }) {
   const { enabled } = options;
   const callbacks = useRef(options);
@@ -19,6 +24,7 @@ export function usePasteOptions(options: {
   const [visible, setVisible] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [selected, setSelected] = useState<PasteFormattingOption>('keep-source');
+  const [offered, setOffered] = useState<readonly PasteFormattingOption[]>([]);
   const [anchor, setAnchor] = useState<PasteOptionsAnchor | null>(null);
   const ctrlAlone = useRef(false);
 
@@ -29,19 +35,19 @@ export function usePasteOptions(options: {
     setAnchor(null);
   }, []);
 
-  const show = useCallback((nextAnchor: PasteOptionsAnchor) => {
+  const show = useCallback((nextAnchor: PasteOptionsAnchor, nextOffered: readonly PasteFormattingOption[]) => {
     if (!callbacks.current.enabled) return;
     ctrlAlone.current = false;
     setAnchor(nextAnchor);
+    setOffered(nextOffered);
     setSelected('keep-source');
     setMenuOpen(false);
     setVisible(true);
   }, []);
 
   const choose = useCallback((option: PasteFormattingOption) => {
-    setSelected(option);
+    if (callbacks.current.onChoose(option)) setSelected(option);
     setMenuOpen(false);
-    callbacks.current.onChoose(option);
     callbacks.current.focusEditor();
   }, []);
 
@@ -72,15 +78,17 @@ export function usePasteOptions(options: {
 
   useEffect(() => {
     if (!visible) return;
+    const owned = (target: EventTarget | null) => target instanceof Node &&
+      (callbacks.current.surface.current?.contains(target) === true ||
+        (target instanceof Element && target.closest('[data-paste-options]') !== null));
     const keydown = (event: KeyboardEvent) => {
-      if (event.key === 'Control') { ctrlAlone.current = true; return; }
-      ctrlAlone.current = false;
+      ctrlAlone.current = event.key === 'Control' && owned(event.target);
     };
     const keyup = (event: KeyboardEvent) => {
       if (event.key !== 'Control') return;
       const alone = ctrlAlone.current;
       ctrlAlone.current = false;
-      if (alone && callbacks.current.enabled) setMenuOpen(true);
+      if (alone && callbacks.current.enabled && owned(event.target)) setMenuOpen(true);
     };
     document.addEventListener('keydown', keydown, true);
     document.addEventListener('keyup', keyup, true);
@@ -92,11 +100,14 @@ export function usePasteOptions(options: {
 
   useEffect(() => {
     if (!visible) return;
-    const hide = () => dismiss();
+    const hide = () => {
+      dismiss();
+      callbacks.current.onHide?.();
+    };
     const pointer = (event: PointerEvent) => {
       const target = event.target as Element | null;
       if (target?.closest?.('[data-paste-options]')) return;
-      dismiss();
+      hide();
     };
     window.addEventListener('resize', hide);
     document.addEventListener('pointerdown', pointer, true);
@@ -114,6 +125,7 @@ export function usePasteOptions(options: {
     visible: enabled && visible,
     menuOpen,
     selected,
+    offered,
     anchor,
     show,
     dismiss,

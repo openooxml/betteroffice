@@ -1,7 +1,7 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, test } from 'bun:test';
 import { useRef, useState } from 'react';
-import type { PasteFormattingOption } from '@betteroffice/docx/yrs';
+import type { PasteFormattingOption } from './clipboardFragmentTransforms';
 import { PasteOptionsControl, menuPlacement } from './PasteOptionsControl';
 import { usePasteOptions } from './usePasteOptions';
 
@@ -13,17 +13,16 @@ afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
 });
 
-function Harness(props: { enabled?: boolean; onChoose?: (option: PasteFormattingOption) => void | boolean; onHide?: () => void }) {
+function Harness(props: { enabled?: boolean; onChoose?: (option: PasteFormattingOption) => boolean; onHide?: () => void }) {
   const [focused, setFocused] = useState(0);
   const surface = useRef<HTMLDivElement | null>(null);
-  const options = {
+  const paste = usePasteOptions({
     enabled: props.enabled ?? true,
-    onChoose: props.onChoose ?? (() => {}),
+    onChoose: props.onChoose ?? (() => true),
     focusEditor: () => setFocused(count => count + 1),
     surface,
-    onHide: props.onHide,
-  };
-  const paste = usePasteOptions(options);
+    ...(props.onHide ? { onHide: props.onHide } : {}),
+  });
   return (
     <div>
       <div
@@ -33,7 +32,7 @@ function Harness(props: { enabled?: boolean; onChoose?: (option: PasteFormatting
         onKeyDown={(event) => { paste.handleKeyDown(event); }}
         onKeyUp={(event) => { paste.handleKeyUp(event); }}
       />
-      <button type="button" onClick={() => paste.show({ left: 40, top: 60 })}>show</button>
+      <button type="button" onClick={() => paste.show({ left: 40, top: 60 }, ['keep-source', 'merge', 'text-only'])}>show</button>
       <button type="button" onClick={() => paste.dismiss()}>dismiss</button>
       <span data-testid="state">
         {paste.visible ? 'visible' : 'hidden'}:{paste.selected}:{focused}
@@ -43,6 +42,7 @@ function Harness(props: { enabled?: boolean; onChoose?: (option: PasteFormatting
           anchor={paste.anchor}
           menuOpen={paste.menuOpen}
           selected={paste.selected}
+          options={paste.offered}
           onMenuOpenChange={paste.setMenuOpen}
           onChoose={paste.choose}
           onCloseMenu={paste.closeMenu}
@@ -72,7 +72,7 @@ test('pasteOptions disabled never shows the control', () => {
 
 test('menu exposes menuitemradio roles with aria-checked and chooses an option', () => {
   const chosen: PasteFormattingOption[] = [];
-  render(<Harness onChoose={(option) => { chosen.push(option); }} />);
+  render(<Harness onChoose={(option) => { chosen.push(option); return true; }} />);
   fireEvent.click(screen.getByText('show'));
   const button = screen.getByRole('button', { name: 'Paste Options (Ctrl)' });
   expect(button.getAttribute('aria-haspopup')).toBe('menu');
@@ -118,7 +118,7 @@ test('Escape closes the menu and returns focus to the editor', () => {
 
 test('arrow keys move between menu items and Enter chooses', () => {
   const chosen: PasteFormattingOption[] = [];
-  render(<Harness onChoose={(option) => { chosen.push(option); }} />);
+  render(<Harness onChoose={(option) => { chosen.push(option); return true; }} />);
   fireEvent.click(screen.getByText('show'));
   fireEvent.click(screen.getByRole('button', { name: 'Paste Options (Ctrl)' }));
   const menu = screen.getByRole('menu');

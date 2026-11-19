@@ -2900,18 +2900,17 @@ test('a keyboard paste hands its submission to the paste recorder', async () => 
   restorers.push(() => allowed.mockRestore());
   const view = render(<DocxEditor {...peerlessProps} showToolbar={false} />);
   await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
-  const recorded = mock((_fragment: yrs.DocxClipboardFragment, _plainText: string, _submission?: unknown) => {});
+  const recorded = mock((_fragment: yrs.DocxClipboardFragment, _submission?: unknown) => {});
   const props = surface.mock.calls.at(-1)![0] as { pasteRecorder?: { current: unknown }; onPasteFragment?: (...args: unknown[]) => boolean };
   if (props.pasteRecorder) props.pasteRecorder.current = recorded;
   const bold: yrs.DocxClipboardFragment = { paragraphs: [{ text: 'Bold', runs: [{ text: 'Bold', format: { other: { bold: true } } }] }] };
   let accepted: boolean | undefined;
-  act(() => { accepted = props.onPasteFragment?.(bold, 0, 'Bold'); });
+  act(() => { accepted = props.onPasteFragment?.(bold, 0); });
   expect(accepted).toBe(true);
   await waitFor(() => expect(requests.some(request => request.type === 'edit' && request.command.kind === 'pasteFragment')).toBe(true));
   expect(recorded).toHaveBeenCalledTimes(1);
-  const [fragment, plainText, submission] = recorded.mock.calls[0]!;
+  const [fragment, submission] = recorded.mock.calls[0]!;
   expect(fragment).toEqual(bold);
-  expect(plainText).toBe('Bold');
   expect((submission as { status?: unknown } | undefined)?.status).toBe('submitted');
 });
 

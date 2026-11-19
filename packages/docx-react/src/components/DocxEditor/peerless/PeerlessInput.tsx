@@ -2,15 +2,11 @@ import { isKeyReleasedFromInput, takeClipboardGesture } from '../../../../../../
 import { Suspense, lazy, useCallback, useLayoutEffect, useRef, useSyncExternalStore, type ReactElement, type Ref, type RefObject } from 'react';
 import { effectiveZoom } from '@betteroffice/docx/layout/render';
 import { findVerticalScrollParentOrRoot } from '@betteroffice/docx/utils/findVerticalScrollParent';
-import {
-  mergeFormattingFragment,
-  type DocxClipboardFragment,
-  type DocxCommandSelection,
-  type PasteFormattingOption,
-} from '@betteroffice/docx/yrs';
+import type { DocxClipboardFragment, DocxCommandSelection } from '@betteroffice/docx/yrs';
 import { scrollIntoViewDelta, scrollViewport } from '../internals/viewportBand';
 import { parseClipboardHtml } from '../internals/clipboardHtml';
-import { clipboardFragmentPlainText, pasteOptionsApply, plainTextClipboardFragment } from '../pasteOptions/pasteText';
+import { clipboardFragmentPlainText, pasteOptionsOffered, plainTextClipboardFragment } from '../pasteOptions/pasteText';
+import { mergeFormattingFragment, type PasteFormattingOption } from '../pasteOptions/clipboardFragmentTransforms';
 import { beginComposition, updateComposition, endComposition, type PeerlessCompositionEndResult, type PeerlessCompositionState } from './composition';
 import type { CommandTicket } from '../../../../../../shared/office-session/commands/types';
 import { admitInputIntents, admitIntent, appliedTicket, submitFormattingIntent, type PeerlessAdmissionResult, type PeerlessInputAdmission } from './inputAdmission';
@@ -22,13 +18,13 @@ import { usePasteOptions } from '../pasteOptions/usePasteOptions';
 const LazyPasteOptionsControl = lazy(() => import('../pasteOptions/PasteOptionsControl'));
 
 /** @internal Records a submitted fragment paste so Paste Options can offer it once the worker applied that paste. */
-export type PeerlessPasteRecorder = (fragment: DocxClipboardFragment, plainText: string, submission: PeerlessAdmissionResult) => void;
+export type PeerlessPasteRecorder = (fragment: DocxClipboardFragment, submission: PeerlessAdmissionResult) => void;
 
 type PastePoint = DocxCommandSelection['focus'];
 
 type PasteRecord = {
   fragment: DocxClipboardFragment;
-  plainText: string;
+  offered: readonly PasteFormattingOption[];
   ticket: CommandTicket | null;
   end: PastePoint | null;
   version: number;
@@ -55,10 +51,12 @@ export interface PeerlessInputProps {
   onRecoverableText?(text: string): void;
   /** Fills `data` synchronously when the selection's clipboard payload is ready. */
   onClipboard?(cut: boolean, data?: DataTransfer | null): Promise<void>;
-  onPasteFragment?(fragment: DocxClipboardFragment, inputTime: number, plainText: string): boolean;
+  onPasteFragment?(fragment: DocxClipboardFragment, inputTime: number): boolean;
   pasteOptions?: boolean;
   onReplacePasteFragment?(fragment: DocxClipboardFragment, selection: DocxCommandSelection, variant?: 'plain' | 'merge'): PeerlessAdmissionResult | false;
   pasteRecorder?: RefObject<PeerlessPasteRecorder | null>;
+  /** True from the submit of a paste that offers Paste Options until that offer ends. */
+  onPasteChoicePending?(pending: boolean): void;
   caretHostRef?: RefObject<HTMLDivElement | null>;
   zoom?: number;
   onNavigateCell?(direction: 'forward' | 'backward'): void;
@@ -91,14 +89,27 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
   const readOnly = useSyncExternalStore(admission.subscribeReadOnly, getReadOnly, getReadOnly);
   const snapshot = useSyncExternalStore(viewStore.subscribe, viewStore.getSnapshot, viewStore.getServerSnapshot);
   const pasteRecordRef = useRef<PasteRecord | null>(null);
+  const pasteChoicePending = useRef(false);
+  const setPasteRecord = useCallback((record: PasteRecord | null): void => {
+    pasteRecordRef.current = record;
+    const pending = record !== null;
+    if (pasteChoicePending.current === pending) return;
+    pasteChoicePending.current = pending;
+    callbacks.current.onPasteChoicePending?.(pending);
+  }, []);
+  useLayoutEffect(() => () => {
+    if (!pasteChoicePending.current) return;
+    pasteChoicePending.current = false;
+    callbacks.current.onPasteChoicePending?.(false);
+  }, []);
   const positionRef = useRef<(() => void) | null>(null);
   const dropPasteRecord = useCallback((record: PasteRecord): void => {
     if (pasteRecordRef.current !== record) return;
-    pasteRecordRef.current = null;
+    setPasteRecord(null);
     pasteOptionsRef.current.dismiss();
-  }, []);
+  }, [setPasteRecord]);
   const awaitPaste = useCallback((record: PasteRecord, submission: PeerlessAdmissionResult): void => {
-    pasteRecordRef.current = record;
+    setPasteRecord(record);
     if (submission.status === 'submitted' && admission.getSnapshot().tail !== submission.ticket) {
       dropPasteRecord(record);
       return;
@@ -112,52 +123,57 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       record.ticket = ticket;
       positionRef.current?.();
     });
-  }, [admission, dropPasteRecord]);
-  const choosePasteOption = useCallback((option: PasteFormattingOption): void => {
+  }, [admission, dropPasteRecord, setPasteRecord]);
+  const choosePasteOption = useCallback((option: PasteFormattingOption): boolean => {
     const record = pasteRecordRef.current;
-    if (!record?.end) return;
+    if (!record?.end || !record.offered.includes(option)) return false;
     const admitted = admission.getSnapshot();
     const view = viewStore.getSnapshot();
     const caret = caretPoint(view.workerSelection);
     if (view.version !== record.version || !caret || !samePoint(caret, record.end) ||
       admitted.originalUnackedIntents !== 0 || admitted.pendingInputs !== 0) {
       dropPasteRecord(record);
-      return;
+      return false;
     }
     const variant = option === 'merge'
       ? mergeFormattingFragment(record.fragment)
       : option === 'text-only'
-        ? plainTextClipboardFragment(record.plainText)
+        ? plainTextClipboardFragment(clipboardFragmentPlainText(record.fragment))
         : structuredClone(record.fragment);
     const end = record.end;
     const replacing: PasteRecord = { ...record, ticket: null, end: null, reveal: 'anchor' };
-    pasteRecordRef.current = replacing;
+    setPasteRecord(replacing);
     const outcome = callbacks.current.onReplacePasteFragment?.(variant, {
       anchor: { ...end },
       focus: { ...end },
     }, option === 'text-only' ? 'plain' : option === 'merge' ? 'merge' : undefined);
     if (!outcome) {
       dropPasteRecord(replacing);
-      return;
+      return false;
     }
     awaitPaste(replacing, outcome);
-  }, [admission, awaitPaste, dropPasteRecord, viewStore]);
+    return true;
+  }, [admission, awaitPaste, dropPasteRecord, setPasteRecord, viewStore]);
   const pasteOptions = usePasteOptions({
     enabled: props.pasteOptions !== false && !readOnly,
     onChoose: choosePasteOption,
     focusEditor: () => { textarea.current?.focus(); },
+    surface: textarea,
+    onHide: () => { setPasteRecord(null); },
   });
   const pasteOptionsRef = useRef(pasteOptions);
   pasteOptionsRef.current = pasteOptions;
-  const recordPaste = useCallback<PeerlessPasteRecorder>((fragment, plainText, submission) => {
+  const recordPaste = useCallback<PeerlessPasteRecorder>((fragment, submission) => {
     pasteOptionsRef.current.dismiss();
-    pasteRecordRef.current = null;
-    if (callbacks.current.pasteOptions === false || !pasteOptionsApply(fragment, plainText)) return;
+    setPasteRecord(null);
+    if (callbacks.current.pasteOptions === false) return;
+    const offered = pasteOptionsOffered(fragment);
+    if (offered.length === 0) return;
     awaitPaste({
-      fragment: structuredClone(fragment), plainText, ticket: null, end: null,
+      fragment: structuredClone(fragment), offered, ticket: null, end: null,
       version: viewStore.getSnapshot().version, reveal: 'show',
     }, submission);
-  }, [awaitPaste, viewStore]);
+  }, [awaitPaste, setPasteRecord, viewStore]);
   const pasteRecorder = props.pasteRecorder;
   useLayoutEffect(() => {
     if (!pasteRecorder) return;
@@ -215,7 +231,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       const caret = caretPoint(state.workerSelection);
       if (shown?.end && caret && samePoint(caret, shown.end) && state.version === shown.version) {
         const anchorPos = { left: (bounds?.left ?? 0) + focus.x * zoom + 6, top: top + height + 4 };
-        if (shown.reveal === 'show') pasteOptionsRef.current.show(anchorPos);
+        if (shown.reveal === 'show') pasteOptionsRef.current.show(anchorPos, shown.offered);
         else if (shown.reveal === 'anchor' || pasteOptionsRef.current.visible) pasteOptionsRef.current.setAnchor(anchorPos);
         shown.reveal = null;
       }
@@ -263,10 +279,10 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
     if (!atEnd || snapshot.version !== record.version) {
       if (snapshot.version === record.version && typeof document !== 'undefined' &&
         document.activeElement?.closest?.('[data-paste-options]')) return;
-      pasteRecordRef.current = null;
+      setPasteRecord(null);
       pasteOptionsRef.current.dismiss();
     }
-  }, [snapshot.workerSelection, snapshot.version]);
+  }, [snapshot.workerSelection, snapshot.version, setPasteRecord]);
 
   useLayoutEffect(() => {
     const element = textarea.current;
@@ -285,7 +301,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       const normalized = normalizeInputEvent(event, state);
       state = normalized.state;
       if (normalized.intents.length > 0 && event.source !== 'paste') {
-        pasteRecordRef.current = null;
+        setPasteRecord(null);
         pasteOptionsRef.current.dismiss();
       }
       if (normalized.preventDefault) native.preventDefault();
@@ -424,7 +440,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
     };
     const paste = (event: ClipboardEvent) => {
       clearEscape();
-      pasteRecordRef.current = null;
+      setPasteRecord(null);
       pasteOptionsRef.current.dismiss();
       if (state.composing) return;
       event.preventDefault();
@@ -434,9 +450,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       const html = gesture === 'plain' ? '' : event.clipboardData?.getData('text/html') ?? '';
       if (html) {
         const fragment = parseClipboardHtml(html);
-        const plain = event.clipboardData?.getData('text/plain') ?? '';
-        if (fragment && callbacks.current.onPasteFragment?.(fragment, event.timeStamp,
-          plain !== '' ? plain : clipboardFragmentPlainText(fragment)) === true) {
+        if (fragment && callbacks.current.onPasteFragment?.(fragment, event.timeStamp) === true) {
           element.value = '';
           return;
         }
@@ -538,7 +552,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
         element.ownerDocument.removeEventListener('pointerdown', clearEscape, true);
       }
     };
-  }, [admission, viewStore]);
+  }, [admission, viewStore, setPasteRecord]);
 
   return <>
   <textarea
@@ -559,6 +573,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
         anchor={pasteOptions.anchor}
         menuOpen={pasteOptions.menuOpen}
         selected={pasteOptions.selected}
+        options={pasteOptions.offered}
         onMenuOpenChange={pasteOptions.setMenuOpen}
         onChoose={pasteOptions.choose}
         onCloseMenu={pasteOptions.closeMenu}

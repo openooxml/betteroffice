@@ -1455,12 +1455,12 @@ function mountPasteOptions() {
   };
   const recorder: { current: PeerlessPasteRecorder | null } = { current: null };
   const admitted: { current: PeerlessInputAdmission | null } = { current: null };
-  const record = (fragment: DocxClipboardFragment, plainText: string) => {
-    recorder.current?.(fragment, plainText, submitPasteFragment(admitted.current!, fragment, { source: 'paste', fence: true }, () => {}));
+  const record = (fragment: DocxClipboardFragment) => {
+    recorder.current?.(fragment, submitPasteFragment(admitted.current!, fragment, { source: 'paste', fence: true }, () => {}));
   };
   const input = mount(false, {
     caretHostRef: { current: host }, pasteRecorder: recorder,
-    onPasteFragment: (fragment, _inputTime, plainText = '') => { record(fragment, plainText); return true; },
+    onPasteFragment: (fragment) => { record(fragment); return true; },
   });
   admitted.current = input.admission;
   const geometry: PeerlessFrameGeometry = {
@@ -1496,12 +1496,12 @@ test('a paste recorded from outside the input offers paste options until the nex
   const end = { story: 'body', paraId: 'a', offset: 4 };
   try {
     expect(typeof paste.recorder.current).toBe('function');
-    act(() => paste.record({ paragraphs: [{ text: 'Plain' }] }, 'Plain'));
+    act(() => paste.record({ paragraphs: [{ text: 'Plain' }] }));
     await paste.settle(0, 'applied', { anchor: end, focus: end });
     paste.present(1);
     await paste.idle();
     expect(paste.control() !== null).toBe(false);
-    act(() => paste.record(boldFragment(), 'Bold'));
+    act(() => paste.record(boldFragment()));
     await paste.settle(1, 'applied', { anchor: end, focus: end });
     paste.present(2);
     await waitFor(() => expect(paste.control() !== null).toBe(true));
@@ -1519,7 +1519,7 @@ test('a selection change while a paste is pending leaves no Paste Options contro
   const end = { story: 'body', paraId: 'a', offset: 4 };
   const moved = { story: 'body', paraId: 'b', offset: 0 };
   try {
-    act(() => paste.record(boldFragment(), 'Bold'));
+    act(() => paste.record(boldFragment()));
     admitIntent(paste.input.admission, { kind: 'navigate', payload: { unit: 'document-boundary', direction: 'backward', extend: false } },
       { source: 'selection' });
     expect(paste.input.submitted).toEqual(['pasteFragment', 'navigate']);
@@ -1539,7 +1539,7 @@ test('a refused or cancelled paste leaves no Paste Options control, an applied o
     const paste = mountPasteOptions();
     const end = { story: 'body', paraId: 'a', offset: 4 };
     try {
-      act(() => paste.record(boldFragment(), 'Bold'));
+      act(() => paste.record(boldFragment()));
       await paste.settle(0, status, { anchor: end, focus: end });
       paste.present(1);
       await paste.idle();
@@ -1554,7 +1554,7 @@ test('a later command presented in the same frame as the paste leaves no Paste O
   const paste = mountPasteOptions();
   const later = { story: 'body', paraId: 'b', offset: 9 };
   try {
-    act(() => paste.record(boldFragment(), 'Bold'));
+    act(() => paste.record(boldFragment()));
     paste.input.session.submit('navigate', { unit: 'document-boundary', direction: 'forward', extend: false });
     expect(paste.input.submitted).toEqual(['pasteFragment', 'navigate']);
     await act(async () => {
@@ -1605,8 +1605,8 @@ function mountPasteChoices() {
   const callbacks: Pick<PeerlessInputProps, 'caretHostRef' | 'pasteRecorder' | 'onPasteFragment' | 'onReplacePasteFragment'> = {
     caretHostRef: { current: host },
     pasteRecorder: recorder,
-    onPasteFragment: (fragment, _inputTime, plainText) => {
-      recorder.current?.(fragment, plainText, submitPasteFragment(admitted.current!, fragment, { source: 'paste', fence: true }, () => {}));
+    onPasteFragment: (fragment) => {
+      recorder.current?.(fragment, submitPasteFragment(admitted.current!, fragment, { source: 'paste', fence: true }, () => {}));
       return true;
     },
     onReplacePasteFragment: (fragment, selection, variant) => {
@@ -1760,8 +1760,8 @@ function mountPasteMenu(options: { pasteOptions?: boolean; replace: 'refuse' | '
     caretHostRef: { current: host },
     pasteRecorder: recorder,
     ...(options.pasteOptions === undefined ? {} : { pasteOptions: options.pasteOptions }),
-    onPasteFragment: (fragment, _inputTime, plainText) => {
-      recorder.current?.(fragment, plainText, submit(fragment));
+    onPasteFragment: (fragment) => {
+      recorder.current?.(fragment, submit(fragment));
       return true;
     },
     onReplacePasteFragment: (fragment, selection, variant) => {
@@ -1794,7 +1794,7 @@ function mountPasteMenu(options: { pasteOptions?: boolean; replace: 'refuse' | '
     input, replaced, control,
     async offer(fragment: DocxClipboardFragment, plain: string, route: 'keyboard' | 'context menu') {
       if (route === 'keyboard') pasteWith(input, clipboardFragmentHtml(fragment), plain);
-      else act(() => { recorder.current?.(fragment, clipboardFragmentPlainText(fragment), submit(fragment)); });
+      else act(() => { recorder.current?.(fragment, submit(fragment)); });
       expect(input.submitted.at(-1)).toBe('pasteFragment');
       await act(async () => {
         const index = input.entries.length - 1;
