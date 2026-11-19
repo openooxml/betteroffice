@@ -404,9 +404,10 @@ impl EditingDoc {
     }
 
     /// The attributes that put paragraph `para_id` of `story` on a list of `kind`: the list it is
-    /// on when that is of that kind, else the list of the paragraph directly above or below when
-    /// it is and does not come from that paragraph's style, otherwise a definition created under a
-    /// fresh key in [`LIST_DEFINITIONS`]. A paragraph already on a list keeps its level; one on
+    /// on when that is of that kind, else the list of the paragraph directly above, else below,
+    /// when it is of that kind and does not come from that paragraph's style, otherwise a
+    /// definition created under a fresh key in [`LIST_DEFINITIONS`]. A paragraph already on a list
+    /// keeps its own level; one on
     /// no list takes the level of the paragraph it joins, or level 0 on a new list.
     pub fn ensure_list_definition(
         &self,
