@@ -35,11 +35,6 @@ export function fontEnvironmentForRegistrations(fonts: YrsResidentFontRegistrati
   ...(progressive.length ? { progressive: structuredClone(progressive) } : {}) };
 }
 
-/** Whether `requirements` name the regular default family, the one the measure source gives the tracked paragraph mark a face from. */
-export function namesParagraphMarkFamily(requirements: readonly ResidentFontRequirement[]): boolean {
-  return requirements.some(requirement => requirement.key === 'calibri|0|0');
-}
-
 /**
  * `prepared` extended by every requirement of `next` it does not cover, or null when it covers all.
  * A requirement covers one with its key only with the same scripts in the same order: they fix the chain.
