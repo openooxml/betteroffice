@@ -120,7 +120,7 @@ interface XlsxHostProps {
   downloadOnSave?: boolean;
   /** Initial scale, clamped to the supported zoom range. Defaults to 1. */
   initialZoom?: number;
-  /** Rendered while a supplied file is opening. */
+  /** Shown while a supplied file opens. Until the editor's code has loaded it is shown in normal flow, as before. Once the editor has mounted it is shown over the grid area, in an overlay whose size does not affect the editor's layout; there it is not interactive by default: pointer input passes through it to the grid, and a control inside it that re-enables pointer input takes that input instead of the grid. */
   loadingIndicator?: React.ReactNode;
   /** Inline style overrides for the editor root. */
   style?: React.CSSProperties;
