@@ -1,9 +1,17 @@
 const MAX_REASON = 160;
 const MAX_MESSAGE = 4000;
+const CHANNELS = new Set(['published', 'commit', 'libreoffice']);
+const STAGES = new Set(['calculation', 'capture', 'compare', 'complete', 'edit', 'parse', 'preserve', 'probe', 'reopen', 'save', 'timing']);
+const known = (set, value) => (set.has(value) ? value : 'other');
 
 export function failureRecords(sample) {
   const records = [];
-  const add = (area, channel, stage, error) => records.push({ area, channel, stage: stage ?? area, error: String(error ?? '') });
+  const add = (area, channel, stage, error) => records.push({
+    area,
+    channel: area === 'probe' ? null : known(CHANNELS, channel),
+    stage: stage == null ? area : known(STAGES, stage),
+    error: String(error ?? ''),
+  });
   for (const result of sample.comparisons ?? [])
     if (result?.status === 'failed') add('render', result.channel, result.stage, result.error);
   for (const [channel, timing] of Object.entries(sample.native_timings ?? {}))
