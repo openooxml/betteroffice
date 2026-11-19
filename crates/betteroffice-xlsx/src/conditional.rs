@@ -137,6 +137,9 @@ pub struct ConditionalStats {
     /// Cells whose conditional fill is withheld because its format names two
     /// different fill colors.
     pub withheld_fill: u64,
+    /// Cells withheld because a rule formula reached a function or reference
+    /// the calc engine cannot evaluate.
+    pub withheld_engine_gap: u64,
 }
 
 impl ConditionalStats {
@@ -148,6 +151,7 @@ impl ConditionalStats {
             Unknown::Unsupported => &mut self.withheld_unsupported,
             Unknown::Volatile => &mut self.withheld_volatile,
             Unknown::Overlapping => &mut self.withheld_overlapping,
+            Unknown::EngineGap => &mut self.withheld_engine_gap,
         };
         *counter += 1;
     }
@@ -163,6 +167,7 @@ enum Unknown {
     Unsupported,
     Volatile,
     Overlapping,
+    EngineGap,
 }
 
 /// Each sheet's rules, aggregates and decided cells for one model epoch, the
@@ -275,6 +280,8 @@ struct Aggregate {
     tables: Vec<Vec<Option<CountTable>>>,
     /// Whether the calc engine refused a constant call for size.
     refused: bool,
+    /// Whether a constant call or count table reached a calc engine gap.
+    gap: bool,
 }
 
 enum Stats {
@@ -607,6 +614,9 @@ impl Cache {
         if aggregate.refused {
             return Err(Unknown::Refused);
         }
+        if aggregate.gap {
+            return Err(Unknown::EngineGap);
+        }
         context.restart();
         context.cell = Some(at);
         let ctx: &EvalContext<'_> = context;
@@ -688,6 +698,9 @@ impl Cache {
         *spent += MAX_EVALUATION_CELL_VISITS.saturating_sub(ctx.remaining_cells());
         if ctx.exhausted() {
             return Err(Unknown::Refused);
+        }
+        if ctx.has_unhandled_unsupported_function() {
+            return Err(Unknown::EngineGap);
         }
         matched
     }
@@ -793,6 +806,7 @@ impl Cache {
                 values.push(evaluate(call, context));
                 *spent += MAX_EVALUATION_CELL_VISITS.saturating_sub(context.remaining_cells());
                 aggregate.refused |= context.exhausted();
+                aggregate.gap |= context.has_unhandled_unsupported_function();
                 built = true;
             }
             let mut tables = Vec::with_capacity(formula.counts.len());
@@ -809,6 +823,7 @@ impl Cache {
                 context.cell = Some(rule.anchor);
                 tables.push(range.and_then(|range| CountTable::build(range, &*context)));
                 *spent += MAX_EVALUATION_CELL_VISITS.saturating_sub(context.remaining_cells());
+                aggregate.gap |= context.has_unhandled_unsupported_function();
                 built = true;
             }
             let base = formula.base.as_ref().map(|base| {

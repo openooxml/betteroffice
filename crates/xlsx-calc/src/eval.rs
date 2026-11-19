@@ -589,7 +589,7 @@ impl<'a> EvalContext<'a> {
     /// whether a function the engine does not implement reached this
     /// evaluation's result, rather than being answered by a handler, or an
     /// uncomputable one was called at all.
-    pub(crate) fn has_unhandled_unsupported_function(&self) -> bool {
+    pub fn has_unhandled_unsupported_function(&self) -> bool {
         self.unsupported_functions.get() != 0 || !self.uncomputable.borrow().is_empty()
     }
 
