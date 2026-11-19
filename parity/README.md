@@ -6,6 +6,7 @@ An optional step `targets` list selects `"ts"`, `"rust"` and/or `"python"` (defa
 The `open` operation takes `{ "fixture": "path/from/repo/root.xlsx" }` to replace the current workbook using the script's calculation settings; `openCollaborative` takes `{ "fixture", "clientId" }` and opens a replica instead.
 A step with `"expectError": true` must fail and records `{ "error": message }`, the message each target's call raises.
 A step whose TS result differs from the engine's goes in the script's `engineSteps` (docx): Rust and Python run them after `steps` and compare with `<format>/engine-expected.json`, which the Rust test writes under `BETTEROFFICE_PARITY_WRITE=1`.
+The docx Rust test runs with the crate's default features.
 
 Normalization spec: Visit steps in script order, arrays in index order and object keys in ascending order. Replace each entire string matching the format's version token pattern (xlsx: 32 lowercase hex digits, pptx: 16 lowercase hex digits, each followed by `-` and a decimal epoch; docx has none) with `<version:N>`, assigning N from 1 on first sight and reusing it for equal tokens across the run. Leave every other value unchanged. In arguments, resolve `<version:N>` to the previously observed token, failing on unknown references. The `save` op records `{ "sha256", "byteLength" }` from the exact saved bytes; docx save instead records `{ "parts": [{ "name", "sha256", "byteLength" }] }` over each part's uncompressed bytes, sorted by name, because package bytes differ in entry timestamps and compression.
 

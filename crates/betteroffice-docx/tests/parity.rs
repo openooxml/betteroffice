@@ -1,4 +1,9 @@
-#![cfg(feature = "raster")]
+#![cfg(all(
+    feature = "raster",
+    feature = "fonts-latin",
+    feature = "fonts-intl",
+    feature = "fonts-cjk"
+))]
 
 use std::fs;
 use std::path::{Path, PathBuf};
