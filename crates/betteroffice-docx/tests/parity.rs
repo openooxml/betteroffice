@@ -1,3 +1,5 @@
+#![cfg(feature = "raster")]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
