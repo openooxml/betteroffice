@@ -1079,7 +1079,10 @@ fn restorations(
         {
             return None;
         }
-        replacements.push((written.elements[counterpart].range.clone(), revision.range.clone()));
+        replacements.push((
+            written.elements[counterpart].range.clone(),
+            revision.range.clone(),
+        ));
     }
     replacements.sort_by_key(|(range, _)| range.start);
     Some(replacements)
