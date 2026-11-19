@@ -3,7 +3,8 @@ import { parseDocx } from '../docx';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
 import { unzipContainer } from '../wasm/opc';
 import { documentToYrs } from './documentToYrs';
-import { DirtyProjectionStories, mergeDocxHostMetadata, saveEditorDocument } from './editorSave';
+import type { Document } from '../types/document';
+import { DirtyProjectionStories, editorSaveKeptUnchanged, mergeDocxHostMetadata, saveEditorDocument } from './editorSave';
 import { createYrsSession, type YrsSession } from './index';
 import { setupStructuralPackageSaves, type SavePath } from './structuralSaveTestSupport';
 import { yrsToDocument } from './yrsToDocument';
@@ -121,6 +122,13 @@ const opening = (shape: Shape) => `<w:${shape.tag} w:id="\\d+" w:author="${shape
 const bareSpan = (shape: Shape) => revisionSpan(shape, bareRun(shape.note, 1));
 const BOLD_HEAD = new RegExp(`<w:r><w:rPr>${IN_RPR}<w:b/>${IN_RPR}</w:rPr><w:t(?:\\s[^>]*)?>Head</w:t></w:r>`);
 
+function compound(shape: Shape): { around: string; alone: string; original: string } {
+  const words = shape.tag === 'del' ? deletedText : text;
+  const around = revisionSpan(shape, `${words('left')}${referenceRun(shape.note)}${words('right')}`);
+  const alone = revisionSpan({ ...shape, id: shape.id + 10 }, referenceRun(shape.note, 2));
+  return { around, alone, original: firstParagraph(`${around}${text(' and ')}${alone}`) };
+}
+
 function wrapperPattern(shape: Shape): RegExp {
   return new RegExp(`${opening(shape)}${bareRun(shape.note, 1)}</w:${shape.tag}>`);
 }
@@ -237,6 +245,22 @@ async function saveFromParsedDocument(source: Uint8Array, apply: Apply): Promise
   }
 }
 
+async function saveOnMainThreadWithReport(source: Uint8Array, apply: Apply) {
+  const session = await createYrsSession();
+  try {
+    const host = session.openDocx(source.slice(), true).document;
+    apply(session);
+    const dirty = new DirtyProjectionStories();
+    dirty.add('body');
+    const base = session.materializeDocx() as Document;
+    const projected = yrsToDocument(session, mergeDocxHostMetadata(base, host), dirty.projectionOptions());
+    const bytes = new Uint8Array(await saveEditorDocument(session, projected, []));
+    return { bytes, kept: editorSaveKeptUnchanged(session) };
+  } finally {
+    session.destroy();
+  }
+}
+
 interface EditorPath {
   name: string;
   keepsSourceBytes: boolean;
@@ -261,6 +285,7 @@ describe.each(PATHS)('$name', (path) => {
   describe.each(SHAPES)('$name at paragraph level', (shape) => {
     const source = () => fixture(firstParagraph(wrapped(shape)));
     const exactSpan = bareSpan(shape);
+    const sourceSpan = wrapped(shape);
     const revision = { kind: shape.revision, author: shape.author };
     const listed = (session: YrsSession) => session.listRevisions().map(({ kind, author }) => ({ kind, author }));
 
@@ -373,11 +398,13 @@ describe.each(PATHS)('$name', (path) => {
       expect(wrapperSpan(shape, first)).toBe(exactSpan);
     });
 
-    it('keeps its source paragraph when text in it is bolded, or the reference inside its wrapper where the paragraph is rewritten', async () => {
+    it('saves bold text beside a revision of a reference alone, with the reference inside its wrapper', async () => {
       const original = firstParagraph(wrapped(shape));
       const first = bodyParagraphs(await path.open(fixture(original), boldHead))[0] ?? '';
       if (path.keepsSourceBytes) {
-        expect(first).toBe(original);
+        expect(first).toMatch(BOLD_HEAD);
+        expect(count(first, `<w:${shape.tag}\\b`)).toBe(1);
+        expect(first).toContain(sourceSpan);
       } else {
         expect(first).toMatch(BOLD_HEAD);
         expect(wrapperSpan(shape, first)).toBe(exactSpan);
@@ -394,21 +421,31 @@ describe.each(PATHS)('$name', (path) => {
       expect(first).toMatch(new RegExp(`${opening(shape)}${left}${reference}</w:${shape.tag}>`));
     });
 
-    it('keeps its source paragraph when text is bolded beside a revision of a reference alone and one with text around a reference, or both wrappers where the paragraph is rewritten', async () => {
-      const words = shape.tag === 'del' ? deletedText : text;
-      const around = revisionSpan(shape, `${words('left')}${referenceRun(shape.note)}${words('right')}`);
-      const alone = revisionSpan({ ...shape, id: shape.id + 10 }, referenceRun(shape.note, 2));
-      const original = firstParagraph(`${around}${text(' and ')}${alone}`);
+    it('saves bold text beside a revision of a reference alone and one with text around a reference, with both wrappers', async () => {
+      const { alone, original } = compound(shape);
       const first = bodyParagraphs(await path.open(fixture(original, [1, 2]), boldHead))[0] ?? '';
+      const run = (value: string) => `<w:r>${RUN_PROPERTIES}<w:(?:t|delText)(?:\\s[^>]*)?>${value}</w:(?:t|delText)></w:r>`;
+      const reference = (id: number) => `<w:r>${RUN_PROPERTIES}<w:${shape.note}Reference w:id="${id}"/></w:r>`;
       if (path.keepsSourceBytes) {
-        expect(first).toBe(original);
+        expect(first).toMatch(BOLD_HEAD);
+        expect(count(first, `<w:${shape.tag}\\b`)).toBe(2);
+        expect(first).toMatch(new RegExp(`${opening(shape)}${run('left')}${reference(1)}${run('right')}</w:${shape.tag}>`));
+        expect(first).toContain(alone);
       } else {
-        const run = (value: string) => `<w:r>${RUN_PROPERTIES}<w:(?:t|delText)(?:\\s[^>]*)?>${value}</w:(?:t|delText)></w:r>`;
-        const reference = (id: number) => `<w:r>${RUN_PROPERTIES}<w:${shape.note}Reference w:id="${id}"/></w:r>`;
         expect(first).toMatch(BOLD_HEAD);
         expect(first).toMatch(new RegExp(`${opening(shape)}${run('left')}${reference(1)}${run('right')}</w:${shape.tag}>`));
         expect(first).toMatch(new RegExp(`${opening(shape)}${reference(2)}</w:${shape.tag}>`));
       }
+    });
+
+    it('lists both revisions after reopening a save of bold text beside them', async () => {
+      const saved = await path.open(fixture(compound(shape).original, [1, 2]), boldHead);
+      let revisions: Array<{ id: string; kind: string; author: string }> = [];
+      await path.open(saved, (session) => {
+        revisions = session.listRevisions().map(({ revisionId, kind, author }) => ({ id: revisionId, kind, author }));
+      });
+      expect([...new Set(revisions.map(({ id }) => id))].sort()).toEqual([String(shape.id), String(shape.id + 10)].sort());
+      expect([...new Set(revisions.map(({ kind, author }) => `${kind} ${author}`))]).toEqual([`${shape.revision} ${shape.author}`]);
     });
   });
 
@@ -500,6 +537,43 @@ describe.each(PATHS)('$name', (path) => {
         `${opening(inserted)}<w:r>${RUN_PROPERTIES}<w:${note}Reference w:id="1"/></w:r></w:ins>`
       ));
       expect(first).not.toMatch(/<w:del\b/);
+    });
+  });
+});
+
+describe.each(PATHS.filter(({ keepsSourceBytes }) => keepsSourceBytes))('$name', (path) => {
+  describe.each(SHAPES)('$name at paragraph level', (shape) => {
+    it('writes the reference of a revision of a reference alone with its source bytes when other text in its paragraph is bolded', async () => {
+      const plain = bodyParagraphs(await path.open(fixture(firstParagraph(wrapped(shape))), boldHead))[0] ?? '';
+      expect(plain).toContain(wrapped(shape));
+      const { alone, original } = compound(shape);
+      const both = bodyParagraphs(await path.open(fixture(original, [1, 2]), boldHead))[0] ?? '';
+      expect(both).toContain(alone);
+    });
+  });
+});
+
+describe(PATHS[0]!.name, () => {
+  describe.each([shapeOf('footnote', 'deletion')])('$name at paragraph level', (shape) => {
+    const keptAndReported = async (original: string, noteIds: number[]) => {
+      const { bytes, kept } = await saveOnMainThreadWithReport(fixture(original, noteIds), boldHead);
+      expect(bodyParagraphs(bytes)[0]).toBe(original);
+      expect(kept?.structure ?? 0).toBeGreaterThanOrEqual(1);
+      expect(kept?.paragraphs).toContainEqual(expect.objectContaining({
+        part: 'word/document.xml',
+        ordinal: 0,
+        scope: 'paragraph',
+        dropped: expect.arrayContaining([`w:${shape.tag}`]),
+      }));
+    };
+
+    it('keeps the source paragraph and reports it when bold text sits beside a revision of a reference alone inside a hyperlink', async () => {
+      await keptAndReported(firstParagraph(`<w:hyperlink w:anchor="a">${wrapped(shape)}</w:hyperlink>`), [1]);
+    });
+
+    it('keeps the source paragraph and reports it when bold text sits beside two wrappers of one revision that hold a reference alone', async () => {
+      const twice = `${wrapped(shape)}${text(' and ')}${revisionSpan(shape, referenceRun(shape.note, 2))}`;
+      await keptAndReported(firstParagraph(twice), [1, 2]);
     });
   });
 });
