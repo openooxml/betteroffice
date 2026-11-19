@@ -15,6 +15,7 @@ import { preloadParseWasm } from '../docx/parseWasm';
 import type { Comment, Paragraph } from '../types/content';
 import type { BlockContent, Document } from '../types/document';
 import type { YrsCommentInfo, YrsSession } from './index';
+import { checkedProjection } from './commentRangeCheck';
 import { resolveCommentMedia } from './hostMedia';
 import { editorSaveKeys, noteSeparatorKeys } from './editorSaveKeys';
 import { savedCommentIds } from './residentCommentProjection';
@@ -793,18 +794,17 @@ export async function saveYrsDocx(
   if (options.commentBaseline && !comments.changed && base.package.document.comments) {
     capture.plan.patchedParts.push({ part: COMMENTS_PART, paraIds: [] });
   }
-  const document = yrsToDocument(
-    session,
-    comments.changed
-      ? {
-          ...base,
-          package: {
-            ...base.package,
-            document: { ...base.package.document, comments: comments.comments },
-          },
-        }
-      : base,
-    { commentIds: comments.sessionIds }
+  const projectionBase = comments.changed
+    ? {
+        ...base,
+        package: {
+          ...base.package,
+          document: { ...base.package.document, comments: comments.comments },
+        },
+      }
+    : base;
+  const document = checkedProjection(session, () =>
+    yrsToDocument(session, projectionBase, { commentIds: comments.sessionIds })
   );
   return writeSessionSave(
     session,

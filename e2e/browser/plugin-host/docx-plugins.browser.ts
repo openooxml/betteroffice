@@ -932,3 +932,67 @@ test('a selection placement follows the selection to a new zoom on the in-thread
   expect(Math.abs(after.anchor.width - before.anchor.width * 1.5), JSON.stringify({ before, after })).toBeLessThanOrEqual(1);
   expect(messages.filter((text) => text.includes('hybrid synchronous API'))).toEqual([]);
 });
+
+type FocusProbe = { focus: { result: unknown; background(): unknown } };
+
+async function selectFirstWord(page: Page) {
+  const input = page.locator('[data-docx-worker-editor] .paged-editor__input');
+  await input.focus();
+  await input.press('ControlOrMeta+Home');
+  await input.press('ControlOrMeta+Shift+ArrowRight');
+  return input;
+}
+
+test('a worker plugin sees the document input lose focus to the context menu, a toolbar menu and Find', async ({ page }) => {
+  peerless = true;
+  await open(page, '/?peerless=1&focus=1');
+  const probe = page.getByTestId('focus-probe');
+  const input = await selectFirstWord(page);
+  await expect(probe).toHaveAttribute('data-input-focused', 'true');
+
+  await input.dispatchEvent('contextmenu', { button: 2, clientX: 400, clientY: 300 });
+  await expect(page.getByRole('menu')).toBeVisible();
+  await expect(probe).toHaveAttribute('data-input-focused', 'false');
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('menu')).toHaveCount(0);
+
+  await input.focus();
+  await expect(probe).toHaveAttribute('data-input-focused', 'true');
+  await page.getByRole('button', { name: 'Line spacing', exact: true }).focus();
+  await page.keyboard.press('ArrowDown');
+  await expect(page.getByRole('menu')).toBeVisible();
+  await expect(probe).toHaveAttribute('data-input-focused', 'false');
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('menu')).toHaveCount(0);
+
+  await input.focus();
+  await expect(probe).toHaveAttribute('data-input-focused', 'true');
+  await input.press('ControlOrMeta+f');
+  await expect(page.getByTestId('find-replace-dialog')).toBeVisible();
+  await expect(probe).toHaveAttribute('data-input-focused', 'false');
+});
+
+test('a worker plugin returns focus to the document from its own UI and keeps the selection', async ({ page }) => {
+  peerless = true;
+  const selected = () => operate(page, async () =>
+    (await (window as unknown as { __probe: DocxProbe }).__probe.editor.readSelectionInfo())?.selectedText);
+  await open(page, '/?peerless=1&focus=1');
+  const probe = page.getByTestId('focus-probe');
+  const input = await selectFirstWord(page);
+  const word = await selected();
+  expect(word?.trim().length).toBeGreaterThan(0);
+
+  const button = page.getByTestId('focus-probe-button');
+  await button.focus();
+  await expect(probe).toHaveAttribute('data-input-focused', 'false');
+  await button.press('Enter');
+  await expect(input).toBeFocused();
+  expect(await page.evaluate(() => (window as unknown as { __probe: FocusProbe }).__probe.focus.result)).toEqual({ ok: true });
+  await expect(probe).toHaveAttribute('data-input-focused', 'true');
+  expect(await selected()).toBe(word);
+
+  await page.getByTestId('probe-input').focus();
+  expect(await page.evaluate(() => (window as unknown as { __probe: FocusProbe }).__probe.focus.background()))
+    .toMatchObject({ ok: false, failure: { code: 'unsupported-policy' } });
+  await expect(page.getByTestId('probe-input')).toBeFocused();
+});

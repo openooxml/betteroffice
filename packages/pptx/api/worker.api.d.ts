@@ -1285,6 +1285,8 @@ export declare class PptxWorkerUnsupportedError extends Error {
     readonly code = "sync-api-unavailable";
     constructor(operation: string, alternative?: string | undefined);
 }
+/** The engine URL against this page: Turbopack asset hrefs are bare paths. @internal */
+export declare function engineFetchUrl(href: string): URL;
 /** @internal */
 export declare function createPptxWorkerSession(bytes: Uint8Array | ArrayBuffer, options?: PptxWorkerSessionOptions): PptxWorkerSession;
 

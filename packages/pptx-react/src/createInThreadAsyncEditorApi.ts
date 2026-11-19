@@ -17,7 +17,8 @@ export function asyncCollaboration(options?: PptxAsyncCollaborationOptions): Ppt
   } : null) };
 }
 
-export function createInThreadAsyncEditorApi(api: PptxEditorApi, readOnly: () => boolean): PptxAsyncEditorApi {
+export function createInThreadAsyncEditorApi(api: PptxEditorApi, readOnly: () => boolean,
+  saved?: (bytes: Uint8Array) => void): PptxAsyncEditorApi {
   const handle = api.handle;
   async function read<T>(operation: () => T): Promise<T> {
     await api.flushPendingInput();
@@ -49,14 +50,15 @@ export function createInThreadAsyncEditorApi(api: PptxEditorApi, readOnly: () =>
     registerFallbackFont: (face: PptxFontFace) => register(face, true),
   }) as PptxAsyncEditorAccess;
   const navigate = (slide: number) => read(() => api.goToSlide(slide));
+  const save = () => read(() => { const bytes = api.save(); saved?.(bytes); return bytes; });
   return {
     commands: api.commands,
     get hydrated() { return true; },
     failure: undefined,
     whenHydrated: api.flushPendingInput,
     handleAsync: () => read(() => access),
-    save: () => read(api.save),
-    saveAsync: () => read(api.save),
+    save,
+    saveAsync: save,
     recoverySave: () => read(() => ({ bytes: api.save(), recovery: true as const, throughSeq: 0, version: handle.version() })),
     flushPendingInput: api.flushPendingInput,
     version: api.version,

@@ -11,6 +11,7 @@ import { workerEditorSessionOpener } from './worker/useEditableSessionPresentati
 import { peerlessSessionOpener } from './worker/usePeerlessPresentation';
 import { PptxEditor } from './PptxEditor';
 import type { PptxAsyncEditorApi } from './worker/createPeerlessEditorApi';
+import * as peerlessEditorApi from './worker/createPeerlessEditorApi';
 import { resetPptxEngineWarningsForTests } from './engineWarnings';
 
 test('default readiness uses one worker engine and no eager main-thread engine', async () => {
@@ -31,14 +32,56 @@ test('default readiness uses one worker engine and no eager main-thread engine',
   } finally { hybrid.mockRestore(); engines.mockRestore(); warn.mockRestore(); }
 });
 
-test('save resolves the bytes like the deprecated saveAsync alias without calling onSave', async () => {
+test('save hands its bytes to onSave once without downloading, like the deprecated saveAsync alias', async () => {
+  const onSave = mock((_bytes: Uint8Array) => {});
+  const click = spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+  try {
+    const { api } = await open({ onSave });
+    const saved = await api.save();
+    expect(saved).toBeInstanceOf(Uint8Array);
+    expect(saved.byteLength).toBeGreaterThan(0);
+    expect(onSave).toHaveBeenCalledTimes(1);
+    expect(onSave.mock.calls[0]![0]).toBe(saved);
+    expect(click).not.toHaveBeenCalled();
+    expect(await api.saveAsync()).toEqual(saved);
+    expect(onSave).toHaveBeenCalledTimes(2);
+    expect(click).not.toHaveBeenCalled();
+  } finally { click.mockRestore(); }
+});
+
+test('a frozen editor api still saves and notifies onSave once', async () => {
   const onSave = mock((_bytes: Uint8Array) => {});
   const { api } = await open({ onSave });
-  const saved = await api.save();
-  expect(saved).toBeInstanceOf(Uint8Array);
-  expect(saved.byteLength).toBeGreaterThan(0);
-  expect(await api.saveAsync()).toEqual(saved);
-  expect(onSave).not.toHaveBeenCalled();
+  Object.freeze(api);
+  await expect(Promise.resolve().then(() => api.save())).resolves.toBeInstanceOf(Uint8Array);
+  expect(onSave).toHaveBeenCalledTimes(1);
+});
+
+test('the editor api save property is the notifying one and its shape matches the raw api', async () => {
+  const created = spyOn(peerlessEditorApi, 'createPeerlessEditorApi');
+  try {
+    const onSave = mock((_bytes: Uint8Array) => {});
+    const { api } = await open({ onSave });
+    const raw = created.mock.results[created.mock.results.length - 1]!.value as PptxAsyncEditorApi;
+    expect(api).not.toBe(raw);
+    for (const key of ['save', 'saveAsync'] as const) {
+      const descriptor = Object.getOwnPropertyDescriptor(api, key)!;
+      expect(descriptor.value).toBe(api[key]);
+      expect(descriptor.value).not.toBe(raw[key]);
+    }
+    expect(await Object.getOwnPropertyDescriptor(api, 'save')!.value()).toBeInstanceOf(Uint8Array);
+    expect(onSave).toHaveBeenCalledTimes(1);
+    expect(await Object.getOwnPropertyDescriptor(api, 'saveAsync')!.value()).toBeInstanceOf(Uint8Array);
+    expect(onSave).toHaveBeenCalledTimes(2);
+    expect(Object.keys(api)).toEqual(Object.keys(raw));
+    expect(Reflect.ownKeys(api)).toEqual(Reflect.ownKeys(raw));
+    for (const key of Reflect.ownKeys(raw)) expect(key in api).toBe(true);
+    expect('x' in api).toBe('x' in raw);
+    for (const key of ['commands', 'hydrated', 'failure', 'handle'] as const) {
+      expect(typeof Object.getOwnPropertyDescriptor(api, key)!.get).toBe('function');
+    }
+    expect(api.hydrated).toBe(true);
+  } finally { created.mockRestore(); }
 });
 
 for (const operation of ['handle', 'host'] as const) {

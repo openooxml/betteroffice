@@ -23,6 +23,7 @@ export type {
   PathCmd,
   TextCmd,
   TextWrap,
+  TextRun,
   ImageCmd,
   ImageCrop,
   DrawCmd,

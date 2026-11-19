@@ -31,11 +31,29 @@ export interface PreparedFrameGeometry {
   retained: RetainedFrame;
   caret: YrsResidentCaretSnapshot;
   identity: PeerlessViewIdentity;
+  /** The previous frame's object geometry a frame that only moved the selection keeps. */
+  keptObjects?: PeerlessFrameGeometry['objects'];
   geometry: PeerlessFrameGeometry;
 }
 
+/**
+ * The object geometry `previous` gave, restamped for `frame` when the frame only moved the
+ * selection; undefined when the frame carries its own or `previous` is of another document version or layout.
+ */
+export function keptFrameObjects(
+  previous: PeerlessFrameGeometry['objects'], frame: DocxCommandFrame, retained: RetainedFrame
+): PeerlessFrameGeometry['objects'] {
+  if (!frame.payload.geometryKept || !previous || previous.version !== frame.payload.documentVersion ||
+    previous.layoutRevision !== frame.payload.layoutRevision) return undefined;
+  return { ...previous, frameEpoch: retained.frameEpoch,
+    selection: (frame.payload.selectionRects ?? []).flatMap(({ pageIndex, x, y, width, height }) => {
+      const page = retained.pages[pageIndex];
+      return page && !page.page.unbuilt ? [{ pageId: page.pageId.toString(), pageIndex, x, y, width, height }] : [];
+    }) };
+}
+
 /** Frame geometry with page boxes snapped to the raster scale. */
-export function frameGeometry({ frame, retained, caret, identity }: Omit<PreparedFrameGeometry, 'geometry'>, rasterScale: number): PeerlessFrameGeometry {
+export function frameGeometry({ frame, retained, caret, identity, keptObjects }: Omit<PreparedFrameGeometry, 'geometry'>, rasterScale: number): PeerlessFrameGeometry {
   const pages = commandPageGeometry(retained, frame.payload, rasterScale);
   return {
     identity,
@@ -44,7 +62,7 @@ export function frameGeometry({ frame, retained, caret, identity }: Omit<Prepare
     layoutRevision: frame.payload.layoutRevision,
     layoutEpoch: retained.layoutEpoch,
     documentVersion: frame.payload.documentVersion,
-    objects: frame.payload.geometry,
+    objects: frame.payload.geometry ?? keptObjects,
     documentWidth: frame.payload.documentWidth,
     layoutProvisional: frame.payload.layoutProvisional,
     ...(frame.payload.reservations ? { reservations: frame.payload.reservations } : {}),
