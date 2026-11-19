@@ -132,7 +132,7 @@ import { useXlsxPluginHost } from './plugins/useXlsxPluginHost';
 
 import { initialZoomScale } from './commands/evaluate';
 import { WorkbookFailure } from './components/WorkbookFailure';
-import { LoadingLayer, loadingAnchorStyle } from './components/LoadingLayer';
+import { LoadingLayer } from './components/LoadingLayer';
 
 import type { XlsxEditorApi, XlsxInThreadEditorProps, XlsxPointPosition } from './XlsxEditor.types';
 import { XlsxSaveRefusedError } from './XlsxSaveRefusedError';
@@ -3002,7 +3002,6 @@ export function XlsxEditorContent({
         ...style,
       }}
     >
-      <div style={loadingAnchorStyle}>
       {toolbarContent != null && (
         <div
           data-testid="xlsx-toolbar"
@@ -3282,6 +3281,9 @@ export function XlsxEditorContent({
           {renderDock('bottom')}
         </div>
         {renderDock('right')}
+        {file && !handleRef.current && !error ? (
+          <LoadingLayer>{loadingIndicator}</LoadingLayer>
+        ) : null}
       </div>
 
       {a11yGrid && (
@@ -3357,10 +3359,6 @@ export function XlsxEditorContent({
         </div>
       )}
       {headerMenu.element}
-      {file && !handleRef.current && !error ? (
-        <LoadingLayer>{loadingIndicator}</LoadingLayer>
-      ) : null}
-      </div>
     </div>
   );
 

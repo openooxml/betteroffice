@@ -85,7 +85,7 @@ import {
 } from './PeerlessWorkerSurface';
 import { PeerlessWorkerAnnouncer } from './PeerlessWorkerAnnouncer';
 import { WorkbookFailure } from '../components/WorkbookFailure';
-import { LoadingLayer, loadingAnchorStyle } from '../components/LoadingLayer';
+import { LoadingLayer } from '../components/LoadingLayer';
 
 const BRAND = '#217346';
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
@@ -2212,7 +2212,6 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
         }}
         style={{ position: 'relative', display: 'flex', flexDirection: 'column', width: '100%', height: '100%',
           minWidth: 0, color: '#202124', background: '#ffffff', fontFamily: 'ui-sans-serif, system-ui, sans-serif', ...props.style }}>
-        <div style={loadingAnchorStyle}>
         <PeerlessSelectionEffect store={presentation} onChange={applySelectionFormat} />
         {toolbar != null && <div data-testid="xlsx-toolbar" style={{ flex: '0 0 auto' }}>{toolbar}</div>}
         <div ref={dockAreaRef} data-testid="xlsx-workspace" style={{ position: 'relative', display: 'flex', flex: 1, minHeight: 0 }}>
@@ -2271,6 +2270,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
           {error && sheets.length === 0 && <WorkbookFailure kind="open" details={error.message} />}
           {!props.file && !error && <div data-testid="xlsx-empty" role="status" style={{ position: 'absolute', inset: 0,
             display: 'grid', placeItems: 'center', color: '#5f6368', pointerEvents: 'none' }}>{t('editor.openPrompt')}</div>}
+          {props.file && !run?.ready && !error ? <LoadingLayer>{props.loadingIndicator}</LoadingLayer> : null}
         </div>
         <PeerlessWorkerAccessibility store={presentation} active={active} sheets={sheets} onFollowLink={followLinkFromMirror} />
         <PeerlessWorkerAnnouncer store={presentation} active={active} sheets={sheets} focusTarget={scrollRef} announceRef={announceRef} />
@@ -2309,8 +2309,6 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
             {sheet.name}
           </button>)}
         </div>}
-        {props.file && !run?.ready && !error ? <LoadingLayer>{props.loadingIndicator}</LoadingLayer> : null}
-        </div>
       </div>
     </PeerlessWorkerInputs>
     </PeerlessChromeContext.Provider>
