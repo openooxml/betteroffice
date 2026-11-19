@@ -6,7 +6,7 @@ import { useWorkerRulerControls } from './workerPropertyControls';
 import { useWorkerPropertyDialogs } from './useWorkerPropertyDialogs';
 import { useWorkerQuery } from './useWorkerQuery';
 import { bodyEdgeY } from './pagePoint';
-import { popupWithLink } from './linkHover';
+import { popupWithLink } from './linkPopup';
 import { useCommentSidebarItems } from '../../../hooks/useCommentSidebarItems';
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import {

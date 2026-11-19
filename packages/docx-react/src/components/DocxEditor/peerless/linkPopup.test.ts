@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { popupWithLink } from './linkHover';
+import { popupWithLink } from './linkPopup';
 
 const hit = { href: 'https://example.com/', displayText: '比亚迪', position: { top: 1, left: 2 } };
 
