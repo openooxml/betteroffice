@@ -67,6 +67,8 @@ test('a full-height loading indicator in a fixed-height parent leaves the grid i
   await pinnedEvaluate(page, () => window.__xlsxWorkerEditor.ready);
   await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.paintedTexts())).toContain('initial');
   await expect(page.locator('#worker-editor-root')).toHaveAttribute('data-indicator-shown', 'true');
+  await expect(page.locator('#worker-editor-root')).toHaveAttribute('data-indicator-with-workspace', 'true');
+  await expect(page.locator('#worker-editor-root')).toHaveAttribute('data-indicator-in-layer', 'true');
   await expect(page.getByTestId('harness-loading')).toHaveCount(0);
   await expect(page.getByTestId('xlsx-loading')).toHaveCount(0);
   const layout = await page.evaluate(() => {
@@ -82,6 +84,24 @@ test('a full-height loading indicator in a fixed-height parent leaves the grid i
   expect(layout.canvas).not.toEqual([300, 150]);
   expect(Math.min(...layout.canvas!)).toBeGreaterThan(0);
   expect(await page.evaluate(() => window.__xlsxWorkerEditor.peerless!.failure())).toBeNull();
+  expect(await page.evaluate(() => window.__xlsxWorkerEditor.errors)).toEqual([]);
+});
+
+test('a loading layer stays on the editor when the host style makes the editor root static', async ({ page }) => {
+  await page.goto('/xlsx-worker-editor.html?asyncApi=1&fixedIndicator=1&staticRoot=1');
+  await page.waitForFunction(() => '__xlsxWorkerEditor' in window);
+  await pinnedEvaluate(page, () => window.__xlsxWorkerEditor.ready);
+  const harness = page.locator('#worker-editor-root');
+  await expect(harness).toHaveAttribute('data-indicator-in-layer', 'true');
+  expect(await page.getByRole('application').evaluate((element) => element.style.position)).toBe('static');
+  expect(await page.getByTestId('harness-host-panel').evaluate((element) => element.getBoundingClientRect().height)).toBe(800);
+  const anchor = JSON.parse(await harness.getAttribute('data-layer-anchor') ?? 'null') as
+    { inside: boolean; layer: number[]; editor: number[] } | null;
+  expect(anchor).not.toBeNull();
+  expect(anchor!.inside).toBe(true);
+  expect(Math.abs(anchor!.editor[3]! - 600)).toBeLessThan(1);
+  anchor!.layer.forEach((value, index) => expect(Math.abs(value - anchor!.editor[index]!)).toBeLessThan(1));
+  await expect(page.getByTestId('xlsx-loading')).toHaveCount(0);
   expect(await page.evaluate(() => window.__xlsxWorkerEditor.errors)).toEqual([]);
 });
 

@@ -29,6 +29,7 @@ const variant = parameters.get('variant') ?? 'plain';
 const collaboration = parameters.has('collaboration');
 const peerless = parameters.has('asyncApi') || collaboration;
 const fixedIndicator = parameters.has('fixedIndicator');
+const staticRoot = parameters.has('staticRoot');
 let mainThreadEngines = 0;
 globalThis.__xlsxMainEngineProbe = { capture() { mainThreadEngines += 1; } };
 
@@ -322,6 +323,26 @@ let retainToolbar = false;
 const saves: number[][] = [];
 let readyCount = 0;
 
+const boxOf = (element: Element) => {
+  const { x, y, width, height } = element.getBoundingClientRect();
+  return [x, y, width, height];
+};
+
+function recordIndicator(element: HTMLDivElement | null) {
+  if (!element) return;
+  rootElement.dataset.indicatorShown = 'true';
+  if (rootElement.querySelector('[data-testid="xlsx-workspace"]')) rootElement.dataset.indicatorWithWorkspace = 'true';
+  const layer = element.closest<HTMLElement>('[data-testid="xlsx-loading"]');
+  const editor = layer?.closest<HTMLElement>('[role="application"]');
+  if (!layer || !editor) return;
+  rootElement.dataset.indicatorInLayer = 'true';
+  rootElement.dataset.layerAnchor = JSON.stringify({
+    inside: editor.contains(layer.offsetParent),
+    layer: boxOf(layer),
+    editor: boxOf(editor),
+  });
+}
+
 function renderPeerlessEditor(bytes: Uint8Array, index: number) {
   const slot = slots[index]!;
   const slotPlugin = defineXlsxPlugin({
@@ -341,12 +362,13 @@ function renderPeerlessEditor(bytes: Uint8Array, index: number) {
       loadingIndicator={fixedIndicator ? (
         <div
           data-testid="harness-loading"
-          ref={(element) => { if (element) rootElement.dataset.indicatorShown = 'true'; }}
+          ref={recordIndicator}
           style={{ height: '100%', display: 'grid', placeItems: 'center' }}
         >
           Opening workbook
         </div>
       ) : undefined}
+      style={staticRoot ? { position: 'static' } : undefined}
       plugins={[slotPlugin]}
       pluginGrants={{ routes: { document: 'write', editBatches: true } }}
       collaboration={
@@ -419,8 +441,10 @@ const open = (bytes: Uint8Array) => {
       ))}
     </div>
   ) : peerless && fixedIndicator ? (
-    <div data-testid="harness-fixed-parent" style={{ height: 600 }}>
-      {renderPeerlessEditor(bytes, 0)}
+    <div data-testid="harness-host-panel" style={{ position: 'relative', height: 800 }}>
+      <div data-testid="harness-fixed-parent" style={{ height: 600 }}>
+        {renderPeerlessEditor(bytes, 0)}
+      </div>
     </div>
   ) : peerless ? (
     renderPeerlessEditor(bytes, 0)
