@@ -639,8 +639,13 @@ describe.each(REPORTING)('$name', (route) => {
       await keptAndReported(firstParagraph(twice), [1, 2]);
     });
 
-    it('keeps the source paragraph and reports it when the bold covers the reference of a revision of a reference alone', async () => {
-      await keptAndReported(firstParagraph(wrapped(shape)), [1], boldAll);
+    it('saves bold over the whole paragraph and writes the reference of a revision of a reference alone as its source run', async () => {
+      const { bytes, kept } = await route.save(fixture(firstParagraph(wrapped(shape)), [1]), boldAll);
+      const first = bodyParagraphs(bytes)[0] ?? '';
+      const bold = (value: string) => `<w:r><w:rPr>${IN_RPR}<w:b/>${IN_RPR}</w:rPr><w:t(?:\\s[^>]*)?>${value}</w:t></w:r>`;
+      expect(first).toMatch(new RegExp(`${bold('Head ')}[\\s\\S]*${bold(' tail')}`));
+      expect(first).toContain(wrapped(shape));
+      expect(kept?.paragraphs ?? []).toEqual([]);
     });
   });
 });
