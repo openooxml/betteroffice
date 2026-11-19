@@ -239,7 +239,6 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
       if (request && await request() !== true) return;
       const bytes = await value.save();
       if (api.current !== value) return;
-      callbacks.current.onSave?.(bytes);
       if (!(callbacks.current.downloadOnSave ?? !callbacks.current.onSave)) return;
       const url = URL.createObjectURL(new Blob([new Uint8Array(bytes)], {
         type: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
@@ -264,7 +263,7 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
   useLayoutEffect(() => {
     api.current = null;
     if (!presentation?.current || !canvas.current) return;
-    const value = createPeerlessEditorApi(presentation, canvas.current, focus, commands);
+    const value = createPeerlessEditorApi(presentation, canvas.current, focus, commands, (bytes) => callbacks.current.onSave?.(bytes));
     api.current = value;
     let current = true;
     let cleanup: void | (() => void);

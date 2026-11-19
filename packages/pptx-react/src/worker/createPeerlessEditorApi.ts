@@ -29,7 +29,7 @@ export type PptxAsyncEditorApi = Omit<PptxWorkerEditorApi,
   [K in keyof AsyncOperations]: (...args: Parameters<AsyncOperations[K]>) => Promise<ReturnType<AsyncOperations[K]>>;
 } & Pick<PptxAsyncEditorAccess, 'exportStructured' | 'exportMarkdown'> & {
   handleAsync(): Promise<PptxAsyncEditorAccess>;
-  /** Flushes pending input, then serializes the presentation to .pptx bytes. Does not call onSave or download. */
+  /** Flushes pending input, serializes the presentation to .pptx bytes and hands them to onSave. Does not download. */
   save(): Promise<Uint8Array>;
   /** @deprecated Use {@link save}, which is async on the default editor. */
   saveAsync(): Promise<Uint8Array>;
@@ -59,7 +59,7 @@ export function peerlessPositionAtPoint(run: PeerlessPresentation, canvas: HTMLC
 }
 
 export function createPeerlessEditorApi(run: PeerlessPresentation, canvas: HTMLCanvasElement,
-  focus: () => void, commands?: PptxCommandStore): PptxAsyncEditorApi {
+  focus: () => void, commands?: PptxCommandStore, saved?: (bytes: Uint8Array) => void): PptxAsyncEditorApi {
   function admit(): void {
     run.require();
     if (peerlessGestureActive(run.store)) throw new PptxCommandAdmissionError('gesture-active');
@@ -100,7 +100,7 @@ export function createPeerlessEditorApi(run: PeerlessPresentation, canvas: HTMLC
     get commands() { run.require(); return commands ?? unsupported('commands'); },
     get hydrated() { run.require(); return run.hydrated; },
     get failure() { return run.failure; },
-    save: () => fenced(() => run.client.save()),
+    save: async () => { const bytes = await fenced(() => run.client.save()); saved?.(bytes); return bytes; },
     saveAsync: () => api.save(),
     recoverySave: () => run.recover(),
     whenHydrated: installed,
