@@ -1931,8 +1931,6 @@ fn plan_delete_paragraphs<T: ReadTxn>(
     })
 }
 
-/// Whether style-derived pilcrow `properties` actually number the paragraph: a `numPr` with a
-/// non-zero `numId`. OOXML treats a `numPr` lacking `numId` (or `numId` 0) as no numbering.
 fn defines_numbering(properties: &[(String, yrs::Any)]) -> bool {
     properties.iter().any(|(key, value)| {
         key == "numPr"
@@ -1941,9 +1939,6 @@ fn defines_numbering(properties: &[(String, yrs::Any)]) -> bool {
     })
 }
 
-/// Drops a style `numPr` that numbers nothing (e.g. Word's built-in Subtitle carries only
-/// `w:ilvl`), so it neither refuses the step nor lands on the paragraph, and reports whether
-/// real numbering remains.
 fn settle_style_numbering(properties: &mut Vec<(String, yrs::Any)>) -> bool {
     if defines_numbering(properties) {
         return true;

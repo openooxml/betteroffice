@@ -1782,9 +1782,6 @@ fn paragraph_styles_apply_their_full_effect_in_rust() {
 
 #[test]
 fn paragraph_styles_without_a_numbering_id_apply_like_plain_styles() {
-    // Word's built-in Subtitle carries `<w:numPr><w:ilvl w:val="1"/></w:numPr>` with no
-    // `w:numId`; a style with `numId` 0 explicitly turns numbering off. Neither numbers the
-    // paragraph, so neither may be refused as a numbered style.
     let body = format!(
         "{}{}",
         p("00000001", &r("plain")),
@@ -1827,7 +1824,6 @@ fn paragraph_styles_without_a_numbering_id_apply_like_plain_styles() {
     assert_eq!(inserted.get("pStyle"), Some(&Any::from("Subtitle")));
     assert!(!inserted.contains_key("numPr"));
 
-    // A style that really numbers is still refused.
     assert_eq!(
         code(&doc, vec![set_style("00000001", "ListNumber")]),
         EditFailureCode::Unsupported
