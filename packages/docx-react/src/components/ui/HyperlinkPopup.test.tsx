@@ -30,7 +30,7 @@ test('copying a link announces it in the editor locale', async () => {
   await waitFor(() => expect(view.getByText(de.editor!.linkCopied!)).toBeTruthy());
 });
 
-test('a link with a ScreenTip shows it in the popup and on hover (7171990133)', () => {
+test('a link with a ScreenTip shows it in the popup and on hover', () => {
   const view = render(
     <HyperlinkPopup data={{ ...data, tooltip: 'Open the example' }} onNavigate={() => {}} onCopy={() => {}} onEdit={() => {}}
       onRemove={() => {}} onClose={() => {}} />

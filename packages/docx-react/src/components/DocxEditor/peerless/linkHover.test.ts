@@ -12,7 +12,7 @@ const page = (primitives: Primitive[], footer: Primitive[] = []): DisplayPage =>
   ...(footer.length ? { footer: { kind: 'footer', primitives: footer } as DisplayPage['footer'] } : {}),
 });
 
-test('hovering a link with a ScreenTip shows the ScreenTip (7171990133)', () => {
+test('hovering a link with a ScreenTip shows the ScreenTip', () => {
   expect(hyperlinkHoverTitle(page([link({ tooltip: 'Open the report' })]), 20, 15)).toBe('Open the report');
 });
 
@@ -33,7 +33,7 @@ test('a link in the footer shows its ScreenTip too', () => {
 
 const hit = { href: 'https://example.com/', displayText: '比亚迪', position: { top: 1, left: 2 } };
 
-test('the popup shows the whole link text, not the run that was clicked (7171990133)', () => {
+test('the popup shows the whole link text, not the run that was clicked', () => {
   expect(popupWithLink(hit, { url: 'https://example.com/', displayText: '比亚迪 2025 年度简报', tooltip: 'Report' }))
     .toEqual({ ...hit, displayText: '比亚迪 2025 年度简报', tooltip: 'Report' });
 });
