@@ -8,11 +8,13 @@ use crate::paragraph_identity::{
     ParagraphOccurrence, Tag, attribute, ensure_ignorable, paragraph_occurrences,
     patch_paragraph_ids, tags, unescaped,
 };
+use crate::xml::parse_javascript_integer_prefix;
 
 use super::context::RecordedParagraphs;
 use super::paragraph_ids::{S13SpliceAnchor, S13SplicedPart};
 use super::paragraph_patch::NamespaceScopes;
 use super::s13::element_span;
+use super::xml_writer::js_number;
 
 const W_NAMESPACE: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
 
@@ -1108,13 +1110,25 @@ fn ranges(xml: &str) -> Option<Ranges<'_>> {
     })
 }
 
-/// Whether `fragments` hold each range end at most as often as `source`, the spliced part, or
-/// at most once.
+/// A range or comment ID as the parser reads it, or its text where it reads no number.
+fn canonical_id(id: String) -> String {
+    parse_javascript_integer_prefix(&id).map_or(id, js_number)
+}
+
+/// Whether `fragments` hold each range end, by the value of its ID, at most as often as
+/// `source`, the spliced part, or at most once.
 fn unique_ranges<'x>(source: &str, fragments: impl IntoIterator<Item = &'x str>) -> Option<bool> {
-    let held = ranges(source).map_or_else(Ends::new, |ranges| ranges.all);
+    fn by_value(ends: Ends<'_>) -> Ends<'_> {
+        let mut values = Ends::new();
+        for ((kind, id, opens), count) in ends {
+            *values.entry((kind, canonical_id(id), opens)).or_insert(0) += count;
+        }
+        values
+    }
+    let held = ranges(source).map_or_else(Ends::new, |ranges| by_value(ranges.all));
     let mut ends = Ends::new();
     for fragment in fragments {
-        for (end, count) in ranges(fragment)?.all {
+        for (end, count) in by_value(ranges(fragment)?.all) {
             if matches!(end.0, "spell" | "gram") {
                 continue;
             }
@@ -1249,7 +1263,7 @@ fn comment_removal_spans(
             continue;
         }
         if let Some(id) = attribute(tag, "w:id").and_then(|range| unescaped(xml, range))
-            && remove(tag.name, &id)
+            && remove(tag.name, &canonical_id(id))
         {
             removed.insert(index);
         }
@@ -1319,7 +1333,7 @@ fn changed_comment_ranges(source: &str, written: &str) -> Option<String> {
             .map(|tag| {
                 Some((
                     tag.name.to_owned(),
-                    unescaped(xml, attribute(tag, "w:id")?)?,
+                    canonical_id(unescaped(xml, attribute(tag, "w:id")?)?),
                 ))
             })
             .collect()
