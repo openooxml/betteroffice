@@ -3323,6 +3323,7 @@ function openProgressiveFonts(
       if (session !== owner || progressiveFonts !== fonts) return;
       requestWholeFaces(identity);
     });
+    fonts.onTrapped((error) => trapped(0, error));
     // A preview is about to be replaced; only an editing session fills its faces.
     fonts.scheduleFill();
   }

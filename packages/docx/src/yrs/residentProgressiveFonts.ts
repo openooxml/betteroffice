@@ -112,6 +112,7 @@ export class ResidentProgressiveFonts {
   private readonly lateListeners = new Set<() => void>();
   private readonly refusalListeners = new Set<(owner: number) => void>();
   private readonly fillListeners = new Set<(owners: ReadonlySet<number>) => void>();
+  private readonly trapListeners = new Set<(error: Error) => void>();
   private warned = false;
   private late = 0;
   private disposed = false;
@@ -200,6 +201,7 @@ export class ResidentProgressiveFonts {
     this.lateListeners.clear();
     this.refusalListeners.clear();
     this.fillListeners.clear();
+    this.trapListeners.clear();
   }
 
   get size(): number {
@@ -294,12 +296,24 @@ export class ResidentProgressiveFonts {
     this.fillTimer = setTimeout(() => {
       this.fillTimer = undefined;
       const filling: Promise<void> = this.fill().catch((error: unknown) => {
+        if (isEngineTrap(error) && this.trapListeners.size) {
+          for (const listener of [...this.trapListeners]) listener(error as Error);
+          return;
+        }
         this.log(`[docx] filling sliced faces stopped: ${error instanceof Error ? error.message : String(error)}`);
       }).finally(() => {
         if (this.filling === filling) this.filling = undefined;
       });
       this.filling = filling;
     }, FILL_DELAY_MS);
+  }
+
+  /** Calls `listener` with an engine trap a fill hit while installing outlines; the engine cannot go on. */
+  onTrapped(listener: (error: Error) => void): () => void {
+    this.trapListeners.add(listener);
+    return () => {
+      this.trapListeners.delete(listener);
+    };
   }
 
   /** Settles once a scheduled fill has run, or at once without one. */

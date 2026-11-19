@@ -264,6 +264,19 @@ test('a fill loads every chunk of a marked face once frames are quiet, installs 
   expect(updates).toHaveLength(1);
 });
 
+test('an engine trap while a fill installs its face reaches the trap listeners, not the log', async () => {
+  const thrown = new WebAssembly.RuntimeError('unreachable');
+  const { resident, logs } = fonts(() => {
+    throw thrown;
+  }, [filling]);
+  const trapped: Error[] = [];
+  resident.onTrapped((error) => trapped.push(error));
+  resident.scheduleFill();
+  await resident.whenFilled();
+  expect(trapped).toEqual([thrown]);
+  expect(logs).toEqual([]);
+});
+
 test('a face not marked to fill loads only as frames need it', async () => {
   const { resident } = fonts();
   resident.scheduleFill();
