@@ -6826,6 +6826,7 @@ impl Workbook {
             .unwrap_or_else(|e| e.into_inner())
             .effects(
                 (self.model_epoch, self.calculated_now),
+                &self.last_calculation.limited_cells,
                 &self.model,
                 sheet,
                 rows,

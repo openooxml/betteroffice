@@ -12,6 +12,8 @@ use xlsx_model::value::CellValue;
 use xlsx_model::{CellRange, CellRef, ErrorValue, MAX_COLS, MAX_ROWS, SheetId, Workbook};
 use xlsx_render::CellFormats;
 
+use crate::CellAddress;
+
 /// Rule checks plus cell visits one frame on screen spends deciding cells.
 pub const CONDITIONAL_FRAME_BUDGET: u64 = 200_000;
 /// Milliseconds one timed frame on screen spends deciding cells.
@@ -125,7 +127,8 @@ pub struct ConditionalStats {
     pub withheld_error_bound: u64,
     /// Cells withheld because a rule formula did not translate or parse there.
     pub withheld_unparsable: u64,
-    /// Cells withheld because the calc engine refused a rule formula for size.
+    /// Cells withheld because the calc engine refused for size a rule formula,
+    /// or the last recalculation of a cell the rule compares.
     pub withheld_refused: u64,
     /// Cells withheld because a rule's kind, operator or rank is unsupported.
     pub withheld_unsupported: u64,
@@ -187,6 +190,9 @@ pub(crate) struct Cache {
     /// the next.
     moved: bool,
     parsed: HashMap<String, Option<Arc<Expr>>>,
+    /// The cells whose last recalculation the calc engine refused or cut
+    /// short, as of the epoch.
+    limited: HashSet<(SheetId, u32, u32)>,
     budget: u64,
     stats: ConditionalStats,
 }
@@ -200,6 +206,7 @@ impl Default for Cache {
             aggregates: HashMap::new(),
             results: HashMap::new(),
             previous: HashMap::new(),
+            limited: HashSet::new(),
             moved: false,
             parsed: HashMap::new(),
             budget: CONDITIONAL_FRAME_BUDGET,
@@ -278,7 +285,8 @@ struct Aggregate {
     bases: Vec<Option<Arc<Expr>>>,
     /// Each formula's count tables, in `Formula::counts` order.
     tables: Vec<Vec<Option<CountTable>>>,
-    /// Whether the calc engine refused a constant call for size.
+    /// Whether the calc engine refused a constant call for size, or the last
+    /// recalculation of a cell a whole-range rule reads.
     refused: bool,
     /// Whether a constant call or count table reached a calc engine gap.
     gap: bool,
@@ -322,10 +330,13 @@ impl Cache {
     /// from the highest-priority matching rule that sets it, and no rule
     /// below a matching `stopIfTrue` rule applies. `epoch` is the model epoch
     /// and the date its cells were last calculated with; a change of either
-    /// starts a new epoch of the cache.
+    /// starts a new epoch of the cache. `limited` are the cells whose last
+    /// recalculation the calc engine refused or cut short.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn effects(
         &mut self,
         epoch: (u64, Option<f64>),
+        limited: &[CellAddress],
         model: &Workbook,
         sheet: SheetId,
         rows: &[Range<u32>],
@@ -337,6 +348,10 @@ impl Cache {
         if self.epoch != Some(key) {
             self.epoch = Some(key);
             self.now_serial = now_serial;
+            self.limited = limited
+                .iter()
+                .map(|at| (at.sheet, at.cell.row, at.cell.col))
+                .collect();
             self.rules.clear();
             self.aggregates.clear();
             if std::mem::take(&mut self.moved) {
@@ -617,6 +632,10 @@ impl Cache {
         if aggregate.gap {
             return Err(Unknown::EngineGap);
         }
+        let limited = self.limited.contains(&(sheet, at.row, at.col));
+        if limited && matches!(rule.test, Test::CellIs(_)) {
+            return Err(Unknown::Refused);
+        }
         context.restart();
         context.cell = Some(at);
         let ctx: &EvalContext<'_> = context;
@@ -792,6 +811,7 @@ impl Cache {
         ) {
             let (stats, read) = stats(model, sheet, rule);
             aggregate.stats = Some(stats);
+            aggregate.refused = rule.covers_any(sheet, &self.limited);
             *spent += read;
             built = true;
         }
@@ -849,6 +869,13 @@ impl Cache {
 impl Rule {
     fn covers(&self, at: CellRef) -> bool {
         self.ranges.iter().any(|range| range.contains(at))
+    }
+
+    fn covers_any(&self, sheet: SheetId, cells: &HashSet<(SheetId, u32, u32)>) -> bool {
+        let covered = |row: u32, col: u32| self.covers(CellRef::new(row, col));
+        cells
+            .iter()
+            .any(|&(owner, row, col)| owner == sheet && covered(row, col))
     }
 
     /// Why no cell can decide this rule, when that is known without a cell.
@@ -1730,6 +1757,7 @@ mod tests {
         let rows = rule.ranges[0].end.row + 1;
         cache.effects(
             (epoch, None),
+            &[],
             model,
             SheetId(0),
             std::slice::from_ref(&(0..rows)),
@@ -1887,6 +1915,7 @@ mod tests {
         let mut painted = |now_serial: Option<f64>| {
             let (formats, pending) = cache.effects(
                 (1, now_serial),
+                &[],
                 &model,
                 SheetId(0),
                 std::slice::from_ref(&(0..8)),
