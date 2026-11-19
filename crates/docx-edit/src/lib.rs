@@ -881,6 +881,7 @@ impl EditingDoc {
         doc.get_or_insert_map(shape_styles::SHAPE_STYLES);
         doc.get_or_insert_map(document_properties::DOCUMENT_PROPERTIES);
         doc.get_or_insert_map(style_languages::STYLE_LANGUAGES);
+        doc.get_or_insert_map(list_definitions::LIST_DEFINITIONS);
         doc.get_or_insert_map(section_margins::SECTION_MARGINS);
         doc.get_or_insert_map(identity::PARAGRAPH_IDS);
         doc.get_or_insert_map(identity::SOURCE_PARAGRAPH_IDS);

@@ -286,6 +286,10 @@ export class EditSession {
      * the story id already exists.
      */
     create_story(story_id: string, initial_text: string, p_style: string, alignment: string): string;
+    /**
+     * The list definitions the editor created, by key, as JSON.
+     */
+    created_list_definitions_json(): string;
     decode_font(bytes: Uint8Array): Uint8Array;
     /**
      * Deletes every column the [`TableRange`] `range_json` covers, along with
@@ -1886,6 +1890,7 @@ export interface InitOutput {
     readonly editsession_compare_docx_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly editsession_content_control_targets_json: (a: number) => [number, number, number, number];
     readonly editsession_create_story: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
+    readonly editsession_created_list_definitions_json: (a: number) => [number, number];
     readonly editsession_decode_font: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_delete_column: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_delete_range: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number) => [number, number, number, number];

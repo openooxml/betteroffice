@@ -7,7 +7,8 @@ use std::sync::Arc;
 use docx_parse::NumberingMap;
 use yrs::Any;
 
-use crate::bridge::{any_bool, any_str, map_number, value_number, value_string};
+use crate::bridge::{any_bool, any_str, value_number, value_string};
+use crate::list_definitions::{CreatedListDefinition, ListIdentity, resolve_list_identity};
 
 /// The numbering levels OOXML defines, `0..=8`.
 pub(crate) const LEVELS: usize = 9;
@@ -35,6 +36,8 @@ pub(crate) struct ListState {
     seen_num_ids: BTreeSet<String>,
     /// The document's numbering definitions, when the session retains them.
     numbering: Option<Arc<NumberingMap>>,
+    /// The list definitions the editor created, by key.
+    created: Arc<BTreeMap<String, CreatedListDefinition>>,
 }
 
 impl ListState {
@@ -45,12 +48,35 @@ impl ListState {
         }
     }
 
-    pub(crate) fn marker_fonts(&self, num_id: f64, level: f64) -> Option<docx_parse::FontFamily> {
+    /// This state over the list definitions the editor created as well.
+    pub(crate) fn with_created(self, created: BTreeMap<String, CreatedListDefinition>) -> Self {
+        Self {
+            created: Arc::new(created),
+            ..self
+        }
+    }
+
+    /// The marker fonts of level `level` of the list the paragraph with `values` is on, which
+    /// names it by `num_id`; a list the editor created defines none.
+    pub(crate) fn marker_fonts(
+        &self,
+        values: &BTreeMap<String, Any>,
+        num_id: f64,
+        level: f64,
+    ) -> Option<docx_parse::FontFamily> {
+        if let Some(ListIdentity::Created { .. }) = resolve_list_identity(values) {
+            return None;
+        }
         self.numbering
             .as_ref()?
             .get_level(num_id, level)?
             .r_pr?
             .font_family
+    }
+
+    /// The `w:lvlText` of level `level` of the list `key` the editor created.
+    fn created_level_text(&self, key: &str, level: usize) -> Option<String> {
+        self.created.get(key)?.level_texts.get(level).cloned()
     }
 
     pub(crate) fn first_picture_bullet(&self) -> Option<&docx_parse::numbering::PictureBulletSize> {
@@ -112,6 +138,15 @@ impl List {
         Some(Self { key, levels })
     }
 
+    /// A list the editor created, keyed by its definition: every level starts at 1 and restarts
+    /// when a level above it is numbered.
+    fn created(key: String) -> Self {
+        Self {
+            key,
+            levels: [(1, None); LEVELS],
+        }
+    }
+
     fn initial(&self) -> Vec<i64> {
         self.levels.iter().map(|(start, _)| start - 1).collect()
     }
@@ -136,6 +171,13 @@ impl List {
             }
         }
     }
+}
+
+/// How a paragraph's list is counted: as its definitions describe, or, without them, by the
+/// numbering instance it names.
+enum Counting {
+    Defined(Box<List>),
+    Undefined(f64),
 }
 
 fn format_roman(value: i64, uppercase: bool) -> String {
@@ -291,42 +333,44 @@ pub(crate) fn compute_list_marker(
 /// The rendered list marker for one paragraph, advancing `state`. Bullets and authored literal
 /// markers pass through; a marker containing `%` is a template resolved against the counter stack,
 /// and a paragraph with no marker at all gets the dotted counter path (`"1.2."`). With retained
-/// definitions, lists are counted as [`List`] describes; without them numbering a level resets
-/// every deeper level. A level outside `0..=8` has no marker, and a number the level's format
-/// cannot write is reported instead of written.
+/// definitions, lists are counted as [`List`] describes, a list the editor created by its own
+/// key; without them numbering a level resets every deeper level. A level outside `0..=8` has no
+/// marker, and a number the level's format cannot write is reported instead of written.
 pub(crate) fn list_marker(
     values: &BTreeMap<String, Any>,
     state: &mut ListState,
 ) -> Option<Result<String, Unrenderable>> {
-    let marker = value_string(values.get("listMarker"));
-    let Some(Any::Map(num_pr)) = values.get("numPr") else {
+    let mut marker = value_string(values.get("listMarker"));
+    let Some(identity) = resolve_list_identity(values) else {
         return marker.map(Ok);
     };
-    let Some(num_id) = map_number(num_pr, "numId") else {
-        return marker.map(Ok);
-    };
-    if num_id == 0.0 {
-        return marker.map(Ok);
-    }
     if values.get("listIsBullet").and_then(any_bool) == Some(true) {
         return Some(Ok(marker.unwrap_or_default()));
     }
 
-    let level = numbering_level(map_number(num_pr, "ilvl").unwrap_or(0.0))?;
+    let level = numbering_level(identity.level())?;
+    let counting = match identity {
+        ListIdentity::Source { num_id, .. } => state
+            .numbering
+            .as_deref()
+            .and_then(|numbering| List::resolve(numbering, num_id))
+            .map(Box::new)
+            .map_or(Counting::Undefined(num_id), Counting::Defined),
+        ListIdentity::Created { key, .. } => {
+            marker = marker.or_else(|| state.created_level_text(&key, level));
+            Counting::Defined(Box::new(List::created(key)))
+        }
+    };
     let mut formats = list_level_formats(values);
     formats.truncate(LEVELS);
     let level_format = formats
         .get(level)
         .cloned()
         .or_else(|| value_string(values.get("listNumFmt")));
-    let list = state
-        .numbering
-        .as_deref()
-        .and_then(|numbering| List::resolve(numbering, num_id));
-    let counter_key = match &list {
-        Some(list) => list.key.clone(),
-        None => value_number(values.get("listAbstractNumId"))
-            .unwrap_or(num_id)
+    let counter_key = match &counting {
+        Counting::Defined(list) => list.key.clone(),
+        Counting::Undefined(num_id) => value_number(values.get("listAbstractNumId"))
+            .unwrap_or(*num_id)
             .to_string(),
     };
     if level_format.as_deref() == Some("none") {
@@ -347,16 +391,19 @@ pub(crate) fn list_marker(
     let counters = state
         .counters
         .entry(counter_key)
-        .or_insert_with(|| list.as_ref().map_or_else(|| vec![0; LEVELS], List::initial));
+        .or_insert_with(|| match &counting {
+            Counting::Defined(list) => list.initial(),
+            Counting::Undefined(_) => vec![0; LEVELS],
+        });
     if counters.len() < LEVELS {
         counters.resize(LEVELS, 0);
     }
-    match &list {
-        Some(list) => {
+    match &counting {
+        Counting::Defined(list) => {
             counters[level] = counters[level].saturating_add(1);
             list.restart_below(counters, level);
         }
-        None => {
+        Counting::Undefined(num_id) => {
             if state.seen_num_ids.insert(format!("{num_id}:{level}"))
                 && let Some(start) =
                     value_number(values.get("listStartOverride")).filter(|start| start.is_finite())

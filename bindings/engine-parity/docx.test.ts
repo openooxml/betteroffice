@@ -3372,6 +3372,11 @@ const rows: Row<Docx>[] = [
     call: ({ session: s }) => s.patch_style_languages_xml(new TextDecoder().decode(fixtureEntries['word/styles.xml'])),
   }),
   defineRow({
+    method: 'EditSession.created_list_definitions_json',
+    setup: ({ session: s }: Docx) => s.ensure_list_definition('body', paraId(s, 'Second body'), 'numbered'),
+    call: ({ session: s }) => s.created_list_definitions_json(),
+  }),
+  defineRow({
     method: 'hit_test_regions_by_handle',
     setup: openedDisplay,
     call: ({ engine }, opened) => onDisplay(engine, opened, (_, handle) => HIT_POINTS.map(([page, x, y]) => engine.hit_test_regions_by_handle(handle, page, x, y))),

@@ -7,6 +7,9 @@ use yrs::{Any, Map, MapRef, Out, ReadTxn, Text};
 
 use crate::batch::DocumentVersion;
 use crate::heading::{OutlineInputs, current_inputs, resolve_heading};
+use crate::list_definitions::{
+    LIST_DEF, effective_list_state, list_instance_id, source_list_rendering,
+};
 use crate::list_marker::{
     ListState, Unrenderable, list_level_formats, list_marker, numbering_level, renders_format,
 };
@@ -20,7 +23,7 @@ fn present(value: Option<&Any>) -> Option<&Any> {
     value.filter(|value| !matches!(value, Any::Null | Any::Undefined))
 }
 
-fn any_text(value: Option<&Any>) -> Option<String> {
+pub(crate) fn any_text(value: Option<&Any>) -> Option<String> {
     match present(value)? {
         Any::String(value) => Some(value.to_string()),
         Any::Number(value) if value.is_finite() && value.fract() == 0.0 => {
@@ -90,11 +93,7 @@ pub(crate) fn numbering_properties<'a>(
     if let Some(num_pr) = num_pr {
         if let Some(num) = any_map(Some(&num_pr))
             && let Some(source) = source
-            && let Some(rendering) = docx_parse::compute_list_rendering(
-                any_number(num.get("numId")),
-                any_number(num.get("ilvl")),
-                &source.numbering(),
-            )
+            && let Some(rendering) = source_list_rendering(num, source)
         {
             values.insert("listNumFmt".into(), rendering.num_fmt.into());
             values.insert("listIsBullet".into(), Any::Bool(rendering.is_bullet));
@@ -150,8 +149,7 @@ pub(crate) fn list_info(
     mut note: impl FnMut(String),
 ) -> Option<ListInfo> {
     let num_pr = any_map(values.get("numPr"))?;
-    let num_id = any_number(num_pr.get("numId")).filter(|id| *id != 0.0)?;
-    let num_id = any_text(num_pr.get("numId")).unwrap_or_else(|| num_id.to_string());
+    let num_id = list_instance_id(values, num_pr)?;
     let abstract_num_id = any_text(values.get("listAbstractNumId"));
     let suffix = match any_text(values.get("listMarkerSuffix")).as_deref() {
         Some("space") => MarkerSuffix::Space,
@@ -263,7 +261,7 @@ impl EditingDoc {
         let key = (root.to_owned(), view);
         Arc::clone(cache.roots.entry(key).or_insert_with(|| {
             let source = self.source_metadata();
-            let mut list = ListState::new(source.as_ref().map(|source| source.numbering()));
+            let mut list = effective_list_state(source.as_deref(), txn);
             let mut facts = HashMap::new();
             facts_story(
                 txn,
@@ -285,6 +283,7 @@ fn fact_properties<T: ReadTxn>(map: &MapRef, txn: &T) -> BTreeMap<String, Any> {
         "pStyle",
         "outlineLevel",
         "numPr",
+        LIST_DEF,
         "listAbstractNumId",
         "listMarkerSuffix",
         "listMarkerHidden",

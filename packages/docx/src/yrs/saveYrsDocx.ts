@@ -29,6 +29,7 @@ import type {
 import {
   assertCommentBookmarkReplacement, projectedSessionKey, restoreBlockBookmarks, yrsToDocument,
 } from './yrsToDocument';
+import { sessionListDefinitions, writeListDefinitionParts } from './listDefinitionSave';
 
 /** A saved paragraph's session anchor and the persisted anchor that resolves to it once reopened. */
 export interface DocxSavedParagraph {
@@ -693,6 +694,12 @@ export async function writeSessionSave(
     const source = parts['word/styles.xml'];
     if (!source) throw new Error('Language edits require a styles part');
     parts['word/styles.xml'] = new TextEncoder().encode(session.patchStyleLanguagesXml(new TextDecoder().decode(source)));
+    bytes = rezipContainer(parts);
+  }
+  const lists = sessionListDefinitions(session);
+  if (lists.length) {
+    const parts = unzipContainer(bytes);
+    writeListDefinitionParts(parts, lists);
     bytes = rezipContainer(parts);
   }
   engineProgress();

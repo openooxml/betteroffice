@@ -1559,6 +1559,7 @@ pub(crate) fn plan_paragraph_style<T: ReadTxn>(
             for key in [
                 "numPr",
                 "numPrFromStyle",
+                crate::LIST_DEF,
                 "listNumFmt",
                 "listIsBullet",
                 "listMarker",

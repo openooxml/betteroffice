@@ -53,6 +53,7 @@ use yrs::types::text::YChange;
 use yrs::{Any, Map, MapRef, OffsetKind, Out, ReadTxn, Text, Transact};
 
 use super::{COMMENTS, DEL, EditError, EditingDoc, INS, decode_anchor, is_pilcrow, story_ref};
+use crate::list_definitions::{effective_list_state, resolve_list_identity, written_numbering};
 use crate::list_marker::{ListState, compute_list_marker};
 use crate::seed::synthesized_cell_width;
 use crate::sticky_positions::sticky_offset;
@@ -519,10 +520,9 @@ fn yrs_doc_to_mapped_layout_blocks_inner(
             .run_revision_stories()
             .any(|story| story == "body" || story.starts_with("body:"))
     }));
-    let numbering = source.as_ref().map(|source| source.numbering());
-    let mut list_state = ListState::new(numbering);
-    local.block(story_id == "body" && list_state.first_picture_bullet().is_some());
     let txn = doc.yrs_doc().transact();
+    let mut list_state = effective_list_state(source.as_deref(), &txn);
+    local.block(story_id == "body" && list_state.first_picture_bullet().is_some());
     local.block(
         txn.get_map(COMMENTS)
             .is_some_and(|comments| comments.len(&txn) != 0),
@@ -5602,18 +5602,13 @@ fn lower_paragraph_attrs(
         .get("shading")
         .and_then(|shading| resolve_paragraph_shading(shading, env));
 
-    if let Some(Any::Map(num_pr)) = values.get("numPr") {
-        result.num_pr = Some(ListNumPr {
-            num_id: map_number(num_pr, "numId"),
-            ilvl: map_number(num_pr, "ilvl"),
-        });
-    }
+    result.num_pr = written_numbering(values).map(|(num_id, ilvl)| ListNumPr { num_id, ilvl });
     result.list_marker = compute_list_marker(values, list_state);
     result.list_is_bullet = values.get("listIsBullet").and_then(any_bool);
     result.list_marker_hidden = true_property(values, "listMarkerHidden");
     result.list_marker_font_family = value_string(values.get("listMarkerFontFamily"));
     if let Some(fonts) = result.num_pr.as_ref().and_then(|properties| {
-        list_state.marker_fonts(properties.num_id?, properties.ilvl.unwrap_or(0.0))
+        list_state.marker_fonts(values, properties.num_id?, properties.ilvl.unwrap_or(0.0))
     }) && result
         .list_marker_font_family
         .as_deref()
@@ -5924,15 +5919,11 @@ fn lower_paragraph_indent(values: &BTreeMap<String, Any>, result: &mut Paragraph
         .or_else(|| indent_map.and_then(|map| map_bool(map, "hanging")))
         .unwrap_or(false);
 
-    if let Some(Any::Map(num_pr)) = values.get("numPr") {
-        let num_id = map_number(num_pr, "numId").unwrap_or(0.0);
-        if num_id != 0.0 && left.is_none() {
-            let level = map_number(num_pr, "ilvl").unwrap_or(0.0);
-            left = Some((level + 1.0) * 720.0);
-            if first_line.is_none() {
-                first_line = Some(-360.0);
-                hanging = true;
-            }
+    if let (Some(list), None) = (resolve_list_identity(values), left) {
+        left = Some((list.level() + 1.0) * 720.0);
+        if first_line.is_none() {
+            first_line = Some(-360.0);
+            hanging = true;
         }
     }
 

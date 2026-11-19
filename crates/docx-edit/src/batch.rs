@@ -949,6 +949,7 @@ fn direct_admissible<T: ReadTxn>(doc: &EditingDoc, txn: &T, steps: &[Planned]) -
             crate::shape_styles::SHAPE_STYLES,
             crate::document_properties::DOCUMENT_PROPERTIES,
             crate::style_languages::STYLE_LANGUAGES,
+            crate::list_definitions::LIST_DEFINITIONS,
             crate::section_margins::SECTION_MARGINS,
             crate::identity::PARAGRAPH_IDS,
             crate::identity::SOURCE_PARAGRAPH_IDS,

@@ -1363,6 +1363,11 @@ impl EditSession {
             .map_err(JsValue::from)
     }
 
+    /// The list definitions the editor created, by key, as JSON.
+    pub fn created_list_definitions_json(&self) -> String {
+        self.core.created_list_definitions_json()
+    }
+
     pub fn list_sections_json(&self) -> Result<String, JsValue> {
         self.core.list_sections_json().map_err(JsValue::from)
     }

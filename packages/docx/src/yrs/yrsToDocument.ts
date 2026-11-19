@@ -21,6 +21,7 @@ import {
 } from './contentControlValues';
 import { sdtAttrsToProps } from '../types/sdtAttributes';
 import { tableRowGrid } from './storyPlainText';
+import { savedListProperties } from './listDefinitionSave';
 import {
   paragraphAttrsToFormatting,
   tableAttrsToFormatting,
@@ -4163,7 +4164,10 @@ class SaveContext {
           );
           paragraph = paragraphFromStory(
             savedParaId,
-            baseParagraph ? segment.properties : this.copiedParagraphProperties(storyId, segment.properties, items, precedingBaseParagraphs),
+            savedListProperties(
+              this.session,
+              baseParagraph ? segment.properties : this.copiedParagraphProperties(storyId, segment.properties, items, precedingBaseParagraphs)
+            ),
             items,
             boundaries,
             baseParagraph,

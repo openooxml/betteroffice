@@ -1738,6 +1738,7 @@ export function wrapSession(
       );
       return listDef === undefined ? attrs : { ...attrs, other: { ...attrs.other, listDef } };
     },
+    createdListDefinitions: () => JSON.parse(session.created_list_definitions_json()),
     formatTextTarget: (target, delta) => {
       ensureUndo(targetStory(target));
       return mutate(

@@ -76,6 +76,29 @@ impl EditSessionCore {
         serde_json::to_string(&attrs).map_err(EngineError::message)
     }
 
+    /// The list definitions the editor created, by key, as JSON
+    /// `[{"key","kind","levelTexts","levelFormats"}]`.
+    pub fn created_list_definitions_json(&self) -> String {
+        let definitions: Vec<_> = self
+            .engine
+            .doc()
+            .created_list_definitions()
+            .into_iter()
+            .map(|definition| {
+                let formats: Vec<_> = (0..definition.level_texts.len())
+                    .map(|level| definition.kind.level_format(level))
+                    .collect();
+                json!({
+                    "key": definition.key,
+                    "kind": definition.kind.name(),
+                    "levelTexts": definition.level_texts,
+                    "levelFormats": formats,
+                })
+            })
+            .collect();
+        serde_json::Value::Array(definitions).to_string()
+    }
+
     pub fn list_sections_json(&self) -> EngineResult<String> {
         let sections = self
             .engine
