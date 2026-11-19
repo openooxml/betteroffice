@@ -4,4 +4,4 @@
 '@betteroffice/rust-crates': patch
 ---
 
-Deleting a comment in the editor and saving keeps the source bytes of the other paragraphs when the save can patch the parts, which it cannot when the same save carries a host-side change such as page margins. Comment and bookmark ids compare by value.
+Deleting a comment inside one paragraph and saving in the editor keeps the other paragraphs' source bytes, unless the save also carries a host-side change such as page margins. A comment spanning paragraphs still rewrites the body. Comment and bookmark ids compare by value.
