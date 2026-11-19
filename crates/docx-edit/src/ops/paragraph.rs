@@ -1518,6 +1518,11 @@ pub(crate) fn plan_paragraph_style<T: ReadTxn>(
                 .is_none_or(|style| Some(style) != present(properties.get("numPr"))),
         }
     });
+    let direct_numbering = direct_numbering
+        || matches!(
+            crate::resolve_list_identity(properties),
+            Some(crate::ListIdentity::Created { .. })
+        );
     let clears_numbering =
         present(properties.get("numPr")).is_some() && !target.contains_key("numPr");
     let mut changes = Vec::new();
