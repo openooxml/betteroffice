@@ -512,4 +512,29 @@ describe('focus hand-back', () => {
       other.remove();
     }
   });
+
+  test('focus that went to nothing and then to another element is not taken back when the toolbar hides', () => {
+    const other = document.createElement('input');
+    document.body.append(other);
+    try {
+      const { view, bold, after } = focusedToolbar();
+      act(() => bold.blur());
+      act(() => other.focus());
+      const calls = after({ selection: collapsed });
+      expect(calls.focused).toBe(0);
+      expect(document.activeElement).toBe(other);
+      expect(view.queryByRole('toolbar')).toBeNull();
+    } finally {
+      other.remove();
+    }
+  });
+
+  test('a press outside the toolbar gives up its focus, so hiding then takes nothing back', () => {
+    const { view, bold, after } = focusedToolbar();
+    fireEvent.pointerDown(document.body);
+    act(() => bold.blur());
+    const calls = after({ selection: collapsed });
+    expect(calls.focused).toBe(0);
+    expect(view.queryByRole('toolbar')).toBeNull();
+  });
 });

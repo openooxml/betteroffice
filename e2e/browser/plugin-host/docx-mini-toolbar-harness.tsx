@@ -44,6 +44,8 @@ function Harness() {
   return state && <><DocxEditor key={state.key} ref={(editor) => { probe.editor = editor; }} documentBuffer={state.buffer}
     fonts={fonts} measurementFontProvider={measurementFontProvider} plugins={PLUGINS} pluginGrants={GRANTS}
     readOnly={readOnly} {...editorMode} />
+    <input aria-label="Host field" style={{ position: 'fixed', right: 0, bottom: 40 }} />
+    <div data-testid="host-area" style={{ position: 'fixed', right: 0, bottom: 80, width: 120, height: 30, background: '#eee' }}>Host area</div>
     <button type="button" style={{ position: 'fixed', right: 0, bottom: 0 }}>After the editor</button></>;
 }
 createRoot(document.getElementById('root')!).render(<Harness />);

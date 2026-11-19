@@ -330,3 +330,30 @@ test('switching the editor to read-only while a toolbar button has focus returns
   await expect(toolbar(page)).toHaveCount(0);
   await expect(input(page)).toBeFocused();
 });
+
+test('a click into a host field while a toolbar button has focus leaves focus in that field', async ({ page }) => {
+  await open(page);
+  await doubleClick(page, 'Bravo');
+  await expect(toolbar(page)).toBeVisible();
+  await page.keyboard.press('Alt+F10');
+  await expect(toolbar(page).getByRole('button', { name: 'Bold' })).toBeFocused();
+  const field = page.getByRole('textbox', { name: 'Host field' });
+  await field.click();
+  await expect(toolbar(page)).toHaveCount(0);
+  await expect(field).toBeFocused();
+  await page.waitForTimeout(500);
+  await expect(field).toBeFocused();
+});
+
+test('a press on a non-focusable spot of the page while a toolbar button has focus does not move focus into the document', async ({ page }) => {
+  await open(page);
+  await doubleClick(page, 'Bravo');
+  await expect(toolbar(page)).toBeVisible();
+  await page.keyboard.press('Alt+F10');
+  await expect(toolbar(page).getByRole('button', { name: 'Bold' })).toBeFocused();
+  await page.getByTestId('host-area').click();
+  await expect(toolbar(page)).toHaveCount(0);
+  await page.waitForTimeout(500);
+  await expect(input(page)).not.toBeFocused();
+  expect(await focusInToolbar(page)).toBe(false);
+});
