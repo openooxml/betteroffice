@@ -217,6 +217,36 @@ for an expired context. `inputFocused` is tracked in the in-thread editor and th
 worker editor, but `focusDocument()` works only in the worker editor; the
 in-thread editor always refuses it with `unsupported-policy`.
 
+**Mini toolbar (experimental).** `@betteroffice/docx-react/mini-toolbar` ships a
+first-party plugin: a small toolbar above a settled text selection in the body,
+with bold, italic, underline, strikethrough, clear formatting and paste as plain
+text, or the `items` you list, in your order. It is off unless you add it, and its
+buttons stay disabled without the grant. It shows once a non-collapsed selection
+in the body has settled, while the document's text input or the toolbar itself
+has focus, in editing or suggesting mode only. It hides while the selection
+changes, as on typing, and when focus moves elsewhere, such as into a menu, a
+dialog or a content control. A pointer press anywhere outside the toolbar, mouse,
+pen or touch, dismisses it for the current selection, also when that press keeps
+the selection, as on an editor toolbar menu; it comes back once the selection
+changes and settles. A press inside it keeps it. `Alt+F10` (its command
+`plugin:betteroffice.mini-toolbar/focus`) moves focus into it, and Escape there
+dismisses it for that selection and returns focus to the document:
+
+```tsx
+import { DocxEditor } from "@betteroffice/docx-react";
+import { DOCX_MINI_TOOLBAR_ID, docxMiniToolbar } from "@betteroffice/docx-react/mini-toolbar";
+
+const miniToolbar = docxMiniToolbar({ items: ["clearFormatting", "pasteAsPlainText"] });
+
+<DocxEditor
+  documentBuffer={bytes}
+  plugins={[miniToolbar]}
+  pluginGrants={{
+    [DOCX_MINI_TOOLBAR_ID]: { document: "write", commands: ["clearFormatting", "pasteAsPlainText"] },
+  }}
+/>;
+```
+
 `geometry.viewport` is the scroller's visible client box intersected with the
 editor root, in overlay-layer pixels. Its `y` changes as the pages scroll.
 `viewport-change` carries the new rectangle on scroll, resize, or zoom, or `null`
