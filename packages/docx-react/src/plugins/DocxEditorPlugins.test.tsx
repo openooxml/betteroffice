@@ -4201,9 +4201,12 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
   });
 
   if (engine !== 'DL') test('T7: reload drops a pending settle and refuses retained geometry', async () => {
-    const h = await matrixEditor(engine);
+    const h = await matrixEditor(engine, documentBytes(), undefined, true);
     try {
       await h.selection('body', h.first.paraId, 0, 3);
+      await h.selectionLayout();
+      expect(h.settles).toHaveLength(0);
+      expect(h.context().snapshot.selectionSettled).toBe(false);
       const retained = h.context();
       const generation = retained.snapshot.generation;
       h.reset();
