@@ -31,7 +31,7 @@ import {
   assertCommentBookmarkReplacement, projectedSessionKey, restoreBlockBookmarks, yrsToDocument,
 } from './yrsToDocument';
 import {
-  markedCreatedListKeys, savedListDefinitions, withCreatedListIds, writeListDefinitionParts,
+  createdListReferences, savedListDefinitions, withCreatedListIds, writeListDefinitionParts,
 } from './listDefinitionSave';
 
 /** A saved paragraph's session anchor and the persisted anchor that resolves to it once reopened. */
@@ -611,8 +611,9 @@ export async function writeSessionSave(
   engineProgress();
   const refuse = (message: string) => new DocxSectionError('unsupported', message);
   const defined = session.createdListDefinitions?.() ?? [];
-  const inUse = defined.length
-    ? new Set([...session.listDefinitionKeysInUse(), ...markedCreatedListKeys(output)])
+  const references = defined.length ? createdListReferences(output) : undefined;
+  const inUse = references
+    ? new Set([...session.listDefinitionKeysInUse(), ...references.keys])
     : undefined;
   const created = defined.filter(definition => inUse?.has(definition.key));
   if (created.length) await preloadOpcWasm();
@@ -657,7 +658,10 @@ export async function writeSessionSave(
       : options.commentBaseline ? commentSourceBuffer(sectionEdits ? sourceBuffer : originalBuffer, options.commentBaseline.bytes)
         : sectionEdits ? sourceBuffer : originalBuffer;
     const lists = created.length
-      ? savedListDefinitions(session, created, unzipContainer(new Uint8Array(source)), sessionMaterializedSource(session)?.package.numbering)
+      ? savedListDefinitions(
+        session, created, unzipContainer(new Uint8Array(source)), sessionMaterializedSource(session)?.package.numbering,
+        references?.numIds
+      )
       : [];
     const modelled = withSourceOrdinals(output, spliced);
     const numIds = new Map(lists.map(definition => [definition.key, definition.numId]));

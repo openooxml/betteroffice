@@ -127,9 +127,13 @@ export function withCreatedListIds<T>(value: T, numIds: ReadonlyMap<string, numb
   return visit(value) as T;
 }
 
-/** The keys of the created lists that some `numPr` of `value`, a projected document or any part of it, marks. */
-export function markedCreatedListKeys(value: unknown): Set<string> {
+/**
+ * What the `numPr`s of `value`, a projected document or any part of it, name: the keys of the
+ * created lists they mark and the numIds of those they leave unmarked.
+ */
+export function createdListReferences(value: unknown): { keys: Set<string>; numIds: Set<number> } {
   const keys = new Set<string>();
+  const numIds = new Set<number>();
   const seen = new Set<object>();
   const visit = (node: unknown): void => {
     if (node === null || typeof node !== 'object' || ArrayBuffer.isView(node) || node instanceof ArrayBuffer) return;
@@ -142,12 +146,21 @@ export function markedCreatedListKeys(value: unknown): Set<string> {
     } else if ([Object.prototype, null].includes(Object.getPrototypeOf(node))) {
       const record = node as Record<string, unknown>;
       const key = record[CREATED_LIST];
-      if (typeof key === 'string') keys.add(key);
-      else for (const entry of Object.values(record)) visit(entry);
+      if (typeof key === 'string') {
+        keys.add(key);
+        return;
+      }
+      for (const [name, entry] of Object.entries(record)) {
+        if (name === 'numPr' && isRecord(entry) && typeof entry[CREATED_LIST] !== 'string') {
+          const numId = engineNumber(entry.numId);
+          if (numId !== undefined && Number.isFinite(numId)) numIds.add(numId);
+        }
+        visit(entry);
+      }
     }
   };
   visit(value);
-  return keys;
+  return { keys, numIds };
 }
 
 /**
@@ -261,6 +274,13 @@ function levelsOf(body: string, own: string): Array<{ format?: string; text?: st
 const looseIds = (xml: string, name: string) =>
   [...xml.matchAll(new RegExp(`(?:^|[\\s:])${name}\\s*=\\s*["'](\\d+)["']`, 'g'))].map(match => Number(match[1]));
 
+/** Every numId a `<{any prefix}numId>` element of `xml` names, in either quoting. */
+const referencedNumIds = (xml: string) =>
+  [...xml.matchAll(/<(?:[\w.-]+:)?numId(?=[\s/>])[^>]*>/g)].flatMap(match => {
+    const value = numberAttribute(match[0], 'val');
+    return value === undefined ? [] : [value];
+  });
+
 /** What a numbering part holds: its ids, the created lists it carries and where its elements are. */
 function scanNumbering(xml: string) {
   const masked = xml.replace(/<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>/g, match => ' '.repeat(match.length));
@@ -329,17 +349,23 @@ function numberingPart(parts: Readonly<Record<string, Uint8Array>>) {
  * and with what the writer writes for it, keeps the ids it has there unless `model` holds them, as
  * a list the session opened with; one an earlier save of the
  * session numbered keeps those while they are above every id of the package and of `model`, the
- * numbering of the session's source; every other one takes the next ids above those.
+ * numbering of the session's source; every other one takes the next ids above those. The numIds
+ * reserved include every one an XML part of the main document's folder names, and `referenced`.
  */
 export function savedListDefinitions(
   session: YrsSession,
   definitions: ReturnType<YrsSession['createdListDefinitions']>,
   parts: Readonly<Record<string, Uint8Array>>,
-  model?: NumberingDefinitions
+  model?: NumberingDefinitions,
+  referenced: Iterable<number> = []
 ): DocxSavedListDefinition[] {
   if (definitions.length === 0) return [];
-  const scan = scanNumbering(decode(parts[numberingPart(parts).path]) ?? '');
-  const numIds = [...scan.numIds, ...(model?.nums ?? []).map(num => num.numId)];
+  const located = numberingPart(parts);
+  const scan = scanNumbering(decode(parts[located.path]) ?? '');
+  const named = Object.keys(parts)
+    .filter(path => path.startsWith(located.folder) && path.toLowerCase().endsWith('.xml'))
+    .flatMap(path => referencedNumIds(decode(parts[path]) ?? ''));
+  const numIds = [...scan.numIds, ...(model?.nums ?? []).map(num => num.numId), ...named, ...referenced];
   const abstractNumIds = [...scan.abstractNumIds, ...(model?.abstractNums ?? []).map(abstract => abstract.abstractNumId)];
   const highestNumId = highest(numIds, 0);
   const highestAbstractNumId = highest(abstractNumIds, -1);
