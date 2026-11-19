@@ -3222,9 +3222,21 @@ const rows: Row<Docx>[] = [
   }),
   { method: 'EditSession.decode_font', call: ({ session: s }) => s.decode_font(fontBytes) },
   defineRow({
+    method: 'EditSession.echo_faces_json',
+    setup: ({ fresh }: Docx) => ({ bare: fresh(), ...residentRegions(fresh) }),
+    // display positions across the first lines, a few of them on no text run
+    call: (_, { bare, session: s }) => ({
+      before: bare.echo_faces_json(0, 'Ab가', 0, 40),
+      faces: Array.from({ length: 24 }, (_, index) => s.echo_faces_json(index * 3, 'Ab가 ', 0, 60)),
+    }),
+  }),
+  defineRow({
     method: 'EditSession.echo_glyph_set_json',
     setup: ({ session: s }: Docx) => s.register_measure_font(fontBytes),
-    call: ({ session: s }, font) => ({ kerned: s.echo_glyph_set_json(font, 12, true, 'Parity AV'), plain: s.echo_glyph_set_json(font, 12, false, 'Parity AV') }),
+    call: ({ session: s }, font) => ({
+      kerned: s.echo_glyph_set_json(font, 12, true, 'Parity AV'), plain: s.echo_glyph_set_json(font, 12, false, 'Parity AV'),
+      language: s.echo_glyph_set_json(font, 12, true, 'Parity AV', 'ko-KR'), grown: s.echo_glyph_set_json(font, 12, true, 'Parity AV!', null, 9),
+    }),
   }),
   defineRow({
     method: 'EditSession.outline_glyph_json',
