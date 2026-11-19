@@ -16,6 +16,23 @@ const NUMBERING: &str = concat!(
     r#"<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>"#,
     r#"<w:num w:numId="2"><w:abstractNumId w:val="1"/></w:num></w:numbering>"#
 );
+const STYLED_TYPES: &str = concat!(
+    r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>"#,
+    r#"<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>"#,
+    r#"<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>"#
+);
+const STYLED_RELATIONSHIPS: &str = concat!(
+    r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+    r#"<Relationship Id="numbering" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/>"#,
+    r#"<Relationship Id="styles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>"#
+);
+/// A Heading 1 style numbered by list 1.
+const NUMBERED_HEADING_STYLES: &str = concat!(
+    r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">"#,
+    r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>"#,
+    r#"<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/>"#,
+    r#"<w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr><w:outlineLvl w:val="0"/></w:pPr></w:style></w:styles>"#
+);
 const SHAPES: &str =
     include_str!("../../../packages/docx/src/yrs/__fixtures__/created-list-shapes.json");
 
@@ -31,7 +48,12 @@ fn docx(paragraphs: &[(&str, Option<u32>)]) -> Vec<u8> {
             format!("<w:p>{properties}<w:r><w:t>{text}</w:t></w:r></w:p>")
         })
         .collect();
-    let parts = vec![
+    styled_docx(&body, None)
+}
+
+/// A package holding `body` and [`NUMBERING`], with the styles part `styles` when given.
+fn styled_docx(body: &str, styles: Option<&str>) -> Vec<u8> {
+    let mut parts = vec![
         (
             "[Content_Types].xml".to_owned(),
             br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/></Types>"#.to_vec(),
@@ -56,6 +78,11 @@ fn docx(paragraphs: &[(&str, Option<u32>)]) -> Vec<u8> {
             NUMBERING.as_bytes().to_vec(),
         ),
     ];
+    if let Some(styles) = styles {
+        parts[0].1 = STYLED_TYPES.as_bytes().to_vec();
+        parts[2].1 = STYLED_RELATIONSHIPS.as_bytes().to_vec();
+        parts.push(("word/styles.xml".to_owned(), styles.as_bytes().to_vec()));
+    }
     ooxml_opc::rezip_parts(&parts).unwrap()
 }
 
@@ -291,6 +318,41 @@ fn a_created_list_resets_the_marker_formatting_of_the_list_the_paragraph_left() 
     ] {
         assert_eq!(ensured.get(key), Some(&Any::Null), "{key}");
     }
+}
+
+#[test]
+fn a_style_numbered_neighbour_is_not_joined_and_a_direct_one_is() {
+    let paragraph = |properties: &str, text: &str| {
+        format!("<w:p><w:pPr>{properties}</w:pPr><w:r><w:t>{text}</w:t></w:r></w:p>")
+    };
+    let body = [
+        paragraph(r#"<w:pStyle w:val="Heading1"/>"#, "Heading"),
+        paragraph("", "Body"),
+        paragraph("", "Gap"),
+        paragraph(r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="2"/></w:numPr>"#, "Item"),
+        paragraph("", "Below"),
+    ]
+    .concat();
+    let doc = EditingDoc::new(709);
+    seed_from_docx(&doc, &styled_docx(&body, Some(NUMBERED_HEADING_STYLES)))
+        .unwrap();
+    let heading = attrs(&doc, "Heading");
+    let shapes = format!(
+        "numPr={:?} numPrFromStyle={:?} _originalFormatting={:?}",
+        heading.get("numPr"),
+        heading.get("numPrFromStyle"),
+        heading.get("_originalFormatting")
+    );
+    assert!(heading.contains_key("numPr"), "{shapes}");
+    create(&doc, "Body", ListKind::Numbered);
+    assert!(created_key(&doc, "Body").is_some(), "{shapes}");
+    create(&doc, "Below", ListKind::Numbered);
+    let joined = ListIdentity::Source {
+        num_id: 2.0,
+        level: 0.0,
+    };
+    assert_eq!(resolve_list_identity(&attrs(&doc, "Below")), Some(joined));
+    assert_eq!(doc.created_list_definitions().len(), 1);
 }
 
 #[test]

@@ -257,13 +257,20 @@ fn shown_kind(values: &BTreeMap<String, Any>) -> ListKind {
     }
 }
 
-/// Whether the list of a paragraph with `values` comes from its style: its `numPr` is the one the
-/// style gives.
+/// Whether the list of a paragraph with `values` comes from its style: it is on no created list and
+/// its `numPr` names the numbering the style gives, which seeding keeps only in the
+/// `numPrFromStyle` of the paragraph's `_originalFormatting`.
 fn numbered_by_style(values: &BTreeMap<String, Any>) -> bool {
-    match values.get("numPrFromStyle") {
-        None | Some(Any::Null) => false,
-        style => style == values.get("numPr"),
-    }
+    let original = match values.get("_originalFormatting") {
+        Some(Any::Map(original)) => original.get("numPrFromStyle"),
+        _ => None,
+    };
+    let style = values.get("numPrFromStyle").or(original);
+    let (Some(Any::Map(style)), Some(Any::Map(num_pr))) = (style, values.get("numPr")) else {
+        return false;
+    };
+    created_key(values).is_none()
+        && map_number(style, "numId").is_some_and(|id| map_number(num_pr, "numId") == Some(id))
 }
 
 /// The attributes that put a paragraph on level `level` of the created list `key` of `kind`.

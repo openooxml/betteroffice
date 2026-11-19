@@ -314,8 +314,11 @@ describe('created definitions no paragraph names', () => {
   };
   const createdNames = (bytes: Uint8Array) =>
     [...text(unzipContainer(bytes)['word/numbering.xml']).matchAll(/<w:name w:val="betteroffice-list:([^"]*)"/g)].map(match => match[1]);
-  const keyOf = (target: YrsSession, value: string) =>
-    createdListKey(target.paragraphs('body').find(entry => entry.text === value)!.properties);
+  const keyOf = (target: YrsSession, value: string): string => {
+    const key = createdListKey(target.paragraphs('body').find(entry => entry.text === value)!.properties);
+    expect(key).toBeDefined();
+    return key!;
+  };
 
   test('a list put on, taken off and put on again saves only the definition its paragraph is on', async () => {
     const created = await session();
