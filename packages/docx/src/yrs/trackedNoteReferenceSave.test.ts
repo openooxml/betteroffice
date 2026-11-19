@@ -216,6 +216,20 @@ function boldHead(session: YrsSession): void {
   session.toggleMark({ story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 4 } }, { type: 'bold' });
 }
 
+function firstParagraphLength(session: YrsSession): number {
+  let length = 0;
+  for (const segment of session.storySegments('body')) {
+    if (segment.kind === 'pilcrow') break;
+    length += segment.kind === 'text' ? segment.text.length : 1;
+  }
+  return length;
+}
+
+function boldAll(session: YrsSession): void {
+  const paraId = firstParagraphId(session);
+  session.toggleMark({ story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: firstParagraphLength(session) } }, { type: 'bold' });
+}
+
 function resolveEach(session: YrsSession, decision: 'accept' | 'reject'): void {
   const ids = [...new Set(session.listRevisions().map(({ revisionId }) => revisionId))];
   expect(ids).toHaveLength(1);
@@ -555,8 +569,8 @@ describe.each(PATHS.filter(({ keepsSourceBytes }) => keepsSourceBytes))('$name',
 
 describe(PATHS[0]!.name, () => {
   describe.each([shapeOf('footnote', 'deletion')])('$name at paragraph level', (shape) => {
-    const keptAndReported = async (original: string, noteIds: number[]) => {
-      const { bytes, kept } = await saveOnMainThreadWithReport(fixture(original, noteIds), boldHead);
+    const keptAndReported = async (original: string, noteIds: number[], apply: Apply = boldHead) => {
+      const { bytes, kept } = await saveOnMainThreadWithReport(fixture(original, noteIds), apply);
       expect(bodyParagraphs(bytes)[0]).toBe(original);
       expect(kept?.structure ?? 0).toBeGreaterThanOrEqual(1);
       expect(kept?.paragraphs).toContainEqual(expect.objectContaining({
@@ -574,6 +588,10 @@ describe(PATHS[0]!.name, () => {
     it('keeps the source paragraph and reports it when bold text sits beside two wrappers of one revision that hold a reference alone', async () => {
       const twice = `${wrapped(shape)}${text(' and ')}${revisionSpan(shape, referenceRun(shape.note, 2))}`;
       await keptAndReported(firstParagraph(twice), [1, 2]);
+    });
+
+    it('keeps the source paragraph and reports it when the bold covers the reference of a revision of a reference alone', async () => {
+      await keptAndReported(firstParagraph(wrapped(shape)), [1], boldAll);
     });
   });
 });
