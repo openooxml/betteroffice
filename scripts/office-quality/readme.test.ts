@@ -479,6 +479,22 @@ test('the aggregate counts a roundtrip stage or a font reason outside the fixed 
   for (const leak of ['host-a', '/tmp/x/y.ttf']) expect(text.includes(leak) && leak).toBe(false);
 });
 
+test('a font count that is not a non-negative integer fails naming the job and the field, never the value', () => {
+  for (const [field, value] of [['loaded', 'host-a'], ['failed', -3]] as const) {
+    const input = fontsReport();
+    (input.samples[1] as any).comparisons[0].fonts.unattributed = { loaded: 0, failed: 0, [field]: value };
+    let message = '';
+    try {
+      aggregateReport(input);
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toContain('docx measure job');
+    expect(message).toContain(`fonts.unattributed.${field}`);
+    expect(message.includes(String(value)) && String(value)).toBe(false);
+  }
+});
+
 test('the arm line states how many advertised faces did not load and why', async () => {
   const { fontArmLine, fontSummary } = await import('./readme.mjs');
   const { samples } = fontsReport();

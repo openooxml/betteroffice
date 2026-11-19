@@ -150,7 +150,7 @@ class NativeBenchmarkTests(unittest.TestCase):
             self.assertNotIn('elapsed_ms', result['commit'])
             self.assertEqual(len(result['libreoffice']['elapsed_ms']), 5)
 
-    def test_the_shard_report_records_no_runner_name_and_no_font_paths(self):
+    def test_the_shard_report_records_no_runner_name_no_runner_platform_and_no_font_paths(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             output, native = root / 'output', root / 'native'
@@ -168,6 +168,7 @@ class NativeBenchmarkTests(unittest.TestCase):
             environment = dict(QUALITY_OUTPUT=str(output), QUALITY_NATIVE=str(native), QUALITY_FONTS=str(root / 'manifest.json'),
                                QUALITY_NATIVE_FONT_MAP='bench-manifest', RUNNER_NAME='host-a', SOFFICE='libreoffice')
             with patch.dict(os.environ, environment), \
+                    patch('platform.platform', lambda *args, **kwargs: 'Linux-host-a-x86_64-with-glibc'), \
                     patch('docx_benchmark.font_environment', lambda *args: 'f' * 64), \
                     patch('docx_benchmark.execute', lambda command, **kwargs: (0, 'LibreOffice 26.2.3.2 ' + 'd' * 40)), \
                     patch('docx_benchmark.measure_sample', lambda *args, **kwargs: {channel: dict(status='ok') for channel in CHANNELS}), \
@@ -178,7 +179,12 @@ class NativeBenchmarkTests(unittest.TestCase):
             report = json.loads((output / 'report.json').read_text())
             self.assertNotIn('font_paths', report['benchmark'])
             self.assertNotIn('name', report['runner'])
+            self.assertNotIn('platform', report['runner'])
             self.assertNotIn('host-a', json.dumps(report))
+
+    def test_no_benchmark_producer_records_the_runner_platform_string(self):
+        for name in ['docx_benchmark.py', 'pptx_benchmark.py', 'xlsx_benchmark.py']:
+            self.assertNotIn('platform.platform()', (Path(__file__).parent / name).read_text(), name)
 
     def test_dimensions_and_nonblank_output_are_required(self):
         with tempfile.TemporaryDirectory() as directory:

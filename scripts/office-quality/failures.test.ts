@@ -118,3 +118,16 @@ test('a stage or channel outside the fixed sets counts as other and is never ech
   const text = JSON.stringify([failureCounts(report, 'docx'), failureClusters(report)]);
   for (const leak of ['host-a', '/tmp/x/y.ttf']) expect(text.includes(leak) && leak).toBe(false);
 });
+
+test('a null or missing channel outside the probe counts as other, and the probe keeps its empty channel', () => {
+  const report = { samples: [{
+    id: 'alpha', format: 'docx',
+    comparisons: [{ channel: null, status: 'failed', stage: 'capture', error: 'failed' }, { status: 'failed', stage: 'compare', error: 'failed' }],
+    roundtrip_probe: { status: 'failed', error: 'failed' },
+  }] };
+  expect(failureCounts(report, 'docx')).toEqual([
+    { area: 'probe', channel: null, stage: 'probe', count: 1 },
+    { area: 'render', channel: 'other', stage: 'capture', count: 1 },
+    { area: 'render', channel: 'other', stage: 'compare', count: 1 },
+  ]);
+});

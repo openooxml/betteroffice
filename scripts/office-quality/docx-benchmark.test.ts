@@ -62,15 +62,15 @@ test('reconciles all shards and renders three versioned columns with native mean
   expect(() => renderSection({ ...merged, versions: { ...plan.versions, docx: '9.0.0' } })).toThrow('revision');
 });
 
-test('the merged report, its aggregate and its section carry no runner name and no font paths', () => {
+test('the merged report, its aggregate and its section carry no runner name, no runner platform and no font paths', () => {
   const { plan, report, parts, hash } = fixture();
   for (const part of parts) {
     Object.assign(part.benchmark, { font_paths: { published: { path: '/tmp/x/y.ttf' }, commit: { path: '/tmp/x/y.ttf' } } });
-    Object.assign(part, { runner: { name: 'host-a', platform: 'Linux', processors: 4 } });
+    Object.assign(part, { runner: { name: 'host-a', platform: 'Linux-host-a-x86_64-with-glibc', processors: 4 } });
   }
   const merged = mergeDocxBenchmarks(plan, report, parts, hash);
   expect('font_paths' in merged.docx_benchmark).toBe(false);
-  expect(merged.docx_runners).toEqual(parts.map((part) => ({ shard: part.shard, platform: 'Linux', processors: 4 })));
+  expect(merged.docx_runners).toEqual(parts.map((part) => ({ shard: part.shard, processors: 4 })));
   const text = JSON.stringify([merged, aggregateReport(merged), renderSection(merged)]);
   for (const leak of ['host-a', '/tmp/x/y.ttf']) expect(text.includes(leak) && leak).toBe(false);
 });
