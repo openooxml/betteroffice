@@ -13,7 +13,7 @@ import { openCommandEngine, closeCommandEngines } from '../../../../../docx/src/
 import { projectCommandEchoContext } from '../../../../../docx/src/yrs/residentCommandViewProjection';
 import { EchoGlyphSources } from '../../../../../docx/src/yrs/residentEchoGlyphSource';
 import { buildGlyphPath, parseOutlineJson } from '../../../../../docx/src/layout/render/glyphCache';
-import { customWorkerFontFaces, fontEnvironmentForRegistrations } from './workerFonts';
+import { customWorkerFontFaces, fontEnvironmentForRegistrations, namesParagraphMarkFamily } from './workerFonts';
 import { createEchoPainter, type PeerlessEchoIntent } from './echoPainter';
 import { createFramePresentation } from './framePresentation';
 import { admitInputIntents, createInputAdmission } from './inputAdmission';
@@ -74,6 +74,7 @@ async function openFontConnection(hold = false, fontKeys: readonly string[] = ['
     controller: { fontChoices() {} }, fontSource: { current: null }, fontAbort: { current: null }, fontJob: { current: null },
     refreshFonts: { current() {} },
     fontEnvironmentForRegistrations,
+    namesParagraphMarkFamily,
     worker: { current: null },
     sourceComments: { current: [] },
     renderEnvironment: { current: { theme: null, requested: '' } },

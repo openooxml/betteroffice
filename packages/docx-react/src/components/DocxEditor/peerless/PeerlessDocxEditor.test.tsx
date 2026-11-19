@@ -1349,7 +1349,7 @@ test('a cut preview leaves the tracked paragraph mark a text item while the whol
   const mark = '@betteroffice/fonts/paragraph-mark';
   const chains = (extras: string) => JSON.parse(extras).fontChains as Record<string, number[]>;
   const whole = chains(init.request.extras);
-  expect(Object.keys(chains(preview.preview.extras))).toEqual(['calibri|0|0']);
+  expect(Object.keys(chains(preview.preview.extras!))).toEqual(['calibri|0|0']);
   expect(JSON.parse(preview.preview.layoutInput).measurement.fontChains).not.toHaveProperty(mark);
   expect(whole[mark]).toEqual(whole['calibri|0|0']!.slice(0, 1));
 });
