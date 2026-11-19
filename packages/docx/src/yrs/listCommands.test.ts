@@ -1,5 +1,6 @@
 import { afterEach, beforeAll, expect, test } from 'bun:test';
 import type { YrsParagraphAttrs } from './index';
+import { LIST_OFF_ATTRS } from './listCommands';
 import {
   LIST_LAYOUT, PLAIN, listCommandScenarios, listDocument, preloadListWasm, shownMarker,
   type ListCommandDriver, type ListDocument, type ListDocumentOptions,
@@ -61,3 +62,11 @@ test('worker: a paragraph-attribute command carrying the created list a paragrap
   }))).toMatchObject({ status: 'applied' });
   expect(arm.engine.paragraphs('body').find(entry => entry.text === PLAIN)?.properties.listDef ?? null).toBeNull();
 }, TIMEOUT);
+
+test('the attributes that take a paragraph off its list are frozen and clear its marker formatting', () => {
+  expect(Object.isFrozen(LIST_OFF_ATTRS)).toBe(true);
+  expect(Object.isFrozen(LIST_OFF_ATTRS.other)).toBe(true);
+  for (const key of ['listMarkerHidden', 'listMarkerBold', 'listMarkerItalic', 'listMarkerColor', 'listMarkerFontSize']) {
+    expect(LIST_OFF_ATTRS).toHaveProperty(key, null);
+  }
+});

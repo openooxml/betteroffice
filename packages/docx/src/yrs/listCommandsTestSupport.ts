@@ -17,6 +17,11 @@ const XML = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
 const SECT = '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr>';
 const STYLES = `${XML}<w:styles xmlns:w="${W}"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:sz w:val="22"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after="160" w:line="259" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="0"/><w:spacing w:before="240" w:after="0"/></w:pPr><w:rPr><w:b/><w:sz w:val="32"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="ListParagraph"><w:name w:val="List Paragraph"/><w:basedOn w:val="Normal"/></w:style></w:styles>`;
 const BULLET_NUMBERING = `${XML}<w:numbering xmlns:w="${W}"><w:abstractNum w:abstractNumId="0"><w:multiLevelType w:val="hybridMultilevel"/><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="•"/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>`;
+const NUMBERED_HEADING_STYLES = STYLES.replace(
+  '<w:pPr><w:outlineLvl w:val="0"/>',
+  '<w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr><w:outlineLvl w:val="0"/>'
+);
+const HEADING_NUMBERING = `${XML}<w:numbering xmlns:w="${W}"><w:abstractNum w:abstractNumId="0"><w:multiLevelType w:val="multilevel"/><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>`;
 
 /** The paragraph the list commands are applied to; the last paragraph added to each document. */
 export const PLAIN = 'Plain paragraph QA';
@@ -32,6 +37,11 @@ export const DECIMAL_ITEM = 'Second numbered item';
 const NESTED_DECIMAL = 'Nested level three';
 /** The item of the decimal list 3 of document A directly below a level 1 item of the bullet list 2. */
 const RESTARTED_ITEM = 'Restarted list with explicit indent override';
+/** The two headings of document D, numbered by their style. */
+const HEADING = 'Introduction heading QA';
+const NEXT_HEADING = 'Second heading QA';
+const SECOND_FOLLOWER = 'Second follower QA';
+const THIRD_FOLLOWER = 'Third follower QA';
 export const LIST_LAYOUT = JSON.stringify({
   bodyStory: 'body',
   regions: { sections: [{ sectionId: 'main', properties: {} }] },
@@ -42,9 +52,10 @@ export const LIST_LAYOUT = JSON.stringify({
 /**
  * A: the seed-parity lists document, whose list 1 is decimal, list 2 a bullet list and list 3
  * decimal again, its last item directly above `PLAIN`. B: `EXISTING_BULLET` of bullet list 1,
- * directly above `PLAIN`, and no `w:num` 2. C: no numbering part.
+ * directly above `PLAIN`, and no `w:num` 2. C: no numbering part. D: `PLAIN` between two Heading 1
+ * paragraphs numbered by their style's list 1.
  */
-export type ListDocument = 'A' | 'B' | 'C';
+export type ListDocument = 'A' | 'B' | 'C' | 'D';
 export type ListKind = 'bullet' | 'numbered';
 export interface ListDocumentOptions {
   /** Puts `GAP` directly above `PLAIN`. */
@@ -54,7 +65,7 @@ export interface ListDocumentOptions {
 }
 
 /** The `w:numId`s of the numbering each document opens with. */
-export const SOURCE_NUM_IDS: Readonly<Record<ListDocument, readonly string[]>> = { A: ['1', '2', '3'], B: ['1'], C: [] };
+export const SOURCE_NUM_IDS: Readonly<Record<ListDocument, readonly string[]>> = { A: ['1', '2', '3'], B: ['1'], C: [], D: ['1'] };
 
 export async function preloadListWasm(): Promise<void> {
   const generated = (path: string) => new Uint8Array(readFileSync(resolve(import.meta.dir, '../wasm/generated', path)));
@@ -69,12 +80,12 @@ export function listFont(): Uint8Array {
 
 const plain = (text: string) => `<w:p><w:r><w:t>${text}</w:t></w:r></w:p>`;
 
-function pack(document: string, numbering: string | null, relationships?: Uint8Array): Uint8Array {
+function pack(document: string, numbering: string | null, relationships?: Uint8Array, styles = STYLES): Uint8Array {
   const parts = new Map<string, Uint8Array>();
   parts.set('[Content_Types].xml', toBytes(`${XML}<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="${OFFICE}.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="${OFFICE}.styles+xml"/>${numbering ? `<Override PartName="/word/numbering.xml" ContentType="${OFFICE}.numbering+xml"/>` : ''}</Types>`));
   parts.set('_rels/.rels', toBytes(`${XML}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDoc" Type="${R}/officeDocument" Target="word/document.xml"/></Relationships>`));
   parts.set('word/_rels/document.xml.rels', relationships ?? toBytes(`${XML}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${R}/styles" Target="styles.xml"/>${numbering ? `<Relationship Id="rId2" Type="${R}/numbering" Target="numbering.xml"/>` : ''}</Relationships>`));
-  parts.set('word/styles.xml', toBytes(STYLES));
+  parts.set('word/styles.xml', toBytes(styles));
   if (numbering) parts.set('word/numbering.xml', toBytes(numbering));
   parts.set('word/document.xml', toBytes(document));
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
@@ -90,6 +101,13 @@ export function listDocument(doc: ListDocument, options: ListDocumentOptions = {
       source.replace(anchor, `${added}\n${anchor}`),
       readFileSync(resolve(FIXTURE, 'numbering.xml'), 'utf8'),
       new Uint8Array(readFileSync(resolve(FIXTURE, '_rels/document.xml.rels')))
+    );
+  }
+  if (doc === 'D') {
+    const heading = (text: string) => `<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>${text}</w:t></w:r></w:p>`;
+    return pack(
+      `${XML}<w:document xmlns:w="${W}"><w:body>${heading(HEADING)}${added}${heading(NEXT_HEADING)}${SECT}</w:body></w:document>`,
+      HEADING_NUMBERING, undefined, NUMBERED_HEADING_STYLES
     );
   }
   const lead = doc === 'B'
@@ -254,7 +272,9 @@ export function listCommandScenarios(path: string, open: OpenListCommandDriver, 
     expect(properties.numPr).toMatchObject({ numId: 3, ilvl: 0 });
     expect(properties.listDef ?? null).toBeNull();
     expect(driver.definitions()).toEqual([]);
-    expect(driver.marker(PLAIN) ?? '').toMatch(/^\d+\.$/);
+    const above = driver.marker(RESTARTED_ITEM) ?? '';
+    expect(above).toMatch(/^\d+\.$/);
+    expect(driver.marker(PLAIN)).toBe(`${Number.parseInt(above, 10) + 1}.`);
     expect(savedList(await driver.save(), PLAIN)).toMatchObject({ paragraphs: 1, numId: '3', numFmt: 'decimal' });
   }, timeout);
 
@@ -384,12 +404,60 @@ export function listCommandScenarios(path: string, open: OpenListCommandDriver, 
     expect(savedList(bytes, FOLLOWER).numId).not.toBe('1');
   }, timeout);
 
-  test(`${path}: a paragraph joining a source list takes the level of the item above`, async () => {
+  test(`${path}: a paragraph on no list joining a source list takes the level of the item above`, async () => {
     const driver = await open('A');
+    driver.toggle('numbered', RESTARTED_ITEM);
+    expectOffList(driver, RESTARTED_ITEM);
     driver.toggle('bullet', RESTARTED_ITEM);
     const properties = propertiesOf(driver, RESTARTED_ITEM);
     expect(properties.numPr).toMatchObject({ numId: 2, ilvl: 1 });
     expect(properties.listDef ?? null).toBeNull();
+  }, timeout);
+
+  test(`${path}: an item switched onto a source list of the other kind keeps its own level`, async () => {
+    const driver = await open('A');
+    driver.toggle('bullet', RESTARTED_ITEM);
+    const properties = propertiesOf(driver, RESTARTED_ITEM);
+    expect(properties.numPr).toMatchObject({ numId: 2, ilvl: 0 });
+    expect(properties.listDef ?? null).toBeNull();
+  }, timeout);
+
+  test(`${path}: numbering over a bullet list keeps the level of every item`, async () => {
+    const items = [PLAIN, FOLLOWER, SECOND_FOLLOWER, THIRD_FOLLOWER];
+    const driver = await open('C', { after: items.slice(1) });
+    driver.toggle('bullet', PLAIN, THIRD_FOLLOWER);
+    const bullet = keyOf(driver, PLAIN);
+    for (const text of [FOLLOWER, SECOND_FOLLOWER, THIRD_FOLLOWER, THIRD_FOLLOWER]) driver.indent('increase', text);
+    driver.toggle('numbered', PLAIN, THIRD_FOLLOWER);
+    expect(items.map(text => (propertiesOf(driver, text).numPr as { ilvl?: number } | undefined)?.ilvl)).toEqual([0, 1, 1, 2]);
+    const key = keyOf(driver, PLAIN);
+    expect(key).toBeDefined();
+    expect(key).not.toBe(bullet);
+    expect(items.map(text => keyOf(driver, text))).toEqual(items.map(() => key));
+    expect(driver.definitions().find(definition => definition.key === key)?.kind).toBe('numbered');
+    expect(items.map(text => driver.marker(text))).toEqual(['1.', 'a.', 'b.', 'i.']);
+  }, timeout);
+
+  test(`${path}: numbering on a level 2 bullet item keeps it at level 2`, async () => {
+    const driver = await open('C');
+    driver.toggle('bullet', PLAIN);
+    driver.indent('increase', PLAIN);
+    driver.indent('increase', PLAIN);
+    driver.toggle('numbered', PLAIN);
+    expect(propertiesOf(driver, PLAIN).numPr).toMatchObject({ ilvl: 2 });
+    expect(keyOf(driver, PLAIN)).toBeDefined();
+    expect(driver.marker(PLAIN)).toBe('i.');
+  }, timeout);
+
+  test(`${path}: numbering below a heading numbered by its style creates a list instead of joining the heading's`, async () => {
+    const driver = await open('D');
+    const heading = propertiesOf(driver, HEADING).numPr;
+    expect(heading).toMatchObject({ numId: 1 });
+    driver.toggle('numbered', PLAIN);
+    await expectOnCreatedList(driver, 'D', PLAIN, 'numbered');
+    expect(driver.definitions()).toHaveLength(1);
+    expect(propertiesOf(driver, HEADING).numPr).toEqual(heading);
+    expect(propertiesOf(driver, NEXT_HEADING).numPr).toEqual(heading);
   }, timeout);
 
   test(`${path}: a paragraph joining a created list takes the level of the item above`, async () => {

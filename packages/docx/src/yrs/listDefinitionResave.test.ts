@@ -330,6 +330,18 @@ describe('created definitions no paragraph names', () => {
     expect(savedFormat(bytes, savedNumId(bytes, 'Alpha'))).toBe('bullet');
   });
 
+  test('a key the projection being written marks is saved even when the live read no longer names it', async () => {
+    const created = await session();
+    created.seedFromDocx(makeDocx(DOCUMENT, LISTS_NUMBERING));
+    createList(created, 'Alpha', 'bullet');
+    created.listDefinitionKeysInUse = () => [];
+    const bytes = (await saveYrsDocx(created, { updateModifiedDate: false })).bytes;
+    const alpha = savedNumId(bytes, 'Alpha');
+    expect(alpha).toBeGreaterThan(3);
+    expect(savedFormat(bytes, alpha)).toBe('bullet');
+    expect(createdNames(bytes)).toEqual([keyOf(created, 'Alpha')]);
+  });
+
   test('a definition its paragraphs left is not saved, and an undo that brings them back saves it under its ids', async () => {
     const created = await session();
     created.seedFromDocx(makeDocx(DOCUMENT, LISTS_NUMBERING));
