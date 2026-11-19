@@ -236,8 +236,16 @@ let activeSession: WorkbookSession | null = null;
 let latestFrame: WorkbookFrame | null = null;
 let cellInputHold: ReturnType<typeof deferred<void>> | null = null;
 let heldCellInputs = 0;
+const holdingOpen = parameters.has('holdOpen');
+let openWaiting = false;
+const openRelease = deferred<void>();
 const backendOpen = editableWorkbookSessionBackend.open;
 editableWorkbookSessionBackend.open = async (...args) => {
+  if (holdingOpen) {
+    openWaiting = true;
+    await openRelease.promise;
+    openWaiting = false;
+  }
   const token = ++generation;
   const slotIndex =
     args[1]?.clientId !== undefined ? args[1].clientId - 4200 : 0;
@@ -568,6 +576,8 @@ window.__xlsxWorkerEditor = {
     } finally { await session.dispose(); }
   },
   releaseHydration() { holdingHydration = false; hydrationRelease.resolve(); },
+  openHeld: () => openWaiting,
+  releaseOpen() { openRelease.resolve(); },
   holdCellInputs() { cellInputHold = deferred<void>(); },
   heldCellInputs: () => heldCellInputs,
   releaseCellInputs() { cellInputHold?.resolve(); cellInputHold = null; },
