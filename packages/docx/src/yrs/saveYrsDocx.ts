@@ -31,7 +31,7 @@ import {
   assertCommentBookmarkReplacement, projectedSessionKey, restoreBlockBookmarks, yrsToDocument,
 } from './yrsToDocument';
 import {
-  savedListDefinitions, withCreatedListIds, writeListDefinitionParts,
+  markedCreatedListKeys, savedListDefinitions, withCreatedListIds, writeListDefinitionParts,
 } from './listDefinitionSave';
 
 /** A saved paragraph's session anchor and the persisted anchor that resolves to it once reopened. */
@@ -611,7 +611,9 @@ export async function writeSessionSave(
   engineProgress();
   const refuse = (message: string) => new DocxSectionError('unsupported', message);
   const defined = session.createdListDefinitions?.() ?? [];
-  const inUse = defined.length ? new Set(session.listDefinitionKeysInUse()) : undefined;
+  const inUse = defined.length
+    ? new Set([...session.listDefinitionKeysInUse(), ...markedCreatedListKeys(output)])
+    : undefined;
   const created = defined.filter(definition => inUse?.has(definition.key));
   if (created.length) await preloadOpcWasm();
   const write = async (sectionEdits: RustParagraphIds['sectionEdits']) => {
