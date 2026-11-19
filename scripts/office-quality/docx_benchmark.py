@@ -300,15 +300,14 @@ def main():
                   benchmark=dict(method=job['method'], trials=job['trials'], dpi=96,
                                  published_version=job['published_version'],
                                  libreoffice_version=version, libreoffice_build=version_text.strip(),
-                                 libreoffice_fonts_sha256=libreoffice_fonts_hash, font_paths=font_paths, builds=builds, environment=dict(
+                                 libreoffice_fonts_sha256=libreoffice_fonts_hash, builds=builds, environment=dict(
                                      os=platform.system(), architecture=platform.machine(),
                                      image_os=os.environ.get('ImageOS', 'local'),
                                      image_version=os.environ.get('ImageVersion', 'local'),
                                      python=platform.python_version(), rasterizer=RASTERIZER,
                                      numpy=numpy.__version__, pillow=PIL.__version__, skimage=skimage.__version__,
                                      font_policy='bundled-fontconfig' if platform.system() == 'Linux' else 'system-fonts')),
-                  runner=dict(name=os.environ.get('RUNNER_NAME', platform.node()),
-                              platform=platform.platform(), processors=os.cpu_count()))
+                  runner=dict(platform=platform.platform(), processors=os.cpu_count()))
     for index, sample in enumerate(job['samples']):
         directory = root / sample['id']
         if sha256(directory / 'source.docx') != sample['metadata']['source']['sha256']:

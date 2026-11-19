@@ -125,6 +125,9 @@ const fontSourceLabel = (fonts) => {
   return `${fonts.package}${fonts.cjk ? ` and ${fonts.cjk}` : ''} (${fonts.copy})`;
 };
 
+const FONT_REASON = /^(?:http \d{3}|blocked|error)$/;
+const fontReason = (reason) => (typeof reason === 'string' && FONT_REASON.test(reason) ? reason : 'other');
+
 /** One arm's font source and face load counts across its captures. */
 export function fontSummary(samples, channel) {
   const sources = new Set();
@@ -161,7 +164,7 @@ export function fontSummary(samples, channel) {
   }
   for (const face of failed.keys()) loaded.delete(face);
   const reasons = {};
-  for (const reason of failed.values()) reasons[reason] = (reasons[reason] ?? 0) + 1;
+  for (const reason of [...failed.values()].map(fontReason)) reasons[reason] = (reasons[reason] ?? 0) + 1;
   return {
     sources: [...sources].sort(),
     captures,
