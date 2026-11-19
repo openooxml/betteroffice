@@ -255,23 +255,25 @@ pub fn render_png_with_images(dl: &DisplayList, images: &ImageMap<'_>) -> Result
                 rotation_valign,
                 stacked,
                 wrap,
-                runs: _,
+                runs,
             } => {
-                #[cfg(test)]
-                count(&RUN_PATHS);
-                if let Some(pieces) = xlsx_render::run_pieces(cmd) {
-                    let lines = match wrap {
-                        Some(wrap) => wrapped_lines(*y, wrap, text, &pieces, |piece, part| {
-                            #[cfg(test)]
-                            count(&PIECE_MEASURES);
-                            font::measure_text(part, piece.font_size)
-                        }),
-                        None => vec![(*y, pieces)],
-                    };
-                    for (y, pieces) in lines {
-                        paint_pieces(&mut pixmap, (*x, y), *align, clip, text, &pieces)?;
+                if !runs.is_empty() {
+                    #[cfg(test)]
+                    count(&RUN_PATHS);
+                    if let Some(pieces) = xlsx_render::run_pieces(cmd) {
+                        let lines = match wrap {
+                            Some(wrap) => wrapped_lines(*y, wrap, text, &pieces, |piece, part| {
+                                #[cfg(test)]
+                                count(&PIECE_MEASURES);
+                                font::measure_text(part, piece.font_size)
+                            }),
+                            None => vec![(*y, pieces)],
+                        };
+                        for (y, pieces) in lines {
+                            paint_pieces(&mut pixmap, (*x, y), *align, clip, text, &pieces)?;
+                        }
+                        continue;
                     }
-                    continue;
                 }
                 let run = font::TextRun {
                     x: *x,

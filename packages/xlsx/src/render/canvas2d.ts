@@ -288,7 +288,7 @@ function paintText(ctx: CanvasRenderingContext2D, cmd: TextCmd): void {
   ctx.font = fontString(cmd);
   (ctx as CanvasRenderingContext2D & { textRendering?: string }).textRendering = 'geometricPrecision';
   ctx.textBaseline = 'alphabetic';
-  const pieces = runPieces(cmd);
+  const pieces = cmd.runs?.length ? runPieces(cmd) : undefined;
   if (pieces && cmd.wrap) {
     paintWrappedPieces(ctx, cmd, cmd.wrap, pieces);
   } else if (pieces) {

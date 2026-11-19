@@ -234,7 +234,7 @@ fn translate_command(
             rotation_valign: _,
             stacked,
             wrap,
-            runs: _,
+            runs: text_runs,
         } => {
             if *stacked {
                 return Err("stacked text is not translated".to_owned());
@@ -269,7 +269,9 @@ fn translate_command(
                     |literal, x| runs.push(prepare(x, *y, literal, Align::Left)),
                 );
                 runs.into_iter().collect::<Result<Vec<_>, _>>()?
-            } else if let Some(pieces) = xlsx_render::run_pieces(command) {
+            } else if !text_runs.is_empty()
+                && let Some(pieces) = xlsx_render::run_pieces(command)
+            {
                 match wrap {
                     Some(wrap) => prepare_wrapped_pieces(*x, *y, *align, wrap, text, &pieces)?,
                     None => prepare_pieces(*x, *y, *align, text, &pieces)?,

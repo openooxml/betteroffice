@@ -358,28 +358,38 @@ pub fn render_png_with_fonts_and_images(
                 rotation_valign,
                 stacked,
                 wrap,
-                runs: _,
+                runs,
             } => {
-                #[cfg(test)]
-                count(&RUN_PATHS);
-                if let Some(pieces) = xlsx_render::run_pieces(cmd) {
-                    let lines = match wrap {
-                        Some(wrap) => wrapped_lines(*y, wrap, text, &pieces, |piece, part| {
-                            #[cfg(test)]
-                            count(&PIECE_MEASURES);
-                            font::measure_text_with_fonts(
-                                piece_faces(fonts, piece),
-                                &fonts.stack,
-                                part,
-                                piece.font_size,
-                            )
-                        }),
-                        None => vec![(*y, pieces)],
-                    };
-                    for (y, pieces) in lines {
-                        paint_pieces(&mut pixmap, fonts, (*x, y), *align, clip, text, &pieces)?;
+                if !runs.is_empty() {
+                    #[cfg(test)]
+                    count(&RUN_PATHS);
+                    if let Some(pieces) = xlsx_render::run_pieces(cmd) {
+                        let lines = match wrap {
+                            Some(wrap) => wrapped_lines(*y, wrap, text, &pieces, |piece, part| {
+                                #[cfg(test)]
+                                count(&PIECE_MEASURES);
+                                font::measure_text_with_fonts(
+                                    piece_faces(fonts, piece),
+                                    &fonts.stack,
+                                    part,
+                                    piece.font_size,
+                                )
+                            }),
+                            None => vec![(*y, pieces)],
+                        };
+                        for (y, pieces) in lines {
+                            paint_pieces(
+                                &mut pixmap,
+                                fonts,
+                                (*x, y),
+                                *align,
+                                clip,
+                                text,
+                                &pieces,
+                            )?;
+                        }
+                        continue;
                     }
-                    continue;
                 }
                 let run = font::TextRun {
                     x: *x,
