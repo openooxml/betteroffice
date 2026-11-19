@@ -11,8 +11,10 @@ import { headerFooterAliasOf, markHeaderFooterAlias } from '../docx/headerFooter
 import { markRevisionInfo } from '../docx/sessionRevisionIds';
 import { headerFooterStory, sessionMaterializedSource, sessionSourcePackage } from './sessionInternals';
 import {
+  crossingFallback,
   crossStoryComments,
   holdsCommentMark,
+  noteWrittenWhole,
   type CommentMarkKind,
   type CrossingComment,
 } from './crossStoryComments';
@@ -3094,11 +3096,11 @@ const openedCrossings = new WeakMap<object, ReadonlyMap<number, CrossingComment>
 
 /**
  * The comments crossing stories in the document `session` was opened from, scanned once per
- * opened document; for a session seeded without one, in the first `base` it was projected with.
+ * opened document; for a session seeded without one, in `base`, scanned once per base document.
  */
 function openedCrossingComments(session: YrsSession, base: Document): ReadonlyMap<number, CrossingComment> {
   const opened = sessionMaterializedSource(session);
-  const key: object = opened ?? session;
+  const key: object = opened ?? base;
   let crossing = openedCrossings.get(key);
   if (!crossing) {
     crossing = crossStoryComments(session, opened ?? base);
@@ -3680,7 +3682,8 @@ class SaveContext {
     private readonly session: YrsSession,
     base: Document,
     commentIds?: ReadonlyMap<number, string>,
-    private readonly revisionIds?: RevisionIds
+    private readonly revisionIds?: RevisionIds,
+    private readonly fallback: ReadonlySet<number> = new Set()
   ) {
     this.storyIds = new Set(session.storyIds());
     this.baseStories = collectBaseStories(session, base);
@@ -3774,6 +3777,7 @@ class SaveContext {
       const source = this.crossingComments().get(id);
       whole =
         source !== undefined &&
+        !this.fallback.has(id) &&
         this.startLive(id, source) &&
         this.farStoryLive(source) &&
         this.referenceLive(id, source) &&
@@ -3782,6 +3786,16 @@ class SaveContext {
       this.whole.set(id, whole);
     }
     return whole;
+  }
+
+  /** The comments this projection writes across stories, each with the root story it starts in. */
+  writtenWhole(): Map<number, string> {
+    const written = new Map<number, string>();
+    for (const [id, whole] of this.whole) {
+      const source = this.crossing?.get(id);
+      if (whole && source) written.set(id, source.start.part);
+    }
+    return written;
   }
 
   /** The start is live: ranged by the session in its source story alone, or in a live drawing. */
@@ -4518,9 +4532,10 @@ function projectDocument(
   projectedMedia = (token) => session.mediaDataUrl?.(token) ?? null;
   let context: SaveContext | undefined;
   try {
-    context = new SaveContext(session, base, options.commentIds, revisionIds);
+    context = new SaveContext(session, base, options.commentIds, revisionIds, crossingFallback(session));
     const projected = projectStories(context, session, base, options);
     markGated(session, projected, scanned);
+    noteWrittenWhole(projected, context.writtenWhole());
     return projected;
   } finally {
     context?.dispose();

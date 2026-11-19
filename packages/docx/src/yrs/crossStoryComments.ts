@@ -18,7 +18,7 @@ export interface SourceCommentMark {
   order: number;
   /** Whether the mark lies in a drawing's own markup, as in a text box, rather than in a story. */
   carried: boolean;
-  /** Whether the mark sits directly in its paragraph: a range mark, or a reference in a run of it. */
+  /** Whether the mark sits directly in its paragraph: a range mark, or a reference first in a run of it. */
   direct: boolean;
   paragraph?: Paragraph;
   index?: number;
@@ -136,15 +136,17 @@ export function crossStoryComments(
         for (const [held, id] of marksIn(item)) add(held, id, { ...place, order: ++order, direct: false });
         return;
       }
-      for (const content of item.content) {
+      const contents = item.content;
+      contents.forEach((content, at) => {
         if (content.type === 'commentReference') {
-          if (content.id !== undefined) add('reference', content.id, { ...place, order: ++order });
+          const first = contents.slice(0, at).every((before) => before.type === 'commentReference');
+          if (content.id !== undefined) add('reference', content.id, { ...place, order: ++order, direct: first });
         } else if (CARRIERS.has(content.type)) {
           for (const [held, id] of marksIn(content)) {
             add(held, id, { ...place, order: ++order, carried: true, direct: false, carrier: content });
           }
         }
-      }
+      });
     });
   };
 
@@ -196,3 +198,35 @@ export function crossStoryComments(
   }
   return crossing;
 }
+
+const NO_FALLBACK: ReadonlySet<number> = new Set();
+const NONE_WHOLE: ReadonlyMap<number, string> = new Map();
+const fallbacks = new WeakMap<object, ReadonlySet<number>>();
+const writtenWhole = new WeakMap<object, ReadonlyMap<number, string>>();
+
+/**
+ * What `project` returns, its projections of `session` writing the comments `ids` as the session
+ * holds them, cut at the end of the paragraph they start in, rather than across stories. @internal
+ */
+export function withCrossingFallback<T>(session: object, ids: ReadonlySet<number>, project: () => T): T {
+  const previous = fallbacks.get(session);
+  fallbacks.set(session, ids);
+  try {
+    return project();
+  } finally {
+    if (previous) fallbacks.set(session, previous);
+    else fallbacks.delete(session);
+  }
+}
+
+/** The comments a projection of `session` writes as the session holds them. @internal */
+export const crossingFallback = (session: object): ReadonlySet<number> => fallbacks.get(session) ?? NO_FALLBACK;
+
+/** Records the comments the projection `document` wrote across stories, each with the root story it starts in. @internal */
+export function noteWrittenWhole(document: object, whole: ReadonlyMap<number, string>): void {
+  if (whole.size > 0) writtenWhole.set(document, whole);
+}
+
+/** The comments the projection `document` wrote across stories, each with the root story it starts in. @internal */
+export const crossingWrittenWhole = (document: object): ReadonlyMap<number, string> =>
+  writtenWhole.get(document) ?? NONE_WHOLE;
