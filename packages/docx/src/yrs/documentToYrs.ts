@@ -1458,7 +1458,6 @@ function paragraphUnits(
       if (assoc) {
         rawMarks.push({ unit: start, assoc, xml: content.xml });
       } else {
-        boundaries = undefined;
         units.push(embedUnit(RAW_INLINE_KIND, { xml: content.xml }));
       }
     } else if (content.type !== 'bookmarkStart' && content.type !== 'bookmarkEnd') {

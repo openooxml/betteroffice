@@ -4749,7 +4749,6 @@ fn paragraph_units(
                         xml: xml.to_owned(),
                     });
                 } else {
-                    boundaries = None;
                     seeded_raw = true;
                     let payload = JsonObject::from([("xml".to_owned(), json!(xml))]);
                     units.push(embed_unit(RAW_INLINE_KIND, payload, &[], 1));
