@@ -8410,6 +8410,11 @@ mod tests {
     }
 
     fn seed_body(blocks: &[Value]) -> EditingDoc {
+        lowered_body(blocks).0
+    }
+
+    /// The body seeded from `blocks`, with the sequences the seed keeps cached.
+    fn lowered_body(blocks: &[Value]) -> (EditingDoc, Vec<String>) {
         let mut context = LoweringContext {
             styles: StyleResolver::new(None),
             theme: None,
@@ -8454,7 +8459,7 @@ mod tests {
         document
             .apply_raw_story_batches(batches, &EditCtx::local(String::new(), String::new()))
             .unwrap();
-        document
+        (document, context.opaque_sequences)
     }
 
     fn measured_table_column_widths(table: &docx_layout::types::TableBlock) -> Vec<f64> {
@@ -9018,6 +9023,138 @@ mod tests {
         assert!(output.contains("Authored"));
         assert!(output.contains("After"));
         assert!(!output.contains("Cached"));
+    }
+
+    /// The cached result blocks each field of the body binds.
+    fn bound_result_blocks(document: &EditingDoc) -> Vec<Option<Any>> {
+        field_values(document, "fieldResultBlocks")
+    }
+
+    /// The value each field of the body holds under `key`.
+    fn field_values(document: &EditingDoc, key: &str) -> Vec<Option<Any>> {
+        document
+            .story_segments("body")
+            .unwrap()
+            .into_iter()
+            .filter_map(|segment| match segment.content {
+                crate::SegmentContent::OtherEmbed { kind, mut payload } if kind == "field" => {
+                    Some(payload.remove(key))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_spanning_field_records_the_blocks_it_spans_raw_blocks_aside() {
+        let document = seed_body(&[
+            json!({"type":"paragraph","paraId":"owner","content":[block_field("TOC", 3)]}),
+            json!({"type":"paragraph","paraId":"first","content":[run("Entry 2")]}),
+            json!({"type":"rawXml","xml":"<x:block/>"}),
+            json!({"type":"paragraph","paraId":"second","content":[run("Entry 3")]}),
+            json!({"type":"paragraph","paraId":"after","content":[run("After")]}),
+        ]);
+        let recorded = Any::Array(vec![Any::from("first"), Any::from("second")].into());
+        assert_eq!(field_values(&document, "fieldSpanBlocks"), vec![Some(recorded)]);
+        assert_eq!(bound_result_blocks(&document), vec![None]);
+    }
+
+    #[test]
+    fn counts_of_zero_or_past_the_story_bind_nothing() {
+        for count in [json!(0), json!(u64::MAX), json!(-1), json!(1e30)] {
+            for key in ["structuredCode", "structuredResult"] {
+                let mut field = block_field("0", 1);
+                field["structuredCode"] = json!({"inline": []});
+                field[key]["blockCount"] = count.clone();
+                let blocks = [
+                    json!({"type":"paragraph","content":[]}),
+                    json!({"type":"paragraph","content":[field]}),
+                    json!({"type":"paragraph","content":[run("Cached second")]}),
+                    json!({"type":"paragraph","content":[]}),
+                    json!({"type":"paragraph","content":[run("After")]}),
+                ];
+                let label = format!("{key} {count}");
+                let seeded = std::panic::catch_unwind(|| seed_body(&blocks));
+                assert!(seeded.is_ok(), "{label}");
+                let document = seeded.unwrap();
+                assert_eq!(bound_result_blocks(&document), [None], "{label}");
+                assert_eq!(rendered(&document).0, 5, "{label}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_numeric_field_holding_copies_of_its_cached_blocks_binds_them_as_a_count_does() {
+        let cached = json!({"type":"paragraph","paraId":"cached","content":[run("Cached second")]});
+        let end = json!({"type":"paragraph","paraId":"end","content":[]});
+        let mut older = block_field("0", 2);
+        let result = older["structuredResult"].as_object_mut().unwrap();
+        result.remove("blockCount");
+        result.insert("blocks".to_owned(), json!([cached.clone(), end.clone()]));
+        let seeded = |field: Value| {
+            seed_body(&[
+                json!({"type":"paragraph","paraId":"owner","content":[field]}),
+                cached.clone(),
+                end.clone(),
+                json!({"type":"paragraph","paraId":"after","content":[run("After")]}),
+            ])
+        };
+        let current = seeded(block_field("0", 2));
+        let older = seeded(older);
+        assert_eq!(bound_result_blocks(&older), bound_result_blocks(&current));
+        assert_eq!(rendered(&older).0, 2);
+    }
+
+    #[test]
+    fn a_field_holding_copies_of_its_code_and_result_blocks_binds_its_code_marks() {
+        let blocks = [
+            json!({"type":"paragraph","paraId":"owner","content":[]}),
+            json!({"type":"paragraph","paraId":"code","content":[run("Code")]}),
+            json!({"type":"paragraph","paraId":"result","content":[run("Result")]}),
+        ];
+        let data = json!({
+            "type":"complexField", "fieldType":"IF", "instruction":"IF 1 = 1",
+            "fieldCode":[], "fieldResult":[],
+            "structuredCode":{"inline":[], "blocks":[blocks[1].clone()]},
+            "structuredResult":{"inline":[], "blocks":[blocks[2].clone()]}
+        });
+        let data = Value::String(data.to_string());
+        let payload = JsonObject::from([("fieldData".to_owned(), data)]);
+        let mut units = [embed_unit("field", payload, &[], 1)];
+        bind_field_code_blocks(&mut units, "body", &blocks, 0, BlockCursor::default());
+        let UnitContent::Embed { payload, .. } = &units[0].content else {
+            panic!("the field is an embed");
+        };
+        assert_eq!(payload.get("fieldCodeMarks"), Some(&json!(["code"])));
+        assert_eq!(payload.get("fieldCodeTarget"), Some(&json!("result")));
+    }
+
+    #[test]
+    fn a_sequence_in_a_hidden_cached_paragraph_keeps_the_caption_after_it_cached() {
+        let sequence = |cached: &str| {
+            let mut field = json!({"type":"simpleField","fieldType":"SEQ"});
+            field["instruction"] = json!("SEQ Figure");
+            field["content"] = json!([run(cached)]);
+            field
+        };
+        let (document, names) = lowered_body(&[
+            json!({"type":"paragraph","content":[block_field("0", 2)]}),
+            json!({"type":"paragraph","content":[sequence("1")]}),
+            json!({"type":"paragraph","content":[]}),
+            json!({"type":"paragraph","content":[sequence("2")]}),
+        ]);
+        seed_opaque_sequences(&document, &names, None);
+        let (_, output) = rendered(&document);
+        let blocks: Value = serde_json::from_str(&output).unwrap();
+        let captions: Vec<_> = blocks
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|block| block["runs"].as_array().cloned().unwrap_or_default())
+            .filter(|run| run["instruction"] == "SEQ Figure")
+            .map(|run| run["fallback"].clone())
+            .collect();
+        assert_eq!(captions, [json!("2")]);
     }
 
     #[test]

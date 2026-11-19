@@ -102,6 +102,33 @@ fn interrupted_xml() -> String {
     .concat()
 }
 
+/// One field opened in the first paragraph with its code continuing into the second, a
+/// body-level bookmark, then its separator and result in the fourth block and its end in the
+/// fifth.
+fn code_before_bookmark_xml() -> String {
+    [
+        format!(
+            "<w:p>{}{}{}</w:p>",
+            text_run(&opener_text(1)),
+            run_xml(r#"<w:fldChar w:fldCharType="begin"/>"#),
+            run_xml(r#"<w:instrText xml:space="preserve"> QUOTE </w:instrText>"#)
+        ),
+        format!(
+            "<w:p>{}</w:p>",
+            run_xml(r#"<w:instrText xml:space="preserve">"L1" </w:instrText>"#)
+        ),
+        BODY_BOOKMARK_START.to_owned(),
+        format!(
+            "<w:p>{}{}</w:p>",
+            run_xml(r#"<w:fldChar w:fldCharType="separate"/>"#),
+            text_run(&result_text(1))
+        ),
+        format!("<w:p>{}{}</w:p>", field_end(), text_run(CLOSER)),
+        BODY_BOOKMARK_END.to_owned(),
+    ]
+    .concat()
+}
+
 fn stair(depth: usize) -> Vec<u8> {
     package(&stair_xml(depth))
 }
@@ -262,6 +289,21 @@ fn field_char_counts(xml: &str) -> [usize; 3] {
     })
 }
 
+/// The begin, separate and end marks in each paragraph of `xml`, in order.
+fn paragraph_field_chars(xml: &str) -> Vec<[usize; 3]> {
+    let mut paragraphs: Vec<_> = xml.split("</w:p>").collect();
+    paragraphs.pop();
+    paragraphs.into_iter().map(field_char_counts).collect()
+}
+
+/// A rewritten stair writes each field whole in its opening paragraph; the plain and closing
+/// paragraphs hold no marks.
+fn rewritten_field_chars(depth: usize) -> Vec<[usize; 3]> {
+    let mut marks = vec![[1; 3]; depth];
+    marks.resize(depth + PLAIN + 1, [0; 3]);
+    marks
+}
+
 /// The text inside each `tag` element of `xml`, in order.
 fn tagged_texts(xml: &str, tag: &str) -> Vec<String> {
     let open = format!("<{tag}");
@@ -389,12 +431,27 @@ fn a_field_open_across_a_body_bookmark_and_foreign_markup_counts_their_indexes()
         [plain_text(0), CLOSER.to_owned()]
     );
     let result = &field["structuredResult"];
-    if let Some(count) = result["blockCount"].as_u64() {
-        assert_eq!(count, 4);
-        assert!(result["blocks"].is_null());
-    }
+    assert_eq!(result["blockCount"], 4);
+    assert!(result["blocks"].is_null());
     assert!(field["structuredCode"]["blockCount"].is_null());
     assert!(field["structuredCode"]["blocks"].is_null());
+}
+
+#[test]
+fn a_body_bookmark_before_an_external_separator_counts_with_the_code() {
+    let body = body_values(&package(&code_before_bookmark_xml()));
+    let kinds: Vec<_> = body
+        .iter()
+        .map(|block| block["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        kinds.join(" "),
+        "paragraph paragraph rawXml paragraph paragraph rawXml"
+    );
+    let fields = top_level_fields(&body[0]);
+    assert_eq!(fields.len(), 1);
+    assert_eq!(fields[0]["structuredCode"]["blockCount"], 2);
+    assert_eq!(fields[0]["structuredResult"]["blockCount"], 2);
 }
 
 #[test]
@@ -417,6 +474,7 @@ fn save_each_field_and_paragraph_once() {
         let saved = save(&bytes, body_values(&bytes));
         let xml = document_xml(&saved);
         assert_eq!(field_char_counts(&xml), [depth; 3]);
+        assert_eq!(paragraph_field_chars(&xml), rewritten_field_chars(depth));
         let instructions: Vec<_> = tagged_texts(&xml, "w:instrText")
             .iter()
             .map(|text| text.trim().replace("&quot;", "\""))
@@ -436,5 +494,9 @@ fn saving_fields_open_across_paragraphs_at_the_nesting_limit_needs_no_large_stac
     let saved = save(&bytes, serde_json::from_slice(&body).unwrap());
     let xml = document_xml(&saved);
     assert_eq!(field_char_counts(&xml), [NESTING_LIMIT; 3]);
+    assert_eq!(
+        paragraph_field_chars(&xml),
+        rewritten_field_chars(NESTING_LIMIT)
+    );
     assert_eq!(tagged_texts(&xml, "w:t"), expected_run_texts(NESTING_LIMIT));
 }

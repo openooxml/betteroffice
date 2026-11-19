@@ -3,13 +3,15 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import { parseDocx } from '../docx';
+import { repackDocx } from '../docx/rezip';
 import { rezipPartsToArrayBuffer, toBytes } from '../docx/rezip/parts';
 import { unzipContainer } from '../docx/wasm';
 import type { LayoutBlock, Run as LayoutRun, ShapeBlock } from '../layout/pagination/types';
-import type { ComplexField, Document, ParagraphContent, Run, SimpleField } from '../types/document';
+import type { BlockContent, ComplexField, Document, ParagraphContent, Run, SimpleField } from '../types/document';
 import { preloadEditWasm } from '../wasm/edit';
 import { createYrsSession, saveYrsDocx, type YrsSession } from './index';
 import { documentToYrs } from './documentToYrs';
+import { yrsToDocument } from './yrsToDocument';
 
 const WASM = resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm');
 const FIXTURE = resolve(import.meta.dir, '../../../../apps/demo/public/betteroffice-demo.docx');
@@ -936,6 +938,307 @@ describe('DOCX engine seeding', () => {
     }
   });
 
+});
+
+describe('fields spanning paragraphs', () => {
+  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
+
+  const text = (value: string): Run => ({ type: 'run', content: [{ type: 'text', text: value }] });
+  const paragraph = (paraId: string, content: unknown[] = []): BlockContent =>
+    ({ type: 'paragraph', paraId, content }) as unknown as BlockContent;
+  const body = (content: BlockContent[]): Document => ({ package: { document: { content } } }) as unknown as Document;
+  const numeric = (result: Record<string, unknown>): ComplexField => ({
+    type: 'complexField',
+    fieldType: 'UNKNOWN',
+    instruction: '0',
+    fieldCode: [],
+    fieldResult: [text('Cached first')],
+    structuredResult: { inline: [text('Cached first')], ...result },
+  }) as unknown as ComplexField;
+  const conditional = (code: Record<string, unknown>, result: Record<string, unknown>): ComplexField => ({
+    type: 'complexField',
+    fieldType: 'IF',
+    instruction: 'IF 1 = 1',
+    fieldCode: [],
+    fieldResult: [],
+    structuredCode: { inline: [], ...code },
+    structuredResult: { inline: [], ...result },
+  }) as unknown as ComplexField;
+  const fieldPayloads = (session: YrsSession): Record<string, unknown>[] =>
+    session.storySegments('body').flatMap((segment) =>
+      segment.kind === 'embed' && segment.embedKind === 'field' ? [segment.payload] : []
+    );
+  const paragraphIds = (session: YrsSession): string[] =>
+    session.storySegments('body').flatMap((segment) => (segment.kind === 'pilcrow' ? [segment.paraId] : []));
+  const seeded = async <T>(document: Document, read: (session: YrsSession) => T): Promise<T> => {
+    const session = await createYrsSession({ clientId: 47101 });
+    try {
+      documentToYrs(session, document);
+      return read(session);
+    } finally {
+      session.destroy();
+    }
+  };
+  const resultBlocks = (document: Document) => seeded(document, (session) => fieldPayloads(session)[0]?.fieldResultBlocks);
+  const codeMarks = (document: Document) => seeded(document, (session) => {
+    const payload = fieldPayloads(session)[0];
+    return [payload?.fieldCodeMarks, payload?.fieldCodeTarget];
+  });
+
+  const contents = (count: number): ComplexField => ({
+    type: 'complexField',
+    fieldType: 'TOC',
+    instruction: 'TOC \\o "1-3"',
+    fieldCode: [],
+    fieldResult: [text('Entry 1')],
+    structuredResult: { inline: [text('Entry 1')], blockCount: count },
+  }) as unknown as ComplexField;
+  const contentsBody = (): Document => body([
+    paragraph('0000000A', [contents(3)]),
+    paragraph('0000000B', [text('Entry 2')]),
+    paragraph('0000000C', [text('Entry 3')]),
+    paragraph('0000000D'),
+    paragraph('0000000E', [text('After')]),
+  ]);
+  const bindings = (session: YrsSession): Record<string, unknown> => {
+    const payload = fieldPayloads(session)[0];
+    return Object.fromEntries(
+      ['fieldSpanBlocks', 'fieldResultBlocks', 'fieldCodeMarks', 'fieldCodeTarget'].map((key) => [key, payload?.[key]])
+    );
+  };
+  const projectedField = (document: Document): ComplexField => {
+    const owner = document.package.document.content[0] as { content: ParagraphContent[] };
+    return owner.content.find((content) => content.type === 'complexField') as ComplexField;
+  };
+  const edited = async (document: Document, edit: (session: YrsSession) => void) => {
+    const session = await createYrsSession({ clientId: 47102 });
+    try {
+      documentToYrs(session, document);
+      const before = bindings(session);
+      edit(session);
+      const projected = yrsToDocument(session, document);
+      return { before, field: projectedField(projected), reloaded: await seeded(projected, bindings) };
+    } finally {
+      session.destroy();
+    }
+  };
+  const deleteSelection = (session: YrsSession, paraId: string, nextParaId: string): void => {
+    session.deleteRange({
+      story: 'body',
+      start: { paraId, offset: 0 },
+      end: { paraId: nextParaId, offset: 0 },
+    });
+  };
+  const paragraphEnd = (session: YrsSession, paraId: string) => {
+    const span = session.locateParagraph('body', paraId);
+    return { paraId, offset: span.end - span.start };
+  };
+  const deleteParagraph = (session: YrsSession, previousParaId: string, paraId: string): void => {
+    session.deleteRange({
+      story: 'body',
+      start: paragraphEnd(session, previousParaId),
+      end: paragraphEnd(session, paraId),
+    });
+  };
+  const contentsPackage = (): Uint8Array<ArrayBuffer> => sequencePackage([
+    '<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r>',
+    '<w:r><w:instrText xml:space="preserve"> TOC \\o "1-3" </w:instrText></w:r>',
+    '<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>Entry 1</w:t></w:r></w:p>',
+    '<w:p><w:r><w:t>Entry 2</w:t></w:r></w:p>',
+    '<w:p><w:r><w:t>Entry 3</w:t></w:r></w:p>',
+    '<w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>',
+    '<w:p><w:r><w:t>After</w:t></w:r></w:p>',
+  ].join(''));
+  const projectAndSave = async (document: Document, edit?: (session: YrsSession) => void) => {
+    const session = await createYrsSession({ clientId: 47103 });
+    try {
+      documentToYrs(session, document);
+      edit?.(session);
+      const projected = yrsToDocument(session, document);
+      const saved = await repackDocx(projected, { updateModifiedDate: false });
+      return { projected, saved: unzipContainer(new Uint8Array(saved)) };
+    } finally {
+      session.destroy();
+    }
+  };
+
+  it('projects an untouched span with its parsed count and reloads it with the same bindings', async () => {
+    const { before, field, reloaded } = await edited(contentsBody(), (session) =>
+      session.insertText({ story: 'body', paraId: '0000000E', offset: 0 }, 'Edited ')
+    );
+    expect(before.fieldSpanBlocks).toEqual(['0000000B', '0000000C', '0000000D']);
+    expect(field.structuredResult?.blockCount).toBe(3);
+    expect(reloaded).toEqual(before);
+  });
+
+  it('projects the leading blocks of a span that still follow the field after a paragraph is added in it', async () => {
+    const { field, reloaded } = await edited(contentsBody(), (session) => {
+      session.splitParagraph({ story: 'body', paraId: '0000000B', offset: 'Entry 2'.length });
+    });
+    expect(field.structuredResult?.blockCount).toBe(1);
+    expect(reloaded.fieldSpanBlocks).toEqual(['0000000B']);
+  });
+
+  it('projects a zero count when a paragraph is added right after the field paragraph', async () => {
+    const { field, reloaded } = await edited(contentsBody(), (session) => {
+      const owner = session.locateParagraph('body', '0000000A');
+      session.splitParagraph({ story: 'body', paraId: '0000000A', offset: owner.end - owner.start });
+    });
+    expect(field.structuredResult?.blockCount).toBe(0);
+    expect(field.structuredResult?.inline).toEqual([text('Entry 1')]);
+    expect(reloaded.fieldSpanBlocks).toBeUndefined();
+  });
+
+  it('projects a zero count and binds nothing on reload when the first spanned paragraph is deleted', async () => {
+    const { field, reloaded } = await edited(contentsBody(), (session) =>
+      deleteParagraph(session, '0000000A', '0000000B')
+    );
+    expect(field.structuredResult?.blockCount).toBe(0);
+    expect(field.structuredResult?.blocks).toBeUndefined();
+    expect(reloaded).toEqual({
+      fieldSpanBlocks: undefined,
+      fieldResultBlocks: undefined,
+      fieldCodeMarks: undefined,
+      fieldCodeTarget: undefined,
+    });
+  });
+
+  it('projects the blocks before a paragraph deleted from a span', async () => {
+    const document = body([
+      paragraph('0000000A', [numeric({ blockCount: 3 })]),
+      paragraph('0000000B', [text('Cached second')]),
+      paragraph('0000000C', [text('Cached third')]),
+      paragraph('0000000D'),
+      paragraph('0000000E', [text('After')]),
+    ]);
+    const { before, field, reloaded } = await edited(document, (session) => {
+      deleteParagraph(session, '0000000B', '0000000C');
+      expect(paragraphIds(session)).toEqual(['0000000A', '0000000B', '0000000D', '0000000E']);
+    });
+    expect(before.fieldResultBlocks).toEqual(['0000000B', '0000000C', '0000000D']);
+    expect(field.structuredResult?.blockCount).toBe(1);
+    expect(reloaded.fieldSpanBlocks).toEqual(['0000000B']);
+    expect(reloaded.fieldResultBlocks).toBeUndefined();
+  });
+
+  it('projects the cached blocks before an authored paragraph a split adds', async () => {
+    const document = body([
+      paragraph('0000000A', [numeric({ blockCount: 2 })]),
+      paragraph('0000000B', [text('Cached second')]),
+      paragraph('0000000C'),
+      paragraph('0000000D', [text('After')]),
+    ]);
+    const { field, reloaded } = await edited(document, (session) => {
+      const { secondParaId } = session.splitParagraph({ story: 'body', paraId: '0000000B', offset: 'Cached second'.length });
+      session.insertText({ story: 'body', paraId: secondParaId, offset: 0 }, 'Authored');
+    });
+    expect(field.structuredResult?.blockCount).toBe(1);
+    expect(field.structuredResult?.blocks).toBeUndefined();
+    expect(reloaded.fieldResultBlocks).toBeUndefined();
+  });
+
+  it('projects a zero count again after a reload and saves the same bytes', async () => {
+    const parsed = await parseDocx(contentsPackage().buffer, { preloadFonts: false });
+    expect(projectedField(parsed).structuredResult?.blockCount).toBe(3);
+    const first = await projectAndSave(parsed, (session) => {
+      const [owner, removed] = paragraphIds(session);
+      deleteParagraph(session, owner!, removed!);
+    });
+    const second = await projectAndSave(first.projected);
+    expect(projectedField(first.projected).structuredResult?.blockCount).toBe(0);
+    expect(projectedField(second.projected).structuredResult?.blockCount).toBe(0);
+    expect(Object.keys(second.saved).sort()).toEqual(Object.keys(first.saved).sort());
+    for (const [name, part] of Object.entries(first.saved)) {
+      expect({ name, same: Buffer.from(second.saved[name]!).equals(Buffer.from(part)) }).toEqual({ name, same: true });
+    }
+  });
+
+  it('projects two blocks for a contents field over B, C, D after a selection delete from the start of C to the start of D and saves each mark and paragraph once', async () => {
+    const parsed = await parseDocx(contentsPackage().buffer, { preloadFonts: false });
+    let ids: string[] = [];
+    let after: string[] = [];
+    const { projected, saved } = await projectAndSave(parsed, (session) => {
+      ids = paragraphIds(session);
+      deleteSelection(session, ids[2]!, ids[3]!);
+      after = paragraphIds(session);
+    });
+    expect(after).toEqual([ids[0], ids[1], ids[2], ids[4]]);
+    expect(projectedField(projected).structuredResult?.blockCount).toBe(2);
+    const xml = new TextDecoder().decode(saved['word/document.xml']);
+    expect([...xml.matchAll(/w:fldCharType="(\w+)"/g)].map((match) => match[1])).toEqual(['begin', 'separate', 'end']);
+    const texts = [...xml.matchAll(/<w:p\b(?:[^>]*\/>|[^>]*>[\s\S]*?<\/w:p>)/g)]
+      .map(([paragraph]) => [...paragraph.matchAll(/<w:t\b[^>]*>([^<]*)<\/w:t>/g)].map((match) => match[1]).join(''))
+      .filter((value) => value !== '');
+    expect(texts).toEqual([...new Set(texts)]);
+  });
+
+  it.each(['field', 'paragraph'])('drops the recorded span blocks with the %s that holds them', async (removed) => {
+    const spans = await seeded(contentsBody(), (session) => {
+      const before = fieldPayloads(session).map((payload) => payload.fieldSpanBlocks);
+      if (removed === 'field') {
+        const owner = session.locateParagraph('body', '0000000A');
+        session.deleteRange({
+          story: 'body',
+          start: { paraId: '0000000A', offset: 0 },
+          end: { paraId: '0000000A', offset: owner.end - owner.start },
+        });
+      } else deleteSelection(session, '0000000A', '0000000B');
+      const after = fieldPayloads(session).filter((payload) => 'fieldSpanBlocks' in payload);
+      return { before, after };
+    });
+    expect(spans).toEqual({ before: [['0000000B', '0000000C', '0000000D']], after: [] });
+  });
+
+  it.each([0,-1, 1.5, 1e30, 2 ** 64])('binds nothing for a count of %p', async (count) => {
+    for (const key of ['structuredCode', 'structuredResult'] as const) {
+      const field = { ...numeric({ blockCount: 1 }), structuredCode: { inline: [] } } as ComplexField;
+      field[key] = { ...field[key], blockCount: count };
+      const document = body([
+        paragraph('0000000A'),
+        paragraph('0000000B', [field]),
+        paragraph('0000000C', [text('Cached second')]),
+        paragraph('0000000D'),
+        paragraph('0000000E', [text('After')]),
+      ]);
+      expect({ key, bound: [await resultBlocks(document), ...(await codeMarks(document))] })
+        .toEqual({ key, bound: [undefined, undefined, undefined] });
+    }
+  });
+
+  it('binds a field holding copies of its later blocks as one counting them', async () => {
+    const cached = paragraph('0000000B', [text('Cached second')]);
+    const end = paragraph('0000000C');
+    const after = paragraph('0000000D', [text('After')]);
+    const results = (field: ComplexField) => resultBlocks(body([paragraph('0000000A', [field]), cached, end, after]));
+    expect(await results(numeric({ blockCount: 2 }))).toEqual(['0000000B', '0000000C']);
+    expect(await results(numeric({ blocks: [cached, end] }))).toEqual(['0000000B', '0000000C']);
+    const code = paragraph('0000000E', [text('Code')]);
+    const result = paragraph('0000000F', [text('Result')]);
+    const marks = (field: ComplexField) => codeMarks(body([paragraph('0000000A', [field]), code, result]));
+    expect(await marks(conditional({ blockCount: 1 }, { blockCount: 1 }))).toEqual([['0000000E'], '0000000F']);
+    expect(await marks(conditional({ blocks: [code] }, { blocks: [result] }))).toEqual([['0000000E'], '0000000F']);
+  });
+
+  it('keeps the caption after a hidden cached sequence at its cached number', async () => {
+    const sequence = (cached: string): SimpleField => ({
+      type: 'simpleField',
+      fieldType: 'SEQ',
+      instruction: 'SEQ Figure',
+      content: [text(cached)],
+    });
+    const document = body([
+      paragraph('0000000A', [numeric({ blockCount: 2 })]),
+      paragraph('0000000B', [sequence('1')]),
+      paragraph('0000000C'),
+      paragraph('0000000D', [sequence('2')]),
+    ]);
+    const captions = await seeded(document, (session) =>
+      sequenceRuns(session.yrsBlocksForStory('body', {}) as LayoutBlock[]).flatMap((run) =>
+        run.kind === 'field' && run.instruction === 'SEQ Figure' ? [run.fallback] : []
+      )
+    );
+    expect(captions).toEqual(['2']);
+  });
 });
 
 describe('spanning field gates', () => {

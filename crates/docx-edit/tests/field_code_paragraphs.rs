@@ -671,6 +671,55 @@ fn a_click_in_either_part_of_a_joined_header_line_edits_that_part() {
 }
 
 #[test]
+fn a_field_added_to_a_hidden_code_paragraph_cancels_the_join() {
+    let engine = seeded(&fixture("header-field-code-paragraphs"));
+    let ids = field_paragraph_ids(&engine);
+    let hidden = 1;
+    let at = engine
+        .doc()
+        .paragraph_mark_position(&ids[hidden])
+        .unwrap()
+        .index;
+    let data = json!({
+        "type": "simpleField", "fieldType": "PAGE", "instruction": "PAGE",
+        "content": [{"type": "run", "content": [{"type": "text", "text": "9"}]}]
+    });
+    let payload = [
+        ("fieldType", "PAGE"),
+        ("instruction", "PAGE"),
+        ("displayText", "9"),
+        ("fieldKind", "simple"),
+        ("modelKind", "field"),
+    ]
+    .into_iter()
+    .map(|(key, value)| (key.to_owned(), Any::from(value)))
+    .chain([("fieldData".to_owned(), Any::from(data.to_string()))])
+    .collect();
+    engine
+        .doc()
+        .apply_raw_ops(
+            HEADER,
+            vec![RawOp::InsertEmbed {
+                index: at,
+                kind: "field".to_owned(),
+                payload,
+                attrs: yrs::types::Attrs::new(),
+            }],
+            &EditCtx::local("", ""),
+        )
+        .unwrap();
+    let blocks = lower(&engine, &RenderEnv::default());
+    let block = blocks
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|block| block["id"] == ids[hidden]);
+    let runs = block.and_then(|block| block["runs"].as_array());
+    let pasted = runs.is_some_and(|runs| runs.iter().any(|run| run["instruction"] == "PAGE"));
+    assert!(pasted);
+}
+
+#[test]
 fn spanning_field_gates_ask_the_shared_predicate() {
     let seed = include_str!("../src/seed.rs");
     let plan = include_str!("../src/paragraph_patch_plan.rs");

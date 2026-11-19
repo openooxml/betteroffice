@@ -494,21 +494,35 @@ mod tests {
             let doc = engine.doc();
             seed_from_docx(doc, &bytes).unwrap();
             let segments = doc.story_segments(story_id).unwrap();
-            assert!(segments.iter().any(|segment| {
-                matches!(&segment.content, crate::SegmentContent::OtherEmbed { payload, .. }
-                if payload.get("fieldData").is_some_and(|data| {
-                    matches!(data, yrs::Any::String(data)
-                        if data.contains("\"blockCount\"") && !data.contains("Entry 2"))
-                }))
-            }));
-            let text: String = segments
+            let mut paragraphs: Vec<(String, Vec<String>)> = vec![Default::default()];
+            for segment in &segments {
+                let (text, fields) = paragraphs.last_mut().unwrap();
+                match &segment.content {
+                    crate::SegmentContent::Text(more) => text.push_str(more),
+                    crate::SegmentContent::OtherEmbed { payload, .. } => {
+                        if let Some(yrs::Any::String(data)) = payload.get("fieldData") {
+                            fields.push(data.to_string());
+                        }
+                    }
+                    crate::SegmentContent::Pilcrow(_) => paragraphs.push(Default::default()),
+                }
+            }
+            let (owner, count) = paragraphs
                 .iter()
-                .filter_map(|segment| match &segment.content {
-                    crate::SegmentContent::Text(text) => Some(text.as_str()),
-                    _ => None,
+                .enumerate()
+                .find_map(|(index, (_, fields))| {
+                    fields.iter().find_map(|data| {
+                        let parsed: serde_json::Value = serde_json::from_str(data).unwrap();
+                        let count = parsed["structuredResult"]["blockCount"].as_u64()?;
+                        assert!(!data.contains("Entry 2"));
+                        Some((index, usize::try_from(count).unwrap()))
+                    })
                 })
-                .collect();
-            assert!(text.contains("Entry 2") && text.contains("Entry 3"));
+                .unwrap();
+            assert_eq!(count, 2);
+            for (index, (text, _)) in paragraphs[owner..=owner + count].iter().enumerate() {
+                assert!(text.contains(&format!("Entry {}", index + 1)), "{text}");
+            }
             let txn = doc.yrs_doc().transact();
             let story = crate::story_ref(&txn, story_id).unwrap();
             let chunks = story.diff(&txn, YChange::identity);

@@ -1632,11 +1632,13 @@ mod tests {
     fn a_field_whose_result_spans_paragraphs_writes_its_result_runs() {
         let copy = run_value(json!({"type": "text", "text": "InlineCopy"}));
         let written = run_value(json!({"type": "text", "text": "RunResult"}));
-        let result = json!({"inline": [copy], "blockCount": 1});
-        let field = spanning_field(Value::Null, result, json!([written]));
-        let output = serialize_complex_field(&field, &mut context()).unwrap();
-        assert!(output.contains("RunResult"), "{output}");
-        assert!(!output.contains("InlineCopy"), "{output}");
+        for count in [0, 1] {
+            let result = json!({"inline": [copy.clone()], "blockCount": count});
+            let field = spanning_field(Value::Null, result, json!([written.clone()]));
+            let output = serialize_complex_field(&field, &mut context()).unwrap();
+            assert!(output.contains("RunResult"), "{count}: {output}");
+            assert!(!output.contains("InlineCopy"), "{count}: {output}");
+        }
     }
 
     #[test]
