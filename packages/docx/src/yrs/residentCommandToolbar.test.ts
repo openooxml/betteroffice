@@ -12,9 +12,9 @@ test('worker_selection_formatting_and_list_commands_cover_multiple_paragraphs', 
   expect(execute(arm, command(arm, 'formatSelection', { delta: { highlight: 'yellow', strike: true, fontSize: 14 } }))).toMatchObject({ status: 'applied', editState: { toolbar: { strike: true, highlight: 'yellow' } } });
   expect(execute(arm, command(arm, 'toggleList', { kind: 'bullet' }))).toMatchObject({ status: 'applied' });
   expect(arm.engine.paragraphs('body').map(p => p.properties.numPr)).toEqual([{ numId: 1, ilvl: 0 }, { numId: 1, ilvl: 0 }]);
-  const [key, second] = arm.engine.paragraphs('body').map(p => createdListKey(p.properties));
+  const [key, secondKey] = arm.engine.paragraphs('body').map(p => createdListKey(p.properties));
   expect(key).toBeDefined();
-  expect(second).toBe(key);
+  expect(secondKey).toBe(key);
   expect(execute(arm, command(arm, 'changeIndent', { direction: 'increase' }))).toMatchObject({ status: 'applied' });
   expect(arm.engine.paragraphs('body').map(p => p.properties.numPr)).toEqual([{ numId: 1, ilvl: 1 }, { numId: 1, ilvl: 1 }]);
   expect(arm.engine.paragraphs('body').map(p => createdListKey(p.properties))).toEqual([key, key]);

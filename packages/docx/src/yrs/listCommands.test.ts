@@ -1,6 +1,7 @@
 import { afterEach, beforeAll, expect, test } from 'bun:test';
 import type { YrsParagraphAttrs } from './index';
 import { LIST_OFF_ATTRS } from './listCommands';
+import { createdListKey } from './listDefinitionSave';
 import {
   LIST_LAYOUT, PLAIN, listCommandScenarios, listDocument, preloadListWasm, shownMarker,
   type ListCommandDriver, type ListDocument, type ListDocumentOptions,
@@ -61,6 +62,20 @@ test('worker: a paragraph-attribute command carrying the created list a paragrap
     selection: selection(paragraph!.paraId, 0), attrs: { numPr: null, listDef: null } as YrsParagraphAttrs,
   }))).toMatchObject({ status: 'applied' });
   expect(arm.engine.paragraphs('body').find(entry => entry.text === PLAIN)?.properties.listDef ?? null).toBeNull();
+}, TIMEOUT);
+
+test('worker: a list paragraph the toolbar made keeps its created list when it takes a paragraph style without numbering', async () => {
+  const arm = await openCommandEngine(undefined, { bytes: listDocument('C'), clientId: ++clientId });
+  const plain = () => arm.engine.paragraphs('body').find(entry => entry.text === PLAIN)!;
+  const at = selection(plain().paraId, 0);
+  expect(execute(arm, command(arm, 'toggleList', { selection: at, kind: 'bullet' }))).toMatchObject({ status: 'applied' });
+  const key = createdListKey(plain().properties);
+  expect(key).toBeDefined();
+  expect(execute(arm, command(arm, 'applyParagraphStyle', { selection: at, styleId: 'Heading1' }))).toMatchObject({ status: 'applied' });
+  const styled = plain().properties;
+  expect(styled.pStyle).toBe('Heading1');
+  expect(styled.numPr).toMatchObject({ numId: 1, ilvl: 0 });
+  expect(createdListKey(styled)).toBe(key);
 }, TIMEOUT);
 
 test('the attributes that take a paragraph off its list are frozen and clear its marker formatting', () => {
