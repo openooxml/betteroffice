@@ -219,8 +219,10 @@ function scopedList(list: DisplayList, root: string, pageIndex?: number): Displa
   };
 }
 
-function queriesFor(reads: SelectionReads, engine: DocxWorkerCommandEngine, frame: RetainedFrame, root = 'body'): DisplayListQueries {
-  if (root === 'body') return residentDisplayListQueries(engine, frame.displayList);
+function queriesFor(
+  reads: SelectionReads, engine: DocxWorkerCommandEngine | null, frame: RetainedFrame, root = 'body'
+): DisplayListQueries {
+  if (root === 'body' && engine) return residentDisplayListQueries(engine, frame.displayList);
   if (reads.frame !== frame || reads.frameEpoch !== frame.frameEpoch) {
     for (const queries of reads.queries.values()) queries.dispose();
     reads.queries.clear();
@@ -401,7 +403,7 @@ export function resolveDocxSelectionIntent(
       const layout = input.readLayout();
       const origin = navigation.unit === 'page' ? cellSelectionHeadPosition(engine, focus) ?? focus : focus;
       const root = rootFor(reads, engine, origin);
-      const queries = queriesFor(reads, engine, layout.frame, root);
+      const queries = queriesFor(reads, null, layout.frame, root);
       const position = indexFor(reads, engine, root).positionOf(origin, root);
       if (position !== null && queries.isReady()) {
         if (navigation.direction === 'up' || navigation.direction === 'down') {
