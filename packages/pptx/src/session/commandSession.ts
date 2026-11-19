@@ -55,6 +55,11 @@ export class PptxWorkerUnsupportedError extends Error {
   }
 }
 
+/** The engine URL against this page: Turbopack asset hrefs are bare paths. @internal */
+export function engineFetchUrl(href: string): URL {
+  return new URL(href, globalThis.location?.href);
+}
+
 /** @internal */
 export function createPptxWorkerSession(
   bytes: Uint8Array | ArrayBuffer, options: PptxWorkerSessionOptions = {},
@@ -67,7 +72,7 @@ export function createPptxWorkerSession(
     preparedWorker ?? createSessionWorker());
   let stopEngineFetch = () => {};
   if (cacheUrl && !wasm && preparedWorker) requestWasmCompile(transport);
-  else if (cacheUrl && !wasm) stopEngineFetch = supplyWasmFetch(transport, new URL(cacheUrl));
+  else if (cacheUrl && !wasm) stopEngineFetch = supplyWasmFetch(transport, engineFetchUrl(cacheUrl));
   const fontCdn = getFontCdnConfiguration();
   const input = {
     ...(fontCdn ? { fontCdn } : {}),
