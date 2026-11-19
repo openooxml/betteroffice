@@ -252,6 +252,7 @@ interface OriginalRunBoundary {
   marksKey?: string;
   formatting?: TextFormatting;
   propertyChanges?: Run['propertyChanges'];
+  inline?: boolean;
 }
 
 interface LiveParagraphBreaks {
@@ -1690,7 +1691,7 @@ function sourceBreakBoundaries(paragraph: Paragraph | undefined): OriginalRunBou
       ) continue;
       const span = inlineSpanText(child);
       if (span === null) return [];
-      boundaries.push({ text: span });
+      boundaries.push({ text: span, inline: true });
       continue;
     }
     let text = '';
@@ -1707,7 +1708,6 @@ function sourceBreakBoundaries(paragraph: Paragraph | undefined): OriginalRunBou
   return boundaries;
 }
 
-/** The text a non-run child of a paragraph takes in the live story, or null when it cannot be told from the source. */
 function inlineSpanText(child: ParagraphContent): string | null {
   switch (child.type) {
     case 'simpleField':
@@ -1815,25 +1815,18 @@ function restoreRecordedBreaks(
   const live = items
     .map((item) => (item.kind === 'text' ? item.text : isBlockBreak(item) ? '' : '\uFFFC'))
     .join('');
-  let prefix = 0;
-  const shared = Math.min(recorded.length, live.length);
-  while (prefix < shared && recorded[prefix] === live[prefix]) prefix += 1;
-  let suffix = 0;
-  while (
-    suffix < shared - prefix &&
-    recorded[recorded.length - 1 - suffix] === live[live.length - 1 - suffix]
+  if (
+    boundaries.some((boundary) => boundary.inline) &&
+    !kept.every(({ offset }) => breakPlaceIsCertain(offset, recorded, live, content))
   ) {
-    suffix += 1;
+    return content;
   }
+  const alignment = textAlignment(recorded, live, true);
   const length = content.reduce((sum, child) => sum + paragraphContentLength(child), 0);
   const placed = insertBoundaries(
     content,
     kept.map(({ offset }, id) => {
-      const mapped = offset <= prefix
-        ? offset
-        : offset >= recorded.length - suffix
-          ? offset + live.length - recorded.length
-          : Math.min(offset, live.length - suffix);
+      const mapped = mapRecordedOffset(offset, recorded, live, alignment);
       return { id, kind: 'start', offset: Math.min(Math.max(mapped, 0), length) };
     }),
     (boundary) => ({ type: 'run', content: [{ type: 'break', breakType: kept[boundary.id]!.type }] })
@@ -1844,6 +1837,85 @@ function restoreRecordedBreaks(
     paragraphBreaksAreLive(placed, liveBreaks)
     ? placed
     : content;
+}
+
+interface TextAlignment {
+  prefix: number;
+  suffix: number;
+}
+
+function textAlignment(recorded: string, live: string, prefixFirst: boolean): TextAlignment {
+  const shared = Math.min(recorded.length, live.length);
+  const same = (index: number, fromEnd: boolean): boolean =>
+    fromEnd
+      ? recorded[recorded.length - 1 - index] === live[live.length - 1 - index]
+      : recorded[index] === live[index];
+  let prefix = 0;
+  let suffix = 0;
+  if (prefixFirst) {
+    while (prefix < shared && same(prefix, false)) prefix += 1;
+    while (suffix < shared - prefix && same(suffix, true)) suffix += 1;
+  } else {
+    while (suffix < shared && same(suffix, true)) suffix += 1;
+    while (prefix < shared - suffix && same(prefix, false)) prefix += 1;
+  }
+  return { prefix, suffix };
+}
+
+function mapRecordedOffset(
+  offset: number,
+  recorded: string,
+  live: string,
+  { prefix, suffix }: TextAlignment
+): number {
+  return offset <= prefix
+    ? offset
+    : offset >= recorded.length - suffix
+      ? offset + live.length - recorded.length
+      : Math.min(offset, live.length - suffix);
+}
+
+function atChildBoundary(content: ParagraphContent[], offset: number): boolean {
+  let start = 0;
+  for (const child of content) {
+    const end = start + paragraphContentLength(child);
+    if (start < offset && offset < end) {
+      if (child.type !== 'run') return false;
+      let at = start;
+      for (const entry of child.content) {
+        const next = at + runContentLength(entry);
+        if (entry.type !== 'text' && at < offset && offset < next) return false;
+        at = next;
+      }
+      return true;
+    }
+    start = end;
+  }
+  return true;
+}
+
+function breakPlaceIsCertain(
+  offset: number,
+  recorded: string,
+  live: string,
+  content: ParagraphContent[]
+): boolean {
+  if (content.reduce((sum, child) => sum + paragraphContentLength(child), 0) !== live.length) {
+    return false;
+  }
+  const first = textAlignment(recorded, live, true);
+  const last = textAlignment(recorded, live, false);
+  const inside = ({ prefix, suffix }: TextAlignment): boolean =>
+    prefix < offset && offset < recorded.length - suffix;
+  if (inside(first) || inside(last)) return false;
+  const mapped = mapRecordedOffset(offset, recorded, live, first);
+  const insertion =
+    first.prefix === last.prefix &&
+    first.suffix === last.suffix &&
+    first.prefix === recorded.length - first.suffix &&
+    offset === first.prefix;
+  if (!insertion && mapped !== mapRecordedOffset(offset, recorded, live, last)) return false;
+  return atChildBoundary(content, mapped);
 }
 
 function restoreOriginalRuns(
