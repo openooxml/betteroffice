@@ -17,7 +17,7 @@ const LISTS_NUMBERING = readFileSync(resolve(FIXTURE, 'numbering.xml'), 'utf8');
 const STYLES = `<w:styles xmlns:w="${W}"><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="ListParagraph"><w:name w:val="List Paragraph"/><w:basedOn w:val="Normal"/></w:style></w:styles>`;
 const LEVELS = [0, 1, 2, 3, 4, 5, 6, 7, 8];
 
-function makeDocx(document: string, numbering?: string): Uint8Array {
+function makeDocx(document: string, numbering?: string, styles = STYLES): Uint8Array {
   const overrides = [
     `<Override PartName="/word/document.xml" ContentType="${OFFICE}.document.main+xml"/>`,
     `<Override PartName="/word/styles.xml" ContentType="${OFFICE}.styles+xml"/>`,
@@ -31,7 +31,7 @@ function makeDocx(document: string, numbering?: string): Uint8Array {
     ['[Content_Types].xml', toBytes(`<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>${overrides.join('')}</Types>`)],
     ['_rels/.rels', toBytes(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="doc" Type="${R}/officeDocument" Target="word/document.xml"/></Relationships>`)],
     ['word/document.xml', toBytes(document)],
-    ['word/styles.xml', toBytes(STYLES)],
+    ['word/styles.xml', toBytes(styles)],
     ['word/_rels/document.xml.rels', toBytes(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${relationships.join('')}</Relationships>`)],
   ]);
   if (numbering !== undefined) parts.set('word/numbering.xml', toBytes(numbering));
@@ -207,6 +207,37 @@ for (const [saveName, save] of Object.entries(SAVES)) {
     const override = (types.match(/<Override\b[^>]*>/g) ?? []).find(entry => entry.includes('PartName="/word/numbering.xml"'));
     expect(override).toContain(`ContentType="${OFFICE}.numbering+xml"`);
     expect(savedNumId(text(parts['word/document.xml']) ?? '', 'Second')).toBe(attribute(nums[0], NUM_ID));
+  });
+
+  test(`${saveName}: a created list takes a numId above one a source paragraph names without a definition`, async () => {
+    const session = await seeded(makeDocx(documentOf(paragraph('Dangling', 1), paragraph('Separator'), paragraph('Fresh'))));
+    createList(session, 'Fresh', 'numbered');
+    const parts = unzipContainer(await save(session));
+    const document = text(parts['word/document.xml']) ?? '';
+    const fresh = savedNumId(document, 'Fresh');
+    expect(fresh).toBeGreaterThan(1);
+    expect(savedNumId(document, 'Dangling')).toBe(1);
+    expect(elements(text(parts['word/numbering.xml']) ?? '', 'num').map(num => attribute(num, NUM_ID))).toEqual([fresh]);
+  });
+
+  test(`${saveName}: a created list takes a numId above one a style names without a definition`, async () => {
+    const styles = STYLES.replace('</w:styles>', '<w:style w:type="paragraph" w:styleId="Listed"><w:name w:val="Listed"/><w:pPr><w:numPr><w:numId w:val="5"/></w:numPr></w:pPr></w:style></w:styles>');
+    const session = await seeded(makeDocx(documentOf(paragraph('First'), paragraph('Second')), undefined, styles));
+    createList(session, 'Second', 'bullet');
+    const parts = unzipContainer(await save(session));
+    expect(savedNumId(text(parts['word/document.xml']) ?? '', 'Second')).toBeGreaterThan(5);
+  });
+
+  test(`${saveName}: a created list takes a numId above one a paragraph of the session names without a created list`, async () => {
+    const session = await seeded(makeDocx(documentOf(paragraph('Bare'), paragraph('Separator'), paragraph('Fresh'))));
+    const bare = session.paragraphs('body').find(entry => entry.text === 'Bare')!.paraId;
+    session.setParagraphAttrs({ story: 'body', start: { paraId: bare, offset: 0 }, end: { paraId: bare, offset: 0 } }, {
+      numPr: { numId: 1, ilvl: 0 },
+    });
+    createList(session, 'Fresh', 'bullet');
+    const document = text(unzipContainer(await save(session))['word/document.xml']) ?? '';
+    expect(savedNumId(document, 'Fresh')).toBeGreaterThan(1);
+    expect(savedNumId(document, 'Bare')).toBe(1);
   });
 
   test(`${saveName}: a document where no list was created keeps its numbering, relationships and content types byte for byte`, async () => {
