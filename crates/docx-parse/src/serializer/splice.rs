@@ -2874,6 +2874,24 @@ mod tests {
     }
 
     #[test]
+    fn removing_comment_markers_matches_a_padded_id_by_its_value() {
+        let xml = r#"<w:p><w:commentRangeStart w:id="05"/><w:r><w:t>Kept</w:t></w:r><w:commentRangeEnd w:id="05"/><w:r><w:rPr/><w:commentReference w:id="05"/></w:r></w:p>"#;
+        assert_eq!(
+            remove_comment_markers(xml, &HashSet::from(["5".to_owned()])).unwrap(),
+            "<w:p><w:r><w:t>Kept</w:t></w:r></w:p>",
+        );
+    }
+
+    #[test]
+    fn removing_comment_markers_matches_a_plain_id() {
+        let xml = r#"<w:p><w:commentRangeStart w:id="5"/><w:r><w:t>Kept</w:t></w:r><w:commentRangeEnd w:id="5"/><w:r><w:rPr/><w:commentReference w:id="5"/></w:r></w:p>"#;
+        assert_eq!(
+            remove_comment_markers(xml, &HashSet::from(["5".to_owned()])).unwrap(),
+            "<w:p><w:r><w:t>Kept</w:t></w:r></w:p>",
+        );
+    }
+
+    #[test]
     fn changed_comment_markers_keep_source_bytes() {
         let source = r#"<w:p keep='yes'><w:commentRangeStart w:id="1"/><w:r><w:t>Kept</w:t></w:r><w:commentRangeEnd w:id="1"/><w:r><w:commentReference w:id="1"/></w:r></w:p>"#;
         let written =
@@ -5412,6 +5430,38 @@ mod tests {
         let twice = format!("{added}{added}").replace("</w:p><w:p>", "");
         for spliced in splice_both(&[&first, PLAIN], 1, &twice) {
             assert!(spliced.is_none(), "an added id written twice was spliced");
+        }
+    }
+
+    fn padded(text: &str) -> String {
+        bookmarked(5, text).replace("w:id=\"5\"", "w:id=\"05\"")
+    }
+
+    #[test]
+    fn a_splice_cannot_add_an_occurrence_of_a_range_id_spelled_another_way() {
+        let first = padded("a");
+        let third = padded("c");
+        let reused = bookmarked(5, "b");
+        for spliced in splice_both(&[&first, PLAIN, &third], 1, &reused) {
+            assert!(spliced.is_none(), "a third pair of id 5 was spliced");
+        }
+    }
+
+    #[test]
+    fn a_range_written_again_in_another_spelling_is_spliced() {
+        let first = padded("a");
+        let second = padded("b");
+        let respelled = bookmarked(5, "b");
+        let expected = body(&format!("{first}{respelled}"));
+        for (route, spliced) in
+            ["planned", "direct"]
+                .into_iter()
+                .zip(splice_both(&[&first, &second], 1, &respelled))
+        {
+            assert!(
+                spliced.as_ref() == Some(&expected),
+                "{route}: respelled pair not spliced"
+            );
         }
     }
 

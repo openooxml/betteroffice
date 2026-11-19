@@ -48,15 +48,22 @@ const durableId = (id: number) => `1E00000${id}`;
 const bookmark = (twice: boolean, name: string, inner: string) =>
   twice ? `<w:bookmarkStart w:id="7" w:name="${name}"/>${inner}<w:bookmarkEnd w:id="7"/>` : inner;
 
+/** A comment's range around `text`, then its reference run. */
+const commented = (id: number, text: string) =>
+  `<w:commentRangeStart w:id="${id}"/>${run(text)}<w:commentRangeEnd w:id="${id}"/>${reference(id)}`;
+
+/** A table of one cell holding `paragraph`. */
+const table = (paragraph: string) =>
+  '<w:tbl><w:tblPr><w:tblW w:w="4000" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid>' +
+  `<w:tr><w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>${paragraph}</w:tc></w:tr></w:tbl>`;
+
 function body(ids: number[], twice = false): string {
   const has = (id: number) => ids.includes(id);
   const ranged = (id: number, inner: string) =>
     has(id) ? `<w:commentRangeStart w:id="${id}"/>${inner}<w:commentRangeEnd w:id="${id}"/>${reference(id)}` : inner;
   const thread = [2, 3, 4].filter(has);
   const field = `<w:fldSimple w:instr=" PAGE ">${run('1')}</w:fldSimple>`;
-  const cell =
-    '<w:tbl><w:tblPr><w:tblW w:w="4000" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid>' +
-    `<w:tr><w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>${para(3, bookmark(twice, 'Cell', run('Cell paragraph')))}</w:tc></w:tr></w:tbl>`;
+  const cell = table(para(3, bookmark(twice, 'Cell', run('Cell paragraph'))));
   return (
     para(1, `${run('Opening page ')}${field}${ranged(1, run('first note'))}${run(' after')}`) +
     para(2, bookmark(twice, 'Second', run('Second paragraph stays'))) +
@@ -140,6 +147,66 @@ const part = (bytes: Uint8Array, name: string) => {
   const data = unzipContainer(bytes)[name];
   return data ? decoder.decode(data) : '';
 };
+
+/** A part a fixture adds beside the document, related from it. */
+interface Added {
+  name: string;
+  kind: string;
+  type: string;
+  xml: string;
+}
+
+/** `bytes` with each part in `added` related from the document as `rIdA<index>`, its section properties `section` when given. */
+function withParts(bytes: Uint8Array, added: Added[], section?: string): Uint8Array {
+  const parts: PartsMap = new Map(Object.entries(unzipContainer(bytes)));
+  const change = (name: string, edit: (xml: string) => string) => parts.set(name, toBytes(edit(part(bytes, name))));
+  const overrides = added.map(({ name, kind }) => `<Override PartName="/word/${name}.xml" ContentType="${OFFICE}.${kind}+xml"/>`);
+  const relationships = added.map(({ name, type }, at) => `<Relationship Id="rIdA${at}" Type="${type}" Target="${name}.xml"/>`);
+  change('[Content_Types].xml', (xml) => xml.replace('</Types>', `${overrides.join('')}</Types>`));
+  change('word/_rels/document.xml.rels', (xml) => xml.replace('</Relationships>', `${relationships.join('')}</Relationships>`));
+  if (section) change('word/document.xml', (xml) => xml.replace('<w:sectPr/>', section));
+  for (const { name, xml } of added) parts.set(`word/${name}.xml`, toBytes(xml));
+  return new Uint8Array(rezipPartsToArrayBuffer(parts));
+}
+
+/** `bytes` with part `name` changed by `edit`. */
+function withPart(bytes: Uint8Array, name: string, edit: (xml: string) => string): Uint8Array {
+  const parts: PartsMap = new Map(Object.entries(unzipContainer(bytes)));
+  parts.set(name, toBytes(edit(part(bytes, name))));
+  return new Uint8Array(rezipPartsToArrayBuffer(parts));
+}
+
+const header = (inner: string): Added => ({
+  name: 'header1',
+  kind: 'header',
+  type: `${REL}/header`,
+  xml: `<w:hdr xmlns:w="${W}" xmlns:w14="${W14}"><w:p w14:paraId="0C000001" w14:textId="0C000001">${inner}</w:p></w:hdr>`,
+});
+const HEADED = '<w:sectPr><w:headerReference w:type="default" r:id="rIdA0"/></w:sectPr>';
+
+const footnotes = (inner: string): Added => ({
+  name: 'footnotes',
+  kind: 'footnotes',
+  type: `${REL}/footnotes`,
+  xml:
+    `<w:footnotes xmlns:w="${W}" xmlns:w14="${W14}">` +
+    '<w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>' +
+    '<w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>' +
+    `<w:footnote w:id="1"><w:p w14:paraId="0C000002" w14:textId="0C000002"><w:r><w:footnoteRef/></w:r>${inner}</w:p></w:footnote>` +
+    '</w:footnotes>',
+});
+
+const PEOPLE: Added = {
+  name: 'people',
+  kind: 'people',
+  type: 'http://schemas.microsoft.com/office/2011/relationships/people',
+  xml:
+    `<w15:people xmlns:w15="${W15}"><w15:person w15:author="Grace">` +
+    '<w15:presenceInfo w15:providerId="None" w15:userId="Grace"/></w15:person></w15:people>',
+};
+
+/** The text of part `name`. */
+const textOf = (bytes: Uint8Array, name: string) => part(bytes, name).replace(/<[^>]+>/g, '');
 const paragraphs = (bytes: Uint8Array) =>
   part(bytes, 'word/document.xml').match(/<w:p\b[^>]*?(?:\/>|>[\s\S]*?<\/w:p>)/g) ?? [];
 
@@ -178,9 +245,9 @@ const untouchedFormatting = (bytes: Uint8Array, touched: number[]) =>
 /** The text of body paragraph `at`. */
 const textAt = (bytes: Uint8Array, at: number) => (paragraphs(bytes)[at] ?? '').replace(/<[^>]+>/g, '');
 
-/** The comment's markers in the body, in document order. */
-const marks = (bytes: Uint8Array, id: number) =>
-  [...part(bytes, 'word/document.xml').matchAll(/<w:comment(RangeStart|RangeEnd|Reference) w:id="(\d+)"\/>/g)]
+/** The comment's markers in part `name`, the body unless given, in document order. */
+const marks = (bytes: Uint8Array, id: number, name = 'word/document.xml') =>
+  [...part(bytes, name).matchAll(/<w:comment(RangeStart|RangeEnd|Reference) w:id=["'](\d+)["']\s*\/>/g)]
     .filter((match) => Number(match[2]) === id)
     .map((match) => match[1]!);
 
@@ -221,6 +288,15 @@ function commentsPart(bytes: Uint8Array) {
     contentType: part(bytes, '[Content_Types].xml').includes('PartName="/word/comments.xml"'),
   };
 }
+
+/** Each companion part with whether it is present, related from the document and typed. */
+const companionParts = (bytes: Uint8Array) =>
+  COMMENT_PARTS.slice(1).map((name) => [
+    name,
+    name in unzipContainer(bytes),
+    part(bytes, 'word/_rels/document.xml.rels').includes(`Target="${name.slice('word/'.length)}"`),
+    part(bytes, '[Content_Types].xml').includes(`PartName="/${name}"`),
+  ]);
 
 const owned: Array<{ destroy(): void }> = [];
 let startWorker: (clientId?: number) => InProcessResidentWorker;
@@ -273,6 +349,8 @@ interface Edit {
   remove?: number;
   /** Text typed at the end of the paragraph with this id. */
   type?: string;
+  /** The text `type` types, `TYPED` unless given. */
+  text?: string;
   /** The host's comment list as the save receives it, from the list the host loaded. */
   comments?: (list: Comment[]) => Comment[];
   /** A change to the host's metadata before the save. */
@@ -291,7 +369,7 @@ function apply(engine: YrsSession, edit: Edit): boolean {
   if (edit.type !== undefined) {
     const result = engine.applyEdits({
       expectVersion: engine.version(),
-      steps: [{ op: 'insertText', target: { kind: 'paragraph', story: 'body', paraId: edit.type }, at: 'end', text: TYPED }],
+      steps: [{ op: 'insertText', target: { kind: 'paragraph', story: 'body', paraId: edit.type }, at: 'end', text: edit.text ?? TYPED }],
     });
     if (!result.ok) throw new Error(`insertText: ${JSON.stringify(result).slice(0, 200)}`);
   }
@@ -387,6 +465,7 @@ for (const [route, save] of Object.entries(ROUTES)) {
       expect(differing(source, saved.bytes)).toEqual([0]);
       expect(bookmarkPairs(saved.bytes)).toEqual(bookmarkPairs(source));
       expect(marks(saved.bytes, 1)).toEqual([]);
+      expect(commentIds(saved.bytes)).toEqual([2, 3, 4, 5]);
       expect(marksOf(saved.bytes, [2, 3, 4, 5])).toEqual(marksOf(source, [2, 3, 4, 5]));
       expect(saved.full).toBe(false);
     }, TIMEOUT);
@@ -401,19 +480,23 @@ for (const [route, save] of Object.entries(ROUTES)) {
       expect(differing(source, saved.bytes)).toEqual([1]);
       expect(bookmarkPairs(saved.bytes)).toEqual(bookmarkPairs(source));
       expect(marks(saved.bytes, 1)).toEqual([]);
+      expect(commentIds(saved.bytes)).toEqual([]);
       expect(saved.full).toBe(false);
     }, TIMEOUT);
 
     test('T2 deleting the last comment keeps the comments part as the agents engine does', async () => {
-      const source = built([5], false);
+      const source = withParts(built([5]), [PEOPLE]);
       const saved = await save(source, { remove: 5 });
       expect(differing(source, saved.bytes)).toEqual([4]);
       expect(untouchedFormatting(saved.bytes, [4])).toEqual(untouchedFormatting(source, [4]));
       expect(textAt(saved.bytes, 4)).toBe(textAt(source, 4));
       expect(changedParts(source, saved.bytes)).toEqual([]);
+      expect(part(saved.bytes, 'word/people.xml')).toBe(PEOPLE.xml);
       expect(marks(saved.bytes, 5)).toEqual([]);
       expect(commentsPart(saved.bytes)).toEqual(commentsPart(await agentsDelete(source, 5)));
       expect(commentsPart(saved.bytes)).toEqual({ state: 'emptied', relationship: true, contentType: true });
+      expect(companionIds(saved.bytes)).toEqual({ extended: [], ids: [], extensible: [] });
+      expect(companionParts(saved.bytes)).toEqual(COMMENT_PARTS.slice(1).map((name) => [name, true, true, true]));
       expect(saved.full).toBe(false);
     }, TIMEOUT);
 
@@ -502,6 +585,180 @@ for (const [route, save] of Object.entries(ROUTES)) {
       expect(paragraphs(saved.bytes).map((xml) => xml.replace(/<[^>]+>/g, ''))).toEqual(
         paragraphs(source).map((xml) => xml.replace(/<[^>]+>/g, ''))
       );
+    }, TIMEOUT);
+
+    test('a host-side deletion removes the markers of a comment whose ids are padded', async () => {
+      const padded =
+        `<w:commentRangeStart w:id="05"/>${run('fifth note')}<w:commentRangeEnd w:id="05"/>` +
+        '<w:r><w:commentReference w:id="05"/></w:r>';
+      const content = para(1, run('Lead paragraph')) + para(2, `${run('Plain ')}${padded}${run(' end')}`);
+      const source = built([5], false, false, content);
+      expect(marks(source, 5)).toEqual(['RangeStart', 'RangeEnd', 'Reference']);
+      const saved = await save(source, { comments: () => [] });
+      expect(marks(saved.bytes, 5)).toEqual([]);
+      expect(part(saved.bytes, 'word/document.xml')).not.toMatch(/<w:comment(RangeStart|RangeEnd|Reference)\b/);
+      expect(commentIds(saved.bytes)).toEqual([]);
+      expect(paragraphs(saved.bytes).map((xml) => xml.replace(/<[^>]+>/g, ''))).toEqual(
+        paragraphs(source).map((xml) => xml.replace(/<[^>]+>/g, ''))
+      );
+    }, TIMEOUT);
+
+    test('deleting a comment anchored in a header removes it from the header alone', async () => {
+      const content = para(1, `${run('Body ')}${commented(1, 'body note')}`);
+      const source = withParts(built([1, 6], true, false, content), [header(`${run('Header ')}${commented(6, 'header words')}`)], HEADED);
+      const name = 'word/header1.xml';
+      expect(marks(source, 6, name)).toEqual(['RangeStart', 'RangeEnd', 'Reference']);
+      const saved = await save(source, { remove: 6 });
+      expect(marks(saved.bytes, 6, name)).toEqual([]);
+      expect(textOf(saved.bytes, name)).toBe(textOf(source, name));
+      expect(commentIds(saved.bytes)).toEqual([1]);
+      expect(companionIds(saved.bytes)).toEqual({ extended: [1], ids: [1], extensible: [1] });
+      expect(marks(saved.bytes, 1)).toEqual(marks(source, 1));
+      expect(differing(source, saved.bytes)).toEqual([]);
+      expect(changedParts(source, saved.bytes, new Set([...CHANGEABLE, name]))).toEqual([]);
+      expect(saved.full).toBe(false);
+    }, TIMEOUT);
+
+    test('deleting a comment anchored in a footnote removes it from the footnotes alone', async () => {
+      const content = para(1, `${run('Body ')}<w:r><w:footnoteReference w:id="1"/></w:r>${commented(1, 'body note')}`);
+      const source = withParts(built([1, 6], true, false, content), [footnotes(`${run(' Note ')}${commented(6, 'footnote words')}`)]);
+      const name = 'word/footnotes.xml';
+      expect(marks(source, 6, name)).toEqual(['RangeStart', 'RangeEnd', 'Reference']);
+      const saved = await save(source, { remove: 6 });
+      expect(marks(saved.bytes, 6, name)).toEqual([]);
+      expect(textOf(saved.bytes, name)).toBe(textOf(source, name));
+      expect(commentIds(saved.bytes)).toEqual([1]);
+      expect(companionIds(saved.bytes)).toEqual({ extended: [1], ids: [1], extensible: [1] });
+      expect(marks(saved.bytes, 1)).toEqual(marks(source, 1));
+      expect(differing(source, saved.bytes)).toEqual([]);
+      expect(changedParts(source, saved.bytes, new Set([...CHANGEABLE, name]))).toEqual([]);
+      expect(saved.full).toBe(false);
+    }, TIMEOUT);
+
+    test('deleting a comment anchored in a table cell rewrites only the cell paragraph', async () => {
+      const content =
+        para(1, `${run('Body ')}${commented(1, 'body note')}`) +
+        table(para(2, `${run('Cell ')}${commented(6, 'cell words')}`)) +
+        para(3, run('After the table'));
+      const source = built([1, 6], true, false, content);
+      const saved = await save(source, { remove: 6 });
+      expect(differing(source, saved.bytes)).toEqual([1]);
+      expect(textAt(saved.bytes, 1)).toBe(textAt(source, 1));
+      expect(untouchedFormatting(saved.bytes, [1])).toEqual(untouchedFormatting(source, [1]));
+      expect(changedParts(source, saved.bytes)).toEqual([]);
+      expect(marks(saved.bytes, 6)).toEqual([]);
+      expect(marks(saved.bytes, 1)).toEqual(marks(source, 1));
+      expect(commentIds(saved.bytes)).toEqual([1]);
+      expect(companionIds(saved.bytes)).toEqual({ extended: [1], ids: [1], extensible: [1] });
+      expect(saved.full).toBe(false);
+    }, TIMEOUT);
+
+    test('deleting a comment anchored in a text box removes it from the box', async () => {
+      const box = (inner: string) =>
+        '<w:r><w:pict xmlns:v="urn:schemas-microsoft-com:vml"><v:shape id="Box" style="width:216pt;height:108pt">' +
+        `<v:textbox><w:txbxContent>${inner}</w:txbxContent></v:textbox></v:shape></w:pict></w:r>`;
+      const content =
+        para(1, `${run('Body ')}${commented(1, 'body note')}`) +
+        para(2, `${run('Box ')}${box(para(3, `${run('In box ')}${commented(6, 'box words')}`))}`) +
+        para(4, run('After the box'));
+      const source = built([1, 6], true, false, content);
+      expect(marks(source, 6)).toEqual(['RangeStart', 'RangeEnd', 'Reference']);
+      const saved = await save(source, { comments: (list) => list.filter((comment) => comment.id !== 6) });
+      expect(marks(saved.bytes, 6)).toEqual([]);
+      expect(textAt(saved.bytes, 1)).toBe(textAt(source, 1));
+      expect(differing(source, saved.bytes)).toEqual([1]);
+      expect(changedParts(source, saved.bytes)).toEqual([]);
+      expect(marks(saved.bytes, 1)).toEqual(marks(source, 1));
+      expect(commentIds(saved.bytes)).toEqual([1]);
+      expect(companionIds(saved.bytes)).toEqual({ extended: [1], ids: [1], extensible: [1] });
+    }, TIMEOUT);
+
+    test('deleting a single reply keeps its root and the other reply', async () => {
+      const source = built();
+      const saved = await save(source, { remove: 3 });
+      expect(differing(source, saved.bytes)).toEqual([3]);
+      expect(untouchedFormatting(saved.bytes, [3])).toEqual(untouchedFormatting(source, [3]));
+      expect(textAt(saved.bytes, 3)).toBe(textAt(source, 3));
+      expect(changedParts(source, saved.bytes)).toEqual([]);
+      expect(marks(saved.bytes, 3)).toEqual([]);
+      expect(marksOf(saved.bytes, [1, 2, 4, 5])).toEqual(marksOf(source, [1, 2, 4, 5]));
+      expect(commentIds(saved.bytes)).toEqual([1, 2, 4, 5]);
+      expect(companionIds(saved.bytes)).toEqual({ extended: [1, 2, 4, 5], ids: [1, 2, 4, 5], extensible: [1, 2, 4, 5] });
+      expect(orphanReplies(saved.bytes)).toEqual([]);
+      const reread = await reopened(saved.bytes);
+      expect([reread.ids, reread.orphans]).toEqual([[1, 2, 4, 5], 0]);
+      expect(saved.full).toBe(false);
+    }, TIMEOUT);
+
+    test('deleting a resolved comment removes its done flag with it', async () => {
+      const open = `w15:paraId="${paraId(5)}" w15:done="0"`;
+      const source = withPart(built(),'word/commentsExtended.xml', (xml) => xml.replace(open, `w15:paraId="${paraId(5)}" w15:done="1"`));
+      expect(part(source, 'word/commentsExtended.xml')).toContain('w15:done="1"');
+      const saved = await save(source, { remove: 5 });
+      expect(differing(source, saved.bytes)).toEqual([4]);
+      expect(textAt(saved.bytes, 4)).toBe(textAt(source, 4));
+      expect(changedParts(source, saved.bytes)).toEqual([]);
+      expect(marks(saved.bytes, 5)).toEqual([]);
+      expect(marksOf(saved.bytes, [1, 2, 3, 4])).toEqual(marksOf(source, [1, 2, 3, 4]));
+      expect(commentIds(saved.bytes)).toEqual([1, 2, 3, 4]);
+      expect(companionIds(saved.bytes)).toEqual({ extended: [1, 2, 3, 4], ids: [1, 2, 3, 4], extensible: [1, 2, 3, 4] });
+      expect(part(saved.bytes, 'word/commentsExtended.xml')).not.toContain('w15:done="1"');
+      expect(saved.full).toBe(false);
+    }, TIMEOUT);
+
+    test('deleting a comment whose range spans two paragraphs rewrites only those two', async () => {
+      const content =
+        para(1, `${run('Lead ')}<w:commentRangeStart w:id="1"/>${run('first half')}`) +
+        para(2, `${run('second half')}<w:commentRangeEnd w:id="1"/>${reference(1)}${run(' after')}`) +
+        para(3, `${run('Plain ')}${commented(5, 'fifth note')}${run(' end')}`);
+      const source = built([1, 5], true, false, content);
+      const saved = await save(source, { remove: 1 });
+      expect(differing(source, saved.bytes)).toEqual([0, 1]);
+      expect([textAt(saved.bytes, 0), textAt(saved.bytes, 1)]).toEqual([textAt(source, 0), textAt(source, 1)]);
+      expect(untouchedFormatting(saved.bytes, [0, 1])).toEqual(untouchedFormatting(source, [0, 1]));
+      expect(changedParts(source, saved.bytes)).toEqual([]);
+      expect(marks(saved.bytes, 1)).toEqual([]);
+      expect(marks(saved.bytes, 5)).toEqual(marks(source, 5));
+      expect(commentIds(saved.bytes)).toEqual([5]);
+      expect(companionIds(saved.bytes)).toEqual({ extended: [5], ids: [5], extensible: [5] });
+      expect(saved.full).toBe(false);
+    }, TIMEOUT);
+
+    test('typing and deleting a comment save an untouched header alike', async () => {
+      const content = para(1, `${run('Lead ')}${commented(1, 'noted')}${run(' end')}`) + para(2, run('Other paragraph'));
+      const source = withParts(built([1], false, false, content), [header('<w:r><w:t>A & B</w:t></w:r>')], HEADED);
+      const name = 'word/header1.xml';
+      expect(part(source, name)).toContain('<w:t>A & B</w:t>');
+      const typed = await save(source, { type: '0A000001', text: 'x' });
+      const deleted = await save(source, { remove: 1 });
+      expect(part(deleted.bytes, name)).toBe(part(typed.bytes, name));
+    }, TIMEOUT);
+
+    test('typing and deleting a comment treat a bookmark nested in an insertion alike', async () => {
+      const inserted =
+        '<w:ins w:id="20" w:author="Grace" w:date="2025-03-04T05:06:07Z"><w:bookmarkStart w:id="7" w:name="Inserted"/>' +
+        `${run('inserted')}<w:bookmarkEnd w:id="7"/></w:ins>`;
+      const content =
+        para(1, bookmark(true, 'First', run('First paragraph'))) +
+        para(2, `${run('Lead ')}${inserted}${commented(1, 'noted')}${run(' end')}`) +
+        para(3, bookmark(true, 'Third', run('Third paragraph')));
+      const source = built([1], false, false, content);
+      const nested = (bytes: Uint8Array) => (paragraphs(bytes)[1] ?? '').match(/<w:bookmark(?:Start|End) w:id="7"/g)?.length ?? 0;
+      expect(nested(source)).toBe(2);
+      const typed = await save(source, { type: '0A000002', text: 'x' });
+      const deleted = await save(source, { remove: 1 });
+      expect(nested(deleted.bytes)).toBe(nested(typed.bytes));
+    }, TIMEOUT);
+
+    test('typing and deleting a comment write the paragraphs after the edit alike', async () => {
+      const content =
+        para(1, `${run('Lead ')}${commented(1, 'x note')}${run(' a')}`) +
+        para(2, `${run('Y starts ')}<w:commentRangeStart w:id="2"/>${run('y words')}<w:commentRangeEnd w:id="2"/>${run(' more text')}`) +
+        para(3, `${reference(2)}${run('C text')}`);
+      const source = built([1, 2], false, false, content);
+      const typed = await save(source, { type: '0A000001', text: 'x' });
+      const deleted = await save(source, { remove: 1 });
+      expect(paragraphs(deleted.bytes).slice(1)).toEqual(paragraphs(typed.bytes).slice(1));
     }, TIMEOUT);
   });
 }
