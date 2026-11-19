@@ -636,38 +636,74 @@ fn a_single_line_rich_cell_sits_on_the_baseline_of_its_largest_run() {
     );
 }
 
-fn runs_no_larger_than_the_cell_keep_the_plain_baseline(valign: VAlign) {
+fn runs_of_the_cell_size_keep_the_plain_baseline(valign: VAlign) {
     let stored = "HI";
     let workbook = single_line_workbook(stored, valign);
     let plain = build_display_list(&workbook, SheetId(0), &VIEW).unwrap();
-    let same = [rich_run(0, 1, |style| {
+    let source = [rich_run(0, 1, |style| {
         style.size_pt = Some(11.0);
         style.bold = Some(true);
     })];
-    let smaller = [rich_run(0, 2, |style| style.size_pt = Some(8.0))];
-    for source in [&same[..], &smaller[..]] {
-        let rich = with_runs(&workbook, &[("A1", source)]);
-        assert_eq!(runs_of(&rich, stored).len(), 1);
-        assert_eq!(
-            without_runs(command(&rich, stored)),
-            *command(&plain, stored)
-        );
+    let rich = with_runs(&workbook, &[("A1", &source)]);
+    assert_eq!(runs_of(&rich, stored).len(), 1);
+    assert_eq!(
+        without_runs(command(&rich, stored)),
+        *command(&plain, stored)
+    );
+}
+
+#[test]
+fn a_top_aligned_rich_cell_whose_runs_have_the_cell_size_keeps_the_plain_baseline() {
+    runs_of_the_cell_size_keep_the_plain_baseline(VAlign::Top);
+}
+
+#[test]
+fn a_centred_rich_cell_whose_runs_have_the_cell_size_keeps_the_plain_baseline() {
+    runs_of_the_cell_size_keep_the_plain_baseline(VAlign::Center);
+}
+
+#[test]
+fn a_bottom_aligned_rich_cell_whose_runs_have_the_cell_size_keeps_the_plain_baseline() {
+    runs_of_the_cell_size_keep_the_plain_baseline(VAlign::Bottom);
+}
+
+fn smaller_runs_over_the_whole_text_sit_on_their_own_baseline(valign: VAlign) {
+    let stored = "HI";
+    let mut workbook = single_line_workbook_in(stored, valign, 15.0);
+    for font in &mut workbook.styles.fonts {
+        font.size_pt = Some(36.0);
     }
+    let source = [rich_run(0, 2, |style| style.size_pt = Some(11.0))];
+    let rich = with_runs(&workbook, &[("A1", &source)]);
+    assert_eq!(runs_of(&rich, stored).len(), 1);
+    let plain = build_display_list(&workbook, SheetId(0), &VIEW).unwrap();
+    let clip = clip_of(command(&plain, stored));
+    let baseline = crate::baseline_y(clip.y, clip.h, 11.0, Some(valign));
+    let run_px = 11.0 * crate::geometry::PX_PER_PT as f32;
+    assert!(
+        baseline - run_px * crate::ASCENT_RATIO < clip.y + clip.h
+            && baseline + run_px * crate::DESCENT_RATIO > clip.y,
+        "{baseline} in {clip:?}"
+    );
+    assert_eq!(
+        without_runs(command(&rich, stored)),
+        with_y(command(&plain, stored), baseline)
+    );
 }
 
 #[test]
-fn a_top_aligned_rich_cell_without_a_larger_run_keeps_the_plain_baseline() {
-    runs_no_larger_than_the_cell_keep_the_plain_baseline(VAlign::Top);
+fn a_top_aligned_cell_of_smaller_runs_in_a_low_row_keeps_them_inside_the_row() {
+    smaller_runs_over_the_whole_text_sit_on_their_own_baseline(VAlign::Top);
 }
 
 #[test]
-fn a_centred_rich_cell_without_a_larger_run_keeps_the_plain_baseline() {
-    runs_no_larger_than_the_cell_keep_the_plain_baseline(VAlign::Center);
+fn a_centred_cell_of_smaller_runs_in_a_low_row_keeps_them_inside_the_row() {
+    smaller_runs_over_the_whole_text_sit_on_their_own_baseline(VAlign::Center);
 }
 
 #[test]
-fn a_bottom_aligned_rich_cell_without_a_larger_run_keeps_the_plain_baseline() {
-    runs_no_larger_than_the_cell_keep_the_plain_baseline(VAlign::Bottom);
+fn a_bottom_aligned_cell_of_smaller_runs_in_a_low_row_keeps_them_inside_the_row() {
+    smaller_runs_over_the_whole_text_sit_on_their_own_baseline(VAlign::Bottom);
 }
 
 fn command_floats(command: &DrawCmd) -> Vec<f32> {
