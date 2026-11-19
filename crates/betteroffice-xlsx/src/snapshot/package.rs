@@ -193,6 +193,14 @@ impl PackageSlot {
                 .map_err(|message| Error::Package(message.clone())),
         }
     }
+
+    /// The parsed package, without parsing a deferred one.
+    pub(crate) fn materialized(&self) -> Option<&PreservedPackage> {
+        match self {
+            Self::Present(package) => Some(package),
+            Self::Deferred { rebuilt, .. } => rebuilt.get()?.as_ref().ok(),
+        }
+    }
 }
 
 fn rebuild(source: &SourceContainer) -> std::result::Result<PreservedPackage, String> {

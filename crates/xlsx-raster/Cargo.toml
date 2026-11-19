@@ -31,5 +31,6 @@ libm.workspace = true
 
 [dev-dependencies]
 xlsx-model.workspace = true
+xlsx-render = { workspace = true, features = ["test-counters"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

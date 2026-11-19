@@ -1,7 +1,12 @@
+use std::sync::Arc;
+
 use betteroffice_xlsx::{
-    CalculationOptions, CellRef, CellState, CellValue, Op, Sheet, SheetId, Workbook, WorkbookModel,
+    CalculationOptions, CellRange, CellRef, CellState, CellValue, DisplayList, DrawCmd, Op,
+    PrintMetrics, RenderOptions, Sheet, SheetId, Viewport, Workbook, WorkbookModel,
 };
+use xlsx_model::styles::{Alignment, Font, Xf};
 use xlsx_model::{Color, RichRun, RunUnderline};
+use xlsx_render::{TextRun, TextRunBaseline};
 
 fn source() -> Vec<u8> {
     source_with(
@@ -15,12 +20,16 @@ fn source_with(sheet_data: &str, items: &str) -> Vec<u8> {
         sheets: vec![Sheet::new("Data")],
         ..WorkbookModel::default()
     };
-    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    package(&model, sheet_data, "", items)
+}
+
+fn package(model: &WorkbookModel, sheet_data: &str, tail: &str, items: &str) -> Vec<u8> {
+    let mut parts = xlsx_parse::serialize_workbook(model).unwrap();
     let sheet = parts
         .iter_mut()
         .find(|(path, _)| path == "xl/worksheets/sheet1.xml")
         .unwrap();
-    let xml = format!("<worksheet><sheetData>{sheet_data}</sheetData></worksheet>");
+    let xml = format!("<worksheet><sheetData>{sheet_data}</sheetData>{tail}</worksheet>");
     sheet.1 = xml.into_bytes();
     let strings = format!("<sst>{items}</sst>").into_bytes();
     match parts
@@ -509,4 +518,235 @@ fn editing_an_excel_written_rich_cell_writes_plain_text() {
         assert_eq!(text_at(&reopened, col), "replacement");
         assert!(reopened.cell_text_runs(SheetId(0), at).is_none());
     }
+}
+
+const MIXED_ITEM: &str = concat!(
+    r#"<si><r><rPr><b/><i/><sz val="14"/><rFont val="Cambria"/></rPr><t>Ab</t></r>"#,
+    r#"<r><rPr><u val="double"/><strike/><color rgb="FFFF0000"/></rPr>"#,
+    r#"<t xml:space="preserve"> 中</t></r>"#,
+    r#"<r><rPr><vertAlign val="superscript"/><u/></rPr><t>😀</t></r>"#,
+    r#"<r><rPr><vertAlign val="subscript"/><u val="none"/></rPr><t>z</t></r></si>"#,
+);
+const MIXED_TEXT: &str = "Ab 中😀z";
+const RIGHT_TO_LEFT_ITEM: &str =
+    r#"<si><r><rPr><b/></rPr><t>שלום</t></r><r><t xml:space="preserve"> abc</t></r></si>"#;
+const TURNED_ITEM: &str = r#"<si><r><rPr><b/></rPr><t>Up</t></r><r><t>right</t></r></si>"#;
+
+const DISPLAY_ROW: &str = concat!(
+    r#"<row r="1"><c r="A1" t="s"><v>0</v></c><c r="C1" t="s"><v>1</v></c>"#,
+    r#"<c r="E1" t="s"><v>2</v></c><c r="G1" t="inlineStr"><is><t>plain</t></is></c>"#,
+    r#"<c r="I1" s="1" t="s"><v>3</v></c><c r="K1" s="2" t="s"><v>3</v></c>"#,
+    r#"<c r="M1" t="str"><f>"ok"</f><v>ok</v></c>"#,
+    r#"<c r="O1" t="inlineStr"><is><r><rPr><b/></rPr><t>Inline</t></r>"#,
+    r#"<r><t xml:space="preserve"> text</t></r></is></c></row>"#,
+);
+
+const SCREEN: Viewport = Viewport {
+    x: 0.0,
+    y: 0.0,
+    width: 1200.0,
+    height: 100.0,
+};
+
+fn styled_model() -> WorkbookModel {
+    let mut model = WorkbookModel {
+        sheets: vec![Sheet::new("Data")],
+        ..WorkbookModel::default()
+    };
+    model.styles.fonts.push(Font {
+        name: Some("Calibri".into()),
+        size_pt: Some(11.0),
+        ..Font::default()
+    });
+    let turned = |degrees| Xf {
+        font: Some(0),
+        alignment: Some(Alignment {
+            text_rotation: Some(degrees),
+            ..Alignment::default()
+        }),
+        ..Xf::default()
+    };
+    model.styles.cell_xfs.extend([
+        Xf {
+            font: Some(0),
+            ..Xf::default()
+        },
+        turned(45),
+        turned(255),
+    ]);
+    model
+}
+
+fn display_source() -> Vec<u8> {
+    let items = [MIXED_ITEM, EXCEL_ITEMS[3], RIGHT_TO_LEFT_ITEM, TURNED_ITEM].concat();
+    package(&styled_model(), DISPLAY_ROW, "", &items)
+}
+
+fn print_metrics() -> PrintMetrics {
+    PrintMetrics {
+        dpi: 96.0,
+        max_digit_width: 7.0,
+        default_row_height_pt: 15.0,
+        default_column_width: None,
+        font_size_pt: 11.0,
+        font_family: "Calibri".into(),
+        font_ascent: 10.0,
+        font_descent: 3.0,
+    }
+}
+
+fn text_runs(list: &DisplayList, wanted: &str) -> Vec<Vec<TextRun>> {
+    list.commands
+        .iter()
+        .filter_map(|command| match command {
+            DrawCmd::Text { text, runs, .. } if &**text == wanted => Some(runs.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn mixed_runs() -> Vec<TextRun> {
+    vec![
+        TextRun {
+            start: 0,
+            end: 2,
+            font_family: Some("Cambria".into()),
+            font_size: Some(14.0),
+            bold: Some(true),
+            italic: Some(true),
+            ..TextRun::default()
+        },
+        TextRun {
+            start: 2,
+            end: 4,
+            underline: Some(true),
+            underline_style: Some(RunUnderline::Double),
+            strike: Some(true),
+            color: Some("#ff0000".into()),
+            ..TextRun::default()
+        },
+        TextRun {
+            start: 4,
+            end: 6,
+            underline: Some(true),
+            baseline: Some(TextRunBaseline::Superscript),
+            ..TextRun::default()
+        },
+        TextRun {
+            start: 6,
+            end: 7,
+            underline: Some(false),
+            baseline: Some(TextRunBaseline::Subscript),
+            ..TextRun::default()
+        },
+    ]
+}
+
+#[test]
+fn rich_cells_carry_their_runs_on_the_screen_print_and_png_paths() {
+    let workbook = Workbook::open(&display_source()).unwrap();
+    let screen = workbook.display_list_for(SheetId(0), &SCREEN).unwrap();
+    let (png, _, _) = workbook
+        .range_png_display_list_for(SheetId(0), &RenderOptions::default())
+        .unwrap();
+    let range = CellRange::new(CellRef::new(0, 0), CellRef::new(0, 14));
+    let print = workbook
+        .print_display_list(SheetId(0), range, &print_metrics(), false)
+        .unwrap();
+    let inline = vec![
+        TextRun {
+            start: 0,
+            end: 6,
+            bold: Some(true),
+            ..TextRun::default()
+        },
+        TextRun {
+            start: 6,
+            end: 11,
+            ..TextRun::default()
+        },
+    ];
+    for (path, list) in [("screen", &screen), ("png", &png), ("print", &print)] {
+        assert_eq!(text_runs(list, MIXED_TEXT), [mixed_runs()], "{path}");
+        assert_eq!(
+            text_runs(list, "Inline text"),
+            std::slice::from_ref(&inline),
+            "{path}"
+        );
+        assert_eq!(text_runs(list, "plain"), [Vec::new()], "{path}");
+    }
+}
+
+#[test]
+fn the_phonetic_tail_is_covered_by_no_run() {
+    let workbook = Workbook::open(&display_source()).unwrap();
+    let screen = workbook.display_list_for(SheetId(0), &SCREEN).unwrap();
+    let runs = text_runs(&screen, "漢字かんじ");
+    let spans: Vec<Vec<(u32, u32, Option<bool>)>> = runs
+        .iter()
+        .map(|runs| {
+            runs.iter()
+                .map(|run| (run.start, run.end, run.bold))
+                .collect()
+        })
+        .collect();
+    assert_eq!(spans, [vec![(0, 1, Some(true)), (1, 2, None)]]);
+}
+
+#[test]
+fn cells_that_do_not_paint_their_stored_text_as_it_is_carry_no_runs() {
+    let workbook = Workbook::open(&display_source()).unwrap();
+    assert!(
+        workbook
+            .cell_text_runs(SheetId(0), CellRef::new(0, 4))
+            .is_some()
+    );
+    assert!(
+        workbook
+            .cell_text_runs(SheetId(0), CellRef::new(0, 8))
+            .is_some()
+    );
+    let screen = workbook.display_list_for(SheetId(0), &SCREEN).unwrap();
+    assert_eq!(text_runs(&screen, "שלום abc"), [Vec::new()]);
+    assert_eq!(text_runs(&screen, "Upright"), [Vec::new(), Vec::new()]);
+    assert_eq!(text_runs(&screen, "ok"), [Vec::new()]);
+    assert_eq!(text_runs(&screen, MIXED_TEXT).len(), 1);
+}
+
+#[test]
+fn a_hyperlink_cell_keeps_the_link_colour_and_underline_over_its_runs() {
+    let row = concat!(
+        r#"<row r="1"><c r="A1" t="s"><v>0</v></c>"#,
+        r#"<c r="C1" t="inlineStr"><is><t>link</t></is></c></row>"#,
+    );
+    let links = concat!(
+        r#"<hyperlinks><hyperlink ref="A1" location="Data!C3"/>"#,
+        r#"<hyperlink ref="C1" location="Data!C3"/></hyperlinks>"#,
+    );
+    let workbook = Workbook::open(&package(&styled_model(), row, links, MIXED_ITEM)).unwrap();
+    let screen = workbook.display_list_for(SheetId(0), &SCREEN).unwrap();
+    let kept: Vec<TextRun> = mixed_runs()
+        .into_iter()
+        .map(|run| TextRun {
+            underline: None,
+            underline_style: None,
+            color: None,
+            ..run
+        })
+        .collect();
+    assert_eq!(text_runs(&screen, MIXED_TEXT), [kept]);
+    let look: Vec<(Arc<str>, bool)> = screen
+        .commands
+        .iter()
+        .filter_map(|command| match command {
+            DrawCmd::Text {
+                color, underline, ..
+            } => Some((color.clone(), *underline)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(look.len(), 2);
+    assert_eq!(look[0], look[1]);
+    assert!(look[0].1);
+    assert_ne!(&*look[0].0, "#000000");
 }

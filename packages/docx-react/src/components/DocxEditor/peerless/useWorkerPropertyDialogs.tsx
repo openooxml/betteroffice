@@ -213,6 +213,7 @@ export function useWorkerPropertyDialogs(controller: WorkerShellController, prop
   } : undefined;
   const imageState = object?.value?.kind === 'object' ? { wrap: imageWrapTargetFromAttrs(object.value.properties) } : null;
   return { openLink, applyPopupLink: (displayText: string, href: string, tooltip?: string) => changeLinkAtCaret({ displayText, url: href, tooltip }),
+    readLinkAtCaret: async () => (await readLink()).initialData,
     removeLinkAtCaret: () => changeLinkAtCaret(null), openNotes, openImage, openImagePosition: () => openImage(true), imagePropertiesAvailable: object?.value?.kind === 'object',
     imageState, applyImageWrap, applyImageTransform,
     pageLayout: { currentProps: page.currentProps, readCurrent: page.readCurrent, onApply: page.handlePageSetupApply },

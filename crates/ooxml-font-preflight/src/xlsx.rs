@@ -199,6 +199,67 @@ fn scripts(pieces: &[&str], budget: &mut usize, complete: &mut bool) -> Vec<Stri
     )
 }
 
+/// Most runs whose fonts a workbook's strings request, as the parser keeps.
+const MAX_RICH_TEXT_RUNS: usize = 100_000;
+/// Most runs of one string item whose fonts it requests, as the parser keeps.
+const MAX_RICH_TEXT_RUNS_PER_ITEM: usize = 4_096;
+
+/// The font a run of a string item paints in, over its cell's, with the
+/// scripts of the run's text.
+#[derive(Clone)]
+struct RunFont {
+    family: Option<String>,
+    bold: Option<bool>,
+    italic: Option<bool>,
+    scripts: Vec<String>,
+}
+
+/// The fonts of the runs of string item `item` that name a family, bold or
+/// italic of their own; an item past the run budget requests none.
+fn run_fonts(
+    item: &Node,
+    runs: &mut usize,
+    budget: &mut usize,
+    complete: &mut bool,
+) -> Vec<RunFont> {
+    let items: Vec<&Node> = item
+        .children
+        .iter()
+        .filter(|node| node.name == "s:r")
+        .collect();
+    if items.len() > MAX_RICH_TEXT_RUNS_PER_ITEM || *runs + items.len() > MAX_RICH_TEXT_RUNS {
+        *complete = false;
+        return Vec::new();
+    }
+    *runs += items.len();
+    items
+        .into_iter()
+        .filter_map(|run| {
+            let properties = run.child("s:rPr")?;
+            let property = |name: &str| properties.children.iter().find(|child| child.name == name);
+            let set = |name: &str| {
+                property(name).map(|node| node.attr("val").is_none_or(|value| flag(Some(value))))
+            };
+            let family = property("s:rFont")
+                .and_then(|node| node.attr("val"))
+                .map(unescape)
+                .filter(|name| !name.trim().is_empty());
+            let (bold, italic) = (set("s:b"), set("s:i"));
+            if family.is_none() && bold.is_none() && italic.is_none() {
+                return None;
+            }
+            let mut pieces = Vec::new();
+            text_pieces(run, &mut pieces);
+            Some(RunFont {
+                family,
+                bold,
+                italic,
+                scripts: scripts(&pieces, budget, complete),
+            })
+        })
+        .collect()
+}
+
 #[derive(Clone, Default)]
 struct Font {
     family: Option<String>,
@@ -624,32 +685,31 @@ pub fn xlsx_font_preflight(bytes: &[u8]) -> Result<FontPreflight, PreflightError
         .filter(|(index, _)| string_ids.contains(index))
         .collect();
     let mut script_budget = 4 * 1024 * 1024;
+    let mut run_count = 0;
     let mut shared_scripts = BTreeMap::new();
     for (&index, text) in &strings {
         let mut pieces = Vec::new();
         text_pieces(text, &mut pieces);
         let nonempty = pieces.iter().any(|piece| !piece.is_empty());
-        shared_scripts.insert(
-            index,
-            (
-                nonempty,
-                scripts(&pieces, &mut script_budget, &mut complete),
-            ),
-        );
+        let scripts = scripts(&pieces, &mut script_budget, &mut complete);
+        let runs = run_fonts(text, &mut run_count, &mut script_budget, &mut complete);
+        shared_scripts.insert(index, (nonempty, scripts, runs));
     }
     let mut faces = Faces::default();
     for (cell, style) in cells.into_values() {
         let mut pieces = Vec::new();
+        let mut runs = Vec::new();
         let scripts = match cell.attr("t").unwrap_or("n") {
             "s" => {
                 let text = cell
                     .child("s:v")
                     .and_then(|node| node.text.trim().parse::<usize>().ok())
                     .and_then(|index| shared_scripts.get(&index));
-                if let Some((nonempty, scripts)) = text {
+                if let Some((nonempty, scripts, fonts)) = text {
                     if !*nonempty {
                         continue;
                     }
+                    runs.clone_from(fonts);
                     scripts.clone()
                 } else {
                     complete = false;
@@ -659,6 +719,7 @@ pub fn xlsx_font_preflight(bytes: &[u8]) -> Result<FontPreflight, PreflightError
             "inlineStr" => {
                 if let Some(text) = cell.child("s:is") {
                     text_pieces(text, &mut pieces);
+                    runs = run_fonts(text, &mut run_count, &mut script_budget, &mut complete);
                 }
                 scripts(&pieces, &mut script_budget, &mut complete)
             }
@@ -676,12 +737,16 @@ pub fn xlsx_font_preflight(bytes: &[u8]) -> Result<FontPreflight, PreflightError
             continue;
         }
         let font = styles.font(style, &mut complete);
-        faces.record(
-            font.family.as_deref().unwrap_or("Calibri"),
-            font.bold,
-            font.italic,
-            &scripts,
-        );
+        let family = font.family.as_deref().unwrap_or("Calibri");
+        faces.record(family, font.bold, font.italic, &scripts);
+        for run in &runs {
+            faces.record(
+                run.family.as_deref().unwrap_or(family),
+                run.bold.unwrap_or(font.bold),
+                run.italic.unwrap_or(font.italic),
+                &run.scripts,
+            );
+        }
     }
     Ok(faces.finish(complete))
 }
