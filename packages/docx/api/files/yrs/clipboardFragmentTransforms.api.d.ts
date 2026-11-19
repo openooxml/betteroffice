@@ -5,7 +5,7 @@ import type { DocxClipboardFragment } from './clipboardFragment';
 export type PasteFormattingOption = 'keep-source' | 'merge' | 'text-only';
 /**
  * @internal Merge-formatting variant of a pasted fragment: bold, italic,
- * underline, strikethrough, hyperlinks and list numbering survive; font
+ * underline, strikethrough and hyperlinks survive; font
  * family, size, colour, highlight and paragraph style are dropped so the
  * destination paragraph's formatting applies.
  */

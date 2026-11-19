@@ -65,8 +65,6 @@ export interface DocxClipboardParagraph {
     text: string;
     inlines?: DocxClipboardInline[];
     runs?: DocxClipboardRun[];
-    pStyle?: string;
-    list?: 'bullet' | 'numbered';
 }
 /** @internal Copied or pasted content in document order; consecutive paragraphs are separate paragraphs. */
 export interface DocxClipboardFragment {
@@ -96,7 +94,7 @@ export type ClipboardTableReader = Pick<YrsSession, 'tablePayload' | 'storySegme
     mediaDataUrl?(source: string): string | null | undefined;
 };
 /** @internal Engine surface a fragment paste needs. */
-export type ClipboardPasteEngine = Pick<YrsSession, 'deleteRange' | 'splitParagraph' | 'insertText' | 'insertTableFragment' | 'validateTableFragment' | 'insertImage' | 'clearFormatting' | 'formatRange' | 'setHyperlink' | 'applyParagraphStyle' | 'setParagraphAttrs'>;
+export type ClipboardPasteEngine = Pick<YrsSession, 'deleteRange' | 'splitParagraph' | 'insertText' | 'insertTableFragment' | 'validateTableFragment' | 'insertImage' | 'clearFormatting' | 'formatRange' | 'setHyperlink'>;
 /** @internal Inclusive grid bounds for {@link readTableFragment}. */
 export interface ClipboardTableRect {
     top: number;
