@@ -1338,6 +1338,22 @@ test('previewFirstPage previews a cut of the source before the whole source open
   expect(Buffer.from(cut.source.bytes!)).toEqual(Buffer.from(whole.source.bytes!));
 });
 
+test('a cut preview leaves the tracked paragraph mark a text item while the whole source names its face', async () => {
+  fontRequirements = [{ key: 'calibri|0|0', family: 'Calibri', bold: false, italic: false }];
+  const bundled = Uint8Array.of(21, 22).buffer;
+  render(<DocxEditor {...peerlessProps} previewFirstPage showToolbar={false} measurementFontProvider={{ resolve: () => async () => bundled }} />);
+  await waitFor(() => expect(requests.some(request => request.type === 'commandInit')).toBe(true));
+  const preview = requests.find(request => request.type === 'previewSource');
+  const init = requests.find(request => request.type === 'commandInit');
+  if (preview?.type !== 'previewSource' || init?.type !== 'commandInit') throw new Error('Worker did not preview');
+  const mark = '@betteroffice/fonts/paragraph-mark';
+  const chains = (extras: string) => JSON.parse(extras).fontChains as Record<string, number[]>;
+  const whole = chains(init.request.extras);
+  expect(Object.keys(chains(preview.preview.extras))).toEqual(['calibri|0|0']);
+  expect(JSON.parse(preview.preview.layoutInput).measurement.fontChains).not.toHaveProperty(mark);
+  expect(whole[mark]).toEqual(whole['calibri|0|0']!.slice(0, 1));
+});
+
 test('a declined source cut previews the whole source before the command session', async () => {
   refuseCut = true;
   render(<DocxEditor {...peerlessProps} previewFirstPage showToolbar={false} />);

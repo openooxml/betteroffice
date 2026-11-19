@@ -274,6 +274,21 @@ fn a_character_both_faces_cover_keeps_the_family_face_next_to_kana() {
 /// Arial text with a Han character Liberation Sans lacks, then an Arial
 /// paragraph whose mark is a tracked insertion when `marked`.
 fn tracked_mark_input(marked: bool) -> LayoutInput {
+    serde_json::from_value(tracked_mark_value(marked)).unwrap()
+}
+
+/// [`tracked_mark_input`] with Arial as every paragraph's default family, so no
+/// font requirement names Calibri, the family the mark is drawn in.
+#[cfg(feature = "raster")]
+fn tracked_mark_input_in_arial() -> LayoutInput {
+    let mut value = tracked_mark_value(true);
+    for measured in value["measured"].as_array_mut().unwrap() {
+        measured["block"]["attrs"]["defaultFontFamily"] = json!("Arial");
+    }
+    serde_json::from_value(value).unwrap()
+}
+
+fn tracked_mark_value(marked: bool) -> Value {
     let mut value = json!({
         "measured": [
             {
@@ -299,7 +314,7 @@ fn tracked_mark_input(marked: bool) -> LayoutInput {
             "pPrIns": {"revisionId": 1, "author": "Ada", "date": "2026-01-01T00:00:00Z"}
         });
     }
-    serde_json::from_value(value).unwrap()
+    value
 }
 
 /// Every glyph outside revision marks as (character, font id, glyph id, advance, x).
@@ -439,4 +454,48 @@ fn a_tracked_paragraph_mark_leaves_inserted_east_asian_text_alone() {
 
     assert!(underlined, "the inserted text drew no dashed underline");
     assert_eq!(outside_the_mark(&marked), outside_the_mark(&plain));
+}
+
+/// The kind of `primitive` when it draws a tracked paragraph mark.
+#[cfg(feature = "raster")]
+fn mark_kind(primitive: &Primitive) -> Option<&'static str> {
+    let (kind, attrs) = match primitive {
+        Primitive::Text(text) => ("text", &text.attrs),
+        Primitive::GlyphRun(run) => ("glyphRun", &run.attrs),
+        _ => return None,
+    };
+    let revision = attrs.structural_revision.as_deref()?;
+    (revision.scope == StructuralRevisionScope::Pmark).then_some(kind)
+}
+
+#[cfg(feature = "raster")]
+fn mark_kinds(result: &LayoutResult) -> Vec<&'static str> {
+    result
+        .display_list
+        .pages
+        .iter()
+        .flat_map(|page| &page.primitives)
+        .filter_map(mark_kind)
+        .collect()
+}
+
+#[cfg(feature = "raster")]
+#[test]
+fn a_tracked_paragraph_mark_keeps_its_kind_once_its_page_is_rasterized() {
+    let package = common::sample_docx();
+    let cases: [(fn() -> LayoutInput, &str); 2] = [
+        (|| tracked_mark_input(true), "glyphRun"),
+        (tracked_mark_input_in_arial, "text"),
+    ];
+    for (input, expected) in cases {
+        let document = Document::open(&package).unwrap();
+        let first = document.layout(input()).unwrap();
+        document
+            .render_display_list_png(&first.display_list, 0)
+            .unwrap();
+        let second = document.layout(input()).unwrap();
+
+        assert_eq!(mark_kinds(&first), [expected], "{expected} first");
+        assert_eq!(mark_kinds(&second), [expected], "{expected} again");
+    }
 }

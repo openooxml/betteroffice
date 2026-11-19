@@ -6,6 +6,8 @@ import {
   NATIVE_MEMORY_BUDGET_EXCEEDED,
   NATIVE_PANIC_CODE,
 } from '../../../../shared/office-session/trap';
+import { createRustMeasureSource, type ResidentFontRequirement } from '../layout/measure/rustMeasureSource';
+import * as wasm from '../layout/wasm';
 import { glyphsByFont, ResidentProgressiveFonts, type ProgressiveFontSpec } from './residentProgressiveFonts';
 
 const assets = new URL('../../../fonts-cjk/assets/', import.meta.url);
@@ -238,4 +240,60 @@ test('a worker that cannot load the progressive module has the face reloaded who
   expect(loads).toBe(1);
   expect(hits.size).toBe(0);
   expect(logs.filter((message) => message.includes('progressive font module is unavailable'))).toHaveLength(1);
+});
+
+test('a tracked paragraph mark in Japanese text with no default face fetches no outline chunk and draws as text', async () => {
+  await wasm.preloadLayoutWasm();
+  const slices = { ref, base: server.url.href, url: async (file: string) => new URL(file, server.url), decode, timeoutMs: 5_000 };
+  const loader = Object.assign(async (): Promise<ArrayBuffer> => {
+    throw new Error('the whole face was requested');
+  }, { slices });
+  const source = createRustMeasureSource({
+    engine: { registerFont: wasm.registerMeasureFont, registerSubstituteFont: wasm.registerSubstituteMeasureFont, clearFonts() {} },
+    bundled: { resolve: () => undefined, resolveScriptFallback: (script) => script === 'cjk-jp' ? loader : undefined },
+    progressive: true,
+  });
+  const text = 'あいう';
+  const requirements: ResidentFontRequirement[] = [{
+    key: 'calibri|0|0', family: 'Calibri', bold: false, italic: false, scripts: ['cjk-jp'], characters: [...text],
+  }];
+  const warn = console.warn;
+  console.warn = () => {};
+  try { await source.prepareFontRequirements(requirements); } finally { console.warn = warn; }
+  const config = source.measurementConfigForRequirements(requirements)!;
+  const specs = await source.progressiveFonts!();
+  expect(specs).toHaveLength(1);
+  const block = (marked: boolean) => ({
+    kind: 'paragraph', id: 'japanese', runs: [{ kind: 'text', text, pmStart: 1, pmEnd: 4 }],
+    ...(marked ? { attrs: { pPrIns: { revisionId: 1, author: 'Ada', date: '2026-01-01T00:00:00Z' } } } : {}),
+  });
+  const drawn = async (marked: boolean) => {
+    const measure = JSON.parse(wasm.measureParagraphJson(JSON.stringify({ ...config, block: block(marked), maxWidth: 400 })));
+    const page = JSON.parse(wasm.buildDisplayListJson(JSON.stringify({
+      measured: [{ block: block(marked), measure }],
+      fontChains: config.fontChains,
+      options: {},
+      layout: { pages: [{
+        size: { w: 816, h: 1056 }, margins: { top: 96, right: 96, bottom: 96, left: 96 }, number: 1,
+        fragments: [{ kind: 'paragraph', blockId: 'japanese', x: 96, y: 96, width: 624, height: measure.totalHeight,
+          fromLine: 0, toLine: measure.lines.length }],
+      }] },
+    }))).pages[0] as { primitives: Array<{ kind: string; text?: string; structuralRevision?: { scope?: string } }> };
+    const ids = Array.from({ length: Math.max(...specs.map((spec) => spec.slot)) + 1 }, (_, id) => id);
+    const resident = new ResidentProgressiveFonts(specs, ids, [], { updateFontOutlines() {} }, decode, () => {});
+    hits.clear();
+    try {
+      await resident.ensure(glyphsByFont(page));
+      await resident.whenInstalled();
+    } finally { resident.dispose(); }
+    return { page, chunks: index.chunks.map((chunk) => chunk.file).filter((file) => hits.has(file)) };
+  };
+  const plain = await drawn(false);
+  const marked = await drawn(true);
+  const marks = marked.page.primitives.filter((primitive) => primitive.structuralRevision?.scope === 'pmark');
+
+  expect(marks.filter((primitive) => primitive.kind === 'glyphRun')).toEqual([]);
+  expect(marks.filter((primitive) => primitive.kind === 'text' && primitive.text === '¶')).toHaveLength(1);
+  expect(glyphsByFont(marked.page)).toEqual(glyphsByFont(plain.page));
+  expect(marked.chunks).toEqual(plain.chunks);
 });

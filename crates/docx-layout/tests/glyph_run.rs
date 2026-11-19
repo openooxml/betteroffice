@@ -2187,3 +2187,80 @@ fn tracked_paragraph_marks_stay_text_without_a_default_family_chain() {
 
     assert_marks_stay_bare_text(&list);
 }
+
+const CARLITO: &[u8] = include_bytes!("../../../packages/fonts/assets/Carlito-Regular.ttf");
+
+/// Registers bundled faces until one lacks the pilcrow and returns its id.
+fn face_without_a_pilcrow(store: &mut FontStore) -> u32 {
+    const NOTO_HEBREW: &[u8] =
+        include_bytes!("../../../packages/fonts/assets/NotoSansHebrew-Regular.ttf");
+    const NOTO_NASKH: &[u8] =
+        include_bytes!("../../../packages/fonts/assets/NotoNaskhArabic-Regular.ttf");
+    for bytes in [NOTO_HEBREW, NOTO_NASKH] {
+        let face = store.register(bytes.to_vec()).unwrap();
+        if !store.covers(face, '\u{b6}').unwrap() {
+            return face.to_u32();
+        }
+    }
+    panic!("no bundled face lacks the pilcrow");
+}
+
+/// `tracked_mark_input` with `chain` for `"calibri|0|0"` and, when given,
+/// `mark` as the face layout shapes the paragraph mark with.
+fn tracked_mark_input_with_face(chain: &[u32], mark: Option<u32>) -> String {
+    let mut input: serde_json::Value =
+        serde_json::from_str(&tracked_mark_input(Some(chain))).unwrap();
+    if let Some(face) = mark {
+        input["fontChains"]["@betteroffice/fonts/paragraph-mark"] = serde_json::json!([face]);
+    }
+    input.to_string()
+}
+
+/// The primitive kind each paragraph mark on `list`'s first page is drawn as.
+fn mark_kinds(list: &DisplayList) -> Vec<&'static str> {
+    [StructuralRevisionKind::Ins, StructuralRevisionKind::Del]
+        .into_iter()
+        .flat_map(|kind| pmark_primitives(list, kind))
+        .filter_map(|primitive| match primitive {
+            Primitive::Text(text) if text.text == "¶" => Some("text"),
+            Primitive::GlyphRun(run) if run.text == "¶" => Some("glyphRun"),
+            _ => None,
+        })
+        .collect()
+}
+
+fn mark_kinds_of(input: &str, store: &FontStore) -> Vec<&'static str> {
+    let json = build_display_list_json_with_fonts(input, store).unwrap();
+    mark_kinds(&serde_json::from_str(&json).unwrap())
+}
+
+#[cfg(feature = "base-latin")]
+#[test]
+fn tracked_paragraph_marks_stay_text_when_their_face_lacks_the_pilcrow_beside_the_backstop() {
+    let mut store = FontStore::new();
+    let lacking = face_without_a_pilcrow(&mut store);
+    let input = tracked_mark_input_with_face(&[lacking], Some(lacking));
+
+    assert_eq!(mark_kinds_of(&input, &store), ["text", "text"]);
+}
+
+#[test]
+fn a_later_face_of_the_default_chain_never_draws_the_paragraph_mark() {
+    let mut store = FontStore::new();
+    let lacking = face_without_a_pilcrow(&mut store);
+    let carlito = store.register(CARLITO.to_vec()).unwrap().to_u32();
+    for mark in [Some(lacking), None] {
+        let input = tracked_mark_input_with_face(&[lacking, carlito], mark);
+
+        assert_eq!(mark_kinds_of(&input, &store), ["text", "text"], "{mark:?}");
+    }
+}
+
+#[test]
+fn a_default_family_chain_without_a_mark_face_leaves_the_mark_text() {
+    let mut store = FontStore::new();
+    let carlito = store.register(CARLITO.to_vec()).unwrap().to_u32();
+    let input = tracked_mark_input_with_face(&[carlito], None);
+
+    assert_eq!(mark_kinds_of(&input, &store), ["text", "text"]);
+}
