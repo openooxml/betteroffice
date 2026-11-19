@@ -5,7 +5,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, mock, spy
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import JSZip from 'jszip';
-import { StrictMode, createRef } from 'react';
+import { StrictMode, createRef, useState } from 'react';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -2482,25 +2482,84 @@ describe('DocxEditor plugins (peer-less engine)', () => {
     return { ref, view };
   };
 
+  test('onReady receives the ref api once, after the first page paints, and not again on later paints or edits', async () => {
+    const order: string[] = [];
+    const onReady = mock((_api: DocxEditorRef) => { order.push('ready'); });
+    const props = { onReady, onFirstPagePainted: () => { order.push('painted'); } } as
+      Omit<Partial<DocxEditorBaseProps>, 'experimentalWorkerOpen' | 'onChange'>;
+    const ref = createRef<DocxEditorRef>();
+    render(<DocxEditor ref={ref} documentBuffer={documentBytes()} {...props} />);
+    await until(() => order.includes('painted'));
+    await settle(100);
+    expect(order).toEqual(['painted', 'ready']);
+    expect(onReady).toHaveBeenCalledTimes(1);
+    expect(onReady.mock.calls[0]![0]).toBe(ref.current!);
+    await until(() => ref.current?.commands.getState('save').enabled === true);
+    await act(async () => { await ref.current!.whenLayoutComplete({ timeoutMs: 3000 }); });
+    await act(async () => ref.current!.setZoom(1.5));
+    const { version, paragraph } = await firstParagraph(ref);
+    await act(async () => {
+      expect(await ref.current!.applyEdits(appendRequest(version, paragraph.paraId))).toMatchObject({ ok: true });
+    });
+    await act(async () => { await ref.current!.whenLayoutComplete({ timeoutMs: 3000 }); });
+    await settle(300);
+    expect(order).toEqual(['painted', 'ready']);
+  });
+
+  test('onReady is not called when onFirstPagePainted unmounts the editor', async () => {
+    const onReady = mock((_api: DocxEditorRef) => {});
+    let painted = 0;
+    let unmount = () => {};
+    const props = { onReady, onFirstPagePainted: () => { painted += 1; unmount(); } } as
+      Omit<Partial<DocxEditorBaseProps>, 'experimentalWorkerOpen' | 'onChange'>;
+    const view = render(<DocxEditor documentBuffer={documentBytes()} {...props} />);
+    unmount = view.unmount;
+    await until(() => painted === 1);
+    await settle(200);
+    expect(painted).toBe(1);
+    expect(onReady).not.toHaveBeenCalled();
+  });
+
+  test('onReady is not called when onFirstPagePainted hides the editor through host state', async () => {
+    const onReady = mock((_api: DocxEditorRef) => {});
+    const bytes = documentBytes();
+    let painted = 0;
+    function Host() {
+      const [show, setShow] = useState(true);
+      const props = { onReady, onFirstPagePainted: () => { painted += 1; setShow(false); } } as
+        Omit<Partial<DocxEditorBaseProps>, 'experimentalWorkerOpen' | 'onChange'>;
+      return show ? <DocxEditor documentBuffer={bytes} {...props} /> : <p data-testid="hidden" />;
+    }
+    const view = render(<Host />);
+    await until(() => painted === 1);
+    await settle(200);
+    expect(view.queryByTestId('hidden')).not.toBeNull();
+    expect(painted).toBe(1);
+    expect(onReady).not.toHaveBeenCalled();
+  });
+
   test('the default worker emits one settled selection after keyboard navigation', async () => {
     const events: DocxPluginEvent[] = [];
     const plugin = defineDocxPlugin({ id: 'settle', createState: () => null,
       onEvent(_context, event) { events.push(event); } });
-    const { view } = await mount({ plugins: [plugin] });
-    await settle(400);
-    events.length = 0;
-    const input = view.container.querySelector<HTMLTextAreaElement>('[data-docx-worker-editor] textarea')!;
-    await act(async () => {
-      input.focus();
-      fireEvent.keyDown(input, { key: 'ArrowRight', shiftKey: true });
-    });
-    await until(() => events.some((event) => event.type === 'selection-change'));
-    expect(events.filter((event) => event.type === 'selection-settle')).toHaveLength(0);
-    await settle(400);
-    expect(events.filter((event) => event.type === 'selection-settle')).toMatchObject([{ source: 'keyboard' }]);
-    expect(events.filter((event) => event.type === 'selection-settle')).toHaveLength(1);
-    await settle(400);
-    expect(events.filter((event) => event.type === 'selection-settle')).toHaveLength(1);
+    const clock = selectionClock();
+    try {
+      const { view } = await mount({ plugins: [plugin] });
+      await act(async () => { await clock.tick(400); });
+      events.length = 0;
+      const input = view.container.querySelector<HTMLTextAreaElement>('[data-docx-worker-editor] textarea')!;
+      await act(async () => {
+        input.focus();
+        fireEvent.keyDown(input, { key: 'ArrowRight', shiftKey: true });
+      });
+      await until(() => events.some((event) => event.type === 'selection-change'));
+      expect(events.filter((event) => event.type === 'selection-settle')).toHaveLength(0);
+      await act(async () => { await clock.tick(400); });
+      expect(events.filter((event) => event.type === 'selection-settle')).toMatchObject([{ source: 'keyboard' }]);
+      expect(events.filter((event) => event.type === 'selection-settle')).toHaveLength(1);
+      await act(async () => { await clock.tick(400); });
+      expect(events.filter((event) => event.type === 'selection-settle')).toHaveLength(1);
+    } finally { clock.restore(); }
   });
 
   test('a slow worker selection mapping settles once with the pointer source and mapped range', async () => {

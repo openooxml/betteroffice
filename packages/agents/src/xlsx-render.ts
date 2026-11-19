@@ -25,10 +25,11 @@ export async function renderXlsxRange(
   }
   const requests = new Map(fonts.map(font => [JSON.stringify(font), font]));
   const familyOf = (cmd: { chart?: boolean; fontFamily?: string }) => (cmd.chart ? cmd.fontFamily?.split(',')[0]?.trim().replace(/^(['"])(.*)\1$/, '$2') : cmd.fontFamily) || 'sans-serif';
+  const runFont = (cmd: { chart?: boolean; fontFamily?: string; bold?: boolean; italic?: boolean }, run: { fontFamily?: string; bold?: boolean; italic?: boolean }) =>
+    ({ family: run.fontFamily ?? familyOf(cmd), bold: run.bold ?? cmd.bold === true, italic: run.italic ?? cmd.italic === true });
   for (const cmd of list.commands) {
     if (cmd.op !== 'text') continue;
-    const font = { family: familyOf(cmd), bold: cmd.bold === true, italic: cmd.italic === true };
-    requests.set(JSON.stringify(font), font);
+    for (const font of [runFont(cmd, {}), ...(cmd.runs ?? []).map(run => runFont(cmd, run))]) requests.set(JSON.stringify(font), font);
   }
   const aliases = new Map<string, string>();
   for (const [key, font] of requests) {
@@ -40,9 +41,14 @@ export async function renderXlsxRange(
   }
   const painted = { ...list, commands: list.commands.map(cmd => {
     if (cmd.op !== 'text') return cmd;
-    const alias = aliases.get(JSON.stringify({ family: familyOf(cmd), bold: cmd.bold === true, italic: cmd.italic === true }));
-    if (!alias) return cmd;
-    return { ...cmd, fontFamily: cmd.chart ? [`"${alias}"`, ...(cmd.fontFamily?.split(',').slice(1) ?? [])].join(',') : alias };
+    const alias = aliases.get(JSON.stringify(runFont(cmd, {})));
+    const runs = cmd.runs?.map(run => {
+      const font = runFont(cmd, run);
+      const face = aliases.get(JSON.stringify(font));
+      return face ? { ...run, fontFamily: face } : alias ? { ...run, fontFamily: font.family } : run;
+    });
+    if (!alias) return runs ? { ...cmd, runs } : cmd;
+    return { ...cmd, fontFamily: cmd.chart ? [`"${alias}"`, ...(cmd.fontFamily?.split(',').slice(1) ?? [])].join(',') : alias, ...(runs ? { runs } : {}) };
   }) };
   const canvas = createCanvas(Math.ceil(Math.fround(Math.fround(viewport.width) * Math.fround(scale))), Math.ceil(Math.fround(Math.fround(viewport.height) * Math.fround(scale))));
   const ctx = canvas.getContext('2d');
