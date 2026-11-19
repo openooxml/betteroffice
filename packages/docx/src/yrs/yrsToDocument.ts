@@ -4169,13 +4169,18 @@ class SaveContext {
     const crossing = this.crossingIn(storyId);
     const farEnds: Array<{ id: number; offset: number }> = [];
     const nestedComments = this.subtreeComments.get(storyId);
-    const commentsKey = (nestedComments ? stableStringify(Object.fromEntries(nestedComments)) : '') + crossing.key;
+    const cut = this.fallback.size > 0;
+    const commentsKey =
+      (nestedComments ? stableStringify(Object.fromEntries(nestedComments)) : '') +
+      crossing.key +
+      (cut ? `|cut:${[...this.fallback].sort((a, b) => a - b).join(',')}` : '');
     const priorStory = this.memo.stories.get(storyId);
     // Nested stories are mapped positionally, so a different array means
     // drift, not divergence — mutation paths mark them dirty anyway. A root
     // story on a different array is genuine divergence and forces a fresh
-    // projection.
+    // projection. A projection that cuts comments reuses no story.
     if (
+      !cut &&
       priorStory !== undefined &&
       priorStory.commentsKey === commentsKey &&
       this.storyIsClean(storyId) &&
