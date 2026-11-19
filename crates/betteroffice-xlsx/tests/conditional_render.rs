@@ -867,3 +867,16 @@ fn a_conditional_italic_leaves_a_rich_text_cell_as_painted_without_it() {
     let (_, bold, italic) = plain_beside_rich("<i/>");
     assert_eq!((bold, italic), (false, true));
 }
+
+#[test]
+fn a_rich_text_cell_left_its_own_font_is_counted() {
+    for (font, kept) in [("<font><b/></font>", 1), ("", 0)] {
+        let workbook = rich_book(
+            &rule("A1:A2", &expression(1, "$B$1&gt;0")),
+            &format!("{font}{}", fill(RED)),
+        );
+        assert_eq!(fills(&workbook, &viewport(0.0)), red(&[0, 1]), "{font}");
+        let stats = workbook.conditional_stats();
+        assert_eq!(stats.withheld_rich_text, kept, "{font}");
+    }
+}

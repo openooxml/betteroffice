@@ -6816,7 +6816,8 @@ fn validate_viewport(viewport: &Viewport) -> Result<()> {
 
 impl Workbook {
     /// The conditional-format effects on the `rows` by `cols` cells of
-    /// `sheet`, and how many of them `budget` left undecided.
+    /// `sheet`, and how many of them `budget` left undecided. A cell with rich
+    /// text runs takes only the fill.
     fn conditional_effects(
         &self,
         sheet: SheetId,
@@ -6824,18 +6825,21 @@ impl Workbook {
         cols: &[std::ops::Range<u32>],
         budget: Budget<'_>,
     ) -> (xlsx_render::CellFormats, u32) {
-        self.conditional_cache
+        let mut cache = self
+            .conditional_cache
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .effects(
-                (self.model_epoch, self.calculated_now),
-                &self.last_calculation.limited_cells,
-                &self.model,
-                sheet,
-                rows,
-                cols,
-                budget,
-            )
+            .unwrap_or_else(|e| e.into_inner());
+        let (mut formats, pending) = cache.effects(
+            (self.model_epoch, self.calculated_now),
+            &self.last_calculation.limited_cells,
+            &self.model,
+            sheet,
+            rows,
+            cols,
+            budget,
+        );
+        cache.set_withheld_rich_text(self.keep_rich_text_fonts(sheet, &mut formats));
+        (formats, pending)
     }
 
     /// Sets the evaluation one frame on screen spends on conditional formats.

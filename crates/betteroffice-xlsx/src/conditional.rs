@@ -147,6 +147,9 @@ pub struct ConditionalStats {
     /// Cells withheld because a rule formula reached a function or reference
     /// the calc engine cannot evaluate.
     pub withheld_engine_gap: u64,
+    /// Cells of the last display list whose conditional font color, bold and
+    /// italic are withheld because the cell has rich text runs.
+    pub withheld_rich_text: u32,
 }
 
 impl ConditionalStats {
@@ -317,6 +320,10 @@ enum Key {
 impl Cache {
     pub(crate) fn set_budget(&mut self, visits: u64) {
         self.budget = visits.max(1);
+    }
+
+    pub(crate) fn set_withheld_rich_text(&mut self, cells: u32) {
+        self.stats.withheld_rich_text = cells;
     }
 
     pub(crate) fn stats(&self) -> ConditionalStats {
