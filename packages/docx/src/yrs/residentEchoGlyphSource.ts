@@ -83,7 +83,7 @@ export class EchoGlyphSources {
     if (current && !missing.length) return current.source;
     const grown = current && current.alphabet.length + missing.length <= MAX_ALPHABET
       ? this.build(fontId, size, kern, language, [...current.alphabet, ...missing], current)
-      : this.build(fontId, size, kern, language, [...new Set([...DOCX_ECHO_ALPHABET, ...chars])]);
+      : this.build(fontId, size, kern, language, [...new Set([...DOCX_ECHO_ALPHABET, ...chars])], undefined, current?.key);
     // a set that cannot grow keeps echoing what it has
     if (grown === null && current) return current.source;
     this.sets.set(base, grown);
@@ -94,7 +94,8 @@ export class EchoGlyphSources {
   }
 
   private build(
-    fontId: number, size: number, kern: boolean, language: string | undefined, alphabet: string[], earlier?: SetEntry
+    fontId: number, size: number, kern: boolean, language: string | undefined, alphabet: string[], earlier?: SetEntry,
+    replaces?: string
   ): SetEntry | null {
     try {
       const known = earlier?.alphabet.length ?? 0;
@@ -104,7 +105,7 @@ export class EchoGlyphSources {
         const before = earlier.payload;
         // pairs only grow from what the earlier set paired; a glyph it could not echo stays out
         if (before.glyphIds.some((id, index) => shaped.glyphIds[index] !== id && (id === 0 || shaped.glyphIds[index] !== 0)) ||
-          before.horizontal !== shaped.horizontal) return this.build(fontId, size, kern, language, alphabet);
+          before.horizontal !== shaped.horizontal) return this.build(fontId, size, kern, language, alphabet, undefined, earlier.key);
       }
       const outlines: Record<string, string> = { ...earlier?.payload.outlines };
       const added: Record<string, string> = {};
@@ -130,7 +131,10 @@ export class EchoGlyphSources {
         unsafePairs: [...earlier.payload.unsafePairs, ...shaped.unsafePairs],
       } : {};
       // the whole set names no base: a receiver without the earlier one takes it as it is
-      const payload: DocxEchoGlyphSet = { key, fontId, alphabet: text, ...shaped, ...pairs, outlines };
+      // and names the set it takes the place of, so the receiver does not keep both
+      const replaced = earlier?.key ?? replaces;
+      const payload: DocxEchoGlyphSet = { key, ...(replaced === undefined ? {} : { replaces: replaced }), fontId, alphabet: text,
+        ...shaped, ...pairs, outlines };
       const growth: DocxEchoGlyphSet | undefined = earlier
         ? { key, extends: earlier.key, fontId, alphabet: text, ...shaped, outlines: added } : undefined;
       return { key, alphabet, has: new Set(alphabet), payload, ...(growth ? { growth } : {}),

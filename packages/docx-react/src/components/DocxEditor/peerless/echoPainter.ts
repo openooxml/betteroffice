@@ -77,7 +77,7 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
   let coverage = -1;
   const owner = {};
   const glyphSets = new Map<string, GlyphSetEntry>();
-  /** Sets a grown set replaced, kept until no installed context names them. */
+  /** Sets a grown or rebuilt set replaced, kept until no installed context names them. */
   const superseded = new Set<string>();
   const requested = new Set<string>();
 
@@ -93,6 +93,7 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
           unsafePairs: [...base.unsafePairs, ...incoming.unsafePairs], outlines: { ...base.outlines, ...incoming.outlines } };
         superseded.add(grown);
       }
+      if (incoming.replaces !== undefined && incoming.replaces !== incoming.key) superseded.add(incoming.replaces);
       const outlines = set.outlines;
       glyphSets.set(set.key, { set, glyphs: indexEchoGlyphSet(set), cache: new GlyphCache({ provider: (fontId, glyphId) => {
         const outline = fontId === set.fontId ? outlines[glyphId] : undefined;

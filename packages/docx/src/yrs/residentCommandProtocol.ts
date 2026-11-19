@@ -281,6 +281,11 @@ export interface DocxEchoGlyphSet {
    * set whose base it does not hold.
    */
   extends?: string;
+  /**
+   * The set this whole one was built in place of, for the same font, size, kerning and language:
+   * the receiver drops it once no installed context names it.
+   */
+  replaces?: string;
   fontId: number;
   alphabet: string;
   horizontal: number;

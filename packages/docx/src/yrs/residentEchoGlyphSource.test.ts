@@ -77,9 +77,10 @@ test('a set grows by what its new characters add, sent as growth only to a main 
   expect(Object.keys(growth!.outlines).sort()).toEqual(['가', '나'].map((char) => String(char.codePointAt(0))).sort());
   expect(growth!.kerning).toEqual([[known, 0, -1], [known + 1, 0, -1]]);
   expect(growth!.glyphIds.length).toBe(known + 2);
-  // the whole set stands alone for a receiver without the base
+  // the whole set stands alone for a receiver without the base, and names the set it replaces
   const whole = grown.glyphs.set;
   expect(whole.extends).toBeUndefined();
+  expect(whole.replaces).toBe(base.key);
   expect(whole.kerning.length).toBe(known + 2);
   expect(Object.keys(whole.outlines).length).toBe(known + 2);
   expect(grown.glyphs.chars.has('나')).toBe(true);
@@ -101,12 +102,15 @@ test('a set whose earlier glyphs shape differently, or that would grow too large
   const { engine, calls, renumbered } = growingEngine();
   const sources = new EchoGlyphSources(engine, 1);
   const provider = sources.provider(1);
-  sources.sent([provider.glyphSet(1, 12, false, undefined)!.glyphs.set]);
+  const first = provider.glyphSet(1, 12, false, undefined)!;
+  sources.sent([first.glyphs.set]);
   renumbered.add('a');
   const rebuilt = provider.glyphSet(1, 12, false, undefined, '가')!;
   expect(calls.map((call) => call.known)).toEqual([undefined, [...DOCX_ECHO_ALPHABET].length, undefined]);
   const [sent] = sources.unsent(naming(rebuilt.key));
   expect(sent!.extends).toBeUndefined();
+  // a rebuilt set names the one it takes the place of, which the main thread then drops
+  expect(sent!.replaces).toBe(first.key);
   expect(sent!.glyphIds[DOCX_ECHO_ALPHABET.indexOf('a')]).toBe(9999);
   sources.sent([sent!]);
 
@@ -116,4 +120,5 @@ test('a set whose earlier glyphs shape differently, or that would grow too large
   // the rebuilt set starts again from the base alphabet and the line's own characters
   expect(large.glyphs.chars.has('가')).toBe(true);
   expect(large.glyphs.set.alphabet.length).toBe(DOCX_ECHO_ALPHABET.length + 1000);
+  expect(large.glyphs.set.replaces).toBe(rebuilt.key);
 });

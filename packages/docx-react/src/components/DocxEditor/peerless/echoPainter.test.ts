@@ -811,6 +811,20 @@ test('a grown glyph set completes the set it extends; one whose base is missing 
   expect(requests).toEqual([1, 1]);
 });
 
+test('a set built again whole drops the set it replaces, as a grown set does', () => {
+  const { painter, requests, install } = faceSetup('a가', [0, 1]);
+  const naming = (revision: number, key: string) => {
+    const echo = faceContext(revision, 'a가', [0, 1], 2);
+    return { ...echo, glyphs: { ...echo.glyphs!, faces: [echo.glyphs!.faces![0]!, { glyphSet: key, fontId: 2, metrics: 2 }] } };
+  };
+  install(3, naming(3, 'kr3'), [{ ...hangulSet('kr3', '가나다', '가나다'), replaces: 'kr' }]);
+  expect(painter.preview(insert('나'))).toBeDefined();
+  expect(requests).toEqual([]);
+  painter.installContext(naming(3, 'kr'));
+  expect(painter.preview(insert('나'))).toBeUndefined();
+  expect(requests).toEqual([1]);
+});
+
 test('a table cell line paints inside the clip the page raster paints its text with', () => {
   const { painter, rects } = faceSetup('a가', [0, 1], 2, { clip: { x: 2, y: 1, w: 50, h: 18 } });
   painter.paint([entry(2, painter.preview(insert('나'))!)]);
