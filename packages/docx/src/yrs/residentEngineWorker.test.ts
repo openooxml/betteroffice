@@ -712,7 +712,7 @@ test('font decoding initializes the resident engine before open and transfers fo
   expect(w.harness.sessionsCreated).toBe(0);
 });
 
-test('selection noop answers in one message carrying its retained echo context and its frame', async () => {
+test('selection noop answers in one message whose frame carries the echo context, with no earlier context beside it', async () => {
   const arm = await commandWorker();
   const { client, w } = arm;
   const at = { story: 'body', paraId: 'p', offset: 1 };
@@ -773,9 +773,9 @@ test('selection noop answers in one message carrying its retained echo context a
     const ack = await client.edit({ ...commandEnvelope(1), kind: 'selectPoint', payload: {} });
     expect(answered).toHaveLength(1);
     expect(projected[0]).toBe(initial.frame.revision);
-    expect(ack.echoContext).toMatchObject({ frameEpoch: initial.frame.revision, selection: { focusGrapheme: 1 } });
     expect(ack.frame?.coversThroughSeq).toBe(1);
-    expect(ack.frame!.payload.echoContext).toMatchObject({ frameEpoch: initial.frame.revision });
+    expect(ack.frame!.payload.echoContext).toMatchObject({ frameEpoch: initial.frame.revision, selection: { focusGrapheme: 1 } });
+    expect(ack.echoContext).toBeUndefined();
     expect(builds).toBe(1);
   } finally { client.destroy(); }
 });
