@@ -913,23 +913,49 @@ fn reference_revisions<'a>(xml: &'a str, tags: &[Tag<'a>]) -> Vec<ReferenceRevis
 }
 
 /// The [`dropped_structure`] of a save that changes only run formatting, with the name of each
-/// `w:ins` or `w:del` of `source` whose runs hold note references and nothing else.
+/// `w:ins` or `w:del` of `source` whose runs hold note references and nothing else, or without
+/// such a revision, the [`base_dropped_revisions`].
 fn dropped_by_format_edit(source: &str, written: &str) -> Vec<&'static str> {
     let mut dropped = dropped_structure(source, written);
     let source_tags = tags(source).unwrap_or_default();
-    for revision in reference_revisions(source, &source_tags) {
-        if !dropped.contains(&revision.name) {
-            dropped.push(revision.name);
+    let revisions = reference_revisions(source, &source_tags);
+    let names = if revisions.is_empty() {
+        base_dropped_revisions(source, written)
+    } else {
+        revisions.iter().map(|revision| revision.name).collect()
+    };
+    for name in names {
+        if !dropped.contains(&name) {
+            dropped.push(name);
         }
     }
     dropped
 }
 
+/// Whether a note reference tag of `tags` stands inside a `w:ins` or `w:del`.
+fn tracks_note_reference(tags: &[Tag<'_>]) -> bool {
+    let mut open = 0usize;
+    for tag in tags {
+        if REVISIONS.contains(&tag.name) {
+            if tag.end {
+                open = open.saturating_sub(1);
+            } else if !tag.empty {
+                open += 1;
+            }
+        } else if open > 0 && matches!(tag.name, "w:footnoteReference" | "w:endnoteReference") {
+            return true;
+        }
+    }
+    false
+}
+
 /// One element of a fragment: the index of its start tag, its bytes from its start tag's first
-/// byte to its end tag's last, and the indices of its child elements.
+/// byte to its end tag's last, the index of its parent element, and the indices of its child
+/// elements.
 struct Element {
     tag: usize,
     range: Range<usize>,
+    parent: Option<usize>,
     children: Vec<usize>,
 }
 
@@ -956,12 +982,14 @@ impl<'a> Fragment<'a> {
                 continue;
             }
             let index = elements.len();
-            if let Some(&parent) = stack.last() {
+            let parent = stack.last().copied();
+            if let Some(parent) = parent {
                 elements[parent].children.push(index);
             }
             elements.push(Element {
                 tag: at,
                 range: tag.range.clone(),
+                parent,
                 children: Vec::new(),
             });
             if !tag.empty {
@@ -1016,23 +1044,63 @@ impl<'a> Fragment<'a> {
         Some((kept, &xml[tag.range.clone()]))
     }
 
-    /// The bytes of each run of the fragment, in document order and at any depth, that holds an
-    /// optional `w:rPr` followed by one empty note reference tag and nothing else.
-    fn reference_runs(&self) -> Vec<&'a str> {
+    /// Whether each element of the fragment is or holds a note reference tag at any depth.
+    fn reference_holders(&self) -> Vec<bool> {
+        let mut holders = vec![false; self.elements.len()];
+        for (index, element) in self.elements.iter().enumerate() {
+            let name = self.tags[element.tag].name;
+            if !matches!(name, "w:footnoteReference" | "w:endnoteReference") {
+                continue;
+            }
+            let mut at = Some(index);
+            while let Some(holder) = at {
+                if holders[holder] {
+                    break;
+                }
+                holders[holder] = true;
+                at = self.elements[holder].parent;
+            }
+        }
+        holders
+    }
+
+    /// The names of the element `element` and of each element that encloses it, innermost first.
+    fn enclosing_names(&self, element: usize) -> Vec<&'a str> {
+        let mut names = Vec::new();
+        let mut at = Some(element);
+        while let Some(index) = at {
+            names.push(self.tag(index).name);
+            at = self.elements[index].parent;
+        }
+        names
+    }
+
+    /// The bytes of each run of the fragment, in document order and at any depth, that holds a
+    /// note reference tag, with the names of the elements that enclose it.
+    fn note_reference_runs(&self) -> Vec<(Vec<&'a str>, &'a str)> {
         let xml = self.xml;
+        let holders = self.reference_holders();
         (0..self.elements.len())
-            .filter(|index| self.reference_run(*index, true).is_some())
-            .map(|index| &xml[self.elements[index].range.clone()])
+            .filter(|index| holders[*index] && self.tag(*index).name == "w:r")
+            .map(|index| {
+                let bytes = &xml[self.elements[index].range.clone()];
+                (self.enclosing_names(index), bytes)
+            })
             .collect()
     }
 
-    /// Whether the element `element` holds a note reference tag at any depth.
-    fn holds_note_reference(&self, element: usize) -> bool {
-        let range = &self.elements[element].range;
-        self.tags.iter().any(|tag| {
-            let note = matches!(tag.name, "w:footnoteReference" | "w:endnoteReference");
-            note && range.contains(&tag.range.start)
-        })
+    /// Whether the run `run` holds one note reference tag and otherwise only `w:rPr` and
+    /// `w:lastRenderedPageBreak` elements.
+    fn holds_one_reference(&self, run: usize) -> bool {
+        let mut references = 0;
+        for &child in &self.elements[run].children {
+            match self.tag(child).name {
+                "w:footnoteReference" | "w:endnoteReference" => references += 1,
+                "w:rPr" | "w:lastRenderedPageBreak" => {}
+                _ => return false,
+            }
+        }
+        references == 1
     }
 
     /// Whether the element `element` has a child other than a `w:rPr`.
@@ -1042,39 +1110,45 @@ impl<'a> Fragment<'a> {
     }
 }
 
-/// Whether the runs of `written` that hold an optional `w:rPr` followed by one empty note
-/// reference tag and nothing else have, in document order, the bytes of those of `source`.
+/// Whether the runs of `written` that hold a note reference tag have, in document order, the
+/// bytes and the enclosing element names of those of `source`.
 fn keeps_reference_runs(source: &str, written: &str) -> Option<bool> {
     let source = Fragment::new(source, tags(source)?)?;
     let written = Fragment::new(written, tags(written)?)?;
-    Some(source.reference_runs() == written.reference_runs())
+    Some(source.note_reference_runs() == written.note_reference_runs())
 }
 
 /// The number of `w:ins` and of `w:del` elements the paragraph `written` would hold if each note
 /// reference stood outside its revision: a revision counts once for each stretch of its runs that
 /// a note reference does not interrupt; `None` when a revision that holds a note reference is not
-/// a child of the paragraph or holds anything but runs.
+/// a child of the paragraph or holds anything but runs, or one of its runs that holds a note
+/// reference holds more than run properties, rendered page break markers and that reference.
 fn base_revision_counts(written: &str) -> Option<[usize; 2]> {
     let written = Fragment::new(written, tags(written)?)?;
+    let holders = written.reference_holders();
     let mut counts = [0; REVISIONS.len()];
-    for element in 0..written.elements.len() {
+    for (element, &holds) in holders.iter().enumerate() {
         let tag = written.tag(element);
         let Some(index) = REVISIONS.iter().position(|name| *name == tag.name) else {
             continue;
         };
-        if !written.holds_note_reference(element) {
+        if !holds {
             counts[index] += 1;
             continue;
         }
+        let children = written.paragraph_children()?;
         let runs = &written.elements[element].children;
-        if !written.paragraph_children()?.contains(&element)
+        if children.binary_search(&element).is_err()
             || runs.iter().any(|run| written.tag(*run).name != "w:r")
         {
             return None;
         }
         let mut open = false;
         for &run in runs {
-            if written.reference_run(run, true).is_some() {
+            if holders[run] {
+                if !written.holds_one_reference(run) {
+                    return None;
+                }
                 open = false;
             } else if written.holds_more_than_properties(run) {
                 counts[index] += usize::from(!open);
@@ -1085,21 +1159,47 @@ fn base_revision_counts(written: &str) -> Option<[usize; 2]> {
     Some(counts)
 }
 
-/// Whether the paragraph `written`, with each note reference outside its revision, holds at least
-/// as many `w:ins` and as many `w:del` elements as `source`.
-fn base_writes_paragraph(source: &str, written: &str) -> bool {
-    let Some(counts) = base_revision_counts(written) else {
-        return false;
-    };
+/// The number of `w:ins` and of `w:del` elements of `source`; `None` when it does not parse.
+fn revision_counts(source: &str) -> Option<[usize; 2]> {
     let mut held = [0; REVISIONS.len()];
-    for tag in tags(source).unwrap_or_default() {
+    for tag in tags(source)? {
         if !tag.end
             && let Some(index) = REVISIONS.iter().position(|name| *name == tag.name)
         {
             held[index] += 1;
         }
     }
+    Some(held)
+}
+
+/// Whether the paragraph `written`, with each note reference outside its revision, holds at least
+/// as many `w:ins` and as many `w:del` elements as `source`.
+fn base_writes_paragraph(source: &str, written: &str) -> bool {
+    let counts = base_revision_counts(written);
+    let held = revision_counts(source);
+    let (Some(counts), Some(held)) = (counts, held) else {
+        return false;
+    };
     counts[0] >= held[0] && counts[1] >= held[1]
+}
+
+/// The names of the `w:ins` and `w:del` elements the paragraph `written`, with each note reference
+/// outside its revision, holds fewer of than `source`, or that `source` holds when those of
+/// `written` cannot be counted.
+fn base_dropped_revisions(source: &str, written: &str) -> Vec<&'static str> {
+    let Some(held) = revision_counts(source) else {
+        return Vec::new();
+    };
+    let counts = base_revision_counts(written);
+    REVISIONS
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| match counts {
+            Some(counts) => counts[*index] < held[*index],
+            None => held[*index] > 0,
+        })
+        .map(|(_, name)| *name)
+        .collect()
 }
 
 /// Whether the element `counterpart` of `written` holds the runs of the element `element` of
@@ -1159,7 +1259,7 @@ fn restorations(
             return None;
         };
         if written.tag(counterpart).empty
-            || !written_children.contains(&counterpart)
+            || written_children.binary_search(&counterpart).is_err()
             || !same_reference_runs(&source, element, &written, counterpart)
         {
             return None;
@@ -1176,8 +1276,8 @@ fn restorations(
 /// What a save that changes only run formatting writes for the paragraph `source` given its
 /// rewrite `written`: `written` with each `w:ins` or `w:del` of `source` whose runs hold note
 /// references and nothing else put back as its source bytes, when every other run of a note
-/// reference keeps its source bytes or [`base_writes_paragraph`] holds for `written`; otherwise
-/// the elements writing it would drop.
+/// reference keeps its source bytes and place or [`base_writes_paragraph`] holds for `written`;
+/// otherwise the elements writing it would drop.
 pub(crate) fn format_edit<'a>(
     source: &str,
     written: &'a str,
@@ -1186,10 +1286,15 @@ pub(crate) fn format_edit<'a>(
     let revisions = reference_revisions(source, &source_tags);
     if revisions.is_empty() {
         let dropped = dropped_structure(source, written);
-        return if dropped.is_empty() {
+        return if !dropped.is_empty() {
+            Err(dropped)
+        } else if !tracks_note_reference(&source_tags)
+            || keeps_reference_runs(source, written) == Some(true)
+            || base_writes_paragraph(source, written)
+        {
             Ok(Cow::Borrowed(written))
         } else {
-            Err(dropped)
+            Err(dropped_by_format_edit(source, written))
         };
     }
     let Some(replacements) = restorations(source, source_tags, written, &revisions) else {
