@@ -1339,6 +1339,77 @@ test('previewFirstPage previews a cut of the source before the whole source open
   expect(Buffer.from(cut.source.bytes!)).toEqual(Buffer.from(whole.source.bytes!));
 });
 
+test('a cut preview leaves the tracked paragraph mark a text item while the whole source names its face', async () => {
+  fontRequirements = [{ key: 'calibri|0|0', family: 'Calibri', bold: false, italic: false }];
+  const bundled = Uint8Array.of(21, 22).buffer;
+  render(<DocxEditor {...peerlessProps} previewFirstPage showToolbar={false} measurementFontProvider={{ resolve: () => async () => bundled }} />);
+  await waitFor(() => expect(requests.some(request => request.type === 'commandInit')).toBe(true));
+  const preview = requests.find(request => request.type === 'previewSource');
+  const init = requests.find(request => request.type === 'commandInit');
+  if (preview?.type !== 'previewSource' || init?.type !== 'commandInit') throw new Error('Worker did not preview');
+  const mark = '@betteroffice/fonts/paragraph-mark';
+  const chains = (extras: string) => JSON.parse(extras).fontChains as Record<string, number[]>;
+  const whole = chains(init.request.extras);
+  expect(Object.keys(chains(preview.preview.extras!))).toEqual(['calibri|0|0']);
+  expect(JSON.parse(preview.preview.layoutInput).measurement.fontChains).not.toHaveProperty(mark);
+  expect(whole[mark]).toEqual(whole['calibri|0|0']!.slice(0, 1));
+});
+
+const PARAGRAPH_MARK = '@betteroffice/fonts/paragraph-mark';
+const calibriRequirement = { key: 'calibri|0|0', family: 'Calibri', bold: false, italic: false };
+const arialRequirement = { key: 'arial|0|0', family: 'Arial', bold: false, italic: false };
+
+function fontEnvironmentChains() {
+  return requests.flatMap(request => request.type === 'edit' && request.command.kind === 'setFontEnvironment'
+    ? [(request.command.payload as yrs.DocxCommandPayloads['setFontEnvironment']).chains] : []);
+}
+
+const fontRequirementQueries = () => requests.filter(request => request.type === 'fontRequirements').length;
+
+async function hintFontRequirements(next: measurement.ResidentFontRequirement[]) {
+  fontRequirements = next;
+  const worker = workers[0]!;
+  const { session, incarnation, epoch } = worker.initial!;
+  const hint = () => act(async () => {
+    worker.onmessage?.({ data: { id: 0, ok: true, fontRequirementsHint: { session, incarnation, epoch } } } as MessageEvent<DocxEngineWorkerResponse>);
+  });
+  const asked = fontRequirementQueries();
+  await hint();
+  await waitFor(() => expect(fontRequirementQueries()).toBe(asked + 1), { timeout: 3000 });
+  await hint();
+  await waitFor(() => expect(fontRequirementQueries()).toBe(asked + 2), { timeout: 3000 });
+}
+
+test('an edit that drops the default family from the requirements sends no font environment and keeps the paragraph mark face', async () => {
+  fontRequirements = [calibriRequirement, arialRequirement];
+  const bundled = Uint8Array.of(21, 22).buffer;
+  render(<DocxEditor {...peerlessProps} measurementFontProvider={{ resolve: () => async () => bundled }} />);
+  await waitFor(() => expect(binding).toBeDefined());
+  const init = requests.find(request => request.type === 'commandInit');
+  if (init?.type !== 'commandInit') throw new Error('command initialization missing');
+  expect(JSON.parse(init.request.extras).fontChains).toHaveProperty(PARAGRAPH_MARK);
+  await hintFontRequirements([arialRequirement]);
+  expect(fontEnvironmentChains()).toHaveLength(0);
+});
+
+test('an edit that brings a picked default family into the requirements sends no font environment beyond the pick', async () => {
+  fontRequirements = [arialRequirement];
+  const bundled = Uint8Array.of(21, 22).buffer;
+  const ref = createRef<DocxEditorRef>();
+  render(<DocxEditor {...peerlessProps} ref={ref} measurementFontProvider={{ resolve: () => async () => bundled }} />);
+  await waitFor(() => expect(binding).toBeDefined());
+  const init = requests.find(request => request.type === 'commandInit');
+  if (init?.type !== 'commandInit') throw new Error('command initialization missing');
+  expect(JSON.parse(init.request.extras).fontChains).not.toHaveProperty(PARAGRAPH_MARK);
+  selectWorkerText();
+  await act(async () => { await ref.current!.commands.execute('fontFamily', { family: 'Calibri' }); });
+  await waitFor(() => expect(fontEnvironmentChains()).toHaveLength(1));
+  expect(fontEnvironmentChains()[0]).toHaveProperty('calibri|0|0');
+  await hintFontRequirements([arialRequirement, calibriRequirement]);
+  expect(fontEnvironmentChains()).toHaveLength(1);
+  expect(fontEnvironmentChains()[0]).not.toHaveProperty(PARAGRAPH_MARK);
+});
+
 test('a declined source cut previews the whole source before the command session', async () => {
   refuseCut = true;
   render(<DocxEditor {...peerlessProps} previewFirstPage showToolbar={false} />);

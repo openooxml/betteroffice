@@ -13102,13 +13102,15 @@ impl EngineSession {
     }
 
     /// A fingerprint of the fonts, fallback order and measurement defaults of `request`, by font
-    /// content rather than store ids. `None` when a font it names is not registered.
+    /// content rather than store ids. `None` when a font it names is not registered. The face
+    /// of the tracked paragraph mark is left out: it moves no text.
     fn font_set_fingerprint(&self, request: &serde_json::Value) -> Option<String> {
         let measurement = request.get("measurement").cloned().unwrap_or_default();
         let store = docx_layout::measure_store_id();
         let mut chains = BTreeMap::new();
         if let Some(serde_json::Value::Object(font_chains)) = measurement.get("fontChains") {
-            for (key, ids) in font_chains {
+            let mark = docx_layout::display_list::PARAGRAPH_MARK_FACE;
+            for (key, ids) in font_chains.iter().filter(|(key, _)| key.as_str() != mark) {
                 let mut faces = Vec::new();
                 for id in ids.as_array().into_iter().flatten() {
                     let id = u32::try_from(id.as_u64()?).ok()?;
@@ -13183,6 +13185,25 @@ mod tests {
     mod preview_refresh_tests;
 
     mod command_relayout_tests;
+
+    #[test]
+    fn the_paragraph_mark_face_leaves_the_font_set_fingerprint_alone() {
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        let engine = EngineSession::new(7);
+        let fingerprint = |chains: serde_json::Value| {
+            let defaults = json!({"fontFamily": "Calibri", "fontSize": 11});
+            let request = json!({"measurement": {"fontChains": chains, "defaults": defaults}});
+            engine.font_set_fingerprint(&request)
+        };
+        let plain = fingerprint(json!({"calibri|0|0": [font]}));
+        let marked = fingerprint(json!({
+            "calibri|0|0": [font],
+            "@betteroffice/fonts/paragraph-mark": [font],
+        }));
+
+        assert!(plain.is_some());
+        assert_eq!(marked, plain);
+    }
 
     fn table_wrap_section(content_width: f64, columns: serde_json::Value) -> serde_json::Value {
         json!({
