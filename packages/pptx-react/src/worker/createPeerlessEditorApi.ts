@@ -60,9 +60,12 @@ export function peerlessPositionAtPoint(run: PeerlessPresentation, canvas: HTMLC
 
 export function notifyingSaveApi(api: PptxAsyncEditorApi, saved: (bytes: Uint8Array) => void): PptxAsyncEditorApi {
   const save = async () => { const bytes = await api.save(); saved(bytes); return bytes; };
-  return new Proxy(api, {
-    get: (target, key, receiver) => key === 'save' || key === 'saveAsync' ? save : Reflect.get(target, key, receiver),
-  });
+  const descriptors = Object.getOwnPropertyDescriptors(api);
+  return Object.defineProperties({}, {
+    ...descriptors,
+    save: { ...descriptors.save, value: save },
+    saveAsync: { ...descriptors.saveAsync, value: save },
+  }) as PptxAsyncEditorApi;
 }
 
 export function createPeerlessEditorApi(run: PeerlessPresentation, canvas: HTMLCanvasElement,
