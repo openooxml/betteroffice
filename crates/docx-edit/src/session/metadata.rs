@@ -1,5 +1,6 @@
 use serde_json::json;
 
+use super::args::attrs_value;
 use super::{EditSessionCore, EngineError, EngineResult};
 use crate::{EditCtx, ListKind};
 
@@ -73,7 +74,7 @@ impl EditSessionCore {
             .doc()
             .ensure_list_definition(&EditCtx::local("", ""), story, para_id, kind)
             .map_err(EngineError::from)?;
-        serde_json::to_string(&attrs).map_err(EngineError::message)
+        Ok(attrs_value(&attrs)?.to_string())
     }
 
     /// The list definitions the editor created, by key, as JSON

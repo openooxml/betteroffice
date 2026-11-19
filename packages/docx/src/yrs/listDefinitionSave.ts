@@ -114,7 +114,7 @@ export function withCreatedListIds<T>(value: T, numIds: ReadonlyMap<string, numb
       } else {
         const entries = Object.entries(record).map(([name, entry]) => [name, visit(entry)] as const);
         if (entries.some(([name, entry]) => entry !== record[name])) {
-          const copy = Object.fromEntries(entries);
+          const copy: object = Object.fromEntries(entries);
           const alias = headerFooterAliasOf(node as HeaderFooter);
           if (alias !== undefined) markHeaderFooterAlias(copy as HeaderFooter, alias);
           result = copy;
