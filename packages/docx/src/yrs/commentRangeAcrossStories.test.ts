@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it } from 'bun:test';
+import { beforeAll, describe, expect, it, spyOn } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parseDocx } from '../docx';
@@ -11,6 +11,7 @@ import { documentToYrs } from './documentToYrs';
 import { DirtyProjectionStories, mergeDocxHostMetadata, saveEditorDocument } from './editorSave';
 import { createYrsSession, decodeDocxHostJson, saveYrsDocx, type YrsSession } from './index';
 import { createResidentEngineSession } from './residentEngineSession';
+import type { ResidentSaveRecord } from './residentSave';
 import { yrsToDocument } from './yrsToDocument';
 
 const TIMEOUT = 60_000;
@@ -48,7 +49,7 @@ const textBox = (inner: string) =>
   `</a:xfrm><a:prstGeom prst="rect"/></wps:spPr><wps:txbx><w:txbxContent>${inner}</w:txbxContent></wps:txbx>` +
   '<wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>';
 
-function docx(body: string, ids: number[]): Uint8Array {
+function docx(body: string, ids: number[], header?: string): Uint8Array {
   const comment = (id: number) =>
     `<w:comment w:id="${id}" w:author="Grace" w:date="2025-03-04T05:06:07Z" w:initials="G">` +
     `<w:p><w:r><w:t>Note ${id}</w:t></w:r></w:p></w:comment>`;
@@ -60,6 +61,7 @@ function docx(body: string, ids: number[]): Uint8Array {
         '<Default Extension="xml" ContentType="application/xml"/>' +
         `<Override PartName="/word/document.xml" ContentType="${OFFICE}.document.main+xml"/>` +
         `<Override PartName="/word/comments.xml" ContentType="${OFFICE}.comments+xml"/>` +
+        (header === undefined ? '' : `<Override PartName="/word/header1.xml" ContentType="${OFFICE}.header+xml"/>`) +
         `<Override PartName="/word/styles.xml" ContentType="${OFFICE}.styles+xml"/></Types>`,
     ],
     [
@@ -71,6 +73,7 @@ function docx(body: string, ids: number[]): Uint8Array {
       'word/_rels/document.xml.rels',
       '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
         `<Relationship Id="rIdStyles" Type="${R}/styles" Target="styles.xml"/>` +
+        (header === undefined ? '' : `<Relationship Id="rIdH" Type="${R}/header" Target="header1.xml"/>`) +
         `<Relationship Id="rIdComments" Type="${R}/comments" Target="comments.xml"/></Relationships>`,
     ],
     [
@@ -79,7 +82,13 @@ function docx(body: string, ids: number[]): Uint8Array {
         '<w:name w:val="Normal"/></w:style></w:styles>',
     ],
     ['word/comments.xml', `<w:comments xmlns:w="${W}">${ids.map(comment).join('')}</w:comments>`],
-    ['word/document.xml', `<w:document ${NAMESPACES}><w:body>${body}<w:sectPr/></w:body></w:document>`],
+    [
+      'word/document.xml',
+      `<w:document ${NAMESPACES}><w:body>${body}` +
+        (header === undefined ? '<w:sectPr/>' : '<w:sectPr><w:headerReference w:type="default" r:id="rIdH"/></w:sectPr>') +
+        '</w:body></w:document>',
+    ],
+    ...(header === undefined ? [] : [['word/header1.xml', `<w:hdr ${NAMESPACES}>${header}</w:hdr>`] as [string, string]]),
   ];
   return new Uint8Array(rezipPartsToArrayBuffer(new Map(parts.map(([name, xml]) => [name, toBytes(xml)]))));
 }
@@ -222,7 +231,18 @@ const KEEPS_BYTES = (route: Route) => route !== 'path that seeds in TypeScript';
 
 type Editable = Pick<
   YrsSession,
-  'paragraphs' | 'insertText' | 'toggleMark' | 'applyRawOps' | 'resolveComment' | 'listComments'
+  | 'paragraphs'
+  | 'insertText'
+  | 'toggleMark'
+  | 'applyRawOps'
+  | 'resolveComment'
+  | 'listComments'
+  | 'deleteRange'
+  | 'deleteColumn'
+  | 'mergeCells'
+  | 'beginUndoCapture'
+  | 'addUndoBoundary'
+  | 'undo'
 >;
 
 interface Opened {
@@ -230,7 +250,8 @@ interface Opened {
   /** The length of each paragraph of the story, in the session's offsets. */
   lengths: YrsSession['paragraphSpans'];
   revisions(): number;
-  save(comments: (list: Comment[]) => Comment[]): Promise<Uint8Array>;
+  /** Saves as the route's editor does; `stories` are marked changed besides the body. */
+  save(comments: (list: Comment[]) => Comment[], stories?: readonly string[]): Promise<Uint8Array>;
   destroy(): void;
 }
 
@@ -247,22 +268,33 @@ beforeAll(async () => {
 
 const hostComments = (document: Document): Comment[] => document.package.document.comments ?? [];
 
-async function editorSave(session: YrsSession, base: Document, comments: Comment[], host?: Document) {
+async function editorSave(
+  session: YrsSession,
+  base: Document,
+  comments: Comment[],
+  host?: Document,
+  stories: readonly string[] = []
+) {
   const dirty = new DirtyProjectionStories();
-  dirty.add('body');
+  for (const story of ['body', ...stories]) dirty.add(story);
   const projected = yrsToDocument(session, host ? mergeDocxHostMetadata(base, host) : base, dirty.projectionOptions());
-  return new Uint8Array(await saveEditorDocument(session, projected, comments));
+  return { projected, bytes: new Uint8Array(await saveEditorDocument(session, projected, comments)) };
 }
 
 async function open(route: Route, bytes: Uint8Array): Promise<Opened> {
   if (route === 'path that seeds in Rust') {
     const session = await createYrsSession({ clientId: (clientId += 1) });
     const host = session.openDocx(bytes.slice(), true).document;
+    let projected: Document | undefined;
     return {
       session,
       lengths: (story) => session.paragraphSpans(story),
       revisions: () => session.listRevisions().length,
-      save: async (comments) => editorSave(session, session.materializeDocx()!, comments(hostComments(host)), host),
+      save: async (comments, stories) => {
+        const saved = await editorSave(session, projected ?? session.materializeDocx()!, comments(hostComments(host)), host, stories);
+        projected = saved.projected;
+        return saved.bytes;
+      },
       destroy: () => session.destroy(),
     };
   }
@@ -275,19 +307,21 @@ async function open(route: Route, bytes: Uint8Array): Promise<Opened> {
       session,
       lengths: (story) => session.paragraphSpans(story),
       revisions: () => session.listRevisions().length,
-      save: async (comments) => editorSave(session, base, comments(hostComments(parsed))),
+      save: async (comments, stories) =>
+        (await editorSave(session, base, comments(hostComments(parsed)), undefined, stories)).bytes,
       destroy: () => session.destroy(),
     };
   }
   const engine = await createResidentEngineSession(undefined, (clientId += 1));
   const hostJson = engine.openDocx(bytes.slice(), undefined, 'comment-range');
+  const record: ResidentSaveRecord = { full: false };
   return {
     session: engine,
     lengths: (story) => engine.geometryReader.paragraphSpans(story),
     revisions: () => engine.proposalEngine.listRevisions().length,
     save: async (comments) => {
       const listed = comments(hostComments(decodeDocxHostJson(hostJson, bytes.slice()).document));
-      return new Uint8Array(await engine.save(bytes.slice(), hostJson, undefined, listed, { full: false }));
+      return new Uint8Array(await engine.save(bytes.slice(), hostJson, undefined, listed, record));
     },
     destroy: () => engine.destroy(),
   };
@@ -369,6 +403,33 @@ function placed(xml: string, id: number) {
   };
 }
 
+const marksOf = (xml: string, id: number) =>
+  scan(xml)
+    .markers.filter((marker) => marker.id === id)
+    .map((marker) => marker.kind);
+const paragraphsOf = (xml: string) => xml.match(/<w:p\b[^>]*>(?:(?!<w:p\b)[\s\S])*?<\/w:p>/g) ?? [];
+
+/** The comment's marks, and where they sit in the paragraph that holds its start. */
+function clamped(xml: string, id: number) {
+  const paragraph = paragraphsOf(xml).find((candidate) => marksOf(candidate, id).includes('Start')) ?? '';
+  const { text, markers } = scan(paragraph);
+  const own = markers.filter((marker) => marker.id === id);
+  const closing = own.find((marker) => marker.kind === 'End');
+  const reference = own.find((marker) => marker.kind === 'Reference');
+  return {
+    marks: marksOf(xml, id).join(' '),
+    inItsParagraph: own.map((marker) => marker.kind).join(' '),
+    endsTheParagraph: closing ? closing.text === text.length : false,
+    referenceFollows:
+      closing && reference
+        ? reference.xml > closing.xml && !paragraph.slice(closing.xml, reference.xml).includes('<w:t')
+        : false,
+  };
+}
+
+/** A range cut at the end of the paragraph it starts in, its reference right after. */
+const CUT = { marks: 'Start End Reference', inItsParagraph: 'Start End Reference', endsTheParagraph: true, referenceFollows: true };
+
 const stripIds = (xml: string) => xml.replace(/\s(?:w14:paraId|w14:textId)="[^"]*"/g, '');
 const lastParagraph = (xml: string, text: string) =>
   stripIds((xml.match(/<w:p\b[^>]*>(?:(?!<w:p\b)[\s\S])*?<\/w:p>/g) ?? []).find((p) => p.includes(`>${text}<`)) ?? '');
@@ -383,9 +444,14 @@ const EDITS: ActionName[] = [
 ];
 const KEPT_ELSEWHERE: ActionName[] = ['no edit', 'typing in the next paragraph', 'bold where the range starts'];
 
+const KEPT_FROM_SOURCE = (built: Built, route: Route, action: ActionName) =>
+  built.ids.length > 1 && action === 'typing where the range ends' && KEEPS_BYTES(route);
+
 const cells = BUILT.flatMap((built) =>
   EDITS.filter((action) => !action.startsWith('typing') || built.typing[action]).flatMap((action) =>
-    ROUTES.map((route) => [built.name, route, action, built] as [string, Route, ActionName, Built])
+    ROUTES.filter((route) => !KEPT_FROM_SOURCE(built, route, action)).map(
+      (route) => [built.name, route, action, built] as [string, Route, ActionName, Built]
+    )
   )
 );
 
@@ -477,8 +543,13 @@ describe('a comment range end whose start is not in its story', () => {
   const LONE = (id: number, ids: number[]) =>
     docx(para(run('Plain one.')) + para(`${run('Lone')}${end(id)}${run(' end.')}`) + para(run('Last.')), ids);
   const ORPHANS: Array<[string, string, number, Uint8Array]> = [
-    ['an end whose comment has no start anywhere', 'is written back before its reference', 3, LONE(3, [3])],
-    ['an end whose id has no comment', 'stays removed as on main', 9, LONE(9, [])],
+    [
+      'an end whose comment has no start anywhere',
+      'is saved with no start, its end kept only where its paragraph keeps its source marks',
+      3,
+      LONE(3, [3]),
+    ],
+    ['an end whose id has no comment', 'is saved with no end and no reference', 9, LONE(9, [])],
   ];
 
   it.each(
@@ -488,21 +559,18 @@ describe('a comment range end whose start is not in its story', () => {
   )(
     '%s, opened by the %s, %s after an edit in its paragraph, and the session lists and shows nothing new for it',
     async (_name, route, _outcome, id, bytes) => {
-      const source = documentBody(bytes);
       const opened = await open(route, bytes);
       try {
         const { paraId } = opened.session.paragraphs('body')[1]!;
         opened.session.insertText({ story: 'body', paraId, offset: 1 }, 'X');
         const xml = documentBody(await opened.save((list) => list));
-        const kinds = placed(xml, id).marks.split(' ').filter(Boolean);
-        const kept = id === 9 ? null : placed(source, id);
+        const want = id === 9 ? '' : KEEPS_BYTES(route) ? 'End Reference' : 'Reference';
         expect([
-          kept ? placed(xml, id) : kinds.filter((kind) => kind === 'Start').length,
-          kinds.filter((kind) => kind === 'End').length <= 1,
+          marksOf(xml, id).join(' '),
           shownIn(opened.session, id),
           listedIds(opened.session).includes('9'),
           opened.revisions(),
-        ]).toEqual([kept ?? 0, true, [], false, 0]);
+        ]).toEqual([want, [], false, 0]);
       } finally {
         opened.destroy();
       }
@@ -558,6 +626,316 @@ describe('the anchors both loaders give a comment range that crosses stories', (
       } finally {
         rust.destroy();
         typescript.destroy();
+      }
+    },
+    TIMEOUT
+  );
+});
+
+const BEFORE_ROW = para(`${start(2)}${run('Before')}${end(2)}${run(' row.')}`);
+const ACROSS_CELLS = docx(
+  BEFORE_ROW + table(para(`${start(1)}${run('Left cell text.')}`), para(`${end(1)}${run('Right cell text.')}`)) +
+    para(run('After row.')),
+  [1, 2]
+);
+const BACKWARDS = docx(
+  BEFORE_ROW + table(para(`${run('Left')}${end(1)}${run(' cell.')}`), para(`${start(1)}${run('Right cell text.')}`)) +
+    para(run('After row.')),
+  [1, 2]
+);
+const BETWEEN_PARAGRAPHS = docx(
+  para(`${run('Alpha ')}${start(1)}${run('one.')}`) +
+    '<w:commentRangeEnd w:id="1"/>' +
+    para(`<w:r><w:commentReference w:id="1"/></w:r>${run('Beta two.')}`) +
+    para(`${start(2)}${run('Delta')}${end(2)}${run(' four.')}`),
+  [1, 2]
+);
+const FIELD =
+  '<w:r><w:fldChar w:fldCharType="begin"/></w:r>' +
+  '<w:r><w:instrText xml:space="preserve"> REF Mark \\h </w:instrText></w:r>' +
+  '<w:r><w:fldChar w:fldCharType="separate"/></w:r>' +
+  `<w:hyperlink w:anchor="Mark">${run('Link')}<w:r><w:commentReference w:id="1"/></w:r></w:hyperlink>` +
+  '<w:r><w:fldChar w:fldCharType="end"/></w:r>';
+const IN_FIELD = docx(
+  para(OPENING) +
+    para(run('Beta two.')) +
+    table(para(`${run('Gamma')}<w:commentRangeEnd w:id="1"/>${FIELD}${run(' three.')}`)) +
+    para(run('Delta four.')),
+  [1, 2]
+);
+const IN_HEADER = docx(
+  para(`${run('Alpha ')}${start(7)}${run('seven')}${end(7)}${run('.')}`) + para(`${start(2)}${run('Beta')}${end(2)}${run(' two.')}`),
+  [2, 7],
+  para(`${run('Head')}${end(7)}${run(' text.')}`)
+);
+const IN_CONTROL = docx(
+  para(OPENING) +
+    para(run('Beta two.')) +
+    `<w:sdt><w:sdtPr><w:id w:val="77"/></w:sdtPr><w:sdtContent>${para(ENDING)}</w:sdtContent></w:sdt>` +
+    para(run('Delta four.')),
+  [1, 2]
+);
+const FROM_TEXT_BOX = docx(
+  para(`${run('Alpha ')}${start(2)}${run('one')}${end(2)}${run('.')}`) +
+    para(`${run('Box ')}${textBox(para(`${run('Inside ')}${start(1)}${run('box.')}`))}`) +
+    para(ENDING) +
+    para(run('Delta four.')),
+  [1, 2]
+);
+const HEADER = 'hf:rIdH';
+
+const OTHER = 2;
+const withoutOther = (list: Comment[]) => list.filter((comment) => comment.id !== OTHER);
+const removeOther = ({ session }: Opened) => session.applyRawOps('body', [{ op: 'removeComment', id: String(OTHER) }]);
+const typeIn = ({ session }: Opened, story: string, paragraph: number, offset: number) => {
+  const { paraId } = session.paragraphs(story)[paragraph]!;
+  session.insertText({ story, paraId, offset }, 'X');
+};
+const cell = (column: number) => ({ story: 'body', tableIndex: 0, row: 0, column });
+const replyTo = (list: Comment[], parentId: number): Comment => {
+  const parent = list.find((comment) => comment.id === parentId)!;
+  return { id: 10, author: parent.author, initials: parent.initials, date: parent.date, content: parent.content, parentId };
+};
+const headerXml = (bytes: Uint8Array) => new TextDecoder().decode(unzipContainer(bytes)['word/header1.xml']);
+const counted = (xml: string, id: number) => {
+  const kinds = marksOf(xml, id);
+  const of = (kind: Marker['kind']) => kinds.filter((entry) => entry === kind).length;
+  return { starts: of('Start'), ends: of('End'), references: of('Reference') };
+};
+const fromTextBox = (xml: string) => {
+  const own = scan(xml).markers.filter((marker) => marker.id === 1);
+  const at = (kind: Marker['kind']) => own.find((marker) => marker.kind === kind);
+  const [opening, closing] = [at('Start'), at('End')];
+  return [
+    own.map((marker) => marker.kind).join(' '),
+    opening ? container(xml, opening.xml) : null,
+    closing ? container(xml, closing.xml) : null,
+  ];
+};
+
+interface Crossing {
+  name: string;
+  outcome: string;
+  bytes: Uint8Array;
+  /** Edits and saves the opened document, as often as the case needs; the last save's bytes. */
+  edit(opened: Opened): Promise<Uint8Array>;
+  /** What the saved file shows, and what it should show. */
+  check(saved: Uint8Array): [unknown, unknown];
+}
+
+const IS_CUT = 'is saved cut at the end of the paragraph it starts in';
+const IN_ORDER = 'is saved with one start, one end and one reference in order';
+const cutIn = (saved: Uint8Array): [unknown, unknown] => [clamped(documentBody(saved), 1), CUT];
+
+const CROSSINGS: Crossing[] = [
+  {
+    name: 'a comment into a table cell whose far paragraph is emptied',
+    outcome: IS_CUT,
+    bytes: BUILT[0]!.bytes,
+    edit: async (opened) => {
+      removeOther(opened);
+      const { paraId } = opened.session.paragraphs(CELL_A)[0]!;
+      const length = opened.lengths(CELL_A).find((paragraph) => paragraph.paraId === paraId)!.length;
+      opened.session.deleteRange({ story: CELL_A, start: { paraId, offset: 0 }, end: { paraId, offset: length } });
+      return opened.save(withoutOther);
+    },
+    check: cutIn,
+  },
+  {
+    name: 'a comment from one cell to the next whose far column is deleted',
+    outcome: IS_CUT,
+    bytes: ACROSS_CELLS,
+    edit: async (opened) => {
+      removeOther(opened);
+      opened.session.deleteColumn({ anchor: cell(1), head: cell(1) });
+      return opened.save(withoutOther);
+    },
+    check: cutIn,
+  },
+  {
+    name: 'a comment from one cell to the next whose two cells are merged',
+    outcome: IS_CUT,
+    bytes: ACROSS_CELLS,
+    edit: async (opened) => {
+      removeOther(opened);
+      opened.session.mergeCells({ anchor: cell(0), head: cell(1) });
+      return opened.save(withoutOther);
+    },
+    check: cutIn,
+  },
+  {
+    name: 'a comment from one cell to the next, saved with its far column deleted, then undone, typed in and saved again',
+    outcome: IN_ORDER,
+    bytes: ACROSS_CELLS,
+    edit: async (opened) => {
+      opened.session.beginUndoCapture();
+      removeOther(opened);
+      opened.session.addUndoBoundary();
+      opened.session.deleteColumn({ anchor: cell(1), head: cell(1) });
+      await opened.save(withoutOther);
+      opened.session.undo();
+      typeIn(opened, CELL_A, 0, 2);
+      return opened.save(withoutOther);
+    },
+    check: (saved) => [marksOf(documentBody(saved), 1).join(' '), 'Start End Reference'],
+  },
+  {
+    name: 'a comment whose end sits directly in the body between two paragraphs',
+    outcome: IS_CUT,
+    bytes: BETWEEN_PARAGRAPHS,
+    edit: async (opened) => {
+      removeOther(opened);
+      typeIn(opened, 'body', 0, 7);
+      return opened.save(withoutOther);
+    },
+    check: cutIn,
+  },
+  {
+    name: 'a comment into a table cell whose reference sits in a field result after its end',
+    outcome: IS_CUT,
+    bytes: IN_FIELD,
+    edit: async (opened) => {
+      removeOther(opened);
+      typeIn(opened, CELL_A, 0, 2);
+      return opened.save(withoutOther);
+    },
+    check: cutIn,
+  },
+  {
+    name: 'a comment from one cell to the next whose start column is deleted',
+    outcome: 'is saved without a range',
+    bytes: ACROSS_CELLS,
+    edit: async (opened) => {
+      removeOther(opened);
+      opened.session.deleteColumn({ anchor: cell(0), head: cell(0) });
+      return opened.save(withoutOther);
+    },
+    check: (saved) => {
+      const { starts, ends, references } = counted(documentBody(saved), 1);
+      return [[starts, ends, references <= 1], [0, 0, true]];
+    },
+  },
+  {
+    name: 'a comment whose end and reference sit in the cell before its start',
+    outcome: IS_CUT,
+    bytes: BACKWARDS,
+    edit: async (opened) => {
+      removeOther(opened);
+      typeIn(opened, CELL_B, 0, 2);
+      return opened.save(withoutOther);
+    },
+    check: cutIn,
+  },
+  {
+    name: 'a complete body comment whose id also ends in a header',
+    outcome: 'keeps its range in the body and none in the header',
+    bytes: IN_HEADER,
+    edit: async (opened) => {
+      removeOther(opened);
+      typeIn(opened, HEADER, 0, 1);
+      return opened.save(withoutOther, [HEADER]);
+    },
+    check: (saved) => [
+      [marksOf(documentBody(saved), 7).join(' '), marksOf(headerXml(saved), 7).join(' ')],
+      ['Start End Reference', ''],
+    ],
+  },
+  {
+    name: 'a comment into a block content control given a reply',
+    outcome: 'is saved cut at the end of the paragraph it starts in, its reply with it',
+    bytes: IN_CONTROL,
+    edit: async (opened) => {
+      removeOther(opened);
+      typeIn(opened, 'body', 0, 7);
+      return opened.save((list) => [...withoutOther(list), replyTo(list, 1)]);
+    },
+    check: (saved) => [[clamped(documentBody(saved), 1), clamped(documentBody(saved), 10)], [CUT, CUT]],
+  },
+  {
+    name: 'a comment from a text box into a later paragraph, typed in where it ends',
+    outcome: IN_ORDER,
+    bytes: FROM_TEXT_BOX,
+    edit: async (opened) => {
+      removeOther(opened);
+      typeIn(opened, 'body', 2, 2);
+      return opened.save(withoutOther);
+    },
+    check: (saved) => [fromTextBox(documentBody(saved)), ['Start End Reference', 'text box', 'body']],
+  },
+  {
+    name: 'a comment from a text box into a later paragraph, typed in the paragraph holding the text box',
+    outcome: IN_ORDER,
+    bytes: FROM_TEXT_BOX,
+    edit: async (opened) => {
+      removeOther(opened);
+      typeIn(opened, 'body', 1, 1);
+      return opened.save(withoutOther);
+    },
+    check: (saved) => [fromTextBox(documentBody(saved)), ['Start End Reference', 'text box', 'body']],
+  },
+  {
+    name: 'a comment into a table cell whose reference sits in a field result, made bold where it starts',
+    outcome: 'is saved with one end',
+    bytes: IN_FIELD,
+    edit: async (opened) => {
+      const { paraId } = opened.session.paragraphs('body')[0]!;
+      opened.session.toggleMark({ story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 5 } }, { type: 'bold' });
+      return opened.save((list) => list);
+    },
+    check: (saved) => [counted(documentBody(saved), 1).ends, 1],
+  },
+];
+
+describe('a comment range across stories saved after edits that move or remove its marks', () => {
+  it.each(
+    CROSSINGS.flatMap((crossing) =>
+      ROUTES.map((route) => [crossing.name, route, crossing.outcome, crossing] as [string, Route, string, Crossing])
+    )
+  )(
+    '%s, opened by the %s, %s',
+    async (_name, route, _outcome, crossing) => {
+      const opened = await open(route, crossing.bytes);
+      try {
+        const [received, wanted] = crossing.check(await crossing.edit(opened));
+        expect(received).toEqual(wanted);
+      } finally {
+        opened.destroy();
+      }
+    },
+    TIMEOUT
+  );
+});
+
+describe('the source scan for comment ranges across stories', () => {
+  it(
+    'runs once for the opened document and not again for the projections change notifications make',
+    async () => {
+      const specifier = './crossStoryComments';
+      const scanner: typeof import('./crossStoryComments') | null = await import(specifier).catch(() => null);
+      expect(scanner === null ? 'no scanner' : 'a scanner').toBe('a scanner');
+      if (!scanner) return;
+      const scans = spyOn(scanner, 'crossStoryComments');
+      const session = await createYrsSession({ clientId: (clientId += 1) });
+      try {
+        const host = session.openDocx(BUILT[0]!.bytes.slice(), true).document;
+        let base = session.materializeDocx()!;
+        const notify = () => {
+          const dirty = new DirtyProjectionStories();
+          dirty.add('body');
+          base = yrsToDocument(session, mergeDocxHostMetadata(base, host), dirty.projectionOptions());
+        };
+        notify();
+        for (const offset of [7, 8, 9]) {
+          const { paraId } = session.paragraphs('body')[0]!;
+          session.insertText({ story: 'body', paraId, offset }, 'X');
+          notify();
+        }
+        await saveEditorDocument(session, base, hostComments(host));
+        notify();
+        expect(scans).toHaveBeenCalledTimes(1);
+      } finally {
+        scans.mockRestore();
+        session.destroy();
       }
     },
     TIMEOUT
