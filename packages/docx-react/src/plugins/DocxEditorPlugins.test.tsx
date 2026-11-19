@@ -2473,7 +2473,8 @@ describe('DocxEditor plugins (peer-less engine)', () => {
   test('onReady receives the ref api once, after the first page paints, and not again on later paints or edits', async () => {
     const order: string[] = [];
     const onReady = mock((_api: DocxEditorRef) => { order.push('ready'); });
-    const props = { onReady, onFirstPagePainted: () => { order.push('painted'); } } as Partial<DocxEditorBaseProps>;
+    const props = { onReady, onFirstPagePainted: () => { order.push('painted'); } } as
+      Omit<Partial<DocxEditorBaseProps>, 'experimentalWorkerOpen' | 'onChange'>;
     const ref = createRef<DocxEditorRef>();
     render(<DocxEditor ref={ref} documentBuffer={documentBytes()} {...props} />);
     await until(() => order.includes('painted'));
