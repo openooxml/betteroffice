@@ -3513,7 +3513,7 @@ impl Workbook {
             metrics,
             gridlines,
             &self.sheet_pictures(sheet),
-            Some(&|at: CellRef| self.painted_text_runs(sheet, at)),
+            self.text_runs_lookup(&|at: CellRef| self.painted_text_runs(sheet, at)),
             |chart| self.resolve_chart_space(&sheet_ref.name, chart),
         )
         .map_err(Error::from)?;
@@ -3580,7 +3580,7 @@ impl Workbook {
             &geometry,
             Some(MAX_DISPLAY_CELLS),
             &self.sheet_pictures(sheet),
-            Some(&|at: CellRef| self.painted_text_runs(sheet, at)),
+            self.text_runs_lookup(&|at: CellRef| self.painted_text_runs(sheet, at)),
             |chart| self.resolve_chart_space(&owner, chart),
         )
         .map_err(Error::from)
@@ -3938,7 +3938,7 @@ impl Workbook {
             &geometry,
             None,
             &self.sheet_pictures(sheet),
-            Some(&|at: CellRef| self.painted_text_runs(sheet, at)),
+            self.text_runs_lookup(&|at: CellRef| self.painted_text_runs(sheet, at)),
             |chart| self.resolve_chart_space(&owner, chart),
         )?;
         let display_list = if options.scale == 1.0 {

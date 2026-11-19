@@ -2,6 +2,7 @@ use std::cell::OnceCell;
 use std::collections::HashSet;
 
 use xlsx_model::{CellRef, CellValue, RichRun, SheetId};
+use xlsx_render::CellTextRuns;
 
 use super::Workbook;
 
@@ -11,6 +12,28 @@ thread_local! {
 }
 
 impl Workbook {
+    /// Whether [`Self::painted_text_runs`] can find runs in any cell: the
+    /// session keeps source runs and the parsed source holds a string with
+    /// runs. A display list built without it takes no runs lookup at all.
+    pub(crate) fn paints_text_runs(&self) -> bool {
+        !self.is_collaborative()
+            && self.invalidated_text_sources.is_some()
+            && self
+                .source_package
+                .as_ref()
+                .and_then(|source| source.materialized())
+                .is_some_and(|package| package.holds_text_runs())
+    }
+
+    /// `lookup` as a display list build's runs lookup, or none when
+    /// [`Self::paints_text_runs`] says no cell has runs.
+    pub(crate) fn text_runs_lookup<'l, 'r>(
+        &self,
+        lookup: &'l CellTextRuns<'r>,
+    ) -> Option<&'l CellTextRuns<'r>> {
+        self.paints_text_runs().then_some(lookup)
+    }
+
     /// [`Self::cell_text_runs`] for painting: `None` while a deferred source
     /// package is unparsed, so building a display list never parses it.
     pub(crate) fn painted_text_runs(&self, sheet: SheetId, cell: CellRef) -> Option<&[RichRun]> {

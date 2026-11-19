@@ -1155,16 +1155,18 @@ where
         };
         let runs = match (text_runs, &cell.value) {
             (Some(lookup), CellValue::Text { value })
-                if !hyperlink_only
-                    && parts.is_empty()
-                    && cell.formula.is_none()
-                    && *text == **value
-                    && !has_right_to_left(&text)
-                    && resolve_text_rotation(xf.text_rotation) == (None, false) =>
+                if !hyperlink_only && parts.is_empty() && cell.formula.is_none() =>
             {
-                lookup(at).map_or_else(Vec::new, |runs| {
-                    text_runs::cell_runs(&text, runs, styles, hyperlink.is_some())
-                })
+                match lookup(at) {
+                    Some(runs)
+                        if *text == **value
+                            && !has_right_to_left(&text)
+                            && resolve_text_rotation(xf.text_rotation) == (None, false) =>
+                    {
+                        text_runs::cell_runs(&text, runs, styles, hyperlink.is_some())
+                    }
+                    _ => Vec::new(),
+                }
             }
             _ => Vec::new(),
         };
