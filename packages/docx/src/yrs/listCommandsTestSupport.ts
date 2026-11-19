@@ -28,6 +28,10 @@ export const FOLLOWER = 'Follower paragraph QA';
 export const EXISTING_BULLET = 'Existing bullet item QA';
 /** An item of the decimal list 1 of document A, directly above an item of the bullet list 2. */
 export const DECIMAL_ITEM = 'Second numbered item';
+/** The level 2 item of the decimal list 1 of document A directly above `DECIMAL_ITEM`. */
+const NESTED_DECIMAL = 'Nested level three';
+/** The item of the decimal list 3 of document A directly below a level 1 item of the bullet list 2. */
+const RESTARTED_ITEM = 'Restarted list with explicit indent override';
 export const LIST_LAYOUT = JSON.stringify({
   bodyStory: 'body',
   regions: { sections: [{ sectionId: 'main', properties: {} }] },
@@ -355,5 +359,67 @@ export function listCommandScenarios(path: string, open: OpenListCommandDriver, 
     expectOffList(driver, FOLLOWER);
     expect(driver.definitions()).toEqual([]);
     expect(driver.canUndo()).toBe(false);
+  }, timeout);
+
+  test(`${path}: between a created list above and a source list below of that kind a paragraph joins the one above`, async () => {
+    const driver = await open('A');
+    driver.toggle('bullet', NESTED_DECIMAL);
+    const above = keyOf(driver, NESTED_DECIMAL);
+    expect(above).toBeDefined();
+    driver.toggle('bullet', DECIMAL_ITEM);
+    expect(keyOf(driver, DECIMAL_ITEM)).toBe(above);
+    expect(driver.definitions()).toHaveLength(1);
+  }, timeout);
+
+  test(`${path}: between a source list above and a created list below of that kind a paragraph joins the one above`, async () => {
+    const driver = await open('B', { after: [FOLLOWER] });
+    driver.toggle('bullet', FOLLOWER);
+    expect(keyOf(driver, FOLLOWER)).toBeDefined();
+    driver.toggle('bullet', PLAIN);
+    const properties = propertiesOf(driver, PLAIN);
+    expect(properties.numPr).toMatchObject({ numId: 1, ilvl: 0 });
+    expect(properties.listDef ?? null).toBeNull();
+    const bytes = await driver.save();
+    expect(savedList(bytes, PLAIN)).toMatchObject({ paragraphs: 1, numId: '1', numFmt: 'bullet' });
+    expect(savedList(bytes, FOLLOWER).numId).not.toBe('1');
+  }, timeout);
+
+  test(`${path}: a paragraph joining a source list takes the level of the item above`, async () => {
+    const driver = await open('A');
+    driver.toggle('bullet', RESTARTED_ITEM);
+    const properties = propertiesOf(driver, RESTARTED_ITEM);
+    expect(properties.numPr).toMatchObject({ numId: 2, ilvl: 1 });
+    expect(properties.listDef ?? null).toBeNull();
+  }, timeout);
+
+  test(`${path}: a paragraph joining a created list takes the level of the item above`, async () => {
+    const driver = await open('C', { after: [FOLLOWER] });
+    driver.toggle('numbered', PLAIN);
+    driver.indent('increase', PLAIN);
+    driver.toggle('numbered', FOLLOWER);
+    expect(propertiesOf(driver, FOLLOWER).numPr).toMatchObject({ ilvl: 1 });
+    expect(keyOf(driver, FOLLOWER)).toBe(keyOf(driver, PLAIN));
+    expect(driver.marker(PLAIN)).toBe('a.');
+    expect(driver.marker(FOLLOWER)).toBe('b.');
+  }, timeout);
+
+  test(`${path}: a click on a selection whose first paragraph is on a list of that kind takes every paragraph off`, async () => {
+    const driver = await open('C', { after: [FOLLOWER] });
+    driver.toggle('bullet', PLAIN);
+    expect(keyOf(driver, PLAIN)).toBeDefined();
+    driver.toggle('bullet', PLAIN, FOLLOWER);
+    expectOffList(driver, PLAIN);
+    expectOffList(driver, FOLLOWER);
+  }, timeout);
+
+  test(`${path}: a click on a selection whose first paragraph is on no list puts every paragraph on one`, async () => {
+    const driver = await open('C', { after: [FOLLOWER] });
+    driver.toggle('bullet', FOLLOWER);
+    const key = keyOf(driver, FOLLOWER);
+    expect(key).toBeDefined();
+    driver.toggle('bullet', PLAIN, FOLLOWER);
+    expect(keyOf(driver, PLAIN)).toBe(key);
+    expect(keyOf(driver, FOLLOWER)).toBe(key);
+    expect(driver.definitions()).toHaveLength(1);
   }, timeout);
 }
