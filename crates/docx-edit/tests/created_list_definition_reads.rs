@@ -459,3 +459,34 @@ fn the_created_list_rule_over_odd_attribute_shapes() {
         assert_eq!(key.as_deref(), case["key"].as_str(), "{name}");
     }
 }
+
+#[test]
+fn a_paragraph_moved_to_a_created_list_keeps_its_level() {
+    let doc = seeded(712, &[("Lead", None), ("Item", Some(2)), ("Gap", None)]);
+    doc.set_paragraph_attr(&paragraph_id(&doc, "Item"), "numPr", num_pr(2.0, 2.0))
+        .unwrap();
+    let ensured = create(&doc, "Item", ListKind::Bullet);
+    assert!(matches!(ensured.get(LIST_DEF), Some(Any::Map(_))), "{ensured:?}");
+    assert_eq!(ensured.get("numPr"), Some(&num_pr(1.0, 2.0)));
+    assert!(created_key(&doc, "Item").is_some());
+    assert_eq!(doc.created_list_definitions().len(), 1);
+}
+
+#[test]
+fn a_paragraph_joining_the_list_above_keeps_its_level() {
+    let doc = seeded(713, &[("Top", Some(1)), ("Item", Some(2)), ("End", None)]);
+    let source = paragraph_id(&doc, "Top");
+    doc.set_paragraph_attr(&source, "listIsBullet", Any::Null)
+        .unwrap();
+    doc.set_paragraph_attr(&source, "listNumFmt", Any::from("bullet"))
+        .unwrap();
+    doc.set_paragraph_attr(&paragraph_id(&doc, "Item"), "numPr", num_pr(2.0, 2.0))
+        .unwrap();
+    create(&doc, "Item", ListKind::Bullet);
+    let joined = ListIdentity::Source {
+        num_id: 1.0,
+        level: 2.0,
+    };
+    assert_eq!(resolve_list_identity(&attrs(&doc, "Item")), Some(joined));
+    assert!(doc.created_list_definitions().is_empty());
+}
