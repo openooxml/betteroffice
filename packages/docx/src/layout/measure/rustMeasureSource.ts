@@ -226,7 +226,7 @@ export function createRustMeasureSource(options: {
       if (options.progressive && options.fill?.length) {
         // No chain names these faces, so measurement and the reported change stay as the requirements make them.
         const current = generation;
-        const ids = await registry.getScriptFallbackIds([...options.fill]).catch(() => []);
+        const ids = await registry.getSlicedScriptFallbackIds(options.fill).catch(() => []);
         if (current === generation) for (const id of ids) fillIds.add(id);
       }
       return settled.some(Boolean) || backstops.some(Boolean);

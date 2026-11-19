@@ -594,3 +594,28 @@ test('fill scripts register their sliced faces outside every chain and mark them
   filled!.source.clear();
   expect(await filled!.source.progressiveFonts!()).toEqual([]);
 });
+
+test('fill scripts never load a face whole: a fallback that is not sliced, or whose slices do not open, is skipped', async () => {
+  let whole = 0;
+  const load = async () => {
+    whole += 1;
+    return Uint8Array.of(5, 6).buffer;
+  };
+  const fallbacks: Record<string, (() => Promise<ArrayBuffer>) & { slices?: object }> = {
+    arabic: load,
+    'cjk-kr': Object.assign(async () => load(), { slices: {} }),
+  };
+  const [filled, plain] = [true, false].map((fill) => {
+    const registered: number[] = [];
+    const source = createRustMeasureSource({
+      bundled: { ...providerFor(Uint8Array.of(1, 2).buffer), resolveScriptFallback: (script: string) => fallbacks[script] },
+      progressive: true, standIns: false, ...(fill ? { fill: ['arabic', 'cjk-kr'] as const } : {}),
+      engine: { registerFont: (bytes) => registered.push(bytes.byteLength) - 1, clearFonts() {} },
+    });
+    return { source, registered };
+  });
+  for (const { source } of [filled!, plain!]) await source.prepareFontRequirements([regular]);
+  expect(whole).toBe(0);
+  expect(filled!.registered).toEqual(plain!.registered);
+  expect(await filled!.source.progressiveFonts!()).toEqual([]);
+});

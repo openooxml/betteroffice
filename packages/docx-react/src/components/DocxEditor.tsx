@@ -342,8 +342,9 @@ export interface DocxEditorBaseProps extends DocxEditorPluginProps {
   /**
    * Scripts whose bundled fallback face loads whole in the background once the document is open, so text typed in
    * them later draws without waiting for its outlines, e.g. `['cjk-kr']`. The face is registered even when the
-   * document has no such text yet; layout is unchanged. Only sliced faces load this way (the CJK faces of
-   * `@betteroffice/fonts-cjk`), at the cost of their whole download (about 3.6 MB for Korean). Worker-only editor only.
+   * document has no such text yet, so opening it also waits for the face's first slices (about 440 KB for Korean);
+   * layout is unchanged. Only sliced faces load this way (the CJK faces of `@betteroffice/fonts-cjk`), at the cost
+   * of their whole download (about 3.6 MB for Korean); other scripts are skipped. Worker-only editor only.
    */
   preloadFontScripts?: readonly FontScript[];
   /**
