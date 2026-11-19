@@ -114,14 +114,8 @@ const typeAndSplitAt = (offset: number): Edit => (session, paraId) => {
   splitAt(offset)(session, paraId);
 };
 
-const TYPESCRIPT_LOADER = 'the TypeScript loader';
-const UNDO_LIMIT = 'limit: undo restores the mark at the start of the restored text on this loader, an end mark one character into it';
-
-/**
- * An edit, the paragraphs it saves, for a split the paragraph that joining them back saves, and
- * where undoing the edit leaves the paragraph on the TypeScript loader when that is not the source.
- */
-type Case = { name: string; edit: Edit; saved: string[]; joined?: string; undoneOnTheTypeScriptLoader?: string };
+/** An edit, the paragraphs it saves, and for a split the paragraph that joining them back saves. */
+type Case ={ name: string; edit: Edit; saved: string[]; joined?: string };
 
 type Fixture = {
   name: string;
@@ -165,12 +159,7 @@ const FIXTURES: Fixture[] = [
     cases: [
       { name: 'typing at the start of the paragraph', edit: typeAt(0), saved: ['XHead [subDoc] tail', 'Other'] },
       { name: 'deleting the first character', edit: deleteBetween(0, 1), saved: ['ead [subDoc] tail', 'Other'] },
-      {
-        name: 'deleting a range across the element',
-        edit: deleteBetween(3, 7),
-        saved: ['Hea[subDoc]ail', 'Other'],
-        undoneOnTheTypeScriptLoader: 'Hea[subDoc]d  tail',
-      },
+      { name: 'deleting a range across the element', edit: deleteBetween(3, 7), saved: ['Hea[subDoc]ail', 'Other'] },
       {
         name: 'splitting at the element',
         edit: splitAt(5),
@@ -199,13 +188,11 @@ const FIXTURES: Fixture[] = [
         name: 'deleting a range across the end',
         edit: deleteBetween(2, 6),
         saved: ['[customXmlInsRangeStart]He[customXmlInsRangeEnd]ail', 'Other'],
-        undoneOnTheTypeScriptLoader: '[customXmlInsRangeStart]Hea[customXmlInsRangeEnd]d tail',
       },
       {
         name: 'deleting everything between the start and the end',
         edit: deleteBetween(0, 4),
         saved: ['[customXmlInsRangeStart][customXmlInsRangeEnd] tail', 'Other'],
-        undoneOnTheTypeScriptLoader: '[customXmlInsRangeStart]H[customXmlInsRangeEnd]ead tail',
       },
       {
         name: 'splitting at the start',
@@ -267,10 +254,8 @@ for (const fixture of FIXTURES) {
         });
       }
 
-      for (const { name, edit, saved: edited, joined, undoneOnTheTypeScriptLoader } of fixture.cases) {
-        const pinned = loader === TYPESCRIPT_LOADER ? undoneOnTheTypeScriptLoader : undefined;
-        const undoing = pinned === undefined ? `undoing saves ${saved}` : `undoing moves it (${UNDO_LIMIT})`;
-        it(`${loader}: ${name} keeps it in place, and ${undoing}`, async () => {
+      for (const { name, edit, saved: edited, joined } of fixture.cases) {
+        it(`${loader}: ${name} keeps it in place, and undoing saves ${saved}`, async () => {
           const bytes = docx(inner);
           const unedited = await (async () => {
             const { session, base } = await load(bytes);
@@ -288,10 +273,6 @@ for (const fixture of FIXTURES) {
           }
           expect(session.undo()).toBe(true);
           while (session.canUndo()) session.undo();
-          if (pinned !== undefined) {
-            expect(traces(await savedAsTheEditorSaves(session, base))).toEqual([pinned, 'Other']);
-            return;
-          }
           expect(traces(await savedAsTheEditorSaves(session, base))).toEqual([source, 'Other']);
           expect(await savedAsTheEditorSaves(session, base)).toBe(unedited);
         });
@@ -304,7 +285,7 @@ describe('a w:subDoc after deleting across it, undoing, and typing elsewhere', (
   const inner = `${SOURCE.t('Head ')}${SUB_DOC}${SOURCE.t(' tail')}`;
   const [loader, load] = LOADERS.find(([name]) => name === 'the Rust loader')!;
 
-  it(`${loader}: typing at the end saves the mark where undo left it (limit: after delete-then-undo the mark sits at the start of the restored text on both loaders; this loader shows it once the paragraph changes again)`, async () => {
+  it(`${loader}: typing at the end saves the mark where it was before the deletion`, async () => {
     const { session, base } = await load(docx(inner));
     session.beginUndoCapture();
     const paraId = session.paragraphs('body')[0]!.paraId;
@@ -314,7 +295,7 @@ describe('a w:subDoc after deleting across it, undoing, and typing elsewhere', (
     while (session.canUndo()) session.undo();
     expect(traces(await savedAsTheEditorSaves(session, base))).toEqual([trace(paragraph(inner)), 'Other']);
     typeAt(10)(session, paraId);
-    expect(traces(await savedAsTheEditorSaves(session, base))).toEqual(['Hea[subDoc]d  tailX', 'Other']);
+    expect(traces(await savedAsTheEditorSaves(session, base))).toEqual(['Head [subDoc] tailX', 'Other']);
   });
 });
 
