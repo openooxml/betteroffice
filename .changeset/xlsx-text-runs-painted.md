@@ -7,4 +7,4 @@
 "@betteroffice/xlsx-react": patch
 ---
 
-XLSX cells with rich text now paint each run in its own font, size, style and colour, wrapped or on one line, on screen, in PNG exports and in print. Rotated, stacked and right-to-left cells still paint plain.
+XLSX rich text cells paint each run in its own size, style, colour and, where available, font on screen, in PNG exports and in print; formula, number-formatted, rotated, stacked and right-to-left cells stay plain. Rust code building or fully matching `DrawCmd::Text` must add `runs`.

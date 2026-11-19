@@ -226,8 +226,8 @@ pub enum DrawCmd {
         stacked: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         wrap: Option<TextWrap>,
-        /// spans of `text` in fonts of their own; empty when the whole text
-        /// paints in the command's font.
+        /// spans of `text` in fonts of their own; empty when the cell has no
+        /// source runs or does not paint its stored text as it is.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         runs: Vec<TextRun>,
     },
