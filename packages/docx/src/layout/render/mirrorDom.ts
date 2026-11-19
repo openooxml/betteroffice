@@ -1424,7 +1424,13 @@ function inLogicalOrder<T extends BlockGroup['prims']>(prims: T): T {
 
 function applyListMarker(
   el: HTMLElement,
-  p: { listMarker?: boolean; listMarkerNumbered?: boolean; listMarkerBullet?: boolean; listMarkerRevision?: 'ins' | 'del' },
+  p: {
+    listMarker?: boolean;
+    listMarkerNumbered?: boolean;
+    listMarkerBullet?: boolean;
+    listMarkerRevision?: 'ins' | 'del';
+    color?: string;
+  },
   ctx: MirrorBuildCtx
 ): void {
   if (!p.listMarker) return;
@@ -1436,9 +1442,7 @@ function applyListMarker(
   } else if (!p.listMarkerNumbered) {
     el.setAttribute('aria-hidden', 'true');
   }
-  if (p.listMarkerRevision) {
-    el.style.color = p.listMarkerRevision === 'ins' ? 'rgb(46, 125, 50)' : 'rgb(198, 40, 40)';
-  }
+  if (p.listMarkerRevision && p.color) el.style.color = p.color;
 }
 
 function applyContainerLanguageAndDirection(el: HTMLElement, prims: BlockGroup['prims']): void {
@@ -1600,9 +1604,6 @@ function createMirrorPrimitive(
       applyPrimitiveVisualStyle(el, p.opacity, p.rotationDeg);
       if (p.filter) el.style.filter = p.filter;
       applyDocAttrs(el, p);
-      if (p.revision) {
-        el.style.outline = `2px solid ${p.revision.kind === 'ins' ? 'rgb(46, 125, 50)' : 'rgb(198, 40, 40)'}`;
-      }
       // The mirror is pointer-inert as a whole (page root: pointer-events
       // none), but images keep the painter's contract of a directly
       // hit-testable `.layout-run-image`: re-enabling DOM hit testing lets a

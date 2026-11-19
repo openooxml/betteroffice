@@ -699,7 +699,7 @@ fn run_property_decision_preview_uses_old_or_new_properties_without_mutating() {
 }
 
 #[test]
-fn formatted_change_has_a_dotted_display_cue_and_decisions_remove_it() {
+fn formatted_change_has_a_change_bar_and_decisions_remove_it() {
     use crate::bridge::{RenderEnv, RevisionPreview};
     use docx_layout::display_list::{Primitive, RevisionKind};
     let font = docx_layout::register_measure_font(include_bytes!(
@@ -731,10 +731,29 @@ fn formatted_change_has_a_dotted_display_cue_and_decisions_remove_it() {
         engine
             .build_display_list_frame("{}", engine.stats().frame_epoch)
             .unwrap();
-        let cues = engine.with_display_list(|list| list.pages.iter().flat_map(|page| &page.primitives).filter(|primitive| {
-            matches!(primitive, Primitive::Decoration(cue) if cue.dotted && cue.attrs.revision.as_ref().is_some_and(|revision| revision.kind == RevisionKind::Format && revision.author == "Ada"))
-        }).count()).unwrap();
-        assert_eq!(cues > 0, decision.is_none());
+        let (bars, formatted) = engine
+            .with_display_list(|list| {
+                let primitives: Vec<&Primitive> =
+                    list.pages.iter().flat_map(|page| &page.primitives).collect();
+                let bars = primitives
+                    .iter()
+                    .filter(|primitive| matches!(primitive, Primitive::Rect(bar) if bar.fill == "#000000"))
+                    .count();
+                let formatted = primitives.iter().any(|primitive| {
+                    let attrs = match primitive {
+                        Primitive::Text(text) => &text.attrs,
+                        Primitive::GlyphRun(run) => &run.attrs,
+                        _ => return false,
+                    };
+                    attrs.revision.as_ref().is_some_and(|revision| {
+                        revision.kind == RevisionKind::Format && revision.author == "Ada"
+                    })
+                });
+                (bars, formatted)
+            })
+            .unwrap();
+        assert_eq!(bars > 0, decision.is_none());
+        assert_eq!(formatted, decision.is_none());
     }
 }
 

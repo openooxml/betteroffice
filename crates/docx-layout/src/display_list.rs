@@ -822,6 +822,12 @@ pub struct Revision {
     pub date: String,
     pub revision_id: String,
     pub kind: RevisionKind,
+    /// Word's paint color for the revision's marks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    /// The revision is half of a move.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_move: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
@@ -2025,6 +2031,8 @@ struct RunFormattingIn {
     #[serde(default)]
     change_revision_id: Option<i64>,
     #[serde(default)]
+    revision_paint: Option<crate::types::RevisionPaint>,
+    #[serde(default)]
     format_change: Option<Revision>,
     #[serde(default)]
     hyperlink: Option<HyperlinkIn>,
@@ -2195,6 +2203,8 @@ struct ImageRunIn {
     #[serde(default)]
     change_revision_id: Option<f64>,
     #[serde(default)]
+    revision_paint: Option<crate::types::RevisionPaint>,
+    #[serde(default)]
     hlink_href: Option<String>,
     #[serde(default)]
     pm_start: Option<i64>,
@@ -2318,6 +2328,10 @@ pub(crate) struct ParaAttrsIn {
     #[serde(default)]
     list_marker_revision: Option<RevisionKind>,
     #[serde(default)]
+    list_marker_revision_color: Option<String>,
+    #[serde(default)]
+    list_marker_previous_len: Option<u32>,
+    #[serde(default)]
     default_font_family: Option<String>,
     #[serde(default)]
     default_font_size: Option<f64>,
@@ -2329,6 +2343,8 @@ pub(crate) struct ParaAttrsIn {
     /// `<w:pPr><w:rPr><w:del/>`: tracked deletion on the paragraph mark.
     #[serde(default)]
     p_pr_del: Option<RevisionInfoIn>,
+    #[serde(default)]
+    p_pr_change: Option<bool>,
     /// `w:autoSpaceDE` / `w:autoSpaceDN` opt-outs; absent is the default (on).
     #[serde(default, rename = "autoSpaceDE")]
     auto_space_de: Option<bool>,
@@ -3702,14 +3718,6 @@ fn block_key(id: &Value) -> Cow<'_, str> {
 
 const DEFAULT_FONT_PT: f64 = 11.0;
 pub(crate) const DEFAULT_FONT_FAMILY: &str = "Calibri";
-const REVISION_INS_COLOR: &str = "#2e7d32";
-const REVISION_DEL_COLOR: &str = "#c62828";
-const REVISION_MERGE_COLOR: &str = "#5f6368";
-const STRUCTURAL_CHANGE_BAR_OFFSET_X: f64 = -10.0;
-const STRUCTURAL_CHANGE_BAR_WIDTH: f64 = 2.0;
-const CELL_STRUCTURAL_BAR_HEIGHT: f64 = 3.0;
-const PARAGRAPH_MARK_GLYPH_GAP: f64 = 2.0;
-const PARAGRAPH_MARK_GLYPH_WIDTH: f64 = 8.0;
 
 fn font_px_of(fmt: &RunFormattingIn) -> f64 {
     fmt.font_size.unwrap_or(DEFAULT_FONT_PT) * 96.0 / 72.0
@@ -3835,12 +3843,118 @@ fn structural_revision(
     }
 }
 
-fn structural_color(kind: StructuralRevisionKind) -> &'static str {
-    match kind {
-        StructuralRevisionKind::Ins => REVISION_INS_COLOR,
-        StructuralRevisionKind::Del => REVISION_DEL_COLOR,
-        StructuralRevisionKind::Merge => REVISION_MERGE_COLOR,
+/// What a list marker's text paints with.
+struct MarkerPaint<'a> {
+    ctx: &'a RenderCtx<'a>,
+    format: &'a RunFormattingIn,
+    baseline: f64,
+    attrs: &'a DocAttrs,
+    color: &'a str,
+    rtl: bool,
+    scripts: &'a [String],
+}
+
+impl MarkerPaint<'_> {
+    /// Paints `text` at `x` and returns its advance; `slot` fixes the fallback text width.
+    fn emit(&self, prims: &mut Vec<Primitive>, text: &str, x: f64, slot: Option<f64>) -> f64 {
+        let start = prims.len();
+        let shaped = !self.rtl
+            && bidi_char_levels(text, base_bidi_direction(false))
+                .iter()
+                .all(|level| level % 2 == 0)
+            && self.ctx.shape.is_some_and(|shape| {
+                try_emit_glyph_runs(
+                    prims,
+                    shape,
+                    text,
+                    self.format,
+                    None,
+                    None,
+                    x,
+                    self.baseline,
+                    &None,
+                    0,
+                    None,
+                    None,
+                    self.attrs,
+                    self.color,
+                    &None,
+                    ooxml_text::AutoSpace::from_options(Some(false), Some(false)),
+                )
+            });
+        if shaped {
+            let end = prims[start..]
+                .iter()
+                .filter_map(|primitive| match primitive {
+                    Primitive::GlyphRun(run) => run
+                        .glyphs
+                        .iter()
+                        .map(|glyph| glyph.x + glyph.advance)
+                        .reduce(f64::max),
+                    _ => None,
+                })
+                .reduce(f64::max);
+            return end.map_or(0.0, |end| (end - x).max(0.0));
+        }
+        let width = slot.unwrap_or_else(|| fallback_text_width(text, self.format, DEFAULT_FONT_PT));
+        prims.push(Primitive::Text(TextRunPrimitive {
+            text: text.to_owned(),
+            paint_text: text_paint_override(self.ctx.shape, text, self.format).map(Box::new),
+            x: px(x),
+            baseline_y: px(self.baseline),
+            width: px(width),
+            paint_clip: None,
+            font: resolved_css_font(self.ctx.shape, text, self.format),
+            scripts: boxed_scripts(self.scripts),
+            color: self.color.to_owned(),
+            letter_spacing: None,
+            word_spacing: None,
+            rtl: self.rtl.then_some(true),
+            opacity: None,
+            rotation_deg: None,
+            horizontal_scale: horizontal_scale_of(self.format),
+            substitute_scale: text_substitute_scale(
+                self.ctx.shape,
+                text,
+                self.format,
+                base_bidi_level(self.rtl),
+                false,
+            ),
+            all_caps: false,
+            small_caps: false,
+            hidden: false,
+            text_shadow: None,
+            text_outline: false,
+            emphasis_mark: None,
+            text_effect: None,
+            attrs: self.attrs.clone(),
+        }));
+        width
     }
+}
+
+/// A black tracked-change bar in the page margin from `top` to `bottom`.
+fn change_bar(x: f64, top: f64, bottom: f64, attrs: DocAttrs) -> Primitive {
+    Primitive::Rect(RectPrimitive {
+        x: px(x),
+        y: px(top),
+        w: px(crate::revision_colors::CHANGE_BAR_WIDTH_PX),
+        h: px(bottom - top),
+        fill: crate::revision_colors::CHANGE_BAR_COLOR.to_owned(),
+        attrs,
+    })
+}
+
+/// Change bars sit in the page margin, so cell clipping leaves them alone.
+fn is_change_bar(primitive: &Primitive) -> bool {
+    matches!(primitive, Primitive::Rect(rect)
+        if rect.fill == crate::revision_colors::CHANGE_BAR_COLOR
+            && num_f64(&rect.w) == crate::revision_colors::CHANGE_BAR_WIDTH_PX)
+}
+
+/// Word draws change bars 36pt left of the page's left margin.
+pub(crate) fn change_bar_x(page: &PageIn) -> f64 {
+    page.margins.left - crate::revision_colors::CHANGE_BAR_MARGIN_OFFSET_PX
 }
 
 fn sdt_attrs_at_depth(group: &SdtGroupIn, depth: usize) -> SdtAttrs {
@@ -4058,9 +4172,72 @@ fn resolved_css_font(shape: Option<&ShapeFonts<'_>>, text: &str, fmt: &RunFormat
 }
 
 /// Resolves deletion, hyperlink, and explicit run colors.
+/// A pending revision side's Word color and whether it is a move.
+#[derive(Clone)]
+struct RevisionMark {
+    color: String,
+    is_move: bool,
+}
+
+fn insertion_mark(
+    paint: Option<&crate::types::RevisionPaint>,
+    pending: Option<bool>,
+) -> Option<RevisionMark> {
+    (pending == Some(true)).then(|| RevisionMark {
+        color: paint
+            .and_then(|paint| paint.insertion_color.clone())
+            .unwrap_or_else(|| crate::revision_colors::AUTHOR_PALETTE[0].to_owned()),
+        is_move: paint.is_some_and(|paint| paint.insertion_move),
+    })
+}
+
+fn deletion_mark(
+    paint: Option<&crate::types::RevisionPaint>,
+    pending: Option<bool>,
+) -> Option<RevisionMark> {
+    (pending == Some(true)).then(|| RevisionMark {
+        color: paint
+            .and_then(|paint| paint.deletion_color.clone())
+            .unwrap_or_else(|| crate::revision_colors::AUTHOR_PALETTE[0].to_owned()),
+        is_move: paint.is_some_and(|paint| paint.deletion_move),
+    })
+}
+
+/// The revision a run's text carries: its deletion, else its insertion, as Word colors it.
+fn run_revision(
+    paint: Option<&crate::types::RevisionPaint>,
+    is_insertion: Option<bool>,
+    is_deletion: Option<bool>,
+    author: Option<&String>,
+    date: Option<&String>,
+    revision_id: Option<String>,
+) -> Option<Revision> {
+    let (kind, mark) = match (
+        insertion_mark(paint, is_insertion),
+        deletion_mark(paint, is_deletion),
+    ) {
+        (Some(mark), _) if is_insertion == Some(true) && is_deletion != Some(true) => {
+            (RevisionKind::Ins, mark)
+        }
+        (Some(_), Some(mark)) => (RevisionKind::Ins, mark),
+        (None, Some(mark)) => (RevisionKind::Del, mark),
+        _ => return None,
+    };
+    Some(Revision {
+        author: author.cloned().unwrap_or_default(),
+        date: date.cloned().unwrap_or_default(),
+        revision_id: revision_id.unwrap_or_default(),
+        kind,
+        color: Some(mark.color),
+        is_move: mark.is_move,
+    })
+}
+
 fn run_color(fmt: &RunFormattingIn) -> String {
-    if fmt.is_deletion == Some(true) {
-        return "#c62828".to_string();
+    if let Some(mark) = deletion_mark(fmt.revision_paint.as_ref(), fmt.is_deletion)
+        .or_else(|| insertion_mark(fmt.revision_paint.as_ref(), fmt.is_insertion))
+    {
+        return mark.color;
     }
     if let Some(c) = &fmt.color {
         return c.clone();
@@ -4573,20 +4750,15 @@ fn stamp_image_run_metadata(
     stamp_hyperlink_attrs(attrs, run.hyperlink.as_ref(), run.hlink_href.as_deref());
     attrs.logical_order = attrs.logical_order.or(logical_order);
     attrs.bidi_level = attrs.bidi_level.or(bidi_level);
-    if run.is_insertion == Some(true) || run.is_deletion == Some(true) {
-        attrs.revision = Some(Box::new(Revision {
-            author: run.change_author.clone().unwrap_or_default(),
-            date: run.change_date.clone().unwrap_or_default(),
-            revision_id: run
-                .change_revision_id
-                .map(|id| id.to_string())
-                .unwrap_or_default(),
-            kind: if run.is_insertion == Some(true) {
-                RevisionKind::Ins
-            } else {
-                RevisionKind::Del
-            },
-        }));
+    if let Some(revision) = run_revision(
+        run.revision_paint.as_ref(),
+        run.is_insertion,
+        run.is_deletion,
+        run.change_author.as_ref(),
+        run.change_date.as_ref(),
+        run.change_revision_id.map(|id| id.to_string()),
+    ) {
+        attrs.revision = Some(Box::new(revision));
     }
 }
 
@@ -5002,9 +5174,20 @@ pub(crate) struct RenderCtx<'a> {
     pub(crate) reservations: Option<&'a std::cell::RefCell<Vec<DisplayReservation>>>,
     /// Collects the page's table gridlines; `None` drops them.
     pub(crate) gridlines: Option<&'a std::cell::RefCell<Vec<DisplayGridline>>>,
+    /// Left edge of tracked-change bars; `None` paints none.
+    pub(crate) change_bar_x: Option<f64>,
 }
 
 impl RenderCtx<'_> {
+    /// Text boxes keep their tracked-change marks but draw no page-margin bars.
+    fn without_change_bars(&self) -> Self {
+        RenderCtx {
+            page_label: self.page_label.clone(),
+            change_bar_x: None,
+            ..*self
+        }
+    }
+
     fn reserve(&self, reservation: &ReservationRefIn, x: f64, y: f64, width: f64, height: f64) {
         if let Some(reservations) = self.reservations {
             reservations.borrow_mut().push(DisplayReservation {
@@ -6138,6 +6321,7 @@ fn recompose_hf_region(
         field_widths: (!field_widths.is_empty()).then_some(&field_widths),
         reservations: Some(reservations),
         gridlines: Some(gridlines),
+        change_bar_x: Some(change_bar_x(page)),
     };
     let content_width = page.size.w - page.margins.left - page.margins.right;
     let height = variant
@@ -6393,6 +6577,7 @@ fn build_display_list_selected(
             field_widths: None,
             reservations: Some(&page_reservations),
             gridlines: Some(&page_gridlines),
+            change_bar_x: Some(change_bar_x(page)),
         };
         let mut prims: Vec<Primitive> = Vec::new();
         let mut page_borders: Vec<PageBorderPrimitive> = Vec::new();
@@ -7041,18 +7226,6 @@ pub(crate) fn emit_paragraph_fragment(
     });
 
     if emit_block_chrome {
-        if let Some(rev) = pmark_revision.clone() {
-            let mut bar_attrs = block_ref.attrs();
-            bar_attrs.structural_revision = Some(Box::new(rev.clone()));
-            prims.push(Primitive::Rect(RectPrimitive {
-                x: px(origin_x + STRUCTURAL_CHANGE_BAR_OFFSET_X),
-                y: px(origin_y),
-                w: px(STRUCTURAL_CHANGE_BAR_WIDTH),
-                h: px(frag.height),
-                fill: structural_color(rev.kind).to_string(),
-                attrs: bar_attrs,
-            }));
-        }
         // paragraph shading paints as a fragment-sized rect behind everything
         if let Some(shading) = attrs.and_then(|a| a.shading.as_ref()) {
             let mut shading_attrs = block_ref.attrs();
@@ -7099,7 +7272,7 @@ pub(crate) fn emit_paragraph_fragment(
     let para_ends_with_line_break = matches!(block.runs.last(), Some(RunIn::LineBreak(_)));
 
     let mut line_top = origin_y;
-    let mut last_line: Option<LinePaintMetrics> = None;
+    let mut changed_lines: Vec<(f64, f64, bool)> = Vec::new();
     let scripts = paragraph_scripts(&block.runs);
     let texts = RunTexts::new(block.runs.len());
     for idx in frag.from_line..frag.to_line.min(total_lines) {
@@ -7111,7 +7284,7 @@ pub(crate) fn emit_paragraph_fragment(
         let is_last_line = idx + 1 == total_lines;
         let line_stamp_from = prims.len();
 
-        last_line = emit_line(
+        emit_line(
             prims,
             block,
             line,
@@ -7136,13 +7309,49 @@ pub(crate) fn emit_paragraph_fragment(
             &scripts,
             &texts,
         );
+        let mut changed = false;
         for primitive in &mut prims[line_stamp_from..] {
             if let Some(attrs) = doc_attrs_mut(primitive) {
                 attrs.line_index = Some(idx as u64);
+                changed |= attrs.revision.is_some() || attrs.list_marker_revision.is_some();
+            }
+        }
+        changed |= is_first_line && attrs.and_then(|a| a.p_pr_change) == Some(true);
+        let ends_paragraph = is_last_line && frag.carried_to_next != Some(true);
+        let pmark_line = ends_paragraph && pmark_revision.is_some();
+        changed_lines.push((line_top, line_top + line.line_height, changed || pmark_line));
+        if changed || pmark_line {
+            let spacing = attrs.and_then(|a| a.spacing.as_ref());
+            let line = changed_lines.last_mut().expect("line just pushed");
+            if is_first_line {
+                line.0 -= spacing.and_then(|s| s.before).unwrap_or(0.0).max(0.0);
+            }
+            if ends_paragraph {
+                line.1 += spacing.and_then(|s| s.after).unwrap_or(0.0).max(0.0);
             }
         }
 
         line_top += line.line_height;
+    }
+    if let Some(bar_x) = ctx.change_bar_x {
+        let mut bars: Vec<(f64, f64)> = Vec::new();
+        for &(top, bottom, changed) in &changed_lines {
+            if !changed {
+                continue;
+            }
+            match bars.last_mut() {
+                Some(bar) if top <= bar.1 + 0.5 => bar.1 = bar.1.max(bottom),
+                _ => bars.push((top, bottom)),
+            }
+        }
+        let bar_count = bars.len();
+        for (index, (top, bottom)) in bars.into_iter().enumerate() {
+            let mut bar_attrs = block_ref.attrs();
+            if index + 1 == bar_count {
+                bar_attrs.structural_revision = pmark_revision.clone().map(Box::new);
+            }
+            prims.push(change_bar(bar_x, top, bottom, bar_attrs));
+        }
     }
     let shown_lines = measure
         .lines
@@ -7154,61 +7363,6 @@ pub(crate) fn emit_paragraph_fragment(
             first.head_run..=last.tail_run,
             &mut prims[stamp_from..],
         );
-    }
-
-    // The tracked-change pilcrow marks the paragraph's end, so only the final
-    // fragment gets it; earlier fragments get the margin bar alone.
-    if let (Some(rev), Some(line)) = (pmark_revision, last_line)
-        && frag.carried_to_next != Some(true)
-    {
-        let mut glyph_attrs = block_ref.attrs();
-        glyph_attrs.structural_revision = Some(Box::new(rev.clone()));
-        let glyph_x = line.end_x + PARAGRAPH_MARK_GLYPH_GAP;
-        prims.push(Primitive::Text(TextRunPrimitive {
-            text: "¶".to_string(),
-            paint_text: None,
-            x: px(glyph_x),
-            baseline_y: px(line.baseline),
-            width: px(PARAGRAPH_MARK_GLYPH_WIDTH),
-            paint_clip: None,
-            font: resolved_css_font(ctx.shape, "¶", &RunFormattingIn::default()),
-            scripts: None,
-            color: structural_color(rev.kind).to_string(),
-            letter_spacing: None,
-            word_spacing: None,
-            rtl: None,
-            opacity: None,
-            rotation_deg: None,
-            horizontal_scale: None,
-            substitute_scale: text_substitute_scale(
-                ctx.shape,
-                "¶",
-                &RunFormattingIn::default(),
-                0,
-                false,
-            ),
-            all_caps: false,
-            small_caps: false,
-            hidden: false,
-            text_shadow: None,
-            text_outline: false,
-            emphasis_mark: None,
-            text_effect: None,
-            attrs: glyph_attrs.clone(),
-        }));
-        if rev.kind == StructuralRevisionKind::Del {
-            prims.push(Primitive::Decoration(DecorationPrimitive {
-                deco: DecoKind::Strike,
-                x: px(glyph_x),
-                y: px(line.baseline - (font_px_of(&RunFormattingIn::default()) * 0.3).round()),
-                w: px(PARAGRAPH_MARK_GLYPH_WIDTH),
-                h: px(1.0),
-                color: structural_color(rev.kind).to_string(),
-                dashed: false,
-                dotted: false,
-                attrs: glyph_attrs,
-            }));
-        }
     }
 
     // stamp the paragraph's stable paraId AND (for mirror-surfaced fragments) its
@@ -7269,12 +7423,6 @@ struct LineGeom<'a> {
     has_list_marker: bool,
     /// A trailing explicit line break allows the closing line to justify.
     para_ends_with_line_break: bool,
-}
-
-#[derive(Clone, Copy)]
-struct LinePaintMetrics {
-    end_x: f64,
-    baseline: f64,
 }
 
 /// Materialize the authoritative Rust-measure seam into paint items. Every
@@ -7698,7 +7846,7 @@ fn emit_line<'a>(
     ctx: &RenderCtx<'_>,
     scripts: &[String],
     texts: &RunTexts<'a>,
-) -> Option<LinePaintMetrics> {
+) {
     let echo_start = prims.len();
     let segments = resolve_line_segments(&block.runs, line, texts);
     let attrs = block.attrs.as_ref();
@@ -7869,9 +8017,15 @@ fn emit_line<'a>(
             pen_x - slot_width
         };
         let marker_revision = attrs.and_then(|attrs| attrs.list_marker_revision);
+        let revision_color = attrs
+            .and_then(|attrs| attrs.list_marker_revision_color.as_deref())
+            .unwrap_or(crate::revision_colors::AUTHOR_PALETTE[0]);
+        let renumbered = attrs
+            .and_then(|attrs| attrs.list_marker_previous_len)
+            .is_some();
         let color = match marker_revision {
-            Some(RevisionKind::Ins) => REVISION_INS_COLOR,
-            Some(RevisionKind::Del) => REVISION_DEL_COLOR,
+            _ if renumbered => revision_color,
+            Some(RevisionKind::Ins | RevisionKind::Del) => revision_color,
             None | Some(RevisionKind::Format) => attrs
                 .and_then(|attrs| attrs.list_marker_color.as_deref())
                 .unwrap_or("#000000"),
@@ -7891,61 +8045,89 @@ fn emit_line<'a>(
             && !(list_is_bullet == Some(false) && symbol_face))
             .then_some(true);
         marker_attrs.list_marker_revision = marker_revision;
-        let shaped = !geom.is_rtl
-            && bidi_char_levels(marker, base_bidi_direction(false))
-                .iter()
-                .all(|level| level % 2 == 0)
-            && ctx.shape.is_some_and(|shape| {
-                try_emit_glyph_runs(
-                    prims,
-                    shape,
-                    marker,
-                    &marker_format,
-                    None,
-                    None,
-                    marker_x,
-                    baseline,
-                    &None,
-                    0,
-                    None,
-                    None,
-                    &marker_attrs,
-                    color,
-                    &None,
-                    ooxml_text::AutoSpace::from_options(Some(false), Some(false)),
-                )
+        let previous_len = attrs
+            .and_then(|attrs| attrs.list_marker_previous_len)
+            .map(|len| {
+                marker
+                    .char_indices()
+                    .nth(len as usize)
+                    .map_or(marker.len(), |(i, _)| i)
             });
-        if !shaped {
-            prims.push(Primitive::Text(TextRunPrimitive {
-                text: marker.to_owned(),
-                paint_text: text_paint_override(ctx.shape, marker, &marker_format).map(Box::new),
-                x: px(marker_x),
-                baseline_y: px(baseline),
-                width: px(slot_width),
-                paint_clip: None,
-                font: resolved_css_font(ctx.shape, marker, &marker_format),
-                scripts: boxed_scripts(scripts),
-                color: color.to_owned(),
-                letter_spacing: None,
-                word_spacing: None,
-                rtl: geom.is_rtl.then_some(true),
-                opacity: None,
-                rotation_deg: None,
-                horizontal_scale: horizontal_scale_of(&marker_format),
-                substitute_scale: text_substitute_scale(
-                    ctx.shape,
-                    marker,
-                    &marker_format,
-                    base_bidi_level(geom.is_rtl),
-                    false,
+        let paint = MarkerPaint {
+            ctx,
+            format: &marker_format,
+            baseline,
+            attrs: &marker_attrs,
+            color,
+            rtl: geom.is_rtl,
+            scripts,
+        };
+        if let Some(split) = previous_len {
+            let (previous, current) = marker.split_at(split);
+            let (previous_x, previous_width, current_x, current_width) = if geom.is_rtl {
+                let current_width = paint.emit(prims, current, marker_x, None);
+                let previous_x = marker_x + current_width;
+                let previous_width = paint.emit(prims, previous, previous_x, None);
+                (previous_x, previous_width, marker_x, current_width)
+            } else {
+                let previous_width = paint.emit(prims, previous, marker_x, None);
+                paint.emit(prims, current, marker_x + previous_width, None);
+                (
+                    marker_x,
+                    previous_width,
+                    marker_x + previous_width,
+                    (slot_width - previous_width).max(0.0),
+                )
+            };
+            let font_px = font_px_of(&marker_format);
+            let thickness = (font_px / 16.0).round().max(1.0);
+            for (deco, x, y, w) in [
+                (
+                    DecoKind::Strike,
+                    previous_x,
+                    baseline - (font_px * 0.3).round(),
+                    previous_width,
                 ),
-                all_caps: false,
-                small_caps: false,
-                hidden: false,
-                text_shadow: None,
-                text_outline: false,
-                emphasis_mark: None,
-                text_effect: None,
+                (
+                    DecoKind::Underline,
+                    current_x,
+                    baseline + (font_px * 0.1875).round(),
+                    current_width,
+                ),
+            ] {
+                prims.push(Primitive::Decoration(DecorationPrimitive {
+                    deco,
+                    x: px(x),
+                    y: px(y),
+                    w: px(w),
+                    h: px(thickness),
+                    color: color.to_owned(),
+                    dashed: false,
+                    dotted: false,
+                    attrs: marker_attrs.clone(),
+                }));
+            }
+        } else {
+            paint.emit(prims, marker, marker_x, Some(slot_width));
+        }
+        // Word marks the number and its tab gap with the paragraph mark's revision.
+        if let Some(kind @ (RevisionKind::Ins | RevisionKind::Del)) = marker_revision {
+            let font_px = font_px_of(&marker_format);
+            let thickness = (font_px / 16.0).round().max(1.0);
+            let (deco, y) = if kind == RevisionKind::Ins {
+                (DecoKind::Underline, baseline + (font_px * 0.1875).round())
+            } else {
+                (DecoKind::Strike, baseline - (font_px * 0.3).round())
+            };
+            prims.push(Primitive::Decoration(DecorationPrimitive {
+                deco,
+                x: px(marker_x),
+                y: px(y),
+                w: px(slot_width),
+                h: px(thickness),
+                color: color.to_owned(),
+                dashed: false,
+                dotted: false,
                 attrs: marker_attrs,
             }));
         }
@@ -8489,10 +8671,6 @@ fn emit_line<'a>(
             }
         }
     }
-    Some(LinePaintMetrics {
-        end_x: pen_x,
-        baseline,
-    })
 }
 
 fn tab_leader_for(attrs: Option<&ParaAttrsIn>, current_x_px: f64) -> Option<String> {
@@ -8724,23 +8902,14 @@ fn emit_text_segment(
         .as_ref()
         .filter(|ids| !ids.is_empty())
         .map(|ids| ids.iter().map(|id| id.to_string()).collect());
-    let revision = if fmt.is_insertion == Some(true) || fmt.is_deletion == Some(true) {
-        Some(Revision {
-            author: fmt.change_author.clone().unwrap_or_default(),
-            date: fmt.change_date.clone().unwrap_or_default(),
-            revision_id: fmt
-                .change_revision_id
-                .map(|id| id.to_string())
-                .unwrap_or_default(),
-            kind: if fmt.is_insertion == Some(true) {
-                RevisionKind::Ins
-            } else {
-                RevisionKind::Del
-            },
-        })
-    } else {
-        None
-    };
+    let revision = run_revision(
+        fmt.revision_paint.as_ref(),
+        fmt.is_insertion,
+        fmt.is_deletion,
+        fmt.change_author.as_ref(),
+        fmt.change_date.as_ref(),
+        fmt.change_revision_id.map(|id| id.to_string()),
+    );
     let mut attrs = block_ref.attrs();
     attrs.doc_start = pm_start;
     attrs.doc_end = pm_end;
@@ -8837,36 +9006,6 @@ fn emit_text_segment(
             attrs: attrs.clone(),
         }));
     }
-    // Paint the insertion wash across the full line band.
-    if fmt.is_insertion == Some(true) {
-        prims.push(Primitive::Decoration(DecorationPrimitive {
-            deco: DecoKind::Highlight,
-            x: px(x),
-            y: px(line_top),
-            w: px(width),
-            h: px(line_bottom - line_top),
-            color: "rgba(52, 168, 83, 0.08)".to_string(),
-            dashed: false,
-            dotted: false,
-            attrs: attrs.clone(),
-        }));
-    }
-    // Suggested deletion: a red wash behind the glyphs. The red text itself
-    // comes from run_color and the strike from the Strike decoration below.
-    if fmt.is_deletion == Some(true) {
-        prims.push(Primitive::Decoration(DecorationPrimitive {
-            deco: DecoKind::Highlight,
-            x: px(x),
-            y: px(line_top),
-            w: px(width),
-            h: px(line_bottom - line_top),
-            color: "rgba(211, 47, 47, 0.08)".to_string(),
-            dashed: false,
-            dotted: false,
-            attrs: attrs.clone(),
-        }));
-    }
-
     let color = run_color(fmt);
     let paint_clip = synthetic_fallback.then(|| ClipRect {
         x: Some(px(x)),
@@ -8965,30 +9104,32 @@ fn emit_text_segment(
     // decoration thickness/offsets derived from the font size (deterministic
     // stand-ins for the browser's UA decoration metrics)
     let thickness = (font_px / 16.0).round().max(1.0);
-    if let Some(decoration) = underline_decoration(fmt, &attrs, x, paint_baseline, width) {
+    let insertion = insertion_mark(fmt.revision_paint.as_ref(), fmt.is_insertion);
+    let deletion = deletion_mark(fmt.revision_paint.as_ref(), fmt.is_deletion);
+    let underline_y = paint_baseline + (font_px * 0.1875).round();
+    let strike_y = paint_baseline - (font_px * 0.3).round();
+    // Word replaces an inserted run's own underline with a single rule, double for a move.
+    if let Some(mark) = &insertion {
+        prims.push(Primitive::Decoration(revision_rule(
+            DecoKind::Underline,
+            mark,
+            &attrs,
+            x,
+            underline_y,
+            width,
+            thickness,
+        )));
+    } else if let Some(mut decoration) = underline_decoration(fmt, &attrs, x, paint_baseline, width)
+    {
+        if let Some(mark) = &deletion {
+            decoration.color = mark.color.clone();
+        }
         prims.push(Primitive::Decoration(decoration));
-    } else if fmt.is_insertion == Some(true) {
-        // Suggested insertion: a green dashed rule under the run, reusing the
-        // offset and thickness of an explicit underline; the dashed flag drives
-        // the canvas
-        // rule. `else if` so an already-underlined inserted run keeps a single
-        // rule rather than stacking two lines at the same baseline offset.
-        prims.push(Primitive::Decoration(DecorationPrimitive {
-            deco: DecoKind::Underline,
-            x: px(x),
-            y: px(paint_baseline + (font_px * 0.1875).round()),
-            w: px(width),
-            h: px(thickness),
-            color: "#2e7d32".to_string(),
-            dashed: true,
-            dotted: false,
-            attrs: attrs.clone(),
-        }));
     } else if fmt.hidden == Some(true) {
         prims.push(Primitive::Decoration(DecorationPrimitive {
             deco: DecoKind::Underline,
             x: px(x),
-            y: px(paint_baseline + (font_px * 0.1875).round()),
+            y: px(underline_y),
             w: px(width),
             h: px(thickness),
             color: color.clone(),
@@ -8997,27 +9138,21 @@ fn emit_text_segment(
             attrs: attrs.clone(),
         }));
     }
-    if let Some(change) = &fmt.format_change {
-        let mut cue_attrs = attrs.clone();
-        cue_attrs.revision = Some(Box::new(change.clone()));
-        prims.push(Primitive::Decoration(DecorationPrimitive {
-            deco: DecoKind::Underline,
-            x: px(x),
-            y: px(paint_baseline + (font_px * 0.3).round()),
-            w: px(width),
-            h: px(1.0),
-            color: "#6a1b9a".to_owned(),
-            dashed: false,
-            dotted: true,
-            attrs: cue_attrs,
-        }));
-    }
-    // Deletions strike through in the revision colour.
-    if fmt.strike == Some(true) || fmt.is_deletion == Some(true) {
+    if let Some(mark) = &deletion {
+        prims.push(Primitive::Decoration(revision_rule(
+            DecoKind::Strike,
+            mark,
+            &attrs,
+            x,
+            strike_y,
+            width,
+            thickness,
+        )));
+    } else if fmt.strike == Some(true) {
         prims.push(Primitive::Decoration(DecorationPrimitive {
             deco: DecoKind::Strike,
             x: px(x),
-            y: px(paint_baseline - (font_px * 0.3).round()),
+            y: px(strike_y),
             w: px(width),
             h: px(thickness),
             color,
@@ -9025,6 +9160,36 @@ fn emit_text_segment(
             dotted: false,
             attrs,
         }));
+    }
+}
+
+/// A revision's underline or strike: one rule, or two for a move.
+fn revision_rule(
+    deco: DecoKind,
+    mark: &RevisionMark,
+    attrs: &DocAttrs,
+    x: f64,
+    y: f64,
+    width: f64,
+    thickness: f64,
+) -> DecorationPrimitive {
+    let mut attrs = attrs.clone();
+    let h = if mark.is_move {
+        attrs.style = Some(DisplayBorderStyle::Double);
+        thickness * 2.0
+    } else {
+        thickness
+    };
+    DecorationPrimitive {
+        deco,
+        x: px(x),
+        y: px(y + thickness / 2.0 - h / 2.0),
+        w: px(width),
+        h: px(h),
+        color: mark.color.clone(),
+        dashed: false,
+        dotted: false,
+        attrs,
     }
 }
 
@@ -10478,7 +10643,17 @@ fn emit_shape_fragment_with_clip(
                 carried_to_next: None,
             };
             emit_paragraph_fragment(
-                prims, &synthetic, para, pm, ctx, content_x, para_y, None, None, true, true,
+                prims,
+                &synthetic,
+                para,
+                pm,
+                &ctx.without_change_bars(),
+                content_x,
+                para_y,
+                None,
+                None,
+                true,
+                true,
             );
         }
         let shape_rotation = if properties
@@ -11318,7 +11493,17 @@ fn emit_text_box_fragment(
             carried_to_next: None,
         };
         emit_paragraph_fragment(
-            prims, &synthetic, para, pm, ctx, content_x, para_y, None, None, true, true,
+            prims,
+            &synthetic,
+            para,
+            pm,
+            &ctx.without_change_bars(),
+            content_x,
+            para_y,
+            None,
+            None,
+            true,
+            true,
         );
         y_offset += pm.total_height;
     }
@@ -11845,17 +12030,10 @@ pub(crate) fn emit_table_fragment(
 
     let block_ref = BlockRef::of(&frag.block_id);
     let table_revision = whole_table_revision(block);
-    if let Some(rev) = table_revision.clone() {
+    if let (Some(rev), Some(bar_x)) = (table_revision.clone(), ctx.change_bar_x) {
         let mut attrs = block_ref.attrs();
-        attrs.structural_revision = Some(Box::new(rev.clone()));
-        prims.push(Primitive::Rect(RectPrimitive {
-            x: px(frag.x + STRUCTURAL_CHANGE_BAR_OFFSET_X),
-            y: px(frag.y),
-            w: px(STRUCTURAL_CHANGE_BAR_WIDTH),
-            h: px(visible_height),
-            fill: structural_color(rev.kind).to_string(),
-            attrs,
-        }));
+        attrs.structural_revision = Some(Box::new(rev));
+        prims.push(change_bar(bar_x, frag.y, frag.y + visible_height, attrs));
     }
 
     if table_revision.is_none() {
@@ -11876,16 +12054,12 @@ pub(crate) fn emit_table_fragment(
             if b - t <= 0.0 {
                 continue;
             }
+            let Some(bar_x) = ctx.change_bar_x else {
+                continue;
+            };
             let mut attrs = block_ref.attrs();
             attrs.structural_revision = Some(Box::new(rev.clone()));
-            prims.push(Primitive::Rect(RectPrimitive {
-                x: px(frag.x + STRUCTURAL_CHANGE_BAR_OFFSET_X),
-                y: px(t),
-                w: px(STRUCTURAL_CHANGE_BAR_WIDTH),
-                h: px(b - t),
-                fill: structural_color(rev.kind).to_string(),
-                attrs,
-            }));
+            prims.push(change_bar(bar_x, t, b, attrs));
         }
     }
 
@@ -12024,7 +12198,8 @@ pub(crate) fn emit_table_fragment(
         if let Some(marker) = &cell.tracked_marker {
             let parent_row_revision_id = row_parent_revision_id(&block.rows[p.g.row_index]);
             if marker.info.revision_id != parent_row_revision_id
-                && let Some((t, b)) = clip(cy, cy + CELL_STRUCTURAL_BAR_HEIGHT)
+                && let Some(bar_x) = ctx.change_bar_x
+                && let Some((t, b)) = clip(cy, cy + p.cell_h)
             {
                 let rev = structural_revision(
                     &marker.info,
@@ -12035,15 +12210,8 @@ pub(crate) fn emit_table_fragment(
                 );
                 let mut attrs = block_ref.attrs();
                 attrs.cell = Some(Box::new(cell_ref.clone()));
-                attrs.structural_revision = Some(Box::new(rev.clone()));
-                prims.push(Primitive::Rect(RectPrimitive {
-                    x: px(cx),
-                    y: px(t),
-                    w: px(p.g.width),
-                    h: px(b - t),
-                    fill: structural_color(rev.kind).to_string(),
-                    attrs,
-                }));
+                attrs.structural_revision = Some(Box::new(rev));
+                prims.push(change_bar(bar_x, t, b, attrs));
             }
         }
 
@@ -12328,7 +12496,9 @@ pub(crate) fn emit_table_fragment(
                 line_clip.y = Some(px(line_clip_top));
                 line_clip.h = Some(px((line_clip_bottom - line_clip_top).max(0.0)));
                 apply_clip_group(&mut line.attrs, clip_id.clone(), line_clip);
-            } else if let Some(attrs) = doc_attrs_mut(primitive) {
+            } else if !is_change_bar(primitive)
+                && let Some(attrs) = doc_attrs_mut(primitive)
+            {
                 apply_clip_group(attrs, clip_id.clone(), cell_clip.clone());
             }
         }
@@ -17314,6 +17484,7 @@ mod tests {
                         "listMarkerItalic": true,
                         "listMarkerColor": "#FF0000",
                         "listMarkerRevision": "ins",
+                        "listMarkerRevisionColor": "#0078D4",
                         "indent": { "left": 48, "hanging": 24 }
                     },
                     "pmStart": 0,
@@ -17369,7 +17540,17 @@ mod tests {
         assert_eq!(marker["listMarkerRevision"], "ins");
         assert_eq!(marker["listMarkerNumbered"], true);
         assert!(marker.get("listMarkerBullet").is_none());
-        assert_eq!(marker["color"], REVISION_INS_COLOR);
+        assert_eq!(marker["color"], "#0078D4");
+        assert!(
+            output["pages"][0]["primitives"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|primitive| primitive["listMarker"] == true
+                    && primitive["deco"] == "underline"
+                    && primitive["color"] == "#0078D4"),
+            "an inserted mark underlines its marker"
+        );
         assert!(marker["font"].as_str().unwrap().contains("Aptos"));
         assert!(marker["font"].as_str().unwrap().contains("700"));
         assert!(marker["font"].as_str().unwrap().contains("italic"));

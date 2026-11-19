@@ -53,7 +53,8 @@ test('ellipse images intersect their outer clip and do not clip later pictures',
     [['rect', 15, 25, 80, 50]],
     [['rect', 15, 25, 80, 50]],
   ]);
-  expect(recorder.calls).toContainEqual(['strokeRect', 10, 20, 100, 80]);
+  expect(recorder.calls).toContainEqual(['moveTo', 10, 60]);
+  expect(recorder.calls).toContainEqual(['lineTo', 110, 60]);
   await drawPrimitive(recorder.ctx, image(), options);
   expect(recorder.images[1].clips).toEqual([]);
   expect(recorder.depth()).toBe(0);

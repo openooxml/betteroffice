@@ -497,7 +497,8 @@ fn command_edits_ahead_of_tables_images_and_split_paragraphs_lay_out_as_a_full_r
 
 /// `edited` as the first body paragraph, then `between`, then filler that runs
 /// over several small pages.
-fn breadth_engine(client_id: u64, edited: &str, between: &str) -> EngineSession {
+/// An engine seeded with `edited` and `between` ahead of filler, and the package it was seeded from.
+fn breadth_engine(client_id: u64, edited: &str, between: &str) -> (EngineSession, Vec<u8>) {
     use super::lowering_fixture::{Package, para, run};
     let filler: String = (0..30)
         .map(|index| {
@@ -510,10 +511,11 @@ fn breadth_engine(client_id: u64, edited: &str, between: &str) -> EngineSession 
         })
         .collect();
     let body = format!("{}{between}{filler}", para("10000001", edited));
+    let bytes = Package::new(&body).bytes();
     let engine = EngineSession::new(client_id);
-    crate::seed_from_docx(engine.doc(), &Package::new(&body).bytes()).unwrap();
+    crate::seed_from_docx(engine.doc(), &bytes).unwrap();
     engine.set_relayout_trigger(RelayoutTrigger::Open);
-    engine
+    (engine, bytes)
 }
 
 /// The start of the body paragraph keyed `id`.
@@ -574,16 +576,16 @@ fn command_edits_around_rich_content_lay_out_as_a_full_recompute_does() {
         ("field and hyperlink", field_and_link, "", "body"),
     ];
     for (label, edited, between, story) in cases {
-        let engine = breadth_engine(9720, &edited, between);
-        let mut host = CommandHost::open(&engine, font);
+        let (engine, bytes) = breadth_engine(9720, &edited, between);
+        let mut host = CommandHost::open(&engine, font).seeded(9720, bytes);
         assert!(host.command(story, 2, 2, Some("x")), "{label}");
         host.assert_matches_cold(&format!("{label}: typing"));
         assert!(host.command(story, 2, 3, None), "{label}");
         host.assert_matches_cold(&format!("{label}: delete"));
     }
 
-    let engine = breadth_engine(9721, &run("First paragraph text"), &table);
-    let mut host = CommandHost::open(&engine, font);
+    let (engine, bytes) = breadth_engine(9721, &run("First paragraph text"), &table);
+    let mut host = CommandHost::open(&engine, font).seeded(9721, bytes);
     let second = paragraph_start(&engine, "00000300");
     assert!(!host.command("body", 3, second + 3, None));
     host.assert_matches_cold("delete across a table");
@@ -701,7 +703,7 @@ fn retained_pages_of_rich_runs_lay_out_as_a_full_recompute_does() {
     let engine = EngineSession::new(9723);
     crate::seed_from_docx(engine.doc(), &bytes).unwrap();
     engine.set_relayout_trigger(RelayoutTrigger::Open);
-    let mut host = CommandHost::open(&engine, font);
+    let mut host = CommandHost::open(&engine, font).seeded(9723, bytes.clone());
     let pages = engine
         .pagination
         .borrow()

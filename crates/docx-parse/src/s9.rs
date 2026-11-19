@@ -79,6 +79,9 @@ pub struct S9PackageWire {
     pub relationship_entries: Vec<(String, Relationship)>,
     pub media_entries: Vec<(String, Arc<MediaFile>)>,
     pub chart_entries: Vec<(String, Chart)>,
+    /// Revision authors in the order Word first meets them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revision_authors: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -795,6 +798,10 @@ fn parse_s9_package_impl(
                 None => media.into_iter().collect(),
             },
             chart_entries: charts.into_iter().collect(),
+            revision_authors: crate::revision_authors::package_revision_authors(
+                parts,
+                &document_path,
+            ),
         },
         template_variables,
         warnings,

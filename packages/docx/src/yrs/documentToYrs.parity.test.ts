@@ -10,6 +10,7 @@ import type { ComplexField, Document, ParagraphContent, Run, SimpleField } from 
 import { preloadEditWasm } from '../wasm/edit';
 import { createYrsSession, saveYrsDocx, type YrsSession } from './index';
 import { documentToYrs } from './documentToYrs';
+import { yrsToDocument } from './yrsToDocument';
 
 const WASM = resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm');
 const FIXTURE = resolve(import.meta.dir, '../../../../apps/demo/public/betteroffice-demo.docx');
@@ -895,6 +896,34 @@ describe('DOCX engine seeding', () => {
       for (const session of [engine, projected]) session.rejectChange({ revisionId: '17' });
       expectEquivalentStories(engine, projected);
       expect(engine.listRevisions()).toEqual([]);
+    } finally {
+      engine.destroy();
+      projected.destroy();
+    }
+  });
+
+  it('seeds complex fields inside tracked changes with their revision and saves them unchanged', async () => {
+    const field = (code: string, text: string) => `<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:${code} xml:space="preserve"> HYPERLINK "https://example.test" </w:${code}></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:${text}>Result</w:${text}></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>`;
+    const revision = 'w:author="A" w:date="2026-01-01T00:00:00Z"';
+    const bytes = sequencePackage(`<w:p><w:ins w:id="1" ${revision}>${field('instrText', 't')}</w:ins><w:del w:id="2" ${revision}>${field('delInstrText', 'delText')}</w:del></w:p>`);
+    const parsed = await parseDocx(bytes.buffer, { preloadFonts: false });
+    const engine = await createYrsSession({ clientId: 47036 });
+    const projected = await createYrsSession({ clientId: 47036 });
+    try {
+      engine.seedFromDocx(bytes);
+      documentToYrs(projected, parsed);
+      expectEquivalentStories(engine, projected);
+      for (const session of [engine, projected]) {
+        const runs = sequenceRuns(session.yrsBlocksForStory('body', {}) as LayoutBlock[]);
+        expect(runs.map(run => run.kind === 'field' && [run.rawType, run.fallback, run.isInsertion ?? false, run.isDeletion ?? false]))
+          .toEqual([['HYPERLINK', 'Result', true, false], ['HYPERLINK', 'Result', false, true]]);
+        const paragraph = yrsToDocument(session, parsed).package.document.content[0];
+        expect(paragraph?.type === 'paragraph' && paragraph.content.map(child =>
+          'content' in child && child.type !== 'run' ? [child.type, child.content.map(inner => inner.type)] : child.type
+        )).toEqual([['insertion', ['complexField']], ['deletion', ['complexField']]]);
+      }
+      const saved = unzipContainer((await saveYrsDocx(engine)).bytes)['word/document.xml'];
+      expect(saved).toEqual(unzipContainer(bytes)['word/document.xml']);
     } finally {
       engine.destroy();
       projected.destroy();

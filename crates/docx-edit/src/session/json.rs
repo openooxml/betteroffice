@@ -87,6 +87,13 @@ pub(crate) fn parse_render_env(env_json: &str) -> EngineResult<crate::bridge::Re
             }
         }
     }
+    if let Some(Value::Array(authors)) = value.get("revisionAuthors") {
+        env.revision_authors = authors
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect();
+    }
     if let Some(preview) = value.get("revisionPreview") {
         env.revision_preview = crate::bridge::RenderEnv::parse_revision_preview(preview);
     }

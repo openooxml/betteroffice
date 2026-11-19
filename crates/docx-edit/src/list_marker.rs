@@ -35,6 +35,8 @@ pub(crate) struct ListState {
     seen_num_ids: BTreeSet<String>,
     /// The document's numbering definitions, when the session retains them.
     numbering: Option<Arc<NumberingMap>>,
+    /// The numbering before pending revisions, kept beside the final one for tracked markup.
+    original: Option<Box<ListState>>,
 }
 
 impl ListState {
@@ -281,6 +283,44 @@ fn resolve_list_template(
 }
 
 /// [`list_marker`] without the reason a marker could not be written.
+/// Word's markup marker for a list paragraph whose mark may be tracked: the final number, the
+/// original one for a deleted mark, or the original ahead of a changed final number. Returns the
+/// marker and the length in chars of a leading original number shown struck.
+pub(crate) fn tracked_list_marker(
+    values: &BTreeMap<String, Any>,
+    state: &mut ListState,
+    inserted: bool,
+    deleted: bool,
+) -> (Option<String>, Option<u32>) {
+    let mut original_state = state.original.take().unwrap_or_else(|| {
+        Box::new(ListState {
+            original: None,
+            ..state.clone()
+        })
+    });
+    let original = if inserted {
+        None
+    } else {
+        compute_list_marker(values, &mut original_state)
+    };
+    state.original = Some(original_state);
+    let current = if deleted {
+        None
+    } else {
+        compute_list_marker(values, state)
+    };
+    if deleted {
+        return (original, None);
+    }
+    match (original, current) {
+        (Some(original), Some(current)) if !inserted && original != current => {
+            let previous = original.chars().count() as u32;
+            (Some(original + &current), Some(previous))
+        }
+        (_, current) => (current, None),
+    }
+}
+
 pub(crate) fn compute_list_marker(
     values: &BTreeMap<String, Any>,
     state: &mut ListState,

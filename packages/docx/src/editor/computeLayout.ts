@@ -118,6 +118,9 @@ export function buildResidentRegionLayoutRequest(
     renderEnv: {
       fontTheme: document?.package.theme,
       compatibilityFlags: document?.package.settings?.compatibilityFlags,
+      ...(document?.package.revisionAuthors?.length
+        ? { revisionAuthors: document.package.revisionAuthors }
+        : {}),
       ...renderEnv,
       ...defaultParagraphStyleEnv(document, renderEnv),
       ...chainFontSizeEnv(document, renderEnv),

@@ -251,6 +251,8 @@ pub struct RunFormatting {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub change_revision_id: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision_paint: Option<RevisionPaint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format_change: Option<crate::display_list::Revision>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logical_order: Option<u64>,
@@ -405,6 +407,8 @@ pub struct ImageRun {
     pub change_date: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub change_revision_id: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision_paint: Option<RevisionPaint>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pm_start: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -683,6 +687,11 @@ pub struct ParagraphAttrs {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub list_marker_revision: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub list_marker_revision_color: Option<String>,
+    /// Chars of `list_marker` that are the original number Word strikes ahead of a changed one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub list_marker_previous_len: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub default_tab_stop_twips: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_font_size: Option<f64>,
@@ -714,6 +723,23 @@ pub struct ParagraphAttrs {
     pub p_pr_ins: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub p_pr_del: Option<Value>,
+    /// The paragraph carries a pending `w:pPrChange`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub p_pr_change: Option<bool>,
+}
+
+/// Word's colors for a run's pending insertion and deletion, and whether each is a move.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RevisionPaint {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub insertion_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deletion_color: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub insertion_move: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub deletion_move: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1528,6 +1554,7 @@ impl PartialEq for ImageRun {
             change_author: _,
             change_date: _,
             change_revision_id: _,
+            revision_paint: _,
             pm_start: _,
             pm_end: _,
         } = other;
@@ -1573,6 +1600,7 @@ impl PartialEq for ImageRun {
             && self.change_author == other.change_author
             && self.change_date == other.change_date
             && self.change_revision_id == other.change_revision_id
+            && self.revision_paint == other.revision_paint
     }
 }
 

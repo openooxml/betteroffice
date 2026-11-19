@@ -358,6 +358,7 @@ function marksToYrsAttrs(marks: readonly MarkDescriptor[]): YrsAttrs {
         id: mark.attrs.revisionId,
         author: mark.attrs.author,
         date: mark.attrs.date,
+        ...(mark.attrs.isMovePair === true ? { isMovePair: true } : {}),
       });
     } else {
       attrs[mark.name] = dropNulls(mark.attrs);
@@ -989,7 +990,16 @@ function trackedToUnits(
       opaqueSequences.push(...hyperlinkSequenceNames(child));
       const linked = hyperlinkToUnits(child, styleFormatting, styleResolver, opaqueSequences, [mark]);
       units.push(...linked);
-    } else if (inControl || child.type === 'inlineSdt' || hasTrackedControlContent(child)) {
+    } else if (
+      inControl ||
+      child.type === 'inlineSdt' ||
+      child.type === 'complexField' ||
+      child.type === 'insertion' ||
+      child.type === 'deletion' ||
+      child.type === 'moveFrom' ||
+      child.type === 'moveTo' ||
+      hasTrackedControlContent(child)
+    ) {
       const nested = inlineContainerUnits(child, styleFormatting, styleResolver, opaqueSequences, inControl);
       const attrs = marksToYrsAttrs([mark]);
       units.push(...nested.map((unit) => ({

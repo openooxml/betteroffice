@@ -22,8 +22,8 @@
 //! decorations, watermarks, floats, charts, shapes and text boxes.
 
 use docx_layout::display_list::{
-    DecoKind, DecorationPrimitive, DisplayList, DocAttrs, MAX_ALT_TEXT_CHARS, Primitive,
-    RevisionKind, ShapePathCommand, StructuralRevisionKind, StructuralRevisionScope, TableCellRef,
+    DecoKind, DecorationPrimitive, DisplayBorderStyle, DisplayList, DocAttrs, MAX_ALT_TEXT_CHARS,
+    Primitive, ShapePathCommand, StructuralRevisionKind, StructuralRevisionScope, TableCellRef,
     build_display_list_json,
 };
 use docx_layout::hit::{
@@ -1675,91 +1675,96 @@ fn a_header_picture_watermark_paints_only_through_the_document_watermark() {
 }
 
 #[test]
-fn tracked_change_runs_emit_revision_washes_and_rules() {
+fn tracked_change_runs_paint_word_marks() {
     let input = serde_json::json!({
         "measured": [{
-            "block": { "kind": "paragraph", "id": 1, "pmStart": 1, "pmEnd": 18, "runs": [
+            "block": { "kind": "paragraph", "id": 1, "pmStart": 1, "pmEnd": 23, "runs": [
                 { "kind": "text", "text": "inserted", "pmStart": 1, "pmEnd": 9,
-                  "isInsertion": true, "changeAuthor": "A", "changeDate": "2026", "changeRevisionId": 5 },
+                  "underline": { "style": "dotted", "color": "#00FF00" },
+                  "isInsertion": true, "changeAuthor": "A", "changeDate": "2026", "changeRevisionId": 5,
+                  "revisionPaint": { "insertionColor": "#0078D4" } },
                 { "kind": "text", "text": "deleted", "pmStart": 9, "pmEnd": 16,
-                  "isDeletion": true, "changeAuthor": "A", "changeDate": "2026", "changeRevisionId": 6 }
+                  "isDeletion": true, "changeAuthor": "B", "changeDate": "2026", "changeRevisionId": 6,
+                  "revisionPaint": { "deletionColor": "#5C2E91" } },
+                { "kind": "text", "text": "moved", "pmStart": 16, "pmEnd": 21,
+                  "isInsertion": true, "changeAuthor": "B", "changeDate": "2026", "changeRevisionId": 7,
+                  "revisionPaint": { "insertionColor": "#2C6234", "insertionMove": true } }
             ] },
             "measure": { "kind": "paragraph", "totalHeight": 24.0, "lines": [
-                { "headRun": 0, "headChar": 0, "tailRun": 1, "tailChar": 7,
-                  "width": 120.0, "ascent": 12.0, "descent": 4.0, "lineHeight": 24.0 }
+                { "headRun": 0, "headChar": 0, "tailRun": 2, "tailChar": 5,
+                  "width": 160.0, "ascent": 12.0, "descent": 4.0, "lineHeight": 24.0 }
             ] }
         }],
         "options": {},
         "layout": { "pages": [
-            { "size": { "w": 400.0, "h": 200.0 }, "margins": {}, "fragments": [
-                { "kind": "paragraph", "blockId": 1, "x": 50.0, "y": 50.0, "width": 200.0,
-                  "height": 24.0, "fromLine": 0, "toLine": 1, "pmStart": 1, "pmEnd": 18 }
+            { "size": { "w": 400.0, "h": 200.0 }, "margins": { "left": 96.0 }, "fragments": [
+                { "kind": "paragraph", "blockId": 1, "x": 96.0, "y": 50.0, "width": 200.0,
+                  "height": 24.0, "fromLine": 0, "toLine": 1, "pmStart": 1, "pmEnd": 23 }
             ] }
         ] }
     });
 
-    // determinism: the same input builds byte-identically
     let a = build_display_list_json(&input.to_string()).expect("builds");
     let b = build_display_list_json(&input.to_string()).expect("builds");
     assert_eq!(a, b, "tracked-change build is not deterministic");
 
     let dl: DisplayList = serde_json::from_str(&a).unwrap();
-    let decos: Vec<&DecorationPrimitive> = dl.pages[0]
-        .primitives
+    let primitives = &dl.pages[0].primitives;
+    let decos: Vec<&DecorationPrimitive> = primitives
         .iter()
         .filter_map(|p| match p {
             Primitive::Decoration(d) => Some(d),
             _ => None,
         })
         .collect();
+    assert!(
+        decos.iter().all(|d| d.deco != DecoKind::Highlight),
+        "Word paints no revision wash"
+    );
+    let text_color = |text: &str| {
+        primitives.iter().find_map(|p| match p {
+            Primitive::Text(t) if t.text == text => Some(t.color.clone()),
+            _ => None,
+        })
+    };
+    assert_eq!(text_color("inserted").as_deref(), Some("#0078D4"));
+    assert_eq!(text_color("deleted").as_deref(), Some("#5C2E91"));
+    assert_eq!(text_color("moved").as_deref(), Some("#2C6234"));
 
-    // insertion: green wash (behind glyphs) + green dashed underline
-    let ins_wash = decos
+    let rules: Vec<(DecoKind, &str, bool, bool, Option<DisplayBorderStyle>)> = decos
         .iter()
-        .find(|d| d.deco == DecoKind::Highlight && d.color == "rgba(52, 168, 83, 0.08)")
-        .expect("insertion green wash decoration missing");
-    assert!(!ins_wash.dashed, "a wash is never dashed");
+        .map(|d| (d.deco, d.color.as_str(), d.dashed, d.dotted, d.attrs.style))
+        .collect();
     assert_eq!(
-        ins_wash.attrs.revision.as_ref().map(|r| r.kind),
-        Some(RevisionKind::Ins),
-        "the wash must carry the run's insertion revision for hit-testing"
+        rules,
+        vec![
+            (DecoKind::Underline, "#0078D4", false, false, None),
+            (DecoKind::Strike, "#5C2E91", false, false, None),
+            (
+                DecoKind::Underline,
+                "#2C6234",
+                false,
+                false,
+                Some(DisplayBorderStyle::Double)
+            ),
+        ],
+        "an insertion replaces the run's underline with one solid rule; a move doubles it"
     );
 
-    let ins_rule = decos
+    let bars: Vec<(f64, f64, f64, f64, &str)> = primitives
         .iter()
-        .find(|d| d.deco == DecoKind::Underline && d.color == "#2e7d32")
-        .expect("insertion green underline decoration missing");
-    assert!(ins_rule.dashed, "insertion underline must be dashed");
-
-    // deletion: red wash (the red text + strike carry the deletion otherwise)
-    assert!(
-        decos
-            .iter()
-            .any(|d| d.deco == DecoKind::Highlight && d.color == "rgba(211, 47, 47, 0.08)"),
-        "deletion red wash decoration missing"
-    );
-    assert!(
-        decos
-            .iter()
-            .any(|d| d.deco == DecoKind::Strike && d.color == "#c62828"),
-        "deletion strike decoration missing"
-    );
-
-    // the washes sit behind their text run: each wash precedes the text
-    // primitive carrying the same revision id
-    let order: Vec<&Primitive> = dl.pages[0].primitives.iter().collect();
-    let wash_idx = order
-        .iter()
-        .position(|p| matches!(p, Primitive::Decoration(d) if d.color == "rgba(52, 168, 83, 0.08)"))
-        .unwrap();
-    let text_idx = order
-        .iter()
-        .position(|p| matches!(p, Primitive::Text(t) if t.text == "inserted"))
-        .unwrap();
-    assert!(
-        wash_idx < text_idx,
-        "insertion wash must paint behind the glyphs"
-    );
+        .filter_map(|p| match p {
+            Primitive::Rect(r) => Some((
+                r.x.as_f64().unwrap(),
+                r.y.as_f64().unwrap(),
+                r.w.as_f64().unwrap(),
+                r.h.as_f64().unwrap(),
+                r.fill.as_str(),
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(bars, vec![(48.0, 50.0, 0.96, 24.0, "#000000")]);
 }
 
 #[derive(Debug, PartialEq)]
@@ -1831,11 +1836,8 @@ fn structural_pin(p: &Primitive) -> Option<StructuralPin> {
     }
 }
 
-/// Structural tracked changes are display-list primitives, not CSS-only DOM
-/// side effects: paragraph-mark changes emit a margin bar plus pilcrow, row and
-/// whole-table changes emit the painter's left-margin bar, and cell changes
-/// emit the top inset marker. This pins the primitives that canvas and mirror
-/// consume for review/sidebar workflows.
+/// Paragraph-mark, row, cell and whole-table revisions each paint Word's black margin bar,
+/// carrying the structural revision the mirror and review workflows read.
 #[test]
 fn structural_revisions_emit_pinned_primitives() {
     let para = serde_json::json!({
@@ -1888,7 +1890,7 @@ fn structural_revisions_emit_pinned_primitives() {
     let input = serde_json::json!({
         "measured": [para, structural_table, whole_table],
         "options": {},
-        "layout": { "pages": [{ "size": { "w": 400.0, "h": 300.0 }, "margins": {}, "fragments": [
+        "layout": { "pages": [{ "size": { "w": 400.0, "h": 300.0 }, "margins": { "left": 96.0 }, "fragments": [
             { "kind": "paragraph", "blockId": 1, "x": 50.0, "y": 50.0, "width": 100.0,
               "height": 24.0, "fromLine": 0, "toLine": 1, "pmStart": 1, "pmEnd": 2 },
             { "kind": "table", "blockId": 2, "x": 50.0, "y": 90.0, "width": 80.0,
@@ -1922,25 +1924,11 @@ fn structural_revisions_emit_pinned_primitives() {
                 row_index: None,
                 col_index: None,
                 text: None,
-                fill: Some("#2e7d32".to_string()),
-                x: 40.0,
+                fill: Some("#000000".to_string()),
+                x: 48.0,
                 y: 50.0,
-                w: 2.0,
+                w: 0.96,
                 h: 24.0,
-            },
-            StructuralPin {
-                visual: "text",
-                scope: "pmark",
-                kind: "ins",
-                revision_id: "10".to_string(),
-                row_index: None,
-                col_index: None,
-                text: Some("¶".to_string()),
-                fill: Some("#2e7d32".to_string()),
-                x: 62.0,
-                y: 62.0,
-                w: 8.0,
-                h: 0.0,
             },
             StructuralPin {
                 visual: "rect",
@@ -1950,10 +1938,10 @@ fn structural_revisions_emit_pinned_primitives() {
                 row_index: Some(0),
                 col_index: None,
                 text: None,
-                fill: Some("#2e7d32".to_string()),
-                x: 40.0,
+                fill: Some("#000000".to_string()),
+                x: 48.0,
                 y: 90.0,
-                w: 2.0,
+                w: 0.96,
                 h: 24.0,
             },
             StructuralPin {
@@ -1964,11 +1952,11 @@ fn structural_revisions_emit_pinned_primitives() {
                 row_index: Some(1),
                 col_index: Some(0),
                 text: None,
-                fill: Some("#c62828".to_string()),
-                x: 50.0,
+                fill: Some("#000000".to_string()),
+                x: 48.0,
                 y: 114.0,
-                w: 80.0,
-                h: 3.0,
+                w: 0.96,
+                h: 24.0,
             },
             StructuralPin {
                 visual: "rect",
@@ -1978,10 +1966,10 @@ fn structural_revisions_emit_pinned_primitives() {
                 row_index: None,
                 col_index: None,
                 text: None,
-                fill: Some("#c62828".to_string()),
-                x: 40.0,
+                fill: Some("#000000".to_string()),
+                x: 48.0,
                 y: 150.0,
-                w: 2.0,
+                w: 0.96,
                 h: 48.0,
             },
         ]

@@ -71,7 +71,7 @@ function render(xml: string): string {
 const body = (xml: string) => xml.slice(xml.indexOf('<w:body>'), xml.indexOf('<w:sectPr'));
 
 /** Every saved wrapper that carries the change's id, author and date, with its rendered and raw content. */
-function trackedContent(xml: string, change: Change): { wrappers: number; content: string; raw: string } {
+function trackedContent(xml: string, change: { tag: string; id: string; author: string; date: string }): { wrappers: number; content: string; raw: string } {
   const pattern = new RegExp(`<w:${change.tag}\\b([^>]*[^/])>([\\s\\S]*?)</w:${change.tag}>`, 'g');
   const matching = [...xml.matchAll(pattern)].filter(([, attributes]) =>
     attributes!.includes(`w:id="${change.id}"`) &&
@@ -269,6 +269,43 @@ describe('a line break and a comment reference inside a tracked change', () => {
     });
   }
 
+  const moveMarkup = (change: Change, kind: string, id: string, text: string) =>
+    `<w:${kind}RangeStart w:id="${id}" w:name="move1" w:author="${change.author}" w:date="${change.date}"/>${tracked(change, t(text))}<w:${kind}RangeEnd w:id="${id}"/>`;
+  const halfOfMove = (paraId: string, change: Change, kind: string, id: string, text: string) =>
+    `<w:p w14:paraId="${paraId}" w14:textId="${paraId}">${t('Head ')}${moveMarkup(change, kind, id, text)}${t(' tail')}</w:p>`;
+  const savedParagraphs = (xml: string) => body(xml).match(/<w:p\b[\s\S]*?<\/w:p>/g) ?? [];
+
+  const HALVES = [
+    { change: MOVE_FROM, kind: 'moveFrom', id: '50', paraId: '1A2B3C02', saved: 'del', side: 'deletion', half: 'move source' },
+    { change: MOVE_TO, kind: 'moveTo', id: '51', paraId: '1A2B3C03', saved: 'ins', side: 'insertion', half: 'move destination' },
+  ] as const;
+
+  for (const [index, edited] of HALVES.entries()) {
+    const other = HALVES[1 - index]!;
+    it(`a rewritten move half is saved as a tracked ${edited.side} and the other half keeps its move markup (${edited.half} paragraph edited)`, async () => {
+      const source = HALVES.map(half => halfOfMove(half.paraId, half.change, half.kind, half.id, 'moved')).join('');
+      const session = await opened(docx(source));
+      const { paraId } = session.paragraphs('body')[index]!;
+      session.insertText({ story: 'body', paraId, offset: 0 }, 'X');
+      const xml = part(await save(session), 'word/document.xml');
+      const paragraphs = savedParagraphs(xml);
+      expect(paragraphs).toHaveLength(2);
+
+      const rewritten = paragraphs[index]!;
+      const wrapper = trackedContent(rewritten, { ...edited.change, tag: edited.saved });
+      expect(wrapper.wrappers).toBeGreaterThan(0);
+      expect(wrapper.content).toBe('moved');
+      expect(count(rewritten, /<w:(moveFrom|moveTo)\b/g)).toBe(0);
+      expect(count(rewritten, /<w:(moveFrom|moveTo)Range(Start|End)\b/g)).toBe(0);
+      expect(render(rewritten)).toBe('XHead moved tail');
+
+      const kept = paragraphs[1 - index]!;
+      expect(kept).toContain(moveMarkup(other.change, other.kind, other.id, 'moved'));
+      expect(count(kept, /<w:(ins|del)\b/g)).toBe(0);
+      expect(render(body(xml))).toBe(index === 0 ? 'XHead moved tailHead moved tail' : 'Head moved tailXHead moved tail');
+    });
+  }
+
   it('both seeders give a comment reference inside a tracked change the same marks as the text around it', async () => {
     for (const change of [INS, DEL, MOVE_FROM, MOVE_TO]) {
       const text = textFor(change);
@@ -295,7 +332,8 @@ describe('a line break and a comment reference inside a tracked change', () => {
       expect(String(revision.id)).toBe(change.id);
       expect(revision.author).toBe(change.author);
       expect(revision.date).toBe(change.date);
-      expect('isMovePair' in revision).toBe(false);
+      if (change === MOVE_FROM || change === MOVE_TO) expect(revision.isMovePair).toBe(true);
+      else expect('isMovePair' in revision).toBe(false);
       expect(reference(engine)).toEqual(attributes);
     }
   });

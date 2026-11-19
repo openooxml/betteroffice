@@ -2958,48 +2958,36 @@ fn paint_image_revision(
     let Some(revision) = &image.attrs.revision else {
         return Ok(());
     };
-    let color = match revision.kind {
-        RevisionKind::Ins => "rgb(46, 125, 50)",
-        RevisionKind::Del => "rgb(198, 40, 40)",
-        RevisionKind::Format => "rgb(106, 27, 154)",
+    let (y, width) = match revision.kind {
+        RevisionKind::Ins => (frame.y + frame.h + IMAGE_REVISION_UNDERLINE_GAP, 1.0),
+        RevisionKind::Del => (frame.y + frame.h / 2.0, 2.0),
+        RevisionKind::Format => return Ok(()),
     };
-    let rect = Rect::from_xywh(frame.x, frame.y, frame.w, frame.h)
-        .ok_or_else(|| "invalid image revision rectangle".to_string())?;
-    let path = PathBuilder::from_rect(rect);
-    let mut paint = Paint::default();
-    paint.set_color(color_with_opacity(color, opacity)?);
-    paint.anti_alias = true;
-    pixmap.stroke_path(
-        &path,
-        &paint,
-        &Stroke {
-            width: 2.0,
-            ..Stroke::default()
+    let color = revision
+        .color
+        .as_deref()
+        .unwrap_or(docx_layout::revision_colors::AUTHOR_PALETTE[0]);
+    stroke_segment(
+        pixmap,
+        Segment {
+            x1: frame.x,
+            y1: y,
+            x2: frame.x + frame.w,
+            y2: y,
         },
+        width,
+        color,
+        None,
         transform,
         mask,
-    );
-    if revision.kind == RevisionKind::Del {
-        stroke_segment(
-            pixmap,
-            Segment {
-                x1: frame.x,
-                y1: frame.y + frame.h,
-                x2: frame.x + frame.w,
-                y2: frame.y,
-            },
-            2.0,
-            color,
-            None,
-            transform,
-            mask,
-            opacity,
-            StrokeStyle::default(),
-            budget,
-        )?;
-    }
-    Ok(())
+        opacity,
+        StrokeStyle::default(),
+        budget,
+    )
 }
+
+/// Word underlines an inserted picture this far below its bottom edge.
+const IMAGE_REVISION_UNDERLINE_GAP: f32 = 3.0;
 
 #[derive(Clone, Copy)]
 struct Segment {

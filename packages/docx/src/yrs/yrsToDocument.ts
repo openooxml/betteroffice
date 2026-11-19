@@ -1316,6 +1316,8 @@ function trackedContentForItem(item: InlineItem, info: TrackedChangeInfo, inCont
   } else if (item.kind === 'embed' && item.embedKind === 'sdt') child = inlineSdtFromPayload(item.payload, recovery, format);
   else if (item.kind === 'embed' && item.embedKind === 'image') child = imageRunFromPayload(item.payload);
   else if (item.kind === 'embed' && item.embedKind === 'tab') child = tabRun(item.attributes, format);
+  else if (item.kind === 'embed' && item.embedKind === 'field' && item.payload.modelKind !== 'commentReference')
+    child = fieldFromPayload(item.payload, item.attributes, format);
   else if (item.kind === 'embed' && item.embedKind === 'horizontalRule')
     child = horizontalRuleRun(item.payload, item.attributes, format);
   else if (item.kind === 'embed' && item.embedKind === 'shape')
@@ -1342,16 +1344,8 @@ function trackedContentForItem(item: InlineItem, info: TrackedChangeInfo, inCont
     child = hyperlink;
   }
 
-  const raw = asObject(item.attributes.ins) ?? asObject(item.attributes.del);
-  const isMovePair = raw?.isMovePair === true;
-  if (item.attributes.ins) {
-    return isMovePair
-      ? { type: 'moveTo', info, content: [child] }
-      : { type: 'insertion', info, content: [child] };
-  }
-  return isMovePair
-    ? { type: 'moveFrom', info, content: [child] }
-    : { type: 'deletion', info, content: [child] };
+  if (item.attributes.ins) return { type: 'insertion', info, content: [child] };
+  return { type: 'deletion', info, content: [child] };
 }
 
 /**

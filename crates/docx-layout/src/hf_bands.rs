@@ -654,6 +654,7 @@ fn compose_region(
         field_widths: field_widths.as_ref(),
         reservations: None,
         gridlines: None,
+        change_bar_x: Some(crate::display_list::change_bar_x(page)),
     };
     let ctx = &ctx;
     let content_width = page.size.w - page.margins.left - page.margins.right;

@@ -41,6 +41,8 @@ fn eligible_painted_descent(block: &ParagraphBlock, line: &TypesetRow) -> Option
             list_marker_color: _,
             list_marker_suffix: _,
             list_marker_revision: _,
+            list_marker_revision_color: _,
+            list_marker_previous_len: _,
             default_tab_stop_twips: _,
             default_font_size: _,
             default_font_family: _,
@@ -51,6 +53,7 @@ fn eligible_painted_descent(block: &ParagraphBlock, line: &TypesetRow) -> Option
             doc_grid_pitch_px: _,
             p_pr_ins: None,
             p_pr_del: None,
+            p_pr_change: _,
         } = attrs
         else {
             return None;
@@ -137,6 +140,7 @@ fn eligible_painted_descent(block: &ParagraphBlock, line: &TypesetRow) -> Option
             change_author: _,
             change_date: _,
             change_revision_id: _,
+            revision_paint: _,
             format_change: None,
             logical_order: _,
             bidi_level: _,

@@ -80,6 +80,7 @@ pub mod prescan;
 pub mod progress;
 pub mod regions;
 pub mod resolve_lines;
+pub mod revision_colors;
 mod transcode;
 pub mod types;
 mod utf16_index;
