@@ -2150,7 +2150,6 @@ fn assert_marks_stay_bare_text(list: &DisplayList) {
     }
 }
 
-#[cfg(not(feature = "base-latin"))]
 #[test]
 fn tracked_paragraph_marks_stay_text_when_the_default_face_lacks_the_pilcrow() {
     const NOTO_HEBREW: &[u8] =
@@ -2170,6 +2169,8 @@ fn tracked_paragraph_marks_stay_text_when_the_default_face_lacks_the_pilcrow() {
     let json = build_display_list_json_with_fonts(&input, &store).unwrap();
     let list: DisplayList = serde_json::from_str(&json).unwrap();
 
+    assert_eq!(mark_kinds(&list), ["text", "text"]);
+    #[cfg(not(feature = "base-latin"))]
     assert_marks_stay_bare_text(&list);
 }
 

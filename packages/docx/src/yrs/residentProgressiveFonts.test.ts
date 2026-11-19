@@ -292,8 +292,10 @@ test('a tracked paragraph mark in Japanese text with no default face fetches no 
   const marked = await drawn(true);
   const marks = marked.page.primitives.filter((primitive) => primitive.structuralRevision?.scope === 'pmark');
 
-  expect(marks.filter((primitive) => primitive.kind === 'glyphRun')).toEqual([]);
-  expect(marks.filter((primitive) => primitive.kind === 'text' && primitive.text === '¶')).toHaveLength(1);
+  expect(marks.filter((primitive) => primitive.kind === 'glyphRun'),
+    'the guard: no glyph run for the mark, so its outline is never requested, whatever chunk holds it').toEqual([]);
+  expect(marks.filter((primitive) => primitive.kind === 'text' && primitive.text === '¶'),
+    'the guard: the mark is still drawn, as a text item').toHaveLength(1);
   expect(glyphsByFont(marked.page)).toEqual(glyphsByFont(plain.page));
-  expect(marked.chunks).toEqual(plain.chunks);
+  expect(marked.chunks, 'catches a fetch only when the pilcrow lies outside the core').toEqual(plain.chunks);
 });

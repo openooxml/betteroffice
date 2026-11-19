@@ -13184,6 +13184,25 @@ mod tests {
 
     mod command_relayout_tests;
 
+    #[test]
+    fn the_paragraph_mark_face_leaves_the_font_set_fingerprint_alone() {
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        let engine = EngineSession::new(7);
+        let fingerprint = |chains: serde_json::Value| {
+            let defaults = json!({"fontFamily": "Calibri", "fontSize": 11});
+            let request = json!({"measurement": {"fontChains": chains, "defaults": defaults}});
+            engine.font_set_fingerprint(&request)
+        };
+        let plain = fingerprint(json!({"calibri|0|0": [font]}));
+        let marked = fingerprint(json!({
+            "calibri|0|0": [font],
+            "@betteroffice/fonts/paragraph-mark": [font],
+        }));
+
+        assert!(plain.is_some());
+        assert_eq!(marked, plain);
+    }
+
     fn table_wrap_section(content_width: f64, columns: serde_json::Value) -> serde_json::Value {
         json!({
             "pageSize": {"w": content_width + 200.0, "h": 800},
