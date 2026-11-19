@@ -64,6 +64,16 @@ const toolbarActive = (context: Context) => context.state.shown && eligible(cont
 const FOCUS_COMMAND = 'focus';
 const NOT_SHOWN = Object.freeze({ code: 'not-shown', message: 'The mini toolbar is not shown' });
 
+const focusInside = (element: HTMLElement | null) =>
+  element?.contains((element.getRootNode() as Document | ShadowRoot).activeElement) === true;
+
+/** Whether the document input took focus back; a refusal leaves focus where it is. */
+function returnFocus(context: Context): boolean {
+  const answer = { ok: false };
+  void context.run((next) => { answer.ok = next.focusDocument().ok; });
+  return answer.ok;
+}
+
 function MiniToolbar({ context, geometry, items }: { context: Context; geometry: DocxPluginGeometry; items: readonly DocxMiniToolbarItem[] }) {
   const { t } = useTranslation();
   const coarse = useSyncExternalStore(subscribeCoarse, readCoarse, () => false);
@@ -75,16 +85,24 @@ function MiniToolbar({ context, geometry, items }: { context: Context; geometry:
   const toolbar = useRef<HTMLDivElement | null>(null);
   const latest = useRef(context);
   latest.current = context;
-  const holdsFocus = toolbar.current?.contains((toolbar.current.getRootNode() as Document | ShadowRoot).activeElement) === true;
+  const holdsFocus = focusInside(toolbar.current);
   const toolbarFocused = context.state.toolbarFocused || holdsFocus;
   const view = miniToolbarView(miniToolbarEligible(context.snapshot, { ...context.state, toolbarFocused }), placement);
   const shown = view !== 'hidden';
+  const [, rerender] = useState(0);
+  const lastPlacement = useRef(placement);
+  const handedBack = useRef(false);
+  if (shown) {
+    lastPlacement.current = placement;
+    handedBack.current = false;
+  }
+  const frame = shown ? placement : holdsFocus && !handedBack.current ? lastPlacement.current : null;
   const commandStates = () => items.map((item) => JSON.stringify(context.commands.getState(item))).join('\n');
   useSyncExternalStore(context.commands.subscribe, commandStates, commandStates);
   const states = items.map((item) => buttonState(item, context.commands.getState(item)));
   const [current, setCurrent] = useState(0);
   const firstEnabled = states.findIndex((state) => !state.disabled);
-  const tabStop = states[current] && !states[current]!.disabled ? current : Math.max(0, firstEnabled);
+  const rovingFrom = states[current] && !states[current]!.disabled ? current : Math.max(0, firstEnabled);
   const buttons = useRef<(HTMLButtonElement | null)[]>([]);
   const handled = useRef(context.state.focusRequest);
 
@@ -111,23 +129,31 @@ function MiniToolbar({ context, geometry, items }: { context: Context; geometry:
     buttons.current[firstEnabled]?.focus();
   });
   useLayoutEffect(() => {
-    if (toolbar.current) toolbar.current.inert = view === 'kept';
+    const element = toolbar.current;
+    if (!element) return;
+    const focused = focusInside(element);
+    if (view === 'hidden' && focused && returnFocus(latest.current)) {
+      handedBack.current = true;
+      rerender((count) => count + 1);
+      return;
+    }
+    element.inert = view === 'kept' && !focused;
   });
+  useLayoutEffect(() => () => {
+    if (focusInside(toolbar.current)) returnFocus(latest.current);
+  }, []);
 
-  if (!placement || view === 'hidden') return null;
+  if (!frame) return null;
 
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.key === 'Escape' || event.key === 'Tab') {
+      if (!returnFocus(context)) return;
       event.preventDefault();
-      const dismiss = event.key === 'Escape';
-      void context.run((next) => {
-        next.focusDocument();
-        if (dismiss) next.setState((state) => dismissMiniToolbar(state, next.snapshot));
-      });
+      if (event.key === 'Escape') void context.run((next) => { next.setState((state) => dismissMiniToolbar(state, next.snapshot)); });
       return;
     }
     const from = buttons.current.findIndex((button) => button === event.target);
-    const to = rovingIndex(event.key, from < 0 ? tabStop : from, states.map((state) => !state.disabled));
+    const to = rovingIndex(event.key, from < 0 ? rovingFrom : from, states.map((state) => !state.disabled));
     if (to === null) return;
     event.preventDefault();
     setCurrent(to);
@@ -152,8 +178,8 @@ function MiniToolbar({ context, geometry, items }: { context: Context; geometry:
       onKeyDown={onKeyDown}
       style={{
         position: 'absolute',
-        left: avoidCommentButton(placement.x, size.width, page.current),
-        top: placement.y,
+        left: avoidCommentButton(frame.x, size.width, page.current),
+        top: frame.y,
         width: size.width,
         height: size.height,
         boxSizing: 'border-box',
@@ -184,7 +210,7 @@ function MiniToolbar({ context, geometry, items }: { context: Context; geometry:
             aria-pressed={state.pressed}
             data-active={state.pressed === 'true' ? 'true' : undefined}
             disabled={state.disabled}
-            tabIndex={index === tabStop ? 0 : -1}
+            tabIndex={-1}
             onFocus={() => setCurrent(index)}
             onClick={() => void context.run(async (next) => { await next.commands.execute(item, null); })}
             style={{ width: size.button, height: size.button, flexShrink: 0, border: 0, background: 'transparent', opacity: state.disabled ? 0.38 : 1 }}
