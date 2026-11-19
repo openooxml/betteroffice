@@ -65,6 +65,8 @@ const SUGGESTER = { name: 'B', date: '2025-03-05T00:00:00Z' };
 const bareRun = (note: NoteKind, id: number) => `<w:r><w:${note}Reference w:id="${id}"/></w:r>`;
 const languageRun = (note: NoteKind, id: number, properties = '') =>
   `<w:r><w:rPr>${properties}<w:lang w:val="fr-FR"/></w:rPr><w:${note}Reference w:id="${id}"/></w:r>`;
+const pageBreakRun = (note: NoteKind, id: number) =>
+  `<w:r><w:rPr><w:rStyle w:val="${style(note)}"/></w:rPr><w:lastRenderedPageBreak/><w:${note}Reference w:id="${id}"/></w:r>`;
 
 function notesXml(note: NoteKind, ids: number[]): string {
   return `<w:${note}s xmlns:w="${W}">` +
@@ -222,6 +224,23 @@ function typeAt(session: YrsSession, offset: number): void {
 function boldHead(session: YrsSession): void {
   const paraId = firstParagraphId(session);
   session.toggleMark({ story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 4 } }, { type: 'bold' });
+}
+
+function boldWord(word: string): Apply {
+  return (session) => {
+    const paraId = firstParagraphId(session);
+    let offset = 0;
+    for (const segment of session.storySegments('body')) {
+      if (segment.kind === 'pilcrow') break;
+      if (segment.kind === 'text' && segment.text.includes(word)) {
+        const start = offset + segment.text.indexOf(word);
+        session.toggleMark({ story: 'body', start: { paraId, offset: start }, end: { paraId, offset: start + word.length } }, { type: 'bold' });
+        return;
+      }
+      offset += segment.kind === 'text' ? segment.text.length : 1;
+    }
+    throw new Error(`no ${word} text in the first paragraph`);
+  };
 }
 
 function firstParagraphLength(session: YrsSession): number {
@@ -657,6 +676,33 @@ describe.each(REPORTING)('$name', (route) => {
 
     it('keeps the source paragraph and reports it when bold text sits beside a revision of a reference alone and an untracked styled reference', async () => {
       await keptAndReported(firstParagraph(`${wrapped(shape)}${text(' and ')}${referenceRun(shape.note, 2)}`), [1, 2]);
+    });
+
+    it('keeps the source paragraph and reports it when bold text follows a deletion that opens with a reference after a rendered page break', async () => {
+      const opening = revisionSpan(shape, `${pageBreakRun(shape.note, 1)}${referenceRun(shape.note, 2)}${deletedText('old')}`);
+      const alone = revisionSpan({ ...shape, id: shape.id + 10 }, referenceRun(shape.note, 3));
+      const original = paragraph('0D000001', `${opening}${alone}${text('Head ')}${referenceRun(shape.note, 4)}`);
+      await keptAndReported(original, [1, 2, 3, 4], boldWord('Head'));
+    });
+
+    it('keeps the source paragraph and reports it when bold text sits between a leading styled reference after a rendered page break and a revision of a reference alone', async () => {
+      const original = paragraph('0D000001', `${pageBreakRun(shape.note, 1)}${text('Head ')}${revisionSpan(shape, referenceRun(shape.note, 2))}`);
+      await keptAndReported(original, [1, 2], boldWord('Head'));
+    });
+
+    it('keeps the source paragraph and reports it when bold text sits beside a deletion of a reference after a proofing mark and an untracked styled reference', async () => {
+      const deletion = revisionSpan(shape, `<w:proofErr w:type="spellEnd"/>${referenceRun(shape.note, 1)}`);
+      await keptAndReported(firstParagraph(`${deletion}${referenceRun(shape.note, 2)}`), [1, 2]);
+    });
+
+    it('keeps the source paragraph and reports it when bold text sits beside a deletion of a reference after empty deleted text and an untracked styled reference', async () => {
+      const deletion = revisionSpan(shape, `<w:r><w:delText/></w:r>${referenceRun(shape.note, 1)}`);
+      await keptAndReported(firstParagraph(`${deletion}${referenceRun(shape.note, 2)}`), [1, 2]);
+    });
+
+    it('keeps the source paragraph and reports it when bold text sits beside a revision of a reference alone and a bare reference inside a hyperlink', async () => {
+      const linked = `<w:hyperlink w:anchor="a">${text('link')}${bareRun(shape.note, 1)}</w:hyperlink>`;
+      await keptAndReported(firstParagraph(`${linked}${revisionSpan(shape, referenceRun(shape.note, 2))}`), [1, 2]);
     });
 
     it('saves bold over the whole paragraph and writes the reference of a revision of a reference alone as its source run', async () => {

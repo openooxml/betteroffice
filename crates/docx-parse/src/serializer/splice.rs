@@ -4473,6 +4473,7 @@ mod tests {
         let written = format!("<w:p>{BOLD_HEAD}{rewritten}{bare}</w:p>");
         let dropped = format_edit(&source, &written).expect_err("the source is kept");
         assert_eq!(dropped, dropped_by_format_edit(&source, &written));
+        assert_eq!(dropped, ["w:del"]);
     }
 
     #[test]
@@ -4528,6 +4529,160 @@ mod tests {
             &beside_a_reference_alone("ins", &format!("{text}{styled}{text}"), &styled),
             &beside_a_reference_alone("ins", &format!("{text}{bare}{text}"), &bare),
         );
+    }
+
+    #[test]
+    fn format_edit_counts_deletions_and_insertions_apart_beside_an_inserted_reference_alone() {
+        let text = "<w:r><w:delText>old</w:delText></w:r>";
+        let (styled, bare) = (styled_reference("footnote"), bare_reference("footnote"));
+        let around = |reference: &str| revision("del", 1, &format!("{text}{reference}{text}"));
+        let source_around = around(&styled);
+        let written_around = around(&bare);
+        let alone = revision("ins", 2, &styled);
+        let rewritten = revision("ins", 2, &bare);
+        let source = format!("<w:p>{HEAD}{source_around}{alone}</w:p>");
+        let written = format!("<w:p>{BOLD_HEAD}{written_around}{rewritten}</w:p>");
+        let dropped = format_edit(&source, &written).expect_err("the source is kept");
+        assert_eq!(dropped, ["w:ins"]);
+    }
+
+    #[test]
+    fn format_edit_keeps_the_source_when_deleted_text_and_a_styled_reference_share_a_deletion() {
+        let text = "<w:r><w:delText>old</w:delText></w:r>";
+        let (styled, bare) = (styled_reference("footnote"), bare_reference("footnote"));
+        assert_kept(
+            &beside_a_reference_alone("del", &format!("{styled}{text}"), &styled),
+            &beside_a_reference_alone("del", &format!("{bare}{text}"), &bare),
+        );
+        assert_kept(
+            &beside_a_reference_alone("del", &format!("{text}{styled}"), &styled),
+            &beside_a_reference_alone("del", &format!("{text}{bare}"), &bare),
+        );
+    }
+
+    #[test]
+    fn base_revision_counts_count_each_deleted_text_stretch_between_note_references() {
+        let text = "<w:r><w:delText>old</w:delText></w:r>";
+        let empty = "<w:r><w:rPr><w:b/></w:rPr></w:r>";
+        let (footnote, endnote) = (bare_reference("footnote"), bare_reference("endnote"));
+        let rows = [
+            (format!("{empty}{text}{footnote}"), 1),
+            (format!("{empty}{footnote}{text}"), 1),
+            (format!("{text}{footnote}{text}"), 2),
+            (format!("{text}{endnote}{text}"), 2),
+            (format!("{endnote}{text}{endnote}"), 1),
+            (format!("{text}{footnote}{footnote}{text}"), 2),
+            (format!("{text}{footnote}{endnote}"), 1),
+            (format!("{footnote}{text}{footnote}"), 1),
+        ];
+        for (content, count) in rows {
+            let xml = format!("<w:p>{HEAD}{}</w:p>", revision("del", 1, &content));
+            assert_eq!(base_revision_counts(&xml), Some([0, count]), "{xml}");
+        }
+    }
+
+    fn styled_footnote(id: u32) -> String {
+        format!(
+            "<w:r><w:rPr><w:rStyle w:val=\"FootnoteReference\"/></w:rPr><w:footnoteReference w:id=\"{id}\"/></w:r>"
+        )
+    }
+
+    fn bare_footnote(id: u32) -> String {
+        format!("<w:r><w:footnoteReference w:id=\"{id}\"/></w:r>")
+    }
+
+    const PAGE_BREAK_REFERENCE: &str = "<w:lastRenderedPageBreak/><w:footnoteReference";
+
+    fn after_a_rendered_page_break(run: &str) -> String {
+        run.replace("<w:footnoteReference", PAGE_BREAK_REFERENCE)
+    }
+
+    #[test]
+    fn format_edit_keeps_the_source_when_a_deletion_opens_with_a_page_break_reference_run() {
+        let text = "<w:r><w:delText>old</w:delText></w:r>";
+        let styled = after_a_rendered_page_break(&styled_footnote(1)) + &styled_footnote(2);
+        let bare = after_a_rendered_page_break(&bare_footnote(1)) + &bare_footnote(2);
+        let source = format!(
+            "<w:p>{}{}{HEAD}{}</w:p>",
+            revision("del", 1, &format!("{styled}{text}")),
+            revision("del", 2, &styled_footnote(3)),
+            styled_footnote(4)
+        );
+        let written = format!(
+            "<w:p>{}{}{BOLD_HEAD}{}</w:p>",
+            revision("del", 1, &format!("{bare}{text}")),
+            revision("del", 2, &bare_footnote(3)),
+            bare_footnote(4)
+        );
+        let dropped = format_edit(&source, &written).expect_err("the source is kept");
+        assert_eq!(dropped, ["w:del"]);
+    }
+
+    #[test]
+    fn format_edit_keeps_the_source_when_a_leading_page_break_reference_run_loses_its_style() {
+        let leading = after_a_rendered_page_break(&styled_footnote(1));
+        let written_leading = after_a_rendered_page_break(&bare_footnote(1));
+        let deleted = revision("del", 1, &styled_footnote(2));
+        let rewritten = revision("del", 1, &bare_footnote(2));
+        let source = format!("<w:p>{leading}{HEAD}{deleted}</w:p>");
+        let written = format!("<w:p>{written_leading}{BOLD_HEAD}{rewritten}</w:p>");
+        let dropped = format_edit(&source, &written).expect_err("the source is kept");
+        assert_eq!(dropped, ["w:del"]);
+    }
+
+    fn assert_kept_beside_a_deleted_reference_after(markup: &str) {
+        let deleted = revision("del", 1, &format!("{markup}{}", styled_footnote(1)));
+        let rewritten = revision("del", 1, &bare_footnote(1));
+        let source = format!("<w:p>{HEAD}{deleted}{}</w:p>", styled_footnote(2));
+        let written = format!("<w:p>{BOLD_HEAD}{rewritten}{}</w:p>", bare_footnote(2));
+        let dropped = format_edit(&source, &written).expect_err("the source is kept");
+        assert!(dropped.contains(&"w:del"), "{dropped:?}");
+    }
+
+    #[test]
+    fn format_edit_keeps_the_source_beside_a_deleted_reference_after_a_proofing_mark() {
+        assert_kept_beside_a_deleted_reference_after("<w:proofErr w:type=\"spellEnd\"/>");
+    }
+
+    #[test]
+    fn format_edit_keeps_the_source_beside_a_deleted_reference_after_empty_deleted_text() {
+        assert_kept_beside_a_deleted_reference_after("<w:r><w:delText/></w:r>");
+    }
+
+    #[test]
+    fn format_edit_keeps_the_source_when_an_untracked_reference_leaves_its_hyperlink() {
+        let link = |runs: &str| format!("<w:hyperlink w:anchor=\"a\">{runs}</w:hyperlink>");
+        let linked = link(&format!("{}{}", text_run("link"), bare_footnote(1)));
+        let unlinked = link(&text_run("link")) + &bare_footnote(1);
+        let deleted = revision("del", 1, &styled_footnote(2));
+        let rewritten = revision("del", 1, &bare_footnote(2));
+        let source = format!("<w:p>{HEAD}{linked}{deleted}</w:p>");
+        let written = format!("<w:p>{BOLD_HEAD}{unlinked}{rewritten}</w:p>");
+        let dropped = format_edit(&source, &written).expect_err("the source is kept");
+        assert_eq!(dropped, ["w:del"]);
+    }
+
+    #[test]
+    fn base_writes_paragraph_is_false_for_a_source_that_does_not_parse() {
+        let source = "<w:p><w:del w:id=\"1\"><w:r";
+        let written = format!("<w:p>{BOLD_HEAD}</w:p>");
+        assert!(!base_writes_paragraph(source, &written));
+    }
+
+    #[test]
+    fn format_edit_keeps_the_source_beside_thousands_of_insertions_that_hold_references() {
+        let mut source = HEAD.to_owned();
+        let mut written = BOLD_HEAD.to_owned();
+        for id in 1..=2000 {
+            source += &revision("ins", id, &(text_run("x") + &styled_footnote(id)));
+            written += &revision("ins", id, &(text_run("x") + &bare_footnote(id)));
+        }
+        source += &revision("del", 2001, &styled_footnote(2001));
+        written += &revision("del", 2001, &bare_footnote(2001));
+        let source = format!("<w:p>{source}</w:p>");
+        let written = format!("<w:p>{written}</w:p>");
+        let dropped = format_edit(&source, &written).expect_err("the source is kept");
+        assert_eq!(dropped, ["w:del"]);
     }
 
     fn body(paragraphs: &str) -> String {
