@@ -624,7 +624,7 @@ fn a_run_size_no_cell_font_would_take_is_ignored() {
         style.size_pt = Some(1e100);
         style.bold = Some(true);
     })];
-    let unsized = [rich_run(0, 1, |style| style.bold = Some(true))];
+    let without_size = [rich_run(0, 1, |style| style.bold = Some(true))];
     let rich = with_runs(&workbook, &[("A1", &huge)]);
     let floats = command_floats(command(&rich, stored));
     assert!(floats.iter().all(|value| value.is_finite()), "{floats:?}");
@@ -637,7 +637,7 @@ fn a_run_size_no_cell_font_would_take_is_ignored() {
             ..TextRun::default()
         }]
     );
-    let expected = with_runs(&workbook, &[("A1", &unsized)]);
+    let expected = with_runs(&workbook, &[("A1", &without_size)]);
     assert_eq!(command(&rich, stored), command(&expected, stored));
 }
 
