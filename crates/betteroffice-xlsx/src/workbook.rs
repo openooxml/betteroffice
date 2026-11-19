@@ -68,7 +68,7 @@ use xlsx_render::region::{
 use xlsx_render::scaled;
 use xlsx_render::{
     ChartRegion, ChartResize, DisplayList, GhostEdit, GridGeometry, PrintMetrics, RenderError,
-    Viewport, build_display_list_with_geometry_and_text_runs,
+    Viewport, build_display_list_with_geometry_and_formats,
     build_print_display_list_with_text_runs, chart_at_point, display_text,
     display_viewport_with_geometry, moved_chart_anchor, resized_chart_anchor, resolve_chart_anchor,
     visible_merged_ranges_with_geometry,
@@ -82,6 +82,7 @@ use crate::authority::{
     WorkbookStructure, is_collaborative_local_layout_op, is_structural_op,
     validate_hyperlink_edit_baseline,
 };
+use crate::conditional::Budget;
 use crate::move_range::{move_range_ops, preserved_move_unsupported_part};
 use crate::sheet_json::{
     MAX_CHART_ANCHORS_PER_DRAWING, MAX_CHART_FIELD_BYTES, MAX_CHART_REFS_PER_CHART,
@@ -513,6 +514,9 @@ pub struct Workbook {
     graph: Option<DepGraph>,
     graph_reuse: GraphReuse,
     rand_seed: Option<u32>,
+    /// The clock the last recalculation gave TODAY and NOW, which conditional
+    /// rules reading them are decided with; `None` until a recalculation with one.
+    calculated_now: Option<f64>,
     proposals: ProposalSet,
     last_calculation: CalculationResult,
     update_observers: Arc<Mutex<UpdateObservers>>,
@@ -530,6 +534,7 @@ pub struct Workbook {
     committed_changes: u64,
     /// Chart plans by part path and resolutions by part path and owner sheet.
     chart_cache: Mutex<ChartCache>,
+    conditional_cache: Mutex<crate::conditional::Cache>,
     /// SHA-256 of retained source parts that exports have cited.
     source_part_hashes: Mutex<BTreeMap<String, String>>,
 }
@@ -1120,6 +1125,7 @@ impl Workbook {
             graph,
             graph_reuse: GraphReuse::default(),
             rand_seed: None,
+            calculated_now: None,
             proposals: ProposalSet::new(),
             last_calculation: CalculationResult::default(),
             update_observers: Arc::new(Mutex::new(UpdateObservers::default())),
@@ -1130,6 +1136,7 @@ impl Workbook {
             version_nonce,
             committed_changes: 0,
             chart_cache: Mutex::new(ChartCache::default()),
+            conditional_cache: Mutex::new(crate::conditional::Cache::default()),
             source_part_hashes: Mutex::new(BTreeMap::new()),
             #[cfg(feature = "fonts")]
             font_manager: betteroffice_fonts::FontManager::new(
@@ -1399,6 +1406,7 @@ impl Workbook {
         self.graph = Some(graph);
         self.mark_graph_current();
         self.last_calculation = calculation;
+        self.calculated_now = options.now_serial;
         self.mode = WorkbookMode::Collaborative {
             structure: Box::new(structure),
         };
@@ -1674,6 +1682,7 @@ impl Workbook {
         self.graph = Some(graph);
         self.mark_graph_current();
         self.last_calculation = calculation.clone();
+        self.calculated_now = options.now_serial;
         self.undo.clear();
         self.preserved_undo.clear();
         self.preserved_redo.clear();
@@ -2498,6 +2507,7 @@ impl Workbook {
         );
         mark(EditStage::Recalculated);
         let result = self.mutation_result(true, result, &seeds);
+        self.calculated_now = options.now_serial;
         self.publish(update);
         if keeps_graph {
             self.mark_graph_current();
@@ -2619,7 +2629,7 @@ impl Workbook {
             CommitHistory::Separate,
             None,
         )?;
-        let update = self.commit_prepared(prepared)?;
+        let update = self.commit_prepared_cell_inputs(prepared)?;
         for (sheet, cell, formula) in &touched {
             self.graph.as_mut().expect("graph initialized").set_formula(
                 *sheet,
@@ -2639,6 +2649,7 @@ impl Workbook {
             self.rand_seed,
         );
         let result = self.mutation_result(true, result, &seeds);
+        self.calculated_now = options.now_serial;
         self.publish(update);
         if keeps_graph {
             self.mark_graph_current();
@@ -3463,6 +3474,7 @@ impl Workbook {
             self.rand_seed,
         );
         let mutation = self.mutation_result(true, result, &seeds);
+        self.calculated_now = options.now_serial;
         self.proposals.remove(id);
         self.publish(update);
         if keeps_graph {
@@ -3531,6 +3543,41 @@ impl Workbook {
     /// display list for `sheet` with ghost pairs for pending proposals; a
     /// proposal cell whose base drifted paints its committed text instead.
     pub fn display_list_for(&self, sheet: SheetId, viewport: &Viewport) -> Result<DisplayList> {
+        self.display_list_within(sheet, viewport, Budget::Complete)
+            .map(|(display_list, _)| display_list)
+    }
+
+    /// [`Self::display_list_for`] for a frame on screen, and how many visible
+    /// cells its conditional formats left undecided: a frame spends one
+    /// frame's budget and later frames decide the rest. Until then an
+    /// undecided cell paints its result from before the last direct edit of
+    /// one cell or recalculation when it has one, and no conditional format
+    /// otherwise.
+    pub fn display_list_frame_for(
+        &self,
+        sheet: SheetId,
+        viewport: &Viewport,
+    ) -> Result<(DisplayList, u32)> {
+        self.display_list_within(sheet, viewport, Budget::Frame(None))
+    }
+
+    /// [`Self::display_list_frame_for`] with the frame's conditional formats
+    /// also stopped once `clock` passes [`crate::CONDITIONAL_FRAME_MS`].
+    pub fn display_list_frame_timed(
+        &self,
+        sheet: SheetId,
+        viewport: &Viewport,
+        clock: &dyn crate::FrameClock,
+    ) -> Result<(DisplayList, u32)> {
+        self.display_list_within(sheet, viewport, Budget::Frame(Some(clock)))
+    }
+
+    fn display_list_within(
+        &self,
+        sheet: SheetId,
+        viewport: &Viewport,
+        budget: Budget<'_>,
+    ) -> Result<(DisplayList, u32)> {
         let sheet_ref = self.sheet(sheet)?;
         validate_viewport(viewport)?;
         let geometry = self.sheet_geometry(sheet)?;
@@ -3572,7 +3619,8 @@ impl Workbook {
         }
         let ghosts: Vec<GhostEdit> = ghosts.into_values().collect();
         let owner = sheet_ref.name.clone();
-        build_display_list_with_geometry_and_text_runs(
+        let mut pending = 0;
+        let display_list = build_display_list_with_geometry_and_formats(
             &self.model,
             sheet,
             viewport,
@@ -3582,8 +3630,13 @@ impl Workbook {
             &self.sheet_pictures(sheet),
             self.text_runs_lookup(&|at: CellRef| self.painted_text_runs(sheet, at)),
             |chart| self.resolve_chart_space(&owner, chart),
-        )
-        .map_err(Error::from)
+            |rows, cols| {
+                let (formats, undecided) = self.conditional_effects(sheet, rows, cols, budget);
+                pending = undecided;
+                formats
+            },
+        )?;
+        Ok((display_list, pending))
     }
 
     /// The chart under a viewport-local point on the active sheet, resolved
@@ -3930,7 +3983,7 @@ impl Workbook {
         validate_render_size(width, height)?;
         validate_display_region(sheet_ref, &geometry, &viewport)?;
         let owner = sheet_ref.name.clone();
-        let display_list = build_display_list_with_geometry_and_text_runs(
+        let display_list = build_display_list_with_geometry_and_formats(
             &self.model,
             sheet,
             &viewport,
@@ -3940,6 +3993,10 @@ impl Workbook {
             &self.sheet_pictures(sheet),
             self.text_runs_lookup(&|at: CellRef| self.painted_text_runs(sheet, at)),
             |chart| self.resolve_chart_space(&owner, chart),
+            |rows, cols| {
+                self.conditional_effects(sheet, rows, cols, Budget::Complete)
+                    .0
+            },
         )?;
         let display_list = if options.scale == 1.0 {
             display_list
@@ -4290,7 +4347,7 @@ impl Workbook {
             let mut model = staged.model;
             retain_formula_caches(&self.model, &mut model);
             retain_array_formulas(&self.model, &mut model);
-            self.install_model_with_ops(model, ops)?;
+            self.install_model_with_ops(model, ops, false)?;
             self.mode = WorkbookMode::Collaborative {
                 structure: Box::new(new_structure),
             };
@@ -4310,7 +4367,7 @@ impl Workbook {
             };
             let transaction = Transaction::new(ops.to_vec(), Provenance::User);
             self.apply_model_history(|undo, model| undo.commit(model, &transaction))?;
-            self.bump_model_epoch();
+            self.bump_model_epoch_keeping_results();
             self.queue_geometry_delta(delta);
             self.update_sheet_info_cache(ops, &prior_styles);
             update
@@ -4535,7 +4592,7 @@ impl Workbook {
     ) -> CalculationResult {
         match scope {
             CalculationScope::Kept => {
-                self.bump_model_epoch();
+                self.bump_model_epoch_keeping_results();
                 self.last_calculation.changed.clear();
                 CalculationResult::default()
             }
@@ -4553,7 +4610,7 @@ impl Workbook {
         rewritten: &[(SheetId, CellRef)],
         options: CalculationOptions,
     ) -> CalculationResult {
-        self.bump_model_epoch();
+        self.bump_model_epoch_keeping_results();
         let graph = self.graph.as_mut().expect("graph initialized");
         let seeds = graph.rename_sheets(&self.model, rewritten);
         let (result, recomputed) = recalc_after_with_recomputed(
@@ -4589,6 +4646,7 @@ impl Workbook {
         result.budget_exhausted |= previous.budget_exhausted && !kept.is_empty();
         result.limited_cells = kept.into_iter().chain(result.limited_cells).collect();
         self.last_calculation = result.clone();
+        self.calculated_now = options.now_serial;
         result
     }
 
@@ -4597,7 +4655,7 @@ impl Workbook {
         let keep = self.graph_current();
         #[cfg(test)]
         let fresh = keep.then(|| self.fresh_full_recalculation(options));
-        self.bump_model_epoch();
+        self.bump_model_epoch_keeping_results();
         self.recalculated_since_open = true;
         self.calculations_since_open = self.calculations_since_open.saturating_add(1);
         self.count_graph_reuse(keep);
@@ -4633,6 +4691,7 @@ impl Workbook {
             panic!("a kept dependency graph diverged from a fresh build: {difference}");
         }
         self.last_calculation = result.clone();
+        self.calculated_now = options.now_serial;
         xlsx_model::progress::pulse();
         result
     }
@@ -5315,9 +5374,26 @@ impl StagedApply {
 
 impl Workbook {
     /// Model writes funnel through here, `commit_*` or `rebuild_and_recalculate`;
-    /// charts revalidate against their refresh value after the bump.
+    /// charts revalidate against their refresh value after the bump. Screen
+    /// frames paint no conditional result from before it.
     fn bump_model_epoch(&mut self) {
         self.model_epoch = self.model_epoch.wrapping_add(1);
+        self.conditional_cells_moved();
+    }
+
+    /// [`Self::bump_model_epoch`] for cell inputs written in place, typed into
+    /// one cell or sent as a batch, or a recalculation, after which screen
+    /// frames may paint a cell's conditional result from before it until the
+    /// cell is decided again.
+    fn bump_model_epoch_keeping_results(&mut self) {
+        self.model_epoch = self.model_epoch.wrapping_add(1);
+    }
+
+    fn conditional_cells_moved(&mut self) {
+        self.conditional_cache
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .cells_moved();
     }
 
     /// The one way a model becomes this workbook's own. Per-op commit paths
@@ -6740,6 +6816,50 @@ fn validate_viewport(viewport: &Viewport) -> Result<()> {
 }
 
 impl Workbook {
+    /// The conditional-format effects on the `rows` by `cols` cells of
+    /// `sheet`, and how many of them `budget` left undecided. A cell with rich
+    /// text runs takes only the fill.
+    fn conditional_effects(
+        &self,
+        sheet: SheetId,
+        rows: &[std::ops::Range<u32>],
+        cols: &[std::ops::Range<u32>],
+        budget: Budget<'_>,
+    ) -> (xlsx_render::CellFormats, u32) {
+        let mut cache = self
+            .conditional_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (mut formats, pending) = cache.effects(
+            (self.model_epoch, self.calculated_now),
+            &self.last_calculation.limited_cells,
+            &self.model,
+            sheet,
+            rows,
+            cols,
+            budget,
+        );
+        cache.set_withheld_rich_text(self.keep_rich_text_fonts(sheet, &mut formats));
+        (formats, pending)
+    }
+
+    /// Sets the evaluation one frame on screen spends on conditional formats.
+    #[doc(hidden)]
+    pub fn set_conditional_budget(&self, visits: u64) {
+        self.conditional_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .set_budget(visits);
+    }
+
+    #[doc(hidden)]
+    pub fn conditional_stats(&self) -> crate::ConditionalStats {
+        self.conditional_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .stats()
+    }
+
     /// Resolves a chart against `owner`, revalidating its refresh value per epoch.
     fn resolve_chart_space(
         &self,
@@ -7430,6 +7550,7 @@ impl Workbook {
                 ..GraphReuse::default()
             },
             rand_seed: None,
+            calculated_now: None,
             proposals: ProposalSet::new(),
             last_calculation: CalculationResult::default(),
             update_observers: Arc::new(Mutex::new(UpdateObservers::default())),
@@ -7440,6 +7561,7 @@ impl Workbook {
             version_nonce,
             committed_changes: 0,
             chart_cache: Mutex::new(ChartCache::default()),
+            conditional_cache: Mutex::new(crate::conditional::Cache::default()),
             source_part_hashes: Mutex::new(BTreeMap::new()),
             #[cfg(feature = "fonts")]
             font_manager: betteroffice_fonts::FontManager::new(

@@ -1094,7 +1094,7 @@ pub(crate) fn relower_body_table(
     };
     let env = &with_sources;
     let comments = resolve_comment_intervals(&txn, "body", env).ok()?;
-    let fresh = ListState::new(doc.source_metadata().map(|source| source.numbering()));
+    let fresh = effective_list_state(doc.source_metadata().as_deref(), &txn);
     let mut list_state = fresh.clone();
     let mut opaque_sequences = initial_sequences.clone();
     let position = WalkPosition {

@@ -876,3 +876,15 @@ fn control_targets_are_reused_until_a_story_their_controls_read_changes() {
     assert_eq!(targets(&session).1, 1, "the body holds the inline control");
     assert_eq!(targets(&session).1, 0);
 }
+
+#[test]
+fn ensured_list_attributes_are_written_with_nested_keys_sorted() {
+    let session = core(1);
+    let seeded: Value = serde_json::from_str(&session.load_json(BODY).unwrap()).unwrap();
+    let para_id = seeded["body"][0].as_str().unwrap().to_owned();
+    let json = session
+        .ensure_list_definition("body", &para_id, "bullet")
+        .unwrap();
+    assert!(json.contains(r#""listDef":{"key":""#), "{json}");
+    assert!(json.contains(r#""numPr":{"ilvl":"#), "{json}");
+}

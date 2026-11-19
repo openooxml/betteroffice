@@ -60,7 +60,7 @@ pub use pictures::sheet_pictures;
 #[doc(hidden)]
 pub use read::styles_part_name;
 pub use read::{
-    LegacySheetDimensions, SharedStringCells, SourceCellFacts, parse_workbook,
+    LegacySheetDimensions, SharedStringCells, SourceCellFacts, cf_rule_attribute, parse_workbook,
     workbook_full_precision,
 };
 pub use reference::UnpatchableReference;
