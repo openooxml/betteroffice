@@ -566,6 +566,25 @@ describe('Canvas substitute widths', () => {
     }
     expect(states).toEqual(['none', 'normal']);
   });
+  it('thickens only requested synthetic-bold outlines without moving glyph origins', async () => {
+    const glyphPath = { width: 2048, height: 2048 } as unknown as Path2D;
+    const glyphCache = { get: () => ({ path: glyphPath, upem: 2048 }) } as unknown as GlyphCache;
+    const run: GlyphRunPrimitive = {
+      kind: 'glyphRun', fontId: 1, size: 16, color: '#000000', text: '楷',
+      glyphs: [{ id: 1, x: 10, y: 20, cluster: 0, advance: 16 }],
+    };
+    const normal = recordingContext(new Map());
+    const synthetic = recordingContext(new Map());
+    await drawPrimitive(normal.ctx, run, { glyphCache });
+    await drawPrimitive(synthetic.ctx, { ...run, syntheticBold: true }, { glyphCache });
+    expect(normal.paints).toHaveLength(1);
+    expect(synthetic.paints).toHaveLength(2);
+    expect(synthetic.paints[0]).toEqual(normal.paints[0]);
+    expect(synthetic.paints[1].left).toBeCloseTo(normal.paints[0].left + 0.35);
+    expect(run.glyphs[0].x).toBe(10);
+    expect(run.glyphs[0].advance).toBe(16);
+  });
+
   it('paints the glyph run stand-in when glyph outlines are unavailable', async () => {
     const { ctx } = recordingContext(new Map([['co-op', { width: 40, ascent: 12, descent: 4 }]]));
     const fillText = spyOn(ctx, 'fillText');
@@ -584,6 +603,19 @@ describe('Canvas substitute widths', () => {
 
     expect(fillText).toHaveBeenCalledWith('co-op', 10, 20);
     expect(run.text).toBe('co\u2011op');
+  });
+
+  it('uses the requested CSS bold weight once when outlines are unavailable', async () => {
+    const { ctx, paints } = recordingContext(new Map([['楷', { width: 16, ascent: 12, descent: 4 }]]));
+    const run: GlyphRunPrimitive = {
+      kind: 'glyphRun', fontId: 1, size: 16, color: '#000000', text: '楷',
+      fallbackFont: '700 16px KaiTi', syntheticBold: true,
+      glyphs: [{ id: 1, x: 10, y: 20, cluster: 0, advance: 16 }],
+    };
+    await drawPrimitive(ctx, run);
+    expect(ctx.font).toBe('700 16px KaiTi');
+    expect(paints).toHaveLength(1);
+    expect(run.text).toBe('楷');
   });
 
   it('paints the supplied hyphen stand-in while preserving source text', async () => {

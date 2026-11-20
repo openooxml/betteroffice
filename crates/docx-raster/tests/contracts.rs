@@ -565,6 +565,108 @@ fn synthetic_glyph_run_clip_intersects_the_outer_mask() {
 }
 
 #[test]
+fn synthetic_bold_paints_a_second_copy_inside_the_mask() {
+    let mut fonts = FontStore::new();
+    let font = fonts.register(FONT.to_vec()).expect("font");
+    let shaped = shape(&fonts, font, "@@@@@@@@@@", 28.0, &[]).expect("shape");
+    let mut pen = 4.0_f64;
+    let glyphs: Vec<Value> = shaped
+        .into_iter()
+        .map(|glyph| {
+            let placed = json!({
+                "id": glyph.glyph_id,
+                "x": pen + f64::from(glyph.x_offset),
+                "y": 31.0 - f64::from(glyph.y_offset),
+                "cluster": glyph.cluster,
+                "advance": glyph.x_advance
+            });
+            pen += f64::from(glyph.x_advance);
+            placed
+        })
+        .collect();
+    let primitive = |synthetic: bool, clipped: bool| {
+        let mut run = json!({
+            "kind": "glyphRun",
+            "fontId": font.to_u32(),
+            "size": 28,
+            "color": "#000000",
+            "text": "@@@@@@@@@@",
+            "syntheticBold": synthetic,
+            "glyphs": glyphs
+        });
+        if clipped {
+            run["paintClip"] = json!({"x": 4, "w": 12});
+            run["clipGroup"] = json!({"clip": {"x": 8, "y": 0, "w": 72, "h": 40}});
+        }
+        run
+    };
+    let chains = FontChains::new();
+    let images = ImageMap::new();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+
+    let plain = render_png(
+        &list(80.0, 40.0, vec![primitive(false, false)]),
+        0,
+        &resources,
+    )
+    .expect("plain render");
+    let bold = render_png(
+        &list(80.0, 40.0, vec![primitive(true, false)]),
+        0,
+        &resources,
+    )
+    .expect("bold render");
+    let clipped = render_png(
+        &list(80.0, 40.0, vec![primitive(true, true)]),
+        0,
+        &resources,
+    )
+    .expect("clipped render");
+
+    assert!(
+        ink_pixels(&bold) > ink_pixels(&plain),
+        "the second offset copy darkens more pixels"
+    );
+    assert!(ink_bounds(&bold).expect("bold ink").0 < 8);
+    assert!(
+        ink_bounds(&clipped).expect("clipped ink").0 >= 8,
+        "the second copy is clipped by the same mask"
+    );
+}
+
+#[test]
+fn text_run_bold_without_a_bold_face_paints_synthetic_weight() {
+    let mut fonts = FontStore::new();
+    let font = fonts.register(FONT.to_vec()).expect("font");
+    let chains = FontChains::from([
+        ("carlito|0|0".to_string(), vec![font]),
+        ("carlito|1|0".to_string(), vec![font]),
+    ]);
+    let images = ImageMap::new();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let primitive = |weight: &str| {
+        json!({
+            "kind": "text",
+            "text": "HHHHHH",
+            "x": 4,
+            "baselineY": 31,
+            "width": 120,
+            "font": format!("{weight} 28px Carlito, sans-serif"),
+            "color": "#000000"
+        })
+    };
+
+    let plain = render_png(&list(140.0, 40.0, vec![primitive("400")]), 0, &resources)
+        .expect("plain render");
+    let bold =
+        render_png(&list(140.0, 40.0, vec![primitive("700")]), 0, &resources).expect("bold render");
+    assert!(
+        ink_pixels(&bold) > ink_pixels(&plain),
+        "the browser text path emboldens the regular face"
+    );
+}
+
+#[test]
 fn text_requires_the_layout_font_chain() {
     let mut fonts = FontStore::new();
     fonts.register(FONT.to_vec()).expect("font");
@@ -1473,6 +1575,21 @@ fn pixel(png: &[u8], x: u32, y: u32) -> [u8; 4] {
     let info = reader.next_frame(&mut pixels).expect("png frame");
     let start = ((y * info.width + x) * 4) as usize;
     pixels[start..start + 4].try_into().expect("rgba pixel")
+}
+
+/// Non-white pixel count, for comparing how much ink a page lays down.
+fn ink_pixels(png: &[u8]) -> usize {
+    let mut reader = png::Decoder::new(Cursor::new(png))
+        .read_info()
+        .expect("png header");
+    let mut pixels = vec![0_u8; reader.output_buffer_size().expect("buffer size")];
+    let info = reader.next_frame(&mut pixels).expect("png frame");
+    pixels[..(info.width * info.height * 4) as usize]
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|pixel| **pixel != [255, 255, 255, 255])
+        .count()
 }
 
 fn ink_bounds(png: &[u8]) -> Option<(u32, u32, u32, u32)> {

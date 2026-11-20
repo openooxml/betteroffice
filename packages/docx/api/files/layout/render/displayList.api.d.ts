@@ -448,6 +448,8 @@ export interface GlyphRunPrimitive extends DocAttrs {
     /** Canvas-only glyph stand-in text for the fillText fallback. */
     paintText?: string;
     glyphs: PositionedGlyph[];
+    /** Regular face painted heavier when a requested bold face is unavailable. */
+    syntheticBold?: boolean;
     echo?: {
         x: number;
         right: number;

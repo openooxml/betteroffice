@@ -18,6 +18,10 @@ use crate::{
     primitive_visual_transform, skip_effect,
 };
 
+/// Synthetic bold paints the glyph twice, the second copy shifted by this many
+/// display pixels, matching the browser canvas and xlsx raster.
+const SYNTHETIC_BOLD_OFFSET_PX: f32 = 0.35;
+
 /// Measures one font run in pixels.
 pub fn measure_text(
     fonts: &FontStore,
@@ -495,7 +499,15 @@ fn paint_glyph_run_core(
     let font = FontId::from_u32(run.font_id);
     let draw = |context: &mut PaintContext<'_, '_>, transform: Transform| {
         for glyph in &run.glyphs {
-            paint_placed_glyph(context, font, glyph, run.size as f32, &paint, transform)?;
+            paint_placed_glyph(
+                context,
+                font,
+                glyph,
+                run.size as f32,
+                &paint,
+                transform,
+                run.synthetic_bold,
+            )?;
         }
         Ok(0.0)
     };
@@ -673,6 +685,7 @@ fn paint_leader(
 /// One shaped leader text, ready to be stamped at every repeat position.
 struct ShapedStamp {
     size: f32,
+    bold: bool,
     segments: Vec<ShapedSegment>,
 }
 
@@ -739,6 +752,7 @@ fn shape_stamp(
         .charge_glyphs(excess.saturating_mul(count as u64))?;
     Ok(ShapedStamp {
         size: spec.size,
+        bold: spec.bold,
         segments,
     })
 }
@@ -774,6 +788,7 @@ fn paint_shaped_stamp(
 ) -> Result<(), String> {
     let mut pen = origin;
     for segment in &stamp.segments {
+        let synthetic = synthetic_bold(context.resources.fonts, segment.font, stamp.bold);
         for glyph in &segment.glyphs {
             let placed = PlacedGlyph {
                 id: glyph.glyph_id,
@@ -784,7 +799,15 @@ fn paint_shaped_stamp(
                 logical_order: None,
                 bidi_level: None,
             };
-            paint_placed_glyph(context, segment.font, &placed, stamp.size, paint, transform)?;
+            paint_placed_glyph(
+                context,
+                segment.font,
+                &placed,
+                stamp.size,
+                paint,
+                transform,
+                synthetic,
+            )?;
             pen += glyph.x_advance;
         }
     }
@@ -843,6 +866,7 @@ fn paint_resolved_text(
     for segment_index in order {
         let segment = &segments[segment_index];
         let segment_text = &text[segment.start..segment.end];
+        let synthetic = synthetic_bold(context.resources.fonts, segment.font, spec.bold);
         let glyphs = ooxml_text::shape::shape_with_word_features(
             context.resources.fonts,
             segment.font,
@@ -864,7 +888,15 @@ fn paint_resolved_text(
                 logical_order: None,
                 bidi_level: None,
             };
-            paint_placed_glyph(context, segment.font, &placed, spec.size, &paint, transform)?;
+            paint_placed_glyph(
+                context,
+                segment.font,
+                &placed,
+                spec.size,
+                &paint,
+                transform,
+                synthetic,
+            )?;
             pen += glyph.x_advance;
             let cluster_ends = glyphs
                 .get(glyph_index + 1)
@@ -904,6 +936,12 @@ fn charge_shaped_excess(
         .charge_glyphs((glyphs as u64).saturating_sub(charged))
 }
 
+/// Whether a bold request has to be painted synthetically: the resolved face
+/// is not itself bold, so a second offset copy supplies the weight.
+fn synthetic_bold(fonts: &FontStore, font: FontId, bold: bool) -> bool {
+    bold && !fonts.face_is_bold(font).unwrap_or(false)
+}
+
 fn paint_placed_glyph(
     context: &mut PaintContext<'_, '_>,
     font: FontId,
@@ -911,22 +949,37 @@ fn paint_placed_glyph(
     size: f32,
     paint: &Paint<'_>,
     transform: Transform,
+    synthetic_bold: bool,
 ) -> Result<(), String> {
     let cached = cached_glyph(context.cache, context.resources.fonts, font, glyph.id)?;
     let Some(path) = &cached.path else {
         return Ok(());
     };
     let scale = size / cached.upem;
+    let x = f64_to_f32(glyph.x, "glyph x")?;
+    let y = f64_to_f32(glyph.y, "glyph y")?;
     ooxml_raster::fill_glyph(
         context.pixmap,
         path,
         scale,
-        f64_to_f32(glyph.x, "glyph x")?,
-        f64_to_f32(glyph.y, "glyph y")?,
+        x,
+        y,
         transform,
         paint,
         context.mask,
     );
+    if synthetic_bold {
+        ooxml_raster::fill_glyph(
+            context.pixmap,
+            path,
+            scale,
+            x + SYNTHETIC_BOLD_OFFSET_PX,
+            y,
+            transform,
+            paint,
+            context.mask,
+        );
+    }
     Ok(())
 }
 

@@ -297,6 +297,10 @@ impl Deref for FontBytes {
 
 struct FontEntry {
     backstop_style: OnceLock<Option<(bool, bool)>>,
+    /// The face's own weight reaches bold (`OS/2` bold selection bit or a
+    /// weight class of 600+), so a bold request needs no synthetic
+    /// emboldening. Views and aliases inherit their face's answer.
+    declared_bold: bool,
     /// Entry owning the bytes, for a metrics-only view of another face;
     /// `None` when this entry owns its own.
     bytes_of: Option<usize>,
@@ -531,10 +535,12 @@ impl FontStore {
 
     fn register_alias(&mut self, owner: FontId) -> FontId {
         let metrics = self.fonts[owner.0 as usize].metrics;
+        let declared_bold = self.fonts[owner.0 as usize].declared_bold;
         let id = FontId(self.fonts.len() as u32);
         self.fonts.push(
             FontEntry {
                 backstop_style: OnceLock::new(),
+                declared_bold,
                 bytes_of: Some(owner.0 as usize),
                 face: None,
                 data: FontBytes::Static(&[]),
@@ -584,6 +590,8 @@ impl FontStore {
             os2_version: os2.version(),
             os2_code_page_range1: os2.ul_code_page_range_1().unwrap_or(0),
         };
+        let declared_bold =
+            os2.fs_selection().contains(SelectionFlags::BOLD) || os2.us_weight_class() >= 600;
 
         // SAFETY: see the `FontEntry` field invariants — the view borrows
         // `data`'s heap allocation, which outlives it and never moves.
@@ -595,6 +603,7 @@ impl FontStore {
 
         Ok(FontEntry {
             backstop_style: OnceLock::new(),
+            declared_bold,
             bytes_of: None,
             face,
             data,
@@ -656,6 +665,7 @@ impl FontStore {
     ) -> Result<FontId, FontError> {
         let entry = self.entry(base)?;
         let owner = entry.bytes_of.unwrap_or(base.0 as usize);
+        let declared_bold = entry.declared_bold;
         let mut metrics = entry.metrics;
         if metrics.units_per_em == 0 || requested.is_some_and(|metrics| metrics.units_per_em == 0) {
             return Ok(base);
@@ -693,6 +703,7 @@ impl FontStore {
         self.fonts.push(
             FontEntry {
                 backstop_style: OnceLock::new(),
+                declared_bold,
                 bytes_of: Some(owner),
                 face: None,
                 data: FontBytes::Static(&[]),
@@ -982,6 +993,13 @@ impl FontStore {
         italic: bool,
     ) -> Option<FontId> {
         self.resolve_with_family(chain, ch, bold, italic, "")
+    }
+
+    /// Whether the face behind `id` is itself bold, so a bold request can use
+    /// its outlines instead of synthesizing weight. Views and aliases answer
+    /// for the face whose bytes they draw.
+    pub fn face_is_bold(&self, id: FontId) -> Result<bool, FontError> {
+        self.entry(id).map(|entry| entry.declared_bold)
     }
 
     pub fn backstop_style(&self, id: FontId) -> Option<(bool, bool)> {
@@ -1368,5 +1386,48 @@ mod tests {
         let mut store = FontStore::new();
         let font = store.register(LIBERATION_SANS.to_vec()).unwrap();
         assert!(store.shaping_face(font).unwrap().is_some());
+    }
+
+    #[test]
+    fn declared_bold_follows_the_face_and_its_views() {
+        let mut store = FontStore::new();
+        let regular = store.register(LIBERATION_SANS.to_vec()).unwrap();
+        let bold = store
+            .register(
+                include_bytes!("../../../packages/fonts/assets/LiberationSans-Bold.ttf").to_vec(),
+            )
+            .unwrap();
+        assert!(!store.face_is_bold(regular).unwrap());
+        assert!(store.face_is_bold(bold).unwrap());
+        let alias = store.register_slice(LIBERATION_SANS).unwrap();
+        assert!(!store.face_is_bold(alias).unwrap());
+        let metrics = *store.metrics(regular).unwrap();
+        let view = store
+            .register_substitute(
+                regular,
+                RequestedLineMetrics {
+                    units_per_em: metrics.units_per_em,
+                    hhea_ascender: metrics.hhea_ascender,
+                    hhea_descender: metrics.hhea_descender,
+                    hhea_line_gap: metrics.hhea_line_gap,
+                    east_asian: false,
+                    advance_scale: 1.0,
+                },
+            )
+            .unwrap();
+        assert!(!store.face_is_bold(view).unwrap());
+        assert_eq!(
+            store.face_is_bold(FontId::from_u32(u32::MAX)),
+            Err(FontError::UnknownFont)
+        );
+        #[cfg(feature = "base-latin")]
+        {
+            assert!(store.face_is_bold(FontId::base_latin(true, false)).unwrap());
+            assert!(
+                !store
+                    .face_is_bold(FontId::base_latin(false, false))
+                    .unwrap()
+            );
+        }
     }
 }

@@ -523,6 +523,10 @@ function drawGlyphRun(
             }
           } else if (effects?.textFill?.kind !== 'none') {
             ctx.fill(path);
+            if (run.syntheticBold) {
+              ctx.translate(0.35 / scale, 0);
+              ctx.fill(path);
+            }
           }
           ctx.restore();
         }
