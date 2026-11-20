@@ -18,7 +18,8 @@ function isOnListOfKind(properties: Readonly<Record<string, unknown>>, kind: 'bu
 
 /**
  * Bullets or Numbering over the paragraphs of `range`: every paragraph off its list when the first
- * is on a list of `kind`, otherwise each in turn onto the list `ensureListDefinition` gives it.
+ * is on a list of `kind`, otherwise the first onto the list `ensureListDefinition` gives it and the
+ * others onto that list after it.
  * @internal
  */
 export function applyListToggle(
@@ -31,8 +32,11 @@ export function applyListToggle(
   const paragraphs = engine.paragraphs(range.story);
   const start = paragraphs.findIndex(paragraph => paragraph.paraId === range.start.paraId);
   const end = paragraphs.findIndex(paragraph => paragraph.paraId === range.end.paraId);
+  const lead = paragraphs[start]?.paraId;
   for (const { paraId } of paragraphs.slice(start, end + 1)) {
     const at = { story: range.story, start: { paraId, offset: 0 }, end: { paraId, offset: 0 } };
-    engine.setParagraphAttrs(at, remove ? LIST_OFF_ATTRS : engine.ensureListDefinition(range.story, paraId, kind), suggesting);
+    const attrs = remove ? LIST_OFF_ATTRS
+      : engine.ensureListDefinition(range.story, paraId, kind, paraId === lead ? undefined : lead);
+    engine.setParagraphAttrs(at, attrs, suggesting);
   }
 }

@@ -66,6 +66,19 @@ impl EditSessionCore {
         para_id: &str,
         kind: &str,
     ) -> EngineResult<String> {
+        self.ensure_list_definition_after(story, para_id, kind, None)
+    }
+
+    /// As [`Self::ensure_list_definition`] for a paragraph of a selection whose first paragraph is
+    /// `lead`, which goes on the list `lead` is on when that is of `kind`. See
+    /// [`crate::EditingDoc::ensure_list_definition_after`].
+    pub fn ensure_list_definition_after(
+        &self,
+        story: &str,
+        para_id: &str,
+        kind: &str,
+        lead: Option<&str>,
+    ) -> EngineResult<String> {
         let kind = match kind {
             "bullet" => ListKind::Bullet,
             "numbered" => ListKind::Numbered,
@@ -74,7 +87,7 @@ impl EditSessionCore {
         let attrs = self
             .engine
             .doc()
-            .ensure_list_definition(&EditCtx::local("", ""), story, para_id, kind)
+            .ensure_list_definition_after(&EditCtx::local("", ""), story, para_id, kind, lead)
             .map_err(EngineError::from)?;
         Ok(attrs_value(&attrs)?.to_string())
     }

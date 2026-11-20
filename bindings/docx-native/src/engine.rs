@@ -2990,10 +2990,11 @@ impl EditSession {
         story: String,
         para_id: String,
         kind: String,
+        lead: Option<String>,
     ) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document(env)?
-            .ensure_list_definition(&story, &para_id, &kind)
+            .ensure_list_definition_after(&story, &para_id, &kind, lead.as_deref())
             .map_err(|error| map_error(env, error))
     }
 

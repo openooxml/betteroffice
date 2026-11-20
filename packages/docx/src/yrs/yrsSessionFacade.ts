@@ -1734,10 +1734,10 @@ export function wrapSession(
     },
     styleLanguages: () => JSON.parse(session.style_languages_json()),
     patchStyleLanguagesXml: source => session.patch_style_languages_xml(source),
-    ensureListDefinition: (story, paraId, kind) => {
+    ensureListDefinition: (story, paraId, kind, lead) => {
       ensureUndo(story);
       const { listDef, ...attrs } = mutate(
-        () => JSON.parse(session.ensure_list_definition(story, paraId, kind)) as YrsParagraphAttrs & { listDef?: unknown }
+        () => JSON.parse(session.ensure_list_definition(story, paraId, kind, lead)) as YrsParagraphAttrs & { listDef?: unknown }
       );
       return listDef === undefined ? attrs : { ...attrs, other: { ...attrs.other, listDef } };
     },

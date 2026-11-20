@@ -1353,15 +1353,17 @@ impl EditSession {
     /// The paragraph attributes, as JSON, that put a paragraph on a list of `kind`, `bullet` or
     /// `numbered`: its own list when that is of that kind, else the list of the paragraph directly
     /// above, else below, else a list definition this call creates; a paragraph already on a list
-    /// keeps its own level.
+    /// keeps its own level. With `lead`, the first paragraph of the selection the paragraph is
+    /// in, it goes on the list `lead` is on when that is of `kind`.
     pub fn ensure_list_definition(
         &self,
         story: &str,
         para_id: &str,
         kind: &str,
+        lead: Option<String>,
     ) -> Result<String, JsValue> {
         self.core
-            .ensure_list_definition(story, para_id, kind)
+            .ensure_list_definition_after(story, para_id, kind, lead.as_deref())
             .map_err(JsValue::from)
     }
 

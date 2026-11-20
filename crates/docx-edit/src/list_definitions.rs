@@ -444,15 +444,31 @@ impl EditingDoc {
         para_id: &str,
         kind: ListKind,
     ) -> EditResult<BTreeMap<String, Any>> {
+        self.ensure_list_definition_after(ctx, story, para_id, kind, None)
+    }
+
+    /// As [`Self::ensure_list_definition`] for a paragraph of a selection whose first paragraph
+    /// is `lead`: when `lead` is on a list of `kind`, the paragraph goes on that list before any
+    /// other is looked at, at its own level where that list has it in that kind, else at
+    /// `lead`'s.
+    pub fn ensure_list_definition_after(
+        &self,
+        ctx: &EditCtx,
+        story: &str,
+        para_id: &str,
+        kind: ListKind,
+        lead: Option<&str>,
+    ) -> EditResult<BTreeMap<String, Any>> {
         let (joined, level) = {
             let txn = self.yrs_doc().transact();
             let text = crate::story_ref(&txn, story)?;
             let pilcrows = crate::pilcrows(&text, &txn);
-            let index = pilcrows
-                .iter()
-                .position(|(_, pilcrow)| {
-                    crate::map_string(pilcrow, &txn, crate::PARA_ID).as_deref() == Some(para_id)
+            let position = |id: &str| {
+                pilcrows.iter().position(|(_, pilcrow)| {
+                    crate::map_string(pilcrow, &txn, crate::PARA_ID).as_deref() == Some(id)
                 })
+            };
+            let index = position(para_id)
                 .ok_or_else(|| EditError::ParagraphNotFound(para_id.to_owned()))?;
             let definitions = created_definitions(&txn);
             let metadata = self.source_metadata();
@@ -462,7 +478,17 @@ impl EditingDoc {
             let join = |values: &BTreeMap<String, Any>| {
                 joined_list(values, &definitions, kind, level, source)
             };
-            let joined = join(&own).or_else(|| {
+            let lead_at = match lead {
+                Some(lead) if lead != para_id => position(lead),
+                _ => None,
+            };
+            let led = lead_at
+                .map(|at| pilcrow_values(&pilcrows[at].1, &txn))
+                .and_then(|values| {
+                    join(&values)
+                        .or_else(|| joined_list(&values, &definitions, kind, None, source))
+                });
+            let joined = led.or_else(|| join(&own)).or_else(|| {
                 [index.checked_sub(1), Some(index + 1)]
                     .into_iter()
                     .flatten()
