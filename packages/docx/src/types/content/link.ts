@@ -251,6 +251,13 @@ export interface ComplexField {
   dirty?: boolean;
   /** The begin `w:fldChar`'s `<w:ffData>` serialized verbatim, replayed unchanged on save. */
   rawFormDataXml?: string;
+  /**
+   * The run holding this field and the fields and text beside it, as read, when one run holds
+   * two or more whole fields. Written in place of the field while the field is as parsed.
+   */
+  sourceRunXml?: string;
+  /** The digest of the field as parsed from `sourceRunXml`. */
+  sourceRunDigest?: string;
   /** Rich recursive code projection. Undefined = use `fieldCode`. */
   structuredCode?: StructuredFieldContent;
   /** Rich recursive cached result. Undefined = use `fieldResult`. */

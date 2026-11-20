@@ -1016,6 +1016,104 @@ pub(crate) fn raw_foreign_inline(element: &crate::xml::XmlElement) -> Option<Inl
     })))
 }
 
+/// The source of a run holding two or more fields one after another, each beginning and ending
+/// inside it, beside only text, tabs, plain breaks and properties; its rendered page breaks are
+/// left out.
+pub(crate) fn field_run_source(element: &XmlElement) -> Option<String> {
+    if element.name != "w:r" {
+        return None;
+    }
+    let mut open = false;
+    let mut begins = 0usize;
+    for child in element.child_elements() {
+        match child.name.as_str() {
+            "w:fldChar" if child.child_elements().next().is_none() => {
+                let kind = child.attribute(Some("w"), "fldCharType")?;
+                match (kind, open) {
+                    ("begin", false) => {
+                        open = true;
+                        begins += 1;
+                    }
+                    ("separate", true) => {}
+                    ("end", true) => open = false,
+                    _ => return None,
+                }
+            }
+            "w:rPr" if plain_run_properties(child) => {}
+            "w:br" if child.attribute(Some("w"), "type").is_none() => {}
+            "w:instrText"
+            | "w:t"
+            | "w:tab"
+            | "w:cr"
+            | "w:noBreakHyphen"
+            | "w:softHyphen"
+            | "w:lastRenderedPageBreak" => {}
+            _ => return None,
+        }
+    }
+    if open || begins < 2 {
+        return None;
+    }
+    let mut run = element.clone();
+    run.children.retain(|node| !rendered_page_break(node));
+    Some(run.to_raw_inline_xml())
+}
+
+/// Keeps `source` on `field` with the digest of the field as parsed.
+pub(crate) fn keep_field_run(field: &mut ComplexField, source: String) {
+    field.source_run_digest = Some(field_run_digest(field));
+    field.source_run_xml = Some(source);
+}
+
+/// The digest of the model values the writer writes `field` from: its instruction, properties,
+/// flags, form field data, code and result. Empty properties count as none, a flag that is not
+/// set counts as off, and every zero counts as the same zero.
+pub(crate) fn field_run_digest(field: &ComplexField) -> String {
+    use sha2::{Digest, Sha256};
+
+    let formatting = field
+        .formatting
+        .as_ref()
+        .filter(|formatting| **formatting != TextFormatting::default());
+    let mut written = serde_json::to_value((
+        &field.instruction,
+        formatting,
+        field.fld_lock == Some(true),
+        field.dirty == Some(true),
+        &field.raw_form_data_xml,
+        &field.field_code,
+        &field.structured_code,
+        &field.field_result,
+        &field.structured_result,
+    ))
+    .expect("field model");
+    unsigned_zeros(&mut written);
+    format!("{:x}", Sha256::digest(written.to_string()))
+}
+
+fn unsigned_zeros(value: &mut serde_json::Value) {
+    use serde_json::Value;
+
+    if value.as_f64() == Some(0.0) {
+        *value = Value::from(0);
+    }
+    match value {
+        Value::Array(items) => items.iter_mut().for_each(unsigned_zeros),
+        Value::Object(object) => object.values_mut().for_each(unsigned_zeros),
+        _ => {}
+    }
+}
+
+fn plain_run_properties(properties: &XmlElement) -> bool {
+    properties
+        .child_elements()
+        .all(|property| property.name.starts_with("w:") && property.name != "w:rPrChange")
+}
+
+fn rendered_page_break(node: &XmlNode) -> bool {
+    matches!(node, XmlNode::Element(child) if child.name == "w:lastRenderedPageBreak")
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum InlineNode {
@@ -1268,6 +1366,13 @@ pub struct ComplexField {
     pub dirty: Option<bool>,
     #[serde(rename = "rawFormDataXml", skip_serializing_if = "Option::is_none")]
     pub raw_form_data_xml: Option<String>,
+    /// The run holding this field and the fields and text beside it as read, written in place
+    /// of the field while the field digests to `source_run_digest`.
+    #[serde(rename = "sourceRunXml", skip_serializing_if = "Option::is_none")]
+    pub source_run_xml: Option<String>,
+    /// The digest of the field as parsed from `source_run_xml`.
+    #[serde(rename = "sourceRunDigest", skip_serializing_if = "Option::is_none")]
+    pub source_run_digest: Option<String>,
     #[serde(rename = "structuredCode", skip_serializing_if = "Option::is_none")]
     pub structured_code: Option<StructuredFieldContent>,
     #[serde(rename = "structuredResult", skip_serializing_if = "Option::is_none")]
@@ -2377,6 +2482,8 @@ impl OpenComplexField {
             fld_lock: self.fld_lock.then_some(true),
             dirty: self.dirty.then_some(true),
             raw_form_data_xml: self.raw_form_data_xml,
+            source_run_xml: None,
+            source_run_digest: None,
             structured_code,
             structured_result,
             field_tree: Some(field_tree),
@@ -2498,6 +2605,11 @@ fn parse_inline_container_at_depth(
         check_container_beyond_field_nesting(beyond_nesting, child, part)?;
         match child.local_name() {
             "r" => {
+                let source = if element.matches_name("w", "p") && fields.is_empty() {
+                    field_run_source(child)
+                } else {
+                    None
+                };
                 let run = parse_run(child, theme, styles, doc_defaults).run;
                 let mut has_begin = false;
                 let mut has_separate = false;
@@ -2548,6 +2660,11 @@ fn parse_inline_container_at_depth(
                     }
                 } else {
                     output.push(InlineNode::Run(run));
+                }
+                if let Some(source) = source
+                    && let Some(InlineNode::ComplexField(field)) = output.last_mut()
+                {
+                    keep_field_run(field, source);
                 }
             }
             "hyperlink" => {
