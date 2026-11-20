@@ -724,3 +724,19 @@ fn a_created_list_no_paragraph_is_on_is_not_reused_for_the_other_kind() {
     assert_eq!(doc.created_list_definitions().len(), 2);
     assert!(bullet.is_some());
 }
+
+#[test]
+fn a_created_list_of_another_client_is_not_handed_out() {
+    let doc = seeded(722, &[("Lead", None), ("Alpha", None), ("Gap", None)]);
+    let root = doc.yrs_doc().get_or_insert_map(LIST_DEFINITIONS);
+    {
+        let mut txn = doc.yrs_doc().transact_mut();
+        let peer = r#"{"kind":"bullet","levelTexts":["o"]}"#;
+        root.insert(&mut txn, "9:1", Any::from_json(peer).unwrap());
+    }
+    create(&doc, "Alpha", ListKind::Bullet);
+    let key = created_key(&doc, "Alpha");
+    assert_ne!(key.as_deref(), Some("9:1"));
+    assert_eq!(doc.created_list_definitions().len(), 2);
+    assert!(key.is_some());
+}
