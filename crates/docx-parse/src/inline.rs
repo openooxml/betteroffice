@@ -1065,14 +1065,19 @@ pub(crate) fn keep_field_run(field: &mut ComplexField, source: String) {
     field.source_run_xml = Some(source);
 }
 
-/// The digest of what the writer writes `field` from: its instruction, properties, flags, form
-/// field data, code and result.
+/// The digest of the model values the writer writes `field` from: its instruction, properties,
+/// flags, form field data, code and result. Empty properties count as none, a flag that is not
+/// set counts as off, and every zero counts as the same zero.
 pub(crate) fn field_run_digest(field: &ComplexField) -> String {
     use sha2::{Digest, Sha256};
 
-    let written = (
+    let formatting = field
+        .formatting
+        .as_ref()
+        .filter(|formatting| **formatting != TextFormatting::default());
+    let mut written = serde_json::to_value((
         &field.instruction,
-        crate::serializer::serialize_text_formatting(field.formatting.as_ref()),
+        formatting,
         field.fld_lock == Some(true),
         field.dirty == Some(true),
         &field.raw_form_data_xml,
@@ -1080,11 +1085,23 @@ pub(crate) fn field_run_digest(field: &ComplexField) -> String {
         &field.structured_code,
         &field.field_result,
         &field.structured_result,
-    );
-    format!(
-        "{:x}",
-        Sha256::digest(serde_json::to_vec(&written).expect("field model"))
-    )
+    ))
+    .expect("field model");
+    unsigned_zeros(&mut written);
+    format!("{:x}", Sha256::digest(written.to_string()))
+}
+
+fn unsigned_zeros(value: &mut serde_json::Value) {
+    use serde_json::Value;
+
+    if value.as_f64() == Some(0.0) {
+        *value = Value::from(0);
+    }
+    match value {
+        Value::Array(items) => items.iter_mut().for_each(unsigned_zeros),
+        Value::Object(object) => object.values_mut().for_each(unsigned_zeros),
+        _ => {}
+    }
 }
 
 fn plain_run_properties(properties: &XmlElement) -> bool {
