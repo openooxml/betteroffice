@@ -39,6 +39,11 @@
     "reason": "Refusal message returned to plugin code by focusDocument, never shown in the UI"
   },
   {
+    "text": "Focus the mini toolbar",
+    "file": "packages/docx-react/src/plugins/miniToolbar/docxMiniToolbar.tsx",
+    "reason": "Label of the mini toolbar's Alt+F10 command, which no toolbar lists, so it is never shown in the UI"
+  },
+  {
     "text": "Unable to decode slide image",
     "file": "packages/pptx-react/src/viewer/sessionPaint.ts",
     "reason": "Internal image decode error passed to the media resolver, never shown in the UI"

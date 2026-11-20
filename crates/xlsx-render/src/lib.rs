@@ -2265,7 +2265,8 @@ struct ResolvedXf {
 
 impl ResolvedXf {
     /// This xf over a table style: each fill and font facet the cell leaves as
-    /// the normal style has takes the table's.
+    /// the normal style has takes the table's. A font without a color under a
+    /// normal font that has one is the cell's own automatic color and stays.
     fn under_table(&self, table: &DifferentialFormat, normal: &ResolvedFont) -> Self {
         let mut xf = self.clone();
         if xf.fill.is_none() {
@@ -2274,8 +2275,9 @@ impl ResolvedXf {
                 .as_deref()
                 .map(|color| ResolvedFill::Solid(color.into()));
         }
+        let fontless = xf.font.is_none();
         let font = xf.font.get_or_insert_with(ResolvedFont::default);
-        if (font.color.is_none() || font.color == normal.color)
+        if (fontless || font.color == normal.color)
             && let Some(color) = &table.font_color
         {
             font.color = Some(color.as_str().into());

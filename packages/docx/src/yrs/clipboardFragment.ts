@@ -933,17 +933,32 @@ export function readClipboardSlice(
   return { text, fragment: { paragraphs: paragraphs.map(({ runs: _runs, ...paragraph }) => paragraph) }, ...report };
 }
 
-function formatInsertedRun(engine: ClipboardPasteEngine, range: YrsStoryRange, run: DocxClipboardRun): void {
-  const { other, ...typed } = run.format ?? {};
-  if (other) engine.clearFormatting(range);
-  if (Object.keys(typed).length > 0 || Object.keys(other ?? {}).length > 0) engine.formatRange(range, run.format!);
+const INHERITED_MARKS = ['bold', 'italic', 'underline', 'strike'] as const;
+
+function formatInsertedRun(
+  engine: ClipboardPasteEngine,
+  range: YrsStoryRange,
+  run: DocxClipboardRun,
+  inheritedMarks: ReadonlySet<string> | null = null,
+): void {
+  if (inheritedMarks) {
+    const delta: Record<string, unknown> = {};
+    for (const key of inheritedMarks) delta[key] = run.format?.other?.[key] ?? null;
+    if (inheritedMarks.size > 0) engine.formatRange(range, delta as YrsInlineFormatDelta);
+  } else {
+    const { other, ...typed } = run.format ?? {};
+    if (other) engine.clearFormatting(range);
+    if (Object.keys(typed).length > 0 || Object.keys(other ?? {}).length > 0) engine.formatRange(range, run.format!);
+  }
   if (run.href) engine.setHyperlink(range, { href: run.href, ...(run.tooltip ? { tooltip: run.tooltip } : {}) });
 }
 
 /**
  * Pastes a fragment over a story range, returning the caret. Deletes a
  * non-collapsed range first, then replays each paragraph: splits for
- * paragraphs after the first, inserts tables, then text.
+ * paragraphs after the first, inserts tables, then text. With
+ * `keepInherited`, pasted runs keep the formatting at the paste point and
+ * set only their own bold, italic, underline and strikethrough.
  * @internal
  */
 export function applyClipboardFragment(
@@ -951,6 +966,7 @@ export function applyClipboardFragment(
   range: YrsStoryRange,
   fragment: DocxClipboardFragment,
   suggesting?: YrsAuthor,
+  keepInherited = false,
 ): YrsLoc {
   for (const paragraph of fragment.paragraphs) {
     for (const table of paragraph.tables ?? []) engine.validateTableFragment(table);
@@ -972,6 +988,10 @@ export function applyClipboardFragment(
       offset: removed.range.start.offset,
     };
   }
+  const inheritedMarks = keepInherited
+    ? new Set(INHERITED_MARKS.filter(key => fragment.paragraphs.some(paragraph =>
+      (paragraph.runs ?? []).some(run => run.format?.other?.[key] !== undefined))))
+    : null;
   fragment.paragraphs.forEach((paragraph, index) => {
     if (index > 0) {
       const split = engine.splitParagraph(caret, suggesting);
@@ -986,7 +1006,7 @@ export function applyClipboardFragment(
         : engine.insertText(caret, unit.text, suggesting);
       if (!inserted.range) throw new Error('Clipboard insertion receipt lacks range');
       caret = { story: inserted.range.story, ...inserted.range.end };
-      if ('text' in unit) formatInsertedRun(engine, inserted.range, unit);
+      if ('text' in unit && (!inheritedMarks || paragraph.runs)) formatInsertedRun(engine, inserted.range, unit, inheritedMarks);
     }
   });
   return caret;

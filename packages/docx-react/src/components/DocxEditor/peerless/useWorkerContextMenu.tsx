@@ -11,6 +11,7 @@ import { admitInputIntents, submitPasteFragment } from './inputAdmission';
 import { isPasteFragmentAllowed } from './clipboard';
 import { readClipboardFragment } from '../internals/clipboardHtml';
 import { WorkerObjectDialog } from './WorkerObjectDialog';
+import type { PeerlessPasteRecorder } from './PeerlessInput';
 import type { PeerlessPropertyIntent } from './inputEvents';
 import type { DocxCommandResult } from '../../../commands/types';
 import type { PeerlessViewSnapshot } from './viewStore';
@@ -64,6 +65,7 @@ export function useWorkerContextMenu(options: {
   onWrapImage?: (handle: string, wrap: ImageLayoutTarget) => void | Promise<boolean>;
   onPaste?: () => void;
   onPasteRefused?: () => void;
+  recordPaste?: PeerlessPasteRecorder;
   onError?: (error: Error) => void;
   beginAddComment?(): Promise<void>;
   focusEditor?(): void;
@@ -167,7 +169,8 @@ export function useWorkerContextMenu(options: {
         if (!sameContextTarget(action, opened, latest)) throw new Error('Context menu target changed');
         if (options.environment().readOnly || options.environment().mode === 'viewing') return;
         if (isPasteFragmentAllowed(options.commands, fragment)) {
-          submitPasteFragment(current.admission, fragment, { source: 'paste', fence: true }, () => options.onPasteRefused?.());
+          const submission = submitPasteFragment(current.admission, fragment, { source: 'paste', fence: true }, () => options.onPasteRefused?.());
+          options.recordPaste?.(fragment, submission);
           options.onPaste?.();
           return;
         }

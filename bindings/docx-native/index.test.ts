@@ -23,8 +23,9 @@ describe('@betteroffice/docx-native', () => {
         types: target.types,
         browser: './dist/browser.js',
         import: target.import,
+        default: target.import,
       });
-      expect(Object.keys(manifest.exports[entry])).toEqual(['types', 'browser', 'import']);
+      expect(Object.keys(manifest.exports[entry])).toEqual(['types', 'browser', 'import', 'default']);
     }
     expect(manifest.main).toBe(wasmManifest.main);
     expect(manifest.module).toBe(wasmManifest.module);
