@@ -18,12 +18,11 @@ import { peerlessPainterFactories, type PeerlessPresentation } from './usePeerle
 
 const SLIDE_PREVIEW_SETTLE_MS = 400;
 
-function activateSlide(run: PeerlessPresentation, id: string, onNavigate?: () => void) {
+function activateSlide(run: PeerlessPresentation, id: string) {
   const presented = run.store.getSnapshot().confirmed?.frame.slideId !== id &&
     run.presentPrerendered?.(id) === true;
   const activation = activatePeerlessSlide(run, id).catch(() => {});
   if (presented) void activation.then(() => run.settlePrerendered?.(id));
-  onNavigate?.();
 }
 
 function afterNextPaint(callback: () => void): () => void {
@@ -120,12 +119,11 @@ const Preview = memo(function Preview({ frame, run, fit, previewFit, current }: 
   return <canvas ref={canvas} style={{ width: 128, display: 'block' }} aria-hidden="true" />;
 });
 
-const Slide = memo(function Slide({ id, name, index, total, active, disabled, frame, run, previewFit, current, onNavigate }: {
+const Slide = memo(function Slide({ id, name, index, total, active, disabled, frame, run, previewFit, current }: {
   id: string; name: string | null; index: number; total: number; active: boolean; disabled: boolean;
   frame: PeerlessConfirmedFrame | null | undefined; run: PeerlessPresentation;
   previewFit(frame: PeerlessConfirmedFrame, run: PeerlessPresentation): SlideFit | null;
   current(token: SlideFit, run: PeerlessPresentation): boolean;
-  onNavigate(): void;
 }) {
   const { t } = useTranslation();
   const settled = useSettledPreview(frame, active, run);
@@ -167,7 +165,7 @@ const Slide = memo(function Slide({ id, name, index, total, active, disabled, fr
       (target as HTMLElement).focus();
       activateSlide(run, targetSlide.id);
     }}
-    onClick={() => activateSlide(run, id, onNavigate)}>
+    onClick={() => activateSlide(run, id)}>
     <span style={styles.number}>{index + 1}</span>
     <span style={styles.preview}>
       {settled && fit ? <Preview frame={settled} run={run} fit={fit} previewFit={previewFit} current={current} /> : <span style={styles.title}>{name ?? t('slides.fallbackTitle', { number: index + 1 })}</span>}
@@ -186,10 +184,9 @@ function SlideActions({ run, active, disabled }: { run: PeerlessPresentation; ac
   </div>;
 }
 
-export const PeerlessSlideStrip = memo(function PeerlessSlideStrip({ run, commands, previewFit, current, onNavigate, proposalId, previewSlideId, onPreviewSlide }: {
+export const PeerlessSlideStrip = memo(function PeerlessSlideStrip({ run, commands, previewFit, current, proposalId, previewSlideId, onPreviewSlide }: {
   run: PeerlessPresentation; commands: PptxCommandStore; previewFit(frame: PeerlessConfirmedFrame, run: PeerlessPresentation): SlideFit | null;
   current(token: SlideFit, run: PeerlessPresentation): boolean;
-  onNavigate(): void;
   proposalId?: string | null;
   previewSlideId?: string | null;
   onPreviewSlide?(slideId: string): void;
@@ -257,7 +254,7 @@ export const PeerlessSlideStrip = memo(function PeerlessSlideStrip({ run, comman
     {proposalId && onPreviewSlide ? <AsyncProposalSlideStrip id={proposalId} read={readStrip}
       load={loadProposalSlide} selectedSlideId={previewSlideId ?? view.active} onSelect={onPreviewSlide} />
       : view.slides.map((slide, index) => <Slide key={slide.id} {...slide} index={index} total={view.slides.length} active={slide.id === view.active}
-      disabled={view.disabled} run={run} previewFit={previewFit} current={current} onNavigate={onNavigate} />)}
+      disabled={view.disabled} run={run} previewFit={previewFit} current={current} />)}
   </aside><SlideActions run={run} active={view.active} disabled={view.disabled} />{contextMenu.element}</div>;
 });
 
