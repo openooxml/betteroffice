@@ -66,6 +66,8 @@ pub struct S13SaveReport {
 pub(crate) struct DirectionScopes {
     open: Vec<DirectionScope>,
     base: usize,
+    /// Whether the next node with width keeps every open scope, as noted before a node without.
+    kept_open: bool,
 }
 
 pub(crate) fn shared_direction_prefix(left: &[DirectionScope], right: &[DirectionScope]) -> usize {
@@ -74,6 +76,7 @@ pub(crate) fn shared_direction_prefix(left: &[DirectionScope], right: &[Directio
 
 impl DirectionScopes {
     fn close_to(&mut self, len: usize) -> String {
+        self.kept_open = false;
         let mut xml = String::new();
         let at = len.min(self.open.len());
         for scope in self.open.drain(at..).rev() {
@@ -119,9 +122,20 @@ impl DirectionScopes {
         xml
     }
 
+    /// Notes, before a node without width, the scopes the next node with width keeps open where
+    /// it starts; `None` when no such node follows inside the wrapper element being written.
+    pub(crate) fn look_ahead(&mut self, next: Option<&[DirectionScope]>) {
+        let shared = next.map(|next| shared_direction_prefix(&self.open, next));
+        self.kept_open = shared == Some(self.open.len());
+    }
+
     /// The tags closing, before a node that carries no scope, each scope opened inside the
-    /// wrapper element being written.
-    pub(crate) fn unscoped(&mut self) -> String {
+    /// wrapper element being written: none before a node without width when the next node with
+    /// width keeps every open scope, as [`Self::look_ahead`] noted.
+    pub(crate) fn unscoped(&mut self, zero_width: bool) -> String {
+        if std::mem::take(&mut self.kept_open) && zero_width {
+            return String::new();
+        }
         self.close_to(self.base)
     }
 

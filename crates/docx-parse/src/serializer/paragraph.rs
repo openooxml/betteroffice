@@ -130,22 +130,16 @@ fn serialize_paragraph_inner(
     )?;
     append_generated(&mut writer, &properties);
     let mut generated_comment_references = Vec::new();
-    for content in &paragraph.content {
+    for (index, content) in paragraph.content.iter().enumerate() {
+        if paragraph_content_zero_width(content) {
+            context
+                .direction
+                .look_ahead(next_paragraph_scopes(paragraph, index));
+        }
         append_generated(&mut writer, &serialize_paragraph_content(content, context)?);
         if let ParagraphContent::CommentRange(marker) = content
-            && marker.node_type == "commentRangeEnd"
             && !generated_comment_references.contains(&marker.id)
-            && !paragraph.content.iter().any(|content| match content {
-                ParagraphContent::Inline(node) => has_comment_reference(node, marker.id),
-                ParagraphContent::Tracked(change) => change.content.iter().any(|node| {
-                    (matches!(
-                        node,
-                        InlineNode::Run(_) | InlineNode::Hyperlink(_) | InlineNode::InlineSdt(_)
-                    ) || node.has_tracked_control(false, true))
-                        && has_comment_reference(node, marker.id)
-                }),
-                _ => false,
-            })
+            && needs_comment_reference(paragraph, content)
         {
             writer
                 .start_element("w:r")
@@ -167,6 +161,107 @@ fn serialize_paragraph_inner(
     }
     writer.end_element();
     Ok(writer.finish())
+}
+
+/// Whether `content` is a `commentRangeEnd` whose comment no reference in the paragraph marks,
+/// so a reference run is written after it.
+fn needs_comment_reference(paragraph: &Paragraph, content: &ParagraphContent) -> bool {
+    let ParagraphContent::CommentRange(marker) = content else {
+        return false;
+    };
+    marker.node_type == "commentRangeEnd"
+        && !paragraph.content.iter().any(|content| match content {
+            ParagraphContent::Inline(node) => has_comment_reference(node, marker.id),
+            ParagraphContent::Tracked(change) => change.content.iter().any(|node| {
+                (matches!(
+                    node,
+                    InlineNode::Run(_) | InlineNode::Hyperlink(_) | InlineNode::InlineSdt(_)
+                ) || node.has_tracked_control(false, true))
+                    && has_comment_reference(node, marker.id)
+            }),
+            _ => false,
+        })
+}
+
+/// Whether `xml` is one `w:` element without content, written where it sits and taking no width.
+fn empty_word_element(xml: &str) -> bool {
+    let Some(tag) = xml.trim().strip_prefix("<w:") else {
+        return false;
+    };
+    let mut quote = None;
+    for (index, character) in tag.char_indices() {
+        match quote {
+            Some(open) if character == open => quote = None,
+            Some(_) => {}
+            None if matches!(character, '"' | '\'') => quote = Some(character),
+            None if character == '>' => {
+                return index + 1 == tag.len() && tag[..index].ends_with('/');
+            }
+            None => {}
+        }
+    }
+    false
+}
+
+fn zero_width(node: &InlineNode) -> bool {
+    match node {
+        InlineNode::BookmarkStart(_) | InlineNode::BookmarkEnd(_) => true,
+        InlineNode::RawXml(raw) => empty_word_element(&raw.xml),
+        _ => false,
+    }
+}
+
+fn paragraph_content_zero_width(content: &ParagraphContent) -> bool {
+    match content {
+        ParagraphContent::Inline(node) => zero_width(node),
+        ParagraphContent::Tracked(_) => false,
+        ParagraphContent::RangeStart(_)
+        | ParagraphContent::RangeEnd(_)
+        | ParagraphContent::CommentRange(_) => true,
+    }
+}
+
+/// The scopes `node` keeps open where it starts.
+fn leading_scopes(node: &InlineNode) -> &[DirectionScope] {
+    let mut shared = None;
+    merge_direction_scopes(node, &mut shared);
+    shared.unwrap_or_default()
+}
+
+/// Notes, before `nodes[index]` when it takes no width, the scopes the next node with width
+/// keeps open where it starts: those of what is written after `nodes` when none of them follows.
+fn look_ahead(
+    nodes: &[InlineNode],
+    index: usize,
+    after: Option<&[DirectionScope]>,
+    context: &mut SerializerContext,
+) {
+    if zero_width(&nodes[index]) {
+        let next = nodes[index + 1..].iter().find(|node| !zero_width(node));
+        context
+            .direction
+            .look_ahead(next.map_or(after, |node| Some(leading_scopes(node))));
+    }
+}
+
+/// The scopes the first paragraph content with width from `index` on keeps open where it starts;
+/// `None` when a reference run is written before it or none follows.
+fn next_paragraph_scopes(paragraph: &Paragraph, index: usize) -> Option<&[DirectionScope]> {
+    for content in &paragraph.content[index..] {
+        if needs_comment_reference(paragraph, content) {
+            return None;
+        }
+        match content {
+            ParagraphContent::Inline(node) if !zero_width(node) => {
+                return Some(leading_scopes(node));
+            }
+            ParagraphContent::Tracked(change) => {
+                return Some(shared_direction_scopes(&change.content).unwrap_or_default());
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -297,7 +392,7 @@ pub fn serialize_paragraph_content(
         ParagraphContent::RangeEnd(marker) => serialize_range_end(marker)?,
         ParagraphContent::CommentRange(marker) => serialize_comment_range(marker)?,
     };
-    Ok(prefixed(context.direction.unscoped(), marker))
+    Ok(prefixed(context.direction.unscoped(true), marker))
 }
 
 pub(crate) fn serialize_inline_node(
@@ -322,7 +417,7 @@ pub(crate) fn serialize_inline_node(
     if unscoped.is_empty() {
         return Ok(unscoped);
     }
-    Ok(prefixed(context.direction.unscoped(), unscoped))
+    Ok(prefixed(context.direction.unscoped(zero_width(node)), unscoped))
 }
 
 pub(super) fn serialize_bookmark_start(bookmark: &BookmarkStart) -> String {
@@ -445,7 +540,8 @@ fn serialize_hyperlink(
     let (before, base) = context
         .direction
         .enter_wrapper(shared_direction_scopes(written));
-    for child in written {
+    for (index, child) in written.iter().enumerate() {
+        look_ahead(written, index, None, context);
         match child {
             _ if expanded => children.push_str(&serialize_inline_node(child, context)?),
             InlineNode::Run(_)
@@ -739,8 +835,14 @@ fn serialize_complex_field(
                 .flat_map(field_runs)
                 .eq(field.field_code.iter())
     });
+    let mut result_scopes = None;
+    for run in &field.field_result {
+        merge_run_direction_scopes(run, &mut result_scopes);
+    }
+    let result_scopes = result_scopes.unwrap_or_default();
     if let Some(nodes) = in_place {
-        for node in nodes {
+        for (index, node) in nodes.iter().enumerate() {
+            look_ahead(nodes, index, Some(result_scopes), context);
             output.push_str(&serialize_inline_node(node, context)?);
         }
     } else if let Some(nodes) = code_nodes {
@@ -768,11 +870,6 @@ fn serialize_complex_field(
             output.push_str(&serialize_context_run(run, context)?);
         }
     }
-    let mut result_scopes = None;
-    for run in &field.field_result {
-        merge_run_direction_scopes(run, &mut result_scopes);
-    }
-    let result_scopes = result_scopes.unwrap_or_default();
     output.push_str(&context.direction.transition(result_scopes));
     output.push_str("<w:r>");
     output.push_str(&properties);
@@ -784,7 +881,8 @@ fn serialize_complex_field(
         .filter(|content| !content.spans_paragraphs())
         .and_then(|content| content.inline.as_ref());
     if let Some(nodes) = structured {
-        for node in nodes {
+        for (index, node) in nodes.iter().enumerate() {
+            look_ahead(nodes, index, Some(result_scopes), context);
             output.push_str(&serialize_inline_node(node, context)?);
         }
     } else {
@@ -795,11 +893,15 @@ fn serialize_complex_field(
                 .is_some_and(|(boundary, _)| *boundary == index)
             {
                 let (_, node) = bookmarks.next().unwrap();
+                context
+                    .direction
+                    .look_ahead(Some(run.direction_scopes.as_slice()));
                 output.push_str(&serialize_inline_node(node, context)?);
             }
             output.push_str(&serialize_context_run(run, context)?);
         }
         for (_, node) in bookmarks {
+            context.direction.look_ahead(Some(result_scopes));
             output.push_str(&serialize_inline_node(node, context)?);
         }
     }
@@ -824,7 +926,8 @@ pub fn serialize_inline_sdt(
         .direction
         .enter_wrapper(shared_direction_scopes(&sdt.content));
     let previous = std::mem::replace(&mut context.in_control, true);
-    let result = sdt.content.iter().try_for_each(|item| {
+    let result = sdt.content.iter().enumerate().try_for_each(|(index, item)| {
+        look_ahead(&sdt.content, index, None, context);
         append_generated(&mut writer, &serialize_inline_node(item, context)?);
         Ok::<_, ParseError>(())
     });
@@ -1026,9 +1129,12 @@ fn serialize_tracked_change(
     let previous_revision = std::mem::replace(&mut context.in_revision, true);
     let previous_deletion =
         std::mem::replace(&mut context.deletion, deletion && context.in_control);
-    let result = change.content.iter().try_for_each(|item| {
+    let result = change.content.iter().enumerate().try_for_each(|(index, item)| {
         let xml = match item {
-            _ if context.in_control => serialize_inline_node(item, context)?,
+            _ if context.in_control => {
+                look_ahead(&change.content, index, None, context);
+                serialize_inline_node(item, context)?
+            }
             InlineNode::Run(run) => serialize_scoped_run(run, deletion, context)?,
             InlineNode::Hyperlink(link) => serialize_hyperlink(link, context)?,
             InlineNode::InlineSdt(_) => {
