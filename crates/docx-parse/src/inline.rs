@@ -1676,10 +1676,16 @@ fn parse_hyperlink_at_depth(
         .map(|value| truncate_chars(value, 2048));
     let mut children = Vec::new();
     let mut structured = Vec::new();
-    for child in element.child_elements().take(MAX_HYPERLINK_CHILDREN) {
+    let mut next_scope = 0u32;
+    let scoped = crate::block::direction_scoped_children(element, &mut || {
+        next_scope += 1;
+        next_scope - 1
+    });
+    for (scopes, child) in scoped.into_iter().take(MAX_HYPERLINK_CHILDREN) {
         match child.local_name() {
             "r" => {
-                let run = parse_run(child, theme, styles, doc_defaults).run;
+                let mut run = parse_run(child, theme, styles, doc_defaults).run;
+                run.direction_scopes = scopes;
                 children.push(InlineNode::Run(run.clone()));
                 structured.push(InlineNode::Run(run));
             }
