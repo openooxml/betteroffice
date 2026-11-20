@@ -2344,7 +2344,10 @@ mod tests {
         let close = "</w:sdtContent></w:sdt>";
         let output = written(&format!("{a}{open}{b}{bookmark}{c}{close}{d}"));
         assert!(!output.contains("w:bookmarkStart"), "{output}");
-        assert!(output.contains("<w:t>B</w:t>") && output.contains("<w:t>C</w:t>"), "{output}");
+        assert!(
+            output.contains("<w:t>B</w:t>") && output.contains("<w:t>C</w:t>"),
+            "{output}"
+        );
     }
 
     #[test]
