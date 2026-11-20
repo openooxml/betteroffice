@@ -2356,7 +2356,7 @@ mod tests {
     }
 
     #[test]
-    fn a_complex_field_kept_as_its_source_run_stays_inside_its_direction_scope() {
+    fn a_complex_field_held_in_one_run_is_rebuilt_inside_its_direction_scope() {
         let (a, b) = (text_run("A"), text_run("B"));
         let field = concat!(
             r#"<w:r><w:fldChar w:fldCharType="begin"/><w:instrText xml:space="preserve"> PAGE </w:instrText>"#,
