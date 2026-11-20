@@ -1685,6 +1685,33 @@ fn structural_deletions_refuse_unsafe_spans() {
 }
 
 #[test]
+fn a_style_without_numbering_leaves_a_created_list_in_place() {
+    let doc = open(&format!(
+        r#"<w:p w14:paraId="00000001"><w:pPr><w:ind w:left="720"/></w:pPr>{}</w:p>{}"#,
+        r("With properties"),
+        p("00000002", &r("Without properties")),
+    ));
+    let undo = UndoSession::new();
+    let kind = docx_edit::ListKind::Bullet;
+    let list_def = docx_edit::LIST_DEF;
+    for id in ["00000001", "00000002"] {
+        let attrs = doc
+            .ensure_list_definition(&EditCtx::local("", ""), "body", id, kind)
+            .unwrap();
+        for (key, value) in attrs {
+            doc.set_paragraph_attr(id, key, value).unwrap();
+        }
+        let listed = properties(&doc, id);
+        assert!(listed.contains_key(list_def), "{id}");
+        apply(&doc, &undo, vec![set_style(id, "Quote")]);
+        let styled = properties(&doc, id);
+        assert_eq!(styled.get("pStyle"), Some(&Any::from("Quote")), "{id}");
+        assert_eq!(styled.get("numPr"), listed.get("numPr"), "{id}");
+        assert_eq!(styled.get(list_def), listed.get(list_def), "{id}");
+    }
+}
+
+#[test]
 fn paragraph_styles_apply_their_full_effect_in_rust() {
     let doc = open(&format!(
         r#"<w:p w14:paraId="00000001"><w:pPr><w:pStyle w:val="Heading1"/><w:ind w:left="1440"/></w:pPr>{}<w:r><w:rPr><w:u w:val="single"/></w:rPr><w:t>underlined</w:t></w:r></w:p>{}"#,

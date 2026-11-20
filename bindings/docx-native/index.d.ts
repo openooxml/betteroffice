@@ -217,6 +217,7 @@ export declare class EditSession {
   patch_style_languages_xml(source: string): string
   ensure_list_definition(story: string, paraId: string, kind: string): string
   created_list_definitions_json(): string
+  list_definition_keys_in_use_json(): string
   set_document_property(key: string, json: string): boolean
   set_header_footer_aliases(json: string): void
   set_hyperlink(story: string, startPara: string, startOffset: number, endPara: string, endOffset: number, hyperlinkJson: string, authorName?: string | undefined | null, authorDate?: string | undefined | null): void

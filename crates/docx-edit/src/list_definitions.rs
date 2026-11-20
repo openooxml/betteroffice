@@ -1,8 +1,8 @@
 //! List definitions the editor creates, beside the numbering definitions of the source package.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use yrs::{Any, Map, MapRef, Out, ReadTxn, Transact};
+use yrs::{Any, Map, MapRef, Out, ReadTxn, TextRef, Transact};
 
 use crate::bridge::{any_bool, map_number};
 use crate::list_marker::{LEVELS, ListState, numbering_level};
@@ -24,7 +24,7 @@ const BULLET_TEXTS: [&str; 3] = ["\u{f0b7}", "o", "\u{f0a7}"];
 const NUMBER_FORMATS: [&str; 3] = ["decimal", "lowerLetter", "lowerRoman"];
 
 /// The list attributes a paragraph joining a source list takes from its neighbour.
-const SOURCE_LIST_KEYS: [&str; 9] = [
+const SOURCE_LIST_KEYS: [&str; 14] = [
     "numPr",
     "listIsBullet",
     "listNumFmt",
@@ -32,7 +32,12 @@ const SOURCE_LIST_KEYS: [&str; 9] = [
     "listLevelNumFmts",
     "listAbstractNumId",
     "listStartOverride",
+    "listMarkerHidden",
+    "listMarkerBold",
+    "listMarkerItalic",
+    "listMarkerColor",
     "listMarkerFontFamily",
+    "listMarkerFontSize",
     "listMarkerSuffix",
 ];
 
@@ -246,13 +251,31 @@ fn xml_text(text: &str) -> String {
         .collect()
 }
 
-/// The kind of list a paragraph on a list shows.
+/// The kind of list a paragraph on a list shows, from its bullet flag and its format.
 fn shown_kind(values: &BTreeMap<String, Any>) -> ListKind {
-    if values.get("listIsBullet").and_then(any_bool) == Some(true) {
+    let bullet_format =
+        matches!(values.get("listNumFmt"), Some(Any::String(format)) if &**format == "bullet");
+    if values.get("listIsBullet").and_then(any_bool) == Some(true) || bullet_format {
         ListKind::Bullet
     } else {
         ListKind::Numbered
     }
+}
+
+/// Whether the list of a paragraph with `values` comes from its style: it is on no created list and
+/// its `numPr` names the numbering the style gives, which seeding keeps only in the
+/// `numPrFromStyle` of the paragraph's `_originalFormatting`.
+fn numbered_by_style(values: &BTreeMap<String, Any>) -> bool {
+    let original = match values.get("_originalFormatting") {
+        Some(Any::Map(original)) => original.get("numPrFromStyle"),
+        _ => None,
+    };
+    let style = values.get("numPrFromStyle").or(original);
+    let (Some(Any::Map(style)), Some(Any::Map(num_pr))) = (style, values.get("numPr")) else {
+        return false;
+    };
+    created_key(values).is_none()
+        && map_number(style, "numId").is_some_and(|id| map_number(num_pr, "numId") == Some(id))
 }
 
 /// The attributes that put a paragraph on level `level` of the created list `key` of `kind`.
@@ -292,37 +315,75 @@ fn created_attrs(kind: ListKind, key: &str, level: f64) -> BTreeMap<String, Any>
         ("listLevelNumFmts".to_owned(), formats),
         ("listAbstractNumId".to_owned(), Any::Null),
         ("listStartOverride".to_owned(), Any::Null),
+        ("listMarkerHidden".to_owned(), Any::Null),
+        ("listMarkerBold".to_owned(), Any::Null),
+        ("listMarkerItalic".to_owned(), Any::Null),
+        ("listMarkerColor".to_owned(), Any::Null),
+        ("listMarkerFontFamily".to_owned(), Any::Null),
+        ("listMarkerFontSize".to_owned(), Any::Null),
+        ("listMarkerSuffix".to_owned(), Any::Null),
     ])
 }
 
-/// The attributes that put a paragraph on the source list of its neighbour with `values`.
-fn source_attrs(values: &BTreeMap<String, Any>) -> BTreeMap<String, Any> {
+/// The attributes that put a paragraph on the source list of its neighbour with `values`, at
+/// `level` when given, else at the neighbour's. At another level than the neighbour's, the list
+/// attributes are those seeding stores for that level as `source` renders it, when it does;
+/// otherwise they are the neighbour's.
+fn source_attrs(
+    values: &BTreeMap<String, Any>,
+    level: Option<f64>,
+    source: Option<&SourceMetadata>,
+) -> BTreeMap<String, Any> {
+    let num_pr = match (level, values.get("numPr")) {
+        (Some(level), Some(Any::Map(num_pr))) => {
+            let mut num_pr = (**num_pr).clone();
+            let moved = map_number(&num_pr, "ilvl").unwrap_or(0.0) != level;
+            num_pr.insert("ilvl".to_owned(), Any::Number(level));
+            Some((num_pr, moved))
+        }
+        _ => None,
+    };
+    let rendered = match (&num_pr, source) {
+        (Some((num_pr, true)), Some(source)) => rendered_level(num_pr, source),
+        _ => None,
+    };
+    let from = rendered.as_ref().unwrap_or(values);
     let mut attrs: BTreeMap<String, Any> = SOURCE_LIST_KEYS
         .into_iter()
-        .map(|key| {
-            (
-                key.to_owned(),
-                values.get(key).cloned().unwrap_or(Any::Null),
-            )
-        })
+        .map(|key| (key.to_owned(), from.get(key).cloned().unwrap_or(Any::Null)))
         .collect();
+    if let Some((num_pr, _)) = num_pr {
+        attrs.insert("numPr".to_owned(), Any::from(num_pr));
+    }
     attrs.insert(LIST_DEF.to_owned(), Any::Null);
     attrs
 }
 
+/// The list attributes seeding stores for a paragraph on the source list and level `num_pr`
+/// names, as `source` renders them; `None` when it renders no such level.
+fn rendered_level(
+    num_pr: &HashMap<String, Any>,
+    source: &SourceMetadata,
+) -> Option<BTreeMap<String, Any>> {
+    crate::seed::rendered_list_attrs(source_list_rendering(num_pr, source)?)
+}
+
 /// The attributes that put a paragraph on the list of the paragraph with `values` when that list
-/// shows as `kind`; a paragraph naming a created list whose definition is absent is on the list
-/// its numId names.
+/// shows as `kind`, at `level` when given, else at that paragraph's; a paragraph naming a created
+/// list whose definition is absent is on the list its numId names.
 fn joined_list(
     values: &BTreeMap<String, Any>,
     definitions: &BTreeMap<String, CreatedListDefinition>,
     kind: ListKind,
+    level: Option<f64>,
+    source: Option<&SourceMetadata>,
 ) -> Option<BTreeMap<String, Any>> {
     match resolve_list_identity(values)? {
-        ListIdentity::Created { key, level } if definitions.contains_key(&key) => {
+        ListIdentity::Created { key, level: theirs } if definitions.contains_key(&key) => {
+            let level = level.unwrap_or(theirs);
             (definitions[&key].kind == kind).then(|| created_attrs(kind, &key, level))
         }
-        _ => (shown_kind(values) == kind).then(|| source_attrs(values)),
+        _ => (shown_kind(values) == kind).then(|| source_attrs(values, level, source)),
     }
 }
 
@@ -345,9 +406,32 @@ impl EditingDoc {
             .collect()
     }
 
+    /// The keys of the created definitions some paragraph of a live story is on.
+    pub fn list_definition_keys_in_use(&self) -> BTreeSet<String> {
+        let txn = self.yrs_doc().transact();
+        let definitions = created_definitions(&txn);
+        let Some(stories) = txn.get_map(crate::STORIES) else {
+            return BTreeSet::new();
+        };
+        crate::live_stories(&stories, &txn)
+            .filter_map(|(_, story)| story.cast::<TextRef>().ok())
+            .flat_map(|story| crate::pilcrows(&story, &txn))
+            .filter_map(|(_, pilcrow)| {
+                let values = pilcrow_values(&pilcrow, &txn);
+                let ListIdentity::Created { key, .. } = resolve_list_identity(&values)? else {
+                    return None;
+                };
+                definitions.contains_key(&key).then_some(key)
+            })
+            .collect()
+    }
+
     /// The attributes that put paragraph `para_id` of `story` on a list of `kind`: the list it is
-    /// on when that is of that kind, else the list of the paragraph directly above or below when
-    /// it is, otherwise a definition created under a fresh key in [`LIST_DEFINITIONS`].
+    /// on when that is of that kind, else the list of the paragraph directly above, else below,
+    /// when it is of that kind and does not come from that paragraph's style, otherwise a
+    /// definition created under a fresh key in [`LIST_DEFINITIONS`]. A paragraph already on a list
+    /// keeps its own level; one on
+    /// no list takes the level of the paragraph it joins, or level 0 on a new list.
     pub fn ensure_list_definition(
         &self,
         ctx: &EditCtx,
@@ -355,7 +439,7 @@ impl EditingDoc {
         para_id: &str,
         kind: ListKind,
     ) -> EditResult<BTreeMap<String, Any>> {
-        let joined = {
+        let (joined, level) = {
             let txn = self.yrs_doc().transact();
             let text = crate::story_ref(&txn, story)?;
             let pilcrows = crate::pilcrows(&text, &txn);
@@ -366,13 +450,23 @@ impl EditingDoc {
                 })
                 .ok_or_else(|| EditError::ParagraphNotFound(para_id.to_owned()))?;
             let definitions = created_definitions(&txn);
-            [Some(index), index.checked_sub(1), Some(index + 1)]
-                .into_iter()
-                .flatten()
-                .filter_map(|at| pilcrows.get(at))
-                .find_map(|(_, pilcrow)| {
-                    joined_list(&pilcrow_values(pilcrow, &txn), &definitions, kind)
-                })
+            let metadata = self.source_metadata();
+            let source = metadata.as_deref();
+            let own = pilcrow_values(&pilcrows[index].1, &txn);
+            let level = numbered_level(&own).map(|(_, level)| level);
+            let join = |values: &BTreeMap<String, Any>| {
+                joined_list(values, &definitions, kind, level, source)
+            };
+            let joined = join(&own).or_else(|| {
+                [index.checked_sub(1), Some(index + 1)]
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|at| pilcrows.get(at))
+                    .map(|(_, pilcrow)| pilcrow_values(pilcrow, &txn))
+                    .filter(|values| !numbered_by_style(values))
+                    .find_map(|values| join(&values))
+            });
+            (joined, level)
         };
         if let Some(attrs) = joined {
             return Ok(attrs);
@@ -390,6 +484,6 @@ impl EditingDoc {
             ("levelTexts".to_owned(), Any::Array(level_texts.into())),
         ]);
         root.insert(&mut txn, key.clone(), Any::from(definition));
-        Ok(created_attrs(kind, &key, 0.0))
+        Ok(created_attrs(kind, &key, level.unwrap_or(0.0)))
     }
 }

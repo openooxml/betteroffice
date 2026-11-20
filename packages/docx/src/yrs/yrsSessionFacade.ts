@@ -52,6 +52,7 @@ import type { Document, DocumentBody, SectionProperties } from '../types/documen
 import { resolvedFinalSectionProperties } from '../editor/finalSection';
 import { checkPeerMetadataHeader, PeerMetadataError } from './peerMetadata';
 import { noteYrsStoriesDirty } from './yrsToDocument';
+import { forgetSavedListDefinitions } from './listDefinitionSave';
 import type {
   DocxParagraphAnchorResult,
   DocxParagraphIdentityReceipt,
@@ -475,6 +476,7 @@ export function wrapSession(
       let opened: string;
       try {
         forgetMaterializedSource(session);
+        forgetSavedListDefinitions(facade);
         opened = session.open_docx(
           source,
           seedStories,
@@ -831,6 +833,7 @@ export function wrapSession(
       mutate(() => {
         try {
           forgetMaterializedSource(session);
+          forgetSavedListDefinitions(facade);
           bootstrap.call(session, state, metadata, bytes === undefined ? undefined : source);
         } catch (error) {
           throw peerMetadataFailure(error);
@@ -1741,6 +1744,7 @@ export function wrapSession(
       return listDef === undefined ? attrs : { ...attrs, other: { ...attrs.other, listDef } };
     },
     createdListDefinitions: () => JSON.parse(session.created_list_definitions_json()),
+    listDefinitionKeysInUse: () => JSON.parse(session.list_definition_keys_in_use_json()),
     formatTextTarget: (target, delta) => {
       ensureUndo(targetStory(target));
       return mutate(
@@ -1845,6 +1849,7 @@ export function wrapSession(
       markDirty('all');
       const json = mutate(() => {
         forgetMaterializedSource(session);
+        forgetSavedListDefinitions(facade);
         const compared = session.compare_docx_json(original, revised, options);
         proposals.reset();
         return compared;

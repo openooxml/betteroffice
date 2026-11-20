@@ -78,6 +78,18 @@ fn previous(properties: &BTreeMap<String, Any>) -> Option<&HashMap<String, Any>>
     any_map(any_map(changes.first())?.get("previousFormatting"))
 }
 
+/// What a bullet level with the text `marker` in the face `font` shows, as parsing shows it.
+pub(crate) fn shown_bullet(marker: &str, font: Option<&str>) -> String {
+    let mut characters = marker.trim_ascii().chars();
+    if let Some(face) = font.and_then(ooxml_text::SymbolFont::named)
+        && let (Some(character), None) = (characters.next(), characters.next())
+        && let Some(shape) = face.shape(character)
+    {
+        return shape.to_string();
+    }
+    docx_parse::convert_bullet_to_unicode(marker)
+}
+
 pub(crate) fn numbering_properties<'a>(
     properties: &'a BTreeMap<String, Any>,
     style_id: Option<&str>,
@@ -98,17 +110,7 @@ pub(crate) fn numbering_properties<'a>(
             values.insert("listNumFmt".into(), rendering.num_fmt.into());
             values.insert("listIsBullet".into(), Any::Bool(rendering.is_bullet));
             let marker = if rendering.is_bullet {
-                let mut characters = rendering.marker.trim_ascii().chars();
-                rendering
-                    .marker_font_family
-                    .as_deref()
-                    .and_then(ooxml_text::SymbolFont::named)
-                    .and_then(|face| match (characters.next(), characters.next()) {
-                        (Some(character), None) => face.shape(character),
-                        _ => None,
-                    })
-                    .map(|shape| shape.to_string())
-                    .unwrap_or_else(|| docx_parse::convert_bullet_to_unicode(&rendering.marker))
+                shown_bullet(&rendering.marker, rendering.marker_font_family.as_deref())
             } else {
                 rendering.marker
             };

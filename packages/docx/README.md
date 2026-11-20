@@ -9,7 +9,7 @@ Rust/WebAssembly. Use it for document processing or a custom editor adapter.
 bun add @betteroffice/docx
 ```
 
-`@betteroffice/fonts` is an optional peer dependency for font assets.
+No peer dependencies. `@betteroffice/fonts`, which holds the font assets, is installed with it as a dependency.
 
 ## Usage
 
