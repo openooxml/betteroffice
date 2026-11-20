@@ -52,6 +52,17 @@ impl Marks {
                 .iter()
                 .all(|(id, count)| self.ids.get(id).is_some_and(|source| source >= count))
     }
+
+    /// These marks without the comment markers `unloaded` holds. A comment marker takes no
+    /// position in the text, so the offsets of the others stay as they are.
+    fn without(mut self, unloaded: &CommentKeys) -> Self {
+        if !unloaded.is_empty() {
+            self.comments.retain(|(name, id, _)| {
+                !unloaded.contains(&(name.clone(), canonical_id(id.clone())))
+            });
+        }
+        self
+    }
 }
 
 /// Run content that takes a position in the text, besides `w:t` and `w:delText` characters.
@@ -365,15 +376,17 @@ fn written_neighbours(order: &[Option<u32>]) -> BTreeSet<u32> {
         .collect()
 }
 
-/// Source and wanted marks by ordinal, with written trailing comment ends moved to the next head.
+/// Source and wanted marks by ordinal, with written trailing comment ends moved to the next head
+/// and the source's without the comment markers `unloaded` holds.
 fn paragraph_marks<'x>(
     paragraphs: impl IntoIterator<Item = (u32, &'x str, &'x str)>,
     neighbours: &BTreeSet<u32>,
     breaks: bool,
+    unloaded: &CommentKeys,
 ) -> Option<BTreeMap<u32, (Marks, Marks)>> {
     let mut all = BTreeMap::new();
     for (ordinal, source, written) in paragraphs {
-        all.insert(ordinal, (marks(source)?, marks(written)?));
+        all.insert(ordinal, (marks(source)?.without(unloaded), marks(written)?));
     }
     let same = |a: &(String, String, usize), b: &(String, String, usize)| a.0 == b.0 && a.1 == b.1;
     let mut moves = BTreeMap::new();
@@ -1618,9 +1631,14 @@ fn unique_ranges<'x>(source: &str, fragments: impl IntoIterator<Item = &'x str>)
 /// the paragraph's source XML, each as the offset in `source` it goes at and its markup in
 /// `written`: a range start or end as its tag, a reference as the run that holds only it. Each
 /// goes right after the marker it follows in `written`, or after that marker's reference run.
-/// `None` unless `written` holds `source`'s comment markers in order with only such markers
-/// added, each after a marker that is an empty range tag or alone in its run.
-fn added_comment_ranges<'w>(source: &str, written: &'w str) -> Option<Vec<(usize, &'w str)>> {
+/// `None` unless `written` holds `source`'s comment markers, other than those `unloaded` holds,
+/// in order with only such markers added, each after a marker that is an empty range tag or
+/// alone in its run.
+fn added_comment_ranges<'w>(
+    source: &str,
+    written: &'w str,
+    unloaded: &CommentKeys,
+) -> Option<Vec<(usize, &'w str)>> {
     fn markers<'x>(xml: &'x str, tags: &[Tag<'x>]) -> Option<Vec<(usize, String)>> {
         tags.iter()
             .enumerate()
@@ -1636,7 +1654,12 @@ fn added_comment_ranges<'w>(source: &str, written: &'w str) -> Option<Vec<(usize
     }
     let source_tags = tags(source)?;
     let written_tags = tags(written)?;
-    let source_markers = markers(source, &source_tags)?;
+    let mut source_markers = markers(source, &source_tags)?;
+    if !unloaded.is_empty() {
+        source_markers.retain(|(index, id)| {
+            !unloaded.contains(&(source_tags[*index].name.to_owned(), canonical_id(id.clone())))
+        });
+    }
     let mut held = source_markers.iter().peekable();
     let mut after = None;
     let mut added = Vec::new();
@@ -1790,7 +1813,11 @@ pub(super) fn remove_comment_markers(xml: &str, ids: &HashSet<String>) -> Option
     Some(result)
 }
 
-fn changed_comment_ranges(source: &str, written: &str) -> Option<String> {
+/// `source`, an unchanged paragraph's source XML, with the comment markers `written` lacks
+/// taken out, other than those `unloaded` holds, which stay where they are, and with those
+/// `written` adds put in (see [`added_comment_ranges`]). `None` when that changes nothing or
+/// does not leave `source` with the comment markers of `written`.
+fn changed_comment_ranges(source: &str, written: &str, unloaded: &CommentKeys) -> Option<String> {
     let keys = |xml: &str| -> Option<HashSet<(String, String)>> {
         tags(xml)?
             .iter()
@@ -1811,16 +1838,61 @@ fn changed_comment_ranges(source: &str, written: &str) -> Option<String> {
     };
     let held = keys(written)?;
     let spans = comment_removal_spans(source, |name, id| {
-        !held.contains(&(name.to_owned(), id.to_owned()))
+        let key = (name.to_owned(), id.to_owned());
+        !held.contains(&key) && !unloaded.contains(&key)
     })?;
     let mut result = source.to_owned();
     for span in spans.iter().rev() {
         result.replace_range(span.clone(), "");
     }
-    if let Some(added) = added_comment_ranges(&result, written) {
+    if let Some(added) = added_comment_ranges(&result, written, unloaded) {
         return Some(with_insertions(&result, &added));
     }
-    (!spans.is_empty() && keys(&result)? == held).then_some(result)
+    if spans.is_empty() {
+        return None;
+    }
+    let mut kept = keys(&result)?;
+    kept.retain(|key| !unloaded.contains(key));
+    (kept == held).then_some(result)
+}
+
+/// Comment markers by element name and canonical ID.
+type CommentKeys = HashSet<(String, String)>;
+
+/// The comment markers of `xml` that carry an ID, by element name and canonical ID.
+fn comment_keys(xml: &str) -> CommentKeys {
+    tags(xml)
+        .unwrap_or_default()
+        .iter()
+        .filter(|tag| {
+            !tag.end
+                && matches!(
+                    tag.name,
+                    "w:commentRangeStart" | "w:commentRangeEnd" | "w:commentReference"
+                )
+        })
+        .filter_map(|tag| {
+            let id = unescaped(xml, attribute(tag, "w:id")?)?;
+            Some((tag.name.to_owned(), canonical_id(id)))
+        })
+        .collect()
+}
+
+/// The comment markers of `source`, a story part's source XML, that no XML of `written` holds
+/// and whose comment is not one of `deleted_comments`, by canonical ID: markers the editing
+/// model did not load, which a save keeps where the source has them.
+fn unloaded_comment_markers<'w>(
+    source: &str,
+    written: impl IntoIterator<Item = &'w str>,
+    deleted_comments: &HashSet<String>,
+) -> CommentKeys {
+    if !source.contains("<w:comment") {
+        return CommentKeys::new();
+    }
+    let held: CommentKeys = written.into_iter().flat_map(comment_keys).collect();
+    let mut unloaded = comment_keys(source);
+    unloaded.retain(|key| !deleted_comments.contains(&key.1) && !held.contains(key));
+    unloaded
 }
 
 /// `source` with each tag in `added` inserted at its offset.
@@ -2253,6 +2325,7 @@ fn row_bookmark_spans(source: &str, row: &Range<usize>) -> Option<Vec<Range<usiz
 struct SpliceOptions<'a> {
     sections: bool,
     replace_reasons: &'a mut Vec<String>,
+    deleted_comments: &'a HashSet<String>,
 }
 
 /// `source` with the paragraphs `part` addresses rewritten from `recorded` where they changed
@@ -2264,7 +2337,10 @@ struct SpliceOptions<'a> {
 /// the caller writes `serialized` whole: among others when a paragraph to remove or insert is
 /// not [`simple`], one to rewrite does not [`keeps_ranges`] from its source to its written XML,
 /// one of them sits in anything but a story root or table cell, and when the result would need a
-/// namespace declaration the source does not have.
+/// namespace declaration the source does not have. An unchanged paragraph loses only the comment
+/// markers of `deleted_comments` that its written XML lacks; the others stay where its source
+/// has them (see [`unloaded_comment_markers`]).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn splice_story_part(
     source: &str,
     serialized: &str,
@@ -2273,6 +2349,7 @@ pub(crate) fn splice_story_part(
     assignments: &BTreeMap<u32, String>,
     patched: &BTreeMap<u32, String>,
     replace_reasons: &mut Vec<String>,
+    deleted_comments: &HashSet<String>,
 ) -> Option<String> {
     splice_story_part_inner(
         source,
@@ -2284,10 +2361,12 @@ pub(crate) fn splice_story_part(
         SpliceOptions {
             sections: false,
             replace_reasons,
+            deleted_comments,
         },
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn splice_section_story_part(
     source: &str,
     serialized: &str,
@@ -2296,6 +2375,7 @@ pub(crate) fn splice_section_story_part(
     assignments: &BTreeMap<u32, String>,
     patched: &BTreeMap<u32, String>,
     replace_reasons: &mut Vec<String>,
+    deleted_comments: &HashSet<String>,
 ) -> Option<String> {
     let (source, _) = source_with_gained_breaks(source, recorded, part, patched)?;
     let source: &str = &source;
@@ -2309,6 +2389,7 @@ pub(crate) fn splice_section_story_part(
         SpliceOptions {
             sections: true,
             replace_reasons,
+            deleted_comments,
         },
     )?;
     super::section_patch::restore_sections(source, serialized, &spliced, recorded)
@@ -2408,6 +2489,11 @@ fn splice_story_part_inner(
     }
     let mut replaced = BTreeSet::new();
     let mut ranged = BTreeSet::new();
+    let unloaded = unloaded_comment_markers(
+        source,
+        std::iter::once(serialized).chain(patched.values().map(String::as_str)),
+        options.deleted_comments,
+    );
     let kept_marks = paragraph_marks(
         written
             .iter()
@@ -2415,6 +2501,7 @@ fn splice_story_part_inner(
             .map(|(&ordinal, xml)| (ordinal, &source[spans[&ordinal].clone()], xml.as_str())),
         &written_neighbours(&recorded.order),
         breaks,
+        &unloaded,
     )?;
     for (&ordinal, xml) in written {
         ooxml_opc::progress::tick();
@@ -2427,8 +2514,8 @@ fn splice_story_part_inner(
         if retained.admit(wanted, breaks) {
             continue;
         }
-        let rangeable = changed_comment_ranges(paragraph, xml).is_some_and(|patched| {
-            marks(&patched).is_some_and(|marks| marks.admit(wanted, breaks))
+        let rangeable = changed_comment_ranges(paragraph, xml, &unloaded).is_some_and(|patched| {
+            marks(&patched).is_some_and(|marks| marks.without(&unloaded).admit(wanted, breaks))
         });
         if rangeable {
             ranged.insert(ordinal);
@@ -2531,7 +2618,9 @@ fn splice_story_part_inner(
     }
     let changed_ranges = ranged
         .iter()
-        .map(|ordinal| changed_comment_ranges(&source[spans[ordinal].clone()], &written[ordinal]))
+        .map(|ordinal| {
+            changed_comment_ranges(&source[spans[ordinal].clone()], &written[ordinal], &unloaded)
+        })
         .collect::<Option<Vec<_>>>()?;
     let mut prefixes = BTreeSet::new();
     let scopes = (!patched.is_empty()).then(|| NamespaceScopes::new(source));
@@ -2616,7 +2705,7 @@ fn splice_story_part_inner(
                 let xml = if replaced.contains(&ordinal) {
                     xml.clone()
                 } else if ranged.contains(&ordinal) {
-                    changed_comment_ranges(original, xml)?
+                    changed_comment_ranges(original, xml, &unloaded)?
                 } else {
                     original.to_owned()
                 };
@@ -2658,7 +2747,8 @@ fn splice_story_part_inner(
             continue;
         }
         let range = span(ordinal)?;
-        let patched = changed_comment_ranges(&source[range.clone()], &written[&ordinal])?;
+        let patched =
+            changed_comment_ranges(&source[range.clone()], &written[&ordinal], &unloaded)?;
         edits.push((range, 0, patched));
     }
     let structural = rows.inserted.union(&tables.inserted).copied().collect();
@@ -2885,6 +2975,11 @@ fn replacement_xml(
     Some(rooted.into_owned())
 }
 
+/// `source` with its changed paragraphs and those whose written XML no longer agrees with their
+/// source replaced by what was written for them. An unchanged paragraph whose written XML lacks
+/// only comment markers outside `deleted_comments` keeps its source bytes, those markers with
+/// them (see [`unloaded_comment_markers`]).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn replace_story_part(
     source: &str,
     serialized: &str,
@@ -2893,6 +2988,7 @@ pub(crate) fn replace_story_part(
     assignments: &BTreeMap<u32, String>,
     patched: &BTreeMap<u32, String>,
     reasons: &mut Vec<String>,
+    deleted_comments: &HashSet<String>,
 ) -> Option<String> {
     let format_only: BTreeSet<u32> = part.format_only.iter().copied().collect();
     let changed: BTreeSet<u32> = part.changed.iter().copied().collect();
@@ -2945,7 +3041,17 @@ pub(crate) fn replace_story_part(
             unchanged.push((ordinal, &source[span(ordinal)?], xml.as_str()));
         }
     }
-    let kept_marks = paragraph_marks(unchanged, &written_neighbours(&recorded.order), breaks)?;
+    let unloaded = unloaded_comment_markers(
+        &source,
+        std::iter::once(serialized).chain(patched.values().map(String::as_str)),
+        deleted_comments,
+    );
+    let kept_marks = paragraph_marks(
+        unchanged,
+        &written_neighbours(&recorded.order),
+        breaks,
+        &unloaded,
+    )?;
     for (&ordinal, xml) in &recorded.written {
         if rows.removed.contains(&ordinal) {
             continue;
@@ -3360,6 +3466,7 @@ mod tests {
             &assignments,
             &BTreeMap::new(),
             &mut Vec::new(),
+            &HashSet::new(),
         )
     }
 
@@ -3424,9 +3531,135 @@ mod tests {
         let written =
             r#"<w:p><w:r><w:t>Kept</w:t></w:r><w:r><w:commentReference w:id="1"/></w:r></w:p>"#;
         assert_eq!(
-            changed_comment_ranges(source, written).unwrap(),
+            changed_comment_ranges(source, written, &CommentKeys::new()).unwrap(),
             r#"<w:p keep='yes'><w:r><w:t>Kept</w:t></w:r><w:r><w:commentReference w:id="1"/></w:r></w:p>"#,
         );
+    }
+
+    #[test]
+    fn changed_comment_markers_keep_the_unloaded_ones_where_the_source_has_them() {
+        let source = r#"<w:p><w:commentRangeStart w:id="1"/><w:r><w:t>Kept</w:t></w:r><w:commentRangeEnd w:id="1"/><w:r><w:commentReference w:id="1"/></w:r><w:commentRangeStart w:id="2"/><w:r><w:t>Gone</w:t></w:r><w:commentRangeEnd w:id="2"/></w:p>"#;
+        let written = r#"<w:p><w:r><w:t>Kept</w:t></w:r><w:r><w:commentReference w:id="1"/></w:r><w:r><w:t>Gone</w:t></w:r></w:p>"#;
+        let unloaded =
+            unloaded_comment_markers(source, [written], &HashSet::from(["2".to_owned()]));
+        assert_eq!(
+            unloaded,
+            CommentKeys::from([
+                ("w:commentRangeStart".to_owned(), "1".to_owned()),
+                ("w:commentRangeEnd".to_owned(), "1".to_owned()),
+            ])
+        );
+        assert_eq!(
+            changed_comment_ranges(source, written, &unloaded).unwrap(),
+            r#"<w:p><w:commentRangeStart w:id="1"/><w:r><w:t>Kept</w:t></w:r><w:commentRangeEnd w:id="1"/><w:r><w:commentReference w:id="1"/></w:r><w:r><w:t>Gone</w:t></w:r></w:p>"#,
+        );
+    }
+
+    const HEAD_RUN: &str = "<w:r><w:t xml:space=\"preserve\">Head </w:t></w:r>";
+    const RANGE_IN_INSERTION: &str = "<w:ins w:id=\"41\" w:author=\"G\"><w:commentRangeStart w:id=\"1\"/><w:r><w:t>inserted</w:t></w:r><w:commentRangeEnd w:id=\"1\"/></w:ins>";
+    const INSERTION: &str =
+        "<w:ins w:id=\"41\" w:author=\"G\"><w:r><w:t>inserted</w:t></w:r></w:ins>";
+    const REFERENCE: &str = "<w:r><w:commentReference w:id=\"1\"/></w:r>";
+    const NOTED: &str = "<w:r><w:t>noted</w:t></w:r>";
+    const NOTED_SECOND: &str = "<w:commentRangeStart w:id=\"2\"/><w:r><w:t>noted</w:t></w:r><w:commentRangeEnd w:id=\"2\"/><w:r><w:commentReference w:id=\"2\"/></w:r>";
+    const NEIGHBOUR: &str = "<w:p><w:r><w:t>Other</w:t></w:r></w:p>";
+    const NEIGHBOUR_EDITED: &str = "<w:p><w:r><w:t>Other X</w:t></w:r></w:p>";
+
+    /// A source paragraph holding `content`, with an attribute the model does not write.
+    fn sourced(content: &str) -> String {
+        format!("<w:p w:rsidR=\"00A10001\">{content}</w:p>")
+    }
+
+    /// A paragraph holding `content` as the model writes it.
+    fn rewritten(content: &str) -> String {
+        format!("<w:p>{content}</w:p>")
+    }
+
+    /// The story splice's and the replacing splice's save of `first` then `NEIGHBOUR`, written
+    /// as `written` then `NEIGHBOUR_EDITED`, by a save that deletes the comments `deleted`.
+    fn saved_beside_an_edited_neighbour(
+        first: &str,
+        written: &str,
+        deleted: &[&str],
+    ) -> [Option<String>; 2] {
+        let source = body(&format!("{first}{NEIGHBOUR}"));
+        let mut recorded = RecordedParagraphs::default();
+        for (ordinal, xml) in [written, NEIGHBOUR_EDITED].into_iter().enumerate() {
+            recorded.written.insert(ordinal as u32, xml.to_owned());
+            recorded.order.push(Some(ordinal as u32));
+        }
+        let serialized =
+            format!("{SERIALIZED_ROOT}<w:body>{written}{NEIGHBOUR_EDITED}</w:body></w:document>");
+        let part = S13SplicedPart {
+            format_only: Vec::new(),
+            part: "word/document.xml".to_owned(),
+            sha256: String::new(),
+            paragraphs: vec![0, 1],
+            changed: vec![1],
+            inserted: Vec::new(),
+            removed: Vec::new(),
+            paragraph_patches: Vec::new(),
+            legacy_paragraphs: Vec::new(),
+            table_patches: Vec::new(),
+        };
+        let deleted: HashSet<String> = deleted.iter().map(|id| (*id).to_owned()).collect();
+        let none = BTreeMap::new();
+        [
+            splice_story_part(
+                &source,
+                &serialized,
+                &recorded,
+                &part,
+                &none,
+                &none,
+                &mut Vec::new(),
+                &deleted,
+            ),
+            replace_story_part(
+                &source,
+                &serialized,
+                &recorded,
+                &part,
+                &none,
+                &none,
+                &mut Vec::new(),
+                &deleted,
+            ),
+        ]
+    }
+
+    #[test]
+    fn an_unchanged_paragraph_keeps_an_unloaded_range_of_a_kept_comment_on_the_story_splice() {
+        let first = sourced(&format!("{HEAD_RUN}{RANGE_IN_INSERTION}{REFERENCE}"));
+        let written = rewritten(&format!("{HEAD_RUN}{INSERTION}{REFERENCE}"));
+        let [saved, _] = saved_beside_an_edited_neighbour(&first, &written, &[]);
+        assert_eq!(saved, Some(body(&format!("{first}{NEIGHBOUR_EDITED}"))));
+    }
+
+    #[test]
+    fn an_unchanged_paragraph_loses_only_the_markers_of_a_deleted_comment_on_the_story_splice() {
+        let first = sourced(&format!("{HEAD_RUN}{RANGE_IN_INSERTION}{REFERENCE}"));
+        let written = rewritten(&format!("{HEAD_RUN}{INSERTION}"));
+        let [saved, _] = saved_beside_an_edited_neighbour(&first, &written, &["1"]);
+        let kept = sourced(&format!("{HEAD_RUN}{INSERTION}"));
+        assert_eq!(saved, Some(body(&format!("{kept}{NEIGHBOUR_EDITED}"))));
+    }
+
+    #[test]
+    fn an_unchanged_paragraph_keeps_an_unloaded_range_beside_a_deleted_comment_on_a_splice() {
+        let first = sourced(&format!("{HEAD_RUN}{RANGE_IN_INSERTION}{REFERENCE}{NOTED_SECOND}"));
+        let written = rewritten(&format!("{HEAD_RUN}{INSERTION}{REFERENCE}{NOTED}"));
+        let [saved, _] = saved_beside_an_edited_neighbour(&first, &written, &["2"]);
+        let kept = sourced(&format!("{HEAD_RUN}{RANGE_IN_INSERTION}{REFERENCE}{NOTED}"));
+        assert_eq!(saved, Some(body(&format!("{kept}{NEIGHBOUR_EDITED}"))));
+    }
+
+    #[test]
+    fn an_unchanged_paragraph_keeps_an_unloaded_range_of_a_kept_comment_on_the_replacing_splice() {
+        let first = sourced(&format!("{HEAD_RUN}{RANGE_IN_INSERTION}{REFERENCE}"));
+        let written = rewritten(&format!("{HEAD_RUN}{INSERTION}{REFERENCE}"));
+        let [_, saved] = saved_beside_an_edited_neighbour(&first, &written, &[]);
+        assert_eq!(saved, Some(body(&format!("{first}{NEIGHBOUR_EDITED}"))));
     }
 
     #[test]
@@ -3783,6 +4016,7 @@ mod tests {
                 &BTreeMap::new(),
                 &patches,
                 &mut Vec::new(),
+                &HashSet::new(),
             )
             .is_none()
         );
@@ -3796,6 +4030,7 @@ mod tests {
                 &BTreeMap::new(),
                 &patches,
                 &mut Vec::new(),
+                &HashSet::new(),
             ),
             Some(correct_source.replace(host, &projected))
         );
@@ -3874,6 +4109,7 @@ mod tests {
                 &BTreeMap::new(),
                 &patches,
                 &mut Vec::new(),
+                &HashSet::new(),
             )
             .is_none()
         );
@@ -3965,6 +4201,7 @@ mod tests {
             &BTreeMap::from([(0, "00000001".to_owned())]),
             &BTreeMap::from([(0, patched)]),
             &mut Vec::new(),
+            &HashSet::new(),
         )
         .unwrap();
         assert!(saved.contains("<w14:token w14:val=\"retained\"/>"));
@@ -4124,6 +4361,7 @@ mod tests {
                 &BTreeMap::new(),
                 &BTreeMap::new(),
                 &mut Vec::new(),
+                &HashSet::new(),
             ),
             Some(serialized)
         );
@@ -4176,6 +4414,7 @@ mod tests {
                         &BTreeMap::new(),
                         &BTreeMap::new(),
                         &mut Vec::new(),
+                        &HashSet::new(),
                     ),
                     Some(serialized.clone())
                 );
@@ -5775,6 +6014,7 @@ mod tests {
                 &none,
                 &patched,
                 &mut Vec::new(),
+                &HashSet::new(),
             ),
             replace_story_part(
                 source,
@@ -5784,6 +6024,7 @@ mod tests {
                 &none,
                 &patched,
                 &mut Vec::new(),
+                &HashSet::new(),
             ),
             splice_source_direct(
                 source,
@@ -7154,6 +7395,7 @@ mod tests {
                 &none,
                 &none,
                 &mut Vec::new(),
+                &HashSet::new(),
             ),
             replace_story_part(
                 source,
@@ -7163,6 +7405,7 @@ mod tests {
                 &none,
                 &none,
                 &mut Vec::new(),
+                &HashSet::new(),
             ),
             splice_source_direct(
                 source,

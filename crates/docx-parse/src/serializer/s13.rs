@@ -395,6 +395,7 @@ pub fn write_docx_s13_parts_with_report(
             .as_ref()
             .is_none_or(|sections| sections.edits.iter().all(|edit| edit.paragraph.is_none())),
         reports_dropped,
+        deleted_comments: &removed_comments,
         processed: RefCell::new(HashSet::new()),
     };
 
@@ -1233,6 +1234,8 @@ struct StoryParts<'r> {
     /// No section edit of this save moves a paragraph's section boundary.
     boundaries_stay: bool,
     reports_dropped: bool,
+    /// The IDs of the comments this save deletes, whose markers its splices take out.
+    deleted_comments: &'r HashSet<String>,
     processed: RefCell<HashSet<String>>,
 }
 
@@ -1460,7 +1463,7 @@ impl StoryParts<'_> {
         if part.table_patches.is_empty() {
             let keeps = !strict || self.boundaries_stay;
             let written =
-                Self::splice(source, part, assignments, strict, keeps, context, serialize)?;
+                self.splice(source, part, assignments, strict, keeps, context, serialize)?;
             if written.whole {
                 let touched = self.edited(path, part);
                 self.report_dropped(package, path, &written.xml, &touched, context);
@@ -1469,7 +1472,7 @@ impl StoryParts<'_> {
         }
         let mut staged = context.clone();
         let keeps = !strict || self.boundaries_stay;
-        match Self::splice(
+        match self.splice(
             source,
             part,
             assignments,
@@ -1627,7 +1630,9 @@ impl StoryParts<'_> {
     }
 
     /// Fails when a form field whose `w:ffData` cannot be replayed was not kept as source bytes.
+    #[allow(clippy::too_many_arguments)]
     fn splice(
+        &self,
         source: Option<&str>,
         part: &S13SplicedPart,
         assignments: &BTreeMap<u32, String>,
@@ -1640,14 +1645,16 @@ impl StoryParts<'_> {
             context.begin_form_data_tokens(source);
         }
         let written =
-            Self::splice_written(source, part, assignments, strict, keeps, context, serialize);
+            self.splice_written(source, part, assignments, strict, keeps, context, serialize);
         let deferred = context.end_form_data_tokens();
         let written = written?;
         super::paragraph::reject_form_data_tokens(&written.xml, &deferred)?;
         Ok(written)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn splice_written(
+        &self,
         source: Option<&str>,
         part: &S13SplicedPart,
         assignments: &BTreeMap<u32, String>,
@@ -1716,6 +1723,7 @@ impl StoryParts<'_> {
                 assignments,
                 patches,
                 &mut reasons,
+                self.deleted_comments,
             )
         } else {
             super::splice::splice_story_part(
@@ -1726,6 +1734,7 @@ impl StoryParts<'_> {
                 assignments,
                 patches,
                 &mut reasons,
+                self.deleted_comments,
             )
             .or_else(|| {
                 reasons.clear();
@@ -1786,6 +1795,7 @@ impl StoryParts<'_> {
                     assignments,
                     &patched,
                     &mut reasons,
+                    self.deleted_comments,
                 )
             })
             .flatten()
