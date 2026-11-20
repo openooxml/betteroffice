@@ -55,6 +55,12 @@ const INDENTED_NUMBERING = numberingXml(
   abstractNumXml(0, '<w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="•"/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="1440" w:hanging="360"/></w:pPr></w:lvl>') +
   numXml(5, 0)
 );
+/** List 5: the indented bullet list of `INDENTED_NUMBERING`. List 6: a bullet list whose level 0 gives no indent. */
+const CHARACTER_INDENT_NUMBERING = numberingXml(
+  abstractNumXml(0, '<w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="•"/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="1440" w:hanging="360"/></w:pPr></w:lvl>') +
+  abstractNumXml(1, '<w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="•"/><w:lvlJc w:val="left"/></w:lvl>') +
+  numXml(5, 0) + numXml(6, 1)
+);
 
 /** The paragraph the list commands are applied to; the last paragraph added to each document. */
 export const PLAIN = 'Plain paragraph QA';
@@ -87,6 +93,9 @@ const LIST_TWO_ITEM = 'List two item QA';
 const LIST_SEVEN_ITEM = 'List seven item QA';
 /** The item of the indented bullet list 5 of document H. */
 const INDENTED_ITEM = 'Indented list item QA';
+/** The item of list 5 in document J whose only indent of its own is a left indent in character units, and the item of list 6. */
+const CHARACTER_ITEM = 'Character indent item QA';
+const UNINDENTED_ITEM = 'Unindented list item QA';
 export const LIST_LAYOUT = JSON.stringify({
   bodyStory: 'body',
   regions: { sections: [{ sectionId: 'main', properties: {} }] },
@@ -102,9 +111,10 @@ export const LIST_LAYOUT = JSON.stringify({
  * list 1. F: `SINGLE_BULLET` of the one-level bullet list 1 above `DEEP_NUMBER` of the decimal list 2.
  * G: `SELECTION_LEAD` above `LIST_TWO_ITEM` at level 0 of the numbered list 2 and `LIST_SEVEN_ITEM`
  * at level 1 of the numbered list 7. H: `INDENTED_ITEM` of the indented bullet list 5. I: as G, with
- * a list 2 that defines level 0 only and `LIST_SEVEN_ITEM` at level 2 of list 7.
+ * a list 2 that defines level 0 only and `LIST_SEVEN_ITEM` at level 2 of list 7. J: `CHARACTER_ITEM`
+ * of the indented bullet list 5 and `UNINDENTED_ITEM` of the bullet list 6, whose level gives no indent.
  */
-export type ListDocument = 'A' | 'B' | 'C' | 'D' | 'E' | 'F' | 'G' | 'H' | 'I';
+export type ListDocument = 'A' | 'B' | 'C' | 'D' | 'E' | 'F' | 'G' | 'H' | 'I' | 'J';
 export type ListKind = 'bullet' | 'numbered';
 export interface ListDocumentOptions {
   /** Puts `GAP` directly above `PLAIN`. */
@@ -119,7 +129,7 @@ export interface ListDocumentOptions {
 
 /** The `w:numId`s of the numbering each document opens with. */
 export const SOURCE_NUM_IDS: Readonly<Record<ListDocument, readonly string[]>> = {
-  A: ['1', '2', '3'], B: ['1'], C: [], D: ['1'], E: ['1'], F: ['1', '2'], G: ['2', '7'], H: ['5'], I: ['2', '7'],
+  A: ['1', '2', '3'], B: ['1'], C: [], D: ['1'], E: ['1'], F: ['1', '2'], G: ['2', '7'], H: ['5'], I: ['2', '7'], J: ['5', '6'],
 };
 
 export async function preloadListWasm(): Promise<void> {
@@ -170,16 +180,19 @@ export function listDocument(doc: ListDocument, options: ListDocumentOptions = {
       HEADING_NUMBERING, undefined, NUMBERED_HEADING_STYLES
     );
   }
-  if (doc === 'E' || doc === 'F' || doc === 'G' || doc === 'H' || doc === 'I') {
+  if (doc === 'E' || doc === 'F' || doc === 'G' || doc === 'H' || doc === 'I' || doc === 'J') {
     const opening = {
       E: item(HYBRID_BULLET, 1, 0) + item(HYBRID_NUMBER, 1, 2),
       F: item(SINGLE_BULLET, 1, 0) + item(DEEP_NUMBER, 2, 2),
       G: plain(SELECTION_LEAD) + item(LIST_TWO_ITEM, 2, 0) + item(LIST_SEVEN_ITEM, 7, 1),
       H: item(INDENTED_ITEM, 5, 0),
       I: plain(SELECTION_LEAD) + item(LIST_TWO_ITEM, 2, 0) + item(LIST_SEVEN_ITEM, 7, 2),
+      J: `<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="5"/></w:numPr><w:ind w:leftChars="200"/></w:pPr><w:r><w:t>${CHARACTER_ITEM}</w:t></w:r></w:p>` +
+        item(UNINDENTED_ITEM, 6, 0),
     }[doc];
     const numbering = {
       E: HYBRID_NUMBERING, F: SINGLE_LEVEL_NUMBERING, G: TWO_DECIMAL_NUMBERING, H: INDENTED_NUMBERING, I: DEEP_SEVEN_NUMBERING,
+      J: CHARACTER_INDENT_NUMBERING,
     }[doc];
     return pack(`${XML}<w:document xmlns:w="${W}"><w:body>${opening}${added}${SECT}</w:body></w:document>`, numbering);
   }
@@ -836,6 +849,16 @@ export function listCommandScenarios(path: string, open: OpenListCommandDriver, 
     expect(reopened.marker(HEADING) ?? '').toBe('');
     expect(before.numPr).toMatchObject({ numId: 1 });
     expect(before.marker).toMatch(/^\d+\.$/);
+  }, timeout);
+
+  test(`${path}: a list item whose own left indent is in character units is laid out as an item of a list that gives no indent`, async () => {
+    const driver = await open('J');
+    const character = driver.left(CHARACTER_ITEM);
+    expect(character).toEqual(driver.left(UNINDENTED_ITEM));
+    expect(character.text).not.toBeNull();
+    expect(character.marker).not.toBeNull();
+    expect(propertiesOf(driver, CHARACTER_ITEM).numPr).toMatchObject({ numId: 5, ilvl: 0 });
+    expect(propertiesOf(driver, UNINDENTED_ITEM).numPr).toMatchObject({ numId: 6, ilvl: 0 });
   }, timeout);
 
   for (const kind of KINDS) {
