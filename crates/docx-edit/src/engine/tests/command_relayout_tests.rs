@@ -815,8 +815,9 @@ fn keystrokes_with_a_repeated_final_section_stay_resident() {
 }
 
 /// Filler paragraphs over several small pages around a table and a bookmarked
-/// paragraph. The local patch declines edits in either, so typing there
-/// re-lowers the whole body.
+/// paragraph. The local patch declines edits in either: typing in the
+/// bookmarked paragraph re-lowers the whole body, typing in a cell only its
+/// table.
 fn relowering_package() -> Vec<u8> {
     use super::lowering_fixture::{Package, para, run};
     let filler = |from: u32, count: u32| -> String {
@@ -882,6 +883,7 @@ fn typed_edits_that_re_lower_the_body_keep_the_full_pass() {
     ] {
         for key in 0..3 {
             let label = format!("{label}: key {key}");
+            let pages = page_count(&engine);
             REGION_FULL_PASSES.with(|count| count.set(0));
             let work = keystroke_work(&engine, || {
                 assert!(
@@ -889,17 +891,18 @@ fn typed_edits_that_re_lower_the_body_keep_the_full_pass() {
                     "{label}"
                 );
             });
-            // a cell's table patch re-lowers the one table instead of the body
+            let passes = REGION_FULL_PASSES.with(Cell::get);
             if story == "body" {
                 assert!(work.full_lowerings > 0, "{label}: {work:?}");
+                assert_eq!(passes, 1, "{label}: the keystroke left the full pass");
             } else {
+                // a cell's table patch re-lowers the one table instead of the
+                // body, which still lays out as one section
                 assert_eq!(work.full_lowerings, 0, "{label}: {work:?}");
+                if page_count(&engine) == pages {
+                    assert_eq!(passes, 0, "{label}: the keystroke ran the full pass");
+                }
             }
-            assert_eq!(
-                REGION_FULL_PASSES.with(Cell::get),
-                1,
-                "{label}: the keystroke left the full pass, {work:?}"
-            );
             host.assert_matches_cold(&label);
         }
     }
@@ -1416,6 +1419,39 @@ fn cell_holding(engine: &EngineSession, id: &str) -> String {
         .unwrap()
 }
 
+/// A resident text command over `range` of the cell story `story`: its work,
+/// the full region passes it ran and whether the page count held, as a page
+/// count change falls back by design.
+fn cell_command(
+    host: &mut CommandHost<'_>,
+    label: &str,
+    story: &str,
+    (start, end): (u32, u32),
+    text: Option<&str>,
+) -> (KeystrokeWork, usize, bool) {
+    let engine = host.engine;
+    let pages = page_count(engine);
+    REGION_FULL_PASSES.with(|count| count.set(0));
+    let work = keystroke_work(engine, || {
+        assert!(host.command(story, start, end, text), "{label}");
+    });
+    let passes = REGION_FULL_PASSES.with(Cell::get);
+    (work, passes, page_count(engine) == pages)
+}
+
+/// [`cell_command`], then checked against a cold full pass.
+fn cell_keystroke(
+    host: &mut CommandHost<'_>,
+    label: &str,
+    story: &str,
+    range: (u32, u32),
+    text: Option<&str>,
+) -> (KeystrokeWork, usize, bool) {
+    let outcome = cell_command(host, label, story, range, text);
+    host.assert_matches_cold(label);
+    outcome
+}
+
 #[test]
 fn cell_edits_re_lower_only_their_table_and_lay_out_as_a_full_recompute_does() {
     let fonts = docx_layout::MeasureFonts::default();
@@ -1428,6 +1464,7 @@ fn cell_edits_re_lower_only_their_table_and_lay_out_as_a_full_recompute_does() {
         let mut host = CommandHost::open_with(&engine, request).seeded(client_id, bytes);
         let mut undo = engine.doc().undo_manager();
         TABLE_PATCHES.with(|patches| patches.set((0, 0)));
+        let mut resident = 0;
         let cases = [
             ("a plain cell", "00000F01", true),
             ("a cell's second paragraph", "00000F03", true),
@@ -1450,25 +1487,37 @@ fn cell_edits_re_lower_only_their_table_and_lay_out_as_a_full_recompute_does() {
             let label = format!("{label}, floating {floating}");
             for (key, text) in ["x", "한", "😀"].into_iter().enumerate() {
                 let label = format!("{label}: typing {text}");
-                let work = keystroke_work(&engine, || {
-                    assert!(host.command(&story, at, at, Some(text)), "{label}");
-                });
+                let (work, passes, pages_held) =
+                    cell_keystroke(&mut host, &label, &story, (at, at), Some(text));
                 if patched {
                     assert_eq!(work.full_lowerings, 0, "{label}: {work:?}");
+                    // the host repeats the final section; floating tables take the full pass
+                    if !floating && pages_held {
+                        assert_eq!(passes, 0, "{label}: the keystroke ran the full pass");
+                        resident += 1;
+                    }
                 } else if key == 0 {
                     assert!(work.full_lowerings > 0, "{label}: {work:?}");
+                    assert_eq!(passes, 1, "{label}: the keystroke left the full pass");
                 }
-                host.assert_matches_cold(&label);
             }
-            let work = keystroke_work(&engine, || {
-                // the 한 typed after the x, before the emoji typed last
-                assert!(host.command(&story, at + 2, at + 3, None), "{label}");
-            });
+            // the 한 typed after the x, before the emoji typed last
+            let label = format!("{label}: delete");
+            let (work, passes, pages_held) =
+                cell_keystroke(&mut host, &label, &story, (at + 2, at + 3), None);
             if patched {
-                assert_eq!(work.full_lowerings, 0, "{label}: delete {work:?}");
+                assert_eq!(work.full_lowerings, 0, "{label}: {work:?}");
+                if !floating && pages_held {
+                    assert_eq!(passes, 0, "{label}: the keystroke ran the full pass");
+                    resident += 1;
+                }
             }
-            host.assert_matches_cold(&format!("{label}: delete"));
         }
+        assert_eq!(
+            resident,
+            if floating { 0 } else { 16 },
+            "floating {floating}: patched keystrokes on the region fast path"
+        );
         let (placed, copied) = TABLE_PATCHES.with(Cell::get);
         // only a full region pass, which floating tables take, records the lowering it measured
         assert_eq!(
@@ -1560,8 +1609,11 @@ fn typing_into_a_cell_story_shown_by_two_tables_matches_a_fresh_session() {
         .unwrap();
     let request = lowering_pages::region_request(&engine, &bytes, font).to_string();
     let mut host = CommandHost::open_with(&engine, request).seeded(client_id, bytes);
-    assert!(host.command(&shared, 0, 0, Some("x")));
-    host.assert_matches_cold("typing into a cell story two tables show");
+    let label = "typing into a cell story two tables show";
+    let (work, passes, _) = cell_keystroke(&mut host, label, &shared, (0, 0), Some("x"));
+    // no table patch: the body is lowered again, which the full pass lays out
+    assert!(work.full_lowerings > 0, "{label}: {work:?}");
+    assert_eq!(passes, 1, "{label}: the keystroke left the full pass");
 }
 
 /// The index of the top-level table whose cells hold the paragraph keyed `id`
@@ -1596,28 +1648,222 @@ fn tables_after_a_typed_cell_shift_with_their_measurements_and_lay_out_as_a_full
     let fonts = docx_layout::MeasureFonts::default();
     let _scope = fonts.enter();
     let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
-    let (engine, bytes) = cell_tables_engine(9813, true);
+    // with a floating table the full pass certifies the float flow; without
+    // one the host-shaped request stays on the region fast path
+    for floating in [true, false] {
+        let client_id = if floating { 9813 } else { 9840 };
+        let (engine, bytes) = cell_tables_engine(client_id, floating);
+        let request = lowering_pages::region_request(&engine, &bytes, font).to_string();
+        let mut host = CommandHost::open_with(&engine, request).seeded(client_id, bytes);
+        let edited = measured_table_holding(&engine, "00000F01");
+        let later = ["00000F11", "00000F22"].map(|id| measured_table_holding(&engine, id));
+        let cell = cell_holding(&engine, "00000F01");
+        for (key, text) in [Some("x"), Some("한"), None].into_iter().enumerate() {
+            let label = format!("floating {floating}, key {key}");
+            CERTIFIED_FLOAT_WORK.with(|work| *work.borrow_mut() = Default::default());
+            BODY_MEASUREMENT_WORK.with(|work| work.borrow_mut().0.clear());
+            let range = match text {
+                Some(_) => (2, 2),
+                None => (2, 3),
+            };
+            let (work, passes, pages_held) = cell_command(&mut host, &label, &cell, range, text);
+            assert_eq!(work.full_lowerings, 0, "{label}");
+            let measured = if floating {
+                CERTIFIED_FLOAT_WORK.with(|work| work.borrow().0.clone())
+            } else {
+                assert!(pages_held, "{label}: the page count held");
+                assert_eq!(passes, 0, "{label}: the keystroke ran the full pass");
+                BODY_MEASUREMENT_WORK.with(|work| work.borrow().0.clone())
+            };
+            assert!(
+                measured.contains(&edited),
+                "{label}: the edited table is measured again"
+            );
+            assert!(
+                later.iter().all(|index| !measured.contains(index)),
+                "{label}: the later tables {later:?} keep their measurements, but {measured:?} were measured again"
+            );
+            host.assert_matches_cold(&label);
+        }
+    }
+}
+
+/// Filler around a table long enough to cross small pages, whose first row
+/// repeats as a header, then two short tables with one line between them.
+fn long_tables_engine(client_id: u64) -> (EngineSession, Vec<u8>) {
+    use super::lowering_fixture::{Package, para, run};
+    let filler = |from: u32, count: u32| -> String {
+        (from..from + count)
+            .map(|index| {
+                para(
+                    &format!("{:08X}", 0x1400 + index),
+                    &run(&format!(
+                        "Filler paragraph {index} with enough words to wrap over two lines."
+                    )),
+                )
+            })
+            .collect()
+    };
+    let cell = |id: u32, text: String| {
+        format!(
+            r#"<w:tc><w:tcPr><w:tcW w:w="1500" w:type="dxa"/></w:tcPr>{}</w:tc>"#,
+            para(&format!("{id:08X}"), &run(&text))
+        )
+    };
+    let row = |properties: &str, id: u32, text: &str| {
+        format!(
+            "<w:tr>{properties}{}{}</w:tr>",
+            cell(id, format!("{text} left")),
+            cell(id + 1, format!("{text} right"))
+        )
+    };
+    let table = |rows: String| {
+        format!(
+            r#"<w:tbl><w:tblPr><w:tblW w:w="3000" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="1500"/><w:gridCol w:w="1500"/></w:tblGrid>{rows}</w:tbl>"#
+        )
+    };
+    let rows: String = (0..16)
+        .map(|index| row("", 0x1510 + 2 * index, &format!("Row {index}")))
+        .collect();
+    let long = table(format!(
+        "{}{rows}",
+        row("<w:trPr><w:tblHeader/></w:trPr>", 0x1500, "Header")
+    ));
+    let first = table(row("", 0x1600, "First"));
+    let second = table(row("", 0x1610, "Second"));
+    let body = format!(
+        r#"{}{long}{}{first}{}{second}{}<w:sectPr><w:pgSz w:w="4320" w:h="2880"/><w:pgMar w:top="300" w:right="300" w:bottom="300" w:left="300" w:header="0" w:footer="0" w:gutter="0"/></w:sectPr>"#,
+        filler(0, 2),
+        filler(2, 3),
+        para("00001700", &run("Between")),
+        filler(5, 6),
+    );
+    let bytes = Package::new(&body).bytes();
+    (seeded_engine(client_id, &bytes), bytes)
+}
+
+/// The table fragments of each laid-out page: their block, first row and
+/// repeated header rows.
+fn table_fragments_by_page(engine: &EngineSession) -> Vec<Vec<(String, usize, f64)>> {
+    let pagination = engine.pagination.borrow();
+    pagination
+        .layout
+        .as_ref()
+        .unwrap()
+        .pages
+        .iter()
+        .map(|page| {
+            page.fragments
+                .iter()
+                .filter_map(|fragment| match fragment {
+                    docx_layout::types::Fragment::Table(table) => Some((
+                        format!("{:?}", table.block_id),
+                        table.row_start,
+                        table.header_row_count.unwrap_or(0.0),
+                    )),
+                    _ => None,
+                })
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+fn cell_edits_across_pages_and_beside_another_table_stay_on_the_region_fast_path() {
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+    let client_id = 9841;
+    let (engine, bytes) = long_tables_engine(client_id);
     let request = lowering_pages::region_request(&engine, &bytes, font).to_string();
-    let mut host = CommandHost::open_with(&engine, request).seeded(9813, bytes);
-    let later = ["00000F11", "00000F22"].map(|id| measured_table_holding(&engine, id));
-    let cell = cell_holding(&engine, "00000F01");
-    for (key, text) in [Some("x"), Some("한"), None].into_iter().enumerate() {
-        CERTIFIED_FLOAT_WORK.with(|work| *work.borrow_mut() = Default::default());
-        let (start, end) = match text {
-            Some(_) => (2, 2),
-            None => (2, 3),
-        };
-        let work = keystroke_work(&engine, || {
-            assert!(host.command(&cell, start, end, text), "key {key}");
-        });
-        assert_eq!(work.full_lowerings, 0, "key {key}");
-        let uncertified = CERTIFIED_FLOAT_WORK.with(|work| work.borrow().0.clone());
-        assert!(!uncertified.is_empty(), "key {key}: the edit is certified");
-        assert!(
-            later.iter().all(|index| !uncertified.contains(index)),
-            "key {key}: the later tables {later:?} keep their measurements, but {uncertified:?} were measured again"
-        );
-        host.assert_matches_cold(&format!("key {key}"));
+    let mut host = CommandHost::open_with(&engine, request).seeded(client_id, bytes);
+    let pages = table_fragments_by_page(&engine);
+    let long = pages
+        .iter()
+        .flatten()
+        .find(|(_, row, _)| *row == 0)
+        .map(|(block, ..)| block.clone())
+        .unwrap();
+    let continued: Vec<_> = pages
+        .iter()
+        .flatten()
+        .filter(|(block, row, _)| *block == long && *row > 0)
+        .collect();
+    assert!(
+        !continued.is_empty(),
+        "the long table crosses pages: {pages:?}"
+    );
+    assert!(
+        continued.iter().all(|(.., headers)| *headers == 1.0),
+        "each later page repeats the header row: {pages:?}"
+    );
+    let shared = pages
+        .iter()
+        .find(|tables| tables.iter().filter(|(block, ..)| *block != long).count() == 2)
+        .unwrap_or_else(|| panic!("the two short tables share a page: {pages:?}"));
+    assert_eq!(
+        shared.len(),
+        2,
+        "only the short tables on their page: {pages:?}"
+    );
+    for (label, id) in [
+        ("the repeated header row", 0x1500),
+        ("the long table's first row", 0x1511),
+        ("the long table's last row", 0x152F),
+        ("the first of two tables on a page", 0x1600),
+        ("the second of two tables on a page", 0x1611),
+    ] {
+        let id = format!("{id:08X}");
+        let story = cell_holding(&engine, &id);
+        let at = engine
+            .doc()
+            .paragraph_index(&story)
+            .unwrap()
+            .para_span(&id)
+            .unwrap()
+            .0
+            + 2;
+        for (text, range) in [
+            (Some("x"), (at, at)),
+            (Some("한"), (at + 1, at + 1)),
+            (None, (at, at + 1)),
+        ] {
+            let label = format!("{label}: {}", text.unwrap_or("delete"));
+            let (work, passes, pages_held) = cell_keystroke(&mut host, &label, &story, range, text);
+            assert_eq!(work.full_lowerings, 0, "{label}: {work:?}");
+            assert!(pages_held, "{label}: the page count held");
+            assert_eq!(
+                passes, 0,
+                "{label}: the keystroke ran the full pass, {work:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn cell_edits_in_a_body_with_a_section_break_keep_the_full_pass() {
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+    for section_break in [false, true] {
+        let client_id = 9842 + u64::from(section_break);
+        let (engine, bytes) = structured_engine(client_id, section_break);
+        let request = lowering_pages::region_request(&engine, &bytes, font).to_string();
+        let mut host = CommandHost::open_with(&engine, request).seeded(client_id, bytes);
+        let story = cell_holding(&engine, "00000D01");
+        for (key, text) in ["x", "y"].into_iter().enumerate() {
+            let label = format!("section break {section_break}: key {key}");
+            let at = 2 + key as u32;
+            let (work, passes, pages_held) =
+                cell_keystroke(&mut host, &label, &story, (at, at), Some(text));
+            assert_eq!(
+                work.full_lowerings, 0,
+                "{label}: the table is patched, {work:?}"
+            );
+            assert!(pages_held, "{label}: the page count held");
+            let full = usize::from(section_break);
+            assert_eq!(passes, full, "{label}: full region passes");
+        }
     }
 }
 
