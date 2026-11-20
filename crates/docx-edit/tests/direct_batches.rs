@@ -1472,3 +1472,46 @@ fn an_unknown_inline_element_holding_runs_seeds_as_one_embed_that_moves_with_edi
     assert_eq!(embedded(&doc), [(3, wrapper)]);
     assert_eq!(first_text(&doc), "Xd  tail");
 }
+
+fn first_paragraph_units(doc: &EditingDoc) -> u32 {
+    let mut units = 0u32;
+    for segment in doc.story_segments("body").unwrap() {
+        match segment.content {
+            SegmentContent::Text(text) => units += text.encode_utf16().count() as u32,
+            SegmentContent::OtherEmbed { .. } => units += 1,
+            SegmentContent::Pilcrow(_) => break,
+        }
+    }
+    units
+}
+
+fn export_findings(doc: &EditingDoc) -> (Vec<String>, usize) {
+    let options =
+        docx_edit::structured::ExportOptions::new(docx_edit::structured::RevisionView::Markup);
+    let content = doc.export_structured(&options).unwrap().content;
+    let diagnostics = content
+        .diagnostics
+        .iter()
+        .map(|diagnostic| format!("{:?} {}", diagnostic.code, diagnostic.message))
+        .collect();
+    let json = serde_json::to_string(&content).unwrap();
+    (diagnostics, json.matches(r#""kind":"unsupported""#).count())
+}
+
+#[test]
+fn a_foreign_inline_element_takes_no_story_unit_and_leaves_search_and_export_as_they_were() {
+    let plain = open(&docx(&direction_body(&format!("{}{}", r("Hel"), r("lo")))));
+    for foreign in [
+        r#"<x:foo xmlns:x="urn:x"><x:bar/></x:foo>"#,
+        r#"<x:foo xmlns:x="urn:x"><w:r><w:t>l</w:t></w:r></x:foo>"#,
+        r#"<x:foo xmlns:x="urn:x"/>"#,
+    ] {
+        let content = format!("{}{foreign}{}", r("Hel"), r("lo"));
+        let doc = open(&docx(&direction_body(&content)));
+        assert_eq!(first_text(&doc), "Hello", "{foreign}");
+        assert_eq!(first_paragraph_units(&doc), 5, "{foreign}");
+        let found = doc.search_text("Hello", true, None).unwrap();
+        assert_eq!(found.len(), 1, "{foreign}: {found:?}");
+        assert_eq!(export_findings(&doc), export_findings(&plain), "{foreign}");
+    }
+}

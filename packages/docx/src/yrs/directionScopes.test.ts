@@ -330,3 +330,23 @@ describe('editing across the edge of a w:dir', () => {
     });
   }
 });
+
+describe('a hyperlink whose text sits in a w:smartTag', () => {
+  const inner = `<w:hyperlink w:anchor="target"><w:smartTag w:element="place">${t('link')}</w:smartTag></w:hyperlink>`;
+  const LINK = /<w:hyperlink\b[^>]*>([\s\S]*?)<\/w:hyperlink>/;
+
+  for (const [loader, load] of LOADERS) {
+    it(`${loader}: typing before and after the link saves every text once and the link around its text`, async () => {
+      const { session, base } = await load(docx(inner));
+      expect(session.paragraphs('body').map(entry => entry.text)).toEqual(['Head link tail', 'Other']);
+      const paraId = session.paragraphs('body')[0]!.paraId;
+      session.insertText({ story: 'body', paraId, offset: 0 }, 'X');
+      session.insertText({ story: 'body', paraId, offset: 'XHead link '.length }, 'Y');
+      expect(session.paragraphs('body').map(entry => entry.text)).toEqual(['XHead link Ytail', 'Other']);
+      const xml = part(await savedAsTheEditorSaves(session, base));
+      expect(render(body(xml))).toBe('XHead link YtailOther');
+      expect(render(xml.match(LINK)?.[1] ?? '')).toBe('link');
+      expect(xml).toContain('w:anchor="target"');
+    });
+  }
+});

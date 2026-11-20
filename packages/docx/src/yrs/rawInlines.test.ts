@@ -371,3 +371,35 @@ for (const [name, kept] of BEFORE_A_BREAK) {
     }
   });
 }
+
+const FOREIGN = '<x:foo xmlns:x="urn:x"><x:bar/></x:foo>';
+const texts = (xml: string) => [...xml.matchAll(/<w:t\b[^>]*>([^<]*)<\/w:t>/g)].map(([, value]) => value).join('');
+
+describe("a foreign element holding content between 'Hel' and 'lo'", () => {
+  const inner = `${SOURCE.t('Hel')}${FOREIGN}${SOURCE.t('lo')}`;
+
+  for (const [loader, load] of LOADERS) {
+    it(`${loader}: it takes no story unit and the paragraph is found as 'Hello'`, async () => {
+      const { session } = await load(docx(inner));
+      expect(session.paragraphs('body').map(entry => entry.text)).toEqual(['Hello', 'Other']);
+      expect(session.paragraphSpans('body')[0]!.length).toBe(5);
+      expect(session.storySegments('body').filter(segment => segment.kind === 'embed')).toEqual([]);
+      expect(session.searchText('Hello').map(match => [match.start, match.end])).toEqual([[0, 5]]);
+    });
+
+    it(`${loader}: the structured export holds no unsupported inline and no diagnostic for it`, async () => {
+      const { session } = await load(docx(inner));
+      const read = session.exportStructured({ revisionView: 'accepted' });
+      if (!read.ok) throw new Error(JSON.stringify(read.failure));
+      expect(read.content.diagnostics.filter(({ code }) => code === 'unsupported-content')).toEqual([]);
+      expect(JSON.stringify(read.content)).not.toContain('"kind":"unsupported"');
+    });
+
+    it(`${loader}: typing at the start saves it between 'Hel' and 'lo'`, async () => {
+      const { session, base } = await load(docx(inner));
+      typeAt(0)(session, session.paragraphs('body')[0]!.paraId);
+      const [first] = paragraphsOf(await savedAsTheEditorSaves(session, base));
+      expect(first!.split('<x:foo').map(texts)).toEqual(['XHel', 'lo']);
+    });
+  }
+});

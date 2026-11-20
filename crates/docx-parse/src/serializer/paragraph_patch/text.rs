@@ -1599,9 +1599,9 @@ mod tests {
     #[test]
     fn edits_across_a_direction_scope_edge_keep_the_scope_and_every_text() {
         let (open, close) = (r#"<w:dir w:val="rtl">"#, "</w:dir>");
-        for (from, to, value, parts) in [
-            (5, 9, "Y", ["BefoY", "wo", " runs", " after"]),
-            (12, 17, "-", ["Before ", "two", " r", "-fter"]),
+        for (from, to, value, parts, edited) in [
+            (5, 9, "Y", ["BeforY", "o", " runs", " after"], "BeforYo runs after"),
+            (12, 17, "-", ["Before ", "two", " r-", "fter"], "Before two r-fter"),
         ] {
             let written = try_replace_with_run_edits(
                 &direction_source(open, close),
@@ -1609,25 +1609,25 @@ mod tests {
                 &[(from, to, value, json!({}))],
                 Vec::new(),
             );
-            let output = written.unwrap_or_else(|_| {
-                rewritten(&format!(
-                    "<w:p xmlns:w=\"{WORD}\">{}{open}{}{}{close}{}</w:p>",
-                    run("1", parts[0], ""),
-                    run("2", parts[1], ""),
-                    run("3", parts[2], ""),
-                    run("4", parts[3], "")
-                ))
-            });
-            assert_eq!(shown(&output), parts.concat(), "{output}");
+            assert_eq!(
+                written,
+                Err((
+                    PatchErrorCode::UnsupportedStructure,
+                    "hyperlink: text edit crosses a wrapper".to_owned()
+                )),
+                "{value}"
+            );
+            let output = rewritten(&format!(
+                "<w:p xmlns:w=\"{WORD}\">{}{open}{}{}{close}{}</w:p>",
+                run("1", parts[0], ""),
+                run("2", parts[1], ""),
+                run("3", parts[2], ""),
+                run("4", parts[3], "")
+            ));
+            assert_eq!(shown(&output), edited, "{output}");
             assert_eq!(output.matches(open).count(), 1, "{output}");
             let inner = shown(region(&output, open, close));
-            let scoped = parts[1..3].concat();
-            let accepted = [
-                scoped.clone(),
-                format!("{value}{scoped}"),
-                format!("{scoped}{value}"),
-            ];
-            assert!(accepted.contains(&inner), "{output}");
+            assert_eq!(inner, parts[1..3].concat(), "{output}");
         }
     }
 

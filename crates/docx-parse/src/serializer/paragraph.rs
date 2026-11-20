@@ -1885,6 +1885,146 @@ mod tests {
         assert_eq!(shown(&output), "axb", "{output}");
     }
 
+    const RELATIONSHIPS: &str =
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+
+    const MATH: &str = "http://schemas.openxmlformats.org/officeDocument/2006/math";
+
+    const BEGIN: &str = r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#;
+
+    const INSTRUCTION: &str = "<w:r><w:instrText>PAGE</w:instrText></w:r>";
+
+    const SEPARATE: &str = r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#;
+
+    const END: &str = r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#;
+
+    const EQUATION: &str = "<m:oMath><m:r><m:t>x</m:t></m:r></m:oMath>";
+
+    fn text_run(text: &str) -> String {
+        format!("<w:r><w:t>{text}</w:t></w:r>")
+    }
+
+    fn rtl(inner: &str) -> String {
+        format!(r#"<w:dir w:val="rtl">{inner}</w:dir>"#)
+    }
+
+    fn written(content: &str) -> String {
+        round_trip(&format!(
+            r#"<w:p xmlns:w="{WORD}" xmlns:r="{RELATIONSHIPS}" xmlns:m="{MATH}">{content}</w:p>"#
+        ))
+    }
+
+    fn run_holding<'a>(xml: &'a str, needle: &str) -> &'a str {
+        let at = xml.find(needle).expect("the unscoped save holds the run");
+        let start = xml[..at].rfind("<w:r>").expect("the needle sits in a run");
+        let end = at + xml[at..].find("</w:r>").expect("the run closes") + "</w:r>".len();
+        &xml[start..end]
+    }
+
+    fn wrapped(xml: &str, node: &str, open: &str, close: &str) -> String {
+        assert_eq!(xml.matches(node).count(), 1, "{node}: {xml}");
+        xml.replacen(node, &format!("{open}{node}{close}"), 1)
+    }
+
+    #[test]
+    fn a_direction_scope_closes_before_every_node_that_does_not_carry_it() {
+        let (a, b, c, d) = (text_run("A"), text_run("B"), text_run("C"), text_run("D"));
+        let cases = [
+            (
+                "equation",
+                format!("{a}{}{EQUATION}{c}", rtl(&b)),
+                format!("{a}{b}{EQUATION}{c}"),
+                "<w:t>B</w:t>",
+            ),
+            (
+                "comment range end",
+                format!(
+                    r#"{a}<w:commentRangeStart w:id="1"/>{}<w:commentRangeEnd w:id="1"/>{c}"#,
+                    rtl(&b)
+                ),
+                format!(
+                    r#"{a}<w:commentRangeStart w:id="1"/>{b}<w:commentRangeEnd w:id="1"/>{c}"#
+                ),
+                "<w:t>B</w:t>",
+            ),
+            (
+                "comment range end closing the paragraph",
+                format!(
+                    r#"{a}<w:commentRangeStart w:id="1"/>{}<w:commentRangeEnd w:id="1"/>"#,
+                    rtl(&b)
+                ),
+                format!(r#"{a}<w:commentRangeStart w:id="1"/>{b}<w:commentRangeEnd w:id="1"/>"#),
+                "<w:t>B</w:t>",
+            ),
+            (
+                "kept element",
+                format!(r#"{a}{}<w:subDoc r:id="rId9"/>{c}"#, rtl(&b)),
+                format!(r#"{a}{b}<w:subDoc r:id="rId9"/>{c}"#),
+                "<w:t>B</w:t>",
+            ),
+            (
+                "bookmark end",
+                format!(
+                    r#"{a}<w:bookmarkStart w:id="3" w:name="mark"/>{}<w:bookmarkEnd w:id="3"/>{c}"#,
+                    rtl(&b)
+                ),
+                format!(
+                    r#"{a}<w:bookmarkStart w:id="3" w:name="mark"/>{b}<w:bookmarkEnd w:id="3"/>{c}"#
+                ),
+                "<w:t>B</w:t>",
+            ),
+            (
+                "scoped field code with an unscoped result",
+                format!("{a}{BEGIN}{}{SEPARATE}{b}{END}{c}", rtl(INSTRUCTION)),
+                format!("{a}{BEGIN}{INSTRUCTION}{SEPARATE}{b}{END}{c}"),
+                "<w:instrText",
+            ),
+            (
+                "field result whose last run alone is scoped",
+                format!("{a}{BEGIN}{INSTRUCTION}{SEPARATE}{b}{}{END}{d}", rtl(&c)),
+                format!("{a}{BEGIN}{INSTRUCTION}{SEPARATE}{b}{c}{END}{d}"),
+                "<w:t>C</w:t>",
+            ),
+        ];
+        for (name, scoped, plain, needle) in cases {
+            let unscoped = written(&plain);
+            let node = run_holding(&unscoped, needle).to_owned();
+            let expected = wrapped(&unscoped, &node, DIR.0, DIR.1);
+            assert_eq!(written(&scoped), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_direction_element_without_a_value_saves_without_one() {
+        let (a, b, c) = (text_run("A"), text_run("B"), text_run("C"));
+        let unscoped = written(&format!("{a}{b}{c}"));
+        let expected = wrapped(&unscoped, &b, "<w:dir>", "</w:dir>");
+        assert_eq!(written(&format!("{a}<w:dir>{b}</w:dir>{c}")), expected);
+    }
+
+    #[test]
+    fn kept_word_elements_inside_a_complex_field_stay_between_its_begin_and_end() {
+        let (a, b, c) = (text_run("A"), text_run("B"), text_run("C"));
+        let output = written(&format!(
+            r#"{a}{BEGIN}{INSTRUCTION}{SEPARATE}<w:customXmlInsRangeStart w:id="7" w:author="Grace"/>{b}<w:customXmlInsRangeEnd w:id="7"/><w:subDoc r:id="rId9"/>{END}{c}"#
+        ));
+        let order = [
+            r#"w:fldCharType="begin""#,
+            "<w:customXmlInsRangeStart",
+            "<w:t>B</w:t>",
+            "<w:customXmlInsRangeEnd",
+            "<w:subDoc",
+            r#"w:fldCharType="end""#,
+        ];
+        let counts: Vec<_> = order
+            .iter()
+            .map(|needle| output.matches(needle).count())
+            .collect();
+        assert_eq!(counts, [1; 6], "{output}");
+        let at: Vec<_> = order.iter().map(|needle| output.find(needle)).collect();
+        assert!(at.windows(2).all(|pair| pair[0] < pair[1]), "{at:?}: {output}");
+    }
+
     #[test]
     fn rejects_unvalidated_math_and_sdt_raw_xml() {
         let mut properties = SdtProperties {

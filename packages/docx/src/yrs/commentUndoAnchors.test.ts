@@ -24,7 +24,8 @@ const COVERED = 'middle';
 const BODY =
   '<w:p w14:paraId="0A000001" w14:textId="0A000001">' +
   '<w:r><w:t xml:space="preserve">Head </w:t></w:r>' +
-  '<w:commentRangeStart w:id="1"/><w:r><w:t>middle</w:t></w:r><w:commentRangeEnd w:id="1"/>' +
+  '<w:commentRangeStart w:id="1"/><w:r><w:t>mid</w:t></w:r><w:subDoc r:id="rIdSub"/><w:r><w:t>dle</w:t></w:r>' +
+  '<w:commentRangeEnd w:id="1"/>' +
   '<w:r><w:commentReference w:id="1"/></w:r>' +
   '<w:r><w:t xml:space="preserve"> tail</w:t></w:r></w:p>';
 
@@ -45,7 +46,8 @@ function fixture(): Uint8Array {
     ['word/_rels/document.xml.rels', toBytes(
       '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
       `<Relationship Id="rIdStyles" Type="${REL}/styles" Target="styles.xml"/>` +
-      `<Relationship Id="rIdComments" Type="${REL}/comments" Target="comments.xml"/></Relationships>`
+      `<Relationship Id="rIdComments" Type="${REL}/comments" Target="comments.xml"/>` +
+      `<Relationship Id="rIdSub" Type="${REL}/subDocument" Target="part.docx" TargetMode="External"/></Relationships>`
     )],
     ['word/styles.xml', toBytes(
       `<w:styles xmlns:w="${W}"><w:style w:type="paragraph" w:default="1" w:styleId="Normal">` +
@@ -97,16 +99,22 @@ function liveRangeText(reader: Reader): string {
   return reader.resolveComment(comments[0]!.id).map(anchor => storyText(reader, anchor.story, anchor.start, anchor.end)).join(' + ');
 }
 
-/** The saved document's text between comment 1's markers, and its markers in order. */
-function savedRange(bytes: Uint8Array): { text: string | null; markers: string[] } {
+/** The saved document's text between comment 1's markers, the part of it before the kept w:subDoc, and its markers in order. */
+function savedRange(bytes: Uint8Array): { text: string | null; kept: string | null; markers: string[] } {
   const xml = new TextDecoder().decode(unzipContainer(bytes)['word/document.xml']);
   let text = '';
   let start: number | null = null;
   let end: number | null = null;
+  let kept: number | null = null;
   const markers: string[] = [];
-  for (const match of xml.matchAll(/<w:t(?:\s[^>]*)?>([^<]*)<\/w:t>|<w:comment(RangeStart|RangeEnd|Reference)\b[^>]*?\bw:id="(\d+)"/g)) {
+  for (const match of xml.matchAll(/<w:t(?:\s[^>]*)?>([^<]*)<\/w:t>|<w:comment(RangeStart|RangeEnd|Reference)\b[^>]*?\bw:id="(\d+)"|<w:(subDoc)\b/g)) {
     if (match[1] !== undefined) {
       text += match[1];
+      continue;
+    }
+    if (match[4] !== undefined) {
+      markers.push(match[4]);
+      kept = text.length;
       continue;
     }
     if (match[3] !== '1') continue;
@@ -114,7 +122,11 @@ function savedRange(bytes: Uint8Array): { text: string | null; markers: string[]
     if (match[2] === 'RangeStart') start = text.length;
     if (match[2] === 'RangeEnd') end = text.length;
   }
-  return { text: start !== null && end !== null ? text.slice(start, end) : null, markers };
+  return {
+    text: start !== null && end !== null ? text.slice(start, end) : null,
+    kept: start !== null && kept !== null ? text.slice(start, kept) : null,
+    markers,
+  };
 }
 
 interface Route {
@@ -241,10 +253,10 @@ const CASES: Array<{ name: string; characters: [number, number] | null; typeAfte
   { name: "deleting 'd mid' and typing at the paragraph end after the undo", characters: characters('d mid'), typeAfter: true },
 ];
 
-describe("a comment over 'middle' in 'Head middle tail' after a deletion is undone", () => {
+describe("a comment over 'middle' holding a kept w:subDoc in 'Head middle tail' after a deletion is undone", () => {
   for (const [routeName, open] of ROUTES) {
     for (const { name, characters: chars, typeAfter } of CASES) {
-      it(`${routeName}: ${name} keeps the live and the saved range on 'middle'`, async () => {
+      it(`${routeName}: ${name} keeps the live and the saved range on 'middle' and the w:subDoc after 'mid'`, async () => {
         const route = await open(fixture());
         const before = layoutOf(route.reader);
         expect(before.text).toBe(ORIGINAL);
@@ -262,7 +274,7 @@ describe("a comment over 'middle' in 'Head middle tail' after a deletion is undo
         }
         expect(liveRangeText(route.reader)).toBe(COVERED);
         const saved = savedRange(await route.save());
-        expect(saved).toEqual({ text: COVERED, markers: ['RangeStart', 'RangeEnd', 'Reference'] });
+        expect(saved).toEqual({ text: COVERED, kept: 'mid', markers: ['RangeStart', 'subDoc', 'RangeEnd', 'Reference'] });
       }, TIMEOUT);
     }
   }
