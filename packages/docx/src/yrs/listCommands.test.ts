@@ -78,6 +78,65 @@ test('worker: a list paragraph the toolbar made keeps its created list when it t
   expect(createdListKey(styled)).toBe(key);
 }, TIMEOUT);
 
+const REFUSED_WITHOUT_LIST_DEFINITIONS = 'unsupported-command';
+
+test('worker: an engine that cannot ensure list definitions refuses a list toggle and changes no paragraph', async () => {
+  const arm = await openCommandEngine(undefined, { bytes: listDocument('C'), clientId: ++clientId });
+  const paragraph = arm.engine.paragraphs('body').find(entry => entry.text === PLAIN);
+  expect(paragraph).toBeDefined();
+  Reflect.deleteProperty(arm.engine, 'ensureListDefinition');
+  const before = arm.engine.paragraphs('body');
+  const outcome = (() => {
+    try {
+      return execute(arm, command(arm, 'toggleList', { selection: selection(paragraph!.paraId, 0), kind: 'bullet' }));
+    } catch (error) {
+      return { thrown: String(error) };
+    }
+  })();
+  expect(outcome).toMatchObject({ status: 'refused', reason: REFUSED_WITHOUT_LIST_DEFINITIONS });
+  expect(arm.engine.paragraphs('body')).toEqual(before);
+  expect('ensureListDefinition' in arm.engine).toBe(false);
+}, TIMEOUT);
+
+test('worker: a paragraph-attribute command carrying a created list with a string numId in other is admitted, and at the top level refused', async () => {
+  const arm = await openCommandEngine(undefined, { bytes: listDocument('C'), clientId: ++clientId });
+  const paragraph = arm.engine.paragraphs('body').find(entry => entry.text === PLAIN);
+  expect(paragraph).toBeDefined();
+  const listDef = { key: '5:0', numId: '2' };
+  expect(execute(arm, command(arm, 'setParagraphAttrs', { selection: selection(paragraph!.paraId, 0), attrs: { other: { listDef } } })))
+    .toMatchObject({ status: 'applied' });
+  expect(execute(arm, command(arm, 'setParagraphAttrs', {
+    selection: selection(paragraph!.paraId, 0), attrs: { listDef } as YrsParagraphAttrs,
+  }))).toMatchObject({ status: 'refused', reason: 'invalid-paragraph-attrs' });
+  expect(execute(arm, command(arm, 'setParagraphAttrs', {
+    selection: selection(paragraph!.paraId, 0), attrs: { other: { listDef: { key: '5:0', numId: 2 } } },
+  }))).toMatchObject({ status: 'applied' });
+}, TIMEOUT);
+
+test('worker: bullets on, off and on again reuse the created list, and undo and redo bring that list back', async () => {
+  const driver = await openWorker('C', { isolated: true });
+  const keyOf = () => createdListKey(driver.paragraphs().find(paragraph => paragraph.text === PLAIN)?.properties ?? {});
+  driver.toggle('bullet', PLAIN);
+  const key = keyOf();
+  driver.toggle('bullet', PLAIN);
+  driver.toggle('bullet', PLAIN);
+  expect(keyOf()).toBe(key);
+  expect(driver.definitions()).toHaveLength(1);
+  driver.undo();
+  expect(keyOf()).toBeUndefined();
+  driver.undo();
+  expect(keyOf()).toBe(key);
+  driver.undo();
+  expect(keyOf()).toBeUndefined();
+  expect(driver.definitions()).toEqual([]);
+  driver.redo();
+  driver.redo();
+  driver.redo();
+  expect(keyOf()).toBe(key);
+  expect(driver.definitions()).toHaveLength(1);
+  expect(key).toBeDefined();
+}, TIMEOUT);
+
 test('the attributes that take a paragraph off its list are frozen and clear its marker formatting', () => {
   expect(Object.isFrozen(LIST_OFF_ATTRS)).toBe(true);
   expect(Object.isFrozen(LIST_OFF_ATTRS.other)).toBe(true);

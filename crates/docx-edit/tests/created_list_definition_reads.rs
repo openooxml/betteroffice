@@ -475,16 +475,24 @@ fn a_paragraph_moved_to_a_created_list_keeps_its_level() {
     assert_eq!(doc.created_list_definitions().len(), 1);
 }
 
+/// List 1 a bullet list and list 2 a decimal list, each defining levels 0 to 2.
+const THREE_LEVEL_NUMBERING: &str = concat!(
+    r#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">"#,
+    r#"<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="o"/></w:lvl>"#,
+    r#"<w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="o"/></w:lvl>"#,
+    r#"<w:lvl w:ilvl="2"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="o"/></w:lvl></w:abstractNum>"#,
+    r#"<w:abstractNum w:abstractNumId="1"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl>"#,
+    r#"<w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="lowerLetter"/><w:lvlText w:val="%2."/></w:lvl>"#,
+    r#"<w:lvl w:ilvl="2"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%3."/></w:lvl></w:abstractNum>"#,
+    r#"<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>"#,
+    r#"<w:num w:numId="2"><w:abstractNumId w:val="1"/></w:num></w:numbering>"#
+);
+
 #[test]
 fn a_paragraph_joining_the_list_above_keeps_its_level() {
-    let doc = seeded(713, &[("Top", Some(1)), ("Item", Some(2)), ("End", None)]);
-    let source = paragraph_id(&doc, "Top");
-    doc.set_paragraph_attr(&source, "listIsBullet", Any::Null)
-        .unwrap();
-    doc.set_paragraph_attr(&source, "listNumFmt", Any::from("bullet"))
-        .unwrap();
-    doc.set_paragraph_attr(&paragraph_id(&doc, "Item"), "numPr", num_pr(2.0, 2.0))
-        .unwrap();
+    let doc = EditingDoc::new(713);
+    let body = levelled_body(&[("Top", 1, 0), ("Item", 2, 2)]);
+    seed_from_docx(&doc, &numbered_docx(&body, None, THREE_LEVEL_NUMBERING)).unwrap();
     create(&doc, "Item", ListKind::Bullet);
     let joined = ListIdentity::Source {
         num_id: 1.0,
@@ -548,4 +556,157 @@ fn a_paragraph_joining_the_list_above_at_another_level_takes_the_look_of_its_lev
     for key in ["listNumFmt", "listMarker", "listMarkerBold"] {
         assert_eq!(shown(written.get(key)), shown(probe.get(key)), "{key}");
     }
+}
+
+/// List 1 a hybrid list: bullets at levels 0 and 1, decimal `%3.` at level 2.
+const HYBRID_NUMBERING: &str = concat!(
+    r#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">"#,
+    r#"<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="o"/></w:lvl>"#,
+    r#"<w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="o"/></w:lvl>"#,
+    r#"<w:lvl w:ilvl="2"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%3."/></w:lvl></w:abstractNum>"#,
+    r#"<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#
+);
+/// List 1 a bullet list defining level 0 only; list 2 decimal at levels 0 to 2.
+const SINGLE_LEVEL_NUMBERING: &str = concat!(
+    r#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">"#,
+    r#"<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="o"/></w:lvl></w:abstractNum>"#,
+    r#"<w:abstractNum w:abstractNumId="1"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl>"#,
+    r#"<w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="lowerLetter"/><w:lvlText w:val="%2."/></w:lvl>"#,
+    r#"<w:lvl w:ilvl="2"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%3."/></w:lvl></w:abstractNum>"#,
+    r#"<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>"#,
+    r#"<w:num w:numId="2"><w:abstractNumId w:val="1"/></w:num></w:numbering>"#
+);
+
+/// The body XML of `items`, each on the list and at the level it names, followed by a paragraph on
+/// no list reading `End`.
+fn levelled_body(items: &[(&str, u32, u32)]) -> String {
+    let paragraphs: String = items
+        .iter()
+        .map(|(text, num_id, level)| {
+            format!(
+                r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="{level}"/><w:numId w:val="{num_id}"/></w:numPr></w:pPr><w:r><w:t>{text}</w:t></w:r></w:p>"#
+            )
+        })
+        .collect();
+    format!("{paragraphs}<w:p><w:r><w:t>End</w:t></w:r></w:p>")
+}
+
+#[test]
+fn bullets_on_a_numbered_level_of_a_hybrid_list_below_its_bullet_create_a_bullet_list() {
+    let doc = EditingDoc::new(715);
+    let body = levelled_body(&[("Top", 1, 0), ("Item", 1, 2)]);
+    seed_from_docx(&doc, &numbered_docx(&body, None, HYBRID_NUMBERING)).unwrap();
+    let before = attrs(&doc, "Item");
+    let ensured = create(&doc, "Item", ListKind::Bullet);
+    assert!(created_key(&doc, "Item").is_some(), "{ensured:?}");
+    assert_eq!(ensured.get("listIsBullet"), Some(&Any::Bool(true)), "{ensured:?}");
+    assert_eq!(ensured.get("numPr"), Some(&num_pr(1.0, 2.0)));
+    assert_eq!(doc.created_list_definitions().len(), 1);
+    assert_eq!(before.get("listNumFmt"), Some(&Any::from("decimal")), "{before:?}");
+    let top = attrs(&doc, "Top");
+    assert_eq!(top.get("listNumFmt"), Some(&Any::from("bullet")), "{top:?}");
+}
+
+#[test]
+fn bullets_on_a_level_two_item_below_a_one_level_bullet_list_create_a_bullet_list() {
+    let doc = EditingDoc::new(716);
+    let body = levelled_body(&[("Top", 1, 0), ("Item", 2, 2)]);
+    seed_from_docx(&doc, &numbered_docx(&body, None, SINGLE_LEVEL_NUMBERING)).unwrap();
+    let before = attrs(&doc, "Item");
+    create(&doc, "Item", ListKind::Bullet);
+    assert!(created_key(&doc, "Item").is_some(), "{:?}", attrs(&doc, "Item"));
+    let definitions = doc.created_list_definitions();
+    assert_eq!(definitions.len(), 1);
+    assert_eq!(definitions[0].kind, ListKind::Bullet);
+    assert_eq!(before.get("listNumFmt"), Some(&Any::from("decimal")), "{before:?}");
+    let top = attrs(&doc, "Top");
+    assert_eq!(top.get("listNumFmt"), Some(&Any::from("bullet")), "{top:?}");
+}
+
+#[test]
+fn a_lone_paragraph_put_on_and_off_a_bullet_list_keeps_reusing_one_definition() {
+    let doc = seeded(717, &[("Lead", None), ("Alpha", None), ("Gap", None)]);
+    let alpha = paragraph_id(&doc, "Alpha");
+    create(&doc, "Alpha", ListKind::Bullet);
+    let first = created_key(&doc, "Alpha");
+    for _ in 0..99 {
+        doc.set_paragraph_attr(&alpha, "numPr", Any::Null)
+            .unwrap();
+        doc.set_paragraph_attr(&alpha, LIST_DEF, Any::Null)
+            .unwrap();
+        create(&doc, "Alpha", ListKind::Bullet);
+    }
+    assert_eq!(doc.created_list_definitions().len(), 1);
+    assert_eq!(created_key(&doc, "Alpha"), first);
+    assert!(first.is_some());
+}
+
+#[test]
+fn a_level_two_paragraph_below_a_list_defining_only_level_zero_does_not_join_it() {
+    let doc = seeded(718, &[("Top", Some(1)), ("Item", Some(2)), ("End", None)]);
+    let source = paragraph_id(&doc, "Top");
+    doc.set_paragraph_attr(&source, "listIsBullet", Any::Null)
+        .unwrap();
+    doc.set_paragraph_attr(&source, "listNumFmt", Any::from("bullet"))
+        .unwrap();
+    doc.set_paragraph_attr(&paragraph_id(&doc, "Item"), "numPr", num_pr(2.0, 2.0))
+        .unwrap();
+    create(&doc, "Item", ListKind::Bullet);
+    let written = attrs(&doc, "Item");
+    assert!(created_key(&doc, "Item").is_some(), "{written:?}");
+    assert_eq!(doc.created_list_definitions().len(), 1);
+}
+
+/// Lists 1 and 3 bullet lists, list 1 defining level 0 only and list 3 levels 0 to 2; list 2
+/// decimal at levels 0 to 2.
+const NEXT_CANDIDATE_NUMBERING: &str = concat!(
+    r#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">"#,
+    r#"<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="o"/></w:lvl></w:abstractNum>"#,
+    r#"<w:abstractNum w:abstractNumId="1"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl>"#,
+    r#"<w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="lowerLetter"/><w:lvlText w:val="%2."/></w:lvl>"#,
+    r#"<w:lvl w:ilvl="2"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%3."/></w:lvl></w:abstractNum>"#,
+    r#"<w:abstractNum w:abstractNumId="2"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="o"/></w:lvl>"#,
+    r#"<w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="o"/></w:lvl>"#,
+    r#"<w:lvl w:ilvl="2"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="o"/></w:lvl></w:abstractNum>"#,
+    r#"<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>"#,
+    r#"<w:num w:numId="2"><w:abstractNumId w:val="1"/></w:num>"#,
+    r#"<w:num w:numId="3"><w:abstractNumId w:val="2"/></w:num></w:numbering>"#
+);
+
+#[test]
+fn a_level_two_paragraph_passes_over_the_list_above_for_the_one_below_that_has_its_level() {
+    let doc = EditingDoc::new(719);
+    let body = levelled_body(&[("Top", 1, 0), ("Item", 2, 2), ("Below", 3, 0)]);
+    seed_from_docx(&doc, &numbered_docx(&body, None, NEXT_CANDIDATE_NUMBERING)).unwrap();
+    create(&doc, "Item", ListKind::Bullet);
+    let joined = ListIdentity::Source {
+        num_id: 3.0,
+        level: 2.0,
+    };
+    assert_eq!(resolve_list_identity(&attrs(&doc, "Item")), Some(joined));
+    assert!(doc.created_list_definitions().is_empty());
+}
+
+#[test]
+fn a_created_list_a_paragraph_is_on_is_not_given_to_a_paragraph_elsewhere() {
+    let doc = seeded(720, &[("Alpha", None), ("Gap", None), ("Beta", None)]);
+    create(&doc, "Alpha", ListKind::Bullet);
+    create(&doc, "Beta", ListKind::Bullet);
+    assert_ne!(created_key(&doc, "Beta"), created_key(&doc, "Alpha"));
+    assert_eq!(doc.created_list_definitions().len(), 2);
+    assert!(created_key(&doc, "Alpha").is_some());
+}
+
+#[test]
+fn a_created_list_no_paragraph_is_on_is_not_reused_for_the_other_kind() {
+    let doc = seeded(721, &[("Lead", None), ("Alpha", None), ("Gap", None)]);
+    let alpha = paragraph_id(&doc, "Alpha");
+    create(&doc, "Alpha", ListKind::Bullet);
+    let bullet = created_key(&doc, "Alpha");
+    doc.set_paragraph_attr(&alpha, "numPr", Any::Null).unwrap();
+    doc.set_paragraph_attr(&alpha, LIST_DEF, Any::Null).unwrap();
+    create(&doc, "Alpha", ListKind::Numbered);
+    assert_ne!(created_key(&doc, "Alpha"), bullet);
+    assert_eq!(doc.created_list_definitions().len(), 2);
+    assert!(bullet.is_some());
 }

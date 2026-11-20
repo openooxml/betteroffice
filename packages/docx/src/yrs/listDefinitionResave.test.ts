@@ -436,10 +436,10 @@ describe('created definitions no paragraph names', () => {
     return key!;
   };
 
-  test('a list put on, taken off and put on again saves only the definition its paragraph is on', async () => {
+  test('a list put on, taken off and put on as the other kind saves only the definition its paragraph is on', async () => {
     const created = await session();
     created.seedFromDocx(makeDocx(DOCUMENT, LISTS_NUMBERING));
-    createList(created, 'Alpha', 'bullet');
+    createList(created, 'Alpha', 'numbered');
     takeOff(created, 'Alpha');
     createList(created, 'Alpha', 'bullet');
     expect(created.createdListDefinitions()).toHaveLength(2);

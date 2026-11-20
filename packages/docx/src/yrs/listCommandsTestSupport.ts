@@ -22,6 +22,28 @@ const NUMBERED_HEADING_STYLES = STYLES.replace(
   '<w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr><w:outlineLvl w:val="0"/>'
 );
 const HEADING_NUMBERING = `${XML}<w:numbering xmlns:w="${W}"><w:abstractNum w:abstractNumId="0"><w:multiLevelType w:val="multilevel"/><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>`;
+const levelXml = (ilvl: number, format: string, text: string) =>
+  `<w:lvl w:ilvl="${ilvl}"><w:start w:val="1"/><w:numFmt w:val="${format}"/><w:lvlText w:val="${text}"/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="${720 * (ilvl + 1)}" w:hanging="360"/></w:pPr></w:lvl>`;
+const abstractNumXml = (id: number, levels: string) =>
+  `<w:abstractNum w:abstractNumId="${id}"><w:multiLevelType w:val="hybridMultilevel"/>${levels}</w:abstractNum>`;
+const numXml = (numId: number, abstractNumId: number) => `<w:num w:numId="${numId}"><w:abstractNumId w:val="${abstractNumId}"/></w:num>`;
+const numberingXml = (body: string) => `${XML}<w:numbering xmlns:w="${W}">${body}</w:numbering>`;
+/** List 1: bullets at levels 0 and 1, decimal `%3.` at level 2. */
+const HYBRID_NUMBERING = numberingXml(
+  abstractNumXml(0, levelXml(0, 'bullet', '•') + levelXml(1, 'bullet', 'o') + levelXml(2, 'decimal', '%3.')) + numXml(1, 0)
+);
+/** List 1: a bullet list defining level 0 only. List 2: decimal at levels 0 to 2. */
+const SINGLE_LEVEL_NUMBERING = numberingXml(
+  abstractNumXml(0, levelXml(0, 'bullet', '•')) +
+  abstractNumXml(1, levelXml(0, 'decimal', '%1.') + levelXml(1, 'lowerLetter', '%2.') + levelXml(2, 'decimal', '%3.')) +
+  numXml(1, 0) + numXml(2, 1)
+);
+/** Lists 2 and 7: decimal at level 0 and lowerLetter at level 1, over two different abstract definitions. */
+const TWO_DECIMAL_NUMBERING = numberingXml(
+  abstractNumXml(0, levelXml(0, 'decimal', '%1.') + levelXml(1, 'lowerLetter', '%2.')) +
+  abstractNumXml(1, levelXml(0, 'decimal', '%1.') + levelXml(1, 'lowerLetter', '%2.')) +
+  numXml(2, 0) + numXml(7, 1)
+);
 
 /** The paragraph the list commands are applied to; the last paragraph added to each document. */
 export const PLAIN = 'Plain paragraph QA';
@@ -42,6 +64,16 @@ const HEADING = 'Introduction heading QA';
 const NEXT_HEADING = 'Second heading QA';
 const SECOND_FOLLOWER = 'Second follower QA';
 const THIRD_FOLLOWER = 'Third follower QA';
+/** The level 0 bullet item and the level 2 numbered item below it, both on list 1 of document E. */
+const HYBRID_BULLET = 'Hybrid bullet item QA';
+const HYBRID_NUMBER = 'Hybrid numbered item QA';
+/** The level 0 item of the one-level bullet list 1 of document F, and the level 2 item of its list 2 below. */
+const SINGLE_BULLET = 'Single level bullet QA';
+const DEEP_NUMBER = 'Deep numbered item QA';
+/** The plain paragraph opening document G, and the items of its lists 2 and 7 below it. */
+const SELECTION_LEAD = 'Selection lead QA';
+const LIST_TWO_ITEM = 'List two item QA';
+const LIST_SEVEN_ITEM = 'List seven item QA';
 export const LIST_LAYOUT = JSON.stringify({
   bodyStory: 'body',
   regions: { sections: [{ sectionId: 'main', properties: {} }] },
@@ -53,19 +85,26 @@ export const LIST_LAYOUT = JSON.stringify({
  * A: the seed-parity lists document, whose list 1 is decimal, list 2 a bullet list and list 3
  * decimal again, its last item directly above `PLAIN`. B: `EXISTING_BULLET` of bullet list 1,
  * directly above `PLAIN`, and no `w:num` 2. C: no numbering part. D: `PLAIN` between two Heading 1
- * paragraphs numbered by their style's list 1.
+ * paragraphs numbered by their style's list 1. E: `HYBRID_BULLET` and `HYBRID_NUMBER` of the hybrid
+ * list 1. F: `SINGLE_BULLET` of the one-level bullet list 1 above `DEEP_NUMBER` of the decimal list 2.
+ * G: `SELECTION_LEAD` above `LIST_TWO_ITEM` at level 0 of the numbered list 2 and `LIST_SEVEN_ITEM`
+ * at level 1 of the numbered list 7.
  */
-export type ListDocument = 'A' | 'B' | 'C' | 'D';
+export type ListDocument = 'A' | 'B' | 'C' | 'D' | 'E' | 'F' | 'G';
 export type ListKind = 'bullet' | 'numbered';
 export interface ListDocumentOptions {
   /** Puts `GAP` directly above `PLAIN`. */
   isolated?: boolean;
   /** Plain paragraphs after `PLAIN`. */
   after?: readonly string[];
+  /** A saved package to open in place of the document built. */
+  saved?: Uint8Array;
 }
 
 /** The `w:numId`s of the numbering each document opens with. */
-export const SOURCE_NUM_IDS: Readonly<Record<ListDocument, readonly string[]>> = { A: ['1', '2', '3'], B: ['1'], C: [], D: ['1'] };
+export const SOURCE_NUM_IDS: Readonly<Record<ListDocument, readonly string[]>> = {
+  A: ['1', '2', '3'], B: ['1'], C: [], D: ['1'], E: ['1'], F: ['1', '2'], G: ['2', '7'],
+};
 
 export async function preloadListWasm(): Promise<void> {
   const generated = (path: string) => new Uint8Array(readFileSync(resolve(import.meta.dir, '../wasm/generated', path)));
@@ -79,6 +118,8 @@ export function listFont(): Uint8Array {
 }
 
 const plain = (text: string) => `<w:p><w:r><w:t>${text}</w:t></w:r></w:p>`;
+const item = (text: string, numId: number, ilvl: number) =>
+  `<w:p><w:pPr><w:numPr><w:ilvl w:val="${ilvl}"/><w:numId w:val="${numId}"/></w:numPr></w:pPr><w:r><w:t>${text}</w:t></w:r></w:p>`;
 
 function pack(document: string, numbering: string | null, relationships?: Uint8Array, styles = STYLES): Uint8Array {
   const parts = new Map<string, Uint8Array>();
@@ -92,7 +133,8 @@ function pack(document: string, numbering: string | null, relationships?: Uint8A
 }
 
 export function listDocument(doc: ListDocument, options: ListDocumentOptions = {}): Uint8Array {
-  const added = [...(options.isolated ? [GAP] : []), PLAIN, ...(options.after ?? [])].map(plain).join('');
+  if (options.saved) return options.saved;
+  const added =[...(options.isolated ? [GAP] : []), PLAIN, ...(options.after ?? [])].map(plain).join('');
   if (doc === 'A') {
     const source = readFileSync(resolve(FIXTURE, 'document.xml'), 'utf8');
     const anchor = '    <w:sectPr>';
@@ -109,6 +151,15 @@ export function listDocument(doc: ListDocument, options: ListDocumentOptions = {
       `${XML}<w:document xmlns:w="${W}"><w:body>${heading(HEADING)}${added}${heading(NEXT_HEADING)}${SECT}</w:body></w:document>`,
       HEADING_NUMBERING, undefined, NUMBERED_HEADING_STYLES
     );
+  }
+  if (doc === 'E' || doc === 'F' || doc === 'G') {
+    const opening = {
+      E: item(HYBRID_BULLET, 1, 0) + item(HYBRID_NUMBER, 1, 2),
+      F: item(SINGLE_BULLET, 1, 0) + item(DEEP_NUMBER, 2, 2),
+      G: plain(SELECTION_LEAD) + item(LIST_TWO_ITEM, 2, 0) + item(LIST_SEVEN_ITEM, 7, 1),
+    }[doc];
+    const numbering = { E: HYBRID_NUMBERING, F: SINGLE_LEVEL_NUMBERING, G: TWO_DECIMAL_NUMBERING }[doc];
+    return pack(`${XML}<w:document xmlns:w="${W}"><w:body>${opening}${added}${SECT}</w:body></w:document>`, numbering);
   }
   const lead = doc === 'B'
     ? `<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>${EXISTING_BULLET}</w:t></w:r></w:p>`
@@ -191,6 +242,41 @@ export function savedList(bytes: Uint8Array, text: string): SavedList {
   saved.numFmt = level.match(/<w:numFmt\b[^>]*\bw:val="([^"]*)"/)?.[1];
   saved.lvlText = level.match(/<w:lvlText\b[^>]*\bw:val="([^"]*)"/)?.[1];
   return saved;
+}
+
+/** What a saved package says of the list level of the one paragraph reading `text`. */
+interface SavedLevel {
+  numId?: string;
+  ilvl?: string;
+  /** The `w:numFmt` of that level of the definition the paragraph's `w:num` points at; undefined when it defines no such level. */
+  numFmt?: string;
+}
+
+function savedLevel(bytes: Uint8Array, text: string): SavedLevel {
+  const parts = unzipContainer(bytes);
+  const decode = (path: string) => (parts[path] ? new TextDecoder().decode(parts[path]) : '');
+  const textOf = (xml: string) => [...xml.matchAll(/<w:t(?:\s[^>]*)?>([^<]*)<\/w:t>/g)].map(match => match[1]).join('');
+  const paragraphs = (decode('word/document.xml').match(/<w:p\b[^>]*>[\s\S]*?<\/w:p>/g) ?? []).filter(paragraph => textOf(paragraph) === text);
+  expect(paragraphs).toHaveLength(1);
+  const numPr = paragraphs[0]!.match(/<w:numPr\b[^>]*>([\s\S]*?)<\/w:numPr>/)?.[1];
+  const saved: SavedLevel = {
+    numId: numPr?.match(/<w:numId\b[^>]*\bw:val="(\d+)"/)?.[1],
+    ilvl: numPr?.match(/<w:ilvl\b[^>]*\bw:val="(\d+)"/)?.[1],
+  };
+  if (saved.numId === undefined) return saved;
+  const numbering = decode('word/numbering.xml');
+  const num = numbering.match(new RegExp(`<w:num\\b[^>]*\\bw:numId="${saved.numId}"[^>]*>([\\s\\S]*?)</w:num>`))?.[1];
+  const abstractNumId = num?.match(/<w:abstractNumId\b[^>]*\bw:val="(\d+)"/)?.[1];
+  if (abstractNumId === undefined) return saved;
+  const abstract = numbering.match(new RegExp(`<w:abstractNum\\b[^>]*\\bw:abstractNumId="${abstractNumId}"[^>]*>([\\s\\S]*?)</w:abstractNum>`))?.[1] ?? '';
+  const level = abstract.match(new RegExp(`<w:lvl\\b[^>]*\\bw:ilvl="${saved.ilvl ?? '0'}"[^>]*>([\\s\\S]*?)</w:lvl>`))?.[1];
+  saved.numFmt = level?.match(/<w:numFmt\b[^>]*\bw:val="([^"]*)"/)?.[1];
+  return saved;
+}
+
+/** The length in bytes of the numbering part of the saved package `bytes`; 0 when it has none. */
+function savedNumberingLength(bytes: Uint8Array): number {
+  return unzipContainer(bytes)['word/numbering.xml']?.length ?? 0;
 }
 
 /** One way the list commands reach a document: the worker's command engine or the toolbar on a session. */
@@ -293,7 +379,7 @@ export function listCommandScenarios(path: string, open: OpenListCommandDriver, 
   }, timeout);
 
   for (const kind of KINDS) {
-    test(`${path}: ${kind} on a ${kind} item takes the list off, and on again starts a list afresh`, async () => {
+    test(`${path}: ${kind} on a ${kind} item takes the list off, and on again puts it back on that list`, async () => {
       const driver = await open('C');
       driver.toggle(kind, PLAIN);
       const first = keyOf(driver, PLAIN);
@@ -303,8 +389,8 @@ export function listCommandScenarios(path: string, open: OpenListCommandDriver, 
       expect(driver.marker(PLAIN)).toBe('');
       driver.toggle(kind, PLAIN);
       const again = keyOf(driver, PLAIN);
-      expect(again).toBeDefined();
-      expect(again).not.toBe(first);
+      expect(again).toBe(first);
+      expect(driver.definitions()).toHaveLength(1);
     }, timeout);
   }
 
@@ -503,5 +589,95 @@ export function listCommandScenarios(path: string, open: OpenListCommandDriver, 
     expect(keyOf(driver, PLAIN)).toBe(key);
     expect(keyOf(driver, FOLLOWER)).toBe(key);
     expect(driver.definitions()).toHaveLength(1);
+  }, timeout);
+
+  test(`${path}: bullets on a numbered level of a hybrid list below its bullet item show a bullet at that level`, async () => {
+    const driver = await open('E');
+    const before = { properties: propertiesOf(driver, HYBRID_NUMBER), marker: driver.marker(HYBRID_NUMBER) };
+    driver.toggle('bullet', HYBRID_NUMBER);
+    expect(propertiesOf(driver, HYBRID_NUMBER)).toMatchObject({ listIsBullet: true, numPr: { ilvl: 2 } });
+    expect(driver.marker(HYBRID_NUMBER) ?? '').not.toMatch(/\d/);
+    expect(driver.marker(HYBRID_NUMBER) ?? '').not.toBe('');
+    expect(savedLevel(await driver.save(), HYBRID_NUMBER)).toMatchObject({ ilvl: '2', numFmt: 'bullet' });
+    expect(before.properties).toMatchObject({ listNumFmt: 'decimal', numPr: { numId: 1, ilvl: 2 } });
+    expect(before.marker).toMatch(/^\d+\.$/);
+    expect(propertiesOf(driver, HYBRID_BULLET)).toMatchObject({ listNumFmt: 'bullet', numPr: { numId: 1, ilvl: 0 } });
+  }, timeout);
+
+  test(`${path}: bullets on a level 2 numbered item below a one-level bullet list put it on a bullet list that has level 2`, async () => {
+    const driver = await open('F');
+    const before = propertiesOf(driver, DEEP_NUMBER);
+    driver.toggle('bullet', DEEP_NUMBER);
+    const key = keyOf(driver, DEEP_NUMBER);
+    expect(key).toBeDefined();
+    expect(driver.definitions().find(definition => definition.key === key)?.kind).toBe('bullet');
+    expect(propertiesOf(driver, DEEP_NUMBER)).toMatchObject({ listIsBullet: true, numPr: { ilvl: 2 } });
+    const bytes = await driver.save();
+    const saved = savedLevel(bytes, DEEP_NUMBER);
+    expect(saved).toMatchObject({ ilvl: '2', numFmt: 'bullet' });
+    expect(SOURCE_NUM_IDS.F.includes(saved.numId ?? '')).toBe(false);
+    expect(driver.marker(DEEP_NUMBER) ?? '').not.toBe('');
+    const reopened = await open('F', { saved: bytes });
+    expect(reopened.marker(DEEP_NUMBER) ?? '').not.toBe('');
+    expect(reopened.marker(DEEP_NUMBER) ?? '').not.toMatch(/\d/);
+    expect(before).toMatchObject({ listNumFmt: 'decimal', numPr: { numId: 2, ilvl: 2 } });
+    expect(propertiesOf(driver, SINGLE_BULLET)).toMatchObject({ listNumFmt: 'bullet', numPr: { numId: 1, ilvl: 0 } });
+  }, timeout);
+
+  test(`${path}: numbering over a plain paragraph and the items of two numbered lists puts all three on the list of the first`, async () => {
+    const driver = await open('G');
+    const items = [SELECTION_LEAD, LIST_TWO_ITEM, LIST_SEVEN_ITEM];
+    const numIdOf = (text: string) => (propertiesOf(driver, text).numPr as { numId?: number } | null | undefined)?.numId;
+    const before = items.map(numIdOf);
+    driver.toggle('numbered', SELECTION_LEAD, LIST_SEVEN_ITEM);
+    expect(items.map(numIdOf)).toEqual([2, 2, 2]);
+    expect(propertiesOf(driver, LIST_SEVEN_ITEM)).toMatchObject({ listNumFmt: 'lowerLetter', numPr: { numId: 2, ilvl: 1 } });
+    const bytes = await driver.save();
+    expect(items.map(text => savedList(bytes, text).numId)).toEqual(['2', '2', '2']);
+    expect(savedLevel(bytes, LIST_SEVEN_ITEM)).toMatchObject({ numId: '2', ilvl: '1', numFmt: 'lowerLetter' });
+    expect(items.map(text => keyOf(driver, text))).toEqual([undefined, undefined, undefined]);
+    expect(before).toEqual([undefined, 2, 7]);
+  }, timeout);
+
+  test(`${path}: numbering off on a heading numbered by its style saves numId 0, and numbering on again puts it on a list`, async () => {
+    const driver = await open('D');
+    const before = { numPr: propertiesOf(driver, HEADING).numPr, marker: driver.marker(HEADING) };
+    driver.toggle('numbered', HEADING);
+    const saved = await driver.save();
+    expect(savedList(saved, HEADING)).toMatchObject({ paragraphs: 1, numId: '0' });
+    expect(driver.marker(HEADING) ?? '').toBe('');
+    const reopened = await open('D', { saved });
+    expect(reopened.marker(HEADING) ?? '').toBe('');
+    reopened.toggle('numbered', HEADING);
+    expect(reopened.marker(HEADING) ?? '').toMatch(/^\d+\.$/);
+    driver.toggle('numbered', HEADING);
+    expect(driver.marker(HEADING) ?? '').toMatch(/^\d+\.$/);
+    expect(before.numPr).toMatchObject({ numId: 1 });
+    expect(before.marker).toMatch(/^\d+\.$/);
+  }, timeout);
+
+  test(`${path}: bullets off on a directly numbered item save no numbering at all`, async () => {
+    const driver = await open('B');
+    const before = propertiesOf(driver, EXISTING_BULLET).numPr;
+    driver.toggle('bullet', EXISTING_BULLET);
+    expect(savedList(await driver.save(), EXISTING_BULLET)).toEqual({ paragraphs: 1, numId: undefined });
+    expectOffList(driver, EXISTING_BULLET);
+    expect(before).toMatchObject({ numId: 1, ilvl: 0 });
+  }, timeout);
+
+  test(`${path}: bullets on and off on a lone paragraph 200 times keep one definition and save the same numbering`, async () => {
+    const driver = await open('C', { isolated: true });
+    driver.toggle('bullet', PLAIN);
+    const key = keyOf(driver, PLAIN);
+    const first = savedNumberingLength(await driver.save());
+    for (let click = 2; click <= 199; click += 1) driver.toggle('bullet', PLAIN);
+    expect(driver.definitions()).toHaveLength(1);
+    expect(keyOf(driver, PLAIN)).toBe(key);
+    expect(savedNumberingLength(await driver.save())).toBe(first);
+    driver.toggle('bullet', PLAIN);
+    expectOffList(driver, PLAIN);
+    expect(driver.definitions()).toHaveLength(1);
+    expect(key).toBeDefined();
+    expect(first).toBeGreaterThan(0);
   }, timeout);
 }
