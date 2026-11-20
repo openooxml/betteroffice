@@ -477,15 +477,24 @@ fn headed_package(body: &str) -> Vec<u8> {
         "<w:hdr {HEADED_NAMESPACES}><w:p w14:paraId=\"00000003\"><w:r><w:t>Header words</w:t></w:r></w:p></w:hdr>"
     );
     ooxml_opc::rezip_parts(&[
-        ("[Content_Types].xml".to_owned(), HEADED_TYPES.as_bytes().to_vec()),
-        ("_rels/.rels".to_owned(), HEADED_ROOT_RELATIONSHIPS.as_bytes().to_vec()),
+        (
+            "[Content_Types].xml".to_owned(),
+            HEADED_TYPES.as_bytes().to_vec(),
+        ),
+        (
+            "_rels/.rels".to_owned(),
+            HEADED_ROOT_RELATIONSHIPS.as_bytes().to_vec(),
+        ),
         (
             "word/_rels/document.xml.rels".to_owned(),
             HEADED_DOCUMENT_RELATIONSHIPS.as_bytes().to_vec(),
         ),
         ("word/document.xml".to_owned(), document.into_bytes()),
         ("word/header1.xml".to_owned(), header.into_bytes()),
-        ("word/comments.xml".to_owned(), HEADED_COMMENTS.as_bytes().to_vec()),
+        (
+            "word/comments.xml".to_owned(),
+            HEADED_COMMENTS.as_bytes().to_vec(),
+        ),
     ])
     .unwrap()
 }
