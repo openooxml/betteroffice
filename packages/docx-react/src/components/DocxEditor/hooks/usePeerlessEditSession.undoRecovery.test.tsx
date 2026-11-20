@@ -9,6 +9,7 @@ import { createYrsSession } from '@betteroffice/docx/yrs';
 import { DocxSourceWorkerClient, createDocxCommandConnection, createDocxWorkerEditSession, SessionFailure } from '@betteroffice/docx/worker';
 import type { DocxCommandCheckpoint, DocxCommandConnection } from '@betteroffice/docx/worker';
 import type { Document } from '@betteroffice/docx/types/document';
+import type { CommandTicket } from '../../../../../../shared/office-session/commands/types';
 import { usePeerlessEditSession, type UsePeerlessEditSessionOptions } from './usePeerlessEditSession';
 
 const TIMEOUT = 180_000;
@@ -166,16 +167,18 @@ function mount({ tamper, source = documentBytes(), reopenSource, collaboration, 
     async save() {
       await act(async () => { await clients.at(-1)!.save({ comments: [] }); });
     },
-    async submitQueued(kind: string, payload: Record<string, unknown> = {}): Promise<{ status: Promise<string>; detail: Promise<string> }> {
+    async submitQueued(kind: string, payload: Record<string, unknown> = {}, after?: CommandTicket): Promise<{ status: Promise<string>; detail: Promise<string>; ticket: CommandTicket }> {
       let status!: Promise<string>;
       let detail!: Promise<string>;
+      let ticket!: CommandTicket;
       await act(async () => {
-        const ack = view.result.current.binding!.session.submit(kind, payload as never).ack as Promise<{ status: string; reason?: string }>;
+        ticket = view.result.current.binding!.session.submit(kind, payload as never, after ? { after } : {});
+        const ack = ticket.ack as Promise<{ status: string; reason?: string }>;
         status = ack.then((outcome) => outcome.status, (error: Error) => `rejected: ${error.message}`);
         detail = ack.then((outcome) => JSON.stringify({ status: outcome.status, reason: outcome.reason }),
           (error: Error) => `rejected: ${error.message}`);
       });
-      return { status, detail };
+      return { status, detail, ticket };
     },
     async ready() { await waitFor(() => expect(view.result.current.status).toBe('ready'), { timeout: 30_000 }); },
     async submit(kind: string, payload: Record<string, unknown> = {}) {
@@ -663,7 +666,8 @@ test('typing queued across a checkpoint', async () => {
   await session.typeUntilApplied(127);
   expect(await session.submit('insertText', { text: 'P' })).toBe('applied');
   await waitFor(() => expect(session.gate.requested).toBe(1), { timeout: 30_000 });
-  const queued = [await session.submitQueued('insertText', { text: 'Q' }), await session.submitQueued('insertText', { text: 'R' })];
+  const first = await session.submitQueued('insertText', { text: 'Q' });
+  const queued = [first, await session.submitQueued('insertText', { text: 'R' }, first.ticket)];
   session.gate.open();
   let statuses: string[] = [];
   let details: string[] = [];
