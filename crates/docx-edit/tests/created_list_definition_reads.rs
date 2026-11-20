@@ -493,3 +493,59 @@ fn a_paragraph_joining_the_list_above_keeps_its_level() {
     assert_eq!(resolve_list_identity(&attrs(&doc, "Item")), Some(joined));
     assert!(doc.created_list_definitions().is_empty());
 }
+
+/// List 1 decimal `%1.` with a bold marker at level 0 and lowerRoman `%3)` without bold at level
+/// 2; list 2 a bullet list.
+const LEVELLED_NUMBERING: &str = concat!(
+    r#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">"#,
+    r#"<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:rPr><w:b/></w:rPr></w:lvl>"#,
+    r#"<w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="lowerLetter"/><w:lvlText w:val="%2."/></w:lvl>"#,
+    r#"<w:lvl w:ilvl="2"><w:start w:val="1"/><w:numFmt w:val="lowerRoman"/><w:lvlText w:val="%3)"/></w:lvl></w:abstractNum>"#,
+    r#"<w:abstractNum w:abstractNumId="1"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="o"/></w:lvl></w:abstractNum>"#,
+    r#"<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>"#,
+    r#"<w:num w:numId="2"><w:abstractNumId w:val="1"/></w:num></w:numbering>"#
+);
+
+#[test]
+fn a_paragraph_joining_the_list_above_at_another_level_takes_the_look_of_its_level() {
+    let paragraph = |properties: &str, text: &str| {
+        format!("<w:p><w:pPr>{properties}</w:pPr><w:r><w:t>{text}</w:t></w:r></w:p>")
+    };
+    let body = [
+        paragraph(
+            r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>"#,
+            "Top",
+        ),
+        paragraph(
+            r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="2"/></w:numPr>"#,
+            "Item",
+        ),
+        paragraph("", "End"),
+        paragraph(
+            r#"<w:numPr><w:ilvl w:val="2"/><w:numId w:val="1"/></w:numPr>"#,
+            "Probe",
+        ),
+    ]
+    .concat();
+    let doc = EditingDoc::new(714);
+    seed_from_docx(&doc, &numbered_docx(&body, None, LEVELLED_NUMBERING)).unwrap();
+    doc.set_paragraph_attr(&paragraph_id(&doc, "Item"), "numPr", num_pr(2.0, 2.0))
+        .unwrap();
+    let probe = attrs(&doc, "Probe");
+    assert_eq!(
+        probe.get("listNumFmt"),
+        Some(&Any::from("lowerRoman")),
+        "{probe:?}"
+    );
+    create(&doc, "Item", ListKind::Numbered);
+    let written = attrs(&doc, "Item");
+    let joined = ListIdentity::Source {
+        num_id: 1.0,
+        level: 2.0,
+    };
+    assert_eq!(resolve_list_identity(&written), Some(joined));
+    let shown = |value: Option<&Any>| value.filter(|value| **value != Any::Null).cloned();
+    for key in ["listNumFmt", "listMarker", "listMarkerBold"] {
+        assert_eq!(shown(written.get(key)), shown(probe.get(key)), "{key}");
+    }
+}

@@ -252,6 +252,15 @@ describe('the ids a save reads from a numbering part', () => {
   });
 });
 
+describe('a numbering part whose list points at a definition it does not hold', () => {
+  test('the abstractNumId the list points at is not given to a created definition', () => {
+    const dangling = `<w:numbering xmlns:w="${W}"><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>`;
+    const [saved] = savedListDefinitions({} as YrsSession, [BULLETS], numberingParts(dangling));
+    expect(saved?.abstractNumId).toBeGreaterThan(0);
+    expect(saved?.numId).toBeGreaterThan(1);
+  });
+});
+
 describe('created lists carried by a saved file', () => {
   test('a key drawn again by a new session on the saved file names a different definition', async () => {
     const first = await session(77);
@@ -417,4 +426,165 @@ describe('a paragraph that joins a created list without its numPr changing', () 
       expect(savedFormat(bytes, item)).toBe('bullet');
     });
   }
+});
+
+/** The `w:abstractNum` the `w:num` `numId` of `bytes` points at, as written. */
+function savedDefinition(bytes: Uint8Array, numId: number | undefined): string | undefined {
+  const numbering = text(unzipContainer(bytes)['word/numbering.xml']);
+  const num = elements(numbering, 'num').find(entry => attribute(entry, NUM_ID) === numId);
+  return elements(numbering, 'abstractNum').find(entry => attribute(entry, ABSTRACT_ID) === attribute(num, POINTER));
+}
+
+describe('a client that reopens a file it saved and draws the same key again', () => {
+  const reopenedWithBeta = async (): Promise<YrsSession> => {
+    const first = await session(78);
+    first.seedFromDocx(makeDocx(DOCUMENT, LISTS_NUMBERING));
+    createList(first, 'Alpha', 'bullet');
+    const earlier = (await saveYrsDocx(first, { updateModifiedDate: false })).bytes;
+    const reopened = await session(78);
+    reopened.seedFromDocx(earlier.slice());
+    createList(reopened, 'Beta', 'bullet');
+    const keys = (target: YrsSession) => target.createdListDefinitions().map(definition => definition.key);
+    expect(keys(reopened)).toEqual(keys(first));
+    return reopened;
+  };
+
+  test('saving again over its own save keeps the numId of the new list and adds no definition', async () => {
+    const reopened = await reopenedWithBeta();
+    const over = async (bytes: Uint8Array) => (await saveYrsDocx(reopened, {
+      updateModifiedDate: false,
+      commentBaseline: { bytes: bytes.slice(), comments: reopened.listComments() },
+      commentDeletion: true,
+    })).bytes;
+    const save1 = (await saveYrsDocx(reopened, { updateModifiedDate: false })).bytes;
+    const save2 = await over(save1);
+    const save3 = await over(save2);
+    const beta = savedNumId(save1, 'Beta');
+    expect(savedNumId(save2, 'Beta')).toBe(beta);
+    expect(savedNumId(save3, 'Beta')).toBe(beta);
+    expect(counts(save2)).toEqual(counts(save1));
+    expect(counts(save3)).toEqual(counts(save1));
+    for (const bytes of [save1, save2, save3]) expect(savedNumId(bytes, 'Beta')).not.toBe(savedNumId(bytes, 'Alpha'));
+    expect(counts(save1)).toEqual({ abstractNums: SOURCE.abstractNums + 2, nums: SOURCE.nums + 2 });
+    expect(beta).toBeGreaterThan(3);
+  });
+
+  test('saving again through the editor over its own save keeps the numId of the new list and adds no definition', async () => {
+    const reopened = await reopenedWithBeta();
+    const over = async (bytes: Uint8Array) => {
+      const projected = yrsToDocument(reopened, { ...reopened.materializeDocx()!, originalBuffer: bytes.slice().buffer });
+      return new Uint8Array(await saveEditorDocument(reopened, projected, []));
+    };
+    const save1 = new Uint8Array(await saveEditorDocument(reopened, yrsToDocument(reopened, reopened.materializeDocx()!), []));
+    const save2 = await over(save1);
+    const save3 = await over(save2);
+    const beta = savedNumId(save1, 'Beta');
+    expect(savedNumId(save2, 'Beta')).toBe(beta);
+    expect(savedNumId(save3, 'Beta')).toBe(beta);
+    expect(counts(save2)).toEqual(counts(save1));
+    expect(counts(save3)).toEqual(counts(save1));
+    for (const bytes of [save1, save2, save3]) expect(savedNumId(bytes, 'Beta')).not.toBe(savedNumId(bytes, 'Alpha'));
+    expect(beta).toBeGreaterThan(3);
+  });
+});
+
+describe('a created list an undo brings back after another created list was saved', () => {
+  test('keeps its ids on a save over the earlier one, and the other list keeps its own', async () => {
+    const created = await session();
+    created.seedFromDocx(makeDocx(DOCUMENT, LISTS_NUMBERING));
+    created.beginUndoCapture();
+    createList(created, 'Alpha', 'bullet');
+    const s1 = (await saveYrsDocx(created, { updateModifiedDate: false })).bytes;
+    const k = savedNumId(s1, 'Alpha');
+    created.addUndoBoundary();
+    createList(created, 'Beta', 'numbered');
+    created.addUndoBoundary();
+    const alpha = created.paragraphs('body').find(entry => entry.text === 'Alpha')!.paraId;
+    created.setParagraphAttrs({ story: 'body', start: { paraId: alpha, offset: 0 }, end: { paraId: alpha, offset: 0 } }, {
+      numPr: null, listIsBullet: null, listNumFmt: null, listMarker: null, other: { listDef: null },
+    });
+    created.addUndoBoundary();
+    const s2 = (await saveYrsDocx(created, { updateModifiedDate: false })).bytes;
+    const undone = created.undo();
+    const s3 = (await saveYrsDocx(created, {
+      updateModifiedDate: false,
+      commentBaseline: { bytes: s2.slice(), comments: created.listComments() },
+      commentDeletion: true,
+    })).bytes;
+    expect(savedNumId(s3, 'Alpha')).toBe(k);
+    expect(savedNumId(s3, 'Beta')).toBe(savedNumId(s2, 'Beta'));
+    expect(undone).toBe(true);
+    expect(savedNumId(s2, 'Alpha')).toBeUndefined();
+    expect(savedNumId(s2, 'Beta')).toBeGreaterThan(3);
+    expect(k).toBeGreaterThan(3);
+  });
+});
+
+describe('ids an earlier save gave that the package now uses for another list', () => {
+  test('are not given again, and the ids given instead stay on the next save', async () => {
+    const created = await session();
+    created.seedFromDocx(makeDocx(DOCUMENT, LISTS_NUMBERING));
+    createList(created, 'Alpha', 'bullet');
+    const s1 = (await saveYrsDocx(created, { updateModifiedDate: false })).bytes;
+    const k = savedNumId(s1, 'Alpha');
+    const other = makeDocx(DOCUMENT, LISTS_NUMBERING.replace(
+      '</w:numbering>',
+      `<w:num w:numId="${k}"><w:abstractNumId w:val="0"/></w:num></w:numbering>`
+    ));
+    const over = async (bytes: Uint8Array) => (await saveYrsDocx(created, {
+      updateModifiedDate: false,
+      commentBaseline: { bytes: bytes.slice(), comments: created.listComments() },
+      commentDeletion: true,
+    })).bytes;
+    const s2 = await over(other);
+    const s3 = await over(s2);
+    const moved = savedNumId(s2, 'Alpha');
+    expect(k).toBeGreaterThan(3);
+    expect(moved).toBeGreaterThan(k!);
+    expect(savedNumId(s3, 'Alpha')).toBe(moved);
+    expect(counts(s3)).toEqual(counts(s2));
+  });
+});
+
+describe('a session that cannot read the created lists in use', () => {
+  test('still saves the created list its paragraph is on', async () => {
+    const created = await session();
+    created.seedFromDocx(makeDocx(DOCUMENT, LISTS_NUMBERING));
+    createList(created, 'Alpha', 'bullet');
+    (created as unknown as { listDefinitionKeysInUse: undefined }).listDefinitionKeysInUse = undefined;
+    const saved = await settled(saveYrsDocx(created, { updateModifiedDate: false }));
+    expect(saved.error).toBeUndefined();
+    const bytes = saved.value?.bytes ?? new Uint8Array();
+    const alpha = saved.value === undefined ? undefined : savedNumId(bytes, 'Alpha');
+    expect(alpha).toBeGreaterThan(3);
+    expect(savedDefinition(bytes, alpha) ?? '').toContain('<w:name w:val="betteroffice-list:');
+  });
+});
+
+describe('a tracked change of a created list read back from the saved file', () => {
+  test('the earlier formatting names a created definition the saved numbering holds, and a reject restores it', async () => {
+    const created = await session();
+    created.seedFromDocx(makeDocx(DOCUMENT, LISTS_NUMBERING));
+    createList(created, 'Alpha', 'numbered');
+    const paraId = created.paragraphs('body').find(entry => entry.text === 'Alpha')!.paraId;
+    created.setParagraphAttrs({ story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 0 } }, {
+      numPr: null, listIsBullet: null, listNumFmt: null, listMarker: null, other: { listDef: null },
+    }, { name: 'Ada', date: '2026-01-01T00:00:00Z' });
+    const bytes = (await saveYrsDocx(created, { updateModifiedDate: false })).bytes;
+    const document = text(unzipContainer(bytes)['word/document.xml']);
+    const saved = (document.match(/<w:p\b[\s\S]*?<\/w:p>/g) ?? []).find(entry => entry.includes('>Alpha<')) ?? '';
+    const change = /<w:pPrChange\b[\s\S]*?<\/w:pPrChange>/.exec(saved)?.[0] ?? '';
+    const earlier = attribute(change, /<w:numId w:val="(\d+)"/);
+    const reopened = await session();
+    reopened.seedFromDocx(bytes.slice());
+    const revision = reopened.listRevisions().find(entry => entry.kind === 'pPrChange');
+    if (revision !== undefined) reopened.rejectChange({ revisionId: revision.revisionId });
+    const properties = reopened.paragraphs('body').find(entry => entry.text === 'Alpha')?.properties as Record<string, unknown> | undefined;
+    const restored = properties?.numPr as Record<string, unknown> | undefined;
+    expect(earlier).toBeGreaterThan(3);
+    expect(savedDefinition(bytes, earlier) ?? '').toContain('<w:name w:val="betteroffice-list:');
+    expect(savedFormat(bytes, earlier)).toBe('decimal');
+    expect(revision).toBeDefined();
+    expect(Number(restored?.numId)).toBe(earlier!);
+  });
 });
