@@ -2364,6 +2364,34 @@ mod tests {
         assert!(close < output.find("<w:t>B</w:t>").unwrap(), "{output}");
     }
 
+    const TWO_FIELDS: &str = concat!(
+        r#"<w:r><w:fldChar w:fldCharType="begin"/><w:instrText xml:space="preserve"> PAGE </w:instrText>"#,
+        r#"<w:fldChar w:fldCharType="separate"/><w:t>1</w:t><w:fldChar w:fldCharType="end"/>"#,
+        r#"<w:t xml:space="preserve"> of </w:t><w:fldChar w:fldCharType="begin"/>"#,
+        r#"<w:instrText xml:space="preserve"> NUMPAGES </w:instrText><w:fldChar w:fldCharType="separate"/>"#,
+        r#"<w:t>2</w:t><w:fldChar w:fldCharType="end"/></w:r>"#
+    );
+
+    #[test]
+    fn a_run_of_two_complex_fields_kept_as_its_source_is_written_once_inside_its_direction_scope() {
+        let (a, b) = (text_run("A"), text_run("B"));
+        let output = written(&format!("{a}{}{b}", rtl(TWO_FIELDS)));
+        assert_eq!(output.matches("<w:dir ").count(), 1, "{output}");
+        assert_eq!(output.matches(r#"w:fldCharType="begin""#).count(), 2, "{output}");
+        let open = output.find("<w:dir ").unwrap();
+        let close = output.find("</w:dir>").unwrap();
+        assert!(open < output.find(r#"w:fldCharType="begin""#).unwrap(), "{output}");
+        assert!(output.rfind(r#"w:fldCharType="end""#).unwrap() < close, "{output}");
+    }
+
+    #[test]
+    fn a_run_of_two_complex_fields_without_a_scope_is_written_as_its_source() {
+        let (a, b) = (text_run("A"), text_run("B"));
+        let output = written(&format!("{a}{TWO_FIELDS}{b}"));
+        assert!(!output.contains("w:dir"), "{output}");
+        assert_eq!(output.matches(TWO_FIELDS).count(), 1, "{output}");
+    }
+
     #[test]
     fn a_bookmark_directly_inside_an_inline_content_control_is_dropped_on_a_rewrite() {
         let (a, b, c, d) = (text_run("A"), text_run("B"), text_run("C"), text_run("D"));
