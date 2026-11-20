@@ -192,7 +192,7 @@ function splitRowWorker(direction: 'up' | 'down', queryEngine?: RustDisplayListQ
     loadRustDisplayListQueryEngine: async () => {}, loadedRustDisplayListQueryEngine: () => queryEngine,
     residentDisplayListQueries: (owner: object, list: RetainedFrame['displayList']): queryModule.DisplayListQueries =>
       residentDisplayListQueries(owner, list, options.productionHooks ? undefined : harnessQueries),
-    releaseResidentDisplayListQueries, StagedEchoPages,
+    releaseResidentDisplayListQueries, StagedEchoPages, openedSeed: null,
     applyFrameDelta: (_frame: RetainedFrame, next: RetainedFrame) => next,
     decodeFrameDelta: (next: RetainedFrame) => next,
     retainedPageByKey: (current: RetainedFrame, pageId: string) => retainedFramePageById(current, BigInt(pageId)),
