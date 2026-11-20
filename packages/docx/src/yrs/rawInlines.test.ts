@@ -387,21 +387,24 @@ describe("a foreign element holding content between 'Hel' and 'lo'", () => {
       expect(session.searchText('Hello').map(match => [match.start, match.end])).toEqual([[0, 5]]);
     });
 
-    it(`${loader}: the structured export reports it once as kept in the package`, async () => {
+    it(`${loader}: the structured export reports it as on main`, async () => {
       const { session } = await load(docx(inner));
       const read = session.exportStructured({ revisionView: 'accepted' });
       if (!read.ok) throw new Error(JSON.stringify(read.failure));
+      const reported = loader === 'the Rust loader'
+        ? ['An inline x:foo is not represented in the export; it stays in the package.']
+        : [];
       expect(
         read.content.diagnostics.filter(({ code }) => code === 'unsupported-content').map(({ message }) => message),
-      ).toEqual(['An inline x:foo is not represented in the export; it stays in the package.']);
-      expect(JSON.stringify(read.content).split('"kind":"unsupported"')).toHaveLength(2);
+      ).toEqual(reported);
+      expect(JSON.stringify(read.content).split('"kind":"unsupported"')).toHaveLength(reported.length + 1);
     });
 
-    it(`${loader}: typing at the start saves it between 'Hel' and 'lo'`, async () => {
+    it(`${loader}: typing at the start saves it at its original offset, as on main`, async () => {
       const { session, base } = await load(docx(inner));
       typeAt(0)(session, session.paragraphs('body')[0]!.paraId);
       const [first] = paragraphsOf(await savedAsTheEditorSaves(session, base));
-      expect(first!.split('<x:foo').map(texts)).toEqual(['XHel', 'lo']);
+      expect(first!.split('<x:foo').map(texts)).toEqual(['XHe', 'llo']);
     });
   }
 });
