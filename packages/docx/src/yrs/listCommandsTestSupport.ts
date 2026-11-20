@@ -44,6 +44,12 @@ const TWO_DECIMAL_NUMBERING = numberingXml(
   abstractNumXml(1, levelXml(0, 'decimal', '%1.') + levelXml(1, 'lowerLetter', '%2.')) +
   numXml(2, 0) + numXml(7, 1)
 );
+/** List 2: decimal at level 0 only. List 7: decimal, lowerLetter and lowerRoman at levels 0 to 2. */
+const DEEP_SEVEN_NUMBERING = numberingXml(
+  abstractNumXml(0, levelXml(0, 'decimal', '%1.')) +
+  abstractNumXml(1, levelXml(0, 'decimal', '%1.') + levelXml(1, 'lowerLetter', '%2.') + levelXml(2, 'lowerRoman', '%3.')) +
+  numXml(2, 0) + numXml(7, 1)
+);
 /** List 5: a bullet list whose level 0 is indented 1440 twips with a 360 twip hanging indent. */
 const INDENTED_NUMBERING = numberingXml(
   abstractNumXml(0, '<w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="•"/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="1440" w:hanging="360"/></w:pPr></w:lvl>') +
@@ -95,9 +101,10 @@ export const LIST_LAYOUT = JSON.stringify({
  * paragraphs numbered by their style's list 1. E: `HYBRID_BULLET` and `HYBRID_NUMBER` of the hybrid
  * list 1. F: `SINGLE_BULLET` of the one-level bullet list 1 above `DEEP_NUMBER` of the decimal list 2.
  * G: `SELECTION_LEAD` above `LIST_TWO_ITEM` at level 0 of the numbered list 2 and `LIST_SEVEN_ITEM`
- * at level 1 of the numbered list 7. H: `INDENTED_ITEM` of the indented bullet list 5.
+ * at level 1 of the numbered list 7. H: `INDENTED_ITEM` of the indented bullet list 5. I: as G, with
+ * a list 2 that defines level 0 only and `LIST_SEVEN_ITEM` at level 2 of list 7.
  */
-export type ListDocument = 'A' | 'B' | 'C' | 'D' | 'E' | 'F' | 'G' | 'H';
+export type ListDocument = 'A' | 'B' | 'C' | 'D' | 'E' | 'F' | 'G' | 'H' | 'I';
 export type ListKind = 'bullet' | 'numbered';
 export interface ListDocumentOptions {
   /** Puts `GAP` directly above `PLAIN`. */
@@ -112,7 +119,7 @@ export interface ListDocumentOptions {
 
 /** The `w:numId`s of the numbering each document opens with. */
 export const SOURCE_NUM_IDS: Readonly<Record<ListDocument, readonly string[]>> = {
-  A: ['1', '2', '3'], B: ['1'], C: [], D: ['1'], E: ['1'], F: ['1', '2'], G: ['2', '7'], H: ['5'],
+  A: ['1', '2', '3'], B: ['1'], C: [], D: ['1'], E: ['1'], F: ['1', '2'], G: ['2', '7'], H: ['5'], I: ['2', '7'],
 };
 
 export async function preloadListWasm(): Promise<void> {
@@ -163,14 +170,17 @@ export function listDocument(doc: ListDocument, options: ListDocumentOptions = {
       HEADING_NUMBERING, undefined, NUMBERED_HEADING_STYLES
     );
   }
-  if (doc === 'E' || doc === 'F' || doc === 'G' || doc === 'H') {
+  if (doc === 'E' || doc === 'F' || doc === 'G' || doc === 'H' || doc === 'I') {
     const opening = {
       E: item(HYBRID_BULLET, 1, 0) + item(HYBRID_NUMBER, 1, 2),
       F: item(SINGLE_BULLET, 1, 0) + item(DEEP_NUMBER, 2, 2),
       G: plain(SELECTION_LEAD) + item(LIST_TWO_ITEM, 2, 0) + item(LIST_SEVEN_ITEM, 7, 1),
       H: item(INDENTED_ITEM, 5, 0),
+      I: plain(SELECTION_LEAD) + item(LIST_TWO_ITEM, 2, 0) + item(LIST_SEVEN_ITEM, 7, 2),
     }[doc];
-    const numbering = { E: HYBRID_NUMBERING, F: SINGLE_LEVEL_NUMBERING, G: TWO_DECIMAL_NUMBERING, H: INDENTED_NUMBERING }[doc];
+    const numbering = {
+      E: HYBRID_NUMBERING, F: SINGLE_LEVEL_NUMBERING, G: TWO_DECIMAL_NUMBERING, H: INDENTED_NUMBERING, I: DEEP_SEVEN_NUMBERING,
+    }[doc];
     return pack(`${XML}<w:document xmlns:w="${W}"><w:body>${opening}${added}${SECT}</w:body></w:document>`, numbering);
   }
   const lead = doc === 'B'
@@ -803,6 +813,29 @@ export function listCommandScenarios(path: string, open: OpenListCommandDriver, 
     expect(original).toContain('w:left="2880"');
     expect(before).toMatchObject({ marker: null });
     expect(before.text ?? 0).toBeGreaterThan((item.text ?? Infinity) + 100);
+  }, timeout);
+
+  test(`${path}: numbering over a selection puts a paragraph whose level the list of the first lacks at the level of the first`, async () => {
+    const driver = await open('I');
+    const before = propertiesOf(driver, LIST_SEVEN_ITEM).numPr;
+    driver.toggle('numbered', SELECTION_LEAD, LIST_SEVEN_ITEM);
+    expect(propertiesOf(driver, LIST_SEVEN_ITEM).numPr).toMatchObject({ numId: 2, ilvl: 0 });
+    expect(propertiesOf(driver, SELECTION_LEAD).numPr).toMatchObject({ numId: 2, ilvl: 0 });
+    expect(savedLevel(await driver.save(), LIST_SEVEN_ITEM)).toMatchObject({ numId: '2', ilvl: '0', numFmt: 'decimal' });
+    expect(before).toMatchObject({ numId: 7, ilvl: 2 });
+  }, timeout);
+
+  test(`${path}: outdent at the top level on a heading numbered by its style saves numId 0 and stays off after reopening`, async () => {
+    const driver = await open('D');
+    const before = { numPr: propertiesOf(driver, HEADING).numPr, marker: driver.marker(HEADING) };
+    driver.indent('decrease', HEADING);
+    const saved = await driver.save();
+    expect(savedList(saved, HEADING)).toMatchObject({ paragraphs: 1, numId: '0' });
+    expect(driver.marker(HEADING) ?? '').toBe('');
+    const reopened = await open('D', { saved });
+    expect(reopened.marker(HEADING) ?? '').toBe('');
+    expect(before.numPr).toMatchObject({ numId: 1 });
+    expect(before.marker).toMatch(/^\d+\.$/);
   }, timeout);
 
   for (const kind of KINDS) {
