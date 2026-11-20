@@ -1600,8 +1600,20 @@ mod tests {
     fn edits_across_a_direction_scope_edge_keep_the_scope_and_every_text() {
         let (open, close) = (r#"<w:dir w:val="rtl">"#, "</w:dir>");
         for (from, to, value, parts, edited) in [
-            (5, 9, "Y", ["BeforY", "o", " runs", " after"], "BeforYo runs after"),
-            (12, 17, "-", ["Before ", "two", " r-", "fter"], "Before two r-fter"),
+            (
+                5,
+                9,
+                "Y",
+                ["BeforY", "o", " runs", " after"],
+                "BeforYo runs after",
+            ),
+            (
+                12,
+                17,
+                "-",
+                ["Before ", "two", " r-", "fter"],
+                "Before two r-fter",
+            ),
         ] {
             let written = try_replace_with_run_edits(
                 &direction_source(open, close),

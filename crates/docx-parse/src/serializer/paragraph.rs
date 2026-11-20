@@ -1940,9 +1940,7 @@ mod tests {
                     r#"{a}<w:commentRangeStart w:id="1"/>{}<w:commentRangeEnd w:id="1"/>{c}"#,
                     rtl(&b)
                 ),
-                format!(
-                    r#"{a}<w:commentRangeStart w:id="1"/>{b}<w:commentRangeEnd w:id="1"/>{c}"#
-                ),
+                format!(r#"{a}<w:commentRangeStart w:id="1"/>{b}<w:commentRangeEnd w:id="1"/>{c}"#),
                 "<w:t>B</w:t>",
             ),
             (
@@ -2020,7 +2018,10 @@ mod tests {
             .collect();
         assert_eq!(counts, [1; 6], "{output}");
         let at: Vec<_> = order.iter().map(|needle| output.find(needle)).collect();
-        assert!(at.windows(2).all(|pair| pair[0] < pair[1]), "{at:?}: {output}");
+        assert!(
+            at.windows(2).all(|pair| pair[0] < pair[1]),
+            "{at:?}: {output}"
+        );
     }
 
     #[test]
