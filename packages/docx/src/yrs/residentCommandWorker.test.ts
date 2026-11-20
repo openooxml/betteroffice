@@ -4084,6 +4084,63 @@ test('round two resident geometry matches the reference walk on built pages', as
   } finally { client.destroy(); }
 }, TIMEOUT);
 
+test('round two resident geometry after edits matches a cold read and the reference walk', async () => {
+  const { readResidentFrameGeometry } = await import('./residentObjectGeometry');
+  const { readResidentFrameGeometry: reference } = await import('./residentObjectGeometry.reference');
+  const paragraph = (index: number, text = 'Seed paragraph ' + index) => '<w:p w14:paraId="' + (index + 1).toString(16).padStart(8, '0') +
+    '"><w:r><w:t>' + text + '</w:t></w:r></w:p>';
+  const row = (text: string, header = false) => '<w:tr>' + (header ? '<w:trPr><w:tblHeader/></w:trPr>' : '') +
+    '<w:tc><w:p><w:r><w:t>' + text + '</w:t></w:r></w:p></w:tc></w:tr>';
+  const table = '<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="1440"/></w:tblGrid>' + row('Head', true) +
+    Array.from({ length: 50 }, (_, index) => row('Row ' + index)).join('') + '</w:tbl>';
+  const bodyXml = Array.from({ length: 40 }, (_, index) => paragraph(index)).join('')
+    .replace('</w:p>', '<w:r><w:footnoteReference w:id="1"/></w:r></w:p>') +
+    paragraph(40, 'Crossing words '.repeat(300)) + table + Array.from({ length: 40 }, (_, index) => paragraph(41 + index)).join('');
+  const { client, engine, initial } = await openWorker({ headersFooters: true, notes: true, objects: true, bodyXml,
+    displayWindow: [0, 12], prepare: () => ({ story: 'body', paraId: '00000003', offset: 4 }) });
+  try {
+    let frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame));
+    const normalize = (value: Awaited<ReturnType<typeof reference>>) => ({ ...value,
+      objects: value.objects.map(({ handle, ...object }) => object),
+    });
+    const pages = new Set<number>();
+    let published = initial.frame.payload.geometry!;
+    let handles = (await readResidentFrameGeometry(engine, frame, initial.selection ?? null, published.layoutRevision)).objects
+      .filter(object => object.kind === 'text').map(object => object.handle);
+    let version = 0;
+    let seq = 0;
+    const steps: Array<[string, Record<string, unknown>]> = [
+      ['insertText', { text: 'x' }], ['insertText', { text: 'y' }], ['deleteBackward', {}],
+      ['paragraphBreak', {}], ['insertText', { text: 'Break ' }], ['deleteBackward', { count: 7 }],
+      ...Array.from({ length: 6 }, () => ['insertText', { text: 'Long words to push the pages along. '.repeat(30) }] as [string, Record<string, unknown>]),
+      ['deleteBackward', { count: 400 }], ['insertText', { text: 'z' }],
+    ];
+    for (const [kind, payload] of steps) {
+      const response = await client.edit(intent(++seq, version, kind, payload));
+      expect(response.outcomes[0]?.status).toBe('applied');
+      version = response.version;
+      for (const bytes of [...response.frame!.payload.pageFrames ?? [], response.frame!.payload.frame]) {
+        frame = applyFrameDeltaOwned(frame, decodeFrameDelta(bytes));
+      }
+      pages.add(frame.pages.length);
+      published = response.frame!.payload.geometry!;
+      const selection = response.selection ?? null;
+      const cold = await readResidentFrameGeometry(engine, frame, selection, published.layoutRevision);
+      expect(JSON.stringify(normalize(published))).toBe(JSON.stringify(normalize(cold)));
+      expect(normalize(published)).toEqual(normalize(await reference(engine, frame, selection, published.layoutRevision)));
+      const after = cold.objects.filter(object => object.kind === 'text').map(object => object.handle);
+      if (kind === 'insertText' && String(payload.text).length === 1) expect(after).toEqual(handles);
+      expect(new Set(after).size).toBe(after.length);
+      handles = after;
+    }
+    expect(pages.size).toBeGreaterThan(1);
+    expect(published.objects.some(object => object.kind === 'cell' && object.rects.some(rect => rect.repeatedHeader))).toBe(true);
+    expect(published.objects.some(object => object.kind === 'text' && new Set(object.rects.map(rect => rect.pageId)).size > 1)).toBe(true);
+    expect(published.objects.some(object => object.story === 'fn:1')).toBe(true);
+    expect(published.objects.some(object => object.story.startsWith('hf:'))).toBe(true);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
 const WRAPPED = 'Wrapped' + ' echo words'.repeat(40);
 
 test('typing in a wrapped paragraph under an active display window carries echo context', async () => {

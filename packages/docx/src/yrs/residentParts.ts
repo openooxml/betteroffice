@@ -146,9 +146,15 @@ export function removePartDocument(engine: ResidentEngineSession, target: DocxPa
 
 export function readPartGeometry(engine: ResidentEngineSession, frame: RetainedFrame): ResidentPartGeometry[] {
   const result: ResidentPartGeometry[] = [];
+  const stories = new Map<string, string>();
+  const partStory = (id: string) => {
+    let story = stories.get(id);
+    if (story === undefined) stories.set(id, story = engine.partStory(id));
+    return story;
+  };
   for (const page of frame.pages) {
     if (page.page.unbuilt) continue;
-    for (const part of [page.page.header, page.page.footer]) if (part) result.push({ kind: part.kind, story: engine.partStory(part.rId),
+    for (const part of [page.page.header, page.page.footer]) if (part) result.push({ kind: part.kind, story: partStory(part.rId),
       pageIndex: page.pageIndex, pageId: page.pageId.toString(), x: 0, y: part.y, width: page.page.width, height: part.height });
     for (const area of page.page.noteAreas ?? []) for (const id of area.noteIds ?? area.notes?.flatMap(note => note.id === undefined ? [] : [note.id]) ?? []) result.push({ kind: area.kind ?? 'footnote',
       story: `${area.kind === 'endnote' ? 'en' : 'fn'}:${id}`, pageIndex: page.pageIndex, pageId: page.pageId.toString(),

@@ -266,19 +266,25 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
     clearProvisionalFinalPages();
     selectionLayout = undefined;
   };
+  let previewInput: { source: string; preview: string; input: string } | undefined;
   const layoutWithPreview = () => {
     laidOutReservations = appliedReservations;
-    const input = JSON.parse(init.layoutWithRegions ? init.layoutInput : layoutInput);
-    const owner = init.layoutWithRegions ? input : input.workerOwned;
+    const source = init.layoutWithRegions ? init.layoutInput : layoutInput;
     const snapshot = registry.snapshot();
     const preview = proposalRevisionPreview(snapshot);
-    if (preview !== undefined || owner.renderEnv?.revisionPreview !== undefined) {
-      owner.renderEnv = { ...owner.renderEnv };
-      if (preview) owner.renderEnv.revisionPreview = preview;
-      else delete owner.renderEnv.revisionPreview;
+    const previewKey = preview === undefined ? '' : JSON.stringify(preview);
+    if (previewInput?.source !== source || previewInput.preview !== previewKey) {
+      const input = JSON.parse(source);
+      const owner = init.layoutWithRegions ? input : input.workerOwned;
+      if (preview !== undefined || owner.renderEnv?.revisionPreview !== undefined) {
+        owner.renderEnv = { ...owner.renderEnv };
+        if (preview) owner.renderEnv.revisionPreview = preview;
+        else delete owner.renderEnv.revisionPreview;
+      }
+      previewInput = { source, preview: previewKey, input: JSON.stringify(input) };
     }
-    if (init.layoutWithRegions) engine.layoutDocumentWithRegionsAfterEdit(JSON.stringify(input));
-    else engine.layoutDocumentJson(JSON.stringify(input));
+    if (init.layoutWithRegions) engine.layoutDocumentWithRegionsAfterEdit(previewInput.input);
+    else engine.layoutDocumentJson(previewInput.input);
     layoutPreviewVersion = snapshot.previewVersion;
     if (commandFrameChanges) {
       commandFrameChanges.layoutPreviewVersion = layoutPreviewVersion;
