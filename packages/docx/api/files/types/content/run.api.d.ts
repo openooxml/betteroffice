@@ -242,8 +242,8 @@ export interface Run {
  */
 export interface DirectionScope {
     kind: 'dir' | 'bdo';
-    /** The `w:val` attribute, verbatim */
-    val: string;
+    /** The `w:val` attribute, verbatim; absent when the element has none */
+    val?: string;
     id: number;
     /** Other attributes of the element, written back verbatim */
     extra?: {
