@@ -2444,7 +2444,10 @@ mod tests {
     fn a_paragraph_of_two_thousand_bookmark_pairs_saves_as_it_reads() {
         for scoped in [false, true] {
             let content = two_thousand_marks(scoped);
-            assert!(written(&content) == paragraph_xml(&content), "scoped: {scoped}");
+            assert!(
+                written(&content) == paragraph_xml(&content),
+                "scoped: {scoped}"
+            );
         }
     }
 
