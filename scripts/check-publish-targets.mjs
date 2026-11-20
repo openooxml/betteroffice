@@ -59,7 +59,7 @@ async function attemptRegistry(url, headers, timeoutMs, method = 'GET', readBody
   if (response.status === 404) return { body: null };
   if (response.ok && readBody) return { body: await response.json() };
   if (response.ok) {
-    await response.body?.cancel();
+    response.body?.cancel().catch(() => {});
     return { body: true };
   }
   const error = new Error(`${url} returned ${response.status}`);
