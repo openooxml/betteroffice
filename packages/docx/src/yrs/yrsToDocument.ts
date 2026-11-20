@@ -2379,7 +2379,11 @@ function paragraphAttrs(properties: Attrs): ParagraphSaveAttrs {
   return attrs as ParagraphSaveAttrs;
 }
 
-function sourceRuns(content: readonly ParagraphContent[], intoFields = false): OriginalRunBoundary[] {
+/**
+ * The runs of `content` with the story units each seeds as, and one boundary per other node: a
+ * kept `w:` element holding content seeds one unit outside a hyperlink, as the seeds count it.
+ */
+function sourceRuns(content: readonly ParagraphContent[], intoFields = false, linked = false): OriginalRunBoundary[] {
   return content.flatMap((child): OriginalRunBoundary[] => {
     if (child.type === 'run') {
       return [{
@@ -2394,11 +2398,12 @@ function sourceRuns(content: readonly ParagraphContent[], intoFields = false): O
         formatting: child.formatting,
       }];
     }
-    if (child.type === 'hyperlink') return sourceRuns(child.children as ParagraphContent[], intoFields);
+    if (child.type === 'hyperlink') return sourceRuns(child.children as ParagraphContent[], intoFields, true);
     if (isTrackedWrapper(child) || child.type === 'inlineSdt' || (intoFields && child.type === 'simpleField')) {
-      return sourceRuns(child.content as ParagraphContent[], intoFields);
+      return sourceRuns(child.content as ParagraphContent[], intoFields, linked);
     }
-    return [{ text: '\ufffc'.repeat(paragraphContentLength(child)) }];
+    const units = child.type === 'rawXml' && !linked ? baseRawInlineUnits(child) : paragraphContentLength(child);
+    return [{ text: '\ufffc'.repeat(units) }];
   });
 }
 
