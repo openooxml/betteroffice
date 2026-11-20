@@ -63,8 +63,9 @@ function main() {
     const manifest = JSON.parse(readFileSync(join(directory, 'package.json'), 'utf8'));
     const plan = importPlan(manifest);
     failures.push(...plan.failures);
-    for (const { specifier, json } of plan.entries) {
-      if (json) continue;
+    const entries = plan.entries.filter((entry) => !entry.json);
+    if (!entries.length) failures.push(`${manifest.name}: no package entries found to load`);
+    for (const { specifier } of entries) {
       checked += 1;
       for (const form of Object.keys(FORMS)) {
         const failure = load(directory, form, specifier);
@@ -72,7 +73,6 @@ function main() {
       }
     }
   }
-  if (checked === 0) failures.push('no package entries found to load');
   if (failures.length) {
     console.error(`${failures.length} loads failed on Node ${process.version}:\n`);
     for (const failure of failures) console.error(`- ${failure}`);
