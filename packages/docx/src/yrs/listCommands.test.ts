@@ -3,7 +3,7 @@ import type { YrsParagraphAttrs } from './index';
 import { LIST_OFF_ATTRS } from './listCommands';
 import { createdListKey } from './listDefinitionSave';
 import {
-  LIST_LAYOUT, PLAIN, listCommandScenarios, listDocument, preloadListWasm, shownMarker,
+  LIST_LAYOUT, PLAIN, listCommandScenarios, listDocument, preloadListWasm, shownLeft, shownMarker,
   type ListCommandDriver, type ListDocument, type ListDocumentOptions,
 } from './listCommandsTestSupport';
 import { closeCommandEngines, command, execute, openCommandEngine, selection, TIMEOUT } from './residentCommandTestSupport';
@@ -41,6 +41,10 @@ async function openWorker(doc: ListDocument, options?: ListDocumentOptions): Pro
     marker: (text) => {
       arm.engine.layoutDocumentWithRegionsRetained(LIST_LAYOUT);
       return shownMarker(arm.engine.buildDisplayListFrame('{}', 0), text);
+    },
+    left: (text) => {
+      arm.engine.layoutDocumentWithRegionsRetained(LIST_LAYOUT);
+      return shownLeft(arm.engine.buildDisplayListFrame('{}', 0), text);
     },
     save: async () => new Uint8Array(await arm.engine.save(bytes.slice(), arm.hostJson ?? '', undefined, [], { full: false })),
   };

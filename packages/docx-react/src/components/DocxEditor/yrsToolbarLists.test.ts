@@ -11,6 +11,7 @@ import {
   listDocument,
   listFont,
   preloadListWasm,
+  shownLeft,
   shownMarker,
   type ListCommandDriver,
   type ListDocument,
@@ -64,6 +65,10 @@ async function openSession(doc: ListDocument, options?: ListDocumentOptions): Pr
     marker: (text) => {
       session.layoutDocumentWithRegionsRetainedJson(LIST_LAYOUT);
       return shownMarker(session.buildDisplayListFrame('{}', 0), text);
+    },
+    left: (text) => {
+      session.layoutDocumentWithRegionsRetainedJson(LIST_LAYOUT);
+      return shownLeft(session.buildDisplayListFrame('{}', 0), text);
     },
     save: async () => (await saveYrsDocx(session, { updateModifiedDate: false })).bytes,
   };

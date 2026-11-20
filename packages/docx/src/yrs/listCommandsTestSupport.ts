@@ -44,6 +44,11 @@ const TWO_DECIMAL_NUMBERING = numberingXml(
   abstractNumXml(1, levelXml(0, 'decimal', '%1.') + levelXml(1, 'lowerLetter', '%2.')) +
   numXml(2, 0) + numXml(7, 1)
 );
+/** List 5: a bullet list whose level 0 is indented 1440 twips with a 360 twip hanging indent. */
+const INDENTED_NUMBERING = numberingXml(
+  abstractNumXml(0, '<w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="•"/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="1440" w:hanging="360"/></w:pPr></w:lvl>') +
+  numXml(5, 0)
+);
 
 /** The paragraph the list commands are applied to; the last paragraph added to each document. */
 export const PLAIN = 'Plain paragraph QA';
@@ -74,6 +79,8 @@ const DEEP_NUMBER = 'Deep numbered item QA';
 const SELECTION_LEAD = 'Selection lead QA';
 const LIST_TWO_ITEM = 'List two item QA';
 const LIST_SEVEN_ITEM = 'List seven item QA';
+/** The item of the indented bullet list 5 of document H. */
+const INDENTED_ITEM = 'Indented list item QA';
 export const LIST_LAYOUT = JSON.stringify({
   bodyStory: 'body',
   regions: { sections: [{ sectionId: 'main', properties: {} }] },
@@ -88,9 +95,9 @@ export const LIST_LAYOUT = JSON.stringify({
  * paragraphs numbered by their style's list 1. E: `HYBRID_BULLET` and `HYBRID_NUMBER` of the hybrid
  * list 1. F: `SINGLE_BULLET` of the one-level bullet list 1 above `DEEP_NUMBER` of the decimal list 2.
  * G: `SELECTION_LEAD` above `LIST_TWO_ITEM` at level 0 of the numbered list 2 and `LIST_SEVEN_ITEM`
- * at level 1 of the numbered list 7.
+ * at level 1 of the numbered list 7. H: `INDENTED_ITEM` of the indented bullet list 5.
  */
-export type ListDocument = 'A' | 'B' | 'C' | 'D' | 'E' | 'F' | 'G';
+export type ListDocument = 'A' | 'B' | 'C' | 'D' | 'E' | 'F' | 'G' | 'H';
 export type ListKind = 'bullet' | 'numbered';
 export interface ListDocumentOptions {
   /** Puts `GAP` directly above `PLAIN`. */
@@ -103,7 +110,7 @@ export interface ListDocumentOptions {
 
 /** The `w:numId`s of the numbering each document opens with. */
 export const SOURCE_NUM_IDS: Readonly<Record<ListDocument, readonly string[]>> = {
-  A: ['1', '2', '3'], B: ['1'], C: [], D: ['1'], E: ['1'], F: ['1', '2'], G: ['2', '7'],
+  A: ['1', '2', '3'], B: ['1'], C: [], D: ['1'], E: ['1'], F: ['1', '2'], G: ['2', '7'], H: ['5'],
 };
 
 export async function preloadListWasm(): Promise<void> {
@@ -152,13 +159,14 @@ export function listDocument(doc: ListDocument, options: ListDocumentOptions = {
       HEADING_NUMBERING, undefined, NUMBERED_HEADING_STYLES
     );
   }
-  if (doc === 'E' || doc === 'F' || doc === 'G') {
+  if (doc === 'E' || doc === 'F' || doc === 'G' || doc === 'H') {
     const opening = {
       E: item(HYBRID_BULLET, 1, 0) + item(HYBRID_NUMBER, 1, 2),
       F: item(SINGLE_BULLET, 1, 0) + item(DEEP_NUMBER, 2, 2),
       G: plain(SELECTION_LEAD) + item(LIST_TWO_ITEM, 2, 0) + item(LIST_SEVEN_ITEM, 7, 1),
+      H: item(INDENTED_ITEM, 5, 0),
     }[doc];
-    const numbering = { E: HYBRID_NUMBERING, F: SINGLE_LEVEL_NUMBERING, G: TWO_DECIMAL_NUMBERING }[doc];
+    const numbering = { E: HYBRID_NUMBERING, F: SINGLE_LEVEL_NUMBERING, G: TWO_DECIMAL_NUMBERING, H: INDENTED_NUMBERING }[doc];
     return pack(`${XML}<w:document xmlns:w="${W}"><w:body>${opening}${added}${SECT}</w:body></w:document>`, numbering);
   }
   const lead = doc === 'B'
@@ -184,30 +192,70 @@ const blockKey = (primitive: Record<string, unknown>) =>
 
 const unspaced = (value: string) => value.replace(/\s+/g, '');
 
-/**
- * The list marker the display list `frame` shows before the one block reading `text`, without
- * white space; '' when it shows none, null when no single block reads `text`.
- */
-export function shownMarker(frame: Uint8Array, text: string): string | null {
+/** A block of a display list: its text, its list marker, and the page x of the first glyph of each. */
+interface ShownBlock {
+  text: string;
+  marker: string;
+  textX?: number;
+  markerX?: number;
+}
+
+const firstX = (primitive: Record<string, unknown>) => {
+  const x = primitive.kind === 'text' ? primitive.x : (primitive.glyphs as ReadonlyArray<{ x?: unknown }> | undefined)?.[0]?.x;
+  return typeof x === 'number' && Number.isFinite(x) ? x : undefined;
+};
+
+const least = (left: number | undefined, right: number | undefined) =>
+  left === undefined ? right : right === undefined ? left : Math.min(left, right);
+
+/** The one block of the display list `frame` reading `text`; null when no single block does. */
+function shownBlock(frame: Uint8Array, text: string): ShownBlock | null {
   const displayList = applyFrameDelta(null, decodeFrameDelta(frame)).displayList as unknown as {
     pages: ReadonlyArray<{ primitives?: readonly unknown[] }>;
   };
   for (const page of displayList.pages) {
-    const blocks = new Map<string, { text: string; marker: string }>();
+    const blocks = new Map<string, ShownBlock>();
     for (const primitive of flatten(page.primitives ?? [])) {
       if (primitive.kind !== 'text' && primitive.kind !== 'glyphRun') continue;
       const key = blockKey(primitive);
       if (key === undefined) continue;
       const block = blocks.get(key) ?? { text: '', marker: '' };
       blocks.set(key, block);
-      if (primitive.listMarker === true) block.marker += String(primitive.text ?? '');
-      else block.text += String(primitive.text ?? '');
+      if (primitive.listMarker === true) {
+        block.marker += String(primitive.text ?? '');
+        block.markerX = least(block.markerX, firstX(primitive));
+      } else {
+        block.text += String(primitive.text ?? '');
+        block.textX = least(block.textX, firstX(primitive));
+      }
     }
     const hits = [...blocks.values()].filter(block => unspaced(block.text) === unspaced(text));
-    if (hits.length === 1) return unspaced(hits[0]!.marker);
+    if (hits.length === 1) return hits[0]!;
     if (hits.length > 1) return null;
   }
   return null;
+}
+
+/**
+ * The list marker the display list `frame` shows before the one block reading `text`, without
+ * white space; '' when it shows none, null when no single block reads `text`.
+ */
+export function shownMarker(frame: Uint8Array, text: string): string | null {
+  const block = shownBlock(frame, text);
+  return block ? unspaced(block.marker) : null;
+}
+
+/** Where a block is laid out: the page x, in hundredths of a pixel, of the first glyph of its text and of its list marker. */
+export interface ShownLeft {
+  text: number | null;
+  marker: number | null;
+}
+
+/** Where the display list `frame` lays out the one block reading `text`; nulls for what it does not show. */
+export function shownLeft(frame: Uint8Array, text: string): ShownLeft {
+  const block = shownBlock(frame, text);
+  const hundredths = (x: number | undefined) => (x === undefined ? null : Math.round(x * 100));
+  return { text: hundredths(block?.textX), marker: hundredths(block?.markerX) };
 }
 
 /** What a saved package says of the list of the paragraph reading `text`. */
@@ -274,6 +322,18 @@ function savedLevel(bytes: Uint8Array, text: string): SavedLevel {
   return saved;
 }
 
+/** The `w:pPr` of the one saved paragraph reading `text`; '' when it has none. */
+function savedParagraphProperties(bytes: Uint8Array, text: string): string {
+  const document = new TextDecoder().decode(unzipContainer(bytes)['word/document.xml']);
+  const textOf = (xml: string) => [...xml.matchAll(/<w:t(?:\s[^>]*)?>([^<]*)<\/w:t>/g)].map(match => match[1]).join('');
+  const paragraphs = (document.match(/<w:p\b[^>]*>[\s\S]*?<\/w:p>/g) ?? []).filter(paragraph => textOf(paragraph) === text);
+  expect(paragraphs).toHaveLength(1);
+  return paragraphs[0]!.match(/<w:pPr\b[^>]*>[\s\S]*?<\/w:pPr>/)?.[0] ?? '';
+}
+
+/** The direct `w:ind` of the one saved paragraph reading `text`; undefined when it has none. */
+const savedIndent = (bytes: Uint8Array, text: string) => savedParagraphProperties(bytes, text).match(/<w:ind\b[^>]*\/>/)?.[0];
+
 /** The length in bytes of the numbering part of the saved package `bytes`; 0 when it has none. */
 function savedNumberingLength(bytes: Uint8Array): number {
   return unzipContainer(bytes)['word/numbering.xml']?.length ?? 0;
@@ -290,6 +350,7 @@ export interface ListCommandDriver {
   paragraphs(): ReadonlyArray<{ paraId: string; text: string; properties: Record<string, unknown> }>;
   definitions(): ReadonlyArray<{ key: string; kind: string }>;
   marker(text: string): string | null;
+  left(text: string): ShownLeft;
   save(): Promise<Uint8Array>;
 }
 
@@ -680,4 +741,55 @@ export function listCommandScenarios(path: string, open: OpenListCommandDriver, 
     expect(key).toBeDefined();
     expect(first).toBeGreaterThan(0);
   }, timeout);
+
+  test(`${path}: bullets below an item of a list with its own indent lay the paragraph out where that list puts its items, as after reopening`, async () => {
+    const driver = await open('H');
+    const before = driver.left(PLAIN);
+    driver.toggle('bullet', PLAIN);
+    const item = driver.left(INDENTED_ITEM);
+    const live = driver.left(PLAIN);
+    expect(live).toEqual(item);
+    const saved = await driver.save();
+    const reopened = await open('H', { saved });
+    expect(reopened.left(PLAIN)).toEqual(live);
+    expect(reopened.left(INDENTED_ITEM)).toEqual(item);
+    expect([PLAIN, INDENTED_ITEM].map(text => savedIndent(saved, text))).toEqual([undefined, undefined]);
+    const resaved = await reopened.save();
+    expect([PLAIN, INDENTED_ITEM].map(text => savedIndent(resaved, text))).toEqual([undefined, undefined]);
+    expect(propertiesOf(driver, PLAIN).numPr).toMatchObject({ numId: 5, ilvl: 0 });
+    expect(item.marker).not.toBeNull();
+    expect(before).toMatchObject({ marker: null });
+    expect(item.text ?? 0).toBeGreaterThan((before.text ?? Infinity) + 100);
+  }, timeout);
+
+  test(`${path}: bullets on and off again below an item of a list with its own indent lay the paragraph out where it was, as after reopening`, async () => {
+    const driver = await open('H');
+    const before = driver.left(PLAIN);
+    const original = savedParagraphProperties(await driver.save(), PLAIN);
+    driver.toggle('bullet', PLAIN);
+    driver.toggle('bullet', PLAIN);
+    expect(driver.left(PLAIN)).toEqual(before);
+    const saved = await driver.save();
+    expect(savedParagraphProperties(saved, PLAIN)).toBe(original);
+    const reopened = await open('H', { saved });
+    expect(reopened.left(PLAIN)).toEqual(before);
+    expectOffList(driver, PLAIN);
+    expect(before.text).not.toBeNull();
+  }, timeout);
+
+  for (const kind of KINDS) {
+    for (const level of [0, 2]) {
+      test(`${path}: a paragraph at level ${level} of a created ${kind} list is laid out the same after reopening`, async () => {
+        const driver = await open('C', { isolated: true });
+        driver.toggle(kind, PLAIN);
+        for (let step = 0; step < level; step += 1) driver.indent('increase', PLAIN);
+        const live = driver.left(PLAIN);
+        const reopened = await open('C', { saved: await driver.save() });
+        expect(reopened.left(PLAIN)).toEqual(live);
+        expect(propertiesOf(driver, PLAIN).numPr).toMatchObject({ ilvl: level });
+        expect(live.text).not.toBeNull();
+        expect(live.marker).not.toBeNull();
+      }, timeout);
+    }
+  }
 }
