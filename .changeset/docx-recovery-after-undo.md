@@ -5,4 +5,4 @@
 '@betteroffice/pptx': minor
 ---
 
-DOCX worker recovery after a worker restart no longer fails, or brings back undone text, when undo or redo was used. Adds the `applyUpdate` command kind, which only recovery sends, and the required `applyVerbatimUpdate` engine method. XLSX and PPTX: a type addition only.
+A DOCX document opened with a seed and without collaboration now recovers after a worker restart that followed undo or redo, and undo history starts at recovery. Adds the public `clientId` and `onStream` members and the engine's `apply_verbatim_update`.

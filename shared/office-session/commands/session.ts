@@ -145,6 +145,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
 ): WorkerEditSession<P, S, E, X, Q> {
   const initial = options.connection.initial;
   const seed = initial.seed && { ...initial.seed, stateVector: initial.seed.stateVector.slice() };
+  let streamed = seed !== undefined;
   const maxAttempts = options.maxRecoveryAttempts === 0 ? 0 : limit(options.maxRecoveryAttempts, 2);
   const source = maxAttempts === 0 ? undefined : cloneData(options.source);
   const sessionId = initial.session;
@@ -949,7 +950,6 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
         knownLayout = opened.revisions?.layout ?? 0;
         initialFrame = undefined;
         acceptAck(record, opened);
-        const historyReset = retainedCheckpoint !== undefined || seed !== undefined;
         const entries = [...log.values()].sort((a, b) => a.envelope.seq - b.envelope.seq);
         const loose = [...stream];
         const items: Array<LogEntry<P> | StreamLogEntry<P>> = [];
@@ -985,7 +985,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
           }
           const entry = item;
           if (blocked(entry.outcome)) continue;
-          if (historyReset && !entry.outcome && options.replayable?.(entry.envelope) === false) {
+          if (streamed && !entry.outcome && options.replayable?.(entry.envelope) === false) {
             presenter.event(() => {
               recordOutcome(entry, { seq: entry.envelope.seq, status: 'refused', reason: 'history-reset', committed: false }, true);
             });
@@ -1018,6 +1018,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
         if (!live(record)) throw record.failure;
         record.seenSeq = replayed;
         record.seenMark = highSeq;
+        streamed = opened.seed !== undefined;
         recovering = false;
         checkpointAttemptedAt = -1;
         checkpointAttemptedStream = -1;

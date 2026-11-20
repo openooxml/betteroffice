@@ -18,10 +18,16 @@ export function registerCommandAnchorState(engine: DocxWorkerCommandEngine, stat
 
 export function readCommandStickyPosition(engine: DocxWorkerCommandEngine, at: YrsLoc): YrsStickyPosition {
   const sticky = engine.encodeStickyPosition(at);
-  commandStates.get(engine)?.stickyPositions.set(stickyPositionKey(sticky.story, sticky.encoded), {
-    story: sticky.story, encoded: sticky.encoded.slice(),
-  });
+  const state = commandStates.get(engine);
+  if (state) issueStickyPosition(state, stickyPositionKey(sticky.story, sticky.encoded), sticky);
   return sticky;
+}
+
+export function issueStickyPosition(state: DocxWorkerCommandState, key: string, position: YrsStickyPosition): void {
+  if (state.issuedPositions && !state.stickyPositions.has(key)) {
+    state.issuedPositions.push([key, { story: position.story, encoded: position.encoded.slice() }]);
+  }
+  state.stickyPositions.set(key, { story: position.story, encoded: position.encoded.slice() });
 }
 
 export function stickyPositionKey(story: string, bytes: Uint8Array): string {
@@ -111,9 +117,7 @@ export function mintCommandSelection(
 ): DocxCommandSelection {
   const mint = (at: YrsLoc): DocxCommandPosition => {
     const sticky = engine.encodeStickyPosition(at);
-    state.stickyPositions.set(stickyPositionKey(at.story, sticky.encoded), {
-      story: at.story, encoded: sticky.encoded.slice(),
-    });
+    issueStickyPosition(state, stickyPositionKey(at.story, sticky.encoded), { story: at.story, encoded: sticky.encoded });
     return { story: at.story, paraId: at.paraId, offset: at.offset, sticky: sticky.encoded.slice() };
   };
   return { anchor: mint(selected.anchor), focus: mint(selected.focus) };

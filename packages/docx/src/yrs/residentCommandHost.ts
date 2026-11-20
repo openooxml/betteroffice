@@ -49,7 +49,7 @@ export function createResidentCommandHost(options: DocxCommandHostOptions): Docx
   const selections = new Map<number, DocxCommandSelection | null>(structuredClone(init.recoveryState?.selections ?? []));
   const selectionLimit = Math.max(256, options.retainedOutcomes ?? 256);
   const recording = options.recordUpdates === true && hooks.commandState !== undefined;
-  let issued = hooks.issuedPositions?.(Number.MAX_SAFE_INTEGER).count ?? 0;
+  if (recording) hooks.issuedPositions?.();
   let capture: Uint8Array[] | undefined;
   let streamOrigin: CommandStreamEntry['origin'] = 'frame';
   let streamSeq = throughSeq;
@@ -63,11 +63,8 @@ export function createResidentCommandHost(options: DocxCommandHostOptions): Docx
     const after = hooks.commandState!();
     const state = Object.fromEntries(Object.entries(after).filter(([key, value]) =>
       !sameCommandState(before[key as keyof typeof before], value))) as DocxCommandEffectState;
-    const positions = hooks.issuedPositions?.(issued);
-    if (positions) {
-      issued = positions.count;
-      if (positions.entries.length) state.stickyPositions = positions.entries;
-    }
+    const positions = hooks.issuedPositions?.();
+    if (positions?.length) state.stickyPositions = positions;
     const changed = Object.keys(state).length > 0;
     if (noop && !changed && updates.length === 0) return undefined;
     const payload: DocxCommandPayloads['applyUpdate'] = {

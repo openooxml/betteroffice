@@ -1165,7 +1165,8 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
       snapshot: () => engine.encodeState(),
     },
   });
-  const stopRecording = openedSeed !== null && !collaboration ? engine.onUpdate((update) => host.recordUpdate(update)) : undefined;
+  const stopRecording = openedSeed !== null && !collaboration && host.withCommandWork && host.recordUpdate && host.takeStream
+    ? engine.onUpdate((update) => host.recordUpdate?.(update)) : undefined;
   commandInit = init;
   commandQueries = (frame) => residentDisplayListQueries(engine, frame.displayList);
   commandShownText = () => {
@@ -1292,7 +1293,7 @@ function postCommandFrame(
 function commandStreamAnswer(host: DocxCommandHost | null, init: DocxCommandInitRequest | null): Pick<
   DocxEngineWorkerResponse & { ok: true }, 'commandStream'
 > {
-  const entries = host && init ? host.takeStream() : undefined;
+  const entries = host && init ? host.takeStream?.() : undefined;
   return entries ? { commandStream: { session: init!.session, incarnation: init!.incarnation, epoch: init!.epoch, entries } } : {};
 }
 
@@ -1702,8 +1703,9 @@ async function runRequest(request: ScheduledRequest): Promise<void> {
       request.type !== 'commandUpdate' && request.type !== 'buildPages' && request.type !== 'commandViewport' &&
       request.type !== 'decodeFontFace') {
       const host = commandHost;
-      if (request.type === 'save') await host.withCommandWork('save', () => host.withFrameWork(() => handle(request)));
-      else await host.withFrameWork(() => handle(request));
+      if (request.type === 'save' && host.withCommandWork) {
+        await host.withCommandWork('save', () => host.withFrameWork(() => handle(request)));
+      } else await host.withFrameWork(() => handle(request));
     } else await handle(request);
     primeSaveSeedStatesOnce();
   } catch (error) {
@@ -1867,8 +1869,10 @@ async function handle(request: ScheduledRequest): Promise<void> {
     holdWholeFaceRequests = true;
     const seeded = session;
     try {
-      const initial = await bindResidentCommands(init).initial();
-      const seed = openedSeed && { ...openedSeed, stateVector: new Uint8Array(seeded.encodeStateVector()) };
+      const host = bindResidentCommands(init);
+      const initial = await host.initial();
+      const seed = openedSeed && host.withCommandWork && host.recordUpdate && host.takeStream
+        ? { ...openedSeed, stateVector: new Uint8Array(seeded.encodeStateVector()) } : null;
       replyCommand(request.id, 'commandInitial', !seed ? initial : isTransferResult(initial)
         ? transferable({ ...initial.value, seed }, initial.transfer) : { ...initial, seed });
     } finally {

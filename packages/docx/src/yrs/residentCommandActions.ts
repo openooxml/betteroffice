@@ -7,11 +7,10 @@ import { applyReviewCommand, grantedHostProposal, preflightReviewCommand, review
 import { planResidentListChanges } from './residentCommandLists';
 import { breakRefusedWhileSuggesting, leadingBlockCount } from './sectionBreak';
 import { tableBoundaryDeleteTarget } from './tableBoundaryDelete';
-import type {
-  YrsInlineFormatDelta, YrsLoc, YrsParagraphAttrs, YrsRunMark, YrsSelectionContext, YrsStickyPosition, YrsStoryRange, YrsStorySegment,
-} from './index';
+import type { YrsInlineFormatDelta, YrsLoc, YrsParagraphAttrs, YrsRunMark, YrsSelectionContext, YrsStoryRange, YrsStorySegment } from './index';
 import {
-  commandSelectionRange, mintCommandSelection, readCommandSelection, registerCommandAnchorState, resolveCommandSelection,
+  commandSelectionRange, issueStickyPosition, mintCommandSelection, readCommandSelection, registerCommandAnchorState,
+  resolveCommandSelection,
 } from './residentCommandAnchors';
 import { projectDocxEditState, withStoredMarks } from './residentCommandEditState';
 import { resolveDocxSelectionIntent, selectResidentPartPage } from './residentCommandSelection';
@@ -1406,7 +1405,7 @@ function applyPreparedDocxCommand(
 function restoreCommandState(
   engine: DocxWorkerCommandEngine, state: DocxWorkerCommandState, restored: DocxCommandEffectState
 ): void {
-  for (const [key, position] of restored.stickyPositions ?? []) state.stickyPositions.set(key, structuredClone(position));
+  for (const [key, position] of restored.stickyPositions ?? []) issueStickyPosition(state, key, position);
   if (restored.storedMarks !== undefined) state.storedMarks = structuredClone(restored.storedMarks);
   if ('activePart' in restored) state.activePart = structuredClone(restored.activePart);
   if (restored.proposals) {
@@ -1516,13 +1515,10 @@ export const createResidentDocxCommandHooks: DocxCommandHooksFactory = (engine, 
       selection: projected().selection, storedMarks: state.storedMarks, activePart: state.activePart,
       cellSelection: readCellSelection(engine), proposals: state.proposals!.exportState(),
     }),
-    issuedPositions: (from) => {
-      const entries: [string, YrsStickyPosition][] = [];
-      let index = 0;
-      for (const [key, position] of state.stickyPositions) {
-        if (index++ >= from) entries.push([key, { story: position.story, encoded: position.encoded.slice() }]);
-      }
-      return { count: state.stickyPositions.size, entries };
+    issuedPositions: () => {
+      const entries = state.issuedPositions ?? [];
+      state.issuedPositions = [];
+      return entries;
     },
   };
 };
