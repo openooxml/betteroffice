@@ -43,9 +43,9 @@ pub use docx_layout::display_list::{DisplayList, DisplayPage, HfParts, Primitive
 pub use docx_layout::types::{Input as LayoutInput, Layout, LayoutOptions, MeasuredBlock, Page};
 pub use docx_parse::xml::ParseLimits;
 pub use docx_parse::{
-    BlockContent, DocumentBody, DroppedParagraph, DroppedStructure, HeaderFooter, InlineNode,
-    KeptParagraph, Paragraph, ParagraphContent, Run, RunContent, Section, SectionProperties, Table,
-    TableCell, TableRow, get_paragraph_text,
+    BlockContent, DirectionKind, DirectionScope, DocumentBody, DroppedParagraph, DroppedStructure,
+    HeaderFooter, InlineNode, KeptParagraph, Paragraph, ParagraphContent, Run, RunContent, Section,
+    SectionProperties, Table, TableCell, TableRow, get_paragraph_text,
 };
 
 pub type Result<T> = std::result::Result<T, Error>;
