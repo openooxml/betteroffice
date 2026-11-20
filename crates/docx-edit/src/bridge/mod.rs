@@ -5614,7 +5614,7 @@ fn lower_paragraph_attrs(
     result.doc_grid_pitch_px = env
         .doc_grid_pitch_px
         .filter(|pitch| pitch.is_finite() && *pitch > 0.0);
-    lower_paragraph_indent(values, &mut result);
+    lower_paragraph_indent(values, list_state, &mut result);
     lower_paragraph_tabs(values, &mut result);
 
     result.has_source_content = true_property(values, "hasSourceContent");
@@ -5949,7 +5949,15 @@ fn lower_paragraph_spacing(
     }
 }
 
-fn lower_paragraph_indent(values: &BTreeMap<String, Any>, result: &mut ParagraphAttrs) {
+/// The indent of the paragraph with `values`. A paragraph on a list takes what it has no value of
+/// its own for from the definition of its list level, and the indent of Word's default lists
+/// where the definition gives none or the paragraph states that indent in character units, which
+/// layout does not read.
+fn lower_paragraph_indent(
+    values: &BTreeMap<String, Any>,
+    list_state: &ListState,
+    result: &mut ParagraphAttrs,
+) {
     let indent_map = values.get("indent").and_then(any_map);
     let mut left = value_number(values.get("indentLeft"))
         .or_else(|| indent_map.and_then(|map| map_number(map, "left")));
@@ -5963,11 +5971,25 @@ fn lower_paragraph_indent(values: &BTreeMap<String, Any>, result: &mut Paragraph
         .or_else(|| indent_map.and_then(|map| map_bool(map, "hanging")))
         .unwrap_or(false);
 
-    if let (Some(list), None) = (resolve_list_identity(values), left) {
-        left = Some((list.level() + 1.0) * 720.0);
+    if let Some(list) = resolve_list_identity(values) {
+        let original = values.get("_originalFormatting").and_then(any_map);
+        let in_characters = |key: &str| {
+            [values.get(key), original.and_then(|original| original.get(key))]
+                .into_iter()
+                .flatten()
+                .any(|value| !matches!(value, Any::Null))
+        };
+        let (level_left, level_first) = list_state.level_indent(values);
+        let level_left = level_left.filter(|_| !in_characters("indentLeftChars"));
+        let level_first = level_first.filter(|_| !in_characters("indentFirstLineChars"));
+        let own_left = left.is_some();
+        left = left.or(level_left).or(Some((list.level() + 1.0) * 720.0));
         if first_line.is_none() {
-            first_line = Some(-360.0);
-            hanging = true;
+            let default = (!own_left).then_some((-360.0, true));
+            if let Some((first, hangs)) = level_first.or(default) {
+                first_line = Some(first);
+                hanging = hangs;
+            }
         }
     }
 
