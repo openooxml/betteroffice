@@ -514,23 +514,102 @@ for (const [type, breakRun, loaders] of LEADING_BREAKS) {
   });
 }
 
+const breakCounts = (xml: string) => ({
+  page: xml.split('<w:br w:type="page"/>').length - 1,
+  column: xml.split('<w:br w:type="column"/>').length - 1,
+});
+const centre: Edit = (session, paraId) => {
+  const position = { paraId, offset: 0 };
+  session.setParagraphAttrs({ story: 'body', start: position, end: position }, { alignment: 'center' });
+};
+
+/** A paragraph, the loaders that seed its breaks, an edit, and the breaks, text and markup its save holds. */
+const LIVE_BREAKS: Array<{
+  name: string;
+  inner: string;
+  loaders: string[];
+  edit: Edit;
+  breaks: { page: number; column: number };
+  text: string;
+  holds?: string[];
+}> = [
+  {
+    name: 'typing before an unknown element that is directly before a leading page break keeps the page break and the element',
+    inner: `${ZZZ}${PAGE_BREAK}${SOURCE.t('After')}`,
+    loaders: ['the Rust loader', 'the TypeScript loader'],
+    edit: typeAt(0),
+    breaks: { page: 1, column: 0 },
+    text: `X${trace(paragraph(ZZZ))}After`,
+  },
+  {
+    name: 'typing before an unknown element that is directly before a leading column break keeps the column break and the element',
+    inner: `${ZZZ}${COLUMN_BREAK}${SOURCE.t('After')}`,
+    loaders: ['the Rust loader'],
+    edit: typeAt(0),
+    breaks: { page: 0, column: 1 },
+    text: `X${trace(paragraph(ZZZ))}After`,
+  },
+  {
+    name: 'typing at the end after a hyperlink holding only an unknown element before a leading page break keeps the page break and the element',
+    inner: `<w:hyperlink w:anchor="target">${ZZZ}</w:hyperlink>${PAGE_BREAK}${SOURCE.t('After')}`,
+    loaders: ['the Rust loader', 'the TypeScript loader'],
+    edit: (session, paraId) => typeAt(spanLength(session))(session, paraId),
+    breaks: { page: 1, column: 0 },
+    text: `${trace(paragraph(ZZZ))}AfterX`,
+  },
+  {
+    name: 'changing the alignment of a paragraph of a page break, an unknown element and a column break keeps both breaks and the element',
+    inner: `${PAGE_BREAK}${ZZZ}${COLUMN_BREAK}`,
+    loaders: ['the Rust loader'],
+    edit: centre,
+    breaks: { page: 1, column: 1 },
+    text: trace(paragraph(ZZZ)),
+  },
+  {
+    name: 'deleting an unknown element before a leading page break followed by a tab keeps the page break and the tab',
+    inner: `${ZZZ}${PAGE_BREAK}${run('<w:tab/>')}${SOURCE.t('After')}`,
+    loaders: ['the Rust loader', 'the TypeScript loader'],
+    edit: deleteBetween(0, 1),
+    breaks: { page: 1, column: 0 },
+    text: 'After',
+    holds: ['<w:tab/>'],
+  },
+];
+
+describe('a break the live paragraph holds beside an unknown element holding a run', () => {
+  for (const { name, inner, loaders, edit, breaks, text, holds = [] } of LIVE_BREAKS) {
+    for (const [loader, load] of LOADERS.filter(([entry]) => loaders.includes(entry))) {
+      it(`${loader}: ${name}`, async () => {
+        const { session, base } = await load(docx(inner));
+        edit(session, session.paragraphs('body')[0]!.paraId);
+        const [first] = paragraphsOf(await savedAsTheEditorSaves(session, base));
+        expect(breakCounts(first!)).toEqual(breaks);
+        expect(trace(first!)).toBe(text);
+        expect(holds.filter(markup => !first!.includes(markup))).toEqual([]);
+      });
+    }
+  }
+});
+
 describe('runs of their own languages around an unknown element holding a run', () => {
   const lang = (value: string, content: string) => run(`<w:rPr><w:lang w:val="${value}"/></w:rPr>${content}`);
-  const inner = `${lang('fr-FR', '<w:t>A</w:t>')}${ZZZ}${lang('de-DE', '<w:br/>')}${lang('es-ES', '<w:t>B</w:t>')}`;
+  const rule = '<w:pict xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office">' +
+    '<v:rect style="width:0pt;height:1.5pt" o:hr="t" o:hrstd="t"/></w:pict>';
+  const inner = `${lang('fr-FR', '<w:t>A</w:t>')}${ZZZ}${lang('de-DE', rule)}${lang('es-ES', '<w:t>B</w:t>')}`;
   const runWith = (xml: string, needle: string) => {
     const at = xml.indexOf(needle);
     return at < 0 ? '' : xml.slice(xml.lastIndexOf('<w:r>', at), xml.indexOf('</w:r>', at));
   };
 
   for (const [loader, load] of LOADERS) {
-    it(`${loader}: typing at the end keeps each run's own language, the line break's too`, async () => {
+    it(`${loader}: typing at the end keeps each run's own language, the horizontal rule's too`, async () => {
       const { session, base } = await load(docx(inner));
       typeAt(spanLength(session))(session, session.paragraphs('body')[0]!.paraId);
       const [first] = paragraphsOf(await savedAsTheEditorSaves(session, base));
       expect(trace(first!)).toBe(`A${trace(paragraph(ZZZ))}BX`);
-      const languages = [['>A<', 'fr-FR'], ['<w:br/>', 'de-DE'], ['>B', 'es-ES']]
+      const languages = [['>A<', 'fr-FR'], ['<w:pict', 'de-DE'], ['>B', 'es-ES']]
         .map(([needle, value]) => [needle, runWith(first!, needle!).includes(`w:val="${value}"`)]);
-      expect(languages).toEqual([['>A<', true], ['<w:br/>', true], ['>B', true]]);
+      expect(languages).toEqual([['>A<', true], ['<w:pict', true], ['>B', true]]);
     });
   }
 });
