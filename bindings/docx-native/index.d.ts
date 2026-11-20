@@ -74,6 +74,7 @@ export declare class EditSession {
   add_undo_boundary(): void
   apply_edits_json(request: string): string
   apply_host_update(update: Uint8Array): void
+  apply_verbatim_update(update: Uint8Array): void
   apply_local_update(update: Uint8Array): void
   apply_paragraph_style(story: string, startPara: string, startOffset: number, endPara: string, endOffset: number, styleId: string, authorName?: string | undefined | null, authorDate?: string | undefined | null): void
   apply_raw_ops(story: string, opsJson: string): void

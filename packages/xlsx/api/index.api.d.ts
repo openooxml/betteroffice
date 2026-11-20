@@ -2724,7 +2724,7 @@ import type { CommandTable, QueryFence, QueryHandlers, QueryReply, QueryTable, W
 /** @internal Reply error name for an indeterminate command outcome. */
 export declare const COMMAND_OUTCOME_UNKNOWN = "CommandOutcomeUnknown";
 /** @internal Shared refusal and cancellation reasons; formats may supply other strings. */
-export type CommandRefusalReason = 'stale-epoch' | 'stale-incarnation' | 'wrong-session' | 'stale-version' | 'dependency-refused' | 'unknown-outcome' | 'disposed';
+export type CommandRefusalReason = 'stale-epoch' | 'stale-incarnation' | 'wrong-session' | 'stale-version' | 'dependency-refused' | 'unknown-outcome' | 'disposed' | 'replay-pending' | 'history-reset';
 /** @internal Error data preserved by the existing RPC reply protocol. */
 export type CommandOutcomeUnknownError = Error & {
     name: typeof COMMAND_OUTCOME_UNKNOWN;
@@ -2749,6 +2749,8 @@ export type CommandEnvelope<P> = {
     lastInputTime?: number;
     group?: string;
     replay?: true;
+    /** @internal A replayed stream entry applied before command `seq`, outside the command sequence. */
+    stream?: true;
 };
 /** @internal Settled worker outcome for one command sequence. */
 export type CommandOutcome = {
@@ -2757,13 +2759,21 @@ export type CommandOutcome = {
     reason?: string;
     committed?: false;
     affectedSeqs?: number[];
-    /** @internal The command that reproduces an applied command's effect when recovery replays it. */
+    /** @internal The command that reproduces an applied command's effect, or a no-op's state, when recovery replays it. */
     effect?: CommandEffect;
 };
 /** @internal Replacement command a recovery replay sends in place of the applied command it stands for. */
 export type CommandEffect = {
     kind: string;
     payload: unknown;
+};
+/** @internal What a worker's document emitted outside any command, replayed by recovery after command `throughSeq`. */
+export type CommandStreamEntry = {
+    throughSeq: number;
+    /** Order among the entries of one incarnation, from 0. */
+    index: number;
+    origin: 'save' | 'frame';
+    effect: CommandEffect;
 };
 /** @internal Full or incremental frame identified by command coverage and revision. */
 export type FrameEnvelope<F> = {
@@ -2790,11 +2800,14 @@ export type CommandAck<S, E, F> = {
     };
     /** @internal How an initial acknowledgement's document was seeded, so recovery can seed it again with the same ids. */
     seed?: CommandSeed;
+    /** @internal Stream entries emitted since the previous acknowledgement. */
+    stream?: CommandStreamEntry[];
 };
-/** @internal The ids a seed wrote under and the state vector it produced. */
+/** @internal The ids a seed wrote under, the SHA-256 of its source, and the state vector it produced. */
 export type CommandSeed = {
     clientId: number;
     generation: string;
+    digest: string;
     stateVector: Uint8Array;
 };
 /** @internal Snapshot captured at a settled command boundary. */
@@ -2803,6 +2816,8 @@ export type Checkpoint = {
     epoch: number;
     version: number;
     throughSeq: number;
+    /** @internal Stream entries the snapshot holds: those of its incarnation with a lower index. */
+    stream?: number;
 };
 /** @internal Methods registered on the existing session RPC. */
 export type CommandMethods<P, S, E, F> = {
@@ -2896,6 +2911,8 @@ export type CommandConnection<P, S, E, F> = {
         /** @internal Subscribes to frames posted by this connection's worker. */
         onFrame?(listener: (frame: FrameEnvelope<F>) => void): () => void;
         onAck?(listener: (ack: CommandAck<S, E, F>) => void): () => void;
+        /** @internal Subscribes to stream entries this connection's worker reports outside acknowledgements. */
+        onStream?(listener: (entries: CommandStreamEntry[]) => void): () => void;
         dispose(): Promise<void>;
     };
 };
@@ -2916,6 +2933,7 @@ export type ApplyResult<S, E> = {
     status: 'noop';
     selection?: S;
     editState?: E;
+    effect?: CommandEffect;
 } | {
     status: 'cancelled';
     reason?: string;
@@ -3085,6 +3103,8 @@ export type WorkerEditSessionOptions<O, P, S, E, F, X, Q extends QueryTable = {}
         bytes: number;
     }): boolean;
     commandBytes?(envelope: CommandEnvelope<P>): number;
+    /** @internal Whether an unacknowledged command may run again after a recovery that reset history; one that may not is refused as diverged. */
+    replayable?(envelope: CommandEnvelope<P>): boolean;
     /** @internal May share caller data only with a transport that copies before returning. */
     copyCommandForDispatch?(envelope: CommandEnvelope<P>): CommandEnvelope<P>;
     now?(): number;
@@ -3111,6 +3131,8 @@ export type CreateLegacyEditSession = <P, S, E, X>(options: LegacyEditSessionOpt
 export declare function isCommandEnvelope(value: unknown): value is CommandEnvelope<unknown>;
 /** @internal Validates acknowledgement metadata while leaving format-owned values unknown. */
 export declare function isCommandAck(value: unknown): value is CommandAck<unknown, unknown, unknown>;
+/** @internal Validates stream entries while leaving their effect payloads unknown. */
+export declare function isCommandStream(value: unknown): value is CommandStreamEntry[];
 /** @internal Identifies the unknown-outcome reply error and its preserved sequence. */
 export declare function isCommandOutcomeUnknownError(value: unknown): value is CommandOutcomeUnknownError;
 

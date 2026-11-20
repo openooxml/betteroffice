@@ -64,6 +64,12 @@ export declare class DocxSourceWorkerClient extends ResidentEngineWorkerClient {
             epoch: number;
             frame: import("./residentCommandProtocol").DocxCommandFrame;
         };
+        commandStream?: {
+            session: string;
+            incarnation: number;
+            epoch: number;
+            entries: import("../../../../shared/office-session/commands/types").CommandStreamEntry[];
+        };
         fontEnvironmentEvent?: DocxFontEnvironmentEvent & {
             session: string;
             incarnation: number;

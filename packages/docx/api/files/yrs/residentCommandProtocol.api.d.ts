@@ -6,7 +6,7 @@ import type { DisplayListRect } from '../layout/render/displayListQueries';
 import type { DocxFontEnvironment, DocxFontEnvironmentSnapshot } from './residentFontEnvironment';
 import type { ResidentCommentRecoveryState } from './residentCommentProjection';
 import type { DocxReservationsPayload, DocxResolvedReservations } from './reservations';
-import type { ApplyContext, ApplyResult, CommandAck, Checkpoint, CommandConnection, CommandEnvelope, CommandHost, CommandMethods, EditSession, EchoHooks, FrameEnvelope, RecoveryHooks, WorkerEditSessionOptions } from '../../../../shared/office-session/commands/types';
+import type { ApplyContext, ApplyResult, CommandAck, Checkpoint, CommandConnection, CommandEnvelope, CommandHost, CommandMethods, CommandStreamEntry, EditSession, EchoHooks, FrameEnvelope, RecoveryHooks, WorkerEditSessionOptions } from '../../../../shared/office-session/commands/types';
 import type { TransferResult } from '../../../../shared/office-session/protocol';
 import type { MethodHandlers, MethodPolicies } from '../../../../shared/office-session/types';
 import type { ColorValue } from '../types/colors';
@@ -263,10 +263,14 @@ export interface DocxCommandPayloads {
     applyRemoteUpdateChunks: {
         updates: ArrayBuffer[];
     };
-    /** @internal What an applied command did, replayed by recovery only: its update and the command-local state it changed. */
+    /**
+     * @internal What a command or the worker did to the document, replayed by recovery only: the updates it emitted,
+     * applied as they are, and the command-local state it changed; `noop` replays without a version.
+     */
     applyUpdate: {
-        update: ArrayBuffer;
+        updates: ArrayBuffer[];
         state?: DocxCommandEffectState;
+        noop?: true;
     };
     /** Transport events and calls for a collaboration provider this worker runs; frames stay undecoded until here. */
     collabPipe: PipeCommandPayload;
@@ -708,15 +712,18 @@ export interface DocxCommandHostOptions {
         echoContext(): DocxCommandEchoContext | undefined;
         deferFrame(ack: DocxCommandAck): void;
     };
-    /** Document reads that capture each applied command's update for recovery to replay. */
-    effects?: {
-        stateVector(): Uint8Array;
-        updateSince(stateVector: Uint8Array): Uint8Array;
-    };
+    /** Records the document's update stream for recovery to replay: each command's updates as its effect, others as stream entries. */
+    recordUpdates?: boolean;
 }
 export interface DocxCommandHost extends CommandHost<DocxCommandPayload, DocxCommandSelection | null, DocxEditState, DocxCommandFramePayload> {
     handler(context: unknown, envelope: DocxCommandEnvelope): Promise<DocxCommandReply>;
     withFrameWork<T>(run: () => Promise<T>): Promise<T>;
+    /** Runs `run` between commands; the updates it emits are stream entries of `origin`. */
+    withCommandWork<T>(origin: CommandStreamEntry['origin'], run: () => Promise<T>): Promise<T>;
+    /** One update the document emitted, in emission order. */
+    recordUpdate(update: Uint8Array): void;
+    /** Stream entries not yet reported, removed from the host. */
+    takeStream(): CommandStreamEntry[] | undefined;
     initial(): Promise<DocxCommandInitReply | TransferResult<DocxCommandInitReply>>;
     requestFullFrame(): Promise<DocxCommandReply>;
 }
@@ -742,6 +749,8 @@ export interface DocxCommandClient {
     requestFullFrame(): Promise<DocxCommandAck>;
     requestViewport?(request: DocxCommandViewportRequest): Promise<void>;
     onFrame?(listener: (frame: DocxCommandFrame) => void): () => void;
+    /** Stream entries the worker reports outside acknowledgements, such as with a save. */
+    onStream?(listener: (entries: CommandStreamEntry[]) => void): () => void;
     onFailure(listener: ((error: Error) => void) | null): void;
     destroy(): void;
 }
