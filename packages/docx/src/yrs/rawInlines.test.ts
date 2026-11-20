@@ -629,3 +629,29 @@ describe('a w:subDoc before a right-to-left scope', () => {
     });
   }
 });
+
+describe('a leading page break without a kept element saves as on main', () => {
+  const countPages = (xml: string) => xml.split('<w:br w:type="page"/>').length - 1;
+
+  for (const [loader, load] of LOADERS) {
+    it(`${loader}: splitting at the start of a paragraph that opens with a page break saves one page break, in the second half`, async () => {
+      const { session, base } = await load(docx(`${PAGE_BREAK}${SOURCE.t('After')}`));
+      session.splitParagraph({ story: 'body', paraId: session.paragraphs('body')[0]!.paraId, offset: 0 });
+      const saved = paragraphsOf(await savedAsTheEditorSaves(session, base));
+      expect(saved.map(countPages)).toEqual([0, 1, 0]);
+      expect(texts(saved[1]!)).toBe('After');
+    });
+
+    it(`${loader}: typing after a hyperlink that opens with a page break saves the break as main does`, async () => {
+      const { session, base } = await load(docx(`<w:hyperlink w:anchor="target">${PAGE_BREAK}${SOURCE.t('link')}</w:hyperlink>${SOURCE.t(' After')}`));
+      typeAt(session.paragraphSpans('body')[0]!.length)(session, session.paragraphs('body')[0]!.paraId);
+      const [first] = paragraphsOf(await savedAsTheEditorSaves(session, base));
+      expect(texts(first!)).toBe('link AfterX');
+      if (loader === 'the Rust loader') {
+        expect(first).toMatch(/<w:hyperlink\b[^>]*><w:r><w:br w:type="page"\/><\/w:r>/);
+      } else {
+        expect(countPages(first!)).toBe(0);
+      }
+    });
+  }
+});
