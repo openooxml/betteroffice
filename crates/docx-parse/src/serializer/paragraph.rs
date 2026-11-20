@@ -183,11 +183,41 @@ fn needs_comment_reference(paragraph: &Paragraph, content: &ParagraphContent) ->
         })
 }
 
-/// Whether `xml` is one `w:` element without content, written where it sits and taking no width.
-fn empty_word_element(xml: &str) -> bool {
+/// The range and annotation marks a direction scope may hold, each one empty `w:` element.
+const MARKS_WITHOUT_WIDTH: [&str; 19] = [
+    "bookmarkStart",
+    "bookmarkEnd",
+    "commentRangeStart",
+    "commentRangeEnd",
+    "moveFromRangeStart",
+    "moveFromRangeEnd",
+    "moveToRangeStart",
+    "moveToRangeEnd",
+    "customXmlInsRangeStart",
+    "customXmlInsRangeEnd",
+    "customXmlDelRangeStart",
+    "customXmlDelRangeEnd",
+    "customXmlMoveFromRangeStart",
+    "customXmlMoveFromRangeEnd",
+    "customXmlMoveToRangeStart",
+    "customXmlMoveToRangeEnd",
+    "permStart",
+    "permEnd",
+    "proofErr",
+];
+
+/// Whether `xml` is one of [`MARKS_WITHOUT_WIDTH`], written where it sits and taking no width.
+fn empty_word_mark(xml: &str) -> bool {
     let Some(tag) = xml.trim().strip_prefix("<w:") else {
         return false;
     };
+    let name = tag
+        .split([' ', '\t', '\n', '\r', '/', '>'])
+        .next()
+        .unwrap_or_default();
+    if !MARKS_WITHOUT_WIDTH.contains(&name) {
+        return false;
+    }
     let mut quote = None;
     for (index, character) in tag.char_indices() {
         match quote {
@@ -206,7 +236,7 @@ fn empty_word_element(xml: &str) -> bool {
 fn zero_width(node: &InlineNode) -> bool {
     match node {
         InlineNode::BookmarkStart(_) | InlineNode::BookmarkEnd(_) => true,
-        InlineNode::RawXml(raw) => empty_word_element(&raw.xml),
+        InlineNode::RawXml(raw) => empty_word_mark(&raw.xml),
         _ => false,
     }
 }
