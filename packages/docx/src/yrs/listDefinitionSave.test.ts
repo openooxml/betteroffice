@@ -685,6 +685,34 @@ describe('a numbering part or main document named through a dot segment', () => 
   }
 });
 
+describe('a relationship target that climbs out of the package', () => {
+  const ESCAPING: Array<[owner: string, target: string]> = [
+    ['word/_rels/document.xml.rels', '../../x.xml'],
+    ['word/_rels/document.xml.rels', '%2e%2e/%2E%2E/x.xml'],
+    ['word/_rels/document.xml.rels', '/../x.xml'],
+    ['word/_rels/document.xml.rels', '../../../numbering.xml'],
+    ['_rels/.rels', '../word/document.xml'],
+  ];
+  for (const [owner, target] of ESCAPING) {
+    test(`is refused when ${owner} names ${target}`, () => {
+      expect(() => resolvedRelationshipTarget(owner, target)).toThrow(target);
+    });
+  }
+
+  for (const [saveName, save] of Object.entries(SAVES)) {
+    test(`${saveName}: a numbering relationship that names ../../x.xml fails the save and writes no part outside word`, async () => {
+      const session = await seeded(repackaged(makeDocx(documentOf(paragraph('First'), paragraph('Second')), LISTS_NUMBERING), {
+        'word/_rels/document.xml.rels': `<Relationships xmlns="${PACKAGE_RELATIONSHIPS}"><Relationship Id="rId1" Type="${R}/styles" Target="styles.xml"/><Relationship Id="rId2" Type="${R}/numbering" Target="../../x.xml"/></Relationships>`,
+      }));
+      createList(session, 'Second', 'numbered');
+      const saved = await settled(save(session));
+      expect(saved.error).toBeDefined();
+      expect(String(saved.error)).toContain('../../x.xml');
+      if (saved.value !== undefined) expect(Object.keys(unzipContainer(saved.value))).not.toContain('x.xml');
+    });
+  }
+});
+
 describe('resolvedRelationshipTarget', () => {
   const DOCUMENT_RELS = 'word/_rels/document.xml.rels';
   const TABLE: Array<[owner: string, target: string, expected: string]> = [
@@ -694,7 +722,6 @@ describe('resolvedRelationshipTarget', () => {
     [DOCUMENT_RELS, '../word/numbering.xml', 'word/numbering.xml'],
     [DOCUMENT_RELS, '/word/numbering.xml', 'word/numbering.xml'],
     [DOCUMENT_RELS, 'lists/parts/numbering.xml', 'word/lists/parts/numbering.xml'],
-    [DOCUMENT_RELS, '../../../numbering.xml', 'numbering.xml'],
     [DOCUMENT_RELS, 'lists\\numbering.xml', 'word/lists/numbering.xml'],
     [DOCUMENT_RELS, 'lists//./numbering.xml', 'word/lists/numbering.xml'],
     ['word/document.xml', 'numbering.xml', 'word/numbering.xml'],
@@ -702,6 +729,10 @@ describe('resolvedRelationshipTarget', () => {
     ['_rels/.rels', 'word/document.xml', 'word/document.xml'],
     ['_rels/.rels', './word/document.xml', 'word/document.xml'],
     ['_rels/.rels', '/word/document.xml', 'word/document.xml'],
+    [DOCUMENT_RELS, '%2e%2e/numbering.xml', 'numbering.xml'],
+    [DOCUMENT_RELS, 'sub/%2E%2e/numbering.xml', 'word/numbering.xml'],
+    [DOCUMENT_RELS, 'sub/.%2e/numbering.xml', 'word/numbering.xml'],
+    [DOCUMENT_RELS, 'sub/%2e./numbering.xml', 'word/numbering.xml'],
   ];
 
   test('resolves each target against the part that owns the relationships', () => {

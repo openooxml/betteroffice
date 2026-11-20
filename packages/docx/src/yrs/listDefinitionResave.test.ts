@@ -252,6 +252,43 @@ describe('the ids a save reads from a numbering part', () => {
   });
 });
 
+describe('two created definitions saved by one session', () => {
+  const FIRST = { ...BULLETS, key: '5:0' };
+  const SECOND = {
+    key: '6:0',
+    kind: 'numbered' as const,
+    levelTexts: LEVELS.map(level => `%${level + 1}.`),
+    levelFormats: LEVELS.map(() => 'decimal'),
+  };
+  const pair = ({ numId, abstractNumId }: { numId: number; abstractNumId: number }) => ({ numId, abstractNumId });
+
+  test('never share one pair of ids, even when a package carries the second at the ids the first was given', () => {
+    const session = {} as YrsSession;
+    const [first] = savedListDefinitions(session, [FIRST], numberingParts(LISTS_NUMBERING));
+    const given = pair(first!);
+    const target = numberingWithListDefinitions(LISTS_NUMBERING, [{ ...SECOND, ...given }]);
+    const [second] = savedListDefinitions(
+      session, [SECOND], numberingParts(target), undefined, [], () => numberingParts(LISTS_NUMBERING)
+    );
+    expect(pair(second!)).not.toEqual(given);
+    const both = savedListDefinitions(session, [FIRST, SECOND], numberingParts(LISTS_NUMBERING));
+    const firstAgain = both.find(definition => definition.key === FIRST.key);
+    const secondAgain = both.find(definition => definition.key === SECOND.key);
+    expect(secondAgain?.numId).not.toBe(firstAgain?.numId);
+    expect(secondAgain?.abstractNumId).not.toBe(firstAgain?.abstractNumId);
+    expect(firstAgain?.numId).toBe(given.numId);
+  });
+
+  test('a numId a paragraph without a created list uses is not adopted from a carrier', () => {
+    const session = {} as YrsSession;
+    const target = numberingWithListDefinitions(LISTS_NUMBERING, [{ ...SECOND, numId: 4, abstractNumId: 2 }]);
+    const [saved] = savedListDefinitions(
+      session, [SECOND], numberingParts(target), undefined, [4], () => numberingParts(LISTS_NUMBERING)
+    );
+    expect(saved?.numId).not.toBe(4);
+  });
+});
+
 describe('a numbering part whose list points at a definition it does not hold', () => {
   test('the abstractNumId the list points at is not given to a created definition', () => {
     const dangling = `<w:numbering xmlns:w="${W}"><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>`;
@@ -514,6 +551,9 @@ describe('a created list an undo brings back after another created list was save
     expect(savedNumId(s2, 'Alpha')).toBeUndefined();
     expect(savedNumId(s2, 'Beta')).toBeGreaterThan(3);
     expect(k).toBeGreaterThan(3);
+    expect(counts(s2)).toEqual({ abstractNums: SOURCE.abstractNums + 1, nums: SOURCE.nums + 1 });
+    expect(counts(s3)).toEqual({ abstractNums: SOURCE.abstractNums + 2, nums: SOURCE.nums + 2 });
+    expect(savedFormat(s3, k)).toBe('bullet');
   });
 });
 
@@ -539,6 +579,69 @@ describe('ids an earlier save gave that the package now uses for another list', 
     expect(moved).toBeGreaterThan(k!);
     expect(savedNumId(s3, 'Alpha')).toBe(moved);
     expect(counts(s3)).toEqual(counts(s2));
+  });
+});
+
+/** The editor's save of `target`'s own projection. */
+const editorSaved = async (target: YrsSession) =>
+  new Uint8Array(await saveEditorDocument(target, yrsToDocument(target, target.materializeDocx()!), []));
+
+describe('a save that fails after the ids of created lists were given', () => {
+  test('leaves the ids earlier saves gave as they were for the next save', async () => {
+    const created = await session();
+    created.seedFromDocx(makeDocx(DOCUMENT, LISTS_NUMBERING));
+    createList(created, 'Alpha', 'bullet');
+    const s1 = await editorSaved(created);
+    const k = savedNumId(s1, 'Alpha');
+    const other = makeDocx(DOCUMENT, LISTS_NUMBERING.replace(
+      '</w:numbering>',
+      `<w:num w:numId="${k}"><w:abstractNumId w:val="0"/></w:num></w:numbering>`
+    ));
+    const over = async (bytes: Uint8Array) => {
+      const projected = yrsToDocument(created, { ...created.materializeDocx()!, originalBuffer: bytes.slice().buffer });
+      return new Uint8Array(await saveEditorDocument(created, projected, []));
+    };
+    const languages = created.styleLanguages;
+    const patch = created.patchStyleLanguagesXml;
+    created.styleLanguages = () => ({ Normal: {} }) as unknown as ReturnType<YrsSession['styleLanguages']>;
+    created.patchStyleLanguagesXml = () => {
+      throw new Error('language patch refused');
+    };
+    const failed = await settled(over(other));
+    created.styleLanguages = languages;
+    created.patchStyleLanguagesXml = patch;
+    const s3 = await over(s1);
+    expect(savedNumId(s3, 'Alpha')).toBe(k);
+    expect(counts(s3)).toEqual(counts(s1));
+    expect(failed.error).toBeDefined();
+    expect(k).toBeGreaterThan(3);
+  });
+});
+
+describe('a session that opens another document', () => {
+  const ONE_LIST = `<w:numbering xmlns:w="${W}"><w:abstractNum w:abstractNumId="0"><w:multiLevelType w:val="hybridMultilevel"/>` +
+    `<w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/></w:lvl>` +
+    `</w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>`;
+  const SHORT = `<w:document xmlns:w="${W}"><w:body>${[
+    paragraph('Lead'), paragraph('Alpha'),
+  ].join('')}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>`;
+
+  test('gives a list created in it the next ids above its own numbering, not above the first document', async () => {
+    const created = await session();
+    created.seedFromDocx(makeDocx(DOCUMENT, LISTS_NUMBERING));
+    createList(created, 'Alpha', 'bullet');
+    const first = await editorSaved(created);
+    const k = savedNumId(first, 'Alpha');
+    for (const story of created.storyIds()) created.deleteStory(story);
+    created.seedFromDocx(makeDocx(SHORT, ONE_LIST));
+    createList(created, 'Alpha', 'bullet');
+    const second = await editorSaved(created);
+    const alpha = savedNumId(second, 'Alpha');
+    expect(alpha).toBe(2);
+    const numbering = text(unzipContainer(second)['word/numbering.xml']);
+    const num = elements(numbering, 'num').find(entry => attribute(entry, NUM_ID) === alpha);
+    expect(attribute(num, POINTER)).toBe(1);
+    expect(k).toBeGreaterThan(3);
   });
 });
 
