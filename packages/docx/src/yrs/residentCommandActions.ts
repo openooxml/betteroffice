@@ -563,7 +563,7 @@ export function preflightDocxCommand(
   const error = { reason: 'invalid-payload' };
   if (!validCommandIntent(command, error, environment)) return refuse(error.reason);
   if (command.kind === 'applyUpdate') {
-    if (!context.replayPreviouslyApplied && command.replay !== true) return refuse('unsupported-command');
+    if (!engine.applyVerbatimUpdate || !context.replayPreviouslyApplied && command.replay !== true) return refuse('unsupported-command');
     return { status: 'ready', prepared: { command, selection: state.selection, range: null } };
   }
   if (commandPolicy(command.kind)?.origin === 'remote') {
@@ -981,7 +981,7 @@ function applyPreparedDocxCommand(
     const since = engine.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
     let pending = false;
     for (const update of command.payload.updates) {
-      engine.applyVerbatimUpdate(new Uint8Array(update));
+      engine.applyVerbatimUpdate?.(new Uint8Array(update));
       pending = engine.hasPendingUpdate();
       if (pending) break;
     }

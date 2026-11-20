@@ -642,7 +642,7 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
   const host = createResidentCommandHost({
     init,
     registry: { handlers: {}, policies: {} },
-    recordUpdates: openedSeed !== null && !collaboration,
+    recordUpdates: streamsUpdates(engine),
     selectionAck: {
       echoContext() {
         if (layoutDirty || !retainedFrame || retainedFrame.frameEpoch !== revision ||
@@ -1165,7 +1165,7 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
       snapshot: () => engine.encodeState(),
     },
   });
-  const stopRecording = openedSeed !== null && !collaboration && host.withCommandWork && host.recordUpdate && host.takeStream
+  const stopRecording = streamsUpdates(engine) && host.withCommandWork && host.recordUpdate && host.takeStream
     ? engine.onUpdate((update) => host.recordUpdate?.(update)) : undefined;
   commandInit = init;
   commandQueries = (frame) => residentDisplayListQueries(engine, frame.displayList);
@@ -1422,6 +1422,12 @@ let cutPartial = false;
 let openedCut: DocxSourceOpenRequest | null = null;
 /** The ids the opened source was seeded under and its digest, which a command session reports so recovery can seed it again. */
 let openedSeed: { clientId: number; generation: string; digest: string } | null = null;
+
+/** Whether `engine`'s command session recovers from its update stream: a seeded, uncollaborative open of an engine that applies updates verbatim. */
+function streamsUpdates(engine: ResidentEngineSession): boolean {
+  return openedSeed !== null && !collaboration && engine.applyVerbatimUpdate !== undefined;
+}
+
 /** Pages of a cut preview's layout that match the whole document's; null for a whole document. */
 let previewFinalPages: number | null = null;
 let provisionalFinalPages: number | null = null;
@@ -1872,7 +1878,7 @@ async function handle(request: ScheduledRequest): Promise<void> {
     try {
       const host = bindResidentCommands(init);
       const initial = await host.initial();
-      const seed = openedSeed && host.withCommandWork && host.recordUpdate && host.takeStream
+      const seed = openedSeed && streamsUpdates(seeded) && host.withCommandWork && host.recordUpdate && host.takeStream
         ? { ...openedSeed, stateVector: new Uint8Array(seeded.encodeStateVector()) } : null;
       replyCommand(request.id, 'commandInitial', !seed ? initial : isTransferResult(initial)
         ? transferable({ ...initial.value, seed }, initial.transfer) : { ...initial, seed });
