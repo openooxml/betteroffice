@@ -1,6 +1,7 @@
 import { expect, test, type Page } from 'playwright/test';
 import JSZip from 'jszip';
-import { inputReady, slideCanvas } from './pptx-async-helpers';
+import { readFile } from 'node:fs/promises';
+import { expectRepaint, inputReady, inspectDeck, painted, slideCanvas } from './pptx-async-helpers';
 
 const DARK_HOST = 'rgb(237, 237, 237)';
 
@@ -34,19 +35,6 @@ async function edit(page: Page, background: string | null, color: string, host: 
 
 const caretColor = (page: Page) => page.getByTestId('pptx-caret').evaluate((element) => getComputedStyle(element).backgroundColor);
 
-function luminance(color: string) {
-  const [r, g, b] = color.match(/\d+(\.\d+)?/g)!.slice(0, 3).map((value) => {
-    const c = Number(value) / 255;
-    return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
-  });
-  return 0.2126 * r! + 0.7152 * g! + 0.0722 * b!;
-}
-
-function ratio(a: string, b: string) {
-  const [light, dark] = [luminance(a), luminance(b)].sort((x, y) => y - x);
-  return (light! + 0.05) / (dark! + 0.05);
-}
-
 for (const host of [false, true]) {
   const suffix = host ? ' inside a dark-themed host' : '';
   test(`pptx worker caret takes the text colour on a white slide${suffix}`, async ({ page }) => {
@@ -60,16 +48,22 @@ for (const host of [false, true]) {
   });
 }
 
-test('pptx worker composition preedit reads against the slide inside a dark-themed host', async ({ page }) => {
+test('pptx worker composition is typed into the slide in its own colour inside a dark-themed host', async ({ page }, info) => {
   await edit(page, null, '172554', true);
+  const before = await painted(page);
   const cdp = await page.context().newCDPSession(page);
   await cdp.send('Input.imeSetComposition', { text: '日本', selectionStart: 2, selectionEnd: 2 });
-  const preedit = page.getByTestId('pptx-preedit');
-  await expect(preedit).toBeVisible();
-  const colors = await preedit.evaluate((element) => {
-    const style = getComputedStyle(element);
-    return { text: style.color, background: style.backgroundColor };
-  });
-  expect(colors.text).toBe('rgb(23, 37, 84)');
-  expect(ratio(colors.text, colors.background)).toBeGreaterThanOrEqual(3);
+  // The composition is slide text drawn by the slide, not an overlay in the host's colour.
+  await expectRepaint(page, before);
+  await expect(page.getByTestId('pptx-preedit')).toHaveCount(0);
+  await expect.poll(() => caretColor(page)).toBe('rgb(23, 37, 84)');
+  await cdp.send('Input.insertText', { text: '日本' });
+  const downloading = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'Save', exact: true }).first().click();
+  const file = info.outputPath('composed.pptx');
+  await (await downloading).saveAs(file);
+  const [slide] = await inspectDeck(page, await readFile(file));
+  const runs = slide!.shapes.flatMap((shape) => shape.runs);
+  expect(runs.map((run) => run.text).join('')).toBe('Caret text日本');
+  expect(runs.filter((run) => run.text.length > 0).every((run) => run.color === '172554')).toBe(true);
 });

@@ -175,7 +175,6 @@ export function createPeerlessViewStore(
   let disposed = false;
   let failure: unknown;
   let draining = false;
-  let compositionVisible = false;
   let pendingSelection: { inTableCell: boolean } | undefined;
   let geometry: ReturnType<typeof indexGeometry> = initial.frame
     ? indexGeometry(decodeCommandDisplayList(initial.frame)) : { hits: [], lines: new Map() };
@@ -276,11 +275,6 @@ export function createPeerlessViewStore(
       sequences.push(record.seq);
     }
     const insertionStyle = echoStyle();
-    const composition = compositionVisible && waiting.length === 0 &&
-      view.pending.every((record) => record.echoed && record.intent.kind === 'insertText') &&
-      canEchoText(view.composition?.text ?? '')
-      ? view.composition : null;
-    if (composition) insertion += composition.text;
     const position = view.selection?.focus ?? 0;
     const offset = position - (entry?.line.start ?? 0);
     const text = original.slice(0, offset) + insertion + original.slice(offset);
@@ -290,7 +284,7 @@ export function createPeerlessViewStore(
     const echo = activeLine && bounds && insertionStyle && canEchoText(insertion) &&
       view.selection?.anchor === position && offset >= 0 &&
       offset <= original.length && text.length * 2 <= PEERLESS_ACTIVE_CONTEXT_BYTES &&
-      (sequences.length > 0 || composition !== null)
+      sequences.length > 0
       ? { text, sequences, bounds, caretPosition: position + insertion.length, insertionOffset: offset, insertionStyle } : null;
     const projection = selectionGeometry(geometry, view.selection);
     if (echo && activeLine) {
@@ -355,7 +349,6 @@ export function createPeerlessViewStore(
       const composition = remoteHistory && view.composition && ack.selection && ack.selection.kind !== 'object' &&
         ack.selection.storyId === view.composition.selection?.storyId
         ? { ...view.composition, selection: ack.selection } : null;
-      if (!composition) compositionVisible = false;
       view = { ...view, selection: ack.selection, composition };
       if (ack.activeSlideId !== null && ack.activeSlideId !== undefined &&
         (!remoteHistory || ack.activeSlideId !== view.confirmed?.frame.slideId)) {
@@ -387,7 +380,6 @@ export function createPeerlessViewStore(
     }
     if (view.composition && [...view.pending.filter((record) => rejected.has(record.seq)), ...rejectedInputs].some((record) =>
       record.intent.kind === 'compositionStart' && record.intent.payload.compositionId === view.composition?.id)) {
-      compositionVisible = false;
       view = { ...view, composition: null };
     }
     for (let index = waiting.length - 1; index >= 0; index -= 1) {
@@ -490,7 +482,7 @@ export function createPeerlessViewStore(
       if (!sharedInput) throw error;
       throw new PptxFrameDecodeError(frame.coversThroughSeq, error);
     }
-    const saved = sharedInput ? { view, geometry, echoContext, echoCharacters, compositionVisible } : undefined;
+    const saved = sharedInput ? { view, geometry, echoContext, echoCharacters } : undefined;
     let rollback: PeerlessPaintCheckpoint | undefined;
     try {
       if (saved) rollback = painters.checkpoint?.(echoEnabled);
@@ -500,7 +492,6 @@ export function createPeerlessViewStore(
       echoCharacters = null;
       if (view.composition && view.pending.some((record) =>
         record.seq <= frame.coversThroughSeq && record.intent.kind === 'compositionStart')) {
-        compositionVisible = selection !== null && selection.kind !== 'object' && selection.anchor === selection.focus;
         if (selection && selection.kind !== 'object') view = { ...view, composition: { ...view.composition, selection } };
       }
       let thumbnails = view.thumbnails;
@@ -515,12 +506,12 @@ export function createPeerlessViewStore(
       painters.paintEcho(view);
     } catch (error) {
       if (!saved) throw error;
-      ({ view, geometry, echoContext, echoCharacters, compositionVisible } = saved);
+      ({ view, geometry, echoContext, echoCharacters } = saved);
       rollback?.();
       return false;
     }
     rollback?.commit?.();
-    if (activation) { localOnlySelection = false; compositionVisible = false; }
+    if (activation) localOnlySelection = false;
     retireCoverage(frame.coversThroughSeq);
     notify(presentation);
     if (changedSlide) notify(structure);
@@ -663,6 +654,13 @@ export function createPeerlessViewStore(
         tail.echoed = false;
         return tail.operation;
       }
+      // A composition stage still waiting behind an earlier edit is replaced by the newer stage: only the latest one
+      // reaches the engine.
+      if (tail?.intent.kind === 'compositionUpdate' && intent.kind === 'compositionUpdate' &&
+        tail.intent.payload.compositionId === intent.payload.compositionId) {
+        tail.intent = { ...tail.intent, payload: { ...tail.intent.payload, text: intent.payload.text } };
+        return tail.operation;
+      }
       const seq = sharedInput ? 0 : compatibilityNextSeq++;
       if (!sharedInput && !preservesSelection(intent)) chainTail = seq;
       if (wasKnown && intent.kind === 'setSelection') {
@@ -736,15 +734,19 @@ export function createPeerlessViewStore(
       const selected = view.selection;
       if (disposed || failure || view.composition || !at || selected?.kind === 'object' && at.source !== 'afterSeq') return;
       const selection = selected?.kind === 'object' ? null : selected;
-      compositionVisible = known() && selection !== null && selection.anchor === selection.focus;
       view = { ...view, composition: { id, selection, text: '' } };
       void store.dispatch({ kind: 'compositionStart', payload: { compositionId: id,
         at, inputTime, undoGroup: id } }).catch(() => {});
     },
     updateComposition(text) {
-      if (disposed || failure || !view.composition) return;
+      if (disposed || failure || !view.composition || view.composition.text === text) return;
+      const { id } = view.composition;
       view = { ...view, composition: { ...view.composition, text } };
       paintLocal();
+      const at = reference();
+      if (!at) return;
+      void store.dispatch({ kind: 'compositionUpdate', payload: { compositionId: id, at, text,
+        inputTime: performance.now(), undoGroup: id } }).catch(() => {});
     },
     installMedia(assets) {
       if (disposed || failure || !assets.length) return;
@@ -807,7 +809,6 @@ export function createPeerlessViewStore(
       const at = reference();
       if (!composition) return null;
       view = { ...view, composition: null };
-      compositionVisible = false;
       paintLocal();
       return at ? { ...composition, at } : null;
     },
@@ -842,6 +843,7 @@ function chainedIntent(intent: PresentationCommandIntent, seq: number): Presenta
     case 'deleteForward': return { ...intent, payload: { ...intent.payload, at } };
     case 'paragraphBreak': return { ...intent, payload: { ...intent.payload, at } };
     case 'compositionStart': return { ...intent, payload: { ...intent.payload, at } };
+    case 'compositionUpdate': return { ...intent, payload: { ...intent.payload, at } };
     case 'compositionCommit': return { ...intent, payload: { ...intent.payload, at } };
     case 'compositionEnd': return { ...intent, payload: { ...intent.payload, at } };
     case 'setSelection': return { ...intent, payload: { ...intent.payload, at } };
@@ -853,7 +855,7 @@ function chainedIntent(intent: PresentationCommandIntent, seq: number): Presenta
 
 function isTextMutation(intent: PresentationCommandIntent): boolean {
   if (intent.kind === 'collabPipe') return intent.payload.ops.some((op) => op.op === 'event' && op.event.type === 'message');
-  return ['insertText', 'replaceText', 'deleteBackward', 'deleteForward', 'paragraphBreak', 'compositionCommit',
+  return ['insertText', 'replaceText', 'deleteBackward', 'deleteForward', 'paragraphBreak', 'compositionUpdate', 'compositionCommit',
     'formatText', 'setParagraphAlignment', 'undo', 'redo', 'moveShape', 'setShapeRect', 'insertTextBox', 'insertShape', 'insertPicture', 'applyEdits', 'registerFont', 'applyRemoteUpdate', 'invoke'].includes(intent.kind);
 }
 
@@ -926,7 +928,7 @@ export function commandMotion(key: string,
 export function commitComposition(store: PeerlessViewStore, text: string, inputTime: number): Promise<PresentationCommandAck | null> {
   const composition = controllers.get(store)?.finishComposition();
   if (!composition) return Promise.resolve(null);
-  const commit = text ? store.dispatch({ kind: 'compositionCommit', payload: { compositionId: composition.id,
+  const commit = text || composition.text ? store.dispatch({ kind: 'compositionCommit', payload: { compositionId: composition.id,
     at: composition.at, text, inputTime, undoGroup: composition.id } }) : null;
   const end = store.dispatch({ kind: 'compositionEnd', payload: { compositionId: composition.id,
     inputTime, undoGroup: composition.id, ...(text ? {} : { cancelled: true }) } });

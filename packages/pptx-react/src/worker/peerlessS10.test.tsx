@@ -195,7 +195,7 @@ function type(input: HTMLElement, text: string): void {
 
 const writes: PresentationCommandKind[] = ['applyEdits', 'registerFont', 'insertTextBox', 'insertShape', 'insertPicture',
   'moveShape', 'setShapeRect', 'undo', 'redo', 'insertText', 'replaceText', 'formatText', 'setParagraphAlignment',
-  'deleteBackward', 'deleteForward', 'paragraphBreak', 'compositionStart', 'compositionCommit'];
+  'deleteBackward', 'deleteForward', 'paragraphBreak', 'compositionStart', 'compositionUpdate', 'compositionCommit'];
 
 test('readonly_selection_and_navigation_remain_available', async () => {
   const { api, view, stage } = await open({ readOnly: true });

@@ -54,7 +54,7 @@ test('zoom preserves focus in a keyboard control', async () => {
   expect(value.api.commands!.getState('zoom').value).toBe(0.5);
 });
 
-test('scaled_localized_preedit', async () => {
+test('scaled_localized_composition_is_a_story_edit', async () => {
   const value = await open({ i18n: { editor: { textInput: 'Folientext' } } });
   const target = await story(value.api);
   await act(async () => { await value.api.selectText({ slide: 1, shapeId: target.shapeId, storyId: target.storyId, start: 0, end: 0 }); });
@@ -66,15 +66,15 @@ test('scaled_localized_preedit', async () => {
     compose(input, 'compositionstart');
     await value.api.flushPendingInput();
   });
-  await act(async () => { compose(input, 'compositionupdate', '日本'); });
-  await waitFor(() => expect(value.view.queryByTestId('pptx-preedit')).not.toBeNull());
-  const preedit = value.view.getByTestId('pptx-preedit');
-  expect(preedit.textContent).toBe('日本');
-  expect(preedit.style.left).toBe(input.style.left);
-  expect(parseFloat(input.style.height)).toBeGreaterThan(1);
-  await act(async () => { compose(input, 'compositionend', '日本'); await value.api.flushPendingInput(); });
+  // The stage goes into the story; there is no overlay.
+  await act(async () => { compose(input, 'compositionupdate', '日本'); await value.api.flushPendingInput(); });
   expect((await story(value.api)).text.startsWith('日本')).toBe(true);
   expect(value.view.queryByTestId('pptx-preedit')).toBeNull();
+  expect(parseFloat(input.style.height)).toBeGreaterThan(1);
+  await act(async () => { compose(input, 'compositionend', '日本'); await value.api.flushPendingInput(); });
+  const text = (await story(value.api)).text;
+  expect(text.startsWith('日本')).toBe(true);
+  expect(text.startsWith('日本日本')).toBe(false);
 });
 
 test('copy_cut_waits_for_clipboard_and_preserves_newer_selection', async () => {

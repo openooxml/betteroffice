@@ -304,15 +304,18 @@ test('composition_after_pending_first_selection', () => {
     compose(input, 'compositionupdate', '漢');
     compose(input, 'compositionend', '漢');
   });
+  // The stage is an edit in flight, so the commit waits for it.
   expect(client.sent.map((intent) => intent.kind)).toEqual([
-    'selectAtPoint', 'compositionStart', 'compositionCommit',
+    'selectAtPoint', 'compositionStart', 'compositionUpdate',
   ]);
   expect(client.sent[1]).toMatchObject({ payload: { at: { source: 'afterSeq', seq: 1 } } });
   expect(client.sent[2]).toMatchObject({ payload: { at: { source: 'afterSeq', seq: 2 }, text: '漢' } });
   act(() => { client.ack(3, { selection: selection(2), frame: frame('a漢bc', 1, 3) }); });
-  expect(client.sent[3]).toMatchObject({ kind: 'compositionEnd',
-    payload: { at: { source: 'afterSeq', seq: 3 } } });
-  act(() => { client.ack(4, { selection: selection(2), frame: frame('a漢bc', 2, 4) }); });
+  expect(client.sent[3]).toMatchObject({ kind: 'compositionCommit', payload: { at: { source: 'afterSeq', seq: 3 }, text: '漢' } });
+  act(() => { client.ack(4, { selection: selection(2), frame: frame('a漢bc', 1, 4) }); });
+  expect(client.sent[4]).toMatchObject({ kind: 'compositionEnd',
+    payload: { at: { source: 'afterSeq', seq: 4 } } });
+  act(() => { client.ack(5, { selection: selection(2), frame: frame('a漢bc', 2, 5) }); });
   expect(store.getSnapshot().composition).toBeNull();
 });
 
@@ -353,9 +356,11 @@ for (const kind of ['typing', 'paste', 'composition'] as const) {
       if (kind === 'composition') compose(input, 'compositionend', '漢');
     });
     if (kind === 'composition') {
-      expect(client.sent.filter((intent) => intent.kind === 'compositionCommit')).toHaveLength(1);
+      expect(client.sent.filter((intent) => intent.kind === 'compositionUpdate')).toHaveLength(1);
       await act(async () => { client.ack(3, { slides: undefined, selection: selection(3), frame: frame('ab漢c', 2, 3) }); });
+      expect(client.sent.filter((intent) => intent.kind === 'compositionCommit')).toHaveLength(1);
       await act(async () => { client.ack(4); });
+      await act(async () => { client.ack(5); });
     }
     expectNoMainModel(client);
   });
@@ -426,7 +431,8 @@ test('p2_composition_commits_once_and_survives_frame_install', async () => {
     beforeInput(input, 'insertCompositionText', '漢', { isComposing: true });
     fireEvent.input(input, { inputType: 'insertCompositionText', data: '漢', isComposing: true });
   });
-  expect(client.sent.map((intent) => intent.kind)).toEqual(['compositionStart']);
+  expect(client.sent.map((intent) => intent.kind)).toEqual(['compositionStart', 'compositionUpdate']);
+  expect(client.sent[1]).toMatchObject({ payload: { text: '漢', at: { source: 'afterSeq', seq: 1 } } });
   const start = client.sent[0];
   expect(start).toMatchObject({ kind: 'compositionStart', payload: {
     at: { source: 'confirmed', selection: selection() },
@@ -451,29 +457,32 @@ test('p2_composition_commits_once_and_survives_frame_install', async () => {
     beforeInput(input, 'insertText', '漢字');
     fireEvent.input(input, { inputType: 'insertText', data: '漢字' });
   });
+  // The second stage, the commit and the end wait behind the first stage's edit.
   expect(client.sent).toHaveLength(2);
+  expect(store.getSnapshot().waitingInputCount).toBe(3);
+  await act(async () => { client.ack(2, { selection: selection(2), frame: frame('a漢bc', 2, 2) }); });
+  expect(client.sent[2]).toMatchObject({ kind: 'compositionUpdate', payload: { compositionId: id, text: '漢字' } });
+  await act(async () => { client.ack(3, { selection: selection(3), frame: frame('a漢字bc', 3, 3) }); });
   expect(client.sent.filter((intent) => intent.kind === 'compositionCommit')).toEqual([
-    { kind: 'compositionCommit', payload: expect.objectContaining({ compositionId: id, text: '漢字',
-      at: { source: 'confirmed', selection: selection() } }) },
+    { kind: 'compositionCommit', payload: expect.objectContaining({ compositionId: id, text: '漢字' }) },
   ]);
-  expect(store.getSnapshot().waitingInputCount).toBe(1);
-  await act(async () => { client.ack(2, { selection: selection(3), frame: frame('a漢字bc', 2, 2) }); });
+  await act(async () => { client.ack(4, { selection: selection(3), frame: frame('a漢字bc', 4, 4) }); });
   expect(client.sent.filter((intent) => intent.kind === 'compositionEnd')).toHaveLength(1);
   expect(client.sent.find((intent) => intent.kind === 'compositionEnd')).toMatchObject({
-    payload: { compositionId: id, at: { source: 'afterSeq', seq: 2 } },
+    payload: { compositionId: id, at: { source: 'afterSeq', seq: 4 } },
   });
   expect(store.getSnapshot().composition).toBeNull();
   expect(store.getSnapshot().echo).toBeNull();
   await act(async () => {
-    client.ack(3, { version: 'v2', selection: selection(3), frame: frame('a漢字bc', 3, 3),
+    client.ack(5, { version: 'v2', selection: selection(3), frame: frame('a漢字bc', 5, 5),
       editState: { ...client.state.editState, canUndo: true } });
   });
   expect(store.getSnapshot().echo).toBeNull();
-  expect(store.getSnapshot().presentedThroughSeq).toBe(3);
+  expect(store.getSnapshot().presentedThroughSeq).toBe(5);
   expectNoMainModel(client);
 });
 
-test('p2_empty_composition_cancels_without_history', async () => {
+test('p2_empty_composition_cancel_removes_the_stage_text', async () => {
   const { client, store, restoreLine } = setup();
   const view = render(<PeerlessTextInput store={store} />);
   const input = textarea(view.container);
@@ -485,13 +494,16 @@ test('p2_empty_composition_cancels_without_history', async () => {
     beforeInput(input, 'insertFromComposition', '');
     fireEvent.input(input, { inputType: 'insertFromComposition', data: '' });
   });
-  expect(client.sent.map((intent) => intent.kind)).toEqual(['compositionStart', 'compositionEnd']);
-  expect(client.sent[1]).toMatchObject({ kind: 'compositionEnd', payload: { cancelled: true } });
-  expect(client.sent.some((intent) => intent.kind === 'compositionCommit')).toBe(false);
+  // The stage put 仮 in the story; the cancel commits '' over it, then ends cancelled.
+  expect(client.sent.map((intent) => intent.kind)).toEqual(['compositionStart', 'compositionUpdate']);
   expect(store.getSnapshot()).toMatchObject({ composition: null, echo: null,
     editState: { canUndo: false, canRedo: false } });
   expect(restoreLine).toHaveBeenCalled();
-  await act(async () => { client.ack(2); });
+  await act(async () => { client.ack(2, { frame: frame('a仮bc', 1, 2) }); });
+  expect(client.sent[2]).toMatchObject({ kind: 'compositionCommit', payload: { text: '' } });
+  await act(async () => { client.ack(3, { frame: frame('abc', 2, 3) }); });
+  expect(client.sent[3]).toMatchObject({ kind: 'compositionEnd', payload: { cancelled: true } });
+  await act(async () => { client.ack(4); });
   expect(store.getSnapshot().confirmed!.displayList).toEqual(JSON.parse(new TextDecoder().decode(frame().displayList)));
   expect(store.getSnapshot().editState.canUndo).toBe(false);
   expect(client.read).not.toHaveBeenCalled();
@@ -509,19 +521,21 @@ test('p2_composition_then_type_references_commit_and_keeps_character', async () 
     beforeInput(input, 'insertText', '!');
   });
   expect(client.sent.map((intent) => intent.kind)).toEqual([
-    'compositionStart', 'compositionCommit',
+    'compositionStart', 'compositionUpdate',
   ]);
   expect(client.envelopes[1]).toMatchObject({ afterSeq: 1, payload: { at: { source: 'afterSeq', seq: 1 } } });
-  expect(store.getSnapshot().waitingInputCount).toBe(2);
+  expect(store.getSnapshot().waitingInputCount).toBe(3);
   expect(store.getSnapshot().echo).toBeNull();
   expect(store.getSnapshot().selection).toMatchObject({ anchor: 1, focus: 1 });
   await act(async () => { client.ack(2, { selection: selection(2), frame: frame('a漢bc', 1, 2) }); });
-  expect(client.envelopes[2].afterSeq).toBe(2);
-  expect(client.envelopes[3]).toMatchObject({ afterSeq: 3, payload: {
-    text: '!', at: { source: 'afterSeq', seq: 3 },
+  expect(client.envelopes[2]).toMatchObject({ kind: 'compositionCommit', afterSeq: 2, payload: { text: '漢' } });
+  await act(async () => { client.ack(3, { selection: selection(2), frame: frame('a漢bc', 2, 3) }); });
+  expect(client.envelopes[3]).toMatchObject({ kind: 'compositionEnd', afterSeq: 3 });
+  expect(client.envelopes[4]).toMatchObject({ afterSeq: 4, payload: {
+    text: '!', at: { source: 'afterSeq', seq: 4 },
   } });
   await act(async () => {
-    client.ack(4, { version: 'v2', selection: selection(3), frame: frame('a漢!bc', 2, 4) });
+    client.ack(5, { version: 'v2', selection: selection(3), frame: frame('a漢!bc', 3, 5) });
   });
   expect(store.getSnapshot().pending).toHaveLength(0);
   const box = store.getSnapshot().confirmed!.displayList.primitives[0];

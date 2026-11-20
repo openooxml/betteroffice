@@ -412,12 +412,16 @@ test('activation_clears_composition_and_preedit', async () => {
     client.ack(1, { selection: selection(), outcomes: [{ seq: 1, status: 'applied', committed: false }],
       frame: frame('abc', 0, 1, { epoch: 2, version: 'v1' }) });
     expect(store.getSnapshot().composition).toMatchObject({ id: 'activation-ime', text: 'xy' });
-    expect(store.getSnapshot().echo?.text).toBe('axybc');
+    // The stage is an edit in the story, not an echo.
+    expect(store.getSnapshot().echo).toBeNull();
+    client.ack(2, { selection: selection(3), outcomes: [{ seq: 2, status: 'applied', committed: true }],
+      frame: frame('axybc', 1, 2, { epoch: 2, version: 'v2' }) });
+    expect(store.getSnapshot().composition).toMatchObject({ id: 'activation-ime', text: 'xy' });
     const operation = store.dispatch({ kind: 'activateSlide', payload: { slideId: 'other' } });
     void operation.catch(() => {});
-    client.ack(2, { activeSlideId: 'other', selection: null, dirtySlideIds: [],
-      outcomes: [{ seq: 2, status: 'applied', committed: false }],
-      frame: frame('other', 0, 2, { slideId: 'other', slideIndex: 1, epoch: 3, version: 'v2' }) });
+    client.ack(3, { activeSlideId: 'other', selection: null, dirtySlideIds: [],
+      outcomes: [{ seq: 3, status: 'applied', committed: false }],
+      frame: frame('other', 0, 3, { slideId: 'other', slideIndex: 1, epoch: 3, version: 'v3' }) });
     expect(store.getSnapshot().confirmed?.frame.slideId).toBe('other');
     expect(store.getSnapshot().selection).toBeNull();
     expect(store.getSnapshot().composition).toBeNull();

@@ -161,13 +161,16 @@ test('history_chords', async () => {
     fireEvent.compositionStart(input);
     fireEvent(input, Object.assign(new Event('compositionupdate', { bubbles: true }), { data: 'preedit' }));
   });
-  await waitFor(() => expect(commands[commands.length - 1]?.kind).toBe('compositionStart'));
+  // The stage is an edit in the story; undo during the composition ends it and undoes the stage.
+  await waitFor(() => expect(commands[commands.length - 1]?.kind).toBe('compositionUpdate'));
   await waitFor(() => expect(client.state.throughSeq).toBe(commands[commands.length - 1]!.seq));
   await waitFor(() => expect(painted?.composition?.text).toBe('preedit'));
   const count = commands.length;
   act(() => { fireEvent.keyDown(input, { key: 'z', metaKey: true }); });
   await waitFor(() => expect(commands.filter((command) => command.kind === 'undo')).toHaveLength(4));
-  expect(commands.slice(count).map((command) => command.kind)).toEqual(['compositionEnd', 'undo']);
+  // The undo cancels the composition first: an empty commit removes the stage text, then the composition ends.
+  expect(commands.slice(count).map((command) => command.kind)).toEqual(['compositionCommit', 'compositionEnd', 'undo']);
+  expect(commands[count]).toMatchObject({ kind: 'compositionCommit', payload: { text: '' } });
   await waitFor(() => expect(painted?.composition).toBeNull());
   act(() => {
     input.dispatchEvent(new InputEvent('beforeinput', { inputType: 'insertFromComposition',
@@ -177,8 +180,7 @@ test('history_chords', async () => {
       data: 'preedit', bubbles: true, cancelable: true }));
     fireEvent.keyDown(input, { key: 'z', ctrlKey: true, repeat: true });
   });
-  expect(commands.slice(count).some((command) => command.kind === 'compositionCommit')).toBe(false);
-  expect(commands.slice(count).map((command) => command.kind)).toEqual(['compositionEnd', 'undo']);
+  expect(commands.slice(count).map((command) => command.kind)).toEqual(['compositionCommit', 'compositionEnd', 'undo']);
 });
 
 test('preedit_survives_ordinary_acknowledgments', async () => {
@@ -203,11 +205,11 @@ test('preedit_survives_ordinary_acknowledgments', async () => {
     fireEvent.compositionStart(input);
     fireEvent(input, Object.assign(new Event('compositionupdate', { bubbles: true }), { data: 'alpha' }));
   });
-  await waitFor(() => expect(client.state.throughSeq).toBe(4));
-  expect(commands[commands.length - 1]?.kind).toBe('compositionStart');
+  await waitFor(() => expect(client.state.throughSeq).toBe(5));
+  expect(commands.slice(-2).map((command) => command.kind)).toEqual(['compositionStart', 'compositionUpdate']);
   await waitFor(() => expect(painted?.composition?.text).toBe('alpha'));
   act(() => { void client.dispatch({ kind: 'setReadOnly', payload: { readOnly: false, inputTime: 3, undoGroup: 'mode' } }).catch(() => {}); });
-  await waitFor(() => expect(client.state.throughSeq).toBe(5));
+  await waitFor(() => expect(client.state.throughSeq).toBe(6));
   await waitFor(() => expect(painted?.composition?.text).toBe('alpha'));
   act(() => { fireEvent(input, Object.assign(new Event('compositionend', { bubbles: true }), { data: 'alpha' })); });
   await waitFor(() => expect(commands[commands.length - 1]?.kind).toBe('compositionEnd'));
