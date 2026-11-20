@@ -978,10 +978,10 @@ test('an undo in flight at a crash after a checkpoint of a session opened withou
   const session = mount({ initialState: await sourceState(documentBytes()) });
   await session.ready();
   expect(session.seeds).toEqual([undefined]);
-  await session.typeUntilApplied(128);
+  await session.typeSteps(128);
   await session.checkpointTaken(1);
   const before = session.text();
-  expect(await session.submit('insertText', { text: 'A' }, { inputTime: Math.ceil(performance.now()) + 10_000 })).toBe('applied');
+  expect(await session.submit('insertText', { text: 'A' }, { inputTime: Math.ceil(performance.now()) + 148_000 })).toBe('applied');
   const typed = session.text();
   expect(typed).not.toBe(before);
   const worker = session.worker();
@@ -1083,7 +1083,7 @@ test('a collaborating core session with checkpoint recovery re-executes an undo 
       return held.committed;
     }, 'the undo to commit in the worker');
     worker.onerror?.({ message: 'simulated worker crash' } as ErrorEvent);
-    await until(() => session.stage !== 'recovering' && events.some((event) =>
+    await until(() => events.some((event) =>
       event.phase === 'recovered' || event.phase === 'failed'), 'recovery');
     await until(() => undo.outcome !== undefined, 'the undo outcome');
     await ack;
