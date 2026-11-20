@@ -326,14 +326,15 @@ fn created_attrs(kind: ListKind, key: &str, level: f64) -> BTreeMap<String, Any>
 }
 
 /// The attributes that put a paragraph on the source list of its neighbour with `values`, at
-/// `level` when given, else at the neighbour's. At another level than the neighbour's, the list
-/// attributes are those seeding stores for that level as `source` renders it, when it does;
-/// otherwise they are the neighbour's.
+/// `level` when given, else at the neighbour's, when the list shows as `kind` there. At the
+/// neighbour's level the list attributes are the neighbour's; at another level the list qualifies
+/// only when `source` renders that level, and the attributes are those seeding stores for it.
 fn source_attrs(
     values: &BTreeMap<String, Any>,
+    kind: ListKind,
     level: Option<f64>,
     source: Option<&SourceMetadata>,
-) -> BTreeMap<String, Any> {
+) -> Option<BTreeMap<String, Any>> {
     let num_pr = match (level, values.get("numPr")) {
         (Some(level), Some(Any::Map(num_pr))) => {
             let mut num_pr = (**num_pr).clone();
@@ -344,10 +345,13 @@ fn source_attrs(
         _ => None,
     };
     let rendered = match (&num_pr, source) {
-        (Some((num_pr, true)), Some(source)) => rendered_level(num_pr, source),
+        (Some((num_pr, true)), source) => Some(rendered_level(num_pr, source?)?),
         _ => None,
     };
     let from = rendered.as_ref().unwrap_or(values);
+    if shown_kind(from) != kind {
+        return None;
+    }
     let mut attrs: BTreeMap<String, Any> = SOURCE_LIST_KEYS
         .into_iter()
         .map(|key| (key.to_owned(), from.get(key).cloned().unwrap_or(Any::Null)))
@@ -356,7 +360,7 @@ fn source_attrs(
         attrs.insert("numPr".to_owned(), Any::from(num_pr));
     }
     attrs.insert(LIST_DEF.to_owned(), Any::Null);
-    attrs
+    Some(attrs)
 }
 
 /// The list attributes seeding stores for a paragraph on the source list and level `num_pr`
@@ -368,9 +372,9 @@ fn rendered_level(
     crate::seed::rendered_list_attrs(source_list_rendering(num_pr, source)?)
 }
 
-/// The attributes that put a paragraph on the list of the paragraph with `values` when that list
-/// shows as `kind`, at `level` when given, else at that paragraph's; a paragraph naming a created
-/// list whose definition is absent is on the list its numId names.
+/// The attributes that put a paragraph on the list of the paragraph with `values`, at `level` when
+/// given, else at that paragraph's, when that list has that level and shows as `kind` there; a
+/// paragraph naming a created list whose definition is absent is on the list its numId names.
 fn joined_list(
     values: &BTreeMap<String, Any>,
     definitions: &BTreeMap<String, CreatedListDefinition>,
@@ -383,7 +387,7 @@ fn joined_list(
             let level = level.unwrap_or(theirs);
             (definitions[&key].kind == kind).then(|| created_attrs(kind, &key, level))
         }
-        _ => (shown_kind(values) == kind).then(|| source_attrs(values, level, source)),
+        _ => source_attrs(values, kind, level, source),
     }
 }
 
@@ -430,8 +434,9 @@ impl EditingDoc {
     /// on when that is of that kind, else the list of the paragraph directly above, else below,
     /// when it is of that kind and does not come from that paragraph's style, otherwise a
     /// definition created under a fresh key in [`LIST_DEFINITIONS`]. A paragraph already on a list
-    /// keeps its own level; one on
-    /// no list takes the level of the paragraph it joins, or level 0 on a new list.
+    /// keeps its own level, and joins a neighbour's list only when that list has that level in
+    /// that kind; one on no list takes the level of the paragraph it joins, or level 0 on a new
+    /// list.
     pub fn ensure_list_definition(
         &self,
         ctx: &EditCtx,
