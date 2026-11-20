@@ -130,11 +130,15 @@ fn serialize_paragraph_inner(
     )?;
     append_generated(&mut writer, &properties);
     let mut generated_comment_references = Vec::new();
+    let mut upcoming = None;
     for (index, content) in paragraph.content.iter().enumerate() {
-        if paragraph_content_zero_width(content) {
-            context
-                .direction
-                .look_ahead(next_paragraph_scopes(paragraph, index));
+        if paragraph_content_zero_width(content) && context.direction.any_open() {
+            if upcoming.is_none() {
+                upcoming = Some(upcoming_paragraph_scopes(paragraph));
+            }
+            if let Some(scopes) = &upcoming {
+                context.direction.look_ahead(scopes[index]);
+            }
         }
         append_generated(&mut writer, &serialize_paragraph_content(content, context)?);
         if let ParagraphContent::CommentRange(marker) = content
@@ -258,40 +262,74 @@ fn leading_scopes(node: &InlineNode) -> &[DirectionScope] {
     shared.unwrap_or_default()
 }
 
-/// Notes, before `nodes[index]` when it takes no width, the scopes the next node with width
-/// keeps open where it starts: those of what is written after `nodes` when none of them follows.
-fn look_ahead(
-    nodes: &[InlineNode],
-    index: usize,
-    after: Option<&[DirectionScope]>,
-    context: &mut SerializerContext,
-) {
-    if zero_width(&nodes[index]) {
-        let next = nodes[index + 1..].iter().find(|node| !zero_width(node));
-        context
-            .direction
-            .look_ahead(next.map_or(after, |node| Some(leading_scopes(node))));
+/// The scopes the next node with width keeps open where it starts, from each of a wrapper
+/// element's nodes on: those of what is written after the nodes where none of them follows.
+/// They are found in one pass from the end, when a node without width first needs them.
+struct Upcoming<'a> {
+    nodes: &'a [InlineNode],
+    after: Option<&'a [DirectionScope]>,
+    scopes: Option<Vec<Option<&'a [DirectionScope]>>>,
+}
+
+impl<'a> Upcoming<'a> {
+    fn new(nodes: &'a [InlineNode], after: Option<&'a [DirectionScope]>) -> Self {
+        Self {
+            nodes,
+            after,
+            scopes: None,
+        }
+    }
+
+    /// Notes, before `nodes[index]` when it takes no width inside an open scope, the scopes the
+    /// next node with width keeps open where it starts.
+    fn look_ahead(&mut self, index: usize, context: &mut SerializerContext) {
+        if !zero_width(&self.nodes[index]) || !context.direction.any_open() {
+            return;
+        }
+        if self.scopes.is_none() {
+            self.scopes = Some(upcoming_scopes(self.nodes, self.after));
+        }
+        if let Some(scopes) = &self.scopes {
+            context.direction.look_ahead(scopes[index]);
+        }
     }
 }
 
-/// The scopes the first paragraph content with width from `index` on keeps open where it starts;
-/// `None` when a reference run is written before it or none follows.
-fn next_paragraph_scopes(paragraph: &Paragraph, index: usize) -> Option<&[DirectionScope]> {
-    for content in &paragraph.content[index..] {
-        if needs_comment_reference(paragraph, content) {
-            return None;
+fn upcoming_scopes<'a>(
+    nodes: &'a [InlineNode],
+    after: Option<&'a [DirectionScope]>,
+) -> Vec<Option<&'a [DirectionScope]>> {
+    let mut next = after;
+    let mut upcoming = vec![None; nodes.len()];
+    for (index, node) in nodes.iter().enumerate().rev() {
+        if !zero_width(node) {
+            next = Some(leading_scopes(node));
         }
+        upcoming[index] = next;
+    }
+    upcoming
+}
+
+/// The scopes the first paragraph content with width from each index on keeps open where it
+/// starts, found in one pass from the end; `None` where a reference run is written before it or
+/// none follows.
+fn upcoming_paragraph_scopes(paragraph: &Paragraph) -> Vec<Option<&[DirectionScope]>> {
+    let mut next = None;
+    let mut upcoming = vec![None; paragraph.content.len()];
+    for (index, content) in paragraph.content.iter().enumerate().rev() {
         match content {
             ParagraphContent::Inline(node) if !zero_width(node) => {
-                return Some(leading_scopes(node));
+                next = Some(leading_scopes(node));
             }
             ParagraphContent::Tracked(change) => {
-                return Some(shared_direction_scopes(&change.content).unwrap_or_default());
+                next = Some(shared_direction_scopes(&change.content).unwrap_or_default());
             }
+            _ if needs_comment_reference(paragraph, content) => next = None,
             _ => {}
         }
+        upcoming[index] = next;
     }
-    None
+    upcoming
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -573,8 +611,9 @@ fn serialize_hyperlink(
     let (before, base) = context
         .direction
         .enter_wrapper(shared_direction_scopes(written));
+    let mut upcoming = Upcoming::new(written, None);
     for (index, child) in written.iter().enumerate() {
-        look_ahead(written, index, None, context);
+        upcoming.look_ahead(index, context);
         match child {
             _ if expanded => children.push_str(&serialize_inline_node(child, context)?),
             InlineNode::Run(_)
@@ -874,8 +913,9 @@ fn serialize_complex_field(
     }
     let result_scopes = result_scopes.unwrap_or_default();
     if let Some(nodes) = in_place {
+        let mut upcoming = Upcoming::new(nodes, Some(result_scopes));
         for (index, node) in nodes.iter().enumerate() {
-            look_ahead(nodes, index, Some(result_scopes), context);
+            upcoming.look_ahead(index, context);
             output.push_str(&serialize_inline_node(node, context)?);
         }
     } else if let Some(nodes) = code_nodes {
@@ -914,8 +954,9 @@ fn serialize_complex_field(
         .filter(|content| !content.spans_paragraphs())
         .and_then(|content| content.inline.as_ref());
     if let Some(nodes) = structured {
+        let mut upcoming = Upcoming::new(nodes, Some(result_scopes));
         for (index, node) in nodes.iter().enumerate() {
-            look_ahead(nodes, index, Some(result_scopes), context);
+            upcoming.look_ahead(index, context);
             output.push_str(&serialize_inline_node(node, context)?);
         }
     } else {
@@ -959,12 +1000,13 @@ pub fn serialize_inline_sdt(
         .direction
         .enter_wrapper(shared_direction_scopes(&sdt.content));
     let previous = std::mem::replace(&mut context.in_control, true);
+    let mut upcoming = Upcoming::new(&sdt.content, None);
     let result = sdt
         .content
         .iter()
         .enumerate()
         .try_for_each(|(index, item)| {
-            look_ahead(&sdt.content, index, None, context);
+            upcoming.look_ahead(index, context);
             append_generated(&mut writer, &serialize_inline_node(item, context)?);
             Ok::<_, ParseError>(())
         });
@@ -1166,6 +1208,7 @@ fn serialize_tracked_change(
     let previous_revision = std::mem::replace(&mut context.in_revision, true);
     let previous_deletion =
         std::mem::replace(&mut context.deletion, deletion && context.in_control);
+    let mut upcoming = Upcoming::new(&change.content, None);
     let result = change
         .content
         .iter()
@@ -1173,7 +1216,7 @@ fn serialize_tracked_change(
         .try_for_each(|(index, item)| {
             let xml = match item {
                 _ if context.in_control => {
-                    look_ahead(&change.content, index, None, context);
+                    upcoming.look_ahead(index, context);
                     serialize_inline_node(item, context)?
                 }
                 InlineNode::Run(run) => serialize_scoped_run(run, deletion, context)?,

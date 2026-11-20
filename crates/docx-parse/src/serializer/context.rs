@@ -122,6 +122,12 @@ impl DirectionScopes {
         xml
     }
 
+    /// Whether a scope opened inside the wrapper element being written is open, so the next node
+    /// with width decides which of them a node without width stays inside.
+    pub(crate) fn any_open(&self) -> bool {
+        self.open.len() > self.base
+    }
+
     /// Notes, before a node without width, the scopes the next node with width keeps open where
     /// it starts; `None` when no such node follows inside the wrapper element being written.
     pub(crate) fn look_ahead(&mut self, next: Option<&[DirectionScope]>) {
