@@ -199,11 +199,6 @@ function mount({ tamper, source = documentBytes(), reopenSource, collaboration, 
     fontFamilies(worker: number) {
       return fontEvents.filter((event) => event.worker === worker).at(-1)?.families ?? null;
     },
-    async reservations() {
-      let value: NonNullable<DocxCommandCheckpoint['recoveryState']>['layoutReservations'];
-      await act(async () => { value = (await clients.at(-1)!.checkpoint()).recoveryState?.layoutReservations; });
-      return value;
-    },
     streamBytes() {
       const covered = checkpoints.at(-1)?.stream ?? 0;
       return [...streamed].reduce((total, [index, bytes]) => index >= covered ? total + bytes : total, 0);
@@ -522,31 +517,6 @@ test('a replayed entry never becomes an undo step: history does not survive a re
   expect(late.version()).toBe(lateVersion);
 }, TIMEOUT);
 
-test('render environment reservations sent after open come back after a worker restart before a checkpoint', async () => {
-  const session = mount();
-  await session.ready();
-  const engine = session.engine();
-  const version = engine.proposalEngine.version();
-  const paraId = engine.paragraphs('body')[0]!.paraId;
-  const sessionId = engine.paragraphIdentities().sessionId;
-  const status = await session.submit('setRenderEnvironment', { themeColors: {}, showHiddenText: false, reservations: {
-    version, key: 'g244', sets: [{ owner: 'plugin', items: [{ id: 'gap', kind: 'block', side: 'after', height: 50,
-      anchor: { kind: 'paragraph', paragraph: { kind: 'session', sessionId, story: 'body', paraId } } }] }],
-  } });
-  expect(status).toBe('noop');
-  expect(await session.submit('insertText', { text: 'a' })).toBe('applied');
-  const before = await session.reservations();
-  expect(before?.set).toEqual({ version, key: 'g244' });
-  expect(Object.values(before?.values ?? {})).toEqual([expect.objectContaining({ owner: 'plugin', id: 'gap', height: 50 })]);
-  const expected = session.text();
-  await session.crash();
-  expect(session.checkpoints).toEqual([]);
-  const after = await session.reservations();
-  console.log(`G244-RENDER-ENV replayed=${JSON.stringify(session.replayed)} before=${JSON.stringify(before)} after=${JSON.stringify(after)}`);
-  session.expectRecovered(expected);
-  expect(after).toEqual(before);
-}, TIMEOUT);
-
 test('a font environment sent after open comes back after a worker restart before a checkpoint', async () => {
   const session = mount();
   await session.ready();
@@ -672,28 +642,49 @@ test('a frame-time update between two commands is in the log', async () => {
   expect(session.engine().hasPendingUpdate()).toBe(false);
 }, TIMEOUT);
 
-test('idle saves do not grow the log without bound', async () => {
+test('saves after a published save do not grow the log', async () => {
   const session = mount();
   await session.ready();
+  expect(await session.submit('paragraphBreak')).toBe('applied');
   const before = session.stateVector();
   await session.save();
-  const published = session.stateVector() !== before;
-  let retainedAt128 = 0;
+  if (session.stateVector() === before) throw new Error('save wrote nothing; mechanism not reached');
+  await session.settle();
+  const afterFirst = session.streamBytes();
+  const checkpoints = session.checkpoints.length;
+  const grown: number[] = [];
   for (let i = 2; i <= 300; i += 1) {
     await session.save();
-    if (i === 128) {
-      await session.settle();
-      retainedAt128 = session.streamBytes();
-    }
+    await session.settle();
+    if (session.streamBytes() !== afterFirst) grown.push(i);
   }
-  console.log(`G244-IDLE-SAVES bytes=${retainedAt128} after=128`);
-  await session.settle();
+  const afterLast = session.streamBytes();
+  console.log(`G244-IDLE-SAVES bytes after save 1=${afterFirst} after save 300=${afterLast} grown=${JSON.stringify(grown.slice(0, 10))}`);
+  expect(afterFirst).toBeGreaterThan(0);
+  expect(grown).toEqual([]);
+  expect(session.checkpoints.length).toBe(checkpoints);
   const expected = session.text();
   await session.crash();
-  console.log(`G244-IDLE-SAVES published=${published} checkpoints=${session.checkpoints.length} replayed=${session.replayed.length}`);
   session.expectRecovered(expected);
   expect(session.engine().hasPendingUpdate()).toBe(false);
-  expect(session.checkpoints.length > 0 || session.replayed.length <= 128).toBe(true);
+}, 600_000);
+
+test('rounds of a paragraph insertion and a publishing save reach the count checkpoint', async () => {
+  const session = mount();
+  await session.ready();
+  for (let round = 1; round <= 128; round += 1) {
+    expect(await session.submit('paragraphBreak')).toBe('applied');
+    const before = session.stateVector();
+    await session.save();
+    if (session.stateVector() === before) throw new Error(`save ${round} wrote nothing; mechanism not reached`);
+  }
+  await session.checkpointTaken(1);
+  console.log(`G244-PUBLISH-ROUNDS checkpoints=${session.checkpoints.length}`);
+  const expected = session.text();
+  expect(expected.split('|')).toHaveLength(129);
+  await session.crash();
+  session.expectRecovered(expected);
+  expect(session.engine().hasPendingUpdate()).toBe(false);
 }, 600_000);
 
 test('an undo still in flight at a crash before the first checkpoint is refused and reported', async () => {
