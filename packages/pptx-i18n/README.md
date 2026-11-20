@@ -34,7 +34,7 @@ const custom = { ...de, toolbar: { ...de.toolbar, addSlide: 'Neue Folie' } };
 
 `en` (source), `ar`, `de`, `es`, `fr`, `he`, `hi`, `id`, `it`, `ja`, `ko`, `nl`, `pl`, `pt-BR`, `ru`,
 `tr`, `uk`, `vi`, `zh-CN` and `zh-TW`. The exports for `pt-BR`, `zh-CN` and `zh-TW` are `ptBR`,
-`zhCN` and `zhTW`. Every locale translates every string.
+`zhCN` and `zhTW`. A string a locale has not translated yet appears in English.
 
 Each locale is also its own subpath, for example `@betteroffice/pptx-i18n/pl`, so an app that picks
 the locale at runtime can load only the one it needs. `locales` maps every tag to its strings and
@@ -50,7 +50,7 @@ Outside React, build a typed `t()` directly:
 import { createT, deepMerge, en, de, type LocaleStrings } from '@betteroffice/pptx-i18n';
 
 const t = createT(deepMerge(en, de) as LocaleStrings, 'de');
-t('toolbar.addSlide'); // 'Add slide'
+t('toolbar.addSlide'); // 'Folie hinzufügen'
 ```
 
 ## Documentation

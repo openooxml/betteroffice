@@ -31,7 +31,7 @@ import {
   assertCommentBookmarkReplacement, projectedSessionKey, restoreBlockBookmarks, yrsToDocument,
 } from './yrsToDocument';
 import {
-  savedListDefinitions, withCreatedListIds, writeListDefinitionParts,
+  createdListReferences, plannedListDefinitions, RelationshipTargetError, withCreatedListIds, writeListDefinitionParts,
 } from './listDefinitionSave';
 
 /** A saved paragraph's session anchor and the persisted anchor that resolves to it once reopened. */
@@ -580,7 +580,8 @@ export async function writeSessionSave(
   engineProgress();
   const output = withoutSyntheticParagraphs(document, capture.identities);
   engineProgress();
-  const sourceBuffer = sessionSourcePackage(session)?.buffer ?? originalBuffer;
+  const openedBuffer = sessionSourcePackage(session)?.buffer;
+  const sourceBuffer = openedBuffer ?? originalBuffer;
   const bodyPart = capture.identities.paragraphs.find(identity => identity.session?.story === 'body' && identity.source)?.source?.partUri.replace(/^\//, '') ?? 'word/document.xml';
   const separators = noteSeparatorKeys(document);
   let sourceSeparators: ReturnType<typeof noteSeparatorKeys> | null | undefined;
@@ -610,8 +611,13 @@ export async function writeSessionSave(
   if (yieldSave) await yieldSave();
   engineProgress();
   const refuse = (message: string) => new DocxSectionError('unsupported', message);
-  const created = session.createdListDefinitions?.() ?? [];
-  if (created.length) await preloadOpcWasm();
+  const defined = session.createdListDefinitions?.() ?? [];
+  const references = defined.length ? createdListReferences(output) : undefined;
+  const inUse = references
+    ? new Set([...(session.listDefinitionKeysInUse?.() ?? defined.map(definition => definition.key)), ...references.keys])
+    : undefined;
+  const created = defined.filter(definition => inUse?.has(definition.key));
+  if (created.length) await Promise.all([preloadOpcWasm(), preloadParseWasm()]);
   const write = async (sectionEdits: RustParagraphIds['sectionEdits']) => {
     const modelBody = (part: string) => sectionPlan !== undefined && !sectionEdits && part === bodyPart;
     const spliced = splicesFor(sectionEdits).filter(({ part }) => !modelBody(part));
@@ -652,9 +658,13 @@ export async function writeSessionSave(
     const source = options.commentDeletion && options.commentBaseline ? Uint8Array.from(options.commentBaseline.bytes).buffer
       : options.commentBaseline ? commentSourceBuffer(sectionEdits ? sourceBuffer : originalBuffer, options.commentBaseline.bytes)
         : sectionEdits ? sourceBuffer : originalBuffer;
-    const lists = created.length
-      ? savedListDefinitions(session, created, unzipContainer(new Uint8Array(source)), sessionMaterializedSource(session)?.package.numbering)
-      : [];
+    const listPlan = created.length
+      ? plannedListDefinitions(
+        session, created, unzipContainer(new Uint8Array(source)), sessionMaterializedSource(session)?.package.numbering,
+        references?.numIds, () => (openedBuffer === undefined ? undefined : unzipContainer(new Uint8Array(openedBuffer)))
+      )
+      : undefined;
+    const lists = listPlan?.definitions ?? [];
     const modelled = withSourceOrdinals(output, spliced);
     const numIds = new Map(lists.map(definition => [definition.key, definition.numId]));
     const { buffer, warnings } = await writeDocumentWithRust(
@@ -679,7 +689,7 @@ export async function writeSessionSave(
         console.warn(warning);
       }
     }
-    return { buffer, plan, structure, keptParagraphs, structureDropped, lists };
+    return { buffer, plan, structure, keptParagraphs, structureDropped, lists, listPlan };
   };
   let sectionEdits = sectionPlan?.plan;
   if (sectionEdits && !sectionEdits.onlySections && !splicesFor(sectionEdits).some(({ part }) => part === bodyPart)) {
@@ -690,12 +700,12 @@ export async function writeSessionSave(
   try {
     result = await write(sectionEdits);
   } catch (error) {
-    if (!sectionEdits) throw error;
+    if (!sectionEdits || error instanceof RelationshipTargetError) throw error;
     if (sectionPlan?.lossy) throw refuse(error instanceof Error ? error.message : String(error));
     if (sectionPlan?.strict) throw refuse('Cannot safely locate section boundaries after this structural edit');
     result = await write(undefined);
   }
-  const { buffer, plan, structure, keptParagraphs, structureDropped, lists } = result;
+  const { buffer, plan, structure, keptParagraphs, structureDropped, lists, listPlan } = result;
   if (yieldSave) await yieldSave();
   const paragraphs = savedParagraphs(output, capture.identities);
   let bytes: Uint8Array = new Uint8Array(buffer);
@@ -733,6 +743,7 @@ export async function writeSessionSave(
   );
   const isStale = ({ session: anchor, persisted }: DocxSavedParagraph) =>
     stale.has(`${anchor.paraId}\u0000${persisted.paraId}`);
+  listPlan?.commit();
   return {
     bytes,
     paragraphs: written.filter((paragraph) => !isStale(paragraph)),

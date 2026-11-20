@@ -35,7 +35,7 @@ bun run --filter @betteroffice/collaboration-relay deploy
 ```
 
 Point your browser transport at the deployed Worker origin. The complete demo
-adapter is [`createRoomTransport`](https://github.com/openooxml/betteroffice/blob/main/apps/demo/app/collab/createRoomTransport.ts);
+adapter is [`createRoomTransport`](https://github.com/openooxml/betteroffice/blob/main/shared/editor-host/collaboration/createRoomTransport.ts);
 it handles WebSocket reconnects, binary ownership, and backpressure. If you write
 your own adapter, implement the `CollaborationTransport` exported by the format
 package. A `false` return from `send` means the adapter must emit `drain` when it

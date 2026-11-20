@@ -3935,6 +3935,70 @@ fn resolved_text_formatting(formatting: Option<&Value>, styles: &StyleResolver) 
     merge_text_formatting(style.as_deref(), formatting)
 }
 
+/// The list attributes seeding stores for a paragraph whose `listRendering` is `list`; an
+/// attribute the rendering gives no value is left out.
+fn list_rendering_attrs(list: Option<&Value>) -> JsonObject {
+    let mut attrs = JsonObject::new();
+    for (key, value) in [
+        ("listNumFmt", field(list, "numFmt")),
+        ("listIsBullet", field(list, "isBullet")),
+        ("listMarker", field(list, "marker")),
+        (
+            "listMarkerHidden",
+            field(list, "markerHidden").filter(|value| truthy(Some(value))),
+        ),
+        ("listMarkerBold", field(list, "markerBold")),
+        ("listMarkerItalic", field(list, "markerItalic")),
+        ("listMarkerColor", field(list, "markerColor")),
+        (
+            "listLevelNumFmts",
+            field(list, "levelNumFmts").filter(|value| truthy(Some(value))),
+        ),
+        ("listAbstractNumId", field(list, "abstractNumId")),
+        ("listStartOverride", field(list, "startOverride")),
+    ] {
+        if let Some(value) = value.filter(|value| !value.is_null()) {
+            attrs.insert(key.to_owned(), drop_nulls(value.clone()));
+        }
+    }
+    for (key, value) in [
+        (
+            "listMarkerFontFamily",
+            string(field(list, "markerFontFamily")).filter(|value| !value.is_empty()),
+        ),
+        (
+            "listMarkerSuffix",
+            string(field(list, "markerSuffix")).filter(|value| !value.is_empty()),
+        ),
+    ] {
+        if let Some(value) = value {
+            attrs.insert(key.to_owned(), Value::String(value.to_owned()));
+        }
+    }
+    if let Some(size) = number(field(list, "markerFontSize")).filter(|value| *value != 0.0) {
+        attrs.insert("listMarkerFontSize".to_owned(), json!(size));
+    }
+    attrs
+}
+
+/// The list attributes seeding stores for a paragraph whose list renders as `rendering`, its
+/// bullet shown as parsing shows it; `None` when an attribute does not convert.
+pub(crate) fn rendered_list_attrs(
+    mut rendering: docx_parse::ListRendering,
+) -> Option<BTreeMap<String, Any>> {
+    if rendering.is_bullet {
+        rendering.marker = crate::paragraph_facts::shown_bullet(
+            &rendering.marker,
+            rendering.marker_font_family.as_deref(),
+        );
+    }
+    let list = serde_json::to_value(rendering).ok()?;
+    list_rendering_attrs(Some(&list))
+        .into_iter()
+        .map(|(key, value)| Some((key, any_from_value(value).ok()?)))
+        .collect()
+}
+
 fn paragraph_attrs(
     paragraph: &Value,
     styles: &StyleResolver,
@@ -3957,28 +4021,12 @@ fn paragraph_attrs(
     } else {
         (None, None)
     };
-    let mut attrs = JsonObject::new();
+    let mut attrs = list_rendering_attrs(list);
     for (key, value) in [
         ("paraId", field(Some(paragraph), "paraId")),
         ("textId", field(Some(paragraph), "textId")),
         ("numPr", field(formatting, "numPr")),
         ("numPrFromStyle", field(formatting, "numPrFromStyle")),
-        ("listNumFmt", field(list, "numFmt")),
-        ("listIsBullet", field(list, "isBullet")),
-        ("listMarker", field(list, "marker")),
-        (
-            "listMarkerHidden",
-            field(list, "markerHidden").filter(|value| truthy(Some(value))),
-        ),
-        ("listMarkerBold", field(list, "markerBold")),
-        ("listMarkerItalic", field(list, "markerItalic")),
-        ("listMarkerColor", field(list, "markerColor")),
-        (
-            "listLevelNumFmts",
-            field(list, "levelNumFmts").filter(|value| truthy(Some(value))),
-        ),
-        ("listAbstractNumId", field(list, "abstractNumId")),
-        ("listStartOverride", field(list, "startOverride")),
         ("_originalFormatting", formatting),
         ("cnfStyle", field(formatting, "cnfStyle")),
     ] {
@@ -3986,23 +4034,8 @@ fn paragraph_attrs(
             attrs.insert(key.to_owned(), drop_nulls(value.clone()));
         }
     }
-    for (key, value) in [
-        ("styleId", style_id),
-        (
-            "listMarkerFontFamily",
-            string(field(list, "markerFontFamily")).filter(|value| !value.is_empty()),
-        ),
-        (
-            "listMarkerSuffix",
-            string(field(list, "markerSuffix")).filter(|value| !value.is_empty()),
-        ),
-    ] {
-        if let Some(value) = value {
-            attrs.insert(key.to_owned(), Value::String(value.to_owned()));
-        }
-    }
-    if let Some(size) = number(field(list, "markerFontSize")).filter(|value| *value != 0.0) {
-        attrs.insert("listMarkerFontSize".to_owned(), json!(size));
+    if let Some(style_id) = style_id {
+        attrs.insert("styleId".to_owned(), Value::String(style_id.to_owned()));
     }
     if styles.enabled {
         let style = styles.resolve_paragraph_style(style_id);
