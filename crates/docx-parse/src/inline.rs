@@ -1016,7 +1016,7 @@ pub(crate) fn raw_foreign_inline(element: &crate::xml::XmlElement) -> Option<Inl
     })))
 }
 
-/// The source of a run holding two or more fields one after another, each beginning and ending
+/// The source of a run holding one or more fields one after another, each beginning and ending
 /// inside it, beside only text, tabs, plain breaks and properties; its rendered page breaks are
 /// left out.
 pub(crate) fn field_run_source(element: &XmlElement) -> Option<String> {
@@ -1051,7 +1051,7 @@ pub(crate) fn field_run_source(element: &XmlElement) -> Option<String> {
             _ => return None,
         }
     }
-    if open || begins < 2 {
+    if open || begins == 0 {
         return None;
     }
     let mut run = element.clone();
