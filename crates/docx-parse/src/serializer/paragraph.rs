@@ -912,13 +912,19 @@ fn serialize_complex_field(
     field: &ComplexField,
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
+    let mut shared = None;
+    for run in field.field_code.iter().chain(&field.field_result) {
+        merge_run_direction_scopes(run, &mut shared);
+    }
     if let Some(source) = field.source_run_xml.as_deref()
         && !context.deletion
         && !context.in_revision
         && field.source_run_digest.as_deref() == Some(field_run_digest(field).as_str())
     {
         validate_replayed_fragment(source)?;
-        return Ok(source.to_owned());
+        let mut output = context.direction.transition(shared.unwrap_or_default());
+        output.push_str(source);
+        return Ok(output);
     }
     let formatting = field
         .field_result
@@ -926,10 +932,6 @@ fn serialize_complex_field(
         .and_then(|run| run.formatting.as_ref())
         .or(field.formatting.as_ref());
     let properties = serialize_text_formatting(formatting);
-    let mut shared = None;
-    for run in field.field_code.iter().chain(&field.field_result) {
-        merge_run_direction_scopes(run, &mut shared);
-    }
     let mut output = context.direction.transition(shared.unwrap_or_default());
     output.push_str("<w:r>");
     output.push_str(&properties);
