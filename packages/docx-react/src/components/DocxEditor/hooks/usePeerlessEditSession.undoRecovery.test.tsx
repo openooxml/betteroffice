@@ -89,6 +89,7 @@ function mount({ tamper, source = documentBytes(), reopenSource, collaboration, 
   const events: RecoveryReport[] = [];
   const errors: Error[] = [];
   const streamed = new Map<number, number>();
+  const fontEvents: { worker: number; families: string[] }[] = [];
   let pendingCheckpoint: Promise<unknown> | undefined;
   let applied = 0;
   const openResident = async (resume?: Resume): Promise<DocxCommandConnection> => {
@@ -97,6 +98,8 @@ function mount({ tamper, source = documentBytes(), reopenSource, collaboration, 
     liveWorkers.push(worker);
     const client = new DocxSourceWorkerClient(worker);
     clients.push(client);
+    const opened = workers.length;
+    client.onFontEnvironment((event) => { fontEvents.push({ worker: opened, families: [...event.families] }); });
     const checkpoint = resume?.checkpoint as DocxCommandCheckpoint | undefined;
     if (checkpoint && !checkpoint.recoveryState) {
       throw new SessionFailure('message', 'Cannot restore DOCX checkpoint command-local state and proposals');
@@ -193,6 +196,14 @@ function mount({ tamper, source = documentBytes(), reopenSource, collaboration, 
       return { status, detail, ticket };
     },
     async ready() { await waitFor(() => expect(view.result.current.status).toBe('ready'), { timeout: 30_000 }); },
+    fontFamilies(worker: number) {
+      return fontEvents.filter((event) => event.worker === worker).at(-1)?.families ?? null;
+    },
+    async reservations() {
+      let value: NonNullable<DocxCommandCheckpoint['recoveryState']>['layoutReservations'];
+      await act(async () => { value = (await clients.at(-1)!.checkpoint()).recoveryState?.layoutReservations; });
+      return value;
+    },
     streamBytes() {
       const covered = checkpoints.at(-1)?.stream ?? 0;
       return [...streamed].reduce((total, [index, bytes]) => index >= covered ? total + bytes : total, 0);
@@ -509,6 +520,50 @@ test('a replayed entry never becomes an undo step: history does not survive a re
   await late.submit('undo');
   expect(late.text()).toBe(lateTyped);
   expect(late.version()).toBe(lateVersion);
+}, TIMEOUT);
+
+test('render environment reservations sent after open come back after a worker restart before a checkpoint', async () => {
+  const session = mount();
+  await session.ready();
+  const engine = session.engine();
+  const version = engine.proposalEngine.version();
+  const paraId = engine.paragraphs('body')[0]!.paraId;
+  const sessionId = engine.paragraphIdentities().sessionId;
+  const status = await session.submit('setRenderEnvironment', { themeColors: {}, showHiddenText: false, reservations: {
+    version, key: 'g244', sets: [{ owner: 'plugin', items: [{ id: 'gap', kind: 'block', side: 'after', height: 50,
+      anchor: { kind: 'paragraph', paragraph: { kind: 'session', sessionId, story: 'body', paraId } } }] }],
+  } });
+  expect(status).toBe('noop');
+  expect(await session.submit('insertText', { text: 'a' })).toBe('applied');
+  const before = await session.reservations();
+  expect(before?.set).toEqual({ version, key: 'g244' });
+  expect(Object.values(before?.values ?? {})).toEqual([expect.objectContaining({ owner: 'plugin', id: 'gap', height: 50 })]);
+  const expected = session.text();
+  await session.crash();
+  expect(session.checkpoints).toEqual([]);
+  const after = await session.reservations();
+  console.log(`G244-RENDER-ENV replayed=${JSON.stringify(session.replayed)} before=${JSON.stringify(before)} after=${JSON.stringify(after)}`);
+  session.expectRecovered(expected);
+  expect(after).toEqual(before);
+}, TIMEOUT);
+
+test('a font environment sent after open comes back after a worker restart before a checkpoint', async () => {
+  const session = mount();
+  await session.ready();
+  const status = await session.submit('setFontEnvironment', {
+    faces: [{ family: 'Liberation Sans', data: FONT.slice() }, { family: 'Brand Sans', data: FONT.slice() }],
+    chains: { 'liberation sans|0|0': [0], 'brand sans|0|0': [1] }, families: ['Liberation Sans', 'Brand Sans'],
+  });
+  expect(['applied', 'noop']).toContain(status);
+  expect(await session.submit('insertText', { text: 'a' })).toBe('applied');
+  await waitFor(() => expect(session.fontFamilies(1)).toContain('Brand Sans'), { timeout: 30_000 });
+  const before = session.fontFamilies(1);
+  const expected = session.text();
+  await session.crash();
+  expect(session.checkpoints).toEqual([]);
+  console.log(`G244-FONT-ENV replayed=${JSON.stringify(session.replayed)} before=${JSON.stringify(before)} after=${JSON.stringify(session.fontFamilies(2))}`);
+  session.expectRecovered(expected);
+  await waitFor(() => expect(session.fontFamilies(2)).toEqual(before), { timeout: 30_000 });
 }, TIMEOUT);
 
 test('a save between acknowledged edits does not leave the recovered document behind', async () => {
