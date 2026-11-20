@@ -16,6 +16,11 @@
       "import": "./dist/shortcuts.mjs",
       "default": "./dist/shortcuts.mjs"
     },
+    "./mini-toolbar": {
+      "types": "./dist/mini-toolbar.d.mts",
+      "import": "./dist/mini-toolbar.mjs",
+      "default": "./dist/mini-toolbar.mjs"
+    },
     "./styles.css": "./dist/styles.css"
   },
   "sideEffects": [

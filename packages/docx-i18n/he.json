@@ -542,6 +542,12 @@
     "tableInserted": "טבלה שנוספה",
     "tableDeleted": "טבלה שנמחקה"
   },
+  "pasteOptions": {
+    "button": "אפשרויות הדבקה (Ctrl)",
+    "keepSource": "שמור על עיצוב המקור",
+    "merge": "מזג עיצוב",
+    "textOnly": "שמור טקסט בלבד"
+  },
   "contextMenu": {
     "ariaLabel": "תפריט פעולות AI",
     "textMenuAriaLabel": "תפריט עריכת טקסט",
@@ -874,6 +880,7 @@
     "toolbarGroup": "תוספים",
     "panelTabs": "חלוניות תוספים",
     "collapsePanel": "כווץ את {title}",
-    "expandPanel": "הרחב את {title}"
+    "expandPanel": "הרחב את {title}",
+    "miniToolbar": "עיצוב הבחירה"
   }
 }

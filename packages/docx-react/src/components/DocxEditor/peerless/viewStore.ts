@@ -100,6 +100,10 @@ export interface PeerlessViewStore {
   setProvisionalCaret(caret: PeerlessProvisionalCaret | null): void;
   subscribeProvisionalCaret?(listener: () => void): () => void;
   getProvisionalCaret?(): PeerlessProvisionalCaret | null;
+  /** Marks the view as waiting for a replacement worker; the reopened worker's first state clears it. */
+  setRecovering?(recovering: boolean): void;
+  subscribeRecovering?(listener: () => void): () => void;
+  getRecovering?(): boolean;
   dispose(): void;
 }
 
@@ -119,6 +123,8 @@ export function createPeerlessViewStore(initial: PeerlessViewSnapshot): Peerless
   let disposed = false;
   const listeners = new Set<() => void>();
   const caretListeners = new Set<() => void>();
+  const recoveringListeners = new Set<() => void>();
+  let recovering = false;
   const sameIdentity = (identity: PeerlessViewIdentity) =>
     identity.session === snapshot.identity.session && identity.incarnation === snapshot.identity.incarnation &&
     identity.epoch === snapshot.identity.epoch;
@@ -155,6 +161,8 @@ export function createPeerlessViewStore(initial: PeerlessViewSnapshot): Peerless
       if (!replacement && state.version === snapshot.version && state.throughSeq === snapshot.throughSeq &&
         (state.selection === undefined || state.selection === selectionInput && state.selectionCause === snapshot.selectionCause) && editState === snapshot.editState) return;
       selectionInput = selected;
+      const recovered = replacement && recovering;
+      if (recovered) recovering = false;
       publish({
         identity: { ...identity }, version: state.version, throughSeq: state.throughSeq,
         versionSinceSeq: replacement || state.version !== snapshot.version ? state.throughSeq : snapshot.versionSinceSeq,
@@ -166,6 +174,7 @@ export function createPeerlessViewStore(initial: PeerlessViewSnapshot): Peerless
         provisionalCaret: replacement || (snapshot.provisionalCaret?.source !== 'echo' &&
           state.version > provisionalRevision.version) ? null : snapshot.provisionalCaret,
       });
+      if (recovered) for (const listener of recoveringListeners) listener();
     },
     installFrameGeometry(geometry) {
       if (disposed || !sameIdentity(geometry.identity) || geometry.coversThroughSeq < snapshot.presentedThroughSeq ||
@@ -202,10 +211,22 @@ export function createPeerlessViewStore(initial: PeerlessViewSnapshot): Peerless
       return () => { caretListeners.delete(listener); };
     },
     getProvisionalCaret: () => snapshot.provisionalCaret ?? null,
+    setRecovering(next) {
+      if (disposed || recovering === next) return;
+      recovering = next;
+      for (const listener of recoveringListeners) listener();
+    },
+    subscribeRecovering(listener) {
+      if (disposed) return () => {};
+      recoveringListeners.add(listener);
+      return () => { recoveringListeners.delete(listener); };
+    },
+    getRecovering: () => recovering,
     dispose() {
       disposed = true;
       listeners.clear();
       caretListeners.clear();
+      recoveringListeners.clear();
     },
   };
 }

@@ -542,6 +542,12 @@
     "tableInserted": "Tabelle eingefügt",
     "tableDeleted": "Tabelle gelöscht"
   },
+  "pasteOptions": {
+    "button": "Einfügeoptionen (Strg)",
+    "keepSource": "Ursprüngliche Formatierung beibehalten",
+    "merge": "Formatierung zusammenführen",
+    "textOnly": "Nur Text übernehmen"
+  },
   "contextMenu": {
     "ariaLabel": "KI-Aktionsmenü",
     "textMenuAriaLabel": "Textbearbeitungsmenü",
@@ -874,6 +880,7 @@
     "toolbarGroup": "Plugins",
     "panelTabs": "Plugin-Bereiche",
     "collapsePanel": "{title} einklappen",
-    "expandPanel": "{title} ausklappen"
+    "expandPanel": "{title} ausklappen",
+    "miniToolbar": "Formatierung der Auswahl"
   }
 }

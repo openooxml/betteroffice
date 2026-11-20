@@ -30,7 +30,7 @@ export interface XlsxPointPosition {
  * with {@link XlsxCommandAdmissionError}: `input-failed` while a refused entry
  * waits for correction or earlier input failed, `gesture-active` during a chart
  * drag, and `document-replaced` when the workbook is replaced meanwhile.
- * @deprecated Removed in 0.6.0. Use XlsxAsyncEditorApi.
+ * @deprecated Removed in 0.7.0. Use XlsxAsyncEditorApi.
  */
 export interface XlsxEditorApi {
   flushPendingInput: () => Promise<void>;
@@ -83,7 +83,7 @@ export interface XlsxEditorApi {
   applyEdits: (request: XlsxEditRequest) => Promise<XlsxEditResult>;
 }
 
-/** @deprecated Removed in 0.6.0. Use XlsxAsyncEditorApi. */
+/** @deprecated Removed in 0.7.0. Use XlsxAsyncEditorApi. */
 export interface XlsxWorkerViewerApi extends Omit<
   XlsxEditorApi, 'handle' | 'save' | 'selectCells' | 'version' | 'readCells' |
   'findText' | 'validateEdits' | 'applyEdits'
@@ -188,9 +188,9 @@ export interface XlsxInThreadEditorProps extends XlsxEditorPluginProps, XlsxHost
   onShortcutIssue?: (issue: ShortcutIssue) => void;
 }
 
-/** @deprecated Removed in 0.6.0. Use XlsxAsyncEditorProps. */
+/** @deprecated Removed in 0.7.0. Use XlsxAsyncEditorProps. */
 export type XlsxWorkerViewerProps = Omit<XlsxInThreadEditorProps, 'onReady' | 'readOnly' | 'collaboration' | 'experimentalWorkerOpen' | keyof XlsxHostProps> & {
-  /** @deprecated Removed in 0.6.0. Omit for the async editor. */
+  /** @deprecated Removed in 0.7.0. Omit for the async editor. */
   [LEGACY_SYNC_API]: true;
   readOnly: true;
   collaboration?: undefined;
@@ -199,23 +199,23 @@ export type XlsxWorkerViewerProps = Omit<XlsxInThreadEditorProps, 'onReady' | 'r
   onReady?: (api: XlsxWorkerViewerApi) => void | (() => void);
 };
 
-/** @deprecated Removed in 0.6.0. Use XlsxAsyncEditorProps. */
+/** @deprecated Removed in 0.7.0. Use XlsxAsyncEditorProps. */
 export type XlsxWorkerEditorProps = Omit<XlsxWorkerViewerProps, 'onReady' | 'readOnly'> & {
   readOnly?: false;
   onReady?: (api: XlsxWorkerEditorApi) => void | (() => void);
 };
 
 export type XlsxAsyncEditorProps = Omit<XlsxInThreadEditorProps, 'onReady' | 'experimentalWorkerOpen'> & {
-  /** @deprecated Removed in 0.6.0. Omit for the async editor. */
+  /** @deprecated Removed in 0.7.0. Omit for the async editor. */
   [LEGACY_SYNC_API]?: false;
   /** @deprecated False selects the in-thread engine. */
   experimentalWorkerOpen?: boolean;
   onReady?: (api: XlsxAsyncEditorApi) => void | (() => void);
 };
 
-/** @deprecated Removed in 0.6.0. Use XlsxAsyncEditorProps. */
+/** @deprecated Removed in 0.7.0. Use XlsxAsyncEditorProps. */
 export type XlsxLegacyEditorProps = Omit<XlsxInThreadEditorProps, keyof XlsxHostProps> & {
-  /** @deprecated Removed in 0.6.0. Omit for the async editor. */
+  /** @deprecated Removed in 0.7.0. Omit for the async editor. */
   [LEGACY_SYNC_API]: true;
 };
 
