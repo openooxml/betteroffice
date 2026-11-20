@@ -86,31 +86,34 @@ impl Workbook {
     ) -> Result<MutexGuard<'_, FontRegistry>> {
         let mut registry = self.fonts.lock().unwrap_or_else(PoisonError::into_inner);
         for command in &display.commands {
-            if let DrawCmd::Text {
+            let DrawCmd::Text {
                 font_family,
                 bold,
                 italic,
                 text,
                 ..
             } = command
-            {
+            else {
+                continue;
+            };
+            let pieces = xlsx_render::run_pieces(command).unwrap_or_default();
+            let own = (font_family, *bold, *italic, &**text);
+            let runs = pieces.iter().map(|piece| {
+                let text = &text[piece.range.clone()];
+                (&piece.font_family, piece.bold, piece.italic, text)
+            });
+            for (font_family, bold, italic, text) in std::iter::once(own).chain(runs) {
                 let family = font_family.as_deref().unwrap_or("Calibri");
                 let requested = primary_family(family);
-                let scripts =
-                    ooxml_text::paragraph_scripts_with_han_fallback([text.as_ref()], false);
-                let key = (
-                    family.trim().to_lowercase(),
-                    *bold,
-                    *italic,
-                    scripts.clone(),
-                );
+                let scripts = ooxml_text::paragraph_scripts_with_han_fallback([text], false);
+                let key = (family.trim().to_lowercase(), bold, italic, scripts.clone());
                 if registry.resolved.contains(&key) {
                     continue;
                 }
                 let faces = self.font_manager.resolve(
                     requested,
-                    *bold,
-                    *italic,
+                    bold,
+                    italic,
                     &scripts,
                     LastResortOffice::Word,
                 );
@@ -135,8 +138,8 @@ impl Workbook {
                         .fonts
                         .register_shared_font(
                             family,
-                            *bold,
-                            *italic,
+                            bold,
+                            italic,
                             Arc::clone(&data),
                             face.bold,
                             face.italic,
@@ -227,7 +230,7 @@ pub(crate) fn supplied_fonts(
     let mut seen = HashSet::new();
     for command in &display.commands {
         let DrawCmd::Text {
-            font_family: Some(family),
+            font_family,
             bold,
             italic,
             chart,
@@ -236,24 +239,34 @@ pub(crate) fn supplied_fonts(
         else {
             continue;
         };
-        if !seen.insert((family.trim().to_lowercase(), *bold, *italic, *chart)) {
-            continue;
-        }
-        if let Some(face) = suppliable_family(family, *chart)
-            .and_then(|name| supplied_face(faces, name, *bold, *italic))
-        {
-            fonts
-                .register_font(
-                    family,
-                    *bold,
-                    *italic,
-                    face.bytes.to_vec(),
-                    face.bold,
-                    face.italic,
-                )
-                .map_err(|_| Error::FontUnavailable {
-                    family: face.family.to_owned(),
-                })?;
+        let pieces = xlsx_render::run_pieces(command).unwrap_or_default();
+        let own = (font_family, *bold, *italic);
+        let runs = pieces
+            .iter()
+            .map(|piece| (&piece.font_family, piece.bold, piece.italic));
+        for (font_family, bold, italic) in std::iter::once(own).chain(runs) {
+            let Some(family) = font_family else {
+                continue;
+            };
+            if !seen.insert((family.trim().to_lowercase(), bold, italic, *chart)) {
+                continue;
+            }
+            if let Some(face) = suppliable_family(family, *chart)
+                .and_then(|name| supplied_face(faces, name, bold, italic))
+            {
+                fonts
+                    .register_font(
+                        family,
+                        bold,
+                        italic,
+                        face.bytes.to_vec(),
+                        face.bold,
+                        face.italic,
+                    )
+                    .map_err(|_| Error::FontUnavailable {
+                        family: face.family.to_owned(),
+                    })?;
+            }
         }
     }
     Ok(fonts)
@@ -427,6 +440,61 @@ mod tests {
                 .unwrap(),
             bold
         );
+    }
+
+    fn with_runs(display: &mut DisplayList, runs: &[xlsx_render::TextRun]) {
+        for command in &mut display.commands {
+            if let DrawCmd::Text { runs: slot, .. } = command {
+                *slot = runs.to_vec();
+            }
+        }
+    }
+
+    #[cfg(feature = "fonts-latin")]
+    #[test]
+    fn a_run_resolves_a_font_of_its_own() {
+        let workbook = Workbook::open(&fixture()).unwrap();
+        let mut display = workbook.display_list(&viewport()).unwrap();
+        let regular_run = xlsx_render::TextRun {
+            start: 0,
+            end: 3,
+            bold: Some(false),
+            ..Default::default()
+        };
+        with_runs(&mut display, &[regular_run]);
+        let fonts = workbook.raster_fonts(&display).unwrap();
+        let regular = BundledFonts::default()
+            .resolve_family("Calibri", false, false)
+            .unwrap()
+            .load()
+            .unwrap();
+        assert_eq!(
+            fonts.fonts.font_data("Calibri", false, false),
+            Some(&regular[..])
+        );
+    }
+
+    #[test]
+    fn a_run_takes_the_supplied_face_of_its_family() {
+        let bytes = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+        let workbook = Workbook::open(&fixture()).unwrap();
+        let mut display = workbook.display_list(&viewport()).unwrap();
+        let run = xlsx_render::TextRun {
+            start: 0,
+            end: 3,
+            font_family: Some("Cambria".into()),
+            bold: Some(false),
+            ..Default::default()
+        };
+        with_runs(&mut display, &[run]);
+        let faces = [PngFontFace {
+            family: "Cambria",
+            bold: false,
+            italic: false,
+            bytes,
+        }];
+        let fonts = supplied_fonts(&display, &faces).unwrap();
+        assert_eq!(fonts.font_data("Cambria", false, false), Some(&bytes[..]));
     }
 
     #[test]

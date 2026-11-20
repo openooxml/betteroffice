@@ -180,10 +180,7 @@ impl FontManager {
         };
         let mut faces = Vec::new();
         let mut push = |face: FontFaceHandle| {
-            if let Some(packs) = &self.packs
-                && crate::resolve_bundled_family_face(&face.family, face.bold, face.italic)
-                    .is_none_or(|entry| !packs.contains(&entry.pack))
-            {
+            if !self.admits(&face) {
                 return None;
             }
             if faces.iter().any(|known: &FontFaceHandle| {
@@ -216,6 +213,25 @@ impl FontManager {
             push(face);
         }
         (faces, glyph)
+    }
+
+    /// Whether [`Self::resolve`] puts a face of `family` itself first, ahead of
+    /// every fallback.
+    #[doc(hidden)]
+    pub fn resolves_family_face(&self, family: &str, bold: bool, italic: bool) -> bool {
+        self.provider.as_ref().is_some_and(|provider| {
+            provider
+                .resolve_family(family, bold, italic)
+                .is_some_and(|face| self.admits(&face))
+        })
+    }
+
+    /// Whether `face` comes from a pack this manager carries, or it limits none.
+    fn admits(&self, face: &FontFaceHandle) -> bool {
+        self.packs.as_ref().is_none_or(|packs| {
+            crate::resolve_bundled_family_face(&face.family, face.bold, face.italic)
+                .is_some_and(|entry| packs.contains(&entry.pack))
+        })
     }
 }
 

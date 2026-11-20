@@ -251,6 +251,8 @@ fn name(namespace: u8, local: &[u8]) -> &'static str {
         #[cfg(feature = "xlsx")]
         (b's', b"rPh") => "s:rPh",
         #[cfg(feature = "xlsx")]
+        (b's', b"rFont") => "s:rFont",
+        #[cfg(feature = "xlsx")]
         (b's', b"sst") => "s:sst",
         #[cfg(feature = "xlsx")]
         (b's', b"si") => "s:si",

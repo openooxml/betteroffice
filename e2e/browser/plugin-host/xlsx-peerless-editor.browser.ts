@@ -59,6 +59,118 @@ test('asyncApi mounts a peer-less editor without a main-thread engine', async ({
   expect(await page.evaluate(() => window.__xlsxWorkerEditor.errors)).toEqual([]);
 });
 
+test('a full-height loading indicator in a fixed-height parent leaves the grid its height', async ({ page }) => {
+  await page.goto('/xlsx-worker-editor.html?asyncApi=1&fixedIndicator=1');
+  await page.waitForFunction(() => '__xlsxWorkerEditor' in window);
+  await expect.poll(() => page.evaluate(() =>
+    document.querySelector('[data-testid="xlsx-workspace"]')?.getBoundingClientRect().height ?? 0)).toBeGreaterThan(0);
+  await pinnedEvaluate(page, () => window.__xlsxWorkerEditor.ready);
+  await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.paintedTexts())).toContain('initial');
+  await expect(page.locator('#worker-editor-root')).toHaveAttribute('data-indicator-shown', 'true');
+  await expect(page.locator('#worker-editor-root')).toHaveAttribute('data-indicator-with-workspace', 'true');
+  await expect(page.locator('#worker-editor-root')).toHaveAttribute('data-indicator-in-layer', 'true');
+  await expect(page.getByTestId('harness-loading')).toHaveCount(0);
+  await expect(page.getByTestId('xlsx-loading')).toHaveCount(0);
+  const layout = await page.evaluate(() => {
+    const height = (id: string) => document.querySelector(`[data-testid="${id}"]`)?.getBoundingClientRect().height ?? 0;
+    const canvas = document.querySelector<HTMLCanvasElement>('[data-paint-source="worker"]');
+    return { parent: height('harness-fixed-parent'), toolbar: height('xlsx-toolbar'), workspace: height('xlsx-workspace'),
+      tabs: height('xlsx-sheet-tabs'), canvas: canvas ? [canvas.width, canvas.height] : null };
+  });
+  expect(layout.parent).toBe(600);
+  expect(layout.workspace).toBeGreaterThan(0);
+  expect(Math.abs(layout.workspace - (layout.parent - layout.toolbar - layout.tabs))).toBeLessThan(1);
+  expect(layout.canvas).not.toBeNull();
+  expect(layout.canvas).not.toEqual([300, 150]);
+  expect(Math.min(...layout.canvas!)).toBeGreaterThan(0);
+  expect(await page.evaluate(() => window.__xlsxWorkerEditor.peerless!.failure())).toBeNull();
+  expect(await page.evaluate(() => window.__xlsxWorkerEditor.errors)).toEqual([]);
+});
+
+test('a loading layer stays on the workspace when the host style makes the editor root static', async ({ page }) => {
+  await page.goto('/xlsx-worker-editor.html?asyncApi=1&fixedIndicator=1&staticRoot=1');
+  await page.waitForFunction(() => '__xlsxWorkerEditor' in window);
+  await pinnedEvaluate(page, () => window.__xlsxWorkerEditor.ready);
+  const harness = page.locator('#worker-editor-root');
+  await expect(harness).toHaveAttribute('data-indicator-in-layer', 'true');
+  expect(await page.getByRole('application').evaluate((element) => element.style.position)).toBe('static');
+  expect(await page.getByTestId('harness-host-panel').evaluate((element) => element.getBoundingClientRect().height)).toBe(800);
+  const anchor = JSON.parse(await harness.getAttribute('data-layer-anchor') ?? 'null') as
+    { inside: boolean; layer: number[]; editor: number[]; workspace: number[] } | null;
+  expect(anchor).not.toBeNull();
+  expect(anchor!.inside).toBe(true);
+  expect(Math.abs(anchor!.editor[3]! - 600)).toBeLessThan(1);
+  expect(anchor!.workspace[3]).toBeGreaterThan(0);
+  anchor!.layer.forEach((value, index) => expect(Math.abs(value - anchor!.workspace[index]!)).toBeLessThan(1));
+  await expect(page.getByTestId('xlsx-loading')).toHaveCount(0);
+  expect(await page.evaluate(() => window.__xlsxWorkerEditor.errors)).toEqual([]);
+});
+
+test('a host grid style on the editor root lays out the editor alike with and without an indicator while the file opens and once it has loaded', async ({ page }) => {
+  const measure = (ids: string[]) => page.evaluate((testIds) => {
+    const root = document.querySelector<HTMLElement>('[role="application"]')!;
+    const parts = testIds.map((id) => document.querySelector<HTMLElement>(`[data-testid="${id}"]`)!);
+    return {
+      held: window.__xlsxWorkerEditor.openHeld(),
+      readyCount: window.__xlsxWorkerEditor.readyCount(),
+      indicator: document.querySelector('[data-testid="harness-loading"]') !== null,
+      layer: document.querySelector('[data-testid="xlsx-loading"]') !== null,
+      shape: {
+        style: [root.style.position, root.style.display, root.style.gap],
+        direct: parts.map((part) => part.parentElement === root),
+        boxes: [root, ...parts].map((part) => {
+          const { top, bottom, left, right } = part.getBoundingClientRect();
+          return [top, bottom, left, right];
+        }),
+      },
+    };
+  }, ids);
+  const opening = async (query: string) => {
+    await page.goto(`/xlsx-worker-editor.html?asyncApi=1&gridRoot=1&holdOpen=1${query}`);
+    await page.waitForFunction(() => '__xlsxWorkerEditor' in window);
+    await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.openHeld())).toBe(true);
+    await expect(page.getByTestId('xlsx-workspace')).toHaveCount(1);
+    await expect(page.getByTestId('xlsx-toolbar')).toHaveCount(1);
+    await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    return measure(['xlsx-toolbar', 'xlsx-workspace']);
+  };
+  const loaded = async () => {
+    await page.evaluate(() => window.__xlsxWorkerEditor.releaseOpen());
+    await pinnedEvaluate(page, () => window.__xlsxWorkerEditor.ready);
+    await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.paintedTexts())).toContain('initial');
+    await expect(page.getByTestId('xlsx-loading')).toHaveCount(0);
+    return measure(['xlsx-toolbar', 'xlsx-workspace', 'xlsx-sheet-tabs']);
+  };
+  const gap = (boxes: number[][]) => boxes[2]![0]! - boxes[1]![1]!;
+  const plainOpening = await opening('');
+  expect(plainOpening.held).toBe(true);
+  expect(plainOpening.readyCount).toBe(0);
+  expect(plainOpening.indicator).toBe(false);
+  expect(plainOpening.layer).toBe(false);
+  expect(plainOpening.shape.style).toEqual(['static', 'grid', '8px']);
+  expect(plainOpening.shape.direct).toEqual([true, true]);
+  expect(Math.abs(gap(plainOpening.shape.boxes) - 8)).toBeLessThan(0.5);
+  const plainLoaded = await loaded();
+  const indicatedOpening = await opening('&fixedIndicator=1');
+  expect(indicatedOpening.held).toBe(true);
+  expect(indicatedOpening.readyCount).toBe(0);
+  expect(indicatedOpening.indicator).toBe(true);
+  expect(indicatedOpening.shape).toEqual(plainOpening.shape);
+  expect(Math.abs(gap(indicatedOpening.shape.boxes) - 8)).toBeLessThan(0.5);
+  expect(indicatedOpening.layer).toBe(true);
+  const indicatedLoaded = await loaded();
+  await expect(page.locator('#worker-editor-root')).toHaveAttribute('data-indicator-in-layer', 'true');
+  expect(plainLoaded.shape.style).toEqual(['static', 'grid', '8px']);
+  expect(plainLoaded.shape.direct).toEqual([true, true, true]);
+  expect(indicatedLoaded.indicator).toBe(false);
+  expect(indicatedLoaded.layer).toBe(false);
+  expect(indicatedLoaded.shape).toEqual(plainLoaded.shape);
+  expect(Math.abs(gap(plainLoaded.shape.boxes) - 8)).toBeLessThan(0.5);
+  const workspace = plainLoaded.shape.boxes[2]!;
+  expect(workspace[1]! - workspace[0]!).toBeGreaterThan(0);
+  expect(await page.evaluate(() => window.__xlsxWorkerEditor.errors)).toEqual([]);
+});
+
 test('hybrid control still creates a main-thread engine', async ({ page }) => {
   await open(page, '');
   expect(await page.evaluate(() => window.__xlsxWorkerEditor.mainThreadEngines())).toBeGreaterThan(0);

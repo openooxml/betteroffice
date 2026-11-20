@@ -21,6 +21,7 @@ export function fontEnvironmentForRegistrations(fonts: YrsResidentFontRegistrati
   progressive: DocxFontEnvironment['progressive'] = []): DocxFontEnvironment {
   const styles = new Map<number, Pick<ResidentFontRequirement, 'family' | 'bold' | 'italic'>>(registeredStyles);
   for (const [key, slots] of Object.entries(chains)) {
+    if (key.startsWith('@betteroffice/fonts/')) continue;
     const [family, bold, italic] = key.split('|');
     const requirement = requirements.find(item => item.key === key) ?? { key, family: family!, bold: bold === '1', italic: italic === '1' };
     for (const slot of slots) if (!styles.has(slot)) styles.set(slot, requirement);
@@ -68,6 +69,8 @@ export async function prepareWorkerFontEnvironment(options: {
   fonts: ReadonlyArray<FontDefinition> | undefined;
   embedded: EmbeddedFontFace[];
   requirements: ResidentFontRequirement[];
+  /** The document's own requirements, by default `requirements`; they decide whether the tracked paragraph mark names a face. */
+  own?: readonly ResidentFontRequirement[];
   families: string[];
   provider: DocxEditorProps['measurementFontProvider'];
   runtime?: Parameters<typeof createRustMeasureSource>[0]['runtime'];
@@ -102,7 +105,7 @@ export async function prepareWorkerFontEnvironment(options: {
     }))];
     await measurement.prepareFontRequirements(requirements);
     options.signal.throwIfAborted();
-    const config = measurement.measurementConfigForRequirements(requirements);
+    const config = measurement.measurementConfigForRequirements(requirements, options.own ?? options.requirements);
     if (!config) throw new Error('DOCX worker fonts are not ready');
     options.onCoverage?.(measurement.coverageCheck(requirements));
     const progressive = await measurement.progressiveFonts?.() ?? [];

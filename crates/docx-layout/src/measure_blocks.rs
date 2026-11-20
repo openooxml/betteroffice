@@ -8304,6 +8304,40 @@ mod tests {
     }
 
     #[test]
+    fn a_tracked_paragraph_mark_leaves_the_font_requirements_alone() {
+        let paragraphs = [
+            json!({"runs": [{"kind": "text", "text": "Latin"}]}),
+            json!({"runs": [{
+                "kind": "text", "text": "日本語の文章",
+                "fontSlots": {"eastAsia": "MS Mincho", "hint": "eastAsia"}
+            }]}),
+            json!({
+                "attrs": {"defaultFontFamily": "Courier New"},
+                "runs": [{"kind": "text", "text": "Latin"}]
+            }),
+        ];
+        for (case, paragraph) in paragraphs.iter().enumerate() {
+            let requirements = |mark: Option<&str>| {
+                let mut value = paragraph.clone();
+                value["kind"] = json!("paragraph");
+                value["id"] = json!("p");
+                if let Some(mark) = mark {
+                    value["attrs"][mark] = json!({"revisionId": 1, "author": "Ada"});
+                }
+                let block: LayoutBlock = serde_json::from_value(value).unwrap();
+                let all = collect_font_requirements([&block], "Arial");
+                let measured = collect_measured_font_requirements([&block], "Arial");
+                serde_json::to_value((all, measured)).unwrap()
+            };
+            let plain = requirements(None);
+
+            for mark in ["pPrIns", "pPrDel"] {
+                assert_eq!(requirements(Some(mark)), plain, "{case} {mark}");
+            }
+        }
+    }
+
+    #[test]
     fn tab_font_requirements_skip_script_slots() {
         for complex_script in [false, true] {
             let keys = font_requirement_keys(json!({

@@ -132,6 +132,7 @@ import { useXlsxPluginHost } from './plugins/useXlsxPluginHost';
 
 import { initialZoomScale } from './commands/evaluate';
 import { WorkbookFailure } from './components/WorkbookFailure';
+import { LoadingLayer } from './components/LoadingLayer';
 
 import type { XlsxEditorApi, XlsxInThreadEditorProps, XlsxPointPosition } from './XlsxEditor.types';
 import { XlsxSaveRefusedError } from './XlsxSaveRefusedError';
@@ -1316,6 +1317,7 @@ export function XlsxEditorContent({
     paintWaitersRef.current = waiters.filter((waiter) => !covers(painted, waiter.mark));
     for (const waiter of waiters) if (covers(painted, waiter.mark)) waiter.resolve(true);
     releaseReady(pendingReadyRef, handle);
+    return dl;
   }, [activeSheet, paintWithDefaultFonts, presentGrid, t, zoom]);
 
   // paint loop: repaint on scroll/resize (rAF-coalesced) and whenever the open
@@ -1323,14 +1325,17 @@ export function XlsxEditorContent({
   useEffect(() => {
     const scroll = scrollRef.current;
     if (!scroll) return;
+    const paint = () => {
+      if (doPaint()?.conditionalPending) schedulePaint();
+    };
     const schedulePaint = () => {
       if (rafRef.current != null) return;
       rafRef.current = requestAnimationFrame(() => {
         rafRef.current = null;
-        doPaint();
+        paint();
       });
     };
-    doPaint();
+    paint();
     scroll.addEventListener('scroll', schedulePaint, { passive: true });
     const observer = new ResizeObserver(schedulePaint);
     observer.observe(scroll);
@@ -3001,7 +3006,6 @@ export function XlsxEditorContent({
         ...style,
       }}
     >
-      {file && !handleRef.current && !error && loadingIndicator}
       {toolbarContent != null && (
         <div
           data-testid="xlsx-toolbar"
@@ -3281,6 +3285,9 @@ export function XlsxEditorContent({
           {renderDock('bottom')}
         </div>
         {renderDock('right')}
+        {file && !handleRef.current && !error ? (
+          <LoadingLayer>{loadingIndicator}</LoadingLayer>
+        ) : null}
       </div>
 
       {a11yGrid && (

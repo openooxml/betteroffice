@@ -47,7 +47,8 @@ export interface RustMeasureSource {
     setEmbeddedFaces(faces: EmbeddedFaceInput[], appFaces?: EmbeddedFaceInput[]): void;
     setCompat(flags: CompatibilityFlags | undefined): void;
     prepareFontRequirements(requirements: ResidentFontRequirement[]): Promise<boolean>;
-    measurementConfigForRequirements(requirements: ResidentFontRequirement[]): ResidentMeasurementConfig | undefined;
+    /** Names the face of the tracked paragraph mark when `own`, the document's own requirements (by default `requirements`), name the default family. */
+    measurementConfigForRequirements(requirements: ResidentFontRequirement[], own?: readonly ResidentFontRequirement[]): ResidentMeasurementConfig | undefined;
     /** @internal Whether later requirements need no face the prepared chains lack (characters the base Latin tier settled count as covered); holds no font bytes, so it outlives `clear()`. */
     coverageCheck(requirements: ResidentFontRequirement[]): (next: ResidentFontRequirement[]) => boolean;
     clear(): void;

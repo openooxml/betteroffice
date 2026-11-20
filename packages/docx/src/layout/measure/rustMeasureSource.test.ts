@@ -1,7 +1,7 @@
 import { afterEach, expect, mock, spyOn, test } from 'bun:test';
 import * as fontManager from '@betteroffice/fonts';
 import { DEFAULT_COMPATIBILITY_FLAGS } from '../../docx/settingsParser';
-import { configureDefaultFonts, IMPLICIT_FONT_COVERAGE, IMPLICIT_SYMBOL_SHAPING, resolveDefaultFontProvider } from './defaultFontProvider';
+import { configureDefaultFonts, IMPLICIT_FONT_COVERAGE, IMPLICIT_SYMBOL_SHAPING, PARAGRAPH_MARK_FACE, resolveDefaultFontProvider } from './defaultFontProvider';
 import type { EmbeddedFaceInput } from './fontRegistry';
 import {
   createRustMeasureSource,
@@ -190,7 +190,7 @@ test('a private-use character in a carried family keeps the shaping it has witho
     const without = await measurementConfig(requirements, false);
     const fallback = await measurementConfig(requirements, undefined);
     expect(fallback.config).toEqual(without.config);
-    expect(Object.keys(fallback.config!.fontChains).sort()).toEqual([IMPLICIT_FONT_COVERAGE, regular.key].sort());
+    expect(Object.keys(fallback.config!.fontChains).sort()).toEqual([IMPLICIT_FONT_COVERAGE, PARAGRAPH_MARK_FACE, regular.key].sort());
   } finally { warn.mockRestore(); }
 });
 
@@ -255,6 +255,7 @@ test('unconfigured measurement lazily resolves faces through the fonts manager',
     expect(source.measurementConfigForRequirements([regular])?.fontChains).toEqual({
       [regular.key]: [7],
       [IMPLICIT_FONT_COVERAGE]: [7],
+      [PARAGRAPH_MARK_FACE]: [7],
     });
   } finally { create.mockRestore(); }
 });
@@ -278,6 +279,7 @@ for (const configured of ['module', 'loader', 'explicit'] as const) {
       await source.prepareFontRequirements([regular]);
       expect(source.measurementConfigForRequirements([regular])?.fontChains).toEqual({
         [regular.key]: [9],
+        [PARAGRAPH_MARK_FACE]: [9],
       });
       expect(registerFont).toHaveBeenCalledWith(new Uint8Array(data));
       expect(create).not.toHaveBeenCalled();
@@ -311,6 +313,7 @@ for (const configured of ['default', 'configured', 'explicit'] as const) {
       expect(source.measurementConfigForRequirements([regular])?.fontChains).toEqual({
         [regular.key]: [1, 2],
         ...(configured === 'default' && { [IMPLICIT_FONT_COVERAGE]: [1, 2] }),
+        [PARAGRAPH_MARK_FACE]: [1],
       });
       expect(create).toHaveBeenCalledTimes(configured === 'default' ? 1 : 0);
     } finally { create.mockRestore(); }
@@ -339,6 +342,7 @@ test('a failed default manager load settles to approximate metrics and retries',
     expect(source.measurementConfigForRequirements([regular])?.fontChains).toEqual({
       [regular.key]: [3],
       [IMPLICIT_FONT_COVERAGE]: [3],
+      [PARAGRAPH_MARK_FACE]: [3],
     });
     expect(create).toHaveBeenCalledTimes(2);
     expect(warn).toHaveBeenCalledTimes(2);
@@ -369,6 +373,7 @@ test('a failed default manager face remains retryable', async () => {
     expect(source.measurementConfigForRequirements([regular])?.fontChains).toEqual({
       [regular.key]: [5],
       [IMPLICIT_FONT_COVERAGE]: [5],
+      [PARAGRAPH_MARK_FACE]: [5],
     });
     expect(create).toHaveBeenCalledTimes(1);
     expect(warn).toHaveBeenCalledTimes(1);

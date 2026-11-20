@@ -156,7 +156,7 @@ pub(crate) const XLSX: &[(&str, Answer, &[&str])] = &[
     (
         "sharedStrings",
         Modelled,
-        &["shared_and_inline_strings_attach_only_used_scripts"],
+        &["shared_and_inline_strings_attach_only_used_scripts_and_request_their_run_fonts"],
     ),
     (
         "xl/sharedStrings.xml",

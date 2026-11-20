@@ -11,6 +11,7 @@ import { GlyphCache } from '../layout/render/glyphCache';
 import { indexEchoGlyphSet, leadingWordWidth, placeEchoGlyphs, placeEchoLine } from './residentEchoGlyphs';
 import { readCellSelection } from './residentCommandTableSelection';
 import { readResidentCellSelectionRects } from './residentObjectGeometry';
+import { StagedEchoPages } from './residentStagedEcho';
 
 const echoAlphabet = 'abxy';
 const echoGlyphSet: DocxEchoGlyphSet = { key: 'set', fontId: 1, alphabet: echoAlphabet, horizontal: 0.01,
@@ -95,7 +96,7 @@ async function stageRequestedPages(requested: number[], damaged: number[] = [], 
     glyphCache: {}, offscreenDpr: 1, offscreenZoom: 1,
     retainedPageByKey: (frame: RetainedFrame, pageId: string) => retainedFramePageById(frame, BigInt(pageId)),
     readCellSelection, readResidentCellSelectionRects,
-    stageCommandPresentation, echoBackgroundPage, buildCommandFrame, pendingUpdates: [],
+    stageCommandPresentation, echoBackgroundPage, buildCommandFrame, pendingUpdates: [], stagedEcho: new StagedEchoPages(),
     OffscreenCanvas: class {
       constructor(public width: number, public height: number) {}
       getContext() { return { drawImage() {} }; }

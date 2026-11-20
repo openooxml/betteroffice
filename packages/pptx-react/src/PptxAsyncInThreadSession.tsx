@@ -11,7 +11,7 @@ export function PptxAsyncInThreadSession(props: PptxAsyncEditorInternalProps) {
   const readOnly = useRef(props.readOnly);
   readOnly.current = props.readOnly;
   const ready = useCallback((value: PptxEditorApi) => {
-    setApi(createInThreadAsyncEditorApi(value, () => Boolean(readOnly.current)));
+    setApi(createInThreadAsyncEditorApi(value, () => Boolean(readOnly.current), (bytes) => callbacks.current.onSave?.(bytes)));
   }, []);
   const collaborationIdentity = useMemo(() => ({}), [Boolean(props.collaboration), props.collaboration?.roomId]);
   const onReplica = useMemo(() => asyncCollaboration(props.collaboration)?.onReplica, [props.collaboration?.onReplica]);

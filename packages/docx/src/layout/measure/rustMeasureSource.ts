@@ -8,6 +8,7 @@ import {
   IMPLICIT_FONT_COVERAGE,
   IMPLICIT_SYMBOL_SHAPING,
   isImplicitFontProvider,
+  PARAGRAPH_MARK_FACE,
   resolveDefaultFontProvider,
   baseLatinFontState,
 } from './defaultFontProvider';
@@ -45,6 +46,9 @@ export function fontRequirementCharacters(requirement: ResidentFontRequirement):
   return [...new Set([...(requirement.characters ?? []), ...charactersFromBits(requirement.characterBits)])];
 }
 
+/** The requirement of the regular default family, the one layout draws the tracked paragraph mark in. */
+const PARAGRAPH_MARK_KEY = 'calibri|0|0';
+
 function mergeRequirements(requirements: ResidentFontRequirement[]): ResidentFontRequirement[] {
   const merged = new Map<string, ResidentFontRequirement>();
   for (const requirement of requirements) {
@@ -76,8 +80,10 @@ export interface RustMeasureSource {
   prepareFontRequirements(
     requirements: ResidentFontRequirement[],
   ): Promise<boolean>;
+  /** Names the face of the tracked paragraph mark when `own`, the document's own requirements (by default `requirements`), name the default family. */
   measurementConfigForRequirements(
     requirements: ResidentFontRequirement[],
+    own?: readonly ResidentFontRequirement[],
   ): ResidentMeasurementConfig | undefined;
   /** @internal Whether later requirements need no face the prepared chains lack (characters the base Latin tier settled count as covered); holds no font bytes, so it outlives `clear()`. */
   coverageCheck(
@@ -234,7 +240,9 @@ export function createRustMeasureSource(options: {
 
     measurementConfigForRequirements(
       requirements,
+      own = requirements,
     ): ResidentMeasurementConfig | undefined {
+      const marked = own.some((requirement) => requirement.key === PARAGRAPH_MARK_KEY);
       requirements = mergeRequirements(requirements);
       const settled = requirements.map((requirement) => ({
         requirement,
@@ -261,6 +269,7 @@ export function createRustMeasureSource(options: {
       )
         return undefined;
       const fontChains: Record<string, number[]> = {};
+      let markFace: number | undefined;
       for (const { requirement } of settled) {
         const familyIds = registry.getCachedFontIdChain(
           requirement.family,
@@ -285,12 +294,17 @@ export function createRustMeasureSource(options: {
           if (!chain.includes(id)) chain.push(id);
         }
         if (chain.length > 0) fontChains[requirement.key] = chain;
+        const head = chain[0];
+        if (marked && requirement.key === PARAGRAPH_MARK_KEY && head !== undefined &&
+          head === registry.getCachedFamilyFace(requirement.family, requirement.bold, requirement.italic) &&
+          !registry.isProgressive(head) && !scriptIds.includes(head) && !backstopIds.includes(head)) markFace = head;
       }
       if (implicit) {
         const ids = [...new Set(Object.values(fontChains).flat())];
         if (ids.length > 0) fontChains[IMPLICIT_FONT_COVERAGE] = ids;
         if (ids.length > 0 && options.standIns === true) fontChains[IMPLICIT_SYMBOL_SHAPING] = ids;
       }
+      if (markFace !== undefined) fontChains[PARAGRAPH_MARK_FACE] = [markFace];
       return {
         fontChains,
         defaults: { fontSize: 11, fontFamily: 'Calibri' },

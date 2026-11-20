@@ -178,6 +178,8 @@ export type BundledFontProviderSource =
 interface ChainResolution {
   ids: number[];
   retryable: boolean;
+  /** The head of `ids` when it is the family's own face: an embedded or app face, or the face the provider resolves it to. */
+  own?: number;
 }
 
 interface ScriptResolution {
@@ -256,6 +258,8 @@ export class TextMeasureFontRegistry {
 
   /** Script-fallback faces registered from their skeleton and core, by font id. */
   private progressiveIds = new Map<number, ProgressiveFontFace>();
+  /** The id each measurement view measures the bytes of. */
+  private viewBases = new Map<number, number>();
   private readonly progressive?: (slices: SliceLocation) => Promise<ProgressiveFontFace>;
   private readonly standInTail: boolean;
 
@@ -277,6 +281,12 @@ export class TextMeasureFontRegistry {
   /** The sliced faces registered from their skeleton and core, by font id. */
   progressiveFaces(): ReadonlyMap<number, ProgressiveFontFace> {
     return this.progressiveIds;
+  }
+
+  /** Whether `id`, or the face a measurement view `id` measures, was registered from a sliced face's skeleton and core. */
+  isProgressive(id: number): boolean {
+    const base = this.viewBases.get(id);
+    return this.progressiveIds.has(id) || (base !== undefined && this.progressiveIds.has(base));
   }
 
   /** Shares in-flight resolution but evicts misses for retry. */
@@ -364,6 +374,11 @@ export class TextMeasureFontRegistry {
       });
     }
     return resolution?.ids;
+  }
+
+  /** The settled head of a family's chain when it is the family's own face: an embedded or app face, or the face the provider resolves it to; never a last-resort or glyph fallback face. */
+  getCachedFamilyFace(family: string, bold: boolean, italic: boolean): number | undefined {
+    return this.chainResults.get(chainKey(family, bold, italic))?.own;
   }
 
   coverageOf(id: number): FontCoverage | undefined {
@@ -522,6 +537,7 @@ export class TextMeasureFontRegistry {
     this.bufferIds = new WeakMap();
     this.loaderIds = new WeakMap();
     this.progressiveIds = new Map();
+    this.viewBases = new Map();
     this.scriptIds = new Map();
     this.scriptResults = new Map();
     this.chains = new Map();
@@ -571,6 +587,7 @@ export class TextMeasureFontRegistry {
       if (id === null) retryable = true;
       primaryRegistered = id !== null;
     }
+    const own = ids[0];
 
     // Terminal link: the always-available last-resort base face. Appended after
     // the embedded + metric-compatible faces so the chain NEVER ends empty — a
@@ -618,7 +635,7 @@ export class TextMeasureFontRegistry {
       );
     }
 
-    return { ids, retryable };
+    return own === undefined ? { ids, retryable } : { ids, retryable, own };
   }
 
   private warnStandIn(family: string): void {
@@ -685,6 +702,7 @@ export class TextMeasureFontRegistry {
     if (!substitute) return base;
     try {
       const id = substitute.call(this.sink, base, family);
+      if (id !== base) this.viewBases.set(id, base);
       const coverage = this.coverage.get(base);
       if (coverage) this.coverage.set(id, coverage);
       const exact = this.inexact.get(base);
