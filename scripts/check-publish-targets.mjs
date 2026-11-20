@@ -11,7 +11,7 @@ import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
 import { publishedPackageVersions, workspaceEntries } from './published-packages.mjs';
-import { NATIVE_PACKAGES } from './native-bindings.mjs';
+import { NATIVE_PACKAGES, platformPackageVersions } from './native-bindings.mjs';
 import { RUST_PUBLISH_CRATES } from './rust-crates.mjs';
 
 const require = createRequire(import.meta.url);
@@ -215,6 +215,7 @@ export async function checkNpm({
   packages = publishedPackageVersions(),
   workspaces = workspaceEntries(),
   later = process.env.RELEASE_SKIP_NATIVE === 'true' ? [] : nativeReleaseVersions(workspaces),
+  platforms = process.env.RELEASE_SKIP_NATIVE === 'true' ? [] : platformPackageVersions(),
   references
 } = {}) {
   const fetchPackage = npmPackages(registry, timeoutMs);
@@ -232,6 +233,16 @@ export async function checkNpm({
       'release.yml publishes with OIDC Trusted Publishing, which cannot create a package. `changeset publish` would publish the rest of the set before it fails on these.'
     );
     out.error('Publish each by hand first: RELEASING.md, "Initial npm release of a new package".');
+  }
+
+  const nativeMissing = (await auditPackages([...later, ...platforms], fetchPackage))
+    .filter((entry) => entry.state === 'missing');
+  if (nativeMissing.length > 0) {
+    failed = true;
+    for (const { name } of nativeMissing) out.error(`${name} is not on npm.`);
+    out.error(
+      "release.yml's native-npm job publishes these after this one, with OIDC Trusted Publishing, which cannot create a package. Publish each by hand first: RELEASING.md, \"Native packages\"."
+    );
   }
 
   const releaseVersions = new Map([...later, ...packages].map(({ name, version }) => [name, version]));

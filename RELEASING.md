@@ -99,8 +99,9 @@ command then.
 
 ## Native packages
 
-`@betteroffice/{docx,pptx,xlsx}-native` are three roots with five platform packages
-each (macOS arm64/x64, GNU Linux arm64/x64, Windows x64): 18 npm names.
+`@betteroffice/{docx,pptx,xlsx}-native` are three roots with eight platform packages
+each (macOS arm64/x64, GNU Linux arm64/x64, musl Linux arm64/x64, Windows
+arm64/x64): 27 npm names.
 Each root joins its core's fixed Changesets group. `version-packages.mjs` syncs
 the platform manifests and the Cargo version.
 Repository roots are private so `changeset publish` skips them. The dispatch-only
@@ -110,17 +111,19 @@ After a successful npm release, `release.yml`'s `native-npm` job dispatches that
 workflow for formats whose root version is missing and waits for every run.
 `RELEASE_SKIP_NATIVE=true` disables this job.
 
-Trusted Publishing cannot create a package. Publish all 18 names by hand first,
-repeating these steps for `docx`, `pptx` and `xlsx`:
+Trusted Publishing cannot create a package. Publish all 27 names by hand first,
+repeating these steps for `docx`, `pptx` and `xlsx`. Unless
+`RELEASE_SKIP_NATIVE=true`, `scripts/check-publish-targets.mjs --npm` fails the
+release before anything is published while one of these names is not on npm.
 
 1. Run `publish-native.yml` with `dry_run=true` at the release commit. Download its
-   five `<format>-native.*` artifacts into `bindings/<format>-native/artifacts`
+   eight `<format>-native.*` artifacts into `bindings/<format>-native/artifacts`
    and the `<format>-native-loader` artifact's `index.js` into
    `bindings/<format>-native` in a clean checkout of that commit.
 2. Run `bun install --frozen-lockfile`, then `bunx napi artifacts --cwd bindings/<format>-native`.
 3. From `bindings/<format>-native`, run `npm pkg delete private`, then
-   `npm publish --access public --provenance=false`. Its `prepublishOnly` publishes the five platform packages first.
-4. Configure all six names' Trusted Publisher: owner `openooxml`, repository
+   `npm publish --access public --provenance=false`. Its `prepublishOnly` publishes the eight platform packages first.
+4. Configure all nine names' Trusted Publisher: owner `openooxml`, repository
    `betteroffice`, workflow `publish-native.yml`, environment `npm-<format>`.
    Restrict each `npm-<format>` environment to the main branch.
 
