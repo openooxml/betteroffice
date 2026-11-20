@@ -17,6 +17,21 @@ const ROOT_RELS: &str = concat!(
     r#"<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>"#,
     "</Relationships>"
 );
+const STYLES_TYPE: &str = concat!(
+    r#"<Override PartName="/word/styles.xml" "#,
+    r#"ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>"#
+);
+const DOCUMENT_RELS: &str = concat!(
+    r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+    r#"<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>"#,
+    "</Relationships>"
+);
+const STYLES: &str = concat!(
+    r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">"#,
+    r#"<w:style w:type="character" w:styleId="Raised"><w:name w:val="Raised"/>"#,
+    r#"<w:rPr><w:vertAlign w:val="superscript"/></w:rPr></w:style></w:styles>"#
+);
+const BASELINE: &str = r#"<w:vertAlign w:val="baseline"/>"#;
 
 fn chr(kind: &str) -> String {
     format!(r#"<w:fldChar w:fldCharType="{kind}"/>"#)
@@ -66,6 +81,29 @@ fn package(body: &str) -> Vec<u8> {
         ("word/document.xml".to_owned(), document.into_bytes()),
     ])
     .unwrap()
+}
+
+/// `package(body)` with a styles part holding the character style `Raised`, which raises its
+/// text.
+fn styled_package(body: &str) -> Vec<u8> {
+    let mut parts = ooxml_opc::unzip_parts(&package(body)).unwrap();
+    parts.retain(|(path, _)| path != "[Content_Types].xml");
+    let types = CONTENT_TYPES.replace("</Types>", &format!("{STYLES_TYPE}</Types>"));
+    parts.extend([
+        ("[Content_Types].xml".to_owned(), types.into_bytes()),
+        (
+            "word/_rels/document.xml.rels".to_owned(),
+            DOCUMENT_RELS.as_bytes().to_vec(),
+        ),
+        ("word/styles.xml".to_owned(), STYLES.as_bytes().to_vec()),
+    ]);
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+/// The two fields in one run whose properties set the baseline over the style `Raised`.
+fn raised_run() -> String {
+    let properties = format!(r#"<w:rPr><w:rStyle w:val="Raised"/>{BASELINE}</w:rPr>"#);
+    run(&format!("{properties}{}", page_of_pages()))
 }
 
 fn body_paragraph(bytes: &[u8], index: usize) -> Vec<Value> {
@@ -283,6 +321,27 @@ fn an_edited_field_is_written_as_main_writes_it() {
         assert!(!saved.contains(&source), "{saved}");
         assert_eq!(saved, main);
     }
+}
+
+#[test]
+fn a_removed_baseline_over_a_raised_style_is_written_as_main_writes_it() {
+    let source = raised_run();
+    let bytes = styled_package(&between(&source));
+    let (saved, main) = save_and_main(&bytes, |document| {
+        let formatting = field_of(document)["formatting"].as_object_mut().unwrap();
+        assert_eq!(formatting.remove("vertAlign"), Some(json!("baseline")));
+    });
+    assert!(!saved.contains(&source), "{saved}");
+    assert!(!saved.contains(BASELINE), "{saved}");
+    assert!(saved.contains(">PAGE  NUMPAGES</w:instrText>"), "{saved}");
+    assert_eq!(saved, main);
+}
+
+#[test]
+fn an_untouched_field_over_a_raised_style_is_written_as_read() {
+    let source = raised_run();
+    let xml = save(&styled_package(&between(&source)), |_| {});
+    assert_eq!(around(&xml, &source), pair("AB", "CD"), "{xml}");
 }
 
 #[test]

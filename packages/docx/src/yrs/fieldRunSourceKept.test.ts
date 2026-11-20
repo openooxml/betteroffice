@@ -36,19 +36,27 @@ afterEach(() => {
   for (const session of sessions.splice(0)) session.destroy();
 });
 
-function fixture(body = BODY): Uint8Array<ArrayBuffer> {
+function fixture(body = BODY, styles?: string): Uint8Array<ArrayBuffer> {
   const section = '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>' +
     '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>';
   const parts = new Map<string, Uint8Array>();
   const add = (name: string, xml: string) => parts.set(name, toBytes(xml));
+  const stylesType = styles === undefined ? '' : '<Override PartName="/word/styles.xml" ' +
+    'ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>';
   add('[Content_Types].xml',
     '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
     '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
     '<Default Extension="xml" ContentType="application/xml"/>' +
-    '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>');
+    '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>' +
+    `${stylesType}</Types>`);
   add('_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
     `<Relationship Id="doc" Type="${R}/officeDocument" Target="word/document.xml"/></Relationships>`);
   add('word/document.xml', `<w:document xmlns:w="${W}"><w:body>${body}${section}</w:body></w:document>`);
+  if (styles !== undefined) {
+    add('word/_rels/document.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+      `<Relationship Id="styles" Type="${R}/styles" Target="styles.xml"/></Relationships>`);
+    add('word/styles.xml', styles);
+  }
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
@@ -260,18 +268,20 @@ const FIELD_EDITS: Array<[string, (field: ComplexField) => void]> = [
   ['bold field properties', (field) => { field.formatting = { ...field.formatting, bold: true }; }],
 ];
 
-const EDIT_ROUTES: Array<[string, (edit: (document: Document) => void) => Promise<string>]> = [
-  ['parseDocx and documentToYrs', async (edit) => {
-    const parsed = await parseDocx(fixture().buffer, { preloadFonts: false });
+type EditRoute = (edit: (document: Document) => void, bytes?: Uint8Array<ArrayBuffer>) => Promise<string>;
+
+const EDIT_ROUTES: Array<[string, EditRoute]> = [
+  ['parseDocx and documentToYrs', async (edit, bytes = fixture()) => {
+    const parsed = await parseDocx(bytes.buffer, { preloadFonts: false });
     const opened = await session();
     documentToYrs(opened, parsed);
     const projected = yrsToDocument(opened, parsed);
     edit(projected);
     return documentXml(new Uint8Array(await repackDocx(projected)));
   }],
-  ['the native session, a full rewrite', async (edit) => {
+  ['the native session, a full rewrite', async (edit, bytes = fixture()) => {
     const opened = await session();
-    opened.openDocx(fixture(), true);
+    opened.openDocx(bytes, true);
     const projected = yrsToDocument(opened, opened.materializeDocx()!);
     edit(projected);
     return documentXml(new Uint8Array(await saveEditorDocument(opened, projected, [], { full: true })));
@@ -294,7 +304,34 @@ for (const [route, save] of EDIT_ROUTES) {
   }
 }
 
-const BOLD = '<w:rPr><w:b/></w:rPr>';
+const BASELINE = '<w:vertAlign w:val="baseline"/>';
+const RAISED_RUN = `<w:r><w:rPr><w:rStyle w:val="Raised"/>${BASELINE}</w:rPr>${FIELDS}</w:r>`;
+const RAISED_STYLES = `<w:styles xmlns:w="${W}"><w:style w:type="character" w:styleId="Raised">` +
+  '<w:name w:val="Raised"/><w:rPr><w:vertAlign w:val="superscript"/></w:rPr></w:style></w:styles>';
+const raisedFixture = () => fixture(BODY.replace(RUN, RAISED_RUN), RAISED_STYLES);
+
+for (const [route, save] of EDIT_ROUTES) {
+  test(`${route}: a removed baseline over a raised style is written as main writes it`, async () => {
+    const removed = (field: ComplexField) => { delete field.formatting!.vertAlign; };
+    const saved = paragraphXml(await save((document) => removed(complexFieldOf(document, 1)), raisedFixture()), 1);
+    const main = paragraphXml(await save((document) => {
+      const field = complexFieldOf(document, 1);
+      removed(field);
+      withoutSource(field);
+    }, raisedFixture()), 1);
+    expect(saved).toContain('AB');
+    expect(saved).not.toContain(RAISED_RUN);
+    expect(saved).not.toContain(BASELINE);
+    expect(saved).toContain('PAGE  NUMPAGES');
+    expect(saved).toBe(main);
+  });
+
+  test(`${route}: an untouched field over a raised style is written as read`, async () => {
+    expect(around(await save(() => {}, raisedFixture()), RAISED_RUN)).toEqual(['AB', 'CD']);
+  });
+}
+
+const BOLD ='<w:rPr><w:b/></w:rPr>';
 const BOLD_RUN = `<w:r>${BOLD}${FIELDS}</w:r>`;
 const BOLD_MARKED_RUN = `<w:r>${BOLD}${MARK}${FIELDS}</w:r>`;
 
