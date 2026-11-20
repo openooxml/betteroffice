@@ -555,7 +555,7 @@ function workerSelectionHooks(arm: CommandArm, frame: RetainedFrame, buildPages?
     sessionFonts: null, ResidentSessionFonts, scope: { fonts: undefined },
     createResidentCommandHost: (options: DocxCommandHostOptions) => options.hooks,
     displayPositionIndex: () => index, createDisplayListQueries: queryModule.createDisplayListQueries,
-    residentDisplayListQueries, releaseResidentDisplayListQueries, StagedEchoPages,
+    residentDisplayListQueries, releaseResidentDisplayListQueries, StagedEchoPages, openedSeed: null,
     loadRustDisplayListQueryEngine: async () => {}, loadedRustDisplayListQueryEngine: () => undefined,
     applyFrameDelta: (_frame: RetainedFrame, next: RetainedFrame) => next,
     decodeFrameDelta: (next: RetainedFrame) => next,
@@ -932,7 +932,7 @@ test('d2a_worker_vertical_navigation_builds_unbuilt_neighbours_before_chained_ty
     sessionFonts: null, ResidentSessionFonts, scope: { fonts: undefined },
     createResidentCommandHost: (options: DocxCommandHostOptions) => options.hooks,
     displayPositionIndex: () => index, createDisplayListQueries: queryModule.createDisplayListQueries,
-    residentDisplayListQueries, releaseResidentDisplayListQueries, StagedEchoPages,
+    residentDisplayListQueries, releaseResidentDisplayListQueries, StagedEchoPages, openedSeed: null,
     loadRustDisplayListQueryEngine, loadedRustDisplayListQueryEngine, applyFrameDelta, decodeFrameDelta,
     retainedPageByKey: (frame: RetainedFrame, pageId: string) => retainedFramePageById(frame, BigInt(pageId)),
   };
