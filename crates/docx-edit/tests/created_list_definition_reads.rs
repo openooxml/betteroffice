@@ -16,11 +16,52 @@ const NUMBERING: &str = concat!(
     r#"<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>"#,
     r#"<w:num w:numId="2"><w:abstractNumId w:val="1"/></w:num></w:numbering>"#
 );
+const STYLED_TYPES: &str = concat!(
+    r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>"#,
+    r#"<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>"#,
+    r#"<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>"#
+);
+const STYLED_RELATIONSHIPS: &str = concat!(
+    r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+    r#"<Relationship Id="numbering" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/>"#,
+    r#"<Relationship Id="styles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>"#
+);
+/// A Heading 1 style numbered by list 1.
+const NUMBERED_HEADING_STYLES: &str = concat!(
+    r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">"#,
+    r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>"#,
+    r#"<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/>"#,
+    r#"<w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr><w:outlineLvl w:val="0"/></w:pPr></w:style></w:styles>"#
+);
+/// List 1 a bullet list whose marker is hidden, in Symbol and followed by nothing; list 2 decimal.
+const MARKED_NUMBERING: &str = concat!(
+    r#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">"#,
+    r#"<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:suff w:val="nothing"/><w:lvlText w:val="o"/>"#,
+    r#"<w:rPr><w:rFonts w:ascii="Symbol" w:hAnsi="Symbol"/><w:vanish/></w:rPr></w:lvl></w:abstractNum>"#,
+    r#"<w:abstractNum w:abstractNumId="1"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl></w:abstractNum>"#,
+    r#"<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>"#,
+    r#"<w:num w:numId="2"><w:abstractNumId w:val="1"/></w:num></w:numbering>"#
+);
+/// The marker look attributes a paragraph's list gives it.
+const MARKER_LOOK: [&str; 7] = [
+    "listMarkerHidden",
+    "listMarkerBold",
+    "listMarkerItalic",
+    "listMarkerColor",
+    "listMarkerFontFamily",
+    "listMarkerFontSize",
+    "listMarkerSuffix",
+];
 const SHAPES: &str =
     include_str!("../../../packages/docx/src/yrs/__fixtures__/created-list-shapes.json");
 
 fn docx(paragraphs: &[(&str, Option<u32>)]) -> Vec<u8> {
-    let body: String = paragraphs
+    styled_docx(&body_of(paragraphs), None)
+}
+
+/// The body XML of `paragraphs`, each on the list its numId names at level 0, or on none.
+fn body_of(paragraphs: &[(&str, Option<u32>)]) -> String {
+    paragraphs
         .iter()
         .map(|(text, num_id)| {
             let properties = num_id.map_or_else(String::new, |num_id| {
@@ -30,8 +71,18 @@ fn docx(paragraphs: &[(&str, Option<u32>)]) -> Vec<u8> {
             });
             format!("<w:p>{properties}<w:r><w:t>{text}</w:t></w:r></w:p>")
         })
-        .collect();
-    let parts = vec![
+        .collect()
+}
+
+/// A package holding `body` and [`NUMBERING`], with the styles part `styles` when given.
+fn styled_docx(body: &str, styles: Option<&str>) -> Vec<u8> {
+    numbered_docx(body, styles, NUMBERING)
+}
+
+/// A package holding `body` and the numbering part `numbering`, with the styles part `styles`
+/// when given.
+fn numbered_docx(body: &str, styles: Option<&str>, numbering: &str) -> Vec<u8> {
+    let mut parts = vec![
         (
             "[Content_Types].xml".to_owned(),
             br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/></Types>"#.to_vec(),
@@ -53,9 +104,14 @@ fn docx(paragraphs: &[(&str, Option<u32>)]) -> Vec<u8> {
         ),
         (
             "word/numbering.xml".to_owned(),
-            NUMBERING.as_bytes().to_vec(),
+            numbering.as_bytes().to_vec(),
         ),
     ];
+    if let Some(styles) = styles {
+        parts[0].1 = STYLED_TYPES.as_bytes().to_vec();
+        parts[2].1 = STYLED_RELATIONSHIPS.as_bytes().to_vec();
+        parts.push(("word/styles.xml".to_owned(), styles.as_bytes().to_vec()));
+    }
     ooxml_opc::rezip_parts(&parts).unwrap()
 }
 
@@ -259,6 +315,133 @@ fn definitions_from_a_peer_are_read_as_nine_levels_of_xml_text() {
 }
 
 #[test]
+fn a_neighbour_whose_format_is_bullet_is_a_bullet_list() {
+    let doc = seeded(707, &[("Source", Some(1)), ("Next", None), ("Tail", None)]);
+    let source = paragraph_id(&doc, "Source");
+    doc.set_paragraph_attr(&source, "listIsBullet", Any::Null)
+        .unwrap();
+    doc.set_paragraph_attr(&source, "listNumFmt", Any::from("bullet"))
+        .unwrap();
+    create(&doc, "Next", ListKind::Bullet);
+    let joined = ListIdentity::Source {
+        num_id: 1.0,
+        level: 0.0,
+    };
+    assert_eq!(resolve_list_identity(&attrs(&doc, "Next")), Some(joined));
+    assert!(doc.created_list_definitions().is_empty());
+}
+
+#[test]
+fn a_created_list_resets_the_marker_formatting_of_the_list_the_paragraph_left() {
+    let doc = seeded(708, &[("Lead", None), ("Alpha", Some(1)), ("Gap", None)]);
+    let alpha = paragraph_id(&doc, "Alpha");
+    doc.set_paragraph_attr(&alpha, "listMarkerBold", Any::Bool(true))
+        .unwrap();
+    let ensured = create(&doc, "Alpha", ListKind::Bullet);
+    for key in [
+        "listMarkerHidden",
+        "listMarkerBold",
+        "listMarkerItalic",
+        "listMarkerColor",
+        "listMarkerFontSize",
+    ] {
+        assert_eq!(ensured.get(key), Some(&Any::Null), "{key}");
+    }
+}
+
+#[test]
+fn a_style_numbered_neighbour_is_not_joined_and_a_direct_one_is() {
+    let paragraph = |properties: &str, text: &str| {
+        format!("<w:p><w:pPr>{properties}</w:pPr><w:r><w:t>{text}</w:t></w:r></w:p>")
+    };
+    let body = [
+        paragraph(r#"<w:pStyle w:val="Heading1"/>"#, "Heading"),
+        paragraph("", "Body"),
+        paragraph("", "Gap"),
+        paragraph(
+            r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="2"/></w:numPr>"#,
+            "Item",
+        ),
+        paragraph("", "Below"),
+    ]
+    .concat();
+    let doc = EditingDoc::new(709);
+    seed_from_docx(&doc, &styled_docx(&body, Some(NUMBERED_HEADING_STYLES))).unwrap();
+    let heading = attrs(&doc, "Heading");
+    let shapes = format!(
+        "numPr={:?} numPrFromStyle={:?} _originalFormatting={:?}",
+        heading.get("numPr"),
+        heading.get("numPrFromStyle"),
+        heading.get("_originalFormatting")
+    );
+    assert!(heading.contains_key("numPr"), "{shapes}");
+    create(&doc, "Body", ListKind::Numbered);
+    assert!(created_key(&doc, "Body").is_some(), "{shapes}");
+    create(&doc, "Below", ListKind::Numbered);
+    let joined = ListIdentity::Source {
+        num_id: 2.0,
+        level: 0.0,
+    };
+    assert_eq!(resolve_list_identity(&attrs(&doc, "Below")), Some(joined));
+    assert_eq!(doc.created_list_definitions().len(), 1);
+}
+
+/// A document of `paragraphs` over [`MARKED_NUMBERING`], whose bullet paragraph `bullet` is checked
+/// to carry the marker look of list 1.
+fn marked(client: u64, paragraphs: &[(&str, Option<u32>)], bullet: &str) -> EditingDoc {
+    let doc = EditingDoc::new(client);
+    let bytes = numbered_docx(&body_of(paragraphs), None, MARKED_NUMBERING);
+    seed_from_docx(&doc, &bytes).unwrap();
+    let seeded = attrs(&doc, bullet);
+    let hidden = seeded.get("listMarkerHidden");
+    assert_eq!(hidden, Some(&Any::Bool(true)), "{seeded:?}");
+    let family = seeded.get("listMarkerFontFamily");
+    assert_eq!(family, Some(&Any::from("Symbol")), "{seeded:?}");
+    let suffix = seeded.get("listMarkerSuffix");
+    assert_eq!(suffix, Some(&Any::from("nothing")), "{seeded:?}");
+    doc
+}
+
+#[test]
+fn a_created_list_leaves_no_marker_look_of_the_list_the_paragraph_left() {
+    let doc = marked(
+        710,
+        &[("Lead", None), ("Bullet", Some(1)), ("Gap", None)],
+        "Bullet",
+    );
+    let ensured = create(&doc, "Bullet", ListKind::Numbered);
+    let written = attrs(&doc, "Bullet");
+    for key in MARKER_LOOK {
+        assert_eq!(ensured.get(key), Some(&Any::Null), "{key}");
+        let value = written.get(key);
+        assert!(matches!(value, None | Some(Any::Null)), "{key}: {value:?}");
+    }
+    assert!(created_key(&doc, "Bullet").is_some());
+    assert_eq!(markers(&doc)[1], Some("1.".to_owned()));
+}
+
+#[test]
+fn a_paragraph_joining_a_source_list_takes_its_marker_look() {
+    let doc = marked(
+        711,
+        &[("Plain", Some(2)), ("Bullet", Some(1)), ("Gap", None)],
+        "Bullet",
+    );
+    let plain = attrs(&doc, "Plain");
+    create(&doc, "Bullet", ListKind::Numbered);
+    let written = attrs(&doc, "Bullet");
+    let joined = ListIdentity::Source {
+        num_id: 2.0,
+        level: 0.0,
+    };
+    assert_eq!(resolve_list_identity(&written), Some(joined));
+    let shown = |value: Option<&Any>| value.filter(|value| **value != Any::Null).cloned();
+    for key in MARKER_LOOK {
+        assert_eq!(shown(written.get(key)), shown(plain.get(key)), "{key}");
+    }
+}
+
+#[test]
 fn the_created_list_rule_over_odd_attribute_shapes() {
     let cases: Vec<serde_json::Value> = serde_json::from_str(SHAPES).unwrap();
     for case in cases {
@@ -274,5 +457,95 @@ fn the_created_list_rule_over_odd_attribute_shapes() {
             _ => None,
         };
         assert_eq!(key.as_deref(), case["key"].as_str(), "{name}");
+    }
+}
+
+#[test]
+fn a_paragraph_moved_to_a_created_list_keeps_its_level() {
+    let doc = seeded(712, &[("Lead", None), ("Item", Some(2)), ("Gap", None)]);
+    doc.set_paragraph_attr(&paragraph_id(&doc, "Item"), "numPr", num_pr(2.0, 2.0))
+        .unwrap();
+    let ensured = create(&doc, "Item", ListKind::Bullet);
+    assert!(
+        matches!(ensured.get(LIST_DEF), Some(Any::Map(_))),
+        "{ensured:?}"
+    );
+    assert_eq!(ensured.get("numPr"), Some(&num_pr(1.0, 2.0)));
+    assert!(created_key(&doc, "Item").is_some());
+    assert_eq!(doc.created_list_definitions().len(), 1);
+}
+
+#[test]
+fn a_paragraph_joining_the_list_above_keeps_its_level() {
+    let doc = seeded(713, &[("Top", Some(1)), ("Item", Some(2)), ("End", None)]);
+    let source = paragraph_id(&doc, "Top");
+    doc.set_paragraph_attr(&source, "listIsBullet", Any::Null)
+        .unwrap();
+    doc.set_paragraph_attr(&source, "listNumFmt", Any::from("bullet"))
+        .unwrap();
+    doc.set_paragraph_attr(&paragraph_id(&doc, "Item"), "numPr", num_pr(2.0, 2.0))
+        .unwrap();
+    create(&doc, "Item", ListKind::Bullet);
+    let joined = ListIdentity::Source {
+        num_id: 1.0,
+        level: 2.0,
+    };
+    assert_eq!(resolve_list_identity(&attrs(&doc, "Item")), Some(joined));
+    assert!(doc.created_list_definitions().is_empty());
+}
+
+/// List 1 decimal `%1.` with a bold marker at level 0 and lowerRoman `%3)` without bold at level
+/// 2; list 2 a bullet list.
+const LEVELLED_NUMBERING: &str = concat!(
+    r#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">"#,
+    r#"<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:rPr><w:b/></w:rPr></w:lvl>"#,
+    r#"<w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="lowerLetter"/><w:lvlText w:val="%2."/></w:lvl>"#,
+    r#"<w:lvl w:ilvl="2"><w:start w:val="1"/><w:numFmt w:val="lowerRoman"/><w:lvlText w:val="%3)"/></w:lvl></w:abstractNum>"#,
+    r#"<w:abstractNum w:abstractNumId="1"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="o"/></w:lvl></w:abstractNum>"#,
+    r#"<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>"#,
+    r#"<w:num w:numId="2"><w:abstractNumId w:val="1"/></w:num></w:numbering>"#
+);
+
+#[test]
+fn a_paragraph_joining_the_list_above_at_another_level_takes_the_look_of_its_level() {
+    let paragraph = |properties: &str, text: &str| {
+        format!("<w:p><w:pPr>{properties}</w:pPr><w:r><w:t>{text}</w:t></w:r></w:p>")
+    };
+    let body = [
+        paragraph(
+            r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>"#,
+            "Top",
+        ),
+        paragraph(
+            r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="2"/></w:numPr>"#,
+            "Item",
+        ),
+        paragraph("", "End"),
+        paragraph(
+            r#"<w:numPr><w:ilvl w:val="2"/><w:numId w:val="1"/></w:numPr>"#,
+            "Probe",
+        ),
+    ]
+    .concat();
+    let doc = EditingDoc::new(714);
+    seed_from_docx(&doc, &numbered_docx(&body, None, LEVELLED_NUMBERING)).unwrap();
+    doc.set_paragraph_attr(&paragraph_id(&doc, "Item"), "numPr", num_pr(2.0, 2.0))
+        .unwrap();
+    let probe = attrs(&doc, "Probe");
+    assert_eq!(
+        probe.get("listNumFmt"),
+        Some(&Any::from("lowerRoman")),
+        "{probe:?}"
+    );
+    create(&doc, "Item", ListKind::Numbered);
+    let written = attrs(&doc, "Item");
+    let joined = ListIdentity::Source {
+        num_id: 1.0,
+        level: 2.0,
+    };
+    assert_eq!(resolve_list_identity(&written), Some(joined));
+    let shown = |value: Option<&Any>| value.filter(|value| **value != Any::Null).cloned();
+    for key in ["listNumFmt", "listMarker", "listMarkerBold"] {
+        assert_eq!(shown(written.get(key)), shown(probe.get(key)), "{key}");
     }
 }

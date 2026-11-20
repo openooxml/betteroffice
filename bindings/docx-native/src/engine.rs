@@ -3011,6 +3011,12 @@ impl EditSession {
         Ok(self.document(env)?.created_list_definitions_json())
     }
 
+    #[napi(catch_unwind, js_name = "list_definition_keys_in_use_json")]
+    pub fn list_definition_keys_in_use_json(&self, env: Env) -> Result<String> {
+        let _call = EngineCall::new(env);
+        Ok(self.document(env)?.list_definition_keys_in_use_json())
+    }
+
     #[napi(catch_unwind, js_name = "set_document_property")]
     pub fn set_document_property(&self, env: Env, key: String, json: String) -> Result<bool> {
         let _call = EngineCall::new(env);

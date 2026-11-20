@@ -1359,7 +1359,9 @@ impl EditSession {
     }
 
     /// The paragraph attributes, as JSON, that put a paragraph on a list of `kind`, `bullet` or
-    /// `numbered`, creating a list definition when no adjacent paragraph's list is of that kind.
+    /// `numbered`: its own list when that is of that kind, else the list of the paragraph directly
+    /// above, else below, else a list definition this call creates; a paragraph already on a list
+    /// keeps its own level.
     pub fn ensure_list_definition(
         &self,
         story: &str,
@@ -1374,6 +1376,11 @@ impl EditSession {
     /// The list definitions the editor created, by key, as JSON.
     pub fn created_list_definitions_json(&self) -> String {
         self.core.created_list_definitions_json()
+    }
+
+    /// The keys of the created list definitions some paragraph is on, as JSON.
+    pub fn list_definition_keys_in_use_json(&self) -> String {
+        self.core.list_definition_keys_in_use_json()
     }
 
     pub fn list_sections_json(&self) -> Result<String, JsValue> {
