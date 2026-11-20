@@ -387,12 +387,14 @@ describe("a foreign element holding content between 'Hel' and 'lo'", () => {
       expect(session.searchText('Hello').map(match => [match.start, match.end])).toEqual([[0, 5]]);
     });
 
-    it(`${loader}: the structured export holds no unsupported inline and no diagnostic for it`, async () => {
+    it(`${loader}: the structured export reports it once as kept in the package`, async () => {
       const { session } = await load(docx(inner));
       const read = session.exportStructured({ revisionView: 'accepted' });
       if (!read.ok) throw new Error(JSON.stringify(read.failure));
-      expect(read.content.diagnostics.filter(({ code }) => code === 'unsupported-content')).toEqual([]);
-      expect(JSON.stringify(read.content)).not.toContain('"kind":"unsupported"');
+      expect(
+        read.content.diagnostics.filter(({ code }) => code === 'unsupported-content').map(({ message }) => message),
+      ).toEqual(['An inline x:foo is not represented in the export; it stays in the package.']);
+      expect(JSON.stringify(read.content).split('"kind":"unsupported"')).toHaveLength(2);
     });
 
     it(`${loader}: typing at the start saves it between 'Hel' and 'lo'`, async () => {
