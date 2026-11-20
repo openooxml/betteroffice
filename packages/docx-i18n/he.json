@@ -880,6 +880,7 @@
     "toolbarGroup": "תוספים",
     "panelTabs": "חלוניות תוספים",
     "collapsePanel": "כווץ את {title}",
-    "expandPanel": "הרחב את {title}"
+    "expandPanel": "הרחב את {title}",
+    "miniToolbar": "עיצוב הבחירה"
   }
 }

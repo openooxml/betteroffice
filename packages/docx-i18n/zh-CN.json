@@ -880,6 +880,7 @@
     "toolbarGroup": "插件",
     "panelTabs": "插件面板",
     "collapsePanel": "折叠{title}",
-    "expandPanel": "展开{title}"
+    "expandPanel": "展开{title}",
+    "miniToolbar": "所选内容格式"
   }
 }

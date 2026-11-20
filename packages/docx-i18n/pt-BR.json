@@ -880,6 +880,7 @@
     "toolbarGroup": "Plugins",
     "panelTabs": "Painéis de plugins",
     "collapsePanel": "Recolher {title}",
-    "expandPanel": "Expandir {title}"
+    "expandPanel": "Expandir {title}",
+    "miniToolbar": "Formatação da seleção"
   }
 }

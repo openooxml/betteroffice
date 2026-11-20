@@ -880,6 +880,7 @@
     "toolbarGroup": "Plugin",
     "panelTabs": "Ngăn plugin",
     "collapsePanel": "Thu gọn {title}",
-    "expandPanel": "Mở rộng {title}"
+    "expandPanel": "Mở rộng {title}",
+    "miniToolbar": "Định dạng vùng chọn"
   }
 }

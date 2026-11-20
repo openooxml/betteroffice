@@ -111,6 +111,41 @@ def nested_table_bytes() -> bytes:
 
 
 @pytest.fixture(scope="session")
+def highlight_and_merge_bytes() -> bytes:
+    """Runs with and without a highlight, and a table whose cells span and merge."""
+
+    def run(properties: str, text: str) -> str:
+        return f"<w:r><w:rPr>{properties}</w:rPr><w:t>{text}</w:t></w:r>"
+
+    def cell(properties: str, text: str) -> str:
+        return f"<w:tc><w:tcPr>{properties}</w:tcPr><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:tc>"
+
+    document = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f'<w:document xmlns:w="{W}"><w:body><w:p>'
+        + run('<w:highlight w:val="yellow"/>', "marked")
+        + run('<w:highlight w:val="none"/>', "cleared")
+        + run('<w:highlight w:val=""/>', "empty")
+        + run("<w:b/>", "bold")
+        + "<w:r><w:t>plain</w:t></w:r></w:p><w:tbl><w:tr>"
+        + cell('<w:gridSpan w:val="2"/>', "wide")
+        + cell('<w:vMerge w:val="restart"/>', "tall")
+        + "</w:tr><w:tr>"
+        + cell("", "left")
+        + "<w:tc><w:p><w:r><w:t>bare</w:t></w:r></w:p></w:tc>"
+        + cell("<w:vMerge/>", "below")
+        + "</w:tr><w:tr>"
+        + cell('<w:gridSpan w:val="1"/>', "single")
+        + cell("", "middle")
+        + cell('<w:vMerge w:val="continue"/>', "lower")
+        + "</w:tr><w:tr>"
+        + cell("", "alone")
+        + "</w:tr></w:tbl><w:sectPr/></w:body></w:document>"
+    )
+    return _package({**PARTS, "word/document.xml": document})
+
+
+@pytest.fixture(scope="session")
 def duplicate_id_package() -> "Callable[..., bytes]":
     """Builds a package as Word writes it: `1A2B3C4D` repeats in the body, a
     nested table cell and a content control, and the last paragraph's ID is

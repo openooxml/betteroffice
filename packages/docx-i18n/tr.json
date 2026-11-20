@@ -880,6 +880,7 @@
     "toolbarGroup": "Eklentiler",
     "panelTabs": "Eklenti panelleri",
     "collapsePanel": "{title} daralt",
-    "expandPanel": "{title} genişlet"
+    "expandPanel": "{title} genişlet",
+    "miniToolbar": "Seçim biçimlendirmesi"
   }
 }

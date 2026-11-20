@@ -1,5 +1,5 @@
 {
-  "scriptSha256": "04d06101771685c3c0e6ab2272862a9546bf42ce3ecb16b7fb1cb2599f7f5f98",
+  "scriptSha256": "b5101ae98ade07d48585c2220b04957185f20ef3f83fa9208c4efe95139c1d4f",
   "results": [
     {
       "op": "text",
@@ -9551,21 +9551,8 @@
       "op": "readEdited",
       "result": {
         "paragraph": "Section two, edited by the parity script.",
-        "story": "Structured export\nDirect outline\nInherited from Heading1\nBuilt-in style fallback\nExplicit body level\nFirst\nNested\nBullet\nSecond\nOverridden start\nNumbered heading\nUnrendered format\nInside a block control\nDear  and \nKeep end\nLogo: \nPage 4, year 2026, author \nCommented words with a note\nSee a link\nAtoms:\ttabbed\né 😀 ￼ done\nShape , equation , unread chart end\nMoved \nSection two, edited by the parity script."
+        "story": "Structured export\nDirect outline\nInherited from Heading1\nBuilt-in style fallback\nExplicit body level\nFirst\nNested\nBullet\nSecond\nOverridden start\nNumbered heading\nUnrendered format\nInside a block control\nDear  and \nKeep end\nLogo: \nPage 4, year 2026, author \nCommented words with a note\nSee a link\nAtoms:\ttabbed\né 😀 ￼ done\nShape , equation , unread chart end\nMoved \nPage\fbreak Boldresult\nEnd of section one\nSection two, edited by the parity script."
       }
-    },
-    {
-      "op": "pageBreakMove",
-      "result": [
-        {
-          "id": "00000019",
-          "text": "Pagebreak Boldresult"
-        },
-        {
-          "id": "00000016",
-          "text": "\fEnd of section one"
-        }
-      ]
     }
   ]
 }

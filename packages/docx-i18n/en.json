@@ -880,6 +880,7 @@
     "toolbarGroup": "Plugins",
     "panelTabs": "Plugin panels",
     "collapsePanel": "Collapse {title}",
-    "expandPanel": "Expand {title}"
+    "expandPanel": "Expand {title}",
+    "miniToolbar": "Selection formatting"
   }
 }
