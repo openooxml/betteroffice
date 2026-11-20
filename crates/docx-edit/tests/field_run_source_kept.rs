@@ -4,6 +4,11 @@ use yrs::{Map, ReadTxn, Transact};
 
 const FONT: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
 
+const ONE_FIELD_RUN: &str = concat!(
+    r#"<w:r><w:fldChar w:fldCharType="begin"/><w:instrText xml:space="preserve"> PAGE </w:instrText>"#,
+    r#"<w:fldChar w:fldCharType="separate"/><w:t>1</w:t><w:fldChar w:fldCharType="end"/></w:r>"#
+);
+
 fn field(code: &str) -> String {
     format!(
         r#"<w:fldChar w:fldCharType="begin"/><w:instrText xml:space="preserve"> {code} </w:instrText><w:fldChar w:fldCharType="separate"/><w:fldChar w:fldCharType="end"/>"#
@@ -25,6 +30,11 @@ fn document_between(middle: &str) -> Vec<u8> {
         field("PAGE"),
         field("NUMPAGES")
     );
+    document_holding(&run)
+}
+
+/// Two pages; the first holds `run` between "AB" and "CD".
+fn document_holding(run: &str) -> Vec<u8> {
     let body = format!(
         r#"<w:p>{}</w:p><w:p>{}{run}{}</w:p><w:p><w:pPr><w:pageBreakBefore/></w:pPr>{}</w:p>"#,
         text("Prev"),
@@ -85,6 +95,20 @@ fn painted_fields(value: &Value, out: &mut Vec<(String, String)>) {
 fn a_run_holding_two_fields_paints_the_first_fields_label_as_main_does() {
     docx_layout::clear_measure_fonts();
     let display = display_list(&document());
+    let pages = display["pages"].as_array().unwrap();
+    assert_eq!(pages.len(), 2, "{display}");
+    let mut first = Vec::new();
+    painted_fields(&pages[0], &mut first);
+    assert_eq!(first, [("PAGE".to_owned(), "1".to_owned())], "{display}");
+    let mut second = Vec::new();
+    painted_fields(&pages[1], &mut second);
+    assert!(second.is_empty(), "{display}");
+}
+
+#[test]
+fn a_run_holding_one_field_paints_its_label_as_main_does() {
+    docx_layout::clear_measure_fonts();
+    let display = display_list(&document_holding(ONE_FIELD_RUN));
     let pages = display["pages"].as_array().unwrap();
     assert_eq!(pages.len(), 2, "{display}");
     let mut first = Vec::new();

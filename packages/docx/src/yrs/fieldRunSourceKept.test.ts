@@ -374,3 +374,31 @@ for (const [where, body, read, kept, before] of MARKED) {
     });
   }
 }
+
+const ONE_FIELD_RUN = '<w:r><w:fldChar w:fldCharType="begin"/><w:instrText xml:space="preserve"> PAGE </w:instrText>' +
+  '<w:fldChar w:fldCharType="separate"/><w:t>1</w:t><w:fldChar w:fldCharType="end"/></w:r>';
+const ONE_FIELD_BODY = `<w:p>${text('AB')}${ONE_FIELD_RUN}${text('CD')}</w:p>`;
+const oneFieldFixture = () => fixture(BODY.replace(RUN, ONE_FIELD_RUN));
+
+for (const [route, , save] of MARK_ROUTES) {
+  test(`a run holding one field is written as read with its cached result: ${route}`, async () => {
+    const xml = await save(fixture(ONE_FIELD_BODY));
+    expect(xml).toContain(ONE_FIELD_RUN);
+    expect(around(xml, ONE_FIELD_RUN)?.[0]).toBe('AB');
+  });
+}
+
+for (const [route, save] of EDIT_ROUTES) {
+  test(`${route}: an edited instruction on a run holding one field is written as main writes it`, async () => {
+    const edited = (field: ComplexField) => { field.instruction = 'DATE'; };
+    const saved = paragraphXml(await save((document) => edited(complexFieldOf(document, 1)), oneFieldFixture()), 1);
+    const main = paragraphXml(await save((document) => {
+      const field = complexFieldOf(document, 1);
+      edited(field);
+      withoutSource(field);
+    }, oneFieldFixture()), 1);
+    expect(saved).toContain('AB');
+    expect(saved).not.toContain(ONE_FIELD_RUN);
+    expect(saved).toBe(main);
+  });
+}

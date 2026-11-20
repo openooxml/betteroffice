@@ -53,6 +53,22 @@ fn whole_field(code: &str) -> String {
     [chr("begin"), instr(code), chr("separate"), chr("end")].concat()
 }
 
+fn field_with_result(code: &str, result: &str) -> String {
+    [
+        chr("begin"),
+        instr(code),
+        chr("separate"),
+        text(result),
+        chr("end"),
+    ]
+    .concat()
+}
+
+/// One run holding the whole field `PAGE` with its cached result.
+fn one_field_run() -> String {
+    run(&field_with_result("PAGE", "1"))
+}
+
 fn page_of_pages() -> String {
     [whole_field("PAGE"), text(" of "), whole_field("NUMPAGES")].concat()
 }
@@ -446,7 +462,6 @@ fn other_field_runs_carry_no_source_run() {
     ]
     .concat();
     let controls = [
-        run(&whole_field("PAGE")),
         run(&nested),
         open_around,
         unbalanced,
@@ -465,5 +480,89 @@ fn other_field_runs_carry_no_source_run() {
                 "{control}\n{serialized}"
             );
         }
+    }
+}
+
+#[test]
+fn a_run_holding_one_field_carries_its_run_as_read() {
+    let source = one_field_run();
+    let bytes = package(&between(&source));
+    for content in both_walkers(&bytes, 0) {
+        assert_eq!(
+            kinds(&content),
+            ["run", "complexField", "run"],
+            "{content:?}"
+        );
+        assert_eq!(content[1]["sourceRunXml"], source.as_str(), "{content:?}");
+        let digest = content[1]["sourceRunDigest"].as_str().unwrap_or_default();
+        assert_eq!(digest.len(), 64, "{content:?}");
+    }
+}
+
+#[test]
+fn a_full_rewrite_writes_a_run_holding_one_field_as_read_between_its_neighbours() {
+    let source = one_field_run();
+    let xml = save(&package(&between(&source)), |_| {});
+    assert_eq!(around(&xml, &source), pair("AB", "CD"), "{xml}");
+    assert!(xml.contains(&text("1")), "{xml}");
+}
+
+#[test]
+fn a_run_holding_one_field_without_a_separator_is_written_as_read() {
+    let source = run(&[chr("begin"), instr("PAGE"), chr("end")].concat());
+    let bytes = package(&between(&source));
+    for content in both_walkers(&bytes, 0) {
+        assert_eq!(content[1]["sourceRunXml"], source.as_str(), "{content:?}");
+    }
+    let xml = save(&bytes, |_| {});
+    assert_eq!(around(&xml, &source), pair("AB", "CD"), "{xml}");
+}
+
+#[test]
+fn text_beside_one_field_in_its_run_is_written_as_read() {
+    let field = field_with_result("PAGE", "1");
+    let source = run(&[text("Page "), field, text(" of")].concat());
+    let xml = save(&package(&between(&source)), |_| {});
+    assert_eq!(around(&xml, &source), pair("AB", "CD"), "{xml}");
+    assert!(xml.contains(&text("Page ")), "{xml}");
+    assert!(xml.contains(&text(" of")), "{xml}");
+}
+
+#[test]
+fn an_edited_instruction_on_a_run_holding_one_field_is_written_as_main_writes_it() {
+    let source = one_field_run();
+    let bytes = package(&between(&source));
+    let (saved, main) = save_and_main(&bytes, |document| {
+        field_of(document)["instruction"] = json!("DATE");
+    });
+    assert!(!saved.contains(&source), "{saved}");
+    assert_eq!(saved, main);
+}
+
+#[test]
+fn a_run_holding_one_field_moved_into_a_tracked_change_is_written_as_main_writes_it() {
+    let source = one_field_run();
+    for (wrapper, tag) in [
+        ("del", "w:delText"),
+        ("moveFrom", "w:delText"),
+        ("ins", "w:t"),
+    ] {
+        let change = format!(
+            r#"<w:{wrapper} w:id="1" w:author="A">{}</w:{wrapper}>"#,
+            run(&format!("<{tag}>x</{tag}>"))
+        );
+        let control = format!("<w:p><w:sdt><w:sdtContent>{change}</w:sdtContent></w:sdt></w:p>");
+        let bytes = package(&format!("{}{control}", between(&source)));
+        let moved = |document: &mut Value| {
+            let field = field_of(document).clone();
+            *tracked_content(&mut document["content"][1]).unwrap() = json!([field]);
+        };
+        let saved = save(&bytes, moved);
+        let main = save(&bytes, |document| {
+            moved(document);
+            without_source(&mut document["content"][1]);
+        });
+        assert!(saved.matches(&source).count() < 2, "{saved}");
+        assert_eq!(saved, main);
     }
 }
