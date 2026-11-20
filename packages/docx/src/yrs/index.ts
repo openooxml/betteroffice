@@ -129,7 +129,7 @@ export * from './inputPositionMap';
 export { subscribeYrsSelection, withYrsSelectionCause, yrsSelectionCause } from './selectionChanges';
 export * from './storyPlainText';
 export { tableBoundaryDeleteTarget } from './tableBoundaryDelete';
-export { applyListToggle, LIST_OFF_ATTRS } from './listCommands';
+export { applyListToggle, LIST_OFF_ATTRS, listOffAttrs } from './listCommands';
 export { isCellHasNoStoryRefusal } from './cellRefusal';
 export * from './clipboardFragment';
 export * from './stories';

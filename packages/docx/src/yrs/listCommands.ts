@@ -28,8 +28,9 @@ function isNumberedByStyle(properties: Readonly<Record<string, unknown>>): boole
 /**
  * The attributes that take a paragraph with `properties` off its list: `LIST_OFF_ATTRS`, and for a
  * paragraph its style numbers the `numId` 0 that keeps it off that numbering in the saved file.
+ * @internal
  */
-function listOffAttrs(properties: Readonly<Record<string, unknown>>): YrsParagraphAttrs {
+export function listOffAttrs(properties: Readonly<Record<string, unknown>>): YrsParagraphAttrs {
   return isNumberedByStyle(properties) ? { ...LIST_OFF_ATTRS, numPr: { numId: 0, ilvl: 0 } } : LIST_OFF_ATTRS;
 }
 

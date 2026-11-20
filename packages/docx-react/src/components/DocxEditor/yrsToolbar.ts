@@ -7,7 +7,7 @@ import type {
   YrsSession,
   YrsStoryRange,
 } from '@betteroffice/docx/yrs';
-import { applyListToggle, compareYrsLocs, LIST_OFF_ATTRS } from '@betteroffice/docx/yrs';
+import { applyListToggle, compareYrsLocs, listOffAttrs } from '@betteroffice/docx/yrs';
 import type { YrsStoredFormatting, YrsStoredFormattingAction } from './YrsInput';
 import type { TableContextInfo } from './types';
 import { currentYrsTableContext } from './yrsCommands';
@@ -153,7 +153,7 @@ function changeIndent(
       }, suggesting);
     } else if (direction === 'outdent') {
       session.setParagraphAttrs(startRange, {
-        ...LIST_OFF_ATTRS,
+        ...listOffAttrs(selection.context.paragraphProperties),
         indentLeft: null,
         indentFirstLine: null,
         hangingIndent: null,

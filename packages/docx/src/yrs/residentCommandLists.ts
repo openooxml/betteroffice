@@ -1,5 +1,5 @@
 import type { YrsParagraphAttrs, YrsStoryRange } from './index';
-import { LIST_OFF_ATTRS } from './listCommands';
+import { listOffAttrs } from './listCommands';
 import type { DocxWorkerCommandEngine } from './residentCommandProtocol';
 
 export function planResidentListChanges(
@@ -17,7 +17,7 @@ export function planResidentListChanges(
       const level = numPr.ilvl ?? 0;
       if (action.direction === 'increase' && level >= 8) return [];
       if (action.direction === 'decrease' && level === 0 && action.preserveNumbering) return [];
-      attrs = action.direction === 'decrease' && level === 0 ? LIST_OFF_ATTRS
+      attrs = action.direction === 'decrease' && level === 0 ? listOffAttrs(properties)
         : { numPr: { numId: numPr.numId, ilvl: level + (action.direction === 'increase' ? 1 : -1) } };
       attrs = { ...attrs, indentLeft: null, indentFirstLine: null, other: { ...attrs.other, hangingIndent: null } };
     } else {
