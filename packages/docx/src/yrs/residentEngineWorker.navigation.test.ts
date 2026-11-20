@@ -18,6 +18,12 @@ import type { DocxCommandApplyContext, DocxCommandEnvelope, DocxCommandIntent, D
 
 const releasesAfterTest: (() => void)[] = [];
 
+function streamsUpdatesSource(source: string): string {
+  const start = source.indexOf('function streamsUpdates(');
+  if (start < 0) throw new Error('residentEngineWorker.ts has no streamsUpdates');
+  return source.slice(start, source.indexOf('\n/**', start));
+}
+
 afterEach(() => {
   for (const release of releasesAfterTest.splice(0)) release();
 });
@@ -199,7 +205,7 @@ function splitRowWorker(direction: 'up' | 'down', queryEngine?: RustDisplayListQ
   };
   harnessQueries = dependencies.createDisplayListQueries as unknown as typeof createDisplayListQueries;
   const worker = new Function(...Object.keys(dependencies),
-    new Bun.Transpiler({ loader: 'ts' }).transformSync(`${reservations}\n${binding}`) +
+    new Bun.Transpiler({ loader: 'ts' }).transformSync(`${reservations}\n${streamsUpdatesSource(source)}\n${binding}`) +
     '\nlet hooks = bindResidentCommands(init); return { get hooks() { return hooks; }, rebind: () => { hooks = bindResidentCommands(init); }, release: () => { releaseCommandHost?.(); releaseCommandHost = null; }, changes: commandFrameChanges, install: (frame) => { retainedFrame = frame; } };'
   )(...Object.values(dependencies)) as { hooks: DocxCommandHooks; rebind(): void; release(): void; changes: { pages: Set<number> }; install(frame: RetainedFrame): void };
   releasesAfterTest.push(worker.release);

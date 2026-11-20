@@ -29,6 +29,12 @@ import type { DocxCommandAck, DocxCommandEnvelope, DocxCommandSelection, DocxNav
 import { TIMEOUT, closeCommandEngines, command, context, execute, openCommandEngine as openEngine, selection, texts, type CommandArm } from './residentCommandTestSupport';
 
 const selectionEngines = new Set<DocxWorkerCommandEngine>();
+
+function streamsUpdatesSource(source: string): string {
+  const start = source.indexOf('function streamsUpdates(');
+  if (start < 0) throw new Error('residentEngineWorker.ts has no streamsUpdates');
+  return source.slice(start, source.indexOf('\n/**', start));
+}
 const releasesAfterTest: (() => void)[] = [];
 
 afterEach(() => {
@@ -562,7 +568,7 @@ function workerSelectionHooks(arm: CommandArm, frame: RetainedFrame, buildPages?
     retainedPageByKey: (current: RetainedFrame, pageId: string) => retainedFramePageById(current, BigInt(pageId)),
   };
   const worker = new Function(...Object.keys(dependencies),
-    new Bun.Transpiler({ loader: 'ts' }).transformSync(`${reservations}\n${binding}`) +
+    new Bun.Transpiler({ loader: 'ts' }).transformSync(`${reservations}\n${streamsUpdatesSource(source)}\n${binding}`) +
     '\nreturn { hooks: bindResidentCommands(init), release: () => { releaseCommandHost?.(); releaseCommandHost = null; }, install: (frame, revision) => { retainedFrame = frame; layoutRevision = revision; } };'
   )(...Object.values(dependencies)) as { hooks: DocxCommandHooks; release(): void; install: (frame: RetainedFrame, revision: number) => void };
   releasesAfterTest.push(worker.release);
@@ -938,7 +944,7 @@ test('d2a_worker_vertical_navigation_builds_unbuilt_neighbours_before_chained_ty
   };
   const bind = () => {
     const worker = new Function(...Object.keys(dependencies),
-      new Bun.Transpiler({ loader: 'ts' }).transformSync(`${reservations}\n${binding}`) +
+      new Bun.Transpiler({ loader: 'ts' }).transformSync(`${reservations}\n${streamsUpdatesSource(source)}\n${binding}`) +
       '\nreturn { hooks: bindResidentCommands(init), release: () => { releaseCommandHost?.(); releaseCommandHost = null; } };'
     )(...Object.values(dependencies)) as { hooks: DocxCommandHooks; release(): void };
     releasesAfterTest.push(worker.release);
