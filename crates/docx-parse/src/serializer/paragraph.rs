@@ -603,11 +603,24 @@ fn prefixed(mut before: String, xml: String) -> String {
 }
 
 fn merge_run_direction_scopes<'a>(run: &'a Run, shared: &mut Option<&'a [DirectionScope]>) {
-    let scopes = run.direction_scopes.as_slice();
+    merge_scopes(&run.direction_scopes, shared);
+}
+
+fn merge_scopes<'a>(scopes: &'a [DirectionScope], shared: &mut Option<&'a [DirectionScope]>) {
     *shared = Some(match *shared {
         Some(current) => &current[..shared_direction_prefix(current, scopes)],
         None => scopes,
     });
+}
+
+/// The scopes every code and result run of `field` sits in, or the scopes read around the field
+/// when it holds no such run.
+fn complex_field_direction_scopes(field: &ComplexField) -> &[DirectionScope] {
+    let mut shared = None;
+    for run in field.field_code.iter().chain(&field.field_result) {
+        merge_run_direction_scopes(run, &mut shared);
+    }
+    shared.unwrap_or(&field.direction_scopes)
 }
 
 fn merge_direction_scopes<'a>(
@@ -628,9 +641,7 @@ fn merge_direction_scopes<'a>(
             }
         }
         InlineNode::ComplexField(field) => {
-            for run in field.field_code.iter().chain(&field.field_result) {
-                merge_run_direction_scopes(run, shared);
-            }
+            merge_scopes(complex_field_direction_scopes(field), shared)
         }
         InlineNode::InlineSdt(sdt) => {
             let within = Within {
@@ -912,17 +923,14 @@ fn serialize_complex_field(
     field: &ComplexField,
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
-    let mut shared = None;
-    for run in field.field_code.iter().chain(&field.field_result) {
-        merge_run_direction_scopes(run, &mut shared);
-    }
+    let shared = complex_field_direction_scopes(field);
     if let Some(source) = field.source_run_xml.as_deref()
         && !context.deletion
         && !context.in_revision
         && field.source_run_digest.as_deref() == Some(field_run_digest(field).as_str())
     {
         validate_replayed_fragment(source)?;
-        let mut output = context.direction.transition(shared.unwrap_or_default());
+        let mut output = context.direction.transition(shared);
         output.push_str(source);
         return Ok(output);
     }
@@ -932,7 +940,7 @@ fn serialize_complex_field(
         .and_then(|run| run.formatting.as_ref())
         .or(field.formatting.as_ref());
     let properties = serialize_text_formatting(formatting);
-    let mut output = context.direction.transition(shared.unwrap_or_default());
+    let mut output = context.direction.transition(shared);
     output.push_str("<w:r>");
     output.push_str(&properties);
     output.push_str("<w:fldChar w:fldCharType=\"begin\"");
@@ -979,7 +987,7 @@ fn serialize_complex_field(
     for run in &field.field_result {
         merge_run_direction_scopes(run, &mut result_scopes);
     }
-    let result_scopes = result_scopes.unwrap_or_default();
+    let result_scopes = result_scopes.unwrap_or(&field.direction_scopes);
     if let Some(nodes) = in_place {
         let mut upcoming = Upcoming::new(nodes, Some(result_scopes), Within::of(context));
         for (index, node) in nodes.iter().enumerate() {
@@ -989,7 +997,7 @@ fn serialize_complex_field(
     } else if let Some(nodes) = code_nodes {
         let code_scopes = match field.field_code.first() {
             Some(run) => run.direction_scopes.as_slice(),
-            None => shared.unwrap_or_default(),
+            None => shared,
         };
         for node in nodes.iter().filter(|node| {
             matches!(

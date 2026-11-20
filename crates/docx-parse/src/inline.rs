@@ -1482,6 +1482,14 @@ pub struct ComplexField {
     pub structured_result: Option<StructuredFieldContent>,
     #[serde(rename = "fieldTree", skip_serializing_if = "Option::is_none")]
     pub field_tree: Option<StructuredFieldTree>,
+    /// The `w:dir` and `w:bdo` elements around every run read for the field, outermost first;
+    /// written around its field characters where no code or result run carries its own.
+    #[serde(
+        rename = "directionScopes",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub direction_scopes: Vec<DirectionScope>,
 }
 
 impl ComplexField {
@@ -2456,6 +2464,7 @@ pub(crate) struct OpenComplexField {
     dirty: bool,
     raw_form_data_xml: Option<String>,
     formatting: Option<TextFormatting>,
+    direction_scopes: Vec<DirectionScope>,
 }
 
 impl OpenComplexField {
@@ -2487,6 +2496,7 @@ impl OpenComplexField {
             dirty: flags.as_ref().is_some_and(|flags| flags.1),
             raw_form_data_xml: flags.and_then(|flags| flags.2),
             formatting: run.formatting.clone(),
+            direction_scopes: run.direction_scopes.clone(),
         }
     }
 
@@ -2498,6 +2508,16 @@ impl OpenComplexField {
         if self.formatting.is_none() {
             self.formatting.clone_from(&run.formatting);
         }
+    }
+
+    pub(crate) fn share_direction_scopes(&mut self, run: &Run) {
+        let shared = self
+            .direction_scopes
+            .iter()
+            .zip(&run.direction_scopes)
+            .take_while(|(open, scope)| open == scope)
+            .count();
+        self.direction_scopes.truncate(shared);
     }
 
     pub(crate) fn switch_to_result(&mut self) {
@@ -2596,6 +2616,7 @@ impl OpenComplexField {
             structured_code,
             structured_result,
             field_tree: Some(field_tree),
+            direction_scopes: self.direction_scopes,
         };
         field.project_leaf_tree(&[]);
         field
@@ -2750,6 +2771,7 @@ fn parse_inline_container_at_depth(
                 if let Some(active) = fields.last_mut() {
                     active.append_instruction(&instruction);
                     active.adopt_formatting(&run);
+                    active.share_direction_scopes(&run);
                     if (has_begin || has_separate) && !instruction.is_empty() {
                         active.absorb_instruction(&run);
                     }
