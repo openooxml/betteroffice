@@ -344,7 +344,7 @@ impl EditingDoc {
                 .or_else(|| {
                     adjacent_paragraph_change_revision_id(&chunks, at.index, &txn, &ctx.author)
                 })
-                .unwrap_or_else(|| self.next_id())
+                .unwrap_or_else(|| self.next_id(&txn))
         });
         let ins = revision_id
             .as_ref()

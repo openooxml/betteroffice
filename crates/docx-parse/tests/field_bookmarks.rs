@@ -119,7 +119,7 @@ fn rewritten_field_result(result: &str, runs: Value, expected_text: &str) -> Str
         .iter_mut()
         .find(|node| node["type"] == "complexField")
         .unwrap();
-    assert!(field["structuredResult"]["blocks"].is_array());
+    assert!(field["structuredResult"]["blockCount"].is_u64());
     field["fieldResult"] = runs;
     let saved = save_package(&source, &package);
     let reopened = parse_docx_s9_wire(&saved, S9ParseOptions::default()).unwrap();
@@ -165,7 +165,7 @@ fn normalized_field_result(result: &str, expected_text: &str) -> String {
         .iter()
         .find(|node| node["type"] == "complexField")
         .unwrap();
-    assert!(field["structuredResult"]["blocks"].is_array());
+    assert!(field["structuredResult"]["blockCount"].is_u64());
     assert_eq!(
         field["fieldResult"]
             .as_array()
@@ -210,7 +210,7 @@ fn nested_result_bookmarks(result: &str, marker_paths: [&str; 2]) {
         .unwrap()
         .remove("sections");
     let field = &package["document"]["content"][0]["content"][0];
-    assert!(field["structuredResult"]["blocks"].is_array());
+    assert!(field["structuredResult"]["blockCount"].is_u64());
     for (path, kind) in marker_paths
         .into_iter()
         .zip(["bookmarkStart", "bookmarkEnd"])
@@ -306,7 +306,7 @@ fn split_wrapper_result(result: &str, children_path: &str, cache_path: &str) {
         .unwrap()
         .remove("sections");
     let field = &mut package["document"]["content"][0]["content"][0];
-    assert!(field["structuredResult"]["blocks"].is_array());
+    assert!(field["structuredResult"]["blockCount"].is_u64());
     let cached = field.pointer(cache_path).unwrap().clone();
     let runs = json!([
         {"type": "run", "content": [{"type": "text", "text": "Heading "}]},

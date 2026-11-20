@@ -19,6 +19,13 @@ const selectionDerivedEditStateFields = new Set([
   'toolbar', 'effectiveFormatting', 'hyperlink', 'tableContext', 'currentRevisionId',
 ]);
 
+const selectionStepKinds = new Set(['selectPoint', 'extendSelection', 'navigate']);
+
+/** A pointer or keyboard step that moves the selection and leaves the document as it is. */
+export function isSelectionStepCommand(kind: string): boolean {
+  return selectionStepKinds.has(kind);
+}
+
 function selectionIndependentEditState(state: DocxEditState): Record<string, unknown> {
   return Object.fromEntries(Object.entries(state).filter(([key]) => !selectionDerivedEditStateFields.has(key)));
 }
@@ -159,9 +166,12 @@ export function createResidentCommandHost(options: DocxCommandHostOptions): Docx
       });
     },
     policy(command) {
-      return isCommandEnvelope(command) && command.basis.epoch !== init.epoch
-        ? { lane: 'input', mutates: true, reframes: true, reorderable: false }
-        : shared.policy(command);
+      if (isCommandEnvelope(command) && command.basis.epoch !== init.epoch) {
+        return { lane: 'input', mutates: true, reframes: true, reorderable: false };
+      }
+      const policy = shared.policy(command);
+      return isCommandEnvelope(command) && isSelectionStepCommand(command.kind)
+        ? { ...policy, mutates: false, reframes: false } : policy;
     },
     checkpoint: (context) => serialize(async () => {
       const result = await shared.checkpoint(context);

@@ -1,0 +1,94 @@
+{
+  "displayList": {
+    "commands": [
+      {
+        "align": "left",
+        "clip": {
+          "h": 20,
+          "w": 160,
+          "x": 0,
+          "y": 0
+        },
+        "color": "#000000",
+        "fontFamily": "Calibri",
+        "fontSize": 12,
+        "op": "text",
+        "runs": [
+          {
+            "bold": true,
+            "end": 2,
+            "fontFamily": "Cambria",
+            "fontSize": 14,
+            "italic": true,
+            "start": 0
+          },
+          {
+            "color": "#ff0000",
+            "end": 4,
+            "start": 3,
+            "strike": true,
+            "underline": true,
+            "underlineStyle": "double"
+          },
+          {
+            "baseline": "superscript",
+            "end": 6,
+            "start": 4
+          }
+        ],
+        "text": "Ab 中😀z",
+        "x": 2,
+        "y": 14
+      },
+      {
+        "align": "left",
+        "clip": {
+          "h": 20,
+          "w": 80,
+          "x": 0,
+          "y": 20
+        },
+        "color": "#000000",
+        "fontSize": 12,
+        "op": "text",
+        "runs": [
+          {
+            "color": "#0000ff",
+            "end": 12,
+            "fontSize": 20,
+            "start": 8
+          }
+        ],
+        "text": "wrapped rich",
+        "wrap": {
+          "lineHeight": 18,
+          "valign": "top",
+          "width": 76
+        },
+        "x": 2,
+        "y": 34
+      }
+    ],
+    "height": 40,
+    "width": 160
+  },
+  "viewport": {
+    "dpr": 1,
+    "frozenCols": 0,
+    "frozenRows": 0,
+    "height": 40,
+    "scrollX": 0,
+    "scrollY": 0,
+    "width": 160
+  },
+  "visible": {
+    "cols": {
+      "first": 0,
+      "last": 1
+    },
+    "rows": {
+      "first": 0,
+      "last": 1
+    }
+  }
+}

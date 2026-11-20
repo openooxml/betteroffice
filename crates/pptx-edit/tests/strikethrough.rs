@@ -703,7 +703,11 @@ fn inserted_explicit_clear_only_overrides_inherited_strike() {
                     },
                 )
                 .unwrap();
-            let expected = (shape_index != 3).then_some("noStrike");
+            let expected = if shape_index != 3 || authored == "noStrike" {
+                Some("noStrike")
+            } else {
+                None
+            };
             let reopened = DeckSession::open(&session.save().unwrap(), 6434).unwrap();
             for session in [&session, &reopened] {
                 let story = session.story(story_id).unwrap();

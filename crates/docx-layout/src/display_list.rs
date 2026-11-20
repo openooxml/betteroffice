@@ -5043,7 +5043,12 @@ pub(crate) struct ShapeFonts<'a> {
     store: &'a ooxml_text::FontStore,
     chains: HashMap<String, ShapeFontChain>,
     coverage_only: bool,
+    paragraph_mark: Option<ooxml_text::FontId>,
 }
+
+/// The `fontChains` key whose one id is the face the tracked paragraph mark is
+/// shaped with. Without it the mark is a text item.
+pub const PARAGRAPH_MARK_FACE: &str = "@betteroffice/fonts/paragraph-mark";
 
 type FontResolver =
     fn(&ooxml_text::FontStore, &[ooxml_text::FontId], char) -> Option<ooxml_text::FontId>;
@@ -5176,8 +5181,13 @@ impl<'a> ShapeFonts<'a> {
             .copied()
             .collect();
         let symbols_shape = font_chains.contains_key("@betteroffice/fonts/coverage-symbols");
+        let paragraph_mark = match font_chains.get(PARAGRAPH_MARK_FACE) {
+            Some(ids) if ids.len() == 1 => Some(ooxml_text::FontId::from_u32(ids[0])),
+            _ => None,
+        };
         let chains = font_chains
             .iter()
+            .filter(|(k, _)| k.as_str() != PARAGRAPH_MARK_FACE)
             .map(|(k, ids)| {
                 (
                     k.clone(),
@@ -5195,6 +5205,7 @@ impl<'a> ShapeFonts<'a> {
             store,
             chains,
             coverage_only: !coverage_only.is_empty(),
+            paragraph_mark,
         })
     }
 
@@ -7200,38 +7211,50 @@ pub(crate) fn emit_paragraph_fragment(
         let mut glyph_attrs = block_ref.attrs();
         glyph_attrs.structural_revision = Some(Box::new(rev.clone()));
         let glyph_x = line.end_x + PARAGRAPH_MARK_GLYPH_GAP;
-        prims.push(Primitive::Text(TextRunPrimitive {
-            text: "¶".to_string(),
-            paint_text: None,
-            x: px(glyph_x),
-            baseline_y: px(line.baseline),
-            width: px(PARAGRAPH_MARK_GLYPH_WIDTH),
-            paint_clip: None,
-            font: resolved_css_font(ctx.shape, "¶", &RunFormattingIn::default()),
-            scripts: None,
-            color: structural_color(rev.kind).to_string(),
-            letter_spacing: None,
-            word_spacing: None,
-            rtl: None,
-            opacity: None,
-            rotation_deg: None,
-            horizontal_scale: None,
-            substitute_scale: text_substitute_scale(
-                ctx.shape,
-                "¶",
-                &RunFormattingIn::default(),
-                0,
-                false,
-            ),
-            all_caps: false,
-            small_caps: false,
-            hidden: false,
-            text_shadow: None,
-            text_outline: false,
-            emphasis_mark: None,
-            text_effect: None,
-            attrs: glyph_attrs.clone(),
-        }));
+        let shaped = ctx.shape.is_some_and(|shape| {
+            emit_paragraph_mark_glyph_run(
+                prims,
+                shape,
+                glyph_x,
+                line.baseline,
+                &glyph_attrs,
+                structural_color(rev.kind),
+            )
+        });
+        if !shaped {
+            prims.push(Primitive::Text(TextRunPrimitive {
+                text: "¶".to_string(),
+                paint_text: None,
+                x: px(glyph_x),
+                baseline_y: px(line.baseline),
+                width: px(PARAGRAPH_MARK_GLYPH_WIDTH),
+                paint_clip: None,
+                font: resolved_css_font(ctx.shape, "¶", &RunFormattingIn::default()),
+                scripts: None,
+                color: structural_color(rev.kind).to_string(),
+                letter_spacing: None,
+                word_spacing: None,
+                rtl: None,
+                opacity: None,
+                rotation_deg: None,
+                horizontal_scale: None,
+                substitute_scale: text_substitute_scale(
+                    ctx.shape,
+                    "¶",
+                    &RunFormattingIn::default(),
+                    0,
+                    false,
+                ),
+                all_caps: false,
+                small_caps: false,
+                hidden: false,
+                text_shadow: None,
+                text_outline: false,
+                emphasis_mark: None,
+                text_effect: None,
+                attrs: glyph_attrs.clone(),
+            }));
+        }
         if rev.kind == StructuralRevisionKind::Del {
             prims.push(Primitive::Decoration(DecorationPrimitive {
                 deco: DecoKind::Strike,
@@ -7282,6 +7305,79 @@ pub(crate) fn emit_paragraph_fragment(
                 }
             }
         }
+    }
+}
+
+/// Shape the tracked paragraph mark in the default run formatting with the face
+/// the input names under [`PARAGRAPH_MARK_FACE`] alone into a glyph run
+/// `PARAGRAPH_MARK_GLYPH_WIDTH` wide, or return `false`, touching nothing, when
+/// it names none or that face does not draw the pilcrow as one glyph.
+fn emit_paragraph_mark_glyph_run(
+    prims: &mut Vec<Primitive>,
+    shape: &ShapeFonts<'_>,
+    x: f64,
+    baseline: f64,
+    attrs: &DocAttrs,
+    color: &str,
+) -> bool {
+    let Some(font) = shape.paragraph_mark else {
+        return false;
+    };
+    if shape.store.metrics(font).is_err() || shape.store.backstop_style(font).is_some() {
+        return false;
+    }
+    let fmt = RunFormattingIn::default();
+    let size_px = effective_font_px_of(&fmt);
+    let Ok(glyphs) = ooxml_text::shape::shape_with_word_features(
+        shape.store,
+        font,
+        "¶",
+        size_px as f32,
+        &kern_features_of(&fmt, size_px),
+        shape_direction_for_level(0),
+        attrs.lang.as_deref(),
+    ) else {
+        return false;
+    };
+    let Some(glyph) = paragraph_mark_glyph(&glyphs) else {
+        return false;
+    };
+    let advance = f64::from(glyph.x_advance);
+    let placed = vec![PlacedGlyph {
+        id: glyph.glyph_id,
+        x: round3(x + f64::from(glyph.x_offset)),
+        y: round3(baseline - f64::from(glyph.y_offset)),
+        cluster: glyph.cluster,
+        advance: round3(round3(advance) + PARAGRAPH_MARK_GLYPH_WIDTH - advance),
+        logical_order: None,
+        bidi_level: Some(0),
+    }];
+    let mut attrs = attrs.clone();
+    attrs.doc_start = None;
+    attrs.doc_end = None;
+    prims.push(Primitive::GlyphRun(glyph_run_primitive(
+        shape.store,
+        font,
+        size_px,
+        "¶".to_owned(),
+        placed,
+        None,
+        &fmt,
+        color,
+        &None,
+        0,
+        attrs,
+        &None,
+    )));
+    true
+}
+
+/// The one glyph a face shaped the paragraph mark into, when it is one glyph
+/// the face draws.
+fn paragraph_mark_glyph(glyphs: &[ooxml_text::ShapedGlyph]) -> Option<&ooxml_text::ShapedGlyph> {
+    match glyphs {
+        [glyph] if glyph.glyph_id != 0 => Some(glyph),
+        _ => None,
     }
 }
 
@@ -15496,10 +15592,26 @@ mod tests {
             store: &store,
             chains: HashMap::new(),
             coverage_only: false,
+            paragraph_mark: None,
         };
         let fmt = RunFormattingIn::default();
         assert!(painted_text_width(&fonts, first, "\u{2060}", &fmt, 0, false, false).is_none());
         assert!(painted_text_width(&fonts, first, "\u{2060}", &fmt, 0, false, true).is_some());
+    }
+
+    #[test]
+    fn a_paragraph_mark_takes_exactly_one_drawn_glyph() {
+        let glyph = |glyph_id| ooxml_text::ShapedGlyph {
+            glyph_id,
+            cluster: 0,
+            x_advance: 8.0,
+            x_offset: 0.0,
+            y_offset: 0.0,
+        };
+        assert_eq!(paragraph_mark_glyph(&[glyph(116)]), Some(&glyph(116)));
+        assert_eq!(paragraph_mark_glyph(&[]), None);
+        assert_eq!(paragraph_mark_glyph(&[glyph(0)]), None);
+        assert_eq!(paragraph_mark_glyph(&[glyph(116), glyph(117)]), None);
     }
 
     #[test]
@@ -15640,6 +15752,7 @@ mod tests {
                 ),
             )]),
             coverage_only: false,
+            paragraph_mark: None,
         };
         let fmt = RunFormattingIn {
             bold: Some(true),

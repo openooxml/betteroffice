@@ -288,6 +288,10 @@ export class EditSession {
      * the story id already exists.
      */
     create_story(story_id: string, initial_text: string, p_style: string, alignment: string): string;
+    /**
+     * The list definitions the editor created, by key, as JSON.
+     */
+    created_list_definitions_json(): string;
     decode_font(bytes: Uint8Array): Uint8Array;
     /**
      * Deletes every column the [`TableRange`] `range_json` covers, along with
@@ -450,6 +454,11 @@ export class EditSession {
      * Ends a shared-read scope, dropping shared story projections when the last scope ends.
      */
     end_shared_reads(): void;
+    /**
+     * The paragraph attributes, as JSON, that put a paragraph on a list of `kind`, `bullet` or
+     * `numbered`, creating a list definition when no adjacent paragraph's list is of that kind.
+     */
+    ensure_list_definition(story: string, para_id: string, kind: string): string;
     /**
      * [`EditSession::export_structured_json`] rendered as Markdown from the same read:
      * `{"ok":true,"version","content":{"markdown","anchors","diagnostics","truncated"}}`.
@@ -1893,6 +1902,7 @@ export interface InitOutput {
     readonly editsession_compare_docx_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly editsession_content_control_targets_json: (a: number) => [number, number, number, number];
     readonly editsession_create_story: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
+    readonly editsession_created_list_definitions_json: (a: number) => [number, number];
     readonly editsession_decode_font: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_delete_column: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_delete_range: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number) => [number, number, number, number];
@@ -1919,6 +1929,7 @@ export interface InitOutput {
     readonly editsession_encode_sticky_position: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly editsession_encoded_selection: (a: number) => [number, number, number, number];
     readonly editsession_end_shared_reads: (a: number) => void;
+    readonly editsession_ensure_list_definition: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly editsession_export_markdown_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_export_snapshot_with_private_fonts_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly editsession_export_structured_json: (a: number, b: number, c: number) => [number, number, number, number];

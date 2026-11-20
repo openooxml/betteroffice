@@ -7,6 +7,7 @@ import type {
   DocxCompareResult,
 } from '../docx/compare';
 import { writeDocumentWithRust } from '../docx/rustSaveFacade';
+import { checkedProjection } from './commentRangeCheck';
 import { sessionInternals } from './sessionInternals';
 import { type RevisionNumbers, yrsBodyToDocumentWithRevisionIds } from './yrsToDocument';
 
@@ -59,10 +60,8 @@ export async function compareDocxInSession(
     if (!base) throw new Error('the compared session holds no document');
     let saved: Uint8Array;
     try {
-      const projected = yrsBodyToDocumentWithRevisionIds(
-        session,
-        base,
-        new Map(Object.entries(save.revisionIds))
+      const projected = checkedProjection(session, () =>
+        yrsBodyToDocumentWithRevisionIds(session, base, new Map(Object.entries(save.revisionIds)))
       );
       const result = await writeDocumentWithRust(
         projected,

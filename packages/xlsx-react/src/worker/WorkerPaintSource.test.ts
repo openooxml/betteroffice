@@ -627,4 +627,19 @@ describe('WorkerPaintSource', () => {
     expect(paints).toHaveLength(1);
     expect(errors).toHaveLength(1);
   });
+
+  test('asks for another frame while conditional formats are pending', async () => {
+    const { source, requests, paints, callbacks, tick, respond } = harness();
+    source.schedule();
+    tick();
+    const partial = frame(requests[0].request);
+    await respond(0, { ...partial, displayList: { ...partial.displayList, conditionalPending: 3 } });
+    expect(paints).toHaveLength(1);
+    expect(callbacks.size).toBe(1);
+    tick();
+    expect(requests).toHaveLength(2);
+    await respond(1, frame(requests[1].request));
+    expect(paints).toHaveLength(2);
+    expect(callbacks.size).toBe(0);
+  });
 });

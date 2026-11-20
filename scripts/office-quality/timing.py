@@ -1,6 +1,5 @@
 import json
 import os
-import platform
 import re
 from pathlib import Path
 
@@ -11,6 +10,16 @@ from docx_benchmark import CHANNELS, execute, font_environment, sha256, write_js
 ABS_TOLERANCE = 1e-9
 REL_TOLERANCE = 1e-12
 BINARIES = dict(docx='docx-native-bench', pptx='pptx-native-bench', xlsx='xlsx-native-bench')
+IMAGE_VERSION = re.compile(r'[0-9]{8}\.[0-9]{1,5}(\.[0-9]{1,3})?')
+
+
+def runner():
+    value = os.environ.get('ImageVersion')
+    if value is None:
+        return dict(processors=os.cpu_count(), image_version='local')
+    if isinstance(value, str) and IMAGE_VERSION.fullmatch(value):
+        return dict(processors=os.cpu_count(), image_version=value)
+    return dict(processors=os.cpu_count())
 
 
 def verify(sample, root, format):
@@ -58,8 +67,7 @@ def main():
                                  published_version=job['published_version'], libreoffice_version=version,
                                  libreoffice_build=version_text.strip(), fonts_sha256=fonts_hash, builds=builds,
                                  order='sequential; engine order rotates per document and round; one warm-up per round'),
-                  runner=dict(name=os.environ.get('RUNNER_NAME', platform.node()), platform=platform.platform(),
-                              processors=os.cpu_count(), image_version=os.environ.get('ImageVersion', 'local')))
+                  runner=runner())
     for turn in range(job['rounds']):
         for index, (sample, row) in enumerate(zip(samples, rows)):
             print(f"{format.upper()} timing round {turn + 1}/{job['rounds']}: {index + 1}/{len(samples)} {sample['id']}", flush=True)

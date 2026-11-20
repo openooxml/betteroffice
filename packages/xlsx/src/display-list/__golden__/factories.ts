@@ -6,7 +6,7 @@
  * goldens exercise the real code paths (visible-range math, clip/align on text).
  */
 
-import type { DisplayList, DrawCmd, Rect, TextAlign } from '../types';
+import type { DisplayList, DrawCmd, Rect, TextAlign, TextRun, TextWrap } from '../types';
 import type { TrackOffsets, ViewportState } from '../../viewport/index';
 import { uniformOffsets } from '../../viewport/index';
 
@@ -43,6 +43,8 @@ export function text(
     underline?: boolean;
     strike?: boolean;
     fontFamily?: string;
+    wrap?: TextWrap;
+    runs?: TextRun[];
   } = {}
 ): DrawCmd {
   return {
@@ -59,6 +61,8 @@ export function text(
     underline: opts.underline,
     strike: opts.strike,
     fontFamily: opts.fontFamily,
+    wrap: opts.wrap,
+    runs: opts.runs,
   };
 }
 

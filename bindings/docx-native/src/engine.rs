@@ -3007,6 +3007,26 @@ impl EditSession {
             .map_err(|error| map_error(env, error))
     }
 
+    #[napi(catch_unwind, js_name = "ensure_list_definition")]
+    pub fn ensure_list_definition(
+        &self,
+        env: Env,
+        story: String,
+        para_id: String,
+        kind: String,
+    ) -> Result<String> {
+        let _call = EngineCall::new(env);
+        self.document(env)?
+            .ensure_list_definition(&story, &para_id, &kind)
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi(catch_unwind, js_name = "created_list_definitions_json")]
+    pub fn created_list_definitions_json(&self, env: Env) -> Result<String> {
+        let _call = EngineCall::new(env);
+        Ok(self.document(env)?.created_list_definitions_json())
+    }
+
     #[napi(catch_unwind, js_name = "set_document_property")]
     pub fn set_document_property(&self, env: Env, key: String, json: String) -> Result<bool> {
         let _call = EngineCall::new(env);

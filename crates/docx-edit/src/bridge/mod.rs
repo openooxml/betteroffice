@@ -53,6 +53,7 @@ use yrs::types::text::YChange;
 use yrs::{Any, Map, MapRef, OffsetKind, Out, ReadTxn, Text, Transact};
 
 use super::{COMMENTS, DEL, EditError, EditingDoc, INS, decode_anchor, is_pilcrow, story_ref};
+use crate::list_definitions::{effective_list_state, resolve_list_identity, written_numbering};
 use crate::list_marker::{ListState, compute_list_marker};
 use crate::seed::synthesized_cell_width;
 use crate::sticky_positions::sticky_offset;
@@ -519,10 +520,9 @@ fn yrs_doc_to_mapped_layout_blocks_inner(
             .run_revision_stories()
             .any(|story| story == "body" || story.starts_with("body:"))
     }));
-    let numbering = source.as_ref().map(|source| source.numbering());
-    let mut list_state = ListState::new(numbering);
-    local.block(story_id == "body" && list_state.first_picture_bullet().is_some());
     let txn = doc.yrs_doc().transact();
+    let mut list_state = effective_list_state(source.as_deref(), &txn);
+    local.block(story_id == "body" && list_state.first_picture_bullet().is_some());
     local.block(
         txn.get_map(COMMENTS)
             .is_some_and(|comments| comments.len(&txn) != 0),
@@ -2013,30 +2013,24 @@ fn field_code_join<T: ReadTxn>(
     txn: &T,
 ) -> Option<(Vec<FieldCodeParagraph>, String)> {
     let target = shared_map_string(field, txn, "fieldCodeTarget")?;
-    let data = shared_map_string(field, txn, "fieldData")
-        .and_then(|data| serde_json::from_str::<Value>(&data).ok());
-    let code = data
-        .as_ref()
-        .and_then(|data| data.get("structuredCode"))
-        .and_then(|code| code.get("blocks"))
-        .and_then(Value::as_array);
+    let fields: Vec<Vec<CodeField>> = match shared_any(field, txn, "fieldCodeFields") {
+        Some(Any::Array(paragraphs)) => paragraphs
+            .iter()
+            .map(|fields| match fields {
+                Any::Array(fields) => fields.iter().filter_map(any_code_field).collect(),
+                _ => Vec::new(),
+            })
+            .collect(),
+        _ => copied_code_fields(field, txn),
+    };
+    let mut fields = fields.into_iter();
     let hidden = match shared_any(field, txn, "fieldCodeMarks") {
         Some(Any::Array(ids)) => ids
             .iter()
             .filter_map(any_str)
-            .enumerate()
-            .map(|(index, id)| {
-                let mut fields = Vec::new();
-                if let Some(content) = code
-                    .and_then(|blocks| blocks.get(index))
-                    .and_then(|block| block.get("content"))
-                {
-                    nested_code_fields(content, &mut fields);
-                }
-                FieldCodeParagraph {
-                    id: id.to_owned(),
-                    fields,
-                }
+            .map(|id| FieldCodeParagraph {
+                id: id.to_owned(),
+                fields: fields.next().unwrap_or_default(),
             })
             .collect(),
         _ => Vec::new(),
@@ -2044,16 +2038,63 @@ fn field_code_join<T: ReadTxn>(
     Some((hidden, target))
 }
 
-fn nested_code_fields(value: &Value, fields: &mut Vec<Value>) {
+/// The fields of each hidden code paragraph, read from the copies of those paragraphs a field's
+/// data holds when its code paragraphs were bound without their fields.
+fn copied_code_fields<T: ReadTxn>(field: &MapRef, txn: &T) -> Vec<Vec<CodeField>> {
+    let data = shared_map_string(field, txn, "fieldData")
+        .and_then(|data| serde_json::from_str::<Value>(&data).ok());
+    let copies = data
+        .as_ref()
+        .and_then(|data| data.get("structuredCode"))
+        .and_then(|code| code.get("blocks"))
+        .and_then(Value::as_array);
+    copies
+        .into_iter()
+        .flatten()
+        .map(|block| {
+            let mut fields = Vec::new();
+            if let Some(content) = block.get("content") {
+                nested_code_fields(content, &mut fields);
+            }
+            fields
+        })
+        .collect()
+}
+
+/// A field's kind and instruction, as the seeds record each field of a hidden code paragraph.
+pub(crate) type CodeField = (String, String);
+
+/// The kind and instruction of a field value, or `None` for anything else.
+fn code_field(value: &Value) -> Option<CodeField> {
+    let kind = value
+        .get("type")
+        .and_then(Value::as_str)
+        .filter(|kind| matches!(*kind, "simpleField" | "complexField"))?;
+    let instruction = value.get("instruction").and_then(Value::as_str);
+    Some((kind.to_owned(), instruction.unwrap_or_default().to_owned()))
+}
+
+/// A field's kind and instruction as `fieldCodeFields` stores them.
+fn any_code_field(value: &Any) -> Option<CodeField> {
     match value {
-        Value::Object(object)
-            if matches!(
-                object.get("type").and_then(Value::as_str),
-                Some("simpleField" | "complexField")
-            ) =>
-        {
-            fields.push(value.clone());
-        }
+        Any::Array(parts) => match &parts[..] {
+            [kind, instruction] => {
+                Some((any_str(kind)?.to_owned(), any_str(instruction)?.to_owned()))
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The kind and instruction of each field a code paragraph's content holds, outermost first,
+/// in order.
+pub(crate) fn nested_code_fields(value: &Value, fields: &mut Vec<CodeField>) {
+    if let Some(field) = code_field(value) {
+        fields.push(field);
+        return;
+    }
+    match value {
         Value::Object(object) => {
             if let Some(content) = object
                 .get("structuredChildren")
@@ -2078,12 +2119,14 @@ fn joins_field_code_paragraphs(story_id: &str) -> bool {
     story_id.starts_with("hf:")
 }
 
+/// A hidden code paragraph and the fields it held when the field was bound.
 struct FieldCodeParagraph {
     id: String,
-    fields: Vec<Value>,
+    fields: Vec<CodeField>,
 }
 
 impl FieldCodeParagraph {
+    /// Whether the paragraph shows nothing but the fields it held when the field was bound.
     fn allows(&self, runs: &[RawRun], env: &RenderEnv) -> bool {
         let mut fields = self.fields.iter();
         runs.iter()
@@ -2094,6 +2137,7 @@ impl FieldCodeParagraph {
                     ..
                 } => serde_json::from_str::<Value>(source)
                     .ok()
+                    .and_then(|source| code_field(&source))
                     .is_some_and(|source| fields.any(|field| *field == source)),
                 _ => false,
             })
@@ -5602,18 +5646,13 @@ fn lower_paragraph_attrs(
         .get("shading")
         .and_then(|shading| resolve_paragraph_shading(shading, env));
 
-    if let Some(Any::Map(num_pr)) = values.get("numPr") {
-        result.num_pr = Some(ListNumPr {
-            num_id: map_number(num_pr, "numId"),
-            ilvl: map_number(num_pr, "ilvl"),
-        });
-    }
+    result.num_pr = written_numbering(values).map(|(num_id, ilvl)| ListNumPr { num_id, ilvl });
     result.list_marker = compute_list_marker(values, list_state);
     result.list_is_bullet = values.get("listIsBullet").and_then(any_bool);
     result.list_marker_hidden = true_property(values, "listMarkerHidden");
     result.list_marker_font_family = value_string(values.get("listMarkerFontFamily"));
     if let Some(fonts) = result.num_pr.as_ref().and_then(|properties| {
-        list_state.marker_fonts(properties.num_id?, properties.ilvl.unwrap_or(0.0))
+        list_state.marker_fonts(values, properties.num_id?, properties.ilvl.unwrap_or(0.0))
     }) && result
         .list_marker_font_family
         .as_deref()
@@ -5924,15 +5963,11 @@ fn lower_paragraph_indent(values: &BTreeMap<String, Any>, result: &mut Paragraph
         .or_else(|| indent_map.and_then(|map| map_bool(map, "hanging")))
         .unwrap_or(false);
 
-    if let Some(Any::Map(num_pr)) = values.get("numPr") {
-        let num_id = map_number(num_pr, "numId").unwrap_or(0.0);
-        if num_id != 0.0 && left.is_none() {
-            let level = map_number(num_pr, "ilvl").unwrap_or(0.0);
-            left = Some((level + 1.0) * 720.0);
-            if first_line.is_none() {
-                first_line = Some(-360.0);
-                hanging = true;
-            }
+    if let (Some(list), None) = (resolve_list_identity(values), left) {
+        left = Some((list.level() + 1.0) * 720.0);
+        if first_line.is_none() {
+            first_line = Some(-360.0);
+            hanging = true;
         }
     }
 

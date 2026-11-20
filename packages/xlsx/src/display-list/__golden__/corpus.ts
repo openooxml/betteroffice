@@ -170,6 +170,40 @@ function styledCellsFillFontBorder(): GoldenScenario {
   };
 }
 
+function richTextRuns(): GoldenScenario {
+  return {
+    name: 'rich-text-runs',
+    pins: 'text runs serialize in UTF-16 offsets with only the properties they set, on single-line and wrapped text',
+    build() {
+      const viewport = makeViewport({ width: 2 * COL_W, height: 2 * ROW_H });
+      const { colOffsets, rowOffsets } = makeUniformGridOffsets(2, 2, COL_W, ROW_H);
+      const displayList: DisplayList = {
+        width: 2 * COL_W,
+        height: 2 * ROW_H,
+        commands: [
+          text(2, 14, 'Ab 中😀z', {
+            clip: { x: 0, y: 0, w: 2 * COL_W, h: ROW_H },
+            align: 'left',
+            fontFamily: 'Calibri',
+            runs: [
+              { start: 0, end: 2, fontFamily: 'Cambria', fontSize: 14, bold: true, italic: true },
+              { start: 3, end: 4, underline: true, underlineStyle: 'double', strike: true, color: '#ff0000' },
+              { start: 4, end: 6, baseline: 'superscript' },
+            ],
+          }),
+          text(2, 34, 'wrapped rich', {
+            clip: { x: 0, y: ROW_H, w: COL_W, h: ROW_H },
+            align: 'left',
+            wrap: { width: 76, lineHeight: 18, valign: 'top' },
+            runs: [{ start: 8, end: 12, fontSize: 20, color: '#0000ff' }],
+          }),
+        ],
+      };
+      return { displayList, viewport, visible: visibleCells(viewport, colOffsets, rowOffsets) };
+    },
+  };
+}
+
 /**
  * The full corpus. Order is stable so the suite runs deterministically.
  */
@@ -179,4 +213,5 @@ export const corpus: GoldenScenario[] = [
   frozenHeaderRowAndCol(),
   clippedAlignedCellText(),
   styledCellsFillFontBorder(),
+  richTextRuns(),
 ];

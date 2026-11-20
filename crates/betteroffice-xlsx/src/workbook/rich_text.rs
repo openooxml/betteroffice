@@ -1,11 +1,77 @@
 use std::cell::OnceCell;
 use std::collections::HashSet;
+use std::sync::Arc;
 
+use xlsx_model::styles::DifferentialFormat;
 use xlsx_model::{CellRef, CellValue, RichRun, SheetId};
+use xlsx_render::{CellFormats, CellTextRuns};
 
 use super::Workbook;
 
+#[cfg(test)]
+thread_local! {
+    static TEXT_RUN_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl Workbook {
+    /// Whether [`Self::painted_text_runs`] can find runs in any cell: the
+    /// session keeps source runs and the parsed source holds a string with
+    /// runs. A display list built without it takes no runs lookup at all.
+    pub(crate) fn paints_text_runs(&self) -> bool {
+        !self.is_collaborative()
+            && self.invalidated_text_sources.is_some()
+            && self
+                .source_package
+                .as_ref()
+                .and_then(|source| source.materialized())
+                .is_some_and(|package| package.holds_text_runs())
+    }
+
+    /// `lookup` as a display list build's runs lookup, or none when
+    /// [`Self::paints_text_runs`] says no cell has runs.
+    pub(crate) fn text_runs_lookup<'l, 'r>(
+        &self,
+        lookup: &'l CellTextRuns<'r>,
+    ) -> Option<&'l CellTextRuns<'r>> {
+        self.paints_text_runs().then_some(lookup)
+    }
+
+    /// [`Self::cell_text_runs`] for painting: `None` while a deferred source
+    /// package is unparsed, so building a display list never parses it.
+    pub(crate) fn painted_text_runs(&self, sheet: SheetId, cell: CellRef) -> Option<&[RichRun]> {
+        #[cfg(test)]
+        TEXT_RUN_LOOKUPS.set(TEXT_RUN_LOOKUPS.get() + 1);
+        self.source_package.as_ref()?.materialized()?;
+        self.cell_text_runs(sheet, cell)
+    }
+
+    /// Leaves each cell of `formats` that has rich text runs only the fill of
+    /// its conditional format, and returns how many lost a font color, bold or
+    /// italic. How those combine with the runs' own is not settled, so such a
+    /// cell keeps the font it is painted with.
+    pub(crate) fn keep_rich_text_fonts(&self, sheet: SheetId, formats: &mut CellFormats) -> u32 {
+        if !self.paints_text_runs() {
+            return 0;
+        }
+        let mut kept = 0;
+        for (&(row, col), format) in formats.iter_mut() {
+            let sets_font =
+                format.font_color.is_some() || format.bold.is_some() || format.italic.is_some();
+            if sets_font
+                && self
+                    .painted_text_runs(sheet, CellRef::new(row, col))
+                    .is_some_and(|runs| !runs.is_empty())
+            {
+                *format = Arc::new(DifferentialFormat {
+                    fill: format.fill.clone(),
+                    ..DifferentialFormat::default()
+                });
+                kept += 1;
+            }
+        }
+        kept
+    }
+
     /// Source runs in UTF-8 bytes; unavailable after content writes, including undo.
     /// No-op inputs retain runs. Collaborative and recovered sessions return `None`.
     pub fn cell_text_runs(&self, sheet: SheetId, cell: CellRef) -> Option<&[RichRun]> {
@@ -137,6 +203,79 @@ impl Workbook {
             source_sheet,
             CellRef::new(axes.rows.source(cell.row)?, axes.cols.source(cell.col)?),
         ))
+    }
+}
+
+#[cfg(test)]
+mod paint_tests {
+    use super::{TEXT_RUN_LOOKUPS, Workbook};
+    use crate::workbook::edit_tests::workbook_bytes;
+    use crate::{CellRange, PrintMetrics, RenderOptions, SheetId, Viewport};
+
+    /// The test workbook with every shared string plain.
+    fn plain_bytes() -> Vec<u8> {
+        let mut parts = ooxml_opc::unzip_parts(&workbook_bytes()).unwrap();
+        let (_, strings) = parts
+            .iter_mut()
+            .find(|(path, _)| path == "xl/sharedStrings.xml")
+            .unwrap();
+        *strings = r#"<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="3" uniqueCount="3"><si><t>Alpha</t></si><si><t>Alpha rich</t></si><si><t>Beta</t></si></sst>"#.as_bytes().to_vec();
+        ooxml_opc::rezip_parts(&parts).unwrap()
+    }
+
+    fn lookups(build: impl FnOnce()) -> usize {
+        let before = TEXT_RUN_LOOKUPS.get();
+        build();
+        TEXT_RUN_LOOKUPS.get() - before
+    }
+
+    /// The runs lookups a screen frame, a PNG display list and a printed page
+    /// of the first sheet make.
+    fn frame_lookups(bytes: &[u8]) -> [usize; 3] {
+        let workbook = Workbook::open(bytes).unwrap();
+        let viewport = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 400.0,
+            height: 200.0,
+        };
+        let range = CellRange::parse_a1("A1:D5").unwrap();
+        let options = RenderOptions {
+            range: Some(range),
+            ..RenderOptions::default()
+        };
+        let metrics = PrintMetrics {
+            dpi: 96.0,
+            max_digit_width: 7.0,
+            default_row_height_pt: 15.0,
+            default_column_width: None,
+            font_size_pt: 11.0,
+            font_family: "Calibri".into(),
+            font_ascent: 10.0,
+            font_descent: 3.0,
+        };
+        [
+            lookups(|| {
+                workbook.display_list_for(SheetId(0), &viewport).unwrap();
+            }),
+            lookups(|| {
+                workbook
+                    .range_png_display_list_for(SheetId(0), &options)
+                    .unwrap();
+            }),
+            lookups(|| {
+                workbook
+                    .print_display_list(SheetId(0), range, &metrics, false)
+                    .unwrap();
+            }),
+        ]
+    }
+
+    #[test]
+    fn frames_of_a_workbook_without_rich_text_never_look_up_runs() {
+        assert_eq!(frame_lookups(&plain_bytes()), [0, 0, 0]);
+        let rich = frame_lookups(&workbook_bytes());
+        assert!(rich.iter().all(|&count| count > 0), "{rich:?}");
     }
 }
 
