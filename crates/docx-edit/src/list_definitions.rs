@@ -474,9 +474,9 @@ impl EditingDoc {
 
     /// The attributes that put paragraph `para_id` of `story` on a list of `kind`: the list it is
     /// on when that is of that kind, else the list of the paragraph directly above, else below,
-    /// when it is of that kind and does not come from that paragraph's style, otherwise a created
-    /// definition of that kind no paragraph names, or failing that a definition created under a
-    /// fresh key in [`LIST_DEFINITIONS`]. A paragraph already on a list
+    /// when it is of that kind and does not come from that paragraph's style, otherwise a
+    /// definition of that kind this client created that no paragraph names, or failing that a
+    /// definition created under a fresh key in [`LIST_DEFINITIONS`]. A paragraph already on a list
     /// keeps its own level, and joins a neighbour's list only when that list has that level in
     /// that kind; one on no list takes the level of the paragraph it joins, or level 0 on a new
     /// list.
@@ -540,11 +540,17 @@ impl EditingDoc {
                     .filter(|values| !numbered_by_style(values))
                     .find_map(|values| join(&values))
             });
-            let spare = if joined.is_none() {
+            let own_keys = format!("{}:", self.client_id());
+            let mut spares = definitions
+                .values()
+                .filter(|definition| {
+                    definition.kind == kind && definition.key.starts_with(own_keys.as_str())
+                })
+                .peekable();
+            let spare = if joined.is_none() && spares.peek().is_some() {
                 let named = named_list_keys(&txn);
-                definitions
-                    .values()
-                    .find(|definition| definition.kind == kind && !named.contains(&definition.key))
+                spares
+                    .find(|definition| !named.contains(&definition.key))
                     .map(|definition| definition.key.clone())
             } else {
                 None
