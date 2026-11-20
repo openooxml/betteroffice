@@ -721,7 +721,7 @@ test('a frame-time update between two commands is in the log', async () => {
     await act(async () => { await session.client().applyRemoteUpdate(update); });
   } finally { remote.destroy(); }
   expect(session.text()).toContain('M');
-  expect(await session.submit('insertText', atParagraphStart('Z'))).toBe('applied');
+  expect(await session.submit('insertText', { text: 'Z' })).toBe('applied');
   const expected = session.text();
   const version = session.version();
   for (const letter of ['A', 'M', 'Z']) expect(expected).toContain(letter);
@@ -953,7 +953,7 @@ test('with collaboration the logged entries keep their original commands', async
   await session.ready();
   await session.typeUntilApplied(128);
   await session.checkpointTaken(1);
-  expect(await session.submit('insertText', atParagraphStart('Z'))).toBe('applied');
+  expect(await session.submit('insertText', { text: 'Z' })).toBe('applied');
   const expected = session.text();
   await session.crash();
   expect(session.resumes[0]!.seed).toBeUndefined();
