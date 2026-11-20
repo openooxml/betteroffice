@@ -5974,10 +5974,13 @@ fn lower_paragraph_indent(
     if let Some(list) = resolve_list_identity(values) {
         let original = values.get("_originalFormatting").and_then(any_map);
         let in_characters = |key: &str| {
-            [values.get(key), original.and_then(|original| original.get(key))]
-                .into_iter()
-                .flatten()
-                .any(|value| !matches!(value, Any::Null))
+            [
+                values.get(key),
+                original.and_then(|original| original.get(key)),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|value| !matches!(value, Any::Null))
         };
         let (level_left, level_first) = list_state.level_indent(values);
         let level_left = level_left.filter(|_| !in_characters("indentLeftChars"));
