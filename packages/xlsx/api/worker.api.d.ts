@@ -2450,6 +2450,13 @@ export type CommandOutcome = {
     reason?: string;
     committed?: false;
     affectedSeqs?: number[];
+    /** @internal The command that reproduces an applied command's effect when recovery replays it. */
+    effect?: CommandEffect;
+};
+/** @internal Replacement command a recovery replay sends in place of the applied command it stands for. */
+export type CommandEffect = {
+    kind: string;
+    payload: unknown;
 };
 /** @internal Full or incremental frame identified by command coverage and revision. */
 export type FrameEnvelope<F> = {
@@ -2474,6 +2481,14 @@ export type CommandAck<S, E, F> = {
         selection: number;
         layout: number;
     };
+    /** @internal How an initial acknowledgement's document was seeded, so recovery can seed it again with the same ids. */
+    seed?: CommandSeed;
+};
+/** @internal The ids a seed wrote under and the state vector it produced. */
+export type CommandSeed = {
+    clientId: number;
+    generation: string;
+    stateVector: Uint8Array;
 };
 /** @internal Snapshot captured at a settled command boundary. */
 export type Checkpoint = {
@@ -2589,6 +2604,7 @@ export type ApplyResult<S, E> = {
     committed?: false;
     selection?: S;
     editState?: E;
+    effect?: CommandEffect;
 } | {
     status: 'noop';
     selection?: S;
@@ -2722,6 +2738,8 @@ export type RecoveryHooks<O, P, S, E, F> = {
     reopen(input: {
         source: O;
         checkpoint?: Checkpoint;
+        /** Without a checkpoint, the ids the opened document was seeded under, to seed the source with again. */
+        seed?: Pick<CommandSeed, 'clientId' | 'generation'>;
         session: string;
         incarnation: number;
         epoch: number;

@@ -263,6 +263,11 @@ export interface DocxCommandPayloads {
     applyRemoteUpdateChunks: {
         updates: ArrayBuffer[];
     };
+    /** @internal What an applied command did, replayed by recovery only: its update and the command-local state it changed. */
+    applyUpdate: {
+        update: ArrayBuffer;
+        state?: DocxCommandEffectState;
+    };
     /** Transport events and calls for a collaboration provider this worker runs; frames stay undecoded until here. */
     collabPipe: PipeCommandPayload;
     applyEdits: {
@@ -577,6 +582,8 @@ export interface DocxCommandRecoveryState {
         set?: DocxFrameReservations;
     };
 }
+/** @internal Command-local state outside the document; `stickyPositions` lists only positions issued since the previous effect. */
+export type DocxCommandEffectState = Partial<Omit<DocxCommandRecoveryState, 'selections'>>;
 /** @internal */
 export interface DocxCommandCheckpoint extends Checkpoint {
     recoveryState?: DocxCommandRecoveryState;
@@ -655,6 +662,11 @@ export interface DocxCommandHooks {
     }): DocxCommandFrame | TransferResult<DocxCommandFrame> | Promise<DocxCommandFrame | TransferResult<DocxCommandFrame>>;
     snapshot(): Uint8Array | Promise<Uint8Array>;
     recoveryState?(): Omit<DocxCommandRecoveryState, 'selections'>;
+    commandState?(): Omit<DocxCommandRecoveryState, 'selections' | 'stickyPositions'>;
+    issuedPositions?(from: number): {
+        count: number;
+        entries: [string, YrsStickyPosition][];
+    };
 }
 /** @internal Worker-owned layout access for ordered selection resolution. */
 export interface DocxCommandHooksEnvironment {
@@ -674,8 +686,10 @@ export interface DocxCommandHooksEnvironment {
         showTableGridlines?: boolean;
         reservations?: DocxResolvedReservations;
     }, set?: DocxFrameReservations | null): void;
+    /** Restores the worker-owned part of a replayed effect's state: comments and layout reservations. */
+    restoreCommandState?(state: DocxCommandEffectState): void;
 }
-export type DocxCommandHooksFactory = (engine: ResidentEngineSession, init: DocxCommandInitRequest, environment?: DocxCommandHooksEnvironment) => Pick<DocxCommandHooks, 'preflight' | 'apply' | 'selection' | 'editState' | 'recoveryState'> & {
+export type DocxCommandHooksFactory = (engine: ResidentEngineSession, init: DocxCommandInitRequest, environment?: DocxCommandHooksEnvironment) => Pick<DocxCommandHooks, 'preflight' | 'apply' | 'selection' | 'editState' | 'recoveryState' | 'commandState' | 'issuedPositions'> & {
     /** Runs after the collaboration wrap applies a remote merge at `context.currentVersion`. */
     afterRemoteMerge?(context: DocxCommandApplyContext): {
         cause: 'remote';
@@ -693,6 +707,11 @@ export interface DocxCommandHostOptions {
     selectionAck?: {
         echoContext(): DocxCommandEchoContext | undefined;
         deferFrame(ack: DocxCommandAck): void;
+    };
+    /** Document reads that capture each applied command's update for recovery to replay. */
+    effects?: {
+        stateVector(): Uint8Array;
+        updateSince(stateVector: Uint8Array): Uint8Array;
     };
 }
 export interface DocxCommandHost extends CommandHost<DocxCommandPayload, DocxCommandSelection | null, DocxEditState, DocxCommandFramePayload> {
