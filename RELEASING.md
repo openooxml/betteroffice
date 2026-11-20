@@ -113,8 +113,8 @@ workflow for formats whose root version is missing and waits for every run.
 
 Trusted Publishing cannot create a package: each of these names has to be on npm
 before the release that publishes it. Unless `RELEASE_SKIP_NATIVE` is `true`,
-`scripts/check-publish-targets.mjs --npm` fails the release before anything is
-published while one of them is not on npm.
+read ignoring case as the workflow reads it, `scripts/check-publish-targets.mjs --npm`
+fails the release before anything is published while one of them is not on npm.
 
 ### A new format
 
@@ -135,6 +135,10 @@ Publish all nine names of the format by hand first:
 6. Configure all nine names' Trusted Publisher: owner `openooxml`, repository
    `betteroffice`, workflow `publish-native.yml`, environment `npm-<format>`.
    Restrict each `npm-<format>` environment to the main branch.
+   Allow a direct `npm publish` in each: a configuration created after
+   2026-09-03 allows only `npm stage publish` unless that is chosen.
+   Create it no earlier than two days before the release: npm lets a new
+   configuration expire unless it publishes successfully within two days.
 
 ### A new platform for existing roots
 
@@ -152,11 +156,15 @@ first publishes it; that release publishes the real version.
 
 Not verified:
 
-- That `--provenance=false` overrides a `publishConfig` that asks for provenance.
+- That `--provenance=false` on the command line wins over a `publishConfig` that
+  asks for provenance. npm documents `provenance=false` in `publishConfig`, in
+  `.npmrc` and as `NPM_CONFIG_PROVENANCE=false`.
 - What the native publish does when a platform version is already on npm, whether
   it pins the roots' optional dependencies exactly, and under which tag it publishes.
-- That `latest` moves from `0.0.0` to the released version. The two font names
-  reserved this way show only that a first publish at `0.0.0` leaves `latest` there.
+- That the release's publish through Trusted Publishing goes through over a
+  placeholder, and that `latest` then moves from `0.0.0` to the released version.
+  The two font names reserved this way show only that a first publish at `0.0.0`
+  leaves `latest` there.
 - That every name the release publishes has its Trusted Publisher configured.
 
 ## Python bindings
