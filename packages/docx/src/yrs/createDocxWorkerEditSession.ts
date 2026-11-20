@@ -24,6 +24,7 @@ export function createDocxWorkerEditSession<O, X = never>(
       command.kind === 'applyRemoteUpdate' || command.kind === 'applyRemoteUpdateChunks' || command.kind === 'collabPipe' ||
       command.kind === 'applyUpdate'
         ? command : cloneData(command),
+    replayable: command => command.kind !== 'undo' && command.kind !== 'redo',
     discardFrame: discardCommandPresentation,
     sameCoverageFrames: true,
     transactionalPresentation: true,

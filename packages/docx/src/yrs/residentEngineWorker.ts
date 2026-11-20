@@ -642,10 +642,7 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
   const host = createResidentCommandHost({
     init,
     registry: { handlers: {}, policies: {} },
-    effects: {
-      stateVector: () => engine.encodeStateVector(),
-      updateSince: (stateVector) => engine.encodeStateAsUpdate(stateVector),
-    },
+    recordUpdates: openedSeed !== null && !collaboration,
     selectionAck: {
       echoContext() {
         if (layoutDirty || !retainedFrame || retainedFrame.frameEpoch !== revision ||
@@ -763,7 +760,8 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
           forgetRequirementsCache();
         }
         const result = await hooks.apply(command, context);
-        if (result.status === 'applied' || (result.status === 'noop' && ['setRenderEnvironment', 'setFontEnvironment'].includes(command.command.kind))) {
+        if (result.status === 'applied' || command.command.kind === 'applyUpdate' ||
+          (result.status === 'noop' && ['setRenderEnvironment', 'setFontEnvironment'].includes(command.command.kind))) {
           try { relayout(); } catch (error) {
             if (isEngineTrap(error)) throw error;
             throw projectionFailure = new SessionFailure('message', `Projection failed after ${command.command.kind}: ${error instanceof Error ? error.message : String(error)}`);
@@ -1167,6 +1165,7 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
       snapshot: () => engine.encodeState(),
     },
   });
+  const stopRecording = openedSeed !== null && !collaboration ? engine.onUpdate((update) => host.recordUpdate(update)) : undefined;
   commandInit = init;
   commandQueries = (frame) => residentDisplayListQueries(engine, frame.displayList);
   commandShownText = () => {
@@ -1175,6 +1174,7 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
     return { showHiddenText: renderEnv.showHiddenText, revisionPreview: proposalRevisionPreview(registry.snapshot()) };
   };
   releaseCommandHost = () => {
+    stopRecording?.();
     commandQueries = null;
     commandShownText = null;
     selectionQueries?.queries.dispose();
@@ -1283,8 +1283,17 @@ function postCommandFrame(
       ...answer, id, ok: true, ...frame.payload, selection: session?.selection() ?? null,
       ...(frame.payload.pageFrames ? { pageFrames: [...frame.payload.pageFrames, frame.payload.frame] } : {}),
       commandFrame: { session: init.session, incarnation: init.incarnation, epoch: init.epoch, frame },
+      ...commandStreamAnswer(host, init),
     }, [...transfer, ...(isTransferResult(result) ? result.transfer : [])]);
   }).catch((error: unknown) => commandFrameFailed(id, host, error));
+}
+
+/** The stream entries `host` has not reported yet, as a reply carries them. */
+function commandStreamAnswer(host: DocxCommandHost | null, init: DocxCommandInitRequest | null): Pick<
+  DocxEngineWorkerResponse & { ok: true }, 'commandStream'
+> {
+  const entries = host && init ? host.takeStream() : undefined;
+  return entries ? { commandStream: { session: init!.session, incarnation: init!.incarnation, epoch: init!.epoch, entries } } : {};
 }
 
 /** Answers `id` with the ack in `result` and the next command frame on it, in one message. */
@@ -1410,8 +1419,8 @@ let previewing = false;
 let cutPartial = false;
 /** The request that opened the current cut, re-opened when the whole source that replaces it fails. */
 let openedCut: DocxSourceOpenRequest | null = null;
-/** The ids the opened source was seeded under, which a command session reports so recovery can seed it again. */
-let openedSeed: { clientId: number; generation: string } | null = null;
+/** The ids the opened source was seeded under and its digest, which a command session reports so recovery can seed it again. */
+let openedSeed: { clientId: number; generation: string; digest: string } | null = null;
 /** Pages of a cut preview's layout that match the whole document's; null for a whole document. */
 let previewFinalPages: number | null = null;
 let provisionalFinalPages: number | null = null;
@@ -1692,7 +1701,9 @@ async function runRequest(request: ScheduledRequest): Promise<void> {
       request.type !== 'commandInit' && request.type !== 'requestFullFrame' &&
       request.type !== 'commandUpdate' && request.type !== 'buildPages' && request.type !== 'commandViewport' &&
       request.type !== 'decodeFontFace') {
-      await commandHost.withFrameWork(() => handle(request));
+      const host = commandHost;
+      if (request.type === 'save') await host.withCommandWork('save', () => host.withFrameWork(() => handle(request)));
+      else await host.withFrameWork(() => handle(request));
     } else await handle(request);
     primeSaveSeedStatesOnce();
   } catch (error) {
@@ -1922,6 +1933,7 @@ async function handle(request: ScheduledRequest): Promise<void> {
     validateResidentSource(request.source);
     const seeding = !request.source.cut && request.source.state === undefined && !request.source.collaboration;
     const generation = seeding ? request.source.generation ?? freshGeneration() : undefined;
+    const digest = seeding ? await sourceDigest(request.source) : undefined;
     const source = generation === undefined ? request.source : { ...request.source, generation };
     if (session && (!previewing || commandHost || source.cut)) throw new Error('Document worker already holds a document');
     const replaced = previewing ? openedCut : null;
@@ -1945,7 +1957,7 @@ async function handle(request: ScheduledRequest): Promise<void> {
         return;
       }
       const { document, hostJson } = opened;
-      openedSeed = generation === undefined ? null : { clientId: opening.clientId, generation };
+      openedSeed = generation === undefined || digest === undefined ? null : { clientId: opening.clientId, generation, digest };
       const embeddedFontFaces = opened.embeddedFontFaces ?? await extractEmbeddedFontFaces(document);
       if (source.collaboration) collaboration = createResidentCollaboration(opening, { onPipeOutput: schedulePipeOutput });
       const metadata = residentSourceMetadata(document);
@@ -2198,7 +2210,7 @@ async function handle(request: ScheduledRequest): Promise<void> {
         completedLayout = null;
         commandFrameChanges!.layoutStale = true;
         postCommandFrame(request.id, answer, [bytes, ...updates, stateVector]);
-      } else reply({ id: request.id, ok: true, ...answer }, [bytes, ...updates, stateVector]);
+      } else reply({ id: request.id, ok: true, ...answer, ...commandStreamAnswer(commandHost, commandInit) }, [bytes, ...updates, stateVector]);
     } finally {
       pendingUpdates = held;
     }
@@ -4122,6 +4134,32 @@ function exactBuffer(bytes: Uint8Array): ArrayBuffer {
 
 function freshGeneration(): string {
   return Array.from(crypto.getRandomValues(new Uint32Array(4)), (word) => word.toString(16).padStart(8, '0')).join('');
+}
+
+/** SHA-256 of the source a seed reads: its bytes, or a parsed document's JSON followed by its binary values. */
+async function sourceDigest(source: DocxSourceOpenRequest): Promise<string> {
+  const parts: Uint8Array[] = [];
+  if (source.bytes) parts.push(source.bytes);
+  else {
+    const binaries: Uint8Array[] = [];
+    const text = JSON.stringify(source.document, (_key, value: unknown) => {
+      const view = value instanceof ArrayBuffer ? new Uint8Array(value) : value;
+      if (ArrayBuffer.isView(view)) {
+        binaries.push(new Uint8Array(view.buffer, view.byteOffset, view.byteLength));
+        return { bytes: binaries.length - 1, length: view.byteLength };
+      }
+      return view instanceof Map || view instanceof Set ? [...view] : view;
+    });
+    parts.push(new TextEncoder().encode(text), ...binaries);
+  }
+  const joined = new Uint8Array(parts.reduce((total, part) => total + part.byteLength, 0));
+  let offset = 0;
+  for (const part of parts) {
+    joined.set(part, offset);
+    offset += part.byteLength;
+  }
+  const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', joined));
+  return Array.from(hash, (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
 /**

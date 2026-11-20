@@ -1,6 +1,6 @@
 import { pipeOpBuffers, type PipeOp, type PipeOutputBatch } from '../../../../shared/collaboration-pipe/protocol';
 import type { LayoutMetaV1 } from './layoutMeta';
-import { isCommandAck } from '../../../../shared/office-session/commands/types';
+import { isCommandAck, type CommandStreamEntry } from '../../../../shared/office-session/commands/types';
 import { SessionFailure } from '../../../../shared/office-session/types';
 import { discardCommandPresentation } from './residentCommandPresentation';
 import type {
@@ -223,6 +223,7 @@ export class ResidentEngineWorkerClient implements DocxCommandClient {
   private retainBuiltPages = false;
   private failureListener: ((error: Error) => void) | null = null;
   private readonly frameListeners = new Set<(frame: DocxCommandFrame) => void>();
+  private readonly streamListeners = new Set<(entries: CommandStreamEntry[]) => void>();
   private readonly pipeListeners = new Set<(batches: readonly PipeOutputBatch[]) => void>();
   private readonly collabListeners = new Set<(event: { updates: Uint8Array[]; inferences: Array<{ seq: number; insertion: CollaborationTextInsertion }>; clock?: number }) => void>();
   protected commandIdentity: { session: string; incarnation: number; epoch: number } | null = null;
@@ -287,6 +288,16 @@ export class ResidentEngineWorkerClient implements DocxCommandClient {
         this.revision = pushed.frame.payload.layoutRevision;
         for (const listener of [...this.frameListeners]) {
           try { listener(pushed.frame); } catch {}
+        }
+      }
+      if (response.ok && response.commandStream) {
+        const reported = response.commandStream;
+        const identity = this.commandIdentity;
+        if (!this.terminalError && !this.commandReplacementPending && identity && reported.session === identity.session &&
+          reported.incarnation === identity.incarnation && reported.epoch === identity.epoch) {
+          for (const listener of [...this.streamListeners]) {
+            try { listener(reported.entries); } catch {}
+          }
         }
       }
       const pending = this.pending.get(response.id);
@@ -380,8 +391,9 @@ export class ResidentEngineWorkerClient implements DocxCommandClient {
       'update' in command.payload && command.payload.update instanceof ArrayBuffer) {
       command = { ...command, payload: { ...command.payload, update: owned(command.payload.update) } };
     } else if (command.kind === 'applyUpdate' && command.payload && typeof command.payload === 'object' &&
-      'update' in command.payload && command.payload.update instanceof ArrayBuffer) {
-      command = { ...command, payload: { ...command.payload, update: owned(command.payload.update) } };
+      'updates' in command.payload && Array.isArray(command.payload.updates) &&
+      command.payload.updates.every(update => update instanceof ArrayBuffer)) {
+      command = { ...command, payload: { ...command.payload, updates: command.payload.updates.map(owned) } };
     } else if (command.kind === 'applyRemoteUpdateChunks' && command.payload && typeof command.payload === 'object' &&
       'updates' in command.payload && Array.isArray(command.payload.updates) &&
       command.payload.updates.every(update => update instanceof ArrayBuffer)) {
@@ -421,6 +433,11 @@ export class ResidentEngineWorkerClient implements DocxCommandClient {
   onFrame(listener: (frame: DocxCommandFrame) => void): () => void {
     this.frameListeners.add(listener);
     return () => { this.frameListeners.delete(listener); };
+  }
+
+  onStream(listener: (entries: CommandStreamEntry[]) => void): () => void {
+    this.streamListeners.add(listener);
+    return () => { this.streamListeners.delete(listener); };
   }
 
   /** Output of the collaboration providers the worker runs, per provider, in order. */

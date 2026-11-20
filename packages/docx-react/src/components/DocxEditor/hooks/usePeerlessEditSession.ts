@@ -83,7 +83,7 @@ export function usePeerlessEditSession(
           async edit(command) {
             const ack = await resident.client.call.edit(command);
             const refused = command.replay && ack.outcomes.find(outcome =>
-              outcome.status === 'refused' || outcome.status === 'cancelled' ||
+              (outcome.status === 'refused' && outcome.reason !== 'replay-pending') || outcome.status === 'cancelled' ||
               (replayAppliedSeqs.includes(outcome.seq) && outcome.status === 'noop'));
             if (refused) {
               discardCommandPresentation(ack.frame);

@@ -13,7 +13,9 @@ export type CommandRefusalReason =
   | 'stale-version'
   | 'dependency-refused'
   | 'unknown-outcome'
-  | 'disposed';
+  | 'disposed'
+  | 'replay-pending'
+  | 'history-reset';
 
 /** @internal Error data preserved by the existing RPC reply protocol. */
 export type CommandOutcomeUnknownError = Error & {
@@ -35,6 +37,8 @@ export type CommandEnvelope<P> = {
   lastInputTime?: number;
   group?: string;
   replay?: true;
+  /** @internal A replayed stream entry applied before command `seq`, outside the command sequence. */
+  stream?: true;
 };
 
 /** @internal Settled worker outcome for one command sequence. */
@@ -44,7 +48,7 @@ export type CommandOutcome = {
   reason?: string;
   committed?: false;
   affectedSeqs?: number[];
-  /** @internal The command that reproduces an applied command's effect when recovery replays it. */
+  /** @internal The command that reproduces an applied command's effect, or a no-op's state, when recovery replays it. */
   effect?: CommandEffect;
 };
 
@@ -52,6 +56,15 @@ export type CommandOutcome = {
 export type CommandEffect = {
   kind: string;
   payload: unknown;
+};
+
+/** @internal What a worker's document emitted outside any command, replayed by recovery after command `throughSeq`. */
+export type CommandStreamEntry = {
+  throughSeq: number;
+  /** Order among the entries of one incarnation, from 0. */
+  index: number;
+  origin: 'save' | 'frame';
+  effect: CommandEffect;
 };
 
 /** @internal Full or incremental frame identified by command coverage and revision. */
@@ -77,12 +90,15 @@ export type CommandAck<S, E, F> = {
   revisions?: { selection: number; layout: number };
   /** @internal How an initial acknowledgement's document was seeded, so recovery can seed it again with the same ids. */
   seed?: CommandSeed;
+  /** @internal Stream entries emitted since the previous acknowledgement. */
+  stream?: CommandStreamEntry[];
 };
 
-/** @internal The ids a seed wrote under and the state vector it produced. */
+/** @internal The ids a seed wrote under, the SHA-256 of its source, and the state vector it produced. */
 export type CommandSeed = {
   clientId: number;
   generation: string;
+  digest: string;
   stateVector: Uint8Array;
 };
 
@@ -92,6 +108,8 @@ export type Checkpoint = {
   epoch: number;
   version: number;
   throughSeq: number;
+  /** @internal Stream entries the snapshot holds: those of its incarnation with a lower index. */
+  stream?: number;
 };
 
 /** @internal Methods registered on the existing session RPC. */
@@ -203,6 +221,8 @@ export type CommandConnection<P, S, E, F> = {
     /** @internal Subscribes to frames posted by this connection's worker. */
     onFrame?(listener: (frame: FrameEnvelope<F>) => void): () => void;
     onAck?(listener: (ack: CommandAck<S, E, F>) => void): () => void;
+    /** @internal Subscribes to stream entries this connection's worker reports outside acknowledgements. */
+    onStream?(listener: (entries: CommandStreamEntry[]) => void): () => void;
     dispose(): Promise<void>;
   };
 };
@@ -217,7 +237,7 @@ export type ApplyContext = {
 /** @internal Format apply result; noop, refusal, cancellation, and applied with committed: false must preserve the version. */
 export type ApplyResult<S, E> =
   | { status: 'applied'; committed?: false; selection?: S; editState?: E; effect?: CommandEffect }
-  | { status: 'noop'; selection?: S; editState?: E }
+  | { status: 'noop'; selection?: S; editState?: E; effect?: CommandEffect }
   | { status: 'cancelled'; reason?: string; selection?: S; editState?: E }
   | {
     status: 'refused';
@@ -398,6 +418,8 @@ export type WorkerEditSessionOptions<O, P, S, E, F, X, Q extends QueryTable = {}
   maxRecoveryAttempts?: number;
   checkpointPolicy?(stats: { applied: number; bytes: number }): boolean;
   commandBytes?(envelope: CommandEnvelope<P>): number;
+  /** @internal Whether an unacknowledged command may run again after a recovery that reset history; one that may not is refused as diverged. */
+  replayable?(envelope: CommandEnvelope<P>): boolean;
   /** @internal May share caller data only with a transport that copies before returning. */
   copyCommandForDispatch?(envelope: CommandEnvelope<P>): CommandEnvelope<P>;
   now?(): number;
@@ -439,7 +461,8 @@ export function isCommandEnvelope(value: unknown): value is CommandEnvelope<unkn
     (value.inputTime === undefined || finite(value.inputTime)) &&
     (value.lastInputTime === undefined || finite(value.lastInputTime)) &&
     (value.group === undefined || typeof value.group === 'string') &&
-    (value.replay === undefined || value.replay === true);
+    (value.replay === undefined || value.replay === true) &&
+    (value.stream === undefined || value.stream === true);
 }
 
 /** @internal Validates acknowledgement metadata while leaving format-owned values unknown. */
@@ -451,7 +474,15 @@ export function isCommandAck(value: unknown): value is CommandAck<unknown, unkno
     (value.revisions === undefined || (record(value.revisions) &&
       counter(value.revisions.selection) && counter(value.revisions.layout))) &&
     (value.seed === undefined || (record(value.seed) && counter(value.seed.clientId) &&
-      typeof value.seed.generation === 'string' && value.seed.stateVector instanceof Uint8Array));
+      typeof value.seed.generation === 'string' && typeof value.seed.digest === 'string' &&
+      value.seed.stateVector instanceof Uint8Array)) &&
+    (value.stream === undefined || isCommandStream(value.stream));
+}
+
+/** @internal Validates stream entries while leaving their effect payloads unknown. */
+export function isCommandStream(value: unknown): value is CommandStreamEntry[] {
+  return Array.isArray(value) && value.every((entry) => record(entry) && counter(entry.throughSeq) &&
+    counter(entry.index) && (entry.origin === 'save' || entry.origin === 'frame') && effect(entry.effect));
 }
 
 /** @internal Identifies the unknown-outcome reply error and its preserved sequence. */
@@ -484,8 +515,11 @@ function outcome(value: unknown): value is CommandOutcome {
     (value.committed === undefined || value.committed === false) &&
     (value.affectedSeqs === undefined ||
       (Array.isArray(value.affectedSeqs) && value.affectedSeqs.every(sequence))) &&
-    (value.effect === undefined || (value.status === 'applied' && record(value.effect) &&
-      typeof value.effect.kind === 'string' && hasOwn(value.effect, 'payload')));
+    (value.effect === undefined || ((value.status === 'applied' || value.status === 'noop') && effect(value.effect)));
+}
+
+function effect(value: unknown): value is CommandEffect {
+  return record(value) && typeof value.kind === 'string' && hasOwn(value, 'payload');
 }
 
 function frame(value: unknown): value is FrameEnvelope<unknown> {

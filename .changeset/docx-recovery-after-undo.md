@@ -5,4 +5,4 @@
 '@betteroffice/pptx': minor
 ---
 
-Recovery after a worker restart no longer fails, or brings back text that was undone, when undo or redo was used after a checkpoint. After a recovery, the undo history starts at the recovery.
+DOCX worker recovery after a worker restart no longer fails, or brings back undone text, when undo or redo was used. Adds the `applyUpdate` command kind, which only recovery sends, and the required `applyVerbatimUpdate` engine method. XLSX and PPTX: a type addition only.

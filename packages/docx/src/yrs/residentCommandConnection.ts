@@ -1,4 +1,4 @@
-import { isCommandAck, isCommandOutcomeUnknownError } from '../../../../shared/office-session/commands/types';
+import { isCommandAck, isCommandOutcomeUnknownError, type CommandStreamEntry } from '../../../../shared/office-session/commands/types';
 import { SessionFailure } from '../../../../shared/office-session/types';
 import { discardCommandPresentation } from './residentCommandPresentation';
 import type {
@@ -129,6 +129,16 @@ export async function createDocxCommandConnection(
           frameSubscriptions.add(unsubscribe);
           return () => { frameSubscriptions.delete(unsubscribe); unsubscribe(); };
         },
+        ...(client.onStream ? {
+          onStream(listener: (entries: CommandStreamEntry[]) => void) {
+            if (failure || disposal) return () => {};
+            const unsubscribe = client.onStream!((entries) => {
+              if (!failure && !disposal && client.commandGeneration === generation) listener(entries);
+            });
+            frameSubscriptions.add(unsubscribe);
+            return () => { frameSubscriptions.delete(unsubscribe); unsubscribe(); };
+          },
+        } : {}),
         call: {
           edit: (command) => call(() => client.edit(command).then(validateAck), discardAck),
           checkpoint: () => call(() => client.checkpoint()),

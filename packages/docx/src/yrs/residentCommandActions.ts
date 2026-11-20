@@ -231,8 +231,9 @@ const DOCX_COMMAND_POLICIES = {
     } },
   collabPipe: { keys: ['provider', 'ops'], exact: true, session: 'collaboration', origin: 'remote',
     payload: (payload) => validPipePayload(payload, MAX_FRAME_BYTES, PIPE_SHAPE) },
-  applyUpdate: { keys: ['update', 'state'], exact: true,
-    payload: ({ update, state }) => update instanceof ArrayBuffer && (state === undefined || object(state)) },
+  applyUpdate: { keys: ['updates', 'state', 'noop'], exact: true,
+    payload: ({ updates, state, noop }) => Array.isArray(updates) && updates.every((update) => update instanceof ArrayBuffer) &&
+      (state === undefined || object(state)) && (noop === undefined || noop === true) },
   applyEdits: { keys: ['request', 'suggesting'], exact: true },
   setFontEnvironment: { keys: ['faces', 'chains', 'families', 'progressive'], exact: true },
   setContentControlValue: { keys: [] }, addRepeatingItem: { keys: [] }, removeRepeatingItem: { keys: [] },
@@ -557,7 +558,7 @@ export function preflightDocxCommand(
   const error = { reason: 'invalid-payload' };
   if (!validCommandIntent(command, error, environment)) return refuse(error.reason);
   if (command.kind === 'applyUpdate') {
-    if (!context.replayPreviouslyApplied) return refuse('unsupported-command');
+    if (!context.replayPreviouslyApplied && command.replay !== true) return refuse('unsupported-command');
     return { status: 'ready', prepared: { command, selection: state.selection, range: null } };
   }
   if (commandPolicy(command.kind)?.origin === 'remote') {
@@ -961,15 +962,25 @@ function applyPreparedDocxCommand(
   };
   if (command.kind === 'applyUpdate') {
     const since = engine.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
-    engine.applyHostUpdate(new Uint8Array(command.payload.update));
+    let pending = false;
+    for (const update of command.payload.updates) {
+      engine.applyVerbatimUpdate(new Uint8Array(update));
+      pending = engine.hasPendingUpdate();
+      if (pending) break;
+    }
     engine.markProjectionStories(engine.storiesChangedSince(since).stories);
+    if (pending) {
+      const corrected = state.selection ? readCommandSelection(engine, state) : null;
+      return { status: 'refused', reason: 'replay-pending', selection: corrected?.ok ? corrected.selection : null,
+        editState: projectDocxEditState(engine, state, corrected) };
+    }
     state.remoteMerges = undefined;
     const restored = command.payload.state;
     if (restored) {
       restoreCommandState(engine, state, restored);
       environment?.restoreCommandState?.(restored);
     }
-    return result('applied');
+    return result(command.payload.noop ? 'noop' : 'applied');
   }
   if (command.kind === 'setRenderEnvironment') {
     const { reservations, ...rest } = command.payload;
