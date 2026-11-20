@@ -874,6 +874,7 @@
     "toolbarGroup": "प्लगइन",
     "panelTabs": "प्लगइन पैनल",
     "collapsePanel": "{title} समेटें",
-    "expandPanel": "{title} फैलाएं"
+    "expandPanel": "{title} फैलाएं",
+    "miniToolbar": "चयन का स्वरूपण"
   }
 }

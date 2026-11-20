@@ -61,6 +61,10 @@ export default defineConfig({
         replacement: resolve(root, 'packages/docx-react/src/index.ts'),
       },
       {
+        find: /^@betteroffice\/docx-react\/mini-toolbar$/,
+        replacement: resolve(root, 'packages/docx-react/src/mini-toolbar.ts'),
+      },
+      {
         find: /^@betteroffice\/docx-react\/styles\.css$/,
         replacement: resolve(root, 'packages/docx-react/src/styles/editor.css'),
       },

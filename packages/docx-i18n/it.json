@@ -874,6 +874,7 @@
     "toolbarGroup": "Plugin",
     "panelTabs": "Pannelli del plug-in",
     "collapsePanel": "Comprimi {title}",
-    "expandPanel": "Espandi {title}"
+    "expandPanel": "Espandi {title}",
+    "miniToolbar": "Formattazione della selezione"
   }
 }
