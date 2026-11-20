@@ -106,6 +106,8 @@ export interface ListDocumentOptions {
   after?: readonly string[];
   /** A saved package to open in place of the document built. */
   saved?: Uint8Array;
+  /** A left indent of its own for `PLAIN`, in twips. */
+  indent?: number;
 }
 
 /** The `w:numId`s of the numbering each document opens with. */
@@ -141,7 +143,9 @@ function pack(document: string, numbering: string | null, relationships?: Uint8A
 
 export function listDocument(doc: ListDocument, options: ListDocumentOptions = {}): Uint8Array {
   if (options.saved) return options.saved;
-  const added =[...(options.isolated ? [GAP] : []), PLAIN, ...(options.after ?? [])].map(plain).join('');
+  const target = options.indent === undefined ? plain(PLAIN)
+    : `<w:p><w:pPr><w:ind w:left="${options.indent}"/></w:pPr><w:r><w:t>${PLAIN}</w:t></w:r></w:p>`;
+  const added = [...(options.isolated ? [GAP] : []).map(plain), target, ...(options.after ?? []).map(plain)].join('');
   if (doc === 'A') {
     const source = readFileSync(resolve(FIXTURE, 'document.xml'), 'utf8');
     const anchor = '    <w:sectPr>';
@@ -775,6 +779,30 @@ export function listCommandScenarios(path: string, open: OpenListCommandDriver, 
     expect(reopened.left(PLAIN)).toEqual(before);
     expectOffList(driver, PLAIN);
     expect(before.text).not.toBeNull();
+  }, timeout);
+
+  test(`${path}: a paragraph with a left indent of its own keeps it on a list it joins and after the list is taken off`, async () => {
+    const driver = await open('H', { indent: 2880 });
+    const before = driver.left(PLAIN);
+    const original = savedParagraphProperties(await driver.save(), PLAIN);
+    driver.toggle('bullet', PLAIN);
+    const item = driver.left(INDENTED_ITEM);
+    const live = driver.left(PLAIN);
+    const saved = await driver.save();
+    const reopened = await open('H', { saved });
+    expect(reopened.left(PLAIN)).toEqual(live);
+    expect(live.text ?? 0).toBeGreaterThan((item.text ?? Infinity) + 100);
+    expect(savedIndent(saved, PLAIN) ?? '').toContain('w:left="2880"');
+    expect(propertiesOf(driver, PLAIN).numPr).toMatchObject({ numId: 5, ilvl: 0 });
+    driver.toggle('bullet', PLAIN);
+    expect(driver.left(PLAIN)).toEqual(before);
+    const off = await driver.save();
+    expect(savedIndent(off, PLAIN)).toBe(original.match(/<w:ind\b[^>]*\/>/)?.[0]);
+    expect(savedParagraphProperties(off, PLAIN)).not.toContain('<w:numPr');
+    expect((await open('H', { saved: off })).left(PLAIN)).toEqual(before);
+    expect(original).toContain('w:left="2880"');
+    expect(before).toMatchObject({ marker: null });
+    expect(before.text ?? 0).toBeGreaterThan((item.text ?? Infinity) + 100);
   }, timeout);
 
   for (const kind of KINDS) {
