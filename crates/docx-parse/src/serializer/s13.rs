@@ -4760,9 +4760,7 @@ mod tests {
             paragraph["sourceOrdinal"] = json!(ordinal);
             paragraph
         };
-        let spliced = |part: &str, xml: &str| {
-            json!({ "part": part, "sha256": digest(xml), "paragraphs": [0, 1], "changed": [1] })
-        };
+        let spliced = |part: &str, xml: &str| json!({ "part": part, "sha256": digest(xml), "paragraphs": [0, 1], "changed": [1] });
         let mut request = json!({
             "determinism": determinism(),
             "document": { "content": [
@@ -4799,9 +4797,7 @@ mod tests {
     fn a_spliced_save_of_a_part_without_comment_markers_never_looks_for_those_its_model_holds() {
         HELD_COMMENT_SEARCHES.with(|searches| searches.set(0));
         let body = spliced_paragraphs("<w:r><w:t>keep</w:t></w:r>", ["0000000A", "0000000B"]);
-        let document = format!(
-            "<w:document {SPLICED_ROOT}><w:body>{body}</w:body></w:document>"
-        );
+        let document = format!("<w:document {SPLICED_ROOT}><w:body>{body}</w:body></w:document>");
         let saved = spliced_save(&document, None);
         let xml = String::from_utf8(saved["word/document.xml"].clone()).unwrap();
         assert!(xml.contains("<w:t>edited</w:t>"), "{xml}");
@@ -4812,9 +4808,7 @@ mod tests {
     fn a_spliced_save_looks_for_the_comment_markers_its_model_holds_once_for_all_its_parts() {
         HELD_COMMENT_SEARCHES.with(|searches| searches.set(0));
         let body = spliced_paragraphs(KEPT_COMMENT, ["0000000A", "0000000B"]);
-        let document = format!(
-            "<w:document {SPLICED_ROOT}><w:body>{body}</w:body></w:document>"
-        );
+        let document = format!("<w:document {SPLICED_ROOT}><w:body>{body}</w:body></w:document>");
         let header = format!(
             "<w:hdr {SPLICED_ROOT}>{}</w:hdr>",
             spliced_paragraphs(KEPT_COMMENT, ["0000000C", "0000000D"])
