@@ -542,6 +542,8 @@ export interface DocxCommandFramePayload {
     reservations?: DocxFrameReservations;
     parts?: ResidentPartGeometry[];
     geometry?: ResidentFrameGeometry;
+    /** The frame only moved the selection: the previous frame's `geometry` still holds, apart from its selection. */
+    geometryKept?: true;
     frame: ArrayBuffer;
     pageFrames?: ArrayBuffer[];
     caret: YrsResidentCaretSnapshot;

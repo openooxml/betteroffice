@@ -215,6 +215,8 @@ export declare class EditSession {
   style_languages_json(): string
   set_style_language(styleId: string | undefined | null, slotsJson: string): boolean
   patch_style_languages_xml(source: string): string
+  ensure_list_definition(story: string, paraId: string, kind: string): string
+  created_list_definitions_json(): string
   set_document_property(key: string, json: string): boolean
   set_header_footer_aliases(json: string): void
   set_hyperlink(story: string, startPara: string, startOffset: number, endPara: string, endOffset: number, hyperlinkJson: string, authorName?: string | undefined | null, authorDate?: string | undefined | null): void

@@ -29,6 +29,16 @@
     "reason": "Internal error message for a stalled frame request, never shown in the UI"
   },
   {
+    "text": "The document input cannot take focus now",
+    "file": "packages/docx-react/src/plugins/createDocxPluginHost.ts",
+    "reason": "Refusal message returned to plugin code by focusDocument, never shown in the UI"
+  },
+  {
+    "text": "An editor dialog is open",
+    "file": "packages/docx-react/src/plugins/createDocxPluginHost.ts",
+    "reason": "Refusal message returned to plugin code by focusDocument, never shown in the UI"
+  },
+  {
     "text": "Unable to decode slide image",
     "file": "packages/pptx-react/src/viewer/sessionPaint.ts",
     "reason": "Internal image decode error passed to the media resolver, never shown in the UI"

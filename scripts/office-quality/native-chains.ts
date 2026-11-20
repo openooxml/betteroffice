@@ -3,6 +3,7 @@ import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { privateMode } from './private-step.mjs';
 
 type Module = Record<string, any>;
 
@@ -160,9 +161,10 @@ export async function loadFontPackages(root: string, planAbsent: ReadonlySet<Add
   return { version, fonts, addons };
 }
 
-export function describeAddons(packages: FontPackages) {
+export function describeAddons(packages: FontPackages, withoutErrors = false) {
   return Object.entries(packages.addons).map(([name, addon]) =>
-    `${name} ${addon.absent ? 'absent (not declared)' : addon.version === undefined ? 'missing' : addon.error ? `${addon.version} (failed: ${addon.error})` : addon.version}`).join(', ');
+    addon.error && withoutErrors ? `${name} failed`
+      : `${name} ${addon.absent ? 'absent (not declared)' : addon.version === undefined ? 'missing' : addon.error ? `${addon.version} (failed: ${addon.error})` : addon.version}`).join(', ');
 }
 
 export function absentAddonUse(packages: FontPackages, requirements: Requirement[], loads: Iterable<[AddonName, string]> = []): AbsentAddon[] {
@@ -448,12 +450,26 @@ export function checkPublishedVersion(installed: string, source: unknown, planne
     throw new Error(`published @betteroffice/docx ${installed} differs from the published native source's ${String(source)} (planned ${String(planned)})`);
 }
 
+export async function reportChains(lines: string[], failures: string[], env: NodeJS.ProcessEnv = process.env) {
+  const isPrivate = privateMode(env);
+  const summary = isPrivate
+    ? [...lines, ...(failures.length ? [`${failures.length} documents failed`] : [])]
+    : [...lines, ...failures.map((failure) => `FAILED ${failure}`)];
+  if (env.GITHUB_STEP_SUMMARY)
+    await appendFile(env.GITHUB_STEP_SUMMARY, `### DOCX native font chains\n\n${summary.map((line) => `- ${line}`).join('\n')}\n`);
+  if (failures.length)
+    throw new Error(isPrivate
+      ? `${failures.length} documents need font add-ons their channel lacks; they are listed in the private log`
+      : `documents need font add-ons their channel lacks:\n${failures.join('\n')}`);
+}
+
 async function main(env: NodeJS.ProcessEnv) {
   const required = (name: string) => {
     const value = env[name]?.trim();
     if (!value) throw new Error(`${name} is required`);
     return resolve(value);
   };
+  const isPrivate = privateMode(env);
   const output = required('QUALITY_OUTPUT');
   const chainsRoot = required('QUALITY_CHAINS');
   const job = JSON.parse(await readFile(join(output, 'job.json'), 'utf8'));
@@ -481,8 +497,9 @@ async function main(env: NodeJS.ProcessEnv) {
       if (!(error instanceof MissingExport)) throw error;
       throw new Error(missingExportsFailure(channel, version, error.message));
     }
-    lines.push(`${channel}: @betteroffice/fonts@${product.fonts.version}, ${describeAddons(product.fonts)}`);
-    console.log(lines.at(-1));
+    const fontsLine = `${channel}: @betteroffice/fonts@${product.fonts.version}, `;
+    lines.push(fontsLine + describeAddons(product.fonts, isPrivate));
+    console.log(fontsLine + describeAddons(product.fonts));
     let absentDocuments = 0;
     for (const sample of job.samples) {
       try {
@@ -503,10 +520,7 @@ async function main(env: NodeJS.ProcessEnv) {
     lines.push(describeFontPath(channel, version));
     console.log(lines.at(-1));
   }
-  const summary = [...lines, ...failures.map((failure) => `FAILED ${failure}`)];
-  if (env.GITHUB_STEP_SUMMARY)
-    await appendFile(env.GITHUB_STEP_SUMMARY, `### DOCX native font chains\n\n${summary.map((line) => `- ${line}`).join('\n')}\n`);
-  if (failures.length) throw new Error(`documents need font add-ons their channel lacks:\n${failures.join('\n')}`);
+  await reportChains(lines, failures, env);
   await mkdir(chainsRoot, { recursive: true });
   await writeFile(join(chainsRoot, 'paths.json'), JSON.stringify(paths, null, 2) + '\n');
 }

@@ -1681,6 +1681,43 @@ for (const end of ['unmount', 'source change'] as const) {
   });
 }
 
+const settleSends = () => act(async () => { await new Promise<void>((resolve) => setTimeout(resolve, 10)); });
+
+for (const clicks of [2, 3]) {
+  test(`a drag after a ${clicks === 2 ? 'double' : 'triple'} click extends the snapped selection instead of selecting again`, async () => {
+    const editor = await dragEditor();
+    for (let press = 0; press < clicks; press += 1) {
+      fireEvent.pointerDown(editor.host, editor.point);
+      if (press < clicks - 1) fireEvent.pointerUp(editor.host, { ...editor.point, buttons: 0 });
+      await editor.acknowledge(press, 'noop');
+    }
+    fireEvent.pointerMove(editor.host, { ...editor.point, clientX: 180 });
+    await waitFor(() => expect(editor.commands.at(-1)).toMatchObject({ kind: 'extendSelection', payload: { x: 60 } }));
+    fireEvent.pointerUp(editor.host, { ...editor.point, clientX: 180, buttons: 0 });
+    await settleSends();
+    expect(editor.commands.map(({ kind, payload }) => [kind, (payload as { clickCount: number }).clickCount]))
+      .toEqual([...Array.from({ length: clicks }, (_, press) => ['selectPoint', press + 1]), ['extendSelection', 1]]);
+  });
+}
+
+test('a Shift press on text and its drag extend from the worker anchor with the latest point', async () => {
+  const editor = await dragEditor();
+  fireEvent.pointerDown(editor.host, { ...editor.point, shiftKey: true });
+  await editor.acknowledge(0, 'noop');
+  expect(editor.commands[0]).toMatchObject({ kind: 'selectPoint', payload: { x: 20, clickCount: 1, modifiers: { shift: true } } });
+  fireEvent.pointerMove(editor.host, { ...editor.point, shiftKey: true, clientX: 140 });
+  fireEvent.pointerMove(editor.host, { ...editor.point, shiftKey: true, clientX: 180 });
+  fireEvent.pointerUp(editor.host, { ...editor.point, clientX: 180, buttons: 0 });
+  for (let index = 1; ; index += 1) {
+    await settleSends();
+    if (index >= editor.commands.length) break;
+    await editor.acknowledge(index, 'noop');
+  }
+  expect(editor.commands.length).toBeGreaterThan(1);
+  expect(editor.commands.slice(1).map(({ kind }) => kind)).toEqual(editor.commands.slice(1).map(() => 'extendSelection'));
+  expect(editor.commands.at(-1)!.payload).toMatchObject({ x: 60 });
+});
+
 const waitForMirror = (assertion: () => void) => waitFor(assertion);
 
 async function unbuiltMirrorEditor(mode?: 'text' | 'off', builtParagraphs = ['Unbuilt title 16', 'Unbuilt paragraph 16']) {

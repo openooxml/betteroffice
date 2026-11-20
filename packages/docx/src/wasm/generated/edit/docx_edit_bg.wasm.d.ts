@@ -57,6 +57,7 @@ export const editsession_comment_text_target_json: (a: number, b: number, c: num
 export const editsession_compare_docx_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
 export const editsession_content_control_targets_json: (a: number) => [number, number, number, number];
 export const editsession_create_story: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
+export const editsession_created_list_definitions_json: (a: number) => [number, number];
 export const editsession_decode_font: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_delete_column: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_delete_range: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number) => [number, number, number, number];
@@ -83,6 +84,7 @@ export const editsession_encode_state_vector: (a: number) => [number, number];
 export const editsession_encode_sticky_position: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
 export const editsession_encoded_selection: (a: number) => [number, number, number, number];
 export const editsession_end_shared_reads: (a: number) => void;
+export const editsession_ensure_list_definition: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
 export const editsession_export_markdown_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_export_snapshot_with_private_fonts_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
 export const editsession_export_structured_json: (a: number, b: number, c: number) => [number, number, number, number];

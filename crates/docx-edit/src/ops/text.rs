@@ -539,7 +539,7 @@ impl EditingDoc {
                 .or_else(|| {
                     adjacent_paragraph_change_revision_id(&chunks, at.index, txn, &ctx.author)
                 })
-                .unwrap_or_else(|| self.next_id())
+                .unwrap_or_else(|| self.next_id(txn))
         });
         let formatting = insertion_attrs(&chunks, at.index, &policy, txn);
         // Typed with cursor marks, the text goes in with `formatting` and is then formatted as
@@ -650,7 +650,7 @@ impl EditingDoc {
         let revision_id = ctx.is_suggesting().then(|| {
             adjacent_revision_id(&chunks, range.start, DEL, &ctx.author)
                 .or_else(|| adjacent_revision_id(&chunks, range.end, DEL, &ctx.author))
-                .unwrap_or_else(|| self.next_id())
+                .unwrap_or_else(|| self.next_id(txn))
         });
         let carry = Carry::capture(&story, txn, range.start, range.end, indexed.as_ref());
         let (result_end, outcome) = if let Some(id) = revision_id.as_ref() {
@@ -831,7 +831,7 @@ impl EditingDoc {
                 .or_else(|| adjacent_revision_id(&chunks, range.start, DEL, &ctx.author))
                 .or_else(|| adjacent_revision_id(&chunks, range.end, INS, &ctx.author))
                 .or_else(|| adjacent_revision_id(&chunks, range.end, DEL, &ctx.author))
-                .unwrap_or_else(|| self.next_id())
+                .unwrap_or_else(|| self.next_id(txn))
         });
         let formatting = chunks
             .iter()
@@ -976,7 +976,7 @@ impl EditingDoc {
                 .or_else(|| adjacent_revision_id(&chunks, range.start, DEL, &ctx.author))
                 .or_else(|| adjacent_revision_id(&chunks, range.end, INS, &ctx.author))
                 .or_else(|| adjacent_revision_id(&chunks, range.end, DEL, &ctx.author))
-                .unwrap_or_else(|| self.next_id())
+                .unwrap_or_else(|| self.next_id(txn))
         });
         let revision = revision_id
             .as_ref()
@@ -1051,7 +1051,7 @@ impl EditingDoc {
         let chunks = position_chunks(&story, &txn, &mut at.index);
         let revision_id = ctx.is_suggesting().then(|| {
             adjacent_revision_id(&chunks, at.index, INS, &ctx.author)
-                .unwrap_or_else(|| self.next_id())
+                .unwrap_or_else(|| self.next_id(&txn))
         });
         let formatting = policy_attrs(&chunks, at.index, &FormatPolicy::Inherit);
         let ins = revision_id
@@ -1087,7 +1087,7 @@ impl EditingDoc {
         let chunks = position_chunks(&story, &txn, &mut at.index);
         let revision_id = ctx.is_suggesting().then(|| {
             adjacent_revision_id(&chunks, at.index, INS, &ctx.author)
-                .unwrap_or_else(|| self.next_id())
+                .unwrap_or_else(|| self.next_id(&txn))
         });
         let formatting = policy_attrs(&chunks, at.index, &FormatPolicy::Inherit);
         let ins = revision_id

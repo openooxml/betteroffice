@@ -1,6 +1,7 @@
-import { open, story, type } from './peerlessTestHarness';
+import { deck, open, story, type } from './peerlessTestHarness';
 import { expect, mock, spyOn, test } from 'bun:test';
 import { act, render, waitFor } from '@testing-library/react';
+import { Suspense } from 'react';
 import { PptxEditor, type PptxAsyncEditorProps } from '../PptxEditor';
 import { peerlessSessionOpener } from './usePeerlessPresentation';
 
@@ -49,6 +50,50 @@ for (const [onSave, downloadOnSave, downloads] of [[true, undefined, 0], [false,
     } finally { click.mockRestore(); }
   });
 }
+
+test('a toolbar save whose onSave closes the editor still downloads', async () => {
+  const click = spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+  try {
+    let close = () => {};
+    const saved = mock((_bytes: Uint8Array) => { close(); });
+    const value = await open({ onSave: saved, downloadOnSave: true });
+    close = () => value.view.unmount();
+    await act(async () => { await value.api.commands!.execute('save', null); });
+    expect(saved).toHaveBeenCalledTimes(1);
+    expect(click).toHaveBeenCalledTimes(1);
+  } finally { click.mockRestore(); }
+});
+
+test('a toolbar save whose file is replaced after the serialization fence calls neither onSave nor a download', async () => {
+  const saved = mock((_bytes: Uint8Array) => {});
+  const errors = mock((_error: Error) => {});
+  const click = spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+  const value = await open({ onSave: saved, downloadOnSave: true, onError: errors });
+  const serialize = value.client.save.bind(value.client);
+  let release = () => {};
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let started = false;
+  const save = spyOn(value.client, 'save').mockImplementation(async () => {
+    started = true;
+    const bytes = await serialize();
+    await gate;
+    return bytes;
+  });
+  try {
+    let outcome!: Promise<unknown>;
+    act(() => { outcome = value.api.commands!.execute('save', null); });
+    await waitFor(() => expect(started).toBe(true));
+    const replacement = await deck(true);
+    value.view.rerender(<Suspense fallback={<div>Waiting</div>}>
+      <PptxEditor fonts={[]} file={replacement} onSave={saved} downloadOnSave onError={errors} />
+      {null}
+    </Suspense>);
+    release();
+    await act(async () => { await outcome.catch(() => null); });
+    expect(saved).not.toHaveBeenCalled();
+    expect(click).not.toHaveBeenCalled();
+  } finally { release(); save.mockRestore(); click.mockRestore(); }
+});
 
 for (const [initialZoom, expected] of [[1.5, 1.5], [20, 5], [0.05, 0.1], [0.1, 0.1], [5, 5], [NaN, 'fit'], [0, 'fit'], [undefined, 'fit']] as const) {
   test(`initial zoom ${initialZoom} becomes ${expected}`, async () => {

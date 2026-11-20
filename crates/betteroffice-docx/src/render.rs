@@ -247,7 +247,7 @@ impl Document {
         request["measurement"] = docx_edit::layout_request::measurement(package);
         let mut fonts = self.fonts.lock().unwrap_or_else(PoisonError::into_inner);
         #[cfg(feature = "fonts")]
-        {
+        let chains = {
             let requirements = engine
                 .layout_font_requirements_json(&request.to_string())
                 .map_err(Error::Render)?;
@@ -270,7 +270,9 @@ impl Document {
                 })
                 .collect();
             fonts.resolve(&self.font_manager, &requirements)?;
-        }
+            fonts.layout_chains(&requirements)
+        };
+        #[cfg(not(feature = "fonts"))]
         let chains: BTreeMap<String, Vec<u32>> = fonts
             .chains
             .iter()

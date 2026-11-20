@@ -1,0 +1,218 @@
+{
+  "results": [
+    {
+      "op": "save",
+      "result": {
+        "parts": [
+          {
+            "byteLength": 1463,
+            "name": "[Content_Types].xml",
+            "sha256": "495fd9fbc6e62d59d6314901d71e8e682201362e373ec089d962b6ef5e6e159f"
+          },
+          {
+            "byteLength": 242,
+            "name": "_rels/.rels",
+            "sha256": "22c01d12e912dc45bdf191c382dd5b80cdeca1a9e95af86a477798a9f7e541e9"
+          },
+          {
+            "byteLength": 1632,
+            "name": "word/_rels/document.xml.rels",
+            "sha256": "55bbb4e93d3f7d16cbc58ced32ebfff7f2d8731f49226d0c11ff39baec940d45"
+          },
+          {
+            "byteLength": 1043,
+            "name": "word/comments.xml",
+            "sha256": "e75e5de6053650e58802fa71cd3299795cb5b95708fe13f1cf4f192e7fa17a91"
+          },
+          {
+            "byteLength": 9887,
+            "name": "word/document.xml",
+            "sha256": "dd8ce43a04188f09d29fe7d453983c0255cff6fdf393fbda0d0b6600577b99f4"
+          },
+          {
+            "byteLength": 1019,
+            "name": "word/endnotes.xml",
+            "sha256": "a649b220462c700cff335675d687532346d04f524a90f4511ace4a2228c28c7a"
+          },
+          {
+            "byteLength": 769,
+            "name": "word/footer1.xml",
+            "sha256": "f92e6b8ff6bca8c0492f9ccac9a7b514da91dd0d73d6c627aa6beff220ba5f77"
+          },
+          {
+            "byteLength": 1020,
+            "name": "word/footnotes.xml",
+            "sha256": "aa6df542f6742f8530acefb349b6dfa99270e7777341d2a2ff734d62adfeaa55"
+          },
+          {
+            "byteLength": 772,
+            "name": "word/header1.xml",
+            "sha256": "36664fc0af993adc68e9d4ea258ad92c69a829a68a5e6d7096c91de51ec4dd45"
+          },
+          {
+            "byteLength": 775,
+            "name": "word/header2.xml",
+            "sha256": "4ec039d8e446f46f928750eeee95f689ac67d9d5aa86bb7d7aad429f42fabd5f"
+          },
+          {
+            "byteLength": 12,
+            "name": "word/media/logo.png",
+            "sha256": "1b56b50ac4e976f488f128cabdcdffb2fc9331d6974bb9968131a415d14ade24"
+          },
+          {
+            "byteLength": 1632,
+            "name": "word/numbering.xml",
+            "sha256": "2e0574aaef131788c4dc59ecd62221280b9ec3a18242db9135e298e39f19453f"
+          },
+          {
+            "byteLength": 1420,
+            "name": "word/styles.xml",
+            "sha256": "d83e8a82504a89f1a53503fb9e09b1338ef798a8a5eefceec8cc7c6dd00cf308"
+          }
+        ]
+      }
+    },
+    {
+      "op": "saveReport",
+      "result": {
+        "keptUnchanged": null,
+        "parts": [
+          {
+            "byteLength": 1463,
+            "name": "[Content_Types].xml",
+            "sha256": "495fd9fbc6e62d59d6314901d71e8e682201362e373ec089d962b6ef5e6e159f"
+          },
+          {
+            "byteLength": 242,
+            "name": "_rels/.rels",
+            "sha256": "22c01d12e912dc45bdf191c382dd5b80cdeca1a9e95af86a477798a9f7e541e9"
+          },
+          {
+            "byteLength": 1632,
+            "name": "word/_rels/document.xml.rels",
+            "sha256": "55bbb4e93d3f7d16cbc58ced32ebfff7f2d8731f49226d0c11ff39baec940d45"
+          },
+          {
+            "byteLength": 1043,
+            "name": "word/comments.xml",
+            "sha256": "e75e5de6053650e58802fa71cd3299795cb5b95708fe13f1cf4f192e7fa17a91"
+          },
+          {
+            "byteLength": 9887,
+            "name": "word/document.xml",
+            "sha256": "dd8ce43a04188f09d29fe7d453983c0255cff6fdf393fbda0d0b6600577b99f4"
+          },
+          {
+            "byteLength": 1019,
+            "name": "word/endnotes.xml",
+            "sha256": "a649b220462c700cff335675d687532346d04f524a90f4511ace4a2228c28c7a"
+          },
+          {
+            "byteLength": 769,
+            "name": "word/footer1.xml",
+            "sha256": "f92e6b8ff6bca8c0492f9ccac9a7b514da91dd0d73d6c627aa6beff220ba5f77"
+          },
+          {
+            "byteLength": 1020,
+            "name": "word/footnotes.xml",
+            "sha256": "aa6df542f6742f8530acefb349b6dfa99270e7777341d2a2ff734d62adfeaa55"
+          },
+          {
+            "byteLength": 772,
+            "name": "word/header1.xml",
+            "sha256": "36664fc0af993adc68e9d4ea258ad92c69a829a68a5e6d7096c91de51ec4dd45"
+          },
+          {
+            "byteLength": 775,
+            "name": "word/header2.xml",
+            "sha256": "4ec039d8e446f46f928750eeee95f689ac67d9d5aa86bb7d7aad429f42fabd5f"
+          },
+          {
+            "byteLength": 12,
+            "name": "word/media/logo.png",
+            "sha256": "1b56b50ac4e976f488f128cabdcdffb2fc9331d6974bb9968131a415d14ade24"
+          },
+          {
+            "byteLength": 1632,
+            "name": "word/numbering.xml",
+            "sha256": "2e0574aaef131788c4dc59ecd62221280b9ec3a18242db9135e298e39f19453f"
+          },
+          {
+            "byteLength": 1420,
+            "name": "word/styles.xml",
+            "sha256": "d83e8a82504a89f1a53503fb9e09b1338ef798a8a5eefceec8cc7c6dd00cf308"
+          }
+        ],
+        "structureDropped": null
+      }
+    },
+    {
+      "op": "openSaved",
+      "result": null
+    },
+    {
+      "op": "paragraph",
+      "result": {
+        "alignment": null,
+        "id": "00000017",
+        "runs": [
+          {
+            "bold": null,
+            "color": null,
+            "fontFamily": null,
+            "fontSize": null,
+            "italic": null,
+            "strike": null,
+            "styleId": null,
+            "text": "Section two, edited by the parity script.",
+            "underline": null
+          }
+        ],
+        "style": null,
+        "text": "Section two, edited by the parity script."
+      }
+    },
+    {
+      "op": "paragraphIds",
+      "result": [
+        "00000001",
+        "00000002",
+        "00000003",
+        "00000004",
+        "00000005",
+        "00000006",
+        "00000007",
+        "00000008",
+        "00000009",
+        "0000000A",
+        "0000000B",
+        "0000000C",
+        "10000001",
+        "10000002",
+        "10000003",
+        "10000004",
+        "10000005",
+        "10000006",
+        "10000007",
+        "10000008",
+        "10000009",
+        "1000000A",
+        "1000000B",
+        "0000000D",
+        "0000000E",
+        "0000000F",
+        "00000010",
+        "00000011",
+        "00000012",
+        "00000013",
+        "00000014",
+        "00000015",
+        "00000018",
+        "00000019",
+        "00000016",
+        "00000017"
+      ]
+    }
+  ],
+  "scriptSha256": "d5c21dd499cf65160ac9be4cf63d3f5d7ca741c1dca7408251654f7ffea977e9"
+}

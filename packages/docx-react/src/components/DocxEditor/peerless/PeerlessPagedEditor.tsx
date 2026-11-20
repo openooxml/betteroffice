@@ -234,11 +234,12 @@ function PeerlessCaretLayer({ viewStore, geometryCaret, matches, composition, co
   return <PeerlessCaret caret={caret} input={input} pages={pages} />;
 }
 
-function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableText, displayWindow, onDisplayWindowChange, onClipboard, onPasteFragment, highlights, onNavigateCell, onPartPoint, onDragSelectionChange, pageOverlays, pageMirror, unbuiltPageMirror, readPageTexts, mirrorReadBlocked, scrollToPage, overlay, pictures, tables, queryEngineReady }: {
+function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, inputRef, onRecoverableText, displayWindow, onDisplayWindowChange, onClipboard, onPasteFragment, highlights, onNavigateCell, onPartPoint, onDragSelectionChange, pageOverlays, pageMirror, unbuiltPageMirror, readPageTexts, mirrorReadBlocked, scrollToPage, overlay, pictures, tables, queryEngineReady }: {
   binding: PeerlessEditSessionBinding;
   canvasForPage(page: DocxCommandPageIdentity): HTMLCanvasElement | null;
   zoom: number;
   autoFocus?: boolean;
+  inputRef?: RefObject<HTMLTextAreaElement | null>;
   onRecoverableText(text: string): void;
   displayWindow: readonly [number, number];
   onDisplayWindowChange(start: number, end: number): void;
@@ -270,7 +271,8 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
   const onCompositionChange = useCallback((state: PeerlessCompositionState | null) => {
     setComposition((current) => state && current && state.id !== current.id && state.phase !== 'active' ? current : state);
   }, []);
-  const input = useRef<HTMLTextAreaElement>(null);
+  const ownInput = useRef<HTMLTextAreaElement>(null);
+  const input = inputRef ?? ownInput;
   const click = useRef<{ time: number; x: number; y: number; pageId: string; count: number; press: number } | null>(null);
   const touchPointer = useRef<{ pointerId: number; x: number; y: number } | null>(null);
   const touchLongPress = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -974,6 +976,8 @@ export interface PeerlessPagedEditorProps {
   zoom?: number;
   className?: string;
   autoFocus?: boolean;
+  /** Receives the document input element. */
+  inputRef?: RefObject<HTMLTextAreaElement | null>;
   onReady?(binding: PeerlessEditSessionBinding): void;
   displayWindow?: readonly [number, number];
   onDisplayWindowChange?(window: readonly [number, number]): void;
@@ -1011,7 +1015,7 @@ export interface PeerlessPictureMoves {
 }
 
 /** @internal */
-export function PeerlessPagedEditor({ sessionOptions, zoom = 1, className, autoFocus, onReady, displayWindow, onDisplayWindowChange, onClipboard, onPasteFragment, highlights, onNavigateCell, onPartPoint, onDragSelectionChange, pageOverlays, pageMirror, unbuiltPageMirror = 'text', readPageTexts, mirrorReadBlocked, scrollToPage, overlay, pictures, tables }: PeerlessPagedEditorProps): ReactElement | null {
+export function PeerlessPagedEditor({ sessionOptions, zoom = 1, className, autoFocus, inputRef, onReady, displayWindow, onDisplayWindowChange, onClipboard, onPasteFragment, highlights, onNavigateCell, onPartPoint, onDragSelectionChange, pageOverlays, pageMirror, unbuiltPageMirror = 'text', readPageTexts, mirrorReadBlocked, scrollToPage, overlay, pictures, tables }: PeerlessPagedEditorProps): ReactElement | null {
   const { t } = useTranslation();
   const [queryEngineReady, setQueryEngineReady] = useState(() => !!loadedRustDisplayListQueryEngine());
   useEffect(() => {
@@ -1134,7 +1138,7 @@ export function PeerlessPagedEditor({ sessionOptions, zoom = 1, className, autoF
     canvases.current.clear();
   }, [sessionOptions.source, session.status === 'failed']);
   return <div className={className} data-docx-worker-editor="true" aria-busy={session.status === 'opening'}>
-    {session.status === 'ready' && <PeerlessReady binding={session.binding} canvasForPage={canvasForPage} zoom={pageZoom} autoFocus={autoFocus}
+    {session.status === 'ready' && <PeerlessReady binding={session.binding} canvasForPage={canvasForPage} zoom={pageZoom} autoFocus={autoFocus} inputRef={inputRef}
       onRecoverableText={retainText} displayWindow={pageWindow} onDisplayWindowChange={changeWindow} onClipboard={onClipboard} onPasteFragment={onPasteFragment} highlights={highlights} onNavigateCell={onNavigateCell} onPartPoint={onPartPoint} onDragSelectionChange={onDragSelectionChange} pageOverlays={pageOverlays} pageMirror={pageMirror} unbuiltPageMirror={unbuiltPageMirror} readPageTexts={readPageTexts} mirrorReadBlocked={mirrorReadBlocked} scrollToPage={scrollToPage} overlay={overlay} pictures={pictures} tables={tables} queryEngineReady={queryEngineReady} />}
     {session.status === 'failed' && <div role="alert">{t('errors.failedToLoad')}</div>}
     {recoverableText.map((text, index) => <div key={index} role="status">
