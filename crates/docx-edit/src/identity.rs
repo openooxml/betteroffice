@@ -329,7 +329,9 @@ pub struct ParagraphSavePlan {
     /// its source when that would drop structure.
     pub whole_parts: Vec<SplicedPart>,
     /// `(part path, ordinals)`: the paragraphs an edit changed or removed in a part with no splice
-    /// plan, which a whole write of it may rightly change.
+    /// plan, which a whole write of it may rightly change. Parts are sorted by path in byte order
+    /// (`header10` before `header2`) and each part's ordinals ascend, so the list is the same in
+    /// every session.
     pub touched_parts: Vec<(String, Vec<u32>)>,
 }
 
@@ -2692,13 +2694,13 @@ impl IdAllocator {
     }
 
     /// The next `clientId:counter` key no paragraph has carried.
-    pub(crate) fn session_key(&mut self, doc: &EditingDoc) -> String {
+    pub(crate) fn session_key<T: ReadTxn>(&mut self, doc: &EditingDoc, txn: &T) -> String {
         let mut guard = self.seen.lock().unwrap();
         let seen = guard
             .as_mut()
             .expect("IdAllocator::new builds the seen identities");
         loop {
-            let key = doc.next_id();
+            let key = doc.next_id(txn);
             if seen.keys.insert(key.clone()) {
                 return key;
             }
@@ -4468,7 +4470,7 @@ impl EditingDoc {
                 }
             }
             if stories_of(seeded, part) != stories_of(&live, part) {
-                let touched: Vec<u32> = part
+                let mut touched: Vec<u32> = part
                     .backed
                     .iter()
                     .filter(|(_, keys)| {
@@ -4484,6 +4486,7 @@ impl EditingDoc {
                     })
                     .map(|(ordinal, _)| *ordinal)
                     .collect();
+                crate::sort::sort(&mut touched);
                 plan.touched_parts.push((part.path().to_owned(), touched));
                 continue;
             }
@@ -4507,6 +4510,7 @@ impl EditingDoc {
             }
             plan.patched_parts.push((part.path().to_owned(), patches));
         }
+        crate::sort::sort_by(&mut plan.touched_parts, &|left, right| left.0.cmp(&right.0));
         drop(live_units);
         drop(live);
         if self

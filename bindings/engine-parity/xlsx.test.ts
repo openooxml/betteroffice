@@ -80,7 +80,7 @@ const STYLES = `<styleSheet xmlns="${MAIN}"><fonts count="2"><font><sz val="11"/
   '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>' +
   '<cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs></styleSheet>';
 
-async function buildFixture(): Promise<Uint8Array> {
+async function buildFixture(replaced: Record<string, string> = {}): Promise<Uint8Array> {
   const zip = new JSZip();
   const date = new Date('2024-01-01T00:00:00Z');
   const override = (part: string, type: string) => `<Override PartName="/${part}" ContentType="${OFFICE}.${type}"/>`;
@@ -103,7 +103,93 @@ async function buildFixture(): Promise<Uint8Array> {
     'xl/drawings/_rels/drawing1.xml.rels': rels([['rIdChart', 'chart', '../charts/chart1.xml']]),
     'xl/charts/chart1.xml': CHART,
   };
+  for (const [name, content] of Object.entries({ ...parts, ...replaced })) zip.file(name, content, { date });
+  return zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
+}
+
+async function buildConditionalFixture(): Promise<Uint8Array> {
+  const zip = new JSZip();
+  const date = new Date('2024-01-01T00:00:00Z');
+  const rows = Array.from({ length: 2000 }, (_, index) => {
+    const row = index + 1;
+    return `<row r="${row}">${[...'ABCDEFGHIJ'].map((col) => `<c r="${col}${row}"><v>${row}</v></c>`).join('')}</row>`;
+  }).join('');
+  const parts: Record<string, string> = {
+    '[Content_Types].xml': '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>' +
+      `<Override PartName="/${MAIN_PART}" ContentType="${OFFICE}.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="${OFFICE}.spreadsheetml.worksheet+xml"/>` +
+      `<Override PartName="/xl/styles.xml" ContentType="${OFFICE}.spreadsheetml.styles+xml"/></Types>`,
+    '_rels/.rels': rels([['rId1', 'officeDocument', MAIN_PART]]),
+    [MAIN_PART]: `<workbook xmlns="${MAIN}" xmlns:r="${REL}"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>`,
+    'xl/_rels/workbook.xml.rels': rels([['rId1', 'worksheet', 'worksheets/sheet1.xml'], ['rId2', 'styles', 'styles.xml']]),
+    'xl/styles.xml': `<styleSheet xmlns="${MAIN}"><cellXfs count="1"><xf/></cellXfs><dxfs count="1"><dxf><fill><patternFill><bgColor rgb="FFFFC7CE"/></patternFill></fill></dxf></dxfs></styleSheet>`,
+    'xl/worksheets/sheet1.xml': `<worksheet xmlns="${MAIN}"><sheetData>${rows}</sheetData><conditionalFormatting sqref="A1:J2000">` +
+      '<cfRule type="expression" dxfId="0" priority="1"><formula>AND(MOD(A1,3)=0,SUM(A$1:A$2000)&gt;0)</formula></cfRule></conditionalFormatting></worksheet>',
+  };
   for (const [name, content] of Object.entries(parts)) zip.file(name, content, { date });
+  return zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
+}
+
+const ACCOUNTING ='_-* #,##0_-;\\-* #,##0_-;_-* &quot;-&quot;_-;_-@_-';
+const EAST_ASIAN_DATE = 'yyyy&quot;年&quot;m&quot;月&quot;d&quot;日&quot;';
+
+// The fixture with `code` declared under `id`, and the Notes sheet's A1 down holding `values` in an xf that points at it.
+const declaredFormat = (id: number, code: string, values: number[]) => buildFixture({
+  'xl/styles.xml': STYLES.replace('<fonts', `<numFmts count="1"><numFmt numFmtId="${id}" formatCode="${code}"/></numFmts><fonts`)
+    .replace('<cellXfs count="2">', '<cellXfs count="3">')
+    .replace('</cellXfs>', `<xf numFmtId="${id}" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/></cellXfs>`),
+  'xl/worksheets/sheet2.xml': `<worksheet xmlns="${MAIN}"><sheetData>${values.map((value, row) => `<row r="${row + 1}"><c r="A${row + 1}" s="2"><v>${value}</v></c></row>`).join('')}</sheetData></worksheet>`,
+});
+const notesCells = (doc: Doc, rows: number) =>
+  (JSON.parse(doc.readCellsJson(json({ ranges: [at(`A1:A${rows}`, 'sheet:1')] }))) as { ranges: { cells: { displayText: string }[][] }[] })
+    .ranges[0]!.cells.map((row) => row[0]!.displayText);
+const notesText = (engine: XlsxEngine, bytes: Uint8Array, rows: number) => scoped(engine.XlsxDocument.open(bytes), (doc) => notesCells(doc, rows));
+// The Notes sheet's A1 down as `engine` shows it once it has restored the peer snapshot `chunks`.
+const restoredNotesText = (engine: XlsxEngine, chunks: Uint8Array[], rows: number) => {
+  const builder = new engine.XlsxSnapshotBuilder();
+  let consumed = false;
+  try {
+    for (const chunk of chunks) builder.push(chunk);
+    advanceUntilReady(builder);
+    consumed = true;
+    return scoped(builder.finish(), (doc) => notesCells(doc, rows));
+  } finally {
+    if (!consumed) builder.free();
+  }
+};
+
+async function buildProtectedFixture(source: Uint8Array): Promise<Uint8Array> {
+  const zip = await JSZip.loadAsync(source);
+  const date = new Date('2024-01-01T00:00:00Z');
+  const unlocked = '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyProtection="1"><protection locked="0"/></xf>';
+  zip.file('xl/styles.xml', STYLES.replace('<cellXfs count="2">', '<cellXfs count="3">').replace('</cellXfs>', `${unlocked}</cellXfs>`), { date });
+  const sheet = DATA_SHEET.replace('<row r="5">', '<row r="4"><c r="B4" s="2"><v>1</v></c></row><row r="5">').replace('</sheetData>', '</sheetData><sheetProtection sheet="1"/>');
+  zip.file('xl/worksheets/sheet1.xml', sheet, { date });
+  return zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
+}
+
+const RICH_SHEET = `<worksheet xmlns="${MAIN}"><sheetData>` +
+  '<row r="1"><c r="A1" t="s"><v>0</v></c><c r="C1" t="inlineStr"><is><r><rPr><b/><color rgb="FFFF0000"/></rPr><t>Inline</t></r>' +
+  '<r><t xml:space="preserve"> text</t></r></is></c></row>' +
+  '<row r="2" ht="150" customHeight="1"><c r="A2" s="2" t="s"><v>1</v></c></row></sheetData></worksheet>';
+const RICH_STRINGS = `<sst xmlns="${MAIN}" count="2" uniqueCount="2">` +
+  '<si><r><rPr><b/><i/><sz val="14"/><rFont val="Cambria"/></rPr><t>Ab</t></r>' +
+  '<r><rPr><u val="double"/><color rgb="FF0000FF"/></rPr><t xml:space="preserve"> 中</t></r>' +
+  '<r><rPr><vertAlign val="superscript"/></rPr><t>😀</t></r></si>' +
+  '<si><r><rPr><b/></rPr><t xml:space="preserve">Wrapped </t></r><r><rPr><sz val="20"/></rPr><t>text in a narrow cell</t></r></si></sst>';
+
+async function buildRichFixture(source: Uint8Array): Promise<Uint8Array> {
+  const zip = await JSZip.loadAsync(source);
+  const date = new Date('2024-01-01T00:00:00Z');
+  const wrapped = '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment wrapText="1"/></xf>';
+  zip.file('xl/styles.xml', STYLES.replace('<cellXfs count="2">', '<cellXfs count="3">').replace('</cellXfs>', `${wrapped}</cellXfs>`), { date });
+  zip.file('xl/worksheets/sheet1.xml', RICH_SHEET, { date });
+  zip.file('xl/sharedStrings.xml', RICH_STRINGS, { date });
+  const types = await zip.file('[Content_Types].xml')!.async('string');
+  const strings = `<Override PartName="/xl/sharedStrings.xml" ContentType="${OFFICE}.spreadsheetml.sharedStrings+xml"/>`;
+  zip.file('[Content_Types].xml', types.replace('</Types>', `${strings}</Types>`), { date });
+  const workbookRels = await zip.file('xl/_rels/workbook.xml.rels')!.async('string');
+  const relationship = `<Relationship Id="rId4" Type="${REL}/sharedStrings" Target="sharedStrings.xml"/>`;
+  zip.file('xl/_rels/workbook.xml.rels', workbookRels.replace('</Relationships>', `${relationship}</Relationships>`), { date });
   return zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
 }
 
@@ -111,11 +197,17 @@ const wasmEngine: XlsxEngine = { ...wasmXlsx, font_preflight: wasmFontPreflight 
 const nativeEngine = createRequire(import.meta.url)('../xlsx-native/index.js') as XlsxEngine;
 const ENGINES = [['wasm', wasmEngine], ['native', nativeEngine]] as const;
 let fixture: Uint8Array;
+let conditionalFixture: Uint8Array;
+let protectedFixture: Uint8Array;
+let richFixture: Uint8Array;
 
 beforeAll(async () => {
   await initWasm({ module_or_path: readFileSync(new URL('../../packages/xlsx/src/wasm/generated/xlsx_wasm_bg.wasm', import.meta.url)) });
   await initPreflight({ module_or_path: readFileSync(new URL('../../packages/xlsx/src/wasm/generated/preflight/xlsx_preflight_bg.wasm', import.meta.url)) });
   fixture = await buildFixture();
+  conditionalFixture = await buildConditionalFixture();
+  protectedFixture = await buildProtectedFixture(fixture);
+  richFixture = await buildRichFixture(fixture);
 });
 
 // documentVersion() is "{nonce:32 hex}-{epoch}"; the nonce is minted per open.
@@ -353,6 +445,10 @@ const rows: Row<Xlsx>[] = [
   {
     method: 'XlsxDocument.openWithCalculationJson',
     call: ({ engine }) => scoped(engine.XlsxDocument.openWithCalculationJson(fixture, CONTEXT), (d) => [d.sheetInfoJson(), d.calculationStatusJson()]),
+  },
+  {
+    method: 'XlsxDocument.openRecalculatingStale',
+    call: ({ engine }) => scoped(engine.XlsxDocument.openRecalculatingStale(fixture, CONTEXT), (d) => [d.sheetInfoJson(), d.calculationStatusJson()]),
   },
   { method: 'XlsxDocument.openCollaborative', call: ({ engine }) => scoped(engine.XlsxDocument.openCollaborative(fixture, CLIENT), (d) => d.sheetInfoJson()) },
   {
@@ -679,6 +775,14 @@ const rows: Row<Xlsx>[] = [
     call: ({ doc }) => doc.translateFormulasJson(json([{ formula: 'B2*2', from: { row: 1, col: 2 }, to: { row: 4, col: 3 } }, { formula: 'A1', from: { row: 0, col: 0 }, to: { row: 0, col: 0 } }])),
   },
   { method: 'XlsxDocument.proposeJson', mutates: true, call: ({ doc }) => doc.proposeJson(json({ agentId: 'parity-agent', note: null, edits: [{ sheet: 0, row: 3, col: 1, input: '5' }] })) },
+  {
+    method: 'XlsxDocument.proposeJson',
+    name: 'XlsxDocument.proposeJson refuses a number format on a protected sheet',
+    throws: { name: 'string', reason: 'the sheet does not allow formatting cells', message: 'sheet "Data" is protected' },
+    call: ({ engine }) =>
+      scoped(engine.XlsxDocument.openWithCalculationJson(protectedFixture, CONTEXT), (d) =>
+        d.proposeJson(json({ agentId: 'parity-agent', note: null, edits: [{ sheet: 0, row: 3, col: 1, input: '5', numberFormat: { type: 'percent' } }] }))),
+  },
   defineRow({
     method: 'XlsxDocument.listProposalsJson',
     setup: ({ doc }: Xlsx) => propose(doc),
@@ -697,6 +801,48 @@ const rows: Row<Xlsx>[] = [
     call: ({ doc }, id) => doc.rejectProposalJson(json({ id })),
   }),
   { method: 'XlsxDocument.displayListJson', call: ({ doc }) => doc.displayListJson(VIEWPORT) },
+  {
+    method: 'XlsxDocument.displayListJson',
+    name: 'XlsxDocument.displayListJson (wrapped text in a row scrolled partly under the frozen pane)',
+    mutates: true,
+    call: ({ doc }) => {
+      const cell = { row: 1, col: 0 };
+      doc.applyOpsJson(json({ ops: [{ type: 'patchRangeStyle', sheet: 0, range: { start: cell, end: cell }, patch: { textWrapping: 'wrap' } }] }));
+      const list = JSON.parse(doc.displayListJson(json({ x: 0, y: 10, width: 800, height: 400 }))) as { commands: { wrap?: { maxLines?: number } }[] };
+      const wraps = list.commands.flatMap((command) => (command.wrap ? [command.wrap] : []));
+      if (wraps.length === 0 || wraps.some((wrap) => wrap.maxLines === undefined)) throw new Error(`no line limit: ${JSON.stringify(wraps)}`);
+      return wraps;
+    },
+  },
+  {
+    method: 'XlsxDocument.displayListJson',
+    name: 'XlsxDocument.displayListJson (conditional formats settled across frames)',
+    call: ({ engine }) => scoped(engine.XlsxDocument.openWithCalculationJson(conditionalFixture, CONTEXT), (d) => {
+      const viewport = json({ x: 0, y: 0, width: 640, height: 600 });
+      let frames = 0;
+      let list: { commands: { op?: string; color?: string }[]; conditionalPending?: number };
+      do {
+        list = JSON.parse(d.displayListJson(viewport)) as typeof list;
+        frames++;
+      } while (list.conditionalPending && frames < 50);
+      if (list.conditionalPending) throw new Error(`conditional formats still pending after ${frames} frames`);
+      const fills = list.commands.filter((command) => command.op === 'fillRect' && command.color === '#ffc7ce').length;
+      if (fills === 0) throw new Error('the settled frame paints no conditional fill');
+      return { settled: list.commands, fills, export: d.pngDisplayListJson(viewport) };
+    }),
+  },
+  {
+    method: 'XlsxDocument.displayListJson',
+    name: 'XlsxDocument.displayListJson (rich text cells carry their runs on the screen, png and print paths)',
+    call: ({ engine }) => scoped(engine.XlsxDocument.open(richFixture), (d) => {
+      const print = json({ sheet: 0, range: 'A1:C2', metrics: METRICS, gridlines: false });
+      const lists = [d.displayListJson(VIEWPORT), d.rangePngDisplayListJson('{}'), d.printDisplayListJson(print)];
+      const runs = lists.map((list) =>
+        (JSON.parse(list) as { commands: { runs?: unknown[] }[] }).commands.flatMap((command) => (command.runs ? [command.runs] : [])));
+      if (runs.some((found) => found.length !== 3)) throw new Error(`rich text cells painted without runs: ${JSON.stringify(runs)}`);
+      return lists;
+    }),
+  },
   { method: 'XlsxDocument.displayListForJson', call: ({ doc }) => doc.displayListForJson(1, VIEWPORT) },
   { method: 'XlsxDocument.pngDisplayListJson', call: ({ doc }) => doc.pngDisplayListJson(VIEWPORT) },
   { method: 'XlsxDocument.rangePngDisplayListJson', call: ({ doc }) => [doc.rangePngDisplayListJson('{}'), doc.rangePngDisplayListJson(json({ range: 'A1:C5', scale: 2 }))] },
@@ -714,6 +860,11 @@ const rows: Row<Xlsx>[] = [
     method: 'XlsxDocument.resizeChartJson',
     mutates: true,
     call: ({ doc }) => doc.resizeChartJson(json({ sheet: 0, chart: 'xl/drawings/drawing1.xml#0', left: 0, top: 0, right: 40, bottom: 30 })),
+  },
+  {
+    method: 'XlsxDocument.mediaBytes',
+    throws: { name: 'string', reason: 'no picture draws xl/media/image1.png' },
+    call: ({ doc }) => doc.mediaBytes('xl/media/image1.png'),
   },
   { method: 'XlsxDocument.cellRectJson', call: ({ doc }) => doc.cellRectJson(json({ sheet: 0, row: 4, col: 1 })) },
   { method: 'XlsxDocument.cellPositionJson', call: ({ doc }) => doc.cellPositionJson(json({ sheet: 0, row: 4, col: 0 })) },
@@ -867,6 +1018,32 @@ describe('xlsx native and wasm parity table', () => {
       const clients = [0, 1].map(() => scoped(engine.XlsxDocument.openRecoveryCheckpoint(checkpoint, CHECKPOINT_SEQ), (d) => d.clientId));
       console.log(`RECOVERY-OPEN-CLIENT-PROBE ${side} ${JSON.stringify(clients)}`);
       expect(clients[0]).not.toBe(clients[1]);
+    }
+  });
+
+  test('a declared built-in number format id displays like its custom twin on both engines', async () => {
+    for (const [id, code, values] of [[41, ACCOUNTING, [-1234, 1234]], [31, EAST_ASIAN_DATE, [45000]]] as const) {
+      const declared = await declaredFormat(id, code, [...values]);
+      const custom = await declaredFormat(164, code, [...values]);
+      const [wasm, native] = ENGINES.map(([, engine]) => notesText(engine, declared, values.length));
+      expect(native).toEqual(wasm);
+      expect(wasm).toEqual(notesText(wasmEngine, custom, values.length));
+      if (id === 41) {
+        expect(wasm![0]).toContain('-');
+        expect(wasm![0]).not.toContain('(');
+      } else {
+        expect(wasm![0]).toContain('年');
+      }
+    }
+  });
+
+  test('a declared built-in number format id keeps the file code in a snapshot restored on the other engine', async () => {
+    const declared = await declaredFormat(41, ACCOUNTING, [-1234, 1234]);
+    for (const [, engine] of ENGINES) {
+      const chunks = scoped(engine.XlsxDocument.openWithCalculationJson(declared, CONTEXT), snapshotChain);
+      const [shown] = restoredNotesText(otherEngine(engine), chunks, 2);
+      expect(shown).toContain('-');
+      expect(shown).not.toContain('(');
     }
   });
 

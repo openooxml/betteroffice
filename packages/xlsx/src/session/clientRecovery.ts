@@ -69,7 +69,7 @@ export async function createWorkbookRecoverySession(
     const opened = checkpoint
       ? await client.call.openRecovery({ ...checkpoint, state: checkpoint.state.slice() }, { wasm, png: options.png, ...fontCdnOptions })
       : await client.call.open(bytes.slice().buffer, { ...fontCdnOptions, collaborative: options.collaborative,
-        clientId: options.clientId, calculation: options.calculation, wasm, png: options.png,
+        clientId: options.clientId, calculation: options.calculation, recalculate: options.recalculate, wasm, png: options.png,
         initialViewport: options.initialViewport, includeEditState: true, recoveryVersion: version });
     const context: WorkbookCommandContext | undefined = opened.commandContext;
     if (!context) throw new Error('Workbook recovery omitted command context');

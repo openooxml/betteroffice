@@ -594,6 +594,15 @@ impl XlsxDocument {
     }
 
     #[napi(catch_unwind)]
+    pub fn media_bytes(&self, env: Env, asset_id: String) -> Result<Uint8Array> {
+        let _call = EngineCall::new(env);
+        self.document(env)?
+            .media_bytes(&asset_id)
+            .map_err(|error| map_error(env, error))
+            .and_then(|bytes| byte_result(env, bytes))
+    }
+
+    #[napi(catch_unwind)]
     pub fn move_chart_json(&mut self, env: Env, args: String) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document_mut(env)?
@@ -1047,6 +1056,24 @@ impl XlsxDocument {
         let bytes = bytes.to_vec();
         let _call = EngineCall::new(env);
         Document::open_with_calculation_json(&bytes, &context, native_host())
+            .map(|inner| Self {
+                inner: Some(inner),
+                failure: RefCell::new(None),
+            })
+            .map_err(|error| map_error(env, error))
+    }
+
+    /// Open keeping cached formula results, recalculating only a file with an uncached formula
+    /// or a `calcPr` full calculation request.
+    #[napi(catch_unwind, factory, js_name = "openRecalculatingStale")]
+    pub fn open_recalculating_stale(
+        env: Env,
+        bytes: Uint8Array,
+        context: Option<String>,
+    ) -> Result<Self> {
+        let bytes = bytes.to_vec();
+        let _call = EngineCall::new(env);
+        Document::open_recalculating_stale(&bytes, context.as_deref(), native_host())
             .map(|inner| Self {
                 inner: Some(inner),
                 failure: RefCell::new(None),

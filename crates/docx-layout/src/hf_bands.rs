@@ -94,6 +94,8 @@ pub struct HeadersFootersIn {
     #[serde(default)]
     pub(crate) watermark: Option<WatermarkIn>,
     #[serde(default)]
+    header_watermarks: bool,
+    #[serde(default)]
     variants: Vec<HfVariantIn>,
 }
 
@@ -122,6 +124,8 @@ struct HfVariantIn {
     /// Per-page resolved PAGE/NUMPAGES field widths.
     #[serde(default)]
     field_widths: Vec<FieldWidthsIn>,
+    #[serde(default)]
+    watermark: Option<WatermarkIn>,
 }
 
 /// Per-field-run header/footer widths.
@@ -316,6 +320,7 @@ mod tests {
             flow_height: None,
             visual_top: None,
             field_widths: Vec::new(),
+            watermark: None,
         }
     }
 
@@ -328,6 +333,7 @@ mod tests {
             header_distance: None,
             footer_distance: None,
             watermark: None,
+            header_watermarks: false,
             variants,
         }
     }
@@ -496,6 +502,29 @@ fn page_variants<'a>(
         resolve_variant(hf, page, HfKind::Header, page_number),
         resolve_variant(hf, page, HfKind::Footer, page_number),
     )
+}
+
+/// The watermark a page paints: its header's own text watermark when any header
+/// carries one, else the envelope's.
+pub(crate) fn page_watermark<'a>(
+    hf: &'a HeadersFootersIn,
+    page: &'a PageIn,
+    page_index: usize,
+) -> Option<&'a WatermarkIn> {
+    let text = |watermark: &WatermarkIn| matches!(watermark, WatermarkIn::Text(_));
+    let per_header = hf.header_watermarks
+        || hf
+            .variants
+            .iter()
+            .any(|variant| variant.watermark.as_ref().is_some_and(text));
+    if page.parity_filler == Some(true) || !per_header {
+        return hf.watermark.as_ref();
+    }
+    let (header, _) = page_variants(hf, page, page.number.unwrap_or(page_index as u64 + 1));
+    header
+        .and_then(|variant| variant.watermark.as_ref())
+        .filter(|wm| text(wm))
+        .or_else(|| hf.watermark.as_ref().filter(|wm| !text(wm)))
 }
 
 /// The header and footer parts [`compose_page_regions`] paints on a page.

@@ -47,12 +47,21 @@ export function buildImageTransformPatch(currentAttrs: Readonly<Record<string, u
 
 type WorkerLink = { query: WorkerPropertyQuery; initialData: HyperlinkData; targetSelection: DocxCommandSelection; replaceText: boolean };
 
-export function useWorkerPropertyDialogs(controller: WorkerShellController, props: Pick<DocxEditorProps, 'onError' | 'watermarkPresets' | 'rulerUnit'>) {
+/** One unit within a paragraph: the only shape that can be an object, though one ordinary character also matches and the worker answers it with null. */
+function selectsOneUnit(selection: DocxCommandSelection) {
+  const { anchor, focus } = selection;
+  return anchor.story === focus.story && anchor.paraId === focus.paraId && Math.abs(anchor.offset - focus.offset) === 1;
+}
+
+/** `dragSelecting` holds the object read at the selection the drag started from until pointer-up. */
+export function useWorkerPropertyDialogs(controller: WorkerShellController, props: Pick<DocxEditorProps, 'onError' | 'watermarkPresets' | 'rulerUnit'>,
+  dragSelecting = false) {
   const state = useSyncExternalStore(controller.subscribeShell, controller.getShellSnapshot, controller.getShellSnapshot);
   const page = useWorkerPageSetupControls(controller, props.onError);
   const watermark = useWorkerWatermarkControls(controller, props.onError);
   const selection = state.view?.workerSelection;
-  const object = useWorkerQuery<'properties'>(controller, selection ? { kind: 'properties', target: { kind: 'objectSelection', selection } } : null);
+  const object = useWorkerQuery<'properties'>(controller, selection && selectsOneUnit(selection)
+    ? { kind: 'properties', target: { kind: 'objectSelection', selection } } : null, { held: dragSelecting });
   const [image, setImage] = useState<{ query: WorkerPropertyQuery; position: boolean } | null>(null);
   const [paragraphSpacing, setParagraphSpacing] = useState<{ initial: ParagraphSpacingData; deferred: DocxDeferredCommand } | null>(null);
   const [notes, setNotes] = useState<WorkerPropertyQuery | null>(null);
@@ -204,6 +213,7 @@ export function useWorkerPropertyDialogs(controller: WorkerShellController, prop
   } : undefined;
   const imageState = object?.value?.kind === 'object' ? { wrap: imageWrapTargetFromAttrs(object.value.properties) } : null;
   return { openLink, applyPopupLink: (displayText: string, href: string, tooltip?: string) => changeLinkAtCaret({ displayText, url: href, tooltip }),
+    readLinkAtCaret: async () => (await readLink()).initialData,
     removeLinkAtCaret: () => changeLinkAtCaret(null), openNotes, openImage, openImagePosition: () => openImage(true), imagePropertiesAvailable: object?.value?.kind === 'object',
     imageState, applyImageWrap, applyImageTransform,
     pageLayout: { currentProps: page.currentProps, readCurrent: page.readCurrent, onApply: page.handlePageSetupApply },

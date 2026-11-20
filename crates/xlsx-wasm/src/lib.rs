@@ -339,6 +339,18 @@ impl XlsxDocument {
             .map_err(map_engine_error)
     }
 
+    /// Open keeping cached formula results, recalculating only a file with an uncached formula
+    /// or a `calcPr` full calculation request.
+    #[wasm_bindgen(js_name = openRecalculatingStale)]
+    pub fn open_recalculating_stale(
+        bytes: &[u8],
+        context: Option<String>,
+    ) -> Result<XlsxDocument, JsValue> {
+        Document::open_recalculating_stale(bytes, context.as_deref(), wasm_host())
+            .map(|inner| XlsxDocument { inner })
+            .map_err(map_engine_error)
+    }
+
     #[wasm_bindgen(js_name = setCalculationContextJson)]
     pub fn set_calculation_context_json(&mut self, context: &str) -> Result<(), JsValue> {
         self.inner
@@ -443,6 +455,12 @@ impl XlsxDocument {
         self.inner
             .chart_at_point_json(args)
             .map_err(map_engine_error)
+    }
+
+    /// the encoded bytes of the image an `image` draw command names.
+    #[wasm_bindgen(js_name = mediaBytes)]
+    pub fn media_bytes(&self, asset_id: &str) -> Result<Vec<u8>, JsValue> {
+        self.inner.media_bytes(asset_id).map_err(map_engine_error)
     }
 
     /// slide a chart by a pixel delta as one undo step.

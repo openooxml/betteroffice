@@ -109,6 +109,36 @@ pub struct Table {
     pub header_rows: u32,
     pub totals_rows: u32,
     pub columns: Vec<String>,
+    /// The style elements its `tableStyleInfo` turns on, lowest precedence first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub style: Vec<TableStyleElement>,
+}
+
+/// A `tableStyleElement` type a table draws, declared in precedence order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TableStyleElementType {
+    WholeTable,
+    FirstColumnStripe,
+    SecondColumnStripe,
+    FirstRowStripe,
+    SecondRowStripe,
+    LastColumn,
+    FirstColumn,
+    HeaderRow,
+    TotalRow,
+    FirstHeaderCell,
+    LastHeaderCell,
+    FirstTotalCell,
+    LastTotalCell,
+}
+
+/// One resolved element of a table style; `size` is a stripe's band height or width.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TableStyleElement {
+    pub kind: TableStyleElementType,
+    pub size: u32,
+    pub format: crate::styles::DifferentialFormat,
 }
 
 impl Table {
@@ -1655,6 +1685,7 @@ mod tests {
                 header_rows: 1,
                 totals_rows: 0,
                 columns: vec!["a".into(), "b".into(), "c".into()],
+                style: Vec::new(),
             });
         }
         if has(9) {

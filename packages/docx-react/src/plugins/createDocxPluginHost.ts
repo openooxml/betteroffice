@@ -1,4 +1,4 @@
-import { pluginActivationId } from '../../../../shared/plugin-host/gesture';
+import { gestureFor, pluginActivationId } from '../../../../shared/plugin-host/gesture';
 import type { TranslationKey } from '@betteroffice/docx-i18n';
 import type { YrsSession } from '@betteroffice/docx/yrs';
 import {
@@ -26,12 +26,13 @@ import { readSessionVersion } from '../components/DocxEditor/internals/layoutPro
 import {
   createPluginClients,
   pluginCommandScope,
+  pluginRefusal,
   scopedCommandStore,
   type DocxPluginEditorAccess,
 } from './createPluginClients';
 import { definitionProblem, pluginDefinition } from './defineDocxPlugin';
 import { scopePluginGeometry } from './geometry';
-import { createDocxSelectionObserver, type DocxSelectionIdentity } from './selectionIdentity';
+import { createDocxSelectionObserver, pluginSelectionKeys, type DocxSelectionIdentity } from './selectionIdentity';
 import { observeProposals, proposalSnapshot, type DocxProposalSnapshot } from './proposalPreview';
 import type {
   DocxPlugin,
@@ -69,6 +70,10 @@ export interface DocxPluginHostAccess extends DocxPluginEditorAccess {
   geometry(): DocxPluginGeometry | null;
   /** Calls `listener` when geometry answers change within one layout, so plugin views read them again. */
   subscribeGeometry?(listener: () => void): () => void;
+  /** The editor's own document input, which `focusDocument` focuses, or null without one. */
+  documentInput?(): HTMLElement | null;
+  /** The editor root; an editor dialog open inside it makes `focusDocument` refuse. */
+  editorRoot?(): Element | null;
 }
 
 export interface DocxPluginHost {
@@ -91,6 +96,7 @@ export interface DocxPluginHost {
   selectionUnsettled(generation?: string | null): void;
   selectionSettled(source: 'pointer' | 'touch' | 'keyboard', generation?: string | null): void;
   focusChanged(focused: boolean): void;
+  inputFocusChanged(focused: boolean): void;
   /** The focus tracker's re-check; opening, closing and mode changes run it, since each can replace the surface. */
   setFocusCheck(check: (() => void) | null): void;
   checkFocus(): void;
@@ -130,6 +136,13 @@ const EMPTY_SELECTION: DocxPluginSelection = Object.freeze({
   formatting: null,
   displayRange: null,
 });
+const NO_INPUT = 'The document input cannot take focus now';
+const DIALOG_OPEN = 'An editor dialog is open';
+
+function editorDialogOpen(root: Element | null): boolean {
+  return [...(root?.querySelectorAll('[role="dialog"]:not([aria-modal="false"])') ?? [])]
+    .some((dialog) => !dialog.closest('[data-plugin-activation]'));
+}
 
 function checkedState(value: unknown) {
   const state = value as {
@@ -206,7 +219,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
   let emittedSelection = EMPTY_SELECTION;
   let emittedResolvedSelection = 'null';
   let selectionSettleKey = 'null';
-  const selectionIdentities = new WeakMap<DocxPluginSnapshot, string>();
+  const selectionIdentities = pluginSelectionKeys;
   const resolvedSelectionKeys = new WeakMap<DocxPluginSnapshot, string>();
   let settledSelection: string | null = null;
   let settleEvent: Extract<DocxPluginEvent, { type: 'selection-settle' }> | null = null;
@@ -223,6 +236,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
     mode: 'editing' as EditorMode,
     readOnly: false,
     focused: false,
+    inputFocused: false,
     locale: 'en',
     selectionSettled: true,
     selection: EMPTY_SELECTION,
@@ -301,6 +315,24 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       setState: (next, atVersion) => invocation.setState(next, atVersion),
       onCleanup: (cleanup) => invocation.onCleanup(cleanup),
       run: (action) => invocation.run((next) => action(createContext(next))),
+      focusDocument: () => {
+        const refusal = invocation.refusal();
+        if (refusal) return pluginRefusal(refusal);
+        const input = access.documentInput?.() ?? null;
+        const node = input?.getRootNode();
+        if (!input || !node || !('activeElement' in node)) return pluginRefusal('unsupported-policy', NO_INPUT);
+        const root = node as Document | ShadowRoot;
+        const activationId = pluginActivationId(invocation.activation);
+        const owned = root.activeElement?.closest('[data-plugin-activation]')?.getAttribute('data-plugin-activation') === activationId;
+        if (!owned && !gestureFor(activationId)) return pluginRefusal('unsupported-policy');
+        if (editorDialogOpen(access.editorRoot?.() ?? null)) return pluginRefusal('unsupported-policy', DIALOG_OPEN);
+        try {
+          input.focus({ preventScroll: true });
+        } catch {
+          return pluginRefusal('unsupported-policy', NO_INPUT);
+        }
+        return root.activeElement === input ? { ok: true } : pluginRefusal('unsupported-policy', NO_INPUT);
+      },
     };
   };
 
@@ -325,6 +357,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
         mode: state.mode,
         readOnly: state.readOnly,
         focused: state.focused,
+        inputFocused: state.inputFocused,
         locale: state.locale,
         grant: runtime.grant(pluginId) as DocxPluginGrant,
         selection: state.selection,
@@ -693,6 +726,12 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       state.focused = focused;
       const generation = runtime.generation();
       if (generation) notify({ type: 'focus-change', generation, focused });
+    },
+
+    inputFocusChanged(focused) {
+      if (focused === state.inputFocused) return;
+      state.inputFocused = focused;
+      if (runtime.generation()) runtime.touch();
     },
 
     setFocusCheck(check) {

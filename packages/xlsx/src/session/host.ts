@@ -20,6 +20,7 @@ import {
 import type { XlsxPngTarget } from '../wasm/pngTarget';
 import { workbookPngFonts } from '../wasm/pngDisplayList';
 import { localNowSerial } from './calculationClock';
+import { settledDisplayListJson } from './settledFrame';
 import { createWorkbookCommandState, projectEditState, translateWorkbookSheetIds, type WorkbookCommandState } from './commandHandlers';
 import { createWorkbookCommandHost } from './commandHost';
 import { isWorkbookCommandFrameRequest, WorkbookCommandRefusal } from './commandProtocol';
@@ -49,6 +50,18 @@ type Events = { [K in keyof WorkbookSessionEvents]: WorkbookSessionEvents[K] } &
 };
 type Methods = WorkbookSessionMethods & WorkbookInternalSessionMethods;
 export const workbookCollaborationHostLoader = { load: () => import('./collaborationHost') };
+
+/** A worker preview the engine refused; the refusal and its failure code cross the session with it. */
+class WorkbookPreviewRefusal extends Error {
+  readonly code: string;
+
+  constructor(readonly refusal: unknown) {
+    super(`Preview refused: ${JSON.stringify(refusal)}`);
+    this.name = 'WorkbookPreviewRefusal';
+    const failure = (refusal as { failure?: { code?: unknown } }).failure;
+    this.code = typeof failure?.code === 'string' ? failure.code : 'refused';
+  }
+}
 
 function sheets(info: SheetInfo): WorkbookSheetSummary[] {
   return info.sheetIds.map((id, index) => ({ id, index, name: info.sheetNames[index] }));
@@ -282,9 +295,9 @@ export function createWorkbookSessionHost(
           validateWorkbookReplayEnvelope({ sequence: 1, calculation: { nowSerial: 0, randSeed: 0 }, op });
           if (op.calculation) speculative.setCalculationContext(op.calculation);
           const result = applyWorkbookReplayOp(speculative, op);
-          if (workbookReplayRefused(result)) throw new Error(`Preview refused: ${JSON.stringify(result)}`);
+          if (workbookReplayRefused(result)) throw new WorkbookPreviewRefusal(result);
         }
-        const buffer = encoder.encode(workbookDisplayListJson(speculative, viewport, sheet)).buffer;
+        const buffer = encoder.encode(settledDisplayListJson(() => workbookDisplayListJson(speculative, viewport, sheet))).buffer;
         return transferable({ displayList: buffer, version: speculative.version(), epoch: 0,
           sequence, sheet, viewport, mergedRanges: speculative.visibleMergedRanges(sheet, viewport) }, [buffer]);
       } finally { speculative.dispose(); }
@@ -430,6 +443,7 @@ export function createWorkbookSessionHost(
         collaborative: input.collaborative,
         clientId: input.clientId,
         calculation,
+        recalculate: input.recalculate,
       });
       collaborative = input.collaborative === true;
       try {

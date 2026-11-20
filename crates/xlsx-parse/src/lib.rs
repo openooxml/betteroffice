@@ -14,6 +14,7 @@ mod inventory;
 mod package;
 mod package_facts;
 mod patch;
+mod pictures;
 mod read;
 mod reference;
 mod rich_text;
@@ -22,6 +23,8 @@ mod rich_text_tests;
 #[cfg(any(test, feature = "test-oracle"))]
 mod save_oracle;
 mod styles;
+mod table_style;
+mod table_style_presets;
 mod tree;
 mod write;
 mod xml;
@@ -35,7 +38,8 @@ pub use chart::{
 #[cfg(feature = "test-counters")]
 pub use chart::{chart_counters, chart_save_counters, reset_chart_counters};
 pub use drawing_anchors::{
-    GridShift, relationship_part_of, sheet_drawing_targets, sheet_drawings_may_move,
+    GridShift, followed_anchor, relationship_part_of, sheet_drawing_targets,
+    sheet_drawings_may_move,
 };
 pub use facts_codec::{PackageFactsBuilder, PackageFactsEncoder, SNAPSHOT_RECORD_MAX_BYTES};
 pub use formula::translate_formula;
@@ -52,10 +56,11 @@ pub use inventory::{
 pub use package::{PreservedPackage, SheetVisibility, SourceSheetKind};
 pub use package_facts::{PackageFacts, PackageFactsView};
 pub use patch::{keeps_source, keeps_source_conditional_formats};
+pub use pictures::sheet_pictures;
 #[doc(hidden)]
 pub use read::styles_part_name;
 pub use read::{
-    LegacySheetDimensions, SharedStringCells, SourceCellFacts, parse_workbook,
+    LegacySheetDimensions, SharedStringCells, SourceCellFacts, cf_rule_attribute, parse_workbook,
     workbook_full_precision,
 };
 pub use reference::UnpatchableReference;

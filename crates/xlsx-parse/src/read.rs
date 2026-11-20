@@ -14,9 +14,10 @@ use xlsx_model::{
 
 use crate::formula::SharedFormulas;
 use crate::styles::parse_stylesheet;
+use crate::table_style::TableStyleInfo;
 use crate::xml::{
-    attr, collect_text, find_part, local_name, next_event, reader, resolve_entity,
-    resolve_part_path, xml_err,
+    PartNames, attr, collect_text, find_part, local_name, next_event, reader, resolve_entity,
+    resolve_part_name, resolve_part_path, xml_err,
 };
 use crate::{
     MAX_CELLS, MAX_COL_STYLES, MAX_DEFINED_NAME_BYTES, MAX_HYPERLINKS, MAX_ROW_STYLES,
@@ -135,6 +136,7 @@ pub(crate) fn parse_workbook_indexed(
         legacy_dimensions.push(legacy);
     }
 
+    let tables = crate::table_style::resolve_tables(tables, styles_bytes, &styles)?;
     if styles.cell_xfs.is_empty() && references_zero_style(&sheets) {
         styles.cell_xfs.push(xlsx_model::Xf::default());
     }
@@ -431,14 +433,18 @@ fn collect_tables(
     worksheet_path: &str,
     sheet_rels: &BTreeMap<String, Relationship>,
     sheet: SheetId,
-    out: &mut Vec<Table>,
+    out: &mut Vec<(Table, Option<TableStyleInfo>)>,
 ) -> Result<(), ParseError> {
     let base = worksheet_path.rsplit_once('/').map_or("", |(dir, _)| dir);
+    let mut seen = PartNames::default();
     for relationship in sheet_rels.values() {
         if relationship.external || !relationship.is_table() {
             continue;
         }
-        let path = resolve_part_path(base, &relationship.target);
+        let path = resolve_part_name(base, &relationship.target);
+        if !seen.push(path.clone()) {
+            continue;
+        }
         let Some(bytes) = find_part(parts, &path) else {
             continue;
         };
@@ -452,13 +458,30 @@ fn collect_tables(
     Ok(())
 }
 
+#[cfg(test)]
+thread_local! {
+    static TABLE_PARSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Table parts parsed since the last call.
+#[cfg(test)]
+pub(crate) fn take_table_parses() -> usize {
+    TABLE_PARSES.replace(0)
+}
+
 /// One `xl/tables/tableN.xml` part. `headerRowCount` defaults to 1 and
 /// `totalsRowCount` to 0, both clamped to the rows the `ref` actually spans.
-fn parse_table(data: &[u8], sheet: SheetId) -> Result<Option<Table>, ParseError> {
+fn parse_table(
+    data: &[u8],
+    sheet: SheetId,
+) -> Result<Option<(Table, Option<TableStyleInfo>)>, ParseError> {
+    #[cfg(test)]
+    TABLE_PARSES.set(TABLE_PARSES.get() + 1);
     let mut reader = reader(data);
     let mut buf = Vec::new();
     let mut depth = 0;
     let mut table: Option<Table> = None;
+    let mut style = None;
     loop {
         match next_event(&mut reader, &mut buf, &mut depth)? {
             Event::Start(e) if local_name(&e) == b"table" && table.is_none() => {
@@ -481,7 +504,11 @@ fn parse_table(data: &[u8], sheet: SheetId) -> Result<Option<Table>, ParseError>
                     header_rows,
                     totals_rows,
                     columns: Vec::new(),
+                    style: Vec::new(),
                 });
+            }
+            Event::Start(e) if local_name(&e) == b"tableStyleInfo" && table.is_some() => {
+                style = TableStyleInfo::parse(&e)?;
             }
             Event::Start(e) if local_name(&e) == b"tableColumn" => {
                 if let Some(table) = table.as_mut() {
@@ -498,7 +525,7 @@ fn parse_table(data: &[u8], sheet: SheetId) -> Result<Option<Table>, ParseError>
             _ => {}
         }
     }
-    Ok(table)
+    Ok(table.map(|table| (table, style)))
 }
 
 fn row_count_attr(
@@ -644,6 +671,10 @@ fn push_item_text(text: &mut Option<(usize, String)>, out: &mut String, value: &
 pub struct SourceCellFacts {
     /// Formula cells written without a cached `<v>` result.
     pub uncached_formulas: BTreeSet<(u32, u32)>,
+    /// Cells with a formula or `t` type but no `<v>` text and no `t="inlineStr"` `<is>` text.
+    pub blank_results: BTreeSet<(u32, u32)>,
+    /// Whether an array formula's range was too large or malformed to keep.
+    pub dropped_array_ranges: bool,
     /// Inline strings authored with formatted runs, with the text the model keeps.
     pub rich_inline: BTreeMap<(u32, u32), String>,
     /// Whether a formula cell sits inside `mc:AlternateContent`, where another
@@ -760,6 +791,8 @@ fn parse_worksheet(
                             shared_formulas.record(&e, origin, &text)?;
                             if let Some(range) = array_ref.filter(|range| range.contains(origin)) {
                                 sheet.set_array_formula(origin, range);
+                            } else if attr(&e, b"t")?.as_deref() == Some("array") {
+                                facts.dropped_array_ranges = true;
                             }
                         }
                         c.formula = Some(text);
@@ -1011,6 +1044,17 @@ fn parse_conditional_formats(
     Ok(groups)
 }
 
+/// The attribute `name` of the `<cfRule>` a rule's `raw_xml` holds.
+pub fn cf_rule_attribute(raw_xml: &str, name: &str) -> Option<String> {
+    let mut reader = reader(raw_xml.as_bytes());
+    let mut buf = Vec::new();
+    let mut depth = 0;
+    match next_event(&mut reader, &mut buf, &mut depth).ok()? {
+        Event::Start(e) if local_name(&e) == b"cfRule" => attr(&e, name.as_bytes()).ok()?,
+        _ => None,
+    }
+}
+
 /// the rectangle an `<f t="array" ref="...">` fills. anything malformed or
 /// larger than the spill limit is read as an ordinary formula.
 fn array_formula_range(
@@ -1201,6 +1245,17 @@ fn finalize_cell(
     };
     if c.formula.is_some() && c.value_text.is_none() && c.inline_text.is_none() {
         facts.uncached_formulas.insert((addr.row, addr.col));
+    }
+    let cached = c
+        .value_text
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+        || (c.ty.as_deref() == Some("inlineStr")
+            && c.inline_text
+                .as_deref()
+                .is_some_and(|text| !text.is_empty()));
+    if (c.formula.is_some() || c.ty.is_some()) && !cached {
+        facts.blank_results.insert((addr.row, addr.col));
     }
     if c.inline_runs
         && c.ty.as_deref() == Some("inlineStr")

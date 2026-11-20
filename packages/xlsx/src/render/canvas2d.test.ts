@@ -1,10 +1,13 @@
-import { describe, expect, it } from 'bun:test';
+import { describe, expect, it, spyOn } from 'bun:test';
 import fixture from '../../test-fixtures/path-backend-agreement.json';
 import type { DisplayList, GeometryPathCommand, PatternType, TextCmd } from '../display-list/types';
 import { paintDisplayList } from './canvas2d';
 import { PATTERN_MASKS } from './patterns';
 import wrapFixture from '../../../../crates/xlsx-render/tests/fixtures/text-wrap-agreement.json';
-import { wrapLines } from './wrap';
+import richWrapFixture from '../../../../crates/xlsx-render/tests/fixtures/rich-text-wrap-agreement.json';
+import * as textRuns from './textRuns';
+import * as breaker from './wrap';
+import { wrapLines, wrapSpans } from './wrap';
 
 describe('Canvas2D pattern masks', () => {
   it('cover the specified share of each 8x8 tile', () => {
@@ -609,7 +612,7 @@ describe('Canvas2D text', () => {
 });
 
 describe('Canvas2D wrapped text', () => {
-  function wrappedFills(text: string, align: 'left' | 'center' | 'right', valign: 'top' | 'center' | 'bottom', width = 60) {
+  function wrappedFills(text: string, align: 'left' | 'center' | 'right', valign: 'top' | 'center' | 'bottom', width = 60, maxLines?: number) {
     const fills: { text: string; x: number; y: number; align: string }[] = [];
     const context = {
       font: '', fillStyle: '', textAlign: '', textBaseline: '',
@@ -624,7 +627,7 @@ describe('Canvas2D wrapped text', () => {
       width: 200, height: 200,
       commands: [{ op: 'text', x: 40, y: 50, text, fontSize: 11, color: '#000000',
         align, clip: { x: 0, y: 0, w: 200, h: 200 },
-        wrap: { width, lineHeight: 18, valign },
+        wrap: { width, lineHeight: 18, valign, maxLines },
       } as unknown as TextCmd],
     }, 1);
     return fills;
@@ -642,6 +645,253 @@ describe('Canvas2D wrapped text', () => {
     expect(wrappedFills('ab cd ef', 'left', 'top').map((f) => [f.text, f.y])).toEqual([['ab cd', 50], ['ef', 68]]);
     expect(wrappedFills('ab cd ef', 'right', 'bottom').map((f) => [f.text, f.y])).toEqual([['ab cd', 32], ['ef', 50]]);
   });
+
+  function paintedLines(maxLines: number | undefined, zoom: number): number {
+    let lines = 0;
+    const context = {
+      font: '', fillStyle: '', textAlign: '', textBaseline: '',
+      save() {}, restore() {}, setTransform() {}, clearRect() {},
+      beginPath() {}, rect() {}, clip() {}, fillRect() {},
+      measureText(value: string) {
+        return { width: value.length * 10, actualBoundingBoxAscent: 12, actualBoundingBoxDescent: 4 };
+      },
+      fillText() { lines += 1; },
+    };
+    paintDisplayList(context as unknown as CanvasRenderingContext2D, {
+      width: 100 * zoom, height: 100 * zoom,
+      commands: [{ op: 'text', x: 4 * zoom, y: 50 * zoom, text: 'a\nb\nc\nd', fontSize: 11 * zoom,
+        color: '#000000', align: 'left', clip: { x: 0, y: 0, w: 100 * zoom, h: 100 * zoom },
+        wrap: { width: 1000 * zoom, lineHeight: 18 * zoom, valign: 'center', maxLines },
+      } as unknown as TextCmd],
+    }, 1);
+    return lines;
+  }
+
+  it('paints at most the wrapped lines the display list keeps, at every zoom', () => {
+    expect([1, 2, 4].map((zoom) => paintedLines(2, zoom))).toEqual([2, 2, 2]);
+    expect([1, 4294967295, undefined].map((maxLines) => paintedLines(maxLines, 1))).toEqual([1, 4, 4]);
+  });
+
+  it('aligns the kept lines as a block of their own', () => {
+    const kept = (valign: 'top' | 'center' | 'bottom') =>
+      wrappedFills('a\nb\nc', 'left', valign, 60, 2).map((f) => [f.text, f.y]);
+    expect(kept('top')).toEqual([['a', 50], ['b', 68]]);
+    expect(kept('center')).toEqual([['a', 41], ['b', 59]]);
+    expect(kept('bottom')).toEqual([['a', 32], ['b', 50]]);
+  });
+});
+
+describe('Canvas2D text runs', () => {
+  const clip = { x: 0, y: 0, w: 200, h: 30 };
+  const base = { op: 'text', x: 10, y: 20, text: 'ABCD', fontSize: 9, color: '#000000', clip, align: 'left' } as const;
+  const px = 9 * (96 / 72);
+  const redBold = { start: 0, end: 2, bold: true, color: '#ff0000' };
+  const measure = (value: string, font: string) =>
+    value.length * Number(/([\d.]+)px/.exec(font)?.[1] ?? 0) * (/(^| )bold /.test(font) ? 0.75 : 0.5);
+
+  interface Fill { text: string; x: number; y: number; font: unknown; fillStyle: unknown; textAlign: unknown }
+
+  function record(cmd: Partial<TextCmd>) {
+    return recordAll([cmd]);
+  }
+
+  function recordAll(cmds: Partial<TextCmd>[]) {
+    const calls: unknown[][] = [];
+    const fills: Fill[] = [];
+    const measures: string[] = [];
+    const state: Record<string, unknown> = {};
+    const context = new Proxy(state, {
+      get(target, property) {
+        if (typeof property !== 'string') return undefined;
+        if (property === 'measureText') {
+          return (value: string) => {
+            measures.push(value);
+            return { width: measure(value, String(target.font)) };
+          };
+        }
+        if (property in target) return target[property];
+        return (...args: unknown[]) => {
+          calls.push([property, ...args]);
+          if (property === 'fillText') {
+            fills.push({ text: args[0] as string, x: args[1] as number, y: args[2] as number,
+              font: target.font, fillStyle: target.fillStyle, textAlign: target.textAlign });
+          }
+        };
+      },
+      set(target, property, value) {
+        target[String(property)] = value;
+        calls.push(['set', String(property), value]);
+        return true;
+      },
+    });
+    paintDisplayList(context as unknown as CanvasRenderingContext2D, {
+      width: 200, height: 30, commands: cmds.map((cmd) => ({ ...base, ...cmd }) as TextCmd),
+    }, 1);
+    const fonts = calls.filter((call) => call[0] === 'set' && call[1] === 'font').map((call) => call[2]);
+    return { calls, fills, measures, fonts };
+  }
+
+  it('paints a command without runs with the calls it made before', () => {
+    const plain = [
+      ['save'], ['setTransform', 1, 0, 0, 1, 0, 0], ['beginPath'], ['rect', 0, 0, 200, 30], ['clip'], ['clearRect', 0, 0, 200, 30],
+      ['save'], ['beginPath'], ['rect', 0, 0, 200, 30], ['clip'],
+      ['set', 'fillStyle', '#000000'], ['set', 'font', '12px sans-serif'], ['set', 'textRendering', 'geometricPrecision'],
+      ['set', 'textBaseline', 'alphabetic'], ['set', 'textAlign', 'left'], ['set', 'fillStyle', '#000000'],
+      ['fillText', 'ABCD', 10, 20], ['restore'], ['restore'],
+    ];
+    expect(record({}).calls).toEqual(plain);
+    expect(record({ runs: [] }).calls).toEqual(plain);
+    expect(record({ runs: [{ start: 0, end: 2 }, { start: 2, end: 4, color: '#000000' }] }).calls).toEqual(plain);
+  });
+
+  it('paints each run in its own font and colour from a running x', () => {
+    const { fills } = record({ runs: [redBold, { start: 2, end: 4, fontSize: 15 }] });
+    expect(fills).toEqual([
+      { text: 'AB', x: 10, y: 20, font: 'bold 12px sans-serif', fillStyle: '#ff0000', textAlign: 'left' },
+      { text: 'CD', x: 10 + measure('AB', 'bold 12px sans-serif'), y: 20, font: '20px sans-serif', fillStyle: '#000000', textAlign: 'left' },
+    ]);
+  });
+
+  it("takes a run's family and style and paints uncovered text in the command's font", () => {
+    const { fills } = record({ color: '#0000ff', fontFamily: 'Calibri', runs: [{ start: 1, end: 3, fontFamily: 'Cambria', italic: true }] });
+    expect(fills.map(({ text, font, fillStyle }) => [text, font, fillStyle])).toEqual([
+      ['A', '12px "Calibri", sans-serif', '#0000ff'],
+      ['BC', 'italic 12px "Cambria", sans-serif', '#0000ff'],
+      ['D', '12px "Calibri", sans-serif', '#0000ff'],
+    ]);
+    expect(fills.map((fill) => fill.x)).toEqual([10, 16, 28]);
+  });
+
+  it('underlines and strikes each run over its own width', () => {
+    const { calls } = record({ runs: [{ start: 0, end: 2, underline: true }, { start: 2, end: 4, strike: true }] });
+    const width = measure('AB', '12px sans-serif');
+    const thickness = Math.max(px * 0.05, 0.5);
+    expect(calls.filter((call) => call[0] === 'fillRect')).toEqual([
+      ['fillRect', 10, 20 + px * 0.1, width, thickness],
+      ['fillRect', 10 + width, 20 - px * 0.26, width, thickness],
+    ]);
+  });
+
+  it('places the runs where the plain path places the whole text', () => {
+    for (const [align, x] of [['center', 100], ['right', 190]] as const) {
+      const plain = record({ align, x }).fills[0]!;
+      expect(plain).toMatchObject({ x, textAlign: align });
+      const width = measure('ABCD', '12px sans-serif');
+      const left = align === 'center' ? x - width / 2 : x - width;
+      const { fills } = record({ align, x, runs: [{ start: 0, end: 2, color: '#ff0000' }] });
+      expect(fills.map((fill) => [fill.x, fill.textAlign])).toEqual([[left, 'left'], [left + measure('AB', '12px sans-serif'), 'left']]);
+    }
+  });
+
+  it('paints a superscript or subscript run at its own size on the common baseline', () => {
+    const plain = record({ runs: [redBold] }).calls;
+    expect(record({ runs: [{ ...redBold, baseline: 'superscript' as const }] }).calls).toEqual(plain);
+    expect(record({ runs: [{ ...redBold, baseline: 'subscript' as const }] }).calls).toEqual(plain);
+  });
+
+  it('paints rotated and stacked text as without runs', () => {
+    const layouts: Partial<TextCmd>[] = [
+      { rotationDeg: 90, rotationBox: clip },
+      { stacked: true, rotationBox: clip },
+    ];
+    for (const layout of layouts) expect(record({ ...layout, runs: [redBold] }).calls).toEqual(record(layout).calls);
+  });
+
+  it("wraps runs where their own fonts break the line and paints each line's pieces in those fonts", () => {
+    const wrap = { width: 35, lineHeight: 16, valign: 'top' } as const;
+    const runs = [redBold, { start: 3, end: 9, fontSize: 15 }];
+    const { fills } = record({ text: 'AB CDE FG', wrap, runs });
+    expect(fills).toEqual([
+      { text: 'AB', x: 10, y: 20, font: 'bold 12px sans-serif', fillStyle: '#ff0000', textAlign: 'left' },
+      { text: 'CDE', x: 10, y: 36, font: '20px sans-serif', fillStyle: '#000000', textAlign: 'left' },
+      { text: 'FG', x: 10, y: 52, font: '20px sans-serif', fillStyle: '#000000', textAlign: 'left' },
+    ]);
+    const centred = record({ text: 'AB CDE FG', wrap, runs, align: 'center', x: 100 }).fills;
+    expect(centred.map((fill) => fill.x)).toEqual([100 - 18 / 2, 100 - 30 / 2, 100 - 20 / 2]);
+    const kept = record({ text: 'AB CDE FG', wrap: { ...wrap, maxLines: 2 }, runs }).fills;
+    expect(kept.map((fill) => [fill.text, fill.y])).toEqual([['AB', 20], ['CDE', 36]]);
+  });
+
+  it('paints right-to-left text as without runs', () => {
+    for (const text of ['שלום עולם', 'abc אבג 123', 'مرحبا']) {
+      expect(record({ text, runs: [redBold] }).calls).toEqual(record({ text }).calls);
+    }
+  });
+
+  it('splits inside a ligature, a combining sequence or a surrogate pair and paints all the text', () => {
+    const red = (end: number) => [{ start: 0, end, color: '#ff0000' }];
+    const pieces = (text: string, end: number) => record({ text, runs: red(end) }).fills.map((fill) => [fill.text, fill.fillStyle]);
+    expect(pieces('office', 2)).toEqual([['of', '#ff0000'], ['fice', '#000000']]);
+    expect(record({ text: 'éx', runs: [{ start: 1, end: 3, color: '#ff0000' }] }).fills.map((fill) => [fill.text, fill.fillStyle]))
+      .toEqual([['e', '#000000'], ['́x', '#ff0000']]);
+    expect(pieces('A😀B', 2)).toEqual([['A', '#ff0000'], ['😀B', '#000000']]);
+  });
+
+  it('sets the clip once around all runs, as the plain path sets it around the whole text', () => {
+    const narrow = { x: 0, y: 0, w: 25, h: 30 };
+    const { calls } = record({ clip: narrow, runs: [redBold] });
+    const painted = calls.slice(calls.findIndex((call) => call[0] === 'clearRect') + 1)
+      .map((call) => call[0]).filter((name) => name !== 'set');
+    expect(painted).toEqual(['save', 'beginPath', 'rect', 'clip', 'fillText', 'fillText', 'restore', 'restore']);
+    expect(calls.filter((call) => call[0] === 'rect')[1]).toEqual(['rect', 0, 0, 25, 30]);
+  });
+
+  it('never enters the run code or the span breaker for commands without runs', () => {
+    const pieces = spyOn(textRuns, 'runPieces');
+    const runLines = spyOn(textRuns, 'wrapRunLines');
+    const spans = spyOn(breaker, 'wrapSpans');
+    const wrap = { width: 35, lineHeight: 16, valign: 'top' } as const;
+    try {
+      recordAll([
+        {},
+        { runs: [] },
+        { text: 'AB CDE FG', wrap },
+        { rotationDeg: 90, rotationBox: clip },
+        { stacked: true, rotationBox: clip },
+      ]);
+      expect(pieces).not.toHaveBeenCalled();
+      expect(runLines).not.toHaveBeenCalled();
+      expect(spans).not.toHaveBeenCalled();
+      recordAll([{ text: 'AB CDE FG', wrap, runs: [redBold] }]);
+      expect(pieces).toHaveBeenCalledTimes(1);
+      expect(runLines).toHaveBeenCalledTimes(1);
+      expect(spans).toHaveBeenCalledTimes(1);
+    } finally {
+      pieces.mockRestore();
+      runLines.mockRestore();
+      spans.mockRestore();
+    }
+  });
+
+  it('sets each font only when it changes and measures each piece once on one line', () => {
+    const blueBold = { start: 2, end: 4, bold: true, color: '#0000ff' };
+    const { fills, fonts, measures } = record({ text: 'ABCDEF', runs: [redBold, blueBold] });
+    expect(fills.map(({ text, x, font, fillStyle }) => [text, x, font, fillStyle])).toEqual([
+      ['AB', 10, 'bold 12px sans-serif', '#ff0000'],
+      ['CD', 28, 'bold 12px sans-serif', '#0000ff'],
+      ['EF', 46, '12px sans-serif', '#000000'],
+    ]);
+    expect(fonts).toEqual([
+      '12px sans-serif', 'bold 12px sans-serif', '12px sans-serif', 'bold 12px sans-serif', '12px sans-serif',
+    ]);
+    expect(measures).toEqual(['AB', 'CD', 'EF']);
+  });
+
+  it('measures each piece of a wrapped command once, reusing the widths found while breaking', () => {
+    const wrap = { width: 35, lineHeight: 16, valign: 'top' } as const;
+    const runs = [redBold, { start: 3, end: 9, fontSize: 15 }];
+    const { fills, fonts, measures } = record({ text: 'AB CDE FG', wrap, runs });
+    expect(fills.map(({ text, y, font }) => [text, y, font])).toEqual([
+      ['AB', 20, 'bold 12px sans-serif'],
+      ['CDE', 36, '20px sans-serif'],
+      ['FG', 52, '20px sans-serif'],
+    ]);
+    expect(fonts).toEqual([
+      '12px sans-serif', 'bold 12px sans-serif', '12px sans-serif', '20px sans-serif', 'bold 12px sans-serif',
+      '20px sans-serif',
+    ]);
+    expect(measures).toEqual(['AB', ' ', 'CDE FG', 'CDE', 'FG']);
+  });
 });
 
 describe('wrapped text breaker', () => {
@@ -652,6 +902,32 @@ describe('wrapped text breaker', () => {
     const segmenter = new Segmenter(undefined, { granularity: 'grapheme' });
     const graphemes = (run: string) => [...segmenter.segment(run)].length;
     for (const { text, width, lines } of wrapFixture) expect(wrapLines(text, width, graphemes)).toEqual(lines);
+  });
+
+  it('breaks spans as it breaks lines on every shared case', () => {
+    const Segmenter = (Intl as unknown as {
+      Segmenter: new (locales: undefined, options: { granularity: 'grapheme' }) => { segment(value: string): Iterable<unknown> };
+    }).Segmenter;
+    const segmenter = new Segmenter(undefined, { granularity: 'grapheme' });
+    const graphemes = (run: string) => [...segmenter.segment(run)].length;
+    for (const { text, width, lines } of wrapFixture) {
+      const spans = wrapSpans(text, width, (start, end) => graphemes(text.slice(start, end)));
+      expect(spans.map(([start, end]) => text.slice(start, end))).toEqual(lines);
+      expect(spans.map(([start, end]) => text.slice(start, end))).toEqual(wrapLines(text, width, graphemes));
+    }
+  });
+
+  it('breaks spans measured per run as the Rust breaker does', () => {
+    for (const { text, width, runs, lines } of richWrapFixture) {
+      expect([...text].every((char) => char.charCodeAt(0) < 128)).toBe(true);
+      const advance = (index: number) => runs.find((run) => index < run.end)?.advance ?? 0;
+      const measure = (start: number, end: number) => {
+        let sum = 0;
+        for (let index = start; index < end; index += 1) sum += advance(index);
+        return sum;
+      };
+      expect(wrapSpans(text, width, measure).map(([start, end]) => text.slice(start, end))).toEqual(lines);
+    }
   });
 
   it('measures each text a bounded number of times', () => {
@@ -673,5 +949,43 @@ describe('wrapped text breaker', () => {
     expect(wrapLines(spaced, Number.NaN, measure)).toEqual([spaced]);
     expect(calls).toBeLessThanOrEqual(64);
     expect(measured).toBeLessThanOrEqual(8 * spaced.length);
+  });
+});
+
+describe('Canvas2D images', () => {
+  it('draws the kept crop of a resolved image over its rect inside its clip', () => {
+    const calls: unknown[][] = [];
+    const context = {
+      save() {}, restore() {}, setTransform() {}, clearRect() {}, beginPath() {}, clip() {},
+      rect(...args: number[]) { calls.push(['rect', ...args]); },
+      drawImage(...args: unknown[]) { calls.push(['drawImage', ...args]); },
+    };
+    const bitmap = { width: 200, height: 100 } as ImageBitmap;
+    const dl = { width: 400, height: 300, commands: [
+      { op: 'image', x: 10, y: 20, w: 80, h: 40, assetId: 'xl/media/image1.png',
+        crop: { left: 0.25, bottom: 0.5 }, clip: { x: 0, y: 0, w: 50, h: 300 } },
+      { op: 'image', x: 0, y: 0, w: 10, h: 10, assetId: 'xl/media/missing.png' },
+    ] } as DisplayList;
+    const requested: string[] = [];
+    paintDisplayList(context as unknown as CanvasRenderingContext2D, dl, 1, undefined, {
+      resolveImage: (assetId) => { requested.push(assetId); return assetId === 'xl/media/image1.png' ? bitmap : null; },
+    });
+    expect(requested).toEqual(['xl/media/image1.png', 'xl/media/missing.png']);
+    expect(calls).toEqual([
+      ['rect', 0, 0, 400, 300],
+      ['rect', 0, 0, 50, 300],
+      ['drawImage', bitmap, 50, 0, 150, 50, 10, 20, 80, 40],
+    ]);
+  });
+
+  it('skips images when the host resolves none', () => {
+    const context = {
+      save() {}, restore() {}, setTransform() {}, clearRect() {}, beginPath() {}, rect() {}, clip() {},
+      drawImage() { throw new Error('unexpected drawImage'); },
+    };
+    const dl = { width: 40, height: 40, commands: [
+      { op: 'image', x: 0, y: 0, w: 10, h: 10, assetId: 'xl/media/image1.png' },
+    ] } as DisplayList;
+    paintDisplayList(context as unknown as CanvasRenderingContext2D, dl, 1);
   });
 });

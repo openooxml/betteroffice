@@ -122,6 +122,22 @@ export {
 // Plugins: host-owned extensions with granted access to the editor
 export { defineDocxPlugin } from './plugins/defineDocxPlugin';
 export { DocxPluginToolbar } from './plugins/DocxPluginToolbar';
+export {
+  createDocxSelectionPlacement,
+  useDocxSelectionPlacement,
+  type DocxSelectionPlacement,
+  type DocxSelectionPlacementRequest,
+  type DocxSelectionPlacer,
+} from './plugins/selectionPlacement';
+export {
+  placeFloating,
+  type FloatingPlacement,
+  type FloatingPlacementInput,
+  type FloatingPlacementOptions,
+  type FloatingRect,
+  type FloatingSide,
+  type FloatingSize,
+} from '../../../shared/plugin-host/floatingPlacement';
 export type {
   DocxEditorPluginProps,
   DocxAnchorGeometryResult,

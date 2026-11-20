@@ -238,6 +238,7 @@ fn print_wraps_on_the_print_row_grid() {
         },
         &metrics,
         false,
+        &[],
         |_| {
             Err::<std::sync::Arc<ooxml_drawingml::chart::ChartSpace>, _>(
                 RenderError::ChartSourceUnavailable {
@@ -300,4 +301,171 @@ fn an_unsized_row_grows_to_the_formatted_text_it_wraps() {
     let cmds = text_commands(&wb);
     assert_eq!(cmds[0]["text"], "alpha beta gamma delta x", "{cmds:?}");
     assert!(cmds[0]["wrap"].is_object(), "{cmds:?}");
+}
+
+#[test]
+fn a_wrapped_cell_measures_its_lines_against_its_whole_row_or_merge() {
+    let mut wb = workbook(&[
+        (CellRef::new(0, 0), text("a\nb\nc"), wrap_alignment()),
+        (CellRef::new(1, 0), text("a\nb\nc"), wrap_alignment()),
+    ]);
+    wb.sheets[0].row_heights.insert(0, 40.0);
+    wb.sheets[0].row_heights.insert(1, 15.0);
+    wb.sheets[0].row_heights.insert(2, 15.0);
+    wb.sheets[0]
+        .merges
+        .push(CellRange::new(CellRef::new(1, 0), CellRef::new(2, 0)));
+    let max_lines = |scroll: f32| {
+        let viewport = Viewport {
+            x: 0.0,
+            y: scroll,
+            width: 200.0,
+            height: 200.0,
+        };
+        let dl = build_display_list(&wb, SheetId(0), &viewport).unwrap();
+        dl.commands
+            .iter()
+            .filter(|cmd| matches!(cmd, DrawCmd::Text { .. }))
+            .map(|cmd| serde_json::to_value(cmd).unwrap()["wrap"]["maxLines"].as_u64())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(max_lines(0.0), [Some(3), Some(2)]);
+    assert_eq!(max_lines(12.0), [Some(3), Some(2)]);
+    assert_eq!(max_lines(60.0), [Some(2)]);
+}
+
+#[test]
+fn a_merge_across_the_frozen_row_keeps_the_lines_of_its_whole_height() {
+    let mut wb = workbook(&[(CellRef::new(0, 0), text("a\nb\nc"), wrap_alignment())]);
+    let sheet = &mut wb.sheets[0];
+    for row in 0..3 {
+        sheet.row_heights.insert(row, 15.0);
+    }
+    sheet
+        .merges
+        .push(CellRange::new(CellRef::new(0, 0), CellRef::new(2, 0)));
+    sheet.freeze_pane = Some(xlsx_model::FreezePane::new(1, 0, CellRef::new(1, 0)));
+    let cmds = text_commands(&wb);
+    assert!(!cmds.is_empty());
+    for cmd in &cmds {
+        assert_eq!(cmd["wrap"]["maxLines"], 3, "{cmds:?}");
+    }
+}
+
+#[test]
+fn a_merge_across_the_frozen_rows_lays_out_as_before() {
+    let layout = |valign: VAlign| {
+        let mut wb = workbook(&[(
+            CellRef::new(0, 0),
+            text("a\nb\nc"),
+            Alignment {
+                wrap_text: true,
+                v: Some(valign),
+                ..Alignment::default()
+            },
+        )]);
+        let sheet = &mut wb.sheets[0];
+        for row in 0..3 {
+            sheet.row_heights.insert(row, 15.0);
+        }
+        sheet
+            .merges
+            .push(CellRange::new(CellRef::new(0, 0), CellRef::new(2, 0)));
+        sheet.freeze_pane = Some(xlsx_model::FreezePane::new(1, 0, CellRef::new(1, 0)));
+        let viewport = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 600.0,
+            height: 400.0,
+        };
+        let dl = build_display_list(&wb, SheetId(0), &viewport).unwrap();
+        dl.commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                DrawCmd::Text {
+                    x,
+                    y,
+                    text,
+                    clip,
+                    wrap: Some(text_wrap),
+                    ..
+                } => {
+                    let lines =
+                        wrap::wrap_lines(text, text_wrap.width, |line| line.len() as f32 * 7.0);
+                    let count = wrap::wrapped_lines_kept(lines.len(), text_wrap);
+                    let baselines: Vec<f32> = (0..count)
+                        .map(|index| wrap::wrapped_line_y(*y, index, count, text_wrap))
+                        .collect();
+                    Some((*x, *clip, text_wrap.width, text_wrap.line_height, baselines))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let clip = Rect {
+        x: 0.0,
+        y: 0.0,
+        w: 64.0,
+        h: 20.0,
+    };
+    let laid_out = |baselines: [f32; 3]| [(2.0, clip, 60.0, 18.666666, baselines.to_vec())];
+    assert_eq!(
+        layout(VAlign::Bottom),
+        laid_out([-22.266666, -3.5999994, 15.066667])
+    );
+    assert_eq!(layout(VAlign::Top), laid_out([12.266666, 30.933332, 49.6]));
+    assert_eq!(
+        layout(VAlign::Center),
+        laid_out([-4.999999, 13.666667, 32.333332])
+    );
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FitCase {
+    name: String,
+    height: f32,
+    line_height: f32,
+    font_size: f32,
+    max_lines: u32,
+}
+
+#[test]
+fn the_shared_table_gives_the_most_wrapped_lines_a_row_keeps() {
+    let cases: Vec<FitCase> =
+        serde_json::from_str(include_str!("../tests/fixtures/wrapped-lines-fitting.json")).unwrap();
+    let kept: Vec<(&str, Option<u32>)> = cases
+        .iter()
+        .map(|case| {
+            let lines = wrap::max_wrapped_lines(case.height, case.line_height, case.font_size);
+            (case.name.as_str(), lines)
+        })
+        .collect();
+    let expected: Vec<(&str, Option<u32>)> = cases
+        .iter()
+        .map(|case| (case.name.as_str(), Some(case.max_lines)))
+        .collect();
+    assert_eq!(kept, expected);
+}
+
+fn kept_of_three(height: f32) -> usize {
+    let text_wrap = TextWrap {
+        width: 100.0,
+        line_height: 20.0,
+        valign: TextValign::Center,
+        max_lines: wrap::max_wrapped_lines(height, 20.0, 11.0),
+    };
+    wrap::wrapped_lines_kept(3, &text_wrap)
+}
+
+#[test]
+fn a_height_that_is_not_a_number_keeps_every_line() {
+    let kept = [f32::INFINITY, f32::NEG_INFINITY, f32::NAN].map(kept_of_three);
+    assert_eq!(kept, [3, 3, 3]);
+}
+
+#[test]
+fn a_huge_height_keeps_every_line() {
+    let kept = [1e30, f32::MAX].map(kept_of_three);
+    assert_eq!(kept, [3, 3]);
 }

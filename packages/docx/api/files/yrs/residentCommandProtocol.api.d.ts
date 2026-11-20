@@ -46,6 +46,8 @@ export interface DocxCommandTableContext {
     rowCount: number;
     columnCount: number;
     hasMultiCellSelection: boolean;
+    /** The selected cells, when more than one is selected. */
+    cells?: YrsTableRange;
     canSplitCell: boolean;
     rowSpan?: number;
     columnSpan?: number;
@@ -534,6 +536,8 @@ export interface DocxCommandFramePayload {
     reservations?: DocxFrameReservations;
     parts?: ResidentPartGeometry[];
     geometry?: ResidentFrameGeometry;
+    /** The frame only moved the selection: the previous frame's `geometry` still holds, apart from its selection. */
+    geometryKept?: true;
     frame: ArrayBuffer;
     pageFrames?: ArrayBuffer[];
     caret: YrsResidentCaretSnapshot;

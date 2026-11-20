@@ -48,7 +48,7 @@ use xlsx_calc::{
 use xlsx_model::{
     Border, BorderEdge, BorderStyle, CellFormat, CellRange, CellRef, CellValue, ChartAnchor,
     DefinedName, Fill, FreezePane, HAlign, Hyperlink, MAX_COLS, MAX_ROWS, NumberFormat, Sheet,
-    SheetChart, SheetId, Stylesheet, VAlign, Workbook as WorkbookModel,
+    SheetChart, SheetId, SheetPicture, Stylesheet, VAlign, Workbook as WorkbookModel,
 };
 #[cfg(test)]
 use xlsx_ops::cell_state_for_input_no_eval;
@@ -68,9 +68,10 @@ use xlsx_render::region::{
 use xlsx_render::scaled;
 use xlsx_render::{
     ChartRegion, ChartResize, DisplayList, GhostEdit, GridGeometry, PrintMetrics, RenderError,
-    Viewport, build_display_list_with_geometry, build_print_display_list_with_charts,
-    chart_at_point, display_text, display_viewport_with_geometry, moved_chart_anchor,
-    resized_chart_anchor, resolve_chart_anchor, visible_merged_ranges_with_geometry,
+    Viewport, build_display_list_with_geometry_and_formats,
+    build_print_display_list_with_text_runs, chart_at_point, display_text,
+    display_viewport_with_geometry, moved_chart_anchor, resized_chart_anchor, resolve_chart_anchor,
+    visible_merged_ranges_with_geometry,
 };
 
 #[cfg(feature = "raster")]
@@ -81,6 +82,7 @@ use crate::authority::{
     WorkbookStructure, is_collaborative_local_layout_op, is_structural_op,
     validate_hyperlink_edit_baseline,
 };
+use crate::conditional::Budget;
 use crate::move_range::{move_range_ops, preserved_move_unsupported_part};
 use crate::sheet_json::{
     MAX_CHART_ANCHORS_PER_DRAWING, MAX_CHART_FIELD_BYTES, MAX_CHART_REFS_PER_CHART,
@@ -91,8 +93,8 @@ use crate::structured::ExportSource;
 use crate::{
     CalculationOptions, CalculationResult, CellAddress, CellEdit, CellInput, EditProfile,
     EditStage, Error, HistoryState, MutationResult, NumberFormatKind, ProposalAcceptance,
-    ProposalRequest, RenderOptions, Result, SelectionFormatting, SheetInfo, TextSearchMatch,
-    UnevaluatedCell, UpdateEvent, UpdateOrigin,
+    ProposalRequest, ProtectedSheets, RenderOptions, Result, SelectionFormatting, SheetInfo,
+    TextSearchMatch, UnevaluatedCell, UpdateEvent, UpdateOrigin,
 };
 use batch::DocumentVersion;
 use staging::CommitHistory;
@@ -512,6 +514,9 @@ pub struct Workbook {
     graph: Option<DepGraph>,
     graph_reuse: GraphReuse,
     rand_seed: Option<u32>,
+    /// The clock the last recalculation gave TODAY and NOW, which conditional
+    /// rules reading them are decided with; `None` until a recalculation with one.
+    calculated_now: Option<f64>,
     proposals: ProposalSet,
     last_calculation: CalculationResult,
     update_observers: Arc<Mutex<UpdateObservers>>,
@@ -529,6 +534,7 @@ pub struct Workbook {
     committed_changes: u64,
     /// Chart plans by part path and resolutions by part path and owner sheet.
     chart_cache: Mutex<ChartCache>,
+    conditional_cache: Mutex<crate::conditional::Cache>,
     /// SHA-256 of retained source parts that exports have cited.
     source_part_hashes: Mutex<BTreeMap<String, String>>,
 }
@@ -668,6 +674,8 @@ struct ChartCache {
     /// edited charts, which resolve from their own XML, by the epoch they
     /// were resolved at.
     edited: HashMap<(String, String), (u64, Arc<ChartSpace>)>,
+    /// the pictures each source sheet draws, as authored.
+    pictures: HashMap<usize, Arc<Vec<SheetPicture>>>,
 }
 
 struct CachedChartSpace {
@@ -903,6 +911,32 @@ impl Workbook {
         Ok(workbook)
     }
 
+    /// Opens keeping the results the file cached. Recalculates every formula, as
+    /// [`Workbook::open_recalculated_with_seed`] does, only when a formula has no cached
+    /// result or `calcPr` asks for a full calculation on load.
+    /// A blank formula result, or a blank or missing array follower, counts as uncached.
+    pub fn open_recalculating_stale(
+        bytes: &[u8],
+        options: CalculationOptions,
+        rand_seed: Option<u32>,
+    ) -> Result<Self> {
+        let mut workbook = Self::open_internal(bytes, false, None)?;
+        workbook.set_rand_seed(rand_seed);
+        let full_calculation = match &workbook.source_package {
+            Some(package) => package.materialize()?.requests_full_calculation(),
+            None => false,
+        };
+        if full_calculation
+            || workbook.has_uncached_source_formulas()
+            || workbook.has_blank_formula_results()?
+        {
+            workbook.recalculate(options);
+        } else {
+            workbook.derive_unevaluated(Some(options));
+        }
+        Ok(workbook)
+    }
+
     pub fn set_rand_seed(&mut self, seed: Option<u32>) {
         if self.rand_seed != seed {
             self.snapshot_package_lineage = None;
@@ -977,7 +1011,7 @@ impl Workbook {
     /// must be `model`.
     #[allow(clippy::too_many_arguments)]
     fn from_source_deferring(
-        model: WorkbookModel,
+        mut model: WorkbookModel,
         source_package: Option<xlsx_parse::PreservedPackage>,
         active_sheet: SheetId,
         build_graph: bool,
@@ -986,6 +1020,7 @@ impl Workbook {
         legacy_styles: (Option<&Stylesheet>, &[Stylesheet]),
         defer: bool,
     ) -> Result<Self> {
+        model.styles.read_declared_number_formats();
         validate_model(&model)?;
         validate_chart_source(&model, source_package.is_some())?;
         let active_sheet = if (active_sheet.0 as usize) < model.sheets.len() {
@@ -1090,6 +1125,7 @@ impl Workbook {
             graph,
             graph_reuse: GraphReuse::default(),
             rand_seed: None,
+            calculated_now: None,
             proposals: ProposalSet::new(),
             last_calculation: CalculationResult::default(),
             update_observers: Arc::new(Mutex::new(UpdateObservers::default())),
@@ -1100,6 +1136,7 @@ impl Workbook {
             version_nonce,
             committed_changes: 0,
             chart_cache: Mutex::new(ChartCache::default()),
+            conditional_cache: Mutex::new(crate::conditional::Cache::default()),
             source_part_hashes: Mutex::new(BTreeMap::new()),
             #[cfg(feature = "fonts")]
             font_manager: betteroffice_fonts::FontManager::new(
@@ -1369,6 +1406,7 @@ impl Workbook {
         self.graph = Some(graph);
         self.mark_graph_current();
         self.last_calculation = calculation;
+        self.calculated_now = options.now_serial;
         self.mode = WorkbookMode::Collaborative {
             structure: Box::new(structure),
         };
@@ -1644,6 +1682,7 @@ impl Workbook {
         self.graph = Some(graph);
         self.mark_graph_current();
         self.last_calculation = calculation.clone();
+        self.calculated_now = options.now_serial;
         self.undo.clear();
         self.preserved_undo.clear();
         self.preserved_redo.clear();
@@ -1777,6 +1816,56 @@ impl Workbook {
         self.source_package
             .as_ref()
             .is_some_and(|package| package.facts().has_uncached_source_formulas())
+    }
+
+    fn has_blank_formula_results(&self) -> Result<bool> {
+        if self.model().sheets.iter().any(|sheet| {
+            sheet
+                .iter_cells()
+                .any(|(_, cell)| cell.formula.is_some() && cell.value == CellValue::Empty)
+                || sheet.array_formulas().any(|(anchor, range)| {
+                    (range.start.row..=range.end.row).any(|row| {
+                        (range.start.col..=range.end.col).any(|col| {
+                            let at = CellRef::new(row, col);
+                            at != anchor
+                                && sheet
+                                    .cell(at)
+                                    .is_none_or(|cell| cell.value == CellValue::Empty)
+                        })
+                    })
+                })
+        }) {
+            return Ok(true);
+        }
+        let Some(package) = self.source_package.as_ref() else {
+            return Ok(false);
+        };
+        let package = package.materialize()?;
+        Ok(self
+            .model()
+            .sheets
+            .iter()
+            .enumerate()
+            .any(|(index, sheet)| {
+                let Some(facts) = package.source_cell_facts(index) else {
+                    return false;
+                };
+                facts.alternate_formulas
+                    || facts.dropped_array_ranges
+                    || facts.blank_results.iter().any(|&(row, col)| {
+                        sheet
+                            .cell(CellRef::new(row, col))
+                            .is_some_and(|cell| cell.formula.is_some())
+                    })
+                    || sheet.array_formulas().any(|(anchor, range)| {
+                        (range.start.row..=range.end.row).any(|row| {
+                            facts
+                                .blank_results
+                                .range((row, range.start.col)..=(row, range.end.col))
+                                .any(|&(row, col)| CellRef::new(row, col) != anchor)
+                        })
+                    })
+            }))
     }
 
     /// The committed state a structured export reads.
@@ -2045,7 +2134,26 @@ impl Workbook {
         patch: StylePatch,
         options: CalculationOptions,
     ) -> Result<MutationResult> {
+        self.patch_range_style_with_protection(
+            sheet,
+            range,
+            patch,
+            options,
+            ProtectedSheets::Refuse,
+        )
+    }
+
+    /// [`Workbook::patch_range_style`] under a [`ProtectedSheets`] policy.
+    pub fn patch_range_style_with_protection(
+        &mut self,
+        sheet: SheetId,
+        range: CellRange,
+        patch: StylePatch,
+        options: CalculationOptions,
+        protection: ProtectedSheets,
+    ) -> Result<MutationResult> {
         self.validate_bounded_range(sheet, range)?;
+        self.ensure_cells_formattable(sheet, protection)?;
         self.apply_carried_ops(
             vec![Op::PatchRangeStyle {
                 sheet,
@@ -2063,7 +2171,26 @@ impl Workbook {
         format: NumberFormatMutation,
         options: CalculationOptions,
     ) -> Result<MutationResult> {
+        self.set_range_number_format_with_protection(
+            sheet,
+            range,
+            format,
+            options,
+            ProtectedSheets::Refuse,
+        )
+    }
+
+    /// [`Workbook::set_range_number_format`] under a [`ProtectedSheets`] policy.
+    pub fn set_range_number_format_with_protection(
+        &mut self,
+        sheet: SheetId,
+        range: CellRange,
+        format: NumberFormatMutation,
+        options: CalculationOptions,
+        protection: ProtectedSheets,
+    ) -> Result<MutationResult> {
         self.validate_bounded_range(sheet, range)?;
+        self.ensure_cells_formattable(sheet, protection)?;
         self.apply_carried_ops(
             vec![Op::SetRangeNumberFormat {
                 sheet,
@@ -2081,14 +2208,26 @@ impl Workbook {
     ) -> Result<SelectionFormatting> {
         self.validate_bounded_range(sheet, range)?;
         let formats = self.range_formats(sheet, range)?;
+        let styles = &self.model.styles;
+        let mut defaults = xlsx_model::workbook::ColumnDefaults::new(self.sheet(sheet)?);
         let number_formats = formats
             .iter()
-            .map(|(_, format)| number_format_kind(&format.number_format))
+            .map(|(at, format)| {
+                let (kind, pattern) = number_format_kind(&format.number_format);
+                let style = defaults.effective_style(*at).unwrap_or(0);
+                let id = styles.xf(style).and_then(|xf| xf.num_fmt_id);
+                let kind = match (id, &format.number_format) {
+                    (Some(id @ 1..=163), NumberFormat::Custom { .. }) => {
+                        number_format_kind(&NumberFormat::Builtin { id }).0
+                    }
+                    _ => kind,
+                };
+                (kind, pattern)
+            })
             .collect::<Vec<_>>();
         let number_format = uniform(number_formats.iter().map(|(kind, _)| *kind));
         let number_format_pattern =
             uniform(number_formats.iter().map(|(_, pattern)| pattern.clone())).flatten();
-        let styles = &self.model.styles;
         Ok(SelectionFormatting {
             number_format,
             number_format_pattern,
@@ -2194,7 +2333,20 @@ impl Workbook {
         format: CapturedFormat,
         options: CalculationOptions,
     ) -> Result<MutationResult> {
+        self.apply_format_with_protection(sheet, range, format, options, ProtectedSheets::Refuse)
+    }
+
+    /// [`Workbook::apply_format`] under a [`ProtectedSheets`] policy.
+    pub fn apply_format_with_protection(
+        &mut self,
+        sheet: SheetId,
+        range: CellRange,
+        format: CapturedFormat,
+        options: CalculationOptions,
+        protection: ProtectedSheets,
+    ) -> Result<MutationResult> {
         self.validate_bounded_range(sheet, range)?;
+        self.ensure_cells_formattable(sheet, protection)?;
         self.apply_carried_ops(
             vec![Op::ApplyRangeFormat {
                 sheet,
@@ -2257,7 +2409,19 @@ impl Workbook {
         input: &str,
         options: CalculationOptions,
     ) -> Result<MutationResult> {
-        self.edit_cell_marked(sheet, cell, input, options, &mut |_| {})
+        self.edit_cell_with_protection(sheet, cell, input, options, ProtectedSheets::Refuse)
+    }
+
+    /// [`Workbook::edit_cell`] under a [`ProtectedSheets`] policy.
+    pub fn edit_cell_with_protection(
+        &mut self,
+        sheet: SheetId,
+        cell: CellRef,
+        input: &str,
+        options: CalculationOptions,
+        protection: ProtectedSheets,
+    ) -> Result<MutationResult> {
+        self.edit_cell_marked(sheet, cell, input, options, protection, &mut |_| {})
     }
 
     /// [`Workbook::edit_cell`] with its stages timed by `now`, a millisecond
@@ -2270,8 +2434,28 @@ impl Workbook {
         options: CalculationOptions,
         now: &mut impl FnMut() -> f64,
     ) -> Result<(MutationResult, EditProfile)> {
+        self.edit_cell_profiled_with_protection(
+            sheet,
+            cell,
+            input,
+            options,
+            ProtectedSheets::Refuse,
+            now,
+        )
+    }
+
+    /// [`Workbook::edit_cell_profiled`] under a [`ProtectedSheets`] policy.
+    pub fn edit_cell_profiled_with_protection(
+        &mut self,
+        sheet: SheetId,
+        cell: CellRef,
+        input: &str,
+        options: CalculationOptions,
+        protection: ProtectedSheets,
+        now: &mut impl FnMut() -> f64,
+    ) -> Result<(MutationResult, EditProfile)> {
         profiled(now, |mark| {
-            self.edit_cell_marked(sheet, cell, input, options, mark)
+            self.edit_cell_marked(sheet, cell, input, options, protection, mark)
         })
     }
 
@@ -2281,9 +2465,11 @@ impl Workbook {
         cell: CellRef,
         input: &str,
         options: CalculationOptions,
+        protection: ProtectedSheets,
         mark: &mut dyn FnMut(EditStage),
     ) -> Result<MutationResult> {
         self.validate_target(sheet, cell)?;
+        self.ensure_cells_writable(sheet, [cell], protection)?;
         let names = DefinedFunctionNames::new(&self.model.defined_names);
         let (mut state, format) =
             edit_cell_state(&self.model, &names, sheet, cell, input, options.now_serial);
@@ -2321,6 +2507,7 @@ impl Workbook {
         );
         mark(EditStage::Recalculated);
         let result = self.mutation_result(true, result, &seeds);
+        self.calculated_now = options.now_serial;
         self.publish(update);
         if keeps_graph {
             self.mark_graph_current();
@@ -2334,7 +2521,18 @@ impl Workbook {
         edits: &[CellInput],
         options: CalculationOptions,
     ) -> Result<MutationResult> {
-        self.edit_cells_from(sheet, edits, &[], options)
+        self.edit_cells_from(sheet, edits, &[], options, ProtectedSheets::Refuse)
+    }
+
+    /// [`Workbook::edit_cells`] under a [`ProtectedSheets`] policy.
+    pub fn edit_cells_with_protection(
+        &mut self,
+        sheet: SheetId,
+        edits: &[CellInput],
+        options: CalculationOptions,
+        protection: ProtectedSheets,
+    ) -> Result<MutationResult> {
+        self.edit_cells_from(sheet, edits, &[], options, protection)
     }
 
     /// [`Workbook::edit_cells`] for a paste: `copied[i]` marks `edits[i]` as a
@@ -2348,7 +2546,19 @@ impl Workbook {
         copied: &[bool],
         options: CalculationOptions,
     ) -> Result<MutationResult> {
-        self.edit_cells_from(sheet, edits, copied, options)
+        self.edit_cells_from(sheet, edits, copied, options, ProtectedSheets::Refuse)
+    }
+
+    /// [`Workbook::edit_pasted_cells`] under a [`ProtectedSheets`] policy.
+    pub fn edit_pasted_cells_with_protection(
+        &mut self,
+        sheet: SheetId,
+        edits: &[CellInput],
+        copied: &[bool],
+        options: CalculationOptions,
+        protection: ProtectedSheets,
+    ) -> Result<MutationResult> {
+        self.edit_cells_from(sheet, edits, copied, options, protection)
     }
 
     fn edit_cells_from(
@@ -2357,18 +2567,23 @@ impl Workbook {
         edits: &[CellInput],
         copied: &[bool],
         options: CalculationOptions,
+        protection: ProtectedSheets,
     ) -> Result<MutationResult> {
+        self.admit_protected_sheets(protection)?;
         if edits.is_empty() {
             return Ok(MutationResult::default());
         }
         self.ensure_worksheet_sheet(sheet)?;
+        for edit in edits {
+            self.validate_cell(edit.cell)?;
+        }
+        self.ensure_cells_writable(sheet, edits.iter().map(|edit| edit.cell), protection)?;
         let mut touched = Vec::with_capacity(edits.len());
         let mut ops = Vec::with_capacity(edits.len());
         let mut preview = self.model.clone();
         let names = DefinedFunctionNames::new(&preview.defined_names);
         let mut per_op = Vec::with_capacity(edits.len());
         for (index, edit) in edits.iter().enumerate() {
-            self.validate_cell(edit.cell)?;
             let (mut state, format) = edit_cell_state(
                 &preview,
                 &names,
@@ -2414,7 +2629,7 @@ impl Workbook {
             CommitHistory::Separate,
             None,
         )?;
-        let update = self.commit_prepared(prepared)?;
+        let update = self.commit_prepared_cell_inputs(prepared)?;
         for (sheet, cell, formula) in &touched {
             self.graph.as_mut().expect("graph initialized").set_formula(
                 *sheet,
@@ -2434,6 +2649,7 @@ impl Workbook {
             self.rand_seed,
         );
         let result = self.mutation_result(true, result, &seeds);
+        self.calculated_now = options.now_serial;
         self.publish(update);
         if keeps_graph {
             self.mark_graph_current();
@@ -2451,7 +2667,8 @@ impl Workbook {
     /// left alone. This is copy tiling only — there is no series detection —
     /// and an array formula, a partially covered merged range, an Excel table,
     /// or a chart anchored in either rectangle is refused before anything
-    /// mutates.
+    /// mutates. On a protected sheet a locked destination refuses the whole
+    /// fill, and so does a copied style unless the sheet allows formatting.
     pub fn fill_range(
         &mut self,
         sheet: SheetId,
@@ -2461,12 +2678,27 @@ impl Workbook {
     ) -> Result<MutationResult> {
         self.validate_bounded_range(sheet, source)?;
         self.validate_bounded_range(sheet, destination)?;
+        self.ensure_cells_writable(
+            sheet,
+            cells_in(destination).filter(|at| !source.contains(*at)),
+            ProtectedSheets::Refuse,
+        )?;
         let ops = crate::fill::fill_range_ops(&self.model, sheet, source, destination)?;
         if let Some(package) = self.source_package.as_ref()
             && let Some(error) =
                 crate::fill::preserved_fill_refusal(package.materialize()?, &self.preserved, sheet)
         {
             return Err(error);
+        }
+        let target = self.sheet(sheet)?;
+        let restyled = ops.iter().any(|op| match op {
+            Op::SetCell { at, cell, .. } => {
+                cell.style.unwrap_or(0) != target.effective_style(*at).unwrap_or(0)
+            }
+            _ => true,
+        });
+        if restyled {
+            self.ensure_cells_formattable(sheet, ProtectedSheets::Refuse)?;
         }
         self.apply_carried_ops(ops, options)
     }
@@ -2493,6 +2725,11 @@ impl Workbook {
             .ok_or(Error::CellOutOfRange(destination))?;
         let target = CellRange::new(destination, CellRef::new(end_row, end_col));
         self.validate_bounded_range(sheet, target)?;
+        self.ensure_cells_writable(
+            sheet,
+            cells_in(source).chain(cells_in(target)),
+            ProtectedSheets::Refuse,
+        )?;
         if source.start.row == destination.row && source.start.col == destination.col {
             return Ok(MutationResult::default());
         }
@@ -3017,6 +3254,10 @@ impl Workbook {
         let names = DefinedFunctionNames::new(&preview.defined_names);
         for edit in &request.edits {
             self.validate_target(edit.sheet, edit.cell)?;
+            self.ensure_cells_writable(edit.sheet, [edit.cell], ProtectedSheets::Refuse)?;
+            if edit.number_format.is_some() {
+                self.ensure_cells_formattable(edit.sheet, ProtectedSheets::Refuse)?;
+            }
             let (mut state, format) = edit_cell_state(
                 &preview,
                 &names,
@@ -3130,6 +3371,10 @@ impl Workbook {
             let sheet = SheetId(edit.sheet);
             let cell = CellRef::new(edit.row, edit.col);
             self.validate_target(sheet, cell)?;
+            self.ensure_cells_writable(sheet, [cell], ProtectedSheets::Refuse)?;
+            if edit.number_format.is_some() {
+                self.ensure_cells_formattable(sheet, ProtectedSheets::Refuse)?;
+            }
             let (mut state, format) = edit_cell_state(
                 &preview,
                 &names,
@@ -3229,6 +3474,7 @@ impl Workbook {
             self.rand_seed,
         );
         let mutation = self.mutation_result(true, result, &seeds);
+        self.calculated_now = options.now_serial;
         self.proposals.remove(id);
         self.publish(update);
         if keeps_graph {
@@ -3272,12 +3518,14 @@ impl Workbook {
             visible_count(rows, |rows| sheet_ref.hidden_row_spans(rows)),
             visible_count(columns, |columns| sheet_ref.hidden_col_spans(columns)),
         )?;
-        let mut frame = build_print_display_list_with_charts(
+        let mut frame = build_print_display_list_with_text_runs(
             &self.model,
             sheet,
             &viewport,
             metrics,
             gridlines,
+            &self.sheet_pictures(sheet),
+            self.text_runs_lookup(&|at: CellRef| self.painted_text_runs(sheet, at)),
             |chart| self.resolve_chart_space(&sheet_ref.name, chart),
         )
         .map_err(Error::from)?;
@@ -3295,6 +3543,41 @@ impl Workbook {
     /// display list for `sheet` with ghost pairs for pending proposals; a
     /// proposal cell whose base drifted paints its committed text instead.
     pub fn display_list_for(&self, sheet: SheetId, viewport: &Viewport) -> Result<DisplayList> {
+        self.display_list_within(sheet, viewport, Budget::Complete)
+            .map(|(display_list, _)| display_list)
+    }
+
+    /// [`Self::display_list_for`] for a frame on screen, and how many visible
+    /// cells its conditional formats left undecided: a frame spends one
+    /// frame's budget and later frames decide the rest. Until then an
+    /// undecided cell paints its result from before the last direct edit of
+    /// one cell or recalculation when it has one, and no conditional format
+    /// otherwise.
+    pub fn display_list_frame_for(
+        &self,
+        sheet: SheetId,
+        viewport: &Viewport,
+    ) -> Result<(DisplayList, u32)> {
+        self.display_list_within(sheet, viewport, Budget::Frame(None))
+    }
+
+    /// [`Self::display_list_frame_for`] with the frame's conditional formats
+    /// also stopped once `clock` passes [`crate::CONDITIONAL_FRAME_MS`].
+    pub fn display_list_frame_timed(
+        &self,
+        sheet: SheetId,
+        viewport: &Viewport,
+        clock: &dyn crate::FrameClock,
+    ) -> Result<(DisplayList, u32)> {
+        self.display_list_within(sheet, viewport, Budget::Frame(Some(clock)))
+    }
+
+    fn display_list_within(
+        &self,
+        sheet: SheetId,
+        viewport: &Viewport,
+        budget: Budget<'_>,
+    ) -> Result<(DisplayList, u32)> {
         let sheet_ref = self.sheet(sheet)?;
         validate_viewport(viewport)?;
         let geometry = self.sheet_geometry(sheet)?;
@@ -3336,16 +3619,24 @@ impl Workbook {
         }
         let ghosts: Vec<GhostEdit> = ghosts.into_values().collect();
         let owner = sheet_ref.name.clone();
-        build_display_list_with_geometry(
+        let mut pending = 0;
+        let display_list = build_display_list_with_geometry_and_formats(
             &self.model,
             sheet,
             viewport,
             &ghosts,
             &geometry,
             Some(MAX_DISPLAY_CELLS),
+            &self.sheet_pictures(sheet),
+            self.text_runs_lookup(&|at: CellRef| self.painted_text_runs(sheet, at)),
             |chart| self.resolve_chart_space(&owner, chart),
-        )
-        .map_err(Error::from)
+            |rows, cols| {
+                let (formats, undecided) = self.conditional_effects(sheet, rows, cols, budget);
+                pending = undecided;
+                formats
+            },
+        )?;
+        Ok((display_list, pending))
     }
 
     /// The chart under a viewport-local point on the active sheet, resolved
@@ -3382,7 +3673,8 @@ impl Workbook {
     ///
     /// A frame is one element in one drawing part, and two sheets may both
     /// anchor it. Every sheet holding it is repinned together, or the save
-    /// would refuse a drawing its sheets no longer agree on.
+    /// would refuse a drawing its sheets no longer agree on. The move is
+    /// refused if any sheet holding the frame is protected.
     pub fn move_chart(
         &mut self,
         sheet: SheetId,
@@ -3391,7 +3683,21 @@ impl Workbook {
         dy: f32,
         options: CalculationOptions,
     ) -> Result<MutationResult> {
+        self.move_chart_with_protection(sheet, frame, dx, dy, options, ProtectedSheets::Refuse)
+    }
+
+    /// [`Workbook::move_chart`] under a [`ProtectedSheets`] policy.
+    pub fn move_chart_with_protection(
+        &mut self,
+        sheet: SheetId,
+        frame: &str,
+        dx: f32,
+        dy: f32,
+        options: CalculationOptions,
+        protection: ProtectedSheets,
+    ) -> Result<MutationResult> {
         let sheet_ref = self.sheet(sheet)?;
+        self.ensure_objects_movable(sheet, protection)?;
         let chart = sheet_ref
             .charts
             .iter()
@@ -3404,26 +3710,45 @@ impl Workbook {
                     "chart {frame} is pinned to the sheet and cannot be moved"
                 ))
             })?;
-        let ops = self
+        let ops = self.repinned_frame_ops(frame, to, protection)?;
+        self.apply_carried_ops(ops, options)
+    }
+
+    /// The anchor writes that repin `frame` to `to` on every sheet holding it,
+    /// refused when any of those sheets is protected.
+    fn repinned_frame_ops(
+        &self,
+        frame: &str,
+        to: ChartAnchor,
+        protection: ProtectedSheets,
+    ) -> Result<Vec<Op>> {
+        let owners: Vec<SheetId> = self
             .model
             .sheets
             .iter()
             .enumerate()
-            .flat_map(|(index, sheet)| {
-                sheet
+            .filter(|(_, sheet)| sheet.charts.iter().any(|held| held.frame_id() == frame))
+            .map(|(index, _)| SheetId(index as u32))
+            .collect();
+        for &owner in &owners {
+            self.ensure_objects_movable(owner, protection)?;
+        }
+        Ok(owners
+            .into_iter()
+            .flat_map(|owner| {
+                self.model.sheets[owner.0 as usize]
                     .charts
                     .iter()
                     .filter(|held| held.frame_id() == frame)
                     .map(move |held| Op::SetChartAnchor {
-                        sheet: SheetId(index as u32),
+                        sheet: owner,
                         frame: frame.to_owned(),
                         part: held.part.clone(),
                         from: held.anchor,
                         to,
                     })
             })
-            .collect();
-        self.apply_carried_ops(ops, options)
+            .collect())
     }
 
     /// Resize the chart frame `frame` names — a `ChartRegion` id — by moving
@@ -3437,7 +3762,8 @@ impl Workbook {
     ///
     /// A frame is one element in one drawing part, and two sheets may both
     /// anchor it. Every sheet holding it is repinned together, or the save
-    /// would refuse a drawing its sheets no longer agree on.
+    /// would refuse a drawing its sheets no longer agree on. The resize is
+    /// refused if any sheet holding the frame is protected.
     pub fn resize_chart(
         &mut self,
         sheet: SheetId,
@@ -3445,7 +3771,20 @@ impl Workbook {
         edges: ChartResize,
         options: CalculationOptions,
     ) -> Result<MutationResult> {
+        self.resize_chart_with_protection(sheet, frame, edges, options, ProtectedSheets::Refuse)
+    }
+
+    /// [`Workbook::resize_chart`] under a [`ProtectedSheets`] policy.
+    pub fn resize_chart_with_protection(
+        &mut self,
+        sheet: SheetId,
+        frame: &str,
+        edges: ChartResize,
+        options: CalculationOptions,
+        protection: ProtectedSheets,
+    ) -> Result<MutationResult> {
         let sheet_ref = self.sheet(sheet)?;
+        self.ensure_objects_movable(sheet, protection)?;
         let chart = sheet_ref
             .charts
             .iter()
@@ -3466,25 +3805,7 @@ impl Workbook {
             };
             Error::InvalidOperation(message)
         })?;
-        let ops = self
-            .model
-            .sheets
-            .iter()
-            .enumerate()
-            .flat_map(|(index, sheet)| {
-                sheet
-                    .charts
-                    .iter()
-                    .filter(|held| held.frame_id() == frame)
-                    .map(move |held| Op::SetChartAnchor {
-                        sheet: SheetId(index as u32),
-                        frame: frame.to_owned(),
-                        part: held.part.clone(),
-                        from: held.anchor,
-                        to,
-                    })
-            })
-            .collect();
+        let ops = self.repinned_frame_ops(frame, to, protection)?;
         self.apply_carried_ops(ops, options)
     }
 
@@ -3557,15 +3878,31 @@ impl Workbook {
         height: u32,
         faces: Option<&[crate::PngFontFace<'_>]>,
     ) -> Result<RenderedPng> {
+        let media: Vec<(&str, Vec<u8>)> = display_list
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                xlsx_render::DrawCmd::Image { asset_id, .. } => Some(&**asset_id),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .filter_map(|asset_id| Some((asset_id, self.media_bytes(asset_id).ok()?)))
+            .collect();
+        let images: xlsx_raster::ImageMap<'_> = media
+            .iter()
+            .map(|(asset_id, bytes)| (*asset_id, bytes.as_slice()))
+            .collect();
         #[cfg(feature = "fonts")]
         let bytes = match faces {
-            Some(faces) => xlsx_raster::render_png_with_fonts(
+            Some(faces) => xlsx_raster::render_png_with_fonts_and_images(
                 display_list,
                 &crate::font::supplied_fonts(display_list, faces)?,
+                &images,
             ),
             None => {
                 let fonts = self.raster_fonts(display_list)?;
-                xlsx_raster::render_png_with_fonts(display_list, fonts.fonts())
+                xlsx_raster::render_png_with_fonts_and_images(display_list, fonts.fonts(), &images)
             }
         }
         .map_err(Error::Raster)?;
@@ -3576,7 +3913,7 @@ impl Workbook {
                     family: face.family.to_owned(),
                 });
             }
-            xlsx_raster::render_png(display_list).map_err(Error::Raster)?
+            xlsx_raster::render_png_with_images(display_list, &images).map_err(Error::Raster)?
         };
         Ok(RenderedPng {
             bytes,
@@ -3646,14 +3983,20 @@ impl Workbook {
         validate_render_size(width, height)?;
         validate_display_region(sheet_ref, &geometry, &viewport)?;
         let owner = sheet_ref.name.clone();
-        let display_list = build_display_list_with_geometry(
+        let display_list = build_display_list_with_geometry_and_formats(
             &self.model,
             sheet,
             &viewport,
             &[],
             &geometry,
             None,
+            &self.sheet_pictures(sheet),
+            self.text_runs_lookup(&|at: CellRef| self.painted_text_runs(sheet, at)),
             |chart| self.resolve_chart_space(&owner, chart),
+            |rows, cols| {
+                self.conditional_effects(sheet, rows, cols, Budget::Complete)
+                    .0
+            },
         )?;
         let display_list = if options.scale == 1.0 {
             display_list
@@ -4004,7 +4347,7 @@ impl Workbook {
             let mut model = staged.model;
             retain_formula_caches(&self.model, &mut model);
             retain_array_formulas(&self.model, &mut model);
-            self.install_model_with_ops(model, ops)?;
+            self.install_model_with_ops(model, ops, false)?;
             self.mode = WorkbookMode::Collaborative {
                 structure: Box::new(new_structure),
             };
@@ -4024,7 +4367,7 @@ impl Workbook {
             };
             let transaction = Transaction::new(ops.to_vec(), Provenance::User);
             self.apply_model_history(|undo, model| undo.commit(model, &transaction))?;
-            self.bump_model_epoch();
+            self.bump_model_epoch_keeping_results();
             self.queue_geometry_delta(delta);
             self.update_sheet_info_cache(ops, &prior_styles);
             update
@@ -4249,7 +4592,7 @@ impl Workbook {
     ) -> CalculationResult {
         match scope {
             CalculationScope::Kept => {
-                self.bump_model_epoch();
+                self.bump_model_epoch_keeping_results();
                 self.last_calculation.changed.clear();
                 CalculationResult::default()
             }
@@ -4267,7 +4610,7 @@ impl Workbook {
         rewritten: &[(SheetId, CellRef)],
         options: CalculationOptions,
     ) -> CalculationResult {
-        self.bump_model_epoch();
+        self.bump_model_epoch_keeping_results();
         let graph = self.graph.as_mut().expect("graph initialized");
         let seeds = graph.rename_sheets(&self.model, rewritten);
         let (result, recomputed) = recalc_after_with_recomputed(
@@ -4303,6 +4646,7 @@ impl Workbook {
         result.budget_exhausted |= previous.budget_exhausted && !kept.is_empty();
         result.limited_cells = kept.into_iter().chain(result.limited_cells).collect();
         self.last_calculation = result.clone();
+        self.calculated_now = options.now_serial;
         result
     }
 
@@ -4311,7 +4655,7 @@ impl Workbook {
         let keep = self.graph_current();
         #[cfg(test)]
         let fresh = keep.then(|| self.fresh_full_recalculation(options));
-        self.bump_model_epoch();
+        self.bump_model_epoch_keeping_results();
         self.recalculated_since_open = true;
         self.calculations_since_open = self.calculations_since_open.saturating_add(1);
         self.count_graph_reuse(keep);
@@ -4347,6 +4691,7 @@ impl Workbook {
             panic!("a kept dependency graph diverged from a fresh build: {difference}");
         }
         self.last_calculation = result.clone();
+        self.calculated_now = options.now_serial;
         xlsx_model::progress::pulse();
         result
     }
@@ -5029,9 +5374,26 @@ impl StagedApply {
 
 impl Workbook {
     /// Model writes funnel through here, `commit_*` or `rebuild_and_recalculate`;
-    /// charts revalidate against their refresh value after the bump.
+    /// charts revalidate against their refresh value after the bump. Screen
+    /// frames paint no conditional result from before it.
     fn bump_model_epoch(&mut self) {
         self.model_epoch = self.model_epoch.wrapping_add(1);
+        self.conditional_cells_moved();
+    }
+
+    /// [`Self::bump_model_epoch`] for cell inputs written in place, typed into
+    /// one cell or sent as a batch, or a recalculation, after which screen
+    /// frames may paint a cell's conditional result from before it until the
+    /// cell is decided again.
+    fn bump_model_epoch_keeping_results(&mut self) {
+        self.model_epoch = self.model_epoch.wrapping_add(1);
+    }
+
+    fn conditional_cells_moved(&mut self) {
+        self.conditional_cache
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .cells_moved();
     }
 
     /// The one way a model becomes this workbook's own. Per-op commit paths
@@ -5687,6 +6049,13 @@ fn validate_range(range: CellRange) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Row-major cells of a validated range.
+fn cells_in(range: CellRange) -> impl Iterator<Item = CellRef> {
+    (range.start.row..=range.end.row).flat_map(move |row| {
+        (range.start.col..=range.end.col).map(move |col| CellRef::new(row, col))
+    })
 }
 
 /// A chart part is only ever preserved from the package it was read with;
@@ -6447,6 +6816,50 @@ fn validate_viewport(viewport: &Viewport) -> Result<()> {
 }
 
 impl Workbook {
+    /// The conditional-format effects on the `rows` by `cols` cells of
+    /// `sheet`, and how many of them `budget` left undecided. A cell with rich
+    /// text runs takes only the fill.
+    fn conditional_effects(
+        &self,
+        sheet: SheetId,
+        rows: &[std::ops::Range<u32>],
+        cols: &[std::ops::Range<u32>],
+        budget: Budget<'_>,
+    ) -> (xlsx_render::CellFormats, u32) {
+        let mut cache = self
+            .conditional_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (mut formats, pending) = cache.effects(
+            (self.model_epoch, self.calculated_now),
+            &self.last_calculation.limited_cells,
+            &self.model,
+            sheet,
+            rows,
+            cols,
+            budget,
+        );
+        cache.set_withheld_rich_text(self.keep_rich_text_fonts(sheet, &mut formats));
+        (formats, pending)
+    }
+
+    /// Sets the evaluation one frame on screen spends on conditional formats.
+    #[doc(hidden)]
+    pub fn set_conditional_budget(&self, visits: u64) {
+        self.conditional_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .set_budget(visits);
+    }
+
+    #[doc(hidden)]
+    pub fn conditional_stats(&self) -> crate::ConditionalStats {
+        self.conditional_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .stats()
+    }
+
     /// Resolves a chart against `owner`, revalidating its refresh value per epoch.
     fn resolve_chart_space(
         &self,
@@ -6544,6 +6957,55 @@ impl Workbook {
             },
         );
         Ok(space)
+    }
+
+    /// The pictures `sheet` draws, anchored where a save places them.
+    fn sheet_pictures(&self, sheet: SheetId) -> Vec<SheetPicture> {
+        let index = sheet.0 as usize;
+        let (Some(origin), Some(package)) = (
+            self.preserved.origins.get(index).copied().flatten(),
+            self.source_package.as_ref(),
+        ) else {
+            return Vec::new();
+        };
+        let authored = self.source_pictures(package, origin);
+        match self.preserved.axes.get(index).and_then(Option::as_ref) {
+            Some(axes) => authored
+                .iter()
+                .filter_map(|picture| {
+                    Some(SheetPicture {
+                        anchor: xlsx_parse::followed_anchor(&picture.anchor, axes)?,
+                        ..picture.clone()
+                    })
+                })
+                .collect(),
+            None => authored.to_vec(),
+        }
+    }
+
+    fn source_pictures(&self, package: &PackageSlot, origin: usize) -> Arc<Vec<SheetPicture>> {
+        let mut cache = self.chart_cache.lock().unwrap_or_else(|e| e.into_inner());
+        Arc::clone(
+            cache
+                .pictures
+                .entry(origin)
+                .or_insert_with(|| Arc::new(package.source_sheet_pictures(origin))),
+        )
+    }
+
+    /// The encoded bytes of the image an `image` draw command names by `asset_id`.
+    pub fn media_bytes(&self, asset_id: &str) -> Result<Vec<u8>> {
+        let missing = || Error::InvalidOperation(format!("no picture draws {asset_id}"));
+        let package = self.source_package.as_ref().ok_or_else(missing)?;
+        let drawn = (0..package.facts().source_sheet_count()).any(|origin| {
+            self.source_pictures(package, origin)
+                .iter()
+                .any(|picture| picture.media == asset_id)
+        });
+        drawn
+            .then(|| package.part_bytes(asset_id))
+            .flatten()
+            .ok_or_else(missing)
     }
 }
 
@@ -7088,6 +7550,7 @@ impl Workbook {
                 ..GraphReuse::default()
             },
             rand_seed: None,
+            calculated_now: None,
             proposals: ProposalSet::new(),
             last_calculation: CalculationResult::default(),
             update_observers: Arc::new(Mutex::new(UpdateObservers::default())),
@@ -7098,6 +7561,7 @@ impl Workbook {
             version_nonce,
             committed_changes: 0,
             chart_cache: Mutex::new(ChartCache::default()),
+            conditional_cache: Mutex::new(crate::conditional::Cache::default()),
             source_part_hashes: Mutex::new(BTreeMap::new()),
             #[cfg(feature = "fonts")]
             font_manager: betteroffice_fonts::FontManager::new(

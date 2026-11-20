@@ -1,6 +1,6 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test';
-import { createRef, Profiler, startTransition, Suspense, useEffect, useLayoutEffect, useState } from 'react';
+import { createRef, Profiler, startTransition, StrictMode, Suspense, useEffect, useLayoutEffect, useState } from 'react';
 import * as measurement from '@betteroffice/docx/layout';
 import * as utils from '@betteroffice/docx/utils';
 import * as yrs from '@betteroffice/docx/yrs';
@@ -48,6 +48,7 @@ import { ToolbarCommandButton } from '../../toolbar/ToolbarCommand';
 import * as toolbarView from '../DocxEditorToolbar';
 import { useEditorChrome } from '../../EditorToolbarContext';
 import { loadMenuList } from '../../../../../../shared/react-toolbar/menuListLoader';
+import * as focusTracker from '../../../../../../shared/plugin-host/focusTracker';
 
 await loadMenuList();
 
@@ -377,8 +378,9 @@ beforeEach(() => {
   restorers.push(() => coreSession.mockRestore(), () => surface.mockRestore());
 });
 
-afterEach(() => {
+afterEach(async () => {
   cleanup();
+  await act(async () => { await new Promise<void>(resolve => setTimeout(resolve, 0)); });
   for (const restore of restorers.splice(0).reverse()) restore();
   resetEngineChoiceForTests();
 });
@@ -1337,6 +1339,77 @@ test('previewFirstPage previews a cut of the source before the whole source open
   expect(Buffer.from(cut.source.bytes!)).toEqual(Buffer.from(whole.source.bytes!));
 });
 
+test('a cut preview leaves the tracked paragraph mark a text item while the whole source names its face', async () => {
+  fontRequirements = [{ key: 'calibri|0|0', family: 'Calibri', bold: false, italic: false }];
+  const bundled = Uint8Array.of(21, 22).buffer;
+  render(<DocxEditor {...peerlessProps} previewFirstPage showToolbar={false} measurementFontProvider={{ resolve: () => async () => bundled }} />);
+  await waitFor(() => expect(requests.some(request => request.type === 'commandInit')).toBe(true));
+  const preview = requests.find(request => request.type === 'previewSource');
+  const init = requests.find(request => request.type === 'commandInit');
+  if (preview?.type !== 'previewSource' || init?.type !== 'commandInit') throw new Error('Worker did not preview');
+  const mark = '@betteroffice/fonts/paragraph-mark';
+  const chains = (extras: string) => JSON.parse(extras).fontChains as Record<string, number[]>;
+  const whole = chains(init.request.extras);
+  expect(Object.keys(chains(preview.preview.extras!))).toEqual(['calibri|0|0']);
+  expect(JSON.parse(preview.preview.layoutInput).measurement.fontChains).not.toHaveProperty(mark);
+  expect(whole[mark]).toEqual(whole['calibri|0|0']!.slice(0, 1));
+});
+
+const PARAGRAPH_MARK = '@betteroffice/fonts/paragraph-mark';
+const calibriRequirement = { key: 'calibri|0|0', family: 'Calibri', bold: false, italic: false };
+const arialRequirement = { key: 'arial|0|0', family: 'Arial', bold: false, italic: false };
+
+function fontEnvironmentChains() {
+  return requests.flatMap(request => request.type === 'edit' && request.command.kind === 'setFontEnvironment'
+    ? [(request.command.payload as yrs.DocxCommandPayloads['setFontEnvironment']).chains] : []);
+}
+
+const fontRequirementQueries = () => requests.filter(request => request.type === 'fontRequirements').length;
+
+async function hintFontRequirements(next: measurement.ResidentFontRequirement[]) {
+  fontRequirements = next;
+  const worker = workers[0]!;
+  const { session, incarnation, epoch } = worker.initial!;
+  const hint = () => act(async () => {
+    worker.onmessage?.({ data: { id: 0, ok: true, fontRequirementsHint: { session, incarnation, epoch } } } as MessageEvent<DocxEngineWorkerResponse>);
+  });
+  const asked = fontRequirementQueries();
+  await hint();
+  await waitFor(() => expect(fontRequirementQueries()).toBe(asked + 1), { timeout: 3000 });
+  await hint();
+  await waitFor(() => expect(fontRequirementQueries()).toBe(asked + 2), { timeout: 3000 });
+}
+
+test('an edit that drops the default family from the requirements sends no font environment and keeps the paragraph mark face', async () => {
+  fontRequirements = [calibriRequirement, arialRequirement];
+  const bundled = Uint8Array.of(21, 22).buffer;
+  render(<DocxEditor {...peerlessProps} measurementFontProvider={{ resolve: () => async () => bundled }} />);
+  await waitFor(() => expect(binding).toBeDefined());
+  const init = requests.find(request => request.type === 'commandInit');
+  if (init?.type !== 'commandInit') throw new Error('command initialization missing');
+  expect(JSON.parse(init.request.extras).fontChains).toHaveProperty(PARAGRAPH_MARK);
+  await hintFontRequirements([arialRequirement]);
+  expect(fontEnvironmentChains()).toHaveLength(0);
+});
+
+test('an edit that brings a picked default family into the requirements sends no font environment beyond the pick', async () => {
+  fontRequirements = [arialRequirement];
+  const bundled = Uint8Array.of(21, 22).buffer;
+  const ref = createRef<DocxEditorRef>();
+  render(<DocxEditor {...peerlessProps} ref={ref} measurementFontProvider={{ resolve: () => async () => bundled }} />);
+  await waitFor(() => expect(binding).toBeDefined());
+  const init = requests.find(request => request.type === 'commandInit');
+  if (init?.type !== 'commandInit') throw new Error('command initialization missing');
+  expect(JSON.parse(init.request.extras).fontChains).not.toHaveProperty(PARAGRAPH_MARK);
+  selectWorkerText();
+  await act(async () => { await ref.current!.commands.execute('fontFamily', { family: 'Calibri' }); });
+  await waitFor(() => expect(fontEnvironmentChains()).toHaveLength(1));
+  expect(fontEnvironmentChains()[0]).toHaveProperty('calibri|0|0');
+  await hintFontRequirements([arialRequirement, calibriRequirement]);
+  expect(fontEnvironmentChains()).toHaveLength(1);
+  expect(fontEnvironmentChains()[0]).not.toHaveProperty(PARAGRAPH_MARK);
+});
+
 test('a declined source cut previews the whole source before the command session', async () => {
   refuseCut = true;
   render(<DocxEditor {...peerlessProps} previewFirstPage showToolbar={false} />);
@@ -2101,7 +2174,12 @@ test('a property-dialog command failure reports a recoverable error and keeps th
   const onError = mock((_error: Error, _info?: DocxErrorInfo) => {});
   const view = render(<DocxEditor {...peerlessProps} ref={ref} onError={onError} />);
   await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
-  const read = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'documentRead').mockRejectedValueOnce(failure);
+  const original = yrs.ResidentEngineWorkerClient.prototype.documentReadAt;
+  const read = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'documentReadAt').mockImplementation(function (
+    this: yrs.ResidentEngineWorkerClient, request: { kind: string; target?: { kind: string } }, token: string) {
+    return request.kind === 'properties' && request.target?.kind === 'watermark'
+      ? Promise.reject(failure) : original.call(this, request as never, token);
+  } as never);
   restorers.push(() => read.mockRestore());
   await act(async () => { expect(await ref.current!.commands.execute('watermark', null)).toMatchObject({ ok: false }); });
   expect(onError.mock.calls).toEqual([[failure, { recoverable: true }]]);
@@ -3383,3 +3461,251 @@ for (const refused of [false, true]) {
     else expect(onError).not.toHaveBeenCalled();
   });
 }
+
+function stubSearchMatch(query: string) {
+  const post = FakeWorker.prototype.postMessage;
+  const spy = spyOn(FakeWorker.prototype, 'postMessage').mockImplementation(function (this: FakeWorker, message) {
+    if (!('id' in message) || message.type !== 'documentRead' || message.read.kind !== 'searchText') return post.call(this, message);
+    requests.push(message);
+    const response = { id: message.id, ok: true, read: { version: 'worker-version', value: {
+      matches: [{ story: 'body', paraId: 'a', start: 0, displayFrom: 1, displayTo: 1 + query.length }], carried: -1 } } };
+    queueMicrotask(() => this.onmessage?.({ data: response } as MessageEvent<DocxEngineWorkerResponse>));
+  });
+  restorers.push(() => spy.mockRestore());
+}
+
+function settled<T>(promise: Promise<T>) {
+  return promise.then(value => value, (error: Error) => error.message);
+}
+
+test('the worker editor searches after a strict mode remount', async () => {
+  stubSearchMatch('Hello');
+  const ref = createRef<DocxEditorRef>();
+  render(<StrictMode><DocxEditor {...peerlessProps} ref={ref} /></StrictMode>);
+  await waitFor(() => expect(binding).toBeDefined());
+  let found!: Promise<unknown>;
+  await act(async () => {
+    found = settled(ref.current!.search('Hello'));
+    await found;
+  });
+  await expect(found).resolves.toEqual(expect.objectContaining({ query: 'Hello', total: 1, current: 0 }));
+});
+
+test('the worker editor runs commands after a strict mode remount', async () => {
+  const ref = createRef<DocxEditorRef>();
+  render(<StrictMode><DocxEditor {...peerlessProps} ref={ref} /></StrictMode>);
+  await waitFor(() => expect(binding).toBeDefined());
+  let result: unknown;
+  await act(async () => { result = await ref.current!.commands.execute('editingMode', { mode: 'viewing' }); });
+  expect(result).toMatchObject({ ok: true });
+  await waitFor(() => expect(binding!.admission.getSnapshot().readOnly).toBe(true));
+  expect(requests.some(request => request.type === 'edit' && request.command.kind === 'setReadOnly' &&
+    (request.command.payload as { readOnly: boolean }).readOnly)).toBe(true);
+});
+
+test('the worker editor applies typing after a strict mode remount', async () => {
+  surface.mockRestore();
+  realSurface = true;
+  const original = sessionHook.usePeerlessEditSession;
+  const hook = spyOn(sessionHook, 'usePeerlessEditSession').mockImplementation(options => {
+    const result = original(options);
+    if (result.binding) binding = result.binding;
+    return result;
+  });
+  restorers.push(() => hook.mockRestore());
+  const onDocumentChange = mock(() => {});
+  render(<StrictMode><DocxEditor {...peerlessProps} onDocumentChange={onDocumentChange} showToolbar={false} /></StrictMode>);
+  await waitFor(() => expect(binding).toBeDefined());
+  await act(async () => {
+    const submitted = binding!.commands.submit({ kind: 'insertText', payload: { text: 'x' } });
+    if (submitted.status !== 'submitted') throw new Error(`edit not submitted: ${JSON.stringify(submitted)}`);
+    expect((await submitted.ticket.ack).status).toBe('applied');
+  });
+  expect(workers.filter(worker => worker.initial).at(-1)!.text).toBe('x');
+  await waitFor(() => expect(onDocumentChange).toHaveBeenCalledTimes(1));
+});
+
+test('the worker editor completes layout after a strict mode remount', async () => {
+  const ref = createRef<DocxEditorRef>();
+  render(<StrictMode><DocxEditor {...peerlessProps} ref={ref} /></StrictMode>);
+  await waitFor(() => expect(binding).toBeDefined());
+  const view = binding!.viewStore.getSnapshot();
+  view.geometry = { identity: view.identity, coversThroughSeq: view.throughSeq, frameEpoch: 1, layoutRevision: 1,
+    pages: [], caret: null, selectionRects: [] };
+  let complete!: Promise<number | string>;
+  await act(async () => {
+    complete = settled(ref.current!.whenLayoutComplete({ timeoutMs: 2000 }));
+    await complete;
+  });
+  await expect(complete).resolves.toBe(0);
+});
+
+test('the worker editor keeps a search listener registered before a strict mode remount', async () => {
+  stubSearchMatch('Hello');
+  const listener = mock((_state: unknown) => {});
+  const editor = createRef<DocxEditorRef>() as { current: DocxEditorRef | null };
+  let registered = false;
+  const attach = (instance: DocxEditorRef | null) => {
+    editor.current = instance ?? editor.current;
+    if (instance && !registered) {
+      registered = true;
+      instance.onSearchChange(listener);
+    }
+  };
+  render(<StrictMode><DocxEditor {...peerlessProps} ref={attach} /></StrictMode>);
+  await waitFor(() => expect(binding).toBeDefined());
+  expect(registered).toBe(true);
+  let found!: Promise<unknown>;
+  await act(async () => {
+    found = settled(editor.current!.search('Hello'));
+    await found;
+  });
+  expect(listener).toHaveBeenCalledWith(expect.objectContaining({ query: 'Hello', total: 1 }));
+  await expect(found).resolves.toEqual(expect.objectContaining({ total: 1 }));
+});
+
+test('the worker editor keeps change listeners registered before a strict mode remount', async () => {
+  surface.mockRestore();
+  realSurface = true;
+  const original = sessionHook.usePeerlessEditSession;
+  const hook = spyOn(sessionHook, 'usePeerlessEditSession').mockImplementation(options => {
+    const result = original(options);
+    if (result.binding) binding = result.binding;
+    return result;
+  });
+  restorers.push(() => hook.mockRestore());
+  const documentListener = mock((_change: unknown) => {});
+  const selectionListener = mock((_selection: unknown) => {});
+  let registered = false;
+  const attach = (instance: DocxEditorRef | null) => {
+    if (instance && !registered) {
+      registered = true;
+      instance.onDocumentChange(documentListener);
+      instance.onSelectionChange(selectionListener);
+    }
+  };
+  render(<StrictMode><DocxEditor {...peerlessProps} ref={attach} showToolbar={false} /></StrictMode>);
+  await waitFor(() => expect(binding).toBeDefined());
+  expect(registered).toBe(true);
+  await act(async () => {
+    const edit = binding!.commands.submit({ kind: 'insertText', payload: { text: 'x' } });
+    if (edit.status === 'submitted') await edit.ticket.ack;
+    const at = { story: 'body', paraId: 'a', offset: 0 };
+    const select = binding!.commands.submit({ kind: 'select', payload: { selection: { anchor: at, focus: at } } });
+    if (select.status === 'submitted') await select.ticket.ack;
+  });
+  await waitFor(() => expect(documentListener).toHaveBeenCalledWith(expect.objectContaining({ version: expect.any(String) })));
+  await waitFor(() => expect(selectionListener).toHaveBeenCalledWith(expect.objectContaining({ hasSelection: true })));
+});
+
+test('a real unmount of the worker editor releases it within one task', async () => {
+  const ref = createRef<DocxEditorRef>();
+  const view = render(<DocxEditor {...peerlessProps} ref={ref} />);
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
+  const editor = ref.current!;
+  holdInitial = true;
+  let outcome = 'pending';
+  act(() => { editor.loadDocumentBuffer(Uint8Array.of(8, 9)).catch((error: Error) => { outcome = error.message; }); });
+  await waitFor(() => expect(requests.filter(({ type }) => type === 'commandInit')).toHaveLength(2));
+  view.unmount();
+  await Promise.resolve();
+  expect(outcome).toBe('pending');
+  await act(async () => { await new Promise<void>(resolve => setTimeout(resolve, 0)); });
+  expect(outcome).toBe('Editor was closed');
+  await expect(editor.commands.execute('editingMode', { mode: 'viewing' })).resolves
+    .toMatchObject({ ok: false, failure: { code: 'editor-unavailable' } });
+  await waitFor(() => expect(workers.at(-1)!.terminate).toHaveBeenCalled());
+});
+
+test('a plain mount opens the document once', async () => {
+  const view = render(<DocxEditor {...peerlessProps} />);
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
+  await act(async () => { await new Promise<void>(resolve => setTimeout(resolve, 0)); });
+  expect(workers).toHaveLength(1);
+  expect(requests.filter(({ type }) => type === 'openSource')).toHaveLength(1);
+  expect(requests.filter(({ type }) => type === 'commandInit')).toHaveLength(1);
+});
+
+function focusPanelPlugin(id: string) {
+  const seen: { context?: DocxPluginContext<null> } = {};
+  const plugin = defineDocxPlugin<null>({ id, createState: () => null, panel: {
+    title: 'Focus', placement: 'right', render: (props) => { seen.context = props.context; return <button data-testid={`${id}-button`} />; },
+  } });
+  return { plugin, seen };
+}
+
+function attachDocumentInput(root: HTMLElement) {
+  const input = document.createElement('textarea');
+  input.className = 'paged-editor__input';
+  root.append(input);
+  surface.mock.calls.at(-1)![0].inputRef!.current = input;
+  return input;
+}
+
+test('worker plugins see the document input focus apart from focus in other editor UI', async () => {
+  const { plugin, seen } = focusPanelPlugin('input-focus');
+  const view = render(<DocxEditor {...peerlessProps} showToolbar={false} plugins={[plugin]} />);
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
+  const editorSurface = view.getByTestId('docx-worker-paged-editor');
+  editorSurface.setAttribute('data-docx-worker-editor', 'true');
+  const input = attachDocumentInput(editorSurface);
+  const control = document.createElement('button');
+  editorSurface.append(control);
+  await waitFor(() => expect(seen.context).toBeDefined());
+  expect(seen.context!.snapshot.inputFocused).toBe(false);
+  await act(async () => { input.focus(); });
+  await waitFor(() => expect(seen.context!.snapshot).toMatchObject({ focused: true, inputFocused: true }));
+  await act(async () => { control.focus(); });
+  await waitFor(() => expect(seen.context!.snapshot).toMatchObject({ focused: true, inputFocused: false }));
+  await act(async () => { input.focus(); });
+  await waitFor(() => expect(seen.context!.snapshot.inputFocused).toBe(true));
+  await act(async () => { view.getByTestId('input-focus-button').focus(); });
+  await waitFor(() => expect(seen.context!.snapshot).toMatchObject({ focused: false, inputFocused: false }));
+});
+
+test('focusDocument from a worker plugin focuses its editor’s own input and refuses while an editor dialog is open', async () => {
+  const { plugin, seen } = focusPanelPlugin('focus-probe');
+  const view = render(<DocxEditor {...peerlessProps} showToolbar={false} plugins={[plugin]} />);
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
+  const editorSurface = view.getByTestId('docx-worker-paged-editor');
+  const decoy = document.createElement('textarea');
+  decoy.className = 'paged-editor__input';
+  editorSurface.append(decoy);
+  const input = attachDocumentInput(editorSurface);
+  const button = await waitFor(() => view.getByTestId('focus-probe-button'));
+  const dialog = document.createElement('div');
+  dialog.setAttribute('role', 'dialog');
+  editorSurface.append(dialog);
+  button.focus();
+  expect(seen.context!.focusDocument()).toMatchObject({ ok: false, failure: { code: 'unsupported-policy' } });
+  expect(document.activeElement).toBe(button);
+  dialog.remove();
+  expect(seen.context!.focusDocument()).toEqual({ ok: true });
+  expect(document.activeElement).toBe(input);
+});
+
+test('a worker editor without plugins tracks no focus and commits nothing when its input takes focus', async () => {
+  const track = spyOn(focusTracker, 'trackFocus');
+  restorers.push(() => track.mockRestore());
+  for (const plugins of [undefined, []]) {
+    let commits = 0;
+    const view = render(<Profiler id="editor" onRender={() => { commits += 1; }}>
+      <DocxEditor {...peerlessProps} showToolbar={false} plugins={plugins} />
+    </Profiler>);
+    await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
+    const input = attachDocumentInput(view.getByTestId('docx-worker-paged-editor'));
+    await act(async () => { await new Promise<void>((resolve) => setTimeout(resolve, 0)); });
+    const settled = commits;
+    await act(async () => { input.focus(); });
+    await act(async () => { input.blur(); });
+    await act(async () => { await new Promise<void>((resolve) => setTimeout(resolve, 0)); });
+    expect(commits).toBe(settled);
+    expect(track).not.toHaveBeenCalled();
+    view.unmount();
+  }
+  const { plugin } = focusPanelPlugin('tracked');
+  const view = render(<DocxEditor {...peerlessProps} showToolbar={false} plugins={[plugin]} />);
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
+  const input = attachDocumentInput(view.getByTestId('docx-worker-paged-editor'));
+  expect(track.mock.calls.some(([roots]) => roots().includes(input))).toBe(true);
+});

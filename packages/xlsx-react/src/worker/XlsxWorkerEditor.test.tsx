@@ -9381,6 +9381,85 @@ it('peerless shows the supplied indicator while the workbook opens', async () =>
   await waitFor(() => expect(view.queryByText('Workbook opening')).toBeNull());
 });
 
+it('peerless shows the indicator in a status layer over the workspace that leaves the root children as they are', async () => {
+  const host = peerlessHarness();
+  const pending = deferred<WorkbookSession>();
+  host.open.mockReturnValue(pending.promise);
+  const ready = mock((_api: XlsxAsyncEditorApi) => {});
+  const onError = mock((_error: Error) => {});
+  const rootChildren = (root: HTMLElement) => Array.from(root.children)
+    .map((child) => child.getAttribute('data-testid') ?? child.getAttribute('role') ?? child.tagName);
+  const view = render(host.asyncEditor({ onReady: ready, onError }));
+  await waitFor(() => expect(view.queryByTestId('xlsx-workspace')).not.toBeNull());
+  const plain = rootChildren(view.getByRole('application'));
+  expect(plain).toContain('xlsx-toolbar');
+  expect(plain).toContain('xlsx-workspace');
+  view.rerender(host.asyncEditor({ onReady: ready, onError,
+    loadingIndicator: <div data-testid="host-indicator" style={{ height: '100%' }}>Workbook opening</div> }));
+  await waitFor(() => expect(view.queryByTestId('host-indicator')).not.toBeNull());
+  const root = view.getByRole('application');
+  expect(rootChildren(root)).toEqual(plain);
+  const indicator = view.getByTestId('host-indicator');
+  const layer = indicator.closest('[data-testid="xlsx-loading"]') as HTMLElement;
+  expect(root.style.position).toBe('relative');
+  expect(layer).not.toBe(indicator);
+  expect(layer.getAttribute('data-testid')).toBe('xlsx-loading');
+  expect(layer.getAttribute('role')).toBe('status');
+  expect(layer.style.position).toBe('absolute');
+  expect(layer.style.pointerEvents).toBe('none');
+  const workspace = view.getByTestId('xlsx-workspace');
+  expect(layer.parentElement).toBe(workspace);
+  expect(workspace.parentElement).toBe(root);
+  await act(async () => { pending.resolve(host.session); });
+  await opened();
+  await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(view.queryByTestId('xlsx-loading')).toBeNull());
+  expect(view.queryByTestId('host-indicator')).toBeNull();
+  expect(onError).not.toHaveBeenCalled();
+});
+
+it('peerless anchors the loading layer to the workspace when the host style makes the root static', async () => {
+  const host = peerlessHarness();
+  const pending = deferred<WorkbookSession>();
+  host.open.mockReturnValue(pending.promise);
+  const view = render(host.asyncEditor({ style: { position: 'static' },
+    loadingIndicator: <div data-testid="host-indicator">Workbook opening</div> }));
+  await waitFor(() => expect(view.queryByTestId('xlsx-workspace')).not.toBeNull());
+  const root = view.getByRole('application');
+  const layer = view.getByTestId('xlsx-loading');
+  expect(root.style.position).toBe('static');
+  let anchor = layer.parentElement;
+  while (anchor && !['relative', 'absolute', 'fixed', 'sticky'].includes(anchor.style.position)) anchor = anchor.parentElement;
+  expect(anchor).toBe(view.getByTestId('xlsx-workspace'));
+  expect(root.contains(anchor)).toBe(true);
+  await act(async () => { pending.resolve(host.session); });
+  await opened();
+  await waitFor(() => expect(view.queryByTestId('xlsx-loading')).toBeNull());
+});
+
+it('peerless shows a numeric 0 indicator in the loading layer', async () => {
+  const host = peerlessHarness();
+  const pending = deferred<WorkbookSession>();
+  host.open.mockReturnValue(pending.promise);
+  const view = render(host.asyncEditor({ loadingIndicator: 0 }));
+  await waitFor(() => expect(view.queryByTestId('xlsx-workspace')).not.toBeNull());
+  expect(view.queryByTestId('xlsx-loading')?.textContent).toBe('0');
+  await act(async () => { pending.resolve(host.session); });
+  await opened();
+  await waitFor(() => expect(view.queryByTestId('xlsx-loading')).toBeNull());
+});
+
+for (const indicator of ['', false, null] as const) it(`peerless renders no loading layer for the indicator ${JSON.stringify(indicator)}`, async () => {
+  const host = peerlessHarness();
+  const pending = deferred<WorkbookSession>();
+  host.open.mockReturnValue(pending.promise);
+  const view = render(host.asyncEditor({ loadingIndicator: indicator }));
+  await waitFor(() => expect(view.queryByTestId('xlsx-workspace')).not.toBeNull());
+  expect(view.queryByTestId('xlsx-loading')).toBeNull();
+  await act(async () => { pending.resolve(host.session); });
+  await opened();
+});
+
 
 for (const range of [false, true]) it(`T18: XL ${range ? 'range' : 'cell'} selection settles once with its painted anchor`, async () => {
   harness(true);

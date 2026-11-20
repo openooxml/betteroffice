@@ -1462,6 +1462,21 @@ fn records_uncached_formulas_and_rich_inline_strings() {
 }
 
 #[test]
+fn records_blank_results() {
+    let parts = package(
+        r#"<sheetData><row r="1"><c r="A1"><f>1</f><v/></c><c r="B1" t="str"><f>""</f><v></v></c><c r="C1" t="b"/><c r="D1" s="1"/><c r="E1"><v>3</v></c></row></sheetData>"#,
+        &[],
+        false,
+    );
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let facts = parsed.package.source_cell_facts(0).unwrap();
+    assert_eq!(
+        facts.blank_results.iter().copied().collect::<Vec<_>>(),
+        [(0, 0), (0, 1), (0, 2)]
+    );
+}
+
+#[test]
 fn honors_1904_date_system() {
     let wb = parse_workbook(&package("<sheetData/>", &[], true)).unwrap();
     assert_eq!(wb.date_system, DateSystem::V1904);
@@ -5973,6 +5988,106 @@ fn reads_the_chart_anchor_and_every_reference() {
     );
 }
 
+#[test]
+fn chart_colours_apply_their_drawingml_transforms() {
+    let fill = |color: &str| format!("<c:spPr><a:solidFill>{color}</a:solidFill></c:spPr>");
+    let series = |color: &str| {
+        format!(
+            r#"<c:ser>{}<c:val><c:numCache><c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:val></c:ser>"#,
+            fill(color)
+        )
+    };
+    let part = format!(
+        concat!(
+            r#"<c:chartSpace xmlns:c="c" xmlns:a="a"><c:chart><c:plotArea><c:barChart>{}{}{}{}{}"#,
+            r#"<c:axId val="1"/><c:axId val="2"/></c:barChart>"#,
+            r#"<c:catAx><c:axId val="1"/><c:txPr><a:bodyPr/><a:p><a:pPr><a:defRPr><a:solidFill>"#,
+            r#"<a:schemeClr val="tx1"><a:lumMod val="65000"/><a:lumOff val="35000"/></a:schemeClr>"#,
+            r#"</a:solidFill></a:defRPr></a:pPr></a:p></c:txPr><c:crossAx val="2"/></c:catAx>"#,
+            r#"<c:valAx><c:axId val="2"/><c:majorGridlines><c:spPr><a:ln w="9525"><a:solidFill>"#,
+            r#"<a:schemeClr val="tx1"><a:lumMod val="15000"/><a:lumOff val="85000"/></a:schemeClr>"#,
+            r#"</a:solidFill></a:ln></c:spPr></c:majorGridlines><c:crossAx val="1"/></c:valAx>"#,
+            r#"</c:plotArea></c:chart><c:spPr><a:solidFill><a:sysClr val="window" lastClr="FFFFFF">"#,
+            r#"<a:lumMod val="50000"/></a:sysClr></a:solidFill></c:spPr></c:chartSpace>"#,
+        ),
+        series(r#"<a:schemeClr val="accent1"><a:lumMod val="75000"/></a:schemeClr>"#),
+        series(r#"<a:schemeClr val="accent2"><a:shade val="50000"/></a:schemeClr>"#),
+        series(r#"<a:srgbClr val="4472C4"><a:tint val="40000"/></a:srgbClr>"#),
+        series(r#"<a:prstClr val="red"><a:alpha val="50000"/></a:prstClr>"#),
+        series(r#"<a:schemeClr val="accent1"/>"#),
+    );
+    let space = crate::chart_space(part.as_bytes(), &Default::default()).expect("chart");
+    let shared = |base: &str, transform| {
+        ooxml_drawingml::resolve_color_value_to_hex(Some(&ooxml_drawingml::ColorValue {
+            rgb: Some(base.to_owned()),
+            transforms: vec![transform],
+            ..Default::default()
+        }))
+        .unwrap()
+    };
+    let colors = space.plot_groups[0]
+        .series
+        .iter()
+        .map(|series| series.color.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        colors,
+        [
+            "#2F5597",
+            &shared("ED7D31", ooxml_drawingml::ColorTransform::Shade(0.5)),
+            &shared("4472C4", ooxml_drawingml::ColorTransform::Tint(0.4)),
+            "#FF000080",
+            "#4472C4",
+        ]
+    );
+    let axes = space.axis_list.as_ref().expect("axes");
+    assert_eq!(
+        axes[0].text.as_ref().and_then(|text| text.color.as_deref()),
+        Some("#595959")
+    );
+    assert_eq!(
+        axes[1]
+            .major_gridline_line
+            .as_ref()
+            .and_then(|line| line.color.as_deref()),
+        Some("#D9D9D9")
+    );
+    assert_eq!(
+        space.fill,
+        Some(ooxml_drawingml::chart::ChartFill::Solid {
+            color: "#808080".to_owned()
+        })
+    );
+}
+
+#[test]
+fn negative_luminance_offsets_darken_chart_colours() {
+    let series = |color: &str| {
+        format!(
+            r#"<c:ser><c:spPr><a:solidFill>{color}</a:solidFill></c:spPr><c:val><c:numCache><c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:val></c:ser>"#
+        )
+    };
+    let part = format!(
+        concat!(
+            r#"<c:chartSpace xmlns:c="c" xmlns:a="a"><c:chart><c:plotArea><c:barChart>{}{}"#,
+            r#"<c:axId val="1"/><c:axId val="2"/></c:barChart>"#,
+            r#"<c:catAx><c:axId val="1"/><c:crossAx val="2"/></c:catAx><c:valAx><c:axId val="2"/><c:crossAx val="1"/></c:valAx>"#,
+            r#"</c:plotArea></c:chart></c:chartSpace>"#,
+        ),
+        series(r#"<a:srgbClr val="FF0000"><a:lumOff val="-25000"/></a:srgbClr>"#),
+        series(
+            r#"<a:srgbClr val="4472C4"><a:lumMod val="75000"/><a:lumOff val="-25000"/></a:srgbClr>"#
+        ),
+    );
+    let space = crate::chart_space(part.as_bytes(), &Default::default()).expect("chart");
+    let colors = space.plot_groups[0]
+        .series
+        .iter()
+        .map(|series| series.color.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(colors, ["#800000", "#111E36"]);
+}
+
 /// Saving a charted workbook whose references moved patches the chart part in
 /// place: the reference and the cache beside it move together, and every byte
 /// neither owns is left alone.
@@ -6294,6 +6409,261 @@ fn follows_a_drawing_named_by_two_relationships_once() {
         .charts;
     assert_eq!(charts.len(), 1);
     assert_eq!(charts[0].anchor_index, 0);
+}
+
+fn sheet_rels_naming_the_drawing(targets: &[String]) -> Vec<u8> {
+    let mut rels = String::from(
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+    );
+    for (index, target) in targets.iter().enumerate() {
+        rels.push_str(&format!(
+            r#"<Relationship Id="rIdDrawing{index}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="{target}"/>"#
+        ));
+    }
+    rels.push_str("</Relationships>");
+    rels.into_bytes()
+}
+
+/// A package part name has no leading slash, so a target spelled with any
+/// number of them names the same drawing and is followed once.
+#[test]
+fn follows_a_drawing_named_with_extra_leading_slashes_once() {
+    let mut source = charted_package();
+    let drawing = String::from_utf8(DRAWING.to_vec()).unwrap().replace(
+        "</xdr:wsDr>",
+        r#"<xdr:twoCellAnchor><xdr:from><xdr:col>0</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>0</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:sp/><xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>"#,
+    );
+    set_part(&mut source, "xl/drawings/drawing1.xml", drawing.as_bytes());
+    set_part(
+        &mut source,
+        "xl/worksheets/_rels/sheet1.xml.rels",
+        &sheet_rels_naming_the_drawing(&[
+            "../drawings/drawing1.xml".to_owned(),
+            "//xl/drawings/drawing1.xml".to_owned(),
+            "///xl/drawings/drawing1.xml".to_owned(),
+        ]),
+    );
+    let sheet = "xl/worksheets/sheet1.xml";
+    let drawings = crate::chart::sheet_drawings(&source, sheet).unwrap().len();
+    let anchors = crate::drawing_anchors::sheet_drawing_anchors(&source, sheet).len();
+    let parsed = parse_workbook_with_package(&source).unwrap();
+    let charts = parsed.workbook.sheets[0].charts.len();
+    let mut objects = 0;
+    let finished = parsed
+        .package
+        .visit_source_sheet_objects(0, &mut ample(), |_| {
+            objects += 1;
+            std::ops::ControlFlow::Continue(())
+        });
+    assert!(finished.is_continue());
+    assert_eq!(
+        (drawings, anchors, charts, objects),
+        (1, 1, 1, 2),
+        "drawing parts read, drawings with movable anchors, charts, inventoried objects"
+    );
+}
+
+/// One chart named through more spellings than the per-sheet chart cap is
+/// still one chart, so the workbook opens.
+#[test]
+fn opens_a_chart_whose_drawing_is_named_past_the_chart_cap() {
+    let mut source = charted_package();
+    let targets = (1..=crate::MAX_CHART_ANCHORS + 1)
+        .map(|slashes| format!("{}xl/drawings/drawing1.xml", "/".repeat(slashes)))
+        .collect::<Vec<_>>();
+    set_part(
+        &mut source,
+        "xl/worksheets/_rels/sheet1.xml.rels",
+        &sheet_rels_naming_the_drawing(&targets),
+    );
+    assert_eq!(
+        parse_workbook_with_package(&source).map(|parsed| parsed.workbook.sheets[0].charts.len()),
+        Ok(1)
+    );
+}
+
+/// Opening a package parses a drawing and its relationships as often when
+/// several relationships name it as when one does.
+#[test]
+fn parses_a_drawing_named_by_several_relationships_as_often_as_one() {
+    let decodes = |source: &[(String, Vec<u8>)]| {
+        let bytes = |path: &str| {
+            source
+                .iter()
+                .find(|(name, _)| name == path)
+                .unwrap()
+                .1
+                .clone()
+        };
+        let drawing = bytes("xl/drawings/drawing1.xml");
+        let drawing_rels = bytes("xl/drawings/_rels/drawing1.xml.rels");
+        crate::tree::watch_decodes(&[&drawing, &drawing_rels]);
+        parse_workbook_with_package(source).unwrap();
+        crate::tree::watched_decodes()
+    };
+    let named_once = decodes(&charted_package());
+    let mut source = charted_package();
+    set_part(
+        &mut source,
+        "xl/worksheets/_rels/sheet1.xml.rels",
+        &sheet_rels_naming_the_drawing(
+            &[
+                "../drawings/drawing1.xml",
+                "../drawings/drawing1.xml",
+                "/xl/drawings/drawing1.xml",
+                "//xl/drawings/drawing1.xml",
+            ]
+            .map(str::to_owned),
+        ),
+    );
+    assert_eq!(
+        decodes(&source),
+        named_once,
+        "parses of the drawing, parses of its relationships"
+    );
+}
+
+/// Telling a new drawing name from one already seen costs one lookup per
+/// relationship, however many distinct drawings a sheet names.
+#[test]
+fn looks_up_each_drawing_name_once() {
+    let mut source = charted_package();
+    let targets = (0..2_000)
+        .map(|index| format!("../drawings/missing{index}.xml"))
+        .collect::<Vec<_>>();
+    set_part(
+        &mut source,
+        "xl/worksheets/_rels/sheet1.xml.rels",
+        &sheet_rels_naming_the_drawing(&targets),
+    );
+    let parsed = parse_workbook_with_package(&source).unwrap();
+    crate::xml::take_name_probes();
+    crate::chart::sheet_drawings(&source, "xl/worksheets/sheet1.xml").unwrap();
+    let chart_walk = crate::xml::take_name_probes();
+    let finished = parsed
+        .package
+        .visit_source_sheet_objects(0, &mut ample(), |_| std::ops::ControlFlow::Continue(()));
+    assert!(finished.is_continue());
+    let inventory = crate::xml::take_name_probes();
+    assert_eq!(
+        (chart_walk, inventory),
+        (2_000, 2_000),
+        "names looked up by the chart walk, by the inventory"
+    );
+}
+
+const REL_TABLE: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/table";
+const REL_COMMENTS: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments";
+const SALES_TABLE: &str = r#"<table id="1" name="Sales" displayName="Sales" ref="B2:D12"><tableColumns count="3"><tableColumn id="1" name="Region"/><tableColumn id="2" name="Cost"/><tableColumn id="3" name="Units"/></tableColumns></table>"#;
+
+fn sheet_rels_naming(kind: &str, targets: &[&str]) -> Vec<u8> {
+    let mut rels = String::from(
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+    );
+    for (index, target) in targets.iter().enumerate() {
+        rels.push_str(&format!(
+            r#"<Relationship Id="rIdNamed{index}" Type="{kind}" Target="{target}"/>"#
+        ));
+    }
+    rels.push_str("</Relationships>");
+    rels.into_bytes()
+}
+
+/// A table part a sheet relates several ways is one table, read once.
+#[test]
+fn reads_a_table_related_several_ways_once() {
+    let mut source = package_with_table(SALES_TABLE);
+    set_part(
+        &mut source,
+        "xl/worksheets/_rels/sheet1.xml.rels",
+        &sheet_rels_naming(
+            REL_TABLE,
+            &[
+                "../tables/table1.xml",
+                "../tables/table1.xml",
+                "//xl/tables/table1.xml",
+            ],
+        ),
+    );
+    crate::read::take_table_parses();
+    let tables = parse_workbook(&source).unwrap().tables.len();
+    assert_eq!(
+        (tables, crate::read::take_table_parses()),
+        (1, 1),
+        "tables, table parses"
+    );
+}
+
+/// One table related more times than the table cap still opens as one table.
+#[test]
+fn opens_a_table_related_past_the_table_cap() {
+    let mut source = package_with_table(SALES_TABLE);
+    let targets = vec!["../tables/table1.xml"; crate::MAX_TABLES + 1];
+    set_part(
+        &mut source,
+        "xl/worksheets/_rels/sheet1.xml.rels",
+        &sheet_rels_naming(REL_TABLE, &targets),
+    );
+    assert_eq!(
+        parse_workbook(&source).map(|workbook| workbook.tables.len()),
+        Ok(1)
+    );
+}
+
+/// A comments part a sheet relates several ways is counted once, and a
+/// missing one is reported once.
+#[test]
+fn counts_comments_related_several_ways_once() {
+    let inventory = |targets: &[&str]| {
+        let mut source = sources_package();
+        set_part(
+            &mut source,
+            "xl/worksheets/_rels/sheet1.xml.rels",
+            &sheet_rels_naming(REL_COMMENTS, targets),
+        );
+        parse_workbook_with_package(&source)
+            .unwrap()
+            .package
+            .source_sheet_inventory(0, &mut ample())
+    };
+    let found = inventory(&["../comments1.xml", "../comments1.xml", "//xl/comments1.xml"]);
+    assert_eq!(
+        (found.comments, found.unreadable_parts.len()),
+        (2, 0),
+        "comments counted, unreadable parts"
+    );
+    let missing = inventory(&["../missing.xml", "/xl/missing.xml", "//xl/missing.xml"]);
+    assert_eq!(missing.unreadable_parts, ["xl/missing.xml"]);
+}
+
+/// The cell-move guard reads a table part a sheet relates several ways once.
+#[test]
+fn move_guard_reads_a_table_related_several_ways_once() {
+    let mut source = package_with_table(SALES_TABLE);
+    set_part(
+        &mut source,
+        "xl/worksheets/_rels/sheet1.xml.rels",
+        &sheet_rels_naming(
+            REL_TABLE,
+            &[
+                "../tables/table1.xml",
+                "../tables/table1.xml",
+                "//xl/tables/table1.xml",
+            ],
+        ),
+    );
+    let parsed = parse_workbook_with_package(&source).unwrap();
+    crate::package::take_move_guard_reads();
+    let blocked = parsed
+        .package
+        .range_move_unsupported_part(|_, _| false, |_, _| false, |_, _| false)
+        .map(str::to_owned);
+    assert_eq!(
+        (blocked, crate::package::take_move_guard_reads()),
+        (None, 1),
+        "blocking part, parts read by the guard"
+    );
 }
 
 /// One drawing anchor cannot hold two frames, so a model carrying one source

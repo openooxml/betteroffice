@@ -1774,6 +1774,26 @@ pub(crate) struct TextWatermarkIn {
     font_size: Option<f64>,
     #[serde(default)]
     decorative: Option<bool>,
+    /// The shape box the glyphs stretch to; wins over `font_size` and `layout`.
+    #[serde(default, rename = "box")]
+    shape_box: Option<WatermarkBoxIn>,
+}
+
+#[derive(Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WatermarkBoxIn {
+    width_pt: f64,
+    height_pt: f64,
+    #[serde(default)]
+    rotation: f64,
+    #[serde(default)]
+    horizontal: Option<String>,
+    #[serde(default)]
+    horizontal_relative: Option<String>,
+    #[serde(default)]
+    vertical: Option<String>,
+    #[serde(default)]
+    vertical_relative: Option<String>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -3681,7 +3701,7 @@ fn block_key(id: &Value) -> Cow<'_, str> {
 }
 
 const DEFAULT_FONT_PT: f64 = 11.0;
-const DEFAULT_FONT_FAMILY: &str = "Calibri";
+pub(crate) const DEFAULT_FONT_FAMILY: &str = "Calibri";
 const REVISION_INS_COLOR: &str = "#2e7d32";
 const REVISION_DEL_COLOR: &str = "#c62828";
 const REVISION_MERGE_COLOR: &str = "#5f6368";
@@ -4179,11 +4199,136 @@ pub(crate) fn capped_relationship_id(id: Option<&str>) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn emit_watermark(prims: &mut Vec<Primitive>, watermark: &WatermarkIn, page: &PageIn) {
+fn emit_watermark(
+    prims: &mut Vec<Primitive>,
+    watermark: &WatermarkIn,
+    page: &PageIn,
+    fonts: Option<&ShapeFonts<'_>>,
+) {
     match watermark {
-        WatermarkIn::Text(wm) => emit_text_watermark(prims, wm, page),
+        WatermarkIn::Text(wm) => emit_text_watermark(prims, wm, page, fonts),
         WatermarkIn::Picture(wm) => emit_picture_watermark(prims, wm, page),
     }
+}
+
+/// Longest box side, in px, a text watermark is stretched to: ten 22 in pages.
+const MAX_FITTED_WATERMARK_PX: f64 = 21_120.0;
+
+struct FittedTextWatermark {
+    x: f64,
+    baseline: f64,
+    width: f64,
+    em: f64,
+    rotation: f64,
+    scale: f64,
+    glyphs: Option<(ooxml_text::FontId, Vec<PlacedGlyph>)>,
+}
+
+/// Geometry of a text watermark whose em is its box height and whose glyphs
+/// stretch to its box width, the box centred where its style places it and
+/// turned about its centre. When the family's chain resolves, the glyphs are
+/// those its stretch was measured from, placed so a painter scaling them from
+/// their left edge and turning them about their own centre lands on the box.
+fn fitted_text_watermark(
+    shape_box: &WatermarkBoxIn,
+    page: &PageIn,
+    fonts: Option<&ShapeFonts<'_>>,
+    family: &str,
+    text: &str,
+) -> Option<FittedTextWatermark> {
+    let width = shape_box.width_pt * 96.0 / 72.0;
+    let em = shape_box.height_pt * 96.0 / 72.0;
+    if !(width.is_finite() && em.is_finite() && width > 0.0 && em > 0.0) {
+        return None;
+    }
+    let margins = &page.margins;
+    let (left, right) = match shape_box.horizontal_relative.as_deref() {
+        Some("page") => (0.0, page.size.w),
+        _ => (margins.left, page.size.w - margins.right),
+    };
+    let (top, bottom) = match shape_box.vertical_relative.as_deref() {
+        Some("page") => (0.0, page.size.h),
+        _ => (margins.top, page.size.h - margins.bottom),
+    };
+    let centre = |start: f64, end: f64, size: f64, position: Option<&str>| match position {
+        Some("left" | "top") => start + size / 2.0,
+        Some("right" | "bottom") => end - size / 2.0,
+        _ => (start + end) / 2.0,
+    };
+    let centre_x = centre(left, right, width, shape_box.horizontal.as_deref());
+    let centre_y = centre(top, bottom, em, shape_box.vertical.as_deref());
+    let rotation = (shape_box.rotation % 360.0 + 540.0) % 360.0 - 180.0;
+    let (sin, cos) = rotation.to_radians().sin_cos();
+    let pivot_x = centre_x - 0.1 * em * sin;
+    let pivot_y = centre_y + 0.1 * em * cos;
+    let shaped = fonts.and_then(|fonts| {
+        let font = *fonts.chain_for(family, false, false)?.ids.first()?;
+        let glyphs = ooxml_text::shape_with_direction(
+            fonts.store,
+            font,
+            text,
+            em as f32,
+            &[],
+            ooxml_text::ShapeDirection::Ltr,
+        )
+        .ok()?;
+        let advance: f64 = glyphs.iter().map(|g| f64::from(g.x_advance)).sum();
+        (advance.is_finite() && advance > 0.0).then_some((font, glyphs, advance))
+    });
+    let advance = shaped.as_ref().map_or_else(
+        || (text.trim().chars().count().max(1) as f64) * em * 0.62,
+        |(_, _, advance)| *advance,
+    );
+    let scale = 100.0 * width / advance;
+    if [width, em, scale]
+        .into_iter()
+        .any(|value| !value.is_finite() || round3(value) == 0.0)
+        || !rotation.is_finite()
+        || width.max(em) > MAX_FITTED_WATERMARK_PX
+    {
+        return None;
+    }
+    let shaped = shaped.filter(|(font, glyphs, _)| {
+        !text.chars().any(is_rtl_strong)
+            && glyphs
+                .iter()
+                .all(|glyph| glyph.x_offset == 0.0 && glyph.y_offset == 0.0)
+            && fonts.is_some_and(|fonts| {
+                text.chars()
+                    .all(|ch| fonts.store.covers(*font, ch).unwrap_or(false))
+            })
+    });
+    let glyphs = shaped.map(|(font, shaped, advance)| {
+        let lead = (width - advance) / 2.0;
+        let baseline = pivot_y + 0.2 * em - lead * sin;
+        let mut pen = pivot_x - advance / 2.0 - lead * cos;
+        let placed = shaped
+            .iter()
+            .map(|glyph| {
+                let origin = pen;
+                pen += f64::from(glyph.x_advance);
+                PlacedGlyph {
+                    id: glyph.glyph_id,
+                    x: round3(origin + f64::from(glyph.x_offset)),
+                    y: round3(baseline - f64::from(glyph.y_offset)),
+                    cluster: glyph.cluster,
+                    advance: round3(f64::from(glyph.x_advance)),
+                    logical_order: None,
+                    bidi_level: None,
+                }
+            })
+            .collect();
+        (font, placed)
+    });
+    Some(FittedTextWatermark {
+        x: pivot_x - width / 2.0,
+        baseline: pivot_y + 0.2 * em,
+        width,
+        em,
+        rotation,
+        scale,
+        glyphs,
+    })
 }
 
 fn watermark_auto_font_px(text: &str, available_width_px: f64) -> f64 {
@@ -4192,11 +4337,21 @@ fn watermark_auto_font_px(text: &str, available_width_px: f64) -> f64 {
     size.clamp(24.0, 180.0)
 }
 
-fn emit_text_watermark(prims: &mut Vec<Primitive>, wm: &TextWatermarkIn, page: &PageIn) {
+fn emit_text_watermark(
+    prims: &mut Vec<Primitive>,
+    wm: &TextWatermarkIn,
+    page: &PageIn,
+    fonts: Option<&ShapeFonts<'_>>,
+) {
     if wm.text.is_empty() {
         return;
     }
     let text: String = wm.text.chars().take(MAX_ALT_TEXT_CHARS).collect();
+    let family = wm.font.as_deref().unwrap_or(DEFAULT_FONT_FAMILY);
+    let fitted = wm
+        .shape_box
+        .as_ref()
+        .and_then(|shape_box| fitted_text_watermark(shape_box, page, fonts, family, &text));
     let content_width = page.size.w - page.margins.left - page.margins.right;
     let target_width = if wm.layout.as_deref() == Some("diagonal") {
         content_width * 1.3
@@ -4213,23 +4368,58 @@ fn emit_text_watermark(prims: &mut Vec<Primitive>, wm: &TextWatermarkIn, page: &
     // textRunRect centers at baseline - 0.2em; choose the baseline so the
     // primitive's geometry center is exactly the page center before rotation.
     let baseline = page.size.h / 2.0 + font_px * 0.2;
-    let family = wm.font.as_deref().unwrap_or(DEFAULT_FONT_FAMILY);
-    let font = format!("700 {}px {}, sans-serif", px(font_px), family);
-    let opacity = if wm.semitransparent == Some(true) {
-        0.5
-    } else {
-        0.85
-    };
+    let opacity = (wm.semitransparent == Some(true)).then(|| px(0.5));
     let rotation = if wm.layout.as_deref() == Some("diagonal") {
         Some(px(-45.0))
     } else {
         None
     };
+    let (x, baseline, width, font_px, rotation, horizontal_scale, glyphs) = match fitted {
+        Some(fitted) => (
+            fitted.x,
+            fitted.baseline,
+            fitted.width,
+            fitted.em,
+            (fitted.rotation != 0.0).then(|| px(fitted.rotation)),
+            Some(px(fitted.scale)),
+            fitted.glyphs,
+        ),
+        None => (x, baseline, width, font_px, rotation, None, None),
+    };
+    let font = format!("400 {}px {}, sans-serif", px(font_px), family);
+    let color = wm.color.clone().unwrap_or_else(|| "#C0C0C0".to_string());
 
-    let attrs = DocAttrs {
+    let mut attrs = DocAttrs {
         decorative: Some(wm.decorative.unwrap_or(true)),
         ..DocAttrs::default()
     };
+    if let (Some((face, glyphs)), Some(fonts)) = (glyphs, fonts) {
+        attrs.fallback_font = Some(font);
+        prims.push(Primitive::GlyphRun(GlyphRunPrimitive {
+            font_id: face.to_u32(),
+            size: round3(font_px),
+            color,
+            paint_text: glyph_paint_text(fonts.store, face, &text).map(Box::new),
+            text,
+            glyphs,
+            echo: None,
+            paint_clip: None,
+            word_spacing: None,
+            rtl: None,
+            opacity,
+            rotation_deg: rotation,
+            horizontal_scale,
+            all_caps: false,
+            small_caps: false,
+            hidden: false,
+            text_shadow: None,
+            text_outline: false,
+            emphasis_mark: None,
+            text_effect: None,
+            attrs,
+        }));
+        return;
+    }
     prims.push(Primitive::Text(TextRunPrimitive {
         text,
         paint_text: None,
@@ -4239,13 +4429,13 @@ fn emit_text_watermark(prims: &mut Vec<Primitive>, wm: &TextWatermarkIn, page: &
         paint_clip: None,
         font,
         scripts: None,
-        color: wm.color.clone().unwrap_or_else(|| "#C0C0C0".to_string()),
+        color,
         letter_spacing: None,
         word_spacing: None,
         rtl: None,
-        opacity: Some(px(opacity)),
+        opacity,
         rotation_deg: rotation,
-        horizontal_scale: None,
+        horizontal_scale,
         substitute_scale: None,
         all_caps: false,
         small_caps: false,
@@ -4845,7 +5035,12 @@ pub(crate) struct ShapeFonts<'a> {
     store: &'a ooxml_text::FontStore,
     chains: HashMap<String, ShapeFontChain>,
     coverage_only: bool,
+    paragraph_mark: Option<ooxml_text::FontId>,
 }
+
+/// The `fontChains` key whose one id is the face the tracked paragraph mark is
+/// shaped with. Without it the mark is a text item.
+pub const PARAGRAPH_MARK_FACE: &str = "@betteroffice/fonts/paragraph-mark";
 
 type FontResolver =
     fn(&ooxml_text::FontStore, &[ooxml_text::FontId], char) -> Option<ooxml_text::FontId>;
@@ -4974,9 +5169,14 @@ impl<'a> ShapeFonts<'a> {
         let symbols_shape = input
             .font_chains
             .contains_key("@betteroffice/fonts/coverage-symbols");
+        let paragraph_mark = match input.font_chains.get(PARAGRAPH_MARK_FACE) {
+            Some(ids) if ids.len() == 1 => Some(ooxml_text::FontId::from_u32(ids[0])),
+            _ => None,
+        };
         let chains = input
             .font_chains
             .iter()
+            .filter(|(k, _)| k.as_str() != PARAGRAPH_MARK_FACE)
             .map(|(k, ids)| {
                 (
                     k.clone(),
@@ -4994,6 +5194,7 @@ impl<'a> ShapeFonts<'a> {
             store,
             chains,
             coverage_only: !coverage_only.is_empty(),
+            paragraph_mark,
         })
     }
 
@@ -6210,9 +6411,9 @@ fn build_display_list_selected(
         if let Some(watermark) = input
             .headers_footers
             .as_ref()
-            .and_then(|hf| hf.watermark.as_ref())
+            .and_then(|hf| crate::hf_bands::page_watermark(hf, page, page_index))
         {
-            emit_watermark(&mut prims, watermark, page);
+            emit_watermark(&mut prims, watermark, page, shape_fonts.as_ref());
         }
         let watermark_primitive_count = (!prims.is_empty()).then_some(prims.len());
         if let Some(border) = page_border_primitive(
@@ -6974,38 +7175,50 @@ pub(crate) fn emit_paragraph_fragment(
         let mut glyph_attrs = block_ref.attrs();
         glyph_attrs.structural_revision = Some(Box::new(rev.clone()));
         let glyph_x = line.end_x + PARAGRAPH_MARK_GLYPH_GAP;
-        prims.push(Primitive::Text(TextRunPrimitive {
-            text: "¶".to_string(),
-            paint_text: None,
-            x: px(glyph_x),
-            baseline_y: px(line.baseline),
-            width: px(PARAGRAPH_MARK_GLYPH_WIDTH),
-            paint_clip: None,
-            font: resolved_css_font(ctx.shape, "¶", &RunFormattingIn::default()),
-            scripts: None,
-            color: structural_color(rev.kind).to_string(),
-            letter_spacing: None,
-            word_spacing: None,
-            rtl: None,
-            opacity: None,
-            rotation_deg: None,
-            horizontal_scale: None,
-            substitute_scale: text_substitute_scale(
-                ctx.shape,
-                "¶",
-                &RunFormattingIn::default(),
-                0,
-                false,
-            ),
-            all_caps: false,
-            small_caps: false,
-            hidden: false,
-            text_shadow: None,
-            text_outline: false,
-            emphasis_mark: None,
-            text_effect: None,
-            attrs: glyph_attrs.clone(),
-        }));
+        let shaped = ctx.shape.is_some_and(|shape| {
+            emit_paragraph_mark_glyph_run(
+                prims,
+                shape,
+                glyph_x,
+                line.baseline,
+                &glyph_attrs,
+                structural_color(rev.kind),
+            )
+        });
+        if !shaped {
+            prims.push(Primitive::Text(TextRunPrimitive {
+                text: "¶".to_string(),
+                paint_text: None,
+                x: px(glyph_x),
+                baseline_y: px(line.baseline),
+                width: px(PARAGRAPH_MARK_GLYPH_WIDTH),
+                paint_clip: None,
+                font: resolved_css_font(ctx.shape, "¶", &RunFormattingIn::default()),
+                scripts: None,
+                color: structural_color(rev.kind).to_string(),
+                letter_spacing: None,
+                word_spacing: None,
+                rtl: None,
+                opacity: None,
+                rotation_deg: None,
+                horizontal_scale: None,
+                substitute_scale: text_substitute_scale(
+                    ctx.shape,
+                    "¶",
+                    &RunFormattingIn::default(),
+                    0,
+                    false,
+                ),
+                all_caps: false,
+                small_caps: false,
+                hidden: false,
+                text_shadow: None,
+                text_outline: false,
+                emphasis_mark: None,
+                text_effect: None,
+                attrs: glyph_attrs.clone(),
+            }));
+        }
         if rev.kind == StructuralRevisionKind::Del {
             prims.push(Primitive::Decoration(DecorationPrimitive {
                 deco: DecoKind::Strike,
@@ -7056,6 +7269,79 @@ pub(crate) fn emit_paragraph_fragment(
                 }
             }
         }
+    }
+}
+
+/// Shape the tracked paragraph mark in the default run formatting with the face
+/// the input names under [`PARAGRAPH_MARK_FACE`] alone into a glyph run
+/// `PARAGRAPH_MARK_GLYPH_WIDTH` wide, or return `false`, touching nothing, when
+/// it names none or that face does not draw the pilcrow as one glyph.
+fn emit_paragraph_mark_glyph_run(
+    prims: &mut Vec<Primitive>,
+    shape: &ShapeFonts<'_>,
+    x: f64,
+    baseline: f64,
+    attrs: &DocAttrs,
+    color: &str,
+) -> bool {
+    let Some(font) = shape.paragraph_mark else {
+        return false;
+    };
+    if shape.store.metrics(font).is_err() || shape.store.backstop_style(font).is_some() {
+        return false;
+    }
+    let fmt = RunFormattingIn::default();
+    let size_px = effective_font_px_of(&fmt);
+    let Ok(glyphs) = ooxml_text::shape::shape_with_word_features(
+        shape.store,
+        font,
+        "¶",
+        size_px as f32,
+        &kern_features_of(&fmt, size_px),
+        shape_direction_for_level(0),
+        attrs.lang.as_deref(),
+    ) else {
+        return false;
+    };
+    let Some(glyph) = paragraph_mark_glyph(&glyphs) else {
+        return false;
+    };
+    let advance = f64::from(glyph.x_advance);
+    let placed = vec![PlacedGlyph {
+        id: glyph.glyph_id,
+        x: round3(x + f64::from(glyph.x_offset)),
+        y: round3(baseline - f64::from(glyph.y_offset)),
+        cluster: glyph.cluster,
+        advance: round3(round3(advance) + PARAGRAPH_MARK_GLYPH_WIDTH - advance),
+        logical_order: None,
+        bidi_level: Some(0),
+    }];
+    let mut attrs = attrs.clone();
+    attrs.doc_start = None;
+    attrs.doc_end = None;
+    prims.push(Primitive::GlyphRun(glyph_run_primitive(
+        shape.store,
+        font,
+        size_px,
+        "¶".to_owned(),
+        placed,
+        None,
+        &fmt,
+        color,
+        &None,
+        0,
+        attrs,
+        &None,
+    )));
+    true
+}
+
+/// The one glyph a face shaped the paragraph mark into, when it is one glyph
+/// the face draws.
+fn paragraph_mark_glyph(glyphs: &[ooxml_text::ShapedGlyph]) -> Option<&ooxml_text::ShapedGlyph> {
+    match glyphs {
+        [glyph] if glyph.glyph_id != 0 => Some(glyph),
+        _ => None,
     }
 }
 
@@ -7668,8 +7954,10 @@ fn emit_line<'a>(
             attrs.and_then(|attrs| attrs.list_marker_font_size.or(attrs.default_font_size));
         let slot_width = if overrun > 0.0 {
             geom.hanging + overrun
+        } else if geom.hanging > 0.0 {
+            geom.hanging
         } else {
-            geom.hanging.max(font_px_of(&marker_format))
+            font_px_of(&marker_format)
         };
         let marker_x = if geom.is_rtl {
             pen_x + effective_line_width
@@ -12978,6 +13266,25 @@ fn rotate_cell_content(primitives: &mut [Primitive], cell: (f64, f64, f64, f64),
         {
             rect(x, y, w, h);
         }
+        let attrs = match primitive {
+            Primitive::Line(line) => Some(&mut line.attrs),
+            other => doc_attrs_mut(other),
+        };
+        if let Some(clip) = attrs
+            .and_then(|attrs| attrs.clip_group.as_deref_mut())
+            .and_then(|group| group.clip.as_mut())
+        {
+            let left = clip_number(&clip.x);
+            let top = clip_number(&clip.y);
+            let first = point(left, top);
+            let last = point(left + clip_number(&clip.w), top + clip_number(&clip.h));
+            *clip = ClipRect {
+                x: Some(px(first.0.min(last.0))),
+                y: Some(px(first.1.min(last.1))),
+                w: Some(px((last.0 - first.0).abs())),
+                h: Some(px((last.1 - first.1).abs())),
+            };
+        }
     }
 }
 
@@ -13995,6 +14302,7 @@ fn resident_build_input_for(
             .flat_map(|page| page.fragments.iter().filter_map(fragment_block_key_ref))
             .collect()
     });
+    let mut first_unreadable = Vec::new();
     let measured = pagination
         .measured
         .iter()
@@ -14003,9 +14311,24 @@ fn resident_build_input_for(
                 resident_block_key(&measured.block).is_some_and(|key| keys.contains(key.as_ref()))
             })
         })
-        .filter_map(|measured| convert_measured_block(&mut transcoder, measured, &mut unreadable))
+        .filter_map(|measured| {
+            let block = convert_measured_block(&mut transcoder, measured, &mut unreadable);
+            if block.is_none() {
+                first_unreadable.extend(unreadable.last().cloned());
+            }
+            block
+        })
         .collect();
     drop(placed);
+    // A readable later copy of a key leaves an unreadable earlier one reported.
+    for entry in first_unreadable {
+        if !unreadable
+            .iter()
+            .any(|known| known.block == entry.block && known.page == entry.page)
+        {
+            unreadable.push(entry);
+        }
+    }
     let options = transcoder
         .convert(&pagination.options)
         .map_err(|e| format!("parse resident display input: {e}"))?;
@@ -15232,10 +15555,26 @@ mod tests {
             store: &store,
             chains: HashMap::new(),
             coverage_only: false,
+            paragraph_mark: None,
         };
         let fmt = RunFormattingIn::default();
         assert!(painted_text_width(&fonts, first, "\u{2060}", &fmt, 0, false, false).is_none());
         assert!(painted_text_width(&fonts, first, "\u{2060}", &fmt, 0, false, true).is_some());
+    }
+
+    #[test]
+    fn a_paragraph_mark_takes_exactly_one_drawn_glyph() {
+        let glyph = |glyph_id| ooxml_text::ShapedGlyph {
+            glyph_id,
+            cluster: 0,
+            x_advance: 8.0,
+            x_offset: 0.0,
+            y_offset: 0.0,
+        };
+        assert_eq!(paragraph_mark_glyph(&[glyph(116)]), Some(&glyph(116)));
+        assert_eq!(paragraph_mark_glyph(&[]), None);
+        assert_eq!(paragraph_mark_glyph(&[glyph(0)]), None);
+        assert_eq!(paragraph_mark_glyph(&[glyph(116), glyph(117)]), None);
     }
 
     #[test]
@@ -15376,6 +15715,7 @@ mod tests {
                 ),
             )]),
             coverage_only: false,
+            paragraph_mark: None,
         };
         let fmt = RunFormattingIn {
             bold: Some(true),
@@ -17284,6 +17624,56 @@ mod tests {
     }
 
     #[test]
+    fn a_marker_larger_than_its_hanging_indent_still_starts_at_the_hanging_edge() {
+        let input = json!({
+            "contractVersion": 1,
+            "measured": [{
+                "block": {
+                    "kind": "paragraph",
+                    "id": "bullet",
+                    "runs": [{ "kind": "text", "text": "one" }],
+                    "attrs": {
+                        "listMarker": "•",
+                        "listMarkerFontSize": 22,
+                        "indent": { "left": 48, "hanging": 24 }
+                    }
+                },
+                "measure": {
+                    "kind": "paragraph",
+                    "totalHeight": 36,
+                    "lines": [{
+                        "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 3,
+                        "width": 30, "ascent": 26, "descent": 8, "lineHeight": 36
+                    }]
+                }
+            }],
+            "options": {},
+            "layout": {
+                "pages": [{
+                    "number": 1,
+                    "size": { "w": 400, "h": 400 },
+                    "margins": { "top": 20, "right": 20, "bottom": 20, "left": 20 },
+                    "fragments": [{
+                        "kind": "paragraph", "blockId": "bullet", "x": 20, "y": 20,
+                        "width": 360, "height": 36, "fromLine": 0, "toLine": 1
+                    }]
+                }]
+            }
+        });
+        let output: Value =
+            serde_json::from_str(&build_display_list_json(&input.to_string()).unwrap()).unwrap();
+        let primitives = output["pages"][0]["primitives"].as_array().unwrap();
+        let marker = primitives
+            .iter()
+            .find(|primitive| primitive["listMarker"] == true)
+            .unwrap();
+        assert_eq!(
+            (marker["x"].as_f64(), marker["width"].as_f64()),
+            (Some(44.0), Some(24.0))
+        );
+    }
+
+    #[test]
     fn underlined_tabs_paint_their_resolved_advance_without_a_leader() {
         for authoritative in [false, true] {
             for underline in [json!(true), json!({"style": "single", "color": "#123456"})] {
@@ -18523,6 +18913,45 @@ mod tests {
     }
 
     #[test]
+    fn a_readable_copy_of_a_key_keeps_an_earlier_unreadable_copy_reported() {
+        let fonts = ooxml_text::FontStore::default();
+        let (mut pagination, layout) = charted_page(serde_json::json!([2, 1, 3]));
+        let copy = pagination.measured[0].clone();
+        pagination.measured.push(copy);
+        let crate::types::BlockExtent::Paragraph(extent) = &mut pagination.measured[0].measure
+        else {
+            unreachable!()
+        };
+        extent.lines[0].width = f64::NAN;
+        let unreadable = |resident: &ResidentDisplayInput| {
+            resident
+                .unreadable()
+                .iter()
+                .map(|entry| (entry.block.clone(), entry.page))
+                .collect::<Vec<_>>()
+        };
+        let (resident, _) = build_resident_display_list_with_fonts_observed(
+            &pagination,
+            &layout,
+            "{}",
+            &fonts,
+            &mut || {},
+        )
+        .unwrap();
+        assert_eq!(unreadable(&resident), [("intro".to_owned(), None)]);
+        let (resident, _) = build_resident_display_list_partial_with_fonts_observed(
+            &pagination,
+            &layout,
+            "{}",
+            &fonts,
+            &|index| index == 0,
+            &mut || {},
+        )
+        .unwrap();
+        assert_eq!(unreadable(&resident), [("intro".to_owned(), None)]);
+    }
+
+    #[test]
     fn a_refresh_tracks_a_block_turning_unreadable_and_readable_again() {
         let fonts = ooxml_text::FontStore::default();
         let (clean, layout) = charted_page(serde_json::json!([2, 1, 3]));
@@ -19017,6 +19446,43 @@ mod tests {
                     frame.h.clone()
                 ),
                 expected
+            );
+        }
+    }
+
+    #[test]
+    fn rotated_cell_content_turns_a_line_clip() {
+        let clip = |x: f64, y: f64, w: f64, h: f64| ClipRect {
+            x: Some(px(x)),
+            y: Some(px(y)),
+            w: Some(px(w)),
+            h: Some(px(h)),
+        };
+        for (rotation, expected) in [
+            (90.0, clip(50.0, 10.0, 30.0, 40.0)),
+            (-90.0, clip(20.0, 150.0, 30.0, 40.0)),
+        ] {
+            let mut attrs = DocAttrs::default();
+            apply_clip_group(&mut attrs, "clip".to_owned(), clip(10.0, 20.0, 40.0, 30.0));
+            let mut prims = vec![Primitive::Line(LinePrimitive {
+                x1: px(10.0),
+                y1: px(20.0),
+                x2: px(50.0),
+                y2: px(20.0),
+                attrs,
+                ..LinePrimitive::contract_defaults()
+            })];
+            rotate_cell_content(&mut prims, (0.0, 0.0, 100.0, 200.0), rotation);
+            let Primitive::Line(line) = &prims[0] else {
+                unreachable!()
+            };
+            assert_eq!(
+                line.attrs
+                    .clip_group
+                    .as_ref()
+                    .and_then(|group| group.clip.clone()),
+                Some(expected),
+                "{rotation}"
             );
         }
     }

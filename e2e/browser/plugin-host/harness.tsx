@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   DocxEditor,
   defineDocxPlugin,
+  useDocxSelectionPlacement,
   type DocxEditorRef,
   type DocxPluginContext,
   type DocxPluginEvent,
@@ -32,11 +33,14 @@ interface ProbeWindow {
   navigation: unknown;
   marks: number;
   reload(): Promise<void>;
+  focus: { result: unknown; background(): unknown };
 }
 
 const fonts = createFontProvider();
 const repeatedHeader = new URLSearchParams(location.search).get('doc') === 'repeated-header';
 const fileProp = new URLSearchParams(location.search).get('prop') === 'file';
+const inThread = new URLSearchParams(location.search).get('engine') === 'in-thread';
+const focusProbe = new URLSearchParams(location.search).get('focus') === '1';
 
 const probe: ProbeWindow = {
   events: [],
@@ -52,6 +56,7 @@ const probe: ProbeWindow = {
     const buffer = await (await fetch(documentUrl)).arrayBuffer();
     await probe.editor!.loadDocumentBuffer(buffer);
   },
+  focus: { result: null, background: () => null },
 };
 (window as unknown as { __probe: ProbeWindow }).__probe = probe;
 
@@ -182,6 +187,19 @@ function HeaderProbe({ geometry }: { geometry: DocxPluginGeometry }) {
   );
 }
 
+function PlacementProbe({ context, geometry }: { context: ProbeContext; geometry: DocxPluginGeometry }) {
+  const placement = useDocxSelectionPlacement(context, { width: 120, height: 30, geometry });
+  if (!placement) return null;
+  return (
+    <div
+      data-testid="probe-placement"
+      data-anchor={JSON.stringify(placement.anchor)}
+      data-kept={String(placement.kept)}
+      style={{ position: 'absolute', left: placement.x, top: placement.y, width: placement.width, height: placement.height, outline: '1px solid green' }}
+    />
+  );
+}
+
 function GeometryProbe({ geometry }: { geometry: DocxPluginGeometry }) {
   useEffect(() => {
     probe.geometry = geometry;
@@ -229,9 +247,10 @@ const alignment = defineDocxPlugin<ProbeState>({
     if (event.type === 'load' || event.type === 'document-change') await refresh(context);
   },
   panel: { title: 'Probe', placement: 'right', render: ProbePanel },
-  overlay: ({ geometry }) => (
+  overlay: ({ context, geometry }) => (
     <>
       <GeometryProbe geometry={geometry} />
+      <PlacementProbe context={context} geometry={geometry} />
       {repeatedHeader && <HeaderProbe geometry={geometry} />}
       {Array.from({ length: geometry.layout.pageCount }, (_, index) => {
         const bounds = geometry.dom.getPageBounds(index);
@@ -292,7 +311,25 @@ const second = defineDocxPlugin({
   },
 });
 
-const PLUGINS = [alignment, second];
+function FocusOverlay({ context }: { context: DocxPluginContext<null> }) {
+  probe.focus.background = () => context.focusDocument();
+  return (
+    <div data-testid="focus-probe" data-input-focused={String(context.snapshot.inputFocused)}
+      data-focused={String(context.snapshot.focused)} style={{ position: 'absolute', left: 0, top: 0, pointerEvents: 'auto' }}>
+      <button type="button" data-testid="focus-probe-button" onKeyDown={(event) => {
+        if (event.key !== 'Enter') return;
+        event.preventDefault();
+        probe.focus.result = context.focusDocument();
+      }}>
+        Return to document
+      </button>
+    </div>
+  );
+}
+
+const focusPlugin = defineDocxPlugin({ id: 'probe.focus', createState: () => null, overlay: FocusOverlay });
+
+const PLUGINS = focusProbe ? [alignment, second, focusPlugin] : [alignment, second];
 const GRANTS = { 'probe.alignment': { document: 'write', editBatches: true, commands: ['clearFormatting', 'bold'] } } as const;
 
 function Harness() {
@@ -308,7 +345,7 @@ function Harness() {
   if (!buffer) return null;
   return (
     <div style={{ height: '100%' }}>
-      <DocxEditor experimentalWorkerOpen={new URLSearchParams(location.search).get('engine') === 'legacy' ? false : undefined} ref={setEditor} {...(fileProp ? { file: new File([buffer], 'upload.docx'), fileName: 'Aliased report.docx' } : { documentBuffer: buffer })} plugins={PLUGINS} pluginGrants={GRANTS} measurementFontProvider={new URLSearchParams(location.search).get('peerless') === '1' ? fonts : undefined} {...(new URLSearchParams(location.search).get('peerless') === '1' ? {} : { legacySyncApi: true }) as Record<never, never>} />
+      <DocxEditor experimentalWorkerOpen={inThread || new URLSearchParams(location.search).get('engine') === 'legacy' ? false : undefined} ref={setEditor} {...(fileProp ? { file: new File([buffer], 'upload.docx'), fileName: 'Aliased report.docx' } : { documentBuffer: buffer })} plugins={PLUGINS} pluginGrants={GRANTS} measurementFontProvider={new URLSearchParams(location.search).get('peerless') === '1' ? fonts : undefined} {...(inThread || new URLSearchParams(location.search).get('peerless') === '1' ? {} : { legacySyncApi: true }) as Record<never, never>} />
     </div>
   );
 }

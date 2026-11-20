@@ -35,6 +35,7 @@ fn thin_header_footer(
                         content: Vec::new(),
                         custom_root_bindings: part.custom_root_bindings.clone(),
                         watermark: part.watermark.clone(),
+                        watermark_box: part.watermark_box.clone(),
                     },
                 )
             })

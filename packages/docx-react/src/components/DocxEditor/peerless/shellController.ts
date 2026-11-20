@@ -60,7 +60,7 @@ export interface WorkerCommentDraft { binding: PeerlessEditSessionBinding; selec
 export type WorkerCommentAction = { kind: 'add'; draft: WorkerCommentDraft; text: string } | { kind: 'reply'; id: number; text: string } |
   { kind: 'resolve' | 'reopen' | 'delete'; id: number };
 
-interface Options extends Pick<DocxEditorProps, 'i18n' | 'theme' | 'mode' | 'readOnly' | 'allowHostProposals' | 'onDocumentChange' | 'onSelectionChange' | 'onCommentsChange' | 'onCommentAdd' | 'onCommentResolve' | 'onCommentDelete' | 'onCommentReply' | 'onError' | 'onSave' | 'showFileOpen' | 'showHelpMenu' | 'author' | 'onModeChange' | 'fontFamilies' | 'onFontsLoaded' | 'onFirstPagePainted' | 'onMemoryPressure' | 'memoryBudget'> {
+interface Options extends Pick<DocxEditorProps, 'i18n' | 'theme' | 'mode' | 'readOnly' | 'allowHostProposals' | 'onDocumentChange' | 'onSelectionChange' | 'onCommentsChange' | 'onCommentAdd' | 'onCommentResolve' | 'onCommentDelete' | 'onCommentReply' | 'onError' | 'onSave' | 'showFileOpen' | 'showHelpMenu' | 'author' | 'onModeChange' | 'fontFamilies' | 'onFontsLoaded' | 'onFirstPagePainted' | 'onReady' | 'onMemoryPressure' | 'memoryBudget'> {
   reviewTimeoutMs?: number;
   openTimeoutMs?: number;
   imagePropertiesAvailable?: boolean;
@@ -104,8 +104,8 @@ export function createPeerlessShellController(initial: Options) {
   let options = initial;
   let binding: PeerlessEditSessionBinding | null = null;
   let unsubscribe: (() => void) | undefined;
-  let snapshot: { status: 'empty' | 'opening' | 'ready' | 'failed'; view: PeerlessViewSnapshot | null; error: Error | null; mode: NonNullable<DocxEditorProps['mode']>; preview: ResidentEngineWorkerFrame | null; previewPainted: boolean } =
-    { status: 'empty', view: null, error: null, mode: initial.mode ?? 'editing', preview: null, previewPainted: false };
+  let snapshot: { status: 'empty' | 'opening' | 'ready' | 'failed'; view: PeerlessViewSnapshot | null; error: Error | null; mode: NonNullable<DocxEditorProps['mode']>; preview: ResidentEngineWorkerFrame | null; previewPainted: boolean; readyFor: PeerlessEditSessionBinding | null } =
+    { status: 'empty', view: null, error: null, mode: initial.mode ?? 'editing', preview: null, previewPainted: false, readyFor: null };
   const listeners = new Set<() => void>();
   let shellSnapshot = snapshot;
   const shellListeners = new Set<() => void>();
@@ -120,6 +120,7 @@ export function createPeerlessShellController(initial: Options) {
   let fontFamilies: string[] = [];
   let metadata: { binding: PeerlessEditSessionBinding; version: number; value: DocxDocumentReadValues['toolbarMetadata'] } | null = null;
   let firstPainted = false;
+  let readyAnnounced = false;
   let workerMemory: WasmModuleMemory[] | null = null;
   let pressure: DocxMemoryPressureLevel = 'normal';
   let reviewValue: DocxReviewSnapshot | null = null;
@@ -129,6 +130,7 @@ export function createPeerlessShellController(initial: Options) {
   let revisions: { binding: PeerlessEditSessionBinding; key: string; value: WorkerRevisionState } | null = null;
   let documentKey: unknown;
   let generation = 0;
+  let nativeProbe: { binding: PeerlessEditSessionBinding; identity: PeerlessViewSnapshot['identity']; version: number; token: Promise<string> } | null = null;
   let borderPen: { style: string; size: number; color: { rgb: string } } = { style: 'single', size: 4, color: { rgb: '000000' } };
   const syncBorderPen = () => {
     const cellColor = snapshot.view?.editState?.tableContext?.cellBorderColor;
@@ -159,16 +161,16 @@ export function createPeerlessShellController(initial: Options) {
   };
   const reset = (status: typeof snapshot.status, error: Error | null = null) => {
     const selected = snapshot.view?.workerSelection;
-    fontRevision = 0; fontFamilies = []; metadata = null; revisions = null; firstPainted = false; workerMemory = null;
-    unsubscribe?.(); binding = null; reviewValue = null; reviewBinding = null; reviewIdentity = null;
-    batchResults.clear(); commentResults.clear(); appliedBatches.clear(); commentList = null; snapshot = { status, view: null, error, mode: mode(), preview: null, previewPainted: false }; publish();
+    fontRevision = 0; fontFamilies = []; metadata = null; revisions = null; firstPainted = false; readyAnnounced = false; workerMemory = null;
+    unsubscribe?.(); binding = null; reviewValue = null; reviewBinding = null; reviewIdentity = null; nativeProbe = null;
+    batchResults.clear(); commentResults.clear(); appliedBatches.clear(); commentList = null; snapshot = { status, view: null, error, mode: mode(), preview: null, previewPainted: false, readyFor: null }; publish();
     if (selected) selectionChanged(null);
   };
   const publish = (frame = false) => {
     snapshot = { ...snapshot, mode: mode() };
     const shellChanged = !frame || shellSnapshot.status !== snapshot.status || shellSnapshot.error !== snapshot.error ||
       shellSnapshot.mode !== snapshot.mode || shellSnapshot.preview !== snapshot.preview ||
-      shellSnapshot.previewPainted !== snapshot.previewPainted || !sameShellView(shellSnapshot.view, snapshot.view);
+      shellSnapshot.previewPainted !== snapshot.previewPainted || shellSnapshot.readyFor !== snapshot.readyFor || !sameShellView(shellSnapshot.view, snapshot.view);
     if (shellChanged) shellSnapshot = snapshot;
     updateAuthor();
     if (shellChanged) commands.refresh();
@@ -177,6 +179,10 @@ export function createPeerlessShellController(initial: Options) {
     for (const wait of [...waits]) wait();
   };
   const painted = () => { if (firstPainted) return; firstPainted = true; emit(options.onFirstPagePainted, undefined); };
+  const announceReady = (current: PeerlessEditSessionBinding) => {
+    if (readyAnnounced || closed || binding !== current || snapshot.readyFor !== current) return;
+    readyAnnounced = true; emit(options.onReady, ref);
+  };
   const reportMemory = () => {
     const stats = memoryStats();
     const next = memoryPressureLevel(stats, options.memoryBudget);
@@ -381,15 +387,43 @@ export function createPeerlessShellController(initial: Options) {
     const current = ready();
     return settleCommand(current, current.commands.format(intent, { fence: true }));
   };
-  const query = async <K extends DocxDocumentRead['kind']>(request: DocxDocumentRead & { kind: K }): Promise<PeerlessWorkerQuery<K>> => {
+  const nativeVersion = (current: PeerlessEditSessionBinding, view: PeerlessViewSnapshot) => {
+    const known = nativeProbe;
+    if (known && known.binding === current && known.version === view.version && sameIdentity(known.identity, view.identity)) return { probe: known, cached: true };
+    const probe = { binding: current, identity: { ...view.identity }, version: view.version,
+      token: options.read({ kind: 'readParagraphs', request: { view: 'accepted', paraIds: [] } }).then(native => native.version) };
+    nativeProbe = probe;
+    probe.token.catch(() => { if (nativeProbe === probe) nativeProbe = null; });
+    return { probe, cached: false };
+  };
+  /** `selectionIndependent` reads are kept across selection-only acknowledgements: they are superseded only by a new document version. */
+  const query = async <K extends DocxDocumentRead['kind']>(request: DocxDocumentRead & { kind: K },
+    { selectionIndependent = false }: { selectionIndependent?: boolean } = {}): Promise<PeerlessWorkerQuery<K>> => {
     const current = await flush();
     const view = current.viewStore.getSnapshot();
-    const native = await options.read({ kind: 'readParagraphs', request: { view: 'accepted', paraIds: [] } });
-    if (current !== binding || !sameIdentity(view.identity, current.viewStore.getSnapshot().identity) || view.throughSeq !== current.viewStore.getSnapshot().throughSeq) throw new Error('Worker read was superseded');
-    const value = await readAt<K>(request, native.version);
-    if (view.throughSeq !== current.viewStore.getSnapshot().throughSeq) throw new Error('Worker read was superseded');
+    const moved = () => {
+      const latest = current.viewStore.getSnapshot();
+      return current !== binding || !sameIdentity(view.identity, latest.identity) ||
+        (selectionIndependent ? view.version !== latest.version : view.throughSeq !== latest.throughSeq);
+    };
+    const pinned = async () => {
+      const { probe, cached } = nativeVersion(current, view);
+      const token = await probe.token;
+      if (moved()) throw new Error('Worker read was superseded');
+      return { probe, cached, token };
+    };
+    const first = await pinned();
+    let token = first.token;
+    let value: DocxDocumentReadValues[K];
+    try { value = await readAt<K>(request, token); } catch (error) {
+      if (!first.cached || !(error instanceof WorkerReadSupersededError) || moved() || view.version !== current.viewStore.getSnapshot().version) throw error;
+      if (nativeProbe === first.probe) nativeProbe = null;
+      token = (await pinned()).token;
+      value = await readAt<K>(request, token);
+    }
+    if (moved()) throw new Error('Worker read was superseded');
     if (request.kind === 'reviewSnapshot') rememberComments(current, view, (value as DocxDocumentReadValues['reviewSnapshot'])?.uiComments);
-    const result = { version: native.version, value, selection: structuredClone(view.workerSelection) };
+    const result = { version: token, value, selection: structuredClone(view.workerSelection) };
     queryOrigins.set(result, { binding: current, identity: view.identity, version: view.version });
     return result;
   };
@@ -1019,6 +1053,7 @@ export function createPeerlessShellController(initial: Options) {
       snapshot = { ...snapshot, previewPainted: true }; publish();
     },
     painted,
+    announceReady,
     stalled(error: Error) {
       if (snapshot.status === 'opening') for (const fail of [...waiting]) fail(error);
     },
@@ -1072,8 +1107,9 @@ export function createPeerlessShellController(initial: Options) {
         const previous = snapshot.view;
         if (previous && !sameIdentity(previous.identity, view.identity)) fontRevision = 0;
         const ready = view.presentedThroughSeq >= 0;
+        const presented = ready && view.geometry?.pages.some(page => page.displayPage?.unbuilt !== true);
         snapshot = { ...snapshot, status: ready ? 'ready' : 'opening', view, error: null, mode: mode(),
-          preview: ready ? null : snapshot.preview };
+          preview: ready ? null : snapshot.preview, readyFor: presented || snapshot.readyFor === next ? next : null };
         syncBorderPen();
         const batch = view.editState?.batch;
         if (batch?.result.ok) {
@@ -1084,7 +1120,7 @@ export function createPeerlessShellController(initial: Options) {
           }
         }
         publish(true);
-        if (ready && view.geometry?.pages.some(page => page.displayPage?.unbuilt !== true)) painted();
+        if (presented) painted();
         if (previous && view.version !== previous.version) {
           const change = { version: String(view.version) };
           emit(options.onDocumentChange, change);

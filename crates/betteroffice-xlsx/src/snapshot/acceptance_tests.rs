@@ -368,6 +368,102 @@ fn deferred_snapshot_run_queries_skip_non_strings_and_cells_without_sources() {
     assert!(!peer.source_package_is_unmaterialized_for_test());
 }
 
+fn rich_text_viewport() -> Viewport {
+    Viewport {
+        x: 0.0,
+        y: 0.0,
+        width: 600.0,
+        height: 400.0,
+    }
+}
+
+fn paints_runs(command: &crate::DrawCmd) -> bool {
+    matches!(command, crate::DrawCmd::Text { runs, .. } if !runs.is_empty())
+}
+
+fn serialized_without(list: &crate::DisplayList, skipped: &[usize]) -> Vec<u8> {
+    let mut list = list.clone();
+    list.commands = std::mem::take(&mut list.commands)
+        .into_iter()
+        .enumerate()
+        .filter(|(index, _)| !skipped.contains(index))
+        .map(|(_, command)| command)
+        .collect();
+    serde_json::to_vec(&list).unwrap()
+}
+
+#[test]
+fn snapshot_rich_text_paints_plain_until_the_package_is_parsed_then_with_its_runs() {
+    let workbook = Workbook::open(&rich_text_source()).unwrap();
+    let viewport = rich_text_viewport();
+    for parse_by_save in [false, true] {
+        let peer = hydrate(&workbook, budgets()[0]);
+        assert!(peer.source_package_is_unmaterialized_for_test());
+        let parses = crate::snapshot::package::rebuild_count();
+        let plain = peer.display_list_for(SheetId(0), &viewport).unwrap();
+        assert_eq!(crate::snapshot::package::rebuild_count(), parses);
+        assert!(peer.source_package_is_unmaterialized_for_test());
+        assert!(!plain.commands.iter().any(paints_runs));
+        let (version, epoch) = (peer.version(), peer.model_epoch);
+        if parse_by_save {
+            peer.save().unwrap();
+        } else {
+            assert!(
+                peer.cell_text_runs(SheetId(0), CellRef::new(0, 2))
+                    .is_some()
+            );
+        }
+        assert_eq!(crate::snapshot::package::rebuild_count(), parses + 1);
+        assert!(!peer.source_package_is_unmaterialized_for_test());
+        assert_eq!((peer.version(), peer.model_epoch), (version, epoch));
+        let painted = peer.display_list_for(SheetId(0), &viewport).unwrap();
+        assert_eq!(painted.commands.len(), plain.commands.len());
+        let rich: Vec<usize> = painted
+            .commands
+            .iter()
+            .enumerate()
+            .filter(|(_, command)| paints_runs(command))
+            .map(|(index, _)| index)
+            .collect();
+        let mut texts: Vec<&str> = rich
+            .iter()
+            .filter_map(|&index| match &painted.commands[index] {
+                crate::DrawCmd::Text { text, .. } => Some(&**text),
+                _ => None,
+            })
+            .collect();
+        texts.sort_unstable();
+        texts.dedup();
+        assert_eq!(texts, ["duplicate", "inline"]);
+        assert_eq!(
+            serialized_without(&plain, &rich),
+            serialized_without(&painted, &rich)
+        );
+        for &index in &rich {
+            let mut command = painted.commands[index].clone();
+            if let crate::DrawCmd::Text { runs, .. } = &mut command {
+                runs.clear();
+            }
+            assert_eq!(command, plain.commands[index]);
+        }
+    }
+}
+
+#[test]
+fn snapshot_with_adopted_committed_version_paints_plain_after_the_package_is_parsed() {
+    let mut workbook = Workbook::open(&rich_text_source()).unwrap();
+    let version = format!("{}-1", workbook.version_nonce);
+    workbook.adopt_peer_version(&version).unwrap();
+    let peer = hydrate(&workbook, budgets()[0]);
+    let viewport = rich_text_viewport();
+    let plain = peer.display_list_for(SheetId(0), &viewport).unwrap();
+    assert!(!plain.commands.iter().any(paints_runs));
+    peer.save().unwrap();
+    assert!(!peer.source_package_is_unmaterialized_for_test());
+    let repainted = peer.display_list_for(SheetId(0), &viewport).unwrap();
+    assert_eq!(repainted, plain);
+}
+
 #[test]
 fn format_facets_bounded_snapshot_and_replay() {
     let expected = serde_json::json!({
@@ -3225,16 +3321,14 @@ fn a1_display(model: &WorkbookModel) -> String {
 
 /// what schema 6 displayed for A1: the builtin, whatever the workbook declares.
 fn builtin_a1_display() -> String {
-    let mut model = declared_builtin_model();
-    model.styles.num_fmts.clear();
-    a1_display(&model)
+    "3/15/23".to_string()
 }
 
 #[test]
 fn schema_6_snapshot_with_a_declared_builtin_restores_its_builtin_display() {
     let model = declared_builtin_model();
     let displayed = builtin_a1_display();
-    assert_eq!(displayed, a1_display(&model));
+    assert_eq!(a1_display(&model), "45000.00");
     let mut worker = Workbook::from_model(model.clone()).unwrap();
     worker.set_authority_for_test(crate::authority::schema_6_authority(&model, 91));
     for budget in budgets() {
@@ -3395,7 +3489,7 @@ fn builtins_applied_after_a_schema_6_restore_survive_save_and_reopen() {
         let cell = model.sheets[0].cell(at).unwrap();
         assert_eq!(
             xlsx_render::display_text(&model.styles, model.date_system, cell),
-            builtin_a1_display(),
+            "45000.00",
             "{at:?}"
         );
     }
@@ -3410,6 +3504,140 @@ fn snapshots_of_a_workbook_declaring_general_restore() {
             .unwrap()
             .into_parts();
         assert_eq!(a1_display(&peer.model), "12");
+    }
+}
+
+const MINUS_ACCOUNTING: &str = r#"_-* #,##0_-;\-* #,##0_-;_-* "-"_-;_-@_-"#;
+
+/// A1 holds -1234 under builtin id 41, which the workbook declares as an
+/// accounting code with a minus sign.
+fn declared_accounting_model() -> WorkbookModel {
+    let mut model = WorkbookModel {
+        sheets: vec![crate::Sheet::new("Data")],
+        ..WorkbookModel::default()
+    };
+    model.styles.num_fmts.push((41, MINUS_ACCOUNTING.into()));
+    model.styles.cell_xfs.push(xlsx_model::styles::Xf {
+        num_fmt_id: Some(41),
+        ..xlsx_model::styles::Xf::default()
+    });
+    model.sheets[0].set_cell(
+        CellRef::new(0, 0),
+        Cell {
+            value: CellValue::Number { value: -1234.0 },
+            style: Some(0),
+            ..Cell::default()
+        },
+    );
+    model
+}
+
+#[test]
+fn a_new_seed_of_a_declared_builtin_id_restores_the_workbooks_own_code() {
+    let worker = Workbook::from_model(declared_accounting_model()).unwrap();
+    let custom = xlsx_model::NumberFormat::Custom {
+        pattern: MINUS_ACCOUNTING.into(),
+    };
+    for budget in budgets() {
+        let (peer, _) = completed_builder(&encode(&worker, budget), budget)
+            .finish()
+            .unwrap()
+            .into_parts();
+        let shown = a1_display(&peer.model);
+        assert!(shown.contains('-') && !shown.contains('('), "{shown}");
+        let cell = peer.model.sheets[0].cell(CellRef::new(0, 0)).unwrap();
+        let format = peer.model.styles.cell_format(cell.style);
+        assert_eq!(format.number_format, custom);
+    }
+}
+
+#[test]
+fn schema_6_snapshot_of_a_declared_accounting_id_keeps_the_builtin_parentheses() {
+    let model = declared_accounting_model();
+    let mut worker = Workbook::from_model(model.clone()).unwrap();
+    worker.set_authority_for_test(crate::authority::schema_6_authority(&model, 91));
+    for budget in budgets() {
+        let (peer, _) = completed_builder(&encode(&worker, budget), budget)
+            .finish()
+            .unwrap()
+            .into_parts();
+        let shown = a1_display(&peer.model);
+        assert!(shown.contains('(') && !shown.contains('-'), "{shown}");
+    }
+}
+
+#[test]
+fn recovered_schema_6_sessions_of_a_declared_accounting_id_keep_the_builtin_parentheses() {
+    let model = declared_accounting_model();
+    let mut worker = Workbook::from_model(model.clone()).unwrap();
+    worker.set_authority_for_test(crate::authority::schema_6_authority(&model, 91));
+    let budget = budgets()[2];
+    let (restored, _) = completed_builder(&encode(&worker, budget), budget)
+        .finish()
+        .unwrap()
+        .into_parts();
+    let (mut styled, _) = completed_builder(&encode(&worker, budget), budget)
+        .finish()
+        .unwrap()
+        .into_parts();
+    let unused = xlsx_model::CellFormat {
+        number_format: xlsx_model::NumberFormat::Custom {
+            pattern: "0.000".into(),
+        },
+        ..xlsx_model::CellFormat::default()
+    };
+    styled.model.styles.intern_cell_format(&unused).unwrap();
+    for session in [restored, styled] {
+        let shown = a1_display(&session.model);
+        assert!(shown.contains('(') && !shown.contains('-'), "{shown}");
+        let checkpoint = session.recovery_checkpoint(1, None).unwrap();
+        let (recovered, ..) = Workbook::restore_recovery_checkpoint(&checkpoint).unwrap();
+        let shown = a1_display(&recovered.model);
+        assert!(shown.contains('(') && !shown.contains('-'), "{shown}");
+    }
+}
+
+#[test]
+fn clients_sharing_a_new_seed_of_a_declared_accounting_id_show_its_code() {
+    let model = declared_accounting_model();
+    let worker = Workbook::from_model(model.clone()).unwrap();
+    let fresh =
+        crate::authority::WorkbookAuthority::from_source(&model, Some(92), &[], None).unwrap();
+    let crate::authority::SnapshotAdoption::Replacement(mut adopted) =
+        fresh.snapshot_replacement(&worker.authority_for_test().encode_state_as_update_v1())
+    else {
+        panic!("a fresh replica should adopt the shared state");
+    };
+    let styles = adopted.materialize().unwrap().styles;
+    let at = CellRef::new(1, 0);
+    adopted
+        .apply_ops(
+            &[Op::SetCell {
+                sheet: SheetId(0),
+                at,
+                cell: CellState {
+                    value: CellValue::Number { value: -5678.0 },
+                    style: Some(0),
+                    ..CellState::default()
+                },
+            }],
+            crate::authority::SyncOrigin::User,
+            &styles,
+        )
+        .unwrap();
+    let staged = worker
+        .authority_for_test()
+        .stage_updates_v1(&[&adopted.encode_state_as_update_v1()], None)
+        .unwrap();
+    for shared in [staged.model, adopted.materialize().unwrap()] {
+        for target in [CellRef::new(0, 0), at] {
+            let cell = shared.sheets[0].cell(target).unwrap();
+            let shown = xlsx_render::display_text(&shared.styles, shared.date_system, cell);
+            assert!(
+                shown.contains('-') && !shown.contains('('),
+                "{target:?}: {shown}"
+            );
+        }
     }
 }
 

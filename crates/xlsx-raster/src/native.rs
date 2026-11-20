@@ -133,15 +133,30 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
 }
 
 pub fn render_png_with_fonts(dl: &DisplayList, fonts: &RasterFonts) -> Result<Vec<u8>, String> {
+    render_png_with_fonts_and_images(dl, fonts, &ImageMap::new())
+}
+
+/// [`render_png`], painting each image command from `images`.
+pub fn render_png_with_images(dl: &DisplayList, images: &ImageMap<'_>) -> Result<Vec<u8>, String> {
+    render_png_with_fonts_and_images(dl, &RasterFonts::default(), images)
+}
+
+pub fn render_png_with_fonts_and_images(
+    dl: &DisplayList,
+    fonts: &RasterFonts,
+    images: &ImageMap<'_>,
+) -> Result<Vec<u8>, String> {
     let w = (dl.width.ceil() as u32).max(1);
     let h = (dl.height.ceil() as u32).max(1);
     let mut pixmap = Pixmap::new(w, h).ok_or_else(|| "invalid pixmap size".to_string())?;
     pixmap.fill(Color::WHITE);
     let mut clip_surface = ClipSurface::default();
     let mut patterns = HashMap::new();
+    let mut pictures = super::picture::Pictures::new(images);
 
     for cmd in &dl.commands {
         match cmd {
+            DrawCmd::Image { .. } => pictures.paint(&mut pixmap, &mut clip_surface, cmd)?,
             DrawCmd::PatternFill {
                 x,
                 y,
@@ -343,7 +358,32 @@ pub fn render_png_with_fonts(dl: &DisplayList, fonts: &RasterFonts) -> Result<Ve
                 rotation_valign,
                 stacked,
                 wrap,
+                runs,
             } => {
+                if !runs.is_empty() {
+                    #[cfg(test)]
+                    count(&RUN_PATHS);
+                    if let Some(pieces) = xlsx_render::run_pieces(cmd) {
+                        let mut measured = PieceWidths::new(piece_measure(fonts));
+                        let lines = match wrap {
+                            Some(wrap) => wrapped_lines(*y, wrap, text, &pieces, &mut measured),
+                            None => vec![(*y, pieces)],
+                        };
+                        for (y, pieces) in lines {
+                            paint_pieces(
+                                &mut pixmap,
+                                fonts,
+                                &mut measured,
+                                (*x, y),
+                                *align,
+                                clip,
+                                text,
+                                &pieces,
+                            )?;
+                        }
+                        continue;
+                    }
+                }
                 let run = font::TextRun {
                     x: *x,
                     y: *y,
@@ -404,11 +444,12 @@ pub fn render_png_with_fonts(dl: &DisplayList, fonts: &RasterFonts) -> Result<Ve
                     let lines = xlsx_render::wrap::wrap_lines(text, wrap.width, |line| {
                         font::measure_text_with_fonts(run.faces, run.stack, line, *font_size)
                     });
-                    for (index, line) in lines.iter().enumerate() {
+                    let count = xlsx_render::wrap::wrapped_lines_kept(lines.len(), wrap);
+                    for (index, line) in lines.iter().take(count).enumerate() {
                         font::paint_text(
                             &mut pixmap,
                             &font::TextRun {
-                                y: xlsx_render::wrap::wrapped_line_y(*y, index, lines.len(), wrap),
+                                y: xlsx_render::wrap::wrapped_line_y(*y, index, count, wrap),
                                 text: line,
                                 ..run
                             },
@@ -423,3 +464,67 @@ pub fn render_png_with_fonts(dl: &DisplayList, fonts: &RasterFonts) -> Result<Ve
 
     ooxml_raster::encode_png(pixmap, w, h)
 }
+
+/// What part of a piece's text measures in the piece's faces.
+fn piece_measure(fonts: &RasterFonts) -> impl FnMut(&xlsx_render::TextPiece, &str) -> f32 {
+    move |piece: &xlsx_render::TextPiece, part: &str| {
+        font::measure_text_with_fonts(
+            piece_faces(fonts, piece),
+            &fonts.stack,
+            part,
+            piece.font_size,
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_pieces(
+    pixmap: &mut Pixmap,
+    fonts: &RasterFonts,
+    measured: &mut PieceWidths<impl FnMut(&xlsx_render::TextPiece, &str) -> f32>,
+    (x, y): (f32, f32),
+    align: Align,
+    clip: &DlRect,
+    text: &str,
+    pieces: &[xlsx_render::TextPiece],
+) -> Result<(), String> {
+    let widths: Vec<f32> = pieces
+        .iter()
+        .map(|piece| measured.width(piece, &text[piece.range.clone()]))
+        .collect();
+    let mut pen = aligned_left(x, align, widths.iter().sum());
+    for (piece, width) in pieces.iter().zip(widths) {
+        font::paint_text(
+            pixmap,
+            &font::TextRun {
+                faces: piece_faces(fonts, piece),
+                stack: &fonts.stack,
+                x: pen,
+                y,
+                text: &text[piece.range.clone()],
+                font_size_pt: piece.font_size,
+                color: parse_color(&piece.color)?,
+                align: Align::Left,
+                clip,
+                bold: piece.bold,
+                italic: piece.italic,
+                underline: piece.underline,
+                double_underline: double_underline(piece.underline_style),
+                strike: piece.strike,
+                highlight: None,
+                dashed_underline: false,
+            },
+        );
+        pen += width;
+    }
+    Ok(())
+}
+
+fn piece_faces<'f>(fonts: &'f RasterFonts, piece: &xlsx_render::TextPiece) -> &'f [font::FontFace] {
+    let family = piece.font_family.as_deref().unwrap_or("Calibri");
+    fonts.chain(family, piece.bold, piece.italic)
+}
+
+#[cfg(test)]
+#[path = "native_rich_text_tests.rs"]
+mod rich_text_tests;

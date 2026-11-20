@@ -148,6 +148,7 @@ fn parse_style_pools(
     let mut dxf_colors = Vec::new();
     let mut dxf_font_color = None;
     let mut dxf_fill_color = None;
+    let mut dxf_fill_sides: (Option<Color>, Option<Color>) = (None, None);
     let mut dxf_font = false;
     let mut dxf_fill = false;
     let mut dxf_solid = false;
@@ -253,6 +254,7 @@ fn parse_style_pools(
                     dxf = (ss.dxfs.len() < MAX_STYLE_ENTRIES).then(DifferentialFormat::default);
                     dxf_font_color = None;
                     dxf_fill_color = None;
+                    dxf_fill_sides = (None, None);
                     dxf_font = false;
                     dxf_fill = false;
                     dxf_solid = false;
@@ -271,16 +273,21 @@ fn parse_style_pools(
                     dxf_font_color = parse_color(&e)?;
                 }
                 b"patternFill" if dxf_fill && dxf.is_some() => {
-                    dxf_solid = attr(&e, b"patternType")?.as_deref() == Some("solid");
+                    dxf_solid =
+                        matches!(attr(&e, b"patternType")?.as_deref(), None | Some("solid"));
                 }
                 b"fgColor" if dxf_fill && dxf.is_some() => {
                     if dxf_solid {
                         dxf_fill_color = parse_color(&e)?;
+                        dxf_fill_sides.0 = dxf_fill_color.clone();
                     }
                 }
                 b"bgColor" if dxf_fill && dxf.is_some() => {
                     if dxf_solid && dxf_fill_color.is_none() {
                         dxf_fill_color = parse_color(&e)?;
+                        dxf_fill_sides.1 = dxf_fill_color.clone();
+                    } else if dxf_solid {
+                        dxf_fill_sides.1 = parse_color(&e).ok().flatten();
                     }
                 }
                 b"numFmt" if unfiltered || (section == Section::NumFmts && depth == 3) => {
@@ -415,7 +422,11 @@ fn parse_style_pools(
                 b"dxf" if section == Section::Dxfs => {
                     if let Some(dxf) = dxf.take() {
                         ss.dxfs.push(dxf);
-                        dxf_colors.push((dxf_font_color.take(), dxf_fill_color.take()));
+                        dxf_colors.push((
+                            dxf_font_color.take(),
+                            dxf_fill_color.take(),
+                            std::mem::take(&mut dxf_fill_sides),
+                        ));
                     }
                 }
                 b"border" => {
@@ -457,9 +468,18 @@ fn parse_style_pools(
             _ => {}
         }
     }
-    for (index, (font, fill)) in dxf_colors.into_iter().enumerate() {
+    for (index, (font, fill, (foreground, background))) in dxf_colors.into_iter().enumerate() {
         ss.dxfs[index].font_color = font.as_ref().and_then(|color| ss.resolve_color(color));
         ss.dxfs[index].fill = fill.as_ref().and_then(|color| ss.resolve_color(color));
+        let foreground = foreground
+            .as_ref()
+            .and_then(|color| ss.resolve_color(color));
+        let background = background
+            .as_ref()
+            .and_then(|color| ss.resolve_color(color));
+        if foreground.is_some() && background.is_some() && foreground != background {
+            ss.note_dxf_fill_colors_differ(index as u32);
+        }
     }
     let xf = plain_xfs
         .into_iter()
@@ -968,5 +988,14 @@ mod tests {
             };
             assert_eq!(xf.protection, protected.then_some(protection));
         }
+    }
+
+    #[test]
+    fn differential_pattern_fill_without_a_pattern_type_is_solid() {
+        let xml = br#"<styleSheet><dxfs count="1"><dxf><font><color rgb="FF9C0006"/></font><fill><patternFill><bgColor rgb="FFFFC7CE"/></patternFill></fill></dxf></dxfs></styleSheet>"#;
+        let (styles, _) = parse_styles(xml, &Theme::default()).unwrap();
+        assert_eq!(styles.dxfs.len(), 1);
+        assert_eq!(styles.dxfs[0].font_color.as_deref(), Some("#9c0006"));
+        assert_eq!(styles.dxfs[0].fill.as_deref(), Some("#ffc7ce"));
     }
 }

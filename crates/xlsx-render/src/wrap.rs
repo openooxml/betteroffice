@@ -1,10 +1,24 @@
 //! line breaking for wrapped cell text, shared by row autofit and the painters.
 //! `packages/xlsx/src/render/wrap.ts` mirrors these rules.
 
+use std::ops::Range;
+
 use unicode_segmentation::UnicodeSegmentation;
 use xlsx_model::styles::Alignment;
 
 use crate::display_list::{TextValign, TextWrap};
+
+#[cfg(any(test, feature = "test-counters"))]
+thread_local! {
+    static SPAN_BREAKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// How many times [`wrap_spans`] has been entered on this thread.
+#[cfg(any(test, feature = "test-counters"))]
+#[doc(hidden)]
+pub fn span_breaks() -> u64 {
+    SPAN_BREAKS.get()
+}
 
 /// whether an alignment wraps its text: wrapText without shrinkToFit, and
 /// neither rotated nor stacked.
@@ -112,6 +126,111 @@ fn last_fitting(
     Some(fits)
 }
 
+/// the byte spans of the lines [`wrap_lines`] breaks `text` into, by the same
+/// rules, with `measure` given the span of `text` to measure: the breaker of
+/// text painted in runs, whose widths are sums over the runs a span reaches
+/// into.
+pub fn wrap_spans(
+    text: &str,
+    width: f32,
+    mut measure: impl FnMut(Range<usize>) -> f32,
+) -> Vec<Range<usize>> {
+    #[cfg(any(test, feature = "test-counters"))]
+    SPAN_BREAKS.set(SPAN_BREAKS.get() + 1);
+    let width = if width.is_nan() { f32::INFINITY } else { width };
+    let body = text
+        .strip_suffix('\n')
+        .map_or(text, |rest| rest.strip_suffix('\r').unwrap_or(rest));
+    let mut lines = Vec::new();
+    let mut at = 0;
+    let mut paragraphs = body.split('\n').peekable();
+    while let Some(paragraph) = paragraphs.next() {
+        let start = at;
+        at += paragraph.len() + 1;
+        let end = start + paragraph.strip_suffix('\r').unwrap_or(paragraph).len();
+        let last = paragraphs.peek().is_none();
+        wrap_span_paragraph(text, start..end, width, &mut measure, &mut lines);
+        if !last && let Some(line) = lines.last_mut() {
+            line.end = line.start + text[line.start..line.end].trim_end_matches(' ').len();
+        }
+    }
+    lines
+}
+
+fn wrap_span_paragraph(
+    text: &str,
+    paragraph: Range<usize>,
+    width: f32,
+    measure: &mut impl FnMut(Range<usize>) -> f32,
+    lines: &mut Vec<Range<usize>>,
+) {
+    if measure(paragraph.clone()) <= width {
+        lines.push(paragraph);
+        return;
+    }
+    let base = paragraph.start;
+    let mut start = base;
+    let mut end = None;
+    for (word_start, word_end) in words(&text[paragraph.clone()]) {
+        let (word_start, word_end) = (base + word_start, base + word_end);
+        if let Some(line_end) = end {
+            if measure(start..word_end) <= width {
+                end = Some(word_end);
+                continue;
+            }
+            lines.push(start..line_end);
+            start = word_start;
+        }
+        end = Some(word_end);
+        if measure(start..word_end) <= width {
+            continue;
+        }
+        let ends: Vec<usize> = text[start..word_end]
+            .grapheme_indices(true)
+            .map(|(offset, grapheme)| start + offset + grapheme.len())
+            .collect();
+        let mut first = 0;
+        while let Some(fits) = last_fitting_span(start, &ends, first, width, measure) {
+            lines.push(start..ends[fits]);
+            start = ends[fits];
+            first = fits + 1;
+        }
+    }
+    lines.push(start..paragraph.end);
+}
+
+/// [`last_fitting`] with `measure` given the span to measure.
+fn last_fitting_span(
+    start: usize,
+    ends: &[usize],
+    first: usize,
+    width: f32,
+    measure: &mut impl FnMut(Range<usize>) -> f32,
+) -> Option<usize> {
+    let mut fits = first;
+    let mut step = 1;
+    let mut over = loop {
+        let probe = (fits + step).min(ends.len() - 1);
+        if probe == fits {
+            return None;
+        }
+        if measure(start..ends[probe]) > width {
+            break probe;
+        }
+        fits = probe;
+        step *= 2;
+    };
+    while over - fits > 1 {
+        let mid = fits + (over - fits) / 2;
+        if measure(start..ends[mid]) > width {
+            over = mid;
+        } else {
+            fits = mid;
+        }
+    }
+    Some(fits)
+}
+
 /// byte spans of the space-separated words in `text`.
 fn words(text: &str) -> impl Iterator<Item = (usize, usize)> + '_ {
     text.split(' ')
@@ -135,6 +254,34 @@ pub fn wrapped_line_y(y: f32, index: usize, count: usize, wrap: &TextWrap) -> f3
         }
 }
 
+/// share of a line by which a wrapped line may pass the cell's height and
+/// still count as fitting.
+const FIT_TOLERANCE: f64 = 1e-4;
+
+/// the most wrapped lines excel paints in a row or merged area `height` px
+/// tall: those whose top half is inside it, to a ten-thousandth of a line, at
+/// least one. `None` when the height or the arithmetic is not a number: every
+/// line paints.
+pub fn max_wrapped_lines(height: f32, line_height: f32, font_size_pt: f32) -> Option<u32> {
+    if !height.is_finite() {
+        return None;
+    }
+    let font = f64::from(font_size_pt) * crate::geometry::PX_PER_PT;
+    let room = (f64::from(height) - font / 2.0) / f64::from(line_height) + FIT_TOLERANCE;
+    if room.is_nan() {
+        return None;
+    }
+    Some(room.floor().clamp(0.0, f64::from(u32::MAX - 1)) as u32 + 1)
+}
+
+/// how many of `count` wrapped lines a painter paints: at most the wrap's
+/// `max_lines`, every line without it.
+pub fn wrapped_lines_kept(count: usize, wrap: &TextWrap) -> usize {
+    wrap.max_lines.map_or(count, |max| {
+        count.min(usize::try_from(max).unwrap_or(usize::MAX))
+    })
+}
+
 /// lines a wrapped cell takes in a text box `width` px wide, measured with
 /// [`estimate_text_width`]: what row autofit counts without a font engine.
 pub fn estimated_line_count(text: &str, width: f32, size_pt: f64) -> usize {
@@ -147,7 +294,7 @@ pub fn estimated_line_count(text: &str, width: f32, size_pt: f64) -> usize {
 /// zero-width marks take none, wide East Asian forms a full em, and anything
 /// else a digit's advance.
 pub fn estimate_text_width(text: &str, size_pt: f64) -> f32 {
-    let units: u32 = text.chars().map(advance_units).sum();
+    let units = text.chars().map(advance_units).fold(0, u32::saturating_add);
     (f64::from(units) * size_pt * crate::geometry::PX_PER_PT / UNITS_PER_EM) as f32
 }
 
@@ -230,6 +377,68 @@ mod tests {
     }
 
     #[test]
+    fn spans_break_every_shared_case_as_the_lines_do() {
+        let cases: Vec<Case> =
+            serde_json::from_str(include_str!("../tests/fixtures/text-wrap-agreement.json"))
+                .unwrap();
+        for case in cases {
+            let text = case.text.as_str();
+            let lines: Vec<&str> = wrap_spans(text, case.width, |span| graphemes(&text[span]))
+                .into_iter()
+                .map(|span| &text[span])
+                .collect();
+            assert_eq!(lines, case.lines, "{text:?} at {}", case.width);
+            assert_eq!(lines, wrap_lines(text, case.width, graphemes));
+        }
+    }
+
+    #[test]
+    fn lines_break_without_the_span_breaker() {
+        let before = span_breaks();
+        let lines = wrap_lines("ab cd\nef", 2.0, graphemes);
+        assert_eq!(lines, ["ab", "cd", "ef"]);
+        assert_eq!(span_breaks() - before, 0);
+        wrap_spans("ab cd", 2.0, |span| span.len() as f32);
+        assert_eq!(span_breaks() - before, 1);
+    }
+
+    const RICH_CASES: &str = include_str!("../tests/fixtures/rich-text-wrap-agreement.json");
+
+    #[derive(serde::Deserialize)]
+    struct Advance {
+        end: usize,
+        advance: f32,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct RichCase {
+        text: String,
+        width: f32,
+        runs: Vec<Advance>,
+        lines: Vec<String>,
+    }
+
+    #[test]
+    fn spans_measured_per_run_follow_the_shared_rules() {
+        let cases: Vec<RichCase> = serde_json::from_str(RICH_CASES).unwrap();
+        for case in cases {
+            let text = case.text.as_str();
+            assert!(text.is_ascii(), "{text:?}");
+            let advance = |index: usize| {
+                case.runs
+                    .iter()
+                    .find(|run| index < run.end)
+                    .map_or(0.0, |run| run.advance)
+            };
+            let lines: Vec<&str> = wrap_spans(text, case.width, |span| span.map(advance).sum())
+                .into_iter()
+                .map(|span| &text[span])
+                .collect();
+            assert_eq!(lines, case.lines, "{text:?} at {}", case.width);
+        }
+    }
+
+    #[test]
     fn long_runs_measure_each_text_a_bounded_number_of_times() {
         let size = 11.0;
         let mut calls = 0;
@@ -267,6 +476,7 @@ mod tests {
             width: 10.0,
             line_height: 18.0,
             valign,
+            max_lines: None,
         };
         let ys = |valign| -> Vec<f32> {
             (0..3)
@@ -291,5 +501,12 @@ mod tests {
         assert!((estimate_text_width("\u{65e5}", 11.0) - em).abs() < 1e-4);
         assert_eq!(estimated_line_count("a\nb\r\nc", 100.0, 11.0), 3);
         assert_eq!(estimated_line_count("a\nb\r\n", 100.0, 11.0), 2);
+    }
+
+    #[test]
+    fn the_estimate_of_a_text_past_the_unit_range_saturates() {
+        let wide = "\u{65e5}".repeat(2_100_000);
+        let most = f64::from(u32::MAX) * 11.0 * crate::geometry::PX_PER_PT / UNITS_PER_EM;
+        assert_eq!(estimate_text_width(&wide, 11.0), most as f32);
     }
 }

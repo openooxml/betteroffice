@@ -131,6 +131,29 @@ test('XLSX canvas previews in one process keep each workbook\'s faces apart', as
   expect(GlobalFonts.has('Host Face')).toBe(true);
 });
 
+test('XLSX canvas previews paint a text run with the face of its own family', async () => {
+  const base = createFontProvider(undefined, { decoder: decodeFontFace });
+  const hebrew = await base.resolveFamily('Noto Sans Hebrew', false, false)!();
+  const sans = await base.resolve('Arial', false, false)!();
+  const asked: string[] = [];
+  const provider = { ...base, resolve: (family: string, bold: boolean, italic: boolean) => {
+    asked.push(`${family}/${bold}/${italic}`);
+    return async () => family === 'Run Face' ? sans : hebrew;
+  } };
+  const book = (cmd: object) => ({
+    sheetInfo: () => ({ activeSheet: 0 }),
+    setActiveSheet: () => {},
+    displayList: () => ({ width: 120, height: 24, commands: [{ op: 'text', x: 4, y: 18, text: 'Quarterly', fontSize: 12, color: '#000000', ...cmd }] }),
+    renderPngFonts: () => [],
+  });
+  const viewport = { x: 0, y: 0, width: 120, height: 24 };
+  const plain = await renderXlsxRange(book({ fontFamily: 'Run Face' }) as never, 0, 'A1', viewport, 1, provider);
+  asked.length = 0;
+  const run = await renderXlsxRange(book({ fontFamily: 'Cell Face', runs: [{ start: 0, end: 9, fontFamily: 'Run Face' }] }) as never, 0, 'A1', viewport, 1, provider);
+  expect(asked).toEqual(['Cell Face/false/false', 'Run Face/false/false']);
+  expect(Buffer.from(run).equals(Buffer.from(plain))).toBe(true);
+});
+
 test('XLSX canvas preview sizes match the engine\'s 32-bit range extent', () => {
   const first = { x: 0, y: Math.fround(1.1) };
   const last = { x: Math.fround(10.3), y: Math.fround(799.9), w: Math.fround(20.7), h: Math.fround(1.2) };
@@ -159,3 +182,26 @@ test('XLSX canvas previews of many workbooks with distinct families keep the fac
     expect(GlobalFonts.families.length).toBe(families);
   } finally { register.mockRestore(); }
 }, 120_000);
+
+test('XLSX canvas previews ask again until no conditional format is pending', async () => {
+  const provider = createFontProvider(undefined, { decoder: decodeFontFace });
+  const viewport = { x: 0, y: 0, width: 40, height: 16 };
+  const fill = { op: 'fillRect' as const, x: 0, y: 0, w: 40, h: 16, color: '#ff0000' };
+  const frames = [
+    { width: 40, height: 16, commands: [], conditionalPending: 2 },
+    { width: 40, height: 16, commands: [fill], conditionalPending: 1 },
+    { width: 40, height: 16, commands: [fill] },
+  ];
+  let calls = 0;
+  const book = (lists: typeof frames) => ({
+    sheetInfo: () => ({ activeSheet: 0 }),
+    setActiveSheet: () => {},
+    displayList: () => lists[Math.min(calls++, lists.length - 1)],
+    renderPngFonts: () => [],
+  });
+  const settled = await renderXlsxRange(book(frames) as never, 0, 'A1', viewport, 1, provider);
+  expect(calls).toBe(3);
+  calls = 0;
+  const direct = await renderXlsxRange(book([frames[2]]) as never, 0, 'A1', viewport, 1, provider);
+  expect(Buffer.from(settled).equals(Buffer.from(direct))).toBe(true);
+});

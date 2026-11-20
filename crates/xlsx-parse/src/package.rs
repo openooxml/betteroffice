@@ -10,8 +10,8 @@ use xlsx_model::{CellRef, SheetId, Workbook};
 use crate::read::{SharedStringCells, SourceCellFacts};
 use crate::reference::UnpatchableReference;
 use crate::xml::{
-    attr, collect_text, find_part, local_name, next_event, reader, resolve_part_path,
-    text_attribute, utf8_bom_len, xml_err,
+    PartNames, attr, collect_text, find_part, local_name, next_event, reader, resolve_part_name,
+    resolve_part_path, text_attribute, utf8_bom_len, xml_err,
 };
 use crate::{MAX_DEPTH, ParseError};
 
@@ -40,6 +40,9 @@ pub struct PreservedPackage {
     pub(crate) drawing_anchors: Arc<OnceLock<Vec<Vec<crate::drawing_anchors::SheetDrawing>>>>,
     pub(crate) rich_shared_strings: BTreeSet<usize>,
     pub(crate) text_runs: Arc<OnceLock<crate::rich_text::RichTextIndex>>,
+    /// Whether a shared string or an inline string of a source sheet carried
+    /// formatted runs.
+    pub(crate) holds_text_runs: bool,
 }
 
 impl PreservedPackage {
@@ -172,6 +175,10 @@ impl PreservedPackage {
             .map(parse_relationships)
             .transpose()?
             .unwrap_or_default();
+        let holds_text_runs = !rich_shared_strings.is_empty()
+            || sheets
+                .iter()
+                .any(|sheet| !sheet.cell_facts.rich_inline.is_empty());
 
         Ok(Self {
             parts,
@@ -195,6 +202,7 @@ impl PreservedPackage {
             drawing_anchors: Arc::new(OnceLock::new()),
             rich_shared_strings,
             text_runs: Arc::new(OnceLock::new()),
+            holds_text_runs,
         })
     }
 
@@ -397,6 +405,8 @@ impl PreservedPackage {
                 },
                 None => continue,
             };
+            let mut table_parts = PartNames::default();
+            let mut comment_parts = PartNames::default();
             for relationship in relationships {
                 let table = relationship.has_type("table");
                 let comments =
@@ -414,10 +424,20 @@ impl PreservedPackage {
                     return Some(&sheet.path);
                 }
                 let base = sheet.path.rsplit_once('/').map_or("", |(base, _)| base);
-                let path = resolve_part_path(base, target);
+                let path = resolve_part_name(base, target);
+                let seen = if table {
+                    &mut table_parts
+                } else {
+                    &mut comment_parts
+                };
+                if !seen.push(path.clone()) {
+                    continue;
+                }
                 let Some(bytes) = find_part(&self.parts, &path) else {
                     return Some(&sheet.path);
                 };
+                #[cfg(test)]
+                MOVE_GUARD_READS.set(MOVE_GUARD_READS.get() + 1);
                 let unsupported = if table {
                     table_move_unsupported(bytes, |formula| formula_affected(index, formula))
                 } else {
@@ -559,6 +579,13 @@ impl PreservedPackage {
         self.rich_shared_strings.contains(&index)
     }
 
+    /// Whether any source string carried formatted runs: `false` means no
+    /// cell has runs to report, known without reading a part.
+    #[doc(hidden)]
+    pub fn holds_text_runs(&self) -> bool {
+        self.holds_text_runs
+    }
+
     /// Whether a source sheet enables `sheetProtection`. A declaration that cannot be read
     /// counts as enabled.
     #[doc(hidden)]
@@ -614,6 +641,17 @@ impl PreservedPackage {
                     })
                 })
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static MOVE_GUARD_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Table and comments parts the cell-move guard read since the last call.
+#[cfg(test)]
+pub(crate) fn take_move_guard_reads() -> usize {
+    MOVE_GUARD_READS.replace(0)
 }
 
 fn table_move_unsupported(

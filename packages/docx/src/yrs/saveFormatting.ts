@@ -407,12 +407,14 @@ export function tableCellAttrsToFormatting(
     return result;
   }
 
+  const fill =
+    (attrs.backgroundColor ?? null) !== (attrs._originalResolvedFill ?? null) ? attrs.backgroundColor : undefined;
   const hasFormatting =
     attrs.colspan > 1 ||
     attrs.rowspan > 1 ||
     attrs.width != null ||
     attrs.verticalAlign ||
-    attrs.backgroundColor ||
+    fill ||
     borders ||
     margins ||
     attrs.textDirection;
@@ -428,7 +430,7 @@ export function tableCellAttrsToFormatting(
         : undefined,
     verticalAlign: attrs.verticalAlign || undefined,
     textDirection: attrs.textDirection || undefined,
-    shading: attrs.backgroundColor ? { fill: { rgb: attrs.backgroundColor } } : undefined,
+    shading: fill ? { fill: { rgb: fill } } : undefined,
     borders,
     margins,
   };

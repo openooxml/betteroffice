@@ -92,7 +92,9 @@ impl Lineage {
             version_nonce,
             committed_changes,
             chart_cache: _,
+            conditional_cache: _,
             source_part_hashes: _,
+            calculated_now: _,
         } = workbook;
         workbook.require_snapshot_standalone()?;
         if *edited_since_open
@@ -2036,6 +2038,9 @@ impl WorkbookSnapshotBuilder {
             return Err(error("snapshot calculation precision differs"));
         }
         authority.restore_full_precision(model.full_precision);
+        if authority.reads_builtin_number_formats() {
+            model.styles.read_builtin_number_formats();
+        }
         if !model.styles.has_xf_xml_markers()
             && let Some(source) = &source_container
             && let Some(styles) = super::source_style_xml_markers(source.as_bytes())
@@ -2129,7 +2134,9 @@ impl WorkbookSnapshotBuilder {
             version_nonce,
             committed_changes,
             chart_cache: Mutex::new(ChartCache::default()),
+            conditional_cache: Mutex::default(),
             source_part_hashes: Mutex::new(BTreeMap::new()),
+            calculated_now: None,
         });
         Ok(())
     }

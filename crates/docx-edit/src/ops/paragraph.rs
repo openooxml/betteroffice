@@ -425,7 +425,7 @@ impl EditingDoc {
         check_position(&story, txn, at.index)?;
         identity::promote_at(self, txn, &at.story, &story, at.index);
         let mut ids = IdAllocator::new(self, txn);
-        let second_para_id = ids.session_key(self);
+        let second_para_id = ids.session_key(self, txn);
         let chunks = position_chunks(&story, txn, &mut at.index);
         let revision_id = ctx.is_suggesting().then(|| {
             revision_id.unwrap_or_else(|| {
@@ -433,7 +433,7 @@ impl EditingDoc {
                     .or_else(|| {
                         adjacent_paragraph_change_revision_id(&chunks, at.index, txn, &ctx.author)
                     })
-                    .unwrap_or_else(|| self.next_id())
+                    .unwrap_or_else(|| self.next_id(txn))
             })
         });
         let (orig_index, orig_map) =
@@ -582,7 +582,7 @@ impl EditingDoc {
                 pilcrow_index.saturating_add(1),
             );
             adjacent_revision_id(&chunks, pilcrow_index, DEL, &ctx.author)
-                .unwrap_or_else(|| self.next_id())
+                .unwrap_or_else(|| self.next_id(&txn))
         });
 
         let carry = (revision_id.is_none() && !needs_boundary)
@@ -753,7 +753,7 @@ impl EditingDoc {
                         &ctx.author,
                     )
                 })
-                .unwrap_or_else(|| self.next_id())
+                .unwrap_or_else(|| self.next_id(&txn))
         });
         let mut changed = false;
         let mut inherited = RestyleInheritanceCache::new();
@@ -1559,6 +1559,7 @@ pub(crate) fn plan_paragraph_style<T: ReadTxn>(
             for key in [
                 "numPr",
                 "numPrFromStyle",
+                crate::LIST_DEF,
                 "listNumFmt",
                 "listIsBullet",
                 "listMarker",
@@ -1788,7 +1789,7 @@ impl EditingDoc {
                 story.insert_with_attributes(&mut txn, index, run.text, attrs);
                 index += crate::ops::utf16_len(run.text);
             }
-            let para_id = allocator.session_key(self);
+            let para_id = allocator.session_key(self, &txn);
             let pilcrow = story.insert_embed_with_attributes(
                 &mut txn,
                 index,

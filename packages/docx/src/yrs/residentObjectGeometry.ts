@@ -85,6 +85,27 @@ export function embedSelected(selection: DocxCommandSelection | null, at: YrsLoc
     Math.min(anchor.offset, focus.offset) === at.offset && Math.max(anchor.offset, focus.offset) === at.offset + 1;
 }
 
+/** Whether `selection` covers exactly one picture, the only selection frame geometry marks on an object. */
+export function selectsImage(engine: ResidentEngineSession, selection: DocxCommandSelection | null): boolean {
+  if (!selection) return false;
+  const { anchor, focus } = selection;
+  if (anchor.story !== focus.story || anchor.paraId !== focus.paraId || Math.abs(anchor.offset - focus.offset) !== 1 ||
+    !engine.geometryReader.hasStory(anchor.story)) return false;
+  return imageAt(engine, { story: anchor.story, paraId: anchor.paraId, offset: Math.min(anchor.offset, focus.offset) });
+}
+
+function imageAt(engine: ResidentEngineSession, at: YrsLoc): boolean {
+  let offset = 0;
+  const index = engine.geometryReader.paragraphSpans(at.story).findIndex(span => span.paraId === at.paraId);
+  if (index < 0) return false;
+  const found = engine.paragraphSegments(at.story, [index])[0]?.find(segment => {
+    const start = offset;
+    offset += segment.kind === 'text' ? segment.text.length : 1;
+    return start === at.offset;
+  });
+  return found?.kind === 'embed' && found.embedKind === 'image';
+}
+
 export function imagePlacement(payload: Record<string, unknown>): Pick<ResidentObjectGeometry, 'floating' | 'behindText' | 'noChangeAspect' | 'rotation'> {
   const rotation = typeof payload.transform === 'string' ? Number(payload.transform.match(/rotate\(([-\d.]+)deg\)/)?.[1] ?? 0) : 0;
   const properties = { ...(payload.noChangeAspect === true ? { noChangeAspect: true } : {}), ...(rotation ? { rotation } : {}) };
@@ -171,17 +192,7 @@ export function resolveResidentObject(engine: ResidentEngineSession, handle: str
   const at = engine.resolveStickyPosition(target.position);
   if (!at || !engine.geometryReader.hasStory(at.story)) return null;
   if (identity(engine.encodeStickyPosition(at)) !== identity(target.position)) return null;
-  if (target.kind === 'image') {
-    let offset = 0;
-    const index = engine.geometryReader.paragraphSpans(at.story).findIndex(span => span.paraId === at.paraId);
-    if (index < 0) return null;
-    const found = engine.paragraphSegments(at.story, [index])[0]?.find(segment => {
-      const start = offset;
-      offset += segment.kind === 'text' ? segment.text.length : 1;
-      return start === at.offset;
-    });
-    if (found?.kind !== 'embed' || found.embedKind !== 'image') return null;
-  }
+  if (target.kind === 'image' && !imageAt(engine, at)) return null;
   return { ...at, kind: target.kind };
 }
 

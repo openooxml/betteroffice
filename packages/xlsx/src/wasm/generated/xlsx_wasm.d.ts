@@ -90,6 +90,10 @@ export class XlsxDocument {
      * the pending proposals: `{"proposals":[...]}`.
      */
     listProposalsJson(): string;
+    /**
+     * the encoded bytes of the image an `image` draw command names.
+     */
+    mediaBytes(asset_id: string): Uint8Array;
     mergedRangesJson(args: string): string;
     /**
      * slide a chart by a pixel delta as one undo step.
@@ -101,6 +105,11 @@ export class XlsxDocument {
      * Open a replica with a positive, safe-integer client ID.
      */
     static openCollaborative(bytes: Uint8Array, client_id: number): XlsxDocument;
+    /**
+     * Open keeping cached formula results, recalculating only a file with an uncached formula
+     * or a `calcPr` full calculation request.
+     */
+    static openRecalculatingStale(bytes: Uint8Array, context?: string | null): XlsxDocument;
     /**
      * Checkpoints are only restorable by the same engine version and codec.
      */
@@ -288,12 +297,14 @@ export interface InitOutput {
     readonly xlsxdocument_historyStateJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_listDefinedNamesJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_listProposalsJson: (a: number) => [number, number, number, number];
+    readonly xlsxdocument_mediaBytes: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_mergedRangesJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_moveChartJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_moveRangeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_nextPeerSnapshotChunk: (a: number) => [number, number, number];
     readonly xlsxdocument_open: (a: number, b: number) => [number, number, number];
     readonly xlsxdocument_openCollaborative: (a: number, b: number, c: number) => [number, number, number];
+    readonly xlsxdocument_openRecalculatingStale: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly xlsxdocument_openRecoveryCheckpoint: (a: number, b: number, c: number) => [number, number, number];
     readonly xlsxdocument_openWithCalculationJson: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly xlsxdocument_openWithPeerHydrationJson: (a: number, b: number, c: number, d: number) => [number, number, number];

@@ -103,7 +103,7 @@ The toolbar and Ctrl/Cmd+S invoke `onSaveRequest` before serialization. Its resu
 `onSave` receives the bytes, and the editor downloads the file using `fileName` when `downloadOnSave`
 is `true` (the default without `onSave`).
 
-Calling `save()` directly returns bytes without invoking those save callbacks.
+On the default async API, `api.save()` skips `onSaveRequest` and never downloads; it returns the bytes and hands them to `onSave`.
 
 ## Toolbar
 

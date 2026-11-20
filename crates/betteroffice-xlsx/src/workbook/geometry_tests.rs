@@ -446,7 +446,9 @@ fn replacement_changes_rebuild_once() {
         }
         reset_geometry_counters();
         if kind == 2 {
-            workbook.install_model_with_ops(replacement, &[]).unwrap();
+            workbook
+                .install_model_with_ops(replacement, &[], false)
+                .unwrap();
         } else {
             workbook.install_model(replacement).unwrap();
         }

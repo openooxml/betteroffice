@@ -36,6 +36,8 @@ mod style_match_tests;
 pub(crate) use style_match::{SourceStyles, StyleMatch, keeps_source_xf, retains_source_styles};
 pub use style_match::{keeps_source, keeps_source_conditional_formats};
 
+type SharedGroupEntry = (bool, Option<CellRange>, Option<(u32, u32)>);
+
 #[cfg(any(test, feature = "test-oracle"))]
 thread_local! {
     static EMISSION_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -776,7 +778,8 @@ impl SheetPatch<'_> {
     fn dirty_formulas(&self, data: &[u8], rows: &[SourceRow]) -> Result<DirtyFormulas, ParseError> {
         let mut changed = self.changed_source_cells();
         let mut arrays = BTreeSet::new();
-        let mut groups: HashMap<u32, (bool, Option<CellRange>)> = HashMap::new();
+        let mut groups: HashMap<u32, SharedGroupEntry> = HashMap::new();
+        let mut members: HashMap<u32, Vec<CellRef>> = HashMap::new();
         let mut masters = Vec::new();
         for cell in rows.iter().flat_map(|row| &row.cells) {
             let Some(formula) = &cell.formula else {
@@ -796,12 +799,20 @@ impl SheetPatch<'_> {
             }
             match formula.group {
                 Some(group) => {
-                    let entry = groups.entry(group).or_insert((false, None));
+                    let entry = groups.entry(group).or_insert((false, None, None));
                     entry.0 |= self
                         .mapped(cell.at)
                         .is_none_or(|at| self.inverse(at) != Some(cell.at))
                         || (changed.contains(&key) && self.source_formula_changed(cell.at));
                     entry.0 |= arrays.contains(&key);
+                    if let Some(at) = self.mapped(cell.at) {
+                        let shift = (
+                            at.row.wrapping_sub(cell.at.row),
+                            at.col.wrapping_sub(cell.at.col),
+                        );
+                        entry.0 |= *entry.2.get_or_insert(shift) != shift;
+                        members.entry(group).or_default().push(at);
+                    }
                     if !entry.0
                         && formula.reference.is_some()
                         && let Some(at) = self.mapped(cell.at)
@@ -824,8 +835,13 @@ impl SheetPatch<'_> {
         Ok(DirtyFormulas {
             groups: groups
                 .into_iter()
-                .filter(|(_, (dirty, master))| {
-                    *dirty || !master.is_some_and(|reference| self.moves_uniformly(reference))
+                .filter(|(group, (dirty, master, _))| {
+                    let members = members.get(group).map_or(&[][..], Vec::as_slice);
+                    *dirty
+                        || !master
+                            .filter(|&reference| self.moves_uniformly(reference))
+                            .and_then(|reference| self.remap_range(reference))
+                            .is_some_and(|written| members.iter().all(|&at| written.contains(at)))
                 })
                 .map(|(group, _)| group)
                 .collect(),

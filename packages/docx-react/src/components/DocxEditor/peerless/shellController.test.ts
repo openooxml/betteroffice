@@ -325,6 +325,121 @@ test('worker highlightColor formats and clears through formatRange', async () =>
   }
 });
 
+function announceLikeTheEditor(controller: ReturnType<typeof fixture>['controller']) {
+  let seen: unknown = null;
+  controller.subscribeShell(() => {
+    const token = controller.getShellSnapshot().readyFor;
+    if (token === seen) return;
+    seen = token;
+    if (token) setTimeout(() => controller.announceReady(token));
+  });
+}
+
+const laterTurn = () => new Promise(resolve => setTimeout(resolve, 0));
+
+function paintFirstPage(viewStore: ReturnType<typeof fixture>['viewStore'], frameEpoch: number) {
+  viewStore.installFrameGeometry({ identity: viewStore.getSnapshot().identity, coversThroughSeq: 0,
+    frameEpoch, layoutRevision: frameEpoch, pages: [{ page: { pageId: '1', pageIndex: 0 },
+      bounds: { x: 0, y: 0, width: 600, height: 800 }, transform: [1, 0, 0, 1, 0, 0] }], caret: null, selectionRects: [] });
+}
+
+test('onReady receives the ref once, on a later turn after the first page paints', async () => {
+  const { controller, binding, viewStore } = fixture(-1);
+  const order: string[] = [];
+  const onReady = mock((_api: unknown) => { order.push('ready'); });
+  controller.update({ read: async () => ({} as never), focus() {}, zoom: 1, onReady,
+    onFirstPagePainted: () => { order.push('painted'); } } as Parameters<typeof controller.update>[0]);
+  announceLikeTheEditor(controller);
+  controller.opening();
+  controller.attach(binding);
+  await laterTurn();
+  expect(order).toEqual([]);
+  paintFirstPage(viewStore, 2);
+  expect(order).toEqual(['painted']);
+  expect(controller.getSnapshot().readyFor).toBe(binding);
+  await laterTurn();
+  expect(order).toEqual(['painted', 'ready']);
+  expect(onReady.mock.calls[0]![0]).toBe(controller.ref);
+  paintFirstPage(viewStore, 3);
+  controller.announceReady(binding);
+  await laterTurn();
+  expect(onReady).toHaveBeenCalledTimes(1);
+});
+
+test('onReady skips the preview paint and fires on a later turn once the opened document paints, when its reads resolve', async () => {
+  const { controller, binding, viewStore, read } = fixture(-1);
+  const order: string[] = [];
+  let identities!: Promise<unknown>;
+  const onReady = mock((api: typeof controller.ref) => { order.push('ready'); identities = api.getParagraphIdentities(); });
+  controller.update({ read: read as never, focus() {}, zoom: 1, onReady,
+    onFirstPagePainted: () => { order.push('painted'); } } as Parameters<typeof controller.update>[0]);
+  announceLikeTheEditor(controller);
+  controller.opening();
+  const preview = { frame: Uint8Array.of(1), documentPreview: true } as never;
+  controller.preview(preview);
+  controller.previewPresented(preview);
+  controller.painted();
+  expect(order).toEqual(['painted']);
+  expect(controller.getSnapshot().readyFor).toBeNull();
+  await laterTurn();
+  expect(order).toEqual(['painted']);
+  controller.attach(binding);
+  await laterTurn();
+  expect(order).toEqual(['painted']);
+  paintFirstPage(viewStore, 2);
+  expect(order).toEqual(['painted']);
+  await laterTurn();
+  expect(order).toEqual(['painted', 'ready']);
+  expect(onReady.mock.calls[0]![0]).toBe(controller.ref);
+  expect(await identities.then(() => 'resolved', (error: Error) => error.name)).toBe('resolved');
+  paintFirstPage(viewStore, 3);
+  await laterTurn();
+  expect(onReady).toHaveBeenCalledTimes(1);
+});
+
+test('onReady is not called when onFirstPagePainted closes the editor', async () => {
+  const { controller, binding, viewStore, read } = fixture(-1);
+  const onReady = mock((_api: unknown) => {});
+  const painted = mock(() => { controller.dispose(); });
+  controller.update({ read: read as never, focus() {}, zoom: 1, onReady,
+    onFirstPagePainted: painted } as Parameters<typeof controller.update>[0]);
+  announceLikeTheEditor(controller);
+  controller.opening();
+  controller.attach(binding);
+  paintFirstPage(viewStore, 2);
+  expect(painted).toHaveBeenCalledTimes(1);
+  await laterTurn();
+  expect(onReady).not.toHaveBeenCalled();
+});
+
+test('a document replaced inside onFirstPagePainted gets no onReady, and its replacement gets one on a later turn once it paints', async () => {
+  const first = fixture(-1);
+  const second = fixture(-1);
+  const { controller } = first;
+  const order: unknown[] = [];
+  let replace = true;
+  controller.update({ read: first.read as never, focus() {}, zoom: 1, onReady: (api: unknown) => { order.push(api); },
+    onFirstPagePainted: () => { order.push('painted'); if (replace) { replace = false; controller.opening({}); } } } as Parameters<typeof controller.update>[0]);
+  announceLikeTheEditor(controller);
+  controller.opening({});
+  controller.attach(first.binding);
+  paintFirstPage(first.viewStore, 2);
+  expect(replace).toBe(false);
+  await laterTurn();
+  expect(order).toEqual(['painted']);
+  expect(controller.getSnapshot().status).toBe('opening');
+  controller.attach(second.binding);
+  await laterTurn();
+  expect(order).toEqual(['painted']);
+  paintFirstPage(second.viewStore, 2);
+  expect(order).toEqual(['painted', 'painted']);
+  await laterTurn();
+  expect(order).toEqual(['painted', 'painted', controller.ref]);
+  paintFirstPage(second.viewStore, 3);
+  await laterTurn();
+  expect(order).toHaveLength(3);
+});
+
 test('worker insertBreak stays a loud sync-API failure', () => {
   const { controller } = toolbarFixture();
   expect(() => controller.ref.insertBreak({ paraId: 'p1', type: 'page' })).toThrow(LEGACY_SYNC_API_PROP);
@@ -801,6 +916,66 @@ test('queries pin the native version and refuse commands after replacement', asy
   expect(await controller.applyQuery(query, { kind: 'setWatermark', payload: { watermark: null, expectVersion: query.version } }))
     .toMatchObject({ ok: false, failure: { code: 'document-replaced' } });
   expect(submit).toHaveBeenCalledTimes(1);
+});
+
+function versionedFixture() {
+  const base = fixture();
+  let native = 'native-0';
+  base.read.mockImplementation(async () => ({ status: 'ok', version: native, value: { version: native, paragraphs: [] } }));
+  const readAt = mock(async (_request: { kind: string }, version: string): Promise<{ status: 'ok'; version: string; value: unknown } | { status: 'superseded' }> =>
+    version === native ? { status: 'ok', version, value: { styles: [], fontFamilies: [] } } : { status: 'superseded' });
+  base.controller.update({ read: base.read as never, readAt: readAt as never, focus() {}, zoom: 1 });
+  base.controller.attach(base.binding);
+  const edit = (next: string) => {
+    native = next;
+    const view = base.viewStore.getSnapshot();
+    base.viewStore.acceptWorkerState(view.identity, { epoch: view.identity.epoch, version: view.version + 1, throughSeq: view.throughSeq + 1,
+      presentedThroughSeq: view.presentedThroughSeq, selection: null, editState: view.editState });
+  };
+  return { ...base, readAt, edit, moveWorker: (next: string) => { native = next; } };
+}
+
+test('queries at one document version share a single version probe', async () => {
+  const { controller, read, readAt, edit } = versionedFixture();
+  await Promise.all(Array.from({ length: 3 }, () => controller.query({ kind: 'toolbarMetadata' })));
+  for (let index = 0; index < 3; index++) await controller.query({ kind: 'toolbarMetadata' });
+  expect(readAt).toHaveBeenCalledTimes(6);
+  expect(read.mock.calls.length).toBeLessThanOrEqual(1);
+  edit('native-1');
+  for (let index = 0; index < 3; index++) expect((await controller.query({ kind: 'toolbarMetadata' })).version).toBe('native-1');
+  expect(readAt).toHaveBeenCalledTimes(9);
+  expect(read.mock.calls.length).toBeLessThanOrEqual(2);
+});
+
+test('a query whose document changes before the reply is refused, not applied to the newer document', async () => {
+  const { controller, readAt, edit } = versionedFixture();
+  await controller.query({ kind: 'toolbarMetadata' });
+  let reply!: () => void;
+  let asked!: () => void;
+  const reached = new Promise<void>(resolve => { asked = resolve; });
+  readAt.mockImplementationOnce((_request, version) => new Promise(resolve => {
+    asked();
+    reply = () => resolve({ status: 'ok', version, value: { styles: [], fontFamilies: [] } });
+  }));
+  const applied = mock((_query: unknown) => {});
+  const pending = controller.query({ kind: 'toolbarMetadata' }).then(applied);
+  await reached;
+  edit('native-1');
+  reply();
+  await expect(pending).rejects.toThrow('superseded');
+  expect(applied).not.toHaveBeenCalled();
+  const fresh = await controller.query({ kind: 'toolbarMetadata' });
+  expect(fresh.version).toBe('native-1');
+  expect(readAt.mock.calls.at(-1)![1]).toBe('native-1');
+});
+
+test('a query reads again at the worker version when the worker moved ahead of the view', async () => {
+  const { controller, readAt, moveWorker } = versionedFixture();
+  expect((await controller.query({ kind: 'toolbarMetadata' })).version).toBe('native-0');
+  moveWorker('native-1');
+  const query = await controller.query({ kind: 'toolbarMetadata' });
+  expect(query.version).toBe('native-1');
+  expect(readAt.mock.calls.at(-1)![1]).toBe('native-1');
 });
 
 test('part queries pin the native version and refuse commands after replacement', async () => {

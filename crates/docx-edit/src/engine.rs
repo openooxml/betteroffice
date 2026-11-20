@@ -82,6 +82,23 @@ struct LoweredStory {
     preview: Option<Rc<crate::bridge::preview::PreviewUnits>>,
     preview_edit: Option<crate::bridge::preview::TextEdit>,
     preview_paragraph_edits: Vec<crate::bridge::preview::ParagraphEdit>,
+    /// The top-level table embeds this lowering read, by table block id.
+    table_embeds: HashMap<String, yrs::MapRef>,
+    /// The plain text edit of a body cell story since this lowering, which
+    /// re-lowering only that cell's table absorbs.
+    cell_edit: Option<CellTextEdit>,
+    /// The cell story the last table patch edited and its index in
+    /// `map.stories`, which the next keystroke in that cell reads again.
+    cell_story_slot: Option<(String, usize)>,
+}
+
+/// A plain text edit of a body cell story: no paragraph or revision created.
+#[derive(Debug)]
+struct CellTextEdit {
+    story: String,
+    epochs: (u64, u64),
+    /// How many UTF-16 units the story grew by.
+    delta: i64,
 }
 
 impl LoweredStory {
@@ -116,6 +133,8 @@ struct RenderState {
     cache_misses: u64,
     preview_patches: u64,
     preview_fallbacks: u64,
+    /// Body lowerings a cell edit re-lowered only one table of.
+    table_patches: u64,
 }
 
 struct LoweredNoteSeparators {
@@ -370,10 +389,14 @@ thread_local! {
     static BODY_MEASUREMENT_WORK: RefCell<(Vec<usize>, u64)> = const { RefCell::new((Vec::new(), 0)) };
     static HEADER_FOOTER_MEASUREMENTS: Cell<usize> = const { Cell::new(0) };
     static REGION_FULL_PASSES: Cell<usize> = const { Cell::new(0) };
+    /// Table patches applied in place and by copy.
+    static TABLE_PATCHES: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
     static SHIFT_SAFETY_WORK: Cell<usize> = const { Cell::new(0) };
     static CERTIFIED_FLOAT_WORK: RefCell<(Vec<usize>, Vec<usize>, Vec<usize>, Vec<usize>)> = const { RefCell::new((Vec::new(), Vec::new(), Vec::new(), Vec::new())) };
     static OPEN_REGION_PATH_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
     static PREVIEW_REGION_PATH_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
+    #[cfg(test)]
+    static WRAP_PHASE_LIMIT: Cell<Option<usize>> = const { Cell::new(None) };
     static REGION_WORK_COUNTS: Cell<RegionWorkCounts> = const { Cell::new(RegionWorkCounts {
         certification: 0,
         placement: 0,
@@ -412,6 +435,7 @@ struct PreparedRegionLayout {
     measured_widths: Vec<f64>,
     measured_font_dependencies: Vec<FontChainDependencies>,
     measured_table_wrap_frames: Vec<TableMeasurementFrame>,
+    measured_side_margin_changes: Vec<bool>,
     measured_float_geometry: Option<[f64; 5]>,
     provisional: bool,
     exact_cut: Option<ExactCut>,
@@ -606,6 +630,18 @@ fn region_table_measurement_frames<'a>(
     input: &LayoutInput,
     regions: &DocumentRegions,
 ) -> (Vec<f64>, Vec<TableMeasurementFrame>) {
+    let (widths, frames, _) = region_frames_with_side_margin_changes(blocks, input, regions);
+    (widths, frames)
+}
+
+/// [`region_table_measurement_frames`], plus whether each block lies in a
+/// continuous section whose start moved either side margin or changed the
+/// page width, or follows one in a run of continuous sections.
+fn region_frames_with_side_margin_changes<'a>(
+    blocks: impl IntoIterator<Item = &'a LayoutBlock>,
+    input: &LayoutInput,
+    regions: &DocumentRegions,
+) -> (Vec<f64>, Vec<TableMeasurementFrame>, Vec<bool>) {
     let blocks: Vec<_> = blocks.into_iter().collect();
     let region_indices = section_region_indices(blocks.iter().copied());
     let section_breaks: Vec<_> = blocks
@@ -658,8 +694,9 @@ fn region_table_measurement_frames<'a>(
     let mut previous_section = None;
     let mut placement_page_width = fallback_size.w;
     let mut placement_margins = &fallback_margins;
+    let mut side_margins_changed = false;
     let negative_flows = docx_layout::measure_blocks::negative_indent_float_flows(&blocks);
-    blocks
+    let (widths, (frames, side_margin_changes)): (Vec<_>, (Vec<_>, Vec<_>)) = blocks
         .into_iter()
         .zip(negative_flows)
         .map(|(block, negative_flow)| {
@@ -704,6 +741,11 @@ fn region_table_measurement_frames<'a>(
                 None => input.options.columns.as_ref(),
             };
             if previous_section != Some(section_index) {
+                let previous_frame = (
+                    placement_page_width,
+                    placement_margins.left,
+                    placement_margins.right,
+                );
                 let (placement_size, margins) = match section_break {
                     Some(section_break) => (
                         section
@@ -736,6 +778,21 @@ fn region_table_measurement_frames<'a>(
                 if let Some(margins) = margins {
                     placement_margins = margins;
                 }
+                let frame = (
+                    placement_page_width,
+                    placement_margins.left,
+                    placement_margins.right,
+                );
+                let break_type = match section_break {
+                    Some(section_break) => section_break.break_type,
+                    None => input.options.body_break_type,
+                };
+                let continuous = break_type == Some(SectionBreakType::Continuous)
+                    || section.and_then(|section| section.section_start)
+                        == Some(SectionBreakType::Continuous);
+                side_margins_changed = section_index > 0
+                    && continuous
+                    && (side_margins_changed || previous_frame != frame);
                 previous_section = Some(section_index);
             }
             let section_width_known = (regions.sections.is_empty()
@@ -761,9 +818,10 @@ fn region_table_measurement_frames<'a>(
                 section_index += 1;
                 column_index = 0;
             }
-            (width, table_frame)
+            (width, (table_frame, side_margins_changed))
         })
-        .unzip()
+        .unzip();
+    (widths, frames, side_margin_changes)
 }
 
 fn initial_float_page_geometry(
@@ -1467,6 +1525,9 @@ fn placed_column_measurement_frames(
     bands
 }
 
+/// Wrap phases each pinned picture frame adds to the phase budget.
+const PIN_RECOVERY_PHASES: usize = 2;
+
 fn stabilize_flow_wrapping<F>(
     input: &mut LayoutInput,
     regions: &DocumentRegions,
@@ -1497,7 +1558,7 @@ where
                     if section.break_type == Some(SectionBreakType::Continuous)
             )
         });
-    let has_continuous_floats = has_continuous
+    let has_continuous_pictures = has_continuous
         && input.measured.iter().any(|measured| {
             matches!(
                 &measured.block,
@@ -1505,7 +1566,7 @@ where
                     if paragraph.runs.iter().any(|run| matches!(run, Run::Image(_)))
             )
         });
-    if shapes.is_empty() && !has_unequal && !has_continuous_floats {
+    if shapes.is_empty() && !has_unequal && !has_continuous_pictures {
         return Ok(false);
     }
     let mut blocks = input
@@ -1513,8 +1574,33 @@ where
         .iter()
         .map(|measured| measured.block.clone())
         .collect::<Vec<_>>();
-    let (mut widths, mut table_wrap_frames) =
-        region_table_measurement_frames(blocks.iter(), input, regions);
+    let (mut widths, mut table_wrap_frames, side_margin_changes) =
+        region_frames_with_side_margin_changes(blocks.iter(), input, regions);
+    let pictures = if has_continuous_pictures {
+        input
+            .measured
+            .iter()
+            .enumerate()
+            .filter_map(|(index, measured)| match &measured.block {
+                LayoutBlock::Paragraph(paragraph)
+                    if side_margin_changes[index]
+                        && paragraph
+                            .runs
+                            .iter()
+                            .any(|run| matches!(run, Run::Image(_))) =>
+                {
+                    Some(index)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let has_continuous_floats = !pictures.is_empty();
+    if shapes.is_empty() && !has_unequal && !has_continuous_floats {
+        return Ok(false);
+    }
     let geometry = initial_float_page_geometry(input, regions);
     let mut previous_offsets = BTreeMap::new();
     let mut previous_bands = BTreeMap::new();
@@ -1528,13 +1614,20 @@ where
     } else {
         Vec::new()
     };
+    let mut pinned = BTreeSet::new();
     let mut touched = false;
     let max_phases = if has_unequal || has_continuous_floats {
         32 + input.measured.len()
     } else {
         shapes.len() + 2
     };
-    for phase in 0..max_phases {
+    #[cfg(test)]
+    let max_phases = WRAP_PHASE_LIMIT.with(Cell::get).unwrap_or(max_phases);
+    let mut recovery = 0;
+    for phase in 0.. {
+        if phase == max_phases + recovery {
+            break;
+        }
         let (layout, recorded) = if has_unequal {
             docx_layout::place::layout_document_with_column_widths(input)?
         } else {
@@ -1567,6 +1660,9 @@ where
                 let LayoutBlock::Paragraph(paragraph) = &measured.block else {
                     continue;
                 };
+                if pinned.contains(&index) || !side_margin_changes[index] {
+                    continue;
+                }
                 if !paragraph
                     .runs
                     .iter()
@@ -1608,6 +1704,27 @@ where
                 });
         let accept =
             has_unequal && !frames_changed && (repeated.is_some() || phase + 1 == max_phases);
+        if let Some(first) = repeated.filter(|_| has_continuous_floats && !has_unequal) {
+            let cycling = pictures
+                .iter()
+                .copied()
+                .filter(|index| {
+                    visited[first..]
+                        .iter()
+                        .any(|(_, _, _, frames)| frames[*index] != next_wrap_frames[*index])
+                })
+                .collect::<Vec<_>>();
+            if cycling.is_empty() {
+                break;
+            }
+            for index in cycling {
+                pinned.insert(index);
+                next_wrap_frames[index].horizontal_frame = None;
+                next_wrap_frames[index].page_width = None;
+            }
+            visited.clear();
+            recovery += PIN_RECOVERY_PHASES;
+        }
         if accept {
             for (index, unequal) in unequal.iter().enumerate() {
                 if !unequal {
@@ -2113,6 +2230,7 @@ struct PaginationState {
     measured_font_dependencies: Vec<FontChainDependencies>,
     measured_font_chains: Option<BTreeMap<String, Vec<u32>>>,
     measured_table_wrap_frames: Vec<TableMeasurementFrame>,
+    measured_side_margin_changes: Vec<bool>,
     measured_float_geometry: Option<[f64; 5]>,
     measured_float_width_policy: Option<FloatWidthPolicy>,
     measured_with_floats: bool,
@@ -2473,7 +2591,8 @@ pub struct EngineSession {
     /// Resident text edits re-lower only their paragraph when eligible.
     local_lowering: Cell<bool>,
     /// Body heading levels by paragraph id, for the document version they were read at.
-    page_text_headings: RefCell<Option<(crate::DocumentVersion, Rc<HashMap<String, u8>>)>>,
+    /// The body's headings, by the document version and body revision they were read at.
+    page_text_headings: RefCell<Option<(PageTextHeadingsRead, Rc<HashMap<String, u8>>)>>,
     #[cfg(test)]
     preview_refresh: Cell<bool>,
 }
@@ -2889,13 +3008,51 @@ fn measured_fingerprint(measured: &MeasuredBlock) -> Result<Fingerprint, String>
     .map_err(|error| format!("fingerprint measured block: {error}"))
 }
 
+/// What the body's headings were read from: they hold at a later read with
+/// the same document version, or with the same source and no change to the
+/// body since but plain text typed into it, which keeps every paragraph and
+/// its properties.
+struct PageTextHeadingsRead {
+    version: crate::DocumentVersion,
+    body: Option<u64>,
+    source: Option<Arc<crate::seed::SourceMetadata>>,
+}
+
+impl PageTextHeadingsRead {
+    fn holds_for(&self, later: &Self) -> bool {
+        let same_source = match (&self.source, &later.source) {
+            (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+            (left, right) => left.is_none() && right.is_none(),
+        };
+        self.version == later.version
+            || (self.body.is_some() && self.body == later.body && same_source)
+    }
+}
+
 fn measurement_shift_safe(block: &LayoutBlock) -> bool {
     #[cfg(test)]
     SHIFT_SAFETY_WORK.with(|work| work.set(work.get() + 1));
+    block_shift_safe(block)
+}
+
+/// [`measurement_shift_safe`] without the work count: a table is safe when it
+/// floats in no frame, groups no controls and every block of its cells is.
+fn block_shift_safe(block: &LayoutBlock) -> bool {
     let position = |value: Option<f64>| {
         value.is_none_or(|value| value >= 0.0 && value <= u32::MAX as f64 && value.fract() == 0.0)
     };
     match block {
+        LayoutBlock::Table(table) => {
+            position(table.pm_start)
+                && position(table.pm_end)
+                && table.sdt_groups.is_none()
+                && table.floating.is_none()
+                && table.rows.iter().all(|row| {
+                    row.cells
+                        .iter()
+                        .all(|cell| cell.blocks.iter().all(block_shift_safe))
+                })
+        }
         LayoutBlock::Paragraph(paragraph) => {
             paragraph.pm_start.is_some()
                 && position(paragraph.pm_start)
@@ -5224,6 +5381,7 @@ impl EngineSession {
         pagination.measured_widths = Vec::new();
         pagination.set_font_dependencies(Vec::new(), None);
         pagination.measured_table_wrap_frames = Vec::new();
+        pagination.measured_side_margin_changes = Vec::new();
         pagination.measured_float_geometry = None;
         pagination.measured_float_width_policy = None;
         pagination.measured_with_floats = false;
@@ -5641,6 +5799,31 @@ impl EngineSession {
                 });
             }
         }
+        if let Some(body) = render.stories.get_mut("body") {
+            let inserted = text.map_or(0, |text| i64::from(text.encode_utf16().count() as u32));
+            let removed = i64::from(range.end - range.start);
+            body.cell_edit = self
+                .doc
+                .story_len(&range.story)
+                .ok()
+                .map(|length| i64::from(length) - i64::from(preview_length))
+                .filter(|delta| {
+                    is_nested_body_story(&range.story)
+                        && lower_locally
+                        && self.local_lowering.get()
+                        && preview_plain
+                        && receipt.new_para_ids.is_empty()
+                        && receipt.revision_ids.is_empty()
+                        && body.doc_epoch == before
+                        && self.doc_epoch() == before.wrapping_add(1)
+                        && *delta == inserted - removed
+                })
+                .map(|delta| CellTextEdit {
+                    story: range.story.clone(),
+                    epochs: (before, self.doc_epoch()),
+                    delta,
+                });
+        }
         self.typing_epoch.set(Some(self.doc_epoch()));
         self.typing_preserves_seeds.set(
             preview_plain
@@ -5877,6 +6060,258 @@ impl EngineSession {
         Some(())
     }
 
+    /// Absorbs a plain text edit of a body cell story by lowering only the
+    /// top-level table holding the cell, splicing it into the resident body
+    /// lowering and moving everything after it. The result is a new lowering
+    /// as a full one would be, so measurement compares it with the old one.
+    fn patch_lowered_table(&self, epoch: u64, env: &RenderEnv) -> Option<()> {
+        let mut render = self.render.borrow_mut();
+        let generation = render.generation.wrapping_add(1);
+        let lowered = render.stories.get_mut("body")?;
+        let edit = lowered.cell_edit.take()?;
+        if edit.epochs != (lowered.doc_epoch, epoch)
+            || lowered.env != *env
+            || lowered.media != self.doc.media_sources()
+            || !lowered.local.matches_source(&self.doc)
+            || lowered
+                .preview
+                .as_ref()
+                .is_some_and(|units| units.has_records())
+        {
+            return None;
+        }
+        let map = &lowered.map;
+        // Stories are lowered once each, so a slot that still names the story is its slot.
+        let cached = lowered
+            .cell_story_slot
+            .as_ref()
+            .filter(|(story, slot)| *story == edit.story && map.stories.get(*slot) == Some(story))
+            .map(|(_, slot)| *slot);
+        let repeated = |id: &str| map.stories.iter().filter(|story| *story == id).count() > 1;
+        let slot = match cached {
+            Some(slot) => slot,
+            None if repeated(&edit.story) => return None,
+            None => map.stories.iter().position(|story| *story == edit.story)?,
+        };
+        let paragraph = map
+            .paragraphs
+            .iter()
+            .position(|(story, _)| *story as usize == slot)? as u32;
+        let pm = map
+            .paragraph_blocks
+            .iter()
+            .find(|(_, source)| *source == paragraph)?
+            .0 as f64;
+        let index = lowered.blocks.shared().iter().position(|block| {
+            matches!(block.as_ref(), LayoutBlock::Table(table)
+                if table.pm_start.is_some_and(|start| start <= pm)
+                    && table.pm_end.is_some_and(|end| pm < end))
+        })?;
+        let LayoutBlock::Table(old) = lowered.blocks.shared()[index].as_ref() else {
+            return None;
+        };
+        let BlockId::Str(id) = &old.id else {
+            return None;
+        };
+        let table = lowered.table_embeds.get(id)?;
+        let first_story = id.strip_prefix("body:table:")?;
+        if cached.is_none() && repeated(first_story) {
+            return None;
+        }
+        let (start, end) = (old.pm_start? as u64, old.pm_end? as u64);
+        // The table lowers its first cell before any story inside it.
+        let stories = map.stories[..=slot]
+            .iter()
+            .rposition(|story| story == first_story)
+            .or_else(|| map.stories.iter().position(|story| story == first_story))?;
+        let paragraphs = map
+            .paragraphs
+            .iter()
+            .position(|(story, _)| *story as usize >= stories)?;
+        let ordinal = map
+            .tables
+            .iter()
+            .find(|(pm, story, _)| *pm == start && *story == 0)?
+            .2;
+        let inside = |block: &LayoutBlock| {
+            block
+                .pm_start()
+                .is_some_and(|pm| pm >= start as f64 && pm < end as f64)
+        };
+        if lowered.revealable_blocks.iter().any(inside)
+            || docx_layout::sequence_fields::reads_sequence_fields(std::slice::from_ref(
+                lowered.blocks.shared()[index].as_ref(),
+            ))
+        {
+            return None;
+        }
+        let relowered = crate::bridge::preview::relower_body_table(
+            &self.doc,
+            env,
+            table,
+            start,
+            ordinal,
+            stories as u32,
+            paragraphs as u32,
+            &lowered.local,
+        )?;
+        let delta = i64::try_from(relowered.end).ok()? - i64::try_from(end).ok()?;
+        let story_count = relowered.map.stories.len();
+        let paragraph_count = relowered.map.paragraphs.len();
+        if !matches!(&relowered.block, LayoutBlock::Table(table) if table.id == old.id)
+            || delta != edit.delta
+            || map.stories.get(stories..stories + story_count)? != relowered.map.stories
+            || map
+                .paragraphs
+                .get(paragraphs..paragraphs + paragraph_count)?
+                != relowered.map.paragraphs
+            || map
+                .paragraphs
+                .get(paragraphs + paragraph_count)
+                .is_some_and(|(story, _)| *story != 0 && (*story as usize) < stories + story_count)
+        {
+            return None;
+        }
+        self.certified_measurement_epoch.set(None);
+        let old_block = Rc::clone(&lowered.blocks.shared()[index]);
+        let block_count = lowered.blocks.len();
+        // Without note references the table numbers nothing, so the patch
+        // leaves every other block as it was but for the shift.
+        let notes = !collect_note_refs(std::slice::from_ref(&relowered.block)).is_empty()
+            || !collect_note_refs(std::slice::from_ref(old_block.as_ref())).is_empty();
+        // When pagination measured exactly this lowering, patch it in place
+        // and tell measurement which block changed, as the paragraph patch
+        // does; otherwise copy, so measurement compares it with the old one.
+        let in_place = {
+            let mut pagination = self.pagination.borrow_mut();
+            pagination.measurement_patch = None;
+            for certificate in pagination
+                .retain_matches
+                .iter_mut()
+                .skip(index.saturating_sub(1))
+            {
+                *certificate = None;
+            }
+            let origin = !notes
+                && pagination.measured_with.is_some()
+                && pagination
+                    .input
+                    .as_ref()
+                    .is_some_and(|input| input.measured.len() == block_count)
+                && pagination.doc_epoch == lowered.doc_epoch
+                && pagination.lowered_generation == Some(lowered.generation)
+                && pagination
+                    .lowered_from
+                    .as_ref()
+                    .is_some_and(|blocks| Rc::ptr_eq(blocks, &lowered.blocks));
+            // the lowering pagination holds is this one, so only it may share the blocks
+            let unshared =
+                Rc::strong_count(&lowered.blocks) == 2 && Rc::weak_count(&lowered.blocks) == 0;
+            if origin && unshared {
+                pagination.lowered_from = None;
+                pagination.lowered_generation = None;
+                pagination.input_lowering = None;
+            }
+            origin && unshared
+        };
+        #[cfg(test)]
+        TABLE_PATCHES.with(|patches| {
+            let (placed, copied) = patches.get();
+            patches.set(if in_place {
+                (placed + 1, copied)
+            } else {
+                (placed, copied + 1)
+            });
+        });
+        let blocks = if in_place {
+            Rc::get_mut(&mut lowered.blocks).expect("checked unique")
+        } else {
+            Rc::make_mut(&mut lowered.blocks)
+        }
+        .shared_mut();
+        blocks[index] = Rc::new(relowered.block);
+        if delta != 0 {
+            for block in &mut blocks[index + 1..] {
+                crate::bridge::local::shift_block(Rc::make_mut(block), delta);
+            }
+        }
+        if notes {
+            docx_layout::footnotes::number_note_references(
+                blocks.as_mut_slice(),
+                &env.note_numbering,
+            );
+        }
+        let map = Rc::make_mut(&mut lowered.map);
+        let range = |positions: &[u64]| {
+            (
+                positions.partition_point(|pm| *pm < start),
+                positions.partition_point(|pm| *pm < end),
+            )
+        };
+        let shift = |pm: &mut u64| *pm = pm.saturating_add_signed(delta);
+        let positions: Vec<u64> = map.spans.iter().map(|span| span.pm_start).collect();
+        let (from, to) = range(&positions);
+        for span in &mut map.spans[to..] {
+            shift(&mut span.pm_start);
+            shift(&mut span.pm_end);
+        }
+        map.spans.splice(from..to, relowered.map.spans);
+        let positions: Vec<u64> = map.paragraph_blocks.iter().map(|(pm, _)| *pm).collect();
+        let (from, to) = range(&positions);
+        for (pm, _) in &mut map.paragraph_blocks[to..] {
+            shift(pm);
+        }
+        map.paragraph_blocks
+            .splice(from..to, relowered.map.paragraph_blocks);
+        let positions: Vec<u64> = map.tables.iter().map(|(pm, ..)| *pm).collect();
+        let (from, to) = range(&positions);
+        for (pm, ..) in &mut map.tables[to..] {
+            shift(pm);
+        }
+        map.tables.splice(from..to, relowered.map.tables);
+        if delta != 0
+            && lowered
+                .revealable_blocks
+                .iter()
+                .any(|block| block.pm_start().is_some_and(|pm| pm >= end as f64))
+        {
+            for block in Rc::make_mut(&mut lowered.revealable_blocks) {
+                if block.pm_start().is_some_and(|pm| pm >= end as f64) {
+                    crate::bridge::local::shift_block(block, delta);
+                }
+            }
+        }
+        lowered.local.shift_after(end, delta);
+        let measurement_patch = in_place.then(|| MeasurementPatch {
+            base_generation: lowered.generation,
+            current_generation: generation,
+            epochs: edit.epochs,
+            block_count_before: block_count,
+            block_count_after: block_count,
+            replaced: index..index + 1,
+            old_blocks: vec![old_block],
+            // the body's own units did not move, so no paragraph patch extends this one
+            shift: crate::bridge::preview::ParagraphEdit {
+                raw: u32::MAX..u32::MAX,
+                pm: start..end,
+                delta,
+            },
+            shifted_version: lowered.blocks.version(),
+        });
+        lowered.cell_story_slot = Some((edit.story, slot));
+        lowered.generation = generation;
+        lowered.doc_epoch = epoch;
+        lowered.serialized_blocks = None;
+        lowered.preview_edit = None;
+        render.generation = generation;
+        render.table_patches = render.table_patches.wrapping_add(1);
+        drop(render);
+        if measurement_patch.is_some() {
+            *self.measurement_patch() = measurement_patch;
+        }
+        Some(())
+    }
+
     fn patch_preview_body(&self, epoch: u64, env: &RenderEnv) -> Option<()> {
         let mut render = self.render.borrow_mut();
         let lowered = render.stories.get_mut("body")?;
@@ -6098,6 +6533,7 @@ impl EngineSession {
                 return Ok(());
             }
         };
+        let table_embeds = std::mem::take(&mut local.table_embeds);
         if let Some(mut retained) = retained_local {
             if local.blocked {
                 retained.resume();
@@ -6125,6 +6561,9 @@ impl EngineSession {
                 preview: preview.map(Rc::new),
                 preview_edit: None,
                 preview_paragraph_edits: Vec::new(),
+                table_embeds,
+                cell_edit: None,
+                cell_story_slot: None,
             },
         );
         Ok(())
@@ -6171,7 +6610,8 @@ impl EngineSession {
             render.cache_hits = render.cache_hits.wrapping_add(1);
         } else if story != "body"
             || (self.patch_preview_body(epoch, env).is_none()
-                && self.patch_lowered_body(epoch, env).is_none())
+                && self.patch_lowered_body(epoch, env).is_none()
+                && self.patch_lowered_table(epoch, env).is_none())
         {
             self.lower_story_into_cache(story, epoch, env)?;
         }
@@ -6928,6 +7368,9 @@ impl EngineSession {
                 }
             }
         }
+        for watermark in regions.header_watermarks.values() {
+            collector.collect_watermark(watermark);
+        }
         let requirements = collector.finish();
         let preview_superset_safe = stable_markers
             && requirements
@@ -7553,6 +7996,7 @@ impl EngineSession {
         let mut measured_widths = Vec::new();
         let mut measured_font_dependencies = Vec::new();
         let mut measured_table_wrap_frames = Vec::new();
+        let mut measured_side_margin_changes = Vec::new();
         let mut measured_float_geometry = None;
         let mut provisional = false;
         let mut exact_cut = None;
@@ -7576,11 +8020,12 @@ impl EngineSession {
                         measured_spacing =
                             BlockSpacing::capture_blocks(blocks.iter(), Some(&regions));
                         apply_section_geometry(&mut input, &regions);
-                        let (widths, table_wrap_frames) =
-                            region_table_measurement_frames(blocks.iter(), &input, &regions);
+                        let (widths, table_wrap_frames, side_margin_changes) =
+                            region_frames_with_side_margin_changes(blocks.iter(), &input, &regions);
                         let geometry = initial_float_page_geometry(&input, &regions);
                         measured_widths.clone_from(&widths);
                         measured_table_wrap_frames.clone_from(&table_wrap_frames);
+                        measured_side_margin_changes.clone_from(&side_margin_changes);
                         measured_float_geometry = Some(float_geometry_key(&geometry));
                         float_width_policy = FloatWidthPolicy::for_document(blocks.iter());
                         let (floats, margin_floats) = resident_float_kinds(
@@ -7605,6 +8050,7 @@ impl EngineSession {
                             &widths,
                             float_width_policy,
                             &table_wrap_frames,
+                            &side_margin_changes,
                             &regions,
                             &measurement,
                             measurement_fingerprint,
@@ -7802,6 +8248,7 @@ impl EngineSession {
             measured_widths,
             measured_font_dependencies,
             measured_table_wrap_frames,
+            measured_side_margin_changes,
             measured_float_geometry,
             provisional,
             exact_cut,
@@ -7877,6 +8324,7 @@ impl EngineSession {
             measured_widths,
             measured_font_dependencies,
             measured_table_wrap_frames,
+            measured_side_margin_changes,
             measured_float_geometry,
             provisional,
             exact_cut,
@@ -8211,6 +8659,7 @@ impl EngineSession {
         pagination.input_lowering = input_lowering;
         pagination.measured_widths = measured_widths;
         pagination.measured_table_wrap_frames = measured_table_wrap_frames;
+        pagination.measured_side_margin_changes = measured_side_margin_changes;
         pagination.measured_float_geometry = measured_float_geometry;
         pagination.measured_float_width_policy =
             pagination.measured_with.map(|_| float_width_policy);
@@ -8270,6 +8719,7 @@ impl EngineSession {
             measured_widths,
             measured_font_dependencies,
             measured_table_wrap_frames,
+            measured_side_margin_changes,
             measured_float_geometry,
             provisional,
             exact_cut,
@@ -8805,6 +9255,7 @@ impl EngineSession {
         pagination.input_lowering = input_lowering;
         pagination.measured_widths = measured_widths;
         pagination.measured_table_wrap_frames = measured_table_wrap_frames;
+        pagination.measured_side_margin_changes = measured_side_margin_changes;
         pagination.measured_float_geometry = measured_float_geometry;
         pagination.measured_float_width_policy =
             pagination.measured_with.map(|_| float_width_policy);
@@ -9315,7 +9766,21 @@ impl EngineSession {
             };
             #[cfg(test)]
             HEADER_FOOTER_MEASUREMENTS.with(|count| count.set(count.get() + 1));
-            if let Some(variant) = measure_header_footer(
+            let watermark = regions.header_watermarks.get(&r_id).cloned();
+            let blank = watermark.is_some().then(|| HeaderFooterVariant {
+                r_id: r_id.clone(),
+                kind,
+                hf_type,
+                section_index,
+                measured: Vec::new(),
+                height: 0.0,
+                flow_height: 0.0,
+                visual_top: 0.0,
+                visual_bottom: 0.0,
+                field_widths: Vec::new(),
+                watermark: None,
+            });
+            if let Some(mut variant) = measure_header_footer(
                 r_id,
                 kind,
                 hf_type,
@@ -9324,7 +9789,10 @@ impl EngineSession {
                 content_width,
                 metrics,
                 measurement,
-            )? {
+            )?
+            .or(blank)
+            {
+                variant.watermark = watermark;
                 variants.push(variant);
             }
         }
@@ -9357,6 +9825,10 @@ impl EngineSession {
                 .collect(),
             variants,
             watermark: regions.watermark.clone(),
+            header_watermarks: regions
+                .header_watermarks
+                .values()
+                .any(|watermark| watermark["kind"] == "text"),
         }))
     }
 
@@ -10145,6 +10617,7 @@ impl EngineSession {
         widths: &[f64],
         float_width_policy: FloatWidthPolicy,
         table_wrap_frames: &[TableMeasurementFrame],
+        side_margin_changes: &[bool],
         regions: &DocumentRegions,
         measurement: &docx_layout::measure_blocks::MeasurementConfig,
         measurement_fingerprint: u64,
@@ -10158,6 +10631,7 @@ impl EngineSession {
                 widths,
                 float_width_policy,
                 table_wrap_frames,
+                side_margin_changes,
                 regions,
                 measurement,
                 measurement_fingerprint,
@@ -10208,11 +10682,13 @@ impl EngineSession {
         };
         let measurement_patch =
             measurement_patch.filter(|_| floats.is_some() && lowered_from.is_none());
-        if floats.is_some_and(|geometry| {
-            widths.first() != previous_widths.first()
-                || table_wrap_frames != pagination.measured_table_wrap_frames.as_slice()
-                || pagination.measured_float_geometry != Some(float_geometry_key(geometry))
-        }) {
+        if side_margin_changes != pagination.measured_side_margin_changes.as_slice()
+            || floats.is_some_and(|geometry| {
+                widths.first() != previous_widths.first()
+                    || table_wrap_frames != pagination.measured_table_wrap_frames.as_slice()
+                    || pagination.measured_float_geometry != Some(float_geometry_key(geometry))
+            })
+        {
             return Ok(None);
         }
         let contexts = normalization_contexts(regions, measurement, &pagination.retain_matches)?;
@@ -10587,6 +11063,7 @@ impl EngineSession {
         widths: &[f64],
         float_width_policy: FloatWidthPolicy,
         table_wrap_frames: &[TableMeasurementFrame],
+        side_margin_changes: &[bool],
         regions: &DocumentRegions,
         measurement: &docx_layout::measure_blocks::MeasurementConfig,
         measurement_fingerprint: u64,
@@ -10606,6 +11083,7 @@ impl EngineSession {
                 widths,
                 float_width_policy,
                 table_wrap_frames,
+                side_margin_changes,
                 regions,
                 measurement,
                 measurement_fingerprint,
@@ -10654,11 +11132,13 @@ impl EngineSession {
         };
         let measurement_patch =
             measurement_patch.filter(|_| floats.is_some() && lowered_from.is_none());
-        if floats.is_some_and(|geometry| {
-            widths.first() != previous_widths.first()
-                || table_wrap_frames != pagination.measured_table_wrap_frames.as_slice()
-                || pagination.measured_float_geometry != Some(float_geometry_key(geometry))
-        }) {
+        if side_margin_changes != pagination.measured_side_margin_changes.as_slice()
+            || floats.is_some_and(|geometry| {
+                widths.first() != previous_widths.first()
+                    || table_wrap_frames != pagination.measured_table_wrap_frames.as_slice()
+                    || pagination.measured_float_geometry != Some(float_geometry_key(geometry))
+            })
+        {
             return Ok(None);
         }
         let previous_fingerprints = &pagination.block_fingerprints;
@@ -11126,7 +11606,11 @@ impl EngineSession {
         {
             return Ok(false);
         }
-        let misses = self.render.borrow().cache_misses;
+        let relowerings = || {
+            let render = self.render.borrow();
+            (render.cache_misses, render.table_patches)
+        };
+        let misses = relowerings();
         let outcome = self
             .with_shared_lowered_story_mapped(
                 story,
@@ -11137,9 +11621,10 @@ impl EngineSession {
                  -> Result<Option<(ResidentLayoutInput, usize, Vec<f64>)>, String> {
                     // A repeated final section takes this path only for an edit the local
                     // patch absorbed, or for a plain split of a top-level body paragraph,
-                    // which re-lowers the body.
+                    // which re-lowers the body. A cell edit's table patch counts as a
+                    // re-lowering.
                     if regions.sections.len() > 1
-                        && self.render.borrow().cache_misses != misses
+                        && relowerings() != misses
                         && self.split_epoch.get() != Some(self.doc_epoch())
                     {
                         return Ok(None);
@@ -11856,10 +12341,15 @@ impl EngineSession {
     }
 
     fn page_text_headings(&self) -> Result<Rc<HashMap<String, u8>>, String> {
-        let version = self.doc().version();
-        if let Some((read_at, headings)) = &*self.page_text_headings.borrow()
-            && *read_at == version
+        let read = PageTextHeadingsRead {
+            version: self.doc().version(),
+            body: self.doc().story_mark("body"),
+            source: self.doc().source_metadata(),
+        };
+        if let Some((read_at, headings)) = &mut *self.page_text_headings.borrow_mut()
+            && read_at.holds_for(&read)
         {
+            *read_at = read;
             return Ok(Rc::clone(headings));
         }
         let headings: Rc<HashMap<String, u8>> = Rc::new(
@@ -11870,7 +12360,7 @@ impl EngineSession {
                 .map(|(para_id, heading)| (para_id, heading.outline_level))
                 .collect(),
         );
-        *self.page_text_headings.borrow_mut() = Some((version, Rc::clone(&headings)));
+        *self.page_text_headings.borrow_mut() = Some((read, Rc::clone(&headings)));
         Ok(headings)
     }
 
@@ -11999,6 +12489,45 @@ impl EngineSession {
     #[allow(dead_code)]
     pub fn with_display_list<T>(&self, read: impl FnOnce(&DisplayList) -> T) -> Option<T> {
         self.display.borrow().list.as_ref().map(read)
+    }
+
+    /// The retained region layout's display list with only `page` built, shaped with `font_chains`,
+    /// and what the conversion left unpainted because it could not be read.
+    // Used by betteroffice-docx; not part of the stable API.
+    #[doc(hidden)]
+    pub fn retained_page_display_list(
+        &self,
+        font_chains: &BTreeMap<String, Vec<u32>>,
+        page: usize,
+    ) -> Result<
+        (
+            DisplayList,
+            Vec<docx_layout::display_list::UnreadableDisplayInput>,
+        ),
+        String,
+    > {
+        let pagination = self.pagination.borrow();
+        let input = pagination
+            .input
+            .as_ref()
+            .ok_or_else(|| "resident pagination input is not built".to_owned())?;
+        let layout = pagination
+            .layout
+            .as_ref()
+            .ok_or_else(|| "resident layout is not built".to_owned())?;
+        let regions = self.regions.borrow();
+        let extras = serde_json::json!({
+            "headersFooters": regions.as_ref().and_then(|state| state.headers_footers.as_ref()),
+            "fontChains": font_chains,
+        });
+        docx_layout::build_resident_display_list_partial_observed(
+            input,
+            layout,
+            &extras.to_string(),
+            &|index| index == page,
+            &mut || {},
+        )
+        .map(|(resident, list)| (list, resident.unreadable().to_vec()))
     }
 
     pub fn resident_caret_snapshot(
@@ -12606,13 +13135,15 @@ impl EngineSession {
     }
 
     /// A fingerprint of the fonts, fallback order and measurement defaults of `request`, by font
-    /// content rather than store ids. `None` when a font it names is not registered.
+    /// content rather than store ids. `None` when a font it names is not registered. The face
+    /// of the tracked paragraph mark is left out: it moves no text.
     fn font_set_fingerprint(&self, request: &serde_json::Value) -> Option<String> {
         let measurement = request.get("measurement").cloned().unwrap_or_default();
         let store = docx_layout::measure_store_id();
         let mut chains = BTreeMap::new();
         if let Some(serde_json::Value::Object(font_chains)) = measurement.get("fontChains") {
-            for (key, ids) in font_chains {
+            let mark = docx_layout::display_list::PARAGRAPH_MARK_FACE;
+            for (key, ids) in font_chains.iter().filter(|(key, _)| key.as_str() != mark) {
                 let mut faces = Vec::new();
                 for id in ids.as_array().into_iter().flatten() {
                     let id = u32::try_from(id.as_u64()?).ok()?;
@@ -12687,6 +13218,25 @@ mod tests {
     mod preview_refresh_tests;
 
     mod command_relayout_tests;
+
+    #[test]
+    fn the_paragraph_mark_face_leaves_the_font_set_fingerprint_alone() {
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        let engine = EngineSession::new(7);
+        let fingerprint = |chains: serde_json::Value| {
+            let defaults = json!({"fontFamily": "Calibri", "fontSize": 11});
+            let request = json!({"measurement": {"fontChains": chains, "defaults": defaults}});
+            engine.font_set_fingerprint(&request)
+        };
+        let plain = fingerprint(json!({"calibri|0|0": [font]}));
+        let marked = fingerprint(json!({
+            "calibri|0|0": [font],
+            "@betteroffice/fonts/paragraph-mark": [font],
+        }));
+
+        assert!(plain.is_some());
+        assert_eq!(marked, plain);
+    }
 
     fn table_wrap_section(content_width: f64, columns: serde_json::Value) -> serde_json::Value {
         json!({
@@ -14540,6 +15090,153 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn region_layout_paints_a_header_watermark_only_where_that_header_applies() {
+        let engine = EngineSession::new(133);
+        for r_id in ["rId1", "rId2"] {
+            engine
+                .doc()
+                .create_story(format!("hf:{r_id}"), "Header", "Normal", "left")
+                .unwrap();
+        }
+        let request = |title_pg: bool| {
+            serde_json::json!({
+                "measured": [],
+                "options": {
+                    "pageSize": {"w": 300, "h": 200},
+                    "margins": {"top": 20, "right": 20, "bottom": 20, "left": 20, "header": 5, "footer": 5}
+                },
+                "regions": {
+                    "sections": [{
+                        "sectionId": "main",
+                        "pageSize": {"w": 300, "h": 200},
+                        "margins": {"top": 20, "right": 20, "bottom": 20, "left": 20, "header": 5, "footer": 5},
+                        "titlePg": title_pg,
+                        "headerFooterRefs": {"headerDefault": "rId1", "headerFirst": "rId2"}
+                    }],
+                    "headerWatermarks": {
+                        "rId1": {"kind": "text", "text": "DRAFT", "widthEmu": 1828800, "heightEmu": 457200}
+                    }
+                },
+                "measurement": {"defaults": {"fontSize": 24, "fontFamily": "Liberation Sans"}},
+                "renderEnv": {}
+            })
+            .to_string()
+        };
+        let watermarks = |title_pg: bool| {
+            let output = engine
+                .layout_document_with_regions_json(&request(title_pg))
+                .unwrap();
+            let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+            let display: serde_json::Value =
+                serde_json::from_str(&engine.build_display_list_json(&output).unwrap()).unwrap();
+            let watermark = |r_id: &str| {
+                value["headersFooters"]["variants"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|variant| variant["rId"] == r_id)
+                    .and_then(|variant| variant["watermark"]["text"].as_str())
+            };
+            assert_eq!(watermark("rId1"), Some("DRAFT"));
+            assert_eq!(watermark("rId2"), None);
+            display["pages"][0]["watermarkPrimitiveCount"].clone()
+        };
+        assert_eq!(watermarks(true), serde_json::Value::Null);
+        assert_eq!(watermarks(false), serde_json::json!(1));
+    }
+
+    #[test]
+    fn region_layout_keeps_a_clean_header_clean_when_only_an_unused_header_has_a_watermark() {
+        let engine = EngineSession::new(1339);
+        for r_id in ["rId1", "rId2"] {
+            engine
+                .doc()
+                .create_story(format!("hf:{r_id}"), "Header", "Normal", "left")
+                .unwrap();
+        }
+        let request = json!({
+            "measured": [],
+            "options": {
+                "pageSize": {"w": 300, "h": 200},
+                "margins": {"top": 20, "right": 20, "bottom": 20, "left": 20, "header": 5, "footer": 5}
+            },
+            "regions": {
+                "sections": [{
+                    "sectionId": "main",
+                    "pageSize": {"w": 300, "h": 200},
+                    "margins": {"top": 20, "right": 20, "bottom": 20, "left": 20, "header": 5, "footer": 5},
+                    "titlePg": false,
+                    "headerFooterRefs": {"headerDefault": "rId1", "headerFirst": "rId2"}
+                }],
+                "watermark": {"kind": "text", "text": "DRAFT"},
+                "headerWatermarks": {
+                    "rId2": {"kind": "text", "text": "DRAFT"}
+                }
+            },
+            "measurement": {"defaults": {"fontSize": 24, "fontFamily": "Liberation Sans"}},
+            "renderEnv": {}
+        });
+        let output = engine
+            .layout_document_with_regions_json(&request.to_string())
+            .unwrap();
+        let display: serde_json::Value =
+            serde_json::from_str(&engine.build_display_list_json(&output).unwrap()).unwrap();
+        assert_eq!(display["pages"][0]["header"]["rId"], "rId1");
+        assert_eq!(
+            display["pages"][0]["watermarkPrimitiveCount"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
+    fn region_layout_paints_the_watermark_of_a_header_with_no_blocks() {
+        let engine = EngineSession::new(1338);
+        engine
+            .doc()
+            .create_story("hf:rId1", "", "Normal", "left")
+            .unwrap();
+        engine
+            .doc()
+            .apply_raw_ops(
+                "hf:rId1",
+                vec![crate::RawOp::Delete { index: 0, len: 1 }],
+                &crate::EditCtx::local("", ""),
+            )
+            .unwrap();
+        assert!(
+            crate::bridge::yrs_doc_to_layout_blocks(engine.doc(), "hf:rId1", &RenderEnv::default())
+                .unwrap()
+                .is_empty()
+        );
+        let request = json!({
+            "measured": [],
+            "options": {
+                "pageSize": {"w": 300, "h": 200},
+                "margins": {"top": 20, "right": 20, "bottom": 20, "left": 20, "header": 5, "footer": 5}
+            },
+            "regions": {
+                "sections": [{
+                    "sectionId": "main",
+                    "pageSize": {"w": 300, "h": 200},
+                    "margins": {"top": 20, "right": 20, "bottom": 20, "left": 20, "header": 5, "footer": 5},
+                    "headerFooterRefs": {"headerDefault": "rId1"}
+                }],
+                "headerWatermarks": {
+                    "rId1": {"kind": "text", "text": "DRAFT", "widthEmu": 1828800, "heightEmu": 457200}
+                }
+            },
+            "measurement": {"defaults": {"fontSize": 24, "fontFamily": "Liberation Sans"}},
+            "renderEnv": {}
+        });
+        let output = engine
+            .layout_document_with_regions_json(&request.to_string())
+            .unwrap();
+        let display: serde_json::Value =
+            serde_json::from_str(&engine.build_display_list_json(&output).unwrap()).unwrap();
+        assert_eq!(display["pages"][0]["watermarkPrimitiveCount"], json!(1));
     }
 
     #[test]
@@ -18007,6 +18704,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                 &[300.0],
                 FloatWidthPolicy::for_document(blocks.iter()),
                 &[],
+                &[],
                 &prepared.regions,
                 &prepared.measurement,
                 prepared.measurement_fingerprint,
@@ -18034,6 +18732,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                     None,
                     &[300.0],
                     FloatWidthPolicy::for_document(blocks.iter()),
+                    &[],
                     &[],
                     &prepared.regions,
                     &prepared.measurement,
@@ -18330,6 +19029,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                     None,
                     &widths,
                     FloatWidthPolicy::for_document(blocks.iter()),
+                    &[],
                     &[],
                     &prepared.regions,
                     &prepared.measurement,
@@ -23289,7 +23989,9 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             step(&engine, &request, "body", (0, 0, Some("x")), patched);
             if name == "table" {
                 step(&engine, &request, "body", (11, 11, Some("😀")), true);
-                step(&engine, &request, "body:t0:r0c1", (2, 2, Some("x")), false);
+                // the cell's table patch absorbs it, and the body after the table still patches
+                step(&engine, &request, "body:t0:r0c1", (2, 2, Some("x")), true);
+                step(&engine, &request, "body", (11, 11, Some("y")), true);
             } else if name == "contextual" {
                 step(&engine, &request, "body", (8, 8, Some("x")), true);
             }
@@ -26673,7 +27375,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         let field = serde_json::json!({
             "type": "complexField", "fieldType": "UNKNOWN", "instruction": "0",
             "fieldCode": [], "fieldResult": [font_preflight_run("First", "Calibri")],
-            "structuredResult": {"blocks": [cached, table, sdt, end]}
+            "structuredResult": {"blockCount": 4}
         });
         let blocks = [
             serde_json::json!({"type": "paragraph", "content": [field]}),
@@ -32616,6 +33318,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             visual_top: 0.0,
             visual_bottom: 100.0,
             field_widths: Vec::new(),
+            watermark: None,
         }];
         extend_input_for_header_footer(&mut input, &regions, &variants, None);
         let margins = input.options.margins.expect("extended margins");

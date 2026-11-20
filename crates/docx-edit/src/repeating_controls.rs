@@ -249,10 +249,13 @@ impl EditingDoc {
         {
             return Err("control-id-exhausted".to_owned());
         }
-        let names: HashMap<String, String> = graph
-            .keys()
-            .map(|id| (id.clone(), format!("{story}:repeat:{}", self.next_id())))
-            .collect();
+        let names: HashMap<String, String> = {
+            let txn = self.yrs_doc().transact();
+            graph
+                .keys()
+                .map(|id| (id.clone(), format!("{story}:repeat:{}", self.next_id(&txn))))
+                .collect()
+        };
         let root_payload: BTreeMap<_, _> = record
             .payload
             .iter()
@@ -292,7 +295,7 @@ impl EditingDoc {
                             .filter(|(key, _)| !crate::is_identity_key(key))
                             .collect();
                         values.insert(crate::KIND_KEY.to_owned(), Any::from(crate::PILCROW_KIND));
-                        values.insert(crate::PARA_ID.to_owned(), Any::from(self.next_id()));
+                        values.insert(crate::PARA_ID.to_owned(), Any::from(self.next_id(&txn)));
                         copied.insert_embed_with_attributes(
                             &mut txn,
                             offset,

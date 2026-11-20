@@ -1,0 +1,706 @@
+use betteroffice_xlsx::{
+    CalculationOptions, CapturedFormat, Cell, CellInput, CellRange, CellRef, CellValue, Error,
+    NumberFormatMutation, ProposalEditInput, ProposalRequest, ProtectedSheets, Sheet, SheetId,
+    StylePatch, Workbook, WorkbookModel,
+};
+use xlsx_model::{CellFormat, ColStyle, Color, Fill, NumberFormat, Protection, Xf};
+
+const FORM: SheetId = SheetId(0);
+const OPEN: SheetId = SheetId(1);
+const STYLED: SheetId = SheetId(2);
+const BANDED: SheetId = SheetId(3);
+
+fn cell(address: &str) -> CellRef {
+    CellRef::parse_a1(address).unwrap()
+}
+
+fn range(a1: &str) -> CellRange {
+    CellRange::parse_a1(a1).unwrap()
+}
+
+fn put(sheet: &mut Sheet, address: &str, value: f64, style: Option<u32>) {
+    sheet.set_cell(
+        cell(address),
+        Cell {
+            value: CellValue::Number { value },
+            formula: None,
+            style,
+        },
+    );
+}
+
+/// Form is protected with A1 locked and B1:B2 unlocked, Open is unprotected and Styled is
+/// protected but lets users format cells. Banded is protected, lets users format cells and
+/// has blank columns with a red fill: B locked and E unlocked, and a locked D2.
+fn workbook() -> Workbook {
+    fixture(true)
+}
+
+/// The sheets of [`workbook`], protected or not.
+fn fixture(protected: bool) -> Workbook {
+    let mut model = WorkbookModel::default();
+    model.styles.cell_xfs.push(Xf::default());
+    model.styles.cell_xfs.push(Xf {
+        protection: Some(Protection {
+            locked: false,
+            hidden: false,
+        }),
+        ..Xf::default()
+    });
+    let mut form = Sheet::new("Form");
+    put(&mut form, "A1", 1.0, None);
+    put(&mut form, "B1", 2.0, Some(1));
+    put(&mut form, "B2", 4.0, Some(1));
+    let mut open = Sheet::new("Open");
+    put(&mut open, "A1", 3.0, None);
+    put(&mut open, "B1", 5.0, None);
+    let mut styled = Sheet::new("Styled");
+    put(&mut styled, "A1", 6.0, None);
+    put(&mut styled, "B1", 7.0, Some(1));
+    let red = |protection| CellFormat {
+        fill: Fill::Solid(Color::Rgb("#ff0000".into())),
+        protection,
+        ..CellFormat::default()
+    };
+    let locked_red = model
+        .styles
+        .intern_cell_format(&red(None))
+        .unwrap()
+        .unwrap();
+    let unlocked_red = model
+        .styles
+        .intern_cell_format(&red(Some(Protection {
+            locked: false,
+            hidden: false,
+        })))
+        .unwrap()
+        .unwrap();
+    let mut banded = Sheet::new("Banded");
+    banded.col_styles.push(ColStyle {
+        first: 1,
+        last: 1,
+        xf: locked_red,
+    });
+    banded.col_styles.push(ColStyle {
+        first: 4,
+        last: 4,
+        xf: unlocked_red,
+    });
+    put(&mut banded, "D2", 8.0, None);
+    model.sheets.extend([form, open, styled, banded]);
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    let protections = [
+        ("xl/worksheets/sheet1.xml", r#"sheet="1""#),
+        ("xl/worksheets/sheet3.xml", r#"sheet="1" formatCells="0""#),
+        ("xl/worksheets/sheet4.xml", r#"sheet="1" formatCells="0""#),
+    ];
+    for (part, attributes) in protections.into_iter().filter(|_| protected) {
+        let sheet = parts.iter_mut().find(|(name, _)| name == part).unwrap();
+        let xml = String::from_utf8(sheet.1.clone()).unwrap().replace(
+            "</sheetData>",
+            &format!("</sheetData><sheetProtection {attributes}/>"),
+        );
+        assert!(xml.contains("sheetProtection"));
+        sheet.1 = xml.into_bytes();
+    }
+    Workbook::open(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap()
+}
+
+fn input(book: &Workbook, sheet: SheetId, address: &str) -> String {
+    book.cell(sheet, cell(address)).unwrap().input
+}
+
+fn locked(result: betteroffice_xlsx::Result<impl std::fmt::Debug>) -> String {
+    match result {
+        Err(Error::LockedTarget(message)) => message,
+        other => panic!("expected a protection refusal, got {other:?}"),
+    }
+}
+
+fn options() -> CalculationOptions {
+    CalculationOptions::default()
+}
+
+fn inputs(edits: &[(&str, &str)]) -> Vec<CellInput> {
+    edits
+        .iter()
+        .map(|(address, input)| CellInput {
+            cell: cell(address),
+            input: (*input).to_owned(),
+        })
+        .collect()
+}
+
+fn bold() -> StylePatch {
+    StylePatch {
+        bold: Some(true),
+        ..Default::default()
+    }
+}
+
+fn captured() -> CapturedFormat {
+    CapturedFormat {
+        rows: 1,
+        columns: 1,
+        formats: vec![CellFormat::default()],
+        kept: Vec::new(),
+        source_styles: Vec::new(),
+        source_formats: Vec::new(),
+    }
+}
+
+#[test]
+fn edit_cell_refuses_a_locked_cell_on_a_protected_sheet() {
+    let mut book = workbook();
+    let version = book.version();
+    let message = locked(book.edit_cell(FORM, cell("A1"), "changed", options()));
+    assert_eq!(message, r#"A1 is locked on protected sheet "Form""#);
+    assert_eq!(input(&book, FORM, "A1"), "1");
+    assert_eq!(book.version(), version);
+    assert!(!book.can_undo());
+    let unchanged = locked(book.edit_cell(FORM, cell("A1"), "1", options()));
+    assert_eq!(unchanged, message);
+    let formula = locked(book.edit_cell(FORM, cell("C3"), "=B1*2", options()));
+    assert_eq!(formula, r#"C3 is locked on protected sheet "Form""#);
+    assert_eq!(input(&book, FORM, "C3"), "");
+}
+
+#[test]
+fn edit_cell_writes_unlocked_cells_and_unprotected_sheets() {
+    let mut book = workbook();
+    assert!(
+        book.edit_cell(FORM, cell("B1"), "unlocked", options())
+            .unwrap()
+            .applied
+    );
+    assert!(
+        book.edit_cell(OPEN, cell("A1"), "unprotected", options())
+            .unwrap()
+            .applied
+    );
+    assert_eq!(input(&book, FORM, "B1"), "unlocked");
+    assert_eq!(input(&book, OPEN, "A1"), "unprotected");
+    assert_eq!(input(&book, FORM, "A1"), "1");
+}
+
+#[test]
+fn edit_cells_refuses_the_whole_write_when_one_cell_is_locked() {
+    let mut book = workbook();
+    let version = book.version();
+    let message = locked(book.edit_cells(
+        FORM,
+        &inputs(&[("B1", "kept out"), ("B2", ""), ("A1", "")]),
+        options(),
+    ));
+    assert_eq!(message, r#"A1 is locked on protected sheet "Form""#);
+    assert_eq!(input(&book, FORM, "A1"), "1");
+    assert_eq!(input(&book, FORM, "B1"), "2");
+    assert_eq!(input(&book, FORM, "B2"), "4");
+    assert_eq!(book.version(), version);
+    assert!(
+        book.edit_cells(FORM, &inputs(&[("B1", "7"), ("B2", "8")]), options())
+            .unwrap()
+            .applied
+    );
+    assert!(
+        book.edit_cells(OPEN, &inputs(&[("A1", ""), ("B1", "9")]), options())
+            .unwrap()
+            .applied
+    );
+    assert_eq!(
+        [
+            input(&book, FORM, "B1"),
+            input(&book, FORM, "B2"),
+            input(&book, OPEN, "A1"),
+            input(&book, OPEN, "B1"),
+        ],
+        ["7", "8", "", "9"]
+    );
+}
+
+#[test]
+fn edit_cells_reports_an_out_of_range_cell_before_a_lock() {
+    let mut book = workbook();
+    let error = book
+        .edit_cells(
+            FORM,
+            &[
+                CellInput {
+                    cell: cell("A1"),
+                    input: "1".to_owned(),
+                },
+                CellInput {
+                    cell: CellRef::new(u32::MAX, 0),
+                    input: "1".to_owned(),
+                },
+            ],
+            options(),
+        )
+        .unwrap_err();
+    assert!(matches!(error, Error::CellOutOfRange(_)), "{error:?}");
+}
+
+#[test]
+fn formatting_refuses_a_protected_sheet_unless_it_allows_formatting_cells() {
+    let mut book = workbook();
+    let version = book.version();
+    let sheet = r#"sheet "Form" is protected"#;
+    assert_eq!(
+        locked(book.patch_range_style(FORM, range("B1"), bold(), options())),
+        sheet
+    );
+    assert_eq!(
+        locked(book.set_range_number_format(
+            FORM,
+            range("B1"),
+            NumberFormatMutation::Percent,
+            options()
+        )),
+        sheet
+    );
+    assert_eq!(
+        locked(book.apply_format(FORM, range("A1"), captured(), options())),
+        sheet
+    );
+    assert_eq!(book.version(), version);
+    assert!(
+        !book
+            .selection_formatting(FORM, range("B1"))
+            .unwrap()
+            .bold
+            .unwrap_or(false)
+    );
+    for target in [STYLED, OPEN] {
+        assert!(
+            book.patch_range_style(target, range("A1"), bold(), options())
+                .unwrap()
+                .applied
+        );
+        assert!(
+            book.set_range_number_format(
+                target,
+                range("A1"),
+                NumberFormatMutation::Percent,
+                options()
+            )
+            .unwrap()
+            .applied
+        );
+        book.apply_format(target, range("A1"), captured(), options())
+            .unwrap();
+    }
+    assert_eq!(
+        locked(book.edit_cell(STYLED, cell("A1"), "content", options())),
+        r#"A1 is locked on protected sheet "Styled""#
+    );
+}
+
+#[test]
+fn move_range_refuses_locked_source_or_destination_cells() {
+    let mut book = workbook();
+    let version = book.version();
+    assert_eq!(
+        locked(book.move_range(FORM, range("B1"), cell("A1"), options())),
+        r#"A1 is locked on protected sheet "Form""#
+    );
+    assert_eq!(
+        locked(book.move_range(FORM, range("A1"), cell("B2"), options())),
+        r#"A1 is locked on protected sheet "Form""#
+    );
+    assert_eq!(book.version(), version);
+    assert_eq!(input(&book, FORM, "A1"), "1");
+    assert_eq!(input(&book, FORM, "B1"), "2");
+    let mut open = fixture(false);
+    assert!(
+        open.move_range(FORM, range("A1"), cell("C3"), options())
+            .unwrap()
+            .applied
+    );
+    assert_eq!(input(&open, FORM, "C3"), "1");
+}
+
+fn style(book: &Workbook, sheet: SheetId, address: &str) -> Option<u32> {
+    book.model()
+        .sheet(sheet)
+        .unwrap()
+        .cell(cell(address))
+        .and_then(|cell| cell.style)
+}
+
+fn format(book: &Workbook, sheet: SheetId, address: &str) -> CellFormat {
+    let model = book.model();
+    let style = model.sheet(sheet).unwrap().effective_style(cell(address));
+    model.styles.cell_format(style)
+}
+
+#[test]
+fn fill_refuses_a_locked_destination_and_writes_nothing() {
+    let mut book = workbook();
+    let version = book.version();
+    assert_eq!(
+        locked(book.fill_range(FORM, range("B1"), range("B1:C1"), options())),
+        r#"C1 is locked on protected sheet "Form""#
+    );
+    assert_eq!(
+        locked(book.fill_range(FORM, range("B1"), range("B1:C2"), options())),
+        r#"C1 is locked on protected sheet "Form""#
+    );
+    assert_eq!(book.version(), version);
+    assert!(!book.can_undo());
+    assert_eq!(input(&book, FORM, "B2"), "4");
+    assert_eq!(input(&book, FORM, "C1"), "");
+    assert_eq!(input(&book, FORM, "C2"), "");
+    assert_eq!(style(&book, FORM, "C1"), None);
+    assert_eq!(style(&book, FORM, "C2"), None);
+}
+
+#[test]
+fn fill_refuses_a_differing_style_on_a_sheet_that_does_not_allow_formatting() {
+    let mut book = workbook();
+    let version = book.version();
+    assert_eq!(
+        locked(book.fill_range(FORM, range("A1"), range("A1:B1"), options())),
+        r#"sheet "Form" is protected"#
+    );
+    assert_eq!(book.version(), version);
+    assert_eq!(input(&book, FORM, "B1"), "2");
+    assert_eq!(style(&book, FORM, "B1"), Some(1));
+}
+
+#[test]
+fn fill_writes_unlocked_destinations_and_unprotected_sheets() {
+    let mut book = workbook();
+    assert!(
+        book.fill_range(FORM, range("B1"), range("B1:B2"), options())
+            .unwrap()
+            .applied
+    );
+    assert_eq!(input(&book, FORM, "B2"), "2");
+    assert_eq!(style(&book, FORM, "B2"), Some(1));
+    assert!(
+        book.fill_range(STYLED, range("A1"), range("A1:B1"), options())
+            .unwrap()
+            .applied
+    );
+    assert_eq!(input(&book, STYLED, "B1"), "6");
+    assert_eq!(style(&book, STYLED, "B1"), None);
+    let mut open = fixture(false);
+    assert!(
+        open.fill_range(FORM, range("A1"), range("A1:C1"), options())
+            .unwrap()
+            .applied
+    );
+    assert_eq!(input(&open, FORM, "C1"), "1");
+}
+
+#[test]
+fn fill_refuses_a_locked_destination_that_only_takes_a_format() {
+    let mut book = workbook();
+    let version = book.version();
+    assert_eq!(
+        locked(book.fill_range(BANDED, range("A1"), range("A1:B1"), options())),
+        r#"B1 is locked on protected sheet "Banded""#
+    );
+    assert_eq!(book.version(), version);
+    assert!(!book.can_undo());
+    assert!(
+        book.model()
+            .sheet(BANDED)
+            .unwrap()
+            .cell(cell("B1"))
+            .is_none()
+    );
+}
+
+#[test]
+fn fill_formats_unlocked_destinations_on_a_protected_sheet() {
+    let mut book = workbook();
+    assert!(
+        book.fill_range(BANDED, range("D1"), range("D1:E1"), options())
+            .unwrap()
+            .applied
+    );
+    let sheet = book.model().sheet(BANDED).unwrap();
+    assert!(sheet.cell(cell("E1")).is_some());
+    assert_ne!(
+        sheet.effective_style(cell("E1")),
+        sheet.inherited_style(cell("E1"))
+    );
+    assert_eq!(input(&book, BANDED, "E1"), "");
+    assert_eq!(format(&book, BANDED, "E1"), format(&book, BANDED, "D1"));
+    assert_eq!(
+        format(&book, BANDED, "E1"),
+        book.model().styles.cell_format(None)
+    );
+}
+
+#[test]
+fn fill_from_a_locked_source_writes_unlocked_destinations() {
+    let mut book = workbook();
+    assert!(
+        book.fill_range(BANDED, range("D2"), range("D2:E2"), options())
+            .unwrap()
+            .applied
+    );
+    assert_eq!(input(&book, BANDED, "D2"), "8");
+    assert_eq!(input(&book, BANDED, "E2"), "8");
+    assert_eq!(style(&book, BANDED, "E2"), style(&book, BANDED, "D2"));
+    assert_eq!(format(&book, BANDED, "E2"), format(&book, BANDED, "D2"));
+    assert_eq!(
+        format(&book, BANDED, "E2"),
+        book.model().styles.cell_format(None)
+    );
+}
+
+#[test]
+fn proposals_refuse_locked_cells_on_a_protected_sheet() {
+    let mut book = workbook();
+    let request = |sheet, address: &str| ProposalRequest {
+        agent_id: "agent".to_owned(),
+        note: None,
+        edits: vec![ProposalEditInput {
+            sheet,
+            cell: cell(address),
+            input: "proposed".to_owned(),
+            number_format: None,
+        }],
+    };
+    assert_eq!(
+        locked(book.propose(request(FORM, "A1"), options())),
+        r#"A1 is locked on protected sheet "Form""#
+    );
+    assert!(book.proposals().is_empty());
+    for (sheet, address) in [(FORM, "B1"), (OPEN, "A1")] {
+        let proposal = book.propose(request(sheet, address), options()).unwrap();
+        book.accept_proposal(&proposal.id, false, options())
+            .unwrap();
+        assert_eq!(input(&book, sheet, address), "proposed");
+    }
+}
+
+#[test]
+fn proposals_refuse_a_number_format_on_a_sheet_that_does_not_allow_formatting() {
+    let mut book = workbook();
+    let request = |sheet, number_format| ProposalRequest {
+        agent_id: "agent".to_owned(),
+        note: None,
+        edits: vec![ProposalEditInput {
+            sheet,
+            cell: cell("B1"),
+            input: "9".to_owned(),
+            number_format,
+        }],
+    };
+    let version = book.version();
+    let percent = Some(NumberFormatMutation::Percent);
+    assert_eq!(
+        locked(book.propose(request(FORM, percent.clone()), options())),
+        r#"sheet "Form" is protected"#
+    );
+    assert!(book.proposals().is_empty());
+    assert_eq!(book.version(), version);
+    let general = NumberFormat::Builtin { id: 0 };
+    let percent_format = NumberFormat::Builtin { id: 10 };
+    let cases = [
+        (FORM, None, &general),
+        (STYLED, None, &general),
+        (STYLED, percent, &percent_format),
+    ];
+    for (sheet, number_format, expected) in cases {
+        assert_eq!(format(&book, sheet, "B1").number_format, general);
+        let proposal = book
+            .propose(request(sheet, number_format), options())
+            .unwrap();
+        book.accept_proposal(&proposal.id, false, options())
+            .unwrap();
+        assert_eq!(input(&book, sheet, "B1"), "9");
+        assert_eq!(&format(&book, sheet, "B1").number_format, expected);
+    }
+}
+
+#[test]
+fn a_proposal_refused_on_its_second_sheet_keeps_nothing_of_its_first() {
+    let mut book = workbook();
+    let edit = |sheet, input: &str| ProposalEditInput {
+        sheet,
+        cell: cell("B1"),
+        input: input.to_owned(),
+        number_format: Some(NumberFormatMutation::Percent),
+    };
+    let request = ProposalRequest {
+        agent_id: "agent".to_owned(),
+        note: None,
+        edits: vec![edit(STYLED, "11"), edit(FORM, "12")],
+    };
+    let version = book.version();
+    let formats = |book: &Workbook| [format(book, STYLED, "B1"), format(book, FORM, "B1")];
+    let before = formats(&book);
+    assert_eq!(before[0].number_format, NumberFormat::Builtin { id: 0 });
+    assert_eq!(
+        locked(book.propose(request, options())),
+        r#"sheet "Form" is protected"#
+    );
+    assert!(book.proposals().is_empty());
+    assert_eq!(book.version(), version);
+    assert_eq!(input(&book, STYLED, "B1"), "7");
+    assert_eq!(input(&book, FORM, "B1"), "2");
+    assert_eq!(formats(&book), before);
+}
+
+#[test]
+fn undo_and_redo_replay_an_unlocked_edit_on_a_protected_sheet() {
+    let mut book = workbook();
+    book.edit_cell(FORM, cell("B1"), "typed", options())
+        .unwrap();
+    book.undo(options()).unwrap();
+    assert_eq!(input(&book, FORM, "B1"), "2");
+    book.redo(options()).unwrap();
+    assert_eq!(input(&book, FORM, "B1"), "typed");
+}
+
+fn protected_xml(book: &Workbook) -> String {
+    let parts = ooxml_opc::unzip_parts(&book.save().unwrap()).unwrap();
+    let sheet = parts
+        .into_iter()
+        .find(|(name, _)| name == "xl/worksheets/sheet1.xml")
+        .unwrap();
+    String::from_utf8(sheet.1).unwrap()
+}
+
+#[test]
+fn protected_sheets_allow_writes_locked_cells_and_keeps_the_protection() {
+    let mut book = workbook();
+    let allow = ProtectedSheets::Allow;
+    assert!(
+        book.edit_cell_with_protection(FORM, cell("A1"), "through", options(), allow)
+            .unwrap()
+            .applied
+    );
+    assert!(
+        book.edit_cells_with_protection(FORM, &inputs(&[("C3", "=B1*2")]), options(), allow)
+            .unwrap()
+            .applied
+    );
+    book.patch_range_style_with_protection(FORM, range("A1"), bold(), options(), allow)
+        .unwrap();
+    book.set_range_number_format_with_protection(
+        FORM,
+        range("A1"),
+        NumberFormatMutation::Percent,
+        options(),
+        allow,
+    )
+    .unwrap();
+    book.apply_format_with_protection(FORM, range("C3"), captured(), options(), allow)
+        .unwrap();
+    assert_eq!(input(&book, FORM, "A1"), "through");
+    assert_eq!(input(&book, FORM, "C3"), "=B1*2");
+    assert_eq!(
+        book.selection_formatting(FORM, range("A1")).unwrap().bold,
+        Some(true)
+    );
+    assert!(protected_xml(&book).contains("<sheetProtection"));
+    let mut reopened = Workbook::open(&book.save().unwrap()).unwrap();
+    assert_eq!(
+        locked(reopened.edit_cell(FORM, cell("A1"), "after", options())),
+        r#"A1 is locked on protected sheet "Form""#
+    );
+    assert_eq!(input(&reopened, FORM, "A1"), "through");
+}
+
+#[test]
+fn protected_sheets_refuse_and_the_default_raise_like_excel() {
+    let mut book = workbook();
+    let version = book.version();
+    let refuse = ProtectedSheets::Refuse;
+    assert_eq!(ProtectedSheets::default(), refuse);
+    let message = r#"A1 is locked on protected sheet "Form""#;
+    assert_eq!(
+        locked(book.edit_cell_with_protection(FORM, cell("A1"), "x", options(), refuse)),
+        message
+    );
+    assert_eq!(
+        locked(book.edit_cells_with_protection(FORM, &inputs(&[("A1", "x")]), options(), refuse)),
+        message
+    );
+    assert_eq!(
+        locked(book.patch_range_style_with_protection(
+            FORM,
+            range("B1"),
+            bold(),
+            options(),
+            refuse
+        )),
+        r#"sheet "Form" is protected"#
+    );
+    assert_eq!(
+        locked(book.edit_cell(FORM, cell("A1"), "x", options())),
+        message
+    );
+    assert_eq!(book.version(), version);
+    assert_eq!(input(&book, FORM, "A1"), "1");
+}
+
+#[test]
+fn protected_sheets_allow_is_refused_on_a_collaborative_workbook() {
+    let source = workbook().save().unwrap();
+    let mut book = Workbook::open_collaborative(&source, 7).unwrap();
+    let version = book.version();
+    let refused =
+        |result: betteroffice_xlsx::Result<betteroffice_xlsx::MutationResult>| match result {
+            Err(Error::InvalidRequest(message)) => message,
+            other => panic!("expected an invalid request, got {other:?}"),
+        };
+    let message = "protectedSheets allow requires a standalone agent workbook";
+    for target in [FORM, OPEN] {
+        assert_eq!(
+            refused(book.edit_cell_with_protection(
+                target,
+                cell("A1"),
+                "x",
+                options(),
+                ProtectedSheets::Allow
+            )),
+            message
+        );
+        assert_eq!(
+            refused(book.edit_cells_with_protection(
+                target,
+                &inputs(&[("A1", "x")]),
+                options(),
+                ProtectedSheets::Allow
+            )),
+            message
+        );
+        assert_eq!(
+            refused(book.patch_range_style_with_protection(
+                target,
+                range("A1"),
+                bold(),
+                options(),
+                ProtectedSheets::Allow
+            )),
+            message
+        );
+    }
+    assert_eq!(book.version(), version);
+    assert_eq!(input(&book, FORM, "A1"), "1");
+}
+
+#[test]
+fn protected_sheets_values_other_than_refuse_or_allow_are_invalid_requests() {
+    assert_eq!(
+        ProtectedSheets::parse("refuse").unwrap(),
+        ProtectedSheets::Refuse
+    );
+    assert_eq!(
+        ProtectedSheets::parse("allow").unwrap(),
+        ProtectedSheets::Allow
+    );
+    for value in ["Allow", "", "yes"] {
+        assert!(matches!(
+            ProtectedSheets::parse(value),
+            Err(Error::InvalidRequest(message)) if message == "protectedSheets must be refuse or allow"
+        ));
+    }
+}

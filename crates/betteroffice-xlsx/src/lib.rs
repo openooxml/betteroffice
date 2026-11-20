@@ -8,6 +8,7 @@ pub use fonts::OpenOptions;
 pub use open_options::OpenOptions;
 
 mod authority;
+mod conditional;
 mod error;
 mod fill;
 #[cfg(all(feature = "fonts", feature = "raster"))]
@@ -26,6 +27,11 @@ pub mod fuzzing {
     pub use crate::workbook::recovery::decode as recovery_decode;
 }
 
+#[doc(hidden)]
+pub use conditional::{
+    CONDITIONAL_FRAME_BUDGET, CONDITIONAL_FRAME_MS, CONDITIONAL_RESULT_CAP, ConditionalStats,
+    FrameClock,
+};
 pub use error::Error;
 pub use snapshot::{
     HydratedWorkbook, SnapshotBudget, SnapshotError, SnapshotProgress, SnapshotResult,
@@ -71,8 +77,8 @@ pub use workbook::reads::{
 pub use workbook::selection::{SelectionData, SelectionDirection, SelectionRegion};
 pub use workbook::target::{
     CellPosition, CellRead, CellTarget, CellsRead, FindMatch, FindOutcome, FindRequest,
-    RangeAddress, RangeRead, RangeTarget, ReadCalculation, ReadOutcome, ReadRequest, SheetEntry,
-    TextFound, UnevaluatedTarget,
+    ProtectedSheets, RangeAddress, RangeRead, RangeTarget, ReadCalculation, ReadOutcome,
+    ReadRequest, SheetEntry, TextFound, UnevaluatedTarget,
 };
 pub use workbook::{
     DEFAULT_TEXT_SEARCH_LIMIT, MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID,
@@ -103,8 +109,9 @@ pub use xlsx_ops::{
 pub use xlsx_parse::translate_formula;
 pub use xlsx_render::{
     Align, ChartA11yAttrs, ChartRegion, ChartResize, DisplayList, DrawCmd, GridGeometry, GridMeta,
-    HyperlinkRegion, PathStroke, PrintMetrics, Rect, RenderError, Viewport, resolve_chart_anchor,
-    viewport_for_range, viewport_for_used_range, viewport_for_used_range_within,
+    HyperlinkRegion, ImageCrop, PathStroke, PrintMetrics, Rect, RenderError, Viewport,
+    resolve_chart_anchor, viewport_for_range, viewport_for_used_range,
+    viewport_for_used_range_within,
 };
 
 pub type Result<T> = std::result::Result<T, Error>;

@@ -34,6 +34,7 @@ export declare class XlsxDocument {
   rangePngDisplayListJson(args: string): string
   displayListProfiledJson(viewportJson: string): string
   chartAtPointJson(args: string): string
+  mediaBytes(assetId: string): Uint8Array
   moveChartJson(args: string): string
   resizeChartJson(args: string): string
   renderPngTarget(targetJson: string, optionsJson: string, fonts?: Array<PngFontFace> | undefined | null): Uint8Array
@@ -92,6 +93,11 @@ export declare class XlsxDocument {
   saveWarningsJson(): string
   static open(bytes: Uint8Array): XlsxDocument
   static openWithCalculationJson(bytes: Uint8Array, context: string): XlsxDocument
+  /**
+   * Open keeping cached formula results, recalculating only a file with an uncached formula
+   * or a `calcPr` full calculation request.
+   */
+  static openRecalculatingStale(bytes: Uint8Array, context?: string | undefined | null): XlsxDocument
   /** Checkpoints are only restorable by the same engine version and codec. */
   static openRecoveryCheckpoint(bytes: Uint8Array, throughSeq: number): XlsxDocument
   static openCollaborative(bytes: Uint8Array, clientId: number): XlsxDocument

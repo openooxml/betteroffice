@@ -1,5 +1,8 @@
 use std::fmt;
 
+const SUGGESTING_EDIT_UNSUPPORTED: &str =
+    "suggesting (tracked-change) edits are not supported by this call";
+
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
@@ -14,7 +17,14 @@ pub enum Error {
     ParagraphNotFound(String),
     /// More than one body paragraph has the ID.
     AmbiguousParagraph(String),
+    /// No body paragraph has the index.
+    ParagraphIndexOutOfRange {
+        index: usize,
+        len: usize,
+    },
     UnsupportedParagraphEdit(String),
+    /// The edit context is in suggesting mode, which the paragraph text edits cannot save.
+    SuggestingEditUnsupported,
     Font(String),
     Image(String),
     ResourceLimit(String),
@@ -48,12 +58,17 @@ impl fmt::Display for Error {
             Self::AmbiguousParagraph(id) => {
                 write!(formatter, "more than one paragraph has the ID {id:?}")
             }
+            Self::ParagraphIndexOutOfRange { index, len } => write!(
+                formatter,
+                "paragraph index {index} is out of range for {len} paragraphs"
+            ),
             Self::UnsupportedParagraphEdit(id) => {
                 write!(
                     formatter,
                     "paragraph {id:?} is not a plain single-run paragraph"
                 )
             }
+            Self::SuggestingEditUnsupported => formatter.write_str(SUGGESTING_EDIT_UNSUPPORTED),
             Self::Font(error) => formatter.write_str(error),
             Self::Image(error) => formatter.write_str(error),
             Self::ResourceLimit(error) => formatter.write_str(error),
@@ -89,7 +104,9 @@ impl std::error::Error for Error {
             | Self::DisplayList(_)
             | Self::ParagraphNotFound(_)
             | Self::AmbiguousParagraph(_)
+            | Self::ParagraphIndexOutOfRange { .. }
             | Self::UnsupportedParagraphEdit(_)
+            | Self::SuggestingEditUnsupported
             | Self::Font(_)
             | Self::Image(_)
             | Self::ResourceLimit(_)

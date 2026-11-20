@@ -162,7 +162,8 @@ describe('pageToPng', () => {
     (globalThis as { OffscreenCanvas?: unknown }).OffscreenCanvas = undefined;
     const error = await pageToPng(list([])).catch((value: unknown) => value) as PngExportError;
     expect(error.code).toBe('canvas-unavailable');
-    expect(error.message).toContain('@betteroffice/vsdx-native');
+    expect(error.message).toContain('OffscreenCanvas or a DOM canvas');
+    expect(error.message).not.toContain('@betteroffice/vsdx-native');
   });
 
   test('stops without encoding when aborted', async () => {

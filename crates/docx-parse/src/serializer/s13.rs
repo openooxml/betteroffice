@@ -31,7 +31,7 @@ use crate::vml::Watermark;
 use crate::xml::ParseError;
 
 use super::comment_references::{ParagraphLocation, normalize_comment_references};
-use super::context::SerializerContext;
+use super::context::{S13SaveReport, SerializerContext};
 use super::numbering::serialize_numbering_xml;
 use super::paragraph::serialize_paragraph;
 use super::paragraph_ids::{
@@ -160,7 +160,8 @@ pub fn write_docx_s13_with_warnings(
     original_docx: &[u8],
 ) -> Result<(Vec<u8>, Vec<String>), ParseError> {
     let original_parts = ooxml_opc::unzip_parts(original_docx).map_err(ParseError::Container)?;
-    write_docx_s13_parts_with_warnings(request, &original_parts, Some(original_docx))
+    write_docx_s13_parts_with_report(request, &original_parts, Some(original_docx))
+        .map(|(bytes, report)| (bytes, report.warnings))
 }
 
 /// [`write_docx_s13`] seeded from already-inflated parts. `source` is the
@@ -171,14 +172,15 @@ pub fn write_docx_s13_parts(
     original_parts: &[(String, Vec<u8>)],
     source: Option<&[u8]>,
 ) -> Result<Vec<u8>, ParseError> {
-    write_docx_s13_parts_with_warnings(request, original_parts, source).map(|(bytes, _)| bytes)
+    write_docx_s13_parts_with_report(request, original_parts, source).map(|(bytes, _)| bytes)
 }
 
-fn write_docx_s13_parts_with_warnings(
+/// [`write_docx_s13_parts`] returning the save's diagnostics beside its bytes.
+pub fn write_docx_s13_parts_with_report(
     mut request: S13SaveRequest,
     original_parts: &[(String, Vec<u8>)],
     source: Option<&[u8]>,
-) -> Result<(Vec<u8>, Vec<String>), ParseError> {
+) -> Result<(Vec<u8>, S13SaveReport), ParseError> {
     request.determinism.validate()?;
     let limits = crate::xml::ParseLimits::default();
     let mut budget = crate::xml::ParseBudget::new(&limits);
@@ -309,7 +311,7 @@ fn write_docx_s13_parts_with_warnings(
         package.set_text("word/document.xml", patched);
         update_core_part(&request.options, &mut package, context.now());
         let bytes = rezip_package(&package, source)?;
-        return Ok((bytes, context.take_warnings()));
+        return Ok((bytes, context.take_report()));
     }
     let relationships: IndexMap<_, _> = request.relationship_entries.iter().cloned().collect();
     let reports_dropped = request.paragraph_ids.is_some();
@@ -333,7 +335,7 @@ fn write_docx_s13_parts_with_warnings(
                 .ok_or_else(|| save_error("unsafe section XML patch"))?;
             package.set_text("word/document.xml", patched);
             update_core_part(&request.options, &mut package, &request.determinism.now);
-            return Ok((rezip_package(&package, source)?, Vec::new()));
+            return Ok((rezip_package(&package, source)?, S13SaveReport::default()));
         }
     }
     apply_paragraph_id_assignments(&mut request, &paragraph_ids, &relationships, &package)?;
@@ -479,9 +481,17 @@ fn write_docx_s13_parts_with_warnings(
         )? {
             Some(patched) => patched,
             None => {
-                let serialized = serialize_document_part(&request.document, &mut context)?;
-                build_patched_document_xml(&original, &serialized, &selective.changed_para_ids)
-                    .ok_or_else(|| save_error("selective document patch is unsafe"))?
+                context.begin_form_data_tokens(&original);
+                let serialized = serialize_document_part(&request.document, &mut context);
+                let deferred = context.end_form_data_tokens();
+                let patched = build_patched_document_xml(
+                    &original,
+                    &serialized?,
+                    &selective.changed_para_ids,
+                )
+                .ok_or_else(|| save_error("selective document patch is unsafe"))?;
+                super::paragraph::reject_form_data_tokens(&patched, &deferred)?;
+                patched
             }
         }
     } else {
@@ -675,7 +685,7 @@ fn write_docx_s13_parts_with_warnings(
     }
     update_core_part(&request.options, &mut package, context.now());
     let bytes = rezip_package(&package, source)?;
-    Ok((bytes, context.take_warnings()))
+    Ok((bytes, context.take_report()))
 }
 
 /// Authored chart placements in one story part, keyed by relationship id.
@@ -1616,7 +1626,28 @@ impl StoryParts<'_> {
         });
     }
 
+    /// Fails when a form field whose `w:ffData` cannot be replayed was not kept as source bytes.
     fn splice(
+        source: Option<&str>,
+        part: &S13SplicedPart,
+        assignments: &BTreeMap<u32, String>,
+        strict: bool,
+        keeps: bool,
+        context: &mut SerializerContext,
+        serialize: impl FnOnce(&mut SerializerContext) -> Result<String, ParseError>,
+    ) -> Result<StoryWrite, ParseError> {
+        if let Some(source) = source {
+            context.begin_form_data_tokens(source);
+        }
+        let written =
+            Self::splice_written(source, part, assignments, strict, keeps, context, serialize);
+        let deferred = context.end_form_data_tokens();
+        let written = written?;
+        super::paragraph::reject_form_data_tokens(&written.xml, &deferred)?;
+        Ok(written)
+    }
+
+    fn splice_written(
         source: Option<&str>,
         part: &S13SplicedPart,
         assignments: &BTreeMap<u32, String>,
@@ -1908,7 +1939,7 @@ fn record_kept(
             .cloned()
             .or_else(|| occurrence.and_then(|occurrence| occurrence.para_id.clone())),
         text,
-        scope,
+        scope: scope.to_owned(),
         dropped,
     });
 }
@@ -2747,7 +2778,7 @@ fn inline_has_drawing_image(node: &InlineNode, control: bool, revision: bool) ->
                 || field
                     .structured_result
                     .as_ref()
-                    .filter(|result| result.blocks.is_none())
+                    .filter(|result| !result.spans_paragraphs())
                     .and_then(|result| result.inline.as_ref())
                     .map_or_else(
                         || {
@@ -2866,7 +2897,7 @@ fn visit_inline_images(
             if let Some(nodes) = field
                 .structured_result
                 .as_mut()
-                .filter(|result| result.blocks.is_none())
+                .filter(|result| !result.spans_paragraphs())
                 .and_then(|result| result.inline.as_mut())
             {
                 for node in nodes {
@@ -3308,7 +3339,7 @@ fn inline_has_hyperlink(node: &InlineNode, control: bool, revision: bool) -> boo
         InlineNode::ComplexField(field) => field
             .structured_result
             .as_ref()
-            .filter(|result| result.blocks.is_none())
+            .filter(|result| !result.spans_paragraphs())
             .and_then(|result| result.inline.as_ref())
             .is_some_and(|nodes| {
                 nodes
@@ -3346,7 +3377,7 @@ fn visit_inline_hyperlinks(
             let Some(nodes) = field
                 .structured_result
                 .as_mut()
-                .filter(|result| result.blocks.is_none())
+                .filter(|result| !result.spans_paragraphs())
                 .and_then(|result| result.inline.as_mut())
             else {
                 return;
@@ -3604,7 +3635,7 @@ impl<'a> SelectiveParagraphIndex<'a> {
                 match field
                     .structured_result
                     .as_ref()
-                    .filter(|result| result.blocks.is_none())
+                    .filter(|result| !result.spans_paragraphs())
                     .and_then(|result| result.inline.as_ref())
                 {
                     Some(nodes) => {
@@ -5283,5 +5314,94 @@ mod tests {
             .collect();
         assert_eq!(media_rels.len(), 1, "{rels}");
         assert_eq!(parts["word/media/image1.png"], [1, 2, 3]);
+    }
+
+    /// A field whose result spans paragraphs, holding `inline` as its structured result and
+    /// `field_result` as the runs a save writes.
+    fn spanning_field(inline: serde_json::Value, field_result: serde_json::Value) -> InlineNode {
+        serde_json::from_value(json!({
+            "type": "complexField",
+            "instruction": "QUOTE x",
+            "fieldType": "QUOTE",
+            "fieldCode": [],
+            "fieldResult": field_result,
+            "structuredResult": { "inline": inline, "blockCount": 1 }
+        }))
+        .unwrap()
+    }
+
+    fn drawing_run(relationship_id: &str) -> serde_json::Value {
+        json!({
+            "type": "run",
+            "content": [{
+                "type": "drawing",
+                "image": {
+                    "type": "image",
+                    "rId": relationship_id,
+                    "src": "data:image/png;base64,AQID",
+                    "size": { "width": 9525, "height": 9525 },
+                    "wrap": { "type": "inline" }
+                }
+            }]
+        })
+    }
+
+    fn hyperlink_value() -> serde_json::Value {
+        json!({ "type": "hyperlink", "anchor": "top", "children": [] })
+    }
+
+    #[test]
+    fn a_field_spanning_paragraphs_finds_drawings_in_its_written_runs_only() {
+        let written = spanning_field(json!([]), json!([drawing_run("rIdResult")]));
+        assert!(inline_has_drawing_image(&written, true, true));
+        let copied = spanning_field(json!([drawing_run("rIdInline")]), json!([]));
+        assert!(!inline_has_drawing_image(&copied, true, true));
+    }
+
+    #[test]
+    fn a_field_spanning_paragraphs_visits_the_images_of_its_written_runs() {
+        let mut node = spanning_field(
+            json!([drawing_run("rIdInline")]),
+            json!([drawing_run("rIdResult")]),
+        );
+        let mut visited = Vec::new();
+        visit_inline_images(
+            &mut node,
+            &mut |image| {
+                visited.push(image.relationship_id.clone());
+                Ok(())
+            },
+            true,
+            true,
+        )
+        .unwrap();
+        assert_eq!(visited, ["rIdResult"]);
+    }
+
+    #[test]
+    fn a_field_spanning_paragraphs_holds_no_hyperlink_of_its_inline_copy() {
+        let node = spanning_field(json!([hyperlink_value()]), json!([]));
+        assert!(!inline_has_hyperlink(&node, true, true));
+    }
+
+    #[test]
+    fn a_field_spanning_paragraphs_visits_no_hyperlink_of_its_inline_copy() {
+        let mut node = spanning_field(json!([hyperlink_value()]), json!([]));
+        let mut visited = 0;
+        visit_inline_hyperlinks(&mut node, &mut |_| visited += 1, true, true);
+        assert_eq!(visited, 0);
+    }
+
+    #[test]
+    fn a_field_spanning_paragraphs_allocates_drawing_ids_for_its_written_runs_only() {
+        let allocates = |node: &InlineNode| {
+            let mut index = SelectiveParagraphIndex::new(&[]);
+            index.inline(node).unwrap();
+            index.allocates_ids
+        };
+        let written = spanning_field(json!([]), json!([drawing_run("")]));
+        assert!(allocates(&written));
+        let copied = spanning_field(json!([drawing_run("")]), json!([]));
+        assert!(!allocates(&copied));
     }
 }

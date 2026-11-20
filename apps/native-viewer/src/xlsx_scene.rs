@@ -132,6 +132,7 @@ fn translate_command(
     tiles: &mut PatternTiles,
 ) -> Result<(), String> {
     match command {
+        DrawCmd::Image { .. } => Err("pictures are not translated".into()),
         DrawCmd::PatternFill {
             x,
             y,
@@ -233,6 +234,7 @@ fn translate_command(
             rotation_valign: _,
             stacked,
             wrap,
+            runs: text_runs,
         } => {
             if *stacked {
                 return Err("stacked text is not translated".to_owned());
@@ -267,15 +269,24 @@ fn translate_command(
                     |literal, x| runs.push(prepare(x, *y, literal, Align::Left)),
                 );
                 runs.into_iter().collect::<Result<Vec<_>, _>>()?
+            } else if !text_runs.is_empty()
+                && let Some(pieces) = xlsx_render::run_pieces(command)
+            {
+                match wrap {
+                    Some(wrap) => prepare_wrapped_pieces(*x, *y, *align, wrap, text, &pieces)?,
+                    None => prepare_pieces(*x, *y, *align, text, &pieces)?,
+                }
             } else if let Some(wrap) = wrap {
                 let lines = xlsx_render::wrap::wrap_lines(text, wrap.width, |line| {
                     measure_text(line, *font_size)
                 });
+                let count = xlsx_render::wrap::wrapped_lines_kept(lines.len(), wrap);
                 lines
                     .iter()
+                    .take(count)
                     .enumerate()
                     .map(|(index, line)| {
-                        let y = xlsx_render::wrap::wrapped_line_y(*y, index, lines.len(), wrap);
+                        let y = xlsx_render::wrap::wrapped_line_y(*y, index, count, wrap);
                         prepare(*x, y, line, *align)
                     })
                     .collect::<Result<Vec<_>, _>>()?
@@ -289,6 +300,65 @@ fn translate_command(
             })
         }
     }
+}
+
+fn prepare_wrapped_pieces(
+    x: f32,
+    y: f32,
+    align: Align,
+    wrap: &xlsx_render::TextWrap,
+    text: &str,
+    pieces: &[xlsx_render::TextPiece],
+) -> Result<Vec<PreparedText>, String> {
+    let lines = xlsx_render::wrap_run_lines(text, pieces, wrap.width, |piece, part| {
+        measure_text(part, piece.font_size)
+    });
+    let count = xlsx_render::wrap::wrapped_lines_kept(lines.len(), wrap);
+    let mut prepared = Vec::new();
+    for (index, line) in lines.iter().take(count).enumerate() {
+        let y = xlsx_render::wrap::wrapped_line_y(y, index, count, wrap);
+        prepared.extend(prepare_pieces(x, y, align, text, line)?);
+    }
+    Ok(prepared)
+}
+
+fn prepare_pieces(
+    x: f32,
+    y: f32,
+    align: Align,
+    text: &str,
+    pieces: &[xlsx_render::TextPiece],
+) -> Result<Vec<PreparedText>, String> {
+    let widths: Vec<f32> = pieces
+        .iter()
+        .map(|piece| measure_text(&text[piece.range.clone()], piece.font_size))
+        .collect();
+    let total: f32 = widths.iter().sum();
+    let mut pen = match align {
+        Align::Left => x,
+        Align::Center => x - total / 2.0,
+        Align::Right => x - total,
+    };
+    let mut prepared = Vec::with_capacity(pieces.len());
+    for (piece, width) in pieces.iter().zip(widths) {
+        prepared.push(PreparedText::new(
+            pen,
+            y,
+            &text[piece.range.clone()],
+            piece.font_size,
+            &piece.color,
+            Align::Left,
+            piece.bold,
+            piece.italic,
+            piece.underline,
+            double_underline(piece.underline_style),
+            piece.strike,
+            None,
+            false,
+        )?);
+        pen += width;
+    }
+    Ok(prepared)
 }
 
 fn double_underline(style: Option<RunUnderline>) -> bool {
@@ -772,14 +842,15 @@ fn command_kind(command: &DrawCmd) -> &'static str {
         DrawCmd::Line { .. } => "line",
         DrawCmd::Path { .. } => "path",
         DrawCmd::Text { .. } => "text",
+        DrawCmd::Image { .. } => "image",
     }
 }
 
 fn command_bounds(command: &DrawCmd) -> Option<Rect> {
     match command {
-        DrawCmd::FillRect { x, y, w, h, .. } | DrawCmd::PatternFill { x, y, w, h, .. } => {
-            loose_rectangle(*x, *y, *w, *h)
-        }
+        DrawCmd::FillRect { x, y, w, h, .. }
+        | DrawCmd::PatternFill { x, y, w, h, .. }
+        | DrawCmd::Image { x, y, w, h, .. } => loose_rectangle(*x, *y, *w, *h),
         DrawCmd::Line { x1, y1, x2, y2, .. } => loose_extents(*x1, *y1, *x2, *y2),
         DrawCmd::Path { commands, .. } => path_bounds(commands),
         DrawCmd::Text { clip, .. } => loose_rectangle(clip.x, clip.y, clip.w, clip.h),
@@ -852,7 +923,8 @@ fn loose_extents(x1: f32, y1: f32, x2: f32, y2: f32) -> Option<Rect> {
 mod tests {
     use super::*;
     use xlsx_render::{
-        GridMeta, NumberFormatLayout, PathStroke, RunUnderline, TextValign, TextWrap,
+        GridMeta, NumberFormatLayout, PathStroke, RunUnderline, TextRun, TextRunBaseline,
+        TextValign, TextWrap,
     };
 
     fn display_list(commands: Vec<DrawCmd>) -> DisplayList {
@@ -962,6 +1034,7 @@ mod tests {
             rotation_valign: None,
             stacked: false,
             wrap: None,
+            runs: Vec::new(),
         });
         let page = translate_sheet(&display_list(commands)).unwrap();
         assert_eq!(page.skipped.total(), 0);
@@ -997,6 +1070,7 @@ mod tests {
             rotation_valign: None,
             stacked: false,
             wrap: None,
+            runs: Vec::new(),
         }
     }
 
@@ -1010,6 +1084,7 @@ mod tests {
                 width: 30.0,
                 line_height: 14.0,
                 valign: TextValign::Top,
+                max_lines: None,
             });
         }
         for (command, width, overflow) in
@@ -1027,6 +1102,35 @@ mod tests {
         }
         let page = translate_sheet(&display_list(vec![wrapped, formatted, overflowing])).unwrap();
         assert_eq!(page.skipped.total(), 0);
+    }
+
+    fn wrapped_glyph_runs(max_lines: Option<u32>, zoom: f32) -> usize {
+        let wrap = serde_json::json!({
+            "width": 100.0,
+            "lineHeight": 12.0,
+            "valign": "center",
+            "maxLines": max_lines,
+        });
+        let mut wrapped = text("a\nb\nc\nd");
+        if let DrawCmd::Text { y, wrap: slot, .. } = &mut wrapped {
+            *y = 30.0;
+            *slot = Some(serde_json::from_value(wrap).unwrap());
+        }
+        let dl = xlsx_render::scaled(display_list(vec![wrapped]), zoom);
+        let page = translate_sheet(&dl).unwrap();
+        page.scene.encoding().resources.glyph_runs.len()
+    }
+
+    #[test]
+    fn wrapped_text_paints_at_most_the_lines_its_display_list_keeps() {
+        let kept = [Some(1), Some(2), Some(u32::MAX), None].map(|max| wrapped_glyph_runs(max, 1.0));
+        assert_eq!(kept, [1, 2, 4, 4]);
+    }
+
+    #[test]
+    fn wrapped_text_keeps_the_same_lines_at_every_zoom() {
+        let runs = [1.0, 2.0, 4.0].map(|zoom| wrapped_glyph_runs(Some(2), zoom));
+        assert_eq!(runs, [2, 2, 2]);
     }
 
     #[test]
@@ -1095,6 +1199,193 @@ mod tests {
                 .keys()
                 .any(|reason| reason.contains("stacked text"))
         );
+    }
+
+    const RED: u32 = 0xff00_00ff;
+    const BLACK: u32 = 0xff00_0000;
+
+    fn span(start: u32, end: u32) -> TextRun {
+        TextRun {
+            start,
+            end,
+            ..TextRun::default()
+        }
+    }
+
+    fn red_bold(start: u32, end: u32) -> TextRun {
+        TextRun {
+            bold: Some(true),
+            color: Some("#ff0000".into()),
+            ..span(start, end)
+        }
+    }
+
+    fn with_runs(mut command: DrawCmd, runs: Vec<TextRun>) -> DrawCmd {
+        if let DrawCmd::Text { runs: slot, .. } = &mut command {
+            *slot = runs;
+        }
+        command
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct Painted {
+        colors: Vec<u32>,
+        pens: Vec<f32>,
+        baselines: Vec<f32>,
+        sizes: Vec<f32>,
+        clips: u32,
+        skipped: usize,
+    }
+
+    fn painted(command: DrawCmd) -> Painted {
+        let page = translate_sheet(&display_list(vec![command])).unwrap();
+        let encoding = page.scene.encoding();
+        let runs = &encoding.resources.glyph_runs;
+        Painted {
+            colors: encoding
+                .draw_data
+                .iter()
+                .copied()
+                .filter(|word| [RED, BLACK].contains(word))
+                .collect(),
+            pens: runs
+                .iter()
+                .map(|run| run.transform.translation[0])
+                .collect(),
+            baselines: runs
+                .iter()
+                .map(|run| run.transform.translation[1])
+                .collect(),
+            sizes: runs.iter().map(|run| run.font_size).collect(),
+            clips: encoding.n_clips,
+            skipped: page.skipped.total(),
+        }
+    }
+
+    #[test]
+    fn runs_paint_a_glyph_run_per_piece_in_its_colour() {
+        let plain = painted(text("ABCD"));
+        assert_eq!(plain.colors, vec![BLACK]);
+        let larger = TextRun {
+            font_size: Some(14.0),
+            ..span(2, 4)
+        };
+        let rich = painted(with_runs(text("ABCD"), vec![red_bold(0, 2), larger]));
+        let ab = measure_text("AB", 11.0);
+        assert_eq!(rich.colors, vec![RED, RED, BLACK]);
+        assert_eq!(rich.pens, vec![4.0, 4.0 + BOLD_OFFSET_PX, 4.0 + ab]);
+        assert_eq!(
+            rich.sizes,
+            vec![11.0 * PX_PER_PT, 11.0 * PX_PER_PT, 14.0 * PX_PER_PT]
+        );
+        assert_eq!((rich.clips, rich.skipped), (plain.clips, 0));
+    }
+
+    #[test]
+    fn text_without_runs_or_with_its_own_style_paints_as_before() {
+        let plain = painted(text("ABCD"));
+        assert_eq!(plain.pens, vec![4.0]);
+        assert_eq!(painted(with_runs(text("ABCD"), Vec::new())), plain);
+        assert_eq!(
+            painted(with_runs(text("ABCD"), vec![span(0, 2), span(2, 4)])),
+            plain
+        );
+    }
+
+    #[test]
+    fn a_superscript_run_paints_at_its_own_size_on_the_common_baseline() {
+        let raised = TextRun {
+            baseline: Some(TextRunBaseline::Superscript),
+            ..red_bold(0, 2)
+        };
+        assert_eq!(
+            painted(with_runs(text("ABCD"), vec![raised])),
+            painted(with_runs(text("ABCD"), vec![red_bold(0, 2)]))
+        );
+    }
+
+    #[test]
+    fn a_wrapped_command_paints_each_line_s_pieces_in_their_own_colours_and_sizes() {
+        let mut wrapped = text("AB CDE FG");
+        if let DrawCmd::Text { wrap, .. } = &mut wrapped {
+            *wrap = Some(TextWrap {
+                width: measure_text("CDE", 14.0) + 1.0,
+                line_height: 16.0,
+                valign: TextValign::Top,
+                max_lines: None,
+            });
+        }
+        let larger = TextRun {
+            font_size: Some(14.0),
+            ..span(3, 9)
+        };
+        let rich = painted(with_runs(wrapped, vec![red_bold(0, 2), larger]));
+        assert_eq!(rich.colors, vec![RED, RED, BLACK, BLACK]);
+        assert_eq!(rich.pens, vec![4.0, 4.0 + BOLD_OFFSET_PX, 4.0, 4.0]);
+        assert_eq!(rich.baselines, vec![20.0, 20.0, 36.0, 52.0]);
+        let (small, large) = (11.0 * PX_PER_PT, 14.0 * PX_PER_PT);
+        assert_eq!(rich.sizes, vec![small, small, large, large]);
+        assert_eq!(rich.skipped, 0);
+    }
+
+    #[test]
+    fn rotated_and_stacked_text_paints_as_without_runs() {
+        let mut rotated = text("ABCD");
+        let mut stacked = text("ABCD");
+        if let DrawCmd::Text { rotation_deg, .. } = &mut rotated {
+            *rotation_deg = Some(90.0);
+        }
+        if let DrawCmd::Text { stacked: flag, .. } = &mut stacked {
+            *flag = true;
+        }
+        for command in [rotated, stacked] {
+            assert_eq!(
+                painted(with_runs(command.clone(), vec![red_bold(0, 2)])),
+                painted(command)
+            );
+        }
+    }
+
+    #[test]
+    fn right_to_left_text_paints_as_without_runs() {
+        for whole in ["שלום עולם", "abc אבג 123", "مرحبا"] {
+            assert_eq!(
+                painted(with_runs(text(whole), vec![red_bold(0, 2)])),
+                painted(text(whole)),
+                "{whole:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_boundary_inside_a_combining_mark_or_surrogate_pair_paints_all_the_text() {
+        let red = |start, end| TextRun {
+            color: Some("#ff0000".into()),
+            ..span(start, end)
+        };
+        let mark = painted(with_runs(text("e\u{301}x"), vec![red(1, 3)]));
+        assert_eq!(mark.colors, vec![BLACK, RED]);
+        assert_eq!(mark.pens, vec![4.0, 4.0 + measure_text("e", 11.0)]);
+        let pair = painted(with_runs(text("A😀B"), vec![red(0, 2)]));
+        assert_eq!(pair.colors, vec![RED, BLACK]);
+        assert_eq!(pair.pens, vec![4.0, 4.0 + measure_text("A", 11.0)]);
+        let ligature = painted(with_runs(text("office"), vec![red(0, 2)]));
+        assert_eq!(ligature.pens, vec![4.0, 4.0 + measure_text("of", 11.0)]);
+    }
+
+    #[test]
+    fn a_narrow_clip_wraps_every_piece_in_one_clip_layer() {
+        let narrow = |mut command: DrawCmd| {
+            if let DrawCmd::Text { clip, .. } = &mut command {
+                clip.w = 12.0;
+            }
+            command
+        };
+        let runs = vec![red_bold(0, 2), span(2, 4)];
+        let plain = painted(narrow(text("ABCD")));
+        let rich = painted(narrow(with_runs(text("ABCD"), runs.clone())));
+        assert_eq!(rich.clips, plain.clips);
+        assert_eq!(rich, painted(with_runs(text("ABCD"), runs)));
     }
 
     #[test]

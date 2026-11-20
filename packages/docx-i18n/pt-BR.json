@@ -730,6 +730,7 @@
     "linkRemoved": "Link removido",
     "linkCopied": "Link copiado para a área de transferência",
     "pasteFailed": "Não foi possível concluir a colagem. Nada foi alterado.",
+    "cutRefused": "A seleção contém objetos que não podem ser recortados. Nada foi alterado.",
     "failedToSave": "Falha ao salvar documento",
     "documentInput": "Entrada do documento",
     "documentPreview": "Visualização do documento",

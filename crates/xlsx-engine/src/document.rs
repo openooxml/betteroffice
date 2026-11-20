@@ -165,6 +165,25 @@ impl Document {
             .map_err(type_error)
     }
 
+    pub fn open_recalculating_stale(
+        bytes: &[u8],
+        context: Option<&str>,
+        host: Host,
+    ) -> Result<Self, EngineError> {
+        let now_serial = match context {
+            Some(_) => None,
+            None => (host.now_serial)()?,
+        };
+        Self::opened(host, || {
+            Session::open_recalculating_stale(bytes, now_serial, context)
+        })
+        .map_err(if context.is_some() {
+            type_error
+        } else {
+            message
+        })
+    }
+
     pub fn set_calculation_context_json(&mut self, context: &str) -> Result<(), EngineError> {
         self.session
             .set_calculation_context_json(context)
@@ -286,7 +305,9 @@ impl Document {
     }
 
     pub fn display_list_json(&self, args: &str) -> Result<String, EngineError> {
-        self.session.display_list_json(args).map_err(message)
+        self.session
+            .display_list_timed_json(None, args, &self.host.timer_ms)
+            .map_err(message)
     }
 
     pub fn display_list_for_json(
@@ -295,7 +316,7 @@ impl Document {
         viewport_json: &str,
     ) -> Result<String, EngineError> {
         self.session
-            .display_list_for_json(sheet, viewport_json)
+            .display_list_timed_json(Some(sheet), viewport_json, &self.host.timer_ms)
             .map_err(message)
     }
 
@@ -309,6 +330,10 @@ impl Document {
 
     pub fn chart_at_point_json(&self, args: &str) -> Result<String, EngineError> {
         self.session.chart_at_point_json(args).map_err(message)
+    }
+
+    pub fn media_bytes(&self, asset_id: &str) -> Result<Vec<u8>, EngineError> {
+        self.session.media_bytes(asset_id).map_err(message)
     }
 
     pub fn move_chart_json(&mut self, args: &str) -> Result<String, EngineError> {
