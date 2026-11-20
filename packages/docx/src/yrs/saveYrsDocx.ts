@@ -580,7 +580,8 @@ export async function writeSessionSave(
   engineProgress();
   const output = withoutSyntheticParagraphs(document, capture.identities);
   engineProgress();
-  const sourceBuffer = sessionSourcePackage(session)?.buffer ?? originalBuffer;
+  const openedBuffer = sessionSourcePackage(session)?.buffer;
+  const sourceBuffer = openedBuffer ?? originalBuffer;
   const bodyPart = capture.identities.paragraphs.find(identity => identity.session?.story === 'body' && identity.source)?.source?.partUri.replace(/^\//, '') ?? 'word/document.xml';
   const separators = noteSeparatorKeys(document);
   let sourceSeparators: ReturnType<typeof noteSeparatorKeys> | null | undefined;
@@ -613,7 +614,7 @@ export async function writeSessionSave(
   const defined = session.createdListDefinitions?.() ?? [];
   const references = defined.length ? createdListReferences(output) : undefined;
   const inUse = references
-    ? new Set([...session.listDefinitionKeysInUse(), ...references.keys])
+    ? new Set([...(session.listDefinitionKeysInUse?.() ?? defined.map(definition => definition.key)), ...references.keys])
     : undefined;
   const created = defined.filter(definition => inUse?.has(definition.key));
   if (created.length) await Promise.all([preloadOpcWasm(), preloadParseWasm()]);
@@ -660,7 +661,7 @@ export async function writeSessionSave(
     const lists = created.length
       ? savedListDefinitions(
         session, created, unzipContainer(new Uint8Array(source)), sessionMaterializedSource(session)?.package.numbering,
-        references?.numIds
+        references?.numIds, () => (openedBuffer === undefined ? undefined : unzipContainer(new Uint8Array(openedBuffer)))
       )
       : [];
     const modelled = withSourceOrdinals(output, spliced);

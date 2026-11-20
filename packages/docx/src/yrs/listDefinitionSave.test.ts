@@ -9,7 +9,8 @@ import { documentToYrs } from './documentToYrs';
 import { saveEditorDocument } from './editorSave';
 import { createYrsSession, saveYrsDocx, yrsToDocument, type YrsSession } from './index';
 import {
-  numberingWithListDefinitions, savedListDefinitionIds, writeListDefinitionParts, type DocxSavedListDefinition,
+  numberingWithListDefinitions, resolvedRelationshipTarget, savedListDefinitionIds, writeListDefinitionParts,
+  type DocxSavedListDefinition,
 } from './listDefinitionSave';
 import { captureSessionSave, writeSessionSave } from './saveYrsDocx';
 
@@ -682,4 +683,28 @@ describe('a numbering part or main document named through a dot segment', () => 
       expect(elements(numbering, 'abstractNum')).toHaveLength(elements(LISTS_NUMBERING, 'abstractNum').length + 1);
     });
   }
+});
+
+describe('resolvedRelationshipTarget', () => {
+  const DOCUMENT_RELS = 'word/_rels/document.xml.rels';
+  const TABLE: Array<[owner: string, target: string, expected: string]> = [
+    [DOCUMENT_RELS, 'numbering.xml', 'word/numbering.xml'],
+    [DOCUMENT_RELS, './numbering.xml', 'word/numbering.xml'],
+    [DOCUMENT_RELS, '../numbering.xml', 'numbering.xml'],
+    [DOCUMENT_RELS, '../word/numbering.xml', 'word/numbering.xml'],
+    [DOCUMENT_RELS, '/word/numbering.xml', 'word/numbering.xml'],
+    [DOCUMENT_RELS, 'lists/parts/numbering.xml', 'word/lists/parts/numbering.xml'],
+    [DOCUMENT_RELS, '../../../numbering.xml', 'numbering.xml'],
+    [DOCUMENT_RELS, 'lists\\numbering.xml', 'word/lists/numbering.xml'],
+    [DOCUMENT_RELS, 'lists//./numbering.xml', 'word/lists/numbering.xml'],
+    ['word/document.xml', 'numbering.xml', 'word/numbering.xml'],
+    ['docs/main/_rels/document.xml.rels', '../numbering.xml', 'docs/numbering.xml'],
+    ['_rels/.rels', 'word/document.xml', 'word/document.xml'],
+    ['_rels/.rels', './word/document.xml', 'word/document.xml'],
+    ['_rels/.rels', '/word/document.xml', 'word/document.xml'],
+  ];
+
+  test('resolves each target against the part that owns the relationships', () => {
+    expect(TABLE.map(([owner, target]) => resolvedRelationshipTarget(owner, target))).toEqual(TABLE.map(([, , expected]) => expected));
+  });
 });
