@@ -111,21 +111,53 @@ After a successful npm release, `release.yml`'s `native-npm` job dispatches that
 workflow for formats whose root version is missing and waits for every run.
 `RELEASE_SKIP_NATIVE=true` disables this job.
 
-Trusted Publishing cannot create a package. Publish all 27 names by hand first,
-repeating these steps for `docx`, `pptx` and `xlsx`. Unless
-`RELEASE_SKIP_NATIVE=true`, `scripts/check-publish-targets.mjs --npm` fails the
-release before anything is published while one of these names is not on npm.
+Trusted Publishing cannot create a package: each of these names has to be on npm
+before the release that publishes it. Unless `RELEASE_SKIP_NATIVE` is `true`,
+`scripts/check-publish-targets.mjs --npm` fails the release before anything is
+published while one of them is not on npm.
 
-1. Run `publish-native.yml` with `dry_run=true` at the release commit. Download its
-   eight `<format>-native.*` artifacts into `bindings/<format>-native/artifacts`
-   and the `<format>-native-loader` artifact's `index.js` into
-   `bindings/<format>-native` in a clean checkout of that commit.
-2. Run `bun install --frozen-lockfile`, then `bunx napi artifacts --cwd bindings/<format>-native`.
-3. From `bindings/<format>-native`, run `npm pkg delete private`, then
-   `npm publish --access public --provenance=false`. Its `prepublishOnly` publishes the eight platform packages first.
-4. Configure all nine names' Trusted Publisher: owner `openooxml`, repository
+### A new format
+
+Publish all nine names of the format by hand first:
+
+1. Run `publish-native.yml` with `dry_run=true` at the release commit. In a clean
+   checkout of that commit, download its eight `<format>-native.*` artifacts into
+   `bindings/<format>-native/artifacts` and the whole `<format>-native-loader`
+   artifact, `index.js` and `dist/`, into `bindings/<format>-native`.
+2. Run `bun install --frozen-lockfile`, then `bunx napi artifacts --cwd bindings/<format>-native`,
+   then `bun scripts/rewrite-workspace-deps.ts` from the repository root.
+3. From `bindings/<format>-native`, run `npm pkg delete private`, then check
+   `npm pack --dry-run`: it must list `index.js`, `index.d.ts` and every `dist/`
+   file the manifest's `exports` names, and no dependency in `package.json` may
+   start with `workspace:`.
+4. Run `npm publish --access public --provenance=false`. Its `prepublishOnly` publishes the eight platform packages first.
+5. Throw the checkout away: steps 2 and 3 rewrote its manifests.
+6. Configure all nine names' Trusted Publisher: owner `openooxml`, repository
    `betteroffice`, workflow `publish-native.yml`, environment `npm-<format>`.
    Restrict each `npm-<format>` environment to the main branch.
+
+### A new platform for existing roots
+
+A new target adds one name per format. Reserve each before the release that
+first publishes it; that release publishes the real version.
+
+1. Outside the checkout, make one directory per name with a `README.md` and a
+   `package.json`: the name, version `0.0.0`, a description that says it is a
+   placeholder, and the `license`, `repository`, `publishConfig`, `os`, `cpu`
+   and `libc` of `bindings/<format>-native/npm/<platform>/package.json`. No
+   `main` and no `files`: there is no binary yet.
+2. Check that `npm pack --dry-run` lists only `package.json` and `README.md`.
+3. Run `npm publish --access public --provenance=false` in each directory.
+4. Configure each name's Trusted Publisher as in step 6 above.
+
+Not verified:
+
+- That `--provenance=false` overrides a `publishConfig` that asks for provenance.
+- What the native publish does when a platform version is already on npm, whether
+  it pins the roots' optional dependencies exactly, and under which tag it publishes.
+- That `latest` moves from `0.0.0` to the released version. The two font names
+  reserved this way show only that a first publish at `0.0.0` leaves `latest` there.
+- That every name the release publishes has its Trusted Publisher configured.
 
 ## Python bindings
 
