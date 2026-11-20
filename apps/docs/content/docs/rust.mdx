@@ -244,8 +244,8 @@ the document, then the faces you register with `register_font` or pass in
 embedded through default features: `fonts-latin` (4.6 MB), `fonts-intl` (2.2 MB)
 and `fonts-cjk` (26.7 MB). Turn off default features to leave them out:
 
-```toml
-betteroffice-docx = { version = "0.5", default-features = false, features = ["fonts-latin"] }
+```bash
+cargo add betteroffice-docx --no-default-features --features fonts-latin
 ```
 
 `open_with_options` reads the packs from a local directory or a provider you
