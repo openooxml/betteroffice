@@ -5,8 +5,10 @@ import { rezipPartsToArrayBuffer, toBytes } from '@betteroffice/docx/docx/rezip/
 import { preloadEditWasm } from '@betteroffice/docx/yrs/wasm/index';
 import { preloadOpcWasm } from '@betteroffice/docx/wasm/opc';
 import { residentWorkerFactory, type InProcessResidentWorker } from '@betteroffice/docx/yrs/__fixtures__/residentWorker';
-import { DocxSourceWorkerClient, createDocxCommandConnection, SessionFailure } from '@betteroffice/docx/worker';
+import { createYrsSession } from '@betteroffice/docx/yrs';
+import { DocxSourceWorkerClient, createDocxCommandConnection, createDocxWorkerEditSession, SessionFailure } from '@betteroffice/docx/worker';
 import type { DocxCommandCheckpoint, DocxCommandConnection } from '@betteroffice/docx/worker';
+import type { Document } from '@betteroffice/docx/types/document';
 import { usePeerlessEditSession, type UsePeerlessEditSessionOptions } from './usePeerlessEditSession';
 
 const TIMEOUT = 180_000;
@@ -30,10 +32,19 @@ afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
 });
 
-const documentBytes = () => new Uint8Array(rezipPartsToArrayBuffer(new Map([
-  ['[Content_Types].xml', toBytes('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')],
+const REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+const documentBytes = (text = 'Seed', header?: string) => new Uint8Array(rezipPartsToArrayBuffer(new Map<string, Uint8Array>([
+  ['[Content_Types].xml', toBytes('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>' +
+    (header === undefined ? '' : '<Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>') + '</Types>')],
   ['_rels/.rels', toBytes('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="r1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>')],
-  ['word/document.xml', toBytes('<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Seed</w:t></w:r></w:p><w:sectPr/></w:body></w:document>')],
+  ...(header === undefined ? [] : [
+    ['word/_rels/document.xml.rels', toBytes(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdH1" Type="${REL}/header" Target="header1.xml"/></Relationships>`)],
+    ['word/header1.xml', toBytes(`<w:hdr xmlns:w="${W}"><w:p><w:r><w:t>${header}</w:t></w:r></w:p></w:hdr>`)],
+  ] as [string, Uint8Array][]),
+  ['word/document.xml', toBytes(header === undefined
+    ? `<w:document xmlns:w="${W}"><w:body><w:p><w:r><w:t>${text}</w:t></w:r></w:p><w:sectPr/></w:body></w:document>`
+    : `<w:document xmlns:w="${W}" xmlns:r="${REL}"><w:body><w:p><w:r><w:t>${text}</w:t></w:r></w:p><w:sectPr><w:headerReference w:type="default" r:id="rIdH1"/></w:sectPr></w:body></w:document>`)],
 ])));
 
 const LAYOUT = JSON.stringify({ bodyStory: 'body', regions: { sections: [{ sectionId: 'main', properties: {} }] },
@@ -51,9 +62,19 @@ const INIT = {
   layoutRevision: 1, extras: JSON.stringify({ fontChains: { 'liberation sans|0|0': [0] } }), displayWindow: [0, 3] as [number, number],
 };
 
-function mount({ tamper }: { tamper?: (seed: Seed) => void } = {}) {
-  const source = documentBytes();
+interface MountOptions {
+  tamper?: (seed: Seed) => void;
+  source?: Uint8Array;
+  reopenSource?: Uint8Array;
+  collaboration?: boolean;
+  gateCheckpoint?: boolean;
+}
+
+function mount({ tamper, source = documentBytes(), reopenSource, collaboration, gateCheckpoint }: MountOptions = {}) {
   const workers: InProcessResidentWorker[] = [];
+  const clients: DocxSourceWorkerClient[] = [];
+  let openGate = () => {};
+  const gate = { requested: 0, opened: new Promise<void>((resolve) => { openGate = resolve; }) };
   const checkpoints: DocxCommandCheckpoint[] = [];
   const resumes: Resume[] = [];
   const reopenedText: string[] = [];
@@ -67,12 +88,14 @@ function mount({ tamper }: { tamper?: (seed: Seed) => void } = {}) {
     workers.push(worker);
     liveWorkers.push(worker);
     const client = new DocxSourceWorkerClient(worker);
+    clients.push(client);
     const checkpoint = resume?.checkpoint as DocxCommandCheckpoint | undefined;
     if (checkpoint && !checkpoint.recoveryState) {
       throw new SessionFailure('message', 'Cannot restore DOCX checkpoint command-local state and proposals');
     }
-    await client.openSource({ bytes: source.slice(), ...(checkpoint ? { state: checkpoint.state } : {}),
-      ...(resume?.seed ? { clientId: resume.seed.clientId, generation: resume.seed.generation } : {}) });
+    await client.openSource({ bytes: (resume && reopenSource ? reopenSource : source).slice(), ...(checkpoint ? { state: checkpoint.state } : {}),
+      ...(resume?.seed ? { clientId: resume.seed.clientId, generation: resume.seed.generation } : {}),
+      ...(collaboration ? { collaboration: { clientId: 9100 + workers.length } } : {}) });
     const initial = await client.commandInit({
       session: resume?.session ?? 'undo-recovery', incarnation: resume?.incarnation ?? 1, epoch: resume?.epoch ?? 1,
       ...(resume ? { version: checkpoint?.version ?? 0, throughSeq: checkpoint?.throughSeq ?? 0,
@@ -99,6 +122,10 @@ function mount({ tamper }: { tamper?: (seed: Seed) => void } = {}) {
     openConnection: () => openResident(),
     recovery: {
       checkpoint: async (resident) => {
+        if (gateCheckpoint) {
+          gate.requested += 1;
+          await gate.opened;
+        }
         const running = resident.client.call.checkpoint();
         pendingCheckpoint = running;
         const value = await running;
@@ -118,7 +145,22 @@ function mount({ tamper }: { tamper?: (seed: Seed) => void } = {}) {
   const view = renderHook(() => usePeerlessEditSession(options));
   const settle = () => act(async () => { await new Promise<void>((resolve) => setImmediate(resolve)); });
   const session = {
-    view, checkpoints, phases, errors, resumes, reopenedText, replayed,
+    view, checkpoints, phases, errors, resumes, reopenedText, replayed, settle,
+    gate: { get requested() { return gate.requested; }, open: () => openGate() },
+    worker() { return workers.at(-1)!; },
+    engine() { return workers.at(-1)!.sessions.at(-1)!; },
+    activePart() { return view.result.current.binding!.session.state.editState?.activePart ?? null; },
+    async save() {
+      await act(async () => { await clients.at(-1)!.save({ comments: [] }); });
+    },
+    async submitQueued(kind: string, payload: Record<string, unknown> = {}): Promise<{ status: Promise<string> }> {
+      let status!: Promise<string>;
+      await act(async () => {
+        status = (view.result.current.binding!.session.submit(kind, payload as never).ack as Promise<{ status: string }>)
+          .then((outcome) => outcome.status, (error: Error) => `rejected: ${error.message}`);
+      });
+      return { status };
+    },
     async ready() { await waitFor(() => expect(view.result.current.status).toBe('ready'), { timeout: 30_000 }); },
     async submit(kind: string, payload: Record<string, unknown> = {}) {
       let status = '';
@@ -386,5 +428,159 @@ test('one undo after a worker restart removes a measured amount of the typing be
 
   console.log(`G244-GROUPING live=${liveRemoved} recovered=${recoveredRemoved}`);
   expect(Number.isInteger(liveRemoved)).toBe(true);
-  expect(Number.isInteger(recoveredRemoved)).toBe(true);
+  expect(recoveredRemoved).toBe(0);
 }, TIMEOUT);
+
+test('a save between acknowledged edits does not leave the recovered document behind', async () => {
+  const session = mount();
+  await session.ready();
+  expect(await session.submit('paragraphBreak')).toBe('applied');
+  await session.save();
+  expect(await session.submit('insertText', { text: 'B' })).toBe('applied');
+  const expected = session.text();
+  const version = session.version();
+  expect(expected.split('|')).toHaveLength(2);
+  expect(expected).toContain('B');
+  await session.crash();
+  expect(session.checkpoints).toEqual([]);
+  session.expectRecovered(expected);
+  expect(session.version()).toBe(version);
+  expect(session.engine().hasPendingUpdate()).toBe(false);
+}, TIMEOUT);
+
+test('a save between two acknowledged edits does not leave the recovered document behind', async () => {
+  const session = mount();
+  await session.ready();
+  expect(await session.submit('insertText', { text: 'A' })).toBe('applied');
+  await session.save();
+  expect(await session.submit('insertText', { text: 'B' })).toBe('applied');
+  const expected = session.text();
+  const version = session.version();
+  await session.crash();
+  expect(session.checkpoints).toEqual([]);
+  session.expectRecovered(expected);
+  expect(session.version()).toBe(version);
+  expect(session.engine().hasPendingUpdate()).toBe(false);
+}, TIMEOUT);
+
+test('an undo still in flight at a crash before the first checkpoint is lost, and the text it undid is back', async () => {
+  const session = mount();
+  await session.ready();
+  const before = session.text();
+  expect(await session.submit('insertText', { text: 'A' })).toBe('applied');
+  const typed = session.text();
+  expect(typed).not.toBe(before);
+  const worker = session.worker();
+  worker.hold();
+  const undo = await session.submitQueued('undo');
+  await waitFor(() => expect(textOf(worker)).toBe(before), { timeout: 30_000 });
+  await session.crash();
+  expect(session.checkpoints).toEqual([]);
+  session.expectRecovered(typed);
+  void undo.status;
+}, TIMEOUT);
+
+test('with collaboration the logged entries keep their original commands', async () => {
+  const session = mount({ collaboration: true });
+  await session.ready();
+  await session.typeUntilApplied(128);
+  await session.checkpointTaken(1);
+  expect(await session.submit('insertText', { text: 'Z' })).toBe('applied');
+  const expected = session.text();
+  await session.crash();
+  expect(session.resumes[0]!.seed).toBeUndefined();
+  expect(session.replayed).toContain('insertText');
+  expect(session.replayed).not.toContain('applyUpdate');
+  session.expectRecovered(expected);
+}, TIMEOUT);
+
+test('a same-length different source is refused', async () => {
+  const session = mount({ reopenSource: documentBytes('Reed') });
+  await session.ready();
+  await session.type(1);
+  await session.crash();
+  expect(session.errors.map((error) => error.message)).toEqual(['Recovery base differs from the opened document']);
+  expect(session.phases).not.toContain('recovered');
+  expect(session.view.result.current.status).toBe('failed');
+  expect(session.resumes).toHaveLength(1);
+  expect(session.reopenedText).toEqual(['Reed']);
+  expect(session.replayed).toEqual([]);
+}, TIMEOUT);
+
+test('opening a header survives a worker restart before a checkpoint', async () => {
+  const session = mount({ source: documentBytes('Seed', 'Head') });
+  await session.ready();
+  const expectVersion = session.engine().proposalEngine.version();
+  expect(await session.submit('openPart', { kind: 'header', section: 'final', page: 0, expectVersion })).toBe('noop');
+  expect(session.activePart()?.kind).toBe('header');
+  const story = session.selection().focus.story;
+  expect(story).toMatch(/^hf:/);
+  await session.crash();
+  expect(session.checkpoints).toEqual([]);
+  session.expectRecovered('Seed');
+  expect(session.activePart()?.kind).toBe('header');
+  expect(session.selection().focus.story).toBe(story);
+}, TIMEOUT);
+
+test('typing queued across a checkpoint', async () => {
+  const session = mount({ gateCheckpoint: true });
+  await session.ready();
+  await session.typeUntilApplied(127);
+  expect(await session.submit('insertText', { text: 'P' })).toBe('applied');
+  await waitFor(() => expect(session.gate.requested).toBe(1), { timeout: 30_000 });
+  const queued = [await session.submitQueued('insertText', { text: 'Q' }), await session.submitQueued('insertText', { text: 'R' })];
+  session.gate.open();
+  let statuses: string[] = [];
+  await act(async () => { statuses = await Promise.all(queued.map((entry) => entry.status)); });
+  expect(statuses.every((status) => !status.startsWith('rejected') && status !== 'refused' && status !== 'cancelled')).toBe(true);
+  await session.checkpointTaken(1);
+  const expected = session.text();
+  const version = session.version();
+  expect(expected).toContain('PQR');
+  await session.crash();
+  session.expectRecovered(expected);
+  expect(session.version()).toBe(version);
+}, TIMEOUT);
+
+test('a long parsed-source session retains log bytes linearly', async () => {
+  const parser = await createYrsSession({ clientId: 9299 });
+  let document: Document;
+  try {
+    parser.openDocx(documentBytes(), true);
+    document = parser.materializeDocx()!;
+  } finally { parser.destroy(); }
+  const worker = start();
+  liveWorkers.push(worker);
+  const client = new DocxSourceWorkerClient(worker);
+  await client.openSource({ document });
+  const initial = await client.commandInit({ session: 'parsed-log', incarnation: 1, epoch: 1, ...INIT });
+  expect(initial.seed).toBeDefined();
+  const retained = new Map<number, number>();
+  const payloadBytes = (payload: unknown) => Object.values((payload ?? {}) as object).reduce((total: number, item: unknown) =>
+    total + (item instanceof ArrayBuffer || ArrayBuffer.isView(item) ? item.byteLength : 0), 0);
+  const session = createDocxWorkerEditSession<Document>({
+    source: document, connection: await createDocxCommandConnection(client, initial),
+    echo: { paint() {}, drop() {}, present() {} }, maxRecoveryAttempts: 1,
+    commandBytes: (envelope) => {
+      const bytes = payloadBytes(envelope.payload);
+      retained.set(envelope.seq, bytes);
+      return bytes;
+    },
+    recovery: { reopen: () => Promise.reject(new Error('Unexpected reopen')) },
+  });
+  const submit = async (kind: string, payload: Record<string, unknown>) =>
+    ((await session.submit(kind as never, payload as never).ack) as { status: string }).status;
+  const total = () => [...retained.values()].reduce((sum, bytes) => sum + bytes, 0);
+  const samples: number[] = [];
+  try {
+    for (let round = 1; round <= 300; round += 1) {
+      expect(await submit('insertText', { text: LETTERS[round % 26]! })).toBe('applied');
+      expect(await submit('insertText', { text: 'x' })).toBe('applied');
+      expect(await submit('deleteBackward', {})).toBe('applied');
+      if (round % 100 === 0) samples.push(total());
+    }
+  } finally { await session.dispose().catch(() => {}); }
+  console.log(`G244-PARSED-LOG bytes=${samples.join(',')}`);
+  const [at100, at200, at300] = samples as [number, number, number];
+  expect(at300 - at200).toBeLessThanOrEqual(1.5 * (at200 - at100));
+}, 600_000);
