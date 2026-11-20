@@ -9,7 +9,9 @@ import { createYrsSession } from '@betteroffice/docx/yrs';
 import { DocxSourceWorkerClient, createDocxCommandConnection, createDocxWorkerEditSession, SessionFailure } from '@betteroffice/docx/worker';
 import type { DocxCommandCheckpoint, DocxCommandConnection } from '@betteroffice/docx/worker';
 import type { Document } from '@betteroffice/docx/types/document';
+import type { DocxClipboardFragment } from '@betteroffice/docx/yrs';
 import type { CommandTicket } from '../../../../../../shared/office-session/commands/types';
+import { mergeFormattingFragment } from '../pasteOptions/clipboardFragmentTransforms';
 import { usePeerlessEditSession, type UsePeerlessEditSessionOptions } from './usePeerlessEditSession';
 
 const TIMEOUT = 180_000;
@@ -455,6 +457,30 @@ test('a command with a worker-issued position, no checkpoint, crash, recover: ap
   expect(session.replayed.length).toBeGreaterThan(0);
   expect(session.replayed.every((kind) => kind === 'applyUpdate')).toBe(true);
   session.expectRecovered(expected);
+  expect(session.version()).toBe(version);
+}, TIMEOUT);
+
+test('a paste and its chosen variant survive a worker restart before a checkpoint', async () => {
+  const session = mount();
+  await session.ready();
+  expect(await session.submit('insertText', { text: 'kept' })).toBe('applied');
+  const fragment: DocxClipboardFragment = { paragraphs: [{ text: 'Rich', runs: [{ text: 'Rich', format: { other: { bold: true } } }] }] };
+  const at = session.selection();
+  expect(await session.submit('pasteFragment', { selection: { anchor: at.anchor, focus: at.focus }, fragment })).toBe('applied');
+  const end = session.selection().focus;
+  expect(await session.submit('replacePasteFragment', {
+    selection: { anchor: { ...end }, focus: { ...end } }, fragment: mergeFormattingFragment(fragment), merge: true,
+  })).toBe('applied');
+  const expected = session.text();
+  expect(expected).toContain('keptRich');
+  const segments = session.engine().paragraphSegments('body', [0]);
+  const version = session.version();
+  await session.crash();
+  expect(session.checkpoints).toEqual([]);
+  expect(session.replayed.length).toBeGreaterThanOrEqual(3);
+  expect(session.replayed.every((kind) => kind === 'applyUpdate')).toBe(true);
+  session.expectRecovered(expected);
+  expect(session.engine().paragraphSegments('body', [0])).toEqual(segments);
   expect(session.version()).toBe(version);
 }, TIMEOUT);
 
