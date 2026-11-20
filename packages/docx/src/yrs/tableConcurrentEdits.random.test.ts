@@ -79,6 +79,7 @@ test('no live table names a hidden or missing cell story after any step of rando
     const cacheCounts = () => (selection as { cellLocationCacheCounts?: () => { built: number; reused: number } }).cellLocationCacheCounts?.() ?? { built: 0, reused: 0 };
     /** Local edits that applied and left the cell structure key as it was, per family and op. */
     const keptKeys: Record<string, Record<string, number>> = {};
+    let merged = 0;
     for (const family of ['valid', 'adversarial'] as const) {
     const totals = familyTotals[family] = { danglingSteps: 0, violations: 0, projectionThrows: 0, peerMissingSteps: 0, invalidSeeds: 0, peerSkipped: 0, reused: 0, built: 0 };
     const familyStart = cacheCounts();
@@ -170,7 +171,9 @@ test('no live table names a hidden or missing cell story after any step of rando
           const at = paragraphIn((paragraphs) => paragraphs.length > 1); if (!at) return undefined;
           const index = Math.min(at.index, at.paragraphs.length - 2);
           const [first, second] = [at.paragraphs[index]!, at.paragraphs[index + 1]!];
-          return engine.deleteRange({ story: at.story, start: { paraId: first.paraId, offset: first.text.length }, end: { paraId: second.paraId, offset: 0 } });
+          engine.deleteRange({ story: at.story, start: { paraId: first.paraId, offset: first.text.length }, end: { paraId: second.paraId, offset: 0 } });
+          // Across a block embed (a table, a block control) the delete leaves both paragraphs: not a merge.
+          return engine.paragraphs(at.story).length < at.paragraphs.length ? true : undefined;
         },
         insertRow: () => { const t = pick(tables()); const c = t && pick(t.cells); return c && engine.insertRow({ story: t.story, tableIndex: t.tableIndex, row: c.row, column: c.column }, next() < 0.5 ? 'above' : 'below'); },
         insertColumn: () => { const t = pick(tables()); const c = t && pick(t.cells); return c && engine.insertColumn({ story: t.story, tableIndex: t.tableIndex, row: c.row, column: c.column }, next() < 0.5 ? 'left' : 'right'); },
@@ -330,7 +333,7 @@ test('no live table names a hidden or missing cell story after any step of rando
         try {
           const result = steps[op]!();
           if (result === undefined || result === false) refused++; else {
-            applied++; ops[op] = (ops[op] ?? 0) + 1; history.push(`${step}:${remote ? 'remote:' : ''}${op}`);
+            applied++; ops[op] = (ops[op] ?? 0) + 1; if (op === 'mergeParagraphs') merged++; history.push(`${step}:${remote ? 'remote:' : ''}${op}`);
             if (keyBefore !== null && cellKey() === keyBefore) { const kept = keptKeys[family] ??= {}; kept[op] = (kept[op] ?? 0) + 1; }
           }
         } catch (error) {
@@ -364,6 +367,9 @@ test('no live table names a hidden or missing cell story after any step of rando
     // Text deleted or replaced inside one paragraph keeps the projected tables.
     expect(keptKeys.valid?.deleteText ?? 0).toBeGreaterThan(0);
     expect(keptKeys.valid?.replaceText ?? 0).toBeGreaterThan(0);
+    // A merge removes a paragraph mark, so it never keeps the key.
+    expect([keptKeys.valid?.mergeParagraphs ?? 0, keptKeys.adversarial?.mergeParagraphs ?? 0]).toEqual([0, 0]);
+    expect(merged).toBeGreaterThan(0);
     expect(familyTotals.valid!.peerMissingSteps).toBe(0);
     console.log(`PROJECTION-THROWS ${JSON.stringify(Object.fromEntries(Object.entries(familyTotals).map(([family, totals]) => [family, totals.projectionThrows])))}`);
     expect(familyTotals.valid!.projectionThrows).toBe(0);

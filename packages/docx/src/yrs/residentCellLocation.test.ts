@@ -149,6 +149,27 @@ for (const [name, edit] of [
   }, TIMEOUT);
 }
 
+test('a paragraph merge changes the key, and a delete across a table that merges nothing keeps it', async () => {
+  const arm = await openCommandEngine([], { bodyXml: paragraph('Before') + square([['A', 'B']]) + paragraph('Gap') + paragraph('Middle') + paragraph('After') });
+  const body = () => arm.engine.paragraphs('body').map((p) => p.text);
+  const end = (index: number) => { const p = arm.engine.paragraphs('body')[index]!; return { paraId: p.paraId, offset: p.text.length }; };
+  const start = (index: number) => ({ paraId: arm.engine.paragraphs('body')[index]!.paraId, offset: 0 });
+  resolveLiveCell(arm.engine, 'body:t0:r0c1');
+  const key = arm.engine.cellStructureKey!();
+  const vector = arm.engine.encodeStateVector();
+  arm.engine.deleteRange({ story: 'body', start: end(0), end: start(1) });
+  expect(body()).toEqual(['Before', 'Gap', 'Middle', 'After']);
+  expect(arm.engine.encodeStateVector()).toEqual(vector);
+  expect(arm.engine.cellStructureKey!()).toBe(key);
+  arm.engine.deleteRange({ story: 'body', start: end(2), end: start(3) });
+  expect(body()).toEqual(['Before', 'Gap', 'MiddleAfter']);
+  expect(arm.engine.cellStructureKey!()).not.toBe(key);
+  const built = cellLocationCacheCounts().built;
+  expect(resolveLiveCell(arm.engine, 'body:t0:r0c1')).toEqual({ story: 'body', tableIndex: 0, row: 0, column: 1 });
+  expect(cellLocationCacheCounts().built).toBe(built + 1);
+  expectProjectionEquivalent(arm.engine);
+}, TIMEOUT);
+
 test('a nested table a merge moved keeps the projection result', async () => {
   const inner = table(1, [cell(paragraph('Inner'))]);
   const arm = await openCommandEngine([], { bodyXml: table(2, [cell(paragraph('CellA')) + cell(inner + paragraph(''))]) });
