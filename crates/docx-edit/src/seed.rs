@@ -10534,6 +10534,44 @@ mod tests {
     }
 
     #[test]
+    fn a_kept_word_element_holding_content_is_one_unit_of_the_recorded_run_boundaries() {
+        let recorded = |raw: &str| {
+            let properties = paragraph_units(
+                &json!({"content":[
+                    {"type":"run","content":[{"type":"text","text":"Head "}]},
+                    {"type":"rawXml","xml":raw},
+                    {"type":"run","content":[{"type":"text","text":" Mid"}]},
+                    {"type":"run","content":[{"type":"break","breakType":"page"}]},
+                    {"type":"run","content":[{"type":"text","text":"End"}]}
+                ]}),
+                &StyleResolver::new(None),
+                None,
+                &BTreeMap::new(),
+            )
+            .ppr;
+            let boundaries = properties["_originalRunBoundaries"].as_array().unwrap();
+            let texts: Vec<_> = boundaries
+                .iter()
+                .map(|boundary| boundary["text"].as_str().unwrap().to_owned())
+                .collect();
+            let breaks: Vec<_> = boundaries
+                .iter()
+                .map(|boundary| boundary.get("breaks").cloned())
+                .collect();
+            (texts, breaks)
+        };
+        let page = Some(json!([{"offset": 0, "type": "page"}]));
+        let (texts, breaks) = recorded("<w:zzz><w:r><w:t>inner</w:t></w:r></w:zzz>");
+        assert_eq!(texts, ["Head ", "\u{fffc}", " Mid", "", "End"]);
+        assert_eq!(breaks, [None, None, None, page.clone(), None]);
+        for zero_units in [r#"<w:subDoc r:id="rId9"/>"#, r#"<x:foo xmlns:x="urn:x"/>"#] {
+            let (texts, breaks) = recorded(zero_units);
+            assert_eq!(texts, ["Head ", " Mid", "", "End"], "{zero_units}");
+            assert_eq!(breaks, [None, None, page.clone(), None], "{zero_units}");
+        }
+    }
+
+    #[test]
     fn numbering_indents_precede_styles_and_ignore_zero_first_line() {
         let style_data = json!({"styles":[{"styleId":"List","type":"paragraph","pPr":{"indentLeft":720,"indentFirstLine":180,"hangingIndent":false}}]});
         for styles in [

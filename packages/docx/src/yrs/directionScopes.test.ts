@@ -350,3 +350,24 @@ describe('a hyperlink whose text sits in a w:smartTag', () => {
     });
   }
 });
+
+describe('a bookmark starting between two runs of one w:dir', () => {
+  const inner = dir('rtl', `${t('مرحبا')}<w:bookmarkStart w:id="0" w:name="b"/>${t(' 123')}<w:bookmarkEnd w:id="0"/>`);
+
+  for (const [loader, load, spelling] of LOADERS) {
+    it(`${loader}: typing in the scope saves one w:dir holding both runs and the bookmark start, and the bookmark end after it`, async () => {
+      const { session, base } = await load(docx(inner));
+      const [match] = session.searchText('123');
+      session.insertText({ story: match!.story, paraId: match!.paraId, offset: match!.start + 1 }, 'X');
+      const xml = part(await savedAsTheEditorSaves(session, base));
+      expect(render(body(xml))).toBe('Head مرحبا 1X23 tailOther');
+      const wrapper = scoped(xml, 'dir', 'rtl');
+      expect([wrapper.wrappers, render(wrapper.raw)]).toEqual([1, 'مرحبا 1X23']);
+      expect([count(xml, /<w:bookmarkStart\b/g), count(xml, /<w:bookmarkEnd\b/g)]).toEqual([1, 1]);
+      expect(wrapper.raw).toMatch(/<w:bookmarkStart\b[^>]*\bw:name="b"/);
+      expect(wrapper.raw).not.toContain('<w:bookmarkEnd');
+      expect(xml).toMatch(/<\/w:dir><w:bookmarkEnd\b/);
+      expect(xml).toContain(other(spelling));
+    });
+  }
+});

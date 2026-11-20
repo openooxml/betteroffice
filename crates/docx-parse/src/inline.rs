@@ -3345,6 +3345,57 @@ mod tests {
     }
 
     #[test]
+    fn standalone_hyperlinks_read_runs_in_smart_tags_custom_xml_and_direction_elements() {
+        let limits = ParseLimits::default();
+        let budget = ParseBudget::new(&limits);
+        let run = "<w:r><w:t>link</w:t></w:r>";
+        for (wrapper, scope) in [
+            (
+                format!(r#"<w:smartTag w:element="place">{run}</w:smartTag>"#),
+                None,
+            ),
+            (
+                format!(r#"<w:customXml w:element="item">{run}</w:customXml>"#),
+                None,
+            ),
+            (
+                format!(r#"<w:dir w:val="rtl">{run}</w:dir>"#),
+                Some(DirectionScope {
+                    kind: DirectionKind::Dir,
+                    val: Some("rtl".to_owned()),
+                    id: 0,
+                    extra: Vec::new(),
+                }),
+            ),
+        ] {
+            let link = parse_hyperlink(
+                &root(&format!(
+                    r#"<w:hyperlink xmlns:w="w" w:anchor="target">{wrapper}</w:hyperlink>"#
+                )),
+                None,
+                None,
+                None,
+                None,
+                "word/document.xml",
+                &budget,
+            )
+            .unwrap();
+            let [InlineNode::Run(inner)] = link.children.as_slice() else {
+                panic!("{wrapper}: {:?}", link.children)
+            };
+            assert_eq!(
+                inner.content,
+                [RunContent::Text {
+                    text: "link".to_owned(),
+                    preserve_space: None,
+                }],
+                "{wrapper}"
+            );
+            assert_eq!(inner.direction_scopes, Vec::from_iter(scope), "{wrapper}");
+        }
+    }
+
+    #[test]
     fn complex_fields_are_nested_inert_and_unterminated_scopes_survive() {
         let paragraph = root(
             r#"<w:p><w:r><w:rPr><w:b/></w:rPr><w:fldChar w:fldCharType="begin" w:fldLock="1"/></w:r><w:r><w:instrText> IF </w:instrText></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> INCLUDETEXT "https://example.test" </w:instrText></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>cached only</w:t></w:r></w:p>"#,

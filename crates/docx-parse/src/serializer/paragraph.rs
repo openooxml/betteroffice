@@ -1998,6 +1998,102 @@ mod tests {
         assert_eq!(written(&format!("{a}<w:dir>{b}</w:dir>{c}")), expected);
     }
 
+    fn runs_spanning<'a>(xml: &'a str, first: &str, last: &str) -> &'a str {
+        let at = |run: &str| run.as_ptr() as usize - xml.as_ptr() as usize;
+        let first = run_holding(xml, first);
+        let last = run_holding(xml, last);
+        &xml[at(first)..at(last) + last.len()]
+    }
+
+    #[test]
+    fn a_bookmark_between_two_runs_of_one_scope_is_written_inside_it() {
+        let first = "<w:r><w:t>مرحبا</w:t></w:r>";
+        let second = r#"<w:r><w:t xml:space="preserve"> 123</w:t></w:r>"#;
+        let start = r#"<w:bookmarkStart w:id="0" w:name="b"/>"#;
+        let end = r#"<w:bookmarkEnd w:id="0"/>"#;
+        let unscoped = written(&format!("{first}{start}{second}{end}"));
+        let held = runs_spanning(&unscoped, "مرحبا", " 123");
+        assert!(held.contains(start), "{unscoped}");
+        let expected = wrapped(&unscoped, held, DIR.0, DIR.1);
+        let output = written(&rtl(&format!("{first}{start}{second}{end}")));
+        assert_eq!(output, expected);
+        assert_eq!(output.matches("<w:dir").count(), 1, "{output}");
+        assert!(output.contains(&format!("</w:dir>{end}")), "{output}");
+    }
+
+    #[test]
+    fn a_node_without_width_between_two_runs_of_one_scope_is_written_inside_it() {
+        let (a, b, c, d) = (text_run("A"), text_run("B"), text_run("C"), text_run("D"));
+        let close = r#"<w:commentRangeEnd w:id="1"/>"#;
+        for middle in [
+            r#"<w:commentRangeStart w:id="1"/>"#,
+            r#"<w:subDoc r:id="rId9"/>"#,
+            r#"<w:customXmlInsRangeStart w:id="7" w:author="Grace"/>"#,
+            r#"<w:moveFromRangeStart w:id="5" w:name="move"/>"#,
+            r#"<w:bookmarkStart w:id="3" w:name="mark"/><w:commentRangeStart w:id="1"/>"#,
+        ] {
+            let unscoped = written(&format!("{a}{b}{middle}{c}{close}{d}"));
+            let held = runs_spanning(&unscoped, "<w:t>B</w:t>", "<w:t>C</w:t>");
+            let expected = wrapped(&unscoped, held, DIR.0, DIR.1);
+            let output = written(&format!("{a}{}{close}{d}", rtl(&format!("{b}{middle}{c}"))));
+            assert_eq!(output, expected, "{middle}");
+            assert_eq!(output.matches("<w:dir").count(), 1, "{middle}: {output}");
+        }
+    }
+
+    #[test]
+    fn a_bookmark_inside_one_scope_stays_inside_it_in_hyperlinks_and_content_controls() {
+        let (a, b, c, d) = (text_run("A"), text_run("B"), text_run("C"), text_run("D"));
+        let bookmark = r#"<w:bookmarkStart w:id="3" w:name="mark"/>"#;
+        for (open, close) in [
+            (r#"<w:hyperlink w:anchor="target">"#, "</w:hyperlink>"),
+            (
+                r#"<w:sdt><w:sdtPr><w:id w:val="1"/></w:sdtPr><w:sdtContent>"#,
+                "</w:sdtContent></w:sdt>",
+            ),
+        ] {
+            let unscoped = written(&format!("{a}{open}{b}{bookmark}{c}{close}{d}"));
+            let held = runs_spanning(&unscoped, "<w:t>B</w:t>", "<w:t>C</w:t>");
+            assert!(held.contains(bookmark), "{unscoped}");
+            let expected = wrapped(&unscoped, held, DIR.0, DIR.1);
+            let output = written(&format!(
+                "{a}{open}{}{close}{d}",
+                rtl(&format!("{b}{bookmark}{c}"))
+            ));
+            assert_eq!(output, expected, "{open}");
+        }
+    }
+
+    #[test]
+    fn a_node_without_width_between_two_different_scopes_is_written_outside_both() {
+        let (a, b, c, d) = (text_run("A"), text_run("B"), text_run("C"), text_run("D"));
+        let bookmark = r#"<w:bookmarkStart w:id="3" w:name="mark"/>"#;
+        let ltr = |inner: &str| format!(r#"<w:dir w:val="ltr">{inner}</w:dir>"#);
+        let bdo = |inner: &str| format!(r#"<w:bdo w:val="rtl">{inner}</w:bdo>"#);
+        let unscoped = written(&format!("{a}{b}{bookmark}{c}{d}"));
+        let first = run_holding(&unscoped, "<w:t>B</w:t>").to_owned();
+        let second = run_holding(&unscoped, "<w:t>C</w:t>").to_owned();
+        let around_first = wrapped(&unscoped, &first, DIR.0, DIR.1);
+        for (source, expected) in [
+            (
+                format!("{a}{}{bookmark}{}{d}", rtl(&b), ltr(&c)),
+                wrapped(&around_first, &second, r#"<w:dir w:val="ltr">"#, "</w:dir>"),
+            ),
+            (
+                format!("{a}{}{bookmark}{}{d}", rtl(&b), bdo(&c)),
+                wrapped(&around_first, &second, BDO.0, BDO.1),
+            ),
+            (
+                format!("{a}{}{bookmark}{}{d}", rtl(&b), rtl(&c)),
+                wrapped(&around_first, &second, DIR.0, DIR.1),
+            ),
+        ] {
+            let output = written(&source);
+            assert_eq!(output, expected, "{source}");
+            assert!(output.contains(&format!("</w:dir>{bookmark}")), "{output}");
+        }
+    }
+
     #[test]
     fn kept_word_elements_inside_a_complex_field_stay_between_its_begin_and_end() {
         let (a, b, c) = (text_run("A"), text_run("B"), text_run("C"));

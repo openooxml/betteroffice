@@ -351,9 +351,13 @@ const PAGE_BREAK = '<w:r><w:br w:type="page"/></w:r>';
 const pages = (xml: string) => xml.replaceAll('<w:br w:type="page"/>', '<w:t>[page]</w:t>');
 const BREAK_RUN = /<w:r>(?:<w:rPr>(?:(?!<\/w:rPr>)[\s\S])*<\/w:rPr>)?<w:br w:type="page"\/><\/w:r>/;
 
-const BEFORE_A_BREAK: Array<[string, string]> = [['a w:subDoc', SUB_DOC], ['an unknown element holding a run', ZZZ]];
+/** A kept element, and the recorded run boundaries of 'Head ', it, ' Mid', the break and 'End': its unit is one of them when it seeds as an embed. */
+const BEFORE_A_BREAK: Array<[string, string, number]> = [
+  ['a w:subDoc', SUB_DOC, 4],
+  ['an unknown element holding a run', ZZZ, 5],
+];
 
-for (const [name, kept] of BEFORE_A_BREAK) {
+for (const [name, kept, boundaries] of BEFORE_A_BREAK) {
   describe(`${name} before a page break in the same paragraph`, () => {
     const inner = `${SOURCE.t('Head ')}${kept}${SOURCE.t(' Mid')}${PAGE_BREAK}${SOURCE.t('End')}`;
     const keptTrace = trace(paragraph(kept));
@@ -362,10 +366,19 @@ for (const [name, kept] of BEFORE_A_BREAK) {
       it(`${loader}: typing before both keeps the break in its run and in place`, async () => {
         const { session, base } = await load(docx(inner));
         const first = session.paragraphs('body')[0]!;
-        expect(first.properties._originalRunBoundaries).toHaveLength(4);
+        expect(first.properties._originalRunBoundaries).toHaveLength(boundaries);
         typeAt(0)(session, first.paraId);
         const saved = paragraphsOf(await savedAsTheEditorSaves(session, base));
         expect(saved.map(entry => trace(pages(entry)))).toEqual([`XHead ${keptTrace} Mid[page]End`, 'Other']);
+        expect(saved[0]).toMatch(BREAK_RUN);
+      });
+
+      it(`${loader}: typing at the end of the paragraph keeps the break in its run and in place`, async () => {
+        const { session, base } = await load(docx(inner));
+        const first = session.paragraphs('body')[0]!;
+        typeAt(session.paragraphSpans('body')[0]!.length)(session, first.paraId);
+        const saved = paragraphsOf(await savedAsTheEditorSaves(session, base));
+        expect(saved.map(entry => trace(pages(entry)))).toEqual([`Head ${keptTrace} Mid[page]EndX`, 'Other']);
         expect(saved[0]).toMatch(BREAK_RUN);
       });
     }
@@ -405,6 +418,23 @@ describe("a foreign element holding content between 'Hel' and 'lo'", () => {
       typeAt(0)(session, session.paragraphs('body')[0]!.paraId);
       const [first] = paragraphsOf(await savedAsTheEditorSaves(session, base));
       expect(first!.split('<x:foo').map(texts)).toEqual(['XHe', 'llo']);
+    });
+  }
+});
+
+describe("an empty foreign element and a w:subDoc side by side between 'Hel' and 'lo'", () => {
+  const inner = `${SOURCE.t('Hel')}<x:foo xmlns:x="urn:x"/>${SUB_DOC}${SOURCE.t('lo')}`;
+
+  for (const [loader, load] of LOADERS) {
+    it(`${loader}: typing at the start saves each once, the foreign one at its original offset and the w:subDoc at its anchor`, async () => {
+      const { session, base } = await load(docx(inner));
+      typeAt(0)(session, session.paragraphs('body')[0]!.paraId);
+      const [first] = paragraphsOf(await savedAsTheEditorSaves(session, base));
+      expect(texts(first!)).toBe('XHello');
+      expect([first!.split('<x:foo').length, first!.split('<w:subDoc').length]).toEqual([2, 2]);
+      expect(first).toContain(SUB_DOC);
+      expect(first!.split('<x:foo').map(texts)).toEqual(['XHe', 'llo']);
+      expect(first!.split('<w:subDoc').map(texts)).toEqual(['XHel', 'lo']);
     });
   }
 });
