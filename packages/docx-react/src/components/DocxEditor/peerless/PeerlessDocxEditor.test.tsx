@@ -3581,6 +3581,58 @@ test('while a restarted worker is still opening the Paste Options control is gon
   expect(editor.onError).not.toHaveBeenCalled();
 });
 
+test('after a worker restart a new paste offers Paste Options again and the choice is applied by the replacement worker', async () => {
+  const editor = await pasteOptionsSession();
+  await editor.paste();
+  await editor.offer();
+  await waitFor(() => expect(editor.first.checkpoints).toHaveLength(1));
+  const incarnation = binding!.viewStore.getSnapshot().identity.incarnation;
+  act(() => { editor.first.onerror?.({ message: 'Worker crashed' } as ErrorEvent); });
+  await waitFor(() => expect(workers).toHaveLength(2));
+  const reopened = workers[1]!;
+  await waitFor(() => {
+    const snapshot = binding!.viewStore.getSnapshot();
+    expect(snapshot.identity.incarnation).toBe(incarnation + 1);
+    expect(snapshot.geometry?.identity.incarnation).toBe(incarnation + 1);
+    expect(snapshot.version).toBe(128);
+    expect(snapshot.workerSelection?.focus.offset).toBe(PASTE_PREFIX.length + 4);
+  });
+  expect(editor.first.terminate).toHaveBeenCalled();
+  expect(binding!.viewStore.getRecovering?.()).toBe(false);
+  editor.showCaret();
+  await act(async () => { await new Promise<void>(resolve => setImmediate(resolve)); });
+  expect(editor.control() !== null).toBe(false);
+  expect(reopened.text).toBe(`${PASTE_PREFIX}Bold`);
+  const bold: yrs.DocxClipboardFragment = { paragraphs: [{ text: 'Bold', runs: [{ text: 'Bold', format: { other: { bold: true } } }] }] };
+  const html = clipboardHtml.clipboardFragmentHtml(bold);
+  act(() => { fireEvent.paste(editor.textarea, { clipboardData: { getData: (type: string) => type === 'text/html' ? html : 'Bold' } }); });
+  await waitFor(() => expect(reopened.text).toBe(`${PASTE_PREFIX}BoldBold`));
+  await waitFor(() => {
+    const snapshot = binding!.viewStore.getSnapshot();
+    expect(snapshot.identity.incarnation).toBe(incarnation + 1);
+    expect(snapshot.workerSelection?.focus.offset).toBe(PASTE_PREFIX.length + 8);
+    expect((snapshot.geometry?.coversThroughSeq ?? -1) >= snapshot.throughSeq).toBe(true);
+  });
+  await act(async () => { await new Promise<void>(resolve => setImmediate(resolve)); });
+  await editor.offer();
+  const replacements = () => requests.filter(request => request.type === 'edit' && request.command.kind === 'replacePasteFragment');
+  expect(replacements()).toHaveLength(0);
+  act(() => { fireEvent.click(editor.control()!.querySelector('button')!); });
+  const textOnly = () => Array.from(editor.control()?.querySelectorAll('[role="menuitemradio"]') ?? [])
+    .find((item) => item.textContent?.includes('Keep Text Only'));
+  await waitFor(() => expect(textOnly() !== undefined).toBe(true));
+  act(() => { fireEvent.click(textOnly()!); });
+  await waitFor(() => expect(reopened.text).toBe(`${PASTE_PREFIX}Bold<plain>Bold`));
+  const sent = replacements();
+  expect(sent).toHaveLength(1);
+  const command = sent[0]!.type === 'edit' ? sent[0]!.command : null;
+  expect(command?.incarnation).toBe(incarnation + 1);
+  expect((command?.payload as { plain?: boolean }).plain).toBe(true);
+  expect(editor.first.text).toBe(`${PASTE_PREFIX}Bold`);
+  expect(binding!.viewStore.getRecovering?.()).toBe(false);
+  expect(editor.onError).not.toHaveBeenCalled();
+});
+
 test('a recovered worker receives plugin reservations versioned to its own document', async () => {
   surface.mockRestore();
   realSurface = true;
