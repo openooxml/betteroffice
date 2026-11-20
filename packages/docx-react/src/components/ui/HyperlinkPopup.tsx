@@ -280,13 +280,10 @@ export function HyperlinkPopup({
   }, [data]);
 
   // Focus text input when entering edit mode
-  useEffect(() => {
-    if (mode === 'edit') {
-      requestAnimationFrame(() => {
-        textInputRef.current?.focus();
-        textInputRef.current?.select();
-      });
-    }
+  useLayoutEffect(() => {
+    if (mode !== 'edit') return;
+    textInputRef.current?.focus();
+    textInputRef.current?.select();
   }, [mode]);
 
   // Close on outside click
