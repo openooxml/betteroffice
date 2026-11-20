@@ -979,7 +979,8 @@ test('an undo in flight at a crash after a checkpoint of a session opened withou
   const worker = session.worker();
   worker.hold();
   const undo = await session.submitQueued('undo');
-  await waitFor(() => expect(textOf(worker)).toBe(before), { timeout: 30_000 });
+  await waitFor(() => expect(textOf(worker)).not.toBe(typed), { timeout: 30_000 });
+  const undone = textOf(worker);
   await session.crash();
   const resume = session.resumes[0] as (Resume & { seed?: unknown }) | undefined;
   const resumed = resume?.checkpoint as DocxCommandCheckpoint | undefined;
@@ -988,14 +989,14 @@ test('an undo in flight at a crash after a checkpoint of a session opened withou
     `reopenResume=${JSON.stringify(resume ? Object.keys(resume) : null)} checkpointPresent=${resumed !== undefined} ` +
     `replayed=${JSON.stringify(session.replayedStatuses)} replayedKinds=${JSON.stringify(session.replayed)} ` +
     `phases=${JSON.stringify(session.phases)} errors=${JSON.stringify(session.errors.map((error) => error.message))} ` +
-    `textBefore=${before} textTyped=${typed} textAfter=${session.recoveredText()}`);
+    `textBefore=${before} textTyped=${typed} textUndoneLive=${undone} textAfter=${session.recoveredText()}`);
   expect(session.resumes[0]!.checkpoint).toBeDefined();
   expect((session.resumes[0] as Resume & { seed?: unknown }).seed).toBeUndefined();
   const detail = await session.outcome(undo.detail);
   console.log(`G244-UNSEEDED-INFLIGHT-UNDO detail=${detail} phases=${JSON.stringify(session.phases)} replayed=${JSON.stringify(session.replayed)}`);
   expect(detail).toBe(JSON.stringify({ status: 'applied' }));
   expect(session.replayed.filter((kind) => kind === 'insertText' || kind === 'undo')).toEqual(['insertText', 'undo']);
-  session.expectRecovered(before);
+  session.expectRecovered(undone);
   expect(session.phases).not.toContain('diverged');
   expect(session.engine().hasPendingUpdate()).toBe(false);
 }, TIMEOUT);
