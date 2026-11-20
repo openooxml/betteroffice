@@ -204,7 +204,10 @@ export function usePeerlessEditSession(
             onRecovery(event) {
               if (controller.signal.aborted) return;
               if (event.phase !== 'diverged') recovering = event.phase === 'recovering';
-              if (event.phase === 'recovering') crash = event.failure;
+              if (event.phase === 'recovering') {
+                crash = event.failure;
+                viewStore.setRecovering?.(true);
+              }
               if (event.phase === 'recovered') {
                 viewport = { ...displayWindow, ...viewport };
                 void requestViewport();
