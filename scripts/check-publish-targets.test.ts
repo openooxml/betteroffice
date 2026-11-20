@@ -287,6 +287,29 @@ describe('native npm names the release publishes later', () => {
     });
   }, FULL_SCAN_BUDGET_MS);
 
+  test('a native name npm answers with 200 and a body stream that fails exists', async () => {
+    const failedBody = () => new Response(new ReadableStream({ start(controller) { controller.error(new Error('stream failed')); } }), { status: 200 });
+    expect(await failedBody().body!.cancel().then(() => 'cancelled', (error: Error) => error.message)).toBe('stream failed');
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      return decodeURIComponent(url.pathname.slice(1)) === platform.name
+        ? Promise.resolve(failedBody())
+        : realFetch(input, init);
+    }) as unknown as typeof fetch;
+    try {
+      const result = await settledNpmCheck(() => versions('1.2.3'), { ...native, workspaces: fontWorkspaces() });
+      expect(result).toEqual({
+        status: 0,
+        stdout: [`${fonts.name}@${fonts.version} is on npm.`, `${latin.name}@${latin.version} is on npm.`].join('\n'),
+        stderr: '',
+        error: undefined
+      });
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  }, FULL_SCAN_BUDGET_MS);
+
   test('a native name npm answers with a JSON null body exists', async () => {
     const result = await check('--npm', (name) =>
       name === platform.name ? Response.json(null) : versions('1.2.3'), {
