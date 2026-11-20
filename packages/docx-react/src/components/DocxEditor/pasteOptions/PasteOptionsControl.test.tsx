@@ -187,3 +187,14 @@ test('hiding the control by an outside pointer or a resize reports the hide each
   expect(screen.queryByRole('button', { name: 'Paste Options (Ctrl)' })).toBeNull();
   expect(hidden).toBe(2);
 });
+
+test('turning paste options off while the control shows reports the hide', () => {
+  let hidden = 0;
+  const onHide = () => { hidden += 1; };
+  const view = render(<Harness onHide={onHide} />);
+  fireEvent.click(screen.getByText('show'));
+  expect(screen.getByRole('button', { name: 'Paste Options (Ctrl)' })).toBeTruthy();
+  view.rerender(<Harness enabled={false} onHide={onHide} />);
+  expect(screen.queryByRole('button', { name: 'Paste Options (Ctrl)' })).toBeNull();
+  expect(hidden).toBe(1);
+});

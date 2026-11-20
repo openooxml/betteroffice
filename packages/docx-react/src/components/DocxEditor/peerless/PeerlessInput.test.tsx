@@ -1884,6 +1884,20 @@ for (const route of ['keyboard', 'context menu'] as const) {
       choices.dispose();
     }
   });
+
+  test(`keep text only after a ${route} paste of a table keeps the leading spaces of a cell`, async () => {
+    const choices = mountPasteMenu({ replace: 'refuse' });
+    const fragment: DocxClipboardFragment = { paragraphs: [{ tables: [cellTableFragment(['  new'])], text: '' }] };
+    try {
+      await choices.offer(fragment, '  new', route);
+      choices.openMenu();
+      choices.choose('Keep Text Only');
+      expect(choices.replaced.map(({ fragment: replacement, variant }) => ({ variant, text: replacement.paragraphs.map(({ text }) => text) })))
+        .toEqual([{ variant: 'plain', text: ['  new'] }]);
+    } finally {
+      choices.dispose();
+    }
+  });
 }
 
 test('a paste whose text-only form is over the worker paragraph limit offers keep source and merge but not keep text only', async () => {
@@ -1956,5 +1970,112 @@ test('a second choice made while the first replacement is pending leaves the fir
     expect(choices.checked()).toEqual(['Keep Text Only']);
   } finally {
     choices.dispose();
+  }
+});
+
+function markRecovering(snapshot: PeerlessViewSnapshot) {
+  (snapshot as PeerlessViewSnapshot & { recovering?: boolean }).recovering = true;
+}
+
+test('a worker being reopened removes the Paste Options control', async () => {
+  const paste = mountPasteOptions();
+  const end = { story: 'body', paraId: 'a', offset: 4 };
+  try {
+    act(() => paste.record(boldFragment()));
+    await paste.settle(0, 'applied', { anchor: end, focus: end });
+    paste.present(1);
+    await waitFor(() => expect(paste.control() !== null).toBe(true));
+    markRecovering(paste.input.snapshot);
+    paste.present(1);
+    await paste.idle();
+    expect(paste.control() !== null).toBe(false);
+  } finally {
+    paste.dispose();
+  }
+});
+
+test('a choice clicked while the worker is being reopened submits nothing', async () => {
+  const choices = mountPasteMenu({ replace: 'submit' });
+  try {
+    await choices.offer(boldFragment(), 'Bold', 'keyboard');
+    choices.openMenu();
+    markRecovering(choices.input.snapshot);
+    choices.choose('Keep Text Only');
+    expect(choices.input.submitted.filter((kind) => kind === 'replacePasteFragment')).toEqual([]);
+    expect(choices.replaced).toEqual([]);
+  } finally {
+    choices.dispose();
+  }
+});
+
+test('a paste made while the worker is being reopened offers no Paste Options', async () => {
+  const paste = mountPasteOptions();
+  const end = { story: 'body', paraId: 'a', offset: 4 };
+  try {
+    markRecovering(paste.input.snapshot);
+    pasteWith(paste.input, clipboardFragmentHtml(boldFragment()), 'Bold');
+    expect(paste.input.submitted).toEqual(['pasteFragment']);
+    await paste.settle(0, 'applied', { anchor: end, focus: end });
+    paste.present(1);
+    await paste.idle();
+    expect(paste.control() !== null).toBe(false);
+  } finally {
+    paste.dispose();
+  }
+});
+
+test('Ctrl tapped in one editor\'s Paste Options control opens only that editor\'s menu', async () => {
+  const first = mountPasteMenu({ replace: 'refuse' });
+  const second = mountPasteMenu({ replace: 'refuse' });
+  try {
+    await first.offer(boldFragment(), 'Bold', 'keyboard');
+    await second.offer(boldFragment(), 'Bold', 'keyboard');
+    const button = second.control()!.querySelector('button')!;
+    act(() => { button.focus(); });
+    fireEvent.keyDown(button, { key: 'Control' });
+    fireEvent.keyUp(button, { key: 'Control' });
+    expect(second.offered()).toEqual([...PASTE_OPTION_LABELS]);
+    expect(first.offered()).toEqual([]);
+  } finally {
+    second.dispose();
+    first.dispose();
+  }
+});
+
+test('a pointer press in another editor\'s Paste Options control hides this editor\'s control', async () => {
+  const first = mountPasteMenu({ replace: 'refuse' });
+  const second = mountPasteMenu({ replace: 'refuse' });
+  try {
+    await first.offer(boldFragment(), 'Bold', 'keyboard');
+    await second.offer(boldFragment(), 'Bold', 'keyboard');
+    fireEvent.pointerDown(second.control()!.querySelector('button')!);
+    expect(first.control() !== null).toBe(false);
+    expect(second.control() !== null).toBe(true);
+  } finally {
+    second.dispose();
+    first.dispose();
+  }
+});
+
+test('a paste whose control was not yet shown shows none after viewing mode is entered and left', async () => {
+  const paste = mountPasteOptions();
+  const end = { story: 'body', paraId: 'a', offset: 4 };
+  try {
+    pasteWith(paste.input, clipboardFragmentHtml(boldFragment()), 'Bold');
+    expect(paste.input.submitted).toEqual(['pasteFragment']);
+    paste.input.snapshot.version = 1;
+    await paste.settle(0, 'applied', { anchor: end, focus: end });
+    await paste.idle();
+    expect(paste.control() !== null).toBe(false);
+    act(() => { paste.input.admission.setReadOnly(true); });
+    await paste.settle(1, 'applied');
+    act(() => { paste.input.admission.setReadOnly(false); });
+    await paste.settle(2, 'applied');
+    expect(paste.input.submitted).toEqual(['pasteFragment', 'setReadOnly', 'setReadOnly']);
+    paste.present(1);
+    await paste.idle();
+    expect(paste.control() !== null).toBe(false);
+  } finally {
+    paste.dispose();
   }
 });

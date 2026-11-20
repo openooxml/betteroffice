@@ -3551,6 +3551,36 @@ test('a worker restart while Paste Options are offered removes the control witho
   expect(editor.onError).not.toHaveBeenCalled();
 });
 
+test('while a restarted worker is still opening the Paste Options control is gone and no choice reaches the new worker', async () => {
+  const editor = await pasteOptionsSession();
+  await editor.paste();
+  await editor.offer();
+  await waitFor(() => expect(editor.first.checkpoints).toHaveLength(1));
+  const incarnation = binding!.viewStore.getSnapshot().identity.incarnation;
+  holdInitial = true;
+  editor.first.outOfMemory = true;
+  let failed: Promise<unknown> = Promise.resolve();
+  act(() => { failed = binding!.session.submit('setReadOnly', { readOnly: false }).ack.catch(() => {}); });
+  await waitFor(() => expect(workers[1]?.pendingReplies.length ?? 0).toBeGreaterThan(0));
+  await act(async () => { await new Promise<void>(resolve => setImmediate(resolve)); });
+  expect(editor.control() !== null).toBe(false);
+  const reopened = workers[1]!;
+  await act(async () => {
+    for (const response of reopened.pendingReplies.splice(0)) reopened.onmessage?.({ data: response } as MessageEvent<DocxEngineWorkerResponse>);
+    await failed;
+  });
+  await waitFor(() => {
+    const snapshot = binding!.viewStore.getSnapshot();
+    expect(snapshot.identity.incarnation).toBe(incarnation + 1);
+    expect(snapshot.geometry?.identity.incarnation).toBe(incarnation + 1);
+    expect(snapshot.version).toBe(128);
+    expect(snapshot.workerSelection?.focus.offset).toBe(PASTE_PREFIX.length + 4);
+  });
+  expect(requests.filter(request => request.type === 'edit' && request.command.kind === 'replacePasteFragment')).toHaveLength(0);
+  expect(reopened.text).toBe(`${PASTE_PREFIX}Bold`);
+  expect(editor.onError).not.toHaveBeenCalled();
+});
+
 test('a recovered worker receives plugin reservations versioned to its own document', async () => {
   surface.mockRestore();
   realSurface = true;

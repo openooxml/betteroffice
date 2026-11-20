@@ -389,6 +389,48 @@ test('replacePasteFragment after a later edit is refused and keeps both edits', 
   }
 }, TIMEOUT);
 
+test('a choice made for a paste that directly follows typing leaves the typing in place', async () => {
+  const { client, engine } = await openTableWorker();
+  try {
+    let version = 0;
+    let seq = 0;
+    const paragraphs = engine.paragraphs('body');
+    const last = paragraphs[paragraphs.length - 1]!;
+    const lastSpan = engine.geometryReader.locateParagraph('body', last.paraId);
+    const split = engine.splitParagraph({ story: 'body', paraId: last.paraId, offset: lastSpan.end - lastSpan.start });
+    const base = { story: 'body', paraId: split.secondParaId, offset: 0 };
+    const paragraphText = () => engine.paragraphs('body').find((paragraph) => paragraph.paraId === split.secondParaId)?.text;
+    const typed = await client.edit({ ...intent(++seq, version, 'insertText', {
+      selection: { anchor: base, focus: base },
+      text: 'abc',
+    }), inputTime: 1000 });
+    expect(typed.outcomes[0]?.status).toBe('applied');
+    version = typed.version;
+    const at = typed.selection!.focus;
+    const pasted = await client.edit({ ...intent(++seq, version, 'pasteFragment', {
+      selection: { anchor: at, focus: at },
+      fragment: { paragraphs: [{ text: 'BAR', runs: [{ text: 'BAR', format: { other: { bold: true } } }] }] },
+    }), inputTime: 1100 });
+    expect(pasted.outcomes[0]?.status).toBe('applied');
+    version = pasted.version;
+    expect(paragraphText()).toBe('abcBAR');
+    const end = pasted.selection!.focus;
+    const replaced = await client.edit({ ...intent(++seq, version, 'replacePasteFragment', {
+      selection: { anchor: end, focus: end },
+      fragment: { paragraphs: [{ text: 'BAR' }] },
+      plain: true,
+    }), inputTime: 1200 });
+    expect(replaced.outcomes[0]?.status).toBe('applied');
+    version = replaced.version;
+    expect(paragraphText()).toBe('abcBAR');
+    const undone = await client.edit(intent(++seq, version, 'undo', {}));
+    expect(undone.outcomes[0]?.status).toBe('applied');
+    expect(paragraphText()).toBe('abc');
+  } finally {
+    client.destroy();
+  }
+}, TIMEOUT);
+
 test('merge formatting keeps the source marks and the destination run formatting', async () => {
   const { client, engine } = await openTableWorker();
   try {
@@ -718,6 +760,23 @@ test('paste refuses invalid payloads and read-only sessions without moving the v
     }));
     expect(refused.outcomes[0]).toMatchObject({ status: 'refused', reason: 'read-only' });
     expect(engine.encodeStateVector()).toEqual(before);
+  } finally {
+    client.destroy();
+  }
+}, TIMEOUT);
+
+test('a text-only fragment of 1000 paragraphs is accepted by the worker and one of 1001 is refused, as the offered options say', async () => {
+  const { client, engine } = await openTableWorker();
+  try {
+    const version = 0;
+    let seq = 0;
+    const at = { story: 'body', paraId: engine.paragraphs('body')[0]!.paraId, offset: 0 };
+    const lines = (count: number): DocxClipboardFragment => ({ paragraphs: Array.from({ length: count }, () => ({ text: 'x' })) });
+    const over = await client.edit(intent(++seq, version, 'pasteFragment', { selection: { anchor: at, focus: at }, fragment: lines(1001) }));
+    expect(over.outcomes[0]).toMatchObject({ status: 'refused', reason: 'invalid-payload' });
+    expect(over.version).toBe(version);
+    const within = await client.edit(intent(++seq, version, 'pasteFragment', { selection: { anchor: at, focus: at }, fragment: lines(1000) }));
+    expect(within.outcomes[0]?.status).toBe('applied');
   } finally {
     client.destroy();
   }

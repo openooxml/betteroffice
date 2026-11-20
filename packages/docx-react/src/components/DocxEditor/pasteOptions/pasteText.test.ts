@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import type { DocxClipboardFragment } from '@betteroffice/docx/yrs';
+import type { DocxClipboardFragment, DocxTableFragment } from '@betteroffice/docx/yrs';
 import { clipboardFragmentPlainText, pasteOptionsOffered, plainTextClipboardFragment } from './pasteText';
 
 const pasteOptionsApply = (fragment: DocxClipboardFragment): boolean => pasteOptionsOffered(fragment).length > 0;
@@ -41,4 +41,45 @@ test('a formatted paste that holds a picture offers no paste options and a plain
   const table = { paragraphs: [{ text: '', tables: [{ tblPr: {}, grid: [], rows: [{ trPr: {}, cells: [cell('a'), cell('b')] }] }] }] };
   expect(clipboardFragmentPlainText(table)).toBe('a\tb');
   expect(pasteOptionsApply(table)).toBe(true);
+});
+
+type CellContent = DocxTableFragment['rows'][number]['cells'][number]['content'];
+
+function rowTable(...cells: CellContent[]): DocxTableFragment {
+  return { tblPr: {}, grid: [], rows: [{ trPr: {}, cells: cells.map((content) => ({ tcPr: {}, content })) }] };
+}
+
+function cellText(content: CellContent): string {
+  return clipboardFragmentPlainText({ paragraphs: [{ text: '', tables: [rowTable(content)] }] });
+}
+
+test('keep text only keeps the leading spaces of a table cell', () => {
+  expect(cellText([{ kind: 'text', text: '  indented' }, { kind: 'pilcrow' }])).toBe('  indented');
+});
+
+test('keep text only keeps a tab that starts a table cell', () => {
+  expect(cellText([{ kind: 'tab' }, { kind: 'text', text: 'tabbed' }, { kind: 'pilcrow' }])).toBe('\ttabbed');
+});
+
+test('keep text only puts a table nested in a cell on its own lines between the text before and after it', () => {
+  const nested = rowTable([{ kind: 'text', text: 'a' }, { kind: 'pilcrow' }], [{ kind: 'text', text: 'b' }, { kind: 'pilcrow' }]);
+  expect(cellText([{ kind: 'text', text: 'pre' }, { kind: 'table', table: nested }, { kind: 'text', text: 'post' }, { kind: 'pilcrow' }]))
+    .toBe('pre\na\tb\npost');
+});
+
+test('keep text only joins the paragraphs of a table cell with one space and adds none at the end', () => {
+  expect(cellText([{ kind: 'text', text: 'first' }, { kind: 'pilcrow' }, { kind: 'text', text: 'second' }, { kind: 'pilcrow' }]))
+    .toBe('first second');
+});
+
+test('keep text only keeps a space typed at the end of a table cell', () => {
+  expect(cellText([{ kind: 'text', text: 'end ' }, { kind: 'pilcrow' }])).toBe('end ');
+});
+
+test('keep text only is offered at 1000 lines of text and not at 1001', () => {
+  const lines = (count: number): DocxClipboardFragment => ({
+    paragraphs: Array.from({ length: count }, () => ({ text: 'x', runs: [{ text: 'x', format: { other: { bold: true } } }] })),
+  });
+  expect(pasteOptionsOffered(lines(1000))).toEqual(['keep-source', 'merge', 'text-only']);
+  expect(pasteOptionsOffered(lines(1001))).toEqual(['keep-source', 'merge']);
 });
