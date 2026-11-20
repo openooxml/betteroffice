@@ -293,7 +293,8 @@ describe('CI runner routing', () => {
           expect(run, name).toMatch(/for attempt in 1 2 3\b/);
           expect(run, name).toMatch(/\bif bunx playwright install-deps chromium; then exit 0; fi\b/);
           expect(run, name).not.toMatch(/\btimeout \d+ bunx playwright install-deps\b/);
-          expect(run, name).toMatch(/Acquire::Retries "1"; Acquire::http::Timeout "20"; Acquire::https::Timeout "20"; DPkg::Lock::Timeout "60";/);
+          expect(run, name).toMatch(/Acquire::Retries "1"; Acquire::http::Timeout "20"; Acquire::https::Timeout "20"; DPkg::Lock::Timeout "60"; Acquire::AllowReleaseInfoChange::Label "true";' \| sudo tee \/etc\/apt\/apt\.conf\.d\/80-ci-retries\b/);
+          expect(run, name).not.toMatch(/AllowReleaseInfoChange(?!::Label "true";)|allow-releaseinfo-change/);
         }
       }
     }

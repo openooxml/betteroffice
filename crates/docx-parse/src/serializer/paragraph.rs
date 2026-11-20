@@ -6,7 +6,7 @@ use crate::formatting::{
 };
 use crate::inline::{
     BookmarkEnd, BookmarkStart, ComplexField, Hyperlink, InlineNode, InlineSdt, MathEquation, Run,
-    RunContent, SdtProperties, SimpleField, field_runs,
+    RunContent, SdtProperties, SimpleField, field_run_digest, field_runs,
 };
 use crate::paragraph::{
     CommentRange, Paragraph, ParagraphContent, ParagraphPropertyChange, RangeEnd, RangeStart,
@@ -592,6 +592,14 @@ fn serialize_complex_field(
     field: &ComplexField,
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
+    if let Some(source) = field.source_run_xml.as_deref()
+        && !context.deletion
+        && !context.in_revision
+        && field.source_run_digest.as_deref() == Some(field_run_digest(field).as_str())
+    {
+        validate_replayed_fragment(source)?;
+        return Ok(source.to_owned());
+    }
     let formatting = field
         .field_result
         .first()
