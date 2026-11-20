@@ -157,6 +157,46 @@ test('worker: a created list a tracked change still names is not handed to anoth
   expect(key).toBeDefined();
 }, TIMEOUT);
 
+test('worker: bullets reusing the created list of a deleted paragraph are undone first, and the next undo brings that paragraph back alone on its list', async () => {
+  const target = 'Target paragraph QA';
+  const arm = await openCommandEngine(undefined, {
+    bytes: listDocument('C', { isolated: true, after: ['Middle paragraph QA', target] }), clientId: ++clientId,
+  });
+  const paragraphs = () => arm.engine.paragraphs('body');
+  const paragraph = (text: string) => paragraphs().find(entry => entry.text === text)!;
+  const naming = (key: string | undefined) => paragraphs().filter(entry => createdListKey(entry.properties) === key).map(entry => entry.text);
+  const definitions = () => (JSON.parse(arm.native.created_list_definitions_json()) as Array<{ key: string }>).map(definition => definition.key);
+  const toggle = (text: string) => expect(execute(arm, command(arm, 'toggleList', {
+    selection: selection(paragraph(text).paraId, 0), kind: 'bullet',
+  }))).toMatchObject({ status: 'applied' });
+  const undo = () => expect(execute(arm, command(arm, 'undo', {}))).toMatchObject({ status: 'applied' });
+  toggle(PLAIN);
+  const key = createdListKey(paragraph(PLAIN).properties);
+  expect(execute(arm, command(arm, 'deleteBackward', { selection: {
+    anchor: { story: 'body', paraId: paragraph(GAP).paraId, offset: GAP.length },
+    focus: { story: 'body', paraId: paragraph(PLAIN).paraId, offset: PLAIN.length },
+  } }))).toMatchObject({ status: 'applied' });
+  const deleted = {
+    texts: paragraphs().map(entry => entry.text),
+    lists: paragraphs().filter(entry => entry.properties.listDef != null).length,
+    definitions: definitions(),
+  };
+  toggle(target);
+  const reused = { naming: naming(key), definitions: definitions() };
+  undo();
+  const undone = paragraph(target).properties;
+  undo();
+  expect(naming(key)).toEqual([PLAIN]);
+  expect(createdListKey(paragraph(target).properties)).toBeUndefined();
+  expect(paragraph(target).properties.numPr ?? null).toBeNull();
+  expect(definitions()).toEqual([key]);
+  expect(createdListKey(undone)).toBeUndefined();
+  expect(undone.numPr ?? null).toBeNull();
+  expect(reused).toEqual({ naming: [target], definitions: [key] });
+  expect(deleted).toEqual({ texts: ['Opening paragraph QA', GAP, 'Middle paragraph QA', target], lists: 0, definitions: [key] });
+  expect(key).toBeDefined();
+}, TIMEOUT);
+
 test('the attributes that take a paragraph off its list are frozen and clear its marker formatting', () => {
   expect(Object.isFrozen(LIST_OFF_ATTRS)).toBe(true);
   expect(Object.isFrozen(LIST_OFF_ATTRS.other)).toBe(true);
