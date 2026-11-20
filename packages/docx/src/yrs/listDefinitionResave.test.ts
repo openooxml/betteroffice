@@ -506,11 +506,8 @@ describe('a created list an undo brings back after another created list was save
     created.addUndoBoundary();
     const s2 = (await saveYrsDocx(created, { updateModifiedDate: false })).bytes;
     const undone = created.undo();
-    const s3 = (await saveYrsDocx(created, {
-      updateModifiedDate: false,
-      commentBaseline: { bytes: s2.slice(), comments: created.listComments() },
-      commentDeletion: true,
-    })).bytes;
+    const projected = yrsToDocument(created, { ...created.materializeDocx()!, originalBuffer: s2.slice().buffer });
+    const s3 = new Uint8Array(await saveEditorDocument(created, projected, []));
     expect(savedNumId(s3, 'Alpha')).toBe(k);
     expect(savedNumId(s3, 'Beta')).toBe(savedNumId(s2, 'Beta'));
     expect(undone).toBe(true);
@@ -531,11 +528,10 @@ describe('ids an earlier save gave that the package now uses for another list', 
       '</w:numbering>',
       `<w:num w:numId="${k}"><w:abstractNumId w:val="0"/></w:num></w:numbering>`
     ));
-    const over = async (bytes: Uint8Array) => (await saveYrsDocx(created, {
-      updateModifiedDate: false,
-      commentBaseline: { bytes: bytes.slice(), comments: created.listComments() },
-      commentDeletion: true,
-    })).bytes;
+    const over = async (bytes: Uint8Array) => {
+      const projected = yrsToDocument(created, { ...created.materializeDocx()!, originalBuffer: bytes.slice().buffer });
+      return new Uint8Array(await saveEditorDocument(created, projected, []));
+    };
     const s2 = await over(other);
     const s3 = await over(s2);
     const moved = savedNumId(s2, 'Alpha');
@@ -578,13 +574,13 @@ describe('a tracked change of a created list read back from the saved file', () 
     const reopened = await session();
     reopened.seedFromDocx(bytes.slice());
     const revision = reopened.listRevisions().find(entry => entry.kind === 'pPrChange');
-    if (revision !== undefined) reopened.rejectChange({ revisionId: revision.revisionId });
+    expect(revision).toBeDefined();
+    reopened.rejectChange({ revisionId: revision!.revisionId });
     const properties = reopened.paragraphs('body').find(entry => entry.text === 'Alpha')?.properties as Record<string, unknown> | undefined;
     const restored = properties?.numPr as Record<string, unknown> | undefined;
     expect(earlier).toBeGreaterThan(3);
     expect(savedDefinition(bytes, earlier) ?? '').toContain('<w:name w:val="betteroffice-list:');
     expect(savedFormat(bytes, earlier)).toBe('decimal');
-    expect(revision).toBeDefined();
     expect(Number(restored?.numId)).toBe(earlier!);
   });
 });
