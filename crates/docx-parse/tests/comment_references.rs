@@ -461,3 +461,194 @@ fn a_source_paragraph_save_leaves_references_outside_its_paragraphs_as_the_sourc
     assert!(xml.contains("<w:t>World</w:t></w:r><w:r><w:commentReference w:id=\"7\"/></w:r>"));
     assert!(xml.contains("Tail edited"));
 }
+
+const HEADED_NAMESPACES: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" mc:Ignorable="w14""#;
+const HEADED_TYPES: &str = r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/><Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/></Types>"#;
+const HEADED_ROOT_RELATIONSHIPS: &str = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#;
+const HEADED_DOCUMENT_RELATIONSHIPS: &str = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdHeader" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/><Relationship Id="rIdComments" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="comments.xml"/></Relationships>"#;
+const HEADED_COMMENTS: &str = r#"<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:comment w:id="7" w:author="Grace" w:date="2025-03-04T05:06:07Z" w:initials="G"><w:p><w:r><w:t>Note</w:t></w:r></w:p></w:comment></w:comments>"#;
+
+/// A package holding comment 7 and a default header, with `body` as its body.
+fn headed_package(body: &str) -> Vec<u8> {
+    let document = format!(
+        "<w:document {HEADED_NAMESPACES}><w:body>{body}<w:sectPr><w:headerReference w:type=\"default\" r:id=\"rIdHeader\"/></w:sectPr></w:body></w:document>"
+    );
+    let header = format!(
+        "<w:hdr {HEADED_NAMESPACES}><w:p w14:paraId=\"00000003\"><w:r><w:t>Header words</w:t></w:r></w:p></w:hdr>"
+    );
+    ooxml_opc::rezip_parts(&[
+        (
+            "[Content_Types].xml".to_owned(),
+            HEADED_TYPES.as_bytes().to_vec(),
+        ),
+        (
+            "_rels/.rels".to_owned(),
+            HEADED_ROOT_RELATIONSHIPS.as_bytes().to_vec(),
+        ),
+        (
+            "word/_rels/document.xml.rels".to_owned(),
+            HEADED_DOCUMENT_RELATIONSHIPS.as_bytes().to_vec(),
+        ),
+        ("word/document.xml".to_owned(), document.into_bytes()),
+        ("word/header1.xml".to_owned(), header.into_bytes()),
+        (
+            "word/comments.xml".to_owned(),
+            HEADED_COMMENTS.as_bytes().to_vec(),
+        ),
+    ])
+    .unwrap()
+}
+
+/// A request saving `original` as its parsed model changed by `edit`, the body spliced from its
+/// source paragraphs 0 and 1 with paragraph 1 changed.
+fn spliced_request(original: &[u8], edit: impl FnOnce(&mut Value)) -> S13SaveRequest {
+    let parsed = parse_docx_s9_wire(
+        original,
+        S9ParseOptions {
+            source_ordinals: true,
+            ..S9ParseOptions::default()
+        },
+    )
+    .unwrap()
+    .document
+    .package;
+    let mut request = save_request(original);
+    request.document.content = parsed.document.content;
+    request.document.sections = None;
+    request.header_entries = parsed.header_entries.unwrap_or_default();
+    let mut value = serde_json::to_value(&request).unwrap();
+    edit(&mut value);
+    let digest = format!("{:x}", Sha256::digest(document_xml(original).as_bytes()));
+    value["paragraphIds"] = json!({ "splicedParts": [{
+        "part": "word/document.xml", "sha256": digest, "paragraphs": [0, 1], "changed": [1]
+    }] });
+    serde_json::from_value(value).unwrap()
+}
+
+/// `paragraph` without its comment range markers and its comment reference runs.
+fn without_comment_markers(paragraph: &mut Value) {
+    let marker = |item: &Value| {
+        matches!(
+            item["type"].as_str(),
+            Some("commentRangeStart" | "commentRangeEnd")
+        ) || item["content"].as_array().is_some_and(|content| {
+            content
+                .iter()
+                .any(|entry| entry["type"] == "commentReference")
+        })
+    };
+    paragraph["content"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|item| !marker(item));
+}
+
+/// `value` with each text `from` it holds written as `to`.
+fn replace_text(value: &mut Value, from: &str, to: &str) {
+    match value {
+        Value::Object(map) => {
+            if map.get("type").and_then(Value::as_str) == Some("text")
+                && map.get("text").and_then(Value::as_str) == Some(from)
+            {
+                map.insert("text".to_owned(), json!(to));
+            }
+            for child in map.values_mut() {
+                replace_text(child, from, to);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                replace_text(item, from, to);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[test]
+fn a_comment_moved_to_the_header_leaves_no_marker_in_the_body_paragraph_it_left() {
+    let original = headed_package(concat!(
+        r#"<w:p w14:paraId="00000001"><w:commentRangeStart w:id="7"/><w:r><w:t>Old anchor</w:t></w:r><w:commentRangeEnd w:id="7"/><w:r><w:commentReference w:id="7"/></w:r></w:p>"#,
+        r#"<w:p w14:paraId="00000002"><w:r><w:t>Other</w:t></w:r></w:p>"#,
+    ));
+    let request = spliced_request(&original, |value| {
+        let body = &mut value["document"]["content"];
+        without_comment_markers(&mut body[0]);
+        replace_text(&mut body[1], "Other", "OtherX");
+        value["headerEntries"][0][1]["content"][0]["content"] = json!([
+            { "type": "commentRangeStart", "id": 7 }, text_run("Header words"),
+            { "type": "commentRangeEnd", "id": 7 }, reference(7)
+        ]);
+    });
+    let saved = write_docx_s13(request, &original).unwrap();
+    for name in ["commentRangeStart", "commentRangeEnd", "commentReference"] {
+        let name = format!("w:{name}");
+        let body = element_ids(&saved, "word/document.xml", name.as_bytes());
+        assert_eq!(body, Vec::<String>::new(), "{name}");
+        let header = element_ids(&saved, "word/header1.xml", name.as_bytes());
+        assert_eq!(header, ["7"], "{name}");
+    }
+    assert!(document_xml(&saved).contains("OtherX"));
+}
+
+#[test]
+fn a_comment_moved_to_the_header_without_its_reference_leaves_no_marker_in_the_body_paragraph() {
+    let original = headed_package(concat!(
+        r#"<w:p w14:paraId="00000001"><w:commentRangeStart w:id="7"/><w:r><w:t>Old anchor</w:t></w:r><w:commentRangeEnd w:id="7"/><w:r><w:commentReference w:id="7"/></w:r></w:p>"#,
+        r#"<w:p w14:paraId="00000002"><w:r><w:t>Other</w:t></w:r></w:p>"#,
+    ));
+    let request = spliced_request(&original, |value| {
+        let body = &mut value["document"]["content"];
+        without_comment_markers(&mut body[0]);
+        replace_text(&mut body[1], "Other", "OtherX");
+        value["headerEntries"][0][1]["content"][0]["content"] = json!([
+            { "type": "commentRangeStart", "id": 7 }, text_run("Header words"),
+            { "type": "commentRangeEnd", "id": 7 }
+        ]);
+    });
+    let saved = write_docx_s13(request, &original).unwrap();
+    for name in ["commentRangeStart", "commentRangeEnd", "commentReference"] {
+        let name = format!("w:{name}");
+        let body = element_ids(&saved, "word/document.xml", name.as_bytes());
+        assert_eq!(body, Vec::<String>::new(), "{name}");
+        let header = element_ids(&saved, "word/header1.xml", name.as_bytes());
+        assert_eq!(header, ["7"], "{name}");
+    }
+    assert!(document_xml(&saved).contains("OtherX"));
+}
+
+#[test]
+fn a_footnote_saved_from_its_verbatim_xml_leaves_a_range_the_model_did_not_load_in_place() {
+    let first = r#"<w:p w14:paraId="00000001"><w:r><w:t xml:space="preserve">Head </w:t></w:r><w:ins w:id="41" w:author="G" w:date="2025-03-04T05:06:07Z"><w:commentRangeStart w:id="7"/><w:r><w:t>inserted</w:t></w:r><w:commentRangeEnd w:id="7"/></w:ins><w:r><w:commentReference w:id="7"/></w:r></w:p>"#;
+    let other = r#"<w:p w14:paraId="00000002"><w:r><w:t>Other</w:t></w:r></w:p>"#;
+    let original = headed_package(&format!("{first}{other}"));
+    let request = spliced_request(&original, |value| {
+        replace_text(&mut value["document"]["content"][1], "Other", "OtherX");
+        value["footnotes"] = json!([{
+            "type": "footnote", "id": 1, "noteType": "normal",
+            "content": [{ "type": "paragraph", "content": [
+                { "type": "commentRangeStart", "id": 7 }, text_run("Note"),
+                { "type": "commentRangeEnd", "id": 7 }
+            ] }],
+            "verbatimXml": r#"<w:footnote w:id="1"><w:p><w:r><w:t>Note</w:t></w:r></w:p></w:footnote>"#
+        }]);
+    });
+    let saved = write_docx_s13(request, &original).unwrap();
+    let xml = document_xml(&saved);
+    assert!(xml.contains(first), "{xml}");
+    assert!(xml.contains("OtherX"), "{xml}");
+}
+
+#[test]
+fn a_comment_range_the_model_did_not_load_stays_in_its_paragraph_beside_an_edit_in_another() {
+    let first = r#"<w:p w14:paraId="00000001"><w:r><w:t xml:space="preserve">Head </w:t></w:r><w:ins w:id="41" w:author="G" w:date="2025-03-04T05:06:07Z"><w:commentRangeStart w:id="7"/><w:r><w:t>inserted</w:t></w:r><w:commentRangeEnd w:id="7"/></w:ins><w:r><w:commentReference w:id="7"/></w:r></w:p>"#;
+    let other = r#"<w:p w14:paraId="00000002"><w:r><w:t>Other</w:t></w:r></w:p>"#;
+    let original = headed_package(&format!("{first}{other}"));
+    let request = spliced_request(&original, |value| {
+        replace_text(&mut value["document"]["content"][1], "Other", "OtherX");
+    });
+    let saved = write_docx_s13(request, &original).unwrap();
+    let xml = document_xml(&saved);
+    assert!(xml.contains(first), "{xml}");
+    assert!(xml.contains("OtherX"), "{xml}");
+}
