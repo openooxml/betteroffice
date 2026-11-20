@@ -290,34 +290,39 @@ pub fn serialize_paragraph_content(
     content: &ParagraphContent,
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
-    match content {
-        ParagraphContent::Inline(node) => serialize_inline_node(node, context),
-        ParagraphContent::Tracked(change) => serialize_tracked_change(change, context),
-        ParagraphContent::RangeStart(marker) => serialize_range_start(marker),
-        ParagraphContent::RangeEnd(marker) => serialize_range_end(marker),
-        ParagraphContent::CommentRange(marker) => serialize_comment_range(marker),
-    }
+    let marker = match content {
+        ParagraphContent::Inline(node) => return serialize_inline_node(node, context),
+        ParagraphContent::Tracked(change) => return serialize_tracked_change(change, context),
+        ParagraphContent::RangeStart(marker) => serialize_range_start(marker)?,
+        ParagraphContent::RangeEnd(marker) => serialize_range_end(marker)?,
+        ParagraphContent::CommentRange(marker) => serialize_comment_range(marker)?,
+    };
+    Ok(prefixed(context.direction.unscoped(), marker))
 }
 
 pub(crate) fn serialize_inline_node(
     node: &InlineNode,
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
-    match node {
-        InlineNode::Run(run) => serialize_context_run(run, context),
-        InlineNode::Hyperlink(hyperlink) => serialize_hyperlink(hyperlink, context),
-        InlineNode::BookmarkStart(bookmark) => Ok(serialize_bookmark_start(bookmark)),
-        InlineNode::BookmarkEnd(bookmark) => Ok(serialize_bookmark_end(bookmark)),
-        InlineNode::SimpleField(field) => serialize_simple_field(field, context),
-        InlineNode::ComplexField(field) => serialize_complex_field(field, context),
-        InlineNode::InlineSdt(sdt) => serialize_inline_sdt(sdt, context),
-        InlineNode::Math(math) => serialize_math(math),
-        InlineNode::Tracked(change) => serialize_tracked_change(change, context),
+    let unscoped = match node {
+        InlineNode::Run(run) => return serialize_context_run(run, context),
+        InlineNode::Hyperlink(hyperlink) => return serialize_hyperlink(hyperlink, context),
+        InlineNode::SimpleField(field) => return serialize_simple_field(field, context),
+        InlineNode::ComplexField(field) => return serialize_complex_field(field, context),
+        InlineNode::InlineSdt(sdt) => return serialize_inline_sdt(sdt, context),
+        InlineNode::Tracked(change) => return serialize_tracked_change(change, context),
+        InlineNode::BookmarkStart(bookmark) => serialize_bookmark_start(bookmark),
+        InlineNode::BookmarkEnd(bookmark) => serialize_bookmark_end(bookmark),
+        InlineNode::Math(math) => serialize_math(math)?,
         InlineNode::RawXml(raw) => {
             validate_replayed_fragment(&raw.xml)?;
-            Ok(raw.xml.clone())
+            raw.xml.clone()
         }
+    };
+    if unscoped.is_empty() {
+        return Ok(unscoped);
     }
+    Ok(prefixed(context.direction.unscoped(), unscoped))
 }
 
 pub(super) fn serialize_bookmark_start(bookmark: &BookmarkStart) -> String {
@@ -443,17 +448,13 @@ fn serialize_hyperlink(
     for child in written {
         match child {
             _ if expanded => children.push_str(&serialize_inline_node(child, context)?),
-            InlineNode::Run(run) => children.push_str(&serialize_context_run(run, context)?),
-            InlineNode::BookmarkStart(bookmark) => {
-                children.push_str(&serialize_bookmark_start(bookmark))
-            }
-            InlineNode::BookmarkEnd(bookmark) => {
-                children.push_str(&serialize_bookmark_end(bookmark))
-            }
+            InlineNode::Run(_)
+            | InlineNode::BookmarkStart(_)
+            | InlineNode::BookmarkEnd(_)
+            | InlineNode::RawXml(_) => children.push_str(&serialize_inline_node(child, context)?),
             InlineNode::InlineSdt(_) if child.has_tracked_control(false, context.in_revision) => {
                 children.push_str(&serialize_inline_node(child, context)?);
             }
-            InlineNode::RawXml(_) => children.push_str(&serialize_inline_node(child, context)?),
             _ => {}
         }
     }
@@ -695,10 +696,7 @@ fn serialize_complex_field(
     for run in field.field_code.iter().chain(&field.field_result) {
         merge_run_direction_scopes(run, &mut shared);
     }
-    let mut output = match shared {
-        Some(scopes) => context.direction.transition(scopes),
-        None => String::new(),
-    };
+    let mut output = context.direction.transition(shared.unwrap_or_default());
     output.push_str("<w:r>");
     output.push_str(&properties);
     output.push_str("<w:fldChar w:fldCharType=\"begin\"");
@@ -774,9 +772,8 @@ fn serialize_complex_field(
     for run in &field.field_result {
         merge_run_direction_scopes(run, &mut result_scopes);
     }
-    if let Some(scopes) = result_scopes.filter(|scopes| !scopes.is_empty()) {
-        output.push_str(&context.direction.transition(scopes));
-    }
+    let result_scopes = result_scopes.unwrap_or_default();
+    output.push_str(&context.direction.transition(result_scopes));
     output.push_str("<w:r>");
     output.push_str(&properties);
     output.push_str("<w:fldChar w:fldCharType=\"separate\"/></w:r>");
@@ -806,6 +803,7 @@ fn serialize_complex_field(
             output.push_str(&serialize_inline_node(node, context)?);
         }
     }
+    output.push_str(&context.direction.transition(result_scopes));
     output.push_str("<w:r>");
     output.push_str(&properties);
     output.push_str("<w:fldChar w:fldCharType=\"end\"/></w:r>");

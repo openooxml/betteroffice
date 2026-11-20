@@ -117,16 +117,17 @@ impl DirectionScopes {
         xml
     }
 
+    /// The tags closing, before a node that carries no scope, each scope opened inside the
+    /// wrapper element being written.
+    pub(crate) fn unscoped(&mut self) -> String {
+        self.close_to(self.base)
+    }
+
     /// Enters a wrapper element whose runs share `scopes`: closes, before it, each open scope
-    /// they do not share, and keeps the others outside it.
+    /// they do not share, every one for a wrapper without runs, and keeps the others outside it.
     pub(crate) fn enter_wrapper(&mut self, scopes: Option<&[DirectionScope]>) -> (String, usize) {
-        let xml = match scopes {
-            Some(scopes) => {
-                let shared = shared_direction_prefix(&self.open, scopes);
-                self.close_to(shared.max(self.base))
-            }
-            None => String::new(),
-        };
+        let shared = shared_direction_prefix(&self.open, scopes.unwrap_or_default());
+        let xml = self.close_to(shared.max(self.base));
         let base = std::mem::replace(&mut self.base, self.open.len());
         (xml, base)
     }
