@@ -383,6 +383,11 @@ pub fn write_docx_s13_parts_with_report(
         .map(|part| (package.resolve_path(&part.part).to_owned(), part))
         .collect();
     let kept_as_source: HashSet<String> = patched_parts.keys().cloned().collect();
+    let held_comments = if spliced.is_empty() {
+        super::splice::CommentKeys::new()
+    } else {
+        held_comment_markers(&request)
+    };
     let stories = StoryParts {
         spliced: &spliced,
         kept_as_source: &kept_as_source,
@@ -395,7 +400,10 @@ pub fn write_docx_s13_parts_with_report(
             .as_ref()
             .is_none_or(|sections| sections.edits.iter().all(|edit| edit.paragraph.is_none())),
         reports_dropped,
-        deleted_comments: &removed_comments,
+        comments: super::splice::SavedComments {
+            deleted: &removed_comments,
+            held: &held_comments,
+        },
         processed: RefCell::new(HashSet::new()),
     };
 
@@ -1234,9 +1242,43 @@ struct StoryParts<'r> {
     /// No section edit of this save moves a paragraph's section boundary.
     boundaries_stay: bool,
     reports_dropped: bool,
-    /// The IDs of the comments this save deletes, whose markers its splices take out.
-    deleted_comments: &'r HashSet<String>,
+    /// The comments this save deletes, whose markers its splices take out, and the comment
+    /// markers its model holds.
+    comments: super::splice::SavedComments<'r>,
     processed: RefCell<HashSet<String>>,
+}
+
+/// The comment markers the model `request` saves holds in any of its stories.
+fn held_comment_markers(request: &S13SaveRequest) -> super::splice::CommentKeys {
+    let document = &request.document;
+    let sections = document
+        .sections
+        .iter()
+        .flatten()
+        .map(|section| section.content.as_slice());
+    let headers = request
+        .header_entries
+        .iter()
+        .chain(&request.footer_entries)
+        .map(|(_, story)| story.content.as_slice());
+    let notes = || {
+        request
+            .footnotes
+            .iter()
+            .chain(&request.endnotes)
+            .chain(&request.footnote_separators)
+            .chain(&request.endnote_separators)
+    };
+    let mut held = super::splice::model_comment_markers(
+        std::iter::once(document.content.as_slice())
+            .chain(sections)
+            .chain(headers)
+            .chain(notes().map(|note| note.content.as_slice())),
+    );
+    for xml in notes().filter_map(|note| note.verbatim_xml.as_deref()) {
+        super::splice::xml_comment_markers(xml, &mut held);
+    }
+    held
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1723,7 +1765,7 @@ impl StoryParts<'_> {
                 assignments,
                 patches,
                 &mut reasons,
-                self.deleted_comments,
+                self.comments,
             )
         } else {
             super::splice::splice_story_part(
@@ -1734,7 +1776,7 @@ impl StoryParts<'_> {
                 assignments,
                 patches,
                 &mut reasons,
-                self.deleted_comments,
+                self.comments,
             )
             .or_else(|| {
                 reasons.clear();
@@ -1795,7 +1837,7 @@ impl StoryParts<'_> {
                     assignments,
                     &patched,
                     &mut reasons,
-                    self.deleted_comments,
+                    self.comments,
                 )
             })
             .flatten()
