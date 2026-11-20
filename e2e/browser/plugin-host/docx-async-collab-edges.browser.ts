@@ -303,11 +303,15 @@ test('remote typing rebases an open IME composition without losing its buffer', 
     textarea.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'insertCompositionText', data: 'かな', isComposing: true }));
     textarea.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertCompositionText', data: 'かな', isComposing: true }));
   });
+  // The composition is typed into the document as it is composed, so the collaborator sees it too. Reads on the
+  // composing editor wait for the composition to settle, so only the collaborator is read while it is open.
+  await expect.poll(() => text(page, 1)).toBe('abcかなdef');
+  await expect.poll(() => page.evaluate(() => window.__docxPeerlessCollab.painted(0))).toContain('abcかなdef');
   await remoteType(page, 1, 'R');
-  await expect.poll(() => page.evaluate(() => window.__docxPeerlessCollab.painted(0))).toContain('aRbcdef');
+  await expect.poll(() => page.evaluate(() => window.__docxPeerlessCollab.painted(0))).toContain('aRbcかなdef');
   await expect(composing).toBeFocused();
   await expect(composing).toHaveValue('かな');
-  await expect.poll(() => text(page, 1)).toBe('aRbcdef');
+  await expect.poll(() => text(page, 1)).toBe('aRbcかなdef');
   await composing.evaluate(element => element.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: '漢字' })));
   await converged(page, ['aRbc漢字def']);
   await expect(composing).toHaveValue('');

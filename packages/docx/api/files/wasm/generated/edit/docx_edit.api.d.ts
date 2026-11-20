@@ -393,13 +393,24 @@ export class EditSession {
      * A plain local text edit that the resident lowering records, so the next
      * [`Self::layout_document_with_regions_after_edit`] re-lowers and
      * re-measures only its paragraph: inserts `text` at the collapsed range,
-     * or deletes `[start, end)` without it. The document changes exactly as
-     * through [`Self::insert_text`] or [`Self::delete_range`] without an
-     * author, and the receipt is theirs. An empty insertion, an edit that
-     * spans paragraphs, or one whose paragraph resident input is not ready
-     * for goes through them instead and records nothing for the relayout.
+     * types it over `[start, end)`, or deletes `[start, end)` without it. The
+     * document changes exactly as through [`Self::insert_text`],
+     * [`Self::replace_range`] or [`Self::delete_range`] without an author,
+     * and the receipt is theirs. An empty text, an edit that spans
+     * paragraphs, or one whose paragraph resident input is not ready for goes
+     * through them instead and records nothing for the relayout.
      */
     edit_text_resident(story: string, start_para: string, start_offset: number, end_para: string, end_offset: number, text?: string | null): string;
+    /**
+     * [`Self::edit_text_resident`] of `text` typed at the cursor with the
+     * cursor formatting `delta_json` (a [`Self::format_range`] delta), as
+     * one edit that leaves what typing it and then formatting it with the
+     * delta would. `undefined`, changing nothing, where it cannot go so (an
+     * empty text, a delta that sets nothing or is refused, an edit that
+     * spans paragraphs or whose paragraph resident input is not ready): the
+     * caller then types and formats it as two edits.
+     */
+    edit_text_resident_marked(story: string, start_para: string, start_offset: number, end_para: string, end_offset: number, text: string, delta_json: string): string | undefined;
     /**
      * [`EditSession::encode_diff`] as ordered updates for a sync that must
      * travel in bounded frames: the whole diff when it fits
@@ -1910,6 +1921,7 @@ export interface InitOutput {
     readonly editsession_drain_update_event: (a: number) => [number, number];
     readonly editsession_echo_glyph_set_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly editsession_edit_text_resident: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number, number, number];
+    readonly editsession_edit_text_resident_marked: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number) => [number, number, number, number];
     readonly editsession_encode_diff: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_encode_diff_chunks: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly editsession_encode_peer_metadata: (a: number) => [number, number, number, number];

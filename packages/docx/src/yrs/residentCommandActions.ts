@@ -36,6 +36,7 @@ import type {
   DocxCommandEnvelope,
   DocxCommandIntent,
   DocxCommandKind,
+  DocxCommandPosition,
   DocxCommandPreflightResult,
   DocxCommandSelection,
   PreparedDocxCommand,
@@ -43,6 +44,7 @@ import type {
   DocxCommandHooksEnvironment,
   DocxWorkerCommandEngine,
   DocxWorkerCommandState,
+  DocxTypedText,
 } from './residentCommandProtocol';
 
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u;
@@ -258,7 +260,7 @@ const DOCX_COMMAND_POLICIES = {
   propose: { keys: reviewCommandKeys.propose, exact: true },
   setProposalStates: { keys: reviewCommandKeys.setProposalStates, exact: true },
   withdrawProposals: { keys: reviewCommandKeys.withdrawProposals, exact: true },
-  select: { keys: ['selection', 'object'] }, insertText: { keys: ['text'] }, replaceSelection: { keys: ['text'] },
+  select: { keys: ['selection', 'object'] }, insertText: { keys: ['text', 'replaceBefore'] }, replaceSelection: { keys: ['text'] },
   navigate: { keys: ['unit', 'direction', 'extend', 'goalX', 'distance'], exact: true },
   navigateCell: { keys: ['direction', 'extend', 'createLastRow'] },
   selectTableCells: { keys: ['target'] },
@@ -385,6 +387,8 @@ function validCommandIntent(
     }
     case 'insertText': case 'replaceSelection':
       if (!string(payload.text) || /[\n\r\u000B\u2028\u2029]/u.test(payload.text)) return refuse('invalid-text');
+      if (payload.replaceBefore !== undefined && (!string(payload.replaceBefore) || payload.replaceBefore === '' ||
+        /[\n\r\u000B\u2028\u2029\uFFFC]/u.test(payload.replaceBefore))) return refuse('invalid-text');
       break;
     case 'deleteBackward': case 'deleteForward':
       if (payload.count !== undefined && (typeof payload.count !== 'number' ||
@@ -455,6 +459,80 @@ function validCommandIntent(
 
 function collapsed(range: YrsStoryRange): boolean {
   return range.start.paraId === range.end.paraId && range.start.offset === range.end.offset;
+}
+
+/**
+ * The range `expected` covers right before a collapsed caret in the caret's paragraph, or null when other text is
+ * there. The caret stays the command's selection, so typing over it keeps the stored formatting.
+ */
+function textRangeBefore(engine: DocxWorkerCommandEngine, range: YrsStoryRange, expected: string): YrsStoryRange | null {
+  const end = range.start;
+  if (!collapsed(range) || end.offset < expected.length) return null;
+  const text = paragraphTextTo(engine, range.story, end.paraId, end.offset);
+  if (text === null || text.slice(end.offset - expected.length, end.offset) !== expected) return null;
+  const start = { paraId: end.paraId, offset: end.offset - expected.length };
+  return commandSelectionRange(engine, { anchor: { story: range.story, ...start }, focus: { story: range.story, ...end } })
+    ? { story: range.story, start, end } : null;
+}
+
+/** A paragraph's text up to at least `offset`, objects as U+FFFC; null when the paragraph is not in the story. */
+function paragraphTextTo(engine: DocxWorkerCommandEngine, story: string, paraId: string, offset: number): string | null {
+  // The paragraph alone: a composition step must not read the whole story.
+  const index = engine.paragraphUnit(story, paraId);
+  if (index < 0) return null;
+  let text = '';
+  for (const segment of engine.paragraphSegments(story, [index])[0] ?? []) {
+    if (text.length >= offset) break;
+    text += segment.kind === 'text' ? segment.text : segment.kind === 'pilcrow' ? '\n' : '\uFFFC';
+  }
+  return text;
+}
+
+function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
+  return left.length === right.length && left.every((byte, index) => byte === right[index]);
+}
+
+/** Holds typed text by its first and last characters, which collaborators' edits move but do not rename. */
+function typedTextOf(
+  engine: DocxWorkerCommandEngine, range: YrsStoryRange, text: string, caret: Uint8Array | undefined
+): DocxTypedText | undefined {
+  if (!text || !caret || range.start.paraId !== range.end.paraId || range.end.offset - range.start.offset !== text.length) return undefined;
+  const lastLength = text.length > 1 && /[\uDC00-\uDFFF]/u.test(text.at(-1)!) && /[\uD800-\uDBFF]/u.test(text.at(-2)!) ? 2 : 1;
+  const at = { story: range.story, paraId: range.start.paraId };
+  try {
+    return {
+      story: range.story,
+      first: engine.encodeStickyPosition({ ...at, offset: range.start.offset }).encoded.slice(),
+      last: engine.encodeStickyPosition({ ...at, offset: range.end.offset - lastLength }).encoded.slice(),
+      lastLength,
+      caret: caret.slice(),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/** Whether `caret` is the one the typing command that wrote `typed` left. */
+function leftBy(typed: DocxTypedText | undefined, caret: DocxCommandPosition): typed is DocxTypedText {
+  return !!typed && !!caret.sticky && caret.story === typed.story && sameBytes(caret.sticky, typed.caret);
+}
+
+/** Where `typed` is, if it still reads `expected` with nothing inserted inside it; null if edits deleted or split it. */
+function typedTextBefore(engine: DocxWorkerCommandEngine, typed: DocxTypedText, expected: string): YrsStoryRange | null {
+  const first = engine.resolveStickyPosition({ story: typed.story, encoded: typed.first });
+  const last = engine.resolveStickyPosition({ story: typed.story, encoded: typed.last });
+  if (!first || !last || first.story !== typed.story || last.story !== typed.story || first.paraId !== last.paraId) return null;
+  // A deleted character's position resolves to where it was and encodes there as the character after it.
+  if (!sameBytes(engine.encodeStickyPosition(first).encoded, typed.first) ||
+    !sameBytes(engine.encodeStickyPosition(last).encoded, typed.last)) return null;
+  const end = last.offset + typed.lastLength;
+  if (end - first.offset !== expected.length) return null;
+  const text = paragraphTextTo(engine, typed.story, first.paraId, end);
+  if (text === null || text.slice(first.offset, end) !== expected) return null;
+  const start = { paraId: first.paraId, offset: first.offset };
+  const stop = { paraId: first.paraId, offset: end };
+  return commandSelectionRange(engine, { anchor: { story: typed.story, ...start }, focus: { story: typed.story, ...stop } })
+    ? { story: typed.story, start, end: stop } : null;
 }
 
 function deleteRange(
@@ -771,6 +849,18 @@ export function preflightDocxCommand(
   let range = resolved.range;
   if ((command.kind === 'insertText' || command.kind === 'replaceSelection' || command.kind === 'lineBreak') && state.storedMarks &&
     (typeof state.storedMarks.clear !== 'boolean' || !validDelta(state.storedMarks.delta))) return refuse('invalid-stored-marks');
+  let typedOver: DocxTypedText | undefined;
+  if (command.kind === 'insertText' && command.payload.replaceBefore !== undefined) {
+    const run = collapsed(range) && leftBy(state.typed, resolved.selection.focus) ? state.typed : undefined;
+    if (!command.payload.text && run?.undoes !== undefined && run.undoes === command.inputTime) typedOver = run;
+    else {
+      const typed = run ? typedTextBefore(engine, run, command.payload.replaceBefore) : undefined;
+      const replaced = typed === undefined ? textRangeBefore(engine, range, command.payload.replaceBefore) : typed;
+      if (!replaced) return refuse('replaced-text-mismatch');
+      range = replaced;
+      if (typed) typedOver = run;
+    }
+  }
   if (command.kind === 'deleteBackward' || command.kind === 'deleteForward') {
     const story = range.story;
     const segments = new Map<number, YrsStorySegment[]>();
@@ -804,7 +894,7 @@ export function preflightDocxCommand(
     range = expanded;
   }
   return { status: 'ready', prepared: {
-    command: structuredClone(command), selection: resolved.selection, range,
+    command: structuredClone(command), selection: resolved.selection, range, ...(typedOver ? { typedOver } : {}),
   } };
 }
 
@@ -916,6 +1006,7 @@ export function applyDocxCommand(
 ): DocxCommandApplyResult {
   const { inputTime, lastInputTime } = prepared.command;
   const version = engine.proposalEngine.version();
+  const typed = state.typed;
   try {
     if (inputTime === undefined) return applyPreparedDocxCommand(engine, state, prepared, context, environment);
     engine.setUndoInputTime([inputTime, lastInputTime ?? inputTime]);
@@ -933,6 +1024,9 @@ export function applyDocxCommand(
     const corrected = state.selection ? readCommandSelection(engine, state) : null;
     return { status: 'refused', reason: unavailable ? 'table-unavailable' : 'unsupported', selection: corrected?.ok ? corrected.selection : null,
       editState: projectDocxEditState(engine, state, corrected) };
+  } finally {
+    // Any other local edit ends the typed text, so no later step types over it or undoes past that edit.
+    if (state.typed === typed && engine.proposalEngine.version() !== version) state.typed = undefined;
   }
 }
 
@@ -1134,12 +1228,16 @@ function applyPreparedDocxCommand(
     if (applied.applied) state.storedMarks = null;
     return result(applied.applied ? 'applied' : 'noop');
   }
-  if (command.kind === 'undo' || command.kind === 'redo') {
+  // Emptying text that replaced a selection as its own undo step undoes that step, which gives the selection back and
+  // leaves collaborators' edits.
+  const undoesTyped = command.kind === 'insertText' && !command.payload.text && prepared.typedOver?.undoes !== undefined &&
+    prepared.typedOver.undoes === command.inputTime;
+  if (command.kind === 'undo' || command.kind === 'redo' || undoesTyped) {
     const beforeHead = engine.selection()?.head ?? null;
     const tables = beforeHead ? liveTableAncestors(engine, beforeHead.story) : [];
     const nearby = tables.map((table) => nearTable(engine, table)).filter((at): at is YrsLoc => !!at);
     engine.addUndoBoundary();
-    const changed = command.kind === 'undo' ? engine.undo() : engine.redo();
+    const changed = command.kind === 'redo' ? engine.redo() : engine.undo();
     if (!changed) return result('noop');
     state.storedMarks = null;
     if (state.activePart && !engine.geometryReader.hasStory(state.activePart.story)) {
@@ -1184,6 +1282,7 @@ function applyPreparedDocxCommand(
     return result('noop');
   }
   if (!range || !selection) throw new Error('Prepared command lacks selection');
+  state.typed = undefined;
   const prior = state.selection ? readCommandSelection(engine, state) : null;
   const priorSelection = prior?.ok ? prior.selection : null;
   const publish = (selected: DocxCommandSelection, force = false) => {
@@ -1232,9 +1331,10 @@ function applyPreparedDocxCommand(
   if (command.kind === 'setParagraphAttrs' && Object.keys(command.payload.attrs).length === 0) return result('noop');
   const version = engine.proposalEngine.version();
   engine.beginUndoCapture();
+  const ownStep = command.kind === 'replaceSelection' && command.payload.text !== '' && !collapsed(range);
   const discrete = ['setTabStops', 'removeTabStop', 'toggleList', 'changeIndent', 'insertImage', 'moveEmbed', 'insertTable', 'pasteFragment', 'insertPageBreak', 'insertSectionBreak', 'lineBreak'].includes(command.kind) ||
     isTableCommandKind(command.kind);
-  if (discrete) engine.addUndoBoundary();
+  if (discrete || ownStep) engine.addUndoBoundary();
   const caret = (at: YrsLoc) => publish({ anchor: at, focus: at }, true);
   switch (command.kind) {
     case 'setTabStops':
@@ -1253,16 +1353,27 @@ function applyPreparedDocxCommand(
       break;
     }
     case 'insertText': case 'replaceSelection': {
-      const receipt = collapsed(range)
-        ? engine.insertText({ story: range.story, ...range.start }, command.payload.text, command.payload.suggesting)
-        : engine.replaceRange(range, command.payload.text, command.payload.suggesting);
-      if (!receipt.range) throw new Error('Text receipt lacks range');
+      // A composition step that empties the composition removes what it typed (one paragraph).
+      const removal = command.kind === 'insertText' && command.payload.replaceBefore !== undefined && !command.payload.text;
       const stored = state.storedMarks;
-      if (stored && command.payload.text && !collapsed(receipt.range)) {
+      // Text typed with cursor formatting goes in already formatted, as one edit, where the
+      // engine can; otherwise it is typed and then formatted.
+      const marked = stored && !stored.clear && command.payload.text && !command.payload.suggesting &&
+        Object.keys(stored.delta).length && engine.typeWithCaretMarks
+        ? engine.typeWithCaretMarks(range, command.payload.text, stored.delta) : null;
+      const receipt = marked ?? (collapsed(range)
+        ? engine.insertText({ story: range.story, ...range.start }, command.payload.text, command.payload.suggesting)
+        : removal ? engine.deleteRange(range, command.payload.suggesting)
+        : engine.replaceRange(range, command.payload.text, command.payload.suggesting));
+      if (!receipt.range) throw new Error('Text receipt lacks range');
+      if (!marked && stored && command.payload.text && !collapsed(receipt.range)) {
         if (stored.clear) engine.clearFormatting(receipt.range);
         if (Object.keys(stored.delta).length) engine.formatRange(receipt.range, stored.delta);
       }
       caret({ story: receipt.range.story, ...receipt.range.end });
+      state.typed = typedTextOf(engine, receipt.range, command.payload.text, state.selection?.focus.sticky);
+      const undoes = ownStep ? command.inputTime : prepared.typedOver?.undoes;
+      if (state.typed && undoes !== undefined && undoes === command.inputTime) state.typed.undoes = undoes;
       break;
     }
     case 'deleteBackward': case 'deleteForward': {

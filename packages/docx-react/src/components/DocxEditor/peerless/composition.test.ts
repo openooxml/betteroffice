@@ -32,6 +32,10 @@ function fakeAdmission() {
   let nextSlot = 0;
   let settlements = 0;
   let ignored = false;
+  let failSteps = false;
+  let removeOnCancel = false;
+  const steps: Array<[number, string, number | undefined]> = [];
+  const times: { reserved?: number; settled?: number } = {};
   const held: string[] = [];
   const commands: {
     kind: string;
@@ -116,16 +120,24 @@ function fakeAdmission() {
       compositionSlot: slot,
       heldIntents: held.length,
     }),
-    reserveComposition() {
+    reserveComposition(inputTime) {
       if (slot !== null) throw new Error('composition already reserved');
+      times.reserved = inputTime;
       slot = ++nextSlot;
       const target: PeerlessAdmissionTarget = tail
         ? { kind: 'predecessor', ticket: tail }
         : { kind: 'worker-selection', snapshot };
       return { slot, target };
     },
-    settleComposition(reserved, commit) {
+    composeText(reserved, text, inputTime) {
       expect(reserved).toBe(slot!);
+      if (failSteps) throw new Error('step failed');
+      steps.push([reserved, text, inputTime]);
+      return undefined;
+    },
+    settleComposition(reserved, commit, inputTime) {
+      expect(reserved).toBe(slot!);
+      times.settled = inputTime;
       settlements += 1;
       slot = null;
       const ticket = commit && !ignored
@@ -134,10 +146,11 @@ function fakeAdmission() {
             fence: true,
           })
         : undefined;
+      const removal = !commit && removeOnCancel ? submit('insertText', { text: '' }, { after: tail, fence: true }) : undefined;
       for (const text of held.splice(0)) submit('insertText', { text }, { after: tail });
       return ticket
         ? { status: 'submitted', ticket, echoEnabled: false }
-        : { status: 'ignored', reason: ignored ? 'read-only' : 'empty-composition' };
+        : { status: 'ignored', reason: ignored ? 'read-only' : 'empty-composition', ...(removal ? { removal } : {}) };
     },
     dispose() {},
   };
@@ -146,9 +159,31 @@ function fakeAdmission() {
     commands,
     hold: (text: string) => { held.push(text); },
     ignore: () => { ignored = true; },
+    failSteps: () => { failSteps = true; },
+    removeOnCancel: () => { removeOnCancel = true; },
+    steps,
+    times,
     settlements: () => settlements,
   };
 }
+
+test('composition_updates_type_each_step_through_the_admission_and_stamp_its_times', () => {
+  const fake = fakeAdmission();
+  const initial = beginComposition(fake.admission, 13, 100);
+  expect(fake.times.reserved).toBe(100);
+  const first = updateComposition(initial, 'ㄱ', fake.admission, 110);
+  const second = updateComposition(first, '가', fake.admission, 120);
+  expect(updateComposition(second, 'record only').text).toBe('record only');
+  expect(fake.steps).toEqual([[1, 'ㄱ', 110], [1, '가', 120]]);
+  fake.failSteps();
+  const third = updateComposition(second, '각', fake.admission, 130);
+  expect(third).toMatchObject({ text: '각', phase: 'active' });
+  const result = endComposition(fake.admission, third, '각', 140);
+  expect(result.status).toBe('committed');
+  expect(fake.times.settled).toBe(140);
+  expect(updateComposition(result.state, 'late', fake.admission, 150)).toBe(result.state);
+  expect(fake.steps).toHaveLength(2);
+});
 
 test('d2d_composition_emits_zero_commands_then_one_commit', async () => {
   const fake = fakeAdmission();
@@ -282,5 +317,20 @@ test('d2d_frames_preserve_preedit_and_refusal_retains_text', async () => {
     expect(updateComposition(result.state, '')).toBe(result.state);
     expect(endComposition(fake.admission, state, 'duplicate')).toBe(result);
     expect(fake.settlements()).toBe(1);
+  }
+});
+
+test('a_cancelled_composition_whose_removal_is_refused_ends_refused_with_nothing_to_recover', async () => {
+  for (const outcome of ['refused', 'applied'] as const) {
+    const fake = fakeAdmission();
+    fake.removeOnCancel();
+    const state = updateComposition(beginComposition(fake.admission, 4, 10), 'かな', fake.admission, 20);
+    const result = endComposition(fake.admission, state, '', 30);
+    if (result.status !== 'cancelled' || !result.removal) throw new Error('the cancel sent no removal');
+    expect(result.state.phase).toBe('cancelled');
+    fake.commands.at(-1)!.resolve(outcome === 'refused' ? { status: 'refused', reason: 'replaced-text-mismatch' } : { status: 'applied' });
+    await result.removal.ack;
+    expect(result.state.phase).toBe(outcome === 'refused' ? 'refused' : 'cancelled');
+    expect(result.state.recoverableText).toBeUndefined();
   }
 });

@@ -11,7 +11,7 @@ import {
   type UsePeerlessEditSessionOptions,
 } from '../hooks/usePeerlessEditSession';
 import { PeerlessInput } from './PeerlessInput';
-import type { DocxClipboardFragment, DocxEditState } from '@betteroffice/docx/yrs';
+import type { DocxClipboardFragment } from '@betteroffice/docx/yrs';
 import type { PeerlessCompositionState } from './composition';
 import { captureSelectionIntent } from './selection';
 import { holdPointerExtension } from './inputAdmission';
@@ -26,7 +26,7 @@ import { createPageChromeHold, type PageChromeHold } from '../usePageChrome';
 import { CanvasA11yLiveRegion } from '../CanvasA11yLiveRegion';
 import { DEFAULT_BLINK_INTERVAL } from '../overlays/SelectionOverlay';
 import { createPresentedPageQueries } from './presentedPageQueries';
-import { peerlessCaretPaint, peerlessPreeditPaint } from './caretColor';
+import { peerlessCaretPaint } from './caretColor';
 import { useTranslation } from '../../../i18n';
 import { workerPageAtViewport } from './pageNavigation';
 import { UnbuiltMirrorSection, useUnbuiltPageMirrors, type ReadPageTexts } from './UnbuiltPageMirrors';
@@ -212,53 +212,26 @@ function PeerlessSelectionLayer({ viewStore, rects, visible }: {
   return <>{rects.map((rect, index) => <div key={index} aria-hidden style={{ position: 'absolute', left: rect.x, top: rect.y, width: rect.width, height: rect.height, background: 'rgba(59, 130, 246, 0.25)', pointerEvents: 'none' }} />)}</>;
 }
 
-function PeerlessCaretLayer({ viewStore, geometryCaret, matches, compositionActive, multiCell, input, pages }: {
+/**
+ * The caret. While an input method composes, the engine draws the composed text and the caret follows it, from the
+ * first frame that shows the composition; before that the caret it would show can predate the composition's target.
+ */
+function PeerlessCaretLayer({ viewStore, geometryCaret, matches, composition, coversThroughSeq, multiCell, input, pages }: {
   viewStore: PeerlessViewStore;
   pages: readonly PageGeometry[];
   geometryCaret: DocxEchoRect | null;
   matches: boolean;
-  compositionActive: boolean;
+  composition: PeerlessCompositionState | null;
+  coversThroughSeq: number | undefined;
   multiCell: boolean;
   input: RefObject<HTMLTextAreaElement | null>;
 }): ReactElement | null {
   const provisional = useShownProvisionalCaret(viewStore);
-  if (compositionActive) return null;
+  const typed = composition?.phase === 'active' ? composition.typed?.seq ?? Infinity : undefined;
+  if (typed !== undefined && !(coversThroughSeq !== undefined && coversThroughSeq >= typed)) return null;
   const caret = provisional?.rect ?? (matches ? geometryCaret : null);
   if (!caret || (!provisional && multiCell)) return null;
   return <PeerlessCaret caret={caret} input={input} pages={pages} />;
-}
-
-/** Paints the active IME composition at the caret until the composition commits. */
-function PeerlessPreedit({ viewStore, composition, geometryCaret, selectionRects, multiCell, coversThroughSeq, matches, formatting, pages }: {
-  viewStore: PeerlessViewStore;
-  composition: PeerlessCompositionState | null;
-  geometryCaret: DocxEchoRect | null;
-  selectionRects: readonly DocxEchoRect[] | undefined;
-  multiCell: boolean;
-  coversThroughSeq: number | undefined;
-  matches: boolean;
-  formatting: DocxEditState['effectiveFormatting'] | undefined;
-  pages: readonly PageGeometry[];
-}): ReactElement | null {
-  const provisional = useShownProvisionalCaret(viewStore);
-  const start = selectionRects?.[0];
-  const first = geometryCaret ?? (!multiCell && start ? { x: start.x, y: start.y, width: 1, height: start.height } : null);
-  const target = composition?.target;
-  const stale = target?.kind === 'predecessor' && (target.ticket.seq === undefined || (coversThroughSeq ?? -1) < target.ticket.seq);
-  const caret = composition?.phase === 'active' && composition.text ? provisional?.rect ?? (matches && !stale ? first : null) : null;
-  const paint = useMemo(() => {
-    if (!caret) return null;
-    const page = pages.find(({ bounds }) => caret.x >= bounds.x && caret.x <= bounds.x + bounds.width &&
-      caret.y >= bounds.y && caret.y <= bounds.y + bounds.height);
-    return peerlessPreeditPaint(page?.displayPage, page ? { ...caret, x: caret.x - page.bounds.x, y: caret.y - page.bounds.y } : caret);
-  }, [pages, caret]);
-  if (!caret || !paint) return null;
-  const fontSize = formatting?.fontSizePt ? formatting.fontSizePt * 96 / 72 : caret.height * 0.8;
-  return <span data-testid="docx-preedit" aria-hidden="true" style={{ position: 'absolute', left: caret.x, top: caret.y,
-    height: caret.height, lineHeight: `${caret.height}px`, fontSize, whiteSpace: 'pre',
-    fontFamily: formatting?.fontFamily ? `"${formatting.fontFamily}", sans-serif` : undefined,
-    fontWeight: formatting?.bold === true ? 'bold' : undefined, fontStyle: formatting?.italic === true ? 'italic' : undefined,
-    color: paint.color, background: paint.background, borderBottom: '1px solid currentColor', pointerEvents: 'none' }}>{composition!.text}</span>;
 }
 
 function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, inputRef, onRecoverableText, displayWindow, onDisplayWindowChange, onClipboard, onPasteFragment, highlights, onNavigateCell, onPartPoint, onDragSelectionChange, pageOverlays, pageMirror, unbuiltPageMirror, readPageTexts, mirrorReadBlocked, scrollToPage, overlay, pictures, tables, queryEngineReady }: {
@@ -950,12 +923,8 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, inputRef, onRe
         <PeerlessSelectionLayer viewStore={binding.viewStore} rects={geometry?.selectionRects}
           visible={composition?.phase !== 'active' && geometryMatchesDocument(snapshot)} />
         <PeerlessCaretLayer viewStore={binding.viewStore} geometryCaret={geometry?.caret ?? null} pages={pages}
-          matches={geometryMatchesDocument(snapshot)} compositionActive={composition?.phase === 'active'}
+          matches={geometryMatchesDocument(snapshot)} composition={composition} coversThroughSeq={geometry?.coversThroughSeq}
           multiCell={snapshot.editState?.tableContext?.hasMultiCellSelection === true} input={input} />
-        <PeerlessPreedit viewStore={binding.viewStore} composition={composition} geometryCaret={geometry?.caret ?? null}
-          selectionRects={geometry?.selectionRects} coversThroughSeq={geometry?.coversThroughSeq}
-          multiCell={snapshot.editState?.tableContext?.hasMultiCellSelection === true}
-          matches={geometryMatchesDocument(snapshot)} formatting={snapshot.editState?.effectiveFormatting} pages={pages} />
         {picturePreview && <div className="paged-editor__picture-drag-preview" aria-hidden style={{ position: 'absolute', left: picturePreview.x, top: picturePreview.y,
           width: picturePreview.width, height: picturePreview.height, outline: '1px dashed rgb(59, 130, 246)', background: 'rgba(59, 130, 246, 0.12)', pointerEvents: 'none', cursor: 'move' }} />}
         {pictureDropCaret && <div className="paged-editor__picture-drop-caret" aria-hidden style={{ position: 'absolute', left: pictureDropCaret.x, top: pictureDropCaret.y,

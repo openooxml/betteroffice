@@ -417,6 +417,8 @@ function applyIntent(draft: EchoDraft, intent: PeerlessTextIntent): EchoDraft | 
   let end = Math.max(draft.anchor, draft.focus);
   let replacement = '';
   if (intent.kind === 'insertText' || intent.kind === 'replaceSelection') {
+    // A composition step types over the step before it; the echo does not draw it.
+    if ('replaceBefore' in intent.payload && intent.payload.replaceBefore !== undefined) return undefined;
     replacement = intent.payload.text;
     if (!simpleText(replacement)) return undefined;
   } else if (start === end) {

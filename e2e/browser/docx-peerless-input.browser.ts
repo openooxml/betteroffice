@@ -1195,7 +1195,7 @@ test('d2d_legacy_input_regression', async ({ page }) => {
   expect(await page.evaluate(() => window.__docxPeerlessInput.mainInstances)).toBeGreaterThan(0);
 });
 
-test('d2d_composition_event_orders_commit_once', async ({ page }) => {
+test('d2d_composition_steps_type_the_document_and_event_orders_commit_once', async ({ page }) => {
   await open(page);
   const input = await focusDocument(page);
   for (const order of ['end-beforeinput-input', 'beforeinput-end-input', 'input-end-beforeinput']) {
@@ -1216,7 +1216,9 @@ test('d2d_composition_event_orders_commit_once', async ({ page }) => {
         }));
       }
     });
-    expect((await commandsSince(page, start)).map((command) => command.kind)).toEqual(['insertText']);
+    expect((await commandsSince(page, start)).map((command) => [command.kind, command.payload]) as unknown[]).toEqual([
+      ['insertText', { text: 'P' }], ['replaceSelection', { text: 'か' }], ['insertText', { text: 'かな', replaceBefore: 'か' }],
+    ]);
     await page.evaluate(() => window.__docxPeerlessInput.releaseAcks());
     await settled(page);
     await expect(input).toHaveValue('かな');
@@ -1235,25 +1237,26 @@ test('d2d_composition_event_orders_commit_once', async ({ page }) => {
       }, source);
       if (source === 'end') ended = true;
       if (ended) {
-        await expect.poll(async () => (await commandsSince(page, start)).length).toBe(2);
+        await expect.poll(async () => (await commandsSince(page, start)).length).toBe(4);
       }
       await paintTurns(page);
-      expect((await commandsSince(page, start)).map((command) => command.kind)).toEqual(
-        ended ? ['insertText', 'replaceSelection'] : ['insertText']
-      );
+      expect((await commandsSince(page, start)).length).toBe(ended ? 4 : 3);
     }
-    await expect.poll(async () => (await commandsSince(page, start)).length).toBe(2);
+    await expect.poll(async () => (await commandsSince(page, start)).length).toBe(4);
     await settled(page);
     const commands = await commandsSince(page, start);
-    expect(commands.map((command) => command.kind)).toEqual(['insertText', 'replaceSelection']);
-    expect(commands[1]!.payload).toEqual({ text: '漢字' });
+    expect(commands.map((command) => command.kind)).toEqual(['insertText', 'replaceSelection', 'insertText', 'insertText']);
+    expect(commands[3]!.payload).toEqual({ text: '漢字', replaceBefore: 'かな' });
+    expect(new Set(commands.slice(1).map((command) => command.inputTime)).size).toBe(1);
     const sent = await page.evaluate((start) => window.__docxPeerlessInput.commands.slice(start), start);
-    const insert = sent.findIndex((command) => command.seq === commands[0]!.seq);
-    const commit = sent.findIndex((command) => command.seq === commands[1]!.seq);
-    expect(sent.slice(insert + 1, commit).map((command) => command.kind)).toEqual(
-      Array(commit - insert - 1).fill('setFontEnvironment')
-    );
-    expect(commands[1]!.afterSeq).toBe(sent[commit - 1]!.seq);
+    for (let index = 1; index < commands.length; index += 1) {
+      const previous = sent.findIndex((command) => command.seq === commands[index - 1]!.seq);
+      const step = sent.findIndex((command) => command.seq === commands[index]!.seq);
+      expect(sent.slice(previous + 1, step).map((command) => command.kind)).toEqual(
+        Array(step - previous - 1).fill('setFontEnvironment')
+      );
+      expect(commands[index]!.afterSeq).toBe(sent[step - 1]!.seq);
+    }
   }
   expect(await savedText(page)).toBe('P漢字'.repeat(3) + 'abcd');
 });

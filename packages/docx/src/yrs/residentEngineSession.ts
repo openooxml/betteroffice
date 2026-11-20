@@ -19,6 +19,7 @@ import type {
   YrsStoryRange,
   YrsTextMatch,
   YrsLoc,
+  YrsInlineFormatDelta,
 } from './index';
 import type {
   CollaborationTextInsertion,
@@ -177,6 +178,14 @@ export type ResidentEngineSession = Pick<
 > & {
   /** Moves an inline embed in one transaction. Internal: concurrent moves would duplicate it, so collaboration never reaches it. */
   moveEmbed(at: YrsLoc, to: YrsLoc): YrsReplaceReceipt;
+  /**
+   * Types `text` over `range` (inserts it at a collapsed one) with the cursor formatting `delta`
+   * as one edit, leaving what `replaceRange` or `insertText` and then `formatRange` of the typed
+   * text with `delta` would. `null`, changing nothing, where it cannot (an edit spanning
+   * paragraphs, one whose paragraph resident input is not ready, a delta that sets nothing or is
+   * refused): the caller then types and formats as two edits.
+   */
+  typeWithCaretMarks?(range: YrsStoryRange, text: string, delta: YrsInlineFormatDelta): YrsReplaceReceipt | null;
   setUndoInputTime(span: readonly [first: number, last: number] | null): void;
   splitSection(at: YrsLoc, properties: SectionProperties, start: NonNullable<SectionProperties['sectionStart']>): YrsLoc;
   /**
@@ -880,10 +889,15 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
     insertText: (at, text, author) => applyCommandMutation(at.story, () => JSON.parse(author
       ? session.insert_text(at.story, at.paraId, at.offset, text, author.name, author.date)
       : session.edit_text_resident(at.story, at.paraId, at.offset, at.paraId, at.offset, text))),
+    typeWithCaretMarks: (range, text, delta) => applyFormatting(range.story, () => {
+      const receipt = session.edit_text_resident_marked(...rangeArgs(range), text, JSON.stringify(delta));
+      return receipt === undefined ? null : JSON.parse(receipt) as YrsReplaceReceipt;
+    }),
     insertLineBreak: (at, author) => applyCommandMutation(at.story, () =>
       JSON.parse(session.insert_line_break(at.story, at.paraId, at.offset, author?.name, author?.date))),
-    replaceRange: (range, text, author) => applyCommandMutation(range.story, () =>
-      JSON.parse(session.replace_range(...rangeArgs(range), text, author?.name, author?.date))),
+    replaceRange: (range, text, author) => applyCommandMutation(range.story, () => JSON.parse(author || !text
+      ? session.replace_range(...rangeArgs(range), text, author?.name, author?.date)
+      : session.edit_text_resident(...rangeArgs(range), text))),
     deleteRange: (range, author) => applyCommandMutation(range.story, () => JSON.parse(author
       ? session.delete_range(...rangeArgs(range), author.name, author.date)
       : session.edit_text_resident(...rangeArgs(range), undefined))),

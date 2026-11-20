@@ -242,17 +242,33 @@ fn indexed_text_edits_match_diff_receipts_and_formatting() {
                     );
                 }
             }
-            for end in start + 1..=len {
-                let actual = replica(&state, true);
-                let expected = replica(&state, false);
-                assert_eq!(
-                    actual.delete_range(&ctx, StoryRange::new("body", start, end)),
-                    expected.delete_range(&ctx, StoryRange::new("body", start, end))
-                );
-                assert_eq!(
-                    actual.story_segments("body"),
-                    expected.story_segments("body")
-                );
+            for end in start..=len {
+                if end > start {
+                    let actual = replica(&state, true);
+                    let expected = replica(&state, false);
+                    assert_eq!(
+                        actual.delete_range(&ctx, StoryRange::new("body", start, end)),
+                        expected.delete_range(&ctx, StoryRange::new("body", start, end))
+                    );
+                    assert_eq!(
+                        actual.story_segments("body"),
+                        expected.story_segments("body")
+                    );
+                }
+                for text in ["", "é😀"] {
+                    let actual = replica(&state, true);
+                    let expected = replica(&state, false);
+                    assert_eq!(
+                        actual.replace_range(&ctx, StoryRange::new("body", start, end), text),
+                        expected.replace_range(&ctx, StoryRange::new("body", start, end), text),
+                        "{start}..{end} {text:?}"
+                    );
+                    assert_eq!(
+                        actual.story_segments("body"),
+                        expected.story_segments("body"),
+                        "{start}..{end} {text:?}"
+                    );
+                }
             }
         }
     }
@@ -281,6 +297,32 @@ fn indexed_windows_match_diff_after_formatted_cache_advances() {
             1,
             if step % 2 == 0 { "é😀" } else { "x" },
             Some(&attrs),
+        );
+        assert_windows(&doc, "body");
+        // Typing over the unit just inserted, in one edit, advances the caches as the
+        // delete and the insertion do one after the other.
+        let before = doc.committed_epoch();
+        let text = if step % 2 == 0 { "x😀" } else { "é" };
+        let mut attrs = None;
+        doc.replace_range_placed_observed(&ctx, StoryRange::new("body", 1, 2), text, |effective| {
+            attrs = Some(effective.clone())
+        })
+        .unwrap();
+        let after = doc.committed_epoch();
+        doc.advance_indexes_after_text_replace("body", before, after, (1, 2), text, attrs.as_ref());
+        assert!(
+            doc.segment_indexes
+                .lock()
+                .unwrap()
+                .get("body", after)
+                .is_some()
+        );
+        assert!(
+            doc.paragraph_indexes
+                .lock()
+                .unwrap()
+                .get("body", after)
+                .is_some()
         );
         assert_windows(&doc, "body");
         let before = doc.committed_epoch();
