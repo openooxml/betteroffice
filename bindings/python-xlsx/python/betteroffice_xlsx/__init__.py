@@ -201,14 +201,28 @@ class Sheet:
 
     def render_png(
         self,
-        target: ViewportTarget | PngRangeTarget,
+        target: "ViewportTarget | PngRangeTarget | Mapping[str, object] | None" = None,
         *,
         scale: float = 1.0,
+        range: "str | None" = None,
         max_width: "int | None" = None,
         max_height: "int | None" = None,
     ) -> Png:
+        """Render this sheet to PNG.
+
+        Without a target it frames `range`, or the used range when there is none, like
+        `render_sheet`. A target without a `sheet` renders this sheet."""
+        if target is None:
+            return self.render_sheet(
+                scale=scale, range=range, max_width=max_width, max_height=max_height
+            )
+        if range is not None:
+            raise TypeError("render_png takes a target or a range, not both")
         return self._workbook.render_png(
-            target, scale=scale, max_width=max_width, max_height=max_height
+            {"sheet": self._index, **target},
+            scale=scale,
+            max_width=max_width,
+            max_height=max_height,
         )
 
     def render_sheet(

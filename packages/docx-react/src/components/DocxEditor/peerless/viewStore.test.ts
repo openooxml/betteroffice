@@ -195,6 +195,36 @@ test('echo caret publishes only to caret subscribers', () => {
   store.dispose();
 });
 
+test('setting the recovering flag publishes no view snapshot', () => {
+  const identity = { session: 'view', incarnation: 1, epoch: 1 };
+  const geometry: PeerlessFrameGeometry = {
+    identity, coversThroughSeq: 0, frameEpoch: 1, layoutRevision: 1,
+    pages: [], caret: null, selectionRects: [],
+  };
+  const store = createPeerlessViewStore({ identity, version: 0, throughSeq: 0, presentedThroughSeq: 0,
+    workerSelection: null, anchors: null, editState: undefined, geometry });
+  let views = 0;
+  let flags = 0;
+  store.subscribe(() => { views += 1; });
+  store.subscribeRecovering?.(() => { flags += 1; });
+  const before = store.getSnapshot();
+  expect(store.getRecovering?.()).toBe(false);
+  store.setRecovering?.(true);
+  expect(views).toBe(0);
+  expect(flags).toBe(1);
+  expect(store.getSnapshot()).toBe(before);
+  expect(store.getRecovering?.()).toBe(true);
+  store.setRecovering?.(true);
+  expect(flags).toBe(1);
+  store.acceptWorkerState({ session: 'view', incarnation: 2, epoch: 1 }, { epoch: 1, version: 0, throughSeq: 0,
+    presentedThroughSeq: -1, selection: null, editState: undefined });
+  expect(views).toBe(1);
+  expect(flags).toBe(2);
+  expect(store.getRecovering?.()).toBe(false);
+  expect(store.getSnapshot().identity.incarnation).toBe(2);
+  store.dispose();
+});
+
 for (const change of ['document version', 'layout revision', 'frame document version']) {
   test(`a newer ${change} retires a provisional caret without covering its sequence`, () => {
     const identity = { session: 'view', incarnation: 1, epoch: 1 };

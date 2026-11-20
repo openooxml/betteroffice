@@ -333,6 +333,13 @@ export interface DocxEditorBaseProps extends DocxEditorPluginProps {
   /** Whether the editor is read-only. When true, hides toolbar and rulers */
   readOnly?: boolean;
   /**
+   * Whether to show the paste options control after a paste that carried
+   * formatting, letting the user re-apply that paste with merged or
+   * text-only formatting as part of the same undo step (default: true).
+   * Set false to never show it; the Ctrl shortcut that opens it is off too.
+   */
+  pasteOptions?: boolean;
+  /**
    * Experimental: paint a display-only preview of a document's first pages
    * before the whole document is opened, then hand them over to it. The editor
    * is read-only and plugins wait until the full document is open. Ignored
@@ -537,13 +544,13 @@ export interface DocxEditorBaseProps extends DocxEditorPluginProps {
 }
 
 export interface DocxAsyncEditorProps extends Omit<DocxEditorBaseProps, 'onChange'> {
-  /** @deprecated Removed in 0.6.0. Omit for the async editor. */
+  /** @deprecated Removed in 0.7.0. Omit for the async editor. */
   [LEGACY_SYNC_API_PROP]?: false;
   onChange?: undefined;
 }
 
 export interface DocxLegacyEditorProps extends DocxEditorBaseProps {
-  /** @deprecated Enables the sync hybrid runtime, removed in 0.6.0. */
+  /** @deprecated Enables the sync hybrid runtime, removed in 0.7.0. */
   [LEGACY_SYNC_API_PROP]: true;
 }
 

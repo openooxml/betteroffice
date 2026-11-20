@@ -54,6 +54,9 @@ class TextRun:
         """Explicit RGB. A theme colour reads as `None`."""
     @property
     def style_id(self) -> str | None: ...
+    @property
+    def highlight(self) -> str | None:
+        """The `w:highlight` value as written, `"none"` included."""
 
 @final
 class Paragraph:
@@ -76,6 +79,14 @@ class TableCell:
     def tables(self) -> list[Table]: ...
     @property
     def text(self) -> str: ...
+    @property
+    def grid_span(self) -> int | None:
+        """Grid columns the cell spans when more than one, from `w:gridSpan`.
+
+        A cell alone in its row of a wider table reads that table's column count."""
+    @property
+    def v_merge(self) -> str | None:
+        """`"restart"` for the first cell of a vertical merge, `"continue"` for the cells below it."""
 
 @final
 class TableRow:

@@ -542,6 +542,12 @@
     "tableInserted": "已插入表格",
     "tableDeleted": "已刪除表格"
   },
+  "pasteOptions": {
+    "button": "貼上選項 (Ctrl)",
+    "keepSource": "保留來源格式",
+    "merge": "合併格式",
+    "textOnly": "只保留文字"
+  },
   "contextMenu": {
     "ariaLabel": "AI 動作功能表",
     "textMenuAriaLabel": "文字編輯功能表",
@@ -874,6 +880,7 @@
     "toolbarGroup": "外掛程式",
     "panelTabs": "外掛程式面板",
     "collapsePanel": "收合 {title}",
-    "expandPanel": "展開 {title}"
+    "expandPanel": "展開 {title}",
+    "miniToolbar": "所選內容格式"
   }
 }
