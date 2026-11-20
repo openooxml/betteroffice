@@ -78,9 +78,11 @@ interface MountOptions {
   gateCheckpoint?: boolean;
   /** Yrs state the first open restores over `source`, so that open records no seed. */
   initialState?: Uint8Array;
+  /** Every worker's engine lacks `applyVerbatimUpdate`, as an engine built before the update stream does. */
+  withoutVerbatimApply?: boolean;
 }
 
-function mount({ tamper, source = documentBytes(), reopenSource, collaboration, gateCheckpoint, initialState }: MountOptions = {}) {
+function mount({ tamper, source = documentBytes(), reopenSource, collaboration, gateCheckpoint, initialState, withoutVerbatimApply }: MountOptions = {}) {
   const workers: InProcessResidentWorker[] = [];
   const clients: DocxSourceWorkerClient[] = [];
   let openGate = () => {};
@@ -99,6 +101,13 @@ function mount({ tamper, source = documentBytes(), reopenSource, collaboration, 
   let applied = 0;
   const openResident = async (resume?: Resume): Promise<DocxCommandConnection> => {
     const worker = start();
+    if (withoutVerbatimApply) {
+      const push = worker.sessions.push.bind(worker.sessions);
+      worker.sessions.push = (...opened) => {
+        for (const engine of opened) Reflect.deleteProperty(engine, 'applyVerbatimUpdate');
+        return push(...opened);
+      };
+    }
     workers.push(worker);
     liveWorkers.push(worker);
     const client = new DocxSourceWorkerClient(worker);
@@ -460,20 +469,31 @@ test('a command with a worker-issued position, no checkpoint, crash, recover: ap
   expect(session.version()).toBe(version);
 }, TIMEOUT);
 
+const COLORED_PASTE: DocxClipboardFragment = {
+  paragraphs: [{ text: 'Rich', runs: [{ text: 'Rich', format: { other: { bold: true, textColor: { rgb: 'FF0000' } } } }] }],
+};
+
+async function typeAndPaste(session: ReturnType<typeof mount>) {
+  expect(await session.submit('insertText', { text: 'kept' })).toBe('applied');
+  const at = session.selection();
+  expect(await session.submit('pasteFragment', { selection: { anchor: at.anchor, focus: at.focus }, fragment: COLORED_PASTE })).toBe('applied');
+  const end = session.selection().focus;
+  return {
+    text: session.text(),
+    segments: session.engine().paragraphSegments('body', [0]),
+    choice: { selection: { anchor: { ...end }, focus: { ...end } }, fragment: mergeFormattingFragment(COLORED_PASTE), merge: true },
+  };
+}
+
 test('a paste and its chosen variant survive a worker restart before a checkpoint', async () => {
   const session = mount();
   await session.ready();
-  expect(await session.submit('insertText', { text: 'kept' })).toBe('applied');
-  const fragment: DocxClipboardFragment = { paragraphs: [{ text: 'Rich', runs: [{ text: 'Rich', format: { other: { bold: true } } }] }] };
-  const at = session.selection();
-  expect(await session.submit('pasteFragment', { selection: { anchor: at.anchor, focus: at.focus }, fragment })).toBe('applied');
-  const end = session.selection().focus;
-  expect(await session.submit('replacePasteFragment', {
-    selection: { anchor: { ...end }, focus: { ...end } }, fragment: mergeFormattingFragment(fragment), merge: true,
-  })).toBe('applied');
+  const pasted = await typeAndPaste(session);
+  expect(await session.submit('replacePasteFragment', pasted.choice)).toBe('applied');
   const expected = session.text();
   expect(expected).toContain('keptRich');
   const segments = session.engine().paragraphSegments('body', [0]);
+  expect(segments).not.toEqual(pasted.segments);
   const version = session.version();
   await session.crash();
   expect(session.checkpoints).toEqual([]);
@@ -482,6 +502,83 @@ test('a paste and its chosen variant survive a worker restart before a checkpoin
   session.expectRecovered(expected);
   expect(session.engine().paragraphSegments('body', [0])).toEqual(segments);
   expect(session.version()).toBe(version);
+}, TIMEOUT);
+
+async function crashWithChoiceInFlight(session: ReturnType<typeof mount>, pasted: Awaited<ReturnType<typeof typeAndPaste>>) {
+  const worker = session.worker();
+  worker.hold();
+  const choice = await session.submitQueued('replacePasteFragment', pasted.choice);
+  await waitFor(() => expect(worker.sessions.at(-1)!.paragraphSegments('body', [0])).not.toEqual(pasted.segments), { timeout: 30_000 });
+  await session.crash();
+  return choice;
+}
+
+test('a paste choice in flight at a crash before the first checkpoint is skipped and reported; the paste stays as pasted', async () => {
+  const session = mount();
+  await session.ready();
+  const pasted = await typeAndPaste(session);
+  const version = session.version();
+  const choice = await crashWithChoiceInFlight(session, pasted);
+  expect(session.checkpoints).toEqual([]);
+  expect(session.resumes[0]!.seed).toBeDefined();
+  const status = await session.outcome(choice.status);
+  const detail = await session.outcome(choice.detail);
+  console.log(`G244-PASTE-CHOICE-INFLIGHT-STREAM detail=${detail} phases=${JSON.stringify(session.phases)} errors=${JSON.stringify(session.errors.map((error) => error.message))}`);
+  session.expectRecovered(pasted.text);
+  expect(['refused', 'cancelled']).toContain(status);
+  const { reason } = JSON.parse(detail) as { reason?: unknown };
+  expect(typeof reason).toBe('string');
+  expect((reason as string).length).toBeGreaterThan(0);
+  const seq = choice.ticket.seq!;
+  expect(Number.isSafeInteger(seq)).toBe(true);
+  expect(session.events.filter((event) => event.phase === 'diverged').map(({ diverged }) => diverged)).toEqual([[seq]]);
+  expect(session.engine().paragraphSegments('body', [0])).toEqual(pasted.segments);
+  expect(session.version()).toBe(version);
+  expect(session.engine().hasPendingUpdate()).toBe(false);
+}, TIMEOUT);
+
+test('a paste choice in flight at a crash before the first checkpoint (measured on main)', async () => {
+  const session = mount();
+  await session.ready();
+  const pasted = await typeAndPaste(session);
+  const worker = session.worker();
+  worker.hold();
+  const choice = await session.submitQueued('replacePasteFragment', pasted.choice);
+  try {
+    await waitFor(() => expect(worker.sessions.at(-1)!.paragraphSegments('body', [0])).not.toEqual(pasted.segments), { timeout: 30_000 });
+    await session.crash();
+  } catch {}
+  const status = await session.outcome(choice.detail, 5_000);
+  const recovered = session.phases.includes('recovered');
+  console.log(`G244-PASTE-CHOICE-INFLIGHT status=${status} recovered=${recovered} text=${session.text()}`);
+}, TIMEOUT);
+
+test('an engine without the verbatim apply advertises no stream form, types and saves, and recovers by replaying the original commands as on main', async () => {
+  const session = mount({ withoutVerbatimApply: true });
+  await session.ready();
+  expect(session.engine().applyVerbatimUpdate).toBeUndefined();
+  expect(session.seeds).toEqual([undefined]);
+  expect(await session.submit('insertText', { text: 'a' })).toBe('applied');
+  const typed = session.text();
+  expect(typed).toContain('a');
+  await session.save();
+  expect(session.text()).toBe(typed);
+  await session.typeUntilApplied(128);
+  await session.checkpointTaken(1);
+  expect(await session.submit('insertText', { text: 'Z' })).toBe('applied');
+  const expected = session.text();
+  const version = session.version();
+  await session.settle();
+  expect(session.streamBytes()).toBe(0);
+  await session.crash();
+  expect(session.resumes[0]!.checkpoint).toBeDefined();
+  expect(session.resumes[0]!.seed).toBeUndefined();
+  expect(session.engine().applyVerbatimUpdate).toBeUndefined();
+  expect(session.replayed).toContain('insertText');
+  expect(session.replayed).not.toContain('applyUpdate');
+  session.expectRecovered(expected);
+  expect(session.version()).toBe(version);
+  expect(session.engine().hasPendingUpdate()).toBe(false);
 }, TIMEOUT);
 
 test('a reseed that differs from the opened document fails recovery and applies nothing', async () => {

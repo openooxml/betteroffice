@@ -671,8 +671,13 @@ test('a raw replay of a paste and its choice into a second worker cannot resolve
     await second!.commandInit({ ...init(), incarnation: 2, replayAppliedSeqs: [1, 2, 3] });
     const outcomes: unknown[] = [];
     for (const command of [typing, paste, choice]) {
-      outcomes.push((await second!.edit({ ...command, incarnation: 2, replay: true })).outcomes[0]?.status);
+      const outcome = (await second!.edit({ ...command, incarnation: 2, replay: true })).outcomes[0];
+      outcomes.push({ status: outcome?.status, reason: outcome?.reason });
     }
-    expect(outcomes).toEqual(['applied', 'refused', 'refused']);
+    expect(outcomes).toEqual([
+      { status: 'applied', reason: undefined },
+      { status: 'refused', reason: 'stale-anchor' },
+      { status: 'refused', reason: 'stale-anchor' },
+    ]);
   } finally { clients.forEach(client => client.destroy()); }
 }, TIMEOUT);
