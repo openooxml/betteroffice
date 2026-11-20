@@ -721,7 +721,7 @@ test('a frame-time update between two commands is in the log', async () => {
     await act(async () => { await session.client().applyRemoteUpdate(update); });
   } finally { remote.destroy(); }
   expect(session.text()).toContain('M');
-  expect(await session.submit('insertText', { text: 'Z' })).toBe('applied');
+  expect(await session.submit('insertText', atParagraphStart('Z'))).toBe('applied');
   const expected = session.text();
   const version = session.version();
   for (const letter of ['A', 'M', 'Z']) expect(expected).toContain(letter);
@@ -920,11 +920,23 @@ test('a collaborating core session with checkpoint recovery re-executes an undo 
     expect(textNow()).not.toBe(before);
     const worker = workers.at(-1)!;
     worker.hold();
-    const ack = session.submit('undo' as never, {} as never).ack as Promise<{ status: string; reason?: string }>;
-    await until(() => textOf(worker) === before, 'the undo to commit in the worker');
+    const undo: { outcome?: { status: string; reason?: string } } = {};
+    const ack = (session.submit('undo' as never, {} as never).ack as Promise<{ status: string; reason?: string }>)
+      .then((outcome) => { undo.outcome = outcome; }, (error: Error) => { undo.outcome = { status: `rejected: ${error.message}` }; });
+    const held = { committed: false };
+    await until(() => {
+      worker.release((reply) => {
+        if (reply.ok && reply.commandAck?.outcomes.some((outcome) => outcome.status === 'applied')) held.committed = true;
+        return false;
+      });
+      return held.committed;
+    }, 'the undo to commit in the worker');
     worker.onerror?.({ message: 'simulated worker crash' } as ErrorEvent);
-    const outcome = await ack;
-    await until(() => events.some((event) => event.phase === 'recovered' || event.phase === 'failed'), 'recovery');
+    await until(() => session.stage !== 'recovering' && events.some((event) =>
+      event.phase === 'recovered' || event.phase === 'failed'), 'recovery');
+    await until(() => undo.outcome !== undefined, 'the undo outcome');
+    await ack;
+    const outcome = undo.outcome!;
     const detail = JSON.stringify({ status: outcome.status, reason: outcome.reason });
     console.log(`G244-COLLAB-INFLIGHT-UNDO detail=${detail} phases=${JSON.stringify(events.map((event) => event.phase))} replayed=${JSON.stringify(replayed)}`);
     expect(workers).toHaveLength(2);
@@ -941,7 +953,7 @@ test('with collaboration the logged entries keep their original commands', async
   await session.ready();
   await session.typeUntilApplied(128);
   await session.checkpointTaken(1);
-  expect(await session.submit('insertText', { text: 'Z' })).toBe('applied');
+  expect(await session.submit('insertText', atParagraphStart('Z'))).toBe('applied');
   const expected = session.text();
   await session.crash();
   expect(session.resumes[0]!.seed).toBeUndefined();
@@ -1052,10 +1064,15 @@ test('capture work for one edit does not grow with the edits before it', async (
     const session = mount();
     await session.ready();
     let edits = 0;
+    const atParagraphStart = (text: string) => {
+      const { story, paraId } = session.selection().focus;
+      const at = { story, paraId, offset: 0 };
+      return { text, selection: { anchor: at, focus: { ...at } } };
+    };
     const editUntil = async (count: number) => {
       for (; edits < count; edits += 1) {
         const breaking = edits % 50 === 49;
-        expect(await session.submit(breaking ? 'paragraphBreak' : 'insertText', breaking ? {} : { text: LETTERS[edits % 26]! })).toBe('applied');
+        expect(await session.submit(breaking ? 'paragraphBreak' : 'insertText', breaking ? {} : atParagraphStart(LETTERS[edits % 26]!))).toBe('applied');
       }
     };
     const measure = async (earlier: number) => {
@@ -1078,7 +1095,7 @@ test('capture work for one edit does not grow with the edits before it', async (
       watch.reset();
       watch.counting = true;
       try {
-        expect(await session.submit('insertText', { text: 'Z' })).toBe('applied');
+        expect(await session.submit('insertText', atParagraphStart('Z'))).toBe('applied');
       } finally {
         watch.counting = false;
         worker.onmessage = deliver;
@@ -1086,7 +1103,7 @@ test('capture work for one edit does not grow with the edits before it', async (
       edits += 1;
       const sample = { earlier, visited: watch.visited, minted: watch.added, returned };
       console.log(`G244-CAPTURE-SCAN earlier=${earlier} visited=${sample.visited} minted=${sample.minted.length} ` +
-        `returned=${returned?.length} maps=${watch.maps.size} minted=${JSON.stringify(sample.minted.map(([key]) => key))} ` +
+        `returned=${returned?.length} maps=${watch.maps.size} issued=${[...watch.maps].map((map) => map.size).join(',')} minted=${JSON.stringify(sample.minted.map(([key]) => key))} ` +
         `returned=${JSON.stringify(returned?.map(([key]) => key))}`);
       return sample;
     };
