@@ -235,21 +235,113 @@ describe('native npm names the release publishes later', () => {
     ].join('\n'));
   });
 
-  test('native names are not required when the release skips native packages', async () => {
+  async function withSkipNative<T>(value: string | undefined, run: () => Promise<T>) {
     const prior = process.env.RELEASE_SKIP_NATIVE;
-    process.env.RELEASE_SKIP_NATIVE = 'true';
+    if (value === undefined) delete process.env.RELEASE_SKIP_NATIVE;
+    else process.env.RELEASE_SKIP_NATIVE = value;
     try {
-      const skipped = await check('--npm', (name) =>
-        name === fonts.name || name === latin.name ? versions('1.2.3') : notFound(), {
-        packages: [fonts, latin], workspaces: fontWorkspaces()
-      });
-      expect(skipped.stderr).toBe('');
-      expect(skipped.status).toBe(0);
+      return await run();
     } finally {
       if (prior === undefined) delete process.env.RELEASE_SKIP_NATIVE;
       else process.env.RELEASE_SKIP_NATIVE = prior;
     }
+  }
+
+  test.each(['true', 'TRUE', 'True'])('native names are neither required nor requested when RELEASE_SKIP_NATIVE is %s', async (value) => {
+    const requested: string[] = [];
+    const skipped = await withSkipNative(value, () => check('--npm', (name) => {
+      requested.push(name);
+      return name === fonts.name || name === latin.name ? versions('1.2.3') : notFound();
+    }, { packages: [fonts, latin], workspaces: fontWorkspaces() }));
+    expect(skipped.stderr).toBe('');
+    expect(skipped.status).toBe(0);
+    expect(requested.sort()).toEqual([fonts.name, latin.name].sort());
   });
+
+  /** Runs the npm check against a fake registry and reports a rejection as `status: 'threw'`, keeping what it printed. */
+  async function settledNpmCheck(respond: RegistryResponder, options: Record<string, unknown>) {
+    const { server, origin } = registry(respond);
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const out = { log: (line: string) => stdout.push(line), error: (line: string) => stderr.push(line) };
+    try {
+      const status: number | 'threw' = await checkNpm({ ...options, registry: origin, out } as any);
+      return { status, stdout: stdout.join('\n'), stderr: stderr.join('\n'), error: undefined as string | undefined };
+    } catch (error) {
+      return { status: 'threw' as const, stdout: stdout.join('\n'), stderr: stderr.join('\n'), error: String(error) };
+    } finally {
+      server.stop(true);
+    }
+  }
+
+  test('a native name npm answers with a body that is not JSON exists', async () => {
+    const result = await settledNpmCheck((name) =>
+      name === platform.name ? new Response('<!doctype html>', { status: 200 }) : versions('1.2.3'), {
+      ...native, workspaces: fontWorkspaces()
+    });
+    expect(result).toEqual({
+      status: 0,
+      stdout: [`${fonts.name}@${fonts.version} is on npm.`, `${latin.name}@${latin.version} is on npm.`].join('\n'),
+      stderr: '',
+      error: undefined
+    });
+  }, FULL_SCAN_BUDGET_MS);
+
+  test('a native name npm answers with a JSON null body exists', async () => {
+    const result = await check('--npm', (name) =>
+      name === platform.name ? Response.json(null) : versions('1.2.3'), {
+      ...native, workspaces: fontWorkspaces()
+    });
+    expect(result.stderr).toBe('');
+    expect(result.status).toBe(0);
+  });
+
+  test('a native lookup that keeps failing fails the check, naming the package', async () => {
+    const result = await settledNpmCheck((name) =>
+      name === platform.name
+        ? new Response('{"error":"unavailable"}', { status: 503, headers: { 'Retry-After': '0' } })
+        : versions('1.2.3'), {
+      ...native, workspaces: fontWorkspaces()
+    });
+    expect({ status: result.status, error: result.error }).toEqual({ status: 1, error: undefined });
+    expect(result.stderr).toContain(`${platform.name} could not be looked up on npm:`);
+    expect(result.stderr).toContain('503');
+  });
+
+  test('native names found missing are named even when a later lookup fails', async () => {
+    const failing = { name: '@betteroffice/docx-native-win32-arm64-msvc', version: '1.2.3' };
+    const result = await settledNpmCheck((name) => {
+      if (name === platform.name) return notFound();
+      if (name === failing.name) return new Response(null, { status: 503, headers: { 'Retry-After': '0' } });
+      return versions('1.2.3');
+    }, { ...native, platforms: [platform, failing], workspaces: fontWorkspaces() });
+    expect({ status: result.status, missing: missingLines(result.stderr), error: result.error }).toEqual({
+      status: 1, missing: [`${platform.name} is not on npm.`], error: undefined
+    });
+    expect(result.stderr).toContain('RELEASING.md, "Native packages"');
+    expect(result.stderr).toContain(`${failing.name} could not be looked up on npm:`);
+  });
+
+  test('the full repository scan asks npm once for every release package and every native name', async () => {
+    const requested: string[] = [];
+    const result = await withSkipNative(undefined, () => check('--npm', (name) => {
+      requested.push(name);
+      return versions(workspaceVersions.get(name) ?? platformVersions.get(name)!);
+    }));
+    expect(result.status).toBe(0);
+    expect(natives).toHaveLength(3);
+    expect(requested.sort()).toEqual([...packages, ...natives, ...platforms].map(({ name }) => name).sort());
+  }, FULL_SCAN_BUDGET_MS);
+
+  test('a full repository scan that skips native packages asks npm for no platform package, and for the roots only as dependencies', async () => {
+    const requested: string[] = [];
+    const result = await withSkipNative('true', () => check('--npm', (name) => {
+      requested.push(name);
+      return versions(workspaceVersions.get(name) ?? platformVersions.get(name)!);
+    }));
+    expect(result.status).toBe(0);
+    expect(requested.sort()).toEqual([...packages, ...natives].map(({ name }) => name).sort());
+  }, FULL_SCAN_BUDGET_MS);
 
   test.each([
     ['platform package', platforms[platforms.length - 1]!.name],
