@@ -1680,6 +1680,34 @@ fn replacing_the_text_of_a_paragraph_inside_a_direction_element_keeps_the_elemen
     ];
     let mut document = Document::open(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
     document.replace_paragraph_text("55555555", "xyz").unwrap();
+    let scopes = |document: &Document| -> Vec<String> {
+        let paragraph = document.paragraph("55555555").unwrap();
+        paragraph
+            .content
+            .iter()
+            .filter_map(|item| match item {
+                ParagraphContent::Inline(InlineNode::Run(run)) => Some(run),
+                _ => None,
+            })
+            .flat_map(|run| &run.direction_scopes)
+            .map(|scope| {
+                format!(
+                    "{}:{}",
+                    scope.kind.element(),
+                    scope.val.as_deref().unwrap_or("")
+                )
+            })
+            .collect()
+    };
+    assert_eq!(scopes(&document), ["w:dir:rtl"]);
+    for block in &mut document.model_mut().body.content {
+        if let BlockContent::Paragraph(paragraph) = block
+            && paragraph.para_id.as_deref() == Some("55555555")
+        {
+            paragraph.formatting.get_or_insert_with(Default::default).alignment =
+                Some("center".to_owned());
+        }
+    }
     let saved = document.save().unwrap();
     let parts = ooxml_opc::unzip_parts(&saved).unwrap();
     let xml = saved_part(&parts, "word/document.xml");
@@ -1687,4 +1715,6 @@ fn replacing_the_text_of_a_paragraph_inside_a_direction_element_keeps_the_elemen
         xml.contains(r#"<w:dir w:val="rtl"><w:r><w:t>xyz</w:t></w:r></w:dir>"#),
         "{xml}"
     );
+    let reopened = Document::open(&saved).unwrap();
+    assert_eq!(scopes(&reopened), ["w:dir:rtl"]);
 }
