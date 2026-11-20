@@ -1657,7 +1657,10 @@ fn added_comment_ranges<'w>(
     let mut source_markers = markers(source, &source_tags)?;
     if !unloaded.is_empty() {
         source_markers.retain(|(index, id)| {
-            !unloaded.contains(&(source_tags[*index].name.to_owned(), canonical_id(id.clone())))
+            !unloaded.contains(&(
+                source_tags[*index].name.to_owned(),
+                canonical_id(id.clone()),
+            ))
         });
     }
     let mut held = source_markers.iter().peekable();
@@ -2619,7 +2622,11 @@ fn splice_story_part_inner(
     let changed_ranges = ranged
         .iter()
         .map(|ordinal| {
-            changed_comment_ranges(&source[spans[ordinal].clone()], &written[ordinal], &unloaded)
+            changed_comment_ranges(
+                &source[spans[ordinal].clone()],
+                &written[ordinal],
+                &unloaded,
+            )
         })
         .collect::<Option<Vec<_>>>()?;
     let mut prefixes = BTreeSet::new();
@@ -3647,7 +3654,9 @@ mod tests {
 
     #[test]
     fn an_unchanged_paragraph_keeps_an_unloaded_range_beside_a_deleted_comment_on_a_splice() {
-        let first = sourced(&format!("{HEAD_RUN}{RANGE_IN_INSERTION}{REFERENCE}{NOTED_SECOND}"));
+        let first = sourced(&format!(
+            "{HEAD_RUN}{RANGE_IN_INSERTION}{REFERENCE}{NOTED_SECOND}"
+        ));
         let written = rewritten(&format!("{HEAD_RUN}{INSERTION}{REFERENCE}{NOTED}"));
         let [saved, _] = saved_beside_an_edited_neighbour(&first, &written, &["2"]);
         let kept = sourced(&format!("{HEAD_RUN}{RANGE_IN_INSERTION}{REFERENCE}{NOTED}"));
