@@ -1512,6 +1512,11 @@ fn a_foreign_inline_element_takes_no_story_unit_and_leaves_search_and_export_as_
         assert_eq!(first_paragraph_units(&doc), 5, "{foreign}");
         let found = doc.search_text("Hello", true, None).unwrap();
         assert_eq!(found.len(), 1, "{foreign}: {found:?}");
-        assert_eq!(export_findings(&doc), export_findings(&plain), "{foreign}");
+        let (mut diagnostics, unsupported) = export_findings(&plain);
+        diagnostics.push(
+            "UnsupportedContent An inline x:foo is not represented in the export; it stays in the package."
+                .to_owned(),
+        );
+        assert_eq!(export_findings(&doc), (diagnostics, unsupported + 1), "{foreign}");
     }
 }
