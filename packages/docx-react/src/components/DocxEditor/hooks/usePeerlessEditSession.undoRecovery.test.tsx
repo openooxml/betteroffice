@@ -53,6 +53,7 @@ const LETTERS = 'abcdefghijklmnopqrstuvwxyz';
 
 type Resume = Parameters<NonNullable<UsePeerlessEditSessionOptions['recovery']>['reopen']>[0];
 type Seed = NonNullable<DocxCommandConnection['initial']['seed']>;
+type RecoveryReport = Parameters<NonNullable<NonNullable<UsePeerlessEditSessionOptions['recovery']>['onRecovery']>>[0];
 
 const textOf = (worker: InProcessResidentWorker) =>
   worker.sessions.at(-1)!.paragraphs('body').map((paragraph) => paragraph.text).join('|');
@@ -80,6 +81,7 @@ function mount({ tamper, source = documentBytes(), reopenSource, collaboration, 
   const reopenedText: string[] = [];
   const replayed: string[] = [];
   const phases: string[] = [];
+  const events: RecoveryReport[] = [];
   const errors: Error[] = [];
   let pendingCheckpoint: Promise<unknown> | undefined;
   let applied = 0;
@@ -136,7 +138,7 @@ function mount({ tamper, source = documentBytes(), reopenSource, collaboration, 
         resumes.push(resume);
         return openResident(resume);
       },
-      onRecovery: (event) => { phases.push(event.phase); },
+      onRecovery: (event) => { phases.push(event.phase); events.push(event); },
     },
     canvasForPage: () => null,
     prepareGeometry: () => undefined,
@@ -145,21 +147,35 @@ function mount({ tamper, source = documentBytes(), reopenSource, collaboration, 
   const view = renderHook(() => usePeerlessEditSession(options));
   const settle = () => act(async () => { await new Promise<void>((resolve) => setImmediate(resolve)); });
   const session = {
-    view, checkpoints, phases, errors, resumes, reopenedText, replayed, settle,
+    view, checkpoints, phases, events, errors, resumes, reopenedText, replayed, settle,
     gate: { get requested() { return gate.requested; }, open: () => openGate() },
     worker() { return workers.at(-1)!; },
+    client() { return clients.at(-1)!; },
     engine() { return workers.at(-1)!.sessions.at(-1)!; },
+    stateVector() { return [...workers.at(-1)!.sessions.at(-1)!.encodeStateVector()].join(','); },
+    async outcome(status: Promise<string>, timeout = 30_000) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let settled = 'unsettled';
+      await act(async () => {
+        settled = await Promise.race([status, new Promise<string>((resolve) => { timer = setTimeout(() => resolve('unsettled'), timeout); })]);
+      });
+      clearTimeout(timer);
+      return settled;
+    },
     activePart() { return view.result.current.binding!.session.state.editState?.activePart ?? null; },
     async save() {
       await act(async () => { await clients.at(-1)!.save({ comments: [] }); });
     },
-    async submitQueued(kind: string, payload: Record<string, unknown> = {}): Promise<{ status: Promise<string> }> {
+    async submitQueued(kind: string, payload: Record<string, unknown> = {}): Promise<{ status: Promise<string>; detail: Promise<string> }> {
       let status!: Promise<string>;
+      let detail!: Promise<string>;
       await act(async () => {
-        status = (view.result.current.binding!.session.submit(kind, payload as never).ack as Promise<{ status: string }>)
-          .then((outcome) => outcome.status, (error: Error) => `rejected: ${error.message}`);
+        const ack = view.result.current.binding!.session.submit(kind, payload as never).ack as Promise<{ status: string; reason?: string }>;
+        status = ack.then((outcome) => outcome.status, (error: Error) => `rejected: ${error.message}`);
+        detail = ack.then((outcome) => JSON.stringify({ status: outcome.status, reason: outcome.reason }),
+          (error: Error) => `rejected: ${error.message}`);
       });
-      return { status };
+      return { status, detail };
     },
     async ready() { await waitFor(() => expect(view.result.current.status).toBe('ready'), { timeout: 30_000 }); },
     async submit(kind: string, payload: Record<string, unknown> = {}) {
@@ -463,13 +479,104 @@ test('a save between two acknowledged edits does not leave the recovered documen
   expect(session.engine().hasPendingUpdate()).toBe(false);
 }, TIMEOUT);
 
-test('an undo still in flight at a crash before the first checkpoint is lost, and the text it undid is back', async () => {
+test('a save that publishes paragraph ids between acknowledged edits recovers the document', async () => {
+  const source = documentBytes('Seed');
+  const session = mount({ source });
+  await session.ready();
+  expect(await session.submit('paragraphBreak')).toBe('applied');
+  const before = session.stateVector();
+  await session.save();
+  if (session.stateVector() === before) throw new Error('save wrote nothing; mechanism not reached');
+  expect(await session.submit('insertText', { text: 'B' })).toBe('applied');
+  const expected = session.text();
+  const version = session.version();
+  expect(expected.split('|')).toHaveLength(2);
+  expect(expected).toContain('B');
+  await session.crash();
+  expect(session.checkpoints).toEqual([]);
+  session.expectRecovered(expected);
+  expect(session.version()).toBe(version);
+  expect(session.engine().hasPendingUpdate()).toBe(false);
+}, TIMEOUT);
+
+test('a save landing while a command awaits keeps stream order', async () => {
+  const session = mount();
+  await session.ready();
+  expect(await session.submit('paragraphBreak')).toBe('applied');
+  const worker = session.worker();
+  worker.hold();
+  const typed = await session.submitQueued('insertText', { text: 'B' });
+  await waitFor(() => expect(textOf(worker)).toContain('B'), { timeout: 30_000 });
+  let saved = false;
+  let saving!: Promise<unknown>;
+  await act(async () => { saving = session.client().save({ comments: [] }).then(() => { saved = true; }); });
+  await waitFor(() => {
+    worker.release((reply) => 'saved' in reply);
+    expect(saved).toBe(true);
+  }, { timeout: 30_000 });
+  worker.release();
+  await act(async () => { await saving; });
+  expect(await session.outcome(typed.status)).toBe('applied');
+  expect(await session.submit('insertText', { text: 'C' })).toBe('applied');
+  const expected = session.text();
+  const version = session.version();
+  expect(expected).toContain('BC');
+  await session.crash();
+  expect(session.checkpoints).toEqual([]);
+  session.expectRecovered(expected);
+  expect(session.version()).toBe(version);
+  expect(session.engine().hasPendingUpdate()).toBe(false);
+}, TIMEOUT);
+
+test('a frame-time update between two commands is in the log', async () => {
+  const session = mount();
+  await session.ready();
+  expect(await session.submit('insertText', { text: 'A' })).toBe('applied');
+  const engine = session.engine();
+  const remote = await createYrsSession({ clientId: 9401 });
+  try {
+    remote.loadState(engine.encodeState());
+    const paragraph = remote.paragraphs('body')[0]!;
+    remote.insertText({ story: 'body', paraId: paragraph.paraId, offset: paragraph.text.length }, 'M');
+    const update = remote.encodeStateAsUpdate(engine.encodeStateVector());
+    await act(async () => { await session.client().applyRemoteUpdate(update); });
+  } finally { remote.destroy(); }
+  expect(session.text()).toContain('M');
+  expect(await session.submit('insertText', { text: 'Z' })).toBe('applied');
+  const expected = session.text();
+  const version = session.version();
+  for (const letter of ['A', 'M', 'Z']) expect(expected).toContain(letter);
+  await session.crash();
+  expect(session.checkpoints).toEqual([]);
+  session.expectRecovered(expected);
+  expect(session.version()).toBe(version);
+  expect(session.engine().hasPendingUpdate()).toBe(false);
+}, TIMEOUT);
+
+test('idle saves do not grow the log without bound', async () => {
+  const session = mount();
+  await session.ready();
+  const before = session.stateVector();
+  await session.save();
+  const published = session.stateVector() !== before;
+  for (let i = 1; i < 300; i += 1) await session.save();
+  await session.settle();
+  const expected = session.text();
+  await session.crash();
+  console.log(`G244-IDLE-SAVES published=${published} checkpoints=${session.checkpoints.length} replayed=${session.replayed.length}`);
+  session.expectRecovered(expected);
+  expect(session.engine().hasPendingUpdate()).toBe(false);
+  expect(session.checkpoints.length > 0 || session.replayed.length <= 128).toBe(true);
+}, 600_000);
+
+test('an undo still in flight at a crash before the first checkpoint is refused and reported', async () => {
   const session = mount();
   await session.ready();
   const before = session.text();
   expect(await session.submit('insertText', { text: 'A' })).toBe('applied');
   const typed = session.text();
   expect(typed).not.toBe(before);
+  expect(typed).toContain('A');
   const worker = session.worker();
   worker.hold();
   const undo = await session.submitQueued('undo');
@@ -477,7 +584,35 @@ test('an undo still in flight at a crash before the first checkpoint is lost, an
   await session.crash();
   expect(session.checkpoints).toEqual([]);
   session.expectRecovered(typed);
-  void undo.status;
+  const status = await session.outcome(undo.status);
+  console.log(`G244-INFLIGHT-UNDO status=${status} detail=${await session.outcome(undo.detail)} phases=${JSON.stringify(session.phases)}`);
+  expect(['refused', 'cancelled']).toContain(status);
+  expect(session.phases).toContain('diverged');
+  expect(session.events.some((event) => event.phase === 'diverged' && event.diverged.length > 0 && event.historyReset)).toBe(true);
+  expect(session.engine().hasPendingUpdate()).toBe(false);
+}, TIMEOUT);
+
+test('a redo still in flight at a crash before the first checkpoint is refused and reported', async () => {
+  const session = mount();
+  await session.ready();
+  const before = session.text();
+  expect(await session.submit('insertText', { text: 'A' })).toBe('applied');
+  const typed = session.text();
+  expect(await session.submit('undo')).toBe('applied');
+  expect(session.text()).toBe(before);
+  const worker = session.worker();
+  worker.hold();
+  const redo = await session.submitQueued('redo');
+  await waitFor(() => expect(textOf(worker)).toBe(typed), { timeout: 30_000 });
+  await session.crash();
+  expect(session.checkpoints).toEqual([]);
+  session.expectRecovered(before);
+  const status = await session.outcome(redo.status);
+  console.log(`G244-INFLIGHT-REDO status=${status} detail=${await session.outcome(redo.detail)} phases=${JSON.stringify(session.phases)}`);
+  expect(['refused', 'cancelled']).toContain(status);
+  expect(session.phases).toContain('diverged');
+  expect(session.events.some((event) => event.phase === 'diverged' && event.diverged.length > 0 && event.historyReset)).toBe(true);
+  expect(session.engine().hasPendingUpdate()).toBe(false);
 }, TIMEOUT);
 
 test('with collaboration the logged entries keep their original commands', async () => {
@@ -531,7 +666,13 @@ test('typing queued across a checkpoint', async () => {
   const queued = [await session.submitQueued('insertText', { text: 'Q' }), await session.submitQueued('insertText', { text: 'R' })];
   session.gate.open();
   let statuses: string[] = [];
-  await act(async () => { statuses = await Promise.all(queued.map((entry) => entry.status)); });
+  let details: string[] = [];
+  await act(async () => {
+    statuses = await Promise.all(queued.map((entry) => entry.status));
+    details = await Promise.all(queued.map((entry) => entry.detail));
+  });
+  console.log('G244-QUEUED statuses=' + JSON.stringify(statuses));
+  console.log('G244-QUEUED details=' + JSON.stringify(details));
   expect(statuses.every((status) => !status.startsWith('rejected') && status !== 'refused' && status !== 'cancelled')).toBe(true);
   await session.checkpointTaken(1);
   const expected = session.text();
