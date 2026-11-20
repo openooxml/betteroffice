@@ -466,7 +466,10 @@ fn a_paragraph_moved_to_a_created_list_keeps_its_level() {
     doc.set_paragraph_attr(&paragraph_id(&doc, "Item"), "numPr", num_pr(2.0, 2.0))
         .unwrap();
     let ensured = create(&doc, "Item", ListKind::Bullet);
-    assert!(matches!(ensured.get(LIST_DEF), Some(Any::Map(_))), "{ensured:?}");
+    assert!(
+        matches!(ensured.get(LIST_DEF), Some(Any::Map(_))),
+        "{ensured:?}"
+    );
     assert_eq!(ensured.get("numPr"), Some(&num_pr(1.0, 2.0)));
     assert!(created_key(&doc, "Item").is_some());
     assert_eq!(doc.created_list_definitions().len(), 1);
