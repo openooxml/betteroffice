@@ -1176,6 +1176,7 @@ pub fn render_docx_markdown(
 type RunTemplate = Option<(
     Option<docx_parse::TextFormatting>,
     Option<Vec<docx_parse::inline::RunPropertyChange>>,
+    Vec<docx_parse::DirectionScope>,
 )>;
 
 fn plain_run_template(paragraph: &Paragraph) -> Option<RunTemplate> {
@@ -1192,7 +1193,11 @@ fn plain_run_template(paragraph: &Paragraph) -> Option<RunTemplate> {
     {
         return None;
     }
-    Some(Some((run.formatting.clone(), run.property_changes.clone())))
+    Some(Some((
+        run.formatting.clone(),
+        run.property_changes.clone(),
+        run.direction_scopes.clone(),
+    )))
 }
 
 fn replace_plain_run(paragraph: &mut Paragraph, text: String, template: RunTemplate) {
@@ -1200,7 +1205,7 @@ fn replace_plain_run(paragraph: &mut Paragraph, text: String, template: RunTempl
         paragraph.content.clear();
         return;
     }
-    let (formatting, property_changes) = template.unwrap_or_default();
+    let (formatting, property_changes, direction_scopes) = template.unwrap_or_default();
     paragraph.content = vec![ParagraphContent::Inline(InlineNode::Run(Run {
         node_type: RunType::Run,
         formatting,
@@ -1209,7 +1214,7 @@ fn replace_plain_run(paragraph: &mut Paragraph, text: String, template: RunTempl
             preserve_space: (text.trim() != text).then_some(true),
             text,
         }],
-        direction_scopes: Vec::new(),
+        direction_scopes,
     }))];
 }
 
