@@ -193,8 +193,7 @@ function validParagraphAttrs(value: unknown): boolean {
     listMarkerColor: nullable((entry) => object(entry) && json(entry)),
     listMarkerSuffix: nullable(oneOf('tab', 'space', 'nothing')),
     listLevelNumFmts: nullable((entry) => Array.isArray(entry) && entry.every(string)),
-    other: (entry) => object(entry) && json(entry) && Object.keys(entry).every((key) => !IDENTITY_KEYS.has(key)) &&
-      (!Object.hasOwn(entry, 'listDef') || validListDef(entry.listDef)),
+    other: (entry) => object(entry) && json(entry) && Object.keys(entry).every((key) => !IDENTITY_KEYS.has(key)),
   };
   for (const key of ['lineSpacing', 'spaceBefore', 'spaceAfter', 'indentLeft', 'indentRight', 'indentFirstLine',
     'listMarkerFontSize', 'listAbstractNumId', 'listStartOverride']) validators[key] = nullable(number);
