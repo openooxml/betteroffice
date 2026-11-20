@@ -2482,6 +2482,40 @@ mod tests {
         }
     }
 
+    fn two_thousand_comment_ranges(scoped: bool) -> String {
+        let mut content = String::new();
+        for id in 0..2000 {
+            content.push_str(&text_run("A"));
+            content.push_str(&format!(r#"<w:commentRangeStart w:id="{id}"/>"#));
+            content.push_str(&text_run("B"));
+            content.push_str(&format!(
+                r#"<w:commentRangeEnd w:id="{id}"/><w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="{id}"/></w:r>"#
+            ));
+        }
+        content.push_str(&text_run("A"));
+        if scoped { rtl(&content) } else { content }
+    }
+
+    #[test]
+    #[ignore]
+    fn measure_two_thousand_comment_ranges_paragraph_rewrite() {
+        for (name, scoped) in [("no scope", false), ("one scope over all", true)] {
+            let paragraph = parsed(&paragraph_xml(&two_thousand_comment_ranges(scoped)));
+            let mut times: Vec<_> = (0..5)
+                .map(|_| {
+                    let start = std::time::Instant::now();
+                    serialize_paragraph(&paragraph, &mut context()).unwrap();
+                    start.elapsed()
+                })
+                .collect();
+            times.sort();
+            eprintln!(
+                "two thousand comment ranges with references, {name}: median {:?}",
+                times[2]
+            );
+        }
+    }
+
     #[test]
     fn kept_word_elements_inside_a_complex_field_stay_between_its_begin_and_end() {
         let (a, b, c) = (text_run("A"), text_run("B"), text_run("C"));
