@@ -2345,6 +2345,24 @@ mod tests {
     }
 
     #[test]
+    fn a_complex_field_kept_as_its_source_run_stays_inside_its_direction_scope() {
+        let (a, b) = (text_run("A"), text_run("B"));
+        let field = concat!(
+            r#"<w:r><w:fldChar w:fldCharType="begin"/><w:instrText xml:space="preserve"> PAGE </w:instrText>"#,
+            r#"<w:fldChar w:fldCharType="separate"/><w:t>1</w:t><w:fldChar w:fldCharType="end"/></w:r>"#
+        );
+        let output = written(&format!("{a}{}{b}", rtl(field)));
+        assert_eq!(output.matches("<w:dir ").count(), 1, "{output}");
+        let open = output.find("<w:dir ").unwrap();
+        let close = output.find("</w:dir>").unwrap();
+        let begin = output.find(r#"w:fldCharType="begin""#).unwrap();
+        let end = output.find(r#"w:fldCharType="end""#).unwrap();
+        assert!(open < begin && end < close, "{output}");
+        assert!(output.find("<w:t>A</w:t>").unwrap() < open, "{output}");
+        assert!(close < output.find("<w:t>B</w:t>").unwrap(), "{output}");
+    }
+
+    #[test]
     fn a_bookmark_directly_inside_an_inline_content_control_is_dropped_on_a_rewrite() {
         let (a, b, c, d) = (text_run("A"), text_run("B"), text_run("C"), text_run("D"));
         let bookmark = r#"<w:bookmarkStart w:id="3" w:name="mark"/>"#;
