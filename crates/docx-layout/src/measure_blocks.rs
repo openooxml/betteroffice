@@ -1729,7 +1729,7 @@ fn measure_float_flow_recorded(
 }
 
 /// Where the float flow stands between two blocks.
-#[derive(Default)]
+#[derive(Clone, Debug, Default)]
 struct FlowState {
     cumulative_y: f64,
     active_zones: Vec<FloatingZone>,
@@ -1749,15 +1749,37 @@ impl FlowState {
         section_break_marks: &[bool],
         column_bands: Option<&[ColumnWidthBand]>,
     ) -> Result<BlockExtent, String> {
+        self.enter(
+            resets_float_flow(block),
+            paragraph_zones.get(&index).map(Vec::as_slice),
+            zones_by_anchor.get(&index).map(Vec::as_slice),
+        );
+        self.measure_entered(
+            block,
+            widths.get(index).copied().unwrap_or(default_width),
+            config,
+            section_break_marks.get(index).copied().unwrap_or(false),
+            column_bands,
+        )
+    }
+
+    /// Moves the flow onto a block: clears it at a flow reset, then takes in
+    /// the zones the block anchors.
+    fn enter(
+        &mut self,
+        resets: bool,
+        paragraph_zones: Option<&[FloatingZone]>,
+        margin_zones: Option<&[FloatingZone]>,
+    ) {
         let Self {
             cumulative_y,
             active_zones,
         } = self;
-        if resets_float_flow(block) {
+        if resets {
             active_zones.clear();
             *cumulative_y = 0.0;
         }
-        if let Some(zones) = paragraph_zones.get(&index) {
+        if let Some(zones) = paragraph_zones {
             // A paragraph-anchored band hangs off its own anchor, which sits at
             // `cumulative_y` in the frame the earlier bands were measured in.
             if active_zones.len() + zones.len() <= MAX_ACTIVE_ZONES {
@@ -1768,19 +1790,37 @@ impl FlowState {
                 }));
             } else {
                 *cumulative_y = 0.0;
-                active_zones.clone_from(zones);
+                active_zones.clear();
+                active_zones.extend_from_slice(zones);
             }
         }
-        if let Some(zones) = zones_by_anchor.get(&index) {
+        if let Some(zones) = margin_zones {
             // Anchors the flow has not advanced past share one origin.
             if *cumulative_y == 0.0 && active_zones.len() + zones.len() <= MAX_ACTIVE_ZONES {
                 active_zones.extend(zones.iter().cloned());
             } else {
                 *cumulative_y = 0.0;
-                active_zones.clone_from(zones);
+                active_zones.clear();
+                active_zones.extend_from_slice(zones);
             }
         }
-        let mut width = widths.get(index).copied().unwrap_or(default_width);
+    }
+
+    /// Measures the block [`Self::enter`] moved the flow onto, then moves the
+    /// flow past it.
+    fn measure_entered(
+        &mut self,
+        block: &mut LayoutBlock,
+        width: f64,
+        config: &MeasurementConfig,
+        section_break_mark: bool,
+        column_bands: Option<&[ColumnWidthBand]>,
+    ) -> Result<BlockExtent, String> {
+        let Self {
+            cumulative_y,
+            active_zones,
+        } = self;
+        let mut width = width;
         let column_bands = match column_bands {
             Some(bands)
                 if active_zones.len() + bands.iter().filter(|band| band.width < width).count()
@@ -1811,7 +1851,7 @@ impl FlowState {
         } else {
             active_zones.as_slice()
         };
-        let mut extent = if section_break_marks.get(index).copied().unwrap_or(false) {
+        let mut extent = if section_break_mark {
             BlockExtent::Paragraph(ParagraphExtent {
                 lines: Vec::new(),
                 total_height: 0.0,
@@ -1851,6 +1891,164 @@ impl FlowState {
         }
         Ok(extent)
     }
+
+    /// Whether `other` is the same flow state, compared bit for bit: zones
+    /// meet lines in absolute coordinates, so only equal bits measure alike.
+    fn same_as(&self, other: &Self) -> bool {
+        self.cumulative_y.to_bits() == other.cumulative_y.to_bits()
+            && self.active_zones.len() == other.active_zones.len()
+            && self
+                .active_zones
+                .iter()
+                .zip(&other.active_zones)
+                .all(|(left, right)| left.same_as(right))
+    }
+}
+
+impl FloatingZone {
+    fn same_as(&self, other: &Self) -> bool {
+        self.left_margin.to_bits() == other.left_margin.to_bits()
+            && self.right_margin.to_bits() == other.right_margin.to_bits()
+            && self.top_y.to_bits() == other.top_y.to_bits()
+            && self.bottom_y.to_bits() == other.bottom_y.to_bits()
+            && self.full_width_block == other.full_width_block
+            && self.segments.len() == other.segments.len()
+            && self
+                .segments
+                .iter()
+                .zip(&other.segments)
+                .all(|(left, right)| {
+                    left.left_offset.to_bits() == right.left_offset.to_bits()
+                        && left.available_width.to_bits() == right.available_width.to_bits()
+                })
+    }
+}
+
+/// One block's part in a float flow: whether the flow starts afresh at it,
+/// the paragraph-anchored zones it adds, and where the flow stands after it.
+/// [`FloatFlowReplay`] rebuilds the flow state before any block from the
+/// steps of the blocks before it, without measuring them.
+#[derive(Clone, Debug)]
+pub struct FloatFlowStep {
+    starts: bool,
+    zones: Vec<FloatingZone>,
+    cumulative_y: f64,
+}
+
+impl FloatFlowStep {
+    /// Whether the flow starts afresh at this block, as at a flow segment's
+    /// first block.
+    pub fn starts(&self) -> bool {
+        self.starts
+    }
+}
+
+/// The state of an earlier float flow, rebuilt one [`FloatFlowStep`] at a time.
+#[derive(Clone, Debug, Default)]
+pub struct FloatFlowReplay {
+    state: FlowState,
+}
+
+impl FloatFlowReplay {
+    /// Moves past the block `step` was taken at.
+    pub fn advance(&mut self, step: &FloatFlowStep) {
+        self.state.enter(
+            step.starts,
+            (!step.zones.is_empty()).then_some(step.zones.as_slice()),
+            None,
+        );
+        self.state.cumulative_y = step.cumulative_y;
+    }
+}
+
+/// [`measure_float_segment_with_width_policy`] one block at a time, from the
+/// segment's first block or from where an earlier flow stood before a later
+/// one. Each block's zones are found as it is measured.
+#[derive(Debug, Default)]
+pub struct FloatSegmentFlow {
+    state: FlowState,
+    started: bool,
+}
+
+impl FloatSegmentFlow {
+    /// A flow at the segment's first block.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A flow standing where `replay` stands, before the block that follows
+    /// the steps it replayed.
+    pub fn resume(replay: &FloatFlowReplay) -> Self {
+        Self {
+            state: replay.state.clone(),
+            started: true,
+        }
+    }
+
+    /// Measures the next block of the segment. `width`, `table_frame` and
+    /// `section_break_mark` are the block's entries in what
+    /// [`measure_float_segment_with_width_policy`] takes. `Ok(None)` when the
+    /// block anchors a margin-relative zone.
+    #[allow(clippy::too_many_arguments)]
+    pub fn measure(
+        &mut self,
+        block: &mut LayoutBlock,
+        width: f64,
+        default_width: f64,
+        width_policy: FloatWidthPolicy,
+        table_frame: impl Copy + Into<TableMeasurementFrame>,
+        config: &MeasurementConfig,
+        page_geometry: Option<&FloatPageGeometry>,
+        section_break_mark: bool,
+    ) -> Result<Option<(BlockExtent, FontChainDependencies, FloatFlowStep)>, String> {
+        let (extracted, zone_dependencies) = extract_floating_zones_recorded(
+            std::slice::from_ref(block),
+            default_width,
+            &[width],
+            width_policy,
+            &[table_frame],
+            config,
+            page_geometry,
+            &BTreeMap::new(),
+            true,
+        )?;
+        if extracted.iter().any(|zone| zone.margin_relative) {
+            return Ok(None);
+        }
+        let zones = extracted
+            .into_iter()
+            .map(|anchored| anchored.zone)
+            .collect::<Vec<_>>();
+        let resets = resets_float_flow(block);
+        let starts = resets || !self.started;
+        self.started = true;
+        let state = &mut self.state;
+        let (extent, mut reads) = FontChainDependencies::capture(|| {
+            state.enter(
+                resets,
+                (!zones.is_empty()).then_some(zones.as_slice()),
+                None,
+            );
+            state.measure_entered(block, width, config, section_break_mark, None)
+        });
+        let zone_reads = zone_dependencies
+            .into_iter()
+            .next()
+            .unwrap_or_else(FontChainDependencies::unknown);
+        reads.extend(&zone_reads);
+        zone_reads.record();
+        let step = FloatFlowStep {
+            starts,
+            zones,
+            cumulative_y: self.state.cumulative_y,
+        };
+        Ok(Some((extent?, reads, step)))
+    }
+
+    /// Whether this flow stands exactly where `replay`'s flow stood.
+    pub fn matches(&self, replay: &FloatFlowReplay) -> bool {
+        self.state.same_as(&replay.state)
+    }
 }
 
 /// [`measure_blocks_with_floats`] a few blocks at a time. The floating zones
@@ -1865,6 +2063,9 @@ pub struct FloatFlow {
     measured: Vec<BlockExtent>,
     font_dependencies: Vec<FontChainDependencies>,
     zone_dependencies: Vec<FontChainDependencies>,
+    /// The measured blocks' steps; `None` when margin-relative zones couple
+    /// the whole flow, which steps do not record.
+    steps: Option<Vec<FloatFlowStep>>,
 }
 
 impl FloatFlow {
@@ -1925,6 +2126,9 @@ impl FloatFlow {
             true,
         )?;
         let (paragraph_zones, zones_by_anchor) = group_floating_zones(extracted);
+        let steps = zones_by_anchor
+            .is_empty()
+            .then(|| Vec::with_capacity(blocks.len()));
         Ok(Self {
             default_width,
             paragraph_zones,
@@ -1934,6 +2138,7 @@ impl FloatFlow {
             measured: Vec::with_capacity(blocks.len()),
             font_dependencies: Vec::with_capacity(blocks.len()),
             zone_dependencies,
+            steps,
         })
     }
 
@@ -1951,6 +2156,13 @@ impl FloatFlow {
         &self.font_dependencies
     }
 
+    /// The measured blocks' [`FloatFlowStep`]s, the same steps
+    /// [`FloatSegmentFlow`] takes through each flow segment. `None` when the
+    /// blocks anchor a margin-relative zone.
+    pub fn steps(&self) -> Option<&[FloatFlowStep]> {
+        self.steps.as_deref()
+    }
+
     /// Measures the next blocks up to `end`, exclusive. `blocks` and `widths`
     /// are the ones the flow was created for.
     pub fn measure_until(
@@ -1961,6 +2173,7 @@ impl FloatFlow {
         end: usize,
     ) -> Result<(), String> {
         for index in self.measured.len()..end.min(blocks.len()) {
+            let starts = index == 0 || resets_float_flow(&blocks[index]);
             let (extent, mut dependencies) = FontChainDependencies::capture(|| {
                 self.state.measure(
                     index,
@@ -1978,6 +2191,17 @@ impl FloatFlow {
             dependencies.record();
             self.measured.push(extent?);
             self.font_dependencies.push(dependencies);
+            if let Some(steps) = self.steps.as_mut() {
+                steps.push(FloatFlowStep {
+                    starts,
+                    zones: self
+                        .paragraph_zones
+                        .get(&index)
+                        .cloned()
+                        .unwrap_or_default(),
+                    cumulative_y: self.state.cumulative_y,
+                });
+            }
         }
         Ok(())
     }
@@ -5502,6 +5726,109 @@ mod tests {
             let zone = &flow.paragraph_zones[&0][0];
             assert_eq!((zone.left_margin, zone.right_margin), expected);
         }
+    }
+
+    #[test]
+    fn a_float_segment_flow_resumed_from_earlier_steps_measures_as_the_whole_segment() {
+        let fonts = crate::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let config = cache_measurement_config();
+        // A wrapped image in every paragraph: the 201st zone re-seats the flow.
+        let blocks: Vec<LayoutBlock> = (0..260)
+            .map(|index| {
+                serde_json::from_value(json!({
+                    "kind": "paragraph", "id": format!("p{index}"),
+                    "runs": [
+                        {"kind": "text", "text": format!("Paragraph {index} wraps beside its image.")},
+                        {"kind": "image", "src": "image", "width": 120,
+                         "height": if index % 7 == 0 { 60 } else { 8 },
+                         "wrapType": "square", "distLeft": 12, "distRight": 12,
+                         "position": {"horizontal": {"relativeTo": "column", "align": "left"},
+                                      "vertical": {"relativeTo": "paragraph", "posOffset": 0}}}
+                    ]
+                }))
+                .unwrap()
+            })
+            .collect();
+        let widths = vec![400.0; blocks.len()];
+        let marks = section_break_marks(&blocks);
+        let policy = FloatWidthPolicy::for_document(blocks.iter());
+        let extent_json = |extent: &BlockExtent| serde_json::to_string(extent).unwrap();
+        let mut whole = blocks.clone();
+        let mut flow =
+            FloatFlow::with_width_policy(&whole, &widths, policy, &[] as &[bool], &config, None)
+                .unwrap();
+        flow.measure_until(&mut whole, &widths, &config, blocks.len())
+            .unwrap();
+        let steps = flow.steps().unwrap().to_vec();
+        let extents = flow.into_extents();
+        let (segment, _) = measure_float_segment_with_width_policy(
+            &mut blocks.clone(),
+            &widths,
+            400.0,
+            policy,
+            &[] as &[bool],
+            &config,
+            None,
+            &marks,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            segment.iter().map(extent_json).collect::<Vec<_>>(),
+            extents.iter().map(extent_json).collect::<Vec<_>>()
+        );
+        for start in [0, 1, 150, 199, 200, 201, 259] {
+            let mut replay = FloatFlowReplay::default();
+            for step in &steps[..start] {
+                replay.advance(step);
+            }
+            if start > 200 {
+                assert_eq!(replay.state.active_zones.len(), start - 200);
+            }
+            let mut resumed = if start == 0 {
+                FloatSegmentFlow::new()
+            } else {
+                FloatSegmentFlow::resume(&replay)
+            };
+            for (index, expected) in extents.iter().enumerate().skip(start) {
+                let mut block = blocks[index].clone();
+                let (extent, _, step) = resumed
+                    .measure(
+                        &mut block,
+                        widths[index],
+                        400.0,
+                        policy,
+                        false,
+                        &config,
+                        None,
+                        marks[index],
+                    )
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    extent_json(&extent),
+                    extent_json(expected),
+                    "{start} {index}"
+                );
+                assert_eq!(step.starts, steps[index].starts);
+                assert_eq!(
+                    step.cumulative_y.to_bits(),
+                    steps[index].cumulative_y.to_bits()
+                );
+                replay.advance(&steps[index]);
+                assert!(resumed.matches(&replay), "{start} {index}");
+            }
+        }
+        // A flow a block taller stands elsewhere.
+        let mut replay = FloatFlowReplay::default();
+        replay.advance(&steps[0]);
+        let mut taller = steps[1].clone();
+        taller.cumulative_y += 1.0;
+        let mut moved = replay.clone();
+        moved.advance(&taller);
+        replay.advance(&steps[1]);
+        assert!(!FloatSegmentFlow::resume(&moved).matches(&replay));
     }
 
     #[test]

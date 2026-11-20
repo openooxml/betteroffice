@@ -260,10 +260,9 @@ fn a_body_edit_beside_floats_remeasures_only_its_flow_segment_as_a_fresh_layout_
         .unwrap()
         .len() as u64;
     let remeasured = after.resident_measure_calls - before.resident_measure_calls;
-    assert!(
-        remeasured > 1 && remeasured < blocks / 2,
-        "{remeasured} of {blocks}"
-    );
+    // The edited paragraph, and the blocks after it until the flow beside the
+    // floating table stands as it stood, within the first segment.
+    assert!((1..=6).contains(&remeasured), "{remeasured} of {blocks}");
 
     let fresh = EngineSession::new(9304);
     fresh

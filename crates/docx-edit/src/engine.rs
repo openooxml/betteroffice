@@ -24,7 +24,10 @@ use docx_layout::header_footer::{
     resolve_header_footer_field_widths,
 };
 use docx_layout::hit::{CaretRect, VerticalDirection};
-use docx_layout::measure_blocks::{ColumnWidthBand, FloatWidthPolicy, TableMeasurementFrame};
+use docx_layout::measure_blocks::{
+    ColumnWidthBand, FloatFlowReplay, FloatFlowStep, FloatSegmentFlow, FloatWidthPolicy,
+    TableMeasurementFrame,
+};
 use docx_layout::paragraph_spacing::resolve_doc_grid_pitch;
 use docx_layout::paragraph_spacing::resolve_line_unit_spacing;
 use docx_layout::place::LayoutCheckpoint;
@@ -437,6 +440,7 @@ struct PreparedRegionLayout {
     measured_table_wrap_frames: Vec<TableMeasurementFrame>,
     measured_side_margin_changes: Vec<bool>,
     measured_float_geometry: Option<[f64; 5]>,
+    float_flow: FloatFlowSteps,
     provisional: bool,
     exact_cut: Option<ExactCut>,
     cached_page_totals: bool,
@@ -480,8 +484,12 @@ impl PreparedRegionLayout {
         let body = self.body.take().expect("body measure present");
         // Header and footer measurement later widens only the section breaks,
         // which the pass fingerprints again.
-        self.block_fingerprints = Some(body.fingerprints);
         self.measured_font_dependencies = body.flow.font_dependencies().to_vec();
+        self.float_flow = body
+            .flow
+            .steps()
+            .map_or_else(Vec::new, |steps| steps.iter().cloned().map(Some).collect());
+        self.block_fingerprints = Some(body.fingerprints);
         self.input.measured = body
             .blocks
             .into_iter()
@@ -533,6 +541,7 @@ impl Drop for MovedArenaGuard<'_> {
             pagination.measured_float_width_policy = None;
             pagination.set_font_dependencies(Vec::new(), None);
             pagination.retain_matches.clear();
+            pagination.float_flow.clear();
             pagination.moved_blocks.clear();
         }
     }
@@ -1528,6 +1537,37 @@ fn placed_column_measurement_frames(
 /// Wrap phases each pinned picture frame adds to the phase budget.
 const PIN_RECOVERY_PHASES: usize = 2;
 
+/// Whether [`stabilize_flow_wrapping`] can measure `input`'s blocks again,
+/// with frames, offsets or bands body measurement does not know.
+fn flow_wrapping_remeasures(input: &LayoutInput, regions: &DocumentRegions) -> bool {
+    input.measured.iter().any(|measured| {
+        matches!(&measured.block, LayoutBlock::Shape(shape) if wraps_by_page_side(shape))
+    }) || unequal_column_blocks(input, regions)
+        .iter()
+        .any(|unequal| *unequal)
+        || continuous_pictures(input)
+}
+
+/// Whether `input` holds a continuous section break and a picture.
+fn continuous_pictures(input: &LayoutInput) -> bool {
+    let has_continuous = input.options.body_break_type == Some(SectionBreakType::Continuous)
+        || input.measured.iter().any(|measured| {
+            matches!(
+                &measured.block,
+                LayoutBlock::SectionBreak(section)
+                    if section.break_type == Some(SectionBreakType::Continuous)
+            )
+        });
+    has_continuous
+        && input.measured.iter().any(|measured| {
+            matches!(
+                &measured.block,
+                LayoutBlock::Paragraph(paragraph)
+                    if paragraph.runs.iter().any(|run| matches!(run, Run::Image(_)))
+            )
+        })
+}
+
 fn stabilize_flow_wrapping<F>(
     input: &mut LayoutInput,
     regions: &DocumentRegions,
@@ -1550,22 +1590,7 @@ where
         .collect::<Vec<_>>();
     let unequal = unequal_column_blocks(input, regions);
     let has_unequal = unequal.iter().any(|unequal| *unequal);
-    let has_continuous = input.options.body_break_type == Some(SectionBreakType::Continuous)
-        || input.measured.iter().any(|measured| {
-            matches!(
-                &measured.block,
-                LayoutBlock::SectionBreak(section)
-                    if section.break_type == Some(SectionBreakType::Continuous)
-            )
-        });
-    let has_continuous_pictures = has_continuous
-        && input.measured.iter().any(|measured| {
-            matches!(
-                &measured.block,
-                LayoutBlock::Paragraph(paragraph)
-                    if paragraph.runs.iter().any(|run| matches!(run, Run::Image(_)))
-            )
-        });
+    let has_continuous_pictures = continuous_pictures(input);
     if shapes.is_empty() && !has_unequal && !has_continuous_pictures {
         return Ok(false);
     }
@@ -2208,6 +2233,150 @@ impl MeasurementPatch {
     }
 }
 
+/// Per arena block, its [`FloatFlowStep`] in the float flow that measured the
+/// arena, `None` where that flow is unknown. Only a region pass's body
+/// measurement records them, and only when [`flow_wrapping_remeasures`] is
+/// false: flow wrapping measures the blocks again outside the flow.
+type FloatFlowSteps = Vec<Option<FloatFlowStep>>;
+
+/// `float_flow` for an arena of `blocks` blocks, or no steps at all.
+fn retained_float_flow(mut float_flow: FloatFlowSteps, blocks: usize) -> FloatFlowSteps {
+    if float_flow.len() != blocks {
+        float_flow.clear();
+        float_flow.resize(blocks, None);
+    }
+    float_flow
+}
+
+/// A resident body arena: its measured blocks, their fingerprints, and with
+/// floats their float flow steps.
+type ResidentMeasured = (Vec<MeasuredBlock>, Vec<Fingerprint>, FloatFlowSteps);
+
+/// The blocks of a float flow segment [`measure_float_segment_from_change`]
+/// measured, `indices` in order, as measurement took them.
+struct MeasuredFloatSegment {
+    indices: Vec<usize>,
+    blocks: Vec<LayoutBlock>,
+    extents: Vec<BlockExtent>,
+    reads: Vec<FontChainDependencies>,
+    steps: Vec<FloatFlowStep>,
+}
+
+/// Measures the flow segment `segment` holding `float_dirty` blocks as
+/// `measure_float_segment_with_width_policy` measures the whole segment, for
+/// the blocks whose extents can differ from the retained ones. `retained`
+/// holds each block's step in the flow that measured the retained arena (see
+/// [`retained_float_flow`]); `normalized` gives a block as measurement takes
+/// it.
+///
+/// The steps of the blocks before a dirty block rebuild the flow state the
+/// earlier flow reached it in. Measuring starts at the first dirty block from
+/// that state; after any measured block that leaves the flow exactly where the
+/// earlier flow stood, it skips the clean blocks up to the next dirty one,
+/// resuming there from the state their steps rebuild, or stops when no dirty
+/// block is left. From the same state the earlier flow measured those clean
+/// blocks as this one would. Without the steps it measures on, to the
+/// segment's end. `Ok(None)` when a measured block anchors a margin-relative
+/// zone.
+#[allow(clippy::too_many_arguments)]
+fn measure_float_segment_from_change(
+    segment: std::ops::Range<usize>,
+    float_dirty: &[bool],
+    retained: &[Option<FloatFlowStep>],
+    mut normalized: impl FnMut(usize) -> LayoutBlock,
+    widths: &[f64],
+    default_width: f64,
+    float_width_policy: FloatWidthPolicy,
+    table_wrap_frames: &[TableMeasurementFrame],
+    measurement: &docx_layout::measure_blocks::MeasurementConfig,
+    geometry: &docx_layout::measure_blocks::FloatPageGeometry,
+    marks: &[bool],
+) -> Result<Option<MeasuredFloatSegment>, String> {
+    let step = |index: usize| retained.get(index).and_then(Option::as_ref);
+    // The earlier flow's state as far as this one has come, from the earlier
+    // flow's own start.
+    let mut earlier = step(segment.start)
+        .is_some_and(FloatFlowStep::starts)
+        .then(FloatFlowReplay::default);
+    // Moves `earlier` past the clean blocks before the next dirty block, or
+    // to the segment's end; that block, or `None` without their steps.
+    let skip = |earlier: &mut FloatFlowReplay, from: usize| {
+        let next = (from..segment.end)
+            .find(|&index| float_dirty[index])
+            .unwrap_or(segment.end);
+        if next == segment.end {
+            return (from..next)
+                .all(|index| step(index).is_some())
+                .then_some(next);
+        }
+        for index in from..next {
+            earlier.advance(step(index)?);
+        }
+        Some(next)
+    };
+    let mut flow = FloatSegmentFlow::new();
+    let mut index = segment.start;
+    if let Some(replay) = earlier.as_mut() {
+        let mut skipped = replay.clone();
+        if let Some(next) = skip(&mut skipped, segment.start) {
+            if next > segment.start {
+                flow = FloatSegmentFlow::resume(&skipped);
+            }
+            *replay = skipped;
+            index = next;
+        }
+    }
+    let mut measured = MeasuredFloatSegment {
+        indices: Vec::new(),
+        blocks: Vec::new(),
+        extents: Vec::new(),
+        reads: Vec::new(),
+        steps: Vec::new(),
+    };
+    while index < segment.end {
+        let mut block = normalized(index);
+        let Some((extent, reads, next)) = flow.measure(
+            &mut block,
+            widths.get(index).copied().unwrap_or(default_width),
+            default_width,
+            float_width_policy,
+            table_wrap_frames
+                .get(index)
+                .copied()
+                .unwrap_or_else(|| false.into()),
+            measurement,
+            Some(geometry),
+            marks.get(index).copied().unwrap_or(false),
+        )?
+        else {
+            return Ok(None);
+        };
+        measured.indices.push(index);
+        measured.blocks.push(block);
+        measured.extents.push(extent);
+        measured.reads.push(reads);
+        measured.steps.push(next);
+        earlier = earlier.and_then(|mut replay| {
+            replay.advance(step(index)?);
+            Some(replay)
+        });
+        index += 1;
+        if let Some(replay) = earlier.as_mut()
+            && flow.matches(replay)
+        {
+            let mut skipped = replay.clone();
+            if let Some(next) = skip(&mut skipped, index) {
+                if next > index {
+                    flow = FloatSegmentFlow::resume(&skipped);
+                }
+                *replay = skipped;
+                index = next;
+            }
+        }
+    }
+    Ok(Some(measured))
+}
+
 #[derive(Debug, Default)]
 struct PaginationState {
     input: Option<LayoutInput>,
@@ -2234,6 +2403,7 @@ struct PaginationState {
     measured_float_geometry: Option<[f64; 5]>,
     measured_float_width_policy: Option<FloatWidthPolicy>,
     measured_with_floats: bool,
+    float_flow: FloatFlowSteps,
     /// Pages whose note areas changed since the last display build.
     note_changed_pages: Vec<usize>,
     layout: Option<Layout>,
@@ -5381,6 +5551,7 @@ impl EngineSession {
         pagination.measured_float_geometry = None;
         pagination.measured_float_width_policy = None;
         pagination.measured_with_floats = false;
+        pagination.float_flow = Vec::new();
         pagination.layout = None;
         pagination.checkpoints = Vec::new();
         pagination.region_placements = Vec::new();
@@ -7965,6 +8136,7 @@ impl EngineSession {
         let mut measured_table_wrap_frames = Vec::new();
         let mut measured_side_margin_changes = Vec::new();
         let mut measured_float_geometry = None;
+        let mut float_flow = Vec::new();
         let mut provisional = false;
         let mut exact_cut = None;
         let mut body = None;
@@ -7973,7 +8145,7 @@ impl EngineSession {
                 .as_ref()
                 .ok_or_else(|| "resident body layout requires a render environment".to_owned())?;
             enum Arena {
-                Reused(Vec<MeasuredBlock>, Vec<Fingerprint>),
+                Reused(ResidentMeasured),
                 /// Blocks to measure, and whether floats couple the whole flow.
                 Full(Vec<LayoutBlock>, bool),
             }
@@ -8024,9 +8196,7 @@ impl EngineSession {
                             floats.then_some(&geometry),
                             trigger,
                         )? {
-                            Some((measured, fingerprints)) => {
-                                Ok(Arena::Reused(measured, fingerprints))
-                            }
+                            Some(measured) => Ok(Arena::Reused(measured)),
                             None => Ok(Arena::Full(blocks.to_vec(), false)),
                         }
                     },
@@ -8039,7 +8209,8 @@ impl EngineSession {
                 lowered_generation = Some(lowered.generation);
             }
             match arena {
-                Arena::Reused(measured, fingerprints) => {
+                Arena::Reused((measured, fingerprints, records)) => {
+                    float_flow = records;
                     if trigger.uses_region_path() {
                         retain_matches =
                             std::mem::take(&mut self.pagination.borrow_mut().retain_matches);
@@ -8217,6 +8388,7 @@ impl EngineSession {
             measured_table_wrap_frames,
             measured_side_margin_changes,
             measured_float_geometry,
+            float_flow,
             provisional,
             exact_cut,
             cached_page_totals,
@@ -8293,6 +8465,7 @@ impl EngineSession {
             measured_table_wrap_frames,
             measured_side_margin_changes,
             measured_float_geometry,
+            float_flow,
             provisional,
             exact_cut,
             cached_page_totals,
@@ -8317,6 +8490,12 @@ impl EngineSession {
             self.measure_header_footer_payload(&mut input, &regions, &measurement, render_env, cut)?
         } else {
             None
+        };
+        // The fast region path edits a float-free arena in place, without steps.
+        let float_flow = if !has_floats || flow_wrapping_remeasures(&input, &regions) {
+            Vec::new()
+        } else {
+            float_flow
         };
         if resident_body
             && stabilize_flow_wrapping(&mut input, &regions, &measurement, |input, _| {
@@ -8628,6 +8807,7 @@ impl EngineSession {
         pagination.measured_table_wrap_frames = measured_table_wrap_frames;
         pagination.measured_side_margin_changes = measured_side_margin_changes;
         pagination.measured_float_geometry = measured_float_geometry;
+        pagination.float_flow = float_flow;
         pagination.measured_float_width_policy =
             pagination.measured_with.map(|_| float_width_policy);
         pagination.measured_with_floats = has_floats;
@@ -8688,6 +8868,7 @@ impl EngineSession {
             measured_table_wrap_frames,
             measured_side_margin_changes,
             measured_float_geometry,
+            float_flow,
             provisional,
             exact_cut,
             cached_page_totals,
@@ -8732,6 +8913,12 @@ impl EngineSession {
             previous: std::mem::take(&mut self.pagination.borrow_mut().region_placements),
             next: Vec::new(),
             placed_blocks: 0,
+        };
+        // The fast region path edits a float-free arena in place, without steps.
+        let float_flow = if !has_floats || flow_wrapping_remeasures(&input, &regions) {
+            Vec::new()
+        } else {
+            float_flow
         };
         if resident_body
             && self
@@ -9224,6 +9411,7 @@ impl EngineSession {
         pagination.measured_table_wrap_frames = measured_table_wrap_frames;
         pagination.measured_side_margin_changes = measured_side_margin_changes;
         pagination.measured_float_geometry = measured_float_geometry;
+        pagination.float_flow = float_flow;
         pagination.measured_float_width_policy =
             pagination.measured_with.map(|_| float_width_policy);
         pagination.measured_with_floats = has_floats;
@@ -10205,6 +10393,8 @@ impl EngineSession {
         } = run;
         let mut pagination = self.pagination.borrow_mut();
         pagination.input = Some(input);
+        // A region pass that measured the arena records its float flow after this.
+        pagination.float_flow.clear();
         pagination.flowed_tail = None;
         pagination.measured_spacing = measured_spacing;
         pagination.moved_blocks.clear();
@@ -10590,7 +10780,7 @@ impl EngineSession {
         measurement_fingerprint: u64,
         floats: Option<&docx_layout::measure_blocks::FloatPageGeometry>,
         trigger: RelayoutTrigger,
-    ) -> Result<Option<(Vec<MeasuredBlock>, Vec<Fingerprint>)>, String> {
+    ) -> Result<Option<ResidentMeasured>, String> {
         if !trigger.uses_region_path() {
             return self.resident_region_measured_plain(
                 blocks,
@@ -10864,7 +11054,10 @@ impl EngineSession {
                 section_index += 1;
             }
         }
+        let mut float_flow = Vec::new();
         if let Some(geometry) = floats {
+            float_flow =
+                retained_float_flow(std::mem::take(&mut pagination.float_flow), blocks.len());
             let default_width = widths.first().copied().unwrap_or(0.0);
             let mut start = 0;
             while start < blocks.len() {
@@ -10876,8 +11069,11 @@ impl EngineSession {
                     })
                     .unwrap_or(blocks.len());
                 if float_dirty[start..end].contains(&true) {
-                    let mut segment: Vec<_> = (start..end)
-                        .map(|index| {
+                    let Some(segment) = measure_float_segment_from_change(
+                        start..end,
+                        &float_dirty,
+                        &float_flow,
+                        |index| {
                             #[cfg(test)]
                             if measurement_patch.is_some() {
                                 CERTIFIED_FLOAT_WORK.with(|work| work.borrow_mut().1.push(index));
@@ -10887,26 +11083,33 @@ impl EngineSession {
                                 regions,
                                 sections[index],
                             )
-                        })
-                        .collect();
-                    let Some((extents, reads)) =
-                        docx_layout::measure_blocks::measure_float_segment_with_width_policy(
-                            &mut segment,
-                            &widths[start..end],
-                            default_width,
-                            float_width_policy,
-                            &table_wrap_frames[start..end],
-                            measurement,
-                            Some(geometry),
-                            &marks[start..end],
-                        )?
+                        },
+                        widths,
+                        default_width,
+                        float_width_policy,
+                        table_wrap_frames,
+                        measurement,
+                        geometry,
+                        &marks,
+                    )?
                     else {
                         return Ok(None);
                     };
-                    for (offset, (mut block, measure)) in
-                        segment.into_iter().zip(extents).enumerate()
+                    let MeasuredFloatSegment {
+                        indices,
+                        blocks: segment,
+                        extents,
+                        reads,
+                        steps,
+                    } = segment;
+                    for (offset, (((index, mut block), measure), step)) in indices
+                        .into_iter()
+                        .zip(segment)
+                        .zip(extents)
+                        .zip(steps)
+                        .enumerate()
                     {
-                        let index = start + offset;
+                        float_flow[index] = Some(step);
                         fingerprint_blocks[index] = Some(block.clone());
                         suppress_contextual_spacing(blocks, index, &mut block);
                         docx_layout::paragraph_spacing::apply_contextual_spacing_blocks(
@@ -11019,7 +11222,7 @@ impl EngineSession {
         if measurement_patch.is_some() {
             self.certified_measurement_epoch.set(Some(self.doc_epoch()));
         }
-        Ok(Some((measured, block_fingerprints)))
+        Ok(Some((measured, block_fingerprints, float_flow)))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -11035,7 +11238,7 @@ impl EngineSession {
         measurement: &docx_layout::measure_blocks::MeasurementConfig,
         measurement_fingerprint: u64,
         floats: Option<&docx_layout::measure_blocks::FloatPageGeometry>,
-    ) -> Result<Option<(Vec<MeasuredBlock>, Vec<Fingerprint>)>, String> {
+    ) -> Result<Option<ResidentMeasured>, String> {
         let edited = self.pagination.borrow().doc_epoch != self.doc_epoch();
         if floats.is_some() && (self.measurement_patch().is_some() || !edited) {
             #[cfg(test)]
@@ -11302,7 +11505,10 @@ impl EngineSession {
                 section_index += 1;
             }
         }
+        let mut float_flow = Vec::new();
         if let Some(geometry) = floats {
+            float_flow =
+                retained_float_flow(std::mem::take(&mut pagination.float_flow), blocks.len());
             let marks: Vec<_> = (0..blocks.len())
                 .map(|index| {
                     docx_layout::measure_blocks::is_section_break_mark(
@@ -11323,52 +11529,67 @@ impl EngineSession {
                     })
                     .unwrap_or(blocks.len());
                 if float_dirty[start..end].contains(&true) {
-                    let mut segment: Vec<_> = (start..end)
-                        .map(|index| blocks.get(index).expect("body block").clone())
-                        .collect();
-                    for (block, &section) in segment.iter_mut().zip(&float_sections[start..end]) {
-                        resolve_line_unit_spacing(
-                            block,
-                            regions.paragraph_spacing_line_px(section),
-                        );
-                        resolve_doc_grid_pitch(block, regions.doc_grid_snap_pitch_px(section));
-                        if let LayoutBlock::SectionBreak(section_break) = block
-                            && !section_break.is_self_describing()
-                            && let Some(section) = regions.sections.get(section)
-                        {
-                            if section.page_size.is_some() {
-                                section_break.page_size.clone_from(&section.page_size);
+                    let segment = measure_float_segment_from_change(
+                        start..end,
+                        &float_dirty,
+                        &float_flow,
+                        |index| {
+                            let mut block = blocks.get(index).expect("body block").clone();
+                            let section = float_sections[index];
+                            resolve_line_unit_spacing(
+                                &mut block,
+                                regions.paragraph_spacing_line_px(section),
+                            );
+                            resolve_doc_grid_pitch(
+                                &mut block,
+                                regions.doc_grid_snap_pitch_px(section),
+                            );
+                            if let LayoutBlock::SectionBreak(section_break) = &mut block
+                                && !section_break.is_self_describing()
+                                && let Some(section) = regions.sections.get(section)
+                            {
+                                if section.page_size.is_some() {
+                                    section_break.page_size.clone_from(&section.page_size);
+                                }
+                                if section.margins.is_some() {
+                                    section_break.margins.clone_from(&section.margins);
+                                }
+                                if section.columns.is_some() {
+                                    section_break.columns.clone_from(&section.columns);
+                                }
                             }
-                            if section.margins.is_some() {
-                                section_break.margins.clone_from(&section.margins);
-                            }
-                            if section.columns.is_some() {
-                                section_break.columns.clone_from(&section.columns);
-                            }
-                        }
-                    }
-                    let extents =
-                        docx_layout::measure_blocks::measure_float_segment_with_width_policy(
-                            &mut segment,
-                            &widths[start..end],
-                            default_width,
-                            float_width_policy,
-                            &table_wrap_frames[start..end],
-                            measurement,
-                            Some(geometry),
-                            &marks[start..end],
-                        );
-                    let (extents, reads) = match extents {
+                            block
+                        },
+                        widths,
+                        default_width,
+                        float_width_policy,
+                        table_wrap_frames,
+                        measurement,
+                        geometry,
+                        &marks,
+                    );
+                    let MeasuredFloatSegment {
+                        indices,
+                        blocks: segment,
+                        extents,
+                        reads,
+                        steps,
+                    } = match segment {
                         Ok(Some(measured)) => measured,
                         outcome => {
                             restore_moved_measures(&mut previous.measured, measured);
                             return outcome.map(|_| None);
                         }
                     };
-                    for (offset, (mut block, measure)) in
-                        segment.into_iter().zip(extents).enumerate()
+                    for (offset, (((index, mut block), measure), step)) in indices
+                        .into_iter()
+                        .zip(segment)
+                        .zip(extents)
+                        .zip(steps)
+                        .enumerate()
                     {
-                        block_fingerprints[start + offset] =
+                        float_flow[index] = Some(step);
+                        block_fingerprints[index] =
                             match measured_parts_fingerprint(&block, &measure) {
                                 Ok(fingerprint) => fingerprint,
                                 Err(error) => {
@@ -11376,26 +11597,26 @@ impl EngineSession {
                                     return Err(error);
                                 }
                             };
-                        suppress_contextual_spacing(blocks, start + offset, &mut block);
+                        suppress_contextual_spacing(blocks, index, &mut block);
                         docx_layout::paragraph_spacing::apply_contextual_spacing_blocks(
                             std::slice::from_mut(&mut block),
                         );
                         let entry = MeasuredBlock { block, measure };
-                        measured[start + offset] = entry;
-                        if let Some(safe) = pagination.measured_shift_safe.get_mut(start + offset) {
+                        measured[index] = entry;
+                        if let Some(safe) = pagination.measured_shift_safe.get_mut(index) {
                             *safe = None;
                         }
-                        dependencies[start + offset] = reads[offset].clone();
-                        if !float_dirty[start + offset] {
+                        dependencies[index] = reads[offset].clone();
+                        if !float_dirty[index] {
                             reused_blocks -= 1;
                         }
                         #[cfg(test)]
                         {
-                            reused[start + offset] = false;
+                            reused[index] = false;
                         }
                         measure_calls = measure_calls.wrapping_add(1);
                         #[cfg(test)]
-                        BODY_MEASUREMENT_WORK.with(|work| work.borrow_mut().0.push(start + offset));
+                        BODY_MEASUREMENT_WORK.with(|work| work.borrow_mut().0.push(index));
                     }
                 }
                 start = end;
@@ -11417,7 +11638,7 @@ impl EngineSession {
         measurement_state.resident_reused_blocks = measurement_state
             .resident_reused_blocks
             .wrapping_add(reused_blocks);
-        Ok(Some((measured, block_fingerprints)))
+        Ok(Some((measured, block_fingerprints, float_flow)))
     }
 
     /// Complete the post-edit dependency cone and return its binary frame.
@@ -18664,7 +18885,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             pagination.measured_widths = vec![300.0];
             pagination.set_font_dependencies(vec![dependencies.clone()], None);
         }
-        let (reused, fingerprints) = engine
+        let (reused, fingerprints, _) = engine
             .resident_region_measured(
                 &blocks,
                 None,
@@ -18990,7 +19211,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                 "kind": if previous_is_section {"pageBreak"} else {"sectionBreak"}, "id": "previous"
             }))
             .unwrap();
-            let (warm, _) = engine
+            let (warm, _, _) = engine
                 .resident_region_measured(
                     &blocks,
                     None,
@@ -19711,16 +19932,15 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         assert_certified_float_cold(&engine, &request, &mut retained);
         for (pass, text) in ["x", "y"].into_iter().enumerate() {
             measurement_patch_type(&engine, certified_float_offset(&engine, 1), text);
-            let expected = certified_float_dirty_segment(&engine);
+            let (segment, first) = certified_float_key(&engine);
             SHIFT_SAFETY_WORK.with(|work| work.set(0));
-            assert_eq!(
-                certified_float_layout(&engine, &request, RelayoutTrigger::Bulk),
-                (expected.clone(), 0),
-            );
+            let (measured, full) = certified_float_layout(&engine, &request, RelayoutTrigger::Bulk);
+            assert_eq!(full, 0);
+            assert_float_key_work(&measured, &segment, first);
             SHIFT_SAFETY_WORK.with(|work| {
                 assert!(work.get() > 0);
                 if pass > 0 {
-                    assert!(work.get() <= expected.len() + 1);
+                    assert!(work.get() <= segment.len() + 1);
                 }
             });
             assert_certified_float_cold(&engine, &request, &mut retained);
@@ -20394,11 +20614,11 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         assert_certified_float_cold(&engine, &request, &mut retained);
         measurement_patch_type(&engine, certified_float_offset(&engine, 18), "z");
         assert!(engine.measurement_patch().is_some());
-        let dirty = certified_float_dirty_segment(&engine);
-        assert_eq!(
-            certified_float_layout(&engine, &request, RelayoutTrigger::Interactive),
-            (dirty, 0),
-        );
+        let (segment, first) = certified_float_key(&engine);
+        let (measured, full) =
+            certified_float_layout(&engine, &request, RelayoutTrigger::Interactive);
+        assert_eq!(full, 0);
+        assert_float_key_work(&measured, &segment, first);
         TYPING_EXTRA_WORK.with(|work| assert_eq!(work.get().measurement_attempts, 1));
         assert_certified_float_cold(&engine, &request, &mut retained);
     }
@@ -20806,11 +21026,11 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             assert_local_patch_matches_cold(&engine, &request, "seeded cross-run refusal");
             measurement_patch_type(&engine, certified_float_offset(&engine, 18), "x");
             assert!(engine.measurement_patch().is_some());
-            let dirty = certified_float_dirty_segment(&engine);
-            assert_eq!(
-                certified_float_layout(&engine, &request, RelayoutTrigger::Interactive),
-                (dirty, 0),
-            );
+            let (segment, first) = certified_float_key(&engine);
+            let (measured, full) =
+                certified_float_layout(&engine, &request, RelayoutTrigger::Interactive);
+            assert_eq!(full, 0);
+            assert_float_key_work(&measured, &segment, first);
             assert_certified_float_cold(&engine, &request, &mut retained);
         }
     }
@@ -20918,6 +21138,33 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         certified_float_segment(engine, replaced)
     }
 
+    /// The flow segment a pending measurement patch edits, and its first
+    /// replaced block.
+    fn certified_float_key(engine: &EngineSession) -> (Vec<usize>, usize) {
+        let first = engine.measurement_patch().as_ref().unwrap().replaced.start;
+        (certified_float_dirty_segment(engine), first)
+    }
+
+    /// Asserts that a key's layout measured `measured` within the flow
+    /// segment `segment` it edited: in order from the first changed block,
+    /// `first`, skipping the unchanged blocks the flow reaches exactly where
+    /// the retained flow stood.
+    fn assert_float_key_work(measured: &[usize], segment: &[usize], first: usize) {
+        assert_eq!(
+            measured.first(),
+            Some(&first),
+            "{measured:?} of {segment:?}"
+        );
+        assert!(
+            measured.windows(2).all(|pair| pair[0] < pair[1]),
+            "{measured:?} of {segment:?}"
+        );
+        assert!(
+            measured.iter().all(|index| segment.contains(index)),
+            "{measured:?} of {segment:?}"
+        );
+    }
+
     fn certified_float_segment(
         engine: &EngineSession,
         replaced: std::ops::Range<usize>,
@@ -20955,7 +21202,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                 _ => false,
             })
             .unwrap();
-        let expected = certified_float_segment(&engine, slot..slot + 1);
+        let segment = certified_float_segment(&engine, slot..slot + 1);
         let offset = certified_float_offset(&engine, 9);
         engine
             .edit_resident_text(
@@ -20970,7 +21217,9 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         BODY_MEASUREMENT_WORK.with(|work| *work.borrow_mut() = Default::default());
         engine.layout_regions(&request, None).unwrap();
         BODY_MEASUREMENT_WORK.with(|work| {
-            assert_eq!(*work.borrow(), (expected, 0));
+            let (measured, full) = &*work.borrow();
+            assert_eq!(*full, 0);
+            assert_float_key_work(measured, &segment, slot);
         });
         assert_certified_float_cold(&engine, &request, &mut retained);
     }
@@ -20992,6 +21241,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             (9, vec!["c", "😀"]),
         ] {
             let mut expected = BTreeSet::new();
+            let mut first = usize::MAX;
             for text in &texts {
                 let id = format!("{:08X}", paragraph + 1);
                 let slot = engine.render.borrow().stories["body"]
@@ -21003,6 +21253,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                     })
                     .unwrap();
                 expected.extend(certified_float_segment(&engine, slot..slot + 1));
+                first = first.min(slot);
                 let offset = certified_float_offset(&engine, paragraph);
                 engine
                     .edit_resident_text(
@@ -21019,7 +21270,10 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             BODY_MEASUREMENT_WORK.with(|work| *work.borrow_mut() = Default::default());
             engine.layout_regions(&request, None).unwrap();
             BODY_MEASUREMENT_WORK.with(|work| {
-                assert_eq!(*work.borrow(), (expected.into_iter().collect(), 0));
+                let (measured, full) = &*work.borrow();
+                assert_eq!(*full, 0);
+                let segment = expected.into_iter().collect::<Vec<_>>();
+                assert_float_key_work(measured, &segment, first);
             });
             assert_certified_float_cold(&engine, &request, &mut retained);
         }
@@ -21120,7 +21374,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             engine.relayout_trigger.set(RelayoutTrigger::Interactive);
             measurement_patch_type(&engine, certified_float_offset(&engine, 17), text);
             assert!(engine.measurement_patch().is_some());
-            let expected = certified_float_dirty_segment(&engine);
+            let (segment, first) = certified_float_key(&engine);
             let before = engine.stats();
             BODY_MEASUREMENT_WORK.with(|work| *work.borrow_mut() = Default::default());
             let prepared = engine
@@ -21128,10 +21382,10 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                 .unwrap();
             assert!(!engine.pagination.borrow().moved_blocks.is_empty());
             engine.finish_region_layout(prepared).unwrap();
-            assert_eq!(
-                BODY_MEASUREMENT_WORK.with(|work| std::mem::take(&mut *work.borrow_mut())),
-                (expected, 0),
-            );
+            let (measured, full) =
+                BODY_MEASUREMENT_WORK.with(|work| std::mem::take(&mut *work.borrow_mut()));
+            assert_eq!(full, 0);
+            assert_float_key_work(&measured, &segment, first);
             assert!(engine.measurement_patch().is_none());
             if key > 0 {
                 let pagination = engine.pagination.borrow();
@@ -21241,10 +21495,10 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                         certified_float_offset(&engine, paragraph),
                         text,
                     );
-                    let expected = certified_float_dirty_segment(&engine);
+                    let (segment, first) = certified_float_key(&engine);
                     let (measured, full) = certified_float_layout(&engine, &request, trigger);
                     assert_eq!(full, 0);
-                    assert_eq!(measured, expected);
+                    assert_float_key_work(&measured, &segment, first);
                     assert!(engine.measurement_patch().is_none());
                     {
                         let render = engine.render.borrow();
@@ -21273,11 +21527,10 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                         text,
                     );
                 }
-                let expected = certified_float_dirty_segment(&engine);
-                assert_eq!(
-                    certified_float_layout(&engine, &request, trigger),
-                    (expected, 0),
-                );
+                let (segment, first) = certified_float_key(&engine);
+                let (measured, full) = certified_float_layout(&engine, &request, trigger);
+                assert_eq!(full, 0);
+                assert_float_key_work(&measured, &segment, first);
                 assert_certified_float_cold(&engine, &request, &mut retained);
             }
         }
@@ -21301,11 +21554,10 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                         certified_float_offset(&engine, paragraph),
                         "x",
                     );
-                    let expected = certified_float_dirty_segment(&engine);
-                    assert_eq!(
-                        certified_float_layout(&engine, &request, trigger),
-                        (expected, 0),
-                    );
+                    let (segment, first) = certified_float_key(&engine);
+                    let (measured, full) = certified_float_layout(&engine, &request, trigger);
+                    assert_eq!(full, 0);
+                    assert_float_key_work(&measured, &segment, first);
                     assert_certified_float_cold(&engine, &request, &mut retained);
                 }
                 let id = format!("{:08X}", 17);
@@ -21318,11 +21570,10 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                     assert_certified_float_cold(&engine, &request, &mut retained);
                     engine.relayout_trigger.set(trigger);
                     measurement_patch_type(&engine, certified_float_offset(&engine, 17), "y");
-                    let expected = certified_float_dirty_segment(&engine);
-                    assert_eq!(
-                        certified_float_layout(&engine, &request, trigger),
-                        (expected, 0),
-                    );
+                    let (segment, first) = certified_float_key(&engine);
+                    let (measured, full) = certified_float_layout(&engine, &request, trigger);
+                    assert_eq!(full, 0);
+                    assert_float_key_work(&measured, &segment, first);
                     assert_certified_float_cold(&engine, &request, &mut retained);
                 }
             }
@@ -21367,17 +21618,16 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                 certified_float_offset(&engine, 20),
                 &"wrapping words ".repeat(80),
             );
-            let expected = certified_float_dirty_segment(&engine);
+            let (segment, first) = certified_float_key(&engine);
             let replaced = engine
                 .measurement_patch()
                 .as_ref()
                 .unwrap()
                 .replaced
                 .clone();
-            assert_eq!(
-                certified_float_layout(&engine, &request, trigger),
-                (expected, 0),
-            );
+            let (measured, full) = certified_float_layout(&engine, &request, trigger);
+            assert_eq!(full, 0);
+            assert_float_key_work(&measured, &segment, first);
             assert!(height(&engine) > before);
             assert!(
                 engine
@@ -21411,11 +21661,10 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                 assert_certified_float_cold(&engine, &request, &mut retained);
                 measurement_patch_type(&engine, certified_float_offset(&engine, 17), "x");
                 undo.add_undo_barrier();
-                let expected = certified_float_dirty_segment(&engine);
-                assert_eq!(
-                    certified_float_layout(&engine, &request, trigger),
-                    (expected, 0),
-                );
+                let (segment, first) = certified_float_key(&engine);
+                let (measured, full) = certified_float_layout(&engine, &request, trigger);
+                assert_eq!(full, 0);
+                assert_float_key_work(&measured, &segment, first);
                 assert_certified_float_cold(&engine, &request, &mut retained);
                 assert!(undo.undo());
                 assert!(engine.measurement_patch().is_none());
@@ -21427,11 +21676,10 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                 assert_certified_float_cold(&engine, &request, &mut retained);
                 engine.relayout_trigger.set(trigger);
                 measurement_patch_type(&engine, certified_float_offset(&engine, 17), "y");
-                let expected = certified_float_dirty_segment(&engine);
-                assert_eq!(
-                    certified_float_layout(&engine, &request, trigger),
-                    (expected, 0),
-                );
+                let (segment, first) = certified_float_key(&engine);
+                let (measured, full) = certified_float_layout(&engine, &request, trigger);
+                assert_eq!(full, 0);
+                assert_float_key_work(&measured, &segment, first);
                 assert_certified_float_cold(&engine, &request, &mut retained);
                 engine.relayout_trigger.set(trigger);
                 measurement_patch_type(&engine, certified_float_offset(&engine, 17), "z");
@@ -21476,11 +21724,18 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                 assert_certified_float_cold(&engine, &request, &mut retained);
                 let paragraph = middle * 8 + 1;
                 measurement_patch_type(&engine, certified_float_offset(&engine, paragraph), "x");
-                let expected = certified_float_dirty_segment(&engine);
+                let segment = certified_float_dirty_segment(&engine);
+                let slot = engine.measurement_patch().as_ref().unwrap().replaced.start;
                 let before = engine.stats();
                 let (measured, full) = certified_float_layout(&engine, &request, trigger);
                 assert_eq!(full, 0);
-                assert_eq!(measured, expected);
+                // From the typed paragraph until the flow stands as it stood.
+                assert_eq!(measured.first(), Some(&slot));
+                assert!(
+                    measured.len() < segment.len(),
+                    "{measured:?} of {segment:?}"
+                );
+                assert!(measured.iter().all(|index| segment.contains(index)));
                 assert_eq!(
                     engine.stats().resident_measure_calls - before.resident_measure_calls,
                     measured.len() as u64,
@@ -21507,11 +21762,16 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                 certified_float_engine(font, 10_000, &[0], false, false, trigger);
             measurement_patch_type(&engine, certified_float_offset(&engine, 1), "x");
             let expected = certified_float_dirty_segment(&engine);
+            let slot = engine.measurement_patch().as_ref().unwrap().replaced.start;
             CERTIFIED_FLOAT_WORK.with(|work| *work.borrow_mut() = Default::default());
-            assert_eq!(
-                certified_float_layout(&engine, &request, trigger),
-                (expected.clone(), 0),
+            let (measured, full) = certified_float_layout(&engine, &request, trigger);
+            assert_eq!(full, 0);
+            assert_eq!(measured.first(), Some(&slot));
+            assert!(
+                measured.len() < expected.len(),
+                "{measured:?} of {expected:?}"
             );
+            assert!(measured.iter().all(|index| expected.contains(index)));
             CERTIFIED_FLOAT_WORK.with(|work| {
                 let work = work.borrow();
                 assert!(!work.0.is_empty());
@@ -21529,6 +21789,303 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                 }
             });
             assert_certified_float_cold(&engine, &request, &mut HashMap::new());
+        }
+    }
+
+    /// One flow segment of `paragraphs` short paragraphs per page break, with
+    /// `before(index)` placed ahead of paragraph `index` and `inside(index)`
+    /// appended to it, laid out for `trigger`.
+    fn float_flow_engine(
+        font: u32,
+        paragraphs: u32,
+        page_break_before: &[u32],
+        before: impl Fn(u32) -> String,
+        inside: impl Fn(u32) -> String,
+        trigger: RelayoutTrigger,
+    ) -> (EngineSession, String) {
+        let section = r#"<w:sectPr><w:pgSz w:w="7200" w:h="8640"/><w:pgMar w:top="300" w:right="300" w:bottom="300" w:left="300"/></w:sectPr>"#;
+        let mut body = String::new();
+        for index in 0..paragraphs {
+            body.push_str(&before(index));
+            let mut content = String::new();
+            if page_break_before.contains(&index) {
+                content.push_str("<w:pPr><w:pageBreakBefore/></w:pPr>");
+            }
+            content.push_str(&preview_fixture::run(&format!("Text {index}.")));
+            content.push_str(&inside(index));
+            body.push_str(&preview_fixture::paragraph(index + 1, &content));
+        }
+        body.push_str(section);
+        let bytes = preview_fixture::document(&body);
+        let engine = EngineSession::new(9635);
+        crate::seed_from_docx(engine.doc(), &bytes).unwrap();
+        engine.set_local_lowering(true);
+        let request = lowering_pages::region_request(&engine, &bytes, font).to_string();
+        engine.relayout_trigger.set(trigger);
+        engine
+            .layout_regions_for_trigger(&request, None, trigger)
+            .unwrap();
+        assert!(engine.pagination.borrow().measured_with_floats);
+        (engine, request)
+    }
+
+    /// A wrapped picture anchored in its paragraph, `width` by `height` EMU.
+    fn float_flow_picture(id: u32, width: u32, height: u32) -> String {
+        preview_pagination_anchor()
+            .replace(
+                r#"cx="285750" cy="285750""#,
+                &format!(r#"cx="{width}" cy="{height}""#),
+            )
+            .replace(r#"id="9""#, &format!(r#"id="{id}""#))
+    }
+
+    fn float_flow_shape(id: u32) -> String {
+        INSIDE_SHAPE
+            .replace("relativeFrom=\"margin\"", "relativeFrom=\"column\"")
+            .replace("<wp:align>inside</wp:align>", "<wp:align>left</wp:align>")
+            .replace("id=\"1\"", &format!("id=\"{id}\""))
+    }
+
+    fn float_flow_slot(engine: &EngineSession, paragraph: u32) -> usize {
+        let id = format!("{:08X}", paragraph + 1);
+        engine.render.borrow().stories["body"]
+            .blocks
+            .iter()
+            .position(|block| match block {
+                LayoutBlock::Paragraph(block) => block_key(&block.id) == id,
+                _ => false,
+            })
+            .unwrap()
+    }
+
+    /// How a test keystroke reaches the engine. (A bulk layout of a local edit
+    /// without a measurement patch measures afresh, see
+    /// `resident_certified_float_unpatched_local_bulk_edit_falls_back`.)
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum FloatFlowKey {
+        /// Typed, then laid out on the interactive path.
+        Interactive,
+        /// Typed with a measurement patch, then laid out in bulk.
+        Patched,
+    }
+
+    impl FloatFlowKey {
+        const ALL: [Self; 2] = [Self::Interactive, Self::Patched];
+
+        fn trigger(self) -> RelayoutTrigger {
+            match self {
+                Self::Interactive => RelayoutTrigger::Interactive,
+                Self::Patched => RelayoutTrigger::Bulk,
+            }
+        }
+
+        /// Types `text` at the start of `paragraph`, lays the document out and
+        /// returns the body blocks measured.
+        fn type_text(
+            self,
+            engine: &EngineSession,
+            request: &str,
+            paragraph: u32,
+            text: &str,
+        ) -> Vec<usize> {
+            let offset = certified_float_offset(engine, paragraph);
+            match self {
+                Self::Patched => measurement_patch_type(engine, offset, text),
+                Self::Interactive => {
+                    engine
+                        .edit_resident_text(
+                            crate::StoryRange::new("body", offset, offset),
+                            Some(text),
+                            true,
+                        )
+                        .unwrap();
+                }
+            }
+            let (measured, full) = certified_float_layout(engine, request, self.trigger());
+            assert_eq!(
+                full, 0,
+                "{self:?} key in paragraph {paragraph} measured afresh"
+            );
+            measured
+        }
+    }
+
+    #[test]
+    fn resident_float_flow_keys_measure_from_the_key_and_match_cold() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        for key in FloatFlowKey::ALL {
+            // Segments 0..40 and 40..60: a picture anchored in paragraph 10,
+            // a shape beside paragraph 25, a floating table before paragraph
+            // 32, and a picture in the second segment's first paragraph.
+            let (engine, request) = float_flow_engine(
+                font,
+                60,
+                &[40],
+                |index| {
+                    if index == 32 {
+                        floating_table(r#"w:vertAnchor="text""#, 1)
+                    } else {
+                        String::new()
+                    }
+                },
+                |index| match index {
+                    10 => float_flow_picture(10, 1828800, 914400),
+                    25 => float_flow_shape(25),
+                    40 => float_flow_picture(40, 1828800, 457200),
+                    _ => String::new(),
+                },
+                key.trigger(),
+            );
+            let mut retained = HashMap::new();
+            assert_certified_float_cold(&engine, &request, &mut retained);
+            let segment_end = float_flow_slot(&engine, 40);
+            let body_end = engine.render.borrow().stories["body"].blocks.len();
+            // (paragraph, text, whether its line count stays)
+            for (paragraph, text, keeps_lines) in [
+                // before the first zone, and the first block of a segment
+                (3, "x", true),
+                (0, "x", true),
+                // in the picture's anchor paragraph, beside and past its zone
+                (10, "x", true),
+                (12, "y", true),
+                (12, "z", true),
+                (20, "x", true),
+                // beside the shape and the floating table
+                (26, "x", true),
+                (33, "x", true),
+                // the second segment's first block, anchoring a picture
+                (40, "x", true),
+                (45, "x", true),
+                // more lines push everything after the key down
+                (12, &"wrapping words ".repeat(12), false),
+                (12, "w", true),
+                (33, &"wrapping words ".repeat(12), false),
+            ] {
+                // A paragraph holding a picture takes no measurement patch.
+                if key == FloatFlowKey::Patched && [10, 40].contains(&paragraph) {
+                    continue;
+                }
+                let slot = float_flow_slot(&engine, paragraph);
+                let lowered = engine.render.borrow().stories["body"].blocks.to_vec();
+                let measured = key.type_text(&engine, &request, paragraph, text);
+                assert_certified_float_cold(&engine, &request, &mut retained);
+                assert!(measured.contains(&slot), "{key:?} {paragraph} {measured:?}");
+                assert!(
+                    measured.windows(2).all(|pair| pair[0] < pair[1]),
+                    "{key:?} {paragraph} {measured:?}"
+                );
+                let end = if paragraph < 40 {
+                    segment_end
+                } else {
+                    body_end
+                };
+                if keeps_lines {
+                    // Only the blocks the key changed, and the shape, which
+                    // the interactive walk always measures again: the flow
+                    // stands after each where it stood.
+                    let changed = engine.render.borrow().stories["body"]
+                        .blocks
+                        .iter()
+                        .zip(&lowered)
+                        .enumerate()
+                        .filter(|(_, (next, previous))| {
+                            next != previous || matches!(next, LayoutBlock::Shape(_))
+                        })
+                        .map(|(index, _)| index)
+                        .collect::<Vec<_>>();
+                    assert!(
+                        measured.iter().all(|index| changed.contains(index)),
+                        "{key:?} {paragraph} {measured:?} changed {changed:?}"
+                    );
+                } else {
+                    assert_eq!(measured.last(), Some(&(end - 1)), "{key:?} {paragraph}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn resident_float_flow_keys_past_two_hundred_zones_match_cold() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        // A paragraph holding a picture takes no measurement patch.
+        for key in [FloatFlowKey::Interactive] {
+            // A small picture in every paragraph: the 201st zone re-seats the flow.
+            let (engine, request) = float_flow_engine(
+                font,
+                260,
+                &[],
+                |_| String::new(),
+                |index| float_flow_picture(index + 1, 457200, 95250),
+                key.trigger(),
+            );
+            let mut retained = HashMap::new();
+            assert_certified_float_cold(&engine, &request, &mut retained);
+            for paragraph in [100, 199, 200, 201, 230, 199] {
+                let slot = float_flow_slot(&engine, paragraph);
+                let measured = key.type_text(&engine, &request, paragraph, "x");
+                assert_certified_float_cold(&engine, &request, &mut retained);
+                assert_eq!(
+                    measured.first(),
+                    Some(&slot),
+                    "{key:?} {paragraph} {measured:?}"
+                );
+                assert!(measured.len() <= 2, "{key:?} {paragraph} {measured:?}");
+            }
+            let measured = key.type_text(&engine, &request, 150, &"wrapping words ".repeat(12));
+            assert_certified_float_cold(&engine, &request, &mut retained);
+            assert_eq!(measured.first(), Some(&float_flow_slot(&engine, 150)));
+        }
+    }
+
+    #[test]
+    fn resident_float_flow_key_work_does_not_grow_with_the_segment() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        for key in FloatFlowKey::ALL {
+            let mut counts = Vec::new();
+            for paragraphs in [1_000, 4_000] {
+                let (engine, request) = float_flow_engine(
+                    font,
+                    paragraphs,
+                    &[],
+                    |_| String::new(),
+                    |index| {
+                        if index % 50 == 10 {
+                            float_flow_picture(index + 1, 1828800, 914400)
+                        } else {
+                            String::new()
+                        }
+                    },
+                    key.trigger(),
+                );
+                let blocks = engine.render.borrow().stories["body"].blocks.len();
+                // A single flow segment holds every block.
+                assert!(
+                    engine.render.borrow().stories["body"]
+                        .blocks
+                        .iter()
+                        .skip(1)
+                        .all(|block| !docx_layout::measure_blocks::resets_float_flow(block))
+                );
+                let measured = key.type_text(&engine, &request, 511, "x");
+                assert!(
+                    measured.len() < blocks / 4,
+                    "{key:?} {paragraphs}: {}",
+                    measured.len()
+                );
+                counts.push(measured.len());
+                let measured = key.type_text(&engine, &request, 511, "y");
+                counts.push(measured.len());
+                if paragraphs == 1_000 {
+                    assert_certified_float_cold(&engine, &request, &mut HashMap::new());
+                }
+            }
+            assert_eq!(counts[..2], counts[2..], "{key:?}");
         }
     }
 
@@ -21674,10 +22231,10 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             let mut retained = HashMap::new();
             assert_certified_float_cold(&engine, &request, &mut retained);
             measurement_patch_type(&engine, certified_float_offset(&engine, 9), "x");
-            let expected = certified_float_dirty_segment(&engine);
+            let (segment, first) = certified_float_key(&engine);
             let (measured, full) = certified_float_layout(&engine, &request, trigger);
             assert_eq!(full, 0);
-            assert_eq!(measured, expected);
+            assert_float_key_work(&measured, &segment, first);
             {
                 let render = engine.render.borrow();
                 let work = engine.font_dependency_work.borrow();
@@ -23032,9 +23589,12 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                     let reused = after.resident_reused_blocks - before.resident_reused_blocks;
                     if floats && index == 0 {
                         assert_eq!(measured + reused, blocks as u64);
-                    } else if let Some(expected) = expected {
+                    } else if let Some(segment) = expected {
+                        // The typed paragraph, then its flow segment until the
+                        // flow beside the floats stands as it stood.
                         assert!(reused > 0);
-                        assert_eq!((measured, reused), (expected, blocks as u64 - expected));
+                        assert!((1..=segment).contains(&measured), "{measured} of {segment}");
+                        assert_eq!(reused, blocks as u64 - measured);
                     } else {
                         assert!(reused > 0);
                         assert_eq!((measured, reused), (1, blocks as u64 - 1));
