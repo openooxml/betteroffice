@@ -1074,15 +1074,16 @@ pub(crate) fn raw_foreign_node(
 }
 
 /// A `w:` inline element no walker models, kept as raw XML. One holding text is recorded for
-/// the parse warnings.
+/// the parse warnings when the model `kept` it.
 pub(crate) fn unmodeled_word_node(
     element: &crate::xml::XmlElement,
     budget: &mut crate::xml::ParseBudget<'_>,
+    kept: bool,
 ) -> Option<RawInlineXml> {
     if element.namespace_prefix() != Some("w") {
         return None;
     }
-    if has_word_text(element) {
+    if kept && has_word_text(element) {
         budget.record_unmodeled_inline(&element.name, word_text_chars(element));
     }
     Some(RawInlineXml {

@@ -807,9 +807,10 @@ fn parse_paragraph_contents(
             "pPr" | "proofErr" | "permStart" | "permEnd" => {}
             "smartTagPr" | "customXmlPr" if child.namespace_prefix() == Some("w") => {}
             _ => {
+                let kept = element.matches_name("w", "p");
                 if let Some(raw) = crate::inline::raw_foreign_node(child, budget) {
                     output.push(ParagraphContent::Inline(InlineNode::RawXml(Box::new(raw))));
-                } else if let Some(raw) = crate::inline::unmodeled_word_node(child, budget) {
+                } else if let Some(raw) = crate::inline::unmodeled_word_node(child, budget, kept) {
                     let node = InlineNode::RawXml(Box::new(raw));
                     match fields.last_mut() {
                         Some(active) => active.absorb(node),
@@ -1051,7 +1052,7 @@ fn parse_hyperlink_composed(
             "oMath" | "oMathPara" => Some(InlineNode::Math(parse_math(child))),
             "proofErr" | "permStart" | "permEnd" | "smartTagPr" | "customXmlPr"
             | "commentRangeStart" | "commentRangeEnd" => None,
-            _ => crate::inline::unmodeled_word_node(child, budget)
+            _ => crate::inline::unmodeled_word_node(child, budget, true)
                 .map(|raw| InlineNode::RawXml(Box::new(raw))),
         };
         if let Some(node) = node {
