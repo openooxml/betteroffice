@@ -592,6 +592,54 @@ fn a_comment_moved_to_the_header_leaves_no_marker_in_the_body_paragraph_it_left(
 }
 
 #[test]
+fn a_comment_moved_to_the_header_without_its_reference_leaves_no_marker_in_the_body_paragraph() {
+    let original = headed_package(concat!(
+        r#"<w:p w14:paraId="00000001"><w:commentRangeStart w:id="7"/><w:r><w:t>Old anchor</w:t></w:r><w:commentRangeEnd w:id="7"/><w:r><w:commentReference w:id="7"/></w:r></w:p>"#,
+        r#"<w:p w14:paraId="00000002"><w:r><w:t>Other</w:t></w:r></w:p>"#,
+    ));
+    let request = spliced_request(&original, |value| {
+        let body = &mut value["document"]["content"];
+        without_comment_markers(&mut body[0]);
+        replace_text(&mut body[1], "Other", "OtherX");
+        value["headerEntries"][0][1]["content"][0]["content"] = json!([
+            { "type": "commentRangeStart", "id": 7 }, text_run("Header words"),
+            { "type": "commentRangeEnd", "id": 7 }
+        ]);
+    });
+    let saved = write_docx_s13(request, &original).unwrap();
+    for name in ["commentRangeStart", "commentRangeEnd", "commentReference"] {
+        let name = format!("w:{name}");
+        let body = element_ids(&saved, "word/document.xml", name.as_bytes());
+        assert_eq!(body, Vec::<String>::new(), "{name}");
+        let header = element_ids(&saved, "word/header1.xml", name.as_bytes());
+        assert_eq!(header, ["7"], "{name}");
+    }
+    assert!(document_xml(&saved).contains("OtherX"));
+}
+
+#[test]
+fn a_footnote_saved_from_its_verbatim_xml_leaves_a_range_the_model_did_not_load_in_place() {
+    let first = r#"<w:p w14:paraId="00000001"><w:r><w:t xml:space="preserve">Head </w:t></w:r><w:ins w:id="41" w:author="G" w:date="2025-03-04T05:06:07Z"><w:commentRangeStart w:id="7"/><w:r><w:t>inserted</w:t></w:r><w:commentRangeEnd w:id="7"/></w:ins><w:r><w:commentReference w:id="7"/></w:r></w:p>"#;
+    let other = r#"<w:p w14:paraId="00000002"><w:r><w:t>Other</w:t></w:r></w:p>"#;
+    let original = headed_package(&format!("{first}{other}"));
+    let request = spliced_request(&original, |value| {
+        replace_text(&mut value["document"]["content"][1], "Other", "OtherX");
+        value["footnotes"] = json!([{
+            "type": "footnote", "id": 1, "noteType": "normal",
+            "content": [{ "type": "paragraph", "content": [
+                { "type": "commentRangeStart", "id": 7 }, text_run("Note"),
+                { "type": "commentRangeEnd", "id": 7 }
+            ] }],
+            "verbatimXml": r#"<w:footnote w:id="1"><w:p><w:r><w:t>Note</w:t></w:r></w:p></w:footnote>"#
+        }]);
+    });
+    let saved = write_docx_s13(request, &original).unwrap();
+    let xml = document_xml(&saved);
+    assert!(xml.contains(first), "{xml}");
+    assert!(xml.contains("OtherX"), "{xml}");
+}
+
+#[test]
 fn a_comment_range_the_model_did_not_load_stays_in_its_paragraph_beside_an_edit_in_another() {
     let first = r#"<w:p w14:paraId="00000001"><w:r><w:t xml:space="preserve">Head </w:t></w:r><w:ins w:id="41" w:author="G" w:date="2025-03-04T05:06:07Z"><w:commentRangeStart w:id="7"/><w:r><w:t>inserted</w:t></w:r><w:commentRangeEnd w:id="7"/></w:ins><w:r><w:commentReference w:id="7"/></w:r></w:p>"#;
     let other = r#"<w:p w14:paraId="00000002"><w:r><w:t>Other</w:t></w:r></w:p>"#;

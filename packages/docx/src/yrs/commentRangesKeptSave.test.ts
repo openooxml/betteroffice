@@ -120,10 +120,12 @@ const part = (bytes: Uint8Array, name: string) => {
 const paragraphs = (bytes: Uint8Array) =>
   part(bytes, 'word/document.xml').match(/<w:p\b[^>]*?(?:\/>|>[\s\S]*?<\/w:p>)/g) ?? [];
 const textAt = (bytes: Uint8Array, at: number) => (paragraphs(bytes)[at] ?? '').replace(/<[^>]+>/g, '');
-const marks = (bytes: Uint8Array, id: number, name = 'word/document.xml') =>
-  [...part(bytes, name).matchAll(/<w:comment(RangeStart|RangeEnd|Reference) w:id=["'](\d+)["']\s*\/>/g)]
+/** The comment's markers in `xml`, in order. */
+const markersIn = (xml: string, id: number) =>
+  [...xml.matchAll(/<w:comment(RangeStart|RangeEnd|Reference) w:id=["'](\d+)["']\s*\/>/g)]
     .filter((match) => Number(match[2]) === id)
     .map((match) => match[1]!);
+const marks = (bytes: Uint8Array, id: number, name = 'word/document.xml') => markersIn(part(bytes, name), id);
 const commentIds = (bytes: Uint8Array) =>
   [...part(bytes, 'word/comments.xml').matchAll(/<w:comment\b[^>]*?\bw:id="(\d+)"/g)].map((match) => Number(match[1]));
 /** How often each of the comment's markers occurs across the body and the header. */
@@ -308,6 +310,7 @@ for (const [route, save] of Object.entries(ROUTES)) {
       });
       expect(markerCounts(saved, 1)).toEqual({ RangeStart: 1, RangeEnd: 1, Reference: 1 });
       expect(paragraphs(saved)[2]).toContain(rangeStart(1));
+      expect(markersIn(paragraphs(saved)[2] ?? '', 1)).toEqual(['RangeStart', 'RangeEnd', 'Reference']);
       expect(paragraphs(saved)[0]).not.toContain(rangeStart(1));
       expect(commentIds(saved)).toEqual([1]);
       expect(typedNext(saved)).toBe('Other paragraphX');
