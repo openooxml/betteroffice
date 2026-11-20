@@ -7,7 +7,7 @@ import { preloadEditWasm } from '../wasm/edit';
 import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
 import { residentWorkerFactory, type InProcessResidentWorker } from './__fixtures__/residentWorker';
 import { DirtyProjectionStories, hostSaveMetadata, mergeDocxHostMetadata, saveEditorDocument } from './editorSave';
-import { createYrsSession, decodeDocxHostJson, type YrsSession } from './index';
+import { createYrsSession, decodeDocxHostJson, type YrsSession, type YrsStoryRange } from './index';
 import { ResidentEngineWorkerClient } from './residentEngineWorkerClient';
 import { yrsToDocument } from './yrsToDocument';
 
@@ -49,6 +49,10 @@ const RANGE_IN_CONTROL = shaped(
 );
 const SECOND_COMMENT = `${rangeStart(2)}${run('noted')}${rangeEnd(2)}${reference(2)}`;
 const BESIDE_SECOND = shaped(`${IN_INSERTION}${reference(1)}${run(' and ')}${SECOND_COMMENT}`);
+const ORDINARY_RANGE = shaped(`${rangeStart(1)}${run('noted')}${rangeEnd(1)}${reference(1)}`);
+const THIRD = paragraph('0D000003', run('Third paragraph'));
+const HEADER_STORY = 'hf:rIdHeader';
+const HEADER = `<w:p w14:paraId="0C000001" w14:textId="0C000001">${run('Header words')}</w:p>`;
 
 function commentsXml(ids: number[]): string {
   return `<w:comments xmlns:w="${W}" xmlns:w14="${W14}">` +
@@ -59,7 +63,16 @@ function commentsXml(ids: number[]): string {
     '</w:comments>';
 }
 
-function fixture(first: string, comments: number[]): Uint8Array {
+interface Layout {
+  /** Body paragraphs after `Other paragraph`. */
+  after?: string;
+  /** The content of a default header's part, related as `rIdHeader`. */
+  header?: string;
+}
+
+function fixture(first: string, comments: number[], layout: Layout = {}): Uint8Array {
+  const header = layout.header;
+  const section = header === undefined ? '<w:sectPr/>' : '<w:sectPr><w:headerReference w:type="default" r:id="rIdHeader"/></w:sectPr>';
   const parts: PartsMap = new Map([
     ['[Content_Types].xml', toBytes(
       '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
@@ -68,6 +81,7 @@ function fixture(first: string, comments: number[]): Uint8Array {
       `<Override PartName="/word/document.xml" ContentType="${OFFICE}.document.main+xml"/>` +
       `<Override PartName="/word/styles.xml" ContentType="${OFFICE}.styles+xml"/>` +
       `<Override PartName="/word/comments.xml" ContentType="${OFFICE}.comments+xml"/>` +
+      (header === undefined ? '' : `<Override PartName="/word/header1.xml" ContentType="${OFFICE}.header+xml"/>`) +
       '</Types>'
     )],
     ['_rels/.rels', toBytes(
@@ -79,6 +93,7 @@ function fixture(first: string, comments: number[]): Uint8Array {
       `<Relationship Id="rIdStyles" Type="${REL}/styles" Target="styles.xml"/>` +
       `<Relationship Id="rIdLink" Type="${REL}/hyperlink" Target="https://example.com/" TargetMode="External"/>` +
       `<Relationship Id="rIdComments" Type="${REL}/comments" Target="comments.xml"/>` +
+      (header === undefined ? '' : `<Relationship Id="rIdHeader" Type="${REL}/header" Target="header1.xml"/>`) +
       '</Relationships>'
     )],
     ['word/styles.xml', toBytes(
@@ -87,10 +102,13 @@ function fixture(first: string, comments: number[]): Uint8Array {
       '<w:style w:type="character" w:styleId="Hyperlink"><w:name w:val="Hyperlink"/><w:rPr><w:color w:val="0563C1"/><w:u w:val="single"/></w:rPr></w:style></w:styles>'
     )],
     ['word/document.xml', toBytes(
-      `<w:document xmlns:w="${W}" xmlns:r="${REL}" xmlns:w14="${W14}"><w:body>${first}${OTHER}<w:sectPr/></w:body></w:document>`
+      `<w:document xmlns:w="${W}" xmlns:r="${REL}" xmlns:w14="${W14}"><w:body>${first}${OTHER}${layout.after ?? ''}${section}</w:body></w:document>`
     )],
     ['word/comments.xml', toBytes(commentsXml(comments))],
   ]);
+  if (header !== undefined) {
+    parts.set('word/header1.xml', toBytes(`<w:hdr xmlns:w="${W}" xmlns:r="${REL}" xmlns:w14="${W14}">${header}</w:hdr>`));
+  }
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
@@ -102,10 +120,24 @@ const part = (bytes: Uint8Array, name: string) => {
 const paragraphs = (bytes: Uint8Array) =>
   part(bytes, 'word/document.xml').match(/<w:p\b[^>]*?(?:\/>|>[\s\S]*?<\/w:p>)/g) ?? [];
 const textAt = (bytes: Uint8Array, at: number) => (paragraphs(bytes)[at] ?? '').replace(/<[^>]+>/g, '');
-const marks = (bytes: Uint8Array, id: number) =>
-  [...part(bytes, 'word/document.xml').matchAll(/<w:comment(RangeStart|RangeEnd|Reference) w:id=["'](\d+)["']\s*\/>/g)]
+const marks = (bytes: Uint8Array, id: number, name = 'word/document.xml') =>
+  [...part(bytes, name).matchAll(/<w:comment(RangeStart|RangeEnd|Reference) w:id=["'](\d+)["']\s*\/>/g)]
     .filter((match) => Number(match[2]) === id)
     .map((match) => match[1]!);
+const commentIds = (bytes: Uint8Array) =>
+  [...part(bytes, 'word/comments.xml').matchAll(/<w:comment\b[^>]*?\bw:id="(\d+)"/g)].map((match) => Number(match[1]));
+/** How often each of the comment's markers occurs across the body and the header. */
+const markerCounts = (bytes: Uint8Array, id: number) => {
+  const all = [...marks(bytes, id), ...marks(bytes, id, 'word/header1.xml')];
+  return Object.fromEntries(['RangeStart', 'RangeEnd', 'Reference'].map((kind) => [kind, all.filter((mark) => mark === kind).length]));
+};
+
+/** The text of paragraph `at` of `story` from offset `start` to `end`. */
+function storyRange(engine: YrsSession, story: string, at: number, start: number, end: number): YrsStoryRange {
+  const target = engine.paragraphs(story)[at];
+  if (!target) throw new Error(`no paragraph ${at} in ${story}`);
+  return { story, start: { paraId: target.paraId, offset: start }, end: { paraId: target.paraId, offset: end } };
+}
 
 const owned: Array<{ destroy(): void }> = [];
 let startWorker: (clientId?: number) => InProcessResidentWorker;
@@ -132,9 +164,14 @@ interface Edit {
   drop?: number;
   /** The Word paragraph id of the paragraph a letter X is typed at the end of. */
   type?: string;
+  /** Comment 1's new ranges, read from the session. */
+  move?: (engine: YrsSession) => YrsStoryRange[];
+  /** The stories the edit touches, `body` unless given. */
+  stories?: string[];
 }
 
 function apply(engine: YrsSession, edit: Edit): boolean {
+  if (edit.move) engine.setCommentRanges('1', edit.move(engine));
   if (edit.type !== undefined) {
     const result = engine.applyEdits({
       expectVersion: engine.version(),
@@ -142,7 +179,7 @@ function apply(engine: YrsSession, edit: Edit): boolean {
     });
     if (!result.ok) throw new Error(`insertText: ${JSON.stringify(result).slice(0, 200)}`);
   }
-  return edit.type !== undefined;
+  return edit.type !== undefined || edit.move !== undefined;
 }
 
 function hostList(host: Document, edit: Edit): Comment[] {
@@ -154,7 +191,7 @@ async function mainThreadSave(source: Uint8Array, edit: Edit): Promise<Uint8Arra
   const editor = await session();
   const host = editor.openDocx(source.slice(), true).document;
   const dirty = new DirtyProjectionStories();
-  if (apply(editor, edit)) dirty.add('body');
+  if (apply(editor, edit)) for (const story of edit.stories ?? ['body']) dirty.add(story);
   const projected = yrsToDocument(editor, mergeDocxHostMetadata(editor.materializeDocx() as Document, host), dirty.projectionOptions());
   return new Uint8Array(await saveEditorDocument(editor, projected, hostList(host, edit)));
 }
@@ -174,7 +211,7 @@ async function workerSave(source: Uint8Array, edit: Edit): Promise<Uint8Array> {
   const saved = await client.save({
     comments: hostList(host, edit),
     host: hostSaveMetadata(host),
-    ...(edited ? { stories: ['body'] } : {}),
+    ...(edited ? { stories: edit.stories ?? ['body'] } : {}),
   });
   return new Uint8Array(saved.bytes);
 }
@@ -223,6 +260,56 @@ for (const [route, save] of Object.entries(ROUTES)) {
       expect(marks(saved, 1)).toEqual([]);
       expect(first).toContain(revision('ins', 41, run('inserted')));
       expect(textAt(saved, 0)).toBe('Head inserted tail');
+      expect(typedNext(saved)).toBe('Other paragraphX');
+      expect(commentIds(saved)).toEqual([]);
+    }, TIMEOUT);
+
+    test('a comment the host list leaves out, saved beside a letter typed in another paragraph, loses its range inside a hyperlink and keeps the other comment', async () => {
+      const saved = await save(fixture(RANGE_IN_LINK, [1, 2]), { drop: 1, type: OTHER_ID });
+      expect(marks(saved, 1)).toEqual([]);
+      expect(marks(saved, 2)).toEqual(['RangeStart', 'RangeEnd', 'Reference']);
+      expect(commentIds(saved)).toEqual([2]);
+      expect(textAt(saved, 0)).toBe('Head linked and noted tail');
+      expect(typedNext(saved)).toBe('Other paragraphX');
+    }, TIMEOUT);
+
+    test('a comment the host list leaves out, saved beside a letter typed in another paragraph, loses its range inside a tracked deletion', async () => {
+      const saved = await save(fixture(RANGE_IN_DELETION, [1]), { drop: 1, type: OTHER_ID });
+      expect(marks(saved, 1)).toEqual([]);
+      expect(paragraphs(saved)[0]).toContain(revision('del', 42, deletedRun('removed')));
+      expect(commentIds(saved)).toEqual([]);
+      expect(typedNext(saved)).toBe('Other paragraphX');
+    }, TIMEOUT);
+
+    test('a comment the host list leaves out, saved beside a letter typed in another paragraph, loses its range inside a content control', async () => {
+      const saved = await save(fixture(RANGE_IN_CONTROL, [1]), { drop: 1, type: OTHER_ID });
+      expect(marks(saved, 1)).toEqual([]);
+      expect(paragraphs(saved)[0]).toContain(`<w:sdtContent>${run('controlled')}</w:sdtContent>`);
+      expect(commentIds(saved)).toEqual([]);
+      expect(typedNext(saved)).toBe('Other paragraphX');
+    }, TIMEOUT);
+
+    test('a comment moved from the body to the header, saved beside a letter typed in another paragraph, has one range and one reference', async () => {
+      const saved = await save(fixture(ORDINARY_RANGE, [1], { header: HEADER }), {
+        move: (engine) => [storyRange(engine, HEADER_STORY, 0, 0, 6)],
+        type: OTHER_ID,
+        stories: ['body', HEADER_STORY],
+      });
+      expect(markerCounts(saved, 1)).toEqual({ RangeStart: 1, RangeEnd: 1, Reference: 1 });
+      expect(marks(saved, 1, 'word/header1.xml')).toEqual(['RangeStart', 'RangeEnd', 'Reference']);
+      expect(commentIds(saved)).toEqual([1]);
+      expect(typedNext(saved)).toBe('Other paragraphX');
+    }, TIMEOUT);
+
+    test('a comment moved to another body paragraph, saved beside a letter typed in a third, has one range and one reference', async () => {
+      const saved = await save(fixture(ORDINARY_RANGE, [1], { after: THIRD }), {
+        move: (engine) => [storyRange(engine, 'body', 2, 0, 5)],
+        type: OTHER_ID,
+      });
+      expect(markerCounts(saved, 1)).toEqual({ RangeStart: 1, RangeEnd: 1, Reference: 1 });
+      expect(paragraphs(saved)[2]).toContain(rangeStart(1));
+      expect(paragraphs(saved)[0]).not.toContain(rangeStart(1));
+      expect(commentIds(saved)).toEqual([1]);
       expect(typedNext(saved)).toBe('Other paragraphX');
     }, TIMEOUT);
 
