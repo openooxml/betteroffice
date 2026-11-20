@@ -672,10 +672,8 @@ export interface DocxCommandHooks {
     snapshot(): Uint8Array | Promise<Uint8Array>;
     recoveryState?(): Omit<DocxCommandRecoveryState, 'selections'>;
     commandState?(): Omit<DocxCommandRecoveryState, 'selections' | 'stickyPositions'>;
-    issuedPositions?(from: number): {
-        count: number;
-        entries: [string, YrsStickyPosition][];
-    };
+    /** Positions first issued since the previous call, which starts the tracking when it is the first. */
+    issuedPositions?(): [string, YrsStickyPosition][];
 }
 /** @internal Worker-owned layout access for ordered selection resolution. */
 export interface DocxCommandHooksEnvironment {
@@ -724,11 +722,11 @@ export interface DocxCommandHost extends CommandHost<DocxCommandPayload, DocxCom
     handler(context: unknown, envelope: DocxCommandEnvelope): Promise<DocxCommandReply>;
     withFrameWork<T>(run: () => Promise<T>): Promise<T>;
     /** Runs `run` between commands; the updates it emits are stream entries of `origin`. */
-    withCommandWork<T>(origin: CommandStreamEntry['origin'], run: () => Promise<T>): Promise<T>;
+    withCommandWork?<T>(origin: CommandStreamEntry['origin'], run: () => Promise<T>): Promise<T>;
     /** One update the document emitted, in emission order. */
-    recordUpdate(update: Uint8Array): void;
+    recordUpdate?(update: Uint8Array): void;
     /** Stream entries not yet reported, removed from the host. */
-    takeStream(): CommandStreamEntry[] | undefined;
+    takeStream?(): CommandStreamEntry[] | undefined;
     initial(): Promise<DocxCommandInitReply | TransferResult<DocxCommandInitReply>>;
     requestFullFrame(): Promise<DocxCommandReply>;
 }
@@ -780,6 +778,8 @@ export interface DocxWorkerCommandState {
     selection: DocxCommandSelection | null;
     storedMarks: DocxStoredMarks | null;
     stickyPositions: Map<string, YrsStickyPosition>;
+    /** Entries first set into `stickyPositions` since the host last took them; absent while the host does not track them. */
+    issuedPositions?: [string, YrsStickyPosition][];
     proposals?: DocxProposalRegistry;
     /** Host versions in `(from, to]`, all produced by applied remote merges and none by a local command. */
     remoteMerges?: {
