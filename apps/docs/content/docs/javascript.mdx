@@ -25,7 +25,7 @@ import "@betteroffice/docx-react/styles.css";
 `documentBuffer` accepts an `ArrayBuffer`, `Uint8Array`, `Blob`, or `File`.
 `file` and `fileName` are aliases of `documentBuffer` and `documentName`; when
 both names are set, `documentBuffer` and `documentName` win.
-`DocxEditor` reads asynchronously by default; deprecated `legacySyncApi` keeps the synchronous API and is removed in 0.6.0. `collaboration` runs on the default editor too. See [Migrating to 0.5](./migrating-to-0-5).
+`DocxEditor` reads asynchronously by default; deprecated `legacySyncApi` keeps the synchronous API and is removed in 0.7.0. `collaboration` runs on the default editor too. See [Migrating to 0.5](./migrating-to-0-5).
 Without `onSave`, File > Save downloads the edited bytes. Configure
 [fonts](./packages#fonts) before mounting the DOCX editor for consistent text
 measurement and pagination.
@@ -47,7 +47,7 @@ only without `onSave`), `initialZoom`, `loadingIndicator` and `style` match
 `DocxEditor`, and a `collaboration.clientId` is generated when omitted.
 Both default to the worker-owned async editor, whose `onReady` API answers reads
 and exports with promises; deprecated `legacySyncApi` keeps the synchronous API
-and is removed in 0.6.0. See [Migrating to 0.5](./migrating-to-0-5).
+and is removed in 0.7.0. See [Migrating to 0.5](./migrating-to-0-5).
 
 ## Compose the DOCX toolbar
 
@@ -217,6 +217,40 @@ for an expired context. `inputFocused` is tracked in the in-thread editor and th
 worker editor, but `focusDocument()` works only in the worker editor; the
 in-thread editor always refuses it with `unsupported-policy`.
 
+**Mini toolbar (experimental).** `@betteroffice/docx-react/mini-toolbar` ships a
+first-party plugin: a small toolbar above a settled text selection in the body,
+with bold, italic, underline, strikethrough, clear formatting and paste as plain
+text, or the `items` you list, in your order. It is off unless you add it, and its
+buttons stay disabled without the grant. It shows once a non-collapsed selection
+in the body has settled, while the document's text input or the toolbar itself
+has focus, in editing or suggesting mode only. It hides while the selection
+changes, as on typing, and when focus moves elsewhere, such as into a menu, a
+dialog or a content control. A pointer press anywhere outside the toolbar, mouse,
+pen or touch, dismisses it for the current selection, also when that press keeps
+the selection, as on an editor toolbar menu; it comes back once the selection
+changes and settles. A press inside it keeps it. `Alt+F10` (its command
+`plugin:betteroffice.mini-toolbar/focus`) moves focus into it; it is never a Tab
+stop. Escape there dismisses it for that selection and returns focus to the
+document. When it hides while it holds focus, it hands focus back to the document
+and hides. Where the editor refuses the hand-back (the in-thread editor, or a
+dialog open over the editor), Escape and Tab keep their browser behaviour and
+focus falls to the page:
+
+```tsx
+import { DocxEditor } from "@betteroffice/docx-react";
+import { DOCX_MINI_TOOLBAR_ID, docxMiniToolbar } from "@betteroffice/docx-react/mini-toolbar";
+
+const miniToolbar = docxMiniToolbar({ items: ["clearFormatting", "pasteAsPlainText"] });
+
+<DocxEditor
+  documentBuffer={bytes}
+  plugins={[miniToolbar]}
+  pluginGrants={{
+    [DOCX_MINI_TOOLBAR_ID]: { document: "write", commands: ["clearFormatting", "pasteAsPlainText"] },
+  }}
+/>;
+```
+
 `geometry.viewport` is the scroller's visible client box intersected with the
 editor root, in overlay-layer pixels. Its `y` changes as the pages scroll.
 `viewport-change` carries the new rectangle on scroll, resize, or zoom, or `null`
@@ -356,7 +390,7 @@ the set's `version`.
 rejects or answers `pending`. Only the default editor awaits reads: targets
 asked in one tick share one worker read, and `getAnchorGeometry` answers
 `pending` while a target's read is in flight. The `legacySyncApi` editor, removed in
-0.6.0, answers right away, and still `layout-unavailable` while its own reads
+0.7.0, answers right away, and still `layout-unavailable` while its own reads
 are in flight. A read the worker fails answers `read-failed` on both methods and
 renders overlays again once; only `readAnchorGeometries` reads that target
 again, so retry it with backoff. Answers come from the layout current when the

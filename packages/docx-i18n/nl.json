@@ -542,6 +542,12 @@
     "tableInserted": "Tabel ingevoegd",
     "tableDeleted": "Tabel verwijderd"
   },
+  "pasteOptions": {
+    "button": "Plakopties (Ctrl)",
+    "keepSource": "Bronopmaak behouden",
+    "merge": "Opmaak samenvoegen",
+    "textOnly": "Alleen tekst behouden"
+  },
   "contextMenu": {
     "ariaLabel": "Menu voor AI-acties",
     "textMenuAriaLabel": "Menu voor tekstbewerking",
@@ -874,6 +880,7 @@
     "toolbarGroup": "Plug-ins",
     "panelTabs": "Plug-inpanelen",
     "collapsePanel": "{title} samenvouwen",
-    "expandPanel": "{title} uitvouwen"
+    "expandPanel": "{title} uitvouwen",
+    "miniToolbar": "Opmaak van selectie"
   }
 }

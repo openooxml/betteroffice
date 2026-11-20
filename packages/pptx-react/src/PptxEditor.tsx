@@ -212,11 +212,11 @@ export interface PptxInThreadEditorProps extends PptxEditorPluginProps {
   onShortcutIssue?: (issue: ShortcutIssue) => void;
 }
 
-/** @deprecated Removed in 0.6.0. Use PptxAsyncEditorProps. */
+/** @deprecated Removed in 0.7.0. Use PptxAsyncEditorProps. */
 export type PptxWorkerViewerProps = Omit<
   PptxInThreadEditorProps, 'onReady' | 'readOnly' | 'experimentalWorkerOpen' | 'collaboration' | 'plugins' | 'onChange'
 > & {
-  /** @deprecated Removed in 0.6.0. Omit for the async editor. */
+  /** @deprecated Removed in 0.7.0. Omit for the async editor. */
   [LEGACY_SYNC_API]: true;
   collaboration?: undefined;
   plugins?: readonly [];
@@ -260,7 +260,7 @@ export interface PptxAsyncPresentationProps {
 export type PptxAsyncEditorProps = Omit<PptxInThreadEditorProps,
   'file' | 'onReady' | 'collaboration' | 'experimentalWorkerOpen'> & PptxAsyncPresentationProps & {
   file?: Uint8Array | ArrayBuffer;
-  /** @deprecated Removed in 0.6.0. Omit for the async editor. */
+  /** @deprecated Removed in 0.7.0. Omit for the async editor. */
   [LEGACY_SYNC_API]?: false;
   /** @deprecated False selects the in-thread engine. */
   experimentalWorkerOpen?: boolean;
@@ -270,9 +270,9 @@ export type PptxAsyncEditorProps = Omit<PptxInThreadEditorProps,
 
 export type PptxAsyncEditorInternalProps = ResolvedFontProps<Omit<PptxAsyncEditorProps, 'file'>> & { file?: Uint8Array };
 
-/** @deprecated Removed in 0.6.0. Use PptxAsyncEditorProps. */
+/** @deprecated Removed in 0.7.0. Use PptxAsyncEditorProps. */
 export type PptxLegacyEditorProps = PptxInThreadEditorProps & {
-  /** @deprecated Removed in 0.6.0. Omit for the async editor. */
+  /** @deprecated Removed in 0.7.0. Omit for the async editor. */
   [LEGACY_SYNC_API]: true;
 };
 

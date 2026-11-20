@@ -9,7 +9,8 @@ import { documentToYrs } from './documentToYrs';
 import { saveEditorDocument } from './editorSave';
 import { createYrsSession, saveYrsDocx, yrsToDocument, type YrsSession } from './index';
 import {
-  numberingWithListDefinitions, savedListDefinitionIds, writeListDefinitionParts, type DocxSavedListDefinition,
+  numberingWithListDefinitions, resolvedRelationshipTarget, savedListDefinitionIds, writeListDefinitionParts,
+  type DocxSavedListDefinition,
 } from './listDefinitionSave';
 import { captureSessionSave, writeSessionSave } from './saveYrsDocx';
 
@@ -476,9 +477,14 @@ describe('the numbering part a save adds, its content type and relationship', ()
 const decimalLevel = (prefix: string) =>
   `<${prefix}lvl ${prefix}ilvl="0"><${prefix}start ${prefix}val="1"/><${prefix}numFmt ${prefix}val="decimal"/><${prefix}lvlText ${prefix}val="%1."/></${prefix}lvl>`;
 
+/** A schema-valid numbering part: the main namespace as the default for elements, attributes qualified with `w:`. */
+const QUALIFIED_DEFAULT = `<numbering xmlns="${W}" xmlns:w="${W}"><abstractNum w:abstractNumId="0"><lvl w:ilvl="0"><start w:val="1"/>` +
+  `<numFmt w:val="decimal"/><lvlText w:val="%1."/></lvl></abstractNum><num w:numId="1"><abstractNumId w:val="0"/></num></numbering>`;
+
 /** Numbering parts whose list elements are not all spelled with the root's prefix, and how a created list is spelled in each. */
 const SPELLINGS: Array<{ name: string; xml: string; abstractStart: string; numStart: string }> = [
   {
+    // Mirrors a schema-invalid input as found: unqualified attributes under the default namespace.
     name: 'with the main namespace as its default namespace',
     xml: `<numbering xmlns="${W}"><abstractNum abstractNumId="0">${decimalLevel('')}</abstractNum><num numId="1"><abstractNumId val="0"/></num></numbering>`,
     abstractStart: '<abstractNum abstractNumId="2">',
@@ -497,6 +503,12 @@ const SPELLINGS: Array<{ name: string; xml: string; abstractStart: string; numSt
       `<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num><w2:num xmlns:w2="${W}" w2:numId="2"><w2:abstractNumId w2:val="1"/></w2:num></w:numbering>`,
     abstractStart: '<w:abstractNum w:abstractNumId="2">',
     numStart: '<w:num w:numId="3">',
+  },
+  {
+    name: 'with the main namespace as its default namespace and its attributes qualified',
+    xml: QUALIFIED_DEFAULT,
+    abstractStart: '<abstractNum w:abstractNumId="2">',
+    numStart: '<num w:numId="3">',
   },
 ];
 
@@ -555,3 +567,175 @@ for (const [saveName, save] of Object.entries(SAVES)) {
     });
   }
 }
+
+describe('a numbering part with the main namespace as default and qualified attributes', () => {
+  const CREATED: DocxSavedListDefinition = {
+    key: '9:1',
+    kind: 'numbered',
+    levelTexts: LEVELS.map(level => `%${level + 1}.`),
+    levelFormats: LEVELS.map(() => 'decimal'),
+    numId: 3,
+    abstractNumId: 2,
+  };
+
+  test('takes a created list with an unprefixed element and a qualified id, and writes it once', () => {
+    const result = numberingWithListDefinitions(QUALIFIED_DEFAULT, [CREATED]);
+    expect(result).toContain('<abstractNum w:abstractNumId="2">');
+    expect(result).not.toMatch(/<abstractNum\s+abstractNumId\s*=/);
+    expect(result).toContain('<num w:numId="3">');
+    expect(listStarts(numberingWithListDefinitions(result, [CREATED]), 'abstractNum', 'abstractNumId')).toHaveLength(2);
+  });
+
+  test('saveYrsDocx: a save over the first save writes the created list no second time', async () => {
+    const session = await seeded(makeDocx(documentOf(paragraph('First'), paragraph('Second')), QUALIFIED_DEFAULT));
+    createList(session, 'Second', 'numbered');
+    const first = (await saveYrsDocx(session, { updateModifiedDate: false })).bytes;
+    const second = (await saveYrsDocx(session, {
+      updateModifiedDate: false,
+      commentBaseline: { bytes: first.slice(), comments: session.listComments() },
+      commentDeletion: true,
+    })).bytes;
+    const numbering = (bytes: Uint8Array) => text(unzipContainer(bytes)['word/numbering.xml']) ?? '';
+    expect(numbering(first)).not.toMatch(/<abstractNum\s+abstractNumId\s*=/);
+    expect(listStarts(numbering(first), 'abstractNum', 'abstractNumId')).toHaveLength(2);
+    expect(listStarts(numbering(second), 'abstractNum', 'abstractNumId')).toHaveLength(2);
+    expect(listStarts(numbering(second), 'num', 'numId')).toHaveLength(2);
+    expect(savedNumId(text(unzipContainer(second)['word/document.xml']) ?? '', 'Second'))
+      .toBe(savedNumId(text(unzipContainer(first)['word/document.xml']) ?? '', 'Second'));
+  });
+});
+
+describe('a created list saved from a parsed document over a file its client saved before', () => {
+  test('a key drawn again through the TypeScript loader names a new definition, kept on a save over its own', async () => {
+    const first = await createYrsSession({ clientId: 78 });
+    open.push(first);
+    first.seedFromDocx(makeDocx(documentOf(
+      paragraph('Lead'), paragraph('Alpha'), paragraph('Gap'), paragraph('Beta'), paragraph('Tail'),
+      paragraph('Decimal source', 1), paragraph('Bullet source', 2),
+    ), LISTS_NUMBERING));
+    createList(first, 'Alpha', 'bullet');
+    const earlier = (await saveYrsDocx(first, { updateModifiedDate: false })).bytes;
+    const source = earlier.slice().buffer as ArrayBuffer;
+    const parsed = await parseDocx(source, { preloadFonts: false });
+    const reopened = await createYrsSession({ clientId: 78 });
+    open.push(reopened);
+    documentToYrs(reopened, parsed);
+    createList(reopened, 'Beta', 'bullet');
+    const keys = (target: YrsSession) => target.createdListDefinitions().map(definition => definition.key);
+    expect(keys(reopened)).toEqual(keys(first));
+    const write = async (base: ArrayBuffer) => (await writeSessionSave(
+      reopened, yrsToDocument(reopened, { ...parsed, originalBuffer: base }), captureSessionSave(reopened), base, {}, () => false
+    )).bytes;
+    const saved = await write(parsed.originalBuffer ?? source);
+    const again = await write(saved.slice().buffer as ArrayBuffer);
+    const numIdOf = (bytes: Uint8Array, value: string) => savedNumId(text(unzipContainer(bytes)['word/document.xml']) ?? '', value);
+    const counted = (bytes: Uint8Array) => {
+      const numbering = text(unzipContainer(bytes)['word/numbering.xml']) ?? '';
+      return { abstractNums: elements(numbering, 'abstractNum').length, nums: elements(numbering, 'num').length };
+    };
+    const beta = numIdOf(saved, 'Beta');
+    expect(beta).not.toBe(numIdOf(saved, 'Alpha'));
+    expect(counted(saved)).toEqual({ abstractNums: counted(earlier).abstractNums + 1, nums: counted(earlier).nums + 1 });
+    expect(numIdOf(again, 'Beta')).toBe(beta);
+    expect(counted(again)).toEqual(counted(saved));
+    expect(beta).toBeGreaterThan(3);
+  });
+});
+
+describe('a numbering part or main document named through a dot segment', () => {
+  const NUMBERED = () => makeDocx(documentOf(paragraph('First'), paragraph('Second')), LISTS_NUMBERING);
+  const dotted = (parts: Record<string, Uint8Array>) =>
+    Object.keys(parts).filter(path => path.split('/').some(segment => segment === '.' || segment === '..'));
+
+  for (const [saveName, save] of Object.entries(SAVES)) {
+    for (const target of ['./numbering.xml', '../word/numbering.xml']) {
+      test(`${saveName}: a numbering relationship that names ${target} has the created list written into word/numbering.xml`, async () => {
+        const session = await seeded(repackaged(NUMBERED(), {
+          'word/_rels/document.xml.rels': `<Relationships xmlns="${PACKAGE_RELATIONSHIPS}"><Relationship Id="rId1" Type="${R}/styles" Target="styles.xml"/><Relationship Id="rId2" Type="${R}/numbering" Target="${target}"/></Relationships>`,
+        }));
+        createList(session, 'Second', 'numbered');
+        const saved = await settled(save(session));
+        expect(saved.error).toBeUndefined();
+        const parts = unzipContainer(saved.value!);
+        expect(dotted(parts)).toEqual([]);
+        const numbering = text(parts['word/numbering.xml']) ?? '';
+        expect(elements(numbering, 'abstractNum')).toHaveLength(elements(LISTS_NUMBERING, 'abstractNum').length + 1);
+        expect(elements(numbering, 'num')).toHaveLength(elements(LISTS_NUMBERING, 'num').length + 1);
+        const types = text(parts['[Content_Types].xml']) ?? '';
+        expect(types).not.toContain('word/./numbering.xml');
+        expect(types).not.toContain('word/../word/numbering.xml');
+        expect(numberingRelationships(text(parts['word/_rels/document.xml.rels']) ?? '')).toHaveLength(1);
+      });
+    }
+
+    test(`${saveName}: a package relationship that names ./word/document.xml has the created list written into word/numbering.xml`, async () => {
+      const opened = await settled(seeded(repackaged(NUMBERED(), {
+        '_rels/.rels': `<Relationships xmlns="${PACKAGE_RELATIONSHIPS}"><Relationship Id="doc" Type="${R}/officeDocument" Target="./word/document.xml"/></Relationships>`,
+      })));
+      expect(opened.error).toBeUndefined();
+      const session = opened.value!;
+      createList(session, 'Second', 'numbered');
+      const saved = await settled(save(session));
+      expect(saved.error).toBeUndefined();
+      const parts = unzipContainer(saved.value!);
+      expect(dotted(parts)).toEqual([]);
+      const numbering = text(parts['word/numbering.xml']) ?? '';
+      expect(elements(numbering, 'abstractNum')).toHaveLength(elements(LISTS_NUMBERING, 'abstractNum').length + 1);
+    });
+  }
+});
+
+describe('a relationship target that climbs out of the package', () => {
+  const ESCAPING: Array<[owner: string, target: string]> = [
+    ['word/_rels/document.xml.rels', '../../x.xml'],
+    ['word/_rels/document.xml.rels', '%2e%2e/%2E%2E/x.xml'],
+    ['word/_rels/document.xml.rels', '/../x.xml'],
+    ['word/_rels/document.xml.rels', '../../../numbering.xml'],
+    ['_rels/.rels', '../word/document.xml'],
+  ];
+  for (const [owner, target] of ESCAPING) {
+    test(`is refused when ${owner} names ${target}`, () => {
+      expect(() => resolvedRelationshipTarget(owner, target)).toThrow(target);
+    });
+  }
+
+  for (const [saveName, save] of Object.entries(SAVES)) {
+    test(`${saveName}: a numbering relationship that names ../../x.xml fails the save and writes no part outside word`, async () => {
+      const session = await seeded(repackaged(makeDocx(documentOf(paragraph('First'), paragraph('Second')), LISTS_NUMBERING), {
+        'word/_rels/document.xml.rels': `<Relationships xmlns="${PACKAGE_RELATIONSHIPS}"><Relationship Id="rId1" Type="${R}/styles" Target="styles.xml"/><Relationship Id="rId2" Type="${R}/numbering" Target="../../x.xml"/></Relationships>`,
+      }));
+      createList(session, 'Second', 'numbered');
+      const saved = await settled(save(session));
+      expect(saved.error).toBeDefined();
+      expect(String(saved.error)).toContain('../../x.xml');
+      if (saved.value !== undefined) expect(Object.keys(unzipContainer(saved.value))).not.toContain('x.xml');
+    });
+  }
+});
+
+describe('resolvedRelationshipTarget', () => {
+  const DOCUMENT_RELS = 'word/_rels/document.xml.rels';
+  const TABLE: Array<[owner: string, target: string, expected: string]> = [
+    [DOCUMENT_RELS, 'numbering.xml', 'word/numbering.xml'],
+    [DOCUMENT_RELS, './numbering.xml', 'word/numbering.xml'],
+    [DOCUMENT_RELS, '../numbering.xml', 'numbering.xml'],
+    [DOCUMENT_RELS, '../word/numbering.xml', 'word/numbering.xml'],
+    [DOCUMENT_RELS, '/word/numbering.xml', 'word/numbering.xml'],
+    [DOCUMENT_RELS, 'lists/parts/numbering.xml', 'word/lists/parts/numbering.xml'],
+    [DOCUMENT_RELS, 'lists\\numbering.xml', 'word/lists/numbering.xml'],
+    [DOCUMENT_RELS, 'lists//./numbering.xml', 'word/lists/numbering.xml'],
+    ['word/document.xml', 'numbering.xml', 'word/numbering.xml'],
+    ['docs/main/_rels/document.xml.rels', '../numbering.xml', 'docs/numbering.xml'],
+    ['_rels/.rels', 'word/document.xml', 'word/document.xml'],
+    ['_rels/.rels', './word/document.xml', 'word/document.xml'],
+    ['_rels/.rels', '/word/document.xml', 'word/document.xml'],
+    [DOCUMENT_RELS, '%2e%2e/numbering.xml', 'numbering.xml'],
+    [DOCUMENT_RELS, 'sub/%2E%2e/numbering.xml', 'word/numbering.xml'],
+    [DOCUMENT_RELS, 'sub/.%2e/numbering.xml', 'word/numbering.xml'],
+    [DOCUMENT_RELS, 'sub/%2e./numbering.xml', 'word/numbering.xml'],
+  ];
+
+  test('resolves each target against the part that owns the relationships', () => {
+    expect(TABLE.map(([owner, target]) => resolvedRelationshipTarget(owner, target))).toEqual(TABLE.map(([, , expected]) => expected));
+  });
+});

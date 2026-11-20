@@ -71,6 +71,19 @@ def table_result(table):
     }
 
 
+def run_highlights_result(paragraph):
+    return {"id": paragraph.id, "highlights": [run.highlight for run in paragraph.runs]}
+
+
+def cell_merges_result(table):
+    return {
+        "rows": [
+            [{"gridSpan": cell.grid_span, "vMerge": cell.v_merge} for cell in row.cells]
+            for row in table.rows
+        ]
+    }
+
+
 def section_result(section):
     return {
         "id": section.id,
@@ -199,15 +212,12 @@ def cell_paragraph_ids(tables):
     return ids
 
 
-def edited_result(document, para_id, except_ids):
+def edited_result(document, para_id):
     in_cells = cell_paragraph_ids(document.tables())
-    excepted = {key.upper() for key in except_ids}
     story = [
         paragraph.text
         for paragraph in document.paragraphs()
-        if paragraph.id not in in_cells
-        and (paragraph.id or "").upper() not in excepted
-        and paragraph.text
+        if paragraph.id not in in_cells and paragraph.text
     ]
     return {"paragraph": document.paragraph(para_id).text, "story": "\n".join(story)}
 
@@ -266,8 +276,12 @@ def run():
         "structure": lambda args: structure_result(document),
         "paragraphIds": lambda args: document.paragraph_ids,
         "paragraphs": lambda args: [paragraph_result(item) for item in document.paragraphs()],
+        "runHighlights": lambda args: [
+            run_highlights_result(item) for item in document.paragraphs()
+        ],
         "paragraph": paragraph,
         "tables": lambda args: [table_result(table) for table in document.tables()],
+        "cellMerges": lambda args: [cell_merges_result(table) for table in document.tables()],
         "sections": lambda args: [section_result(section) for section in document.sections()],
         "headers": lambda args: [header_footer_result(story) for story in document.headers()],
         "footers": lambda args: [header_footer_result(story) for story in document.footers()],
@@ -291,9 +305,7 @@ def run():
         "replaceParagraphTextAt": lambda args: receipt_result(
             document.replace_paragraph_text_at(args["index"], args["text"])
         ),
-        "readEdited": lambda args: edited_result(
-            document, args["paraId"], args.get("exceptParaIds", [])
-        ),
+        "readEdited": lambda args: edited_result(document, args["paraId"]),
         "save": save,
         "saveReport": save_report,
     }

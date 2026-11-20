@@ -326,24 +326,46 @@ fn created_attrs(kind: ListKind, key: &str, level: f64) -> BTreeMap<String, Any>
 }
 
 /// The attributes that put a paragraph on the source list of its neighbour with `values`, at
-/// `level` when given, else at the neighbour's.
-fn source_attrs(values: &BTreeMap<String, Any>, level: Option<f64>) -> BTreeMap<String, Any> {
+/// `level` when given, else at the neighbour's. At another level than the neighbour's, the list
+/// attributes are those seeding stores for that level as `source` renders it, when it does;
+/// otherwise they are the neighbour's.
+fn source_attrs(
+    values: &BTreeMap<String, Any>,
+    level: Option<f64>,
+    source: Option<&SourceMetadata>,
+) -> BTreeMap<String, Any> {
+    let num_pr = match (level, values.get("numPr")) {
+        (Some(level), Some(Any::Map(num_pr))) => {
+            let mut num_pr = (**num_pr).clone();
+            let moved = map_number(&num_pr, "ilvl").unwrap_or(0.0) != level;
+            num_pr.insert("ilvl".to_owned(), Any::Number(level));
+            Some((num_pr, moved))
+        }
+        _ => None,
+    };
+    let rendered = match (&num_pr, source) {
+        (Some((num_pr, true)), Some(source)) => rendered_level(num_pr, source),
+        _ => None,
+    };
+    let from = rendered.as_ref().unwrap_or(values);
     let mut attrs: BTreeMap<String, Any> = SOURCE_LIST_KEYS
         .into_iter()
-        .map(|key| {
-            (
-                key.to_owned(),
-                values.get(key).cloned().unwrap_or(Any::Null),
-            )
-        })
+        .map(|key| (key.to_owned(), from.get(key).cloned().unwrap_or(Any::Null)))
         .collect();
-    if let (Some(level), Some(Any::Map(num_pr))) = (level, values.get("numPr")) {
-        let mut num_pr = (**num_pr).clone();
-        num_pr.insert("ilvl".to_owned(), Any::Number(level));
+    if let Some((num_pr, _)) = num_pr {
         attrs.insert("numPr".to_owned(), Any::from(num_pr));
     }
     attrs.insert(LIST_DEF.to_owned(), Any::Null);
     attrs
+}
+
+/// The list attributes seeding stores for a paragraph on the source list and level `num_pr`
+/// names, as `source` renders them; `None` when it renders no such level.
+fn rendered_level(
+    num_pr: &HashMap<String, Any>,
+    source: &SourceMetadata,
+) -> Option<BTreeMap<String, Any>> {
+    crate::seed::rendered_list_attrs(source_list_rendering(num_pr, source)?)
 }
 
 /// The attributes that put a paragraph on the list of the paragraph with `values` when that list
@@ -354,13 +376,14 @@ fn joined_list(
     definitions: &BTreeMap<String, CreatedListDefinition>,
     kind: ListKind,
     level: Option<f64>,
+    source: Option<&SourceMetadata>,
 ) -> Option<BTreeMap<String, Any>> {
     match resolve_list_identity(values)? {
         ListIdentity::Created { key, level: theirs } if definitions.contains_key(&key) => {
             let level = level.unwrap_or(theirs);
             (definitions[&key].kind == kind).then(|| created_attrs(kind, &key, level))
         }
-        _ => (shown_kind(values) == kind).then(|| source_attrs(values, level)),
+        _ => (shown_kind(values) == kind).then(|| source_attrs(values, level, source)),
     }
 }
 
@@ -427,16 +450,21 @@ impl EditingDoc {
                 })
                 .ok_or_else(|| EditError::ParagraphNotFound(para_id.to_owned()))?;
             let definitions = created_definitions(&txn);
+            let metadata = self.source_metadata();
+            let source = metadata.as_deref();
             let own = pilcrow_values(&pilcrows[index].1, &txn);
             let level = numbered_level(&own).map(|(_, level)| level);
-            let joined = joined_list(&own, &definitions, kind, level).or_else(|| {
+            let join = |values: &BTreeMap<String, Any>| {
+                joined_list(values, &definitions, kind, level, source)
+            };
+            let joined = join(&own).or_else(|| {
                 [index.checked_sub(1), Some(index + 1)]
                     .into_iter()
                     .flatten()
                     .filter_map(|at| pilcrows.get(at))
                     .map(|(_, pilcrow)| pilcrow_values(pilcrow, &txn))
                     .filter(|values| !numbered_by_style(values))
-                    .find_map(|values| joined_list(&values, &definitions, kind, level))
+                    .find_map(|values| join(&values))
             });
             (joined, level)
         };
