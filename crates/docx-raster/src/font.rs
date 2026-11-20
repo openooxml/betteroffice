@@ -18,10 +18,6 @@ use crate::{
     primitive_visual_transform, skip_effect,
 };
 
-/// Synthetic bold paints the glyph twice, the second copy shifted by this many
-/// display pixels, matching the browser canvas and xlsx raster.
-const SYNTHETIC_BOLD_OFFSET_PX: f32 = 0.35;
-
 /// Measures one font run in pixels.
 pub fn measure_text(
     fonts: &FontStore,
@@ -937,7 +933,7 @@ fn charge_shaped_excess(
 }
 
 /// Whether a bold request has to be painted synthetically: the resolved face
-/// is not itself bold, so a second offset copy supplies the weight.
+/// is not itself bold, so the widened outline supplies the weight.
 fn synthetic_bold(fonts: &FontStore, font: FontId, bold: bool) -> bool {
     bold && !fonts.face_is_bold(font).unwrap_or(false)
 }
@@ -951,8 +947,19 @@ fn paint_placed_glyph(
     transform: Transform,
     synthetic_bold: bool,
 ) -> Result<(), String> {
-    let cached = cached_glyph(context.cache, context.resources.fonts, font, glyph.id)?;
-    let Some(path) = &cached.path else {
+    let cached = cached_glyph(
+        context.cache,
+        context.resources.fonts,
+        font,
+        glyph.id,
+        synthetic_bold,
+    )?;
+    let path = if synthetic_bold {
+        cached.bold_path.as_ref().or(cached.path.as_ref())
+    } else {
+        cached.path.as_ref()
+    };
+    let Some(path) = path else {
         return Ok(());
     };
     let scale = size / cached.upem;
@@ -968,18 +975,6 @@ fn paint_placed_glyph(
         paint,
         context.mask,
     );
-    if synthetic_bold {
-        ooxml_raster::fill_glyph(
-            context.pixmap,
-            path,
-            scale,
-            x + SYNTHETIC_BOLD_OFFSET_PX,
-            y,
-            transform,
-            paint,
-            context.mask,
-        );
-    }
     Ok(())
 }
 
@@ -988,17 +983,21 @@ fn cached_glyph<'a>(
     fonts: &FontStore,
     font: FontId,
     glyph_id: u32,
+    synthetic_bold: bool,
 ) -> Result<&'a ooxml_raster::CachedGlyph, String> {
-    cache.inner.lookup(
-        fonts,
-        font,
-        glyph_id,
-        || {
-            u16::try_from(glyph_id)
-                .map_err(|_| format!("glyph id {glyph_id} exceeds the font outline range"))
-        },
-        outline_path,
-    )
+    let outline_id = || {
+        u16::try_from(glyph_id)
+            .map_err(|_| format!("glyph id {glyph_id} exceeds the font outline range"))
+    };
+    if synthetic_bold {
+        cache
+            .inner
+            .lookup_emboldened(fonts, font, glyph_id, outline_id, outline_path)
+    } else {
+        cache
+            .inner
+            .lookup(fonts, font, glyph_id, outline_id, outline_path)
+    }
 }
 
 fn outline_path(commands: &[PathCmd]) -> Result<Option<Path>, String> {

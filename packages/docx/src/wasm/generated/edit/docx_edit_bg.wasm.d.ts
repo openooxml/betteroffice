@@ -144,7 +144,7 @@ export const editsession_note_separators_state: (a: number) => [number, number, 
 export const editsession_open_docx: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
 export const editsession_open_docx_preview: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const editsession_open_docx_preview_with_budget: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
-export const editsession_outline_glyph_json: (a: number, b: number, c: number) => [number, number, number, number];
+export const editsession_outline_glyph_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const editsession_page_texts_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_paragraph_id_count: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
 export const editsession_paragraph_identities: (a: number) => [number, number, number, number];
@@ -267,7 +267,7 @@ export const list_docx_content_controls_json: (a: number, b: number, c: number, 
 export const measure_paragraph_json: (a: number, b: number) => [number, number, number, number];
 export const memory: WebAssembly.Memory;
 export const open_display_list: (a: number, b: number) => [number, number, number];
-export const outline_glyph_json: (a: number, b: number) => [number, number, number, number];
+export const outline_glyph_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const paragraphPatchWriterVersion: () => number;
 export const parse_docx_relationships: (a: number, b: number) => [number, number, number, number];
 export const parse_docx_s2: (a: number, b: number) => [number, number, number, number];

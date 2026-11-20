@@ -109,7 +109,7 @@ test.each(['unmount', 'provider replacement'] as const)(
         expect(context.fillText).toHaveBeenCalledWith('A', 10, 20);
       }
       if (retire === 'provider replacement') {
-        expect(replacementProvider).toHaveBeenCalledWith(7, 42);
+        expect(replacementProvider).toHaveBeenCalledWith(7, 42, false);
       }
     } finally {
       cleanup();
@@ -159,7 +159,7 @@ test("an engine's glyph outlines paint its first replay, rasterized once", async
     await act(async () => {});
     const buffers = [...contexts].filter(([canvas]) => !canvas.isConnected);
     expect(buffers).toHaveLength(1);
-    expect(provider).toHaveBeenCalledWith(7, 42);
+    expect(provider).toHaveBeenCalledWith(7, 42, false);
     expect(buffers[0]![1].fillText).not.toHaveBeenCalled();
   } finally {
     cleanup();

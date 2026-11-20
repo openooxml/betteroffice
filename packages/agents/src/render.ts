@@ -94,7 +94,7 @@ const renderDocxPageCanvas: DocumentRenderer = async (original, pageNumber) => {
     const media = document.package.media;
     const mediaBySource = new Map([...media?.values() ?? []].map(file => [file.dataUrl, file]));
     const glyphCache = new GlyphCache({
-      provider: (font, glyph) => session.outlineGlyphJson(font, glyph),
+      provider: (font, glyph, syntheticBold) => session.outlineGlyphJson(font, glyph, syntheticBold),
       createPath: () => new Path2D() as unknown as globalThis.Path2D,
     });
     let placeholders = 0;

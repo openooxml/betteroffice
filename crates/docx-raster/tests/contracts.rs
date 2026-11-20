@@ -565,7 +565,7 @@ fn synthetic_glyph_run_clip_intersects_the_outer_mask() {
 }
 
 #[test]
-fn synthetic_bold_paints_a_second_copy_inside_the_mask() {
+fn synthetic_bold_paints_widened_geometry_inside_the_mask() {
     let mut fonts = FontStore::new();
     let font = fonts.register(FONT.to_vec()).expect("font");
     let shaped = shape(&fonts, font, "@@@@@@@@@@", 28.0, &[]).expect("shape");
@@ -625,12 +625,59 @@ fn synthetic_bold_paints_a_second_copy_inside_the_mask() {
 
     assert!(
         ink_pixels(&bold) > ink_pixels(&plain),
-        "the second offset copy darkens more pixels"
+        "widened geometry darkens more pixels"
     );
     assert!(ink_bounds(&bold).expect("bold ink").0 < 8);
     assert!(
         ink_bounds(&clipped).expect("clipped ink").0 >= 8,
-        "the second copy is clipped by the same mask"
+        "the widened fill is clipped by the same mask"
+    );
+}
+
+#[test]
+fn synthetic_bold_widens_the_glyph_on_both_sides() {
+    let mut fonts = FontStore::new();
+    let font = fonts.register(FONT.to_vec()).expect("font");
+    let shaped = shape(&fonts, font, "H", 96.0, &[]).expect("shape");
+    let glyphs: Vec<Value> = shaped
+        .iter()
+        .map(|glyph| {
+            json!({
+                "id": glyph.glyph_id,
+                "x": 24.0 + f64::from(glyph.x_offset),
+                "y": 136.0 - f64::from(glyph.y_offset),
+                "cluster": glyph.cluster,
+                "advance": glyph.x_advance
+            })
+        })
+        .collect();
+    let primitive = |synthetic: bool| {
+        json!({
+            "kind": "glyphRun",
+            "fontId": font.to_u32(),
+            "size": 96,
+            "color": "#000000",
+            "text": "H",
+            "syntheticBold": synthetic,
+            "glyphs": glyphs
+        })
+    };
+    let chains = FontChains::new();
+    let images = ImageMap::new();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let plain = render_png(&list(240.0, 160.0, vec![primitive(false)]), 0, &resources)
+        .expect("plain render");
+    let bold =
+        render_png(&list(240.0, 160.0, vec![primitive(true)]), 0, &resources).expect("bold render");
+    let (plain_left, plain_right, _, _) = ink_bounds(&plain).expect("plain ink");
+    let (bold_left, bold_right, _, _) = ink_bounds(&bold).expect("bold ink");
+    assert!(
+        bold_left < plain_left,
+        "widening grows past the crisp left edge ({bold_left} against {plain_left})"
+    );
+    assert!(
+        bold_right > plain_right,
+        "widening grows past the crisp right edge ({bold_right} against {plain_right})"
     );
 }
 

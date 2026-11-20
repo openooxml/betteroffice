@@ -21,7 +21,7 @@ import type {
   GlyphRunPrimitive,
   TextRunPrimitive,
 } from './displayList';
-import type { GlyphCache } from './glyphCache';
+import { GlyphCache } from './glyphCache';
 
 interface Bounds {
   left: number;
@@ -566,21 +566,62 @@ describe('Canvas substitute widths', () => {
     }
     expect(states).toEqual(['none', 'normal']);
   });
-  it('thickens only requested synthetic-bold outlines without moving glyph origins', async () => {
+  it('caches crisp and synthetic-bold outlines under separate keys', () => {
+    const regular = JSON.stringify({
+      upem: 1000,
+      cmds: [{ t: 'M', x: 0, y: 0 }, { t: 'L', x: 500, y: 0 }, { t: 'Z' }],
+    });
+    const synthetic = JSON.stringify({
+      upem: 1000,
+      cmds: [{ t: 'M', x: -40, y: 0 }, { t: 'L', x: 540, y: 0 }, { t: 'Z' }],
+    });
+    const requests: boolean[] = [];
+    const path = {
+      moveTo() {},
+      lineTo() {},
+      closePath() {},
+    } as unknown as Path2D;
+    const cache = new GlyphCache({
+      provider: (_fontId, _glyphId, syntheticBold) => {
+        requests.push(syntheticBold === true);
+        return syntheticBold ? synthetic : regular;
+      },
+      createPath: () => path,
+    });
+    const crisp = cache.get(1, 2);
+    const bold = cache.get(1, 2, true);
+    expect(bold).not.toBe(crisp);
+    expect(cache.get(1, 2)).toBe(crisp);
+    expect(requests).toEqual([false, true]);
+    expect(cache.size).toBe(2);
+  });
+
+  it('paints the requested synthetic-bold variant once at the glyph origin', async () => {
     const glyphPath = { width: 2048, height: 2048 } as unknown as Path2D;
-    const glyphCache = { get: () => ({ path: glyphPath, upem: 2048 }) } as unknown as GlyphCache;
+    const widenedPath = { width: 2176, height: 2176 } as unknown as Path2D;
+    const requests: Array<[number, number, boolean]> = [];
+    const glyphCache = {
+      get: (cacheFontId: number, cacheGlyphId: number, syntheticBold?: boolean) => {
+        requests.push([cacheFontId, cacheGlyphId, syntheticBold === true]);
+        return { path: syntheticBold ? widenedPath : glyphPath, upem: 2048 };
+      },
+    } as unknown as GlyphCache;
     const run: GlyphRunPrimitive = {
       kind: 'glyphRun', fontId: 1, size: 16, color: '#000000', text: '楷',
       glyphs: [{ id: 1, x: 10, y: 20, cluster: 0, advance: 16 }],
     };
     const normal = recordingContext(new Map());
     const synthetic = recordingContext(new Map());
+    const translate = spyOn(synthetic.ctx, 'translate');
     await drawPrimitive(normal.ctx, run, { glyphCache });
     await drawPrimitive(synthetic.ctx, { ...run, syntheticBold: true }, { glyphCache });
+    expect(requests).toEqual([[1, 1, false], [1, 1, true]]);
     expect(normal.paints).toHaveLength(1);
-    expect(synthetic.paints).toHaveLength(2);
-    expect(synthetic.paints[0]).toEqual(normal.paints[0]);
-    expect(synthetic.paints[1].left).toBeCloseTo(normal.paints[0].left + 0.35);
+    expect(synthetic.paints).toHaveLength(1);
+    expect(synthetic.paints[0].left).toBe(normal.paints[0].left);
+    expect(translate.mock.calls).toEqual([[10, 20]]);
+    expect(synthetic.paints[0].top).toBeLessThan(normal.paints[0].top);
+    expect(synthetic.paints[0].right).toBeGreaterThan(normal.paints[0].right);
     expect(run.glyphs[0].x).toBe(10);
     expect(run.glyphs[0].advance).toBe(16);
   });

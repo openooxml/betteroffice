@@ -30,9 +30,10 @@ export interface EchoGlyphSource {
 
 /** @internal The worker's shaping facts for exact echo placement. */
 export interface EchoGlyphProvider {
-  glyphSet(fontId: number, size: number, kern: boolean): EchoGlyphSource | undefined;
+  /** `syntheticBold` asks for the widened outlines a regular face is painted with instead of its own. */
+  glyphSet(fontId: number, size: number, kern: boolean, syntheticBold?: boolean): EchoGlyphSource | undefined;
   /** Ink box of one glyph in font units with the font's units per em; null without ink, undefined when unknown. */
-  glyphInk(fontId: number, glyphId: number): { upem: number; xMin: number; xMax: number; yMin: number; yMax: number } | null | undefined;
+  glyphInk(fontId: number, glyphId: number, syntheticBold?: boolean): { upem: number; xMin: number; xMax: number; yMin: number; yMax: number } | null | undefined;
   pixelRatio: number;
 }
 
@@ -333,6 +334,8 @@ const CSS_FONT = /^(italic )?(400|700) (\d+(?:\.\d+)?)px (.+), sans-serif$/;
 function projectGlyphLine(input: GlyphLineInput): { line: DocxEchoGlyphLine; rect: DocxEchoRect } | undefined {
   const { provider, retained, runs, text, baseline } = input;
   const first = runs[0]!;
+  // one echo run paints one weight, so a line mixing synthetic and real bold cannot be reproduced
+  const syntheticBold = first.syntheticBold === true;
   const facts = first.echo;
   const kern = facts?.kern ?? false;
   if (!facts || facts.primaryFont === false || runs.some(run => !run.echo || run.echo.primaryFont === false ||
@@ -345,7 +348,7 @@ function projectGlyphLine(input: GlyphLineInput): { line: DocxEchoGlyphLine; rec
   if (center !== undefined && (input.lineOffset !== 0 || text.length !== input.paragraphText.length ||
     text.endsWith(' '))) return undefined;
   if (runs.some((run) => run.fontId !== first.fontId || run.size !== first.size || run.color !== first.color ||
-    run.fallbackFont !== first.fallbackFont) ||
+    run.fallbackFont !== first.fallbackFont || (run.syntheticBold === true) !== syntheticBold) ||
     [...input.omitted].some((index) => retained.page.primitives[index]!.kind !== 'glyphRun')) return undefined;
   const font = CSS_FONT.exec(first.fallbackFont ?? '');
   const halfPoints = Math.round(first.size * 1.5);
@@ -368,7 +371,7 @@ function projectGlyphLine(input: GlyphLineInput): { line: DocxEchoGlyphLine; rec
   }
   const after = input.paragraphText.codePointAt(input.lineOffset + text.length);
   const next = after === undefined ? '' : String.fromCodePoint(after);
-  const source = provider.glyphSet(first.fontId, shapingSize, kern);
+  const source = provider.glyphSet(first.fontId, shapingSize, kern, syntheticBold);
   if (!source) return undefined;
   let previous: number | undefined;
   const count = source.glyphs.set.glyphIds.length;
@@ -442,7 +445,8 @@ function projectGlyphLine(input: GlyphLineInput): { line: DocxEchoGlyphLine; rec
   if (paintedOver(provider, page, input.omitted, band)) return undefined;
   return {
     line: { glyphSet: source.key, fontId: first.fontId, size: first.size,
-      color: first.color, x: chosen.x, y: baseline, next, right, ...(center === undefined ? {} : { center }),
+      color: first.color, ...(syntheticBold ? { syntheticBold } : {}), x: chosen.x, y: baseline, next, right,
+      ...(center === undefined ? {} : { center }),
       ...(facts.canEmpty === undefined ? {} : { canEmpty: facts.canEmpty }),
       ...(previousSlack === undefined ? {} : { previousSlack }), ...(nextWord === undefined ? {} : { nextWord }),
       device, pixelRatio: ratio },
@@ -473,7 +477,7 @@ function paintedOver(
     if (!meets({ x: coarse.x - primitive.size, y: coarse.y - primitive.size,
       w: coarse.w + 2 * primitive.size, h: coarse.h + 2 * primitive.size })) return false;
     return primitive.glyphs.some((glyph) => {
-      const ink = provider.glyphInk(primitive.fontId, glyph.id);
+      const ink = provider.glyphInk(primitive.fontId, glyph.id, primitive.syntheticBold === true);
       if (ink === null) return false;
       if (!ink) return true;
       const scale = primitive.size / ink.upem;

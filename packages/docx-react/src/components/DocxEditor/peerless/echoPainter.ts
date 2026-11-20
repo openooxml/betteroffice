@@ -77,6 +77,8 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
 
   function receiveGlyphSets(sets: readonly DocxEchoGlyphSet[] | undefined): void {
     for (const set of sets ?? []) {
+      // a set is one font, size and weight variant: a synthetic-bold set already carries the
+      // widened outlines, so its lines paint those and never ask for the offset bold copy
       glyphSets.set(set.key, { glyphs: indexEchoGlyphSet(set), cache: new GlyphCache({ provider: (fontId, glyphId) => {
         const outline = fontId === set.fontId ? set.outlines[glyphId] : undefined;
         if (outline === undefined) throw new Error('Echo glyph outline is unavailable');
@@ -328,6 +330,8 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
       ctx.clip();
       ctx.setTransform(line.pixelRatio, 0, 0, line.pixelRatio, 0, 0);
       if (glyphs.glyphIds.length) {
+        // the line's glyph set already paints its weight (a synthetic-bold set carries widened
+        // outlines), so the run must not also ask for the engine's offset bold copy
         const run: GlyphRunPrimitive = { kind: 'glyphRun', fontId: line.fontId, size: line.size, color: line.color,
           text: draft.text, glyphs: glyphs.glyphIds.map((id, index) => ({ id, x: glyphs.xs[index]!, y: line.y,
             cluster: 0, advance: glyphs.advances[index]! })) };

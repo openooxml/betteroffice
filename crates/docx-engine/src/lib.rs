@@ -71,7 +71,16 @@ pub fn clear_measure_fonts() -> EngineResult<()> {
 }
 
 pub fn outline_glyph_json(font_id: u32, glyph_id: u32) -> EngineResult<String> {
-    docx_layout::outline_glyph_json_str(font_id, glyph_id).map_err(EngineError::message)
+    outline_glyph_json_with_weight(font_id, glyph_id, false)
+}
+
+pub fn outline_glyph_json_with_weight(
+    font_id: u32,
+    glyph_id: u32,
+    synthetic_bold: bool,
+) -> EngineResult<String> {
+    docx_layout::outline_glyph_json_str_with_weight(font_id, glyph_id, synthetic_bold)
+        .map_err(EngineError::message)
 }
 
 pub fn open_display_list(display_list: &str) -> EngineResult<u32> {

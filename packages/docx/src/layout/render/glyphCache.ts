@@ -33,8 +33,16 @@ export interface GlyphOutline {
   upem: number;
 }
 
-/** fetch a glyph's outline as JSON — `outlineGlyphJson` in production, a fake in tests. */
-export type GlyphOutlineProvider = (fontId: number, glyphId: number) => string;
+/**
+ * fetch a glyph's outline as JSON — `outlineGlyphJson` in production, a fake in
+ * tests. `syntheticBold` asks the source for the widened outlines a regular
+ * face is painted with instead of its own.
+ */
+export type GlyphOutlineProvider = (
+  fontId: number,
+  glyphId: number,
+  syntheticBold?: boolean
+) => string;
 
 export interface GlyphCacheOptions {
   /** outline source; throws/invalid JSON propagate to the caller (fallback). */
@@ -51,9 +59,10 @@ export interface GlyphCacheOptions {
 const DEFAULT_MAX_ENTRIES = 4096;
 
 /**
- * LRU cache keyed `(fontId, glyphId)` → `GlyphOutline`. `Map` preserves
- * insertion order, so the oldest key is `keys().next()` and touching an entry
- * is delete-then-set (reinsert at the tail).
+ * LRU cache keyed `(fontId, glyphId, syntheticBold)` → `GlyphOutline`. `Map`
+ * preserves insertion order, so the oldest key is `keys().next()` and touching
+ * an entry is delete-then-set (reinsert at the tail). The synthetic-bold
+ * variant is a distinct entry: its widened contour fills a different path.
  */
 export class GlyphCache {
   private readonly provider: GlyphOutlineProvider;
@@ -80,11 +89,12 @@ export class GlyphCache {
   }
 
   /**
-   * Outline for one glyph, building and caching it on first request. Throws if
-   * the provider throws or returns unparseable JSON — the caller falls back.
+   * Outline for one glyph and weight variant, building and caching it on first
+   * request. Throws if the provider throws or returns unparseable JSON — the
+   * caller falls back.
    */
-  get(fontId: number, glyphId: number): GlyphOutline {
-    const key = `${fontId}:${glyphId}`;
+  get(fontId: number, glyphId: number, syntheticBold = false): GlyphOutline {
+    const key = `${fontId}:${glyphId}${syntheticBold ? ':synthetic' : ''}`;
     const cached = this.entries.get(key);
     if (cached !== undefined) {
       // LRU touch: reinsert so the most-recently-used entry moves to the tail
@@ -95,7 +105,7 @@ export class GlyphCache {
 
     // build BEFORE inserting so a throwing/invalid provider never poisons the
     // cache — the entry is only stored once the outline is successfully built
-    const outline = this.build(fontId, glyphId);
+    const outline = this.build(fontId, glyphId, syntheticBold);
     this.entries.set(key, outline);
     if (this.entries.size > this.maxEntries) {
       const oldest = this.entries.keys().next().value;
@@ -104,8 +114,8 @@ export class GlyphCache {
     return outline;
   }
 
-  private build(fontId: number, glyphId: number): GlyphOutline {
-    const { upem, cmds } = parseOutlineJson(this.provider(fontId, glyphId));
+  private build(fontId: number, glyphId: number, syntheticBold: boolean): GlyphOutline {
+    const { upem, cmds } = parseOutlineJson(this.provider(fontId, glyphId, syntheticBold));
     // empty-contour glyphs (spaces) cache as a null path so the backend skips
     // them without re-fetching
     if (cmds.length === 0) return { path: null, upem };

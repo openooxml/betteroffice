@@ -5,10 +5,20 @@ import { DOCX_ECHO_ALPHABET, indexEchoGlyphSet, outlineBounds } from './resident
 /** @internal */
 export interface EchoGlyphEngine {
   echoGlyphSetJson(fontId: number, size: number, kern: boolean, alphabet: string): string;
-  outlineGlyphJson(fontId: number, glyphId: number): string;
+  /** `syntheticBold` asks for the widened outlines a regular face is painted with instead. */
+  outlineGlyphJson(fontId: number, glyphId: number, syntheticBold?: boolean): string;
 }
 
 type InkBox = { upem: number; xMin: number; xMax: number; yMin: number; yMax: number };
+
+/** Shapes advance the same for both weights, so only the outlines and their ink differ. */
+function setKey(generation: number, fontId: number, size: number, kern: boolean, syntheticBold: boolean): string {
+  return `${generation}:${fontId}:${size}:${kern ? 1 : 0}${syntheticBold ? 'synthetic' : ''}`;
+}
+
+function inkKey(fontId: number, glyphId: number, syntheticBold: boolean): string {
+  return `${fontId}:${glyphId}${syntheticBold ? ':synthetic' : ''}`;
+}
 
 /** @internal The echo glyph sets of one font store, and which of them the main thread was sent. */
 export class EchoGlyphSources {
@@ -24,12 +34,15 @@ export class EchoGlyphSources {
   provider(pixelRatio: number, retainedOnly = false): EchoGlyphProvider {
     return {
       pixelRatio,
-      glyphSet: (fontId, size, kern) => {
-        if (!retainedOnly) return this.glyphSet(fontId, size, kern);
-        const entry = this.sets.get(`${this.generation}:${fontId}:${size}:${kern ? 1 : 0}`);
+      glyphSet: (fontId, size, kern, syntheticBold = false) => {
+        const key = setKey(this.generation, fontId, size, kern, syntheticBold);
+        if (!retainedOnly) return this.glyphSet(key, fontId, size, kern, syntheticBold);
+        const entry = this.sets.get(key);
         return entry && this.shipped.has(entry.payload.key) ? entry.source : undefined;
       },
-      glyphInk: (fontId, glyphId) => retainedOnly ? this.inks.get(`${fontId}:${glyphId}`) : this.glyphInk(fontId, glyphId),
+      glyphInk: (fontId, glyphId, syntheticBold = false) => retainedOnly
+        ? this.inks.get(inkKey(fontId, glyphId, syntheticBold))
+        : this.glyphInk(fontId, glyphId, syntheticBold),
     };
   }
 
@@ -43,13 +56,12 @@ export class EchoGlyphSources {
     for (const set of sets) this.shipped.add(set.key);
   }
 
-  private glyphSet(fontId: number, size: number, kern: boolean): EchoGlyphSource | undefined {
-    const key = `${this.generation}:${fontId}:${size}:${kern ? 1 : 0}`;
-    if (!this.sets.has(key)) this.sets.set(key, this.build(key, fontId, size, kern));
+  private glyphSet(key: string, fontId: number, size: number, kern: boolean, syntheticBold: boolean): EchoGlyphSource | undefined {
+    if (!this.sets.has(key)) this.sets.set(key, this.build(key, fontId, size, kern, syntheticBold));
     return this.sets.get(key)?.source;
   }
 
-  private build(key: string, fontId: number, size: number, kern: boolean) {
+  private build(key: string, fontId: number, size: number, kern: boolean, syntheticBold: boolean) {
     try {
       const shaped = JSON.parse(this.engine.echoGlyphSetJson(fontId, size, kern, DOCX_ECHO_ALPHABET)) as Omit<
         DocxEchoGlyphSet, 'key' | 'fontId' | 'alphabet' | 'outlines'>;
@@ -57,10 +69,13 @@ export class EchoGlyphSources {
       const ink = { upem: 0, xMin: 0, yMin: 0, yMax: 0, overhang: 0 };
       shaped.glyphIds.forEach((id, index) => {
         if (!id) return;
-        const json = outlines[id] ??= this.engine.outlineGlyphJson(fontId, id);
-        const box = this.glyphInk(fontId, id, json);
+        // widened outlines carry the synthetic weight, so they also set the repaint band
+        const json = outlines[id] ??= this.engine.outlineGlyphJson(fontId, id, syntheticBold);
+        const box = this.glyphInk(fontId, id, syntheticBold, json);
         if (box === undefined) throw new Error('Echo glyph outline is unavailable');
-        ink.upem = (JSON.parse(json) as { upem: number }).upem;
+        // a blank glyph has no ink box, so the units per em are read from the outline itself
+        const outline = JSON.parse(json) as { upem: number };
+        ink.upem = outline.upem;
         if (!box) return;
         ink.xMin = Math.min(ink.xMin, box.xMin);
         ink.yMin = Math.min(ink.yMin, box.yMin);
@@ -68,7 +83,8 @@ export class EchoGlyphSources {
         ink.overhang = Math.max(ink.overhang, box.xMax - shaped.advances[index]!);
       });
       if (!ink.upem) return null;
-      const payload: DocxEchoGlyphSet = { key, fontId, alphabet: DOCX_ECHO_ALPHABET, ...shaped, outlines };
+      const payload: DocxEchoGlyphSet = { key, fontId, ...(syntheticBold ? { syntheticBold } : {}),
+        alphabet: DOCX_ECHO_ALPHABET, ...shaped, outlines };
       return { source: { key, glyphs: indexEchoGlyphSet(payload), ink }, payload };
     } catch {
       return null;
@@ -76,12 +92,12 @@ export class EchoGlyphSources {
   }
 
   /** Null for a glyph without ink, undefined when its outline cannot be read. */
-  private glyphInk(fontId: number, glyphId: number, outline?: string): InkBox | null | undefined {
-    const key = `${fontId}:${glyphId}`;
+  private glyphInk(fontId: number, glyphId: number, syntheticBold: boolean, outline?: string): InkBox | null | undefined {
+    const key = inkKey(fontId, glyphId, syntheticBold);
     if (!this.inks.has(key)) {
       let box: InkBox | null | undefined;
       try {
-        const json = outline ?? this.engine.outlineGlyphJson(fontId, glyphId);
+        const json = outline ?? this.engine.outlineGlyphJson(fontId, glyphId, syntheticBold);
         box = outlineBounds(json) ?? null;
       } catch {
         box = undefined;

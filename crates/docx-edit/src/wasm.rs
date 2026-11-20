@@ -775,10 +775,16 @@ impl EditSession {
     /// `{"upem":n,"cmds":[{"t":"M"|"L"|"Q"|"C"|"Z", …}]}` — commands in font
     /// units, y-up. `font_id` comes from
     /// [`EditSession::register_measure_font`] and `glyph_id` from shaping.
-    /// Errors when the glyph cannot be extracted.
-    pub fn outline_glyph_json(&self, font_id: u32, glyph_id: u32) -> Result<String, JsValue> {
+    /// `synthetic_bold` widens the contours of a regular face that has no bold
+    /// cut without changing metrics. Errors when the glyph cannot be extracted.
+    pub fn outline_glyph_json(
+        &self,
+        font_id: u32,
+        glyph_id: u32,
+        synthetic_bold: Option<bool>,
+    ) -> Result<String, JsValue> {
         self.core
-            .outline_glyph_json(font_id, glyph_id)
+            .outline_glyph_json_with_weight(font_id, glyph_id, synthetic_bold.unwrap_or(false))
             .map_err(JsValue::from)
     }
 
@@ -4344,8 +4350,8 @@ mod tests {
                     .display_range_rects_region_json("body", "", 1.0, 9.0)
                     .unwrap(),
             ));
-            record(parse(session.outline_glyph_json(0, 36).unwrap()));
-            record(parse(session.outline_glyph_json(1, 36).unwrap()));
+            record(parse(session.outline_glyph_json(0, 36, None).unwrap()));
+            record(parse(session.outline_glyph_json(1, 36, None).unwrap()));
             let pages = parse(
                 session
                     .export_structured_with_pages_json(
@@ -4376,7 +4382,7 @@ mod tests {
                     .unwrap(),
             );
             record(private["content"]["layout"]["fragments"].clone());
-            record(parse(session.outline_glyph_json(0, 36).unwrap()));
+            record(parse(session.outline_glyph_json(0, 36, None).unwrap()));
             session.set_display_window(0, 0);
             session
                 .layout_document_with_regions_retained_json(&request)
@@ -4401,7 +4407,7 @@ mod tests {
             b.layout_document_with_regions_retained_json(&b_request)
                 .unwrap();
             b.build_display_list_frame("{}", 0.0).unwrap();
-            b.outline_glyph_json(1, 36).unwrap();
+            b.outline_glyph_json(1, 36, None).unwrap();
         };
         b_round();
         assert_eq!(drive(&open(83.0), [LIBERATION, CARLITO], &b_round), a_alone);

@@ -601,9 +601,9 @@ export function CanvasPagesView({
     const outlines = glyphOutlineProvider;
     if (outlines) {
       glyphCacheRef.current = new GlyphCache({
-        provider: (fontId, glyphId) => {
+        provider: (fontId, glyphId, syntheticBold) => {
           if (cancelled) throw new Error('The glyph outlines belong to a released engine');
-          return outlines(fontId, glyphId);
+          return outlines(fontId, glyphId, syntheticBold);
         },
       });
       return () => {

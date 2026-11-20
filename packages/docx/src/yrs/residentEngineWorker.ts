@@ -999,7 +999,7 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
           enteredPages.includes(caretPage) || (caretPageId !== undefined && pendingOffscreenPageIds.has(caretPageId)))) {
           requestedPages.add(caretPage);
         }
-        if (!glyphCache) glyphCache = new GlyphCache({ provider: (fontId, glyphId) => engine.outlineGlyphJson(fontId, glyphId) });
+        if (!glyphCache) glyphCache = new GlyphCache({ provider: (fontId, glyphId, syntheticBold) => engine.outlineGlyphJson(fontId, glyphId, syntheticBold) });
         const pixelRatio = offscreenDpr * offscreenZoom;
         const echoRaster = changes.echoRaster;
         if (echoRaster && echoRaster.pixelRatio !== pixelRatio) pendingOffscreenPageIds.add(echoRaster.pageId);
@@ -3985,9 +3985,9 @@ async function replayOffscreen(
   }
   if (!glyphCache && session) {
     glyphCache = new GlyphCache({
-      provider: (fontId, glyphId) => {
+      provider: (fontId, glyphId, syntheticBold) => {
         try {
-          return session!.outlineGlyphJson(fontId, glyphId);
+          return session!.outlineGlyphJson(fontId, glyphId, syntheticBold);
         } catch (error) {
           // The raster paints on with browser text, so running out of memory is answered here.
           if (isEngineTrap(error) && outOfMemoryBytes(error as Error, wasmModuleMemories()) > 0) {
