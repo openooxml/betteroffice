@@ -258,6 +258,8 @@ interface OriginalRunBoundary {
   formatting?: TextFormatting;
   propertyChanges?: Run['propertyChanges'];
   inline?: boolean;
+  /** False for the unit of a kept inline element seeded as an embed, which is no run. */
+  formatsRun?: boolean;
 }
 
 interface LiveParagraphBreaks {
@@ -1730,7 +1732,7 @@ function sourceBreakBoundaries(paragraph: Paragraph | undefined): OriginalRunBou
   for (const child of paragraph?.content ?? []) {
     if (child.type !== 'run') {
       if (child.type === 'rawXml') {
-        if (baseRawInlineUnits(child) > 0) boundaries.push({ text: '\uFFFC' });
+        if (baseRawInlineUnits(child) > 0) boundaries.push({ text: '\uFFFC', formatsRun: false });
         continue;
       }
       if (
@@ -1791,6 +1793,16 @@ function plainRunsText(children: readonly unknown[]): string | null {
   return text;
 }
 
+/**
+ * The content a recorded boundary stands for when its breaks are classified. A kept inline
+ * element's unit takes no flow token, as its live embed takes none.
+ */
+function boundarySource(boundary: OriginalRunBoundary): ParagraphContent {
+  return boundary.formatsRun === false
+    ? { type: 'rawXml', xml: '' }
+    : { type: 'run', content: boundaryContent(boundary, {}) };
+}
+
 function liveRunBoundaries(
   boundaries: OriginalRunBoundary[],
   live: LiveParagraphBreaks
@@ -1798,9 +1810,7 @@ function liveRunBoundaries(
   const count = boundaries.reduce((sum, boundary) =>
     sum + (noteMarkContent(boundary) ? 0 : (boundary.breaks?.length ?? 0)), 0);
   if (count === 0) return boundaries;
-  const source = boundaries.map((boundary): ParagraphContent => ({
-    type: 'run', content: boundaryContent(boundary, {}),
-  }));
+  const source = boundaries.map(boundarySource);
   const hoisted = count - trailingBlockBreaks({ type: 'paragraph', content: source }).length;
   const visible = flowTokens(source).includes('visible');
   let index = 0;
@@ -1849,15 +1859,12 @@ function restoreRecordedBreaks(
     start += boundary.text.length;
   }
   if (breaks.length === 0) return content;
-  const source = boundaries.map((boundary): ParagraphContent => ({
-    type: 'run',
-    content: boundaryContent(boundary, {}),
-  }));
+  const source = boundaries.map(boundarySource);
   const trailing = trailingBlockBreaks({ type: 'paragraph', content: source });
   const hoisted = breaks.length - trailing.length;
   const visible = flowTokens(source).includes('visible');
   const kept = breaks.filter(
-    (entry, index) => index >= hoisted || (visible && entry.type === 'page')
+    (entry, index) => index >= hoisted || (visible && entry.type === 'page') || entry.offset > 0
   );
   const recorded = boundaries.map((boundary) => boundary.text).join('');
   const live = items
