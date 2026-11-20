@@ -1852,6 +1852,14 @@ function withLiveLeadingPage(content: ParagraphContent[], live: LiveParagraphBre
     : content;
 }
 
+function holdsKeptWordInline(content: readonly ParagraphContent[]): boolean {
+  return content.some(child =>
+    child.type === 'rawXml' ? KEPT_WORD_INLINE.test(child.xml)
+      : child.type === 'hyperlink' ? holdsKeptWordInline(child.children as ParagraphContent[])
+        : false
+  );
+}
+
 function restoreRecordedBreaks(
   content: ParagraphContent[],
   items: InlineItem[],
@@ -2647,7 +2655,7 @@ function paragraphFromStory(
     !item.attributes.hyperlink && !item.attributes.ins && !item.attributes.del && !item.attributes.rPrChange
   ) && sources.map(source => source.text).join('') !== items.map(item => item.kind === 'text' ? item.text : '').join('');
   let content = buildParagraphContent(preserveSourceRunFormatting(items, sources, coalesce), recovery, format, revisionIds);
-  content = withLiveLeadingPage(restoreOriginalRuns(
+  content = restoreOriginalRuns(
     content,
     items,
     Array.isArray(attrs._originalRunBoundaries)
@@ -2655,7 +2663,11 @@ function paragraphFromStory(
       : undefined,
     baseParagraph,
     liveBreaks
-  ), liveBreaks);
+  );
+  const holdsKeptElement = rawMarks.length > 0 ||
+    items.some(item => item.kind === 'embed' && item.embedKind === RAW_INLINE_KIND) ||
+    (baseParagraph !== undefined && holdsKeptWordInline(baseParagraph.content));
+  if (holdsKeptElement) content = withLiveLeadingPage(content, liveBreaks);
   restoreLineBreaks(content, baseParagraph);
   content = restoreForeignInlines(content, baseParagraph);
   content = insertBoundaries(content, rawMarks, (boundary) => ({
