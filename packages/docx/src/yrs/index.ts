@@ -1648,7 +1648,8 @@ export interface YrsSession extends CollaborationReplica {
   /**
    * The attributes that put `paraId` on a list of `kind`: its own list when that is of that kind,
    * else the list of the paragraph directly above, else below, when it is of that kind, otherwise a
-   * list definition this call creates. A paragraph already on a list keeps its own level. With
+   * created list of that kind no paragraph names, or one this call creates. A paragraph already on
+   * a list keeps its own level, and joins a neighbour's list only where that list has it. With
    * `lead`, the first paragraph of the selection `paraId` is in, it goes on the list `lead` is on
    * when that is of `kind`.
    * @internal

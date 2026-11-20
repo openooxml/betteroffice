@@ -1352,9 +1352,10 @@ impl EditSession {
 
     /// The paragraph attributes, as JSON, that put a paragraph on a list of `kind`, `bullet` or
     /// `numbered`: its own list when that is of that kind, else the list of the paragraph directly
-    /// above, else below, else a list definition this call creates; a paragraph already on a list
-    /// keeps its own level. With `lead`, the first paragraph of the selection the paragraph is
-    /// in, it goes on the list `lead` is on when that is of `kind`.
+    /// above, else below, else a created list of that kind no paragraph names, else one this call
+    /// creates; a paragraph already on a list keeps its own level. With `lead`, the first
+    /// paragraph of the selection the paragraph is in, it goes on the list `lead` is on when that
+    /// is of `kind`.
     pub fn ensure_list_definition(
         &self,
         story: &str,
