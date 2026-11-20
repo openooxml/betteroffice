@@ -402,6 +402,48 @@ fn pilcrow_values<T: ReadTxn>(pilcrow: &MapRef, txn: &T) -> BTreeMap<String, Any
         .collect()
 }
 
+/// Adds to `keys` the key of every created definition `value` names in a [`LIST_DEF`] entry, at
+/// any depth.
+fn collect_list_keys(value: &Any, keys: &mut BTreeSet<String>) {
+    match value {
+        Any::Map(map) => {
+            let named = match map.get(LIST_DEF) {
+                Some(Any::Map(reference)) => reference.get("key"),
+                _ => None,
+            };
+            if let Some(Any::String(key)) = named {
+                keys.insert(key.to_string());
+            }
+            for value in map.values() {
+                collect_list_keys(value, keys);
+            }
+        }
+        Any::Array(values) => {
+            for value in values.iter() {
+                collect_list_keys(value, keys);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The keys of the created definitions the paragraphs of the live stories name, as the list they
+/// are on or in a record of their earlier properties.
+fn named_list_keys<T: ReadTxn>(txn: &T) -> BTreeSet<String> {
+    let mut keys = BTreeSet::new();
+    let Some(stories) = txn.get_map(crate::STORIES) else {
+        return keys;
+    };
+    let pilcrows = crate::live_stories(&stories, txn)
+        .filter_map(|(_, story)| story.cast::<TextRef>().ok())
+        .flat_map(|story| crate::pilcrows(&story, txn));
+    for (_, pilcrow) in pilcrows {
+        let values: HashMap<String, Any> = pilcrow_values(&pilcrow, txn).into_iter().collect();
+        collect_list_keys(&Any::from(values), &mut keys);
+    }
+    keys
+}
+
 impl EditingDoc {
     /// The list definitions the editor created, by key.
     pub fn created_list_definitions(&self) -> Vec<CreatedListDefinition> {
@@ -432,8 +474,9 @@ impl EditingDoc {
 
     /// The attributes that put paragraph `para_id` of `story` on a list of `kind`: the list it is
     /// on when that is of that kind, else the list of the paragraph directly above, else below,
-    /// when it is of that kind and does not come from that paragraph's style, otherwise a
-    /// definition created under a fresh key in [`LIST_DEFINITIONS`]. A paragraph already on a list
+    /// when it is of that kind and does not come from that paragraph's style, otherwise a created
+    /// definition of that kind no paragraph names, or failing that a definition created under a
+    /// fresh key in [`LIST_DEFINITIONS`]. A paragraph already on a list
     /// keeps its own level, and joins a neighbour's list only when that list has that level in
     /// that kind; one on no list takes the level of the paragraph it joins, or level 0 on a new
     /// list.
@@ -459,7 +502,7 @@ impl EditingDoc {
         kind: ListKind,
         lead: Option<&str>,
     ) -> EditResult<BTreeMap<String, Any>> {
-        let (joined, level) = {
+        let (joined, level, spare) = {
             let txn = self.yrs_doc().transact();
             let text = crate::story_ref(&txn, story)?;
             let pilcrows = crate::pilcrows(&text, &txn);
@@ -497,10 +540,22 @@ impl EditingDoc {
                     .filter(|values| !numbered_by_style(values))
                     .find_map(|values| join(&values))
             });
-            (joined, level)
+            let spare = if joined.is_none() {
+                let named = named_list_keys(&txn);
+                definitions
+                    .values()
+                    .find(|definition| definition.kind == kind && !named.contains(&definition.key))
+                    .map(|definition| definition.key.clone())
+            } else {
+                None
+            };
+            (joined, level, spare)
         };
         if let Some(attrs) = joined {
             return Ok(attrs);
+        }
+        if let Some(key) = spare {
+            return Ok(created_attrs(kind, &key, level.unwrap_or(0.0)));
         }
         let mut txn = self.transact_for(ctx);
         let root = txn
