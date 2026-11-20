@@ -1255,7 +1255,7 @@ test('capture work for one edit does not grow with the edits before it', async (
         worker.onmessage = deliver;
       }
       edits += 1;
-      const sample = { earlier, visited: watch.visited, minted: watch.added, returned };
+      const sample = { earlier, visited: watch.visited, minted: [...watch.added], returned };
       console.log(`G244-CAPTURE-SCAN earlier=${earlier} visited=${sample.visited} minted=${sample.minted.length} ` +
         `returned=${returned?.length} maps=${watch.maps.size} issued=${[...watch.maps].map((map) => map.size).join(',')} minted=${JSON.stringify(sample.minted.map(([key]) => key))} ` +
         `returned=${JSON.stringify(returned?.map(([key]) => key))}`);
