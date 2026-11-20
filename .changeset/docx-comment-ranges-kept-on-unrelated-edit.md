@@ -4,4 +4,4 @@
 '@betteroffice/rust-crates': patch
 ---
 
-A comment lost the range it was anchored to when the range sat inside a tracked change, a hyperlink or a content control and another paragraph was edited: the comment stayed, attached to nothing. A save now leaves such a paragraph as it was in the file and takes out only the markers of comments that were deleted.
+A comment whose range sits inside a tracked change, a hyperlink or a content control no longer loses that range when another paragraph is edited and the save patches the file in place. Deleting such a comment removes its markers.
