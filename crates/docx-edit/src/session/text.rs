@@ -173,11 +173,19 @@ impl EditSessionCore {
         let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
         let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
         let ctx = edit_ctx(author_name, author_date)?;
-        let receipt = self
-            .engine
-            .doc()
+        let doc = self.engine.doc();
+        let before = doc.committed_epoch();
+        // Typing over text in a cell (an IME composition step) leaves the tables as they were.
+        // Only nested stories hold cells, so a root story skips the read.
+        let in_paragraph = !ctx.is_suggesting()
+            && crate::structured::source::story_root(story) != story
+            && doc.holds_only_text(story, start, end);
+        let receipt = doc
             .replace_range(&ctx, StoryRange::new(story, start, end), text)
             .map_err(EngineError::message)?;
+        if in_paragraph {
+            doc.keep_table_structure(story, before, doc.committed_epoch(), end - start);
+        }
         Ok(text_receipt_json(receipt))
     }
 

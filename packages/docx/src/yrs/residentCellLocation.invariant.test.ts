@@ -72,6 +72,8 @@ test('engine cell location is null or equal to the projection after every step o
     const RAW_OPS = new Set(['detachControl', 'detachTable', 'moveTable', 'shareCell', 'reattachControl']);
     const familyTotals: Record<string, { violations: number; projectionThrows: number; peerMissingSteps: number; invalidSeeds: number; peerSkipped: number; reused: number; built: number }> = {};
     const cacheCounts = () => (selection as { cellLocationCacheCounts?: () => { built: number; reused: number } }).cellLocationCacheCounts?.() ?? { built: 0, reused: 0 };
+    /** Local edits that applied and left the cell structure key as it was, per family and op. */
+    const keptKeys: Record<string, Record<string, number>> = {};
     for (const family of ['valid', 'adversarial'] as const) {
     const totals = familyTotals[family] = { violations: 0, projectionThrows: 0, peerMissingSteps: 0, invalidSeeds: 0, peerSkipped: 0, reused: 0, built: 0 };
     const familyStart = cacheCounts();
@@ -115,6 +117,7 @@ test('engine cell location is null or equal to the projection after every step o
           return message.startsWith('cell location cache differs') ? `shadow: ${message.slice(0, 200)}` : `throw: ${message.slice(0, 120)}`;
         }
       };
+      const cellKey = () => (local as { cellStructureKey?: () => string }).cellStructureKey?.() ?? '';
       const seen = new Set<string>();
       let checks = 0;
       let answered = 0;
@@ -129,7 +132,41 @@ test('engine cell location is null or equal to the projection after every step o
       const textStories = () => liveStories().filter((story) => {
         try { return engine.paragraphs(story).length > 0; } catch { return false; }
       });
+      /** A paragraph of a random text story whose paragraphs `fits`. */
+      const paragraphIn = (fits: (paragraphs: { text: string }[]) => boolean = (paragraphs) => paragraphs.length > 0) => {
+        const story = pick(textStories().filter((id) => { try { return fits(engine.paragraphs(id)); } catch { return false; } }));
+        if (!story) return undefined;
+        const paragraphs = engine.paragraphs(story);
+        const index = Math.floor(next() * paragraphs.length);
+        return { story, paragraphs, index, paragraph: paragraphs[index]! };
+      };
+      /** A range of one to two units inside one paragraph of a random text story. */
+      const textRange = () => {
+        const at = paragraphIn((paragraphs) => paragraphs.some((paragraph) => paragraph.text.length > 0));
+        const length = at?.paragraph.text.length ?? 0;
+        if (!at || length === 0) return undefined;
+        const start = Math.floor(next() * length);
+        const end = Math.min(length, start + 1 + Math.floor(next() * 2));
+        const paraId = at.paragraph.paraId;
+        return { story: at.story, start: { paraId, offset: start }, end: { paraId, offset: end } };
+      };
       const steps: Record<string, () => unknown> = {
+        typeText: () => {
+          const at = paragraphIn();
+          return at && engine.insertText({ story: at.story, paraId: at.paragraph.paraId, offset: Math.floor(next() * (at.paragraph.text.length + 1)) }, next() < 0.5 ? 'x' : '가');
+        },
+        deleteText: () => { const range = textRange(); return range && engine.deleteRange(range); },
+        replaceText: () => { const range = textRange(); return range && engine.replaceRange(range, next() < 0.5 ? '한' : 'yz'); },
+        splitParagraph: () => {
+          const at = paragraphIn();
+          return at && engine.splitParagraph({ story: at.story, paraId: at.paragraph.paraId, offset: Math.floor(next() * (at.paragraph.text.length + 1)) });
+        },
+        mergeParagraphs: () => {
+          const at = paragraphIn((paragraphs) => paragraphs.length > 1); if (!at) return undefined;
+          const index = Math.min(at.index, at.paragraphs.length - 2);
+          const [first, second] = [at.paragraphs[index]!, at.paragraphs[index + 1]!];
+          return engine.deleteRange({ story: at.story, start: { paraId: first.paraId, offset: first.text.length }, end: { paraId: second.paraId, offset: 0 } });
+        },
         insertRow: () => { const t = pick(tables()); const c = t && pick(t.cells); return c && engine.insertRow({ story: t.story, tableIndex: t.tableIndex, row: c.row, column: c.column }, next() < 0.5 ? 'above' : 'below'); },
         insertColumn: () => { const t = pick(tables()); const c = t && pick(t.cells); return c && engine.insertColumn({ story: t.story, tableIndex: t.tableIndex, row: c.row, column: c.column }, next() < 0.5 ? 'left' : 'right'); },
         deleteRow: () => { const t = pick(tables()); const c = t && pick(t.cells); const at = c && { story: t.story, tableIndex: t.tableIndex, row: c.row, column: c.column }; return at && engine.deleteRow({ anchor: at, head: at }); },
@@ -260,9 +297,13 @@ test('engine cell location is null or equal to the projection after every step o
         const remote = peer !== null && next() < 0.5;
         engine = remote && peer ? peer : local;
         if (remote) { syncToPeer(); remoteSteps++; }
+        const keyBefore = remote ? null : cellKey();
         try {
           const result = steps[op]!();
-          if (result === undefined || result === false) refused++; else { applied++; ops[op] = (ops[op] ?? 0) + 1; history.push(`${step}:${remote ? 'remote:' : ''}${op}`); }
+          if (result === undefined || result === false) refused++; else {
+            applied++; ops[op] = (ops[op] ?? 0) + 1; history.push(`${step}:${remote ? 'remote:' : ''}${op}`);
+            if (keyBefore !== null && cellKey() === keyBefore) { const kept = keptKeys[family] ??= {}; kept[op] = (kept[op] ?? 0) + 1; }
+          }
         } catch (error) {
           if (isEngineTrap(error)) throw error;
           refused++;
@@ -289,7 +330,11 @@ test('engine cell location is null or equal to the projection after every step o
       console.log(`INVARIANT-FAMILY ${family} ${JSON.stringify(totals)} reuseRate=${rate}`);
     }
     for (const line of violations.slice(0, 12)) console.log(`VIOLATION ${line}`);
+    console.log(`KEY-KEPT ${JSON.stringify(keptKeys)}`);
     expect(violations).toEqual([]);
+    // Text deleted or replaced inside one paragraph keeps the projected tables.
+    expect(keptKeys.valid?.deleteText ?? 0).toBeGreaterThan(0);
+    expect(keptKeys.valid?.replaceText ?? 0).toBeGreaterThan(0);
     expect(familyTotals.valid!.peerMissingSteps).toBe(0);
   })();
 }, 600_000);

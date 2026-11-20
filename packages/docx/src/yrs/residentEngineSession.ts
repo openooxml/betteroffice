@@ -197,7 +197,8 @@ export type ResidentEngineSession = Pick<
   clearCellSelection(): YrsLoc | null;
   /**
    * @internal A key that changes whenever an embed, a table's rows, cells or cell stories, or
-   * the set of stories changes, and with every document instance, seed or loaded state.
+   * the set of stories changes, and with every document instance, seed or loaded state. Text
+   * deleted inside one paragraph leaves it as it was.
    */
   cellStructureKey?(): string;
   controlTargets(): ResidentControlTarget[];
@@ -854,7 +855,11 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
       const payload = session.table_payload(story, index);
       return payload === undefined ? null : JSON.parse(payload);
     },
-    cellStructureKey: () => `${session.version().split('-')[0]}:${session.resident_section_revision().split(':')[0]}`,
+    cellStructureKey: () => {
+      // `structure:sections:tables`; an engine without the table revision keys by structure.
+      const [structure, , tables] = session.resident_section_revision().split(':');
+      return `${session.version().split('-')[0]}:${tables === undefined ? `s${structure}` : `t${tables}`}`;
+    },
     setHyperlink: (range, hyperlink, suggesting) => applyCommandMutation(range.story, () =>
       session.set_hyperlink(...rangeArgs(range), JSON.stringify(hyperlink), suggesting?.name, suggesting?.date)),
     setImageGeometryAt: (at, geometry) => applyCommandMutation(at.story, () =>

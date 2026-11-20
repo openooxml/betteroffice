@@ -79,7 +79,8 @@ export type ResidentEngineSession = Pick<YrsSession, 'clientId' | 'applyDelete' 
     clearCellSelection(): YrsLoc | null;
     /**
      * @internal A key that changes whenever an embed, a table's rows, cells or cell stories, or
-     * the set of stories changes, and with every document instance, seed or loaded state.
+     * the set of stories changes, and with every document instance, seed or loaded state. Text
+     * deleted inside one paragraph leaves it as it was.
      */
     cellStructureKey?(): string;
     controlTargets(): ResidentControlTarget[];

@@ -183,9 +183,14 @@ impl EditSessionCore {
         serde_json::to_string(&geometry).map_err(EngineError::message)
     }
 
+    /// `structure:sections:tables`: the story structure revision, the section revision, and the
+    /// table structure revision (which a deletion of text inside one paragraph leaves as it was).
     pub fn resident_section_revision(&self) -> String {
         let revisions = self.engine.doc().story_revisions.lock().unwrap();
-        format!("{}:{}", revisions.structure, revisions.sections)
+        format!(
+            "{}:{}:{}",
+            revisions.structure, revisions.sections, revisions.table_structure
+        )
     }
 
     pub fn search_text(

@@ -77,6 +77,78 @@ test('typing in a cell reuses the projected tables and a structural edit rebuild
   expect(cellLocationCacheCounts().built).toBeGreaterThan(afterTyping.built);
 }, TIMEOUT);
 
+/** The start of `story`'s first paragraph moved by `offset`. */
+const startOf = (engine: DocxWorkerCommandEngine, story: string, offset: number) => ({ paraId: engine.paragraphs(story)[0]!.paraId, offset });
+
+test('deleting or replacing text inside a cell paragraph reuses the projected tables', async () => {
+  const arm = await openCommandEngine([], { bodyXml: paragraph('Before') + square([['A', 'B'], ['C', 'Delta echo']]) + paragraph('After') });
+  const story = 'body:t0:r1c1';
+  const at = (offset: number) => startOf(arm.engine, story, offset);
+  const where = { story: 'body', tableIndex: 0, row: 1, column: 1 };
+  expect(resolveLiveCell(arm.engine, story)).toEqual(where);
+  const key = arm.engine.cellStructureKey!();
+  const warmed = cellLocationCacheCounts();
+  for (const edit of [
+    () => arm.engine.deleteRange({ story, start: at(9), end: at(10) }),
+    () => arm.engine.deleteRange({ story, start: at(1), end: at(3) }),
+    () => arm.engine.replaceRange({ story, start: at(0), end: at(1) }, '가'),
+    () => arm.engine.replaceRange({ story, start: at(0), end: at(1) }, '각'),
+    () => arm.native.delete_range(story, at(0).paraId, 0, at(0).paraId, 1, undefined, undefined),
+  ]) {
+    edit();
+    expect(resolveLiveCell(arm.engine, story)).toEqual(where);
+  }
+  expect(arm.engine.paragraphs(story)[0]!.text).toBe('ta ech');
+  expect(arm.engine.cellStructureKey!()).toBe(key);
+  const edited = cellLocationCacheCounts();
+  expect(edited.built - warmed.built).toBe(0);
+  expect(edited.reused - warmed.reused).toBe(5);
+  expectProjectionEquivalent(arm.engine);
+}, TIMEOUT);
+
+test('text deleted in a block control inside a cell reuses the projection that shows it', async () => {
+  const inside = `<w:sdt><w:sdtPr><w:alias w:val="Box"/></w:sdtPr><w:sdtContent>${paragraph('in control')}</w:sdtContent></w:sdt>`;
+  const arm = await openCommandEngine([], { bodyXml: table(2, [cell(inside + paragraph('')) + cell(paragraph('B'))]) + paragraph('After') });
+  const story = arm.engine.geometryReader.storyIds().find((id) => /^body:t0:r0c0:sdt\d+$/.test(id))!;
+  const where = { story: 'body', tableIndex: 0, row: 0, column: 0 };
+  expect(resolveLiveCell(arm.engine, story)).toEqual(where);
+  const warmed = cellLocationCacheCounts();
+  for (const offset of [9, 5, 0]) {
+    arm.engine.deleteRange({ story, start: startOf(arm.engine, story, offset), end: startOf(arm.engine, story, offset + 1) });
+    expect(resolveLiveCell(arm.engine, story)).toEqual(where);
+  }
+  expect(arm.engine.paragraphs(story)[0]!.text).toBe('n cotro');
+  const edited = cellLocationCacheCounts();
+  expect([edited.built - warmed.built, edited.shownProjected - warmed.shownProjected]).toEqual([0, 0]);
+  expectProjectionEquivalent(arm.engine, [story]);
+}, TIMEOUT);
+
+for (const [name, edit] of [
+  ['a delete across the table', (engine: DocxWorkerCommandEngine) =>
+    engine.deleteRange({ story: 'body', start: startOf(engine, 'body', 3), end: { paraId: engine.paragraphs('body').at(-1)!.paraId, offset: 2 } })],
+  ['merged cells', (engine: DocxWorkerCommandEngine) => engine.mergeCells(range(1, 0, 1, 1))],
+  ['a deleted row', (engine: DocxWorkerCommandEngine) => engine.deleteRow(range(0, 0))],
+  ['a paragraph break in the cell', (engine: DocxWorkerCommandEngine) => engine.splitParagraph({ story: 'body:t0:r1c1', ...startOf(engine, 'body:t0:r1c1', 2) })],
+  ['a paragraph merge inside the cell', (engine: DocxWorkerCommandEngine) => {
+    const [first, second] = engine.paragraphs('body:t0:r1c1');
+    engine.deleteRange({ story: 'body:t0:r1c1', start: { paraId: first!.paraId, offset: first!.text.length }, end: { paraId: second!.paraId, offset: 0 } });
+  }],
+] as const) {
+  test(`${name} rebuilds the projected tables`, async () => {
+    const two = paragraph('Delta') + paragraph('echo');
+    const arm = await openCommandEngine([], { bodyXml: paragraph('Before') + table(2, [
+      cell(paragraph('A')) + cell(paragraph('B')), cell(paragraph('C')) + cell(two),
+    ]) + paragraph('After') });
+    resolveLiveCell(arm.engine, 'body:t0:r1c1');
+    const key = arm.engine.cellStructureKey!();
+    const warmed = cellLocationCacheCounts();
+    edit(arm.engine);
+    expect(arm.engine.cellStructureKey!()).not.toBe(key);
+    expectProjectionEquivalent(arm.engine, ['body:t0:r1c1']);
+    expect(cellLocationCacheCounts().built).toBeGreaterThan(warmed.built);
+  }, TIMEOUT);
+}
+
 test('a nested table a merge moved keeps the projection result', async () => {
   const inner = table(1, [cell(paragraph('Inner'))]);
   const arm = await openCommandEngine([], { bodyXml: table(2, [cell(paragraph('CellA')) + cell(inner + paragraph(''))]) });
