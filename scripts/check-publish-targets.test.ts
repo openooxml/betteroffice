@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { checkCrates, checkNpm, checkPlan, nativeReleaseVersions, repositoryScan, unaskedMajors, siblingReferences, verifyPublished } from './check-publish-targets.mjs';
+import { platformPackageVersions } from './native-bindings.mjs';
 import { publishedCrates, publishedPackageVersions, workspaceEntries } from './published-packages.mjs';
 import { RUST_PUBLISH_CRATES } from './rust-crates.mjs';
 
@@ -14,6 +15,8 @@ const release = Bun.YAML.parse(readFileSync(releaseWorkflow, 'utf8')) as any;
 const packages = publishedPackageVersions();
 const repository = repositoryScan(packages);
 const workspaceVersions = new Map(workspaceEntries().map(({ manifest }) => [manifest.name, manifest.version]));
+const platforms = platformPackageVersions();
+const platformVersions = new Map(platforms.map(({ name, version }) => [name, version]));
 const crates = RUST_PUBLISH_CRATES.map((crate) => crate.name);
 const fixtureDirectories: string[] = [];
 const fonts = { name: '@betteroffice/fonts', version: '1.2.3' };
@@ -66,6 +69,7 @@ async function check(
     packages?: typeof packages;
     workspaces?: ReturnType<typeof workspaceEntries>;
     later?: { name: string; version: string }[];
+    platforms?: { name: string; version: string }[];
     references?: ReturnType<typeof siblingReferences>;
     maxWaitMs?: number;
   } = {}
@@ -78,7 +82,8 @@ async function check(
     const started = performance.now();
     const npmOptions = {
       registry: origin, out, timeoutMs: options.timeoutMs,
-      packages: options.packages, workspaces: options.workspaces, later: options.later, references: options.references
+      packages: options.packages, workspaces: options.workspaces, later: options.later, platforms: options.platforms,
+      references: options.references
     };
     const status =
       mode === '--npm'
@@ -163,7 +168,7 @@ describe('npm publish targets', () => {
 
   test('a package that exists at its release version passes', async () => {
     const result = await check('--npm', (name) => {
-      const version = workspaceVersions.get(name);
+      const version = workspaceVersions.get(name) ?? platformVersions.get(name);
       return version ? versions(version) : notFound();
     }, repository);
     expect(result.status).toBe(0);
@@ -189,6 +194,73 @@ describe('npm publish targets', () => {
     expect(result.stderr).toContain(`${missing} is not on npm.`);
     expect(result.stderr).toContain('Initial npm release of a new package');
   });
+});
+
+describe('native npm names the release publishes later', () => {
+  const root = { name: '@betteroffice/docx-native', version: '1.2.3' };
+  const platform = { name: '@betteroffice/docx-native-linux-x64-musl', version: '1.2.3' };
+  const native = { packages: [fonts, latin], later: [root], platforms: [platform] };
+  const missingLines = (stderr: string) => stderr.split('\n').filter((line) => line.endsWith(' is not on npm.'));
+
+  test.each([
+    ['platform package', platform.name],
+    ['root', root.name]
+  ])('a native %s that does not exist fails, by name', async (_kind, missing) => {
+    const result = await check('--npm', (name) => name === missing ? notFound() : versions('1.2.3'), {
+      ...native, workspaces: fontWorkspaces()
+    });
+    expect(result.status).toBe(1);
+    expect(missingLines(result.stderr)).toEqual([`${missing} is not on npm.`]);
+    expect(result.stderr).toContain('RELEASING.md, "Native packages"');
+    expect(result.stderr).not.toContain('Initial npm release of a new package');
+  });
+
+  test('native names on npm at the release version pass and print nothing of their own', async () => {
+    const result = await check('--npm', () => versions('1.2.3'), { ...native, workspaces: fontWorkspaces() });
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe('');
+    expect(result.stdout).toBe([
+      `${fonts.name}@${fonts.version} is on npm.`,
+      `${latin.name}@${latin.version} is on npm.`
+    ].join('\n'));
+  });
+
+  test('native names on npm only at an older version pass: the release publishes that version', async () => {
+    const result = await check('--npm', () => versions('0.0.0'), { ...native, workspaces: fontWorkspaces() });
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe('');
+    expect(result.stdout).toBe([
+      `${fonts.name}@${fonts.version} is a new version of a package on npm.`,
+      `${latin.name}@${latin.version} is a new version of a package on npm.`
+    ].join('\n'));
+  });
+
+  test('native names are not required when the release skips native packages', async () => {
+    const prior = process.env.RELEASE_SKIP_NATIVE;
+    process.env.RELEASE_SKIP_NATIVE = 'true';
+    try {
+      const skipped = await check('--npm', (name) =>
+        name === fonts.name || name === latin.name ? versions('1.2.3') : notFound(), {
+        packages: [fonts, latin], workspaces: fontWorkspaces()
+      });
+      expect(skipped.stderr).toBe('');
+      expect(skipped.status).toBe(0);
+    } finally {
+      if (prior === undefined) delete process.env.RELEASE_SKIP_NATIVE;
+      else process.env.RELEASE_SKIP_NATIVE = prior;
+    }
+  });
+
+  test.each([
+    ['platform package', platforms[platforms.length - 1]!.name],
+    ['root', natives[0]!.name]
+  ])('a native %s of the repository that does not exist fails the full repository scan, by name', async (_kind, missing) => {
+    const result = await check('--npm', (name) =>
+      name === missing ? notFound() : versions(workspaceVersions.get(name) ?? platformVersions.get(name)!));
+    expect(result.status).toBe(1);
+    expect(missingLines(result.stderr)).toEqual([`${missing} is not on npm.`]);
+    expect(result.stderr).toContain('RELEASING.md, "Native packages"');
+  }, FULL_SCAN_BUDGET_MS);
 });
 
 describe('workspace dependency versions', () => {
