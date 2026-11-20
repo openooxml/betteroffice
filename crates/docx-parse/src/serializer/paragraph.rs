@@ -2337,6 +2337,17 @@ mod tests {
     }
 
     #[test]
+    fn a_bookmark_directly_inside_an_inline_content_control_is_dropped_on_a_rewrite() {
+        let (a, b, c, d) = (text_run("A"), text_run("B"), text_run("C"), text_run("D"));
+        let bookmark = r#"<w:bookmarkStart w:id="3" w:name="mark"/>"#;
+        let open = r#"<w:sdt><w:sdtPr><w:id w:val="1"/></w:sdtPr><w:sdtContent>"#;
+        let close = "</w:sdtContent></w:sdt>";
+        let output = written(&format!("{a}{open}{b}{bookmark}{c}{close}{d}"));
+        assert!(!output.contains("w:bookmarkStart"), "{output}");
+        assert!(output.contains("<w:t>B</w:t>") && output.contains("<w:t>C</w:t>"), "{output}");
+    }
+
+    #[test]
     fn a_node_without_width_between_two_different_scopes_is_written_outside_both() {
         let (a, b, c, d) = (text_run("A"), text_run("B"), text_run("C"), text_run("D"));
         let bookmark = r#"<w:bookmarkStart w:id="3" w:name="mark"/>"#;

@@ -1657,3 +1657,34 @@ fn an_edit_by_index_of_a_paragraph_with_an_id_reports_that_id() {
     assert_eq!(receipt, expected);
     assert_eq!(by_index.save().unwrap(), by_id.save().unwrap());
 }
+
+#[test]
+fn replacing_the_text_of_a_paragraph_inside_a_direction_element_keeps_the_element() {
+    let document_xml = concat!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#,
+        r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" "#,
+        r#"xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body>"#,
+        r#"<w:p w14:paraId="55555555"><w:dir w:val="rtl"><w:r><w:t>abc</w:t></w:r></w:dir></w:p>"#,
+        r#"<w:sectPr/></w:body></w:document>"#
+    );
+    let parts = vec![
+        (
+            "[Content_Types].xml".to_owned(),
+            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec(),
+        ),
+        (
+            "_rels/.rels".to_owned(),
+            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec(),
+        ),
+        ("word/document.xml".to_owned(), document_xml.as_bytes().to_vec()),
+    ];
+    let mut document = Document::open(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
+    document.replace_paragraph_text("55555555", "xyz").unwrap();
+    let saved = document.save().unwrap();
+    let parts = ooxml_opc::unzip_parts(&saved).unwrap();
+    let xml = saved_part(&parts, "word/document.xml");
+    assert!(
+        xml.contains(r#"<w:dir w:val="rtl"><w:r><w:t>xyz</w:t></w:r></w:dir>"#),
+        "{xml}"
+    );
+}
