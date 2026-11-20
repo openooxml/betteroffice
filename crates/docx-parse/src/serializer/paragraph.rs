@@ -2386,11 +2386,21 @@ mod tests {
         let (a, b) = (text_run("A"), text_run("B"));
         let output = written(&format!("{a}{}{b}", rtl(TWO_FIELDS)));
         assert_eq!(output.matches("<w:dir ").count(), 1, "{output}");
-        assert_eq!(output.matches(r#"w:fldCharType="begin""#).count(), 2, "{output}");
+        assert_eq!(
+            output.matches(r#"w:fldCharType="begin""#).count(),
+            2,
+            "{output}"
+        );
         let open = output.find("<w:dir ").unwrap();
         let close = output.find("</w:dir>").unwrap();
-        assert!(open < output.find(r#"w:fldCharType="begin""#).unwrap(), "{output}");
-        assert!(output.rfind(r#"w:fldCharType="end""#).unwrap() < close, "{output}");
+        assert!(
+            open < output.find(r#"w:fldCharType="begin""#).unwrap(),
+            "{output}"
+        );
+        assert!(
+            output.rfind(r#"w:fldCharType="end""#).unwrap() < close,
+            "{output}"
+        );
     }
 
     #[test]
@@ -2423,7 +2433,10 @@ mod tests {
         let begin = output.find(r#"w:fldCharType="begin""#).unwrap();
         let instruction = output.find("SECTIONPAGES").unwrap();
         let end = output.rfind(r#"w:fldCharType="end""#).unwrap();
-        assert!(open < begin && begin < instruction && end < close, "{output}");
+        assert!(
+            open < begin && begin < instruction && end < close,
+            "{output}"
+        );
         assert!(output.find("<w:t>A</w:t>").unwrap() < open, "{output}");
         assert!(close < output.find("<w:t>B</w:t>").unwrap(), "{output}");
     }

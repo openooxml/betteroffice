@@ -11,16 +11,22 @@ fn field(code: &str, result: &str) -> String {
 }
 
 #[test]
-fn a_field_held_in_one_run_loses_its_cached_result_and_instruction_spacing_on_a_rewrite_as_on_main() {
+fn a_field_held_in_one_run_loses_its_cached_result_and_instruction_spacing_on_a_rewrite_as_on_main()
+{
     let cases = [
         ("page", field(" PAGE ", "1")),
         ("ref", field(" REF target \\h ", "Cached text")),
-        ("date", field(" DATE \\@ \"d MMMM yyyy\" ", "20 November 2026")),
+        (
+            "date",
+            field(" DATE \\@ \"d MMMM yyyy\" ", "20 November 2026"),
+        ),
     ];
     let body: String = cases
         .iter()
         .enumerate()
-        .map(|(index, (_, run))| format!(r#"<w:p w14:paraId="7777777{index}"><w:r><w:t>A</w:t></w:r>{run}</w:p>"#))
+        .map(|(index, (_, run))| {
+            format!(r#"<w:p w14:paraId="7777777{index}"><w:r><w:t>A</w:t></w:r>{run}</w:p>"#)
+        })
         .collect();
     let document_xml = format!(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body>{body}<w:sectPr/></w:body></w:document>"#
@@ -42,8 +48,7 @@ fn a_field_held_in_one_run_loses_its_cached_result_and_instruction_spacing_on_a_
             std::sync::Arc::make_mut(paragraph)
                 .formatting
                 .get_or_insert_with(Default::default)
-                .alignment =
-                Some("center".to_owned());
+                .alignment = Some("center".to_owned());
         }
     }
     let saved = document.save().unwrap();
@@ -56,7 +61,12 @@ fn a_field_held_in_one_run_loses_its_cached_result_and_instruction_spacing_on_a_
     let paragraphs: Vec<String> = xml
         .split("<w:p ")
         .skip(1)
-        .map(|rest| format!("<w:p {}", &rest[..rest.find("</w:p>").map_or(rest.len(), |at| at + 6)]))
+        .map(|rest| {
+            format!(
+                "<w:p {}",
+                &rest[..rest.find("</w:p>").map_or(rest.len(), |at| at + 6)]
+            )
+        })
         .collect();
     let out: Vec<String> = cases
         .iter()
