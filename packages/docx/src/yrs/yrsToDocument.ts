@@ -1842,6 +1842,16 @@ function paragraphBreaksAreLive(content: ParagraphContent[], live: LiveParagraph
     trailingBlockBreaks(paragraph).every((kind, index) => kind === live.trailing[index]);
 }
 
+/**
+ * Writes the leading page break the live paragraph holds first wherever its recorded place was
+ * not kept. The story's own break embeds around the paragraph reach the save without it.
+ */
+function withLiveLeadingPage(content: ParagraphContent[], live: LiveParagraphBreaks): ParagraphContent[] {
+  return live.leadingPage && flowTokens(content)[0] !== 'page'
+    ? [{ type: 'run', content: [{ type: 'break', breakType: 'page' }] }, ...content]
+    : content;
+}
+
 function restoreRecordedBreaks(
   content: ParagraphContent[],
   items: InlineItem[],
@@ -2637,7 +2647,7 @@ function paragraphFromStory(
     !item.attributes.hyperlink && !item.attributes.ins && !item.attributes.del && !item.attributes.rPrChange
   ) && sources.map(source => source.text).join('') !== items.map(item => item.kind === 'text' ? item.text : '').join('');
   let content = buildParagraphContent(preserveSourceRunFormatting(items, sources, coalesce), recovery, format, revisionIds);
-  content = restoreOriginalRuns(
+  content = withLiveLeadingPage(restoreOriginalRuns(
     content,
     items,
     Array.isArray(attrs._originalRunBoundaries)
@@ -2645,7 +2655,7 @@ function paragraphFromStory(
       : undefined,
     baseParagraph,
     liveBreaks
-  );
+  ), liveBreaks);
   restoreLineBreaks(content, baseParagraph);
   content = restoreForeignInlines(content, baseParagraph);
   content = insertBoundaries(content, rawMarks, (boundary) => ({
