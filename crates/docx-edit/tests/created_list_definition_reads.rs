@@ -599,10 +599,18 @@ fn bullets_on_a_numbered_level_of_a_hybrid_list_below_its_bullet_create_a_bullet
     let before = attrs(&doc, "Item");
     let ensured = create(&doc, "Item", ListKind::Bullet);
     assert!(created_key(&doc, "Item").is_some(), "{ensured:?}");
-    assert_eq!(ensured.get("listIsBullet"), Some(&Any::Bool(true)), "{ensured:?}");
+    assert_eq!(
+        ensured.get("listIsBullet"),
+        Some(&Any::Bool(true)),
+        "{ensured:?}"
+    );
     assert_eq!(ensured.get("numPr"), Some(&num_pr(1.0, 2.0)));
     assert_eq!(doc.created_list_definitions().len(), 1);
-    assert_eq!(before.get("listNumFmt"), Some(&Any::from("decimal")), "{before:?}");
+    assert_eq!(
+        before.get("listNumFmt"),
+        Some(&Any::from("decimal")),
+        "{before:?}"
+    );
     let top = attrs(&doc, "Top");
     assert_eq!(top.get("listNumFmt"), Some(&Any::from("bullet")), "{top:?}");
 }
@@ -614,11 +622,19 @@ fn bullets_on_a_level_two_item_below_a_one_level_bullet_list_create_a_bullet_lis
     seed_from_docx(&doc, &numbered_docx(&body, None, SINGLE_LEVEL_NUMBERING)).unwrap();
     let before = attrs(&doc, "Item");
     create(&doc, "Item", ListKind::Bullet);
-    assert!(created_key(&doc, "Item").is_some(), "{:?}", attrs(&doc, "Item"));
+    assert!(
+        created_key(&doc, "Item").is_some(),
+        "{:?}",
+        attrs(&doc, "Item")
+    );
     let definitions = doc.created_list_definitions();
     assert_eq!(definitions.len(), 1);
     assert_eq!(definitions[0].kind, ListKind::Bullet);
-    assert_eq!(before.get("listNumFmt"), Some(&Any::from("decimal")), "{before:?}");
+    assert_eq!(
+        before.get("listNumFmt"),
+        Some(&Any::from("decimal")),
+        "{before:?}"
+    );
     let top = attrs(&doc, "Top");
     assert_eq!(top.get("listNumFmt"), Some(&Any::from("bullet")), "{top:?}");
 }
@@ -630,10 +646,8 @@ fn a_lone_paragraph_put_on_and_off_a_bullet_list_keeps_reusing_one_definition() 
     create(&doc, "Alpha", ListKind::Bullet);
     let first = created_key(&doc, "Alpha");
     for _ in 0..99 {
-        doc.set_paragraph_attr(&alpha, "numPr", Any::Null)
-            .unwrap();
-        doc.set_paragraph_attr(&alpha, LIST_DEF, Any::Null)
-            .unwrap();
+        doc.set_paragraph_attr(&alpha, "numPr", Any::Null).unwrap();
+        doc.set_paragraph_attr(&alpha, LIST_DEF, Any::Null).unwrap();
         create(&doc, "Alpha", ListKind::Bullet);
     }
     assert_eq!(doc.created_list_definitions().len(), 1);
