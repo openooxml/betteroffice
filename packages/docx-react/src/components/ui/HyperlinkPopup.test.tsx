@@ -36,7 +36,7 @@ function editing(onEdit: (text: string, href: string) => void) {
       <HyperlinkPopup data={data} onNavigate={() => {}} onCopy={() => {}} onEdit={onEdit} onRemove={() => {}} onClose={() => {}} />
     </LocaleProvider>
   );
-  fireEvent.click(view.container.querySelectorAll('.oox-hyperlink-popup__icon-btn')[1]!);
+  fireEvent.click(view.getByTitle(de.hyperlinkPopup!.editLink!));
   const [text, address] = view.getAllByRole('textbox') as HTMLInputElement[];
   return { text: text!, address: address! };
 }
@@ -47,11 +47,12 @@ test('an address typed after a late frame lands in the address field and leaves 
   globalThis.requestAnimationFrame = (callback) => frames.push(callback);
   try {
     const onEdit = mock((_text: string, _href: string) => {});
-    const { address } = editing(onEdit);
+    const { text, address } = editing(onEdit);
     address.focus();
     for (const frame of frames.splice(0)) frame(0);
     const typedInto = document.activeElement as HTMLInputElement;
     fireEvent.change(typedInto, { target: { value: 'https://example.com/popup' } });
+    expect([text.value, address.value]).toEqual(['Example', 'https://example.com/popup']);
     fireEvent.keyDown(typedInto, { key: 'Enter' });
     expect(onEdit.mock.calls).toEqual([['Example', 'https://example.com/popup']]);
     expect(typedInto).toBe(address);
