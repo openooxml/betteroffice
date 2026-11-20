@@ -1524,3 +1524,31 @@ fn a_foreign_inline_element_takes_no_story_unit_and_leaves_search_and_export_as_
         );
     }
 }
+
+#[test]
+fn a_format_change_beside_a_foreign_element_exports_as_on_main() {
+    let changed = concat!(
+        r#"<w:r><w:rPr><w:sz w:val="24"/><w:rPrChange w:id="1" w:author="Ann">"#,
+        r#"<w:rPr><w:sz w:val="20"/></w:rPr></w:rPrChange></w:rPr><w:t>Hel</w:t></w:r>"#
+    );
+    for (foreign, paragraphs, unsupported) in [("", 4, 0), (r#"<x:foo xmlns:x="urn:x"/>"#, 6, 1)] {
+        let doc = open(&docx(&direction_body(&format!(
+            "{changed}{foreign}{}",
+            r("lo")
+        ))));
+        for view in [
+            docx_edit::structured::RevisionView::Original,
+            docx_edit::structured::RevisionView::Markup,
+        ] {
+            let options = docx_edit::structured::ExportOptions::new(view);
+            let content = doc.export_structured(&options).unwrap().content;
+            let json = serde_json::to_string(&content).unwrap();
+            let count = |kind: &str| json.matches(&format!(r#""kind":"{kind}""#)).count();
+            assert_eq!(
+                (count("paragraph"), count("unsupported")),
+                (paragraphs, unsupported),
+                "{foreign} {view:?}"
+            );
+        }
+    }
+}

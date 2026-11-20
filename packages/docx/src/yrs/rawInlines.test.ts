@@ -438,3 +438,36 @@ describe("an empty foreign element and a w:subDoc side by side between 'Hel' and
     });
   }
 });
+
+const split = (value: string) => `<w:r><w:t>${value}</w:t></w:r>`;
+const SPLIT_FOREIGN: Array<[string, string]> = [
+  ['an empty foreign element', '<x:foo xmlns:x="urn:x"/>'],
+  ['a foreign element holding content', '<x:foo xmlns:x="urn:x"><x:bar/></x:foo>'],
+];
+const PARAGRAPH_OPEN = '<w:p w14:paraId="1A2B3C01" w14:textId="1A2B3C01">';
+
+for (const [name, foreign] of SPLIT_FOREIGN) {
+  describe(`${name} after the runs 'He' and 'l'`, () => {
+    const inner = `${split('He')}${split('l')}${foreign}${split('lo')}`;
+
+    for (const [loader, load] of LOADERS) {
+      it(`${loader}: a paragraph alignment change saves the source runs as on main`, async () => {
+        const { session, base } = await load(docx(inner));
+        const paraId = session.paragraphs('body')[0]!.paraId;
+        const position = { paraId, offset: 0 };
+        session.setParagraphAttrs({ story: 'body', start: position, end: position }, { alignment: 'center' });
+        const [first] = paragraphsOf(await savedAsTheEditorSaves(session, base));
+        expect(first).toBe(`${PARAGRAPH_OPEN}<w:pPr><w:jc w:val="center"/></w:pPr>${inner}</w:p>`);
+      });
+
+      it(`${loader}: typing a letter and deleting it saves the source runs as on main`, async () => {
+        const { session, base } = await load(docx(inner));
+        const paraId = session.paragraphs('body')[0]!.paraId;
+        typeAt(0)(session, paraId);
+        deleteBetween(0, 1)(session, paraId);
+        const [first] = paragraphsOf(await savedAsTheEditorSaves(session, base));
+        expect(first).toBe(`${PARAGRAPH_OPEN}${inner}</w:p>`);
+      });
+    }
+  });
+}
