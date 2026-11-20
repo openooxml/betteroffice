@@ -91,6 +91,7 @@ function mount({ tamper, source = documentBytes(), reopenSource, collaboration, 
   const resumes: Resume[] = [];
   const reopenedText: string[] = [];
   const replayed: string[] = [];
+  const replayedStatuses: string[] = [];
   const phases: string[] = [];
   const events: RecoveryReport[] = [];
   const errors: Error[] = [];
@@ -147,7 +148,11 @@ function mount({ tamper, source = documentBytes(), reopenSource, collaboration, 
     const edit = call.edit;
     call.edit = (command) => {
       replayed.push(command.kind);
-      return edit(command);
+      const result = edit(command);
+      void Promise.resolve(result).then(
+        (ack) => { replayedStatuses.push(`${command.kind}:${ack.outcomes.map((outcome) => outcome.status).join('/')}`); },
+        (error: Error) => { replayedStatuses.push(`${command.kind}:rejected ${error.message}`); });
+      return result;
     };
     return connection;
   };
@@ -179,9 +184,14 @@ function mount({ tamper, source = documentBytes(), reopenSource, collaboration, 
   const view = renderHook(() => usePeerlessEditSession(options));
   const settle = () => act(async () => { await new Promise<void>((resolve) => setImmediate(resolve)); });
   const session = {
-    view, checkpoints, phases, events, errors, resumes, reopenedText, replayed, seeds, settle,
+    view, checkpoints, phases, events, errors, resumes, reopenedText, replayed, replayedStatuses, seeds, settle,
     gate: { get requested() { return gate.requested; }, open: () => openGate() },
     worker() { return workers.at(-1)!; },
+    workerCount() { return workers.length; },
+    recoveredText() {
+      if (workers.length < 2) return `no-recovered-worker(workers=${workers.length})`;
+      try { return textOf(workers.at(-1)!); } catch (error) { return `unreadable: ${(error as Error).message}`; }
+    },
     client() { return clients.at(-1)!; },
     engine() { return workers.at(-1)!.sessions.at(-1)!; },
     stateVector() { return [...workers.at(-1)!.sessions.at(-1)!.encodeStateVector()].join(','); },
@@ -549,8 +559,8 @@ test('a paste choice in flight at a crash before the first checkpoint (measured 
     await session.crash();
   } catch {}
   const status = await session.outcome(choice.detail, 5_000);
-  const recovered = session.phases.includes('recovered');
-  console.log(`G244-PASTE-CHOICE-INFLIGHT status=${status} recovered=${recovered} text=${session.text()}`);
+  console.log(`G244-PASTE-CHOICE-INFLIGHT status=${status} phases=${JSON.stringify(session.phases)} ` +
+    `workers=${session.workerCount()} text=${session.recoveredText()} errors=${JSON.stringify(session.errors.map((error) => error.message))}`);
 }, TIMEOUT);
 
 test('an engine without the verbatim apply advertises no stream form, types and saves, and recovers by replaying the original commands as on main', async () => {
@@ -971,8 +981,16 @@ test('an undo in flight at a crash after a checkpoint of a session opened withou
   const undo = await session.submitQueued('undo');
   await waitFor(() => expect(textOf(worker)).toBe(before), { timeout: 30_000 });
   await session.crash();
+  const resume = session.resumes[0] as (Resume & { seed?: unknown }) | undefined;
+  const resumed = resume?.checkpoint as DocxCommandCheckpoint | undefined;
+  console.log(`G244-NOSEED checkpointThroughSeq=${resumed?.throughSeq} checkpointStateBytes=${resumed?.state?.byteLength} ` +
+    `checkpoints=${JSON.stringify(session.checkpoints.map(({ throughSeq, version, state }) => ({ throughSeq, version, bytes: state.byteLength })))} ` +
+    `reopenResume=${JSON.stringify(resume ? Object.keys(resume) : null)} checkpointPresent=${resumed !== undefined} ` +
+    `replayed=${JSON.stringify(session.replayedStatuses)} replayedKinds=${JSON.stringify(session.replayed)} ` +
+    `phases=${JSON.stringify(session.phases)} errors=${JSON.stringify(session.errors.map((error) => error.message))} ` +
+    `textBefore=${before} textTyped=${typed} textAfter=${session.recoveredText()}`);
   expect(session.resumes[0]!.checkpoint).toBeDefined();
-  expect(session.resumes[0]!.seed).toBeUndefined();
+  expect((session.resumes[0] as Resume & { seed?: unknown }).seed).toBeUndefined();
   const detail = await session.outcome(undo.detail);
   console.log(`G244-UNSEEDED-INFLIGHT-UNDO detail=${detail} phases=${JSON.stringify(session.phases)} replayed=${JSON.stringify(session.replayed)}`);
   expect(detail).toBe(JSON.stringify({ status: 'applied' }));
@@ -1200,6 +1218,9 @@ test('capture work for one edit does not grow with the edits before it', async (
     };
     const measure = async (earlier: number) => {
       await editUntil(earlier);
+      expect(await session.submit('paragraphBreak')).toBe('applied');
+      expect(await session.submit('insertText', atParagraphStart('Y'))).toBe('applied');
+      edits += 2;
       await session.idle();
       const worker = session.worker();
       const deliver = worker.onmessage!;
