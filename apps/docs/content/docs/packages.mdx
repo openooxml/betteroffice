@@ -55,7 +55,8 @@ module provides the font manifest and is required with either asset location.
 Install `@betteroffice/fonts-cjk` when you need Chinese, Japanese, or Korean text.
 Install `@betteroffice/fonts-intl` for additional international script coverage.
 `@betteroffice/fonts-latin` is installed automatically with `@betteroffice/fonts`.
-All font packages are optional and must be installed explicitly.
+`@betteroffice/fonts` is a dependency of the DOCX, XLSX and PPTX packages;
+`@betteroffice/fonts-cjk` and `@betteroffice/fonts-intl` are optional and must be installed explicitly.
 
 For missing packs, `fonts.configureFontCdn({ baseUrl: "https://assets.example/fonts/" })`
 enables a fallback at `<base>/<pack>/<version>/<file>`. Installed packs take priority;
