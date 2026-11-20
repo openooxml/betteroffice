@@ -417,7 +417,10 @@ pub(crate) fn serialize_inline_node(
     if unscoped.is_empty() {
         return Ok(unscoped);
     }
-    Ok(prefixed(context.direction.unscoped(zero_width(node)), unscoped))
+    Ok(prefixed(
+        context.direction.unscoped(zero_width(node)),
+        unscoped,
+    ))
 }
 
 pub(super) fn serialize_bookmark_start(bookmark: &BookmarkStart) -> String {
@@ -926,11 +929,15 @@ pub fn serialize_inline_sdt(
         .direction
         .enter_wrapper(shared_direction_scopes(&sdt.content));
     let previous = std::mem::replace(&mut context.in_control, true);
-    let result = sdt.content.iter().enumerate().try_for_each(|(index, item)| {
-        look_ahead(&sdt.content, index, None, context);
-        append_generated(&mut writer, &serialize_inline_node(item, context)?);
-        Ok::<_, ParseError>(())
-    });
+    let result = sdt
+        .content
+        .iter()
+        .enumerate()
+        .try_for_each(|(index, item)| {
+            look_ahead(&sdt.content, index, None, context);
+            append_generated(&mut writer, &serialize_inline_node(item, context)?);
+            Ok::<_, ParseError>(())
+        });
     context.in_control = previous;
     result?;
     let closing = context.direction.leave_wrapper(base);
@@ -1129,28 +1136,32 @@ fn serialize_tracked_change(
     let previous_revision = std::mem::replace(&mut context.in_revision, true);
     let previous_deletion =
         std::mem::replace(&mut context.deletion, deletion && context.in_control);
-    let result = change.content.iter().enumerate().try_for_each(|(index, item)| {
-        let xml = match item {
-            _ if context.in_control => {
-                look_ahead(&change.content, index, None, context);
-                serialize_inline_node(item, context)?
-            }
-            InlineNode::Run(run) => serialize_scoped_run(run, deletion, context)?,
-            InlineNode::Hyperlink(link) => serialize_hyperlink(link, context)?,
-            InlineNode::InlineSdt(_) => {
-                context.deletion = deletion;
-                let result = serialize_inline_node(item, context);
-                context.deletion = false;
-                result?
-            }
-            InlineNode::Tracked(_) if item.has_tracked_control(false, true) => {
-                serialize_inline_node(item, context)?
-            }
-            _ => return Ok(()),
-        };
-        append_generated(&mut writer, &xml);
-        Ok::<_, ParseError>(())
-    });
+    let result = change
+        .content
+        .iter()
+        .enumerate()
+        .try_for_each(|(index, item)| {
+            let xml = match item {
+                _ if context.in_control => {
+                    look_ahead(&change.content, index, None, context);
+                    serialize_inline_node(item, context)?
+                }
+                InlineNode::Run(run) => serialize_scoped_run(run, deletion, context)?,
+                InlineNode::Hyperlink(link) => serialize_hyperlink(link, context)?,
+                InlineNode::InlineSdt(_) => {
+                    context.deletion = deletion;
+                    let result = serialize_inline_node(item, context);
+                    context.deletion = false;
+                    result?
+                }
+                InlineNode::Tracked(_) if item.has_tracked_control(false, true) => {
+                    serialize_inline_node(item, context)?
+                }
+                _ => return Ok(()),
+            };
+            append_generated(&mut writer, &xml);
+            Ok::<_, ParseError>(())
+        });
     context.in_revision = previous_revision;
     context.deletion = previous_deletion;
     result?;
