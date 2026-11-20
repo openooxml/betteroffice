@@ -645,6 +645,36 @@ describe('a session that opens another document', () => {
   });
 });
 
+describe('an open that fails on a session that keeps its document', () => {
+  test('leaves the ids earlier saves gave as they were for the next save', async () => {
+    const created = await session();
+    created.seedFromDocx(makeDocx(DOCUMENT, LISTS_NUMBERING));
+    createList(created, 'Alpha', 'bullet');
+    const s1 = await editorSaved(created);
+    const k = savedNumId(s1, 'Alpha');
+    createList(created, 'Beta', 'numbered');
+    const alpha = created.paragraphs('body').find(entry => entry.text === 'Alpha')!.paraId;
+    created.setParagraphAttrs({ story: 'body', start: { paraId: alpha, offset: 0 }, end: { paraId: alpha, offset: 0 } }, {
+      numPr: null, listIsBullet: null, listNumFmt: null, listMarker: null, other: { listDef: null },
+    });
+    const s2 = await editorSaved(created);
+    const beta = savedNumId(s2, 'Beta');
+    let refused: unknown;
+    try {
+      created.seedFromDocx(new Uint8Array([1, 2, 3]));
+    } catch (error) {
+      refused = error;
+    }
+    const s3 = await editorSaved(created);
+    expect(savedNumId(s3, 'Beta')).toBe(beta);
+    expect(counts(s3)).toEqual(counts(s2));
+    expect(refused).toBeDefined();
+    expect(savedNumId(s2, 'Alpha')).toBeUndefined();
+    expect(beta).toBeGreaterThan(k!);
+    expect(k).toBeGreaterThan(3);
+  });
+});
+
 describe('a session that cannot read the created lists in use', () => {
   test('still saves the created list its paragraph is on', async () => {
     const created = await session();
