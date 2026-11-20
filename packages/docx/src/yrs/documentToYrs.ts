@@ -1463,6 +1463,7 @@ function paragraphUnits(
           rawMarks.push({ unit: start, assoc, xml: content.xml });
         } else {
           units.push(embedUnit(RAW_INLINE_KIND, { xml: content.xml }));
+          boundaries?.push({ text: '\uFFFC', formatsRun: false });
         }
       }
     } else if (content.type !== 'bookmarkStart' && content.type !== 'bookmarkEnd') {

@@ -1729,9 +1729,13 @@ function sourceBreakBoundaries(paragraph: Paragraph | undefined): OriginalRunBou
   const boundaries: OriginalRunBoundary[] = [];
   for (const child of paragraph?.content ?? []) {
     if (child.type !== 'run') {
+      if (child.type === 'rawXml') {
+        if (baseRawInlineUnits(child) > 0) boundaries.push({ text: '\uFFFC' });
+        continue;
+      }
       if (
         child.type === 'commentRangeStart' || child.type === 'commentRangeEnd' ||
-        child.type === 'bookmarkStart' || child.type === 'bookmarkEnd' || child.type === 'rawXml'
+        child.type === 'bookmarkStart' || child.type === 'bookmarkEnd'
       ) continue;
       const span = inlineSpanText(child);
       if (span === null) return [];

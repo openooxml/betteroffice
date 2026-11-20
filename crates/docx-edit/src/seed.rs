@@ -4760,6 +4760,9 @@ fn paragraph_units(
                     seeded_raw = true;
                     let payload = JsonObject::from([("xml".to_owned(), json!(xml))]);
                     units.push(embed_unit(RAW_INLINE_KIND, payload, &[], 1));
+                    if let Some(run_boundaries) = &mut boundaries {
+                        run_boundaries.push(json!({ "text": "\u{fffc}", "formatsRun": false }));
+                    }
                 }
             }
             "bookmarkStart" | "bookmarkEnd" => {}
