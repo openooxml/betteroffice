@@ -51,6 +51,13 @@ const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[
 const PROTECTED_MARKS = new Set(['ins', 'del', 'hyperlink', 'rPrChange']);
 const IDENTITY_KEYS = new Set(['paraId', '_kind', 'ooxmlParaId', 'sourceParaId', 'paraOrigin']);
 
+/** Whether `engine` can put a paragraph on a list, which the list toggle needs. */
+function ensuresLists(
+  engine: DocxWorkerCommandEngine
+): engine is DocxWorkerCommandEngine & Required<Pick<DocxWorkerCommandEngine, 'ensureListDefinition'>> {
+  return typeof engine.ensureListDefinition === 'function';
+}
+
 function formattingRangeContainsContainer(engine: DocxWorkerCommandEngine, range: YrsStoryRange): boolean {
   if (collapsed(range)) return false;
   const spans = engine.geometryReader.paragraphSpans(range.story);
@@ -776,6 +783,7 @@ export function preflightDocxCommand(
         sectionBreakProperties: properties } };
     }
   }
+  if (command.kind === 'toggleList' && !ensuresLists(engine)) return refuse('unsupported-command');
   if (command.kind === 'toggleList' || command.kind === 'changeIndent') return { status: 'ready', prepared: {
     command: structuredClone(command), selection: resolved.selection, range: resolved.range,
     ...(command.kind === 'changeIndent' ? { paragraphChanges: planResidentListChanges(engine, resolved.range, command.payload) } : {}),
@@ -1337,7 +1345,7 @@ function applyPreparedDocxCommand(
       break;
     }
     case 'toggleList':
-      applyListToggle(engine, range, command.payload.kind, command.payload.suggesting);
+      if (ensuresLists(engine)) applyListToggle(engine, range, command.payload.kind, command.payload.suggesting);
       break;
     case 'changeIndent':
       for (const change of prepared.paragraphChanges ?? []) engine.setParagraphAttrs(change.range, change.attrs, command.payload.suggesting);

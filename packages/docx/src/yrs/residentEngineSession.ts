@@ -119,7 +119,6 @@ export type ResidentEngineSession = Pick<
   | 'formatRange'
   | 'clearFormatting'
   | 'setParagraphAttrs'
-  | 'ensureListDefinition'
   | 'applyParagraphStyle'
   | 'beginUndoCapture'
   | 'addUndoBoundary'
@@ -220,6 +219,8 @@ export type ResidentEngineSession = Pick<
   /** Seeds the opened package's comment metadata, unless the session joined from a peer's state. */
   initializeComments(recovery?: ResidentCommentRecoveryState): void;
   commentRecoveryState?(): ResidentCommentRecoveryState;
+  /** The list a paragraph goes on for Bullets or Numbering; an engine without it refuses the list toggle. */
+  ensureListDefinition?: YrsSession['ensureListDefinition'];
   mediaDataUrl(token: string): string | null;
   /** The pictures whose display copy is SVG, which a worker cannot decode. */
   svgMedia?(): DocxSvgMedia[];
