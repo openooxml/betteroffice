@@ -544,13 +544,13 @@ export interface DocxEditorBaseProps extends DocxEditorPluginProps {
 }
 
 export interface DocxAsyncEditorProps extends Omit<DocxEditorBaseProps, 'onChange'> {
-  /** @deprecated Removed in 0.6.0. Omit for the async editor. */
+  /** @deprecated Removed in 0.7.0. Omit for the async editor. */
   [LEGACY_SYNC_API_PROP]?: false;
   onChange?: undefined;
 }
 
 export interface DocxLegacyEditorProps extends DocxEditorBaseProps {
-  /** @deprecated Enables the sync hybrid runtime, removed in 0.6.0. */
+  /** @deprecated Enables the sync hybrid runtime, removed in 0.7.0. */
   [LEGACY_SYNC_API_PROP]: true;
 }
 

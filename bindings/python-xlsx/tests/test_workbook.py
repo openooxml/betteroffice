@@ -718,6 +718,40 @@ def test_render_sheet_frames_the_used_range(sample_bytes):
     assert workbook.render_sheet(0, range="A1:D12").bytes == workbook.render_png({"sheet": 0, "range": "A1:D12"}).bytes
 
 
+def test_a_sheet_renders_itself_without_a_target(sample_bytes):
+    workbook = bo.Workbook.open(sample_bytes)
+    summary = workbook["Summary"]
+    own = workbook.render_sheet(1)
+    assert own.bytes != workbook.render_sheet(0).bytes
+    assert summary.render_png().bytes == own.bytes
+    assert summary.render_png(scale=2.0).bytes == workbook.render_sheet(1, scale=2.0).bytes
+    ranged = workbook.render_sheet(1, range="A1:B2", max_width=40)
+    assert summary.render_png(range="A1:B2", max_width=40).bytes == ranged.bytes
+
+
+def test_a_sheet_fills_itself_into_a_target_without_a_sheet(sample_bytes):
+    workbook = bo.Workbook.open(sample_bytes)
+    summary = workbook["Summary"]
+    ranged = workbook.render_png({"sheet": 1, "range": "A1:B2"})
+    assert summary.render_png({"range": "A1:B2"}).bytes == ranged.bytes
+    viewport = {"x": 0, "y": 0, "width": 128, "height": 64}
+    framed = workbook.render_png({"sheet": 1, "viewport": viewport}, scale=2.0)
+    assert summary.render_png({"viewport": viewport}, scale=2.0).bytes == framed.bytes
+
+
+def test_a_sheet_renders_a_target_that_names_a_sheet_as_given(sample_bytes):
+    workbook = bo.Workbook.open(sample_bytes)
+    target = {"sheet": 0, "range": "A1:D12"}
+    expected = workbook.render_png(target, scale=2.0)
+    assert workbook["Summary"].render_png(target, scale=2.0).bytes == expected.bytes
+
+
+def test_a_sheet_refuses_a_target_together_with_a_range(sample_bytes):
+    sheet = bo.Workbook.open(sample_bytes)["Summary"]
+    with pytest.raises(TypeError):
+        sheet.render_png({"range": "A1:B2"}, range="A1:B2")
+
+
 def test_png_target_keeps_the_sheet_key_errors(sample_bytes):
     workbook = bo.Workbook.open(sample_bytes)
     with pytest.raises(IndexError):
