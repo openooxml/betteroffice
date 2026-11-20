@@ -475,7 +475,6 @@ export function wrapSession(
       let opened: string;
       try {
         forgetMaterializedSource(session);
-        forgetSavedListDefinitions(facade);
         opened = session.open_docx(
           source,
           seedStories,
@@ -485,6 +484,7 @@ export function wrapSession(
       } catch (error) {
         throw normalizeSeedError(error);
       }
+      forgetSavedListDefinitions(facade);
       proposals.reset();
       return opened;
     });
@@ -832,11 +832,11 @@ export function wrapSession(
       mutate(() => {
         try {
           forgetMaterializedSource(session);
-          forgetSavedListDefinitions(facade);
           bootstrap.call(session, state, metadata, bytes === undefined ? undefined : source);
         } catch (error) {
           throw peerMetadataFailure(error);
         }
+        forgetSavedListDefinitions(facade);
         session.set_media_tokens(options.mediaTokens === true);
         markDirty('all');
         resetMedia();
@@ -1847,8 +1847,8 @@ export function wrapSession(
       markDirty('all');
       const json = mutate(() => {
         forgetMaterializedSource(session);
-        forgetSavedListDefinitions(facade);
         const compared = session.compare_docx_json(original, revised, options);
+        forgetSavedListDefinitions(facade);
         proposals.reset();
         return compared;
       });
