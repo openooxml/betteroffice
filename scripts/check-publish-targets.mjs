@@ -49,7 +49,7 @@ function retryAfterMs(response) {
 }
 
 /** The parsed body, `null` when the name is unclaimed, or a failure to weigh. */
-async function attemptRegistry(url, headers, timeoutMs, method = 'GET') {
+async function attemptRegistry(url, headers, timeoutMs, method = 'GET', readBody = method !== 'HEAD') {
   const response = await fetch(url, {
     method,
     headers: { 'User-Agent': USER_AGENT, ...headers },
@@ -57,18 +57,22 @@ async function attemptRegistry(url, headers, timeoutMs, method = 'GET') {
     signal: AbortSignal.timeout(timeoutMs)
   });
   if (response.status === 404) return { body: null };
-  if (response.ok) return { body: method === 'HEAD' ? true : await response.json() };
+  if (response.ok && readBody) return { body: await response.json() };
+  if (response.ok) {
+    await response.body?.cancel();
+    return { body: true };
+  }
   const error = new Error(`${url} returned ${response.status}`);
   const retry = response.status === 429 || response.status >= 500;
   return { error, retry, wait: retry ? retryAfterMs(response) : undefined };
 }
 
-async function fetchRegistry(url, headers = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
+async function fetchRegistry(url, headers = {}, timeoutMs = REQUEST_TIMEOUT_MS, readBody = true) {
   let lastError;
   for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
     let result;
     try {
-      result = await attemptRegistry(url, headers, timeoutMs);
+      result = await attemptRegistry(url, headers, timeoutMs, 'GET', readBody);
     } catch (error) {
       // A refused connection, a request past REQUEST_TIMEOUT_MS, or a body that stops mid-JSON.
       result = { error, retry: true };
@@ -81,14 +85,16 @@ async function fetchRegistry(url, headers = {}, timeoutMs = REQUEST_TIMEOUT_MS) 
   throw lastError;
 }
 
-function npmPackages(registry, timeoutMs) {
+/** Bodies by name; with `readBody` false, `true` for a name that exists and `null` for one that does not. */
+function npmPackages(registry, timeoutMs, readBody = true) {
   const cache = new Map();
   return (name) => {
     if (!cache.has(name)) {
       cache.set(name, fetchRegistry(
         `${registry.replace(/\/+$/, '')}/${encodeURIComponent(name)}`,
         { Accept: 'application/vnd.npm.install-v1+json' },
-        timeoutMs
+        timeoutMs,
+        readBody
       ));
     }
     return cache.get(name);
@@ -112,6 +118,11 @@ async function auditPackages(packages, fetchPackage) {
 /** `missing` (the name is unclaimed), `new` (this version is), or `published`. */
 export async function auditNpmPackages(packages, registry = NPM_REGISTRY, timeoutMs = REQUEST_TIMEOUT_MS) {
   return auditPackages(packages, npmPackages(registry, timeoutMs));
+}
+
+/** Whether release.yml skips its native job: Actions compares `vars.RELEASE_SKIP_NATIVE != 'true'` ignoring case. */
+function skipsNative(env = process.env) {
+  return env.RELEASE_SKIP_NATIVE?.toLowerCase() === 'true';
 }
 
 /** The native roots the release's native job publishes after this one, at their manifest versions. */
@@ -214,8 +225,8 @@ export async function checkNpm({
   timeoutMs = REQUEST_TIMEOUT_MS,
   packages = publishedPackageVersions(),
   workspaces = workspaceEntries(),
-  later = process.env.RELEASE_SKIP_NATIVE === 'true' ? [] : nativeReleaseVersions(workspaces),
-  platforms = process.env.RELEASE_SKIP_NATIVE === 'true' ? [] : platformPackageVersions(),
+  later = skipsNative() ? [] : nativeReleaseVersions(workspaces),
+  platforms = skipsNative() ? [] : platformPackageVersions(),
   references
 } = {}) {
   const fetchPackage = npmPackages(registry, timeoutMs);
@@ -235,14 +246,27 @@ export async function checkNpm({
     out.error('Publish each by hand first: RELEASING.md, "Initial npm release of a new package".');
   }
 
-  const nativeMissing = (await auditPackages([...later, ...platforms], fetchPackage))
-    .filter((entry) => entry.state === 'missing');
+  const packageExists = npmPackages(registry, timeoutMs, false);
+  const nativeMissing = [];
+  let lookupFailure;
+  for (const { name } of [...later, ...platforms]) {
+    try {
+      if ((await packageExists(name)) === null) nativeMissing.push(name);
+    } catch (error) {
+      lookupFailure = { name, error };
+      break;
+    }
+  }
   if (nativeMissing.length > 0) {
     failed = true;
-    for (const { name } of nativeMissing) out.error(`${name} is not on npm.`);
+    for (const name of nativeMissing) out.error(`${name} is not on npm.`);
     out.error(
       "release.yml's native-npm job publishes these after this one, with OIDC Trusted Publishing, which cannot create a package. Publish each by hand first: RELEASING.md, \"Native packages\"."
     );
+  }
+  if (lookupFailure) {
+    out.error(`${lookupFailure.name} could not be looked up on npm: ${lookupFailure.error.message}`);
+    return 1;
   }
 
   const releaseVersions = new Map([...later, ...packages].map(({ name, version }) => [name, version]));
