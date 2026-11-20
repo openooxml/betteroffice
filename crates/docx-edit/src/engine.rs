@@ -14,9 +14,10 @@ use docx_layout::endnote_flow::{
 };
 use docx_layout::footnotes::{
     FOOTNOTE_COLUMN_GAP_PX, NoteKind, NoteSeparatorHeights, OrderedMap, apply_note_presentation,
-    assign_note_presentations, attach_note_areas, build_note_presentations,
+    assign_note_presentations, attach_note_areas, attach_note_areas_with, build_note_presentations,
     calculate_note_reserved_heights, collect_note_refs, map_note_anchors_to_pages,
-    map_notes_to_pages, reservation_surplus_pages, stabilize_note_layout, stamp_note_pages,
+    map_notes_to_pages, note_item_content, note_item_outline, reservation_surplus_pages,
+    stabilize_note_layout, stamp_note_pages,
 };
 use docx_layout::header_footer::{
     HeaderFooterKind, HeaderFooterMetrics, HeaderFooterPayload, HeaderFooterType,
@@ -135,6 +136,71 @@ struct RenderState {
     preview_fallbacks: u64,
     /// Body lowerings a cell edit re-lowered only one table of.
     table_patches: u64,
+    notes: NoteMeasurements,
+}
+
+/// Note stories lowered, presented and measured, kept while nothing they read changes.
+#[derive(Debug, Default)]
+struct NoteMeasurements {
+    /// What every entry was lowered and measured against.
+    basis: Option<NoteMeasurementBasis>,
+    /// The story revision the entries were last checked against.
+    revision: u64,
+    entries: HashMap<String, MeasuredNote>,
+}
+
+/// What lowering and measuring a note reads besides its own stories and presentation.
+#[derive(Debug, PartialEq)]
+struct NoteMeasurementBasis {
+    /// Commits that changed the document outside its stories.
+    context: u64,
+    env: RenderEnv,
+    media: crate::media::MediaSources,
+    sources: crate::bridge::local::LoweringSources,
+    measurement: (
+        serde_json::Value,
+        serde_json::Value,
+        bool,
+        BTreeMap<String, Vec<u32>>,
+    ),
+    fonts: (u64, usize),
+}
+
+/// The width, line units, grid pitch, number and label a note was presented and measured
+/// at.
+#[derive(Debug, PartialEq)]
+struct NotePresentationKey {
+    width: u64,
+    line_px: u64,
+    grid_pitch: Option<u64>,
+    number: i64,
+    label: String,
+}
+
+#[derive(Debug)]
+struct MeasuredNote {
+    /// The stories the lowering read: the note's own and those nested in it.
+    stories: Vec<String>,
+    presentation: NotePresentationKey,
+    blocks: Vec<LayoutBlock>,
+    measures: Vec<BlockExtent>,
+    height: f64,
+    /// Names this content: no other measurement shares it.
+    serial: u64,
+}
+
+/// Whether a commit changed nothing outside the document's stories: every root type it
+/// changed is the stories map.
+fn changes_only_stories(txn: &yrs::TransactionMut) -> bool {
+    let mut roots = txn
+        .changed_parent_types()
+        .iter()
+        .filter_map(|branch| match branch.id() {
+            yrs::BranchID::Root(name) => Some(name),
+            yrs::BranchID::Nested(_) => None,
+        })
+        .peekable();
+    roots.peek().is_some() && roots.all(|name| &*name == crate::STORIES)
 }
 
 struct LoweredNoteSeparators {
@@ -337,6 +403,12 @@ impl RelayoutTrigger {
             }
         }
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Note stories lowered and measured afresh, not reused.
+    static NOTE_STORY_MEASUREMENTS: Cell<usize> = const { Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -1332,6 +1404,208 @@ fn note_page_keys_plain(layout: Option<&Layout>) -> Vec<Option<Vec<NoteAreaContr
     })
 }
 
+/// The note areas of a layout's pages, taken out of it, and the serial of the measured content
+/// each note's item carries when known.
+#[derive(Default)]
+struct PreviousNoteAreas {
+    pages: Vec<Option<Vec<NoteAreaContract>>>,
+    serials: Option<HashMap<i64, u64>>,
+}
+
+/// Takes the retained layout's note areas out, with their serials when they describe it.
+fn take_note_areas(pagination: &mut PaginationState) -> PreviousNoteAreas {
+    let serials = pagination
+        .note_item_serials
+        .take()
+        .and_then(|(epoch, serials)| (epoch == pagination.layout_epoch).then_some(serials));
+    let pages = pagination.layout.as_mut().map_or_else(Vec::new, |layout| {
+        layout
+            .pages
+            .iter_mut()
+            .map(|page| page.note_areas.take())
+            .collect()
+    });
+    PreviousNoteAreas { pages, serials }
+}
+
+/// Serials for measured note content, unique across engines.
+static NOTE_CONTENT_SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_note_content_serial() -> u64 {
+    NOTE_CONTENT_SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The map id of the note a note area's item shows.
+fn note_item_map_id(item: &docx_layout::types::NoteLayoutItemContract) -> Option<i64> {
+    let kind = match item.kind.as_deref()? {
+        "footnote" => NoteKind::Footnote,
+        "endnote" => NoteKind::Endnote,
+        _ => return None,
+    };
+    Some(docx_layout::footnotes::note_reference_map_id(
+        item.id?, kind,
+    ))
+}
+
+type NoteItemContent = (Vec<serde_json::Value>, Vec<serde_json::Value>);
+
+/// [`attach_note_areas`] for a layout whose pages carry no note areas yet, which takes each
+/// item's blocks and measures from `previous` when they were made from the content of the
+/// same serial, `serials` giving each of `contents`' own. Returns the pages whose note areas
+/// differ from those `previous` held at the same index, and the serials the items now carry.
+fn attach_note_areas_reusing(
+    layout: &mut Layout,
+    page_note_map: &OrderedMap<u32, Vec<i64>>,
+    contents: &[docx_layout::footnotes::NoteContent],
+    serials: &[Option<u64>],
+    separator_heights: &NoteSeparatorHeights,
+    regions: &DocumentRegions,
+    previous: PreviousNoteAreas,
+) -> (Vec<usize>, HashMap<i64, u64>) {
+    let PreviousNoteAreas {
+        pages: mut previous_pages,
+        serials: previous_serials,
+    } = previous;
+    let mut by_id = HashMap::new();
+    let mut current = HashMap::new();
+    for (content, serial) in contents.iter().zip(serials) {
+        by_id.insert(content.map_id(), content);
+        match serial {
+            Some(serial) => current.insert(content.map_id(), *serial),
+            None => current.remove(&content.map_id()),
+        };
+    }
+    let reusable = |map_id: i64| {
+        current.get(&map_id).is_some_and(|serial| {
+            previous_serials
+                .as_ref()
+                .and_then(|serials| serials.get(&map_id))
+                == Some(serial)
+        })
+    };
+    let mut previous_content: Vec<Vec<Vec<(Option<i64>, Option<NoteItemContent>)>>> =
+        previous_pages
+            .iter_mut()
+            .map(|areas| {
+                areas
+                    .iter_mut()
+                    .flatten()
+                    .map(|area| {
+                        area.notes
+                            .iter_mut()
+                            .flatten()
+                            .map(|item| {
+                                let content = match (item.blocks.take(), item.measures.take()) {
+                                    (Some(blocks), Some(measures)) => Some((blocks, measures)),
+                                    (blocks, measures) => {
+                                        item.blocks = blocks;
+                                        item.measures = measures;
+                                        None
+                                    }
+                                };
+                                (note_item_map_id(item), content)
+                            })
+                            .collect()
+                    })
+                    .collect()
+            })
+            .collect();
+    attach_note_areas_with(
+        layout,
+        page_note_map,
+        contents,
+        separator_heights,
+        regions,
+        note_item_outline,
+    );
+    let mut converted: HashMap<i64, NoteItemContent> = HashMap::new();
+    let convert = |converted: &mut HashMap<i64, NoteItemContent>, map_id: i64| {
+        if !converted.contains_key(&map_id)
+            && let Some(content) = by_id.get(&map_id)
+        {
+            converted.insert(map_id, note_item_content(content));
+        }
+    };
+    let mut changed = Vec::new();
+    let mut occurrences: HashMap<i64, usize> = HashMap::new();
+    for (index, page) in layout.pages.iter().enumerate() {
+        let new_items = page
+            .note_areas
+            .iter()
+            .flatten()
+            .map(|area| area.notes.iter().flatten().filter_map(note_item_map_id));
+        for map_id in new_items.flatten() {
+            *occurrences.entry(map_id).or_default() += 1;
+        }
+        let same =
+            previous_pages.get(index).is_some_and(|areas| {
+                *areas == page.note_areas
+                    && page
+                        .note_areas
+                        .iter()
+                        .flatten()
+                        .zip(&previous_content[index])
+                        .all(|(area, previous)| {
+                            area.notes.iter().flatten().zip(previous).all(
+                                |(item, (_, previous))| {
+                                    let Some(map_id) = note_item_map_id(item) else {
+                                        return previous.is_none();
+                                    };
+                                    reusable(map_id) || {
+                                        convert(&mut converted, map_id);
+                                        converted.get(&map_id) == previous.as_ref()
+                                    }
+                                },
+                            )
+                        })
+            });
+        if !same {
+            changed.push(index);
+        }
+    }
+    let mut previous_by_id: HashMap<i64, NoteItemContent> = HashMap::new();
+    for (map_id, content) in previous_content.iter_mut().flatten().flatten() {
+        if let Some(map_id) = *map_id
+            && reusable(map_id)
+            && !previous_by_id.contains_key(&map_id)
+            && let Some(content) = content.take()
+        {
+            previous_by_id.insert(map_id, content);
+        }
+    }
+    for item in layout
+        .pages
+        .iter_mut()
+        .flat_map(|page| page.note_areas.iter_mut().flatten())
+        .flat_map(|area| area.notes.iter_mut().flatten())
+    {
+        let Some(map_id) = note_item_map_id(item) else {
+            continue;
+        };
+        let remaining = occurrences.entry(map_id).or_default();
+        *remaining = remaining.saturating_sub(1);
+        let last = *remaining == 0;
+        let content = if previous_by_id.contains_key(&map_id) {
+            if last {
+                previous_by_id.remove(&map_id)
+            } else {
+                previous_by_id.get(&map_id).cloned()
+            }
+        } else {
+            convert(&mut converted, map_id);
+            if last {
+                converted.remove(&map_id)
+            } else {
+                converted.get(&map_id).cloned()
+            }
+        };
+        let (blocks, measures) = content.unwrap_or_default();
+        item.blocks = Some(blocks);
+        item.measures = Some(measures);
+    }
+    (changed, current)
+}
+
 fn note_page_keys(layout: Option<&Layout>) -> Vec<(f64, Option<Vec<NoteAreaContract>>)> {
     layout.map_or_else(Vec::new, |layout| {
         layout
@@ -2236,6 +2510,9 @@ struct PaginationState {
     measured_with_floats: bool,
     /// Pages whose note areas changed since the last display build.
     note_changed_pages: Vec<usize>,
+    /// The serial of the measured content each note's item in the retained layout carries, by
+    /// note map id, and the layout epoch they describe.
+    note_item_serials: Option<(u64, HashMap<i64, u64>)>,
     layout: Option<Layout>,
     checkpoints: Vec<LayoutCheckpoint>,
     region_placements: Vec<RegionPlacementState>,
@@ -2564,6 +2841,10 @@ pub struct EngineSession {
     // Kept alive for the lifetime of the document. Dropping it unregisters the
     // observer before the Rc epoch source is released.
     _doc_epoch_observer: crate::CommitHook,
+    /// Commits that changed the document outside its stories, which note measurements
+    /// outlive only while it holds.
+    note_context: Rc<Cell<u64>>,
+    _note_context_observer: crate::CommitHook,
     render: RefCell<RenderState>,
     note_separators: RefCell<Option<LoweredNoteSeparators>>,
     preview_font_requirements: RefCell<Option<PreviewFontRequirements>>,
@@ -5177,6 +5458,15 @@ impl EngineSession {
                 }
             }
         });
+        let note_context = Rc::new(Cell::new(0_u64));
+        let observer_note_context = Rc::clone(&note_context);
+        let note_context_observer = doc.observe_commit(move |txn| {
+            if (!txn.delete_set().is_empty() || txn.after_state() != txn.before_state())
+                && !changes_only_stories(txn)
+            {
+                observer_note_context.set(observer_note_context.get().wrapping_add(1));
+            }
+        });
         Self {
             doc,
             doc_epoch,
@@ -5191,6 +5481,8 @@ impl EngineSession {
             interactive_pending,
             region_retention_valid,
             _doc_epoch_observer: observer,
+            note_context,
+            _note_context_observer: note_context_observer,
             render: RefCell::new(RenderState::default()),
             note_separators: RefCell::new(None),
             preview_font_requirements: RefCell::new(None),
@@ -8344,7 +8636,14 @@ impl EngineSession {
             .iter()
             .flat_map(|measured| collect_note_refs(std::slice::from_ref(&measured.block)))
             .collect::<Vec<_>>();
-        let previous_notes = note_page_keys_plain(self.pagination.borrow().layout.as_ref());
+        let mut previous_notes = PreviousNoteAreas {
+            pages: if refs.is_empty() {
+                note_page_keys_plain(self.pagination.borrow().layout.as_ref())
+            } else {
+                Vec::new()
+            },
+            serials: None,
+        };
         // The note fixpoint replays `base_input`. Without notes `input` is the
         // final pass; with notes the final pass carries reserved heights, so
         // the reservation-free pass stays out of the retained pagination state
@@ -8391,6 +8690,7 @@ impl EngineSession {
         apply_document_regions_tracked(&mut initial_layout, &regions, &mut restamped_pages);
         let presentations = build_note_presentations(&refs, &initial_layout.pages, &regions);
         assign_note_presentations(&mut notes.contents, &presentations);
+        let mut note_serials = Vec::new();
         if resident_body {
             let measured_separator_heights = self.measure_resident_notes(
                 &mut notes.contents,
@@ -8402,6 +8702,7 @@ impl EngineSession {
                 parsed_render_env
                     .as_ref()
                     .expect("resident body required render environment"),
+                Some(&mut note_serials),
             )?;
             separator_heights
                 .footnote
@@ -8486,14 +8787,24 @@ impl EngineSession {
             } else {
                 block_fingerprints
             };
-            self.layout_document_value_with_fingerprints(
+            let taken = take_note_areas(&mut self.pagination.borrow_mut());
+            let placed = self.layout_document_value_with_fingerprints(
                 final_input,
                 fingerprints,
                 std::mem::take(&mut measured_spacing),
                 Some((revision_preview_key, &revision_preview, main_body)),
                 cached_page_totals,
                 RelayoutTrigger::Interactive,
-            )?;
+            );
+            if let Err(error) = placed {
+                if let Some(layout) = self.pagination.borrow_mut().layout.as_mut() {
+                    for (page, areas) in layout.pages.iter_mut().zip(taken.pages) {
+                        page.note_areas = areas;
+                    }
+                }
+                return Err(error);
+            }
+            previous_notes = taken;
             restamped_pages.clear();
         } else {
             self.pagination.borrow_mut().layout = Some(stabilized.layout);
@@ -8516,14 +8827,39 @@ impl EngineSession {
         apply_document_regions_tracked(layout, &regions, &mut restamped_pages);
         let page_note_map = map_notes_to_pages(&layout.pages, &refs, &regions);
         stamp_note_pages(layout, &page_note_map, &regions);
-        attach_note_areas(
-            layout,
-            &page_note_map,
-            &notes.contents,
-            &separator_heights,
-            &regions,
-        );
-        attach_flowed_endnote_areas(layout, &flow, &notes.contents, &separator_heights);
+        let reuse_note_content = resident_body
+            && regions.note_areas.is_none()
+            && flow.is_empty()
+            && note_serials.len() == notes.contents.len();
+        let mut note_item_serials = None;
+        let note_changed_pages: Vec<usize> = if reuse_note_content {
+            let (changed, serials) = attach_note_areas_reusing(
+                layout,
+                &page_note_map,
+                &notes.contents,
+                &note_serials,
+                &separator_heights,
+                &regions,
+                previous_notes,
+            );
+            note_item_serials = Some(serials);
+            changed
+        } else {
+            attach_note_areas(
+                layout,
+                &page_note_map,
+                &notes.contents,
+                &separator_heights,
+                &regions,
+            );
+            attach_flowed_endnote_areas(layout, &flow, &notes.contents, &separator_heights);
+            note_page_keys_plain(Some(layout))
+                .iter()
+                .enumerate()
+                .filter(|(index, keys)| previous_notes.pages.get(*index) != Some(*keys))
+                .map(|(index, _)| index)
+                .collect()
+        };
         let flowed_fragments = take_flowed_fragments(layout, &flow);
         let note_settlement = if notes_converged {
             NoteSettlement::Converged
@@ -8548,12 +8884,6 @@ impl EngineSession {
                 None => NoteSettlement::Unsettled,
             }
         };
-        let note_changed_pages: Vec<usize> = note_page_keys_plain(Some(layout))
-            .iter()
-            .enumerate()
-            .filter(|(index, keys)| previous_notes.get(*index) != Some(*keys))
-            .map(|(index, _)| index)
-            .collect();
         let measured_value = measured_headers_footers
             .as_mut()
             .map(|payload| {
@@ -8564,6 +8894,8 @@ impl EngineSession {
             })
             .transpose()?;
         pagination.note_changed_pages = note_changed_pages;
+        pagination.note_item_serials =
+            note_item_serials.map(|serials| (pagination.layout_epoch, serials));
         pagination.keep_flowed_fragments(flowed_fragments);
         let page_count = certified.map_or(usize::MAX, |cut| cut.pages);
         restamped_pages.retain(|&page| page < page_count);
@@ -8843,6 +9175,7 @@ impl EngineSession {
                 parsed_render_env
                     .as_ref()
                     .expect("resident body required render environment"),
+                None,
             )?;
             separator_heights
                 .footnote
@@ -9056,6 +9389,7 @@ impl EngineSession {
         let mut pagination = self.pagination.borrow_mut();
         pagination.region_placements = placement_passes.next;
         pagination.retain_body_only(&flow);
+        pagination.note_item_serials = None;
         pagination.pagination_blocks_placed = pagination
             .pagination_blocks_placed
             .wrapping_add(placement_passes.placed_blocks as u64);
@@ -9499,6 +9833,44 @@ impl EngineSession {
         Ok(heights)
     }
 
+    /// Drops the note measurements a change since the last call may have left stale: all of
+    /// them when the document changed outside its stories or the environment, sources or
+    /// measurement differ, and otherwise those whose stories changed.
+    fn retain_note_measurements(
+        &self,
+        render_env: &RenderEnv,
+        measurement: &docx_layout::measure_blocks::MeasurementConfig,
+    ) {
+        let basis = NoteMeasurementBasis {
+            context: self.note_context.get(),
+            env: render_env.clone(),
+            media: self.doc.media_sources(),
+            sources: crate::bridge::local::LoweringSources::of(&self.doc),
+            measurement: (
+                measurement.defaults.clone(),
+                measurement.compat.clone(),
+                measurement.authoritative_shaping,
+                measurement.font_chains.clone(),
+            ),
+            fonts: docx_layout::measure_fonts_generation(),
+        };
+        let mut render = self.render.borrow_mut();
+        let notes = &mut render.notes;
+        let (revision, changed) = self.doc.stories_changed_since(notes.revision);
+        if notes.basis.as_ref() != Some(&basis) {
+            notes.entries.clear();
+            notes.basis = Some(basis);
+        } else if !changed.is_empty() {
+            notes.entries.retain(|_, note| {
+                !note
+                    .stories
+                    .iter()
+                    .any(|story| changed.binary_search(story).is_ok())
+            });
+        }
+        notes.revision = revision;
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn measure_resident_notes(
         &self,
@@ -9509,7 +9881,12 @@ impl EngineSession {
         regions: &DocumentRegions,
         measurement: &docx_layout::measure_blocks::MeasurementConfig,
         render_env: &RenderEnv,
+        mut serials: Option<&mut Vec<Option<u64>>>,
     ) -> Result<NoteSeparatorHeights, String> {
+        if let Some(serials) = serials.as_deref_mut() {
+            serials.clear();
+            serials.resize(contents.len(), None);
+        }
         let separator_heights = self.measure_note_separators(
             contents,
             layout,
@@ -9518,12 +9895,15 @@ impl EngineSession {
             measurement,
             render_env,
         )?;
-        let anchors = map_note_anchors_to_pages(&layout.pages, refs);
-        for content in contents {
-            let Some(page_number) = anchors
-                .iter()
-                .find_map(|(page, ids)| ids.contains(&content.map_id()).then_some(*page))
-            else {
+        self.retain_note_measurements(render_env, measurement);
+        let mut anchors = HashMap::new();
+        for (page, ids) in map_note_anchors_to_pages(&layout.pages, refs).iter() {
+            for id in ids {
+                anchors.entry(*id).or_insert(*page);
+            }
+        }
+        for (index, content) in contents.iter_mut().enumerate() {
+            let Some(&page_number) = anchors.get(&content.map_id()) else {
                 continue;
             };
             let Some(anchor) = layout.pages.iter().find(|page| page.number == page_number) else {
@@ -9547,29 +9927,50 @@ impl EngineSession {
                 docx_layout::footnotes::NoteKind::Footnote => "fn",
                 docx_layout::footnotes::NoteKind::Endnote => "en",
             };
-            let mut blocks = self
-                .with_resident_story(&format!("{prefix}:{}", content.id), render_env, |blocks| {
-                    blocks
-                        .iter()
-                        .map(|block| block.as_ref().clone())
-                        .collect::<Vec<_>>()
+            let story = format!("{prefix}:{}", content.id);
+            let line_px = regions.paragraph_spacing_line_px(page.region_section_index);
+            let grid_pitch = regions.doc_grid_snap_pitch_px(page.region_section_index);
+            let presentation = NotePresentationKey {
+                width: width.to_bits(),
+                line_px: line_px.to_bits(),
+                grid_pitch: grid_pitch.map(f64::to_bits),
+                number: content.display_number.unwrap_or(1),
+                label: content.display_label.as_deref().unwrap_or("1").to_owned(),
+            };
+            if let Some(note) = self
+                .render
+                .borrow()
+                .notes
+                .entries
+                .get(&story)
+                .filter(|note| note.presentation == presentation)
+            {
+                content.blocks.clone_from(&note.blocks);
+                content.measures.clone_from(&note.measures);
+                content.height = note.height;
+                if let Some(serials) = serials.as_deref_mut() {
+                    serials[index] = Some(note.serial);
+                }
+                continue;
+            }
+            #[cfg(test)]
+            NOTE_STORY_MEASUREMENTS.with(|count| count.set(count.get() + 1));
+            let (mut blocks, stories) = self
+                .with_lowered_story_mapped(&story, render_env, &mut || {}, |blocks, (_, map)| {
+                    (
+                        blocks
+                            .iter()
+                            .map(|block| block.as_ref().clone())
+                            .collect::<Vec<_>>(),
+                        map.stories.clone(),
+                    )
                 })
                 .map_err(|error| error.to_string())?;
             for block in &mut blocks {
-                resolve_line_unit_spacing(
-                    block,
-                    regions.paragraph_spacing_line_px(page.region_section_index),
-                );
-                resolve_doc_grid_pitch(
-                    block,
-                    regions.doc_grid_snap_pitch_px(page.region_section_index),
-                );
+                resolve_line_unit_spacing(block, line_px);
+                resolve_doc_grid_pitch(block, grid_pitch);
             }
-            apply_note_presentation(
-                &mut blocks,
-                content.display_number.unwrap_or(1),
-                content.display_label.as_deref().unwrap_or("1"),
-            );
+            apply_note_presentation(&mut blocks, presentation.number, &presentation.label);
             let measures = docx_layout::measure_blocks::measure_blocks_without_table_compat_shift(
                 &mut blocks,
                 width,
@@ -9579,6 +9980,21 @@ impl EngineSession {
                 .iter()
                 .map(docx_layout::measure_blocks::extent_height)
                 .sum();
+            let serial = next_note_content_serial();
+            if let Some(serials) = serials.as_deref_mut() {
+                serials[index] = Some(serial);
+            }
+            self.render.borrow_mut().notes.entries.insert(
+                story,
+                MeasuredNote {
+                    stories,
+                    presentation,
+                    blocks: blocks.clone(),
+                    measures: measures.clone(),
+                    height: content.height,
+                    serial,
+                },
+            );
             content.blocks = blocks;
             content.measures = measures;
         }
@@ -13185,6 +13601,8 @@ mod tests {
     mod preview_refresh_tests;
 
     mod command_relayout_tests;
+
+    mod note_keystroke_tests;
 
     #[test]
     fn the_paragraph_mark_face_leaves_the_font_set_fingerprint_alone() {

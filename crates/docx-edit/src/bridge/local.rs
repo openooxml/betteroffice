@@ -1053,6 +1053,38 @@ impl LocalLowering {
     }
 }
 
+/// What lowering reads beside the document's stories and the render environment: the source
+/// package, the shape styles and the source theme fonts, compared as
+/// [`LocalLowering::matches_source`] compares them.
+#[derive(Debug)]
+pub(crate) struct LoweringSources {
+    source: std::sync::Weak<crate::seed::SourceMetadata>,
+    shape_styles: ShapeStyles,
+    source_font_scheme: Option<docx_parse::ThemeFontScheme>,
+}
+
+impl LoweringSources {
+    pub(crate) fn of(doc: &EditingDoc) -> Self {
+        Self {
+            source: doc
+                .source_metadata()
+                .as_ref()
+                .map(Arc::downgrade)
+                .unwrap_or_default(),
+            shape_styles: ShapeStyles::new(doc),
+            source_font_scheme: source_font_theme(doc).map(|theme| theme.font_scheme),
+        }
+    }
+}
+
+impl PartialEq for LoweringSources {
+    fn eq(&self, other: &Self) -> bool {
+        self.source.ptr_eq(&other.source)
+            && self.shape_styles == other.shape_styles
+            && self.source_font_scheme == other.source_font_scheme
+    }
+}
+
 fn patch_segment_bounds(segments: &[TextSegment], edit: &TextEdit) -> Option<PatchBounds> {
     patch_part_bounds(
         segments.iter().map(|segment| SegmentPart {
