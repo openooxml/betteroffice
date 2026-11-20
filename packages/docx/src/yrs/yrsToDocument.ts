@@ -1442,6 +1442,10 @@ function restoreProjectedFieldResults(
     const group = children.get(index) ?? [];
     const attributes = { ...item.attributes };
     delete attributes.fieldResult;
+    if (item.kind === 'embed' && item.embedKind === 'noteRef') {
+      delete attributes.ins;
+      delete attributes.del;
+    }
     group.push({ ...item, attributes });
     children.set(index, group);
     groups.set(owner, children);
@@ -1523,8 +1527,8 @@ function buildParagraphContent(
   };
 
   for (const item of items) {
-    // A note reference is handled before tracked/link marks.
-    if (item.kind === 'embed' && item.embedKind === 'noteRef') {
+    // An untracked note reference is handled before link marks.
+    if (item.kind === 'embed' && item.embedKind === 'noteRef' && !item.attributes.ins && !item.attributes.del) {
       flushRun();
       flushHyperlink();
       const note = ordinaryContentForItem(item, recovery, format);
