@@ -528,8 +528,7 @@ impl EditingDoc {
             let led = lead_at
                 .map(|at| pilcrow_values(&pilcrows[at].1, &txn))
                 .and_then(|values| {
-                    join(&values)
-                        .or_else(|| joined_list(&values, &definitions, kind, None, source))
+                    join(&values).or_else(|| joined_list(&values, &definitions, kind, None, source))
                 });
             let joined = led.or_else(|| join(&own)).or_else(|| {
                 [index.checked_sub(1), Some(index + 1)]
