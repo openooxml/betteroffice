@@ -1866,12 +1866,16 @@ mod tests {
     ];
 
     fn round_trip(xml: &str) -> String {
+        serialize_paragraph(&parsed(xml), &mut context()).unwrap()
+    }
+
+    fn parsed(xml: &str) -> Paragraph {
         let limits = crate::xml::ParseLimits::default();
         let mut budget = crate::xml::ParseBudget::new(&limits);
         let document =
             crate::xml::parse_xml(xml.as_bytes(), "word/document.xml", &mut budget).unwrap();
         let mut ids = crate::paragraph::HexIdAllocator::from_sha256(&"0".repeat(64)).unwrap();
-        let paragraph = crate::paragraph::parse_paragraph(
+        crate::paragraph::parse_paragraph(
             document.root().unwrap(),
             None,
             None,
@@ -1885,8 +1889,7 @@ mod tests {
             false,
             0,
         )
-        .unwrap();
-        serialize_paragraph(&paragraph, &mut context()).unwrap()
+        .unwrap()
     }
 
     fn shown(xml: &str) -> String {
@@ -2023,10 +2026,22 @@ mod tests {
         format!(r#"<w:dir w:val="rtl">{inner}</w:dir>"#)
     }
 
-    fn written(content: &str) -> String {
-        round_trip(&format!(
+    fn paragraph_xml(content: &str) -> String {
+        format!(
             r#"<w:p xmlns:w="{WORD}" xmlns:r="{RELATIONSHIPS}" xmlns:m="{MATH}">{content}</w:p>"#
-        ))
+        )
+    }
+
+    fn written(content: &str) -> String {
+        round_trip(&paragraph_xml(content))
+    }
+
+    fn rtl_code_run(text: &str) -> Value {
+        json!({
+            "type": "run",
+            "content": [{"type": "instrText", "text": text}],
+            "directionScopes": [{"kind": "dir", "val": "rtl", "id": 0}]
+        })
     }
 
     fn run_holding<'a>(xml: &'a str, needle: &str) -> &'a str {
@@ -2144,7 +2159,6 @@ mod tests {
         let close = r#"<w:commentRangeEnd w:id="1"/>"#;
         for middle in [
             r#"<w:commentRangeStart w:id="1"/>"#,
-            r#"<w:subDoc r:id="rId9"/>"#,
             r#"<w:customXmlInsRangeStart w:id="7" w:author="Grace"/>"#,
             r#"<w:moveFromRangeStart w:id="5" w:name="move"/>"#,
             r#"<w:bookmarkStart w:id="3" w:name="mark"/><w:commentRangeStart w:id="1"/>"#,
@@ -2165,8 +2179,8 @@ mod tests {
         for (open, close) in [
             (r#"<w:hyperlink w:anchor="target">"#, "</w:hyperlink>"),
             (
-                r#"<w:sdt><w:sdtPr><w:id w:val="1"/></w:sdtPr><w:sdtContent>"#,
-                "</w:sdtContent></w:sdt>",
+                r#"<w:sdt><w:sdtPr><w:id w:val="1"/></w:sdtPr><w:sdtContent><w:hyperlink w:anchor="target">"#,
+                "</w:hyperlink></w:sdtContent></w:sdt>",
             ),
         ] {
             let unscoped = written(&format!("{a}{open}{b}{bookmark}{c}{close}{d}"));
@@ -2208,6 +2222,105 @@ mod tests {
             let output = written(&source);
             assert_eq!(output, expected, "{source}");
             assert!(output.contains(&format!("</w:dir>{bookmark}")), "{output}");
+        }
+    }
+
+    #[test]
+    fn a_mark_between_an_inner_scope_run_and_an_outer_scope_run_keeps_the_outer_open() {
+        let content = format!(
+            r#"<w:bdo w:val="rtl"><w:dir w:val="ltr">{}</w:dir><w:bookmarkStart w:id="0" w:name="b"/>{}</w:bdo>"#,
+            text_run("AB"),
+            text_run("CD")
+        );
+        assert_eq!(written(&content), paragraph_xml(&content));
+    }
+
+    #[test]
+    fn a_kept_element_that_is_no_range_or_annotation_mark_is_written_outside_the_scope_around_it() {
+        let (a, b, c, d) = (text_run("A"), text_run("B"), text_run("C"), text_run("D"));
+        let sub_doc = r#"<w:subDoc r:id="rId9"/>"#;
+        let unscoped = written(&format!("{a}{b}{sub_doc}{c}{d}"));
+        let expected = wrapped(&wrapped(&unscoped, &b, DIR.0, DIR.1), &c, DIR.0, DIR.1);
+        let output = written(&format!("{a}{}{d}", rtl(&format!("{b}{sub_doc}{c}"))));
+        assert_eq!(output, expected);
+        assert_eq!(output.matches("<w:dir").count(), 2, "{output}");
+    }
+
+    #[test]
+    fn a_mark_before_a_hyperlink_that_writes_no_run_of_the_scope_is_written_outside_it() {
+        let (a, b) = (text_run("A"), text_run("B"));
+        let bookmark = r#"<w:bookmarkStart w:id="3" w:name="mark"/>"#;
+        let link = format!(
+            r#"<w:hyperlink w:anchor="target"><w:sdt><w:sdtPr><w:id w:val="1"/></w:sdtPr><w:sdtContent>{b}</w:sdtContent></w:sdt></w:hyperlink>"#
+        );
+        let unscoped = written(&format!("{a}{bookmark}{link}"));
+        let expected = wrapped(&unscoped, &a, DIR.0, DIR.1);
+        assert_eq!(written(&rtl(&format!("{a}{bookmark}{link}"))), expected);
+    }
+
+    #[test]
+    fn a_code_bookmark_of_a_rebuilt_field_stays_inside_the_scope_of_its_code_runs() {
+        let field: ComplexField = serde_json::from_value(json!({
+            "type": "complexField",
+            "instruction": "QUOTE x",
+            "fieldType": "QUOTE",
+            "fieldCode": [rtl_code_run("QUOTE x")],
+            "fieldResult": [],
+            "structuredCode": {"inline": [
+                {"type": "bookmarkStart", "id": 5, "name": "CodeMark"},
+                rtl_code_run("QUOTE y")
+            ]}
+        }))
+        .unwrap();
+        let output = serialize_complex_field(&field, &mut context()).unwrap();
+        assert_eq!(output.matches("<w:dir").count(), 1, "{output}");
+        let order = [
+            r#"w:fldCharType="begin""#,
+            "CodeMark",
+            "QUOTE x",
+            r#"w:fldCharType="separate""#,
+        ];
+        let at: Vec<_> = order.iter().map(|needle| output.find(needle)).collect();
+        assert!(
+            at.iter().all(Option::is_some) && at.windows(2).all(|pair| pair[0] < pair[1]),
+            "{at:?}: {output}"
+        );
+    }
+
+    fn two_thousand_marks(scoped: bool) -> String {
+        let mut content = String::new();
+        for id in 0..2000 {
+            content.push_str(&text_run("A"));
+            content.push_str(&format!(
+                r#"<w:bookmarkStart w:id="{id}" w:name="m{id}"/><w:bookmarkEnd w:id="{id}"/>"#
+            ));
+        }
+        content.push_str(&text_run("A"));
+        if scoped { rtl(&content) } else { content }
+    }
+
+    #[test]
+    fn a_paragraph_of_two_thousand_bookmark_pairs_saves_as_it_reads() {
+        for scoped in [false, true] {
+            let content = two_thousand_marks(scoped);
+            assert!(written(&content) == paragraph_xml(&content), "scoped: {scoped}");
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn measure_two_thousand_marks_paragraph_rewrite() {
+        for (name, scoped) in [("no scope", false), ("one scope over all", true)] {
+            let paragraph = parsed(&paragraph_xml(&two_thousand_marks(scoped)));
+            let mut times: Vec<_> = (0..5)
+                .map(|_| {
+                    let start = std::time::Instant::now();
+                    serialize_paragraph(&paragraph, &mut context()).unwrap();
+                    start.elapsed()
+                })
+                .collect();
+            times.sort();
+            eprintln!("two thousand bookmark pairs, {name}: median {:?}", times[2]);
         }
     }
 

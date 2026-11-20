@@ -471,3 +471,82 @@ for (const [name, foreign] of SPLIT_FOREIGN) {
     }
   });
 }
+
+const COLUMN_BREAK = '<w:r><w:br w:type="column"/></w:r>';
+const flowBreaks = (xml: string) => pages(xml).replaceAll('<w:br w:type="column"/>', '<w:t>[column]</w:t>');
+const flowBreakRun = (type: string) =>
+  new RegExp(`<w:r>(?:<w:rPr>(?:(?!</w:rPr>)[\\s\\S])*</w:rPr>)?<w:br w:type="${type}"/></w:r>`);
+const spanLength = (session: YrsSession) => session.paragraphSpans('body')[0]!.length;
+
+/** A break in a run of its own right after the kept element, and the loaders that seed it as a break. */
+const LEADING_BREAKS: Array<[string, string, string[]]> = [
+  ['page', PAGE_BREAK, ['the Rust loader', 'the TypeScript loader']],
+  ['column', COLUMN_BREAK, ['the Rust loader']],
+];
+
+for (const [type, breakRun, loaders] of LEADING_BREAKS) {
+  describe(`an unknown element holding a run directly before a ${type} break in a run of its own`, () => {
+    const inner = `${ZZZ}${breakRun}${SOURCE.t('After')}`;
+    const kept = trace(paragraph(ZZZ));
+    const edits: Array<[string, Edit, string]> = [
+      ['typing at the end', (session, paraId) => typeAt(spanLength(session))(session, paraId), `${kept}[${type}]AfterX`],
+      ['changing the paragraph alignment', (session, paraId) => {
+        const position = { paraId, offset: 0 };
+        session.setParagraphAttrs({ story: 'body', start: position, end: position }, { alignment: 'center' });
+      }, `${kept}[${type}]After`],
+      ['deleting the element', (session, paraId) => {
+        const at = spanLength(session) - 'After'.length - 1;
+        deleteBetween(at, at + 1)(session, paraId);
+      }, `[${type}]After`],
+    ];
+
+    for (const [loader, load] of LOADERS.filter(([name]) => loaders.includes(name))) {
+      for (const [name, edit, expected] of edits) {
+        it(`${loader}: ${name} keeps the break in its run and in place`, async () => {
+          const { session, base } = await load(docx(inner));
+          edit(session, session.paragraphs('body')[0]!.paraId);
+          const saved = paragraphsOf(await savedAsTheEditorSaves(session, base));
+          expect(saved.map(entry => trace(flowBreaks(entry)))).toEqual([expected, 'Other']);
+          expect(saved[0]).toMatch(flowBreakRun(type));
+        });
+      }
+    }
+  });
+}
+
+describe('runs of their own languages around an unknown element holding a run', () => {
+  const lang = (value: string, content: string) => run(`<w:rPr><w:lang w:val="${value}"/></w:rPr>${content}`);
+  const inner = `${lang('fr-FR', '<w:t>A</w:t>')}${ZZZ}${lang('de-DE', '<w:br/>')}${lang('es-ES', '<w:t>B</w:t>')}`;
+  const runWith = (xml: string, needle: string) => {
+    const at = xml.indexOf(needle);
+    return at < 0 ? '' : xml.slice(xml.lastIndexOf('<w:r>', at), xml.indexOf('</w:r>', at));
+  };
+
+  for (const [loader, load] of LOADERS) {
+    it(`${loader}: typing at the end keeps each run's own language, the line break's too`, async () => {
+      const { session, base } = await load(docx(inner));
+      typeAt(spanLength(session))(session, session.paragraphs('body')[0]!.paraId);
+      const [first] = paragraphsOf(await savedAsTheEditorSaves(session, base));
+      expect(trace(first!)).toBe(`A${trace(paragraph(ZZZ))}BX`);
+      const languages = [['>A<', 'fr-FR'], ['<w:br/>', 'de-DE'], ['>B', 'es-ES']]
+        .map(([needle, value]) => [needle, runWith(first!, needle!).includes(`w:val="${value}"`)]);
+      expect(languages).toEqual([['>A<', true], ['<w:br/>', true], ['>B', true]]);
+    });
+  }
+});
+
+describe('a w:subDoc before a right-to-left scope', () => {
+  const inner = `${SUB_DOC}<w:dir w:val="rtl">${SOURCE.t('مرحبا')}</w:dir>`;
+  const INSIDE_A_DIR = /<w:dir\b[^>]*>(?:(?!<\/w:dir>)[\s\S])*<w:subDoc\b/;
+
+  for (const [loader, load] of LOADERS) {
+    it(`${loader}: typing before the scope saves the w:subDoc once and outside every w:dir`, async () => {
+      const { session, base } = await load(docx(inner));
+      typeAt(0)(session, session.paragraphs('body')[0]!.paraId);
+      const [first] = paragraphsOf(await savedAsTheEditorSaves(session, base));
+      expect(texts(first!)).toBe('Xمرحبا');
+      expect(first!.split('<w:subDoc').length).toBe(2);
+      expect(first).not.toMatch(INSIDE_A_DIR);
+    });
+  }
+});
