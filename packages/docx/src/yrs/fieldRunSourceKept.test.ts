@@ -279,7 +279,7 @@ const EDIT_ROUTES: Array<[string, EditRoute]> = [
     edit(projected);
     return documentXml(new Uint8Array(await repackDocx(projected)));
   }],
-  ['the native session, a full rewrite', async (edit, bytes = fixture()) => {
+  ['the Rust loader in a Wasm session, a full rewrite', async (edit, bytes = fixture()) => {
     const opened = await session();
     opened.openDocx(bytes, true);
     const projected = yrsToDocument(opened, opened.materializeDocx()!);
