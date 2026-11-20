@@ -128,16 +128,13 @@ async function session(): Promise<YrsSession> {
 }
 
 interface Edit {
-  /** The comment the editor deletes: the session removes it and the host's list leaves it out. */
-  remove?: number;
-  /** The comment only the host's list leaves out. */
+  /** The comment the host's list leaves out. */
   drop?: number;
   /** The Word paragraph id of the paragraph a letter X is typed at the end of. */
   type?: string;
 }
 
 function apply(engine: YrsSession, edit: Edit): boolean {
-  if (edit.remove !== undefined) engine.applyRawOps('body', [{ op: 'removeComment', id: String(edit.remove) }]);
   if (edit.type !== undefined) {
     const result = engine.applyEdits({
       expectVersion: engine.version(),
@@ -145,13 +142,12 @@ function apply(engine: YrsSession, edit: Edit): boolean {
     });
     if (!result.ok) throw new Error(`insertText: ${JSON.stringify(result).slice(0, 200)}`);
   }
-  return edit.remove !== undefined || edit.type !== undefined;
+  return edit.type !== undefined;
 }
 
 function hostList(host: Document, edit: Edit): Comment[] {
   const list = host.package.document.comments ?? [];
-  const gone = [edit.remove, edit.drop].filter((id): id is number => id !== undefined);
-  return list.filter((comment) => !gone.includes(comment.id) && (comment.parentId == null || !gone.includes(comment.parentId)));
+  return list.filter((comment) => comment.id !== edit.drop && (comment.parentId == null || comment.parentId !== edit.drop));
 }
 
 async function mainThreadSave(source: Uint8Array, edit: Edit): Promise<Uint8Array> {
@@ -221,12 +217,13 @@ for (const [route, save] of Object.entries(ROUTES)) {
       expect(typedNext(saved)).toBe('Other paragraphX');
     }, TIMEOUT);
 
-    test('deleting the comment whose range is inside a tracked insertion takes its markers out', async () => {
-      const saved = await save(fixture(RANGE_IN_INSERTION, [1]), { remove: 1 });
+    test('a comment the host list leaves out, saved beside a letter typed in another paragraph, loses its range inside a tracked insertion', async () => {
+      const saved = await save(fixture(RANGE_IN_INSERTION, [1]), { drop: 1, type: OTHER_ID });
       const first = paragraphs(saved)[0] ?? '';
       expect(marks(saved, 1)).toEqual([]);
       expect(first).toContain(revision('ins', 41, run('inserted')));
       expect(textAt(saved, 0)).toBe('Head inserted tail');
+      expect(typedNext(saved)).toBe('Other paragraphX');
     }, TIMEOUT);
 
     for (const [name, first, comments] of [
