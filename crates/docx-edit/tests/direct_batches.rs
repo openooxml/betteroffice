@@ -1517,6 +1517,10 @@ fn a_foreign_inline_element_takes_no_story_unit_and_leaves_search_and_export_as_
             "UnsupportedContent An inline x:foo is not represented in the export; it stays in the package."
                 .to_owned(),
         );
-        assert_eq!(export_findings(&doc), (diagnostics, unsupported + 1), "{foreign}");
+        assert_eq!(
+            export_findings(&doc),
+            (diagnostics, unsupported + 1),
+            "{foreign}"
+        );
     }
 }
