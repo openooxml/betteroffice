@@ -814,6 +814,58 @@ fn keystrokes_with_a_repeated_final_section_stay_resident() {
     }
 }
 
+/// A keystroke's walk moves each unchanged table out of the retained arena and gives it the new
+/// positions, instead of copying the table lowered now, ahead of the tables, between them and
+/// after them, and the layout stays the one a full recompute builds.
+#[test]
+fn typing_moves_unchanged_tables_instead_of_copying_them() {
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+    for (label, request) in [
+        ("one section", small_page_request(font)),
+        (
+            "repeated final section",
+            repeated_final_section_request(font),
+        ),
+    ] {
+        let engine = objects_engine(9741, &["table"]);
+        let mut host =
+            CommandHost::open_with(&engine, request).seeded(9741, objects_package(&["table"]));
+        let tables = engine
+            .pagination
+            .borrow()
+            .input
+            .as_ref()
+            .unwrap()
+            .measured
+            .iter()
+            .filter(|measured| matches!(measured.block, LayoutBlock::Table(_)))
+            .count() as u64;
+        assert_eq!(tables, 3, "{label}");
+        for (place, paragraph) in [("ahead", 2), ("between", 8), ("after", 11)] {
+            let end = paragraph_end(&engine, paragraph);
+            for (key, start, end, text) in [
+                ("x", end, end, Some("x")),
+                ("y", end + 1, end + 1, Some("y")),
+                ("backspace", end + 1, end + 2, None),
+            ] {
+                let label = format!("{label}: {place}: {key}");
+                REGION_FULL_PASSES.with(|count| count.set(0));
+                PLAIN_WALK_REUSE.with(|reuse| reuse.set((0, 0)));
+                assert!(host.command("body", start, end, text), "{label}");
+                assert_eq!(REGION_FULL_PASSES.with(Cell::get), 0, "{label}");
+                assert_eq!(
+                    PLAIN_WALK_REUSE.with(Cell::get),
+                    (0, tables),
+                    "{label}: (copied, moved) tables"
+                );
+                host.assert_matches_cold(&label);
+            }
+        }
+    }
+}
+
 /// Filler paragraphs over several small pages around a table and a bookmarked
 /// paragraph. The local patch declines edits in either, so typing there
 /// re-lowers the whole body.

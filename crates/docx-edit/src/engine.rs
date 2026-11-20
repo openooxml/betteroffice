@@ -3511,13 +3511,86 @@ type ResidentWalkOut<'a> = (
 );
 
 /// The dirty-block walk of `resident_layout_input_from_blocks`. With `take`, reused extents move
-/// out of `previous` and `moved` records `(previous index, measured index)` for each one.
+/// out of `previous` and `moved` records `(previous index, measured index)` for each one; the
+/// reused tables [`positions_adoptable`] admits move out too, recorded in the last vector, and
+/// take their new positions once the walk succeeds.
 type PlainResidentWalkOut<'a> = (
     &'a mut Vec<MeasuredBlock>,
     &'a mut Vec<Fingerprint>,
     &'a mut Vec<(usize, usize)>,
     &'a mut Vec<FontChainDependencies>,
+    &'a mut Vec<(usize, usize)>,
 );
+
+#[cfg(test)]
+thread_local! {
+    /// Reused tables the plain walk copied from the new lowering, and those it moved out of the
+    /// retained arena instead.
+    static PLAIN_WALK_REUSE: Cell<(u64, u64)> = const { Cell::new((0, 0)) };
+}
+
+/// Whether a reused block can move out of the retained arena and take the positions of the
+/// equal block lowered now through [`adopt_block_positions`]: a table whose cells hold only such
+/// tables and paragraphs of text, tab, line break and field runs. Equality of those skips their
+/// positions and nothing else, so with them copied the moved block is the new one.
+fn positions_adoptable(block: &LayoutBlock) -> bool {
+    let LayoutBlock::Table(table) = block else {
+        return false;
+    };
+    table
+        .rows
+        .iter()
+        .flat_map(|row| &row.cells)
+        .flat_map(|cell| &cell.blocks)
+        .all(|block| match block {
+            LayoutBlock::Paragraph(paragraph) => paragraph.runs.iter().all(|run| {
+                matches!(
+                    run,
+                    Run::Text(_) | Run::Tab(_) | Run::LineBreak(_) | Run::Field(_)
+                )
+            }),
+            LayoutBlock::Table(_) => positions_adoptable(block),
+            _ => false,
+        })
+}
+
+/// Copies the positions of `source` into `target`, a block [`positions_adoptable`] admits that is
+/// equal to `source` but for them.
+fn adopt_block_positions(target: &mut LayoutBlock, source: &LayoutBlock) {
+    match (target, source) {
+        (LayoutBlock::Table(target), LayoutBlock::Table(source)) => {
+            (target.pm_start, target.pm_end) = (source.pm_start, source.pm_end);
+            for (row, source) in target.rows.iter_mut().zip(&source.rows) {
+                for (cell, source) in row.cells.iter_mut().zip(&source.cells) {
+                    for (block, source) in cell.blocks.iter_mut().zip(&source.blocks) {
+                        adopt_block_positions(block, source);
+                    }
+                }
+            }
+        }
+        (LayoutBlock::Paragraph(target), LayoutBlock::Paragraph(source)) => {
+            (target.pm_start, target.pm_end) = (source.pm_start, source.pm_end);
+            for (run, source) in target.runs.iter_mut().zip(&source.runs) {
+                match (run, source) {
+                    (Run::Text(run), Run::Text(source)) => {
+                        (run.pm_start, run.pm_end) = (source.pm_start, source.pm_end);
+                    }
+                    (Run::Tab(run), Run::Tab(source)) => {
+                        (run.pm_start, run.pm_end) = (source.pm_start, source.pm_end);
+                    }
+                    (Run::LineBreak(run), Run::LineBreak(source)) => {
+                        (run.pm_start, run.pm_end) = (source.pm_start, source.pm_end);
+                    }
+                    (Run::Field(run), Run::Field(source)) => {
+                        (run.pm_start, run.pm_end) = (source.pm_start, source.pm_end);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+}
 
 fn resident_walk_plain(
     blocks: &(impl BlockSource + ?Sized),
@@ -3536,7 +3609,7 @@ fn resident_walk_plain(
         &LayoutBlock,
         &mut LayoutBlock,
     ) -> Result<BlockExtent, String>,
-    (measured, block_fingerprints, moved, dependencies): PlainResidentWalkOut<'_>,
+    (measured, block_fingerprints, moved, dependencies, moved_blocks): PlainResidentWalkOut<'_>,
 ) -> Result<(u64, u64), String> {
     let structure = || "resident plain-text input changed the block structure".to_owned();
     let identity = || "resident plain-text input changed stable block identity".to_owned();
@@ -3652,11 +3725,32 @@ fn resident_walk_plain(
                     .cloned()
                     .unwrap_or_else(FontChainDependencies::unknown),
             );
-            let measure = reuse(previous, index, measured.len());
-            measured.push(MeasuredBlock {
-                block: next_block.clone(),
-                measure,
-            });
+            // Pagination skips the relative run positions of a moved block, so only a block
+            // whose own match them moves; the rest copy, and pagination compares them.
+            let adopt = take
+                && positions_adoptable(previous_block)
+                && relative_run_position_fingerprint(previous_block)
+                    == relative_run_position_fingerprint(next_block);
+            let to = measured.len();
+            let measure = reuse(previous, index, to);
+            let block = if adopt {
+                moved_blocks.push((index, to));
+                take_block(&mut previous[index].block)
+            } else {
+                next_block.clone()
+            };
+            #[cfg(test)]
+            if matches!(next_block, LayoutBlock::Table(_)) {
+                PLAIN_WALK_REUSE.with(|reuse| {
+                    let (copied, adopted) = reuse.get();
+                    reuse.set(if adopt {
+                        (copied, adopted + 1)
+                    } else {
+                        (copied + 1, adopted)
+                    });
+                });
+            }
+            measured.push(MeasuredBlock { block, measure });
             block_fingerprints.push(previous_fingerprint);
             resident_reused_blocks = resident_reused_blocks.wrapping_add(1);
             continue;
@@ -10489,6 +10583,7 @@ impl EngineSession {
                     &mut block_fingerprints,
                     &mut moved,
                     &mut font_dependencies,
+                    &mut moved_blocks,
                 ),
             )
         };
@@ -10498,11 +10593,9 @@ impl EngineSession {
         let (resident_measure_calls, resident_reused_blocks) = match walked {
             Ok(counts) => counts,
             Err(error) => {
-                if uses_region_path {
-                    for &(from, to) in &moved_blocks {
-                        previous.measured[from].block =
-                            std::mem::replace(&mut measured[to].block, LayoutBlock::Unsupported);
-                    }
+                for &(from, to) in &moved_blocks {
+                    previous.measured[from].block =
+                        std::mem::replace(&mut measured[to].block, LayoutBlock::Unsupported);
                 }
                 for (from, to) in moved {
                     previous.measured[from].measure =
@@ -10517,10 +10610,26 @@ impl EngineSession {
             {
                 pagination.retain_match_calls += moved_blocks.len() as u64;
             }
-            pagination
-                .moved_blocks
-                .extend(moved_blocks.into_iter().map(|(from, _)| from));
+        } else {
+            // The plain walk measures in block order, so a moved block's measured index is its
+            // index in `blocks`.
+            for &(_, to) in &moved_blocks {
+                let source = blocks.get(to).expect("moved block within source length");
+                adopt_block_positions(&mut measured[to].block, source);
+                #[cfg(any(test, debug_assertions))]
+                {
+                    assert_eq!(measured[to].block, *source, "moved block {to}");
+                    assert_eq!(
+                        serde_json::to_vec(&measured[to].block).unwrap(),
+                        serde_json::to_vec(source).unwrap(),
+                        "moved block {to} took every position"
+                    );
+                }
+            }
         }
+        pagination
+            .moved_blocks
+            .extend(moved_blocks.into_iter().map(|(from, _)| from));
         let mut measurement = self.measurement.borrow_mut();
         measurement.resident_measure_calls = measurement
             .resident_measure_calls
