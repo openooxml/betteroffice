@@ -2316,6 +2316,33 @@ function restoreNestedOrdinals(content: ParagraphContent[], base: readonly Parag
   });
 }
 
+const KEPT_WORD_INLINE = /^\s*<w:/;
+
+const EMPTY_INLINE = /^\s*<[^\s/>]+(?:[^>"']|"[^"]*"|'[^']*')*?\/>\s*$/;
+
+/** The story units a base paragraph's raw inline seeded as: one for a kept `w:` element holding content. */
+function baseRawInlineUnits(raw: RawXml): number {
+  return KEPT_WORD_INLINE.test(raw.xml) && !EMPTY_INLINE.test(raw.xml) ? 1 : 0;
+}
+
+/** Puts each foreign inline element of the base paragraph back at its offset: foreign markup seeds as nothing. */
+function restoreForeignInlines(content: ParagraphContent[], base: Paragraph | undefined): ParagraphContent[] {
+  if (!base) return content;
+  const length = content.reduce((sum, child) => sum + paragraphContentLength(child), 0);
+  const boundaries: CommentBoundary[] = [];
+  let offset = 0;
+  for (const [index, child] of base.content.entries()) {
+    if (child.type !== 'rawXml') {
+      offset += paragraphContentLength(child);
+    } else if (KEPT_WORD_INLINE.test(child.xml)) {
+      offset += baseRawInlineUnits(child);
+    } else {
+      boundaries.push({ id: index, kind: 'start', offset: Math.min(offset, length) });
+    }
+  }
+  return insertBoundaries(content, boundaries, (boundary) => base.content[boundary.id]!);
+}
+
 /** Gives each kept inline element written back from its embed the source occurrence its base counterpart carries. */
 function restoreRawInlineOrdinals(content: ParagraphContent[], base: readonly ParagraphContent[]): void {
   const ordinals = new Map<string, number>();
@@ -2604,6 +2631,7 @@ function paragraphFromStory(
     liveBreaks
   );
   restoreLineBreaks(content, baseParagraph);
+  content = restoreForeignInlines(content, baseParagraph);
   content = insertBoundaries(content, rawMarks, (boundary) => ({
     type: 'rawXml',
     xml: (boundary as RawMarkBoundary).xml,

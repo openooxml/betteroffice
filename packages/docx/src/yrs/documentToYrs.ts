@@ -186,6 +186,9 @@ interface RawMarkOp {
 
 const EMPTY_ELEMENT = /^\s*<([^\s/>]+)(?:[^>"']|"[^"]*"|'[^']*')*?\/>\s*$/;
 
+/** A kept `w:` inline element; foreign markup takes no story unit and the save restores it from the base paragraph. */
+const KEPT_WORD_INLINE = /^\s*<w:/;
+
 /**
  * The side a kept inline element's anchor sticks to when it is written without content: the unit
  * before it for an element whose name ends in `End`, the unit after it otherwise. Null for an
@@ -1454,11 +1457,13 @@ function paragraphUnits(
       boundaries = undefined;
       units.push(embedUnit('math', mathPayload(content)));
     } else if (content.type === 'rawXml') {
-      const assoc = rawMarkAssoc(content.xml);
-      if (assoc) {
-        rawMarks.push({ unit: start, assoc, xml: content.xml });
-      } else {
-        units.push(embedUnit(RAW_INLINE_KIND, { xml: content.xml }));
+      if (KEPT_WORD_INLINE.test(content.xml)) {
+        const assoc = rawMarkAssoc(content.xml);
+        if (assoc) {
+          rawMarks.push({ unit: start, assoc, xml: content.xml });
+        } else {
+          units.push(embedUnit(RAW_INLINE_KIND, { xml: content.xml }));
+        }
       }
     } else if (content.type !== 'bookmarkStart' && content.type !== 'bookmarkEnd') {
       boundaries = undefined;

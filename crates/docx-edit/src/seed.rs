@@ -4612,6 +4612,12 @@ struct RawMark {
     xml: String,
 }
 
+/// Whether `xml` is a kept `w:` inline element. Foreign markup takes no story unit: the save
+/// restores it from the base paragraph.
+fn kept_word_inline(xml: &str) -> bool {
+    xml.trim_start().starts_with("<w:")
+}
+
 /// The side a kept inline element's anchor sticks to when it is written without content: the
 /// unit before it for an element whose name ends in `End`, the unit after it otherwise. `None`
 /// for an element holding content, which seeds as one embed.
@@ -4740,6 +4746,8 @@ fn paragraph_units(
                 boundaries = None;
                 units.push(embed_unit("math", math_payload(content), &[], 1));
             }
+            "rawXml"
+                if !kept_word_inline(string(field(Some(content), "xml")).unwrap_or_default()) => {}
             "rawXml" => {
                 let xml = string(field(Some(content), "xml")).unwrap_or_default();
                 if let Some(assoc) = raw_mark_assoc(xml) {
