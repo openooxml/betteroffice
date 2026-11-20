@@ -54,7 +54,8 @@ pub enum RunType {
 #[serde(rename_all = "camelCase")]
 pub struct DirectionScope {
     pub kind: DirectionKind,
-    pub val: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub val: Option<String>,
     pub id: u32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra: Vec<crate::paragraph::RawAttribute>,
@@ -86,10 +87,7 @@ pub(crate) fn direction_scope(element: &XmlElement, id: u32) -> Option<Direction
     };
     Some(DirectionScope {
         kind,
-        val: element
-            .attribute(Some("w"), "val")
-            .unwrap_or_default()
-            .to_owned(),
+        val: element.attribute(Some("w"), "val").map(str::to_owned),
         id,
         extra: element
             .attributes

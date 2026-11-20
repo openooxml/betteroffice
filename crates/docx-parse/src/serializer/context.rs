@@ -99,9 +99,11 @@ impl DirectionScopes {
             }
             xml.push('<');
             xml.push_str(scope.kind.element());
-            xml.push_str(" w:val=\"");
-            xml.push_str(&escape_xml(&scope.val));
-            xml.push('"');
+            if let Some(val) = &scope.val {
+                xml.push_str(" w:val=\"");
+                xml.push_str(&escape_xml(val));
+                xml.push('"');
+            }
             for attribute in &scope.extra {
                 if is_safe_attribute_name(&attribute.name) {
                     xml.push(' ');
