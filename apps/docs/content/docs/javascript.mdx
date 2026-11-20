@@ -25,7 +25,7 @@ import "@betteroffice/docx-react/styles.css";
 `documentBuffer` accepts an `ArrayBuffer`, `Uint8Array`, `Blob`, or `File`.
 `file` and `fileName` are aliases of `documentBuffer` and `documentName`; when
 both names are set, `documentBuffer` and `documentName` win.
-`DocxEditor` reads asynchronously by default; deprecated `legacySyncApi` keeps the synchronous API and is removed in 0.6.0. `collaboration` runs on the default editor too. See [Migrating to 0.5](./migrating-to-0-5).
+`DocxEditor` reads asynchronously by default; deprecated `legacySyncApi` keeps the synchronous API and is removed in 0.7.0. `collaboration` runs on the default editor too. See [Migrating to 0.5](./migrating-to-0-5).
 Without `onSave`, File > Save downloads the edited bytes. Configure
 [fonts](./packages#fonts) before mounting the DOCX editor for consistent text
 measurement and pagination.
@@ -47,7 +47,7 @@ only without `onSave`), `initialZoom`, `loadingIndicator` and `style` match
 `DocxEditor`, and a `collaboration.clientId` is generated when omitted.
 Both default to the worker-owned async editor, whose `onReady` API answers reads
 and exports with promises; deprecated `legacySyncApi` keeps the synchronous API
-and is removed in 0.6.0. See [Migrating to 0.5](./migrating-to-0-5).
+and is removed in 0.7.0. See [Migrating to 0.5](./migrating-to-0-5).
 
 ## Compose the DOCX toolbar
 
@@ -390,7 +390,7 @@ the set's `version`.
 rejects or answers `pending`. Only the default editor awaits reads: targets
 asked in one tick share one worker read, and `getAnchorGeometry` answers
 `pending` while a target's read is in flight. The `legacySyncApi` editor, removed in
-0.6.0, answers right away, and still `layout-unavailable` while its own reads
+0.7.0, answers right away, and still `layout-unavailable` while its own reads
 are in flight. A read the worker fails answers `read-failed` on both methods and
 renders overlays again once; only `readAnchorGeometries` reads that target
 again, so retry it with backoff. Answers come from the layout current when the
