@@ -299,7 +299,7 @@ editing.
 | `wb.last_calculation()` | the `Calculation` the most recent one produced |
 | `wb.sheet_names` / `wb.sheet_count` | sheet metadata |
 | `wb[key]` / `wb.sheet(key)` | a `Sheet` by name or index |
-| `wb.sheet_index(key)` | resolve a name or index to an index |
+| `wb.sheet(key).index` / `.name` | the index and the name of that sheet |
 | `sheet[addr]` | cell value (see the note below on when it is recalculated) |
 | `sheet[addr] = value` | set from what a user would type |
 | `sheet.formula(addr)` | source formula, or `None` |
