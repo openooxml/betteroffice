@@ -807,10 +807,14 @@ fn parse_paragraph_contents(
             "pPr" | "proofErr" | "permStart" | "permEnd" => {}
             "smartTagPr" | "customXmlPr" if child.namespace_prefix() == Some("w") => {}
             _ => {
-                if let Some(raw) = crate::inline::raw_foreign_node(child, budget)
-                    .or_else(|| crate::inline::unmodeled_word_node(child, budget))
-                {
+                if let Some(raw) = crate::inline::raw_foreign_node(child, budget) {
                     output.push(ParagraphContent::Inline(InlineNode::RawXml(Box::new(raw))));
+                } else if let Some(raw) = crate::inline::unmodeled_word_node(child, budget) {
+                    let node = InlineNode::RawXml(Box::new(raw));
+                    match fields.last_mut() {
+                        Some(active) => active.absorb(node),
+                        None => output.push(ParagraphContent::Inline(node)),
+                    }
                 }
             }
         }
