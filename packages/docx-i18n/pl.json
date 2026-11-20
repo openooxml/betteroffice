@@ -874,6 +874,7 @@
     "toolbarGroup": "Wtyczki",
     "panelTabs": "Panele wtyczek",
     "collapsePanel": "Zwiń {title}",
-    "expandPanel": "Rozwiń {title}"
+    "expandPanel": "Rozwiń {title}",
+    "miniToolbar": "Formatowanie zaznaczenia"
   }
 }

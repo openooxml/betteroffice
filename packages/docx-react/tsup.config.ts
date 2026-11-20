@@ -6,6 +6,7 @@ export const library: Options = {
   entry: {
     index: 'src/index.ts',
     'peerless-harness': 'src/components/DocxEditor/peerless/browserHarness.ts',
+    'mini-toolbar': 'src/mini-toolbar.ts',
   },
   format: ['esm'],
   dts: true,
