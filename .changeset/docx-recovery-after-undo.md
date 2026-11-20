@@ -5,4 +5,4 @@
 '@betteroffice/pptx': minor
 ---
 
-A DOCX document opened with a seed and without collaboration now recovers after a worker restart that followed undo or redo; undo history starts at recovery. Adds public `clientId` and `onStream`, the `applyUpdate` command kind, optional engine `applyVerbatimUpdate`, and the binding's `apply_verbatim_update`.
+A DOCX document opened with a seed and without collaboration now recovers after a worker restart following undo or redo; undo history starts at recovery. Adds `clientId`, `onStream`, the `applyUpdate` command kind, and optional stream members: the host's `recordUpdate`, `takeStream`, `withCommandWork`, and the engine's `applyVerbatimUpdate`.
