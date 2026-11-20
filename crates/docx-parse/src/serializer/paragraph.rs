@@ -1,5 +1,7 @@
 //! Paragraph properties and inline-content serialization.
 
+use std::borrow::Borrow;
+
 use crate::borders::Borders;
 use crate::formatting::{
     NumberingProperties, ParagraphCnfStyle, ParagraphFormatting, ParagraphFrame,
@@ -134,7 +136,7 @@ fn serialize_paragraph_inner(
     for (index, content) in paragraph.content.iter().enumerate() {
         if paragraph_content_zero_width(content) && context.direction.any_open() {
             if upcoming.is_none() {
-                upcoming = Some(upcoming_paragraph_scopes(paragraph));
+                upcoming = Some(upcoming_paragraph_scopes(paragraph, Within::of(context)));
             }
             if let Some(scopes) = &upcoming {
                 context.direction.look_ahead(scopes[index]);
@@ -255,27 +257,75 @@ fn paragraph_content_zero_width(content: &ParagraphContent) -> bool {
     }
 }
 
-/// The scopes `node` keeps open where it starts.
-fn leading_scopes(node: &InlineNode) -> &[DirectionScope] {
+/// Whether a node is written inside a content control and inside a tracked change, which decides
+/// the children a hyperlink there writes.
+#[derive(Clone, Copy)]
+struct Within {
+    control: bool,
+    revision: bool,
+}
+
+impl Within {
+    fn of(context: &SerializerContext) -> Self {
+        Self {
+            control: context.in_control,
+            revision: context.in_revision,
+        }
+    }
+}
+
+/// Whether a hyperlink written `within` writes its child `child`.
+fn link_writes(child: &InlineNode, within: Within) -> bool {
+    match child {
+        _ if within.control && within.revision => true,
+        InlineNode::Run(_)
+        | InlineNode::BookmarkStart(_)
+        | InlineNode::BookmarkEnd(_)
+        | InlineNode::RawXml(_) => true,
+        InlineNode::InlineSdt(_) => child.has_tracked_control(false, within.revision),
+        _ => false,
+    }
+}
+
+/// The children a hyperlink written `within` writes, in order.
+fn written_link_children(hyperlink: &Hyperlink, within: Within) -> Vec<&InlineNode> {
+    let expanded = within.control && within.revision;
+    let nested = hyperlink.structured_children.as_ref().filter(|children| {
+        expanded
+            || children
+                .iter()
+                .any(|child| child.has_tracked_control(false, within.revision))
+    });
+    nested
+        .unwrap_or(&hyperlink.children)
+        .iter()
+        .filter(|child| link_writes(child, within))
+        .collect()
+}
+
+/// The scopes `node`, written `within`, keeps open where it starts.
+fn leading_scopes(node: &InlineNode, within: Within) -> &[DirectionScope] {
     let mut shared = None;
-    merge_direction_scopes(node, &mut shared);
+    merge_direction_scopes(node, &mut shared, within);
     shared.unwrap_or_default()
 }
 
 /// The scopes the next node with width keeps open where it starts, from each of a wrapper
 /// element's nodes on: those of what is written after the nodes where none of them follows.
 /// They are found in one pass from the end, when a node without width first needs them.
-struct Upcoming<'a> {
-    nodes: &'a [InlineNode],
+struct Upcoming<'a, N> {
+    nodes: &'a [N],
     after: Option<&'a [DirectionScope]>,
+    within: Within,
     scopes: Option<Vec<Option<&'a [DirectionScope]>>>,
 }
 
-impl<'a> Upcoming<'a> {
-    fn new(nodes: &'a [InlineNode], after: Option<&'a [DirectionScope]>) -> Self {
+impl<'a, N: Borrow<InlineNode>> Upcoming<'a, N> {
+    fn new(nodes: &'a [N], after: Option<&'a [DirectionScope]>, within: Within) -> Self {
         Self {
             nodes,
             after,
+            within,
             scopes: None,
         }
     }
@@ -283,11 +333,11 @@ impl<'a> Upcoming<'a> {
     /// Notes, before `nodes[index]` when it takes no width inside an open scope, the scopes the
     /// next node with width keeps open where it starts.
     fn look_ahead(&mut self, index: usize, context: &mut SerializerContext) {
-        if !zero_width(&self.nodes[index]) || !context.direction.any_open() {
+        if !zero_width(self.nodes[index].borrow()) || !context.direction.any_open() {
             return;
         }
         if self.scopes.is_none() {
-            self.scopes = Some(upcoming_scopes(self.nodes, self.after));
+            self.scopes = Some(upcoming_scopes(self.nodes, self.after, self.within));
         }
         if let Some(scopes) = &self.scopes {
             context.direction.look_ahead(scopes[index]);
@@ -295,15 +345,17 @@ impl<'a> Upcoming<'a> {
     }
 }
 
-fn upcoming_scopes<'a>(
-    nodes: &'a [InlineNode],
+fn upcoming_scopes<'a, N: Borrow<InlineNode>>(
+    nodes: &'a [N],
     after: Option<&'a [DirectionScope]>,
+    within: Within,
 ) -> Vec<Option<&'a [DirectionScope]>> {
     let mut next = after;
     let mut upcoming = vec![None; nodes.len()];
     for (index, node) in nodes.iter().enumerate().rev() {
+        let node: &InlineNode = node.borrow();
         if !zero_width(node) {
-            next = Some(leading_scopes(node));
+            next = Some(leading_scopes(node, within));
         }
         upcoming[index] = next;
     }
@@ -311,18 +363,26 @@ fn upcoming_scopes<'a>(
 }
 
 /// The scopes the first paragraph content with width from each index on keeps open where it
-/// starts, found in one pass from the end; `None` where a reference run is written before it or
-/// none follows.
-fn upcoming_paragraph_scopes(paragraph: &Paragraph) -> Vec<Option<&[DirectionScope]>> {
+/// starts, written `within`, found in one pass from the end; `None` where a reference run is
+/// written before it or none follows.
+fn upcoming_paragraph_scopes(
+    paragraph: &Paragraph,
+    within: Within,
+) -> Vec<Option<&[DirectionScope]>> {
+    let revision = Within {
+        revision: true,
+        ..within
+    };
     let mut next = None;
     let mut upcoming = vec![None; paragraph.content.len()];
     for (index, content) in paragraph.content.iter().enumerate().rev() {
         match content {
             ParagraphContent::Inline(node) if !zero_width(node) => {
-                next = Some(leading_scopes(node));
+                next = Some(leading_scopes(node, within));
             }
             ParagraphContent::Tracked(change) => {
-                next = Some(shared_direction_scopes(&change.content).unwrap_or_default());
+                let scopes = shared_direction_scopes(&change.content, revision);
+                next = Some(scopes.unwrap_or_default());
             }
             _ if needs_comment_reference(paragraph, content) => next = None,
             _ => {}
@@ -550,13 +610,16 @@ fn merge_run_direction_scopes<'a>(run: &'a Run, shared: &mut Option<&'a [Directi
     });
 }
 
-fn merge_direction_scopes<'a>(node: &'a InlineNode, shared: &mut Option<&'a [DirectionScope]>) {
+fn merge_direction_scopes<'a>(
+    node: &'a InlineNode,
+    shared: &mut Option<&'a [DirectionScope]>,
+    within: Within,
+) {
     match node {
         InlineNode::Run(run) => merge_run_direction_scopes(run, shared),
         InlineNode::Hyperlink(link) => {
-            let children = link.structured_children.as_ref().unwrap_or(&link.children);
-            for child in children {
-                merge_direction_scopes(child, shared);
+            for child in written_link_children(link, within) {
+                merge_direction_scopes(child, shared, within);
             }
         }
         InlineNode::SimpleField(field) => {
@@ -570,13 +633,21 @@ fn merge_direction_scopes<'a>(node: &'a InlineNode, shared: &mut Option<&'a [Dir
             }
         }
         InlineNode::InlineSdt(sdt) => {
+            let within = Within {
+                control: true,
+                ..within
+            };
             for child in &sdt.content {
-                merge_direction_scopes(child, shared);
+                merge_direction_scopes(child, shared, within);
             }
         }
         InlineNode::Tracked(change) => {
+            let within = Within {
+                revision: true,
+                ..within
+            };
             for child in &change.content {
-                merge_direction_scopes(child, shared);
+                merge_direction_scopes(child, shared, within);
             }
         }
         InlineNode::BookmarkStart(_)
@@ -586,11 +657,12 @@ fn merge_direction_scopes<'a>(node: &'a InlineNode, shared: &mut Option<&'a [Dir
     }
 }
 
-/// The `w:dir`/`w:bdo` scopes every run in `nodes` sits in, outermost first; `None` without runs.
-fn shared_direction_scopes(nodes: &[InlineNode]) -> Option<&[DirectionScope]> {
+/// The `w:dir`/`w:bdo` scopes every run in `nodes`, written `within`, sits in, outermost first;
+/// `None` without runs.
+fn shared_direction_scopes(nodes: &[InlineNode], within: Within) -> Option<&[DirectionScope]> {
     let mut shared = None;
     for node in nodes {
-        merge_direction_scopes(node, &mut shared);
+        merge_direction_scopes(node, &mut shared, within);
     }
     shared
 }
@@ -600,31 +672,17 @@ fn serialize_hyperlink(
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
     let mut children = String::new();
-    let expanded = context.in_control && context.in_revision;
-    let nested = hyperlink.structured_children.as_ref().filter(|children| {
-        expanded
-            || children
-                .iter()
-                .any(|child| child.has_tracked_control(false, context.in_revision))
-    });
-    let written = nested.unwrap_or(&hyperlink.children);
-    let (before, base) = context
-        .direction
-        .enter_wrapper(shared_direction_scopes(written));
-    let mut upcoming = Upcoming::new(written, None);
+    let within = Within::of(context);
+    let written = written_link_children(hyperlink, within);
+    let mut shared = None;
+    for &child in &written {
+        merge_direction_scopes(child, &mut shared, within);
+    }
+    let (before, base) = context.direction.enter_wrapper(shared);
+    let mut upcoming = Upcoming::new(&written, None, within);
     for (index, child) in written.iter().enumerate() {
         upcoming.look_ahead(index, context);
-        match child {
-            _ if expanded => children.push_str(&serialize_inline_node(child, context)?),
-            InlineNode::Run(_)
-            | InlineNode::BookmarkStart(_)
-            | InlineNode::BookmarkEnd(_)
-            | InlineNode::RawXml(_) => children.push_str(&serialize_inline_node(child, context)?),
-            InlineNode::InlineSdt(_) if child.has_tracked_control(false, context.in_revision) => {
-                children.push_str(&serialize_inline_node(child, context)?);
-            }
-            _ => {}
-        }
+        children.push_str(&serialize_inline_node(child, context)?);
     }
     children.push_str(&context.direction.leave_wrapper(base));
     let xml = serialize_hyperlink_element(hyperlink, children);
@@ -913,18 +971,23 @@ fn serialize_complex_field(
     }
     let result_scopes = result_scopes.unwrap_or_default();
     if let Some(nodes) = in_place {
-        let mut upcoming = Upcoming::new(nodes, Some(result_scopes));
+        let mut upcoming = Upcoming::new(nodes, Some(result_scopes), Within::of(context));
         for (index, node) in nodes.iter().enumerate() {
             upcoming.look_ahead(index, context);
             output.push_str(&serialize_inline_node(node, context)?);
         }
     } else if let Some(nodes) = code_nodes {
+        let code_scopes = match field.field_code.first() {
+            Some(run) => run.direction_scopes.as_slice(),
+            None => shared.unwrap_or_default(),
+        };
         for node in nodes.iter().filter(|node| {
             matches!(
                 node,
                 InlineNode::BookmarkStart(_) | InlineNode::BookmarkEnd(_)
             )
         }) {
+            context.direction.look_ahead(Some(code_scopes));
             output.push_str(&serialize_inline_node(node, context)?);
         }
     }
@@ -954,7 +1017,7 @@ fn serialize_complex_field(
         .filter(|content| !content.spans_paragraphs())
         .and_then(|content| content.inline.as_ref());
     if let Some(nodes) = structured {
-        let mut upcoming = Upcoming::new(nodes, Some(result_scopes));
+        let mut upcoming = Upcoming::new(nodes, Some(result_scopes), Within::of(context));
         for (index, node) in nodes.iter().enumerate() {
             upcoming.look_ahead(index, context);
             output.push_str(&serialize_inline_node(node, context)?);
@@ -996,11 +1059,12 @@ pub fn serialize_inline_sdt(
     append_generated(&mut writer, &properties);
     append_generated(&mut writer, &end_properties);
     writer.start_element("w:sdtContent");
+    let previous = std::mem::replace(&mut context.in_control, true);
+    let within = Within::of(context);
     let (before, base) = context
         .direction
-        .enter_wrapper(shared_direction_scopes(&sdt.content));
-    let previous = std::mem::replace(&mut context.in_control, true);
-    let mut upcoming = Upcoming::new(&sdt.content, None);
+        .enter_wrapper(shared_direction_scopes(&sdt.content, within));
+    let mut upcoming = Upcoming::new(&sdt.content, None, within);
     let result = sdt
         .content
         .iter()
@@ -1189,9 +1253,13 @@ fn serialize_tracked_change(
         "moveTo" => ("w:moveTo", false),
         _ => return Ok(String::new()),
     };
+    let within = Within {
+        revision: true,
+        ..Within::of(context)
+    };
     let (before, base) = context
         .direction
-        .enter_wrapper(shared_direction_scopes(&change.content));
+        .enter_wrapper(shared_direction_scopes(&change.content, within));
     let mut writer = XmlWriter::with_capacity(256);
     writer
         .start_element(element)
@@ -1208,7 +1276,7 @@ fn serialize_tracked_change(
     let previous_revision = std::mem::replace(&mut context.in_revision, true);
     let previous_deletion =
         std::mem::replace(&mut context.deletion, deletion && context.in_control);
-    let mut upcoming = Upcoming::new(&change.content, None);
+    let mut upcoming = Upcoming::new(&change.content, None, within);
     let result = change
         .content
         .iter()
