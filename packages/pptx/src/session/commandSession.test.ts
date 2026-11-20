@@ -998,6 +998,34 @@ test('p1_composition_cancel_removes_stage_text', async () => {
   } finally { await value.session.dispose(); }
 });
 
+test('p1_composition_cancel_over_a_selection_gives_it_back_with_its_formatting', async () => {
+  const value = await composeSession(['alphabet'], 1);
+  try {
+    const selected = selection(value.story, 1, 4);
+    expect(await value.send({ kind: 'formatText', payload: { ...input, at: { source: 'confirmed', selection: selected },
+      patch: { bold: true } } })).toMatchObject({ status: 'applied', committed: true });
+    const payload = { ...value.payload, at: { source: 'confirmed' as const, selection: selected } };
+    await value.send({ kind: 'compositionStart', payload });
+    await value.send({ kind: 'compositionUpdate', payload: { ...payload, text: 'ㅎ' } });
+    expect(await value.text()).toBe('aㅎabet');
+    await value.send({ kind: 'compositionUpdate', payload: { ...payload, text: '하' } });
+    expect(await value.text()).toBe('a하abet');
+    expect(await value.send({ kind: 'compositionCommit', payload: { ...payload, text: '' } }))
+      .toMatchObject({ status: 'applied', committed: true });
+    expect(value.state().selection).toMatchObject({ anchor: 1, focus: 4 });
+    expect(await value.end(true)).toMatchObject({ status: 'applied' });
+    expect(await value.text()).toBe('alphabet');
+    const bold = () => value.session.handle().story(value.story.storyId).paragraphs[0]!.runs
+      .filter((run) => run.style.bold === true).map((run) => run.text).join('');
+    expect(bold()).toBe('lph');
+    // The cancel took back the composition's own undo step; the next undo is the formatting before it.
+    await value.undo();
+    expect(await value.text()).toBe('alphabet');
+    expect(bold()).toBe('');
+    expect(value.state().editState.canUndo).toBe(false);
+  } finally { await value.session.dispose(); }
+});
+
 test('p1_composition_undo_keeps_typing_before_it', async () => {
   const value = await composeSession(['alpha'], 5);
   try {

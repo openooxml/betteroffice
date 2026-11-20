@@ -118,7 +118,9 @@ export function registerPresentationCommandHandlers(
     | { kind: 'insertion'; slideId: string; draft: ShapeDraft | PresetShapeDraft | PictureDraft; receipt?: ShapeReceipt }
     | { kind: 'object'; object: PresentationCommandObjectSelection }
     | { kind: 'transform'; object: PresentationCommandObjectSelection; rect: ShapeRect; move: boolean }
-    | { kind: 'history'; direction: 'undo' | 'redo'; receipt?: PresentationHistoryReceipt }
+    | { kind: 'history'; direction: 'undo' | 'redo'; receipt?: PresentationHistoryReceipt;
+      /** A cancelled composition over a selection: the selection its undone stages give back. */
+      restore?: PresentationCommandSelection }
     | { kind: 'activation'; slideId: string }
     | { kind: 'mode'; readOnly: boolean }
     | { kind: 'selection'; selection: PresentationCommandSelection | null }
@@ -185,6 +187,8 @@ export function registerPresentationCommandHandlers(
   let lastEditState: PresentationCommandEditState | undefined;
   let composition: {
     id: string; selection: PresentationCommandSelection; committed: boolean; inserted: string;
+    /** Length of the selection the first stage replaced, while the stages are still the last local undo step. */
+    replaced?: number;
   } | undefined;
   let typing: { target: string; group: string; time: number; kind: string; position: number } | undefined;
   let initialUpdate = false;
@@ -1267,6 +1271,13 @@ export function registerPresentationCommandHandlers(
       if (command.kind === 'compositionCommit' && start < end && text === composition!.inserted) {
         return { kind: 'text', selection: { ...at }, start: end, end, text: '' };
       }
+      // Cancelling stages typed over a selection undoes them, so the selected text comes back with its formatting.
+      const replaced = composition!.replaced;
+      if (command.kind === 'compositionCommit' && text === '' && start < end && replaced && presentation().canUndo()) {
+        const restore = { ...composition!.selection, anchor: start, focus: start + replaced, affinity: 'downstream' as const };
+        delete restore.goalX;
+        return { kind: 'history', direction: 'undo', restore };
+      }
     }
     if (!validText(text) || story.text.length - (end - start) + text.length > 0xfffffffe) {
       return 'invalid-payload';
@@ -1390,6 +1401,11 @@ export function registerPresentationCommandHandlers(
   function apply(command: PresentationCommandEnvelope, admitted: Admission): boolean {
     const opened = presentation();
     if (admitted.kind === 'noop') return false;
+    // Any other local write leaves the stages behind it in the undo history, so a cancel can no longer undo them.
+    if (composition?.replaced && PRESENTATION_COMMAND_ADMISSION[command.kind] === 'local-write' &&
+      command.kind !== 'compositionUpdate' && command.kind !== 'compositionCommit' && command.kind !== 'registerFont') {
+      composition.replaced = undefined;
+    }
     if (admitted.kind === 'remote') {
       const selected = selection ? anchor(selection) : null;
       const composed = composition ? anchor(composition.selection) : null;
@@ -1421,8 +1437,17 @@ export function registerPresentationCommandHandlers(
       if (!result.applied) return false;
       admitted.receipt = result;
       typing = undefined;
-      composition = undefined;
-      selection = null;
+      const restore = admitted.restore;
+      if (restore && composition) {
+        // The composition stays open until its end, with nothing of its own left in the story.
+        composition = { ...composition, selection: { ...restore, focus: restore.anchor }, inserted: '', replaced: undefined,
+          committed: true };
+        selection = { ...restore };
+        activeSlideId = restore.slideId;
+      } else {
+        composition = undefined;
+        selection = null;
+      }
       objectSelection = null;
       clearMarks();
       return true;
@@ -1606,6 +1631,7 @@ export function registerPresentationCommandHandlers(
     delete selection.goalX;
     activeSlideId = at.slideId;
     if (composing) {
+      if (composition!.inserted === '') composition!.replaced = end > start && text !== '' ? end - start : undefined;
       composition!.inserted = text;
       composition!.selection = { ...at, anchor: start, focus: start, affinity: 'downstream' };
       delete composition!.selection.goalX;
