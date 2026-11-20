@@ -401,6 +401,8 @@ pub struct PyTextRun {
     color: Option<String>,
     #[pyo3(get)]
     style_id: Option<String>,
+    #[pyo3(get)]
+    highlight: Option<String>,
 }
 
 impl PyTextRun {
@@ -425,6 +427,7 @@ impl PyTextRun {
                 .and_then(|format| format.color.as_ref())
                 .and_then(|color| color.rgb.clone()),
             style_id: formatting.and_then(|format| format.style_id.clone()),
+            highlight: formatting.and_then(|format| format.highlight.clone()),
         }
     }
 }
@@ -497,6 +500,10 @@ pub struct PyTableCell {
     tables: Vec<PyTable>,
     #[pyo3(get)]
     text: String,
+    #[pyo3(get)]
+    grid_span: Option<i64>,
+    #[pyo3(get)]
+    v_merge: Option<String>,
 }
 
 impl PyTableCell {
@@ -504,12 +511,23 @@ impl PyTableCell {
         let paragraphs = paragraphs_of(&cell.content);
         let tables = tables_of(&cell.content);
         let text = join_text(paragraphs.iter().map(|paragraph| paragraph.text.as_str()));
+        let formatting = cell.formatting.as_ref();
         Self {
             paragraphs,
             tables,
             text,
+            grid_span: formatting
+                .and_then(|format| format.grid_span)
+                .and_then(whole_number),
+            v_merge: formatting.and_then(|format| format.v_merge.clone()),
         }
     }
+}
+
+/// `value` as an integer, when it is one that an `f64` holds exactly.
+fn whole_number(value: f64) -> Option<i64> {
+    const EXACT: f64 = 9_007_199_254_740_992.0;
+    (value.fract() == 0.0 && value.abs() <= EXACT).then_some(value as i64)
 }
 
 #[pymethods]

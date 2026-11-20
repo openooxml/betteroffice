@@ -71,6 +71,19 @@ def table_result(table):
     }
 
 
+def run_highlights_result(paragraph):
+    return {"id": paragraph.id, "highlights": [run.highlight for run in paragraph.runs]}
+
+
+def cell_merges_result(table):
+    return {
+        "rows": [
+            [{"gridSpan": cell.grid_span, "vMerge": cell.v_merge} for cell in row.cells]
+            for row in table.rows
+        ]
+    }
+
+
 def section_result(section):
     return {
         "id": section.id,
@@ -263,8 +276,12 @@ def run():
         "structure": lambda args: structure_result(document),
         "paragraphIds": lambda args: document.paragraph_ids,
         "paragraphs": lambda args: [paragraph_result(item) for item in document.paragraphs()],
+        "runHighlights": lambda args: [
+            run_highlights_result(item) for item in document.paragraphs()
+        ],
         "paragraph": paragraph,
         "tables": lambda args: [table_result(table) for table in document.tables()],
+        "cellMerges": lambda args: [cell_merges_result(table) for table in document.tables()],
         "sections": lambda args: [section_result(section) for section in document.sections()],
         "headers": lambda args: [header_footer_result(story) for story in document.headers()],
         "footers": lambda args: [header_footer_result(story) for story in document.footers()],
