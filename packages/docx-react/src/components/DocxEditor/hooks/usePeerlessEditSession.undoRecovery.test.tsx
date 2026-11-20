@@ -74,9 +74,11 @@ interface MountOptions {
   reopenSource?: Uint8Array;
   collaboration?: boolean;
   gateCheckpoint?: boolean;
+  /** Yrs state the first open restores over `source`, so that open records no seed. */
+  initialState?: Uint8Array;
 }
 
-function mount({ tamper, source = documentBytes(), reopenSource, collaboration, gateCheckpoint }: MountOptions = {}) {
+function mount({ tamper, source = documentBytes(), reopenSource, collaboration, gateCheckpoint, initialState }: MountOptions = {}) {
   const workers: InProcessResidentWorker[] = [];
   const clients: DocxSourceWorkerClient[] = [];
   let openGate = () => {};
@@ -89,6 +91,7 @@ function mount({ tamper, source = documentBytes(), reopenSource, collaboration, 
   const events: RecoveryReport[] = [];
   const errors: Error[] = [];
   const streamed = new Map<number, number>();
+  const seeds: (Seed | undefined)[] = [];
   const fontEvents: { worker: number; families: string[] }[] = [];
   let pendingCheckpoint: Promise<unknown> | undefined;
   let applied = 0;
@@ -104,7 +107,8 @@ function mount({ tamper, source = documentBytes(), reopenSource, collaboration, 
     if (checkpoint && !checkpoint.recoveryState) {
       throw new SessionFailure('message', 'Cannot restore DOCX checkpoint command-local state and proposals');
     }
-    await client.openSource({ bytes: (resume && reopenSource ? reopenSource : source).slice(), ...(checkpoint ? { state: checkpoint.state } : {}),
+    const state = checkpoint ? checkpoint.state : resume ? undefined : initialState?.slice();
+    await client.openSource({ bytes: (resume && reopenSource ? reopenSource : source).slice(), ...(state ? { state } : {}),
       ...(resume?.seed ? { clientId: resume.seed.clientId, generation: resume.seed.generation } : {}),
       ...(collaboration ? { collaboration: { clientId: 9100 + workers.length } } : {}) });
     const initial = await client.commandInit({
@@ -115,6 +119,7 @@ function mount({ tamper, source = documentBytes(), reopenSource, collaboration, 
       ...INIT,
     });
     const connection = await createDocxCommandConnection(client, initial);
+    seeds.push(connection.initial.seed);
     if (!resume) {
       if (tamper) tamper(connection.initial.seed!);
       const onStream = connection.client.onStream;
@@ -163,7 +168,7 @@ function mount({ tamper, source = documentBytes(), reopenSource, collaboration, 
   const view = renderHook(() => usePeerlessEditSession(options));
   const settle = () => act(async () => { await new Promise<void>((resolve) => setImmediate(resolve)); });
   const session = {
-    view, checkpoints, phases, events, errors, resumes, reopenedText, replayed, settle,
+    view, checkpoints, phases, events, errors, resumes, reopenedText, replayed, seeds, settle,
     gate: { get requested() { return gate.requested; }, open: () => openGate() },
     worker() { return workers.at(-1)!; },
     client() { return clients.at(-1)!; },
@@ -232,6 +237,24 @@ function mount({ tamper, source = documentBytes(), reopenSource, collaboration, 
       }
       expect(checkpoints.length).toBeGreaterThanOrEqual(count);
     },
+    async idle() {
+      for (let i = 0; i < 3; i += 1) {
+        await settle();
+        if (pendingCheckpoint) await act(async () => { try { await pendingCheckpoint; } catch {} });
+      }
+    },
+    async typeSaveUndo(recovered: string) {
+      const { focus } = session.selection();
+      expect(focus.story).toBe('body');
+      expect(recovered.includes('|')).toBe(false);
+      const typed = recovered.slice(0, focus.offset) + 'B' + recovered.slice(focus.offset);
+      expect(await session.submit('insertText', { text: 'B' })).toBe('applied');
+      expect(session.text()).toBe(typed);
+      await session.save();
+      expect(session.text()).toBe(typed);
+      expect(await session.submit('undo')).toBe('applied');
+      expect(session.text()).toBe(recovered);
+    },
     text() {
       return textOf(workers.at(-1)!);
     },
@@ -262,6 +285,73 @@ function mount({ tamper, source = documentBytes(), reopenSource, collaboration, 
     },
   };
   return session;
+}
+
+async function sourceState(bytes: Uint8Array): Promise<Uint8Array> {
+  const worker = start();
+  liveWorkers.push(worker);
+  await new DocxSourceWorkerClient(worker).openSource({ bytes: bytes.slice() });
+  return worker.sessions.at(-1)!.encodeState().slice();
+}
+
+type IssuedEntry = [key: string, story: string, encoded: string];
+
+const issuedEntry = (key: unknown, value: unknown): IssuedEntry | null => {
+  if (typeof key !== 'string' || !key.includes('\0') || !value || typeof value !== 'object') return null;
+  const { story, encoded } = value as { story?: unknown; encoded?: unknown };
+  return typeof story === 'string' && encoded instanceof Uint8Array ? [key, story, Array.from(encoded).join(',')] : null;
+};
+
+/**
+ * Observes the worker's issued-position map from the same realm the in-process worker runs in: a map is the issued-position
+ * map once a sticky-position entry (key `story\0bytes`, value `{ story, encoded }`) is set into it. While `counting`, every
+ * entry an iteration of that map yields is counted; `added` lists the keys first set into it since the last `reset`.
+ */
+function watchIssuedPositions() {
+  type AnyMap = Map<unknown, unknown>;
+  type Iterate = (this: AnyMap) => Iterator<unknown>;
+  const proto = Map.prototype as unknown as Record<PropertyKey, unknown>;
+  const names = [Symbol.iterator, 'entries', 'keys', 'values'] as const;
+  const originals = new Map<PropertyKey, unknown>([...names, 'set', 'forEach'].map((name) => [name, proto[name]]));
+  const set = originals.get('set') as (this: AnyMap, key: unknown, value: unknown) => AnyMap;
+  const forEach = originals.get('forEach') as (this: AnyMap, callback: (value: unknown, key: unknown, map: AnyMap) => void, self?: unknown) => void;
+  const has = Map.prototype.has;
+  const maps = new Set<AnyMap>();
+  const watch = { counting: false, visited: 0, added: [] as IssuedEntry[], maps,
+    reset() { watch.visited = 0; watch.added = []; },
+    restore() { for (const [name, original] of originals) proto[name] = original; },
+  };
+  proto.set = function (this: AnyMap, key: unknown, value: unknown) {
+    const entry = issuedEntry(key, value);
+    if (entry) {
+      maps.add(this);
+      if (!has.call(this, key)) watch.added.push(entry);
+    }
+    return set.call(this, key, value);
+  };
+  for (const name of names) {
+    const original = originals.get(name) as Iterate;
+    proto[name] = function (this: AnyMap) {
+      const iterator = original.call(this);
+      if (!watch.counting || !maps.has(this)) return iterator;
+      const counted = Object.create(Object.getPrototypeOf(Object.getPrototypeOf(iterator))) as Iterator<unknown> & Iterable<unknown>;
+      counted.next = () => {
+        const step = iterator.next();
+        if (!step.done) watch.visited += 1;
+        return step;
+      };
+      counted[Symbol.iterator] = () => counted;
+      return counted;
+    };
+  }
+  proto.forEach = function (this: AnyMap, callback: (value: unknown, key: unknown, map: AnyMap) => void, self?: unknown) {
+    if (!watch.counting || !maps.has(this)) return forEach.call(this, callback, self);
+    return forEach.call(this, (value, key, map) => {
+      watch.visited += 1;
+      callback.call(self, value, key, map);
+    });
+  };
+  return watch;
 }
 
 test('undo after a checkpoint survives a worker restart', async () => {
@@ -703,11 +793,16 @@ test('an undo still in flight at a crash before the first checkpoint is refused 
   expect(session.checkpoints).toEqual([]);
   session.expectRecovered(typed);
   const status = await session.outcome(undo.status);
-  console.log(`G244-INFLIGHT-UNDO status=${status} detail=${await session.outcome(undo.detail)} phases=${JSON.stringify(session.phases)}`);
-  expect(['refused', 'cancelled']).toContain(status);
-  expect(session.phases).toContain('diverged');
-  expect(session.events.some((event) => event.phase === 'diverged' && event.diverged.length > 0 && event.historyReset)).toBe(true);
+  const detail = await session.outcome(undo.detail);
+  console.log(`G244-INFLIGHT-UNDO status=${status} detail=${detail} phases=${JSON.stringify(session.phases)}`);
+  expect(status).toBe('refused');
+  expect(detail).toBe(JSON.stringify({ status: 'refused', reason: 'history-reset' }));
+  const seq = undo.ticket.seq!;
+  expect(Number.isSafeInteger(seq)).toBe(true);
+  expect(session.events.filter((event) => event.phase === 'diverged')
+    .map(({ diverged, historyReset }) => ({ diverged, historyReset }))).toEqual([{ diverged: [seq], historyReset: true }]);
   expect(session.engine().hasPendingUpdate()).toBe(false);
+  await session.typeSaveUndo(typed);
 }, TIMEOUT);
 
 test('a redo still in flight at a crash before the first checkpoint is refused and reported', async () => {
@@ -726,11 +821,119 @@ test('a redo still in flight at a crash before the first checkpoint is refused a
   expect(session.checkpoints).toEqual([]);
   session.expectRecovered(before);
   const status = await session.outcome(redo.status);
-  console.log(`G244-INFLIGHT-REDO status=${status} detail=${await session.outcome(redo.detail)} phases=${JSON.stringify(session.phases)}`);
-  expect(['refused', 'cancelled']).toContain(status);
-  expect(session.phases).toContain('diverged');
-  expect(session.events.some((event) => event.phase === 'diverged' && event.diverged.length > 0 && event.historyReset)).toBe(true);
+  const detail = await session.outcome(redo.detail);
+  console.log(`G244-INFLIGHT-REDO status=${status} detail=${detail} phases=${JSON.stringify(session.phases)}`);
+  expect(status).toBe('refused');
+  expect(detail).toBe(JSON.stringify({ status: 'refused', reason: 'history-reset' }));
+  const seq = redo.ticket.seq!;
+  expect(Number.isSafeInteger(seq)).toBe(true);
+  expect(session.events.filter((event) => event.phase === 'diverged')
+    .map(({ diverged, historyReset }) => ({ diverged, historyReset }))).toEqual([{ diverged: [seq], historyReset: true }]);
   expect(session.engine().hasPendingUpdate()).toBe(false);
+  await session.typeSaveUndo(before);
+}, TIMEOUT);
+
+test('an undo in flight at a crash after a checkpoint of a session opened without a seed re-executes as on main', async () => {
+  const session = mount({ initialState: await sourceState(documentBytes()) });
+  await session.ready();
+  expect(session.seeds).toEqual([undefined]);
+  await session.typeUntilApplied(128);
+  await session.checkpointTaken(1);
+  const before = session.text();
+  expect(await session.submit('insertText', { text: 'A' })).toBe('applied');
+  const typed = session.text();
+  expect(typed).not.toBe(before);
+  const worker = session.worker();
+  worker.hold();
+  const undo = await session.submitQueued('undo');
+  await waitFor(() => expect(textOf(worker)).toBe(before), { timeout: 30_000 });
+  await session.crash();
+  expect(session.resumes[0]!.checkpoint).toBeDefined();
+  expect(session.resumes[0]!.seed).toBeUndefined();
+  const detail = await session.outcome(undo.detail);
+  console.log(`G244-UNSEEDED-INFLIGHT-UNDO detail=${detail} phases=${JSON.stringify(session.phases)} replayed=${JSON.stringify(session.replayed)}`);
+  expect(detail).toBe(JSON.stringify({ status: 'applied' }));
+  expect(session.replayed.filter((kind) => kind === 'insertText' || kind === 'undo')).toEqual(['insertText', 'undo']);
+  session.expectRecovered(before);
+  expect(session.phases).not.toContain('diverged');
+  expect(session.engine().hasPendingUpdate()).toBe(false);
+}, TIMEOUT);
+
+test('a collaborating core session with checkpoint recovery re-executes an undo in flight at a crash as on main', async () => {
+  const source = documentBytes();
+  const workers: InProcessResidentWorker[] = [];
+  const checkpoints: DocxCommandCheckpoint[] = [];
+  const events: RecoveryReport[] = [];
+  const replayed: string[] = [];
+  const open = async (resume?: Resume): Promise<DocxCommandConnection> => {
+    const worker = start();
+    workers.push(worker);
+    liveWorkers.push(worker);
+    const client = new DocxSourceWorkerClient(worker);
+    const checkpoint = resume?.checkpoint as DocxCommandCheckpoint | undefined;
+    await client.openSource({ bytes: source.slice(), ...(checkpoint ? { state: checkpoint.state } : {}),
+      collaboration: { clientId: 9200 + workers.length } });
+    const initial = await client.commandInit({
+      session: 'collab-inflight-undo', incarnation: resume?.incarnation ?? 1, epoch: resume?.epoch ?? 1,
+      ...(resume ? { version: checkpoint?.version ?? 0, throughSeq: checkpoint?.throughSeq ?? 0,
+        refusedSeqs: resume.refusedSeqs, replayAppliedSeqs: resume.replayAppliedSeqs,
+        recoveryState: checkpoint?.recoveryState } : {}),
+      ...INIT,
+    });
+    const connection = await createDocxCommandConnection(client, initial);
+    if (resume) {
+      const edit = connection.client.call.edit;
+      connection.client.call.edit = (command) => {
+        replayed.push(command.kind);
+        return edit(command);
+      };
+    }
+    return connection;
+  };
+  const textNow = () => textOf(workers.at(-1)!);
+  const until = async (done: () => boolean, label: string) => {
+    for (const started = performance.now(); !done();) {
+      if (performance.now() - started > 60_000) throw new Error(`Timed out waiting for ${label}`);
+      await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    }
+  };
+  const session = createDocxWorkerEditSession<Uint8Array>({
+    source, connection: await open(), echo: { paint() {}, drop() {}, present() {} },
+    checkpointPolicy: ({ applied }) => checkpoints.length === 0 && applied >= 1,
+    recovery: {
+      reopen: (input) => open(input as Resume),
+      checkpoint: async (connection) => {
+        const value = await connection.client.call.checkpoint();
+        checkpoints.push(value as DocxCommandCheckpoint);
+        return value;
+      },
+      onRecovery: (event) => { events.push(event); },
+    },
+  });
+  const submit = async (kind: string, payload: Record<string, unknown> = {}) =>
+    ((await session.submit(kind as never, payload as never).ack) as { status: string }).status;
+  try {
+    expect(await submit('insertText', { text: 'x' })).toBe('applied');
+    await until(() => checkpoints.length === 1, 'the checkpoint');
+    const before = textNow();
+    expect(await submit('insertText', { text: 'A' })).toBe('applied');
+    expect(textNow()).not.toBe(before);
+    const worker = workers.at(-1)!;
+    worker.hold();
+    const ack = session.submit('undo' as never, {} as never).ack as Promise<{ status: string; reason?: string }>;
+    await until(() => textOf(worker) === before, 'the undo to commit in the worker');
+    worker.onerror?.({ message: 'simulated worker crash' } as ErrorEvent);
+    const outcome = await ack;
+    await until(() => events.some((event) => event.phase === 'recovered' || event.phase === 'failed'), 'recovery');
+    const detail = JSON.stringify({ status: outcome.status, reason: outcome.reason });
+    console.log(`G244-COLLAB-INFLIGHT-UNDO detail=${detail} phases=${JSON.stringify(events.map((event) => event.phase))} replayed=${JSON.stringify(replayed)}`);
+    expect(workers).toHaveLength(2);
+    expect(detail).toBe(JSON.stringify({ status: 'applied' }));
+    expect(replayed.filter((kind) => kind === 'insertText' || kind === 'undo')).toEqual(['insertText', 'undo']);
+    expect(events.map((event) => event.phase)).toContain('recovered');
+    expect(events.map((event) => event.phase)).not.toContain('diverged');
+    expect(textNow()).toBe(before);
+  } finally { await session.dispose().catch(() => {}); }
 }, TIMEOUT);
 
 test('with collaboration the logged entries keep their original commands', async () => {
@@ -842,3 +1045,58 @@ test('a long parsed-source session retains log bytes linearly', async () => {
   const [at100, at200, at300] = samples as [number, number, number];
   expect(at300 - at200).toBeLessThanOrEqual(1.5 * (at200 - at100));
 }, 600_000);
+
+test('capture work for one edit does not grow with the edits before it', async () => {
+  const watch = watchIssuedPositions();
+  try {
+    const session = mount();
+    await session.ready();
+    let edits = 0;
+    const editUntil = async (count: number) => {
+      for (; edits < count; edits += 1) {
+        const breaking = edits % 50 === 49;
+        expect(await session.submit(breaking ? 'paragraphBreak' : 'insertText', breaking ? {} : { text: LETTERS[edits % 26]! })).toBe('applied');
+      }
+    };
+    const measure = async (earlier: number) => {
+      await editUntil(earlier);
+      await session.idle();
+      const worker = session.worker();
+      const deliver = worker.onmessage!;
+      let returned: IssuedEntry[] | undefined;
+      worker.onmessage = (event) => {
+        const ack = event.data.ok ? event.data.commandAck : undefined;
+        if (watch.counting && ack?.outcomes.length) {
+          watch.counting = false;
+          returned = ack.outcomes.flatMap((outcome) => {
+            const state = (outcome.effect?.payload as { state?: { stickyPositions?: [string, unknown][] } } | undefined)?.state;
+            return (state?.stickyPositions ?? []).map(([key, position]) => issuedEntry(key, position)!);
+          });
+        }
+        deliver.call(worker, event);
+      };
+      watch.reset();
+      watch.counting = true;
+      try {
+        expect(await session.submit('insertText', { text: 'Z' })).toBe('applied');
+      } finally {
+        watch.counting = false;
+        worker.onmessage = deliver;
+      }
+      edits += 1;
+      const sample = { earlier, visited: watch.visited, minted: watch.added, returned };
+      console.log(`G244-CAPTURE-SCAN earlier=${earlier} visited=${sample.visited} minted=${sample.minted.length} ` +
+        `returned=${returned?.length} maps=${watch.maps.size} minted=${JSON.stringify(sample.minted.map(([key]) => key))} ` +
+        `returned=${JSON.stringify(returned?.map(([key]) => key))}`);
+      return sample;
+    };
+    const samples = [await measure(10), await measure(2_000)];
+    for (const sample of samples) {
+      expect(sample.minted.length).toBeGreaterThan(0);
+      expect(sample.returned).toEqual(sample.minted);
+      expect(sample.visited).toBeLessThanOrEqual(sample.minted.length);
+    }
+  } finally {
+    watch.restore();
+  }
+}, 1_800_000);
