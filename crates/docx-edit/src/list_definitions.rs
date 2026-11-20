@@ -350,12 +350,7 @@ fn source_attrs(
     let from = rendered.as_ref().unwrap_or(values);
     let mut attrs: BTreeMap<String, Any> = SOURCE_LIST_KEYS
         .into_iter()
-        .map(|key| {
-            (
-                key.to_owned(),
-                from.get(key).cloned().unwrap_or(Any::Null),
-            )
-        })
+        .map(|key| (key.to_owned(), from.get(key).cloned().unwrap_or(Any::Null)))
         .collect();
     if let Some((num_pr, _)) = num_pr {
         attrs.insert("numPr".to_owned(), Any::from(num_pr));
