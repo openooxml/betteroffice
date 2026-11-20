@@ -1504,6 +1504,8 @@ function restoreProjectedFieldResults(
       replacements.set(index, rebuilt);
     }
     if (replacements.size === 0) continue;
+    delete stored.sourceRunXml;
+    delete stored.sourceRunDigest;
     const inline = (stored.structuredResult?.inline ?? []).flatMap((child, index) => replacements.get(index) ?? [child]);
     const code = stored.structuredCode?.inline?.flatMap((child, index) => replacements.get(-index - 1) ?? [child]);
     stored.structuredResult = { ...stored.structuredResult, inline };

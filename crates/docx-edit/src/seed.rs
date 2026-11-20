@@ -117,7 +117,7 @@ fn holds_sequence_fields<T: ReadTxn>(txn: &T) -> bool {
         let mut values = vec![any];
         while let Some(value) = values.pop() {
             match value {
-                Any::String(text) if text.contains("SEQ") => return true,
+                Any::String(text) if names_sequence(text) => return true,
                 Any::Array(items) => values.extend(items.iter()),
                 Any::Map(entries) => values.extend(entries.values()),
                 _ => {}
@@ -147,7 +147,7 @@ fn seeded_sequence_fields<'a>(ops: impl IntoIterator<Item = &'a RawOp>) -> Optio
                     !payload.iter().any(|(key, _)| key == crate::KIND_KEY) && kind.contains("SEQ");
                 while !found && let Some(value) = values.pop() {
                     match value {
-                        Any::String(text) => found = text.contains("SEQ"),
+                        Any::String(text) => found = names_sequence(text),
                         Any::Array(items) => values.extend(items.iter()),
                         Any::Map(entries) => values.extend(entries.values()),
                         _ => {}
@@ -160,6 +160,32 @@ fn seeded_sequence_fields<'a>(ops: impl IntoIterator<Item = &'a RawOp>) -> Optio
         }
     }
     Some(found)
+}
+
+/// Whether an embed string names SEQ, leaving out the run a complex field keeps as read.
+fn names_sequence(text: &str) -> bool {
+    if !text.contains("SEQ") {
+        return false;
+    }
+    if !text.contains("\"sourceRunXml\"") {
+        return true;
+    }
+    let Ok(mut value) = serde_json::from_str::<Value>(text) else {
+        return true;
+    };
+    drop_field_runs(&mut value);
+    value.to_string().contains("SEQ")
+}
+
+fn drop_field_runs(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            object.remove("sourceRunXml");
+            object.values_mut().for_each(drop_field_runs);
+        }
+        Value::Array(items) => items.iter_mut().for_each(drop_field_runs),
+        _ => {}
+    }
 }
 
 /// A parsed node's `w:p` occurrence in its part: read for identity, never seeded.
