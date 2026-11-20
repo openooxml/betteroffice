@@ -3,7 +3,7 @@ import type { YrsParagraphAttrs } from './index';
 import { LIST_OFF_ATTRS } from './listCommands';
 import { createdListKey } from './listDefinitionSave';
 import {
-  LIST_LAYOUT, PLAIN, listCommandScenarios, listDocument, preloadListWasm, shownLeft, shownMarker,
+  GAP, LIST_LAYOUT, PLAIN, listCommandScenarios, listDocument, preloadListWasm, shownLeft, shownMarker,
   type ListCommandDriver, type ListDocument, type ListDocumentOptions,
 } from './listCommandsTestSupport';
 import { closeCommandEngines, command, execute, openCommandEngine, selection, TIMEOUT } from './residentCommandTestSupport';
@@ -138,6 +138,22 @@ test('worker: bullets on, off and on again reuse the created list, and undo and 
   driver.redo();
   expect(keyOf()).toBe(key);
   expect(driver.definitions()).toHaveLength(1);
+  expect(key).toBeDefined();
+}, TIMEOUT);
+
+test('worker: a created list a tracked change still names is not handed to another paragraph', async () => {
+  const arm = await openCommandEngine(undefined, { bytes: listDocument('C', { isolated: true }), clientId: ++clientId });
+  const paragraph = (text: string) => arm.engine.paragraphs('body').find(entry => entry.text === text)!;
+  const toggle = (text: string, suggesting?: { name: string; date: string }) => execute(arm, command(arm, 'toggleList', {
+    selection: selection(paragraph(text).paraId, 0), kind: 'bullet', ...(suggesting ? { suggesting } : {}),
+  }));
+  expect(toggle(PLAIN)).toMatchObject({ status: 'applied' });
+  const key = createdListKey(paragraph(PLAIN).properties);
+  expect(toggle(PLAIN, { name: 'Writer', date: '2026-01-01T00:00:00Z' })).toMatchObject({ status: 'applied' });
+  expect(toggle(GAP)).toMatchObject({ status: 'applied' });
+  expect(createdListKey(paragraph(GAP).properties)).toBeDefined();
+  expect(createdListKey(paragraph(GAP).properties)).not.toBe(key);
+  expect(createdListKey(paragraph(PLAIN).properties)).toBeUndefined();
   expect(key).toBeDefined();
 }, TIMEOUT);
 
