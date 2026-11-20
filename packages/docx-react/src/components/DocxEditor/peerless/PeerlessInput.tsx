@@ -87,6 +87,10 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
   const getReadOnly = useCallback(() => admission.getSnapshot().readOnly, [admission]);
   const readOnly = useSyncExternalStore(admission.subscribeReadOnly, getReadOnly, getReadOnly);
   const snapshot = useSyncExternalStore(viewStore.subscribe, viewStore.getSnapshot, viewStore.getServerSnapshot);
+  const getRecovering = useCallback(() => viewStore.getRecovering?.() === true, [viewStore]);
+  const subscribeRecovering = useCallback((listener: () => void) =>
+    viewStore.subscribeRecovering?.(listener) ?? (() => {}), [viewStore]);
+  const recovering = useSyncExternalStore(subscribeRecovering, getRecovering, getRecovering);
   const pasteRecordRef = useRef<PasteRecord | null>(null);
   const setPasteRecord = useCallback((record: PasteRecord | null): void => {
     pasteRecordRef.current = record;
@@ -119,7 +123,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
     const admitted = admission.getSnapshot();
     const view = viewStore.getSnapshot();
     const caret = caretPoint(view.workerSelection);
-    if (view.recovering === true || view.identity.incarnation !== record.incarnation ||
+    if (viewStore.getRecovering?.() === true || view.identity.incarnation !== record.incarnation ||
       view.version !== record.version || !caret || !samePoint(caret, record.end) ||
       admitted.originalUnackedIntents !== 0 || admitted.pendingInputs !== 0) {
       dropPasteRecord(record);
@@ -157,8 +161,8 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
     pasteOptionsRef.current.dismiss();
     setPasteRecord(null);
     if (callbacks.current.pasteOptions === false) return;
+    if (viewStore.getRecovering?.() === true) return;
     const view = viewStore.getSnapshot();
-    if (view.recovering === true) return;
     const offered = pasteOptionsOffered(fragment);
     if (offered.length === 0) return;
     awaitPaste({
@@ -192,7 +196,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       const state = viewStore.getSnapshot();
       const pasteRecord = pasteRecordRef.current;
       const pasteSeq = pasteRecord?.ticket?.seq;
-      if (pasteRecord && (state.recovering === true || pasteRecord.incarnation !== state.identity.incarnation)) {
+      if (pasteRecord && (viewStore.getRecovering?.() === true || pasteRecord.incarnation !== state.identity.incarnation)) {
         dropPasteRecord(pasteRecord);
       } else if (pasteRecord && !pasteRecord.end && pasteSeq !== undefined && state.throughSeq >= pasteSeq) {
         const tail = admission.getSnapshot().tail;
@@ -267,10 +271,10 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
   }, [snapshot.identity.incarnation, setPasteRecord]);
 
   useLayoutEffect(() => {
-    if (snapshot.recovering !== true) return;
+    if (!recovering) return;
     setPasteRecord(null);
     pasteOptionsRef.current.dismiss();
-  }, [snapshot.recovering, setPasteRecord]);
+  }, [recovering, setPasteRecord]);
 
   useLayoutEffect(() => {
     const record = pasteRecordRef.current;

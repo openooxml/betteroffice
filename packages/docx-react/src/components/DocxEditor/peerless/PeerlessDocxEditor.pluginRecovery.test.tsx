@@ -29,7 +29,7 @@ const source = Uint8Array.of(1, 2, 3);
 const peerlessProps: DocxEditorProps = {
   documentBuffer: source,
 };
-const pasteOptionsOff = { pasteOptions: false } as unknown as Partial<DocxEditorProps>;
+const pasteOptionsOff: object = { pasteOptions: false };
 const workers: FakeWorker[] = [];
 let binding: PeerlessEditSessionBinding | undefined;
 let holdOpen = false;
@@ -238,7 +238,7 @@ afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
 });
 
-async function openWithPlugin(extra: Partial<DocxEditorProps> = {}) {
+async function openWithPlugin(extra: object = {}) {
   const proposalVersions: string[] = [];
   const plugin = defineDocxPlugin({ id: 'recovery-watch', createState: () => null,
     async onEvent(_context, event) {

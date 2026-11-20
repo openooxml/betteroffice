@@ -34,6 +34,8 @@ function mount(readOnly = false, callbacks: Pick<PeerlessInputProps, 'onComposit
   const waitForSubmitted = (count: number) => submitted.length >= count ? Promise.resolve()
     : new Promise<void>((resolve) => { waiters.push({ count, resolve }); });
   const listeners = new Set<() => void>();
+  const recoveringListeners = new Set<() => void>();
+  let recovering = false;
   const snapshot: PeerlessViewSnapshot = {
     identity: { session: 'test', incarnation: 1, epoch: 1 }, version: 0,
     throughSeq: 0, presentedThroughSeq: 0, workerSelection: null, anchors: null, geometry: null,
@@ -47,6 +49,13 @@ function mount(readOnly = false, callbacks: Pick<PeerlessInputProps, 'onComposit
       snapshot.geometry = geometry;
       for (const listener of listeners) listener();
     }, setProvisionalCaret() {}, dispose() {},
+    setRecovering(next) {
+      if (recovering === next) return;
+      recovering = next;
+      for (const listener of recoveringListeners) listener();
+    },
+    subscribeRecovering: (listener) => { recoveringListeners.add(listener); return () => { recoveringListeners.delete(listener); }; },
+    getRecovering: () => recovering,
   };
   const session: DocxWorkerEditSession<PeerlessEchoIntent> = {
     backend: 'worker', state: { epoch: 1, version: 0, throughSeq: 0,
@@ -1973,8 +1982,11 @@ test('a second choice made while the first replacement is pending leaves the fir
   }
 });
 
-function markRecovering(snapshot: PeerlessViewSnapshot) {
-  snapshot.recovering = true;
+function markRecovering(viewStore: PeerlessViewStore, during: () => void = () => {}) {
+  act(() => {
+    viewStore.setRecovering?.(true);
+    during();
+  });
 }
 
 test('a worker being reopened removes the Paste Options control', async () => {
@@ -1985,7 +1997,7 @@ test('a worker being reopened removes the Paste Options control', async () => {
     await paste.settle(0, 'applied', { anchor: end, focus: end });
     paste.present(1);
     await waitFor(() => expect(paste.control() !== null).toBe(true));
-    markRecovering(paste.input.snapshot);
+    markRecovering(paste.input.viewStore);
     paste.present(1);
     await paste.idle();
     expect(paste.control() !== null).toBe(false);
@@ -1999,8 +2011,7 @@ test('a choice clicked while the worker is being reopened submits nothing', asyn
   try {
     await choices.offer(boldFragment(), 'Bold', 'keyboard');
     choices.openMenu();
-    markRecovering(choices.input.snapshot);
-    choices.choose('Keep Text Only');
+    markRecovering(choices.input.viewStore, () => choices.choose('Keep Text Only'));
     expect(choices.input.submitted.filter((kind) => kind === 'replacePasteFragment')).toEqual([]);
     expect(choices.replaced).toEqual([]);
   } finally {
@@ -2012,7 +2023,7 @@ test('a paste made while the worker is being reopened offers no Paste Options', 
   const paste = mountPasteOptions();
   const end = { story: 'body', paraId: 'a', offset: 4 };
   try {
-    markRecovering(paste.input.snapshot);
+    markRecovering(paste.input.viewStore);
     pasteWith(paste.input, clipboardFragmentHtml(boldFragment()), 'Bold');
     expect(paste.input.submitted).toEqual(['pasteFragment']);
     await paste.settle(0, 'applied', { anchor: end, focus: end });
