@@ -514,6 +514,12 @@ test('a paste and its chosen variant survive a worker restart before a checkpoin
   expect(session.version()).toBe(version);
 }, TIMEOUT);
 
+type SessionSelection = ReturnType<ReturnType<typeof mount>['selection']>;
+const caretOf = ({ anchor, focus }: SessionSelection) => ({
+  anchor: { story: anchor.story, paraId: anchor.paraId, offset: anchor.offset },
+  focus: { story: focus.story, paraId: focus.paraId, offset: focus.offset },
+});
+
 async function crashWithChoiceInFlight(session: ReturnType<typeof mount>, pasted: Awaited<ReturnType<typeof typeAndPaste>>) {
   const worker = session.worker();
   worker.hold();
@@ -528,6 +534,7 @@ test('a paste choice in flight at a crash before the first checkpoint is skipped
   await session.ready();
   const pasted = await typeAndPaste(session);
   const version = session.version();
+  const caret = caretOf(session.selection());
   const choice = await crashWithChoiceInFlight(session, pasted);
   expect(session.checkpoints).toEqual([]);
   expect(session.resumes[0]!.seed).toBeDefined();
@@ -535,10 +542,9 @@ test('a paste choice in flight at a crash before the first checkpoint is skipped
   const detail = await session.outcome(choice.detail);
   console.log(`G244-PASTE-CHOICE-INFLIGHT-STREAM detail=${detail} phases=${JSON.stringify(session.phases)} errors=${JSON.stringify(session.errors.map((error) => error.message))}`);
   session.expectRecovered(pasted.text);
-  expect(['refused', 'cancelled']).toContain(status);
-  const { reason } = JSON.parse(detail) as { reason?: unknown };
-  expect(typeof reason).toBe('string');
-  expect((reason as string).length).toBeGreaterThan(0);
+  expect(status).toBe('refused');
+  expect(detail).toBe(JSON.stringify({ status: 'refused', reason: 'history-reset' }));
+  expect(caretOf(session.selection())).toEqual(caret);
   const seq = choice.ticket.seq!;
   expect(Number.isSafeInteger(seq)).toBe(true);
   expect(session.events.filter((event) => event.phase === 'diverged').map(({ diverged }) => diverged)).toEqual([[seq]]);
@@ -561,6 +567,8 @@ test('a paste choice in flight at a crash before the first checkpoint (measured 
   const status = await session.outcome(choice.detail, 5_000);
   console.log(`G244-PASTE-CHOICE-INFLIGHT status=${status} phases=${JSON.stringify(session.phases)} ` +
     `workers=${session.workerCount()} text=${session.recoveredText()} errors=${JSON.stringify(session.errors.map((error) => error.message))}`);
+  expect(session.workerCount()).toBe(2);
+  expect(session.phases).toContain('recovering');
 }, TIMEOUT);
 
 test('an engine without the verbatim apply advertises no stream form, types and saves, and recovers by replaying the original commands as on main', async () => {
@@ -973,7 +981,7 @@ test('an undo in flight at a crash after a checkpoint of a session opened withou
   await session.typeUntilApplied(128);
   await session.checkpointTaken(1);
   const before = session.text();
-  expect(await session.submit('insertText', { text: 'A' })).toBe('applied');
+  expect(await session.submit('insertText', { text: 'A' }, { inputTime: Math.ceil(performance.now()) + 10_000 })).toBe('applied');
   const typed = session.text();
   expect(typed).not.toBe(before);
   const worker = session.worker();
@@ -981,6 +989,7 @@ test('an undo in flight at a crash after a checkpoint of a session opened withou
   const undo = await session.submitQueued('undo');
   await waitFor(() => expect(textOf(worker)).not.toBe(typed), { timeout: 30_000 });
   const undone = textOf(worker);
+  expect(undone).toBe(before);
   await session.crash();
   const resume = session.resumes[0] as (Resume & { seed?: unknown }) | undefined;
   const resumed = resume?.checkpoint as DocxCommandCheckpoint | undefined;
@@ -996,7 +1005,7 @@ test('an undo in flight at a crash after a checkpoint of a session opened withou
   console.log(`G244-UNSEEDED-INFLIGHT-UNDO detail=${detail} phases=${JSON.stringify(session.phases)} replayed=${JSON.stringify(session.replayed)}`);
   expect(detail).toBe(JSON.stringify({ status: 'applied' }));
   expect(session.replayed.filter((kind) => kind === 'insertText' || kind === 'undo')).toEqual(['insertText', 'undo']);
-  session.expectRecovered(undone);
+  session.expectRecovered(before);
   expect(session.phases).not.toContain('diverged');
   expect(session.engine().hasPendingUpdate()).toBe(false);
 }, TIMEOUT);
