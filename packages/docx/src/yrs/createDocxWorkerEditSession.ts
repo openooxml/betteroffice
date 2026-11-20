@@ -25,7 +25,6 @@ export function createDocxWorkerEditSession<O, X = never>(
       command.kind === 'applyUpdate'
         ? command : cloneData(command),
     discardFrame: discardCommandPresentation,
-    baseCheckpoint: true,
     sameCoverageFrames: true,
     transactionalPresentation: true,
     echoOverflow: 'decline',

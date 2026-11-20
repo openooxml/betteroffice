@@ -8,7 +8,7 @@ import { hasOwn } from '../protocol';
 import { isQueryReply, type ArgsOf, type Hold, type HoldReason, type QueryReply, type QueryTable,
   type Read, type ReadOptions, type RefusalOf, type ResultOf, type WorkerEditSession } from './spec';
 import type {
-  Checkpoint, CommandAck, CommandConnection, CommandDraft, CommandEffect, CommandEnvelope,
+  Checkpoint, CommandAck, CommandConnection, CommandDraft, CommandEffect, CommandEnvelope, CommandSeed,
   CommandOutcome, CommandTicket, EditSessionState, OutboxEntry,
   FrameEnvelope, PresentationStatus, RecoveryEvent, SubmitOptions, TicketOutcome, WorkerEditSessionOptions,
 } from './types';
@@ -94,6 +94,12 @@ function binaryBytes(value: unknown): number {
   return total;
 }
 
+function sameSeed(reopened: CommandSeed | undefined, recorded: CommandSeed): boolean {
+  if (!reopened || reopened.clientId !== recorded.clientId || reopened.generation !== recorded.generation ||
+    reopened.stateVector.byteLength !== recorded.stateVector.byteLength) return false;
+  return reopened.stateVector.every((byte, index) => byte === recorded.stateVector[index]);
+}
+
 function limit(value: number | undefined, fallback: number): number {
   return value !== undefined && Number.isSafeInteger(value) && value > 0 ? value : fallback;
 }
@@ -113,6 +119,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
   options: WorkerEditSessionOptions<O, P, S, E, F, X, Q>
 ): WorkerEditSession<P, S, E, X, Q> {
   const initial = options.connection.initial;
+  const seed = initial.seed && { ...initial.seed, stateVector: initial.seed.stateVector.slice() };
   const maxAttempts = options.maxRecoveryAttempts === 0 ? 0 : limit(options.maxRecoveryAttempts, 2);
   const source = maxAttempts === 0 ? undefined : cloneData(options.source);
   const sessionId = initial.session;
@@ -457,13 +464,13 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
     try {
       options.recovery.onRecovery?.({
         phase, incarnation, attempt: recoveryAttempt,
-        diverged: [...diverged].sort((a, b) => a - b), historyReset: checkpoint !== undefined, failure,
+        diverged: [...diverged].sort((a, b) => a - b), historyReset: checkpoint !== undefined || seed !== undefined, failure,
       });
     } catch {}
   }
 
   function recordEffect(entry: LogEntry<P>, effect: CommandEffect): void {
-    if (!checkpoint) return;
+    if (!checkpoint && !seed) return;
     const envelope = cloneData<CommandEnvelope<P>>({ ...entry.envelope, kind: effect.kind, payload: effect.payload as P });
     const counted = options.commandBytes?.(envelope) ?? binaryBytes(envelope.payload);
     const bytes = Number.isFinite(counted) && counted >= 0 ? counted : 0;
@@ -817,6 +824,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
         const retainedCheckpoint = checkpoint && { ...checkpoint, state: checkpoint.state.slice() };
         const next = await options.recovery.reopen({
           source: cloneData(source!), checkpoint: retainedCheckpoint,
+          ...(!retainedCheckpoint && seed ? { seed: { clientId: seed.clientId, generation: seed.generation } } : {}),
           session: sessionId, incarnation, epoch,
           refusedSeqs: blockedSeqs.values(),
           replayAppliedSeqs: [...log.values()].filter((entry) => isCommittedApplied(entry.outcome)).map((entry) => entry.envelope.seq),
@@ -837,6 +845,9 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
           throw new SessionFailure('message', 'Reopened command connection has invalid initial state');
         }
         if (next.client.failure) throw next.client.failure;
+        if (!retainedCheckpoint && seed && !sameSeed(opened.seed, seed)) {
+          throw new SessionFailure('message', 'Recovery base differs from the opened document');
+        }
         presenter.reset();
         uncoveredPresentations.clear();
         for (const [seq, entry] of presentations) {
@@ -1032,40 +1043,6 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
     });
   }
 
-  function baseCheckpointDue(): boolean {
-    return maxAttempts > 0 && options.baseCheckpoint === true && options.recovery.checkpoint !== undefined && !checkpoint;
-  }
-
-  function takeBaseCheckpoint(record: ConnectionRecord<P, S, E, F>): void {
-    checkpointBusy = true;
-    let snapshot: Promise<Checkpoint>;
-    try { snapshot = options.recovery.checkpoint!(record.connection); }
-    catch (error) {
-      checkpointBusy = false;
-      fail(failureFor(error));
-      return;
-    }
-    void snapshot.then((value) => {
-      if (!live(record)) return;
-      checkpointBusy = false;
-      if (!validCheckpoint(value)) {
-        fail(new SessionFailure('message', 'Base checkpoint does not match the opened document'));
-        return;
-      }
-      checkpoint = { ...value, state: value.state.slice() };
-      pruneLog(value.throughSeq);
-      wake();
-    }, (error) => {
-      if (!live(record)) return;
-      checkpointBusy = false;
-      fail(failureFor(error));
-    }).catch((error) => {
-      if (!live(record)) return;
-      checkpointBusy = false;
-      fail(failureFor(error));
-    });
-  }
-
   function pruneLog(throughSeq: number, knownPrefix = false): void {
     for (const [seq, entry] of log) {
       if (seq > throughSeq) break;
@@ -1167,10 +1144,6 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
   function pump(): void {
     const record = connection;
     if (!record || !live(record) || recovering || checkpointBusy) return;
-    if (baseCheckpointDue()) {
-      takeBaseCheckpoint(record);
-      return;
-    }
     if (checkpointDue()) {
       if (inFlight.size === 0 && unknownCount === 0) {
         takeCheckpoint(record);
@@ -1338,6 +1311,5 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
   const first = attach(options.connection);
   acceptAck(first, initial);
   if (options.connection.client.failure) fail(options.connection.client.failure);
-  else if (baseCheckpointDue()) takeBaseCheckpoint(first);
   return session;
 }

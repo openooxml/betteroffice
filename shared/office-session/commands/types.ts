@@ -75,6 +75,15 @@ export type CommandAck<S, E, F> = {
   editState?: E;
   frame?: FrameEnvelope<F>;
   revisions?: { selection: number; layout: number };
+  /** @internal How an initial acknowledgement's document was seeded, so recovery can seed it again with the same ids. */
+  seed?: CommandSeed;
+};
+
+/** @internal The ids a seed wrote under and the state vector it produced. */
+export type CommandSeed = {
+  clientId: number;
+  generation: string;
+  stateVector: Uint8Array;
 };
 
 /** @internal Snapshot captured at a settled command boundary. */
@@ -351,6 +360,8 @@ export type RecoveryHooks<O, P, S, E, F> = {
   reopen(input: {
     source: O;
     checkpoint?: Checkpoint;
+    /** Without a checkpoint, the ids the opened document was seeded under, to seed the source with again. */
+    seed?: Pick<CommandSeed, 'clientId' | 'generation'>;
     session: string;
     incarnation: number;
     epoch: number;
@@ -386,8 +397,6 @@ export type WorkerEditSessionOptions<O, P, S, E, F, X, Q extends QueryTable = {}
   maxEchoEntries?: number;
   maxRecoveryAttempts?: number;
   checkpointPolicy?(stats: { applied: number; bytes: number }): boolean;
-  /** @internal Holds every send until a checkpoint of the opened document is acknowledged, so each recovery replays effects onto a checkpoint. */
-  baseCheckpoint?: boolean;
   commandBytes?(envelope: CommandEnvelope<P>): number;
   /** @internal May share caller data only with a transport that copies before returning. */
   copyCommandForDispatch?(envelope: CommandEnvelope<P>): CommandEnvelope<P>;
@@ -440,7 +449,9 @@ export function isCommandAck(value: unknown): value is CommandAck<unknown, unkno
     finite(value.version) && Array.isArray(value.outcomes) && value.outcomes.every(outcome) &&
     (value.frame === undefined || frame(value.frame)) &&
     (value.revisions === undefined || (record(value.revisions) &&
-      counter(value.revisions.selection) && counter(value.revisions.layout)));
+      counter(value.revisions.selection) && counter(value.revisions.layout))) &&
+    (value.seed === undefined || (record(value.seed) && counter(value.seed.clientId) &&
+      typeof value.seed.generation === 'string' && value.seed.stateVector instanceof Uint8Array));
 }
 
 /** @internal Identifies the unknown-outcome reply error and its preserved sequence. */

@@ -41,13 +41,23 @@ const LAYOUT = JSON.stringify({ bodyStory: 'body', regions: { sections: [{ secti
 const LETTERS = 'abcdefghijklmnopqrstuvwxyz';
 
 type Resume = Parameters<NonNullable<UsePeerlessEditSessionOptions['recovery']>['reopen']>[0];
+type Seed = NonNullable<DocxCommandConnection['initial']['seed']>;
 
-function mount({ holdFirstCheckpoint = false } = {}) {
+const textOf = (worker: InProcessResidentWorker) =>
+  worker.sessions.at(-1)!.paragraphs('body').map((paragraph) => paragraph.text).join('|');
+
+const INIT = {
+  readOnly: false, fonts: [FONT], fontRegistrationSlots: true, layoutInput: LAYOUT, layoutWithRegions: true,
+  layoutRevision: 1, extras: JSON.stringify({ fontChains: { 'liberation sans|0|0': [0] } }), displayWindow: [0, 3] as [number, number],
+};
+
+function mount({ tamper }: { tamper?: (seed: Seed) => void } = {}) {
   const source = documentBytes();
   const workers: InProcessResidentWorker[] = [];
   const checkpoints: DocxCommandCheckpoint[] = [];
   const resumes: Resume[] = [];
-  let checkpointRequests = 0;
+  const reopenedText: string[] = [];
+  const replayed: string[] = [];
   const phases: string[] = [];
   const errors: Error[] = [];
   let pendingCheckpoint: Promise<unknown> | undefined;
@@ -61,23 +71,34 @@ function mount({ holdFirstCheckpoint = false } = {}) {
     if (checkpoint && !checkpoint.recoveryState) {
       throw new SessionFailure('message', 'Cannot restore DOCX checkpoint command-local state and proposals');
     }
-    await client.openSource({ bytes: source.slice(), ...(checkpoint ? { state: checkpoint.state } : {}) });
+    await client.openSource({ bytes: source.slice(), ...(checkpoint ? { state: checkpoint.state } : {}),
+      ...(resume?.seed ? { clientId: resume.seed.clientId, generation: resume.seed.generation } : {}) });
     const initial = await client.commandInit({
       session: resume?.session ?? 'undo-recovery', incarnation: resume?.incarnation ?? 1, epoch: resume?.epoch ?? 1,
       ...(resume ? { version: checkpoint?.version ?? 0, throughSeq: checkpoint?.throughSeq ?? 0,
         refusedSeqs: resume.refusedSeqs, replayAppliedSeqs: resume.replayAppliedSeqs,
         recoveryState: checkpoint?.recoveryState } : {}),
-      readOnly: false, fonts: [FONT], fontRegistrationSlots: true, layoutInput: LAYOUT, layoutWithRegions: true,
-      layoutRevision: 1, extras: JSON.stringify({ fontChains: { 'liberation sans|0|0': [0] } }), displayWindow: [0, 3],
+      ...INIT,
     });
-    return createDocxCommandConnection(client, initial);
+    const connection = await createDocxCommandConnection(client, initial);
+    if (!resume) {
+      if (tamper) tamper(connection.initial.seed!);
+      return connection;
+    }
+    reopenedText.push(textOf(worker));
+    const call = connection.client.call;
+    const edit = call.edit;
+    call.edit = (command) => {
+      replayed.push(command.kind);
+      return edit(command);
+    };
+    return connection;
   };
   const options: UsePeerlessEditSessionOptions = {
     source,
     openConnection: () => openResident(),
     recovery: {
       checkpoint: async (resident) => {
-        if (holdFirstCheckpoint && checkpointRequests++ === 0) return new Promise<DocxCommandCheckpoint>(() => {});
         const running = resident.client.call.checkpoint();
         pendingCheckpoint = running;
         const value = await running;
@@ -97,7 +118,7 @@ function mount({ holdFirstCheckpoint = false } = {}) {
   const view = renderHook(() => usePeerlessEditSession(options));
   const settle = () => act(async () => { await new Promise<void>((resolve) => setImmediate(resolve)); });
   const session = {
-    view, checkpoints, phases, errors, resumes,
+    view, checkpoints, phases, errors, resumes, reopenedText, replayed,
     async ready() { await waitFor(() => expect(view.result.current.status).toBe('ready'), { timeout: 30_000 }); },
     async submit(kind: string, payload: Record<string, unknown> = {}) {
       let status = '';
@@ -123,8 +144,7 @@ function mount({ holdFirstCheckpoint = false } = {}) {
       expect(checkpoints.length).toBeGreaterThanOrEqual(count);
     },
     text() {
-      const engine = workers.at(-1)!.sessions.at(-1)!;
-      return engine.paragraphs('body').map((paragraph) => paragraph.text).join('|');
+      return textOf(workers.at(-1)!);
     },
     version() {
       return view.result.current.binding!.session.state.version;
@@ -159,7 +179,7 @@ test('undo after a checkpoint survives a worker restart', async () => {
   const session = mount();
   await session.ready();
   await session.typeUntilApplied(128);
-  await session.checkpointTaken(2);
+  await session.checkpointTaken(1);
   const typed = session.text();
   expect(await session.submit('undo')).toBe('applied');
   const expected = session.text();
@@ -175,7 +195,7 @@ test('redo after a checkpoint survives a worker restart', async () => {
   await session.ready();
   await session.typeUntilApplied(127);
   expect(await session.submit('undo')).toBe('applied');
-  await session.checkpointTaken(2);
+  await session.checkpointTaken(1);
   const undone = session.text();
   expect(await session.submit('redo')).toBe('applied');
   const expected = session.text();
@@ -190,7 +210,7 @@ test('undo reaching across a checkpoint recovers the document the user saw', asy
   const session = mount();
   await session.ready();
   await session.typeUntilApplied(128);
-  await session.checkpointTaken(2);
+  await session.checkpointTaken(1);
   for (const text of ['Z', 'Y', 'X']) expect(await session.submit('insertText', { text })).toBe('applied');
   expect(await session.submit('undo')).toBe('applied');
   const expected = session.text();
@@ -204,7 +224,7 @@ test('after recovery from an undo across a checkpoint, a further undo and redo c
   const session = mount();
   await session.ready();
   await session.typeUntilApplied(128);
-  await session.checkpointTaken(2);
+  await session.checkpointTaken(1);
   for (const text of ['Z', 'Y', 'X']) expect(await session.submit('insertText', { text })).toBe('applied');
   expect(await session.submit('undo')).toBe('applied');
   const expected = session.text();
@@ -216,30 +236,33 @@ test('after recovery from an undo across a checkpoint, a further undo and redo c
   expect(session.text()).toBe(expected);
 }, TIMEOUT);
 
-test('undo before any edit checkpoint survives a worker restart', async () => {
+test('undo before any checkpoint survives a worker restart', async () => {
   const session = mount();
   await session.ready();
   await session.type(5);
   expect(await session.submit('undo')).toBe('applied');
   const expected = session.text();
   await session.crash();
-  expect(session.checkpoints.map((checkpoint) => checkpoint.throughSeq)).toEqual([0]);
+  expect(session.checkpoints).toEqual([]);
+  expect(session.resumes[0]!.checkpoint).toBeUndefined();
+  expect(session.resumes[0]!.seed).toBeDefined();
   session.expectRecovered(expected);
 }, TIMEOUT);
 
-test('a crash before the base checkpoint is acknowledged reopens the source with an empty log', async () => {
-  const session = mount({ holdFirstCheckpoint: true });
+test('a crash before any edit recovers the source document', async () => {
+  const session = mount();
   await session.ready();
   await session.crash();
   expect(session.resumes).toHaveLength(1);
   expect(session.resumes[0]!.checkpoint).toBeUndefined();
   expect(session.resumes[0]!.replayAppliedSeqs).toEqual([]);
   session.expectRecovered('Seed');
+  expect(session.replayed).toEqual([]);
   expect(await session.submit('insertText', { text: 'a' })).toBe('applied');
-  expect(session.checkpoints.map((checkpoint) => checkpoint.throughSeq)).toEqual([0]);
+  expect(session.checkpoints).toEqual([]);
 }, TIMEOUT);
 
-test('an edit at a worker-issued position before any edit checkpoint survives a worker restart', async () => {
+test('a command with a worker-issued position, no checkpoint, crash, recover: applied, same text', async () => {
   const session = mount();
   await session.ready();
   await session.type(3);
@@ -249,16 +272,62 @@ test('an edit at a worker-issued position before any edit checkpoint survives a 
   const expected = session.text();
   const version = session.version();
   await session.crash();
-  expect(session.checkpoints.map((checkpoint) => checkpoint.throughSeq)).toEqual([0]);
+  expect(session.checkpoints).toEqual([]);
+  expect(session.replayed.length).toBeGreaterThan(0);
+  expect(session.replayed.every((kind) => kind === 'applyUpdate')).toBe(true);
   session.expectRecovered(expected);
   expect(session.version()).toBe(version);
+}, TIMEOUT);
+
+test('a reseed that differs from the opened document fails recovery and applies nothing', async () => {
+  const session = mount({ tamper: (seed) => { seed.stateVector = Uint8Array.of(...seed.stateVector, 0); } });
+  await session.ready();
+  await session.type(3);
+  expect(session.text()).not.toBe('Seed');
+  await session.crash();
+  expect(session.errors.map((error) => error.message)).toEqual(['Recovery base differs from the opened document']);
+  expect(session.phases).not.toContain('recovered');
+  expect(session.view.result.current.status).toBe('failed');
+  expect(session.resumes).toHaveLength(1);
+  expect(session.reopenedText).toEqual(['Seed']);
+  expect(session.replayed).toEqual([]);
+}, TIMEOUT);
+
+test('the same document reseeded with the pinned client id and generation gives the same state vector', async () => {
+  const root = resolve(import.meta.dir, '../../../../../..');
+  const fixtures: [string, Uint8Array][] = [
+    ['inline', documentBytes()],
+    ...[
+      'packages/docx/src/yrs/__fixtures__/comment-ranges/structure.docx',
+      'crates/docx-edit/tests/fixtures/header-footer-reservation/continuous-title-page-at-page-break.docx',
+      'crates/betteroffice-docx/tests/corpus/fixtures/wordprocessingml-comprehensive.docx',
+      'apps/demo/public/betteroffice-demo.docx',
+    ].map((path): [string, Uint8Array] => [path, new Uint8Array(readFileSync(resolve(root, path)))]),
+  ];
+  const seedOf = async (bytes: Uint8Array, pinned?: Pick<Seed, 'clientId' | 'generation'>): Promise<Seed> => {
+    const worker = start();
+    liveWorkers.push(worker);
+    const client = new DocxSourceWorkerClient(worker);
+    await client.openSource({ bytes: bytes.slice(), ...(pinned ?? {}) });
+    const initial = await client.commandInit({ session: 'reseed', incarnation: 1, epoch: 1, ...INIT });
+    expect(initial.seed).toBeDefined();
+    return initial.seed!;
+  };
+  for (const [name, bytes] of fixtures) {
+    const opened = await seedOf(bytes);
+    const reseeded = await seedOf(bytes, { clientId: opened.clientId, generation: opened.generation });
+    console.log(`G244-SEED ${name} stateVector=${opened.stateVector.byteLength} source=${bytes.byteLength}`);
+    expect(reseeded.clientId).toBe(opened.clientId);
+    expect(reseeded.generation).toBe(opened.generation);
+    expect([...reseeded.stateVector]).toEqual([...opened.stateVector]);
+  }
 }, TIMEOUT);
 
 test('a caret-only bold after a checkpoint still applies to typing after a worker restart', async () => {
   const live = mount();
   await live.ready();
   await live.typeUntilApplied(128);
-  await live.checkpointTaken(2);
+  await live.checkpointTaken(1);
   expect(await live.submit('insertText', { text: 'Z' })).toBe('applied');
   expect(await live.submit('toggleMark', { mark: { type: 'bold' } })).not.toBe('refused');
   const liveBefore = live.text();
@@ -273,7 +342,7 @@ test('a caret-only bold after a checkpoint still applies to typing after a worke
   const restarted = mount();
   await restarted.ready();
   await restarted.typeUntilApplied(128);
-  await restarted.checkpointTaken(2);
+  await restarted.checkpointTaken(1);
   expect(await restarted.submit('insertText', { text: 'Z' })).toBe('applied');
   expect(await restarted.submit('toggleMark', { mark: { type: 'bold' } })).not.toBe('refused');
   const before = restarted.text();
@@ -290,27 +359,11 @@ test('an effect over the byte limit after a checkpoint brings the next checkpoin
   const session = mount();
   await session.ready();
   await session.typeUntilApplied(128);
-  await session.checkpointTaken(2);
+  await session.checkpointTaken(1);
   const taken = session.checkpoints.length;
   expect(await session.submit('insertText', { text: 'x'.repeat(1_150_000) })).toBe('applied');
   await session.checkpointTaken(taken + 1);
   expect(session.checkpoints.at(-1)!.throughSeq).toBeGreaterThan(session.checkpoints[taken - 1]!.throughSeq);
-}, TIMEOUT);
-
-test('the base checkpoint of the largest DOCX fixture', async () => {
-  const bytes = new Uint8Array(readFileSync(resolve(import.meta.dir, '../../../../../docx/src/yrs/__fixtures__/comment-ranges/structure.docx')));
-  const worker = start();
-  liveWorkers.push(worker);
-  const client = new DocxSourceWorkerClient(worker);
-  await client.openSource({ bytes: bytes.slice() });
-  const initial = await client.commandInit({
-    session: 'base-size', incarnation: 1, epoch: 1, readOnly: false, fonts: [FONT], fontRegistrationSlots: true,
-    layoutInput: LAYOUT, layoutWithRegions: true, layoutRevision: 1,
-    extras: JSON.stringify({ fontChains: { 'liberation sans|0|0': [0] } }), displayWindow: [0, 3],
-  });
-  const checkpoint = await createDocxCommandConnection(client, initial).client.call.checkpoint();
-  console.log(`G244-BASE bytes=${checkpoint.state.byteLength} source=${bytes.byteLength}`);
-  expect(checkpoint.state.byteLength).toBeGreaterThan(0);
 }, TIMEOUT);
 
 test('one undo after a worker restart removes a measured amount of the typing before it', async () => {

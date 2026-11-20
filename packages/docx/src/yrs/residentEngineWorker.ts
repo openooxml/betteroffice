@@ -11,7 +11,7 @@ import { createResidentCollaboration, readResidentCollaborationState, readReside
 import { stateVectorClock } from '../collaboration/protocol';
 import { LAYOUT_META_VERSION, type LayoutMetaV1, type RetainedLayoutMeta } from './layoutMeta';
 import { isCommandOutcomeUnknownError } from '../../../../shared/office-session/commands/types';
-import { isTransferResult, type TransferResult } from '../../../../shared/office-session/protocol';
+import { isTransferResult, transferable, type TransferResult } from '../../../../shared/office-session/protocol';
 import { SessionFailure } from '../../../../shared/office-session/types';
 import { buildCommandFrame, exactFrameBuffer, packResidentFrame } from './residentCommandFrame';
 import { createResidentCommandHost, isSelectionStepCommand } from './residentCommandHost';
@@ -1410,6 +1410,8 @@ let previewing = false;
 let cutPartial = false;
 /** The request that opened the current cut, re-opened when the whole source that replaces it fails. */
 let openedCut: DocxSourceOpenRequest | null = null;
+/** The ids the opened source was seeded under, which a command session reports so recovery can seed it again. */
+let openedSeed: { clientId: number; generation: string } | null = null;
 /** Pages of a cut preview's layout that match the whole document's; null for a whole document. */
 let previewFinalPages: number | null = null;
 let provisionalFinalPages: number | null = null;
@@ -1852,8 +1854,12 @@ async function handle(request: ScheduledRequest): Promise<void> {
     pendingUpdates = [];
     setProgressiveFonts(openProgressiveFonts(init.progressiveFonts, init));
     holdWholeFaceRequests = true;
+    const seeded = session;
     try {
-      replyCommand(request.id, 'commandInitial', await bindResidentCommands(init).initial());
+      const initial = await bindResidentCommands(init).initial();
+      const seed = openedSeed && { ...openedSeed, stateVector: new Uint8Array(seeded.encodeStateVector()) };
+      replyCommand(request.id, 'commandInitial', !seed ? initial : isTransferResult(initial)
+        ? transferable({ ...initial.value, seed }, initial.transfer) : { ...initial, seed });
     } finally {
       releaseWholeFaceRequests();
     }
@@ -1914,7 +1920,9 @@ async function handle(request: ScheduledRequest): Promise<void> {
   }
   if (request.type === 'openSource') {
     validateResidentSource(request.source);
-    const source = request.source;
+    const seeding = !request.source.cut && request.source.state === undefined && !request.source.collaboration;
+    const generation = seeding ? request.source.generation ?? freshGeneration() : undefined;
+    const source = generation === undefined ? request.source : { ...request.source, generation };
     if (session && (!previewing || commandHost || source.cut)) throw new Error('Document worker already holds a document');
     const replaced = previewing ? openedCut : null;
     if (session) destroySession(true);
@@ -1923,7 +1931,7 @@ async function handle(request: ScheduledRequest): Promise<void> {
     try {
       const pinned = source.collaboration;
       const reseeded = pinned?.clientClock !== undefined && pinned.initialUpdate === undefined;
-      opening = await createResidentEngineSession(source.heapLimitBytes, reseeded ? undefined : pinned?.clientId);
+      opening = await createResidentEngineSession(source.heapLimitBytes, reseeded ? undefined : pinned?.clientId ?? source.clientId);
       let opened = adoptResidentSource(opening, source);
       if (opened && !reseeded && pinned?.clientClock !== undefined &&
         stateVectorClock(opening.encodeStateVector(), opening.clientId) < pinned.clientClock) {
@@ -1937,6 +1945,7 @@ async function handle(request: ScheduledRequest): Promise<void> {
         return;
       }
       const { document, hostJson } = opened;
+      openedSeed = generation === undefined ? null : { clientId: opening.clientId, generation };
       const embeddedFontFaces = opened.embeddedFontFaces ?? await extractEmbeddedFontFaces(document);
       if (source.collaboration) collaboration = createResidentCollaboration(opening, { onPipeOutput: schedulePipeOutput });
       const metadata = residentSourceMetadata(document);
@@ -3658,6 +3667,7 @@ function destroySession(keepSurfaces = false): void {
   commandDisplayWindow = undefined;
   openedDocument = null;
   openedSource = null;
+  openedSeed = null;
   openedViaSource = false;
   openedParsed = false;
   openedParsedToolbar = null;
@@ -4108,6 +4118,10 @@ async function replayOffscreen(
 
 function exactBuffer(bytes: Uint8Array): ArrayBuffer {
   return exactFrameBuffer(bytes);
+}
+
+function freshGeneration(): string {
+  return Array.from(crypto.getRandomValues(new Uint32Array(4)), (word) => word.toString(16).padStart(8, '0')).join('');
 }
 
 /**

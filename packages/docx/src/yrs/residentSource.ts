@@ -15,7 +15,10 @@ export type DocxSourceOpenRequest = (
   cut?: { blocks: number; paragraphBudget?: number };
   mediaTokens?: boolean;
   heapLimitBytes?: number;
+  /** The seed's opening generation; with `clientId`, a seed of the same source writes the same ids as an earlier one. */
   generation?: string;
+  /** The client id the seed writes under; a fresh one when absent. */
+  clientId?: number;
   digest?: string;
   /**
    * One replica seeds from bytes; joiners pass `initialUpdate`. Two seeds merge by story last-writer-wins.
@@ -44,6 +47,13 @@ export function validateResidentSource(source: DocxSourceOpenRequest): void {
   if (source.state !== undefined && (!(source.state instanceof Uint8Array) || source.bytes === undefined ||
     source.cut !== undefined || source.preview)) {
     throw new TypeError('Invalid DOCX source state');
+  }
+  if (source.clientId !== undefined && (!Number.isSafeInteger(source.clientId) || source.clientId < 0 ||
+    source.collaboration !== undefined || source.state !== undefined || source.cut !== undefined)) {
+    throw new TypeError('Invalid DOCX source client id');
+  }
+  if (source.generation !== undefined && typeof source.generation !== 'string') {
+    throw new TypeError('Invalid DOCX source generation');
   }
   if (source.preview !== undefined && typeof source.preview !== 'boolean') {
     if (!source.preview || typeof source.preview !== 'object') throw new TypeError('Invalid DOCX preview options');
