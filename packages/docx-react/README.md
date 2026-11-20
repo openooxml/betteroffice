@@ -59,7 +59,7 @@ All props below are optional. Omit the document source to show the placeholder.
 | `memoryBudget` | `DocxMemoryBudget` | Memory pressure thresholds and an optional worker allocation limit. |
 | `onMemoryPressure` | `(pressure: DocxMemoryPressure) => void` | Receive memory pressure level changes. |
 
-Deprecated: `legacySyncApi` keeps the synchronous API and is removed in 0.6.0;
+Deprecated: `legacySyncApi` keeps the synchronous API and is removed in 0.7.0;
 omit it to use the default async editor.
 
 `onChange` receives a full `Document` and works only with `legacySyncApi`. The default worker editor

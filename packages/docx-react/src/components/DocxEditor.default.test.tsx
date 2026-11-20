@@ -13,7 +13,7 @@ test('the default route requires no sync opt-in', () => {
 test('explicit runtime choices precede collaboration, capabilities and sync callbacks', () => {
   setMissingWorkerCapabilitiesForTests(['Worker']);
   const props = { collaboration: {}, onChange() {}, experimentalWorkerOpen: false as const };
-  expect(chooseDocxEditorRoute({ ...props, [LEGACY_SYNC_API_PROP]: true })).toMatchObject({ route: 'hybrid', warning: expect.stringContaining('0.6.0') });
+  expect(chooseDocxEditorRoute({ ...props, [LEGACY_SYNC_API_PROP]: true })).toMatchObject({ route: 'hybrid', warning: expect.stringContaining('0.7.0') });
   expect(chooseDocxEditorRoute(props)).toEqual({ route: 'in-thread' });
   expect(chooseDocxEditorRoute({ collaboration: {}, onChange() {} })).toEqual({ route: 'capability-fallback' });
   expect(chooseDocxEditorRoute({ onChange() {} })).toEqual({ route: 'capability-fallback' });
