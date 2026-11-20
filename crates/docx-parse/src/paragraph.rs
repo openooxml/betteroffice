@@ -14,9 +14,8 @@ use crate::inline::{
     MathType, OpenComplexField, Run, RunContent, SimpleField, SimpleFieldType,
     StructuredFieldContent, StructuredFieldTree, absorb_beyond_field_nesting,
     check_container_beyond_field_nesting, field_depth_error, field_run_source, has_bookmark_id,
-    keep_field_run, parse_bookmark_end,
-    parse_bookmark_start, parse_field_type, parse_hyperlink, parse_run, parse_sdt_properties,
-    run_content_length,
+    keep_field_run, parse_bookmark_end, parse_bookmark_start, parse_field_type, parse_hyperlink,
+    parse_run, parse_sdt_properties, run_content_length,
 };
 use crate::media::MediaMap;
 use crate::numbering::{ListRendering, NumberingMap, compute_list_rendering};

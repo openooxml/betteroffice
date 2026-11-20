@@ -1704,8 +1704,10 @@ fn replacing_the_text_of_a_paragraph_inside_a_direction_element_keeps_the_elemen
         if let BlockContent::Paragraph(paragraph) = block
             && paragraph.para_id.as_deref() == Some("55555555")
         {
-            paragraph.formatting.get_or_insert_with(Default::default).alignment =
-                Some("center".to_owned());
+            paragraph
+                .formatting
+                .get_or_insert_with(Default::default)
+                .alignment = Some("center".to_owned());
         }
     }
     let saved = document.save().unwrap();

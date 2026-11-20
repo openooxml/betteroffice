@@ -2324,7 +2324,8 @@ mod tests {
     }
 
     #[test]
-    fn a_bookmark_inside_one_scope_stays_inside_it_in_a_hyperlink_and_a_hyperlink_inside_a_content_control() {
+    fn a_bookmark_inside_one_scope_stays_inside_it_in_a_hyperlink_and_a_hyperlink_inside_a_content_control()
+     {
         let (a, b, c, d) = (text_run("A"), text_run("B"), text_run("C"), text_run("D"));
         let bookmark = r#"<w:bookmarkStart w:id="3" w:name="mark"/>"#;
         for (open, close) in [
