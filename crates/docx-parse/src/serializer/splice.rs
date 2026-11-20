@@ -5,7 +5,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::Range;
 
 use crate::block::BlockContent;
-use crate::inline::{InlineNode, Run, RunContent, StructuredFieldContent, StructuredFieldTree};
+use crate::inline::{InlineNode, Run, RunContent};
+use crate::notes::Note;
 use crate::paragraph::ParagraphContent;
 use crate::paragraph_identity::{
     ParagraphOccurrence, Tag, attribute, ensure_ignorable, paragraph_occurrences,
@@ -1911,16 +1912,16 @@ fn unloaded_comment_markers<'w>(
     let written: CommentKeys = written.into_iter().flat_map(comment_keys).collect();
     let mut unloaded = comment_keys(source);
     unloaded.retain(|key| {
-        !comments.deleted.contains(&key.1)
-            && !comments.held.contains(key)
-            && !written.contains(key)
+        !comments.deleted.contains(&key.1) && !comments.held.contains(key) && !written.contains(key)
     });
     unloaded
 }
 
 /// The comment markers the stories `stories` of a model hold, by element name and the canonical
 /// ID their written XML spells: in paragraphs, table cells, content controls, hyperlinks, fields,
-/// tracked changes, runs and text boxes, and in the XML the model replays verbatim.
+/// tracked changes, runs and shape text boxes, and in the XML the model replays verbatim. A range
+/// end counts as its comment's reference too: the paragraph writer adds a reference after an end
+/// whose paragraph holds none.
 pub(crate) fn model_comment_markers<'a>(
     stories: impl IntoIterator<Item = &'a [BlockContent]>,
 ) -> CommentKeys {
@@ -1931,6 +1932,16 @@ pub(crate) fn model_comment_markers<'a>(
     keys
 }
 
+/// Adds the comment markers the note `note` holds as a save writes it to `keys`: those of its
+/// verbatim XML when it has one, which the save writes instead of its content, else those of its
+/// content.
+pub(crate) fn note_comment_markers(note: &Note, keys: &mut CommentKeys) {
+    match note.verbatim_xml.as_deref() {
+        Some(xml) => xml_comment_markers(xml, keys),
+        None => block_comment_markers(&note.content, keys),
+    }
+}
+
 /// Adds the comment markers the XML `xml` holds to `keys`.
 pub(crate) fn xml_comment_markers(xml: &str, keys: &mut CommentKeys) {
     if xml.contains("<w:comment") {
@@ -1938,8 +1949,14 @@ pub(crate) fn xml_comment_markers(xml: &str, keys: &mut CommentKeys) {
     }
 }
 
+/// Adds the marker `name` of comment `id` to `keys`, and for a range end the reference the
+/// paragraph writer puts after it unless its paragraph holds one.
 fn insert_comment_marker(keys: &mut CommentKeys, name: &str, id: f64) {
-    keys.insert((format!("w:{name}"), canonical_id(js_number(id))));
+    let id = canonical_id(js_number(id));
+    if name == "commentRangeEnd" {
+        keys.insert(("w:commentReference".to_owned(), id.clone()));
+    }
+    keys.insert((format!("w:{name}"), id));
 }
 
 fn block_comment_markers(blocks: &[BlockContent], keys: &mut CommentKeys) {
@@ -1985,25 +2002,19 @@ fn inline_comment_markers(node: &InlineNode, keys: &mut CommentKeys) {
             for run in &field.content {
                 run_comment_markers(run, keys);
             }
-            if let Some(content) = &field.structured_result {
-                field_content_comment_markers(content, keys);
-            }
-            if let Some(tree) = &field.field_tree {
-                field_tree_comment_markers(tree, keys);
-            }
         }
         InlineNode::ComplexField(field) => {
             for run in field.field_code.iter().chain(&field.field_result) {
                 run_comment_markers(run, keys);
             }
-            for content in [&field.structured_code, &field.structured_result]
+            let structured = [&field.structured_code, &field.structured_result]
                 .into_iter()
                 .flatten()
-            {
-                field_content_comment_markers(content, keys);
-            }
-            if let Some(tree) = &field.field_tree {
-                field_tree_comment_markers(tree, keys);
+                .filter(|content| !content.spans_paragraphs())
+                .filter_map(|content| content.inline.as_deref())
+                .flatten();
+            for node in structured {
+                inline_comment_markers(node, keys);
             }
         }
         InlineNode::InlineSdt(sdt) => {
@@ -2022,24 +2033,6 @@ fn inline_comment_markers(node: &InlineNode, keys: &mut CommentKeys) {
     }
 }
 
-fn field_content_comment_markers(content: &StructuredFieldContent, keys: &mut CommentKeys) {
-    for node in content.inline.iter().flatten() {
-        inline_comment_markers(node, keys);
-    }
-    if let Some(blocks) = &content.blocks {
-        block_comment_markers(blocks, keys);
-    }
-}
-
-fn field_tree_comment_markers(tree: &StructuredFieldTree, keys: &mut CommentKeys) {
-    for content in [&tree.code, &tree.result].into_iter().flatten() {
-        field_content_comment_markers(content, keys);
-    }
-    for child in tree.children.iter().flatten() {
-        field_tree_comment_markers(child, keys);
-    }
-}
-
 fn run_comment_markers(run: &Run, keys: &mut CommentKeys) {
     for content in &run.content {
         match content {
@@ -2047,12 +2040,7 @@ fn run_comment_markers(run: &Run, keys: &mut CommentKeys) {
                 insert_comment_marker(keys, "commentReference", *id);
             }
             RunContent::Shape { shape, .. } => shape_comment_markers(shape, keys),
-            RunContent::OpaqueDrawing { xml, text_box, .. } => {
-                xml_comment_markers(xml, keys);
-                if let Some(shape) = text_box {
-                    shape_comment_markers(shape, keys);
-                }
-            }
+            RunContent::OpaqueDrawing { xml, .. } => xml_comment_markers(xml, keys),
             _ => {}
         }
     }
@@ -3700,10 +3688,14 @@ mod tests {
 
     /// The keys of comment `id`'s range start, range end and reference.
     fn comment_marker_keys(id: &str) -> CommentKeys {
-        ["w:commentRangeStart", "w:commentRangeEnd", "w:commentReference"]
-            .into_iter()
-            .map(|name| (name.to_owned(), id.to_owned()))
-            .collect()
+        [
+            "w:commentRangeStart",
+            "w:commentRangeEnd",
+            "w:commentReference",
+        ]
+        .into_iter()
+        .map(|name| (name.to_owned(), id.to_owned()))
+        .collect()
     }
 
     #[test]
@@ -3934,24 +3926,24 @@ mod tests {
     #[test]
     fn the_model_walk_finds_each_comment_marker_its_stories_hold_and_nothing_else() {
         let range = |kind: &str, id: u32| json!({ "type": kind, "id": id });
-        let reference = |id: u32| {
-            json!({ "type": "run", "content": [{ "type": "commentReference", "id": id }] })
-        };
+        let reference = |id: u32| json!({ "type": "run", "content": [{ "type": "commentReference", "id": id }] });
         let text = || json!({ "type": "run", "content": [{ "type": "text", "text": "a" }] });
-        let paragraph = |content: serde_json::Value| {
-            json!({ "type": "paragraph", "content": content })
-        };
+        let paragraph =
+            |content: serde_json::Value| json!({ "type": "paragraph", "content": content });
         let story = |blocks: serde_json::Value| -> Vec<BlockContent> {
             serde_json::from_value(blocks).unwrap()
         };
-        let text_box = json!({ "type": "run", "content": [{
-            "type": "opaqueDrawing", "kind": "pict", "xml": "<w:pict/>",
-            "textBox": {
+        let boxed = |id: u32| {
+            json!({
                 "type": "rect", "shapeType": "rect", "size": { "width": 1, "height": 1 },
                 "textBody": { "content": [
-                    paragraph(json!([range("commentRangeStart", 7), text(), reference(7)]))
+                    paragraph(json!([range("commentRangeStart", id), text(), reference(id)]))
                 ] }
-            }
+            })
+        };
+        let shape = json!({ "type": "run", "content": [{ "type": "shape", "shape": boxed(7) }] });
+        let replayed = json!({ "type": "run", "content": [{
+            "type": "opaqueDrawing", "kind": "pict", "xml": "<w:pict/>", "textBox": boxed(8)
         }] });
         let body = story(json!([
             paragraph(json!([range("commentRangeStart", 1), text(), range("commentRangeEnd", 1)])),
@@ -3962,7 +3954,7 @@ mod tests {
             { "type": "blockSdt", "properties": { "sdtType": "richText" },
               "content": [paragraph(json!([text(), range("commentRangeEnd", 3)]))] },
             paragraph(json!([{ "type": "hyperlink", "children": [text(), reference(4)] }])),
-            paragraph(json!([text(), text_box])),
+            paragraph(json!([text(), shape, replayed])),
         ]));
         let opening = paragraph(json!([range("commentRangeStart", 5), text()]));
         let header = story(json!([opening]));
@@ -3974,12 +3966,48 @@ mod tests {
             CommentKeys::from([
                 key("commentRangeStart", "1"),
                 key("commentRangeEnd", "1"),
+                key("commentReference", "1"),
                 key("commentRangeStart", "2"),
                 key("commentRangeEnd", "3"),
+                key("commentReference", "3"),
                 key("commentReference", "4"),
                 key("commentRangeStart", "5"),
                 key("commentReference", "6"),
                 key("commentRangeStart", "7"),
+                key("commentReference", "7"),
+            ])
+        );
+    }
+
+    #[test]
+    fn a_note_written_from_its_verbatim_xml_holds_only_the_comment_markers_of_that_xml() {
+        let note = |verbatim: Option<&str>| -> Note {
+            serde_json::from_value(json!({
+                "type": "footnote", "id": 1, "noteType": "normal",
+                "content": [{ "type": "paragraph", "content": [
+                    { "type": "commentRangeStart", "id": 7 },
+                    { "type": "commentRangeEnd", "id": 7 }
+                ] }],
+                "verbatimXml": verbatim
+            }))
+            .unwrap()
+        };
+        let held = |note: &Note| {
+            let mut keys = CommentKeys::new();
+            note_comment_markers(note, &mut keys);
+            keys
+        };
+        let verbatim = r#"<w:footnote><w:p><w:commentRangeStart w:id="9"/></w:p></w:footnote>"#;
+        let key = |name: &str, id: &str| (format!("w:{name}"), id.to_owned());
+        assert_eq!(
+            held(&note(Some(verbatim))),
+            CommentKeys::from([key("commentRangeStart", "9")])
+        );
+        assert_eq!(
+            held(&note(None)),
+            CommentKeys::from([
+                key("commentRangeStart", "7"),
+                key("commentRangeEnd", "7"),
                 key("commentReference", "7"),
             ])
         );
