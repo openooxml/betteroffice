@@ -39,8 +39,21 @@ function position(value: unknown): value is DocxCommandPosition {
     (at.sticky === undefined || (at.sticky instanceof Uint8Array && at.sticky.length > 0));
 }
 
+/**
+ * Whether two paragraphs sit side by side, as a backspace at a paragraph start spans, leaving none
+ * between them whose ids need checking. Found by id, without reading the story's spans.
+ */
+function adjacentParagraphs(
+  engine: Partial<Pick<DocxWorkerCommandEngine, 'paragraphUnit'>>, anchor: YrsLoc, focus: YrsLoc
+): boolean {
+  if (!engine.paragraphUnit) return false;
+  const first = engine.paragraphUnit(anchor.story, anchor.paraId);
+  const second = engine.paragraphUnit(focus.story, focus.paraId);
+  return first >= 0 && second >= 0 && Math.abs(first - second) === 1;
+}
+
 export function commandSelectionRange(
-  engine: Pick<DocxWorkerCommandEngine, 'geometryReader'>,
+  engine: Pick<DocxWorkerCommandEngine, 'geometryReader'> & Partial<Pick<DocxWorkerCommandEngine, 'paragraphUnit'>>,
   selected: DocxCommandSelection
 ): YrsStoryRange | null {
   if (!selected || typeof selected !== 'object' || Array.isArray(selected) ||
@@ -50,7 +63,7 @@ export function commandSelectionRange(
   const { anchor, focus } = selected;
   if (!engine.geometryReader.hasStory(anchor.story)) return null;
   if ([anchor, focus].some((at) => engine.geometryReader.paragraphIdCount(at.story, at.paraId) !== 1)) return null;
-  if (anchor.paraId !== focus.paraId) {
+  if (anchor.paraId !== focus.paraId && !adjacentParagraphs(engine, anchor, focus)) {
     const paragraphs = engine.geometryReader.paragraphSpans(anchor.story);
     const indices = [anchor, focus].map((at) => paragraphs.findIndex(({ paraId }) => paraId === at.paraId));
     if (indices.some((index) => index < 0)) return null;
