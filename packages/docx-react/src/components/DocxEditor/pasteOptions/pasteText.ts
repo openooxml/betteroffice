@@ -23,13 +23,30 @@ export function plainTextClipboardFragment(plain: string): DocxClipboardFragment
   return { paragraphs: lines.map((text) => ({ text })) };
 }
 
+function cellFragmentText(content: DocxTableFragment['rows'][number]['cells'][number]['content']): string {
+  let text = '';
+  let breakBefore = false;
+  const append = (piece: string) => {
+    if (piece === '') return;
+    if (breakBefore) text += '\n';
+    breakBefore = false;
+    text += piece;
+  };
+  content.forEach((segment, index) => {
+    if (segment.kind === 'table') {
+      breakBefore = text !== '';
+      append(tableFragmentText(segment.table));
+      breakBefore = true;
+    } else if (segment.kind === 'pilcrow') {
+      const last = index === content.length - 1;
+      if (!last && content[index - 1]?.kind !== 'table' && content[index + 1]?.kind !== 'table') append(' ');
+    } else append(segment.kind === 'text' ? segment.text : segment.kind === 'tab' ? '\t' : ' ');
+  });
+  return text;
+}
+
 function tableFragmentText(table: DocxTableFragment): string {
-  return table.rows.map((row) => row.cells.map((cell) => cell.content.map((segment) =>
-    segment.kind === 'text' ? segment.text
-      : segment.kind === 'tab' ? '\t'
-        : segment.kind === 'table' ? tableFragmentText(segment.table)
-          : ' '
-  ).join('').trim()).join('\t')).join('\n');
+  return table.rows.map((row) => row.cells.map((cell) => cellFragmentText(cell.content)).join('\t')).join('\n');
 }
 
 /** @internal Plain text a fragment was pasted from: tables row by row with tab-separated cells, then the paragraph text. */

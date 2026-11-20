@@ -119,7 +119,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
     const admitted = admission.getSnapshot();
     const view = viewStore.getSnapshot();
     const caret = caretPoint(view.workerSelection);
-    if (view.identity.incarnation !== record.incarnation ||
+    if (view.recovering === true || view.identity.incarnation !== record.incarnation ||
       view.version !== record.version || !caret || !samePoint(caret, record.end) ||
       admitted.originalUnackedIntents !== 0 || admitted.pendingInputs !== 0) {
       dropPasteRecord(record);
@@ -157,9 +157,10 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
     pasteOptionsRef.current.dismiss();
     setPasteRecord(null);
     if (callbacks.current.pasteOptions === false) return;
+    const view = viewStore.getSnapshot();
+    if (view.recovering === true) return;
     const offered = pasteOptionsOffered(fragment);
     if (offered.length === 0) return;
-    const view = viewStore.getSnapshot();
     awaitPaste({
       fragment: structuredClone(fragment), offered, ticket: null, end: null,
       version: view.version, incarnation: view.identity.incarnation, reveal: 'show',
@@ -191,7 +192,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       const state = viewStore.getSnapshot();
       const pasteRecord = pasteRecordRef.current;
       const pasteSeq = pasteRecord?.ticket?.seq;
-      if (pasteRecord && pasteRecord.incarnation !== state.identity.incarnation) {
+      if (pasteRecord && (state.recovering === true || pasteRecord.incarnation !== state.identity.incarnation)) {
         dropPasteRecord(pasteRecord);
       } else if (pasteRecord && !pasteRecord.end && pasteSeq !== undefined && state.throughSeq >= pasteSeq) {
         const tail = admission.getSnapshot().tail;
@@ -266,6 +267,12 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
   }, [snapshot.identity.incarnation, setPasteRecord]);
 
   useLayoutEffect(() => {
+    if (snapshot.recovering !== true) return;
+    setPasteRecord(null);
+    pasteOptionsRef.current.dismiss();
+  }, [snapshot.recovering, setPasteRecord]);
+
+  useLayoutEffect(() => {
     const record = pasteRecordRef.current;
     if (!record?.end) return;
     const selection = snapshot.workerSelection;
@@ -278,7 +285,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       selection.focus.offset === record.end.offset;
     if (!atEnd || snapshot.version !== record.version) {
       if (snapshot.version === record.version && typeof document !== 'undefined' &&
-        document.activeElement?.closest?.('[data-paste-options]')) return;
+        pasteOptionsRef.current.controlRef.current?.contains(document.activeElement) === true) return;
       setPasteRecord(null);
       pasteOptionsRef.current.dismiss();
     }
@@ -577,6 +584,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
         onMenuOpenChange={pasteOptions.setMenuOpen}
         onChoose={pasteOptions.choose}
         onCloseMenu={pasteOptions.closeMenu}
+        controlRef={pasteOptions.controlRef}
       />
     </Suspense>
   )}

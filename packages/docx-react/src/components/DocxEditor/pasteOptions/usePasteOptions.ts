@@ -15,12 +15,13 @@ export function usePasteOptions(options: {
   focusEditor(): void;
   /** The editor input; a Ctrl tap opens the menu only from inside it or the control. */
   surface: RefObject<HTMLElement | null>;
-  /** Called when an outside pointer or a window resize hides the control. */
+  /** Called when an outside pointer or a window resize hides the control, and each time the control is turned off. */
   onHide?(): void;
 }) {
   const { enabled } = options;
   const callbacks = useRef(options);
   callbacks.current = options;
+  const controlRef = useRef<HTMLDivElement | null>(null);
   const [visible, setVisible] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [selected, setSelected] = useState<PasteFormattingOption>('keep-source');
@@ -79,8 +80,7 @@ export function usePasteOptions(options: {
   useEffect(() => {
     if (!visible) return;
     const owned = (target: EventTarget | null) => target instanceof Node &&
-      (callbacks.current.surface.current?.contains(target) === true ||
-        (target instanceof Element && target.closest('[data-paste-options]') !== null));
+      (callbacks.current.surface.current?.contains(target) === true || controlRef.current?.contains(target) === true);
     const keydown = (event: KeyboardEvent) => {
       ctrlAlone.current = event.key === 'Control' && owned(event.target);
     };
@@ -105,8 +105,8 @@ export function usePasteOptions(options: {
       callbacks.current.onHide?.();
     };
     const pointer = (event: PointerEvent) => {
-      const target = event.target as Element | null;
-      if (target?.closest?.('[data-paste-options]')) return;
+      const target = event.target;
+      if (target instanceof Node && controlRef.current?.contains(target)) return;
       hide();
     };
     window.addEventListener('resize', hide);
@@ -118,10 +118,13 @@ export function usePasteOptions(options: {
   }, [visible, dismiss]);
 
   useEffect(() => {
-    if (!enabled) dismiss();
+    if (enabled) return;
+    dismiss();
+    callbacks.current.onHide?.();
   }, [enabled, dismiss]);
 
   return {
+    controlRef,
     visible: enabled && visible,
     menuOpen,
     selected,

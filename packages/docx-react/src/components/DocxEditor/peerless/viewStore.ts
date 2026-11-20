@@ -73,6 +73,8 @@ export interface PeerlessViewSnapshot {
   editState: DocxEditState | undefined;
   geometry: PeerlessFrameGeometry | null;
   provisionalCaret?: PeerlessProvisionalCaret | null;
+  /** True while a replacement worker is being opened; the reopened worker's first state clears it. */
+  recovering?: boolean;
 }
 
 /**
@@ -100,6 +102,8 @@ export interface PeerlessViewStore {
   setProvisionalCaret(caret: PeerlessProvisionalCaret | null): void;
   subscribeProvisionalCaret?(listener: () => void): () => void;
   getProvisionalCaret?(): PeerlessProvisionalCaret | null;
+  /** Marks the view as waiting for a replacement worker. */
+  setRecovering?(recovering: boolean): void;
   dispose(): void;
 }
 
@@ -130,7 +134,8 @@ export function createPeerlessViewStore(initial: PeerlessViewSnapshot): Peerless
       previous.throughSeq !== next.throughSeq || previous.presentedThroughSeq !== next.presentedThroughSeq ||
       previous.versionSinceSeq !== next.versionSinceSeq || previous.workerSelection !== next.workerSelection ||
       previous.selectionCause !== next.selectionCause ||
-      previous.anchors !== next.anchors || previous.editState !== next.editState || previous.geometry !== next.geometry;
+      previous.anchors !== next.anchors || previous.editState !== next.editState || previous.geometry !== next.geometry ||
+      previous.recovering !== next.recovering;
     const echoOnly = caretChanged && !otherChanged && previous.provisionalCaret?.source !== 'click' &&
       next.provisionalCaret?.source !== 'click' &&
       (previous.provisionalCaret?.source === 'echo' || next.provisionalCaret?.source === 'echo');
@@ -165,6 +170,7 @@ export function createPeerlessViewStore(initial: PeerlessViewSnapshot): Peerless
         geometry: replacement ? null : snapshot.geometry,
         provisionalCaret: replacement || (snapshot.provisionalCaret?.source !== 'echo' &&
           state.version > provisionalRevision.version) ? null : snapshot.provisionalCaret,
+        ...(!replacement && snapshot.recovering !== undefined ? { recovering: snapshot.recovering } : {}),
       });
     },
     installFrameGeometry(geometry) {
@@ -202,6 +208,10 @@ export function createPeerlessViewStore(initial: PeerlessViewSnapshot): Peerless
       return () => { caretListeners.delete(listener); };
     },
     getProvisionalCaret: () => snapshot.provisionalCaret ?? null,
+    setRecovering(recovering) {
+      if (disposed || (snapshot.recovering === true) === recovering) return;
+      publish({ ...snapshot, recovering });
+    },
     dispose() {
       disposed = true;
       listeners.clear();

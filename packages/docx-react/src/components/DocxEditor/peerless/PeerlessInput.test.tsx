@@ -1974,7 +1974,7 @@ test('a second choice made while the first replacement is pending leaves the fir
 });
 
 function markRecovering(snapshot: PeerlessViewSnapshot) {
-  (snapshot as PeerlessViewSnapshot & { recovering?: boolean }).recovering = true;
+  snapshot.recovering = true;
 }
 
 test('a worker being reopened removes the Paste Options control', async () => {

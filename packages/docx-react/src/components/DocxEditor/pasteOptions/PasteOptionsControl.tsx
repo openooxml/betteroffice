@@ -1,5 +1,5 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { CSSProperties, ReactElement } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import type { CSSProperties, ReactElement, RefObject } from 'react';
 import type { PasteFormattingOption } from './clipboardFragmentTransforms';
 import { useTranslation } from '../../../i18n';
 import { MaterialSymbol } from '../../ui/Icons';
@@ -44,12 +44,18 @@ export function PasteOptionsControl(props: {
   onMenuOpenChange(open: boolean): void;
   onChoose(option: PasteFormattingOption): void;
   onCloseMenu(): void;
+  /** Receives the control's root element, so the owning editor can tell its own control from another one. */
+  controlRef?: RefObject<HTMLDivElement | null>;
 }): ReactElement {
   const { t } = useTranslation();
-  const { anchor, menuOpen, selected, onMenuOpenChange, onChoose, onCloseMenu } = props;
+  const { anchor, menuOpen, selected, onMenuOpenChange, onChoose, onCloseMenu, controlRef } = props;
   const offered = props.options;
   const items = useMemo(() => OPTIONS.filter((option) => offered.includes(option.kind)), [offered]);
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const attachRoot = useCallback((element: HTMLDivElement | null) => {
+    rootRef.current = element;
+    if (controlRef) controlRef.current = element;
+  }, [controlRef]);
   const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const [placement, setPlacement] = useState<{ left: number; top: number }>({ left: 0, top: 28 });
@@ -88,7 +94,7 @@ export function PasteOptionsControl(props: {
   };
 
   return (
-    <div ref={rootRef} data-paste-options style={style} onKeyDown={(event) => event.stopPropagation()}>
+    <div ref={attachRoot} data-paste-options style={style} onKeyDown={(event) => event.stopPropagation()}>
       <button
         type="button"
         aria-haspopup="menu"
