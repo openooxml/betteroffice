@@ -56,6 +56,10 @@ type Resume = Parameters<NonNullable<UsePeerlessEditSessionOptions['recovery']>[
 type Seed = NonNullable<DocxCommandConnection['initial']['seed']>;
 type RecoveryReport = Parameters<NonNullable<NonNullable<UsePeerlessEditSessionOptions['recovery']>['onRecovery']>>[0];
 
+const payloadBytes = (payload: unknown) => Object.values((payload ?? {}) as object).reduce((total: number, item: unknown) =>
+  total + (Array.isArray(item) ? item : [item]).reduce((sum: number, part: unknown) =>
+    sum + (part instanceof ArrayBuffer || ArrayBuffer.isView(part) ? part.byteLength : 0), 0), 0);
+
 const textOf = (worker: InProcessResidentWorker) =>
   worker.sessions.at(-1)!.paragraphs('body').map((paragraph) => paragraph.text).join('|');
 
@@ -84,6 +88,7 @@ function mount({ tamper, source = documentBytes(), reopenSource, collaboration, 
   const phases: string[] = [];
   const events: RecoveryReport[] = [];
   const errors: Error[] = [];
+  const streamed = new Map<number, number>();
   let pendingCheckpoint: Promise<unknown> | undefined;
   let applied = 0;
   const openResident = async (resume?: Resume): Promise<DocxCommandConnection> => {
@@ -109,6 +114,13 @@ function mount({ tamper, source = documentBytes(), reopenSource, collaboration, 
     const connection = await createDocxCommandConnection(client, initial);
     if (!resume) {
       if (tamper) tamper(connection.initial.seed!);
+      const onStream = connection.client.onStream;
+      if (onStream) {
+        connection.client.onStream = (listener) => onStream((entries) => {
+          for (const entry of entries) streamed.set(entry.index, payloadBytes(entry.effect.payload));
+          listener(entries);
+        });
+      }
       return connection;
     }
     reopenedText.push(textOf(worker));
@@ -181,10 +193,14 @@ function mount({ tamper, source = documentBytes(), reopenSource, collaboration, 
       return { status, detail, ticket };
     },
     async ready() { await waitFor(() => expect(view.result.current.status).toBe('ready'), { timeout: 30_000 }); },
-    async submit(kind: string, payload: Record<string, unknown> = {}) {
+    streamBytes() {
+      const covered = checkpoints.at(-1)?.stream ?? 0;
+      return [...streamed].reduce((total, [index, bytes]) => index >= covered ? total + bytes : total, 0);
+    },
+    async submit(kind: string, payload: Record<string, unknown> = {}, options: { inputTime?: number } = {}) {
       let status = '';
       await act(async () => {
-        const outcome = await view.result.current.binding!.session.submit(kind, payload as never).ack as { status: string };
+        const outcome = await view.result.current.binding!.session.submit(kind, payload as never, options).ack as { status: string };
         status = outcome.status;
       });
       if (status === 'applied') applied += 1;
@@ -192,6 +208,12 @@ function mount({ tamper, source = documentBytes(), reopenSource, collaboration, 
     },
     async type(count: number) {
       for (let i = 0; i < count; i += 1) expect(await session.submit('insertText', { text: LETTERS[i % 26]! })).toBe('applied');
+    },
+    async typeSteps(count: number) {
+      const base = Math.ceil(performance.now()) + 10_000;
+      for (let i = 0; i < count; i += 1) {
+        expect(await session.submit('insertText', { text: LETTERS[i % 26]! }, { inputTime: base + i * 1_000 })).toBe('applied');
+      }
     },
     async typeUntilApplied(target: number) {
       for (let i = 0; applied < target && i < 400; i += 1) await session.submit('insertText', { text: LETTERS[i % 26]! });
@@ -450,6 +472,45 @@ test('one undo after a worker restart removes a measured amount of the typing be
   expect(recoveredRemoved).toBe(0);
 }, TIMEOUT);
 
+test('a replayed entry never becomes an undo step: history does not survive a recovery: undo after it removes nothing', async () => {
+  const live = mount();
+  await live.ready();
+  await live.typeSteps(5);
+  const liveTyped = live.text();
+  expect(await live.submit('undo')).toBe('applied');
+  expect(live.text().length).toBe(liveTyped.length - 1);
+  cleanup();
+
+  const early = mount();
+  await early.ready();
+  await early.typeSteps(5);
+  const typed = early.text();
+  const version = early.version();
+  await early.crash();
+  expect(early.checkpoints).toEqual([]);
+  console.log(`G244-REPLAY-UNDO early replayed=${JSON.stringify(early.replayed)}`);
+  expect(early.replayed.length).toBeGreaterThanOrEqual(5);
+  early.expectRecovered(typed);
+  await early.submit('undo');
+  expect(early.text()).toBe(typed);
+  expect(early.version()).toBe(version);
+  cleanup();
+
+  const late = mount();
+  await late.ready();
+  await late.typeUntilApplied(128);
+  await late.checkpointTaken(1);
+  await late.typeSteps(3);
+  const lateTyped = late.text();
+  const lateVersion = late.version();
+  await late.crash();
+  console.log(`G244-REPLAY-UNDO late replayed=${JSON.stringify(late.replayed)}`);
+  late.expectRecovered(lateTyped);
+  await late.submit('undo');
+  expect(late.text()).toBe(lateTyped);
+  expect(late.version()).toBe(lateVersion);
+}, TIMEOUT);
+
 test('a save between acknowledged edits does not leave the recovered document behind', async () => {
   const session = mount();
   await session.ready();
@@ -562,7 +623,15 @@ test('idle saves do not grow the log without bound', async () => {
   const before = session.stateVector();
   await session.save();
   const published = session.stateVector() !== before;
-  for (let i = 1; i < 300; i += 1) await session.save();
+  let retainedAt128 = 0;
+  for (let i = 2; i <= 300; i += 1) {
+    await session.save();
+    if (i === 128) {
+      await session.settle();
+      retainedAt128 = session.streamBytes();
+    }
+  }
+  console.log(`G244-IDLE-SAVES bytes=${retainedAt128} after=128`);
   await session.settle();
   const expected = session.text();
   await session.crash();
@@ -701,8 +770,6 @@ test('a long parsed-source session retains log bytes linearly', async () => {
   const initial = await client.commandInit({ session: 'parsed-log', incarnation: 1, epoch: 1, ...INIT });
   expect(initial.seed).toBeDefined();
   const retained = new Map<number, number>();
-  const payloadBytes = (payload: unknown) => Object.values((payload ?? {}) as object).reduce((total: number, item: unknown) =>
-    total + (item instanceof ArrayBuffer || ArrayBuffer.isView(item) ? item.byteLength : 0), 0);
   const session = createDocxWorkerEditSession<Document>({
     source: document, connection: await createDocxCommandConnection(client, initial),
     echo: { paint() {}, drop() {}, present() {} }, maxRecoveryAttempts: 1,
