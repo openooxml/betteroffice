@@ -5,7 +5,7 @@ import type {
 
 export interface PresentationSharedInput {
   subscribeSent(listener: () => void): () => void;
-  cancel(ticket: CommandTicket): boolean;
+  cancel?(ticket: CommandTicket): boolean;
   submit(intent: PresentationCommandIntent, basis: PresentationCommandBasis, after?: CommandTicket,
     waitForAfter?: boolean): {
     ticket: CommandTicket;

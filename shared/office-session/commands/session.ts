@@ -1,5 +1,5 @@
 import { SessionFailure } from '../types';
-import { cancelOutboxAfter, createOutbox, fenceOutbox } from './outbox';
+import { cancelOutboxAfter, createOutbox, fenceOutbox, removeWaitingOutboxEntry } from './outbox';
 import { createPresenter } from './presenter';
 import { cloneData } from './clone';
 import { createBlockedLedger } from './ledger';
@@ -100,7 +100,7 @@ export function sessionUnacknowledged<P>(session: object): readonly CommandEnvel
   return (ledgers.get(session)?.() ?? []) as readonly CommandEnvelope<P>[];
 }
 
-/** @internal Cancels one unmerged command and its queued dependents. */
+/** @internal Cancels one unmerged, unsent command. */
 export function cancelWorkerEditTicket(session: object, ticket: CommandTicket): boolean {
   return cancellers.get(session)?.(ticket) ?? false;
 }
@@ -1219,7 +1219,9 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
     if (!target || target.tickets.length !== 1) return false;
     let cancelled = false;
     presenter.event(() => {
-      const removed = outbox.remove((entry) => entry === target);
+      const { after, waitForAfter } = target.draft.options;
+      const removed = waitForAfter && after && !dependencyBlocked(after) && removeWaitingOutboxEntry(outbox, target.id)
+        ? [target] : outbox.remove((entry) => entry === target);
       for (const entry of removed) {
         const direct = entry === target;
         cancelTickets(entry.tickets, direct ? 'cancelled' : 'dependency-refused');
@@ -1227,6 +1229,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
       }
       if (waitingReads.size) checkReads();
     });
+    if (cancelled) void ticket.ack.then(wake);
     return cancelled;
   };
   const session: WorkerEditSession<P, S, E, X, Q> = {

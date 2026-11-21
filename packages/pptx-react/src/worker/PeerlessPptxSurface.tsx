@@ -103,6 +103,8 @@ function useStageFit(stage: RefObject<HTMLDivElement | null>, run: PeerlessPrese
 function Overlays({ run, commands, inputRef, preview, insertion, editor, onError }: { run: PeerlessPresentation; commands: PptxCommandStore; inputRef: RefObject<HTMLTextAreaElement | null>; preview: PeerlessShapePreviewStore; insertion: ShapeRect | null; editor: RefObject<HTMLDivElement | null>; onError(error: Error): void }) {
   const { t } = useTranslation();
   const snapshot = useSyncExternalStore(run.subscribeVisual, run.getVisualSnapshot, run.getVisualSnapshot);
+  const isComposing = () => Boolean(run.store.getSnapshot().composition);
+  const composing = useSyncExternalStore(run.store.subscribePresentation, isComposing, isComposing);
   const geometry = useMemo(() => snapshot?.view.confirmed ? indexGeometry(snapshot.view.confirmed.displayList) : null,
     [snapshot?.view.confirmed]);
   if (!snapshot?.view.confirmed) return null;
@@ -145,8 +147,8 @@ function Overlays({ run, commands, inputRef, preview, insertion, editor, onError
       <PeerlessCaret store={run.visual} />
     </div>
     {!insertion && view.selection?.kind === 'object' && <PeerlessShapeOverlay selection={view.selection} preview={preview}
-      scale={fit.scale} readOnly={view.editState.readOnly} />}
-    {!insertion && edited && selected && selected.kind !== 'object' &&
+      scale={fit.scale} readOnly={view.editState.readOnly || composing} />}
+    {!composing && !insertion && edited && selected && selected.kind !== 'object' &&
       <PeerlessResizeHandles bounds={edited} scale={fit.scale}
         readOnly={view.editState.readOnly} canResize={canResizeEdited} />}
     {edited && <span data-testid="pptx-text-edit-outline" aria-hidden="true" style={{

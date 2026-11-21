@@ -351,8 +351,8 @@ export function registerPresentationCommandHandlers(
     const resize = new Map<string, boolean>();
     const visit = (shapes: readonly ShapeSnapshot[], topLevel: boolean) => {
       for (const shape of shapes) {
-        for (const story of shape.textStories) resize.set(story.id, topLevel && canResizeShape(shape));
         const graphic = shape.graphic as { type?: string; grid?: unknown[] } | null;
+        for (const story of shape.textStories) resize.set(story.id, graphic?.type !== 'table' && topLevel && canResizeShape(shape));
         if (graphic?.type === 'table' && Array.isArray(graphic.grid) && graphic.grid.length) {
           const columns = graphic.grid.length;
           (shape.textStories ?? []).forEach((story, index) => tables.set(story.id, {

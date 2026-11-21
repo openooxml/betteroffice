@@ -27,6 +27,7 @@ type ReadyLane<T> = {
 type Controls = {
   fence(): void;
   cancel(tickets: readonly CommandTicket[]): readonly OutboxEntry<unknown, unknown>[];
+  removeWaiting(id: number): boolean;
 };
 
 const controls = new WeakMap<object, Controls>();
@@ -41,6 +42,11 @@ export function cancelOutboxAfter<P, X>(
   outbox: Outbox<P, X>, tickets: readonly CommandTicket[]
 ): readonly OutboxEntry<P, X>[] {
   return (controls.get(outbox)?.cancel(tickets) ?? []) as readonly OutboxEntry<P, X>[];
+}
+
+/** @internal Removes an unsent command while retaining its dependents. */
+export function removeWaitingOutboxEntry<P, X>(outbox: Outbox<P, X>, id: number): boolean {
+  return controls.get(outbox)?.removeWaiting(id) ?? false;
 }
 
 function readyLane<T>(): ReadyLane<T> {
@@ -117,6 +123,17 @@ export function createOutbox<P, X>(options: OutboxOptions<P, X>): Outbox<P, X> {
     node.segment.lanes[laneOf(node.entry.draft)].set(node.order, node);
   }
 
+  function linkDependency(node: Node<P, X>, after: CommandTicket | undefined): void {
+    node.afterId = after ? owners.get(after)?.id ?? after.id : undefined;
+    if (node.afterId !== undefined) {
+      let children = dependents.get(node.afterId);
+      if (!children) dependents.set(node.afterId, children = new Set());
+      children.add(node);
+    }
+    if (node.afterId === undefined || !entries.has(node.afterId)) ready(node);
+    else node.segment.lanes[laneOf(node.entry.draft)].delete(node.order);
+  }
+
   function merge(previous: Node<P, X>, draft: CommandDraft<P, X>): CommandDraft<P, X> | undefined {
     const base = previous.entry.draft;
     const after = draft.options.after;
@@ -128,7 +145,8 @@ export function createOutbox<P, X>(options: OutboxOptions<P, X>): Outbox<P, X> {
   }
 
   function enqueue(draft: CommandDraft<P, X>, ticket: CommandTicket): OutboxEntry<P, X> {
-    const previous = last?.segment === lastSegment ? last : undefined;
+    const fenced = draft.options.fence || draft.options.waitForAfter && draft.options.after !== undefined;
+    const previous = !fenced && last?.segment === lastSegment ? last : undefined;
     const merged = previous && merge(previous, draft);
     if (merged && previous) {
       previous.tickets.push(ticket);
@@ -136,7 +154,7 @@ export function createOutbox<P, X>(options: OutboxOptions<P, X>): Outbox<P, X> {
       owners.set(ticket, owners.get(previous.tickets[0]!)!);
       return previous.entry;
     }
-    if (draft.options.fence) fence();
+    if (fenced) fence();
     if (order === Number.MAX_SAFE_INTEGER) throw new RangeError('Outbox order space is exhausted');
     const tickets = [ticket];
     const entry = { id: ticket.id, draft, tickets };
@@ -146,15 +164,8 @@ export function createOutbox<P, X>(options: OutboxOptions<P, X>): Outbox<P, X> {
     entries.set(entry.id, node);
     owners.set(ticket, { id: entry.id });
     lastSegment.size += 1;
-    const after = draft.options.after;
-    if (after) {
-      node.afterId = owners.get(after)?.id ?? after.id;
-      let children = dependents.get(node.afterId);
-      if (!children) dependents.set(node.afterId, children = new Set());
-      children.add(node);
-    }
-    if (!after || !entries.has(node.afterId!)) ready(node);
-    if (draft.options.fence) fence();
+    linkDependency(node, draft.options.after);
+    if (fenced) fence();
     return entry;
   }
 
@@ -262,6 +273,21 @@ export function createOutbox<P, X>(options: OutboxOptions<P, X>): Outbox<P, X> {
     return result;
   }
 
+  function removeWaiting(id: number): boolean {
+    const node = entries.get(id);
+    const after = node?.entry.draft.options.after;
+    if (!node || !after) return false;
+    const children = dependents.get(id);
+    dependents.delete(id);
+    for (const child of children ?? []) {
+      const { draft } = child.entry;
+      child.entry = { ...child.entry, draft: { ...draft, options: { ...draft.options, after } } };
+      linkDependency(child, after);
+    }
+    unlink(node);
+    return true;
+  }
+
   const outbox: Outbox<P, X> = {
     get size() { return entries.size; },
     get entries() { return [...entries.values()].map((node) => node.entry); },
@@ -279,7 +305,7 @@ export function createOutbox<P, X>(options: OutboxOptions<P, X>): Outbox<P, X> {
       return removed;
     },
   };
-  controls.set(outbox, { fence, cancel });
+  controls.set(outbox, { fence, cancel, removeWaiting });
   return outbox;
 }
 

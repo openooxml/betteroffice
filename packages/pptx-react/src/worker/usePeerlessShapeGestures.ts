@@ -139,18 +139,22 @@ export function usePeerlessShapeGestures(store: PeerlessViewStore | null, {
   }, [store, setPreview]);
 
   const onPointerDown = useCallback((event: PointerEvent<HTMLElement>): boolean => {
-    if (!store || !presentation?.selectionEnabled || !canvas.current || event.button !== 0 || event.isPrimary === false ||
-      store.getSnapshot().composition) return false;
+    if (!store || !presentation?.selectionEnabled || !canvas.current || event.button !== 0 || event.isPrimary === false) return false;
+    const handle = (event.target as HTMLElement).dataset?.pptxResize as ResizeHandle | undefined;
+    const view = store.getSnapshot();
+    if (view.composition) {
+      if (handle) event.preventDefault();
+      return Boolean(handle);
+    }
     const visual = presentation.getVisualSnapshot();
     const confirmed = visual?.view.confirmed;
     const start = position(event);
     if (!confirmed || !start) return false;
-    const handle = (event.target as HTMLElement).dataset?.pptxResize as ResizeHandle | undefined;
     if (handle && !RESIZE_HANDLES.includes(handle)) return false;
-    const selected = store.getSnapshot().selection;
+    const selected = view.selection;
     const scale = canvas.current.getBoundingClientRect().width / confirmed.displayList.width;
     if (handle && (!selected || selected.kind === 'object' && !selected.canResize ||
-      store.getSnapshot().editState.readOnly)) return true;
+      view.editState.readOnly)) return true;
     const hit = handle ? null : hitConfirmedGeometry(store, start, scale);
     if (!handle && hit?.kind !== 'shape') return false;
     const shapeId = handle ? selected!.shapeId : hit!.shapeId;
