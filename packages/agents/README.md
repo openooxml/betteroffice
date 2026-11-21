@@ -12,7 +12,7 @@ No model provider, API key or agent framework is required.
 bun add @betteroffice/agents
 ```
 
-Requires Node.js 22 or later.
+Requires Node.js 22.12 or later.
 
 ## Usage
 
