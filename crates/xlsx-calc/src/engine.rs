@@ -1363,8 +1363,8 @@ impl<'g> Pass<'g> {
         if let Some(inherited) = self.inherited.get(&u) {
             note_functions(gap.get_or_insert_with(Vec::new), inherited);
         }
-        let iterative = iterative
-            || (wb.iterate && limited && self.graph.is_iterative_gap(u.0, cell_of(u)));
+        let iterative =
+            iterative || (wb.iterate && limited && self.graph.is_iterative_gap(u.0, cell_of(u)));
         let keeps = iterative
             || gap.as_ref().is_some_and(|functions| {
                 !functions.is_empty() && !answers(self.graph, wb, u, functions)
@@ -1431,8 +1431,7 @@ impl<'g> Pass<'g> {
                                 gap: Some(held),
                                 reach: None,
                             };
-                            let iterative =
-                                wb.iterate && self.graph.is_iterative_gap(u.0, at.1);
+                            let iterative = wb.iterate && self.graph.is_iterative_gap(u.0, at.1);
                             self.write(wb, u, kept, iterative);
                             return;
                         }
@@ -4080,12 +4079,7 @@ mod tests {
             (other, "A1", 32.0),
             (other, "B1", 32.0),
         ] {
-            assert_eq!(
-                value(&wb, at, cell),
-                num(expected),
-                "sheet {} {cell}",
-                at.0
-            );
+            assert_eq!(value(&wb, at, cell), num(expected), "sheet {} {cell}", at.0);
         }
         assert_eq!(
             result.unevaluated_cells,

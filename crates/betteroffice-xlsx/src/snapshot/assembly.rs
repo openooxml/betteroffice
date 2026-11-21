@@ -2027,7 +2027,7 @@ impl WorkbookSnapshotBuilder {
             .transpose()
             .map_err(error)?;
         let source_bytes = source_container.as_ref().map(|source| source.as_bytes());
-        let (full_precision, iterate) = super::restore_calculation_settings(
+        let (full_precision, iterate) = crate::snapshot::restore_calculation_settings(
             source_bytes,
             full_precision.or(authority.full_precision_setting()),
             iterate.or(authority.iterate_setting()),

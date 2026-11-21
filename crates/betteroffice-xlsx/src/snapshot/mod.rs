@@ -134,19 +134,18 @@ pub(crate) fn restore_calculation_settings(
     let Some(source) = source.filter(|_| full_precision.is_none() || iterate.is_none()) else {
         return Ok((full_precision.unwrap_or(true), iterate.unwrap_or(false)));
     };
-    let parsed = ooxml_opc::unzip_parts_where(
-        source,
-        ooxml_opc::MAX_TOTAL_UNCOMPRESSED_BYTES,
-        |name| name.trim_start_matches('/') == "xl/workbook.xml",
-    )
-    .map_err(SnapshotError::new)
-    .and_then(|parts| {
-        let Some((_, workbook_xml)) = parts.first() else {
-            return Ok((true, false));
-        };
-        xlsx_parse::workbook_calculation_settings(workbook_xml)
-            .map_err(|failure| SnapshotError::new(failure.to_string()))
-    });
+    let parsed =
+        ooxml_opc::unzip_parts_where(source, ooxml_opc::MAX_TOTAL_UNCOMPRESSED_BYTES, |name| {
+            name.trim_start_matches('/') == "xl/workbook.xml"
+        })
+        .map_err(SnapshotError::new)
+        .and_then(|parts| {
+            let Some((_, workbook_xml)) = parts.first() else {
+                return Ok((true, false));
+            };
+            xlsx_parse::workbook_calculation_settings(workbook_xml)
+                .map_err(|failure| SnapshotError::new(failure.to_string()))
+        });
     let (source_precision, source_iterate) = match parsed {
         Ok(settings) => settings,
         Err(error) if full_precision.is_none() => return Err(error),

@@ -1068,12 +1068,8 @@ impl WorkbookAuthority {
         }
         let mut writer = Writer::new();
         base.bootstrap_client_id.write(&mut writer);
-        snapshot::CalculationSettings(
-            base.date_system,
-            base.full_precision,
-            base.iterate,
-        )
-        .write(&mut writer);
+        snapshot::CalculationSettings(base.date_system, base.full_precision, base.iterate)
+            .write(&mut writer);
         base.defined_names.write(&mut writer);
         base.fingerprint.write(&mut writer);
         base.fingerprints.write(&mut writer);

@@ -79,9 +79,7 @@ fn package_with_sheet(calc_pr: &str, sheet: &str) -> Vec<u8> {
         ),
         (
             "xl/worksheets/sheet1.xml",
-            format!(
-                r#"<worksheet xmlns="{MAIN}"><sheetData>{sheet}</sheetData></worksheet>"#
-            ),
+            format!(r#"<worksheet xmlns="{MAIN}"><sheetData>{sheet}</sheetData></worksheet>"#),
         ),
         ("xl/styles.xml", STYLES.to_owned()),
     ];
