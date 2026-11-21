@@ -44,7 +44,7 @@ docx-edit = { package = "betteroffice-docx-edit", path = "../../crates/docx-edit
 docx-layout = { package = "betteroffice-docx-layout", path = "../../crates/docx-layout", features = ["base-latin"], optional = true }
 docx-parse = { package = "betteroffice-docx-parse", path = "../../crates/docx-parse", default-features = false, optional = true }
 docx-raster = { package = "betteroffice-docx-raster", path = "../../crates/docx-raster", optional = true }
-futures-util = { version = "=0.3.33", features = ["sink"] }
+futures-util = { version = "=0.3.34", features = ["sink"] }
 getrandom = "=0.4.3"
 image = { version = "=0.25.10", default-features = false, features = ["bmp", "gif", "jpeg", "png", "tiff", "webp"] }
 ooxml-drawingml = { package = "betteroffice-drawingml", path = "../../crates/ooxml-drawingml", optional = true, features = ["tiff"] }
