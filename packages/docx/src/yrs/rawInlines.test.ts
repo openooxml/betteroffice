@@ -655,3 +655,34 @@ describe('a leading page break without a kept element saves as on main', () => {
     });
   }
 });
+
+describe('kept empty elements spread over many paragraphs', () => {
+  const texts = ['Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon'];
+  const placed = (index: number) => {
+    const text = texts[index % texts.length]!;
+    const at = index % (text.length + 1);
+    return `${text.slice(0, at)}[subDoc]${text.slice(at)}`;
+  };
+  const source = (index: number) => {
+    const text = texts[index % texts.length]!;
+    const at = index % (text.length + 1);
+    return `${SOURCE.t(text.slice(0, at))}${SUB_DOC}${SOURCE.t(text.slice(at))}`;
+  };
+  let inner = `${source(0)}${SUB_DOC}`;
+  for (let index = 1; index < 40; index += 1) {
+    const id = (0x20000000 + index).toString(16).toUpperCase();
+    inner += `</w:p><w:p w14:paraId="${id}" w14:textId="${id}">${source(index)}`;
+  }
+
+  for (const [loader, load] of LOADERS) {
+    it(`${loader}: typing in one paragraph saves every mark of every paragraph in its place`, async () => {
+      const { session, base } = await load(docx(inner));
+      typeAt(0)(session, session.paragraphs('body')[20]!.paraId);
+      const saved = traces(await savedAsTheEditorSaves(session, base));
+      const expected = Array.from({ length: 40 }, (_, index) => placed(index));
+      expected[0] = `${expected[0]}[subDoc]`;
+      expected[20] = `X${expected[20]}`;
+      expect(saved).toEqual([...expected, 'Other']);
+    });
+  }
+});
