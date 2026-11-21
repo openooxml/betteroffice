@@ -215,3 +215,7 @@ test('an import over the formatted run limit keeps its paragraphs and offers no 
   expect(fragment.paragraphs.at(-1)!.tables).toHaveLength(1);
   expect(pasteOptionsOffered(fragment)).toEqual([]);
 });
+
+test('pre-line text keeps its line breaks and collapses its spaces', () => {
+  imported('<p style="white-space:pre-line"><b>x</b>  A  \n\nB</p>', ['x A', '', 'B']);
+});
