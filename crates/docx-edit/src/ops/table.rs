@@ -510,6 +510,42 @@ struct FragmentTable {
 struct FragmentBuild {
     created_story_ids: Vec<String>,
     new_para_ids: Vec<String>,
+    revision_ids: HashMap<String, String>,
+}
+
+impl FragmentBuild {
+    fn attrs<T: ReadTxn>(&mut self, doc: &EditingDoc, txn: &T, attrs: &Attrs) -> Attrs {
+        let mut attrs = attrs.clone();
+        if let Some(Any::Array(changes)) = attrs.get_mut(crate::format::RPR_CHANGE) {
+            for change in Arc::make_mut(changes) {
+                let Some((id, ..)) = crate::queries::revision_parts(change) else {
+                    continue;
+                };
+                let Any::Map(values) = change else {
+                    continue;
+                };
+                let values = Arc::make_mut(values);
+                let id = self.revision_ids.entry(id).or_insert_with(|| doc.next_id(txn));
+                if let Some(Any::Map(info)) = values.get_mut("info") {
+                    let info = Arc::make_mut(info);
+                    let key = if info.contains_key("id") {
+                        "id"
+                    } else {
+                        "revisionId"
+                    };
+                    info.insert(key.to_owned(), Any::from(id.as_str()));
+                } else {
+                    let key = if values.contains_key("id") {
+                        "id"
+                    } else {
+                        "revisionId"
+                    };
+                    values.insert(key.to_owned(), Any::from(id.as_str()));
+                }
+            }
+        }
+        attrs
+    }
 }
 
 fn json_shaped(value: &Value) -> bool {
@@ -2176,18 +2212,21 @@ impl EditingDoc {
         let mut at = 0u32;
         let mut nested = 0usize;
         for segment in content {
+            let attrs = match segment {
+                FragmentSegment::Text(part) => &part.attrs,
+                FragmentSegment::TabBreak(part) => &part.attrs,
+                FragmentSegment::Pilcrow(part) => &part.attrs,
+                FragmentSegment::Table(part) => &part.attrs,
+            };
+            let attrs = build.attrs(self, txn, attrs);
             match segment {
                 FragmentSegment::Text(part) => {
-                    story.insert_with_attributes(txn, at, part.text.as_str(), part.attrs.clone());
+                    story.insert_with_attributes(txn, at, part.text.as_str(), attrs);
                     at += part.text.encode_utf16().count() as u32;
                 }
                 FragmentSegment::TabBreak(part) => {
-                    let map = story.insert_embed_with_attributes(
-                        txn,
-                        at,
-                        MapPrelim::default(),
-                        part.attrs.clone(),
-                    );
+                    let map =
+                        story.insert_embed_with_attributes(txn, at, MapPrelim::default(), attrs);
                     map.insert(txn, KIND_KEY, part.kind);
                     for (key, value) in &part.payload {
                         map.insert(txn, key.clone(), value.clone());
@@ -2196,12 +2235,8 @@ impl EditingDoc {
                 }
                 FragmentSegment::Pilcrow(part) => {
                     let key = ids.session_key(self, txn);
-                    let map = story.insert_embed_with_attributes(
-                        txn,
-                        at,
-                        MapPrelim::default(),
-                        part.attrs.clone(),
-                    );
+                    let map =
+                        story.insert_embed_with_attributes(txn, at, MapPrelim::default(), attrs);
                     map.insert(txn, KIND_KEY, PILCROW_KIND);
                     map.insert(txn, PARA_ID, key.as_str());
                     for (prop_key, prop_value) in &part.props {
@@ -2214,10 +2249,8 @@ impl EditingDoc {
                 FragmentSegment::Table(part) => {
                     let slot = fresh_table_slot(used, story_id, nested);
                     nested += 1;
-                    let mut attrs = insertion_attrs(None, None);
-                    for (key, value) in part.attrs.iter() {
-                        attrs.insert(key.clone(), value.clone());
-                    }
+                    let mut embed_attrs = insertion_attrs(None, None);
+                    embed_attrs.extend(attrs);
                     self.insert_fragment_table_data(
                         txn,
                         ids,
@@ -2228,7 +2261,7 @@ impl EditingDoc {
                         slot,
                         &part.table,
                         revision,
-                        attrs,
+                        embed_attrs,
                         build,
                     )?;
                     at += 1;
