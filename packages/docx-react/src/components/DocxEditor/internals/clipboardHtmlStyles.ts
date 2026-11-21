@@ -5,7 +5,7 @@ const STYLE_TEXT_LIMIT = 200_000;
 const DECLARATION_LIMIT = 512;
 const SELECTOR = /^([a-z][\w-]*)?(\.[\w-]+)?$/i;
 const RUN_PROPERTIES = new Set(['font-weight', 'font-style', 'font-size', 'font-family', 'text-decoration-line',
-  'color', 'background-color', 'vertical-align', 'mso-highlight', 'mso-list']);
+  'color', 'background-color', 'vertical-align', 'white-space', 'mso-highlight', 'mso-list']);
 
 function* delimiters(css: string, wanted: string) {
   let parentheses = 0;

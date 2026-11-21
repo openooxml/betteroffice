@@ -4,7 +4,7 @@ import { validClipboardFragment } from '@betteroffice/docx/yrs';
 import { mergeFormattingFragment } from '../pasteOptions/clipboardFragmentTransforms';
 import { clipboardFragmentPlainText, pasteOptionsOffered, plainTextClipboardFragment } from '../pasteOptions/pasteText';
 import {
-  clipboardFragmentHtml, MAX_FORMATTED_HTML_LENGTH, MAX_FORMATTED_HTML_DEPTH, MAX_FORMATTED_HTML_RUNS, MAX_FORMATTED_HTML_TEXT,
+  clipboardFragmentHtml, MAX_FORMATTED_HTML_LENGTH, MAX_FORMATTED_HTML_DEPTH, MAX_FORMATTED_HTML_RUNS, MAX_FORMATTED_HTML_TEXT, MAX_FORMATTED_HTML_PARAGRAPHS,
   parseClipboardHtml,
 } from './clipboardHtml';
 
@@ -182,4 +182,17 @@ test('hostile styles and run counts stay linear', () => {
   const runs = timed('<p>' + '<b>x</b>y'.repeat(210_000) + '</p>');
   expect(runs.fragment).toBeNull();
   expect(runs.ms).toBeLessThan(10_000);
+}, 60_000);
+
+test('a line break that opens a paragraph is a blank line', () => {
+  imported('<p><b>A</b></p><p><br>B</p>', ['A', '', 'B']);
+});
+
+test('the paragraph budget counts blank lines', () => {
+  const html = (count: number) => '<pre><b>A' + '\n'.repeat(count) + 'B</b></pre>';
+  expect(parseClipboardHtml(html(MAX_FORMATTED_HTML_PARAGRAPHS), formatted)).toBeNull();
+  imported(html(MAX_FORMATTED_HTML_PARAGRAPHS - 1), ['A', ...Array(MAX_FORMATTED_HTML_PARAGRAPHS - 2).fill(''), 'B']);
+  const start = performance.now();
+  expect(parseClipboardHtml(html(1_900_000), formatted)).toBeNull();
+  expect(performance.now() - start).toBeLessThan(10_000);
 }, 60_000);

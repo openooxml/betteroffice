@@ -19,6 +19,7 @@ export const MAX_FORMATTED_HTML_LENGTH = 2_000_000;
 export const MAX_FORMATTED_HTML_DEPTH = 200;
 export const MAX_FORMATTED_HTML_RUNS = 5_000;
 export const MAX_FORMATTED_HTML_TEXT = 200_000;
+export const MAX_FORMATTED_HTML_PARAGRAPHS = 1_000;
 
 const NBSP = '\u00a0';
 const LINE_SEP = '\u2028';
@@ -770,7 +771,7 @@ function formattedRun(text: string, state: HtmlRunState): DocxClipboardRun {
 
 function walkFormattedBody(
   body: HTMLElement,
-  pushText: (text: string, runs: DocxClipboardRun[]) => void,
+  pushText: (text: string, runs?: DocxClipboardRun[]) => void,
   pushTable: (table: DocxTableFragment) => void,
 ): boolean {
   const withTable = new WeakSet<Element>();
@@ -796,11 +797,12 @@ function walkFormattedBody(
   let endsInSpace = false;
   let afterBreak = false;
   let emitted = 0;
+  let failed = false;
   let runBudget = MAX_FORMATTED_HTML_RUNS;
   let textBudget = MAX_FORMATTED_HTML_TEXT;
   const emit = (text: string, paragraphRuns?: DocxClipboardRun[]) => {
-    emitted++;
-    pushText(text, paragraphRuns);
+    if (++emitted > MAX_FORMATTED_HTML_PARAGRAPHS) failed = true;
+    else pushText(text, paragraphRuns);
   };
   const flush = () => {
     if (endsInSpace) {
@@ -832,10 +834,10 @@ function walkFormattedBody(
   };
   const append = (raw: string, state: HtmlRunState): boolean => {
     if (state.pre) {
-      const lines = raw.replace(/\r\n?/g, '\n').split(NBSP).join(' ').split(/[\n\f\v  ]/);
+      const lines = raw.replace(/\r\n?/g, '\n').split(NBSP).join(' ').split(/[\n\f\v\u2028\u2029]/);
       for (const [index, line] of lines.entries()) {
         if (index) lineBreak();
-        if (line && !appendRun(line, state)) return false;
+        if (failed || (line && !appendRun(line, state))) return false;
         endsInSpace = false;
       }
       return true;
@@ -864,18 +866,19 @@ function walkFormattedBody(
     if (SKIP_TAGS.has(tag) || tag === 'IMG') return true;
     if (tag === 'BR') {
       lineBreak();
-      return true;
+      return !failed;
     }
     if (tag === 'TABLE') {
       flush();
       afterBreak = false;
+      if (++emitted > MAX_FORMATTED_HTML_PARAGRAPHS) return false;
       pushTable(parseTableElement(element as HTMLTableElement));
-      return true;
+      return !failed;
     }
     const boundary = !inBlock && (isBlock(tag) || withTable.has(element) || withBlock.has(element));
     if (boundary) {
       flush();
-      afterBreak = false;
+      afterBreak = true;
     }
     const state = htmlRunState(parent, element, styles(element), read);
     const block = inBlock || (isBlock(tag) && !withTable.has(element) && !withBlock.has(element));
@@ -888,7 +891,7 @@ function walkFormattedBody(
       afterBreak = false;
       if (block && emitted === before && (element.querySelector('br') || element.textContent?.includes(NBSP))) emit('');
     }
-    return true;
+    return !failed;
   };
   const root = htmlRunState(blankInlineFormat(), doc.documentElement, styles(doc.documentElement), read);
   const state = htmlRunState(root, body, styles(body), read);
@@ -896,7 +899,7 @@ function walkFormattedBody(
     if (!visit(child, state, false)) return false;
   }
   flush();
-  return true;
+  return !failed;
 }
 
 /** Reads an internal payload or imports supported clipboard HTML. */
