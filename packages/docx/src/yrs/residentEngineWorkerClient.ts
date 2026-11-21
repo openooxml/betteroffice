@@ -241,7 +241,7 @@ export class ResidentEngineWorkerClient implements DocxCommandClient {
       ? attachFontPackSource(worker as Worker) : getFontPackSourceDetach(this.worker);
     this.worker.onmessage = (event) => {
       if (isFontPackRequest(event.data)) {
-        if (!hasFontPackSource(this.worker)) this.fontPackFallback.receive(event.data);
+        if (!this.terminalError && !hasFontPackSource(this.worker)) this.fontPackFallback.receive(event.data);
         return;
       }
       const response = event.data;
