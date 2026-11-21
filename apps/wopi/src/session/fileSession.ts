@@ -372,6 +372,9 @@ export class FileSession {
         this.#itemVersion = info.Version ?? null;
         const fetched = await this.#host.readFile({ wopiSrc: this.wopiSrc, accessToken: input.accessToken });
         const isBlank = fetched.byteLength === 0;
+        if (isBlank && info.Size > 0) {
+          throw new WopiHostError("invalidResponse", "GetFile returned no bytes for a non-empty file");
+        }
         const bytes = isBlank ? await blankDocument(this.#format) : fetched;
         if (isBlank) {
           this.#savedVersion = -1;
