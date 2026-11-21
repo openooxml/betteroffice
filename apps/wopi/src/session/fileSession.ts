@@ -1197,11 +1197,13 @@ export class FileSession {
         } catch (err) {
           unauthorized = err instanceof WopiHostError && err.kind === "unauthorized";
         }
-        if (info?.Version && info.Version !== result.itemVersion) {
+        const written = result.itemVersion ?? info?.Version ?? null;
+        if (info?.Version && info.Version !== written) {
           return this.#saveCurrentConflict(current, tried);
         }
-        this.#itemVersion = result.itemVersion ?? this.#itemVersion;
-        if (info?.LastModifiedTime && info.Version === result.itemVersion) this.#lastModifiedTime = info.LastModifiedTime;
+        if (result.itemVersion === null && written !== null) this.#recordWritten(written);
+        this.#itemVersion = written ?? this.#itemVersion;
+        if (info?.LastModifiedTime && info.Version === written) this.#lastModifiedTime = info.LastModifiedTime;
         this.#savedVersion = Math.max(this.#savedVersion, versionAtStart);
         if (!this.dirty) this.#firstDirtyAt = null;
         if (unauthorized) this.#markTokenDead(current);
