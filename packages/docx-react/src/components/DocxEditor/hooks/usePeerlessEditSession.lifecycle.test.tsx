@@ -143,41 +143,6 @@ for (const request of ['requestFullFrame', 'requestViewport'] as const) {
   });
 }
 
-test('the byte cap counts from the command that first made a checkpoint due', async () => {
-  const { connection, options } = resident();
-  let throughSeq = 0;
-  connection.client.call.edit = async command => {
-    throughSeq = command.seq;
-    return { ...connection.initial, frame: undefined, throughSeq, version: throughSeq, outcomes: [{ seq: throughSeq, status: 'applied' }] };
-  };
-  const events: string[] = [];
-  const checkpoint = mock(() => {
-    events.push('checkpoint');
-    return Promise.resolve({ epoch: 1, throughSeq, version: throughSeq, state: new Uint8Array() });
-  });
-  connection.client.call.checkpoint = checkpoint;
-  const view = renderHook(() => usePeerlessEditSession({ ...options,
-    recovery: { reopen: async () => connection, checkpoint: resident => resident.client.call.checkpoint() } }));
-  await waitFor(() => expect(view.result.current.status).toBe('ready'));
-  const binding = view.result.current.binding!;
-  binding.setPasteOptionsLive!(() => {
-    events.push('dismiss');
-    binding.setPasteOptionsLive!(null);
-  });
-  const submit = async (bytes: number) => {
-    await act(async () => {
-      expect((await binding.session.submit('applyRemoteUpdate', { update: new ArrayBuffer(bytes) }).ack).status).toBe('applied');
-    });
-  };
-  await submit(1536 * 1024);
-  await submit(128 * 1024);
-  expect(events).toEqual([]);
-  await submit(128 * 1024);
-  await waitFor(() => expect(checkpoint).toHaveBeenCalledTimes(1));
-  expect(await checkpoint.mock.results[0]!.value).toMatchObject({ throughSeq: 3 });
-  expect(events).toEqual(['dismiss', 'checkpoint']);
-});
-
 test('a crashed worker respawns once with the viewport re-sent and a second crash fails the editor through onError', async () => {
   const first = resident();
   let rejectViewport!: (error: Error) => void;

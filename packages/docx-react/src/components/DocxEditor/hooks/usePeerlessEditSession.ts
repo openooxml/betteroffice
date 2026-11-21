@@ -209,7 +209,8 @@ export function usePeerlessEditSession(
         };
         let dismissPasteOptions: (() => void) | null = null;
         let pendingChoices = 0;
-        let firstDue: { applied: number } | undefined;
+        let submitted = 0;
+        let firstDue: number | undefined;
         const session = createDocxWorkerEditSession<PeerlessDocumentSource, PeerlessEchoIntent>({
           source, connection: connect(connection), echo: presentation.hooks, coalesce: coalesceInputDrafts,
           holdForCoalescing: holdInputForCoalescing,
@@ -218,17 +219,18 @@ export function usePeerlessEditSession(
           /** A Paste Options choice never lands after a checkpoint that follows its paste, so its replay can never be refused. */
           checkpointPolicy: (stats) => {
             if (stats.applied < 128 && stats.bytes < 1024 * 1024) return false;
-            firstDue ??= stats;
-            if (stats.applied - firstDue.applied >= MAX_DEFERRED_COMMANDS) {
+            firstDue ??= submitted;
+            if (submitted - firstDue >= MAX_DEFERRED_COMMANDS) {
               dismissPasteOptions?.();
             }
             return !dismissPasteOptions && pendingChoices === 0;
           },
           recovery: {
             checkpoint: callbacks.current.recovery?.checkpoint
-              ? (resident) => {
+              ? async (resident) => {
+                const checkpoint = await (callbacks.current.recovery?.checkpoint?.(resident) ?? resident.client.call.checkpoint());
                 firstDue = undefined;
-                return callbacks.current.recovery?.checkpoint?.(resident) ?? resident.client.call.checkpoint();
+                return checkpoint;
               } : undefined,
             onRecovery(event) {
               if (controller.signal.aborted) return;
@@ -281,13 +283,14 @@ export function usePeerlessEditSession(
           pendingChoices++;
           const settled = () => {
             pendingChoices--;
-            if (!pendingChoices && firstDue) void session.flush().catch(() => {});
+            if (!pendingChoices && firstDue !== undefined) void session.flush().catch(() => {});
           };
           void ack.then(settled, settled);
         };
         const submit = session.submit;
         session.submit = (kind, payload, options) => {
           const ticket = submit(kind, payload, options);
+          submitted++;
           if (kind === 'replacePasteFragment') trackPasteChoice(ticket.ack);
           return ticket;
         };
@@ -296,7 +299,7 @@ export function usePeerlessEditSession(
         binding = { session, viewStore, admission, commands: createPeerlessCommandBinding(admission), echoPainter, presentation,
           setPasteOptionsLive(dismiss) {
             dismissPasteOptions = dismiss;
-            if (!dismiss && firstDue) void session.flush().catch(() => {});
+            if (!dismiss && firstDue !== undefined) void session.flush().catch(() => {});
           },
           setDisplayWindow(start, end) {
             displayWindow = { start, end };
