@@ -11,8 +11,7 @@ fn field(code: &str, result: &str) -> String {
 }
 
 #[test]
-fn a_field_held_in_one_run_keeps_its_cached_result_and_instruction_on_a_rewrite_as_on_main()
-{
+fn a_field_held_in_one_run_keeps_its_cached_result_and_instruction_on_a_rewrite_as_on_main() {
     let cases = [
         ("page", field(" PAGE ", "1")),
         ("ref", field(" REF target \\h ", "Cached text")),
