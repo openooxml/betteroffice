@@ -844,6 +844,7 @@ export type PresentationCommandSelectionReference = {
     seq: number;
 };
 export type PresentationCommandMotion = 'left' | 'right' | 'wordLeft' | 'wordRight' | 'lineStart' | 'lineEnd' | 'storyStart' | 'storyEnd' | 'up' | 'down' | 'nextCell' | 'previousCell';
+export type PresentationCommandResizeHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
 export type PresentationCommandFrameTag = Pick<PresentationCommandFrame, 'slideId' | 'slideRevision' | 'coversThroughSeq' | 'documentEpoch' | 'incarnation'>;
 export interface PresentationCommandInput {
     inputTime: number;
@@ -914,9 +915,18 @@ export type PresentationCommandPayloads = {
     });
     setShapeRect: PresentationCommandInput & {
         frame: PresentationCommandFrameTag;
+    } & ({
         target: PresentationCommandObjectTarget;
         rect: ShapeRect;
-    };
+    } | {
+        at: PresentationCommandSelectionReference;
+        shapeId: string;
+        handle: PresentationCommandResizeHandle;
+        delta: {
+            x: number;
+            y: number;
+        };
+    });
     undo: PresentationCommandInput;
     redo: PresentationCommandInput;
     activateSlide: Partial<PresentationCommandInput> & {

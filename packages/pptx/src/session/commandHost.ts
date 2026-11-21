@@ -10,6 +10,7 @@ import { deferReply, transferable, type TransferResult } from '../../../../share
 import { isCommandEnvelope } from '../../../../shared/office-session/commands/types';
 import { isEngineTrap } from '../../../../shared/office-session/trap';
 import { setFontCdnConfiguration, type FontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
+import { resizedShapeRect } from '../../../../shared/office-session/shapeResize';
 import { extendTextRange, graphemeBoundaries, textRangeAt } from '../../../../shared/textSelection';
 import { SessionFailure, type MethodHandlers, type MethodPolicies } from '../../../../shared/office-session/types';
 import type { PptxEditRequest, PptxEditResult, PptxStoryTarget, PptxStoryText, PptxTextField } from '../edits';
@@ -1017,9 +1018,13 @@ export function registerPresentationCommandHandlers(
       return object ? { kind: 'object', object } : 'bad-target';
     }
     if (command.kind === 'moveShape' || command.kind === 'setShapeRect') {
-      const relative = command.kind === 'moveShape' && 'delta' in command.payload ? command.payload : null;
+      const relativeMove = command.kind === 'moveShape' && 'delta' in command.payload ? command.payload : null;
+      const relativeResize = command.kind === 'setShapeRect' && 'delta' in command.payload ? command.payload : null;
+      const relative = relativeMove ?? relativeResize;
       if (relative && (relative.at.source !== 'afterSeq' || relative.at.seq !== throughSeq ||
-        !relative.delta || !Number.isFinite(relative.delta.x) || !Number.isFinite(relative.delta.y))) return 'invalid-payload';
+        !relative.delta || !Number.isFinite(relative.delta.x) || !Number.isFinite(relative.delta.y) ||
+        relativeResize &&
+        !['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'].includes(relativeResize.handle))) return 'invalid-payload';
       const object = relative ? objectSelection?.shapeId === relative.shapeId
         ? transformTarget(objectSelection) : null : 'target' in command.payload ? transformTarget(command.payload.target) : null;
       if (!object) return 'bad-target';
@@ -1032,7 +1037,10 @@ export function registerPresentationCommandHandlers(
         ? { ...object.rect, x: object.rect.x + Math.round(relative.delta.x * object.units.x),
           y: object.rect.y + Math.round(relative.delta.y * object.units.y) }
         : 'x' in command.payload ? { ...object.rect, x: command.payload.x, y: command.payload.y } : null
-        : command.payload.rect;
+        : relativeResize ? resizedShapeRect(object.rect, relativeResize.handle, {
+          x: Math.round(relativeResize.delta.x * object.units.x),
+          y: Math.round(relativeResize.delta.y * object.units.y),
+        }, MIN_SHAPE_SIZE_EMU, object.aspectRatioLocked) : 'rect' in command.payload ? command.payload.rect : null;
       if (!rect || ![rect.x, rect.y, rect.width, rect.height].every(Number.isSafeInteger) ||
         rect.width <= 0 || rect.height <= 0 || !move &&
         (rect.width !== object.rect.width && rect.width < MIN_SHAPE_SIZE_EMU ||

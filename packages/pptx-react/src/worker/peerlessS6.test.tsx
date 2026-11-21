@@ -29,6 +29,8 @@ let client: PresentationCommandClient;
 let commands: PresentationCommandEnvelope[];
 let owner: PptxWorkerSession | undefined;
 let paintedThroughSeq = 0;
+let selectObjectReplyBarrier: Promise<void> | undefined;
+let releaseSelectObjectReply: (() => void) | undefined;
 
 function bounded<T>(promise: Promise<T>): Promise<T> {
   let timer: ReturnType<typeof setTimeout>;
@@ -68,6 +70,8 @@ async function deck(small = false, table: boolean | 'empty' | 'mixed' | 'stacked
 beforeEach(() => {
   commands = [];
   paintedThroughSeq = 0;
+  selectObjectReplyBarrier = undefined;
+  releaseSelectObjectReply = undefined;
   const createPainter = peerlessPainterFactories.frame;
   const painter = spyOn(peerlessPainterFactories, 'frame').mockImplementation((canvas, options) =>
     createPainter(canvas, { ...options, onCommit(frame, view) {
@@ -104,7 +108,13 @@ beforeEach(() => {
     const command = registration.handlers.command;
     const received = spyOn(registration.handlers, 'command').mockImplementation((context, envelope) => {
       commands.push(envelope);
-      return command(context, envelope);
+      const result = command(context, envelope);
+      return envelope.kind === 'selectObject' && selectObjectReplyBarrier
+        ? Promise.resolve(result).then(async (reply) => {
+          await selectObjectReplyBarrier;
+          return reply;
+        })
+        : result;
     });
     restorers.push(() => received.mockRestore());
     createSessionHost<PresentationCommandMethods, PresentationCommandEvents, null>(pair.host, {
@@ -439,6 +449,40 @@ test('released_shape_drag_precedes_immediate_text_click_and_typing', async () =>
   if (!saved.ok) throw new Error(saved.failure.message);
   expect(saved.stories[0]!.text).toBe('al!pha beta\nx\nalpha beta');
   expect(saved.slides[0]!.shapes[0]!.x).toBe(100000 + Math.round(30 * 9144000 / list.width));
+});
+
+test('released text-edit resize precedes immediate text click and typing while selection is delayed', async () => {
+  const { stage, canvas, box, point, list, view } = await open();
+  const line = box.lines[0]!;
+  const stop = line.caretStops.find((stop) => stop.position === 2)!;
+  const textPoint = point(stop.x, line.y + line.height / 2);
+  act(() => { fireEvent.pointerDown(canvas, textPoint); fireEvent.pointerUp(stage, textPoint); });
+  await waitFor(() => expect(client.state.selection).toMatchObject({ storyId: box.storyId, focus: 2 }));
+  const handle = await waitFor(() => view.getByTestId('pptx-resize-e'));
+  selectObjectReplyBarrier = new Promise<void>((resolve) => { releaseSelectObjectReply = resolve; });
+  const since = commands.length;
+  const edge = point(box.x + box.w, box.y + box.h / 2);
+  const input = view.getByRole('textbox', { name: 'Slide text' });
+  act(() => {
+    fireEvent.pointerDown(handle, edge);
+    fireEvent.pointerMove(stage, { ...edge, clientX: edge.clientX + 10, buttons: 1 });
+    fireEvent.pointerUp(stage, { ...edge, clientX: edge.clientX + 30 });
+    fireEvent.pointerDown(canvas, textPoint);
+    fireEvent.pointerUp(stage, textPoint);
+    input.dispatchEvent(new InputEvent('beforeinput', { inputType: 'insertText', data: '!',
+      bubbles: true, cancelable: true }));
+  });
+  await waitFor(() => expect(commands.slice(since).map((command) => command.kind)).toEqual(['selectObject']));
+  await act(async () => { releaseSelectObjectReply!(); });
+  await bounded(client.flush());
+  const ordered = commands.slice(since);
+  expect(ordered.map((command) => command.kind)).toEqual(['selectObject', 'setShapeRect', 'selectAtPoint', 'insertText']);
+  expect(ordered.filter((command) => command.kind === 'setShapeRect')).toHaveLength(1);
+  const saved = (await client.read()).result;
+  expect(saved.ok).toBe(true);
+  if (!saved.ok) throw new Error(saved.failure.message);
+  expect(saved.stories[0]!.text).toBe('al!pha beta\nx\nalpha beta');
+  expect(saved.slides[0]!.shapes[0]!.width).toBe(6000000 + Math.round(30 * 9144000 / list.width));
 });
 
 for (const cellIndex of [0, 1, 2, 3]) {

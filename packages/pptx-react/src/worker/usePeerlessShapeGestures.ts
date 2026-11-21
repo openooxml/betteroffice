@@ -222,9 +222,14 @@ export function usePeerlessShapeGestures(store: PeerlessViewStore | null, {
     };
     if (!current.selected) {
       if (current.handle) {
-        void current.object.then((object) => {
-          if (object) commit(object); else outstanding.current.delete(current);
-        });
+        outstanding.current.delete(current);
+        if (current.cancelled || !presentation?.current || store.getSnapshot().editState.readOnly) return true;
+        const at = peerlessInputReference(store, true);
+        if (at?.source === 'afterSeq') {
+          void store.dispatch({ kind: 'setShapeRect', payload: { at, frame: current.frame,
+            shapeId: current.shapeId, handle: current.handle, delta,
+            inputTime, undoGroup: current.group } }).catch(() => {});
+        }
         return true;
       }
       outstanding.current.delete(current);
