@@ -28,10 +28,12 @@ function isNumberedByStyle(properties: Readonly<Record<string, unknown>>): boole
 /**
  * The attributes that take a paragraph with `properties` off its list: `LIST_OFF_ATTRS`, and for a
  * paragraph its style numbers the `numId` 0 that keeps it off that numbering in the saved file.
+ * `styleNumbers` is the engine's answer for the style the paragraph has now; without it the flag
+ * stored on the paragraph when the file was read decides.
  * @internal
  */
-export function listOffAttrs(properties: Readonly<Record<string, unknown>>): YrsParagraphAttrs {
-  return isNumberedByStyle(properties) ? { ...LIST_OFF_ATTRS, numPr: { numId: 0, ilvl: 0 } } : LIST_OFF_ATTRS;
+export function listOffAttrs(properties: Readonly<Record<string, unknown>>, styleNumbers?: boolean): YrsParagraphAttrs {
+  return (styleNumbers ?? isNumberedByStyle(properties)) ? { ...LIST_OFF_ATTRS, numPr: { numId: 0, ilvl: 0 } } : LIST_OFF_ATTRS;
 }
 
 /**
@@ -41,7 +43,8 @@ export function listOffAttrs(properties: Readonly<Record<string, unknown>>): Yrs
  * @internal
  */
 export function applyListToggle(
-  engine: Pick<YrsSession, 'paragraphs' | 'selectionContext' | 'ensureListDefinition' | 'setParagraphAttrs'>,
+  engine: Pick<YrsSession, 'paragraphs' | 'selectionContext' | 'ensureListDefinition' | 'setParagraphAttrs'>
+    & Partial<Pick<YrsSession, 'paragraphStyleNumbers'>>,
   range: YrsStoryRange,
   kind: 'bullet' | 'numbered',
   suggesting?: YrsAuthor
@@ -53,7 +56,7 @@ export function applyListToggle(
   const lead = paragraphs[start]?.paraId;
   for (const { paraId, properties } of paragraphs.slice(start, end + 1)) {
     const at = { story: range.story, start: { paraId, offset: 0 }, end: { paraId, offset: 0 } };
-    const attrs = remove ? listOffAttrs(properties)
+    const attrs = remove ? listOffAttrs(properties, engine.paragraphStyleNumbers?.(range.story, paraId))
       : engine.ensureListDefinition(range.story, paraId, kind, paraId === lead ? undefined : lead);
     engine.setParagraphAttrs(at, attrs, suggesting);
   }

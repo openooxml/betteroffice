@@ -1943,6 +1943,14 @@ impl StyleResolver {
             .then(|| next.to_owned())
     }
 
+    /// Whether paragraph style `style_id`, or the default paragraph style when it is `None` or
+    /// unknown, numbers its paragraphs: its `numPr`, through `basedOn`, names a list other than 0.
+    pub(crate) fn paragraph_style_numbers(&self, style_id: Option<&str>) -> bool {
+        let style = self.resolve_paragraph_style(style_id);
+        let num_pr = field(style.paragraph.as_ref(), "numPr");
+        num_pr.is_some() && number(field(num_pr, "numId")) != Some(0.0)
+    }
+
     fn default_style(&self, style_type: &str) -> Option<&Value> {
         let id = match style_type {
             "paragraph" => self.default_paragraph.as_deref(),

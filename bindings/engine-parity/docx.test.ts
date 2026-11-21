@@ -3163,6 +3163,16 @@ const rows: Row<Docx>[] = [
     call: ({ session: s }) => s.next_paragraph_style('body', '7FFFFFFF', 0),
   },
   {
+    method: 'EditSession.paragraph_style_numbers',
+    call: ({ session: s }) => ['Parity heading', 'First body'].map((prefix) => s.paragraph_style_numbers('body', paraId(s, prefix))),
+  },
+  {
+    method: 'EditSession.paragraph_style_numbers',
+    name: 'EditSession.paragraph_style_numbers (unknown paragraph)',
+    throws: { name: 'string', reason: 'a paragraph id the story does not hold is refused' },
+    call: ({ session: s }) => s.paragraph_style_numbers('body', '7FFFFFFF'),
+  },
+  {
     method: 'EditSession.paragraph_unit',
     call: ({ session: s }) => [...['Parity heading', 'First body', 'Final'].map((prefix) => paraId(s, prefix)), '7FFFFFFF'].map((id) => s.paragraph_unit('body', id)),
   },

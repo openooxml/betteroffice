@@ -1379,6 +1379,15 @@ impl EditSession {
             .map_err(JsValue::from)
     }
 
+    /// Whether the style the paragraph has now, or the default paragraph style when it names none,
+    /// numbers it: its `numPr`, through `basedOn`, names a list other than 0. `false` for a session
+    /// without a source package.
+    pub fn paragraph_style_numbers(&self, story: &str, para_id: &str) -> Result<bool, JsValue> {
+        self.core
+            .paragraph_style_numbers(story, para_id)
+            .map_err(JsValue::from)
+    }
+
     /// The list definitions the editor created, by key, as JSON.
     pub fn created_list_definitions_json(&self) -> String {
         self.core.created_list_definitions_json()

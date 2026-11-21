@@ -153,7 +153,10 @@ function changeIndent(
       }, suggesting);
     } else if (direction === 'outdent') {
       session.setParagraphAttrs(startRange, {
-        ...listOffAttrs(selection.context.paragraphProperties),
+        ...listOffAttrs(
+          selection.context.paragraphProperties,
+          session.paragraphStyleNumbers?.(selection.range.story, selection.context.paraId)
+        ),
         indentLeft: null,
         indentFirstLine: null,
         hangingIndent: null,
