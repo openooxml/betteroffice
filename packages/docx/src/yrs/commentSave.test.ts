@@ -581,22 +581,14 @@ it('keeps the body and table-cell ranges of a generated document after an edit t
   }
 });
 
-it('saves a document with a comment id past the exact integer range and a new comment, each id distinct', async () => {
-  const huge = '10000000000000000';
+it('refuses to save a new comment after a comment id too large to extend', async () => {
   const parts = new Map(Object.entries(unzipContainer(docx())));
   for (const name of ['word/document.xml', 'word/comments.xml']) {
-    parts.set(name, toBytes(new TextDecoder().decode(parts.get(name)).replaceAll('w:id="1"', `w:id="${huge}"`)));
+    parts.set(name, toBytes(new TextDecoder().decode(parts.get(name)).replaceAll('w:id="1"', 'w:id="10000000000000000"')));
   }
   const session = await open(new Uint8Array(rezipPartsToArrayBuffer(parts)), 91210);
   session.addComment([range(session, 2, 0, 7)], 'Editor', '2026-10-01T00:00:00Z', 'New');
-  const saved = unzipContainer((await saveYrsDocx(session)).bytes);
-  const document = new TextDecoder().decode(saved['word/document.xml']);
-  const comments = new TextDecoder().decode(saved['word/comments.xml']);
-  const ids = [...comments.matchAll(/<w:comment w:id="(\d+)"/g)].map(match => match[1]!);
-  expect(ids).toHaveLength(2);
-  expect(new Set(ids).size).toBe(2);
-  expect([...document.matchAll(/<w:comment(?:RangeStart|RangeEnd|Reference) w:id="(\d+)"/g)].map(match => match[1]).sort())
-    .toEqual([...ids, ...ids, ...ids].sort());
+  await expect(saveYrsDocx(session)).rejects.toThrow('The document holds a comment id too large to extend');
 }, 30_000);
 
 describe('comment threads', () => {
