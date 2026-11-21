@@ -653,6 +653,11 @@ struct StoryRevisions {
     /// Text inserted without revision marks leaves the story's paragraphs,
     /// their properties and its tracked changes as they were.
     marked: HashMap<Arc<str>, u64>,
+    /// The story stamped last, and no lower than the newest revision any
+    /// other story was stamped at: together they tell whether the commits
+    /// since a story last changed touched that story alone.
+    newest: Option<Arc<str>>,
+    others: u64,
 }
 
 /// Inserts plain text into a story's own text and nothing else: no deletion,
@@ -731,7 +736,7 @@ impl StoryRevisions {
         for event in events.iter() {
             match event.path().front() {
                 Some(yrs::types::PathSegment::Key(story)) => {
-                    self.stamped.insert(Arc::clone(story), self.current);
+                    self.touch(story);
                     if !inserts_plain_text(txn, event) {
                         self.marked.insert(Arc::clone(story), self.current);
                     }
@@ -740,7 +745,7 @@ impl StoryRevisions {
                 None => {
                     if let yrs::types::Event::Map(entries) = event {
                         for story in entries.keys(txn).keys() {
-                            self.stamped.insert(Arc::clone(story), self.current);
+                            self.touch(story);
                             self.marked.insert(Arc::clone(story), self.current);
                         }
                     }
@@ -748,9 +753,38 @@ impl StoryRevisions {
             }
         }
     }
+
+    fn touch(&mut self, story: &Arc<str>) {
+        if self.newest.as_deref() != Some(&**story)
+            && let Some(previous) = self.newest.replace(Arc::clone(story))
+        {
+            let revision = self.stamped.get(&previous).copied().unwrap_or(0);
+            self.others = self.others.max(revision);
+        }
+        self.stamped.insert(Arc::clone(story), self.current);
+    }
+
+    /// Whether no story but `story_id` changed since the commit that last changed `story_id`.
+    fn changed_alone(&self, story_id: &str) -> bool {
+        self.newest.as_deref() == Some(story_id)
+            && self
+                .stamped
+                .get(story_id)
+                .is_some_and(|revision| self.others < *revision)
+    }
 }
 
 impl<T> EpochCache<T> {
+    /// Serves the values of `before` at `after` too, all but `story_id`'s, for a commit between
+    /// them that changed no other story.
+    fn carry(&mut self, story_id: &str, before: u64, after: u64) {
+        if self.epoch != before || after <= before {
+            return;
+        }
+        self.entries.remove(story_id);
+        self.epoch = after;
+    }
+
     fn get(&self, story_id: &str, epoch: u64) -> Option<Arc<T>> {
         if self.epoch != epoch {
             return None;
@@ -1202,9 +1236,14 @@ impl EditingDoc {
             text.encode_utf16().count() as i64,
             true,
         );
+        let alone = self.changed_alone(story_id);
         {
             let mut indexes = self.paragraph_indexes.lock().unwrap();
-            if let Some(mut paragraphs) = indexes.take(story_id, before) {
+            let taken = indexes.take(story_id, before);
+            if alone {
+                indexes.carry(story_id, before, after);
+            }
+            if let Some(mut paragraphs) = taken {
                 if Arc::make_mut(&mut paragraphs)
                     .shift_for_text_insert(index, text.encode_utf16().count() as u32)
                 {
@@ -1213,7 +1252,11 @@ impl EditingDoc {
             }
         }
         let mut indexes = self.segment_indexes.lock().unwrap();
-        if let Some(mut segments) = indexes.take(story_id, before) {
+        let taken = indexes.take(story_id, before);
+        if alone {
+            indexes.carry(story_id, before, after);
+        }
+        if let Some(mut segments) = taken {
             let segments_mut = Arc::make_mut(&mut segments);
             let shifted = match attrs {
                 Some(attrs) => {
@@ -1275,21 +1318,35 @@ impl EditingDoc {
             -i64::from(end.saturating_sub(start)),
             false,
         );
+        let alone = self.changed_alone(story_id);
         {
             let mut indexes = self.paragraph_indexes.lock().unwrap();
-            if let Some(mut paragraphs) = indexes.take(story_id, before) {
+            let taken = indexes.take(story_id, before);
+            if alone {
+                indexes.carry(story_id, before, after);
+            }
+            if let Some(mut paragraphs) = taken {
                 if Arc::make_mut(&mut paragraphs).shift_for_text_delete(start, end) {
                     indexes.insert(story_id, after, paragraphs);
                 }
             }
         }
         let mut indexes = self.segment_indexes.lock().unwrap();
-        if let Some(mut segments) = indexes.take(story_id, before) {
+        let taken = indexes.take(story_id, before);
+        if alone {
+            indexes.carry(story_id, before, after);
+        }
+        if let Some(mut segments) = taken {
             if Arc::make_mut(&mut segments).shift_for_text_delete(start, end) {
                 indexes.insert(story_id, after, segments);
             }
         }
         self.advance_table_membership(before, after);
+    }
+
+    /// Whether no story but `story_id` changed since the commit that last changed `story_id`.
+    fn changed_alone(&self, story_id: &str) -> bool {
+        self.story_revisions.lock().unwrap().changed_alone(story_id)
     }
 
     fn advance_table_membership(&self, before: u64, after: u64) {
