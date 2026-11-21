@@ -468,6 +468,50 @@ for (const tracked of [false, true]) {
   });
 }
 
+test('attached DOCX preserves target edits made by a withdrawal listener', async () => {
+  const owner = await openDocx(await fixture());
+  const doc = attachDocx(owner.session);
+  let unsubscribe = () => {};
+  try {
+    const hit = doc.grep({ query: 'Executive summary' }).matches[0];
+    const proposal = doc.propose({ author: 'Agent', edits: [{ match: hit.match, newText: 'Updated summary' }] });
+    const [record] = owner.session.getProposals().proposals;
+    let edited = false;
+    unsubscribe = owner.session.onProposalChange(snapshot => {
+      if (edited || snapshot.proposals.some(value => value.id === record.id)) return;
+      edited = true;
+      owner.session.insertText({ story: record.paragraph.story, paraId: record.paragraph.paraId, offset: 0 }, 'Listener ');
+    });
+    await expect(doc.accept(proposal.id)).rejects.toMatchObject({ code: 'STALE_TARGET', details: { withdrawn: true } });
+    expect(edited).toBe(true);
+    expect(doc.read(hit.ref).text).toBe('Listener Executive summary');
+    expect(owner.session.getProposals().proposals).toHaveLength(0);
+    expect(doc.review(proposal.id).status).toBe('rejected');
+  } finally { unsubscribe(); doc.close(); owner.close(); }
+});
+
+test('attached DOCX reports accepted records during and after local acceptance', async () => {
+  const owner = await openDocx(await fixture());
+  const doc = attachDocx(owner.session);
+  let unsubscribe = () => {};
+  try {
+    const hits = ['Executive', 'summary'].map(query => doc.grep({ query }).matches[0]);
+    const proposal = doc.propose({ author: 'Agent', edits: hits.map((hit, index) => ({ match: hit.match, newText: ['Updated', 'overview'][index] })) });
+    expect(proposal.records).toHaveLength(2);
+    const records = proposal.records!.map(({ id }) => ({ id, state: 'accepted' }));
+    const observed: ReturnType<typeof doc.review>[] = [];
+    unsubscribe = owner.session.onUpdate(() => {
+      if (!owner.session.getProposals().proposals.length && doc.read(hits[0].ref).text === 'Updated overview') observed.push(doc.review(proposal.id));
+    });
+    await doc.accept(proposal.id);
+    expect(observed.length).toBeGreaterThan(0);
+    for (const value of observed) expect(value).toMatchObject({ status: 'accepted', records });
+    expect(doc.review(proposal.id)).toMatchObject({ status: 'accepted', records });
+    expect(doc.listProposals().find(value => value.id === proposal.id)).toMatchObject({ status: 'accepted', records });
+    expect(doc.read(hits[0].ref).text).toBe('Updated overview');
+  } finally { unsubscribe(); doc.close(); owner.close(); }
+});
+
 for (const phase of ['dry-run', 'withdrawal'] as const) {
   test(`attached DOCX keeps a failed ${phase} acceptance pending and retryable`, async () => {
     const owner = await openDocx(await fixture());

@@ -634,6 +634,7 @@ export class DocxAgentDocument {
       this.checkDecisionReferences(before, held);
       this.proposalOperation = { withdrawal: ids, withdrawalSnapshot: snapshot, snapshots: [] };
       const result = this.session.withdrawProposals({ ids, expectVersion: snapshot.version, expectPreviewVersion: snapshot.previewVersion, keepRevisions: false });
+      const withdrawnVersion = this.session.version();
       if (result.ok) {
         withdrawn = true;
         held.localDecision = 'rejected';
@@ -642,17 +643,19 @@ export class DocxAgentDocument {
       this.finishProposalOperation(result);
       const settled = this.proposalResult(result, held.value.changes);
       this.checkDecisionReferences(before, held);
-      if (this.session.version() !== settled.version) throw new DocumentToolError('STALE_TARGET', 'The document changed after proposal withdrawal.', { id: held.value.id });
       draft.applyUpdate(this.session.encodeStateAsUpdate(draft.encodeStateVector()));
+      const stale = this.staleRefs(held);
+      if (stale.length) this.stale(stale);
+      if (this.session.version() !== settled.version || this.session.version() !== withdrawnVersion) throw new DocumentToolError('STALE_TARGET', 'The document changed after proposal withdrawal.', { id: held.value.id });
       const vector = draft.encodeStateVector();
       this.apply(draft, held, author);
       const update = draft.encodeStateAsUpdate(vector);
       this.session.addUndoBoundary();
       try {
-        this.session.applyLocalUpdate(update);
-        applied = true;
         held.localDecision = 'accepted';
         held.value.status = 'accepted';
+        this.session.applyLocalUpdate(update);
+        applied = true;
       } finally { this.session.addUndoBoundary(); }
       this.preserveReferences(before, this.session.version(), this.agentDecisionChanges(held, 'accepted', options.tracked ?? false));
       this.checkDecisionReferences(before, held);
@@ -660,7 +663,11 @@ export class DocxAgentDocument {
     } catch (error) {
       if (this.proposalOperation) this.finishProposalOperation();
       if (withdrawn) {
-        if (!applied) this.preserveReferences(before, this.session.version());
+        if (!applied) {
+          held.localDecision = 'rejected';
+          held.value.status = 'rejected';
+          this.preserveReferences(before, this.session.version());
+        }
         throw release.failed(new DocumentToolError(error instanceof DocumentToolError ? error.code : 'ACCEPT_FAILED', error instanceof Error ? error.message : String(error), {
           ...(error instanceof DocumentToolError ? error.details : undefined), withdrawn: true, id: held.value.id, status: this.settledStatus(held), ...(applied && { applied: true }),
         }));
@@ -1114,7 +1121,7 @@ export class DocxAgentDocument {
         else held.registered.delete(record.id);
         return current;
       });
-      held.value.records = held.engine.map(({ id, state }) => ({ id, state }));
+      held.value.records = held.engine.map(({ id, state }) => ({ id, state: held.localDecision ?? state }));
       held.value.status = held.localDecision ?? (held.engine.some(record => record.state === 'proposed') ? 'pending' : this.settledStatus(held));
       if (!held.registered.size) this.forgetProposalOwnership(held);
     }
