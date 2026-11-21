@@ -131,9 +131,10 @@ export const LIST_LAYOUT = JSON.stringify({
  * K: `SINGLE_BULLET` of the one-level bullet list 1, directly above `PLAIN`. L: `HEADING`, numbered
  * by its style's indented list 1 with the style's left indent in character units, above
  * `UNINDENTED_ITEM` of the decimal list 6, whose level gives no indent. M: as H, with a list 5
- * whose level gives a left indent and no hanging indent.
+ * whose level gives a left indent and no hanging indent. N: `HYBRID_BULLET` at the bullet level 1
+ * of the hybrid list 1, directly above `PLAIN`.
  */
-export type ListDocument = 'A' | 'B' | 'C' | 'D' | 'E' | 'F' | 'G' | 'H' | 'I' | 'J' | 'K' | 'L' | 'M';
+export type ListDocument = 'A' | 'B' | 'C' | 'D' | 'E' | 'F' | 'G' | 'H' | 'I' | 'J' | 'K' | 'L' | 'M' | 'N';
 export type ListKind = 'bullet' | 'numbered';
 export interface ListDocumentOptions {
   /** Puts `GAP` directly above `PLAIN`. */
@@ -149,7 +150,7 @@ export interface ListDocumentOptions {
 /** The `w:numId`s of the numbering each document opens with. */
 export const SOURCE_NUM_IDS: Readonly<Record<ListDocument, readonly string[]>> = {
   A: ['1', '2', '3'], B: ['1'], C: [], D: ['1'], E: ['1'], F: ['1', '2'], G: ['2', '7'], H: ['5'], I: ['2', '7'], J: ['5', '6'], K: ['1', '2'], L: ['1', '6'],
-  M: ['5'],
+  M: ['5'], N: ['1'],
 };
 
 export async function preloadListWasm(): Promise<void> {
@@ -207,7 +208,7 @@ export function listDocument(doc: ListDocument, options: ListDocumentOptions = {
       CHARACTER_HEADING_NUMBERING, undefined, CHARACTER_HEADING_STYLES
     );
   }
-  if (doc === 'E' || doc === 'F' || doc === 'G' || doc === 'H' || doc === 'I' || doc === 'J' || doc === 'K' || doc === 'M') {
+  if (doc === 'E' || doc === 'F' || doc === 'G' || doc === 'H' || doc === 'I' || doc === 'J' || doc === 'K' || doc === 'M' || doc === 'N') {
     const opening = {
       E: item(HYBRID_BULLET, 1, 0) + item(HYBRID_NUMBER, 1, 2),
       F: item(SINGLE_BULLET, 1, 0) + item(DEEP_NUMBER, 2, 2),
@@ -218,10 +219,12 @@ export function listDocument(doc: ListDocument, options: ListDocumentOptions = {
         item(UNINDENTED_ITEM, 6, 0),
       K: item(SINGLE_BULLET, 1, 0),
       M: item(INDENTED_ITEM, 5, 0),
+      N: item(HYBRID_BULLET, 1, 1),
     }[doc];
     const numbering = {
       E: HYBRID_NUMBERING, F: SINGLE_LEVEL_NUMBERING, G: TWO_DECIMAL_NUMBERING, H: INDENTED_NUMBERING, I: DEEP_SEVEN_NUMBERING,
       J: CHARACTER_INDENT_NUMBERING, K: SINGLE_LEVEL_NUMBERING, M: LEFT_ONLY_NUMBERING,
+      N: HYBRID_NUMBERING,
     }[doc];
     return pack(`${XML}<w:document xmlns:w="${W}"><w:body>${opening}${added}${SECT}</w:body></w:document>`, numbering);
   }
@@ -902,6 +905,20 @@ export function listCommandScenarios(path: string, open: OpenListCommandDriver, 
     expect(character.marker).not.toBeNull();
     expect(propertiesOf(driver, CHARACTER_ITEM).numPr).toMatchObject({ numId: 5, ilvl: 0 });
     expect(propertiesOf(driver, UNINDENTED_ITEM).numPr).toMatchObject({ numId: 6, ilvl: 0 });
+  }, timeout);
+
+  test(`${path}: bullets below a bullet item indented onto a numbered level of its list stay bullets after a save and a reopen`, async () => {
+    const driver = await open('N');
+    driver.indent('increase', HYBRID_BULLET);
+    driver.toggle('bullet', PLAIN);
+    const live = driver.marker(PLAIN) ?? '';
+    const bytes = await driver.save();
+    const reopened = await open('N', { saved: bytes });
+    expect(savedLevel(bytes, PLAIN)).toMatchObject({ numFmt: 'bullet' });
+    expect(reopened.marker(PLAIN) ?? '').toBe(live);
+    expect(live).not.toMatch(/\d/);
+    expect(live).not.toBe('');
+    expect(propertiesOf(driver, HYBRID_BULLET).numPr).toMatchObject({ numId: 1, ilvl: 2 });
   }, timeout);
 
   test(`${path}: bullets below an item of a list whose level gives a left indent and no hanging indent lay the paragraph out as after reopening`, async () => {

@@ -316,18 +316,51 @@ fn definitions_from_a_peer_are_read_as_nine_levels_of_xml_text() {
 
 #[test]
 fn a_neighbour_whose_format_is_bullet_is_a_bullet_list() {
-    let doc = seeded(707, &[("Source", Some(1)), ("Next", None), ("Tail", None)]);
+    let doc = EditingDoc::new(707);
+    let body = levelled_body(&[("Source", 1, 0)]);
+    seed_from_docx(&doc, &numbered_docx(&body, None, SINGLE_LEVEL_NUMBERING)).unwrap();
+    let source = paragraph_id(&doc, "Source");
+    doc.set_paragraph_attr(&source, "listIsBullet", Any::Null)
+        .unwrap();
+    create(&doc, "End", ListKind::Bullet);
+    let joined = ListIdentity::Source {
+        num_id: 1.0,
+        level: 0.0,
+    };
+    assert_eq!(resolve_list_identity(&attrs(&doc, "End")), Some(joined));
+    assert!(doc.created_list_definitions().is_empty());
+}
+
+#[test]
+fn a_neighbour_stored_as_a_bullet_on_a_numbered_level_is_no_bullet_list() {
+    let doc = seeded(725, &[("Source", Some(1)), ("Next", None), ("Tail", None)]);
     let source = paragraph_id(&doc, "Source");
     doc.set_paragraph_attr(&source, "listIsBullet", Any::Null)
         .unwrap();
     doc.set_paragraph_attr(&source, "listNumFmt", Any::from("bullet"))
         .unwrap();
     create(&doc, "Next", ListKind::Bullet);
+    let written = attrs(&doc, "Next");
+    assert!(created_key(&doc, "Next").is_some(), "{written:?}");
+    assert_eq!(doc.created_list_definitions().len(), 1);
+}
+
+#[test]
+fn a_neighbour_stored_as_a_bullet_on_a_numbered_level_is_a_numbered_list() {
+    let doc = seeded(726, &[("Source", Some(1)), ("Next", None), ("Tail", None)]);
+    let source = paragraph_id(&doc, "Source");
+    doc.set_paragraph_attr(&source, "listIsBullet", Any::Bool(true))
+        .unwrap();
+    doc.set_paragraph_attr(&source, "listNumFmt", Any::from("bullet"))
+        .unwrap();
+    create(&doc, "Next", ListKind::Numbered);
     let joined = ListIdentity::Source {
         num_id: 1.0,
         level: 0.0,
     };
-    assert_eq!(resolve_list_identity(&attrs(&doc, "Next")), Some(joined));
+    let written = attrs(&doc, "Next");
+    assert_eq!(resolve_list_identity(&written), Some(joined));
+    assert_eq!(written.get("listNumFmt"), Some(&Any::from("decimal")));
     assert!(doc.created_list_definitions().is_empty());
 }
 
