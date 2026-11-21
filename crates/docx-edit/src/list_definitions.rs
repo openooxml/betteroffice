@@ -351,9 +351,10 @@ fn created_attrs(kind: ListKind, key: &str, level: f64) -> BTreeMap<String, Any>
 }
 
 /// The attributes that put a paragraph on the source list of its neighbour with `values`, at
-/// `level` when given, else at the neighbour's, when the list shows as `kind` there. The list
-/// qualifies only at a level `source` renders, where there is a `source`. At the neighbour's level
-/// the list attributes are the neighbour's; at another level they are those seeding stores for it.
+/// `level` when given, else at the neighbour's, when the list is of `kind` there. With a `source`
+/// the list qualifies only at a level `source` renders, and its kind and the list attributes are
+/// those seeding stores for that level; the neighbour's own are used only without a `source`, and
+/// then only at the neighbour's level.
 fn source_attrs(
     values: &BTreeMap<String, Any>,
     kind: ListKind,
@@ -372,9 +373,9 @@ fn source_attrs(
         None => None,
     };
     let from = match rendered.as_ref() {
-        Some(rendered) if target != own => rendered,
+        Some(rendered) => rendered,
         None if target != own => return None,
-        _ => values,
+        None => values,
     };
     if shown_kind(from) != kind {
         return None;
@@ -383,9 +384,12 @@ fn source_attrs(
         .into_iter()
         .map(|key| (key.to_owned(), from.get(key).cloned().unwrap_or(Any::Null)))
         .collect();
-    if level.is_some() {
-        attrs.insert("numPr".to_owned(), Any::from(num_pr));
-    }
+    let written = if level.is_some() {
+        num_pr
+    } else {
+        (**theirs).clone()
+    };
+    attrs.insert("numPr".to_owned(), Any::from(written));
     attrs.insert(LIST_DEF.to_owned(), Any::Null);
     attrs.insert(LIST_LEVEL_INDENTS.to_owned(), Any::Bool(true));
     Some(attrs)
