@@ -154,6 +154,30 @@ test('attached DOCX keeps unidentified engine protection refusals out of revisio
   } finally { doc.close(); owner.close(); }
 });
 
+test('attached DOCX refuses a stale insertion after accepting a change to its common prefix', async () => {
+  const owner = await openDocx(await fixture());
+  const doc = attachDocx(owner.session);
+  try {
+    const executive = doc.grep({ query: 'Executive' }).matches[0];
+    const summary = doc.grep({ query: 'Executive summary' }).matches[0];
+    const first = doc.propose({ author: 'Agent', edits: [{ match: executive.match, newText: 'Quarterly report' }] });
+    const second = doc.propose({ author: 'Agent', edits: [{ match: summary.match, newText: 'Executive summary proposed' }] });
+    await doc.accept(first.id);
+    const text = doc.read(summary.ref).text;
+    expect(text).toBe('Quarterly report summary');
+    expect(doc.review(second.id).staleRefs).toEqual([]);
+    const state = owner.session.encodeState();
+    const pending = owner.session.getProposals();
+    await expect(doc.accept(second.id)).rejects.toMatchObject({
+      code: 'STALE_TARGET', message: 'Target text changed. Read fresh targets and create a new proposal.',
+    });
+    expect(doc.read(summary.ref).text).toBe(text);
+    expect(owner.session.encodeState()).toEqual(state);
+    expect(owner.session.getProposals()).toEqual(pending);
+    expect(doc.review(second.id)).toMatchObject({ status: 'pending', records: [{ state: 'proposed' }] });
+  } finally { doc.close(); owner.close(); }
+});
+
 test('attached DOCX sends the known trimmed offset for overlapping replacement text', async () => {
   for (const sample of [
     { text: 'aaab', oldText: 'aab', start: 1, newText: 'ccb', search: 'aa', replaceWith: 'cc', expected: 'accb' },
@@ -510,6 +534,33 @@ test('attached DOCX reports accepted records during and after local acceptance',
     expect(doc.listProposals().find(value => value.id === proposal.id)).toMatchObject({ status: 'accepted', records });
     expect(doc.read(hits[0].ref).text).toBe('Updated overview');
   } finally { unsubscribe(); doc.close(); owner.close(); }
+});
+
+test('attached DOCX keeps status and records consistent for update listeners registered before attachment', async () => {
+  const owner = await openDocx(await fixture());
+  let accepting = false;
+  const observed: Array<{ status: string; states: string[] }> = [];
+  const unsubscribe = owner.session.onUpdate(() => {
+    if (!accepting) return;
+    for (const proposal of doc.listProposals()) {
+      for (const value of [proposal, doc.review(proposal.id)]) {
+        observed.push({ status: value.status, states: value.records!.map(record => record.state) });
+      }
+    }
+  });
+  const doc = attachDocx(owner.session);
+  try {
+    const hits = ['Executive', 'summary'].map(query => doc.grep({ query }).matches[0]);
+    const proposal = doc.propose({ author: 'Agent', edits: hits.map((hit, index) => ({ match: hit.match, newText: ['Updated', 'overview'][index] })) });
+    accepting = true;
+    await doc.accept(proposal.id);
+    expect(observed.some(value => value.status === 'accepted')).toBe(true);
+    for (const { status, states } of observed) {
+      const expected = status === 'pending' ? 'proposed' : status;
+      expect(states).toEqual([expected, expected]);
+    }
+    expect(doc.read(hits[0].ref).text).toBe('Updated overview');
+  } finally { accepting = false; unsubscribe(); doc.close(); owner.close(); }
 });
 
 for (const phase of ['dry-run', 'withdrawal'] as const) {

@@ -606,6 +606,12 @@ export class DocxAgentDocument {
     return { id, status: this.settledStatus(held), tracked: options.tracked ?? false, changes: held.value.changes.length };
   }
 
+  private setLocalDecision(held: HeldProposal, state: 'accepted' | 'rejected') {
+    held.localDecision = state;
+    held.value.status = state;
+    held.value.records = held.engine.map(({ id }) => ({ id, state }));
+  }
+
   private async acceptAttached(held: HeldProposal, options: { tracked?: boolean; date?: string }) {
     this.checkPending(held);
     const before = this.captureReferences();
@@ -637,8 +643,7 @@ export class DocxAgentDocument {
       const withdrawnVersion = this.session.version();
       if (result.ok) {
         withdrawn = true;
-        held.localDecision = 'rejected';
-        held.value.status = 'rejected';
+        this.setLocalDecision(held, 'rejected');
       }
       this.finishProposalOperation(result);
       const settled = this.proposalResult(result, held.value.changes);
@@ -652,8 +657,7 @@ export class DocxAgentDocument {
       const update = draft.encodeStateAsUpdate(vector);
       this.session.addUndoBoundary();
       try {
-        held.localDecision = 'accepted';
-        held.value.status = 'accepted';
+        this.setLocalDecision(held, 'accepted');
         this.session.applyLocalUpdate(update);
         applied = true;
       } finally { this.session.addUndoBoundary(); }
@@ -664,8 +668,7 @@ export class DocxAgentDocument {
       if (this.proposalOperation) this.finishProposalOperation();
       if (withdrawn) {
         if (!applied) {
-          held.localDecision = 'rejected';
-          held.value.status = 'rejected';
+          this.setLocalDecision(held, 'rejected');
           this.preserveReferences(before, this.session.version());
         }
         throw release.failed(new DocumentToolError(error instanceof DocumentToolError ? error.code : 'ACCEPT_FAILED', error instanceof Error ? error.message : String(error), {
@@ -1378,11 +1381,25 @@ export class DocxAgentDocument {
     const ids = new Set(held.engine.map(record => record.id));
     const snapshot = this.attached ? this.proposalSnapshot ?? this.session.getProposals() : undefined;
     const previews = snapshot && { ...snapshot, proposals: snapshot.proposals.filter(record => !ids.has(record.id)) };
-    const changes = held.value.changes.map(trimChange).sort((a, b) => a.ref.localeCompare(b.ref) || b.start - a.start);
-    for (const change of changes) {
+    const changes = held.value.changes.map(original => ({ original, change: trimChange(original) }))
+      .sort((a, b) => a.change.ref.localeCompare(b.change.ref) || b.change.start - a.change.start);
+    for (const { original, change } of changes) {
       if (!change.oldText && !change.newText) continue;
       const { story, paraId } = held.targets.get(change.ref)!;
       const mapped = previews?.proposals.some(record => record.paragraph.story === story && record.paragraph.paraId === paraId) ? previews : undefined;
+      let segments: YrsStorySegment[] = [];
+      let found = false;
+      for (const segment of draft.storySegments(story)) {
+        if (segment.kind !== 'pilcrow') { segments.push(segment); continue; }
+        if (segment.paraId === paraId) { found = true; break; }
+        segments = [];
+      }
+      const text = (mapped ? this.projectSegments(segments, mapped) : segments).map(segment => segment.kind === 'text' ? segment.text : '\ufffc').join('');
+      const expected = change.oldText ? change : original;
+      if (!found || expected.start < 0 || expected.start + expected.oldText.length > text.length
+        || text.slice(expected.start, expected.start + expected.oldText.length) !== expected.oldText) {
+        throw new DocumentToolError('STALE_TARGET', 'Target text changed. Read fresh targets and create a new proposal.');
+      }
       const start = mapped ? this.previewOffset(draft, story, paraId, change.start, mapped, true) : change.start;
       const end = !change.oldText ? start : mapped ? this.previewOffset(draft, story, paraId, change.start + change.oldText.length, mapped) : change.start + change.oldText.length;
       draft.replaceRange({ story, start: { paraId, offset: start }, end: { paraId, offset: end } }, change.newText, author);
