@@ -2287,14 +2287,18 @@ export function documentToYrs(
   options: YrsOpeningOptions = {}
 ): void {
   const restoreGroups = recoverGroupedStorySeeds(document, () => sessionMaterializedSource(session));
+  const digests = new Map<ComplexField, string | undefined>();
   let restore = () => {};
-  let restoreDigests = () => {};
   try {
     const untouched = untouchedFieldRuns(document);
     restore = seedFontNames(document);
-    restoreDigests = restampFieldRuns(untouched);
+    restampFieldRuns(untouched, digests);
     seedDocument(session, document, options);
-  } finally { restoreDigests(); restore(); restoreGroups(); }
+  } finally {
+    for (const [field, digest] of digests) if (field.sourceRunDigest !== digest) field.sourceRunDigest = digest;
+    restore();
+    restoreGroups();
+  }
 }
 
 /** The engine's digest of `field`, which the writer compares the field's `sourceRunDigest` with. */
@@ -2323,17 +2327,14 @@ function untouchedFieldRuns(document: Document): ComplexField[] {
   return fields;
 }
 
-/** Sets each field's digest to the digest of the field as it now is, inner fields first; the returned function restores them. */
-function restampFieldRuns(fields: ComplexField[]): () => void {
-  const restore: Array<() => void> = [];
+/** Sets each field's digest to the digest of the field as it now is, inner fields first, recording each digest it replaces in `originals` first. */
+function restampFieldRuns(fields: ComplexField[], originals: Map<ComplexField, string | undefined>): void {
   for (const field of [...fields].reverse()) {
-    const original = field.sourceRunDigest;
     const digest = fieldRunDigest(field);
-    if (digest === undefined || digest === original) continue;
+    if (digest === undefined || digest === field.sourceRunDigest) continue;
+    if (!originals.has(field)) originals.set(field, field.sourceRunDigest);
     field.sourceRunDigest = digest;
-    restore.push(() => { field.sourceRunDigest = original; });
   }
-  return () => { restore.reverse().forEach(reset => reset()); };
 }
 
 function seedDocument(

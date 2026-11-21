@@ -1371,7 +1371,8 @@ pub struct ComplexField {
     /// of the field while the field digests to `source_run_digest`.
     #[serde(rename = "sourceRunXml", skip_serializing_if = "Option::is_none")]
     pub source_run_xml: Option<String>,
-    /// The digest of the field as parsed from `source_run_xml`.
+    /// The digest of the field as stored. It equals the digest of the field as parsed from
+    /// `source_run_xml` until a loader has filled in the field's theme fonts.
     #[serde(rename = "sourceRunDigest", skip_serializing_if = "Option::is_none")]
     pub source_run_digest: Option<String>,
     #[serde(rename = "structuredCode", skip_serializing_if = "Option::is_none")]
