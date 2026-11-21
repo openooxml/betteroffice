@@ -243,6 +243,38 @@ test('worker: a paragraph moved to another list by a paragraph-attribute write l
   expect(level.listLevelIndents).toBe(true);
 }, TIMEOUT);
 
+test('worker: one toggle over plain paragraphs asks the engine for a list once and for each style once', async () => {
+  const arm = await openCommandEngine(undefined, { bytes: listDocument('C'), clientId: ++clientId });
+  const paragraphs = () => arm.engine.paragraphs('body');
+  const first = paragraphs()[0]!;
+  const last = paragraphs()[paragraphs().length - 1]!;
+  const counted = (name: 'ensureListDefinition' | 'paragraphStyleNumbers') => {
+    const engine = arm.engine as unknown as Record<string, (...args: unknown[]) => unknown>;
+    const original = engine[name]!.bind(arm.engine);
+    let calls = 0;
+    engine[name] = (...args) => { calls += 1; return original(...args); };
+    return () => calls;
+  };
+  const ensured = counted('ensureListDefinition');
+  const styled = counted('paragraphStyleNumbers');
+  const toggle = () => expect(execute(arm, command(arm, 'toggleList', { selection: {
+    anchor: { story: 'body', paraId: first.paraId, offset: 0 },
+    focus: { story: 'body', paraId: last.paraId, offset: last.text.length },
+  }, kind: 'bullet' }))).toMatchObject({ status: 'applied' });
+  toggle();
+  const on = paragraphs();
+  toggle();
+  const styles = new Set(on.map(entry => entry.properties.pStyle)).size;
+  expect(ensured()).toBe(1);
+  expect(styled()).toBe(styles);
+  expect(new Set(on.map(entry => createdListKey(entry.properties))).size).toBe(1);
+  expect(on.every(entry => createdListKey(entry.properties) !== undefined)).toBe(true);
+  expect(on.every(entry => entry.properties.listLevelIndents === true)).toBe(true);
+  expect(paragraphs().every(entry => entry.properties.numPr == null)).toBe(true);
+  expect(styles).toBeLessThan(on.length);
+  expect(on.length).toBeGreaterThan(3);
+}, TIMEOUT);
+
 test('a session written before the style question still satisfies the session type', () => {
   const adapter = {} as Omit<YrsSession, 'paragraphStyleNumbers'>;
   const session: YrsSession = adapter;
