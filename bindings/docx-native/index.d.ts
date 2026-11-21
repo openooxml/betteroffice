@@ -215,6 +215,8 @@ export declare class EditSession {
   set_style_language(styleId: string | undefined | null, slotsJson: string): boolean
   patch_style_languages_xml(source: string): string
   ensure_list_definition(story: string, paraId: string, kind: string): string
+  ensure_list_definition_after(story: string, paraId: string, kind: string, lead?: string | undefined | null): string
+  paragraph_style_numbers(story: string, paraId: string): boolean | undefined
   created_list_definitions_json(): string
   list_definition_keys_in_use_json(): string
   set_document_property(key: string, json: string): boolean
