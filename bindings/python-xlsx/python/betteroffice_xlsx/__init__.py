@@ -317,8 +317,8 @@ class Workbook:
         if len(after_keys) != self.sheet_count:
             raise RuntimeError("sheet handle keys do not match the workbook's sheet count")
         if history_step is None and after_depth > before_depth:
-            for depth in range(before_depth + 1, before_depth + before_history.redo_depth + 1):
-                self._sheet_history.pop(depth, None)
+            for depth in [depth for depth in self._sheet_history if depth > before_depth]:
+                del self._sheet_history[depth]
             self._sheet_history[after_depth] = (before_keys, after_keys)
         self._sheet_keys = after_keys
         return result
