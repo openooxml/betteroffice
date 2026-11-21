@@ -300,7 +300,7 @@ async function createCommandClient(
   const unpipe = rpc.on('collaborationPipe', receivePipe);
   const unfailure = rpc.onFailure(fail);
   const fence = (seq = sentThroughSeq) => ({ ...identity, seq });
-  type SharedPayload = { intent: PresentationCommandIntent; basis: PresentationCommandBasis; refreshSelectionFrame?: boolean };
+  type SharedPayload = { intent: PresentationCommandIntent; basis: PresentationCommandBasis; waitForAfter: boolean };
   const replies = new Map<number, PresentationCommandAck>();
   const unacknowledged = new Map<number, PresentationPendingIntent>();
   const tickets = new Map<number, CommandTicket>();
@@ -322,16 +322,18 @@ async function createCommandClient(
             let { basis, intent: draft } = envelope.payload;
             const reference = 'at' in draft.payload ? draft.payload.at : undefined;
             const afterSeq = envelope.afterSeq ?? (reference?.source === 'afterSeq' ? reference.seq : undefined);
-            if (draft.kind === 'selectObject' && envelope.payload.refreshSelectionFrame &&
-              afterSeq === latestSharedAck!.throughSeq) {
-              const frame = latestSharedAck!.frame?.payload;
+            if (afterSeq !== undefined && envelope.payload.waitForAfter &&
+              (draft.kind === 'selectObject' && 'shapeId' in draft.payload ||
+                draft.kind === 'setShapeRect' && 'delta' in draft.payload)) {
+              const frame = replies.get(afterSeq)?.frame ??
+                (afterSeq === latestSharedAck!.throughSeq ? latestSharedAck!.frame?.payload : undefined);
               const previous = draft.payload.frame;
               if (frame && frame.coversThroughSeq === afterSeq && frame.slideId === previous.slideId &&
                 frame.documentEpoch === previous.documentEpoch && frame.incarnation === previous.incarnation) {
                 const { slideId, slideRevision, coversThroughSeq, documentEpoch, incarnation } = frame;
                 draft = { ...draft, payload: { ...draft.payload, frame: {
                   slideId, slideRevision, coversThroughSeq, documentEpoch, incarnation,
-                } } };
+                } } } as typeof draft;
                 basis = { epoch: documentEpoch, version: frame.version };
               }
             }
@@ -381,8 +383,7 @@ async function createCommandClient(
     submit(intent, basis, after, waitForAfter = false) {
       const reference = 'at' in intent.payload ? intent.payload.at : undefined;
       const predecessor = after ?? (reference?.source === 'afterSeq' ? tickets.get(reference.seq) : undefined);
-      const refreshSelectionFrame = waitForAfter && intent.kind === 'selectObject';
-      const ticket = editSession.submit(intent.kind, { intent, basis, ...(refreshSelectionFrame ? { refreshSelectionFrame } : {}) }, {
+      const ticket = editSession.submit(intent.kind, { intent, basis, waitForAfter }, {
         ...(predecessor ? { after: predecessor } : {}),
         ...(waitForAfter ? { waitForAfter: true } : {}),
       });

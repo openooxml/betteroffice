@@ -1021,7 +1021,8 @@ export function registerPresentationCommandHandlers(
       const relativeMove = command.kind === 'moveShape' && 'delta' in command.payload ? command.payload : null;
       const relativeResize = command.kind === 'setShapeRect' && 'delta' in command.payload ? command.payload : null;
       const relative = relativeMove ?? relativeResize;
-      if (relative && (relative.at.source !== 'afterSeq' || relative.at.seq !== throughSeq ||
+      if (relative && (relative.at.source !== 'afterSeq' || relative.at.seq !== throughSeq &&
+        !(relativeResize?.frame && relativeResize.frame.coversThroughSeq <= relative.at.seq) ||
         !relative.delta || !Number.isFinite(relative.delta.x) || !Number.isFinite(relative.delta.y) ||
         relativeResize &&
         !['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'].includes(relativeResize.handle))) return 'invalid-payload';

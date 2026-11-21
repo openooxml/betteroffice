@@ -419,6 +419,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
       cancelTickets(removed.map((entry) => entry.tickets[0]!), 'dependency-refused');
       if (removed.length < 64) {
         if (waitingReads.size) checkReads();
+        if (tickets.length === 0 && !synchronous) queueMicrotask(wake);
         return;
       }
       if (!synchronous) {
