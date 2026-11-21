@@ -122,14 +122,16 @@ DOCX pending proposals are live tracked changes in the shared editor session.
 Editor save includes them as tracked changes; agent read, grep and default export
 project the original text. Export with a proposal ID projects that proposal as
 accepted. Direct acceptance is one local undo step; direct tracked acceptance
-uses the proposal's author and the supplied `date`, defaulting to now. Once the editor accepts
-or rejects any engine record in an agent proposal group, the editor owns the rest
+uses the proposal's author and the supplied `date`, defaulting to now.
+A `date` is refused only with an editor edit peer (`AcceptDateUnsupportedError`).
+Once the editor accepts or rejects any engine record in an agent proposal group, the editor owns the rest
 of that group. Agent accept, tracked accept, reject, discard and proposal-limit
 eviction throw `ProposalDecidedInEditorError` with code `PROPOSAL_DECIDED_IN_EDITOR`,
 without changing or withdrawing records, through both direct sessions and async
 peers. `details.records` names each decided record's `id` and `state`. List and
-review include per-record `records` and a derived `status`: pending while any record
-is proposed, then accepted if any was accepted, otherwise rejected.
+review include per-record `records`. The `status` is accepted after direct acceptance;
+otherwise it is pending while any record is proposed, then accepted if any was accepted,
+or rejected.
 
 Proposals over or next to existing tracked changes can throw
 `TrackedRevisionConflictError` with code `TRACKED_REVISION_CONFLICT`. Its
