@@ -2529,6 +2529,20 @@ test('a recoverable presentation failure reaches the host without closing the do
   expect(view.queryByText(stall.message)).toBeNull();
 });
 
+test('a skipped paste choice reports a notice and a failed recovery shows the recovery explanation', async () => {
+  const onError = mock((_error: Error, _info?: DocxErrorInfo) => {});
+  const view = render(<DocxEditor {...peerlessProps} onError={onError} />);
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
+  const { sessionOptions } = surface.mock.calls.at(-1)![0];
+  act(() => { sessionOptions.onPasteOptionNotRestored!(); });
+  expect(onError).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining('Your last Paste Options choice') }), { recoverable: true });
+  expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true');
+  act(() => { sessionOptions.onError!(new Error('Cannot restore DOCX command'), true); });
+  const failure = view.getByRole('alert');
+  expect(failure.textContent).toContain('The editor stopped and could not restore your recent changes.');
+  expect(failure.textContent).not.toContain('The file may be damaged');
+});
+
 for (const [name, update, message] of [
   ['read-only', { readOnly: true }, 'DOCX read-only transition was rejected'],
   ['render', { showHiddenText: true }, 'DOCX render environment was rejected: stale-version'],

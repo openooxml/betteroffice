@@ -54,6 +54,7 @@ export interface PeerlessInputProps {
   onClipboard?(cut: boolean, data?: DataTransfer | null): Promise<void>;
   onPasteFragment?(fragment: DocxClipboardFragment, inputTime: number): boolean;
   pasteOptions?: boolean;
+  onPasteOptionsLiveChange?(live: boolean): void;
   onReplacePasteFragment?(fragment: DocxClipboardFragment, selection: DocxCommandSelection, variant?: 'plain' | 'merge'): PeerlessAdmissionResult | false;
   pasteRecorder?: RefObject<PeerlessPasteRecorder | null>;
   caretHostRef?: RefObject<HTMLDivElement | null>;
@@ -92,9 +93,13 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
     viewStore.subscribeRecovering?.(listener) ?? (() => {}), [viewStore]);
   const recovering = useSyncExternalStore(subscribeRecovering, getRecovering, getRecovering);
   const pasteRecordRef = useRef<PasteRecord | null>(null);
+  const { onPasteOptionsLiveChange } = props;
   const setPasteRecord = useCallback((record: PasteRecord | null): void => {
+    const wasLive = pasteRecordRef.current !== null;
     pasteRecordRef.current = record;
-  }, []);
+    if (wasLive !== (record !== null)) onPasteOptionsLiveChange?.(record !== null);
+  }, [onPasteOptionsLiveChange]);
+  useLayoutEffect(() => () => setPasteRecord(null), [setPasteRecord]);
   const positionRef = useRef<(() => void) | null>(null);
   const dropPasteRecord = useCallback((record: PasteRecord): void => {
     if (pasteRecordRef.current !== record) return;

@@ -18,6 +18,42 @@ import type { Document } from '@betteroffice/docx/types/document';
 import { createInputAdmission, type PeerlessInputAdmission } from '../peerless/inputAdmission';
 import { createPeerlessViewStore, type PeerlessFrameGeometry, type PeerlessProvisionalCaret, type PeerlessViewStore } from '../peerless/viewStore';
 
+type ResidentEdit = DocxCommandConnection['client']['call']['edit'];
+
+function replayEdits(resident: DocxCommandConnection, appliedSeqs: readonly number[], onSkipped: () => void): ResidentEdit {
+  const skippedVersions: number[] = [];
+  const skippedPredecessors = new Map<number, number | undefined>();
+  let previousSeq = resident.initial.throughSeq || undefined;
+  return async command => {
+    if (command.afterSeq !== undefined && skippedPredecessors.has(command.afterSeq)) {
+      command = { ...command, afterSeq: skippedPredecessors.get(command.afterSeq) };
+    }
+    if (command.replay && skippedVersions.length) {
+      const skipped = skippedVersions.filter(version => version <= command.basis.version).length;
+      command = { ...command, basis: { ...command.basis, version: command.basis.version - skipped } };
+    }
+    const ack = await resident.client.call.edit(command);
+    if (!command.replay) return ack;
+    const skipped = ack.outcomes.find(outcome => command.kind === 'replacePasteFragment' && outcome.seq === command.seq &&
+      outcome.status === 'refused' && (outcome.reason === 'paste-changed' || outcome.reason === 'nothing-to-undo'));
+    const failed = ack.outcomes.find(outcome => outcome !== skipped && (outcome.status === 'refused' || outcome.status === 'cancelled' ||
+      (outcome.status === 'noop' && appliedSeqs.includes(outcome.seq))));
+    if (failed) {
+      discardCommandPresentation(ack.frame);
+      throw new SessionFailure('message', `DOCX recovery failed at command ${failed.seq} (${command.kind}): ${failed.reason ?? failed.status}`);
+    }
+    if (skipped) {
+      // Later edits may depend on the choice's sequence or have observed its version.
+      skippedPredecessors.set(command.seq, previousSeq);
+      if (appliedSeqs.includes(command.seq)) skippedVersions.push(ack.version + skippedVersions.length + 1);
+      onSkipped();
+      return { ...ack, outcomes: ack.outcomes.map(outcome => outcome === skipped ? { seq: outcome.seq, status: 'noop' as const } : outcome) };
+    }
+    previousSeq = command.seq;
+    return ack;
+  };
+}
+
 /** @internal Opens worker authority without creating a main-thread document. */
 export type PeerlessDocumentSource = Uint8Array | Document;
 
@@ -30,9 +66,10 @@ export interface UsePeerlessEditSessionOptions {
   prepareGeometry(frame: DocxCommandFrame, rasterScale?: number): PeerlessFrameGeometry | undefined;
   /** The same frame geometry with page boxes snapped to another raster scale. */
   rescaleGeometry?(geometry: PeerlessFrameGeometry, rasterScale: number): PeerlessFrameGeometry | undefined;
-  onError?(error: Error): void;
+  onError?(error: Error, recoveryFailed?: boolean): void;
   /** Failures the editor survives, such as pages that cannot be painted until the viewport or zoom changes. */
   onRecoverableError?(error: Error): void;
+  onPasteOptionNotRestored?(): void;
 }
 
 /** @internal */
@@ -43,6 +80,7 @@ export interface PeerlessEditSessionBinding {
   commands: PeerlessCommandBinding;
   echoPainter: PeerlessEchoPainter;
   presentation: PeerlessFramePresentation;
+  setPasteOptionsLive?(live: boolean): void;
   setDisplayWindow?(start: number, end: number): void;
   setRasterScale?(scale: number): void;
 }
@@ -51,7 +89,7 @@ export interface PeerlessEditSessionBinding {
 export type UsePeerlessEditSessionResult =
   | { status: 'opening'; binding: null; error: null }
   | { status: 'ready'; binding: PeerlessEditSessionBinding; error: null }
-  | { status: 'failed'; binding: null; error: Error };
+  | { status: 'failed'; binding: null; error: Error; recoveryFailed: boolean };
 
 /** @internal */
 export function usePeerlessEditSession(
@@ -62,7 +100,9 @@ export function usePeerlessEditSession(
   callbacks.current = options;
   const { source, rasterScale = 1 } = options;
   const appliedRasterScale = useRef(rasterScale);
+  const pasteOptionsLive = useRef(false);
   useEffect(() => {
+    pasteOptionsLive.current = false;
     const controller = new AbortController();
     let binding: PeerlessEditSessionBinding | undefined;
     let connection: DocxCommandConnection | undefined;
@@ -71,27 +111,17 @@ export function usePeerlessEditSession(
     let sessionCreated = false;
     let respawned = false;
     let recovering = false;
+    let pasteOptionSkipped = false;
     let crash: Error | undefined;
     let receiveRequestedFrame: ((frame: DocxCommandFrame) => void) | undefined;
-    const connect = (resident: DocxCommandConnection, replayAppliedSeqs: readonly number[] = []): DocxCommandConnection => ({
+    const connect = (resident: DocxCommandConnection, replayAppliedSeqs?: readonly number[]): DocxCommandConnection => ({
       ...resident,
       client: {
         ...resident.client,
         get failure() { return resident.client.failure; },
-        call: {
-          ...resident.client.call,
-          async edit(command) {
-            const ack = await resident.client.call.edit(command);
-            const refused = command.replay && ack.outcomes.find(outcome =>
-              outcome.status === 'refused' || outcome.status === 'cancelled' ||
-              (replayAppliedSeqs.includes(outcome.seq) && outcome.status === 'noop'));
-            if (refused) {
-              discardCommandPresentation(ack.frame);
-              throw new SessionFailure('message', `Cannot restore DOCX command ${command.seq} (${command.kind}): ${refused.reason ?? refused.status}`);
-            }
-            return ack;
-          },
-        },
+        call: replayAppliedSeqs ? { ...resident.client.call,
+          edit: replayEdits(resident, replayAppliedSeqs, () => { pasteOptionSkipped = true; }),
+        } : resident.client.call,
         onFrame(listener) {
           receiveRequestedFrame = listener;
           const stop = resident.client.onFrame?.(listener);
@@ -111,13 +141,13 @@ export function usePeerlessEditSession(
         void connection.client.dispose().catch(() => {});
       }
     };
-    const fail = (cause: unknown) => {
+    const fail = (cause: unknown, recoveryFailed = false) => {
       if (controller.signal.aborted) return;
       const error = cause instanceof Error ? cause : new Error(String(cause));
       controller.abort();
       close();
-      setResult({ status: 'failed', binding: null, error });
-      callbacks.current.onError?.(error);
+      setResult({ status: 'failed', binding: null, error, recoveryFailed });
+      callbacks.current.onError?.(error, recoveryFailed);
     };
     setResult({ status: 'opening', binding: null, error: null });
     void (async () => {
@@ -193,16 +223,23 @@ export function usePeerlessEditSession(
             if (!controller.signal.aborted && !recovering) callbacks.current.onError?.(error instanceof Error ? error : new Error(String(error)));
           } finally { viewportPending = false; }
         };
+        let checkpointDeferred = false;
         const session = createDocxWorkerEditSession<PeerlessDocumentSource, PeerlessEchoIntent>({
           source, connection: connect(connection), echo: presentation.hooks, coalesce: coalesceInputDrafts,
           holdForCoalescing: holdInputForCoalescing,
           transactionalPresentation: true, echoOverflow: 'decline', maxEchoEntries: 256,
           maxRecoveryAttempts: callbacks.current.recovery ? 1 : 0,
+          checkpointPolicy: ({ applied, bytes }) => {
+            const due = applied >= 128 || bytes >= 1024 * 1024;
+            checkpointDeferred = due && pasteOptionsLive.current;
+            return due && !checkpointDeferred;
+          },
           recovery: {
             checkpoint: callbacks.current.recovery?.checkpoint
               ? (resident) => callbacks.current.recovery?.checkpoint?.(resident) ?? resident.client.call.checkpoint() : undefined,
             onRecovery(event) {
               if (controller.signal.aborted) return;
+              if (event.phase === 'failed') fail(event.failure ?? new Error('The worker editor session failed'), recovering);
               if (event.phase !== 'diverged') recovering = event.phase === 'recovering';
               if (event.phase === 'recovering') {
                 crash = event.failure;
@@ -211,8 +248,8 @@ export function usePeerlessEditSession(
               if (event.phase === 'recovered') {
                 viewport = { ...displayWindow, ...viewport };
                 void requestViewport();
+                if (pasteOptionSkipped) callbacks.current.onPasteOptionNotRestored?.();
               }
-              if (event.phase === 'failed') fail(event.failure ?? new Error('The worker editor session failed'));
               callbacks.current.recovery?.onRecovery?.(event);
             },
             async reopen(input) {
@@ -250,6 +287,11 @@ export function usePeerlessEditSession(
         const admission = createInputAdmission({ session, viewStore, echoPainter });
         cleanups.push(() => admission.dispose());
         binding = { session, viewStore, admission, commands: createPeerlessCommandBinding(admission), echoPainter, presentation,
+          setPasteOptionsLive(live) {
+            if (controller.signal.aborted || pasteOptionsLive.current === live) return;
+            pasteOptionsLive.current = live;
+            if (!live && checkpointDeferred) void session.flush().catch(() => {});
+          },
           setDisplayWindow(start, end) {
             displayWindow = { start, end };
             viewport = { ...viewport, ...displayWindow };

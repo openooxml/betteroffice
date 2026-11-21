@@ -840,6 +840,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, inputRef, onRe
       <PeerlessInput admission={binding.admission} viewStore={binding.viewStore} textareaRef={input} autoFocus={autoFocus}
         onCompositionChange={onCompositionChange} onRecoverableText={onRecoverableText} onClipboard={onClipboard} onPasteFragment={onPasteFragment}
         pasteOptions={pasteOptions} onReplacePasteFragment={onReplacePasteFragment} pasteRecorder={pasteRecorder}
+        onPasteOptionsLiveChange={binding.setPasteOptionsLive}
         caretHostRef={column} zoom={zoom} onNavigateCell={onNavigateCell} />
       <div data-docx-pages-host data-table-resize={tableAxis && (tableAxis === 'x' ? 'col' : 'row')} style={{ position: 'relative', width, height, transform: `scale(${zoom})`, transformOrigin: 'top left', touchAction: 'pan-x pan-y' }}
         onMouseDown={(event) => {
@@ -1136,7 +1137,7 @@ export function PeerlessPagedEditor({ sessionOptions, zoom = 1, className, autoF
     return geometry;
   }, [options.prepareGeometry, canvasForPage]);
   const session = usePeerlessEditSession(useMemo(() => ({ ...options, rasterScale, canvasForPage: residentCanvasForPage, prepareGeometry }), [
-    options.source, options.openConnection, options.recovery, prepareGeometry, options.onError, options.onRecoverableError,
+    options.source, options.openConnection, options.recovery, prepareGeometry, options.onError, options.onRecoverableError, options.onPasteOptionNotRestored,
     residentCanvasForPage, rasterScale,
   ]));
   useLayoutEffect(() => {
@@ -1178,7 +1179,7 @@ export function PeerlessPagedEditor({ sessionOptions, zoom = 1, className, autoF
   return <div className={className} data-docx-worker-editor="true" aria-busy={session.status === 'opening'}>
     {session.status === 'ready' && <PeerlessReady binding={session.binding} canvasForPage={canvasForPage} zoom={pageZoom} autoFocus={autoFocus} inputRef={inputRef}
       onRecoverableText={retainText} displayWindow={pageWindow} onDisplayWindowChange={changeWindow} onClipboard={onClipboard} onPasteFragment={onPasteFragment} pasteOptions={pasteOptions} onReplacePasteFragment={onReplacePasteFragment} pasteRecorder={pasteRecorder} highlights={highlights} onNavigateCell={onNavigateCell} onPartPoint={onPartPoint} onDragSelectionChange={onDragSelectionChange} pageOverlays={pageOverlays} pageMirror={pageMirror} unbuiltPageMirror={unbuiltPageMirror} readPageTexts={readPageTexts} mirrorReadBlocked={mirrorReadBlocked} scrollToPage={scrollToPage} overlay={overlay} pictures={pictures} tables={tables} queryEngineReady={queryEngineReady} />}
-    {session.status === 'failed' && <div role="alert">{t('errors.failedToLoad')}</div>}
+    {session.status === 'failed' && <div role="alert">{t(session.recoveryFailed ? 'errors.recoveryFailedDescription' : 'errors.failedToLoad')}</div>}
     {recoverableText.map((text, index) => <div key={index} role="status">
       {t('editor.recoverableTextNotice')}
       <textarea aria-label={t('editor.recoverableText')} value={text} readOnly />
