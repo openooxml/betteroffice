@@ -21,7 +21,6 @@ export function PeerlessShapeResizePreview({ run, preview, scale }: {
   const snapshot = useSyncExternalStore(preview.subscribe, preview.getSnapshot, preview.getSnapshot);
   const request = snapshot?.request;
   const canvas = useRef<HTMLCanvasElement>(null);
-  const activeGesture = useRef<string | null>(null);
   const currentScale = useRef(scale);
   currentScale.current = scale;
   const desired = useRef<PreviewJob | null>(null);
@@ -40,21 +39,24 @@ export function PeerlessShapeResizePreview({ run, preview, scale }: {
   const pump = useCallback(() => {
     if (running.current) return;
     running.current = true;
+    const isCurrent = (job: PreviewJob) => job.gesture === preview.getSnapshot()?.request?.gesture &&
+      job.scale === currentScale.current && run.current && canvas.current !== null;
     void (async () => {
       try {
         while (desired.current) {
           const job = desired.current;
           desired.current = null;
+          if (!isCurrent(job)) continue;
           try {
             const frame = await run.client.previewShapeRect(
               job.request.frame, job.request.target, job.request.rect,
             );
             run.require();
-            if (job.gesture !== activeGesture.current || job.scale !== currentScale.current) continue;
+            if (!isCurrent(job)) continue;
             const images = run.images.pin({ displayList: frame, frame: { media: [] } });
             try {
               await Promise.all([images.ready, run.ensureWholeFonts?.()]);
-              if (job.gesture !== activeGesture.current || job.scale !== currentScale.current || !run.current) continue;
+              if (!isCurrent(job)) continue;
               const target = canvas.current;
               if (!target) continue;
               const buffer = target.ownerDocument.createElement('canvas');
@@ -64,8 +66,7 @@ export function PeerlessShapeResizePreview({ run, preview, scale }: {
               sizeCanvasForSlide(buffer, frame as SlideDisplayList, dpr, job.scale);
               await peerlessShapeResizePreviewPaint.paint(context, frame as SlideDisplayList, dpr, job.scale,
                 { resolveImage: images.resolve });
-              if (job.gesture !== activeGesture.current || job.scale !== currentScale.current ||
-                !run.current || !canvas.current) continue;
+              if (!isCurrent(job) || !canvas.current) continue;
               sizeCanvasForSlide(canvas.current, frame as SlideDisplayList, dpr, job.scale);
               const visible = canvas.current.getContext('2d');
               if (!visible) throw new Error('Slide canvas is unavailable');
@@ -76,7 +77,7 @@ export function PeerlessShapeResizePreview({ run, preview, scale }: {
               images.release();
             }
           } catch {
-            if (job.gesture === activeGesture.current && job.scale === currentScale.current && !desired.current) clear();
+            if (isCurrent(job) && !desired.current) clear();
           }
         }
       } finally {
@@ -84,22 +85,19 @@ export function PeerlessShapeResizePreview({ run, preview, scale }: {
         if (desired.current) pumpRef.current();
       }
     })();
-  }, [clear, run]);
+  }, [clear, preview, run]);
   pumpRef.current = pump;
 
   useEffect(() => {
-    activeGesture.current = request?.gesture ?? null;
     desired.current = request ? { gesture: request.gesture, request, scale } : null;
-    if (!request) clear();
-    else pump();
-  }, [clear, pump, request, scale]);
+    if (request) pump();
+  }, [pump, request, scale]);
 
   useEffect(() => () => {
-    activeGesture.current = null;
     desired.current = null;
   }, []);
 
-  if (!request) return null;
+  if (!request && !snapshot?.retainCanvas) return null;
   return <canvas ref={canvas} data-testid="pptx-shape-resize-preview" aria-hidden="true"
-    style={{ position: 'absolute', left: 0, top: 0, pointerEvents: 'none' }} />;
+    width={0} height={0} style={{ position: 'absolute', left: 0, top: 0, pointerEvents: 'none', backgroundColor: 'white' }} />;
 }

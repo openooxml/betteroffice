@@ -28,6 +28,7 @@ interface ShapeGesture {
 export interface PeerlessShapePreview {
   token: string;
   bounds: ShapeRect;
+  retainCanvas?: boolean;
   request?: {
     gesture: string;
     frame: PresentationCommandFrameTag;
@@ -240,10 +241,11 @@ export function usePeerlessShapeGestures(store: PeerlessViewStore | null, {
     const payload = { frame: current.frame,
       target: { slideId: object.slideId, shapeId: object.shapeId, token: object.token },
       inputTime, undoGroup: current.group };
-    const retained = previewValue.current;
+    const preview = previewValue.current;
+    const retained = preview?.request ? { token: preview.token, bounds: preview.bounds, retainCanvas: true } : null;
+    setPreview(retained);
     const commit = store.dispatch(current.handle ? { kind: 'setShapeRect', payload: { ...payload, rect } }
       : { kind: 'moveShape', payload: { ...payload, x: rect.x, y: rect.y } });
-    if (!retained?.request) setPreview(null);
     void commit.then(async (ack) => {
       const outcome = ack.outcomes.find((entry) => entry.seq === ack.throughSeq);
       if (!outcome?.committed) return;

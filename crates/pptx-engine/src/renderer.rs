@@ -542,7 +542,11 @@ impl Renderer {
             .position(|id| id == slide_id)
             .ok_or_else(|| EngineError::message("shape preview slide is unavailable"))?;
         let mut scope = session.slide_scope(slide_index).map_err(engine_error)?;
-        let shape = find_shape_mut(&mut scope.slide.shapes, shape_id)
+        let shape = scope
+            .slide
+            .shapes
+            .iter_mut()
+            .find(|shape| shape.id == shape_id)
             .ok_or_else(|| EngineError::message("shape preview target is unavailable"))?;
         shape.x = rect.x;
         shape.y = rect.y;
@@ -554,21 +558,6 @@ impl Renderer {
             .map_err(engine_error)?;
         serde_json::to_string(&rendered.display_list).map_err(engine_error)
     }
-}
-
-fn find_shape_mut<'a>(
-    shapes: &'a mut [pptx_edit::ShapeSnapshot],
-    shape_id: &str,
-) -> Option<&'a mut pptx_edit::ShapeSnapshot> {
-    for shape in shapes {
-        if shape.id == shape_id {
-            return Some(shape);
-        }
-        if let Some(found) = find_shape_mut(&mut shape.children, shape_id) {
-            return Some(found);
-        }
-    }
-    None
 }
 
 impl Renderer {
