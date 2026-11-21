@@ -5996,7 +5996,7 @@ fn lower_paragraph_indent(
         let own_left = left.is_some();
         left = left.or(level_left).or(Some((list.level() + 1.0) * 720.0));
         if first_line.is_none() {
-            let default = (!own_left).then_some((-360.0, true));
+            let default = (!own_left && level_left.is_none()).then_some((-360.0, true));
             if let Some((first, hangs)) = level_first.or(default) {
                 first_line = Some(first);
                 hanging = hangs;
