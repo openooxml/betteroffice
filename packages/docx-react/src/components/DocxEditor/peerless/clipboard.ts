@@ -1,9 +1,10 @@
-import { clipboardFragmentHasPictures } from '@betteroffice/docx/yrs';
-import type { DocxClipboardSlice, DocxCommandSelection, YrsSelectionText } from '@betteroffice/docx/yrs';
+import { clipboardFragmentHasPictures, clipboardFragmentIsTextOnly } from '@betteroffice/docx/yrs';
+import type { DocxClipboardFragment, DocxClipboardSlice, DocxCommandSelection, YrsSelectionText, YrsTableRange } from '@betteroffice/docx/yrs';
 import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession';
 import { clipboardFragmentHtml } from '../internals/clipboardHtml';
+import { cutRefusalFrom, DocxCutRefusedError } from '../internals/cutRefused';
 import { flushAdmittedInput } from './inputAdmission';
-import type { PeerlessViewIdentity } from './viewStore';
+import type { PeerlessViewIdentity, PeerlessViewSnapshot } from './viewStore';
 
 interface SelectionRead {
   binding: PeerlessEditSessionBinding;
@@ -27,27 +28,43 @@ export async function readWorkerSelection(options: SelectionRead) {
   return { selection, text: info.selectedText, version: state.version, identity, info };
 }
 
-export async function readWorkerClipboardSlice(options: SelectionRead & {
-  readClipboardSlice(selection: DocxCommandSelection): Promise<DocxClipboardSlice>;
-}) {
-  const { binding } = options;
-  await flushAdmittedInput(binding);
-  if (!options.isCurrent()) throw new Error('Document was replaced');
-  const state = binding.viewStore.getSnapshot();
+type ReadClipboardSlice = (selection: DocxCommandSelection, cells: YrsTableRange | null) => Promise<DocxClipboardSlice>;
+type ClipboardSliceRead = SelectionRead & { readClipboardSlice: ReadClipboardSlice };
+
+async function readSnapshotSlice(options: ClipboardSliceRead, state: PeerlessViewSnapshot) {
   const identity = { ...state.identity };
   if (!state.workerSelection) return null;
   const selection = structuredClone(state.workerSelection);
   const { anchor, focus } = selection;
   if (anchor.story !== focus.story) throw new Error('Cross-story selection is unavailable');
-  const slice = await options.readClipboardSlice(selection);
+  const cells = state.editState?.tableContext?.cells;
+  const slice = await options.readClipboardSlice(selection, cells ? structuredClone(cells) : null);
   if (!options.isCurrent()) throw new Error('Document was replaced');
-  if (!sameIdentity(identity, binding.viewStore.getSnapshot().identity) || state.version !== binding.viewStore.getSnapshot().version) throw new Error('Selection read was superseded');
   return { selection, slice, version: state.version, identity, html: slice.fragment ? clipboardFragmentHtml(slice.fragment) : null };
 }
 
+export async function readWorkerClipboardSlice(options: ClipboardSliceRead) {
+  const { binding } = options;
+  await flushAdmittedInput(binding);
+  if (!options.isCurrent()) throw new Error('Document was replaced');
+  const state = binding.viewStore.getSnapshot();
+  const captured = await readSnapshotSlice(options, state);
+  if (captured && (!sameIdentity(state.identity, binding.viewStore.getSnapshot().identity) || state.version !== binding.viewStore.getSnapshot().version)) throw new Error('Selection read was superseded');
+  return captured;
+}
+
+/** Waits for the input admitted before the call, not for input that arrives later. */
+async function settleEarlierInput(binding: PeerlessEditSessionBinding): Promise<void> {
+  const submitted = binding.session.flush();
+  await binding.admission?.whenCompositionSettled?.();
+  await binding.admission?.getSnapshot?.().tail?.ack;
+  await submitted;
+}
+
 export function isPasteFragmentAllowed(commands: {
-  getState(id: 'insertTable', args?: unknown): { enabled: boolean };
-}): boolean {
+  getState(id: 'insertTable' | 'bold', args?: unknown): { enabled: boolean };
+}, fragment?: DocxClipboardFragment): boolean {
+  if (fragment && clipboardFragmentIsTextOnly(fragment)) return commands.getState('bold').enabled === true;
   return commands.getState('insertTable', { rows: 1, columns: 1 }).enabled === true;
 }
 
@@ -81,54 +98,61 @@ function inputSettled(binding: PeerlessEditSessionBinding): boolean {
   return !admission || (!admission.tail && admission.compositionSlot === null && admission.heldIntents === 0);
 }
 
-/** @internal Reads the settled selection's clipboard slice ahead of a copy so the copy event can fill its clipboardData. */
-export function createClipboardPrefetch(options: SelectionRead & {
-  readClipboardSlice(selection: DocxCommandSelection): Promise<DocxClipboardSlice>;
-}) {
+/**
+ * @internal Reads the settled selection's clipboard slice ahead of a copy so the copy event can fill its clipboardData.
+ * Nothing is read ahead while `held` answers true; `resume` reads the selection it then shows.
+ */
+export function createClipboardPrefetch(options: ClipboardSliceRead & { held?(): boolean }) {
   const { binding } = options;
   let cached: { key: string; capture: ClipboardCapture | null; error?: unknown } | null = null;
-  let reading: Promise<void> | null = null;
+  let reading: { key: string; capture: Promise<ClipboardCapture | null> } | null = null;
   let disposed = false;
   const dispose = () => {
     disposed = true;
     unsubscribe();
     cached = null;
   };
+  const layoutOf = () => binding.viewStore.getSnapshot().geometry?.layoutEpoch ?? null;
+  const laidOut = (key: string | null, layout: number | null) => key && `${key}|${layout}`;
   const schedule = () => {
     if (disposed) return;
     if (!options.isCurrent()) { dispose(); return; }
-    const key = snapshotKey(binding);
+    const layout = layoutOf();
+    const key = laidOut(snapshotKey(binding), layout);
     if (cached && key !== cached.key) cached = null;
-    if (!key || key === cached?.key || reading) return;
-    reading = readWorkerClipboardSlice(options).then(captured => {
+    if (!key || key === cached?.key || reading || options.held?.()) return;
+    const capture = readWorkerClipboardSlice(options);
+    reading = { key, capture };
+    void capture.then(captured => {
       if (disposed) return;
-      const capturedKey = captured ? selectionKey(captured.identity, captured.version, captured.selection) : key;
-      if (capturedKey) cached = { key: capturedKey, capture: (captured?.slice.text || captured?.slice.fragment) ? captured : null };
+      const capturedKey = captured ? laidOut(selectionKey(captured.identity, captured.version, captured.selection), layout) : key;
+      if (capturedKey) cached = { key: capturedKey, capture: (captured?.slice.text || captured?.slice.fragment || captured?.slice.leftOut?.length) ? captured : null };
     }, error => {
       if (!disposed) cached = { key, capture: null, error };
     }).finally(() => { reading = null; schedule(); });
   };
   const unsubscribe = binding.viewStore.subscribe(schedule);
   const take = (): ClipboardCapture | null =>
-    !disposed && cached && options.isCurrent() && inputSettled(binding) && snapshotKey(binding) === cached.key
+    !disposed && cached && options.isCurrent() && inputSettled(binding) && laidOut(snapshotKey(binding), layoutOf()) === cached.key
       ? cached.capture : null;
   schedule();
   return {
     take,
+    resume: schedule,
+    /** Reads the selection as it stood at the call, whatever the selection does while the read runs; a cut rechecks it before acting. */
     async read(): Promise<ClipboardCapture | null> {
-      await flushAdmittedInput(binding);
-      const key = snapshotKey(binding);
-      if (!key) return readWorkerClipboardSlice(options);
-      const identity = { ...binding.viewStore.getSnapshot().identity };
-      schedule();
-      while (!disposed && options.isCurrent()) {
-        if (!sameIdentity(identity, binding.viewStore.getSnapshot().identity)) return null;
-        if (snapshotKey(binding) !== key) throw new Error('Selection read was superseded');
-        if (reading) { await reading; continue; }
-        if (cached?.key === snapshotKey(binding) && cached?.error) throw cached.error;
-        return take();
+      await settleEarlierInput(binding);
+      if (disposed || !options.isCurrent()) return null;
+      const state = binding.viewStore.getSnapshot();
+      const key = selectionKey(state.identity, state.version, state.workerSelection);
+      const current = laidOut(key, state.geometry?.layoutEpoch ?? null);
+      if (current && cached?.key === current && !cached.error) return cached.capture;
+      if (current && reading?.key === current) {
+        const captured = await reading.capture.catch(() => null);
+        if (captured && selectionKey(captured.identity, captured.version, captured.selection) === key) return captured;
       }
-      return null;
+      if (!sameIdentity(state.identity, binding.viewStore.getSnapshot().identity)) return null;
+      return readSnapshotSlice(options, state);
     },
     dispose,
   };
@@ -142,8 +166,12 @@ export function writeClipboardCapture(data: DataTransfer, capture: ClipboardCapt
   return true;
 }
 
+function refuseLeftOut(slice: DocxClipboardSlice): void {
+  if (slice.leftOut?.length) throw new DocxCutRefusedError(slice.leftOut);
+}
+
 export async function copyWorkerSelection(options: SelectionRead & { write(text: string): Promise<void>; cut?: boolean;
-  readClipboardSlice?(selection: DocxCommandSelection): Promise<DocxClipboardSlice>;
+  readClipboardSlice?: ReadClipboardSlice;
   writeSlice?(text: string, html: string): Promise<void>;
   data?: DataTransfer | null; prefetched?: ClipboardCapture | null;
   readCapture?(): Promise<ClipboardCapture | null>;
@@ -153,15 +181,24 @@ export async function copyWorkerSelection(options: SelectionRead & { write(text:
   if (options.cut && binding.viewStore.getSnapshot().editState?.readOnly) return false;
   let captured: { selection: DocxCommandSelection; version: number; identity?: PeerlessViewIdentity };
   if (options.data && options.prefetched) {
-    if (!sameIdentity(options.prefetched.identity, binding.viewStore.getSnapshot().identity) ||
-      !writeClipboardCapture(options.data, options.prefetched)) return false;
+    if (!sameIdentity(options.prefetched.identity, binding.viewStore.getSnapshot().identity)) return false;
+    if (options.cut) refuseLeftOut(options.prefetched.slice);
+    if (!writeClipboardCapture(options.data, options.prefetched)) return false;
     captured = options.prefetched;
   } else if (options.readClipboardSlice || options.readCapture) {
-    const sliceCaptured = options.readCapture ? await options.readCapture()
-      : await readWorkerClipboardSlice({ ...options, readClipboardSlice: options.readClipboardSlice! });
+    let sliceCaptured: ClipboardCapture | Awaited<ReturnType<typeof readWorkerClipboardSlice>>;
+    try {
+      sliceCaptured = options.readCapture ? await options.readCapture()
+        : await readWorkerClipboardSlice({ ...options, readClipboardSlice: options.readClipboardSlice! });
+    } catch (error) {
+      throw (options.cut ? cutRefusalFrom(error) : null) ?? error;
+    }
+    if (options.cut && sliceCaptured) refuseLeftOut(sliceCaptured.slice);
     if (!sliceCaptured || (!sliceCaptured.slice.text && !sliceCaptured.slice.fragment)) return false;
     if (!options.isCurrent() || !sameIdentity(identity, sliceCaptured.identity) ||
       !sameIdentity(sliceCaptured.identity, binding.viewStore.getSnapshot().identity)) return false;
+    if (options.cut && selectionKey(sliceCaptured.identity, sliceCaptured.version, sliceCaptured.selection) !== snapshotKey(binding))
+      throw new Error('Selection read was superseded');
     if (!options.writeNative?.(sliceCaptured)) {
       if (sliceCaptured.html) {
         try {

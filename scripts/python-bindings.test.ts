@@ -5,11 +5,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
+  FONT_PACK_NAMES,
   PYPI_DISTRIBUTIONS,
   PYTHON_BINDINGS,
   PYTHON_BINDING_NAMES,
   PYTHON_PUBLISH_NAMES,
   bindingVersion,
+  fontPackVersion,
   pendingPublishNames
 } from './python-bindings.mjs';
 
@@ -35,13 +37,15 @@ const dist = Bun.YAML.parse(readFileSync(distWorkflow, 'utf8')) as any;
 const SHA = '9b3f0c1d2e4a5b6c7d8e9f0a1b2c3d4e5f607182';
 const dispatchStep = release.jobs['python-pypi'].steps[0];
 const RUN_IDS = PYTHON_PUBLISH_NAMES.map((_, index) => 4200 + index);
+const ALL_NAMES = [...FONT_PACK_NAMES, ...PYTHON_PUBLISH_NAMES];
+const ALL_RUN_IDS = ALL_NAMES.map((_, index) => 4300 + index);
 
 /** The dispatch step against a `gh` that dispatches (returning a run id) and watches. */
-function dispatch({ dispatchStatus = 0, failing = 0 } = {}) {
+function dispatch({ dispatchStatus = 0, failing = 0, names = PYTHON_PUBLISH_NAMES, runIds = RUN_IDS } = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'dispatch-'));
   const log = join(directory, 'gh.log');
-  const ids = PYTHON_PUBLISH_NAMES.map(
-    (name, index) => `    *"inputs[binding]=${name}"*) echo ${RUN_IDS[index]} ;;`
+  const ids = names.map(
+    (name, index) => `    *"inputs[binding]=${name}"*) echo ${runIds[index]} ;;`
   );
   writeFileSync(
     join(directory, 'gh'),
@@ -66,7 +70,7 @@ function dispatch({ dispatchStatus = 0, failing = 0 } = {}) {
       ...process.env,
       PATH: `${directory}:${process.env.PATH}`,
       GH_REPO: 'openooxml/betteroffice',
-      PUBLISH: JSON.stringify(PYTHON_PUBLISH_NAMES),
+      PUBLISH: JSON.stringify(names),
       SHA
     }
   });
@@ -156,7 +160,9 @@ globalThis.fetch = async (url) => {
     });
 
     expect(result.status, result.stderr).toBe(0);
-    expect(readFileSync(outputs, 'utf8')).toBe(`publish=${JSON.stringify(unserved)}\n`);
+    expect(readFileSync(outputs, 'utf8')).toBe(
+      `publish=${JSON.stringify([...FONT_PACK_NAMES, ...unserved])}\n`
+    );
   });
 
   test('a registry lookup failure fails the step instead of publishing nothing', () => {
@@ -267,7 +273,7 @@ globalThis.fetch = async (url) => {
     const checkouts = Object.values(dist.jobs).flatMap((job: any) =>
       (job.steps ?? []).filter((step: any) => String(step.uses ?? '').startsWith('actions/checkout'))
     );
-    expect(checkouts).toHaveLength(2);
+    expect(checkouts).toHaveLength(3);
     for (const step of checkouts) expect(step.with.ref).toBe('${{ inputs.sha }}');
   });
 
@@ -277,6 +283,109 @@ globalThis.fetch = async (url) => {
     expect(steps).toContain('scripts/python-bindings.mjs --paths');
     expect(steps).not.toContain('--publish');
   });
+
+  test('CI installs the font pack wheels built from this commit before any binding', () => {
+    const python = Bun.YAML.parse(readFileSync(ciWorkflow, 'utf8')) as any;
+    const steps = python.jobs.python.steps.map((step: any) => step.run ?? '').join('\n');
+    const packs = steps.indexOf('python -m pip install "$RUNNER_TEMP"/font-packs/*.whl');
+    expect(steps.indexOf('scripts/python_font_packs.py --out "$RUNNER_TEMP/font-packs"')).toBeGreaterThan(-1);
+    expect(packs).toBeGreaterThan(steps.indexOf('scripts/python_font_packs.py'));
+    expect(packs).toBeLessThan(steps.indexOf('python -m pip install --find-links "$RUNNER_TEMP/font-packs" -e "$binding"'));
+  });
+
+  test('font packs publish first, and a failed pack dispatches no format binding', () => {
+    const ok = dispatch({ names: ALL_NAMES, runIds: ALL_RUN_IDS });
+    expect(ok.status, ok.stdout).toBe(0);
+    const order = ok.log
+      .filter((line) => line.startsWith('api --method POST') || line.startsWith('run watch'))
+      .map((line) => line.match(/inputs\[binding\]=(\S+)/)?.[1] ?? line);
+    expect(order).toEqual([
+      ...FONT_PACK_NAMES,
+      ...ALL_RUN_IDS.slice(0, FONT_PACK_NAMES.length).map((id) => `run watch ${id} --exit-status`),
+      ...PYTHON_PUBLISH_NAMES,
+      ...ALL_RUN_IDS.slice(FONT_PACK_NAMES.length).map((id) => `run watch ${id} --exit-status`)
+    ]);
+
+    const failed = dispatch({ names: ALL_NAMES, runIds: ALL_RUN_IDS, failing: ALL_RUN_IDS[1]! });
+    expect(failed.status).toBe(1);
+    expect(failed.stdout).toContain(`::error::betteroffice-${FONT_PACK_NAMES[1]} did not publish`);
+    expect(failed.stdout).toContain('no format binding was dispatched');
+    const dispatched = failed.log
+      .filter((line) => line.startsWith('api --method POST'))
+      .map((line) => line.match(/inputs\[binding\]=(\S+)/)?.[1]);
+    expect(dispatched).toEqual(FONT_PACK_NAMES);
+  });
+
+  test('a font pack builds one pure wheel from the committed assets, and no Rust', () => {
+    for (const job of ['wheels', 'sdist']) {
+      expect(dist.jobs[job].if).toBe("${{ !startsWith(inputs.binding, 'fonts-') }}");
+    }
+    const pack = dist.jobs['font-pack'];
+    expect(pack.if).toBe("${{ startsWith(inputs.binding, 'fonts-') }}");
+    const run = pack.steps.map((step: any) => step.run ?? '').join('\n');
+    expect(run).toContain('python -I scripts/python_font_packs.py --out dist --pack "${BINDING#fonts-}"');
+    const upload = pack.steps.find((step: any) => String(step.uses).startsWith('actions/upload-artifact'));
+    expect(upload.with.name).toBe('python-${{ inputs.binding }}.wheel');
+    expect(dist.jobs.built.needs).toEqual(['wheels', 'sdist', 'font-pack']);
+    expect(dist.jobs.built.if).toContain("!contains(needs.*.result, 'failure')");
+  });
+});
+
+describe('font pack wheels', () => {
+  const versions = Object.fromEntries(FONT_PACK_NAMES.map((name) => [name, fontPackVersion(name)]));
+
+  test('every pack version is a semver', () => {
+    for (const version of Object.values(versions)) expect(version).toMatch(/^\d+\.\d+\.\d+$/);
+  });
+
+  test('every publishable format binding pins all three packs at the committed versions', () => {
+    for (const name of PYTHON_PUBLISH_NAMES) {
+      const pyproject = Bun.TOML.parse(
+        readFileSync(join(repository, `bindings/python-${name}/pyproject.toml`), 'utf8')
+      ) as any;
+      expect(pyproject.project.dependencies).toEqual(
+        FONT_PACK_NAMES.map((pack) => `betteroffice-${pack}==${versions[pack]}`)
+      );
+    }
+  });
+
+  test('the builder writes a py3-none-any wheel per pack with every face and the font licenses', () => {
+    const out = mkdtempSync(join(tmpdir(), 'font-packs-'));
+    try {
+      const result = spawnSync('python3', ['-I', 'scripts/python_font_packs.py', '--out', out], {
+        cwd: repository,
+        encoding: 'utf8'
+      });
+      expect(result.status, result.stderr).toBe(0);
+      for (const name of FONT_PACK_NAMES) {
+        const pack = name.replace('fonts-', '');
+        const version = versions[name];
+        const wheel = `betteroffice_fonts_${pack}-${version}-py3-none-any.whl`;
+        expect(result.stdout).toContain(wheel);
+        const listing = spawnSync(
+          'python3',
+          ['-I', '-c', 'import sys, zipfile; print("\\n".join(zipfile.ZipFile(sys.argv[1]).namelist()))', join(out, wheel)],
+          { encoding: 'utf8' }
+        ).stdout.trim().split('\n');
+        const manifest = JSON.parse(
+          readFileSync(join(repository, `packages/${name}/assets/manifest.json`), 'utf8')
+        );
+        const data = listing.filter((entry) => entry.startsWith('betteroffice_fonts_packs/'));
+        expect(data.sort()).toEqual(
+          ['manifest.json', ...manifest.faces.map((face: { file: string }) => face.file)]
+            .map((file) => `betteroffice_fonts_packs/${pack}/${version}/${file}`)
+            .sort()
+        );
+        const info = `betteroffice_fonts_${pack}-${version}.dist-info`;
+        for (const file of ['METADATA', 'WHEEL', 'RECORD', 'licenses/LICENSE']) {
+          expect(listing).toContain(`${info}/${file}`);
+        }
+        expect(listing.some((entry) => /licenses\/LICENSES\/OFL-.+\.txt$/.test(entry))).toBe(true);
+      }
+    } finally {
+      rmSync(out, { recursive: true, force: true });
+    }
+  }, 60_000);
 });
 
 describe('repository-scoped token guard', () => {
@@ -326,12 +435,13 @@ describe('repository-scoped token guard', () => {
 
 describe('pending publish selection', () => {
   const live = () =>
-    Object.fromEntries(
-      PYTHON_BINDINGS.map((path) => [
+    Object.fromEntries([
+      ...FONT_PACK_NAMES.map((name) => [`betteroffice-${name}`, [fontPackVersion(name)]]),
+      ...PYTHON_BINDINGS.map((path) => [
         `betteroffice-${path.replace('bindings/python-', '')}`,
         [bindingVersion(path)]
       ])
-    );
+    ]);
 
   type Files = { yanked?: boolean }[];
 
@@ -361,7 +471,19 @@ describe('pending publish selection', () => {
   test('nothing is pending when PyPI serves every version', async () => {
     const { fetchImpl, requested } = pypi(live());
     expect(await pendingPublishNames({ fetchImpl })).toEqual([]);
-    expect(requested).toEqual(PYPI_DISTRIBUTIONS.map((d) => `https://pypi.org/pypi/${d}/json`));
+    expect(requested).toEqual(
+      [...FONT_PACK_NAMES.map((name) => `betteroffice-${name}`), ...PYPI_DISTRIBUTIONS].map(
+        (d) => `https://pypi.org/pypi/${d}/json`
+      )
+    );
+  });
+
+  test('a font pack version PyPI does not serve is pending, ahead of the bindings', async () => {
+    const releases = live();
+    releases['betteroffice-fonts-cjk'] = null;
+    releases['betteroffice-docx'] = ['0.0.0'];
+    const { fetchImpl } = pypi(releases);
+    expect(await pendingPublishNames({ fetchImpl })).toEqual(['fonts-cjk', 'docx']);
   });
 
   test('a version PyPI does not serve is pending', async () => {

@@ -6,12 +6,22 @@ import { sectionPropertiesEqual } from './sections';
 import { resolveThemeFont } from '../utils/fontResolver';
 import { mergeFontFamily } from '../utils/fontFamilyMerge';
 import { engineProgressTick } from '../utils/engineProgress';
+import { serializeRun } from '../docx/serializer';
 import { headerFooterAliasOf, markHeaderFooterAlias } from '../docx/headerFooterAliasProjection';
 import { markRevisionInfo } from '../docx/sessionRevisionIds';
-import { headerFooterStory, sessionSourcePackage } from './sessionInternals';
+import { headerFooterStory, sessionMaterializedSource, sessionSourcePackage } from './sessionInternals';
+import {
+  crossingFallback,
+  crossStoryComments,
+  holdsCommentMark,
+  noteWrittenWhole,
+  type CommentMarkKind,
+  type CrossingComment,
+} from './crossStoryComments';
 import { createStyleResolver, type StyleResolver } from '../styles';
 import { hasTrackedControlContent } from '../utils/trackedControlContent';
 import { isRawXml } from '../types/content/rawXml';
+import { seededCellIndices } from './tableRowSpans';
 import { pixelsToEmu } from '../utils/units';
 import {
   applyContentControlValue,
@@ -19,6 +29,7 @@ import {
 } from './contentControlValues';
 import { sdtAttrsToProps } from '../types/sdtAttributes';
 import { tableRowGrid } from './storyPlainText';
+import { markCreatedListParagraph } from './listDefinitionSave';
 import {
   paragraphAttrsToFormatting,
   tableAttrsToFormatting,
@@ -49,6 +60,7 @@ import type {
   TableBorders,
   SimpleField,
   ComplexField,
+  StructuredFieldContent,
   FieldType,
   FieldInlineContent,
   MathEquation,
@@ -64,7 +76,8 @@ import type {
   HeaderFooter,
   SectionProperties,
 } from '../types/document';
-import type { YrsRunInheritance, YrsSession, YrsTableInheritance } from './index';
+import type { YrsRunInheritance, YrsSession, YrsStorySegment, YrsTableInheritance } from './index';
+import { isUnavailableTablePayload, markGated, refuseUnavailableTables, tableUnavailableError } from './tableUnavailable';
 
 type Attrs = Record<string, unknown>;
 
@@ -112,6 +125,7 @@ interface TextItem {
   kind: 'text';
   text: string;
   attributes: Attrs;
+  sourceRun?: { index: number; previous: number; changed: boolean };
 }
 
 interface EmbedItem {
@@ -239,6 +253,7 @@ interface OriginalRunBoundary {
   marksKey?: string;
   formatting?: TextFormatting;
   propertyChanges?: Run['propertyChanges'];
+  inline?: boolean;
 }
 
 interface LiveParagraphBreaks {
@@ -304,17 +319,44 @@ function dropNulls(value: unknown): unknown {
   return result;
 }
 
-function stableStringify(value: unknown): string {
+const SIMPLE_JSON_KEY = /^[A-Za-z0-9_$]+$/;
+const NON_FORMATTING_ATTRS = new Set(['hyperlink', 'ins', 'del']);
+
+/** @internal */
+export function stableStringify(value: unknown): string {
   if (value === null || value === undefined) return 'null';
-  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
-  const object = asObject(value);
-  if (object) {
-    return `{${Object.keys(object)
-      .sort()
-      .map((key) => `${JSON.stringify(key)}:${stableStringify(object[key])}`)
-      .join(',')}}`;
+  if (Array.isArray(value)) {
+    let result = '[';
+    const length = value.length;
+    for (let index = 0; index < length; index += 1) {
+      if (index > 0) result += ',';
+      if (index in value) {
+        const entry = stableStringify(value[index]);
+        if (entry !== undefined) result += entry;
+      }
+    }
+    return result + ']';
   }
+  const object = asObject(value);
+  if (object) return stableStringifyObject(object);
   return JSON.stringify(value);
+}
+
+function stableStringifyObject(value: Attrs, omitted?: ReadonlySet<string>): string {
+  let result = '{';
+  let separator = '';
+  for (const key of Object.keys(value).sort()) {
+    if (omitted?.has(key)) continue;
+    const quotedKey = SIMPLE_JSON_KEY.test(key) ? '"' + key + '"' : JSON.stringify(key);
+    result += separator + quotedKey + ':' + stableStringify(value[key]);
+    separator = ',';
+  }
+  return result + '}';
+}
+
+/** @internal */
+export function stableStringifyWithout(value: Attrs, omitted: ReadonlySet<string>): string {
+  return stableStringifyObject(value, omitted);
 }
 
 function formattingAttrs(attributes: Attrs): Attrs {
@@ -430,7 +472,15 @@ function attrsToTextFormatting(attributes: Attrs): TextFormatting {
   }
 
   const modern = asObject(attributes.modernTextEffects);
+  const typography = asObject(attributes.typography);
+  const ligatures = asString(typography?.ligatures);
+  if (ligatures !== undefined) formatting.ligatures = ligatures;
+  if (typeof typography?.contextualAlternates === 'boolean') {
+    formatting.contextualAlternates = typography.contextualAlternates;
+  }
   if (modern?.effects) formatting.modernEffects = modern.effects as TextFormatting['modernEffects'];
+
+  if (attributes.language !== undefined) formatting.language = liveLanguage(undefined, attributes.language);
 
   const runStyle = asObject(attributes.runStyle);
   const styleId = asString(runStyle?.styleId);
@@ -445,12 +495,27 @@ type RunFormatter = (attributes: Attrs) => TextFormatting;
 const directFormatting: RunFormatter = (attributes) =>
   attrsToTextFormatting(formattingAttrs(attributes));
 
+function liveLanguage(source: TextFormatting['language'], live: unknown): TextFormatting['language'] {
+  const patch = asObject(live);
+  if (!patch) return source;
+  const result = { ...source };
+  for (const slot of ['latin', 'eastAsia', 'bidi'] as const) {
+    const key = slot === 'latin' && patch.latin === undefined ? 'val' : slot;
+    if (patch[key] === undefined) continue;
+    if (patch[key] === null) delete result[slot];
+    else result[slot] = asString(patch[key]);
+  }
+  return Object.values(result).some(value => value !== undefined) ? result : undefined;
+}
+
 const ON_OFF_RUN_PROPERTIES = new Set<string>([
   'bold', 'italic', 'allCaps', 'smallCaps', 'strike', 'doubleStrike',
   'outline', 'shadow', 'emboss', 'imprint', 'hidden', 'rtl', 'boldCs', 'italicCs',
 ]);
 
-const SOURCE_RUN_PROPERTIES = ['bold', 'italic', 'fontSize', 'boldCs', 'italicCs', 'fontSizeCs', 'language', 'fontFamily'] as const;
+const SOURCE_RUN_PROPERTIES = [
+  'bold', 'italic', 'fontSize', 'boldCs', 'italicCs', 'fontSizeCs', 'language', 'fontFamily', 'snapToGrid',
+] as const;
 
 const lentByLinkStyle = (mark: unknown): boolean => asObject(mark)?.inheritedHyperlink === true;
 
@@ -485,7 +550,7 @@ function relativeFormatting(attributes: Attrs, inherited: TextFormatting, theme?
   const formatting = directFormatting(attributes);
   const result: Attrs = {};
   for (const key of new Set([...Object.keys(formatting), ...Object.keys(inherited)])) {
-    if (key === 'fontFamily') continue;
+    if (key === 'fontFamily' || key === 'language') continue;
     if ((key === 'boldCs' || key === 'italicCs') && typeof attributes[key] !== 'boolean') continue;
     const value = formatting[key as keyof TextFormatting];
     if (sameJson(value, inherited[key as keyof TextFormatting])) continue;
@@ -504,17 +569,31 @@ function relativeFormatting(attributes: Attrs, inherited: TextFormatting, theme?
     if (key === 'fontFamily') continue;
     const value = source?.[key];
     if (value === undefined) continue;
-    const live = ON_OFF_RUN_PROPERTIES.has(key) ? formatting[key] ?? false : formatting[key];
-    // Runs hold no live language, so text keeps the language of the source run it maps to.
-    if (key === 'language' || sameJson(value, live) ||
+    if (key === 'snapToGrid' && value !== false) continue;
+    const live = key === 'snapToGrid' ? attributes.snapToGrid
+      : ON_OFF_RUN_PROPERTIES.has(key) ? formatting[key] ?? false : formatting[key];
+    if ((key === 'language' && attributes.language === undefined) || sameJson(value, live) ||
       ((key === 'boldCs' || key === 'italicCs') && attributes[key] === undefined)) {
       result[key] = value;
     }
   }
+  if (attributes.language !== undefined) {
+    result.language = liveLanguage(source?.language as TextFormatting['language'], attributes.language);
+  }
   return result as TextFormatting;
 }
 
-function runContentForText(text: string, formatting: TextFormatting): RunContent[] {
+const SPECIAL_RUN_TEXT = /[\u00ad\u2011\uf000-\uf8ff]/;
+
+/** @internal */
+export function runContentForText(
+  text: string,
+  formatting: TextFormatting | (() => TextFormatting)
+): RunContent[] {
+  if (!SPECIAL_RUN_TEXT.test(text)) {
+    return text ? [{ type: 'text', text }] : [];
+  }
+  if (typeof formatting === 'function') formatting = formatting();
   const content: RunContent[] = [];
   let plainText = '';
   const flushText = (): void => {
@@ -560,9 +639,29 @@ function createTextRun(text: string, attributes: Attrs, format: RunFormatter): R
   const formatting = format(attributes);
   return {
     type: 'run',
+    ...runPropertyChanges(attributes, format),
     formatting: Object.keys(formatting).length > 0 ? formatting : undefined,
-    content: runContentForText(text, directFormatting(attributes)),
+    content: runContentForText(text, () => directFormatting(attributes)),
   };
+}
+
+function runPropertyChanges(attributes: Attrs, format: RunFormatter): Pick<Run, 'propertyChanges'> {
+  if (!Array.isArray(attributes.rPrChange) || attributes.rPrChange.length === 0) return {};
+  const changes = attributes.rPrChange.map((raw) => {
+    const change = asObject(raw);
+    if (!change) return raw;
+    const previous = asObject(change.previousAttributes);
+    const info = asObject(change.info);
+    const generated = typeof info?.id === 'string' && !Number.isFinite(Number(info.id));
+    return {
+      type: 'runPropertyChange',
+      ...change,
+      ...(previous && generated ? { previousFormatting: format({
+        ...previous, _sourceRunFormatting: attributes._sourceRunFormatting,
+      }) } : {}),
+    };
+  });
+  return { propertyChanges: propertyChanges(changes) as Run['propertyChanges'] };
 }
 
 function appendTextRun(target: Run, source: Run): void {
@@ -937,7 +1036,7 @@ function replayedRunProperties(payload: Attrs, attributes: Attrs, format: RunFor
   }
   return {
     formatting: formatting as TextFormatting,
-    ...(Array.isArray(source.propertyChanges) ? { propertyChanges: source.propertyChanges as Run['propertyChanges'] } : {}),
+    ...runPropertyChanges(attributes, format),
   };
 }
 
@@ -1159,6 +1258,15 @@ function ordinaryContentForItem(
   recovery: ChartRecovery,
   format: RunFormatter
 ): ParagraphContent | null {
+  const content = inlineContentForItem(item, recovery, format);
+  return content?.type === 'run' ? { ...content, ...runPropertyChanges(item.attributes, format) } : content;
+}
+
+function inlineContentForItem(
+  item: InlineItem,
+  recovery: ChartRecovery,
+  format: RunFormatter
+): ParagraphContent | null {
   if (item.kind === 'text') return createTextRun(item.text, item.attributes, format);
   switch (item.embedKind) {
     case 'break':
@@ -1205,6 +1313,7 @@ function tabRun(attributes: Attrs, format: RunFormatter): Run {
   const formatting = format(attributes);
   return {
     type: 'run',
+    ...runPropertyChanges(attributes, format),
     content: [{ type: 'tab' }],
     ...(Object.keys(formatting).length > 0 ? { formatting } : {}),
   };
@@ -1227,12 +1336,19 @@ function trackedContentForItem(item: InlineItem, info: TrackedChangeInfo, inCont
   else if (item.kind === 'embed' && item.embedKind === 'opaqueDrawing')
     child = opaqueDrawingRunFromPayload(item.payload, item.attributes, format) ?? { type: 'run', content: [] };
   else if (item.kind === 'text') child = createTextRun(item.text, item.attributes, format);
-  else child = { type: 'run', content: [] };
+  else
+    child =
+      (inlineContentForItem(item, recovery, format) as TrackedWrapper['content'][number] | null) ??
+      { type: 'run', content: [] };
 
   if (item.kind === 'embed' && item.embedKind === 'chart' && child.type === 'run' && child.content.length === 0) return null;
+  if (child.type === 'run') Object.assign(child, runPropertyChanges(item.attributes, format));
   const hyperlink = createHyperlink(item.attributes);
   if (hyperlink && (child.type === 'run' || child.type === 'mathEquation' || child.type === 'inlineSdt' || child.type === 'simpleField' || child.type === 'complexField')) {
-    if (child.type === 'run') hyperlink.children.push(child);
+    if (child.type === 'run') {
+    Object.assign(child, runPropertyChanges(item.attributes, format));
+    hyperlink.children.push(child);
+  }
     else hyperlink.structuredChildren = [child];
     child = hyperlink;
   }
@@ -1326,6 +1442,10 @@ function restoreProjectedFieldResults(
     const group = children.get(index) ?? [];
     const attributes = { ...item.attributes };
     delete attributes.fieldResult;
+    if (item.kind === 'embed' && item.embedKind === 'noteRef') {
+      delete attributes.ins;
+      delete attributes.del;
+    }
     group.push({ ...item, attributes });
     children.set(index, group);
     groups.set(owner, children);
@@ -1351,6 +1471,8 @@ function restoreProjectedFieldResults(
       replacements.set(index, rebuilt);
     }
     if (replacements.size === 0) continue;
+    delete stored.sourceRunXml;
+    delete stored.sourceRunDigest;
     const inline = (stored.structuredResult?.inline ?? []).flatMap((child, index) => replacements.get(index) ?? [child]);
     const code = stored.structuredCode?.inline?.flatMap((child, index) => replacements.get(-index - 1) ?? [child]);
     stored.structuredResult = { ...stored.structuredResult, inline };
@@ -1391,12 +1513,15 @@ function buildParagraphContent(
   const content: ParagraphContent[] = [];
   let currentRun: Run | null = null;
   let currentFormattingKey: string | null = null;
+  let currentSource: TextItem['sourceRun'];
+  const formattingKeys = new Map<string, string>();
   let currentHyperlink: Hyperlink | null = null;
 
   const flushRun = (): void => {
     if (currentRun) content.push(currentRun);
     currentRun = null;
     currentFormattingKey = null;
+    currentSource = undefined;
   };
   const flushHyperlink = (): void => {
     if (currentHyperlink) content.push(currentHyperlink);
@@ -1404,8 +1529,8 @@ function buildParagraphContent(
   };
 
   for (const item of items) {
-    // A note reference is handled before tracked/link marks.
-    if (item.kind === 'embed' && item.embedKind === 'noteRef') {
+    // An untracked note reference is handled before link marks.
+    if (item.kind === 'embed' && item.embedKind === 'noteRef' && !item.attributes.ins && !item.attributes.del) {
       flushRun();
       flushHyperlink();
       const note = ordinaryContentForItem(item, recovery, format);
@@ -1458,14 +1583,32 @@ function buildParagraphContent(
 
     flushHyperlink();
     if (item.kind === 'text') {
-      const key = stableStringify(formattingAttrs(item.attributes));
       const nextRun = createTextRun(item.text, item.attributes, format);
-      if (currentRun && currentFormattingKey === key) appendTextRun(currentRun, nextRun);
-      else {
+      let key = stableStringifyWithout(item.attributes, NON_FORMATTING_ATTRS);
+      if (item.sourceRun?.changed) {
+        const formatting = stableStringify([nextRun.formatting, nextRun.propertyChanges]);
+        let written = formattingKeys.get(formatting);
+        if (written === undefined) {
+          written = serializeRun({ ...nextRun, content: [] });
+          formattingKeys.set(formatting, written);
+        }
+        key = written;
+      }
+      const source = item.sourceRun;
+      const sameSource = source?.index === currentSource?.index;
+      const changedNeighbours = source && currentSource && source.changed && currentSource.changed &&
+        source.previous === currentSource.index;
+      const plain = nextRun.content.every(child => child.type === 'text') &&
+        currentRun?.content.every(child => child.type === 'text');
+      const compatible = source ? plain && (sameSource || changedNeighbours) : !currentSource;
+      if (currentRun && currentFormattingKey === key && compatible) {
+        appendTextRun(currentRun, nextRun);
+      } else {
         flushRun();
         currentRun = nextRun;
         currentFormattingKey = key;
       }
+      currentSource = source;
       continue;
     }
 
@@ -1498,6 +1641,7 @@ function marksKeyToYrsAttrs(marksKey: string | undefined): Attrs | null {
     if (BOOLEAN_MARKS.has(name)) attrs[name] = true;
     else if (name === 'boldCs' || name === 'italicCs') attrs[name] = value.value;
     else if (name === 'highlight') attrs.highlight = value.color;
+    else if (name === 'rPrChange') attrs.rPrChange = value.changes;
     else if (name === 'insertion' || name === 'deletion') {
       attrs[name === 'insertion' ? 'ins' : 'del'] = dropNulls({
         id: value.revisionId,
@@ -1552,7 +1696,10 @@ function sourceBreakBoundaries(paragraph: Paragraph | undefined): OriginalRunBou
         child.type === 'commentRangeStart' || child.type === 'commentRangeEnd' ||
         child.type === 'bookmarkStart' || child.type === 'bookmarkEnd' || child.type === 'rawXml'
       ) continue;
-      return [];
+      const span = inlineSpanText(child);
+      if (span === null) return [];
+      boundaries.push({ text: span, inline: true });
+      continue;
     }
     let text = '';
     const breaks: NonNullable<OriginalRunBoundary['breaks']> = [];
@@ -1566,6 +1713,41 @@ function sourceBreakBoundaries(paragraph: Paragraph | undefined): OriginalRunBou
     boundaries.push({ text, breaks });
   }
   return boundaries;
+}
+
+function inlineSpanText(child: ParagraphContent): string | null {
+  switch (child.type) {
+    case 'simpleField':
+    case 'inlineSdt':
+    case 'mathEquation':
+      return '￼';
+    case 'complexField':
+      return [...(child.structuredCode?.inline ?? []), ...(child.structuredResult?.inline ?? [])]
+        .some((nested) => nested.type === 'hyperlink' || nested.type === 'simpleField')
+        ? null
+        : '￼';
+    case 'hyperlink':
+      return plainRunsText(child.structuredChildren ?? child.children);
+    case 'insertion':
+    case 'deletion':
+    case 'moveFrom':
+    case 'moveTo':
+      return plainRunsText(child.content);
+    default:
+      return null;
+  }
+}
+
+function plainRunsText(children: readonly unknown[]): string | null {
+  let text = '';
+  for (const child of children as ParagraphContent[]) {
+    if (child.type !== 'run') return null;
+    for (const entry of child.content) {
+      if (entry.type !== 'text') return null;
+      text += entry.text;
+    }
+  }
+  return text;
 }
 
 function liveRunBoundaries(
@@ -1640,25 +1822,18 @@ function restoreRecordedBreaks(
   const live = items
     .map((item) => (item.kind === 'text' ? item.text : isBlockBreak(item) ? '' : '\uFFFC'))
     .join('');
-  let prefix = 0;
-  const shared = Math.min(recorded.length, live.length);
-  while (prefix < shared && recorded[prefix] === live[prefix]) prefix += 1;
-  let suffix = 0;
-  while (
-    suffix < shared - prefix &&
-    recorded[recorded.length - 1 - suffix] === live[live.length - 1 - suffix]
-  ) {
-    suffix += 1;
-  }
+  const alignment = textAlignment(recorded, live, true);
   const length = content.reduce((sum, child) => sum + paragraphContentLength(child), 0);
+  if (
+    boundaries.some((boundary) => boundary.inline) &&
+    !breakPlacesAreCertain(kept.map(({ offset }) => offset), recorded, live, content, alignment, length)
+  ) {
+    return content;
+  }
   const placed = insertBoundaries(
     content,
     kept.map(({ offset }, id) => {
-      const mapped = offset <= prefix
-        ? offset
-        : offset >= recorded.length - suffix
-          ? offset + live.length - recorded.length
-          : Math.min(offset, live.length - suffix);
+      const mapped = mapRecordedOffset(offset, recorded, live, alignment);
       return { id, kind: 'start', offset: Math.min(Math.max(mapped, 0), length) };
     }),
     (boundary) => ({ type: 'run', content: [{ type: 'break', breakType: kept[boundary.id]!.type }] })
@@ -1669,6 +1844,85 @@ function restoreRecordedBreaks(
     paragraphBreaksAreLive(placed, liveBreaks)
     ? placed
     : content;
+}
+
+interface TextAlignment {
+  prefix: number;
+  suffix: number;
+}
+
+function textAlignment(recorded: string, live: string, prefixFirst: boolean): TextAlignment {
+  const shared = Math.min(recorded.length, live.length);
+  const same = (index: number, fromEnd: boolean): boolean =>
+    fromEnd
+      ? recorded[recorded.length - 1 - index] === live[live.length - 1 - index]
+      : recorded[index] === live[index];
+  let prefix = 0;
+  let suffix = 0;
+  if (prefixFirst) {
+    while (prefix < shared && same(prefix, false)) prefix += 1;
+    while (suffix < shared - prefix && same(suffix, true)) suffix += 1;
+  } else {
+    while (suffix < shared && same(suffix, true)) suffix += 1;
+    while (prefix < shared - suffix && same(prefix, false)) prefix += 1;
+  }
+  return { prefix, suffix };
+}
+
+function mapRecordedOffset(
+  offset: number,
+  recorded: string,
+  live: string,
+  { prefix, suffix }: TextAlignment
+): number {
+  return offset <= prefix
+    ? offset
+    : offset >= recorded.length - suffix
+      ? offset + live.length - recorded.length
+      : Math.min(offset, live.length - suffix);
+}
+
+function atChildBoundaries(content: ParagraphContent[], offsets: number[]): boolean {
+  let index = 0;
+  let start = 0;
+  for (const child of content) {
+    const end = start + paragraphContentLength(child);
+    while (index < offsets.length && offsets[index]! <= start) index += 1;
+    if (index < offsets.length && offsets[index]! < end) {
+      if (child.type !== 'run') return false;
+      let at = start;
+      for (const entry of child.content) {
+        const next = at + runContentLength(entry);
+        while (index < offsets.length && offsets[index]! <= at) index += 1;
+        if (entry.type !== 'text' && index < offsets.length && offsets[index]! < next) return false;
+        at = next;
+      }
+    }
+    start = end;
+  }
+  return true;
+}
+
+function breakPlacesAreCertain(
+  offsets: number[],
+  recorded: string,
+  live: string,
+  content: ParagraphContent[],
+  first: TextAlignment,
+  length: number
+): boolean {
+  if (length !== live.length) return false;
+  const last = textAlignment(recorded, live, false);
+  const inside = (offset: number, { prefix, suffix }: TextAlignment): boolean =>
+    prefix < offset && offset < recorded.length - suffix;
+  const mapped: number[] = [];
+  for (const offset of offsets) {
+    if (inside(offset, first) || inside(offset, last)) return false;
+    const place = mapRecordedOffset(offset, recorded, live, first);
+    if (place !== mapRecordedOffset(offset, recorded, live, last)) return false;
+    mapped.push(place);
+  }
+  return atChildBoundaries(content, mapped.sort((left, right) => left - right));
 }
 
 function restoreOriginalRuns(
@@ -1707,7 +1961,7 @@ function restoreOriginalRuns(
     while (remaining > 0) {
       const item = items[itemIndex];
       if (item?.kind !== 'text') return fallback();
-      if (stableStringify(formattingAttrs(item.attributes)) !== stableStringify(expected)) {
+      if (stableStringifyWithout(item.attributes, NON_FORMATTING_ATTRS) !== stableStringify(expected)) {
         return fallback();
       }
       const available = item.text.length - itemOffset;
@@ -2156,7 +2410,9 @@ function sourceTextMatches(original: string, current: string): SourceTextMatch[]
   return matches;
 }
 
-function preserveSourceRunFormatting(items: InlineItem[], sources: OriginalRunBoundary[]): InlineItem[] {
+function preserveSourceRunFormatting(
+  items: InlineItem[], sources: OriginalRunBoundary[], coalesce = false
+): InlineItem[] {
   if (sources.length === 0) {
     return items;
   }
@@ -2177,10 +2433,23 @@ function preserveSourceRunFormatting(items: InlineItem[], sources: OriginalRunBo
     return offset === sourceEnd ? liveEnd : current.length;
   };
   let sourceOffset = 0;
-  const spans = sources.map((source, index) => {
+  const mappedSources = sources.map((source, index) => {
     const start = mapped(sourceOffset);
     sourceOffset += source.text.length;
-    return { start, end: index + 1 === sources.length ? current.length : mapped(sourceOffset), formatting: source.formatting };
+    const end = index + 1 === sources.length ? current.length : mapped(sourceOffset);
+    return {
+      start, end, index, formatting: source.formatting,
+      changed: current.slice(start, end) !== source.text,
+    };
+  });
+  const spans = mappedSources.map((span, index) => {
+    let previous = index - 1;
+    while (previous >= 0) {
+      const skipped = mappedSources[previous]!;
+      if (skipped.end > skipped.start || !skipped.changed) break;
+      previous--;
+    }
+    return { ...span, previous };
   }).filter((span) => span.end > span.start);
   let offset = 0;
   return items.flatMap((item): InlineItem[] => {
@@ -2194,7 +2463,12 @@ function preserveSourceRunFormatting(items: InlineItem[], sources: OriginalRunBo
         .map((key) => [key, span!.formatting![key]]));
       const attributes = { ...item.attributes, _sourceRunFormatting: source };
       slices.push(item.kind === 'text'
-        ? { ...item, text: item.text.slice(item.text.length - (end - offset), item.text.length - (end - next)), attributes }
+        ? {
+          ...item, text: item.text.slice(item.text.length - (end - offset), item.text.length - (end - next)), attributes,
+          ...(coalesce && span ? { sourceRun: {
+            index: span.index, previous: span.previous, changed: span.changed,
+          } } : {}),
+        }
         : { ...item, attributes });
       offset = next;
     }
@@ -2253,6 +2527,13 @@ function paragraphFromStory(
       } : undefined,
     };
   }
+  if (properties.language !== undefined) {
+    const original = attrs._originalFormatting ?? {};
+    attrs._originalFormatting = { ...original, runProperties: {
+      ...original.runProperties,
+      language: liveLanguage(original.runProperties?.language, properties.language),
+    } };
+  }
   const sources = baseParagraph ? sourceRuns(baseParagraph.content)
     : Array.isArray(attrs._originalRunBoundaries) ? attrs._originalRunBoundaries as OriginalRunBoundary[]
       : attrs._originalFormatting?.runProperties ? [{
@@ -2262,7 +2543,12 @@ function paragraphFromStory(
           language: attrs._originalFormatting.runProperties.language,
         },
       }] : [];
-  let content = buildParagraphContent(preserveSourceRunFormatting(items, sources), recovery, format, revisionIds);
+  const coalesce = !!baseParagraph && baseParagraph.content.every(child =>
+    child.type === 'run' && child.content.every(entry => entry.type === 'text') && !child.propertyChanges?.length
+  ) && items.every(item => item.kind === 'text' &&
+    !item.attributes.hyperlink && !item.attributes.ins && !item.attributes.del && !item.attributes.rPrChange
+  ) && sources.map(source => source.text).join('') !== items.map(item => item.kind === 'text' ? item.text : '').join('');
+  let content = buildParagraphContent(preserveSourceRunFormatting(items, sources, coalesce), recovery, format, revisionIds);
   content = restoreOriginalRuns(
     content,
     items,
@@ -2274,7 +2560,10 @@ function paragraphFromStory(
   );
   restoreLineBreaks(content, baseParagraph);
   content = restoreRawInlines(content, baseParagraph);
-  if (baseParagraph) restoreNestedOrdinals(content, baseParagraph.content);
+  if (baseParagraph) {
+    restoreNestedOrdinals(content, baseParagraph.content);
+    restoreTextBoxBookmarks(content, baseParagraph.content);
+  }
   content = insertBoundaries(content, commentBoundaries);
 
   const bookmarks = bookmarkBoundaries(properties).map((boundary) => ({
@@ -2443,6 +2732,7 @@ function tableFromPayload(context: SaveContext, payload: TablePayload): Table {
     rowspan: number;
     colspan: number;
     cell: TableCell;
+    story?: string;
   }> = [];
   let totalColumns = 0;
 
@@ -2459,6 +2749,7 @@ function tableFromPayload(context: SaveContext, payload: TablePayload): Table {
         rowspan,
         colspan,
         cell: tableCellFromPayload(context, cellPayload),
+        story: asString(cellPayload.story),
       });
       for (let r = rowIndex; r < rowIndex + rowspan; r += 1) {
         occupied[r] ??= [];
@@ -2479,8 +2770,11 @@ function tableFromPayload(context: SaveContext, payload: TablePayload): Table {
     }
   }
 
+  const cellStories: TableCellSource[][] = [];
   const rows: TableRow[] = rowPayloads.map((rowPayload, rowIndex) => {
     const cells: TableCell[] = [];
+    const stories: TableCellSource[] = [];
+    cellStories.push(stories);
     for (let col = tableRowGrid(rowPayload.trPr).before; col < totalColumns; ) {
       const anchor = byStart.get(`${rowIndex}-${col}`);
       if (anchor) {
@@ -2495,6 +2789,7 @@ function tableFromPayload(context: SaveContext, payload: TablePayload): Table {
           ...anchor.cell,
           formatting: Object.keys(formatting).length > 0 ? formatting : undefined,
         });
+        stories.push(anchor.story);
         col += anchor.colspan;
         continue;
       }
@@ -2508,6 +2803,7 @@ function tableFromPayload(context: SaveContext, payload: TablePayload): Table {
       else delete formatting.gridSpan;
       formatting.vMerge = 'continue';
       cells.push({ ...covering.cell, content: [], formatting });
+      stories.push(covering.story === undefined ? undefined : { covering: covering.story, rowOffset: rowIndex - covering.row });
       col += covering.colspan;
     }
 
@@ -2552,7 +2848,217 @@ function tableFromPayload(context: SaveContext, payload: TablePayload): Table {
   if (Array.isArray(attrs.tblPrChange) && attrs.tblPrChange.length > 0) {
     table.propertyChanges = attrs.tblPrChange;
   }
+  const prefixHint = rowPayloads.flatMap((row) => Array.isArray(row.cells) ? row.cells : [])
+    .map((cell) => (asString(cell.tcPr?._sourceCellStory) ?? asString(cell.story))?.match(/^(.*:t\d+):r\d+c\d+(?:~\d+)?$/)?.[1])
+    .find((prefix) => prefix !== undefined);
+  restoreTableBookmarks(context, table, cellStories, prefixHint);
+  projectedTableCells.set(table, cellStories);
   return table;
+}
+
+/** A projected cell's source: its own story, or the anchor story and row offset of the vertical merge it continues. */
+type TableCellSource = string | { covering: string; rowOffset: number } | undefined;
+
+/** The cell sources of each projected table, so a later save that takes this projection as its base maps cells by story rather than position. */
+const projectedTableCells = new WeakMap<Table, ReadonlyArray<ReadonlyArray<TableCellSource>>>();
+
+function tableCellKey(entry: TableCellSource): string | undefined {
+  return typeof entry === 'string' ? entry : entry ? `${entry.covering}#${entry.rowOffset}` : undefined;
+}
+
+/** Where each cell story (or continuation `anchor#offset`) of a base table sits in it. */
+function baseTableCells(table: Table, prefix: string): Map<string, { row: number; cell: number }> {
+  const cells = new Map<string, { row: number; cell: number }>();
+  const recorded = projectedTableCells.get(table);
+  if (recorded) {
+    recorded.forEach((row, rowIndex) => row.forEach((entry, cellIndex) => {
+      const key = tableCellKey(entry);
+      if (key !== undefined && !cells.has(key)) cells.set(key, { row: rowIndex, cell: cellIndex });
+    }));
+    return cells;
+  }
+  const seeded = seededCellIndices(table);
+  const spans = new Map<number, { story: string; row: number }>();
+  table.rows.forEach((row, rowIndex) => {
+    const starts = gridStarts(row);
+    row.cells.forEach((cell, cellIndex) => {
+      const ordinal = seeded[rowIndex]!.indexOf(cellIndex);
+      const column = starts[cellIndex]!;
+      if (ordinal >= 0) {
+        const story = `${prefix}:r${rowIndex}c${ordinal}`;
+        cells.set(story, { row: rowIndex, cell: cellIndex });
+        if (cell.formatting?.vMerge === 'restart') spans.set(column, { story, row: rowIndex });
+        else spans.delete(column);
+        return;
+      }
+      const anchor = spans.get(column);
+      if (anchor) cells.set(`${anchor.story}#${rowIndex - anchor.row}`, { row: rowIndex, cell: cellIndex });
+    });
+  });
+  return cells;
+}
+
+function gridStarts(row: TableRow): number[] {
+  let column = row.formatting?.gridBefore ?? 0;
+  return row.cells.map((cell) => {
+    const start = column;
+    column += cell.formatting?.gridSpan ?? 1;
+    return start;
+  });
+}
+
+const SOURCE_CELL_STORY = /^(.*:t\d+):r(\d+)c(\d+)$/;
+
+function rowCellBookmarks(row: TableRow): string[] {
+  return [...row.cells.flatMap((cell) => cell.leadingBookmarks ?? []), ...(row.trailingBookmarks ?? [])];
+}
+
+function tableHasBookmarks(table: Table): boolean {
+  return (table.trailingBookmarks?.length ?? 0) > 0
+    || table.rows.some((row) => (row.leadingBookmarks?.length ?? 0) > 0 || rowCellBookmarks(row).length > 0);
+}
+
+/** A stand-in block for a row or cell; `scan` exposes the boundaries already inside it to the collapse rules. */
+function bookmarkMarker(key: string, scan?: readonly BlockContent[]): Paragraph {
+  return { type: 'paragraph', paraId: key, content: [], ...(scan ? { scan } : {}) } as unknown as Paragraph;
+}
+
+function distributeBookmarks<T>(
+  restored: readonly BlockContent[],
+  items: readonly T[],
+  leading: (item: T, xml: string) => void,
+  trailing: (xml: string) => void
+): void {
+  let index = 0;
+  for (const block of restored) {
+    if (isRawXml(block)) {
+      if (index < items.length) leading(items[index]!, block.xml);
+      else trailing(block.xml);
+    } else {
+      index += 1;
+    }
+  }
+}
+
+/** Puts the source table's row and cell bookmark boundaries back on the projected table, collapsing those of removed rows and cells. */
+function restoreTableBookmarks(
+  context: SaveContext,
+  table: Table,
+  cellStories: ReadonlyArray<ReadonlyArray<TableCellSource>>,
+  prefixHint: string | undefined
+): void {
+  const parse = (story: string) => {
+    const match = SOURCE_CELL_STORY.exec(story);
+    return match ? { prefix: match[1]!, row: Number(match[2]), ordinal: Number(match[3]) } : undefined;
+  };
+  const prefix = prefixHint ?? cellStories.flat().map((entry) =>
+    typeof entry === 'string' ? parse(entry)?.prefix : entry ? parse(entry.covering)?.prefix : undefined)
+    .find((candidate) => candidate !== undefined);
+  const source = prefix === undefined ? undefined : context.sourceTable(prefix);
+  if (!source || !tableHasBookmarks(source)) return;
+  const located = baseTableCells(source, prefix!);
+  const starts = source.rows.map(gridStarts);
+  const continues = (row: number, cell: number) => source.rows[row]?.cells[cell]?.formatting?.vMerge === 'continue';
+  const resolved = cellStories.map((row) => row.map((entry) => {
+    if (entry === undefined) return undefined;
+    if (typeof entry === 'string') {
+      const at = located.get(entry);
+      return at ? { direct: true as const, row: at.row, cell: at.cell } : undefined;
+    }
+    const anchor = located.get(entry.covering);
+    return anchor
+      ? { direct: false as const, row: anchor.row + entry.rowOffset, column: starts[anchor.row]![anchor.cell]! }
+      : undefined;
+  }));
+  const seen = new Set<number>();
+  const rowKeys: Array<number | undefined> = resolved.map((row) => {
+    const rows = new Set(row.flatMap((cell) => cell?.direct ? [cell.row] : []));
+    const sourceRow = rows.size === 1 ? [...rows][0]! : undefined;
+    if (sourceRow === undefined || seen.has(sourceRow)) return undefined;
+    seen.add(sourceRow);
+    return sourceRow;
+  });
+  resolved.forEach((row, index) => {
+    if (rowKeys[index] !== undefined || row.some((cell) => cell?.direct)) return;
+    const rows = new Set(row.flatMap((cell) => cell && !cell.direct
+      && continues(cell.row, starts[cell.row]?.indexOf(cell.column) ?? -1) ? [cell.row] : []));
+    const sourceRow = rows.size === 1 ? [...rows][0]! : undefined;
+    if (sourceRow === undefined || seen.has(sourceRow)) return;
+    seen.add(sourceRow);
+    rowKeys[index] = sourceRow;
+  });
+  const sources = resolved.map((row, index) => row.map((cell) => {
+    if (!cell) return undefined;
+    if (cell.direct) return { row: cell.row, cell: cell.cell };
+    const sourceRow = rowKeys[index];
+    const covered = sourceRow === undefined ? -1 : starts[sourceRow]?.indexOf(cell.column) ?? -1;
+    return covered >= 0 && continues(sourceRow!, covered) ? { row: sourceRow!, cell: covered } : undefined;
+  }));
+  const contentOf = (rows: readonly TableRow[]) => projectedBookmarkPositions(rows.flatMap((row) => row.cells.flatMap((cell) => cell.content)));
+  const sourceContent = contentOf(source.rows);
+  const projectedContent = contentOf(table.rows);
+  const orphaned = (xml: string): boolean => {
+    const marker = rawBlockBookmark(xml);
+    if (marker?.id === undefined) return false;
+    const partner = marker.kind === 'start' ? 'end' : 'start';
+    return sourceContent.get(marker.id)?.[partner] !== undefined && projectedContent.get(marker.id)?.[partner] === undefined;
+  };
+  const raw = (xml: string): BlockContent[] => orphaned(xml) ? [] : [{ type: 'rawXml', xml }];
+  const projected = table.rows.map((row, index) => bookmarkMarker(
+    rowKeys[index] === undefined ? `N${index}` : `R${rowKeys[index]}`, row.cells.flatMap((cell) => cell.content)));
+  const placed = projectedBookmarkPositions(projected);
+  const promoted = new Set<string>();
+  rowKeys.forEach((sourceIndex, index) => {
+    if (sourceIndex === undefined) return;
+    for (const xml of rowCellBookmarks(source.rows[sourceIndex]!)) {
+      const marker = rawBlockBookmark(xml);
+      if (marker?.id === undefined) continue;
+      const partner = placed.get(marker.id)?.[marker.kind === 'start' ? 'end' : 'start'];
+      if (partner !== undefined && (marker.kind === 'start' ? partner < index + 0.5 : partner > index + 0.5)) promoted.add(xml);
+    }
+  });
+  const base: BlockContent[] = [];
+  source.rows.forEach((row, index) => {
+    for (const xml of row.leadingBookmarks ?? []) base.push(...raw(xml));
+    for (const xml of rowCellBookmarks(row)) if (!seen.has(index) || promoted.has(xml)) base.push(...raw(xml));
+    base.push(bookmarkMarker(`R${index}`));
+  });
+  for (const xml of source.trailingBookmarks ?? []) base.push(...raw(xml));
+  delete table.trailingBookmarks;
+  for (const row of table.rows) {
+    delete row.leadingBookmarks;
+    delete row.trailingBookmarks;
+    for (const cell of row.cells) delete cell.leadingBookmarks;
+  }
+  distributeBookmarks(
+    restoreBlockBookmarks(projected, base, `${prefix}:rows`),
+    table.rows,
+    (row, xml) => (row.leadingBookmarks ??= []).push(xml),
+    (xml) => (table.trailingBookmarks ??= []).push(xml)
+  );
+  table.rows.forEach((row, index) => {
+    const sourceIndex = rowKeys[index];
+    if (sourceIndex === undefined) return;
+    const sourceRow = source.rows[sourceIndex]!;
+    if (rowCellBookmarks(sourceRow).length === 0) return;
+    const cellBase: BlockContent[] = [];
+    const kept = (xml: string) => promoted.has(xml) ? [] : raw(xml);
+    sourceRow.cells.forEach((cell, cellIndex) => {
+      for (const xml of cell.leadingBookmarks ?? []) cellBase.push(...kept(xml));
+      cellBase.push(bookmarkMarker(`C${cellIndex}`));
+    });
+    for (const xml of sourceRow.trailingBookmarks ?? []) cellBase.push(...kept(xml));
+    const cellProjected = row.cells.map((cell, cellIndex) => {
+      const key = sources[index]![cellIndex];
+      return bookmarkMarker(key && key.row === sourceIndex ? `C${key.cell}` : `N${cellIndex}`, cell.content);
+    });
+    distributeBookmarks(
+      restoreBlockBookmarks(cellProjected, cellBase, `${prefix}:r${sourceIndex}`),
+      row.cells,
+      (cell, xml) => (cell.leadingBookmarks ??= []).push(xml),
+      (xml) => (row.trailingBookmarks ??= []).push(xml)
+    );
+  });
 }
 
 function pageBreakParagraph(): Paragraph {
@@ -2647,9 +3153,16 @@ function collectBaseStories(
       }
       if (block.type !== 'table') continue;
       const currentTableIndex = tableIndex++;
-      block.rows.forEach((row, rowIndex) => {
-        row.cells.forEach((cell, cellIndex) => {
-          visit(`${storyId}:t${currentTableIndex}:r${rowIndex}c${cellIndex}`, cell.content);
+      const recorded = projectedTableCells.get(block);
+      if (recorded) {
+        recorded.forEach((row, rowIndex) => row.forEach((entry, cellIndex) => {
+          if (typeof entry === 'string') visit(entry, block.rows[rowIndex]!.cells[cellIndex]!.content);
+        }));
+        continue;
+      }
+      seededCellIndices(block).forEach((cells, rowIndex) => {
+        cells.forEach((cellIndex, ordinal) => {
+          visit(`${storyId}:t${currentTableIndex}:r${rowIndex}c${ordinal}`, block.rows[rowIndex]!.cells[cellIndex]!.content);
         });
       });
     }
@@ -2697,6 +3210,26 @@ function commentRanges(
   }
   return byStory;
 }
+
+const openedCrossings = new WeakMap<object, ReadonlyMap<number, CrossingComment>>();
+
+/**
+ * The comments crossing stories in the document `session` was opened from, scanned once per
+ * opened document; for a session seeded without one, in `base`, scanned once per base document.
+ */
+function openedCrossingComments(session: YrsSession, base: Document): ReadonlyMap<number, CrossingComment> {
+  const opened = sessionMaterializedSource(session);
+  const key: object = opened ?? base;
+  let crossing = openedCrossings.get(key);
+  if (!crossing) {
+    crossing = crossStoryComments(session, opened ?? base);
+    openedCrossings.set(key, crossing);
+  }
+  return crossing;
+}
+
+/** Whether `story` is `root` or one of the stories nested in it. */
+const withinStory = (story: string, root: string): boolean => story === root || story.startsWith(`${root}:`);
 
 /** Chart placements recoverable from the base document, keyed per story. */
 interface ChartRecovery {
@@ -2753,22 +3286,54 @@ function paragraphChartRuns(content: readonly ParagraphContent[]): Run[] {
 }
 
 function isBlockBookmark(block: BlockContent): boolean {
-  return isRawXml(block) && /^<w:bookmark(?:Start|End)(?=[\s/>])/.test(block.xml);
+  return isRawXml(block) && /^<w:bookmark(?:Start|End)(?=[\s/>]|$)/.test(block.xml.trimStart());
+}
+
+function containsBookmark(blocks: readonly BlockContent[]): boolean {
+  return blocks.some(block => {
+    if (isBlockBookmark(block)) return true;
+    if (block.type === 'blockSdt') return containsBookmark(block.content);
+    if (block.type === 'table') return tableHasBookmarks(block) || block.rows.some(row => row.cells.some(cell => containsBookmark(cell.content)));
+    return false;
+  });
+}
+
+export function assertCommentBookmarkReplacement(blocks: readonly BlockContent[]): void {
+  if (blocks.some(block =>
+    block.type === 'blockSdt' ? containsBookmark(block.content)
+      : block.type === 'table' && containsBookmark([block])
+  )) throw new Error('Cannot replace comment body with bookmarks in nested blocks');
 }
 
 type BookmarkKind = 'start' | 'end';
+const WORD_NAMESPACE = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 
 function rawBlockBookmark(xml: string): { kind: BookmarkKind; id?: string } | undefined {
-  const kind = /^<w:bookmark(Start|End)(?=[\s/>])/.exec(xml)?.[1];
+  xml = xml.trimStart();
+  const kind = /^<w:bookmark(Start|End)(?=[\s/>]|$)/.exec(xml)?.[1];
   if (!kind) return undefined;
+  const decoded = (value: string): string => value.replace(/&#(?:x([0-9a-fA-F]+)|([0-9]+));|&(amp|lt|gt|quot|apos);/g, (entity, hex, decimal, named) => {
+    if (named) return ({ amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" } as Record<string, string>)[named] ?? entity;
+    const code = Number.parseInt(hex ?? decimal, hex === undefined ? 10 : 16);
+    return code <= 0x10ffff ? String.fromCodePoint(code) : entity;
+  });
+  const tag = /^<[^<>"']*(?:"[^"]*"[^<>"']*|'[^']*'[^<>"']*)*>/.exec(xml)?.[0];
+  if (!tag) throw new Error('Invalid block bookmark');
+  const attributes = [...tag.matchAll(/([^\s=<>/]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g)]
+    .map(attribute => [attribute[1]!, decoded(attribute[2] ?? attribute[3]!)] as const);
+  const namespaces = new Map([['w', WORD_NAMESPACE], ['xml', 'http://www.w3.org/XML/1998/namespace']]);
+  for (const [name, value] of attributes) {
+    if (name.startsWith('xmlns:')) namespaces.set(name.slice(6), value);
+  }
   let value: string | undefined;
-  for (const attribute of xml.matchAll(/([^\s=<>/]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g)) {
-    if (attribute[1] !== 'w:id') continue;
-    value = (attribute[2] ?? attribute[3]!).replace(/&#(?:x([0-9a-f]+)|([0-9]+));/gi, (entity, hex, decimal) => {
-      const code = Number.parseInt(hex ?? decimal, hex === undefined ? 10 : 16);
-      return code <= 0x10ffff ? String.fromCodePoint(code) : entity;
-    });
-    break;
+  for (const [name, attribute] of attributes) {
+    const [prefix, local] = name.split(':');
+    if (prefix === 'xmlns' || (local !== 'id' && local !== 'name')) continue;
+    const namespace = namespaces.get(prefix!);
+    if (namespace === undefined) throw new Error(`Unbound block bookmark attribute ${name}`);
+    if (namespace !== WORD_NAMESPACE || local !== 'id') continue;
+    if (value !== undefined) throw new Error('Duplicate block bookmark id');
+    value = attribute;
   }
   const id = value === undefined ? undefined
     : Number.isSafeInteger(Number(value)) ? String(Number(value)) : value;
@@ -2822,6 +3387,17 @@ function projectedBookmarkPositions(blocks: readonly BlockContent[]): Map<string
       pair[marker.kind] ??= position;
       return;
     }
+    for (const key of ['leadingBookmarks', 'trailingBookmarks']) {
+      const fragments = record[key];
+      if (!Array.isArray(fragments)) continue;
+      for (const xml of fragments) {
+        const boundary = typeof xml === 'string' ? rawBlockBookmark(xml) : undefined;
+        if (boundary?.id === undefined) continue;
+        let pair = positions.get(boundary.id);
+        if (!pair) positions.set(boundary.id, pair = {});
+        pair[boundary.kind] ??= position;
+      }
+    }
     for (const child of Object.values(record)) visit(child, position);
   };
   blocks.forEach((block, index) => visit(block, index + 0.5));
@@ -2836,7 +3412,7 @@ interface BlockBookmarkPlacement {
   following?: BlockContent;
 }
 
-function restoreBlockBookmarks(
+export function restoreBlockBookmarks(
   projected: BlockContent[],
   base: readonly BlockContent[],
   storyId: string
@@ -2866,15 +3442,14 @@ function restoreBlockBookmarks(
       const id = marker.id ?? `\0${index}`;
       let pair = pairs.get(id);
       if (!pair) pairs.set(id, pair = {});
-      if (!pair[marker.kind]) {
-        const boundary = {
-          block, index,
-          position: nextPositions[index] ?? (previous === undefined ? 0 : previous + 1),
-          omit: present.get(id)?.[marker.kind] !== undefined,
-        };
-        pair[marker.kind] = boundary;
-        boundaries.push(boundary);
-      }
+      if (pair[marker.kind]) throw new Error(`Duplicate block bookmark ${marker.kind} for id ${id}`);
+      const boundary = {
+        block, index,
+        position: nextPositions[index] ?? (previous === undefined ? 0 : previous + 1),
+        omit: present.get(id)?.[marker.kind] !== undefined,
+      };
+      pair[marker.kind] = boundary;
+      boundaries.push(boundary);
     }
     const key = keys[index];
     const position = key === undefined ? undefined : live.get(key);
@@ -2912,6 +3487,36 @@ function restoreBlockBookmarks(
   return restored;
 }
 
+function restoreTextBoxBookmarks(content: ParagraphContent[], base: readonly ParagraphContent[]): void {
+  const bodies = (value: unknown): Map<string, Array<{ content: BlockContent[] }>> => {
+    const found = new Map<string, Array<{ content: BlockContent[] }>>();
+    const visit = (value: unknown): void => {
+      if (Array.isArray(value)) {
+        for (const child of value) visit(child);
+      } else if (value !== null && typeof value === 'object') {
+        const record = value as Record<string, unknown>;
+        const body = asObject(record.textBody);
+        if (body && Array.isArray(body.content)) {
+          const id = typeof record.id === 'string' ? record.id : String(found.size);
+          const copies = found.get(id) ?? [];
+          copies.push(body as { content: BlockContent[] });
+          found.set(id, copies);
+        }
+        for (const [key, child] of Object.entries(record)) if (key !== 'drawingModel') visit(child);
+      }
+    };
+    visit(value);
+    return found;
+  };
+  const sources = bodies(base);
+  for (const [id, copies] of bodies(content)) {
+    copies.forEach((body, index) => {
+      const source = sources.get(id)?.[index];
+      if (source) body.content = restoreBlockBookmarks(body.content, source.content, `txbx:${id}`);
+    });
+  }
+}
+
 function restoreRawBlocks(projected: BlockContent[], base: readonly BlockContent[], storyId: string): BlockContent[] {
   projected = restoreBlockBookmarks(projected, base, storyId);
   let offset = 0;
@@ -2929,6 +3534,162 @@ function restoreRawBlocks(projected: BlockContent[], base: readonly BlockContent
     offset = Math.max(0, position - index);
   }
   return projected;
+}
+
+/** Story blocks a complex field's code and result span after its paragraph. */
+interface FieldBlockSpan {
+  code: number;
+  result: number;
+}
+
+function spansParagraphs(field: ComplexField): boolean {
+  return [field.structuredCode, field.structuredResult].some(
+    (part) => part?.blockCount != null || part?.blocks != null
+  );
+}
+
+/** Whether a field embed's payload holds a complex field spanning paragraphs. */
+function payloadSpansParagraphs(payload: Attrs): boolean {
+  const data = payload.fieldData;
+  if (typeof data !== 'string' || !data.includes('"block')) return false;
+  try {
+    const field = JSON.parse(data) as ComplexField | null;
+    return field?.type === 'complexField' && spansParagraphs(field);
+  } catch {
+    return false;
+  }
+}
+
+/** How many story blocks a structured code or result spans: its count, or its copies. */
+function parsedBlockCount(content: StructuredFieldContent | undefined): number {
+  return content?.blockCount ?? content?.blocks?.length ?? 0;
+}
+
+/**
+ * The story blocks a spanning field's code and result span in `blocks`, the projected story its
+ * paragraph sits at `owner` in, with `keys` its block ids. While the blocks its embed recorded
+ * at seed time (`fieldSpanBlocks`) still follow its paragraph in order with nothing between
+ * them, or it recorded none, this is the parsed span. Otherwise it is the blocks up to the last
+ * of the leading recorded blocks that still do. Raw blocks count as they did when parsed.
+ */
+function keptSpan(
+  field: ComplexField,
+  payload: Attrs | undefined,
+  owner: number,
+  blocks: readonly BlockContent[],
+  keys: ReadonlyArray<string | undefined>
+): FieldBlockSpan {
+  const code = parsedBlockCount(field.structuredCode);
+  const result = parsedBlockCount(field.structuredResult);
+  const recorded = payload?.fieldSpanBlocks;
+  if (!Array.isArray(recorded)) return { code, result };
+  let index = owner + 1;
+  let end = owner;
+  for (const id of recorded) {
+    while (index < blocks.length && isRawXml(blocks[index]!)) index += 1;
+    if (index >= blocks.length || keys[index] !== id) {
+      const kept = end - owner;
+      return { code: Math.min(code, kept), result: Math.max(0, kept - code) };
+    }
+    end = index;
+    index += 1;
+  }
+  return { code, result };
+}
+
+/**
+ * Structured code or result counting `count` story blocks, its copies of them dropped. A part
+ * that spans paragraphs keeps a count, zero included, so it is written as a spanning part.
+ */
+function countedPart(content: StructuredFieldContent | undefined, count: number): StructuredFieldContent | undefined {
+  if (content?.blockCount == null && content?.blocks == null && count === 0) return content;
+  const next: StructuredFieldContent = { ...content };
+  delete next.blocks;
+  next.blockCount = count;
+  return next;
+}
+
+/** `field` counting the story blocks of `span`. */
+function withBlockCounts(field: ComplexField, span: FieldBlockSpan): ComplexField {
+  const { code, result } = span;
+  const counts = (content: StructuredFieldContent | undefined, count: number): boolean =>
+    content?.blocks === undefined && (content?.blockCount ?? 0) === count;
+  if (counts(field.structuredCode, code) && counts(field.structuredResult, result)) return field;
+  const next: ComplexField = { ...field };
+  const structuredCode = countedPart(field.structuredCode, code);
+  const structuredResult = countedPart(field.structuredResult, result);
+  if (structuredCode === undefined) delete next.structuredCode;
+  else next.structuredCode = structuredCode;
+  if (structuredResult === undefined) delete next.structuredResult;
+  else next.structuredResult = structuredResult;
+  if (field.fieldTree) {
+    next.fieldTree = { ...field.fieldTree };
+    if (field.fieldTree.code) next.fieldTree.code = structuredCode;
+    if (field.fieldTree.result) next.fieldTree.result = structuredResult;
+  }
+  return next;
+}
+
+/** The complex fields spanning paragraphs in `content`, tracked ones included, in order. */
+function spanningFields(content: readonly ParagraphContent[]): ComplexField[] {
+  return content.flatMap((item) =>
+    item.type === 'complexField' && spansParagraphs(item)
+      ? [item]
+      : isTrackedWrapper(item)
+        ? spanningFields(item.content as ParagraphContent[])
+        : []
+  );
+}
+
+/** `content` with each field `replacements` names replaced, or `content` when none is. */
+function replaceFields(
+  content: ParagraphContent[],
+  replacements: ReadonlyMap<ComplexField, ComplexField>
+): ParagraphContent[] {
+  let changed = false;
+  const next = content.map((item): ParagraphContent => {
+    let replaced: ParagraphContent = item;
+    if (item.type === 'complexField') replaced = replacements.get(item) ?? item;
+    else if (isTrackedWrapper(item)) {
+      const inner = replaceFields(item.content as ParagraphContent[], replacements);
+      if (inner !== item.content) replaced = { ...item, content: inner } as ParagraphContent;
+    }
+    if (replaced !== item) changed = true;
+    return replaced;
+  });
+  return changed ? next : content;
+}
+
+/**
+ * `blocks` with each complex field spanning paragraphs counting the story blocks it still spans
+ * in this projection, read from `payloads`, each paragraph's spanning field embeds by session
+ * key.
+ */
+function withKeptBlockCounts(
+  blocks: BlockContent[],
+  storyId: string,
+  payloads: ReadonlyMap<string, Attrs[]>
+): BlockContent[] {
+  if (payloads.size === 0) return blocks;
+  const keys = storyBlockKeys(blocks, storyId).map((key) => key?.slice(1));
+  let changed = false;
+  const next = blocks.map((block, owner) => {
+    const key = keys[owner];
+    const embeds = key === undefined ? undefined : payloads.get(key);
+    if (embeds === undefined || block.type !== 'paragraph') return block;
+    const fields = spanningFields(block.content);
+    const replacements = new Map(
+      fields.map((field, index) => {
+        const payload = fields.length === embeds.length ? embeds[index] : undefined;
+        return [field, withBlockCounts(field, keptSpan(field, payload, owner, blocks, keys))] as const;
+      })
+    );
+    const content = replaceFields(block.content, replacements);
+    if (content === block.content) return block;
+    changed = true;
+    return cloneProjectedParagraph(block, { content });
+  });
+  return changed ? next : blocks;
 }
 
 /** A projected block plus a fingerprint of the story inputs it was built from. */
@@ -3164,6 +3925,14 @@ class SaveContext {
   private readonly baseStories: Map<string, readonly BlockContent[]>;
   private readonly baseChartDrawings = new Map<string, Map<string, string>>();
   private readonly comments: Map<string, Array<{ id: number; start: number; end: number }>>;
+  private readonly base: Document;
+  private crossing: ReadonlyMap<number, CrossingComment> | undefined;
+  /** Per comment, whether this save writes its source range across stories whole. */
+  private readonly whole = new Map<number, boolean>();
+  private readonly liveSegments = new Map<string, YrsStorySegment[]>();
+  private readonly savedComments: Set<number>;
+  /** The comments with a listed reply whose range marks are taken from the comment's own. */
+  private readonly repliedWithoutRange: Set<number>;
   /** Per story, the comment ranges of it and of the stories nested in it, which key its blocks. */
   private readonly subtreeComments = new Map<string, Map<string, unknown>>();
   private readonly memo: SessionProjectionMemo;
@@ -3174,6 +3943,10 @@ class SaveContext {
   private runInheritance: YrsRunInheritance | null = null;
   private readonly inheritedRuns = new Map<string, TextFormatting>();
   private readonly sourceTables = new Map<string, Table>();
+
+  sourceTable(prefix: string): Table | undefined {
+    return this.sourceTables.get(prefix);
+  }
   private readonly tableBaselines = new Map<Table, YrsTableInheritance>();
   private readonly payloadBaselines = new WeakMap<TablePayload, YrsTableInheritance>();
   private readonly sourceCells = new Map<string, YrsTableInheritance['rows'][number][number]>();
@@ -3184,7 +3957,8 @@ class SaveContext {
     private readonly session: YrsSession,
     base: Document,
     commentIds?: ReadonlyMap<number, string>,
-    private readonly revisionIds?: RevisionIds
+    private readonly revisionIds?: RevisionIds,
+    private readonly fallback: ReadonlySet<number> = new Set()
   ) {
     this.storyIds = new Set(session.storyIds());
     this.baseStories = collectBaseStories(session, base);
@@ -3216,6 +3990,14 @@ class SaveContext {
     this.hasCommentReferenceStyle = (base.package.styles?.styles ?? [])
       .some(style => style.styleId === 'CommentReference' && style.type === 'character');
     this.comments = commentRanges(session, base.package.document.comments, commentIds);
+    this.base = base;
+    this.savedComments = new Set((base.package.document.comments ?? []).map((comment) => comment.id));
+    const ranged = new Set([...this.comments.values()].flatMap((ranges) => ranges.map((range) => range.id)));
+    this.repliedWithoutRange = new Set(
+      (base.package.document.comments ?? []).flatMap((comment) =>
+        comment.parentId != null && !ranged.has(comment.id) ? [comment.parentId] : []
+      )
+    );
     this.memo = sessionProjectionMemo(session);
     this.styleDefinitions = base.package.styles;
     this.fontScheme = base.package.theme?.fontScheme;
@@ -3242,6 +4024,107 @@ class SaveContext {
     return this.memo.wholesale
       ? this.memo.clean.has(storyId)
       : !this.memo.dirty.has(storyId);
+  }
+
+  /** The source comments crossing stories; no scan when the document lists no comment. */
+  private crossingComments(): ReadonlyMap<number, CrossingComment> {
+    return (this.crossing ??=
+      this.savedComments.size > 0 ? openedCrossingComments(this.session, this.base) : new Map());
+  }
+
+  private segmentsOf(story: string): YrsStorySegment[] {
+    let segments = this.liveSegments.get(story);
+    if (!segments) {
+      segments = this.session.storySegments(story);
+      this.liveSegments.set(story, segments);
+    }
+    return segments;
+  }
+
+  /**
+   * Whether this save writes the source range of `id` across stories whole: its start, its end
+   * before its reference in the far story, and the reference. Otherwise the range is written as
+   * the session holds it, cut at the end of the paragraph it starts in. Decided once per projection.
+   */
+  private writesWhole(id: number): boolean {
+    let whole = this.whole.get(id);
+    if (whole === undefined) {
+      const source = this.crossingComments().get(id);
+      whole =
+        source !== undefined &&
+        !this.fallback.has(id) &&
+        this.startLive(id, source) &&
+        this.farStoryLive(source) &&
+        this.referenceLive(id, source) &&
+        this.savedComments.has(id) &&
+        !this.repliedWithoutRange.has(id);
+      this.whole.set(id, whole);
+    }
+    return whole;
+  }
+
+  /** The comments this projection writes across stories, each with the root story it starts in. */
+  writtenWhole(): Map<number, string> {
+    const written = new Map<number, string>();
+    for (const [id, whole] of this.whole) {
+      const source = this.crossing?.get(id);
+      if (whole && source) written.set(id, source.start.part);
+    }
+    return written;
+  }
+
+  /** The start is live: ranged by the session in its source story alone, or in a live drawing. */
+  private startLive(id: number, { start }: CrossingComment): boolean {
+    const stories = [...this.comments].flatMap(([story, ranges]) =>
+      ranges.some((range) => range.id === id) ? [story] : []
+    );
+    if (start.carried) return stories.length === 0 && this.carriedLive(start.story, id, ['start']);
+    return stories.length === 1 && stories[0] === start.story;
+  }
+
+  /** The story the source end was found in is live. */
+  private farStoryLive({ end }: CrossingComment): boolean {
+    return this.storyIds.has(end.story);
+  }
+
+  /**
+   * The reference is live where the end goes: exactly one reference run of the comment in the far
+   * story and none in the story it starts in, or the live drawing carrying both end and reference.
+   */
+  private referenceLive(id: number, { start, end }: CrossingComment): boolean {
+    if (end.carried) return this.carriedLive(end.story, id, ['end', 'reference']);
+    const references = (story: string): number =>
+      this.segmentsOf(story).filter((segment) =>
+        segment.kind === 'embed' &&
+        segment.payload.modelKind === 'commentReference' &&
+        Number(segment.payload.commentId) === id
+      ).length;
+    return references(end.story) === 1 && (start.story === end.story || references(start.story) === 0);
+  }
+
+  private carriedLive(story: string, id: number, kinds: CommentMarkKind[]): boolean {
+    return this.storyIds.has(story) && this.segmentsOf(story).some((segment) =>
+      segment.kind === 'embed' && kinds.every((kind) => holdsCommentMark(segment.payload, kind, id))
+    );
+  }
+
+  /**
+   * Of the comments crossing into or out of `storyId` or a story nested in it, the ones written
+   * whole: those whose session end in this story is not written, and those whose end goes before
+   * their reference here.
+   */
+  private crossingIn(storyId: string): { key: string; heldOpen: Set<number>; endsHere: Set<number> } {
+    const heldOpen = new Set<number>();
+    const endsHere = new Set<number>();
+    const whole: number[] = [];
+    for (const [id, { start, end }] of this.crossingComments()) {
+      if (!withinStory(start.story, storyId) && !withinStory(end.story, storyId)) continue;
+      if (!this.writesWhole(id)) continue;
+      whole.push(id);
+      if (!start.carried && start.story === storyId) heldOpen.add(id);
+      if (!end.carried && end.story === storyId) endsHere.add(id);
+    }
+    return { key: whole.length > 0 ? `|whole:${whole.join(',')}` : '', heldOpen, endsHere };
   }
 
   sectionChanged(paraId: string, properties: Paragraph['sectionProperties']): boolean {
@@ -3275,11 +4158,22 @@ class SaveContext {
       }
       this.payloadBaselines.set(payload, baseline);
       const prefix = source.prefix;
-      baseline.rows.forEach((row, rowIndex) => {
-        row.forEach((cell, cellIndex) => {
-          this.sourceCells.set(`${prefix}:r${rowIndex}c${cellIndex}`, cell);
+      const recorded = projectedBlocks.get(source.table)?.tableBaseline
+        ? undefined
+        : projectedTableCells.get(source.table);
+      if (recorded) {
+        const seeded = seededCellIndices(source.table);
+        recorded.forEach((row, rowIndex) => row.forEach((entry, cellIndex) => {
+          const cell = baseline!.rows[rowIndex]?.[seeded[rowIndex]?.indexOf(cellIndex) ?? -1];
+          if (typeof entry === 'string' && cell) this.sourceCells.set(entry, cell);
+        }));
+      } else {
+        baseline.rows.forEach((row, rowIndex) => {
+          row.forEach((cell, cellIndex) => {
+            this.sourceCells.set(`${prefix}:r${rowIndex}c${cellIndex}`, cell);
+          });
         });
-      });
+      }
     }
     for (const cell of cells) {
       if (typeof cell.story !== 'string') continue;
@@ -3440,7 +4334,6 @@ class SaveContext {
         mark: paragraph.formatting?.runProperties,
         matches: items.some(item => {
           const formatting = directFormatting(item.attributes);
-          // Seeded runs carry no language; a run that has one must agree with every slot the source run sets.
           const live = asObject(item.attributes.language);
           return sameJson(fontsKey(formatting.fontFamily), fontsKey(expected)) &&
             (!live || Object.entries(run.formatting?.language ?? {}).every(([slot, value]) => live[slot] === value));
@@ -3462,6 +4355,26 @@ class SaveContext {
       candidate = first;
     }
     const formatting = candidate.run;
+    if (properties.language === undefined) {
+      const inheritedLanguage = {
+        ...this.styles.resolveParagraphStyle(
+          typeof properties.pStyle === 'string' ? properties.pStyle : null,
+          undefined,
+          this.cellRuns.get(story)
+        ).runFormatting?.language,
+        ...asObject(asObject(properties.defaultTextFormatting)?.language),
+      };
+      for (const item of items) {
+        const live = asObject(item.attributes.language);
+        if (!live) continue;
+        const language = { ...live };
+        for (const slot of ['latin', 'eastAsia', 'bidi'] as const) {
+          if (formatting.language?.[slot] === undefined && typeof language[slot] === 'string' &&
+            language[slot] === inheritedLanguage?.[slot]) delete language[slot];
+        }
+        item.attributes = { ...item.attributes, language };
+      }
+    }
     const marks = asObject(original!.runProperties);
     const sourceMark = candidate.mark;
     return {
@@ -3528,14 +4441,21 @@ class SaveContext {
   storyToBlocks(storyId: string): BlockContent[] {
     const baseBlocks = this.baseStories.get(storyId);
     const storyComments = this.comments.get(storyId) ?? [];
+    const crossing = this.crossingIn(storyId);
+    const farEnds: Array<{ id: number; offset: number }> = [];
     const nestedComments = this.subtreeComments.get(storyId);
-    const commentsKey = nestedComments ? stableStringify(Object.fromEntries(nestedComments)) : '';
+    const cut = this.fallback.size > 0;
+    const commentsKey =
+      (nestedComments ? stableStringify(Object.fromEntries(nestedComments)) : '') +
+      crossing.key +
+      (cut ? `|cut:${[...this.fallback].sort((a, b) => a - b).join(',')}` : '');
     const priorStory = this.memo.stories.get(storyId);
     // Nested stories are mapped positionally, so a different array means
     // drift, not divergence — mutation paths mark them dirty anyway. A root
     // story on a different array is genuine divergence and forces a fresh
-    // projection.
+    // projection. A projection that cuts comments reuses no story.
     if (
+      !cut &&
       priorStory !== undefined &&
       priorStory.commentsKey === commentsKey &&
       this.storyIsClean(storyId) &&
@@ -3549,12 +4469,19 @@ class SaveContext {
     const paragraphIds = this.session.storyParagraphIds(storyId);
     const segments = this.session.storySegments(storyId);
     const trailingByParagraph = new Map<string, BlockBreakKind[]>();
+    const spanningEmbeds = new Map<string, Attrs[]>();
+    let paragraphSpanning: Attrs[] = [];
     let closing: string | undefined;
     for (const segment of segments) {
       if (segment.kind === 'pilcrow') {
         closing = segment.paraId;
         trailingByParagraph.set(closing, []);
+        if (paragraphSpanning.length > 0) spanningEmbeds.set(segment.paraId, paragraphSpanning);
+        paragraphSpanning = [];
       } else {
+        if (segment.kind === 'embed' && segment.embedKind === 'field' && payloadSpansParagraphs(segment.payload)) {
+          paragraphSpanning.push(segment.payload);
+        }
         const kind = segment.kind === 'embed' ? blockBreakKind(segment.embedKind) : null;
         if (kind && closing !== undefined) trailingByParagraph.get(closing)!.push(kind);
         else closing = undefined;
@@ -3605,8 +4532,13 @@ class SaveContext {
           const offset = Math.max(0, range.start - inlineStart);
           boundaries.push({ id: range.id, kind: 'start', offset });
         }
-        if (range.end >= paragraphStart && range.end <= end) {
+        if (range.end >= paragraphStart && range.end <= end && !crossing.heldOpen.has(range.id)) {
           boundaries.push({ id: range.id, kind: 'end', offset: Math.max(0, range.end - inlineStart) });
+        }
+      }
+      for (const far of farEnds) {
+        if (far.offset >= paragraphStart && far.offset <= end) {
+          boundaries.push({ id: far.id, kind: 'end', offset: Math.max(0, far.offset - inlineStart) });
         }
       }
       return boundaries;
@@ -3669,7 +4601,7 @@ class SaveContext {
           const snapshot = inputs.map((input, index) =>
             index === 4 ? (input as InlineItem[]).map((item) => ({ ...item })) : input
           );
-          paragraph = paragraphFromStory(
+          paragraph = markCreatedListParagraph(paragraphFromStory(
             savedParaId,
             baseParagraph ? segment.properties : this.copiedParagraphProperties(storyId, segment.properties, items, precedingBaseParagraphs),
             items,
@@ -3680,7 +4612,7 @@ class SaveContext {
             this.runFormatter(storyId, segment.properties),
             this.revisionIds,
             this.inheritedFormatting(storyId, segment.properties)
-          );
+          ), segment.properties);
           this.restoreCommentReferences(paragraph);
           const trailing = trailingBlockBreaks(paragraph);
           const leading = leadingBlockBreaks(paragraph);
@@ -3710,6 +4642,7 @@ class SaveContext {
       }
 
       if (segment.embedKind === 'table') {
+        if (isUnavailableTablePayload(segment.payload)) throw tableUnavailableError();
         const payload = segment.payload as TablePayload;
         this.prepareTable(payload, storyId);
         const inputs = [segment.attributes, payload] as const;
@@ -3790,6 +4723,8 @@ class SaveContext {
           // documented opaque carry gap.
         }
       } else {
+        const referenced = segment.payload.modelKind === 'commentReference' ? Number(segment.payload.commentId) : NaN;
+        if (crossing.endsHere.has(referenced)) farEnds.push({ id: referenced, offset: storyOffset });
         items.push(segment as EmbedItem);
       }
       const kind = blockBreakKind(segment.embedKind);
@@ -3828,7 +4763,11 @@ class SaveContext {
         blocks.push({ type: 'paragraph', content: pendingBreaks });
       }
     }
-    const projected = restoreRawBlocks(blocks, baseBlocks ?? [], storyId);
+    const projected = withKeptBlockCounts(
+      restoreRawBlocks(blocks, baseBlocks ?? [], storyId),
+      storyId,
+      spanningEmbeds
+    );
     this.memo.stories.set(storyId, { commentsKey, blocks: projected });
     this.memo.dirty.delete(storyId);
     this.memo.clean.add(storyId);
@@ -3879,12 +4818,16 @@ function projectDocument(
   options: YrsToDocumentOptions,
   revisionIds?: RevisionIds
 ): Document {
+  const scanned = refuseUnavailableTables(session, base);
   const previous = projectedMedia;
   projectedMedia = (token) => session.mediaDataUrl?.(token) ?? null;
   let context: SaveContext | undefined;
   try {
-    context = new SaveContext(session, base, options.commentIds, revisionIds);
-    return projectStories(context, session, base, options);
+    context = new SaveContext(session, base, options.commentIds, revisionIds, crossingFallback(session));
+    const projected = projectStories(context, session, base, options);
+    markGated(session, projected, scanned);
+    noteWrittenWhole(projected, context.writtenWhole());
+    return projected;
   } finally {
     context?.dispose();
     projectedMedia = previous;
@@ -3986,6 +4929,22 @@ function projectStories(
   };
   const footnotes = projectNotes(base.package.footnotes, 'fn:');
   const endnotes = projectNotes(base.package.endnotes, 'en:');
+  const commentBodies = base.package.document.comments?.some(comment => containsBookmark(comment.blockContent ?? []))
+    ? new Map(session.listComments().map(comment => [comment.id, comment.body])) : undefined;
+  const comments = commentBodies && base.package.document.comments?.map(comment => {
+    if (!containsBookmark(comment.blockContent ?? [])) return comment;
+    const body = commentBodies.get(String(comment.id));
+    if (!Array.isArray(body) || !body.every(block =>
+      block && ['paragraph', 'table', 'blockSdt', 'rawXml'].includes(block.type)
+    ) || sameJson(body, comment.blockContent ?? comment.content)) return comment;
+    assertCommentBookmarkReplacement(comment.blockContent ?? comment.content);
+    const blockContent = restoreBlockBookmarks(body, comment.blockContent ?? comment.content, `comment:${comment.id}`);
+    return {
+      ...comment,
+      content: blockContent.filter((block): block is Paragraph => block.type === 'paragraph'),
+      blockContent,
+    };
+  });
 
   const sourcePackage = sessionSourcePackage(session);
   const liveSections = sourcePackage && shouldProject('body') ? session.listSections?.() ?? [] : [];
@@ -4014,6 +4973,7 @@ function projectStories(
       document: {
         ...base.package.document,
         content: bodyContent,
+        ...(comments ? { comments } : {}),
         ...(sectionChanges ? { sections: projectedSections } : {}),
         ...(finalSectionChanges ? { finalSectionProperties: withHostSectionChanges(liveSections.at(-1)!.authored, sourceFinal ?? {}, base.package.document.finalSectionProperties ?? {}) } : {}),
       },

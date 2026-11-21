@@ -1,19 +1,23 @@
 //! PyO3 bindings over the `betteroffice-docx` facade.
 
+use std::collections::BTreeMap;
 use std::fs;
+use std::io;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyIndexError, PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyBytes, PyDict, PyInt};
+use pyo3::types::{PyBool, PyBytes, PyDict, PyInt, PyString};
 use python_common::map_io_error;
 
 use betteroffice_docx::{
     BlockContent, ContentControlQuery, ContentControlsOptions, DisplayList,
-    Document as CoreDocument, DocxStructuredContent, EditCtx, EditOrigin, Error as CoreError,
-    ExportOptions, HeaderFooter, ImageScope, InlineNode, LayoutInput, MarkdownOptions, NoteKind,
-    Paragraph, ParagraphContent, ParseLimits, Receipt, RevisionView, Run, RunContent, SaveOptions,
+    Document as CoreDocument, DocxStructuredContent, DroppedParagraph, DroppedStructure, EditCtx,
+    EditOrigin, Error as CoreError, ExportOptions, HeaderFooter, ImageScope, InlineNode,
+    KeptParagraph, KeptUnchanged, LayoutInput, MarkdownOptions, NoteKind, Paragraph,
+    ParagraphContent, ParseLimits, Receipt, RevisionView, Run, RunContent, SaveOptions, SaveReport,
     Section, StorySelection, Table, get_paragraph_text,
 };
 
@@ -64,6 +68,20 @@ create_exception!(
     "The engine refused a structured export's or a content-control listing's options."
 );
 
+fn png_target_index(target: &Bound<'_, PyAny>) -> PyResult<usize> {
+    let invalid =
+        || PyValueError::new_err("target must be a dict containing only a nonnegative page index");
+    let target = target.cast::<PyDict>().map_err(|_| invalid())?;
+    if target.len() != 1 {
+        return Err(invalid());
+    }
+    let index = target.get_item("page")?.ok_or_else(invalid)?;
+    if index.is_instance_of::<PyBool>() {
+        return Err(invalid());
+    }
+    index.extract::<usize>().map_err(|_| invalid())
+}
+
 fn map_error(error: CoreError) -> PyErr {
     let message = error.to_string();
     match error {
@@ -72,6 +90,7 @@ fn map_error(error: CoreError) -> PyErr {
         CoreError::ParagraphNotFound(_) | CoreError::AmbiguousParagraph(_) => {
             PyKeyError::new_err(message)
         }
+        CoreError::ParagraphIndexOutOfRange { .. } => PyIndexError::new_err(message),
         CoreError::UnsupportedParagraphEdit(_) => UnsupportedEditError::new_err(message),
         CoreError::Layout(_) | CoreError::DisplayList(_) => LayoutError::new_err(message),
         CoreError::Font(_) | CoreError::Image(_) => PyValueError::new_err(message),
@@ -382,6 +401,8 @@ pub struct PyTextRun {
     color: Option<String>,
     #[pyo3(get)]
     style_id: Option<String>,
+    #[pyo3(get)]
+    highlight: Option<String>,
 }
 
 impl PyTextRun {
@@ -406,6 +427,7 @@ impl PyTextRun {
                 .and_then(|format| format.color.as_ref())
                 .and_then(|color| color.rgb.clone()),
             style_id: formatting.and_then(|format| format.style_id.clone()),
+            highlight: formatting.and_then(|format| format.highlight.clone()),
         }
     }
 }
@@ -478,6 +500,10 @@ pub struct PyTableCell {
     tables: Vec<PyTable>,
     #[pyo3(get)]
     text: String,
+    #[pyo3(get)]
+    grid_span: Option<i64>,
+    #[pyo3(get)]
+    v_merge: Option<String>,
 }
 
 impl PyTableCell {
@@ -485,12 +511,23 @@ impl PyTableCell {
         let paragraphs = paragraphs_of(&cell.content);
         let tables = tables_of(&cell.content);
         let text = join_text(paragraphs.iter().map(|paragraph| paragraph.text.as_str()));
+        let formatting = cell.formatting.as_ref();
         Self {
             paragraphs,
             tables,
             text,
+            grid_span: formatting
+                .and_then(|format| format.grid_span)
+                .and_then(whole_number),
+            v_merge: formatting.and_then(|format| format.v_merge.clone()),
         }
     }
+}
+
+/// `value` as an integer, when it is one that an `f64` holds exactly.
+fn whole_number(value: f64) -> Option<i64> {
+    const EXACT: f64 = 9_007_199_254_740_992.0;
+    (value.fract() == 0.0 && value.abs() <= EXACT).then_some(value as i64)
 }
 
 #[pymethods]
@@ -715,6 +752,8 @@ pub struct PyEdit {
     #[pyo3(get)]
     para_id: Option<String>,
     #[pyo3(get)]
+    index: Option<usize>,
+    #[pyo3(get)]
     story: Option<String>,
     #[pyo3(get)]
     start: Option<u32>,
@@ -731,6 +770,7 @@ impl PyEdit {
         let range = receipt.range;
         Self {
             para_id: range.as_ref().map(|range| range.start.para.clone()),
+            index: None,
             story: range.as_ref().map(|range| range.start.story.clone()),
             start: range.as_ref().map(|range| range.start.offset),
             end: range.as_ref().map(|range| range.end.offset),
@@ -763,23 +803,35 @@ fn offset_repr(offset: Option<u32>) -> String {
     frozen,
     from_py_object
 )]
-#[derive(Clone)]
 pub struct PyDisplayList {
     inner: DisplayList,
-    payload: String,
+    payload: OnceLock<Py<PyString>>,
     #[pyo3(get)]
     contract_version: Option<u32>,
 }
 
+impl Clone for PyDisplayList {
+    fn clone(&self) -> Self {
+        Self::new(self.inner.clone())
+    }
+}
+
 impl PyDisplayList {
-    fn new(inner: DisplayList) -> PyResult<Self> {
-        let payload = serde_json::to_string(&inner)
-            .map_err(|error| LayoutError::new_err(error.to_string()))?;
-        Ok(Self {
+    fn new(inner: DisplayList) -> Self {
+        Self {
             contract_version: inner.contract_version,
             inner,
-            payload,
-        })
+            payload: OnceLock::new(),
+        }
+    }
+
+    fn payload<'py>(&self, py: Python<'py>) -> Result<Bound<'py, PyString>, serde_json::Error> {
+        if let Some(text) = self.payload.get() {
+            return Ok(text.bind(py).clone());
+        }
+        let text = py.detach(|| serde_json::to_string(&self.inner))?;
+        let text = PyString::new(py, &text).unbind();
+        Ok(self.payload.get_or_init(|| text).bind(py).clone())
     }
 }
 
@@ -790,12 +842,13 @@ impl PyDisplayList {
     fn from_json(text: &str) -> PyResult<Self> {
         let inner: DisplayList = serde_json::from_str(text)
             .map_err(|error| PyValueError::new_err(format!("invalid display list: {error}")))?;
-        Self::new(inner)
+        Ok(Self::new(inner))
     }
 
     #[getter]
-    fn json(&self) -> &str {
-        &self.payload
+    fn json<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyString>> {
+        self.payload(py)
+            .map_err(|error| LayoutError::new_err(error.to_string()))
     }
 
     #[getter]
@@ -808,12 +861,17 @@ impl PyDisplayList {
     }
 
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        py.import("json")?
-            .call_method1("loads", (self.payload.as_str(),))
+        let payload = self.json(py)?;
+        py.import("json")?.call_method1("loads", (payload,))
     }
 
     fn write(&self, py: Python<'_>, path: PathBuf) -> PyResult<()> {
-        py.detach(|| fs::write(&path, self.payload.as_bytes()))
+        let payload = self
+            .payload(py)
+            .map_err(|error| map_io_error(&io::Error::from(error), &path))?;
+        let bytes = payload.encode_utf8()?;
+        let bytes = bytes.as_bytes();
+        py.detach(|| fs::write(&path, bytes))
             .map_err(|error| map_io_error(&error, &path))
     }
 
@@ -836,12 +894,16 @@ pub struct PyLayout {
     payload: String,
     #[pyo3(get)]
     pages: usize,
-    #[pyo3(get)]
-    display_list: PyDisplayList,
+    display_list: Py<PyDisplayList>,
 }
 
 #[pymethods]
 impl PyLayout {
+    #[getter]
+    fn display_list(&self, py: Python<'_>) -> Py<PyDisplayList> {
+        self.display_list.clone_ref(py)
+    }
+
     #[getter]
     fn json(&self) -> &str {
         &self.payload
@@ -867,12 +929,15 @@ impl PyLayout {
 }
 
 /// One rasterized page. `skipped_images` counts the image references the
-/// backend could not resolve and left undrawn.
+/// backend could not resolve and left undrawn; `skipped_effects` counts, by
+/// kind, the effects it left out of primitives it otherwise drew.
 #[pyclass(module = "betteroffice_docx", name = "Png", frozen)]
 pub struct PyPng {
     data: Vec<u8>,
     #[pyo3(get)]
     skipped_images: usize,
+    #[pyo3(get)]
+    skipped_effects: BTreeMap<String, usize>,
 }
 
 #[pymethods]
@@ -897,6 +962,175 @@ impl PyPng {
             self.data.len(),
             self.skipped_images
         )
+    }
+}
+
+/// The bytes a save writes and the structure it kept or dropped.
+#[pyclass(module = "betteroffice_docx", name = "SaveReport", frozen)]
+pub struct PySaveReport {
+    data: Vec<u8>,
+    #[pyo3(get)]
+    kept_unchanged: Option<PyKeptUnchanged>,
+    #[pyo3(get)]
+    structure_dropped: Option<Vec<PyDroppedStructure>>,
+}
+
+impl PySaveReport {
+    fn from_core(report: SaveReport) -> Self {
+        Self {
+            data: report.bytes,
+            kept_unchanged: report.kept_unchanged.map(PyKeptUnchanged::from_core),
+            structure_dropped: report.structure_dropped.map(|structures| {
+                structures
+                    .into_iter()
+                    .map(PyDroppedStructure::from_core)
+                    .collect()
+            }),
+        }
+    }
+}
+
+#[pymethods]
+impl PySaveReport {
+    #[getter]
+    fn bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new(py, &self.data)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "SaveReport(bytes={}, kept_unchanged={}, structure_dropped={})",
+            self.data.len(),
+            self.kept_unchanged
+                .as_ref()
+                .map_or(0, |kept| kept.structure),
+            self.structure_dropped.as_ref().map_or(0, Vec::len)
+        )
+    }
+}
+
+/// Paragraphs a save wrote as their source bytes, counted, with the first ones described.
+#[pyclass(
+    module = "betteroffice_docx",
+    name = "KeptUnchanged",
+    frozen,
+    skip_from_py_object
+)]
+#[derive(Clone)]
+pub struct PyKeptUnchanged {
+    #[pyo3(get)]
+    structure: u32,
+    #[pyo3(get)]
+    paragraphs: Vec<PyKeptParagraph>,
+}
+
+impl PyKeptUnchanged {
+    fn from_core(kept: KeptUnchanged) -> Self {
+        Self {
+            structure: kept.structure,
+            paragraphs: kept
+                .paragraphs
+                .into_iter()
+                .map(PyKeptParagraph::from_core)
+                .collect(),
+        }
+    }
+}
+
+/// A paragraph a save wrote as its source bytes because writing it would have dropped structure.
+#[pyclass(
+    module = "betteroffice_docx",
+    name = "KeptParagraph",
+    frozen,
+    skip_from_py_object
+)]
+#[derive(Clone)]
+pub struct PyKeptParagraph {
+    #[pyo3(get)]
+    part: String,
+    #[pyo3(get)]
+    ordinal: u32,
+    #[pyo3(get)]
+    para_id: Option<String>,
+    #[pyo3(get)]
+    text: String,
+    #[pyo3(get)]
+    scope: String,
+    #[pyo3(get)]
+    dropped: Vec<String>,
+}
+
+impl PyKeptParagraph {
+    fn from_core(paragraph: KeptParagraph) -> Self {
+        Self {
+            part: paragraph.part,
+            ordinal: paragraph.ordinal,
+            para_id: paragraph.para_id,
+            text: paragraph.text,
+            scope: paragraph.scope,
+            dropped: paragraph.dropped,
+        }
+    }
+}
+
+/// A story part written whole with fewer structural elements than its source.
+#[pyclass(
+    module = "betteroffice_docx",
+    name = "DroppedStructure",
+    frozen,
+    skip_from_py_object
+)]
+#[derive(Clone)]
+pub struct PyDroppedStructure {
+    #[pyo3(get)]
+    part: String,
+    #[pyo3(get)]
+    dropped: Vec<String>,
+    #[pyo3(get)]
+    paragraphs: Vec<PyDroppedParagraph>,
+}
+
+impl PyDroppedStructure {
+    fn from_core(structure: DroppedStructure) -> Self {
+        Self {
+            part: structure.part,
+            dropped: structure.dropped,
+            paragraphs: structure
+                .paragraphs
+                .into_iter()
+                .map(PyDroppedParagraph::from_core)
+                .collect(),
+        }
+    }
+}
+
+/// A paragraph of a part written whole that holds fewer structural elements than its source.
+#[pyclass(
+    module = "betteroffice_docx",
+    name = "DroppedParagraph",
+    frozen,
+    skip_from_py_object
+)]
+#[derive(Clone)]
+pub struct PyDroppedParagraph {
+    #[pyo3(get)]
+    ordinal: u32,
+    #[pyo3(get)]
+    para_id: String,
+    #[pyo3(get)]
+    text: String,
+    #[pyo3(get)]
+    dropped: Vec<String>,
+}
+
+impl PyDroppedParagraph {
+    fn from_core(paragraph: DroppedParagraph) -> Self {
+        Self {
+            ordinal: paragraph.ordinal,
+            para_id: paragraph.para_id,
+            text: paragraph.text,
+            dropped: paragraph.dropped,
+        }
     }
 }
 
@@ -1178,6 +1412,44 @@ impl PyDocument {
         self.replace_text(para_id, text)
     }
 
+    /// Replace paragraph `index`'s text; raises IndexError out of range, TypeError for a non-int.
+    fn replace_text_at(&mut self, index: &Bound<'_, PyAny>, text: &str) -> PyResult<PyEdit> {
+        if index.is_instance_of::<PyBool>() || !index.is_instance_of::<PyInt>() {
+            return Err(PyTypeError::new_err("paragraph index must be an int"));
+        }
+        let (position, para_id) = {
+            let paragraphs = self.inner.paragraphs();
+            let len = paragraphs.len();
+            let position = index.extract::<usize>().map_err(|_| {
+                PyIndexError::new_err(format!(
+                    "paragraph index {index} out of range for {len} paragraph(s)"
+                ))
+            })?;
+            let para_id = paragraphs
+                .get(position)
+                .and_then(|paragraph| paragraph.para_id.clone());
+            (position, para_id)
+        };
+        let context = self.edit_ctx();
+        let receipt = self
+            .inner
+            .replace_paragraph_text_at_with(position, text, EDIT_CLIENT_ID, &context)
+            .map_err(map_error)?;
+        Ok(PyEdit {
+            para_id,
+            index: Some(position),
+            ..PyEdit::from_core(receipt)
+        })
+    }
+
+    fn replace_paragraph_text_at(
+        &mut self,
+        index: &Bound<'_, PyAny>,
+        text: &str,
+    ) -> PyResult<PyEdit> {
+        self.replace_text_at(index, text)
+    }
+
     /// Export the document as read-only structured content: a dict with the
     /// camelCase `schemaVersion: 1` schema, anchors scoped to this snapshot.
     ///
@@ -1306,7 +1578,7 @@ impl PyDocument {
         Ok(PyLayout {
             payload,
             pages: result.layout.pages.len(),
-            display_list: PyDisplayList::new(result.display_list)?,
+            display_list: Py::new(py, PyDisplayList::new(result.display_list))?,
         })
     }
 
@@ -1341,9 +1613,24 @@ impl PyDocument {
             .map_err(map_error)
     }
 
-    /// Rasterize one display-list page to deterministic PNG bytes.
+    #[pyo3(signature = (target, *, scale = 1.0))]
+    fn render_png(&self, py: Python<'_>, target: &Bound<'_, PyAny>, scale: f32) -> PyResult<PyPng> {
+        let target = betteroffice_docx::PngTarget {
+            page: png_target_index(target)?,
+        };
+        let options = betteroffice_docx::RenderOptions { scale };
+        let rendered = py
+            .detach(|| self.inner.render_png(target, &options))
+            .map_err(map_error)?;
+        Ok(PyPng {
+            data: rendered.bytes,
+            skipped_images: rendered.skipped_images,
+            skipped_effects: rendered.skipped_effects,
+        })
+    }
+
     #[pyo3(signature = (display_list, page = 0))]
-    fn render_png(
+    fn render_display_list_png(
         &self,
         py: Python<'_>,
         display_list: &PyDisplayList,
@@ -1351,11 +1638,12 @@ impl PyDocument {
     ) -> PyResult<PyPng> {
         let list = &display_list.inner;
         let rendered = py
-            .detach(|| self.inner.render_png(list, page))
+            .detach(|| self.inner.render_display_list_png(list, page))
             .map_err(map_error)?;
         Ok(PyPng {
             data: rendered.bytes,
             skipped_images: rendered.skipped_images,
+            skipped_effects: rendered.skipped_effects,
         })
     }
 
@@ -1372,6 +1660,21 @@ impl PyDocument {
             .detach(|| self.inner.save_with_options(options))
             .map_err(map_error)?;
         Ok(PyBytes::new(py, &bytes))
+    }
+
+    #[pyo3(signature = (*, now = None, update_modified_date = false, modified_by = None))]
+    fn save_report(
+        &self,
+        py: Python<'_>,
+        now: Option<String>,
+        update_modified_date: bool,
+        modified_by: Option<String>,
+    ) -> PyResult<PySaveReport> {
+        let options = self.save_options(now, update_modified_date, modified_by);
+        let report = py
+            .detach(|| self.inner.save_report_with_options(options))
+            .map_err(map_error)?;
+        Ok(PySaveReport::from_core(report))
     }
 
     #[pyo3(signature = (path, *, now = None, update_modified_date = false, modified_by = None))]
@@ -1422,7 +1725,10 @@ impl PyDocument {
 #[pymodule]
 fn _betteroffice_docx(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(python_common::decode_font_face, module)?)?;
+    module.add_function(wrap_pyfunction!(python_common::font_substitute, module)?)?;
+    module.add_function(wrap_pyfunction!(python_common::font_packs, module)?)?;
     let py = module.py();
+    python_common::install_font_packs(py)?;
     module.add("__version__", env!("CARGO_PKG_VERSION"))?;
     module.add_class::<PyDocument>()?;
     module.add_class::<PyParagraph>()?;
@@ -1437,6 +1743,11 @@ fn _betteroffice_docx(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyLayout>()?;
     module.add_class::<PyDisplayList>()?;
     module.add_class::<PyPng>()?;
+    module.add_class::<PySaveReport>()?;
+    module.add_class::<PyKeptUnchanged>()?;
+    module.add_class::<PyKeptParagraph>()?;
+    module.add_class::<PyDroppedStructure>()?;
+    module.add_class::<PyDroppedParagraph>()?;
     module.add("DocxError", py.get_type::<DocxError>())?;
     module.add("ParseError", py.get_type::<ParseError>())?;
     module.add("EditError", py.get_type::<EditError>())?;

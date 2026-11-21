@@ -1,6 +1,7 @@
 import { afterEach, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolveReservations, validReservationsPayload } from './reservations';
+import { canvasPageStack } from '../layout/render/canvasPageMetrics';
 import * as queryModule from '../layout/render/displayListQueries';
 import * as rustQueries from '../layout/render/rustDisplayList';
 import type { DisplayPage, TextRunPrimitive } from '../layout/render/displayList';
@@ -14,6 +15,10 @@ import type { YrsLoc, YrsStoryRange, YrsStorySegment, YrsTableRange } from './in
 import { mintCommandSelection } from './residentCommandAnchors';
 import { cellSelectionHeadPosition } from './residentCommandTableSelection';
 import { ResidentSessionFonts } from './residentFontEnvironment';
+import { releaseResidentDisplayListQueries, residentDisplayListQueries } from './residentDisplayListQueries';
+import { StagedEchoPages } from './residentStagedEcho';
+import { readResidentRangeHighlights } from './residentRangeHighlights';
+import type { ResidentEngineSession } from './residentEngineSession';
 import { createProposalRegistry, proposalRevisionPreview } from './proposals';
 import { applyDocxCommand, createResidentDocxCommandHooks, preflightDocxCommand } from './residentCommandActions';
 import { createResidentCommandHost } from './residentCommandHost';
@@ -310,7 +315,7 @@ test('page_navigation_moves_by_viewport_height_and_preserves_the_selection_ancho
 test('shift_page_navigation_extends_to_the_landing_cell_from_above_and_within_a_table', () => {
   const stories = ['body:t0:r0c0', 'body:t0:r1c0', 'body:t0:r2c0'];
   const arm = fakeArm({ body: ['Before', 'After'], ...Object.fromEntries(stories.map(story => [story, ['Cell']])) });
-  const payload = { rows: stories.map(story => ({ cells: [{ story }] })) };
+  const payload = { tblPr: {}, grid: [], rows: stories.map(story => ({ cells: [{ story }] })) };
   const segments = arm.engine.geometryReader.storySegments;
   arm.engine.geometryReader.storySegments = story => story === 'body' ? [
     ...segments(story).slice(0, 2),
@@ -355,7 +360,7 @@ test('shift_page_navigation_extends_to_the_landing_cell_from_above_and_within_a_
 test('repeated_shift_page_down_grows_the_cell_selection_and_shift_page_up_shrinks_it', () => {
   const stories = Array.from({ length: 7 }, (_, row) => `body:t0:r${row}c0`);
   const arm = fakeArm({ body: ['Before', 'After'], ...Object.fromEntries(stories.map(story => [story, ['Cell']])) });
-  const payload = { rows: stories.map(story => ({ cells: [{ story }] })) };
+  const payload = { tblPr: {}, grid: [], rows: stories.map(story => ({ cells: [{ story }] })) };
   const segments = arm.engine.geometryReader.storySegments;
   arm.engine.geometryReader.storySegments = story => story === 'body' ? [
     ...segments(story).slice(0, 2),
@@ -535,7 +540,7 @@ function workerSelectionHooks(arm: CommandArm, frame: RetainedFrame, buildPages?
   const reservations = source.slice(reservationStart, source.indexOf('\n/**', reservationStart));
   const binding = source.slice(source.indexOf('function bindResidentCommands('), source.indexOf('function replacementCommandInit('));
   const dependencies = {
-    resolveReservations, validReservationsPayload, cellSelectionHeadPosition,
+    resolveReservations, validReservationsPayload, cellSelectionHeadPosition, canvasPageStack, offscreenDpr: 1, offscreenZoom: 1,
     session: {
       ...arm.engine, proposalEngine: { version: () => arm.engine.geometryReader.version() },
       selection: () => ({ anchor: arm.state.selection!.anchor, head: arm.state.selection!.focus }),
@@ -550,6 +555,7 @@ function workerSelectionHooks(arm: CommandArm, frame: RetainedFrame, buildPages?
     sessionFonts: null, ResidentSessionFonts, scope: { fonts: undefined },
     createResidentCommandHost: (options: DocxCommandHostOptions) => options.hooks,
     displayPositionIndex: () => index, createDisplayListQueries: queryModule.createDisplayListQueries,
+    residentDisplayListQueries, releaseResidentDisplayListQueries, StagedEchoPages,
     loadRustDisplayListQueryEngine: async () => {}, loadedRustDisplayListQueryEngine: () => undefined,
     applyFrameDelta: (_frame: RetainedFrame, next: RetainedFrame) => next,
     decodeFrameDelta: (next: RetainedFrame) => next,
@@ -615,7 +621,7 @@ test('d2a_vertical_extension_clamps_at_body_cell_story_boundary', () => {
   const segments = arm.engine.geometryReader.storySegments;
   arm.engine.geometryReader.storySegments = (story) => story === 'body' ? [
     ...segments(story),
-    { kind: 'embed', embedKind: 'table', attributes: {}, payload: { rows: [{ cells: [{ story: cell }] }] } },
+    { kind: 'embed', embedKind: 'table', attributes: {}, payload: { tblPr: {}, grid: [], rows: [{ cells: [{ story: cell }] }] } },
   ] : segments(story);
   const index = new DisplayPositionIndex({
     ...arm.engine.geometryReader, selectionText: arm.engine.selectionText, resolveComment: arm.engine.resolveComment,
@@ -783,7 +789,7 @@ test('d2a_line_navigation_reuses_caches_and_reads_lines_only_on_the_caret_page',
     expect(segments).toHaveBeenCalledTimes(1);
     expect(lineReads).toBe(4);
     expect(disposed).toBe(0);
-    runNavigation(arm, { ...frame, frameEpoch: 2 }, { unit: 'line', direction: 'forward', extend: false });
+    runNavigation(arm, { ...frame, frameEpoch: 2, displayList: { pages: [...frame.displayList.pages] } }, { unit: 'line', direction: 'forward', extend: false });
     expect(queries).toHaveBeenCalledTimes(2);
     expect(segments).toHaveBeenCalledTimes(1);
     expect(disposed).toBe(1);
@@ -917,7 +923,7 @@ test('d2a_worker_vertical_navigation_builds_unbuilt_neighbours_before_chained_ty
   const reservations = source.slice(reservationStart, source.indexOf('\n/**', reservationStart));
   const binding = source.slice(source.indexOf('function bindResidentCommands('), source.indexOf('function replacementCommandInit('));
   const dependencies = {
-    resolveReservations, validReservationsPayload, cellSelectionHeadPosition,
+    resolveReservations, validReservationsPayload, cellSelectionHeadPosition, canvasPageStack, offscreenDpr: 1, offscreenZoom: 1,
     session: arm.engine, commandHooksFactory: factory, collaboration: null,
     init: { layoutWithRegions: true, layoutInput: '{}', extras: '{}' } as DocxCommandInitRequest,
     retainedFrame: windowed, retainedLayoutVersion: null, layoutRevision: 0, commandFrameChanges: null,
@@ -926,6 +932,7 @@ test('d2a_worker_vertical_navigation_builds_unbuilt_neighbours_before_chained_ty
     sessionFonts: null, ResidentSessionFonts, scope: { fonts: undefined },
     createResidentCommandHost: (options: DocxCommandHostOptions) => options.hooks,
     displayPositionIndex: () => index, createDisplayListQueries: queryModule.createDisplayListQueries,
+    residentDisplayListQueries, releaseResidentDisplayListQueries, StagedEchoPages,
     loadRustDisplayListQueryEngine, loadedRustDisplayListQueryEngine, applyFrameDelta, decodeFrameDelta,
     retainedPageByKey: (frame: RetainedFrame, pageId: string) => retainedFramePageById(frame, BigInt(pageId)),
   };
@@ -982,7 +989,7 @@ test('d2a_worker_arrow_down_builds_the_actual_split_row_caret_page_and_neighbour
   const segments = arm.engine.geometryReader.storySegments;
   arm.engine.geometryReader.storySegments = (story) => story === 'body' ? [
     ...segments(story),
-    { kind: 'embed', embedKind: 'table', attributes: {}, payload: { rows: [{ cells: [{ story: cell }] }] } },
+    { kind: 'embed', embedKind: 'table', attributes: {}, payload: { tblPr: {}, grid: [], rows: [{ cells: [{ story: cell }] }] } },
   ] : segments(story);
   arm.state.selection = selection(`${cell}-0`, 10, 10, cell);
   const index = new DisplayPositionIndex({ ...arm.engine.geometryReader, selectionText: arm.engine.selectionText, resolveComment: arm.engine.resolveComment });
@@ -1128,7 +1135,7 @@ test('d2a_repeated_end_of_document_drag_and_line_results_use_indexed_positions',
   const segments = arm.engine.geometryReader.storySegments;
   arm.engine.geometryReader.storySegments = (story) => story === 'body' ? [
     ...segments(story),
-    { kind: 'embed', embedKind: 'table', attributes: {}, payload: { rows: [{ cells: Object.keys(cells).map((story) => ({ story })) }] } },
+    { kind: 'embed', embedKind: 'table', attributes: {}, payload: { tblPr: {}, grid: [], rows: [{ cells: Object.keys(cells).map((story) => ({ story })) }] } },
   ] : segments(story);
   const cell = 'body:t0:r0c99';
   const index = new DisplayPositionIndex({ ...arm.engine.geometryReader, selectionText: arm.engine.selectionText, resolveComment: arm.engine.resolveComment });
@@ -1167,3 +1174,308 @@ test('d2a_repeated_end_of_document_drag_and_line_results_use_indexed_positions',
     queries.mockRestore();
   }
 });
+
+type ControlPart = string | { control: string } | { embed: YrsStorySegment };
+
+const CHECKBOX = { control: '☐' };
+
+function controlSegments(story: string, index: number, parts: readonly ControlPart[]): YrsStorySegment[] {
+  return [
+    ...parts.map<YrsStorySegment>((part) => typeof part === 'string'
+      ? { kind: 'text', text: part, attributes: {} }
+      : 'embed' in part ? part.embed
+      : { kind: 'embed', embedKind: 'sdt', attributes: {}, payload: { content: [{ kind: 'text', text: part.control }] } }),
+    { kind: 'pilcrow', paraId: `${story}-${index}`, properties: {}, attributes: {} },
+  ];
+}
+
+function controlArm(stories: Record<string, ControlPart[][]>): CommandArm {
+  const arm = fakeArm(Object.fromEntries(Object.entries(stories).map(([story, paragraphs]) =>
+    [story, paragraphs.map((parts) => parts.map((part) => typeof part === 'string' ? part : '￼').join(''))])));
+  arm.engine.geometryReader.storySegments = (story) =>
+    stories[story]!.flatMap((parts, index) => controlSegments(story, index, parts));
+  Object.assign(arm.engine, {
+    paragraphSegments: (story: string, indices: readonly number[]) =>
+      indices.map((index) => controlSegments(story, index, stories[story]![index]!)),
+  });
+  return arm;
+}
+
+function pointer(
+  arm: CommandArm, lines: queryModule.DisplayListVisualLine[] = [],
+  region: Omit<queryModule.DisplayListRegionHit, 'pos'> = { region: 'body', target: 'text' },
+) {
+  const frame = fakeFrame([{ pageIndex: 0, width: 600, height: 800, primitives: [] }]);
+  let hit: number | null = null;
+  const queries = spyOn(queryModule, 'createDisplayListQueries').mockReturnValue(fakeQueries({
+    hitTestRegions: () => hit === null ? null : { ...region, pos: hit },
+    visualLinesOnPage: () => lines,
+  }));
+  releasesAfterTest.push(() => queries.mockRestore());
+  return (position: number | null, kind: 'selectPoint' | 'extendSelection' = 'selectPoint', shift = false, y = 40) => {
+    hit = position;
+    const intent = command(arm, kind, {
+      page: { pageId: '1', pageIndex: 0 }, x: 0, y, layoutRevision: 0, frameEpoch: 1, clickCount: 1,
+      modifiers: { shift, alt: false, ctrl: false, meta: false },
+    }) as DocxSelectionCommandIntent;
+    return resolveDocxSelectionIntent({
+      engine: arm.engine, state: arm.state, command: intent, context: context(arm, intent),
+      readLayout: () => ({ frame, layoutRevision: 0 }),
+    });
+  };
+}
+
+test('click_before_and_after_a_checkbox_control_lands_at_the_clicked_story_offset', () => {
+  const arm = controlArm({ body: [['Intro'], ['ab', CHECKBOX, 'cd']] });
+  const click = pointer(arm);
+  for (const [content, offset] of [[0, 0], [1, 1], [2, 2], [3, 2], [4, 3], [5, 3], [6, 4], [7, 5]] as const) {
+    arm.state.selection = selection('body-0', 2);
+    expect(click(8 + content).selection, `content unit ${content}`).toEqual(selection('body-1', offset));
+  }
+});
+
+test('click_before_and_after_a_plain_text_control_lands_at_the_clicked_story_offset', () => {
+  const arm = controlArm({ body: [['Intro'], ['ab', { control: 'Value 1' }, 'cd']] });
+  const click = pointer(arm);
+  for (const [content, offset] of [[0, 0], [1, 1], [2, 2], [6, 2], [7, 3], [11, 3], [12, 4], [13, 5]] as const) {
+    arm.state.selection = selection('body-0', 2);
+    expect(click(8 + content).selection, `content unit ${content}`).toEqual(selection('body-1', offset));
+  }
+});
+
+test('click_between_and_after_two_controls_in_one_paragraph_lands_at_the_clicked_story_offset', () => {
+  const arm = controlArm({ body: [['Intro'], ['a', CHECKBOX, 'b', { control: 'Value 2' }, 'c']] });
+  const click = pointer(arm);
+  for (const [content, offset] of [[0, 0], [1, 1], [4, 2], [5, 3], [14, 4], [15, 5]] as const) {
+    arm.state.selection = selection('body-0', 2);
+    expect(click(8 + content).selection, `content unit ${content}`).toEqual(selection('body-1', offset));
+  }
+});
+
+test('click_left_and_right_of_a_trailing_checkbox_control_lands_at_the_clicked_story_offset', () => {
+  const arm = controlArm({ body: [['Intro'], ['ab', CHECKBOX]] });
+  const click = pointer(arm);
+  for (const [content, offset] of [[0, 0], [2, 2], [3, 2], [4, 3], [5, 3]] as const) {
+    arm.state.selection = selection('body-0', 2);
+    expect(click(8 + content).selection, `content unit ${content}`).toEqual(selection('body-1', offset));
+  }
+});
+
+test('click_before_between_and_after_two_adjacent_checkbox_controls_lands_at_the_clicked_story_offset', () => {
+  const arm = controlArm({ body: [['Intro'], ['a', CHECKBOX, CHECKBOX, 'b']] });
+  const click = pointer(arm);
+  for (const [content, offset] of [[0, 0], [1, 1], [2, 1], [3, 2], [4, 2], [5, 2], [6, 3], [7, 3], [8, 4]] as const) {
+    arm.state.selection = selection('body-0', 2);
+    expect(click(8 + content).selection, `content unit ${content}`).toEqual(selection('body-1', offset));
+  }
+});
+
+test('click_before_and_after_a_control_nesting_another_control_lands_at_the_clicked_story_offset', () => {
+  const nested = { embed: { kind: 'embed', embedKind: 'sdt', attributes: {}, payload: { content: [
+    { kind: 'sdt', payload: { content: [{ kind: 'text', text: '☐' }] } },
+  ] } } satisfies YrsStorySegment };
+  const arm = controlArm({ body: [['Intro'], ['ab', nested, 'cd']] });
+  const click = pointer(arm);
+  for (const [content, offset] of [[0, 0], [2, 2], [3, 2], [4, 2], [5, 3], [6, 3], [7, 3], [9, 5]] as const) {
+    arm.state.selection = selection('body-0', 2);
+    expect(click(8 + content).selection, `content unit ${content}`).toEqual(selection('body-1', offset));
+  }
+});
+
+test('click_before_and_after_the_only_control_of_a_paragraph_lands_at_the_clicked_story_offset', () => {
+  const arm = controlArm({ body: [['Intro'], [CHECKBOX]] });
+  const click = pointer(arm);
+  for (const [content, offset] of [[0, 0], [1, 0], [2, 1], [3, 1]] as const) {
+    arm.state.selection = selection('body-0', 2);
+    expect(click(8 + content).selection, `content unit ${content}`).toEqual(selection('body-1', offset));
+  }
+});
+
+test('click_around_a_control_in_a_paragraph_led_by_a_table_lands_past_the_leading_block', () => {
+  const cell = 'body:t0:r0c0';
+  const table = { embed: { kind: 'embed', embedKind: 'table', attributes: {},
+    payload: { tblPr: {}, grid: [], rows: [{ cells: [{ story: cell }] }] } } satisfies YrsStorySegment };
+  const arm = controlArm({ body: [['Before'], [table, 'ab', CHECKBOX, 'cd']], [cell]: [['Cell']] });
+  const click = pointer(arm);
+  for (const [content, offset] of [[0, 1], [2, 3], [5, 4], [7, 6]] as const) {
+    arm.state.selection = selection('body-0', 2);
+    expect(click(21 + content).selection, `content unit ${content}`).toEqual(selection('body-1', offset));
+  }
+});
+
+test('click_before_and_after_a_checkbox_control_in_a_header_lands_at_the_clicked_story_offset', () => {
+  const header = 'hf:rId1';
+  const arm = controlArm({ body: [['Intro']], [header]: [['ab', CHECKBOX, 'cd']] });
+  const click = pointer(arm, [], { region: 'header', rId: 'rId1', target: 'text' });
+  for (const [content, offset] of [[0, 0], [2, 2], [5, 3], [7, 5]] as const) {
+    arm.state.selection = selection('body-0', 2);
+    expect(click(1 + content).selection, `content unit ${content}`).toEqual(selection(`${header}-0`, offset, offset, header));
+  }
+});
+
+test('click_on_line_two_of_a_wrapped_paragraph_with_a_control_on_line_one_lands_at_the_clicked_story_offset', () => {
+  const arm = controlArm({ body: [['Intro'], ['Check ', CHECKBOX, ' first line second line ', { control: 'Value 4' }, ' tail']] });
+  const lines = [{ ...fakeLine(1, 6), y: 0 }, { ...fakeLine(8, 29), y: 20 }, { ...fakeLine(29, 55), y: 40 }];
+  const click = pointer(arm, lines);
+  for (const [content, offset] of [[21, 19], [33, 31], [47, 37]] as const) {
+    arm.state.selection = selection('body-0', 2);
+    expect(click(8 + content).selection, `content unit ${content}`).toEqual(selection('body-1', offset));
+  }
+  arm.state.selection = selection('body-0', 2);
+  expect(click(null, 'selectPoint', false, 45).selection).toEqual(selection('body-1', 19));
+});
+
+test('click_in_a_table_cell_paragraph_with_a_checkbox_control_lands_at_the_clicked_story_offset', () => {
+  const cell = 'body:t0:r0c0';
+  const arm = controlArm({ body: [['Before'], ['After']], [cell]: [['ab', CHECKBOX, 'cd']] });
+  const segments = arm.engine.geometryReader.storySegments;
+  arm.engine.geometryReader.storySegments = (story) => story === 'body' ? [
+    ...segments(story).slice(0, 2),
+    { kind: 'embed', embedKind: 'table', attributes: {}, payload: { tblPr: {}, grid: [], rows: [{ cells: [{ story: cell }] }] } },
+    ...segments(story).slice(2),
+  ] : segments(story);
+  const index = new DisplayPositionIndex({
+    ...arm.engine.geometryReader, selectionText: arm.engine.selectionText, resolveComment: arm.engine.resolveComment,
+  });
+  const click = pointer(arm);
+  for (let offset = 0; offset <= 5; offset++) {
+    arm.state.selection = selection('body-0', 2);
+    const position = index.positionOf({ story: cell, paraId: `${cell}-0`, offset }, 'body')!;
+    expect(click(position).selection, `story offset ${offset}`).toEqual(selection(`${cell}-0`, offset, offset, cell));
+  }
+});
+
+test('arrow_down_and_up_through_checklist_paragraphs_keep_the_goal_column', () => {
+  const arm = controlArm({ body: [['Intro'], [CHECKBOX, 'One'], [CHECKBOX, 'Two'], [CHECKBOX, 'Three']] });
+  const frame = fakeFrame([{ pageIndex: 0, width: 600, height: 800, primitives: [] }]);
+  const lines = [fakeLine(1, 6), fakeLine(8, 14), fakeLine(16, 22), fakeLine(24, 32)];
+  const queries = spyOn(queryModule, 'createDisplayListQueries').mockReturnValue(fakeQueries({
+    verticalMove: (position, direction, goalX = 0) => {
+      const line = lines.findIndex((line) => line.from <= position && position <= line.to);
+      const target = lines[line + (direction === 'down' ? 1 : -1)]!;
+      return { position: Math.min(target.from + goalX / 10, target.to), goalX };
+    },
+  }));
+  try {
+    for (const [goalX, start, offset] of [[0, 0, 0], [20, 0, 1], [40, 2, 2]] as const) {
+      arm.state.selection = selection('body-1', start);
+      for (const [direction, paragraph] of [['down', 2], ['down', 3], ['up', 2], ['up', 1]] as const) {
+        const moved = runNavigation(arm, frame, { unit: 'line', direction, extend: false, goalX });
+        expect(moved.selection, `${direction} to paragraph ${paragraph} at goal ${goalX}`).toEqual(selection(`body-${paragraph}`, offset));
+        expect(moved.goalX).toBe(goalX);
+        arm.state.selection = moved.selection;
+      }
+    }
+    arm.state.selection = selection('body-1', 2);
+    const extended = runNavigation(arm, frame, { unit: 'line', direction: 'down', extend: true, goalX: 0 });
+    expect(extended.selection).toEqual({ anchor: { story: 'body', paraId: 'body-1', offset: 2 }, focus: { story: 'body', paraId: 'body-2', offset: 0 } });
+  } finally {
+    queries.mockRestore();
+  }
+});
+
+test('home_and_end_on_a_checklist_line_land_before_the_control_and_at_the_line_end', () => {
+  const arm = controlArm({ body: [['Intro'], [CHECKBOX, 'One']] });
+  const frame = fakeFrame([{ pageIndex: 0, width: 600, height: 800, primitives: [] }]);
+  const queries = spyOn(queryModule, 'createDisplayListQueries').mockReturnValue(fakeQueries({
+    caretRect: () => ({ pageIndex: 0, x: 0, y: 0, width: 0, height: 10 }),
+    visualLinesOnPage: () => [fakeLine(8, 14)],
+  }));
+  try {
+    for (const [direction, extend, expected] of [
+      ['backward', false, selection('body-1', 0)],
+      ['forward', false, selection('body-1', 4)],
+      ['backward', true, selection('body-1', 3, 0)],
+    ] as const) {
+      arm.state.selection = selection('body-1', 3);
+      expect(runNavigation(arm, frame, { unit: 'line', direction, extend }).selection, `${direction} ${extend}`).toEqual(expected);
+    }
+  } finally {
+    queries.mockRestore();
+  }
+});
+
+test('shift_click_and_drag_extend_put_the_focus_at_the_story_offset_before_a_control', () => {
+  const arm = controlArm({ body: [['Intro'], ['ab', CHECKBOX, 'cd']] });
+  const click = pointer(arm);
+  for (const [kind, shift, content, offset] of [
+    ['selectPoint', true, 1, 1],
+    ['selectPoint', true, 2, 2],
+    ['extendSelection', false, 0, 0],
+    ['extendSelection', false, 3, 2],
+    ['extendSelection', false, 6, 4],
+  ] as const) {
+    arm.state.selection = selection('body-1', 5);
+    expect(click(8 + content, kind, shift).selection, `${kind} at content unit ${content}`)
+      .toEqual(selection('body-1', 5, offset));
+  }
+});
+
+test('positions_table_build_looks_up_one_node_per_plain_paragraph_and_scans_only_the_control_paragraph', () => {
+  const plain = Array.from({ length: 50 }, (): ControlPart[] => ['x'.repeat(40)]);
+  const arm = controlArm({ body: [...plain, ['ab', CHECKBOX, 'cd']] });
+  const click = pointer(arm);
+  const nodes = spyOn(YrsPositionProjection.prototype, 'nodeAt');
+  try {
+    arm.state.selection = selection('body-0', 2);
+    expect(click(50 * 42 + 1 + 4).selection).toEqual(selection('body-50', 3));
+    const cold = nodes.mock.calls.length;
+    arm.state.selection = selection('body-0', 2);
+    expect(click(50 * 42 + 1 + 4).selection).toEqual(selection('body-50', 3));
+    const warm = nodes.mock.calls.length - cold;
+    expect(cold - warm).toBe(50 + 1 + 5 + 1);
+    arm.state.selection = selection('body-0', 2);
+    expect(click(10 * 42 + 1 + 7).selection).toEqual(selection('body-10', 7));
+  } finally {
+    nodes.mockRestore();
+  }
+});
+
+function malformedSecondPage() {
+  const arm = fakeArm({ body: ['Alpha', 'Bravo'] });
+  Object.assign(arm.engine, { proposalEngine: { version: () => '0' } });
+  const session = arm.engine as unknown as ResidentEngineSession;
+  const index = new DisplayPositionIndex({ ...arm.engine.geometryReader, selectionText: arm.engine.selectionText });
+  const at = (paraId: string, offset: number) => index.positionOf({ story: 'body', paraId, offset }, 'body')!;
+  const page = (pageIndex: number, paraId: string, malformed = false): DisplayPage => ({
+    pageIndex, width: 600, height: 800, primitives: [{
+      kind: 'text', text: paraId === 'body-0' ? 'Alpha' : 'Bravo', x: 100, baselineY: 100, width: 50, font: '400 16px Arial', color: '#000000',
+      docStart: at(paraId, 0), docEnd: at(paraId, 5), paraId, ...(malformed ? { table: { tableId: 't0' } } : {}),
+    } as DisplayPage['primitives'][number]],
+  });
+  const frame = fakeFrame([page(0, 'body-0'), page(1, 'body-1', true)]);
+  const range = (paraId: string): YrsStoryRange => ({ story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 5 } });
+  const pagesOf = async (paraId: string) =>
+    (await readResidentRangeHighlights(session, frame, [range(paraId)], 0)).rects[0]!.map((rect) => rect.pageIndex);
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  releasesAfterTest.push(() => {
+    warn.mockRestore();
+    releaseResidentDisplayListQueries(arm.engine);
+  });
+  return { arm, frame, pagesOf };
+}
+
+test('after a range read fails on a malformed page, a click on a healthy page moves the caret', async () => {
+  await loadRustDisplayListQueryEngine();
+  const { arm, frame, pagesOf } = malformedSecondPage();
+  await expect(pagesOf('body-1')).rejects.toThrow('Range highlight layout is unavailable');
+  arm.state.selection = selection('body-1', 2);
+  const intent = command(arm, 'selectPoint', {
+    page: { pageId: '1', pageIndex: 0 }, x: 125, y: 95, layoutRevision: 0, frameEpoch: 1, clickCount: 1,
+    modifiers: { shift: false, alt: false, ctrl: false, meta: false },
+  }) as DocxSelectionCommandIntent;
+  const clicked = resolveDocxSelectionIntent({
+    engine: arm.engine, state: arm.state, command: intent, context: context(arm, intent),
+    readLayout: () => ({ frame, layoutRevision: 0 }),
+  }).selection;
+  expect(clicked.focus.paraId).toBe('body-0');
+  expect(clicked.anchor).toEqual(clicked.focus);
+}, TIMEOUT);
+
+test('a range read on a malformed page fails again on the next read, and a read on a healthy page after it is answered', async () => {
+  await loadRustDisplayListQueryEngine();
+  const { pagesOf } = malformedSecondPage();
+  await expect(pagesOf('body-1')).rejects.toThrow('Range highlight layout is unavailable');
+  await expect(pagesOf('body-1')).rejects.toThrow('Range highlight layout is unavailable');
+  await expect(pagesOf('body-0')).resolves.toEqual([0]);
+}, TIMEOUT);

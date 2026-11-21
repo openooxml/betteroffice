@@ -10,6 +10,7 @@ export {
   type RustMeasureSource,
   type RustTextEngine,
   type ResidentFontRequirement,
+  fontRequirementCharacters,
   type ResidentMeasurementConfig,
 } from './rustMeasureSource';
 export type {
@@ -20,7 +21,9 @@ export type {
 } from './fontRegistry';
 export {
   configureDefaultFonts,
+  hasConfiguredFontSource,
   resolveDefaultFontProvider,
+  resolveCompleteFontProvider,
   type BundledFontModule,
   type DefaultFontOptions,
 } from './defaultFontProvider';

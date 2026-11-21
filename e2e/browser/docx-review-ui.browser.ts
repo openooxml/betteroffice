@@ -319,6 +319,28 @@ test.describe('dots review', () => {
     await expect(first).toHaveAttribute('aria-expanded', 'false');
   });
 
+  test('a balloon is placed with its own width before the next frame', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    const count = await begin(page, 'dots');
+    await page.evaluate(() => {
+      const request = window.requestAnimationFrame.bind(window);
+      window.requestAnimationFrame = (callback) => request(() => { setTimeout(() => callback(performance.now()), 1_000); });
+      const Observer = window.ResizeObserver;
+      window.ResizeObserver = class extends Observer {
+        constructor(callback: ResizeObserverCallback) { super((entries, observer) => { setTimeout(() => callback(entries, observer), 1_000); }); }
+      };
+    });
+    for (const index of [0, count - 1]) {
+      await page.mouse.move(1, 1);
+      await expect(balloon(page)).toBeHidden();
+      const dot = dots(page).nth(index);
+      const panel = (await (await showBalloon(page, dot)).boundingBox())!;
+      const anchor = (await dot.boundingBox())!;
+      expect(panel.y).toBeGreaterThanOrEqual(anchor.y + anchor.height);
+      expect(panel.x + panel.width).toBeGreaterThanOrEqual(anchor.x + anchor.width - 1);
+    }
+  });
+
   for (const width of [1440, 1280]) test(`places the balloon so it never covers the anchor text at ${width}`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
     const count = await begin(page, 'dots');

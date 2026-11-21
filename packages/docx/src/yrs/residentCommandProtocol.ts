@@ -76,6 +76,8 @@ export interface DocxCommandTableContext {
   rowCount: number;
   columnCount: number;
   hasMultiCellSelection: boolean;
+  /** The selected cells, when more than one is selected. */
+  cells?: YrsTableRange;
   canSplitCell: boolean;
   rowSpan?: number;
   columnSpan?: number;
@@ -303,7 +305,7 @@ export interface DocxCommandPayloads {
   openPart: DocxPartTarget;
   ensurePart: DocxPartTarget;
   removePart: DocxPartTarget;
-  setHyperlink: { selection: DocxCommandSelection; hyperlink: YrsHyperlinkAttrs | null; displayText?: string; expectVersion: string };
+  setHyperlink: DocxSelectionIntent & { selection: DocxCommandSelection; hyperlink: YrsHyperlinkAttrs | null; displayText?: string; expectVersion: string };
   setObjectProperties: { handle: string; patch: Record<string, unknown>; expectVersion: string };
   setSectionProperties: { section: string; patch: Partial<SectionProperties>; expectVersion: string };
   setNoteProperties: { section: string; footnotePr: FootnoteProperties; endnotePr: EndnoteProperties; expectVersion: string };
@@ -328,10 +330,15 @@ export interface DocxCommandPayloads {
   setTableBorders: DocxSelectionIntent & { borders: YrsCellBorders };
   setTableProperties: DocxSelectionIntent & { op: 'patch'; patch: { width?: number | null; widthType?: string | null; justification?: 'left' | 'center' | 'right' | null }; expectVersion?: string };
   pasteFragment: DocxSelectionIntent & { fragment: DocxClipboardFragment };
+  replacePasteFragment: DocxSelectionIntent & { fragment: DocxClipboardFragment; plain?: true; merge?: true };
   insertPageBreak: DocxSelectionIntent;
   insertSectionBreak: DocxSelectionIntent & { type: 'nextPage' | 'continuous' | 'oddPage' | 'evenPage' };
   resizeObject: { handle: string; expectVersion: string } &
-    ({ widthEmu: number; heightEmu: number; hOffsetEmu?: number; vOffsetEmu?: number } | { widthTwips: number });
+    ({ widthEmu: number; heightEmu: number; hOffsetEmu?: number; vOffsetEmu?: number } | { widthTwips: number } |
+      /** Moves the right edge of grid column `columnEdge - 1` by `deltaTwips`; the next column, if any, gives up the same width. */
+      { columnEdge: number; deltaTwips: number } |
+      /** Drags the bottom border of the row holding the cell `handle` names, from `paintedRowTwips` or the row's stored height if taller. */
+      { paintedRowTwips: number; rowDeltaTwips: number });
   moveObject: { handle: string; hOffsetEmu: number; vOffsetEmu: number; expectVersion: string };
   /** Moves the inline picture `handle` names to the text position under `drop`, as one undo step. */
   moveEmbed: { handle: string; expectVersion: string; drop: DocxSelectionPointIntent; suggesting?: YrsAuthor };
@@ -389,6 +396,8 @@ export interface DocxCommandFramePayload {
   reservations?: DocxFrameReservations;
   parts?: ResidentPartGeometry[];
   geometry?: ResidentFrameGeometry;
+  /** The frame only moved the selection: the previous frame's `geometry` still holds, apart from its selection. */
+  geometryKept?: true;
   frame: ArrayBuffer;
   pageFrames?: ArrayBuffer[];
   caret: YrsResidentCaretSnapshot;
@@ -410,7 +419,7 @@ export type DocxCommandFrame = FrameEnvelope<DocxCommandFramePayload>;
 export type DocxCommandAck = CommandAck<DocxCommandSelection | null, DocxEditState, DocxCommandFramePayload> & {
   echoContext?: DocxCommandEchoContext;
 };
-export type DocxCommandApplyResult = ApplyResult<DocxCommandSelection | null, DocxEditState>;
+export type DocxCommandApplyResult = ApplyResult<DocxCommandSelection | null, DocxEditState> & { cause?: 'remote' };
 export type DocxCommandReply = DocxCommandAck | TransferResult<DocxCommandAck>;
 
 /** @internal */
@@ -456,6 +465,8 @@ export interface DocxCommandInitRequest {
   selection?: DocxCommandSelection | null;
   fonts: YrsResidentFontRegistration[];
   fontRegistrationSlots?: boolean | { fontChains: Record<string, number[]> };
+  /** Slots registered from a sliced face's skeleton and core, whose outlines the worker loads before painting. */
+  progressiveFonts?: readonly import('./residentProgressiveFonts').ProgressiveFontSpec[];
   layoutInput: string;
   layoutWithRegions: boolean;
   layoutRevision: number;
@@ -533,7 +544,7 @@ export type DocxCommandHooksFactory = (
   environment?: DocxCommandHooksEnvironment
 ) => Pick<DocxCommandHooks, 'preflight' | 'apply' | 'selection' | 'editState' | 'recoveryState'> & {
   /** Runs after the collaboration wrap applies a remote merge at `context.currentVersion`. */
-  afterRemoteMerge?(context: DocxCommandApplyContext): void;
+  afterRemoteMerge?(context: DocxCommandApplyContext): { cause: 'remote' } | void;
 };
 
 export interface DocxCommandRegistry {
@@ -626,6 +637,8 @@ export interface DocxWorkerCommandState {
   proposals?: DocxProposalRegistry;
   /** Host versions in `(from, to]`, all produced by applied remote merges and none by a local command. */
   remoteMerges?: { from: number; to: number };
+  /** The range the latest paste replaced and the document version right after it; any later edit makes it stale. */
+  lastPaste?: { range: YrsStoryRange; version: string; storedMarks: DocxStoredMarks | null } | null;
 }
 
 export type DocxWorkerCommandEngine = ResidentEngineSession & Pick<YrsSession,

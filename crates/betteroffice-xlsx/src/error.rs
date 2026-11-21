@@ -5,6 +5,8 @@ use crate::{CellAddress, CellRef, SheetId};
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
+    #[cfg(feature = "fonts")]
+    FontSource(betteroffice_fonts::FontError),
     Package(String),
     CollaborativeState(String),
     InvalidClientId {
@@ -24,6 +26,12 @@ pub enum Error {
     },
     NotCollaborative,
     CollaborativeStructureOperation,
+    /// A collaborative `AddSheet` anywhere but the end of the workbook.
+    CollaborativeSheetPosition,
+    /// An undo that would remove an added sheet still holding anything the add
+    /// did not write, such as another collaborator's edit. The workbook is
+    /// unchanged and the next undo reaches the step before it.
+    CollaborativeUndoRefused,
     CollaborativeStructureChanged,
     Spreadsheet(xlsx_parse::ParseError),
     Operation(xlsx_ops::OpError),
@@ -32,6 +40,9 @@ pub enum Error {
     SheetOutOfRange(SheetId),
     CellOutOfRange(CellRef),
     InvalidOperation(String),
+    /// A user edit sheet protection refuses: input into a locked cell, or formatting or
+    /// moving objects on a protected sheet that does not allow it. The workbook is unchanged.
+    LockedTarget(String),
     /// A JSON request that does not decode to the request type.
     InvalidRequest(String),
     /// A stored `SetChartAnchor` named a frame that no longer holds the chart
@@ -49,6 +60,10 @@ pub enum Error {
         max: u64,
     },
     InvalidViewport,
+    /// A face supplied for one export that cannot paint.
+    FontUnavailable {
+        family: String,
+    },
     DisplayTooLarge {
         cells: u64,
         max: u64,
@@ -77,6 +92,8 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            #[cfg(feature = "fonts")]
+            Self::FontSource(error) => error.fmt(f),
             Self::Package(error) => f.write_str(error),
             Self::CollaborativeState(error) => {
                 write!(f, "invalid collaborative workbook state: {error}")
@@ -104,6 +121,12 @@ impl fmt::Display for Error {
             Self::CollaborativeStructureOperation => {
                 f.write_str("structural operations are unavailable in collaborative mode")
             }
+            Self::CollaborativeSheetPosition => {
+                f.write_str("collaborative sheets can only be added at the end of the workbook")
+            }
+            Self::CollaborativeUndoRefused => {
+                f.write_str("undo would remove a sheet that holds collaborators' edits")
+            }
             Self::CollaborativeStructureChanged => {
                 f.write_str("remote update changes the frozen workbook structure")
             }
@@ -119,6 +142,7 @@ impl fmt::Display for Error {
                 u64::from(cell.col) + 1
             ),
             Self::InvalidOperation(message) => f.write_str(message),
+            Self::LockedTarget(message) => f.write_str(message),
             Self::InvalidRequest(message) => write!(f, "malformed request: {message}"),
             Self::ChartFrameShifted { frame } => write!(
                 f,
@@ -137,6 +161,7 @@ impl fmt::Display for Error {
                 write!(f, "range {rows}x{cols} exceeds the {max}-cell copy cap")
             }
             Self::InvalidViewport => f.write_str("viewport must have finite positive dimensions"),
+            Self::FontUnavailable { family } => write!(f, "png-font-unavailable: {family}"),
             Self::DisplayTooLarge { cells, max } => write!(
                 f,
                 "requested viewport spans {cells} cells, exceeds the {max}-cell display-list cap"
@@ -169,6 +194,8 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            #[cfg(feature = "fonts")]
+            Self::FontSource(error) => Some(error),
             Self::Spreadsheet(error) => Some(error),
             Self::Operation(error) => Some(error),
             Self::DisplayList(error) => Some(error),
@@ -192,5 +219,12 @@ impl From<xlsx_ops::OpError> for Error {
 impl From<xlsx_render::RenderError> for Error {
     fn from(error: xlsx_render::RenderError) -> Self {
         Self::DisplayList(error)
+    }
+}
+
+#[cfg(feature = "fonts")]
+impl From<betteroffice_fonts::FontError> for Error {
+    fn from(error: betteroffice_fonts::FontError) -> Self {
+        Self::FontSource(error)
     }
 }

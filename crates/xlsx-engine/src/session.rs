@@ -1,14 +1,32 @@
-#[cfg(feature = "raster")]
-use betteroffice_xlsx::RenderOptions;
 use betteroffice_xlsx::{
     CalculationOptions, CapturedFormat, CellAddress, CellInput as WorkbookCellInput, CellRange,
-    CellRef, EditProfile, Error, HydratedWorkbook, MutationResult, NumberFormatMutation, Op,
-    PeerHydration as WorkbookPeerHydration, PrintMetrics, Proposal,
-    ProposalEditInput as WorkbookProposalEditInput, ProposalRequest, SelectionDirection, SheetId,
-    SheetInfoWire as SheetInfo, SnapshotBudget, StylePatch, UpdateEvent, UpdateSubscription,
-    Viewport, Workbook, WorkbookSnapshotEncoder,
+    CellRef, DisplayList, EditProfile, Error, HydratedWorkbook, MutationResult,
+    NumberFormatMutation, Op, PeerHydration as WorkbookPeerHydration, PrintMetrics, Proposal,
+    ProposalEditInput as WorkbookProposalEditInput, ProposalRequest, ProtectedSheets,
+    RenderOptions, SelectionDirection, SheetId, SheetInfoWire as SheetInfo, SnapshotBudget,
+    StylePatch, UpdateEvent, UpdateSubscription, Viewport, Workbook, WorkbookSnapshotEncoder,
 };
 use serde::{Deserialize, Serialize};
+
+fn range_png_options(args: &str) -> Result<RenderOptions, String> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Args {
+        range: Option<String>,
+        scale: Option<f32>,
+        max_width: Option<u32>,
+        max_height: Option<u32>,
+    }
+
+    let args: Args = serde_json::from_str(args).map_err(|error| format!("bad args: {error}"))?;
+    let range = args.range.map(|range| parse_range(&range)).transpose()?;
+    Ok(RenderOptions {
+        range,
+        scale: args.scale.unwrap_or(1.0),
+        max_width: args.max_width,
+        max_height: args.max_height,
+    })
+}
 
 pub struct Session {
     workbook: Workbook,
@@ -51,16 +69,27 @@ struct EditArgs {
     row: u32,
     col: u32,
     input: String,
+    #[serde(default, rename = "protectedSheets", deserialize_with = "supplied")]
+    protected_sheets: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
 struct EditBatchArgs {
     sheet: u32,
     edits: Vec<CellEditInput>,
+    #[serde(default, rename = "protectedSheets", deserialize_with = "supplied")]
+    protected_sheets: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
 struct MoveRangeArgs {
+    sheet: u32,
+    source: String,
+    destination: String,
+}
+
+#[derive(Deserialize)]
+struct FillRangeArgs {
     sheet: u32,
     source: String,
     destination: String,
@@ -73,6 +102,29 @@ struct CellEditInput {
     col: u32,
     input: String,
     copy_from: Option<CellRef>,
+}
+
+#[derive(Deserialize)]
+struct FormulaMove {
+    formula: String,
+    from: CellRef,
+    to: CellRef,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum MovedFormula {
+    Moved { ok: bool, formula: String },
+    Refused { ok: bool, error: &'static str },
+}
+
+/// A formula, without its `=`, copied from `origin` to `cell` as a paste moves it.
+fn moved_formula(formula: &str, origin: CellRef, cell: CellRef) -> Result<String, &'static str> {
+    if origin.row >= betteroffice_xlsx::MAX_ROWS || origin.col >= betteroffice_xlsx::MAX_COLS {
+        return Err("bad edit args: copy origin is outside the grid");
+    }
+    betteroffice_xlsx::translate_formula(formula, origin, cell)
+        .map_err(|_| "formula exceeds the length limit")
 }
 
 #[derive(Deserialize)]
@@ -130,6 +182,26 @@ struct MoveChartArgs {
     chart: String,
     dx: f32,
     dy: f32,
+    #[serde(default, rename = "protectedSheets", deserialize_with = "supplied")]
+    protected_sheets: Option<serde_json::Value>,
+}
+
+/// Pixel movement of each frame edge; an omitted edge stays put.
+#[derive(Deserialize)]
+struct ResizeChartArgs {
+    sheet: u32,
+    /// a `ChartRegion` id: the frame, not the chart part backing it.
+    chart: String,
+    #[serde(default)]
+    left: f32,
+    #[serde(default)]
+    top: f32,
+    #[serde(default)]
+    right: f32,
+    #[serde(default)]
+    bottom: f32,
+    #[serde(default, rename = "protectedSheets", deserialize_with = "supplied")]
+    protected_sheets: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -137,6 +209,8 @@ struct StyleArgs {
     sheet: u32,
     range: String,
     patch: StylePatch,
+    #[serde(default, rename = "protectedSheets", deserialize_with = "supplied")]
+    protected_sheets: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -144,6 +218,8 @@ struct NumberFormatArgs {
     sheet: u32,
     range: String,
     format: NumberFormatMutation,
+    #[serde(default, rename = "protectedSheets", deserialize_with = "supplied")]
+    protected_sheets: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -151,6 +227,8 @@ struct ApplyFormatArgs {
     sheet: u32,
     range: String,
     format: CapturedFormat,
+    #[serde(default, rename = "protectedSheets", deserialize_with = "supplied")]
+    protected_sheets: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -174,6 +252,20 @@ struct ProfiledEditResult {
 struct DisplayListProfile {
     build_ms: f64,
     encode_ms: f64,
+}
+
+/// A screen frame's display list with the visible cells whose conditional
+/// formats it left undecided.
+#[derive(Serialize)]
+struct ScreenFrame<'a> {
+    #[serde(flatten)]
+    display_list: &'a DisplayList,
+    #[serde(rename = "conditionalPending", skip_serializing_if = "is_zero")]
+    pending: u32,
+}
+
+fn is_zero(count: &u32) -> bool {
+    *count == 0
 }
 
 #[derive(Deserialize)]
@@ -209,8 +301,18 @@ struct IdArgs {
 }
 
 #[derive(Serialize)]
-struct ProposalList<'a> {
-    proposals: &'a [Proposal],
+struct ProposalList {
+    proposals: Vec<ListedProposal>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ListedProposal {
+    #[serde(flatten)]
+    proposal: Proposal,
+    stale_targets: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    force_blocked: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -249,6 +351,7 @@ struct AcceptResult {
 }
 
 impl Session {
+    /// Checkpoints are only restorable by the same engine version and codec.
     pub fn recovery_checkpoint(
         &self,
         through_seq: u64,
@@ -263,6 +366,7 @@ impl Session {
             .map_err(|error| error.to_string())
     }
 
+    /// Checkpoints are only restorable by the same engine version and codec.
     pub fn open_recovery_checkpoint(bytes: &[u8], expected_seq: u64) -> Result<Self, String> {
         let (workbook, through_seq, calculation_context, _) =
             Workbook::restore_recovery_checkpoint(bytes).map_err(|error| error.to_string())?;
@@ -381,6 +485,31 @@ impl Session {
             .map_err(|error| error.to_string())
     }
 
+    /// [`Workbook::open_recalculating_stale`], under `context` when given, as in
+    /// [`Session::open_with_calculation_json`].
+    pub fn open_recalculating_stale(
+        bytes: &[u8],
+        now_serial: Option<f64>,
+        context: Option<&str>,
+    ) -> Result<Self, String> {
+        let context: Option<WorkbookCalculationContext> = context
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|error| format!("bad calculation context: {error}"))?;
+        let rand_seed = context.as_ref().map(|context| context.rand_seed);
+        let calculation_context = context
+            .map(WorkbookCalculationContext::options)
+            .transpose()?;
+        let options = calculation_context.unwrap_or_else(|| calculation_options(now_serial));
+        Workbook::open_recalculating_stale(bytes, options, rand_seed)
+            .map(|workbook| Self {
+                workbook,
+                calculation_context,
+                snapshot: None,
+            })
+            .map_err(|error| error.to_string())
+    }
+
     pub fn set_calculation_context_json(&mut self, context: &str) -> Result<(), String> {
         let context: Option<WorkbookCalculationContext> = serde_json::from_str(context)
             .map_err(|error| format!("bad calculation context: {error}"))?;
@@ -479,17 +608,46 @@ impl Session {
 
     /// @experimental
     pub fn display_list_for_json(&self, sheet: u32, viewport_json: &str) -> Result<String, String> {
+        self.frame_json(SheetId(sheet), viewport_json, None)
+    }
+
+    /// [`Self::display_list_for_json`] with the frame's conditional formats
+    /// also bounded by `clock`; no `sheet` is the active one.
+    pub fn display_list_timed_json(
+        &self,
+        sheet: Option<u32>,
+        viewport_json: &str,
+        clock: &dyn betteroffice_xlsx::FrameClock,
+    ) -> Result<String, String> {
+        let sheet = sheet.map_or(self.workbook.active_sheet(), SheetId);
+        self.frame_json(sheet, viewport_json, Some(clock))
+    }
+
+    fn frame_json(
+        &self,
+        sheet: SheetId,
+        viewport_json: &str,
+        clock: Option<&dyn betteroffice_xlsx::FrameClock>,
+    ) -> Result<String, String> {
         let viewport: Viewport = serde_json::from_str(viewport_json)
             .map_err(|error| format!("bad viewport: {error}"))?;
-        let display_list = self
-            .workbook
-            .display_list_for(SheetId(sheet), &viewport)
-            .map_err(display_error)?;
-        serde_json::to_string(&display_list).map_err(|error| error.to_string())
+        let (display_list, pending) = match clock {
+            Some(clock) => self
+                .workbook
+                .display_list_frame_timed(sheet, &viewport, clock),
+            None => self.workbook.display_list_frame_for(sheet, &viewport),
+        }
+        .map_err(display_error)?;
+        serde_json::to_string(&ScreenFrame {
+            display_list: &display_list,
+            pending,
+        })
+        .map_err(|error| error.to_string())
     }
 
     /// `display_list_json` split into build and encode time by `now`, returned
-    /// as `{"displayList": ..., "profile": {"buildMs", "encodeMs"}}`.
+    /// as `{"displayList": ..., "profile": {"buildMs", "encodeMs"}}`; `now`
+    /// also bounds the frame's conditional formats.
     pub fn display_list_profiled_json(
         &self,
         viewport_json: &str,
@@ -497,14 +655,20 @@ impl Session {
     ) -> Result<String, String> {
         let viewport: Viewport = serde_json::from_str(viewport_json)
             .map_err(|error| format!("bad viewport: {error}"))?;
-        let started = now();
-        let display_list = self
+        let now = std::cell::RefCell::new(now);
+        let clock = || (*now.borrow_mut())();
+        let started = clock();
+        let (display_list, pending) = self
             .workbook
-            .display_list(&viewport)
+            .display_list_frame_timed(self.workbook.active_sheet(), &viewport, &clock)
             .map_err(display_error)?;
-        let built = now();
-        let json = serde_json::to_string(&display_list).map_err(|error| error.to_string())?;
-        let encoded = now();
+        let built = clock();
+        let json = serde_json::to_string(&ScreenFrame {
+            display_list: &display_list,
+            pending,
+        })
+        .map_err(|error| error.to_string())?;
+        let encoded = clock();
         let profile = serde_json::to_string(&DisplayListProfile {
             build_ms: built - started,
             encode_ms: encoded - built,
@@ -523,6 +687,12 @@ impl Session {
         serde_json::to_string(&hit).map_err(|error| error.to_string())
     }
 
+    pub fn media_bytes(&self, asset_id: &str) -> Result<Vec<u8>, String> {
+        self.workbook
+            .media_bytes(asset_id)
+            .map_err(|error| error.to_string())
+    }
+
     pub fn move_chart_json(
         &mut self,
         args: &str,
@@ -532,12 +702,38 @@ impl Session {
             serde_json::from_str(args).map_err(|error| format!("bad chart move args: {error}"))?;
         let result = self
             .workbook
-            .move_chart(
+            .move_chart_with_protection(
                 SheetId(args.sheet),
                 &args.chart,
                 args.dx,
                 args.dy,
                 self.calculation_options(now_serial),
+                protected_sheets(args.protected_sheets.as_ref())?,
+            )
+            .map_err(|error| error.to_string())?;
+        self.edit_result(result)
+    }
+
+    pub fn resize_chart_json(
+        &mut self,
+        args: &str,
+        now_serial: Option<f64>,
+    ) -> Result<String, String> {
+        let args: ResizeChartArgs = serde_json::from_str(args)
+            .map_err(|error| format!("bad chart resize args: {error}"))?;
+        let result = self
+            .workbook
+            .resize_chart_with_protection(
+                SheetId(args.sheet),
+                &args.chart,
+                betteroffice_xlsx::ChartResize {
+                    left: args.left,
+                    top: args.top,
+                    right: args.right,
+                    bottom: args.bottom,
+                },
+                self.calculation_options(now_serial),
+                protected_sheets(args.protected_sheets.as_ref())?,
             )
             .map_err(|error| error.to_string())?;
         self.edit_result(result)
@@ -548,34 +744,153 @@ impl Session {
         let viewport: Viewport = serde_json::from_str(viewport_json)
             .map_err(|error| format!("bad viewport: {error}"))?;
         self.workbook
-            .render_png(&viewport)
+            .render_png(
+                betteroffice_xlsx::PngTarget::Viewport {
+                    sheet: self.workbook.active_sheet(),
+                    viewport,
+                },
+                &RenderOptions::default(),
+            )
             .map(|rendered| rendered.bytes)
             .map_err(|error| error.to_string())
     }
 
+    /// Renders `{ sheet, viewport }` or `{ sheet, range }` with `{ scale, maxWidth, maxHeight }`.
     #[cfg(feature = "raster")]
-    pub fn render_range_png(&self, args: &str) -> Result<Vec<u8>, String> {
+    pub fn render_png_target(
+        &self,
+        target_json: &str,
+        options_json: &str,
+    ) -> Result<Vec<u8>, String> {
+        self.render_png_target_with_faces(target_json, options_json, None)
+    }
+
+    /// [`Self::render_png_target`]. `Some` paints with those faces alone, for this export only.
+    #[cfg(feature = "raster")]
+    pub fn render_png_target_with_faces(
+        &self,
+        target_json: &str,
+        options_json: &str,
+        faces: Option<&[betteroffice_xlsx::PngFontFace<'_>]>,
+    ) -> Result<Vec<u8>, String> {
         #[derive(Deserialize)]
-        struct Args {
-            range: Option<String>,
+        #[serde(deny_unknown_fields)]
+        struct ViewportTarget {
+            sheet: u32,
+            viewport: ViewportBox,
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct ViewportBox {
+            x: f32,
+            y: f32,
+            width: f32,
+            height: f32,
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RangeTarget {
+            sheet: u32,
+            range: String,
+        }
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Target {
+            Viewport(ViewportTarget),
+            Range(RangeTarget),
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields, rename_all = "camelCase")]
+        struct Options {
             scale: Option<f32>,
+            max_width: Option<u32>,
+            max_height: Option<u32>,
         }
 
-        let args: Args =
-            serde_json::from_str(args).map_err(|error| format!("bad args: {error}"))?;
-        let range = args
-            .range
-            .map(|range| CellRange::parse_a1(&range).map_err(|error| format!("bad range: {error}")))
-            .transpose()?;
-        self.workbook
-            .render_sheet(
-                self.workbook.active_sheet(),
-                &RenderOptions {
-                    range,
-                    scale: args.scale.unwrap_or(1.0),
-                    ..RenderOptions::default()
+        let target: Target = serde_json::from_str(target_json)
+            .map_err(|_| "target must be { sheet, viewport } or { sheet, range }".to_owned())?;
+        let options: Options =
+            serde_json::from_str(options_json).map_err(|error| format!("bad options: {error}"))?;
+        let count = self.workbook.sheet_count();
+        let sheet = |index: u32| {
+            if (index as usize) < count {
+                Ok(SheetId(index))
+            } else {
+                Err(format!(
+                    "sheet index {index} out of range for {count} sheet(s)"
+                ))
+            }
+        };
+        let options = RenderOptions {
+            scale: options.scale.unwrap_or(1.0),
+            max_width: options.max_width,
+            max_height: options.max_height,
+            ..RenderOptions::default()
+        };
+        if let Target::Range(RangeTarget {
+            sheet: index,
+            range,
+        }) = &target
+            && range == "used"
+        {
+            return self
+                .workbook
+                .render_sheet_with_faces(sheet(*index)?, &options, faces)
+                .map(|rendered| rendered.bytes)
+                .map_err(|error| error.to_string());
+        }
+        let target = match target {
+            Target::Viewport(target) => betteroffice_xlsx::PngTarget::Viewport {
+                sheet: sheet(target.sheet)?,
+                viewport: Viewport {
+                    x: target.viewport.x,
+                    y: target.viewport.y,
+                    width: target.viewport.width,
+                    height: target.viewport.height,
                 },
-            )
+            },
+            Target::Range(target) => betteroffice_xlsx::PngTarget::Range {
+                sheet: sheet(target.sheet)?,
+                range: parse_range(&target.range)?,
+            },
+        };
+        self.workbook
+            .render_png_with_faces(target, &options, faces)
+            .map(|rendered| rendered.bytes)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn png_display_list_json(&self, viewport_json: &str) -> Result<String, String> {
+        let viewport: Viewport = serde_json::from_str(viewport_json)
+            .map_err(|error| format!("bad viewport: {error}"))?;
+        let (display_list, _, _) = self
+            .workbook
+            .png_display_list_for(self.workbook.active_sheet(), &viewport)
+            .map_err(|error| error.to_string())?;
+        serde_json::to_string(&display_list).map_err(|error| error.to_string())
+    }
+
+    pub fn range_png_display_list_json(&self, args: &str) -> Result<String, String> {
+        let options = range_png_options(args)?;
+        let (display_list, _, _) = self
+            .workbook
+            .range_png_display_list_for(self.workbook.active_sheet(), &options)
+            .map_err(|error| error.to_string())?;
+        serde_json::to_string(&display_list).map_err(|error| error.to_string())
+    }
+
+    #[cfg(feature = "raster")]
+    pub fn render_range_png(&self, args: &str) -> Result<Vec<u8>, String> {
+        let options = range_png_options(args)?;
+        let sheet = self.workbook.active_sheet();
+        let rendered = match options.range {
+            Some(range) => self.workbook.render_png(
+                betteroffice_xlsx::PngTarget::Range { sheet, range },
+                &options,
+            ),
+            None => self.workbook.render_sheet(sheet, &options),
+        };
+        rendered
             .map(|rendered| rendered.bytes)
             .map_err(|error| error.to_string())
     }
@@ -622,6 +937,15 @@ impl Session {
             .map_err(|error| error.to_string())
     }
 
+    /// Recalculate every formula with the handle clock (or `now_serial`), counting it as an
+    /// edit so the next save writes the recalculated values, and report the calculation
+    /// status.
+    pub fn recalculate_json(&mut self, now_serial: Option<f64>) -> Result<String, String> {
+        let options = self.calculation_options(now_serial);
+        self.workbook.recalculate_all(options);
+        self.calculation_status_json()
+    }
+
     pub fn calculation_status_json(&self) -> Result<String, String> {
         self.workbook
             .calculation_status_json()
@@ -643,11 +967,12 @@ impl Session {
             serde_json::from_str(args).map_err(|error| format!("bad edit args: {error}"))?;
         let result = self
             .workbook
-            .edit_cell(
+            .edit_cell_with_protection(
                 SheetId(args.sheet),
                 CellRef::new(args.row, args.col),
                 &args.input,
                 self.calculation_options(now_serial),
+                protected_sheets(args.protected_sheets.as_ref())?,
             )
             .map_err(|error| error.to_string())?;
         self.edit_result(result)
@@ -664,11 +989,12 @@ impl Session {
             serde_json::from_str(args).map_err(|error| format!("bad edit args: {error}"))?;
         let (result, profile) = self
             .workbook
-            .edit_cell_profiled(
+            .edit_cell_profiled_with_protection(
                 SheetId(args.sheet),
                 CellRef::new(args.row, args.col),
                 &args.input,
                 self.calculation_options(now_serial),
+                protected_sheets(args.protected_sheets.as_ref())?,
                 now,
             )
             .map_err(|error| error.to_string())?;
@@ -682,36 +1008,60 @@ impl Session {
     ) -> Result<String, String> {
         let args: EditBatchArgs =
             serde_json::from_str(args).map_err(|error| format!("bad edit args: {error}"))?;
-        let edits = args
+        let protection = protected_sheets(args.protected_sheets.as_ref())?;
+        let (edits, copied): (Vec<_>, Vec<_>) = args
             .edits
             .into_iter()
             .map(|edit| {
                 let cell = CellRef::new(edit.row, edit.col);
-                let input = match (edit.copy_from, edit.input.strip_prefix('=')) {
-                    (Some(origin), Some(formula)) => {
-                        if origin.row >= betteroffice_xlsx::MAX_ROWS
-                            || origin.col >= betteroffice_xlsx::MAX_COLS
-                        {
-                            return Err("bad edit args: copy origin is outside the grid".to_owned());
-                        }
-                        let formula = betteroffice_xlsx::translate_formula(formula, origin, cell)
-                            .map_err(|_| "formula exceeds the length limit".to_owned())?;
-                        format!("={formula}")
-                    }
-                    _ => edit.input,
-                };
-                Ok(WorkbookCellInput { cell, input })
+                Ok(match (edit.copy_from, edit.input.strip_prefix('=')) {
+                    (Some(origin), Some(formula)) => (
+                        WorkbookCellInput {
+                            cell,
+                            input: format!("={}", moved_formula(formula, origin, cell)?),
+                        },
+                        true,
+                    ),
+                    _ => (
+                        WorkbookCellInput {
+                            cell,
+                            input: edit.input,
+                        },
+                        false,
+                    ),
+                })
             })
-            .collect::<Result<Vec<_>, String>>()?;
+            .collect::<Result<Vec<_>, String>>()?
+            .into_iter()
+            .unzip();
         let result = self
             .workbook
-            .edit_cells(
+            .edit_pasted_cells_with_protection(
                 SheetId(args.sheet),
                 &edits,
+                &copied,
                 self.calculation_options(now_serial),
+                protection,
             )
             .map_err(|error| error.to_string())?;
         self.edit_result(result)
+    }
+
+    /// Formulas, without their `=`, moved from one cell to another as a paste moves them: per
+    /// item `{ ok: true, formula }`, or `{ ok: false, error }` when the paste would refuse it.
+    pub fn translate_formulas_json(args: &str) -> Result<String, String> {
+        let moves: Vec<FormulaMove> =
+            serde_json::from_str(args).map_err(|error| format!("bad translate args: {error}"))?;
+        let moved: Vec<MovedFormula> = moves
+            .into_iter()
+            .map(
+                |item| match moved_formula(&item.formula, item.from, item.to) {
+                    Ok(formula) => MovedFormula::Moved { ok: true, formula },
+                    Err(error) => MovedFormula::Refused { ok: false, error },
+                },
+            )
+            .collect();
+        serde_json::to_string(&moved).map_err(|error| error.to_string())
     }
 
     pub fn move_range_json(
@@ -727,6 +1077,28 @@ impl Session {
         let result = self
             .workbook
             .move_range(
+                SheetId(args.sheet),
+                source,
+                destination,
+                self.calculation_options(now_serial),
+            )
+            .map_err(|error| error.to_string())?;
+        self.edit_result(result)
+    }
+
+    /// Copies `source` over the filled rectangle `destination` as one undo step.
+    pub fn fill_range_json(
+        &mut self,
+        args: &str,
+        now_serial: Option<f64>,
+    ) -> Result<String, String> {
+        let args: FillRangeArgs =
+            serde_json::from_str(args).map_err(|error| format!("bad fill args: {error}"))?;
+        let source = parse_range(&args.source)?;
+        let destination = parse_range(&args.destination)?;
+        let result = self
+            .workbook
+            .fill_range(
                 SheetId(args.sheet),
                 source,
                 destination,
@@ -835,8 +1207,7 @@ impl Session {
     pub fn range_cells_json(&self, args: &str) -> Result<String, String> {
         let args: RangeArgs =
             serde_json::from_str(args).map_err(|error| format!("bad range args: {error}"))?;
-        let range =
-            CellRange::parse_a1(&args.range).map_err(|error| format!("bad range: {error}"))?;
+        let range = parse_range(&args.range)?;
         let cells = self
             .workbook
             .range_cells_json(SheetId(args.sheet), range)
@@ -854,11 +1225,12 @@ impl Session {
         let range = parse_range(&args.range)?;
         let result = self
             .workbook
-            .patch_range_style(
+            .patch_range_style_with_protection(
                 SheetId(args.sheet),
                 range,
                 args.patch,
                 self.calculation_options(now_serial),
+                protected_sheets(args.protected_sheets.as_ref())?,
             )
             .map_err(|error| error.to_string())?;
         self.edit_result(result)
@@ -874,11 +1246,12 @@ impl Session {
         let range = parse_range(&args.range)?;
         let result = self
             .workbook
-            .set_range_number_format(
+            .set_range_number_format_with_protection(
                 SheetId(args.sheet),
                 range,
                 args.format,
                 self.calculation_options(now_serial),
+                protected_sheets(args.protected_sheets.as_ref())?,
             )
             .map_err(|error| error.to_string())?;
         self.edit_result(result)
@@ -912,11 +1285,12 @@ impl Session {
         let range = parse_range(&args.range)?;
         let result = self
             .workbook
-            .apply_format(
+            .apply_format_with_protection(
                 SheetId(args.sheet),
                 range,
                 args.format,
                 self.calculation_options(now_serial),
+                protected_sheets(args.protected_sheets.as_ref())?,
             )
             .map_err(|error| error.to_string())?;
         self.edit_result(result)
@@ -974,14 +1348,40 @@ impl Session {
                 self.calculation_options(now_serial),
             )
             .map_err(|error| error.to_string())?;
-        serde_json::to_string(&proposal).map_err(|error| error.to_string())
+        serde_json::to_string(&self.listed_proposal(proposal)).map_err(|error| error.to_string())
     }
 
     pub fn list_proposals_json(&self) -> Result<String, String> {
         serde_json::to_string(&ProposalList {
-            proposals: self.workbook.proposals(),
+            proposals: self
+                .workbook
+                .proposals()
+                .iter()
+                .cloned()
+                .map(|proposal| self.listed_proposal(proposal))
+                .collect(),
         })
         .map_err(|error| error.to_string())
+    }
+
+    fn listed_proposal(&self, mut proposal: Proposal) -> ListedProposal {
+        let force_blocked = proposal
+            .edits
+            .iter()
+            .any(|edit| edit.stale == Some(true))
+            .then_some(true);
+        let mut stale_targets = Vec::new();
+        for edit in &mut proposal.edits {
+            if self.workbook.proposal_edit_is_stale(edit) {
+                edit.stale = Some(true);
+                stale_targets.push(CellRef::new(edit.row, edit.col).to_a1());
+            }
+        }
+        ListedProposal {
+            proposal,
+            stale_targets,
+            force_blocked,
+        }
     }
 
     pub fn accept_proposal_json(
@@ -1016,6 +1416,10 @@ impl Session {
 
     pub fn save(&self) -> Result<Vec<u8>, String> {
         self.workbook.save().map_err(|error| error.to_string())
+    }
+
+    pub fn save_warnings_json(&self) -> Result<String, String> {
+        serde_json::to_string(&self.workbook.save_warnings()).map_err(|error| error.to_string())
     }
 
     pub fn document_version(&self) -> String {
@@ -1192,14 +1596,97 @@ fn calculation_options(now_serial: Option<f64>) -> CalculationOptions {
     CalculationOptions { now_serial }
 }
 
+/// An A1 range in either case, as Excel reads one: `a1:b2` is `A1:B2`.
 fn parse_range(range: &str) -> Result<CellRange, String> {
-    CellRange::parse_a1(range).map_err(|error| format!("bad range: {error}"))
+    CellRange::parse_a1(&range.to_ascii_uppercase()).map_err(|error| format!("bad range: {error}"))
+}
+
+/// Keeps a supplied `null` apart from an absent field, which `default` leaves `None`.
+fn supplied<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<serde_json::Value>, D::Error> {
+    serde_json::Value::deserialize(deserializer).map(Some)
+}
+
+/// A direct write's `protectedSheets` option: absent means `refuse`, and a supplied value
+/// other than the strings `refuse` and `allow` is an invalid request.
+fn protected_sheets(value: Option<&serde_json::Value>) -> Result<ProtectedSheets, String> {
+    match value {
+        None => Ok(ProtectedSheets::Refuse),
+        Some(serde_json::Value::String(value)) => ProtectedSheets::parse(value),
+        Some(_) => ProtectedSheets::parse(""),
+    }
+    .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ranges_parse_in_either_case() {
+        assert_eq!(super::parse_range("a1:b2"), super::parse_range("A1:B2"));
+        assert_eq!(super::parse_range("c3"), super::parse_range("C3"));
+        assert!(
+            super::parse_range("not a range")
+                .unwrap_err()
+                .starts_with("bad range: ")
+        );
+    }
+
     use super::*;
     use xlsx_model::{Cell, CellValue, Sheet, Workbook as WorkbookModel};
+
+    #[test]
+    fn protected_sheets_supplied_values_other_than_refuse_or_allow_are_invalid_requests() {
+        let mut session = Session::open(&sample_xlsx(), None).unwrap();
+        let invalid = Err("malformed request: protectedSheets must be refuse or allow".to_owned());
+        for value in [
+            "null",
+            "5",
+            "true",
+            "\"Allow\"",
+            "\"\"",
+            "{}",
+            "[\"allow\"]",
+        ] {
+            let cell = format!(
+                r#"{{"sheet":0,"row":0,"col":0,"input":"written","protectedSheets":{value}}}"#
+            );
+            let cells = format!(
+                r#"{{"sheet":0,"edits":[{{"row":0,"col":0,"input":"written"}}],"protectedSheets":{value}}}"#
+            );
+            let style = format!(
+                r#"{{"sheet":0,"range":"A1","patch":{{"bold":true}},"protectedSheets":{value}}}"#
+            );
+            let format = format!(
+                r#"{{"sheet":0,"range":"A1","format":{{"type":"percent"}},"protectedSheets":{value}}}"#
+            );
+            assert_eq!(session.edit_cell_json(&cell, None), invalid, "{cell}");
+            assert_eq!(session.edit_cells_json(&cells, None), invalid, "{cells}");
+            assert_eq!(
+                session.patch_range_style_json(&style, None),
+                invalid,
+                "{style}"
+            );
+            assert_eq!(
+                session.set_range_number_format_json(&format, None),
+                invalid,
+                "{format}"
+            );
+        }
+        let read = || -> serde_json::Value {
+            serde_json::from_str(&session.cell_json(r#"{"sheet":0,"row":0,"col":0}"#).unwrap())
+                .unwrap()
+        };
+        assert_eq!(read()["input"], "Hello");
+        for value in [
+            "",
+            r#","protectedSheets":"refuse""#,
+            r#","protectedSheets":"allow""#,
+        ] {
+            let edit = format!(r#"{{"sheet":0,"row":0,"col":0,"input":"written"{value}}}"#);
+            assert!(session.edit_cell_json(&edit, None).is_ok(), "{edit}");
+        }
+    }
 
     const VIEWPORT: &str = r#"{"x":0,"y":0,"width":300,"height":120}"#;
 
@@ -1339,6 +1826,24 @@ mod tests {
             peer.workbook.save().unwrap(),
             worker.workbook.save().unwrap()
         );
+    }
+
+    #[test]
+    fn open_recalculating_stale_keeps_cached_results_under_an_optional_context() {
+        let bytes = formula_xlsx();
+        let b1 = |session: &Session| {
+            session.workbook.model().sheets[0]
+                .cell(CellRef::parse_a1("B1").unwrap())
+                .map(|cell| cell.value.clone())
+        };
+        let recalculated = Session::open(&bytes, None).unwrap();
+        assert_eq!(b1(&recalculated), Some(CellValue::Number { value: 15.0 }));
+        for context in [None, Some(r#"{"nowSerial":45000.75,"randSeed":42}"#)] {
+            let session = Session::open_recalculating_stale(&bytes, None, context).unwrap();
+            assert_eq!(b1(&session), Some(CellValue::Number { value: 999.0 }));
+            assert_eq!(session.calculation_context.is_some(), context.is_some());
+        }
+        assert!(Session::open_recalculating_stale(&bytes, None, Some("{}")).is_err());
     }
 
     #[test]
@@ -1673,7 +2178,7 @@ mod tests {
         assert!(position["y"].as_f64().unwrap() > 0.0);
         assert_eq!(
             session.calculation_status_json().unwrap(),
-            r#"{"limitedCells":[]}"#
+            r#"{"limitedCells":[],"unevaluatedCells":[]}"#
         );
         session.set_active_sheet(1).unwrap();
         assert!(
@@ -2000,6 +2505,68 @@ mod tests {
                 .is_err()
         );
         assert_eq!(session.workbook.history_state().undo_depth, before + 1);
+    }
+
+    #[test]
+    fn fill_range_json_commits_one_undoable_formula_aware_edit() {
+        let mut session = Session::open(&sample_xlsx(), None).unwrap();
+        session
+            .edit_cells_json(
+                r#"{"sheet":0,"edits":[{"row":0,"col":2,"input":"5"},{"row":1,"col":2,"input":"=C1+$C$1"}]}"#,
+                None,
+            )
+            .unwrap();
+        let before = session.workbook.history_state().undo_depth;
+        let result = session
+            .fill_range_json(
+                r#"{"sheet":0,"source":"C1:C2","destination":"C1:C4"}"#,
+                None,
+            )
+            .unwrap();
+        assert!(result.contains(r#""applied":true"#));
+        assert_eq!(session.workbook.history_state().undo_depth, before + 1);
+        assert_eq!(
+            session
+                .workbook
+                .cell(SheetId(0), CellRef::new(2, 2))
+                .unwrap()
+                .input,
+            "5"
+        );
+        assert_eq!(
+            session
+                .workbook
+                .cell(SheetId(0), CellRef::new(3, 2))
+                .unwrap()
+                .input,
+            "=C3+$C$1"
+        );
+        assert!(
+            session
+                .fill_range_json(
+                    r#"{"sheet":0,"source":"C1:C2","destination":"C2:C4"}"#,
+                    None,
+                )
+                .is_err()
+        );
+        assert_eq!(session.workbook.history_state().undo_depth, before + 1);
+        session.undo_json(None).unwrap();
+        assert_eq!(
+            session
+                .workbook
+                .cell(SheetId(0), CellRef::new(3, 2))
+                .unwrap()
+                .input,
+            ""
+        );
+        assert_eq!(
+            session
+                .workbook
+                .cell(SheetId(0), CellRef::new(1, 2))
+                .unwrap()
+                .input,
+            "=C1+$C$1"
+        );
     }
 
     #[test]
@@ -2363,7 +2930,7 @@ mod tests {
         assert!(result.contains(r#""limitedCells":["A3"]"#), "{result}");
         assert_eq!(
             session.calculation_status_json().unwrap(),
-            r#"{"limitedCells":["A3"]}"#
+            r#"{"limitedCells":["A3"],"unevaluatedCells":[]}"#
         );
     }
 
@@ -2392,7 +2959,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             session.calculation_status_json().unwrap(),
-            r#"{"limitedCells":[]}"#
+            r#"{"limitedCells":[],"unevaluatedCells":[]}"#
         );
     }
 
@@ -2466,6 +3033,53 @@ mod tests {
                 .unwrap()
                 .contains(r#""input":"=SUM(A1:A2)""#)
         );
+    }
+
+    #[test]
+    fn track_moves_are_refused_before_the_batch_applies() {
+        let mut session = Session::open(&sample_xlsx(), None).unwrap();
+        let saved = session.save().unwrap();
+        let set = r#"{"type":"setCell","sheet":0,"at":{"row":0,"col":2},"cell":{"value":{"kind":"text","value":"Probe"}}}"#;
+        for mv in [
+            r#"{"type":"moveCols","sheet":0,"col":0,"count":1,"before":2}"#,
+            r#"{"type":"moveRows","sheet":0,"row":0,"count":1,"before":2}"#,
+        ] {
+            let transaction = format!(r#"{{"ops":[{set},{mv}]}}"#);
+            for result in [
+                session.apply_ops_json(&transaction, None),
+                session.apply_ops_profiled_json(&transaction, None, &mut || 0.0),
+            ] {
+                assert_eq!(
+                    result.unwrap_err(),
+                    "cannot move sheet 0 tracks: moving rows or columns is not supported yet"
+                );
+                assert!(
+                    !session
+                        .cell_json(r#"{"sheet":0,"row":0,"col":2}"#)
+                        .unwrap()
+                        .contains(r#""input":"Probe""#)
+                );
+            }
+            assert!(
+                session
+                    .cell_json(r#"{"sheet":0,"row":0,"col":0}"#)
+                    .unwrap()
+                    .contains(r#""input":"Hello""#)
+            );
+            assert!(
+                session
+                    .cell_json(r#"{"sheet":0,"row":1,"col":1}"#)
+                    .unwrap()
+                    .contains(r#""input":"42""#)
+            );
+            assert!(
+                session
+                    .undo_json(None)
+                    .unwrap()
+                    .contains(r#""applied":false"#)
+            );
+            assert_eq!(session.save().unwrap(), saved);
+        }
     }
 
     #[test]
@@ -2548,9 +3162,21 @@ mod tests {
             .unwrap();
         assert!(proposal.contains(r#""id":"p1""#));
         assert!(proposal.contains(r#""cells":["#));
+        assert_eq!(json(&proposal)["staleTargets"], serde_json::json!([]));
+        assert_eq!(
+            json(&session.list_proposals_json().unwrap())["proposals"][0],
+            json(&proposal)
+        );
         session
             .edit_cell_json(r#"{"sheet":0,"row":0,"col":0,"input":"moved"}"#, None)
             .unwrap();
+        let listed = json(&session.list_proposals_json().unwrap());
+        assert_eq!(listed["proposals"][0]["cells"][0]["stale"], true);
+        assert_eq!(
+            listed["proposals"][0]["staleTargets"],
+            serde_json::json!(["A1"])
+        );
+        assert!(listed["proposals"][0].get("forceBlocked").is_none());
         let error: serde_json::Value = serde_json::from_str(
             &session
                 .accept_proposal_json(r#"{"id":"p1"}"#, None)
@@ -2570,6 +3196,55 @@ mod tests {
                 .unwrap()
                 .contains(r#""proposalId":"p1""#)
         );
+    }
+
+    #[test]
+    fn structural_proposal_staleness_blocks_force_on_the_wire_until_undo() {
+        for (input, operation) in [
+            (
+                "42",
+                r#"{"ops":[{"type":"deleteRows","sheet":0,"at":0,"count":1}]}"#,
+            ),
+            (
+                "=SUM(Table1[Amount])",
+                r#"{"ops":[{"type":"insertRows","sheet":0,"at":0,"count":1}]}"#,
+            ),
+        ] {
+            let mut session = Session::open(&sample_xlsx(), None).unwrap();
+            session
+                .propose_json(
+                    &serde_json::json!({
+                        "agentId": "agent",
+                        "edits": [{ "sheet": 0, "row": 0, "col": 0, "input": input }],
+                    })
+                    .to_string(),
+                    None,
+                )
+                .unwrap();
+            let listed = json(&session.list_proposals_json().unwrap());
+            assert!(listed["proposals"][0].get("forceBlocked").is_none());
+            session.apply_ops_json(operation, None).unwrap();
+            let listed = json(&session.list_proposals_json().unwrap());
+            assert_eq!(listed["proposals"][0]["forceBlocked"], true);
+            assert_eq!(listed["proposals"][0]["cells"][0]["stale"], true);
+            assert_eq!(
+                listed["proposals"][0]["staleTargets"],
+                serde_json::json!([listed["proposals"][0]["cells"][0]["a1"]])
+            );
+            assert!(
+                session
+                    .accept_proposal_json(r#"{"id":"p1","force":true}"#, None)
+                    .is_err()
+            );
+            session.undo_json(None).unwrap();
+            let listed = json(&session.list_proposals_json().unwrap());
+            assert!(listed["proposals"][0].get("forceBlocked").is_none());
+            assert!(listed["proposals"][0]["cells"][0].get("stale").is_none());
+            assert_eq!(
+                listed["proposals"][0]["staleTargets"],
+                serde_json::json!([])
+            );
+        }
     }
 
     #[test]
@@ -2749,9 +3424,12 @@ mod tests {
             left.encode_state_as_update(),
             right.encode_state_as_update()
         );
-        assert_eq!(
-            left.encode_diff(&right.encode_state_vector()).unwrap(),
-            [0, 0]
+        let unchanged = left.encode_diff(&right.encode_state_vector()).unwrap();
+        assert!(
+            right
+                .apply_update_json(&unchanged, None)
+                .unwrap()
+                .contains(r#""applied":false"#)
         );
 
         left.edit_cell_json(r#"{"sheet":0,"row":0,"col":0,"input":"left"}"#, None)
@@ -2836,6 +3514,46 @@ mod tests {
         assert_eq!(target.encode_state_as_update(), target_state);
     }
 
+    #[test]
+    fn png_display_lists_validate_viewports_ranges_and_scales() {
+        let session = Session::open(&sample_xlsx(), None).unwrap();
+        let viewport = r#"{"x":13.37,"y":21.125,"width":300.3,"height":180.7}"#;
+        let list: serde_json::Value =
+            serde_json::from_str(&session.png_display_list_json(viewport).unwrap()).unwrap();
+        assert!(!list["commands"].as_array().unwrap().is_empty());
+        let list: serde_json::Value = serde_json::from_str(
+            &session
+                .range_png_display_list_json(
+                    r#"{"range":"A1:B2","scale":1.3,"maxWidth":100,"maxHeight":50}"#,
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(list["width"].as_f64().unwrap() <= 100.0001);
+        assert!(list["height"].as_f64().unwrap() <= 50.0001);
+        for viewport in [
+            "not json",
+            r#"{"x":0,"y":0,"width":-1,"height":120}"#,
+            r#"{"x":0,"y":0,"width":17000,"height":120}"#,
+        ] {
+            let error = session.png_display_list_json(viewport).unwrap_err();
+            assert!(!error.is_empty());
+            #[cfg(feature = "raster")]
+            assert_eq!(error, session.render_png(viewport).unwrap_err());
+        }
+        for args in [
+            "not json",
+            r#"{"range":"nope"}"#,
+            r#"{"range":"A1:B2","scale":0}"#,
+            r#"{"range":"A1:B2","scale":-1}"#,
+        ] {
+            let error = session.range_png_display_list_json(args).unwrap_err();
+            assert!(!error.is_empty());
+            #[cfg(feature = "raster")]
+            assert_eq!(error, session.render_range_png(args).unwrap_err());
+        }
+    }
+
     #[cfg(feature = "raster")]
     #[test]
     fn raster_methods_produce_png() {
@@ -2855,5 +3573,378 @@ mod tests {
                 .is_err()
         );
         assert!(session.render_range_png(r#"{"range":"nope"}"#).is_err());
+    }
+
+    /// 2000 rows of `row` in A:J, every third row painted red by a rule that
+    /// sums its whole column for each cell.
+    fn costly_conditional_xlsx() -> Vec<u8> {
+        let rows: String = (1..=2000)
+            .map(|row| {
+                let cells: String = "ABCDEFGHIJ"
+                    .chars()
+                    .map(|col| format!(r#"<c r="{col}{row}"><v>{row}</v></c>"#))
+                    .collect();
+                format!(r#"<row r="{row}">{cells}</row>"#)
+            })
+            .collect();
+        let parts: Vec<(String, Vec<u8>)> = vec![
+            ("xl/workbook.xml".into(), br#"<workbook><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#.to_vec()),
+            ("xl/_rels/workbook.xml.rels".into(), br#"<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>"#.to_vec()),
+            ("xl/worksheets/sheet1.xml".into(), format!(r#"<worksheet><sheetData>{rows}</sheetData><conditionalFormatting sqref="A1:J2000"><cfRule type="expression" dxfId="0" priority="1"><formula>AND(MOD(A1,3)=0,SUM(A$1:A$2000)&gt;0)</formula></cfRule></conditionalFormatting></worksheet>"#).into_bytes()),
+            ("xl/styles.xml".into(), br#"<styleSheet><cellXfs count="1"><xf/></cellXfs><dxfs count="1"><dxf><fill><patternFill><bgColor rgb="FFFFC7CE"/></patternFill></fill></dxf></dxfs></styleSheet>"#.to_vec()),
+        ];
+        ooxml_opc::rezip_parts(&parts).unwrap()
+    }
+
+    fn red_fills(list: &serde_json::Value) -> usize {
+        list["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|command| command["op"] == "fillRect" && command["color"] == "#ffc7ce")
+            .count()
+    }
+
+    #[test]
+    fn screen_frames_settle_conditional_formats_and_exports_never_wait() {
+        let session = Session::open(&costly_conditional_xlsx(), None).unwrap();
+        let viewport = r#"{"x":0,"y":0,"width":640,"height":600}"#;
+        let frame = || -> serde_json::Value {
+            serde_json::from_str(&session.display_list_json(viewport).unwrap()).unwrap()
+        };
+        let first = frame();
+        assert!(
+            first["conditionalPending"]
+                .as_u64()
+                .is_some_and(|pending| pending > 0)
+        );
+        let (settled, frames) = (2..=10)
+            .map(|count| (frame(), count))
+            .find(|(list, _)| list.get("conditionalPending").is_none())
+            .expect("conditional formats settle within 10 frames");
+        assert!(frames > 1);
+        assert!(red_fills(&settled) > red_fills(&first));
+        let export: serde_json::Value =
+            serde_json::from_str(&session.png_display_list_json(viewport).unwrap()).unwrap();
+        assert!(export.get("conditionalPending").is_none());
+        assert_eq!(export["commands"], settled["commands"]);
+
+        let fresh = Session::open(&costly_conditional_xlsx(), None).unwrap();
+        let range: serde_json::Value = serde_json::from_str(
+            &fresh
+                .range_png_display_list_json(r#"{"range":"A1:J30"}"#)
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(range.get("conditionalPending").is_none());
+        assert_eq!(red_fills(&range), 100);
+        let fresh = Session::open(&costly_conditional_xlsx(), None).unwrap();
+        let export: serde_json::Value =
+            serde_json::from_str(&fresh.png_display_list_json(viewport).unwrap()).unwrap();
+        assert!(export.get("conditionalPending").is_none());
+        assert_eq!(export["commands"], settled["commands"]);
+    }
+
+    const RULED_VIEW: &str = r#"{"x":0,"y":0,"width":640,"height":800}"#;
+
+    /// 30 rows of `row + col` in A:D, zero in the 1-based `(row, col)` cells of
+    /// `zeros`, each cell above zero painted red by its rule.
+    fn positive_xlsx(zeros: &[(u32, u32)]) -> Vec<u8> {
+        let rows: String = (1..=30)
+            .map(|row| {
+                let cells: String = (0..4).map(|col| positive_cell(row, col, zeros)).collect();
+                format!(r#"<row r="{row}">{cells}</row>"#)
+            })
+            .collect();
+        let parts: Vec<(String, Vec<u8>)> = vec![
+            ("xl/workbook.xml".into(), br#"<workbook><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#.to_vec()),
+            ("xl/_rels/workbook.xml.rels".into(), br#"<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>"#.to_vec()),
+            ("xl/worksheets/sheet1.xml".into(), format!(r#"<worksheet><sheetData>{rows}</sheetData><conditionalFormatting sqref="A1:D30"><cfRule type="cellIs" dxfId="0" priority="1" operator="greaterThan"><formula>0</formula></cfRule></conditionalFormatting></worksheet>"#).into_bytes()),
+            ("xl/styles.xml".into(), br#"<styleSheet><cellXfs count="1"><xf/></cellXfs><dxfs count="1"><dxf><fill><patternFill><bgColor rgb="FFFFC7CE"/></patternFill></fill></dxf></dxfs></styleSheet>"#.to_vec()),
+        ];
+        ooxml_opc::rezip_parts(&parts).unwrap()
+    }
+
+    fn positive_cell(row: u32, col: u32, zeros: &[(u32, u32)]) -> String {
+        let letter = char::from(b'A' + col as u8);
+        let value = if zeros.contains(&(row, col)) {
+            0
+        } else {
+            row + col
+        };
+        format!(r#"<c r="{letter}{row}"><v>{value}</v></c>"#)
+    }
+
+    fn pending(list: &serde_json::Value) -> u64 {
+        list["conditionalPending"].as_u64().unwrap_or(0)
+    }
+
+    /// Every fill a frame paints, as its rectangle and colour, sorted.
+    fn fills(list: &serde_json::Value) -> Vec<String> {
+        let mut fills: Vec<String> = list["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|command| command["op"] == "fillRect")
+            .map(|command| {
+                format!(
+                    "{} {} {} {} {}",
+                    command["x"], command["y"], command["w"], command["h"], command["color"]
+                )
+            })
+            .collect();
+        fills.sort();
+        fills
+    }
+
+    /// A screen frame of the whole ruled area with the frame budget alone,
+    /// which decides all of its cells.
+    fn settled_frame(session: &Session) -> serde_json::Value {
+        let frame: serde_json::Value =
+            serde_json::from_str(&session.display_list_json(RULED_VIEW).unwrap()).unwrap();
+        assert_eq!(pending(&frame), 0);
+        frame
+    }
+
+    /// A screen frame under a clock that moves a second on every reading, so
+    /// the frame stops at its first clock check.
+    fn stopped_frame(session: &Session) -> serde_json::Value {
+        let readings = std::cell::Cell::new(0.0);
+        let clock = || {
+            readings.set(readings.get() + 1000.0);
+            readings.get()
+        };
+        let json = session
+            .display_list_timed_json(None, RULED_VIEW, &clock)
+            .unwrap();
+        serde_json::from_str(&json).unwrap()
+    }
+
+    /// Stopped frames until one decides every cell, each passed to `check`,
+    /// and how many that took; fails past 40 frames.
+    fn settle_stopped(
+        session: &Session,
+        check: impl Fn(&serde_json::Value),
+    ) -> (serde_json::Value, usize) {
+        for count in 1..=40 {
+            let frame = stopped_frame(session);
+            check(&frame);
+            if pending(&frame) == 0 {
+                return (frame, count);
+            }
+        }
+        panic!("conditional formats still pending after 40 frames");
+    }
+
+    /// The call a typed edit of D30 reaches in the editor.
+    fn type_into_d30(session: &mut Session, input: &str) {
+        let args = format!(r#"{{"sheet":0,"row":29,"col":3,"input":"{input}"}}"#);
+        session.edit_cell_json(&args, None).unwrap();
+    }
+
+    #[test]
+    fn a_typed_edit_that_changes_no_result_keeps_every_fill_until_decided() {
+        let mut session = Session::open(&positive_xlsx(&[]), None).unwrap();
+        let settled = settled_frame(&session);
+        assert_eq!(red_fills(&settled), 120);
+        let before = fills(&settled);
+        type_into_d30(&mut session, "7");
+        let stopped = stopped_frame(&session);
+        assert!(pending(&stopped) > 0);
+        assert_eq!(fills(&stopped), before);
+        let (after, frames) = settle_stopped(&session, |frame| assert_eq!(fills(frame), before));
+        assert!(frames > 1);
+        assert_eq!(fills(&after), before);
+    }
+
+    #[test]
+    fn a_typed_edit_that_changes_a_result_shows_its_previous_fill_until_decided() {
+        let mut session = Session::open(&positive_xlsx(&[]), None).unwrap();
+        let before = fills(&settled_frame(&session));
+        type_into_d30(&mut session, "0");
+        let stopped = stopped_frame(&session);
+        assert!(pending(&stopped) > 0);
+        assert_eq!(fills(&stopped), before);
+        let (after, _) = settle_stopped(&session, |_| {});
+        let reference = Session::open(&positive_xlsx(&[(30, 3)]), None).unwrap();
+        let expected = settled_frame(&reference);
+        assert_eq!(red_fills(&expected), 119);
+        assert_eq!(fills(&after), fills(&expected));
+    }
+
+    #[test]
+    fn clearing_one_cell_with_the_delete_key_shows_the_previous_fills_until_decided() {
+        let mut session = Session::open(&positive_xlsx(&[]), None).unwrap();
+        let before = fills(&settled_frame(&session));
+        let clear = r#"{"sheet":0,"edits":[{"row":29,"col":3,"input":""}]}"#;
+        session.edit_cells_json(clear, None).unwrap();
+        let stopped = stopped_frame(&session);
+        assert!(pending(&stopped) > 0);
+        assert_eq!(fills(&stopped), before);
+        let (after, _) = settle_stopped(&session, |_| {});
+        let reference = Session::open(&positive_xlsx(&[(30, 3)]), None).unwrap();
+        assert_eq!(fills(&after), fills(&settled_frame(&reference)));
+    }
+
+    const CLEAR_D30: &str = r#"{"sheet":0,"edits":[{"row":29,"col":3,"input":""}]}"#;
+    const CLEAR_D28_D30: &str = r#"{"sheet":0,"edits":[{"row":27,"col":3,"input":""},{"row":28,"col":3,"input":""},{"row":29,"col":3,"input":""}]}"#;
+    const PASTE_C30_D30: &str =
+        r#"{"sheet":0,"edits":[{"row":29,"col":2,"input":"5"},{"row":29,"col":3,"input":"0"}]}"#;
+
+    /// Typing 0 into D30, then the batches the editor sends to clear D30, to
+    /// clear D28:D30 and to paste values over C30:D30.
+    const VALUE_EDITS: [Option<&str>; 4] = [
+        None,
+        Some(CLEAR_D30),
+        Some(CLEAR_D28_D30),
+        Some(PASTE_C30_D30),
+    ];
+
+    fn write_values(session: &mut Session, edit: Option<&str>) {
+        let result = match edit {
+            Some(batch) => session.edit_cells_json(batch, None),
+            None => session.edit_cell_json(r#"{"sheet":0,"row":29,"col":3,"input":"0"}"#, None),
+        }
+        .unwrap();
+        assert_applied(&result);
+    }
+
+    fn assert_applied(result: &str) {
+        assert!(result.contains(r#""applied":true"#), "{result}");
+    }
+
+    /// Asserts that a screen frame decides every ruled cell and paints all 120
+    /// red, so a later frame with fewer fills shows dropped results.
+    fn assert_all_fills_settled(session: &Session) {
+        assert_eq!(red_fills(&settled_frame(session)), 120);
+    }
+
+    /// Asserts that a frame stopped right after an edit paints the fills of
+    /// `before`, and that stopped frames then settle to the fills of a one-shot
+    /// render, `red` of them red.
+    fn assert_previous_fills_kept(session: &Session, before: &[String], red: usize) {
+        let stopped = stopped_frame(session);
+        assert!(pending(&stopped) > 0);
+        assert_eq!(fills(&stopped), before);
+        let (after, _) = settle_stopped(session, |_| {});
+        let one_shot: serde_json::Value =
+            serde_json::from_str(&session.png_display_list_json(RULED_VIEW).unwrap()).unwrap();
+        assert_eq!(red_fills(&one_shot), red);
+        assert_eq!(fills(&after), fills(&one_shot));
+    }
+
+    /// Asserts that a frame stopped right after a change paints only the cells
+    /// it decided before its first clock check, eight at most.
+    fn assert_previous_fills_dropped(session: &Session, change: &str) {
+        let stopped = stopped_frame(session);
+        assert!(pending(&stopped) > 0, "{change}");
+        let red = red_fills(&stopped);
+        assert!(red <= 8, "{change}: {red} red fills");
+    }
+
+    #[test]
+    fn clearing_several_cells_shows_the_previous_fills_until_decided() {
+        let mut session = Session::open(&positive_xlsx(&[]), None).unwrap();
+        let before = fills(&settled_frame(&session));
+        session.edit_cells_json(CLEAR_D28_D30, None).unwrap();
+        assert_previous_fills_kept(&session, &before, 117);
+    }
+
+    #[test]
+    fn pasting_values_over_a_range_shows_the_previous_fills_until_decided() {
+        let mut session = Session::open(&positive_xlsx(&[]), None).unwrap();
+        let before = fills(&settled_frame(&session));
+        session.edit_cells_json(PASTE_C30_D30, None).unwrap();
+        assert_previous_fills_kept(&session, &before, 119);
+    }
+
+    /// The write a descending sort of A1:D30 by column A sends for a cell.
+    fn sorted_write(row: u32, col: u32) -> String {
+        let value = 30 - row + col;
+        format!(
+            r#"{{"type":"setCell","sheet":0,"at":{{"row":{row},"col":{col}}},"cell":{{"value":{{"kind":"number","value":{value}}}}}}}"#
+        )
+    }
+
+    #[test]
+    fn a_sort_paints_no_previous_fill_until_decided() {
+        let mut session = Session::open(&positive_xlsx(&[]), None).unwrap();
+        assert_all_fills_settled(&session);
+        let format = session
+            .capture_format_json(r#"{"sheet":0,"range":"A1:D30"}"#)
+            .unwrap();
+        let mut ops: Vec<String> = (0..30u32)
+            .flat_map(|row| (0..4u32).map(move |col| sorted_write(row, col)))
+            .collect();
+        ops.push(format!(
+            r#"{{"type":"applyRangeFormat","sheet":0,"range":{{"start":{{"row":0,"col":0}},"end":{{"row":29,"col":3}}}},"format":{format}}}"#
+        ));
+        let sorted = session
+            .apply_ops_json(&format!(r#"{{"ops":[{}]}}"#, ops.join(",")), None)
+            .unwrap();
+        assert_applied(&sorted);
+        assert_previous_fills_dropped(&session, "sort");
+    }
+
+    #[test]
+    fn an_inserted_row_paints_no_previous_fill_until_decided() {
+        let mut session = Session::open(&positive_xlsx(&[]), None).unwrap();
+        assert_all_fills_settled(&session);
+        let inserted = session
+            .apply_ops_json(
+                r#"{"ops":[{"type":"insertRows","sheet":0,"at":0,"count":1}]}"#,
+                None,
+            )
+            .unwrap();
+        assert_applied(&inserted);
+        assert_previous_fills_dropped(&session, "insert row");
+    }
+
+    #[test]
+    fn a_paste_that_carries_a_style_paints_no_previous_fill_until_decided() {
+        let mut session = Session::open(&positive_xlsx(&[]), None).unwrap();
+        assert_all_fills_settled(&session);
+        let paste = r#"{"ops":[{"type":"setCell","sheet":0,"at":{"row":29,"col":3},"cell":{"value":{"kind":"number","value":0}}},{"type":"patchRangeStyle","sheet":0,"range":{"start":{"row":29,"col":3},"end":{"row":29,"col":3}},"patch":{"bold":true}}]}"#;
+        assert_applied(&session.apply_ops_json(paste, None).unwrap());
+        assert_previous_fills_dropped(&session, "styled paste");
+    }
+
+    #[test]
+    fn a_fill_paints_no_previous_fill_until_decided() {
+        let mut session = Session::open(&positive_xlsx(&[]), None).unwrap();
+        assert_all_fills_settled(&session);
+        let filled = session
+            .fill_range_json(
+                r#"{"sheet":0,"source":"C29:D29","destination":"C29:D30"}"#,
+                None,
+            )
+            .unwrap();
+        assert_applied(&filled);
+        assert_previous_fills_dropped(&session, "fill");
+    }
+
+    #[test]
+    fn undoing_or_redoing_a_value_edit_paints_no_previous_fill_until_decided() {
+        for edit in VALUE_EDITS {
+            let mut session = Session::open(&positive_xlsx(&[]), None).unwrap();
+            assert_all_fills_settled(&session);
+            write_values(&mut session, edit);
+            settle_stopped(&session, |_| {});
+            assert_applied(&session.undo_json(None).unwrap());
+            assert_previous_fills_dropped(&session, &format!("undo {edit:?}"));
+            assert_all_fills_settled(&session);
+            assert_applied(&session.redo_json(None).unwrap());
+            assert_previous_fills_dropped(&session, &format!("redo {edit:?}"));
+        }
+    }
+
+    #[test]
+    fn value_edits_in_a_collaborative_session_paint_no_previous_fill_until_decided() {
+        for edit in VALUE_EDITS {
+            let mut session = Session::open_collaborative(&positive_xlsx(&[]), 721, None).unwrap();
+            assert_all_fills_settled(&session);
+            write_values(&mut session, edit);
+            assert_previous_fills_dropped(&session, &format!("{edit:?}"));
+        }
     }
 }

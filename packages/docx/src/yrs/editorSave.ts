@@ -8,8 +8,11 @@ import type { Document, Endnote, Footnote, HeaderFooter, Section } from '../type
 import { editorSaveKeys } from './editorSaveKeys';
 import type { YrsSession } from './index';
 import { dirtyProjectionStory } from './dirtyProjectionStories';
-import { captureSessionSave, writeSessionSave, type DocxSessionSave } from './saveYrsDocx';
+import { checkedSaveModel, type SaveModel } from './commentRangeCheck';
+import { crossingWrittenWhole, withCrossingFallback } from './crossStoryComments';
+import { captureSessionSave, writeSessionSave, type DocxSavedDocument, type DocxSessionSave } from './saveYrsDocx';
 import { sessionSourcePackage } from './sessionInternals';
+import { carryGate, refuseUnavailableTables } from './tableUnavailable';
 import { ownProjectedParagraphs, yrsToDocument } from './yrsToDocument';
 
 export {
@@ -27,6 +30,9 @@ export interface EditorSaveRecord {
   full: boolean;
   /** The bytes the last save wrote from the source package. */
   saved?: ArrayBuffer;
+  /** Paragraphs the last save wrote as their source bytes, see `DocxSavedDocument.keptUnchanged`. */
+  keptUnchanged?: DocxSavedDocument['keptUnchanged'];
+  structureDropped?: DocxSavedDocument['structureDropped'];
 }
 
 const records = new WeakMap<YrsSession, EditorSaveRecord>();
@@ -145,6 +151,7 @@ async function writeEditorDocument(
   record?: EditorSaveRecord,
   yieldSave?: () => Promise<void>
 ): Promise<ArrayBuffer> {
+  if (session) refuseUnavailableTables(session, document);
   const original = document.originalBuffer;
   if (!original) return createDocx(document);
   if (!session || !capture) return repackDocx(document);
@@ -155,12 +162,13 @@ async function writeEditorDocument(
   if (
     !source ||
     keys.metadata !== source.keys.metadata ||
-    source.keys.commentIds.some((id) => !new Set(keys.commentIds).has(id)) ||
     saves.full ||
     (original !== saves.saved && !sameBytes(original, source.buffer))
   ) {
     saves.full = true;
-    const { bytes } = await writeSessionSave(session, document, capture, original, {}, () => false, false, () => false, yieldSave);
+    const { bytes, keptUnchanged, structureDropped } = await writeSessionSave(session, document, capture, original, {}, () => false, false, () => false, yieldSave);
+    saves.keptUnchanged = keptUnchanged;
+    saves.structureDropped = structureDropped;
     return bytes.buffer as ArrayBuffer;
   }
   const commentsChanged = keys.comments !== source.keys.comments;
@@ -170,7 +178,7 @@ async function writeEditorDocument(
   const patches = (part: string): boolean =>
     (!commentsChanged || part !== 'word/comments.xml') &&
     (!injectedMarkers || (bodyPart !== undefined && part !== bodyPart));
-  const { bytes } = await writeSessionSave(
+  const { bytes, keptUnchanged, structureDropped } = await writeSessionSave(
     session,
     document,
     capture,
@@ -183,7 +191,22 @@ async function writeEditorDocument(
   );
   const saved = bytes.buffer as ArrayBuffer;
   saves.saved = saved;
+  saves.keptUnchanged = keptUnchanged;
+  saves.structureDropped = structureDropped;
   return saved;
+}
+
+/**
+ * Paragraphs the session's last editor save wrote as their source bytes although their run
+ * formatting changed, because writing them would have dropped structure; absent when none were.
+ */
+export function editorSaveKeptUnchanged(session: YrsSession): DocxSavedDocument['keptUnchanged'] {
+  return records.get(session)?.keptUnchanged;
+}
+
+/** Story parts the session's last editor save wrote whole with less structure, see `DocxSavedDocument.structureDropped`. */
+export function editorSaveStructureDropped(session: YrsSession): DocxSavedDocument['structureDropped'] {
+  return records.get(session)?.structureDropped;
 }
 
 function sameBytes(a: ArrayBuffer, b: ArrayBuffer): boolean {
@@ -202,13 +225,20 @@ function sameBytes(a: ArrayBuffer, b: ArrayBuffer): boolean {
  * in projected again with them: the editor projects its host's comments.
  * With replies, its body paragraphs are its own for their range markers.
  */
-function withSavedComments(document: Document, session: YrsSession, comments: Comment[], record?: EditorSaveRecord): Document {
+function withSavedComments(
+  document: Document,
+  session: YrsSession,
+  comments: Comment[],
+  record?: EditorSaveRecord,
+  fallback: ReadonlyMap<number, string> = new Map()
+): SaveModel {
   const commentIds = record?.commentIds;
   const base: Document = {
     ...document,
     package: { ...document.package, document: { ...document.package.document, comments } },
   };
-  const storyIds = new Set<string>();
+  carryGate(document, base);
+  const storyIds = new Set<string>(fallback.values());
   for (const comment of comments) {
     try {
       for (const anchor of session.resolveComment(commentIds?.get(comment.id) ?? String(comment.id))) {
@@ -219,20 +249,25 @@ function withSavedComments(document: Document, session: YrsSession, comments: Co
     }
   }
   const saved = storyIds.size > 0
-    ? yrsToDocument(session, base, {
+    ? withCrossingFallback(session, new Set(fallback.keys()), () => yrsToDocument(session, base, {
       storyIds,
       ...(commentIds?.size ? { commentIds } : {}),
-    })
+    }))
     : base;
-  if (!comments.some((comment) => comment.parentId != null)) return saved;
+  const whole = new Map(
+    [...crossingWrittenWhole(document), ...crossingWrittenWhole(saved)].filter(([id]) => !fallback.has(id))
+  );
+  if (!comments.some((comment) => comment.parentId != null)) return { document: saved, whole };
   const body = saved.package.document;
-  return {
+  const owned: Document = {
     ...saved,
     package: {
       ...saved.package,
       document: { ...body, content: ownProjectedParagraphs(body.content) },
     },
   };
+  carryGate(saved, owned);
+  return { document: owned, whole };
 }
 
 /**
@@ -257,14 +292,17 @@ export async function saveEditorDocument(
   const capture = projected.originalBuffer ? captureSessionSave(session, identities) : null;
   engineProgress();
   if (yieldSave) await yieldSave();
-  const document = withSavedComments(projected, session, comments, record);
-  engineProgress();
+  const { document, injected } = checkedSaveModel((fallback) => {
+    const model = withSavedComments(projected, session, comments, record, fallback);
+    engineProgress();
 
-  // Inject commentRangeStart/End for reply comments that share the parent's range.
-  // Pages/Word require every comment (including replies) to have range markers in document.xml.
-  const injectedReplies = injectReplyRangeMarkers(document.package.document.content, comments);
-  // Also inject range markers for comments that reply to tracked changes.
-  const injectedTCReplies = injectTCReplyRangeMarkers(document.package.document.content, comments);
+    // Inject commentRangeStart/End for reply comments that share the parent's range.
+    // Pages/Word require every comment (including replies) to have range markers in document.xml.
+    const injectedReplies = injectReplyRangeMarkers(model.document.package.document.content, comments);
+    // Also inject range markers for comments that reply to tracked changes.
+    const injectedTCReplies = injectTCReplyRangeMarkers(model.document.package.document.content, comments);
+    return { ...model, injected: injectedReplies || injectedTCReplies };
+  });
 
   engineProgress();
   return writeEditorDocument(
@@ -272,7 +310,7 @@ export async function saveEditorDocument(
     session,
     capture,
     comments,
-    injectedReplies || injectedTCReplies,
+    injected,
     record,
     yieldSave
   );

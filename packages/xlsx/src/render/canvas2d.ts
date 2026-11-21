@@ -10,18 +10,21 @@
 import type {
   DisplayList,
   DrawCmd,
+  ImageCmd,
   LineCmd,
   PathCmd,
   PatternFillCmd,
   Rect,
   TextAlign,
   TextCmd,
+  TextWrap,
 } from '../display-list/types';
+import { fontSizePx, fontString } from './fontString';
 import { PATTERN_MASKS } from './patterns';
 import { paintNumberFormat } from './number-format';
+import { runPieces, wrapRunLines, type TextPiece } from './textRuns';
 import { wrapLines, wrappedLineY } from './wrap';
 
-const PX_PER_PT = 96 / 72;
 const STACKED_LINE_HEIGHT_RATIO = 1.2;
 const STACKED_ASCENT_RATIO = 0.8;
 
@@ -44,6 +47,16 @@ const LINE_DASH: Record<Exclude<NonNullable<LineCmd['style']>, 'double'>, number
 
 const patternCache = new WeakMap<CanvasRenderingContext2D, Map<string, CanvasPattern>>();
 
+export type PictureSource = ImageBitmap | HTMLImageElement | HTMLCanvasElement | OffscreenCanvas;
+
+export interface PaintOptions {
+  /**
+   * The decoded image for an `image` command's `assetId`. Without one, or when
+   * it returns nothing, the picture is skipped.
+   */
+  resolveImage?: (assetId: string) => PictureSource | null | undefined;
+}
+
 /**
  * Paint a display list into a 2D context. `dpr` maps device-independent list
  * coordinates onto the backing store, so callers size the canvas at
@@ -53,7 +66,8 @@ export function paintDisplayList(
   ctx: CanvasRenderingContext2D,
   dl: DisplayList,
   dpr: number,
-  origin: { x: number; y: number } = { x: 0, y: 0 }
+  origin: { x: number; y: number } = { x: 0, y: 0 },
+  options: PaintOptions = {}
 ): void {
   ctx.save();
   ctx.setTransform(dpr, 0, 0, dpr, origin.x, origin.y);
@@ -61,12 +75,21 @@ export function paintDisplayList(
   ctx.rect(0, 0, dl.width, dl.height);
   ctx.clip();
   ctx.clearRect(0, 0, dl.width, dl.height);
-  for (const cmd of dl.commands) paintCommand(ctx, cmd, dpr, origin);
+  for (const cmd of dl.commands) paintCommand(ctx, cmd, dpr, origin, options);
   ctx.restore();
 }
 
-function paintCommand(ctx: CanvasRenderingContext2D, cmd: DrawCmd, dpr: number, origin: { x: number; y: number }): void {
+function paintCommand(
+  ctx: CanvasRenderingContext2D,
+  cmd: DrawCmd,
+  dpr: number,
+  origin: { x: number; y: number },
+  options: PaintOptions
+): void {
   switch (cmd.op) {
+    case 'image':
+      paintClipped(ctx, cmd.clip, () => paintImage(ctx, cmd, options));
+      return;
     case 'fillRect':
       paintClipped(ctx, cmd.clip, () => {
         ctx.fillStyle = cmd.color;
@@ -97,7 +120,9 @@ function paintPattern(ctx: CanvasRenderingContext2D, cmd: PatternFillCmd, dpr: n
   const key = `${cmd.pattern}/${cmd.fg}/${cmd.bg}/${dpr}`;
   let pattern = cache.get(key);
   if (!pattern) {
-    const tile = typeof OffscreenCanvas === 'undefined' ? document.createElement('canvas') : new OffscreenCanvas(8, 8);
+    const tile = typeof OffscreenCanvas === 'function' ? new OffscreenCanvas(8, 8)
+      : typeof document !== 'undefined' ? document.createElement('canvas')
+      : new (ctx.canvas.constructor as new (width: number, height: number) => HTMLCanvasElement)(8, 8);
     tile.width = 8;
     tile.height = 8;
     const context = tile.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
@@ -130,6 +155,17 @@ function paintPattern(ctx: CanvasRenderingContext2D, cmd: PatternFillCmd, dpr: n
   ctx.fillRect(x, y, (Math.round((cmd.x + cmd.w) * dpr + origin.x) - origin.x) / dpr - x,
     (Math.round((cmd.y + cmd.h) * dpr + origin.y) - origin.y) / dpr - y);
   ctx.restore();
+}
+
+function paintImage(ctx: CanvasRenderingContext2D, cmd: ImageCmd, options: PaintOptions): void {
+  const image = options.resolveImage?.(cmd.assetId);
+  if (!image) return;
+  const [width, height] = 'naturalWidth' in image ? [image.naturalWidth, image.naturalHeight] : [image.width, image.height];
+  const { left = 0, top = 0, right = 0, bottom = 0 } = cmd.crop ?? {};
+  const sw = width * (1 - left - right);
+  const sh = height * (1 - top - bottom);
+  if (!(sw > 0 && sh > 0 && cmd.w > 0 && cmd.h > 0)) return;
+  ctx.drawImage(image, width * left, height * top, sw, sh, cmd.x, cmd.y, cmd.w, cmd.h);
 }
 
 function paintClipped(
@@ -249,9 +285,16 @@ function paintText(ctx: CanvasRenderingContext2D, cmd: TextCmd): void {
     ctx.clip();
   }
   ctx.fillStyle = cmd.color;
-  ctx.font = fontString(cmd);
+  const font = fontString(cmd);
+  ctx.font = font;
+  (ctx as CanvasRenderingContext2D & { textRendering?: string }).textRendering = 'geometricPrecision';
   ctx.textBaseline = 'alphabetic';
-  if (cmd.stacked) {
+  const pieces = cmd.runs?.length ? runPieces(cmd) : undefined;
+  if (pieces && cmd.wrap) {
+    paintWrappedPieces(ctx, cmd, cmd.wrap, pieces, newPiecePaint(font));
+  } else if (pieces) {
+    paintPieces(ctx, cmd, pieces, cmd.y, newPiecePaint(font));
+  } else if (cmd.stacked) {
     paintStackedText(ctx, cmd);
   } else if (cmd.rotationDeg !== undefined && cmd.rotationDeg !== null) {
     paintRotatedText(ctx, cmd, cmd.rotationDeg);
@@ -262,8 +305,9 @@ function paintText(ctx: CanvasRenderingContext2D, cmd: TextCmd): void {
     const align = cmd.align ?? 'left';
     ctx.textAlign = ALIGN_TO_TEXT_ALIGN[align];
     const lines = wrapLines(cmd.text, wrap.width, (run) => ctx.measureText(run).width);
-    lines.forEach((line, index) => {
-      paintRun(ctx, { ...cmd, y: wrappedLineY(cmd.y, index, lines.length, wrap) }, line, cmd.x, align);
+    const count = Math.min(lines.length, wrap.maxLines ?? lines.length);
+    lines.slice(0, count).forEach((line, index) => {
+      paintRun(ctx, { ...cmd, y: wrappedLineY(cmd.y, index, count, wrap) }, line, cmd.x, align);
     });
   } else {
     const align = cmd.align ?? 'left';
@@ -271,6 +315,88 @@ function paintText(ctx: CanvasRenderingContext2D, cmd: TextCmd): void {
     paintRun(ctx, cmd, cmd.text, cmd.x, align);
   }
   ctx.restore();
+}
+
+/**
+ * What painting one command's pieces has done to the canvas so far: the font string it last assigned, each piece
+ * style's font string, and the width of every text it measured in each font. Lives for one command's paint.
+ */
+interface PiecePaint {
+  font: string;
+  fonts: Map<TextPiece['cmd'], string>;
+  widths: Map<string, Map<string, number>>;
+}
+
+function newPiecePaint(font: string): PiecePaint {
+  return { font, fonts: new Map(), widths: new Map() };
+}
+
+function pieceFont(paint: PiecePaint, piece: TextPiece): string {
+  let font = paint.fonts.get(piece.cmd);
+  if (font === undefined) {
+    font = fontString(piece.cmd);
+    paint.fonts.set(piece.cmd, font);
+  }
+  return font;
+}
+
+function useFont(ctx: CanvasRenderingContext2D, paint: PiecePaint, font: string): void {
+  if (paint.font === font) return;
+  ctx.font = font;
+  paint.font = font;
+}
+
+function measurePiece(ctx: CanvasRenderingContext2D, paint: PiecePaint, piece: TextPiece, text: string): number {
+  const font = pieceFont(paint, piece);
+  let widths = paint.widths.get(font);
+  if (widths === undefined) {
+    widths = new Map();
+    paint.widths.set(font, widths);
+  }
+  let width = widths.get(text);
+  if (width === undefined) {
+    useFont(ctx, paint, font);
+    width = ctx.measureText(text).width;
+    widths.set(text, width);
+  }
+  return width;
+}
+
+function paintPieces(ctx: CanvasRenderingContext2D, cmd: TextCmd, pieces: TextPiece[], y: number, paint: PiecePaint): void {
+  const widths = pieces.map((piece) => measurePiece(ctx, paint, piece, piece.text));
+  const total = widths.reduce((sum, width) => sum + width, 0);
+  const align = cmd.align ?? 'left';
+  let x = align === 'right' ? cmd.x - total : align === 'center' ? cmd.x - total / 2 : cmd.x;
+  ctx.textAlign = 'left';
+  pieces.forEach((piece, index) => {
+    useFont(ctx, paint, pieceFont(paint, piece));
+    paintPiece(ctx, piece.cmd, piece.text, x, y, widths[index]!);
+    x += widths[index]!;
+  });
+}
+
+function paintWrappedPieces(
+  ctx: CanvasRenderingContext2D,
+  cmd: TextCmd,
+  wrap: TextWrap,
+  pieces: TextPiece[],
+  paint: PiecePaint,
+): void {
+  const lines = wrapRunLines(cmd.text, pieces, wrap.width, (piece, part) => measurePiece(ctx, paint, piece, part));
+  const count = Math.min(lines.length, wrap.maxLines ?? lines.length);
+  lines.slice(0, count).forEach((line, index) => paintPieces(ctx, cmd, line, wrappedLineY(cmd.y, index, count, wrap), paint));
+}
+
+/** `paintRun` for a piece painted left-aligned at `y`, `width` wide, in a font without highlight or dashed underline. */
+function paintPiece(ctx: CanvasRenderingContext2D, cmd: TextCmd, text: string, x: number, y: number, width: number): void {
+  ctx.fillStyle = cmd.color;
+  ctx.fillText(text, x, y);
+  if (!cmd.underline && !cmd.strike) return;
+  const fontSize = fontSizePx(cmd);
+  const thickness = Math.max(fontSize * 0.05, 0.5);
+  ctx.fillStyle = cmd.color;
+  if (cmd.underline) fillUnderline(ctx, cmd, x, y + fontSize * 0.1, width, thickness);
+  if (cmd.strike) ctx.fillRect(x, y - fontSize * 0.26, width, thickness);
 }
 
 function rotatedAvailableLength(box: Rect, deg: number, fontSize: number): number {
@@ -363,7 +489,8 @@ function paintRotatedText(ctx: CanvasRenderingContext2D, cmd: TextCmd, deg: numb
   }
   const thickness = Math.max(fontSize * 0.05, 0.5);
   ctx.fillStyle = cmd.color;
-  if (cmd.underline || cmd.dashedUnderline) ctx.fillRect(-width / 2, baseline + fontSize * 0.1, width, thickness);
+  if (cmd.underline) fillUnderline(ctx, cmd, -width / 2, baseline + fontSize * 0.1, width, thickness);
+  else if (cmd.dashedUnderline) ctx.fillRect(-width / 2, baseline + fontSize * 0.1, width, thickness);
   if (cmd.strike) ctx.fillRect(-width / 2, baseline - fontSize * 0.26, width, thickness);
   ctx.restore();
 }
@@ -397,7 +524,7 @@ function paintStackedText(ctx: CanvasRenderingContext2D, cmd: TextCmd): void {
     ctx.fillText(cluster, x, baseline);
     const thickness = Math.max(fontSize * 0.05, 0.5);
     ctx.fillStyle = cmd.color;
-    if (cmd.underline) ctx.fillRect(x, baseline + fontSize * 0.1, w, thickness);
+    if (cmd.underline) fillUnderline(ctx, cmd, x, baseline + fontSize * 0.1, w, thickness);
     if (cmd.strike) ctx.fillRect(x, baseline - fontSize * 0.26, w, thickness);
     if (cmd.dashedUnderline) {
       ctx.save();
@@ -423,23 +550,6 @@ function paintRun(
   if (cmd.underline || cmd.strike || cmd.dashedUnderline) paintDecorations(ctx, cmd, text, x, align);
 }
 
-// css font shorthand: `[italic] [bold] <size>px <family>`. Workbook fonts are
-// often not installed on the host (Calibri on macOS); without a fallback the
-// browser's unknown-family default is serif.
-function fontString(cmd: TextCmd): string {
-  const style = cmd.italic ? 'italic ' : '';
-  const weight = cmd.bold ? 'bold ' : '';
-  const family = cmd.fontFamily
-    ? cmd.chart
-      ? cmd.fontFamily
-      : `"${cmd.fontFamily.replace(/"/g, '\\"')}", sans-serif`
-    : 'sans-serif';
-  return `${style}${weight}${fontSizePx(cmd)}px ${family}`;
-}
-
-function fontSizePx(cmd: TextCmd): number {
-  return cmd.fontSize * PX_PER_PT;
-}
 
 function paintDecorations(
   ctx: CanvasRenderingContext2D,
@@ -453,7 +563,7 @@ function paintDecorations(
   const fontSize = fontSizePx(cmd);
   const thickness = Math.max(fontSize * 0.05, 0.5);
   ctx.fillStyle = cmd.color;
-  if (cmd.underline) ctx.fillRect(x0, cmd.y + fontSize * 0.1, width, thickness);
+  if (cmd.underline) fillUnderline(ctx, cmd, x0, cmd.y + fontSize * 0.1, width, thickness);
   if (cmd.strike) ctx.fillRect(x0, cmd.y - fontSize * 0.26, width, thickness);
   if (cmd.dashedUnderline) {
     ctx.save();
@@ -462,6 +572,21 @@ function paintDecorations(
     ctx.setLineDash([3, 2]);
     strokeSegment(ctx, x0, cmd.y + fontSize * 0.1, x0 + width, cmd.y + fontSize * 0.1);
     ctx.restore();
+  }
+}
+
+/** A double kind adds a second line one line width and at least a pixel below the first. */
+function fillUnderline(
+  ctx: CanvasRenderingContext2D,
+  cmd: TextCmd,
+  x: number,
+  y: number,
+  width: number,
+  thickness: number
+): void {
+  ctx.fillRect(x, y, width, thickness);
+  if (cmd.underlineStyle === 'double' || cmd.underlineStyle === 'doubleAccounting') {
+    ctx.fillRect(x, y + thickness + Math.max(thickness, 1), width, thickness);
   }
 }
 

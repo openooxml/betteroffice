@@ -1,3 +1,4 @@
+import { isEngineTrap } from '../../../../shared/office-session/trap';
 import type { YrsCommentInfo, YrsLoc, YrsRevisionInfo, YrsStoryRange } from './index';
 import type { ResidentEngineSession } from './residentEngineSession';
 import type { DocxProposalRegistry, DocxProposalSnapshot } from './proposals';
@@ -87,7 +88,7 @@ export function readReviewTarget(engine: ResidentEngineSession, target: DocxRevi
   while (publicId !== undefined && !visited.has(publicId)) {
     visited.add(publicId);
     try { anchors = engine.resolveComment(projection?.sessionIds.get(publicId) ?? String(publicId)); }
-    catch (error) { if (error instanceof WebAssembly.RuntimeError) throw error; anchors = []; }
+    catch (error) { if (isEngineTrap(error)) throw error; anchors = []; }
     if (anchors.length) break;
     publicId = projection?.comments.find(comment => comment.id === publicId)?.parentId;
   }
@@ -121,7 +122,7 @@ export async function readResidentReviewSnapshot(
     const commentGeometry = Object.fromEntries(comments.map(({ id }) => {
       let anchors: ReturnType<ResidentEngineSession['resolveComment']>;
       try { anchors = engine.resolveComment(id); }
-      catch (error) { if (error instanceof WebAssembly.RuntimeError) throw error; anchors = []; }
+      catch (error) { if (isEngineTrap(error)) throw error; anchors = []; }
       const ranges = anchors.flatMap(anchor => {
         const start = locationAt(engine, anchor.story, anchor.start);
         const end = locationAt(engine, anchor.story, anchor.end);

@@ -32,6 +32,7 @@
     "ariaLabel": "格式化工具列",
     "file": "檔案",
     "format": "格式",
+    "layout": "版面配置",
     "insert": "插入",
     "open": "開啟",
     "openShortcut": "Ctrl+O",
@@ -53,6 +54,16 @@
     "imageWrap": {
       "current": "目前"
     }
+  },
+  "layout": {
+    "margins": "邊界",
+    "normal": "標準",
+    "narrow": "窄",
+    "moderate": "適中",
+    "wide": "寬",
+    "customMargins": "自訂邊界...",
+    "morePaperSizes": "其他紙張大小...",
+    "indent": "縮排"
   },
   "formattingBar": {
     "groups": {
@@ -104,7 +115,12 @@
     "single": "單行",
     "double": "雙行",
     "lineSpacingTitle": "行距：{label}",
-    "paragraphSpacing": "段落間距"
+    "paragraphSpacing": "段落間距",
+    "addBefore": "新增段落前間距",
+    "removeBefore": "移除段落前間距",
+    "addAfter": "新增段落後間距",
+    "removeAfter": "移除段落後間距",
+    "options": "行距選項..."
   },
   "styles": {
     "selectAriaLabel": "選取段落樣式",
@@ -417,6 +433,8 @@
         "strikethroughDescription": "切換刪除線",
         "subscript": "下標",
         "subscriptDescription": "切換下標",
+        "clearFormatting": "清除所有格式設定",
+        "clearFormattingDescription": "清除文字格式",
         "superscript": "上標",
         "superscriptDescription": "切換上標",
         "alignLeft": "靠左對齊",
@@ -470,7 +488,9 @@
         "pageUp": "Page Up",
         "pageDown": "Page Down",
         "ctrl": "Ctrl",
-        "del": "Del"
+        "del": "Del",
+        "shift": "Shift",
+        "alt": "Alt"
       }
     },
     "objectGeometry": {
@@ -478,6 +498,11 @@
       "top": "上 (px)",
       "width": "寬度 (px)",
       "height": "高度 (px)"
+    },
+    "paragraphSpacing": {
+      "before": "段落前間距",
+      "after": "段落後間距",
+      "multiple": "多倍行高"
     }
   },
   "comments": {
@@ -505,6 +530,7 @@
     "paragraphMarkInserted": "已插入段落分隔符號",
     "paragraphMarkDeleted": "已刪除段落分隔符號",
     "paragraphPropertiesChanged": "已變更段落內容",
+    "runPropertiesChanged": "已變更文字格式設定",
     "rowInserted": "已插入列",
     "rowDeleted": "已刪除列",
     "rowPropertiesChanged": "已變更列內容",
@@ -515,6 +541,12 @@
     "tablePropertiesChanged": "已變更表格內容",
     "tableInserted": "已插入表格",
     "tableDeleted": "已刪除表格"
+  },
+  "pasteOptions": {
+    "button": "貼上選項 (Ctrl)",
+    "keepSource": "保留來源格式",
+    "merge": "合併格式",
+    "textOnly": "只保留文字"
   },
   "contextMenu": {
     "ariaLabel": "AI 動作功能表",
@@ -561,6 +593,8 @@
     "noDocumentLoaded": "尚未載入文件",
     "failedToLoad": "無法開啟此文件",
     "failedToLoadDescription": "檔案可能已損毀，或使用了此編輯器尚無法讀取的功能。",
+    "failedToLoadDamaged": "檔案已損毀,或不是完整的 Word 文件。",
+    "failedToLoadUnsupported": "此文件使用了此編輯器尚無法讀取的內容。",
     "editorUnavailable": "編輯器無法載入",
     "editorUnavailableDescription": "請檢查連線，然後重新載入頁面。",
     "reloadPage": "重新載入頁面",
@@ -701,6 +735,8 @@
     "failedToParse": "無法剖析文件",
     "linkRemoved": "已移除連結",
     "linkCopied": "已將連結複製到剪貼簿",
+    "pasteFailed": "無法完成貼上。未做任何變更。",
+    "cutRefused": "選取範圍包含無法剪下的物件。未做任何變更。",
     "failedToSave": "無法儲存文件",
     "documentInput": "文件輸入",
     "documentPreview": "文件預覽",
@@ -753,7 +789,11 @@
     "leftIndent": "左方縮排",
     "rightIndent": "右方縮排",
     "topMargin": "上邊界",
-    "bottomMargin": "下邊界"
+    "bottomMargin": "下邊界",
+    "leftMargin": "左邊界",
+    "rightMargin": "右邊界",
+    "hangingIndent": "首行凸排",
+    "markerValue": "{name}：{value}"
   },
   "print": {
     "label": "列印",
@@ -766,8 +806,13 @@
   },
   "a11y": {
     "pageLabel": "第 {number} 頁",
+    "unbuiltPagesNotMirrored": "第 {from} 頁至第 {to} 頁尚未包含在閱讀檢視中。",
+    "goToPage": "前往第 {number} 頁",
     "headerLabel": "頁首",
     "footerLabel": "頁尾",
+    "chartNoData": "無資料",
+    "pictureName": "圖片",
+    "bulletMarker": "項目符號",
     "selected": "已選取",
     "selectionCleared": "已清除選取範圍",
     "commentedText": "已加註解的文字",
@@ -826,7 +871,7 @@
       "targetChanged": "此動作開啟的內容在套用前已變更。",
       "commandFailed": "命令無法完成。",
       "permissionDenied": "主機應用程式尚未允許此外掛程式使用此命令。",
-      "unsupportedPolicy": "外掛程式尚無法執行此命令。請改用編輯批次。",
+      "unsupportedPolicy": "此命令需要使用者在該外掛程式自己的介面中進行操作。",
       "pluginUnavailable": "外掛程式已不再作用中。",
       "aborted": "外掛程式動作在命令執行前已取消。"
     }
@@ -835,6 +880,7 @@
     "toolbarGroup": "外掛程式",
     "panelTabs": "外掛程式面板",
     "collapsePanel": "收合 {title}",
-    "expandPanel": "展開 {title}"
+    "expandPanel": "展開 {title}",
+    "miniToolbar": "所選內容格式"
   }
 }

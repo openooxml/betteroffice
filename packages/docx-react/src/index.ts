@@ -47,6 +47,15 @@ export type {
   TrackedChangesOptions,
 } from './components/sidebar/trackedChanges';
 
+// Keyboard shortcuts a host can remap or disable
+export type {
+  DocxShortcutId,
+  DocxShortcuts,
+  DocxShortcutVariantId,
+} from './commands/shortcuts';
+export type { ShortcutChord } from '../../../shared/keyboard/chords';
+export type { ResolvedShortcuts, ShortcutBinding, ShortcutIssue } from '../../../shared/keyboard/resolve';
+
 // Commands: one authority for built-in and host chrome
 export { DocxCommandProvider, type DocxCommandProviderProps } from './commands/DocxCommandProvider';
 export { DocxCommandAdmissionError, type DocxCommandAdmissionCode } from './commands/createDocxCommandStore';
@@ -113,6 +122,22 @@ export {
 // Plugins: host-owned extensions with granted access to the editor
 export { defineDocxPlugin } from './plugins/defineDocxPlugin';
 export { DocxPluginToolbar } from './plugins/DocxPluginToolbar';
+export {
+  createDocxSelectionPlacement,
+  useDocxSelectionPlacement,
+  type DocxSelectionPlacement,
+  type DocxSelectionPlacementRequest,
+  type DocxSelectionPlacer,
+} from './plugins/selectionPlacement';
+export {
+  placeFloating,
+  type FloatingPlacement,
+  type FloatingPlacementInput,
+  type FloatingPlacementOptions,
+  type FloatingRect,
+  type FloatingSide,
+  type FloatingSize,
+} from '../../../shared/plugin-host/floatingPlacement';
 export type {
   DocxEditorPluginProps,
   DocxAnchorGeometryResult,
@@ -127,6 +152,9 @@ export type {
   DocxPluginError,
   DocxPluginErrorPhase,
   DocxPluginEvent,
+  DocxPluginFocusChangeEvent,
+  DocxPluginLocaleChangeEvent,
+  DocxPluginSelectionSettleEvent,
   DocxPluginFailureCode,
   DocxPluginGeometry,
   DocxPluginGrant,
@@ -142,6 +170,7 @@ export type {
   DocxPluginSelection,
   DocxPluginSidebarItem,
   DocxPluginSnapshot,
+  DocxPluginViewportChangeEvent,
   DocxReservation,
   DocxReservationAnchor,
   DocxReservationParagraph,

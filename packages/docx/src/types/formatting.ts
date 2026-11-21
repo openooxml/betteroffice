@@ -226,6 +226,8 @@ export interface TextFormatting {
   shadow?: boolean;
   /** Modern w14 text effects (glow/shadow/reflection/textFill/textOutline). */
   modernEffects?: TextModernEffects;
+  ligatures?: string;
+  contextualAlternates?: boolean;
 
   // Complex script
   /** Right-to-left text (w:rtl) */
@@ -611,9 +613,9 @@ export interface TableFormatting {
   floating?: FloatingTableProperties;
   /** Right to left table */
   bidi?: boolean;
-  /** Horizontal band size (`w:tblStyleRowBandSize`). Undefined = 1. */
+  /** Horizontal band size (`w:tblStyleRowBandSize`). Undefined = no banding. */
   styleRowBandSize?: number;
-  /** Vertical band size (`w:tblStyleColBandSize`). Undefined = 1. */
+  /** Vertical band size (`w:tblStyleColBandSize`). Undefined = no banding. */
   styleColBandSize?: number;
   /** Optional resolved style provenance. Undefined = legacy cascade. */
   styleCascade?: TableStyleCascade;
@@ -635,6 +637,8 @@ export interface TableRowFormatting {
   justification?: 'left' | 'center' | 'right';
   /** Hidden row */
   hidden?: boolean;
+  /** Computed on load, never written back: every run in the hidden row has its own `w:vanish`. */
+  hiddenContentOnly?: boolean;
   /** Conditional format style */
   conditionalFormat?: ConditionalFormatStyle;
   /** Leading omitted grid columns (`w:gridBefore`). Undefined = 0. */

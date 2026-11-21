@@ -32,6 +32,7 @@
     "ariaLabel": "Pasek narzędzi formatowania",
     "file": "Plik",
     "format": "Formatowanie",
+    "layout": "Układ",
     "insert": "Wstawianie",
     "open": "Otwórz",
     "openShortcut": "Ctrl+O",
@@ -53,6 +54,16 @@
     "imageWrap": {
       "current": "Bieżący"
     }
+  },
+  "layout": {
+    "margins": "Marginesy",
+    "normal": "Normalne",
+    "narrow": "Wąskie",
+    "moderate": "Umiarkowane",
+    "wide": "Szerokie",
+    "customMargins": "Marginesy niestandardowe...",
+    "morePaperSizes": "Więcej rozmiarów papieru...",
+    "indent": "Wcięcie"
   },
   "formattingBar": {
     "groups": {
@@ -104,7 +115,12 @@
     "single": "Pojedyncza",
     "double": "Podwójna",
     "lineSpacingTitle": "Interlinia: {label}",
-    "paragraphSpacing": "Odstępy między akapitami"
+    "paragraphSpacing": "Odstępy między akapitami",
+    "addBefore": "Dodaj odstęp przed akapitem",
+    "removeBefore": "Usuń odstęp przed akapitem",
+    "addAfter": "Dodaj odstęp po akapicie",
+    "removeAfter": "Usuń odstęp po akapicie",
+    "options": "Opcje interlinii..."
   },
   "styles": {
     "selectAriaLabel": "Wybierz styl akapitu",
@@ -417,6 +433,8 @@
         "strikethroughDescription": "Przełącz przekreślenie",
         "subscript": "Indeks dolny",
         "subscriptDescription": "Przełącz indeks dolny",
+        "clearFormatting": "Wyczyść formatowanie",
+        "clearFormattingDescription": "Wyczyść formatowanie tekstu",
         "superscript": "Indeks górny",
         "superscriptDescription": "Przełącz indeks górny",
         "alignLeft": "Wyrównaj do lewej",
@@ -470,7 +488,9 @@
         "pageUp": "Page Up",
         "pageDown": "Page Down",
         "ctrl": "Ctrl",
-        "del": "Del"
+        "del": "Del",
+        "shift": "Shift",
+        "alt": "Alt"
       }
     },
     "objectGeometry": {
@@ -478,6 +498,11 @@
       "top": "Od góry (px)",
       "width": "Szerokość (px)",
       "height": "Wysokość (px)"
+    },
+    "paragraphSpacing": {
+      "before": "Odstęp przed",
+      "after": "Odstęp po",
+      "multiple": "Wielokrotna"
     }
   },
   "comments": {
@@ -505,6 +530,7 @@
     "paragraphMarkInserted": "Wstawiono podział akapitu",
     "paragraphMarkDeleted": "Usunięto podział akapitu",
     "paragraphPropertiesChanged": "Zmieniono właściwości akapitu",
+    "runPropertiesChanged": "Zmieniono formatowanie tekstu",
     "rowInserted": "Wstawiono wiersz",
     "rowDeleted": "Usunięto wiersz",
     "rowPropertiesChanged": "Zmieniono właściwości wiersza",
@@ -515,6 +541,12 @@
     "tablePropertiesChanged": "Zmieniono właściwości tabeli",
     "tableInserted": "Wstawiono tabelę",
     "tableDeleted": "Usunięto tabelę"
+  },
+  "pasteOptions": {
+    "button": "Opcje wklejania (Ctrl)",
+    "keepSource": "Zachowaj formatowanie źródłowe",
+    "merge": "Scal formatowanie",
+    "textOnly": "Zachowaj tylko tekst"
   },
   "contextMenu": {
     "ariaLabel": "Menu akcji AI",
@@ -561,6 +593,8 @@
     "noDocumentLoaded": "Nie załadowano dokumentu",
     "failedToLoad": "Nie udało się załadować dokumentu",
     "failedToLoadDescription": "Plik może być uszkodzony albo zawiera elementy, których ten edytor jeszcze nie potrafi odczytać.",
+    "failedToLoadDamaged": "Plik jest uszkodzony lub nie jest kompletnym dokumentem Word.",
+    "failedToLoadUnsupported": "Ten dokument zawiera element, którego ten edytor nie potrafi jeszcze odczytać.",
     "editorUnavailable": "Nie udało się załadować edytora",
     "editorUnavailableDescription": "Sprawdź połączenie, a następnie odśwież stronę.",
     "reloadPage": "Odśwież stronę",
@@ -701,6 +735,8 @@
     "failedToParse": "Nie udało się przetworzyć dokumentu",
     "linkRemoved": "Usunięto łącze",
     "linkCopied": "Skopiowano łącze do schowka",
+    "pasteFailed": "Nie udało się ukończyć wklejania. Nic nie zostało zmienione.",
+    "cutRefused": "Zaznaczenie zawiera obiekty, których nie można wyciąć. Nic nie zostało zmienione.",
     "failedToSave": "Nie udało się zapisać dokumentu",
     "documentInput": "Dane wejściowe dokumentu",
     "documentPreview": "Podgląd dokumentu",
@@ -753,7 +789,11 @@
     "leftIndent": "Wcięcie z lewej",
     "rightIndent": "Wcięcie z prawej",
     "topMargin": "Margines górny",
-    "bottomMargin": "Margines dolny"
+    "bottomMargin": "Margines dolny",
+    "leftMargin": "Lewy margines",
+    "rightMargin": "Prawy margines",
+    "hangingIndent": "Wcięcie wysunięte",
+    "markerValue": "{name}: {value}"
   },
   "print": {
     "label": "Drukuj",
@@ -766,8 +806,13 @@
   },
   "a11y": {
     "pageLabel": "Strona {number}",
+    "unbuiltPagesNotMirrored": "Strony od {from} do {to} nie są jeszcze dostępne w widoku do czytania.",
+    "goToPage": "Przejdź do strony {number}",
     "headerLabel": "Nagłówek strony",
     "footerLabel": "Stopka strony",
+    "chartNoData": "Brak danych",
+    "pictureName": "Obraz",
+    "bulletMarker": "punktor",
     "selected": "Zaznaczono",
     "selectionCleared": "Wyczyszczono zaznaczenie",
     "commentedText": "Tekst z komentarzem",
@@ -826,7 +871,7 @@
       "targetChanged": "Zawartość, dla której otwarto tę czynność, uległa zmianie przed jej zastosowaniem.",
       "commandFailed": "Nie można było wykonać polecenia.",
       "permissionDenied": "Aplikacja hosta nie zezwoliła tej wtyczce na użycie tego polecenia.",
-      "unsupportedPolicy": "Wtyczki nie mogą jeszcze uruchamiać tego polecenia. Użyj zamiast tego pakietu edycji.",
+      "unsupportedPolicy": "To polecenie wymaga działania użytkownika we własnym interfejsie wtyczki.",
       "pluginUnavailable": "Wtyczka nie jest już aktywna.",
       "aborted": "Działanie wtyczki zostało anulowane przed wykonaniem polecenia."
     }
@@ -835,6 +880,7 @@
     "toolbarGroup": "Wtyczki",
     "panelTabs": "Panele wtyczek",
     "collapsePanel": "Zwiń {title}",
-    "expandPanel": "Rozwiń {title}"
+    "expandPanel": "Rozwiń {title}",
+    "miniToolbar": "Formatowanie zaznaczenia"
   }
 }

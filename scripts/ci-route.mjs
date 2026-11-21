@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 
 const GITHUB_HOSTED = /^(ubuntu|macos|windows)-[\w.-]+$/;
 export const LABEL = 'ubuntu-latest';
+export const ROUTER = 'Route runners';
 export const BATCH_RUNS = 10;
 
 /** `packages python package_tests:2 rust`: job groups in the order they claim GitHub-hosted slots. */
@@ -20,7 +21,7 @@ export function parseGroups(spec) {
     });
 }
 
-/** First fit: a group that does not fit stays on kyora, and a later, smaller one may still fit. */
+/** First fit: a group that does not fit stays self-hosted, and a later, smaller one may still fit. */
 export function allocate(groups, free) {
   const routes = {};
   for (const { name, slots } of groups) {
@@ -38,6 +39,7 @@ export function hostedJobs(jobs) {
   return jobs.filter(
     (job) =>
       (job.status === 'queued' || job.status === 'in_progress') &&
+      job.name !== ROUTER &&
       job.labels?.length === 1 &&
       GITHUB_HOSTED.test(job.labels[0])
   ).length;
@@ -96,17 +98,21 @@ export async function route(env, fetchImpl = fetch, signal = AbortSignal.timeout
   return { routes: allocate(groups, free), busy };
 }
 
-// Never fails the job: any error or the deadline leaves every output empty, which keeps the jobs on their kyora class.
+// Never fails the job: any error or the deadline leaves every output empty, which keeps the jobs on their self-hosted class.
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   let groups = [];
   let result;
+  const ms = count(process.env.BO_CI_ROUTE_DEADLINE_MS, 45_000);
+  const deadline = new AbortController();
+  const timer = setTimeout(() => deadline.abort(new Error(`routing deadline of ${ms} ms passed`)), ms);
   try {
     groups = parseGroups(process.env.ROUTE_GROUPS ?? '');
-    const deadline = AbortSignal.timeout(count(process.env.BO_CI_ROUTE_DEADLINE_MS, 45_000));
-    result = await route(process.env, fetch, deadline);
+    result = await route(process.env, fetch, deadline.signal);
   } catch (error) {
     console.log(`::warning::runner routing fell back to kyora: ${error.message}`);
     result = { routes: allocate(groups, 0), busy: null };
+  } finally {
+    clearTimeout(timer);
   }
   const lines = Object.entries(result.routes).map(([name, label]) => `${name}=${label}`);
   if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `${lines.join('\n')}\n`);

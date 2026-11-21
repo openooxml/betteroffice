@@ -548,6 +548,161 @@ fn a_nested_emf_plus_metafile_is_placed_in_its_destination() {
     assert!(about(x, 70.0) && about(y, 70.0));
 }
 
+fn nested_emf_at_dpi(dpi: i32, source_height: f32) -> ooxml_metafile::Drawing {
+    let d = dpi as f32;
+    let frame = [d, d / 2.0, d, d / 2.0];
+    let top = [d, d / 2.0, d, d / 4.0];
+    let inner = Emf::new(dpi, dpi / 2)
+        .reference_device([dpi * 100, dpi * 100], [2540, 2540])
+        .frame([2540, 1270, 5080, 2540])
+        .rec(
+            70,
+            &plus(&[
+                plus_header(false),
+                plus_fill_rects(0xff00_0000, &[frame]),
+                plus_fill_rects(0xff00_ff00, &[top]),
+                plus_eof(),
+            ])
+            .1,
+        )
+        .bytes();
+    let mut image = u32s(&[0xDBC0_1002, 2, 3, inner.len() as u32]);
+    image.extend(&inner);
+    let mut points = u32s(&[0, 2]);
+    points.extend(f32s(&[
+        frame[0],
+        frame[1],
+        frame[2],
+        frame[3] * source_height,
+    ]));
+    points.extend(u32s(&[3]));
+    points.extend(f32s(&[20.0, 30.0, 80.0, 40.0, 30.0, 70.0]));
+    replay(&plus_only(vec![
+        (0x4008, 0x0500, image),
+        (0x401B, 0, points),
+    ]))
+    .unwrap()
+}
+
+#[test]
+fn nested_emf_device_frames_cover_the_draw_image_points_destination() {
+    for dpi in [72, 96, 144] {
+        let drawing = nested_emf_at_dpi(dpi, 1.0);
+        assert!(drawing.omissions.is_empty());
+        let fills = shapes(&drawing.ops);
+        assert_eq!(fills.len(), 2);
+        let fill = fills[0];
+        assert_eq!(fill.fill, Some(Paint::Solid(Rgba::BLACK)));
+        for (command, (x, y)) in
+            fill.path
+                .iter()
+                .zip([(20.0, 30.0), (80.0, 40.0), (90.0, 80.0), (30.0, 70.0)])
+        {
+            assert!(at(command, x, y), "nested EMF at {dpi} dpi: {command:?}");
+        }
+    }
+}
+
+#[test]
+fn the_top_half_of_a_nested_emf_maps_onto_the_whole_destination() {
+    for dpi in [72, 96, 144] {
+        let drawing = nested_emf_at_dpi(dpi, 0.5);
+        assert!(drawing.omissions.is_empty());
+        let fills = shapes(&drawing.ops);
+        assert_eq!(fills.len(), 2);
+        let top = fills[1];
+        assert_eq!(top.fill, Some(Paint::Solid(Rgba::opaque(0, 255, 0))));
+        let clip = &top.clip.as_ref().unwrap().region;
+        assert!(!clip.exclude);
+        for (index, (x, y)) in [(20.0, 30.0), (80.0, 40.0), (90.0, 80.0), (30.0, 70.0)]
+            .into_iter()
+            .enumerate()
+        {
+            assert!(at(&top.path[index], x, y), "nested EMF at {dpi} dpi");
+            assert!(at(&clip.path[index], x, y));
+        }
+        assert!(at(&fills[0].path[2], 100.0, 120.0));
+    }
+}
+
+fn bitblt(rop: u32) -> Vec<u8> {
+    let mut body = u32s(&[0, 0, 99, 99, 0, 0, 100, 100, rop, 0, 0]);
+    body.extend(f32s(&[1.0, 0.0, 0.0, 1.0, 0.0, 0.0]));
+    body.extend(u32s(&[0, 0, 0, 0, 0, 0]));
+    body
+}
+
+fn plus_fill_with_gdi(dual: bool, gdi: (u32, Vec<u8>)) -> Vec<u8> {
+    Emf::new(100, 100)
+        .rec(
+            70,
+            &plus(&[
+                plus_header(dual),
+                plus_fill_rects(0xff00_0000, &[[0.0, 0.0, 10.0, 10.0]]),
+                plus_eof(),
+            ])
+            .1,
+        )
+        .rec(gdi.0, &gdi.1)
+        .bytes()
+}
+
+#[test]
+fn a_dual_emf_whose_gdi_records_draw_nothing_draws_nothing() {
+    let bytes = plus_fill_with_gdi(true, (76, bitblt(0x00AA_0029)));
+    assert!(replay(&bytes).unwrap().ops.is_empty());
+}
+
+#[test]
+fn a_dual_emf_whose_gdi_side_draws_only_with_opengl_records_plays_its_emf_plus_records() {
+    for kind in [102, 103] {
+        let drawing = replay(&plus_fill_with_gdi(true, (kind, Vec::new()))).unwrap();
+        assert!(
+            shapes(&drawing.ops)
+                .iter()
+                .any(|shape| shape.fill == Some(Paint::Solid(Rgba::BLACK))),
+            "record {kind}"
+        );
+    }
+}
+
+#[test]
+fn a_nested_dual_emf_whose_gdi_records_draw_nothing_plays_its_emf_plus_records() {
+    let inner = plus_fill_with_gdi(true, (76, bitblt(0x00AA_0029)));
+    let mut image = u32s(&[0xDBC0_1002, 2, 3, inner.len() as u32]);
+    image.extend(&inner);
+    let mut points = u32s(&[0, 2]);
+    points.extend(f32s(&[0.0, 0.0, 100.0, 100.0]));
+    points.extend(u32s(&[3]));
+    points.extend(f32s(&[0.0, 0.0, 100.0, 0.0, 0.0, 100.0]));
+    let drawing = replay(&plus_only(vec![
+        (0x4008, 0x0500, image),
+        (0x401B, 0, points),
+    ]))
+    .unwrap();
+    assert!(
+        shapes(&drawing.ops)
+            .iter()
+            .any(|shape| shape.fill == Some(Paint::Solid(Rgba::BLACK)))
+    );
+}
+
+#[test]
+fn emf_plus_draws_when_the_gdi_side_draws_or_is_not_dual() {
+    for bytes in [
+        plus_fill_with_gdi(false, (76, bitblt(0x00AA_0029))),
+        plus_fill_with_gdi(true, (43, u32s(&[0, 0, 10, 10]))),
+        plus_fill_with_gdi(true, (76, bitblt(0x00F0_0021))),
+    ] {
+        let drawing = replay(&bytes).unwrap();
+        assert!(
+            shapes(&drawing.ops)
+                .iter()
+                .any(|shape| shape.fill == Some(Paint::Solid(Rgba::BLACK)))
+        );
+    }
+}
+
 #[test]
 fn an_emf_plus_header_after_another_comment_still_counts() {
     let bytes = Emf::new(100, 100)
@@ -727,6 +882,49 @@ fn emf_plus_strings_wrap_in_their_box_keep_blank_lines_and_clip() {
     let line = 20.0 * (0.905 + 0.212);
     assert!(close(third.transform[5] - top.transform[5], 2.0 * line));
     assert!(top.clip.is_none(), "an empty layout box does not clip");
+}
+
+#[test]
+fn emf_plus_strings_follow_the_page_scale() {
+    assert_emf_plus_text_page_scale(false);
+}
+
+#[test]
+fn emf_plus_driver_strings_follow_the_page_scale() {
+    assert_emf_plus_text_page_scale(true);
+}
+
+fn assert_emf_plus_text_page_scale(driver: bool) {
+    for (unit, em, page_unit, scale, expected) in [
+        (2u32, 83.333, 2, 0.16, 83.333 * 0.16),
+        (3, 10.0, 2, 0.5, 10.0 * 96.0 / 72.0 * 0.5),
+        (0, 83.333, 2, 0.16, 83.333 * 0.16),
+        (0, 10.0, 2, 0.5, 5.0),
+        (2, 10.0, 3, 0.5, 10.0 * 96.0 / 72.0 * 0.5),
+    ] {
+        let mut font = plus_font(1, em, 0, "Arial");
+        font.2[8..12].copy_from_slice(&unit.to_le_bytes());
+        let string = if driver {
+            plus_driver_string(1, 0xff00_0000, "AB", (530.0, 3843.0), &[40.0])
+        } else {
+            plus_string(1, "AB", [530.0, 3843.0, 0.0, 0.0])
+        };
+        let drawing = replay(&plus_only(vec![
+            (0x4030, page_unit, f32s(&[scale])),
+            font,
+            string,
+        ]))
+        .unwrap();
+        assert!(drawing.omissions.is_empty());
+        let runs = texts(&drawing.ops);
+        assert_eq!(runs.len(), 1);
+        let text = runs[0];
+        let device_em = text.font.size * text.transform[2].hypot(text.transform[3]);
+        assert!(
+            close(device_em, expected),
+            "unit {unit}, page unit {page_unit}, scale {scale}: {device_em} != {expected}"
+        );
+    }
 }
 
 #[test]

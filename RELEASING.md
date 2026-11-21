@@ -99,8 +99,9 @@ command then.
 
 ## Native packages
 
-`@betteroffice/{docx,pptx,xlsx}-native` are three roots with five platform packages
-each (macOS arm64/x64, GNU Linux arm64/x64, Windows x64): 18 npm names.
+`@betteroffice/{docx,pptx,xlsx}-native` are three roots with eight platform packages
+each (macOS arm64/x64, GNU Linux arm64/x64, musl Linux arm64/x64, Windows
+arm64/x64): 27 npm names.
 Each root joins its core's fixed Changesets group. `version-packages.mjs` syncs
 the platform manifests and the Cargo version.
 Repository roots are private so `changeset publish` skips them. The dispatch-only
@@ -110,19 +111,61 @@ After a successful npm release, `release.yml`'s `native-npm` job dispatches that
 workflow for formats whose root version is missing and waits for every run.
 `RELEASE_SKIP_NATIVE=true` disables this job.
 
-Trusted Publishing cannot create a package. Publish all 18 names by hand first,
-repeating these steps for `docx`, `pptx` and `xlsx`:
+Trusted Publishing cannot create a package: each of these names has to be on npm
+before the release that publishes it. Unless `RELEASE_SKIP_NATIVE` is `true`,
+read ignoring case as the workflow reads it, `scripts/check-publish-targets.mjs --npm`
+fails the release before anything is published while one of them is not on npm.
 
-1. Run `publish-native.yml` with `dry_run=true` at the release commit. Download its
-   five `<format>-native.*` artifacts into `bindings/<format>-native/artifacts`
-   and the `<format>-native-loader` artifact's `index.js` into
-   `bindings/<format>-native` in a clean checkout of that commit.
-2. Run `bun install --frozen-lockfile`, then `bunx napi artifacts --cwd bindings/<format>-native`.
-3. From `bindings/<format>-native`, run `npm pkg delete private`, then
-   `npm publish --access public --provenance=false`. Its `prepublishOnly` publishes the five platform packages first.
-4. Configure all six names' Trusted Publisher: owner `openooxml`, repository
+### A new format
+
+Publish all nine names of the format by hand first:
+
+1. Run `publish-native.yml` with `dry_run=true` at the release commit. In a clean
+   checkout of that commit, download its eight `<format>-native.*` artifacts into
+   `bindings/<format>-native/artifacts` and the whole `<format>-native-loader`
+   artifact, `index.js` and `dist/`, into `bindings/<format>-native`.
+2. Run `bun install --frozen-lockfile`, then `bunx napi artifacts --cwd bindings/<format>-native`,
+   then `bun scripts/rewrite-workspace-deps.ts` from the repository root.
+3. From `bindings/<format>-native`, run `npm pkg delete private`, then check
+   `npm pack --dry-run`: it must list `index.js`, `index.d.ts` and every `dist/`
+   file the manifest's `exports` names, and no dependency in `package.json` may
+   start with `workspace:`.
+4. Run `npm publish --access public --provenance=false`. Its `prepublishOnly` publishes the eight platform packages first.
+5. Throw the checkout away: steps 2 and 3 rewrote its manifests.
+6. Configure all nine names' Trusted Publisher: owner `openooxml`, repository
    `betteroffice`, workflow `publish-native.yml`, environment `npm-<format>`.
    Restrict each `npm-<format>` environment to the main branch.
+   Allow a direct `npm publish` in each: a configuration created after
+   2026-09-03 allows only `npm stage publish` unless that is chosen.
+   Create it no earlier than two days before the release: npm lets a new
+   configuration expire unless it publishes successfully within two days.
+
+### A new platform for existing roots
+
+A new target adds one name per format. Reserve each before the release that
+first publishes it; that release publishes the real version.
+
+1. Outside the checkout, make one directory per name with a `README.md` and a
+   `package.json`: the name, version `0.0.0`, a description that says it is a
+   placeholder, and the `license`, `repository`, `publishConfig`, `os`, `cpu`
+   and `libc` of `bindings/<format>-native/npm/<platform>/package.json`. No
+   `main` and no `files`: there is no binary yet.
+2. Check that `npm pack --dry-run` lists only `package.json` and `README.md`.
+3. Run `npm publish --access public --provenance=false` in each directory.
+4. Configure each name's Trusted Publisher as in step 6 above.
+
+Not verified:
+
+- That `--provenance=false` on the command line wins over a `publishConfig` that
+  asks for provenance. npm documents `provenance=false` in `publishConfig`, in
+  `.npmrc` and as `NPM_CONFIG_PROVENANCE=false`.
+- What the native publish does when a platform version is already on npm, whether
+  it pins the roots' optional dependencies exactly, and under which tag it publishes.
+- That the release's publish through Trusted Publishing goes through over a
+  placeholder, and that `latest` then moves from `0.0.0` to the released version.
+  The two font names reserved this way show only that a first publish at `0.0.0`
+  leaves `latest` there.
+- That every name the release publishes has its Trusted Publisher configured.
 
 ## Python bindings
 
@@ -202,6 +245,42 @@ To launch `betteroffice-<format>`:
 
 No step needs a `PYPI_API_TOKEN`.
 
+### Font pack wheels
+
+`betteroffice-fonts-latin`, `betteroffice-fonts-intl` and `betteroffice-fonts-cjk`
+are pure `py3-none-any` wheels of data: each holds one font pack under
+`betteroffice_fonts_packs/<pack>/<version>/`, the directory layout the Rust font
+manager reads from a local base directory. Every format binding requires all
+three at the exact versions it pins in `pyproject.toml`, and its module points
+the default font source at the installed directory on import, so no format wheel
+embeds a font and nothing is fetched at run time.
+
+`scripts/python_font_packs.py` builds them from `packages/fonts-<pack>/assets`,
+and a pack's version is its `manifest.json` version, which the Rust catalog reads
+too. `FONT_PACK_NAMES` in `scripts/python-binding-names.mjs` lists them apart
+from the binding registry: they have no crate and no Changesets entry. A pack is
+pending whenever PyPI does not serve its manifest version, so regenerating a pack
+at a new version publishes it with the next release. `scripts/python-bindings.test.ts`
+fails when a binding's pins drift from the manifests.
+
+`python-dist.yml` builds a `fonts-<pack>` binding as a single wheel with no Rust
+and no sdist. The release dispatches the font packs first and waits for them;
+when one fails it dispatches no format binding and fails, because every format
+wheel would be uninstallable without it. Launching them is the same pending
+publisher setup as a binding, once per pack:
+
+1. Create the GitHub environments `pypi-fonts-latin`, `pypi-fonts-intl` and
+   `pypi-fonts-cjk`.
+2. Add a pending publisher per project (`betteroffice-fonts-latin`,
+   `betteroffice-fonts-intl`, `betteroffice-fonts-cjk`) with owner `openooxml`,
+   repository `betteroffice`, workflow `publish-python-binding.yml`, and the
+   matching environment.
+
+Until all three exist, the Python release train stops at the first font pack
+with an error naming this section, and no format binding is uploaded. A
+**Publish a Python binding** dispatch with `binding=fonts-<pack>` publishes one
+pack by hand.
+
 ### No API token path
 
 Neither workflow can upload with a token. The release train fails at `Refuse a
@@ -226,7 +305,8 @@ empty — so `environment: pypi-<binding>` cannot block a publish by itself. The
 `publish` flag and that guard are what block it.
 
 Each binding builds and publishes independently. A broken wheel in one
-distribution fails only that distribution's upload.
+distribution fails only that distribution's upload; a font pack that fails stops
+the format bindings, which require it.
 
 [pending]: https://docs.pypi.org/trusted-publishers/creating-a-project-through-oidc/
 [reusable]: https://docs.pypi.org/trusted-publishers/troubleshooting/#reusable-workflows-on-github

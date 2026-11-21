@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { expectFontFace, fontCases, fontErrorCases } from '../../../../bindings/font-fixtures';
 import { decodeFontFace as decodePublicFontFace } from '../core';
 import { preloadEditWasm } from './edit';
-import { decodeFontFace } from './generated/edit/docx_edit.js';
+import { decodeFontFace } from './engineEdit';
 
 beforeAll(async () => {
   await preloadEditWasm(new Uint8Array(readFileSync(new URL('./generated/edit/docx_edit_bg.wasm', import.meta.url))));

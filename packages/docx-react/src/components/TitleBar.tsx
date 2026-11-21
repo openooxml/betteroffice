@@ -12,6 +12,7 @@ import React, { useCallback, useState, Children, isValidElement } from 'react';
 import type { ReactNode } from 'react';
 import { MenuDropdown } from './ui/MenuDropdown';
 import type { MenuEntry, MenuItem } from './ui/MenuDropdown';
+import { LayoutMenu } from './LayoutMenu';
 import { TableGridInline } from './ui/TableGridInline';
 import { MaterialSymbol } from './ui/MaterialSymbol';
 import { useDocxCommand } from '../commands/hooks';
@@ -309,6 +310,11 @@ export function MenuBar() {
           },
           ...visible(toc, watermark),
         ]}
+      />
+
+      <LayoutMenu
+        tabIndex={focusedMenu === 'layout' ? 0 : -1}
+        onFocus={() => setActiveMenu('layout')}
       />
 
       {!reportIssue.hidden && (

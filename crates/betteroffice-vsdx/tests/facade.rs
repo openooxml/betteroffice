@@ -5,6 +5,20 @@ use ooxml_opc::{rezip_parts, unzip_parts};
 use std::collections::BTreeMap;
 use vsdx_edit::{CellSnapshot, DiagramSession, EditCtx, ShapeDraft};
 
+#[cfg(not(any(feature = "fonts-latin", feature = "fonts-intl", feature = "fonts-cjk")))]
+#[test]
+fn opens_without_bundled_pack_features() {
+    let bytes = include_bytes!("../../vsdx-parse/tests/fixtures/foundation.vsdx");
+    assert!(
+        !Diagram::open(bytes)
+            .unwrap()
+            .package()
+            .page_part_paths
+            .is_empty()
+    );
+    assert!(Diagram::open_with_options(bytes, &betteroffice_vsdx::OpenOptions::default()).is_ok());
+}
+
 fn diagram_with_page(xml: &str) -> (Vec<u8>, Diagram, u32) {
     let source = include_bytes!("../../vsdx-parse/tests/fixtures/foundation.vsdx");
     let package = vsdx_parse::parse_vsdx(source).unwrap();
@@ -941,11 +955,65 @@ fn export_svg_page_rejects_an_unknown_page() {
 fn export_png_renders_scaled_raster_pages() {
     let source = include_bytes!("../../vsdx-parse/tests/fixtures/text-accounting.vsdx");
     let diagram = Diagram::open(source).unwrap();
-    let first = diagram.export_png(0, 1.0).unwrap();
+    let first = diagram
+        .render_png(
+            betteroffice_vsdx::PngTarget { page: 0 },
+            &betteroffice_vsdx::RenderOptions { scale: 1.0 },
+        )
+        .unwrap();
     assert_eq!(&first.bytes[0..8], &[137, 80, 78, 71, 13, 10, 26, 10]);
-    let second = diagram.export_png(0, 2.0).unwrap();
+    let second = diagram
+        .render_png(
+            betteroffice_vsdx::PngTarget { page: 0 },
+            &betteroffice_vsdx::RenderOptions { scale: 2.0 },
+        )
+        .unwrap();
     assert_eq!(second.width, first.width * 2);
     assert_eq!(second.height, first.height * 2);
-    assert!(diagram.export_png(99, 1.0).is_err());
-    assert!(diagram.export_png(0, 0.0).is_err());
+    assert!(
+        diagram
+            .render_png(
+                betteroffice_vsdx::PngTarget { page: 99 },
+                &betteroffice_vsdx::RenderOptions { scale: 1.0 }
+            )
+            .is_err()
+    );
+    assert!(
+        diagram
+            .render_png(
+                betteroffice_vsdx::PngTarget { page: 0 },
+                &betteroffice_vsdx::RenderOptions { scale: 0.0 }
+            )
+            .is_err()
+    );
+}
+
+#[cfg(feature = "raster")]
+#[test]
+fn png_targets_use_zero_based_pages_with_default_scale() {
+    let diagram = Diagram::open(include_bytes!(
+        "../../vsdx-parse/tests/fixtures/text-accounting.vsdx"
+    ))
+    .unwrap();
+    let target = betteroffice_vsdx::PngTarget { page: 0 };
+    let first = diagram
+        .render_png(target, &betteroffice_vsdx::RenderOptions::default())
+        .unwrap();
+    let second = diagram
+        .render_png(target, &betteroffice_vsdx::RenderOptions { scale: 2.0 })
+        .unwrap();
+    assert_eq!(
+        (second.width, second.height),
+        (first.width * 2, first.height * 2)
+    );
+    assert!(
+        diagram
+            .render_png(
+                betteroffice_vsdx::PngTarget {
+                    page: diagram.pages().count()
+                },
+                &betteroffice_vsdx::RenderOptions::default()
+            )
+            .is_err()
+    );
 }

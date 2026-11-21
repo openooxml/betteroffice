@@ -4,8 +4,10 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   DocxEditor,
   defineDocxPlugin,
+  useDocxSelectionPlacement,
   type DocxEditorRef,
   type DocxPluginContext,
+  type DocxPluginEvent,
   type DocxPluginGeometry,
   type DocxPluginSidebarItem,
 } from '@betteroffice/docx-react';
@@ -21,19 +23,32 @@ interface ProbeState {
 type ProbeContext = DocxPluginContext<ProbeState>;
 
 interface ProbeWindow {
+  mutation: unknown;
+  nestedMutations: unknown[];
+  nativeClick: boolean | null;
+  runMutation(): Promise<unknown>;
+  events: DocxPluginEvent[];
   editor: DocxEditorRef | null;
   geometry: DocxPluginGeometry | null;
   navigation: unknown;
   marks: number;
   reload(): Promise<void>;
+  focus: { result: unknown; background(): unknown };
 }
 
 const fonts = createFontProvider();
 const repeatedHeader = new URLSearchParams(location.search).get('doc') === 'repeated-header';
 const fileProp = new URLSearchParams(location.search).get('prop') === 'file';
+const inThread = new URLSearchParams(location.search).get('engine') === 'in-thread';
+const focusProbe = new URLSearchParams(location.search).get('focus') === '1';
 
 const probe: ProbeWindow = {
+  events: [],
   editor: null,
+  mutation: null,
+  nestedMutations: [],
+  nativeClick: null,
+  runMutation: async () => null,
   geometry: null,
   navigation: null,
   marks: 0,
@@ -41,6 +56,7 @@ const probe: ProbeWindow = {
     const buffer = await (await fetch(documentUrl)).arrayBuffer();
     await probe.editor!.loadDocumentBuffer(buffer);
   },
+  focus: { result: null, background: () => null },
 };
 (window as unknown as { __probe: ProbeWindow }).__probe = probe;
 
@@ -54,9 +70,38 @@ async function refresh(context: ProbeContext) {
 }
 
 function ProbePanel({ context }: { context: ProbeContext }) {
+  probe.runMutation = () => context.commands.execute('clearFormatting', null);
   const last = context.state.paragraphs.at(-1);
   return (
     <div>
+      <button type="button" data-testid="probe-mutation" data-version={context.snapshot.version} onMouseDown={(event) => event.preventDefault()}
+        onClick={(event) => {
+          probe.nativeClick = window.event === event.nativeEvent;
+          void probe.runMutation().then((result) => { probe.mutation = result; });
+        }}>
+        Apply formatting
+      </button>
+      <button type="button" data-testid="probe-nested-mutations" onMouseDown={(event) => event.preventDefault()}
+        onClick={(event) => {
+          probe.nestedMutations = [];
+          const button = event.currentTarget;
+          for (const nested of [new Event('input'), new CustomEvent('plugin-action')]) {
+            button.addEventListener(nested.type, () => {
+              void context.commands.execute('bold', null).then((result) => { probe.nestedMutations.push(result); });
+            }, { once: true });
+            button.dispatchEvent(nested);
+          }
+        }}>
+        Apply formatting from nested events
+      </button>
+      <button type="button" data-testid="probe-timer-mutation" onMouseDown={(event) => event.preventDefault()}
+        onClick={async () => {
+          probe.mutation = null;
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          probe.mutation = await probe.runMutation();
+        }}>
+        Apply formatting after a timer
+      </button>
       <button
         type="button"
         data-testid="probe-navigate"
@@ -142,6 +187,19 @@ function HeaderProbe({ geometry }: { geometry: DocxPluginGeometry }) {
   );
 }
 
+function PlacementProbe({ context, geometry }: { context: ProbeContext; geometry: DocxPluginGeometry }) {
+  const placement = useDocxSelectionPlacement(context, { width: 120, height: 30, geometry });
+  if (!placement) return null;
+  return (
+    <div
+      data-testid="probe-placement"
+      data-anchor={JSON.stringify(placement.anchor)}
+      data-kept={String(placement.kept)}
+      style={{ position: 'absolute', left: placement.x, top: placement.y, width: placement.width, height: placement.height, outline: '1px solid green' }}
+    />
+  );
+}
+
 function GeometryProbe({ geometry }: { geometry: DocxPluginGeometry }) {
   useEffect(() => {
     probe.geometry = geometry;
@@ -185,12 +243,14 @@ const alignment = defineDocxPlugin<ProbeState>({
   id: 'probe.alignment',
   createState: () => ({ version: null, paragraphs: [] }),
   async onEvent(context, event) {
+    probe.events.push(event);
     if (event.type === 'load' || event.type === 'document-change') await refresh(context);
   },
   panel: { title: 'Probe', placement: 'right', render: ProbePanel },
-  overlay: ({ geometry }) => (
+  overlay: ({ context, geometry }) => (
     <>
       <GeometryProbe geometry={geometry} />
+      <PlacementProbe context={context} geometry={geometry} />
       {repeatedHeader && <HeaderProbe geometry={geometry} />}
       {Array.from({ length: geometry.layout.pageCount }, (_, index) => {
         const bounds = geometry.dom.getPageBounds(index);
@@ -251,8 +311,26 @@ const second = defineDocxPlugin({
   },
 });
 
-const PLUGINS = [alignment, second];
-const GRANTS = { 'probe.alignment': { document: 'write', editBatches: true } } as const;
+function FocusOverlay({ context }: { context: DocxPluginContext<null> }) {
+  probe.focus.background = () => context.focusDocument();
+  return (
+    <div data-testid="focus-probe" data-input-focused={String(context.snapshot.inputFocused)}
+      data-focused={String(context.snapshot.focused)} style={{ position: 'absolute', left: 0, top: 0, pointerEvents: 'auto' }}>
+      <button type="button" data-testid="focus-probe-button" onKeyDown={(event) => {
+        if (event.key !== 'Enter') return;
+        event.preventDefault();
+        probe.focus.result = context.focusDocument();
+      }}>
+        Return to document
+      </button>
+    </div>
+  );
+}
+
+const focusPlugin = defineDocxPlugin({ id: 'probe.focus', createState: () => null, overlay: FocusOverlay });
+
+const PLUGINS = focusProbe ? [alignment, second, focusPlugin] : [alignment, second];
+const GRANTS = { 'probe.alignment': { document: 'write', editBatches: true, commands: ['clearFormatting', 'bold'] } } as const;
 
 function Harness() {
   const [buffer, setBuffer] = useState<ArrayBuffer | null>(null);
@@ -267,7 +345,7 @@ function Harness() {
   if (!buffer) return null;
   return (
     <div style={{ height: '100%' }}>
-      <DocxEditor ref={setEditor} {...(fileProp ? { file: new File([buffer], 'upload.docx'), fileName: 'Aliased report.docx' } : { documentBuffer: buffer })} plugins={PLUGINS} pluginGrants={GRANTS} measurementFontProvider={new URLSearchParams(location.search).get('peerless') === '1' ? fonts : undefined} {...(new URLSearchParams(location.search).get('peerless') === '1' ? {} : { legacySyncApi: true as const })} />
+      <DocxEditor experimentalWorkerOpen={inThread || new URLSearchParams(location.search).get('engine') === 'legacy' ? false : undefined} ref={setEditor} {...(fileProp ? { file: new File([buffer], 'upload.docx'), fileName: 'Aliased report.docx' } : { documentBuffer: buffer })} plugins={PLUGINS} pluginGrants={GRANTS} measurementFontProvider={new URLSearchParams(location.search).get('peerless') === '1' ? fonts : undefined} {...(inThread || new URLSearchParams(location.search).get('peerless') === '1' ? {} : { legacySyncApi: true }) as Record<never, never>} />
     </div>
   );
 }

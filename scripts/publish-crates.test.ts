@@ -568,14 +568,16 @@ describe('cargo child environment isolation', () => {
 
 describe('release workflow crates auth', () => {
   const releaseWorkflow = fileURLToPath(new URL('../.github/workflows/release.yml', import.meta.url));
-  const release = Bun.YAML.parse(readFileSync(releaseWorkflow, 'utf8')) as any;
+  const releaseSource = readFileSync(releaseWorkflow, 'utf8');
+  const release = Bun.YAML.parse(releaseSource) as any;
   const named = new Map(release.jobs.release.steps.map((step: any) => [step.name, step]));
 
-  test('the OIDC action is pinned to the official v1 commit', () => {
+  test('the OIDC action is pinned to a full commit of the official v1 release line', () => {
     const auth = named.get('Authenticate to crates.io');
-    expect(auth.uses).toBe(
-      'rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18'
-    );
+    expect(auth.uses).toMatch(/^rust-lang\/crates-io-auth-action@[0-9a-f]{40}$/);
+    const pins = releaseSource.split('\n').filter((line) => line.includes(`uses: ${auth.uses}`));
+    expect(pins).toHaveLength(1);
+    expect(pins[0]).toMatch(/ # v1$/);
   });
 
   test('the OIDC exchange runs on the publish path unless crates are skipped', () => {

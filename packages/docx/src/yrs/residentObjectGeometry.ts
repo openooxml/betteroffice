@@ -8,6 +8,7 @@ import { deriveDisplayListSelectedCellRects, type DisplayListSelectedCellSpec, t
 import { findImagePrimitiveByDocPos } from '../layout/render/displayListImages';
 import { rootOf } from './residentCommandTableSelection';
 import type { DisplayPrimitive } from '../layout/render/displayList';
+import { cellStart } from './residentCommandTableSelection';
 
 export interface ResidentObjectRect {
   pageId: string;
@@ -16,6 +17,8 @@ export interface ResidentObjectRect {
   y: number;
   width: number;
   height: number;
+  /** Table cells only: this box is a header row's copy on a continuation page. */
+  repeatedHeader?: boolean;
 }
 
 export interface ResidentObjectGeometry {
@@ -36,6 +39,31 @@ export interface ResidentObjectGeometry {
   paintOrder?: number;
   /** Image anchored inside a cell or text box. */
   nested?: boolean;
+  /** Cells only: where the cell sits in its table's grid. */
+  cell?: ResidentCellPlacement;
+}
+
+export interface ResidentCellPlacement {
+  /** Identifies the table within the document: its story and index there. */
+  table: string;
+  row: number;
+  column: number;
+  rowspan: number;
+  colspan: number;
+  /** Grid columns of the whole table. */
+  columns: number;
+  /** Whether the cell's boxes are its real edges rather than an estimate from its content. */
+  exact: boolean;
+}
+
+export function residentCellPlacement(
+  table: { story: string; tableIndex: number; cells: ReadonlyArray<{ column: number; colspan: number }> },
+  cell: { row: number; column: number; rowspan: number; colspan: number },
+  exact: boolean
+): ResidentCellPlacement {
+  return { table: `${table.story}#${table.tableIndex}`, row: cell.row, column: cell.column, rowspan: cell.rowspan,
+    colspan: cell.colspan, columns: Math.max(0, ...table.cells.map(entry => entry.column + entry.colspan)),
+    exact };
 }
 
 export function isFloatingImagePayload(payload: Record<string, unknown>): boolean {
@@ -55,6 +83,27 @@ export function embedSelected(selection: DocxCommandSelection | null, at: YrsLoc
   const { anchor, focus } = selection;
   return anchor.story === at.story && focus.story === at.story && anchor.paraId === at.paraId && focus.paraId === at.paraId &&
     Math.min(anchor.offset, focus.offset) === at.offset && Math.max(anchor.offset, focus.offset) === at.offset + 1;
+}
+
+/** Whether `selection` covers exactly one picture, the only selection frame geometry marks on an object. */
+export function selectsImage(engine: ResidentEngineSession, selection: DocxCommandSelection | null): boolean {
+  if (!selection) return false;
+  const { anchor, focus } = selection;
+  if (anchor.story !== focus.story || anchor.paraId !== focus.paraId || Math.abs(anchor.offset - focus.offset) !== 1 ||
+    !engine.geometryReader.hasStory(anchor.story)) return false;
+  return imageAt(engine, { story: anchor.story, paraId: anchor.paraId, offset: Math.min(anchor.offset, focus.offset) });
+}
+
+function imageAt(engine: ResidentEngineSession, at: YrsLoc): boolean {
+  let offset = 0;
+  const index = engine.geometryReader.paragraphSpans(at.story).findIndex(span => span.paraId === at.paraId);
+  if (index < 0) return false;
+  const found = engine.paragraphSegments(at.story, [index])[0]?.find(segment => {
+    const start = offset;
+    offset += segment.kind === 'text' ? segment.text.length : 1;
+    return start === at.offset;
+  });
+  return found?.kind === 'embed' && found.embedKind === 'image';
 }
 
 export function imagePlacement(payload: Record<string, unknown>): Pick<ResidentObjectGeometry, 'floating' | 'behindText' | 'noChangeAspect' | 'rotation'> {
@@ -128,29 +177,22 @@ export function resolveResidentObject(engine: ResidentEngineSession, handle: str
   if (!target) return null;
   if (!engine.geometryReader.hasStory(target.story) || !engine.geometryReader.hasStory(target.position.story)) return null;
   if (target.kind !== 'image') {
-    const paragraph = engine.geometryReader.paragraphSpans(target.story)
-      .find(span => target.kind === 'cell' || span.paraId === target.paraId);
+    if (target.kind === 'cell') {
+      const start = cellStart(engine, target.story);
+      const cell = resolveCell(engine, target.story);
+      if (!start || !cell || identity(engine.encodeStickyPosition(cell.at)) !== identity(target.position)) return null;
+      return { ...start, kind: target.kind, cell: cell.cell };
+    }
+    const paragraph = engine.geometryReader.paragraphSpans(target.story).find(span => span.paraId === target.paraId);
     if (!paragraph) return null;
-    const cell = target.kind === 'cell' ? resolveCell(engine, target.story) : null;
-    if (target.kind === 'cell' && !cell) return null;
-    const at = cell?.at ?? { story: target.story, paraId: paragraph.paraId, offset: paragraph.length };
+    const at = { story: target.story, paraId: paragraph.paraId, offset: paragraph.length };
     if (identity(engine.encodeStickyPosition(at)) !== identity(target.position)) return null;
-    return { story: target.story, paraId: paragraph.paraId, offset: 0, kind: target.kind, ...(cell ? { cell: cell.cell } : {}) };
+    return { story: target.story, paraId: paragraph.paraId, offset: 0, kind: target.kind };
   }
   const at = engine.resolveStickyPosition(target.position);
   if (!at || !engine.geometryReader.hasStory(at.story)) return null;
   if (identity(engine.encodeStickyPosition(at)) !== identity(target.position)) return null;
-  if (target.kind === 'image') {
-    let offset = 0;
-    const index = engine.geometryReader.paragraphSpans(at.story).findIndex(span => span.paraId === at.paraId);
-    if (index < 0) return null;
-    const found = engine.paragraphSegments(at.story, [index])[0]?.find(segment => {
-      const start = offset;
-      offset += segment.kind === 'text' ? segment.text.length : 1;
-      return start === at.offset;
-    });
-    if (found?.kind !== 'embed' || found.embedKind !== 'image') return null;
-  }
+  if (target.kind === 'image' && !imageAt(engine, at)) return null;
   return { ...at, kind: target.kind };
 }
 
@@ -301,17 +343,20 @@ export async function readResidentFrameGeometry(
     const tableRegions: DisplayListTableRegion[] = prefix === 'hf'
       ? [{ kind: 'header', rId: id }, { kind: 'footer', rId: id }] : [{ kind: 'body' }];
     const cellGeometry = new Map<string, ResidentObjectRect[]>();
+    const estimated = new Set<string>();
     for (const region of tableRegions) for (const box of deriveDisplayListSelectedCellRects(list, cells, tableKeyOf, region)) {
       const key = `${box.tableKey}:${box.row}:${box.col}`;
+      if (!box.exact) estimated.add(key);
       const bounds = cellGeometry.get(key) ?? [];
       bounds.push({ pageId: frame.pages[box.pageIndex]!.pageId.toString(), pageIndex: box.pageIndex,
-        x: box.x, y: box.y, width: box.w, height: box.h });
+        x: box.x, y: box.y, width: box.w, height: box.h, ...(box.repeatedHeader ? { repeatedHeader: true } : {}) });
       cellGeometry.set(key, bounds);
     }
     for (const table of tables) for (const cell of table.cells) {
       const boxes = cellGeometry.get(`${table.from}:${cell.row}:${cell.column}`) ?? [];
       if (boxes.length) objects.push({ kind: 'cell', story: cell.story,
-        handle: issue(engine, 'cell', { story: cell.story, paraId: cell.paraId, offset: 0 }, table.at), rects: boxes });
+        handle: issue(engine, 'cell', { story: cell.story, paraId: cell.paraId, offset: 0 }, table.at), rects: boxes,
+        cell: residentCellPlacement(table, cell, !estimated.has(`${table.from}:${cell.row}:${cell.column}`)) });
     }
     const imageStarts: number[] = [];
     if (root === 'body' || prefix === 'hf') for (const page of frame.displayList.pages) {

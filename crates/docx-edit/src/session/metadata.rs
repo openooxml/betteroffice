@@ -1,7 +1,8 @@
 use serde_json::json;
 
+use super::args::attrs_value;
 use super::{EditSessionCore, EngineError, EngineResult};
-use crate::EditCtx;
+use crate::{EditCtx, ListKind};
 
 impl EditSessionCore {
     pub fn part_metadata_json(&self) -> String {
@@ -31,6 +32,76 @@ impl EditSessionCore {
             .doc()
             .set_document_property(&EditCtx::local("", ""), key, json)
             .map_err(EngineError::message)
+    }
+
+    pub fn style_languages_json(&self) -> String {
+        self.engine.doc().style_languages_json()
+    }
+
+    pub fn set_style_language(
+        &self,
+        style_id: Option<&str>,
+        slots_json: &str,
+    ) -> EngineResult<bool> {
+        self.engine
+            .doc()
+            .set_style_language(&EditCtx::local("", ""), style_id, slots_json)
+            .map_err(EngineError::message)
+    }
+
+    pub fn patch_style_languages_xml(&self, source: &str) -> EngineResult<String> {
+        self.engine
+            .doc()
+            .patch_style_languages_xml(source)
+            .map_err(EngineError::message)
+    }
+
+    /// The paragraph attributes, as JSON, that put a paragraph on a list of `kind`, `bullet` or
+    /// `numbered`: its own list when that is of that kind, else the list of the paragraph directly
+    /// above, else below, else a new one; a paragraph already on a list keeps its own level. See
+    /// [`crate::EditingDoc::ensure_list_definition`].
+    pub fn ensure_list_definition(
+        &self,
+        story: &str,
+        para_id: &str,
+        kind: &str,
+    ) -> EngineResult<String> {
+        let kind = match kind {
+            "bullet" => ListKind::Bullet,
+            "numbered" => ListKind::Numbered,
+            _ => return Err(EngineError::message(format!("unknown list kind {kind:?}"))),
+        };
+        let attrs = self
+            .engine
+            .doc()
+            .ensure_list_definition(&EditCtx::local("", ""), story, para_id, kind)
+            .map_err(EngineError::from)?;
+        Ok(attrs_value(&attrs)?.to_string())
+    }
+
+    /// The list definitions the editor created, by key, as JSON
+    /// `[{"key","kind","levelTexts","levelFormats"}]`.
+    pub fn created_list_definitions_json(&self) -> String {
+        let definitions: Vec<_> = self
+            .engine
+            .doc()
+            .created_list_definitions()
+            .into_iter()
+            .map(|definition| {
+                json!({
+                    "key": definition.key,
+                    "kind": definition.kind.name(),
+                    "levelTexts": definition.level_texts,
+                    "levelFormats": definition.level_formats(),
+                })
+            })
+            .collect();
+        serde_json::Value::Array(definitions).to_string()
+    }
+
+    /// The keys of the created list definitions some paragraph is on, as a JSON array.
+    pub fn list_definition_keys_in_use_json(&self) -> String {
+        json!(self.engine.doc().list_definition_keys_in_use()).to_string()
     }
 
     pub fn list_sections_json(&self) -> EngineResult<String> {
@@ -68,7 +139,7 @@ impl EditSessionCore {
             .engine
             .doc()
             .create_story(story_id, initial_text, p_style, alignment)
-            .map_err(EngineError::message)?;
+            .map_err(EngineError::from)?;
         Ok(json!({ "paraId": para_id }).to_string())
     }
 
@@ -77,6 +148,6 @@ impl EditSessionCore {
         self.engine
             .doc()
             .delete_story(story_id)
-            .map_err(EngineError::message)
+            .map_err(EngineError::from)
     }
 }

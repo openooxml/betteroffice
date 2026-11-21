@@ -54,8 +54,15 @@ pub(super) struct Lineage {
 
 impl Lineage {
     fn capture(workbook: &Workbook) -> SnapshotResult<Self> {
+        let built = workbook
+            .authority()
+            .map_err(|failure| error(failure.to_string()))?;
         let Workbook {
-            authority,
+            #[cfg(feature = "fonts")]
+                font_manager: _,
+            #[cfg(all(feature = "fonts", feature = "raster"))]
+                fonts: _,
+            authority: _,
             mode: _,
             pending_remote_updates,
             model,
@@ -73,6 +80,7 @@ impl Lineage {
             active_sheet,
             undo,
             graph: _,
+            graph_reuse: _,
             rand_seed,
             proposals,
             last_calculation: _,
@@ -84,7 +92,9 @@ impl Lineage {
             version_nonce,
             committed_changes,
             chart_cache: _,
+            conditional_cache: _,
             source_part_hashes: _,
+            calculated_now: _,
         } = workbook;
         workbook.require_snapshot_standalone()?;
         if *edited_since_open
@@ -147,9 +157,9 @@ impl Lineage {
             active_sheet: *active_sheet,
             seed: *rand_seed,
             recalculated: *recalculated_since_open,
-            projection_valid: authority.snapshot_projection_valid()?,
-            state_vector: authority.encode_state_vector_v1(),
-            authority_revision: authority.snapshot_revision(),
+            projection_valid: built.snapshot_projection_valid()?,
+            state_vector: built.encode_state_vector_v1(),
+            authority_revision: built.snapshot_revision(),
         })
     }
 
@@ -179,10 +189,13 @@ impl Lineage {
         if !observers.listeners.is_empty() || observers.next_id != 0 {
             return Ok(false);
         }
+        let Some(built) = workbook.authority.built.get() else {
+            return Ok(false);
+        };
         let mut proposals = workbook.proposals.clone();
         Ok(proposals.next_id() == "p1"
-            && self.projection_valid == workbook.authority.snapshot_projection_valid()?
-            && self.authority_revision == workbook.authority.snapshot_revision())
+            && self.projection_valid == built.snapshot_projection_valid()?
+            && self.authority_revision == built.snapshot_revision())
     }
 }
 
@@ -244,7 +257,9 @@ impl WorkbookSnapshotEncoder {
         let part_budget = SnapshotBudget::new(1, part_bytes)?;
         let record_budget = record_budget()?;
         let authority = AuthoritySnapshotEncoder::new(
-            &workbook.authority,
+            workbook
+                .authority()
+                .map_err(|failure| error(failure.to_string()))?,
             SnapshotBudget::new(budget.max_records(), part_bytes)?,
         )?;
         let split_fallback = authority.split_fallback();
@@ -254,6 +269,7 @@ impl WorkbookSnapshotEncoder {
             cycle_cells,
             limited_cells,
             budget_exhausted: _,
+            unevaluated_cells: _,
         } = &workbook.last_calculation;
         let calculation_counts = [changed.len(), cycle_cells.len(), limited_cells.len()];
         let header_count = calculation_counts.iter().try_fold(1u64, |total, count| {
@@ -289,7 +305,10 @@ impl WorkbookSnapshotEncoder {
                 .div_ceil(part_budget.max_bytes())
                 .max(1) as u64;
         }
-        let (client_id, guid, next_sheet_id) = workbook.authority.snapshot_identity();
+        let (client_id, guid, next_sheet_id) = workbook
+            .authority()
+            .map_err(|failure| error(failure.to_string()))?
+            .snapshot_identity();
         let header = SnapshotHeader {
             snapshot_id,
             mode: SnapshotMode::Standalone,
@@ -432,6 +451,7 @@ impl WorkbookSnapshotEncoder {
                         cycle_cells,
                         limited_cells,
                         budget_exhausted: _,
+                        unevaluated_cells: _,
                     } = &workbook.last_calculation;
                     let lists = [changed, cycle_cells, limited_cells];
                     while let Some(list) = lists.get(self.calculation_list) {
@@ -979,6 +999,7 @@ pub struct WorkbookSnapshotBuilder {
     source: Option<SourceBuilder>,
     source_received_bytes: usize,
     restored: Option<Workbook>,
+    projection_valid: bool,
     graph: Option<SnapshotGraphBuilder>,
     anchor_sheet: usize,
     anchor_chart: usize,
@@ -992,6 +1013,21 @@ pub struct WorkbookSnapshotBuilder {
     calculation_context: Option<CalculationOptions>,
     base_admission: StreamAdmission,
     facts_admission: StreamAdmission,
+    unevaluated: Unevaluated,
+}
+
+/// the restored session's re-derivation of the cells an uncomputable or
+/// unknown call leaves unevaluated, a step per advance like every other phase.
+enum Unevaluated {
+    /// looking through defined names, then each sheet's cells after the last
+    /// one looked at, for a formula that may call an uncomputable function.
+    Scan {
+        name: usize,
+        sheet: usize,
+        after: Option<CellRef>,
+    },
+    Derive(Box<xlsx_calc::Derivation>),
+    Done,
 }
 
 impl WorkbookSnapshotBuilder {
@@ -1015,6 +1051,7 @@ impl WorkbookSnapshotBuilder {
             source: None,
             source_received_bytes: 0,
             restored: None,
+            projection_valid: false,
             graph: None,
             anchor_sheet: 0,
             anchor_chart: 0,
@@ -1029,6 +1066,11 @@ impl WorkbookSnapshotBuilder {
             calculation_context: None,
             base_admission: StreamAdmission::default(),
             facts_admission: StreamAdmission::default(),
+            unevaluated: Unevaluated::Scan {
+                name: 0,
+                sheet: 0,
+                after: None,
+            },
         }
     }
 
@@ -1345,6 +1387,7 @@ impl WorkbookSnapshotBuilder {
             cycle_cells,
             limited_cells,
             budget_exhausted: _,
+            unevaluated_cells: _,
         } = &mut state.header.last_calculation;
         match state.calculation_list {
             0 => changed.push(address),
@@ -1372,6 +1415,7 @@ impl WorkbookSnapshotBuilder {
             cycle_cells,
             limited_cells,
             budget_exhausted: _,
+            unevaluated_cells: _,
         } = &mut state.header.last_calculation;
         let list = match state.calculation_list {
             0 => changed,
@@ -1556,6 +1600,7 @@ impl WorkbookSnapshotBuilder {
                 && !matches!(
                     failure.to_string().as_str(),
                     "snapshot graph record exceeds advance byte budget"
+                        | "snapshot formula exceeds advance byte budget"
                         | "snapshot decoding exceeds advance byte budget"
                         | "snapshot authority exceeds advance byte budget"
                         | "Yrs snapshot record exceeds advance byte budget"
@@ -1730,12 +1775,16 @@ impl WorkbookSnapshotBuilder {
             return Ok(SnapshotProgress::pending());
         }
         if !self.authority_validated {
-            self.authority_validated = workbook.authority.validate_snapshot_model(
-                &mut workbook.model,
-                &mut self.authority_validation,
-                &mut self.authority_keys,
-                budget,
-            )?;
+            self.authority_validated = workbook
+                .authority
+                .get()
+                .map_err(|failure| error(failure.to_string()))?
+                .validate_snapshot_model(
+                    &mut workbook.model,
+                    &mut self.authority_validation,
+                    &mut self.authority_keys,
+                    budget,
+                )?;
             return Ok(SnapshotProgress::pending());
         }
         if !self.anchors_done {
@@ -1785,6 +1834,65 @@ impl WorkbookSnapshotBuilder {
             crate::snapshot::step::record(records, bytes);
             return Ok(SnapshotProgress::pending());
         }
+        if let Unevaluated::Scan { name, sheet, after } = &mut self.unevaluated {
+            let model = &workbook.model;
+            let mut records = 0;
+            let mut bytes = 0usize;
+            let mut found = false;
+            let mut finished = false;
+            while records < budget.max_records() {
+                let (formula, next) = if let Some(defined) = model.defined_names.get(*name) {
+                    (Some(defined.formula.as_str()), (*name + 1, *sheet, *after))
+                } else if let Some(cells) = model.sheets.get(*sheet) {
+                    let start = after.map_or(CellRef::new(0, 0), |at| {
+                        CellRef::new(at.row, at.col.saturating_add(1))
+                    });
+                    let row = cells.cells_in_range(xlsx_model::CellRange::new(
+                        start,
+                        CellRef::new(start.row, u32::MAX),
+                    ));
+                    let later = cells.cells_in_range(xlsx_model::CellRange::new(
+                        CellRef::new(start.row.saturating_add(1), 0),
+                        CellRef::new(u32::MAX, u32::MAX),
+                    ));
+                    match row.chain(later).find(|&(at, _)| Some(at) != *after) {
+                        Some((at, cell)) => (cell.formula.as_deref(), (*name, *sheet, Some(at))),
+                        None => (None, (*name, *sheet + 1, None)),
+                    }
+                } else {
+                    finished = true;
+                    break;
+                };
+                let cost = formula.map_or(0, str::len).max(16);
+                if cost > budget.max_bytes().saturating_sub(bytes) {
+                    if records == 0 {
+                        return Err(error("snapshot formula exceeds advance byte budget"));
+                    }
+                    break;
+                }
+                (*name, *sheet, *after) = next;
+                records += 1;
+                bytes += cost;
+                if formula.is_some_and(xlsx_calc::functions::may_call_uncomputable) {
+                    found = true;
+                    break;
+                }
+            }
+            crate::snapshot::step::record(records, bytes);
+            if found {
+                let now_serial = self
+                    .calculation_context
+                    .and_then(|context| context.now_serial);
+                let derivation = xlsx_calc::Derivation::new(now_serial, workbook.rand_seed);
+                self.unevaluated = Unevaluated::Derive(Box::new(derivation));
+                if workbook.graph.is_none() && self.graph.is_none() {
+                    self.graph = Some(SnapshotGraphBuilder::new());
+                }
+            } else if finished {
+                self.unevaluated = Unevaluated::Done;
+            }
+            return Ok(SnapshotProgress::pending());
+        }
         if let Some(graph) = self.graph.as_mut() {
             #[cfg(test)]
             let migrated = graph.migrated_entries();
@@ -1822,6 +1930,24 @@ impl WorkbookSnapshotBuilder {
                 .ok_or_else(|| error("completed graph builder is missing"))?
                 .finish();
         }
+        if let Unevaluated::Derive(derivation) = &mut self.unevaluated {
+            let graph = workbook
+                .graph
+                .as_ref()
+                .ok_or_else(|| error("snapshot graph is missing"))?;
+            let step = derivation.advance(&workbook.model, graph, budget.max_records());
+            crate::snapshot::step::record(step.work, 0);
+            if !step.done {
+                return Ok(SnapshotProgress::pending());
+            }
+            workbook.adopt_derived_unevaluated();
+            self.unevaluated = Unevaluated::Done;
+        }
+        workbook
+            .authority
+            .get_mut()
+            .map_err(|failure| error(failure.to_string()))?
+            .set_snapshot_projection_valid(self.projection_valid);
         self.ready = Some(HydratedWorkbook {
             workbook: self
                 .restored
@@ -1864,7 +1990,7 @@ impl WorkbookSnapshotBuilder {
             .take()
             .ok_or_else(|| error("snapshot authority builder is missing"))?
             .finish_drained()?;
-        authority.set_snapshot_projection_valid(projection_valid);
+        self.projection_valid = projection_valid;
         let model_builder = self
             .model
             .take()
@@ -1912,6 +2038,9 @@ impl WorkbookSnapshotBuilder {
             return Err(error("snapshot calculation precision differs"));
         }
         authority.restore_full_precision(model.full_precision);
+        if authority.reads_builtin_number_formats() {
+            model.styles.read_builtin_number_formats();
+        }
         if !model.styles.has_xf_xml_markers()
             && let Some(source) = &source_container
             && let Some(styles) = super::source_style_xml_markers(source.as_bytes())
@@ -1966,7 +2095,15 @@ impl WorkbookSnapshotBuilder {
             authority_revision: authority.snapshot_revision(),
         });
         self.restored = Some(Workbook {
-            authority,
+            #[cfg(feature = "fonts")]
+            font_manager: betteroffice_fonts::FontManager::new(
+                &crate::OpenOptions::default().font_source,
+                crate::OpenOptions::default().font_loading,
+            )
+            .map_err(|source| error(source.to_string()))?,
+            #[cfg(all(feature = "fonts", feature = "raster"))]
+            fonts: Mutex::new(crate::font::FontRegistry::default()),
+            authority: super::AuthoritySlot::built(authority),
             mode: WorkbookMode::Standalone,
             pending_remote_updates: Vec::new(),
             model,
@@ -1985,6 +2122,7 @@ impl WorkbookSnapshotBuilder {
             active_sheet,
             undo: UndoStack::new(),
             graph: None,
+            graph_reuse: super::GraphReuse::default(),
             rand_seed,
             proposals: ProposalSet::new(),
             last_calculation,
@@ -1996,7 +2134,9 @@ impl WorkbookSnapshotBuilder {
             version_nonce,
             committed_changes,
             chart_cache: Mutex::new(ChartCache::default()),
+            conditional_cache: Mutex::default(),
             source_part_hashes: Mutex::new(BTreeMap::new()),
+            calculated_now: None,
         });
         Ok(())
     }

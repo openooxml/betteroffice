@@ -83,6 +83,7 @@ test(`docx Insert table grid supports keyboard navigation and inserts its dimens
 
   const menu = page.getByRole('menu', { name: 'Insert' });
   const tableItem = menu.getByRole('menuitem', { name: 'Table', exact: true });
+  await expect(tableItem).toBeEnabled();
   await tableItem.focus();
   await page.keyboard.press('ArrowRight');
 
@@ -138,7 +139,9 @@ test(`docx Insert submenus continue to open on mouse hover (${label})`, async ({
   const grid = page.getByRole('grid', { name: 'Table size selector' });
   const breakMenu = page.getByRole('menu', { name: 'Break' });
 
-  await menu.getByRole('menuitem', { name: 'Table', exact: true }).hover();
+  const tableItem = menu.getByRole('menuitem', { name: 'Table', exact: true });
+  await expect(tableItem).toBeEnabled();
+  await tableItem.hover();
   await expect(grid).toBeVisible();
   await page.mouse.move(0, 0);
   await expect(grid).toBeHidden();
@@ -171,6 +174,7 @@ test(`docx table grid keeps row and boundary navigation inside the picker (${lab
   await page.keyboard.press('Enter');
   const menu = page.getByRole('menu', { name: 'Insert' });
   const table = menu.getByRole('menuitem', { name: 'Table', exact: true });
+  await expect(table).toBeEnabled();
   await table.focus();
   await page.keyboard.press('Space');
   const grid = page.getByRole('grid', { name: 'Table size selector' });

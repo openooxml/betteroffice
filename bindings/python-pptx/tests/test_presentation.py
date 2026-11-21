@@ -260,6 +260,11 @@ def test_format_text_may_cross_a_paragraph_boundary(deck):
     ] == ["es,", "withou"]
 
 
+def test_render_slide_uses_the_bundled_fonts_without_registration(sample_bytes):
+    assert len(bo.Presentation.open(sample_bytes).render_slide(0)) > 0
+
+
+@pytest.mark.without_font_packs
 def test_render_slide_needs_a_registered_font(deck):
     with pytest.raises(bo.RenderError, match="font"):
         deck.render_slide(0)
@@ -575,7 +580,7 @@ ops = {
     "open": lambda: bo.Presentation.open(saved),
     "register_font": lambda: holder["deck"].register_font("Probe", heavy_font),
     "render_slide": lambda: holder["deck"].render_slide(0),
-    "render_png": lambda: holder["deck"].render_png(0),
+    "render_png": lambda: holder["deck"].render_png({"slide": 0}),
     "save": lambda: holder["deck"].save(),
     "apply_update": lambda: holder["peer"].apply_update(holder["update"]),
 }
@@ -971,11 +976,16 @@ def test_touching_a_presentation_off_its_thread_escapes_except_exception(deck):
 
 def test_dropping_a_presentation_off_its_thread_leaks_it(sample_bytes, monkeypatch):
     """pyo3 skips the Rust destructor and writes an unraisable error instead."""
+    gc.collect()
     unraisable: list = []
     monkeypatch.setattr(sys, "unraisablehook", unraisable.append)
     holder = [bo.Presentation.open(sample_bytes)]
 
-    _on_a_worker_thread(holder.clear)
+    gc.disable()
+    try:
+        _on_a_worker_thread(holder.clear)
+    finally:
+        gc.enable()
 
     assert [type(hook.exc_value).__name__ for hook in unraisable] == ["RuntimeError"]
     assert "unsendable" in str(unraisable[0].exc_value)

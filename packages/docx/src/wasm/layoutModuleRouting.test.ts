@@ -5,8 +5,9 @@ import * as editGlue from './generated/edit/docx_edit.js';
 import { wasmModuleMemories } from './loadWasmAsset';
 import { paragraphPatchWriterVersionWire, parseWasmState } from './parse';
 import { queryWasmState } from './query';
+import { engineKind } from './engineEdit';
 
-test('main-thread queries use only query wasm with an idle or compiled worker engine', async () => {
+test.skipIf(engineKind === 'native')('main-thread queries use only query wasm with an idle or compiled worker engine', async () => {
   expect(editWasmState.status()).toBe('idle');
   const instances: WebAssembly.Instance[] = [];
   const counted = (result: WebAssembly.Instance | WebAssembly.WebAssemblyInstantiatedSource) => {

@@ -166,6 +166,7 @@ function DefaultToolbarItems() {
         <ToolbarCommandButton id="bold" />
         <ToolbarCommandButton id="italic" />
         <ToolbarCommandButton id="underline" />
+        <ToolbarCommandButton id="strikethrough" />
         <ToolbarCommand id="textColor" />
       </ToolbarGroup>
       <ToolbarSeparator />

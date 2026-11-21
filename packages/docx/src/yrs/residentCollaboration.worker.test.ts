@@ -24,7 +24,7 @@ beforeAll(async () => {
   await openCommandEngine();
   await preloadOpcWasm(new Uint8Array(readFileSync(resolve(process.cwd(), 'packages/docx/src/wasm/generated/opc/ooxml_opc_bg.wasm'))));
   start = await residentWorkerFactory({ transferBuffers: true });
-});
+}, 30_000);
 afterEach(closeCommandEngines);
 
 const REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
@@ -172,6 +172,31 @@ test('a pinned session reports its own clocks held at open and merged from a pee
     expect(clocks[0]).toBeGreaterThan(held);
     expect(b.opened.clientClock).toBe(held);
   } finally { off(); a.session.dispose(); b.session.dispose(); }
+}, TIMEOUT);
+
+test('a reload with the same client id keeps earlier comments and revision ids when new ones are added', async () => {
+  const bytes = documentBytes();
+  const seed = await open(9530, undefined, undefined, bytes, start());
+  const a = await open(9531, seed.engine.encodeState(), undefined, bytes, start());
+  const edit = async (replica: Replica, index: number, body: string, text: string) => {
+    const paraId = replica.engine.paragraphs('body')[index]!.paraId;
+    expect((await replica.session.submit('addComment', { ranges: [{ story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 4 } }],
+      author: 'Ada', date: '2026-01-01', body, expectVersion: replica.engine.proposalEngine.version() }).ack).status).toBe('applied');
+    const at = { story: 'body', paraId, offset: 2 };
+    expect((await replica.session.submit('insertText', { selection: { anchor: at, focus: at }, text,
+      suggesting: { name: 'Ada', date: '2026-01-01' } }).ack).status).toBe('applied');
+  };
+  await edit(a, 0, 'First', 'one');
+  const b = await open(9531, a.engine.encodeState(), undefined, bytes, start());
+  try {
+    expect(b.opened.clientId).toBe(9531);
+    expect(b.engine.clientId).toBe(9531);
+    await edit(b, 1, 'Second', 'two');
+    expect(b.engine.listComments().map(comment => comment.body).sort()).toEqual(['First', 'Second']);
+    expect(new Set(b.engine.listComments().map(comment => comment.id)).size).toBe(2);
+    const revisionIds = b.engine.proposalEngine.listRevisions().map(({ revisionId }) => revisionId);
+    expect(new Set(revisionIds).size).toBe(2);
+  } finally { seed.session.dispose(); a.session.dispose(); b.session.dispose(); }
 }, TIMEOUT);
 
 test('two worker command sessions converge with reordered and duplicated updates', async () => {

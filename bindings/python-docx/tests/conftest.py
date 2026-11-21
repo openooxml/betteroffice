@@ -1,3 +1,11 @@
+import os
+import subprocess
+import sys
+
+WITHOUT_FONT_PACKS = os.environ.get("BETTEROFFICE_TEST_WITHOUT_FONT_PACKS") == "1"
+if WITHOUT_FONT_PACKS:
+    sys.modules["betteroffice_fonts_packs"] = None
+
 import io
 import json
 import zipfile
@@ -103,6 +111,41 @@ def nested_table_bytes() -> bytes:
 
 
 @pytest.fixture(scope="session")
+def highlight_and_merge_bytes() -> bytes:
+    """Runs with and without a highlight, and a table whose cells span and merge."""
+
+    def run(properties: str, text: str) -> str:
+        return f"<w:r><w:rPr>{properties}</w:rPr><w:t>{text}</w:t></w:r>"
+
+    def cell(properties: str, text: str) -> str:
+        return f"<w:tc><w:tcPr>{properties}</w:tcPr><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:tc>"
+
+    document = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f'<w:document xmlns:w="{W}"><w:body><w:p>'
+        + run('<w:highlight w:val="yellow"/>', "marked")
+        + run('<w:highlight w:val="none"/>', "cleared")
+        + run('<w:highlight w:val=""/>', "empty")
+        + run("<w:b/>", "bold")
+        + "<w:r><w:t>plain</w:t></w:r></w:p><w:tbl><w:tr>"
+        + cell('<w:gridSpan w:val="2"/>', "wide")
+        + cell('<w:vMerge w:val="restart"/>', "tall")
+        + "</w:tr><w:tr>"
+        + cell("", "left")
+        + "<w:tc><w:p><w:r><w:t>bare</w:t></w:r></w:p></w:tc>"
+        + cell("<w:vMerge/>", "below")
+        + "</w:tr><w:tr>"
+        + cell('<w:gridSpan w:val="1"/>', "single")
+        + cell("", "middle")
+        + cell('<w:vMerge w:val="continue"/>', "lower")
+        + "</w:tr><w:tr>"
+        + cell("", "alone")
+        + "</w:tr></w:tbl><w:sectPr/></w:body></w:document>"
+    )
+    return _package({**PARTS, "word/document.xml": document})
+
+
+@pytest.fixture(scope="session")
 def duplicate_id_package() -> "Callable[..., bytes]":
     """Builds a package as Word writes it: `1A2B3C4D` repeats in the body, a
     nested table cell and a content control, and the last paragraph's ID is
@@ -161,3 +204,30 @@ def layout_input() -> "dict[str, Any]":
 @pytest.fixture(scope="session")
 def font_bytes() -> bytes:
     return _read(FONTS / "Carlito-Regular.ttf")
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "without_font_packs: runs only in the child process that cannot import the font pack wheels",
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    if WITHOUT_FONT_PACKS:
+        return
+    skip = pytest.mark.skip(reason="runs in test_font_packs.py without the font pack wheels")
+    for item in items:
+        if "without_font_packs" in item.keywords:
+            item.add_marker(skip)
+
+
+def run_without_font_packs() -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-m", "without_font_packs",
+         str(Path(__file__).parent)],
+        env={**os.environ, "BETTEROFFICE_TEST_WITHOUT_FONT_PACKS": "1"},
+        capture_output=True,
+        text=True,
+        timeout=900,
+    )

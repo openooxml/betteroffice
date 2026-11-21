@@ -4,7 +4,7 @@
 //! and re-emit unchanged markup, so every byte outside an explicitly changed
 //! paragraph remains authored exactly as it appeared in the source package.
 
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
@@ -31,17 +31,17 @@ use crate::vml::Watermark;
 use crate::xml::ParseError;
 
 use super::comment_references::{ParagraphLocation, normalize_comment_references};
-use super::context::SerializerContext;
+use super::context::{S13SaveReport, SerializerContext};
 use super::numbering::serialize_numbering_xml;
 use super::paragraph::serialize_paragraph;
 use super::paragraph_ids::{
-    COMMENTS_PART, S13ParagraphIds, S13SplicedPart, apply_assignments, comment_companions,
-    model_paragraph_ids, patch_comment_parts, patch_part,
+    COMMENTS_PART, S13ParagraphIds, S13SplicedPart, S13TouchedPart, S13WholePart,
+    apply_assignments, comment_companions, model_paragraph_ids, patch_comment_parts, patch_part,
 };
 use super::parts::{
     serialize_comments_extended_part, serialize_comments_extensible_part,
-    serialize_comments_ids_part, serialize_comments_with_info, serialize_document_part,
-    serialize_endnotes_part, serialize_footnotes_part, serialize_header_footer_part,
+    serialize_comments_ids_part, serialize_document_part, serialize_endnotes_part,
+    serialize_footnotes_part, serialize_header_footer_part,
 };
 use super::raw::{validate_math_subtree, validate_raw_subtree, validate_replayed_fragment};
 use super::s10::SerializerDeterminism;
@@ -160,7 +160,8 @@ pub fn write_docx_s13_with_warnings(
     original_docx: &[u8],
 ) -> Result<(Vec<u8>, Vec<String>), ParseError> {
     let original_parts = ooxml_opc::unzip_parts(original_docx).map_err(ParseError::Container)?;
-    write_docx_s13_parts_with_warnings(request, &original_parts, Some(original_docx))
+    write_docx_s13_parts_with_report(request, &original_parts, Some(original_docx))
+        .map(|(bytes, report)| (bytes, report.warnings))
 }
 
 /// [`write_docx_s13`] seeded from already-inflated parts. `source` is the
@@ -171,19 +172,41 @@ pub fn write_docx_s13_parts(
     original_parts: &[(String, Vec<u8>)],
     source: Option<&[u8]>,
 ) -> Result<Vec<u8>, ParseError> {
-    write_docx_s13_parts_with_warnings(request, original_parts, source).map(|(bytes, _)| bytes)
+    write_docx_s13_parts_with_report(request, original_parts, source).map(|(bytes, _)| bytes)
 }
 
-fn write_docx_s13_parts_with_warnings(
+/// [`write_docx_s13_parts`] returning the save's diagnostics beside its bytes.
+pub fn write_docx_s13_parts_with_report(
     mut request: S13SaveRequest,
     original_parts: &[(String, Vec<u8>)],
     source: Option<&[u8]>,
-) -> Result<(Vec<u8>, Vec<String>), ParseError> {
+) -> Result<(Vec<u8>, S13SaveReport), ParseError> {
     request.determinism.validate()?;
     let limits = crate::xml::ParseLimits::default();
     let mut budget = crate::xml::ParseBudget::new(&limits);
     let document_path = crate::relationships::office_document_path(original_parts, &mut budget)?;
     let mut package = Package::new(original_parts, document_path);
+    let mut removed_comments = match (
+        package.original_bytes(COMMENTS_PART),
+        request.document.comments.as_deref(),
+    ) {
+        (Some(source), Some(comments)) => {
+            super::comment_splice::removed_comment_ids(source, comments)?
+        }
+        _ => HashSet::new(),
+    };
+    if let Some(plan) = &request.paragraph_ids {
+        for id in &plan.removed_comment_ids {
+            if request.document.comments.as_ref().is_some_and(|comments| {
+                comments
+                    .iter()
+                    .any(|comment| super::xml_writer::js_number(comment.id) == *id)
+            }) {
+                return Err(save_error("removed comment is still present"));
+            }
+            removed_comments.insert(id.clone());
+        }
+    }
     if let Some(ids) = &mut request.paragraph_ids {
         let patched_parts = &ids.patched_parts;
         ids.spliced_parts.retain(|part| {
@@ -280,14 +303,18 @@ fn write_docx_s13_parts_with_warnings(
         context.set_chart_drawings(chart_drawings_in_part(
             &package.text("word/document.xml").unwrap_or_default(),
         ));
+        context.set_group_drawings(group_drawings_in_part(
+            &package.text("word/document.xml").unwrap_or_default(),
+        ));
         let patched =
             build_source_patched_document_xml(&request.document, original, sources, &mut context)?;
         package.set_text("word/document.xml", patched);
         update_core_part(&request.options, &mut package, context.now());
         let bytes = rezip_package(&package, source)?;
-        return Ok((bytes, context.take_warnings()));
+        return Ok((bytes, context.take_report()));
     }
     let relationships: IndexMap<_, _> = request.relationship_entries.iter().cloned().collect();
+    let reports_dropped = request.paragraph_ids.is_some();
     let paragraph_ids = request.paragraph_ids.take().unwrap_or_default();
     paragraph_ids.validate()?;
     if let Some(sections) = &paragraph_ids.section_edits {
@@ -308,7 +335,7 @@ fn write_docx_s13_parts_with_warnings(
                 .ok_or_else(|| save_error("unsafe section XML patch"))?;
             package.set_text("word/document.xml", patched);
             update_core_part(&request.options, &mut package, &request.determinism.now);
-            return Ok((rezip_package(&package, source)?, Vec::new()));
+            return Ok((rezip_package(&package, source)?, S13SaveReport::default()));
         }
     }
     apply_paragraph_id_assignments(&mut request, &paragraph_ids, &relationships, &package)?;
@@ -344,10 +371,45 @@ fn write_docx_s13_parts_with_warnings(
         .filter(|part| part.part != COMMENTS_PART && !patched.contains_key(part.part.as_str()))
         .map(|part| (package.resolve_path(&part.part).to_owned(), part))
         .collect();
+    let whole: HashMap<String, &S13WholePart> = paragraph_ids
+        .whole_parts
+        .iter()
+        .filter(|part| part.part != COMMENTS_PART && !patched.contains_key(part.part.as_str()))
+        .map(|part| (package.resolve_path(&part.part).to_owned(), part))
+        .collect();
+    let touched: HashMap<String, &S13TouchedPart> = paragraph_ids
+        .touched_parts
+        .iter()
+        .map(|part| (package.resolve_path(&part.part).to_owned(), part))
+        .collect();
+    let kept_as_source: HashSet<String> = patched_parts.keys().cloned().collect();
+    let commented = spliced.keys().any(|path| {
+        package
+            .original_bytes(path)
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .is_some_and(|xml| xml.contains("<w:comment"))
+    });
+    let held_comments = if commented {
+        held_comment_markers(&request, &relationships)
+    } else {
+        super::splice::CommentKeys::new()
+    };
     let stories = StoryParts {
         spliced: &spliced,
+        kept_as_source: &kept_as_source,
+        whole: &whole,
+        touched: &touched,
         assignments: &assignments,
         strict: paragraph_ids.section_edits.is_some(),
+        boundaries_stay: paragraph_ids
+            .section_edits
+            .as_ref()
+            .is_none_or(|sections| sections.edits.iter().all(|edit| edit.paragraph.is_none())),
+        reports_dropped,
+        comments: super::splice::SavedComments {
+            deleted: &removed_comments,
+            held: &held_comments,
+        },
         processed: RefCell::new(HashSet::new()),
     };
 
@@ -417,6 +479,9 @@ fn write_docx_s13_parts_with_warnings(
     context.set_chart_drawings(chart_drawings_in_part(
         &package.text(&package.document_path).unwrap_or_default(),
     ));
+    context.set_group_drawings(group_drawings_in_part(
+        &package.text(&package.document_path).unwrap_or_default(),
+    ));
     let document_xml = if let Some(patched) = patched_parts.remove(&package.document_path) {
         String::from_utf8(patched).map_err(|error| save_error(error.to_string()))?
     } else if let Some(selective) = request.selective.as_ref() {
@@ -431,9 +496,17 @@ fn write_docx_s13_parts_with_warnings(
         )? {
             Some(patched) => patched,
             None => {
-                let serialized = serialize_document_part(&request.document, &mut context)?;
-                build_patched_document_xml(&original, &serialized, &selective.changed_para_ids)
-                    .ok_or_else(|| save_error("selective document patch is unsafe"))?
+                context.begin_form_data_tokens(&original);
+                let serialized = serialize_document_part(&request.document, &mut context);
+                let deferred = context.end_form_data_tokens();
+                let patched = build_patched_document_xml(
+                    &original,
+                    &serialized?,
+                    &selective.changed_para_ids,
+                )
+                .ok_or_else(|| save_error("selective document patch is unsafe"))?;
+                super::paragraph::reject_form_data_tokens(&patched, &deferred)?;
+                patched
             }
         }
     } else {
@@ -515,7 +588,7 @@ fn write_docx_s13_parts_with_warnings(
             &mut context,
             &request.determinism.seed,
             !patched.contains_key(COMMENTS_PART) && !assignments.contains_key(COMMENTS_PART),
-        );
+        )?;
     }
 
     let document_rels = package
@@ -593,12 +666,149 @@ fn write_docx_s13_parts_with_warnings(
             ));
         }
     }
+    if !removed_comments.is_empty() {
+        let mut parts = HashSet::from([package.document_path.clone()]);
+        for relationship in relationships.values() {
+            if matches!(
+                relationship.relationship_type.as_str(),
+                relationship_types::HEADER
+                    | relationship_types::FOOTER
+                    | relationship_types::FOOTNOTES
+                    | relationship_types::ENDNOTES
+            ) {
+                parts.insert(resolve_relative_path(
+                    &package.document_path,
+                    &relationship.target,
+                )?);
+            }
+        }
+        let updated = package
+            .refs()
+            .into_iter()
+            .filter(|(path, _)| parts.contains(path))
+            .map(|(path, bytes)| {
+                let xml =
+                    std::str::from_utf8(bytes).map_err(|error| save_error(error.to_string()))?;
+                let cleaned = super::splice::remove_comment_markers(xml, &removed_comments)
+                    .ok_or_else(|| save_error("deleted comment markers could not be removed"))?;
+                Ok((path, cleaned))
+            })
+            .collect::<Result<Vec<_>, ParseError>>()?;
+        for (path, xml) in updated {
+            package.set_text(path, xml);
+        }
+    }
     update_core_part(&request.options, &mut package, context.now());
     let bytes = rezip_package(&package, source)?;
-    Ok((bytes, context.take_warnings()))
+    Ok((bytes, context.take_report()))
 }
 
 /// Authored chart placements in one story part, keyed by relationship id.
+/// The part's `w:drawing` elements whose graphic is a group or canvas, keyed by `wp:docPr` id.
+fn group_drawings_in_part(xml: &str) -> HashMap<String, String> {
+    let mut drawings = HashMap::new();
+    if !xml.contains("/wordprocessingGroup") && !xml.contains("/wordprocessingCanvas") {
+        return drawings;
+    }
+    let mut repeated = HashSet::new();
+    let Some(tags) = crate::paragraph_identity::tags(xml) else {
+        return drawings;
+    };
+    let local = |name: &str| {
+        name.rsplit_once(':')
+            .map_or(name, |(_, local)| local)
+            .to_owned()
+    };
+    let declarations = |tag: &crate::paragraph_identity::Tag<'_>| -> Vec<(String, String)> {
+        tag.attributes
+            .iter()
+            .filter_map(|(name, range)| {
+                name.strip_prefix("xmlns:")
+                    .map(|prefix| (prefix.to_owned(), xml[range.clone()].to_owned()))
+            })
+            .collect()
+    };
+    let mut depth = 0usize;
+    let mut scopes: Vec<Vec<(String, String)>> = Vec::new();
+    let mut open: Vec<(usize, usize, usize)> = Vec::new();
+    for (index, tag) in tags.iter().enumerate() {
+        if tag.end {
+            depth = depth.saturating_sub(1);
+            scopes.pop();
+            if local(tag.name) == "drawing"
+                && let Some(&(at, start, first)) = open.last()
+                && at == depth
+            {
+                open.pop();
+                let inner = &tags[first..index];
+                let group = inner
+                    .iter()
+                    .find(|tag| !tag.end && local(tag.name) == "graphicData")
+                    .and_then(|tag| {
+                        tag.attributes
+                            .iter()
+                            .find(|(name, _)| *name == "uri")
+                            .map(|(_, range)| &xml[range.clone()])
+                    })
+                    .is_some_and(|uri| {
+                        uri.ends_with("/wordprocessingGroup")
+                            || uri.ends_with("/wordprocessingCanvas")
+                    });
+                let id = inner
+                    .iter()
+                    .find(|tag| !tag.end && local(tag.name) == "docPr")
+                    .and_then(|tag| {
+                        tag.attributes
+                            .iter()
+                            .find(|(name, _)| *name == "id")
+                            .and_then(|(_, range)| {
+                                crate::paragraph_identity::unescaped(xml, range.clone())
+                            })
+                    });
+                if group && let Some(id) = id {
+                    let mut span = xml[start..tag.range.end].to_owned();
+                    let Some(required) = super::splice::required_prefixes(&span) else {
+                        continue;
+                    };
+                    let required: Vec<String> = required.into_iter().map(str::to_owned).collect();
+                    let mut bindings = String::new();
+                    for prefix in required {
+                        if prefix == "xml" || prefix == "xmlns" {
+                            continue;
+                        }
+                        if let Some((_, uri)) = scopes
+                            .iter()
+                            .skip(1)
+                            .rev()
+                            .flat_map(|scope| scope.iter().rev())
+                            .find(|(bound, _)| *bound == prefix)
+                        {
+                            bindings.push_str(&format!(" xmlns:{prefix}=\"{uri}\""));
+                        }
+                    }
+                    if !bindings.is_empty() {
+                        let name_end = tags[first - 1].name.len() + 1;
+                        span.insert_str(name_end, &bindings);
+                    }
+                    if drawings.insert(id.clone(), span).is_some() {
+                        repeated.insert(id);
+                    }
+                }
+            }
+            continue;
+        }
+        if local(tag.name) == "drawing" && !tag.empty {
+            open.push((depth, tag.range.start, index + 1));
+        }
+        if !tag.empty {
+            depth += 1;
+            scopes.push(declarations(tag));
+        }
+    }
+    drawings.retain(|id, _| !repeated.contains(id));
+    drawings
+}
+
 fn chart_drawings_in_part(xml: &str) -> HashMap<String, String> {
     let drawing_prefix = declared_prefix(xml, &WORDPROCESSINGML_URIS, "w");
     let chart_prefix = declared_prefix(xml, &CHART_URIS, "c");
@@ -1029,9 +1239,71 @@ fn validate_selective_header_footer_parts(
 /// The story parts a save may splice into their source XML, and the paragraph IDs it assigns.
 struct StoryParts<'r> {
     spliced: &'r HashMap<String, &'r S13SplicedPart>,
+    /// Parts that replace whatever is serialized for them with their source bytes.
+    kept_as_source: &'r HashSet<String>,
+    whole: &'r HashMap<String, &'r S13WholePart>,
+    touched: &'r HashMap<String, &'r S13TouchedPart>,
     assignments: &'r HashMap<String, BTreeMap<u32, String>>,
     strict: bool,
+    /// No section edit of this save moves a paragraph's section boundary.
+    boundaries_stay: bool,
+    reports_dropped: bool,
+    /// The comments this save deletes, whose markers its splices take out, and the comment
+    /// markers its model holds.
+    comments: super::splice::SavedComments<'r>,
     processed: RefCell<HashSet<String>>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static HELD_COMMENT_SEARCHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The comment markers the stories a save of `request` writes hold: its body, the headers and
+/// footers `relationships` lets it write, and its notes.
+fn held_comment_markers(
+    request: &S13SaveRequest,
+    relationships: &IndexMap<String, Relationship>,
+) -> super::splice::CommentKeys {
+    #[cfg(test)]
+    HELD_COMMENT_SEARCHES.with(|searches| searches.set(searches.get() + 1));
+    let headers = [
+        (&request.header_entries, relationship_types::HEADER),
+        (&request.footer_entries, relationship_types::FOOTER),
+    ]
+    .into_iter()
+    .flat_map(|(entries, kind)| {
+        entries.iter().filter(move |(relationship_id, _)| {
+            written_story_relationship(relationships, relationship_id, kind).is_some()
+        })
+    })
+    .map(|(_, story)| story.content.as_slice());
+    let mut held = super::splice::model_comment_markers(
+        std::iter::once(request.document.content.as_slice()).chain(headers),
+    );
+    for note in request
+        .footnotes
+        .iter()
+        .chain(&request.endnotes)
+        .chain(&request.footnote_separators)
+        .chain(&request.endnote_separators)
+    {
+        super::splice::note_comment_markers(note, &mut held);
+    }
+    held
+}
+
+/// The relationship the save writes the header or footer `relationship_id` through, if any.
+fn written_story_relationship<'r>(
+    relationships: &'r IndexMap<String, Relationship>,
+    relationship_id: &str,
+    relationship_type: &str,
+) -> Option<&'r Relationship> {
+    relationships.get(relationship_id).filter(|relationship| {
+        relationship.relationship_type == relationship_type
+            && !relationship.target.is_empty()
+            && relationship.target_mode != Some(TargetMode::External)
+    })
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1064,16 +1336,18 @@ fn patched_paragraphs(
     part: &S13SplicedPart,
     context: &mut SerializerContext,
 ) -> Result<BTreeMap<u32, String>, ParseError> {
-    use super::paragraph_patch::{PatchContext, patch_paragraph_v1};
+    use super::paragraph_patch::{NamespaceScopes, patch_paragraph_v1};
     use crate::paragraph_identity::paragraph_occurrences;
 
     let error = |ordinal, code, detail: &str| {
         paragraph_patch_save_error(&part.part, Some(ordinal), code, detail)
     };
+    let changed: HashSet<u32> = part.changed.iter().copied().collect();
+    let paragraphs: HashSet<u32> = part.paragraphs.iter().copied().collect();
     let mut seen = HashSet::new();
     for legacy in &part.legacy_paragraphs {
         if !seen.insert(legacy.ordinal)
-            || !part.changed.contains(&legacy.ordinal)
+            || !changed.contains(&legacy.ordinal)
             || !legacy.code.is_unsupported()
         {
             return Err(error(
@@ -1088,15 +1362,18 @@ fn patched_paragraphs(
         count_replace(context, &part.part, legacy.ordinal, &legacy.detail)?;
     }
     let mut patched = BTreeMap::new();
-    let occurrences = if part.paragraph_patches.is_empty() {
-        None
+    let (occurrences, scopes) = if part.paragraph_patches.is_empty() {
+        (None, None)
     } else {
-        source.and_then(paragraph_occurrences)
+        (
+            source.and_then(paragraph_occurrences),
+            source.map(NamespaceScopes::new),
+        )
     };
     for patch in &part.paragraph_patches {
         if !seen.insert(patch.ordinal)
-            || !part.changed.contains(&patch.ordinal)
-            || !part.paragraphs.contains(&patch.ordinal)
+            || !changed.contains(&patch.ordinal)
+            || !paragraphs.contains(&patch.ordinal)
         {
             return Err(error(
                 patch.ordinal,
@@ -1104,7 +1381,7 @@ fn patched_paragraphs(
                 "invalid patch ordinal",
             ));
         }
-        let source = source.ok_or_else(|| {
+        let (source, scopes) = source.zip(scopes.as_ref()).ok_or_else(|| {
             error(
                 patch.ordinal,
                 PatchErrorCode::MissingSource,
@@ -1122,7 +1399,7 @@ fn patched_paragraphs(
                     "source paragraph is missing",
                 )
             })?;
-        let patch_context = PatchContext::at(&part.part, source, span.start);
+        let patch_context = scopes.context(&part.part, span.start);
         match patch_paragraph_v1(&source[span], patch, &patch_context) {
             Ok(xml) => {
                 patched.insert(patch.ordinal, xml);
@@ -1185,6 +1462,8 @@ fn count_replace(
 struct StoryWrite {
     xml: String,
     spliced: bool,
+    /// Whether the part was written from the model, every paragraph re-serialized.
+    whole: bool,
 }
 
 impl StoryParts<'_> {
@@ -1201,11 +1480,45 @@ impl StoryParts<'_> {
         context.set_chart_drawings(chart_drawings_in_part(
             &package.text(path).unwrap_or_default(),
         ));
+        context.set_group_drawings(group_drawings_in_part(
+            &package.text(path).unwrap_or_default(),
+        ));
         let Some(part) = self.spliced.get(path) else {
             if self.strict && path == package.document_path {
                 return Err(save_error("section save requires a safe paragraph splice"));
             }
-            return serialize(context);
+            let xml = serialize(context)?;
+            if let Some(whole) = self.whole.get(path)
+                && let Some(source) = package
+                    .original_bytes(path)
+                    .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                && format!("{:x}", Sha256::digest(source.as_bytes()))
+                    == whole.sha256.to_ascii_lowercase()
+                && let dropped = dropped_names(source, &xml)
+                && !dropped.is_empty()
+            {
+                let kept = KeptSource::new(source);
+                let assignments = self.assignments.get(path);
+                for &ordinal in &whole.changed {
+                    record_kept(
+                        context,
+                        &kept,
+                        &whole.part,
+                        assignments,
+                        ordinal,
+                        "part",
+                        dropped.clone(),
+                    );
+                }
+                return Ok(source.to_owned());
+            }
+            let touched: Vec<u32> = self
+                .touched
+                .get(path)
+                .map(|part| part.touched.clone())
+                .unwrap_or_default();
+            self.report_dropped(package, path, &xml, &touched, context);
+            return Ok(xml);
         };
         self.processed.borrow_mut().insert(path.to_owned());
         let source = package
@@ -1215,26 +1528,205 @@ impl StoryParts<'_> {
         let assignments = self.assignments.get(path).unwrap_or(&empty);
         let strict = self.strict && path == package.document_path;
         if part.table_patches.is_empty() {
-            return Self::splice(source, part, assignments, strict, context, serialize)
-                .map(|written| written.xml);
+            let keeps = !strict || self.boundaries_stay;
+            let written =
+                self.splice(source, part, assignments, strict, keeps, context, serialize)?;
+            if written.whole {
+                let touched = self.edited(path, part);
+                self.report_dropped(package, path, &written.xml, &touched, context);
+            }
+            return Ok(written.xml);
         }
         let mut staged = context.clone();
-        match Self::splice(source, part, assignments, strict, &mut staged, &serialize) {
+        let keeps = !strict || self.boundaries_stay;
+        match self.splice(
+            source,
+            part,
+            assignments,
+            strict,
+            keeps,
+            &mut staged,
+            &serialize,
+        ) {
             Ok(written) if written.spliced => {
                 *context = staged;
                 Ok(written.xml)
             }
             Err(error) if strict => Err(error),
             Ok(_) if strict => Err(save_error("unsafe section paragraph splice")),
-            _ => serialize(context),
+            _ => {
+                let xml = serialize(context)?;
+                let touched = self.edited(path, part);
+                self.report_dropped(package, path, &xml, &touched, context);
+                Ok(xml)
+            }
         }
     }
 
+    /// The ordinals of the paragraphs `part` removed or changed beyond their run formatting, and
+    /// those the planner found touched, as beside a table edit.
+    fn edited(&self, path: &str, part: &S13SplicedPart) -> Vec<u32> {
+        let mut touched = edited(part);
+        if let Some(planned) = self.touched.get(path) {
+            touched.extend(&planned.touched);
+        }
+        touched
+    }
+
+    /// Reports the structure a session save's whole write of `path` holds less of than its source,
+    /// outside the `touched` paragraphs of the edits, whose structure is theirs to change.
+    fn report_dropped(
+        &self,
+        package: &Package,
+        path: &str,
+        xml: &str,
+        touched: &[u32],
+        context: &mut SerializerContext,
+    ) {
+        let source = package
+            .original_bytes(path)
+            .and_then(|bytes| std::str::from_utf8(bytes).ok());
+        let Some(source) =
+            source.filter(|_| self.reports_dropped && !self.kept_as_source.contains(path))
+        else {
+            return;
+        };
+        if dropped_names(source, xml).is_empty() {
+            return;
+        }
+        let occurrences =
+            crate::paragraph_identity::paragraph_occurrences(source).unwrap_or_default();
+        let assigned = self.assignments.get(path);
+        let id_of = |occurrence: &crate::paragraph_identity::ParagraphOccurrence| {
+            assigned
+                .and_then(|ids| ids.get(&occurrence.ordinal))
+                .or(occurrence.para_id.as_ref())
+                .cloned()
+        };
+        let source_ids: HashSet<String> = occurrences.iter().filter_map(&id_of).collect();
+        let identified = source_ids.len() == occurrences.len();
+        let mut written = HashMap::new();
+        let mut unidentified: Vec<(String, std::ops::Range<usize>)> = Vec::new();
+        for occurrence in crate::paragraph_identity::paragraph_occurrences(xml).unwrap_or_default()
+        {
+            let Some(span) = super::splice::paragraph_span(xml, &occurrence) else {
+                continue;
+            };
+            match occurrence.para_id {
+                Some(id) if source_ids.contains(&id) => {
+                    written.insert(id, span);
+                }
+                _ if identified => {
+                    let text =
+                        super::splice::paragraph_text(&xml[span.clone()], 80).unwrap_or_default();
+                    unidentified.push((text, span));
+                }
+                _ => {}
+            }
+        }
+        let touched_set: HashSet<u32> = touched.iter().copied().collect();
+        let mut inside_source = Vec::new();
+        let mut inside_written = Vec::new();
+        let mut paragraphs = Vec::new();
+        for occurrence in &occurrences {
+            let Some(was) = super::splice::paragraph_span(source, occurrence) else {
+                continue;
+            };
+            let para_id = id_of(occurrence);
+            let text = super::splice::paragraph_text(&source[was.clone()], 80).unwrap_or_default();
+            let reassigned = para_id
+                .as_ref()
+                .filter(|id| {
+                    !text.is_empty()
+                        && !written.contains_key(*id)
+                        && !touched_set.contains(&occurrence.ordinal)
+                })
+                .and_then(|_| unidentified.iter().position(|(same, _)| *same == text))
+                .map(|at| unidentified.swap_remove(at).1);
+            let now = para_id
+                .as_ref()
+                .and_then(|id| written.get(id).cloned())
+                .or(reassigned);
+            let now = now.as_ref();
+            if touched_set.contains(&occurrence.ordinal) {
+                inside_written.extend(now.cloned());
+                inside_source.push(was);
+                continue;
+            }
+            if now.is_none() && !identified {
+                continue;
+            }
+            let lost = super::splice::dropped_structure(
+                &source[was.clone()],
+                now.map_or("", |now| &xml[now.clone()]),
+            );
+            if now.is_none() && text.is_empty() && lost == ["w:p"] {
+                inside_source.push(was);
+                continue;
+            }
+            if lost.is_empty() || paragraphs.len() == 200 {
+                continue;
+            }
+            paragraphs.push(super::context::DroppedParagraph {
+                ordinal: occurrence.ordinal,
+                para_id: para_id.unwrap_or_default(),
+                text,
+                dropped: lost.into_iter().map(str::to_owned).collect(),
+            });
+        }
+        inside_written.extend(unidentified.into_iter().map(|(_, span)| span));
+        let mut dropped: Vec<String> = super::splice::dropped_structure(
+            &without_spans(source, inside_source),
+            &without_spans(xml, inside_written),
+        )
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        if touched.is_empty() {
+            dropped.extend(super::splice::dropped_outside_paragraphs(source, xml));
+            dropped.dedup();
+        }
+        if dropped.is_empty() {
+            return;
+        }
+        context.add_structure_dropped(super::context::DroppedStructure {
+            part: path.to_owned(),
+            dropped,
+            paragraphs,
+        });
+    }
+
+    /// Fails when a form field whose `w:ffData` cannot be replayed was not kept as source bytes.
+    #[allow(clippy::too_many_arguments)]
     fn splice(
+        &self,
         source: Option<&str>,
         part: &S13SplicedPart,
         assignments: &BTreeMap<u32, String>,
         strict: bool,
+        keeps: bool,
+        context: &mut SerializerContext,
+        serialize: impl FnOnce(&mut SerializerContext) -> Result<String, ParseError>,
+    ) -> Result<StoryWrite, ParseError> {
+        if let Some(source) = source {
+            context.begin_form_data_tokens(source);
+        }
+        let written =
+            self.splice_written(source, part, assignments, strict, keeps, context, serialize);
+        let deferred = context.end_form_data_tokens();
+        let written = written?;
+        super::paragraph::reject_form_data_tokens(&written.xml, &deferred)?;
+        Ok(written)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn splice_written(
+        &self,
+        source: Option<&str>,
+        part: &S13SplicedPart,
+        assignments: &BTreeMap<u32, String>,
+        strict: bool,
+        keeps: bool,
         context: &mut SerializerContext,
         serialize: impl FnOnce(&mut SerializerContext) -> Result<String, ParseError>,
     ) -> Result<StoryWrite, ParseError> {
@@ -1267,6 +1759,7 @@ impl StoryParts<'_> {
             return Ok(StoryWrite {
                 xml: serialized,
                 spliced: false,
+                whole: true,
             });
         };
         super::permissions::keep(source, part, &mut written, &mut serialized);
@@ -1274,6 +1767,8 @@ impl StoryParts<'_> {
             return Err(save_error("section splice conflict"));
         }
         let empty = BTreeMap::new();
+        let original = part;
+        let formatting_alone = keeps && super::splice::format_only_part(original);
         let mut model_part;
         let (part, patches) = if model_only {
             model_part = part.clone();
@@ -1295,6 +1790,7 @@ impl StoryParts<'_> {
                 assignments,
                 patches,
                 &mut reasons,
+                self.comments,
             )
         } else {
             super::splice::splice_story_part(
@@ -1305,8 +1801,10 @@ impl StoryParts<'_> {
                 assignments,
                 patches,
                 &mut reasons,
+                self.comments,
             )
             .or_else(|| {
+                reasons.clear();
                 super::splice::splice_source_direct(
                     source,
                     &serialized,
@@ -1314,41 +1812,108 @@ impl StoryParts<'_> {
                     part,
                     assignments,
                     patches,
+                    &mut reasons,
                 )
             })
         };
+        let part = original;
+        let kept = KeptSource::new(source);
         if let Some(spliced) = spliced {
             for reason in reasons {
-                count_replace(context, &part.part, 0, &reason)?;
+                if let Some((ordinal, dropped)) = super::splice::parse_kept_reason(&reason) {
+                    record_kept(
+                        context,
+                        &kept,
+                        &part.part,
+                        Some(assignments),
+                        ordinal,
+                        "paragraph",
+                        dropped,
+                    );
+                } else {
+                    count_replace(context, &part.part, 0, &reason)?;
+                }
             }
             return Ok(StoryWrite {
                 xml: spliced,
                 spliced: true,
+                whole: false,
             });
         }
-        if strict {
+        if strict && !formatting_alone {
             return Err(save_error("unsafe section paragraph splice"));
         }
         if !part.table_patches.is_empty() {
             return Ok(StoryWrite {
                 xml: serialized,
                 spliced: false,
+                whole: true,
             });
         }
-        if (!part.paragraph_patches.is_empty() || !part.legacy_paragraphs.is_empty())
-            && let Some(replaced) = super::splice::replace_story_part(
-                source,
-                &serialized,
-                &written,
-                part,
-                assignments,
-                &patched,
-            )
-        {
+        reasons.clear();
+        let replaced = ((!part.paragraph_patches.is_empty() || !part.legacy_paragraphs.is_empty())
+            && (!model_only || formatting_alone))
+            .then(|| {
+                super::splice::replace_story_part(
+                    source,
+                    &serialized,
+                    &written,
+                    part,
+                    assignments,
+                    &patched,
+                    &mut reasons,
+                    self.comments,
+                )
+            })
+            .flatten()
+            .and_then(|xml| {
+                if strict {
+                    super::section_patch::restore_sections(source, &serialized, &xml, &written)
+                } else {
+                    Some(xml)
+                }
+            });
+        if let Some(replaced) = replaced {
+            for reason in &reasons {
+                if let Some((ordinal, dropped)) = super::splice::parse_kept_reason(reason) {
+                    record_kept(
+                        context,
+                        &kept,
+                        &part.part,
+                        Some(assignments),
+                        ordinal,
+                        "paragraph",
+                        dropped,
+                    );
+                }
+            }
             return Ok(StoryWrite {
                 xml: replaced,
                 spliced: false,
+                whole: false,
             });
+        }
+        let dropped = dropped_names(source, &serialized);
+        if formatting_alone && !dropped.is_empty() {
+            for &ordinal in &part.changed {
+                record_kept(
+                    context,
+                    &kept,
+                    &part.part,
+                    Some(assignments),
+                    ordinal,
+                    "part",
+                    dropped.clone(),
+                );
+            }
+            return Ok(StoryWrite {
+                xml: source.to_owned(),
+                spliced: false,
+                whole: false,
+            });
+        }
+        if strict {
+            return Err(save_error("unsafe section paragraph splice"));
         }
         for &ordinal in patched.keys() {
             count_replace(
@@ -1361,8 +1926,99 @@ impl StoryParts<'_> {
         Ok(StoryWrite {
             xml: serialized,
             spliced: false,
+            whole: true,
         })
     }
+}
+
+/// The ordinals of the paragraphs `part` removed or changed beyond their run formatting.
+fn edited(part: &S13SplicedPart) -> Vec<u32> {
+    let format_only: HashSet<u32> = part.format_only.iter().copied().collect();
+    part.changed
+        .iter()
+        .filter(|ordinal| !format_only.contains(*ordinal))
+        .chain(&part.removed)
+        .copied()
+        .collect()
+}
+
+/// `xml` without `spans`, of which one may hold another.
+fn without_spans(xml: &str, mut spans: Vec<std::ops::Range<usize>>) -> String {
+    spans.sort_by_key(|span| span.start);
+    let mut kept = String::with_capacity(xml.len());
+    let mut at = 0;
+    for span in spans {
+        if span.start >= at {
+            kept.push_str(&xml[at..span.start]);
+        }
+        at = at.max(span.end);
+    }
+    kept.push_str(&xml[at..]);
+    kept
+}
+
+/// The names of the elements a whole write of a part changing only formatting would lose.
+fn dropped_names(source: &str, written: &str) -> Vec<String> {
+    let mut dropped: Vec<String> = super::splice::dropped_structure(source, written)
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    for name in super::splice::dropped_outside_paragraphs(source, written) {
+        if !dropped.contains(&name) {
+            dropped.push(name);
+        }
+    }
+    dropped
+}
+
+/// A part's source XML, its paragraphs read once for the kept paragraphs a save describes.
+struct KeptSource<'x> {
+    xml: &'x str,
+    occurrences: OnceCell<Vec<crate::paragraph_identity::ParagraphOccurrence>>,
+}
+
+impl<'x> KeptSource<'x> {
+    fn new(xml: &'x str) -> Self {
+        Self {
+            xml,
+            occurrences: OnceCell::new(),
+        }
+    }
+}
+
+/// Counts a paragraph of `part` kept as its source and, for the first few, what it was and why.
+fn record_kept(
+    context: &mut SerializerContext,
+    source: &KeptSource<'_>,
+    part: &str,
+    assignments: Option<&BTreeMap<u32, String>>,
+    ordinal: u32,
+    scope: &'static str,
+    dropped: Vec<String>,
+) {
+    context.count_kept_unchanged(part);
+    if !context.wants_kept_paragraph() {
+        return;
+    }
+    let KeptSource { xml, occurrences } = source;
+    let occurrence = occurrences
+        .get_or_init(|| crate::paragraph_identity::paragraph_occurrences(xml).unwrap_or_default())
+        .get(ordinal as usize);
+    let text = occurrence
+        .and_then(|occurrence| super::splice::paragraph_span(xml, occurrence))
+        .and_then(|span| super::splice::paragraph_text(&xml[span], 80))
+        .unwrap_or_default();
+    context.add_kept_paragraph(super::context::KeptParagraph {
+        part: part.to_owned(),
+        ordinal,
+        para_id: assignments
+            .and_then(|assignments| assignments.get(&ordinal))
+            .cloned()
+            .or_else(|| occurrence.and_then(|occurrence| occurrence.para_id.clone())),
+        text,
+        scope: scope.to_owned(),
+        dropped,
+    });
 }
 
 fn serialize_header_footer_parts(
@@ -1378,15 +2034,11 @@ fn serialize_header_footer_parts(
         (footers, relationship_types::FOOTER),
     ] {
         for (relationship_id, story) in entries {
-            let Some(relationship) = relationships.get(relationship_id) else {
+            let Some(relationship) =
+                written_story_relationship(relationships, relationship_id, relationship_type)
+            else {
                 continue;
             };
-            if relationship.relationship_type != relationship_type
-                || relationship.target.is_empty()
-                || relationship.target_mode == Some(TargetMode::External)
-            {
-                continue;
-            }
             let path = resolve_relative_path(&package.document_path, &relationship.target)?;
             let xml = stories.write(package, &path, context, |context| {
                 serialize_header_footer_part(story, context)
@@ -1504,20 +2156,43 @@ fn serialize_comment_parts(
     context: &mut SerializerContext,
     seed: &str,
     allow_source_splice: bool,
-) {
-    let Some(comments) = document
-        .comments
-        .as_ref()
-        .filter(|comments| !comments.is_empty())
-    else {
-        return;
+) -> Result<(), ParseError> {
+    let Some(comments) = document.comments.as_ref() else {
+        return Ok(());
+    };
+    if comments.is_empty() && !package.contains(COMMENTS_PART) {
+        return Ok(());
+    }
+    let mut restored;
+    let comments = if comments
+        .iter()
+        .any(|comment| comment.block_content.is_empty())
+    {
+        restored = comments.clone();
+        let original = super::comment_splice::source_comments(package.original, seed)?;
+        for comment in &mut restored {
+            if comment.block_content.is_empty()
+                && let Some(source) = original.iter().find(|source| source.id == comment.id)
+                && source
+                    .block_content
+                    .iter()
+                    .any(crate::block::contains_bookmark_block)
+            {
+                comment.block_content.clone_from(&source.block_content);
+            }
+        }
+        &restored
+    } else {
+        comments
     };
     let source_context = allow_source_splice
         .then(|| package.original_bytes(COMMENTS_PART))
         .flatten()
         .map(|source| (source, context.clone()));
-    let (mut comments_xml, mut infos) = serialize_comments_with_info(comments, context);
+    let (mut comments_xml, mut infos) =
+        super::parts::serialize_comments_projection(comments, context)?;
     let mut spliced_companions = None;
+    let mut spliced_source = false;
     if let Some((source, source_context)) = source_context {
         let original_infos = infos.clone();
         match super::comment_splice::splice_comments(
@@ -1532,9 +2207,13 @@ fn serialize_comment_parts(
             Ok(spliced) => {
                 comments_xml = spliced.xml;
                 spliced_companions = spliced.companions;
+                spliced_source = true;
             }
             Err(_) => infos = original_infos,
         }
+    }
+    if !spliced_source && comments.iter().any(super::parts::has_nested_bookmarks) {
+        return Err(super::parts::nested_comment_bookmarks());
     }
     package.set_text("word/comments.xml", comments_xml);
 
@@ -1560,6 +2239,7 @@ fn serialize_comment_parts(
         }
     }
     ensure_comment_parts(package);
+    Ok(())
 }
 
 fn ensure_comment_parts(package: &mut Package) {
@@ -2171,7 +2851,7 @@ fn inline_has_drawing_image(node: &InlineNode, control: bool, revision: bool) ->
                 || field
                     .structured_result
                     .as_ref()
-                    .filter(|result| result.blocks.is_none())
+                    .filter(|result| !result.spans_paragraphs())
                     .and_then(|result| result.inline.as_ref())
                     .map_or_else(
                         || {
@@ -2290,7 +2970,7 @@ fn visit_inline_images(
             if let Some(nodes) = field
                 .structured_result
                 .as_mut()
-                .filter(|result| result.blocks.is_none())
+                .filter(|result| !result.spans_paragraphs())
                 .and_then(|result| result.inline.as_mut())
             {
                 for node in nodes {
@@ -2732,7 +3412,7 @@ fn inline_has_hyperlink(node: &InlineNode, control: bool, revision: bool) -> boo
         InlineNode::ComplexField(field) => field
             .structured_result
             .as_ref()
-            .filter(|result| result.blocks.is_none())
+            .filter(|result| !result.spans_paragraphs())
             .and_then(|result| result.inline.as_ref())
             .is_some_and(|nodes| {
                 nodes
@@ -2770,7 +3450,7 @@ fn visit_inline_hyperlinks(
             let Some(nodes) = field
                 .structured_result
                 .as_mut()
-                .filter(|result| result.blocks.is_none())
+                .filter(|result| !result.spans_paragraphs())
                 .and_then(|result| result.inline.as_mut())
             else {
                 return;
@@ -3028,7 +3708,7 @@ impl<'a> SelectiveParagraphIndex<'a> {
                 match field
                     .structured_result
                     .as_ref()
-                    .filter(|result| result.blocks.is_none())
+                    .filter(|result| !result.spans_paragraphs())
                     .and_then(|result| result.inline.as_ref())
                 {
                     Some(nodes) => {
@@ -4059,6 +4739,88 @@ mod tests {
         assert!(error.contains("[SOURCE_DIGEST_MISMATCH]"), "{error}");
     }
 
+    const SPLICED_ROOT: &str = "xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\"";
+    const KEPT_COMMENT: &str = "<w:commentRangeStart w:id=\"7\"/><w:r><w:t>keep</w:t></w:r><w:commentRangeEnd w:id=\"7\"/>";
+
+    /// Paragraph 0 holding `kept` and paragraph 1 reading `old`, with the paragraph IDs `ids`.
+    fn spliced_paragraphs(kept: &str, ids: [&str; 2]) -> String {
+        let [kept_id, old_id] = ids;
+        format!(
+            "<w:p w14:paraId=\"{kept_id}\">{kept}</w:p><w:p w14:paraId=\"{old_id}\"><w:r><w:t>old</w:t></w:r></w:p>"
+        )
+    }
+
+    /// A save of `document` with its paragraph 1 edited, and of `header`, when given, as the
+    /// default header with its paragraph 1 edited too, both spliced into their source.
+    fn spliced_save(document: &str, header: Option<&str>) -> IndexMap<String, Vec<u8>> {
+        let mut parts = part_map(&base_package(document));
+        let digest = |xml: &str| format!("{:x}", Sha256::digest(xml.as_bytes()));
+        let paragraph = |text: &str, para_id: &str, ordinal: u32| {
+            let mut paragraph = text_paragraph(text, Some(para_id));
+            paragraph["sourceOrdinal"] = json!(ordinal);
+            paragraph
+        };
+        let spliced = |part: &str, xml: &str| json!({ "part": part, "sha256": digest(xml), "paragraphs": [0, 1], "changed": [1] });
+        let mut request = json!({
+            "determinism": determinism(),
+            "document": { "content": [
+                paragraph("keep", "0000000A", 0),
+                paragraph("edited", "0000000B", 1)
+            ] },
+            "options": { "updateModifiedDate": false },
+            "paragraphIds": { "splicedParts": [spliced("word/document.xml", document)] }
+        });
+        if let Some(header) = header {
+            parts.insert("word/header1.xml".to_owned(), header.as_bytes().to_vec());
+            request["headerEntries"] = json!([["rIdHeader", {
+                "type": "header", "hdrFtrType": "default",
+                "content": [paragraph("keep", "0000000C", 0), paragraph("edited", "0000000D", 1)]
+            }]]);
+            request["relationshipEntries"] = json!([["rIdHeader", {
+                "id": "rIdHeader", "type": relationship_types::HEADER, "target": "header1.xml"
+            }]]);
+            request["paragraphIds"]["splicedParts"]
+                .as_array_mut()
+                .unwrap()
+                .push(spliced("word/header1.xml", header));
+        }
+        let original = ooxml_opc::rezip_parts(&parts.into_iter().collect::<Vec<_>>()).unwrap();
+        let request: S13SaveRequest = serde_json::from_value(request).expect("request");
+        part_map(&write_docx_s13(request, &original).expect("save"))
+    }
+
+    fn held_comment_searches() -> usize {
+        HELD_COMMENT_SEARCHES.with(std::cell::Cell::get)
+    }
+
+    #[test]
+    fn a_spliced_save_of_a_part_without_comment_markers_never_looks_for_those_its_model_holds() {
+        HELD_COMMENT_SEARCHES.with(|searches| searches.set(0));
+        let body = spliced_paragraphs("<w:r><w:t>keep</w:t></w:r>", ["0000000A", "0000000B"]);
+        let document = format!("<w:document {SPLICED_ROOT}><w:body>{body}</w:body></w:document>");
+        let saved = spliced_save(&document, None);
+        let xml = String::from_utf8(saved["word/document.xml"].clone()).unwrap();
+        assert!(xml.contains("<w:t>edited</w:t>"), "{xml}");
+        assert_eq!(held_comment_searches(), 0);
+    }
+
+    #[test]
+    fn a_spliced_save_looks_for_the_comment_markers_its_model_holds_once_for_all_its_parts() {
+        HELD_COMMENT_SEARCHES.with(|searches| searches.set(0));
+        let body = spliced_paragraphs(KEPT_COMMENT, ["0000000A", "0000000B"]);
+        let document = format!("<w:document {SPLICED_ROOT}><w:body>{body}</w:body></w:document>");
+        let header = format!(
+            "<w:hdr {SPLICED_ROOT}>{}</w:hdr>",
+            spliced_paragraphs(KEPT_COMMENT, ["0000000C", "0000000D"])
+        );
+        let saved = spliced_save(&document, Some(&header));
+        for part in ["word/document.xml", "word/header1.xml"] {
+            let xml = String::from_utf8(saved[part].clone()).unwrap();
+            assert!(xml.contains("<w:t>edited</w:t>"), "{part}: {xml}");
+        }
+        assert_eq!(held_comment_searches(), 1);
+    }
+
     #[test]
     fn selective_save_counts_block_controls_in_table_cells() {
         let document = concat!(
@@ -4707,5 +5469,94 @@ mod tests {
             .collect();
         assert_eq!(media_rels.len(), 1, "{rels}");
         assert_eq!(parts["word/media/image1.png"], [1, 2, 3]);
+    }
+
+    /// A field whose result spans paragraphs, holding `inline` as its structured result and
+    /// `field_result` as the runs a save writes.
+    fn spanning_field(inline: serde_json::Value, field_result: serde_json::Value) -> InlineNode {
+        serde_json::from_value(json!({
+            "type": "complexField",
+            "instruction": "QUOTE x",
+            "fieldType": "QUOTE",
+            "fieldCode": [],
+            "fieldResult": field_result,
+            "structuredResult": { "inline": inline, "blockCount": 1 }
+        }))
+        .unwrap()
+    }
+
+    fn drawing_run(relationship_id: &str) -> serde_json::Value {
+        json!({
+            "type": "run",
+            "content": [{
+                "type": "drawing",
+                "image": {
+                    "type": "image",
+                    "rId": relationship_id,
+                    "src": "data:image/png;base64,AQID",
+                    "size": { "width": 9525, "height": 9525 },
+                    "wrap": { "type": "inline" }
+                }
+            }]
+        })
+    }
+
+    fn hyperlink_value() -> serde_json::Value {
+        json!({ "type": "hyperlink", "anchor": "top", "children": [] })
+    }
+
+    #[test]
+    fn a_field_spanning_paragraphs_finds_drawings_in_its_written_runs_only() {
+        let written = spanning_field(json!([]), json!([drawing_run("rIdResult")]));
+        assert!(inline_has_drawing_image(&written, true, true));
+        let copied = spanning_field(json!([drawing_run("rIdInline")]), json!([]));
+        assert!(!inline_has_drawing_image(&copied, true, true));
+    }
+
+    #[test]
+    fn a_field_spanning_paragraphs_visits_the_images_of_its_written_runs() {
+        let mut node = spanning_field(
+            json!([drawing_run("rIdInline")]),
+            json!([drawing_run("rIdResult")]),
+        );
+        let mut visited = Vec::new();
+        visit_inline_images(
+            &mut node,
+            &mut |image| {
+                visited.push(image.relationship_id.clone());
+                Ok(())
+            },
+            true,
+            true,
+        )
+        .unwrap();
+        assert_eq!(visited, ["rIdResult"]);
+    }
+
+    #[test]
+    fn a_field_spanning_paragraphs_holds_no_hyperlink_of_its_inline_copy() {
+        let node = spanning_field(json!([hyperlink_value()]), json!([]));
+        assert!(!inline_has_hyperlink(&node, true, true));
+    }
+
+    #[test]
+    fn a_field_spanning_paragraphs_visits_no_hyperlink_of_its_inline_copy() {
+        let mut node = spanning_field(json!([hyperlink_value()]), json!([]));
+        let mut visited = 0;
+        visit_inline_hyperlinks(&mut node, &mut |_| visited += 1, true, true);
+        assert_eq!(visited, 0);
+    }
+
+    #[test]
+    fn a_field_spanning_paragraphs_allocates_drawing_ids_for_its_written_runs_only() {
+        let allocates = |node: &InlineNode| {
+            let mut index = SelectiveParagraphIndex::new(&[]);
+            index.inline(node).unwrap();
+            index.allocates_ids
+        };
+        let written = spanning_field(json!([]), json!([drawing_run("")]));
+        assert!(allocates(&written));
+        let copied = spanning_field(json!([drawing_run("")]), json!([]));
+        assert!(!allocates(&copied));
     }
 }

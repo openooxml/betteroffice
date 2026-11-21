@@ -4,10 +4,11 @@ import type {
   DocxCommandPayloads,
   DocxWorkerEditSession,
 } from '@betteroffice/docx/worker';
-import type { YrsAuthor } from '@betteroffice/docx/yrs';
+import type { DocxClipboardFragment, YrsAuthor } from '@betteroffice/docx/yrs';
 import type { PeerlessEchoIntent, PeerlessEchoPainter } from './echoPainter';
 import { hasImplicitVerticalGoal, type PeerlessInputIntent, type PeerlessProposalIntent, type PeerlessRevisionIntent, type PeerlessTextIntent } from './inputEvents';
 import type { PeerlessViewStore } from './viewStore';
+import { notifySelectionActivity } from '../../../plugins/selectionIdentity';
 
 /** @internal */
 export const DOCX_ECHO_MAX_UNACKED_INTENTS = 256;
@@ -133,6 +134,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
   const releaseCount = (count = 1) => {
     originalUnackedIntents -= count;
     resetIdle();
+    notifySelectionActivity(session);
   };
   const readOnly = () => requestedReadOnly ?? viewStore.getSnapshot().editState?.readOnly ?? session.state.editState?.readOnly ?? false;
   const workerSelection = () => latestSelection(session, viewStore);
@@ -267,6 +269,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
     let echoTicket: { ticket?: CommandTicket; settled?: boolean; dropped?: boolean } | undefined;
     try {
       if (!counted) count();
+      if (!counted && !environment) notifySelectionActivity(session);
       if (compositionSlot !== null && !target) {
         let release!: (result: PeerlessAdmissionResult) => void;
         let drop!: (error: Error) => void;
@@ -362,7 +365,10 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
         pendingInputs += 1;
         const done = () => {
           if (echoTicket) echoTicket.settled = true;
-          if (!disposed) pendingInputs -= 1;
+          if (!disposed) {
+            pendingInputs -= 1;
+            notifySelectionActivity(session);
+          }
         };
         void ticket.ack.then(done, done);
       }
@@ -468,6 +474,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
       viewStore.setProvisionalCaret(null);
       echoFence = undefined;
       compositionSlot = ++nextSlot;
+      notifySelectionActivity(session);
       const target: PeerlessAdmissionTarget = tail
         ? { kind: 'predecessor', ticket: tail, suggesting: suggesting === null ? undefined : { name: suggesting, date: new Date().toISOString() } }
         : { kind: 'worker-selection', snapshot: viewStore.getSnapshot(), suggesting: suggesting === null ? undefined : { name: suggesting, date: new Date().toISOString() } };
@@ -499,6 +506,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
       for (const waiter of compositionWaiters) waiter.resolve();
       compositionWaiters.clear();
       resetIdle();
+      notifySelectionActivity(session);
       if (compositionFailed) throw failure;
       return result;
     },
@@ -523,6 +531,42 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
   };
   admissions.set(admission, (intent, options, deletionExtension) => submit(intent, options, false, undefined, deletionExtension));
   return admission;
+}
+
+/**
+ * Submits a clipboard fragment paste, returns its submission and calls `onRefused` when the worker
+ * refuses it, so a paste that does not land is never silent.
+ * @internal
+ */
+export function submitPasteFragment(
+  admission: PeerlessInputAdmission,
+  fragment: DocxClipboardFragment,
+  options: PeerlessAdmissionOptions,
+  onRefused: () => void
+): PeerlessAdmissionResult {
+  const watch = (result: PeerlessAdmissionResult): void => {
+    if (result.status === 'submitted') {
+      void result.ticket.ack.then((outcome) => { if (outcome.status === 'refused') onRefused(); }, () => {});
+    } else if (result.status === 'held') {
+      void result.released.then(watch, () => {});
+    }
+  };
+  const submission = admitIntent(admission, { kind: 'pasteFragment', payload: { fragment } }, options);
+  watch(submission);
+  return submission;
+}
+
+/**
+ * The submission's ticket once the worker applied it, or null when it was refused, cancelled, ignored or a no-op;
+ * a held submission counts as applied when its released admission is.
+ * @internal
+ */
+export function appliedTicket(submission: PeerlessAdmissionResult): Promise<CommandTicket | null> {
+  if (submission.status === 'submitted') {
+    return submission.ticket.ack.then((outcome) => outcome.status === 'applied' ? submission.ticket : null, () => null);
+  }
+  if (submission.status === 'held') return submission.released.then(appliedTicket, () => null);
+  return Promise.resolve(null);
 }
 
 /** @internal */
@@ -555,6 +599,15 @@ export function admitInputIntents(
   }
 }
 
+/** @internal Submits one input intent and returns its admission, for callers that act on the outcome. */
+export function submitInputIntent(
+  admission: PeerlessInputAdmission,
+  intent: PeerlessInputIntent,
+  options: PeerlessAdmissionOptions
+): PeerlessAdmissionResult {
+  return submitAdmission(admission, intent, options);
+}
+
 /** @internal */
 export function submitFormattingIntent(
   _admission: PeerlessInputAdmission,
@@ -570,6 +623,7 @@ type AdmissionIntent = PeerlessInputIntent | PeerlessFormattingIntent;
 const SUGGESTED = {
   insertText: true, replaceSelection: true, deleteBackward: true, deleteForward: true, paragraphBreak: true, lineBreak: true,
   pasteFragment: true,
+  replacePasteFragment: true,
   applyEdits: true, replaceMatches: true, insertImage: true, insertTable: true, insertPageBreak: true, insertSectionBreak: true,
   toggleMark: true, formatRange: true, clearFormatting: true, setParagraphAttrs: true, applyParagraphStyle: true,
   formatSelection: true, toggleStrike: true, toggleList: true, changeIndent: true, navigateCell: true,
@@ -577,7 +631,7 @@ const SUGGESTED = {
   deleteTable: true, mergeTableCells: true, splitTableCell: true, setTableCellShading: true, setTableBorders: true, setTableProperties: true,
   selectTableCells: false,
   addComment: false, updateComment: false, removeComment: false, resizeObject: false, moveObject: false, moveEmbed: true,
-  setHyperlink: false, setObjectProperties: false, setSectionProperties: false, setNoteProperties: false, setWatermark: false,
+  setHyperlink: true, setObjectProperties: false, setSectionProperties: false, setNoteProperties: false, setWatermark: false,
   setSectionMargins: false, setTabStops: false, removeTabStop: false,
   setContentControlValue: false, addRepeatingItem: false, removeRepeatingItem: false,
   openPart: false, ensurePart: false, removePart: false,

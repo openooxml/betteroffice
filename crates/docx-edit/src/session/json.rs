@@ -16,6 +16,13 @@ use crate::{
 pub(crate) fn parse_render_env(env_json: &str) -> EngineResult<crate::bridge::RenderEnv> {
     let value: Value = serde_json::from_str(env_json).map_err(EngineError::message)?;
     let mut env = crate::bridge::RenderEnv::default();
+    env.font_theme = value
+        .get("fontTheme")
+        .filter(|theme| !theme.is_null())
+        .cloned()
+        .map(crate::bridge::parse_font_theme)
+        .transpose()
+        .map_err(EngineError::message)?;
     if let Some(Value::Array(ids)) = value.get("tocStyleIds") {
         env.toc_style_ids
             .extend(ids.iter().filter_map(Value::as_str).map(str::to_owned));
@@ -49,6 +56,18 @@ pub(crate) fn parse_render_env(env_json: &str) -> EngineResult<crate::bridge::Re
         }
     }
     env.doc_default_font_size = value.get("docDefaultFontSize").and_then(Value::as_f64);
+    if let Some(Value::Object(margins)) = value.get("tableStyleCellMargins") {
+        env.table_style_cell_margins.extend(
+            margins
+                .iter()
+                .map(|(id, margins)| (id.clone(), margins.clone())),
+        );
+    }
+    env.default_table_style_id = value
+        .get("defaultTableStyleId")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned);
     env.show_hidden_text = value
         .get("showHiddenText")
         .and_then(Value::as_bool)

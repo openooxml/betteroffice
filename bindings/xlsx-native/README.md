@@ -1,28 +1,59 @@
 # @betteroffice/xlsx-native
 
-Native Rust bindings for the BetterOffice XLSX engine in Node.js, Bun and Deno.
-Prebuilt binaries cover macOS arm64/x64, GNU Linux arm64/x64, and Windows x64.
+The `@betteroffice/xlsx` API on the native Rust engine, for Node.js, Bun and Deno.
+Prebuilt binaries cover macOS arm64/x64, GNU and musl Linux arm64/x64, and Windows arm64/x64.
+PNG export renders with the installed Latin, international and CJK font packs; nothing is fetched. A `fonts` list passed to
+`renderPng`, even an empty one, replaces them for that export: a family it does not cover is painted with the engine's
+built-in substitute, and a supplied face that fails to load rejects with `PngExportError` code `font-unavailable`.
+
+An installed font pack that cannot be used (another release, missing files, an unreadable manifest) is skipped and its
+faces substituted; the process warns once per pack with code `BETTEROFFICE_FONT_PACK`, and `fontPackDiagnostics()`
+lists each one with the pack and the reason.
+
+Worker sessions on Node.js >= 20.16 / 22.3 run on `worker_threads`, keeping the process alive until the session is disposed.
 
 ```sh
 npm install @betteroffice/xlsx-native
 ```
 
-## Deprecated facade
+This package has the same entry points (`.`, `./headless`, `./worker`, `./collaboration`), exports
+and type declarations as `@betteroffice/xlsx`, so code written for one runs on the other; pick the
+engine by the package you import. `initWasm()` needs no WebAssembly input here and ignores any it is given.
 
-The asynchronous `openWorkbook` and `Workbook` facade exported by this package
-is deprecated and removed in 0.7. Use `@betteroffice/xlsx` instead. Initialize
-the core once with `initWasm` before opening workbooks; pass WebAssembly bytes
-in server runtimes. Edits and saves are synchronous. Cell row and column indexes are
-zero-based, so A1 is row 0, column 0.
+```ts
+import { initWasm, openWorkbook } from '@betteroffice/xlsx-native';
 
-| 0.5 facade | @betteroffice/xlsx |
-| --- | --- |
-| `await openWorkbook(buf, { recalculate, nowSerial })` | `openWorkbook(bytes, { calculation: { nowSerial, randSeed } })` |
-| `await wb.set(0, 'A1', v)` | `wb.editCell(0, row, col, v)` |
-| `await wb.setStyle(0, 'A1:B1', patch)` | `wb.patchRangeStyle(0, 'A1:B1', patch)` |
-| `await wb.save()` (Buffer) | `wb.save()` (Uint8Array) |
+export async function updateWorkbook(bytes: Uint8Array): Promise<Uint8Array> {
+  await initWasm();
+  const workbook = openWorkbook(bytes);
+  try {
+    workbook.editCell(0, 9, 2, '=SUM(C1:C9)');
+    return workbook.save();
+  } finally {
+    workbook.dispose();
+  }
+}
+```
 
-The facade keeps the cached formula values unless `recalculate` is true;
-`@betteroffice/xlsx` always recalculates on open, so formula values that were
-stale in the file can change. A `calculation` context needs both `nowSerial`
-and `randSeed`; without one, `NOW()` and `TODAY()` use the current time.
+Browsers need the WebAssembly engine: the `browser` export condition of this package throws, so
+use `@betteroffice/xlsx` there. Main-thread edit peers hydrated from a worker session
+(`retainPeerHydration`) also need the WebAssembly engine.
+
+## Memory and untrusted input
+
+The native engine runs inside the calling process. In `@betteroffice/xlsx` each engine runs in a
+WebAssembly memory of at most 4 GiB; the native engine gives each thread the same 4 GiB budget. It
+counts the engine's live allocations on that thread, and a call that takes them past the budget
+fails: a worker session fails with a typed out-of-memory error, a workbook handle throws and then
+refuses every call except `dispose()`, and the process keeps running.
+
+Both engines bound their input the same way. A package is refused above 512 MiB uncompressed or
+5,000 parts, and XML nested deeper than 256 levels is refused. Worksheets are read up to 10,000,000 cells and the shared string table up to 10,000,000 entries.
+
+The budget counts live engine allocations, not process memory, and allocations are checked as the
+engine works, so process memory can exceed it: in a measurement with the budget lowered to 1 GiB,
+opening a 1,000,000-row workbook peaked about 40% above the budget, from allocator overhead and the
+JavaScript side. When you open
+documents from untrusted sources with this package on a server, set the container or cgroup memory
+limit above the budget of every thread that opens documents, with headroom for that overshoot, or
+open them in a separate process.

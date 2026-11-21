@@ -186,3 +186,47 @@ pub(crate) fn powi(a: f64, b: i32) -> f64 {
         if recip { 1.0 / r } else { r }
     }
 }
+
+pub(crate) fn acosh(x: f64) -> f64 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        x.acosh()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        libm::acosh(x)
+    }
+}
+
+pub(crate) fn asinh(x: f64) -> f64 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        x.asinh()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        libm::asinh(x)
+    }
+}
+
+pub(crate) fn atanh(x: f64) -> f64 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        x.atanh()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        libm::atanh(x)
+    }
+}
+
+pub(crate) fn ln_1p(x: f64) -> f64 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        x.ln_1p()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        libm::log1p(x)
+    }
+}

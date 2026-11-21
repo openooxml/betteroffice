@@ -7,7 +7,9 @@
 //! [`crate::bidi`] runs, so text handed in here is a single directional run.
 
 use crate::family_metrics::{FamilyMetrics, family_cluster_advance};
-use crate::font_store::{FontError, FontId, FontStore, MAX_CACHED_SHAPE_TEXT_BYTES, ShapeCacheKey};
+use crate::font_store::{
+    FontError, FontId, FontStore, MAX_CACHED_SHAPE_TEXT_BYTES, ShapeCacheKey, covered_character,
+};
 use std::collections::BTreeMap;
 use std::str::FromStr;
 
@@ -30,10 +32,37 @@ pub struct ShapedGlyph {
 
 /// An OpenType feature setting, e.g. `(*b"liga", 0)` to disable ligatures or
 /// `(*b"smcp", 1)` for small caps. Applied over the whole run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "String", into = "String")]
 pub struct ShapeFeature {
     pub tag: [u8; 4],
     pub value: u32,
+}
+
+impl From<ShapeFeature> for String {
+    fn from(feature: ShapeFeature) -> Self {
+        let tag = String::from_utf8_lossy(&feature.tag);
+        if feature.value == 1 {
+            tag.into_owned()
+        } else {
+            format!("{tag}={}", feature.value)
+        }
+    }
+}
+
+impl TryFrom<String> for ShapeFeature {
+    type Error = &'static str;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        let (tag, value) = value.split_once('=').unwrap_or((&value, "1"));
+        Ok(Self {
+            tag: tag
+                .as_bytes()
+                .try_into()
+                .map_err(|_| "expected four-byte tag")?,
+            value: value.parse().map_err(|_| "invalid feature value")?,
+        })
+    }
 }
 
 /// Direction to use when shaping a single bidi-level run.
@@ -44,6 +73,13 @@ pub enum ShapeDirection {
     Auto,
     Ltr,
     Rtl,
+}
+
+/// The logical text on either side of a shaped range.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ShapeContext<'a> {
+    pub before: &'a str,
+    pub after: &'a str,
 }
 
 /// Whether `character` is a Unicode nonspacing mark.
@@ -95,6 +131,94 @@ pub fn shape_with_properties(
     direction: ShapeDirection,
     language: Option<&str>,
 ) -> Result<Vec<ShapedGlyph>, FontError> {
+    shape_in_context(
+        store,
+        font,
+        text,
+        size,
+        features,
+        direction,
+        language,
+        ShapeContext::default(),
+    )
+}
+
+/// Shapes Word's optional features only in Latin, Greek and Cyrillic text.
+pub fn shape_with_word_features(
+    store: &FontStore,
+    font: FontId,
+    text: &str,
+    size: f32,
+    features: &[ShapeFeature],
+    direction: ShapeDirection,
+    language: Option<&str>,
+) -> Result<Vec<ShapedGlyph>, FontError> {
+    if features.is_empty() {
+        return shape_with_properties(store, font, text, size, features, direction, language);
+    }
+    let mask = crate::word_metrics::word_typography_mask(text);
+    if mask.iter().all(|enabled| *enabled) {
+        return shape_with_properties(store, font, text, size, features, direction, language);
+    }
+    let unmodified: Vec<_> = features
+        .iter()
+        .copied()
+        .filter(|feature| {
+            !matches!(
+                &feature.tag,
+                b"liga" | b"clig" | b"hlig" | b"dlig" | b"calt"
+            )
+        })
+        .collect();
+    if mask.iter().all(|enabled| !*enabled) {
+        return shape_with_properties(store, font, text, size, &unmodified, direction, language);
+    }
+    let mut ranges: Vec<(std::ops::Range<usize>, bool)> = Vec::new();
+    for ((byte, ch), enabled) in text.char_indices().zip(mask) {
+        if let Some((range, previous)) = ranges.last_mut()
+            && *previous == enabled
+        {
+            range.end = byte + ch.len_utf8();
+        } else {
+            ranges.push((byte..byte + ch.len_utf8(), enabled));
+        }
+    }
+    if direction == ShapeDirection::Rtl {
+        ranges.reverse();
+    }
+    let mut result = Vec::new();
+    for (range, enabled) in ranges {
+        let mut glyphs = shape_with_properties(
+            store,
+            font,
+            &text[range.clone()],
+            size,
+            if enabled { features } else { &unmodified },
+            direction,
+            language,
+        )?;
+        for glyph in &mut glyphs {
+            glyph.cluster += range.start as u32;
+        }
+        result.extend(glyphs);
+    }
+    Ok(result)
+}
+
+/// Shape with [`shape_with_properties`], letting joining at the edges see the
+/// text around `text`. Context selects joining forms only: it forms no
+/// ligature and places no mark across the edge.
+#[allow(clippy::too_many_arguments)]
+pub fn shape_in_context(
+    store: &FontStore,
+    font: FontId,
+    text: &str,
+    size: f32,
+    features: &[ShapeFeature],
+    direction: ShapeDirection,
+    language: Option<&str>,
+    context: ShapeContext<'_>,
+) -> Result<Vec<ShapedGlyph>, FontError> {
     let cache_key = (text.len() <= MAX_CACHED_SHAPE_TEXT_BYTES).then(|| ShapeCacheKey {
         font,
         text: text.to_owned(),
@@ -113,6 +237,8 @@ pub fn shape_with_properties(
         language: language
             .filter(|tag| tag.len() <= 128)
             .map(ToOwned::to_owned),
+        before: context.before.to_owned(),
+        after: context.after.to_owned(),
     });
     if let Some(glyphs) = cache_key.as_ref().and_then(|key| store.cached_shape(key)) {
         return Ok(glyphs);
@@ -121,8 +247,29 @@ pub fn shape_with_properties(
         .shaping_face(font)?
         .ok_or_else(|| FontError::Parse("rustybuzz rejected font bytes".to_string()))?;
 
+    let no_break_hyphen = if text.contains('\u{2011}') {
+        covered_character(store, font, '\u{2011}')?.unwrap_or('\u{2011}')
+    } else {
+        '\u{2011}'
+    };
     let mut buffer = rustybuzz::UnicodeBuffer::new();
-    buffer.push_str(text);
+    if no_break_hyphen == '\u{2011}' {
+        buffer.push_str(text);
+    } else {
+        for (byte, ch) in text.char_indices() {
+            buffer.add(
+                if ch == '\u{2011}' {
+                    no_break_hyphen
+                } else {
+                    ch
+                },
+                byte as u32,
+            );
+        }
+    }
+    // Adding text resets the post-context, so this follows it.
+    buffer.set_pre_context(context.before);
+    buffer.set_post_context(context.after);
     match direction {
         ShapeDirection::Auto => {}
         ShapeDirection::Ltr => buffer.set_direction(rustybuzz::Direction::LeftToRight),
@@ -170,7 +317,7 @@ pub fn shape_with_properties(
         glyphs.reverse();
     }
     if let Some(widths) = store.family_widths(font)? {
-        apply_family_widths(&mut glyphs, text, size, widths);
+        apply_family_widths(&mut glyphs, text, size, widths, no_break_hyphen);
     }
     if let Some(cache_key) = cache_key {
         store.cache_shape(cache_key, &glyphs);
@@ -178,7 +325,13 @@ pub fn shape_with_properties(
     Ok(glyphs)
 }
 
-fn apply_family_widths(glyphs: &mut [ShapedGlyph], text: &str, size: f32, widths: &FamilyMetrics) {
+fn apply_family_widths(
+    glyphs: &mut [ShapedGlyph],
+    text: &str,
+    size: f32,
+    widths: &FamilyMetrics,
+    no_break_hyphen: char,
+) {
     let mut clusters: BTreeMap<u32, (bool, Option<f32>)> = BTreeMap::new();
     for glyph in glyphs.iter() {
         let (has_advance, _) = clusters.entry(glyph.cluster).or_insert((false, None));
@@ -195,7 +348,23 @@ fn apply_family_widths(glyphs: &mut [ShapedGlyph], text: &str, size: f32, widths
         }
         let advance = text
             .get(bounds[0]..bounds[1])
-            .and_then(|cluster| family_cluster_advance(widths, cluster))
+            .and_then(|cluster| {
+                if no_break_hyphen != '\u{2011}' && cluster.contains('\u{2011}') {
+                    let substituted: String = cluster
+                        .chars()
+                        .map(|ch| {
+                            if ch == '\u{2011}' {
+                                no_break_hyphen
+                            } else {
+                                ch
+                            }
+                        })
+                        .collect();
+                    family_cluster_advance(widths, &substituted)
+                } else {
+                    family_cluster_advance(widths, cluster)
+                }
+            })
             .map(|advance| (advance * 1000.0).round());
         clusters.insert(
             bounds[0] as u32,
@@ -292,7 +461,7 @@ mod tests {
                     y_offset: 0.0,
                 },
             ];
-            apply_family_widths(&mut glyphs, &format!("f{ch}i"), 32.0, widths);
+            apply_family_widths(&mut glyphs, &format!("f{ch}i"), 32.0, widths, '\u{2011}');
             let expected = expected
                 + if ch == '-' {
                     family_advance(widths, ch).unwrap() * 32.0
@@ -321,7 +490,7 @@ mod tests {
             if rtl {
                 glyphs.reverse();
             }
-            apply_family_widths(&mut glyphs, "fiA\u{03A9}", 32.0, widths);
+            apply_family_widths(&mut glyphs, "fiA\u{03A9}", 32.0, widths, '\u{2011}');
             let cluster: Vec<_> = glyphs.iter().filter(|glyph| glyph.cluster == 0).collect();
             let expected = (family_advance(widths, 'f').unwrap()
                 + family_advance(widths, 'i').unwrap())

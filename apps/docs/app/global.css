@@ -4,6 +4,7 @@
 
 html {
   scrollbar-gutter: stable;
+  font-family: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
 }
 
 html > body[data-scroll-locked] {

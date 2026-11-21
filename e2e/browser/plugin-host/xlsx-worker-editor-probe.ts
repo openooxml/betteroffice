@@ -11,9 +11,11 @@ export interface WorkerEditorApiProbe {
   applyEdits(request: Parameters<WorkbookHandle['applyEdits']>[0]): Promise<ReturnType<WorkbookHandle['applyEdits']>>;
   save(): Promise<Uint8Array>;
   readonly commands: {
-    getState(id: 'proposalsPanel'): { value: number };
+    getState(id: 'proposalsPanel'): { value?: number };
+    getState(id: 'merge', args: { value: 'all' | 'unmerge' }): { enabled: boolean };
     execute(id: 'proposalsPanel', args: { open: boolean } | null): Promise<CommandResult>;
     execute(id: 'proposalAccept' | 'proposalReject', args: { proposalId: string }): Promise<CommandResult>;
+    execute(id: 'merge', args: { value: 'all' | 'unmerge' }): Promise<CommandResult>;
   };
   proposeChanges?(request: { agentId: string; note?: string | null; edits: ProposalEdit[] }):
     Promise<{ ok: true; proposal: Proposal } | Extract<CommandResult, { ok: false }>>;
@@ -51,6 +53,8 @@ export interface WorkerEditorProbe {
   readOnlyEditRefusal(): string;
   savedInputs(): Promise<string[]>;
   releaseHydration(): void;
+  openHeld(): boolean;
+  releaseOpen(): void;
   holdCellInputs(): void;
   heldCellInputs(): number;
   releaseCellInputs(): void;

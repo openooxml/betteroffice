@@ -2,7 +2,6 @@ import hashlib
 import json
 import math
 import os
-import platform
 import re
 from pathlib import Path
 
@@ -55,7 +54,7 @@ def prepare_input(source, reference, frozen=None):
     return cleared
 
 
-def measure_sample(sample, root, binaries, soffice, config, offset=0):
+def measure_sample(sample, root, binaries, soffice, config, offset=0, directory='timing'):
     reference = json.loads((root/'expected.json').read_text())
     if sha256(root/'expected.json') != sample['metadata']['calculation']['reference']['sha256']:
         raise ValueError('Calculation reference hash mismatch')
@@ -63,7 +62,7 @@ def measure_sample(sample, root, binaries, soffice, config, offset=0):
     if sha256(input_path) != sample['metadata']['calculation']['input']['sha256']:
         raise ValueError('Frozen calculation input hash mismatch')
     prepare_input(root/'source.xlsx',reference,input_path.read_bytes())
-    output = root/'timing'
+    output = root/directory
     output.mkdir()
     lo_output = output/'libreoffice'
     lo_output.mkdir()
@@ -121,7 +120,7 @@ def main():
     config = dict(method=job['method'],trials=job['trials'],absolute_tolerance=job['absolute_tolerance'],relative_tolerance=job['relative_tolerance'],
         published_version=job['published_version'],libreoffice_version=version,libreoffice_build=version_text.strip(),builds=builds)
     report = dict(schema_version=1,plan_sha256=job['plan_sha256'],shard=job['shard'],benchmark=config,samples=[],
-        runner=dict(platform=platform.platform(),processors=os.cpu_count()))
+        runner=dict(processors=os.cpu_count()))
     for index,sample in enumerate(job['samples']):
         print(f"XLSX calculation shard {job['shard']}: {index+1}/{len(job['samples'])} {sample['id']}",flush=True)
         calculation = measure_sample(sample,root/sample['id'],binaries,soffice,config,index)

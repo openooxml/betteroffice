@@ -105,20 +105,37 @@ proposal = deck.propose("editor-agent", [{
 }], note="Clarify the opening")
 
 preview = deck.preview_proposal(proposal.id)
+for entry in deck.proposal_slide_strip(proposal.id):
+    diff = deck.layout_proposal_diff_slide_by_id(proposal.id, entry.slide_id)
+    print(entry.status, entry.live_index, entry.preview_index, len(diff["frame"]["primitives"]))
+
 deck.accept_proposal(proposal.id)
 deck.undo()
 ```
 
-Register fonts before `render_proposal`, just as for `render_slide`.
+`render_proposal` uses the same fonts as `render_slide`.
+It accepts a slide ID or zero-based preview index, including inserted slides.
+`proposal_slide_strip` returns `ProposalStripEntry` values in preview order with
+deleted slides retained as ghosts. By-ID diffs include inserted and deleted slides;
+`Proposal.refs` maps edit references to created slide and shape IDs.
 `proposals()` returns `Proposal` values with agent attribution, notes,
 `ProposalChange` values, and current `stale_targets`. `preview_proposal` returns
 a `ProposalPreview` containing fresh changes and the proposed deck snapshot.
 Snapshot and edit dictionaries use the core's camelCase JSON fields; the
 dataclass attributes use Python snake_case.
+`ProposalChange.kind`, `before_index`, and `after_index` describe structural changes.
+`before_index_present` and `after_index_present` distinguish omitted indices from
+explicit null indices.
 
 Edit objects support `replaceText`, `formatText`, `setParagraphAlignment`,
-`setShapeRect`, `setShapeFill`, `setShapeStroke`, `setShapeAdjust`, and
-`setSlideNotes`. They share the [TypeScript edit contract](../../packages/pptx/src/proposals.ts).
+`setStoryParagraphs`, `setShapeRect`, `setShapeFill`, `setShapeStroke`,
+`setShapeAdjust`, `setSlideNotes`, `setSlideLayout`, `setSlideBackground`,
+`addTextBox`, `addShape`, `addPicture`, `removeShape`, `insertSlide`,
+`duplicateSlide`, `moveSlide`, `deleteSlide`, `reorderShape`, `insertTableRow`, `deleteTableRow`,
+`insertTableColumn`, and `deleteTableColumn`. Table edits use `slideId`, `shapeId`,
+and a zero-based `index`. Inserts require `position` (`before` or `after`) and accept
+optional `cells`; column inserts accept `width` (`split` by default or `copy`).
+They share the [TypeScript edit contract](../../packages/pptx/src/proposals.ts).
 Replacement ranges stay within one paragraph and use UTF-16 offsets; shape
 geometry uses EMU. A group has 1 to 256 edits, applied in order, with up to 64
 pending groups per session.
@@ -205,15 +222,10 @@ bytes with the camelCase wire options and return the content alone,
 
 ## Lay a slide out
 
-Register a face before laying out slide text; until then, `render_slide` raises:
-
-```python
-deck.render_slide(0)
-# RenderError: no font has been registered for slide text
-```
-
-Register the faces the deck uses (one call per family, weight, and slant), and
-it lays out:
+Slide text lays out with the bundled fonts, which the package installs as the
+`betteroffice-fonts-latin`, `-intl` and `-cjk` wheels and reads from disk.
+`register_font` adds a family or replaces a bundled one (one call per family,
+weight, and slant):
 
 ```python
 from pathlib import Path
@@ -233,14 +245,16 @@ family. Known requested families supply their measured metrics.
 
 `render_slide` returns the display list (the same drawing contract the browser
 editor paints, as JSON) for hosts that paint it themselves. `render_png`
-rasterizes a slide instead, resolving pictures out of the package so only fonts
-need registering:
+rasterizes a slide instead, resolving pictures out of the package:
 
 ```python
-png = deck.render_png(0, scale=2.0)
+png = deck.render_png({"slide": 0}, scale=2.0)
 print(png.width, png.height, png.skipped_images)   # 2560 1440 0
 png.write("slide-0.png")
 ```
+
+The `PngTarget` dictionary takes a zero-based slide index or a slide ID. Scale defaults to 1.0;
+`background` and `max_shadow_pixels` remain keyword-only options.
 
 `background` picks what fills the pixels the slide leaves uncovered: `"slide"`
 (the default, opaque white under the slide's own background), `"transparent"`,

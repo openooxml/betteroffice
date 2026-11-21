@@ -4,15 +4,17 @@
  * URL-geometry invariant.
  */
 
-import * as parseModule from './generated/parse/docx_parse.js';
-import wasmInit, { initSync } from './generated/parse/docx_parse.js';
+import * as parseModule from './engineParse';
+import wasmInit, { initSync, engineKind } from './engineParse';
+import { wasmAssetUrl } from './assetParse';
 import { createWasmModuleState, type WasmAsyncInput } from './loadWasmAsset';
 import { residentEngine } from './residentEngine';
 
 export const parseWasmState = createWasmModuleState({
   label: 'docx-parse',
   preloadName: 'preloadParseWasm',
-  assetUrl: () => new URL('./generated/parse/docx_parse_bg.wasm', import.meta.url),
+  assetUrl: wasmAssetUrl,
+  engineKind,
   initAsync: wasmInit,
   initSync,
 });

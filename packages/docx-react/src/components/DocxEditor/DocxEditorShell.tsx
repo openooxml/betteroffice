@@ -1,3 +1,4 @@
+import { usePluginGestures } from '../../../../../shared/plugin-host/usePluginGestures';
 import { useEffect, useRef, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import type { SectionProperties, TabStop } from '@betteroffice/docx/types/document';
@@ -182,6 +183,8 @@ export function DocxEditorShell({
   fileInputs: ReactNode;
   scrollContainerProps?: Pick<React.HTMLAttributes<HTMLDivElement>, 'tabIndex' | 'onKeyDown'>;
 }) {
+  const gestureRoot = useRef<HTMLDivElement>(null);
+  usePluginGestures(gestureRoot);
   const [dockAreaRef, dockArea] = useDockArea();
   return (
     <LocaleProvider i18n={i18n}>
@@ -189,7 +192,11 @@ export function DocxEditorShell({
         <ErrorBoundary onError={onEditorError}>
           <div
             dir="ltr"
-            ref={containerRef}
+            ref={(element) => {
+              gestureRoot.current = element;
+              if (typeof containerRef === 'function') containerRef(element);
+              else if (containerRef) containerRef.current = element;
+            }}
             className={cn('oox-root docx-editor', isDark && 'dark', className)}
             style={containerStyle}
             data-testid="docx-editor"

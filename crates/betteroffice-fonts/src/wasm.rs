@@ -16,7 +16,7 @@ unsafe impl Sync for Output {}
 static OUTPUT: Output = Output(UnsafeCell::new(None));
 static PAYLOAD: Output = Output(UnsafeCell::new(None));
 
-#[cfg(all(not(feature = "build"), not(test)))]
+#[cfg(all(not(feature = "build"), not(feature = "manager"), not(test)))]
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
     core::arch::wasm32::unreachable()

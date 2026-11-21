@@ -12,6 +12,7 @@ use xlsx_model::{CellProvider, CellRef, CellValue, DateSystem, ErrorValue, Sheet
 
 use crate::TableSpec;
 use crate::array::{Binding, evaluate_array};
+use crate::deps::{mentions_workbook_index, names_other_workbook, reads_other_workbook};
 use crate::fmath;
 use crate::functions::criteria_index::CriteriaCache;
 use crate::graph::DepGraph;
@@ -34,6 +35,7 @@ const MAX_LAMBDA_DEPTH: usize = 64;
 #[cfg(test)]
 thread_local! {
     static DEFINED_NAME_EXPANSIONS: Cell<usize> = const { Cell::new(0) };
+    static DEFINED_NAME_PARSES: Cell<usize> = const { Cell::new(0) };
     static LAMBDA_CALLS: Cell<usize> = const { Cell::new(0) };
 }
 
@@ -100,6 +102,19 @@ impl EvaluationBudget {
             criteria_index_reads: Cell::new(0),
             criteria_cache: Rc::new(RefCell::new(CriteriaCache::default())),
         }
+    }
+
+    /// a budget taking up where one that [`EvaluationBudget::left`] read
+    /// stopped.
+    pub(crate) fn resumed(cells: u64, text: u64, refused: bool) -> Self {
+        let budget = Self::with_text(cells, text);
+        budget.refused.set(refused);
+        budget
+    }
+
+    /// the cell visits and text bytes left, and whether work was turned away.
+    pub(crate) fn left(&self) -> (u64, u64, bool) {
+        (self.remaining.get(), self.text.get(), self.refused.get())
     }
 
     pub(crate) fn consume(&self, count: u64) -> bool {
@@ -176,6 +191,10 @@ pub struct EvalContext<'a> {
     exhausted: Rc<Cell<bool>>,
     unhandled_budget_errors: Rc<Cell<u64>>,
     unsupported_functions: Rc<Cell<u64>>,
+    /// names of the uncomputable and unknown functions this evaluation
+    /// called, in call order; no handler answers for them.
+    uncomputable: Rc<RefCell<Vec<String>>>,
+    other_workbook: Rc<Cell<bool>>,
     defined_name_stack: Rc<RefCell<Vec<DefinedNameKey>>>,
     defined_name_values: Rc<RefCell<DefinedNameValues>>,
     array_depth: Rc<Cell<u32>>,
@@ -187,9 +206,22 @@ pub struct EvalContext<'a> {
     pub(crate) spill_index: Option<&'a DepGraph>,
     /// recalc-wide parse memo; `None` for one-off `evaluate` calls.
     pub(crate) parse_cache: Option<&'a ParseCache>,
+    /// defined-name definitions parsed while `parse_cache` is `None`, keyed
+    /// by their text and shared with every context derived from this one.
+    parsed_definitions: Rc<RefCell<HashMap<String, Arc<Expr>>>>,
     /// a graph whose names match the provider's, looked up instead of
     /// scanning them; `None` reads names through the provider.
     pub(crate) name_index: Option<&'a DepGraph>,
+    /// the cells an uncomputable call keeps unevaluated, consulted on every
+    /// read of a formula whose reads the graph cannot know ahead.
+    pub(crate) held_cells: Option<&'a dyn HeldCells>,
+}
+
+/// what a read tells a formula about the cell it reads.
+pub(crate) trait HeldCells {
+    /// the uncomputable functions keeping the cell at `at` unevaluated, if
+    /// any do.
+    fn held(&self, sheet: SheetId, at: CellRef) -> Option<Vec<String>>;
 }
 
 impl<'a> EvalContext<'a> {
@@ -232,13 +264,17 @@ impl<'a> EvalContext<'a> {
             cell: None,
             now_serial: None,
             rand_seed: None,
-            date_system: DateSystem::V1900,
+            date_system: provider
+                .workbook()
+                .map_or(DateSystem::V1900, |workbook| workbook.date_system),
             random_state: Rc::new(Cell::new(None)),
             remaining_cell_visits: Rc::new(Cell::new(MAX_EVALUATION_CELL_VISITS)),
             remaining_text_bytes: Rc::new(Cell::new(MAX_EVALUATION_TEXT_BYTES)),
             exhausted: Rc::new(Cell::new(false)),
             unhandled_budget_errors: Rc::new(Cell::new(0)),
             unsupported_functions: Rc::new(Cell::new(0)),
+            uncomputable: Rc::new(RefCell::new(Vec::new())),
+            other_workbook: Rc::new(Cell::new(false)),
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
             defined_name_values: Rc::new(RefCell::new(DefinedNameValues::default())),
             array_depth: Rc::new(Cell::new(0)),
@@ -251,8 +287,10 @@ impl<'a> EvalContext<'a> {
                 .unwrap_or_default(),
             criteria_cache: Rc::new(RefCell::new(CriteriaCache::default())),
             parse_cache: None,
+            parsed_definitions: Rc::new(RefCell::new(HashMap::new())),
             name_index: None,
             spill_index: None,
+            held_cells: None,
         }
     }
 
@@ -274,13 +312,17 @@ impl<'a> EvalContext<'a> {
             cell: None,
             now_serial: Some(now_serial),
             rand_seed: None,
-            date_system: DateSystem::V1900,
+            date_system: provider
+                .workbook()
+                .map_or(DateSystem::V1900, |workbook| workbook.date_system),
             random_state: Rc::new(Cell::new(None)),
             remaining_cell_visits: Rc::new(Cell::new(MAX_EVALUATION_CELL_VISITS)),
             remaining_text_bytes: Rc::new(Cell::new(MAX_EVALUATION_TEXT_BYTES)),
             exhausted: Rc::new(Cell::new(false)),
             unhandled_budget_errors: Rc::new(Cell::new(0)),
             unsupported_functions: Rc::new(Cell::new(0)),
+            uncomputable: Rc::new(RefCell::new(Vec::new())),
+            other_workbook: Rc::new(Cell::new(false)),
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
             defined_name_values: Rc::new(RefCell::new(DefinedNameValues::default())),
             array_depth: Rc::new(Cell::new(0)),
@@ -293,8 +335,10 @@ impl<'a> EvalContext<'a> {
                 .unwrap_or_default(),
             criteria_cache: Rc::new(RefCell::new(CriteriaCache::default())),
             parse_cache: None,
+            parsed_definitions: Rc::new(RefCell::new(HashMap::new())),
             name_index: None,
             spill_index: None,
+            held_cells: None,
         }
     }
 
@@ -309,13 +353,17 @@ impl<'a> EvalContext<'a> {
             cell: None,
             now_serial: None,
             rand_seed: None,
-            date_system: DateSystem::V1900,
+            date_system: provider
+                .workbook()
+                .map_or(DateSystem::V1900, |workbook| workbook.date_system),
             random_state: Rc::new(Cell::new(None)),
             remaining_cell_visits: Rc::new(Cell::new(MAX_EVALUATION_CELL_VISITS)),
             remaining_text_bytes: Rc::new(Cell::new(MAX_EVALUATION_TEXT_BYTES)),
             exhausted: Rc::new(Cell::new(false)),
             unhandled_budget_errors: Rc::new(Cell::new(0)),
             unsupported_functions: Rc::new(Cell::new(0)),
+            uncomputable: Rc::new(RefCell::new(Vec::new())),
+            other_workbook: Rc::new(Cell::new(false)),
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
             defined_name_values: Rc::new(RefCell::new(DefinedNameValues::default())),
             array_depth: Rc::new(Cell::new(0)),
@@ -325,12 +373,14 @@ impl<'a> EvalContext<'a> {
             criteria_cache: Rc::clone(&budget.criteria_cache),
             shared_budget: Some(budget),
             parse_cache: None,
+            parsed_definitions: Rc::new(RefCell::new(HashMap::new())),
             name_index: None,
             spill_index: None,
+            held_cells: None,
         }
     }
 
-    fn for_sheet(&self, sheet: SheetId) -> Self {
+    pub(crate) fn for_sheet(&self, sheet: SheetId) -> Self {
         Self {
             provider: self.provider,
             sheet,
@@ -344,6 +394,8 @@ impl<'a> EvalContext<'a> {
             exhausted: Rc::clone(&self.exhausted),
             unhandled_budget_errors: Rc::clone(&self.unhandled_budget_errors),
             unsupported_functions: Rc::clone(&self.unsupported_functions),
+            uncomputable: Rc::clone(&self.uncomputable),
+            other_workbook: Rc::clone(&self.other_workbook),
             defined_name_stack: Rc::clone(&self.defined_name_stack),
             defined_name_values: Rc::clone(&self.defined_name_values),
             array_depth: Rc::clone(&self.array_depth),
@@ -353,8 +405,10 @@ impl<'a> EvalContext<'a> {
             currency_coercion: self.currency_coercion.clone(),
             criteria_cache: Rc::clone(&self.criteria_cache),
             parse_cache: self.parse_cache,
+            parsed_definitions: Rc::clone(&self.parsed_definitions),
             name_index: self.name_index,
             spill_index: self.spill_index,
+            held_cells: self.held_cells,
         }
     }
 
@@ -364,6 +418,7 @@ impl<'a> EvalContext<'a> {
         let exhausted = self.exhausted.get();
         let errors = self.unhandled_budget_errors.get();
         let unsupported = self.unsupported_functions.get();
+        let uncomputable = self.uncomputable_checkpoint();
         let random = self.random_state.get();
         let names = self.defined_name_values.borrow().insertions.len();
         let cache = self.criteria_cache.borrow().checkpoint();
@@ -381,6 +436,7 @@ impl<'a> EvalContext<'a> {
             self.exhausted.set(exhausted);
             self.unhandled_budget_errors.set(errors);
             self.unsupported_functions.set(unsupported);
+            self.discard_uncomputable_since(uncomputable);
             self.random_state.set(random);
             self.defined_name_values.borrow_mut().restore(names);
             self.criteria_cache.borrow_mut().restore(cache);
@@ -393,8 +449,8 @@ impl<'a> EvalContext<'a> {
         result
     }
 
-    /// whether `consume_cells(count)` would be granted; charges nothing.
-    pub(crate) fn remaining_cells(&self) -> u64 {
+    /// cell visits this evaluation may still make.
+    pub fn remaining_cells(&self) -> u64 {
         self.remaining_cell_visits.get()
     }
 
@@ -475,8 +531,27 @@ impl<'a> EvalContext<'a> {
         ((z ^ (z >> 31)) >> 11) as f64 / (1u64 << 53) as f64
     }
 
-    pub(crate) fn exhausted(&self) -> bool {
+    /// whether this evaluation was refused budget.
+    pub fn exhausted(&self) -> bool {
         self.exhausted.get()
+    }
+
+    /// readies this context for another formula: a fresh budget and no state
+    /// left from the last one, keeping the criteria indexes it built.
+    pub fn restart(&self) {
+        self.random_state.set(None);
+        self.remaining_cell_visits.set(MAX_EVALUATION_CELL_VISITS);
+        self.remaining_text_bytes.set(MAX_EVALUATION_TEXT_BYTES);
+        self.exhausted.set(false);
+        self.unhandled_budget_errors.set(0);
+        self.unsupported_functions.set(0);
+        self.uncomputable.borrow_mut().clear();
+        self.other_workbook.set(false);
+        self.defined_name_stack.borrow_mut().clear();
+        *self.defined_name_values.borrow_mut() = DefinedNameValues::default();
+        self.array_depth.set(0);
+        self.bindings.borrow_mut().clear();
+        self.lambda_depth.set(0);
     }
 
     /// `#NUM!`, recorded as a budget error, once this evaluation has been
@@ -512,9 +587,68 @@ impl<'a> EvalContext<'a> {
     }
 
     /// whether a function the engine does not implement reached this
-    /// evaluation's result, rather than being answered by a handler.
-    pub(crate) fn has_unhandled_unsupported_function(&self) -> bool {
-        self.unsupported_functions.get() != 0
+    /// evaluation's result, rather than being answered by a handler, or an
+    /// uncomputable one was called at all.
+    pub fn has_unhandled_unsupported_function(&self) -> bool {
+        self.unsupported_functions.get() != 0 || !self.uncomputable.borrow().is_empty()
+    }
+
+    /// notes a call the engine cannot compute, offline or at all. unlike
+    /// other gaps it survives `IFERROR` and every other handler: what excel
+    /// returned for the call is unknown, so no handler's answer is known
+    /// either.
+    pub(crate) fn record_uncomputable(&self, name: String) {
+        self.uncomputable.borrow_mut().push(name);
+    }
+
+    /// notes a read of the cell at `at`: an uncomputable call keeping that
+    /// cell unevaluated reaches this evaluation too.
+    pub(crate) fn note_read(&self, sheet: SheetId, at: CellRef) {
+        let Some(functions) = self.held_cells.and_then(|held| held.held(sheet, at)) else {
+            return;
+        };
+        let mut called = self.uncomputable.borrow_mut();
+        for name in functions {
+            if !called.contains(&name) {
+                called.push(name);
+            }
+        }
+    }
+
+    /// whether every read must pass through [`EvalContext::note_read`], so no
+    /// index built for other formulas may answer for one.
+    pub(crate) fn watches_reads(&self) -> bool {
+        self.held_cells.is_some()
+    }
+
+    pub(crate) fn uncomputable_checkpoint(&self) -> usize {
+        self.uncomputable.borrow().len()
+    }
+
+    /// forgets the uncomputable calls since `checkpoint`, for an evaluation
+    /// whose value never reaches the result.
+    pub(crate) fn discard_uncomputable_since(&self, checkpoint: usize) {
+        self.uncomputable.borrow_mut().truncate(checkpoint);
+    }
+
+    /// the distinct uncomputable functions called, sorted.
+    pub(crate) fn uncomputable_functions(&self) -> Vec<String> {
+        let mut names = self.uncomputable.borrow().clone();
+        names.sort_unstable();
+        names.dedup();
+        names
+    }
+
+    /// whether this evaluation read another workbook, directly or through a
+    /// defined name. the package carries none of its cells, so the result
+    /// stands in for nothing, whatever a handler made of the gap.
+    pub fn read_other_workbook(&self) -> bool {
+        self.other_workbook.get()
+    }
+
+    pub(crate) fn record_other_workbook(&self) {
+        self.other_workbook.set(true);
+        self.record_unsupported_function();
     }
 
     pub(crate) fn record_unsupported_function(&self) {
@@ -598,6 +732,19 @@ impl<'a> EvalContext<'a> {
         self.defined_name_stack.borrow_mut().pop();
         value
     }
+
+    /// a definition parsed once per context however often its name is read.
+    /// a failed parse is not kept, so each read records its gap again.
+    fn parsed_definition(&self, formula: &str) -> Option<Arc<Expr>> {
+        if let Some(expression) = self.parsed_definitions.borrow().get(formula) {
+            return Some(Arc::clone(expression));
+        }
+        let expression = parse_definition(formula)?;
+        self.parsed_definitions
+            .borrow_mut()
+            .insert(formula.to_owned(), Arc::clone(&expression));
+        Some(expression)
+    }
 }
 
 /// one stream per unseeded context, so sibling cells draw different values and
@@ -624,6 +771,12 @@ pub(crate) fn parse_cached(cache: &ParseCache, src: &str) -> Option<Arc<Expr>> {
         .expect("parse cache poisoned")
         .insert(src.to_string(), Arc::clone(&expr));
     Some(expr)
+}
+
+fn parse_definition(formula: &str) -> Option<Arc<Expr>> {
+    #[cfg(test)]
+    DEFINED_NAME_PARSES.with(|count| count.set(count.get() + 1));
+    parse_formula(formula).ok().map(Arc::new)
 }
 
 pub(crate) fn err(value: ErrorValue) -> CellValue {
@@ -709,11 +862,27 @@ pub fn evaluate(expr: &Expr, ctx: &EvalContext<'_>) -> CellValue {
             }
             Some(f) => f.call(args, ctx),
             None if crate::array::is_array_builtin(name) => evaluate_array(expr, ctx).into_scalar(),
-            None => {
-                ctx.record_unsupported_function();
-                err(ErrorValue::Name)
-            }
+            None => err(unimplemented_call(name, ctx)),
         },
+    }
+}
+
+/// a call to a function the engine has no implementation for. one no
+/// offline engine can compute is `#VALUE!`, what excel shows without the
+/// service it needs; any other name is excel's own `#NAME?`. the engine
+/// cannot tell a typo from a function excel knows, so either call survives a
+/// handler, whose answer is known no better than the call's.
+pub(crate) fn unimplemented_call(name: &str, ctx: &EvalContext<'_>) -> ErrorValue {
+    match crate::functions::uncomputable(name) {
+        Some(name) => {
+            ctx.record_uncomputable(name);
+            ErrorValue::Value
+        }
+        None => {
+            ctx.record_unsupported_function();
+            ctx.record_uncomputable(crate::functions::bare_name(name).to_owned());
+            ErrorValue::Name
+        }
     }
 }
 
@@ -739,11 +908,11 @@ fn intersect(area: Area, ctx: &EvalContext<'_>) -> CellValue {
 /// a defined name identified by the sheet its lookup resolved against.
 type DefinedNameKey = (SheetId, String);
 
-/// each name's value and whether it reached an engine gap, per intersection
-/// mode.
+/// each name's value, whether it reached an engine gap, and the uncomputable
+/// functions it called, per intersection mode.
 #[derive(Default)]
 struct DefinedNameValues {
-    values: HashMap<(DefinedNameKey, bool), (CellValue, bool)>,
+    values: HashMap<(DefinedNameKey, bool), (CellValue, bool, Vec<String>)>,
     insertions: Vec<(DefinedNameKey, bool)>,
 }
 
@@ -775,9 +944,12 @@ fn evaluate_defined_name(scope: &Option<String>, name: &str, ctx: &EvalContext<'
         Err(error) => return err(error),
     };
     let memo = (key, ctx.intersects());
-    if let Some((cached, gap)) = ctx.defined_name_values.borrow().values.get(&memo) {
+    if let Some((cached, gap, uncomputable)) = ctx.defined_name_values.borrow().values.get(&memo) {
         if *gap {
             ctx.record_unsupported_function();
+        }
+        for name in uncomputable {
+            ctx.record_uncomputable(name.clone());
         }
         return cached.clone();
     }
@@ -787,12 +959,21 @@ fn evaluate_defined_name(scope: &Option<String>, name: &str, ctx: &EvalContext<'
         Err(error) => return err(error),
     };
     let checkpoint = ctx.unsupported_checkpoint();
+    let called = ctx.uncomputable_checkpoint();
     let value = ctx.inside_defined_name(&binding, evaluate);
     let gap = ctx.unsupported_checkpoint() > checkpoint;
+    let uncomputable = ctx
+        .uncomputable
+        .borrow()
+        .get(called..)
+        .map(<[String]>::to_vec)
+        .unwrap_or_default();
     let mut names = ctx.defined_name_values.borrow_mut();
     let memo = (binding.key, intersects);
     names.insertions.push(memo.clone());
-    names.values.insert(memo, (value.clone(), gap));
+    names
+        .values
+        .insert(memo, (value.clone(), gap, uncomputable));
     value
 }
 
@@ -834,14 +1015,19 @@ fn bind_defined_name(
         .unwrap_or(&defined.formula);
     let expression = match ctx.parse_cache {
         Some(cache) => parse_cached(cache, formula),
-        None => parse_formula(formula).ok().map(Arc::new),
+        None => ctx.parsed_definition(formula),
     }
     .ok_or_else(|| {
-        if formula.contains('[') {
+        if mentions_workbook_index(formula) {
+            ctx.record_other_workbook();
+        } else if formula.contains('[') {
             ctx.record_unsupported_function();
         }
         ErrorValue::Name
     })?;
+    if reads_other_workbook(&expression) {
+        ctx.record_other_workbook();
+    }
     let sheet = defined.local_sheet.unwrap_or(key.0);
     #[cfg(test)]
     DEFINED_NAME_EXPANSIONS.with(|count| count.set(count.get() + 1));
@@ -873,6 +1059,7 @@ pub(crate) fn resolve_ref(
     if !ctx.consume_cells(1) {
         return err(ErrorValue::Num);
     }
+    ctx.note_read(sid, cell);
     kept(
         ctx,
         normalize_cow(ctx.provider.value_cow(sid, cell)).into_owned(),
@@ -895,7 +1082,9 @@ pub(crate) fn resolve_sheet(sheet: &Option<String>, ctx: &EvalContext<'_>) -> Op
 /// workbook (`[1]Sheet`; a sheet name cannot contain `[`) is an engine gap,
 /// since the package carries none of that workbook's cells.
 fn missing_sheet(name: &str, ctx: &EvalContext<'_>) -> Option<SheetId> {
-    if name.contains('[') {
+    if names_other_workbook(name) {
+        ctx.record_other_workbook();
+    } else if name.contains('[') {
         ctx.record_unsupported_function();
     }
     None
@@ -1221,9 +1410,54 @@ pub(crate) fn parse_clock(s: &str) -> Option<f64> {
     Some((hour * 3600.0 + minute * 60.0 + second) / 86400.0)
 }
 
-/// excel "general" number formatting, good enough for text coercion: integers
-/// print without a decimal, everything else uses rust's shortest round-trip.
-pub(crate) fn format_number(n: f64) -> String {
+/// the longest plain form, sign excluded, excel writes for a number in text;
+/// a longer one switches to scientific notation.
+const PLAIN_TEXT_CHARS: usize = 20;
+
+/// a number as excel writes it into text: rounded to 15 significant digits
+/// without trailing zeros, plain unless that takes more than
+/// [`PLAIN_TEXT_CHARS`] characters, then scientific with a signed exponent
+/// of at least two digits. so `0.1+0.2` reads as "0.3", 10^19 as
+/// "10000000000000000000", 10^20 as "1E+20" and 10^-19 as "1E-19".
+pub(crate) fn format_number(x: f64) -> String {
+    if x == 0.0 || !x.is_finite() {
+        return exact_number_text(x);
+    }
+    let scientific = format!("{:.14e}", x.abs());
+    let (mantissa, exponent) = scientific.split_once('e').unwrap_or((&scientific, "0"));
+    let exponent: i32 = exponent.parse().unwrap_or(0);
+    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+    let digits = digits.trim_end_matches('0');
+    let sign = if x < 0.0 { "-" } else { "" };
+    let magnitude = exponent.unsigned_abs() as usize;
+    let plain_chars = if exponent < 0 {
+        magnitude + 1 + digits.len()
+    } else if digits.len() <= magnitude + 1 {
+        magnitude + 1
+    } else {
+        digits.len() + 1
+    };
+    if plain_chars > PLAIN_TEXT_CHARS {
+        let (head, tail) = digits.split_at(1);
+        let point = if tail.is_empty() { "" } else { "." };
+        let exponent_sign = if exponent < 0 { '-' } else { '+' };
+        return format!("{sign}{head}{point}{tail}E{exponent_sign}{magnitude:02}");
+    }
+    if exponent < 0 {
+        let zeros = "0".repeat(magnitude - 1);
+        return format!("{sign}0.{zeros}{digits}");
+    }
+    let whole = magnitude + 1;
+    if digits.len() <= whole {
+        format!("{sign}{digits:0<whole$}")
+    } else {
+        format!("{sign}{}.{}", &digits[..whole], &digits[whole..])
+    }
+}
+
+/// a number as the shortest text that reads back as the same double, for
+/// keys and formula text that must not merge distinct values.
+pub(crate) fn exact_number_text(n: f64) -> String {
     if n == 0.0 {
         return "0".to_string();
     }
@@ -1302,6 +1536,7 @@ impl Area {
         col: usize,
     ) -> Cow<'p, CellValue> {
         let cell = CellRef::new(self.start.row + row as u32, self.start.col + col as u32);
+        ctx.note_read(self.sheet, cell);
         normalize_cow(ctx.provider.value_cow(self.sheet, cell))
     }
 
@@ -1406,6 +1641,9 @@ pub(crate) fn as_area(arg: &Expr, ctx: &EvalContext<'_>) -> Option<Area> {
         Expr::FuncCall { name, args, .. } if name.eq_ignore_ascii_case("INDEX") => {
             crate::functions::lookups::index_area(args, ctx).ok()
         }
+        Expr::FuncCall { name, args, .. } if crate::functions::grouping::trims(name) => {
+            crate::functions::grouping::trim_area(name, args, ctx).and_then(Result::ok)
+        }
         Expr::Ref { sheet, cell } => Some(Area {
             sheet: resolve_sheet(sheet, ctx)?,
             start: *cell,
@@ -1461,6 +1699,9 @@ pub(crate) fn resolve_area(arg: &Expr, ctx: &EvalContext<'_>) -> Option<Result<A
         {
             let area = resolve_area(&args[0], ctx)?;
             Some(area.and_then(|area| crate::functions::lookups::index_within(area, args, ctx)))
+        }
+        Expr::FuncCall { name, args, .. } if crate::functions::grouping::trims(name) => {
+            crate::functions::grouping::trim_area(name, args, ctx)
         }
         Expr::RangeJoin { start, end } => Some(range_join_area(start, end, ctx)),
         Expr::TableRef { table, spec } => Some(table_area(table, spec, ctx)),
@@ -1813,6 +2054,191 @@ mod tests {
             }
         );
         assert_eq!(expansions, DEPTH + 1);
+    }
+
+    #[test]
+    fn a_context_without_a_parse_cache_parses_each_definition_once() {
+        let mut workbook = Workbook::default();
+        let mut data = Sheet::new("Data");
+        for (at, value) in [("A1", 1.0), ("A2", 2.0), ("A3", 3.0)] {
+            data.set_cell(CellRef::parse_a1(at).unwrap(), number(value));
+        }
+        workbook.sheets.extend([data, Sheet::new("Other")]);
+        workbook.defined_names.extend([
+            defined_name("Inner", "Data!$A$1:$A$3"),
+            defined_name("Outer", "Inner"),
+        ]);
+        let context = EvalContext::new(&workbook, SheetId(0));
+        let other = context.for_sheet(SheetId(1));
+        let rows = parse_formula("ROWS(Outer)").unwrap();
+        let total = parse_formula("SUM(Outer)+SUM(Inner)").unwrap();
+
+        DEFINED_NAME_PARSES.with(|count| count.set(0));
+        for _ in 0..8 {
+            assert_eq!(evaluate(&rows, &other), num(3.0));
+            assert_eq!(evaluate(&rows, &context), num(3.0));
+            assert_eq!(evaluate(&total, &context), num(12.0));
+        }
+        let parses = DEFINED_NAME_PARSES.with(std::cell::Cell::get);
+
+        assert_eq!(parses, 2);
+    }
+
+    #[test]
+    fn a_restarted_context_keeps_its_parsed_definitions() {
+        let mut workbook = Workbook::default();
+        let mut data = Sheet::new("Data");
+        data.set_cell(CellRef::parse_a1("A1").unwrap(), number(1.0));
+        workbook.sheets.push(data);
+        workbook.defined_names.extend([
+            defined_name("Kind", "IF(Data!$A$1=1,\"S\",\"T\")"),
+            defined_name("Code", "Data!$A$1+301"),
+        ]);
+        let context = EvalContext::new(&workbook, SheetId(0));
+        let kind = parse_formula("OR(Kind=\"S\",Kind=\"M\")").unwrap();
+        let code = parse_formula("OR(Code=302,Code=303)").unwrap();
+        let fresh = |formula: &Expr| evaluate(formula, &EvalContext::new(&workbook, SheetId(0)));
+        let expected = [fresh(&kind), fresh(&code)];
+        assert_eq!(expected, [boolean(true), boolean(true)]);
+
+        DEFINED_NAME_PARSES.with(|count| count.set(0));
+        for _ in 0..8 {
+            context.restart();
+            assert_eq!(evaluate(&kind, &context), expected[0]);
+            context.restart();
+            assert_eq!(evaluate(&code, &context), expected[1]);
+        }
+        let parses = DEFINED_NAME_PARSES.with(std::cell::Cell::get);
+
+        assert_eq!(parses, 2);
+    }
+
+    fn names_workbook() -> Workbook {
+        let mut workbook = Workbook::default();
+        let mut data = Sheet::new("Data");
+        for (at, value) in [("A1", 1.0), ("A2", 2.0), ("A3", 3.0), ("B1", 2.0)] {
+            data.set_cell(CellRef::parse_a1(at).unwrap(), number(value));
+        }
+        workbook.sheets.extend([data, Sheet::new("Other")]);
+        workbook.defined_names.extend([
+            defined_name("Block", "Data!$A$1:$A$3"),
+            defined_name("Rate", "0.25"),
+            defined_name(
+                "Pick",
+                "IF(Data!$B$1>1,SWITCH(Data!$B$1,2,\"two\",3,\"three\",\"many\"),\"few\")",
+            ),
+            defined_name("Input", "Data!$A$1"),
+            DefinedName {
+                name: "Input".into(),
+                formula: "Data!$A$2".into(),
+                local_sheet: Some(SheetId(1)),
+                hidden: false,
+            },
+            defined_name("Loop", "Loop+1"),
+            defined_name("Broken", "[1]Sheet1!$A$1"),
+            defined_name("Garbled", "SUM(1,"),
+        ]);
+        for index in 0..MAX_DEFINED_NAME_DEPTH + 4 {
+            let next = index + 1;
+            workbook.defined_names.push(defined_name(
+                &format!("Deep_{index}"),
+                &format!("Deep_{next}"),
+            ));
+        }
+        workbook.defined_names.push(defined_name(
+            &format!("Deep_{}", MAX_DEFINED_NAME_DEPTH + 4),
+            "7",
+        ));
+        workbook
+    }
+
+    /// a value, the engine gaps its evaluation added, and whether the context
+    /// has read another workbook.
+    fn observed(formula: &Expr, context: &EvalContext<'_>) -> (CellValue, u64, bool) {
+        let gaps = context.unsupported_checkpoint();
+        let value = evaluate(formula, context);
+        let added = context.unsupported_checkpoint() - gaps;
+        (value, added, context.read_other_workbook())
+    }
+
+    #[test]
+    fn one_context_answers_name_formulas_as_fresh_contexts_do() {
+        let workbook = names_workbook();
+        let sources = [
+            "SUM(Block)",
+            "ROWS(Block)+Rate*4",
+            "Rate*2",
+            "Pick",
+            "Input",
+            "Other!Input+Input",
+            "Loop",
+            "Deep_0",
+            "Broken",
+            "IFERROR(Broken,0)",
+            "Garbled",
+        ];
+        let formulas: Vec<Expr> = sources
+            .iter()
+            .map(|source| parse_formula(source).unwrap())
+            .collect();
+        let fresh: Vec<_> = formulas
+            .iter()
+            .map(|formula| observed(formula, &EvalContext::new(&workbook, SheetId(0))))
+            .collect();
+        for (source, (_, _, other)) in sources.iter().zip(&fresh) {
+            assert_eq!(*other, source.contains("Broken"), "{source}");
+        }
+        assert_eq!(fresh[8], (err(ErrorValue::Name), 1, true));
+        assert_eq!(fresh[6].0, err(ErrorValue::Name));
+        assert_eq!(fresh[7].0, err(ErrorValue::Num));
+
+        let shared = EvalContext::new(&workbook, SheetId(0));
+        for _ in 0..2 {
+            for (index, formula) in formulas.iter().enumerate() {
+                let (source, (value, gaps, _)) = (sources[index], &fresh[index]);
+                let (again, added, _) = observed(formula, &shared);
+                assert_eq!(&again, value, "{source}");
+                assert_eq!(added, *gaps, "{source}");
+            }
+        }
+        assert!(shared.read_other_workbook());
+
+        let broken = EvalContext::new(&workbook, SheetId(0));
+        for _ in 0..3 {
+            assert_eq!(
+                observed(&formulas[8], &broken),
+                (err(ErrorValue::Name), 1, true)
+            );
+        }
+
+        let local = parse_formula("Input*10+SUM(Block)").unwrap();
+        assert_eq!(
+            evaluate(&local, &shared.for_sheet(SheetId(1))),
+            evaluate(&local, &EvalContext::new(&workbook, SheetId(1)))
+        );
+        assert_eq!(evaluate(&local, &shared.for_sheet(SheetId(1))), num(26.0));
+    }
+
+    #[test]
+    fn a_redefined_name_reads_its_new_definition_in_a_new_context() {
+        let mut workbook = Workbook::default();
+        let mut data = Sheet::new("Data");
+        data.set_cell(CellRef::parse_a1("A1").unwrap(), number(5.0));
+        data.set_cell(CellRef::parse_a1("A2").unwrap(), number(9.0));
+        workbook.sheets.push(data);
+        workbook
+            .defined_names
+            .push(defined_name("Input", "Data!$A$1"));
+        let formula = parse_formula("Input*2+ROWS(Input)").unwrap();
+
+        let before = EvalContext::new(&workbook, SheetId(0));
+        assert_eq!(evaluate(&formula, &before), num(11.0));
+        assert_eq!(evaluate(&formula, &before), num(11.0));
+
+        workbook.defined_names[0].formula = "Data!$A$2".into();
+        let after = EvalContext::new(&workbook, SheetId(0));
+        assert_eq!(evaluate(&formula, &after), num(19.0));
+        assert_eq!(evaluate(&formula, &after), num(19.0));
     }
 
     #[test]
@@ -2266,7 +2692,7 @@ mod tests {
     fn non_finite_arithmetic_becomes_num_error() {
         let mut workbook = Workbook::default();
         workbook.sheets.push(Sheet::new("Data"));
-        for formula in ["MEDIAN(1e308*1e308,1)", "SMALL(1e308*1e308,1)"] {
+        for formula in ["MEDIAN(1e307*1e307,1)", "SMALL(1e307*1e307,1)"] {
             let expression = parse_formula(formula).unwrap();
             let context = EvalContext::new(&workbook, SheetId(0));
             assert_eq!(

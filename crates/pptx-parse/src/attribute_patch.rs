@@ -75,7 +75,11 @@ fn escaped(value: &str) -> String {
         .replace('\t', "&#x9;")
 }
 
-fn patch_start(bytes: &[u8], before: &Attributes, after: &Attributes) -> Option<Vec<u8>> {
+pub(crate) fn patch_start(
+    bytes: &[u8],
+    before: &Attributes,
+    after: &Attributes,
+) -> Option<Vec<u8>> {
     let mut output = Vec::new();
     let mut seen = HashSet::new();
     let mut pos = 1;

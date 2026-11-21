@@ -3,7 +3,7 @@
 use ooxml_drawingml::SymbolFont;
 use serde::{Deserialize, Serialize};
 
-use crate::block::transparent_children;
+use crate::block::{StoryContext, transparent_children};
 use crate::chart::{ChartPartsMap, DrawingChart, parse_chart_from_drawing};
 use crate::formatting::{
     ParagraphFormatting, ParagraphFrame, SpacingExplicit, parse_paragraph_properties,
@@ -13,8 +13,9 @@ use crate::inline::{
     ContentPosition, Hyperlink, InlineNode, InlineSdt, InlineSdtType, MathEquation, MathType,
     OpenComplexField, Run, RunContent, SimpleField, SimpleFieldType, StructuredFieldContent,
     StructuredFieldTree, absorb_beyond_field_nesting, check_container_beyond_field_nesting,
-    field_depth_error, has_bookmark_id, parse_bookmark_end, parse_bookmark_start, parse_field_type,
-    parse_hyperlink, parse_run, parse_sdt_properties, run_content_length,
+    field_depth_error, field_run_source, has_bookmark_id, keep_field_run, parse_bookmark_end,
+    parse_bookmark_start, parse_field_type, parse_hyperlink, parse_run, parse_sdt_properties,
+    run_content_length,
 };
 use crate::media::MediaMap;
 use crate::numbering::{ListRendering, NumberingMap, compute_list_rendering};
@@ -281,6 +282,40 @@ pub fn parse_paragraph(
     in_header_footer: bool,
     depth: usize,
 ) -> Result<Paragraph, ParseError> {
+    parse_paragraph_with_story_context(
+        element,
+        relationships,
+        theme,
+        styles,
+        doc_defaults,
+        numbering,
+        part,
+        budget,
+        ids,
+        drawing,
+        StoryContext {
+            in_header_footer,
+            watermark_claimed_separately: in_header_footer,
+        },
+        depth,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn parse_paragraph_with_story_context(
+    element: &XmlElement,
+    relationships: Option<&RelationshipMap>,
+    theme: Option<&Theme>,
+    styles: Option<&StyleMap>,
+    doc_defaults: Option<&DocDefaults>,
+    numbering: Option<&NumberingMap>,
+    part: &str,
+    budget: &mut ParseBudget<'_>,
+    ids: &mut HexIdAllocator,
+    drawing: Option<&mut DrawingContext<'_>>,
+    context: StoryContext,
+    depth: usize,
+) -> Result<Paragraph, ParseError> {
     budget.check_nesting_depth(depth, part)?;
     budget.charge_paragraph(part)?;
     let para_id = element
@@ -313,7 +348,7 @@ pub fn parse_paragraph(
         p_pr_del: None,
         content: Vec::new(),
         list_rendering: None,
-        rendered_page_break_before: (!in_header_footer
+        rendered_page_break_before: (!context.in_header_footer
             && paragraph_starts_with_rendered_page_break(element))
         .then_some(true),
         section_properties: None,
@@ -388,7 +423,7 @@ pub fn parse_paragraph(
         depth,
         false,
         false,
-        in_header_footer,
+        context.watermark_claimed_separately,
     )?;
     apply_list_rendering(&mut paragraph, properties, styles, numbering);
     Ok(paragraph)
@@ -432,6 +467,8 @@ pub fn parse_document_paragraph_properties(
             paragraph_ordinal: None,
             para_id_attribute: None,
             bookmark_xml: None,
+            bookmark_replay_xml: None,
+            matches_local_names: run_properties.matches_local_names,
         };
         value.run_properties = parse_run(&shell, theme, styles, None).run.formatting;
     }
@@ -536,7 +573,7 @@ fn parse_paragraph_contents(
     depth: usize,
     deletion: bool,
     in_control: bool,
-    in_header_footer: bool,
+    watermark_claimed_separately: bool,
 ) -> Result<Vec<ParagraphContent>, ParseError> {
     budget.check_nesting_depth(depth, part)?;
     let tracked_context = if deletion {
@@ -547,6 +584,7 @@ fn parse_paragraph_contents(
     let mut output = Vec::new();
     let mut fields: Vec<OpenComplexField> = Vec::new();
     let mut beyond_nesting = 0;
+    let mut runs = Vec::new();
     for child in transparent_children(element, false) {
         let normalized;
         let child = if tracked_context == TrackedContext::Deletion
@@ -560,6 +598,15 @@ fn parse_paragraph_contents(
         check_container_beyond_field_nesting(beyond_nesting, child, part)?;
         match child.local_name() {
             "r" => {
+                let source = if element.matches_name("w", "p")
+                    && !deletion
+                    && !in_control
+                    && fields.is_empty()
+                {
+                    field_run_source(child)
+                } else {
+                    None
+                };
                 let run = parse_run_with_context(
                     child,
                     relationships,
@@ -568,10 +615,25 @@ fn parse_paragraph_contents(
                     doc_defaults,
                     budget,
                     drawing.as_deref_mut(),
-                    in_control,
-                    in_header_footer,
+                    in_control || !element.matches_name("w", "p"),
+                    watermark_claimed_separately,
                 )?;
+                let before = output.len();
                 process_field_run(run, &mut fields, &mut beyond_nesting, &mut output, part)?;
+                if let Some(source) = source
+                    && let Some(ParagraphContent::Inline(node)) = output.last_mut()
+                    && let InlineNode::ComplexField(field) = node
+                {
+                    keep_field_run(field, source);
+                }
+                runs.push(
+                    (output.len() == before + 1
+                        && matches!(
+                            output.last(),
+                            Some(ParagraphContent::Inline(InlineNode::Run(_)))
+                        ))
+                    .then_some(before),
+                );
             }
             "hyperlink" => {
                 let hyperlink = parse_hyperlink_composed(
@@ -585,18 +647,10 @@ fn parse_paragraph_contents(
                     drawing.as_deref_mut(),
                     depth + 1,
                     in_control,
-                    in_header_footer,
+                    watermark_claimed_separately,
                 )?;
                 if let Some(active) = fields.last_mut() {
-                    let runs: Vec<Run> = hyperlink
-                        .children
-                        .iter()
-                        .filter_map(|node| match node {
-                            InlineNode::Run(run) => Some(run.clone()),
-                            _ => None,
-                        })
-                        .collect();
-                    active.absorb(InlineNode::Hyperlink(Box::new(hyperlink)), runs);
+                    active.absorb(InlineNode::Hyperlink(Box::new(hyperlink)));
                 } else {
                     output.push(ParagraphContent::Inline(InlineNode::Hyperlink(Box::new(
                         hyperlink,
@@ -609,7 +663,7 @@ fn parse_paragraph_contents(
                 }
                 let node = InlineNode::BookmarkStart(parse_bookmark_start(child));
                 match fields.last_mut() {
-                    Some(active) => active.absorb(node, Vec::new()),
+                    Some(active) => active.absorb(node),
                     None => output.push(ParagraphContent::Inline(node)),
                 }
             }
@@ -619,7 +673,7 @@ fn parse_paragraph_contents(
                 }
                 let node = InlineNode::BookmarkEnd(parse_bookmark_end(child));
                 match fields.last_mut() {
-                    Some(active) => active.absorb(node, Vec::new()),
+                    Some(active) => active.absorb(node),
                     None => output.push(ParagraphContent::Inline(node)),
                 }
             }
@@ -635,11 +689,10 @@ fn parse_paragraph_contents(
                     drawing.as_deref_mut(),
                     depth + 1,
                     in_control,
-                    in_header_footer,
+                    watermark_claimed_separately,
                 )?;
                 if let Some(active) = fields.last_mut() {
-                    let runs = field.content.clone();
-                    active.absorb(InlineNode::SimpleField(Box::new(field)), runs);
+                    active.absorb(InlineNode::SimpleField(Box::new(field)));
                 } else {
                     output.push(ParagraphContent::Inline(InlineNode::SimpleField(Box::new(
                         field,
@@ -660,7 +713,7 @@ fn parse_paragraph_contents(
                         depth + 1,
                         tracked_context == TrackedContext::Deletion,
                         true,
-                        in_header_footer,
+                        watermark_claimed_separately,
                     )?;
                     output.push(ParagraphContent::Inline(InlineNode::InlineSdt(Box::new(
                         InlineSdt {
@@ -689,7 +742,7 @@ fn parse_paragraph_contents(
                     depth + 1,
                     is_deletion,
                     in_control,
-                    in_header_footer,
+                    watermark_claimed_separately,
                 )?;
                 let content = if in_control {
                     filter_field_inline(content, true)
@@ -777,6 +830,9 @@ fn parse_paragraph_contents(
         }
     }
     assign_marker_offsets(&mut output);
+    if element.name == "w:p" {
+        budget.record_paragraph_runs(runs);
+    }
     Ok(output)
 }
 
@@ -811,11 +867,14 @@ fn process_field_run(
     if let Some(active) = fields.last_mut() {
         active.append_instruction(&instruction);
         active.adopt_formatting(&run);
+        if (has_begin || has_separate) && !instruction.is_empty() {
+            active.absorb_instruction(&run);
+        }
         if has_separate {
             active.switch_to_result();
         }
         if !has_begin && !has_separate && !has_end {
-            active.absorb(InlineNode::Run(run.clone()), vec![run]);
+            active.absorb(InlineNode::Run(run));
         }
         if has_end {
             let completed = fields.pop().unwrap().finish();
@@ -845,7 +904,7 @@ fn parse_simple_field_composed(
     drawing: Option<&mut ComposedDrawingContext<'_>>,
     depth: usize,
     in_control: bool,
-    in_header_footer: bool,
+    watermark_claimed_separately: bool,
 ) -> Result<SimpleField, ParseError> {
     let instruction = element
         .attribute(Some("w"), "instr")
@@ -864,7 +923,7 @@ fn parse_simple_field_composed(
             depth,
             false,
             in_control,
-            in_header_footer,
+            watermark_claimed_separately,
         )?,
         false,
     );
@@ -878,6 +937,7 @@ fn parse_simple_field_composed(
     let structured_result = (!result.is_empty()).then(|| StructuredFieldContent {
         inline: Some(result),
         blocks: None,
+        block_count: None,
     });
     let field_tree = structured_result
         .as_ref()
@@ -913,7 +973,7 @@ fn parse_hyperlink_composed(
     mut drawing: Option<&mut ComposedDrawingContext<'_>>,
     depth: usize,
     in_control: bool,
-    in_header_footer: bool,
+    watermark_claimed_separately: bool,
 ) -> Result<Hyperlink, ParseError> {
     budget.check_nesting_depth(depth, part)?;
     let mut hyperlink = parse_hyperlink(
@@ -937,8 +997,8 @@ fn parse_hyperlink_composed(
                 doc_defaults,
                 budget,
                 drawing.as_deref_mut(),
-                in_control,
-                in_header_footer,
+                true,
+                watermark_claimed_separately,
             )?)),
             "bookmarkStart" => has_bookmark_id(child)
                 .then(|| InlineNode::BookmarkStart(parse_bookmark_start(child))),
@@ -957,7 +1017,7 @@ fn parse_hyperlink_composed(
                     drawing.as_deref_mut(),
                     depth + 1,
                     in_control,
-                    in_header_footer,
+                    watermark_claimed_separately,
                 )?,
             ))),
             "sdt" => parse_inline_sdt_composed(
@@ -971,7 +1031,7 @@ fn parse_hyperlink_composed(
                 drawing.as_deref_mut(),
                 depth + 1,
                 false,
-                in_header_footer,
+                watermark_claimed_separately,
             )?
             .map(|sdt| InlineNode::InlineSdt(Box::new(sdt))),
             "oMath" | "oMathPara" => Some(InlineNode::Math(parse_math(child))),
@@ -1007,7 +1067,7 @@ fn parse_inline_sdt_composed(
     drawing: Option<&mut ComposedDrawingContext<'_>>,
     depth: usize,
     property_theme: bool,
-    in_header_footer: bool,
+    watermark_claimed_separately: bool,
 ) -> Result<Option<InlineSdt>, ParseError> {
     let Some(container) = element.child("w", "sdtContent") else {
         return Ok(None);
@@ -1025,7 +1085,7 @@ fn parse_inline_sdt_composed(
             depth,
             false,
             true,
-            in_header_footer,
+            watermark_claimed_separately,
         )?,
         true,
     );
@@ -1082,10 +1142,20 @@ pub(crate) fn normalize_deletion_element(element: &XmlElement) -> XmlElement {
         paragraph_ordinal: element.paragraph_ordinal,
         para_id_attribute: element.para_id_attribute.clone(),
         bookmark_xml: element.bookmark_xml.clone(),
+        bookmark_replay_xml: element.bookmark_replay_xml.clone(),
+        matches_local_names: element.matches_local_names,
         children: element
             .children
             .iter()
             .map(|node| match node {
+                XmlNode::Element(child)
+                    if matches!(
+                        child.local_name(),
+                        "drawing" | "pict" | "object" | "AlternateContent"
+                    ) =>
+                {
+                    node.clone()
+                }
                 XmlNode::Element(child) => XmlNode::Element(normalize_deletion_element(child)),
                 _ => node.clone(),
             })
@@ -1164,7 +1234,7 @@ fn parse_run_with_context(
     budget: &mut ParseBudget<'_>,
     mut drawing: Option<&mut ComposedDrawingContext<'_>>,
     in_control: bool,
-    in_header_footer: bool,
+    watermark_claimed_separately: bool,
 ) -> Result<Run, ParseError> {
     let mut run = parse_run(element, theme, styles, doc_defaults).run;
     let mut replacements = Vec::new();
@@ -1176,12 +1246,12 @@ fn parse_run_with_context(
                     relationships,
                     budget,
                     drawing.as_deref_mut(),
-                    in_header_footer,
+                    watermark_claimed_separately,
                 )?;
                 if in_control && parsed.is_empty() && is_text_box_drawing(child) {
                     parsed.push(RunContent::OpaqueDrawing {
                         kind: "drawing".to_owned(),
-                        xml: child.to_raw_inline_xml(),
+                        xml: crate::text_box::source_xml(child),
                         preview: None,
                         previews: Vec::new(),
                         text_box: None,
@@ -1196,10 +1266,10 @@ fn parse_run_with_context(
                     relationships,
                     budget,
                     drawing.as_deref_mut(),
-                    in_header_footer,
+                    watermark_claimed_separately,
                     in_control,
                 )?;
-                let (branch, parsed) = match selected {
+                let (branch, mut parsed) = match selected {
                     Some((branch, parsed)) => (Some(branch), parsed),
                     None => (None, Vec::new()),
                 };
@@ -1208,8 +1278,9 @@ fn parse_run_with_context(
                     _ => true,
                 });
                 let has_text_box = alternate_content_has_text_box(child);
-                let control_text_box =
-                    in_control && branch.and_then(single_text_box_drawing).is_some();
+                let control_text_box = in_control
+                    && (branch.and_then(single_text_box_drawing).is_some()
+                        || (has_text_box && !modeled));
                 if control_text_box || (!modeled && !has_text_box) {
                     let fallback_properties = if control_text_box {
                         branch
@@ -1249,13 +1320,18 @@ fn parse_run_with_context(
                     };
                     replacements.push(vec![RunContent::OpaqueDrawing {
                         kind: "alternateContent".to_owned(),
-                        xml: child.to_raw_inline_xml(),
+                        xml: crate::text_box::source_xml(child),
                         preview,
                         previews,
                         text_box: None,
                         drawing_properties: fallback_properties,
                     }]);
                 } else {
+                    if let [RunContent::Shape { shape, .. }] = parsed.as_mut_slice()
+                        && !crate::text_box::shares_a_bookmarked_branch(child)
+                    {
+                        crate::text_box::capture_bookmark_source(shape, child);
+                    }
                     replacements.push(parsed);
                 }
             }
@@ -1278,7 +1354,17 @@ fn parse_run_with_context(
     {
         match run.content.as_mut_slice() {
             [RunContent::Shape { shape, .. }] if shape.drawing_xml.is_some() => {
-                shape.drawing_run_xml = Some(element.to_raw_inline_xml());
+                shape.drawing_run_xml = Some(
+                    if shape
+                        .drawing_model
+                        .as_ref()
+                        .is_some_and(|model| model.get("textBoxContentSha256").is_some())
+                    {
+                        element.to_bookmarked_raw_inline_xml()
+                    } else {
+                        element.to_raw_inline_xml()
+                    },
+                );
                 shape.drawing_xml = None;
             }
             [RunContent::OpaqueDrawing { kind, xml, .. }]
@@ -1300,11 +1386,16 @@ fn parse_drawing_owned(
     relationships: Option<&RelationshipMap>,
     budget: &mut ParseBudget<'_>,
     drawing: Option<&mut ComposedDrawingContext<'_>>,
-    in_header_footer: bool,
+    watermark_claimed_separately: bool,
 ) -> Result<Vec<RunContent>, ParseError> {
     let properties = crate::image::parse_drawing_properties(element);
-    let mut parsed =
-        parse_drawing_owned_inner(element, relationships, budget, drawing, in_header_footer)?;
+    let mut parsed = parse_drawing_owned_inner(
+        element,
+        relationships,
+        budget,
+        drawing,
+        watermark_claimed_separately,
+    )?;
     if properties.is_some() {
         for content in &mut parsed {
             if content.drawing_properties().is_none() {
@@ -1320,10 +1411,11 @@ fn parse_drawing_owned_inner(
     relationships: Option<&RelationshipMap>,
     budget: &mut ParseBudget<'_>,
     mut drawing: Option<&mut ComposedDrawingContext<'_>>,
-    in_header_footer: bool,
+    watermark_claimed_separately: bool,
 ) -> Result<Vec<RunContent>, ParseError> {
     if matches!(element.local_name(), "pict" | "object") {
-        if let Some(rule) = parse_horizontal_rule(element) {
+        let bookmarked = crate::text_box::has_bookmarked_text_box(element);
+        if !bookmarked && let Some(rule) = parse_horizontal_rule(element) {
             return Ok(vec![RunContent::HorizontalRule {
                 rule: Box::new(rule),
             }]);
@@ -1332,7 +1424,7 @@ fn parse_drawing_owned_inner(
         if element.local_name() == "object" || has_ole_object(element, 0) {
             return Ok(vec![RunContent::OpaqueDrawing {
                 kind: element.local_name().to_owned(),
-                xml: element.to_raw_inline_xml(),
+                xml: crate::text_box::source_xml(element),
                 preview: vml_image_content(element, relationships, media, Some(budget))
                     .map(Box::new),
                 previews: Vec::new(),
@@ -1341,7 +1433,10 @@ fn parse_drawing_owned_inner(
             }]);
         }
         let images = vml_image_contents(element, relationships, media, Some(budget));
-        if images.len() == 1 && find_descendant_by_name(element, "v:group", 0).is_none() {
+        if !bookmarked
+            && images.len() == 1
+            && find_descendant_by_name(element, "v:group", 0).is_none()
+        {
             return Ok(images
                 .into_iter()
                 .map(|image| RunContent::Drawing {
@@ -1353,17 +1448,17 @@ fn parse_drawing_owned_inner(
         if !images.is_empty() {
             return Ok(vec![RunContent::OpaqueDrawing {
                 kind: element.local_name().to_owned(),
-                xml: element.to_raw_inline_xml(),
+                xml: crate::text_box::source_xml(element),
                 preview: None,
                 previews: images,
                 text_box: None,
                 drawing_properties: None,
             }]);
         }
-        if !has_vml_image_data(element, 0) || !in_header_footer {
+        if bookmarked || !has_vml_image_data(element, 0) || !watermark_claimed_separately {
             return Ok(vec![RunContent::OpaqueDrawing {
                 kind: element.local_name().to_owned(),
-                xml: element.to_raw_inline_xml(),
+                xml: crate::text_box::source_xml(element),
                 preview: None,
                 previews: Vec::new(),
                 text_box: None,
@@ -1386,7 +1481,7 @@ fn parse_drawing_owned_inner(
         DrawingChart::Unread => {
             return Ok(vec![RunContent::OpaqueDrawing {
                 kind: "drawing".to_owned(),
-                xml: element.to_raw_inline_xml(),
+                xml: crate::text_box::source_xml(element),
                 preview: None,
                 previews: Vec::new(),
                 text_box: None,
@@ -1400,6 +1495,7 @@ fn parse_drawing_owned_inner(
             Some(context) => parse_smart_art_from_drawing(
                 element,
                 relationships,
+                Some(context.media),
                 Some(&mut *context.smart_art),
                 budget,
             )?,
@@ -1415,7 +1511,7 @@ fn parse_drawing_owned_inner(
             }
             None => RunContent::OpaqueDrawing {
                 kind: "drawing".to_owned(),
-                xml: element.to_raw_inline_xml(),
+                xml: crate::text_box::source_xml(element),
                 preview: None,
                 previews: Vec::new(),
                 text_box: None,
@@ -1434,6 +1530,7 @@ fn parse_drawing_owned_inner(
             let media = drawing.as_ref().map(|context| context.media);
             resolve_shape_fill_pictures(&mut shape, relationships, media);
             apply_shape_metadata(&mut shape, element);
+            crate::text_box::capture_bookmark_source(&mut shape, element);
             return Ok(vec![RunContent::Shape {
                 shape: Box::new(shape),
                 drawing_properties: None,
@@ -1456,7 +1553,7 @@ fn parse_alternate_content<'a>(
     relationships: Option<&RelationshipMap>,
     budget: &mut ParseBudget<'_>,
     drawing: Option<&mut ComposedDrawingContext<'_>>,
-    in_header_footer: bool,
+    watermark_claimed_separately: bool,
     preserve_text_box: bool,
 ) -> Result<Option<(&'a XmlElement, Vec<RunContent>)>, ParseError> {
     parse_alternate_content_branch_with_context(
@@ -1464,7 +1561,7 @@ fn parse_alternate_content<'a>(
         relationships,
         budget,
         drawing,
-        in_header_footer,
+        watermark_claimed_separately,
         preserve_text_box,
     )
 }
@@ -1492,7 +1589,7 @@ fn parse_alternate_content_branch_with_context<'a>(
     relationships: Option<&RelationshipMap>,
     budget: &mut ParseBudget<'_>,
     mut drawing: Option<&mut ComposedDrawingContext<'_>>,
-    in_header_footer: bool,
+    watermark_claimed_separately: bool,
     preserve_text_box: bool,
 ) -> Result<Option<(&'a XmlElement, Vec<RunContent>)>, ParseError> {
     let has_media = drawing.is_some();
@@ -1520,7 +1617,7 @@ fn parse_alternate_content_branch_with_context<'a>(
                         relationships,
                         budget,
                         drawing.as_deref_mut(),
-                        in_header_footer,
+                        watermark_claimed_separately,
                     ) {
                         Ok(parsed) => parsed,
                         Err(_) if unsupported.is_some() => return Ok(unsupported),
@@ -1579,7 +1676,7 @@ fn parse_alternate_content_branch_with_context<'a>(
                             text_box_branch.unwrap_or(branch),
                             vec![RunContent::OpaqueDrawing {
                                 kind: "alternateContent".to_owned(),
-                                xml: element.to_raw_inline_xml(),
+                                xml: crate::text_box::source_xml(element),
                                 preview,
                                 previews,
                                 text_box: None,

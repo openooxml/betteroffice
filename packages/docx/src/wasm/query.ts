@@ -1,10 +1,12 @@
-import wasmInit, { initSync } from './generated/query/docx_query.js';
+import wasmInit, { initSync, engineKind } from './engineQuery';
+import { wasmAssetUrl } from './assetQuery';
 import { createWasmModuleState, type WasmAsyncInput } from './loadWasmAsset';
 
 export const queryWasmState = createWasmModuleState({
   label: 'docx-query',
   preloadName: 'preloadQueryWasm',
-  assetUrl: () => new URL('./generated/query/docx_query_bg.wasm', import.meta.url),
+  assetUrl: wasmAssetUrl,
+  engineKind,
   initAsync: wasmInit,
   initSync,
 });

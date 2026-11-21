@@ -25,3 +25,17 @@ test('search finds a shortcut by its localized key names', () => {
   fireEvent.change(search, { target: { value: 'ctrl+j' } });
   expect(view.getByText('Probe shortcut')).toBeTruthy();
 });
+
+test.each(['Linux x86_64', 'MacIntel'])('clear formatting help shows the binding on %s', (platform) => {
+  const originalPlatform = Object.getOwnPropertyDescriptor(navigator, 'platform');
+  try {
+    Object.defineProperty(navigator, 'platform', { configurable: true, value: platform });
+    const view = render(<KeyboardShortcutsDialog isOpen onClose={() => {}} />);
+    expect(view.getByText('Clear text formatting')).toBeTruthy();
+    expect(view.getByText(platform === 'MacIntel' ? '⌘\\' : 'Ctrl+Space')).toBeTruthy();
+    expect(view.queryByText('⌘Space')).toBeNull();
+  } finally {
+    if (originalPlatform) Object.defineProperty(navigator, 'platform', originalPlatform);
+    else Reflect.deleteProperty(navigator, 'platform');
+  }
+});

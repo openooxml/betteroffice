@@ -6,6 +6,7 @@ import type { WorkbookFrame, WorkbookWireFrame } from './methods';
 export const WORKBOOK_REPLAY_MUTATORS = {
   editCell: true,
   editCells: true,
+  fillRange: true,
   applyEdits: true,
   applyOps: true,
   propose: true,
@@ -15,6 +16,7 @@ export const WORKBOOK_REPLAY_MUTATORS = {
   setNumberFormat: true,
   applyFormat: true,
   moveChart: true,
+  resizeChart: true,
   moveRange: true,
   undo: true,
   redo: true,
@@ -23,8 +25,14 @@ export const WORKBOOK_REPLAY_MUTATORS = {
 
 export type WorkbookReplayMethod = keyof typeof WORKBOOK_REPLAY_MUTATORS;
 
+type DirectWriteMethod = 'editCell' | 'editCells' | 'patchRangeStyle' | 'setNumberFormat' | 'applyFormat' | 'moveChart' | 'resizeChart';
+type WithoutLast<P extends unknown[]> = P extends [...infer Head, unknown] ? Head : P;
+/** Replayed arguments; a direct write's trailing `XlsxWriteOptions` never replays. */
+type WorkbookReplayArgs<K extends WorkbookReplayMethod> = K extends DirectWriteMethod
+  ? WithoutLast<Required<Parameters<WorkbookHandle[K]>>> : Parameters<WorkbookHandle[K]>;
+
 export type WorkbookReplayOp = {
-  [K in WorkbookReplayMethod]: { method: K; args: Parameters<WorkbookHandle[K]> }
+  [K in WorkbookReplayMethod]: { method: K; args: WorkbookReplayArgs<K> }
 }[WorkbookReplayMethod] & { calculation?: WorkbookCalculationContext };
 
 export interface WorkbookReplayEnvelope {
@@ -166,8 +174,11 @@ function guard(value: unknown): boolean {
   });
 }
 
+const EDIT_REQUEST_KEYS: readonly string[] = ['expectVersion', 'steps', 'source', 'history', 'calculation'];
+
 function editRequest(value: unknown): boolean {
-  if (!record(value) || typeof value.expectVersion !== 'string' || !Array.isArray(value.steps)) {
+  if (!record(value) || typeof value.expectVersion !== 'string' || !Array.isArray(value.steps) ||
+    !Object.keys(value).every((key) => EDIT_REQUEST_KEYS.includes(key))) {
     return false;
   }
   return optionalFields(value, {
@@ -189,6 +200,13 @@ function editRequest(value: unknown): boolean {
       case 'setFormulas': return matrix(step.formulas);
       case 'setNumberFormat': return numberFormat(step.format);
       case 'patchStyle': return style(step.patch);
+      case 'replaceText': return typeof step.query === 'string' && step.query.length > 0 &&
+        typeof step.replacement === 'string' &&
+        optionalFields(step, {
+          entireCell: (field) => typeof field === 'boolean',
+          lookIn: (field) => field === 'values' || field === 'formulas',
+        }) &&
+        step.expect === undefined;
       default: return false;
     }
   });
@@ -278,7 +296,14 @@ function validOp(value: unknown): boolean {
     case 'moveChart':
       return args.length === 4 && integer(args[0]) && typeof args[1] === 'string' &&
         args.slice(2).every(finite);
+    case 'resizeChart':
+      return args.length === 3 && integer(args[0]) && typeof args[1] === 'string' &&
+        record(args[2]) && ['left', 'top', 'right', 'bottom'].every((edge) =>
+          finite((args[2] as Record<string, unknown>)[edge]));
     case 'moveRange':
+      return args.length === 3 && integer(args[0]) && typeof args[1] === 'string' &&
+        typeof args[2] === 'string';
+    case 'fillRange':
       return args.length === 3 && integer(args[0]) && typeof args[1] === 'string' &&
         typeof args[2] === 'string';
     case 'undo':
@@ -325,7 +350,9 @@ export function applyWorkbookReplayOp(
     case 'setNumberFormat': return handle.setNumberFormat(...op.args);
     case 'applyFormat': return handle.applyFormat(...op.args);
     case 'moveChart': return handle.moveChart(...op.args);
+    case 'resizeChart': return handle.resizeChart(...op.args);
     case 'moveRange': return handle.moveRange(...op.args);
+    case 'fillRange': return handle.fillRange(...op.args);
     case 'undo': return handle.undo(...op.args);
     case 'redo': return handle.redo(...op.args);
     case 'setActiveSheet': return handle.setActiveSheet(...op.args);

@@ -87,8 +87,17 @@ configureDefaultFonts({ fonts, baseUrl: 'https://cdn.example.com/betteroffice-fo
   faces a document requests.
 - Latin, RTL and intl assets use `.ttf.zst` files decoded by the manager; keep those filenames when hosting them.
 - CJK assets use `.otf.zst` files decoded by the manager; keep those filenames when hosting them.
-- With a custom `baseUrl` in either entry, copy `node_modules/@betteroffice/fonts/dist/decoder/fontpack.wasm`
-  to `<baseUrl>/decoder/fontpack.wasm` and serve it as `application/wasm`. The package build ships this decoder in `dist/decoder/`.
+- With a custom `baseUrl` in either entry, copying the font `assets/` is enough. Packed faces use
+  `<baseUrl>/decoder/fontpack.wasm` when it is served (as `application/wasm`) and otherwise the decoder the package ships in
+  `dist/decoder/`, which bundlers emit next to the entry. When neither loads, decoding fails with
+  `Font decoder wasm not found` and both URLs.
+
+## Checking installed packs
+
+`checkFontPacks()` lists installed add-on packages that cannot be used, such as a `@betteroffice/fonts-cjk` from
+another release or with missing files, each with the pack and the reason (`version-mismatch`, `missing-file`,
+`invalid-manifest`). Their faces are substituted as when the pack is not installed. Under Node the files are checked on
+disk; in a browser only the package's asset list is compared, since checking the files would fetch them.
 
 ## Bundlers
 
@@ -116,8 +125,8 @@ packages external. Esbuild does not emit assets referenced only by
 Latin and RTL assets ship in the regular dependency `@betteroffice/fonts-latin`.
 The manager loads compressed faces on demand and returns decoded, independently
 owned sfnt buffers. `BundledFontFace.file` names the `.ttf.zst` or `.otf.zst` asset. For a custom
-`baseUrl`, copy the Latin pack assets alongside international assets and serve
-`@betteroffice/fonts/dist/decoder/fontpack.wasm` at `<baseUrl>/decoder/fontpack.wasm`.
+`baseUrl`, copy the Latin pack assets alongside international assets. An inlined manager has no decoder next to it, so
+serve `@betteroffice/fonts/dist/decoder/fontpack.wasm` at `<baseUrl>/decoder/fontpack.wasm`.
 
 ## Bundled faces
 
@@ -145,6 +154,8 @@ real italic face.
 
 Measurement never consults fonts installed on the machine: embedded document fonts come first, then
 the bundled substitutes, then a last-resort face, so a document measures the same everywhere.
+DOCX loads `BASE_LATIN_FAMILY` from package assets only for text those sources do not cover.
+Native raster consumers embed these faces.
 
 ## API
 
@@ -163,6 +174,7 @@ sources and other consumers:
 | `resolveDigitAdvance`, `maxDigitWidth` | Widest digit advance, recorded or measured. |
 | `loadBundledFontBytes(face, { baseUrl? })` | Fetches a face's bytes, cached per face and base URL. |
 | `registerBundledFontFace(face)` | Registers a face with the browser `FontFace` API; no-op outside the DOM. |
+| `ProgressiveFontFace`, `SliceLocation` (types) | A CJK face opened from its slices: layout tables complete at once, outlines loaded by glyph id (`ensureGlyphs`) or predicted from text (`prefetch`). A sliced face's loader carries an optional `slices` location, which `openSlicedFace` from `@betteroffice/fonts/progressive` opens. Calling the loader itself still returns the whole face. |
 
 ## Documentation
 

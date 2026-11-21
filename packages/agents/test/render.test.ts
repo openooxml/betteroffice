@@ -1,9 +1,56 @@
-import { expect, test } from 'bun:test';
+import { afterEach, expect, mock, spyOn, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
 import { createCanvas, loadImage } from '@napi-rs/canvas';
+import { engines } from '#agents-engines';
+import type { DisplayList } from '@betteroffice/docx/layout/render';
+import type { YrsSession } from '@betteroffice/docx/yrs';
 import JSZip from 'jszip';
-import { openDocx } from '../src';
+import { openDocx, type DocumentRenderer } from '../src';
 import { renderDocxPage } from '../src/render';
 import { fixture } from './fixture';
+
+const configureDefaultFonts = async (options: Parameters<typeof import('@betteroffice/docx/layout').configureDefaultFonts>[0]) => (await engines.load('docx')).module.layout.configureDefaultFonts(options);
+
+afterEach(() => configureDefaultFonts({}));
+
+let restoreYrs: (() => void) | undefined;
+afterEach(() => { restoreYrs?.(); restoreYrs = undefined; });
+
+/** Runs `install` on each private session a preview lays out on. */
+const onPreviewSession = async (install: (session: YrsSession) => void) => {
+  const { module } = await engines.load('docx');
+  const { yrs } = module;
+  (module as { yrs: typeof yrs }).yrs = {
+    ...yrs,
+    createYrsSession: async (...args: Parameters<typeof yrs.createYrsSession>) => {
+      const session = await yrs.createYrsSession(...args);
+      install(session);
+      return session;
+    },
+  };
+  restoreYrs = () => { (module as { yrs: typeof yrs }).yrs = yrs; };
+};
+
+const frameBuilds = async () => {
+  const calls = mock((input: string, frame: Uint8Array) => { void input; return frame; });
+  await onPreviewSession((session) => {
+    const original = session.buildDisplayListFrame;
+    session.buildDisplayListFrame = (input, epoch) => calls(input, original(input, epoch));
+  });
+  return calls;
+};
+
+const frameDisplay = async (frame: Uint8Array): Promise<DisplayList> => {
+  const { module } = await engines.load('docx');
+  return module.render.applyFrameDelta(null, module.render.decodeFrameDelta(frame)).displayList;
+};
+
+const canvasRenderer: DocumentRenderer = async (session, page) => {
+  const render = spyOn(session, 'renderPng').mockRejectedValue(Object.assign(new Error('canvas unavailable'), { code: 'canvas-unavailable' }));
+  try { return await renderDocxPage(session, page); }
+  finally { render.mockRestore(); }
+};
+
 
 async function imageFixture(data: Uint8Array, extension: string, mimeType: string) {
   const zip = await JSZip.loadAsync(await fixture());
@@ -13,6 +60,37 @@ async function imageFixture(data: Uint8Array, extension: string, mimeType: strin
   const drawing = '<w:p><w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"><wp:extent cx="914400" cy="914400"/><wp:docPr id="1" name="Picture"/><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:blipFill><a:blip r:embed="picture"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>';
   zip.file('word/document.xml', (await zip.file('word/document.xml')!.async('string')).replace('<w:body>', `<w:body>${drawing}`));
   return zip.generateAsync({ type: 'uint8array' });
+}
+
+for (const embedded of [false, true]) {
+  test(`DOCX preview uses configured defaults${embedded ? ' after document embeds' : ''}`, async () => {
+    const fallback = new Uint8Array(readFileSync(new URL('../../fonts/assets/Carlito-Regular.ttf', import.meta.url))).buffer;
+    const face = new Uint8Array(readFileSync(new URL('../../fonts/assets/LiberationMono-Regular.ttf', import.meta.url))).buffer;
+    const zip = await JSZip.loadAsync(await fixture());
+    if (embedded) {
+      zip.file('word/fonts/body.ttf', face);
+      zip.file('word/fontTable.xml', '<w:fonts xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:font w:name="Calibri"><w:embedRegular r:id="body"/></w:font></w:fonts>');
+      zip.file('word/_rels/fontTable.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="body" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/font" Target="fonts/body.ttf"/></Relationships>');
+      zip.file('[Content_Types].xml', (await zip.file('[Content_Types].xml')!.async('string')).replace('</Types>', '<Default Extension="ttf" ContentType="application/x-font-ttf"/><Override PartName="/word/fontTable.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml"/></Types>'));
+      zip.file('word/_rels/document.xml.rels', (await zip.file('word/_rels/document.xml.rels')!.async('string')).replace('</Relationships>', '<Relationship Id="fontTable" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/fontTable" Target="fontTable.xml"/></Relationships>'));
+    }
+    const resolve = mock(() => async () => fallback);
+    const module = { createFontProvider: () => ({ resolve }) };
+    await configureDefaultFonts(embedded ? { load: async () => module } : { fonts: module });
+    const doc = await openDocx(await zip.generateAsync({ type: 'uint8array' }), { renderer: canvasRenderer });
+    const register = mock((bytes: Uint8Array) => { void bytes; });
+    await onPreviewSession((session) => {
+      const original = session.registerFont;
+      session.registerFont = (...args: Parameters<typeof original>) => { register(args[0] as Uint8Array); return original(...args); };
+    });
+    try {
+      const rendered = await canvasRenderer(doc.session, 1);
+      expect([...rendered.png.slice(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
+      expect(resolve).toHaveBeenCalledWith('Calibri', false, false);
+      expect(register.mock.calls[0]?.[0]).toEqual(new Uint8Array(embedded ? face : fallback));
+      expect(register.mock.calls.some(([bytes]) => bytes.byteLength === fallback.byteLength)).toBe(true);
+    } finally { register.mockRestore(); doc.close(); await configureDefaultFonts({}); }
+  });
 }
 
 test('renders actual before/after pages without changing the live document', async () => {
@@ -30,12 +108,57 @@ test('renders actual before/after pages without changing the live document', asy
   } finally { doc.close(); }
 });
 
+test('headless default preview keeps Latin native beside an uncovered emoji', async () => {
+  const doc = await openDocx(await fixture(), { renderer: canvasRenderer });
+  const build = await frameBuilds();
+  try {
+    const rendered = await canvasRenderer(doc.session, 1);
+    const input = JSON.parse(build.mock.calls[0]![0]) as { fontChains: Record<string, number[]> };
+    expect(input.fontChains['@betteroffice/fonts/coverage']).toBeUndefined();
+    const display = await frameDisplay(build.mock.results[0]!.value as Uint8Array);
+    const text = display.pages[0]!.primitives.filter(
+      primitive => primitive.kind === 'text' || primitive.kind === 'glyphRun',
+    );
+    expect(text.map(primitive => primitive.text).join('')).toContain('😀 café İSTANBUL');
+    expect(text.filter(primitive => primitive.kind === 'glyphRun').map(primitive => primitive.text).join('')).toContain('€4.2');
+    expect(text.every(primitive => primitive.kind === 'glyphRun' && primitive.paintClip === undefined)).toBe(true);
+    expect(text.some(primitive => primitive.kind === 'glyphRun' && primitive.text.includes('😀') && primitive.glyphs.some(glyph => glyph.id === 0))).toBe(true);
+    expect(rendered.warnings).toContain('Some characters have no glyph in the available fonts. Their preview may show replacement boxes.');
+  } finally { build.mockRestore(); doc.close(); }
+});
+
+test('headless default preview wraps an unbundled Aptos body beside a Calibri heading', async () => {
+  const zip = await JSZip.loadAsync(await fixture());
+  const body = 'Aptos body text needs a real fallback face so this paragraph wraps within the page. '.repeat(12);
+  zip.file('word/document.xml', `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+    <w:p><w:r><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:b/><w:sz w:val="32"/></w:rPr><w:t>Calibri heading</w:t></w:r></w:p>
+    <w:p><w:r><w:rPr><w:rFonts w:ascii="Aptos" w:hAnsi="Aptos"/></w:rPr><w:t xml:space="preserve">${body}</w:t></w:r></w:p>
+    <w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>
+  </w:body></w:document>`);
+  const doc = await openDocx(await zip.generateAsync({ type: 'uint8array' }), { renderer: canvasRenderer });
+  const build = await frameBuilds();
+  try {
+    await canvasRenderer(doc.session, 1);
+    const input = JSON.parse(build.mock.calls[0]![0]) as { fontChains: Record<string, number[]> };
+    expect(input.fontChains['calibri|1|0']?.length).toBeGreaterThan(0);
+    expect(input.fontChains['aptos|0|0']?.length).toBeGreaterThan(0);
+    const display = await frameDisplay(build.mock.results[0]!.value as Uint8Array);
+    const runs = display.pages[0]!.primitives.filter(
+      primitive => primitive.kind === 'glyphRun' && primitive.fallbackFont?.includes('Aptos'),
+    );
+    expect(runs.length).toBeGreaterThan(2);
+    const baselines = new Set(runs.flatMap(primitive => primitive.kind === 'glyphRun'
+      ? primitive.glyphs.map(glyph => glyph.y) : []));
+    expect(baselines.size).toBeGreaterThan(2);
+  } finally { build.mockRestore(); doc.close(); }
+});
+
 test('renders embedded image pixels in live and proposed previews', async () => {
   const image = createCanvas(32, 32);
   const context = image.getContext('2d');
   context.fillStyle = '#ff0000';
   context.fillRect(0, 0, 32, 32);
-  const doc = await openDocx(await imageFixture(await image.encode('png'), 'png', 'image/png'), { renderer: renderDocxPage });
+  const doc = await openDocx(await imageFixture(await image.encode('png'), 'png', 'image/png'), { renderer: canvasRenderer });
   try {
     const [hit] = doc.grep({ query: 'Executive summary' }).matches;
     const proposal = doc.propose({ author: 'test', edits: [{ match: hit.match, newText: 'Annual report' }] });
@@ -62,9 +185,108 @@ test('skips oversized rasters and SVG before native image decoding', async () =>
     [png, 'png', 'image/png', 'An embedded image exceeds the preview image limits.'],
     [svg, 'svg', 'image/svg+xml', 'An embedded image uses an unsupported encoding; previews support raster images only.'],
   ] as const) {
-    const doc = await openDocx(await imageFixture(bytes, extension, type), { renderer: renderDocxPage });
+    const doc = await openDocx(await imageFixture(bytes, extension, type), { renderer: canvasRenderer });
     try {
       expect((await doc.render(1)).warnings).toContain(warning);
     } finally { doc.close(); }
   }
+});
+
+test('a picture no engine can draw previews as a placeholder with a warning', async () => {
+  const doc = await openDocx(await imageFixture(new Uint8Array([137, 80, 78, 71, 1, 2, 3, 4]), 'png', 'image/png'), { renderer: renderDocxPage });
+  try {
+    const preview = await doc.render(1);
+    expect([...preview.png.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
+    expect(preview.warnings).toContain('1 picture could not be drawn; the preview shows a placeholder in its place.');
+  } finally { doc.close(); }
+});
+
+test('engine diagnostics become one warning line', async () => {
+  const doc = await openDocx(await fixture());
+  const png = new Uint8Array(await createCanvas(12, 7).encode('png'));
+  const render = spyOn(doc.session, 'renderPng').mockImplementation(async (_target, options) => {
+    options?.onDiagnostic?.({ code: 'picture-unavailable', pictures: [{ id: 'media:0', reason: 'metafile' }, { id: 'media:1', reason: 'budget', limit: 10, actual: 12, unit: 'pixels' }] });
+    return png;
+  });
+  try {
+    expect((await renderDocxPage(doc.session, 1)).warnings).toContain('2 pictures could not be drawn; the preview shows a placeholder in their place.');
+  } finally { render.mockRestore(); doc.close(); }
+});
+
+test('a skipped-effects diagnostic previews without counting as a placeholder picture', async () => {
+  const doc = await openDocx(await fixture());
+  const png = new Uint8Array(await createCanvas(12, 7).encode('png'));
+  const render = spyOn(doc.session, 'renderPng').mockImplementation(async (_target, options) => {
+    options?.onDiagnostic?.({ code: 'effects-skipped', page: 0, effects: ['text.effect', 'shape.effects'] });
+    options?.onDiagnostic?.({ code: 'picture-unavailable', pictures: [{ id: 'media:0', reason: 'metafile' }] });
+    return png;
+  });
+  try {
+    const preview = await renderDocxPage(doc.session, 1);
+    expect(preview.png).toBe(png);
+    expect(preview.warnings).toContain('1 picture could not be drawn; the preview shows a placeholder in its place.');
+    expect(preview.warnings.filter((warning) => warning.includes('could not be drawn; the preview shows a placeholder'))).toHaveLength(1);
+  } finally { render.mockRestore(); doc.close(); }
+});
+
+test('a page whose only diagnostic is skipped effects shows no placeholder warning', async () => {
+  const doc = await openDocx(await fixture());
+  const png = new Uint8Array(await createCanvas(12, 7).encode('png'));
+  const render = spyOn(doc.session, 'renderPng').mockImplementation(async (_target, options) => {
+    options?.onDiagnostic?.({ code: 'effects-skipped', page: 0, effects: ['shape.effects'] });
+    return png;
+  });
+  try {
+    const preview = await renderDocxPage(doc.session, 1);
+    expect(preview.warnings.some((warning) => warning.includes('placeholder'))).toBe(false);
+  } finally { render.mockRestore(); doc.close(); }
+});
+
+test('DOCX previews use the engine PNG where it can draw', async () => {
+  const zip = await JSZip.loadAsync(await fixture());
+  zip.file('word/document.xml', (await zip.file('word/document.xml')!.async('string')).replace('<w:br w:type="page"/>', ''));
+  const doc = await openDocx(await zip.generateAsync({ type: 'uint8array' }));
+  const png = new Uint8Array(await createCanvas(12, 7).encode('png'));
+  const render = spyOn(doc.session, 'renderPng').mockResolvedValue(png);
+  const build = await frameBuilds();
+  try {
+    const preview = await renderDocxPage(doc.session, 1);
+    expect(render).toHaveBeenCalledTimes(1);
+    expect(render).toHaveBeenCalledWith({ page: 0 }, { onDiagnostic: expect.any(Function) });
+    expect(preview.png).toBe(png);
+    expect(preview).toMatchObject({ page: 1, pageCount: 1, width: 12, height: 7 });
+    expect(build).not.toHaveBeenCalled();
+  } finally { build.mockRestore(); render.mockRestore(); doc.close(); }
+});
+
+test('DOCX previews fall back to canvas when the engine cannot draw', async () => {
+  const doc = await openDocx(await fixture());
+  const render = spyOn(doc.session, 'renderPng').mockRejectedValue(Object.assign(new Error('canvas unavailable'), { code: 'canvas-unavailable' }));
+  const build = await frameBuilds();
+  try {
+    const preview = await renderDocxPage(doc.session, 1);
+    expect(render).toHaveBeenCalledTimes(1);
+    expect(render).toHaveBeenCalledWith({ page: 0 }, { onDiagnostic: expect.any(Function) });
+    expect(build).toHaveBeenCalled();
+    expect([...preview.png.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
+    expect(preview.pageCount).toBeGreaterThan(0);
+  } finally { build.mockRestore(); render.mockRestore(); doc.close(); }
+});
+
+test('DOCX previews map engine errors without using canvas', async () => {
+  const doc = await openDocx(await fixture());
+  const render = spyOn(doc.session, 'renderPng');
+  const build = await frameBuilds();
+  try {
+    for (const [code, mapped] of [['canvas-too-large', 'PAGE_TOO_LARGE'], ['font-unavailable', 'FONT_UNAVAILABLE']] as const) {
+      render.mockRejectedValue(Object.assign(new Error('engine refused'), { code }));
+      await expect(renderDocxPage(doc.session, 1)).rejects.toMatchObject({ name: 'DocumentToolError', code: mapped, message: 'engine refused' });
+    }
+    render.mockRejectedValue(new RangeError('page index 99 out of range for 3 page(s)'));
+    await expect(renderDocxPage(doc.session, 100)).rejects.toMatchObject({ code: 'PAGE_OUT_OF_RANGE', details: { pageCount: 3 } });
+    const error = new Error('engine failed');
+    render.mockRejectedValue(error);
+    await expect(renderDocxPage(doc.session, 1)).rejects.toBe(error);
+    expect(build).not.toHaveBeenCalled();
+  } finally { build.mockRestore(); render.mockRestore(); doc.close(); }
 });

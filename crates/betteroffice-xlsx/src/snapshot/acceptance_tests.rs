@@ -368,6 +368,102 @@ fn deferred_snapshot_run_queries_skip_non_strings_and_cells_without_sources() {
     assert!(!peer.source_package_is_unmaterialized_for_test());
 }
 
+fn rich_text_viewport() -> Viewport {
+    Viewport {
+        x: 0.0,
+        y: 0.0,
+        width: 600.0,
+        height: 400.0,
+    }
+}
+
+fn paints_runs(command: &crate::DrawCmd) -> bool {
+    matches!(command, crate::DrawCmd::Text { runs, .. } if !runs.is_empty())
+}
+
+fn serialized_without(list: &crate::DisplayList, skipped: &[usize]) -> Vec<u8> {
+    let mut list = list.clone();
+    list.commands = std::mem::take(&mut list.commands)
+        .into_iter()
+        .enumerate()
+        .filter(|(index, _)| !skipped.contains(index))
+        .map(|(_, command)| command)
+        .collect();
+    serde_json::to_vec(&list).unwrap()
+}
+
+#[test]
+fn snapshot_rich_text_paints_plain_until_the_package_is_parsed_then_with_its_runs() {
+    let workbook = Workbook::open(&rich_text_source()).unwrap();
+    let viewport = rich_text_viewport();
+    for parse_by_save in [false, true] {
+        let peer = hydrate(&workbook, budgets()[0]);
+        assert!(peer.source_package_is_unmaterialized_for_test());
+        let parses = crate::snapshot::package::rebuild_count();
+        let plain = peer.display_list_for(SheetId(0), &viewport).unwrap();
+        assert_eq!(crate::snapshot::package::rebuild_count(), parses);
+        assert!(peer.source_package_is_unmaterialized_for_test());
+        assert!(!plain.commands.iter().any(paints_runs));
+        let (version, epoch) = (peer.version(), peer.model_epoch);
+        if parse_by_save {
+            peer.save().unwrap();
+        } else {
+            assert!(
+                peer.cell_text_runs(SheetId(0), CellRef::new(0, 2))
+                    .is_some()
+            );
+        }
+        assert_eq!(crate::snapshot::package::rebuild_count(), parses + 1);
+        assert!(!peer.source_package_is_unmaterialized_for_test());
+        assert_eq!((peer.version(), peer.model_epoch), (version, epoch));
+        let painted = peer.display_list_for(SheetId(0), &viewport).unwrap();
+        assert_eq!(painted.commands.len(), plain.commands.len());
+        let rich: Vec<usize> = painted
+            .commands
+            .iter()
+            .enumerate()
+            .filter(|(_, command)| paints_runs(command))
+            .map(|(index, _)| index)
+            .collect();
+        let mut texts: Vec<&str> = rich
+            .iter()
+            .filter_map(|&index| match &painted.commands[index] {
+                crate::DrawCmd::Text { text, .. } => Some(&**text),
+                _ => None,
+            })
+            .collect();
+        texts.sort_unstable();
+        texts.dedup();
+        assert_eq!(texts, ["duplicate", "inline"]);
+        assert_eq!(
+            serialized_without(&plain, &rich),
+            serialized_without(&painted, &rich)
+        );
+        for &index in &rich {
+            let mut command = painted.commands[index].clone();
+            if let crate::DrawCmd::Text { runs, .. } = &mut command {
+                runs.clear();
+            }
+            assert_eq!(command, plain.commands[index]);
+        }
+    }
+}
+
+#[test]
+fn snapshot_with_adopted_committed_version_paints_plain_after_the_package_is_parsed() {
+    let mut workbook = Workbook::open(&rich_text_source()).unwrap();
+    let version = format!("{}-1", workbook.version_nonce);
+    workbook.adopt_peer_version(&version).unwrap();
+    let peer = hydrate(&workbook, budgets()[0]);
+    let viewport = rich_text_viewport();
+    let plain = peer.display_list_for(SheetId(0), &viewport).unwrap();
+    assert!(!plain.commands.iter().any(paints_runs));
+    peer.save().unwrap();
+    assert!(!peer.source_package_is_unmaterialized_for_test());
+    let repainted = peer.display_list_for(SheetId(0), &viewport).unwrap();
+    assert_eq!(repainted, plain);
+}
+
 #[test]
 fn format_facets_bounded_snapshot_and_replay() {
     let expected = serde_json::json!({
@@ -448,7 +544,7 @@ fn canonical_model(model: &WorkbookModel) -> Vec<Vec<u8>> {
 
 fn canonical_base(workbook: &Workbook) -> Vec<Vec<u8>> {
     let budget = SnapshotBudget::new(1, usize::MAX).unwrap();
-    let mut encoder = AuthoritySnapshotEncoder::new(&workbook.authority, budget).unwrap();
+    let mut encoder = AuthoritySnapshotEncoder::new(workbook.authority_for_test(), budget).unwrap();
     let mut chunks = Vec::new();
     while let Some(chunk) = encoder.next(budget).unwrap() {
         if unframe(&chunk).unwrap().0 == ChunkKind::AuthorityBase {
@@ -537,7 +633,7 @@ fn assert_current_identity(worker: &Workbook, peer: &Workbook) {
         peer.encode_state_vector_v1()
     );
     assert!(peer.pending_remote_updates.is_empty());
-    assert!(!peer.authority.has_pending_updates());
+    assert!(!peer.authority_for_test().has_pending_updates());
 }
 
 fn assert_step_budget(budget: SnapshotBudget) -> crate::snapshot::step::StepWork {
@@ -629,8 +725,8 @@ fn snapshot_pending_singleton_string_survives_a_larger_allowance() {
     let (peer, _) = builder.finish().unwrap().into_parts();
     assert_current_identity(&worker, &peer);
     assert_eq!(
-        worker.authority.encode_state_as_update_v1(),
-        peer.authority.encode_state_as_update_v1()
+        worker.authority_for_test().encode_state_as_update_v1(),
+        peer.authority_for_test().encode_state_as_update_v1()
     );
     assert_eq!(worker.save().unwrap(), peer.save().unwrap());
 }
@@ -682,8 +778,8 @@ fn snapshot_singleton_strings_survive_alternating_allowances() {
     let (peer, _) = builder.finish().unwrap().into_parts();
     assert_current_identity(&worker, &peer);
     assert_eq!(
-        worker.authority.encode_state_as_update_v1(),
-        peer.authority.encode_state_as_update_v1()
+        worker.authority_for_test().encode_state_as_update_v1(),
+        peer.authority_for_test().encode_state_as_update_v1()
     );
     assert_eq!(worker.save().unwrap(), peer.save().unwrap());
 }
@@ -734,8 +830,8 @@ fn snapshot_empty_workbook_refuses_small_authority_scaffolding_and_retries() {
     let (peer, _) = builder.finish().unwrap().into_parts();
     assert_current_identity(&worker, &peer);
     assert_eq!(
-        worker.authority.encode_state_as_update_v1(),
-        peer.authority.encode_state_as_update_v1()
+        worker.authority_for_test().encode_state_as_update_v1(),
+        peer.authority_for_test().encode_state_as_update_v1()
     );
     assert_eq!(worker.save().unwrap(), peer.save().unwrap());
 }
@@ -1077,7 +1173,9 @@ fn snapshot_in_flight_encoder_refuses_restored_retained_permission() {
 #[test]
 fn snapshot_large_deletion_history_respects_step_budget_and_worker_identity() {
     let worker = worker(&source(false, false));
-    worker.authority.snapshot_deletion_history_for_test(20_000);
+    worker
+        .authority_for_test()
+        .snapshot_deletion_history_for_test(20_000);
     let deleted_total = deleted_clock_total(&worker);
     assert!(deleted_total >= 20_000);
     for budget in [budgets()[0], budgets()[1]] {
@@ -1098,7 +1196,9 @@ fn snapshot_large_deletion_history_respects_step_budget_and_worker_identity() {
 #[test]
 fn snapshot_deletion_parts_accept_a_smaller_receiver_record_budget() {
     let worker = worker(&source(false, false));
-    worker.authority.snapshot_deletion_history_for_test(21);
+    worker
+        .authority_for_test()
+        .snapshot_deletion_history_for_test(21);
     let deleted_total = deleted_clock_total(&worker);
     assert!(deleted_total >= 21);
     let encode_budget = SnapshotBudget::new(7, 16_384).unwrap();
@@ -1134,7 +1234,7 @@ fn snapshot_object_any_values_match_worker() {
 
     let worker = worker(&source(false, false));
     {
-        let mut txn = worker.authority.snapshot_transaction_for_test();
+        let mut txn = worker.authority_for_test().snapshot_transaction_for_test();
         let value = Any::Map(Arc::new(HashMap::from([("a".to_owned(), Any::from(0))])));
         let array = txn.get_or_insert_array("snapshot-json");
         array.push_back(&mut txn, value.clone());
@@ -1169,7 +1269,7 @@ fn snapshot_gc_reclaims_deleted_nested_map_children_before_hydration() {
     .unwrap();
     assert!(worker.is_collaborative());
     let (client, start, end) = {
-        let mut txn = worker.authority.snapshot_transaction_for_test();
+        let mut txn = worker.authority_for_test().snapshot_transaction_for_test();
         assert!(!txn.doc().skip_gc());
         let client = txn.doc().client_id();
         let root = txn.get_or_insert_map("snapshot-gc");
@@ -1182,7 +1282,7 @@ fn snapshot_gc_reclaims_deleted_nested_map_children_before_hydration() {
     };
     assert_eq!(end - start, 10_000);
     {
-        let mut txn = worker.authority.snapshot_transaction_for_test();
+        let mut txn = worker.authority_for_test().snapshot_transaction_for_test();
         let root = txn.get_or_insert_map("snapshot-gc");
         root.insert(&mut txn, "nested", 0);
     }
@@ -1666,8 +1766,8 @@ fn single_large_sheet_snapshot(rows: u32) {
     assert_eq!(peer.source_container.as_ref().unwrap().as_bytes(), bytes);
     assert_current_identity(&worker, &peer);
     assert_eq!(
-        worker.authority.encode_state_as_update_v1(),
-        peer.authority.encode_state_as_update_v1()
+        worker.authority_for_test().encode_state_as_update_v1(),
+        peer.authority_for_test().encode_state_as_update_v1()
     );
     assert_eq!(worker.save().unwrap(), peer.save().unwrap());
 }
@@ -1755,7 +1855,9 @@ fn snapshot_single_million_cell_sheet_cleared_history_steps_respect_budget() {
             .iter_cells()
             .all(|(_, cell)| cell.value == CellValue::Empty && cell.formula.is_none())
     );
-    worker.authority.snapshot_checkpoint_for_test();
+    worker
+        .authority_mut_for_test()
+        .snapshot_checkpoint_for_test();
     worker.mode = WorkbookMode::Standalone;
     worker.edited_since_open = false;
     assert!(!worker.can_undo());
@@ -1957,7 +2059,7 @@ fn snapshot_flat_conflict_history_steps_respect_budget() {
             .transact()
             .encode_state_as_update_v1(&StateVector::default());
         worker
-            .authority
+            .authority_for_test()
             .snapshot_transaction_for_test()
             .apply_update(Update::decode_v1(&bytes).unwrap())
             .unwrap();
@@ -1979,7 +2081,7 @@ fn snapshot_ungc_conflict_history_steps_respect_budget() {
         ..WorkbookModel::default()
     })
     .unwrap();
-    worker.authority.snapshot_skip_gc_for_test();
+    worker.authority_mut_for_test().snapshot_skip_gc_for_test();
     for client in 1..=4_000 {
         let writer = Doc::with_client_id(client);
         {
@@ -1993,7 +2095,7 @@ fn snapshot_ungc_conflict_history_steps_respect_budget() {
         let bytes = writer
             .transact()
             .encode_state_as_update_v1(&StateVector::default());
-        let mut txn = worker.authority.snapshot_transaction_for_test();
+        let mut txn = worker.authority_for_test().snapshot_transaction_for_test();
         assert!(txn.doc().skip_gc());
         assert_eq!(txn.state_vector().get(&writer.client_id()), 0);
         txn.apply_update(Update::decode_v1(&bytes).unwrap())
@@ -2030,7 +2132,7 @@ fn snapshot_ungc_conflict_history_steps_respect_budget() {
     assert_eq!(retained, 4_000);
     let peer = measure_snapshot_receiver(&worker, "4000 un-GC'd conflicts");
     assert_current_identity(&worker, &peer);
-    let txn = peer.authority.snapshot_transaction_for_test();
+    let txn = peer.authority_for_test().snapshot_transaction_for_test();
     assert_eq!(
         txn.get_map("snapshot-ungc-conflicts")
             .unwrap()
@@ -2073,8 +2175,8 @@ fn snapshot_authority_steps_accept_a_smaller_record_budget() {
     assert_eq!(received_context, Some(context()));
     assert_current_identity(&worker, &peer);
     assert_eq!(
-        worker.authority.encode_state_as_update_v1(),
-        peer.authority.encode_state_as_update_v1()
+        worker.authority_for_test().encode_state_as_update_v1(),
+        peer.authority_for_test().encode_state_as_update_v1()
     );
     assert_eq!(worker.save().unwrap(), peer.save().unwrap());
 }
@@ -2161,7 +2263,9 @@ fn snapshot_rejects_noninitial_or_incomplete_state() {
     pending.pending_remote_updates.push(vec![0]);
     assert!(WorkbookSnapshotEncoder::new(&pending, None, budget).is_err());
     let in_flight = worker(&bytes);
-    let transaction = in_flight.authority.snapshot_transaction_for_test();
+    let transaction = in_flight
+        .authority_for_test()
+        .snapshot_transaction_for_test();
     assert!(WorkbookSnapshotEncoder::new(&in_flight, None, budget).is_err());
     drop(transaction);
     let mut changed = worker(&bytes);
@@ -2219,20 +2323,20 @@ fn snapshot_authority_identity() {
         let peer = hydrate(&worker, budget);
         assert_eq!(worker.client_id(), peer.client_id());
         assert_eq!(
-            worker.authority.snapshot_identity(),
-            peer.authority.snapshot_identity()
+            worker.authority_for_test().snapshot_identity(),
+            peer.authority_for_test().snapshot_identity()
         );
         assert_eq!(
             worker.encode_state_vector_v1(),
             peer.encode_state_vector_v1()
         );
         assert_eq!(
-            canonical_model(&worker.authority.materialize().unwrap()),
-            canonical_model(&peer.authority.materialize().unwrap()),
+            canonical_model(&worker.authority_for_test().materialize().unwrap()),
+            canonical_model(&peer.authority_for_test().materialize().unwrap()),
         );
-        assert!(!peer.authority.can_undo());
-        assert!(!peer.authority.can_redo());
-        assert!(!peer.authority.has_pending_updates());
+        assert!(!peer.authority_for_test().can_undo());
+        assert!(!peer.authority_for_test().can_redo());
+        assert!(!peer.authority_for_test().has_pending_updates());
         let mut simple = WorkbookModel::default();
         let mut sheet = crate::Sheet::new("Simple");
         sheet.set_cell(
@@ -2259,7 +2363,9 @@ fn snapshot_current_state_identity() {
     for budget in budgets() {
         for valid in [false, true] {
             let mut worker = worker(&bytes);
-            worker.authority.set_snapshot_projection_valid(valid);
+            worker
+                .authority_mut_for_test()
+                .set_snapshot_projection_valid(valid);
             worker.model.sheets[0].set_cell(
                 CellRef::new(8, 0),
                 Cell {
@@ -2300,19 +2406,28 @@ fn snapshot_current_state_identity() {
                     style: None,
                 },
             );
-            worker.authority = crate::authority::WorkbookAuthority::from_source_with_projection(
-                &authored,
-                None,
-                &[],
-                None,
-                &[],
-            )
-            .unwrap()
-            .0;
-            worker.authority.set_snapshot_projection_valid(valid);
+            worker.set_authority_for_test(
+                crate::authority::WorkbookAuthority::from_source_with_projection(
+                    &authored,
+                    None,
+                    &[],
+                    None,
+                    &[],
+                )
+                .unwrap()
+                .0,
+            );
+            worker
+                .authority_mut_for_test()
+                .set_snapshot_projection_valid(valid);
             let peer = hydrate(&worker, budget);
             assert_current_identity(&worker, &peer);
-            assert_eq!(peer.authority.snapshot_projection_valid().unwrap(), valid);
+            assert_eq!(
+                peer.authority_for_test()
+                    .snapshot_projection_valid()
+                    .unwrap(),
+                valid
+            );
             assert_eq!(worker.model.sheets[0].charts.len(), 1);
             assert_eq!(worker.model.tables.len(), 1);
             assert!(worker.model.sheets[2].iter_cells().next().is_none());
@@ -2401,10 +2516,10 @@ fn source_conditional_formats_and_dxfs_use_binary_snapshots_losslessly() {
                 assert!(peer.source_package_is_unmaterialized_for_test());
                 assert_eq!(peer.model, worker.model);
                 assert_eq!(
-                    peer.authority.materialize().unwrap(),
-                    worker.authority.materialize().unwrap()
+                    peer.authority_for_test().materialize().unwrap(),
+                    worker.authority_for_test().materialize().unwrap()
                 );
-                let projected = peer.authority.materialize().unwrap();
+                let projected = peer.authority_for_test().materialize().unwrap();
                 assert_eq!(peer.model.styles.dxfs, projected.styles.dxfs);
                 for (sheet, projected) in peer.model.sheets.iter().zip(&projected.sheets) {
                     assert_eq!(sheet.conditional_formats, projected.conditional_formats);
@@ -2491,13 +2606,93 @@ fn snapshot_rebuilt_package_identity() {
 }
 
 #[test]
+fn snapshot_range_format_and_set_cell_first_edits_use_fast_paths() {
+    let bytes = source(false, false);
+    for budget in budgets() {
+        let source = worker(&bytes);
+        for kind in 0..3 {
+            let mut fast = hydrate(&source, budget);
+            let mut oracle = hydrate(&source, budget);
+            assert!(
+                fast.authority_for_test()
+                    .snapshot_projection_valid()
+                    .unwrap()
+            );
+            assert!(
+                oracle
+                    .authority_for_test()
+                    .snapshot_projection_valid()
+                    .unwrap()
+            );
+            let (fast_events, _fast_subscription) = observe(&fast);
+            let (oracle_events, _oracle_subscription) = observe(&oracle);
+            let apply = |workbook: &mut Workbook| match kind {
+                0 => workbook.edit_cell(SheetId(0), CellRef::new(0, 0), "8", context()),
+                1 => workbook.patch_range_style(
+                    SheetId(0),
+                    CellRange::parse_a1("A1:B2").unwrap(),
+                    crate::StylePatch {
+                        bold: Some(true),
+                        fill_color: Some("#123456".into()),
+                        ..crate::StylePatch::default()
+                    },
+                    context(),
+                ),
+                _ => workbook.set_range_number_format(
+                    SheetId(0),
+                    CellRange::parse_a1("B2").unwrap(),
+                    xlsx_ops::NumberFormatMutation::Currency,
+                    context(),
+                ),
+            };
+            let cells = crate::authority::fast_set_cell_count();
+            let formats = crate::authority::fast_range_format_count();
+            let materializations = crate::authority::full_materializations();
+            let hydrations = crate::authority::local_hydrations();
+            let result = apply(&mut fast).unwrap();
+            assert!(result.applied);
+            assert_eq!(
+                crate::authority::fast_set_cell_count() - cells,
+                usize::from(kind == 0)
+            );
+            assert_eq!(
+                crate::authority::fast_range_format_count() - formats,
+                usize::from(kind != 0)
+            );
+            assert_eq!(crate::authority::full_materializations(), materializations);
+            assert_eq!(crate::authority::local_hydrations(), hydrations);
+            let expected =
+                crate::authority::with_full_materialization(|| apply(&mut oracle)).unwrap();
+            assert_eq!(result, expected);
+            assert_events(&fast_events, &oracle_events);
+            assert_eq!(fast.model(), oracle.model());
+            assert_eq!(
+                fast.authority_for_test().encode_state_as_update_v1(),
+                oracle.authority_for_test().encode_state_as_update_v1()
+            );
+            assert_eq!(fast.sheet_info().unwrap(), oracle.sheet_info().unwrap());
+            assert_edited_identity(&fast, &oracle);
+        }
+    }
+}
+
+#[test]
 fn snapshot_next_edit_identity() {
     let bytes = source(false, false);
     for budget in budgets() {
         let mut worker = worker(&bytes);
         let mut peer = hydrate(&worker, budget);
-        assert!(worker.authority.snapshot_projection_valid().unwrap());
-        assert!(peer.authority.snapshot_projection_valid().unwrap());
+        assert!(
+            worker
+                .authority_for_test()
+                .snapshot_projection_valid()
+                .unwrap()
+        );
+        assert!(
+            peer.authority_for_test()
+                .snapshot_projection_valid()
+                .unwrap()
+        );
         let (worker_events, _worker_subscription) = observe(&worker);
         let (peer_events, _peer_subscription) = observe(&peer);
         let before = crate::authority::fast_set_cell_count();
@@ -2746,6 +2941,7 @@ fn snapshot_calculation_lists_advance_one_address_at_a_time() {
         cycle_cells: vec![address(2, "A1"), address(0, "$D5")],
         limited_cells: vec![address(0, "E6")],
         budget_exhausted: false,
+        unevaluated_cells: Vec::new(),
     };
     let budget = SnapshotBudget::new(1, usize::MAX).unwrap();
     let chunks = encode(&worker, budget);
@@ -3066,7 +3262,7 @@ fn snapshot_lineage_uses_cached_authority_revision_for_every_fragment() {
             .transact()
             .encode_state_as_update_v1(&StateVector::default());
         worker
-            .authority
+            .authority_for_test()
             .snapshot_transaction_for_test()
             .apply_update(Update::decode_v1(&bytes).unwrap())
             .unwrap();
@@ -3082,12 +3278,12 @@ fn snapshot_lineage_uses_cached_authority_revision_for_every_fragment() {
     assert_eq!(crate::authority::SNAPSHOT_VECTOR_ENCODINGS.get(), before);
     let mut encoder = WorkbookSnapshotEncoder::new(&worker, None, transport).unwrap();
     assert!(encoder.next(&worker).unwrap().is_some());
-    let revision = worker.authority.snapshot_revision();
-    drop(worker.authority.snapshot_transaction_for_test());
-    assert_eq!(worker.authority.snapshot_revision(), revision);
+    let revision = worker.authority_for_test().snapshot_revision();
+    drop(worker.authority_for_test().snapshot_transaction_for_test());
+    assert_eq!(worker.authority_for_test().snapshot_revision(), revision);
     assert!(encoder.next(&worker).unwrap().is_some());
     {
-        let mut txn = worker.authority.snapshot_transaction_for_test();
+        let mut txn = worker.authority_for_test().snapshot_transaction_for_test();
         txn.get_or_insert_map("snapshot-lineage")
             .insert(&mut txn, "changed", 1);
     }
@@ -3125,18 +3321,16 @@ fn a1_display(model: &WorkbookModel) -> String {
 
 /// what schema 6 displayed for A1: the builtin, whatever the workbook declares.
 fn builtin_a1_display() -> String {
-    let mut model = declared_builtin_model();
-    model.styles.num_fmts.clear();
-    a1_display(&model)
+    "3/15/23".to_string()
 }
 
 #[test]
 fn schema_6_snapshot_with_a_declared_builtin_restores_its_builtin_display() {
     let model = declared_builtin_model();
     let displayed = builtin_a1_display();
-    assert_eq!(displayed, a1_display(&model));
+    assert_eq!(a1_display(&model), "45000.00");
     let mut worker = Workbook::from_model(model.clone()).unwrap();
-    worker.authority = crate::authority::schema_6_authority(&model, 91);
+    worker.set_authority_for_test(crate::authority::schema_6_authority(&model, 91));
     for budget in budgets() {
         let (peer, _) = completed_builder(&encode(&worker, budget), budget)
             .finish()
@@ -3156,14 +3350,14 @@ fn schema_6_snapshot_with_a_declared_builtin_restores_its_builtin_display() {
 fn restored_schema_6_snapshot_stages_updates_at_its_own_schema() {
     let model = declared_builtin_model();
     let mut worker = Workbook::from_model(model.clone()).unwrap();
-    worker.authority = crate::authority::schema_6_authority(&model, 91);
+    worker.set_authority_for_test(crate::authority::schema_6_authority(&model, 91));
     let budget = budgets()[2];
     let (peer, _) = completed_builder(&encode(&worker, budget), budget)
         .finish()
         .unwrap()
         .into_parts();
     let staged = peer
-        .authority
+        .authority_for_test()
         .stage_updates_v1(&[yrs::Update::EMPTY_V1], None)
         .unwrap();
     assert_eq!(a1_display(&staged.model), builtin_a1_display());
@@ -3190,7 +3384,7 @@ fn declared_general_model() -> WorkbookModel {
 fn peers_sharing_a_schema_6_state_accept_each_others_updates() {
     let model = declared_builtin_model();
     let mut worker = Workbook::from_model(model.clone()).unwrap();
-    worker.authority = crate::authority::schema_6_authority(&model, 91);
+    worker.set_authority_for_test(crate::authority::schema_6_authority(&model, 91));
     let budget = budgets()[2];
     let (restored, _) = completed_builder(&encode(&worker, budget), budget)
         .finish()
@@ -3199,7 +3393,7 @@ fn peers_sharing_a_schema_6_state_accept_each_others_updates() {
     let fresh =
         crate::authority::WorkbookAuthority::from_source(&model, Some(92), &[], None).unwrap();
     let crate::authority::SnapshotAdoption::Replacement(mut adopted) =
-        fresh.snapshot_replacement(&restored.authority.encode_state_as_update_v1())
+        fresh.snapshot_replacement(&restored.authority_for_test().encode_state_as_update_v1())
     else {
         panic!("a fresh replica should adopt the shared state");
     };
@@ -3219,7 +3413,7 @@ fn peers_sharing_a_schema_6_state_accept_each_others_updates() {
         )
         .unwrap();
     let staged = restored
-        .authority
+        .authority_for_test()
         .stage_updates_v1(&[&adopted.encode_state_as_update_v1()], None)
         .unwrap();
     assert_eq!(
@@ -3258,7 +3452,7 @@ fn builtins_applied_after_a_schema_6_restore_survive_save_and_reopen() {
         );
     }
     let mut worker = Workbook::from_model(model.clone()).unwrap();
-    worker.authority = crate::authority::schema_6_authority(&model, 91);
+    worker.set_authority_for_test(crate::authority::schema_6_authority(&model, 91));
     let budget = budgets()[2];
     let (mut peer, _) = completed_builder(&encode(&worker, budget), budget)
         .finish()
@@ -3295,7 +3489,7 @@ fn builtins_applied_after_a_schema_6_restore_survive_save_and_reopen() {
         let cell = model.sheets[0].cell(at).unwrap();
         assert_eq!(
             xlsx_render::display_text(&model.styles, model.date_system, cell),
-            builtin_a1_display(),
+            "45000.00",
             "{at:?}"
         );
     }
@@ -3310,6 +3504,140 @@ fn snapshots_of_a_workbook_declaring_general_restore() {
             .unwrap()
             .into_parts();
         assert_eq!(a1_display(&peer.model), "12");
+    }
+}
+
+const MINUS_ACCOUNTING: &str = r#"_-* #,##0_-;\-* #,##0_-;_-* "-"_-;_-@_-"#;
+
+/// A1 holds -1234 under builtin id 41, which the workbook declares as an
+/// accounting code with a minus sign.
+fn declared_accounting_model() -> WorkbookModel {
+    let mut model = WorkbookModel {
+        sheets: vec![crate::Sheet::new("Data")],
+        ..WorkbookModel::default()
+    };
+    model.styles.num_fmts.push((41, MINUS_ACCOUNTING.into()));
+    model.styles.cell_xfs.push(xlsx_model::styles::Xf {
+        num_fmt_id: Some(41),
+        ..xlsx_model::styles::Xf::default()
+    });
+    model.sheets[0].set_cell(
+        CellRef::new(0, 0),
+        Cell {
+            value: CellValue::Number { value: -1234.0 },
+            style: Some(0),
+            ..Cell::default()
+        },
+    );
+    model
+}
+
+#[test]
+fn a_new_seed_of_a_declared_builtin_id_restores_the_workbooks_own_code() {
+    let worker = Workbook::from_model(declared_accounting_model()).unwrap();
+    let custom = xlsx_model::NumberFormat::Custom {
+        pattern: MINUS_ACCOUNTING.into(),
+    };
+    for budget in budgets() {
+        let (peer, _) = completed_builder(&encode(&worker, budget), budget)
+            .finish()
+            .unwrap()
+            .into_parts();
+        let shown = a1_display(&peer.model);
+        assert!(shown.contains('-') && !shown.contains('('), "{shown}");
+        let cell = peer.model.sheets[0].cell(CellRef::new(0, 0)).unwrap();
+        let format = peer.model.styles.cell_format(cell.style);
+        assert_eq!(format.number_format, custom);
+    }
+}
+
+#[test]
+fn schema_6_snapshot_of_a_declared_accounting_id_keeps_the_builtin_parentheses() {
+    let model = declared_accounting_model();
+    let mut worker = Workbook::from_model(model.clone()).unwrap();
+    worker.set_authority_for_test(crate::authority::schema_6_authority(&model, 91));
+    for budget in budgets() {
+        let (peer, _) = completed_builder(&encode(&worker, budget), budget)
+            .finish()
+            .unwrap()
+            .into_parts();
+        let shown = a1_display(&peer.model);
+        assert!(shown.contains('(') && !shown.contains('-'), "{shown}");
+    }
+}
+
+#[test]
+fn recovered_schema_6_sessions_of_a_declared_accounting_id_keep_the_builtin_parentheses() {
+    let model = declared_accounting_model();
+    let mut worker = Workbook::from_model(model.clone()).unwrap();
+    worker.set_authority_for_test(crate::authority::schema_6_authority(&model, 91));
+    let budget = budgets()[2];
+    let (restored, _) = completed_builder(&encode(&worker, budget), budget)
+        .finish()
+        .unwrap()
+        .into_parts();
+    let (mut styled, _) = completed_builder(&encode(&worker, budget), budget)
+        .finish()
+        .unwrap()
+        .into_parts();
+    let unused = xlsx_model::CellFormat {
+        number_format: xlsx_model::NumberFormat::Custom {
+            pattern: "0.000".into(),
+        },
+        ..xlsx_model::CellFormat::default()
+    };
+    styled.model.styles.intern_cell_format(&unused).unwrap();
+    for session in [restored, styled] {
+        let shown = a1_display(&session.model);
+        assert!(shown.contains('(') && !shown.contains('-'), "{shown}");
+        let checkpoint = session.recovery_checkpoint(1, None).unwrap();
+        let (recovered, ..) = Workbook::restore_recovery_checkpoint(&checkpoint).unwrap();
+        let shown = a1_display(&recovered.model);
+        assert!(shown.contains('(') && !shown.contains('-'), "{shown}");
+    }
+}
+
+#[test]
+fn clients_sharing_a_new_seed_of_a_declared_accounting_id_show_its_code() {
+    let model = declared_accounting_model();
+    let worker = Workbook::from_model(model.clone()).unwrap();
+    let fresh =
+        crate::authority::WorkbookAuthority::from_source(&model, Some(92), &[], None).unwrap();
+    let crate::authority::SnapshotAdoption::Replacement(mut adopted) =
+        fresh.snapshot_replacement(&worker.authority_for_test().encode_state_as_update_v1())
+    else {
+        panic!("a fresh replica should adopt the shared state");
+    };
+    let styles = adopted.materialize().unwrap().styles;
+    let at = CellRef::new(1, 0);
+    adopted
+        .apply_ops(
+            &[Op::SetCell {
+                sheet: SheetId(0),
+                at,
+                cell: CellState {
+                    value: CellValue::Number { value: -5678.0 },
+                    style: Some(0),
+                    ..CellState::default()
+                },
+            }],
+            crate::authority::SyncOrigin::User,
+            &styles,
+        )
+        .unwrap();
+    let staged = worker
+        .authority_for_test()
+        .stage_updates_v1(&[&adopted.encode_state_as_update_v1()], None)
+        .unwrap();
+    for shared in [staged.model, adopted.materialize().unwrap()] {
+        for target in [CellRef::new(0, 0), at] {
+            let cell = shared.sheets[0].cell(target).unwrap();
+            let shown = xlsx_render::display_text(&shared.styles, shared.date_system, cell);
+            assert!(
+                shown.contains('-') && !shown.contains('('),
+                "{target:?}: {shown}"
+            );
+        }
     }
 }
 
@@ -3374,4 +3702,88 @@ fn snapshot_read_cells_reports_header_footer_without_package_rebuild() {
             assert!(peer.source_package_is_unmaterialized_for_test());
         }
     }
+}
+
+/// a sheet of uncomputable calls, readers through computed references, a
+/// cycle through a fallback and a long tail of plain cells.
+fn uncomputable_source() -> Vec<u8> {
+    let mut sheet = xlsx_model::Sheet::new("Data");
+    let mut put = |at: &str, formula: Option<&str>, value: CellValue| {
+        sheet.set_cell(
+            CellRef::parse_a1(at).unwrap(),
+            Cell {
+                value,
+                formula: formula.map(str::to_owned),
+                style: None,
+            },
+        );
+    };
+    let number = |value: f64| CellValue::Number { value };
+    put("A6", Some(r#"_xlfn.WEBSERVICE("http://x")"#), number(5.0));
+    put("B1", Some(r#"INDIRECT("A6")*2"#), number(99.0));
+    put("C1", Some("LEN(A6)"), number(1.0));
+    put(
+        "D1",
+        Some(r#"IFERROR(_xlfn.WEBSERVICE("http://x"),E1)"#),
+        number(3.0),
+    );
+    put("E1", Some("D1"), number(3.0));
+    for row in 10u32..400 {
+        put(&format!("A{row}"), None, number(f64::from(row)));
+        put(
+            &format!("B{row}"),
+            Some(&format!("A{row}*2")),
+            number(f64::from(row * 2)),
+        );
+    }
+    let model = WorkbookModel {
+        sheets: vec![sheet],
+        ..WorkbookModel::default()
+    };
+    ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap()
+}
+
+/// a restored session re-derives its unevaluated cells in steps each
+/// advance's budget bounds, and a one-record budget derives the same list as
+/// an unbounded one.
+#[test]
+fn snapshot_rederivation_stays_within_each_advance_budget() {
+    let worker = worker(&uncomputable_source());
+    let listed: Vec<String> = worker
+        .last_calculation
+        .unevaluated_cells
+        .iter()
+        .map(|cell| cell.address.cell.to_a1())
+        .collect();
+    assert_eq!(listed, ["B1", "C1", "D1", "E1", "A6"]);
+    let tiny = SnapshotBudget::new(1, 16 * 1024).unwrap();
+    let mut builder = WorkbookSnapshotBuilder::new();
+    for chunk in encode(&worker, tiny) {
+        builder.push(&chunk).unwrap();
+        builder.advance(tiny).unwrap();
+    }
+    let mut ready = false;
+    for _ in 0..200_000 {
+        xlsx_calc::engine::track_formula_evaluations();
+        ready = builder.advance(tiny).unwrap().is_ready();
+        assert_step_budget(tiny);
+        assert!(xlsx_calc::engine::take_evaluated_formulas().len() <= 1);
+        if ready {
+            break;
+        }
+    }
+    assert!(ready);
+    let (bounded, _) = builder.finish().unwrap().into_parts();
+    let unbounded = hydrate(
+        &worker,
+        SnapshotBudget::new(usize::MAX, usize::MAX).unwrap(),
+    );
+    assert_eq!(
+        bounded.last_calculation.unevaluated_cells,
+        worker.last_calculation.unevaluated_cells
+    );
+    assert_eq!(
+        unbounded.last_calculation.unevaluated_cells,
+        worker.last_calculation.unevaluated_cells
+    );
 }

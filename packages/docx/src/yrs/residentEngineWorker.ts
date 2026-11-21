@@ -1,8 +1,11 @@
 /// <reference lib="webworker" />
 
+import { isEngineTrap, nativeBudgetFailure } from '../../../../shared/office-session/trap';
+import { isCellHasNoStoryRefusal } from './cellRefusal';
 import { resolveReservations, validReservationsPayload, type DocxResolvedReservations } from './reservations';
 import { readParsedToolbarMetadata, readResidentToolbarMetadata, type DocxToolbarMetadata } from './residentToolbarMetadata';
 import { readResidentRangeHighlights } from './residentRangeHighlights';
+import { releaseResidentDisplayListQueries, residentDisplayListQueries } from './residentDisplayListQueries';
 import { readResidentReviewSnapshot, readReviewTarget } from './residentReview';
 import { createResidentCollaboration, readResidentCollaborationState, readResidentPresence } from './residentCollaboration';
 import { stateVectorClock } from '../collaboration/protocol';
@@ -11,13 +14,14 @@ import { isCommandOutcomeUnknownError } from '../../../../shared/office-session/
 import { isTransferResult, type TransferResult } from '../../../../shared/office-session/protocol';
 import { SessionFailure } from '../../../../shared/office-session/types';
 import { buildCommandFrame, exactFrameBuffer, packResidentFrame } from './residentCommandFrame';
-import { createResidentCommandHost } from './residentCommandHost';
+import { createResidentCommandHost, isSelectionStepCommand } from './residentCommandHost';
 import { createResidentDocxCommandHooks } from './residentCommandActions';
 import { readDocxSelectionFocus, releaseResidentSelectionReads } from './residentCommandSelection';
 import { currentSelectionRange, readCommandStickyPosition } from './residentCommandAnchors';
 import { projectCommandEchoContext } from './residentCommandViewProjection';
 import { EchoGlyphSources, type EchoGlyphEngine } from './residentEchoGlyphSource';
 import { echoBackgroundPage, stageCommandPresentation } from './residentCommandPresentation';
+import { StagedEchoPages } from './residentStagedEcho';
 import { registerCommandFonts } from './residentCommandFonts';
 import { residentSourceMetadata, validateResidentSource, type DocxSourceOpenRequest, type DocxSourcePreviewOptions } from './residentSource';
 import { decodeDocxHostJson } from './yrsSessionFacade';
@@ -31,6 +35,7 @@ import type {
   DocxCommandEnvelope,
   DocxCommandFramePayload,
   DocxCommandPageIdentity,
+  DocxCommandReply,
   DocxCommandSelection,
   DocxFrameReservations,
   DocxNavigationIntent,
@@ -47,14 +52,17 @@ import type {
 import type { CollaborationCursor } from '../collaboration/types';
 import type { YrsLoc, YrsRegionLayoutProgress, YrsRenderEnv, YrsResidentCaretRect, YrsResidentWorkerSnapshot } from './index';
 import { createDisplayListQueries, onDisplayListQuerySourceFailure } from '../layout/render/displayListQueries';
-import { CANVAS_PAGE_GAP_PX } from '../layout/render/canvasPageMetrics';
+import { canvasPageStack } from '../layout/render/canvasPageMetrics';
 import {
   createResidentEngineSession,
   type ResidentEngineSession,
 } from './residentEngineSession';
 import { finalPreviewDisplayWindow, finalPreviewPageCount } from './previewDisplayWindow';
 import { decodePackedFontFace, preloadEditWasm, preloadEditWasmFrom } from './wasm/index';
+import { shipsWasmAsset } from '../wasm/assetEdit';
+import { engineKind } from '../wasm/engineEdit';
 import { copyDecodedFace, fontBytes } from '../../../../shared/office-session/fontDecoder';
+import { glyphsByFont, ResidentProgressiveFonts, type ProgressiveFontSpec } from './residentProgressiveFonts';
 import {
   createProposalRegistry,
   proposalRevisionPreview,
@@ -80,8 +88,8 @@ import { readCommentInsertionRange } from './residentCommentProjection';
 import { partMetadata } from './residentParts';
 import { readControlHandles } from './residentControls';
 import { readResidentProperties } from './residentProperties';
-import { readResidentFrameGeometry, readResidentCellSelectionRects, resetResidentObjectHandles } from './residentObjectGeometry';
-import { cellSelectionHeadPosition, readCellSelection } from './residentCommandTableSelection';
+import { readResidentFrameGeometry, readResidentCellSelectionRects, resetResidentObjectHandles, selectsImage } from './residentObjectGeometry';
+import { cellSelectionHeadPosition, readCellSelection, rootOf, shownStory } from './residentCommandTableSelection';
 import {
   resolveBookmarkPosition,
   resolveBookmarkTarget,
@@ -94,6 +102,7 @@ import {
 } from './viewerSelection';
 import { readAdjacentRevision, readSidebar, readOutlineHeadings } from './sidebarReads';
 import { clipboardTablePayload, readClipboardSlice } from './clipboardFragment';
+import { isTableUnavailableRefusal, isUnavailableTablePayload, tableUnavailableError } from './tableUnavailable';
 import { storyOffsetForLoc, tableAnchors } from './storyPlainText';
 import { createResidentScheduler, type SchedulerMessage } from './residentScheduler';
 import { hasCachedYrsSidebarProjection } from '../layout/render/yrsSidebarProjection';
@@ -111,7 +120,8 @@ import {
   type RetainedFrame,
 } from '../layout/render/frameDelta';
 import { GlyphCache } from '../layout/render/glyphCache';
-import { WASM32_MEMORY_LIMIT_BYTES, wasmModuleMemories } from '../wasm/loadWasmAsset';
+import { wasmModuleMemories } from '../wasm/loadWasmAsset';
+import { saveWarmupPolicy, type SaveWarmupPolicy } from './saveWarmupPolicy';
 import {
   encodeDisplayListFrameExtras,
   loadRustDisplayListQueryEngine,
@@ -130,7 +140,8 @@ import {
   type ResidentCaretPaintStyle,
 } from './residentCaret';
 
-const scope = self as unknown as DedicatedWorkerGlobalScope;
+
+let scope: DedicatedWorkerGlobalScope;
 let resolveHostEditModule: (module: WebAssembly.Module | null) => void;
 let hostEditModule = nextHostEditModule();
 let session: ResidentEngineSession | null = null;
@@ -189,6 +200,8 @@ let commandFrameChanges: {
     frameEpoch: number; docEpoch: number; layoutEpoch: number; documentVersion: string;
     layoutRevision: number; layoutInput: string; extras: string; pixelRatio: number;
     provisional: boolean; parts: ReturnType<ResidentEngineSession['partGeometry']>;
+    /** Main holds object geometry for this frame; `selectedImage` when a picture in it is selected. */
+    objects: boolean; selectedImage: boolean;
   };
   selectionContext?: boolean;
   /** The document changed outside a command and its layout has not followed yet. */
@@ -497,11 +510,11 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
           }
           if (caret && caret.height > 0 && !frame.pages[caret.pageIndex]?.page.unbuilt) {
             if (distance !== undefined) {
-              let top = 0;
-              const entries = frame.pages.map(({ page, pageIndex }) => {
-                const entry = { pageIndex, top, bottom: top + page.height };
-                top += page.height + CANVAS_PAGE_GAP_PX;
-                return entry;
+              const rasterScale = offscreenDpr * offscreenZoom;
+              const boxes = canvasPageStack(frame.pages.map(({ page }) => page), { scale: { rasterScale, unitScale: rasterScale } });
+              const entries = frame.pages.map(({ pageIndex }, index) => {
+                const { top, height } = boxes[index]!;
+                return { pageIndex, top, bottom: top + height };
               });
               const origin = entries[caret.pageIndex]!.top + caret.y + caret.height / 2;
               const target = origin + (direction === 'down' ? distance : -distance);
@@ -520,7 +533,7 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
       }
       buildPages();
       if (selectionNavigation) selectionNavigation.queryFrame = { frame, version };
-      return { frame, layoutRevision };
+      return { frame, layoutRevision, rasterScale: offscreenDpr * offscreenZoom };
     },
   });
   const changes: NonNullable<typeof commandFrameChanges> = {
@@ -609,6 +622,7 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
     }
   };
   let revision = 0;
+  const stagedEcho = new StagedEchoPages();
   const host = createResidentCommandHost({
     init,
     registry: { handlers: {}, policies: {} },
@@ -622,7 +636,8 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
           layout: { frame: retainedFrame, layoutRevision },
           glyphs: echoGlyphState.sources.provider(offscreenDpr * offscreenZoom, true),
         });
-        return projected?.glyphs ? projected : undefined;
+        return projected?.glyphs
+          ? stagedEcho.reuse(projected, retainedFrame, layoutRevision, offscreenDpr * offscreenZoom) : undefined;
       },
       deferFrame(ack) { deferredSelectionFrames.add(ack); },
     },
@@ -677,7 +692,7 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
             try {
               preparedFonts.set(checked.prepared, await fonts.prepare(command.payload as DocxFontEnvironment));
             } catch (error) {
-              if (error instanceof WebAssembly.RuntimeError) throw error;
+              if (isEngineTrap(error)) throw error;
               return { status: 'refused' as const, reason: 'invalid-font-environment', selection: hooks.selection(), editState: hooks.editState() };
             }
           }
@@ -690,14 +705,21 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
         }
       },
       async apply(command, context) {
+        engine.takeBaseLatinMiss?.();
         if (command.command.kind === 'setFontEnvironment') {
           const prepared = preparedFonts.get(command);
           if (!prepared) throw new Error('Worker font environment was not prepared');
-          const snapshot = fonts.commit(prepared, (faces, chains) => {
+          const snapshot = fonts.commit(prepared, (faces, chains, progressive) => {
             engine.clearFonts();
             glyphCache = null;
+            setProgressiveFonts(null);
             const registered = registerCommandFonts(engine, faces);
             if (registered.ids.some(id => id === null)) throw new Error('Worker font registration failed');
+            commandFontSlots = {
+              ids: registered.ids,
+              substituteOf: faces.map((font) => font instanceof Uint8Array ? undefined : font.substituteOf),
+            };
+            setProgressiveFonts(openProgressiveFonts(progressive, init));
             const input = JSON.parse(init.layoutInput);
             input.measurement = { ...input.measurement, fontChains: chains };
             init.layoutInput = registered.remap(JSON.stringify(input));
@@ -723,9 +745,14 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
         const result = await hooks.apply(command, context);
         if (result.status === 'applied' || (result.status === 'noop' && ['setRenderEnvironment', 'setFontEnvironment'].includes(command.command.kind))) {
           try { relayout(); } catch (error) {
-            if (error instanceof WebAssembly.RuntimeError) throw error;
+            if (isEngineTrap(error)) throw error;
             throw projectionFailure = new SessionFailure('message', `Projection failed after ${command.command.kind}: ${error instanceof Error ? error.message : String(error)}`);
           }
+        }
+        const coverageMiss = engine.takeBaseLatinMiss?.();
+        if (result.status === 'applied' && coverageMiss && !fontRequirementsHinted) {
+          fontRequirementsHinted = true;
+          reply({ id: 0, ok: true, fontRequirementsHint: { session: init.session, incarnation: init.incarnation, epoch: init.epoch } });
         }
         return result;
       },
@@ -781,6 +808,9 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
         const relaid = layoutDirty;
         if (relaid) extras = frameExtras();
         layoutDirty = false;
+        const selectionStep = selectionOnly ||
+          (!!selectionContext && !full && !relaid && !updates.length && !pages.length && !viewport);
+        let enteredPages: readonly number[] = [];
         const preceding: Uint8Array[] = selectionOnly ? selectionFrames : [];
         let reuseGeometry = selectionOnly;
         const geometryPages = new Set<number>();
@@ -864,10 +894,9 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
             }
             const caretPosition = position ?? displayPositionIndex(engine).positionOf(focus, 'body');
             if (caretPosition !== null) {
-              const version = engine.proposalEngine.version();
               const trailingCaretOnPage = (pageIndex: number) => {
                 const rect = focus.offset === length && caretPosition > 0
-                  ? queriesFor(retainedFrame!, version).rangeRectsOnPages?.(caretPosition - 1, caretPosition, pageIndex, pageIndex).at(-1)
+                  ? residentDisplayListQueries(engine, retainedFrame!.displayList).rangeRectsOnPages?.(caretPosition - 1, caretPosition, pageIndex, pageIndex).at(-1)
                   : undefined;
                 return rect && rect.height > 0 ? { ...rect, x: rect.x + rect.width, width: 0 } : null;
               };
@@ -878,7 +907,7 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
                 trackBuilt(finalized.delta);
                 probed = true;
               };
-              let caret = queriesFor(retainedFrame, version).caretRect(caretPosition);
+              let caret = residentDisplayListQueries(engine, retainedFrame.displayList).caretRect(caretPosition);
               if (!caret || caret.height <= 0 || retainedFrame.pages[caret.pageIndex]?.page.unbuilt) {
                 for (const [pageId, pageIndex] of builtPages!) {
                   const page = retainedFrame.pages[pageIndex];
@@ -896,7 +925,7 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
                 if (caret && retainedFrame.pages[caret.pageIndex]?.page.unbuilt) candidates.add(caret.pageIndex);
                 for (const index of candidates) {
                   await install(engine.buildDisplayPagesFrame([index], retainedFrame!.frameEpoch));
-                  caret = queriesFor(retainedFrame!, version).caretRect(caretPosition);
+                  caret = residentDisplayListQueries(engine, retainedFrame!.displayList).caretRect(caretPosition);
                   if (!caret || caret.height <= 0 || retainedFrame!.pages[caret.pageIndex]?.page.unbuilt) {
                     caret = trailingCaretOnPage(index) ?? caret;
                   }
@@ -923,6 +952,7 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
           if (caretPage !== undefined) keep.add(caretPage);
           for (let index = start; index < Math.min(end, retainedFrame.pages.length); index += 1) keep.add(index);
           const entering = [...keep].filter((index) => retainedFrame!.pages[index]?.page.unbuilt);
+          enteredPages = entering;
           if (entering.length) {
             first ??= finalized.delta;
             preceding.push(finalized.bytes);
@@ -964,7 +994,11 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
         if (viewport && !scaleOnlyViewport) {
           for (let index = viewport.start; index < Math.min(viewport.end, layout.frame.pages.length); index += 1) requestedPages.add(index);
         }
-        if ((frameWindow || viewport) && caretPage !== undefined && !scaleOnlyViewport) requestedPages.add(caretPage);
+        const caretPageId = caretPage === undefined ? undefined : layout.frame.pages[caretPage]?.pageId.toString();
+        if ((frameWindow || viewport) && caretPage !== undefined && !scaleOnlyViewport && (!selectionStep || probed ||
+          enteredPages.includes(caretPage) || (caretPageId !== undefined && pendingOffscreenPageIds.has(caretPageId)))) {
+          requestedPages.add(caretPage);
+        }
         if (!glyphCache) glyphCache = new GlyphCache({ provider: (fontId, glyphId) => engine.outlineGlyphJson(fontId, glyphId) });
         const pixelRatio = offscreenDpr * offscreenZoom;
         const echoRaster = changes.echoRaster;
@@ -974,10 +1008,14 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
           engine: engine as DocxWorkerCommandEngine, selection: hooks.selection(), layout,
           glyphs: echoGlyphs.provider(pixelRatio),
         });
-        if (selectionContext && projectedEcho?.glyphs) requestedPages.add(projectedEcho.page.pageIndex);
-        const echoContext = projectedEcho?.glyphs && (full || requestedPages.has(projectedEcho.page.pageIndex) ||
+        const heldEcho = projectedEcho?.glyphs && !full && !requestedPages.has(projectedEcho.page.pageIndex) &&
+          !pendingOffscreenPageIds.has(projectedEcho.page.pageId)
+          ? stagedEcho.reuse(projectedEcho, layout.frame, layoutRevision, pixelRatio) : undefined;
+        if (selectionContext && projectedEcho?.glyphs && !heldEcho) requestedPages.add(projectedEcho.page.pageIndex);
+        const stagedEchoContext = projectedEcho?.glyphs && (full || requestedPages.has(projectedEcho.page.pageIndex) ||
           pendingOffscreenPageIds.has(projectedEcho.page.pageId))
           ? projectedEcho : undefined;
+        const echoContext = stagedEchoContext ?? heldEcho;
         const echoGlyphSets = echoGlyphs.unsent(echoContext);
         const images = new Map<string, ImageBitmap>();
         const failedImages = new Set<string>();
@@ -1032,13 +1070,13 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
           return [{ pageId, pageIndex: retained.pageIndex }];
         });
         const presentation = await stageCommandPresentation({
-          layout, pixelRatio, echoContext,
+          layout, pixelRatio, echoContext: stagedEchoContext,
           pages: stagedPages,
           async rasterizePage(page) {
             const retained = retainedPageByKey(layout.frame, page.pageId);
             if (!retained) throw new Error('Command page is unavailable');
             const buffer = new OffscreenCanvas(1, 1);
-            await rasterizeDisplayPageToBackBuffer(buffer, retained.page, rasterOptions, pixelRatio);
+            await rasterizePage(buffer, retained.page, rasterOptions, pixelRatio);
             return buffer.transferToImageBitmap();
           },
           async rasterizeBackground(dependency) {
@@ -1048,11 +1086,12 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
             const device = [rect.x, rect.y, rect.width, rect.height].map((value) => Math.round(value * pixelRatio)) as
               [number, number, number, number];
             const buffer = new OffscreenCanvas(device[2], device[3]);
-            await rasterizeDisplayPageToBackBuffer(buffer, echoBackgroundPage(retained, dependency), rasterOptions,
+            await rasterizePage(buffer, echoBackgroundPage(retained, dependency), rasterOptions,
               pixelRatio, 1, { x: device[0], y: device[1], width: device[2], height: device[3] });
             return buffer.transferToImageBitmap();
           },
         }).finally(() => { for (const image of images.values()) image.close(); });
+        stagedEcho.record(presentation.value, layout.frame, layoutRevision, pixelRatio, stagedEchoContext, full);
         if (echoContext) changes.echoRaster = { pageId: echoContext.page.pageId, pixelRatio };
         else if (stagedPages.some((page) => page.pageId === echoRaster?.pageId)) changes.echoRaster = undefined;
         for (const page of stagedPages) pendingOffscreenPageIds.delete(page.pageId);
@@ -1071,6 +1110,11 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
             ...retainedFrame!, pages: [...geometryPages].map(index => retainedFrame!.pages[index]!),
           })].sort((a, b) => a.pageIndex - b.pageIndex);
         }
+        const readOnly = hooks.editState().readOnly;
+        const geometryKept = selectionOnly && reuseGeometry && !geometryPages.size && !shown.layoutProvisional && !readOnly &&
+          publishedGeometry!.objects && !publishedGeometry!.selectedImage && !selectsImage(engine, selected);
+        const geometry = geometryKept || readOnly || shown.layoutProvisional ? undefined
+          : await readResidentFrameGeometry(engine, retainedFrame!, selected, layoutRevision);
         const built = buildCommandFrame({
           frame: finalized.bytes,
           metadata: first
@@ -1083,8 +1127,7 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
             ? readDocxSelectionFocus(engine, selected, layout) ?? undefined : undefined,
           ...(fonts.snapshot ? { fontEnvironment: fonts.snapshot } : {}),
           parts,
-          geometry: hooks.editState().readOnly || shown.layoutProvisional ? undefined
-            : await readResidentFrameGeometry(engine, retainedFrame!, hooks.selection(), layoutRevision),
+          ...(geometry ? { geometry } : {}), ...(geometryKept ? { geometryKept: true as const } : {}),
           ...shown, echoContext, ...(echoGlyphSets.length ? { echoGlyphSets } : {}), stagedPresentation: presentation.value,
           ...(laidOutReservations ? { reservations: laidOutReservations } : {}),
         });
@@ -1094,6 +1137,8 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
           frameEpoch: retainedFrame!.frameEpoch, docEpoch: retainedFrame!.docEpoch, layoutEpoch: retainedFrame!.layoutEpoch,
           documentVersion, layoutRevision, layoutInput: init.layoutInput, extras, pixelRatio,
           provisional: prefix !== null, parts,
+          objects: geometryKept || geometry !== undefined,
+          selectedImage: !geometryKept && !!geometry?.objects.some((object) => object.kind === 'image' && object.selected === true),
         };
         changes.reviewFrame = { frameEpoch: retainedFrame!.frameEpoch, previewVersion: framePreviewVersion };
         pendingUpdates = [];
@@ -1103,7 +1148,7 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
     },
   });
   commandInit = init;
-  commandQueries = queriesFor;
+  commandQueries = (frame) => residentDisplayListQueries(engine, frame.displayList);
   commandShownText = () => {
     const input = JSON.parse(init.layoutWithRegions ? init.layoutInput : layoutInput);
     const renderEnv = (init.layoutWithRegions ? input : input.workerOwned).renderEnv ?? {};
@@ -1114,6 +1159,7 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
     commandShownText = null;
     selectionQueries?.queries.dispose();
     selectionQueries = undefined;
+    releaseResidentDisplayListQueries(engine);
     releaseResidentSelectionReads(engine);
   };
   commandHost = host;
@@ -1171,7 +1217,7 @@ function completeCommandPrefix(host: DocxCommandHost): Promise<boolean> {
 
 /** A sliced region layout that a change in between abandoned. */
 function abandonedRegionLayout(error: unknown): boolean {
-  if (error instanceof WebAssembly.RuntimeError) return false;
+  if (isEngineTrap(error)) return false;
   const message = error instanceof Error ? error.message : String(error);
   return message === 'no region layout to resume' ||
     message === 'the document or its fonts changed since the region layout began';
@@ -1218,14 +1264,32 @@ function postCommandFrame(
       ...(frame.payload.pageFrames ? { pageFrames: [...frame.payload.pageFrames, frame.payload.frame] } : {}),
       commandFrame: { session: init.session, incarnation: init.incarnation, epoch: init.epoch, frame },
     }, [...transfer, ...(isTransferResult(result) ? result.transfer : [])]);
-  }).catch((error: unknown) => {
+  }).catch((error: unknown) => commandFrameFailed(id, host, error));
+}
+
+/** Answers `id` with the ack in `result` and the next command frame on it, in one message. */
+function replyCommandWithFrame(id: number, result: DocxCommandReply): void {
+  const host = requireCommandHost();
+  const ack = isTransferResult(result) ? result.value : result;
+  void host.frame().then((rendered) => {
     if (commandHost !== host) {
       replyFailure(id, new SessionFailure('disposed', 'Worker command document was replaced'));
       return;
     }
-    reply({ id, ok: false, terminal: true, error: error instanceof Error ? error.message : String(error),
-      failureCode: error instanceof SessionFailure ? error.code : 'message' });
-  });
+    const frame = isTransferResult(rendered) ? rendered.value : rendered;
+    const { echoContext: _early, ...withoutContext } = ack;
+    reply({ id, ok: true, commandAck: { ...(frame.payload.echoContext ? withoutContext : ack), frame } },
+      [...(isTransferResult(result) ? result.transfer : []), ...(isTransferResult(rendered) ? rendered.transfer : [])]);
+  }).catch((error: unknown) => commandFrameFailed(id, host, error));
+}
+
+function commandFrameFailed(id: number, host: DocxCommandHost, error: unknown): void {
+  if (commandHost !== host) {
+    replyFailure(id, new SessionFailure('disposed', 'Worker command document was replaced'));
+    return;
+  }
+  reply({ id, ok: false, terminal: true, error: error instanceof Error ? error.message : String(error),
+    failureCode: error instanceof SessionFailure ? error.code : 'message' });
 }
 let positionIndex: { session: ResidentEngineSession; index: DisplayPositionIndex } | null = null;
 
@@ -1286,10 +1350,27 @@ interface SaveWarmup {
 let saveWarmup: SaveWarmup | null = null;
 const SAVE_WARMUP_IDLE_MS = 300;
 const SAVE_WARMUP_INPUT_IDLE_MS = 600;
-const SAVE_WARMUP_MIN_HEADROOM_BYTES = 64 * 1024 * 1024;
-const SAVE_WARMUP_HEADROOM_FRACTION = 0.25;
 const SAVE_SEED_MAX_PARAGRAPHS = 4096;
 const SAVE_SEED_MAX_INFLATED_BYTES = 16 * 1024 * 1024;
+export const SAVE_SEED_SLICE_BYTES = 16 * 1024;
+export const SAVE_SEED_MIN_SLICE_BYTES = 2 * 1024;
+export const SAVE_SEED_MAX_SLICE_BYTES = 1024 * 1024;
+const SAVE_SEED_SLICE_TARGET_MS = 10;
+export const SAVE_SEED_MAX_GROWTH = 2;
+
+/**
+ * The budget of the next save seed prime slice: `targetMs` at the rate the last slice charged
+ * its cost, at most `maxGrowth` times `current`, between the floor and the cap; a slice that
+ * charged nothing keeps `current`.
+ */
+export function nextPrimeByteBudget(
+  current: number, charged: number, elapsedMs: number, targetMs: number, maxGrowth: number,
+): number {
+  if (charged <= 0) return current;
+  const measured = Math.round((targetMs * charged) / Math.max(elapsedMs, 1));
+  return Math.min(SAVE_SEED_MAX_SLICE_BYTES, Math.max(SAVE_SEED_MIN_SLICE_BYTES,
+    Math.min(measured, current * maxGrowth)));
+}
 /** Toolbar metadata of the parsed document a source open seeded, read once. */
 let openedParsedToolbar: (() => DocxToolbarMetadata) | null = null;
 let sourcePreviewing = false;
@@ -1297,6 +1378,7 @@ let editorSaves: ResidentSaveRecord = { full: false };
 let saveSeedStatesPrimed = false;
 class SaveUnavailableError extends Error {}
 class SourceCutKeptError extends Error {}
+class InvalidSelectionError extends Error {}
 let openedVersion: string | null | undefined;
 /** A change before the whole document's first frame leaves no frame as opened. */
 function noteDocumentChange(): void {
@@ -1330,6 +1412,32 @@ let fontsRevision = -1;
 let retainedFrame: RetainedFrame | null = null;
 let glyphCache: GlyphCache | null = null;
 let echoGlyphState: EchoGlyphState | null = null;
+let progressiveFonts: ResidentProgressiveFonts | null = null;
+/** Set while `commandInit` builds and sends its reply: whole-face requests wait until the host knows the session. */
+let holdWholeFaceRequests = false;
+let heldWholeFaceRequest: { session: string; incarnation: number; epoch: number } | null = null;
+
+/** Replaces the sliced faces of the registered fonts; the old ones stop installing outlines. */
+function setProgressiveFonts(next: ResidentProgressiveFonts | null): void {
+  if (progressiveFonts !== next) progressiveFonts?.dispose();
+  progressiveFonts = next;
+}
+
+function requestWholeFaces(identity: { session: string; incarnation: number; epoch: number }): void {
+  if (holdWholeFaceRequests) {
+    heldWholeFaceRequest = identity;
+    return;
+  }
+  reply({ id: 0, ok: true, fontRequirementsHint: { ...identity, wholeFaces: true } });
+}
+
+function releaseWholeFaceRequests(): void {
+  holdWholeFaceRequests = false;
+  const held = heldWholeFaceRequest;
+  heldWholeFaceRequest = null;
+  if (held) requestWholeFaces(held);
+}
+let commandFontSlots: { ids: (number | null)[]; substituteOf: (number | undefined)[] } | null = null;
 let echoGlyphGeneration = 0;
 const offscreenCanvases = new Map<string, OffscreenCanvas>();
 const offscreenBackBuffers = new Map<string, OffscreenCanvas>();
@@ -1349,7 +1457,7 @@ let paintedCaretPageId: string | null = null;
 let paintedCaretKey: string | null = null;
 let caretStage: OffscreenCanvas | null = null;
 const intactBackBuffers = new Set<string>();
-let trap: WebAssembly.RuntimeError | null = null;
+let trap: Error | null = null;
 let projectionFailure: SessionFailure | null = null;
 // A bootstrap laid out only the body's first pages: the request to finish
 // it, then the finished layout until `completeLayout` hands it over.
@@ -1401,7 +1509,7 @@ let handlingId = 0;
 const trappedIds = new Set<number>();
 
 onDisplayListQuerySourceFailure((error) => {
-  if (error instanceof WebAssembly.RuntimeError) trapped(handlingId, error);
+  if (isEngineTrap(error)) trapped(handlingId, error as Error);
 });
 
 /** Least time between two progress notices. */
@@ -1419,27 +1527,36 @@ function reportProgress(): void {
 }
 Object.assign(globalThis, { __betterofficeEngineProgress: reportProgress });
 
-scope.onmessage = (
-  event: MessageEvent<DocxEngineWorkerRequest | DocxEngineWorkerHostModule>
-) => {
-  const message = event.data;
-  interruptSaveWarmup(message.type);
-  if (message.type === 'editModule') {
-    // The queued warm waits for this message.
-    resolveHostEditModule(message.module instanceof WebAssembly.Module ? message.module : null);
+const WORKER_STARTED = Symbol.for('betteroffice.docx.worker.started');
+
+export function startWorker(workerScope: DedicatedWorkerGlobalScope): void {
+  const flags = workerScope as unknown as Record<symbol, unknown>;
+  if (flags[WORKER_STARTED]) return;
+  flags[WORKER_STARTED] = true;
+  scope = workerScope;
+  scope.onmessage = (
+    event: MessageEvent<DocxEngineWorkerRequest | DocxEngineWorkerHostModule>
+  ) => {
+    const message = event.data;
+    interruptSaveWarmup(message.type);
+    if (message.type === 'editModule') {
+      resolveHostEditModule(shipsWasmAsset && message.module instanceof WebAssembly.Module ? message.module : null);
+      scheduleSaveWarmup();
+      return;
+    }
+    if (message.type === 'prepare-save') {
+      scheduleSaveWasmPreload();
+      return;
+    }
+    scheduler.submit(classify(message));
     scheduleSaveWarmup();
-    return;
-  }
-  if (message.type === 'prepare-save') {
-    scheduleSaveWasmPreload();
-    return;
-  }
-  scheduler.submit(classify(message));
-  scheduleSaveWarmup();
-};
-scope.onmessageerror = () => resolveHostEditModule(null);
+  };
+  scope.onmessageerror = () => resolveHostEditModule(null);
+}
+
 
 function nextHostEditModule(): Promise<WebAssembly.Module | null> {
+  if (!shipsWasmAsset) return Promise.resolve(null);
   return new Promise((resolve) => {
     resolveHostEditModule = resolve;
   });
@@ -1529,6 +1646,7 @@ function isUserInputCommand(kind: string): boolean {
     kind === 'setParagraphAttrs' || kind === 'applyParagraphStyle' || kind === 'formatSelection' || kind === 'toggleStrike' ||
     kind === 'toggleList' || kind === 'changeIndent' || kind === 'insertImage' || kind === 'insertTable' ||
     kind === 'pasteFragment' ||
+    kind === 'replacePasteFragment' ||
     kind === 'insertPageBreak' || kind === 'insertSectionBreak' ||
     kind === 'setTableBorders' || kind === 'setTableProperties';
 }
@@ -1589,8 +1707,8 @@ function replyFailure(id: number, error: unknown): void {
     });
     return;
   }
-  if (failure instanceof WebAssembly.RuntimeError) {
-    trapped(id, failure);
+  if (isEngineTrap(failure)) {
+    trapped(id, failure as Error);
     return;
   }
   reply({
@@ -1599,17 +1717,19 @@ function replyFailure(id: number, error: unknown): void {
     error: error instanceof Error ? error.message : String(error),
     ...(failure instanceof SaveUnavailableError ? { code: 'save-unavailable' as const } : {}),
     ...(failure instanceof SourceCutKeptError ? { code: 'cut-kept' as const } : {}),
+    ...(failure instanceof InvalidSelectionError ? { code: 'invalid-selection' as const } : {}),
+    ...(isTableUnavailableRefusal(failure) ? { code: 'table-unavailable' as const } : {}),
   });
 }
 
 /** A trap leaves the module unusable: `id` is answered as terminal, and nothing succeeds after. */
-function trapped(id: number, error: WebAssembly.RuntimeError): void {
+function trapped(id: number, error: Error): void {
   if (trappedIds.has(id)) return;
   trappedIds.add(id);
   trap = error;
   let memory: ReturnType<typeof wasmModuleMemories> = [];
   try { memory = wasmModuleMemories(); } catch {}
-  const failed = memory.find((module) => module.label === 'docx-edit')?.failedAllocationBytes ?? 0;
+  const failed = outOfMemoryBytes(error, memory);
   reply({
     id,
     ok: false,
@@ -1631,7 +1751,7 @@ async function handle(request: ScheduledRequest): Promise<void> {
       reply({ id: request.id, ok: true, decodedFontFace: face },
         face.payload === undefined ? [face.font] : [face.font, face.payload]);
     } catch (error) {
-      if (error instanceof WebAssembly.RuntimeError) throw error;
+      if (isEngineTrap(error)) throw error;
       const message = error instanceof Error ? error.message : String(error);
       reply({ id: request.id, ok: false, error: message, commandError: { name: 'Error', message } });
     }
@@ -1649,7 +1769,7 @@ async function handle(request: ScheduledRequest): Promise<void> {
   ) supersedeBackgroundPageBuild();
   if (request.type === 'warm') {
     try {
-      if (request.hostModule) {
+      if (request.hostModule && shipsWasmAsset) {
         const timer = setTimeout(() => resolveHostEditModule(null), RESIDENT_HOST_MODULE_WAIT_MS);
         await preloadEditWasmFrom(
           hostEditModule.then((module) => {
@@ -1682,6 +1802,9 @@ async function handle(request: ScheduledRequest): Promise<void> {
     return;
   }
   if (request.type === 'commandInit') {
+    if (typeof OffscreenCanvas !== 'function') {
+      throw new Error('DOCX worker editing paints frames and needs OffscreenCanvas, which this runtime lacks; edit documents headless with the in-thread edit session');
+    }
     if (!session || !openedDocument || previewing) {
       throw new Error('Worker commands require a whole opened document');
     }
@@ -1708,18 +1831,30 @@ async function handle(request: ScheduledRequest): Promise<void> {
     unsubscribe?.();
     unsubscribe = null;
     pendingUpdates = [];
-    replyCommand(request.id, 'commandInitial', await bindResidentCommands(init).initial());
+    setProgressiveFonts(openProgressiveFonts(init.progressiveFonts, init));
+    holdWholeFaceRequests = true;
+    try {
+      replyCommand(request.id, 'commandInitial', await bindResidentCommands(init).initial());
+    } finally {
+      releaseWholeFaceRequests();
+    }
     return;
   }
   if (request.type === 'edit') {
     if (!commandLayout) await completeProvisionalLayout();
-    noteDocumentChange();
-    fontRequirements = null;
-    completedLayout = null;
+    if (!isSelectionStepCommand(request.command.kind)) {
+      noteDocumentChange();
+      fontRequirements = null;
+      completedLayout = null;
+    }
     const result = await requireCommandHost().handler(undefined, request.command);
-    replyCommand(request.id, 'commandAck', result);
     const ack = isTransferResult(result) ? result.value : result;
-    if (deferredSelectionFrames.delete(ack)) postCommandFrame(0);
+    if (!deferredSelectionFrames.delete(ack)) replyCommand(request.id, 'commandAck', result);
+    else if (scheduler.pending().foreground === 0) replyCommandWithFrame(request.id, result);
+    else {
+      replyCommand(request.id, 'commandAck', result);
+      postCommandFrame(0);
+    }
     return;
   }
   if (request.type === 'checkpoint') {
@@ -1799,7 +1934,7 @@ async function handle(request: ScheduledRequest): Promise<void> {
           [stateVector, ...embeddedFontFaces.map(face => face.data)]);
       }
     } catch (error) {
-      if (error instanceof WebAssembly.RuntimeError) throw error;
+      if (isEngineTrap(error)) throw error;
       if (opening && session === opening) destroySession(true);
       else opening?.destroy();
       if (replaced && await reopenSourceCut(replaced)) throw new SourceCutKeptError(error instanceof Error ? error.message : String(error));
@@ -1831,7 +1966,7 @@ async function handle(request: ScheduledRequest): Promise<void> {
               request.previewParagraphBudget
             );
     } catch (error) {
-      if (!(error instanceof WebAssembly.RuntimeError)) opening.destroy();
+      if (!(isEngineTrap(error))) opening.destroy();
       throw error;
     }
     if (hostJson === null) {
@@ -2125,6 +2260,12 @@ async function handle(request: ScheduledRequest): Promise<void> {
           (request.operation.kind === 'snapshot' && fontRequirements.version === snapshot.version))
           ? { ...fontRequirements, version: snapshot.version }
           : null;
+      if (unchangedFonts && fontRequirements) {
+        const requirements = JSON.parse(fontRequirements.requirementsJson) as { characterBits?: string; characters?: string[] }[];
+        if (requirements.some(requirement => requirement.characterBits || requirement.characters?.length)) {
+          fontRequirements = previewFontRequirements(session, fontRequirements.layoutInput, undefined, snapshot.version);
+        }
+      }
       // A decision changes only the preview: the host's next input is its last one previewing it.
       const preview = proposalRevisionPreview(snapshot);
       if (
@@ -2165,7 +2306,7 @@ async function handle(request: ScheduledRequest): Promise<void> {
       );
     } catch (error) {
       if (trap) throw trap;
-      if (error instanceof WebAssembly.RuntimeError) throw error;
+      if (isEngineTrap(error)) throw error;
       reply({
         id: request.id,
         ok: false,
@@ -2223,29 +2364,29 @@ async function handle(request: ScheduledRequest): Promise<void> {
           mediaDataUrl: (source: string) => resident.mediaDataUrl(source),
         };
         const { anchor, focus } = request.read.selection;
-        const cells = session.cellSelection();
+        const cells = request.read.cells === undefined ? session.cellSelection() : request.read.cells;
         const multiCell = !!cells && (cells.anchor.story !== cells.head.story ||
           cells.anchor.tableIndex !== cells.head.tableIndex ||
           cells.anchor.row !== cells.head.row || cells.anchor.column !== cells.head.column);
         if (multiCell && cells) {
-          const payload = clipboardTablePayload(
-            session.tablePayload(cells.anchor.story, cells.anchor.tableIndex),
-          );
-          const holds = !!payload &&
-            tableAnchors(payload).anchors.some(
-              (cell) => focus.story === cell.story || focus.story.startsWith(`${cell.story}:`),
-            );
+          const raw = session.tablePayload(cells.anchor.story, cells.anchor.tableIndex);
+          if (raw && isUnavailableTablePayload(raw)) throw tableUnavailableError();
+          const payload = clipboardTablePayload(raw);
+          const anchors = payload ? tableAnchors(payload).anchors : [];
+          const holds = anchors.some((cell) => focus.story === cell.story) ||
+            (anchors.some((cell) => focus.story.startsWith(`${cell.story}:`)) &&
+              shownStory(session, rootOf(focus.story), null, focus.story));
           if (holds) {
             value = readClipboardSlice(reader, { cells });
             break;
           }
         }
-        if (anchor.story !== focus.story) throw new Error('Cross-story selection is unavailable');
+        if (anchor.story !== focus.story) throw new InvalidSelectionError('Cross-story selection is unavailable');
         value = readClipboardSlice(reader, {
           story: anchor.story,
           from: storyOffsetForLoc(session.geometryReader, anchor),
           to: storyOffsetForLoc(session.geometryReader, focus),
-        });
+        }, commandInit ? (JSON.parse(commandInit.layoutInput) as { renderEnv?: YrsRenderEnv }).renderEnv?.themeColors : undefined);
         break;
       }
       case 'validateEdits':
@@ -2260,6 +2401,10 @@ async function handle(request: ScheduledRequest): Promise<void> {
         } finally { queries?.dispose(); }
         break;
       }
+      case 'fontOutlinesInstalled':
+        await progressiveFonts?.whenInstalled();
+        value = { lateInstalls: progressiveFonts?.lateInstalls ?? 0 };
+        break;
       case 'partSnapshot':
         value = { metadata: partMetadata(session.partDocument()), geometry: retainedFrame && retainedLayoutVersion === engine.version() ? session.partGeometry(retainedFrame) : [],
           frameEpoch: retainedFrame && retainedLayoutVersion === engine.version() ? retainedFrame.frameEpoch : null, layoutRevision };
@@ -2268,7 +2413,7 @@ async function handle(request: ScheduledRequest): Promise<void> {
         value = readResidentProperties(session, request.read.target);
         break;
       case 'sectionProperties':
-        value = session.sectionProperties();
+        value = session.sectionProperties(request.read.paragraphs);
         break;
       case 'exportStructuredWithPages': {
         if (commandLayout?.complete()) postCommandFrame(0);
@@ -2457,6 +2602,13 @@ async function handle(request: ScheduledRequest): Promise<void> {
         break;
       case 'headings':
         value = readOutlineHeadings(session.geometryReader, request.read.expectVersion);
+        break;
+      case 'pageTexts':
+        value = !retainedFrame || retainedLayoutVersion !== engine.version() ||
+          (request.read.expectFrameEpoch !== undefined && request.read.expectFrameEpoch !== retainedFrame.frameEpoch) ||
+          (request.read.expectLayoutRevision !== undefined && request.read.expectLayoutRevision !== layoutRevision)
+          ? null : { pages: JSON.parse(session.pageTextsJson(Uint32Array.from(request.read.pages))),
+            frameEpoch: retainedFrame.frameEpoch, layoutRevision };
         break;
       case 'adjacentRevision':
         value = readAdjacentRevision(session.geometryReader, request.read.selection, request.read.direction,
@@ -2778,13 +2930,15 @@ async function handle(request: ScheduledRequest): Promise<void> {
     );
   } catch (error) {
     if (trap) throw trap;
-    if (error instanceof WebAssembly.RuntimeError) throw error;
+    if (isEngineTrap(error)) throw error;
     const message = error instanceof Error ? error.message : String(error);
     reply({
       id: request.id,
       ok: false,
       error: message,
-      residentUnavailable: message.includes('resident input state is not ready'),
+      // A write into a table cell with no story is refused before the engine changes anything.
+      residentUnavailable: message.includes('resident input state is not ready') ||
+        (pendingUpdates.length === 0 && isCellHasNoStoryRefusal(error)),
       // The edit committed here but never reached the host: this replica is
       // no longer the host's, so the host must replace it.
       ...(pendingUpdates.length > 0 ? { terminal: true } : {}),
@@ -2874,12 +3028,17 @@ function hydrate(
     if (snapshot.fontsBaseRevision === undefined) {
       session.clearFonts();
       glyphCache = null;
+      setProgressiveFonts(null);
       for (const pageId of activeOffscreenPageIds) pendingOffscreenPageIds.add(pageId);
       intactBackBuffers.clear();
     }
     fontsRevision = -1;
     if (commandFonts) {
       const registered = registerCommandFonts(session, snapshot.fonts);
+      commandFontSlots = {
+        ids: registered.ids,
+        substituteOf: snapshot.fonts.map((font) => font instanceof Uint8Array ? undefined : font.substituteOf),
+      };
       const chains = typeof commandFonts.fontRegistrationSlots === 'object'
         ? commandFonts.fontRegistrationSlots.fontChains : undefined;
       snapshot.layoutInput = registered.remap(snapshot.layoutInput, chains);
@@ -3038,7 +3197,7 @@ function previewFontRequirements(
   } catch (error) {
     // The host reads them itself and meets the failure there.
     if (trap) throw trap;
-    if (error instanceof WebAssembly.RuntimeError) throw error;
+    if (isEngineTrap(error)) throw error;
     return null;
   }
 }
@@ -3099,7 +3258,7 @@ async function completeProvisionalLayout(): Promise<void> {
       try {
         layoutJson = session.resumeRegionLayout(ALL_BLOCKS).layoutJson;
       } catch (error) {
-        if (error instanceof WebAssembly.RuntimeError) throw error;
+        if (isEngineTrap(error)) throw error;
       }
     }
     completedLayout = {
@@ -3175,6 +3334,58 @@ const scheduler = createResidentScheduler({
   failed: () => {},
 });
 
+/**
+ * The sliced font slots of the fonts just registered; null without any. A face
+ * whose outlines the engine refuses asks the host, which owns `identity`, for
+ * its whole faces.
+ */
+function openProgressiveFonts(
+  specs: readonly ProgressiveFontSpec[] | undefined,
+  identity: { session: string; incarnation: number; epoch: number } | null,
+): ResidentProgressiveFonts | null {
+  const owner = session;
+  const slots = commandFontSlots;
+  if (!owner || !slots || !specs?.length) return null;
+  const fonts = new ResidentProgressiveFonts(
+    specs, slots.ids, slots.substituteOf,
+    { updateFontOutlines: (fontId, bytes) => owner.updateFontOutlines(fontId, bytes) },
+    async (encoded, maxOutput) => copyDecodedFace(decodePackedFontFace(new Uint8Array(encoded), 'zstd', undefined, maxOutput)).font,
+  );
+  if (fonts.size === 0) return null;
+  fonts.onLateInstall(() => {
+    if (session !== owner || progressiveFonts !== fonts) return;
+    glyphCache = null;
+    echoGlyphState = null;
+    if (commandFrameChanges) commandFrameChanges.repaintPictures = true;
+    if (commandHost) postCommandFrame(0);
+  });
+  if (identity) {
+    fonts.onRefused(() => {
+      if (session !== owner || progressiveFonts !== fonts) return;
+      requestWholeFaces(identity);
+    });
+  }
+  return fonts;
+}
+
+/** Rasterizes a page once the outlines it draws from sliced faces are installed, or their wait runs out. */
+async function rasterizePage(...args: Parameters<typeof rasterizeDisplayPageToBackBuffer>): Promise<void> {
+  await ensureProgressiveOutlines([args[1]]);
+  await rasterizeDisplayPageToBackBuffer(...args);
+}
+
+/** Installs the outlines `pages` draw from sliced faces, then drops their stale cached outlines. */
+async function ensureProgressiveOutlines(pages: Iterable<unknown>): Promise<void> {
+  const fonts = progressiveFonts;
+  if (!fonts) return;
+  const glyphs = new Map<number, Set<number>>();
+  for (const page of pages) glyphsByFont(page, glyphs);
+  const changed = await fonts.ensure(glyphs);
+  if (changed.size === 0 || fonts !== progressiveFonts) return;
+  glyphCache?.invalidateFonts(fonts.fontIdsOf(changed));
+  echoGlyphState = null;
+}
+
 function supersedeBackgroundPageBuild(): void {
   const build = backgroundPageBuild;
   if (!build) return;
@@ -3221,7 +3432,7 @@ function scheduleCompletion(completion: SlicedCompletion): void {
       if (slicedCompletion === completion) slicedCompletion = null;
       if (!completion.commandOwner) replyFailure(completion.id, error);
       else if (completion.commandOwner === commandHost) {
-        if (error instanceof WebAssembly.RuntimeError) replyFailure(0, error);
+        if (isEngineTrap(error)) replyFailure(0, error);
         else reply({ id: 0, ok: false, terminal: true, failureCode: 'message',
           error: error instanceof Error ? error.message : String(error) });
       }
@@ -3253,7 +3464,7 @@ async function completionSlice(completion: SlicedCompletion, budgetMs: number): 
     try {
       progress = owner ? owner.resume(completion.blocks) : session.resumeRegionLayout(completion.blocks);
     } catch (error) {
-      if (error instanceof WebAssembly.RuntimeError) throw error;
+      if (isEngineTrap(error)) throw error;
       const message = error instanceof Error ? error.message : String(error);
       if (
         message !== 'no region layout to resume' &&
@@ -3399,6 +3610,7 @@ function asciiProposalFontsUnchanged(
 function destroySession(keepSurfaces = false): void {
   cancelSaveWasmPreload();
   cancelSaveWarmup();
+  scheduler.cancel((task) => task.kind === 'saveSeedPrime');
   saveWarmupOwner = null;
   collaboration?.dispose(); collaboration = null;
   supersedeBackgroundPageBuild();
@@ -3412,6 +3624,7 @@ function destroySession(keepSurfaces = false): void {
   proposals = null;
   releaseCommandHost?.();
   releaseCommandHost = null;
+  if (session) releaseResidentDisplayListQueries(session);
   session?.destroy();
   closeHostImages();
   lastProposalMirrorVersion = null;
@@ -3449,6 +3662,8 @@ function destroySession(keepSurfaces = false): void {
   completedLayout = null;
   retainedFrame = null;
   glyphCache = null;
+  setProgressiveFonts(null);
+  commandFontSlots = null;
   offscreenBackBuffers.clear();
   pendingOffscreenPageIds.clear();
   if (!keepSurfaces) {
@@ -3608,7 +3823,7 @@ async function reopenSourceCut(source: DocxSourceOpenRequest): Promise<boolean> 
     if (adoptResidentSource(opening, source)) return true;
     opening.destroy();
   } catch (error) {
-    if (error instanceof WebAssembly.RuntimeError) throw error;
+    if (isEngineTrap(error)) throw error;
     if (session === opening) destroySession(true);
     else opening.destroy();
   }
@@ -3638,6 +3853,7 @@ async function replySourcePreview(
     fonts: init.fonts, fontsRevision: 0, renderInputs: [], measureInputs: [],
     layoutInput: init.layoutInput, layoutWithRegions: true, layoutRevision: 1, partialDocument: cutPartial,
   }, pages, true, false, undefined, undefined, init.fontRegistrationSlots ? init : undefined);
+  setProgressiveFonts(openProgressiveFonts(preview.progressiveFonts, null));
   if (layout.provisional) incompleteLayout = {
     layoutInput: init.layoutInput, workerAuthoritative: true, extras: init.extras,
   };
@@ -3775,8 +3991,8 @@ async function replayOffscreen(
           return session!.outlineGlyphJson(fontId, glyphId);
         } catch (error) {
           // The raster paints on with browser text, so running out of memory is answered here.
-          if (error instanceof WebAssembly.RuntimeError && editFailedAllocationBytes() > 0) {
-            trapped(handlingId, error);
+          if (isEngineTrap(error) && outOfMemoryBytes(error as Error, wasmModuleMemories()) > 0) {
+            trapped(handlingId, error as Error);
           }
           throw error;
         }
@@ -3830,7 +4046,7 @@ async function replayOffscreen(
       continue;
     }
     preparations.push(
-      rasterizeDisplayPageToBackBuffer(
+      rasterizePage(
         resolvedBuffer,
         page,
         { glyphCache: glyphCache ?? undefined, ...(images ? { resolveImage: images.resolve } : {}) },
@@ -3875,8 +4091,16 @@ function exactBuffer(bytes: Uint8Array): ArrayBuffer {
   return exactFrameBuffer(bytes);
 }
 
-function editFailedAllocationBytes(): number {
-  return wasmModuleMemories().find((module) => module.label === 'docx-edit')?.failedAllocationBytes ?? 0;
+/**
+ * The size of the allocation a trap ran out of memory on, or 0 for any other trap. A native call
+ * past its heap limit names the allocation in its own error, while the native failed-bytes
+ * counter outlives the call; a wasm module that trapped is dead, so its counter is this trap's.
+ */
+function outOfMemoryBytes(error: Error, memory: ReturnType<typeof wasmModuleMemories>): number {
+  const budget = nativeBudgetFailure(error.message);
+  if (budget) return budget.bytes;
+  const edit = memory.find((module) => module.label === 'docx-edit');
+  return edit && !edit.native ? edit.failedAllocationBytes ?? 0 : 0;
 }
 
 let pipeOutputTimer: ReturnType<typeof setTimeout> | null = null;
@@ -3916,20 +4140,35 @@ function canPreloadSaveWasm(): boolean {
 }
 
 /**
- * Records save seed states once per editable command document, as soon as its
- * layout is complete: one bounded wasm call after a request or completion
- * step, so the first save after an edit need not reseed.
+ * Records save seed states once per editable command document once its layout
+ * is complete, so the first save after an edit need not reseed: idle slices of
+ * the background scheduler, each sized to its budget, that yield to every
+ * request and wait out input.
  */
 function primeSaveSeedStatesOnce(): void {
   if (saveSeedStatesPrimed || !session || !commandHost || !canPreloadSaveWasm() || slicedCompletion ||
     incompleteLayout || commandLayout?.certifiedPages() != null) return;
   saveSeedStatesPrimed = true;
-  if (!saveWarmupHasHeadroom()) return;
-  try {
-    session.primeSaveSeedStates(SAVE_SEED_MAX_PARAGRAPHS, SAVE_SEED_MAX_INFLATED_BYTES);
-  } catch (error) {
-    if (error instanceof WebAssembly.RuntimeError) trapped(0, error);
-  }
+  if (!currentSaveWarmupPolicy().primeSeeds) return;
+  const owner = session;
+  let maxBytes = SAVE_SEED_SLICE_BYTES;
+  scheduler.schedule({
+    kind: 'saveSeedPrime', version: scheduler.version, generation: scheduler.generation,
+    idleAfterInputMs: COMPLETION_IDLE_MS,
+    onStale: () => 'continue',
+    fail: (error) => {
+      if (isEngineTrap(error)) trapped(0, error as Error);
+    },
+    run: (budgetMs) => {
+      if (session !== owner || trap) return 'done';
+      const started = performance.now();
+      const state = owner.primeSaveSeedStatesSlice(SAVE_SEED_MAX_PARAGRAPHS, SAVE_SEED_MAX_INFLATED_BYTES, maxBytes);
+      const elapsed = performance.now() - started;
+      maxBytes = nextPrimeByteBudget(maxBytes, owner.primeLastSliceCost(), elapsed,
+        Math.min(budgetMs, SAVE_SEED_SLICE_TARGET_MS), SAVE_SEED_MAX_GROWTH);
+      return state === 1 ? 'yield' : 'done';
+    },
+  });
 }
 
 function scheduleSaveWasmPreload(): void {
@@ -3975,25 +4214,21 @@ function interruptSaveWarmup(type: string): void {
 
 function saveWarmupCurrent(attempt: SaveWarmup): boolean {
   return !attempt.cancelled && session === attempt.owner && saveWarmupOwner === attempt.owner &&
-    canPreloadSaveWasm() && saveWarmupHasHeadroom();
+    canPreloadSaveWasm() && currentSaveWarmupPolicy().warm;
 }
 
-function saveWarmupHasHeadroom(): boolean {
+function currentSaveWarmupPolicy(): SaveWarmupPolicy {
   const configured = openedDocument?.heapLimitBytes;
-  if (configured !== undefined && (!Number.isSafeInteger(configured) || configured <= 0)) return false;
+  const unread = saveWarmupPolicy(engineKind, configured, undefined);
+  if (unread.reason === 'no-limit') return unread;
   let memory: ReturnType<typeof wasmModuleMemories>[number] | undefined;
   try {
     memory = wasmModuleMemories().find((module) => module.label === 'docx-edit');
   } catch (error) {
-    if (error instanceof WebAssembly.RuntimeError) trapped(0, error);
-    return false;
+    if (isEngineTrap(error)) trapped(0, error as Error);
+    return unread;
   }
-  const limit = Math.min(configured ?? WASM32_MEMORY_LIMIT_BYTES,
-    memory?.maximumBytes ?? WASM32_MEMORY_LIMIT_BYTES, WASM32_MEMORY_LIMIT_BYTES);
-  if (!Number.isSafeInteger(limit) || limit <= 0) return false;
-  const live = memory?.liveBytes;
-  return typeof live === 'number' && Number.isSafeInteger(live) && live >= 0 &&
-    limit - live >= Math.max(SAVE_WARMUP_MIN_HEADROOM_BYTES, limit * SAVE_WARMUP_HEADROOM_FRACTION);
+  return saveWarmupPolicy(engineKind, configured, memory);
 }
 
 function yieldSaveWarmup(attempt: SaveWarmup): Promise<void> {
@@ -4020,13 +4255,13 @@ function yieldSaveWarmup(attempt: SaveWarmup): Promise<void> {
 
 function scheduleSaveWarmup(): void {
   if (saveWarmupTimer !== null || saveWarmup || !saveWarmupOwner || session !== saveWarmupOwner ||
-    saveWarmupFinished || saveWarmupAttempts >= 2 || !canPreloadSaveWasm() || !saveWarmupHasHeadroom()) return;
+    saveWarmupFinished || saveWarmupAttempts >= 2 || !canPreloadSaveWasm() || !currentSaveWarmupPolicy().warm) return;
   const owner = saveWarmupOwner;
   const delay = Math.max(0, saveWarmupRequestAt + SAVE_WARMUP_IDLE_MS - performance.now(),
     saveWarmupInputAt + SAVE_WARMUP_INPUT_IDLE_MS - performance.now());
   saveWarmupTimer = setTimeout(() => {
     saveWarmupTimer = null;
-    if (session !== owner || !canPreloadSaveWasm() || saveWarmupFinished || !saveWarmupHasHeadroom()) return;
+    if (session !== owner || !canPreloadSaveWasm() || saveWarmupFinished || !currentSaveWarmupPolicy().warm) return;
     const attempt: SaveWarmup = { owner, cancelled: false };
     saveWarmup = attempt;
     void yieldSaveWarmup(attempt).then(async () => {
@@ -4037,8 +4272,8 @@ function scheduleSaveWarmup(): void {
       await warmResidentSave(() => yieldSaveWarmup(attempt));
       if (!attempt.cancelled) saveWarmupFinished = true;
     }).catch((error: unknown) => {
-      if (error instanceof WebAssembly.RuntimeError) {
-        trapped(0, error);
+      if (isEngineTrap(error)) {
+        trapped(0, error as Error);
         return;
       }
       if (!attempt.cancelled && session === owner) saveWarmupFinished = true;

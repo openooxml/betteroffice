@@ -49,6 +49,7 @@ export interface RustSaveResult {
  * source bytes with only these IDs patched in.
  */
 export interface RustParagraphIds {
+  removedCommentIds?: string[];
   sectionEdits?: {
     onlySections: boolean;
     sha256: string;
@@ -57,6 +58,8 @@ export interface RustParagraphIds {
   };
   assignments: Array<{ part: string; ordinal: number; paraId: string }>;
   patchedParts: Array<{ part: string; paraIds: Array<[number, string]> }>;
+  wholeParts?: Array<{ part: string; sha256: string; changed: number[] }>;
+  touchedParts?: Array<{ part: string; touched: number[] }>;
   /**
    * Story parts written as their source bytes with only some paragraphs
    * re-serialized: those whose `sourceOrdinal` is in `changed`, or whose
@@ -76,6 +79,7 @@ export interface RustParagraphIds {
     tablePatches?: Array<{ ordinal: number; before: unknown; after: unknown }>;
     inserted?: Array<{ before: number } | { after: number }>;
     removed?: number[];
+    formatOnly?: number[];
   }>;
 }
 
@@ -343,19 +347,39 @@ function validateDeterminism(value: RustSaveDeterminism): void {
 
 const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
-function assertSafeSaveTree(value: unknown, path: string, active = new WeakSet<object>()): void {
-  if (value === null || typeof value !== 'object') return;
-  if (active.has(value)) throw new TypeError(`${path} contains a cycle`);
-  active.add(value);
-  if (Array.isArray(value)) {
-    value.forEach((entry, index) => assertSafeSaveTree(entry, `${path}[${index}]`, active));
-  } else {
-    for (const key of Object.keys(value)) {
-      if (FORBIDDEN_KEYS.has(key)) throw new TypeError(`${path} contains forbidden key ${key}`);
-      assertSafeSaveTree((value as Record<string, unknown>)[key], `${path}.${key}`, active);
+/** @internal */
+export function assertSafeSaveTree(value: unknown, path: string, active = new WeakSet<object>()): void {
+  const segments: Array<string | number> = [];
+  const currentPath = (): string => {
+    let result = path;
+    for (const segment of segments) {
+      result += typeof segment === 'number' ? `[${segment}]` : `.${segment}`;
     }
-  }
-  active.delete(value);
+    return result;
+  };
+  const visit = (value: unknown): void => {
+    if (value === null || typeof value !== 'object') return;
+    if (active.has(value)) throw new TypeError(`${currentPath()} contains a cycle`);
+    active.add(value);
+    if (Array.isArray(value)) {
+      const length = value.length;
+      for (let index = 0; index < length; index += 1) {
+        if (!(index in value)) continue;
+        segments.push(index);
+        visit(value[index]);
+        segments.pop();
+      }
+    } else {
+      for (const key of Object.keys(value)) {
+        if (FORBIDDEN_KEYS.has(key)) throw new TypeError(`${currentPath()} contains forbidden key ${key}`);
+        segments.push(key);
+        visit((value as Record<string, unknown>)[key]);
+        segments.pop();
+      }
+    }
+    active.delete(value);
+  };
+  visit(value);
 }
 
 function exactArrayBuffer(bytes: Uint8Array): ArrayBuffer {

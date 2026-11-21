@@ -45,6 +45,7 @@ export declare class XlsxSnapshotBuilder {
 }
 export declare function displayListCellLimit(): number
 export declare function engineVersion(): string
+export declare function install_panic_hook(): void
 export interface BorderPatch {
   preset?: string
 }
@@ -101,6 +102,16 @@ describe("check-engine-surface parser", () => {
     expect(problems.some((problem) => problem.includes("free"))).toBe(true);
   });
 
+  test("a missing install_panic_hook is reported", () => {
+    expect(parseSurface(wasm).functions.has("install_panic_hook")).toBe(true);
+    const broken = native.replace("export declare function install_panic_hook(): void\n", "");
+    const problems = compareSurfaces(parseSurface(wasm), parseSurface(broken), [
+      "XlsxDocument",
+      "XlsxSnapshotBuilder",
+    ]);
+    expect(problems).toEqual(["function install_panic_hook: missing natively (wasm: install_panic_hook(): void)"]);
+  });
+
   test.each([
     ["method", "export class Example { read(value?: boolean): void; }", "export class Example { read(value: boolean): void; }"],
     ["static method", "export class Example { static open(value?: boolean): Example; }", "export class Example { static open(value: boolean): Example; }"],
@@ -148,5 +159,56 @@ describe("check-engine-surface parser", () => {
       .toContain("Example.constructor: missing natively");
     expect(compareSurfaces(privateConstructor, constructible, ["Example"])[0])
       .toContain("Example.constructor: public constructor is only available natively");
+  });
+
+  test("pending members are skipped and unlisted missing members still fail", () => {
+    const expected = parseSurface(`export class Example {
+      later(): string;
+      required(): number;
+    }`);
+    const actual = parseSurface("export class Example {}");
+    const problems = compareSurfaces(expected, actual, ["Example"], ["Example.later"]);
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toContain("Example.required: missing natively");
+    expect(compareSurfaces(expected, actual, ["Example"], [
+      "Example.later", "Example.required",
+    ])).toEqual([]);
+  });
+
+  test("pending classes and functions are skipped independently", () => {
+    const expected = parseSurface(`
+      export class Later { read(): string; }
+      export function later(): string;
+      export function required(): number;
+    `);
+    const problems = compareSurfaces(expected, parseSurface(""), ["Later"], [
+      "Later", "function later",
+    ]);
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toContain("function required: missing natively");
+  });
+
+  test("stale pending entries fail", () => {
+    const expected = parseSurface(`export class Example { later(): string; }
+      export function done(): number;`);
+    const actual = parseSurface(`export class Example { later(): string; }
+      export function done(): number;`);
+    const problems = compareSurfaces(expected, actual, ["Example"], [
+      "Example.later", "function done", "Example.gone",
+    ]);
+    expect(problems).toHaveLength(3);
+    expect(problems.join("\n")).toContain("Example.later: pending but available natively");
+    expect(problems.join("\n")).toContain("function done: pending but available natively");
+    expect(problems.join("\n")).toContain("Example.gone: pending but not in the wasm surface");
+  });
+
+  test("native-only classes and functions are allowed", () => {
+    const extra = `${native}
+      export declare class Document { read(): string; }
+      export declare function openDocument(): Document;
+    `;
+    expect(compareSurfaces(parseSurface(wasm), parseSurface(extra), [
+      "XlsxDocument", "XlsxSnapshotBuilder",
+    ])).toEqual([]);
   });
 });

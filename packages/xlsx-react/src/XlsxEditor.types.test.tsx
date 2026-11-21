@@ -100,7 +100,7 @@ test('rejects sync callbacks without a literal legacy opt-in', () => {
 
 test('accepts async host props and document change types', () => {
   const props = { file: new ArrayBuffer(0), initialZoom: 1.5, loadingIndicator: <span>Opening</span>,
-    style: { height: 400 }, downloadOnSave: false,
+    style: { height: 400 }, downloadOnSave: false, defaultFonts: false,
     onDocumentChange: (change: import('./index').XlsxDocumentChange) => { assertType<Equal<typeof change.version, string>>(); },
   } satisfies XlsxAsyncEditorProps;
   expect(props.downloadOnSave).toBe(false);

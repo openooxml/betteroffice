@@ -21,7 +21,7 @@ const decode = mock(async (
   };
 });
 mock.module('./decode', () => ({ decodeFontFace: decode }));
-const { loadPackedFontBytes, readPackManifest } = await import('./packed');
+const { loadPackedFontBytes, readPackedFontBytes, readPackManifest } = await import('./packed');
 
 const originalFetch = globalThis.fetch;
 afterEach(() => {
@@ -52,7 +52,7 @@ function fixture(codec: 'zstd' | 'woff2t+zstd' = 'zstd') {
     requested.push(String(input));
     return new Response(new Uint8Array([String(input).includes('-Regular.') ? 1 : 2]));
   }) as typeof fetch;
-  const load = (target = face, runtime?: { decoder?: FontDecoder }) =>
+  const load = (target = face, runtime?: { decoder?: FontDecoder; retain?: boolean }) =>
     loadPackedFontBytes(target, resolveUrl, undefined, undefined, manifest, runtime);
   return { manifest, face, requested, load, resolveUrl };
 }
@@ -76,6 +76,28 @@ for (const codec of ['zstd', 'woff2t+zstd'] as const) {
   });
 }
 
+test('the shared read returns the one decoded buffer, which owned copies leave intact', async () => {
+  const { face, manifest, resolveUrl } = fixture();
+  const first = await readPackedFontBytes(face, resolveUrl, undefined, undefined, manifest);
+  expect(new Uint8Array(first)).toEqual(bold);
+  expect(await readPackedFontBytes(face, resolveUrl, undefined, undefined, manifest)).toBe(first);
+  const owned = await loadPackedFontBytes(face, resolveUrl, undefined, undefined, manifest);
+  expect(owned).not.toBe(first);
+  structuredClone(owned, { transfer: [owned] });
+  expect(first.byteLength).toBe(bold.byteLength);
+  expect(decode).toHaveBeenCalledTimes(2);
+});
+
+test('a shared decoded face that something transferred is decoded again', async () => {
+  const { face, manifest, resolveUrl } = fixture();
+  const shared = await readPackedFontBytes(face, resolveUrl, undefined, undefined, manifest);
+  structuredClone(shared, { transfer: [shared] });
+  expect(shared.byteLength).toBe(0);
+  const again = await readPackedFontBytes(face, resolveUrl, undefined, undefined, manifest);
+  expect(new Uint8Array(again)).toEqual(bold);
+  expect(new Uint8Array(await loadPackedFontBytes(face, resolveUrl, undefined, undefined, manifest))).toEqual(bold);
+});
+
 test('ignores unknown manifest and face fields, including slices, while loading unchanged', async () => {
   const { manifest, face, resolveUrl } = fixture();
   const extended = {
@@ -86,7 +108,7 @@ test('ignores unknown manifest and face fields, including slices, while loading 
     })),
   };
   const parsed = readPackManifest(extended);
-  expect(parsed).toBe(extended);
+  expect(parsed as unknown).toBe(extended);
   expect(new Uint8Array(await loadPackedFontBytes(face, resolveUrl, undefined, undefined, parsed)))
     .toEqual(bold);
   expect(extended.faces[0].slices.skeleton.file).toBe('unused.zst');
@@ -145,6 +167,30 @@ for (const codec of ['zstd', 'woff2t+zstd'] as const) {
     expect(engine).toHaveBeenCalledTimes(2);
     expect(decode).not.toHaveBeenCalled();
     expect(requested.filter(url => url.endsWith('fontpack.wasm'))).toEqual([]);
+  });
+}
+
+for (const codec of ['zstd', 'woff2t+zstd'] as const) {
+  test(`a non-retaining ${codec} provider shares in-flight decodes and keeps nothing once they settle`, async () => {
+    const { load, face, manifest } = fixture(codec);
+    let release!: () => void;
+    const waiting = new Promise<void>(resolve => { release = resolve; });
+    const engine = mock<FontDecoder>(async (input) => {
+      await waiting;
+      const marker = new Uint8Array(input instanceof Uint8Array ? input : new Uint8Array(input))[0];
+      return { font: (marker === 1 ? regular : bold).slice().buffer,
+        ...(codec === 'woff2t+zstd' ? { payload: payload.slice().buffer } : {}) };
+    });
+    const runtime = { decoder: engine, retain: false };
+    const concurrent = [load(face, runtime), load(face, runtime)];
+    release();
+    for (const result of await Promise.all(concurrent)) expect(new Uint8Array(result)).toEqual(bold);
+    expect(engine).toHaveBeenCalledTimes(2);
+    expect(new Uint8Array(await load({ ...face, file: manifest.faces[0].file }, runtime))).toEqual(regular);
+    expect(engine).toHaveBeenCalledTimes(3);
+    expect(new Uint8Array(await load(face, runtime))).toEqual(bold);
+    expect(engine).toHaveBeenCalledTimes(5);
+    expect(decode).not.toHaveBeenCalled();
   });
 }
 

@@ -26,6 +26,25 @@ pub struct ParagraphPatchV1 {
     #[serde(default)]
     pub mark_inherit: Attrs,
     pub result_sha256: String,
+    #[serde(default, skip_serializing_if = "InheritanceStateV1::is_current")]
+    pub inheritance: InheritanceStateV1,
+}
+
+/// Whether the inherited values a patch carries are known to match the styles the paragraph
+/// takes now. Where they are not, a changed run property keeps its explicit value instead of
+/// being removed in favour of the inherited one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum InheritanceStateV1 {
+    #[default]
+    Current,
+    Unknown,
+}
+
+impl InheritanceStateV1 {
+    pub fn is_current(&self) -> bool {
+        matches!(self, Self::Current)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

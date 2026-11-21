@@ -112,7 +112,10 @@ pub fn unzip_parts_where(
         if entry.is_dir() {
             continue;
         }
-        let name = entry.name().to_string();
+        let name = entry
+            .name()
+            .map_err(|e| format!("bad zip entry name: {e}"))?
+            .into_owned();
         let Some(security_path) = normalized_security_path(&name) else {
             return Err(format!("unsafe zip entry path: {name}"));
         };
@@ -234,7 +237,9 @@ impl SourceContainer {
         let mut files = HashSet::with_capacity(members.len());
         for (index, (name, header)) in members.iter().enumerate() {
             match archive.by_index_raw(index) {
-                Ok(file) if file.name() == name && file.header_start() == *header => {}
+                Ok(file)
+                    if file.name().is_ok_and(|entry| entry == name.as_str())
+                        && file.header_start() == *header => {}
                 _ => return false,
             }
             if !files.insert(name.as_str()) {
@@ -365,7 +370,13 @@ fn copy_unchanged_member(
     let Ok(mut file) = archive.by_index(index) else {
         return Ok(false);
     };
-    if file.is_dir() || file.size() != bytes.len() as u64 || !inflated_matches(&mut file, bytes) {
+    if file.is_dir()
+        || file.size() != bytes.len() as u64
+        || file
+            .extra_data_fields()
+            .any(|field| matches!(field, zip::ExtraField::UnicodePath(_)))
+        || !inflated_matches(&mut file, bytes)
+    {
         return Ok(false);
     }
     drop(file);
@@ -648,6 +659,126 @@ mod tests {
         entries[2].1 = vec![0x89, 0x50, 0x4e, 0x00];
         let out = rezip_parts_preserving(&entries, &source).expect("rezip");
         assert_eq!(unzip_parts(&out).unwrap(), entries);
+    }
+
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for byte in bytes {
+            crc ^= u32::from(*byte);
+            for _ in 0..8 {
+                crc = (crc >> 1) ^ (0xedb8_8320 & (crc & 1).wrapping_neg());
+            }
+        }
+        !crc
+    }
+
+    fn unicode_path(name_raw: &[u8], path: &str) -> Vec<u8> {
+        let mut field = vec![0x75, 0x70];
+        field.extend_from_slice(&(5 + path.len() as u16).to_le_bytes());
+        field.push(1);
+        field.extend_from_slice(&crc32(name_raw).to_le_bytes());
+        field.extend_from_slice(path.as_bytes());
+        field
+    }
+
+    fn raw_stored_zip(name: &[u8], extra: &[u8], data: &[u8]) -> Vec<u8> {
+        let crc = crc32(data).to_le_bytes();
+        let size = (data.len() as u32).to_le_bytes();
+        let lengths = [
+            (name.len() as u16).to_le_bytes(),
+            (extra.len() as u16).to_le_bytes(),
+        ]
+        .concat();
+        let mut zip = [
+            &[0x50, 0x4b, 3, 4, 20, 0, 0, 0, 0, 0, 0, 0, 0x21, 0][..],
+            &crc,
+            &size,
+            &size,
+            &lengths,
+        ]
+        .concat();
+        zip.extend_from_slice(name);
+        zip.extend_from_slice(extra);
+        zip.extend_from_slice(data);
+        let central_start = zip.len() as u32;
+        zip.extend_from_slice(&[0x50, 0x4b, 1, 2, 20, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0x21, 0]);
+        zip.extend_from_slice(&[&crc[..], &size, &size, &lengths, &[0; 14]].concat());
+        zip.extend_from_slice(name);
+        zip.extend_from_slice(extra);
+        let central_size = zip.len() as u32 - central_start;
+        zip.extend_from_slice(&[0x50, 0x4b, 5, 6, 0, 0, 0, 0, 1, 0, 1, 0]);
+        zip.extend_from_slice(&central_size.to_le_bytes());
+        zip.extend_from_slice(&central_start.to_le_bytes());
+        zip.extend_from_slice(&[0, 0]);
+        zip
+    }
+
+    #[test]
+    fn preserving_never_lets_a_copied_unicode_path_rename_a_part() {
+        let mut extra = unicode_path(b"old.xml", "safe.xml");
+        extra.extend(unicode_path(b"safe.xml", "../escape.xml"));
+        let source = raw_stored_zip(b"old.xml", &extra, b"<x/>");
+        let parts = unzip_parts(&source).expect("unzip");
+        assert_eq!(names(&parts), ["safe.xml"]);
+        let out = rezip_parts_preserving(&parts, &source).expect("rezip");
+        assert_eq!(unzip_parts(&out).expect("reopen"), parts);
+    }
+
+    fn effective_names(zip_bytes: &[u8]) -> Vec<String> {
+        let mut archive = zip::ZipArchive::new(Cursor::new(zip_bytes)).unwrap();
+        (0..archive.len())
+            .map(|index| {
+                archive
+                    .by_index_raw(index)
+                    .unwrap()
+                    .name()
+                    .unwrap()
+                    .into_owned()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn saved_packages_reopen_with_the_names_they_were_given() {
+        let mut cases = vec![(sample(), stored_zip(&sample(), "word/media/image1.png"))];
+        for target in [
+            "../escape.xml",
+            "/escape.xml",
+            "word\\..\\..\\escape.xml",
+            "C:/escape.xml",
+            "word/escape.xml",
+        ] {
+            let mut extra = unicode_path(b"old.xml", "safe.xml");
+            extra.extend(unicode_path(b"safe.xml", target));
+            let source = raw_stored_zip(b"old.xml", &extra, b"<x/>");
+            cases.push((unzip_parts(&source).expect("unzip"), source));
+        }
+        let renamed = raw_stored_zip(
+            b"old.xml",
+            &unicode_path(b"old.xml", "word/renamed.xml"),
+            b"<x/>",
+        );
+        cases.push((unzip_parts(&renamed).expect("unzip"), renamed));
+        for (parts, source) in cases {
+            let intended: Vec<&str> = names(&parts);
+            for saved in [
+                rezip_parts(&parts).expect("rezip"),
+                rezip_parts_preserving(&parts, &source).expect("rezip preserving"),
+            ] {
+                let reopened = effective_names(&saved);
+                assert_eq!(reopened, intended);
+                assert!(
+                    reopened
+                        .iter()
+                        .all(|name| is_safe_entry_path(name) && !name.contains('\\'))
+                );
+                let retained = RetainedPackage::new(std::sync::Arc::from(saved)).expect("retained");
+                assert_eq!(
+                    retained.parts().map(|(name, _)| name).collect::<Vec<_>>(),
+                    intended
+                );
+            }
+        }
     }
 
     #[test]

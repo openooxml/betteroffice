@@ -323,6 +323,12 @@ impl DeckUndoManager {
             .merge_with(changes);
     }
 
+    pub(crate) fn adopt_tables(&mut self, stage: &Self) {
+        for (shape_id, changes) in &stage.tables {
+            self.track_table(shape_id, changes.clone());
+        }
+    }
+
     pub(crate) fn tracked_tables(&self) -> impl Iterator<Item = &String> {
         self.tables.keys()
     }

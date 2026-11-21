@@ -43,6 +43,8 @@ pub struct TextStyle {
     pub font_family: Option<String>,
     pub underline: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strike: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spacing_pt: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub baseline_pct: Option<f64>,
@@ -62,6 +64,8 @@ pub struct TextStylePatch {
     pub color: Option<String>,
     pub font_family: Option<String>,
     pub underline: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strike: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spacing_pt: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -273,6 +277,8 @@ pub struct SlideSnapshot {
 pub struct SlideScope {
     /// The slide's position in deck order.
     pub index: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slide_part_paths: Vec<Option<String>>,
     pub slide: SlideSnapshot,
     pub width_emu: i64,
     pub height_emu: i64,
@@ -387,12 +393,30 @@ pub struct PresetShapeDraft {
     pub fill: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PictureDraft {
     pub name: String,
     pub rect: ShapeRect,
     pub content_type: String,
+    #[serde(rename = "mediaBase64", with = "picture_media_base64")]
     pub media_bytes: Vec<u8>,
+}
+
+mod picture_media_base64 {
+    use base64::Engine as _;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&base64::engine::general_purpose::STANDARD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+        let encoded = String::deserialize(deserializer)?;
+        base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -521,7 +545,7 @@ fn legal_xml_character(character: char) -> bool {
         || ('\u{10000}'..='\u{10ffff}').contains(&character)
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TextParagraphDraft {
     pub alignment: Option<String>,
@@ -530,7 +554,7 @@ pub struct TextParagraphDraft {
     pub runs: Vec<TextRunDraft>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TextRunDraft {
     pub text: String,

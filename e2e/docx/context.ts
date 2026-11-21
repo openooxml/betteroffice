@@ -81,6 +81,11 @@ export interface RegionLayout {
 
 let fontBytes: Uint8Array;
 
+/** The test face every requirement is pinned to. */
+export function pinnedFontBytes(): Uint8Array {
+  return fontBytes;
+}
+
 export async function setup(): Promise<void> {
   fontBytes = new Uint8Array(readFileSync(FONT));
   await Promise.all([

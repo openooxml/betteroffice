@@ -32,6 +32,7 @@
     "ariaLabel": "Панель инструментов форматирования",
     "file": "Файл",
     "format": "Формат",
+    "layout": "Макет",
     "insert": "Вставка",
     "open": "Открыть",
     "openShortcut": "Ctrl+O",
@@ -53,6 +54,16 @@
     "imageWrap": {
       "current": "Текущий"
     }
+  },
+  "layout": {
+    "margins": "Поля",
+    "normal": "Обычные",
+    "narrow": "Узкие",
+    "moderate": "Умеренные",
+    "wide": "Широкие",
+    "customMargins": "Настраиваемые поля...",
+    "morePaperSizes": "Другие размеры бумаги...",
+    "indent": "Отступ"
   },
   "formattingBar": {
     "groups": {
@@ -104,7 +115,12 @@
     "single": "Одинарный",
     "double": "Двойной",
     "lineSpacingTitle": "Междустрочный интервал: {label}",
-    "paragraphSpacing": "Интервал между абзацами"
+    "paragraphSpacing": "Интервал между абзацами",
+    "addBefore": "Добавить интервал перед абзацем",
+    "removeBefore": "Удалить интервал перед абзацем",
+    "addAfter": "Добавить интервал после абзаца",
+    "removeAfter": "Удалить интервал после абзаца",
+    "options": "Параметры межстрочного интервала..."
   },
   "styles": {
     "selectAriaLabel": "Выбор стиля абзаца",
@@ -417,6 +433,8 @@
         "strikethroughDescription": "Включить или выключить зачёркивание",
         "subscript": "Подстрочный",
         "subscriptDescription": "Включить или выключить подстрочный шрифт",
+        "clearFormatting": "Очистить все форматирование",
+        "clearFormattingDescription": "Очистить форматирование текста",
         "superscript": "Надстрочный",
         "superscriptDescription": "Включить или выключить надстрочный шрифт",
         "alignLeft": "Выровнять по левому краю",
@@ -470,7 +488,9 @@
         "pageUp": "Page Up",
         "pageDown": "Page Down",
         "ctrl": "Ctrl",
-        "del": "Del"
+        "del": "Del",
+        "shift": "Shift",
+        "alt": "Alt"
       }
     },
     "objectGeometry": {
@@ -478,6 +498,11 @@
       "top": "Сверху (px)",
       "width": "Ширина (px)",
       "height": "Высота (px)"
+    },
+    "paragraphSpacing": {
+      "before": "Интервал перед",
+      "after": "Интервал после",
+      "multiple": "Множитель"
     }
   },
   "comments": {
@@ -505,6 +530,7 @@
     "paragraphMarkInserted": "Вставлен разрыв абзаца",
     "paragraphMarkDeleted": "Удалён разрыв абзаца",
     "paragraphPropertiesChanged": "Изменены свойства абзаца",
+    "runPropertiesChanged": "Изменено форматирование текста",
     "rowInserted": "Вставлена строка",
     "rowDeleted": "Удалена строка",
     "rowPropertiesChanged": "Изменены свойства строки",
@@ -515,6 +541,12 @@
     "tablePropertiesChanged": "Изменены свойства таблицы",
     "tableInserted": "Вставлена таблица",
     "tableDeleted": "Удалена таблица"
+  },
+  "pasteOptions": {
+    "button": "Параметры вставки (Ctrl)",
+    "keepSource": "Сохранить форматирование источника",
+    "merge": "Объединить форматирование",
+    "textOnly": "Сохранить только текст"
   },
   "contextMenu": {
     "ariaLabel": "Меню действий ИИ",
@@ -561,6 +593,8 @@
     "noDocumentLoaded": "Документ не загружен",
     "failedToLoad": "Не удалось открыть этот документ",
     "failedToLoadDescription": "Возможно, файл повреждён или содержит то, что этот редактор пока не может прочитать.",
+    "failedToLoadDamaged": "Файл повреждён или не является полным документом Word.",
+    "failedToLoadUnsupported": "В этом документе есть то, что этот редактор пока не умеет читать.",
     "editorUnavailable": "Не удалось загрузить редактор",
     "editorUnavailableDescription": "Проверьте подключение и перезагрузите страницу.",
     "reloadPage": "Перезагрузить страницу",
@@ -701,6 +735,8 @@
     "failedToParse": "Не удалось обработать документ",
     "linkRemoved": "Ссылка удалена",
     "linkCopied": "Ссылка скопирована в буфер обмена",
+    "pasteFailed": "Не удалось завершить вставку. Ничего не изменено.",
+    "cutRefused": "Выделенный фрагмент содержит объекты, которые нельзя вырезать. Ничего не изменено.",
     "failedToSave": "Не удалось сохранить документ",
     "documentInput": "Ввод документа",
     "documentPreview": "Предварительный просмотр документа",
@@ -753,7 +789,11 @@
     "leftIndent": "Отступ слева",
     "rightIndent": "Отступ справа",
     "topMargin": "Верхнее поле",
-    "bottomMargin": "Нижнее поле"
+    "bottomMargin": "Нижнее поле",
+    "leftMargin": "Левое поле",
+    "rightMargin": "Правое поле",
+    "hangingIndent": "Выступ",
+    "markerValue": "{name}: {value}"
   },
   "print": {
     "label": "Печать",
@@ -766,8 +806,13 @@
   },
   "a11y": {
     "pageLabel": "Страница {number}",
+    "unbuiltPagesNotMirrored": "Страницы с {from} по {to} пока не включены в режим чтения.",
+    "goToPage": "Перейти к странице {number}",
     "headerLabel": "Верхний колонтитул страницы",
     "footerLabel": "Нижний колонтитул страницы",
+    "chartNoData": "Нет данных",
+    "pictureName": "Рисунок",
+    "bulletMarker": "маркер",
     "selected": "Выделено",
     "selectionCleared": "Выделение снято",
     "commentedText": "Текст с примечанием",
@@ -826,7 +871,7 @@
       "targetChanged": "Содержимое, для которого было открыто это действие, изменилось до его применения.",
       "commandFailed": "Не удалось выполнить команду.",
       "permissionDenied": "Главное приложение не разрешило этому плагину использовать эту команду.",
-      "unsupportedPolicy": "Плагины пока не могут выполнять эту команду. Используйте вместо этого пакет изменений.",
+      "unsupportedPolicy": "Эта команда требует действия пользователя в интерфейсе самого плагина.",
       "pluginUnavailable": "Плагин больше не активен.",
       "aborted": "Действие плагина было отменено до выполнения команды."
     }
@@ -835,6 +880,7 @@
     "toolbarGroup": "Плагины",
     "panelTabs": "Панели плагинов",
     "collapsePanel": "Свернуть: {title}",
-    "expandPanel": "Развернуть: {title}"
+    "expandPanel": "Развернуть: {title}",
+    "miniToolbar": "Форматирование выделения"
   }
 }

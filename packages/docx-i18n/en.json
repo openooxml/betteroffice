@@ -32,6 +32,7 @@
     "ariaLabel": "Formatting toolbar",
     "file": "File",
     "format": "Format",
+    "layout": "Layout",
     "insert": "Insert",
     "open": "Open",
     "openShortcut": "Ctrl+O",
@@ -53,6 +54,16 @@
     "imageWrap": {
       "current": "Current"
     }
+  },
+  "layout": {
+    "margins": "Margins",
+    "normal": "Normal",
+    "narrow": "Narrow",
+    "moderate": "Moderate",
+    "wide": "Wide",
+    "customMargins": "Custom margins...",
+    "morePaperSizes": "More paper sizes...",
+    "indent": "Indent"
   },
   "formattingBar": {
     "groups": {
@@ -104,7 +115,12 @@
     "single": "Single",
     "double": "Double",
     "lineSpacingTitle": "Line spacing: {label}",
-    "paragraphSpacing": "Paragraph spacing"
+    "paragraphSpacing": "Paragraph spacing",
+    "addBefore": "Add Space Before Paragraph",
+    "removeBefore": "Remove Space Before Paragraph",
+    "addAfter": "Add Space After Paragraph",
+    "removeAfter": "Remove Space After Paragraph",
+    "options": "Line Spacing Options..."
   },
   "styles": {
     "selectAriaLabel": "Select paragraph style",
@@ -417,6 +433,8 @@
         "strikethroughDescription": "Toggle strikethrough",
         "subscript": "Subscript",
         "subscriptDescription": "Toggle subscript",
+        "clearFormatting": "Clear Formatting",
+        "clearFormattingDescription": "Clear text formatting",
         "superscript": "Superscript",
         "superscriptDescription": "Toggle superscript",
         "alignLeft": "Align Left",
@@ -470,7 +488,9 @@
         "pageUp": "Page Up",
         "pageDown": "Page Down",
         "ctrl": "Ctrl",
-        "del": "Del"
+        "del": "Del",
+        "shift": "Shift",
+        "alt": "Alt"
       }
     },
     "objectGeometry": {
@@ -478,6 +498,11 @@
       "top": "Top (px)",
       "width": "Width (px)",
       "height": "Height (px)"
+    },
+    "paragraphSpacing": {
+      "before": "Spacing Before",
+      "after": "Spacing After",
+      "multiple": "Multiple"
     }
   },
   "comments": {
@@ -505,6 +530,7 @@
     "paragraphMarkInserted": "Inserted paragraph break",
     "paragraphMarkDeleted": "Deleted paragraph break",
     "paragraphPropertiesChanged": "Changed paragraph properties",
+    "runPropertiesChanged": "Changed text formatting",
     "rowInserted": "Inserted row",
     "rowDeleted": "Deleted row",
     "rowPropertiesChanged": "Changed row properties",
@@ -515,6 +541,12 @@
     "tablePropertiesChanged": "Changed table properties",
     "tableInserted": "Inserted table",
     "tableDeleted": "Deleted table"
+  },
+  "pasteOptions": {
+    "button": "Paste Options (Ctrl)",
+    "keepSource": "Keep Source Formatting",
+    "merge": "Merge Formatting",
+    "textOnly": "Keep Text Only"
   },
   "contextMenu": {
     "ariaLabel": "AI actions menu",
@@ -561,6 +593,8 @@
     "noDocumentLoaded": "No document loaded",
     "failedToLoad": "Couldn't open this document",
     "failedToLoadDescription": "The file may be damaged, or it uses something this editor can't read yet.",
+    "failedToLoadDamaged": "The file is damaged or isn't a complete Word document.",
+    "failedToLoadUnsupported": "This document uses something this editor can't read yet.",
     "editorUnavailable": "The editor couldn't load",
     "editorUnavailableDescription": "Check your connection, then reload the page.",
     "reloadPage": "Reload page",
@@ -701,6 +735,8 @@
     "failedToParse": "Failed to parse document",
     "linkRemoved": "Link removed",
     "linkCopied": "Link copied to clipboard",
+    "pasteFailed": "The paste could not be completed. Nothing was changed.",
+    "cutRefused": "The selection holds objects that cannot be cut. Nothing was changed.",
     "failedToSave": "Failed to save document",
     "documentInput": "Document input",
     "documentPreview": "Document preview",
@@ -753,7 +789,11 @@
     "leftIndent": "Left indent",
     "rightIndent": "Right indent",
     "topMargin": "Top margin",
-    "bottomMargin": "Bottom margin"
+    "bottomMargin": "Bottom margin",
+    "leftMargin": "Left margin",
+    "rightMargin": "Right margin",
+    "hangingIndent": "Hanging indent",
+    "markerValue": "{name}: {value}"
   },
   "print": {
     "label": "Print",
@@ -766,8 +806,13 @@
   },
   "a11y": {
     "pageLabel": "Page {number}",
+    "unbuiltPagesNotMirrored": "Pages {from} to {to} are not in the reading view yet.",
+    "goToPage": "Go to page {number}",
     "headerLabel": "Page header",
     "footerLabel": "Page footer",
+    "chartNoData": "No data",
+    "pictureName": "Picture",
+    "bulletMarker": "bullet",
     "selected": "Selected",
     "selectionCleared": "Selection cleared",
     "commentedText": "Commented text",
@@ -826,7 +871,7 @@
       "targetChanged": "The content this action was opened for changed before it could be applied.",
       "commandFailed": "The command could not be completed.",
       "permissionDenied": "The host application has not allowed this plugin to use this command.",
-      "unsupportedPolicy": "Plugins can't run this command yet. Use an edit batch instead.",
+      "unsupportedPolicy": "This command needs a user gesture in the plugin's own UI.",
       "pluginUnavailable": "The plugin is no longer active.",
       "aborted": "The plugin action was cancelled before the command ran."
     }
@@ -835,6 +880,7 @@
     "toolbarGroup": "Plugins",
     "panelTabs": "Plugin panels",
     "collapsePanel": "Collapse {title}",
-    "expandPanel": "Expand {title}"
+    "expandPanel": "Expand {title}",
+    "miniToolbar": "Selection formatting"
   }
 }

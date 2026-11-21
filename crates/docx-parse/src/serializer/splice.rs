@@ -1,44 +1,72 @@
 //! Story parts written as their source XML with only the paragraphs a save changed re-serialized.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::Range;
 
+use crate::block::BlockContent;
+use crate::inline::{InlineNode, Run, RunContent};
+use crate::notes::Note;
+use crate::paragraph::ParagraphContent;
 use crate::paragraph_identity::{
     ParagraphOccurrence, Tag, attribute, ensure_ignorable, paragraph_occurrences,
     patch_paragraph_ids, tags, unescaped,
 };
+use crate::shape::Shape;
+use crate::xml::parse_javascript_integer_prefix;
 
 use super::context::RecordedParagraphs;
 use super::paragraph_ids::{S13SpliceAnchor, S13SplicedPart};
-use super::paragraph_patch::PatchContext;
+use super::paragraph_patch::NamespaceScopes;
 use super::s13::element_span;
+use super::xml_writer::js_number;
 
 const W_NAMESPACE: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
 
 /// What the XML written for an unchanged paragraph must agree on with its source XML for the
 /// source to stand in for it: the same comment markers in order, at the same text offsets, the
-/// same permission markers, and no revision or note ID the source lacks. Source IDs the written XML lacks are kept, as are
-/// relationship IDs: the save keeps every source relationship.
-#[derive(Debug, Default, PartialEq, Eq)]
+/// same permission markers, the same number of page and column breaks in the paragraph's own
+/// runs, and no revision or note ID the source lacks. Source IDs the written XML lacks are kept,
+/// as are relationship IDs: the save keeps every source relationship.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Marks {
     comments: Vec<(String, String, usize)>,
+    text: usize,
     permissions: Vec<(String, String)>,
+    page_breaks: usize,
+    column_breaks: usize,
     footnote_refs: usize,
     endnote_refs: usize,
     ids: BTreeMap<(&'static str, String), usize>,
 }
 
 impl Marks {
-    fn admit(&self, written: &Marks) -> bool {
+    /// `breaks` is false for a part where some page or column break sits outside a paragraph's
+    /// own runs: the editing model may keep such a break with another paragraph, so counts per
+    /// paragraph cannot decide there.
+    fn admit(&self, written: &Marks, breaks: bool) -> bool {
         self.comments == written.comments
             && self.permissions == written.permissions
+            && (!breaks
+                || (self.page_breaks == written.page_breaks
+                    && self.column_breaks == written.column_breaks))
             && self.footnote_refs >= written.footnote_refs
             && self.endnote_refs >= written.endnote_refs
             && written
                 .ids
                 .iter()
                 .all(|(id, count)| self.ids.get(id).is_some_and(|source| source >= count))
+    }
+
+    /// These marks without the comment markers `unloaded` holds. A comment marker takes no
+    /// position in the text, so the offsets of the others stay as they are.
+    fn without(mut self, unloaded: &CommentKeys) -> Self {
+        if !unloaded.is_empty() {
+            self.comments.retain(|(name, id, _)| {
+                !unloaded.contains(&(name.clone(), canonical_id(id.clone())))
+            });
+        }
+        self
     }
 }
 
@@ -65,17 +93,216 @@ pub(crate) const POSITIONED: [&str; 19] = [
     "m:oMath",
 ];
 
+/// Whether every page or column break in `xml` is a `w:br` directly in a paragraph's own run,
+/// whatever wraps the paragraph. A break under any other element, prefix or namespace binding
+/// is one the per-paragraph break counts do not see.
+fn breaks_on_own_runs(xml: &str) -> Option<bool> {
+    let local = |name: &str| name.rsplit(':').next().unwrap_or(name).to_owned();
+    let mut open: Vec<&str> = Vec::new();
+    for tag in tags(xml)? {
+        if tag.end {
+            open.pop();
+            continue;
+        }
+        if local(tag.name) == "br" {
+            let typed = tag.attributes.iter().any(|(key, range)| {
+                local(key) == "type"
+                    && unescaped(xml, range.clone())
+                        .is_some_and(|value| value == "page" || value == "column")
+            });
+            let own = tag.name == "w:br"
+                && open.ends_with(&["w:p", "w:r"])
+                && !open.iter().any(|name| name.starts_with("mc:"));
+            if typed && !own {
+                return Some(false);
+            }
+        }
+        if !tag.empty {
+            open.push(tag.name);
+        }
+    }
+    Some(true)
+}
+
+/// The page and column breaks at the start of `paragraph`'s content, in order, before any
+/// text or other run content; `None` when it is not a plain `w:p`.
+fn leading_breaks(paragraph: &str) -> Option<Vec<&'static str>> {
+    let mut kinds = Vec::new();
+    let mut open: Vec<&str> = Vec::new();
+    let mut skip = 0usize;
+    for tag in tags(paragraph)? {
+        if skip > 0 {
+            if tag.end {
+                skip -= 1;
+            } else if !tag.empty {
+                skip += 1;
+            }
+            continue;
+        }
+        if tag.end {
+            open.pop();
+            continue;
+        }
+        match (open.as_slice(), tag.name) {
+            ([], "w:p") | (["w:p"], "w:r") => {}
+            (["w:p"], "w:pPr") | (["w:p", "w:r"], "w:rPr") => {
+                skip = usize::from(!tag.empty);
+                continue;
+            }
+            (["w:p", "w:r"], "w:br") => {
+                match attribute(&tag, "w:type")
+                    .and_then(|range| unescaped(paragraph, range))
+                    .as_deref()
+                {
+                    Some("page") => kinds.push("page"),
+                    Some("column") => kinds.push("column"),
+                    _ => break,
+                }
+            }
+            ([], _) => return None,
+            _ => break,
+        }
+        if !tag.empty {
+            open.push(tag.name);
+        }
+    }
+    Some(kinds)
+}
+
+/// The offset in `paragraph` where its content starts: after its properties, before a first
+/// child that is a plain run, or before its end tag. `None` for any other first child.
+fn content_start(paragraph: &str) -> Option<usize> {
+    let tags = tags(paragraph)?;
+    let mut iter = tags.iter();
+    let first = iter.next()?;
+    if first.name != "w:p" || first.end || first.empty {
+        return None;
+    }
+    let mut next = iter.next()?;
+    if next.name == "w:pPr" && !next.end {
+        if !next.empty {
+            let mut depth = 1usize;
+            for tag in iter.by_ref() {
+                if tag.end {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                } else if !tag.empty {
+                    depth += 1;
+                }
+            }
+        }
+        next = iter.next()?;
+    }
+    ((next.name == "w:r" && !next.end) || (next.name == "w:p" && next.end))
+        .then_some(next.range.start)
+}
+
+/// The part's source with each page or column break the model moved to the start of an
+/// unchanged paragraph inserted there as its own run, and whether break counts then decide
+/// which unchanged paragraphs keep their source bytes. Nothing else of such a paragraph
+/// changes, so properties the model does not hold stay. Counts decide only when the part's
+/// breaks all sit in paragraphs' own runs and no paragraph holds fewer such breaks than its
+/// source or patch: the model can drop a break it does not place, so a loss is never taken
+/// as a removal. When they do not decide, the part keeps source paragraphs exactly as
+/// without the comparison.
+fn source_with_gained_breaks<'s>(
+    source: &'s str,
+    recorded: &RecordedParagraphs,
+    part: &S13SplicedPart,
+    patched: &BTreeMap<u32, String>,
+) -> Option<(Cow<'s, str>, bool)> {
+    let off = Some((Cow::Borrowed(source), false));
+    let inserted = placed(recorded, &part.inserted)?;
+    if !breaks_on_own_runs(source)?
+        || recorded
+            .written
+            .values()
+            .map(String::as_str)
+            .chain(inserted.iter().map(|(_, xml)| *xml))
+            .chain(patched.values().map(String::as_str))
+            .map(breaks_on_own_runs)
+            .collect::<Option<Vec<_>>>()?
+            .contains(&false)
+    {
+        return off;
+    }
+    let breaks = |xml: &str| marks(xml).map(|marks| (marks.page_breaks, marks.column_breaks));
+    let changed: BTreeSet<u32> = part.changed.iter().copied().collect();
+    let format_only: BTreeSet<u32> = part.format_only.iter().copied().collect();
+    let occurrences = paragraph_occurrences(source)?;
+    let mut insertions = Vec::new();
+    for (&ordinal, xml) in &recorded.written {
+        let occurrence = occurrences
+            .get(ordinal as usize)
+            .filter(|occurrence| occurrence.ordinal == ordinal)?;
+        let span = paragraph_span(source, occurrence)?;
+        let paragraph = &source[span.clone()];
+        let projected = breaks(xml)?;
+        let edited = changed.contains(&ordinal);
+        let kept = if edited {
+            let candidate = patched.get(&ordinal).map_or(xml.as_str(), String::as_str);
+            if format_only.contains(&ordinal) && format_edit(paragraph, candidate).is_err() {
+                breaks(paragraph)?
+            } else if let Some(patch) = patched.get(&ordinal) {
+                breaks(patch)?
+            } else {
+                continue;
+            }
+        } else {
+            breaks(paragraph)?
+        };
+        if kept == projected {
+            continue;
+        }
+        if edited || kept != (0, 0) {
+            return off;
+        }
+        let Some(kinds) = leading_breaks(xml) else {
+            return off;
+        };
+        let Some(at) = content_start(paragraph) else {
+            return off;
+        };
+        if kinds.len() != projected.0 + projected.1 {
+            return off;
+        }
+        let runs: String = kinds
+            .iter()
+            .map(|kind| format!("<w:r><w:br w:type=\"{kind}\"/></w:r>"))
+            .collect();
+        insertions.push((span.start + at, runs));
+    }
+    if insertions.is_empty() {
+        return Some((Cow::Borrowed(source), true));
+    }
+    insertions.sort_by_key(|(at, _)| *at);
+    let mut written = source.to_owned();
+    for (at, runs) in insertions.into_iter().rev() {
+        written.insert_str(at, &runs);
+    }
+    Some((Cow::Owned(written), true))
+}
+
 fn marks(xml: &str) -> Option<Marks> {
     let mut marks = Marks::default();
     let mut offset = 0;
     let mut in_text = 0usize;
     let mut in_properties = 0usize;
     let mut previous = 0;
+    let mut open: Vec<&str> = Vec::new();
     for tag in tags(xml)? {
         if in_text > 0 {
             offset += unescaped(xml, previous..tag.range.start)?.chars().count();
         }
         previous = tag.range.end;
+        let own_run = open.as_slice() == ["w:p", "w:r"];
+        if tag.end {
+            open.pop();
+        } else if !tag.empty {
+            open.push(tag.name);
+        }
         let text = matches!(tag.name, "w:t" | "w:delText");
         let properties = tag.name.ends_with("Pr");
         if tag.end {
@@ -92,6 +319,17 @@ fn marks(xml: &str) -> Option<Marks> {
         }
         if in_properties == 0 && POSITIONED.contains(&tag.name) {
             offset += 1;
+        }
+        if own_run && tag.name == "w:br" {
+            match attribute(&tag, "w:type")
+                .and_then(|range| unescaped(xml, range))
+                .as_deref()
+            {
+                Some("page") => marks.page_breaks += 1,
+                Some("column") => marks.column_breaks += 1,
+                _ => {}
+            }
+            continue;
         }
         let id = || {
             attribute(&tag, "w:id")
@@ -128,30 +366,177 @@ fn marks(xml: &str) -> Option<Marks> {
         *marks.ids.entry((kind, id())).or_insert(0) += 1;
     }
     marks.permissions.sort();
+    marks.text = offset;
     Some(marks)
+}
+
+/// Each source ordinal written directly before the next source ordinal.
+fn written_neighbours(order: &[Option<u32>]) -> BTreeSet<u32> {
+    order
+        .windows(2)
+        .filter_map(|pair| match pair {
+            [Some(first), Some(second)] if first.checked_add(1) == Some(*second) => Some(*first),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Source and wanted marks by ordinal, with written trailing comment ends moved to the next head
+/// and the source's without the comment markers `unloaded` holds.
+fn paragraph_marks<'x>(
+    paragraphs: impl IntoIterator<Item = (u32, &'x str, &'x str)>,
+    neighbours: &BTreeSet<u32>,
+    breaks: bool,
+    unloaded: &CommentKeys,
+) -> Option<BTreeMap<u32, (Marks, Marks)>> {
+    let mut all = BTreeMap::new();
+    for (ordinal, source, written) in paragraphs {
+        all.insert(ordinal, (marks(source)?.without(unloaded), marks(written)?));
+    }
+    let same = |a: &(String, String, usize), b: &(String, String, usize)| a.0 == b.0 && a.1 == b.1;
+    let mut moves = BTreeMap::new();
+    for (&ordinal, (source, written)) in &all {
+        if !neighbours.contains(&ordinal) {
+            continue;
+        }
+        let Some((next, _)) = ordinal.checked_add(1).and_then(|next| all.get(&next)) else {
+            continue;
+        };
+        let held = written
+            .comments
+            .iter()
+            .rev()
+            .take_while(|(name, _, offset)| {
+                *offset == written.text
+                    && matches!(name.as_str(), "w:commentRangeEnd" | "w:commentReference")
+            })
+            .count();
+        let tail = &written.comments[written.comments.len() - held..];
+        if held > 0
+            && next.comments.len() >= held
+            && next.comments[..held]
+                .iter()
+                .zip(tail)
+                .all(|(head, moved)| head.2 == 0 && same(head, moved))
+            && !source
+                .comments
+                .iter()
+                .any(|marker| tail.iter().any(|moved| same(marker, moved)))
+        {
+            moves.insert(ordinal, held);
+        }
+    }
+    loop {
+        let mut wanted = moved_marks(&all, &moves);
+        let count = moves.len();
+        moves.retain(|ordinal, _| {
+            [*ordinal, *ordinal + 1]
+                .iter()
+                .all(|ordinal| all[ordinal].0.admit(&wanted[ordinal], breaks))
+        });
+        if moves.len() == count {
+            return Some(
+                all.into_iter()
+                    .filter_map(|(ordinal, (source, _))| {
+                        Some((ordinal, (source, wanted.remove(&ordinal)?)))
+                    })
+                    .collect(),
+            );
+        }
+    }
+}
+
+/// Written marks by ordinal with each move's trailing markers placed at the next paragraph's head.
+fn moved_marks(
+    all: &BTreeMap<u32, (Marks, Marks)>,
+    moves: &BTreeMap<u32, usize>,
+) -> BTreeMap<u32, Marks> {
+    all.iter()
+        .map(|(&ordinal, (_, written))| {
+            let mut wanted = written.clone();
+            if let Some(&held) = moves.get(&ordinal) {
+                wanted.comments.truncate(wanted.comments.len() - held);
+            }
+            if let Some(&held) = ordinal
+                .checked_sub(1)
+                .and_then(|previous| moves.get(&previous))
+            {
+                let previous = &all[&(ordinal - 1)].1.comments;
+                let mut head: Vec<_> = previous[previous.len() - held..]
+                    .iter()
+                    .map(|(name, id, _)| (name.clone(), id.clone(), 0))
+                    .collect();
+                head.append(&mut wanted.comments);
+                wanted.comments = head;
+            }
+            (ordinal, wanted)
+        })
+        .collect()
+}
+
+fn word_attribute(
+    reader: &quick_xml::NsReader<&[u8]>,
+    element: &quick_xml::events::BytesStart<'_>,
+    local: &str,
+) -> Option<String> {
+    let qualified = format!("w:{local}");
+    for attribute in element.attributes() {
+        let attribute = attribute.ok()?;
+        let (namespace, name) = reader.resolver().resolve_attribute(attribute.key);
+        if attribute.key.as_ref() == qualified.as_bytes()
+            || (name.as_ref() == local.as_bytes()
+                && namespace
+                    == quick_xml::name::ResolveResult::Bound(quick_xml::name::Namespace(
+                        W_NAMESPACE.as_bytes(),
+                    )))
+        {
+            #[allow(deprecated)]
+            let value = attribute.decode_and_unescape_value(reader.decoder());
+            return value.ok().map(Cow::into_owned);
+        }
+    }
+    None
+}
+
+pub(crate) fn bookmark_id(xml: &str) -> Option<String> {
+    let mut reader = quick_xml::NsReader::from_reader(xml.as_bytes());
+    loop {
+        match reader.read_resolved_event().ok()?.1 {
+            quick_xml::events::Event::Start(element) | quick_xml::events::Event::Empty(element) => {
+                return word_attribute(&reader, &element, "id");
+            }
+            quick_xml::events::Event::Eof => return None,
+            _ => {}
+        }
+    }
 }
 
 /// Counts bookmark and comment markers by kind and ID.
 fn marker_counts(xml: &str) -> Option<BTreeMap<(String, String), isize>> {
     let mut counts = BTreeMap::new();
-    for tag in tags(xml)? {
-        if !tag.end
-            && matches!(
-                tag.name,
-                "w:bookmarkStart"
-                    | "w:bookmarkEnd"
-                    | "w:commentRangeStart"
-                    | "w:commentRangeEnd"
-                    | "w:commentReference"
-            )
-        {
-            let id = attribute(&tag, "w:id")
-                .and_then(|range| unescaped(xml, range))
-                .unwrap_or_default();
-            *counts.entry((tag.name.to_owned(), id)).or_insert(0) += 1;
+    let mut reader = quick_xml::NsReader::from_reader(xml.as_bytes());
+    loop {
+        match reader.read_resolved_event().ok()?.1 {
+            quick_xml::events::Event::Start(element) | quick_xml::events::Event::Empty(element) => {
+                if matches!(
+                    element.name().as_ref(),
+                    b"w:bookmarkStart"
+                        | b"w:bookmarkEnd"
+                        | b"w:commentRangeStart"
+                        | b"w:commentRangeEnd"
+                        | b"w:commentReference"
+                ) {
+                    let name = std::str::from_utf8(element.name().as_ref())
+                        .ok()?
+                        .to_owned();
+                    let id = word_attribute(&reader, &element, "id").unwrap_or_default();
+                    *counts.entry((name, id)).or_insert(0) += 1;
+                }
+            }
+            quick_xml::events::Event::Eof => return Some(counts),
+            _ => {}
         }
     }
-    Some(counts)
 }
 
 fn subtract(
@@ -430,6 +815,611 @@ fn layout<'s>(
 
 /// The elements a rewritten paragraph may sit in: story roots and table cells, not content
 /// controls or other wrappers.
+/// The reason a splice records for a changed paragraph it writes as its source bytes.
+pub(crate) const KEPT_UNCHANGED: &str = "kept:structure";
+
+/// The elements whose count a paragraph whose run formatting alone changed must keep.
+const STRUCTURE: [&str; 29] = [
+    "w:hyperlink",
+    "w:smartTag",
+    "w:customXml",
+    "w:sdt",
+    "w:fldSimple",
+    "w:fldChar",
+    "w:instrText",
+    "w:br",
+    "w:tab",
+    "w:ruby",
+    "w:pict",
+    "w:object",
+    "w:drawing",
+    "mc:AlternateContent",
+    "mc:Fallback",
+    "w:txbxContent",
+    "w:p",
+    "w:tbl",
+    "w:bookmarkStart",
+    "w:bookmarkEnd",
+    "w:commentRangeStart",
+    "w:commentRangeEnd",
+    "w:commentReference",
+    "w:footnoteReference",
+    "w:endnoteReference",
+    "w:ins",
+    "w:del",
+    "w:moveFrom",
+    "w:moveTo",
+];
+
+/// The [`STRUCTURE`] elements `written` holds fewer of than `source`.
+pub(crate) fn dropped_structure(source: &str, written: &str) -> Vec<&'static str> {
+    let counts = |xml: &str| {
+        let mut counts = [0u32; STRUCTURE.len()];
+        for tag in tags(xml).unwrap_or_default() {
+            if !tag.end
+                && let Some(index) = STRUCTURE.iter().position(|name| *name == tag.name)
+            {
+                counts[index] += 1;
+            }
+        }
+        counts
+    };
+    let (before, after) = (counts(source), counts(written));
+    STRUCTURE
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| after[*index] < before[*index])
+        .map(|(_, name)| *name)
+        .collect()
+}
+
+const REVISIONS: [&str; 2] = ["w:ins", "w:del"];
+
+/// A `w:ins` or `w:del` whose runs hold note references and nothing else.
+struct ReferenceRevision<'a> {
+    name: &'static str,
+    /// From its start tag's first byte to its end tag's last.
+    range: Range<usize>,
+    /// The depth its start tag opens at, the fragment's first element opening at 0.
+    depth: usize,
+    /// Its `w:id` attribute's value as written.
+    id: Option<&'a str>,
+}
+
+/// The `w:ins` and `w:del` elements of `tags`, read from `xml`, whose runs hold note references
+/// and nothing else.
+fn reference_revisions<'a>(xml: &'a str, tags: &[Tag<'a>]) -> Vec<ReferenceRevision<'a>> {
+    let mut found = Vec::new();
+    let mut depth = 0usize;
+    let mut open: Option<(&'static str, usize, bool, bool, &Tag<'a>)> = None;
+    for tag in tags {
+        if tag.end {
+            depth = depth.saturating_sub(1);
+            if let Some((name, at, references, other, opening)) = open
+                && at == depth
+            {
+                if references && !other {
+                    found.push(ReferenceRevision {
+                        name,
+                        range: opening.range.start..tag.range.end,
+                        depth: at,
+                        id: attribute(opening, "w:id").map(|range| &xml[range]),
+                    });
+                }
+                open = None;
+            }
+            continue;
+        }
+        if let Some((_, at, references, other, _)) = open.as_mut() {
+            if depth == *at + 1 {
+                *other |= tag.empty || tag.name != "w:r";
+            } else if depth == *at + 2 {
+                let reference = matches!(tag.name, "w:footnoteReference" | "w:endnoteReference");
+                *references |= reference;
+                *other |= !reference && tag.name != "w:rPr";
+            }
+        } else if !tag.empty
+            && let Some(name) = REVISIONS.into_iter().find(|name| *name == tag.name)
+        {
+            open = Some((name, depth, false, false, tag));
+        }
+        if !tag.empty {
+            depth += 1;
+        }
+    }
+    found
+}
+
+/// The [`dropped_structure`] of a save that changes only run formatting, with the name of each
+/// `w:ins` or `w:del` of `source` whose runs hold note references and nothing else, or without
+/// such a revision, the [`base_dropped_revisions`].
+fn dropped_by_format_edit(source: &str, written: &str) -> Vec<&'static str> {
+    let mut dropped = dropped_structure(source, written);
+    let source_tags = tags(source).unwrap_or_default();
+    let revisions = reference_revisions(source, &source_tags);
+    let names = if revisions.is_empty() {
+        base_dropped_revisions(source, written)
+    } else {
+        revisions.iter().map(|revision| revision.name).collect()
+    };
+    for name in names {
+        if !dropped.contains(&name) {
+            dropped.push(name);
+        }
+    }
+    dropped
+}
+
+/// Whether a note reference tag of `tags` stands inside a `w:ins` or `w:del`.
+fn tracks_note_reference(tags: &[Tag<'_>]) -> bool {
+    let mut open = 0usize;
+    for tag in tags {
+        if REVISIONS.contains(&tag.name) {
+            if tag.end {
+                open = open.saturating_sub(1);
+            } else if !tag.empty {
+                open += 1;
+            }
+        } else if open > 0 && matches!(tag.name, "w:footnoteReference" | "w:endnoteReference") {
+            return true;
+        }
+    }
+    false
+}
+
+/// One element of a fragment: the index of its start tag, its bytes from its start tag's first
+/// byte to its end tag's last, the index of its parent element, and the indices of its child
+/// elements.
+struct Element {
+    tag: usize,
+    range: Range<usize>,
+    parent: Option<usize>,
+    children: Vec<usize>,
+}
+
+/// A fragment's tags and elements, in document order.
+struct Fragment<'a> {
+    xml: &'a str,
+    tags: Vec<Tag<'a>>,
+    elements: Vec<Element>,
+}
+
+impl<'a> Fragment<'a> {
+    /// `None` when the tags do not nest.
+    fn new(xml: &'a str, tags: Vec<Tag<'a>>) -> Option<Self> {
+        let mut elements: Vec<Element> = Vec::new();
+        let mut stack: Vec<usize> = Vec::new();
+        for (at, tag) in tags.iter().enumerate() {
+            if tag.end {
+                let index = stack.pop()?;
+                let element = elements.get_mut(index)?;
+                if tags[element.tag].name != tag.name {
+                    return None;
+                }
+                element.range.end = tag.range.end;
+                continue;
+            }
+            let index = elements.len();
+            let parent = stack.last().copied();
+            if let Some(parent) = parent {
+                elements[parent].children.push(index);
+            }
+            elements.push(Element {
+                tag: at,
+                range: tag.range.clone(),
+                parent,
+                children: Vec::new(),
+            });
+            if !tag.empty {
+                stack.push(index);
+            }
+        }
+        stack.is_empty().then_some(Self {
+            xml,
+            tags,
+            elements,
+        })
+    }
+
+    fn tag(&self, element: usize) -> &Tag<'a> {
+        &self.tags[self.elements[element].tag]
+    }
+
+    /// The children of the fragment's first element when it is a `w:p`.
+    fn paragraph_children(&self) -> Option<&[usize]> {
+        let root = self.elements.first()?;
+        (self.tags[root.tag].name == "w:p").then_some(root.children.as_slice())
+    }
+
+    /// The bytes of each child of the `w:rPr` of the run `run`, without its `w:rStyle` unless
+    /// `styles`, and the bytes of the run's note reference; `None` unless the run holds an
+    /// optional `w:rPr` followed by one empty note reference tag and nothing else.
+    fn reference_run(&self, run: usize, styles: bool) -> Option<(Vec<&'a str>, &'a str)> {
+        if self.tag(run).name != "w:r" {
+            return None;
+        }
+        let (properties, reference) = match self.elements[run].children.as_slice() {
+            [reference] => (None, *reference),
+            [properties, reference] if self.tag(*properties).name == "w:rPr" => {
+                (Some(*properties), *reference)
+            }
+            _ => return None,
+        };
+        let tag = self.tag(reference);
+        let note = matches!(tag.name, "w:footnoteReference" | "w:endnoteReference");
+        if !tag.empty || !note {
+            return None;
+        }
+        let xml = self.xml;
+        let mut kept = Vec::new();
+        if let Some(properties) = properties {
+            for &child in &self.elements[properties].children {
+                if styles || self.tag(child).name != "w:rStyle" {
+                    kept.push(&xml[self.elements[child].range.clone()]);
+                }
+            }
+        }
+        Some((kept, &xml[tag.range.clone()]))
+    }
+
+    /// Whether each element of the fragment is or holds a note reference tag at any depth.
+    fn reference_holders(&self) -> Vec<bool> {
+        let mut holders = vec![false; self.elements.len()];
+        for (index, element) in self.elements.iter().enumerate() {
+            let name = self.tags[element.tag].name;
+            if !matches!(name, "w:footnoteReference" | "w:endnoteReference") {
+                continue;
+            }
+            let mut at = Some(index);
+            while let Some(holder) = at {
+                if holders[holder] {
+                    break;
+                }
+                holders[holder] = true;
+                at = self.elements[holder].parent;
+            }
+        }
+        holders
+    }
+
+    /// The names of the element `element` and of each element that encloses it, innermost first.
+    fn enclosing_names(&self, element: usize) -> Vec<&'a str> {
+        let mut names = Vec::new();
+        let mut at = Some(element);
+        while let Some(index) = at {
+            names.push(self.tag(index).name);
+            at = self.elements[index].parent;
+        }
+        names
+    }
+
+    /// The bytes of each run of the fragment, in document order and at any depth, that holds a
+    /// note reference tag, with the names of the elements that enclose it.
+    fn note_reference_runs(&self) -> Vec<(Vec<&'a str>, &'a str)> {
+        let xml = self.xml;
+        let holders = self.reference_holders();
+        (0..self.elements.len())
+            .filter(|index| holders[*index] && self.tag(*index).name == "w:r")
+            .map(|index| {
+                let bytes = &xml[self.elements[index].range.clone()];
+                (self.enclosing_names(index), bytes)
+            })
+            .collect()
+    }
+
+    /// Whether the run `run` holds one note reference tag and otherwise only `w:rPr` and
+    /// `w:lastRenderedPageBreak` elements.
+    fn holds_one_reference(&self, run: usize) -> bool {
+        let mut references = 0;
+        for &child in &self.elements[run].children {
+            match self.tag(child).name {
+                "w:footnoteReference" | "w:endnoteReference" => references += 1,
+                "w:rPr" | "w:lastRenderedPageBreak" => {}
+                _ => return false,
+            }
+        }
+        references == 1
+    }
+
+    /// Whether the element `element` has a child other than a `w:rPr`.
+    fn holds_more_than_properties(&self, element: usize) -> bool {
+        let properties = |child: &usize| self.tag(*child).name == "w:rPr";
+        !self.elements[element].children.iter().all(properties)
+    }
+}
+
+/// Whether the runs of `written` that hold a note reference tag have, in document order, the
+/// bytes and the enclosing element names of those of `source`.
+fn keeps_reference_runs(source: &str, written: &str) -> Option<bool> {
+    let source = Fragment::new(source, tags(source)?)?;
+    let written = Fragment::new(written, tags(written)?)?;
+    Some(source.note_reference_runs() == written.note_reference_runs())
+}
+
+/// The number of `w:ins` and of `w:del` elements the paragraph `written` would hold if each note
+/// reference stood outside its revision: a revision counts once for each stretch of its runs that
+/// a note reference does not interrupt; `None` when a revision that holds a note reference is not
+/// a child of the paragraph or holds anything but runs, or one of its runs that holds a note
+/// reference holds more than run properties, rendered page break markers and that reference.
+fn base_revision_counts(written: &str) -> Option<[usize; 2]> {
+    let written = Fragment::new(written, tags(written)?)?;
+    let holders = written.reference_holders();
+    let mut counts = [0; REVISIONS.len()];
+    for (element, &holds) in holders.iter().enumerate() {
+        let tag = written.tag(element);
+        let Some(index) = REVISIONS.iter().position(|name| *name == tag.name) else {
+            continue;
+        };
+        if !holds {
+            counts[index] += 1;
+            continue;
+        }
+        let children = written.paragraph_children()?;
+        let runs = &written.elements[element].children;
+        if children.binary_search(&element).is_err()
+            || runs.iter().any(|run| written.tag(*run).name != "w:r")
+        {
+            return None;
+        }
+        let mut open = false;
+        for &run in runs {
+            if holders[run] {
+                if !written.holds_one_reference(run) {
+                    return None;
+                }
+                open = false;
+            } else if written.holds_more_than_properties(run) {
+                counts[index] += usize::from(!open);
+                open = true;
+            }
+        }
+    }
+    Some(counts)
+}
+
+/// The number of `w:ins` and of `w:del` elements of `source`; `None` when it does not parse.
+fn revision_counts(source: &str) -> Option<[usize; 2]> {
+    let mut held = [0; REVISIONS.len()];
+    for tag in tags(source)? {
+        if !tag.end
+            && let Some(index) = REVISIONS.iter().position(|name| *name == tag.name)
+        {
+            held[index] += 1;
+        }
+    }
+    Some(held)
+}
+
+/// Whether the paragraph `written`, with each note reference outside its revision, holds at least
+/// as many `w:ins` and as many `w:del` elements as `source`.
+fn base_writes_paragraph(source: &str, written: &str) -> bool {
+    let counts = base_revision_counts(written);
+    let held = revision_counts(source);
+    let (Some(counts), Some(held)) = (counts, held) else {
+        return false;
+    };
+    counts[0] >= held[0] && counts[1] >= held[1]
+}
+
+/// The names of the `w:ins` and `w:del` elements the paragraph `written`, with each note reference
+/// outside its revision, holds fewer of than `source`, or that `source` holds when those of
+/// `written` cannot be counted.
+fn base_dropped_revisions(source: &str, written: &str) -> Vec<&'static str> {
+    let Some(held) = revision_counts(source) else {
+        return Vec::new();
+    };
+    let counts = base_revision_counts(written);
+    REVISIONS
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| match counts {
+            Some(counts) => counts[*index] < held[*index],
+            None => held[*index] > 0,
+        })
+        .map(|(_, name)| *name)
+        .collect()
+}
+
+/// Whether the element `counterpart` of `written` holds the runs of the element `element` of
+/// `source`, with or without their `w:rStyle`.
+fn same_reference_runs<'a>(
+    source: &Fragment<'a>,
+    element: usize,
+    written: &Fragment<'a>,
+    counterpart: usize,
+) -> bool {
+    let runs = &source.elements[element].children;
+    let written_runs = &written.elements[counterpart].children;
+    runs.len() == written_runs.len()
+        && runs.iter().zip(written_runs).all(|(&run, &written_run)| {
+            let rewritten = written.reference_run(written_run, true);
+            rewritten.is_some()
+                && (rewritten == source.reference_run(run, false)
+                    || rewritten == source.reference_run(run, true))
+        })
+}
+
+/// The byte range in `written` of the counterpart of each of `revisions`, with the byte range in
+/// `source` that replaces it, ordered by position in `written`; `None` unless each revision is a
+/// child of the paragraph with a `w:id` no other of `revisions` of its name shares, and `written`
+/// holds exactly one element of its name and `w:id`, a child of the paragraph holding the same
+/// runs.
+fn restorations(
+    source: &str,
+    source_tags: Vec<Tag<'_>>,
+    written: &str,
+    revisions: &[ReferenceRevision<'_>],
+) -> Option<Vec<(Range<usize>, Range<usize>)>> {
+    let source = Fragment::new(source, source_tags)?;
+    let written = Fragment::new(written, tags(written)?)?;
+    let source_children = source.paragraph_children()?;
+    let written_children = written.paragraph_children()?;
+    let mut replacements = Vec::with_capacity(revisions.len());
+    for revision in revisions {
+        let id = revision.id?;
+        let shared = revisions
+            .iter()
+            .filter(|other| other.name == revision.name && other.id == Some(id))
+            .count();
+        if revision.depth != 1 || shared != 1 {
+            return None;
+        }
+        let element = source_children
+            .iter()
+            .copied()
+            .find(|child| source.elements[*child].range == revision.range)?;
+        let mut counterparts = (0..written.elements.len()).filter(|index| {
+            let tag = written.tag(*index);
+            tag.name == revision.name
+                && attribute(tag, "w:id").is_some_and(|range| written.xml.get(range) == Some(id))
+        });
+        let (Some(counterpart), None) = (counterparts.next(), counterparts.next()) else {
+            return None;
+        };
+        if written.tag(counterpart).empty
+            || written_children.binary_search(&counterpart).is_err()
+            || !same_reference_runs(&source, element, &written, counterpart)
+        {
+            return None;
+        }
+        replacements.push((
+            written.elements[counterpart].range.clone(),
+            revision.range.clone(),
+        ));
+    }
+    replacements.sort_by_key(|(range, _)| range.start);
+    Some(replacements)
+}
+
+/// What a save that changes only run formatting writes for the paragraph `source` given its
+/// rewrite `written`: `written` with each `w:ins` or `w:del` of `source` whose runs hold note
+/// references and nothing else put back as its source bytes, when every other run of a note
+/// reference keeps its source bytes and place or [`base_writes_paragraph`] holds for `written`;
+/// otherwise the elements writing it would drop.
+pub(crate) fn format_edit<'a>(
+    source: &str,
+    written: &'a str,
+) -> Result<Cow<'a, str>, Vec<&'static str>> {
+    let source_tags = tags(source).unwrap_or_default();
+    let revisions = reference_revisions(source, &source_tags);
+    if revisions.is_empty() {
+        let dropped = dropped_structure(source, written);
+        return if !dropped.is_empty() {
+            Err(dropped)
+        } else if !tracks_note_reference(&source_tags)
+            || keeps_reference_runs(source, written) == Some(true)
+            || base_writes_paragraph(source, written)
+        {
+            Ok(Cow::Borrowed(written))
+        } else {
+            Err(dropped_by_format_edit(source, written))
+        };
+    }
+    let Some(replacements) = restorations(source, source_tags, written, &revisions) else {
+        return Err(dropped_by_format_edit(source, written));
+    };
+    let mut restored = written.to_owned();
+    for (range, bytes) in replacements.into_iter().rev() {
+        restored.replace_range(range, &source[bytes]);
+    }
+    let dropped = dropped_structure(source, &restored);
+    if !dropped.is_empty() {
+        return Err(dropped);
+    }
+    if keeps_reference_runs(source, &restored) == Some(true)
+        || base_writes_paragraph(source, written)
+    {
+        Ok(Cow::Owned(restored))
+    } else {
+        Err(dropped_by_format_edit(source, written))
+    }
+}
+
+/// The elements outside paragraphs that `written` holds fewer of than `source`: table, cell and
+/// section properties and the like, which a paragraph's own save never touches.
+pub(crate) fn dropped_outside_paragraphs(source: &str, written: &str) -> Vec<String> {
+    let counts = |xml: &'_ str| {
+        let mut counts: BTreeMap<String, u32> = BTreeMap::new();
+        let mut depth = 0usize;
+        for tag in tags(xml).unwrap_or_default() {
+            if tag.name == "w:p" {
+                if tag.end {
+                    depth = depth.saturating_sub(1);
+                } else if !tag.empty {
+                    depth += 1;
+                }
+            } else if depth == 0 && !tag.end {
+                *counts.entry(tag.name.to_owned()).or_default() += 1;
+            }
+        }
+        counts
+    };
+    let after = counts(written);
+    counts(source)
+        .into_iter()
+        .filter(|(name, count)| after.get(name).copied().unwrap_or_default() < *count)
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// The reason recorded for a paragraph kept as its source, its ordinal and what writing it would
+/// have dropped.
+fn kept_reason(ordinal: u32, dropped: &[&str]) -> String {
+    format!("{KEPT_UNCHANGED}:{ordinal}:{}", dropped.join(","))
+}
+
+/// The ordinal and dropped elements in a reason from [`kept_reason`].
+pub(crate) fn parse_kept_reason(reason: &str) -> Option<(u32, Vec<String>)> {
+    let (ordinal, dropped) = reason
+        .strip_prefix(KEPT_UNCHANGED)?
+        .strip_prefix(':')?
+        .split_once(':')?;
+    Some((
+        ordinal.parse().ok()?,
+        dropped.split(',').map(str::to_owned).collect(),
+    ))
+}
+
+/// The start of the text of a paragraph.
+pub(crate) fn paragraph_text(xml: &str, limit: usize) -> Option<String> {
+    let mut text = String::new();
+    let mut open = None;
+    for tag in tags(xml)? {
+        if tag.name != "w:t" {
+            continue;
+        }
+        if tag.end {
+            if let Some(start) = open.take() {
+                text.push_str(&unescaped(xml, start..tag.range.start)?);
+            }
+        } else if !tag.empty {
+            open = Some(tag.range.end);
+        }
+        if text.chars().count() >= limit {
+            break;
+        }
+    }
+    Some(text.chars().take(limit).collect())
+}
+
+/// Whether every change to `part` is of run formatting alone, so that no save of it has to give
+/// up a source paragraph's structure to record what the user did.
+pub(crate) fn format_only_part(part: &S13SplicedPart) -> bool {
+    let format_only: BTreeSet<u32> = part.format_only.iter().copied().collect();
+    !part.changed.is_empty()
+        && part.inserted.is_empty()
+        && part.removed.is_empty()
+        && part.table_patches.is_empty()
+        && part
+            .changed
+            .iter()
+            .all(|ordinal| format_only.contains(ordinal))
+}
+
+/// The content of a block-level content control: a paragraph in it is replaced in place, its
+/// control's properties and its sibling paragraphs kept, as one directly in a story is.
+const BLOCK_CONTROL_CONTENT: &str = "w:sdtContent";
+
 const PARENTS: [&str; 6] = [
     "w:body",
     "w:tc",
@@ -599,16 +1589,42 @@ fn ranges(xml: &str) -> Option<Ranges<'_>> {
     })
 }
 
-fn unique_ranges<'x>(fragments: impl IntoIterator<Item = &'x str>) -> Option<bool> {
+/// The largest integer an ID's number holds exactly.
+const MAX_EXACT_ID: f64 = 9_007_199_254_740_991.0;
+
+/// A range or comment ID as the number the parser reads, where its text is a decimal integer
+/// the parser reads exactly, or else its text.
+fn canonical_id(id: String) -> String {
+    let digits = id.trim();
+    let digits = digits.strip_prefix(['+', '-']).unwrap_or(digits);
+    let plain = !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit());
+    match parse_javascript_integer_prefix(&id) {
+        Some(value) if plain && value.abs() <= MAX_EXACT_ID => js_number(value),
+        _ => id,
+    }
+}
+
+/// Whether `fragments` hold each range end, by the value of its ID, at most as often as
+/// `source`, the spliced part, or at most once.
+fn unique_ranges<'x>(source: &str, fragments: impl IntoIterator<Item = &'x str>) -> Option<bool> {
+    fn by_value(ends: Ends<'_>) -> Ends<'_> {
+        let mut values = Ends::new();
+        for ((kind, id, opens), count) in ends {
+            *values.entry((kind, canonical_id(id), opens)).or_insert(0) += count;
+        }
+        values
+    }
+    let held = by_value(ranges(source).map_or_else(Ends::new, |ranges| ranges.all));
     let mut ends = Ends::new();
     for fragment in fragments {
-        for ((kind, id, opens), count) in ranges(fragment)?.all {
-            if matches!(kind, "spell" | "gram") {
+        for (end, count) in by_value(ranges(fragment)?.all) {
+            if matches!(end.0, "spell" | "gram") {
                 continue;
             }
-            let total = ends.entry((kind, id, opens)).or_insert(0);
+            let allowed = held.get(&end).copied().unwrap_or(0).max(1);
+            let total = ends.entry(end).or_insert(0);
             *total += count;
-            if *total > 1 {
+            if *total > allowed {
                 return Some(false);
             }
         }
@@ -620,9 +1636,14 @@ fn unique_ranges<'x>(fragments: impl IntoIterator<Item = &'x str>) -> Option<boo
 /// the paragraph's source XML, each as the offset in `source` it goes at and its markup in
 /// `written`: a range start or end as its tag, a reference as the run that holds only it. Each
 /// goes right after the marker it follows in `written`, or after that marker's reference run.
-/// `None` unless `written` holds `source`'s comment markers in order with only such markers
-/// added, each after a marker that is an empty range tag or alone in its run.
-fn added_comment_ranges<'w>(source: &str, written: &'w str) -> Option<Vec<(usize, &'w str)>> {
+/// `None` unless `written` holds `source`'s comment markers, other than those `unloaded` holds,
+/// in order with only such markers added, each after a marker that is an empty range tag or
+/// alone in its run.
+fn added_comment_ranges<'w>(
+    source: &str,
+    written: &'w str,
+    unloaded: &CommentKeys,
+) -> Option<Vec<(usize, &'w str)>> {
     fn markers<'x>(xml: &'x str, tags: &[Tag<'x>]) -> Option<Vec<(usize, String)>> {
         tags.iter()
             .enumerate()
@@ -636,37 +1657,17 @@ fn added_comment_ranges<'w>(source: &str, written: &'w str) -> Option<Vec<(usize
             .map(|(index, tag)| Some((index, unescaped(xml, attribute(tag, "w:id")?)?)))
             .collect()
     }
-    /// The span of the marker at `index`: its empty range tag, or the run it is alone in.
-    fn markup(tags: &[Tag<'_>], index: usize) -> Option<Range<usize>> {
-        let tag = &tags[index];
-        if tag.name != "w:commentReference" {
-            return tag.empty.then(|| tag.range.clone());
-        }
-        let close = tags
-            .get(index + 1)
-            .filter(|tag| tag.end && tag.name == "w:r")?;
-        let mut at = index.checked_sub(1)?;
-        if tags[at].end && tags[at].name == "w:rPr" {
-            let mut depth = 0usize;
-            loop {
-                if tags[at].end {
-                    depth += 1;
-                } else if !tags[at].empty {
-                    depth = depth.checked_sub(1)?;
-                }
-                if depth == 0 {
-                    break;
-                }
-                at = at.checked_sub(1)?;
-            }
-            at = at.checked_sub(1)?;
-        }
-        let open = &tags[at];
-        (open.name == "w:r" && !open.end && !open.empty).then(|| open.range.start..close.range.end)
-    }
     let source_tags = tags(source)?;
     let written_tags = tags(written)?;
-    let source_markers = markers(source, &source_tags)?;
+    let mut source_markers = markers(source, &source_tags)?;
+    if !unloaded.is_empty() {
+        source_markers.retain(|(index, id)| {
+            !unloaded.contains(&(
+                source_tags[*index].name.to_owned(),
+                canonical_id(id.clone()),
+            ))
+        });
+    }
     let mut held = source_markers.iter().peekable();
     let mut after = None;
     let mut added = Vec::new();
@@ -675,12 +1676,420 @@ fn added_comment_ranges<'w>(source: &str, written: &'w str) -> Option<Vec<(usize
         if let Some((kept, _)) =
             held.next_if(|(kept, kept_id)| source_tags[*kept].name == name && *kept_id == id)
         {
-            after = markup(&source_tags, *kept).map(|span| span.end);
+            after = comment_marker_markup(&source_tags, *kept).map(|span| span.end);
             continue;
         }
-        added.push((after?, &written[markup(&written_tags, index)?]));
+        added.push((
+            after?,
+            &written[comment_marker_markup(&written_tags, index)?],
+        ));
     }
     (held.next().is_none() && !added.is_empty()).then_some(added)
+}
+
+fn comment_marker_markup(tags: &[Tag<'_>], index: usize) -> Option<Range<usize>> {
+    let tag = &tags[index];
+    if tag.name != "w:commentReference" {
+        return tag.empty.then(|| tag.range.clone());
+    }
+    let close = tags
+        .get(index + 1)
+        .filter(|tag| tag.end && tag.name == "w:r")?;
+    let mut at = index.checked_sub(1)?;
+    if tags[at].empty && tags[at].name == "w:rPr" {
+        at = at.checked_sub(1)?;
+    }
+    if tags[at].end && tags[at].name == "w:rPr" {
+        let mut depth = 0usize;
+        loop {
+            if tags[at].end {
+                depth += 1;
+            } else if !tags[at].empty {
+                depth = depth.checked_sub(1)?;
+            }
+            if depth == 0 {
+                break;
+            }
+            at = at.checked_sub(1)?;
+        }
+        at = at.checked_sub(1)?;
+    }
+    let open = &tags[at];
+    (open.name == "w:r" && !open.end && !open.empty).then(|| open.range.start..close.range.end)
+}
+
+fn comment_removal_spans(
+    xml: &str,
+    remove: impl Fn(&str, &str) -> bool,
+) -> Option<Vec<Range<usize>>> {
+    let parsed = tags(xml)?;
+    let mut parents = vec![None; parsed.len()];
+    let mut children: HashMap<usize, Vec<usize>> = HashMap::new();
+    let mut ends = HashMap::new();
+    let mut stack: Vec<usize> = Vec::new();
+    for (index, tag) in parsed.iter().enumerate() {
+        if tag.end {
+            let open = stack.pop()?;
+            if parsed[open].name != tag.name {
+                return None;
+            }
+            ends.insert(open, index);
+        } else {
+            parents[index] = stack.last().copied();
+            if let Some(parent) = parents[index] {
+                children.entry(parent).or_default().push(index);
+            }
+            if !tag.empty {
+                stack.push(index);
+            }
+        }
+    }
+    let span = |index: usize| -> Option<Range<usize>> {
+        let tag = &parsed[index];
+        Some(
+            tag.range.start..if tag.empty {
+                tag.range.end
+            } else {
+                parsed[*ends.get(&index)?].range.end
+            },
+        )
+    };
+    let mut removed = HashSet::new();
+    for (index, tag) in parsed.iter().enumerate() {
+        if tag.end
+            || !matches!(
+                tag.name,
+                "w:commentRangeStart" | "w:commentRangeEnd" | "w:commentReference"
+            )
+        {
+            continue;
+        }
+        if let Some(id) = attribute(tag, "w:id").and_then(|range| unescaped(xml, range))
+            && remove(tag.name, &canonical_id(id))
+        {
+            removed.insert(index);
+        }
+    }
+    let runs: HashSet<_> = removed
+        .iter()
+        .filter_map(|index| {
+            (parsed[*index].name == "w:commentReference")
+                .then_some(parents[*index])
+                .flatten()
+        })
+        .filter(|parent| parsed[*parent].name == "w:r")
+        .collect();
+    let mut spans = removed
+        .iter()
+        .map(|index| span(*index))
+        .collect::<Option<Vec<_>>>()?;
+    for run in runs {
+        let mut cursor = parsed[run].range.end;
+        let mut pure = true;
+        for child in children.get(&run)? {
+            let child_span = span(*child)?;
+            pure &= xml[cursor..child_span.start].trim().is_empty()
+                && (parsed[*child].name == "w:rPr" || removed.contains(child));
+            cursor = child_span.end;
+        }
+        let close = parsed[*ends.get(&run)?].range.start;
+        if pure && xml[cursor..close].trim().is_empty() {
+            spans.push(span(run)?);
+        }
+    }
+    spans.sort_by_key(|range| (range.start, std::cmp::Reverse(range.end)));
+    let mut outer = Vec::new();
+    let mut end = 0;
+    for range in spans {
+        if range.start < end {
+            continue;
+        }
+        end = range.end;
+        outer.push(range);
+    }
+    Some(outer)
+}
+
+pub(super) fn remove_comment_markers(xml: &str, ids: &HashSet<String>) -> Option<String> {
+    let mut result = xml.to_owned();
+    for span in comment_removal_spans(xml, |_, id| ids.contains(id))?
+        .into_iter()
+        .rev()
+    {
+        result.replace_range(span, "");
+    }
+    Some(result)
+}
+
+/// `source`, an unchanged paragraph's source XML, with the comment markers `written` lacks
+/// taken out, other than those `unloaded` holds, which stay where they are, and with those
+/// `written` adds put in (see [`added_comment_ranges`]). `None` when that changes nothing or
+/// does not leave `source` with the comment markers of `written`.
+fn changed_comment_ranges(source: &str, written: &str, unloaded: &CommentKeys) -> Option<String> {
+    let keys = |xml: &str| -> Option<HashSet<(String, String)>> {
+        tags(xml)?
+            .iter()
+            .filter(|tag| {
+                !tag.end
+                    && matches!(
+                        tag.name,
+                        "w:commentRangeStart" | "w:commentRangeEnd" | "w:commentReference"
+                    )
+            })
+            .map(|tag| {
+                Some((
+                    tag.name.to_owned(),
+                    canonical_id(unescaped(xml, attribute(tag, "w:id")?)?),
+                ))
+            })
+            .collect()
+    };
+    let held = keys(written)?;
+    let spans = comment_removal_spans(source, |name, id| {
+        let key = (name.to_owned(), id.to_owned());
+        !held.contains(&key) && !unloaded.contains(&key)
+    })?;
+    let mut result = source.to_owned();
+    for span in spans.iter().rev() {
+        result.replace_range(span.clone(), "");
+    }
+    if let Some(added) = added_comment_ranges(&result, written, unloaded) {
+        return Some(with_insertions(&result, &added));
+    }
+    if spans.is_empty() {
+        return None;
+    }
+    let mut kept = keys(&result)?;
+    kept.retain(|key| !unloaded.contains(key));
+    (kept == held).then_some(result)
+}
+
+/// Comment markers by element name and canonical ID.
+pub(crate) type CommentKeys = HashSet<(String, String)>;
+
+/// The comments a save deletes and the comment markers its model holds, which decide the source
+/// comment markers a splice keeps in a paragraph it leaves alone (see
+/// [`unloaded_comment_markers`]).
+#[derive(Clone, Copy)]
+pub(crate) struct SavedComments<'a> {
+    /// The IDs of the comments the save deletes.
+    pub deleted: &'a HashSet<String>,
+    /// The comment markers the saved model holds anywhere in the document.
+    pub held: &'a CommentKeys,
+}
+
+/// The comment markers of `xml` that carry an ID, by element name and canonical ID.
+fn comment_keys(xml: &str) -> CommentKeys {
+    tags(xml)
+        .unwrap_or_default()
+        .iter()
+        .filter(|tag| {
+            !tag.end
+                && matches!(
+                    tag.name,
+                    "w:commentRangeStart" | "w:commentRangeEnd" | "w:commentReference"
+                )
+        })
+        .filter_map(|tag| {
+            let id = unescaped(xml, attribute(tag, "w:id")?)?;
+            Some((tag.name.to_owned(), canonical_id(id)))
+        })
+        .collect()
+}
+
+/// The comment markers of `source`, a story part's source XML, whose comment is not one
+/// `comments` deletes and which neither the saved model holds anywhere in the document nor any
+/// XML of `written` holds, by canonical ID: markers the editing model did not load, which a save
+/// keeps where the source has them.
+fn unloaded_comment_markers<'w>(
+    source: &str,
+    written: impl IntoIterator<Item = &'w str>,
+    comments: SavedComments<'_>,
+) -> CommentKeys {
+    if !source.contains("<w:comment") {
+        return CommentKeys::new();
+    }
+    let written: CommentKeys = written.into_iter().flat_map(comment_keys).collect();
+    let mut unloaded = comment_keys(source);
+    unloaded.retain(|key| {
+        !comments.deleted.contains(&key.1) && !comments.held.contains(key) && !written.contains(key)
+    });
+    unloaded
+}
+
+/// The comment markers the stories `stories` of a model hold, by element name and the canonical
+/// ID their written XML spells: in paragraphs, table cells, content controls, hyperlinks, fields,
+/// tracked changes, runs and shape text boxes, and in the XML the model replays verbatim. A range
+/// end counts as its comment's reference too: the paragraph writer adds a reference after an end
+/// whose paragraph holds none.
+pub(crate) fn model_comment_markers<'a>(
+    stories: impl IntoIterator<Item = &'a [BlockContent]>,
+) -> CommentKeys {
+    let mut keys = CommentKeys::new();
+    for blocks in stories {
+        block_comment_markers(blocks, &mut keys);
+    }
+    keys
+}
+
+/// Adds the comment markers the note `note` holds as a save writes it to `keys`: those of its
+/// verbatim XML when it has one, which the save writes instead of its content, else those of its
+/// content.
+pub(crate) fn note_comment_markers(note: &Note, keys: &mut CommentKeys) {
+    match note.verbatim_xml.as_deref() {
+        Some(xml) => xml_comment_markers(xml, keys),
+        None => block_comment_markers(&note.content, keys),
+    }
+}
+
+/// Adds the comment markers the XML `xml` holds to `keys`.
+pub(crate) fn xml_comment_markers(xml: &str, keys: &mut CommentKeys) {
+    if xml.contains("<w:comment") {
+        keys.extend(comment_keys(xml));
+    }
+}
+
+/// Adds the marker `name` of comment `id` to `keys`, and for a range end the reference the
+/// paragraph writer puts after it unless its paragraph holds one.
+fn insert_comment_marker(keys: &mut CommentKeys, name: &str, id: f64) {
+    let id = canonical_id(js_number(id));
+    if name == "commentRangeEnd" {
+        keys.insert(("w:commentReference".to_owned(), id.clone()));
+    }
+    keys.insert((format!("w:{name}"), id));
+}
+
+fn block_comment_markers(blocks: &[BlockContent], keys: &mut CommentKeys) {
+    for block in blocks {
+        match block {
+            BlockContent::Paragraph(paragraph) => {
+                for content in &paragraph.content {
+                    match content {
+                        ParagraphContent::Inline(node) => inline_comment_markers(node, keys),
+                        ParagraphContent::Tracked(change) => {
+                            for node in &change.content {
+                                inline_comment_markers(node, keys);
+                            }
+                        }
+                        ParagraphContent::CommentRange(marker) => {
+                            insert_comment_marker(keys, &marker.node_type, marker.id);
+                        }
+                        ParagraphContent::RangeStart(_) | ParagraphContent::RangeEnd(_) => {}
+                    }
+                }
+            }
+            BlockContent::Table(table) => {
+                for cell in table.rows.iter().flat_map(|row| &row.cells) {
+                    block_comment_markers(&cell.content, keys);
+                }
+            }
+            BlockContent::BlockSdt(sdt) => block_comment_markers(&sdt.content, keys),
+            BlockContent::RawXml(raw) => xml_comment_markers(&raw.xml, keys),
+        }
+    }
+}
+
+fn inline_comment_markers(node: &InlineNode, keys: &mut CommentKeys) {
+    match node {
+        InlineNode::Run(run) => run_comment_markers(run, keys),
+        InlineNode::Hyperlink(link) => {
+            let structured = link.structured_children.iter().flatten();
+            for child in link.children.iter().chain(structured) {
+                inline_comment_markers(child, keys);
+            }
+        }
+        InlineNode::SimpleField(field) => {
+            for run in &field.content {
+                run_comment_markers(run, keys);
+            }
+        }
+        InlineNode::ComplexField(field) => {
+            for run in field.field_code.iter().chain(&field.field_result) {
+                run_comment_markers(run, keys);
+            }
+            let structured = [&field.structured_code, &field.structured_result]
+                .into_iter()
+                .flatten()
+                .filter(|content| !content.spans_paragraphs())
+                .filter_map(|content| content.inline.as_deref())
+                .flatten();
+            for node in structured {
+                inline_comment_markers(node, keys);
+            }
+        }
+        InlineNode::InlineSdt(sdt) => {
+            for node in &sdt.content {
+                inline_comment_markers(node, keys);
+            }
+        }
+        InlineNode::Tracked(change) => {
+            for node in &change.content {
+                inline_comment_markers(node, keys);
+            }
+        }
+        InlineNode::Math(math) => xml_comment_markers(&math.omml_xml, keys),
+        InlineNode::RawXml(raw) => xml_comment_markers(&raw.xml, keys),
+        InlineNode::BookmarkStart(_) | InlineNode::BookmarkEnd(_) => {}
+    }
+}
+
+fn run_comment_markers(run: &Run, keys: &mut CommentKeys) {
+    for content in &run.content {
+        match content {
+            RunContent::CommentReference { id: Some(id) } => {
+                insert_comment_marker(keys, "commentReference", *id);
+            }
+            RunContent::Shape { shape, .. } => shape_comment_markers(shape, keys),
+            RunContent::OpaqueDrawing { xml, .. } => xml_comment_markers(xml, keys),
+            _ => {}
+        }
+    }
+}
+
+fn shape_comment_markers(shape: &Shape, keys: &mut CommentKeys) {
+    for xml in [&shape.drawing_xml, &shape.drawing_run_xml]
+        .into_iter()
+        .flatten()
+    {
+        xml_comment_markers(xml, keys);
+    }
+    if let Some(body) = &shape.text_body {
+        for value in &body.content {
+            json_comment_markers(value, keys);
+        }
+    }
+    if let Some(model) = &shape.drawing_model {
+        json_comment_markers(model, keys);
+    }
+    for child in shape.children.iter().flatten() {
+        shape_comment_markers(child, keys);
+    }
+}
+
+/// Adds the comment markers a model kept as JSON, such as a text box's paragraphs, holds.
+fn json_comment_markers(value: &serde_json::Value, keys: &mut CommentKeys) {
+    match value {
+        serde_json::Value::Object(object) => {
+            if let Some(name) = object.get("type").and_then(serde_json::Value::as_str)
+                && matches!(
+                    name,
+                    "commentRangeStart" | "commentRangeEnd" | "commentReference"
+                )
+                && let Some(id) = object.get("id").and_then(serde_json::Value::as_f64)
+            {
+                insert_comment_marker(keys, name, id);
+            }
+            for child in object.values() {
+                json_comment_markers(child, keys);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                json_comment_markers(item, keys);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// `source` with each tag in `added` inserted at its offset.
@@ -1029,14 +2438,91 @@ fn row_edits<'a>(
         edits
             .removed
             .extend(row.paragraphs.iter().map(|at| *at as u32));
-        edits.edits.push((row.span.clone(), 2, ""));
+        let mut start = row.span.start;
+        for kept in row_bookmark_spans(source, &row.span)? {
+            if start < kept.start {
+                edits.edits.push((start..kept.start, 2, ""));
+            }
+            start = kept.end;
+        }
+        edits.edits.push((start..row.span.end, 2, ""));
     }
     Some(edits)
+}
+
+/// The bookmark boundaries that are direct children of the row spanning `row` in `source`; a
+/// removed row leaves them in place between its neighbours. A boundary whose partner sits inside
+/// one of the row's cells goes with the row. `None` when the row declares namespaces or wraps its
+/// children, so the part is written whole.
+fn row_bookmark_spans(source: &str, row: &Range<usize>) -> Option<Vec<Range<usize>>> {
+    let xml = &source[row.clone()];
+    let tags = tags(xml)?;
+    if tags
+        .first()?
+        .attributes
+        .iter()
+        .any(|(name, _)| *name == "xmlns" || name.starts_with("xmlns:"))
+    {
+        return None;
+    }
+    let boundary = |name: &str| {
+        let local = name.rsplit_once(':').map_or(name, |(_, local)| local);
+        match local {
+            "bookmarkStart" => Some(true),
+            "bookmarkEnd" => Some(false),
+            _ => None,
+        }
+    };
+    let mut direct = Vec::new();
+    let mut nested = HashSet::new();
+    let mut depth = 0usize;
+    let mut open: Option<(usize, bool, Option<String>)> = None;
+    for tag in &tags {
+        if tag.end {
+            depth = depth.checked_sub(1)?;
+            if depth == 1
+                && let Some((start, kind, id)) = open.take()
+            {
+                direct.push((start..tag.range.end, kind, id));
+            }
+            continue;
+        }
+        let local = tag
+            .name
+            .rsplit_once(':')
+            .map_or(tag.name, |(_, local)| local);
+        if depth == 1 && matches!(local, "customXml" | "smartTag" | "sdt") {
+            return None;
+        }
+        if let Some(kind) = boundary(tag.name) {
+            let id = bookmark_id(&xml[tag.range.clone()]);
+            if depth == 1 {
+                if tag.empty {
+                    direct.push((tag.range.clone(), kind, id));
+                } else {
+                    open = Some((tag.range.start, kind, id));
+                }
+            } else if depth > 1 {
+                nested.insert((id, kind));
+            }
+        }
+        if !tag.empty {
+            depth += 1;
+        }
+    }
+    Some(
+        direct
+            .into_iter()
+            .filter(|(_, kind, id)| !nested.contains(&(id.clone(), !*kind)))
+            .map(|(span, _, _)| row.start + span.start..row.start + span.end)
+            .collect(),
+    )
 }
 
 struct SpliceOptions<'a> {
     sections: bool,
     replace_reasons: &'a mut Vec<String>,
+    comments: SavedComments<'a>,
 }
 
 /// `source` with the paragraphs `part` addresses rewritten from `recorded` where they changed
@@ -1048,7 +2534,10 @@ struct SpliceOptions<'a> {
 /// the caller writes `serialized` whole: among others when a paragraph to remove or insert is
 /// not [`simple`], one to rewrite does not [`keeps_ranges`] from its source to its written XML,
 /// one of them sits in anything but a story root or table cell, and when the result would need a
-/// namespace declaration the source does not have.
+/// namespace declaration the source does not have. An unchanged paragraph keeps the comment
+/// markers its written XML lacks when `comments` neither deletes their comment nor holds that
+/// marker anywhere in the model (see [`unloaded_comment_markers`]), and loses the others.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn splice_story_part(
     source: &str,
     serialized: &str,
@@ -1057,6 +2546,7 @@ pub(crate) fn splice_story_part(
     assignments: &BTreeMap<u32, String>,
     patched: &BTreeMap<u32, String>,
     replace_reasons: &mut Vec<String>,
+    comments: SavedComments<'_>,
 ) -> Option<String> {
     splice_story_part_inner(
         source,
@@ -1068,10 +2558,12 @@ pub(crate) fn splice_story_part(
         SpliceOptions {
             sections: false,
             replace_reasons,
+            comments,
         },
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn splice_section_story_part(
     source: &str,
     serialized: &str,
@@ -1080,7 +2572,10 @@ pub(crate) fn splice_section_story_part(
     assignments: &BTreeMap<u32, String>,
     patched: &BTreeMap<u32, String>,
     replace_reasons: &mut Vec<String>,
+    comments: SavedComments<'_>,
 ) -> Option<String> {
+    let (source, _) = source_with_gained_breaks(source, recorded, part, patched)?;
+    let source: &str = &source;
     let spliced = splice_story_part_inner(
         source,
         serialized,
@@ -1091,6 +2586,7 @@ pub(crate) fn splice_section_story_part(
         SpliceOptions {
             sections: true,
             replace_reasons,
+            comments,
         },
     )?;
     super::section_patch::restore_sections(source, serialized, &spliced, recorded)
@@ -1112,13 +2608,16 @@ fn splice_story_part_inner(
     }) {
         return None;
     }
+    let (source, breaks) = source_with_gained_breaks(source, recorded, part, patched)?;
+    let source: &str = &source;
+    let planned: BTreeSet<u32> = part.changed.iter().copied().collect();
     let mut patched_recording;
     let recorded = if patched.is_empty() {
         recorded
     } else {
         patched_recording = recorded.clone();
         for (&ordinal, xml) in patched {
-            if !part.changed.contains(&ordinal) {
+            if !planned.contains(&ordinal) {
                 return None;
             }
             let projected = recorded.written.get(&ordinal)?;
@@ -1187,6 +2686,20 @@ fn splice_story_part_inner(
     }
     let mut replaced = BTreeSet::new();
     let mut ranged = BTreeSet::new();
+    let unloaded = unloaded_comment_markers(
+        source,
+        std::iter::once(serialized).chain(patched.values().map(String::as_str)),
+        options.comments,
+    );
+    let kept_marks = paragraph_marks(
+        written
+            .iter()
+            .filter(|(ordinal, _)| !changed.contains(*ordinal))
+            .map(|(&ordinal, xml)| (ordinal, &source[spans[&ordinal].clone()], xml.as_str())),
+        &written_neighbours(&recorded.order),
+        breaks,
+        &unloaded,
+    )?;
     for (&ordinal, xml) in written {
         ooxml_opc::progress::tick();
         if changed.contains(&ordinal) {
@@ -1194,12 +2707,12 @@ fn splice_story_part_inner(
             continue;
         }
         let paragraph = &source[spans[&ordinal].clone()];
-        let wanted = marks(xml)?;
-        if marks(paragraph)?.admit(&wanted) {
+        let (retained, wanted) = &kept_marks[&ordinal];
+        if retained.admit(wanted, breaks) {
             continue;
         }
-        let rangeable = added_comment_ranges(paragraph, xml).is_some_and(|added| {
-            marks(&with_insertions(paragraph, &added)).is_some_and(|patched| patched.admit(&wanted))
+        let rangeable = changed_comment_ranges(paragraph, xml, &unloaded).is_some_and(|patched| {
+            marks(&patched).is_some_and(|marks| marks.without(&unloaded).admit(wanted, breaks))
         });
         if rangeable {
             ranged.insert(ordinal);
@@ -1207,6 +2720,41 @@ fn splice_story_part_inner(
             replaced.insert(ordinal);
         }
     }
+    let format_only: BTreeSet<u32> = part.format_only.iter().copied().collect();
+    let formatting_alone = format_only_part(part);
+    let mut restorations = HashMap::new();
+    replaced.retain(|ordinal| {
+        let edited = format_only.contains(ordinal);
+        if !edited && (!formatting_alone || changed.contains(ordinal)) {
+            return true;
+        }
+        match format_edit(&source[spans[ordinal].clone()], &written[ordinal]) {
+            Ok(Cow::Borrowed(_)) => true,
+            Ok(Cow::Owned(restored)) => {
+                if edited {
+                    restorations.insert(*ordinal, restored);
+                }
+                edited
+            }
+            Err(dropped) => {
+                if edited {
+                    options
+                        .replace_reasons
+                        .push(kept_reason(*ordinal, &dropped));
+                }
+                false
+            }
+        }
+    });
+    let mut restored_recording;
+    let recorded = if restorations.is_empty() {
+        recorded
+    } else {
+        restored_recording = recorded.clone();
+        restored_recording.written.extend(restorations);
+        &restored_recording
+    };
+    let written = &recorded.written;
     let anchors: BTreeSet<u32> = inserted
         .iter()
         .map(|(anchor, _)| anchor.ordinal())
@@ -1217,6 +2765,11 @@ fn splice_story_part_inner(
             .parents
             .get(ordinal)
             .is_some_and(|parent| PARENTS.contains(parent))
+    };
+    let replaceable = |ordinal: &u32| {
+        in_story(ordinal)
+            || (!removed.contains(ordinal)
+                && layout.parents.get(ordinal) == Some(&BLOCK_CONTROL_CONTENT))
     };
     for ordinal in replaced.iter().chain(&removed) {
         let paragraph = &source[spans[ordinal].clone()];
@@ -1242,7 +2795,7 @@ fn splice_story_part_inner(
             }
             None => simple(paragraph)?,
         };
-        if !in_story(ordinal) || !admitted {
+        if !replaceable(ordinal) || !admitted {
             return None;
         }
     }
@@ -1260,11 +2813,22 @@ fn splice_story_part_inner(
             return None;
         }
     }
+    let changed_ranges = ranged
+        .iter()
+        .map(|ordinal| {
+            changed_comment_ranges(
+                &source[spans[ordinal].clone()],
+                &written[ordinal],
+                &unloaded,
+            )
+        })
+        .collect::<Option<Vec<_>>>()?;
     let mut prefixes = BTreeSet::new();
+    let scopes = (!patched.is_empty()).then(|| NamespaceScopes::new(source));
     for ordinal in &replaced {
         let mut required = required_prefixes(&written[ordinal])?;
-        if patched.contains_key(ordinal) {
-            let scope = PatchContext::at(&part.part, source, spans[ordinal].start);
+        if let Some(scopes) = scopes.as_ref().filter(|_| patched.contains_key(ordinal)) {
+            let scope = scopes.context(&part.part, spans[ordinal].start);
             required.retain(|prefix| !scope.namespaces.contains_key(*prefix));
         }
         prefixes.extend(required);
@@ -1275,10 +2839,8 @@ fn splice_story_part_inner(
     for (_, _, xml) in &rows.edits {
         prefixes.extend(required_prefixes(xml)?);
     }
-    for ordinal in &ranged {
-        for (_, tag) in added_comment_ranges(&source[spans[ordinal].clone()], &written[ordinal])? {
-            prefixes.extend(required_prefixes(tag)?);
-        }
+    for xml in &changed_ranges {
+        prefixes.extend(required_prefixes(xml)?);
     }
     let root = root_tag(source)?;
     let bound = bindings(source, &root);
@@ -1344,7 +2906,7 @@ fn splice_story_part_inner(
                 let xml = if replaced.contains(&ordinal) {
                     xml.clone()
                 } else if ranged.contains(&ordinal) {
-                    with_insertions(original, &added_comment_ranges(original, xml)?)
+                    changed_comment_ranges(original, xml, &unloaded)?
                 } else {
                     original.to_owned()
                 };
@@ -1386,9 +2948,9 @@ fn splice_story_part_inner(
             continue;
         }
         let range = span(ordinal)?;
-        for (at, tag) in added_comment_ranges(&source[range.clone()], &written[&ordinal])? {
-            edits.push((range.start + at..range.start + at, 0, tag.to_owned()));
-        }
+        let patched =
+            changed_comment_ranges(&source[range.clone()], &written[&ordinal], &unloaded)?;
+        edits.push((range, 0, patched));
     }
     let structural = rows.inserted.union(&tables.inserted).copied().collect();
     let offsets = insertion_offsets(
@@ -1413,7 +2975,7 @@ fn splice_story_part_inner(
         .map(|(range, rank, xml)| (range.clone(), *rank, xml.as_str()))
         .collect();
     let fragments = splice_fragments(&source, edits)?;
-    if !unique_ranges(fragments.iter().copied())? {
+    if !unique_ranges(&source, fragments.iter().copied())? {
         return None;
     }
     options.replace_reasons.extend(tables.reasons);
@@ -1588,11 +3150,16 @@ fn insertion_offsets(
         .collect()
 }
 
-fn replacement_xml(source: &str, at: usize, serialized: &str, xml: &str) -> Option<String> {
+fn replacement_xml(
+    scopes: &NamespaceScopes,
+    at: usize,
+    serialized: &str,
+    xml: &str,
+) -> Option<String> {
     if xml.is_empty() {
         return Some(String::new());
     }
-    let scope = PatchContext::at("", source, at);
+    let scope = scopes.context("", at);
     let target = root_tag(serialized)?;
     let wanted = bindings(serialized, &target);
     let mut required = required_prefixes(xml)?;
@@ -1609,6 +3176,11 @@ fn replacement_xml(source: &str, at: usize, serialized: &str, xml: &str) -> Opti
     Some(rooted.into_owned())
 }
 
+/// `source` with its changed paragraphs and those whose written XML no longer agrees with their
+/// source replaced by what was written for them. An unchanged paragraph whose written XML lacks
+/// only comment markers that `comments` neither deletes nor holds anywhere in the model keeps its
+/// source bytes, those markers with them (see [`unloaded_comment_markers`]).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn replace_story_part(
     source: &str,
     serialized: &str,
@@ -1616,7 +3188,12 @@ pub(crate) fn replace_story_part(
     part: &S13SplicedPart,
     assignments: &BTreeMap<u32, String>,
     patched: &BTreeMap<u32, String>,
+    reasons: &mut Vec<String>,
+    comments: SavedComments<'_>,
 ) -> Option<String> {
+    let format_only: BTreeSet<u32> = part.format_only.iter().copied().collect();
+    let changed: BTreeSet<u32> = part.changed.iter().copied().collect();
+    let formatting_alone = format_only_part(part);
     if recorded.conflict
         || recorded.written.len() != part.paragraphs.len()
         || part
@@ -1626,9 +3203,11 @@ pub(crate) fn replace_story_part(
     {
         return None;
     }
+    let (source, breaks) = source_with_gained_breaks(source, recorded, part, patched)?;
+    let source: &str = &source;
     let source_assignments = assignments
         .iter()
-        .filter(|(ordinal, _)| !part.changed.contains(ordinal) || !patched.contains_key(*ordinal))
+        .filter(|(ordinal, _)| !changed.contains(*ordinal) || !patched.contains_key(*ordinal))
         .map(|(&ordinal, id)| (ordinal, id.clone()))
         .collect();
     let source = patch_paragraph_ids(source, &source_assignments, true)?;
@@ -1651,25 +3230,46 @@ pub(crate) fn replace_story_part(
         &removed,
         &part.table_patches,
     )?;
+    let scopes = NamespaceScopes::new(&source);
     let mut edits = Vec::new();
     for (span, rank, xml) in rows.edits {
-        let xml = replacement_xml(&source, span.start, serialized, xml)?;
+        let xml = replacement_xml(&scopes, span.start, serialized, xml)?;
         edits.push((span, rank, xml));
     }
+    let mut unchanged = Vec::new();
+    for (&ordinal, xml) in &recorded.written {
+        if !changed.contains(&ordinal) && !rows.removed.contains(&ordinal) {
+            unchanged.push((ordinal, &source[span(ordinal)?], xml.as_str()));
+        }
+    }
+    let unloaded = unloaded_comment_markers(
+        &source,
+        std::iter::once(serialized).chain(patched.values().map(String::as_str)),
+        comments,
+    );
+    let kept_marks = paragraph_marks(
+        unchanged,
+        &written_neighbours(&recorded.order),
+        breaks,
+        &unloaded,
+    )?;
     for (&ordinal, xml) in &recorded.written {
         if rows.removed.contains(&ordinal) {
             continue;
         }
         let range = span(ordinal)?;
         let paragraph = &source[range.clone()];
-        if part.changed.contains(&ordinal) || !marks(paragraph)?.admit(&marks(xml)?) {
-            let xml = if let Some(patched) = patched.get(&ordinal) {
+        let kept = kept_marks
+            .get(&ordinal)
+            .is_some_and(|(retained, wanted)| retained.admit(wanted, breaks));
+        if changed.contains(&ordinal) || !kept {
+            let mut xml = if let Some(patched) = patched.get(&ordinal) {
                 let id = assignments
                     .get(&ordinal)
                     .cloned()
                     .or_else(|| paragraph_occurrences(xml)?.first()?.para_id.clone());
                 if let Some(id) = id {
-                    let scope = PatchContext::at(&part.part, &source, range.start);
+                    let scope = scopes.context(&part.part, range.start);
                     crate::paragraph_identity::patch_paragraph_id_in_scope(
                         patched,
                         &id,
@@ -1679,8 +3279,25 @@ pub(crate) fn replace_story_part(
                     patched.clone()
                 }
             } else {
-                replacement_xml(&source, range.start, serialized, xml)?
+                replacement_xml(&scopes, range.start, serialized, xml)?
             };
+            let edited = format_only.contains(&ordinal);
+            if edited || (formatting_alone && !changed.contains(&ordinal)) {
+                let restored = match format_edit(paragraph, &xml) {
+                    Ok(Cow::Borrowed(_)) => None,
+                    Ok(Cow::Owned(restored)) if edited => Some(restored),
+                    Ok(Cow::Owned(_)) => continue,
+                    Err(dropped) => {
+                        if edited {
+                            reasons.push(kept_reason(ordinal, &dropped));
+                        }
+                        continue;
+                    }
+                };
+                if let Some(restored) = restored {
+                    xml = restored;
+                }
+            }
             edits.push((range, 2, xml));
         }
     }
@@ -1694,7 +3311,7 @@ pub(crate) fn replace_story_part(
             continue;
         }
         let range = span(anchor.ordinal())?;
-        let xml = replacement_xml(&source, range.start, serialized, xml)?;
+        let xml = replacement_xml(&scopes, range.start, serialized, xml)?;
         let at = match anchor {
             S13SpliceAnchor::After(_) => range.end,
             S13SpliceAnchor::Before(_) => range.start,
@@ -1727,6 +3344,7 @@ pub(crate) fn splice_source_direct(
     part: &S13SplicedPart,
     assignments: &BTreeMap<u32, String>,
     patched: &BTreeMap<u32, String>,
+    replace_reasons: &mut Vec<String>,
 ) -> Option<String> {
     if recorded.conflict
         || !part.table_patches.is_empty()
@@ -1750,6 +3368,8 @@ pub(crate) fn splice_source_direct(
     {
         return None;
     }
+    let (source, breaks) = source_with_gained_breaks(source, recorded, part, patched)?;
+    let source: &str = &source;
     if !crate::xml::reads_as_written(source.as_bytes()) {
         return None;
     }
@@ -1792,7 +3412,7 @@ pub(crate) fn splice_source_direct(
         }
         retained.comments.clear();
         written.comments.clear();
-        if !retained.admit(&written) {
+        if !retained.admit(&written, breaks) {
             return None;
         }
     }
@@ -1874,17 +3494,29 @@ pub(crate) fn splice_source_direct(
     };
     let occurrences = paragraph_occurrences(&source)?;
     let span = |ordinal: u32| paragraph_span(&source, occurrences.get(ordinal as usize)?);
+    let format_only: BTreeSet<u32> = part.format_only.iter().copied().collect();
     let mut edits: Vec<(Range<usize>, u8, String)> = Vec::new();
     for &ordinal in &changed {
-        let xml = &patched[&ordinal];
+        let candidate = patched[&ordinal].as_str();
+        let xml = if format_only.contains(&ordinal) {
+            match format_edit(&source[span(ordinal)?], candidate) {
+                Ok(xml) => xml,
+                Err(dropped) => {
+                    replace_reasons.push(kept_reason(ordinal, &dropped));
+                    continue;
+                }
+            }
+        } else {
+            Cow::Borrowed(candidate)
+        };
         let projected = &recorded.written[&ordinal];
         let id = assignments.get(&ordinal).cloned().or_else(|| {
             paragraph_occurrences(projected).and_then(|all| all.first()?.para_id.clone())
         });
         let xml = if let Some(id) = id {
-            patch_paragraph_ids(xml, &BTreeMap::from([(0, id)]), false)?
+            patch_paragraph_ids(&xml, &BTreeMap::from([(0, id)]), false)?
         } else {
-            xml.clone()
+            xml.into_owned()
         };
         edits.push((span(ordinal)?, 2, xml));
     }
@@ -1910,7 +3542,7 @@ pub(crate) fn splice_source_direct(
         .map(|(range, rank, xml)| (range.clone(), *rank, xml.as_str()))
         .collect();
     let fragments = splice_fragments(&source, edits)?;
-    if !unique_ranges(fragments.iter().copied())? {
+    if !unique_ranges(&source, fragments.iter().copied())? {
         return None;
     }
     Some(fragments.concat())
@@ -1923,6 +3555,31 @@ mod tests {
     use crate::serializer::{S13SaveRequest, write_docx_s13, write_docx_s13_with_warnings};
     use serde_json::json;
     use sha2::{Digest, Sha256};
+
+    #[test]
+    fn marker_ids_resolve_namespace_aliases_in_their_scope() {
+        let xml = r#"<w:tc xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:b="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:bookmarkStart b:id="&#55;" b:name="B"/><w:p xmlns:b="urn:foreign"><w:bookmarkStart b:id="other" w:id="8"/></w:p><w:bookmarkEnd b:id="7"/></w:tc>"#;
+        let counts = super::marker_counts(xml).unwrap();
+        assert_eq!(
+            counts.get(&("w:bookmarkStart".to_owned(), "7".to_owned())),
+            Some(&1)
+        );
+        assert_eq!(
+            counts.get(&("w:bookmarkEnd".to_owned(), "7".to_owned())),
+            Some(&1)
+        );
+        assert_eq!(
+            counts.get(&("w:bookmarkStart".to_owned(), "8".to_owned())),
+            Some(&1)
+        );
+        assert_eq!(counts.len(), 3);
+        assert_eq!(
+            super::bookmark_id(
+                r#"<w:bookmarkStart xmlns:b="http://schemas.openxmlformats.org/wordprocessingml/2006/main" b:id="&#55;"/>"#
+            ),
+            Some("7".to_owned())
+        );
+    }
 
     const ROOT: &str = "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\" xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" mc:Ignorable=\"w14\">";
     const W_ONLY_ROOT: &str =
@@ -1987,6 +3644,7 @@ mod tests {
         let serialized =
             format!("{SERIALIZED_ROOT}<w:body>{before}{body}{after}</w:body></w:document>");
         let part = S13SplicedPart {
+            format_only: Vec::new(),
             part: "word/document.xml".to_owned(),
             sha256: String::new(),
             paragraphs: written.iter().filter_map(|(ordinal, _)| *ordinal).collect(),
@@ -2009,11 +3667,350 @@ mod tests {
             &assignments,
             &BTreeMap::new(),
             &mut Vec::new(),
+            no_comments(),
         )
     }
 
     fn splice(source: &str, paragraphs: &[(u32, &str)], changed: &[u32]) -> Option<String> {
         splice_around(source, paragraphs, changed, &[], ("", ""))
+    }
+
+    /// The comments of a save that deletes none and whose model holds no comment marker.
+    fn no_comments() -> SavedComments<'static> {
+        use std::sync::LazyLock;
+        static DELETED: LazyLock<HashSet<String>> = LazyLock::new(HashSet::new);
+        static HELD: LazyLock<CommentKeys> = LazyLock::new(CommentKeys::new);
+        SavedComments {
+            deleted: &DELETED,
+            held: &HELD,
+        }
+    }
+
+    /// The keys of comment `id`'s range start, range end and reference.
+    fn comment_marker_keys(id: &str) -> CommentKeys {
+        [
+            "w:commentRangeStart",
+            "w:commentRangeEnd",
+            "w:commentReference",
+        ]
+        .into_iter()
+        .map(|name| (name.to_owned(), id.to_owned()))
+        .collect()
+    }
+
+    #[test]
+    fn removing_comment_markers_keeps_other_run_content() {
+        let xml = r#"<w:p><w:commentRangeStart w:id="1"/><w:r><w:t>Kept</w:t><w:commentReference w:id="1"/></w:r><w:commentRangeEnd w:id="1"/><w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="1"/></w:r><w:r><w:commentReference w:id="2"/></w:r></w:p>"#;
+        assert_eq!(
+            remove_comment_markers(xml, &HashSet::from(["1".to_owned()])).unwrap(),
+            r#"<w:p><w:r><w:t>Kept</w:t></w:r><w:r><w:commentReference w:id="2"/></w:r></w:p>"#,
+        );
+    }
+
+    #[test]
+    fn removing_comment_references_drops_runs_that_hold_only_deleted_references() {
+        let xml = r#"<w:p><w:r><w:rPr/><w:commentReference w:id="1"/><w:commentReference w:id="2"/></w:r><w:r><w:rPr/><w:commentReference w:id="1"/></w:r></w:p>"#;
+        assert_eq!(
+            remove_comment_markers(xml, &HashSet::from(["1".to_owned(), "2".to_owned()])).unwrap(),
+            "<w:p></w:p>",
+        );
+        assert_eq!(
+            remove_comment_markers(xml, &HashSet::from(["1".to_owned()])).unwrap(),
+            r#"<w:p><w:r><w:rPr/><w:commentReference w:id="2"/></w:r></w:p>"#,
+        );
+    }
+
+    #[test]
+    fn removing_comment_markers_matches_a_padded_id_by_its_value() {
+        let xml = r#"<w:p><w:commentRangeStart w:id="05"/><w:r><w:t>Kept</w:t></w:r><w:commentRangeEnd w:id="05"/><w:r><w:rPr/><w:commentReference w:id="05"/></w:r></w:p>"#;
+        assert_eq!(
+            remove_comment_markers(xml, &HashSet::from(["5".to_owned()])).unwrap(),
+            "<w:p><w:r><w:t>Kept</w:t></w:r></w:p>",
+        );
+    }
+
+    #[test]
+    fn removing_comment_markers_matches_a_plain_id() {
+        let xml = r#"<w:p><w:commentRangeStart w:id="5"/><w:r><w:t>Kept</w:t></w:r><w:commentRangeEnd w:id="5"/><w:r><w:rPr/><w:commentReference w:id="5"/></w:r></w:p>"#;
+        assert_eq!(
+            remove_comment_markers(xml, &HashSet::from(["5".to_owned()])).unwrap(),
+            "<w:p><w:r><w:t>Kept</w:t></w:r></w:p>",
+        );
+    }
+
+    #[test]
+    fn removing_comment_markers_matches_an_id_written_as_an_exponent_by_its_text() {
+        let xml = r#"<w:p><w:commentRangeStart w:id="1e+21"/><w:r><w:t>Kept</w:t></w:r><w:commentRangeEnd w:id="1e+21"/><w:r><w:rPr/><w:commentReference w:id="1e+21"/></w:r></w:p>"#;
+        assert_eq!(
+            remove_comment_markers(xml, &HashSet::from(["1e+21".to_owned()])).unwrap(),
+            "<w:p><w:r><w:t>Kept</w:t></w:r></w:p>",
+        );
+        let other = HashSet::from(["1".to_owned()]);
+        assert_eq!(remove_comment_markers(xml, &other).unwrap(), xml);
+    }
+
+    #[test]
+    fn changed_comment_markers_keep_source_bytes() {
+        let source = r#"<w:p keep='yes'><w:commentRangeStart w:id="1"/><w:r><w:t>Kept</w:t></w:r><w:commentRangeEnd w:id="1"/><w:r><w:commentReference w:id="1"/></w:r></w:p>"#;
+        let written =
+            r#"<w:p><w:r><w:t>Kept</w:t></w:r><w:r><w:commentReference w:id="1"/></w:r></w:p>"#;
+        assert_eq!(
+            changed_comment_ranges(source, written, &CommentKeys::new()).unwrap(),
+            r#"<w:p keep='yes'><w:r><w:t>Kept</w:t></w:r><w:r><w:commentReference w:id="1"/></w:r></w:p>"#,
+        );
+    }
+
+    #[test]
+    fn changed_comment_markers_keep_the_unloaded_ones_where_the_source_has_them() {
+        let source = r#"<w:p><w:commentRangeStart w:id="1"/><w:r><w:t>Kept</w:t></w:r><w:commentRangeEnd w:id="1"/><w:r><w:commentReference w:id="1"/></w:r><w:commentRangeStart w:id="2"/><w:r><w:t>Gone</w:t></w:r><w:commentRangeEnd w:id="2"/></w:p>"#;
+        let written = r#"<w:p><w:r><w:t>Kept</w:t></w:r><w:r><w:commentReference w:id="1"/></w:r><w:r><w:t>Gone</w:t></w:r></w:p>"#;
+        let deleted = HashSet::from(["2".to_owned()]);
+        let held = CommentKeys::new();
+        let comments = SavedComments {
+            deleted: &deleted,
+            held: &held,
+        };
+        let unloaded = unloaded_comment_markers(source, [written], comments);
+        assert_eq!(
+            unloaded,
+            CommentKeys::from([
+                ("w:commentRangeStart".to_owned(), "1".to_owned()),
+                ("w:commentRangeEnd".to_owned(), "1".to_owned()),
+            ])
+        );
+        assert_eq!(
+            changed_comment_ranges(source, written, &unloaded).unwrap(),
+            r#"<w:p><w:commentRangeStart w:id="1"/><w:r><w:t>Kept</w:t></w:r><w:commentRangeEnd w:id="1"/><w:r><w:commentReference w:id="1"/></w:r><w:r><w:t>Gone</w:t></w:r></w:p>"#,
+        );
+    }
+
+    const HEAD_RUN: &str = "<w:r><w:t xml:space=\"preserve\">Head </w:t></w:r>";
+    const RANGE_IN_INSERTION: &str = "<w:ins w:id=\"41\" w:author=\"G\"><w:commentRangeStart w:id=\"1\"/><w:r><w:t>inserted</w:t></w:r><w:commentRangeEnd w:id=\"1\"/></w:ins>";
+    const INSERTION: &str =
+        "<w:ins w:id=\"41\" w:author=\"G\"><w:r><w:t>inserted</w:t></w:r></w:ins>";
+    const REFERENCE: &str = "<w:r><w:commentReference w:id=\"1\"/></w:r>";
+    const NOTED: &str = "<w:r><w:t>noted</w:t></w:r>";
+    const NOTED_SECOND: &str = "<w:commentRangeStart w:id=\"2\"/><w:r><w:t>noted</w:t></w:r><w:commentRangeEnd w:id=\"2\"/><w:r><w:commentReference w:id=\"2\"/></w:r>";
+    const NEIGHBOUR: &str = "<w:p><w:r><w:t>Other</w:t></w:r></w:p>";
+    const NEIGHBOUR_EDITED: &str = "<w:p><w:r><w:t>Other X</w:t></w:r></w:p>";
+
+    /// A source paragraph holding `content`, with an attribute the model does not write.
+    fn sourced(content: &str) -> String {
+        format!("<w:p w:rsidR=\"00A10001\">{content}</w:p>")
+    }
+
+    /// A paragraph holding `content` as the model writes it.
+    fn rewritten(content: &str) -> String {
+        format!("<w:p>{content}</w:p>")
+    }
+
+    /// The story splice's and the replacing splice's save of `first` then `NEIGHBOUR`, written
+    /// as `written` then `NEIGHBOUR_EDITED`, by a save that deletes the comments `deleted` and
+    /// whose model holds the comment markers `held`.
+    fn saved_beside_an_edited_neighbour(
+        first: &str,
+        written: &str,
+        deleted: &[&str],
+        held: &CommentKeys,
+    ) -> [Option<String>; 2] {
+        let source = body(&format!("{first}{NEIGHBOUR}"));
+        let mut recorded = RecordedParagraphs::default();
+        for (ordinal, xml) in [written, NEIGHBOUR_EDITED].into_iter().enumerate() {
+            recorded.written.insert(ordinal as u32, xml.to_owned());
+            recorded.order.push(Some(ordinal as u32));
+        }
+        let serialized =
+            format!("{SERIALIZED_ROOT}<w:body>{written}{NEIGHBOUR_EDITED}</w:body></w:document>");
+        let part = S13SplicedPart {
+            format_only: Vec::new(),
+            part: "word/document.xml".to_owned(),
+            sha256: String::new(),
+            paragraphs: vec![0, 1],
+            changed: vec![1],
+            inserted: Vec::new(),
+            removed: Vec::new(),
+            paragraph_patches: Vec::new(),
+            legacy_paragraphs: Vec::new(),
+            table_patches: Vec::new(),
+        };
+        let deleted: HashSet<String> = deleted.iter().map(|id| (*id).to_owned()).collect();
+        let comments = SavedComments {
+            deleted: &deleted,
+            held,
+        };
+        let none = BTreeMap::new();
+        [
+            splice_story_part(
+                &source,
+                &serialized,
+                &recorded,
+                &part,
+                &none,
+                &none,
+                &mut Vec::new(),
+                comments,
+            ),
+            replace_story_part(
+                &source,
+                &serialized,
+                &recorded,
+                &part,
+                &none,
+                &none,
+                &mut Vec::new(),
+                comments,
+            ),
+        ]
+    }
+
+    #[test]
+    fn an_unchanged_paragraph_keeps_an_unloaded_range_of_a_kept_comment_on_the_story_splice() {
+        let first = sourced(&format!("{HEAD_RUN}{RANGE_IN_INSERTION}{REFERENCE}"));
+        let written = rewritten(&format!("{HEAD_RUN}{INSERTION}{REFERENCE}"));
+        let [saved, _] =
+            saved_beside_an_edited_neighbour(&first, &written, &[], &CommentKeys::new());
+        assert_eq!(saved, Some(body(&format!("{first}{NEIGHBOUR_EDITED}"))));
+    }
+
+    #[test]
+    fn an_unchanged_paragraph_loses_only_the_markers_of_a_deleted_comment_on_the_story_splice() {
+        let first = sourced(&format!("{HEAD_RUN}{RANGE_IN_INSERTION}{REFERENCE}"));
+        let written = rewritten(&format!("{HEAD_RUN}{INSERTION}"));
+        let [saved, _] =
+            saved_beside_an_edited_neighbour(&first, &written, &["1"], &CommentKeys::new());
+        let kept = sourced(&format!("{HEAD_RUN}{INSERTION}"));
+        assert_eq!(saved, Some(body(&format!("{kept}{NEIGHBOUR_EDITED}"))));
+    }
+
+    #[test]
+    fn an_unchanged_paragraph_keeps_an_unloaded_range_beside_a_deleted_comment_on_a_splice() {
+        let first = sourced(&format!(
+            "{HEAD_RUN}{RANGE_IN_INSERTION}{REFERENCE}{NOTED_SECOND}"
+        ));
+        let written = rewritten(&format!("{HEAD_RUN}{INSERTION}{REFERENCE}{NOTED}"));
+        let [saved, _] =
+            saved_beside_an_edited_neighbour(&first, &written, &["2"], &CommentKeys::new());
+        let kept = sourced(&format!("{HEAD_RUN}{RANGE_IN_INSERTION}{REFERENCE}{NOTED}"));
+        assert_eq!(saved, Some(body(&format!("{kept}{NEIGHBOUR_EDITED}"))));
+    }
+
+    #[test]
+    fn an_unchanged_paragraph_keeps_an_unloaded_range_of_a_kept_comment_on_the_replacing_splice() {
+        let first = sourced(&format!("{HEAD_RUN}{RANGE_IN_INSERTION}{REFERENCE}"));
+        let written = rewritten(&format!("{HEAD_RUN}{INSERTION}{REFERENCE}"));
+        let [_, saved] =
+            saved_beside_an_edited_neighbour(&first, &written, &[], &CommentKeys::new());
+        assert_eq!(saved, Some(body(&format!("{first}{NEIGHBOUR_EDITED}"))));
+    }
+
+    #[test]
+    fn an_unchanged_paragraph_loses_a_range_its_model_holds_in_another_part_on_the_story_splice() {
+        let first = sourced(&format!("{HEAD_RUN}{RANGE_IN_INSERTION}{REFERENCE}"));
+        let written = rewritten(&format!("{HEAD_RUN}{INSERTION}"));
+        let held = comment_marker_keys("1");
+        let [saved, _] = saved_beside_an_edited_neighbour(&first, &written, &[], &held);
+        let kept = sourced(&format!("{HEAD_RUN}{INSERTION}"));
+        assert_eq!(saved, Some(body(&format!("{kept}{NEIGHBOUR_EDITED}"))));
+    }
+
+    #[test]
+    fn an_unchanged_paragraph_keeps_a_range_whose_reference_alone_its_model_holds_on_a_splice() {
+        let first = sourced(&format!("{HEAD_RUN}{RANGE_IN_INSERTION}{REFERENCE}"));
+        let written = rewritten(&format!("{HEAD_RUN}{INSERTION}{REFERENCE}"));
+        let held = CommentKeys::from([("w:commentReference".to_owned(), "1".to_owned())]);
+        for saved in saved_beside_an_edited_neighbour(&first, &written, &[], &held) {
+            assert_eq!(saved, Some(body(&format!("{first}{NEIGHBOUR_EDITED}"))));
+        }
+    }
+
+    #[test]
+    fn the_model_walk_finds_each_comment_marker_its_stories_hold_and_nothing_else() {
+        let range = |kind: &str, id: u32| json!({ "type": kind, "id": id });
+        let reference = |id: u32| json!({ "type": "run", "content": [{ "type": "commentReference", "id": id }] });
+        let text = || json!({ "type": "run", "content": [{ "type": "text", "text": "a" }] });
+        let paragraph =
+            |content: serde_json::Value| json!({ "type": "paragraph", "content": content });
+        let story = |blocks: serde_json::Value| -> Vec<BlockContent> {
+            serde_json::from_value(blocks).unwrap()
+        };
+        let boxed = |id: u32| {
+            json!({
+                "type": "rect", "shapeType": "rect", "size": { "width": 1, "height": 1 },
+                "textBody": { "content": [
+                    paragraph(json!([range("commentRangeStart", id), text(), reference(id)]))
+                ] }
+            })
+        };
+        let shape = json!({ "type": "run", "content": [{ "type": "shape", "shape": boxed(7) }] });
+        let replayed = json!({ "type": "run", "content": [{
+            "type": "opaqueDrawing", "kind": "pict", "xml": "<w:pict/>", "textBox": boxed(8)
+        }] });
+        let body = story(json!([
+            paragraph(json!([range("commentRangeStart", 1), text(), range("commentRangeEnd", 1)])),
+            { "type": "table", "rows": [{ "type": "tableRow", "cells": [{
+                "type": "tableCell",
+                "content": [paragraph(json!([range("commentRangeStart", 2), text()]))]
+            }] }] },
+            { "type": "blockSdt", "properties": { "sdtType": "richText" },
+              "content": [paragraph(json!([text(), range("commentRangeEnd", 3)]))] },
+            paragraph(json!([{ "type": "hyperlink", "children": [text(), reference(4)] }])),
+            paragraph(json!([text(), shape, replayed])),
+        ]));
+        let opening = paragraph(json!([range("commentRangeStart", 5), text()]));
+        let header = story(json!([opening]));
+        let footnote = story(json!([paragraph(json!([text(), reference(6)]))]));
+        let held = model_comment_markers([body.as_slice(), header.as_slice(), footnote.as_slice()]);
+        let key = |name: &str, id: &str| (format!("w:{name}"), id.to_owned());
+        assert_eq!(
+            held,
+            CommentKeys::from([
+                key("commentRangeStart", "1"),
+                key("commentRangeEnd", "1"),
+                key("commentReference", "1"),
+                key("commentRangeStart", "2"),
+                key("commentRangeEnd", "3"),
+                key("commentReference", "3"),
+                key("commentReference", "4"),
+                key("commentRangeStart", "5"),
+                key("commentReference", "6"),
+                key("commentRangeStart", "7"),
+                key("commentReference", "7"),
+            ])
+        );
+    }
+
+    #[test]
+    fn a_note_written_from_its_verbatim_xml_holds_only_the_comment_markers_of_that_xml() {
+        let note = |verbatim: Option<&str>| -> Note {
+            serde_json::from_value(json!({
+                "type": "footnote", "id": 1, "noteType": "normal",
+                "content": [{ "type": "paragraph", "content": [
+                    { "type": "commentRangeStart", "id": 7 },
+                    { "type": "commentRangeEnd", "id": 7 }
+                ] }],
+                "verbatimXml": verbatim
+            }))
+            .unwrap()
+        };
+        let held = |note: &Note| {
+            let mut keys = CommentKeys::new();
+            note_comment_markers(note, &mut keys);
+            keys
+        };
+        let verbatim = r#"<w:footnote><w:p><w:commentRangeStart w:id="9"/></w:p></w:footnote>"#;
+        let key = |name: &str, id: &str| (format!("w:{name}"), id.to_owned());
+        assert_eq!(
+            held(&note(Some(verbatim))),
+            CommentKeys::from([key("commentRangeStart", "9")])
+        );
+        assert_eq!(
+            held(&note(None)),
+            CommentKeys::from([
+                key("commentRangeStart", "7"),
+                key("commentRangeEnd", "7"),
+                key("commentReference", "7"),
+            ])
+        );
     }
 
     #[test]
@@ -2035,6 +4032,7 @@ mod tests {
             "{SERIALIZED_ROOT}<w:body>{heading}{inserted}{written_start}{written_end}</w:body></w:document>"
         );
         let part = S13SplicedPart {
+            format_only: Vec::new(),
             part: "word/document.xml".to_owned(),
             sha256: String::new(),
             paragraphs: vec![0, 1, 2],
@@ -2052,7 +4050,8 @@ mod tests {
                 &recorded,
                 &part,
                 &BTreeMap::new(),
-                &BTreeMap::new()
+                &BTreeMap::new(),
+                &mut Vec::new()
             ),
             Some(body(&format!("{heading}{inserted}{start}{end}")))
         );
@@ -2102,6 +4101,7 @@ mod tests {
             }
         }
         let part = S13SplicedPart {
+            format_only: Vec::new(),
             part: "word/document.xml".to_owned(),
             sha256: String::new(),
             paragraphs: written.iter().map(|(ordinal, _)| *ordinal).collect(),
@@ -2119,6 +4119,7 @@ mod tests {
             &part,
             &BTreeMap::new(),
             &BTreeMap::new(),
+            &mut Vec::new(),
         )
     }
 
@@ -2139,6 +4140,7 @@ mod tests {
             ..RecordedParagraphs::default()
         };
         let part = S13SplicedPart {
+            format_only: Vec::new(),
             part: "word/document.xml".to_owned(),
             sha256: String::new(),
             paragraphs: vec![0],
@@ -2158,6 +4160,7 @@ mod tests {
                 &part,
                 &BTreeMap::new(),
                 &BTreeMap::new(),
+                &mut Vec::new(),
             )
             .is_none()
         );
@@ -2173,6 +4176,7 @@ mod tests {
                 &part,
                 &BTreeMap::new(),
                 &BTreeMap::new(),
+                &mut Vec::new(),
             ),
             Some(source.replace(host, &format!("{host}{}", recorded.inserted[0])))
         );
@@ -2234,6 +4238,7 @@ mod tests {
                 &part,
                 &BTreeMap::new(),
                 &BTreeMap::from([(0, link.to_owned())]),
+                &mut Vec::new(),
             )
             .is_none()
         );
@@ -2251,6 +4256,7 @@ mod tests {
             ..RecordedParagraphs::default()
         };
         let part = S13SplicedPart {
+            format_only: Vec::new(),
             part: "word/document.xml".to_owned(),
             sha256: String::new(),
             paragraphs: vec![0],
@@ -2269,6 +4275,7 @@ mod tests {
                 &part,
                 &BTreeMap::new(),
                 &BTreeMap::from([(0, patched.clone())]),
+                &mut Vec::new(),
             ),
             Some(source.replace(host, &patched))
         );
@@ -2281,6 +4288,7 @@ mod tests {
                 &part,
                 &BTreeMap::new(),
                 &BTreeMap::from([(0, patched)]),
+                &mut Vec::new(),
             )
             .is_none()
         );
@@ -2304,6 +4312,7 @@ mod tests {
                 &part,
                 &BTreeMap::new(),
                 &BTreeMap::from([(0, patched.to_owned())]),
+                &mut Vec::new(),
             )
             .is_none()
         );
@@ -2358,6 +4367,7 @@ mod tests {
                 &BTreeMap::new(),
                 &patches,
                 &mut Vec::new(),
+                no_comments(),
             )
             .is_none()
         );
@@ -2371,6 +4381,7 @@ mod tests {
                 &BTreeMap::new(),
                 &patches,
                 &mut Vec::new(),
+                no_comments(),
             ),
             Some(correct_source.replace(host, &projected))
         );
@@ -2449,6 +4460,7 @@ mod tests {
                 &BTreeMap::new(),
                 &patches,
                 &mut Vec::new(),
+                no_comments(),
             )
             .is_none()
         );
@@ -2460,6 +4472,7 @@ mod tests {
                 &part,
                 &BTreeMap::new(),
                 &patches,
+                &mut Vec::new(),
             )
             .is_none()
         );
@@ -2538,6 +4551,8 @@ mod tests {
             &part,
             &BTreeMap::from([(0, "00000001".to_owned())]),
             &BTreeMap::from([(0, patched)]),
+            &mut Vec::new(),
+            no_comments(),
         )
         .unwrap();
         assert!(saved.contains("<w14:token w14:val=\"retained\"/>"));
@@ -2677,6 +4692,7 @@ mod tests {
             ..RecordedParagraphs::default()
         };
         let part = S13SplicedPart {
+            format_only: Vec::new(),
             part: "word/document.xml".to_owned(),
             sha256: String::new(),
             paragraphs: vec![0, 2],
@@ -2696,6 +4712,7 @@ mod tests {
                 &BTreeMap::new(),
                 &BTreeMap::new(),
                 &mut Vec::new(),
+                no_comments(),
             ),
             Some(serialized)
         );
@@ -2721,6 +4738,7 @@ mod tests {
                 ..RecordedParagraphs::default()
             };
             let part = S13SplicedPart {
+                format_only: Vec::new(),
                 part: "word/document.xml".to_owned(),
                 sha256: String::new(),
                 paragraphs: vec![0, 1],
@@ -2747,6 +4765,7 @@ mod tests {
                         &BTreeMap::new(),
                         &BTreeMap::new(),
                         &mut Vec::new(),
+                        no_comments(),
                     ),
                     Some(serialized.clone())
                 );
@@ -2803,6 +4822,7 @@ mod tests {
                 ..RecordedParagraphs::default()
             };
             let part = S13SplicedPart {
+                format_only: Vec::new(),
                 part: format!("word/{kind}s.xml"),
                 sha256: String::new(),
                 paragraphs: vec![0],
@@ -2821,10 +4841,543 @@ mod tests {
                     &part,
                     &BTreeMap::new(),
                     &BTreeMap::from([(0, patched.to_owned())]),
+                    &mut Vec::new(),
                 )
                 .is_none()
             );
         }
+    }
+
+    #[test]
+    fn a_direct_splice_keeps_a_formatting_change_whose_patch_would_drop_structure() {
+        let kept =
+            "<w:p><w:hyperlink w:anchor=\"target\"><w:r><w:t>Old</w:t></w:r></w:hyperlink></w:p>";
+        let source = body(kept);
+        let written = "<w:p><w:r><w:t>Old</w:t></w:r></w:p>".to_owned();
+        let serialized = body(&written);
+        let recorded = RecordedParagraphs {
+            written: HashMap::from([(0, written.clone())]),
+            order: vec![Some(0)],
+            ..RecordedParagraphs::default()
+        };
+        let part = S13SplicedPart {
+            format_only: vec![0],
+            part: "word/document.xml".to_owned(),
+            sha256: String::new(),
+            paragraphs: vec![0],
+            changed: vec![0],
+            inserted: Vec::new(),
+            removed: Vec::new(),
+            paragraph_patches: Vec::new(),
+            legacy_paragraphs: Vec::new(),
+            table_patches: Vec::new(),
+        };
+        let mut reasons = Vec::new();
+        let saved = splice_source_direct(
+            &source,
+            &serialized,
+            &recorded,
+            &part,
+            &BTreeMap::new(),
+            &BTreeMap::from([(0, written)]),
+            &mut reasons,
+        )
+        .expect("the source is kept");
+        assert_eq!(saved, source);
+        assert_eq!(reasons, [kept_reason(0, &["w:hyperlink"])]);
+    }
+
+    #[test]
+    fn a_direct_splice_writes_a_formatting_change_beside_a_tracked_note_reference() {
+        let styled = "<w:del w:id=\"1\"><w:r><w:rPr><w:rStyle w:val=\"FootnoteReference\"/></w:rPr><w:footnoteReference w:id=\"1\"/></w:r></w:del>";
+        let reference = "<w:del w:id=\"1\"><w:r><w:footnoteReference w:id=\"1\"/></w:r></w:del>";
+        let head = "<w:r><w:t>Head</w:t></w:r>";
+        let bold = "<w:r><w:rPr><w:b/></w:rPr><w:t>Head</w:t></w:r>";
+        let source = body(&format!("<w:p>{head}{styled}</w:p>"));
+        let expected = body(&format!("<w:p>{bold}{styled}</w:p>"));
+        let written = format!("<w:p>{bold}{reference}</w:p>");
+        let serialized = body(&written);
+        let recorded = RecordedParagraphs {
+            written: HashMap::from([(0, written.clone())]),
+            order: vec![Some(0)],
+            ..RecordedParagraphs::default()
+        };
+        let part = S13SplicedPart {
+            format_only: vec![0],
+            part: "word/document.xml".to_owned(),
+            sha256: String::new(),
+            paragraphs: vec![0],
+            changed: vec![0],
+            inserted: Vec::new(),
+            removed: Vec::new(),
+            paragraph_patches: Vec::new(),
+            legacy_paragraphs: Vec::new(),
+            table_patches: Vec::new(),
+        };
+        let mut reasons = Vec::new();
+        let saved = splice_source_direct(
+            &source,
+            &serialized,
+            &recorded,
+            &part,
+            &BTreeMap::new(),
+            &BTreeMap::from([(0, written)]),
+            &mut reasons,
+        )
+        .expect("the edit is written");
+        assert_eq!(saved, expected);
+        assert!(reasons.is_empty(), "{reasons:?}");
+    }
+
+    #[test]
+    fn a_formatting_edit_keeps_the_source_beside_a_revision_of_note_references_alone() {
+        let reference = "<w:r><w:footnoteReference w:id=\"1\"/></w:r>";
+        let text = "<w:r><w:delText>Old</w:delText></w:r>";
+        let tab = "<w:r><w:tab/></w:r>";
+        let deleted = |id: u32, content: &str| format!("<w:del w:id=\"{id}\">{content}</w:del>");
+        let linked = deleted(1, reference);
+        let linked = format!("<w:hyperlink w:anchor=\"a\">{linked}</w:hyperlink>");
+        let compound = deleted(1, &format!("{text}{reference}{text}")) + &deleted(2, reference);
+        let cases = [
+            (deleted(1, reference), true),
+            (deleted(1, &format!("{reference}{reference}")), true),
+            (deleted(1, &format!("{text}{reference}")), false),
+            (deleted(1, &format!("{reference}{text}")), false),
+            (deleted(1, &format!("{tab}{reference}")), false),
+            (linked, true),
+            (compound, true),
+        ];
+        for (content, kept) in cases {
+            let xml = format!("<w:p>{content}</w:p>");
+            let dropped = dropped_by_format_edit(&xml, &xml);
+            assert_eq!(dropped == ["w:del"], kept, "{xml}");
+        }
+    }
+
+    const HEAD: &str = "<w:r><w:t>Head</w:t></w:r>";
+    const BOLD_HEAD: &str = "<w:r><w:rPr><w:b/></w:rPr><w:t>Head</w:t></w:r>";
+
+    fn bare_reference(note: &str) -> String {
+        format!("<w:r><w:{note}Reference w:id=\"1\"/></w:r>")
+    }
+
+    fn styled_reference(note: &str) -> String {
+        format!(
+            "<w:r><w:rPr><w:rStyle w:val=\"NoteReference\"/></w:rPr><w:{note}Reference w:id=\"1\"/></w:r>"
+        )
+    }
+
+    fn revision(tag: &str, id: u32, content: &str) -> String {
+        format!("<w:{tag} w:id=\"{id}\" w:author=\"A\">{content}</w:{tag}>")
+    }
+
+    fn assert_restores(tag: &str, note: &str) {
+        let wrapper = revision(tag, 1, &styled_reference(note));
+        let source = format!("<w:p>{HEAD}{wrapper}</w:p>");
+        let rewritten = revision(tag, 1, &bare_reference(note));
+        let written = format!("<w:p>{BOLD_HEAD}{rewritten}</w:p>");
+        let restored = format_edit(&source, &written).expect("the edit is written");
+        assert!(matches!(restored, Cow::Owned(_)));
+        assert_eq!(
+            restored.into_owned(),
+            format!("<w:p>{BOLD_HEAD}{wrapper}</w:p>")
+        );
+    }
+
+    fn assert_kept(source: &str, written: &str) {
+        let source = format!("<w:p>{HEAD}{source}</w:p>");
+        let written = format!("<w:p>{BOLD_HEAD}{written}</w:p>");
+        let dropped = format_edit(&source, &written).expect_err("the source is kept");
+        assert_eq!(dropped, dropped_by_format_edit(&source, &written));
+        assert!(dropped.contains(&"w:del"), "{dropped:?}");
+    }
+
+    #[test]
+    fn format_edit_writes_a_deleted_footnote_reference_with_its_source_bytes() {
+        assert_restores("del", "footnote");
+    }
+
+    #[test]
+    fn format_edit_writes_an_inserted_footnote_reference_with_its_source_bytes() {
+        assert_restores("ins", "footnote");
+    }
+
+    #[test]
+    fn format_edit_writes_a_tracked_endnote_reference_with_its_source_bytes() {
+        assert_restores("del", "endnote");
+        assert_restores("ins", "endnote");
+    }
+
+    #[test]
+    fn format_edit_writes_only_the_revision_of_a_reference_alone_with_its_source_bytes() {
+        let text = "<w:r><w:delText>left</w:delText></w:r>";
+        let around = |reference: String| revision("del", 1, &format!("{text}{reference}{text}"));
+        let alone = revision("del", 2, &styled_reference("footnote"));
+        let source_around = around(styled_reference("footnote"));
+        let source = format!("<w:p>{HEAD}{source_around}{alone}</w:p>");
+        let written_around = around(bare_reference("footnote"));
+        let written_alone = revision("del", 2, &bare_reference("footnote"));
+        let written = format!("<w:p>{BOLD_HEAD}{written_around}{written_alone}</w:p>");
+        let restored = format_edit(&source, &written).expect("the edit is written");
+        assert_eq!(
+            restored.into_owned(),
+            format!("<w:p>{BOLD_HEAD}{written_around}{alone}</w:p>")
+        );
+    }
+
+    #[test]
+    fn format_edit_keeps_the_source_for_a_revision_of_a_reference_alone_inside_a_hyperlink() {
+        let link = |xml: String| format!("<w:hyperlink w:anchor=\"a\">{xml}</w:hyperlink>");
+        assert_kept(
+            &link(revision("del", 1, &styled_reference("footnote"))),
+            &link(revision("del", 1, &bare_reference("footnote"))),
+        );
+    }
+
+    #[test]
+    fn format_edit_keeps_the_source_for_two_revisions_of_a_reference_alone_with_one_id() {
+        let twice = |reference: String| {
+            let wrapper = revision("del", 1, &reference);
+            format!("{wrapper}{HEAD}{wrapper}")
+        };
+        assert_kept(
+            &twice(styled_reference("footnote")),
+            &twice(bare_reference("footnote")),
+        );
+    }
+
+    #[test]
+    fn format_edit_keeps_the_source_when_the_rewrite_has_no_counterpart() {
+        assert_kept(
+            &revision("del", 1, &styled_reference("footnote")),
+            &bare_reference("footnote"),
+        );
+    }
+
+    #[test]
+    fn format_edit_keeps_the_source_when_the_rewrite_has_two_counterparts() {
+        let rewritten = revision("del", 1, &bare_reference("footnote"));
+        assert_kept(
+            &revision("del", 1, &styled_reference("footnote")),
+            &format!("{rewritten}{rewritten}"),
+        );
+    }
+
+    #[test]
+    fn format_edit_keeps_the_source_when_the_rewritten_reference_gains_bold() {
+        let bold = "<w:r><w:rPr><w:b/></w:rPr><w:footnoteReference w:id=\"1\"/></w:r>";
+        assert_kept(
+            &revision("del", 1, &styled_reference("footnote")),
+            &revision("del", 1, bold),
+        );
+    }
+
+    #[test]
+    fn format_edit_keeps_the_source_when_the_rewritten_reference_loses_bold() {
+        let bold = "<w:r><w:rPr><w:rStyle w:val=\"NoteReference\"/><w:b/></w:rPr><w:footnoteReference w:id=\"1\"/></w:r>";
+        assert_kept(
+            &revision("del", 1, bold),
+            &revision("del", 1, &bare_reference("footnote")),
+        );
+    }
+
+    #[test]
+    fn format_edit_keeps_the_source_when_the_rewritten_revision_gains_a_run() {
+        let text = "<w:r><w:delText>x</w:delText></w:r>";
+        assert_kept(
+            &revision("del", 1, &styled_reference("footnote")),
+            &revision("del", 1, &format!("{}{text}", bare_reference("footnote"))),
+        );
+    }
+
+    #[test]
+    fn format_edit_without_a_revision_of_a_reference_alone_checks_dropped_structure() {
+        let source = format!("<w:p>{HEAD}{}</w:p>", styled_reference("footnote"));
+        let written = format!("<w:p>{BOLD_HEAD}{}</w:p>", bare_reference("footnote"));
+        let result = format_edit(&source, &written);
+        assert!(matches!(result, Ok(Cow::Borrowed(_))), "{result:?}");
+        assert_eq!(result.unwrap(), written);
+        let linked = format!("<w:p><w:hyperlink w:anchor=\"a\">{HEAD}</w:hyperlink></w:p>");
+        let unlinked = format!("<w:p>{BOLD_HEAD}</w:p>");
+        let dropped = format_edit(&linked, &unlinked).unwrap_err();
+        assert_eq!(dropped, ["w:hyperlink"]);
+    }
+
+    fn text_run(value: &str) -> String {
+        format!("<w:r><w:t>{value}</w:t></w:r>")
+    }
+
+    fn beside_a_reference_alone(tag: &str, content: &str, reference: &str) -> String {
+        revision(tag, 1, content) + &revision("del", 2, reference)
+    }
+
+    #[test]
+    fn base_revision_counts_count_each_stretch_a_note_reference_does_not_interrupt() {
+        let text = text_run("old");
+        let reference = bare_reference("footnote");
+        let empty = "<w:r><w:rPr><w:b/></w:rPr></w:r>";
+        let rows = [
+            (reference.clone(), 0),
+            (format!("{text}{reference}{text}"), 2),
+            (format!("{text}{reference}"), 1),
+            (format!("{reference}{text}"), 1),
+            (format!("{text}{reference}{text}{reference}{text}"), 3),
+            (format!("{reference}{reference}"), 0),
+            (format!("{text}{text}"), 1),
+            (format!("{text}{empty}{text}{reference}"), 1),
+            (format!("{empty}{reference}{empty}"), 0),
+        ];
+        for (content, count) in rows {
+            for (tag, counts) in [("ins", [count, 0]), ("del", [0, count])] {
+                let xml = format!("<w:p>{HEAD}{}</w:p>", revision(tag, 1, &content));
+                assert_eq!(base_revision_counts(&xml), Some(counts), "{xml}");
+            }
+        }
+    }
+
+    #[test]
+    fn base_revision_counts_count_insertions_and_deletions_apart() {
+        let text = text_run("old");
+        let reference = bare_reference("footnote");
+        let inserted = revision("ins", 1, &format!("{text}{reference}{text}"));
+        let deleted = revision("del", 2, &reference);
+        let xml = format!("<w:p>{HEAD}{inserted}{deleted}</w:p>");
+        assert_eq!(base_revision_counts(&xml), Some([2, 0]));
+    }
+
+    #[test]
+    fn base_revision_counts_need_note_reference_revisions_to_be_paragraph_children_of_runs() {
+        let reference = bare_reference("footnote");
+        let deleted = revision("del", 1, &reference);
+        let linked = format!("<w:p><w:hyperlink>{deleted}</w:hyperlink></w:p>");
+        assert_eq!(base_revision_counts(&linked), None);
+        let link = format!("<w:hyperlink>{}</w:hyperlink>", text_run("x"));
+        let bookmark = "<w:bookmarkStart w:id=\"0\" w:name=\"b\"/>";
+        for other in [link.as_str(), bookmark] {
+            let deleted = revision("del", 1, &format!("{other}{reference}"));
+            assert_eq!(base_revision_counts(&format!("<w:p>{deleted}</w:p>")), None);
+        }
+    }
+
+    #[test]
+    fn format_edit_keeps_the_source_when_an_untracked_note_reference_loses_its_style() {
+        let (styled, bare) = (styled_reference("footnote"), bare_reference("footnote"));
+        let wrapper = revision("del", 1, &styled);
+        let source = format!("<w:p>{HEAD}{wrapper}{styled}</w:p>");
+        let rewritten = revision("del", 1, &bare);
+        let written = format!("<w:p>{BOLD_HEAD}{rewritten}{bare}</w:p>");
+        let dropped = format_edit(&source, &written).expect_err("the source is kept");
+        assert_eq!(dropped, dropped_by_format_edit(&source, &written));
+        assert_eq!(dropped, ["w:del"]);
+    }
+
+    #[test]
+    fn format_edit_writes_a_revision_of_a_reference_alone_beside_an_untouched_note_reference() {
+        let (styled, bare) = (styled_reference("footnote"), bare_reference("footnote"));
+        let wrapper = revision("del", 1, &styled);
+        let source = format!("<w:p>{HEAD}{wrapper}{bare}</w:p>");
+        let rewritten = revision("del", 1, &bare);
+        let written = format!("<w:p>{BOLD_HEAD}{rewritten}{bare}</w:p>");
+        let restored = format_edit(&source, &written).expect("the edit is written");
+        assert_eq!(
+            restored.into_owned(),
+            format!("<w:p>{BOLD_HEAD}{wrapper}{bare}</w:p>")
+        );
+    }
+
+    #[test]
+    fn format_edit_writes_the_rewrite_of_a_text_revision_around_an_endnote_reference() {
+        let text = text_run("old");
+        let (styled, bare) = (styled_reference("endnote"), bare_reference("endnote"));
+        let alone = revision("del", 2, &styled);
+        let source_around = revision("del", 1, &format!("{text}{styled}{text}"));
+        let source = format!("<w:p>{HEAD}{source_around}{alone}</w:p>");
+        let around = revision("del", 1, &format!("{text}{bare}{text}"));
+        let written_alone = revision("del", 2, &bare);
+        let written = format!("<w:p>{BOLD_HEAD}{around}{written_alone}</w:p>");
+        let restored = format_edit(&source, &written).expect("the edit is written");
+        assert_eq!(
+            restored.into_owned(),
+            format!("<w:p>{BOLD_HEAD}{around}{alone}</w:p>")
+        );
+    }
+
+    #[test]
+    fn format_edit_keeps_the_source_when_a_text_revision_ends_with_a_styled_note_reference() {
+        let text = text_run("old");
+        let (styled, bare) = (styled_reference("footnote"), bare_reference("footnote"));
+        assert_kept(
+            &beside_a_reference_alone("del", &format!("{text}{styled}"), &styled),
+            &beside_a_reference_alone("del", &format!("{text}{bare}"), &bare),
+        );
+    }
+
+    #[test]
+    fn format_edit_counts_insertions_and_deletions_apart_beside_a_deleted_reference_alone() {
+        let text = text_run("new");
+        let (styled, bare) = (styled_reference("footnote"), bare_reference("footnote"));
+        assert_kept(
+            &beside_a_reference_alone("ins", &format!("{text}{styled}"), &styled),
+            &beside_a_reference_alone("ins", &format!("{text}{bare}"), &bare),
+        );
+        assert_kept(
+            &beside_a_reference_alone("ins", &format!("{text}{styled}{text}"), &styled),
+            &beside_a_reference_alone("ins", &format!("{text}{bare}{text}"), &bare),
+        );
+    }
+
+    #[test]
+    fn format_edit_counts_deletions_and_insertions_apart_beside_an_inserted_reference_alone() {
+        let text = "<w:r><w:delText>old</w:delText></w:r>";
+        let (styled, bare) = (styled_reference("footnote"), bare_reference("footnote"));
+        let around = |reference: &str| revision("del", 1, &format!("{text}{reference}{text}"));
+        let source_around = around(&styled);
+        let written_around = around(&bare);
+        let alone = revision("ins", 2, &styled);
+        let rewritten = revision("ins", 2, &bare);
+        let source = format!("<w:p>{HEAD}{source_around}{alone}</w:p>");
+        let written = format!("<w:p>{BOLD_HEAD}{written_around}{rewritten}</w:p>");
+        let dropped = format_edit(&source, &written).expect_err("the source is kept");
+        assert_eq!(dropped, ["w:ins"]);
+    }
+
+    #[test]
+    fn format_edit_keeps_the_source_when_deleted_text_and_a_styled_reference_share_a_deletion() {
+        let text = "<w:r><w:delText>old</w:delText></w:r>";
+        let (styled, bare) = (styled_reference("footnote"), bare_reference("footnote"));
+        assert_kept(
+            &beside_a_reference_alone("del", &format!("{styled}{text}"), &styled),
+            &beside_a_reference_alone("del", &format!("{bare}{text}"), &bare),
+        );
+        assert_kept(
+            &beside_a_reference_alone("del", &format!("{text}{styled}"), &styled),
+            &beside_a_reference_alone("del", &format!("{text}{bare}"), &bare),
+        );
+    }
+
+    #[test]
+    fn base_revision_counts_count_each_deleted_text_stretch_between_note_references() {
+        let text = "<w:r><w:delText>old</w:delText></w:r>";
+        let empty = "<w:r><w:rPr><w:b/></w:rPr></w:r>";
+        let (footnote, endnote) = (bare_reference("footnote"), bare_reference("endnote"));
+        let rows = [
+            (format!("{empty}{text}{footnote}"), 1),
+            (format!("{empty}{footnote}{text}"), 1),
+            (format!("{text}{footnote}{text}"), 2),
+            (format!("{text}{endnote}{text}"), 2),
+            (format!("{endnote}{text}{endnote}"), 1),
+            (format!("{text}{footnote}{footnote}{text}"), 2),
+            (format!("{text}{footnote}{endnote}"), 1),
+            (format!("{footnote}{text}{footnote}"), 1),
+        ];
+        for (content, count) in rows {
+            let xml = format!("<w:p>{HEAD}{}</w:p>", revision("del", 1, &content));
+            assert_eq!(base_revision_counts(&xml), Some([0, count]), "{xml}");
+        }
+    }
+
+    fn styled_footnote(id: u32) -> String {
+        format!(
+            "<w:r><w:rPr><w:rStyle w:val=\"FootnoteReference\"/></w:rPr><w:footnoteReference w:id=\"{id}\"/></w:r>"
+        )
+    }
+
+    fn bare_footnote(id: u32) -> String {
+        format!("<w:r><w:footnoteReference w:id=\"{id}\"/></w:r>")
+    }
+
+    const PAGE_BREAK_REFERENCE: &str = "<w:lastRenderedPageBreak/><w:footnoteReference";
+
+    fn after_a_rendered_page_break(run: &str) -> String {
+        run.replace("<w:footnoteReference", PAGE_BREAK_REFERENCE)
+    }
+
+    #[test]
+    fn format_edit_keeps_the_source_when_a_deletion_opens_with_a_page_break_reference_run() {
+        let text = "<w:r><w:delText>old</w:delText></w:r>";
+        let styled = after_a_rendered_page_break(&styled_footnote(1)) + &styled_footnote(2);
+        let bare = after_a_rendered_page_break(&bare_footnote(1)) + &bare_footnote(2);
+        let source = format!(
+            "<w:p>{}{}{HEAD}{}</w:p>",
+            revision("del", 1, &format!("{styled}{text}")),
+            revision("del", 2, &styled_footnote(3)),
+            styled_footnote(4)
+        );
+        let written = format!(
+            "<w:p>{}{}{BOLD_HEAD}{}</w:p>",
+            revision("del", 1, &format!("{bare}{text}")),
+            revision("del", 2, &bare_footnote(3)),
+            bare_footnote(4)
+        );
+        let dropped = format_edit(&source, &written).expect_err("the source is kept");
+        assert_eq!(dropped, ["w:del"]);
+    }
+
+    #[test]
+    fn format_edit_keeps_the_source_when_a_leading_page_break_reference_run_loses_its_style() {
+        let leading = after_a_rendered_page_break(&styled_footnote(1));
+        let written_leading = after_a_rendered_page_break(&bare_footnote(1));
+        let deleted = revision("del", 1, &styled_footnote(2));
+        let rewritten = revision("del", 1, &bare_footnote(2));
+        let source = format!("<w:p>{leading}{HEAD}{deleted}</w:p>");
+        let written = format!("<w:p>{written_leading}{BOLD_HEAD}{rewritten}</w:p>");
+        let dropped = format_edit(&source, &written).expect_err("the source is kept");
+        assert_eq!(dropped, ["w:del"]);
+    }
+
+    fn assert_kept_beside_a_deleted_reference_after(markup: &str) {
+        let deleted = revision("del", 1, &format!("{markup}{}", styled_footnote(1)));
+        let rewritten = revision("del", 1, &bare_footnote(1));
+        let source = format!("<w:p>{HEAD}{deleted}{}</w:p>", styled_footnote(2));
+        let written = format!("<w:p>{BOLD_HEAD}{rewritten}{}</w:p>", bare_footnote(2));
+        let dropped = format_edit(&source, &written).expect_err("the source is kept");
+        assert!(dropped.contains(&"w:del"), "{dropped:?}");
+    }
+
+    #[test]
+    fn format_edit_keeps_the_source_beside_a_deleted_reference_after_a_proofing_mark() {
+        assert_kept_beside_a_deleted_reference_after("<w:proofErr w:type=\"spellEnd\"/>");
+    }
+
+    #[test]
+    fn format_edit_keeps_the_source_beside_a_deleted_reference_after_empty_deleted_text() {
+        assert_kept_beside_a_deleted_reference_after("<w:r><w:delText/></w:r>");
+    }
+
+    #[test]
+    fn format_edit_keeps_the_source_when_an_untracked_reference_leaves_its_hyperlink() {
+        let link = |runs: &str| format!("<w:hyperlink w:anchor=\"a\">{runs}</w:hyperlink>");
+        let linked = link(&format!("{}{}", text_run("link"), bare_footnote(1)));
+        let unlinked = link(&text_run("link")) + &bare_footnote(1);
+        let deleted = revision("del", 1, &styled_footnote(2));
+        let rewritten = revision("del", 1, &bare_footnote(2));
+        let source = format!("<w:p>{HEAD}{linked}{deleted}</w:p>");
+        let written = format!("<w:p>{BOLD_HEAD}{unlinked}{rewritten}</w:p>");
+        let dropped = format_edit(&source, &written).expect_err("the source is kept");
+        assert_eq!(dropped, ["w:del"]);
+    }
+
+    #[test]
+    fn base_writes_paragraph_is_false_for_a_source_that_does_not_parse() {
+        let source = "<w:p><w:del w:id=\"1\"><w:r";
+        let written = format!("<w:p>{BOLD_HEAD}</w:p>");
+        assert!(!base_writes_paragraph(source, &written));
+    }
+
+    #[test]
+    fn format_edit_keeps_the_source_beside_thousands_of_insertions_that_hold_references() {
+        let mut source = HEAD.to_owned();
+        let mut written = BOLD_HEAD.to_owned();
+        for id in 1..=2000 {
+            source += &revision("ins", id, &(text_run("x") + &styled_footnote(id)));
+            written += &revision("ins", id, &(text_run("x") + &bare_footnote(id)));
+        }
+        source += &revision("del", 2001, &styled_footnote(2001));
+        written += &revision("del", 2001, &bare_footnote(2001));
+        let source = format!("<w:p>{source}</w:p>");
+        let written = format!("<w:p>{written}</w:p>");
+        let dropped = format_edit(&source, &written).expect_err("the source is kept");
+        assert_eq!(dropped, ["w:del"]);
     }
 
     fn body(paragraphs: &str) -> String {
@@ -3621,6 +6174,351 @@ mod tests {
     }
 
     #[test]
+    fn rewrites_an_unchanged_paragraph_that_gains_a_page_or_column_break() {
+        let source = format!(
+            "{ROOT}<w:body><w:p w14:paraId=\"0000000A\"><w:r><w:t>a</w:t></w:r></w:p><w:p w14:paraId=\"0000000B\"><w:r><w:t>b</w:t></w:r></w:p></w:body></w:document>"
+        );
+        for kind in ["page", "column"] {
+            let gained = format!(
+                "<w:p w14:paraId=\"0000000B\"><w:r><w:br w:type=\"{kind}\"/><w:t>b</w:t></w:r></w:p>"
+            );
+            let edited = "<w:p w14:paraId=\"0000000A\"><w:r><w:t>ax</w:t></w:r></w:p>";
+            let spliced = splice(&source, &[(0, edited), (1, &gained)], &[0]).unwrap();
+            let inserted = format!(
+                "<w:p w14:paraId=\"0000000B\"><w:r><w:br w:type=\"{kind}\"/></w:r><w:r><w:t>b</w:t></w:r></w:p>"
+            );
+            assert!(spliced.contains(&inserted), "{kind}: {spliced}");
+            assert!(spliced.contains(edited));
+        }
+        let with_break = format!(
+            "{ROOT}<w:body><w:p w14:paraId=\"0000000A\"><w:r><w:t>a</w:t><w:br w:type=\"page\"/></w:r></w:p></w:body></w:document>"
+        );
+        let lost = "<w:p w14:paraId=\"0000000A\"><w:r><w:t>a</w:t></w:r></w:p>";
+        assert_eq!(
+            splice(&with_break, &[(0, lost)], &[]),
+            Some(with_break.clone())
+        );
+        let moved =
+            "<w:p w14:paraId=\"0000000A\"><w:r><w:br w:type=\"page\"/><w:t>a</w:t></w:r></w:p>";
+        assert_eq!(
+            splice(&with_break, &[(0, moved)], &[]),
+            Some(with_break.clone())
+        );
+        let rendered = "<w:p w14:paraId=\"0000000A\"><w:r><w:t>a</w:t></w:r><w:r><w:br w:type=\"page\"/><w:lastRenderedPageBreak/></w:r></w:p>";
+        assert_eq!(
+            splice(&with_break, &[(0, rendered)], &[]),
+            Some(with_break.clone())
+        );
+        let line = "<w:p w14:paraId=\"0000000A\"><w:r><w:t>a</w:t><w:br/><w:br w:type=\"textWrapping\"/><w:br w:type=\"page\"/></w:r></w:p>";
+        assert_eq!(
+            splice(&with_break, &[(0, line)], &[]),
+            Some(with_break.clone())
+        );
+        let nested = format!(
+            "{ROOT}<w:body><w:p w14:paraId=\"0000000A\"><w:hyperlink w:anchor=\"x\"><w:r><w:br w:type=\"page\"/><w:t>a</w:t></w:r></w:hyperlink></w:p></w:body></w:document>"
+        );
+        let unmodelled = "<w:p w14:paraId=\"0000000A\"><w:hyperlink w:anchor=\"x\"><w:r><w:t>a</w:t></w:r></w:hyperlink></w:p>";
+        assert_eq!(
+            splice(&nested, &[(0, unmodelled)], &[]),
+            Some(nested.clone())
+        );
+    }
+
+    #[test]
+    fn finds_page_and_column_breaks_outside_a_paragraphs_own_runs() {
+        for own in [
+            "<w:p><w:r><w:t>a</w:t><w:br w:type=\"page\"/></w:r></w:p>",
+            "<w:p><w:r><w:br w:type=\"page\"></w:br></w:r></w:p>",
+            "<w:p><w:r><w:br w:type='column'/></w:r></w:p>",
+            "<w:p><!-- <w:hyperlink> --><?pi <w:sdt>?><w:r><w:br w:type=\"column\"/></w:r></w:p>",
+            "<w:p><w:hyperlink><w:r><w:br/><w:br w:type=\"textWrapping\"/></w:r></w:hyperlink></w:p>",
+            "<w:p><w:r><w:pict><w:txbxContent><w:p><w:r><w:br w:type=\"page\"/></w:r></w:p></w:txbxContent></w:pict></w:r></w:p>",
+        ] {
+            assert_eq!(breaks_on_own_runs(own), Some(true), "{own}");
+        }
+        for wrapper in [
+            ("<w:hyperlink w:anchor=\"x\">", "</w:hyperlink>"),
+            ("<w:smartTag w:element=\"x\">", "</w:smartTag>"),
+            ("<w:customXml w:element=\"x\">", "</w:customXml>"),
+            ("<w:sdt><w:sdtContent>", "</w:sdtContent></w:sdt>"),
+            ("<w:ins w:id=\"1\">", "</w:ins>"),
+            ("<w:del w:id=\"1\">", "</w:del>"),
+            ("<w:fldSimple w:instr=\" PAGE \">", "</w:fldSimple>"),
+            ("<w:dir w:val=\"rtl\">", "</w:dir>"),
+            (
+                "<mc:AlternateContent><mc:Choice Requires=\"w14\">",
+                "</mc:Choice></mc:AlternateContent>",
+            ),
+        ] {
+            for brk in ["<w:br w:type=\"page\"/>", "<w:br w:type=\"page\"></w:br>"] {
+                let xml = format!("<w:p>{}<w:r>{brk}</w:r>{}</w:p>", wrapper.0, wrapper.1);
+                assert_eq!(breaks_on_own_runs(&xml), Some(false), "{xml}");
+            }
+        }
+        for stray in [
+            "<w:p><w:r><mc:AlternateContent><mc:Fallback><w:pict><w:txbxContent><w:p><w:r><w:br w:type=\"page\"/></w:r></w:p></w:txbxContent></w:pict></mc:Fallback></mc:AlternateContent></w:r></w:p>",
+            "<x:p><x:r><x:br x:type=\"page\"/></x:r></x:p>",
+            "<p><r><br type=\"column\"/></r></p>",
+            "<w:body><w:br w:type=\"page\"/></w:body>",
+        ] {
+            assert_eq!(breaks_on_own_runs(stray), Some(false), "{stray}");
+        }
+    }
+
+    #[test]
+    fn a_part_with_a_break_outside_own_runs_keeps_unchanged_paragraphs_without_counting_breaks() {
+        let wrappers: [(&str, &str); 7] = [
+            ("<w:hyperlink w:anchor=\"x\">", "</w:hyperlink>"),
+            ("<w:smartTag w:element=\"x\">", "</w:smartTag>"),
+            ("<w:customXml w:element=\"x\">", "</w:customXml>"),
+            ("<w:sdt><w:sdtContent>", "</w:sdtContent></w:sdt>"),
+            (
+                "<w:ins w:id=\"9\" w:author=\"A\" w:date=\"2026-01-01T00:00:00Z\">",
+                "</w:ins>",
+            ),
+            ("<w:fldSimple w:instr=\" PAGE \">", "</w:fldSimple>"),
+            ("<w:hyperlink w:anchor=\"y\">", "</w:hyperlink>"),
+        ];
+        let edited = "<w:p w14:paraId=\"0000000A\"><w:r><w:t>ax</w:t></w:r></w:p>";
+        let next = "<w:p w14:paraId=\"0000000C\"><w:r><w:t>n</w:t></w:r></w:p>";
+        let handed =
+            "<w:p w14:paraId=\"0000000C\"><w:r><w:br w:type=\"page\"/><w:t>n</w:t></w:r></w:p>";
+        for (index, (open, close)) in wrappers.into_iter().enumerate() {
+            let brk = if index == 6 {
+                "<w:br w:type=\"page\"></w:br>"
+            } else {
+                "<w:br w:type=\"page\"/>"
+            };
+            let wrapped = |inner: &str| {
+                format!(
+                    "<w:p w14:paraId=\"0000000B\">{open}<w:r>{inner}<w:t>b</w:t></w:r>{close}</w:p>"
+                )
+            };
+            let kept = wrapped(brk);
+            let source = format!(
+                "{ROOT}<w:body><w:p w14:paraId=\"0000000A\"><w:r><w:t>a</w:t></w:r></w:p>{kept}{next}</w:body></w:document>"
+            );
+            let projected = wrapped("");
+            let spliced = splice(&source, &[(0, edited), (1, &projected), (2, handed)], &[0])
+                .unwrap_or_else(|| panic!("{open}: no splice"));
+            assert_eq!(
+                spliced,
+                source.replace(
+                    "<w:p w14:paraId=\"0000000A\"><w:r><w:t>a</w:t></w:r></w:p>",
+                    edited
+                ),
+                "{open}"
+            );
+        }
+        let own = format!(
+            "{ROOT}<w:body><w:p w14:paraId=\"0000000A\"><w:r><w:t>a</w:t></w:r></w:p><w:p w14:paraId=\"0000000B\"><w:r><w:t>b</w:t><w:br w:type=\"page\"/></w:r></w:p>{next}</w:body></w:document>"
+        );
+        let moved = "<w:p w14:paraId=\"0000000B\"><w:r><w:t>b</w:t></w:r></w:p>";
+        assert_eq!(
+            splice(&own, &[(0, edited), (1, moved), (2, handed)], &[0]),
+            Some(own.replace(
+                "<w:p w14:paraId=\"0000000A\"><w:r><w:t>a</w:t></w:r></w:p>",
+                edited
+            ))
+        );
+    }
+
+    /// Saves `source` through each of the three splice paths with `written` as the model's
+    /// paragraphs and `patched` as the precise patches of the changed ones.
+    fn splice_paths(
+        source: &str,
+        written: &[(u32, &str)],
+        changed: &[u32],
+        removed: &[u32],
+        patched: &[(u32, &str)],
+    ) -> [Option<String>; 3] {
+        let mut recorded = RecordedParagraphs::default();
+        for (ordinal, xml) in written {
+            recorded.written.insert(*ordinal, (*xml).to_owned());
+            recorded.order.push(Some(*ordinal));
+        }
+        let body: String = written.iter().map(|(_, xml)| *xml).collect();
+        let serialized = format!("{SERIALIZED_ROOT}<w:body>{body}</w:body></w:document>");
+        let part = S13SplicedPart {
+            format_only: Vec::new(),
+            part: "word/document.xml".to_owned(),
+            sha256: String::new(),
+            paragraphs: written.iter().map(|(ordinal, _)| *ordinal).collect(),
+            changed: changed.to_vec(),
+            inserted: Vec::new(),
+            removed: removed.to_vec(),
+            paragraph_patches: Vec::new(),
+            legacy_paragraphs: Vec::new(),
+            table_patches: Vec::new(),
+        };
+        let patched: BTreeMap<u32, String> = patched
+            .iter()
+            .map(|(ordinal, xml)| (*ordinal, (*xml).to_owned()))
+            .collect();
+        let none = BTreeMap::new();
+        [
+            splice_story_part(
+                source,
+                &serialized,
+                &recorded,
+                &part,
+                &none,
+                &patched,
+                &mut Vec::new(),
+                no_comments(),
+            ),
+            replace_story_part(
+                source,
+                &serialized,
+                &recorded,
+                &part,
+                &none,
+                &patched,
+                &mut Vec::new(),
+                no_comments(),
+            ),
+            splice_source_direct(
+                source,
+                &serialized,
+                &recorded,
+                &part,
+                &none,
+                &patched,
+                &mut Vec::new(),
+            ),
+        ]
+    }
+
+    #[test]
+    fn a_patch_that_keeps_a_break_the_model_moved_on_keeps_the_part_as_before() {
+        let source = format!(
+            "{ROOT}<w:body><w:p w14:paraId=\"0000000B\"><w:hyperlink w:anchor=\"x\"><w:r><w:t>h</w:t></w:r></w:hyperlink><w:r><w:t>AB</w:t><w:br w:type=\"page\"/></w:r></w:p><w:p w14:paraId=\"0000000C\"><w:r><w:t>n</w:t></w:r></w:p></w:body></w:document>"
+        );
+        let patch = "<w:p w14:paraId=\"0000000B\"><w:hyperlink w:anchor=\"x\"><w:r><w:t>h</w:t></w:r></w:hyperlink><w:r><w:t>AxB</w:t><w:br w:type=\"page\"/></w:r></w:p>";
+        let projected = "<w:p w14:paraId=\"0000000B\"><w:hyperlink w:anchor=\"x\"><w:r><w:t>h</w:t></w:r></w:hyperlink><w:r><w:t>AxB</w:t></w:r></w:p>";
+        let handed =
+            "<w:p w14:paraId=\"0000000C\"><w:r><w:br w:type=\"page\"/><w:t>n</w:t></w:r></w:p>";
+        let mut spliced = 0;
+        for (path, saved) in splice_paths(
+            &source,
+            &[(0, projected), (1, handed)],
+            &[0],
+            &[],
+            &[(0, patch)],
+        )
+        .into_iter()
+        .enumerate()
+        {
+            let Some(saved) = saved else { continue };
+            spliced += 1;
+            assert_eq!(
+                saved.matches("w:type=\"page\"").count(),
+                1,
+                "path {path}: {saved}"
+            );
+            assert!(
+                saved.contains("<w:p w14:paraId=\"0000000C\"><w:r><w:t>n</w:t></w:r></w:p>"),
+                "path {path}: {saved}"
+            );
+        }
+        assert!(spliced > 0);
+    }
+
+    #[test]
+    fn a_patch_that_keeps_a_break_the_model_lost_keeps_the_part_as_before() {
+        let source = format!(
+            "{ROOT}<w:body><w:p w14:paraId=\"0000000B\"><w:r><w:t>AC</w:t><w:br w:type=\"page\"/></w:r></w:p><w:p w14:paraId=\"0000000C\"><w:r><w:t>N</w:t></w:r></w:p></w:body></w:document>"
+        );
+        let patch = "<w:p w14:paraId=\"0000000B\"><w:r><w:t>AC</w:t><w:br w:type=\"page\"/><w:t>N</w:t></w:r></w:p>";
+        let projected = "<w:p w14:paraId=\"0000000B\"><w:r><w:t>ACN</w:t></w:r></w:p>";
+        let mut spliced = 0;
+        for (path, saved) in splice_paths(&source, &[(0, projected)], &[0], &[1], &[(0, patch)])
+            .into_iter()
+            .enumerate()
+        {
+            let Some(saved) = saved else { continue };
+            spliced += 1;
+            assert!(saved.contains(patch), "path {path}: {saved}");
+        }
+        assert!(spliced > 0);
+    }
+
+    #[test]
+    fn a_break_lost_from_a_paragraph_the_model_cannot_place_it_in_stays() {
+        let kept = "<w:p w14:paraId=\"0000000B\"><w:hyperlink w:anchor=\"x\"><w:r><w:t>h</w:t></w:r></w:hyperlink><w:r><w:t>A</w:t><w:br w:type=\"page\"/></w:r></w:p>";
+        let source = format!(
+            "{ROOT}<w:body><w:p w14:paraId=\"0000000A\"><w:r><w:t>a</w:t></w:r></w:p>{kept}</w:body></w:document>"
+        );
+        let edited = "<w:p w14:paraId=\"0000000A\"><w:r><w:t>ax</w:t></w:r></w:p>";
+        let dropped = "<w:p w14:paraId=\"0000000B\"><w:hyperlink w:anchor=\"x\"><w:r><w:t>h</w:t></w:r></w:hyperlink><w:r><w:t>A</w:t></w:r></w:p>";
+        let saved = splice(&source, &[(0, edited), (1, dropped)], &[0]).expect("saved");
+        assert!(saved.contains(kept), "{saved}");
+    }
+
+    #[test]
+    fn a_gained_break_is_inserted_into_the_source_paragraph() {
+        let edited = "<w:p w14:paraId=\"0000000A\"><w:r><w:t>ax</w:t></w:r></w:p>";
+        let source_of = |next: &str| {
+            format!(
+                "{ROOT}<w:body><w:p w14:paraId=\"0000000A\"><w:r><w:t>a</w:t></w:r></w:p>{next}</w:body></w:document>"
+            )
+        };
+        let vertical = "<w:p w14:paraId=\"0000000B\"><w:pPr><w:textDirection w:val=\"tbRl\"/></w:pPr><w:r><w:t>b</w:t></w:r></w:p>";
+        let gained = "<w:p w14:paraId=\"0000000B\"><w:pPr><w:rPr><w:b/></w:rPr></w:pPr><w:r><w:br w:type=\"page\"/><w:br w:type=\"column\"/><w:t>b</w:t></w:r></w:p>";
+        let expected = vertical.replace(
+            "</w:pPr>",
+            "</w:pPr><w:r><w:br w:type=\"page\"/></w:r><w:r><w:br w:type=\"column\"/></w:r>",
+        );
+        let mut spliced = 0;
+        for saved in splice_paths(
+            &source_of(vertical),
+            &[(0, edited), (1, gained)],
+            &[0],
+            &[],
+            &[],
+        )
+        .into_iter()
+        .flatten()
+        {
+            spliced += 1;
+            assert!(saved.contains(&expected), "{saved}");
+            assert_eq!(saved.matches("w:type=\"page\"").count(), 1, "{saved}");
+        }
+        assert!(spliced > 0);
+        for properties in [
+            "<w:pPr><w:pStyle w:val=\"Heading1\"/><w:rPr><w:b/><w:color w:val=\"FF0000\"/></w:rPr></w:pPr>",
+            "<w:pPr><mc:AlternateContent><mc:Choice Requires=\"w14\"><w:jc w:val=\"center\"/></mc:Choice><mc:Fallback><w:jc w:val=\"left\"/></mc:Fallback></mc:AlternateContent><w:spacing w:after=\"0\"/></w:pPr>",
+            "<w:pPr/>",
+        ] {
+            let next =
+                format!("<w:p w14:paraId=\"0000000B\">{properties}<w:r><w:t>b</w:t></w:r></w:p>");
+            let projected = format!(
+                "<w:p w14:paraId=\"0000000B\">{properties}<w:r><w:br w:type=\"page\"/><w:t>b</w:t></w:r></w:p>"
+            );
+            let expected = format!(
+                "<w:p w14:paraId=\"0000000B\">{properties}<w:r><w:br w:type=\"page\"/></w:r><w:r><w:t>b</w:t></w:r></w:p>"
+            );
+            let saved =
+                splice(&source_of(&next), &[(0, edited), (1, &projected)], &[0]).expect(properties);
+            assert!(saved.contains(&expected), "{properties}: {saved}");
+            assert_eq!(saved.matches("w:type=\"page\"").count(), 1, "{properties}");
+        }
+        let empty = "<w:p w14:paraId=\"0000000B\"/>";
+        let marked = "<w:p w14:paraId=\"0000000B\"><w:bookmarkStart w:id=\"1\" w:name=\"m\"/><w:r><w:t>b</w:t></w:r><w:bookmarkEnd w:id=\"1\"/></w:p>";
+        let plain = "<w:p w14:paraId=\"0000000B\"><w:r><w:t>b</w:t></w:r></w:p>";
+        let trailing =
+            "<w:p w14:paraId=\"0000000B\"><w:r><w:t>b</w:t><w:br w:type=\"page\"/></w:r></w:p>";
+        for (next, written) in [(empty, gained), (marked, gained), (plain, trailing)] {
+            let source = source_of(next);
+            assert_eq!(
+                splice(&source, &[(0, edited), (1, written)], &[0]),
+                Some(source.replace("<w:t>a</w:t>", "<w:t>ax</w:t>")),
+                "{next} written as {written}"
+            );
+        }
+    }
+
+    #[test]
     fn rewrites_an_unchanged_paragraph_only_when_it_gains_note_numbers() {
         let numbers = [
             ("", 0, 0),
@@ -4046,6 +6944,156 @@ mod tests {
         }
     }
 
+    /// Splices `xml` as paragraph `changed` of the body holding `paragraphs`, both through the
+    /// planned splice and through the direct one, giving each result.
+    fn splice_both(paragraphs: &[&str], changed: u32, xml: &str) -> [Option<String>; 2] {
+        let source = body(&paragraphs.concat());
+        let mut written = paragraphs.to_vec();
+        written[changed as usize] = xml;
+        let numbered: Vec<(u32, &str)> = (0..).zip(written.iter().copied()).collect();
+        let ordinals: Vec<u32> = numbered.iter().map(|&(ordinal, _)| ordinal).collect();
+        let recorded = RecordedParagraphs {
+            written: numbered
+                .iter()
+                .map(|&(ordinal, xml)| (ordinal, xml.to_owned()))
+                .collect(),
+            order: ordinals.iter().copied().map(Some).collect(),
+            ..RecordedParagraphs::default()
+        };
+        let part = S13SplicedPart {
+            format_only: Vec::new(),
+            part: "word/document.xml".to_owned(),
+            sha256: String::new(),
+            paragraphs: ordinals,
+            changed: vec![changed],
+            inserted: Vec::new(),
+            removed: Vec::new(),
+            paragraph_patches: Vec::new(),
+            legacy_paragraphs: Vec::new(),
+            table_patches: Vec::new(),
+        };
+        [
+            splice(&source, &numbered, &[changed]),
+            splice_source_direct(
+                &source,
+                &body(&written.concat()),
+                &recorded,
+                &part,
+                &BTreeMap::new(),
+                &BTreeMap::from([(changed, xml.to_owned())]),
+                &mut Vec::new(),
+            ),
+        ]
+    }
+
+    fn bookmarked(id: u32, text: &str) -> String {
+        format!(
+            "<w:p><w:bookmarkStart w:id=\"{id}\" w:name=\"{text}\"/><w:r><w:t>{text}</w:t></w:r>\
+             <w:bookmarkEnd w:id=\"{id}\"/></w:p>"
+        )
+    }
+
+    #[test]
+    fn a_range_id_the_source_holds_twice_does_not_refuse_the_splice() {
+        let first = bookmarked(4, "a");
+        let third = bookmarked(4, "c");
+        let edited = PLAIN.replace("Plain<", "Plain, edited<");
+        let expected = body(&format!("{first}{edited}{third}"));
+        for (route, spliced) in
+            ["planned", "direct"]
+                .into_iter()
+                .zip(splice_both(&[&first, PLAIN, &third], 1, &edited))
+        {
+            let spliced = spliced.unwrap_or_else(|| panic!("{route}: refused"));
+            assert!(spliced == expected, "{route}: not paragraph 2 alone");
+            assert_eq!(spliced.matches("<w:bookmarkStart w:id=\"4\"").count(), 2);
+            assert_eq!(spliced.matches("<w:bookmarkEnd w:id=\"4\"/>").count(), 2);
+        }
+    }
+
+    #[test]
+    fn a_splice_cannot_add_an_occurrence_of_a_range_id() {
+        let first = bookmarked(4, "a");
+        let third = bookmarked(4, "c");
+        let reused = bookmarked(4, "b");
+        for spliced in splice_both(&[&first, PLAIN, &third], 1, &reused) {
+            assert!(spliced.is_none(), "a third pair of id 4 was spliced");
+        }
+        for spliced in splice_both(&[&first, PLAIN], 1, &reused) {
+            assert!(spliced.is_none(), "a second pair of id 4 was spliced");
+        }
+    }
+
+    #[test]
+    fn a_range_added_by_an_edit_is_spliced_once() {
+        let first = bookmarked(4, "a");
+        let added = bookmarked(9, "b");
+        let expected = body(&format!("{first}{added}"));
+        for (route, spliced) in
+            ["planned", "direct"]
+                .into_iter()
+                .zip(splice_both(&[&first, PLAIN], 1, &added))
+        {
+            assert!(
+                spliced.as_ref() == Some(&expected),
+                "{route}: added bookmark not spliced"
+            );
+        }
+        let twice = format!("{added}{added}").replace("</w:p><w:p>", "");
+        for spliced in splice_both(&[&first, PLAIN], 1, &twice) {
+            assert!(spliced.is_none(), "an added id written twice was spliced");
+        }
+    }
+
+    fn padded(text: &str) -> String {
+        bookmarked(5, text).replace("w:id=\"5\"", "w:id=\"05\"")
+    }
+
+    #[test]
+    fn a_splice_cannot_add_an_occurrence_of_a_range_id_spelled_another_way() {
+        let first = padded("a");
+        let third = padded("c");
+        let reused = bookmarked(5, "b");
+        for spliced in splice_both(&[&first, PLAIN, &third], 1, &reused) {
+            assert!(spliced.is_none(), "a third pair of id 5 was spliced");
+        }
+    }
+
+    #[test]
+    fn a_range_written_again_in_another_spelling_is_spliced() {
+        let first = padded("a");
+        let second = padded("b");
+        let respelled = bookmarked(5, "b");
+        let expected = body(&format!("{first}{respelled}"));
+        for (route, spliced) in
+            ["planned", "direct"]
+                .into_iter()
+                .zip(splice_both(&[&first, &second], 1, &respelled))
+        {
+            assert!(
+                spliced.as_ref() == Some(&expected),
+                "{route}: respelled pair not spliced"
+            );
+        }
+    }
+
+    #[test]
+    fn range_ids_too_large_to_read_exactly_are_told_apart_by_their_text() {
+        let first = bookmarked(4, "a").replace("w:id=\"4\"", "w:id=\"9007199254740992\"");
+        let added = bookmarked(4, "b").replace("w:id=\"4\"", "w:id=\"9007199254740993\"");
+        let expected = body(&format!("{first}{added}"));
+        for (route, spliced) in
+            ["planned", "direct"]
+                .into_iter()
+                .zip(splice_both(&[&first, PLAIN], 1, &added))
+        {
+            assert!(
+                spliced.as_ref() == Some(&expected),
+                "{route}: a pair with another id not spliced"
+            );
+        }
+    }
+
     #[test]
     fn a_proofing_mark_across_paragraphs_does_not_hold_back_rewriting_one_end() {
         for keep in [true, false] {
@@ -4399,5 +7447,394 @@ mod tests {
             splice(&body(source), &[(0, written)], &[]),
             Some(body(written))
         );
+    }
+
+    const PLAIN: &str = "<w:p><w:r><w:t>Plain</w:t></w:r></w:p>";
+    const EDITED: &str = "<w:p><w:r><w:t>Plain, edited</w:t></w:r></w:p>";
+    const START: &str = "<w:commentRangeStart w:id=\"0\"/>";
+
+    /// A comment range end on `id` with its reference run.
+    fn range_end(id: u32) -> String {
+        format!(
+            "<w:commentRangeEnd w:id=\"{id}\"/><w:r><w:rPr><w:rStyle w:val=\"CommentReference\"/></w:rPr><w:commentReference w:id=\"{id}\"/></w:r>"
+        )
+    }
+
+    /// A source paragraph with what a rewrite from the model drops.
+    fn rich(rsid: &str, head: &str, text: &str) -> String {
+        format!(
+            "<w:p w:rsidR=\"{rsid}\" w:rsidRDefault=\"{rsid}\"><w:pPr><w:pageBreakBefore/><w:bidi/><w:rPr><w:rtl/></w:rPr></w:pPr>{head}<w:r w:rsidRPr=\"{rsid}\"><w:rPr><w:rtl/></w:rPr><w:t xml:space=\"preserve\">{text}</w:t></w:r></w:p>"
+        )
+    }
+
+    /// A paragraph as the model writes it.
+    fn modelled(head: &str, text: &str, tail: &str) -> String {
+        format!(
+            "<w:p><w:pPr><w:pageBreakBefore/></w:pPr>{head}<w:r><w:t>{text}</w:t></w:r>{tail}</w:p>"
+        )
+    }
+
+    /// Each splice path's save of `source` then `PLAIN`, written as `written` then `EDITED`,
+    /// and the source with only that last paragraph edited.
+    fn saved_beside_an_edit(
+        source: &[String],
+        written: &[String],
+    ) -> ([Option<String>; 3], String) {
+        let last = source.len() as u32;
+        let mut paragraphs: Vec<(u32, &str)> = written
+            .iter()
+            .enumerate()
+            .map(|(ordinal, xml)| (ordinal as u32, xml.as_str()))
+            .collect();
+        paragraphs.push((last, EDITED));
+        let saved = splice_paths(
+            &body(&format!("{}{PLAIN}", source.concat())),
+            &paragraphs,
+            &[last],
+            &[],
+            &[(last, EDITED)],
+        );
+        (saved, body(&format!("{}{EDITED}", source.concat())))
+    }
+
+    fn end_at_a_paragraph_head() -> ([Option<String>; 3], String) {
+        saved_beside_an_edit(
+            &[
+                rich("00A10001", START, "One"),
+                rich("00A10002", &range_end(0), "Two"),
+            ],
+            &[
+                modelled(START, "One", &range_end(0)),
+                modelled("", "Two", ""),
+            ],
+        )
+    }
+
+    fn range_over_three_paragraphs() -> ([Option<String>; 3], String) {
+        saved_beside_an_edit(
+            &[
+                rich("00A10001", START, "One"),
+                rich("00A10002", "", "Two"),
+                rich("00A10003", &range_end(0), "Three"),
+            ],
+            &[
+                modelled(START, "One", ""),
+                modelled("", "Two", &range_end(0)),
+                modelled("", "Three", ""),
+            ],
+        )
+    }
+
+    fn two_ends_at_one_paragraph_head() -> ([Option<String>; 3], String) {
+        let starts = "<w:commentRangeStart w:id=\"1\"/><w:commentRangeStart w:id=\"2\"/>";
+        let ends = format!("{}{}", range_end(1), range_end(2));
+        saved_beside_an_edit(
+            &[
+                rich("00A10001", starts, "One"),
+                rich("00A10002", &ends, "Two"),
+            ],
+            &[modelled(starts, "One", &ends), modelled("", "Two", "")],
+        )
+    }
+
+    #[test]
+    fn a_range_end_held_at_a_paragraph_head_keeps_both_paragraphs_on_the_story_splice() {
+        let ([saved, _, _], kept) = end_at_a_paragraph_head();
+        assert_eq!(saved, Some(kept));
+    }
+
+    #[test]
+    fn a_range_end_held_at_a_paragraph_head_keeps_both_paragraphs_on_the_replacing_splice() {
+        let ([_, saved, _], kept) = end_at_a_paragraph_head();
+        assert_eq!(saved, Some(kept));
+    }
+
+    #[test]
+    fn a_range_end_held_at_a_paragraph_head_keeps_both_paragraphs_on_the_direct_splice() {
+        let ([_, _, saved], kept) = end_at_a_paragraph_head();
+        assert_eq!(saved, Some(kept));
+    }
+
+    #[test]
+    fn a_range_over_three_paragraphs_keeps_them_on_the_story_splice() {
+        let ([saved, _, _], kept) = range_over_three_paragraphs();
+        assert_eq!(saved, Some(kept));
+    }
+
+    #[test]
+    fn a_range_over_three_paragraphs_keeps_them_on_the_replacing_splice() {
+        let ([_, saved, _], kept) = range_over_three_paragraphs();
+        assert_eq!(saved, Some(kept));
+    }
+
+    #[test]
+    fn a_range_over_three_paragraphs_keeps_them_on_the_direct_splice() {
+        let ([_, _, saved], kept) = range_over_three_paragraphs();
+        assert_eq!(saved, Some(kept));
+    }
+
+    #[test]
+    fn two_range_ends_at_one_paragraph_head_keep_both_paragraphs_on_the_story_splice() {
+        let ([saved, _, _], kept) = two_ends_at_one_paragraph_head();
+        assert_eq!(saved, Some(kept));
+    }
+
+    #[test]
+    fn two_range_ends_at_one_paragraph_head_keep_both_paragraphs_on_the_replacing_splice() {
+        let ([_, saved, _], kept) = two_ends_at_one_paragraph_head();
+        assert_eq!(saved, Some(kept));
+    }
+
+    #[test]
+    fn two_range_ends_at_one_paragraph_head_keep_both_paragraphs_on_the_direct_splice() {
+        let ([_, _, saved], kept) = two_ends_at_one_paragraph_head();
+        assert_eq!(saved, Some(kept));
+    }
+
+    /// Asserts that each story path that saves puts every comment marker where `written` has it.
+    fn assert_written_where_moved(source: &[String], written: &[String]) {
+        let (saved, _) = saved_beside_an_edit(source, written);
+        let comments = |xml: &str| -> Vec<Vec<(String, String, usize)>> {
+            paragraph_occurrences(xml)
+                .unwrap()
+                .iter()
+                .map(|occurrence| {
+                    marks(&xml[paragraph_span(xml, occurrence).unwrap()])
+                        .unwrap()
+                        .comments
+                })
+                .collect()
+        };
+        let mut wanted = comments(&written.concat());
+        wanted.push(Vec::new());
+        let mut writes = 0;
+        for (path, saved) in saved.iter().take(2).enumerate() {
+            let Some(saved) = saved else { continue };
+            writes += 1;
+            assert_eq!(comments(saved), wanted, "path {path}: {saved}");
+        }
+        assert!(writes > 0);
+    }
+
+    #[test]
+    fn a_range_end_moved_into_the_first_paragraph_text_is_written_where_it_moved() {
+        let shortened = format!(
+            "<w:p><w:pPr><w:pageBreakBefore/></w:pPr>{START}<w:r><w:t>On</w:t></w:r>{}<w:r><w:t>e</w:t></w:r></w:p>",
+            range_end(0)
+        );
+        assert_written_where_moved(
+            &[
+                rich("00A10001", START, "One"),
+                rich("00A10002", &range_end(0), "Two"),
+            ],
+            &[shortened, modelled("", "Two", "")],
+        );
+    }
+
+    #[test]
+    fn a_range_end_moved_past_the_next_paragraph_text_is_written_where_it_moved() {
+        assert_written_where_moved(
+            &[
+                rich("00A10001", START, "One"),
+                rich("00A10002", &range_end(0), "Two"),
+            ],
+            &[
+                modelled(START, "One", ""),
+                modelled("", "Two", &range_end(0)),
+            ],
+        );
+    }
+
+    /// Each paragraph's comment markers in `xml`, in order.
+    fn comment_marks(xml: &str) -> Vec<Vec<(String, String, usize)>> {
+        paragraph_occurrences(xml)
+            .unwrap()
+            .iter()
+            .map(|occurrence| {
+                marks(&xml[paragraph_span(xml, occurrence).unwrap()])
+                    .unwrap()
+                    .comments
+            })
+            .collect()
+    }
+
+    /// Asserts that the direct splice puts every comment marker where `written` has it.
+    fn assert_direct_where_moved(source: &[String], written: &[String]) {
+        let ([_, _, saved], _) = saved_beside_an_edit(source, written);
+        let mut wanted = comment_marks(&written.concat());
+        wanted.push(Vec::new());
+        assert_eq!(saved.as_deref().map(comment_marks), Some(wanted));
+    }
+
+    #[test]
+    #[ignore = "the direct splice keeps the source positions of comment markers"]
+    fn a_range_end_moved_into_the_first_paragraph_text_is_written_where_it_moved_on_the_direct_splice()
+     {
+        let shortened = format!(
+            "<w:p><w:pPr><w:pageBreakBefore/></w:pPr>{START}<w:r><w:t>On</w:t></w:r>{}<w:r><w:t>e</w:t></w:r></w:p>",
+            range_end(0)
+        );
+        assert_direct_where_moved(
+            &[
+                rich("00A10001", START, "One"),
+                rich("00A10002", &range_end(0), "Two"),
+            ],
+            &[shortened, modelled("", "Two", "")],
+        );
+    }
+
+    #[test]
+    #[ignore = "the direct splice keeps the source positions of comment markers"]
+    fn a_range_end_moved_past_the_next_paragraph_text_is_written_where_it_moved_on_the_direct_splice()
+     {
+        assert_direct_where_moved(
+            &[
+                rich("00A10001", START, "One"),
+                rich("00A10002", &range_end(0), "Two"),
+            ],
+            &[
+                modelled(START, "One", ""),
+                modelled("", "Two", &range_end(0)),
+            ],
+        );
+    }
+
+    /// Each splice path's save of `source` written as `written` in order, `None` for a new
+    /// paragraph after the one before it, with `removed` dropped.
+    fn saved_as_written(
+        source: &str,
+        written: &[(Option<u32>, &str)],
+        removed: &[u32],
+    ) -> [Option<String>; 3] {
+        let mut recorded = RecordedParagraphs::default();
+        let mut inserted = Vec::new();
+        let mut previous = 0;
+        for (ordinal, xml) in written {
+            match ordinal {
+                Some(ordinal) => {
+                    recorded.written.insert(*ordinal, (*xml).to_owned());
+                    previous = *ordinal;
+                }
+                None => {
+                    recorded.inserted.push((*xml).to_owned());
+                    inserted.push(S13SpliceAnchor::After(previous));
+                }
+            }
+            recorded.order.push(*ordinal);
+        }
+        let body: String = written.iter().map(|(_, xml)| *xml).collect();
+        let serialized = format!("{SERIALIZED_ROOT}<w:body>{body}</w:body></w:document>");
+        let part = S13SplicedPart {
+            format_only: Vec::new(),
+            part: "word/document.xml".to_owned(),
+            sha256: String::new(),
+            paragraphs: written.iter().filter_map(|(ordinal, _)| *ordinal).collect(),
+            changed: Vec::new(),
+            inserted,
+            removed: removed.to_vec(),
+            paragraph_patches: Vec::new(),
+            legacy_paragraphs: Vec::new(),
+            table_patches: Vec::new(),
+        };
+        let none = BTreeMap::new();
+        [
+            splice_story_part(
+                source,
+                &serialized,
+                &recorded,
+                &part,
+                &none,
+                &none,
+                &mut Vec::new(),
+                no_comments(),
+            ),
+            replace_story_part(
+                source,
+                &serialized,
+                &recorded,
+                &part,
+                &none,
+                &none,
+                &mut Vec::new(),
+                no_comments(),
+            ),
+            splice_source_direct(
+                source,
+                &serialized,
+                &recorded,
+                &part,
+                &none,
+                &none,
+                &mut Vec::new(),
+            ),
+        ]
+    }
+
+    const NEW: &str = "<w:p><w:r><w:t>New</w:t></w:r></w:p>";
+
+    fn inserted_after_a_held_end() -> ([Option<String>; 3], String) {
+        let first = modelled(START, "One", &range_end(0));
+        let second = modelled("", "Two", "");
+        let source = body(&format!(
+            "{}{}",
+            rich("00A10001", START, "One"),
+            rich("00A10002", &range_end(0), "Two")
+        ));
+        let saved = saved_as_written(
+            &source,
+            &[(Some(0), &first), (None, NEW), (Some(1), &second)],
+            &[],
+        );
+        (saved, body(&format!("{first}{NEW}{second}")))
+    }
+
+    #[test]
+    fn a_paragraph_inserted_after_a_held_range_end_stays_outside_the_comment_on_the_story_splice() {
+        let ([saved, _, _], _) = inserted_after_a_held_end();
+        assert_eq!(saved, None);
+    }
+
+    #[test]
+    fn a_paragraph_inserted_after_a_held_range_end_stays_outside_the_comment_on_the_replacing_splice()
+     {
+        let ([_, saved, _], written) = inserted_after_a_held_end();
+        assert_eq!(saved, Some(written));
+    }
+
+    fn deleted_inside_a_range() -> ([Option<String>; 3], String, String) {
+        let first = modelled(START, "One", &range_end(0));
+        let third = modelled("", "Two", "");
+        let (kept_first, kept_third) = (
+            rich("00A10001", START, "One"),
+            rich("00A10003", &range_end(0), "Two"),
+        );
+        let source = body(&format!(
+            "{kept_first}{}{kept_third}",
+            rich("00A10002", "", "Mid")
+        ));
+        let saved = saved_as_written(&source, &[(Some(0), &first), (Some(2), &third)], &[1]);
+        (
+            saved,
+            body(&format!("{first}{third}")),
+            body(&format!("{kept_first}{kept_third}")),
+        )
+    }
+
+    #[test]
+    fn a_paragraph_deleted_inside_a_range_leaves_the_model_placement_on_the_story_splice() {
+        let ([saved, _, _], _, _) = deleted_inside_a_range();
+        assert_eq!(saved, None);
+    }
+
+    #[test]
+    fn a_paragraph_deleted_inside_a_range_leaves_the_model_placement_on_the_replacing_splice() {
+        let ([_, saved, _], written, _) = deleted_inside_a_range();
+        assert_eq!(saved, Some(written));
+    }
+
+    #[test]
+    fn a_paragraph_deleted_inside_a_range_leaves_the_model_placement_on_the_direct_splice() {
+        let ([_, _, saved], _, kept) = deleted_inside_a_range();
+        assert_eq!(saved, Some(kept));
     }
 }

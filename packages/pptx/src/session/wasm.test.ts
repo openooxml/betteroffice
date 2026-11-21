@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, test } from 'bun:test';
+import { configureFontCdn } from '@betteroffice/fonts';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
@@ -7,6 +8,7 @@ import {
 } from 'typescript';
 import { engineKind } from '../wasm/engine';
 import { isClientMessage } from '../../../../shared/office-session/protocol';
+import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import {
   mainThreadWasmSpies, sessionWasmFactory, type WasmTestWorker,
 } from '../../../../shared/office-session/testing/wasmWorker';
@@ -33,8 +35,8 @@ function compileRequests(worker: WasmTestWorker) {
 }
 
 test('keeps worker URLs and options statically evaluable', () => {
-  const source = createSourceFile('client.ts',
-    readFileSync(resolve(import.meta.dir, 'client.ts'), 'utf8'), ScriptTarget.Latest);
+  const source = createSourceFile('sessionWorker.browser.ts',
+    readFileSync(resolve(import.meta.dir, 'sessionWorker.browser.ts'), 'utf8'), ScriptTarget.Latest);
   const workers: Array<Record<string, string>> = [];
   function visit(node: Node): void {
     if (isNewExpression(node) && isIdentifier(node.expression) && node.expression.text === 'Worker') {
@@ -54,6 +56,23 @@ test('keeps worker URLs and options statically evaluable', () => {
   }
   visit(source);
   expect(workers).toEqual([{ type: 'module' }]);
+});
+
+test('session opens forward only configured font CDN state', async () => {
+  const previous = getFontCdnConfiguration();
+  try {
+    for (const configured of [undefined, { baseUrl: 'https://session-fonts.example/', timeoutMs: 3456 },
+      { baseUrl: false, timeoutMs: 4567 }] as const) {
+      setFontCdnConfiguration(undefined);
+      if (configured) configureFontCdn(configured);
+      const h = factory();
+      const session = await h.client.openPresentationSession(new Uint8Array(), { wasm: h.module });
+      try {
+        if (configured) expect(input(h.workers[0])).toMatchObject({ fontCdn: configured });
+        else expect(input(h.workers[0])).not.toHaveProperty('fontCdn');
+      } finally { await session.dispose(); }
+    }
+  } finally { setFontCdnConfiguration(previous); }
 });
 
 describe.skipIf(engineKind === 'native')('presentation session wasm reuse', () => {
@@ -285,6 +304,23 @@ describe.skipIf(engineKind === 'native')('presentation session wasm reuse', () =
       for (const spy of spies) expect(spy).not.toHaveBeenCalled();
     } finally {
       release();
+      for (const spy of spies) spy.mockRestore();
+    }
+  });
+
+  test('session workers fetch and cache the editor-core asset', async () => {
+    const h = factory();
+    const spies = mainThreadWasmSpies();
+    try {
+      const first = await h.client.openPresentationSession(new Uint8Array());
+      expect(h.workers[0].urls).toEqual(['https://example.test/session_editor.wasm']);
+      await first.dispose();
+      const second = await h.client.openPresentationSession(new Uint8Array());
+      expect(h.workers[1].urls).toEqual([]);
+      expect(input(h.workers[1]).wasm).toBe(h.workers[0].modules[0]);
+      await second.dispose();
+      for (const spy of spies) expect(spy).not.toHaveBeenCalled();
+    } finally {
       for (const spy of spies) spy.mockRestore();
     }
   });

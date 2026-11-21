@@ -12,6 +12,7 @@
 
 import wasmInit, {
   initSync,
+  engineKind,
   EditSession,
   decodeFontFace as decodePackedFontFace,
   export_docx_markdown_json,
@@ -20,20 +21,23 @@ import wasmInit, {
   list_docx_content_controls_json,
   render_docx_markdown_json,
   render_docx_markdown_with_pages_json,
+  set_wasm_heap_counting,
   set_wasm_heap_limit,
   wasm_failed_allocation_bytes,
   wasm_heap_counted,
   wasm_live_bytes,
   wasm_peak_bytes,
-} from './generated/edit/docx_edit.js';
-import * as editGlue from './generated/edit/docx_edit.js';
+} from './engineEdit';
+import * as editGlue from './engineEdit';
+import { wasmAssetUrl } from './assetEdit';
 import { createWasmModuleState, type WasmAsyncInput } from './loadWasmAsset';
 import { registerResidentEngine } from './residentEngine';
 
 export const editWasmState = createWasmModuleState({
   label: 'docx-edit',
   preloadName: 'preloadEditWasm',
-  assetUrl: () => new URL('./generated/edit/docx_edit_bg.wasm', import.meta.url),
+  assetUrl: wasmAssetUrl,
+  engineKind,
   initAsync: wasmInit,
   initSync,
   shareModule: true,
@@ -45,6 +49,7 @@ export const editWasmState = createWasmModuleState({
           failedAllocationBytes: wasm_failed_allocation_bytes(),
         }
       : undefined,
+  startHeapCounting: () => set_wasm_heap_counting(true),
 });
 
 registerResidentEngine(editWasmState, editGlue);
@@ -67,6 +72,11 @@ export function preloadEditWasmFrom(source: Promise<WebAssembly.Module | null>):
 /**
  * Caps the bytes the editing core in this thread may allocate at once; an
  * allocation past the cap fails as if the memory were full. Undefined removes it.
+ *
+ * On a native engine a cap switches heap counting on for this thread's engine,
+ * which adds a measurable cost to every engine call; no cap costs nothing. The cap is checked at engine-call entry and exit and at progress
+ * checkpoints, so one large allocation between checkpoints can pass it before the
+ * call fails.
  */
 export function setEditWasmHeapLimit(bytes: number | undefined): void {
   editWasmState.ensure();

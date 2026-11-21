@@ -1,4 +1,5 @@
 import type { MethodPolicies, SessionState } from '../../../../shared/office-session';
+import type { FontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import type {
   PptxEditRequest,
   PptxEditResult,
@@ -10,6 +11,10 @@ import type {
 } from '../edits';
 import type { SlideDisplayList } from '../types';
 import type { OpenPresentationOptions } from '../wasm/loader';
+import type { PptxPngOptions, PptxPngTarget } from '../wasm/pngOptions';
+
+/** PNG options a session call carries; an abort signal stays on the caller's side. */
+export type PresentationPngOptions = Omit<PptxPngOptions, 'signal'>;
 
 /** @experimental */
 export interface PresentationFrame {
@@ -46,6 +51,8 @@ export interface PresentationSessionOpenOptions
   fonts?: readonly PresentationSessionFont[];
   fallbackFonts?: readonly PresentationSessionFont[];
   wasm?: ArrayBuffer | WebAssembly.Module;
+  /** @internal */
+  fontCdn?: FontCdnConfiguration;
 }
 
 /**
@@ -93,6 +100,8 @@ export type PresentationSessionMethods = {
   slides(): PresentationSlideSummary[];
   slideSize(): { width: number; height: number };
   save(): ArrayBuffer;
+  /** Draws a slide as PNG bytes in the session's engine, with the faces it measured with. */
+  renderPng(target: PptxPngTarget, options?: PresentationPngOptions): ArrayBuffer;
   dispose(): void;
 };
 
@@ -108,6 +117,7 @@ export const PRESENTATION_SESSION_METHODS = {
   slides: true,
   slideSize: true,
   save: true,
+  renderPng: true,
   dispose: true,
 } satisfies { readonly [K in keyof PresentationSessionMethods]-?: true };
 
@@ -123,5 +133,6 @@ export const PRESENTATION_SESSION_POLICIES: MethodPolicies<PresentationSessionMe
   slides: { lane: 'interactive' },
   slideSize: { lane: 'interactive' },
   save: { lane: 'interactive' },
+  renderPng: { lane: 'interactive', reorderable: false },
   dispose: { lane: 'interactive' },
 };

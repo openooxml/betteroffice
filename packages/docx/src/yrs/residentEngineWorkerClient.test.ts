@@ -23,6 +23,7 @@ import { extractEmbeddedFontFaces, type EmbeddedFontFace } from '../utils/embedd
 import type { Document } from '../types/document';
 import { wasmModuleMemories } from '../wasm/loadWasmAsset';
 import { preloadDocxEngine } from './preloadDocxEngine';
+import { engineKind } from '../wasm/engineEdit';
 
 class FakeWorker implements ResidentEngineWorkerPort {
   static instances: FakeWorker[] = [];
@@ -191,6 +192,19 @@ function setup() {
   const client = new ResidentEngineWorkerClient(worker);
   return { worker, client };
 }
+
+test('font environment commands leave the caller\'s face bytes attached', async () => {
+  const { worker, client } = setup();
+  const data = new Uint8Array([1, 2, 3]);
+  const pending = client.edit({ session: 'room', incarnation: 1, seq: 1, basis: { epoch: 1, version: 0 },
+    kind: 'setFontEnvironment', payload: { faces: [{ family: 'Calibri', data }], chains: {}, families: ['Calibri'] } });
+  const request = worker.requestAt(0);
+  structuredClone(request, { transfer: worker.transfers[0]! });
+  worker.reply({ id: request.id, ok: false, error: 'test complete' });
+  await expect(pending).rejects.toThrow('test complete');
+  expect(worker.transfers[0]).toEqual([]);
+  expect(data).toEqual(new Uint8Array([1, 2, 3]));
+});
 
 test('remote command updates transfer an owned buffer and preserve caller bytes', async () => {
   const { worker, client } = setup();
@@ -910,7 +924,7 @@ describe('warmup', () => {
     }
   });
 
-  test('waits for warm without marking a session ready or bootstrapped', async () => {
+  test.skipIf(engineKind === 'native')('waits for warm without marking a session ready or bootstrapped', async () => {
     const { worker, client } = setup();
     const warm = client.warm(true);
     expect(worker.posted).toEqual([{ id: 1, type: 'warm', hostModule: true }]);
@@ -942,7 +956,7 @@ describe('warmup', () => {
     expect(client.isReady()).toBe(true);
   });
 
-  test('posts the compiled module after warm without adding a request or watchdog', async () => {
+  test.skipIf(engineKind === 'native')('posts the compiled module after warm without adding a request or watchdog', async () => {
     let resolve!: (module: WebAssembly.Module) => void;
     compileModule.mockReturnValue(
       new Promise((settle) => {
@@ -971,7 +985,7 @@ describe('warmup', () => {
     await bootstrap;
   });
 
-  test('posts null once when the host has no shared module', async () => {
+  test.skipIf(engineKind === 'native')('posts null once when the host has no shared module', async () => {
     compileModule.mockResolvedValue(null);
     const { worker, client } = setup();
     const warm = client.warm(true);
@@ -987,7 +1001,7 @@ describe('warmup', () => {
     expect(worker.posted.filter((message) => message.type === 'editModule')).toHaveLength(1);
   });
 
-  test('posts null when compilation fails', async () => {
+  test.skipIf(engineKind === 'native')('posts null when compilation fails', async () => {
     compileModule.mockRejectedValue(new Error('compile failed'));
     const { worker, client } = setup();
     const warm = client.warm(true);
@@ -1019,7 +1033,7 @@ describe('warmup', () => {
     expect(worker.posted.some((message) => message.type === 'editModule')).toBe(false);
   });
 
-  test.each([false, true])('falls back to null on DataCloneError, even if null also throws=%s', async (rejectNull) => {
+  if (engineKind !== 'native') test.each([false, true])('falls back to null on DataCloneError, even if null also throws=%s', async (rejectNull) => {
     const { worker, client } = setup();
     const post = worker.postMessage.bind(worker);
     const posting = spyOn(worker, 'postMessage').mockImplementation((message, transfer) => {

@@ -6,6 +6,8 @@ use std::hash::{Hash, Hasher};
 
 use serde::{Deserialize, Serialize};
 
+use crate::RunUnderline;
+
 /// a color reference as it appears in a `<color>` element (§18.8.3).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Color {
@@ -55,18 +57,94 @@ impl DifferentialFormat {
             ..self.clone()
         }
     }
+
+    /// Whether this is `source` as an earlier release read it: releases before
+    /// italic read none, and releases before bare fills read no fill for a
+    /// `patternFill` without `patternType` and `fgColor` for a solid one.
+    pub fn is_released_reading_of(&self, source: &Self) -> bool {
+        self.font_color == source.font_color
+            && self.bold == source.bold
+            && (self.italic.is_none() || self.italic == source.italic)
+            && (self.fill.is_none() || source.fill.is_some())
+    }
 }
 
 /// a cell font. only the facets we render are modelled; unset fields inherit.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+///
+/// Serializes `underline` as a boolean; `underline_style` names a kind other than single.
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+#[serde(from = "FontFields")]
 pub struct Font {
     pub name: Option<String>,
     pub size_pt: Option<f64>,
     pub bold: bool,
     pub italic: bool,
-    pub underline: bool,
+    pub underline: RunUnderline,
     pub strike: bool,
     pub color: Option<Color>,
+}
+
+impl Font {
+    /// The underline kind a boolean cannot carry.
+    pub fn underline_style(&self) -> Option<RunUnderline> {
+        match self.underline {
+            RunUnderline::None | RunUnderline::Single => None,
+            style => Some(style),
+        }
+    }
+}
+
+impl Serialize for Font {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+
+        let style = self.underline_style();
+        let mut state = serializer.serialize_struct("Font", 7 + usize::from(style.is_some()))?;
+        state.serialize_field("name", &self.name)?;
+        state.serialize_field("size_pt", &self.size_pt)?;
+        state.serialize_field("bold", &self.bold)?;
+        state.serialize_field("italic", &self.italic)?;
+        state.serialize_field("underline", &(self.underline != RunUnderline::None))?;
+        match style {
+            Some(style) => state.serialize_field("underline_style", &style)?,
+            None => state.skip_field("underline_style")?,
+        }
+        state.serialize_field("strike", &self.strike)?;
+        state.serialize_field("color", &self.color)?;
+        state.end()
+    }
+}
+
+#[derive(Deserialize)]
+struct FontFields {
+    name: Option<String>,
+    size_pt: Option<f64>,
+    bold: bool,
+    italic: bool,
+    underline: bool,
+    #[serde(default)]
+    underline_style: Option<RunUnderline>,
+    strike: bool,
+    color: Option<Color>,
+}
+
+impl From<FontFields> for Font {
+    fn from(fields: FontFields) -> Self {
+        let underline = match (fields.underline, fields.underline_style) {
+            (false, _) => RunUnderline::None,
+            (true, Some(style)) if style != RunUnderline::None => style,
+            (true, _) => RunUnderline::Single,
+        };
+        Font {
+            name: fields.name,
+            size_pt: fields.size_pt,
+            bold: fields.bold,
+            italic: fields.italic,
+            underline,
+            strike: fields.strike,
+            color: fields.color,
+        }
+    }
 }
 
 /// A cell fill.
@@ -574,7 +652,7 @@ struct FontKey<'a> {
     size_pt: Option<u64>,
     bold: bool,
     italic: bool,
-    underline: bool,
+    underline: RunUnderline,
     strike: bool,
     color: Option<ColorKey<'a>>,
 }
@@ -779,6 +857,9 @@ pub struct Stylesheet {
     pub indexed_colors: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dxfs: Vec<DifferentialFormat>,
+    /// read from the source only; not snapshotted.
+    #[serde(skip)]
+    dxf_fills_differ: BTreeSet<u32>,
     /// not snapshotted: a restored stylesheet knows none and appends its own.
     #[serde(skip)]
     saved_plain: SavedPlain,
@@ -794,6 +875,11 @@ pub struct Stylesheet {
     /// format facets.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     released_xfs: Vec<bool>,
+    /// set while the stylesheet stands for a shared state made before a
+    /// workbook's own entries for builtin ids were read: those entries are not
+    /// consulted.
+    #[serde(skip)]
+    builtin_number_formats: bool,
     #[serde(skip)]
     derived_memo: HashMap<(u32, Xf), u32>,
     #[serde(skip)]
@@ -816,6 +902,30 @@ struct CurrencyMemo {
     xf_formats: Vec<Option<u16>>,
     used_styles: Vec<u32>,
     symbols: Vec<char>,
+}
+
+impl Stylesheet {
+    /// `==` plus the state `==` leaves out; only the memos are ignored.
+    pub fn same_state(&self, other: &Self) -> bool {
+        self == other
+            && self.saved_plain == other.saved_plain
+            && self.bound_plain == other.bound_plain
+            && self.xfs_with_extra_xml == other.xfs_with_extra_xml
+            && self.exact_style_indices == other.exact_style_indices
+            && self.released_xfs == other.released_xfs
+            && self.builtin_number_formats == other.builtin_number_formats
+    }
+
+    /// Whether the source gives `dxfs[index]` a solid fill whose foreground
+    /// and background colors differ.
+    pub fn dxf_fill_colors_differ(&self, index: u32) -> bool {
+        self.dxf_fills_differ.contains(&index)
+    }
+
+    #[doc(hidden)]
+    pub fn note_dxf_fill_colors_differ(&mut self, index: u32) {
+        self.dxf_fills_differ.insert(index);
+    }
 }
 
 impl PartialEq for Stylesheet {
@@ -889,7 +999,7 @@ const DEFAULT_FONT: Font = Font {
     size_pt: None,
     bold: false,
     italic: false,
-    underline: false,
+    underline: RunUnderline::None,
     strike: false,
     color: None,
 };
@@ -962,6 +1072,8 @@ impl Stylesheet {
             xfs_with_extra_xml: _,
             exact_style_indices: _,
             released_xfs: _,
+            builtin_number_formats: _,
+            dxf_fills_differ: _,
             derived_memo: _,
             font_memo: _,
             fill_memo: _,
@@ -1032,14 +1144,22 @@ impl Stylesheet {
         self.xf(style_index)?.alignment.as_ref()
     }
 
-    /// the number-format for a cell style: custom code when id >= 164, else the
-    /// builtin id. a missing/unset xf resolves to builtin `0` (General).
+    /// the number-format for a cell style: the workbook's own code when it
+    /// declares the id (General, id `0`, excepted), else the builtin id. a
+    /// missing/unset xf resolves to builtin `0` (General).
     pub fn format_code_for(&self, style_index: u32) -> FormatCode<'_> {
         let id = self
             .xf(style_index)
             .and_then(|xf| xf.num_fmt_id)
             .unwrap_or(0);
-        if id >= 164
+        self.format_code_for_id(id)
+    }
+
+    /// the number-format a cell using number format `id` reads, as
+    /// [`Stylesheet::format_code_for`] resolves it.
+    pub fn format_code_for_id(&self, id: u16) -> FormatCode<'_> {
+        if id != 0
+            && (id >= 164 || !self.builtin_number_formats)
             && let Some((_, code)) = self.num_fmts.iter().find(|(k, _)| *k == id)
         {
             return FormatCode::Custom(code);
@@ -1127,6 +1247,17 @@ impl Stylesheet {
         if self.borders.is_empty() && format.border != Border::default() {
             self.borders.push(Border::default());
         }
+        let authored;
+        let format = match self.authored_number_format(&format.number_format) {
+            Some(number_format) => {
+                authored = CellFormat {
+                    number_format,
+                    ..format.clone()
+                };
+                &authored
+            }
+            None => format,
+        };
         let previous_len = self.cell_xfs.len();
         let result = match &format.number_format {
             NumberFormat::Builtin { id } => Ok(Some(self.intern_builtin_cell_format(format, *id))),
@@ -1165,6 +1296,27 @@ impl Stylesheet {
     }
 
     #[doc(hidden)]
+    pub fn recovery_provenance(&self) -> (&BTreeMap<u32, Option<u32>>, bool, &[bool]) {
+        (
+            &self.format_sources,
+            self.exact_style_indices,
+            &self.released_xfs,
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn restore_recovery_provenance(
+        &mut self,
+        sources: BTreeMap<u32, Option<u32>>,
+        exact: bool,
+        released: Vec<bool>,
+    ) {
+        self.format_sources = sources;
+        self.exact_style_indices = exact;
+        self.released_xfs = released;
+    }
+
+    #[doc(hidden)]
     pub fn format_source(&self, index: u32) -> (Option<u32>, Option<u32>) {
         match self.format_sources.get(&index) {
             None => (Some(index), None),
@@ -1176,6 +1328,20 @@ impl Stylesheet {
     #[doc(hidden)]
     pub fn preserve_style_identity(&mut self) {
         self.exact_style_indices = true;
+    }
+
+    /// reads the workbook's own entries for builtin ids as the builtins, as a
+    /// shared state made before those entries were read does.
+    #[doc(hidden)]
+    pub fn read_builtin_number_formats(&mut self) {
+        self.builtin_number_formats = true;
+    }
+
+    /// reads the workbook's own entries for builtin ids as declared, as a new
+    /// seed of the workbook does.
+    #[doc(hidden)]
+    pub fn read_declared_number_formats(&mut self) {
+        self.builtin_number_formats = false;
     }
 
     #[doc(hidden)]
@@ -1262,6 +1428,26 @@ impl Stylesheet {
             canonical_index,
         );
         Ok(index)
+    }
+
+    /// what an authored builtin id means where the workbook's first entry for
+    /// that id has another code: the builtin code, or General for an id
+    /// without one.
+    fn authored_number_format(&self, format: &NumberFormat) -> Option<NumberFormat> {
+        let NumberFormat::Builtin { id } = format else {
+            return None;
+        };
+        if *id == 0 || *id >= 164 || self.builtin_number_formats {
+            return None;
+        }
+        let (_, own) = self.num_fmts.iter().find(|(declared, _)| declared == id)?;
+        match crate::numfmt::builtin_format_code(*id) {
+            Some(code) if own != code => Some(NumberFormat::Custom {
+                pattern: code.to_string(),
+            }),
+            Some(_) => None,
+            None => Some(NumberFormat::Builtin { id: 0 }),
+        }
     }
 
     #[inline(never)]
@@ -1862,6 +2048,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_differential_format_read_before_italic_is_its_released_reading() {
+        let source = DifferentialFormat {
+            bold: Some(true),
+            italic: Some(true),
+            fill: Some("#ffc7ce".into()),
+            ..DifferentialFormat::default()
+        };
+        let released = source.released_reading();
+        assert_eq!(released.italic, None);
+        assert_eq!(released.fill, source.fill);
+        assert!(released.is_released_reading_of(&source));
+    }
+
+    #[test]
     fn format_facets_intern_and_serialize_in_small_and_large_pools() {
         let mut value = serde_json::to_value(CellFormat::default()).unwrap();
         value["protection"] = serde_json::json!({"locked": false, "hidden": true});
@@ -1926,6 +2126,41 @@ mod tests {
         assert_eq!(
             serde_json::to_value(serde_json::from_value::<Xf>(xf.clone()).unwrap()).unwrap(),
             xf
+        );
+    }
+
+    #[test]
+    fn font_json_keeps_the_underline_boolean_and_adds_its_style() {
+        let json = |underline| {
+            serde_json::to_value(Font {
+                underline,
+                ..Font::default()
+            })
+            .unwrap()
+        };
+        assert_eq!(json(RunUnderline::None)["underline"], false);
+        assert_eq!(json(RunUnderline::Single)["underline"], true);
+        for underline in [RunUnderline::None, RunUnderline::Single] {
+            assert!(json(underline).get("underline_style").is_none());
+        }
+        for (underline, style) in [
+            (RunUnderline::Double, "double"),
+            (RunUnderline::SingleAccounting, "singleAccounting"),
+            (RunUnderline::DoubleAccounting, "doubleAccounting"),
+        ] {
+            let value = json(underline);
+            assert_eq!(value["underline"], true);
+            assert_eq!(value["underline_style"], style);
+            assert_eq!(
+                serde_json::from_value::<Font>(value).unwrap().underline,
+                underline
+            );
+        }
+        let mut cleared = json(RunUnderline::Double);
+        cleared["underline"] = false.into();
+        assert_eq!(
+            serde_json::from_value::<Font>(cleared).unwrap().underline,
+            RunUnderline::None
         );
     }
 
@@ -2047,6 +2282,14 @@ mod tests {
 
         ss.cell_xfs[1].num_fmt_id = Some(14);
         assert_eq!(ss.format_code_for(1), FormatCode::Builtin(14));
+
+        ss.num_fmts.push((14, "yyyy-mm-dd".into()));
+        assert_eq!(ss.format_code_for(1), FormatCode::Custom("yyyy-mm-dd"));
+
+        ss.num_fmts.push((0, "0.00".into()));
+        ss.cell_xfs[1].num_fmt_id = Some(0);
+        assert_eq!(ss.format_code_for(1), FormatCode::Builtin(0));
+        assert_eq!(ss.format_code_for(0), FormatCode::Builtin(0));
     }
 
     #[test]
@@ -2173,7 +2416,11 @@ mod tests {
                 ..base.clone()
             },
             Font {
-                underline: true,
+                underline: RunUnderline::Single,
+                ..base.clone()
+            },
+            Font {
+                underline: RunUnderline::Double,
                 ..base.clone()
             },
             Font {

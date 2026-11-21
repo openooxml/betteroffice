@@ -22,6 +22,7 @@ import { useLayoutPipeline, type UseLayoutPipelineReturn } from './hooks/useLayo
 import { useLayoutTriggers } from './hooks/useLayoutTriggers';
 import { useRevisionPreview } from './hooks/useRevisionPreview';
 import { scrollIntoViewDelta, scrollViewport } from './internals/viewportBand';
+import { stampSourceVersion } from './internals/layoutProvenance';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -497,6 +498,50 @@ test('a local Delete reveals a distant caret even when its collapsed selection i
   expect(t.onError).not.toHaveBeenCalled();
 });
 
+test('a local layout commit reveals the caret once, so later frames of it leave a newer scroll alone', async () => {
+  const t = await mount(false, true);
+  t.expectCaret(0);
+  stampSourceVersion(t.queries, 'v1');
+  t.scroller.scrollTop = 2300;
+  act(() => t.view.rerender(t.inputFor({ layoutUpdateOrigin: 'local', layoutCommit: 1, layoutCommitVersion: 'v1', displayListFrameEpoch: 2 })));
+  expect(t.scroller.scrollTop).toBeLessThan(2300);
+  t.scroller.scrollTop = 2300;
+  act(() => t.view.rerender(t.inputFor({ layoutUpdateOrigin: 'local', layoutCommit: 1, layoutCommitVersion: 'v1', displayListFrameEpoch: 3 })));
+  expect(t.scroller.scrollTop).toBe(2300);
+  act(() => t.view.rerender(t.inputFor({ layoutUpdateOrigin: 'local', layoutCommit: 2, layoutCommitVersion: 'v1', displayListFrameEpoch: 4 })));
+  expect(t.scroller.scrollTop).toBeLessThan(2300);
+});
+
+test('a local layout commit keeps its reveal for the frame of its version when an older frame shows first', async () => {
+  const t = await mount(false, true);
+  t.expectCaret(0);
+  stampSourceVersion(t.queries, 'v1');
+  t.scroller.scrollTop = 2300;
+  act(() => t.view.rerender(t.inputFor({ layoutUpdateOrigin: 'local', layoutCommit: 1, layoutCommitVersion: 'v2', displayListFrameEpoch: 2 })));
+  expect(t.scroller.scrollTop).toBeLessThan(2300);
+  t.scroller.scrollTop = 2300;
+  stampSourceVersion(t.queries, 'v2');
+  act(() => t.view.rerender(t.inputFor({ layoutUpdateOrigin: 'local', layoutCommit: 1, layoutCommitVersion: 'v2', displayListFrameEpoch: 3 })));
+  expect(t.scroller.scrollTop).toBeLessThan(2300);
+  t.scroller.scrollTop = 2300;
+  act(() => t.view.rerender(t.inputFor({ layoutUpdateOrigin: 'local', layoutCommit: 1, layoutCommitVersion: 'v2', displayListFrameEpoch: 4 })));
+  expect(t.scroller.scrollTop).toBe(2300);
+});
+
+test('a local layout commit whose caret is not laid out yet reveals it on the frame that lays it out', async () => {
+  const t = await mount(false, true);
+  t.expectCaret(0);
+  t.scroller.scrollTop = 2300;
+  stampSourceVersion(t.queries, 'v1');
+  const ready = spyOn(t.queries, 'isReady').mockReturnValue(false);
+  restoreMocks.push(() => ready.mockRestore());
+  act(() => t.view.rerender(t.inputFor({ layoutUpdateOrigin: 'local', layoutCommit: 1, layoutCommitVersion: 'v1', displayListFrameEpoch: 2 })));
+  expect(t.scroller.scrollTop).toBe(2300);
+  ready.mockReturnValue(true);
+  act(() => t.view.rerender(t.inputFor({ layoutUpdateOrigin: 'local', layoutCommit: 1, layoutCommitVersion: 'v1', displayListFrameEpoch: 3 })));
+  expect(t.scroller.scrollTop).toBeLessThan(2300);
+});
+
 test('a resident Delete frame reveals an unchanged distant caret after a remote layout', async () => {
   let session!: YrsSession;
   const applyResidentDelete = mock(async () => {
@@ -784,3 +829,81 @@ test('a replica that fails to load drops the keys waiting for it', async () => {
   expect(t.session.selection()).toBeNull();
   expect(t.input.current!.hasPendingInput()).toBe(false);
 });
+
+test('a host scroll before the first caret placement still lets that placement scroll into view', async () => {
+  const { input, scroller, scrollTop, expectCaret } = await mount(true, false);
+  act(() => {
+    scroller.scrollTop = scrollTop - 50;
+    scroller.dispatchEvent(new Event('scroll'));
+  });
+  act(() => input.current!.setSelectionFromDisplay(2));
+  expectCaret(1);
+  expect(scroller.scrollTop).toBeGreaterThan(scrollTop - 50);
+});
+
+test.each([
+  ['read-only', true],
+  ['editable', false],
+] as const)('a %s default caret seeded after a host scroll leaves the view where the host put it', async (_, readOnly) => {
+  const { session, input, scroller, replicaReadyRef, view, inputFor, expectCaret } =
+    await mount(readOnly, true, false);
+  act(() => {
+    scroller.scrollTop = 2000;
+    scroller.dispatchEvent(new Event('scroll'));
+  });
+  act(() => {
+    session.openDocx(bytes, true);
+    replicaReadyRef.current = true;
+    view.rerender(inputFor());
+  });
+  expectCaret(0);
+  expect(scroller.scrollTop).toBe(2000);
+  act(() => input.current!.setSelectionFromDisplay(3));
+  expectCaret(2);
+  expect(scroller.scrollTop).not.toBe(2000);
+});
+
+test('an explicit selection at the story start after a host scroll still scrolls into view while the default caret waits for layout', async () => {
+  const { session, input, scroller, view, inputFor, queries, expectCaret } =
+    await mount(false, true, true, { displayListQueries: null });
+  expect(session.selection()).not.toBeNull();
+  act(() => {
+    scroller.scrollTop = 2000;
+    scroller.dispatchEvent(new Event('scroll'));
+  });
+  act(() => input.current!.setSelectionFromDisplay(1));
+  act(() => view.rerender(inputFor({ displayListQueries: queries as unknown as DisplayListQueries })));
+  expectCaret(0);
+  expect(scroller.scrollTop).not.toBe(2000);
+});
+
+test.each([
+  ['Shift leaves the restored view', false, { key: 'Shift' }, true],
+  ['read-only Enter leaves the restored view', true, { key: 'Enter' }, true],
+  ['Ctrl+Home scrolls to the caret', false, { key: 'Home', ctrlKey: true }, false],
+  ['Delete scrolls to the caret it edits at', false, { key: 'Delete' }, false],
+] as const)('after a host scroll while the default caret waits for layout, %s', async (_, readOnly, key, kept) => {
+  const { session, scroller, view, inputFor, queries, expectCaret } =
+    await mount(readOnly, true, true, { displayListQueries: null });
+  expect(session.selection()).not.toBeNull();
+  act(() => {
+    scroller.scrollTop = 2000;
+    scroller.dispatchEvent(new Event('scroll'));
+  });
+  await act(async () => { fireEvent.keyDown(view.getByTestId('yrs-input'), key); });
+  act(() => view.rerender(inputFor({ displayListQueries: queries as unknown as DisplayListQueries })));
+  expectCaret(0);
+  if (kept) expect(scroller.scrollTop).toBe(2000);
+  else expect(scroller.scrollTop).not.toBe(2000);
+});
+
+test('a reader wheel before the first caret placement keeps the view where the reader put it', async () => {
+  const { input, scroller, scrollTop, expectCaret } = await mount(true, false);
+  act(() => {
+    scroller.querySelector('.canvas-page')!.dispatchEvent(new Event('wheel', { bubbles: true }));
+  });
+  act(() => input.current!.setSelectionFromDisplay(2));
+  expectCaret(1);
+  expect(scroller.scrollTop).toBe(scrollTop);
+});
+

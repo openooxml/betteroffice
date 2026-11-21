@@ -5,6 +5,20 @@ import type {
   DocxCommandShortcut,
   DocxPluginCommandId,
 } from './types';
+import {
+  formatChord,
+  isMacPlatform,
+  normalizeChord as normalizeHostChord,
+  parseChord,
+} from '../../../../shared/keyboard/chords';
+
+export { formatChord, isMacPlatform, matchesChord } from '../../../../shared/keyboard/chords';
+
+/** `chord` in canonical form, or null; contributed chords name `Mod`, never a physical `Ctrl`. */
+export function normalizeChord(chord: string): string | null {
+  const canonical = normalizeHostChord(chord);
+  return canonical && !parseChord(canonical).ctrl ? canonical : null;
+}
 
 type DescriptorTable = { readonly [K in DocxCommandId]: DocxCommandDescriptor<K> };
 
@@ -22,6 +36,13 @@ const plain = <K extends DocxCommandId>(chord: string) =>
 
 /** Every DOCX command, with its label and keyboard bindings. */
 export const DOCX_COMMAND_DESCRIPTORS: DescriptorTable = Object.freeze({
+  cut: descriptor('cut', 'contextMenu.cut', true, [plain('Mod+X')]),
+  copy: descriptor('copy', 'contextMenu.copy', false, [plain('Mod+C')]),
+  paste: descriptor('paste', 'contextMenu.paste', true, [plain('Mod+V')]),
+  pasteAsPlainText: descriptor('pasteAsPlainText', 'contextMenu.pastePlainText', true, [
+    plain('Mod+Shift+V'),
+  ]),
+  selectAll: descriptor('selectAll', 'contextMenu.selectAll', false, [plain('Mod+A')]),
   undo: descriptor('undo', 'formattingBar.undo', true, [plain('Mod+Z')]),
   redo: descriptor('redo', 'formattingBar.redo', true, [plain('Mod+Shift+Z'), plain('Mod+Y')]),
   bold: descriptor('bold', 'formattingBar.bold', true, [plain('Mod+B')]),
@@ -32,7 +53,10 @@ export const DOCX_COMMAND_DESCRIPTORS: DescriptorTable = Object.freeze({
     plain('Mod+Shift+='),
   ]),
   subscript: descriptor('subscript', 'formattingBar.subscript', true, [plain('Mod+=')]),
-  clearFormatting: descriptor('clearFormatting', 'formattingBar.clearFormatting', true),
+  clearFormatting: descriptor('clearFormatting', 'formattingBar.clearFormatting', true, [
+    { chord: 'Mod+Space', args: null, platform: 'other' },
+    { chord: 'Mod+\\', args: null, platform: 'mac' },
+  ]),
   paragraphStyle: descriptor('paragraphStyle', 'commands.paragraphStyle', true),
   fontFamily: descriptor('fontFamily', 'commands.fontFamily', true),
   fontSize: descriptor('fontSize', 'fontSize.label', true),
@@ -45,6 +69,8 @@ export const DOCX_COMMAND_DESCRIPTORS: DescriptorTable = Object.freeze({
     { chord: 'Mod+J', args: { value: 'both' } },
   ]),
   lineSpacing: descriptor('lineSpacing', 'lineSpacing.label', true),
+  paragraphSpacing: descriptor('paragraphSpacing', 'lineSpacing.paragraphSpacing', true),
+  paragraphSpacingDialog: descriptor('paragraphSpacingDialog', 'lineSpacing.options', true),
   bulletList: descriptor('bulletList', 'lists.bulletList', true),
   numberedList: descriptor('numberedList', 'lists.numberedList', true),
   indent: descriptor('indent', 'lists.increaseIndent', true),
@@ -103,47 +129,12 @@ export function isPluginCommandId(value: unknown): value is DocxPluginCommandId 
   return typeof value === 'string' && PLUGIN_COMMAND_ID.test(value);
 }
 
-interface ParsedChord {
-  mod: boolean;
-  shift: boolean;
-  alt: boolean;
-  key: string;
-}
-
-function parseChord(chord: string): ParsedChord {
-  const parts = chord.split('+');
-  const key = parts.length > 1 && parts[parts.length - 1] === '' ? '+' : parts[parts.length - 1];
-  const modifiers = new Set(parts.slice(0, -1));
-  return {
-    mod: modifiers.has('Mod'),
-    shift: modifiers.has('Shift'),
-    alt: modifiers.has('Alt'),
-    key: key.toLowerCase(),
-  };
-}
-
-export function isMacPlatform(): boolean {
-  return typeof navigator !== 'undefined' && /Mac|iPod|iPhone|iPad/.test(navigator.platform);
-}
-
-const MODIFIERS: ReadonlySet<string> = new Set(['Mod', 'Shift', 'Alt']);
-
-/**
- * `chord` in canonical form (`Mod+Alt+Shift+key`), or null when it is not a chord. `+` counts as
- * `=`, whose matcher also accepts the `+` key.
- */
-export function normalizeChord(chord: string): string | null {
-  if (typeof chord !== 'string' || chord.length === 0) return null;
-  const parts = chord.split('+');
-  const modifiers =
-    parts.length > 1 && parts[parts.length - 1] === '' ? parts.slice(0, -2) : parts.slice(0, -1);
-  if (!modifiers.every((modifier) => MODIFIERS.has(modifier))) return null;
-  const parsed = parseChord(chord);
-  if (parsed.key.length === 0) return null;
-  const key = parsed.key === '+' ? '=' : parsed.key;
-  return [parsed.mod && 'Mod', parsed.alt && 'Alt', parsed.shift && 'Shift', key]
-    .filter(Boolean)
-    .join('+');
+/** Whether a binding exists on the current platform. */
+export function shortcutMatchesPlatform(
+  shortcut: Pick<DocxCommandShortcut, 'chord' | 'platform'>,
+  mac = isMacPlatform()
+): boolean {
+  return shortcut.platform === undefined || shortcut.platform === (mac ? 'mac' : 'other');
 }
 
 /** Canonical chords the text input handles itself (clipboard and select all). */
@@ -160,44 +151,16 @@ export const BUILT_IN_CHORDS: ReadonlySet<string> = new Set(
   )
 );
 
-function keyMatches(key: string, event: KeyboardEvent): boolean {
-  if (key === '=') return event.code === 'Equal' || event.key === '=' || event.key === '+';
-  return event.key.toLowerCase() === key;
-}
-
-/** Whether a keydown event presses `chord`. */
-export function matchesChord(chord: string, event: KeyboardEvent, mac = isMacPlatform()): boolean {
-  const parsed = parseChord(chord);
-  const mod = mac ? event.metaKey : event.ctrlKey;
-  const other = mac ? event.ctrlKey : event.metaKey;
-  return (
-    parsed.mod === mod &&
-    !other &&
-    parsed.shift === event.shiftKey &&
-    parsed.alt === event.altKey &&
-    keyMatches(parsed.key, event)
-  );
-}
-
-/** A chord as people read it on the current platform (`Ctrl+B`, `⌘B`). */
-export function formatChord(chord: string, mac = isMacPlatform()): string {
-  const parsed = parseChord(chord);
-  const key = parsed.key.length === 1 ? parsed.key.toUpperCase() : parsed.key;
-  if (mac) {
-    return `${parsed.mod ? '⌘' : ''}${parsed.alt ? '⌥' : ''}${parsed.shift ? '⇧' : ''}${key}`;
-  }
-  return [parsed.mod && 'Ctrl', parsed.alt && 'Alt', parsed.shift && 'Shift', key]
-    .filter(Boolean)
-    .join('+');
-}
-
 /** The display chord for a command invoked with `args`, if it has one. */
 export function commandShortcut<K extends DocxCommandId>(
   id: K,
-  args?: DocxCommandArgs[K]
+  args?: DocxCommandArgs[K],
+  mac = isMacPlatform()
 ): string | null {
   const shortcuts = DOCX_COMMAND_DESCRIPTORS[id].shortcuts as readonly DocxCommandShortcut<K>[];
   const key = JSON.stringify(args ?? null);
-  const match = shortcuts.find((shortcut) => JSON.stringify(shortcut.args) === key);
-  return match ? formatChord(match.chord) : null;
+  const match = shortcuts.find(
+    (shortcut) => shortcutMatchesPlatform(shortcut, mac) && JSON.stringify(shortcut.args) === key
+  );
+  return match ? formatChord(match.chord, mac) : null;
 }

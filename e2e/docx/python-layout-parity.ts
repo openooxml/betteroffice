@@ -2,9 +2,11 @@ import { expect } from 'bun:test';
 import type { Layout } from '../../packages/docx/src/layout/pagination';
 import { assertLayoutParity, layoutProjection } from '../assertions';
 
+import type { ResidentFontRequirement } from '../../packages/docx/src/layout/measure';
 import {
   STORY,
   displayFrame,
+  pinnedFontBytes,
   regionLayout,
   save,
   typingTarget,
@@ -20,6 +22,9 @@ def run(state, input, timed):
         import betteroffice_docx as bd
     with timed('open'):
         document = bd.Document.open(base64.b64decode(input['bytes']))
+        font = base64.b64decode(input['font'])
+        for face in input['faces']:
+            document.register_font(face['family'], font, bold=face['bold'], italic=face['italic'])
     with timed('paginate'):
         layout = document.layout(json.loads(input['kernel']))
     with timed('displayList'):
@@ -30,7 +35,7 @@ def run(state, input, timed):
 export const pythonLayoutParity: DocxScenario = {
   name: 'python-layout-parity',
   description:
-    'The web engine measures the document and hands its retained kernel to the python binding, which paginates the same measured arena; both SDKs must report matching page dimensions and fragment geometry, before and after an edit that reflows the text.',
+    'The web engine measures the document and hands its retained kernel to the python binding, which paginates the same measured arena with the same pinned face; both SDKs must report matching page dimensions and fragment geometry, before and after an edit that reflows the text.',
   participants: ['web', 'python'],
   requires: pythonMissing,
   async run({ recorder, open }) {
@@ -53,6 +58,11 @@ export const pythonLayoutParity: DocxScenario = {
         const kernel = recorder.op(`retainedKernelInputs:${label}`, () =>
           session.retainedKernelInputsJson(revision)
         );
+        const faces = (
+          JSON.parse(
+            session.layoutFontRequirementsJson(editor.layoutInput)
+          ) as ResidentFontRequirement[]
+        ).map(({ family, bold, italic }) => ({ family, bold, italic }));
         const mirrored = await worker.call<{
           pages: number;
           primitives: number;
@@ -60,7 +70,12 @@ export const pythonLayoutParity: DocxScenario = {
         }>(
           `python:paginate:${label}`,
           PAGINATE,
-          { bytes: toBase64(bytes), kernel },
+          {
+            bytes: toBase64(bytes),
+            kernel,
+            font: toBase64(pinnedFontBytes()),
+            faces,
+          },
           { kernelBytes: kernel.length }
         );
         expect(mirrored.pages).toBe(laid.layout.pages.length);

@@ -1,6 +1,7 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, mock, test } from 'bun:test';
 import { evaluateDocxCommand } from '../../../commands/evaluate';
+import { toolbarFixture } from './toolbarCommands.testing';
 import { useWorkerContextMenu } from './useWorkerContextMenu';
 import {
   buildImageTransformPatch,
@@ -9,6 +10,7 @@ import {
   useWorkerPropertyDialogs,
 } from './useWorkerPropertyDialogs';
 import type { WorkerShellController } from './workerProperties';
+import { useWorkerRulerControls } from './workerPropertyControls';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -23,7 +25,8 @@ function fixture() {
   const readAt = mock(async () => ({ selectedText: 'Old' }));
   const submit = mock(async (_intent: unknown) => ({ ok: true, status: 'executed' }));
   const range = { story: 'body', start: { paraId: 'p', offset: 0 }, end: { paraId: 'p', offset: 5 } };
-  const controller = { subscribe: () => () => {}, getSnapshot: () => state, applyQuery, readAt,
+  const controller = { subscribe: () => () => {}, getSnapshot: () => state,
+    subscribeShell: () => () => {}, getShellSnapshot: () => state, applyQuery, readAt,
     submit,
     environment: () => ({ readOnly: false, mode: 'editing' }), ref: { focus() {}, flushPendingInput: async () => {} },
     query: async (request: { target?: { kind: string } }) => ({ version: 'captured-native', selection,
@@ -33,6 +36,82 @@ function fixture() {
   const hook = renderHook(() => useWorkerPropertyDialogs(controller, {}));
   return { hook, applyQuery, selection, readAt, controller, range, submit };
 }
+
+type Selection = { anchor: { story: string; paraId: string; offset: number }; focus: { story: string; paraId: string; offset: number } };
+const at = (paraId: string, from: number, toPara = paraId, to = from): Selection =>
+  ({ anchor: { story: 'body', paraId, offset: from }, focus: { story: 'body', paraId: toPara, offset: to } });
+
+function selectionFixture(object: unknown = { kind: 'object', handle: 'picture', properties: { wrapType: 'inline' } }) {
+  const listeners = new Set<() => void>();
+  let state = { status: 'ready', view: { identity: { session: 's', incarnation: 1, epoch: 1 }, version: 1, throughSeq: 1,
+    workerSelection: at('p0', 0), geometry: null, editState: undefined } };
+  const query = mock(async (request: { kind: string }) => ({ version: 'native', selection: state.view.workerSelection,
+    value: request.kind === 'sectionProperties' ? { sections: [], paragraphs: [] } : object }));
+  const subscribe = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
+  const controller = { subscribe, getSnapshot: () => state, subscribeShell: subscribe, getShellSnapshot: () => state, query,
+    environment: () => ({ readOnly: false, mode: 'editing' }),
+    ref: { focus() {}, flushPendingInput: async () => {}, getCurrentPage: () => 1 } } as unknown as WorkerShellController;
+  const hook = renderHook(({ dragging }: { dragging: boolean }) => ({
+    dialogs: useWorkerPropertyDialogs(controller, {}, dragging),
+    ruler: useWorkerRulerControls(controller, undefined, true, dragging),
+  }), { initialProps: { dragging: false } });
+  const select = async (selection: Selection) => {
+    await act(async () => {
+      state = { ...state, view: { ...state.view, throughSeq: state.view.throughSeq + 1, workerSelection: selection } };
+      for (const listener of listeners) listener();
+    });
+  };
+  const reads = (kind: string) => query.mock.calls.filter(([request]) => request.kind === kind).length;
+  return { hook, select, reads };
+}
+
+test('a pointer drag issues no selection-keyed reads until pointer-up, then one each', async () => {
+  const { hook, select, reads } = selectionFixture();
+  await act(async () => {});
+  const properties = reads('properties');
+  const ruler = reads('sectionProperties');
+  hook.rerender({ dragging: true });
+  for (let index = 1; index <= 6; index++) await select(at('p0', 0, `p${index}`, 2));
+  await select(at('p7', 3, 'p7', 4));
+  expect(reads('properties') - properties).toBe(0);
+  expect(reads('sectionProperties') - ruler).toBe(0);
+  hook.rerender({ dragging: false });
+  await act(async () => {});
+  expect(reads('properties') - properties).toBe(1);
+  expect(reads('sectionProperties') - ruler).toBe(1);
+  expect(hook.result.current.dialogs.imagePropertiesAvailable).toBe(true);
+});
+
+test('keyboard selection keeps re-reading the ruler for each change and asks for no object properties across paragraphs', async () => {
+  const { select, reads } = selectionFixture();
+  await act(async () => {});
+  const properties = reads('properties');
+  const ruler = reads('sectionProperties');
+  for (let index = 1; index <= 5; index++) await select(at('p0', 0, `p${index}`, 0));
+  expect(reads('sectionProperties') - ruler).toBe(5);
+  expect(reads('properties') - properties).toBe(0);
+});
+
+test('clicking an object still reads its properties', async () => {
+  const { hook, select, reads } = selectionFixture();
+  await act(async () => {});
+  const properties = reads('properties');
+  await select(at('p0', 3, 'p0', 4));
+  await act(async () => {});
+  expect(reads('properties') - properties).toBe(1);
+  expect(hook.result.current.dialogs.imageState).toEqual({ wrap: 'inline' });
+});
+
+test('pins: a one-unit selection over ordinary text asks for object properties and shows none when the worker answers null', async () => {
+  const { hook, select, reads } = selectionFixture(null);
+  await act(async () => {});
+  const properties = reads('properties');
+  await select(at('p0', 3, 'p0', 4));
+  await act(async () => {});
+  expect(reads('properties') - properties).toBe(1);
+  expect(hook.result.current.dialogs.imagePropertiesAvailable).toBe(false);
+  expect(hook.result.current.dialogs.imageState).toBeNull();
+});
 
 test('caret link opens expanded, editable, and submits display text', async () => {
   const { hook, applyQuery, selection, readAt, range, submit } = fixture();
@@ -244,6 +323,7 @@ test('computes imageState.wrap and submits setObjectProperties patches for apply
   expect(buildImageTransformPatch({ transform: 'rotate(90deg)' }, 'rotateCCW')).toEqual({ transform: null });
 
   const { applyQuery, controller, selection } = fixture();
+  selection.focus.offset = selection.anchor.offset + 1;
   let currentProps: Record<string, unknown> = { width: 80, height: 40, wrapType: 'square', displayMode: 'float', cssFloat: 'left' };
   controller.query = (async () => ({
     version: 'captured-native',
@@ -400,7 +480,7 @@ test('image context-menu wrap action refuses in header, footer, note stories and
     useWorkerContextMenu({
       binding: () => binding,
       environment: getEnvironment,
-      commands: { getState: () => ({ enabled: false }) },
+      commands: { getState: () => ({ enabled: false }), getDescriptor: () => ({ shortcuts: [] }) },
       clipboard: async () => {},
       submit,
       onWrapImage,
@@ -547,3 +627,29 @@ test('image context-menu wrap action refuses in header, footer, note stories and
   pageEl.remove();
 });
 
+
+test('paragraph dialog reads spacing and submits line and paragraph attributes together', async () => {
+  const { controller, context, submit } = toolbarFixture();
+  context({ paragraphProperties: { spaceBefore: 240, spaceAfter: 160, lineSpacing: 360 } });
+  const hook = renderHook(() => useWorkerPropertyDialogs(controller, {}));
+  await act(async () => { expect(hook.result.current.openParagraphSpacing()).toEqual({ ok: true, status: 'opened' }); });
+  const dialog = hook.result.current.element.props.children.at(-1);
+  expect(dialog.props.currentProps).toEqual({ before: 240, after: 160, lineSpacing: 360 });
+  await act(async () => { await dialog.props.onApply({ before: 120, after: 240, lineSpacing: 480 }); });
+  expect(submit).toHaveBeenCalledWith({ kind: 'setParagraphAttrs', payload: { attrs: {
+    spaceBefore: 120, spaceAfter: 240, lineSpacing: 480, lineSpacingRule: 'auto',
+  } } }, { fence: true });
+});
+
+test('paragraph dialog refuses a changed worker selection', async () => {
+  const { controller, context, submit, selection } = toolbarFixture();
+  const onError = mock(() => {});
+  const hook = renderHook(() => useWorkerPropertyDialogs(controller, { onError }));
+  await act(async () => { hook.result.current.openParagraphSpacing(); });
+  const dialog = hook.result.current.element.props.children.at(-1);
+  selection.focus.offset = 1;
+  context({});
+  await act(async () => { await dialog.props.onApply({ before: 120, after: 240 }); });
+  expect(submit).not.toHaveBeenCalled();
+  expect(onError).toHaveBeenCalledTimes(1);
+});

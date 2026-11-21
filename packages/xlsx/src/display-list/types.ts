@@ -114,12 +114,38 @@ export interface PathCmd {
 /**
  * Wrapped cell text: the painter breaks the run into lines no wider than
  * `width` and steps their baselines by `lineHeight`, the block anchored by
- * `valign` on the single-line baseline `y`.
+ * `valign` on the single-line baseline `y`. `maxLines` is the most lines the
+ * cell keeps, from its whole row or merged area: the painter paints at most
+ * that many and aligns them as a block of their own. A list without it paints
+ * every line.
  */
 export interface TextWrap {
   width: number;
   lineHeight: number;
   valign: 'top' | 'center' | 'bottom';
+  maxLines?: number;
+}
+
+/**
+ * A span of a text command's text in a font of its own. `start` and `end`
+ * count UTF-16 code units, half-open; the runs of a command are sorted and do
+ * not overlap. A property left out takes the command's own, and text no run
+ * covers paints in the command's font.
+ */
+export interface TextRun {
+  start: number;
+  end: number;
+  fontFamily?: string;
+  /** Font size in points. */
+  fontSize?: number;
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  underlineStyle?: 'single' | 'double' | 'singleAccounting' | 'doubleAccounting';
+  strike?: boolean;
+  /** resolved font color (`#rrggbb`). */
+  color?: string;
+  baseline?: 'superscript' | 'subscript';
 }
 
 /**
@@ -145,6 +171,8 @@ export interface TextCmd {
   bold?: boolean;
   italic?: boolean;
   underline?: boolean;
+  /** The kind of `underline` when it is not single. */
+  underlineStyle?: 'double' | 'singleAccounting' | 'doubleAccounting';
   strike?: boolean;
   highlight?: string;
   dashedUnderline?: boolean;
@@ -162,6 +190,8 @@ export interface TextCmd {
   rotationValign?: 'top' | 'center' | 'bottom';
   stacked?: boolean;
   wrap?: TextWrap;
+  /** Spans of `text` in fonts of their own; absent when the cell has no source runs, does not paint its stored text as it is, or its row has no room for the runs' layout. */
+  runs?: TextRun[];
 }
 
 export interface NumberFormatLayout {
@@ -172,10 +202,34 @@ export interface NumberFormatLayout {
   overflow?: boolean;
 }
 
+/** Fractions of an image discarded from each edge; absent edges are `0`. */
+export interface ImageCrop {
+  left?: number;
+  top?: number;
+  right?: number;
+  bottom?: number;
+}
+
+/**
+ * A worksheet picture: the image part `assetId` names, its `crop` discarded and
+ * the rest stretched over the rect. The host supplies the image, for example
+ * from `XlsxDocument.mediaBytes(assetId)`.
+ */
+export interface ImageCmd {
+  op: 'image';
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  assetId: string;
+  crop?: ImageCrop;
+  clip?: Rect;
+}
+
 /**
  * One draw command; discriminated on `op`.
  */
-export type DrawCmd = FillRectCmd | PatternFillCmd | LineCmd | PathCmd | TextCmd;
+export type DrawCmd = FillRectCmd | PatternFillCmd | LineCmd | PathCmd | TextCmd | ImageCmd;
 
 /**
  * Grid metadata for the frame: which sheet cells the visible tracks map to and
@@ -191,12 +245,25 @@ export type DrawCmd = FillRectCmd | PatternFillCmd | LineCmd | PathCmd | TextCmd
 export interface GridMeta {
   startRow: number;
   startCol: number;
+  /** Leading tracks pinned by a frozen pane; absent when nothing is frozen. */
+  frozenRows?: number;
+  frozenCols?: number;
+  /** Viewport-pixel freeze line on each axis; absent when there is no split. */
+  dividerX?: number;
+  dividerY?: number;
   hiddenRowSpans?: [number, number][];
   hiddenColSpans?: [number, number][];
   rowIndices?: number[];
   colIndices?: number[];
   rowOffsets: number[];
   colOffsets: number[];
+  /**
+   * Full track sizes parallel to `rowOffsets`/`colOffsets`: the sheet-px extent
+   * of each visible track, independent of scroll and of a frozen pane clipping
+   * its leading edge. Absent on lists that predate the field.
+   */
+  rowSizes?: number[];
+  colSizes?: number[];
 }
 
 export interface HyperlinkRegion {
@@ -235,6 +302,8 @@ export interface ChartRegion {
   clip: Rect;
   /** whether the anchor can be repinned; an absolute one cannot. */
   movable: boolean;
+  /** whether the anchor can be resized. A two-cell anchor writes both corners back, so it can. */
+  resizable: boolean;
 }
 
 /** Former name of {@link ChartRegion}, when it carried the label alone. */
@@ -254,4 +323,6 @@ export interface DisplayList {
   charts?: ChartRegion[];
   /** The cell budget omitted the bottom of this viewport. */
   truncated?: boolean;
+  /** Visible cells whose conditional formats this frame left undecided; until a later frame of the same view decides them, each paints its result from before the last direct edit of one cell or recalculation, or no conditional format. */
+  conditionalPending?: number;
 }

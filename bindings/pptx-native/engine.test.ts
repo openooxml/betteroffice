@@ -1,5 +1,8 @@
+import initPreflight, { font_preflight as wasmFontPreflight } from '../../packages/pptx/src/wasm/generated/preflight/pptx_preflight.js';
+import { fontPreflightFixture } from '../../packages/pptx/src/wasm/__fixtures__/fontPreflight';
 import { readFileSync } from 'node:fs';
 import { beforeAll, describe, expect, test } from 'bun:test';
+import JSZip from 'jszip';
 import initWasm, * as wasm from '../../packages/pptx/src/wasm/generated/pptx_wasm.js';
 import type { SlideDisplayList } from '../../packages/pptx/src/types';
 import { expectSavedPartsEqual } from '../native-parity';
@@ -31,6 +34,9 @@ type Snapshot = {
 let wasmMemory: WebAssembly.Memory;
 
 beforeAll(async () => {
+  await initPreflight({
+    module_or_path: readFileSync(new URL('../../packages/pptx/src/wasm/generated/preflight/pptx_preflight_bg.wasm', import.meta.url)),
+  });
   ({ memory: wasmMemory } = await initWasm({
     module_or_path: readFileSync(new URL('../../packages/pptx/src/wasm/generated/pptx_wasm_bg.wasm', import.meta.url)),
   }));
@@ -102,6 +108,7 @@ test('linked font decoder returns known answers and matching native and wasm err
     expect(actual).toBeInstanceOf(Error);
     expect(expected).toMatchObject({ name: 'Error', message: entry.message });
     expect(actual).toMatchObject({ name: 'Error', message: entry.message });
+    expect('code' in (actual as Error)).toBe('code' in (expected as Error));
   }
 });
 
@@ -271,6 +278,70 @@ describe('pptx native engine parity', () => {
     }
   });
 
+  test('requested script coverage fields match native and wasm for a synthetic deck', async () => {
+    const zip = new JSZip();
+    const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+    const ns = `xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="${rel}"`;
+    zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/></Types>');
+    zip.file('_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/officeDocument" Target="ppt/presentation.xml"/></Relationships>`);
+    zip.file('ppt/presentation.xml', `<p:presentation ${ns}><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst><p:sldSz cx="9144000" cy="6858000"/></p:presentation>`);
+    zip.file('ppt/_rels/presentation.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/slide" Target="slides/slide1.xml"/></Relationships>`);
+    const faces = [
+      { family: 'BIZ UD明朝', bold: true, italic: true, text: '日本語かな', scripts: ['cjk-jp'] },
+      { family: 'Unknown Indic', bold: true, italic: false, text: 'नमस्ते', scripts: ['devanagari'] },
+      { family: 'Calibri', bold: false, italic: false, text: 'Latin 日本語かな', scripts: ['cjk-jp'] },
+    ];
+    const shapes = faces.map((face, index) => `<p:sp><p:nvSpPr><p:cNvPr id="${index + 2}" name="Text ${index}"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="${index * 1200000}"/><a:ext cx="6000000" cy="1200000"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr b="${Number(face.bold)}" i="${Number(face.italic)}"><a:latin typeface="${face.family}"/></a:rPr><a:t>${face.text}</a:t></a:r></a:p></p:txBody></p:sp>`).join('');
+    zip.file('ppt/slides/slide1.xml', `<p:sld ${ns}><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>${shapes}</p:spTree></p:cSld></p:sld>`);
+    const input = await zip.generateAsync({ type: 'uint8array' });
+    const run = (engine: Engine) => {
+      const doc = engine.PptxDocument.openCollaborative(input.slice(), 7);
+      const renderer = new engine.PptxRenderer();
+      try {
+        const slide = (JSON.parse(doc.snapshotJson()) as Snapshot).slides[0];
+        const deck = JSON.parse(renderer.requestedFontFacesJson(doc));
+        expect(deck.faces).toEqual(faces.map(({ text: _text, ...face }) => face));
+        expect(JSON.parse(renderer.requestedFontFacesJson(doc, slide.id))).toEqual(deck);
+        return deck;
+      } finally {
+        renderer.free();
+        doc.free();
+      }
+    };
+    expect(run(native)).toEqual(run(wasm));
+  });
+
+  test('text typed at the end of a run with explicit default formatting stays in that run on native and wasm', async () => {
+    const zip = new JSZip();
+    const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+    const ns = `xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="${rel}"`;
+    zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/></Types>');
+    zip.file('_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/officeDocument" Target="ppt/presentation.xml"/></Relationships>`);
+    zip.file('ppt/presentation.xml', `<p:presentation ${ns}><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst><p:sldSz cx="9144000" cy="6858000"/></p:presentation>`);
+    zip.file('ppt/_rels/presentation.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/slide" Target="slides/slide1.xml"/></Relationships>`);
+    const paragraph = '<a:p><a:r><a:rPr lang="en-US" sz="1800" b="0" i="0" u="none" strike="noStrike" baseline="0" dirty="0"><a:latin typeface="Arial"/></a:rPr><a:t>Hello</a:t></a:r><a:endParaRPr lang="en-GB" dirty="0"/></a:p>';
+    const slide = `<p:sld ${ns}><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p:sp><p:nvSpPr><p:cNvPr id="2" name="Text"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="6000000" cy="1200000"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/>${paragraph}</p:txBody></p:sp></p:spTree></p:cSld></p:sld>`;
+    zip.file('ppt/slides/slide1.xml', slide);
+    const input = await zip.generateAsync({ type: 'uint8array' });
+    type Story = { id: string; paragraphs: { runs: { text: string; style: unknown }[] }[] };
+    const run = (engine: Engine) => {
+      const doc = engine.PptxDocument.openCollaborative(input.slice(), 7);
+      try {
+        const snapshot = JSON.parse(doc.snapshotJson()) as { slides: { shapes: { textStories: Story[] }[] }[] };
+        const story = snapshot.slides[0]!.shapes.flatMap((shape) => shape.textStories)[0]!;
+        expect(story.paragraphs.map((entry) => entry.runs.map((item) => item.text))).toEqual([['Hello']]);
+        doc.insertTextJson(JSON.stringify({ storyId: story.id, index: 5, text: '_X_', style: story.paragraphs[0]!.runs[0]!.style }));
+        return doc.saveBytes();
+      } finally {
+        doc.free();
+      }
+    };
+    const savedSlide = async (zipped: Uint8Array) => (await JSZip.loadAsync(zipped)).file('ppt/slides/slide1.xml')!.async('string');
+    const expected = slide.replace('<a:t>Hello</a:t>', '<a:t>Hello_X_</a:t>');
+    expect(await savedSlide(run(wasm))).toBe(expected);
+    expect(await savedSlide(run(native))).toBe(expected);
+  });
+
   test('browser coverage fallback is opt-in and toggles equally in native and wasm', () => {
     const font = readFileSync(new URL('../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url));
     const run = (engine: Engine) => {
@@ -307,6 +378,183 @@ describe('pptx native engine parity', () => {
         expect(renderer.slideLayoutKey(doc, 0)).not.toBe(enabledKey);
         expect(layout()).toEqual(initial);
         return [initial, enabled].map((pieces) => pieces.map(({ text, start, end, fontId }) => ({ text, start, end, fontId })));
+      } finally {
+        renderer.free();
+        doc.free();
+      }
+    };
+    expect(run(native)).toEqual(run(wasm));
+  });
+
+  test('paragraph language spans match native and wasm with utf16 offsets across coalesced runs', async () => {
+    const zip = new JSZip();
+    const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+    const ns = `xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="${rel}"`;
+    zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/></Types>');
+    zip.file('_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/officeDocument" Target="ppt/presentation.xml"/></Relationships>`);
+    zip.file('ppt/presentation.xml', `<p:presentation ${ns}><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst><p:sldSz cx="9144000" cy="6858000"/></p:presentation>`);
+    zip.file('ppt/_rels/presentation.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/slide" Target="slides/slide1.xml"/></Relationships>`);
+    const runs = [['A😀 ', 'en-US'], ['hello ', 'en-US'], ['salut', 'fr-FR']]
+      .map(([text, lang]) => `<a:r><a:rPr lang="${lang}"/><a:t>${text}</a:t></a:r>`).join('');
+    zip.file('ppt/slides/slide1.xml', `<p:sld ${ns}><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p:sp><p:nvSpPr><p:cNvPr id="2" name="Languages"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="8000000" cy="1200000"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p>${runs}</a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>`);
+    const input = await zip.generateAsync({ type: 'uint8array' });
+    const font = new Uint8Array(readFileSync(new URL('../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url)));
+    const run = (engine: Engine) => {
+      const doc = engine.PptxDocument.openCollaborative(input.slice(), 7);
+      const renderer = new engine.PptxRenderer();
+      try {
+        renderer.registerFont('Arial', false, false, font);
+        const list = JSON.parse(renderer.layoutSlideJson(doc, 0)) as SlideDisplayList;
+        const paragraphs = list.primitives.flatMap((primitive) => primitive.kind === 'textBox' ? primitive.paragraphs : []);
+        expect(paragraphs).toHaveLength(1);
+        expect(paragraphs[0]!.runs.map((run) => run.text).join('')).toBe('A😀 hello salut');
+        expect(paragraphs[0]!.languages).toEqual([
+          { start: 0, end: 10, lang: 'en-US' }, { start: 10, end: 15, lang: 'fr-FR' },
+        ]);
+        return paragraphs.map((paragraph) => paragraph.languages);
+      } finally {
+        renderer.free();
+        doc.free();
+      }
+    };
+    expect(run(native)).toEqual(run(wasm));
+  });
+
+  test('paragraph links match native and wasm for external and slide targets', async () => {
+    const zip = new JSZip();
+    const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+    const ns = `xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="${rel}"`;
+    zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/><Override PartName="/ppt/slides/slide2.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/><Override PartName="/ppt/slides/slide3.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/></Types>');
+    zip.file('_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/officeDocument" Target="ppt/presentation.xml"/></Relationships>`);
+    zip.file('ppt/presentation.xml', `<p:presentation ${ns}><p:sldIdLst><p:sldId id="256" r:id="rId1"/><p:sldId id="257" r:id="rId2"/><p:sldId id="258" r:id="rId3"/></p:sldIdLst><p:sldSz cx="9144000" cy="6858000"/></p:presentation>`);
+    zip.file('ppt/_rels/presentation.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/slide" Target="slides/slide1.xml"/><Relationship Id="rId2" Type="${rel}/slide" Target="slides/slide2.xml"/><Relationship Id="rId3" Type="${rel}/slide" Target="slides/slide3.xml"/></Relationships>`);
+    const runs = '<a:r><a:rPr><a:hlinkClick r:id="url"/></a:rPr><a:t>Read</a:t></a:r><a:r><a:t> </a:t></a:r><a:r><a:rPr><a:hlinkClick r:id="third" action="ppaction://hlinksldjump"/></a:rPr><a:t>third</a:t></a:r>';
+    zip.file('ppt/slides/_rels/slide1.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="url" Type="${rel}/hyperlink" Target="https://example.test/docs" TargetMode="External"/><Relationship Id="third" Type="${rel}/slide" Target="slide3.xml"/></Relationships>`);
+    for (const index of [2, 3]) zip.file(`ppt/slides/slide${index}.xml`, `<p:sld ${ns}><p:cSld><p:spTree/></p:cSld></p:sld>`);
+    zip.file('ppt/slides/slide1.xml', `<p:sld ${ns}><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p:sp><p:nvSpPr><p:cNvPr id="2" name="Links"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="8000000" cy="1200000"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p>${runs}</a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>`);
+    const input = await zip.generateAsync({ type: 'uint8array' });
+    const font = new Uint8Array(readFileSync(new URL('../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url)));
+    const run = (engine: Engine) => {
+      const doc = engine.PptxDocument.openCollaborative(input.slice(), 7);
+      const renderer = new engine.PptxRenderer();
+      try {
+        renderer.registerFont('Arial', false, false, font);
+        const list = JSON.parse(renderer.layoutSlideJson(doc, 0)) as SlideDisplayList;
+        const paragraphs = list.primitives.flatMap((primitive) => primitive.kind === 'textBox' ? primitive.paragraphs : []);
+        expect(paragraphs).toHaveLength(1);
+        expect(paragraphs[0]!.runs.map((run) => run.text).join('')).toBe('Read third');
+        expect(paragraphs[0]!.links).toEqual([
+          { start: 0, end: 4, target: { kind: 'url', href: 'https://example.test/docs' } },
+          { start: 5, end: 10, target: { kind: 'slide', index: 2 } },
+        ]);
+        return paragraphs.map((paragraph) => paragraph.links);
+      } finally {
+        renderer.free();
+        doc.free();
+      }
+    };
+    expect(run(native)).toEqual(run(wasm));
+  });
+
+  test('link span budgets keep 1024 links identically in native and wasm', async () => {
+    const zip = new JSZip();
+    const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+    const ns = `xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="${rel}"`;
+    zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/></Types>');
+    zip.file('_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/officeDocument" Target="ppt/presentation.xml"/></Relationships>`);
+    zip.file('ppt/presentation.xml', `<p:presentation ${ns}><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst><p:sldSz cx="9144000" cy="6858000"/></p:presentation>`);
+    zip.file('ppt/_rels/presentation.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/slide" Target="slides/slide1.xml"/></Relationships>`);
+    const ids = Array.from({ length: 1_025 }, (_, index) => `link${index}`);
+    const runs = ids.map((id) => `<a:r><a:rPr><a:hlinkClick r:id="${id}"/></a:rPr><a:t>x</a:t></a:r>`).join('');
+    zip.file('ppt/slides/_rels/slide1.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${ids.map((id) => `<Relationship Id="${id}" Type="${rel}/hyperlink" Target="https://example.test/${id}" TargetMode="External"/>`).join('')}</Relationships>`);
+    zip.file('ppt/slides/slide1.xml', `<p:sld ${ns}><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p:sp><p:nvSpPr><p:cNvPr id="2" name="Links"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="8000000" cy="1200000"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p>${runs}</a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>`);
+    const input = await zip.generateAsync({ type: 'uint8array' });
+    const font = new Uint8Array(readFileSync(new URL('../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url)));
+    const run = (engine: Engine) => {
+      const doc = engine.PptxDocument.openCollaborative(input.slice(), 7);
+      const renderer = new engine.PptxRenderer();
+      try {
+        renderer.registerFont('Arial', false, false, font);
+        const list = JSON.parse(renderer.layoutSlideJson(doc, 0)) as SlideDisplayList;
+        const paragraphs = list.primitives.flatMap((primitive) => primitive.kind === 'textBox' ? primitive.paragraphs : []);
+        expect(paragraphs).toHaveLength(1);
+        expect(paragraphs[0]!.runs.map((run) => run.text).join('')).toBe('x'.repeat(1_025));
+        const links = paragraphs.flatMap((paragraph) => paragraph.links ?? []);
+        expect(links).toHaveLength(1_024);
+        expect(links[0]).toEqual({ start: 0, end: 1, target: { kind: 'url', href: 'https://example.test/link0' } });
+        expect(links[1_023]).toEqual({ start: 1_023, end: 1_024, target: { kind: 'url', href: 'https://example.test/link1023' } });
+        return links;
+      } finally {
+        renderer.free();
+        doc.free();
+      }
+    };
+    expect(run(native)).toEqual(run(wasm));
+  });
+
+  test('table grids match native and wasm with spans, headers and cell ranges', async () => {
+    const zip = new JSZip();
+    const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+    const ns = `xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="${rel}"`;
+    zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/></Types>');
+    zip.file('_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/officeDocument" Target="ppt/presentation.xml"/></Relationships>`);
+    zip.file('ppt/presentation.xml', `<p:presentation ${ns}><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst><p:sldSz cx="9144000" cy="6858000"/></p:presentation>`);
+    zip.file('ppt/_rels/presentation.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/slide" Target="slides/slide1.xml"/></Relationships>`);
+    const cell = (attributes: string, text: string) => `<a:tc${attributes}><a:txBody><a:bodyPr/><a:lstStyle/>${text ? `<a:p><a:r><a:t>${text}</a:t></a:r></a:p>` : '<a:p/>'}</a:txBody><a:tcPr/></a:tc>`;
+    const rows = [
+      [cell(' gridSpan="2"', 'Region'), cell(' hMerge="1"', ''), cell('', 'Total')],
+      [cell(' rowSpan="2"', 'North'), cell('', 'Q1'), cell('', '')],
+      [cell(' vMerge="1"', ''), cell('', 'Q2'), cell('', '9')],
+    ].map((cells) => `<a:tr h="400000">${cells.join('')}</a:tr>`).join('');
+    const table = `<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="2" name="Table"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x="0" y="0"/><a:ext cx="6000000" cy="1200000"/></p:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/table"><a:tbl><a:tblPr firstRow="1" firstCol="1"/><a:tblGrid>${'<a:gridCol w="2000000"/>'.repeat(3)}</a:tblGrid>${rows}</a:tbl></a:graphicData></a:graphic></p:graphicFrame>`;
+    zip.file('ppt/slides/slide1.xml', `<p:sld ${ns}><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>${table}</p:spTree></p:cSld></p:sld>`);
+    const input = await zip.generateAsync({ type: 'uint8array' });
+    const font = new Uint8Array(readFileSync(new URL('../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url)));
+    const run = (engine: Engine) => {
+      const doc = engine.PptxDocument.openCollaborative(input.slice(), 7);
+      const renderer = new engine.PptxRenderer();
+      try {
+        renderer.registerFont('Arial', false, false, font);
+        const list = JSON.parse(renderer.layoutSlideJson(doc, 0)) as SlideDisplayList;
+        const tables = list.primitives.flatMap((primitive) => primitive.kind === 'table' ? [primitive] : []);
+        expect(tables).toHaveLength(1);
+        const grid = tables[0]!.grid;
+        expect(grid).toBeDefined();
+        expect({ rows: grid!.rows, columns: grid!.columns }).toEqual({ rows: 3, columns: 3 });
+        expect(grid!.cells.map(({ primitives: _range, ...cell }) => cell)).toEqual([
+          { row: 0, column: 0, rowSpan: 1, columnSpan: 2, header: 'column' },
+          { row: 0, column: 2, rowSpan: 1, columnSpan: 1, header: 'column' },
+          { row: 1, column: 0, rowSpan: 2, columnSpan: 1, header: 'row' },
+          { row: 1, column: 1, rowSpan: 1, columnSpan: 1 },
+          { row: 1, column: 2, rowSpan: 1, columnSpan: 1 },
+          { row: 2, column: 1, rowSpan: 1, columnSpan: 1 },
+          { row: 2, column: 2, rowSpan: 1, columnSpan: 1 },
+        ]);
+        return grid;
+      } finally {
+        renderer.free();
+        doc.free();
+      }
+    };
+    expect(run(native)).toEqual(run(wasm));
+  });
+
+  test('chart data matches native and wasm for a chart with two series', () => {
+    const input = new Uint8Array(readFileSync(new URL('../../crates/pptx-render/tests/fixtures/data-labels.pptx', import.meta.url)));
+    const font = new Uint8Array(readFileSync(new URL('../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url)));
+    const run = (engine: Engine) => {
+      const doc = engine.PptxDocument.openCollaborative(input.slice(), 7);
+      const renderer = new engine.PptxRenderer();
+      try {
+        renderer.registerFont('Arial', false, false, font);
+        const list = JSON.parse(renderer.layoutSlideJson(doc, 0)) as SlideDisplayList;
+        const charts = list.primitives.flatMap((primitive) => primitive.kind === 'chart' ? [primitive] : []);
+        expect(charts).toHaveLength(1);
+        expect(charts[0]!.data).toEqual({
+          categories: ['Q1', 'Q2', 'Q3'],
+          series: [{ name: 'North', values: ['12', '19', '7'] }, { name: 'South', values: ['8', '14', '21'] }],
+        });
+        return charts[0]!.data;
       } finally {
         renderer.free();
         doc.free();
@@ -397,6 +645,27 @@ describe('pptx native engine parity', () => {
     }
   });
 
+  test('structural proposal strip and by-ID layout match wasm', () => {
+    const docs = [wasm.PptxDocument.openCollaborative(bytes(), 7), native.PptxDocument.openCollaborative(bytes(), 7)];
+    const renderers = [new wasm.PptxRenderer(), new native.PptxRenderer()];
+    try {
+      const request = JSON.stringify({ agentId: 'parity', edits: [
+        { type: 'insertSlide', ref: 'draft', afterSlideId: null },
+        { type: 'setSlideNotes', slideId: '@draft', text: 'Review notes' },
+      ] });
+      expect(normalized(docs[0].validateProposalJson(request))).toEqual(normalized(docs[1].validateProposalJson(request)));
+      const proposals = docs.map(doc => JSON.parse(doc.proposeJson(request)));
+      const strips = docs.map((doc, index) => JSON.parse(doc.proposalSlideStripJson(proposals[index].id)));
+      expect(strips[0]).toEqual(strips[1]);
+      expect(strips[0][0]).toMatchObject({ status: 'inserted', liveIndex: null, previewIndex: 0 });
+      const diffs = renderers.map((renderer, index) => normalized(renderer.layoutProposalDiffSlideByIdJson(docs[index], proposals[index].id, strips[index][0].slideId)));
+      expect(diffs[0]).toEqual(diffs[1]);
+    } finally {
+      for (const renderer of renderers) renderer.free();
+      for (const doc of docs) doc.free();
+    }
+  });
+
   test('stale proposal acceptance throws the same string', () => {
     const docs = [wasm.PptxDocument.openCollaborative(bytes(), 7), native.PptxDocument.openCollaborative(bytes(), 7)];
     try {
@@ -414,6 +683,24 @@ describe('pptx native engine parity', () => {
       );
       expect(typeof failure).toBe('string');
       expect(JSON.parse(failure as string).code).toBe('staleProposal');
+    } finally {
+      for (const doc of docs) doc.free();
+    }
+  });
+
+  test('metafile SVG display copies match wasm, including a missing part', () => {
+    const deck = readFileSync(new URL('../../crates/pptx-render/tests/fixtures/metafile-svg-pictures.pptx', import.meta.url));
+    const docs = [wasm.PptxDocument.openCollaborative(new Uint8Array(deck), 7), native.PptxDocument.openCollaborative(new Uint8Array(deck), 7)];
+    try {
+      const metadata = JSON.parse(native.parsePptxJsonWithoutMedia(new Uint8Array(deck))) as {
+        media: { partPath: string }[];
+      };
+      const parts = [...metadata.media.map((part) => part.partPath), 'missing'];
+      const [expected, actual] = docs.map((doc) => parts.map((part) => doc.metafileSvg(part)));
+      expect(expected.filter((svg) => svg !== undefined).length).toBeGreaterThan(0);
+      expect(actual).toEqual(expected);
+      expect(actual.at(-1)).toBeUndefined();
+      for (const svg of actual) if (svg) expectPlainBytes(svg);
     } finally {
       for (const doc of docs) doc.free();
     }
@@ -487,4 +774,121 @@ describe('pptx native engine parity', () => {
     expect(native.rendererVersion()).toBe(wasm.rendererVersion());
     expect(native.engineVersion()).toBe(require('./package.json').version);
   });
+});
+
+test('shape proposal refs, deleted frames, and picture cap match wasm', () => {
+  const fixture = new Uint8Array(readFileSync(new URL('../../crates/pptx-edit/tests/fixtures/proposal-shapes.pptx', import.meta.url)));
+  const docs = [wasm.PptxDocument.openCollaborative(fixture, 8), native.PptxDocument.openCollaborative(fixture, 8)];
+  const renderers = [new wasm.PptxRenderer(), new native.PptxRenderer()];
+  try {
+    const slide = JSON.parse(docs[0].snapshotJson()).slides[0];
+    const rect = { x: 0, y: 0, width: 1000000, height: 500000 };
+    const request = JSON.stringify({ agentId: 'parity', edits: [
+      { type: 'addTextBox', ref: 'box', slideId: slide.id, draft: { name: 'Box', rect, text: '', style: {} } },
+      { type: 'replaceText', storyId: '@box', start: 0, end: 0, text: 'Filled' },
+      { type: 'addShape', slideId: slide.id, draft: { name: 'Shape', rect, geometry: 'rect' } },
+      { type: 'addPicture', slideId: slide.id, draft: { name: 'Image', rect, contentType: 'image/png', mediaBase64: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=' } },
+      { type: 'removeShape', slideId: slide.id, shapeId: slide.shapes[0].id },
+    ] });
+    expect(normalized(docs[0].validateProposalJson(request))).toEqual(normalized(docs[1].validateProposalJson(request)));
+    const proposals = docs.map(doc => JSON.parse(doc.proposeJson(request)));
+    const diffs = renderers.map((renderer, i) => JSON.parse(renderer.layoutProposalDiffSlideByIdJson(docs[i], proposals[i].id, slide.id)));
+    expect(diffs[0]).toEqual(diffs[1]);
+    expect(diffs[0].shapeChanges).toContainEqual({ shapeId: slide.shapes[0].id, kind: 'deleted' });
+    for (const doc of docs) doc.rejectProposalJson(JSON.stringify({ id: proposals[0].id }));
+    const large = JSON.stringify({ agentId: 'parity', edits: [{ type: 'addPicture', slideId: slide.id, draft: {
+      name: 'Oversize', rect, contentType: 'image/png', mediaBase64: Buffer.alloc(8 * 1024 * 1024 + 1).toString('base64'),
+    } }] });
+    const failure = expectThrownParity(() => docs[0].proposeJson(large), () => docs[1].proposeJson(large));
+    expect(JSON.parse(failure as string).code).toBe('proposalPictureMediaTooLarge');
+  } finally {
+    for (const renderer of renderers) renderer.free();
+    for (const doc of docs) doc.free();
+  }
+});
+
+test('paragraph proposal JSON, preview, acceptance and undo match wasm', async () => {
+  const fixture = new Uint8Array(readFileSync(new URL('../../crates/pptx-edit/tests/fixtures/proposal-shapes.pptx', import.meta.url)));
+  const docs = [wasm.PptxDocument.openCollaborative(fixture, 9), native.PptxDocument.openCollaborative(fixture, 9)];
+  const renderers = [new wasm.PptxRenderer(), new native.PptxRenderer()];
+  try {
+    const before = docs.map(doc => JSON.parse(doc.snapshotJson()));
+    const slide = before[0].slides[0];
+    const request = JSON.stringify({ agentId: 'parity', edits: [
+      { type: 'setStoryParagraphs', storyId: slide.shapes[0].textStories[0].id, paragraphs: [
+        { alignment: 'ctr', bullet: true, runs: [{ text: 'First', style: { bold: true } }] },
+        { alignment: 'r', bullet: false, runs: [{ text: 'Second', style: {} }] },
+      ] },
+      { type: 'addTextBox', ref: 'box', slideId: slide.id, draft: { name: 'Box', rect: { x: 0, y: 0, width: 1000000, height: 500000 }, text: '', style: {} } },
+      { type: 'setStoryParagraphs', storyId: '@box', paragraphs: [{ bullet: true, runs: [{ text: 'From ref', style: {} }] }] },
+    ] });
+    expect(normalized(docs[0].validateProposalJson(request))).toEqual(normalized(docs[1].validateProposalJson(request)));
+    const proposals = docs.map(doc => JSON.parse(doc.proposeJson(request)));
+    expect(proposals[0]).toEqual(proposals[1]);
+    const diffs = renderers.map((renderer, index) => JSON.parse(renderer.layoutProposalDiffSlideJson(docs[index], proposals[index].id, 0)));
+    expect(diffs[0]).toEqual(diffs[1]);
+    expect(diffs[0].textChanges.some((change: { kind: string }) => change.kind === 'deletion')).toBe(true);
+    expect(diffs[0].shapeChanges).toContainEqual({ shapeId: slide.shapes[0].id, kind: 'changed' });
+    for (const [index, doc] of docs.entries()) {
+      expect(JSON.parse(doc.snapshotJson())).toEqual(before[index]);
+      doc.acceptProposalJson(JSON.stringify({ id: proposals[index].id }));
+    }
+    expect(JSON.parse(docs[0].snapshotJson())).toEqual(JSON.parse(docs[1].snapshotJson()));
+    await expectSavedPartsEqual(docs[0].saveBytes(), docs[1].saveBytes());
+    for (const [index, doc] of docs.entries()) {
+      doc.undoJson();
+      expect(JSON.parse(doc.snapshotJson())).toEqual(before[index]);
+    }
+    const invalid = JSON.stringify({ agentId: 'parity', edits: [{ type: 'setStoryParagraphs', storyId: slide.shapes[0].textStories[0].id, paragraphs: [] }] });
+    expectThrownParity(() => docs[0].proposeJson(invalid), () => docs[1].proposeJson(invalid));
+  } finally {
+    for (const renderer of renderers) renderer.free();
+    for (const doc of docs) doc.free();
+  }
+});
+
+test.each(['setSlideLayout', 'setSlideBackground'] as const)('%s proposal JSON, preview and undo match wasm', async type => {
+  const fixture = new Uint8Array(readFileSync(new URL('../../crates/pptx-edit/tests/fixtures/proposal-slide-props.pptx', import.meta.url)));
+  const docs = [wasm.PptxDocument.openCollaborative(fixture, 10), native.PptxDocument.openCollaborative(fixture, 10)];
+  const renderers = [new wasm.PptxRenderer(), new native.PptxRenderer()];
+  try {
+    const before = docs.map(doc => JSON.parse(doc.snapshotJson()));
+    const slide = before[0].slides[0];
+    const edit = type === 'setSlideLayout'
+      ? { type, slideId: slide.id, layoutPartPath: 'ppt/slideLayouts/slideLayout2.xml', mapping: [[slide.shapes[0].id, 8]] }
+      : { type, slideId: slide.id, background: { type: 'solid', color: { rgb: '123456' } } };
+    const request = JSON.stringify({ agentId: 'parity', edits: [edit] });
+    expect(normalized(docs[0].validateProposalJson(request))).toEqual(normalized(docs[1].validateProposalJson(request)));
+    const proposals = docs.map(doc => JSON.parse(doc.proposeJson(request)));
+    expect(proposals[0]).toEqual(proposals[1]);
+    const diffs = renderers.map((renderer, index) => JSON.parse(renderer.layoutProposalDiffSlideJson(docs[index], proposals[index].id, 0)));
+    expect(diffs[0]).toEqual(diffs[1]);
+    expect(JSON.stringify(diffs[0].frame)).toContain('#123456');
+    for (const [index, doc] of docs.entries()) {
+      expect(JSON.parse(doc.snapshotJson())).toEqual(before[index]);
+      expect(JSON.parse(doc.proposalSlideStripJson(proposals[index].id))[0].status).toBe('changed');
+      const byId = JSON.parse(renderers[index].layoutProposalDiffSlideByIdJson(doc, proposals[index].id, slide.id));
+      expect(byId.frame).toEqual(diffs[index].frame);
+      doc.acceptProposalJson(JSON.stringify({ id: proposals[index].id }));
+    }
+    await expectSavedPartsEqual(docs[0].saveBytes(), docs[1].saveBytes());
+    for (const [index, doc] of docs.entries()) {
+      doc.undoJson();
+      expect(JSON.parse(doc.snapshotJson())).toEqual(before[index]);
+    }
+  } finally {
+    for (const renderer of renderers) renderer.free();
+    for (const doc of docs) doc.free();
+  }
+});
+
+test('standalone font preflight has native and wasm parity on synthetic bytes', async () => {
+  const nativePreflight = (native as unknown as { font_preflight: typeof wasmFontPreflight }).font_preflight;
+  const bytes = await fontPreflightFixture();
+  const expected = JSON.parse(wasmFontPreflight(bytes, 0));
+  expect(expected.complete).toBe(true);
+  expect(expected.faces.length).toBeGreaterThan(0);
+  expect(JSON.parse(nativePreflight(bytes, 0))).toEqual(expected);
+  const invalid = new Uint8Array([1, 2, 3]);
+  expectThrownParity(() => wasmFontPreflight(invalid, 0), () => nativePreflight(invalid, 0));
 });

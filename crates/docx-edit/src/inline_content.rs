@@ -43,7 +43,10 @@ pub(crate) fn revision_text(content: &Any, id: &str, key: &str, inherited: bool)
         let Any::Map(child) = child else { continue };
         let matched = inherited
             || matches!(child.get("attrs"), Some(Any::Map(attrs))
-            if attrs.get(key).and_then(crate::queries::revision_parts).is_some_and(|(revision, ..)| revision == id));
+            if attrs.get(key).is_some_and(|value| match value {
+                Any::Array(changes) => changes.iter().any(|value| crate::queries::revision_parts(value).is_some_and(|(revision, ..)| revision == id)),
+                value => crate::queries::revision_parts(value).is_some_and(|(revision, ..)| revision == id),
+            }));
         if let Some(Any::Map(payload)) = child.get("payload")
             && let Some(content) = payload.get("content")
         {

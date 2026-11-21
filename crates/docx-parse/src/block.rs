@@ -6,13 +6,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::chart::ChartPartsMap;
 use crate::inline::{
-    ComplexField, InlineNode, MathEquation, MathType, RunContent, SdtProperties,
+    ComplexField, InlineNode, MathEquation, MathType, Run, RunContent, SdtProperties,
     StructuredFieldContent, inline_holds_field, parse_sdt_properties,
 };
 use crate::media::MediaMap;
 use crate::numbering::NumberingMap;
 use crate::paragraph::{
-    DrawingContext, HexIdAllocator, Paragraph, ParagraphContent, parse_paragraph,
+    DrawingContext, HexIdAllocator, Paragraph, ParagraphContent, parse_paragraph_with_story_context,
 };
 use crate::relationships::RelationshipMap;
 use crate::shape::{RelativeRect, Shape, ShapeTextBody, ShapeTextBodyProperties};
@@ -24,8 +24,9 @@ use crate::table::{
     parse_document_table_row_properties, parse_table_cell_property_changes,
     parse_table_cell_structural_change, parse_table_grid, parse_table_property_changes,
     parse_table_row_property_changes, parse_table_row_structural_change,
+    row_is_hidden_content_only,
 };
-use crate::text_box::{get_text_box_content_element, parse_text_box};
+use crate::text_box::get_text_box_content_element;
 use crate::theme::Theme;
 use crate::xml::{ParseBudget, ParseError, XmlElement, XmlNode};
 
@@ -40,13 +41,30 @@ pub struct BlockSdt {
 /// Block payloads live behind `Arc` so derived views (section content,
 /// structured field caches) share the parsed allocation instead of
 /// deep-cloning it. Mutation goes through `Arc::make_mut` copy-on-write.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum BlockContent {
     Paragraph(Arc<Paragraph>),
     Table(Arc<Table>),
     BlockSdt(Arc<BlockSdt>),
     RawXml(Arc<crate::inline::RawInlineXml>),
+}
+
+impl<'de> Deserialize<'de> for BlockContent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let decoded = match value.get("type").and_then(serde_json::Value::as_str) {
+            Some("paragraph") => Deserialize::deserialize(&value).map(Self::Paragraph),
+            Some("table") => Deserialize::deserialize(&value).map(Self::Table),
+            Some("blockSdt") => Deserialize::deserialize(&value).map(Self::BlockSdt),
+            Some("rawXml") => Deserialize::deserialize(&value).map(Self::RawXml),
+            _ => return Err(serde::de::Error::custom("invalid block type")),
+        };
+        decoded.map_err(serde::de::Error::custom)
+    }
 }
 
 impl BlockContent {
@@ -77,8 +95,8 @@ struct FieldEvents {
 struct FieldRecord {
     owner_block: usize,
     owner_content: usize,
-    code_blocks: Vec<usize>,
-    result_blocks: Vec<usize>,
+    code_end: Option<usize>,
+    result_end: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -100,6 +118,12 @@ pub struct StoryParser<'a, 'limits> {
     pub budget: &'a mut ParseBudget<'limits>,
     pub ids: &'a mut HexIdAllocator,
     pub part: &'a str,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct StoryContext {
+    pub in_header_footer: bool,
+    pub watermark_claimed_separately: bool,
 }
 
 pub const PREVIEW_MIN_BLOCKS: usize = 32;
@@ -144,6 +168,31 @@ impl LegacyBodyCut {
 }
 
 impl StoryParser<'_, '_> {
+    pub(crate) fn parse_header_footer_blocks(
+        &mut self,
+        parent: &XmlElement,
+        is_header: bool,
+    ) -> Result<Vec<BlockContent>, ParseError> {
+        self.parse_blocks_with_context(
+            parent,
+            0,
+            StoryContext {
+                in_header_footer: true,
+                watermark_claimed_separately: is_header,
+            },
+        )
+    }
+
+    fn parse_blocks_with_context(
+        &mut self,
+        parent: &XmlElement,
+        depth: usize,
+        context: StoryContext,
+    ) -> Result<Vec<BlockContent>, ParseError> {
+        self.parse_blocks_until_with_context(parent, depth, context, None, None, None, None)
+            .map(|(content, _, _)| content)
+    }
+
     pub fn parse_blocks(
         &mut self,
         parent: &XmlElement,
@@ -182,6 +231,31 @@ impl StoryParser<'_, '_> {
         parent: &XmlElement,
         depth: usize,
         in_header_footer: bool,
+        limit: Option<usize>,
+        read_limit: Option<usize>,
+        paragraph_budget: Option<usize>,
+        legacy_partial: Option<bool>,
+    ) -> Result<(Vec<BlockContent>, usize, bool), ParseError> {
+        self.parse_blocks_until_with_context(
+            parent,
+            depth,
+            StoryContext {
+                in_header_footer,
+                watermark_claimed_separately: in_header_footer,
+            },
+            limit,
+            read_limit,
+            paragraph_budget,
+            legacy_partial,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn parse_blocks_until_with_context(
+        &mut self,
+        parent: &XmlElement,
+        depth: usize,
+        context: StoryContext,
         limit: Option<usize>,
         read_limit: Option<usize>,
         paragraph_budget: Option<usize>,
@@ -240,19 +314,17 @@ impl StoryParser<'_, '_> {
             }
             let paragraphs_before = self.budget.paragraph_count();
             if !typed_block(child) {
-                let raw = if is_body_bookmark(parent, child) {
+                let raw = if is_block_bookmark(parent, child) {
                     Some(crate::inline::RawInlineXml {
                         node_type: crate::inline::RawInlineXmlType::RawXml,
-                        xml: child
-                            .bookmark_xml
-                            .clone()
-                            .unwrap_or_else(|| child.to_raw_inline_xml()),
+                        xml: bookmark_source(child),
                         source_ordinal: None,
                     })
                 } else {
                     crate::inline::raw_foreign_node(child, self.budget)
                 };
                 if let Some(raw) = raw {
+                    extend_open_fields(&mut records, &open_fields, content.len());
                     content.push(BlockContent::RawXml(Arc::new(raw)));
                     weight = weight.saturating_add(
                         self.budget
@@ -280,7 +352,7 @@ impl StoryParser<'_, '_> {
                         charts: self.charts,
                         smart_art: &mut *self.smart_art,
                     };
-                    let mut paragraph = parse_paragraph(
+                    let mut paragraph = parse_paragraph_with_story_context(
                         child,
                         self.relationships,
                         self.theme,
@@ -291,22 +363,16 @@ impl StoryParser<'_, '_> {
                         self.budget,
                         self.ids,
                         Some(&mut drawing),
-                        in_header_footer,
+                        context,
                         depth,
                     )?;
                     self.enrich_paragraph_text_boxes(&mut paragraph, child, depth)?;
                     BlockContent::Paragraph(Arc::new(paragraph))
                 }
-                "tbl" => BlockContent::Table(Arc::new(self.parse_table(
-                    child,
-                    depth,
-                    in_header_footer,
-                )?)),
-                "sdt" => BlockContent::BlockSdt(Arc::new(self.parse_block_sdt(
-                    child,
-                    depth,
-                    in_header_footer,
-                )?)),
+                "tbl" => BlockContent::Table(Arc::new(self.parse_table(child, depth, context)?)),
+                "sdt" => {
+                    BlockContent::BlockSdt(Arc::new(self.parse_block_sdt(child, depth, context)?))
+                }
                 "oMath" | "oMathPara" => {
                     self.budget.charge_paragraph(self.part)?;
                     BlockContent::Paragraph(Arc::new(math_paragraph(child)))
@@ -316,13 +382,7 @@ impl StoryParser<'_, '_> {
 
             remove_external_field_end_runs(&mut parsed, events.external_ends);
             let parsed_index = content.len();
-            for open in &open_fields {
-                let target = &mut records[open.record];
-                match open.mode {
-                    FieldMode::Code => target.code_blocks.push(parsed_index),
-                    FieldMode::Result => target.result_blocks.push(parsed_index),
-                }
-            }
+            extend_open_fields(&mut records, &open_fields, parsed_index);
             for _ in 0..events.external_ends {
                 if open_fields.pop().is_none() {
                     break;
@@ -350,8 +410,8 @@ impl StoryParser<'_, '_> {
                     records.push(FieldRecord {
                         owner_block: parsed_index,
                         owner_content: content_index,
-                        code_blocks: Vec::new(),
-                        result_blocks: Vec::new(),
+                        code_end: None,
+                        result_end: None,
                     });
                     open_fields.push(OpenField { record, mode });
                 }
@@ -366,12 +426,12 @@ impl StoryParser<'_, '_> {
         &mut self,
         element: &XmlElement,
         depth: usize,
-        in_header_footer: bool,
+        context: StoryContext,
     ) -> Result<BlockSdt, ParseError> {
         let next_depth = depth.saturating_add(1);
         self.budget.check_nesting_depth(next_depth, self.part)?;
         let nested = match element.child("w", "sdtContent") {
-            Some(container) => self.parse_blocks(container, next_depth, in_header_footer)?,
+            Some(container) => self.parse_blocks_with_context(container, next_depth, context)?,
             None => Vec::new(),
         };
         Ok(BlockSdt {
@@ -389,7 +449,7 @@ impl StoryParser<'_, '_> {
         &mut self,
         element: &XmlElement,
         depth: usize,
-        in_header_footer: bool,
+        context: StoryContext,
     ) -> Result<Table, ParseError> {
         self.budget.charge_table(self.part)?;
         let properties = element.child("w", "tblPr");
@@ -400,16 +460,20 @@ impl StoryParser<'_, '_> {
             formatting,
             column_widths: parse_table_grid(element.child("w", "tblGrid")),
             rows: Vec::new(),
+            trailing_bookmarks: None,
         };
-        for row in transparent_children(element, true)
-            .into_iter()
-            .filter(|row| row.matches_name("w", "tr"))
-        {
-            self.budget.charge_table_row(self.part)?;
-            table
-                .rows
-                .push(self.parse_table_row(row, depth, in_header_footer)?);
+        let mut pending = Vec::new();
+        for child in transparent_children(element, true) {
+            if is_block_bookmark(element, child) {
+                pending.push(bookmark_source(child));
+            } else if child.matches_name("w", "tr") {
+                self.budget.charge_table_row(self.part)?;
+                let mut row = self.parse_table_row(child, depth, context)?;
+                row.leading_bookmarks = take_bookmarks(&mut pending);
+                table.rows.push(row);
+            }
         }
+        table.trailing_bookmarks = take_bookmarks(&mut pending);
         infer_implicit_single_cell_row_spans(&mut table);
         Ok(table)
     }
@@ -418,10 +482,18 @@ impl StoryParser<'_, '_> {
         &mut self,
         element: &XmlElement,
         depth: usize,
-        in_header_footer: bool,
+        context: StoryContext,
     ) -> Result<TableRow, ParseError> {
         let properties = element.child("w", "trPr");
-        let formatting = parse_document_table_row_properties(properties);
+        let mut formatting = parse_document_table_row_properties(properties);
+        let property_changes = parse_table_row_property_changes(properties, formatting.as_ref());
+        if let Some(formatting) = formatting
+            .as_mut()
+            .filter(|value| value.hidden == Some(true))
+        {
+            formatting.hidden_content_only =
+                row_is_hidden_content_only(element, self.styles, self.doc_defaults).then_some(true);
+        }
         let mut row = TableRow {
             node_type: "tableRow".to_owned(),
             extra_attributes: (!element.attributes.is_empty()).then(|| {
@@ -434,19 +506,25 @@ impl StoryParser<'_, '_> {
                     })
                     .collect()
             }),
-            property_changes: parse_table_row_property_changes(properties, formatting.as_ref()),
+            property_changes,
             structural_change: parse_table_row_structural_change(properties),
             formatting,
             cells: Vec::new(),
+            leading_bookmarks: None,
+            trailing_bookmarks: None,
         };
-        for cell in transparent_children(element, true)
-            .into_iter()
-            .filter(|cell| cell.matches_name("w", "tc"))
-        {
-            self.budget.charge_table_cell(self.part)?;
-            row.cells
-                .push(self.parse_table_cell(cell, depth, in_header_footer)?);
+        let mut pending = Vec::new();
+        for child in transparent_children(element, true) {
+            if is_block_bookmark(element, child) {
+                pending.push(bookmark_source(child));
+            } else if child.matches_name("w", "tc") {
+                self.budget.charge_table_cell(self.part)?;
+                let mut cell = self.parse_table_cell(child, depth, context)?;
+                cell.leading_bookmarks = take_bookmarks(&mut pending);
+                row.cells.push(cell);
+            }
         }
+        row.trailing_bookmarks = take_bookmarks(&mut pending);
         Ok(row)
     }
 
@@ -454,14 +532,14 @@ impl StoryParser<'_, '_> {
         &mut self,
         element: &XmlElement,
         depth: usize,
-        in_header_footer: bool,
+        context: StoryContext,
     ) -> Result<TableCell, ParseError> {
         let properties = element.child("w", "tcPr");
         let formatting = parse_document_table_cell_properties(properties);
         let cell_depth = depth.saturating_add(1);
         self.budget.check_nesting_depth(cell_depth, self.part)?;
-        let mut content = self.parse_blocks(element, cell_depth, in_header_footer)?;
-        if content.is_empty() {
+        let mut content = self.parse_blocks_with_context(element, cell_depth, context)?;
+        if content.iter().all(is_bookmark_block) {
             self.budget.charge_block(self.part)?;
             self.budget.charge_paragraph(self.part)?;
             content.push(BlockContent::Paragraph(Arc::new(empty_paragraph())));
@@ -472,6 +550,7 @@ impl StoryParser<'_, '_> {
             structural_change: parse_table_cell_structural_change(properties),
             formatting,
             content,
+            leading_bookmarks: None,
         })
     }
 
@@ -481,6 +560,7 @@ impl StoryParser<'_, '_> {
         source: &XmlElement,
         depth: usize,
     ) -> Result<(), ParseError> {
+        let runs = self.budget.take_paragraph_runs();
         if paragraph.content.is_empty() {
             return Ok(());
         }
@@ -489,13 +569,23 @@ impl StoryParser<'_, '_> {
             .into_iter()
             .filter(|child| child.local_name() == "r")
         {
+            let target = runs.get(run_index).copied().flatten().unwrap_or(run_index);
             for child in run.child_elements() {
                 match child.local_name() {
                     "drawing" => {
-                        self.enrich_text_box_drawing(paragraph, child, run_index, depth)?
+                        self.enrich_text_box_drawing(paragraph, child, child, target, depth)?
                     }
                     "pict" => self.enrich_vml_text_box(paragraph, child, depth)?,
                     "AlternateContent" => {
+                        let shared = crate::text_box::shares_a_bookmarked_branch(child);
+                        if shared
+                            && holds_whole_alternate_content(
+                                paragraph,
+                                &crate::text_box::source_xml(child),
+                            )
+                        {
+                            continue;
+                        }
                         let branch = child
                             .child_elements()
                             .find(|branch| branch.local_name() == "Choice")
@@ -505,12 +595,16 @@ impl StoryParser<'_, '_> {
                                     .find(|branch| branch.local_name() == "Fallback")
                             });
                         if let Some(branch) = branch {
-                            for child in branch.child_elements() {
-                                match child.local_name() {
+                            for item in branch.child_elements() {
+                                match item.local_name() {
                                     "drawing" => self.enrich_text_box_drawing(
-                                        paragraph, child, run_index, depth,
+                                        paragraph,
+                                        item,
+                                        if shared { item } else { child },
+                                        target,
+                                        depth,
                                     )?,
-                                    "pict" => self.enrich_vml_text_box(paragraph, child, depth)?,
+                                    "pict" => self.enrich_vml_text_box(paragraph, item, depth)?,
                                     _ => {}
                                 }
                             }
@@ -528,10 +622,11 @@ impl StoryParser<'_, '_> {
         &mut self,
         paragraph: &mut Paragraph,
         drawing: &XmlElement,
+        source: &XmlElement,
         run_index: usize,
         depth: usize,
     ) -> Result<(), ParseError> {
-        let Some(text_box) = parse_text_box(drawing) else {
+        let Some(mut shape) = crate::text_box::text_box_shape(drawing, Vec::new()) else {
             return Ok(());
         };
         let content = if let Some(shape) = find_descendant_by_name(drawing, "wps:wsp", 0)
@@ -541,37 +636,8 @@ impl StoryParser<'_, '_> {
         } else {
             Vec::new()
         };
-        let mut shape = crate::shape::parse_shape_from_drawing(drawing).unwrap_or_else(|| {
-            let mut shape = Shape::empty("textBox".to_owned(), text_box.size);
-            shape.id = text_box.id;
-            shape.name = text_box.name;
-            shape.position = text_box.position;
-            shape.wrap = text_box.wrap;
-            shape.fill = text_box.fill;
-            shape.outline = text_box.outline;
-            shape
-        });
-        let body: Option<ShapeTextBodyProperties> = text_box.body_properties.map(Into::into);
-        shape.text_body = Some(ShapeTextBody {
-            vertical: body.as_ref().and_then(|body| {
-                body.vertical
-                    .as_deref()
-                    .filter(|value| *value != "horizontal")
-                    .map(|_| true)
-            }),
-            rotation: body.as_ref().and_then(|body| body.rotation),
-            anchor: body.as_ref().and_then(|body| body.anchor.clone()),
-            anchor_center: body.as_ref().and_then(|body| body.anchor_center),
-            auto_fit: body.as_ref().and_then(|body| body.auto_fit.clone()),
-            margins: text_box.margins.map(|margins| RelativeRect {
-                left: margins.left,
-                top: margins.top,
-                right: margins.right,
-                bottom: margins.bottom,
-            }),
-            content,
-        });
-        shape.text_body_properties = shape.text_body_properties.or(body);
+        shape.text_body.as_mut().unwrap().content = content;
+        crate::text_box::capture_bookmark_source(&mut shape, source);
         let mut target = run_index;
         if target >= paragraph.content.len() {
             let Some(last_run) = paragraph.content.iter().rposition(|content| {
@@ -616,7 +682,7 @@ impl StoryParser<'_, '_> {
         let Some(container) = crate::vml::vml_text_box_content_element(pict) else {
             return Ok(());
         };
-        let pict_xml = pict.to_raw_inline_xml();
+        let pict_xml = crate::text_box::source_xml(pict);
         let slot = paragraph
             .content
             .iter_mut()
@@ -695,6 +761,15 @@ impl StoryParser<'_, '_> {
 
 /// `parent`'s children in document order, descending through `w:customXml`
 /// and `w:smartTag` wrappers, and through `w:sdt`/`w:sdtContent` when `through_sdt`.
+fn holds_whole_alternate_content(paragraph: &Paragraph, xml: &str) -> bool {
+    paragraph.content.iter().any(|content| {
+        matches!(content, ParagraphContent::Inline(InlineNode::Run(run))
+            if run.content.iter().any(|item| matches!(item,
+                RunContent::OpaqueDrawing { kind, xml: whole, .. }
+                    if kind == "alternateContent" && whole == xml)))
+    })
+}
+
 pub(crate) fn transparent_children(parent: &XmlElement, through_sdt: bool) -> Vec<&XmlElement> {
     let mut children = Vec::new();
     visit_transparent_children(parent, through_sdt, &mut Vec::new(), &mut |_, child| {
@@ -742,8 +817,74 @@ pub(crate) fn typed_block_name(name: &str) -> bool {
     )
 }
 
-fn is_body_bookmark(parent: &XmlElement, element: &XmlElement) -> bool {
-    parent.name == "w:body" && matches!(element.name.as_str(), "w:bookmarkStart" | "w:bookmarkEnd")
+pub(crate) fn is_bookmark_block(block: &BlockContent) -> bool {
+    let BlockContent::RawXml(raw) = block else {
+        return false;
+    };
+    let name = raw
+        .xml
+        .trim_start()
+        .strip_prefix('<')
+        .unwrap_or_default()
+        .split(|character: char| character.is_ascii_whitespace() || matches!(character, '/' | '>'))
+        .next()
+        .unwrap_or_default();
+    matches!(name, "w:bookmarkStart" | "w:bookmarkEnd")
+}
+
+/// A bookmark boundary's XML for replay outside its source ancestors.
+pub(crate) fn bookmark_source(element: &XmlElement) -> String {
+    element
+        .bookmark_replay_xml
+        .clone()
+        .or_else(|| element.bookmark_xml.clone())
+        .unwrap_or_else(|| element.to_raw_inline_xml())
+}
+
+fn take_bookmarks(pending: &mut Vec<String>) -> Option<Vec<String>> {
+    (!pending.is_empty()).then(|| std::mem::take(pending))
+}
+
+/// Whether `parent` holds a block bookmark directly or through `w:customXml` / `w:smartTag`.
+pub(crate) fn has_direct_block_bookmark(parent: &XmlElement) -> bool {
+    transparent_children(parent, false)
+        .into_iter()
+        .any(|child| is_block_bookmark(parent, child))
+}
+
+pub(crate) fn contains_bookmark_block(block: &BlockContent) -> bool {
+    match block {
+        BlockContent::BlockSdt(control) => control.content.iter().any(contains_bookmark_block),
+        BlockContent::Table(table) => {
+            table.trailing_bookmarks.is_some()
+                || table.rows.iter().any(|row| {
+                    row.leading_bookmarks.is_some()
+                        || row.trailing_bookmarks.is_some()
+                        || row.cells.iter().any(|cell| {
+                            cell.leading_bookmarks.is_some()
+                                || cell.content.iter().any(contains_bookmark_block)
+                        })
+                })
+        }
+        _ => is_bookmark_block(block),
+    }
+}
+
+pub(crate) fn is_block_bookmark(parent: &XmlElement, element: &XmlElement) -> bool {
+    matches!(
+        parent.name.as_str(),
+        "w:body"
+            | "w:tbl"
+            | "w:tr"
+            | "w:tc"
+            | "w:sdtContent"
+            | "w:hdr"
+            | "w:ftr"
+            | "w:footnote"
+            | "w:endnote"
+            | "w:comment"
+            | "w:txbxContent"
+    ) && matches!(element.name.as_str(), "w:bookmarkStart" | "w:bookmarkEnd")
 }
 
 /// Whether the story dispatcher reads `element` as a block: a typed one, or foreign markup it
@@ -761,7 +902,7 @@ fn is_story_block_name(name: &str) -> bool {
 pub fn story_block_elements(parent: &XmlElement) -> Vec<(Vec<u32>, &XmlElement)> {
     let mut blocks = Vec::new();
     visit_transparent_children(parent, false, &mut Vec::new(), &mut |path, child| {
-        if is_story_block(child) || is_body_bookmark(parent, child) {
+        if is_story_block(child) || is_block_bookmark(parent, child) {
             blocks.push((path.to_vec(), child));
         }
     });
@@ -828,63 +969,48 @@ fn top_level_complex_field_indices(block: &BlockContent) -> Vec<usize> {
         .collect()
 }
 
+/// Extends every open field's span to the block at `index`, in the phase the field is in.
+fn extend_open_fields(records: &mut [FieldRecord], open_fields: &[OpenField], index: usize) {
+    for open in open_fields {
+        let target = &mut records[open.record];
+        match open.mode {
+            FieldMode::Code => target.code_end = Some(index),
+            FieldMode::Result => target.result_end = Some(index),
+        }
+    }
+}
+
 fn attach_recorded_field_blocks(content: &mut [BlockContent], records: Vec<FieldRecord>) {
     for record in records.into_iter().rev() {
-        let code: Vec<_> = record
-            .code_blocks
-            .iter()
-            .filter_map(|index| content.get(*index).cloned())
-            .collect();
-        let result: Vec<_> = record
-            .result_blocks
-            .iter()
-            .filter_map(|index| content.get(*index).cloned())
-            .collect();
-        let Some(field) = complex_field_mut(content, record.owner_block, record.owner_content)
-        else {
+        let owner = record.owner_block;
+        let Some(end) = record.result_end.or(record.code_end) else {
             continue;
         };
-        if code.is_empty() && result.is_empty() {
+        let (head, later) = content.split_at_mut(owner + 1);
+        let Some(field) = complex_field_mut(head, owner, record.owner_content) else {
             continue;
+        };
+        if let Some(code_end) = record.code_end {
+            let code = structured_or_runs(&mut field.structured_code, &field.field_code);
+            code.block_count = Some(code_end - owner);
         }
-        if !code.is_empty() {
-            let structured = field
-                .structured_code
-                .get_or_insert_with(|| StructuredFieldContent {
-                    inline: Some(
-                        field
-                            .field_code
-                            .iter()
-                            .cloned()
-                            .map(InlineNode::Run)
-                            .collect(),
-                    ),
-                    blocks: None,
-                });
-            structured.blocks.get_or_insert_with(Vec::new).extend(code);
+        if let Some(result_end) = record.result_end {
+            let result = structured_or_runs(&mut field.structured_result, &field.field_result);
+            result.block_count = Some(result_end - record.code_end.unwrap_or(owner));
         }
-        if !result.is_empty() {
-            let structured =
-                field
-                    .structured_result
-                    .get_or_insert_with(|| StructuredFieldContent {
-                        inline: Some(
-                            field
-                                .field_result
-                                .iter()
-                                .cloned()
-                                .map(InlineNode::Run)
-                                .collect(),
-                        ),
-                        blocks: None,
-                    });
-            structured
-                .blocks
-                .get_or_insert_with(Vec::new)
-                .extend(result);
-        }
-        field.project_leaf_tree();
+        field.project_leaf_tree(&later[..end - owner]);
     }
+}
+
+fn structured_or_runs<'a>(
+    content: &'a mut Option<StructuredFieldContent>,
+    runs: &[Run],
+) -> &'a mut StructuredFieldContent {
+    content.get_or_insert_with(|| StructuredFieldContent {
+        inline: Some(runs.iter().cloned().map(InlineNode::Run).collect()),
+        blocks: None,
+        block_count: None,
+    })
 }
 
 pub(crate) fn blocks_hold_field(blocks: &[BlockContent]) -> bool {
@@ -1210,11 +1336,9 @@ mod tests {
             })
             .unwrap();
         let result = field.structured_result.as_ref().unwrap();
-        assert_eq!(result.blocks.as_ref().unwrap().len(), 3);
-        assert!(matches!(
-            result.blocks.as_ref().unwrap()[1],
-            BlockContent::Table(_)
-        ));
+        assert_eq!(result.block_count, Some(3));
+        assert!(result.blocks.is_none());
+        assert!(matches!(blocks[2], BlockContent::Table(_)));
         let BlockContent::Paragraph(closing) = &blocks[3] else {
             panic!("closing")
         };
@@ -1432,10 +1556,8 @@ mod tests {
             field
                 .structured_result
                 .as_ref()
-                .and_then(|result| result.blocks.as_ref())
-                .unwrap()
-                .len(),
-            3
+                .and_then(|result| result.block_count),
+            Some(3)
         );
     }
 

@@ -9,6 +9,9 @@ export const REGISTRY = [
   { path: 'bindings/python-xlsx', publish: true }
 ];
 
+/** Pure data wheels betteroffice-fonts-<pack>, built from packages/fonts-<pack>; every format binding depends on all three. */
+export const FONT_PACK_NAMES = ['fonts-latin', 'fonts-intl', 'fonts-cjk'];
+
 export function bindingName(path) {
   return path.replace('bindings/python-', '');
 }

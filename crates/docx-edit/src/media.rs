@@ -146,12 +146,15 @@ impl MediaSources {
 
     /// The key and digests, for a replica that did not seed.
     pub fn to_json(&self) -> String {
-        let parts: Vec<(String, u32)> = self
+        let mut parts: Vec<(String, u32)> = self
             .0
             .parts
             .iter()
             .map(|(digest, index)| (format!("{digest:016x}"), *index))
             .collect();
+        crate::sort::sort_by(&mut parts, &|left, right| {
+            left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0))
+        });
         serde_json::json!({
             "key": [format!("{:016x}", self.0.key.0), format!("{:016x}", self.0.key.1)],
             "parts": parts,
@@ -237,8 +240,12 @@ pub(crate) fn write_data_urls<'a>(
     let mut seen = HashMap::new();
     for (index, url) in writer.urls {
         if let Some(url) = url {
-            parts.insert(digest(key, &url), index as u32);
-            seen.insert(Arc::as_ptr(&url) as *const u8 as usize, (url, index as u32));
+            let index = index as u32;
+            parts
+                .entry(digest(key, &url))
+                .and_modify(|kept: &mut u32| *kept = (*kept).min(index))
+                .or_insert(index);
+            seen.insert(Arc::as_ptr(&url) as *const u8 as usize, (url, index));
         }
     }
     Ok(MediaSources(Arc::new(Sources {
@@ -249,6 +256,66 @@ pub(crate) fn write_data_urls<'a>(
     })))
 }
 
+/// `base` extended with the `data:` URL of every part of `table` it lacks,
+/// under `base`'s key (a fresh one when it is empty), so a replica that holds
+/// the package resolves the URLs seeding wrote whether or not it was seeded
+/// itself. What `base` maps stays; a URL two parts share and `base` does not
+/// map is left unresolved unless both draw the same bytes.
+pub(crate) fn sources_from_table(base: &MediaSources, table: &MediaTable) -> MediaSources {
+    let key = if base.is_empty() {
+        let [k0, k1] = crate::identity::entropy();
+        (k0, k1)
+    } else {
+        base.0.key
+    };
+    let mut added: HashMap<u64, u32> = HashMap::new();
+    let mut ambiguous = std::collections::HashSet::new();
+    for index in 0..table.len() {
+        let Ok(url) = table.data_url(index) else {
+            continue;
+        };
+        let digest = digest(key, &url);
+        if base.0.parts.contains_key(&digest) || ambiguous.contains(&digest) {
+            continue;
+        }
+        match added.get(&digest) {
+            None => {
+                added.insert(digest, index as u32);
+            }
+            Some(&kept) if !draws_same(table, kept as usize, index) => {
+                added.remove(&digest);
+                ambiguous.insert(digest);
+            }
+            Some(_) => {}
+        }
+    }
+    if added.is_empty() {
+        return base.clone();
+    }
+    let mut parts = base.0.parts.clone();
+    parts.extend(added);
+    MediaSources(Arc::new(Sources {
+        key,
+        parts,
+        seen: Mutex::new(Seen::new(HashMap::new())),
+        json: Mutex::new(Seen::new(HashMap::new())),
+    }))
+}
+
+/// Whether a raster backend draws parts `a` and `b` from the same bytes; on
+/// wasm a part is drawn from its display copy, which a shared URL already
+/// makes equal.
+#[cfg(not(target_arch = "wasm32"))]
+fn draws_same(table: &MediaTable, a: usize, b: usize) -> bool {
+    matches!((table.raster_bytes(a), table.raster_bytes(b)), (Ok(a), Ok(b)) if a == b)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn draws_same(_table: &MediaTable, _a: usize, _b: usize) -> bool {
+    true
+}
+
+#[cfg(test)]
 pub(crate) fn write_segment_data_urls(
     segments: &mut [StorySegment],
     table: &MediaTable,
@@ -261,22 +328,50 @@ pub(crate) fn write_segment_data_urls(
     }
 }
 
-/// [`write_segment_data_urls`] writing at most `budget` bytes of URLs, each
-/// counted at every value it is written into, and of rewritten payloads,
-/// taking them off `budget`; false once it runs out, leaving `segments`
-/// partly written.
-pub(crate) fn write_segment_data_urls_within(
-    segments: &mut [StorySegment],
-    table: &MediaTable,
-    budget: &mut usize,
-) -> Result<bool, String> {
-    let mut writer = DataUrls::new(table);
-    writer.budget = Some(*budget);
-    writer.segments(segments);
-    *budget = writer.budget.unwrap_or(0);
-    match writer.error {
-        Some(error) => Err(error),
-        None => Ok(!writer.spent),
+/// Writes the `data:` URLs of a story's segments a chunk at a time.
+pub(crate) struct SegmentDataUrls {
+    urls: HashMap<usize, Option<Arc<str>>>,
+    budget: Option<usize>,
+    spent: bool,
+    error: Option<String>,
+}
+
+impl SegmentDataUrls {
+    pub(crate) fn new(budget: Option<usize>) -> Self {
+        Self {
+            urls: HashMap::new(),
+            budget,
+            spent: false,
+            error: None,
+        }
+    }
+
+    pub(crate) fn write(&mut self, segments: &mut [StorySegment], table: &MediaTable) {
+        let mut writer = DataUrls::new(table);
+        writer.urls = std::mem::take(&mut self.urls);
+        writer.budget = self.budget;
+        writer.spent = self.spent;
+        writer.error = self.error.take();
+        writer.segments(segments);
+        self.urls = writer.urls;
+        self.budget = writer.budget;
+        self.spent = writer.spent;
+        self.error = writer.error;
+    }
+
+    /// What is left of the budget.
+    pub(crate) fn budget(&self) -> Option<usize> {
+        self.budget
+    }
+
+    /// Whether the budget ran out.
+    pub(crate) fn spent(&self) -> bool {
+        self.spent
+    }
+
+    /// Whether a part's URL could not be read.
+    pub(crate) fn failed(&self) -> bool {
+        self.error.is_some()
     }
 }
 
@@ -631,6 +726,131 @@ mod tests {
             &MediaSources::default().tokenized_json(&source),
             &source
         ));
+    }
+
+    #[test]
+    fn identical_parts_map_to_the_lowest_index_in_index_order() {
+        let bytes = ooxml_opc::rezip_parts(&[
+            ("word/media/a.png".to_owned(), vec![1, 2, 3]),
+            ("word/media/b.png".to_owned(), vec![9]),
+            ("word/media/c.png".to_owned(), vec![1, 2, 3]),
+        ])
+        .unwrap();
+        let table =
+            MediaTable::new(ooxml_opc::RetainedPackage::new(Arc::from(bytes)).unwrap()).unwrap();
+        let index = |path| {
+            (0..table.len())
+                .find(|&i| table.path(i) == Some(path))
+                .unwrap() as u32
+        };
+        let (a, b, c) = (
+            index("word/media/a.png"),
+            index("word/media/b.png"),
+            index("word/media/c.png"),
+        );
+        let mut expected = vec![a.min(c), b];
+        expected.sort_unstable();
+        for _ in 0..32 {
+            let mut ops: Vec<RawOp> = [c, b, a]
+                .iter()
+                .enumerate()
+                .map(|(at, part)| RawOp::InsertEmbed {
+                    index: at as u32,
+                    kind: "image".to_owned(),
+                    payload: vec![("src".to_owned(), Any::from(format!("media:{part}")))],
+                    attrs: crate::Attrs::new(),
+                })
+                .collect();
+            let sources = write_data_urls(&mut ops, &table, true).unwrap();
+            let json: Value = serde_json::from_str(&sources.to_json()).unwrap();
+            let indices: Vec<u32> = json["parts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|part| part[1].as_u64().unwrap() as u32)
+                .collect();
+            assert_eq!(indices, expected);
+        }
+    }
+
+    #[test]
+    fn sources_rebuilt_from_the_table_resolve_only_what_seeding_wrote() {
+        let bytes = ooxml_opc::rezip_parts(&[
+            ("word/media/a.png".to_owned(), vec![1, 2, 3, 4]),
+            ("word/media/b.png".to_owned(), vec![5]),
+        ])
+        .unwrap();
+        let table =
+            MediaTable::new(ooxml_opc::RetainedPackage::new(Arc::from(bytes)).unwrap()).unwrap();
+        let a = (0..table.len())
+            .find(|&i| table.path(i) == Some("word/media/a.png"))
+            .unwrap();
+        let mut ops = vec![RawOp::InsertEmbed {
+            index: 0,
+            kind: "image".to_owned(),
+            payload: vec![("src".to_owned(), Any::from(format!("media:{a}")))],
+            attrs: crate::Attrs::new(),
+        }];
+        let seeded = write_data_urls(&mut ops, &table, true).unwrap();
+        let RawOp::InsertEmbed { payload, .. } = &ops[0] else {
+            unreachable!()
+        };
+        let Any::String(url) = &payload[0].1 else {
+            unreachable!()
+        };
+        let rebuilt = sources_from_table(&MediaSources::default(), &table);
+        assert_eq!(rebuilt.token_of(url), Some(media_token(a)));
+        assert_eq!(rebuilt.token_of(url), seeded.token_of(url));
+        assert_eq!(rebuilt.token_of("data:image/png;base64,AQIDBQ=="), None);
+    }
+
+    #[cfg(feature = "metafile")]
+    #[test]
+    fn rebuilt_sources_leave_a_url_two_differently_drawn_parts_share_unresolved() {
+        let emf = include_bytes!("../../ooxml-metafile/tests/fixtures/clip-bitmap.emf").to_vec();
+        let table = |parts: &[(&str, Vec<u8>)]| {
+            let parts: Vec<(String, Vec<u8>)> = parts
+                .iter()
+                .map(|(path, bytes)| ((*path).to_owned(), bytes.clone()))
+                .collect();
+            MediaTable::new(
+                ooxml_opc::RetainedPackage::new(Arc::from(ooxml_opc::rezip_parts(&parts).unwrap()))
+                    .unwrap(),
+            )
+            .unwrap()
+        };
+        let alone = table(&[("word/media/a.emf", emf.clone())]);
+        let display = alone.bytes(0).unwrap().into_owned();
+        assert!(display.starts_with(b"<svg"));
+        let both = table(&[("word/media/a.emf", emf), ("word/media/b.svg", display)]);
+        let url = both.data_url(1).unwrap();
+        assert_eq!(both.data_url(0).unwrap(), url);
+        assert_eq!(
+            sources_from_table(&MediaSources::default(), &both).token_of(&url),
+            None
+        );
+        let mut ops = vec![RawOp::InsertEmbed {
+            index: 0,
+            kind: "image".to_owned(),
+            payload: vec![("src".to_owned(), Any::from("media:0"))],
+            attrs: crate::Attrs::new(),
+        }];
+        let seeded = write_data_urls(&mut ops, &both, true).unwrap();
+        assert_eq!(seeded.token_of(&url), Some(media_token(0)));
+        assert_eq!(
+            sources_from_table(&seeded, &both).token_of(&url),
+            Some(media_token(0))
+        );
+        let twins = table(&[
+            ("word/media/a.png", vec![1, 2, 3, 4]),
+            ("word/media/b.png", vec![1, 2, 3, 4]),
+        ]);
+        let url = twins.data_url(0).unwrap();
+        assert!(
+            sources_from_table(&MediaSources::default(), &twins)
+                .token_of(&url)
+                .is_some()
+        );
     }
 
     #[test]

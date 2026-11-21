@@ -53,18 +53,22 @@ use yrs::types::text::YChange;
 use yrs::{Any, Map, MapRef, OffsetKind, Out, ReadTxn, Text, Transact};
 
 use super::{COMMENTS, DEL, EditError, EditingDoc, INS, decode_anchor, is_pilcrow, story_ref};
+use crate::list_definitions::{effective_list_state, resolve_list_identity, written_numbering};
 use crate::list_marker::{ListState, compute_list_marker};
 use crate::seed::synthesized_cell_width;
 use crate::sticky_positions::sticky_offset;
 
 pub(crate) mod group_pictures;
 mod group_transforms;
+#[cfg(test)]
+mod hidden_rows_tests;
 pub(crate) mod local;
 pub(crate) mod preview;
 pub mod reservations;
 pub use group_pictures::GroupPictureSources;
 pub(crate) mod run_size_provenance;
 mod shapes;
+pub use shapes::ShapeStyles;
 
 pub use reservations::{Reservation, ReservationKind, ReservationSide, Reservations};
 
@@ -74,11 +78,23 @@ pub use reservations::{Reservation, ReservationKind, ReservationSide, Reservatio
 #[serde(default, rename_all = "camelCase")]
 pub struct RenderEnv {
     pub compatibility_flags: docx_parse::CompatibilityFlags,
+    /// `w:tblCellMar` of the document's table styles that set one, by style
+    /// id, for the sides a table and its cells leave unset.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub table_style_cell_margins: BTreeMap<String, Value>,
+    /// The document's default table style.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_table_style_id: Option<String>,
     #[serde(skip_serializing_if = "BTreeSet::is_empty")]
     pub toc_style_ids: BTreeSet<String>,
     /// Six-digit RGB values keyed by OOXML theme slot. A missing slot falls
     /// back to the default Office palette.
     pub theme_colors: BTreeMap<String, String>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_font_theme"
+    )]
+    pub font_theme: Option<docx_parse::Theme>,
     /// Interval between implicit tab stops, passed through to each paragraph.
     /// `None` leaves the layout engine's own default in effect.
     pub default_tab_stop_twips: Option<f64>,
@@ -113,6 +129,10 @@ pub struct RenderEnv {
     /// sections. `None` disables snapping.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub doc_grid_pitch_px: Option<f64>,
+    /// Each region section's note numbering, which the body's note reference marks follow.
+    /// Empty numbers them in decimal from 1.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub note_numbering: Vec<docx_layout::footnotes::SectionNoteNumbering>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_paragraph_style_id: Option<String>,
     /// Resolved paragraph style chain font size in pt, keyed by style id.
@@ -124,6 +144,8 @@ pub struct RenderEnv {
     /// The docDefaults font size in pt.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub doc_default_font_size: Option<f64>,
+    /// The docDefaults run language, which runs that name none inherit.
+    pub doc_default_language: Option<RunLanguageSlots>,
     /// Lower the `data:` image sources seeding wrote as the `media:{n}`
     /// tokens of their parts, which the host then resolves.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -137,6 +159,63 @@ pub struct RenderEnv {
     pub reservations: Reservations,
     #[serde(skip)]
     pub group_pictures: GroupPictureSources,
+    /// Package style context for display-only shape text.
+    #[serde(skip)]
+    pub shape_styles: ShapeStyles,
+}
+
+pub(crate) fn package_font_theme(
+    package: &ooxml_opc::RetainedPackage,
+) -> Option<docx_parse::Theme> {
+    let mut parts = Vec::new();
+    for name in ["word/settings.xml", "word/theme/theme1.xml"] {
+        if let Some(position) = package
+            .parts()
+            .position(|(path, _)| path.eq_ignore_ascii_case(name))
+        {
+            parts.push((name.to_owned(), package.read(position).ok()?));
+        }
+    }
+    crate::seed::package_styles(&parts)
+        .ok()
+        .map(|(theme, _)| theme)
+}
+
+pub(crate) fn source_font_theme(doc: &EditingDoc) -> Option<docx_parse::Theme> {
+    if let Some(index) = doc.source_index() {
+        return Some(index.render_theme().clone());
+    }
+    package_font_theme(doc.media_table()?.retained_package())
+}
+
+pub(crate) fn parse_font_theme(value: Value) -> Result<docx_parse::Theme, serde_json::Error> {
+    fn merge(target: &mut Value, source: Value) {
+        match (target, source) {
+            (Value::Object(target), Value::Object(source)) => {
+                for (key, value) in source {
+                    let entry = target.entry(key).or_insert(Value::Null);
+                    merge(entry, value);
+                }
+            }
+            (target, source) => *target = source,
+        }
+    }
+    let mut theme = docx_parse::Theme::default();
+    theme.font_scheme.major_font = docx_parse::ThemeFont::empty();
+    theme.font_scheme.minor_font = docx_parse::ThemeFont::empty();
+    let mut theme = serde_json::to_value(theme)?;
+    merge(&mut theme, value);
+    serde_json::from_value(theme)
+}
+
+fn deserialize_font_theme<'de, D>(deserializer: D) -> Result<Option<docx_parse::Theme>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    <Option<Value> as serde::Deserialize>::deserialize(deserializer)?
+        .map(parse_font_theme)
+        .transpose()
+        .map_err(serde::de::Error::custom)
 }
 
 impl RenderEnv {
@@ -369,6 +448,10 @@ pub fn yrs_doc_to_mapped_layout_blocks(
     story_id: &str,
     env: &RenderEnv,
 ) -> Result<(Vec<LayoutBlock>, LoweringMap), BridgeError> {
+    if crate::empty_cells::is_empty_cell(&doc.yrs_doc().transact(), story_id) {
+        let cell = crate::empty_cells::EmptyCell::new(story_id);
+        return yrs_doc_to_mapped_layout_blocks(cell.doc(), story_id, env);
+    }
     let mut local = local::LocalLowering::new(false);
     yrs_doc_to_mapped_layout_blocks_inner(doc, story_id, env, &mut None, &mut local, &mut None)
 }
@@ -407,7 +490,10 @@ fn yrs_doc_to_mapped_layout_blocks_inner(
         return Err(BridgeError::WrongOffsetKind);
     }
 
+    let source_theme = source_font_theme(doc);
+    local.source_font_scheme = source_theme.as_ref().map(|theme| theme.font_scheme.clone());
     let with_sources = RenderEnv {
+        font_theme: env.font_theme.clone().or(source_theme),
         media: if env.media_tokens && env.media.is_empty() {
             doc.media_sources()
         } else {
@@ -417,8 +503,10 @@ fn yrs_doc_to_mapped_layout_blocks_inner(
             .source_index()
             .map(|index| index.group_picture_sources())
             .unwrap_or_else(|| env.group_pictures.clone()),
+        shape_styles: shapes::ShapeStyles::new(doc),
         ..env.clone()
     };
+    local.shape_styles = with_sources.shape_styles.clone();
     let env = &with_sources;
     let source = doc.source_metadata();
     local.source = source.as_ref().map(Arc::downgrade).unwrap_or_default();
@@ -432,10 +520,9 @@ fn yrs_doc_to_mapped_layout_blocks_inner(
             .run_revision_stories()
             .any(|story| story == "body" || story.starts_with("body:"))
     }));
-    let numbering = source.as_ref().map(|source| source.numbering());
-    let mut list_state = ListState::new(numbering);
-    local.block(story_id == "body" && list_state.first_picture_bullet().is_some());
     let txn = doc.yrs_doc().transact();
+    let mut list_state = effective_list_state(source.as_deref(), &txn);
+    local.block(story_id == "body" && list_state.first_picture_bullet().is_some());
     local.block(
         txn.get_map(COMMENTS)
             .is_some_and(|comments| comments.len(&txn) != 0),
@@ -486,6 +573,9 @@ fn yrs_doc_to_mapped_layout_blocks_inner(
             &mut blocks,
             opaque_sequences,
         );
+    }
+    if story_id == "body" {
+        docx_layout::footnotes::number_note_references(&mut blocks, &env.note_numbering);
     }
     map.finish();
     Ok((blocks, map.map))
@@ -666,18 +756,13 @@ fn can_omit_trailing_body_page_break<T: ReadTxn>(
         .or_else(|| read.settings.as_ref()?.get("footnotePr")?.get("position"))
         .and_then(Value::as_str)
         .unwrap_or("pageBottom");
-    !txn.get_map(crate::STORIES).is_some_and(|stories| {
-        stories.iter(txn).any(|(id, _)| {
-            let note_id = id.strip_prefix("en:").or_else(|| {
-                if matches!(footnote_position, "docEnd" | "sectEnd") {
-                    id.strip_prefix("fn:")
-                } else {
-                    None
-                }
-            });
-            note_id.is_some_and(|id| id.parse::<i64>().is_ok_and(|id| id > 0))
+    !matches!(footnote_position, "docEnd" | "sectEnd")
+        || !txn.get_map(crate::STORIES).is_some_and(|stories| {
+            stories.iter(txn).any(|(id, _)| {
+                id.strip_prefix("fn:")
+                    .is_some_and(|id| id.parse::<i64>().is_ok_and(|id| id > 0))
+            })
         })
-    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -711,6 +796,7 @@ fn walk_story_chunks<T: ReadTxn>(
         mut paragraph_pm_units,
         mut pm_cursor,
         mut at_block_boundary,
+        mut at_unit_boundary,
         mut section_margins,
         ..
     } = initial;
@@ -734,6 +820,7 @@ fn walk_story_chunks<T: ReadTxn>(
                 paragraph_pm_units,
                 pm_cursor,
                 at_block_boundary,
+                at_unit_boundary,
                 section_margins,
                 stories: map.story_count(),
                 paragraphs: map.paragraph_count(),
@@ -751,11 +838,13 @@ fn walk_story_chunks<T: ReadTxn>(
     }
     let mut plain = local::ParagraphSeed::default();
     let mut paragraph_chunk_start = 0;
+    let mut paragraph_at_unit_start = at_unit_boundary;
     let mut paragraph_has_hyperlink_size = false;
     let mut paragraph_has_toc_field = false;
     for (chunk_index, diff) in chunks.iter().enumerate() {
         if at_block_boundary && paragraph_start == story_index {
             paragraph_chunk_start = chunk_index;
+            paragraph_at_unit_start = at_unit_boundary;
             paragraph_has_hyperlink_size = false;
             paragraph_has_toc_field = false;
         }
@@ -820,6 +909,7 @@ fn walk_story_chunks<T: ReadTxn>(
                     local.run_size_sources.unchanged(
                         &para_id,
                         story_id,
+                        paragraph_at_unit_start,
                         txn,
                         &chunks[paragraph_chunk_start..=chunk_index],
                         comments.markers(paragraph_start, story_index + 1),
@@ -903,8 +993,11 @@ fn walk_story_chunks<T: ReadTxn>(
                         if !paragraph_runs.is_empty() {
                             let join = field_join.as_mut().unwrap();
                             let offset = (paragraph_pm_start - join.pm_start) as u32;
-                            let defaults =
-                                paragraph_run_defaults(&values, paragraph_chain_size(env, &values));
+                            let defaults = paragraph_run_defaults(
+                                &values,
+                                paragraph_chain_size(env, &values),
+                                env,
+                            );
                             for run in &mut paragraph_runs {
                                 run.pm_start += offset;
                                 run.pm_end += offset;
@@ -925,6 +1018,7 @@ fn walk_story_chunks<T: ReadTxn>(
                     paragraph_pm_start = pm_cursor;
                     paragraph_pm_units = 0;
                     at_block_boundary = true;
+                    at_unit_boundary = true;
                     continue;
                 }
                 let joinable = !sectioned
@@ -968,7 +1062,7 @@ fn walk_story_chunks<T: ReadTxn>(
                     && joinable
                 {
                     let defaults =
-                        paragraph_run_defaults(&values, paragraph_chain_size(env, &values));
+                        paragraph_run_defaults(&values, paragraph_chain_size(env, &values), env);
                     for run in &mut paragraph_runs {
                         apply_run_defaults(&mut run.formatting, &defaults);
                     }
@@ -998,6 +1092,7 @@ fn walk_story_chunks<T: ReadTxn>(
                     paragraph_pm_start = pm_cursor;
                     paragraph_pm_units = 0;
                     at_block_boundary = true;
+                    at_unit_boundary = true;
                     continue;
                 }
                 let mut paragraph_blocks = flush_paragraph_parts(
@@ -1053,6 +1148,7 @@ fn walk_story_chunks<T: ReadTxn>(
                 paragraph_pm_start = pm_cursor;
                 paragraph_pm_units = 0;
                 at_block_boundary = true;
+                at_unit_boundary = true;
             }
             Out::YMap(table)
                 if shared_map_string(table, txn, "_kind").as_deref() == Some("table") =>
@@ -1083,38 +1179,57 @@ fn walk_story_chunks<T: ReadTxn>(
                         detail: "table embed interrupts paragraph content".to_owned(),
                     });
                 }
-                let previewed_out = env.revision_hidden(attributes);
-                let hidden = previewed_out
-                    || shared_map_string(table, txn, "blockId")
-                        .is_some_and(|id| hidden_field_blocks.contains(&id));
-                map.tables.push((pm_cursor, story_slot, table_ordinal));
-                table_ordinal += 1;
-                let mut unnumbered = previewed_out.then(|| list_state.clone());
-                let (lowered, node_size) = lower_table(
-                    table,
-                    txn,
-                    story_id,
-                    story_index,
-                    pm_cursor,
-                    env,
-                    active_stories,
-                    unnumbered.as_mut().unwrap_or(&mut *list_state),
-                    map,
-                    opaque_sequences,
-                    revealable,
-                    local,
-                )?;
-                if !hidden {
-                    blocks.push(LayoutBlock::Table(lowered));
-                } else if !previewed_out && let Some(revealed) = revealable {
-                    revealed.push(LayoutBlock::Table(lowered));
-                }
+                let payload = crate::unavailable_tables::table_payload(table, txn);
+                let node_size = if let Some(payload) = payload {
+                    let previewed_out = env.revision_hidden(attributes);
+                    let hidden = previewed_out
+                        || shared_map_string(table, txn, "blockId")
+                            .is_some_and(|id| hidden_field_blocks.contains(&id));
+                    map.tables.push((pm_cursor, story_slot, table_ordinal));
+                    table_ordinal += 1;
+                    let mut unnumbered = previewed_out.then(|| list_state.clone());
+                    let (lowered, node_size) = lower_table(
+                        &payload,
+                        txn,
+                        story_id,
+                        story_index,
+                        pm_cursor,
+                        env,
+                        active_stories,
+                        unnumbered.as_mut().unwrap_or(&mut *list_state),
+                        map,
+                        opaque_sequences,
+                        revealable,
+                        local,
+                    )?;
+                    let rows_shown = !lowered.rows.is_empty();
+                    if story_id == "body"
+                        && active_stories.len() == 1
+                        && let BlockId::Str(id) = &lowered.id
+                    {
+                        local.table_embeds.insert(id.clone(), table.clone());
+                    }
+                    if rows_shown && !hidden {
+                        blocks.push(LayoutBlock::Table(lowered));
+                    } else if rows_shown
+                        && !previewed_out
+                        && let Some(revealed) = revealable
+                    {
+                        revealed.push(LayoutBlock::Table(lowered));
+                    }
+                    node_size
+                } else {
+                    map.tables.push((pm_cursor, story_slot, table_ordinal));
+                    table_ordinal += 1;
+                    UNAVAILABLE_TABLE_NODE_SIZE
+                };
                 story_index += 1;
                 paragraph_start = story_index;
                 pm_cursor += node_size;
                 paragraph_pm_start = pm_cursor;
                 paragraph_pm_units = 0;
                 at_block_boundary = true;
+                at_unit_boundary = false;
             }
             Out::YMap(page_break)
                 if matches!(
@@ -1201,6 +1316,7 @@ fn walk_story_chunks<T: ReadTxn>(
                 paragraph_pm_start = pm_cursor;
                 paragraph_pm_units = 0;
                 at_block_boundary = true;
+                at_unit_boundary = false;
             }
             Out::YMap(block_sdt)
                 if shared_map_string(block_sdt, txn, "_kind").as_deref() == Some("blockSdt") =>
@@ -1267,6 +1383,7 @@ fn walk_story_chunks<T: ReadTxn>(
                 paragraph_pm_start = pm_cursor;
                 paragraph_pm_units = 0;
                 at_block_boundary = true;
+                at_unit_boundary = false;
             }
             Out::YMap(note_ref)
                 if shared_map_string(note_ref, txn, "_kind").as_deref() == Some("noteRef") =>
@@ -1547,6 +1664,7 @@ fn walk_story_chunks<T: ReadTxn>(
                 if shapes::inline_native_shape(&block) {
                     let image = ImageRun {
                         src: String::new(),
+                        relationship_id: None,
                         width: block.width,
                         height: block.height,
                         alt: block.description.clone().or_else(|| block.title.clone()),
@@ -1895,30 +2013,24 @@ fn field_code_join<T: ReadTxn>(
     txn: &T,
 ) -> Option<(Vec<FieldCodeParagraph>, String)> {
     let target = shared_map_string(field, txn, "fieldCodeTarget")?;
-    let data = shared_map_string(field, txn, "fieldData")
-        .and_then(|data| serde_json::from_str::<Value>(&data).ok());
-    let code = data
-        .as_ref()
-        .and_then(|data| data.get("structuredCode"))
-        .and_then(|code| code.get("blocks"))
-        .and_then(Value::as_array);
+    let fields: Vec<Vec<CodeField>> = match shared_any(field, txn, "fieldCodeFields") {
+        Some(Any::Array(paragraphs)) => paragraphs
+            .iter()
+            .map(|fields| match fields {
+                Any::Array(fields) => fields.iter().filter_map(any_code_field).collect(),
+                _ => Vec::new(),
+            })
+            .collect(),
+        _ => copied_code_fields(field, txn),
+    };
+    let mut fields = fields.into_iter();
     let hidden = match shared_any(field, txn, "fieldCodeMarks") {
         Some(Any::Array(ids)) => ids
             .iter()
             .filter_map(any_str)
-            .enumerate()
-            .map(|(index, id)| {
-                let mut fields = Vec::new();
-                if let Some(content) = code
-                    .and_then(|blocks| blocks.get(index))
-                    .and_then(|block| block.get("content"))
-                {
-                    nested_code_fields(content, &mut fields);
-                }
-                FieldCodeParagraph {
-                    id: id.to_owned(),
-                    fields,
-                }
+            .map(|id| FieldCodeParagraph {
+                id: id.to_owned(),
+                fields: fields.next().unwrap_or_default(),
             })
             .collect(),
         _ => Vec::new(),
@@ -1926,16 +2038,63 @@ fn field_code_join<T: ReadTxn>(
     Some((hidden, target))
 }
 
-fn nested_code_fields(value: &Value, fields: &mut Vec<Value>) {
+/// The fields of each hidden code paragraph, read from the copies of those paragraphs a field's
+/// data holds when its code paragraphs were bound without their fields.
+fn copied_code_fields<T: ReadTxn>(field: &MapRef, txn: &T) -> Vec<Vec<CodeField>> {
+    let data = shared_map_string(field, txn, "fieldData")
+        .and_then(|data| serde_json::from_str::<Value>(&data).ok());
+    let copies = data
+        .as_ref()
+        .and_then(|data| data.get("structuredCode"))
+        .and_then(|code| code.get("blocks"))
+        .and_then(Value::as_array);
+    copies
+        .into_iter()
+        .flatten()
+        .map(|block| {
+            let mut fields = Vec::new();
+            if let Some(content) = block.get("content") {
+                nested_code_fields(content, &mut fields);
+            }
+            fields
+        })
+        .collect()
+}
+
+/// A field's kind and instruction, as the seeds record each field of a hidden code paragraph.
+pub(crate) type CodeField = (String, String);
+
+/// The kind and instruction of a field value, or `None` for anything else.
+fn code_field(value: &Value) -> Option<CodeField> {
+    let kind = value
+        .get("type")
+        .and_then(Value::as_str)
+        .filter(|kind| matches!(*kind, "simpleField" | "complexField"))?;
+    let instruction = value.get("instruction").and_then(Value::as_str);
+    Some((kind.to_owned(), instruction.unwrap_or_default().to_owned()))
+}
+
+/// A field's kind and instruction as `fieldCodeFields` stores them.
+fn any_code_field(value: &Any) -> Option<CodeField> {
     match value {
-        Value::Object(object)
-            if matches!(
-                object.get("type").and_then(Value::as_str),
-                Some("simpleField" | "complexField")
-            ) =>
-        {
-            fields.push(value.clone());
-        }
+        Any::Array(parts) => match &parts[..] {
+            [kind, instruction] => {
+                Some((any_str(kind)?.to_owned(), any_str(instruction)?.to_owned()))
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The kind and instruction of each field a code paragraph's content holds, outermost first,
+/// in order.
+pub(crate) fn nested_code_fields(value: &Value, fields: &mut Vec<CodeField>) {
+    if let Some(field) = code_field(value) {
+        fields.push(field);
+        return;
+    }
+    match value {
         Value::Object(object) => {
             if let Some(content) = object
                 .get("structuredChildren")
@@ -1960,12 +2119,14 @@ fn joins_field_code_paragraphs(story_id: &str) -> bool {
     story_id.starts_with("hf:")
 }
 
+/// A hidden code paragraph and the fields it held when the field was bound.
 struct FieldCodeParagraph {
     id: String,
-    fields: Vec<Value>,
+    fields: Vec<CodeField>,
 }
 
 impl FieldCodeParagraph {
+    /// Whether the paragraph shows nothing but the fields it held when the field was bound.
     fn allows(&self, runs: &[RawRun], env: &RenderEnv) -> bool {
         let mut fields = self.fields.iter();
         runs.iter()
@@ -1976,6 +2137,7 @@ impl FieldCodeParagraph {
                     ..
                 } => serde_json::from_str::<Value>(source)
                     .ok()
+                    .and_then(|source| code_field(&source))
                     .is_some_and(|source| fields.any(|field| *field == source)),
                 _ => false,
             })
@@ -2088,9 +2250,13 @@ fn note_ref_label(id: f64) -> String {
     }
 }
 
+/// Display units of a table embed that lost its payload: an empty table node, so display
+/// positions after it match the editor projection, which counts it as a table without rows.
+const UNAVAILABLE_TABLE_NODE_SIZE: u64 = 2;
+
 #[allow(clippy::too_many_arguments)]
 fn lower_table<T: ReadTxn>(
-    table: &MapRef,
+    payload: &crate::unavailable_tables::TablePayload,
     txn: &T,
     parent_story: &str,
     story_index: u32,
@@ -2103,11 +2269,15 @@ fn lower_table<T: ReadTxn>(
     revealable: &mut Option<Vec<LayoutBlock>>,
     local: &mut local::LocalLowering,
 ) -> Result<(TableBlock, u64), BridgeError> {
-    let tbl_pr_value = shared_any(table, txn, "tblPr")
+    let plain = |value: &Out| match value {
+        Out::Any(value) => Some(value.clone()),
+        _ => None,
+    };
+    let tbl_pr_value = plain(&payload.tbl_pr)
         .ok_or_else(|| malformed_table(parent_story, story_index, "missing tblPr"))?;
     let tbl_pr = any_map(&tbl_pr_value)
         .ok_or_else(|| malformed_table(parent_story, story_index, "tblPr must be a map"))?;
-    let grid_value = shared_any(table, txn, "grid")
+    let grid_value = plain(&payload.grid)
         .ok_or_else(|| malformed_table(parent_story, story_index, "missing grid"))?;
     let grid = match &grid_value {
         Any::Array(values) => values,
@@ -2119,7 +2289,7 @@ fn lower_table<T: ReadTxn>(
             ));
         }
     };
-    let rows_value = shared_any(table, txn, "rows")
+    let rows_value = plain(&payload.rows)
         .ok_or_else(|| malformed_table(parent_story, story_index, "missing rows"))?;
     let row_values = match &rows_value {
         Any::Array(values) => values,
@@ -2151,6 +2321,7 @@ fn lower_table<T: ReadTxn>(
 
     let original = tbl_pr.get("_originalFormatting").and_then(any_map);
     let table_margins = tbl_pr.get("cellMargins").and_then(any_map);
+    let default_margins = style_cell_margins(tbl_pr, env, local.source.upgrade().as_deref());
     let grid_widths: Vec<Option<f64>> = grid.iter().map(any_number).collect();
     let total_grid_width: f64 = grid_widths.iter().flatten().sum();
     let mut column_row_ends = vec![0usize; grid_widths.len()];
@@ -2226,22 +2397,42 @@ fn lower_table<T: ReadTxn>(
                     format!("row {row_index} cell {cell_index} is missing story"),
                 )
             })?;
-            let (mut blocks, content_size) = lower_story(
-                txn,
-                &cell_story,
-                env,
-                cell_pm_start + 1,
-                active_stories,
-                list_state,
-                CellEdges {
-                    before: true,
-                    after: true,
-                },
-                map,
-                opaque_sequences,
-                revealable,
-                local,
-            )?;
+            let cell_edges = CellEdges {
+                before: true,
+                after: true,
+            };
+            let (mut blocks, content_size) = if crate::story_text(txn, &cell_story).is_some() {
+                lower_story(
+                    txn,
+                    &cell_story,
+                    env,
+                    cell_pm_start + 1,
+                    active_stories,
+                    list_state,
+                    cell_edges,
+                    map,
+                    opaque_sequences,
+                    revealable,
+                    local,
+                )?
+            } else {
+                local.block(true);
+                let cell = crate::empty_cells::EmptyCell::new(&cell_story);
+                let scratch = cell.doc().yrs_doc().transact();
+                lower_story(
+                    &scratch,
+                    &cell_story,
+                    env,
+                    cell_pm_start + 1,
+                    active_stories,
+                    list_state,
+                    cell_edges,
+                    map,
+                    opaque_sequences,
+                    revealable,
+                    local,
+                )?
+            };
 
             for block in &mut blocks {
                 if let LayoutBlock::Paragraph(paragraph) = block
@@ -2315,9 +2506,15 @@ fn lower_table<T: ReadTxn>(
                 vertical_align: map_string(tc_pr, "verticalAlign"),
                 background,
                 borders: lower_cell_borders(tc_pr, env),
-                padding: Some(lower_cell_padding(tc_pr, table_margins)),
+                padding: Some(lower_cell_padding(tc_pr, table_margins, default_margins)),
                 no_wrap: (map_bool(tc_pr, "noWrap") == Some(true)).then_some(true),
                 tracked_marker: tc_pr.get("cellMarker").and_then(any_json),
+                merge_continuation: tc_pr
+                    .get("_originalFormatting")
+                    .and_then(any_map)
+                    .and_then(|formatting| map_string(formatting, "vMerge"))
+                    .is_some_and(|merge| merge == "continue")
+                    .then_some(true),
             });
             for end in column_row_ends.iter_mut().skip(column).take(colspan) {
                 *end = row_index.saturating_add(row_span.unwrap_or(1.0) as usize);
@@ -2338,6 +2535,13 @@ fn lower_table<T: ReadTxn>(
             cant_split: row_formatting
                 .and_then(|value| map_bool(value, "cantSplit"))
                 .filter(|value| *value),
+            hidden: row_formatting
+                .and_then(|value| map_bool(value, "hidden"))
+                .filter(|value| *value),
+            hidden_content_only: row_formatting
+                .and_then(|value| map_bool(value, "hiddenContentOnly"))
+                .filter(|value| *value),
+            source_row: None,
             grid_before,
             grid_after,
             width_before: grid_before
@@ -2373,46 +2577,77 @@ fn lower_table<T: ReadTxn>(
         .get("floating")
         .and_then(any_map)
         .map(lower_floating_table);
-    let compatibility_mode = map_number(tbl_pr, "compatibilityMode").and_then(|value| {
-        (value.is_finite() && (0.0..=255.0).contains(&value)).then_some(value as u8)
-    });
+    let compatibility_mode = map_number(tbl_pr, "compatibilityMode")
+        .and_then(|value| {
+            (value.is_finite() && (0.0..=255.0).contains(&value)).then_some(value as u8)
+        })
+        .or_else(|| {
+            Some(env.compatibility_flags.compatibility_mode).filter(|mode| *mode > 0 && *mode != 12)
+        });
     let layout_mode = map_string(tbl_pr, "tableLayout")
         .filter(|value| matches!(value.as_str(), "fixed" | "autofit"));
     let table_margin = |side: &str| {
-        table_margins
+        let twips = table_margins
             .and_then(|margins| map_number(margins, side))
-            .map(twips_to_pixels)
-            .filter(|value| value.is_finite() && *value > 0.0)
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .unwrap_or_else(|| default_margins.side(side));
+        (twips > 0.0).then(|| twips_to_pixels(twips))
     };
 
-    Ok((
-        TableBlock {
-            sdt_groups: None,
-            id: BlockId::Str(table_id),
-            rows,
-            column_widths: (!column_widths.is_empty()).then_some(column_widths),
-            grid_widths: None,
-            width: map_number(tbl_pr, "width"),
-            width_type: map_string(tbl_pr, "widthType"),
-            preferred_width: None,
-            layout_mode: None,
-            table_layout: Some(layout_mode.unwrap_or_else(|| "autofit".to_owned())),
-            width_algorithm: None,
-            style_cascade: None,
-            background: None,
-            justification: map_string(tbl_pr, "justification"),
-            bidi: (map_bool(tbl_pr, "bidi") == Some(true)).then_some(true),
-            indent,
-            floating,
-            compatibility_mode,
-            cell_margin_left: table_margin("left"),
-            cell_margin_right: table_margin("right"),
-            gridlines: env.show_table_gridlines.then_some(true),
-            pm_start: Some(pm_start as f64),
-            pm_end: Some((pm_start + node_size) as f64),
-        },
-        node_size,
-    ))
+    let mut block = TableBlock {
+        sdt_groups: None,
+        id: BlockId::Str(table_id),
+        rows,
+        column_widths: (!column_widths.is_empty()).then_some(column_widths),
+        grid_widths: None,
+        width: map_number(tbl_pr, "width"),
+        width_type: map_string(tbl_pr, "widthType"),
+        preferred_width: None,
+        layout_mode: None,
+        table_layout: Some(layout_mode.unwrap_or_else(|| "autofit".to_owned())),
+        width_algorithm: None,
+        style_cascade: None,
+        background: None,
+        justification: map_string(tbl_pr, "justification"),
+        bidi: (map_bool(tbl_pr, "bidi") == Some(true)).then_some(true),
+        indent,
+        floating,
+        compatibility_mode,
+        cell_margin_left: table_margin("left"),
+        cell_margin_right: table_margin("right"),
+        gridlines: env.show_table_gridlines.then_some(true),
+        first_column: table_look_first_column(tbl_pr).then_some(true),
+        pm_start: Some(pm_start as f64),
+        pm_end: Some((pm_start + node_size) as f64),
+    };
+    if !env.show_hidden_text {
+        docx_layout::table_grid::drop_hidden_rows(&mut block);
+    }
+    Ok((block, node_size))
+}
+
+/// The table's own `w:tblLook` asks for first-column formatting, by its
+/// attribute or by bit `0x0080` of its legacy hex value.
+fn table_look_first_column(tbl_pr: &std::collections::HashMap<String, Any>) -> bool {
+    let Some(look) = tbl_pr.get("look").and_then(any_map) else {
+        return false;
+    };
+    let named = [
+        "firstRow",
+        "lastRow",
+        "firstColumn",
+        "lastColumn",
+        "noHBand",
+        "noVBand",
+    ]
+    .into_iter()
+    .any(|key| map_bool(look, key).is_some());
+    if named {
+        return map_bool(look, "firstColumn") == Some(true);
+    }
+    map_string(look, "value")
+        .and_then(|value| u32::from_str_radix(value.trim(), 16).ok())
+        .is_some_and(|bits| bits & 0x0080 != 0)
 }
 
 fn resolve_paragraph_auto_text_color(
@@ -2466,7 +2701,8 @@ fn resolve_auto_text_color(
 fn automatic_text_needs_white(color: &str) -> bool {
     let Some(value) = color
         .strip_prefix('#')
-        .filter(|value| value.len() == 6)
+        .filter(|value| matches!(value.len(), 6 | 8))
+        .and_then(|value| value.get(..6))
         .and_then(|value| u32::from_str_radix(value, 16).ok())
     else {
         return false;
@@ -2644,6 +2880,7 @@ fn lower_image_values(
             Some(Any::String(src)) => env.media.token(src).unwrap_or_else(|| src.to_string()),
             value => value_string(value).unwrap_or_default(),
         },
+        relationship_id: map_string(values, "rId").filter(|id| !id.is_empty()),
         width,
         height,
         alt: map_string(values, "alt"),
@@ -3071,13 +3308,35 @@ fn chart_drawing_anchored(chart: &Value) -> bool {
             .is_some_and(|wrap_type| wrap_type != "inline")
 }
 
+/// Replaces `+mj-*` and `+mn-*` typefaces in a chart's layout copy with the
+/// theme's fonts; the chart part keeps the references.
+fn resolve_chart_theme_fonts(value: &mut Value, theme: Option<&docx_parse::Theme>) {
+    match value {
+        Value::Array(items) => items
+            .iter_mut()
+            .for_each(|item| resolve_chart_theme_fonts(item, theme)),
+        Value::Object(fields) => {
+            if let Some(Value::String(font)) = fields.get_mut("font")
+                && (font.starts_with("+mj-") || font.starts_with("+mn-"))
+            {
+                *font = docx_parse::resolve_theme_font_ref(theme, font);
+            }
+            fields
+                .values_mut()
+                .for_each(|field| resolve_chart_theme_fonts(field, theme));
+        }
+        _ => {}
+    }
+}
+
 fn lower_chart_block(
     values: &std::collections::HashMap<String, Any>,
     pm_start: Option<u64>,
     env: &RenderEnv,
 ) -> Option<ChartBlock> {
-    let chart = map_string(values, "chartJson")
+    let mut chart = map_string(values, "chartJson")
         .and_then(|value| serde_json::from_str::<Value>(&value).ok())?;
+    resolve_chart_theme_fonts(&mut chart, env.font_theme.as_ref());
     let (width, height) = constrain_to_page(
         map_number(values, "width")
             .filter(|value| *value != 0.0)
@@ -3522,6 +3781,7 @@ fn lower_floating_table(value: &std::collections::HashMap<String, Any>) -> Float
 fn lower_cell_padding(
     tc_pr: &std::collections::HashMap<String, Any>,
     table_margins: Option<&std::collections::HashMap<String, Any>>,
+    default_margins: DefaultCellMargins,
 ) -> BoxEdges {
     let cell_margins = tc_pr.get("margins").and_then(any_map);
     let side = |key: &str| {
@@ -3535,7 +3795,7 @@ fn lower_cell_padding(
                     .map(twips_to_pixels)
                     .filter(|value| *value >= 0.0)
             })
-            .unwrap_or(0.0)
+            .unwrap_or_else(|| twips_to_pixels(default_margins.side(key)))
     };
     BoxEdges {
         top: side("top"),
@@ -3543,6 +3803,54 @@ fn lower_cell_padding(
         bottom: side("bottom"),
         left: side("left"),
     }
+}
+
+/// Cell margins in twips, `[top, right, bottom, left]`, for the sides no
+/// `w:tcMar` or resolved `w:tblCellMar` sets.
+#[derive(Clone, Copy)]
+struct DefaultCellMargins([f64; 4]);
+
+impl DefaultCellMargins {
+    fn side(self, side: &str) -> f64 {
+        match side {
+            "top" => self.0[0],
+            "right" => self.0[1],
+            "bottom" => self.0[2],
+            _ => self.0[3],
+        }
+    }
+}
+
+/// What the document's table styles set for the sides a table and its cells
+/// leave unset: the table's own style, else the default table style, and none
+/// where they set nothing, as Word does. An opened table already carries its
+/// style margins, so this changes only tables inserted or pasted since. The
+/// host's environment names the styles; a document seeded from its package
+/// also has them in its source.
+fn style_cell_margins(
+    tbl_pr: &std::collections::HashMap<String, Any>,
+    env: &RenderEnv,
+    source: Option<&crate::seed::SourceMetadata>,
+) -> DefaultCellMargins {
+    let style_id = map_string(tbl_pr, "styleId").filter(|id| !id.is_empty());
+    let bidi = map_bool(tbl_pr, "bidi") == Some(true);
+    let sides = if !env.table_style_cell_margins.is_empty() || env.default_table_style_id.is_some()
+    {
+        let margins = style_id
+            .as_deref()
+            .and_then(|id| env.table_style_cell_margins.get(id))
+            .or_else(|| {
+                env.default_table_style_id
+                    .as_deref()
+                    .and_then(|id| env.table_style_cell_margins.get(id))
+            });
+        crate::seed::cell_margin_sides(margins, bidi)
+    } else if let Some(source) = source {
+        source.table_cell_margins(style_id.as_deref(), bidi)
+    } else {
+        [None; 4]
+    };
+    DefaultCellMargins(sides.map(|side| side.unwrap_or(0.0)))
 }
 
 fn lower_cell_borders(
@@ -4059,6 +4367,7 @@ fn inline_drawing_run(drawing: DrawingMarker, show_hidden_text: bool) -> RawRun 
     };
     let image = ImageRun {
         src: String::new(),
+        relationship_id: None,
         width,
         height,
         alt,
@@ -4449,7 +4758,7 @@ fn flush_paragraph<T: ReadTxn>(
         .is_some_and(|suffix| suffix.parse::<usize>().is_ok());
     let style_id = paragraph_style_id(&values);
     let chain_size = paragraph_chain_size(env, &values);
-    let defaults = paragraph_run_defaults(&values, chain_size);
+    let defaults = paragraph_run_defaults(&values, chain_size, env);
     let semantic_toc = style_id
         .as_ref()
         .is_some_and(|id| env.toc_style_ids.contains(id));
@@ -4758,6 +5067,97 @@ fn has_nonfinite(formatting: &RunFormatting) -> bool {
         .any(|value| !value.is_finite())
 }
 
+/// The text a run draws: a character whose `w:rFonts` slot names a symbol
+/// face (Symbol, Wingdings, Webdings) addresses a glyph by font position, so
+/// layout gets the covered character the face's table names for it. A slot
+/// the table does not name stays as stored, and so does a private-use slot
+/// the base-latin backstop draws with its own glyph for that face.
+///
+/// A replacement can fall in another slot than the character it replaces
+/// (`a` is ASCII, `α` is not), so that slot is pointed at the symbol face too,
+/// and every slot is then named explicitly so none follows the re-pointed one
+/// through fallback; a combining mark keeps its base's family. When another
+/// character of the run still needs a slot's own family, the slots stay as
+/// they are. Display only: the story, saves, find and copy keep the stored
+/// characters, and every replacement keeps the UTF-16 width.
+pub(super) fn symbol_display_run(formatting: &mut RunFormatting, text: String) -> String {
+    let slots = formatting.font_slots.as_ref();
+    let family = |slot: usize| -> Option<String> {
+        slots
+            .and_then(|slots| match slot {
+                0 => slots.ascii.as_deref(),
+                1 => slots.h_ansi.as_deref(),
+                2 => slots.east_asia.as_deref(),
+                _ => slots.cs.as_deref(),
+            })
+            .or_else(|| slots.and_then(|slots| slots.h_ansi.as_deref()))
+            .or_else(|| slots.and_then(|slots| slots.ascii.as_deref()))
+            .or(formatting.font_family.as_deref())
+            .map(str::to_owned)
+    };
+    let symbol_face = |slot: usize| {
+        family(slot)
+            .as_deref()
+            .and_then(ooxml_text::SymbolFont::named)
+    };
+    if (0..4).all(|slot| symbol_face(slot).is_none()) {
+        return text;
+    }
+    let hint = slots.and_then(|slots| slots.hint.as_deref()) == Some("eastAsia");
+    let complex_script = formatting.complex_script.unwrap_or(false);
+    let mut wanted: Vec<Option<String>> = Vec::new();
+    let drawn: String = ooxml_text::font_slot_characters(&text, complex_script, hint)
+        .map(|(character, slot)| {
+            wanted.push(family(slot));
+            symbol_face(slot)
+                .filter(|_| !ooxml_text::font_store::base_latin_alias(character))
+                .and_then(|face| face.shape(character))
+                .unwrap_or(character)
+        })
+        .collect();
+    if drawn == text {
+        return text;
+    }
+    let mut targets: [Option<Option<String>>; 4] = [None, None, None, None];
+    let mut conflict = false;
+    for ((_, slot), want) in
+        ooxml_text::font_slot_characters(&drawn, complex_script, hint).zip(wanted)
+    {
+        match &targets[slot] {
+            None => targets[slot] = Some(want),
+            Some(existing) if *existing == want => {}
+            Some(_) => {
+                conflict = true;
+                break;
+            }
+        }
+    }
+    if conflict {
+        return drawn;
+    }
+    let pinned: Vec<Option<String>> = (0..4)
+        .map(|slot| targets[slot].clone().unwrap_or_else(|| family(slot)))
+        .collect();
+    if (0..4).all(|slot| pinned[slot] == family(slot)) {
+        return drawn;
+    }
+    let mut repointed = formatting.font_slots.clone().unwrap_or_default();
+    for (slot, target) in pinned.into_iter().enumerate() {
+        let (name, theme) = match slot {
+            0 => (&mut repointed.ascii, &mut repointed.ascii_theme),
+            1 => (&mut repointed.h_ansi, &mut repointed.h_ansi_theme),
+            2 => (&mut repointed.east_asia, &mut repointed.east_asia_theme),
+            _ => (&mut repointed.cs, &mut repointed.cs_theme),
+        };
+        if *name != target {
+            *name = target;
+            *theme = None;
+        }
+    }
+    formatting.font_slots = Some(repointed);
+    drawn
+}
+
 fn raw_run_to_layout(raw: RawRun, paragraph_pm_start: u64) -> Run {
     let pm_start = Some((paragraph_pm_start + 1 + u64::from(raw.pm_start)) as f64);
     let pm_end = Some((paragraph_pm_start + 1 + u64::from(raw.pm_end)) as f64);
@@ -4769,13 +5169,17 @@ fn raw_run_to_layout(raw: RawRun, paragraph_pm_start: u64) -> Run {
             pm_end,
             inline_sdt_widget: raw.inline_sdt_widget,
         }),
-        RawRunKind::Text(text) => Run::Text(TextRun {
-            fmt: raw.formatting,
-            text,
-            pm_start,
-            pm_end,
-            inline_sdt_widget: raw.inline_sdt_widget,
-        }),
+        RawRunKind::Text(text) => {
+            let mut fmt = raw.formatting;
+            let text = symbol_display_run(&mut fmt, text);
+            Run::Text(TextRun {
+                fmt,
+                text,
+                pm_start,
+                pm_end,
+                inline_sdt_widget: raw.inline_sdt_widget,
+            })
+        }
         RawRunKind::Tab => Run::Tab(TabRun {
             fmt: raw.formatting,
             pm_start,
@@ -4833,8 +5237,44 @@ fn stamp_logical_order(runs: &mut [Run]) {
 }
 
 fn lower_run_formatting(attributes: Option<&Attrs>, env: &RenderEnv) -> RunFormatting {
+    let mut projected: Option<Attrs> = None;
+    let mut format_change = None;
+    if let Some(Any::Array(changes)) = attribute(attributes, crate::format::RPR_CHANGE) {
+        for change in changes.iter().rev() {
+            match env.revision_decision(change) {
+                Some(RevisionPreview::Rejected) => {
+                    let projected =
+                        projected.get_or_insert_with(|| attributes.cloned().unwrap_or_default());
+                    let current = projected
+                        .iter()
+                        .map(|(key, value)| (key.to_string(), value.clone()))
+                        .collect();
+                    for (key, value) in crate::format::previous_run_properties(&current, change) {
+                        if value == Any::Null {
+                            projected.remove(&key);
+                        } else {
+                            projected.insert(key, value);
+                        }
+                    }
+                }
+                Some(RevisionPreview::Accepted) => {}
+                None => {
+                    if let Some((id, author, date)) = crate::queries::revision_parts(change) {
+                        format_change = Some(docx_layout::display_list::Revision {
+                            revision_id: numeric_id(&id, env).to_string(),
+                            author,
+                            date,
+                            kind: docx_layout::display_list::RevisionKind::Format,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    let attributes = projected.as_ref().or(attributes);
     let mut result = RunFormatting {
         bold: mark_bool(attributes, "bold"),
+        format_change,
         ..RunFormatting::default()
     };
     if let Some(map) = attribute_map(attributes, "bold")
@@ -4869,10 +5309,14 @@ fn lower_run_formatting(attributes: Option<&Attrs>, env: &RenderEnv) -> RunForma
         .and_then(|value| resolve_color(value, env));
     result.highlight = attribute(attributes, "highlight").and_then(resolve_highlight);
 
-    lower_font_family(attributes, &mut result);
+    lower_font_family(attributes, &mut result, env);
     lower_font_size(attributes, &mut result);
     lower_language(attributes, &mut result);
     lower_character_spacing(attributes, &mut result);
+    if let Some(Any::Map(map)) = attribute(attributes, "typography") {
+        result.ligatures = map_string(map, "ligatures");
+        result.contextual_alternates = map_bool(map, "contextualAlternates");
+    }
 
     result.superscript = mark_bool(attributes, "superscript");
     result.subscript = mark_bool(attributes, "subscript");
@@ -4944,7 +5388,25 @@ fn lower_run_formatting(attributes: Option<&Attrs>, env: &RenderEnv) -> RunForma
     result
 }
 
-fn lower_font_family(attributes: Option<&Attrs>, result: &mut RunFormatting) {
+fn resolve_font_slots(slots: &mut RunFontSlots, env: &RenderEnv) {
+    let Some(theme) = env.font_theme.as_ref() else {
+        return;
+    };
+    for (explicit, reference) in [
+        (&mut slots.ascii, &slots.ascii_theme),
+        (&mut slots.h_ansi, &slots.h_ansi_theme),
+        (&mut slots.east_asia, &slots.east_asia_theme),
+        (&mut slots.cs, &slots.cs_theme),
+    ] {
+        if let Some(font) = reference.as_deref().and_then(|reference| {
+            docx_parse::theme::resolve_rfonts_theme_font(Some(theme), reference)
+        }) {
+            *explicit = Some(font.to_owned());
+        }
+    }
+}
+
+fn lower_font_family(attributes: Option<&Attrs>, result: &mut RunFormatting, env: &RenderEnv) {
     let Some(value) =
         attribute(attributes, "fontFamily").or_else(|| attribute(attributes, "rFonts"))
     else {
@@ -4961,7 +5423,7 @@ fn lower_font_family(attributes: Option<&Attrs>, result: &mut RunFormatting) {
             });
         }
         Any::Map(map) => {
-            let slots = RunFontSlots {
+            let mut slots = RunFontSlots {
                 ascii: map_string(map, "ascii"),
                 h_ansi: map_string(map, "hAnsi"),
                 east_asia: map_string(map, "eastAsia"),
@@ -4972,6 +5434,7 @@ fn lower_font_family(attributes: Option<&Attrs>, result: &mut RunFormatting) {
                 cs_theme: map_string(map, "csTheme"),
                 hint: map_string(map, "hint"),
             };
+            resolve_font_slots(&mut slots, env);
             let rtl = mark_bool(attributes, "rtl") == Some(true);
             result.font_family = if rtl { slots.cs.clone() } else { None }
                 .or_else(|| slots.ascii.clone())
@@ -5035,7 +5498,10 @@ fn lower_character_spacing(attributes: Option<&Attrs>, result: &mut RunFormattin
     if let Some(position) = map_number(map, "position").filter(|value| *value != 0.0) {
         result.position_px = Some(half_points_to_pixels(position));
     }
-    if let Some(scale) = map_number(map, "scale").filter(|value| *value != 100.0) {
+    if let Some(scale) = map_number(map, "scale")
+        .and_then(docx_parse::formatting::text_scale)
+        .filter(|value| *value != 100.0)
+    {
         result.horizontal_scale = Some(scale);
     }
     if let Some(kerning) = map_number(map, "kerning").filter(|value| *value > 0.0) {
@@ -5180,16 +5646,38 @@ fn lower_paragraph_attrs(
         .get("shading")
         .and_then(|shading| resolve_paragraph_shading(shading, env));
 
-    if let Some(Any::Map(num_pr)) = values.get("numPr") {
-        result.num_pr = Some(ListNumPr {
-            num_id: map_number(num_pr, "numId"),
-            ilvl: map_number(num_pr, "ilvl"),
-        });
-    }
+    result.num_pr = written_numbering(values).map(|(num_id, ilvl)| ListNumPr { num_id, ilvl });
     result.list_marker = compute_list_marker(values, list_state);
     result.list_is_bullet = values.get("listIsBullet").and_then(any_bool);
     result.list_marker_hidden = true_property(values, "listMarkerHidden");
     result.list_marker_font_family = value_string(values.get("listMarkerFontFamily"));
+    if let Some(fonts) = result.num_pr.as_ref().and_then(|properties| {
+        list_state.marker_fonts(values, properties.num_id?, properties.ilvl.unwrap_or(0.0))
+    }) && result
+        .list_marker_font_family
+        .as_deref()
+        .is_none_or(|stored| {
+            fonts
+                .ascii
+                .as_deref()
+                .filter(|font| !font.is_empty())
+                .or_else(|| fonts.h_ansi.as_deref().filter(|font| !font.is_empty()))
+                == Some(stored)
+        })
+    {
+        let mut slots = RunFontSlots {
+            ascii: fonts.ascii.filter(|font| !font.is_empty()),
+            h_ansi: fonts.h_ansi.filter(|font| !font.is_empty()),
+            ascii_theme: fonts.ascii_theme,
+            h_ansi_theme: fonts.h_ansi_theme,
+            ..RunFontSlots::default()
+        };
+        resolve_font_slots(&mut slots, env);
+        result.list_marker_font_family = slots
+            .ascii
+            .or(slots.h_ansi)
+            .or(result.list_marker_font_family);
+    }
     result.list_marker_font_size = value_number(values.get("listMarkerFontSize"));
     if result.list_marker.is_some() {
         let explicit_bold = values.get("listMarkerBold").and_then(any_bool);
@@ -5213,7 +5701,7 @@ fn lower_paragraph_attrs(
     }
     result.list_marker_suffix = value_string(values.get("listMarkerSuffix"));
     result.default_tab_stop_twips = env.default_tab_stop_twips;
-    lower_paragraph_defaults(values, &mut result);
+    lower_paragraph_defaults(values, &mut result, env);
 
     result.p_pr_ins = values
         .get("pPrIns")
@@ -5475,15 +5963,11 @@ fn lower_paragraph_indent(values: &BTreeMap<String, Any>, result: &mut Paragraph
         .or_else(|| indent_map.and_then(|map| map_bool(map, "hanging")))
         .unwrap_or(false);
 
-    if let Some(Any::Map(num_pr)) = values.get("numPr") {
-        let num_id = map_number(num_pr, "numId").unwrap_or(0.0);
-        if num_id != 0.0 && left.is_none() {
-            let level = map_number(num_pr, "ilvl").unwrap_or(0.0);
-            left = Some((level + 1.0) * 720.0);
-            if first_line.is_none() {
-                first_line = Some(-360.0);
-                hanging = true;
-            }
+    if let (Some(list), None) = (resolve_list_identity(values), left) {
+        left = Some((list.level() + 1.0) * 720.0);
+        if first_line.is_none() {
+            first_line = Some(-360.0);
+            hanging = true;
         }
     }
 
@@ -5545,14 +6029,25 @@ fn paragraph_default_font_size(values: &BTreeMap<String, Any>) -> f64 {
         .map_or(10.0, font_size_pt)
 }
 
-fn lower_paragraph_defaults(values: &BTreeMap<String, Any>, result: &mut ParagraphAttrs) {
+fn lower_paragraph_defaults(
+    values: &BTreeMap<String, Any>,
+    result: &mut ParagraphAttrs,
+    env: &RenderEnv,
+) {
     result.default_font_size = Some(paragraph_default_font_size(values));
     let Some(Any::Map(defaults)) = values.get("defaultTextFormatting") else {
         return;
     };
     if let Some(Any::Map(fonts)) = defaults.get("fontFamily") {
-        result.default_font_family =
-            map_string(fonts, "ascii").or_else(|| map_string(fonts, "hAnsi"));
+        let mut slots = RunFontSlots {
+            ascii: map_string(fonts, "ascii"),
+            h_ansi: map_string(fonts, "hAnsi"),
+            ascii_theme: map_string(fonts, "asciiTheme"),
+            h_ansi_theme: map_string(fonts, "hAnsiTheme"),
+            ..RunFontSlots::default()
+        };
+        resolve_font_slots(&mut slots, env);
+        result.default_font_family = slots.ascii.or(slots.h_ansi);
     }
 }
 
@@ -5566,16 +6061,19 @@ fn paragraph_chain_size(env: &RenderEnv, values: &BTreeMap<String, Any>) -> Opti
 fn paragraph_run_defaults(
     values: &BTreeMap<String, Any>,
     chain_size: Option<f64>,
+    env: &RenderEnv,
 ) -> RunFormatting {
     let mut result = RunFormatting {
         font_size: Some(chain_size.unwrap_or(10.0)),
         ..RunFormatting::default()
     };
-    let Some(Any::Map(defaults)) = values.get("defaultTextFormatting") else {
-        return result;
-    };
+    let empty = HashMap::new();
+    let defaults = values
+        .get("defaultTextFormatting")
+        .and_then(any_map)
+        .unwrap_or(&empty);
     if let Some(Any::Map(fonts)) = defaults.get("fontFamily") {
-        let slots = RunFontSlots {
+        let mut slots = RunFontSlots {
             ascii: map_string(fonts, "ascii"),
             h_ansi: map_string(fonts, "hAnsi"),
             east_asia: map_string(fonts, "eastAsia"),
@@ -5586,6 +6084,7 @@ fn paragraph_run_defaults(
             cs_theme: map_string(fonts, "csTheme"),
             hint: map_string(fonts, "hint"),
         };
+        resolve_font_slots(&mut slots, env);
         result.font_family = slots
             .ascii
             .clone()
@@ -5607,6 +6106,18 @@ fn paragraph_run_defaults(
             east_asia: map_string(language, "eastAsia"),
             bidi: map_string(language, "bidi"),
         });
+    }
+    if let Some(Any::Map(language)) = values.get("language") {
+        let slots = result.language.get_or_insert_with(Default::default);
+        for (key, slot) in [
+            ("latin", &mut slots.latin),
+            ("eastAsia", &mut slots.east_asia),
+            ("bidi", &mut slots.bidi),
+        ] {
+            if language.contains_key(key) {
+                *slot = map_string(language, key);
+            }
+        }
     }
     result
 }
@@ -5636,8 +6147,20 @@ fn apply_run_defaults(target: &mut RunFormatting, defaults: &RunFormatting) {
     if target.snap_to_grid.is_none() {
         target.snap_to_grid = defaults.snap_to_grid;
     }
-    if target.language.is_none() {
-        target.language = defaults.language.clone();
+    match (&mut target.language, &defaults.language) {
+        (None, defaults) => target.language = defaults.clone(),
+        (Some(language), Some(defaults)) => {
+            if language.latin.is_none() {
+                language.latin = defaults.latin.clone();
+            }
+            if language.east_asia.is_none() {
+                language.east_asia = defaults.east_asia.clone();
+            }
+            if language.bidi.is_none() {
+                language.bidi = defaults.bidi.clone();
+            }
+        }
+        (Some(_), None) => {}
     }
 }
 
@@ -6113,6 +6636,394 @@ mod tests {
 
     const DATE: &str = "2026-07-13T12:00:00Z";
 
+    fn yrs_attrs(value: Value) -> Attrs {
+        let value = crate::seed::any_from_value(value).unwrap();
+        attrs_from_any(Some(&value))
+    }
+
+    #[test]
+    fn hostile_colour_value_does_not_panic() {
+        assert!(!automatic_text_needs_white("#abcde\u{20ac}"));
+    }
+
+    #[test]
+    fn chart_theme_typefaces_lower_to_the_theme_fonts() {
+        let mut theme = docx_parse::Theme::default();
+        theme.font_scheme.major_font.latin = "Theme Major".to_owned();
+        theme.font_scheme.minor_font.latin = "Theme Minor".to_owned();
+        let env = RenderEnv {
+            font_theme: Some(theme),
+            ..RenderEnv::default()
+        };
+        let chart = json!({
+            "chartType": "column",
+            "text": {"font": "+mn-lt", "bold": true},
+            "titleText": {"font": "+mj-lt"},
+            "legend": {"text": {"font": "Georgia"}},
+            "series": [{"name": "+mn-lt"}]
+        });
+        let values = std::collections::HashMap::from([(
+            "chartJson".to_owned(),
+            Any::from(chart.to_string()),
+        )]);
+        let block = lower_chart_block(&values, None, &env).unwrap();
+        assert_eq!(block.chart["text"]["font"], json!("Theme Minor"));
+        assert_eq!(block.chart["titleText"]["font"], json!("Theme Major"));
+        assert_eq!(block.chart["legend"]["text"]["font"], json!("Georgia"));
+        assert_eq!(block.chart["series"][0]["name"], json!("+mn-lt"));
+    }
+
+    #[test]
+    fn theme_font_precedence_is_applied_only_to_layout_fonts() {
+        let mut theme = docx_parse::Theme::default();
+        theme.font_scheme.major_font.latin = "Calibri".to_owned();
+        theme.font_scheme.major_font.ea = "Theme East Asia".to_owned();
+        theme.font_scheme.major_font.cs = "Theme Bidi".to_owned();
+        let env = RenderEnv {
+            font_theme: Some(theme),
+            ..RenderEnv::default()
+        };
+        let fonts = json!({
+            "ascii": "Cambria", "hAnsi": "Cambria", "eastAsia": "Explicit East Asia",
+            "cs": "Explicit Bidi", "asciiTheme": "majorHAnsi", "hAnsiTheme": "majorHAnsi",
+            "eastAsiaTheme": "majorEastAsia", "csTheme": "majorBidi"
+        });
+        let attrs = yrs_attrs(json!({"fontFamily": fonts}));
+        let original = attrs.clone();
+        let formatting = lower_run_formatting(Some(&attrs), &env);
+        assert_eq!(formatting.font_family.as_deref(), Some("Calibri"));
+        let slots = formatting.font_slots.unwrap();
+        assert_eq!(slots.ascii.as_deref(), Some("Calibri"));
+        assert_eq!(slots.h_ansi.as_deref(), Some("Calibri"));
+        assert_eq!(slots.east_asia.as_deref(), Some("Theme East Asia"));
+        assert_eq!(slots.cs.as_deref(), Some("Theme Bidi"));
+        assert_eq!(attrs, original);
+
+        let defaults = BTreeMap::from([(
+            "defaultTextFormatting".to_owned(),
+            crate::seed::any_from_value(json!({"fontFamily": fonts})).unwrap(),
+        )]);
+        let run = paragraph_run_defaults(&defaults, paragraph_chain_size(&env, &defaults), &env);
+        assert_eq!(run.font_family.as_deref(), Some("Calibri"));
+        let mut paragraph = ParagraphAttrs::default();
+        lower_paragraph_defaults(&defaults, &mut paragraph, &env);
+        assert_eq!(paragraph.default_font_family.as_deref(), Some("Calibri"));
+
+        let shape = json!({
+            "shapeType": "rect", "size": {"width": 914400, "height": 457200},
+            "textBody": {"content": [{"type": "paragraph", "content": [{
+                "type": "run", "formatting": {"fontFamily": fonts},
+                "content": [{"type": "text", "text": "Box"}]
+            }]}]}
+        });
+        let original = shape.clone();
+        let block = shapes::lower_shape_json(&shape, 1, &env).unwrap();
+        let Run::Text(run) = &block.inner_text.as_ref().unwrap()[0].runs[0] else {
+            panic!("missing text box run");
+        };
+        assert_eq!(run.fmt.font_family.as_deref(), Some("Calibri"));
+        assert_eq!(run.fmt.font_slots.as_ref().unwrap(), &slots);
+        assert_eq!(shape, original);
+        let blocks = [LayoutBlock::Shape(block)];
+        let requirements =
+            docx_layout::measure_blocks::collect_font_requirements(&blocks, "Calibri");
+        assert!(requirements.iter().any(|font| font.family == "Calibri"));
+        assert!(!requirements.iter().any(|font| font.family == "Cambria"));
+    }
+
+    #[test]
+    fn mixed_font_slots_resolve_independently_for_runs_defaults_and_shapes() {
+        let env = RenderEnv {
+            font_theme: Some(docx_parse::Theme::default()),
+            ..RenderEnv::default()
+        };
+        for (reference, ascii, h_ansi) in [
+            ("hAnsiTheme", "Times New Roman", "Calibri"),
+            ("asciiTheme", "Calibri", "Arial"),
+        ] {
+            let mut fonts = json!({
+                "ascii": "Times New Roman", "hAnsi": "Arial",
+                "eastAsia": "MS Mincho", "cs": "Tahoma"
+            });
+            fonts[reference] = json!("minorHAnsi");
+            let attrs = yrs_attrs(json!({"fontFamily": fonts}));
+            let original = attrs.clone();
+            let formatting = lower_run_formatting(Some(&attrs), &env);
+            assert_eq!(formatting.font_family.as_deref(), Some(ascii));
+            let slots = formatting.font_slots.unwrap();
+            assert_eq!(slots.ascii.as_deref(), Some(ascii));
+            assert_eq!(slots.h_ansi.as_deref(), Some(h_ansi));
+            assert_eq!(slots.east_asia.as_deref(), Some("MS Mincho"));
+            assert_eq!(slots.cs.as_deref(), Some("Tahoma"));
+            assert_eq!(attrs, original);
+            let rtl = yrs_attrs(json!({"fontFamily": fonts, "rtl": true}));
+            let rtl = lower_run_formatting(Some(&rtl), &env);
+            assert_eq!(rtl.font_family.as_deref(), Some("Tahoma"));
+            assert_eq!(rtl.font_slots.as_ref(), Some(&slots));
+
+            let defaults = BTreeMap::from([(
+                "defaultTextFormatting".to_owned(),
+                crate::seed::any_from_value(json!({"fontFamily": fonts})).unwrap(),
+            )]);
+            let run =
+                paragraph_run_defaults(&defaults, paragraph_chain_size(&env, &defaults), &env);
+            assert_eq!(run.font_family.as_deref(), Some(ascii));
+            assert_eq!(run.font_slots.as_ref(), Some(&slots));
+            let mut paragraph = ParagraphAttrs::default();
+            lower_paragraph_defaults(&defaults, &mut paragraph, &env);
+            assert_eq!(paragraph.default_font_family.as_deref(), Some(ascii));
+
+            let shape = json!({
+                "shapeType": "rect", "size": {"width": 914400, "height": 457200},
+                "textBody": {"content": [{"type": "paragraph", "content": [{
+                    "type": "run", "formatting": {"fontFamily": fonts},
+                    "content": [{"type": "text", "text": "Box"}]
+                }]}]}
+            });
+            let original = shape.clone();
+            let block = shapes::lower_shape_json(&shape, 1, &env).unwrap();
+            let Run::Text(run) = &block.inner_text.as_ref().unwrap()[0].runs[0] else {
+                panic!("missing text box run");
+            };
+            assert_eq!(run.fmt.font_family.as_deref(), Some(ascii));
+            assert_eq!(run.fmt.font_slots.as_ref(), Some(&slots));
+            assert_eq!(shape, original);
+        }
+    }
+
+    #[test]
+    fn partial_layout_themes_preserve_names_for_missing_slots() {
+        let env: RenderEnv = serde_json::from_value(json!({"fontTheme": {
+            "fontScheme": {"majorFont": {"latin": "Calibri"}}
+        }}))
+        .unwrap();
+        let attrs = yrs_attrs(json!({"fontFamily": {
+            "ascii": "Cambria", "asciiTheme": "majorHAnsi",
+            "hAnsi": "Cambria", "hAnsiTheme": "minorHAnsi",
+            "eastAsia": "Explicit East Asia", "eastAsiaTheme": "majorEastAsia",
+            "cs": "Explicit Bidi", "csTheme": "majorBidi"
+        }}));
+        let formatting = lower_run_formatting(Some(&attrs), &env);
+        assert_eq!(formatting.font_family.as_deref(), Some("Calibri"));
+        let slots = formatting.font_slots.unwrap();
+        assert_eq!(slots.h_ansi.as_deref(), Some("Cambria"));
+        assert_eq!(slots.east_asia.as_deref(), Some("Explicit East Asia"));
+        assert_eq!(slots.cs.as_deref(), Some("Explicit Bidi"));
+    }
+
+    #[test]
+    fn empty_or_unknown_theme_slots_preserve_layout_names() {
+        let mut theme = docx_parse::Theme::default();
+        theme.font_scheme.major_font.latin.clear();
+        let env = RenderEnv {
+            font_theme: Some(theme),
+            ..RenderEnv::default()
+        };
+        for reference in ["majorHAnsi", "unknown"] {
+            let attrs = yrs_attrs(json!({"fontFamily": {
+                "ascii": "Cambria", "hAnsi": "Cambria",
+                "asciiTheme": reference, "hAnsiTheme": reference
+            }}));
+            let formatting = lower_run_formatting(Some(&attrs), &env);
+            assert_eq!(formatting.font_family.as_deref(), Some("Cambria"));
+            assert_eq!(
+                formatting.font_slots.unwrap().ascii.as_deref(),
+                Some("Cambria")
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_only_and_theme_only_layout_fonts_keep_their_names() {
+        for fonts in [
+            json!({"ascii": "Cambria", "hAnsi": "Cambria"}),
+            json!({
+                "ascii": "Calibri Light", "hAnsi": "Calibri Light",
+                "asciiTheme": "majorHAnsi", "hAnsiTheme": "majorHAnsi"
+            }),
+        ] {
+            let attrs = yrs_attrs(json!({"fontFamily": fonts}));
+            let formatting = lower_run_formatting(Some(&attrs), &RenderEnv::default());
+            assert_eq!(formatting.font_family.as_deref(), fonts["ascii"].as_str());
+            assert_eq!(
+                formatting.font_slots.unwrap().h_ansi.as_deref(),
+                fonts["hAnsi"].as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_document_theme_keeps_seeded_font_names() {
+        for latin in ["Times New Roman", "Cambria"] {
+            let attrs = yrs_attrs(json!({"fontFamily": {
+                "ascii": latin, "hAnsi": latin,
+                "eastAsia": "SimSun", "cs": "Arial",
+                "asciiTheme": "majorHAnsi", "hAnsiTheme": "majorHAnsi",
+                "eastAsiaTheme": "majorEastAsia", "csTheme": "majorBidi"
+            }}));
+            let formatting = lower_run_formatting(Some(&attrs), &RenderEnv::default());
+            assert_eq!(formatting.font_family.as_deref(), Some(latin));
+            let slots = formatting.font_slots.unwrap();
+            assert_eq!(slots.ascii.as_deref(), Some(latin));
+            assert_eq!(slots.h_ansi.as_deref(), Some(latin));
+            assert_eq!(slots.east_asia.as_deref(), Some("SimSun"));
+            assert_eq!(slots.cs.as_deref(), Some("Arial"));
+        }
+    }
+
+    #[test]
+    fn retained_package_theme_resolves_runs_and_numbering_for_layout() {
+        let fonts = r#"<w:rFonts w:ascii="Cambria" w:hAnsi="Cambria" w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi"/>"#;
+        let body = format!(
+            r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:rPr>{fonts}</w:rPr><w:t>Title</w:t></w:r></w:p>"#
+        );
+        let numbering = format!(
+            r#"<w:numbering {}><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:rPr>{fonts}</w:rPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#,
+            crate::seed::fixture::NS
+        );
+        let bytes = crate::seed::fixture::Package::new(&body)
+            .numbering(&numbering)
+            .part(
+                "theme/theme1.xml",
+                "theme",
+                "theme",
+                "theme",
+                r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:fontScheme name="Synthetic"><a:majorFont><a:latin typeface="Calibri"/></a:majorFont></a:fontScheme></a:themeElements></a:theme>"#,
+            )
+            .bytes();
+        for preview in [false, true] {
+            let doc = EditingDoc::new(75303);
+            if preview {
+                assert!(crate::seed::seed_docx_preview(&doc, &bytes, 1).unwrap());
+            } else {
+                crate::seed::seed_from_docx(&doc, &bytes).unwrap();
+            }
+            let original = doc.encode_state_as_update_v1();
+            let blocks = yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
+            let LayoutBlock::Paragraph(paragraph) = &blocks[0] else {
+                panic!("missing paragraph");
+            };
+            let Run::Text(run) = &paragraph.runs[0] else {
+                panic!("missing run");
+            };
+            assert_eq!(run.fmt.font_family.as_deref(), Some("Calibri"));
+            assert_eq!(
+                paragraph
+                    .attrs
+                    .as_ref()
+                    .unwrap()
+                    .list_marker_font_family
+                    .as_deref(),
+                Some("Calibri")
+            );
+            assert_eq!(doc.encode_state_as_update_v1(), original);
+        }
+    }
+
+    #[test]
+    fn numbering_theme_precedence_keeps_the_other_font_slot() {
+        for (fonts, expected) in [
+            (
+                r#"<w:rFonts w:ascii="Times New Roman" w:hAnsi="Arial" w:hAnsiTheme="minorHAnsi"/>"#,
+                "Times New Roman",
+            ),
+            (
+                r#"<w:rFonts w:ascii="Times New Roman" w:asciiTheme="minorHAnsi" w:hAnsi="Arial"/>"#,
+                "Calibri",
+            ),
+            (
+                r#"<w:rFonts w:ascii="" w:hAnsi="Arial" w:hAnsiTheme="unknown"/>"#,
+                "Arial",
+            ),
+        ] {
+            let numbering = format!(
+                r#"<w:numbering {}><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:rPr>{fonts}</w:rPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#,
+                crate::seed::fixture::NS
+            );
+            let bytes = crate::seed::fixture::Package::new(
+                r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>Title</w:t></w:r></w:p>"#,
+            )
+            .numbering(&numbering)
+            .part(
+                "theme/theme1.xml",
+                "theme",
+                "theme",
+                "theme",
+                r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:fontScheme name="Synthetic"><a:majorFont><a:latin typeface="Calibri Light"/></a:majorFont><a:minorFont><a:latin typeface="Calibri"/></a:minorFont></a:fontScheme></a:themeElements></a:theme>"#,
+            )
+            .bytes();
+            for preview in [false, true] {
+                let doc = EditingDoc::new(75304);
+                if preview {
+                    assert!(crate::seed::seed_docx_preview(&doc, &bytes, 1).unwrap());
+                } else {
+                    crate::seed::seed_from_docx(&doc, &bytes).unwrap();
+                }
+                let original = doc.encode_state_as_update_v1();
+                let blocks = yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
+                let LayoutBlock::Paragraph(paragraph) = &blocks[0] else {
+                    panic!("missing paragraph");
+                };
+                let attrs = paragraph.attrs.as_ref().unwrap();
+                assert_eq!(attrs.list_marker.as_deref(), Some("1."));
+                assert_eq!(attrs.list_marker_font_family.as_deref(), Some(expected));
+                assert_eq!(doc.encode_state_as_update_v1(), original);
+            }
+        }
+    }
+
+    #[test]
+    fn edited_marker_font_wins_over_the_numbering_theme_font() {
+        let fonts = r#"<w:rFonts w:ascii="Cambria" w:hAnsi="Cambria" w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi"/>"#;
+        let numbering = format!(
+            r#"<w:numbering {}><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:rPr>{fonts}</w:rPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#,
+            crate::seed::fixture::NS
+        );
+        let bytes = crate::seed::fixture::Package::new(
+            r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>Title</w:t></w:r></w:p>"#,
+        )
+        .numbering(&numbering)
+        .part(
+            "theme/theme1.xml",
+            "theme",
+            "theme",
+            "theme",
+            r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:fontScheme name="Synthetic"><a:majorFont><a:latin typeface="Calibri"/></a:majorFont></a:fontScheme></a:themeElements></a:theme>"#,
+        )
+        .bytes();
+        for preview in [false, true] {
+            let doc = EditingDoc::new(75305);
+            if preview {
+                assert!(crate::seed::seed_docx_preview(&doc, &bytes, 1).unwrap());
+            } else {
+                crate::seed::seed_from_docx(&doc, &bytes).unwrap();
+            }
+            let marker_font = |doc: &EditingDoc| {
+                let blocks = yrs_doc_to_layout_blocks(doc, "body", &RenderEnv::default()).unwrap();
+                let LayoutBlock::Paragraph(paragraph) = &blocks[0] else {
+                    panic!("missing paragraph");
+                };
+                let BlockId::Str(id) = &paragraph.id else {
+                    panic!("paragraph without a string id");
+                };
+                (
+                    id.clone(),
+                    paragraph
+                        .attrs
+                        .as_ref()
+                        .unwrap()
+                        .list_marker_font_family
+                        .clone(),
+                )
+            };
+            let (para_id, inherited) = marker_font(&doc);
+            assert_eq!(inherited.as_deref(), Some("Calibri"));
+            doc.set_paragraph_attr(&para_id, "listMarkerFontFamily", Any::from("Courier New"))
+                .unwrap();
+            assert_eq!(marker_font(&doc).1.as_deref(), Some("Courier New"));
+        }
+    }
+
     #[test]
     fn hard_break_spacing_suppression_clears_line_units_without_changing_authored_values() {
         let values = BTreeMap::from([
@@ -6144,6 +7055,27 @@ mod tests {
                 .map(|(key, value)| (key.to_owned(), value))
                 .collect::<HashMap<_, _>>(),
         ))
+    }
+
+    #[test]
+    fn a_run_scale_outside_the_schema_never_reaches_layout() {
+        for (scale, expected) in [
+            (0.0, None),
+            (-5.0, None),
+            (100.0, None),
+            (50.0, Some(50.0)),
+            (700.0, Some(600.0)),
+        ] {
+            let spacing = Any::Map(std::sync::Arc::new(HashMap::from([(
+                "scale".to_owned(),
+                Any::Number(scale),
+            )])));
+            let attributes: Attrs =
+                HashMap::from([(std::sync::Arc::from("characterSpacing"), spacing)]);
+            let mut lowered = RunFormatting::default();
+            lower_character_spacing(Some(&attributes), &mut lowered);
+            assert_eq!(lowered.horizontal_scale, expected, "scale {scale}");
+        }
     }
 
     #[test]
@@ -6342,9 +7274,37 @@ mod tests {
             ("left".to_owned(), Any::Number(108.0)),
             ("right".to_owned(), Any::Number(108.0)),
         ]);
-        let padding = lower_cell_padding(&cell, Some(&table));
+        let padding = lower_cell_padding(&cell, Some(&table), DefaultCellMargins([0.0; 4]));
         assert_eq!(padding.left, 0.0);
         assert!((padding.right - 7.2).abs() < 1e-10);
+    }
+
+    #[test]
+    fn unset_cell_sides_take_the_resolved_default_margins() {
+        let empty = std::collections::HashMap::new();
+        let normal_table = DefaultCellMargins([0.0, 108.0, 0.0, 108.0]);
+        let padding = lower_cell_padding(&empty, None, normal_table);
+        assert!((padding.left - 7.2).abs() < 1e-10);
+        assert!((padding.right - 7.2).abs() < 1e-10);
+        assert_eq!((padding.top, padding.bottom), (0.0, 0.0));
+        let table = std::collections::HashMap::from([
+            ("left".to_owned(), Any::Number(0.0)),
+            ("top".to_owned(), Any::Number(60.0)),
+        ]);
+        let padding = lower_cell_padding(&empty, Some(&table), normal_table);
+        assert_eq!(padding.left, 0.0);
+        assert!((padding.right - 7.2).abs() < 1e-10);
+        assert!((padding.top - 4.0).abs() < 1e-10);
+        assert_eq!(padding.bottom, 0.0);
+        let padding = lower_cell_padding(
+            &empty,
+            None,
+            style_cell_margins(&empty, &RenderEnv::default(), None),
+        );
+        assert_eq!(
+            [padding.top, padding.right, padding.bottom, padding.left],
+            [0.0; 4]
+        );
     }
 
     #[test]
@@ -6441,6 +7401,64 @@ mod tests {
             &EditCtx::local("", DATE),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn a_table_look_first_column_reaches_the_layout_table() {
+        let first_column = |tbl_pr: &str| {
+            let doc = EditingDoc::new(43);
+            replace_story_with_paragraph(&doc, "body:t0:r0c0", "c00p", "A");
+            doc.create_story("body", "", "Normal", "left").unwrap();
+            doc.apply_raw_ops(
+                "body",
+                vec![
+                    RawOp::Delete { index: 0, len: 1 },
+                    RawOp::InsertEmbed {
+                        index: 0,
+                        kind: "table".to_owned(),
+                        payload: vec![
+                            ("tblPr".to_owned(), Any::from_json(tbl_pr).unwrap()),
+                            ("grid".to_owned(), Any::from_json("[]").unwrap()),
+                            (
+                                "rows".to_owned(),
+                                Any::from_json(
+                                    r#"[{"trPr":{"isHeader":true},"cells":[
+                                      {"tcPr":{"colspan":1,"rowspan":1},"story":"body:t0:r0c0"}
+                                    ]}]"#,
+                                )
+                                .unwrap(),
+                            ),
+                        ],
+                        attrs: Attrs::new(),
+                    },
+                ],
+                &EditCtx::local("", DATE),
+            )
+            .unwrap();
+            let blocks = serde_json::to_value(
+                yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap(),
+            )
+            .unwrap();
+            blocks.pointer("/0/firstColumn").cloned()
+        };
+        assert_eq!(
+            first_column(r#"{"look":{"firstColumn":true}}"#),
+            Some(json!(true))
+        );
+        assert_eq!(
+            first_column(r#"{"look":{"value":"04A0"}}"#),
+            Some(json!(true))
+        );
+        assert_eq!(
+            first_column(r#"{"look":{"value":"04A0","firstColumn":false}}"#),
+            None
+        );
+        assert_eq!(first_column(r#"{"look":{"value":"0420"}}"#), None);
+        assert_eq!(
+            first_column("{}"),
+            None,
+            "a table without its own look asks for nothing"
+        );
     }
 
     #[test]
@@ -6773,7 +7791,7 @@ mod tests {
             yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap(),
         )
         .unwrap();
-        assert_eq!(body[0]["runs"][1]["text"], json!("5"));
+        assert_eq!(body[0]["runs"][1]["text"], json!("1"));
         assert_eq!(body[0]["runs"][1]["footnoteRefId"], json!(5.0));
         assert_eq!(body[0]["runs"][1]["superscript"], json!(true));
 
@@ -6816,17 +7834,136 @@ mod tests {
         )
         .unwrap();
         replace_story_with_paragraph(&doc, "fn:12", "fn-p", "Footnote text");
+        let env = RenderEnv {
+            note_numbering: vec![docx_layout::footnotes::SectionNoteNumbering {
+                footnote: docx_layout::regions::NoteProperties {
+                    num_start: Some(12),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+            ..RenderEnv::default()
+        };
 
-        let body = serde_json::to_value(
-            yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap(),
-        )
-        .unwrap();
+        let body =
+            serde_json::to_value(yrs_doc_to_layout_blocks(&doc, "body", &env).unwrap()).unwrap();
         assert_eq!(body[0]["runs"][1]["text"], json!("12"));
         assert_eq!(body[0]["runs"][1]["pmStart"], json!(2.0));
         assert_eq!(body[0]["runs"][1]["pmEnd"], json!(3.0));
         assert_eq!(body[0]["runs"][2]["text"], json!("B"));
         assert_eq!(body[0]["runs"][2]["pmStart"], json!(3.0));
         assert_eq!(body[0]["pmEnd"], json!(5.0));
+    }
+
+    fn note_ref_embed(index: u32, key: &str, id: f64) -> RawOp {
+        RawOp::InsertEmbed {
+            index,
+            kind: "noteRef".to_owned(),
+            payload: vec![(key.to_owned(), Any::Number(id))],
+            attrs: Attrs::new(),
+        }
+    }
+
+    fn inline_control_note_ref(index: u32, key: &'static str, id: f64) -> RawOp {
+        RawOp::InsertEmbed {
+            index,
+            kind: "sdt".to_owned(),
+            payload: vec![(
+                "content".to_owned(),
+                Any::Array(Arc::from([any_map([
+                    ("kind", Any::from("noteRef")),
+                    ("payload", any_map([(key, Any::Number(id))])),
+                ])])),
+            )],
+            attrs: Attrs::new(),
+        }
+    }
+
+    fn note_ref_doc(
+        client_id: u64,
+        embeds: impl Fn(u32, usize) -> RawOp,
+        count: usize,
+    ) -> EditingDoc {
+        let doc = EditingDoc::new(client_id);
+        doc.create_story("body", "", "Normal", "left").unwrap();
+        let mut ops = vec![RawOp::Delete { index: 0, len: 1 }];
+        let mut cursor = 0;
+        for slot in 0..count {
+            ops.push(RawOp::Insert {
+                index: cursor,
+                text: "ab".to_owned(),
+                attrs: Attrs::new(),
+            });
+            ops.push(embeds(cursor + 2, slot));
+            cursor += 3;
+        }
+        ops.push(RawOp::InsertEmbed {
+            index: cursor,
+            kind: "pilcrow".to_owned(),
+            payload: vec![("paraId".to_owned(), Any::from("body-p"))],
+            attrs: Attrs::new(),
+        });
+        doc.apply_raw_ops("body", ops, &EditCtx::local("", DATE))
+            .unwrap();
+        doc
+    }
+
+    fn note_ref_marks(doc: &EditingDoc) -> Vec<String> {
+        yrs_doc_to_layout_blocks(doc, "body", &RenderEnv::default())
+            .unwrap()
+            .into_iter()
+            .flat_map(|block| match block {
+                LayoutBlock::Paragraph(paragraph) => paragraph.runs,
+                _ => Vec::new(),
+            })
+            .filter_map(|run| match run {
+                Run::Text(text)
+                    if text.fmt.footnote_ref_id.is_some() || text.fmt.endnote_ref_id.is_some() =>
+                {
+                    Some(text.text)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_lone_note_ref_marks_its_ordinal_not_its_id() {
+        for key in ["footnoteRefId", "endnoteRefId"] {
+            let doc = note_ref_doc(7301, |index, _| note_ref_embed(index, key, 2.0), 1);
+            assert_eq!(note_ref_marks(&doc), ["1"], "{key}");
+            let doc = note_ref_doc(7302, |index, _| inline_control_note_ref(index, key, 2.0), 1);
+            assert_eq!(note_ref_marks(&doc), ["1"], "inline control {key}");
+        }
+    }
+
+    #[test]
+    fn note_refs_out_of_id_order_mark_their_document_order() {
+        let ids = [7.0, 3.0, 5.0];
+        for key in ["footnoteRefId", "endnoteRefId"] {
+            let doc = note_ref_doc(7303, |index, slot| note_ref_embed(index, key, ids[slot]), 3);
+            assert_eq!(note_ref_marks(&doc), ["1", "2", "3"], "{key}");
+        }
+        let doc = note_ref_doc(
+            7304,
+            |index, slot| inline_control_note_ref(index, "footnoteRefId", ids[slot]),
+            3,
+        );
+        assert_eq!(note_ref_marks(&doc), ["1", "2", "3"]);
+    }
+
+    #[test]
+    fn footnote_and_endnote_refs_count_apart() {
+        let doc = note_ref_doc(
+            7305,
+            |index, slot| match slot {
+                0 => note_ref_embed(index, "footnoteRefId", 4.0),
+                1 => note_ref_embed(index, "endnoteRefId", 9.0),
+                _ => note_ref_embed(index, "footnoteRefId", 6.0),
+            },
+            3,
+        );
+        assert_eq!(note_ref_marks(&doc), ["1", "1", "2"]);
     }
 
     #[test]
@@ -7362,6 +8499,45 @@ mod tests {
         assert_eq!(pm_position(3, 0), 4);
         assert_eq!(pm_position(5, 2), 8);
         assert_eq!(pm_position(9, 2), 12);
+    }
+
+    #[test]
+    fn run_languages_inherit_each_missing_slot_from_defaults() {
+        let slots = |latin: Option<&str>, east_asia: Option<&str>, bidi: Option<&str>| {
+            Some(RunLanguageSlots {
+                latin: latin.map(str::to_owned),
+                east_asia: east_asia.map(str::to_owned),
+                bidi: bidi.map(str::to_owned),
+            })
+        };
+        let defaults = RunFormatting {
+            language: slots(Some("en-GB"), Some("ja-JP"), Some("ar-SA")),
+            ..RunFormatting::default()
+        };
+        for (own, expected) in [
+            (None, slots(Some("en-GB"), Some("ja-JP"), Some("ar-SA"))),
+            (
+                slots(Some("en-US"), None, None),
+                slots(Some("en-US"), Some("ja-JP"), Some("ar-SA")),
+            ),
+            (
+                slots(None, Some("zh-TW"), None),
+                slots(Some("en-GB"), Some("zh-TW"), Some("ar-SA")),
+            ),
+        ] {
+            let mut run = RunFormatting {
+                language: own,
+                ..RunFormatting::default()
+            };
+            apply_run_defaults(&mut run, &defaults);
+            assert_eq!(run.language, expected);
+        }
+        let mut run = RunFormatting {
+            language: slots(Some("en-US"), None, None),
+            ..RunFormatting::default()
+        };
+        apply_run_defaults(&mut run, &RunFormatting::default());
+        assert_eq!(run.language, slots(Some("en-US"), None, None));
     }
 
     #[test]

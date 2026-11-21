@@ -2,7 +2,9 @@
 //! `Session` methods in `core.rs`.
 
 use wasm_bindgen::prelude::*;
-use xlsx_engine::{Document, EngineError, ErrorKind, Host, SnapshotBuilder};
+#[cfg(feature = "peer-snapshot")]
+use xlsx_engine::SnapshotBuilder;
+use xlsx_engine::{Document, EngineError, ErrorKind, Host};
 
 #[wasm_bindgen(typescript_custom_section)]
 const DECODED_FONT_FACE: &str =
@@ -39,11 +41,6 @@ pub fn decode_font_face(
     }
     Ok(object.into())
 }
-
-#[cfg(all(target_arch = "wasm32", not(feature = "raster")))]
-#[used]
-#[unsafe(link_section = "betteroffice.xlsx.no-png")]
-static PNG_EXPORT_UNAVAILABLE: [u8; 1] = [1];
 
 /// days from the 1900 epoch to 1970-01-01, phantom-1900 leap day included.
 const UNIX_EPOCH_SERIAL: f64 = 25569.0;
@@ -167,7 +164,13 @@ pub struct XlsxDocument {
 
 #[wasm_bindgen]
 pub struct XlsxSnapshotBuilder {
+    #[cfg(feature = "peer-snapshot")]
     inner: SnapshotBuilder,
+}
+
+#[cfg(not(feature = "peer-snapshot"))]
+fn peer_snapshot_unavailable() -> JsValue {
+    JsValue::from_str("peer snapshots not in this build")
 }
 
 #[wasm_bindgen]
@@ -175,23 +178,47 @@ impl XlsxSnapshotBuilder {
     #[wasm_bindgen(constructor)]
     pub fn new() -> XlsxSnapshotBuilder {
         Self {
+            #[cfg(feature = "peer-snapshot")]
             inner: SnapshotBuilder::new(wasm_host()),
         }
     }
 
     pub fn push(&mut self, chunk: &[u8]) -> Result<(), JsValue> {
-        self.inner.push(chunk).map_err(map_engine_error)
+        #[cfg(feature = "peer-snapshot")]
+        {
+            self.inner.push(chunk).map_err(map_engine_error)
+        }
+        #[cfg(not(feature = "peer-snapshot"))]
+        {
+            let _ = chunk;
+            Err(peer_snapshot_unavailable())
+        }
     }
 
     pub fn advance(&mut self, records: usize, bytes: usize) -> Result<bool, JsValue> {
-        self.inner.advance(records, bytes).map_err(map_engine_error)
+        #[cfg(feature = "peer-snapshot")]
+        {
+            self.inner.advance(records, bytes).map_err(map_engine_error)
+        }
+        #[cfg(not(feature = "peer-snapshot"))]
+        {
+            let _ = (records, bytes);
+            Err(peer_snapshot_unavailable())
+        }
     }
 
     pub fn finish(self) -> Result<XlsxDocument, JsValue> {
-        self.inner
-            .finish()
-            .map(|inner| XlsxDocument { inner })
-            .map_err(map_engine_error)
+        #[cfg(feature = "peer-snapshot")]
+        {
+            self.inner
+                .finish()
+                .map(|inner| XlsxDocument { inner })
+                .map_err(map_engine_error)
+        }
+        #[cfg(not(feature = "peer-snapshot"))]
+        {
+            Err(peer_snapshot_unavailable())
+        }
     }
 }
 
@@ -203,6 +230,7 @@ impl Default for XlsxSnapshotBuilder {
 
 #[wasm_bindgen]
 impl XlsxDocument {
+    /// Checkpoints are only restorable by the same engine version and codec.
     #[wasm_bindgen(js_name = recoveryCheckpoint)]
     pub fn recovery_checkpoint(
         &self,
@@ -214,6 +242,7 @@ impl XlsxDocument {
             .map_err(map_engine_error)
     }
 
+    /// Checkpoints are only restorable by the same engine version and codec.
     #[wasm_bindgen(js_name = openRecoveryCheckpoint)]
     pub fn open_recovery_checkpoint(
         bytes: &[u8],
@@ -226,21 +255,37 @@ impl XlsxDocument {
 
     #[wasm_bindgen(js_name = beginPeerSnapshot)]
     pub fn begin_peer_snapshot(&mut self, records: usize, bytes: usize) -> Result<(), JsValue> {
-        self.inner
-            .begin_peer_snapshot(records, bytes)
-            .map_err(map_engine_error)
+        #[cfg(feature = "peer-snapshot")]
+        {
+            self.inner
+                .begin_peer_snapshot(records, bytes)
+                .map_err(map_engine_error)
+        }
+        #[cfg(not(feature = "peer-snapshot"))]
+        {
+            let _ = (records, bytes);
+            Err(peer_snapshot_unavailable())
+        }
     }
 
     #[wasm_bindgen(js_name = nextPeerSnapshotChunk)]
     pub fn next_peer_snapshot_chunk(&mut self) -> Result<Option<js_sys::Uint8Array>, JsValue> {
-        self.inner
-            .next_peer_snapshot_chunk()
-            .map(|chunk| chunk.map(|bytes| js_sys::Uint8Array::from(bytes.as_slice())))
-            .map_err(map_engine_error)
+        #[cfg(feature = "peer-snapshot")]
+        {
+            self.inner
+                .next_peer_snapshot_chunk()
+                .map(|chunk| chunk.map(|bytes| js_sys::Uint8Array::from(bytes.as_slice())))
+                .map_err(map_engine_error)
+        }
+        #[cfg(not(feature = "peer-snapshot"))]
+        {
+            Err(peer_snapshot_unavailable())
+        }
     }
 
     #[wasm_bindgen(js_name = endPeerSnapshot)]
     pub fn end_peer_snapshot(&mut self) {
+        #[cfg(feature = "peer-snapshot")]
         self.inner.end_peer_snapshot();
     }
 
@@ -264,9 +309,17 @@ impl XlsxDocument {
         bytes: &[u8],
         hydration: &str,
     ) -> Result<XlsxDocument, JsValue> {
-        Document::open_with_peer_hydration_json(bytes, hydration, wasm_host())
-            .map(|inner| XlsxDocument { inner })
-            .map_err(map_engine_error)
+        #[cfg(feature = "peer-snapshot")]
+        {
+            Document::open_with_peer_hydration_json(bytes, hydration, wasm_host())
+                .map(|inner| XlsxDocument { inner })
+                .map_err(map_engine_error)
+        }
+        #[cfg(not(feature = "peer-snapshot"))]
+        {
+            let _ = (bytes, hydration);
+            Err(peer_snapshot_unavailable())
+        }
     }
 
     /// open a workbook from raw `.xlsx` bytes.
@@ -282,6 +335,18 @@ impl XlsxDocument {
         context: &str,
     ) -> Result<XlsxDocument, JsValue> {
         Document::open_with_calculation_json(bytes, context, wasm_host())
+            .map(|inner| XlsxDocument { inner })
+            .map_err(map_engine_error)
+    }
+
+    /// Open keeping cached formula results, recalculating only a file with an uncached formula
+    /// or a `calcPr` full calculation request.
+    #[wasm_bindgen(js_name = openRecalculatingStale)]
+    pub fn open_recalculating_stale(
+        bytes: &[u8],
+        context: Option<String>,
+    ) -> Result<XlsxDocument, JsValue> {
+        Document::open_recalculating_stale(bytes, context.as_deref(), wasm_host())
             .map(|inner| XlsxDocument { inner })
             .map_err(map_engine_error)
     }
@@ -392,40 +457,36 @@ impl XlsxDocument {
             .map_err(map_engine_error)
     }
 
+    /// the encoded bytes of the image an `image` draw command names.
+    #[wasm_bindgen(js_name = mediaBytes)]
+    pub fn media_bytes(&self, asset_id: &str) -> Result<Vec<u8>, JsValue> {
+        self.inner.media_bytes(asset_id).map_err(map_engine_error)
+    }
+
     /// slide a chart by a pixel delta as one undo step.
     #[wasm_bindgen(js_name = moveChartJson)]
     pub fn move_chart_json(&mut self, args: &str) -> Result<String, JsValue> {
         self.inner.move_chart_json(args).map_err(map_engine_error)
     }
 
-    /// render the current sheet viewport to png bytes (raster feature only).
-    #[wasm_bindgen(js_name = renderPng)]
-    pub fn render_png(&self, viewport_json: &str) -> Result<Vec<u8>, JsValue> {
-        #[cfg(feature = "raster")]
-        {
-            self.inner
-                .render_png(viewport_json)
-                .map_err(map_engine_error)
-        }
-        #[cfg(not(feature = "raster"))]
-        {
-            let _ = viewport_json;
-            Err(JsValue::from_str("png export not in this build"))
-        }
+    /// move a chart's edges by pixel deltas as one undo step.
+    #[wasm_bindgen(js_name = resizeChartJson)]
+    pub fn resize_chart_json(&mut self, args: &str) -> Result<String, JsValue> {
+        self.inner.resize_chart_json(args).map_err(map_engine_error)
     }
 
-    /// render an a1 range (default: used range) at an optional scale to png.
-    #[wasm_bindgen(js_name = renderRangePng)]
-    pub fn render_range_png(&self, args: &str) -> Result<Vec<u8>, JsValue> {
-        #[cfg(feature = "raster")]
-        {
-            self.inner.render_range_png(args).map_err(map_engine_error)
-        }
-        #[cfg(not(feature = "raster"))]
-        {
-            let _ = args;
-            Err(JsValue::from_str("png export not in this build"))
-        }
+    #[wasm_bindgen(js_name = pngDisplayListJson)]
+    pub fn png_display_list_json(&self, viewport_json: &str) -> Result<String, JsValue> {
+        self.inner
+            .png_display_list_json(viewport_json)
+            .map_err(map_engine_error)
+    }
+
+    #[wasm_bindgen(js_name = rangePngDisplayListJson)]
+    pub fn range_png_display_list_json(&self, args: &str) -> Result<String, JsValue> {
+        self.inner
+            .range_png_display_list_json(args)
+            .map_err(map_engine_error)
     }
 
     /// serialized `SheetInfo`: stable IDs, names, active index, content extent.
@@ -456,6 +517,12 @@ impl XlsxDocument {
     #[wasm_bindgen(js_name = cellRectJson)]
     pub fn cell_rect_json(&self, args: &str) -> Result<String, JsValue> {
         self.inner.cell_rect_json(args).map_err(map_engine_error)
+    }
+
+    /// Recalculate every formula; the next save writes the recalculated values.
+    #[wasm_bindgen(js_name = recalculateJson)]
+    pub fn recalculate_json(&mut self) -> Result<String, JsValue> {
+        self.inner.recalculate_json().map_err(map_engine_error)
     }
 
     #[wasm_bindgen(js_name = calculationStatusJson)]
@@ -490,9 +557,22 @@ impl XlsxDocument {
         self.inner.edit_cells_json(args).map_err(map_engine_error)
     }
 
+    /// @internal
+    #[wasm_bindgen(js_name = translateFormulasJson)]
+    pub fn translate_formulas_json(&self, args: &str) -> Result<String, JsValue> {
+        self.inner
+            .translate_formulas_json(args)
+            .map_err(map_engine_error)
+    }
+
     #[wasm_bindgen(js_name = moveRangeJson)]
     pub fn move_range_json(&mut self, args: &str) -> Result<String, JsValue> {
         self.inner.move_range_json(args).map_err(map_engine_error)
+    }
+
+    #[wasm_bindgen(js_name = fillRangeJson)]
+    pub fn fill_range_json(&mut self, args: &str) -> Result<String, JsValue> {
+        self.inner.fill_range_json(args).map_err(map_engine_error)
     }
 
     /// apply a raw op list as one user transaction; returns `SheetInfo` json.
@@ -713,6 +793,14 @@ impl XlsxDocument {
         self.inner.save_bytes().map_err(map_engine_error)
     }
 
+    /// The warnings a save of the workbook as it is now carries, as a JSON
+    /// array of `{ code, part, element?, sheet?, message }`; `[]` on an
+    /// ordinary save.
+    #[wasm_bindgen(js_name = saveWarningsJson)]
+    pub fn save_warnings_json(&self) -> Result<String, JsValue> {
+        self.inner.save_warnings_json().map_err(map_engine_error)
+    }
+
     /// crate version string.
     pub fn version() -> String {
         xlsx_engine::Session::version().to_string()
@@ -742,5 +830,15 @@ pub fn export_xlsx_markdown_json(
 
 #[wasm_bindgen(js_name = renderXlsxMarkdownJson)]
 pub fn render_xlsx_markdown_json(content: &str, options: &str) -> Result<String, JsValue> {
-    xlsx_engine::render_xlsx_markdown_json(content, options).map_err(map_engine_error)
+    #[cfg(feature = "structured-render")]
+    {
+        xlsx_engine::render_xlsx_markdown_json(content, options).map_err(map_engine_error)
+    }
+    #[cfg(not(feature = "structured-render"))]
+    {
+        let _ = (content, options);
+        Err(JsValue::from_str(
+            "rendering structured content not in this build",
+        ))
+    }
 }

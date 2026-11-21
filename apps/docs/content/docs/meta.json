@@ -2,12 +2,14 @@
   "pages": [
     "index",
     "packages",
+    "fonts",
     "javascript",
     "migrating-to-0-5",
     "rust",
     "python",
     "agents",
     "collaboration",
+    "wopi",
     "vsdx"
   ]
 }

@@ -13,8 +13,12 @@ import {
 } from '@betteroffice/docx/layout/render';
 import { isWithinPageArea } from '../internals/pageAreaRouting';
 import { formatKeys } from '../../dialogs/KeyboardShortcutsDialog/ShortcutItem';
+import { storeAriaShortcut, storeShortcutLabel } from '../../../commands/shortcuts';
+import { useDocxShortcutRevision } from '../../../commands/hooks';
+import type { DocxCommandId, DocxCommandStore } from '../../../commands/types';
 import type { PagedEditorRef } from '../PagedEditor';
-import { currentYrsTableTarget, yrsSelectedText, yrsSelectionPlainText } from '../yrsCommands';
+import { currentYrsTableTarget } from '../yrsCommands';
+import { readClipboardFragment } from '../internals/clipboardHtml';
 import type { DocxTableAction } from '../../../commands/types';
 
 interface TableContextInfo {
@@ -36,10 +40,8 @@ interface ContextMenuState {
  *    + add-comment when there's a selection + table ops when in a cell)
  *  - image context menu (wrap-type swatches + reused text actions)
  *
- * Shortcut strings come from i18n (`contextMenu.*Shortcut`) and are
- * passed through `formatKeys` so Mac users see `⌘⇧V` instead of the
- * literal `Ctrl+Shift+V` — handles the full Ctrl/Alt/Shift swap set,
- * not just Ctrl.
+ * Clipboard and select-all shortcuts come from the command store, so a
+ * host's remap shows here; delete keeps its translated key name.
  *
  * The text menu's `addComment` branch needs to mutate comment-management
  * state (selection range, Y position, sidebar visibility, isAddingComment,
@@ -48,6 +50,7 @@ interface ContextMenuState {
  * callback that fans out to those setters.
  */
 export function useContextMenus({
+  commands,
   pagedEditorRef,
   focusActiveEditor,
   runTableAction,
@@ -59,6 +62,7 @@ export function useContextMenus({
   readOnly = false,
   onAddComment,
 }: {
+  commands: DocxCommandStore;
   pagedEditorRef: React.RefObject<PagedEditorRef | null>;
   focusActiveEditor: () => void;
   runTableAction: (action: DocxTableAction) => void;
@@ -183,26 +187,34 @@ export function useContextMenus({
     ]
   );
 
+  const shortcutRevision = useDocxShortcutRevision(commands);
+  const keys = useMemo(() => {
+    void shortcutRevision;
+    return (id: DocxCommandId) => ({
+      shortcut: storeShortcutLabel(commands, id, t) ?? undefined,
+      ariaShortcut: storeAriaShortcut(commands, id) ?? undefined,
+    });
+  }, [commands, shortcutRevision, t]);
+
   // Cut / Copy / Paste / Delete ride along inside the image context menu so
   // users don't need to flip menus to do basic clipboard work on the
-  // selected image. Shortcuts go through `formatKeys` so multi-modifier
-  // combos like `Ctrl+Shift+V` render as `⌘⇧V` on Mac instead of `⌘+Shift+V`.
+  // selected image.
   const imageContextMenuTextActions = useMemo(
     () => [
       {
         action: 'cut' as TextContextAction,
         label: t('contextMenu.cut'),
-        shortcut: formatKeys(t('contextMenu.cutShortcut')),
+        ...keys('cut'),
       },
       {
         action: 'copy' as TextContextAction,
         label: t('contextMenu.copy'),
-        shortcut: formatKeys(t('contextMenu.copyShortcut')),
+        ...keys('copy'),
       },
       {
         action: 'paste' as TextContextAction,
         label: t('contextMenu.paste'),
-        shortcut: formatKeys(t('contextMenu.pasteShortcut')),
+        ...keys('paste'),
         dividerAfter: true,
       },
       {
@@ -211,7 +223,7 @@ export function useContextMenus({
         shortcut: formatKeys(t('contextMenu.deleteShortcut')),
       },
     ],
-    [t]
+    [t, keys]
   );
 
   const handleContextMenuClose = useCallback(() => {
@@ -225,21 +237,18 @@ export function useContextMenus({
   }, []);
 
   const contextMenuItems = useMemo((): TextContextMenuItem[] => {
-    // `formatKeys` handles all modifier swaps on Mac (Ctrl+ → ⌘, Shift+ → ⇧,
-    // Alt+ → ⌥) so multi-modifier strings like `Ctrl+Shift+V` render as
-    // `⌘⇧V` rather than the wrong `⌘+Shift+V`.
     if (readOnly) {
       return [
         {
           action: 'copy',
           label: t('contextMenu.copy'),
-          shortcut: formatKeys(t('contextMenu.copyShortcut')),
+          ...keys('copy'),
           dividerAfter: true,
         },
         {
           action: 'selectAll',
           label: t('contextMenu.selectAll'),
-          shortcut: formatKeys(t('contextMenu.selectAllShortcut')),
+          ...keys('selectAll'),
         },
       ];
     }
@@ -247,22 +256,22 @@ export function useContextMenus({
       {
         action: 'cut',
         label: t('contextMenu.cut'),
-        shortcut: formatKeys(t('contextMenu.cutShortcut')),
+        ...keys('cut'),
       },
       {
         action: 'copy',
         label: t('contextMenu.copy'),
-        shortcut: formatKeys(t('contextMenu.copyShortcut')),
+        ...keys('copy'),
       },
       {
         action: 'paste',
         label: t('contextMenu.paste'),
-        shortcut: formatKeys(t('contextMenu.pasteShortcut')),
+        ...keys('paste'),
       },
       {
         action: 'pasteAsPlainText',
         label: t('contextMenu.pastePlainText'),
-        shortcut: formatKeys(t('contextMenu.pastePlainTextShortcut')),
+        ...keys('pasteAsPlainText'),
         dividerAfter: true,
       },
       {
@@ -312,10 +321,11 @@ export function useContextMenus({
     items.push({
       action: 'selectAll',
       label: t('contextMenu.selectAll'),
-      shortcut: formatKeys(t('contextMenu.selectAllShortcut')),
+      ...keys('selectAll'),
     });
     return items;
   }, [
+    keys,
     contextMenu.hasSelection,
     contextMenu.cursorInTable,
     contextMenu.tableContext,
@@ -333,23 +343,24 @@ export function useContextMenus({
 
       switch (action) {
         case 'cut': {
-          const session = paged.getYrsSession();
-          const text = session ? yrsSelectedText(session) : '';
-          if (text) await navigator.clipboard.writeText(text).catch(() => undefined);
-          paged.deleteSelection();
+          paged.copySelection(true);
           break;
         }
         case 'copy': {
           const read = paged.readSelectedText();
-          const session = read ? null : paged.getYrsSession();
-          const text = read ? await read.catch(() => '') : session ? yrsSelectionPlainText(session) : '';
+          if (!read) {
+            paged.copySelection(false);
+            break;
+          }
+          const text = await read.catch(() => '');
           if (text) await navigator.clipboard.writeText(text).catch(() => undefined);
           break;
         }
         case 'paste': {
           try {
             const text = await navigator.clipboard.readText();
-            if (text) paged.insertText(text);
+            const fragment = await readClipboardFragment();
+            if (text || fragment) paged.pasteContent(text, fragment);
           } catch {
             // Clipboard access denied.
           }
@@ -408,7 +419,7 @@ export function useContextMenus({
           break;
         }
       }
-      // TextContextMenu calls onClose after onAction, so no need to close here.
+      // TextContextMenu closes itself before running the action.
     },
     [
       focusActiveEditor,

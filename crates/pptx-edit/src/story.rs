@@ -4,7 +4,7 @@ use ooxml_drawingml::{Theme, resolve_color_value_to_hex_with_theme};
 use pptx_parse::{RunProperties, TextBody};
 use yrs::branch::{Branch, BranchPtr};
 use yrs::types::Attrs;
-use yrs::types::text::YChange;
+use yrs::types::text::{Diff, YChange};
 use yrs::updates::{decoder::Decode, encoder::Encode};
 use yrs::{
     Any, Assoc, IndexedSequence, Map, MapPrelim, MapRef, Out, ReadTxn, StickyIndex, Text,
@@ -43,9 +43,11 @@ const ALIGNMENTS: [&str; 7] = ["l", "ctr", "r", "just", "justLow", "dist", "thai
 
 /// The values land in schema-typed attributes, so junk must fail the edit
 /// rather than the file.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn validate_style_values(
     font_family: Option<&str>,
     underline: Option<&str>,
+    strike: Option<&str>,
     color: Option<&str>,
     font_size_pt: Option<f64>,
     spacing_pt: Option<f64>,
@@ -60,6 +62,13 @@ pub(crate) fn validate_style_values(
     {
         return Err(EditError::InvalidText(format!(
             "unrecognized underline type {underline:?}"
+        )));
+    }
+    if let Some(strike) = strike
+        && !["noStrike", "sngStrike", "dblStrike"].contains(&strike)
+    {
+        return Err(EditError::InvalidText(format!(
+            "unrecognized strike type {strike:?}"
         )));
     }
     if let Some(color) = color {
@@ -130,7 +139,7 @@ pub(crate) fn seed_story(
             if !run.text.is_empty() {
                 let style = style_from_run_properties(&run.properties, theme);
                 let index = story.len(txn);
-                insert_styled_text(&story, txn, index, &run.text, &style);
+                insert_styled_text(&story, txn, index, &run.text, &style, false);
             }
         }
         let bullet_json = paragraph
@@ -162,7 +171,7 @@ pub(crate) fn seed_plain_story(
 ) -> TextRef {
     let story = stories.insert(txn, story_id, TextPrelim::new(""));
     if !text.is_empty() {
-        insert_styled_text(&story, txn, 0, text, style);
+        insert_styled_text(&story, txn, 0, text, style, false);
     }
     append_pilcrow(&story, txn, paragraph_id, None, 0, None);
     story
@@ -320,6 +329,7 @@ impl DeckSession {
     pub fn resolve_caret_anchor(&self, anchor: &CaretAnchor) -> Option<u32> {
         let txn = self.doc.transact();
         let story = story_ref(&txn, &anchor.story_id).ok()?;
+        self.story_owners.owner(&txn, &anchor.story_id).ok()??;
         let offset = anchor.position.get_offset(&txn)?;
         let expected = BranchPtr::from(<TextRef as AsRef<Branch>>::as_ref(&story));
         if offset.branch != expected {
@@ -365,6 +375,7 @@ impl DeckSession {
                 validate_style_values(
                     style.font_family.as_deref(),
                     style.underline.as_deref(),
+                    style.strike.as_deref(),
                     style.color.as_deref(),
                     style.font_size_pt,
                     style.spacing_pt,
@@ -519,6 +530,19 @@ impl DeckSession {
                 ));
             }
             let starts = paragraph_offsets(&current);
+            for (index, template) in templates.iter().enumerate() {
+                let Some(template) = template else { continue };
+                self.set_replacement_properties(context, story_id, starts[index], template)?;
+                if current.paragraphs[index].alignment != template.alignment {
+                    self.set_paragraph_alignment(
+                        context,
+                        story_id,
+                        starts[index],
+                        starts[index],
+                        template.alignment.as_deref(),
+                    )?;
+                }
+            }
             for (index, (paragraph, draft)) in
                 current.paragraphs.iter().zip(&draft_text).enumerate().rev()
             {
@@ -563,27 +587,19 @@ impl DeckSession {
                         .iter()
                         .map(|(character, _)| *character)
                         .collect();
-                    self.insert_text(context, story_id, offset, &text, style)?;
+                    self.insert_text_with_strike_inheritance(
+                        context,
+                        story_id,
+                        offset,
+                        &text,
+                        (style, false),
+                    )?;
                     offset += text.encode_utf16().count() as u32;
                     cursor += count;
                 }
             }
             let current = self.story(story_id)?;
             let starts = paragraph_offsets(&current);
-            for (index, template) in templates.iter().enumerate() {
-                let Some(template) = template else { continue };
-                self.set_replacement_properties(context, story_id, starts[index], template)?;
-                if current.paragraphs[index].alignment != template.alignment {
-                    self.set_paragraph_alignment(
-                        context,
-                        story_id,
-                        starts[index],
-                        starts[index],
-                        template.alignment.as_deref(),
-                    )?;
-                }
-            }
-            let current = self.story(story_id)?;
             for (index, paragraph) in paragraphs.iter().enumerate() {
                 if let Some(alignment) = paragraph.alignment.as_deref()
                     && current.paragraphs[index].alignment.as_deref() != Some(alignment)
@@ -616,7 +632,7 @@ impl DeckSession {
         properties: &ParagraphSnapshot,
     ) -> EditResult<()> {
         let mut txn = self.transact_for(context);
-        let story = story_ref(&txn, story_id)?;
+        let story = self.story_mut(&txn, story_id)?;
         let marker = selected_pilcrows(&story, &txn, story_id, paragraph_start, paragraph_start)
             .pop()
             .ok_or_else(|| EditError::InvalidState("missing replacement paragraph".into()))?;
@@ -688,18 +704,36 @@ impl DeckSession {
         text: &str,
         style: &TextStyle,
     ) -> EditResult<TextReceipt> {
+        self.insert_text_with_strike_inheritance(context, story_id, index, text, (style, true))
+    }
+
+    fn insert_text_with_strike_inheritance(
+        &self,
+        context: &crate::EditCtx,
+        story_id: &str,
+        index: u32,
+        text: &str,
+        insertion: (&TextStyle, bool),
+    ) -> EditResult<TextReceipt> {
+        let (style, inherit_strike) = insertion;
         validate_xml_text(text)?;
         validate_style_values(
             style.font_family.as_deref(),
             style.underline.as_deref(),
+            style.strike.as_deref(),
             style.color.as_deref(),
             style.font_size_pt,
             style.spacing_pt,
             style.baseline_pct,
             style.kern_pt,
         )?;
+        let inherited_strikes = if style.strike.as_deref() == Some("noStrike") {
+            self.inherited_story_strikes(story_id)?
+        } else {
+            Vec::new()
+        };
         let mut txn = self.transact_for(context);
-        let story = story_ref(&txn, story_id)?;
+        let story = self.story_mut(&txn, story_id)?;
         let final_pilcrow = final_pilcrow_index(&story, &txn)?;
         if index > final_pilcrow {
             return Err(EditError::OutOfBounds {
@@ -708,7 +742,27 @@ impl DeckSession {
             });
         }
         if !text.is_empty() {
-            insert_styled_text(&story, &mut txn, index, text, style);
+            let mut style = style.clone();
+            let clear_strike = style.strike.as_deref() == Some("noStrike") && {
+                let diffs = story.diff(&txn, YChange::identity);
+                let paragraph = markers_in(&diffs)
+                    .iter()
+                    .position(|(offset, _)| *offset >= index)
+                    .unwrap();
+                !inherited_strikes[paragraph]
+                    && strike_beside(&diffs, index).as_deref() != Some("noStrike")
+            };
+            if clear_strike {
+                style.strike = None;
+            }
+            insert_styled_text(
+                &story,
+                &mut txn,
+                index,
+                text,
+                &style,
+                inherit_strike && !clear_strike,
+            );
         }
         let length = text.encode_utf16().count() as u32;
         Ok(TextReceipt {
@@ -727,7 +781,7 @@ impl DeckSession {
         end: u32,
     ) -> EditResult<TextReceipt> {
         let mut txn = self.transact_for(context);
-        let story = story_ref(&txn, story_id)?;
+        let story = self.story_mut(&txn, story_id)?;
         check_text_range(&story, &txn, start, end)?;
         let text = text_in_range(&story, &txn, start, end);
         if end > start {
@@ -754,7 +808,7 @@ impl DeckSession {
         let fields = crate::target::field_paragraphs(&self.package, &self.snapshot()?, story_id);
         let source_xml = self.source_paragraph_xml(story_id)?;
         let mut txn = self.transact_for(context);
-        let story = story_ref(&txn, story_id)?;
+        let story = self.story_mut(&txn, story_id)?;
         check_text_bounds(&story, &txn, start, end)?;
         let final_index = final_pilcrow_index(&story, &txn)?;
         if start <= final_index && final_index < end {
@@ -857,25 +911,37 @@ impl DeckSession {
         validate_style_values(
             patch.font_family.as_deref(),
             patch.underline.as_deref(),
+            patch.strike.as_deref(),
             patch.color.as_deref(),
             patch.font_size_pt,
             patch.spacing_pt,
             patch.baseline_pct,
             None,
         )?;
+        let inherited_strikes = if patch.strike.as_deref() == Some("noStrike") {
+            self.inherited_story_strikes(story_id)?
+        } else {
+            Vec::new()
+        };
         let mut txn = self.transact_for(context);
-        let story = story_ref(&txn, story_id)?;
+        let story = self.story_mut(&txn, story_id)?;
         check_text_bounds(&story, &txn, start, end)?;
         let text = text_in_range(&story, &txn, start, end);
-        for (segment_start, segment_end) in paragraph_text_segments(&story, &txn, start, end) {
+        for (paragraph_index, segment_start, segment_end) in
+            paragraph_text_segments(&story, &txn, start, end)
+        {
             for (key, value) in patch_values(patch) {
                 if let Some(value) = value {
-                    story.format(
-                        &mut txn,
-                        segment_start,
-                        segment_end - segment_start,
-                        Attrs::from([(Arc::from(key), value)]),
-                    );
+                    let value = if key == "strike"
+                        && patch.strike.as_deref() == Some("noStrike")
+                        && !inherited_strikes[paragraph_index]
+                    {
+                        Any::Null
+                    } else {
+                        value
+                    };
+                    let attrs = Attrs::from([(Arc::from(key), value)]);
+                    story.format(&mut txn, segment_start, segment_end - segment_start, attrs);
                 }
             }
         }
@@ -899,7 +965,7 @@ impl DeckSession {
     ) -> EditResult<TextReceipt> {
         validate_alignment(alignment)?;
         let mut txn = self.transact_for(context);
-        let story = story_ref(&txn, story_id)?;
+        let story = self.story_mut(&txn, story_id)?;
         check_text_bounds(&story, &txn, start, end)?;
         let text = text_in_range(&story, &txn, start, end);
         let pilcrows = selected_pilcrows(&story, &txn, story_id, start, end);
@@ -930,7 +996,7 @@ impl DeckSession {
         let fields = crate::target::field_paragraphs(&self.package, &self.snapshot()?, story_id);
         let (story, has_fields, inherited) = {
             let txn = self.doc.transact();
-            let story = story_ref(&txn, story_id)?;
+            let story = self.story_mut(&txn, story_id)?;
             let final_pilcrow = final_pilcrow_index(&story, &txn)?;
             if index > final_pilcrow {
                 return Err(EditError::OutOfBounds {
@@ -1006,7 +1072,7 @@ impl DeckSession {
         index: u32,
     ) -> EditResult<TextReceipt> {
         let txn = self.transact_for(context);
-        let story = story_ref(&txn, story_id)?;
+        let story = self.story_mut(&txn, story_id)?;
         let final_pilcrow = final_pilcrow_index(&story, &txn)?;
         if index >= final_pilcrow {
             return Err(EditError::OutOfBounds {
@@ -1045,7 +1111,7 @@ impl DeckSession {
     ) -> EditResult<()> {
         let fields = crate::target::field_paragraphs(&self.package, &self.snapshot()?, story_id);
         let mut txn = self.transact_for(context);
-        let story = story_ref(&txn, story_id)?;
+        let story = self.story_mut(&txn, story_id)?;
         let markers = paragraph_markers(&story, &txn);
         let selected = markers
             .iter()
@@ -1283,6 +1349,16 @@ pub(crate) fn story_ref<T: ReadTxn>(txn: &T, story_id: &str) -> EditResult<TextR
         .ok_or_else(|| EditError::StoryNotFound(story_id.to_owned()))
 }
 
+impl DeckSession {
+    fn story_mut<T: ReadTxn>(&self, txn: &T, story_id: &str) -> EditResult<TextRef> {
+        let story = story_ref(txn, story_id)?;
+        self.story_owners
+            .owner(txn, story_id)?
+            .ok_or_else(|| EditError::StoryNotFound(story_id.to_owned()))?;
+        Ok(story)
+    }
+}
+
 fn final_pilcrow_index<T: ReadTxn>(story: &TextRef, txn: &T) -> EditResult<u32> {
     validate_story(story, txn, "requested")?;
     Ok(story.len(txn) - 1)
@@ -1337,16 +1413,41 @@ fn selected_pilcrows<T: ReadTxn>(
 }
 
 fn paragraph_markers<T: ReadTxn>(story: &TextRef, txn: &T) -> Vec<(u32, MapRef)> {
+    markers_in(&story.diff(txn, YChange::identity))
+}
+
+fn markers_in(diffs: &[Diff<YChange>]) -> Vec<(u32, MapRef)> {
     let mut markers = Vec::new();
     let mut offset = 0;
-    for diff in story.diff(txn, YChange::identity) {
+    for diff in diffs {
+        if let Out::YMap(map) = &diff.insert {
+            markers.push((offset, map.clone()));
+        }
+        offset += out_len(&diff.insert);
+    }
+    markers
+}
+
+/// The literal strike of the run text typed at `index` joins: the text before the
+/// caret in its paragraph, else the text after it.
+fn strike_beside(diffs: &[Diff<YChange>], index: u32) -> Option<String> {
+    let mut offset = 0;
+    for diff in diffs {
         let length = out_len(&diff.insert);
-        if let Out::YMap(map) = diff.insert {
-            markers.push((offset, map));
+        if index <= offset + length {
+            if matches!(diff.insert, Out::Any(Any::String(_))) {
+                return diff
+                    .attributes
+                    .as_deref()
+                    .and_then(|attrs| any_string(attrs.get("strike")));
+            }
+            if index == offset {
+                return None;
+            }
         }
         offset += length;
     }
-    markers
+    None
 }
 
 fn source_paragraphs<T: ReadTxn>(map: &MapRef, txn: &T) -> Vec<ParagraphSource> {
@@ -1489,8 +1590,9 @@ fn paragraph_text_segments<T: ReadTxn>(
     txn: &T,
     start: u32,
     end: u32,
-) -> Vec<(u32, u32)> {
+) -> Vec<(usize, u32, u32)> {
     let mut segments = Vec::new();
+    let mut paragraph_index = 0;
     let mut paragraph_start = 0;
     let mut offset = 0;
     for diff in story.diff(txn, YChange::identity) {
@@ -1499,9 +1601,10 @@ fn paragraph_text_segments<T: ReadTxn>(
             let segment_start = start.max(paragraph_start);
             let segment_end = end.min(offset);
             if segment_start < segment_end {
-                segments.push((segment_start, segment_end));
+                segments.push((paragraph_index, segment_start, segment_end));
             }
             paragraph_start = offset + item_length;
+            paragraph_index += 1;
         }
         offset += item_length;
     }
@@ -1543,15 +1646,19 @@ pub(crate) fn insert_styled_text(
     index: u32,
     text: &str,
     style: &TextStyle,
+    inherit_strike: bool,
 ) {
     story.insert(txn, index, text);
     let length = text.encode_utf16().count() as u32;
     for (key, value) in style_values(style) {
+        if key == "strike" && inherit_strike && style.strike.is_none() {
+            continue;
+        }
         story.format(txn, index, length, Attrs::from([(Arc::from(key), value)]));
     }
 }
 
-fn style_values(style: &TextStyle) -> [(&'static str, Any); 10] {
+fn style_values(style: &TextStyle) -> [(&'static str, Any); 11] {
     [
         ("bold", style.bold.map(Any::Bool).unwrap_or(Any::Null)),
         ("italic", style.italic.map(Any::Bool).unwrap_or(Any::Null)),
@@ -1580,6 +1687,10 @@ fn style_values(style: &TextStyle) -> [(&'static str, Any); 10] {
                 .unwrap_or(Any::Null),
         ),
         (
+            "strike",
+            style.strike.as_deref().map(Any::from).unwrap_or(Any::Null),
+        ),
+        (
             "spacing",
             style.spacing_pt.map(Any::Number).unwrap_or(Any::Null),
         ),
@@ -1598,7 +1709,7 @@ fn style_values(style: &TextStyle) -> [(&'static str, Any); 10] {
     ]
 }
 
-fn patch_values(patch: &TextStylePatch) -> [(&'static str, Option<Any>); 8] {
+fn patch_values(patch: &TextStylePatch) -> [(&'static str, Option<Any>); 9] {
     [
         ("bold", patch.bold.map(Any::Bool)),
         ("italic", patch.italic.map(Any::Bool)),
@@ -1606,6 +1717,7 @@ fn patch_values(patch: &TextStylePatch) -> [(&'static str, Option<Any>); 8] {
         ("color", patch.color.as_deref().map(Any::from)),
         ("fontFamily", patch.font_family.as_deref().map(Any::from)),
         ("underline", patch.underline.as_deref().map(Any::from)),
+        ("strike", patch.strike.as_deref().map(Any::from)),
         ("spacing", patch.spacing_pt.map(Any::Number)),
         ("baseline", patch.baseline_pct.map(Any::Number)),
     ]
@@ -1619,6 +1731,7 @@ pub fn style_from_run_properties(properties: &RunProperties, theme: Option<&Them
         color: resolve_color_value_to_hex_with_theme(properties.color.as_ref(), theme),
         font_family: properties.font_family.clone(),
         underline: properties.underline.clone(),
+        strike: properties.strike.clone(),
         spacing_pt: properties.spacing_pt,
         baseline_pct: properties.baseline_pct,
         kern_pt: properties.kern_pt,
@@ -1634,6 +1747,7 @@ pub(crate) fn style_from_attrs(attrs: Option<&Attrs>) -> TextStyle {
         color: attrs.and_then(|attrs| any_string(attrs.get("color"))),
         font_family: attrs.and_then(|attrs| any_string(attrs.get("fontFamily"))),
         underline: attrs.and_then(|attrs| any_string(attrs.get("underline"))),
+        strike: attrs.and_then(|attrs| any_string(attrs.get("strike"))),
         spacing_pt: attrs.and_then(|attrs| any_number(attrs.get("spacing"))),
         baseline_pct: attrs.and_then(|attrs| any_number(attrs.get("baseline"))),
         kern_pt: attrs.and_then(|attrs| any_number(attrs.get("kern"))),

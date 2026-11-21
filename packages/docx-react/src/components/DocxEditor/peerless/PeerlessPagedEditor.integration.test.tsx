@@ -8,11 +8,14 @@ import {
   type DecodedFrameDelta, type DisplayPage, type FramePageOperation,
 } from '@betteroffice/docx/layout/render';
 import type { PeerlessEditSessionBinding, UsePeerlessEditSessionOptions } from '../hooks/usePeerlessEditSession';
+import { describeNode, sameNode } from '../__fixtures__/nodeIdentity';
 import * as composition from './composition';
 import * as display from '@betteroffice/docx/layout/render';
 import { installCompositionEventPolyfill } from './compositionEventPolyfill.testing';
 import { PeerlessPagedEditor, type PeerlessPagedEditorProps } from './PeerlessPagedEditor';
 import { glyphChar, installGlyphPaths, testEchoGlyphLine, testEchoGlyphSet } from './echoGlyphs.testing';
+import { fakeIdleScheduler } from '../__fixtures__/fakeIdleScheduler';
+import { buildUnbuiltMirrorSection } from './UnbuiltPageMirrors';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -150,6 +153,238 @@ async function mount(selection = false, accessible = false, table = false,
   };
 }
 
+async function warmupEditor({ primitiveCounts = [0, 0, 0], timers = false } = {}) {
+  const scheduler = fakeIdleScheduler();
+  restorers.push(() => scheduler.restore());
+  const loaded = spyOn(display, 'loadedRustDisplayListQueryEngine').mockReturnValue({} as display.RustDisplayListQueryEngine);
+  const hitTestRegions = mock((_pageIndex: number, _x: number, _y: number) => null);
+  const queries = spyOn(display, 'createDisplayListQueries').mockImplementation(() => ({
+    hitTestRegions, caretRect: () => null, dispose() {},
+  }) as unknown as display.DisplayListQueries);
+  restorers.push(() => loaded.mockRestore(), () => queries.mockRestore());
+  const displayPages: DisplayPage[] = primitiveCounts.map((count, pageIndex) => ({ pageIndex, width: 200, height: 40,
+    primitives: Array.from({ length: count }, () => ({ kind: 'rect' as const, x: 0, y: 0, w: 1, h: 1, fill: '#000' })),
+  }));
+  const editor = await mount(false, false, false, candidate => ({
+    identity, coversThroughSeq: candidate.coversThroughSeq, frameEpoch: candidate.revision, layoutRevision: 1,
+    documentVersion: 'v1',
+    pages: displayPages.map((displayPage, pageIndex) => ({ page: { pageId: String(pageIndex + 1), pageIndex },
+      bounds: { x: 0, y: pageIndex * 64, width: 200, height: 40 }, transform: [1, 0, 0, 1, 0, 0], displayPage })),
+    caret: null, selectionRects: [],
+  }));
+  if (timers) {
+    let id = 0;
+    const clock = spyOn(performance, 'now').mockImplementation(() => scheduler.now);
+    const timeout = spyOn(globalThis, 'setTimeout').mockImplementation(((run: () => void, delay = 0) => {
+      scheduler.timers.set(++id, { at: scheduler.now + delay, run });
+      return id;
+    }) as unknown as typeof setTimeout);
+    const clear = spyOn(globalThis, 'clearTimeout').mockImplementation((timer) => { scheduler.timers.delete(timer as unknown as number); });
+    restorers.push(() => clock.mockRestore(), () => timeout.mockRestore(), () => clear.mockRestore());
+  }
+  return { ...editor, scheduler, hitTestRegions, queries,
+    changeDocument(change: 'edit' | 'layout' = 'edit') {
+      const before = editor.binding.viewStore.getSnapshot().geometry!;
+      act(() => editor.binding.viewStore.installFrameGeometry({ ...before, frameEpoch: before.frameEpoch + 1,
+        ...(change === 'edit'
+          ? { documentVersion: `v${Number(before.documentVersion!.slice(1)) + 1}` }
+          : { layoutRevision: before.layoutRevision + 1 }),
+        pages: before.pages.map(entry => ({ ...entry, displayPage: { ...entry.displayPage! } })),
+      }));
+    },
+  };
+}
+
+test('hit-test warm-up yields when the idle budget ends and skips unchanged query objects', async () => {
+  const editor = await warmupEditor();
+  let clock = 0;
+  const now = spyOn(performance, 'now').mockImplementation(() => clock);
+  restorers.push(() => now.mockRestore());
+  const timeouts = () => [...editor.scheduler.idleWork.values()].map(({ timeout }) => timeout);
+  let remaining = 8;
+  editor.hitTestRegions.mockImplementation(() => { remaining = 0; return null; });
+  act(() => editor.scheduler.flushIdle({ didTimeout: false, timeRemaining: () => remaining }));
+  expect(editor.hitTestRegions).toHaveBeenCalledTimes(1);
+  expect(timeouts()).toEqual([1000]);
+  clock = 400;
+  act(() => editor.scheduler.flushIdle({ didTimeout: false, timeRemaining: () => 0 }));
+  expect(editor.hitTestRegions).toHaveBeenCalledTimes(1);
+  expect(timeouts()).toEqual([600]);
+  clock = 1000;
+  act(() => editor.scheduler.flushIdle({ didTimeout: false, timeRemaining: () => 0 }));
+  expect(editor.hitTestRegions).toHaveBeenCalledTimes(2);
+  editor.hitTestRegions.mockImplementation(() => null);
+  act(() => editor.scheduler.flushIdle());
+  expect(editor.hitTestRegions).toHaveBeenCalledTimes(3);
+  const store = editor.binding.viewStore;
+  let before = store.getSnapshot().geometry!;
+  act(() => {
+    store.installFrameGeometry({ ...before, frameEpoch: before.frameEpoch + 1,
+      pages: before.pages.map(entry => ({ ...entry, bounds: { ...entry.bounds, x: 10 } })) });
+  });
+  act(() => editor.scheduler.flushIdle());
+  expect(editor.hitTestRegions).toHaveBeenCalledTimes(3);
+  expect(editor.queries).toHaveBeenCalledTimes(1);
+  before = store.getSnapshot().geometry!;
+  act(() => {
+    store.installFrameGeometry({ ...before, frameEpoch: before.frameEpoch + 1,
+      pages: before.pages.map(entry => ({ ...entry, displayPage: { ...entry.displayPage! } })) });
+  });
+  for (let flush = 0; flush < 3; flush++) act(() => editor.scheduler.flushIdle());
+  expect(editor.hitTestRegions).toHaveBeenCalledTimes(6);
+  expect(editor.queries).toHaveBeenCalledTimes(2);
+});
+
+test('hit-test warm-up waits until 500 ms after the last keystroke', async () => {
+  const editor = await warmupEditor();
+  let now = 1000;
+  let id = 0;
+  const timers = new Map<number, { at: number; run: () => void }>();
+  const clock = spyOn(performance, 'now').mockImplementation(() => now);
+  const timeout = spyOn(globalThis, 'setTimeout').mockImplementation(((run: () => void, delay = 0) => {
+    timers.set(++id, { at: now + delay, run });
+    return id;
+  }) as unknown as typeof setTimeout);
+  const clear = spyOn(globalThis, 'clearTimeout').mockImplementation((timer) => { timers.delete(timer as unknown as number); });
+  restorers.push(() => clock.mockRestore(), () => timeout.mockRestore(), () => clear.mockRestore());
+  const advance = (ms: number) => act(() => {
+    now += ms;
+    for (const [timer, work] of [...timers]) if (work.at <= now && timers.delete(timer)) work.run();
+  });
+  act(() => fireEvent.keyDown(document, { key: 'a' }));
+  act(() => editor.scheduler.flushIdle());
+  expect(editor.hitTestRegions).not.toHaveBeenCalled();
+  advance(300);
+  act(() => fireEvent.keyDown(document, { key: 'b' }));
+  advance(499);
+  act(() => editor.scheduler.flushIdle());
+  expect(editor.hitTestRegions).not.toHaveBeenCalled();
+  advance(1);
+  act(() => editor.scheduler.flushIdle());
+  expect(editor.hitTestRegions).toHaveBeenCalledTimes(1);
+});
+
+for (const [focusTarget, change] of [['input', 'edit'], ['root', 'edit'], ['input', 'layout']] as const) {
+  test(`hit-test warm-up waits for 2 s after a document ${change} with the ${focusTarget} focused`, async () => {
+    const editor = await warmupEditor({ timers: true });
+    const { scheduler } = editor;
+    const root = editor.container.querySelector<HTMLElement>('[data-docx-worker-editor]')!;
+    root.tabIndex = 0;
+    await act(async () => { (focusTarget === 'input' ? editor.textarea : root).focus(); });
+    editor.changeDocument(change);
+    act(() => scheduler.flushIdle());
+    expect(editor.hitTestRegions).not.toHaveBeenCalled();
+    expect([...scheduler.timers.values()].map(({ at }) => at)).toEqual([2000]);
+    for (const at of [1001, 1999]) {
+      scheduler.now = at;
+      act(() => {
+        scheduler.flushDueTimers();
+        scheduler.flushIdle({ didTimeout: true, timeRemaining: () => 40 });
+      });
+      expect(editor.hitTestRegions).not.toHaveBeenCalled();
+      expect([...scheduler.timers.values()].map(({ at }) => at)).toEqual([2000]);
+    }
+    scheduler.now = 2000;
+    act(() => scheduler.flushDueTimers());
+    expect(scheduler.timers.size).toBe(0);
+    expect([...scheduler.idleWork.values()].map(({ timeout }) => timeout)).toEqual([1000]);
+    act(() => scheduler.flushIdle({ didTimeout: false, timeRemaining: () => 0 }));
+    expect(editor.hitTestRegions).not.toHaveBeenCalled();
+    for (let flush = 0; flush < 3; flush++) act(() => scheduler.flushIdle());
+    expect(editor.hitTestRegions).toHaveBeenCalledTimes(3);
+    expect(scheduler.idleWork.size).toBe(0);
+  });
+}
+
+test('hit-test warm-up resumes on blur and does not guard blurred document changes', async () => {
+  const editor = await warmupEditor({ timers: true });
+  const { scheduler } = editor;
+  await act(async () => { editor.textarea.focus(); });
+  editor.changeDocument();
+  expect([...scheduler.timers.values()].map(({ at }) => at)).toEqual([2000]);
+  scheduler.now = 250;
+  await act(async () => { editor.textarea.blur(); });
+  expect(scheduler.timers.size).toBe(0);
+  act(() => scheduler.flushIdle({ didTimeout: false, timeRemaining: () => 5 }));
+  expect(editor.hitTestRegions).toHaveBeenCalledTimes(1);
+  editor.changeDocument();
+  expect(scheduler.timers.size).toBe(0);
+  for (let flush = 0; flush < 3; flush++) act(() => scheduler.flushIdle());
+  expect(editor.hitTestRegions).toHaveBeenCalledTimes(4);
+});
+
+test('hit-test warm-up restarts the document quiet window and cancels its timer on scroll and cleanup', async () => {
+  const editor = await warmupEditor({ timers: true });
+  const { scheduler } = editor;
+  await act(async () => { editor.textarea.focus(); });
+  editor.changeDocument();
+  scheduler.now = 1000;
+  editor.changeDocument();
+  expect([...scheduler.timers.values()].map(({ at }) => at)).toEqual([3000]);
+  act(() => fireEvent.scroll(window));
+  expect([...scheduler.timers.values()].map(({ at }) => at)).toEqual([1150]);
+  scheduler.now = 1150;
+  act(() => scheduler.flushDueTimers());
+  expect([...scheduler.timers.values()].map(({ at }) => at)).toEqual([3000]);
+  editor.unmount();
+  expect(scheduler.timers.size).toBe(0);
+  expect(scheduler.idleWork.size).toBe(0);
+  scheduler.now = 3000;
+  act(() => { scheduler.flushDueTimers(); scheduler.flushIdle(); });
+  expect(editor.hitTestRegions).not.toHaveBeenCalled();
+});
+
+test('hit-test warm-up waits for a larger idle slice before a large page unless overdue', async () => {
+  const editor = await warmupEditor({ primitiveCounts: [2001, 2000, 2001], timers: true });
+  const { scheduler } = editor;
+  editor.changeDocument();
+  act(() => scheduler.flushIdle({ didTimeout: false, timeRemaining: () => 5 }));
+  expect(editor.hitTestRegions).not.toHaveBeenCalled();
+  expect(editor.queries).not.toHaveBeenCalled();
+  act(() => scheduler.flushIdle({ didTimeout: false, timeRemaining: () => 15 }));
+  expect(editor.hitTestRegions.mock.calls.map(([pageIndex]) => pageIndex)).toEqual([0]);
+  act(() => scheduler.flushIdle({ didTimeout: false, timeRemaining: () => 5 }));
+  expect(editor.hitTestRegions.mock.calls.map(([pageIndex]) => pageIndex)).toEqual([0, 1]);
+  act(() => scheduler.flushIdle({ didTimeout: false, timeRemaining: () => 5 }));
+  expect(editor.hitTestRegions).toHaveBeenCalledTimes(2);
+  scheduler.now = 1000;
+  act(() => scheduler.flushIdle({ didTimeout: false, timeRemaining: () => 0 }));
+  expect(editor.hitTestRegions.mock.calls.map(([pageIndex]) => pageIndex)).toEqual([0, 1, 2]);
+  expect(scheduler.idleWork.size).toBe(0);
+});
+
+test('hit-test warm-up pauses until 150 ms after the last scroll', async () => {
+  const editor = await warmupEditor();
+  let now = 0;
+  let id = 0;
+  const timers = new Map<number, { at: number; run: () => void }>();
+  const timeout = spyOn(globalThis, 'setTimeout').mockImplementation(((run: () => void, delay = 0) => {
+    timers.set(++id, { at: now + delay, run });
+    return id;
+  }) as unknown as typeof setTimeout);
+  const clear = spyOn(globalThis, 'clearTimeout').mockImplementation((timer) => { timers.delete(timer as unknown as number); });
+  restorers.push(() => timeout.mockRestore(), () => clear.mockRestore());
+  const advance = (ms: number) => act(() => {
+    now += ms;
+    for (const [timer, work] of [...timers]) if (work.at <= now && timers.delete(timer)) work.run();
+  });
+  act(() => fireEvent.scroll(window));
+  act(() => editor.scheduler.flushIdle());
+  expect(editor.hitTestRegions).not.toHaveBeenCalled();
+  advance(149);
+  act(() => fireEvent.scroll(window));
+  advance(149);
+  act(() => editor.scheduler.flushIdle());
+  expect(editor.hitTestRegions).not.toHaveBeenCalled();
+  advance(1);
+  for (let flush = 0; flush < 3; flush++) act(() => editor.scheduler.flushIdle());
+  expect(editor.hitTestRegions).toHaveBeenCalledTimes(3);
+  editor.unmount();
+  advance(150);
+  act(() => editor.scheduler.flushIdle());
+  expect(editor.hitTestRegions).toHaveBeenCalledTimes(3);
+});
+
 test('peerless accessibility exposes retained offscreen pages without allocating their canvases', async () => {
   const editor = await mount(false, true);
   await waitFor(() => expect(editor.getByText('Readable page 13')).toBeTruthy());
@@ -193,6 +428,11 @@ function preedit(textarea: HTMLTextAreaElement, type: 'compositionstart' | 'comp
   const event = type === 'compositionstart' ? fireEvent.compositionStart
     : type === 'compositionupdate' ? fireEvent.compositionUpdate : fireEvent.compositionEnd;
   event(textarea, { data });
+}
+
+function overlays(container: HTMLElement) {
+  return [...container.querySelectorAll<HTMLElement>('[aria-hidden="true"]')]
+    .map((element) => `${element.dataset.testid ?? element.tagName}:${element.textContent}`);
 }
 
 function beforeinput(textarea: HTMLTextAreaElement, inputType: string, data: string) {
@@ -243,6 +483,52 @@ test('refused_ime_retains_recoverable_draft', async () => {
   expect(editor.textarea.value).toBe('');
 });
 
+test('active_composition_paints_its_preedit_at_the_caret_until_it_commits', async () => {
+  const editor = await mount();
+  const shown = () => editor.queryByTestId('docx-preedit');
+  preedit(editor.textarea, 'compositionstart');
+  expect(shown()).toBeNull();
+  preedit(editor.textarea, 'compositionupdate', 'ㅎ');
+  expect(shown()?.textContent).toBe('ㅎ');
+  preedit(editor.textarea, 'compositionupdate', '한');
+  expect(shown()?.textContent).toBe('한');
+  expect([shown()!.style.left, shown()!.style.top, shown()!.style.lineHeight]).toEqual(['10px', '0px', '20px']);
+  expect(editor.commands).toEqual([]);
+  preedit(editor.textarea, 'compositionend', '한');
+  expect(shown()).toBeNull();
+  await waitFor(() => { expect(editor.commands).toHaveLength(1); });
+  expect(editor.commands[0]!.payload).toMatchObject({ text: '한' });
+});
+
+for (const backward of [false, true]) {
+  test(`range_composition_paints_its_preedit_at_the_selection_start_${backward ? 'backward' : 'forward'}`, async () => {
+    const editor = await mount(true, false, false, candidate => ({
+      identity, coversThroughSeq: candidate.coversThroughSeq, frameEpoch: candidate.revision,
+      layoutRevision: candidate.payload.layoutRevision,
+      pages: [{ page, bounds: { x: 0, y: 0, width: 200, height: 40 }, transform: [1, 0, 0, 1, 0, 0] }],
+      caret: null, selectionFocus: { x: backward ? 10 : 30, y: 0, width: 1, height: 20 },
+      selectionRects: [{ x: 10, y: 0, width: 20, height: 20 }],
+    }));
+    const start = { story: 'body', paraId: 'worker', offset: 1 };
+    const end = { story: 'body', paraId: 'worker', offset: 3 };
+    const selection = backward ? { anchor: end, focus: start } : { anchor: start, focus: end };
+    fireEvent.keyDown(editor.textarea, { key: backward ? 'ArrowLeft' : 'ArrowRight', code: backward ? 'ArrowLeft' : 'ArrowRight', shiftKey: true });
+    await editor.acknowledge(0, 'applied', { selection });
+    editor.present(frame(2, editor.commands[0]!.seq));
+    expect(editor.binding.viewStore.getSnapshot().workerSelection).toEqual(selection);
+    const shown = () => editor.queryByTestId('docx-preedit');
+    preedit(editor.textarea, 'compositionstart');
+    preedit(editor.textarea, 'compositionupdate', 'あ');
+    expect(shown()?.textContent).toBe('あ');
+    expect([shown()!.style.left, shown()!.style.top, shown()!.style.lineHeight]).toEqual(['10px', '0px', '20px']);
+    preedit(editor.textarea, 'compositionend', 'あ');
+    expect(shown()).toBeNull();
+    await waitFor(() => { expect(editor.commands).toHaveLength(2); });
+    expect(editor.commands[1]!.kind).toBe('replaceSelection');
+    expect(editor.commands[1]!.payload).toEqual({ text: 'あ', selection });
+  });
+}
+
 test('synthetic_composition_payload_commits_and_recovers_through_paged_editor', async () => {
   const editor = await mount();
   fireEvent.compositionStart(editor.textarea);
@@ -265,7 +551,7 @@ test('synthetic_composition_payload_commits_and_recovers_through_paged_editor', 
   expect(editor.commands[1]!.kind).toBe('insertText');
 });
 
-test('delayed_composition_refusal_retains_draft_without_exposing_active_preedit_overlays', async () => {
+test('delayed_composition_refusal_retains_draft_and_paints_the_preedit_once_its_predecessor_is_presented', async () => {
   const editor = await mount(true);
   preedit(editor.textarea, 'compositionstart');
   preedit(editor.textarea, 'compositionupdate', '先');
@@ -275,7 +561,7 @@ test('delayed_composition_refusal_retains_draft_without_exposing_active_preedit_
   preedit(editor.textarea, 'compositionupdate', '未確定');
   fireEvent.input(editor.textarea, { inputType: 'insertCompositionText', isComposing: true,
     target: { value: '未確定' } });
-  expect(editor.container.querySelectorAll('[aria-hidden="true"]')).toHaveLength(0);
+  expect(overlays(editor.container)).toEqual([]);
   await editor.acknowledge(0, 'refused');
   expect((editor.getByRole('textbox', { name: 'Recoverable document text' }) as HTMLTextAreaElement).value).toBe('先');
   editor.present(frame(2, editor.commands[0]!.seq));
@@ -283,7 +569,44 @@ test('delayed_composition_refusal_retains_draft_without_exposing_active_preedit_
   expect(editor.binding.admission.getSnapshot().compositionSlot).not.toBeNull();
   expect(editor.textarea.value).toBe('未確定');
   expect(editor.commands).toHaveLength(1);
-  expect(editor.container.querySelectorAll('[aria-hidden="true"]')).toHaveLength(0);
+  expect(overlays(editor.container)).toEqual(['docx-preedit:未確定']);
+});
+
+test('composition_after_an_unpresented_commit_waits_for_its_frame', async () => {
+  const editor = await mount(false, false, false, undefined, (revision) => revision === 1 ? 10 : 30);
+  const shown = () => editor.queryByTestId('docx-preedit');
+  preedit(editor.textarea, 'compositionstart');
+  preedit(editor.textarea, 'compositionupdate', '先');
+  preedit(editor.textarea, 'compositionend', '先');
+  await waitFor(() => { expect(editor.commands).toHaveLength(1); });
+  preedit(editor.textarea, 'compositionstart');
+  preedit(editor.textarea, 'compositionupdate', '未');
+  expect(shown()).toBeNull();
+  await editor.acknowledge(0, 'applied');
+  expect(shown()).toBeNull();
+  editor.present(frame(2, editor.commands[0]!.seq));
+  expect(shown()?.textContent).toBe('未');
+  expect(shown()!.style.left).toBe('30px');
+});
+
+test('composition_after_typing_held_behind_an_inflight_insert_waits_for_its_frame', async () => {
+  const editor = await mount(false, false, false, undefined, (revision) => revision === 1 ? 10 : 30);
+  const shown = () => editor.queryByTestId('docx-preedit');
+  beforeinput(editor.textarea, 'insertText', 'x');
+  await waitFor(() => { expect(editor.commands).toHaveLength(1); });
+  beforeinput(editor.textarea, 'insertText', 'y');
+  preedit(editor.textarea, 'compositionstart');
+  preedit(editor.textarea, 'compositionupdate', '未');
+  expect(editor.commands).toHaveLength(1);
+  expect(shown()).toBeNull();
+  await editor.acknowledge(0, 'applied');
+  await waitFor(() => { expect(editor.commands).toHaveLength(2); });
+  expect(editor.commands[1]!.payload).toEqual({ text: 'y' });
+  expect(shown()).toBeNull();
+  await editor.acknowledge(1, 'applied');
+  editor.present(frame(2, editor.commands[1]!.seq));
+  expect(shown()?.textContent).toBe('未');
+  expect(shown()!.style.left).toBe('30px');
 });
 
 test('recoverable_drafts_remain_until_individually_dismissed', async () => {
@@ -368,7 +691,7 @@ test('worker_frame_installs_through_frame_presentation_and_retires_echo', async 
   expect(editor.container.querySelector('[data-page-id="1"] canvas')).toBe(editor.canvas);
   expect(editor.textarea.value).toBe('未確定');
   expect(editor.commands).toHaveLength(1);
-  expect(editor.container.querySelectorAll('[aria-hidden="true"]')).toHaveLength(0);
+  expect(overlays(editor.container)).toEqual(['docx-preedit:未確定']);
 });
 
 test('worker caret blinks on the hybrid interval only while the input is focused', async () => {
@@ -599,6 +922,22 @@ test('Escape typed in the editor on a selected picture puts the caret after it, 
   fireEvent.keyDown(editor.textarea, { key: 'Escape' });
   await waitFor(() => expect(editor.commands.map(({ kind }) => kind)).toEqual(['navigate']));
   expect(editor.commands[0]!.payload).toEqual({ unit: 'character', direction: 'forward', extend: false });
+});
+
+test('Escape typed in the editor before a picture press is selected still leaves the picture', async () => {
+  const editor = await pictureEditor();
+  fireEvent.pointerDown(editor.host, editor.point);
+  fireEvent.pointerUp(editor.host, editor.point);
+  fireEvent.keyDown(editor.textarea, { key: 'Escape' });
+  await waitFor(() => expect(editor.commands[0]?.kind).toBe('selectPoint'));
+  const fenced = editor.commands.length < 2;
+  if (fenced) await editor.acknowledge(0, 'noop');
+  await waitFor(() => expect(editor.commands.slice(0, 2).map(({ kind }) => kind)).toEqual(['selectPoint', 'select']));
+  expect(editor.overlay()).toBeNull();
+  if (!fenced) await editor.acknowledge(0, 'noop');
+  await editor.acknowledge(1, 'noop');
+  await waitFor(() => expect(editor.commands.map(({ kind }) => kind)).toEqual(['selectPoint', 'select', 'navigate']));
+  expect(editor.commands[2]!.payload).toEqual({ unit: 'character', direction: 'forward', extend: false });
 });
 
 for (const end of ['drop', 'escape', 'cancel', 'lost-capture'] as const) {
@@ -1302,3 +1641,277 @@ for (const end of ['unmount', 'source change'] as const) {
     await waitFor(() => expect(dragging.mock.calls).toEqual([[true], [false]]));
   });
 }
+
+const settleSends = () => act(async () => { await new Promise<void>((resolve) => setTimeout(resolve, 10)); });
+
+for (const clicks of [2, 3]) {
+  test(`a drag after a ${clicks === 2 ? 'double' : 'triple'} click extends the snapped selection instead of selecting again`, async () => {
+    const editor = await dragEditor();
+    for (let press = 0; press < clicks; press += 1) {
+      fireEvent.pointerDown(editor.host, editor.point);
+      if (press < clicks - 1) fireEvent.pointerUp(editor.host, { ...editor.point, buttons: 0 });
+      await editor.acknowledge(press, 'noop');
+    }
+    fireEvent.pointerMove(editor.host, { ...editor.point, clientX: 180 });
+    await waitFor(() => expect(editor.commands.at(-1)).toMatchObject({ kind: 'extendSelection', payload: { x: 60 } }));
+    fireEvent.pointerUp(editor.host, { ...editor.point, clientX: 180, buttons: 0 });
+    await settleSends();
+    expect(editor.commands.map(({ kind, payload }) => [kind, (payload as { clickCount: number }).clickCount]))
+      .toEqual([...Array.from({ length: clicks }, (_, press) => ['selectPoint', press + 1]), ['extendSelection', 1]]);
+  });
+}
+
+test('a Shift press on text and its drag extend from the worker anchor with the latest point', async () => {
+  const editor = await dragEditor();
+  fireEvent.pointerDown(editor.host, { ...editor.point, shiftKey: true });
+  await editor.acknowledge(0, 'noop');
+  expect(editor.commands[0]).toMatchObject({ kind: 'selectPoint', payload: { x: 20, clickCount: 1, modifiers: { shift: true } } });
+  fireEvent.pointerMove(editor.host, { ...editor.point, shiftKey: true, clientX: 140 });
+  fireEvent.pointerMove(editor.host, { ...editor.point, shiftKey: true, clientX: 180 });
+  fireEvent.pointerUp(editor.host, { ...editor.point, clientX: 180, buttons: 0 });
+  for (let index = 1; ; index += 1) {
+    await settleSends();
+    if (index >= editor.commands.length) break;
+    await editor.acknowledge(index, 'noop');
+  }
+  expect(editor.commands.length).toBeGreaterThan(1);
+  expect(editor.commands.slice(1).map(({ kind }) => kind)).toEqual(editor.commands.slice(1).map(() => 'extendSelection'));
+  expect(editor.commands.at(-1)!.payload).toMatchObject({ x: 60 });
+});
+
+const waitForMirror = (assertion: () => void) => waitFor(assertion);
+
+async function unbuiltMirrorEditor(mode?: 'text' | 'off', builtParagraphs = ['Unbuilt title 16', 'Unbuilt paragraph 16']) {
+  const scheduler = fakeIdleScheduler();
+  restorers.push(() => scheduler.restore());
+  const navigate = mock((_number: number) => {});
+  const reads: number[][] = [];
+  const displayPages: DisplayPage[] = Array.from({ length: 20 }, (_, pageIndex) => ({
+    pageIndex, width: 200, height: 40, unbuilt: true, primitives: [],
+  }));
+  const built: DisplayPage = { pageIndex: 15, width: 200, height: 40, primitives: builtParagraphs.map((text, index) => ({
+    kind: 'text', blockId: index + 1, text, x: 0, baselineY: 14 + index * 16, width: 180, font: '12px Arial', color: '#000',
+  })) };
+  const editor = await mount(false, false, false, candidate => ({
+    identity, coversThroughSeq: candidate.coversThroughSeq, frameEpoch: candidate.revision, layoutRevision: candidate.revision,
+    pages: displayPages.map((displayPage, pageIndex) => ({ page: { pageId: String(pageIndex + 1), pageIndex },
+      bounds: { x: 0, y: pageIndex * 1200, width: 200, height: 40 }, transform: [1, 0, 0, 1, 0, 0],
+      displayPage: candidate.revision > 1 && pageIndex === 15 ? built : displayPage })),
+    caret: null, selectionRects: [],
+  }), () => 10, { unbuiltPageMirror: mode, scrollToPage: navigate,
+    readPageTexts: async (pages, stamp) => {
+      reads.push(pages);
+      return { ...stamp, pages: pages.map((pageIndex) => ({ pageIndex, paragraphs: [
+        { text: `Unbuilt title ${pageIndex + 1}`, level: 0 },
+        { text: `Deep outline ${pageIndex + 1}`, level: 8 },
+        { text: `Unbuilt paragraph ${pageIndex + 1}`, inTable: true as const },
+        { text: '  ' },
+      ] })) };
+    } });
+  const fill = async () => {
+    for (let slice = 0; slice < 12; slice += 1) await act(async () => { scheduler.flushIdle(); });
+  };
+  await fill();
+  return { ...editor, scheduler, navigate, reads, fill };
+}
+
+test('unbuilt pages default to labelled regions of focusable plain paragraphs with automatic direction', async () => {
+  const editor = await unbuiltMirrorEditor();
+  const section = editor.getByRole('region', { name: 'Page 16' });
+  expect(section.getAttribute('data-docx-unbuilt-page')).toBe('15');
+  expect(section.tagName).toBe('SECTION');
+  expect(section.style.top).toBe('18000px');
+  expect(section.style.width).toBe('200px');
+  expect(section.style.opacity).toBe('0');
+  expect(section.style.pointerEvents).toBe('none');
+  expect(Array.from(section.children).map((block) => block.tagName)).toEqual(['P', 'P', 'P']);
+  expect(Array.from(section.children).every((block) => block.getAttribute('dir') === 'auto' &&
+    block.getAttribute('tabindex') === '-1' && !block.hasAttribute('lang'))).toBe(true);
+  expect(describeNode(section.querySelector('h1, h2, h3, h4, h5, h6, [role="heading"]'))).toBe('null');
+  expect(section.firstElementChild?.textContent).toBe('Unbuilt title 16');
+  editor.present(frame(2, 0));
+  await editor.fill();
+  await waitForMirror(() => expect(editor.container.querySelector('[data-docx-unbuilt-page="15"]')).toBeNull());
+  await waitForMirror(() => expect(editor.container.querySelector('[data-page-index="15"] .canvas-page-mirror')?.textContent).toContain('Unbuilt title 16'));
+});
+
+test('focusing an unbuilt paragraph navigates and hands focus to its matching built paragraph', async () => {
+  const editor = await unbuiltMirrorEditor('text');
+  const paragraph = editor.getByText('Unbuilt paragraph 16');
+  act(() => paragraph.focus());
+  expect(editor.navigate).toHaveBeenCalledWith(16);
+  expect(sameNode(document.activeElement, paragraph)).toBe('same');
+  editor.present(frame(2, 0));
+  await editor.fill();
+  await waitForMirror(() => {
+    const active = document.activeElement;
+    expect(active?.closest('[data-page-index="15"] .canvas-page-mirror')).not.toBeNull();
+    expect(active?.getAttribute('role')).toBe('paragraph');
+    expect(active?.textContent).toBe('Unbuilt paragraph 16');
+  });
+  expect(describeNode(editor.container.querySelector('[data-docx-unbuilt-page="15"]'))).toBe('null');
+  const block = document.activeElement!;
+  expect(block.getAttribute('tabindex')).toBe('-1');
+  expect(block.hasAttribute('aria-level')).toBe(false);
+  act(() => editor.textarea.focus());
+  expect(block.hasAttribute('tabindex')).toBe(false);
+  expect(block.getAttribute('role')).toBe('paragraph');
+  expect(editor.container.querySelector('[data-docx-pages-host]')?.hasAttribute('tabindex')).toBe(false);
+  expect(editor.container.querySelector('[data-page-index="15"] .canvas-page-mirror')?.hasAttribute('tabindex')).toBe(false);
+});
+
+test('a selection inside one unbuilt section navigates once and moves the selection, not focus, to the built paragraph', async () => {
+  const editor = await unbuiltMirrorEditor('text');
+  act(() => editor.textarea.focus());
+  const selection = document.getSelection()!;
+  const select = (text: string) => {
+    const range = document.createRange();
+    range.selectNodeContents(editor.getByText(text));
+    act(() => {
+      selection.removeAllRanges();
+      selection.addRange(range);
+      fireEvent(document, new Event('selectionchange'));
+    });
+  };
+  try {
+    select('Unbuilt title 16');
+    select('Unbuilt paragraph 16');
+    act(() => fireEvent(document, new Event('selectionchange')));
+    expect(editor.navigate.mock.calls).toEqual([]);
+    await waitForMirror(() => expect(editor.navigate.mock.calls).toEqual([[16]]));
+    expect(sameNode(document.activeElement, editor.textarea)).toBe('same');
+    editor.present(frame(2, 0));
+    await editor.fill();
+    await waitForMirror(() => {
+      const anchor = selection.anchorNode;
+      const block = (anchor instanceof Element ? anchor : anchor?.parentElement)?.closest<HTMLElement>('[role="paragraph"]');
+      expect(block?.closest('[data-page-index="15"] .canvas-page-mirror')).not.toBeNull();
+      expect(block?.textContent).toBe('Unbuilt paragraph 16');
+    });
+    expect(sameNode(document.activeElement, editor.textarea)).toBe('same');
+    expect(describeNode(editor.container.querySelector('[data-docx-unbuilt-page="15"]'))).toBe('null');
+  } finally {
+    selection.removeAllRanges();
+  }
+});
+
+test('a selection spanning beyond one unbuilt section, or select-all, never navigates', async () => {
+  const editor = await unbuiltMirrorEditor('text');
+  act(() => editor.textarea.focus());
+  const selection = document.getSelection()!;
+  try {
+    const range = document.createRange();
+    range.setStart(editor.getByText('Unbuilt paragraph 16').firstChild!, 0);
+    range.setEndAfter(editor.container.lastChild!);
+    act(() => {
+      selection.removeAllRanges();
+      selection.addRange(range);
+      fireEvent(document, new Event('selectionchange'));
+    });
+    act(() => {
+      selection.removeAllRanges();
+      selection.selectAllChildren(document.body);
+      fireEvent(document, new Event('selectionchange'));
+    });
+    await new Promise((resolve) => globalThis.setTimeout(resolve, 120));
+    expect(editor.navigate.mock.calls).toEqual([]);
+    expect(sameNode(document.activeElement, editor.textarea)).toBe('same');
+  } finally {
+    selection.removeAllRanges();
+  }
+});
+
+test('paragraph handover survives focus loss before the unbuilt section is removed', async () => {
+  const editor = await unbuiltMirrorEditor('text');
+  const paragraph = editor.getByText('Unbuilt paragraph 16');
+  act(() => { paragraph.focus(); paragraph.blur(); });
+  editor.present(frame(2, 0));
+  await editor.fill();
+  await waitForMirror(() => {
+    const active = document.activeElement;
+    expect(active?.closest('[data-page-index="15"] .canvas-page-mirror')).not.toBeNull();
+    expect(active?.textContent).toBe('Unbuilt paragraph 16');
+  });
+});
+
+test('a pending paragraph handover preserves focus moved back to the input', async () => {
+  const editor = await unbuiltMirrorEditor('text');
+  act(() => editor.getByText('Unbuilt paragraph 16').focus());
+  editor.present(frame(2, 0));
+  act(() => editor.textarea.focus());
+  await editor.fill();
+  await waitForMirror(() => expect(editor.container.querySelector('[data-page-index="15"] .canvas-page-mirror')?.textContent).toContain('Unbuilt paragraph 16'));
+  expect(sameNode(document.activeElement, editor.textarea)).toBe('same');
+});
+
+test('paragraph handover prefers a text match at or after its non-blank ordinal', async () => {
+  const editor = await unbuiltMirrorEditor('text', ['Unbuilt paragraph 16', 'Different paragraph', 'Unbuilt paragraph 16']);
+  act(() => editor.getByText('Unbuilt paragraph 16').focus());
+  editor.present(frame(2, 0));
+  await editor.fill();
+  await waitForMirror(() => {
+    const blocks = editor.container.querySelectorAll('[data-page-index="15"] .canvas-page-mirror [role="paragraph"]');
+    expect(blocks.length).toBe(3);
+    expect(sameNode(document.activeElement, blocks[2]!)).toBe('same');
+  });
+});
+
+test('paragraph handover falls back to the first built paragraph when nothing matches and its place is past the end', async () => {
+  const editor = await unbuiltMirrorEditor('text', ['Different paragraph']);
+  act(() => editor.getByText('Unbuilt paragraph 16').focus());
+  editor.present(frame(2, 0));
+  await editor.fill();
+  await waitForMirror(() => {
+    const blocks = editor.container.querySelectorAll('[data-page-index="15"] .canvas-page-mirror [role="paragraph"]');
+    expect(blocks.length).toBe(1);
+    expect(sameNode(document.activeElement, blocks[0]!)).toBe('same');
+  });
+  const block = document.activeElement!;
+  expect(block.getAttribute('tabindex')).toBe('-1');
+  act(() => editor.textarea.focus());
+  expect(block.hasAttribute('tabindex')).toBe(false);
+});
+
+test('activating an unbuilt paragraph navigates to its page', async () => {
+  const editor = await unbuiltMirrorEditor('text');
+  fireEvent.click(editor.getByText('Unbuilt paragraph 16'));
+  expect(editor.navigate).toHaveBeenCalledWith(16);
+});
+
+test('off preserves the page DOM without any unbuilt sections, edge sections or reads', async () => {
+  const editor = await unbuiltMirrorEditor('off');
+  expect(describeNode(editor.container.querySelector('[data-docx-unbuilt-page]'))).toBe('null');
+  expect(describeNode(editor.container.querySelector('[data-docx-unbuilt-range]'))).toBe('null');
+  expect(editor.container.textContent).not.toContain('Unbuilt title 16');
+  expect(editor.reads).toEqual([]);
+});
+
+test('unbuilt section cost counts accessibility nodes per paragraph and text line and ignores blank paragraphs', () => {
+  const result = buildUnbuiltMirrorSection({ pageIndex: 0, paragraphs: [
+    { text: 'Title', level: 0 }, { text: 'Body', level: 8 }, { text: 'Cell', inTable: true }, { text: '  ' }, { text: 'x'.repeat(241) },
+  ] }, (key) => key);
+  expect(result.nodes).toBe(1 + 3 * 3 + (2 + 3));
+  expect(result.value.querySelectorAll('p')).toHaveLength(4);
+  expect(Array.from(result.value.children).every((block) => block.getAttribute('tabindex') === '-1')).toBe(true);
+  expect(describeNode(result.value.querySelector('h1, h2, h3, h4, h5, h6, [role="heading"]'))).toBe('null');
+});
+
+test('turning the mirror off removes its sections and temporary focusability without changing built roles', async () => {
+  const editor = await unbuiltMirrorEditor('text');
+  act(() => editor.getByText('Unbuilt title 16').focus());
+  editor.present(frame(2, 0));
+  await editor.fill();
+  await waitForMirror(() => {
+    expect(document.activeElement?.closest('[data-page-index="15"] .canvas-page-mirror')).not.toBeNull();
+    expect(document.activeElement?.textContent).toBe('Unbuilt title 16');
+  });
+  const block = document.activeElement!;
+  expect(block.getAttribute('role')).toBe('paragraph');
+  expect(block.getAttribute('tabindex')).toBe('-1');
+  editor.rerender(<PeerlessPagedEditor sessionOptions={editor.sessionOptions} unbuiltPageMirror="off" />);
+  expect(describeNode(editor.container.querySelector('[data-docx-unbuilt-page]'))).toBe('null');
+  expect(describeNode(editor.container.querySelector('[data-docx-unbuilt-range]'))).toBe('null');
+  expect(block.getAttribute('role')).toBe('paragraph');
+  expect(block.hasAttribute('aria-level')).toBe(false);
+  expect(block.hasAttribute('tabindex')).toBe(false);
+});

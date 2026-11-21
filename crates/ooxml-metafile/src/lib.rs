@@ -17,6 +17,8 @@ mod read;
 mod shapes;
 #[cfg(feature = "svg")]
 mod svg;
+#[cfg(feature = "svg")]
+mod svg_session;
 mod text;
 mod transform;
 mod wmf;
@@ -29,8 +31,11 @@ pub use drawing::{Drawing, Omission, Refusal};
 pub use shapes::{MetafileDrawing, MetafileOp, MetafileStroke, decode};
 #[cfg(feature = "svg")]
 pub use svg::{
-    MAX_SVG_BYTES, Svg, placeholder_svg, to_svg, to_svg_with_budget, to_svg_with_limits,
+    MAX_SVG_BYTES, Svg, is_placeholder_svg, placeholder_svg, to_svg, to_svg_with_budget,
+    to_svg_with_limits,
 };
+#[cfg(feature = "svg")]
+pub use svg_session::SvgSession;
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -88,7 +93,9 @@ pub fn replay(bytes: &[u8]) -> Result<Drawing, Refusal> {
 /// Replays with cumulative allowances, spending them even on refusal.
 pub fn replay_with_budget(bytes: &[u8], budget: &mut ReplayBudget) -> Result<Drawing, Refusal> {
     with_budget(budget, |shared| {
-        play_nested(bytes, 0, shared).map_err(Refusal)
+        play_nested(bytes, 0, shared)
+            .map(|(drawing, _)| drawing)
+            .map_err(Refusal)
     })
 }
 
@@ -121,7 +128,7 @@ pub(crate) fn play_nested(
     bytes: &[u8],
     depth: usize,
     budget: Rc<SharedBudget>,
-) -> Result<Drawing, String> {
+) -> Result<(Drawing, player::Xform), String> {
     let player = if emf::is_emf(bytes) {
         play_full_emf(bytes, depth, budget)
     } else if wmf::is_wmf(bytes) {
@@ -129,7 +136,12 @@ pub(crate) fn play_nested(
     } else {
         Err("the bytes are not an EMF or WMF metafile".to_owned())
     }?;
-    Ok(Drawing {
+    let device_to_output = if emf::is_emf(bytes) {
+        player.device_to_output()
+    } else {
+        player::IDENTITY
+    };
+    let drawing = Drawing {
         width: player.unit.0,
         height: player.unit.1,
         omissions: player
@@ -141,20 +153,29 @@ pub(crate) fn play_nested(
             })
             .collect(),
         ops: player.ops,
-    })
+    };
+    Ok((drawing, device_to_output))
 }
 
 /// An EMF with EMF+ records plays them, as Office does, when they draw
 /// without omissions; otherwise, and for plain EMF, its GDI records play.
-/// A GDI rendition that fails falls back to EMF+ only when that draws.
+/// A GDI rendition that fails falls back to EMF+ only when that draws. A dual
+/// picture whose GDI records draw nothing plays them: GDI+ writes that side as
+/// a destination-only BitBlt where it has no GDI equivalent (an embedded EMF+
+/// only metafile), and Office shows nothing for such a picture. A metafile
+/// nested in EMF+ records is played by GDI+, so it plays its EMF+ records.
 fn play_full_emf(
     bytes: &[u8],
     depth: usize,
     budget: Rc<SharedBudget>,
 ) -> Result<Player<true>, String> {
-    if !has_plus_header(bytes, &budget) {
+    let Some(dual) = plus_header(bytes, &budget) else {
+        return play_emf::<true>(bytes, depth, false, Some(budget));
+    };
+    if depth == 0 && dual && gdi_draws_nothing(bytes, &budget) {
         return play_emf::<true>(bytes, depth, false, Some(budget));
     }
+    let before = budget.remaining.get();
     let plus = play_emf::<true>(bytes, depth, true, Some(Rc::clone(&budget)));
     if budget.exceeded.get() {
         return Err("the metafile draws more than the replay limits".to_owned());
@@ -165,21 +186,86 @@ fn play_full_emf(
     {
         return plus;
     }
+    let plus_drew = plus.as_ref().ok().map(|player| !player.ops.is_empty());
+    drop(plus);
+    let plus_spent = budget.spent_since(before);
+    if !budget.release(plus_spent.pixels) {
+        return Err("the metafile draws more than the replay limits".to_owned());
+    }
+    let before = budget.remaining.get();
     let gdi = play_emf::<true>(bytes, depth, false, Some(Rc::clone(&budget)));
     if budget.exceeded.get() {
         return Err("the metafile draws more than the replay limits".to_owned());
     }
-    match gdi {
-        Ok(gdi) if !gdi.ops.is_empty() => Ok(gdi),
-        Err(error) if plus.as_ref().is_ok_and(|plus| plus.ops.is_empty()) => Err(error),
-        gdi => plus.or(gdi),
+    match (gdi, plus_drew) {
+        (Ok(gdi), _) if !gdi.ops.is_empty() => Ok(gdi),
+        (Err(error), Some(false)) => Err(error),
+        (gdi, Some(_)) => {
+            drop(gdi);
+            if !budget.release(budget.spent_since(before).pixels) {
+                return Err("the metafile draws more than the replay limits".to_owned());
+            }
+            budget.give_back(ReplayBudget {
+                work: plus_spent.work,
+                pixels: 0,
+            });
+            let plus = play_emf::<true>(bytes, depth, true, Some(Rc::clone(&budget)));
+            if budget.exceeded.get() {
+                return Err("the metafile draws more than the replay limits".to_owned());
+            }
+            plus
+        }
+        (gdi, None) => gdi,
     }
 }
 
-/// Whether an EMF+ header comment comes before the EMF's first drawing record.
-fn has_plus_header(bytes: &[u8], budget: &SharedBudget) -> bool {
+/// Whether an EMF+ header comment comes before the EMF's first drawing record,
+/// and if so whether it marks the metafile as dual (GDI records drawing the
+/// same picture).
+fn plus_header(bytes: &[u8], budget: &SharedBudget) -> Option<bool> {
     let mut offset = 0usize;
     for index in 0..player::FULL_LIMITS.records {
+        if !budget.spend(1, 0) {
+            return None;
+        }
+        let (Some(kind), Some(size)) = (
+            u32_at(bytes, offset),
+            u32_at(bytes, offset.saturating_add(4)),
+        ) else {
+            return None;
+        };
+        if size < 8 {
+            return None;
+        }
+        match kind {
+            emf::EMF_COMMENT if size >= 20 && u32_at(bytes, offset + 12) == Some(emf::EMF_PLUS) => {
+                return (u16_at(bytes, offset + 16) == Some(0x4001))
+                    .then(|| u16_at(bytes, offset + 18).is_some_and(|flags| flags & 1 == 1));
+            }
+            emf::EMF_COMMENT => {}
+            1 if index == 0 => {}
+            _ => return None,
+        }
+        offset = offset.saturating_add(size as usize);
+    }
+    None
+}
+
+/// GDI records that put marks on the page.
+const DRAWING_RECORDS: [u32; 50] = [
+    2, 3, 4, 5, 6, 7, 8, 15, 41, 42, 43, 44, 45, 46, 47, 53, 54, 55, 56, 62, 63, 64, 71, 72, 73,
+    74, 76, 77, 78, 79, 80, 81, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 96, 97, 102, 103, 108, 114,
+    116, 118,
+];
+
+/// The raster operation that leaves the destination as it is.
+const ROP_DESTINATION: u32 = 0x00AA_0029;
+
+/// Whether no GDI record draws, counting a BitBlt that keeps the destination
+/// as drawing nothing.
+fn gdi_draws_nothing(bytes: &[u8], budget: &SharedBudget) -> bool {
+    let mut offset = 0usize;
+    for _ in 0..player::FULL_LIMITS.records {
         if !budget.spend(1, 0) {
             return false;
         }
@@ -189,16 +275,16 @@ fn has_plus_header(bytes: &[u8], budget: &SharedBudget) -> bool {
         ) else {
             return false;
         };
+        if kind == emf::EMF_EOF {
+            return true;
+        }
         if size < 8 {
             return false;
         }
-        match kind {
-            emf::EMF_COMMENT if size >= 20 && u32_at(bytes, offset + 12) == Some(emf::EMF_PLUS) => {
-                return u16_at(bytes, offset + 16) == Some(0x4001);
-            }
-            emf::EMF_COMMENT => {}
-            1 if index == 0 => {}
-            _ => return false,
+        let keeps_destination =
+            kind == 76 && u32_at(bytes, offset.saturating_add(40)) == Some(ROP_DESTINATION);
+        if DRAWING_RECORDS.contains(&kind) && !keeps_destination {
+            return false;
         }
         offset = offset.saturating_add(size as usize);
     }

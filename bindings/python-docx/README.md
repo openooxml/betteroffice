@@ -140,25 +140,32 @@ paints them.
 
 ## Rasterize
 
-Register a face under each family the text names before rasterizing; here
-Carlito stands in for Calibri:
+Text renders with the bundled fonts, which the package installs as the
+`betteroffice-fonts-latin`, `-intl` and `-cjk` wheels and reads from disk
+(Carlito stands in for Calibri, for example):
 
 ```python
-from pathlib import Path
-
-document.register_font("Calibri", Path("Carlito-Regular.ttf").read_bytes())
-document.register_font("Calibri", Path("Carlito-Bold.ttf").read_bytes(), bold=True)
-
-png = document.render_png(layout.display_list, 0)
+png = document.render_png({"page": 0}, scale=1.0)
 png.write("page-0.png")
 print(len(png), png.skipped_images)
 ```
 
-Text whose family has no chain raises `RenderError` naming the chain it wanted
-(``missing font chain for `calibri|0|0` ``), so a missing face is loud rather
-than silently blank.
+`render_png` accepts a `PngTarget` dictionary. For an existing layout, use
+`document.render_display_list_png(layout.display_list, 0)`.
 
-`png.skipped_images` counts unresolved references. Register image bytes under
+`register_font` adds a family or replaces a bundled one:
+
+```python
+from pathlib import Path
+
+document.register_font("Brand Sans", Path("BrandSans-Regular.ttf").read_bytes())
+```
+
+Without the font wheels (installed with `--no-deps`), text whose family has no
+registered face raises `RenderError` naming the chain it wanted
+(``missing font chain for `calibri|0|0` ``).
+
+`png.skipped_images` counts unresolved references, and `png.skipped_effects` maps each effect kind the renderer could not draw yet (for example `text.textOutline`) to how often it was left out. Register image bytes under
 the relationship ID and owning part:
 
 ```python
@@ -197,13 +204,15 @@ is the gap this fills.
 | `document.paragraph_ids` / `text` | body IDs, and the whole text |
 | `document.warnings` / `template_variables` | what the parser found |
 | `document.replace_text(para_id, text)` | rewrite one paragraph |
+| `document.replace_text_at(index, text)` | rewrite one paragraph by index, ID or not |
 | `document.export_structured(...)` / `export_markdown(...)` | read-only structured content or Markdown |
 | `document.list_content_controls(...)` / `find_content_controls(query)` | the document's content controls |
 | `render_docx_markdown(content)` | render exported content as Markdown |
 | `document.author` / `origin` / `timestamp` | how an edit is attributed and stamped |
 | `document.layout(input)` | paginate a measured envelope |
 | `document.register_font` / `register_image` | raster resources |
-| `document.render_png(display_list, page)` | rasterize one page |
+| `document.render_png(target, *, scale=1.0)` | lay out and rasterize a zero-based page |
+| `document.render_display_list_png(display_list, page=0)` | rasterize an existing layout |
 | `document.save()` / `save_path(path)` | serialize to DOCX |
 
 Errors raise `DocxError` or a more specific subclass: `ParseError`,

@@ -56,8 +56,51 @@ import {
   type ResidentProposalOperation,
 } from './residentEngineWorkerProtocol';
 import type { EchoGlyphProvider } from './residentCommandViewProjection';
+import { saveWarmupPolicy } from './saveWarmupPolicy';
+import {
+  SAVE_SEED_MAX_GROWTH,
+  SAVE_SEED_MAX_SLICE_BYTES,
+  SAVE_SEED_MIN_SLICE_BYTES,
+  SAVE_SEED_SLICE_BYTES,
+  nextPrimeByteBudget,
+} from './residentEngineWorker';
 
-let startWorker: (scope: unknown, canvas: unknown, harness: unknown, clock: unknown, fetch: unknown, decode: unknown) => void;
+let startWorker: (scope: unknown, canvas: unknown, harness: unknown, clock: unknown, fetch: unknown, decode: unknown, schedule: unknown, unschedule: unknown) => void;
+const retireWorkerTimers: (() => void)[] = [];
+
+interface WorkerEditCaches {
+  fontRequirements: { version: string; layoutInput: string; requirementsJson: string } | null;
+  completedLayout: { extras: string; layoutJson: string; headersFootersJson: string | undefined } | null;
+}
+
+afterEach(() => {
+  for (const retire of retireWorkerTimers.splice(0)) retire();
+});
+
+function testScopedTimers() {
+  const armed = new Set<ReturnType<typeof setTimeout>>();
+  let retired = false;
+  retireWorkerTimers.push(() => {
+    retired = true;
+    for (const handle of armed) globalThis.clearTimeout(handle);
+    armed.clear();
+  });
+  return {
+    schedule(callback: (...args: unknown[]) => void, ms?: number, ...args: unknown[]) {
+      if (retired) return 0 as unknown as ReturnType<typeof setTimeout>;
+      const handle = globalThis.setTimeout(() => {
+        armed.delete(handle);
+        callback(...args);
+      }, ms);
+      armed.add(handle);
+      return handle;
+    },
+    unschedule(handle: ReturnType<typeof setTimeout>) {
+      armed.delete(handle);
+      globalThis.clearTimeout(handle);
+    },
+  };
+}
 
 beforeAll(async () => {
   const frameDelta = resolve(import.meta.dir, '../layout/render/frameDelta.ts');
@@ -88,6 +131,10 @@ beforeAll(async () => {
     '../layout/render/glyphCache':
       'export class GlyphCache { constructor(options) { testHarness.glyphs = options.provider; testHarness.glyphCacheCreations += 1; } }',
     '../wasm/loadWasmAsset': 'export const WASM32_MEMORY_LIMIT_BYTES = 2 ** 32; export const wasmModuleMemories = () => testHarness.memories;',
+    '../wasm/engineEdit': `
+      export let engineKind = 'wasm';
+      testHarness.setEngineKind = (kind) => { engineKind = kind; };
+    `,
     './residentCommandViewProjection':
       'export const projectCommandEchoContext = (input) => testHarness.projectEchoContext?.(input);',
     '../layout/render/frameDelta': `
@@ -112,13 +159,17 @@ beforeAll(async () => {
     `,
   };
   const result = await Bun.build({
-    entrypoints: [resolve(import.meta.dir, 'residentEngineWorker.ts')],
+    entrypoints: [resolve(import.meta.dir, 'docxWorker.browser.ts')],
     target: 'bun',
     format: 'iife',
     plugins: [
       {
         name: 'isolated-worker-dependencies',
         setup(build) {
+          build.onLoad({ filter: /\/docxWorker\.browser\.ts$/ }, () => ({
+            contents: "import { startWorker } from './residentEngineWorker';\nstartWorker(self);\n",
+            loader: 'ts',
+          }));
           build.onLoad({ filter: /\/rustDisplayList\.ts$/ }, () => ({
             contents: `
               export const encodeDisplayListFrameExtras = (...args) => testHarness.encodeDisplayListFrameExtras(...args);
@@ -128,7 +179,7 @@ beforeAll(async () => {
             loader: 'js',
           }));
           build.onLoad({ filter: /\/residentEngineWorker\.ts$/ }, ({ path }) => ({
-            contents: `${readFileSync(path, 'utf8')}\ntestHarness.installCommands = setResidentCommandHooksFactory; testHarness.pendingPages = pendingOffscreenPageIds; testHarness.saveWarmupState = () => ({ attempts: typeof saveWarmupAttempts === 'undefined' ? 0 : saveWarmupAttempts, active: typeof saveWarmup !== 'undefined' && saveWarmup !== null, finished: typeof saveWarmupFinished !== 'undefined' && saveWarmupFinished, record: editorSaves, saveDelayMs: typeof saveWarmupStats === 'undefined' ? null : saveWarmupStats.saveDelayMs });`,
+            contents: `${readFileSync(path, 'utf8')}\ntestHarness.installCommands = setResidentCommandHooksFactory; testHarness.pendingPages = pendingOffscreenPageIds; testHarness.saveWarmupState = () => ({ attempts: typeof saveWarmupAttempts === 'undefined' ? 0 : saveWarmupAttempts, active: typeof saveWarmup !== 'undefined' && saveWarmup !== null, finished: typeof saveWarmupFinished !== 'undefined' && saveWarmupFinished, record: editorSaves, saveDelayMs: typeof saveWarmupStats === 'undefined' ? null : saveWarmupStats.saveDelayMs }); testHarness.editCaches = () => ({ fontRequirements, completedLayout }); testHarness.seedEditCaches = (caches) => { fontRequirements = caches.fontRequirements; completedLayout = caches.completedLayout; };`,
             loader: 'ts',
           }));
           build.onResolve({ filter: /.*/ }, ({ path, importer }) =>
@@ -153,6 +204,8 @@ beforeAll(async () => {
     'performance',
     'fetch',
     'createImageBitmap',
+    'setTimeout',
+    'clearTimeout',
     await result.outputs[0].text()
   ) as typeof startWorker;
 }, 30_000);
@@ -234,7 +287,10 @@ function worker() {
       await yieldSave();
       await yieldSave();
     }),
+    setEngineKind: null as ((kind: 'wasm' | 'native') => void) | null,
     saveWarmupState: null as (() => { attempts: number; active: boolean; finished: boolean; record: ResidentSaveRecord; saveDelayMs: number | null }) | null,
+    editCaches: null as (() => WorkerEditCaches) | null,
+    seedEditCaches: null as ((caches: WorkerEditCaches) => void) | null,
     async preloadFrom(source: Promise<WebAssembly.Module | null>): Promise<void> {
       await harness.preload((await source) ?? undefined);
     },
@@ -268,6 +324,8 @@ function worker() {
     session: {
       initializeComments() {},
       primeSaveSeedStates: mock(() => true),
+      primeSaveSeedStatesSlice: mock((_paragraphs: number, _inflated: number, _bytes: number) => 0),
+      primeLastSliceCost: mock(() => 0),
       partGeometry: () => [],
       proposalEngine: { version: () => 'v' },
       geometryReader: { storyIds: () => ['body'] },
@@ -410,8 +468,10 @@ function worker() {
       canvas.height = buffer.height;
     },
   };
+  const timers = testScopedTimers();
   startWorker(scope, Surface, harness, { now: () => harness.now() },
-    (source: string) => harness.fetchImage(source), (blob: Blob) => harness.decodeImage(blob));
+    (source: string) => harness.fetchImage(source), (blob: Blob) => harness.decodeImage(blob),
+    timers.schedule, timers.unschedule);
   function send(request: ResidentEngineWorkerRequestWithoutId) {
     const id = ++nextId;
     return new Promise<DocxEngineWorkerResponse>((resolve) => {
@@ -652,7 +712,7 @@ test('font decoding initializes the resident engine before open and transfers fo
   expect(w.harness.sessionsCreated).toBe(0);
 });
 
-test('selection noop sends its retained echo context before building the deferred frame', async () => {
+test('selection noop answers in one message whose frame carries the echo context, with no earlier context beside it', async () => {
   const arm = await commandWorker();
   const { client, w } = arm;
   const at = { story: 'body', paraId: 'p', offset: 1 };
@@ -680,7 +740,9 @@ test('selection noop sends its retained echo context before building the deferre
   w.harness.projectEchoContext = ({ layout }) => {
     projected.push(layout.frame.frameEpoch);
     return { page, frameEpoch: layout.frame.frameEpoch, layoutRevision: 1, serializedBytes: 100, text: 'ab',
-      styleRuns: [], boundaries: [], damage: [], selection: { anchorGrapheme: 1, focusGrapheme: 1 },
+      styleRuns: [], boundaries: [], selection: { anchorGrapheme: 1, focusGrapheme: 1 },
+      damage: [{ page, rect: { x: 0, y: 0, width: 100, height: 20 },
+        backgroundId: `${layout.frame.frameEpoch}:1:echo`, omittedPrimitiveIds: [] }],
       transform: [1, 0, 0, 1, 0, 0], shaping: 'simple-ltr', glyphs: {
         glyphSet: 'set', fontId: 1, size: 12, color: '#000', x: 0, y: 14, next: '', right: 100,
         device: { x: 0, y: 0, width: 100, height: 20 }, pixelRatio: 1,
@@ -689,37 +751,120 @@ test('selection noop sends its retained echo context before building the deferre
   try {
     const initial = await client.commandInit(COMMAND_INIT);
     projected.length = 0;
-    let ackSent = false;
     let builds = 0;
     const build = w.harness.session.buildDisplayListFrame;
     w.harness.session.buildDisplayListFrame = (...args: Parameters<typeof build>) => {
-      expect(ackSent).toBe(true);
       builds += 1;
       return build(...args);
     };
     w.harness.session.buildDisplayPagesFrame = (pages: number[]) => {
-      expect(ackSent).toBe(true);
       builds += 1;
       const { docEpoch, layoutEpoch } = w.harness.delta!;
       w.delta(pages.map(index => index + 1), false, 100, 1);
       Object.assign(w.harness.delta!, { docEpoch, layoutEpoch });
       return new Uint8Array([w.harness.delta!.frameEpoch]);
     };
+    const answered: DocxEngineWorkerResponse[] = [];
     const post = w.scope.postMessage;
     w.scope.postMessage = (response, transfer) => {
-      if (response.ok && response.commandAck) {
-        expect(projected).toEqual([initial.frame.revision]);
-        ackSent = true;
-      }
+      if (response.ok && (response.commandAck || response.commandFrame)) answered.push(response);
       post(response, transfer);
     };
-    const pushed = new Promise<DocxCommandFrame>(resolve => client.onFrame(resolve));
     const ack = await client.edit({ ...commandEnvelope(1), kind: 'selectPoint', payload: {} });
-    expect(ack.frame).toBeUndefined();
-    expect(ack.echoContext).toMatchObject({ frameEpoch: initial.frame.revision, selection: { focusGrapheme: 1 } });
-    expect((await pushed).coversThroughSeq).toBe(1);
+    expect(answered).toHaveLength(1);
+    expect(projected[0]).toBe(initial.frame.revision);
+    expect(ack.frame?.coversThroughSeq).toBe(1);
+    expect(ack.frame!.payload.echoContext).toMatchObject({ frameEpoch: initial.frame.revision, selection: { focusGrapheme: 1 } });
+    expect(ack.echoContext).toBeUndefined();
     expect(builds).toBe(1);
   } finally { client.destroy(); }
+});
+
+async function selectionStepWorker() {
+  const arm = await commandWorker();
+  const { w } = arm;
+  const at = (seq: number) => ({ story: 'body', paraId: 'p', offset: seq % 2 });
+  Object.assign(w.harness.session.geometryReader, {
+    version: () => w.harness.session.proposalEngine.version(),
+    hasStory: (story: string) => story === 'body',
+    paragraphSpans: () => [{ paraId: 'p', length: 2 }],
+    locateParagraph: () => ({ start: 0, end: 2 }),
+    storySegments: () => [
+      { kind: 'text', text: 'ab', attributes: {} },
+      { kind: 'pilcrow', paraId: 'p', properties: {}, attributes: {} },
+    ],
+  });
+  const state: DocxEditState = { readOnly: false, toolbar: null, effectiveFormatting: null, storedMarks: null,
+    canUndo: false, canRedo: false, hyperlink: null, tableContext: null };
+  let selected = { anchor: at(0), focus: at(0) };
+  w.harness.installCommands!(() => ({
+    preflight: command => ({ status: 'ready', prepared: {
+      command: { ...command, kind: 'select', payload: { selection: { anchor: at(command.seq), focus: at(command.seq) } } },
+      selection: { anchor: at(command.seq), focus: at(command.seq) }, range: null,
+    } }),
+    apply: ({ command }) => {
+      selected = { anchor: at(command.seq), focus: at(command.seq) };
+      return { status: 'noop' };
+    },
+    selection: () => selected, editState: () => state,
+  }));
+  const initial = await arm.client.commandInit(COMMAND_INIT);
+  w.harness.session.buildDisplayPagesFrame = (pages: number[]) => {
+    const { docEpoch, layoutEpoch } = w.harness.delta!;
+    w.delta(pages.map(index => index + 1), false, 100, 1);
+    Object.assign(w.harness.delta!, { docEpoch, layoutEpoch });
+    return new Uint8Array([w.harness.delta!.frameEpoch]);
+  };
+  const step = (seq: number) => arm.client.edit({ ...commandEnvelope(seq), kind: 'extendSelection', payload: {
+    page: { pageId: '1', pageIndex: 0 }, x: 20, y: 10, frameEpoch: initial.frame.revision, layoutRevision: 1,
+    clickCount: 1, modifiers: { shift: false, alt: false, ctrl: false, meta: false },
+  } });
+  return { ...arm, step, settle: () => new Promise<void>(resolve => setTimeout(resolve, 50)) };
+}
+
+test('a drag selection step leaves the scheduler stamps, earlier stamped work and the layout caches alone', async () => {
+  const arm = await selectionStepWorker();
+  const { w } = arm;
+  try {
+    await arm.settle();
+    const scheduler = w.harness.scheduler!;
+    const caches: WorkerEditCaches = {
+      fontRequirements: { version: 'v', layoutInput: '{}', requirementsJson: '[]' },
+      completedLayout: { extras: '{}', layoutJson: '{}', headersFootersJson: undefined },
+    };
+    w.harness.seedEditCaches!(caches);
+    const stamps = { version: scheduler.version, generation: scheduler.generation };
+    await arm.step(1);
+    await arm.settle();
+    expect(w.harness.messages.at(-1)).not.toMatchObject({ mutates: true });
+    expect({ version: scheduler.version, generation: scheduler.generation }).toEqual(stamps);
+    const outcome = new Promise<'ran' | 'cancelled'>((resolve) => scheduler.schedule({
+      kind: 'pageBuild', version: stamps.version, generation: stamps.generation,
+      onStale: () => 'cancel', cancel: () => resolve('cancelled'),
+      run: () => { resolve('ran'); return 'done'; },
+    }));
+    expect(await outcome).toBe('ran');
+    expect(w.harness.editCaches!()).toEqual(caches);
+  } finally { arm.client.destroy(); }
+});
+
+test('a drag selection step answers main with one message carrying the selection and no frame geometry', async () => {
+  const arm = await selectionStepWorker();
+  try {
+    await arm.settle();
+    for (const seq of [1, 2, 3]) {
+      const before = arm.replies.length;
+      await arm.step(seq);
+      await arm.settle();
+      const answered = arm.replies.slice(before).filter(reply => !(reply.ok && reply.progress !== undefined));
+      expect(answered.map(reply => reply.ok && reply.commandFrame ? 'commandFrame' : reply.ok && reply.commandAck ? 'commandAck' : 'other'),
+        `replies to selection step ${seq}`).toHaveLength(1);
+      const [only] = answered;
+      expect(JSON.stringify(only)).toContain('"selection"');
+      expect(Object.keys(only!.ok && only!.commandFrame ? only!.commandFrame.frame.payload : {})).not.toContain('geometry');
+      expect(only!.ok && only!.commandAck?.frame?.payload.geometry).toBeFalsy();
+    }
+  } finally { arm.client.destroy(); }
 });
 
 test('command raster scale sizes the initial bitmaps before presentation', async () => {
@@ -2530,16 +2675,125 @@ describe('document worker warmup', () => {
     try {
       await client.commandInit(COMMAND_INIT);
       const before = replies.length;
-      await settleWarmup(() => w.harness.session.primeSaveSeedStates.mock.calls.length === 1);
-      expect(w.harness.session.primeSaveSeedStates).toHaveBeenCalledWith(4096, 16 * 1024 * 1024);
+      await settleWarmup(() => w.harness.session.primeSaveSeedStatesSlice.mock.calls.length === 1);
+      expect(w.harness.session.primeSaveSeedStatesSlice).toHaveBeenCalledWith(4096, 16 * 1024 * 1024, 16 * 1024);
+      expect(w.harness.session.primeSaveSeedStates).not.toHaveBeenCalled();
       expect(replies).toHaveLength(before);
       await client.edit(commandEnvelope(1));
       advanceTimers(5_000);
       await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
-      expect(w.harness.session.primeSaveSeedStates).toHaveBeenCalledTimes(1);
+      expect(w.harness.session.primeSaveSeedStatesSlice).toHaveBeenCalledTimes(1);
     } finally {
       client.destroy();
     }
+  });
+
+  test('save seed priming runs in slices until the states are known', async () => {
+    const { w, client } = await commandWorker();
+    w.harness.now = () => now;
+    const answers = [1, 1, 0];
+    w.harness.session.primeSaveSeedStatesSlice.mockImplementation(() => answers.shift() ?? 0);
+    try {
+      await client.commandInit(COMMAND_INIT);
+      await settleWarmup(() => w.harness.session.primeSaveSeedStatesSlice.mock.calls.length === 3);
+      advanceTimers(5_000);
+      await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+      const calls = w.harness.session.primeSaveSeedStatesSlice.mock.calls;
+      expect(calls).toHaveLength(3);
+      for (const [paragraphs, inflated, bytes] of calls) {
+        expect([paragraphs, inflated]).toEqual([4096, 16 * 1024 * 1024]);
+        expect(bytes).toBeGreaterThanOrEqual(2 * 1024);
+        expect(bytes).toBeLessThanOrEqual(1024 * 1024);
+      }
+    } finally {
+      client.destroy();
+    }
+  });
+
+  test('prime byte budget bounds are 16 KiB initially, 2 KiB at the floor and 1 MiB at the cap', () => {
+    expect([SAVE_SEED_SLICE_BYTES, SAVE_SEED_MIN_SLICE_BYTES, SAVE_SEED_MAX_SLICE_BYTES])
+      .toEqual([16 * 1024, 2 * 1024, 1024 * 1024]);
+  });
+
+  test('prime budget growth limit is 2 or 4 times a slice', () => {
+    expect([2, 4]).toContain(SAVE_SEED_MAX_GROWTH);
+  });
+
+  test('prime budget holds through slices that charge nothing', () => {
+    let budget = SAVE_SEED_SLICE_BYTES;
+    for (const elapsed of [0, 0.1, 0.2, 0.3, 0.4, 0.5]) {
+      budget = nextPrimeByteBudget(budget, 0, elapsed, 10, 4);
+      expect(budget).toBe(SAVE_SEED_SLICE_BYTES);
+    }
+  });
+
+  test('prime budget stays where the last charged slice left it across slices that charge nothing', () => {
+    const measured = nextPrimeByteBudget(SAVE_SEED_SLICE_BYTES, 64 * 1024, 20, 10, 4);
+    let budget = measured;
+    for (const elapsed of [0, 0.25, 0.5]) {
+      budget = nextPrimeByteBudget(budget, 0, elapsed, 10, 4);
+      expect(budget).toBe(measured);
+    }
+  });
+
+  test('prime budget is the target times the measured charge rate within the growth limit', () => {
+    expect(nextPrimeByteBudget(SAVE_SEED_SLICE_BYTES, 64 * 1024, 20, 10, 4)).toBe(32 * 1024);
+    expect(nextPrimeByteBudget(SAVE_SEED_SLICE_BYTES, 64 * 1024, 20, 10, 2)).toBe(32 * 1024);
+    expect(nextPrimeByteBudget(SAVE_SEED_MIN_SLICE_BYTES, 64 * 1024, 20, 10, 4)).toBe(8 * 1024);
+    expect(nextPrimeByteBudget(SAVE_SEED_MIN_SLICE_BYTES, 64 * 1024, 20, 10, 2)).toBe(4 * 1024);
+  });
+
+  test('prime budget grows by at most the growth limit after a slice that took no measurable time', () => {
+    for (const elapsed of [0, 0.01, 0.25]) {
+      expect(nextPrimeByteBudget(SAVE_SEED_SLICE_BYTES, 16 * 1024, elapsed, 10, 4)).toBe(64 * 1024);
+      expect(nextPrimeByteBudget(SAVE_SEED_SLICE_BYTES, 16 * 1024, elapsed, 10, 2)).toBe(32 * 1024);
+    }
+  });
+
+  test('prime budget shrinks without limit', () => {
+    expect(nextPrimeByteBudget(SAVE_SEED_MAX_SLICE_BYTES, 64 * 1024, 20, 10, 2)).toBe(32 * 1024);
+    expect(nextPrimeByteBudget(SAVE_SEED_MAX_SLICE_BYTES, 64 * 1024, 20, 10, 4)).toBe(32 * 1024);
+    expect(nextPrimeByteBudget(SAVE_SEED_MAX_SLICE_BYTES, 1, 100, 10, 2)).toBe(SAVE_SEED_MIN_SLICE_BYTES);
+  });
+
+  test('prime budget holds the cap and the floor', () => {
+    expect(nextPrimeByteBudget(512 * 1024, 64 * 1024 * 1024, 1, 10, 4)).toBe(SAVE_SEED_MAX_SLICE_BYTES);
+    expect(nextPrimeByteBudget(SAVE_SEED_MAX_SLICE_BYTES, 64 * 1024 * 1024, 0, 10, 4)).toBe(SAVE_SEED_MAX_SLICE_BYTES);
+    expect(nextPrimeByteBudget(SAVE_SEED_SLICE_BYTES, 1, 100, 10, 4)).toBe(SAVE_SEED_MIN_SLICE_BYTES);
+  });
+
+  test('a run of cheap slices raises the prime budget one growth step at a time', () => {
+    const offered: number[] = [];
+    let budget = SAVE_SEED_SLICE_BYTES;
+    for (let slice = 0; slice < 4; slice += 1) {
+      offered.push(budget);
+      budget = nextPrimeByteBudget(budget, budget, 0.01, 10, 4);
+    }
+    expect(offered).toEqual([16 * 1024, 64 * 1024, 256 * 1024, 1024 * 1024]);
+    expect(offered[1]).toBeLessThan(SAVE_SEED_MAX_SLICE_BYTES);
+    expect(offered[2]).toBeLessThan(SAVE_SEED_MAX_SLICE_BYTES);
+  });
+
+  test('a heavy slice after sub-millisecond slices that charge nothing is offered the initial budget', () => {
+    let budget = SAVE_SEED_SLICE_BYTES;
+    for (let slice = 0; slice < 3; slice += 1) budget = nextPrimeByteBudget(budget, 0, 0.1, 10, SAVE_SEED_MAX_GROWTH);
+    expect(budget).toBe(SAVE_SEED_SLICE_BYTES);
+    const next = nextPrimeByteBudget(budget, 16 * 1024, 0.1, 10, SAVE_SEED_MAX_GROWTH);
+    expect(next).toBeLessThanOrEqual(budget * SAVE_SEED_MAX_GROWTH);
+    expect(next).toBeLessThan(SAVE_SEED_MAX_SLICE_BYTES);
+  });
+
+  test('the first charged slice after slices that charge nothing is offered the initial budget', () => {
+    const offered: number[] = [];
+    let budget = SAVE_SEED_SLICE_BYTES;
+    const slices: Array<[charged: number, elapsed: number]> = [[0, 0], [0, 0.1], [0, 0.2], [0, 0.4], [0, 0.5], [8 * 1024, 4], [0, 0.1]];
+    for (const [charged, elapsed] of slices) {
+      offered.push(budget);
+      budget = nextPrimeByteBudget(budget, charged, elapsed, 10, 4);
+    }
+    expect(offered.slice(0, 6)).toEqual(Array(6).fill(SAVE_SEED_SLICE_BYTES));
+    expect(offered[6]).toBe(20 * 1024);
+    expect(budget).toBe(20 * 1024);
   });
 
   test('read-only opens do not prime save seed states', async () => {
@@ -2549,7 +2803,7 @@ describe('document worker warmup', () => {
       await client.commandInit({ ...COMMAND_INIT, readOnly: true });
       advanceTimers(5_000);
       await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
-      expect(w.harness.session.primeSaveSeedStates).not.toHaveBeenCalled();
+      expect(w.harness.session.primeSaveSeedStatesSlice).not.toHaveBeenCalled();
     } finally {
       client.destroy();
     }
@@ -2563,11 +2817,52 @@ describe('document worker warmup', () => {
       await client.commandInit(COMMAND_INIT);
       advanceTimers(5_000);
       await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
-      expect(w.harness.session.primeSaveSeedStates).not.toHaveBeenCalled();
+      expect(w.harness.session.primeSaveSeedStatesSlice).not.toHaveBeenCalled();
     } finally {
       client.destroy();
     }
   });
+
+  const MiB = 1024 * 1024;
+  test.each([
+    ['wasm', undefined, { liveBytes: 100 }, { warm: true, primeSeeds: true, reason: 'ok' }],
+    ['wasm', 512 * MiB, { liveBytes: 100 }, { warm: true, primeSeeds: true, reason: 'ok' }],
+    ['wasm', 512 * MiB, { liveBytes: 385 * MiB }, { warm: false, primeSeeds: false, reason: 'low-headroom' }],
+    ['wasm', 512 * MiB, undefined, { warm: false, primeSeeds: false, reason: 'no-stats' }],
+    ['native', undefined, { liveBytes: 100 }, { warm: false, primeSeeds: false, reason: 'no-limit' }],
+    ['native', 512 * MiB, { liveBytes: 100 }, { warm: false, primeSeeds: false, reason: 'engine-native' }],
+    ['native', 512 * MiB, { liveBytes: 385 * MiB }, { warm: false, primeSeeds: false, reason: 'low-headroom' }],
+    ['native', 512 * MiB, undefined, { warm: false, primeSeeds: false, reason: 'no-stats' }],
+  ] as const)('save warmup policy: %s engine, limit=%p, memory=%o', (engine, limit, memory, expected) => {
+    expect(saveWarmupPolicy(engine, limit, memory)).toEqual(expected);
+  });
+
+  test.each([['wasm', 1], ['native', 0]] as const)(
+    '%s engine with a 512 MiB limit and ample headroom warms the save and primes seeds %i times',
+    async (engine, runs) => {
+      const { w, client } = await commandWorker({ heapLimitBytes: SAVE_WARMUP_HEAP_LIMIT_BYTES });
+      w.harness.setEngineKind!(engine);
+      w.harness.now = () => now;
+      try {
+        await client.commandInit(COMMAND_INIT);
+        client.prepareSave();
+        advanceTimers(0);
+        await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+        advanceTimers(SAVE_WARMUP_INPUT_IDLE_MS);
+        await settleWarmup(() => runs === 0 || (w.harness.saveWarmupState!().finished &&
+          w.harness.session.primeSaveSeedStatesSlice.mock.calls.length === runs));
+        for (let turn = 0; turn < 10; turn += 1) {
+          advanceTimers(SAVE_WARMUP_INPUT_IDLE_MS);
+          await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+        }
+        expect(w.harness.warmSave).toHaveBeenCalledTimes(runs);
+        expect(w.harness.session.primeSaveSeedStatesSlice).toHaveBeenCalledTimes(runs);
+        expect(w.harness.saveWarmupState!().attempts).toBe(runs);
+      } finally {
+        client.destroy();
+      }
+    },
+  );
 
   test('save warmup waits for save intent, wasm loading and command idle, then runs once', async () => {
     const { w, client } = await commandWorker({ heapLimitBytes: SAVE_WARMUP_HEAP_LIMIT_BYTES });

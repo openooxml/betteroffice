@@ -419,6 +419,23 @@ test('a text-only mirror keeps image names and table semantics and removes visua
   ].join(', '))).toBeNull();
 });
 
+test('a paragraph mark shaped as a glyph run mirrors as the text mark does', () => {
+  const mark = (kind: 'ins' | 'del'): DisplayPrimitive => ({
+    kind: 'glyphRun', fontId: 1, size: 14.667, color: '#2e7d32', text: '¶',
+    glyphs: [{ id: 1, x: 40, y: 20, cluster: 0, advance: 8 }],
+    structuralRevision: { scope: 'pmark', kind, author: 'Author', revisionId: 'revision' },
+  });
+  const page: DisplayPage = { pageIndex: 0, width: 100, height: 100, primitives: [mark('ins'), mark('del')] };
+  const marks = Array.from(buildMirrorPage(page).querySelectorAll('.layout-revision-pmark-glyph'));
+  expect(marks.map((element) => [
+    element.textContent,
+    element.classList.contains('layout-revision-ins'),
+    element.classList.contains('layout-revision-del'),
+    element.getAttribute('aria-hidden'),
+  ])).toEqual([['¶', true, false, 'true'], ['¶', false, true, 'true']]);
+  expect(buildMirrorPageText(page).textContent).toBe('');
+});
+
 test('a text-only mirror keeps labels and attributes of ancestors of retained content', () => {
   const full = buildMirrorPage({
     pageIndex: 0,
@@ -443,4 +460,57 @@ test('a text-only mirror keeps labels and attributes of ancestors of retained co
     linksOnly.querySelectorAll('[data-doc-start]').length
   );
   expect(textOnly.textContent).toBe('Link descriptionLinkOther text');
+});
+
+test('an endnote split across two pages is one note in the mirror', () => {
+  const part = (pageIndex: number, words: string, continued: boolean): DisplayPage => ({
+    pageIndex,
+    width: 100,
+    height: 100,
+    primitives: [],
+    noteAreas: [
+      {
+        kind: 'endnote',
+        y: 50,
+        height: 20,
+        noteIds: [9],
+        ...(continued ? { continuedNoteIds: [9] } : { notes: [{ id: 9, label: '9', anchorDocStart: 4, anchorDocEnd: 5 }] }),
+        primitives: [text({ groupId: 'endnote-9', text: words })],
+      },
+    ],
+  });
+  const split = [part(0, 'opening words', false), part(1, 'closing words', true)];
+  const mirrors = split.map((page) => buildMirrorPage(page));
+  const all = (selector: string) => mirrors.flatMap((mirror) => Array.from(mirror.querySelectorAll(selector)));
+  expect(all('#oox-endnote-9')).toHaveLength(1);
+  expect(all('[role="doc-endnote"]')).toHaveLength(1);
+  expect(all('[role="doc-backlink"]')).toHaveLength(1);
+  expect(all('[data-note-id="9"]')).toHaveLength(2);
+  const read = mirrors.map((mirror) => mirror.textContent ?? '').join(' ');
+  expect(read.split('opening words')).toHaveLength(2);
+  expect(read.split('closing words')).toHaveLength(2);
+  expect(split.map((page) => displayPageHoldsMirrorId(page, 'oox-endnote-9'))).toEqual([true, false]);
+});
+
+test('a note backlink without a label never reads the raw note id', () => {
+  const mirror = buildMirrorPage({
+    pageIndex: 0,
+    width: 100,
+    height: 100,
+    primitives: [],
+    noteAreas: [
+      {
+        kind: 'footnote',
+        y: 50,
+        height: 20,
+        noteIds: [12],
+        notes: [{ id: 12 }],
+        primitives: [text({ groupId: 'footnote-12', text: 'Body' })],
+      },
+    ],
+  });
+  const backlink = mirror.querySelector('[role="doc-backlink"]')!;
+  expect(backlink).not.toBeNull();
+  expect(backlink.hasAttribute('aria-label')).toBe(false);
+  expect(mirror.querySelector('[aria-label*="12"]')).toBeNull();
 });

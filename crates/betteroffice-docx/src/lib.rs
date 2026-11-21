@@ -2,9 +2,15 @@
 
 /// The font pack decoder shared by every engine.
 pub use betteroffice_fonts as fonts;
+#[cfg(feature = "fonts")]
+pub use fonts::OpenOptions;
+#[cfg(not(feature = "fonts"))]
+pub use open_options::OpenOptions;
 
 mod document;
 mod error;
+#[cfg(any(feature = "fonts", feature = "raster"))]
+mod font;
 #[cfg(feature = "raster")]
 mod render;
 mod types;
@@ -14,8 +20,10 @@ pub use document::{Document, render_docx_markdown};
 pub use docx_raster::{ImageScope, NoteKind, RenderedPage};
 pub use error::Error;
 #[cfg(feature = "raster")]
-pub use render::{MAX_PIXMAP_DIM, MAX_PIXMAP_PIXELS};
-pub use types::{DocumentModel, DocumentStructure, LayoutResult, SaveOptions};
+pub use render::{MAX_PIXMAP_DIM, MAX_PIXMAP_PIXELS, PngTarget, RenderOptions};
+pub use types::{
+    DocumentModel, DocumentStructure, KeptUnchanged, LayoutResult, SaveOptions, SaveReport,
+};
 
 pub use docx_edit::content_controls;
 pub use docx_edit::content_controls::{
@@ -35,8 +43,12 @@ pub use docx_layout::display_list::{DisplayList, DisplayPage, HfParts, Primitive
 pub use docx_layout::types::{Input as LayoutInput, Layout, LayoutOptions, MeasuredBlock, Page};
 pub use docx_parse::xml::ParseLimits;
 pub use docx_parse::{
-    BlockContent, DocumentBody, HeaderFooter, InlineNode, Paragraph, ParagraphContent, Run,
-    RunContent, Section, SectionProperties, Table, TableCell, TableRow, get_paragraph_text,
+    BlockContent, DocumentBody, DroppedParagraph, DroppedStructure, HeaderFooter, InlineNode,
+    KeptParagraph, Paragraph, ParagraphContent, Run, RunContent, Section, SectionProperties, Table,
+    TableCell, TableRow, get_paragraph_text,
 };
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(not(feature = "fonts"))]
+mod open_options;

@@ -2,12 +2,17 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   useSyncExternalStore,
 } from 'react';
 import type { RefObject } from 'react';
+import { resolvedLocale } from '../i18n/LocaleContext';
+import { createSelectionSettle } from '../../../../shared/plugin-host/selectionSettle';
+import { trackFocus } from '../../../../shared/plugin-host/focusTracker';
 import type { TFunction } from '@betteroffice/xlsx-i18n';
+import type { Proposal } from '@betteroffice/xlsx';
 import type { XlsxCommandController } from '../commands/createXlsxCommandStore';
 import type { XlsxPluginEditorAccess } from './createPluginClients';
 import type { XlsxPluginDocumentAccess } from './createPluginDocumentAccess';
@@ -18,23 +23,48 @@ import {
   type XlsxPluginActivation,
   type XlsxPluginHost,
 } from './createXlsxPluginHost';
-import { createPluginGeometry, pluginLayout, type PaintedGrid } from './geometry';
+import {
+  createPluginGeometry,
+  pluginLayout,
+  type EditorPointQuery,
+  type PaintedGrid,
+} from './geometry';
+import { rowDecorationIndex, type RowDecorationSet, type RowGutterIndex } from './rowDecorations';
 import type { XlsxEditorPluginProps, XlsxPluginGeometry, XlsxPluginSelection } from './types';
 
 const NO_ACTIVATIONS: readonly XlsxPluginActivation[] = Object.freeze([]);
+const NO_DECORATIONS: readonly RowDecorationSet[] = Object.freeze([]);
+const SELECTION_PAINT_WAIT_MS = 1500;
+
+/** The frame the canvas shows, for chrome that follows every paint. */
+export interface PaintedGridStore {
+  get(): PaintedGrid | null;
+  subscribe(listener: () => void): () => void;
+}
 
 export interface UseXlsxPluginHostOptions extends XlsxEditorPluginProps {
+  locale?: string;
+  focusRoot?: RefObject<HTMLElement | null>;
   createClients?: typeof createPluginClients;
   createGeometry?: typeof createPeerlessPluginGeometry;
   /** Stable; its members read the editor at call time. */
   access: XlsxPluginEditorAccess | XlsxPluginDocumentAccess;
+  /** False when the editor cannot gate typed edits; read once. */
+  editGate?: boolean;
   commands: XlsxCommandController;
   readOnly: boolean;
+  proposals?: readonly Proposal[];
+  staleFor?: Readonly<Record<string, readonly string[]>>;
+  proposalsPending?(): boolean;
   /** The workbook once it is open, else null. Plugins open it while the editor still holds it. */
   handle: object | null;
   selection: XlsxPluginSelection;
+  /** Captures pending paint readiness at the quiet-window deadline. */
+  selectionPaintReady?(sheet: number): () => boolean;
   /** The canvas the grid paints into. */
   canvasRef: RefObject<HTMLCanvasElement | null>;
+  /** The editor's hit test that plugin point queries go through; read at call time. */
+  positionAtPoint?: EditorPointQuery;
   t: TFunction;
 }
 
@@ -51,6 +81,14 @@ export interface XlsxPluginHostBinding {
    * in the same step, so retained geometry of an earlier frame refuses at once.
    */
   presentGrid(painted: PaintedGrid | null): void;
+  /** Current row decorations of the active sheet by row, or null when the gutter is hidden. */
+  rowGutter: RowGutterIndex | null;
+  painted: PaintedGridStore;
+}
+
+function proposalSignature(options: UseXlsxPluginHostOptions, version: string): string {
+  const proposals = options.proposals ?? [];
+  return JSON.stringify({ proposals, staleFor: options.staleFor ?? {}, version: proposals.length ? version : null });
 }
 
 /** Owns the plugin host of one `XlsxEditor` and binds it to the editor's authority. */
@@ -60,16 +98,83 @@ export function useXlsxPluginHost(options: UseXlsxPluginHostOptions): XlsxPlugin
   const geometryRef = useRef<XlsxPluginGeometry | null>(null);
   const paintedRef = useRef<PaintedGrid | null>(null);
   const layerRef = useRef<HTMLDivElement | null>(null);
+  const [paintedStore] = useState(() => {
+    const listeners = new Set<() => void>();
+    return {
+      get: () => paintedRef.current,
+      subscribe(listener: () => void) {
+        listeners.add(listener);
+        return () => { listeners.delete(listener); };
+      },
+      emit() {
+        for (const listener of [...listeners]) listener();
+      },
+    };
+  });
 
   const [host] = useState(() =>
     createXlsxPluginHost({
       ...options.access,
       translate: (key) => latest.current.t(key),
       geometry: () => geometryRef.current,
-    }, options.createClients)
+    }, options.createClients, { editGate: options.editGate })
   );
 
+  const selectionRef = useRef<XlsxPluginSelection>(null);
+  const selectionIdentityRef = useRef<string | null>(null);
+  const settleRef = useRef<ReturnType<typeof createSelectionSettle> | null>(null);
   const managed = (options.plugins?.length ?? 0) > 0;
+  useEffect(() => {
+    if (!managed || !options.handle) return;
+    let generation = host.generation();
+    let paintReady: (() => boolean) | undefined;
+    let paintTimer: ReturnType<typeof setTimeout> | null = null;
+    let paintExpired = false;
+    const clearPaintWait = () => {
+      if (paintTimer !== null) clearTimeout(paintTimer);
+      paintTimer = null;
+    };
+    const settled = (source: 'pointer' | 'touch' | 'keyboard') => {
+      clearPaintWait();
+      paintReady = undefined;
+      host.selectionSettled(source, generation);
+    };
+    const machine = createSelectionSettle({
+      root: () => latest.current.focusRoot?.current ?? null,
+      canSettle: () => {
+        const sheet = selectionRef.current?.sheetIndex;
+        if (sheet === undefined || paintExpired) return true;
+        paintReady ??= latest.current.selectionPaintReady?.(sheet) ?? (() => true);
+        if (paintReady()) return true;
+        if (paintTimer === null) paintTimer = setTimeout(() => {
+          paintTimer = null;
+          paintExpired = true;
+          if (selectionIdentityRef.current !== null) machine.notifySelectionChange(selectionIdentityRef.current);
+        }, SELECTION_PAINT_WAIT_MS);
+        return false;
+      },
+      onUnsettle: () => {
+        clearPaintWait(); paintReady = undefined; paintExpired = false;
+        generation = host.generation(); host.selectionUnsettled(generation);
+      },
+      onSettle: settled,
+      onResettle: settled,
+    });
+    settleRef.current = machine;
+    return () => { clearPaintWait(); machine.dispose(); settleRef.current = null; };
+  }, [host, managed, options.handle]);
+  const locale = resolvedLocale(options.locale);
+  useLayoutEffect(() => { host.localeChanged(locale); }, [host, locale]);
+  useLayoutEffect(() => {
+    if (!managed) return;
+    const tracker = trackFocus(() => latest.current.focusRoot?.current ? [latest.current.focusRoot.current] : [],
+      (focused) => host.focusChanged(focused));
+    host.setFocusCheck(tracker.recheck);
+    return () => {
+      host.setFocusCheck(null);
+      tracker();
+    };
+  }, [host, managed]);
 
   /** Publishes the layout and geometry of the painted frame for the current version. */
   const publish = useCallback(() => {
@@ -79,6 +184,15 @@ export function useXlsxPluginHost(options: UseXlsxPluginHostOptions): XlsxPlugin
     const installed = (latest.current.plugins?.length ?? 0) > 0;
     const layout =
       installed && host.generation() !== null ? pluginLayout(painted, host.version()) : null;
+    const pointAt: EditorPointQuery | undefined = latest.current.positionAtPoint
+      ? (clientX, clientY) => latest.current.positionAtPoint?.(clientX, clientY) ?? null
+      : undefined;
+    const proposals = () => {
+      const options = latest.current;
+      if (options.proposalsPending?.() || !options.selection || options.selection.sheetId !== layout?.sheetId) return null;
+      return { proposals: options.proposals ?? [], sheetIndex: options.selection.sheetIndex,
+        previewVersion: host.previewVersion() };
+    };
     geometryRef.current =
       layout && painted && canvas && layer
         ? 'identity' in latest.current.access ? latest.current.createGeometry?.(
@@ -93,12 +207,15 @@ export function useXlsxPluginHost(options: UseXlsxPluginHostOptions): XlsxPlugin
               const identity = access.identity();
               return { version: identity ? access.version(identity) : null,
                 painted: live ? paintedRef.current : null };
-            }
+            },
+            proposals,
+            pointAt,
+            () => selectionRef.current
           ) ?? null : createPluginGeometry(layout, painted, canvas, layer, () =>
               host.layoutId() === layout.id &&
               paintedRef.current === painted &&
               canvas.isConnected &&
-              layer.isConnected)
+              layer.isConnected, proposals, pointAt, () => selectionRef.current)
         : null;
     host.layoutChanged(layout);
     host.geometryChanged();
@@ -128,19 +245,40 @@ export function useXlsxPluginHost(options: UseXlsxPluginHostOptions): XlsxPlugin
     const identity = 'identity' in access ? access.identity() : access.handle();
     if (identity !== options.handle) return;
     host.open(options.handle);
+    host.proposalsChanged(proposalSignature(latest.current, host.version()));
     publish();
     return () => host.close('document-replaced');
   }, [host, options.access, options.handle, publish]);
 
   useEffect(() => {
     host.syncCommands();
-    return host.subscribe(() => host.syncCommands());
-  }, [host]);
+    const unsubscribe = host.subscribe(() => host.syncCommands());
+    const unsubscribeShortcuts = options.commands.subscribeShortcuts(() => host.syncCommands());
+    return () => {
+      unsubscribe();
+      unsubscribeShortcuts();
+    };
+  }, [host, options.commands]);
+
+  const proposalState = proposalSignature(options, host.version());
+  useLayoutEffect(() => {
+    if (options.handle && host.generation()) host.proposalsChanged(proposalState);
+  }, [host, options.handle, proposalState]);
 
   const activations = useSyncExternalStore(host.subscribe, host.activations, () => NO_ACTIVATIONS);
+  const decorations = managed && activations.length ? host.rowDecorations() : NO_DECORATIONS;
+  const activeSheetId = options.selection?.sheetId ?? null;
+  const t = options.t;
+  const rowGutter = useMemo(() => rowDecorationIndex(decorations, activeSheetId,
+    (row) => t('a11y.rowHeaderLabel', { row: row + 1 })), [decorations, activeSheetId, t]);
 
   useEffect(() => {
-    if (managed) host.selectionChanged(options.selection);
+    if (managed) {
+      selectionRef.current = options.selection;
+      const identity = host.selectionChanged(options.selection);
+      selectionIdentityRef.current = identity;
+      settleRef.current?.notifySelectionChange(identity);
+    }
   }, [host, managed, options.handle, options.selection]);
 
   useEffect(() => {
@@ -148,11 +286,15 @@ export function useXlsxPluginHost(options: UseXlsxPluginHostOptions): XlsxPlugin
   }, [managed, publish]);
 
   const presentGrid = useCallback(
-    (painted: PaintedGrid | null) => {
-      paintedRef.current = painted;
-      if (!painted || (latest.current.plugins?.length ?? 0) > 0) publish();
+    (next: PaintedGrid | null) => {
+      paintedRef.current = next;
+      if (!next || (latest.current.plugins?.length ?? 0) > 0) publish();
+      paintedStore.emit();
+      if (next && selectionIdentityRef.current !== null) {
+        settleRef.current?.notifySelectionChange(selectionIdentityRef.current);
+      }
     },
-    [publish]
+    [paintedStore, publish]
   );
 
   const overlayLayerRef = useCallback(
@@ -175,5 +317,7 @@ export function useXlsxPluginHost(options: UseXlsxPluginHostOptions): XlsxPlugin
     overlayLayerRef,
     beginLoad,
     presentGrid,
+    rowGutter,
+    painted: paintedStore,
   };
 }

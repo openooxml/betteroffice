@@ -20,6 +20,7 @@ pub(crate) struct SnapshotValidation {
     pending_cell: Option<(CellRef, bool)>,
     spill_after: Option<(u32, u32)>,
     version: i64,
+    builtins: bool,
     base_section: u8,
     base_index: usize,
     base_child: usize,
@@ -256,7 +257,7 @@ mod pattern_tests {
                     &mut position,
                     SnapshotBudget::new(1, 768).unwrap(),
                     &mut meter,
-                    |window| window.format(&model, xf, &BTreeMap::new(), None),
+                    |window| window.format(&model, xf, &BTreeMap::new(), false, None),
                 )
                 .unwrap();
                 bytes.extend(chunk);
@@ -416,6 +417,7 @@ impl JsonWindow<'_> {
         model: &WorkbookModel,
         xf: Option<&xlsx_model::styles::Xf>,
         formats: &BTreeMap<u16, usize>,
+        builtins: bool,
         source_xf: Option<u32>,
     ) -> JsonResult {
         let default = CellFormat::default();
@@ -438,12 +440,20 @@ impl JsonWindow<'_> {
         for (key, value) in [
             (b",\"bold\":".as_slice(), font.bold),
             (b",\"italic\":".as_slice(), font.italic),
-            (b",\"underline\":".as_slice(), font.underline),
-            (b",\"strike\":".as_slice(), font.strike),
+            (
+                b",\"underline\":".as_slice(),
+                font.underline != xlsx_model::RunUnderline::None,
+            ),
         ] {
             self.raw(key)?;
             self.small(&value)?;
         }
+        if let Some(style) = font.underline_style() {
+            self.raw(b",\"underline_style\":")?;
+            self.small(&style)?;
+        }
+        self.raw(b",\"strike\":")?;
+        self.small(&font.strike)?;
         self.raw(b",\"color\":")?;
         self.optional_color(font.color.as_ref())?;
         self.raw(b"},\"fill\":")?;
@@ -484,7 +494,8 @@ impl JsonWindow<'_> {
         }
         self.raw(b"},\"numberFormat\":")?;
         let id = xf.and_then(|xf| xf.num_fmt_id).unwrap_or(0);
-        if let Some(&index) = formats.get(&id).filter(|_| id >= 164) {
+        let declared = id != 0 && (id >= 164 || !builtins);
+        if let Some(&index) = formats.get(&id).filter(|_| declared) {
             self.raw(b"{\"kind\":\"custom\",\"pattern\":")?;
             self.string(&model.styles.num_fmts[index].1)?;
             self.raw(b"}")?;
@@ -805,6 +816,7 @@ impl SnapshotValidation {
                 .and_then(|value| value.cast::<i64>().ok())
                 .ok_or_else(invalid)?;
             validate_schema_version(self.version).map_err(SnapshotError::new)?;
+            self.builtins = reads_builtins(self.version, &base.styles);
             structure_generation(&meta, &txn).map_err(SnapshotError::new)?;
             atomic(&meta, &txn, BASE_FINGERPRINT)?;
             if order.len(&txn) as usize != model.sheets.len()
@@ -836,11 +848,16 @@ impl SnapshotValidation {
         if self.phase == 8 {
             let fingerprint = atomic(&meta, &txn, BASE_FINGERPRINT)?;
             let fingerprint = string(&fingerprint)?;
-            let candidate = base
-                .fingerprints
-                .get(&self.version)
-                .and_then(|values| values.get(self.metadata_child))
-                .ok_or_else(invalid)?;
+            let declared = self.version >= NUMBER_FORMATS_SCHEMA_VERSION
+                && declares_builtin_number_formats(&base.styles);
+            let candidate = if declared {
+                (self.metadata_child == 0).then_some(&base.fingerprint)
+            } else {
+                base.fingerprints
+                    .get(&self.version.min(FINGERPRINT_SCHEMA_VERSION))
+                    .and_then(|values| values.get(self.metadata_child))
+            }
+            .ok_or_else(invalid)?;
             allowance(128, budget, &mut self.unit_bytes)?;
             let Some(matches) = compare_text(
                 fingerprint,
@@ -894,12 +911,14 @@ impl SnapshotValidation {
                 return Ok(false);
             };
             let start = self.json.bytes;
+            let builtins = self.builtins;
             let (done, bytes) =
                 json_window(&mut self.json, budget, &mut self.unit_bytes, |window| {
                     window.format(
                         model,
                         xf,
                         &self.number_formats,
+                        builtins,
                         (index != 0 && !self.plain_format).then(|| index - 1),
                     )
                 })?;
@@ -1041,11 +1060,6 @@ impl SnapshotValidation {
                             }
                             FREEZE_PANE => {
                                 allowance(128, budget, &mut self.unit_bytes)?;
-                                if freeze_pane_from_any(&value).map_err(SnapshotError::new)?
-                                    != sheet.freeze_pane
-                                {
-                                    return Err(invalid());
-                                }
                             }
                             MERGES => {
                                 let values =
@@ -1194,14 +1208,21 @@ impl SnapshotValidation {
                 }
                 if self.field == required.len() + 2 {
                     allowance(128, budget, &mut self.unit_bytes)?;
-                    if self.version < FREEZE_PANE_SCHEMA_VERSION
-                        && base
+                    let stored = map
+                        .get(&txn, FREEZE_PANE)
+                        .filter(|_| self.version >= FREEZE_PANE_SCHEMA_VERSION);
+                    let pane = match stored {
+                        Some(Out::Any(value)) => {
+                            freeze_pane_from_any(&value).map_err(SnapshotError::new)?
+                        }
+                        Some(_) => return Err(invalid()),
+                        None => base
                             .freeze_panes
                             .get(base_sheet_index(&key).unwrap_or(usize::MAX))
                             .copied()
-                            .flatten()
-                            != sheet.freeze_pane
-                    {
+                            .flatten(),
+                    };
+                    if pane != sheet.freeze_pane {
                         return Err(invalid());
                     }
                     self.field += 1;
@@ -1251,7 +1272,7 @@ impl SnapshotValidation {
                 }
                 if (required.len() + 4..=required.len() + 5).contains(&self.field) {
                     let columns = self.field == required.len() + 4;
-                    if let Some(hidden) = (self.version < SCHEMA_VERSION)
+                    if let Some(hidden) = (self.version < CHARTS_SCHEMA_VERSION)
                         .then(|| {
                             base.hidden_dimensions
                                 .get(base_sheet_index(&key).unwrap_or(usize::MAX))
@@ -1481,7 +1502,7 @@ impl SnapshotValidation {
                                             )
                                             .map_err(SnapshotError::new)?;
                                         } else if key.starts_with(HYPERLINK_PREFIX) {
-                                            if self.version < SCHEMA_VERSION {
+                                            if self.version < CHARTS_SCHEMA_VERSION {
                                                 return Err(invalid());
                                             }
                                             if !self.collect_hyperlink_edit(
@@ -1792,7 +1813,7 @@ impl SnapshotValidation {
                         let actual = child
                             .get(&txn, &index.to_string())
                             .and_then(|value| value.cast::<f64>().ok());
-                        let fallback = if self.version < SCHEMA_VERSION {
+                        let fallback = if self.version < CHARTS_SCHEMA_VERSION {
                             base.hidden_dimensions
                                 .get(
                                     base_sheet_index(
@@ -2009,6 +2030,7 @@ impl SnapshotValidation {
                             || left.range != right.range
                             || left.header_rows != right.header_rows
                             || left.totals_rows != right.totals_rows
+                            || left.style != right.style
                             || left.columns.len() != right.columns.len()
                         {
                             return Err(invalid());
@@ -2043,6 +2065,9 @@ impl SnapshotValidation {
                         .formats
                         .get(base_sheet_index(key).unwrap_or(usize::MAX))
                         .unwrap_or(&default);
+                    if left.hide_gridlines != sheet.format.hide_gridlines {
+                        return Err(invalid());
+                    }
                     if !equal_record(
                         left,
                         &sheet.format,
@@ -2409,7 +2434,7 @@ mod tests {
             for _ in 0..=expected.len() {
                 let mut meter = 0;
                 let (done, bytes) = json_window(&mut position, budget, &mut meter, |window| {
-                    window.format(&model, xf, &formats, None)
+                    window.format(&model, xf, &formats, false, None)
                 })
                 .unwrap();
                 assert!(meter <= budget.max_bytes());

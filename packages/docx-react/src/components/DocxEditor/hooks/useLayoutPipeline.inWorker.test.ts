@@ -3,7 +3,15 @@ import { afterAll, afterEach, beforeAll, expect, spyOn, test } from 'bun:test';
 import type { LayoutComputation } from '@betteroffice/docx/editor';
 import { LayoutSelectionGate, type ResidentMeasurementConfig } from '@betteroffice/docx/layout';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
-import { proposalSetIdentity, type ResidentProposalReply, type YrsRenderEnv, type YrsSession } from '@betteroffice/docx/yrs';
+import type { DisplayListQueries, DisplayListVisualLine } from '@betteroffice/docx/layout/render';
+import {
+  proposalSetIdentity,
+  type ResidentProposalReply,
+  type YrsLoc,
+  type YrsRenderEnv,
+  type YrsSession,
+  type YrsStickyPosition,
+} from '@betteroffice/docx/yrs';
 import { isLayoutQueued, isSupersededLayout, sourceVersionOf } from '../internals/layoutProvenance';
 import {
   deferWorkerOpenReplica,
@@ -52,6 +60,7 @@ interface HookProps {
   renderEnv?: YrsRenderEnv;
   zoom?: number;
   viewport?: HTMLDivElement;
+  displayListQueries?: DisplayListQueries;
 }
 
 const MEASUREMENT: ResidentMeasurementConfig = {
@@ -89,6 +98,7 @@ async function opened({
   ownsDocument = false,
   viewerSession = false,
   fontRequirementsInWorker = undefined as FontRequirementsInWorker | undefined,
+  scroll = undefined as ScrollScene | undefined,
 } = {}) {
   let nextFrame = 0;
   const frames = new Map<number, FrameRequestCallback>();
@@ -102,6 +112,14 @@ async function opened({
   });
   restoreFrames.push(() => { requestFrame.mockRestore(); cancelFrame.mockRestore(); });
   const { doc, session } = fakeDocument();
+  if (scroll) {
+    Object.assign(session, {
+      encodeStickyPosition: (loc: YrsLoc): YrsStickyPosition =>
+        ({ story: loc.story, encoded: Uint8Array.of(loc.offset) }),
+      resolveStickyPosition: (position: YrsStickyPosition): YrsLoc =>
+        ({ story: position.story, paraId: 'p', offset: position.encoded[0]! }),
+    });
+  }
   doc.workerOwnsDocument = ownsDocument;
   const replica = pendingReplica
     ? deferWorkerOpenReplica(session, () => new Promise(() => {}), () => {}, () => {})
@@ -116,7 +134,9 @@ async function opened({
   const worker: WorkerPass[] = [];
   const errors: Error[] = [];
   const syncCoordinator = new LayoutSelectionGate();
-  const hook = renderHook(({ session, renderEnv, zoom = 1, viewport }: HookProps) =>
+  const getScrollContainer = () => scroll?.scroller ?? null;
+  const pagesContainerRef = { current: scroll?.host ?? null };
+  const hook = renderHook(({ session, renderEnv, zoom = 1, viewport, displayListQueries }: HookProps) =>
     useLayoutPipeline({
       document: null,
       session,
@@ -126,10 +146,15 @@ async function opened({
       zoom,
       residentMeasurementConfig: () => (doc.fontsReady ? doc.measurement : null),
       deferLayoutPass: () => false,
-      pagesContainerRef: { current: null },
+      pagesContainerRef,
       viewportLayoutRef: { current: viewport ?? null },
       syncCoordinator,
-      getScrollContainer: () => null,
+      getScrollContainer,
+      displayListQueries,
+      displayPositionToYrsLoc: scroll
+        ? (position) => ({ story: 'body', paraId: 'p', offset: position })
+        : undefined,
+      yrsLocToDisplayPosition: scroll ? (loc) => loc.offset : undefined,
       onError: (error) => errors.push(error),
       fontRequirementsInWorker: fontRequirementsInWorker ??
         (viewerSession ? () => Promise.resolve('[]') : undefined),
@@ -174,6 +199,75 @@ async function opened({
     doc, session, worker, errors, hook, frame, answer, shown, replica, ensureReplica,
     mainPreflight, release,
   };
+}
+
+const PAGE_HEIGHT = 800;
+const PAGE_GAP = 24;
+const PAGE_PADDING = 24;
+const SCROLLER_TOP = 60;
+const SCROLLER_HEIGHT = 200;
+
+interface ScrollScene {
+  state: { scrollTop: number; pageCount: number };
+  scroller: HTMLDivElement;
+  host: HTMLDivElement;
+}
+
+/** A scroller over a page column whose client rects follow its scrollTop and page count. */
+function scrollScene(scrollTop: number, pageCount: number): ScrollScene {
+  const state = { scrollTop, pageCount };
+  const contentHeight = () =>
+    PAGE_PADDING * 2 + state.pageCount * PAGE_HEIGHT + (state.pageCount - 1) * PAGE_GAP;
+  const rect = (top: number, height: number) => new DOMRect(0, top, 600, height);
+  const scroller = document.createElement('div');
+  const host = document.createElement('div');
+  scroller.append(host);
+  document.body.append(scroller);
+  Object.defineProperties(scroller, {
+    scrollTop: {
+      configurable: true,
+      get: () => state.scrollTop,
+      set: (next: number) => {
+        state.scrollTop = Math.min(Math.max(0, next), Math.max(0, contentHeight() - SCROLLER_HEIGHT));
+      },
+    },
+    scrollHeight: { configurable: true, get: contentHeight },
+    clientHeight: { configurable: true, value: SCROLLER_HEIGHT },
+    getBoundingClientRect: { configurable: true, value: () => rect(SCROLLER_TOP, SCROLLER_HEIGHT) },
+  });
+  Object.defineProperties(host, {
+    offsetWidth: { configurable: true, value: 600 },
+    clientWidth: { configurable: true, value: 600 },
+    getBoundingClientRect: {
+      configurable: true,
+      value: () => rect(SCROLLER_TOP - state.scrollTop, contentHeight()),
+    },
+  });
+  restoreFrames.push(() => scroller.remove());
+  return { state, scroller, host };
+}
+
+/** Pages of lines 100px apart; `firstPage` pages of other text come before them. */
+function pagedQueries(pages: number, firstPage = 0): DisplayListQueries {
+  const lines: DisplayListVisualLine[] = [];
+  for (let page = 0; page < firstPage + pages; page++) {
+    for (let line = 0; line < 8; line++) {
+      const from = page < firstPage ? 200 + page * 10 + line : (page - firstPage) * 10 + line + 1;
+      lines.push({
+        pageIndex: page, x: 0, y: line * 100, width: 500, height: 16, baseline: line * 100 + 12,
+        from, to: from, paraId: 'p',
+      });
+    }
+  }
+  return {
+    pageCount: () => firstPage + pages,
+    pageSize: () => ({ width: 600, height: PAGE_HEIGHT }),
+    visualLines: () => lines,
+    visualLinesOnPage: (pageIndex: number) => lines.filter((line) => line.pageIndex === pageIndex),
+    visualLineExtent: (pageIndex: number) =>
+      lines.some((line) => line.pageIndex === pageIndex) ? { top: 0, bottom: 716 } : null,
+    anchorRect: () => null,
+  } as unknown as DisplayListQueries;
 }
 
 async function holdProposals(session: YrsSession) {
@@ -809,6 +903,30 @@ test.each([false, true])('a local edit in the same frame as a host batch keeps t
   expect(worker).toHaveLength(1);
   expect(doc.laidOutHere).toEqual([2]);
   expect(shown()).toBe('2');
+});
+
+test('a remote pass restores the reading position scrolled to while it was pending', async () => {
+  const scroll = scrollScene(900, 3);
+  const { doc, session, worker, errors, hook, frame, answer, shown } = await opened({ scroll });
+  hook.rerender({ session, displayListQueries: pagedQueries(3) });
+
+  doc.version = 2;
+  act(() => hook.result.current.scheduleLayout('remote'));
+  await frame();
+  expect(worker.map((pass) => pass.at)).toEqual([1, 2]);
+
+  scroll.scroller.dispatchEvent(new Event('wheel'));
+  scroll.state.scrollTop = 1_000;
+  scroll.scroller.dispatchEvent(new Event('scroll'));
+  await act(() => new Promise((resolve) => setTimeout(resolve, 120)));
+
+  await answer(1);
+  expect(shown()).toBe('2');
+  scroll.state.pageCount = 4;
+  act(() => hook.rerender({ session, displayListQueries: pagedQueries(3, 1) }));
+
+  expect(scroll.state.scrollTop).toBe(1_000 + PAGE_HEIGHT + PAGE_GAP);
+  expect(errors).toEqual([]);
 });
 
 test('a worker layout of a host batch never replaces a newer local edit', async () => {

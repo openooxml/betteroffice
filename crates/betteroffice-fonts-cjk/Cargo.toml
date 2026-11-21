@@ -1,0 +1,20 @@
+[package]
+name = "betteroffice-fonts-cjk"
+version.workspace = true
+edition.workspace = true
+license = "Apache-2.0 AND OFL-1.1"
+homepage.workspace = true
+repository.workspace = true
+publish = ["crates-io"]
+description = "Bundled cjk font pack bytes for native font resolution"
+include = ["src/**", "build.rs", "assets/**", "LICENSE", "LICENSES/**"]
+
+[dependencies]
+betteroffice-fonts-cjk-sc.workspace = true
+betteroffice-fonts-cjk-tc.workspace = true
+betteroffice-fonts-cjk-jp.workspace = true
+betteroffice-fonts-cjk-kr.workspace = true
+betteroffice-fonts-cjk-serif-sc.workspace = true
+
+[dev-dependencies]
+serde_json = "1"

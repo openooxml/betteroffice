@@ -11,7 +11,7 @@
 
 import { useRef, useCallback, useState, useEffect, useLayoutEffect, useMemo, forwardRef } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
-import type { Document, Theme } from '@betteroffice/docx/types/document';
+import type { Document, SectionProperties, Theme } from '@betteroffice/docx/types/document';
 import type {
   DocxContentControlQuery,
   DocxContentControlsOptions,
@@ -66,6 +66,8 @@ import { useEditorEngineChoice, useDocxEditorRoute } from './DocxEditor/internal
 import { useDocxFileAliases } from './DocxEditor/internals/fileAliases';
 import { useOutlineSidebar } from './DocxEditor/hooks/useOutlineSidebar';
 import { useKeyboardShortcuts } from './DocxEditor/hooks/useKeyboardShortcuts';
+import type { DocxShortcuts } from '../commands/shortcuts';
+import type { ShortcutIssue } from '../../../../shared/keyboard/resolve';
 import { useFileIO } from './DocxEditor/hooks/useFileIO';
 import { usePageSetupControls } from './DocxEditor/hooks/usePageSetupControls';
 import { useWatermarkControls } from './DocxEditor/hooks/useWatermarkControls';
@@ -98,6 +100,7 @@ import {
   type DocxMemoryPressure,
   type DocxMemoryStats,
 } from './DocxEditor/memoryStats';
+import type { ParagraphSpacingData } from './dialogs/ParagraphSpacingDialog';
 import { commandOutcome, useDocxCommandBinding } from './DocxEditor/hooks/useDocxCommands';
 import type {
   PagedEditorCommandBridge,
@@ -135,6 +138,7 @@ import { DocxEditorToolbar } from './DocxEditor/DocxEditorToolbar';
 import { DocxEditorPagedArea } from './DocxEditor/DocxEditorPagedArea';
 import { ContentControlWidgets } from './DocxEditor/ContentControlWidgets';
 import { CanvasPagedArea } from './DocxEditor/CanvasPagesView';
+import { MirrorLinkRouteContext, useMirrorLinkRoute } from './DocxEditor/mirrorLinkRoute';
 import { useCanvasRenderer } from './DocxEditor/hooks/useDisplayList';
 import { LazyPeerlessDocxEditor } from './DocxEditor/peerless/PeerlessDocxEditorLoader';
 import { LEGACY_SYNC_API_PROP, PeerlessSyncApiError } from './DocxEditor/peerless/contracts';
@@ -157,6 +161,7 @@ import { TrackedChangesReview } from './sidebar/TrackedChangesReview';
 import { useCanvasReviewGeometry } from './sidebar/canvasReviewGeometry';
 import type { ReactSidebarItem } from '../plugin-api/types';
 import type { DocxEditorPluginProps } from '../plugins/types';
+import { resolvedLocale } from '../i18n/LocaleContext';
 import { useDocxPluginHost } from '../plugins/useDocxPluginHost';
 import { PluginOverlays } from '../plugins/PluginOverlays';
 import { PluginDock } from '../plugins/PluginPanels';
@@ -172,6 +177,7 @@ import { clampZoom } from '../commands/evaluate';
 import { type DocxInput } from '@betteroffice/docx/utils';
 import type { FontDefinition, ScrollToParaIdOptions } from '@betteroffice/docx/utils';
 import { useFontLifecycle, useFontLoadScope } from '../hooks/useFontLifecycle';
+import { hostedFontProvider } from '../hooks/hostedFonts';
 import { useTableSelection } from '../hooks/useTableSelection';
 import { useDocumentHistory } from '../hooks/useHistory';
 
@@ -190,6 +196,14 @@ import type { RenderedDomContext } from '../plugin-api/types';
 
 export type { DocxParagraphMatch } from '@betteroffice/docx/yrs';
 import type { DocxParagraphMatch } from '@betteroffice/docx/yrs';
+
+/** What a save reports beside its bytes. */
+export interface DocxEditorSaveInfo {
+  /** Paragraphs saved as they were, without their new formatting, so that no structure is lost. */
+  keptUnchanged?: { structure: number; paragraphs: unknown[] };
+  /** Parts written whole with less structure than their source, outside what the edits touched. */
+  structureDropped?: unknown[];
+}
 
 export interface DocxSelectionInfo {
   paraId: string | null;
@@ -231,8 +245,12 @@ export interface DocxEditorBaseProps extends DocxEditorPluginProps {
   experimentalPrewarm?: boolean;
   /** Pre-parsed document (alternative to documentBuffer) */
   document?: Document | null;
-  /** Callback when document is saved */
-  onSave?: (buffer: ArrayBuffer) => void;
+  /**
+   * Callback when document is saved. `info.keptUnchanged` counts paragraphs the save wrote as
+   * they were, without their new formatting, because writing it would have dropped a
+   * hyperlink, field or drawing; absent when none were.
+   */
+  onSave?: (buffer: ArrayBuffer, info?: DocxEditorSaveInfo) => void;
   /** Owns File > Save and Cmd/Ctrl+S; return true to continue the built-in save. */
   onSaveRequest?: () => boolean | void | Promise<boolean | void>;
   /** Whether Save also downloads a copy. Defaults to true. */
@@ -315,6 +333,13 @@ export interface DocxEditorBaseProps extends DocxEditorPluginProps {
   /** Whether the editor is read-only. When true, hides toolbar and rulers */
   readOnly?: boolean;
   /**
+   * Whether to show the paste options control after a paste that carried
+   * formatting, letting the user re-apply that paste with merged or
+   * text-only formatting as part of the same undo step (default: true).
+   * Set false to never show it; the Ctrl shortcut that opens it is off too.
+   */
+  pasteOptions?: boolean;
+  /**
    * Experimental: paint a display-only preview of a document's first pages
    * before the whole document is opened, then hand them over to it. The editor
    * is read-only and plugins wait until the full document is open. Ignored
@@ -328,6 +353,14 @@ export interface DocxEditorBaseProps extends DocxEditorPluginProps {
    */
   pageMirror?: 'full' | 'text';
   /**
+   * Plain paragraphs for pages the worker-only editor has not built yet, without layout
+   * positions or headings. Tables read as paragraphs; notes, text boxes, headers, footers and
+   * list numbers or bullets are omitted. Beyond a reading window, a line names the page range with a Go to page
+   * control. Find in page matches no text outside that window. `pageMirror` covers built
+   * pages and replaces the section when a page is built. Default: `'text'`.
+   */
+  unbuiltPageMirror?: 'text' | 'off';
+  /**
    * Lets the ref's proposal methods run while the editor is read-only or viewing. Typing,
    * `applyEdits`, commands and plugin writes stay blocked. Default: false.
    */
@@ -339,6 +372,18 @@ export interface DocxEditorBaseProps extends DocxEditorPluginProps {
    * This lets the browser or host app handle native find/history shortcuts.
    */
   disableFindReplaceShortcuts?: boolean;
+  /**
+   * Remaps or disables keyboard shortcuts; menus, tooltips and the shortcuts dialog follow. An
+   * entry for `find` or `replace` wins over `disableFindReplaceShortcuts`.
+   * @experimental
+   */
+  shortcuts?: DocxShortcuts;
+  /**
+   * Reports each entry of `shortcuts` that was refused, and each default a host chord displaced.
+   * Without it, refusals are logged in development builds.
+   * @experimental
+   */
+  onShortcutIssue?: (issue: ShortcutIssue) => void;
   /** Custom toolbar actions */
   toolbarExtra?: ReactNode;
   /**
@@ -454,6 +499,12 @@ export interface DocxEditorBaseProps extends DocxEditorPluginProps {
    */
   onFirstPagePainted?: () => void;
   /**
+   * onReady is called once per document after its first page has painted, on a later turn, with
+   * the api the ref exposes, and never after the editor has unmounted or the file has changed.
+   * Worker editor only; a `previewFirstPage` preview does not count as that paint.
+   */
+  onReady?: (api: DocxEditorRef) => void;
+  /**
    * Unmanaged overlay content, drawn under managed plugin overlays.
    * @deprecated Contribute an `overlay` through `plugins` instead.
    */
@@ -484,22 +535,22 @@ export interface DocxEditorBaseProps extends DocxEditorPluginProps {
   /** Translation overrides. Import a locale JSON file and pass it directly. */
   i18n?: Translations;
   /**
-   * Font provider for this editor, overriding whatever `configureDefaultFonts`
-   * set globally. With neither, measurement falls back to the browser and may
-   * not paginate like Word. Call `configureDefaultFonts` before editors load;
-   * existing registries retain their provider, so it is not per editor or tenant.
+   * Font provider for this editor, overriding the `configureDefaultFonts`
+   * source and the default fonts manager. Call `configureDefaultFonts` before
+   * editors load; existing registries retain their provider, so it is not per
+   * editor or tenant.
    */
   measurementFontProvider?: BundledFontProvider;
 }
 
 export interface DocxAsyncEditorProps extends Omit<DocxEditorBaseProps, 'onChange'> {
-  /** @deprecated Removed in 0.6.0. Omit for the async editor. */
+  /** @deprecated Removed in 0.7.0. Omit for the async editor. */
   [LEGACY_SYNC_API_PROP]?: false;
   onChange?: undefined;
 }
 
 export interface DocxLegacyEditorProps extends DocxEditorBaseProps {
-  /** @deprecated Enables the sync hybrid runtime, removed in 0.6.0. */
+  /** @deprecated Enables the sync hybrid runtime, removed in 0.7.0. */
   [LEGACY_SYNC_API_PROP]: true;
 }
 
@@ -869,10 +920,16 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   ref
 ) {
   const props = useDocxFileAliases(aliasedProps);
+  const hostedFamilies = props.fonts?.map(font => font.family.trim().toLowerCase()).sort().join('\n') ?? '';
+  const measurementFontProvider = useMemo(
+    () => hostedFontProvider(props.measurementFontProvider, hostedFamilies ? props.fonts : undefined),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [props.measurementFontProvider, hostedFamilies]
+  );
   const choice = useDocxEditorRoute(props);
   if (choice.route === 'sync-api-error') return <DocxSyncApiRefusal key={choice.route} {...props} />;
-  if (choice.route === 'peerless') return <LazyPeerlessDocxEditor key={choice.route} {...props} ref={ref} />;
-  return <LegacyDocxEditor key={choice.route} {...props} ref={ref} />;
+  if (choice.route === 'peerless') return <LazyPeerlessDocxEditor key={choice.route} {...props} measurementFontProvider={measurementFontProvider} ref={ref} />;
+  return <LegacyDocxEditor key={choice.route} {...props} measurementFontProvider={measurementFontProvider} ref={ref} />;
 });
 
 function DocxSyncApiRefusal(props: Pick<DocxEditorProps, 'onError' | 'className' | 'style'>) {
@@ -926,6 +983,8 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
     allowHostProposals = false,
     showHostProposalsInSidebar = false,
     disableFindReplaceShortcuts = false,
+    shortcuts,
+    onShortcutIssue,
     toolbarExtra,
     toolbar,
     className = '',
@@ -1020,7 +1079,8 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
   // PagedEditor ref declared early so comment management can read the live
   // Yrs session before the tracked-changes effect drives `setComments`.
   const pagedEditorRef = useRef<PagedEditorRef>(null);
-  const fontScope = useFontLoadScope();
+  const mirrorLinkRoute = useMirrorLinkRoute();
+  const fontScope = useFontLoadScope(fonts);
 
   const {
     comments,
@@ -1382,6 +1442,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
     },
     [untakenWorkerSession, reportLayoutError]
   );
+  const reportCutRefused = useCallback((error: Error) => onError?.(error, { recoverable: true }), [onError]);
   const readOnly = modeReadOnly || opening;
   const holdOpeningInput = workerOpen && opening && !modeReadOnly && !viewerSession;
   if (opening) writeModeRef.current = 'viewing';
@@ -1490,6 +1551,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
     setState((prev) => ({ ...prev, zoom }));
   }, []);
 
+  const [paragraphSpacingDialog, setParagraphSpacingDialog] = useState<ParagraphSpacingData | null>(null);
   const commands = useDocxCommandBinding({
     experimentalWorkerOpen: workerOpen,
     pagedEditorRef,
@@ -1535,6 +1597,11 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
         imageDialogTarget(image, commandBridgeRef.current?.imageHandle(image.pos) ?? null)
       );
       setImagePropsOpen(true);
+    },
+    openParagraphSpacing: () => {
+      const spacing = commandController.store.getState('paragraphSpacing').value;
+      setParagraphSpacingDialog({ before: spacing?.before ?? 0, after: spacing?.after ?? 0,
+        lineSpacing: commandController.store.getState('lineSpacing').value ?? 240 });
     },
     openPageSetup: () => handleOpenPageSetup(),
     openWatermark: () => handleOpenWatermark(),
@@ -1776,6 +1843,9 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
     containerRef,
     disableFindReplaceShortcuts,
     tableSelection,
+    shortcuts,
+    onShortcutIssue,
+    onError,
   });
 
   // Handle table insert from toolbar
@@ -1878,6 +1948,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
     contextMenuItems,
     handleContextMenuAction,
   } = useContextMenus({
+    commands: commandController.store,
     pagedEditorRef,
     focusActiveEditor,
     runTableAction: (action) => void commandController.store.execute('tableAction', action),
@@ -1933,6 +2004,12 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
   });
   const dialogApply = useRef({ pageSetup: handlePageSetupApply, watermark: handleWatermarkApply });
   dialogApply.current = { pageSetup: handlePageSetupApply, watermark: handleWatermarkApply };
+  const applyPageSetup = useCallback((properties: Partial<SectionProperties>) => {
+    void commands.complete('pageSetup', () => {
+      dialogApply.current.pageSetup(properties);
+      return commandOutcome(true);
+    });
+  }, [commands]);
 
   const { scrollPageInfo, setScrollPageInfo, readCurrentPage } = useScrollPageInfo({
     scrollContainerRef,
@@ -1959,6 +2036,11 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
       ? yrsCore.session
       : null;
   const pluginHost = useDocxPluginHost({
+    locale: resolvedLocale(i18n?._lang),
+    focusRoot: () => editorContentRef.current?.querySelector('.paged-editor') ?? null,
+    scrollContainerRef,
+    editorRootRef: containerRef,
+    shortcutsKey: shortcuts === undefined ? undefined : JSON.stringify(shortcuts),
     experimentalWorkerOpen: workerOpen,
     plugins,
     pluginGrants,
@@ -1997,9 +2079,10 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
   // Handle error from editor
   const handleEditorError = useCallback(
     (error: Error) => {
+      pluginHost.host.checkFocus();
       onError?.(error);
     },
-    [onError]
+    [onError, pluginHost.host]
   );
 
   const {
@@ -2536,8 +2619,19 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
   };
 
   const chromeContext = useMemo<EditorChrome>(
-    () => ({ showZoomControl, toolbarExtra }),
-    [showZoomControl, toolbarExtra]
+    () => ({
+      showZoomControl,
+      toolbarExtra,
+      pageLayout: {
+        currentProps: history.state?.package.document?.finalSectionProperties,
+        unit: rulerUnit,
+        onApply: (properties) => {
+          commands.open('pageSetup');
+          applyPageSetup(properties);
+        },
+      },
+    }),
+    [showZoomControl, toolbarExtra, history.state, rulerUnit, commands, applyPageSetup]
   );
   const chrome = !showToolbar ? null : toolbar !== undefined ? (
     toolbar !== null && (
@@ -2699,6 +2793,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
         pagedArea={
           <TrackedChangesContext.Provider value={{ options: trackedChangesOptions, peers: reviewPeers, user: collaboration?.user,
             clientId: collaboration?.clientId, items: reviewSidebarItems, navigate: navigateReviewItem }}>
+          <MirrorLinkRouteContext.Provider value={mirrorLinkRoute}>
           <CanvasPagedArea
             renderer={canvasRenderer}
             a11y={{
@@ -2749,6 +2844,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
               onYrsContentChange={handleYrsContentChange}
               onPagedSelectionChange={handlePagedSelectionChange}
               onYrsSelectionChange={handleYrsToolbarSelectionChange}
+              onYrsPartSelectionChange={pluginHost.publishSelection}
               onViewerSelectionChange={handlePagedViewerSelectionChange}
               onRenderedDomContextReady={
                 pluginHost.managed || onRenderedDomContextReady
@@ -2818,6 +2914,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
               onCaretInput={canvasRenderer.notifyCaretInput}
               onCaretInputDispatched={canvasRenderer.notifyCaretInputDispatched}
               onCaretInterrupt={canvasRenderer.notifyCaretInterrupt}
+              onCutRefused={reportCutRefused}
               canvasHostRef={canvasRenderer.canvasHostRef}
               floatingCommentBtn={floatingCommentBtn}
               isAddingComment={isAddingComment}
@@ -2847,6 +2944,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
               heldGeometry={pluginHost.heldGeometry}
             />
           </CanvasPagedArea>
+          </MirrorLinkRouteContext.Provider>
           </TrackedChangesContext.Provider>
         }
         loadingIndicator={
@@ -2891,14 +2989,16 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
             onImagePropsClose={() => setImagePropsOpen(false)}
             onApplyImageProperties={handleApplyImageProperties}
             pmImageContext={imageTarget}
-            showPageSetup={showPageSetup}
-            onPageSetupClose={() => setShowPageSetup(false)}
-            onPageSetupApply={(properties) => {
-              void commands.complete('pageSetup', () => {
-                dialogApply.current.pageSetup(properties);
-                return commandOutcome(true);
-              });
+            paragraphSpacing={paragraphSpacingDialog}
+            onParagraphSpacingClose={() => setParagraphSpacingDialog(null)}
+            onParagraphSpacingApply={(spacing) => {
+              void commands.complete('paragraphSpacingDialog', () =>
+                commandOutcome(commandBridgeRef.current?.format({ type: 'paragraphSpacing', ...spacing }) ?? false));
             }}
+            showPageSetup={showPageSetup}
+            pageSetupUnit={rulerUnit}
+            onPageSetupClose={() => setShowPageSetup(false)}
+            onPageSetupApply={applyPageSetup}
             showWatermark={showWatermark}
             onWatermarkClose={() => setShowWatermark(false)}
             onWatermarkApply={(watermark) => {

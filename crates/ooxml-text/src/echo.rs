@@ -13,7 +13,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use serde::Serialize;
 
-use crate::font_store::{FontError, FontId, FontStore};
+use crate::font_store::{FontError, FontId, FontStore, covered_character};
 use crate::shape::{ShapeDirection, ShapedGlyph, shape_with_direction};
 use crate::word_metrics::kern_features;
 
@@ -65,7 +65,7 @@ pub fn echo_glyph_set(
     let mut glyph_ids = vec![0; alphabet.len()];
     let mut advances = vec![0; alphabet.len()];
     for (index, ch) in alphabet.iter().enumerate() {
-        if !store.covers(font, *ch)? {
+        if covered_character(store, font, *ch)?.is_none() {
             continue;
         }
         let glyphs = shape(&ch.to_string())?;
@@ -205,7 +205,10 @@ fn shaping_barriers(
     }
     let nominal: Vec<_> = alphabet
         .iter()
-        .map(|&ch| store.glyph_id(font, ch))
+        .map(|&ch| match covered_character(store, font, ch)? {
+            Some(ch) => store.glyph_id(font, ch),
+            None => Ok(None),
+        })
         .collect::<Result<_, _>>()?;
     let mut lookups = BTreeSet::new();
     let mut required = BTreeSet::new();

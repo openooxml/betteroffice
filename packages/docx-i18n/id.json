@@ -32,6 +32,7 @@
     "ariaLabel": "Bilah alat pemformatan",
     "file": "File",
     "format": "Format",
+    "layout": "Tata Letak",
     "insert": "Sisipkan",
     "open": "Buka",
     "openShortcut": "Ctrl+O",
@@ -53,6 +54,16 @@
     "imageWrap": {
       "current": "Saat ini"
     }
+  },
+  "layout": {
+    "margins": "Margin",
+    "normal": "Normal",
+    "narrow": "Sempit",
+    "moderate": "Sedang",
+    "wide": "Lebar",
+    "customMargins": "Margin kustom...",
+    "morePaperSizes": "Ukuran kertas lainnya...",
+    "indent": "Indentasi"
   },
   "formattingBar": {
     "groups": {
@@ -104,7 +115,12 @@
     "single": "Tunggal",
     "double": "Ganda",
     "lineSpacingTitle": "Spasi baris: {label}",
-    "paragraphSpacing": "Jarak antar paragraf"
+    "paragraphSpacing": "Jarak antar paragraf",
+    "addBefore": "Tambahkan Spasi Sebelum Paragraf",
+    "removeBefore": "Hapus Spasi Sebelum Paragraf",
+    "addAfter": "Tambahkan Spasi Setelah Paragraf",
+    "removeAfter": "Hapus Spasi Setelah Paragraf",
+    "options": "Opsi Spasi Baris..."
   },
   "styles": {
     "selectAriaLabel": "Pilih gaya paragraf",
@@ -417,6 +433,8 @@
         "strikethroughDescription": "Aktifkan/nonaktifkan teks coret",
         "subscript": "Subskrip",
         "subscriptDescription": "Aktifkan/nonaktifkan subskrip",
+        "clearFormatting": "Hapus Semua Pemformatan",
+        "clearFormattingDescription": "Hapus pemformatan teks",
         "superscript": "Superskrip",
         "superscriptDescription": "Aktifkan/nonaktifkan superskrip",
         "alignLeft": "Rata Kiri",
@@ -470,7 +488,9 @@
         "pageUp": "Page Up",
         "pageDown": "Page Down",
         "ctrl": "Ctrl",
-        "del": "Del"
+        "del": "Del",
+        "shift": "Shift",
+        "alt": "Alt"
       }
     },
     "objectGeometry": {
@@ -478,6 +498,11 @@
       "top": "Atas (px)",
       "width": "Lebar (px)",
       "height": "Tinggi (px)"
+    },
+    "paragraphSpacing": {
+      "before": "Spasi Sebelum",
+      "after": "Spasi Setelah",
+      "multiple": "Kelipatan"
     }
   },
   "comments": {
@@ -505,6 +530,7 @@
     "paragraphMarkInserted": "Menyisipkan tanda paragraf",
     "paragraphMarkDeleted": "Menghapus tanda paragraf",
     "paragraphPropertiesChanged": "Mengubah properti paragraf",
+    "runPropertiesChanged": "Mengubah pemformatan teks",
     "rowInserted": "Menyisipkan baris",
     "rowDeleted": "Menghapus baris",
     "rowPropertiesChanged": "Mengubah properti baris",
@@ -515,6 +541,12 @@
     "tablePropertiesChanged": "Mengubah properti tabel",
     "tableInserted": "Menyisipkan tabel",
     "tableDeleted": "Menghapus tabel"
+  },
+  "pasteOptions": {
+    "button": "Opsi Tempel (Ctrl)",
+    "keepSource": "Pertahankan Pemformatan Sumber",
+    "merge": "Gabungkan Pemformatan",
+    "textOnly": "Pertahankan Teks Saja"
   },
   "contextMenu": {
     "ariaLabel": "Menu tindakan AI",
@@ -561,6 +593,8 @@
     "noDocumentLoaded": "Belum ada dokumen yang dimuat",
     "failedToLoad": "Gagal Memuat Dokumen",
     "failedToLoadDescription": "Berkas mungkin rusak, atau menggunakan sesuatu yang belum dapat dibaca editor ini.",
+    "failedToLoadDamaged": "File rusak atau bukan dokumen Word yang lengkap.",
+    "failedToLoadUnsupported": "Dokumen ini menggunakan sesuatu yang belum dapat dibaca editor ini.",
     "editorUnavailable": "Editor tidak dapat dimuat",
     "editorUnavailableDescription": "Periksa koneksi Anda, lalu muat ulang halaman.",
     "reloadPage": "Muat ulang halaman",
@@ -701,6 +735,8 @@
     "failedToParse": "Gagal membaca dokumen",
     "linkRemoved": "Tautan dihapus",
     "linkCopied": "Tautan disalin ke papan klip",
+    "pasteFailed": "Tempel tidak dapat diselesaikan. Tidak ada yang diubah.",
+    "cutRefused": "Pilihan berisi objek yang tidak dapat dipotong. Tidak ada yang diubah.",
     "failedToSave": "Gagal menyimpan dokumen",
     "documentInput": "Masukan dokumen",
     "documentPreview": "Pratinjau dokumen",
@@ -753,7 +789,11 @@
     "leftIndent": "Inden Kiri",
     "rightIndent": "Inden Kanan",
     "topMargin": "Margin Atas",
-    "bottomMargin": "Margin Bawah"
+    "bottomMargin": "Margin Bawah",
+    "leftMargin": "Margin kiri",
+    "rightMargin": "Margin kanan",
+    "hangingIndent": "Inden gantung",
+    "markerValue": "{name}: {value}"
   },
   "print": {
     "label": "Cetak",
@@ -766,8 +806,13 @@
   },
   "a11y": {
     "pageLabel": "Halaman {number}",
+    "unbuiltPagesNotMirrored": "Halaman {from} hingga {to} belum ada dalam tampilan baca.",
+    "goToPage": "Buka halaman {number}",
     "headerLabel": "Header halaman",
     "footerLabel": "Footer halaman",
+    "chartNoData": "Tidak ada data",
+    "pictureName": "Gambar",
+    "bulletMarker": "butir",
     "selected": "Dipilih",
     "selectionCleared": "Pilihan dihapus",
     "commentedText": "Teks yang dikomentari",
@@ -826,7 +871,7 @@
       "targetChanged": "Konten yang menjadi tujuan tindakan ini berubah sebelum dapat diterapkan.",
       "commandFailed": "Perintah tidak dapat diselesaikan.",
       "permissionDenied": "Aplikasi host tidak mengizinkan plugin ini menggunakan perintah ini.",
-      "unsupportedPolicy": "Plugin belum dapat menjalankan perintah ini. Gunakan batch edit sebagai gantinya.",
+      "unsupportedPolicy": "Perintah ini memerlukan tindakan pengguna di antarmuka plugin itu sendiri.",
       "pluginUnavailable": "Plugin tidak lagi aktif.",
       "aborted": "Tindakan plugin dibatalkan sebelum perintah dijalankan."
     }
@@ -835,6 +880,7 @@
     "toolbarGroup": "Plugin",
     "panelTabs": "Panel plugin",
     "collapsePanel": "Ciutkan {title}",
-    "expandPanel": "Luaskan {title}"
+    "expandPanel": "Luaskan {title}",
+    "miniToolbar": "Format pilihan"
   }
 }

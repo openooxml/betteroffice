@@ -19,6 +19,13 @@ const selectionDerivedEditStateFields = new Set([
   'toolbar', 'effectiveFormatting', 'hyperlink', 'tableContext', 'currentRevisionId',
 ]);
 
+const selectionStepKinds = new Set(['selectPoint', 'extendSelection', 'navigate']);
+
+/** A pointer or keyboard step that moves the selection and leaves the document as it is. */
+export function isSelectionStepCommand(kind: string): boolean {
+  return selectionStepKinds.has(kind);
+}
+
 function selectionIndependentEditState(state: DocxEditState): Record<string, unknown> {
   return Object.fromEntries(Object.entries(state).filter(([key]) => !selectionDerivedEditStateFields.has(key)));
 }
@@ -34,6 +41,7 @@ export function createResidentCommandHost(options: DocxCommandHostOptions): Docx
   let selection: DocxCommandSelection | null | undefined;
   let editState: DocxEditState | undefined;
   let selectionOnly = false;
+  let selectionCause: 'remote' | undefined;
   const selections = new Map<number, DocxCommandSelection | null>(structuredClone(init.recoveryState?.selections ?? []));
   const selectionLimit = Math.max(256, options.retainedOutcomes ?? 256);
   const shared = createCommandHost<
@@ -58,6 +66,7 @@ export function createResidentCommandHost(options: DocxCommandHostOptions): Docx
       const preflight = await hooks.preflight(command, applyContext);
       const result = preflight.status === 'ready'
         ? await hooks.apply(preflight.prepared, applyContext) : preflight;
+      selectionCause = 'cause' in result ? result.cause : undefined;
       if (result.status === 'applied') {
         if (version === Number.MAX_SAFE_INTEGER) throw new Error('Command version space is exhausted');
         version += 1;
@@ -100,7 +109,12 @@ export function createResidentCommandHost(options: DocxCommandHostOptions): Docx
     if (includeState || !sameCommandState(selection, nextSelection)) {
       selection = structuredClone(nextSelection);
       ack.selection = structuredClone(selection);
-    } else delete ack.selection;
+      if (selectionCause) ack.cause = selectionCause;
+      else delete ack.cause;
+    } else {
+      delete ack.selection;
+      delete ack.cause;
+    }
     if (includeState || !sameCommandState(editState, nextEditState)) {
       editState = structuredClone(nextEditState);
       ack.editState = structuredClone(editState);
@@ -127,6 +141,8 @@ export function createResidentCommandHost(options: DocxCommandHostOptions): Docx
   const host: DocxCommandHost = {
     handler(context, command) {
       return serialize(async () => {
+        selectionOnly = false;
+        selectionCause = undefined;
         if (isCommandEnvelope(command) && command.basis.epoch !== init.epoch) {
           return packState({
             session: init.session, incarnation: init.incarnation, epoch: init.epoch,
@@ -134,7 +150,6 @@ export function createResidentCommandHost(options: DocxCommandHostOptions): Docx
             outcomes: [{ seq: command.seq, status: 'refused', reason: 'stale-epoch', committed: false }],
           }, true);
         }
-        selectionOnly = false;
         const duplicate = command.seq <= throughSeq;
         const reply = await shared.handler(context, command);
         const ack = isTransferResult(reply) ? reply.value : reply;
@@ -151,9 +166,12 @@ export function createResidentCommandHost(options: DocxCommandHostOptions): Docx
       });
     },
     policy(command) {
-      return isCommandEnvelope(command) && command.basis.epoch !== init.epoch
-        ? { lane: 'input', mutates: true, reframes: true, reorderable: false }
-        : shared.policy(command);
+      if (isCommandEnvelope(command) && command.basis.epoch !== init.epoch) {
+        return { lane: 'input', mutates: true, reframes: true, reorderable: false };
+      }
+      const policy = shared.policy(command);
+      return isCommandEnvelope(command) && isSelectionStepCommand(command.kind)
+        ? { ...policy, mutates: false, reframes: false } : policy;
     },
     checkpoint: (context) => serialize(async () => {
       const result = await shared.checkpoint(context);

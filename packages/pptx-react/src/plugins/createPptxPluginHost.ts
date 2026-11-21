@@ -1,3 +1,4 @@
+import { pluginActivationId } from '../../../../shared/plugin-host/gesture';
 import type { PresentationHandle } from '@betteroffice/pptx';
 import type { TranslationKey } from '@betteroffice/pptx-i18n';
 import {
@@ -13,7 +14,9 @@ import {
   type PptxCommandScope,
   type PptxPluginCommandBinding,
 } from '../commands/createPptxCommandStore';
-import { BUILT_IN_CHORDS, EDITING_CHORDS, normalizeChord } from '../commands/descriptors';
+import { isPluginCommandId, normalizeChord } from '../commands/descriptors';
+import { EDITING_CHORDS, inputKeepsChord } from '../commands/shortcutKeys';
+import { hostPluginChords, releasedChord, shortcutOwner } from '../commands/shortcutTable';
 import { commandReason } from '../commands/evaluate';
 import type {
   PptxCommandStore,
@@ -28,6 +31,7 @@ import {
   type PptxPluginClients,
 } from './createPluginClients';
 import { definitionProblem, pluginDefinition } from './definePptxPlugin';
+import type { SelectionCaret } from './geometry';
 import type {
   PptxPlugin,
   PptxPluginCommand,
@@ -39,6 +43,7 @@ import type {
   PptxPluginGeometry,
   PptxPluginGrant,
   PptxPluginLayout,
+  PptxPluginRect,
   PptxPluginSelection,
   PptxPluginSnapshot,
 } from './types';
@@ -52,7 +57,7 @@ export type PptxPluginActivation = RuntimeActivation<Definition, Context>;
 export interface PptxPluginHostAccess extends PptxPluginEditorAccess {
   translate(key: TranslationKey): string;
   /** Geometry of the presented frame that shows the current version, or null. */
-  geometry(): PptxPluginGeometry | null;
+  geometry(selection?: PptxPluginSelection, caretHint?: SelectionCaret): PptxPluginGeometry | null;
 }
 
 export type PptxPluginDocument = Pick<PresentationHandle, 'version' | 'onUpdate'>;
@@ -69,7 +74,11 @@ export interface PptxPluginHost {
   close(reason: 'document-replaced' | 'unmounted'): void;
   generation(): string | null;
   version(): string;
-  selectionChanged(selection: PptxPluginSelection): void;
+  selectionChanged(selection: PptxPluginSelection, caretHint?: SelectionCaret): void;
+  focusChanged(focused: boolean): void;
+  /** The focus tracker's re-check; opening and closing run it, since either can replace the surface. */
+  setFocusCheck(check: (() => void) | null): void;
+  localeChanged(locale: string): void;
   modeChanged(readOnly: boolean): void;
   layoutChanged(layout: PptxPluginLayout | null): void;
   /**
@@ -125,6 +134,10 @@ function sameLayout(a: PptxPluginLayout | null, b: PptxPluginLayout | null): boo
   return a === b || (!!a && !!b && a.id === b.id && a.version === b.version);
 }
 
+function sameCaret(a: SelectionCaret | undefined, b: SelectionCaret | undefined): boolean {
+  return a?.focusLine === b?.focusLine && a?.affinity === b?.affinity;
+}
+
 function readVersion(handle: PptxPluginDocument): string | null {
   try {
     return handle.version();
@@ -141,15 +154,20 @@ export function createPptxPluginHost(access: PptxPluginHostAccess | PptxPluginVi
     return createPluginClients(invocation, access, grant, store);
   });
   let reporter: ((error: PptxPluginError) => void) | undefined;
+  let focusCheck: (() => void) | null = null;
   let handle: PptxPluginDocument | null = null;
   let detachUpdates: (() => void) | null = null;
   let installed = false;
   let generations = 0;
+  let viewport: PptxPluginRect | null = null;
   let commandSignature: string | null = null;
   const state = {
     version: '',
     readOnly: false,
+    focused: false,
+    locale: 'en',
     selection: null as PptxPluginSelection,
+    caretHint: undefined as SelectionCaret | undefined,
     layout: null as PptxPluginLayout | null,
   };
   const activationScopes = new WeakMap<object, PptxCommandScope>();
@@ -201,7 +219,16 @@ export function createPptxPluginHost(access: PptxPluginHostAccess | PptxPluginVi
       () => runtime.grant(pluginId) as PptxPluginGrant,
       scopedCommandStore(controller(), scopeFor(invocation))
     );
-    const geometry = access.geometry();
+    const caretHint = state.caretHint;
+    const geometry = access.geometry(invocation.snapshot.selection, caretHint);
+    const getAnchorGeometry: PptxPluginGeometry['getAnchorGeometry'] = (target) => {
+      if (!geometry || invocation.refusal() || target.kind === 'selection' &&
+        (JSON.stringify(invocation.snapshot.selection) !== JSON.stringify(state.selection) ||
+          !sameCaret(caretHint, state.caretHint))) {
+        return { ok: false, failure: { code: 'layout-unavailable', message: 'The plugin context is no longer current.' } };
+      }
+      return geometry.getAnchorGeometry(target);
+    };
     return {
       pluginId,
       snapshot: invocation.snapshot,
@@ -213,7 +240,15 @@ export function createPptxPluginHost(access: PptxPluginHostAccess | PptxPluginVi
       read: clients.read,
       commands: clients.commands,
       edits: clients.edits,
-      geometry: geometry && invocation.snapshot.layout?.id === geometry.layout.id ? geometry : null,
+      geometry: geometry && invocation.snapshot.layout?.id === geometry.layout.id ? {
+        layout: geometry.layout,
+        get viewport() { return geometry.viewport; },
+        getAnchorGeometry,
+        readAnchorGeometries: (targets) => Promise.resolve(targets.map(getAnchorGeometry)),
+        toOverlayRect: geometry.toOverlayRect,
+        getShapeRect: geometry.getShapeRect,
+        getPositionAtPoint: geometry.getPositionAtPoint,
+      } : null,
       navigation: clients.navigation,
       setState: (next, atVersion) => invocation.setState(next, atVersion),
       onCleanup: (cleanup) => invocation.onCleanup(cleanup),
@@ -238,6 +273,8 @@ export function createPptxPluginHost(access: PptxPluginHostAccess | PptxPluginVi
       generation,
       version: state.version,
       readOnly: state.readOnly,
+      focused: state.focused,
+      locale: state.locale,
       grant: runtime.grant(pluginId) as PptxPluginGrant,
       selection: state.selection,
       layout: state.layout,
@@ -259,6 +296,15 @@ export function createPptxPluginHost(access: PptxPluginHostAccess | PptxPluginVi
   });
 
   const notify = (event: PptxPluginEvent): void => runtime.notify(event);
+  const notifyViewport = (): void => {
+    const generation = runtime.generation();
+    const geometry = state.layout ? access.geometry() : null;
+    const next = geometry && sameLayout(geometry.layout, state.layout) ? geometry.viewport ?? null : null;
+    if (viewport === next || (viewport && next && viewport.x === next.x && viewport.y === next.y &&
+      viewport.width === next.width && viewport.height === next.height)) return;
+    viewport = next ? { ...next } : null;
+    if (generation) notify({ type: 'viewport-change', generation, viewport });
+  };
 
   const documentChanged = (): void => {
     const generation = runtime.generation();
@@ -269,6 +315,7 @@ export function createPptxPluginHost(access: PptxPluginHostAccess | PptxPluginVi
     if (state.layout && state.layout.version !== version) {
       state.layout = null;
       notify({ type: 'layout-change', generation, layout: null });
+      notifyViewport();
     }
   };
 
@@ -354,27 +401,55 @@ export function createPptxPluginHost(access: PptxPluginHostAccess | PptxPluginVi
       state.version = readVersion(next) ?? '';
       state.layout = null;
       state.selection = null;
+      state.caretHint = undefined;
       observe();
+      viewport = null;
       generations += 1;
       runtime.open(`presentation-${generations}`);
+      focusCheck?.();
     },
 
     close(reason) {
       closeHandle();
       state.layout = null;
       runtime.close(reason);
+      focusCheck?.();
     },
 
     generation: () => runtime.generation(),
     version: () => state.version,
 
-    selectionChanged(selection) {
-      if (JSON.stringify(selection) === JSON.stringify(state.selection)) return;
+    selectionChanged(selection, caretHint) {
+      const selectionChanged = JSON.stringify(selection) !== JSON.stringify(state.selection);
+      if (!selectionChanged && sameCaret(caretHint, state.caretHint)) return;
+      state.caretHint = caretHint ? { ...caretHint } : undefined;
+      if (!selectionChanged) {
+        runtime.touch();
+        return;
+      }
       state.selection = selection;
       const generation = runtime.generation();
       if (generation) {
         notify({ type: 'selection-change', generation, version: state.version, selection });
       }
+    },
+
+    focusChanged(focused) {
+      if (focused === state.focused) return;
+      state.focused = focused;
+      const generation = runtime.generation();
+      if (generation) notify({ type: 'focus-change', generation, focused });
+    },
+
+    setFocusCheck(check) {
+      focusCheck = check;
+    },
+
+    localeChanged(locale) {
+      if (locale === state.locale) return;
+      state.locale = locale;
+      const generation = runtime.generation();
+      if (generation) notify({ type: 'locale-change', generation, locale });
     },
 
     modeChanged(readOnly) {
@@ -390,11 +465,15 @@ export function createPptxPluginHost(access: PptxPluginHostAccess | PptxPluginVi
       state.layout = layout;
       const generation = runtime.generation();
       if (generation) notify({ type: 'layout-change', generation, layout });
+      notifyViewport();
     },
 
     layoutId: () => (runtime.generation() === null ? null : state.layout?.id ?? null),
 
-    geometryChanged: () => runtime.touch(),
+    geometryChanged() {
+      notifyViewport();
+      runtime.touch();
+    },
 
     activations: () => runtime.activations(),
     subscribe: (listener) => runtime.subscribe(listener),
@@ -417,13 +496,24 @@ export function createPptxPluginHost(access: PptxPluginHostAccess | PptxPluginVi
         for (const command of definition.commands ?? []) {
           const id: PptxPluginCommandId = `plugin:${entry.pluginId}/${command.id}`;
           const shortcuts: { chord: string; args: null }[] = [];
-          for (const chord of command.shortcuts ?? []) {
+          const hostChords = hostPluginChords(commands, id);
+          for (const chord of hostChords ?? []) {
+            claimed.set(chord, id);
+            shortcuts.push({ chord, args: null });
+          }
+          for (const chord of hostChords ? [] : (command.shortcuts ?? [])) {
             const canonical = normalizeChord(chord)!;
-            const owner = BUILT_IN_CHORDS.has(canonical)
-              ? 'a built-in command'
-              : EDITING_CHORDS.has(canonical)
-                ? 'text editing'
-                : claimed.get(canonical);
+            const held = shortcutOwner(commands, canonical);
+            const editing = inputKeepsChord(canonical) ||
+              (EDITING_CHORDS.has(canonical) && !releasedChord(commands, canonical));
+            const owner =
+              held !== undefined && isPluginCommandId(held)
+                ? held
+                : editing
+                  ? 'text editing'
+                  : held !== undefined
+                    ? 'a built-in command'
+                    : claimed.get(canonical);
             if (!owner) {
               claimed.set(canonical, id);
               shortcuts.push({ chord, args: null });
@@ -448,6 +538,7 @@ export function createPptxPluginHost(access: PptxPluginHostAccess | PptxPluginVi
               mutatesDocument: command.mutatesDocument,
               shortcuts: Object.freeze(shortcuts),
             }),
+            activationId: pluginActivationId(entry.activation),
             state: () => commandState(entry.pluginId, command),
             execute: () => executeCommand(entry.pluginId, command),
           });
@@ -455,6 +546,7 @@ export function createPptxPluginHost(access: PptxPluginHostAccess | PptxPluginVi
         for (const local of definition.toolbar ?? [])
           toolbar.push(`plugin:${entry.pluginId}/${local}`);
       }
+      parts.push(`shortcuts:${commands.shortcutRevision()}`);
       const signature = parts.join('|');
       if (signature === commandSignature) {
         commands.refresh();

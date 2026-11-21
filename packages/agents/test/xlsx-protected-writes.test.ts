@@ -1,14 +1,17 @@
-import { expect, test } from 'bun:test';
+import { beforeAll, expect, test } from 'bun:test';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import JSZip from 'jszip';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { openWorkbook } from '@betteroffice/xlsx';
+import { initWasm, openWorkbook } from '@betteroffice/xlsx';
 import { attachXlsx, openXlsx } from '../src/xlsx';
 import { implicitFontWorkbook } from './format-fixtures';
 import { cliEnv } from './cli-env';
+import { initialize } from '../src/prototype';
+
+beforeAll(() => initialize('xlsx', initWasm));
 
 const protection = '<sheetProtection password="CAFE" sheet="1" objects="1" scenarios="1" formatCells="1" sort="1"/>';
 
@@ -19,7 +22,7 @@ async function fixture() {
   const styles = await zip.file('xl/styles.xml')!.async('string');
   zip.file('xl/styles.xml', styles.replace('<cellXfs count="2">', '<cellXfs count="3">').replace('</cellXfs>', '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyProtection="1"><protection locked="0" hidden="1"/></xf></cellXfs>').replace('applyNumberFormat="1"/>', 'applyNumberFormat="1" applyProtection="1"><protection locked="1" hidden="1"/></xf>'));
   const workbook = await zip.file('xl/workbook.xml')!.async('string');
-  zip.file('xl/workbook.xml', workbook.replace('<bookViews>', '<workbookProtection workbookPassword="BEEF" lockStructure="1"/><bookViews>').replace('</sheets>', '<sheet name="Other" sheetId="2" r:id="rId3"/><sheet name="Chart" sheetId="3" r:id="rId4"/></sheets>'));
+  zip.file('xl/workbook.xml', workbook.replace('<calcPr fullCalcOnLoad="1"/>', '').replace('<bookViews>', '<workbookProtection workbookPassword="BEEF" lockStructure="1"/><bookViews>').replace('</sheets>', '<sheet name="Other" sheetId="2" r:id="rId3"/><sheet name="Chart" sheetId="3" r:id="rId4"/></sheets>'));
   const rels = await zip.file('xl/_rels/workbook.xml.rels')!.async('string');
   const ns = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
   zip.file('xl/_rels/workbook.xml.rels', rels.replace('</Relationships>', `<Relationship Id="rId3" Type="${ns}/worksheet" Target="worksheets/sheet2.xml"/><Relationship Id="rId4" Type="${ns}/chartsheet" Target="chartsheets/sheet1.xml"/></Relationships>`));

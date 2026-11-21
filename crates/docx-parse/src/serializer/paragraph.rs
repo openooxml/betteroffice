@@ -6,7 +6,7 @@ use crate::formatting::{
 };
 use crate::inline::{
     BookmarkEnd, BookmarkStart, ComplexField, Hyperlink, InlineNode, InlineSdt, MathEquation, Run,
-    RunContent, SdtProperties, SimpleField,
+    RunContent, SdtProperties, SimpleField, field_run_digest, field_runs,
 };
 use crate::paragraph::{
     CommentRange, Paragraph, ParagraphContent, ParagraphPropertyChange, RangeEnd, RangeStart,
@@ -16,9 +16,12 @@ use crate::paragraph_identity::W14_NAMESPACE;
 use crate::section::SectionProperties;
 use crate::xml::ParseError;
 
-use super::context::SerializerContext;
+use super::context::{DeferredFormData, SerializerContext};
 use super::foundation::{BorderSide, write_border};
-use super::raw::{validate_math_subtree, validate_raw_subtree, validate_replayed_fragment};
+use super::raw::{
+    validate_form_field_data, validate_math_subtree, validate_raw_subtree,
+    validate_replayed_fragment,
+};
 use super::run::{
     append_generated, nonempty, nonempty_trimmed, normalized_tracked_id, serialize_deleted_run,
     serialize_run, serialize_text_formatting, write_shading,
@@ -311,7 +314,7 @@ pub(crate) fn serialize_inline_node(
     }
 }
 
-fn serialize_bookmark_start(bookmark: &BookmarkStart) -> String {
+pub(super) fn serialize_bookmark_start(bookmark: &BookmarkStart) -> String {
     let mut writer = XmlWriter::with_capacity(96);
     writer
         .start_element("w:bookmarkStart")
@@ -327,7 +330,7 @@ fn serialize_bookmark_start(bookmark: &BookmarkStart) -> String {
     writer.finish()
 }
 
-fn serialize_bookmark_end(bookmark: &BookmarkEnd) -> String {
+pub(super) fn serialize_bookmark_end(bookmark: &BookmarkEnd) -> String {
     let mut writer = XmlWriter::with_capacity(40);
     writer
         .start_element("w:bookmarkEnd")
@@ -422,10 +425,181 @@ fn serialize_simple_field(
     Ok(output)
 }
 
+enum FieldResultItem<'a> {
+    Run(&'a Run),
+    Bookmark(&'a InlineNode),
+}
+
+fn field_result_children<'a>(
+    nodes: &'a [InlineNode],
+    runs: Vec<&'a Run>,
+    projected: bool,
+    items: &mut Vec<FieldResultItem<'a>>,
+    aligned: &mut bool,
+) {
+    *aligned &= nodes
+        .iter()
+        .filter_map(|node| match node {
+            InlineNode::Run(run) => Some(run),
+            _ => None,
+        })
+        .eq(runs);
+    for node in nodes {
+        match node {
+            InlineNode::Run(run) if projected => {
+                items.push(FieldResultItem::Run(run));
+            }
+            _ => field_result_items(std::slice::from_ref(node), false, items, aligned),
+        }
+    }
+}
+
+fn field_result_items<'a>(
+    nodes: &'a [InlineNode],
+    projected: bool,
+    items: &mut Vec<FieldResultItem<'a>>,
+    aligned: &mut bool,
+) {
+    for node in nodes {
+        match node {
+            InlineNode::Run(run) => {
+                if projected {
+                    items.push(FieldResultItem::Run(run));
+                }
+            }
+            InlineNode::BookmarkStart(_) | InlineNode::BookmarkEnd(_) => {
+                items.push(FieldResultItem::Bookmark(node));
+            }
+            InlineNode::Hyperlink(link) => field_result_children(
+                link.structured_children
+                    .as_deref()
+                    .unwrap_or(&link.children),
+                field_runs(node),
+                projected,
+                items,
+                aligned,
+            ),
+            InlineNode::SimpleField(field) => match field
+                .structured_result
+                .as_ref()
+                .and_then(|result| result.inline.as_deref())
+            {
+                Some(nodes) => {
+                    field_result_children(nodes, field_runs(node), projected, items, aligned);
+                }
+                None if projected => {
+                    items.extend(field_runs(node).into_iter().map(FieldResultItem::Run));
+                }
+                None => {}
+            },
+            InlineNode::ComplexField(field) => {
+                for (content, runs) in [
+                    (&field.structured_code, &field.field_code),
+                    (&field.structured_result, &field.field_result),
+                ] {
+                    if let Some(nodes) = content
+                        .as_ref()
+                        .and_then(|content| content.inline.as_deref())
+                    {
+                        *aligned &= nodes.iter().flat_map(field_runs).eq(runs);
+                        field_result_items(nodes, false, items, aligned);
+                    }
+                }
+            }
+            InlineNode::InlineSdt(sdt) => {
+                field_result_items(&sdt.content, false, items, aligned);
+            }
+            InlineNode::Tracked(change) => {
+                field_result_items(&change.content, false, items, aligned);
+            }
+            InlineNode::Math(_) | InlineNode::RawXml(_) => {}
+        }
+    }
+}
+
+fn field_run_length(run: &Run) -> usize {
+    run.content
+        .iter()
+        .map(|content| match content {
+            RunContent::Text { text, .. } => text.encode_utf16().count(),
+            RunContent::CommentReference { .. }
+            | RunContent::FieldChar { .. }
+            | RunContent::InstrText { .. } => 0,
+            _ => 1,
+        })
+        .sum()
+}
+
+fn field_result_bookmarks(field: &ComplexField) -> Vec<(usize, &InlineNode)> {
+    let Some(nodes) = field
+        .structured_result
+        .as_ref()
+        .and_then(|content| content.inline.as_ref())
+    else {
+        return Vec::new();
+    };
+    let mut items = Vec::new();
+    let mut aligned = true;
+    field_result_items(nodes, true, &mut items, &mut aligned);
+    let in_place = aligned
+        && items
+            .iter()
+            .filter_map(|item| match item {
+                FieldResultItem::Run(run) => Some(*run),
+                FieldResultItem::Bookmark(_) => None,
+            })
+            .eq(field.field_result.iter());
+    let mut bookmarks = Vec::new();
+    let mut offset = 0usize;
+    for item in items {
+        match item {
+            FieldResultItem::Bookmark(node) => bookmarks.push((offset, node)),
+            FieldResultItem::Run(run) => {
+                offset = offset.saturating_add(if in_place { 1 } else { field_run_length(run) });
+            }
+        }
+    }
+    if in_place || bookmarks.is_empty() {
+        return bookmarks;
+    }
+    let mut boundaries = Vec::with_capacity(field.field_result.len() + 1);
+    let mut total = 0usize;
+    boundaries.push(total);
+    for run in &field.field_result {
+        total = total.saturating_add(field_run_length(run));
+        boundaries.push(total);
+    }
+    for (offset, node) in &mut bookmarks {
+        if *offset == 0 {
+            continue;
+        }
+        if *offset >= total {
+            *offset = field.field_result.len();
+            continue;
+        }
+        let after = boundaries.partition_point(|boundary| *boundary < *offset);
+        *offset = if boundaries[after] == *offset || matches!(node, InlineNode::BookmarkEnd(_)) {
+            after
+        } else {
+            after - 1
+        };
+    }
+    bookmarks.sort_by_key(|(boundary, _)| *boundary);
+    bookmarks
+}
+
 fn serialize_complex_field(
     field: &ComplexField,
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
+    if let Some(source) = field.source_run_xml.as_deref()
+        && !context.deletion
+        && !context.in_revision
+        && field.source_run_digest.as_deref() == Some(field_run_digest(field).as_str())
+    {
+        validate_replayed_fragment(source)?;
+        return Ok(source.to_owned());
+    }
     let formatting = field
         .field_result
         .first()
@@ -439,8 +613,57 @@ fn serialize_complex_field(
     if field.fld_lock == Some(true) {
         output.push_str(" w:fldLock=\"true\"");
     }
-    output.push_str("/></w:r>");
-    if field.field_code.is_empty() {
+    if field.dirty == Some(true) {
+        output.push_str(" w:dirty=\"true\"");
+    }
+    if let Some(raw) = field.raw_form_data_xml.as_deref() {
+        output.push('>');
+        match validate_form_field_data(raw) {
+            Ok(()) => {
+                context.note_form_data(raw);
+                output.push_str(raw);
+            }
+            Err(error) => {
+                let name = form_field_name(field, raw);
+                let detail = error.to_string();
+                let Some(token) = context.defer_form_data(&name, &detail) else {
+                    return Err(form_data_error(&name, &detail));
+                };
+                output.push_str(&token);
+            }
+        }
+        output.push_str("</w:fldChar></w:r>");
+    } else {
+        output.push_str("/></w:r>");
+    }
+    let code_nodes = field
+        .structured_code
+        .as_ref()
+        .filter(|content| !content.spans_paragraphs())
+        .and_then(|content| content.inline.as_deref())
+        .filter(|nodes| nodes.iter().any(|node| !matches!(node, InlineNode::Run(_))));
+    let in_place = code_nodes.filter(|nodes| {
+        !field.field_code.is_empty()
+            && nodes
+                .iter()
+                .flat_map(field_runs)
+                .eq(field.field_code.iter())
+    });
+    if let Some(nodes) = in_place {
+        for node in nodes {
+            output.push_str(&serialize_inline_node(node, context)?);
+        }
+    } else if let Some(nodes) = code_nodes {
+        for node in nodes.iter().filter(|node| {
+            matches!(
+                node,
+                InlineNode::BookmarkStart(_) | InlineNode::BookmarkEnd(_)
+            )
+        }) {
+            output.push_str(&serialize_inline_node(node, context)?);
+        }
+    }
+    if in_place.is_none() && field.field_code.is_empty() {
         output.push_str("<w:r>");
         output.push_str(&properties);
         output.push_str("<w:instrText");
@@ -450,7 +673,7 @@ fn serialize_complex_field(
         output.push('>');
         output.push_str(&super::xml_writer::escape_xml(&field.instruction));
         output.push_str("</w:instrText></w:r>");
-    } else {
+    } else if in_place.is_none() {
         for run in &field.field_code {
             output.push_str(&serialize_context_run(run, context)?);
         }
@@ -462,15 +685,26 @@ fn serialize_complex_field(
     let structured = field
         .structured_result
         .as_ref()
-        .filter(|content| content.blocks.is_none())
+        .filter(|content| !content.spans_paragraphs())
         .and_then(|content| content.inline.as_ref());
     if let Some(nodes) = structured {
         for node in nodes {
             output.push_str(&serialize_inline_node(node, context)?);
         }
     } else {
-        for run in &field.field_result {
+        let mut bookmarks = field_result_bookmarks(field).into_iter().peekable();
+        for (index, run) in field.field_result.iter().enumerate() {
+            while bookmarks
+                .peek()
+                .is_some_and(|(boundary, _)| *boundary == index)
+            {
+                let (_, node) = bookmarks.next().unwrap();
+                output.push_str(&serialize_inline_node(node, context)?);
+            }
             output.push_str(&serialize_context_run(run, context)?);
+        }
+        for (_, node) in bookmarks {
+            output.push_str(&serialize_inline_node(node, context)?);
         }
     }
     output.push_str("<w:r>");
@@ -498,6 +732,64 @@ pub fn serialize_inline_sdt(
     result?;
     writer.end_element().end_element();
     Ok(writer.finish())
+}
+
+fn form_field_name(field: &ComplexField, raw: &str) -> String {
+    raw.split_once(":name ")
+        .and_then(|(_, rest)| rest.split_once(":val=\""))
+        .and_then(|(_, rest)| rest.split_once('"'))
+        .map(|(name, _)| name)
+        .filter(|name| !name.is_empty())
+        .map_or_else(|| field.instruction.clone(), str::to_owned)
+}
+
+pub(crate) fn form_data_error(field: &str, detail: &str) -> ParseError {
+    ParseError::Canonical(format!(
+        "the form field data of field {field:?} cannot be written: {detail}"
+    ))
+}
+
+/// Fails when `xml` still holds a token written in place of form field data.
+pub(crate) fn reject_form_data_tokens(
+    xml: &str,
+    deferred: &DeferredFormData,
+) -> Result<(), ParseError> {
+    if deferred.tokens.is_empty() {
+        return Ok(());
+    }
+    let outside = deferred
+        .in_written_data
+        .then(|| comments_outside_form_data(xml))
+        .flatten();
+    let left = deferred.tokens.iter().find(|(token, _, _)| match &outside {
+        Some(comments) => comments.contains(token.as_str()),
+        None => xml.contains(token.as_str()),
+    });
+    match left {
+        Some((_, field, detail)) => Err(form_data_error(field, detail)),
+        None => Ok(()),
+    }
+}
+
+/// Every comment of `xml` outside all `w:ffData`, where tokens sit and written data never does.
+fn comments_outside_form_data(xml: &str) -> Option<std::collections::HashSet<String>> {
+    use quick_xml::events::Event;
+    let mut reader = quick_xml::Reader::from_str(xml);
+    let mut comments = std::collections::HashSet::new();
+    let mut depth = 0usize;
+    loop {
+        match reader.read_event().ok()? {
+            Event::Start(element) if element.name().as_ref() == b"w:ffData" => depth += 1,
+            Event::End(element) if depth > 0 && element.name().as_ref() == b"w:ffData" => {
+                depth -= 1;
+            }
+            Event::Comment(text) if depth == 0 => {
+                comments.insert(format!("<!--{}-->", std::str::from_utf8(&text).ok()?));
+            }
+            Event::Eof => return Some(comments),
+            _ => {}
+        }
+    }
 }
 
 pub(crate) fn serialize_sdt_properties(
@@ -721,7 +1013,7 @@ fn has_comment_reference(node: &InlineNode, id: f64) -> bool {
                 || field
                     .structured_result
                     .as_ref()
-                    .filter(|content| content.blocks.is_none())
+                    .filter(|content| !content.spans_paragraphs())
                     .and_then(|content| content.inline.as_ref())
                     .map_or_else(
                         || {
@@ -1023,7 +1315,7 @@ fn write_paragraph_cnf_style(writer: &mut XmlWriter, style: Option<&ParagraphCnf
     writer.end_element();
 }
 
-fn on_off(writer: &mut XmlWriter, name: &'static str, value: Option<bool>) {
+pub(super) fn on_off(writer: &mut XmlWriter, name: &'static str, value: Option<bool>) {
     match value {
         Some(true) => {
             writer.start_element(name).end_element();
@@ -1040,6 +1332,8 @@ fn on_off(writer: &mut XmlWriter, name: &'static str, value: Option<bool>) {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::{Value, json};
+
     use crate::inline::{Run, RunContent, RunType};
     use crate::serializer::s10::SerializerDeterminism;
 
@@ -1307,5 +1601,61 @@ mod tests {
         assert!(serialize_sdt_properties(&properties).is_err());
         properties.raw_properties_xml = None;
         assert!(serialize_sdt_properties(&properties).is_ok());
+    }
+
+    fn run_value(content: Value) -> Value {
+        json!({"type": "run", "content": [content]})
+    }
+
+    fn instruction_run() -> Value {
+        run_value(json!({"type": "instrText", "text": "QUOTE x"}))
+    }
+
+    fn spanning_field(code: Value, result: Value, field_result: Value) -> ComplexField {
+        serde_json::from_value(json!({
+            "type": "complexField",
+            "instruction": "QUOTE x",
+            "fieldType": "QUOTE",
+            "fieldCode": [instruction_run()],
+            "fieldResult": field_result,
+            "structuredCode": code,
+            "structuredResult": result
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_field_whose_code_spans_paragraphs_writes_its_code_runs() {
+        let code = json!({"inline": [
+            {"type": "bookmarkStart", "id": 5, "name": "CodeMark"},
+            instruction_run()
+        ], "blockCount": 1});
+        let field = spanning_field(code, Value::Null, json!([]));
+        let output = serialize_complex_field(&field, &mut context()).unwrap();
+        assert!(output.contains("QUOTE x"), "{output}");
+        assert!(!output.contains("CodeMark"), "{output}");
+    }
+
+    #[test]
+    fn a_field_whose_result_spans_paragraphs_writes_its_result_runs() {
+        let copy = run_value(json!({"type": "text", "text": "InlineCopy"}));
+        let written = run_value(json!({"type": "text", "text": "RunResult"}));
+        for count in [0, 1] {
+            let result = json!({"inline": [copy.clone()], "blockCount": count});
+            let field = spanning_field(Value::Null, result, json!([written.clone()]));
+            let output = serialize_complex_field(&field, &mut context()).unwrap();
+            assert!(output.contains("RunResult"), "{count}: {output}");
+            assert!(!output.contains("InlineCopy"), "{count}: {output}");
+        }
+    }
+
+    #[test]
+    fn a_field_whose_result_spans_paragraphs_holds_the_references_of_its_result_runs() {
+        let reference = |id: u32| run_value(json!({"type": "commentReference", "id": id}));
+        let result = json!({"inline": [reference(3)], "blockCount": 1});
+        let field = spanning_field(Value::Null, result, json!([reference(4)]));
+        let node = InlineNode::ComplexField(Box::new(field));
+        assert!(has_comment_reference(&node, 4.0));
+        assert!(!has_comment_reference(&node, 3.0));
     }
 }

@@ -32,6 +32,7 @@
     "ariaLabel": "Formatierungssymbolleiste",
     "file": "Datei",
     "format": "Format",
+    "layout": "Layout",
     "insert": "Einfügen",
     "open": "Öffnen",
     "openShortcut": "Strg+O",
@@ -53,6 +54,16 @@
     "imageWrap": {
       "current": "Aktuell"
     }
+  },
+  "layout": {
+    "margins": "Seitenränder",
+    "normal": "Normal",
+    "narrow": "Schmal",
+    "moderate": "Mittel",
+    "wide": "Breit",
+    "customMargins": "Benutzerdefinierte Seitenränder...",
+    "morePaperSizes": "Weitere Papierformate...",
+    "indent": "Einzug"
   },
   "formattingBar": {
     "groups": {
@@ -104,7 +115,12 @@
     "single": "Einfach",
     "double": "Doppelt",
     "lineSpacingTitle": "Zeilenabstand: {label}",
-    "paragraphSpacing": "Absatzabstand"
+    "paragraphSpacing": "Absatzabstand",
+    "addBefore": "Abstand vor Absatz hinzufügen",
+    "removeBefore": "Abstand vor Absatz entfernen",
+    "addAfter": "Abstand nach Absatz hinzufügen",
+    "removeAfter": "Abstand nach Absatz entfernen",
+    "options": "Zeilenabstandsoptionen..."
   },
   "styles": {
     "selectAriaLabel": "Absatzformatvorlage auswählen",
@@ -417,6 +433,8 @@
         "strikethroughDescription": "Durchstreichung umschalten",
         "subscript": "Tiefgestellt",
         "subscriptDescription": "Tiefstellung umschalten",
+        "clearFormatting": "Formatierung löschen",
+        "clearFormattingDescription": "Textformatierung löschen",
         "superscript": "Hochgestellt",
         "superscriptDescription": "Hochstellung umschalten",
         "alignLeft": "Linksbündig",
@@ -470,7 +488,9 @@
         "pageUp": "Bild auf",
         "pageDown": "Bild ab",
         "ctrl": "Strg",
-        "del": "Entf"
+        "del": "Entf",
+        "shift": "Umschalt",
+        "alt": "Alt"
       }
     },
     "objectGeometry": {
@@ -478,6 +498,11 @@
       "top": "Oben (px)",
       "width": "Breite (px)",
       "height": "Höhe (px)"
+    },
+    "paragraphSpacing": {
+      "before": "Abstand vor",
+      "after": "Abstand nach",
+      "multiple": "Mehrfach"
     }
   },
   "comments": {
@@ -505,6 +530,7 @@
     "paragraphMarkInserted": "Absatzmarke eingefügt",
     "paragraphMarkDeleted": "Absatzmarke gelöscht",
     "paragraphPropertiesChanged": "Absatzeigenschaften geändert",
+    "runPropertiesChanged": "Zeichenformatierung geändert",
     "rowInserted": "Zeile eingefügt",
     "rowDeleted": "Zeile gelöscht",
     "rowPropertiesChanged": "Zeileneigenschaften geändert",
@@ -515,6 +541,12 @@
     "tablePropertiesChanged": "Tabelleneigenschaften geändert",
     "tableInserted": "Tabelle eingefügt",
     "tableDeleted": "Tabelle gelöscht"
+  },
+  "pasteOptions": {
+    "button": "Einfügeoptionen (Strg)",
+    "keepSource": "Ursprüngliche Formatierung beibehalten",
+    "merge": "Formatierung zusammenführen",
+    "textOnly": "Nur Text übernehmen"
   },
   "contextMenu": {
     "ariaLabel": "KI-Aktionsmenü",
@@ -561,6 +593,8 @@
     "noDocumentLoaded": "Kein Dokument geladen",
     "failedToLoad": "Dokument konnte nicht geladen werden",
     "failedToLoadDescription": "Die Datei ist möglicherweise beschädigt oder verwendet etwas, das dieser Editor noch nicht lesen kann.",
+    "failedToLoadDamaged": "Die Datei ist beschädigt oder kein vollständiges Word-Dokument.",
+    "failedToLoadUnsupported": "Dieses Dokument enthält etwas, das dieser Editor noch nicht lesen kann.",
     "editorUnavailable": "Der Editor konnte nicht geladen werden",
     "editorUnavailableDescription": "Überprüfen Sie Ihre Verbindung und laden Sie die Seite neu.",
     "reloadPage": "Seite neu laden",
@@ -701,6 +735,8 @@
     "failedToParse": "Dokument konnte nicht verarbeitet werden",
     "linkRemoved": "Link entfernt",
     "linkCopied": "Link in Zwischenablage kopiert",
+    "pasteFailed": "Das Einfügen konnte nicht abgeschlossen werden. Es wurde nichts geändert.",
+    "cutRefused": "Die Auswahl enthält Objekte, die nicht ausgeschnitten werden können. Es wurde nichts geändert.",
     "failedToSave": "Dokument konnte nicht gespeichert werden",
     "documentInput": "Dokumenteingabe",
     "documentPreview": "Dokumentvorschau",
@@ -753,7 +789,11 @@
     "leftIndent": "Linker Einzug",
     "rightIndent": "Rechter Einzug",
     "topMargin": "Oberer Seitenrand",
-    "bottomMargin": "Unterer Seitenrand"
+    "bottomMargin": "Unterer Seitenrand",
+    "leftMargin": "Linker Seitenrand",
+    "rightMargin": "Rechter Seitenrand",
+    "hangingIndent": "Hängender Einzug",
+    "markerValue": "{name}: {value}"
   },
   "print": {
     "label": "Drucken",
@@ -766,8 +806,13 @@
   },
   "a11y": {
     "pageLabel": "Seite {number}",
+    "unbuiltPagesNotMirrored": "Die Seiten {from} bis {to} sind noch nicht in der Leseansicht.",
+    "goToPage": "Zu Seite {number} gehen",
     "headerLabel": "Kopfzeile",
     "footerLabel": "Fußzeile",
+    "chartNoData": "Keine Daten",
+    "pictureName": "Bild",
+    "bulletMarker": "Aufzählungszeichen",
     "selected": "Ausgewählt",
     "selectionCleared": "Auswahl aufgehoben",
     "commentedText": "Kommentierter Text",
@@ -826,7 +871,7 @@
       "targetChanged": "Der Inhalt, für den diese Aktion geöffnet wurde, hat sich geändert, bevor sie angewendet werden konnte.",
       "commandFailed": "Der Befehl konnte nicht abgeschlossen werden.",
       "permissionDenied": "Die Host-Anwendung hat diesem Plugin die Verwendung dieses Befehls nicht gestattet.",
-      "unsupportedPolicy": "Plugins können diesen Befehl noch nicht ausführen. Verwenden Sie stattdessen einen Bearbeitungsstapel.",
+      "unsupportedPolicy": "Dieser Befehl erfordert eine Benutzeraktion in der eigenen Oberfläche des Plugins.",
       "pluginUnavailable": "Das Plugin ist nicht mehr aktiv.",
       "aborted": "Die Pluginaktion wurde abgebrochen, bevor der Befehl ausgeführt wurde."
     }
@@ -835,6 +880,7 @@
     "toolbarGroup": "Plugins",
     "panelTabs": "Plugin-Bereiche",
     "collapsePanel": "{title} einklappen",
-    "expandPanel": "{title} ausklappen"
+    "expandPanel": "{title} ausklappen",
+    "miniToolbar": "Formatierung der Auswahl"
   }
 }

@@ -140,6 +140,7 @@ fn search(id: &str, text: &str) -> TextTarget {
 
 fn insert(target: TextTarget, text: &str) -> EditStep {
     EditStep::new(EditOperation::InsertText {
+        runs: None,
         target,
         at: TargetEdge::Start,
         text: text.to_owned(),
@@ -148,6 +149,7 @@ fn insert(target: TextTarget, text: &str) -> EditStep {
 
 fn replace(target: TextTarget, text: &str) -> EditStep {
     EditStep::new(EditOperation::ReplaceText {
+        runs: None,
         target,
         text: text.to_owned(),
     })
@@ -695,6 +697,7 @@ fn separate_histories_and_structural_operations_use_replicas() {
                 },
                 at: TargetEdge::End,
                 paragraphs: vec![ParagraphInput {
+                    runs: None,
                     text: "New".to_owned(),
                     style_id: None,
                 }],

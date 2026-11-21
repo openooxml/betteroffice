@@ -7,6 +7,9 @@ import { HyperlinkDialog, type HyperlinkData } from '../../dialogs/HyperlinkDial
 import { FootnotePropertiesDialog } from '../../dialogs/FootnotePropertiesDialog';
 import { ImagePropertiesDialog, type ImagePropertiesData } from '../../dialogs/ImagePropertiesDialog';
 import { ImagePositionDialog, type ImagePositionData } from '../../dialogs/ImagePositionDialog';
+import { paragraphSpacingAttrs } from '../../../commands/paragraphSpacing';
+import { ParagraphSpacingDialog, type ParagraphSpacingData } from '../../dialogs/ParagraphSpacingDialog';
+import type { DocxDeferredCommand } from '../../../commands/createDocxCommandStore';
 import { PageSetupDialog } from '../../dialogs/PageSetupDialog';
 import { SplitCellDialog } from '../../dialogs/SplitCellDialog';
 import { TablePropertiesDialog, type TableProperties } from '../../dialogs/TablePropertiesDialog';
@@ -44,13 +47,23 @@ export function buildImageTransformPatch(currentAttrs: Readonly<Record<string, u
 
 type WorkerLink = { query: WorkerPropertyQuery; initialData: HyperlinkData; targetSelection: DocxCommandSelection; replaceText: boolean };
 
-export function useWorkerPropertyDialogs(controller: WorkerShellController, props: Pick<DocxEditorProps, 'onError' | 'watermarkPresets'>) {
-  const state = useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot);
+/** One unit within a paragraph: the only shape that can be an object, though one ordinary character also matches and the worker answers it with null. */
+function selectsOneUnit(selection: DocxCommandSelection) {
+  const { anchor, focus } = selection;
+  return anchor.story === focus.story && anchor.paraId === focus.paraId && Math.abs(anchor.offset - focus.offset) === 1;
+}
+
+/** `dragSelecting` holds the object read at the selection the drag started from until pointer-up. */
+export function useWorkerPropertyDialogs(controller: WorkerShellController, props: Pick<DocxEditorProps, 'onError' | 'watermarkPresets' | 'rulerUnit'>,
+  dragSelecting = false) {
+  const state = useSyncExternalStore(controller.subscribeShell, controller.getShellSnapshot, controller.getShellSnapshot);
   const page = useWorkerPageSetupControls(controller, props.onError);
   const watermark = useWorkerWatermarkControls(controller, props.onError);
   const selection = state.view?.workerSelection;
-  const object = useWorkerQuery<'properties'>(controller, selection ? { kind: 'properties', target: { kind: 'objectSelection', selection } } : null);
+  const object = useWorkerQuery<'properties'>(controller, selection && selectsOneUnit(selection)
+    ? { kind: 'properties', target: { kind: 'objectSelection', selection } } : null, { held: dragSelecting });
   const [image, setImage] = useState<{ query: WorkerPropertyQuery; position: boolean } | null>(null);
+  const [paragraphSpacing, setParagraphSpacing] = useState<{ initial: ParagraphSpacingData; deferred: DocxDeferredCommand } | null>(null);
   const [notes, setNotes] = useState<WorkerPropertyQuery | null>(null);
   const [link, setLink] = useState<WorkerLink | null>(null);
   const linkRequest = useRef(0);
@@ -64,9 +77,24 @@ export function useWorkerPropertyDialogs(controller: WorkerShellController, prop
   const openTableProperties = useCallback((initial: TableProperties,
     apply: (props: TableProperties) => Promise<DocxCommandResult>) => { setTableProps({ initial, apply }); }, []);
   const report = (error: unknown) => props.onError?.(error instanceof Error ? error : new Error(String(error)));
-  useEffect(() => { setImage(null); setNotes(null); closeLink(); setSplit(null); setTableProps(null);
+  useEffect(() => { setImage(null); setNotes(null); closeLink(); setSplit(null); setTableProps(null); setParagraphSpacing(null);
     return () => { linkRequest.current++; }; },
     [closeLink, state.view?.identity.session, state.view?.identity.incarnation, state.view?.identity.epoch]);
+  const openParagraphSpacing = () => {
+    const spacing = controller.commands.store.getState('paragraphSpacing').value;
+    setParagraphSpacing({ initial: { before: spacing?.before ?? 0, after: spacing?.after ?? 0,
+      lineSpacing: controller.commands.store.getState('lineSpacing').value ?? 240 },
+      deferred: controller.commands.defer('paragraphSpacingDialog', null, 'selection') });
+    return { ok: true, status: 'opened' } as const;
+  };
+  const applyParagraphSpacing = async (spacing: ParagraphSpacingData) => {
+    if (!paragraphSpacing) return;
+    const result = await paragraphSpacing.deferred.complete(() => controller.submit({
+      kind: 'setParagraphAttrs', payload: { attrs: paragraphSpacingAttrs(spacing) },
+    }));
+    if (result.ok) controller.ref.focus();
+    else report(new Error(result.failure.message));
+  };
   const openImage = async (position = false) => {
     try {
       await controller.ref.flushPendingInput();
@@ -185,11 +213,14 @@ export function useWorkerPropertyDialogs(controller: WorkerShellController, prop
   } : undefined;
   const imageState = object?.value?.kind === 'object' ? { wrap: imageWrapTargetFromAttrs(object.value.properties) } : null;
   return { openLink, applyPopupLink: (displayText: string, href: string, tooltip?: string) => changeLinkAtCaret({ displayText, url: href, tooltip }),
+    readLinkAtCaret: async () => (await readLink()).initialData,
     removeLinkAtCaret: () => changeLinkAtCaret(null), openNotes, openImage, openImagePosition: () => openImage(true), imagePropertiesAvailable: object?.value?.kind === 'object',
     imageState, applyImageWrap, applyImageTransform,
-    openPageSetup: page.handleOpenPageSetup, openWatermark: watermark.handleOpenWatermark, openSplitCell, openTableProperties,
+    pageLayout: { currentProps: page.currentProps, readCurrent: page.readCurrent, onApply: page.handlePageSetupApply },
+    openParagraphSpacing, openPageSetup: page.handleOpenPageSetup, openWatermark: watermark.handleOpenWatermark, openSplitCell, openTableProperties,
     element: <>
-      {page.showPageSetup && <PageSetupDialog isOpen onClose={page.close} currentProps={page.currentProps} onApply={page.handlePageSetupApply} />}
+      {page.showPageSetup && <PageSetupDialog isOpen onClose={page.close} currentProps={page.currentProps}
+        unit={props.rulerUnit} onApply={page.handlePageSetupApply} />}
       {watermark.showWatermark && <WatermarkDialog isOpen onClose={watermark.close} current={watermark.currentWatermark}
         presets={props.watermarkPresets} onApply={watermark.handleWatermarkApply} />}
       {link && <HyperlinkDialog isOpen onClose={closeLink} isEditing={hyperlink !== null} selectedText={link.initialData.displayText}
@@ -207,5 +238,7 @@ export function useWorkerPropertyDialogs(controller: WorkerShellController, prop
         currentData={{ ...imageData, ...(imageData.position && typeof imageData.position === 'object' ? imageData.position : {}) }} /> :
         <ImagePropertiesDialog isOpen onClose={() => setImage(null)} currentData={imageProperties} onApply={applyImageProperties}
           onPosition={() => setImage(current => current ? { ...current, position: true } : null)} />)}
+      {paragraphSpacing && <ParagraphSpacingDialog isOpen currentProps={paragraphSpacing.initial}
+        onClose={() => setParagraphSpacing(null)} onApply={applyParagraphSpacing} />}
     </> };
 }

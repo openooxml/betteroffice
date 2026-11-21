@@ -1,13 +1,11 @@
 import type { Metadata, Viewport } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import "@fontsource-variable/geist";
+import "@fontsource-variable/geist-mono";
 import Link from "next/link";
 import { Logo } from "./components/Logo";
 import { BENCHMARKS, BENCHMARKS_SITE, EVALS_SITE, SITE, SITE_DESCRIPTION, SITE_TITLE } from "./content";
 import { BLOG_PATH, publishedPosts } from "../lib/blog";
 import "./globals.css";
-
-const sans = Geist({ subsets: ["latin"], variable: "--font-geist", display: "swap" });
-const mono = Geist_Mono({ subsets: ["latin"], variable: "--font-geist-mono", display: "swap" });
 
 const navLink =
   "font-mono text-xs text-ink no-underline transition-colors hover:text-fg";
@@ -84,7 +82,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" className={`${sans.variable} ${mono.variable}`}>
+    <html lang="en">
       <body className="flex min-h-dvh flex-col">
         <header className="sticky top-0 z-20 border-b border-line-soft bg-head backdrop-blur-xl">
           <div className="wrap flex h-16 items-center justify-between gap-6 max-[36rem]:h-auto max-[36rem]:flex-wrap max-[36rem]:gap-y-2 max-[36rem]:py-3.5">

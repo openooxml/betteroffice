@@ -14,6 +14,7 @@ from betteroffice_docx import (
     UnsupportedEditError,
     __version__,
 )
+from conftest import R, W, _package
 
 
 def test_version_is_exposed() -> None:
@@ -85,6 +86,38 @@ def test_nested_tables_are_reachable_from_their_cell(nested_table_bytes: bytes) 
     assert [table.text for table in cell.tables] == ["Direct nested", "SDT nested"]
     assert [table.text for table in document.tables()[1:]] == [direct.text, controlled.text]
     assert len(document.tables()) == len(cell.tables) + 1
+
+
+def test_a_run_carries_its_highlight_as_written(highlight_and_merge_bytes: bytes) -> None:
+    runs = Document.open(highlight_and_merge_bytes).paragraph(0).runs
+
+    assert [run.text for run in runs] == ["marked", "cleared", "empty", "bold", "plain"]
+    assert [run.highlight for run in runs] == ["yellow", "none", None, None, None]
+
+
+def test_a_cell_carries_its_column_span_and_vertical_merge(
+    highlight_and_merge_bytes: bytes,
+) -> None:
+    (table,) = Document.open(highlight_and_merge_bytes).tables()
+    merges = [
+        [(cell.text, cell.grid_span, cell.v_merge) for cell in row.cells] for row in table.rows
+    ]
+
+    assert merges == [
+        [("wide", 2, None), ("tall", None, "restart")],
+        [("left", None, None), ("bare", None, None), ("below", None, "continue")],
+        [("single", None, None), ("middle", None, None), ("lower", None, "continue")],
+        [("alone", 3, None)],
+    ]
+    assert type(table.rows[0].cells[0].grid_span) is int
+
+
+def test_a_document_without_highlights_or_merges_reads_none(minimal_bytes: bytes) -> None:
+    document = Document.open(minimal_bytes)
+    (table,) = document.tables()
+
+    assert all(run.highlight is None for paragraph in document for run in paragraph.runs)
+    assert [(cell.grid_span, cell.v_merge) for cell in table.rows[0].cells] == [(None, None)] * 2
 
 
 def test_sections_and_headers(minimal_bytes: bytes) -> None:
@@ -192,6 +225,107 @@ def test_replace_text_refuses_what_it_cannot_rebuild(
     assert Document.open(document.save()).paragraph("44444444").text == (
         "Plain and italic"
     )
+
+
+UNIDENTIFIED_TEXTS = ["First line", "Middle line", "Last line"]
+
+
+@pytest.fixture
+def unidentified_bytes() -> bytes:
+    body = "".join(f"<w:p><w:r><w:t>{text}</w:t></w:r></w:p>" for text in UNIDENTIFIED_TEXTS)
+    return _package(
+        {
+            "[Content_Types].xml": (
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+                '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+                '<Default Extension="xml" ContentType="application/xml"/>'
+                '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+                "</Types>"
+            ),
+            "_rels/.rels": (
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                f'<Relationship Id="rId1" Type="{R}/officeDocument" Target="word/document.xml"/>'
+                "</Relationships>"
+            ),
+            "word/document.xml": (
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                f'<w:document xmlns:w="{W}"><w:body>{body}<w:sectPr/></w:body></w:document>'
+            ),
+        }
+    )
+
+
+def test_replace_text_at_edits_a_paragraph_without_an_id(unidentified_bytes: bytes) -> None:
+    document = Document.open(unidentified_bytes)
+    assert document.paragraph_ids == [None, None, None]
+
+    document.replace_text_at(1, "new")
+    saved = document.save()
+
+    reopened = Document.open(saved)
+    assert reopened.paragraph(1).text == "new"
+    assert [paragraph.text for paragraph in reopened.paragraphs()] == [
+        "First line",
+        "new",
+        "Last line",
+    ]
+    before, after = _parts(unidentified_bytes), _parts(saved)
+    assert list(after) == list(before)
+    assert "w14:paraId" not in after["word/document.xml"].decode()
+    for name in before.keys() - {"word/document.xml"}:
+        assert after[name] == before[name], name
+
+
+def test_replace_text_at_reports_the_index_and_no_id(unidentified_bytes: bytes) -> None:
+    edit = Document.open(unidentified_bytes).replace_text_at(1, "new")
+
+    assert edit.index == 1
+    assert edit.para_id is None
+    assert edit.new_para_ids == []
+
+
+def test_replace_paragraph_text_at_alias(unidentified_bytes: bytes) -> None:
+    original = Document.open(unidentified_bytes)
+    aliased = Document.open(unidentified_bytes)
+    expected = original.replace_text_at(2, "Edited through the alias")
+    actual = aliased.replace_paragraph_text_at(2, "Edited through the alias")
+
+    assert (actual.index, actual.para_id) == (expected.index, expected.para_id)
+    assert aliased.save() == original.save()
+
+
+def test_replace_text_at_refuses_an_index_it_cannot_resolve(
+    unidentified_bytes: bytes,
+) -> None:
+    document = Document.open(unidentified_bytes)
+
+    with pytest.raises(IndexError):
+        document.replace_text_at(len(document), "nope")
+    with pytest.raises(IndexError):
+        document.replace_text_at(-1, "nope")
+    with pytest.raises(TypeError):
+        document.replace_text_at(True, "nope")
+    with pytest.raises(TypeError):
+        document.replace_text_at("0", "nope")
+
+    assert Document.open(document.save()).text.splitlines() == UNIDENTIFIED_TEXTS
+
+
+def test_replace_text_at_reports_the_id_of_a_paragraph_that_has_one(
+    minimal_bytes: bytes,
+) -> None:
+    edit = Document.open(minimal_bytes).replace_text_at(4, "By index")
+
+    assert (edit.index, edit.para_id, edit.story) == (4, "55555555", "body")
+
+
+def test_an_edit_by_id_has_no_index(minimal_bytes: bytes) -> None:
+    edit = Document.open(minimal_bytes).replace_text("11111111", "By id")
+
+    assert edit.index is None
+    assert edit.para_id == "11111111"
 
 
 REPEATED = "1A2B3C4D"

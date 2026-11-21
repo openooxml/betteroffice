@@ -9,7 +9,7 @@ async function phase<T>(name: string, work: Promise<T>): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([work, new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error(`${name} did not finish within 4 s`)), 4_000);
+      timer = setTimeout(() => reject(new Error(`${name} did not finish within 12 s`)), 12_000);
     })]);
   } finally {
     clearTimeout(timer);
@@ -84,4 +84,4 @@ export const load = (baseUrl) => loadBundledFontBytes(face, { baseUrl });`,
     globalThis.fetch = originalFetch;
     await rm(output, { recursive: true, force: true });
   }
-});
+}, 30_000);

@@ -1,0 +1,58 @@
+/** Each native engine module must export what its wasm engine module exports, with identical declared types. */
+type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ? true : false;
+type Mismatched<W, N> = { [K in keyof W & keyof N]-?: Equal<W[K], N[K]> extends true ? never : K }[keyof W & keyof N];
+type Missing<W, N> = Exclude<keyof W, keyof N> | Exclude<keyof N, keyof W>;
+type Same<T extends never> = T;
+
+import type * as WasmXlsxEngine from '../packages/xlsx/src/wasm/engine';
+import type * as NativeXlsxEngine from './xlsx-native/js/engine';
+import type * as WasmXlsxEnginePng from '../packages/xlsx/src/wasm/enginePng';
+import type * as NativeXlsxEnginePng from './xlsx-native/js/enginePng';
+import type * as WasmXlsxEnginePreflight from '../packages/xlsx/src/wasm/enginePreflight';
+import type * as NativeXlsxEnginePreflight from './xlsx-native/js/enginePreflight';
+import type * as WasmPptxEngine from '../packages/pptx/src/wasm/engine';
+import type * as NativePptxEngine from './pptx-native/js/engine';
+import type * as WasmPptxEnginePng from '../packages/pptx/src/wasm/enginePng';
+import type * as NativePptxEnginePng from './pptx-native/js/enginePng';
+import type * as WasmPptxEnginePreflight from '../packages/pptx/src/wasm/enginePreflight';
+import type * as NativePptxEnginePreflight from './pptx-native/js/enginePreflight';
+import type * as WasmDocxEngineEdit from '../packages/docx/src/wasm/engineEdit';
+import type * as NativeDocxEngineEdit from './docx-native/js/engineEdit';
+import type * as WasmDocxEngineParse from '../packages/docx/src/wasm/engineParse';
+import type * as NativeDocxEngineParse from './docx-native/js/engineParse';
+import type * as WasmDocxEngineQuery from '../packages/docx/src/wasm/engineQuery';
+import type * as NativeDocxEngineQuery from './docx-native/js/engineQuery';
+import type * as WasmDocxEngineOpc from '../packages/docx/src/wasm/engineOpc';
+import type * as NativeDocxEngineOpc from './docx-native/js/engineOpc';
+import type * as WasmDocxEnginePreflight from '../packages/docx/src/wasm/enginePreflight';
+import type * as NativeDocxEnginePreflight from './docx-native/js/enginePreflight';
+import type * as WasmDocxEnginePng from '../packages/docx/src/wasm/enginePng';
+import type * as NativeDocxEnginePng from './docx-native/js/enginePng';
+
+export type XlsxEngineDiffers = Same<Mismatched<typeof WasmXlsxEngine, typeof NativeXlsxEngine>>;
+export type XlsxEngineMissing = Same<Missing<typeof WasmXlsxEngine, typeof NativeXlsxEngine>>;
+export type XlsxEnginePngDiffers = Same<Mismatched<typeof WasmXlsxEnginePng, typeof NativeXlsxEnginePng>>;
+export type XlsxEnginePngMissing = Same<Missing<typeof WasmXlsxEnginePng, typeof NativeXlsxEnginePng>>;
+export type XlsxEnginePreflightDiffers = Same<Mismatched<typeof WasmXlsxEnginePreflight, typeof NativeXlsxEnginePreflight>>;
+export type XlsxEnginePreflightMissing = Same<Missing<typeof WasmXlsxEnginePreflight, typeof NativeXlsxEnginePreflight>>;
+/** Declared differently on purpose, pending: listed in bindings/native-extras.ts typeAllowances. */
+type PptxEnginePending = 'metafileSvgBindings';
+export type PptxEngineDiffers = Same<Exclude<Mismatched<typeof WasmPptxEngine, typeof NativePptxEngine>, PptxEnginePending>>;
+export type PptxEnginePendingStale = Same<Exclude<PptxEnginePending, Mismatched<typeof WasmPptxEngine, typeof NativePptxEngine>>>;
+export type PptxEngineMissing = Same<Missing<typeof WasmPptxEngine, typeof NativePptxEngine>>;
+export type PptxEnginePngDiffers = Same<Mismatched<typeof WasmPptxEnginePng, typeof NativePptxEnginePng>>;
+export type PptxEnginePngMissing = Same<Missing<typeof WasmPptxEnginePng, typeof NativePptxEnginePng>>;
+export type PptxEnginePreflightDiffers = Same<Mismatched<typeof WasmPptxEnginePreflight, typeof NativePptxEnginePreflight>>;
+export type PptxEnginePreflightMissing = Same<Missing<typeof WasmPptxEnginePreflight, typeof NativePptxEnginePreflight>>;
+export type DocxEngineEditDiffers = Same<Mismatched<typeof WasmDocxEngineEdit, typeof NativeDocxEngineEdit>>;
+export type DocxEngineEditMissing = Same<Missing<typeof WasmDocxEngineEdit, typeof NativeDocxEngineEdit>>;
+export type DocxEngineParseDiffers = Same<Mismatched<typeof WasmDocxEngineParse, typeof NativeDocxEngineParse>>;
+export type DocxEngineParseMissing = Same<Missing<typeof WasmDocxEngineParse, typeof NativeDocxEngineParse>>;
+export type DocxEngineQueryDiffers = Same<Mismatched<typeof WasmDocxEngineQuery, typeof NativeDocxEngineQuery>>;
+export type DocxEngineQueryMissing = Same<Missing<typeof WasmDocxEngineQuery, typeof NativeDocxEngineQuery>>;
+export type DocxEngineOpcDiffers = Same<Mismatched<typeof WasmDocxEngineOpc, typeof NativeDocxEngineOpc>>;
+export type DocxEngineOpcMissing = Same<Missing<typeof WasmDocxEngineOpc, typeof NativeDocxEngineOpc>>;
+export type DocxEnginePreflightDiffers = Same<Mismatched<typeof WasmDocxEnginePreflight, typeof NativeDocxEnginePreflight>>;
+export type DocxEnginePreflightMissing = Same<Missing<typeof WasmDocxEnginePreflight, typeof NativeDocxEnginePreflight>>;
+export type DocxEnginePngDiffers = Same<Mismatched<typeof WasmDocxEnginePng, typeof NativeDocxEnginePng>>;
+export type DocxEnginePngMissing = Same<Missing<typeof WasmDocxEnginePng, typeof NativeDocxEnginePng>>;

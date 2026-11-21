@@ -1,6 +1,35 @@
 import { expect, test } from 'bun:test';
 import { createPeerlessViewStore, geometryMatchesDocument, type PeerlessFrameGeometry } from './viewStore';
 
+test('remote attribution follows the accepted selection, including null, until an unmarked selection replaces it', () => {
+  const identity = { session: 'view', incarnation: 1, epoch: 1 };
+  const point = { story: 'body', paraId: 'p', offset: 2 };
+  const selected = { anchor: point, focus: point };
+  const store = createPeerlessViewStore({ identity, version: 0, throughSeq: 0, presentedThroughSeq: 0,
+    workerSelection: selected, anchors: null, editState: undefined, geometry: null });
+  try {
+    store.acceptWorkerState(identity, { epoch: 1, version: 1, throughSeq: 1, presentedThroughSeq: 0,
+      selection: null, selectionCause: 'remote', editState: undefined });
+    expect(store.getSnapshot()).toMatchObject({ workerSelection: null, selectionCause: 'remote' });
+    store.acceptWorkerState(identity, { epoch: 1, version: 1, throughSeq: 2, presentedThroughSeq: 0,
+      selection: undefined, editState: undefined });
+    expect(store.getSnapshot()).toMatchObject({ workerSelection: null, selectionCause: 'remote' });
+    store.acceptWorkerState(identity, { epoch: 1, version: 0, throughSeq: 0, presentedThroughSeq: 0,
+      selection: selected, selectionCause: 'remote', editState: undefined });
+    expect(store.getSnapshot().workerSelection).toBeNull();
+    store.acceptWorkerState(identity, { epoch: 1, version: 1, throughSeq: 3, presentedThroughSeq: 0,
+      selection: selected, editState: undefined });
+    expect(store.getSnapshot().workerSelection).toEqual(selected);
+    expect(store.getSnapshot().selectionCause).toBeUndefined();
+    store.acceptWorkerState(identity, { epoch: 1, version: 1, throughSeq: 3, presentedThroughSeq: 0,
+      selection: selected, selectionCause: 'remote', editState: undefined });
+    expect(store.getSnapshot().selectionCause).toBe('remote');
+    store.acceptWorkerState(identity, { epoch: 1, version: 1, throughSeq: 3, presentedThroughSeq: 0,
+      selection: selected, editState: undefined });
+    expect(store.getSnapshot().selectionCause).toBeUndefined();
+  } finally { store.dispose(); }
+});
+
 test('d2a_ack_selection_waits_for_matching_frame_geometry', () => {
   const identity = { session: 'view', incarnation: 1, epoch: 1 };
   const selection = (offset: number) => ({
@@ -166,6 +195,36 @@ test('echo caret publishes only to caret subscribers', () => {
   store.dispose();
 });
 
+test('setting the recovering flag publishes no view snapshot', () => {
+  const identity = { session: 'view', incarnation: 1, epoch: 1 };
+  const geometry: PeerlessFrameGeometry = {
+    identity, coversThroughSeq: 0, frameEpoch: 1, layoutRevision: 1,
+    pages: [], caret: null, selectionRects: [],
+  };
+  const store = createPeerlessViewStore({ identity, version: 0, throughSeq: 0, presentedThroughSeq: 0,
+    workerSelection: null, anchors: null, editState: undefined, geometry });
+  let views = 0;
+  let flags = 0;
+  store.subscribe(() => { views += 1; });
+  store.subscribeRecovering?.(() => { flags += 1; });
+  const before = store.getSnapshot();
+  expect(store.getRecovering?.()).toBe(false);
+  store.setRecovering?.(true);
+  expect(views).toBe(0);
+  expect(flags).toBe(1);
+  expect(store.getSnapshot()).toBe(before);
+  expect(store.getRecovering?.()).toBe(true);
+  store.setRecovering?.(true);
+  expect(flags).toBe(1);
+  store.acceptWorkerState({ session: 'view', incarnation: 2, epoch: 1 }, { epoch: 1, version: 0, throughSeq: 0,
+    presentedThroughSeq: -1, selection: null, editState: undefined });
+  expect(views).toBe(1);
+  expect(flags).toBe(2);
+  expect(store.getRecovering?.()).toBe(false);
+  expect(store.getSnapshot().identity.incarnation).toBe(2);
+  store.dispose();
+});
+
 for (const change of ['document version', 'layout revision', 'frame document version']) {
   test(`a newer ${change} retires a provisional caret without covering its sequence`, () => {
     const identity = { session: 'view', incarnation: 1, epoch: 1 };
@@ -223,5 +282,25 @@ test('selection acks ahead of their deferred frames keep the installed selection
   store.acceptWorkerState({ ...identity, incarnation: 2 }, { epoch: 1, version: 5, throughSeq: 0,
     presentedThroughSeq: -1, selection: null, editState: undefined });
   expect(geometryMatchesDocument(store.getSnapshot())).toBe(false);
+  store.dispose();
+});
+
+test('a rescaled geometry replaces only the installed frame', () => {
+  const identity = { session: 'view', incarnation: 1, epoch: 1 };
+  const geometry = (frameEpoch: number, rasterScale: number): PeerlessFrameGeometry => ({
+    identity, coversThroughSeq: frameEpoch, frameEpoch, layoutRevision: frameEpoch, rasterScale,
+    pages: [], caret: null, selectionRects: [],
+  });
+  const installed = geometry(2, 1);
+  const store = createPeerlessViewStore({ identity, version: 2, throughSeq: 2, presentedThroughSeq: 2,
+    workerSelection: undefined, anchors: null, editState: undefined, geometry: installed });
+  store.rescaleFrameGeometry!(geometry(1, 2));
+  store.rescaleFrameGeometry!(geometry(3, 2));
+  store.rescaleFrameGeometry!({ ...geometry(2, 2), identity: { ...identity, epoch: 2 } });
+  expect(store.getSnapshot().geometry).toBe(installed);
+  const rescaled = geometry(2, 1.5);
+  store.rescaleFrameGeometry!(rescaled);
+  expect(store.getSnapshot().geometry).toBe(rescaled);
+  expect(store.getSnapshot().presentedThroughSeq).toBe(2);
   store.dispose();
 });

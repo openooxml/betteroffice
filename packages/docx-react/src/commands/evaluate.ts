@@ -336,6 +336,11 @@ function validArgs<K extends DocxCommandId>(id: K, args: DocxCommandArgs[K] | un
       return isRecord(value) && typeof value.value === 'string' && PARAGRAPH_ALIGNMENTS.has(value.value);
     case 'lineSpacing':
       return isRecord(value) && finite(value.value) && value.value > 0 && value.value <= 31680;
+    case 'paragraphSpacing':
+      return isRecord(value) && ['before', 'after'].every((key) => {
+        const spacing = value[key];
+        return spacing === undefined || (finite(spacing) && spacing >= 0 && spacing <= 31680);
+      });
     case 'insertTable':
       return (
         isRecord(value) &&
@@ -362,6 +367,11 @@ function validArgs<K extends DocxCommandId>(id: K, args: DocxCommandArgs[K] | un
     default:
       return value === null;
   }
+}
+
+/** Whether `id` runs without arguments, so a shortcut can trigger it directly. */
+export function acceptsNullArgs(id: DocxCommandId): boolean {
+  return validArgs(id, null);
 }
 
 function validTableAction(value: unknown): boolean {
@@ -551,6 +561,18 @@ function evaluate<K extends DocxCommandId>(
         active: spacingArgs ? spacing === spacingArgs.value : undefined,
       });
     }
+    case 'paragraphSpacing': {
+      const properties = context?.paragraphProperties;
+      return result<'paragraphSpacing'>({
+        gate: textGate(env),
+        value: {
+          before: finite(properties?.spaceBefore) ? properties.spaceBefore : 0,
+          after: finite(properties?.spaceAfter) ? properties.spaceAfter : 0,
+        },
+      });
+    }
+    case 'paragraphSpacingDialog':
+      return { gate: textGate(env) };
     case 'bulletList':
       return { gate: textGate(env), active: numberingOf(env)?.numId === 1 };
     case 'numberedList': {
@@ -658,8 +680,13 @@ function evaluate<K extends DocxCommandId>(
     case 'save':
     case 'print':
     case 'find':
+    case 'copy':
+    case 'selectAll':
       return { gate: documentGate(env) };
     case 'replace':
+    case 'cut':
+    case 'paste':
+    case 'pasteAsPlainText':
       return { gate: writeGate(env) };
     case 'zoom': {
       const zoomArgs = args as DocxCommandArgs['zoom'] | undefined;

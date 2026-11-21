@@ -7,6 +7,8 @@ import {
   type PptxEditorApi,
   type PptxAsyncEditorApi,
   type PptxPluginContext,
+  type PptxPluginEvent,
+  type PptxPluginGeometry,
   type PptxPluginNavigationResult,
   type PptxPluginSelection,
 } from '@betteroffice/pptx-react';
@@ -20,14 +22,18 @@ interface ProbeState {
 type ProbeContext = PptxPluginContext<ProbeState>;
 
 interface ProbeWindow {
+  mutation: unknown;
+  runMutation(): Promise<unknown>;
+  events: PptxPluginEvent[];
   editor: PptxEditorApi | PptxAsyncEditorApi | null;
   navigation: PptxPluginNavigationResult | null;
   selection: PptxPluginSelection;
+  geometry: PptxPluginGeometry | null;
   marks: number;
 }
 
 const workerOnly = new URLSearchParams(location.search).get('engine') === 'worker';
-const probe: ProbeWindow = { editor: null, navigation: null, selection: null, marks: 0 };
+const probe: ProbeWindow = { events: [], editor: null, navigation: null, selection: null, geometry: null, marks: 0, mutation: null, runMutation: async () => null };
 (window as unknown as { __probe: ProbeWindow }).__probe = probe;
 
 async function refresh(context: ProbeContext) {
@@ -41,9 +47,22 @@ async function refresh(context: ProbeContext) {
 }
 
 function ProbePanel({ context }: { context: ProbeContext }) {
+  probe.runMutation = () => context.commands.execute('bold', null);
   const last = context.state.slides.at(-1);
   return (
     <div>
+      <button type="button" data-testid="probe-mutation" data-version={context.snapshot.version} onMouseDown={(event) => event.preventDefault()}
+        onClick={() => { void probe.runMutation().then((result) => { probe.mutation = result; }); }}>
+        Apply formatting
+      </button>
+      <button type="button" data-testid="probe-timer-mutation" onMouseDown={(event) => event.preventDefault()}
+        onClick={async () => {
+          probe.mutation = null;
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          probe.mutation = await probe.runMutation();
+        }}>
+        Apply formatting after a timer
+      </button>
       <button
         type="button"
         data-testid="probe-navigate"
@@ -76,11 +95,13 @@ const alignment = definePptxPlugin<ProbeState>({
   id: 'probe.alignment',
   createState: () => ({ slides: [] }),
   async onEvent(context, event) {
+    probe.events.push(event);
     if (event.type === 'selection-change') probe.selection = event.selection;
     if (event.type === 'load' || event.type === 'document-change') await refresh(context);
   },
   panel: { title: 'Probe', placement: 'right', render: ProbePanel },
   overlay: ({ context, geometry }) => {
+    probe.geometry = geometry;
     const slide = geometry.toOverlayRect({
       space: 'slide-px',
       rect: { x: 0, y: 0, width: geometry.layout.width, height: geometry.layout.height },
@@ -89,8 +110,19 @@ const alignment = definePptxPlugin<ProbeState>({
       (entry) => entry.slideId === geometry.layout.slideId
     )?.shapeId;
     const shape = shapeId ? geometry.getShapeRect(shapeId) : null;
+    const selected = context.snapshot.selection;
+    const target = selected?.target;
+    const anchors = selected && target?.kind === 'text' ? [
+      { name: 'selection', answer: geometry.getAnchorGeometry({ kind: 'selection' }) },
+      { name: 'range', answer: geometry.getAnchorGeometry({ kind: 'range', version: geometry.layout.version,
+        slideId: selected.slideId, shapeId: target.shapeId, storyId: target.storyId, anchor: target.anchor, focus: target.focus }) },
+    ] : [];
+
     return (
       <>
+        {anchors.map(({ name, answer }) => answer.ok && <div key={name} data-probe-anchor={name}
+          style={{ position: 'absolute', left: answer.anchor.x, top: answer.anchor.y,
+            width: Math.max(1, answer.anchor.width), height: answer.anchor.height }} />)}
         {slide && (
           <input
             data-testid="overlay-input"
@@ -175,10 +207,11 @@ function Harness() {
   if (!file || !fonts) return null;
   return (
     <div style={{ height: '100%' }}>
-      <PptxEditor {...(workerOnly ? {} : { legacySyncApi: true, experimentalWorkerOpen: false })}
+      <PptxEditor {...(workerOnly ? {} : { legacySyncApi: true, experimentalWorkerOpen: false }) as Record<never, never>}
         file={file}
         fonts={fonts}
         plugins={PLUGINS}
+        pluginGrants={{ 'probe.alignment': { document: 'write', commands: ['bold'] } }}
         onReady={(api) => {
           probe.editor = api;
         }}

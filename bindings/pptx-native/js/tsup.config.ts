@@ -1,0 +1,56 @@
+import { defineConfig } from 'tsup';
+import { rename, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { nativeEnginePlugin } from '../../../scripts/native-engine';
+import { packageBoundary } from '../../../scripts/package-boundary';
+import { buildWorkerStubs } from '../../../scripts/worker-stub';
+
+const source = '../../../packages/pptx';
+const dist = '../dist';
+const browser = 'throw new Error("@betteroffice/pptx-native runs on Node.js, Bun and Deno; use @betteroffice/pptx in browsers");\n';
+
+export default defineConfig({
+  entry: {
+    index: `${source}/src/index.ts`,
+    'wasm-preflight': `${source}/src/wasm/preflight.ts`,
+    worker: `${source}/src/worker.ts`,
+    collaboration: `${source}/src/collaboration/index.ts`,
+    pptxWorkerStart: `${source}/src/session/workerStart.ts`,
+    'pptxSessionWorker.node': `${source}/src/session/worker.node.ts`,
+    'sessionWorker.node': `${source}/src/session/sessionWorker.node.ts`,
+    'sessionWorker.missing': `${source}/src/session/sessionWorker.missing.ts`,
+  },
+  outDir: dist,
+  format: ['esm'],
+  dts: {
+    compilerOptions: {
+      paths: { '#session-worker': [fileURLToPath(new URL('../../../packages/pptx/src/session/sessionWorker.node.ts', import.meta.url))] },
+    },
+  },
+  tsconfig: `${source}/tsconfig.json`,
+  splitting: true,
+  sourcemap: false,
+  clean: true,
+  treeshake: true,
+  minify: true,
+  external: ['@betteroffice/fonts', '@betteroffice/fonts-cjk', '@betteroffice/fonts-intl', '@betteroffice/fonts-latin', '#session-worker'],
+  esbuildPlugins: [
+    packageBoundary(fileURLToPath(new URL(`${source}/`, import.meta.url))),
+    nativeEnginePlugin('pptx'),
+  ],
+  esbuildOptions(options) {
+    options.chunkNames = 'chunk-[hash]';
+  },
+  onSuccess: async () => {
+    await buildWorkerStubs('pptx', dist);
+    await rename(join(dist, 'pptxSessionWorker.node.js'), join(dist, 'pptxSessionWorker.node.mjs'));
+    await writeFile(join(dist, 'package.json'), JSON.stringify({
+      type: 'module',
+      imports: {
+        '#session-worker': { node: './sessionWorker.node.js', default: './sessionWorker.missing.js' },
+      },
+    }, null, 2) + '\n');
+    await writeFile(join(dist, 'browser.js'), browser);
+  },
+});

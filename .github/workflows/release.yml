@@ -11,6 +11,10 @@ concurrency:
   group: release
   cancel-in-progress: false
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   release:
     if: github.ref == 'refs/heads/main'
@@ -19,6 +23,7 @@ jobs:
     timeout-minutes: 90
     outputs:
       publishing: ${{ steps.pending.outputs.publishing }}
+      published: ${{ steps.changesets.outputs.published }}
     permissions:
       contents: write
       pull-requests: write
@@ -34,7 +39,7 @@ jobs:
           bun-version: "1.4.3"
 
       # Node 24 ships npm >= 11.5.1, required for provenance and OIDC publishing.
-      - uses: actions/setup-node@v7.0.0
+      - uses: actions/setup-node@v7.1.0
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
@@ -50,8 +55,8 @@ jobs:
       - name: Detect pending changesets
         id: pending
         run: |
-          count=$(find .changeset -maxdepth 1 -name '*.md' ! -name 'README.md' | wc -l | tr -d ' ')
-          echo "publishing=$([ "$count" -eq 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          changesets=$(find .changeset -maxdepth 1 -name '*.md' ! -name 'README.md')
+          echo "publishing=$([ -z "$changesets" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -112,7 +117,15 @@ jobs:
       # It reads name and version, which the pin below leaves alone.
       - name: Check npm publish targets
         if: steps.pending.outputs.publishing == 'true'
+        env:
+          RELEASE_SKIP_NATIVE: ${{ vars.RELEASE_SKIP_NATIVE }}
         run: node scripts/check-publish-targets.mjs --npm
+
+      # A peer range a bump leaves turns its dependents major, and a fixed group
+      # carries that to every member: refuse a release PR nobody asked to be major.
+      - name: Check the release plan for unrequested major bumps
+        if: steps.pending.outputs.publishing != 'true'
+        run: node scripts/check-publish-targets.mjs --plan
 
       - name: Publish Rust crates
         if: steps.pending.outputs.publishing == 'true' && vars.RELEASE_SKIP_CRATES != 'true'
@@ -141,6 +154,13 @@ jobs:
           # package after the first manual publish creates it). id-token: write
           # above authorizes the exchange and signs provenance.
           NPM_CONFIG_PROVENANCE: "true"
+
+      # Also after a failed publish: it names what the set is missing. Reports
+      # only: deploy and the native and Python jobs still run after a miss.
+      - name: Verify npm and CDN publish targets
+        if: "always() && steps.pending.outputs.publishing == 'true'"
+        continue-on-error: true
+        run: node scripts/check-publish-targets.mjs --verify-published
 
       # GITHUB_TOKEN releases don't fire `on: release`, so dispatch directly.
       - name: Trigger deploy
@@ -190,8 +210,9 @@ jobs:
     needs: python-bindings
     if: needs.python-bindings.outputs.publish != '[]'
     runs-on: ubuntu-latest
-    # Covers the dispatched workflow's own worst case: 45 (wheels) + 5 + 15 (publish).
-    timeout-minutes: 75
+    # Covers the font packs' worst case, 15 (wheel) + 5 + 15 (publish), then the
+    # bindings': 45 (wheels) + 5 + 15 (publish).
+    timeout-minutes: 110
     permissions:
       actions: write # dispatch publish-python-binding.yml
     steps:
@@ -203,29 +224,43 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           status=0
-          runs=""
-          for binding in $(echo "$PUBLISH" | jq -r '.[]'); do
-            # From API version 2026-03-10 the dispatch returns the created run's id,
-            # so the wait below watches exactly the runs this job started.
-            if run=$(gh api --method POST -H "X-GitHub-Api-Version: 2026-03-10" \
-              "repos/$GH_REPO/actions/workflows/publish-python-binding.yml/dispatches" \
-              -f ref=main -f "inputs[binding]=$binding" -f "inputs[sha]=$SHA" \
-              -F "inputs[dry_run]=false" --jq '.workflow_run_id') && [ -n "$run" ]; then
-              runs="$runs $binding:$run"
-            else
-              echo "::error::Dispatching the publish of betteroffice-$binding failed."
-              status=1
-            fi
-          done
+          publish() {
+            runs=""
+            for binding in "$@"; do
+              # From API version 2026-03-10 the dispatch returns the created run's id,
+              # so the wait below watches exactly the runs this job started.
+              if run=$(gh api --method POST -H "X-GitHub-Api-Version: 2026-03-10" \
+                "repos/$GH_REPO/actions/workflows/publish-python-binding.yml/dispatches" \
+                -f ref=main -f "inputs[binding]=$binding" -f "inputs[sha]=$SHA" \
+                -F "inputs[dry_run]=false" --jq '.workflow_run_id') && [ -n "$run" ]; then
+                runs="$runs $binding:$run"
+              else
+                echo "::error::Dispatching the publish of betteroffice-$binding failed."
+                status=1
+              fi
+            done
 
-          for entry in $runs; do
-            binding=${entry%%:*}
-            run=${entry#*:}
-            if ! gh run watch "$run" --exit-status; then
-              echo "::error::betteroffice-$binding did not publish: $GITHUB_SERVER_URL/$GH_REPO/actions/runs/$run"
-              status=1
-            fi
-          done
+            for entry in $runs; do
+              binding=${entry%%:*}
+              run=${entry#*:}
+              if ! gh run watch "$run" --exit-status; then
+                echo "::error::betteroffice-$binding did not publish: $GITHUB_SERVER_URL/$GH_REPO/actions/runs/$run"
+                status=1
+              fi
+            done
+          }
+
+          packs=$(echo "$PUBLISH" | jq -r '.[] | select(startswith("fonts-"))')
+          formats=$(echo "$PUBLISH" | jq -r '.[] | select(startswith("fonts-") | not)')
+          # shellcheck disable=SC2086 # binding names contain no spaces
+          publish $packs
+          if [ $status -ne 0 ] && [ -n "$formats" ]; then
+            echo "::error::A font pack did not publish, so no format binding was dispatched: every betteroffice-<format> wheel requires betteroffice-fonts-latin, -intl and -cjk at the versions this commit pins."
+            echo "::error::A missing PyPI project needs its pending publisher (environment pypi-fonts-<pack>): RELEASING.md, \"Font pack wheels\". Rerun the release once it exists."
+            exit 1
+          fi
+          # shellcheck disable=SC2086 # binding names contain no spaces
+          publish $formats
           exit $status
 
   # npm Trusted Publishers name publish-native.yml, so dispatch it with this run's
@@ -276,3 +311,25 @@ jobs:
             fi
           done
           exit $status
+
+  # Runs only when this run published and WOPI_IMAGE_PUBLISH opts in; without
+  # that variable the WOPI image is never pushed. It dispatches and does not wait:
+  # the publish waits on a reviewer, which would hold the release concurrency group.
+  wopi-image:
+    name: Start the WOPI image publish
+    needs: release
+    if: needs.release.result == 'success' && needs.release.outputs.published == 'true' && github.repository == 'openooxml/betteroffice' && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.repository.fork == false && startsWith(github.workflow_ref, format('{0}/.github/workflows/release.yml@refs/heads/main', github.repository)) && vars.WOPI_IMAGE_PUBLISH == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch the publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          gh api --method POST -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/$GH_REPO/actions/workflows/wopi-image.yml/dispatches" \
+            -f ref=main -F "inputs[publish]=true" -f "inputs[sha]=$SHA"

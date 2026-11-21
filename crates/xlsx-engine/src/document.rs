@@ -91,6 +91,7 @@ impl Document {
         self.host
     }
 
+    /// Checkpoints are only restorable by the same engine version and codec.
     pub fn recovery_checkpoint(
         &self,
         through_seq: f64,
@@ -104,6 +105,7 @@ impl Document {
             .map_err(error_kind)
     }
 
+    /// Checkpoints are only restorable by the same engine version and codec.
     pub fn open_recovery_checkpoint(
         bytes: &[u8],
         through_seq: f64,
@@ -161,6 +163,25 @@ impl Document {
     ) -> Result<Self, EngineError> {
         Self::opened(host, || Session::open_with_calculation_json(bytes, context))
             .map_err(type_error)
+    }
+
+    pub fn open_recalculating_stale(
+        bytes: &[u8],
+        context: Option<&str>,
+        host: Host,
+    ) -> Result<Self, EngineError> {
+        let now_serial = match context {
+            Some(_) => None,
+            None => (host.now_serial)()?,
+        };
+        Self::opened(host, || {
+            Session::open_recalculating_stale(bytes, now_serial, context)
+        })
+        .map_err(if context.is_some() {
+            type_error
+        } else {
+            message
+        })
     }
 
     pub fn set_calculation_context_json(&mut self, context: &str) -> Result<(), EngineError> {
@@ -284,7 +305,9 @@ impl Document {
     }
 
     pub fn display_list_json(&self, args: &str) -> Result<String, EngineError> {
-        self.session.display_list_json(args).map_err(message)
+        self.session
+            .display_list_timed_json(None, args, &self.host.timer_ms)
+            .map_err(message)
     }
 
     pub fn display_list_for_json(
@@ -293,7 +316,7 @@ impl Document {
         viewport_json: &str,
     ) -> Result<String, EngineError> {
         self.session
-            .display_list_for_json(sheet, viewport_json)
+            .display_list_timed_json(Some(sheet), viewport_json, &self.host.timer_ms)
             .map_err(message)
     }
 
@@ -309,10 +332,33 @@ impl Document {
         self.session.chart_at_point_json(args).map_err(message)
     }
 
+    pub fn media_bytes(&self, asset_id: &str) -> Result<Vec<u8>, EngineError> {
+        self.session.media_bytes(asset_id).map_err(message)
+    }
+
     pub fn move_chart_json(&mut self, args: &str) -> Result<String, EngineError> {
         let now_serial = (self.host.now_serial)()?;
         self.session
             .move_chart_json(args, now_serial)
+            .map_err(message)
+    }
+
+    pub fn resize_chart_json(&mut self, args: &str) -> Result<String, EngineError> {
+        let now_serial = (self.host.now_serial)()?;
+        self.session
+            .resize_chart_json(args, now_serial)
+            .map_err(message)
+    }
+
+    pub fn png_display_list_json(&self, viewport_json: &str) -> Result<String, EngineError> {
+        self.session
+            .png_display_list_json(viewport_json)
+            .map_err(message)
+    }
+
+    pub fn range_png_display_list_json(&self, args: &str) -> Result<String, EngineError> {
+        self.session
+            .range_png_display_list_json(args)
             .map_err(message)
     }
 
@@ -324,6 +370,28 @@ impl Document {
     #[cfg(feature = "raster")]
     pub fn render_range_png(&self, args: &str) -> Result<Vec<u8>, EngineError> {
         self.session.render_range_png(args).map_err(message)
+    }
+
+    #[cfg(feature = "raster")]
+    pub fn render_png_target(
+        &self,
+        target_json: &str,
+        options_json: &str,
+    ) -> Result<Vec<u8>, EngineError> {
+        self.render_png_target_with_faces(target_json, options_json, None)
+    }
+
+    /// [`Self::render_png_target`]. `Some` paints with those faces alone, for this export only.
+    #[cfg(feature = "raster")]
+    pub fn render_png_target_with_faces(
+        &self,
+        target_json: &str,
+        options_json: &str,
+        faces: Option<&[betteroffice_xlsx::PngFontFace<'_>]>,
+    ) -> Result<Vec<u8>, EngineError> {
+        self.session
+            .render_png_target_with_faces(target_json, options_json, faces)
+            .map_err(message)
     }
 
     pub fn sheet_info_json(&self) -> Result<String, EngineError> {
@@ -344,6 +412,11 @@ impl Document {
 
     pub fn cell_rect_json(&self, args: &str) -> Result<String, EngineError> {
         self.session.cell_rect_json(args).map_err(message)
+    }
+
+    pub fn recalculate_json(&mut self) -> Result<String, EngineError> {
+        let now_serial = (self.host.now_serial)()?;
+        self.session.recalculate_json(now_serial).map_err(message)
     }
 
     pub fn calculation_status_json(&self) -> Result<String, EngineError> {
@@ -377,10 +450,22 @@ impl Document {
             .map_err(message)
     }
 
+    /// Formulas moved between cells as a paste moves them; see [`Session::translate_formulas_json`].
+    pub fn translate_formulas_json(&self, args: &str) -> Result<String, EngineError> {
+        Session::translate_formulas_json(args).map_err(message)
+    }
+
     pub fn move_range_json(&mut self, args: &str) -> Result<String, EngineError> {
         let now_serial = (self.host.now_serial)()?;
         self.session
             .move_range_json(args, now_serial)
+            .map_err(message)
+    }
+
+    pub fn fill_range_json(&mut self, args: &str) -> Result<String, EngineError> {
+        let now_serial = (self.host.now_serial)()?;
+        self.session
+            .fill_range_json(args, now_serial)
             .map_err(message)
     }
 
@@ -555,6 +640,10 @@ impl Document {
 
     pub fn save_bytes(&self) -> Result<Vec<u8>, EngineError> {
         self.session.save().map_err(message)
+    }
+
+    pub fn save_warnings_json(&self) -> Result<String, EngineError> {
+        self.session.save_warnings_json().map_err(message)
     }
 
     pub fn version(&self) -> &'static str {

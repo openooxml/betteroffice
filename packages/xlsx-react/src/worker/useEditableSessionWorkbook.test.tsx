@@ -39,7 +39,8 @@ function session(log: string[] = []) {
     ...testSessionCommands(),
     state: { format: 'xlsx', stage: 'ready', version: 0, dirty: false, sheets: [], activeSheet: 0 },
     call: {} as WorkbookSession['call'],
-    save: mock(async () => new Uint8Array([9])), on: () => () => {},
+    save: mock(async () => new Uint8Array([9])),
+    saveWithWarnings: mock(async () => ({ bytes: new Uint8Array([9]), warnings: [] })), on: () => () => {},
     onFailure: (next) => {
       listener = next;
       return () => { log.push('off'); listener = undefined; };
@@ -783,7 +784,7 @@ describe('editable session workbook', () => {
     const commands = createXlsxCommandController().store;
     const { result } = renderHook(() => useEditableSessionWorkbook({ file, onReady: ready }, commands, controls));
     await waitFor(() => expect(result.current.run).not.toBeNull());
-    expect(opener).toHaveBeenCalledWith(file, { signal: expect.any(AbortSignal), retainPeerHydration: true });
+    expect(opener).toHaveBeenCalledWith(file, { signal: expect.any(AbortSignal), png: true, retainPeerHydration: true });
     expect(hydrate).not.toHaveBeenCalled();
     const run = result.current.run!;
     await act(async () => run.firstPaint());

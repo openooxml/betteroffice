@@ -2,7 +2,7 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, jest, mock, spyOn, test } from 'bun:test';
 import { useRef } from 'react';
 import { createPeerlessShellController, WorkerReadSupersededError } from './shellController';
-import { createPeerlessViewStore } from './viewStore';
+import { createPeerlessViewStore, type PeerlessFrameGeometry, type PeerlessViewSnapshot } from './viewStore';
 import { useWorkerNavigation } from './useWorkerNavigation';
 import { createInputAdmission } from './inputAdmission';
 import { ResidentEngineWorkerClient } from '@betteroffice/docx/yrs';
@@ -126,6 +126,10 @@ for (const event of ['window resize', 'width change', 'height change', 'plain sc
       fireEvent.scroll(scroller);
       flushFrame();
       expect(navigation.pageInfo.visible).toBe(true);
+      const shown = navigation.pageInfo;
+      const geometry = viewStore.getSnapshot().geometry!;
+      act(() => { viewStore.installFrameGeometry({ ...geometry, frameEpoch: geometry.frameEpoch + 1 }); });
+      expect(navigation.pageInfo).toBe(shown);
       act(() => { jest.advanceTimersByTime(300); });
       if (event === 'width change') { width = 160; fireEvent.scroll(scroller); }
       else if (event === 'height change') { height = 100; fireEvent.scroll(scroller); }
@@ -327,5 +331,148 @@ for (const destroyed of [true, false]) {
       if (destroyed) expect(await controller.ref.scrollToComment(7)).toBe(false);
       else await expect(controller.ref.scrollToComment(7)).rejects.toThrow('Document worker failed: Worker failed');
     } finally { client.destroy(); dispose(); }
+  });
+}
+
+const collapsedTargets = { [JSON.stringify({ kind: 'comment', id: 7 })]: { id: 'native',
+  ranges: [{ story: 'body', start: { paraId: 'p', offset: 3 }, end: { paraId: 'p', offset: 3 } }] } };
+
+function presentWithForeignCommand(navigation: ReturnType<typeof reviewNavigation>, at: { paraId: string; offset: number }, version = 1,
+  editState?: PeerlessViewSnapshot['editState']) {
+  const { submit, viewStore } = navigation;
+  submit.mockImplementationOnce(() => ({ status: 'submitted', ticket: { seq: 1, ack: Promise.resolve({ status: 'applied', seq: 1 }),
+    presented: Promise.resolve().then(() => {
+      const view = viewStore.getSnapshot();
+      viewStore.acceptWorkerState(view.identity, { epoch: view.identity.epoch, version, throughSeq: 2, presentedThroughSeq: 2,
+        selection: { anchor: { story: 'body', ...at }, focus: { story: 'body', ...at } }, editState: editState ?? view.editState });
+      viewStore.installFrameGeometry({ ...view.geometry!, frameEpoch: view.geometry!.frameEpoch + 1, coversThroughSeq: 2,
+        caret: { x: 10, y: 600, width: 1, height: 12 } });
+      return 'presented';
+    }) } }));
+}
+
+test('review navigation reveals its selection when a command that keeps it is presented in the same frame', async () => {
+  const navigation = reviewNavigation(collapsedTargets);
+  presentWithForeignCommand(navigation, { paraId: 'p', offset: 3 });
+  try {
+    expect(await navigation.controller.ref.scrollToComment(7)).toBe(true);
+    expect(navigation.submit).toHaveBeenCalledTimes(1);
+    expect(navigation.scroller.scrollTop).toBe(600 * 2 - 24);
+  } finally { navigation.dispose(); }
+});
+
+for (const [name, at, version] of [
+  ['another select replaced the selection', { paraId: 'z', offset: 0 }, 1],
+  ['a later command moved the caret', { paraId: 'p', offset: 5 }, 1],
+  ['a later edit changed the paragraph under the same offsets', { paraId: 'p', offset: 3 }, 2],
+] as const) {
+  test(`review navigation resolves false without scrolling when ${name}`, async () => {
+    const navigation = reviewNavigation(collapsedTargets);
+    presentWithForeignCommand(navigation, at, version);
+    try {
+      expect(await navigation.controller.ref.scrollToComment(7)).toBe(false);
+      expect(navigation.scroller.scrollTop).toBe(0);
+    } finally { navigation.dispose(); }
+  });
+}
+
+test('review navigation resolves false without scrolling when a table cell selection replaced its selection', async () => {
+  const navigation = reviewNavigation(collapsedTargets);
+  presentWithForeignCommand(navigation, { paraId: 'p', offset: 3 }, 1, { readOnly: false, toolbar: null, effectiveFormatting: null,
+    storedMarks: null, canUndo: false, canRedo: false, hyperlink: null, tableContext: { story: 'body', tableIndex: 0, rowIndex: 0,
+      columnIndex: 0, rowCount: 2, columnCount: 3, hasMultiCellSelection: true, canSplitCell: true } });
+  try {
+    expect(await navigation.controller.ref.scrollToComment(7)).toBe(false);
+    expect(navigation.scroller.scrollTop).toBe(0);
+  } finally { navigation.dispose(); }
+});
+
+test('review navigation scrolls a range start to where the final frame shows it after a relayout', async () => {
+  const range = { story: 'body', start: { paraId: 'p', offset: 3 }, end: { paraId: 'q', offset: 2 } };
+  const navigation = reviewNavigation({ [JSON.stringify({ kind: 'comment', id: 7 })]: { id: 'native', ranges: [range] } });
+  const { submit, viewStore } = navigation;
+  submit.mockImplementationOnce(() => ({ status: 'submitted', ticket: { seq: 1, ack: Promise.resolve({ status: 'applied', seq: 1 }),
+    presented: Promise.resolve('presented') } }));
+  submit.mockImplementationOnce(() => ({ status: 'submitted', ticket: { seq: 2, ack: Promise.resolve({ status: 'noop', seq: 2 }),
+    presented: Promise.resolve().then(() => {
+      const view = viewStore.getSnapshot();
+      viewStore.acceptWorkerState(view.identity, { epoch: view.identity.epoch, version: 1, throughSeq: 3, presentedThroughSeq: 3,
+        selection: { anchor: { story: 'body', ...range.end }, focus: { story: 'body', ...range.start } }, editState: view.editState });
+      viewStore.installFrameGeometry({ ...view.geometry!, frameEpoch: view.geometry!.frameEpoch + 1,
+        layoutRevision: view.geometry!.layoutRevision + 1, coversThroughSeq: 3, caret: { x: 10, y: 700, width: 1, height: 12 } });
+      return 'presented';
+    }) } }));
+  try {
+    expect(await navigation.controller.ref.scrollToComment(7)).toBe(true);
+    expect(submit).toHaveBeenCalledTimes(2);
+    expect(navigation.scroller.scrollTop).toBe(700 * 2 - 24);
+  } finally { navigation.dispose(); }
+});
+
+function revealRange(throughSeq: number, final: (first: PeerlessFrameGeometry) => Partial<PeerlessFrameGeometry>, rasterScale?: number) {
+  const navigation = reviewNavigation(reviewTargets);
+  const { submit, viewStore } = navigation;
+  const initial = viewStore.getSnapshot().geometry!;
+  viewStore.installFrameGeometry({ ...initial, frameEpoch: initial.frameEpoch + 1, layoutEpoch: 4, rasterScale: 2, documentWidth: 816 });
+  submit.mockImplementationOnce(() => ({ status: 'submitted', ticket: { seq: 1, ack: Promise.resolve({ status: 'applied', seq: 1 }),
+    presented: Promise.resolve().then(() => {
+      const view = viewStore.getSnapshot();
+      viewStore.acceptWorkerState(view.identity, { epoch: view.identity.epoch, version: 1, throughSeq: 1, presentedThroughSeq: 1,
+        selection: { anchor: { story: 'body', ...reviewRange.start }, focus: { story: 'body', ...reviewRange.start } }, editState: view.editState });
+      viewStore.installFrameGeometry({ ...view.geometry!, frameEpoch: view.geometry!.frameEpoch + 1, coversThroughSeq: 1 });
+      return 'presented';
+    }) } }));
+  submit.mockImplementationOnce(() => ({ status: 'submitted', ticket: { seq: 2, ack: Promise.resolve({ status: 'applied', seq: 2 }),
+    presented: Promise.resolve().then(() => {
+      const view = viewStore.getSnapshot();
+      const first = view.geometry!;
+      expect(first.coversThroughSeq).toBe(1);
+      viewStore.acceptWorkerState(view.identity, { epoch: view.identity.epoch, version: 1, throughSeq, presentedThroughSeq: throughSeq,
+        selection: { anchor: { story: 'body', ...reviewRange.end }, focus: { story: 'body', ...reviewRange.start } }, editState: view.editState });
+      viewStore.installFrameGeometry({ ...first, frameEpoch: first.frameEpoch + 1, coversThroughSeq: throughSeq,
+        caret: null, selectionFocus: null, ...final(first) });
+      if (rasterScale !== undefined) viewStore.rescaleFrameGeometry!({ ...viewStore.getSnapshot().geometry!, rasterScale });
+      return 'presented';
+    }) } }));
+  return navigation;
+}
+
+test('review navigation scrolls a range start to the selection focus the final frame shows after a relayout', async () => {
+  const navigation = revealRange(2, (first) => ({ layoutRevision: first.layoutRevision + 1, layoutEpoch: 5,
+    selectionFocus: { x: 10, y: 700, width: 1, height: 12 } }));
+  try {
+    expect(await navigation.controller.ref.scrollToComment(7)).toBe(true);
+    expect(navigation.submit).toHaveBeenCalledTimes(2);
+    expect(navigation.scroller.scrollTop).toBe(700 * 2 - 24);
+  } finally { navigation.dispose(); }
+});
+
+for (const [name, throughSeq, final, rasterScale] of [
+  ['a later command repaginated without a new layout revision', 3, { layoutEpoch: 5, layoutProvisional: true }, undefined],
+  ['the raster scale changed', 2, { layoutProvisional: true }, 3],
+] as const) {
+  test(`review navigation resolves false without scrolling when the final frame has no range geometry and ${name}`, async () => {
+    const navigation = revealRange(throughSeq, () => final, rasterScale);
+    try {
+      expect(await navigation.controller.ref.scrollToComment(7)).toBe(false);
+      expect(navigation.submit).toHaveBeenCalledTimes(2);
+      expect(navigation.viewStore.getSnapshot().geometry!.coversThroughSeq).toBe(throughSeq);
+      expect(navigation.scroller.scrollTop).toBe(0);
+    } finally { navigation.dispose(); }
+  });
+}
+
+for (const [name, throughSeq, final, y] of [
+  ['a later command kept the layout and the final frame has no range geometry', 3, { layoutProvisional: true }, 400],
+  ['the final frame covers only its own selection and has no range geometry', 2, { layoutProvisional: true }, 400],
+  ['the final frame covers only its own selection and shows its focus', 2, { selectionFocus: { x: 10, y: 650, width: 1, height: 12 } }, 650],
+] as const) {
+  test(`review navigation scrolls a range start when ${name}`, async () => {
+    const navigation = revealRange(throughSeq, () => final);
+    try {
+      expect(await navigation.controller.ref.scrollToComment(7)).toBe(true);
+      expect(navigation.submit).toHaveBeenCalledTimes(2);
+      expect(navigation.scroller.scrollTop).toBe(y * 2 - 24);
+    } finally { navigation.dispose(); }
   });
 }

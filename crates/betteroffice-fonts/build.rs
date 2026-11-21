@@ -5,10 +5,10 @@ use std::path::PathBuf;
 fn main() {
     let target = env::var("TARGET").expect("TARGET");
     // wasm32 decodes with ruzstd, so a wasm build needs no C compiler with a wasm target.
+    // No link arguments here: Cargo hands a build script's cdylib link arguments to every
+    // dependent cdylib, so a memory cap set here would also cap each engine that links this
+    // crate. The standalone decoder's cap is set by scripts/build-fonts-decoder.ts.
     if target.starts_with("wasm32") {
-        if target == "wasm32-unknown-unknown" {
-            println!("cargo:rustc-link-arg-cdylib=--max-memory=1073741824");
-        }
         return;
     }
     println!("cargo:rerun-if-changed=vendor/zstd/zstddeclib.c");

@@ -2,10 +2,10 @@ import { expect, spyOn, test } from 'bun:test';
 import JSZip from 'jszip';
 import { isHostMessage } from '../../../../shared/office-session';
 import { engineKind } from '../wasm/engine';
-import type { WorkbookHandle } from '../wasm/loader';
+import { isPngExportAvailable, openWorkbook, type WorkbookHandle } from '../wasm/loader';
 import { hydratePeer, openWorkbookSession } from './client';
 
-test.skipIf(engineKind === 'native')('cold hydration instantiates exactly the worker module without main-thread wasm compilation', async () => {
+test.skipIf(engineKind === 'native')('cold retained hydration preserves canvas-free PNG errors without compiling another module', async () => {
   const zip = new JSZip();
   zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>');
   zip.file('_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>');
@@ -25,7 +25,7 @@ test.skipIf(engineKind === 'native')('cold hydration instantiates exactly the wo
   let session: Awaited<ReturnType<typeof openWorkbookSession>> | undefined;
   let peer: WorkbookHandle | undefined;
   try {
-    session = await openWorkbookSession(bytes, { worker: () => worker, retainPeerHydration: true });
+    session = await openWorkbookSession(bytes, { worker: () => worker, png: true, retainPeerHydration: true });
     expect(modules).toHaveLength(1);
     expect(modules[0]).toBeInstanceOf(WebAssembly.Module);
     expect(instantiating).not.toHaveBeenCalled();
@@ -38,6 +38,23 @@ test.skipIf(engineKind === 'native')('cold hydration instantiates exactly the wo
     expect(instantiateStreaming).not.toHaveBeenCalled();
     expect(peer.version()).toBe(await session.call.version());
     expect(peer.save()).toEqual(await session.save());
+    expect(isPngExportAvailable()).toBe(false);
+    const viewport = { x: 0, y: 0, width: 240, height: 120 };
+    for (const target of [{ sheet: 0, viewport }, { sheet: 0, range: 'A1:B1' }]) {
+      for (const png of [peer.renderPng(target), session.call.renderPng(target)]) {
+        const refused: unknown = await png.then(() => undefined, (error: unknown) => error);
+        expect(refused).toMatchObject({
+          name: 'PngExportError', code: 'canvas-unavailable', message: expect.stringContaining('@betteroffice/xlsx-native'),
+        });
+      }
+    }
+    const later = openWorkbook(bytes);
+    try {
+      expect(isPngExportAvailable()).toBe(false);
+      await expect(later.renderPng({ sheet: 0, viewport })).rejects.toMatchObject({
+        name: 'PngExportError', code: 'canvas-unavailable', message: expect.stringContaining('@betteroffice/xlsx-native'),
+      });
+    } finally { later.dispose(); }
     const cells = peer.readCells({
       ranges: [{ sheetId: 'sheet:0', range: { kind: 'a1', a1: 'A1:B1' } }],
     });

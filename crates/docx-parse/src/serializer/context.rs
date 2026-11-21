@@ -8,6 +8,55 @@ use crate::xml::ParseError;
 
 use super::s10::SerializerDeterminism;
 
+/// The most kept paragraphs one save describes; its count covers them all.
+const KEPT_PARAGRAPH_LIMIT: usize = 200;
+
+/// A paragraph a save wrote as its source bytes because writing it would have dropped structure.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeptParagraph {
+    pub part: String,
+    pub ordinal: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub para_id: Option<String>,
+    pub text: String,
+    /// `"paragraph"`, or `"part"` when no safe splice applied and the whole part was kept.
+    pub scope: String,
+    pub dropped: Vec<String>,
+}
+
+/// A surviving paragraph of a part written whole that holds fewer structural elements than its
+/// source.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DroppedParagraph {
+    pub ordinal: u32,
+    pub para_id: String,
+    pub text: String,
+    pub dropped: Vec<String>,
+}
+
+/// A story part written whole with fewer structural elements than its source. The edits may
+/// account for them, as a deleted table row does.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DroppedStructure {
+    pub part: String,
+    pub dropped: Vec<String>,
+    pub paragraphs: Vec<DroppedParagraph>,
+}
+
+/// A save's diagnostics: the text warnings and the typed values the save reports.
+#[derive(Clone, Debug, Default)]
+pub struct S13SaveReport {
+    /// Every diagnostic as text, as [`super::write_docx_s13_with_warnings`] returns them.
+    pub warnings: Vec<String>,
+    /// Paragraphs kept as their source bytes, counted per part.
+    pub kept_unchanged: BTreeMap<String, u32>,
+    pub kept_paragraphs: Vec<KeptParagraph>,
+    pub structure_dropped: Vec<DroppedStructure>,
+}
+
 /// Per-serialization state. Generated identities are taken only from the
 /// injected seed; serializers never consult ambient randomness or a clock.
 #[derive(Clone, Debug)]
@@ -16,14 +65,31 @@ pub struct SerializerContext {
     now: String,
     rendered_page_breaks: Vec<bool>,
     chart_drawings: HashMap<String, String>,
+    group_drawings: HashMap<String, String>,
     warnings: Vec<String>,
     paragraph_replace_counts: BTreeMap<String, u32>,
+    kept_unchanged: BTreeMap<String, u32>,
+    kept_paragraphs: Vec<KeptParagraph>,
+    structure_dropped: Vec<DroppedStructure>,
     paragraph_ids: BTreeSet<u32>,
     pub(crate) deletion: bool,
     pub(crate) in_control: bool,
     pub(crate) in_revision: bool,
+    pub(crate) vmerge_continuation: u32,
     splice: Option<SpliceRecorder>,
     document_root: Option<String>,
+    form_data_token: Option<String>,
+    form_data_written_token: bool,
+    deferred_form_data: Vec<(String, String, String)>,
+}
+
+const FORM_DATA_TOKEN: &str = "<!--bo-ffdata ";
+
+/// The tokens written in place of form field data, by field name and reason.
+pub(crate) struct DeferredFormData {
+    pub(crate) tokens: Vec<(String, String, String)>,
+    /// Whether written form field data holds token text, so only position tells tokens apart.
+    pub(crate) in_written_data: bool,
 }
 
 /// The XML written for each model paragraph a spliced part addresses by `sourceOrdinal`.
@@ -61,15 +127,59 @@ impl SerializerContext {
             now: determinism.now.clone(),
             rendered_page_breaks: Vec::new(),
             chart_drawings: HashMap::new(),
+            group_drawings: HashMap::new(),
             warnings: Vec::new(),
             paragraph_replace_counts: BTreeMap::new(),
+            kept_unchanged: BTreeMap::new(),
+            kept_paragraphs: Vec::new(),
+            structure_dropped: Vec::new(),
             paragraph_ids: BTreeSet::new(),
             deletion: false,
             in_control: false,
             in_revision: false,
+            vmerge_continuation: 0,
             splice: None,
             document_root: None,
+            form_data_token: None,
+            form_data_written_token: false,
+            deferred_form_data: Vec::new(),
         })
+    }
+
+    /// Writes an unreplayable `w:ffData` as a token absent from `source` instead of failing.
+    pub(crate) fn begin_form_data_tokens(&mut self, source: &str) {
+        let mut prefix = FORM_DATA_TOKEN.to_owned();
+        while source.contains(&prefix) {
+            prefix.push('_');
+        }
+        self.form_data_token = Some(prefix);
+        self.form_data_written_token = false;
+        self.deferred_form_data.clear();
+    }
+
+    /// Records whether written form field data holds the token text itself.
+    pub(crate) fn note_form_data(&mut self, raw: &str) {
+        if let Some(prefix) = self.form_data_token.as_deref()
+            && raw.contains(prefix)
+        {
+            self.form_data_written_token = true;
+        }
+    }
+
+    pub(crate) fn defer_form_data(&mut self, field: &str, detail: &str) -> Option<String> {
+        let prefix = self.form_data_token.as_deref()?;
+        let token = format!("{prefix}{}-->", self.deferred_form_data.len());
+        self.deferred_form_data
+            .push((token.clone(), field.to_owned(), detail.to_owned()));
+        Some(token)
+    }
+
+    pub(crate) fn end_form_data_tokens(&mut self) -> DeferredFormData {
+        self.form_data_token = None;
+        DeferredFormData {
+            tokens: std::mem::take(&mut self.deferred_form_data),
+            in_written_data: std::mem::take(&mut self.form_data_written_token),
+        }
     }
 
     pub(crate) fn set_document_source(&mut self, source: Option<&str>) {
@@ -106,6 +216,16 @@ impl SerializerContext {
         self.chart_drawings.get(relationship_id).map(String::as_str)
     }
 
+    /// Source `w:drawing` elements holding a group or canvas in one story part, keyed by
+    /// `wp:docPr` id; an id used by more than one drawing is left out.
+    pub fn set_group_drawings(&mut self, drawings: HashMap<String, String>) {
+        self.group_drawings = drawings;
+    }
+
+    pub(crate) fn group_drawing(&self, id: &str) -> Option<&str> {
+        self.group_drawings.get(id).map(String::as_str)
+    }
+
     /// Records a non-fatal save diagnostic for the caller to report.
     pub fn warn(&mut self, warning: impl Into<String>) {
         self.warnings.push(warning.into());
@@ -118,8 +238,50 @@ impl SerializerContext {
             .or_default() += 1;
     }
 
+    /// Counts a paragraph of `part` written as its source bytes because its rewritten XML would
+    /// drop structure, though its run formatting changed.
+    pub(crate) fn count_kept_unchanged(&mut self, part: &str) {
+        *self.kept_unchanged.entry(part.to_owned()).or_default() += 1;
+    }
+
+    /// Whether another kept paragraph's details fit in the save's report.
+    pub(crate) fn wants_kept_paragraph(&self) -> bool {
+        self.kept_paragraphs.len() < KEPT_PARAGRAPH_LIMIT
+    }
+
+    /// Reports a story part written whole with fewer structural elements than its source.
+    pub(crate) fn add_structure_dropped(&mut self, dropped: DroppedStructure) {
+        self.structure_dropped.push(dropped);
+    }
+
+    /// Adds a kept paragraph's details to the save's report.
+    pub(crate) fn add_kept_paragraph(&mut self, paragraph: KeptParagraph) {
+        self.kept_paragraphs.push(paragraph);
+    }
+
     /// Drains the diagnostics recorded so far.
     pub fn take_warnings(&mut self) -> Vec<String> {
+        if !self.kept_unchanged.is_empty() {
+            let counts = std::mem::take(&mut self.kept_unchanged);
+            self.warn(format!(
+                "DOCX_KEPT_UNCHANGED structure {}",
+                serde_json::to_string(&counts).expect("string keys and integer counts")
+            ));
+        }
+        if !self.structure_dropped.is_empty() {
+            let dropped = std::mem::take(&mut self.structure_dropped);
+            self.warn(format!(
+                "DOCX_STRUCTURE_DROPPED {}",
+                serde_json::to_string(&dropped).expect("strings and integers")
+            ));
+        }
+        if !self.kept_paragraphs.is_empty() {
+            let paragraphs = std::mem::take(&mut self.kept_paragraphs);
+            self.warn(format!(
+                "DOCX_KEPT_PARAGRAPHS {}",
+                serde_json::to_string(&paragraphs).expect("strings and integers")
+            ));
+        }
         if !self.paragraph_replace_counts.is_empty() {
             let counts = std::mem::take(&mut self.paragraph_replace_counts);
             self.warn(format!(
@@ -128,6 +290,19 @@ impl SerializerContext {
             ));
         }
         std::mem::take(&mut self.warnings)
+    }
+
+    /// Drains the diagnostics recorded so far, typed beside their text.
+    pub(crate) fn take_report(&mut self) -> S13SaveReport {
+        let kept_unchanged = self.kept_unchanged.clone();
+        let kept_paragraphs = self.kept_paragraphs.clone();
+        let structure_dropped = self.structure_dropped.clone();
+        S13SaveReport {
+            warnings: self.take_warnings(),
+            kept_unchanged,
+            kept_paragraphs,
+            structure_dropped,
+        }
     }
 
     pub fn allocate_hex_id(&mut self) -> String {
@@ -191,6 +366,7 @@ impl SerializerContext {
                 }
                 recorded.written.insert(ordinal, xml.to_owned());
             }
+            Some(_) if self.vmerge_continuation > 0 => return None,
             Some(_) => {
                 recorder.conflict = true;
                 return None;

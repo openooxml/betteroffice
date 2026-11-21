@@ -408,6 +408,7 @@ fn step(operation: EditOperation) -> EditStep {
 
 fn replace(target: TextTarget, text: &str) -> EditStep {
     step(EditOperation::ReplaceText {
+        runs: None,
         target,
         text: text.to_owned(),
     })
@@ -415,6 +416,7 @@ fn replace(target: TextTarget, text: &str) -> EditStep {
 
 fn insert(target: TextTarget, at: TargetEdge, text: &str) -> EditStep {
     step(EditOperation::InsertText {
+        runs: None,
         target,
         at,
         text: text.to_owned(),
@@ -427,6 +429,7 @@ fn delete(target: TextTarget) -> EditStep {
 
 fn new_paragraph(text: &str, style: Option<&str>) -> ParagraphInput {
     ParagraphInput {
+        runs: None,
         text: text.to_owned(),
         style_id: style.map(str::to_owned),
     }
@@ -949,6 +952,7 @@ fn one_undo_step_between_typing_in_both_capture_modes() {
             vec![
                 replace(search("Delta", "00000004"), "Omega"),
                 step(EditOperation::ReplaceText {
+                    runs: None,
                     target: TextTarget::Paragraph(para("hf:rIdHeader", "0000E001")),
                     text: "New header".to_owned(),
                 }),
@@ -1681,6 +1685,33 @@ fn structural_deletions_refuse_unsafe_spans() {
 }
 
 #[test]
+fn a_style_without_numbering_leaves_a_created_list_in_place() {
+    let doc = open(&format!(
+        r#"<w:p w14:paraId="00000001"><w:pPr><w:ind w:left="720"/></w:pPr>{}</w:p>{}"#,
+        r("With properties"),
+        p("00000002", &r("Without properties")),
+    ));
+    let undo = UndoSession::new();
+    let kind = docx_edit::ListKind::Bullet;
+    let list_def = docx_edit::LIST_DEF;
+    for id in ["00000001", "00000002"] {
+        let attrs = doc
+            .ensure_list_definition(&EditCtx::local("", ""), "body", id, kind)
+            .unwrap();
+        for (key, value) in attrs {
+            doc.set_paragraph_attr(id, key, value).unwrap();
+        }
+        let listed = properties(&doc, id);
+        assert!(listed.contains_key(list_def), "{id}");
+        apply(&doc, &undo, vec![set_style(id, "Quote")]);
+        let styled = properties(&doc, id);
+        assert_eq!(styled.get("pStyle"), Some(&Any::from("Quote")), "{id}");
+        assert_eq!(styled.get("numPr"), listed.get("numPr"), "{id}");
+        assert_eq!(styled.get(list_def), listed.get(list_def), "{id}");
+    }
+}
+
+#[test]
 fn paragraph_styles_apply_their_full_effect_in_rust() {
     let doc = open(&format!(
         r#"<w:p w14:paraId="00000001"><w:pPr><w:pStyle w:val="Heading1"/><w:ind w:left="1440"/></w:pPr>{}<w:r><w:rPr><w:u w:val="single"/></w:rPr><w:t>underlined</w:t></w:r></w:p>{}"#,
@@ -1774,6 +1805,56 @@ fn paragraph_styles_apply_their_full_effect_in_rust() {
         assert_eq!(inherited.get("alignment"), Some(&Any::from("center")));
         assert!(!inherited.contains_key("numPr"));
     }
+}
+
+#[test]
+fn paragraph_styles_without_a_numbering_id_apply_like_plain_styles() {
+    let body = format!(
+        "{}{}",
+        p("00000001", &r("plain")),
+        styled("00000002", "ListNumber", &r("listed"))
+    );
+    let mut parts = ooxml_opc::unzip_parts(&docx(&body)).unwrap();
+    let styles = format!(
+        r#"<w:styles {NS}>{STYLES}<w:style w:type="paragraph" w:styleId="Subtitle"><w:name w:val="Subtitle"/><w:basedOn w:val="Normal"/><w:pPr><w:numPr><w:ilvl w:val="1"/></w:numPr><w:jc w:val="center"/></w:pPr><w:rPr><w:color w:val="5A5A5A"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Unnumbered"><w:name w:val="Unnumbered"/><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="0"/></w:numPr></w:pPr></w:style></w:styles>"#
+    );
+    parts
+        .iter_mut()
+        .find(|(name, _)| name == "word/styles.xml")
+        .unwrap()
+        .1 = styles.into_bytes();
+    let doc = open_package(&ooxml_opc::rezip_parts(&parts).unwrap());
+    let undo = UndoSession::new();
+
+    apply(&doc, &undo, vec![set_style("00000001", "Subtitle")]);
+    let subtitle = properties(&doc, "00000001");
+    assert_eq!(subtitle.get("pStyle"), Some(&Any::from("Subtitle")));
+    assert_eq!(subtitle.get("alignment"), Some(&Any::from("center")));
+    assert!(!subtitle.contains_key("numPr"));
+    assert!(!subtitle.contains_key("numPrFromStyle"));
+
+    apply(&doc, &undo, vec![set_style("00000002", "Unnumbered")]);
+    let cleared = properties(&doc, "00000002");
+    assert_eq!(cleared.get("pStyle"), Some(&Any::from("Unnumbered")));
+    assert!(!cleared.contains_key("numPr"));
+
+    let applied = apply(
+        &doc,
+        &undo,
+        vec![insert_paragraphs(
+            "00000001",
+            TargetEdge::End,
+            vec![new_paragraph("sub", Some("Subtitle"))],
+        )],
+    );
+    let inserted = properties(&doc, &applied.receipts[0].new_paragraphs[0].para_id);
+    assert_eq!(inserted.get("pStyle"), Some(&Any::from("Subtitle")));
+    assert!(!inserted.contains_key("numPr"));
+
+    assert_eq!(
+        code(&doc, vec![set_style("00000001", "ListNumber")]),
+        EditFailureCode::Unsupported
+    );
 }
 
 fn open_numbered_restyle(body: &str) -> EditingDoc {
@@ -4014,4 +4095,87 @@ fn removing_the_end_of_a_paragraph_keeps_the_formatting_of_the_marks_after_it() 
     apply(&doc, &undo, vec![delete(at("00000003", 2, 3))]);
     assert_eq!(embed_formatting(&doc), before);
     assert_eq!(accepted(&doc), ["On", "", "Tw"]);
+}
+
+#[test]
+fn a_built_step_with_both_text_and_runs_is_invalid() {
+    let doc = basic();
+    let run = docx_edit::TextRun {
+        text: "x".to_owned(),
+        marks: None,
+    };
+    let both = step(EditOperation::InsertText {
+        target: TextTarget::Paragraph(body("00000001")),
+        at: TargetEdge::End,
+        text: "x".to_owned(),
+        runs: Some(vec![run.clone()]),
+    });
+    let mut paragraph = new_paragraph("x", None);
+    paragraph.runs = Some(vec![run]);
+    let before = doc.encode_state_as_update_v1();
+    for steps in [
+        vec![both],
+        vec![insert_paragraphs(
+            "00000001",
+            TargetEdge::End,
+            vec![paragraph],
+        )],
+    ] {
+        let refusal = refuse(&doc, &UndoSession::new(), steps);
+        assert_eq!(refusal.failure.code, EditFailureCode::InvalidStep);
+        assert_eq!(doc.encode_state_as_update_v1(), before);
+    }
+}
+
+#[test]
+fn block_control_fill_with_unnumbered_style_adds_paragraphs() {
+    use docx_edit::content_controls::ContentControlSelector;
+
+    let fill = |tag: &str| {
+        step(EditOperation::SetContentControlText {
+            target: ContentControlSelector::Tag {
+                tag: tag.to_owned(),
+            },
+            text: "first\nsecond".to_owned(),
+        })
+    };
+    for (style_id, num_pr) in [
+        ("Subtitle", r#"<w:ilvl w:val="1"/>"#),
+        ("Unnumbered", r#"<w:ilvl w:val="0"/><w:numId w:val="0"/>"#),
+        ("Numbered1", r#"<w:ilvl w:val="0"/><w:numId w:val="1"/>"#),
+    ] {
+        let body = format!(
+            r#"<w:sdt><w:sdtPr><w:tag w:val="fill"/></w:sdtPr><w:sdtContent>{}</w:sdtContent></w:sdt>"#,
+            styled("0000D001", style_id, &r("before")),
+        );
+        let mut parts = ooxml_opc::unzip_parts(&docx(&body)).unwrap();
+        parts.iter_mut().find(|(name, _)| name == "word/styles.xml").unwrap().1 = format!(
+            r#"<w:styles {NS}>{STYLES}<w:style w:type="paragraph" w:styleId="{style_id}"><w:name w:val="{style_id}"/><w:pPr><w:numPr>{num_pr}</w:numPr></w:pPr></w:style></w:styles>"#,
+        ).into_bytes();
+        let doc = open_package(&ooxml_opc::rezip_parts(&parts).unwrap());
+        if style_id == "Numbered1" {
+            assert_eq!(code(&doc, vec![fill("fill")]), EditFailureCode::Unsupported);
+            continue;
+        }
+        let applied = apply(&doc, &UndoSession::new(), vec![fill("fill")]);
+        assert_eq!(
+            texts(&doc, "body:sdt0", EditTextView::Accepted),
+            ["first", "second"]
+        );
+        let added = &applied.receipts[0].new_paragraphs;
+        assert_eq!(added.len(), 1);
+        let paragraph = doc
+            .paragraphs("body:sdt0")
+            .unwrap()
+            .into_iter()
+            .find(|paragraph| paragraph.para_id == added[0].para_id)
+            .unwrap();
+        assert_eq!(paragraph.text, "second");
+        assert_eq!(
+            paragraph.properties.get("pStyle"),
+            Some(&Any::from(style_id))
+        );
+        assert!(!paragraph.properties.contains_key("numPr"));
+        assert!(!paragraph.properties.contains_key("numPrFromStyle"));
+    }
 }

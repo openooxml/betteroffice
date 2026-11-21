@@ -2,12 +2,15 @@ import type {
   Selection, WorkbookHandle, XlsxEditRequest, XlsxEditResult, XlsxFindRequest, XlsxFindResult,
   XlsxReadRequest, XlsxReadResult, XlsxValidationResult,
 } from '@betteroffice/xlsx';
+import type { RemoteFontProvider } from '@betteroffice/fonts/remote';
 import type { CollaborationAwareness, CollaborationReplica } from '@betteroffice/xlsx/collaboration';
 import type { Translations } from '@betteroffice/xlsx-i18n';
 import type { XlsxCommandStore } from './commands/types';
+import type { XlsxShortcuts } from './commands/shortcuts';
+import type { ShortcutIssue } from '../../../shared/keyboard/resolve';
 import type { XlsxEditorPluginProps } from './plugins/types';
 import { LEGACY_SYNC_API } from './runtimeOptions';
-import type { XlsxAsyncEditorApi } from './worker/createAsyncEditorApi';
+import type { XlsxProposalRequest, XlsxProposalResult, XlsxAsyncEditorApi } from './worker/createAsyncEditorApi';
 import type { XlsxWorkerEditorApi } from './worker/createWorkerEditorApi';
 
 export interface XlsxPointPosition {
@@ -27,7 +30,7 @@ export interface XlsxPointPosition {
  * with {@link XlsxCommandAdmissionError}: `input-failed` while a refused entry
  * waits for correction or earlier input failed, `gesture-active` during a chart
  * drag, and `document-replaced` when the workbook is replaced meanwhile.
- * @deprecated Removed in 0.6.0. Use XlsxAsyncEditorApi.
+ * @deprecated Removed in 0.7.0. Use XlsxAsyncEditorApi.
  */
 export interface XlsxEditorApi {
   flushPendingInput: () => Promise<void>;
@@ -49,6 +52,7 @@ export interface XlsxEditorApi {
   focus: () => void;
   handle: WorkbookHandle;
   refreshProposals: () => void;
+  proposeChanges?(request: XlsxProposalRequest): Promise<XlsxProposalResult>;
   /**
    * Writes the open cell entry and returns the workbook bytes at once. Throws
    * {@link XlsxSaveRefusedError} rather than return bytes without accepted
@@ -79,7 +83,7 @@ export interface XlsxEditorApi {
   applyEdits: (request: XlsxEditRequest) => Promise<XlsxEditResult>;
 }
 
-/** @deprecated Removed in 0.6.0. Use XlsxAsyncEditorApi. */
+/** @deprecated Removed in 0.7.0. Use XlsxAsyncEditorApi. */
 export interface XlsxWorkerViewerApi extends Omit<
   XlsxEditorApi, 'handle' | 'save' | 'selectCells' | 'version' | 'readCells' |
   'findText' | 'validateEdits' | 'applyEdits'
@@ -116,7 +120,7 @@ interface XlsxHostProps {
   downloadOnSave?: boolean;
   /** Initial scale, clamped to the supported zoom range. Defaults to 1. */
   initialZoom?: number;
-  /** Rendered while a supplied file is opening. */
+  /** Shown while a supplied file opens. Until the editor's code has loaded it is shown in normal flow, as before. Once the editor has mounted it is shown over the grid area, in an overlay whose size does not affect the editor's layout; there it is not interactive by default: pointer input passes through it to the grid, and a control inside it that re-enables pointer input takes that input instead of the grid. */
   loadingIndicator?: React.ReactNode;
   /** Inline style overrides for the editor root. */
   style?: React.CSSProperties;
@@ -124,6 +128,13 @@ interface XlsxHostProps {
 
 /** Props for XlsxEditor. */
 export interface XlsxInThreadEditorProps extends XlsxEditorPluginProps, XlsxHostProps {
+  /** Load bundled workbook fonts. Defaults to true. */
+  defaultFonts?: boolean;
+  /**
+   * Where fonts with no bundled metric-compatible face are fetched from. Defaults to `'bunny'`
+   * (fonts.bunny.net); `'off'` never fetches.
+   */
+  remoteFonts?: RemoteFontProvider;
   /** @deprecated False selects the in-thread engine. */
   experimentalWorkerOpen?: false;
   onError?: (error: Error) => void;
@@ -141,7 +152,7 @@ export interface XlsxInThreadEditorProps extends XlsxEditorPluginProps, XlsxHost
   collaboration?: XlsxEditorCollaborationOptions;
   i18n?: Translations;
   /**
-   * Called when a workbook opens, with a handle to stage agent proposals and a
+   * Called once an opened workbook's first frame is painted, with a handle to stage agent proposals and a
    * way to refresh the panel afterward. Enables demo/host agents without
    * exposing the wasm object through the render tree. A returned cleanup runs
    * before the workbook is replaced or disposed.
@@ -150,6 +161,11 @@ export interface XlsxInThreadEditorProps extends XlsxEditorPluginProps, XlsxHost
   className?: string;
   /** Blocks user edits; navigation and selection remain available. */
   readOnly?: boolean;
+  /** Whether to show the column and row header bands. Defaults to false. */
+  showSheetHeaders?: boolean;
+  /** Shows the fill handle on the selection corner. */
+  fillHandle?: boolean;
+  allowHostProposals?: boolean;
   /**
    * Replaces the default toolbar: omitted keeps it (hidden when read-only),
    * `null` removes it, and supplied chrome renders instead, also when
@@ -159,11 +175,22 @@ export interface XlsxInThreadEditorProps extends XlsxEditorPluginProps, XlsxHost
   toolbar?: React.ReactNode;
   /** `false` hides the toolbar region, whatever `toolbar` is. */
   showToolbar?: boolean;
+  /**
+   * Remaps or disables keyboard shortcuts; menus and tooltips follow.
+   * @experimental
+   */
+  shortcuts?: XlsxShortcuts;
+  /**
+   * Reports each entry of `shortcuts` that was refused, and each default a host chord displaced.
+   * Without it, refusals are logged in development builds.
+   * @experimental
+   */
+  onShortcutIssue?: (issue: ShortcutIssue) => void;
 }
 
-/** @deprecated Removed in 0.6.0. Use XlsxAsyncEditorProps. */
+/** @deprecated Removed in 0.7.0. Use XlsxAsyncEditorProps. */
 export type XlsxWorkerViewerProps = Omit<XlsxInThreadEditorProps, 'onReady' | 'readOnly' | 'collaboration' | 'experimentalWorkerOpen' | keyof XlsxHostProps> & {
-  /** @deprecated Removed in 0.6.0. Omit for the async editor. */
+  /** @deprecated Removed in 0.7.0. Omit for the async editor. */
   [LEGACY_SYNC_API]: true;
   readOnly: true;
   collaboration?: undefined;
@@ -172,23 +199,23 @@ export type XlsxWorkerViewerProps = Omit<XlsxInThreadEditorProps, 'onReady' | 'r
   onReady?: (api: XlsxWorkerViewerApi) => void | (() => void);
 };
 
-/** @deprecated Removed in 0.6.0. Use XlsxAsyncEditorProps. */
+/** @deprecated Removed in 0.7.0. Use XlsxAsyncEditorProps. */
 export type XlsxWorkerEditorProps = Omit<XlsxWorkerViewerProps, 'onReady' | 'readOnly'> & {
   readOnly?: false;
   onReady?: (api: XlsxWorkerEditorApi) => void | (() => void);
 };
 
 export type XlsxAsyncEditorProps = Omit<XlsxInThreadEditorProps, 'onReady' | 'experimentalWorkerOpen'> & {
-  /** @deprecated Removed in 0.6.0. Omit for the async editor. */
+  /** @deprecated Removed in 0.7.0. Omit for the async editor. */
   [LEGACY_SYNC_API]?: false;
   /** @deprecated False selects the in-thread engine. */
   experimentalWorkerOpen?: boolean;
   onReady?: (api: XlsxAsyncEditorApi) => void | (() => void);
 };
 
-/** @deprecated Removed in 0.6.0. Use XlsxAsyncEditorProps. */
+/** @deprecated Removed in 0.7.0. Use XlsxAsyncEditorProps. */
 export type XlsxLegacyEditorProps = Omit<XlsxInThreadEditorProps, keyof XlsxHostProps> & {
-  /** @deprecated Removed in 0.6.0. Omit for the async editor. */
+  /** @deprecated Removed in 0.7.0. Omit for the async editor. */
   [LEGACY_SYNC_API]: true;
 };
 

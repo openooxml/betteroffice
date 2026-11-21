@@ -1,4 +1,4 @@
-import { deck, faultControl, open, story, type } from './peerlessTestHarness';
+import { deck, faultControl, open, replyControl, story, type } from './peerlessTestHarness';
 import { afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test';
 import JSZip from 'jszip';
 import { readFile } from 'node:fs/promises';
@@ -154,6 +154,32 @@ test('recovery retains acknowledged typing before the first checkpoint', async (
   } finally { checkpoint.mockRestore(); }
 });
 
+test('recovery reports typing the worker never acknowledged before it failed instead of dropping it silently', async () => {
+  const error = mock((_error: Error) => {});
+  const value = await open({ onError: error });
+  const target = await story(value.api);
+  await act(async () => { await value.api.selectText({ slide: 1, shapeId: target.shapeId, storyId: target.storyId, start: 0, end: 0 }); });
+  const input = value.view.getByLabelText('Slide text');
+  await act(async () => { type(input, 'Accepted'); await value.api.flushPendingInput(); });
+  replyControl.hold();
+  await act(async () => { type(input, 'Lost'); });
+  await waitFor(() => expect(replyControl.count()).toBeGreaterThan(0));
+  await act(async () => { faultControl.crash(); });
+  await waitFor(() => expect(error).toHaveBeenCalled());
+  await act(async () => { replyControl.release(); });
+  const recovered = await value.api.recoverySave();
+  expect(recovered.unrecoveredIntents?.length).toBeGreaterThan(0);
+  expect(recovered.unrecoveredIntents!.every((intent) => intent.reason === 'unknown-outcome')).toBe(true);
+  expect(recovered.unrecoveredIntents!.map((intent) => intent.kind)).toContain('insertText');
+  expect(error.mock.calls.some(([reported]) => /left out \d+ edit/.test(reported.message))).toBe(true);
+  const saved = wasm.openPresentation(recovered.bytes);
+  try {
+    const content = saved.readContent();
+    if (!content.ok) throw new Error(content.failure.message);
+    expect(content.stories[0]!.text).toBe(`Accepted${target.text}`);
+  } finally { saved.dispose(); }
+});
+
 test('recovery after a crash on a deck whose state exceeds the update cap', async () => {
   const updateCap = 64 * 1024 * 1024;
   let bytes: Uint8Array;
@@ -181,7 +207,7 @@ test('recovery after a crash on a deck whose state exceeds the update cap', asyn
   const opened = spyOn(wasm, 'openPresentation');
   let value: Awaited<ReturnType<typeof open>>;
   try {
-    value = await open({ file: bytes, onError: error });
+    value = await open({ file: bytes, onError: error }, { openMs: 30_000 });
     const handle = opened.mock.results[0]!.value as wasm.PresentationHandle;
     expect(handle.encodeStateAsUpdate().byteLength).toBeGreaterThan(updateCap);
   } finally { opened.mockRestore(); }
@@ -208,6 +234,28 @@ test('recovery after a crash on a deck whose state exceeds the update cap', asyn
     } finally { saved.dispose(); }
   } finally { checkpoint.mockRestore(); }
 }, 60_000);
+
+test('recovery reports typing whose outcome the worker declared unknown instead of dropping it silently', async () => {
+  const error = mock((_error: Error) => {});
+  const value = await open({ onError: error });
+  const target = await story(value.api);
+  await act(async () => { await value.api.selectText({ slide: 1, shapeId: target.shapeId, storyId: target.storyId, start: 0, end: 0 }); });
+  const input = value.view.getByLabelText('Slide text');
+  await act(async () => { type(input, 'Accepted'); await value.api.flushPendingInput(); });
+  faultControl.unknown();
+  await act(async () => { type(input, 'Uncertain'); await value.api.flushPendingInput().catch(() => {}); });
+  await waitFor(() => expect(error).toHaveBeenCalledTimes(1));
+  const recovered = await value.api.recoverySave();
+  expect(recovered.unrecoveredIntents?.map((intent) => intent.kind)).toContain('insertText');
+  expect(recovered.unrecoveredIntents!.every((intent) => intent.reason === 'unknown-outcome')).toBe(true);
+  expect(error.mock.calls.some(([reported]) => /left out \d+ edit/.test(reported.message))).toBe(true);
+  const saved = wasm.openPresentation(recovered.bytes);
+  try {
+    const content = saved.readContent();
+    if (!content.ok) throw new Error(content.failure.message);
+    expect(content.stories[0]!.text).toBe(`Accepted${target.text}`);
+  } finally { saved.dispose(); }
+});
 
 test('unknown_outcome', async () => {
   const error = mock(() => {});

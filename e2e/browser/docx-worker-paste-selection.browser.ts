@@ -1,10 +1,11 @@
 import { test, expect, type Page, type TestInfo } from 'playwright/test';
 import { readFile } from 'node:fs/promises';
 import JSZip from 'jszip';
+import { caretBoxAtRunStart } from './rendered-box';
 
 const W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
 const overlay = '[data-docx-worker-editor] div[aria-hidden="true"][style*="rgba(59, 130, 246"]';
-const caret = '[data-docx-worker-editor] div[aria-hidden="true"][style*="currentcolor" i]';
+const caret = '[data-docx-worker-editor] [data-docx-caret]';
 
 async function open(page: Page) {
   const run = (text: string, rPr = '') => `<w:r><w:rPr>${rPr}<w:sz w:val="24"/></w:rPr><w:t>${text}</w:t></w:r>`;
@@ -24,7 +25,7 @@ async function open(page: Page) {
   await expect(page.locator('.paged-editor__page canvas').first()).toBeVisible({ timeout: 60_000 });
   const input = page.locator('.paged-editor__input');
   await input.focus();
-  await input.press('ControlOrMeta+Home');
+  await caretBoxAtRunStart(page.locator(caret), page.locator('[data-docx-worker-editor] .canvas-page-mirror .layout-run-text').first(), () => input.press('ControlOrMeta+Home'));
   await expect(page.locator(caret)).toHaveCount(1);
 }
 

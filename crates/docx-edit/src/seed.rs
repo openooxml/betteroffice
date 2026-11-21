@@ -113,7 +113,7 @@ fn holds_sequence_fields<T: ReadTxn>(txn: &T) -> bool {
         let mut values = vec![any];
         while let Some(value) = values.pop() {
             match value {
-                Any::String(text) if text.contains("SEQ") => return true,
+                Any::String(text) if names_sequence(text) => return true,
                 Any::Array(items) => values.extend(items.iter()),
                 Any::Map(entries) => values.extend(entries.values()),
                 _ => {}
@@ -143,7 +143,7 @@ fn seeded_sequence_fields<'a>(ops: impl IntoIterator<Item = &'a RawOp>) -> Optio
                     !payload.iter().any(|(key, _)| key == crate::KIND_KEY) && kind.contains("SEQ");
                 while !found && let Some(value) = values.pop() {
                     match value {
-                        Any::String(text) => found = text.contains("SEQ"),
+                        Any::String(text) => found = names_sequence(text),
                         Any::Array(items) => values.extend(items.iter()),
                         Any::Map(entries) => values.extend(entries.values()),
                         _ => {}
@@ -156,6 +156,32 @@ fn seeded_sequence_fields<'a>(ops: impl IntoIterator<Item = &'a RawOp>) -> Optio
         }
     }
     Some(found)
+}
+
+/// Whether an embed string names SEQ, leaving out the run a complex field keeps as read.
+fn names_sequence(text: &str) -> bool {
+    if !text.contains("SEQ") {
+        return false;
+    }
+    if !text.contains("\"sourceRunXml\"") {
+        return true;
+    }
+    let Ok(mut value) = serde_json::from_str::<Value>(text) else {
+        return true;
+    };
+    drop_field_runs(&mut value);
+    value.to_string().contains("SEQ")
+}
+
+fn drop_field_runs(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            object.remove("sourceRunXml");
+            object.values_mut().for_each(drop_field_runs);
+        }
+        Value::Array(items) => items.iter_mut().for_each(drop_field_runs),
+        _ => {}
+    }
 }
 
 /// A parsed node's `w:p` occurrence in its part: read for identity, never seeded.
@@ -405,7 +431,41 @@ pub(crate) fn style_resolved_keys() -> impl Iterator<Item = &'static str> {
     ])
 }
 
+/// The sides of a `cellMargins` value in twips, `[top, right, bottom, left]`,
+/// with `start`/`end` read as left/right (right/left in a `bidi` table).
+pub(crate) fn cell_margin_sides(margins: Option<&Value>, bidi: bool) -> [Option<f64>; 4] {
+    let margins = margins.filter(|margins| !margins.is_null());
+    let (logical_left, logical_right) = if bidi {
+        ("end", "start")
+    } else {
+        ("start", "end")
+    };
+    let side = |keys: &[&str]| {
+        keys.iter().find_map(|key| {
+            let side = field(margins, key);
+            field(side, "value")
+                .or(side)
+                .and_then(Value::as_f64)
+                .filter(|value| value.is_finite() && *value >= 0.0)
+        })
+    };
+    [
+        side(&["top"]),
+        side(&["right", logical_right]),
+        side(&["bottom"]),
+        side(&["left", logical_left]),
+    ]
+}
+
 impl SourceMetadata {
+    pub(crate) fn table_cell_margins(
+        &self,
+        style_id: Option<&str>,
+        bidi: bool,
+    ) -> [Option<f64>; 4] {
+        self.styles.table_cell_margins(style_id, bidi)
+    }
+
     pub(crate) fn plain_patch_style_supported(
         &self,
         story: &str,
@@ -541,9 +601,10 @@ impl SourceMetadata {
     }
 
     pub(crate) fn prepare_patch_table_styles(&self, story: &str, source: &SourceIndex) {
-        if crate::structured::source::cell_table(story).is_some()
-            && self.structure.patch_table_styles.is_empty()
-        {
+        let in_cell = std::iter::once(story)
+            .chain(story.match_indices(':').map(|(at, _)| &story[..at]))
+            .any(|prefix| crate::structured::source::cell_table(prefix).is_some());
+        if in_cell && self.structure.patch_table_styles.is_empty() {
             self.peer_patch_table_styles
                 .get_or_init(|| source.patch_table_styles().clone());
         }
@@ -1416,13 +1477,92 @@ pub(crate) fn any_from_value(value: Value) -> Result<Any, String> {
     }
 }
 
-fn yrs_attrs(values: JsonObject) -> Result<Attrs, String> {
-    let mut entries = values
-        .into_iter()
-        .map(|(key, value)| Ok((Arc::<str>::from(key), any_from_value(value)?)))
-        .collect::<Result<Vec<_>, String>>()?;
-    entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-    Ok(entries.into_iter().collect())
+/// One seed's attribute and embed keys and values, so equal ones share an allocation.
+#[derive(Default)]
+pub(crate) struct SeedAttrs {
+    strings: HashSet<Arc<str>>,
+    composites: HashMap<String, Any>,
+    #[cfg(test)]
+    unshared: bool,
+}
+
+#[cfg(test)]
+thread_local! {
+    static UNSHARED_SEED_ATTRS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+impl SeedAttrs {
+    #[cfg(not(test))]
+    pub(crate) fn for_seed() -> Self {
+        Self::default()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_seed() -> Self {
+        Self {
+            unshared: UNSHARED_SEED_ATTRS.with(std::cell::Cell::get),
+            ..Self::default()
+        }
+    }
+
+    #[cfg(not(test))]
+    fn unshared(&self) -> bool {
+        false
+    }
+
+    #[cfg(test)]
+    fn unshared(&self) -> bool {
+        self.unshared
+    }
+
+    pub(crate) fn text(&mut self, value: String) -> Arc<str> {
+        if self.unshared() {
+            return Arc::from(value);
+        }
+        if let Some(shared) = self.strings.get(value.as_str()) {
+            return Arc::clone(shared);
+        }
+        let shared = Arc::<str>::from(value);
+        self.strings.insert(Arc::clone(&shared));
+        shared
+    }
+
+    fn value(&mut self, value: Value) -> Result<Any, String> {
+        if self.unshared() {
+            return any_from_value(value);
+        }
+        match value {
+            Value::String(value) => Ok(Any::String(self.text(value))),
+            Value::Array(_) | Value::Object(_) => {
+                // JSON text keeps 1, 1.0, -0.0, "1" and true apart.
+                let text = value.to_string();
+                if let Some(shared) = self.composites.get(&text) {
+                    return Ok(shared.clone());
+                }
+                let shared = any_from_value(value)?;
+                self.composites.insert(text, shared.clone());
+                Ok(shared)
+            }
+            value => any_from_value(value),
+        }
+    }
+
+    fn attrs(&mut self, values: JsonObject) -> Result<Attrs, String> {
+        let mut entries = values
+            .into_iter()
+            .map(|(key, value)| Ok((self.text(key), self.value(value)?)))
+            .collect::<Result<Vec<_>, String>>()?;
+        entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        Ok(entries.into_iter().collect())
+    }
+
+    /// An embed's payload; its keys are shared when the embed is written.
+    fn payload(&mut self, values: JsonObject) -> Result<Vec<(String, Any)>, String> {
+        values
+            .into_iter()
+            .map(|(key, value)| Ok((key, self.value(value)?)))
+            .collect()
+    }
 }
 
 pub(crate) fn payload(values: JsonObject) -> Result<Vec<(String, Any)>, String> {
@@ -1625,6 +1765,75 @@ pub(crate) fn package_styles(
 }
 
 impl StyleResolver {
+    /// Cell margins in twips, `[top, right, bottom, left]`, that the document's
+    /// table styles give a table naming `style_id`: that style's
+    /// `w:tblCellMar`, else the default table style's, as seeding resolves them.
+    pub(crate) fn table_cell_margins(
+        &self,
+        style_id: Option<&str>,
+        bidi: bool,
+    ) -> [Option<f64>; 4] {
+        let default_style = self.default_style("table");
+        let table_style = style_id
+            .filter(|id| !id.is_empty())
+            .and_then(|id| self.style(id))
+            .or(default_style);
+        let margins = field(field(table_style, "tblPr"), "cellMargins")
+            .filter(|margins| !margins.is_null())
+            .or_else(|| field(field(default_style, "tblPr"), "cellMargins"));
+        cell_margin_sides(margins, bidi)
+    }
+
+    pub(crate) fn render_paragraph(&self, paragraph: &Value) -> (JsonObject, Option<Arc<Value>>) {
+        (
+            paragraph_attrs(paragraph, self, &[], &[], None),
+            paragraph_style_formatting(paragraph, self, None),
+        )
+    }
+
+    pub(crate) fn render_shape_run_attrs(
+        &self,
+        run: &Value,
+        paragraph_formatting: Option<&Value>,
+    ) -> JsonObject {
+        let direct = field(Some(run), "formatting");
+        let character = self.run_style_own(string(field(direct, "styleId")));
+        let merged = self.run_formatting(paragraph_formatting, direct);
+        let mut attrs = marks_to_attrs(&run_marks_from_formatting(
+            run,
+            paragraph_formatting,
+            self,
+            merged.as_ref(),
+        ));
+        for key in ["boldCs", "italicCs"] {
+            if let Some(value) = field(merged.as_ref(), key).and_then(Value::as_bool) {
+                attrs.insert(key.to_owned(), Value::Bool(value));
+            }
+        }
+        if let Some(value) = field(merged.as_ref(), "cs").and_then(Value::as_bool) {
+            attrs.insert("complexScript".to_owned(), Value::Bool(value));
+        }
+        if let Some(hint) = field(field(merged.as_ref(), "fontFamily"), "hint")
+            && let Some(fonts) = attrs.get_mut("fontFamily").and_then(Value::as_object_mut)
+        {
+            fonts.insert("hint".to_owned(), hint.clone());
+        }
+        if let Some(language) = field(merged.as_ref(), "language").and_then(Value::as_object) {
+            let own_language: serde_json::Map<String, Value> = language
+                .iter()
+                .filter(|(slot, _)| {
+                    field(field(direct, "language"), slot).is_some()
+                        || field(field(character, "language"), slot).is_some()
+                })
+                .map(|(slot, value)| (slot.clone(), value.clone()))
+                .collect();
+            if !own_language.is_empty() {
+                attrs.insert("language".to_owned(), Value::Object(own_language));
+            }
+        }
+        attrs
+    }
+
     /// Reads paragraph and character inheritance from package parts.
     pub fn from_parts(parts: &[(String, Vec<u8>)]) -> Result<Self, String> {
         let (_, definitions) = package_styles(parts)?;
@@ -1695,6 +1904,21 @@ impl StyleResolver {
         resolver.default_table = resolver.find_default("table");
         resolver.default_character = resolver.find_default("character");
         resolver
+    }
+
+    pub(crate) fn for_shape_styles(&self) -> Self {
+        let mut styles = self.clone();
+        styles.styles.retain(|_, style| {
+            matches!(
+                style.get("type").and_then(Value::as_str),
+                Some("paragraph" | "character")
+            )
+        });
+        styles.default_table = None;
+        styles.table_paragraph_formatting = None;
+        styles.table_run_formatting = None;
+        styles.memo = StyleMemo::default();
+        styles
     }
 
     fn find_default(&self, style_type: &str) -> Option<String> {
@@ -2062,6 +2286,21 @@ fn formatting_to_marks(formatting: Option<&Value>) -> Vec<Mark> {
             ]),
         ));
     }
+    if ["ligatures", "contextualAlternates"]
+        .iter()
+        .any(|key| formatting.contains_key(*key))
+    {
+        marks.push(mark(
+            "typography",
+            ordered_object([
+                ("ligatures", nullish(formatting.get("ligatures"))),
+                (
+                    "contextualAlternates",
+                    nullish(formatting.get("contextualAlternates")),
+                ),
+            ]),
+        ));
+    }
     if let Some(value) = string(formatting.get("emphasisMark")).filter(|value| *value != "none") {
         marks.push(mark(
             "emphasisMark",
@@ -2099,7 +2338,9 @@ pub(crate) fn mark_run_attrs(defaults: &Any) -> Vec<(String, Any)> {
 }
 
 /// Run attributes held as one field of a mark: (attribute, field, `defaultTextFormatting` key).
-const MARK_FIELDS: [(&str, &str, &str); 10] = [
+const MARK_FIELDS: [(&str, &str, &str); 12] = [
+    ("typography", "ligatures", "ligatures"),
+    ("typography", "contextualAlternates", "contextualAlternates"),
     ("fontSize", "size", "fontSize"),
     ("fontSize", "sizeCs", "fontSizeCs"),
     ("characterSpacing", "spacing", "spacing"),
@@ -2163,6 +2404,10 @@ pub(crate) fn mark_run_formatting<'a>(
             }
             "strike" => ("strike", Any::Bool(true)),
             "highlight" => match value {
+                Any::Map(_) => match field("color") {
+                    Some(color) => ("highlight", color),
+                    None => continue,
+                },
                 Any::String(color) => match color.strip_prefix('#') {
                     Some(rgb) => {
                         let fill = HashMap::from([("rgb".to_owned(), Any::from(rgb))]);
@@ -2216,6 +2461,15 @@ fn marks_to_attrs(marks: &[Mark]) -> JsonObject {
             attrs.insert(mark.name.clone(), Value::Bool(true));
         } else if mark.name == "snapToGrid" {
             attrs.insert("snapToGrid".to_owned(), Value::Bool(false));
+        } else if mark.name == crate::format::RPR_CHANGE {
+            attrs.insert(
+                mark.name.clone(),
+                mark.attrs
+                    .iter()
+                    .find(|(key, _)| key == "changes")
+                    .map(|(_, value)| value.clone())
+                    .unwrap_or(Value::Null),
+            );
         } else if mark.name == "highlight" {
             attrs.insert(
                 "highlight".to_owned(),
@@ -2296,11 +2550,20 @@ fn embed_unit(kind: &str, payload: JsonObject, marks: &[Mark], pm_size: u32) -> 
 }
 
 fn run_marks(run: &Value, style_formatting: Option<&Value>, styles: &StyleResolver) -> Vec<Mark> {
+    let merged = styles.run_formatting(style_formatting, field(Some(run), "formatting"));
+    run_marks_from_formatting(run, style_formatting, styles, merged.as_ref())
+}
+
+fn run_marks_from_formatting(
+    run: &Value,
+    style_formatting: Option<&Value>,
+    styles: &StyleResolver,
+    merged: Option<&Value>,
+) -> Vec<Mark> {
     let formatting = field(Some(run), "formatting");
     let style_id = string(field(formatting, "styleId"));
     let run_style = styles.run_style_own(style_id);
-    let merged = styles.run_formatting(style_formatting, formatting);
-    let mut marks = formatting_to_marks(merged.as_ref());
+    let mut marks = formatting_to_marks(merged);
     let hyperlink_style = style_id.is_some_and(is_hyperlink_style_name)
         || style_id
             .and_then(|id| styles.style(id))
@@ -2316,6 +2579,28 @@ fn run_marks(run: &Value, style_formatting: Option<&Value>, styles: &StyleResolv
                     .push(("inheritedHyperlink".to_owned(), Value::Bool(true)));
             }
         }
+    }
+    if let Some(Value::Array(changes)) = field(Some(run), "propertyChanges") {
+        let changes: Vec<_> = changes
+            .iter()
+            .map(|change| {
+                let mut change = change.clone();
+                let previous =
+                    styles.run_formatting(style_formatting, change.get("previousFormatting"));
+                let attrs = marks_to_attrs(&formatting_to_marks(previous.as_ref()));
+                if let Some(change) = change.as_object_mut() {
+                    change.insert(
+                        "previousAttributes".to_owned(),
+                        serde_json::to_value(attrs).unwrap(),
+                    );
+                }
+                change
+            })
+            .collect();
+        marks.push(mark(
+            crate::format::RPR_CHANGE,
+            ordered_object([("changes", Value::Array(changes))]),
+        ));
     }
     marks
 }
@@ -2337,27 +2622,25 @@ fn inherited_run_attrs(
 }
 
 /// What runs inherit under one package's styles.
-#[cfg(any(test, feature = "wasm"))]
-pub(crate) struct RunInheritance(StyleResolver);
+#[doc(hidden)]
+pub struct RunInheritance(StyleResolver);
 
-#[cfg(any(test, feature = "wasm"))]
 impl RunInheritance {
-    pub(crate) fn new(definitions: Option<&Value>) -> Self {
+    #[doc(hidden)]
+    pub fn new(definitions: Option<&Value>) -> Self {
         Self(StyleResolver::new(definitions))
     }
 
     /// What seeding merges into the marks of a run of `run_style` in a paragraph of
     /// `paragraph_style` before the run's direct formatting.
-    pub(crate) fn run_attrs(
-        &self,
-        paragraph_style: Option<&str>,
-        run_style: Option<&str>,
-    ) -> JsonObject {
+    #[doc(hidden)]
+    pub fn run_attrs(&self, paragraph_style: Option<&str>, run_style: Option<&str>) -> JsonObject {
         self.0.run_attrs(paragraph_style, run_style)
     }
 
     #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
-    pub(crate) fn table_run_attrs(
+    #[doc(hidden)]
+    pub fn table_run_attrs(
         &mut self,
         paragraph_style: Option<&str>,
         run_style: Option<&str>,
@@ -2369,7 +2652,8 @@ impl RunInheritance {
         attrs
     }
 
-    pub(crate) fn paragraph_formatting(
+    #[doc(hidden)]
+    pub fn paragraph_formatting(
         &mut self,
         paragraph_style: Option<&str>,
         table_formatting: Option<Value>,
@@ -2381,7 +2665,8 @@ impl RunInheritance {
         formatting
     }
 
-    pub(crate) fn table_attrs(&self, table: &Value) -> Value {
+    #[doc(hidden)]
+    pub fn table_attrs(&self, table: &Value) -> Value {
         let projected = project_table(table, &self.0, None, 12);
         let rows: Vec<Vec<Value>> = projected
             .rows
@@ -2917,7 +3202,12 @@ fn run_content_to_units(
                     .unwrap()
                     .insert("commentId".to_owned(), id.clone());
             }
-            vec![embed_unit("field", map_from_value(value), &[], 1)]
+            let revisions: Vec<Mark> = marks
+                .iter()
+                .filter(|mark| matches!(mark.name.as_str(), "insertion" | "deletion"))
+                .cloned()
+                .collect();
+            vec![embed_unit("field", map_from_value(value), &revisions, 1)]
         }
         "drawing" => vec![embed_unit(
             "image",
@@ -3645,6 +3935,70 @@ fn resolved_text_formatting(formatting: Option<&Value>, styles: &StyleResolver) 
     merge_text_formatting(style.as_deref(), formatting)
 }
 
+/// The list attributes seeding stores for a paragraph whose `listRendering` is `list`; an
+/// attribute the rendering gives no value is left out.
+fn list_rendering_attrs(list: Option<&Value>) -> JsonObject {
+    let mut attrs = JsonObject::new();
+    for (key, value) in [
+        ("listNumFmt", field(list, "numFmt")),
+        ("listIsBullet", field(list, "isBullet")),
+        ("listMarker", field(list, "marker")),
+        (
+            "listMarkerHidden",
+            field(list, "markerHidden").filter(|value| truthy(Some(value))),
+        ),
+        ("listMarkerBold", field(list, "markerBold")),
+        ("listMarkerItalic", field(list, "markerItalic")),
+        ("listMarkerColor", field(list, "markerColor")),
+        (
+            "listLevelNumFmts",
+            field(list, "levelNumFmts").filter(|value| truthy(Some(value))),
+        ),
+        ("listAbstractNumId", field(list, "abstractNumId")),
+        ("listStartOverride", field(list, "startOverride")),
+    ] {
+        if let Some(value) = value.filter(|value| !value.is_null()) {
+            attrs.insert(key.to_owned(), drop_nulls(value.clone()));
+        }
+    }
+    for (key, value) in [
+        (
+            "listMarkerFontFamily",
+            string(field(list, "markerFontFamily")).filter(|value| !value.is_empty()),
+        ),
+        (
+            "listMarkerSuffix",
+            string(field(list, "markerSuffix")).filter(|value| !value.is_empty()),
+        ),
+    ] {
+        if let Some(value) = value {
+            attrs.insert(key.to_owned(), Value::String(value.to_owned()));
+        }
+    }
+    if let Some(size) = number(field(list, "markerFontSize")).filter(|value| *value != 0.0) {
+        attrs.insert("listMarkerFontSize".to_owned(), json!(size));
+    }
+    attrs
+}
+
+/// The list attributes seeding stores for a paragraph whose list renders as `rendering`, its
+/// bullet shown as parsing shows it; `None` when an attribute does not convert.
+pub(crate) fn rendered_list_attrs(
+    mut rendering: docx_parse::ListRendering,
+) -> Option<BTreeMap<String, Any>> {
+    if rendering.is_bullet {
+        rendering.marker = crate::paragraph_facts::shown_bullet(
+            &rendering.marker,
+            rendering.marker_font_family.as_deref(),
+        );
+    }
+    let list = serde_json::to_value(rendering).ok()?;
+    list_rendering_attrs(Some(&list))
+        .into_iter()
+        .map(|(key, value)| Some((key, any_from_value(value).ok()?)))
+        .collect()
+}
+
 fn paragraph_attrs(
     paragraph: &Value,
     styles: &StyleResolver,
@@ -3667,28 +4021,12 @@ fn paragraph_attrs(
     } else {
         (None, None)
     };
-    let mut attrs = JsonObject::new();
+    let mut attrs = list_rendering_attrs(list);
     for (key, value) in [
         ("paraId", field(Some(paragraph), "paraId")),
         ("textId", field(Some(paragraph), "textId")),
         ("numPr", field(formatting, "numPr")),
         ("numPrFromStyle", field(formatting, "numPrFromStyle")),
-        ("listNumFmt", field(list, "numFmt")),
-        ("listIsBullet", field(list, "isBullet")),
-        ("listMarker", field(list, "marker")),
-        (
-            "listMarkerHidden",
-            field(list, "markerHidden").filter(|value| truthy(Some(value))),
-        ),
-        ("listMarkerBold", field(list, "markerBold")),
-        ("listMarkerItalic", field(list, "markerItalic")),
-        ("listMarkerColor", field(list, "markerColor")),
-        (
-            "listLevelNumFmts",
-            field(list, "levelNumFmts").filter(|value| truthy(Some(value))),
-        ),
-        ("listAbstractNumId", field(list, "abstractNumId")),
-        ("listStartOverride", field(list, "startOverride")),
         ("_originalFormatting", formatting),
         ("cnfStyle", field(formatting, "cnfStyle")),
     ] {
@@ -3696,23 +4034,8 @@ fn paragraph_attrs(
             attrs.insert(key.to_owned(), drop_nulls(value.clone()));
         }
     }
-    for (key, value) in [
-        ("styleId", style_id),
-        (
-            "listMarkerFontFamily",
-            string(field(list, "markerFontFamily")).filter(|value| !value.is_empty()),
-        ),
-        (
-            "listMarkerSuffix",
-            string(field(list, "markerSuffix")).filter(|value| !value.is_empty()),
-        ),
-    ] {
-        if let Some(value) = value {
-            attrs.insert(key.to_owned(), Value::String(value.to_owned()));
-        }
-    }
-    if let Some(size) = number(field(list, "markerFontSize")).filter(|value| *value != 0.0) {
-        attrs.insert("listMarkerFontSize".to_owned(), json!(size));
+    if let Some(style_id) = style_id {
+        attrs.insert("styleId".to_owned(), Value::String(style_id.to_owned()));
     }
     if styles.enabled {
         let style = styles.resolve_paragraph_style(style_id);
@@ -4749,6 +5072,7 @@ pub(crate) fn border_side_sources(
 fn cell_borders(
     formatting: Option<&Value>,
     table_borders: Option<&Value>,
+    style_borders: Option<&Value>,
     first_row: bool,
     last_row: bool,
     first_column: bool,
@@ -4762,12 +5086,8 @@ fn cell_borders(
                 .collect(),
         )
     });
-    let direct = field(formatting, "borders");
-    if inherited.is_none() && direct.is_none() {
-        None
-    } else {
-        merge_plain(inherited.as_ref(), direct)
-    }
+    let inherited = merge_plain(inherited.as_ref(), style_borders);
+    merge_plain(inherited.as_ref(), field(formatting, "borders"))
 }
 
 pub(crate) fn synthesized_cell_width(
@@ -4796,6 +5116,7 @@ struct CellOptions<'a> {
     first_column: bool,
     last_column: bool,
     table_borders: Option<&'a Value>,
+    style_cell: Option<&'a Value>,
     default_margins: Option<&'a Value>,
     theme: Option<&'a Value>,
     table_bidi: bool,
@@ -4809,8 +5130,17 @@ fn structural_attrs(mut attrs: JsonObject, skipped: &[&str]) -> JsonObject {
 
 fn project_cell<'a>(cell: &'a Value, options: CellOptions<'_>) -> ProjectedCell<'a> {
     let formatting = field(Some(cell), "formatting");
-    let background =
-        resolve_color_to_hex(field(field(formatting, "shading"), "fill"), options.theme);
+    let shading = field(formatting, "shading")
+        .filter(|value| !value.is_null())
+        .or_else(|| field(options.style_cell, "shading"));
+    let background = if string(field(shading, "pattern")) == Some("solid") {
+        Some(
+            resolve_color_to_hex(field(shading, "color"), options.theme)
+                .unwrap_or_else(|| "000000".to_string()),
+        )
+    } else {
+        resolve_color_to_hex(field(shading, "fill"), options.theme)
+    };
     let width = field(field(formatting, "width"), "value")
         .cloned()
         .or_else(|| options.grid_width.map(|value| json!(value)));
@@ -4851,6 +5181,7 @@ fn project_cell<'a>(cell: &'a Value, options: CellOptions<'_>) -> ProjectedCell<
         "borders": cell_borders(
             formatting,
             options.table_borders,
+            field(options.style_cell, "borders"),
             options.first_row,
             options.last_row,
             options.first_column,
@@ -4966,25 +5297,155 @@ fn table_cell_style_formatting(
     };
     let mut result = field(style, property).cloned();
     let parts = array(field(style, "tblStylePr"));
-    if property == "rPr" {
-        let whole = parts
-            .iter()
-            .find(|part| string(field(Some(part), "type")) == Some("wholeTable"));
-        result = merge(result.as_ref(), field(whole, property));
-    }
     if !parts
         .iter()
         .any(|part| field(Some(part), property).is_some())
     {
         return result;
     }
+    for (region, _) in table_style_regions(
+        table,
+        style,
+        row_index,
+        start_column,
+        end_column,
+        columns,
+        1,
+    ) {
+        if region == "wholeTable" && property != "rPr" {
+            continue;
+        }
+        let conditional = parts
+            .iter()
+            .find(|part| string(field(Some(part), "type")) == Some(region));
+        result = merge(result.as_ref(), field(conditional, property));
+    }
+    result
+}
+
+/// Whether a cell takes its top, bottom, left and right border from the table's outer sides.
+fn cell_outer_edges(
+    rows: usize,
+    row_index: usize,
+    start_column: usize,
+    end_column: usize,
+    total_columns: usize,
+) -> [bool; 4] {
+    [
+        row_index == 0,
+        row_index + 1 == rows,
+        start_column == 0,
+        end_column == total_columns,
+    ]
+}
+
+/// The shading and edge borders a cell takes from its table style's `tcPr` and active
+/// conditional parts.
+fn table_cell_style_properties(
+    table: &Value,
+    style: Option<&Value>,
+    row_index: usize,
+    start_column: usize,
+    end_column: usize,
+    columns: usize,
+    rowspan: usize,
+    outer: [bool; 4],
+) -> Option<Value> {
+    let parts = array(field(style, "tblStylePr"));
+    if field(style, "tcPr").is_none()
+        && !parts.iter().any(|part| field(Some(part), "tcPr").is_some())
+    {
+        return None;
+    }
+    let regions = table_style_regions(
+        table,
+        style,
+        row_index,
+        start_column,
+        end_column,
+        columns,
+        rowspan,
+    );
+    let ltr = !truthy(field(field(Some(table), "formatting"), "bidi"));
+    let outer = [outer[0], outer[1], outer[2] && ltr, outer[3] && ltr];
+    let mut shading = field(field(style, "tcPr"), "shading");
+    let layers = regions
+        .into_iter()
+        .filter(|(region, _)| *region != "wholeTable")
+        .map(|(region, edges)| {
+            let conditional = parts
+                .iter()
+                .find(|part| string(field(Some(part), "type")) == Some(region));
+            (
+                field(conditional, "tcPr"),
+                edges,
+                region.starts_with("band"),
+            )
+        });
+    let mut borders = Map::new();
+    for (properties, [top, bottom, left, right], band) in layers {
+        if let Some(value) = field(properties, "shading") {
+            shading = Some(value);
+        }
+        if let Some(sides) = object(field(properties, "borders")) {
+            for ((edge, side), on_outer) in border_side_sources(top, bottom, left, right)
+                .into_iter()
+                .zip(outer)
+            {
+                let Some(border) = sides.get(side) else {
+                    continue;
+                };
+                let cleared = matches!(string(field(Some(border), "style")), Some("nil" | "none"));
+                if band && on_outer && cleared {
+                    borders.remove(edge);
+                } else {
+                    borders.insert(edge.to_owned(), border.clone());
+                }
+            }
+        }
+    }
+    (shading.is_some() || !borders.is_empty()).then(|| {
+        json!({
+            "shading": nullish(shading),
+            "borders": (!borders.is_empty()).then_some(Value::Object(borders))
+        })
+    })
+}
+
+/// The table style regions active for a cell in precedence order, each with whether the cell
+/// sits on the region's top, bottom, left and right edge.
+fn table_style_regions(
+    table: &Value,
+    style: Option<&Value>,
+    row_index: usize,
+    start_column: usize,
+    end_column: usize,
+    columns: usize,
+    rowspan: usize,
+) -> Vec<(&'static str, [bool; 4])> {
     let formatting = field(Some(table), "formatting");
     let style_formatting = field(style, "tblPr");
     let look = field(formatting, "look").or_else(|| field(style_formatting, "look"));
     let mask = string(field(look, "value"))
         .and_then(|value| u32::from_str_radix(value, 16).ok())
         .unwrap_or(if look.is_none() { 0x04a0 } else { 0 });
-    let flag = |key, bit| boolean(field(look, key)).unwrap_or(mask & bit != 0);
+    let named = [
+        "firstRow",
+        "lastRow",
+        "firstColumn",
+        "lastColumn",
+        "noHBand",
+        "noVBand",
+    ]
+    .into_iter()
+    .any(|key| boolean(field(look, key)).is_some());
+    let flag = |key, bit| {
+        if named {
+            boolean(field(look, key)) == Some(true)
+        } else {
+            mask & bit != 0
+        }
+    };
     let first_row = flag("firstRow", 0x20);
     let last_row = flag("lastRow", 0x40);
     let first_column = flag("firstColumn", 0x80);
@@ -5002,51 +5463,72 @@ fn table_cell_style_formatting(
     let at_first_column = first_column && start_column == 0;
     let at_last_column = last_column && end_column == columns;
     let band_size = |key| {
-        number(field(formatting, key).or_else(|| field(style_formatting, key))).unwrap_or(1.0)
+        number(field(formatting, key).or_else(|| field(style_formatting, key))).unwrap_or(0.0)
     };
     let row_band_size = band_size("styleRowBandSize");
     let column_band_size = band_size("styleColBandSize");
-    let mut regions = Vec::new();
+    let top = row_index == 0;
+    let last_spanned_row = row_index + rowspan.max(1) - 1;
+    let bottom = last_spanned_row + 1 >= rows.len();
+    let left = start_column == 0;
+    let right = end_column == columns;
+    let band_of = |position: usize, size: f64| (position as f64 / size).floor();
+    let mut regions = vec![("wholeTable", [top, bottom, left, right])];
     if !flag("noHBand", 0x200) && !at_first_row && !at_last_row && row_band_size > 0.0 {
-        let band =
-            (row_index.saturating_sub(usize::from(first_row)) as f64 / row_band_size).floor();
-        regions.push(if band % 2.0 == 0.0 {
-            "band1Horz"
-        } else {
-            "band2Horz"
-        });
+        let position = row_index.saturating_sub(usize::from(first_row));
+        let band = band_of(position, row_band_size);
+        let body_end = rows.len().saturating_sub(usize::from(last_row));
+        regions.push((
+            if band % 2.0 == 0.0 {
+                "band1Horz"
+            } else {
+                "band2Horz"
+            },
+            [
+                position == 0 || band_of(position - 1, row_band_size) != band,
+                last_spanned_row + 1 >= body_end
+                    || band_of(position + last_spanned_row - row_index + 1, row_band_size)
+                        != band_of(position + last_spanned_row - row_index, row_band_size),
+                left,
+                right,
+            ],
+        ));
     }
     if !flag("noVBand", 0x400) && !at_first_column && !at_last_column && column_band_size > 0.0 {
-        let band = (start_column.saturating_sub(usize::from(first_column)) as f64
-            / column_band_size)
-            .floor();
-        regions.push(if band % 2.0 == 0.0 {
-            "band1Vert"
-        } else {
-            "band2Vert"
-        });
+        let position = start_column.saturating_sub(usize::from(first_column));
+        let band = band_of(position, column_band_size);
+        let last = end_column.saturating_sub(usize::from(first_column) + 1);
+        let body_end = columns.saturating_sub(usize::from(last_column));
+        regions.push((
+            if band % 2.0 == 0.0 {
+                "band1Vert"
+            } else {
+                "band2Vert"
+            },
+            [
+                top,
+                bottom,
+                position == 0 || band_of(position - 1, column_band_size) != band,
+                end_column >= body_end
+                    || band_of(last + 1, column_band_size) != band_of(last, column_band_size),
+            ],
+        ));
     }
-    for (region, active) in [
-        ("firstCol", at_first_column),
-        ("lastCol", at_last_column),
-        ("firstRow", at_first_row),
-        ("lastRow", at_last_row),
-        ("nwCell", at_first_row && at_first_column),
-        ("neCell", at_first_row && at_last_column),
-        ("swCell", at_last_row && at_first_column),
-        ("seCell", at_last_row && at_last_column),
+    for (region, active, edges) in [
+        ("firstCol", at_first_column, [top, bottom, true, true]),
+        ("lastCol", at_last_column, [top, bottom, true, true]),
+        ("firstRow", at_first_row, [true, true, left, right]),
+        ("lastRow", at_last_row, [true, true, left, right]),
+        ("nwCell", at_first_row && at_first_column, [true; 4]),
+        ("neCell", at_first_row && at_last_column, [true; 4]),
+        ("swCell", at_last_row && at_first_column, [true; 4]),
+        ("seCell", at_last_row && at_last_column, [true; 4]),
     ] {
         if active {
-            regions.push(region);
+            regions.push((region, edges));
         }
     }
-    for region in regions {
-        let conditional = parts
-            .iter()
-            .find(|part| string(field(Some(part), "type")) == Some(region));
-        result = merge(result.as_ref(), field(conditional, property));
-    }
-    result
+    regions
 }
 
 fn project_row<'a>(
@@ -5120,6 +5602,17 @@ fn project_row<'a>(
         if span.is_some_and(|(_, skip)| *skip) {
             continue;
         }
+        let outer = cell_outer_edges(rows.len(), row_index, start_column, column, total_columns);
+        let style_cell = table_cell_style_properties(
+            table,
+            style_context.style,
+            row_index,
+            start_column,
+            column,
+            style_context.column_count,
+            span.map(|(rowspan, _)| *rowspan).unwrap_or(1),
+            outer,
+        );
         let mut projected = project_cell(
             cell,
             CellOptions {
@@ -5130,11 +5623,12 @@ fn project_row<'a>(
                     )),
                 rowspan: span.map(|(rowspan, _)| *rowspan).unwrap_or(1),
                 grid_width,
-                first_row: row_index == 0,
-                last_row: row_index + 1 == rows.len(),
-                first_column: start_column == 0,
-                last_column: column == total_columns,
+                first_row: outer[0],
+                last_row: outer[1],
+                first_column: outer[2],
+                last_column: outer[3],
                 table_borders: style_context.borders,
+                style_cell: style_cell.as_ref(),
                 default_margins: style_context.margins,
                 theme: style_context.theme,
                 table_bidi: truthy(field(field(Some(table), "formatting"), "bidi")),
@@ -5173,6 +5667,17 @@ fn project_row<'a>(
                 "content": [{ "type": "paragraph", "content": [] }]
             })
         };
+        let outer = cell_outer_edges(rows.len(), row_index, 0, total_columns, total_columns);
+        let style_cell = table_cell_style_properties(
+            table,
+            style_context.style,
+            row_index,
+            0,
+            total_columns,
+            style_context.column_count,
+            1,
+            outer,
+        );
         let projected = project_cell(
             &synthetic,
             CellOptions {
@@ -5183,11 +5688,12 @@ fn project_row<'a>(
                     )),
                 rowspan: 1,
                 grid_width: (total_width > 0.0).then_some(100.0),
-                first_row: row_index == 0,
-                last_row: row_index + 1 == rows.len(),
-                first_column: true,
-                last_column: true,
+                first_row: outer[0],
+                last_row: outer[1],
+                first_column: outer[2],
+                last_column: outer[3],
                 table_borders: style_context.borders,
+                style_cell: style_cell.as_ref(),
                 default_margins: style_context.margins,
                 theme: style_context.theme,
                 table_bidi: truthy(field(field(Some(table), "formatting"), "bidi")),
@@ -5375,19 +5881,80 @@ impl BlockCursor {
     }
 }
 
-/// How many story blocks a suppressed field's cached result duplicates.
-fn cached_result_block_count(data: &Value) -> Option<usize> {
-    let blocks = array(field(field(Some(data), "structuredResult"), "blocks"));
-    blocks
-        .last()
-        .is_some_and(|block| {
-            string(field(Some(block), "type")) == Some("paragraph")
-                && array(field(Some(block), "content")).is_empty()
-        })
-        .then(|| blocks.len())
+/// A field embed's data when it may span paragraphs.
+fn spanning_field_data(payload: &JsonObject) -> Option<Value> {
+    payload
+        .get("fieldData")
+        .and_then(Value::as_str)
+        .filter(|data| data.contains("\"block"))
+        .and_then(|data| serde_json::from_str(data).ok())
 }
 
-/// Binds each suppressed field to the story blocks its cached result duplicates.
+/// How many story blocks a field's structured code or result spans after the field's paragraph:
+/// its count, or the number of copies of those blocks a model holding them carries. `Some(None)`
+/// when it does not span paragraphs, `None` when its count is not a block count.
+fn part_block_count(data: &Value, key: &str) -> Option<Option<usize>> {
+    let part = field(Some(data), key);
+    let copies = field(part, "blocks").and_then(Value::as_array);
+    match field(part, "blockCount").filter(|count| !count.is_null()) {
+        Some(count) => count
+            .as_u64()
+            .and_then(|count| usize::try_from(count).ok())
+            .map(Some),
+        None => Some(copies.map(Vec::len)),
+    }
+}
+
+/// The story blocks a field's structured code and result span after the field's paragraph at
+/// `owner`, checked against `blocks`: `None` when neither spans paragraphs, a count is not a
+/// block count, or the span runs past the story.
+fn field_spans(data: &Value, blocks: &[Value], owner: usize) -> Option<(usize, usize)> {
+    let code = part_block_count(data, "structuredCode")?;
+    let result = part_block_count(data, "structuredResult")?;
+    if code.is_none() && result.is_none() {
+        return None;
+    }
+    let (code, result) = (code.unwrap_or(0), result.unwrap_or(0));
+    let end = owner
+        .checked_add(1)?
+        .checked_add(code)?
+        .checked_add(result)?;
+    (end <= blocks.len()).then_some((code, result))
+}
+
+/// The sequences of SEQ fields in the story blocks the fields of a paragraph span.
+fn spanned_sequence_names(units: &[InlineUnit], blocks: &[Value], owner: usize) -> Vec<String> {
+    let mut names = Vec::new();
+    for unit in units {
+        let UnitContent::Embed { kind, payload } = &unit.content else {
+            continue;
+        };
+        if kind.as_str() != "field" {
+            continue;
+        }
+        let Some((code, result)) =
+            spanning_field_data(payload).and_then(|data| field_spans(&data, blocks, owner))
+        else {
+            continue;
+        };
+        for block in &blocks[owner + 1..owner + 1 + code + result] {
+            names.extend(nested_sequence_names(block));
+        }
+    }
+    names
+}
+
+/// Where the story blocks a suppressed field's cached result spans start, and how many it spans.
+fn cached_result_blocks(data: &Value, blocks: &[Value], owner: usize) -> Option<(usize, usize)> {
+    let (code, count) = field_spans(data, blocks, owner)?;
+    let start = owner + 1 + code;
+    let last = blocks.get(start + count.checked_sub(1)?)?;
+    let empty_paragraph = string(field(Some(last), "type")) == Some("paragraph")
+        && array(field(Some(last), "content")).is_empty();
+    empty_paragraph.then_some((start, count))
+}
+
+/// Binds each suppressed field to the story blocks its cached result spans.
 fn bind_field_result_blocks(
     units: &mut [InlineUnit],
     story_id: &str,
@@ -5411,27 +5978,21 @@ fn bind_field_result_blocks(
         {
             continue;
         }
-        let Some(count) = payload
-            .get("fieldData")
-            .and_then(Value::as_str)
-            .and_then(|data| serde_json::from_str::<Value>(data).ok())
-            .as_ref()
-            .and_then(cached_result_block_count)
+        let Some((start, count)) = spanning_field_data(payload)
+            .and_then(|data| cached_result_blocks(&data, blocks, owner))
         else {
             continue;
         };
-        let Some(duplicated) = blocks.get(owner + 1..owner + 1 + count) else {
-            continue;
-        };
         let mut cursor = after_owner;
-        let mut ids = Vec::with_capacity(duplicated.len());
-        for (offset, block) in duplicated.iter().enumerate() {
+        let mut ids = Vec::with_capacity(count);
+        for (offset, block) in blocks[owner + 1..start + count].iter().enumerate() {
+            let index = owner + 1 + offset;
             let is_table = string(field(Some(block), "type")) == Some("table");
-            let Some(id) = cursor.take(story_id, block) else {
+            let Some(id) = cursor.take(story_id, block).filter(|_| index >= start) else {
                 continue;
             };
             if is_table {
-                table_ids.insert(owner + 1 + offset, id.clone());
+                table_ids.insert(index, id.clone());
             }
             ids.push(Value::String(id));
         }
@@ -5444,9 +6005,10 @@ fn bind_field_result_blocks(
 
 /// Binds each field whose code runs past its paragraph's mark to the paragraph that paragraph
 /// joins (`fieldCodeTarget`) and the paragraphs in between whose marks the code hides
-/// (`fieldCodeMarks`). Word shows the field's paragraph and the target, the paragraph holding the
-/// field's separator or, when the field ends within its code, its code's last paragraph, as one
-/// paragraph. Tables among those blocks leave the field unbound.
+/// (`fieldCodeMarks`), with the fields each of those holds (`fieldCodeFields`). Word shows the
+/// field's paragraph and the target, the paragraph holding the field's separator or, when the
+/// field ends within its code, its code's last paragraph, as one paragraph. Tables among those
+/// blocks leave the field unbound.
 fn bind_field_code_blocks(
     units: &mut [InlineUnit],
     story_id: &str,
@@ -5461,17 +6023,12 @@ fn bind_field_code_blocks(
         if kind.as_str() != "field" {
             continue;
         }
-        let Some(data) = payload
-            .get("fieldData")
-            .and_then(Value::as_str)
-            .filter(|data| data.contains("\"blocks\""))
-            .and_then(|data| serde_json::from_str::<Value>(data).ok())
+        let Some((code, result)) =
+            spanning_field_data(payload).and_then(|data| field_spans(&data, blocks, owner))
         else {
             continue;
         };
-        let code = array(field(field(Some(&data), "structuredCode"), "blocks")).len();
-        let has_result = !array(field(field(Some(&data), "structuredResult"), "blocks")).is_empty();
-        let hidden = match (code, has_result) {
+        let hidden = match (code, result > 0) {
             (0, true)
                 if blocks
                     .get(owner + 1)
@@ -5501,8 +6058,55 @@ fn bind_field_code_blocks(
         let Some(target) = ids.pop() else {
             continue;
         };
+        let fields = joined[..ids.len()]
+            .iter()
+            .map(|block| {
+                let mut found = Vec::new();
+                if let Some(content) = field(Some(block), "content") {
+                    crate::bridge::nested_code_fields(content, &mut found);
+                }
+                let found = found
+                    .into_iter()
+                    .map(|(kind, instruction)| Value::from(vec![kind, instruction]));
+                Value::Array(found.collect())
+            })
+            .collect();
         payload.insert("fieldCodeMarks".to_owned(), Value::Array(ids));
         payload.insert("fieldCodeTarget".to_owned(), target);
+        payload.insert("fieldCodeFields".to_owned(), Value::Array(fields));
+    }
+}
+
+/// Records, for each spanning field, the ids of the story blocks its span covers, raw blocks
+/// aside (`fieldSpanBlocks`).
+fn record_field_span_blocks(
+    units: &mut [InlineUnit],
+    story_id: &str,
+    blocks: &[Value],
+    owner: usize,
+    after_owner: BlockCursor,
+) {
+    for unit in units {
+        let UnitContent::Embed { kind, payload } = &mut unit.content else {
+            continue;
+        };
+        if kind.as_str() != "field" {
+            continue;
+        }
+        let Some((code, result)) =
+            spanning_field_data(payload).and_then(|data| field_spans(&data, blocks, owner))
+        else {
+            continue;
+        };
+        let mut cursor = after_owner;
+        let ids: Vec<Value> = blocks[owner + 1..owner + 1 + code + result]
+            .iter()
+            .filter_map(|block| cursor.take(story_id, block))
+            .map(Value::String)
+            .collect();
+        if !ids.is_empty() {
+            payload.insert("fieldSpanBlocks".to_owned(), Value::Array(ids));
+        }
     }
 }
 
@@ -5955,6 +6559,11 @@ fn visit_story(
                         .map(|ordinal| ordinal as u32),
                     source,
                 });
+                context.opaque_sequences.extend(spanned_sequence_names(
+                    &units,
+                    blocks,
+                    block_index,
+                ));
                 bind_field_result_blocks(
                     &mut units,
                     &story_id,
@@ -5964,6 +6573,7 @@ fn visit_story(
                     &mut result_table_ids,
                 );
                 bind_field_code_blocks(&mut units, &story_id, blocks, block_index, cursor);
+                record_field_span_blocks(&mut units, &story_id, blocks, block_index, cursor);
                 let unit_base = context.plans[plan_index].units.len();
                 context.plans[plan_index]
                     .comment_marks
@@ -6260,6 +6870,7 @@ fn units_to_raw_ops(
     units: Vec<InlineUnit>,
     referenced_fonts: &mut BTreeSet<String>,
     mut script_fonts: Option<&mut ScriptFontUse>,
+    shared: &mut SeedAttrs,
 ) -> Result<Vec<RawOp>, String> {
     let mut ops = vec![RawOp::Delete { index: 0, len: 1 }];
     let mut index = 0u32;
@@ -6268,7 +6879,8 @@ fn units_to_raw_ops(
     let flush = |ops: &mut Vec<RawOp>,
                  index: &mut u32,
                  text: &mut String,
-                 attrs: &mut JsonObject|
+                 attrs: &mut JsonObject,
+                 shared: &mut SeedAttrs|
      -> Result<(), String> {
         if text.is_empty() {
             return Ok(());
@@ -6278,7 +6890,7 @@ fn units_to_raw_ops(
         ops.push(RawOp::Insert {
             index: *index,
             text: inserted,
-            attrs: yrs_attrs(std::mem::take(attrs))?,
+            attrs: shared.attrs(std::mem::take(attrs))?,
         });
         *index += len;
         Ok(())
@@ -6306,7 +6918,7 @@ fn units_to_raw_ops(
                 if text.is_empty() {
                     attrs = unit.attrs;
                 } else if unit.attrs != attrs {
-                    flush(&mut ops, &mut index, &mut text, &mut attrs)?;
+                    flush(&mut ops, &mut index, &mut text, &mut attrs, shared)?;
                     attrs = unit.attrs;
                 }
                 text.push_str(&value);
@@ -6315,24 +6927,33 @@ fn units_to_raw_ops(
                 kind,
                 payload: values,
             } => {
-                flush(&mut ops, &mut index, &mut text, &mut attrs)?;
+                flush(&mut ops, &mut index, &mut text, &mut attrs, shared)?;
                 ops.push(RawOp::InsertEmbed {
                     index,
                     kind,
-                    payload: payload(values)?,
-                    attrs: yrs_attrs(unit.attrs)?,
+                    payload: shared.payload(values)?,
+                    attrs: shared.attrs(unit.attrs)?,
                 });
                 index += 1;
             }
         }
     }
-    flush(&mut ops, &mut index, &mut text, &mut attrs)?;
+    flush(&mut ops, &mut index, &mut text, &mut attrs, shared)?;
     Ok(ops)
 }
 
+#[cfg(test)]
 fn seed_plan(
     plan: StoryPlan,
     script_fonts: Option<&mut ScriptFontUse>,
+) -> Result<(String, Vec<RawOp>, BTreeSet<String>), String> {
+    seed_plan_sharing(plan, script_fonts, &mut SeedAttrs::default())
+}
+
+fn seed_plan_sharing(
+    plan: StoryPlan,
+    script_fonts: Option<&mut ScriptFontUse>,
+    shared: &mut SeedAttrs,
 ) -> Result<(String, Vec<RawOp>, BTreeSet<String>), String> {
     let StoryPlan {
         story_id,
@@ -6341,7 +6962,7 @@ fn seed_plan(
         ..
     } = plan;
     let mut referenced_fonts = BTreeSet::new();
-    let mut ops = units_to_raw_ops(units, &mut referenced_fonts, script_fonts)?;
+    let mut ops = units_to_raw_ops(units, &mut referenced_fonts, script_fonts, shared)?;
     if !comment_coverage.is_empty() {
         ops.extend(
             comment_coverage
@@ -6452,6 +7073,7 @@ type SourceRoot = (String, SourceStoryKind, Option<String>);
 /// need.
 struct LoweredDocx {
     context: LoweringContext,
+    shape_styles: Option<StyleResolver>,
     referenced_fonts: BTreeSet<String>,
     /// `None` for a seed whose caller does not report unused script fonts.
     script_fonts: Option<ScriptFontUse>,
@@ -6582,6 +7204,7 @@ fn lower_docx_with(
         field(Some(&parsed), "package").ok_or_else(|| "parsed DOCX has no package".to_owned())?;
     let mut read = read_source(package, &parsed, parts);
     let (mut context, roots) = lower_package(package, source_json);
+    let shape_styles = crate::shape_styles::for_package(package, &context.styles);
     drop(parsed);
     read.provenance = std::mem::take(&mut context.provenance);
     read.seeded_comments = seeded_comments(&context.plans);
@@ -6592,6 +7215,7 @@ fn lower_docx_with(
     }
     Ok(LoweredDocx {
         context,
+        shape_styles,
         referenced_fonts,
         script_fonts: Some(script_fonts),
         roots,
@@ -6609,7 +7233,7 @@ pub(crate) fn seed_parsed_docx_with(
 ) -> Result<Vec<String>, String> {
     let mut lowered = lower_docx(envelope, parts)?;
     lowered.script_fonts = None;
-    seed_lowered(document, lowered, None, SeedMedia::AsParsed).map(|fonts| fonts.referenced)
+    seed_lowered(document, lowered, None, SeedMedia::AsParsed, false).map(|fonts| fonts.referenced)
 }
 
 /// The fonts a seeded document references, and those of them it names only
@@ -6640,9 +7264,11 @@ fn seed_lowered(
     lowered: LoweredDocx,
     index: Option<SourceIndex>,
     media: SeedMedia<'_>,
+    seed_shape_styles: bool,
 ) -> Result<SeededFonts, String> {
     let LoweredDocx {
         context,
+        shape_styles,
         mut referenced_fonts,
         mut script_fonts,
         mut read,
@@ -6671,8 +7297,10 @@ fn seed_lowered(
         .map_err(|error| error.to_string())?;
     let mut batches = Vec::with_capacity(context.plans.len());
     let mut deletes = Vec::with_capacity(context.plans.len());
+    let mut shared = SeedAttrs::for_seed();
     for plan in context.plans {
-        let (story_id, mut ops, fonts) = seed_plan(plan, script_fonts.as_mut())?;
+        let (story_id, mut ops, fonts) =
+            seed_plan_sharing(plan, script_fonts.as_mut(), &mut shared)?;
         deletes.push((story_id.clone(), vec![ops.remove(0)]));
         batches.push((story_id, ops));
         referenced_fonts.extend(fonts);
@@ -6695,6 +7323,9 @@ fn seed_lowered(
     document
         .apply_raw_story_batches(deletes, &ctx)
         .map_err(|error| error.to_string())?;
+    if let Some(styles) = shape_styles.as_ref().filter(|_| seed_shape_styles) {
+        crate::shape_styles::seed(document, styles);
+    }
     let ranges = document
         .apply_raw_seed_batches(batches, &ctx)
         .map_err(|error| error.to_string())?;
@@ -6878,8 +7509,9 @@ pub(crate) fn seed_blocks(
     .map_err(|error| error.to_string())?;
     let mut provenance = std::mem::take(&mut context.provenance);
     let mut batches = Vec::with_capacity(context.plans.len());
+    let mut shared = SeedAttrs::for_seed();
     for plan in context.plans {
-        let (story_id, ops, _) = seed_plan(plan, None)?;
+        let (story_id, ops, _) = seed_plan_sharing(plan, None, &mut shared)?;
         batches.push((story_id, ops));
     }
     let ranges = doc
@@ -7158,15 +7790,16 @@ pub(crate) fn seed_parsed_docx(
         &lowered.relationships,
         std::mem::take(&mut lowered.context.paragraphs),
     );
-    seed_lowered(document, lowered, Some(index), media)
+    seed_lowered(document, lowered, Some(index), media, true)
 }
 
 /// Opens a DOCX: seeds every story and starts a new opening with a fresh
 /// generation, so its session anchors are its own; see
 /// [`EditingDoc::begin_opening`].
 pub fn seed_from_docx(document: &EditingDoc, bytes: &[u8]) -> Result<(), String> {
+    let fresh_seed = document.holds_nothing();
     seed_stories(document, bytes)?;
-    document.begin_opening(None);
+    begin_seeded_opening(document, None, fresh_seed);
     Ok(())
 }
 
@@ -7177,8 +7810,39 @@ pub fn seed_from_docx_with_generation(
     bytes: &[u8],
     generation: &str,
 ) -> Result<(), String> {
+    let fresh_seed = document.holds_nothing();
     seed_stories(document, bytes)?;
-    document.begin_opening(Some(generation));
+    begin_seeded_opening(document, Some(generation), fresh_seed);
+    Ok(())
+}
+
+/// Starts the opening and, when the stories were seeded into an empty replica,
+/// records them as a fresh seed of the retained package.
+fn begin_seeded_opening(document: &EditingDoc, generation: Option<&str>, fresh_seed: bool) {
+    document.begin_opening(generation);
+    if fresh_seed {
+        document.mark_seeded();
+    }
+}
+
+/// [`seed_from_docx`] from a parsed package of `bytes` with its images inline, and the parts `bytes` inflate to.
+// Used by betteroffice-docx; not part of the stable API.
+#[doc(hidden)]
+pub fn seed_from_parsed_docx(
+    document: &EditingDoc,
+    envelope: docx_parse::S9WireEnvelope,
+    parts: Vec<(String, Vec<u8>)>,
+    bytes: &[u8],
+) -> Result<(), String> {
+    seed_parsed_docx(
+        document,
+        envelope,
+        parts,
+        PackageBytes::from(bytes),
+        package_digest(bytes),
+        SeedMedia::AsParsed,
+    )?;
+    document.begin_opening(None);
     Ok(())
 }
 
@@ -7245,7 +7909,7 @@ pub(crate) fn seed_preview_envelope(
 ) -> Result<SeededFonts, String> {
     let mut lowered = lower_docx(envelope, None)?;
     retain_referenced_body_stories(&mut lowered.context.plans);
-    let fonts = seed_lowered(document, lowered, None, SeedMedia::AsParsed)?;
+    let fonts = seed_lowered(document, lowered, None, SeedMedia::AsParsed, true)?;
     document.install_media(media);
     Ok(fonts)
 }
@@ -7304,6 +7968,7 @@ fn retain_referenced_body_stories(plans: &mut Vec<StoryPlan>) {
 /// stories, tokens in layout.
 #[cfg(test)]
 pub(crate) fn seed_with_layout_tokens(document: &EditingDoc, bytes: &[u8]) -> Result<(), String> {
+    let fresh_seed = document.holds_nothing();
     let source = PackageBytes::from(bytes);
     let digest = package_digest(&source);
     let (envelope, parts, media) = parse_docx_package_with_media(source.clone(), digest.clone())?;
@@ -7319,7 +7984,7 @@ pub(crate) fn seed_with_layout_tokens(document: &EditingDoc, bytes: &[u8]) -> Re
         },
     )?;
     document.install_media(media);
-    document.begin_opening(None);
+    begin_seeded_opening(document, None, fresh_seed);
     Ok(())
 }
 
@@ -7683,7 +8348,7 @@ mod tests {
 
         let split = EditingDoc::new(1);
         let lowered = lower_docx(parse_docx_for_edit(bytes).unwrap(), None).unwrap();
-        seed_lowered(&split, lowered, None, SeedMedia::AsParsed).unwrap();
+        seed_lowered(&split, lowered, None, SeedMedia::AsParsed, false).unwrap();
         assert_eq!(
             split.encode_state_as_update_v1(),
             original.encode_state_as_update_v1()
@@ -7905,6 +8570,11 @@ mod tests {
     }
 
     fn seed_body(blocks: &[Value]) -> EditingDoc {
+        lowered_body(blocks).0
+    }
+
+    /// The body seeded from `blocks`, with the sequences the seed keeps cached.
+    fn lowered_body(blocks: &[Value]) -> (EditingDoc, Vec<String>) {
         let mut context = LoweringContext {
             styles: StyleResolver::new(None),
             theme: None,
@@ -7949,7 +8619,7 @@ mod tests {
         document
             .apply_raw_story_batches(batches, &EditCtx::local(String::new(), String::new()))
             .unwrap();
-        document
+        (document, context.opaque_sequences)
     }
 
     fn measured_table_column_widths(table: &docx_layout::types::TableBlock) -> Vec<f64> {
@@ -8075,6 +8745,77 @@ mod tests {
         assert_eq!(rows[0]["cells"][0]["tcPr"]["colspan"], 2);
         assert_eq!(rows[1]["cells"].as_array().unwrap().len(), 1);
         assert_eq!(doc.paragraphs("body:t0:r1c0").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn seeding_skips_the_merge_continuations_the_serializer_exempts() {
+        type Rows<'a> = &'a [&'a [(u32, Option<&'a str>)]];
+        let skipped = |rows: Rows<'_>| {
+            let table = json!({
+                "type": "table",
+                "rows": rows.iter().map(|cells| json!({
+                    "type": "tableRow",
+                    "cells": cells.iter().map(|(span, merge)| json!({
+                        "type": "tableCell",
+                        "formatting": {"gridSpan": span, "vMerge": merge},
+                        "content": []
+                    })).collect::<Vec<_>>()
+                })).collect::<Vec<_>>()
+            });
+            super::source_cells(&table)
+                .iter()
+                .zip(rows)
+                .map(|(kept, cells)| {
+                    (0..cells.len())
+                        .map(|index| !kept.contains(&index))
+                        .collect()
+                })
+                .collect::<Vec<Vec<bool>>>()
+        };
+        let cases: [(Rows<'_>, &[&[bool]]); 6] = [
+            (
+                &[
+                    &[(1, Some("restart")), (1, None)],
+                    &[(1, Some("continue")), (1, None)],
+                ],
+                &[&[false, false], &[true, false]],
+            ),
+            (
+                &[&[(1, Some("continue")), (1, None)], &[(1, None), (1, None)]],
+                &[&[false, false], &[false, false]],
+            ),
+            (
+                &[&[(1, None), (1, None)], &[(1, Some("continue")), (1, None)]],
+                &[&[false, false], &[false, false]],
+            ),
+            (
+                &[
+                    &[(1, Some("restart")), (1, None)],
+                    &[(1, Some("continue")), (1, None)],
+                    &[(1, Some("continue")), (1, None)],
+                ],
+                &[&[false, false], &[true, false], &[true, false]],
+            ),
+            (
+                &[
+                    &[(1, None), (1, Some("restart")), (1, None)],
+                    &[(2, None), (1, Some("continue"))],
+                    &[(1, None), (1, Some("continue")), (1, None)],
+                ],
+                &[
+                    &[false, false, false],
+                    &[false, false],
+                    &[false, true, false],
+                ],
+            ),
+            (
+                &[&[(2, Some("restart"))], &[(2, Some("continue"))]],
+                &[&[false], &[false]],
+            ),
+        ];
+        for (rows, expected) in cases {
+            assert_eq!(skipped(rows), expected, "{rows:?}");
+        }
     }
 
     #[test]
@@ -8266,13 +9007,37 @@ mod tests {
         assert_eq!(inlines[2]["text"], json!("Version Control Table"));
     }
 
-    fn block_field(instruction: &str, blocks: &[Value]) -> Value {
+    #[test]
+    fn a_field_counting_its_code_and_result_paragraphs_binds_its_code_marks() {
+        let data = json!({
+            "type":"complexField", "fieldType":"QUOTE", "instruction":"QUOTE x",
+            "fieldCode":[], "fieldResult":[],
+            "structuredCode":{"inline":[], "blockCount":1},
+            "structuredResult":{"inline":[], "blockCount":1}
+        });
+        let data = Value::String(data.to_string());
+        let payload = JsonObject::from([("fieldData".to_owned(), data)]);
+        let mut units = [embed_unit("field", payload, &[], 1)];
+        let blocks = [
+            json!({"type":"paragraph","paraId":"owner","content":[]}),
+            json!({"type":"paragraph","paraId":"code","content":[run("Code")]}),
+            json!({"type":"paragraph","paraId":"result","content":[run("Result")]}),
+        ];
+        bind_field_code_blocks(&mut units, "body", &blocks, 0, BlockCursor::default());
+        let UnitContent::Embed { payload, .. } = &units[0].content else {
+            panic!("the field is an embed");
+        };
+        assert_eq!(payload.get("fieldCodeMarks"), Some(&json!(["code"])));
+        assert_eq!(payload.get("fieldCodeTarget"), Some(&json!("result")));
+    }
+
+    fn block_field(instruction: &str, count: usize) -> Value {
         json!({
             "type":"complexField", "fieldType":"UNKNOWN", "instruction":instruction,
             "fieldCode":[], "fieldResult":[run("Cached first")],
             "structuredResult":{
                 "inline":[{"type":"hyperlink","anchor":"bookmark","children":[run("Cached first")]}],
-                "blocks":blocks
+                "blockCount":count
             }
         })
     }
@@ -8286,7 +9051,7 @@ mod tests {
             let cached =
                 json!({"type":"paragraph","paraId":id("cached"),"content":[run("Cached second") ]});
             let end = json!({"type":"paragraph","paraId":id("end"),"content":[]});
-            let field = block_field(instruction, &[cached.clone(), end.clone()]);
+            let field = block_field(instruction, 2);
             let document = seed_body(&[
                 json!({"type":"paragraph","paraId":id("owner"),"content":[field]}),
                 cached,
@@ -8311,7 +9076,7 @@ mod tests {
     fn a_numeric_field_the_preview_leaves_out_releases_its_cached_blocks() {
         let cached = json!({"type":"paragraph","paraId":"cached","content":[run("Cached second")]});
         let end = json!({"type":"paragraph","paraId":"end","content":[]});
-        let field = block_field("0", &[cached.clone(), end.clone()]);
+        let field = block_field("0", 2);
         let document = seed_body(&[
             json!({"type":"paragraph","paraId":"owner","content":[field]}),
             cached,
@@ -8358,7 +9123,7 @@ mod tests {
                 json!({"type":"paragraph","content":[run("Cached sdt")]})
             ]});
             let end = json!({"type":"paragraph","content":[]});
-            let field = block_field(instruction, &[table.clone(), sdt.clone(), end.clone()]);
+            let field = block_field(instruction, 3);
             let document = seed_body(&[
                 json!({"type":"paragraph","content":[field]}),
                 table,
@@ -8392,7 +9157,7 @@ mod tests {
         let cached = json!({"type":"paragraph","content":[run("Cached second")]});
         let end = json!({"type":"paragraph","content":[]});
         let document = seed_body(&[
-            json!({"type":"paragraph","content":[block_field("0", &[cached.clone(), end.clone()])]}),
+            json!({"type":"paragraph","content":[block_field("0", 2)]}),
             cached,
             end,
             json!({"type":"paragraph","content":[run("After")]}),
@@ -8418,6 +9183,141 @@ mod tests {
         assert!(output.contains("Authored"));
         assert!(output.contains("After"));
         assert!(!output.contains("Cached"));
+    }
+
+    /// The cached result blocks each field of the body binds.
+    fn bound_result_blocks(document: &EditingDoc) -> Vec<Option<Any>> {
+        field_values(document, "fieldResultBlocks")
+    }
+
+    /// The value each field of the body holds under `key`.
+    fn field_values(document: &EditingDoc, key: &str) -> Vec<Option<Any>> {
+        document
+            .story_segments("body")
+            .unwrap()
+            .into_iter()
+            .filter_map(|segment| match segment.content {
+                crate::SegmentContent::OtherEmbed { kind, mut payload } if kind == "field" => {
+                    Some(payload.remove(key))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_spanning_field_records_the_blocks_it_spans_raw_blocks_aside() {
+        let document = seed_body(&[
+            json!({"type":"paragraph","paraId":"owner","content":[block_field("TOC", 3)]}),
+            json!({"type":"paragraph","paraId":"first","content":[run("Entry 2")]}),
+            json!({"type":"rawXml","xml":"<x:block/>"}),
+            json!({"type":"paragraph","paraId":"second","content":[run("Entry 3")]}),
+            json!({"type":"paragraph","paraId":"after","content":[run("After")]}),
+        ]);
+        let recorded = Any::Array(vec![Any::from("first"), Any::from("second")].into());
+        assert_eq!(
+            field_values(&document, "fieldSpanBlocks"),
+            vec![Some(recorded)]
+        );
+        assert_eq!(bound_result_blocks(&document), vec![None]);
+    }
+
+    #[test]
+    fn counts_of_zero_or_past_the_story_bind_nothing() {
+        for count in [json!(0), json!(u64::MAX), json!(-1), json!(1e30)] {
+            for key in ["structuredCode", "structuredResult"] {
+                let mut field = block_field("0", 1);
+                field["structuredCode"] = json!({"inline": []});
+                field[key]["blockCount"] = count.clone();
+                let blocks = [
+                    json!({"type":"paragraph","content":[]}),
+                    json!({"type":"paragraph","content":[field]}),
+                    json!({"type":"paragraph","content":[run("Cached second")]}),
+                    json!({"type":"paragraph","content":[]}),
+                    json!({"type":"paragraph","content":[run("After")]}),
+                ];
+                let label = format!("{key} {count}");
+                let seeded = std::panic::catch_unwind(|| seed_body(&blocks));
+                assert!(seeded.is_ok(), "{label}");
+                let document = seeded.unwrap();
+                assert_eq!(bound_result_blocks(&document), [None], "{label}");
+                assert_eq!(rendered(&document).0, 5, "{label}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_numeric_field_holding_copies_of_its_cached_blocks_binds_them_as_a_count_does() {
+        let cached = json!({"type":"paragraph","paraId":"cached","content":[run("Cached second")]});
+        let end = json!({"type":"paragraph","paraId":"end","content":[]});
+        let mut older = block_field("0", 2);
+        let result = older["structuredResult"].as_object_mut().unwrap();
+        result.remove("blockCount");
+        result.insert("blocks".to_owned(), json!([cached.clone(), end.clone()]));
+        let seeded = |field: Value| {
+            seed_body(&[
+                json!({"type":"paragraph","paraId":"owner","content":[field]}),
+                cached.clone(),
+                end.clone(),
+                json!({"type":"paragraph","paraId":"after","content":[run("After")]}),
+            ])
+        };
+        let current = seeded(block_field("0", 2));
+        let older = seeded(older);
+        assert_eq!(bound_result_blocks(&older), bound_result_blocks(&current));
+        assert_eq!(rendered(&older).0, 2);
+    }
+
+    #[test]
+    fn a_field_holding_copies_of_its_code_and_result_blocks_binds_its_code_marks() {
+        let blocks = [
+            json!({"type":"paragraph","paraId":"owner","content":[]}),
+            json!({"type":"paragraph","paraId":"code","content":[run("Code")]}),
+            json!({"type":"paragraph","paraId":"result","content":[run("Result")]}),
+        ];
+        let data = json!({
+            "type":"complexField", "fieldType":"IF", "instruction":"IF 1 = 1",
+            "fieldCode":[], "fieldResult":[],
+            "structuredCode":{"inline":[], "blocks":[blocks[1].clone()]},
+            "structuredResult":{"inline":[], "blocks":[blocks[2].clone()]}
+        });
+        let data = Value::String(data.to_string());
+        let payload = JsonObject::from([("fieldData".to_owned(), data)]);
+        let mut units = [embed_unit("field", payload, &[], 1)];
+        bind_field_code_blocks(&mut units, "body", &blocks, 0, BlockCursor::default());
+        let UnitContent::Embed { payload, .. } = &units[0].content else {
+            panic!("the field is an embed");
+        };
+        assert_eq!(payload.get("fieldCodeMarks"), Some(&json!(["code"])));
+        assert_eq!(payload.get("fieldCodeTarget"), Some(&json!("result")));
+    }
+
+    #[test]
+    fn a_sequence_in_a_hidden_cached_paragraph_keeps_the_caption_after_it_cached() {
+        let sequence = |cached: &str| {
+            let mut field = json!({"type":"simpleField","fieldType":"SEQ"});
+            field["instruction"] = json!("SEQ Figure");
+            field["content"] = json!([run(cached)]);
+            field
+        };
+        let (document, names) = lowered_body(&[
+            json!({"type":"paragraph","content":[block_field("0", 2)]}),
+            json!({"type":"paragraph","content":[sequence("1")]}),
+            json!({"type":"paragraph","content":[]}),
+            json!({"type":"paragraph","content":[sequence("2")]}),
+        ]);
+        seed_opaque_sequences(&document, &names, None);
+        let (_, output) = rendered(&document);
+        let blocks: Value = serde_json::from_str(&output).unwrap();
+        let captions: Vec<_> = blocks
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|block| block["runs"].as_array().cloned().unwrap_or_default())
+            .filter(|run| run["instruction"] == "SEQ Figure")
+            .map(|run| run["fallback"].clone())
+            .collect();
+        assert_eq!(captions, [json!("2")]);
     }
 
     #[test]
@@ -8584,6 +9484,755 @@ mod tests {
         );
     }
 
+    fn conditional_cells(look: Value) -> Vec<Vec<Value>> {
+        let line = |color: &str| json!({ "style": "single", "size": 8, "color": { "rgb": color } });
+        let fill = |color: &str| json!({ "fill": { "rgb": color } });
+        let definitions = json!({
+            "styles": [{
+                "type": "table", "styleId": "Shaded",
+                "tblPr": { "styleRowBandSize": 1, "borders": { "insideH": line("000000") } },
+                "tblStylePr": [
+                    { "type": "firstRow", "tcPr": {
+                        "shading": fill("FF0000"),
+                        "borders": { "bottom": line("FF0000"), "insideV": { "style": "nil" } }
+                    } },
+                    { "type": "firstCol", "tcPr": {
+                        "shading": fill("00FF00"), "borders": { "insideH": line("00FF00") }
+                    } },
+                    { "type": "band1Horz", "tcPr": { "shading": fill("0000FF") } },
+                    { "type": "band2Horz", "tcPr": { "borders": { "top": line("888888") } } }
+                ]
+            }]
+        });
+        let rows: Vec<Value> = (0..4)
+            .map(|row| {
+                let cells: Vec<Value> = (0..3)
+                    .map(|column| {
+                        let mut cell = json!({ "type": "tableCell", "content": [] });
+                        if (row, column) == (2, 1) {
+                            cell["formatting"] = json!({ "shading": fill("ABCDEF") });
+                        }
+                        cell
+                    })
+                    .collect();
+                json!({ "cells": cells })
+            })
+            .collect();
+        let mut table = json!({
+            "type": "table",
+            "formatting": { "styleId": "Shaded" },
+            "rows": rows
+        });
+        if !look.is_null() {
+            table["formatting"]["look"] = look;
+        }
+        seeded_cells(&definitions, &table)
+    }
+
+    fn seeded_cells(definitions: &Value, table: &Value) -> Vec<Vec<Value>> {
+        let baseline = RunInheritance::new(Some(definitions)).table_attrs(table);
+        baseline["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| {
+                row.as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|cell| cell["attributes"].clone())
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn table_style_conditional_parts_shade_and_border_their_regions() {
+        let cells = conditional_cells(Value::Null);
+        let fill = |row: usize, column: usize| cells[row][column]["backgroundColor"].clone();
+        let edge = |row: usize, column: usize, side: &str| {
+            cells[row][column]["borders"][side]["color"]["rgb"].clone()
+        };
+        assert_eq!(fill(0, 0), json!("FF0000"));
+        assert_eq!(fill(0, 1), json!("FF0000"));
+        assert_eq!(fill(1, 0), json!("00FF00"));
+        assert_eq!(fill(1, 1), json!("0000FF"));
+        assert_eq!(fill(2, 1), json!("ABCDEF"));
+        assert_eq!(cells[2][1]["_originalResolvedFill"], json!("ABCDEF"));
+        assert!(fill(2, 2).is_null());
+        assert_eq!(fill(3, 1), json!("0000FF"));
+        assert_eq!(cells[1][1]["_originalResolvedFill"], json!("0000FF"));
+
+        assert_eq!(edge(0, 0, "bottom"), json!("FF0000"));
+        assert_eq!(cells[0][1]["borders"]["right"]["style"], json!("nil"));
+        assert_eq!(edge(1, 0, "bottom"), json!("00FF00"));
+        assert_eq!(edge(2, 0, "top"), json!("00FF00"));
+        assert_eq!(edge(1, 1, "top"), json!("000000"));
+        assert_eq!(edge(2, 2, "top"), json!("888888"));
+        assert_eq!(edge(3, 0, "bottom"), Value::Null);
+        assert!(cells[2][1]["_originalFormatting"]["borders"].is_null());
+    }
+
+    #[test]
+    fn table_look_turns_conditional_cell_regions_off() {
+        let cells = conditional_cells(json!({ "firstRow": true, "noHBand": true }));
+        assert_eq!(cells[0][0]["backgroundColor"], json!("FF0000"));
+        for (row, column) in [(1, 0), (1, 1), (2, 2), (3, 1)] {
+            assert!(cells[row][column]["backgroundColor"].is_null());
+        }
+        assert_eq!(
+            cells[1][0]["borders"]["bottom"]["color"]["rgb"],
+            json!("000000")
+        );
+        assert_eq!(
+            cells[2][2]["borders"]["top"]["color"]["rgb"],
+            json!("000000")
+        );
+    }
+
+    #[test]
+    fn direct_shading_element_replaces_style_shading() {
+        let definitions = json!({
+            "styles": [{
+                "type": "table", "styleId": "Shaded",
+                "tblStylePr": [
+                    { "type": "firstRow", "tcPr": { "shading": { "fill": { "rgb": "0000FF" } } } }
+                ]
+            }]
+        });
+        let cell = |shading: Value| json!({ "type": "tableCell", "formatting": { "shading": shading }, "content": [] });
+        let nil = cell(json!({ "pattern": "nil" }));
+        let solid = cell(json!({
+            "pattern": "solid", "color": { "rgb": "FF0000" }, "fill": { "auto": true }
+        }));
+        let plain = json!({ "type": "tableCell", "content": [] });
+        let table = json!({
+            "type": "table",
+            "formatting": { "styleId": "Shaded", "look": { "firstRow": true } },
+            "rows": [{ "cells": [nil, solid, plain] }]
+        });
+        let cells = seeded_cells(&definitions, &table);
+        assert!(cells[0][0]["backgroundColor"].is_null());
+        assert_eq!(cells[0][1]["backgroundColor"], json!("FF0000"));
+        assert_eq!(cells[0][2]["backgroundColor"], json!("0000FF"));
+    }
+
+    #[test]
+    fn solid_shading_takes_its_pattern_colour_black_when_automatic() {
+        let definitions = json!({
+            "styles": [{
+                "type": "table", "styleId": "Solid",
+                "tblStylePr": [
+                    { "type": "firstRow", "tcPr": { "shading": {
+                        "pattern": "solid", "color": { "auto": true }, "fill": { "rgb": "0000FF" }
+                    } } },
+                    { "type": "lastRow", "tcPr": { "shading": {
+                        "pattern": "solid", "fill": { "rgb": "0000FF" }
+                    } } }
+                ]
+            }]
+        });
+        let cell = |shading: Value| json!({ "type": "tableCell", "formatting": { "shading": shading }, "content": [] });
+        let plain = || json!({ "type": "tableCell", "content": [] });
+        let table = json!({
+            "type": "table",
+            "formatting": { "styleId": "Solid", "look": { "firstRow": true, "lastRow": true } },
+            "rows": [
+                { "cells": [plain(), plain(), plain(), plain()] },
+                { "cells": [
+                    cell(json!({ "pattern": "solid", "color": { "auto": true }, "fill": { "rgb": "FFFF00" } })),
+                    cell(json!({ "pattern": "solid", "fill": { "rgb": "FFFF00" } })),
+                    cell(json!({ "pattern": "solid", "color": { "rgb": "FF0000" }, "fill": { "rgb": "FFFF00" } })),
+                    cell(json!({ "pattern": "clear", "color": { "auto": true }, "fill": { "rgb": "00FF00" } }))
+                ] },
+                { "cells": [plain(), plain(), plain(), plain()] }
+            ]
+        });
+        let cells = seeded_cells(&definitions, &table);
+        let fills = |row: usize| {
+            cells[row]
+                .iter()
+                .map(|cell| cell["backgroundColor"].clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(fills(0), vec![json!("000000"); 4]);
+        assert_eq!(
+            fills(1),
+            vec![
+                json!("000000"),
+                json!("000000"),
+                json!("FF0000"),
+                json!("00FF00")
+            ]
+        );
+        assert_eq!(fills(2), vec![json!("000000"); 4]);
+    }
+
+    #[test]
+    fn vertically_merged_cell_takes_its_region_bottom_border() {
+        let definitions = json!({
+            "styles": [{
+                "type": "table", "styleId": "Edged",
+                "tblStylePr": [{ "type": "firstCol", "tcPr": { "borders": {
+                    "bottom": { "style": "single", "size": 8, "color": { "rgb": "0000FF" } },
+                    "insideH": { "style": "nil" }
+                } } }]
+            }]
+        });
+        let cell = |merge: Option<&str>| match merge {
+            Some(merge) => {
+                json!({ "type": "tableCell", "formatting": { "vMerge": merge }, "content": [] })
+            }
+            None => json!({ "type": "tableCell", "content": [] }),
+        };
+        let table = json!({
+            "type": "table",
+            "formatting": { "styleId": "Edged", "look": { "firstColumn": true } },
+            "rows": [
+                { "cells": [cell(None), cell(None)] },
+                { "cells": [cell(Some("restart")), cell(None)] },
+                { "cells": [cell(Some("continue")), cell(None)] }
+            ]
+        });
+        let cells = seeded_cells(&definitions, &table);
+        assert_eq!(cells[1][0]["rowspan"], json!(2));
+        assert_eq!(
+            cells[1][0]["borders"]["bottom"]["color"]["rgb"],
+            json!("0000FF")
+        );
+    }
+
+    fn styled_cells(style: Value, look: Value, rows: usize, columns: usize) -> Vec<Vec<Value>> {
+        let cells = vec![json!({ "type": "tableCell", "content": [] }); columns];
+        let rows: Vec<Value> = (0..rows)
+            .map(|_| json!({ "cells": cells.clone() }))
+            .collect();
+        let style_id = style["styleId"].clone();
+        let table = json!({
+            "type": "table",
+            "formatting": { "styleId": style_id, "look": look },
+            "rows": rows
+        });
+        seeded_cells(&json!({ "styles": [style] }), &table)
+    }
+
+    fn first_column_fills(cells: &[Vec<Value>]) -> Vec<Value> {
+        cells
+            .iter()
+            .map(|row| row[0]["backgroundColor"].clone())
+            .collect()
+    }
+
+    fn shading_part(region: &str, color: &str) -> Value {
+        json!({ "type": region, "tcPr": { "shading": { "fill": { "rgb": color } } } })
+    }
+
+    fn edge_style() -> Value {
+        json!({
+            "type": "table", "styleId": "Edges",
+            "tblStylePr": [shading_part("firstRow", "FF0000"), shading_part("lastRow", "0000FF")]
+        })
+    }
+
+    #[test]
+    fn table_look_named_flags_ignore_the_hex_mask() {
+        let cells = styled_cells(
+            edge_style(),
+            json!({ "value": "04A0", "lastRow": true }),
+            3,
+            1,
+        );
+        assert_eq!(
+            first_column_fills(&cells),
+            vec![Value::Null, Value::Null, json!("0000FF")]
+        );
+    }
+
+    #[test]
+    fn table_look_hex_mask_applies_without_named_flags() {
+        let cells = styled_cells(edge_style(), json!({ "value": "04A0" }), 3, 1);
+        assert_eq!(
+            first_column_fills(&cells),
+            vec![json!("FF0000"), Value::Null, Value::Null]
+        );
+    }
+
+    fn banded_style(band_size: Option<u32>) -> Value {
+        let mut style = json!({
+            "type": "table", "styleId": "Banded",
+            "tblStylePr": [shading_part("band1Horz", "D3DFEE")]
+        });
+        if let Some(size) = band_size {
+            style["tblPr"] = json!({ "styleRowBandSize": size });
+        }
+        style
+    }
+
+    #[test]
+    fn absent_row_band_size_applies_no_horizontal_banding() {
+        let cells = styled_cells(banded_style(None), json!({ "noVBand": true }), 3, 1);
+        assert_eq!(first_column_fills(&cells), vec![Value::Null; 3]);
+    }
+
+    #[test]
+    fn explicit_row_band_size_of_one_bands_alternate_rows() {
+        let cells = styled_cells(banded_style(Some(1)), json!({ "noVBand": true }), 3, 1);
+        assert_eq!(
+            first_column_fills(&cells),
+            vec![json!("D3DFEE"), Value::Null, json!("D3DFEE")]
+        );
+    }
+
+    #[test]
+    fn whole_table_part_shading_does_not_reach_cells() {
+        let style = json!({
+            "type": "table", "styleId": "Whole",
+            "tblStylePr": [shading_part("wholeTable", "00FF00")]
+        });
+        let cells = styled_cells(style, json!({ "noHBand": true, "noVBand": true }), 2, 2);
+        let fills: Vec<Value> = cells
+            .iter()
+            .flatten()
+            .map(|cell| cell["backgroundColor"].clone())
+            .collect();
+        assert_eq!(fills, vec![Value::Null; 4]);
+    }
+
+    #[test]
+    fn absent_column_band_size_applies_no_vertical_banding() {
+        let style = json!({
+            "type": "table", "styleId": "Columns",
+            "tblStylePr": [shading_part("band1Vert", "D3DFEE")]
+        });
+        let cells = styled_cells(style, json!({ "noHBand": true }), 1, 3);
+        let fills: Vec<Value> = cells[0]
+            .iter()
+            .map(|cell| cell["backgroundColor"].clone())
+            .collect();
+        assert_eq!(fills, vec![Value::Null; 3]);
+    }
+
+    #[test]
+    fn whole_table_part_paragraph_formatting_does_not_reach_cells() {
+        let definitions = json!({
+            "styles": [{
+                "type": "table", "styleId": "Spaced",
+                "tblStylePr": [{ "type": "wholeTable", "pPr": { "spaceAfter": 777 } }]
+            }]
+        });
+        let table = json!({
+            "type": "table",
+            "formatting": { "styleId": "Spaced", "look": { "noHBand": true, "noVBand": true } },
+            "rows": [{ "cells": [{ "type": "tableCell", "content": [] }] }]
+        });
+        let baseline = RunInheritance::new(Some(&definitions)).table_attrs(&table);
+        assert!(baseline["rows"][0][0]["paragraphFormatting"]["spaceAfter"].is_null());
+    }
+
+    #[test]
+    fn style_level_cell_borders_do_not_reach_cells() {
+        let line = json!({ "style": "single", "size": 8, "color": { "rgb": "0000FF" } });
+        let style = json!({
+            "type": "table", "styleId": "Boxed",
+            "tcPr": { "borders": { "top": line, "bottom": line, "left": line, "right": line } }
+        });
+        let cells = styled_cells(style, json!({ "noHBand": true, "noVBand": true }), 2, 2);
+        let edges: Vec<Value> = cells
+            .iter()
+            .flatten()
+            .map(|cell| json!([cell["borders"]["top"], cell["borders"]["left"]]))
+            .collect();
+        assert_eq!(edges, vec![json!([null, null]); 4]);
+    }
+
+    #[test]
+    fn band_nil_borders_keep_the_table_outer_edge() {
+        let line = json!({ "style": "single", "size": 8, "color": { "rgb": "000000" } });
+        let nil = json!({ "style": "nil" });
+        let style = json!({
+            "type": "table", "styleId": "Ruled",
+            "tblPr": {
+                "styleRowBandSize": 1,
+                "borders": { "top": line, "bottom": line, "left": line, "right": line }
+            },
+            "tblStylePr": [
+                { "type": "band1Horz", "tcPr": { "borders": { "top": nil, "bottom": nil } } },
+                { "type": "firstCol", "tcPr": { "borders": { "bottom": nil } } }
+            ]
+        });
+        let look = json!({
+            "firstRow": false, "lastRow": false, "firstColumn": true, "noVBand": true
+        });
+        let cells = styled_cells(style, look, 3, 3);
+        let size = |row: usize, column: usize, side: &str| {
+            cells[row][column]["borders"][side]["size"].clone()
+        };
+        assert_eq!(size(2, 1, "bottom"), json!(8));
+        assert_eq!(size(2, 2, "bottom"), json!(8));
+        assert!(size(2, 0, "bottom").is_null());
+        assert_eq!(size(0, 1, "top"), json!(8));
+        assert_eq!(size(0, 2, "top"), json!(8));
+    }
+
+    #[test]
+    fn a_three_line_table_draws_its_header_rule() {
+        let rule =
+            |size: u32| json!({ "style": "single", "size": size, "color": { "rgb": "000000" } });
+        let style = json!({
+            "type": "table", "styleId": "ThreeLine",
+            "tblPr": { "borders": { "top": rule(12), "bottom": rule(12) } },
+            "tblStylePr": [
+                { "type": "firstRow", "tcPr": { "borders": { "bottom": rule(4) } } }
+            ]
+        });
+        let look = json!({
+            "firstRow": true, "lastRow": false, "firstColumn": false, "noVBand": true
+        });
+        let cells = styled_cells(style, look, 2, 2);
+        let size = |row: usize, column: usize, side: &str| {
+            cells[row][column]["borders"][side]["size"].clone()
+        };
+        for column in 0..2 {
+            assert_eq!(size(0, column, "top"), json!(12));
+            assert_eq!(size(0, column, "bottom"), json!(4));
+            assert!(size(1, column, "top").is_null());
+            assert_eq!(size(1, column, "bottom"), json!(12));
+        }
+    }
+
+    fn band_style(borders: Value, regions: [&str; 2], sides: Value) -> Value {
+        let parts: Vec<Value> = regions
+            .iter()
+            .map(|region| json!({ "type": region, "tcPr": { "borders": sides } }))
+            .collect();
+        json!({ "styles": [{
+            "type": "table", "styleId": "Bands",
+            "tblPr": { "styleRowBandSize": 1, "styleColBandSize": 1, "borders": borders },
+            "tblStylePr": parts
+        }] })
+    }
+
+    fn row_band_look() -> Value {
+        json!({
+            "firstRow": false, "lastRow": false, "firstColumn": false, "lastColumn": false,
+            "noVBand": true
+        })
+    }
+
+    fn merged_cell(merge: &str) -> Value {
+        json!({ "type": "tableCell", "formatting": { "vMerge": merge }, "content": [] })
+    }
+
+    #[test]
+    fn a_band_clears_the_bottom_of_a_merged_cell_above_the_last_row() {
+        let line = json!({ "style": "single", "size": 8, "color": { "rgb": "000000" } });
+        let plain = json!({ "type": "tableCell", "content": [] });
+        let table = json!({
+            "type": "table",
+            "formatting": { "styleId": "Bands", "look": row_band_look() },
+            "rows": [
+                { "cells": [merged_cell("restart"), plain] },
+                { "cells": [merged_cell("continue"), plain] }
+            ]
+        });
+        for cleared in ["nil", "none"] {
+            let definitions = band_style(
+                json!({ "bottom": { "style": "nil" }, "insideH": line }),
+                ["band1Horz", "band2Horz"],
+                json!({ "bottom": { "style": cleared } }),
+            );
+            let cells = seeded_cells(&definitions, &table);
+            assert_eq!(cells[0][0]["rowspan"], json!(2));
+            assert!(
+                cells[0][0]["borders"]["bottom"]["size"].is_null(),
+                "{cleared}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_band_clears_the_right_of_a_cell_short_of_the_grid() {
+        let line = json!({ "style": "single", "size": 8, "color": { "rgb": "000000" } });
+        let plain = json!({ "type": "tableCell", "content": [] });
+        let table = json!({
+            "type": "table",
+            "formatting": { "styleId": "Bands", "look": row_band_look() },
+            "columnWidths": [2000, 2000, 2000],
+            "rows": [{ "formatting": { "gridBefore": 1 }, "cells": [plain, plain] }]
+        });
+        for cleared in ["nil", "none"] {
+            let definitions = band_style(
+                json!({ "right": line, "insideV": line }),
+                ["band1Horz", "band2Horz"],
+                json!({ "right": { "style": cleared } }),
+            );
+            let cells = seeded_cells(&definitions, &table);
+            assert!(
+                cells[0][1]["borders"]["right"]["size"].is_null(),
+                "{cleared}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_band_clears_the_sides_of_a_right_to_left_table() {
+        let line = json!({ "style": "single", "size": 8, "color": { "rgb": "000000" } });
+        let nil = json!({ "style": "nil" });
+        let plain = json!({ "type": "tableCell", "content": [] });
+        let table = json!({
+            "type": "table",
+            "formatting": { "styleId": "Bands", "look": row_band_look(), "bidi": true },
+            "rows": [{ "cells": [plain, plain] }]
+        });
+        let definitions = band_style(
+            json!({ "left": line, "right": line, "insideV": nil }),
+            ["band1Horz", "band2Horz"],
+            json!({ "left": nil, "right": nil }),
+        );
+        let cells = seeded_cells(&definitions, &table);
+        assert!(cells[0][1]["borders"]["right"]["size"].is_null());
+        assert!(cells[0][0]["borders"]["left"]["size"].is_null());
+    }
+
+    #[test]
+    fn vertical_band_nil_borders_keep_the_table_sides() {
+        let line = json!({ "style": "single", "size": 8, "color": { "rgb": "000000" } });
+        let nil = json!({ "style": "nil" });
+        let plain = json!({ "type": "tableCell", "content": [] });
+        let table = json!({
+            "type": "table",
+            "formatting": {
+                "styleId": "Bands",
+                "look": {
+                    "firstRow": false, "lastRow": false, "firstColumn": false,
+                    "lastColumn": false, "noHBand": true, "noVBand": false
+                }
+            },
+            "rows": [{ "cells": [plain, plain, plain] }]
+        });
+        let definitions = band_style(
+            json!({ "left": line, "right": line, "insideV": line }),
+            ["band1Vert", "band2Vert"],
+            json!({ "left": nil, "right": nil }),
+        );
+        let cells = seeded_cells(&definitions, &table);
+        let unbanded = seeded_cells(&definitions, &without_bands(&table));
+        assert_eq!(cells[0][0]["borders"]["left"]["size"], json!(8));
+        assert_eq!(cells[0][2]["borders"]["right"]["size"], json!(8));
+        assert!(cells[0][1]["borders"]["left"]["size"].is_null());
+        assert_eq!(unbanded[0][1]["borders"]["left"]["size"], json!(8));
+        assert_ne!(
+            cells[0][1]["borders"]["left"],
+            unbanded[0][1]["borders"]["left"]
+        );
+    }
+
+    fn both_bands_look() -> Value {
+        json!({
+            "firstRow": false, "lastRow": false, "firstColumn": false, "lastColumn": false,
+            "noHBand": false, "noVBand": false
+        })
+    }
+
+    fn layered_band_style(table_borders: Value, parts: [(&str, Value); 2]) -> Value {
+        let parts: Vec<Value> = parts
+            .iter()
+            .map(|(region, sides)| json!({ "type": region, "tcPr": { "borders": sides } }))
+            .collect();
+        json!({ "styles": [{
+            "type": "table", "styleId": "Bands",
+            "tblPr": { "styleRowBandSize": 1, "styleColBandSize": 1, "borders": table_borders },
+            "tblStylePr": parts
+        }] })
+    }
+
+    fn offset_band_table() -> Value {
+        let plain = json!({ "type": "tableCell", "content": [] });
+        json!({
+            "type": "table",
+            "formatting": { "styleId": "Bands", "look": both_bands_look() },
+            "columnWidths": [2000, 2000, 2000],
+            "rows": [
+                { "cells": [plain, plain, plain] },
+                { "formatting": { "gridBefore": 1 }, "cells": [plain, plain] }
+            ]
+        })
+    }
+
+    fn sized_line(size: u32) -> Value {
+        json!({ "style": "single", "size": size, "color": { "rgb": "000000" } })
+    }
+
+    #[test]
+    fn a_skipped_band_edge_leaves_no_earlier_band_layer_behind() {
+        for cleared in ["nil", "none"] {
+            let definitions = layered_band_style(
+                json!({ "left": sized_line(4) }),
+                [
+                    ("band2Horz", json!({ "insideV": sized_line(8) })),
+                    ("band2Vert", json!({ "left": { "style": cleared } })),
+                ],
+            );
+            let cells = seeded_cells(&definitions, &offset_band_table());
+            assert_eq!(
+                cells[1][0]["borders"]["left"]["size"],
+                json!(4),
+                "{cleared}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cleared_vertical_band_edge_shows_the_table_side_over_a_horizontal_band() {
+        let plain = json!({ "type": "tableCell", "content": [] });
+        let table = json!({
+            "type": "table",
+            "formatting": { "styleId": "Bands", "look": both_bands_look() },
+            "rows": [{ "cells": [plain, plain] }]
+        });
+        let definitions = layered_band_style(
+            json!({ "left": sized_line(4) }),
+            [
+                ("band1Horz", json!({ "left": sized_line(12) })),
+                ("band1Vert", json!({ "left": { "style": "nil" } })),
+            ],
+        );
+        let cells = seeded_cells(&definitions, &table);
+        assert_eq!(cells[0][0]["borders"]["left"]["size"], json!(4));
+    }
+
+    #[test]
+    fn an_empty_grid_takes_its_band_edges_from_the_widest_row() {
+        let plain = json!({ "type": "tableCell", "content": [] });
+        let missing = json!({
+            "type": "table",
+            "formatting": {
+                "styleId": "Bands",
+                "look": {
+                    "firstRow": false, "lastRow": false, "firstColumn": false,
+                    "lastColumn": false, "noHBand": true, "noVBand": false
+                }
+            },
+            "rows": [{ "cells": [plain, plain] }]
+        });
+        let mut empty = missing.clone();
+        empty["columnWidths"] = json!([]);
+        let definitions = band_style(
+            json!({ "right": sized_line(12), "insideV": sized_line(4) }),
+            ["band1Vert", "band2Vert"],
+            json!({ "right": { "style": "nil" } }),
+        );
+        for (grid, table) in [("empty", empty), ("missing", missing)] {
+            let cells = seeded_cells(&definitions, &table);
+            assert!(cells[0][0]["borders"]["right"]["size"].is_null(), "{grid}");
+            assert_ne!(cells[0][0]["borders"]["right"]["size"], json!(12), "{grid}");
+            assert_eq!(cells[0][1]["borders"]["right"]["size"], json!(12), "{grid}");
+        }
+    }
+
+    fn without_bands(table: &Value) -> Value {
+        let mut table = table.clone();
+        table["formatting"]["look"]["noHBand"] = json!(true);
+        table["formatting"]["look"]["noVBand"] = json!(true);
+        table
+    }
+
+    #[test]
+    fn a_skipped_band_edge_matches_the_same_table_without_bands() {
+        let line = sized_line(8);
+        let nil = json!({ "style": "nil" });
+        let plain = json!({ "type": "tableCell", "content": [] });
+        let ruled = json!({ "styles": [{
+            "type": "table", "styleId": "Ruled",
+            "tblPr": {
+                "styleRowBandSize": 1,
+                "borders": { "top": line, "bottom": line, "left": line, "right": line }
+            },
+            "tblStylePr": [
+                { "type": "band1Horz", "tcPr": { "borders": { "top": nil, "bottom": nil } } },
+                { "type": "firstCol", "tcPr": { "borders": { "bottom": nil } } }
+            ]
+        }] });
+        let ruled_table = json!({
+            "type": "table",
+            "formatting": {
+                "styleId": "Ruled",
+                "look": {
+                    "firstRow": false, "lastRow": false, "firstColumn": true, "noVBand": true
+                }
+            },
+            "rows": [
+                { "cells": [plain, plain, plain] },
+                { "cells": [plain, plain, plain] },
+                { "cells": [plain, plain, plain] }
+            ]
+        });
+        let merged_table = json!({
+            "type": "table",
+            "formatting": { "styleId": "Bands", "look": row_band_look() },
+            "rows": [
+                { "cells": [merged_cell("restart"), plain] },
+                { "cells": [merged_cell("continue"), plain] }
+            ]
+        });
+        let offset_table = json!({
+            "type": "table",
+            "formatting": { "styleId": "Bands", "look": row_band_look() },
+            "columnWidths": [2000, 2000, 2000],
+            "rows": [{ "formatting": { "gridBefore": 1 }, "cells": [plain, plain] }]
+        });
+        let constructions = [
+            (
+                ruled,
+                ruled_table,
+                vec![
+                    (0, 1, "top"),
+                    (0, 2, "top"),
+                    (2, 1, "bottom"),
+                    (2, 2, "bottom"),
+                ],
+            ),
+            (
+                band_style(
+                    json!({ "bottom": nil, "insideH": line }),
+                    ["band1Horz", "band2Horz"],
+                    json!({ "bottom": nil }),
+                ),
+                merged_table,
+                vec![(1, 0, "bottom")],
+            ),
+            (
+                band_style(
+                    json!({ "left": line, "insideV": line }),
+                    ["band1Horz", "band2Horz"],
+                    json!({ "insideV": nil }),
+                ),
+                offset_table,
+                vec![(0, 0, "left")],
+            ),
+            (
+                layered_band_style(
+                    json!({ "left": sized_line(4) }),
+                    [
+                        ("band2Horz", json!({ "insideV": sized_line(8) })),
+                        ("band2Vert", json!({ "left": nil })),
+                    ],
+                ),
+                offset_band_table(),
+                vec![(1, 0, "left")],
+            ),
+        ];
+        for (definitions, table, edges) in constructions {
+            let banded = seeded_cells(&definitions, &table);
+            let unbanded = seeded_cells(&definitions, &without_bands(&table));
+            for (row, column, side) in edges {
+                assert_eq!(
+                    banded[row][column]["borders"][side], unbanded[row][column]["borders"][side],
+                    "{row} {column} {side}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn replayed_drawings_capture_source_properties_and_seed_attributes() {
         let formatting = json!({"hidden": true, "position": 20});
@@ -8607,6 +10256,37 @@ mod tests {
                 assert!(!payload.contains_key("sourceRun"));
             }
         }
+    }
+
+    #[test]
+    fn tracked_comment_references_keep_revision_marks() {
+        let info = json!({"id": 11, "author": "Ada", "date": "2024-01-01T00:00:00Z"});
+        let reference = |id: u32| json!({"type": "run", "formatting": {"bold": true}, "content": [{"type": "commentReference", "id": id}]});
+        let tracked = |node_type: &str, id: u32| json!({"type": node_type, "info": info, "content": [reference(id)]});
+        let paragraph = json!({"content": [
+            tracked("insertion", 3),
+            tracked("deletion", 4),
+            reference(5),
+        ]});
+        let styles = StyleResolver::new(None);
+        let ParagraphUnits { units, .. } =
+            paragraph_units(&paragraph, &styles, None, &BTreeMap::new());
+        assert_eq!(units.len(), 3);
+        for (unit, id) in units.iter().zip([3, 4, 5]) {
+            let UnitContent::Embed { kind, payload } = &unit.content else {
+                panic!("expected comment reference embed");
+            };
+            assert_eq!(kind, "field");
+            assert_eq!(payload["modelKind"], json!("commentReference"));
+            assert_eq!(payload["commentId"], json!(id));
+        }
+        let keys = |unit: &InlineUnit| unit.attrs.keys().cloned().collect::<Vec<_>>();
+        assert_eq!(keys(&units[0]), ["ins"]);
+        assert_eq!(units[0].attrs["ins"]["author"], json!("Ada"));
+        assert_eq!(units[0].attrs["ins"]["id"], json!(11));
+        assert_eq!(keys(&units[1]), ["del"]);
+        assert_eq!(units[1].attrs["del"]["author"], json!("Ada"));
+        assert!(keys(&units[2]).is_empty());
     }
 
     #[test]
@@ -9829,6 +11509,229 @@ mod tests {
 
     use super::*;
 
+    fn seeded_sharing(bytes: &[u8], sharing: bool, generation: Option<&str>) -> EditingDoc {
+        let doc = EditingDoc::new(1);
+        UNSHARED_SEED_ATTRS.with(|unshared| unshared.set(!sharing));
+        let seeded = match generation {
+            Some(generation) => seed_from_docx_with_generation(&doc, bytes, generation),
+            None => seed_from_docx(&doc, bytes),
+        };
+        UNSHARED_SEED_ATTRS.with(|unshared| unshared.set(false));
+        seeded.unwrap();
+        doc
+    }
+
+    const GENERATION: &str = "shared-attributes";
+
+    fn seed_bytes(bytes: &[u8], sharing: bool, generation: Option<&str>) -> Vec<u8> {
+        seeded_sharing(bytes, sharing, generation).encode_state_as_update_v1()
+    }
+
+    fn body_attributes(doc: &EditingDoc, text: &str) -> Attrs {
+        let txn = doc.yrs_doc().transact();
+        let body = crate::story_ref(&txn, "body").unwrap();
+        yrs::Text::diff(&body, &txn, yrs::types::text::YChange::identity)
+            .into_iter()
+            .find_map(|op| match op.insert {
+                Out::Any(Any::String(chunk)) if chunk.contains(text) => {
+                    Some(op.attributes.map(|attrs| *attrs).unwrap_or_default())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no body text holds {text:?}"))
+    }
+
+    fn font_family(doc: &EditingDoc, text: &str) -> Arc<HashMap<String, Any>> {
+        match body_attributes(doc, text).remove("fontFamily") {
+            Some(Any::Map(font)) => font,
+            other => panic!("{text}: fontFamily is {other:?}"),
+        }
+    }
+
+    #[test]
+    fn seeded_bytes_match_with_and_without_shared_attributes() {
+        let formatted = concat!(
+            r#"<w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:b/><w:color w:val="C00000"/>"#,
+            r#"<w:sz w:val="28"/><w:highlight w:val="yellow"/><w:u w:val="single" w:color="00B050"/>"#,
+            r#"<w:rPrChange w:id="8" w:author="A" w:date="2024-01-01T00:00:00Z"><w:rPr><w:i/></w:rPr></w:rPrChange></w:rPr>"#,
+        );
+        let other = r#"<w:rPr><w:rFonts w:ascii="Courier New" w:hAnsi="Courier New"/><w:i/><w:color w:val="0000FF"/></w:rPr>"#;
+        let spaced =
+            r#"<w:pPr><w:spacing w:before="120" w:after="240"/><w:ind w:left="720"/></w:pPr>"#;
+        let body = [
+            fixture::para(
+                "00000001",
+                &format!(
+                    r#"{spaced}<w:r>{formatted}<w:t>First</w:t></w:r>{plain}<w:r>{formatted}<w:t>Second</w:t></w:r><w:r>{other}<w:t>Other</w:t></w:r><w:r>{formatted}<w:br/></w:r>{image}"#,
+                    plain = fixture::run(" plain "),
+                    image = fixture::image("rIdImage", "Picture"),
+                ),
+            ),
+            fixture::para(
+                "00000002",
+                &format!(
+                    r#"{spaced}<w:r>{formatted}<w:t>Third</w:t></w:r><w:r>{other}<w:t>Again</w:t></w:r>"#
+                ),
+            ),
+            fixture::para(
+                "00000003",
+                &format!(
+                    r#"<w:ins w:id="7" w:author="A" w:date="2024-01-01T00:00:00Z"><w:r>{formatted}<w:t>Inserted</w:t></w:r></w:ins>"#
+                ),
+            ),
+        ]
+        .concat();
+        let custom = fixture::Package::new(&body)
+            .rel("rIdImage", "image", "media/image1.png")
+            .bytes();
+        for bytes in [custom.clone(), fixture::principal_docx()] {
+            assert_eq!(
+                seed_bytes(&bytes, true, Some(GENERATION)),
+                seed_bytes(&bytes, false, Some(GENERATION)),
+                "sharing attribute allocations changed the seeded bytes"
+            );
+        }
+        assert_ne!(
+            seed_bytes(&custom, false, None),
+            seed_bytes(&custom, false, None),
+            "fresh generations no longer make independent seeds differ"
+        );
+        assert_eq!(
+            seed_bytes(&custom, false, Some(GENERATION)),
+            seed_bytes(&custom, false, Some(GENERATION)),
+            "a fixed generation does not make unshared seeds identical"
+        );
+        let shared = seeded_sharing(&custom, true, Some(GENERATION));
+        let shared_first = font_family(&shared, "First");
+        let shared_third = font_family(&shared, "Third");
+        assert!(Arc::ptr_eq(&shared_first, &shared_third));
+        let unshared = seeded_sharing(&custom, false, Some(GENERATION));
+        let unshared_first = font_family(&unshared, "First");
+        let unshared_third = font_family(&unshared, "Third");
+        assert_eq!(unshared_first, unshared_third);
+        assert!(!Arc::ptr_eq(&unshared_first, &unshared_third));
+    }
+
+    /// The body paragraph marks' `key` entries: the stored key's address and its map value.
+    fn mark_maps(doc: &EditingDoc, key: &str) -> Vec<(usize, Arc<HashMap<String, Any>>)> {
+        let txn = doc.yrs_doc().transact();
+        let body = crate::story_ref(&txn, "body").unwrap();
+        yrs::Text::diff(&body, &txn, yrs::types::text::YChange::identity)
+            .into_iter()
+            .filter_map(|op| match op.insert {
+                Out::YMap(mark) if crate::is_pilcrow(&mark, &txn) => {
+                    let entry = YrsMap::iter(&mark, &txn)
+                        .find(|(name, _)| *name == key)
+                        .map(|(name, value)| (name.as_ptr() as usize, value));
+                    match entry {
+                        Some((address, Out::Any(Any::Map(value)))) => Some((address, value)),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every entry of each body paragraph mark.
+    fn mark_entries(doc: &EditingDoc) -> Vec<HashMap<String, Any>> {
+        let txn = doc.yrs_doc().transact();
+        let body = crate::story_ref(&txn, "body").unwrap();
+        yrs::Text::diff(&body, &txn, yrs::types::text::YChange::identity)
+            .into_iter()
+            .filter_map(|op| match op.insert {
+                Out::YMap(mark) if crate::is_pilcrow(&mark, &txn) => Some(
+                    YrsMap::iter(&mark, &txn)
+                        .map(|(key, value)| match value {
+                            Out::Any(value) => (key.to_owned(), value),
+                            _ => panic!("{key}: the mark holds a shared type"),
+                        })
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn seeded_bytes_match_with_and_without_shared_embed_values() {
+        let styles = format!(
+            r#"<w:styles {}><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Shared"><w:basedOn w:val="Normal"/><w:pPr><w:jc w:val="center"/></w:pPr><w:rPr><w:b/></w:rPr></w:style></w:styles>"#,
+            fixture::namespaces()
+        );
+        let body = ["00000001", "00000002", "00000003"]
+            .map(|id| {
+                fixture::para(
+                    id,
+                    r#"<w:pPr><w:pStyle w:val="Shared"/><w:spacing w:before="120" w:after="240"/></w:pPr><w:r><w:t>Styled</w:t></w:r>"#,
+                )
+            })
+            .concat();
+        let custom = fixture::Package::new(&body).styles(&styles).bytes();
+        for bytes in [custom.clone(), fixture::principal_docx()] {
+            assert_eq!(
+                seed_bytes(&bytes, true, Some(GENERATION)),
+                seed_bytes(&bytes, false, Some(GENERATION)),
+                "sharing embed payload allocations changed the seeded bytes"
+            );
+        }
+        let shared_doc = seeded_sharing(&custom, true, Some(GENERATION));
+        let shared = mark_maps(&shared_doc, "_originalFormatting");
+        assert_eq!(shared.len(), 3);
+        for (address, value) in &shared[1..] {
+            assert_eq!(*address, shared[0].0);
+            assert!(Arc::ptr_eq(value, &shared[0].1));
+        }
+        let unshared_doc = seeded_sharing(&custom, false, Some(GENERATION));
+        let unshared = mark_maps(&unshared_doc, "_originalFormatting");
+        assert_eq!(unshared.len(), 3);
+        for (address, value) in &unshared[1..] {
+            assert_ne!(*address, unshared[0].0);
+            assert_eq!(value, &unshared[0].1);
+            assert!(!Arc::ptr_eq(value, &unshared[0].1));
+        }
+        let lowered = lower_docx(parse_docx_for_edit(&custom).unwrap(), None).unwrap();
+        let expected: Vec<HashMap<String, Any>> = lowered
+            .context
+            .plans
+            .iter()
+            .filter(|plan| plan.story_id == "body")
+            .flat_map(|plan| &plan.units)
+            .filter_map(|unit| match &unit.content {
+                UnitContent::Embed { kind, payload } if kind == crate::PILCROW_KIND => Some(
+                    payload
+                        .iter()
+                        .map(|(key, value)| (key.clone(), any_from_value(value.clone()).unwrap()))
+                        .chain([(crate::KIND_KEY.to_owned(), Any::from(crate::PILCROW_KIND))])
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .collect();
+        let pinned = [
+            (crate::KIND_KEY, Any::from(crate::PILCROW_KIND)),
+            ("pStyle", Any::from("Shared")),
+            ("alignment", Any::from("center")),
+            ("spaceBefore", Any::Number(120.0)),
+            ("spaceAfter", Any::Number(240.0)),
+            (
+                "defaultTextFormatting",
+                Any::Map(Arc::new(HashMap::from([(
+                    "bold".to_owned(),
+                    Any::Bool(true),
+                )]))),
+            ),
+        ];
+        assert_eq!(expected.len(), 3);
+        for mark in &expected {
+            for (key, value) in &pinned {
+                assert_eq!(mark.get(*key), Some(value), "{key}");
+            }
+        }
+        assert_eq!(mark_entries(&shared_doc), expected);
+        assert_eq!(mark_entries(&unshared_doc), expected);
+    }
+
     #[test]
     fn a_passed_package_digest_parses_like_the_parser_hashing_it() {
         let bytes = include_bytes!("../../../apps/demo/public/betteroffice-demo.docx");
@@ -10593,5 +12496,446 @@ mod tests {
         })));
 
         assert_eq!(seeded_widow_control(&styles, json!({})), Some(Value::Null));
+    }
+}
+
+#[cfg(test)]
+mod shape_style_seed_tests {
+    use super::*;
+
+    fn package() -> Vec<u8> {
+        let paragraph = r#"<w:p><w:pPr><w:pStyle w:val="Box"/></w:pPr><w:r><w:rPr><w:rStyle w:val="Accent"/></w:rPr><w:t>Styled box</w:t></w:r></w:p>"#;
+        let drawing = format!(
+            r#"<w:p><w:r><w:drawing><wp:inline><wp:extent cx="2743200" cy="1371600"/><wp:docPr id="1" name="Box"/><a:graphic><a:graphicData><wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:prstGeom prst="rect"/></wps:spPr><wps:txbx><w:txbxContent>{paragraph}</w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>"#
+        );
+        let vml = format!(
+            r#"<w:p><w:r><w:pict xmlns:v="urn:schemas-microsoft-com:vml"><v:shape id="VML" style="position:absolute;width:216pt;height:108pt"><v:textbox><w:txbxContent>{paragraph}</w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p>"#
+        );
+        fixture::Package::new(&format!(r#"{drawing}{vml}<w:sectPr><w:headerReference w:type="default" r:id="rHeader"/></w:sectPr>"#))
+            .styles(r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:sz w:val="22"/></w:rPr></w:rPrDefault></w:docDefaults><w:style w:type="paragraph" w:styleId="Box"><w:rPr><w:rFonts w:ascii="Courier New" w:hAnsi="Courier New"/><w:sz w:val="30"/></w:rPr></w:style><w:style w:type="character" w:styleId="Accent"><w:rPr><w:b/></w:rPr></w:style></w:styles>"#)
+            .part("header1.xml", "rHeader", "header", "header",
+                &format!("<w:hdr {}>{drawing}{vml}</w:hdr>", fixture::NS)).bytes()
+    }
+
+    fn payloads(doc: &EditingDoc) -> Vec<(String, String)> {
+        let mut result = Vec::new();
+        for story in doc.list_stories().stories {
+            for segment in doc.story_segments(&story.story).unwrap() {
+                if let crate::SegmentContent::OtherEmbed { payload, .. } = segment.content {
+                    for key in ["shapeJson", "textBoxJson"] {
+                        if let Some(Any::String(value)) = payload.get(key) {
+                            result.push((key.to_owned(), value.to_string()));
+                        }
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    fn source_payloads(value: &Value, source: &BTreeMap<String, String>, output: &mut Vec<String>) {
+        match value {
+            Value::Array(values) => {
+                for value in values {
+                    source_payloads(value, source, output);
+                }
+            }
+            Value::Object(values) => {
+                if value.get("type").and_then(Value::as_str) == Some("shape") {
+                    output.push(source_json(value, source));
+                }
+                for (key, value) in values {
+                    if matches!(key.as_str(), "shape" | "textBox") && value.is_object() {
+                        output.push(source_json(value, source));
+                    }
+                    source_payloads(value, source, output);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn save_authored_shapes(doc: &EditingDoc, bytes: &[u8]) -> Vec<u8> {
+        fn replace(value: &mut Value, shapes: &mut std::collections::VecDeque<Value>) {
+            match value {
+                Value::Array(values) => {
+                    for value in values {
+                        replace(value, shapes);
+                    }
+                }
+                Value::Object(values) => {
+                    if values.get("type").and_then(Value::as_str) == Some("shape")
+                        && values.contains_key("shape")
+                    {
+                        values.insert("shape".to_owned(), shapes.pop_front().unwrap());
+                        return;
+                    }
+                    for child in values.values_mut() {
+                        replace(child, shapes);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut package =
+            serde_json::to_value(parse_docx_for_edit(bytes).unwrap().document.package).unwrap();
+        let mut shapes = payloads(doc)
+            .into_iter()
+            .filter(|(key, _)| key == "shapeJson")
+            .map(|(_, json)| serde_json::from_str(&json).unwrap())
+            .collect();
+        replace(&mut package, &mut shapes);
+        assert!(shapes.is_empty());
+        let request = serde_json::from_value(json!({
+            "determinism": {"seed": package_digest(bytes), "now": "2030-01-02T03:04:05.006Z"},
+            "document": {
+                "content": package["document"]["content"],
+                "finalSectionProperties": package["document"]["finalSectionProperties"],
+                "comments": package["document"]["comments"],
+            },
+            "headerEntries": package["headerEntries"],
+            "relationshipEntries": package["relationshipEntries"],
+            "selective": {"changedParaIds": []}, "options": {"updateModifiedDate": false}
+        }))
+        .unwrap();
+        docx_parse::write_docx_s13(request, bytes).unwrap()
+    }
+
+    #[test]
+    fn native_seed_keeps_source_writer_payloads_and_parsed_seed_has_no_resolver() {
+        let bytes = package();
+        let envelope = parse_docx_for_edit(&bytes).unwrap();
+        let parsed = serde_json::to_value(&envelope).unwrap();
+        let lowered = lower_docx(envelope, None).unwrap();
+        let mut expected = Vec::new();
+        source_payloads(&parsed, &lowered.context.source_json, &mut expected);
+        let native = EditingDoc::new(75370);
+        seed_from_docx_with_generation(&native, &bytes, "boxes").unwrap();
+        assert!(native.shape_style_resolver().is_some());
+        let actual = payloads(&native);
+        assert!(actual.len() >= 4);
+        for (_, value) in &actual {
+            assert!(
+                expected.contains(value),
+                "payload differs from source_json: {value}"
+            );
+        }
+        let parsed = EditingDoc::new(75371);
+        seed_parsed_docx_with(&parsed, parse_docx_for_edit(&bytes).unwrap(), None).unwrap();
+        assert!(parsed.shape_style_resolver().is_none());
+        assert_eq!(payloads(&parsed), actual);
+        let saved = save_authored_shapes(&native, &bytes);
+        assert_eq!(save_authored_shapes(&parsed, &bytes), saved);
+        let cold = EditingDoc::new(75372);
+        cold.apply_update_v1(&parsed.encode_state_as_update_v1())
+            .unwrap();
+        assert!(cold.shape_style_resolver().is_none());
+        let env = crate::bridge::RenderEnv::default();
+        assert_eq!(
+            crate::bridge::yrs_doc_to_layout_blocks(&cold, "body", &env).unwrap(),
+            crate::bridge::yrs_doc_to_layout_blocks(&parsed, "body", &env).unwrap()
+        );
+        assert_ne!(
+            crate::bridge::yrs_doc_to_layout_blocks(&native, "body", &env).unwrap(),
+            crate::bridge::yrs_doc_to_layout_blocks(&cold, "body", &env).unwrap()
+        );
+    }
+
+    #[test]
+    fn legacy_payload_writer_keeps_the_exact_source_json() {
+        let text_box = json!({"content": [{"type": "paragraph", "formatting": {"styleId": "Box"},
+            "content": [{"type": "run", "formatting": {"styleId": "Accent"},
+                "content": [{"type": "text", "text": "Legacy"}]}]}], "width": 914400});
+        let wire = format!("{{\"width\":914400,\"content\":{}}}", text_box["content"]);
+        let source = BTreeMap::from([(serde_json::to_string(&text_box).unwrap(), wire.clone())]);
+        let content = json!({"type": "opaqueDrawing", "kind": "pict", "xml": "<w:pict/>", "textBox": text_box});
+        let units = run_content_to_units(&content, &[], &source);
+        let UnitContent::Embed { payload, .. } = &units[0].content else {
+            panic!("legacy embed")
+        };
+        assert_eq!(payload["textBoxJson"], source_json(&text_box, &source));
+        assert_eq!(payload["textBoxJson"], wire);
+        let doc = EditingDoc::new(75376);
+        let styles = crate::shape_styles::for_package(&content, &StyleResolver::default()).unwrap();
+        crate::shape_styles::seed(&doc, &styles);
+        assert_eq!(payload["textBoxJson"], wire);
+        assert!(doc.shape_style_resolver().is_some());
+    }
+
+    #[test]
+    fn no_text_boxes_seed_the_same_bytes_as_without_style_seeding() {
+        let bytes = fixture::Package::new("<w:p><w:r><w:t>Body</w:t></w:r></w:p>").bytes();
+        let with = EditingDoc::new(75373);
+        let without = EditingDoc::new(75373);
+        for (doc, enabled) in [(&with, true), (&without, false)] {
+            seed_lowered(
+                doc,
+                lower_docx(parse_docx_for_edit(&bytes).unwrap(), None).unwrap(),
+                None,
+                SeedMedia::AsParsed,
+                enabled,
+            )
+            .unwrap();
+        }
+        let txn = with.yrs_doc().transact();
+        assert_eq!(
+            txn.get_map(crate::shape_styles::SHAPE_STYLES)
+                .unwrap()
+                .len(&txn),
+            0
+        );
+        assert_eq!(
+            with.encode_state_as_update_v1(),
+            without.encode_state_as_update_v1()
+        );
+    }
+
+    #[test]
+    fn shared_bootstrap_and_removed_styles_keep_authored_state_and_saved_bytes() {
+        let bytes = package();
+        let source = EditingDoc::new(75374);
+        seed_from_docx_with_generation(&source, &bytes, "boxes").unwrap();
+        let repeat = EditingDoc::new(75374);
+        seed_from_docx_with_generation(&repeat, &bytes, "boxes").unwrap();
+        assert_eq!(
+            source.encode_state_as_update_v1(),
+            repeat.encode_state_as_update_v1()
+        );
+        let peer = EditingDoc::new(75375);
+        let state = source.encode_state_as_update_v1();
+        let prepared = peer
+            .prepare_peer_bootstrap(
+                &state,
+                &source.encode_peer_metadata().unwrap(),
+                Some(PackageBytes::from(bytes.as_slice())),
+            )
+            .unwrap();
+        peer.install_peer_bootstrap(prepared, 0).unwrap();
+        peer.load_state_v1(&state).unwrap();
+        assert!(peer.shape_style_resolver().is_some());
+        assert_eq!(payloads(&peer), payloads(&source));
+        let before: Vec<_> = source
+            .list_stories()
+            .stories
+            .into_iter()
+            .map(|story| {
+                let canonical = crate::project_story(&source, &story.story).unwrap();
+                let checksum = crate::story_checksum(&source, &story.story).unwrap();
+                (story.story, canonical, checksum)
+            })
+            .collect();
+        let parsed = EditingDoc::new(75380);
+        seed_parsed_docx_with(&parsed, parse_docx_for_edit(&bytes).unwrap(), None).unwrap();
+        let saved = save_authored_shapes(&source, &bytes);
+        assert_eq!(save_authored_shapes(&parsed, &bytes), saved);
+        assert_eq!(save_authored_shapes(&peer, &bytes), saved);
+        {
+            let mut txn = source.yrs_doc().transact_mut();
+            txn.get_map(crate::shape_styles::SHAPE_STYLES)
+                .unwrap()
+                .remove(&mut txn, "resolver");
+        }
+        assert!(source.shape_style_resolver().is_none());
+        for (story, canonical, checksum) in before {
+            assert_eq!(crate::project_story(&source, &story).unwrap(), canonical);
+            assert_eq!(crate::story_checksum(&source, &story).unwrap(), checksum);
+        }
+        assert_eq!(payloads(&source), payloads(&peer));
+        assert_eq!(save_authored_shapes(&source, &bytes), saved);
+        let without = EditingDoc::new(75377);
+        let state = source.encode_state_as_update_v1();
+        let prepared = without
+            .prepare_peer_bootstrap(
+                &state,
+                &source.encode_peer_metadata().unwrap(),
+                Some(PackageBytes::from(bytes.as_slice())),
+            )
+            .unwrap();
+        without.install_peer_bootstrap(prepared, 0).unwrap();
+        without.load_state_v1(&state).unwrap();
+        assert!(without.shape_style_resolver().is_none());
+        assert_eq!(save_authored_shapes(&without, &bytes), saved);
+        let env = crate::bridge::RenderEnv::default();
+        assert_eq!(
+            crate::bridge::yrs_doc_to_layout_blocks(&without, "body", &env).unwrap(),
+            crate::bridge::yrs_doc_to_layout_blocks(&source, "body", &env).unwrap()
+        );
+    }
+
+    #[test]
+    fn native_open_captures_the_seed_baseline_after_styles_and_map_edits_preserve_saved_bytes() {
+        let bytes = package();
+        let session =
+            crate::session::EditSessionCore::new(75381, crate::session::Host::deterministic());
+        session
+            .open_docx_retaining(&bytes, true, None, None)
+            .unwrap();
+        let doc = session.engine.doc();
+        assert!(doc.shape_style_resolver().is_some());
+        assert!(doc.unchanged_since_seeded());
+        let saved = save_authored_shapes(doc, &bytes);
+        let mut styles =
+            serde_json::to_value(doc.shape_style_resolver().unwrap().as_ref()).unwrap();
+        styles["doc_defaults"]["rPr"]["fontSize"] = json!(44);
+        {
+            let mut txn = doc.yrs_doc().transact_mut();
+            txn.get_map(crate::shape_styles::SHAPE_STYLES)
+                .unwrap()
+                .insert(&mut txn, "resolver", styles.to_string());
+        }
+        assert!(!doc.unchanged_since_seeded());
+        assert_eq!(save_authored_shapes(doc, &bytes), saved);
+        {
+            let mut txn = doc.yrs_doc().transact_mut();
+            txn.get_map(crate::shape_styles::SHAPE_STYLES)
+                .unwrap()
+                .remove(&mut txn, "resolver");
+        }
+        assert_eq!(save_authored_shapes(doc, &bytes), saved);
+    }
+
+    fn with_different_styles(bytes: &[u8]) -> Vec<u8> {
+        let mut parts = ooxml_opc::unzip_parts(bytes).unwrap();
+        for (name, bytes) in &mut parts {
+            if name == "word/styles.xml" {
+                *bytes = String::from_utf8(bytes.clone())
+                    .unwrap()
+                    .replace("Courier New", "Verdana")
+                    .replace("w:val=\"30\"", "w:val=\"42\"")
+                    .into_bytes();
+            }
+        }
+        ooxml_opc::rezip_parts(&parts).unwrap()
+    }
+
+    #[test]
+    fn reopening_preserves_shared_styles_with_different_styles_or_without_boxes() {
+        let a = package();
+        let b = with_different_styles(&a);
+        let no_boxes =
+            fixture::Package::new("<w:p><w:r><w:t>Direct body</w:t></w:r></w:p>").bytes();
+        let session =
+            crate::session::EditSessionCore::new(75383, crate::session::Host::deterministic());
+        session
+            .open_docx_retaining(&a, true, Some("shape-reopen"), None)
+            .unwrap();
+        let doc = session.engine.doc();
+        let state = doc.encode_state_as_update_v1();
+        let env = crate::bridge::RenderEnv::default();
+        let lowering: Vec<_> = doc
+            .list_stories()
+            .stories
+            .into_iter()
+            .map(|story| {
+                let blocks =
+                    crate::bridge::yrs_doc_to_layout_blocks(doc, &story.story, &env).unwrap();
+                (story.story, blocks)
+            })
+            .collect();
+        for bytes in [&b, &no_boxes] {
+            session
+                .open_docx_retaining(bytes, false, Some("shape-reopen"), None)
+                .unwrap();
+            assert_eq!(doc.encode_state_as_update_v1(), state);
+            for (story, blocks) in &lowering {
+                assert_eq!(
+                    &crate::bridge::yrs_doc_to_layout_blocks(doc, story, &env).unwrap(),
+                    blocks
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn source_attachment_order_preserves_shared_styles_for_matching_and_different_packages() {
+        let a = package();
+        let b = with_different_styles(&a);
+        let seeded = EditingDoc::new(75382);
+        seed_from_docx(&seeded, &a).unwrap();
+        let state = seeded.encode_state_as_update_v1();
+        let env = crate::bridge::RenderEnv::default();
+        let different = EditingDoc::new(75384);
+        seed_from_docx(&different, &b).unwrap();
+        assert_ne!(
+            crate::bridge::yrs_doc_to_layout_blocks(&seeded, "body", &env).unwrap(),
+            crate::bridge::yrs_doc_to_layout_blocks(&different, "body", &env).unwrap()
+        );
+        for bytes in [&a, &b] {
+            let source_first =
+                crate::session::EditSessionCore::new(75387, crate::session::Host::deterministic());
+            source_first
+                .open_docx_retaining(bytes, false, None, None)
+                .unwrap();
+            source_first.load(&state).unwrap();
+            let state_first =
+                crate::session::EditSessionCore::new(75388, crate::session::Host::deterministic());
+            state_first.load(&state).unwrap();
+            state_first
+                .open_docx_retaining(bytes, false, None, None)
+                .unwrap();
+            assert_eq!(source_first.engine.doc().encode_state_as_update_v1(), state);
+            assert_eq!(
+                source_first.engine.doc().encode_state_as_update_v1(),
+                state_first.engine.doc().encode_state_as_update_v1()
+            );
+            for story in seeded.list_stories().stories {
+                let expected =
+                    crate::bridge::yrs_doc_to_layout_blocks(&seeded, &story.story, &env).unwrap();
+                assert_eq!(
+                    crate::bridge::yrs_doc_to_layout_blocks(
+                        source_first.engine.doc(),
+                        &story.story,
+                        &env
+                    )
+                    .unwrap(),
+                    expected
+                );
+                assert_eq!(
+                    crate::bridge::yrs_doc_to_layout_blocks(
+                        state_first.engine.doc(),
+                        &story.story,
+                        &env
+                    )
+                    .unwrap(),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_and_oversized_shared_entries_render_like_the_missing_entry() {
+        let doc = EditingDoc::new(75385);
+        seed_from_docx(&doc, &package()).unwrap();
+        let styles = serde_json::to_string(doc.shape_style_resolver().unwrap().as_ref()).unwrap();
+        {
+            let mut txn = doc.yrs_doc().transact_mut();
+            txn.get_map(crate::shape_styles::SHAPE_STYLES)
+                .unwrap()
+                .remove(&mut txn, "resolver");
+        }
+        let env = crate::bridge::RenderEnv::default();
+        let direct = crate::bridge::yrs_doc_to_layout_blocks(&doc, "body", &env).unwrap();
+        for json in [
+            "{".to_owned(),
+            "{}".to_owned(),
+            format!(
+                "{}{}",
+                " ".repeat(docx_parse::ParseLimits::default().max_attribute_bytes),
+                styles
+            ),
+        ] {
+            {
+                let mut txn = doc.yrs_doc().transact_mut();
+                txn.get_map(crate::shape_styles::SHAPE_STYLES)
+                    .unwrap()
+                    .insert(&mut txn, "resolver", json);
+            }
+            assert!(doc.shape_style_resolver().is_none());
+            assert_eq!(
+                crate::bridge::yrs_doc_to_layout_blocks(&doc, "body", &env).unwrap(),
+                direct
+            );
+        }
     }
 }

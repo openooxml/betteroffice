@@ -70,7 +70,7 @@ let fontId = -1;
 beforeAll(async () => {
   await preloadLayoutWasm();
   fontId = registerMeasureFont(new Uint8Array(readFileSync(FONT)));
-});
+}, 30_000);
 
 function textRun(
   text: string,
@@ -495,6 +495,118 @@ describe('Canvas text-run slot clipping', () => {
 });
 
 describe('Canvas substitute widths', () => {
+  it('suppresses optional ligatures for text and glyph fallback and restores canvas state', async () => {
+    const fontFeatures = undefined;
+    for (const path of ['text', 'glyphRun', 'modernEffects'] as const) {
+      const { ctx } = recordingContext(new Map());
+      let rendering = 'auto';
+      let kerning = 'auto';
+      const states: Array<[string, string]> = [];
+      const stack: Array<[string, string]> = [];
+      Object.defineProperty(ctx, 'textRendering', { get: () => rendering, set: value => { rendering = value; } });
+      Object.defineProperty(ctx, 'fontKerning', { get: () => kerning, set: value => { kerning = value; } });
+      const save = ctx.save.bind(ctx);
+      const restore = ctx.restore.bind(ctx);
+      ctx.save = () => { stack.push([rendering, kerning]); save(); };
+      ctx.restore = () => { [rendering, kerning] = stack.pop()!; restore(); };
+      ctx.fillText = () => { states.push([rendering, kerning]); };
+      const run: TextRunPrimitive | GlyphRunPrimitive = path !== 'glyphRun'
+        ? { ...textRun('fi ti', 0, 30, 'Calibri'), fontFeatures,
+            modernEffects: path === 'modernEffects' ? {} : undefined }
+        : { kind: 'glyphRun', fontId: 0, size: 16, color: '#000000', text: 'fi ti', fontFeatures,
+            glyphs: [{ id: 1, x: 0, y: 20, cluster: 0 }] };
+      await drawPrimitive(ctx, run);
+      expect(states).toEqual([['optimizeSpeed', 'none']]);
+      expect(rendering).toBe('auto');
+      expect(kerning).toBe('auto');
+      run.text = 'العربية';
+      await drawPrimitive(ctx, run);
+      expect(states.at(-1)).toEqual(['auto', 'none']);
+      run.text = 'fi ti';
+      run.fontFeatures = ['kern', 'liga', 'clig'];
+      await drawPrimitive(ctx, run);
+      expect(states.at(-1)).toEqual(['auto', 'normal']);
+      run.fontFeatures = ['calt'];
+      await drawPrimitive(ctx, run);
+      expect(states.at(-1)).toEqual(['auto', 'none']);
+    }
+  });
+
+  it('keeps requested kerning when optimizeSpeed would disable it', async () => {
+    for (const preservesKerning of [false, true]) {
+      const { ctx } = recordingContext(new Map());
+      let rendering = 'auto';
+      let kerning = 'auto';
+      const stack: Array<[string, string]> = [];
+      Object.defineProperty(ctx, 'textRendering', { get: () => rendering, set: value => { rendering = value; } });
+      Object.defineProperty(ctx, 'fontKerning', { get: () => kerning, set: value => { kerning = value; } });
+      ctx.save = () => { stack.push([rendering, kerning]); };
+      ctx.restore = () => { [rendering, kerning] = stack.pop()!; };
+      ctx.measureText = () => ({
+        width: kerning === 'normal' && (rendering !== 'optimizeSpeed' || preservesKerning) ? 18 : 20,
+      }) as TextMetrics;
+      const states: Array<[string, string]> = [];
+      ctx.fillText = () => { states.push([rendering, kerning]); };
+      const run = { ...textRun('AV fi', 0, 40, 'Calibri'),
+        fontFeatures: ['kern'] };
+      await drawPrimitive(ctx, run);
+      expect(states).toEqual([[preservesKerning ? 'optimizeSpeed' : 'auto', 'normal']]);
+      expect([rendering, kerning]).toEqual(['auto', 'auto']);
+    }
+  });
+
+  it('sets kerning even when textRendering is unavailable', async () => {
+    const { ctx } = recordingContext(new Map());
+    Object.defineProperty(ctx, 'fontKerning', { value: 'auto', writable: true });
+    const states: string[] = [];
+    ctx.fillText = () => { states.push(ctx.fontKerning); };
+    for (const kern of [false, true]) {
+      await drawPrimitive(ctx, { ...textRun('AV', 0, 30, 'Calibri'),
+        fontFeatures: kern ? ['kern'] : undefined });
+    }
+    expect(states).toEqual(['none', 'normal']);
+  });
+  it('paints the glyph run stand-in when glyph outlines are unavailable', async () => {
+    const { ctx } = recordingContext(new Map([['co-op', { width: 40, ascent: 12, descent: 4 }]]));
+    const fillText = spyOn(ctx, 'fillText');
+    const run: GlyphRunPrimitive = {
+      kind: 'glyphRun',
+      fontId: 1,
+      size: 16,
+      color: '#000000',
+      text: 'co\u2011op',
+      paintText: 'co-op',
+      fallbackFont: '16px Calibri',
+      glyphs: [{ id: 1, x: 10, y: 20, cluster: 0 }],
+    };
+
+    await drawPrimitive(ctx, run);
+
+    expect(fillText).toHaveBeenCalledWith('co-op', 10, 20);
+    expect(run.text).toBe('co\u2011op');
+  });
+
+  it('paints the supplied hyphen stand-in while preserving source text', async () => {
+    for (const allCaps of [false, true]) {
+      const painted = allCaps ? 'CO-OP' : 'co-op';
+      const { ctx } = recordingContext(
+        new Map([[painted, { width: 40, ascent: 12, descent: 4 }]])
+      );
+      const fillText = spyOn(ctx, 'fillText');
+      const run = {
+        ...textRun('co\u2011op', 40, 40, 'Calibri'),
+        paintText: 'co-op',
+        allCaps,
+      };
+
+      await drawPrimitive(ctx, run);
+
+      expect(fillText).toHaveBeenCalledWith(painted, run.x, run.baselineY);
+      expect(run.text).toBe('co\u2011op');
+      expect(run.paintText.length).toBe(run.text.length);
+    }
+  });
+
   it('paints corrected Japanese cluster positions without scaling CJK outlines', async () => {
     const text = '1111111111中あア';
     for (const effects of [{ allCaps: true }, { textShadow: 'shadow' as const }]) {

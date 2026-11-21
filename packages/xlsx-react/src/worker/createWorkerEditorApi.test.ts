@@ -25,7 +25,7 @@ function harness(ready = true) {
   const hydration = deferred<void>();
   const state = {
     current: true, ready, failure: null as Error | null, generation: 1,
-    readOnly: false, preview: Promise.resolve(), value: 'initial',
+    readOnly: false, allowHostProposals: false, preview: Promise.resolve(), value: 'initial',
   };
   if (ready) hydration.resolve();
   const result: EditResult = {
@@ -62,6 +62,7 @@ function harness(ready = true) {
   const flush = mock(async () => { log.push('flush'); });
   const editMethods = {
     state: 'ready' as const,
+    propose: mock(() => ({ id: 'p1', agentId: 'host', note: null, cells: [] })),
     editCell: mock((_sheet: number, _row: number, _col: number, input: string) => {
       state.value = input;
       log.push(`edit:${input}`);
@@ -96,6 +97,7 @@ function harness(ready = true) {
   });
   const bridge: WorkerEditorApiBridge = {
     coordinator: () => coordinator, readOnly: () => state.readOnly,
+    allowHostProposals: () => state.allowHostProposals,
     clearSelection: mock(() => {}), focus: mock(() => {}), refreshProposals: mock(() => {}),
     recoverInput: mock(async () => { log.push('recover-input'); }),
     selectCells: mock(() => true), selectCellsAsync: mock(async () => true),
@@ -108,6 +110,24 @@ function harness(ready = true) {
 }
 
 describe('worker editor API', () => {
+  for (const allowed of [false, true]) {
+    test(`read-only legacy worker host proposals require opt-in: ${allowed}`, async () => {
+      const h = harness();
+      h.state.readOnly = true;
+      h.state.allowHostProposals = allowed;
+      const result = await h.api.proposeChanges!({ agentId: 'host', edits: [] });
+      if (allowed) {
+        expect(result).toMatchObject({ ok: true, proposal: { id: 'p1' } });
+        expect(h.edits.propose).toHaveBeenCalledTimes(1);
+        expect(h.bridge.refreshProposals).toHaveBeenCalledTimes(1);
+      } else {
+        expect(result).toMatchObject({ ok: false, failure: { code: 'read-only' } });
+        expect(h.edits.propose).not.toHaveBeenCalled();
+      }
+      expect(h.edits.editCell).not.toHaveBeenCalled();
+    });
+  }
+
   test('keeps the raw handle absent and synchronous reads nullable before hydration', () => {
     const { api, peer, session } = harness(false);
     expect(api.handle).toBeNull();

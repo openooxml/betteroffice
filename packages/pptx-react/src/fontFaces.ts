@@ -1,4 +1,5 @@
 import type { PptxFontFace } from '@betteroffice/pptx';
+import type { PptxPaintFont } from '../../../shared/office-session/render/pptxWorkerRender';
 import { useMemo, useRef } from 'react';
 
 export const FONT_FALLBACK_MESSAGE = 'Font faces failed to load; text uses fallback fonts.';
@@ -18,6 +19,7 @@ export function useFontWarning(session: unknown): () => void {
 
 export async function installFonts(
   fonts: readonly PptxFontFace[], installed: FontFace[], current: () => boolean, report: () => void = warnFontFallback,
+  installedForPaint?: (face: PptxPaintFont) => void,
 ): Promise<void> {
   if (!fonts.length) return;
   if (typeof FontFace === 'undefined') return;
@@ -38,8 +40,9 @@ export async function installFonts(
     let failure: unknown;
     for (const { font, weight, style } of candidates) {
       let face: FontFace;
+      const source = font.bytes.slice().buffer as ArrayBuffer;
       try {
-        face = await new FontFace(font.family, font.bytes.slice().buffer as ArrayBuffer, { style, weight }).load();
+        face = await new FontFace(font.family, source, { style, weight }).load();
       } catch (error) {
         failure = error;
         continue;
@@ -47,6 +50,7 @@ export async function installFonts(
       if (!current()) return;
       document.fonts.add(face);
       installed.push(face);
+      installedForPaint?.({ family: font.family, source, descriptors: { style, weight } });
       return;
     }
     throw failure;

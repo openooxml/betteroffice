@@ -17,6 +17,9 @@ import {
 } from '../../index';
 import { createDocxCommandController } from '../../commands/createDocxCommandStore';
 import { testBinding } from '../../commands/testing';
+import { loadMenuList } from '../../../../../shared/react-toolbar/menuListLoader';
+
+await loadMenuList();
 
 const { act, cleanup, fireEvent, render, within } = await import('@testing-library/react');
 
@@ -633,7 +636,9 @@ describe('overflow coverage', () => {
     expect(labels(find(tree, ['Font size'])).at(-1)).toBe('Custom size…');
     expect(labels(find(tree, ['Zoom level']))).toEqual(['50%', '75%', '90%', '100%', '125%', '150%', '200%']);
     expect(labels(find(tree, ['Alignment']))).toHaveLength(4);
-    expect(labels(find(tree, ['Line spacing']))).toHaveLength(4);
+    expect(labels(find(tree, ['Line spacing'])).filter(Boolean).slice(4)).toEqual([
+      'Add Space Before Paragraph', 'Add Space After Paragraph', 'Line Spacing Options...']);
+    expect(labels(find(tree, ['Line spacing'])).filter(Boolean)).toHaveLength(7);
     expect(labels(find(tree, ['Text wrapping']))).toHaveLength(6);
     expect(labels(find(tree, ['Transform']))).toHaveLength(4);
     expect(labels(find(tree, ['Editing mode']))).toHaveLength(3);

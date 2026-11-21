@@ -3,7 +3,6 @@ import { DocxEditor, type DocxEditorRef, type DocxErrorInfo, type TrackedChanges
 import { XlsxEditor, type XlsxAsyncEditorApi } from "@betteroffice/xlsx-react";
 import { PptxEditor, type PptxAsyncEditorApi } from "@betteroffice/pptx-react";
 import { configureDefaultFonts } from "@betteroffice/docx/layout";
-import { setGoogleFontsEnabled } from "@betteroffice/docx/utils";
 import { CollaborationProvider as DocxProvider, type AsyncReplicaAdapter } from "@betteroffice/docx/collaboration";
 import { CollaborationProvider as XlsxProvider } from "@betteroffice/xlsx/collaboration";
 import { CollaborationProvider as PptxProvider, type AsyncCollaborationReplica } from "@betteroffice/pptx/collaboration";
@@ -48,12 +47,21 @@ export interface EditorTranslations {
 }
 
 configureDefaultFonts({ load: () => import("@betteroffice/fonts") });
-setGoogleFontsEnabled(false);
 
 export function legacyDocx() {
   if (typeof location === "undefined") return false;
   const query = new URLSearchParams(location.search);
   return query.get("peerless") === "0";
+}
+
+function pageMirror(): "text" | undefined {
+  if (typeof location === "undefined") return undefined;
+  return new URLSearchParams(location.search).get("pageMirror") === "text" ? "text" : undefined;
+}
+
+function rulerUnit(): "inch" | "cm" {
+  if (typeof location === "undefined") return "inch";
+  return new URLSearchParams(location.search).get("rulerUnit") === "cm" ? "cm" : "inch";
 }
 
 function trackedChanges(): TrackedChangesOptions | undefined {
@@ -177,6 +185,7 @@ export interface EditorProps {
   onSave(bytes: Uint8Array): void;
   onSaveRequest?: () => boolean | void | Promise<boolean | void>;
   downloadOnSave?: boolean;
+  remoteFonts?: ComponentProps<typeof XlsxEditor>["remoteFonts"];
   onChange(): void;
   onLocalUpdate?(): void;
   onError(error: Error): void;
@@ -218,6 +227,7 @@ export default function Editor({
   onSave,
   onSaveRequest,
   downloadOnSave,
+  remoteFonts,
   onChange,
   onLocalUpdate,
   onError,
@@ -474,6 +484,7 @@ export default function Editor({
         i18n={i18n?.docx}
         ref={docx}
         {...(legacyDocx() ? { legacySyncApi: true as const } : { legacySyncApi: false as const })}
+        unbuiltPageMirror={typeof location !== "undefined" && new URLSearchParams(location.search).get("unbuiltPageMirror") === "off" ? "off" : undefined}
         trackedChanges={TRACKED_CHANGES}
         mode={mode}
         readOnly={readOnly}
@@ -490,6 +501,8 @@ export default function Editor({
         onOpen={onOpen}
         showToolbar
         showRuler
+        rulerUnit={rulerUnit()}
+        pageMirror={pageMirror()}
         showZoomControl
         colorMode={colorMode()}
         onPrint={() => undefined}
@@ -515,6 +528,7 @@ export default function Editor({
         fileName={name}
         {...(onSaveRequest ? { onSaveRequest: requestSave } : {})}
         {...(downloadOnSave !== undefined ? { downloadOnSave } : {})}
+        {...(remoteFonts !== undefined ? { remoteFonts } : {})}
         onSave={(bytes) => {
           if (serialization.current) serialization.current.bytes = bytes;
           else saveBytes(bytes);

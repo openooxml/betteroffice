@@ -159,6 +159,51 @@ describe('host-composed toolbar', () => {
     ]);
   });
 
+  test('dispatches clear formatting for the platform at keydown and leaves Mac system chords alone', async () => {
+    const originalPlatform = Object.getOwnPropertyDescriptor(navigator, 'platform');
+    try {
+      Object.defineProperty(navigator, 'platform', { configurable: true, value: 'Linux x86_64' });
+      const { harness, controller } = editor();
+      render(
+        <DocxCommandProvider commands={controller.store}>
+          <Shortcuts controller={controller} />
+          <EditorToolbar>
+            <EditorToolbar.Toolbar>
+              <ToolbarCommandButton id="clearFormatting" />
+            </EditorToolbar.Toolbar>
+          </EditorToolbar>
+        </DocxCommandProvider>
+      );
+      const clear = screen().getByRole('button', { name: 'Clear formatting' });
+      expect(controller.store.getDescriptor('clearFormatting').shortcuts).toEqual([
+        { chord: 'Mod+Space', args: null, platform: 'other' },
+      ]);
+      expect(fireEvent.keyDown(clear, { key: ' ', code: 'Space', ctrlKey: true })).toBe(false);
+      expect(fireEvent.keyDown(clear, { key: '\\', code: 'Backslash', ctrlKey: true })).toBe(true);
+      expect(fireEvent.keyDown(clear, { key: '\\', code: 'Backslash', metaKey: true })).toBe(true);
+      await act(async () => {});
+      expect(harness.calls.map((call) => call.id)).toEqual(['clearFormatting']);
+
+      Object.defineProperty(navigator, 'platform', { configurable: true, value: 'MacIntel' });
+      expect(controller.store.getDescriptor('clearFormatting').shortcuts).toEqual([
+        { chord: 'Mod+\\', args: null, platform: 'mac' },
+      ]);
+      expect(fireEvent.keyDown(clear, { key: ' ', code: 'Space', ctrlKey: true })).toBe(true);
+      expect(fireEvent.keyDown(clear, { key: ' ', code: 'Space', metaKey: true })).toBe(true);
+      await act(async () => {});
+      expect(harness.calls.map((call) => call.id)).toEqual(['clearFormatting']);
+      expect(fireEvent.keyDown(clear, { key: '\\', code: 'Backslash', metaKey: true })).toBe(false);
+      await act(async () => {});
+      expect(harness.calls).toEqual([
+        { id: 'clearFormatting', args: null, ordered: true },
+        { id: 'clearFormatting', args: null, ordered: true },
+      ]);
+    } finally {
+      if (originalPlatform) Object.defineProperty(navigator, 'platform', originalPlatform);
+      else Reflect.deleteProperty(navigator, 'platform');
+    }
+  });
+
   test('keeps two editors isolated', async () => {
     const first = editor();
     const second = editor();

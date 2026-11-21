@@ -10,14 +10,14 @@ import {
   displayPositionToYrsLoc,
   type YrsSession,
 } from '@betteroffice/docx/yrs';
-import { DocxCommandAdmissionError } from '../../../commands/createDocxCommandStore';
+import { DocxCommandAdmissionError, docxCommandController } from '../../../commands/createDocxCommandStore';
 import type { DocxCommandResult } from '../../../commands/types';
 import type { PagedEditorRef } from '../PagedEditor';
 import { createYrsPositionProjection } from '../internals/yrsPositionProjection';
 import type { YrsInputRef } from '../YrsInput';
 import * as workerOpenReplica from '../internals/workerOpenReplica';
 import { awaitWorkerOpenReplica, deferWorkerOpenReplica, holdWorkerOpenDocument, workerOpenReplicaPending, workerOpenReplicaStarted } from '../internals/workerOpenReplica';
-import { currentYrsToolbarSelection } from '../yrsToolbar';
+import { applyYrsToolbarFormatting, currentYrsToolbarSelection } from '../yrsToolbar';
 import {
   useDocxCommandBinding,
   type DocxCommandInputs,
@@ -160,6 +160,7 @@ function mount(initial: YrsSession, overrides: Partial<DocxCommandInputs> = {}) 
     tableAction: () => false,
     openImageProperties: noop,
     openPageSetup: noop,
+    openParagraphSpacing: () => opened.push('paragraphSpacingDialog'),
     openWatermark: noop,
     refreshTrackedChanges: noop,
     ...overrides,
@@ -177,6 +178,7 @@ function mount(initial: YrsSession, overrides: Partial<DocxCommandInputs> = {}) 
     hook,
     bridge,
     opened,
+    paged: editor as unknown as Record<string, unknown>,
     get store() {
       return hook.result.current.commands.controller.store;
     },
@@ -211,6 +213,72 @@ function heldReplica(
 }
 
 describe('editor command binding', () => {
+  test('paragraphSpacing executes through the toolbar adapter and exposes the changed spacing', async () => {
+    const { session } = await newSession();
+    const editor = mount(session);
+    const format = spyOn(editor.bridge, 'format').mockImplementation((action) => {
+      const map = createYrsInputPositionMap('body', session.paragraphs('body').map((paragraph) => ({
+        paraId: paragraph.paraId, length: paragraph.text.length,
+      })));
+      return applyYrsToolbarFormatting(session, map, action);
+    });
+    expect(await editor.store.execute('paragraphSpacing', { before: 240 })).toEqual({ ok: true, status: 'executed' });
+    expect(format).toHaveBeenCalledWith({ type: 'paragraphSpacing', before: 240 });
+    expect(editor.store.getState('paragraphSpacing').value).toEqual({ before: 240, after: 0 });
+  });
+
+  test('paste as plain text applies after input typed before it, which lands while the clipboard is read', async () => {
+    const { session } = await newSession();
+    const editor = mount(session);
+    const { paged } = editor;
+    const location = session.selection()!.head;
+    let landed = false;
+    const land = () => {
+      if (landed) return;
+      landed = true;
+      session.setSelection({ ...location, offset: location.offset + 1 }, { ...location, offset: location.offset + 1 });
+    };
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => { release = () => { land(); resolve(); }; });
+    paged.flushPendingInput = () => pending;
+    const pasted = mock((_text: string) => {});
+    paged.pasteContent = pasted;
+    let insideGesture = true;
+    const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { readText: async () => { expect(insideGesture).toBe(true); land(); return 'RICH'; } },
+    });
+    try {
+      const scoped = docxCommandController(editor.store)!.scoped({
+        gesture: () => insideGesture, deny: () => null, subscribe: () => () => {},
+      });
+      const result = scoped.execute('pasteAsPlainText', null);
+      expect(landed).toBe(true);
+      insideGesture = false;
+      setTimeout(release, 0);
+      expect(await result).toEqual({ ok: true, status: 'executed' });
+      expect(pasted).toHaveBeenCalledTimes(1);
+      expect(pasted.mock.calls[0]![0]).toBe('RICH');
+    } finally {
+      if (clipboard) Object.defineProperty(navigator, 'clipboard', clipboard);
+      else Reflect.deleteProperty(navigator, 'clipboard');
+    }
+  });
+
+  test('paragraph spacing dialog refuses completion after the target changes', async () => {
+    const { session } = await newSession();
+    const editor = mount(session);
+    await act(async () => { expect(await editor.store.execute('paragraphSpacingDialog', null)).toEqual({ ok: true, status: 'opened' }); });
+    expect(editor.opened).toContain('paragraphSpacingDialog');
+    const location = session.selection()!.head;
+    session.setSelection({ ...location, offset: 1 }, { ...location, offset: 1 });
+    const write = mock(() => ({ ok: true as const, status: 'executed' as const }));
+    const result = await editor.hook.result.current.commands.complete('paragraphSpacingDialog', write);
+    expect(code(result)).toBe('target-changed');
+    expect(write).not.toHaveBeenCalled();
+  });
+
   for (const readOnly of [true, false]) {
     test(`worker viewer mutations refuse ${readOnly ? 'read-only' : 'viewing-mode'} without input admission`, async () => {
       const { session } = await newSession();

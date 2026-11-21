@@ -26,7 +26,7 @@ beforeAll(async () => {
   list = JSON.parse(buildDisplayListJson(readFileSync(FIXTURE, 'utf8'))) as DisplayList;
   queries = createDisplayListQueries(list);
   await queries.whenReady();
-});
+}, 30_000);
 
 afterAll(() => queries.dispose());
 

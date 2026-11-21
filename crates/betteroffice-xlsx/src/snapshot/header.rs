@@ -87,6 +87,7 @@ impl SnapshotHeader {
             cycle_cells,
             limited_cells,
             budget_exhausted: _,
+            unevaluated_cells: _,
         } = last_calculation;
         for addresses in [changed, cycle_cells, limited_cells] {
             w.var_usize(addresses.len());
@@ -160,6 +161,7 @@ impl SnapshotHeader {
             cycle_cells: addresses()?,
             limited_cells: addresses()?,
             budget_exhausted: false,
+            unevaluated_cells: Vec::new(),
         };
         let calculation_context = r.option(|r| {
             Ok(CalculationOptions {
@@ -245,6 +247,7 @@ mod tests {
                     cell: CellRef::parse_a1("D$5").unwrap(),
                 }],
                 budget_exhausted: false,
+                unevaluated_cells: Vec::new(),
             },
             calculation_context: None,
             client_id: 123,

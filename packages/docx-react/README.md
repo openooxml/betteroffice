@@ -51,6 +51,7 @@ All props below are optional. Omit the document source to show the placeholder.
 | `showHiddenText` | `boolean` | Include hidden text in layout; defaults to `false`. |
 | `previewFirstPage` | `boolean` | Paint a display-only first page while the document opens; off by default and ignored with collaboration. |
 | `onFirstPagePainted` | `() => void` | Called once per document when its first pages paint. |
+| `onReady` | `(api: DocxEditorRef) => void` | Worker editor: called once per document after its first page has painted, on a later turn, with the api the ref exposes, and never after the editor has unmounted or the file has changed. |
 | `pageMirror` | `'full' \| 'text'` | Accessible page DOM; defaults to `'full'`. |
 | `measurementFontProvider` | `BundledFontProvider` | Override the measurement font provider for this editor. |
 | `i18n` | `Translations` | Locale overrides from `@betteroffice/docx-i18n`. |
@@ -58,7 +59,7 @@ All props below are optional. Omit the document source to show the placeholder.
 | `memoryBudget` | `DocxMemoryBudget` | Memory pressure thresholds and an optional worker allocation limit. |
 | `onMemoryPressure` | `(pressure: DocxMemoryPressure) => void` | Receive memory pressure level changes. |
 
-Deprecated: `legacySyncApi` keeps the synchronous API and is removed in 0.6.0;
+Deprecated: `legacySyncApi` keeps the synchronous API and is removed in 0.7.0;
 omit it to use the default async editor.
 
 `onChange` receives a full `Document` and works only with `legacySyncApi`. The default worker editor
@@ -130,12 +131,36 @@ Both the composition and plugin APIs can change in minor releases. For host pane
 sidebar items, lifecycle, and granted operations, see
 [host DOCX editor plugins](https://docs.betteroffice.dev/docs/javascript#host-docx-editor-plugins).
 
+Plugins read `snapshot.focused` and `snapshot.locale`, and receive
+`focus-change` and `locale-change`. Focus covers the document surface; docked panels
+and toolbar controls are outside. Locale is the canonical `i18n._lang`, defaulting to `en`.
+`geometry.viewport` is the visible document area in overlay-layer pixels;
+`viewport-change` reports scroll, resize, or zoom changes, with `null` when no layout is shown.
+
+`selection-settle` reports the current selection after a minimum quiet window of
+350 ms; engines may wait longer for input or layout. Sources are `pointer`, `touch`
+and `keyboard`; programmatic changes use `keyboard`. `snapshot.selectionSettled`
+is false while the selection changes. These experimental signals are on for installed
+plugins. `geometry.getAnchorGeometry({ kind: "selection" })` anchors to the live
+selection. Superseded retained contexts or unavailable layouts return `layout-unavailable`
+before the no-selection check, which returns `missing-target`. Mapping and display-range
+reads may be `pending`; `readAnchorGeometries` waits up to two seconds for selection
+targets, then answers `layout-unavailable`. A mixed call resolves when its slowest target
+does. Collapsed selections return a caret anchor and empty `rects`. In the read-only
+viewer, header and footer selections return `unsupported`; body selections still return geometry.
+
 ## Edit batches and paragraph anchors
 
 The ref's `readParagraphs`, `findText`, `validateEdits`, and `applyEdits` flush pending input before
 version-checked operations. See [DOCX edit batches](https://docs.betteroffice.dev/docs/javascript#edit-docx-in-version-checked-batches)
 and [paragraph anchors](https://docs.betteroffice.dev/docs/javascript#docx-paragraph-anchors)
 for target addressing, persisted identities, and refusals.
+
+Granted mutating built-in commands require `document: "write"`. A trusted `click`, `keydown`,
+or `pointerup` in the plugin's own UI, including its contributed toolbar buttons, admits
+that plugin's mutating calls until the event finishes dispatching, including the handler
+and microtasks queued before it settles, whichever of the plugin's code paths makes them.
+Another plugin's calls and calls after the window closes refuse with `unsupported-policy`.
 
 ## Structured export and content controls
 

@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 import { rezipPartsToArrayBuffer, toBytes } from '../docx/rezip/parts';
 import { applyFrameDeltaOwned, decodeFrameDelta, type RetainedFrame } from '../layout/render/frameDelta';
 import { displayPrimitiveRect } from '../layout/render/displayListGeometry';
+import { loadRustDisplayListQueryEngine } from '../layout/render/rustDisplayList';
 import { preloadEditWasm } from './wasm/index';
 import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
 import { createResidentEngineSession } from './residentEngineSession';
@@ -19,6 +20,7 @@ import type { DocxEngineWorkerResponse } from './residentEngineWorkerProtocol';
 import type { DocxReviewTarget } from './residentReview';
 import type { YrsContentControlValue } from './index';
 import type { SectionProperties } from '../types/document';
+import type { TextWatermark } from '../types/content/watermark';
 import type { LayoutBlock } from '../layout/pagination/types';
 
 const TIMEOUT = 20_000;
@@ -40,7 +42,7 @@ beforeAll(async () => {
   startWorker = await residentWorkerFactory();
 }, 30_000);
 
-function syntheticDocument(headersFooters = false, notes = false, controls = false, bodyXml?: string, sectPr?: string, commentsXml?: string, commentsExtendedXml?: string, imageMedia = false): Uint8Array {
+function syntheticDocument(headersFooters = false, notes = false, controls = false, bodyXml?: string, sectPr?: string, commentsXml?: string, commentsExtendedXml?: string, imageMedia = false, headerXml?: string): Uint8Array {
   const parts = new Map<string, Uint8Array>();
   parts.set('[Content_Types].xml', toBytes(
     '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'
@@ -70,7 +72,7 @@ function syntheticDocument(headersFooters = false, notes = false, controls = fal
     parts.set('word/_rels/document.xml.rels', toBytes(
       '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdHeader" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header.xml"/><Relationship Id="rIdFooter" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer.xml"/></Relationships>'
     ));
-    parts.set('word/header.xml', toBytes('<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>H</w:t></w:r></w:p></w:hdr>'));
+    parts.set('word/header.xml', toBytes(headerXml ?? '<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>H</w:t></w:r></w:p></w:hdr>'));
     parts.set('word/footer.xml', toBytes('<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>F</w:t></w:r></w:p></w:ftr>'));
   }
   if (notes) {
@@ -101,11 +103,11 @@ function syntheticDocument(headersFooters = false, notes = false, controls = fal
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
-export async function openWorker(options: { collaboration?: boolean; headersFooters?: boolean; layoutWithRegions?: boolean; notes?: boolean; controls?: boolean; propertyImages?: boolean; objects?: boolean; imageMedia?: boolean; bodyXml?: string; sectPr?: string; comments?: string; displayWindow?: [number, number]; factory?: typeof startWorker; prepare?: (engine: Awaited<ReturnType<typeof createResidentEngineSession>>) => { story: string; paraId: string; offset: number }; commentsXml?: string; commentsExtendedXml?: string } = {}) {
+export async function openWorker(options: { collaboration?: boolean; headersFooters?: boolean; layoutWithRegions?: boolean; notes?: boolean; controls?: boolean; propertyImages?: boolean; objects?: boolean; imageMedia?: boolean; bodyXml?: string; sectPr?: string; comments?: string; displayWindow?: [number, number]; factory?: typeof startWorker; prepare?: (engine: Awaited<ReturnType<typeof createResidentEngineSession>>) => { story: string; paraId: string; offset: number }; commentsXml?: string; commentsExtendedXml?: string; headerXml?: string } = {}) {
   const worker = (options.factory ?? startWorker)(8301);
   const client = options.collaboration ? new DocxSourceWorkerClient(worker) : new ResidentEngineWorkerClient(worker);
   try {
-    const bytes = syntheticDocument(options.headersFooters, options.notes, options.controls, options.bodyXml, options.sectPr, options.commentsXml ?? options.comments, options.commentsExtendedXml, options.imageMedia);
+    const bytes = syntheticDocument(options.headersFooters, options.notes, options.controls, options.bodyXml, options.sectPr, options.commentsXml ?? options.comments, options.commentsExtendedXml, options.imageMedia, options.headerXml);
     if (client instanceof DocxSourceWorkerClient) await client.openSource({ bytes, collaboration: { clientId: 8301 } });
     else await client.open(bytes, { generation: 'd1-command-worker' });
     const engine = worker.sessions[0]!;
@@ -164,32 +166,15 @@ export function intent(seq: number, version: number, kind: string, payload: Docx
 }
 
 async function editWithFrame(client: ResidentEngineWorkerClient, command: DocxCommandEnvelope): Promise<DocxCommandAck> {
-  let resolveFrame!: (frame: DocxCommandFrame) => void;
-  const deferred = new Promise<DocxCommandFrame>((resolve) => { resolveFrame = resolve; });
-  const unsubscribe = client.onFrame((frame) => {
-    if (frame.coversThroughSeq === command.seq) resolveFrame(frame);
-  });
-  let timeout: ReturnType<typeof setTimeout> | undefined;
-  try {
-    const ack = await client.edit(command);
-    if (ack.frame) return ack;
-    expect(['select', 'navigate', 'selectPoint', 'extendSelection', 'selectTableCells', 'navigateCell']).toContain(command.kind);
-    expect(ack.outcomes[0]?.status).toBe('noop');
-    expect(ack.throughSeq).toBe(command.seq);
-    const frame = await Promise.race([
-      deferred,
-      new Promise<never>((_, reject) => {
-        timeout = setTimeout(() => reject(new Error(`Missing command frame through seq ${ack.throughSeq}`)), 5_000);
-      }),
-    ]);
-    expect(frame.coversThroughSeq).toBe(ack.throughSeq);
-    expect(frame.revision).toBe(decodeFrameDelta(frame.payload.frame).frameEpoch);
-    expect(frame.payload.caret.frameEpoch).toBe(frame.revision);
-    return { ...ack, frame };
-  } finally {
-    if (timeout !== undefined) clearTimeout(timeout);
-    unsubscribe();
+  const ack = await client.edit(command);
+  const frame = ack.frame;
+  expect(frame, `the ack of ${command.kind} ${command.seq} carries its frame`).toBeDefined();
+  if (['select', 'navigate', 'selectPoint', 'extendSelection', 'selectTableCells', 'navigateCell'].includes(command.kind)) {
+    expect(frame!.coversThroughSeq).toBe(ack.throughSeq);
+    expect(frame!.revision).toBe(decodeFrameDelta(frame!.payload.frame).frameEpoch);
+    expect(frame!.payload.caret.frameEpoch).toBe(frame!.revision);
   }
+  return ack;
 }
 
 function frameText(frame: RetainedFrame): string {
@@ -215,6 +200,315 @@ test('worker frames include highlights for keyboard and point range selections',
       modifiers: { shift: true, alt: false, ctrl: false, meta: false },
     }));
     expect(pointer.frame!.payload.selectionRects?.length).toBeGreaterThan(0);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+function deepValues(value: unknown, key: string, found: unknown[] = []): unknown[] {
+  if (!value || typeof value !== 'object' || ArrayBuffer.isView(value) || value instanceof ArrayBuffer) return found;
+  for (const [name, entry] of Object.entries(value)) {
+    if (name === key) found.push(entry);
+    deepValues(entry, key, found);
+  }
+  return found;
+}
+
+test('each pointer drag step gets one reply from the worker carrying its selection and highlight without frame geometry', async () => {
+  const { client, worker, point } = await openWorker();
+  try {
+    const selected = await editWithFrame(client, intent(1, 0, 'select', { selection: { anchor: { ...point, offset: 0 }, focus: point } }));
+    const rect = selected.frame!.payload.selectionRects![0]!;
+    const received: DocxEngineWorkerResponse[] = [];
+    const deliver = worker.onmessage!;
+    worker.onmessage = (event) => {
+      received.push(event.data);
+      deliver.call(worker, event);
+    };
+    let frameEpoch = selected.frame!.revision;
+    const layoutRevision = selected.frame!.payload.layoutRevision;
+    const pointAt = (fraction: number) => ({
+      page: { pageId: '1', pageIndex: rect.pageIndex }, x: rect.x + Math.min(rect.width - 0.5, Math.max(0.5, rect.width * fraction)),
+      y: rect.y + rect.height / 2, layoutRevision, frameEpoch, clickCount: 1,
+      modifiers: { shift: false, alt: false, ctrl: false, meta: false },
+    });
+    const settle = () => new Promise<void>(resolve => setTimeout(resolve, 100));
+    const latestFrame = () => {
+      for (const reply of received) {
+        if (!reply.ok) continue;
+        for (const frame of [reply.commandFrame?.frame, reply.commandAck?.frame]) if (frame) frameEpoch = Math.max(frameEpoch, frame.revision);
+      }
+    };
+    await client.edit(intent(2, 0, 'selectPoint', pointAt(0)));
+    await settle();
+    latestFrame();
+    for (const [index, fraction] of [0.5, 1, 0.75].entries()) {
+      const before = received.length;
+      const ack = await client.edit(intent(3 + index, 0, 'extendSelection', pointAt(fraction)));
+      expect(ack.outcomes[0]?.status).toBe('noop');
+      await settle();
+      const replies = received.slice(before).filter(reply => !(reply.ok && reply.progress !== undefined));
+      latestFrame();
+      expect(replies.map(reply => reply.ok ? Object.keys(reply).filter(key => key.startsWith('command')).join('+') : 'failure'),
+        `worker replies to drag step ${index + 1}`).toHaveLength(1);
+      const selections = deepValues(replies, 'selection') as ({ anchor?: { offset: number }; focus?: { offset: number } } | null)[];
+      expect(selections.some(selection => !!selection?.anchor && !!selection.focus && selection.anchor.offset !== selection.focus.offset)).toBe(true);
+      expect(deepValues(replies, 'selectionRects').some(rects => Array.isArray(rects) && rects.length > 0)).toBe(true);
+      expect(deepValues(replies, 'geometry').filter(value => value !== undefined)).toEqual([]);
+    }
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+function pointerIntent(frame: DocxCommandFrame, rect: { pageIndex: number; y: number; height: number }, x: number, clickCount = 1) {
+  return {
+    page: { pageId: '1', pageIndex: rect.pageIndex }, x, y: rect.y + rect.height / 2,
+    layoutRevision: frame.payload.layoutRevision, frameEpoch: frame.revision, clickCount,
+    modifiers: { shift: false, alt: false, ctrl: false, meta: false },
+  };
+}
+
+test('a drag selection step transfers no page bitmap', async () => {
+  const texts = ['Alpha beta gamma', 'Second paragraph', 'Third paragraph', 'Fourth paragraph'];
+  const { client, worker, engine } = await openWorker({ bodyXml: texts.map((text, index) =>
+    `<w:p w14:paraId="0000000${index + 1}"><w:r><w:t>${text}</w:t></w:r></w:p>`).join('') });
+  try {
+    const spans = engine.geometryReader.paragraphSpans('body');
+    const whole = await editWithFrame(client, intent(1, 0, 'select', { selection: {
+      anchor: { story: 'body', paraId: spans[0]!.paraId, offset: 0 },
+      focus: { story: 'body', paraId: spans.at(-1)!.paraId, offset: spans.at(-1)!.length },
+    } }));
+    const lines = new Map<number, NonNullable<DocxCommandFrame['payload']['selectionRects']>[number]>();
+    for (const rect of whole.frame!.payload.selectionRects!) {
+      const key = Math.round(rect.y);
+      if (!lines.has(key) || lines.get(key)!.width < rect.width) lines.set(key, rect);
+    }
+    const rows = [...lines.values()].sort((a, b) => a.y - b.y);
+    expect(rows).toHaveLength(texts.length);
+    const staged: string[] = [];
+    const deliver = worker.onmessage!;
+    worker.onmessage = (event) => {
+      const reply = event.data as DocxEngineWorkerResponse;
+      if (reply.ok) {
+        for (const frame of [reply.commandAck?.frame, reply.commandFrame?.frame]) {
+          if (!frame || frame.coversThroughSeq < 2) continue;
+          for (const page of frame.payload.stagedPresentation?.pages ?? []) {
+            staged.push(`step ${frame.coversThroughSeq}: page ${page.page.pageId}`);
+            for (const background of page.backgrounds ?? []) staged.push(`step ${frame.coversThroughSeq}: background ${background.id}`);
+          }
+        }
+      }
+      deliver.call(worker, event);
+    };
+    let frame = whole.frame!;
+    const steps: ['selectPoint' | 'extendSelection', number, number][] = [
+      ['selectPoint', 0, 0], ['extendSelection', 0, 0.6], ['extendSelection', 1, 0.5],
+      ['extendSelection', 2, 0.5], ['extendSelection', 3, 0.8], ['extendSelection', 3, 0.3],
+    ];
+    for (const [index, [kind, row, fraction]] of steps.entries()) {
+      const rect = rows[row]!;
+      const x = rect.x + Math.min(rect.width - 0.5, Math.max(0.5, rect.width * fraction));
+      frame = (await editWithFrame(client, intent(2 + index, 0, kind, pointerIntent(frame, rect, x)))).frame!;
+    }
+    await new Promise<void>(resolve => setTimeout(resolve, 100));
+    expect(staged).toEqual([]);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('drag selection steps feed the query engine an unchanged page at most once and an edited page again', async () => {
+  const texts = ['Alpha beta gamma', 'Second paragraph', 'Third paragraph', 'Fourth paragraph'];
+  const { client, engine } = await openWorker({ bodyXml: texts.map((text, index) =>
+    `<w:p w14:paraId="0000000${index + 1}"><w:r><w:t>${text}</w:t></w:r></w:p>`).join('') });
+  const queryEngine = await loadRustDisplayListQueryEngine();
+  const { openDisplayList, updateDisplayList } = queryEngine;
+  const fed: number[] = [];
+  const feed = (pages: [number, { primitives?: unknown[] }][]) => {
+    for (const [index, page] of pages) if (page.primitives?.length) fed.push(index);
+  };
+  queryEngine.openDisplayList = (json: string) => {
+    feed((JSON.parse(json) as { pages: { primitives?: unknown[] }[] }).pages.map((page, index) => [index, page]));
+    return openDisplayList!.call(queryEngine, json);
+  };
+  queryEngine.updateDisplayList = (handle: number, json: string) => {
+    feed((JSON.parse(json) as { replace?: [number, { primitives?: unknown[] }][] }).replace ?? []);
+    updateDisplayList!.call(queryEngine, handle, json);
+  };
+  try {
+    const spans = engine.geometryReader.paragraphSpans('body');
+    const whole = await editWithFrame(client, intent(1, 0, 'select', { selection: {
+      anchor: { story: 'body', paraId: spans[0]!.paraId, offset: 0 },
+      focus: { story: 'body', paraId: spans.at(-1)!.paraId, offset: spans.at(-1)!.length },
+    } }));
+    const lines = new Map<number, NonNullable<DocxCommandFrame['payload']['selectionRects']>[number]>();
+    for (const rect of whole.frame!.payload.selectionRects!) {
+      const key = Math.round(rect.y);
+      if (!lines.has(key) || lines.get(key)!.width < rect.width) lines.set(key, rect);
+    }
+    const rows = [...lines.values()].sort((a, b) => a.y - b.y);
+    expect(rows).toHaveLength(texts.length);
+    let frame = whole.frame!;
+    let version = 0;
+    const step = async (seq: number, kind: 'selectPoint' | 'extendSelection', row: number, fraction: number) => {
+      const rect = rows[row]!;
+      const x = rect.x + Math.min(rect.width - 0.5, Math.max(0.5, rect.width * fraction));
+      const ack = await editWithFrame(client, intent(seq, version, kind, pointerIntent(frame, rect, x)));
+      frame = ack.frame!;
+      return ack;
+    };
+    const timesFed = () => {
+      const counts = new Map<number, number>();
+      for (const index of fed) counts.set(index, (counts.get(index) ?? 0) + 1);
+      return counts;
+    };
+    fed.length = 0;
+    const steps: ['selectPoint' | 'extendSelection', number, number][] = [
+      ['selectPoint', 0, 0.2], ['extendSelection', 0, 0.6], ['extendSelection', 1, 0.5],
+      ['extendSelection', 2, 0.5], ['extendSelection', 3, 0.8], ['extendSelection', 3, 0.3],
+    ];
+    for (const [index, [kind, row, fraction]] of steps.entries()) await step(2 + index, kind, row, fraction);
+    expect([...timesFed()].filter(([, times]) => times > 1), 'pages fed more than once during the drag').toEqual([]);
+    const pressed = await step(8, 'selectPoint', 0, 0.3);
+    fed.length = 0;
+    const typed = await client.edit(intent(9, version, 'insertText', { text: 'X', selection: pressed.selection! }));
+    expect(typed.outcomes[0]?.status).toBe('applied');
+    version = typed.version;
+    if (typed.frame) frame = typed.frame;
+    await step(10, 'extendSelection', 1, 0.5);
+    await step(11, 'extendSelection', 2, 0.5);
+    expect(timesFed().get(rows[0]!.pageIndex), 'times the edited page was fed after the edit').toBe(1);
+  } finally {
+    queryEngine.openDisplayList = openDisplayList;
+    queryEngine.updateDisplayList = updateDisplayList;
+    client.destroy();
+  }
+}, TIMEOUT);
+
+test('the first keystroke after a click, and after a click that follows a drag ending collapsed, has a staged echo page on main', async () => {
+  const texts = ['Alpha beta gamma', 'Second paragraph', 'Third paragraph', 'Fourth paragraph'];
+  const { client, worker, engine, initial } = await openWorker({ bodyXml: texts.map((text, index) =>
+    `<w:p w14:paraId="0000000${index + 1}"><w:r><w:t>${text}</w:t></w:r></w:p>`).join('') });
+  try {
+    const held = new Map<string, { frameEpoch: number; backgrounds: Set<string> }>();
+    const glyphSets = new Set<string>();
+    const ackInstalls = new Map<number, boolean>();
+    const receive = (frame: DocxCommandFrame | undefined) => {
+      if (!frame) return;
+      for (const set of frame.payload.echoGlyphSets ?? []) glyphSets.add(set.key);
+      for (const { page, frameEpoch, backgrounds } of frame.payload.stagedPresentation?.pages ?? []) {
+        held.set(page.pageId, { frameEpoch, backgrounds: new Set((backgrounds ?? []).map(({ id }) => id)) });
+      }
+    };
+    receive(initial.frame);
+    const deliver = worker.onmessage!;
+    worker.onmessage = (event) => {
+      const reply = event.data as DocxEngineWorkerResponse;
+      if (reply.ok) {
+        const context = reply.commandAck?.echoContext;
+        if (reply.commandAck && context) {
+          ackInstalls.set(reply.commandAck.throughSeq, held.get(context.page.pageId)?.frameEpoch === context.frameEpoch);
+        }
+        receive(reply.commandAck?.frame);
+        receive(reply.commandFrame?.frame);
+      }
+      deliver.call(worker, event);
+    };
+    const spans = engine.geometryReader.paragraphSpans('body');
+    const whole = await editWithFrame(client, intent(1, 0, 'select', { selection: {
+      anchor: { story: 'body', paraId: spans[0]!.paraId, offset: 0 },
+      focus: { story: 'body', paraId: spans.at(-1)!.paraId, offset: spans.at(-1)!.length },
+    } }));
+    const lines = new Map<number, NonNullable<DocxCommandFrame['payload']['selectionRects']>[number]>();
+    for (const rect of whole.frame!.payload.selectionRects!) {
+      const key = Math.round(rect.y);
+      if (!lines.has(key) || lines.get(key)!.width < rect.width) lines.set(key, rect);
+    }
+    const rows = [...lines.values()].sort((a, b) => a.y - b.y);
+    expect(rows).toHaveLength(texts.length);
+    let frame = whole.frame!;
+    const step = async (seq: number, kind: 'selectPoint' | 'extendSelection', row: number, fraction: number) => {
+      const rect = rows[row]!;
+      const x = rect.x + Math.min(rect.width - 0.5, Math.max(0.5, rect.width * fraction));
+      const ack = await editWithFrame(client, intent(seq, 0, kind, pointerIntent(frame, rect, x)));
+      frame = ack.frame!;
+      return ack;
+    };
+    const echoReadiness = (seq: number) => {
+      const context = frame.payload.echoContext;
+      return {
+        seq,
+        ackContextInstalls: ackInstalls.get(seq) ?? 'no ack context',
+        frameContext: context ? { shaping: context.shaping, glyphSetReceived: glyphSets.has(context.glyphs?.glyphSet ?? '') } : null,
+        restorableBackgrounds: (context?.damage ?? []).map(({ page, backgroundId }) => held.get(page.pageId)?.backgrounds.has(backgroundId) ?? false),
+      };
+    };
+    await step(2, 'selectPoint', 0, 0.6);
+    await step(3, 'selectPoint', 0, 0.3);
+    const click = echoReadiness(3);
+    await step(4, 'selectPoint', 1, 0.2);
+    await step(5, 'extendSelection', 3, 0.5);
+    const ended = await step(6, 'extendSelection', 1, 0.2);
+    expect([ended.selection?.anchor.paraId, ended.selection?.anchor.offset])
+      .toEqual([ended.selection?.focus.paraId, ended.selection?.focus.offset]);
+    await step(7, 'selectPoint', 2, 0.4);
+    const afterDrag = echoReadiness(7);
+    for (const readiness of [click, afterDrag]) {
+      expect(readiness.ackContextInstalls, `ack context of step ${readiness.seq}`).not.toBe(false);
+      expect(readiness.frameContext, `frame context of step ${readiness.seq}`).toEqual({ shaping: 'simple-ltr', glyphSetReceived: true });
+      expect(readiness.restorableBackgrounds, `staged echo backgrounds of step ${readiness.seq}`).toEqual([true]);
+    }
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('a drag after a double or triple click keeps the word or paragraph start as its anchor', async () => {
+  const { client, engine } = await openWorker({ bodyXml:
+    '<w:p w14:paraId="00000001"><w:r><w:t>Alpha beta gamma</w:t></w:r></w:p>' +
+    '<w:p w14:paraId="00000002"><w:r><w:t>Second paragraph</w:t></w:r></w:p>',
+  });
+  try {
+    const { paraId, length } = engine.geometryReader.paragraphSpans('body')[0]!;
+    const at = (offset: number) => ({ story: 'body', paraId, offset });
+    const whole = await editWithFrame(client, intent(1, 0, 'select', { selection: { anchor: at(0), focus: at(length) } }));
+    const rect = whole.frame!.payload.selectionRects![0]!;
+    const x = (fraction: number) => rect.x + Math.min(rect.width - 0.5, Math.max(0.5, rect.width * fraction));
+    let frame = whole.frame!;
+    const step = async (seq: number, kind: 'selectPoint' | 'extendSelection', fraction: number, clickCount: number) => {
+      const ack = await editWithFrame(client, intent(seq, 0, kind, pointerIntent(frame, rect, x(fraction), clickCount)));
+      frame = ack.frame!;
+      return ack.selection;
+    };
+    expect(await step(2, 'selectPoint', 0.43, 2)).toMatchObject({ anchor: at(6), focus: at(10) });
+    expect(await step(3, 'extendSelection', 1, 1)).toMatchObject({ anchor: at(6), focus: at(length) });
+    expect(await step(4, 'selectPoint', 0.43, 3)).toMatchObject({ anchor: at(0), focus: at(length) });
+    const fromParagraph = await step(5, 'extendSelection', 0.43, 1);
+    expect(fromParagraph?.anchor).toMatchObject(at(0));
+    expect(fromParagraph!.focus.offset).toBeGreaterThan(0);
+    expect(fromParagraph!.focus.offset).toBeLessThan(length);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('a drag across tracked changes selects the raw range a keyboard selection does and suggesting typing replaces it', async () => {
+  const tracked = 'w:author="Writer" w:date="2026-01-01T00:00:00Z"';
+  const { client, engine } = await openWorker({ bodyXml:
+    `<w:p w14:paraId="00000001"><w:del w:id="1" ${tracked}><w:r><w:delText>Gone </w:delText></w:r></w:del>` +
+    `<w:r><w:t>Alpha beta</w:t></w:r><w:ins w:id="2" ${tracked}><w:r><w:t> added</w:t></w:r></w:ins></w:p>`,
+  });
+  try {
+    const { paraId } = engine.geometryReader.paragraphSpans('body')[0]!;
+    const at = (offset: number) => ({ story: 'body', paraId, offset });
+    const keyboard = await editWithFrame(client, intent(1, 0, 'select', { selection: { anchor: at(7), focus: at(15) } }));
+    const rects = keyboard.frame!.payload.selectionRects!;
+    expect(rects.length).toBeGreaterThan(0);
+    const first = rects[0]!;
+    const last = rects.at(-1)!;
+    const pressed = await editWithFrame(client, intent(2, 0, 'selectPoint', pointerIntent(keyboard.frame!, first, first.x + 0.5)));
+    expect(pressed.selection).toMatchObject({ anchor: at(7), focus: at(7) });
+    const dragged = await editWithFrame(client, intent(3, 0, 'extendSelection',
+      pointerIntent(pressed.frame!, last, last.x + last.width - 0.5)));
+    expect(dragged.selection).toMatchObject({ anchor: at(7), focus: at(15) });
+    expect(dragged.frame!.payload.selectionRects).toEqual(rects);
+    const revisions = engine.geometryReader.listRevisions().length;
+    const typed = await client.edit(intent(4, 0, 'insertText', {
+      text: 'X', selection: dragged.selection!, suggesting: { name: 'Ada', date: '2026-01-01' },
+    }));
+    expect(typed.outcomes[0]?.status).toBe('applied');
+    expect(engine.geometryReader.listRevisions().length).toBeGreaterThan(revisions);
   } finally { client.destroy(); }
 }, TIMEOUT);
 
@@ -552,6 +846,113 @@ test('the worker and a main-thread session lay out one reservation set identical
   }
 }, TIMEOUT);
 
+for (const twips of [40, -20]) {
+  test(`main-thread and worker carets hits and selections follow glyphs with ${twips} twips spacing`, async () => {
+    const { createDisplayListQueries } = await import('../layout/render/displayListQueries');
+    const { loadRustDisplayListQueryEngine } = await import('../layout/render/rustDisplayList');
+    const bodyXml = '<w:p w14:paraId="00000001"><w:r><w:rPr>' +
+      '<w:rFonts w:ascii="Liberation Sans" w:hAnsi="Liberation Sans"/><w:sz w:val="24"/>' +
+      `<w:spacing w:val="${twips}"/></w:rPr><w:t>WimA</w:t></w:r>` +
+      '<w:r><w:rPr><w:rFonts w:ascii="Liberation Sans" w:hAnsi="Liberation Sans"/>' +
+      '<w:sz w:val="24"/></w:rPr><w:t>BC</w:t></w:r></w:p>';
+    const { client, engine, init, initial, point } = await openWorker({ bodyXml });
+    const host = await createYrsSession({ clientId: 8302 });
+    try {
+      const queryEngine = await loadRustDisplayListQueryEngine();
+      host.seedFromDocx(syntheticDocument(false, false, false, bodyXml));
+      const font = host.registerFont(new Uint8Array(readFileSync(resolve(
+        process.cwd(), 'crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf'
+      ))));
+      const request = JSON.parse(init.layoutInput);
+      request.measurement.fontChains = { 'liberation sans|0|0': [font] };
+      host.layoutDocumentWithRegionsRetainedJson(JSON.stringify(request));
+      const main = applyFrameDeltaOwned(null, decodeFrameDelta(host.buildDisplayListFrame(JSON.stringify({
+        fontChains: { 'liberation sans|0|0': [font] },
+      }), 0)));
+      const worker = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame));
+      let commandFrame = initial.frame;
+      let seq = 0;
+      for (const [mode, frame, source] of [
+        ['main-thread', main, queryEngine], ['main-thread retained', main, host],
+        ['worker/resident', worker, queryEngine],
+      ] as const) {
+        const queries = createDisplayListQueries(frame.displayList, source);
+        try {
+          const runs = frame.displayList.pages[0]!.primitives.filter(run => run.kind === 'glyphRun');
+          expect(runs.map(run => run.text).join('')).toBe('WimABC');
+          const origins = new Map(runs.flatMap(run => run.glyphs.map(glyph =>
+            [run.docStart! + glyph.cluster, glyph.x] as const)));
+          expect(origins.size).toBe(6);
+          const start = Math.min(...origins.keys());
+          const baseline = runs[0]!.glyphs[0]!.y;
+          const spaced = runs.find(run => run.docStart === start)!;
+          const unspaced = runs.find(run => run.docStart === start + 4)!;
+          expect(Math.abs(spaced.echo!.letterSpacing! - twips / 15)).toBeLessThan(0.001);
+          expect(unspaced.echo?.letterSpacing ?? 0).toBe(0);
+          for (let offset = 0; offset <= 4; offset += 1) {
+            const position = start + offset;
+            const x = origins.get(position)!;
+            const caret = queries.caretRect(position);
+            expect(caret).not.toBeNull();
+            expect(Math.abs(caret!.x - x)).toBeLessThan(0.01);
+            if (mode === 'worker/resident') {
+              const at = { ...point, offset };
+              const selected = await editWithFrame(client, intent(++seq, 0, 'select', {
+                selection: { anchor: at, focus: at },
+              }));
+              commandFrame = selected.frame!;
+              expect(commandFrame.payload.caret.caretRect).not.toBeNull();
+              expect(Math.abs(commandFrame.payload.caret.caretRect!.x - x)).toBeLessThan(0.01);
+            }
+            if (offset < 4) {
+              const next = origins.get(position + 1)!;
+              const midpoint = (x + next) / 2;
+              for (const [hitX, expected] of [
+                [x, offset], [midpoint - 0.05, offset], [midpoint + 0.05, offset + 1],
+              ] as const) {
+                expect(queries.hitTestRegions(0, hitX, baseline)?.pos).toBe(start + expected);
+                if (mode === 'worker/resident') {
+                  const clicked = await editWithFrame(client, intent(++seq, 0, 'selectPoint', {
+                    page: { pageId: frame.pages[0]!.pageId.toString(), pageIndex: 0 }, x: hitX, y: baseline,
+                    layoutRevision: commandFrame.payload.layoutRevision, frameEpoch: commandFrame.revision,
+                    clickCount: 1, modifiers: { shift: false, alt: false, ctrl: false, meta: false },
+                  }));
+                  commandFrame = clicked.frame!;
+                  expect(engine.selection()!.head.offset).toBe(expected);
+                  expect(Math.abs(commandFrame.payload.caret.caretRect!.x - origins.get(start + expected)!))
+                    .toBeLessThan(0.01);
+                }
+              }
+            }
+          }
+          const last = runs.flatMap(run => run.glyphs.map(glyph =>
+            ({ position: run.docStart! + glyph.cluster, glyph })))
+            .find(entry => entry.position === start + 3)!.glyph;
+          expect(last.advance).toBeDefined();
+          expect(Math.abs(last.x + last.advance! - origins.get(start + 4)!)).toBeLessThan(0.01);
+          const rects = queries.rangeRects(start, start + 4);
+          expect(rects).toHaveLength(1);
+          expect(Math.abs(rects[0]!.x - origins.get(start)!)).toBeLessThan(0.01);
+          expect(Math.abs(rects[0]!.x + rects[0]!.width - origins.get(start + 4)!)).toBeLessThan(0.01);
+          if (mode === 'worker/resident') {
+            expect(engine.storyRangeRects('body', '', [[start, start + 4]])).toEqual([rects]);
+            const selected = await editWithFrame(client, intent(++seq, 0, 'select', {
+              selection: { anchor: { ...point, offset: 0 }, focus: { ...point, offset: 4 } },
+            }));
+            const frameRects = selected.frame!.payload.selectionRects!;
+            expect(frameRects).toHaveLength(1);
+            expect(Math.abs(frameRects[0]!.x - origins.get(start)!)).toBeLessThan(0.01);
+            expect(Math.abs(frameRects[0]!.x + frameRects[0]!.width - origins.get(start + 4)!)).toBeLessThan(0.01);
+          }
+        } finally { queries.dispose(); }
+      }
+    } finally {
+      host.destroy();
+      client.destroy();
+    }
+  }, TIMEOUT);
+}
+
 function expectFrameRegions(frame: RetainedFrame, headerText: string, footerText: string): void {
   expect(frameText(frame)).toBe('Seed');
   expect(frame.displayList.pages.length).toBeGreaterThan(0);
@@ -635,6 +1036,20 @@ test('d1a_real_worker_init_insert_delete_acknowledge_current_layout_and_state', 
     expect(layouts).toHaveBeenCalledTimes(2);
   } finally {
     layouts.mockRestore();
+    client.destroy();
+  }
+}, TIMEOUT);
+
+test('worker scheduler turns go through the turn channel the worker was given', async () => {
+  const { client, worker, engine } = await openWorker();
+  try {
+    const before = worker.turnPosts;
+    const version = engine.proposalEngine.version();
+    const reads = await Promise.all([0, 1, 2].map(() =>
+      client.documentReadAt({ kind: 'rangeHighlights', ranges: [], expectVersion: version }, version)));
+    expect(reads.map(read => read.status)).toEqual(['ok', 'ok', 'ok']);
+    expect(worker.turnPosts).toBeGreaterThan(before);
+  } finally {
     client.destroy();
   }
 }, TIMEOUT);
@@ -1138,6 +1553,27 @@ test('worker orders hyperlink note and watermark properties and refuses stale re
     const removed = await client.edit(intent(5, 3, 'setWatermark', { watermark: null, expectVersion: saved.version }));
     expect(removed.outcomes[0]?.status).toBe('applied');
     expect((await client.documentRead({ kind: 'properties', target: { kind: 'watermark' } })).value).toMatchObject({ watermark: null });
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('worker accepts a read word text watermark written back with new text', async () => {
+  const { client, initial } = await openWorker({
+    headersFooters: true,
+    headerXml: '<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:v="urn:schemas-microsoft-com:vml"><w:sdt><w:sdtPr><w:docPartObj><w:docPartGallery w:val="Watermarks"/></w:docPartObj></w:sdtPr><w:sdtContent><w:p><w:r><w:pict>' +
+      '<v:shapetype id="_x0000_t136" coordsize="21600,21600"><v:textpath on="t" fitshape="t"/></v:shapetype>' +
+      '<v:shape id="PowerPlusWaterMarkObject1" type="#_x0000_t136" style="position:absolute;width:515.75pt;height:147.35pt;rotation:315" fillcolor="silver" stroked="f"><v:fill opacity=".5"/>' +
+      '<v:textpath style="font-family:&quot;Liberation Serif&quot;;font-size:1pt" string="SAMPLE"/></v:shape>' +
+      '</w:pict></w:r></w:p></w:sdtContent></w:sdt></w:hdr>',
+  });
+  try {
+    const read = (await client.documentRead({ kind: 'properties', target: { kind: 'watermark' } })).value as unknown as { watermark: TextWatermark };
+    expect(read.watermark).toMatchObject({ kind: 'text', text: 'SAMPLE', font: 'Liberation Serif' });
+    const written = await client.edit(intent(1, 0, 'setWatermark', {
+      watermark: { ...read.watermark, text: 'DRAFT' }, expectVersion: initial.frame.payload.documentVersion!,
+    }));
+    expect(written.outcomes[0]?.status).toBe('applied');
+    expect((await client.documentRead({ kind: 'properties', target: { kind: 'watermark' } })).value)
+      .toMatchObject({ watermark: { kind: 'text', text: 'DRAFT' } });
   } finally { client.destroy(); }
 }, TIMEOUT);
 
@@ -1660,12 +2096,92 @@ test('worker frames publish selection and distinct stable image handles', async 
     const selected = await editWithFrame(client, intent(1, 0, 'select', { selection: {
       anchor: { ...point, offset: 0 }, focus: { ...point, offset: 1 },
     } }));
-    expect(selected.frame!.payload.geometry!.selection.length).toBeGreaterThan(0);
+    expect(selected.frame!.payload.geometryKept).toBe(true);
+    expect(selected.frame!.payload.selectionRects?.length).toBeGreaterThan(0);
     const typed = await client.edit(intent(2, 0, 'insertText', {
       text: '+', selection: { anchor: { ...point, offset: 0 }, focus: { ...point, offset: 0 } },
     }));
     expect(typed.frame!.payload.geometry!.objects.filter(object => object.kind === 'image').map(object => object.handle))
       .toEqual(images.map(object => object.handle));
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+function pictureFlags(ack: { frame?: DocxCommandAck['frame'] }): Array<[string, boolean | undefined]> {
+  return ack.frame!.payload.geometry!.objects.filter(object => object.kind === 'image').map(object => [object.handle, object.selected]);
+}
+
+test('a click on a picture reads fresh frame geometry that flags it under its stable handle', async () => {
+  const { client, initial, point } = await openWorker({ objects: true });
+  try {
+    const [first, second] = pictureFlags(initial).map(([handle]) => handle);
+    const caret = await editWithFrame(client, intent(1, 0, 'select', { selection: {
+      anchor: { ...point, offset: 0 }, focus: { ...point, offset: 0 },
+    } }));
+    expect(caret.frame!.payload.geometryKept).toBe(true);
+    const clicked = await editWithFrame(client, intent(2, 0, 'select', { object: {
+      handle: second!, expectVersion: initial.frame.payload.documentVersion!,
+    } }));
+    expect(clicked.frame!.payload.geometryKept).toBeUndefined();
+    expect(pictureFlags(clicked)).toEqual([[first!, undefined], [second!, true]]);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('keyboard steps onto and past a picture read fresh frame geometry with its flag under its stable handle', async () => {
+  const { client, initial, point } = await openWorker({ objects: true });
+  try {
+    const [first, second] = pictureFlags(initial).map(([handle]) => handle);
+    const caret = await editWithFrame(client, intent(1, 0, 'select', { selection: {
+      anchor: { ...point, offset: 1 }, focus: { ...point, offset: 1 },
+    } }));
+    expect(caret.frame!.payload.geometryKept).toBe(true);
+    const onto = await editWithFrame(client, intent(2, 0, 'navigate', { unit: 'character', direction: 'forward', extend: true }));
+    expect(onto.selection).toMatchObject({ anchor: { offset: 1 }, focus: { offset: 2 } });
+    expect(onto.frame!.payload.geometryKept).toBeUndefined();
+    expect(pictureFlags(onto)).toEqual([[first!, true], [second!, undefined]]);
+    const past = await editWithFrame(client, intent(3, 0, 'navigate', { unit: 'character', direction: 'forward', extend: true }));
+    expect(past.selection).toMatchObject({ anchor: { offset: 1 }, focus: { offset: 3 } });
+    expect(past.frame!.payload.geometryKept).toBeUndefined();
+    expect(pictureFlags(past)).toEqual([[first!, undefined], [second!, undefined]]);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('a range containing a picture flags no picture, so it keeps frame geometry unless it leaves a selected picture', async () => {
+  const { readResidentFrameGeometry } = await import('./residentObjectGeometry');
+  const { client, engine, initial, point } = await openWorker({ objects: true });
+  try {
+    const [first, second] = pictureFlags(initial).map(([handle]) => handle);
+    const range = { anchor: { ...point, offset: 0 }, focus: { ...point, offset: 2 } };
+    const kept = await editWithFrame(client, intent(1, 0, 'select', { selection: range }));
+    expect(kept.frame!.payload.geometryKept).toBe(true);
+    expect(kept.frame!.payload.selectionRects?.length).toBeGreaterThan(0);
+    const fresh = await readResidentFrameGeometry(engine, applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame)),
+      range, kept.frame!.payload.layoutRevision);
+    expect(fresh.objects.filter(object => object.kind === 'image').map(object => object.selected))
+      .toEqual([undefined, undefined]);
+    const picture = await editWithFrame(client, intent(2, 0, 'select', { object: {
+      handle: first!, expectVersion: initial.frame.payload.documentVersion!,
+    } }));
+    expect(pictureFlags(picture)).toEqual([[first!, true], [second!, undefined]]);
+    const around = await editWithFrame(client, intent(3, 0, 'select', { selection: range }));
+    expect(around.frame!.payload.geometryKept).toBeUndefined();
+    expect(pictureFlags(around)).toEqual([[first!, undefined], [second!, undefined]]);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('leaving a selected picture reads fresh frame geometry that clears its flag under the same handle', async () => {
+  const { client, initial } = await openWorker({ objects: true });
+  try {
+    const [first, second] = pictureFlags(initial).map(([handle]) => handle);
+    const picture = await editWithFrame(client, intent(1, 0, 'select', { object: {
+      handle: first!, expectVersion: initial.frame.payload.documentVersion!,
+    } }));
+    expect(pictureFlags(picture)).toEqual([[first!, true], [second!, undefined]]);
+    const left = await editWithFrame(client, intent(2, 0, 'navigate', { unit: 'character', direction: 'forward', extend: false }));
+    expect(left.selection).toMatchObject({ anchor: { offset: 2 }, focus: { offset: 2 } });
+    expect(left.frame!.payload.geometryKept).toBeUndefined();
+    expect(pictureFlags(left)).toEqual([[first!, undefined], [second!, undefined]]);
+    const moved = await editWithFrame(client, intent(3, 0, 'navigate', { unit: 'character', direction: 'forward', extend: false }));
+    expect(moved.frame!.payload.geometryKept).toBe(true);
   } finally { client.destroy(); }
 }, TIMEOUT);
 
@@ -2139,6 +2655,152 @@ test('worker cell and text handles survive input and resize the issued cell colu
   } finally { client.destroy(); }
 }, TIMEOUT);
 
+const THREE_COLUMNS = '<w:p w14:paraId="00000001"><w:r><w:t>Seed</w:t></w:r></w:p>' +
+  '<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="1440"/><w:gridCol w:w="1440"/><w:gridCol w:w="1440"/></w:tblGrid>' +
+  '<w:tr>' + ['A', 'B', 'C'].map(text => `<w:tc><w:p><w:r><w:t>${text}</w:t></w:r></w:p></w:tc>`).join('') + '</w:tr></w:tbl>';
+
+test('worker column edge drags move one border in one undo step and clamp at the minimum width', async () => {
+  const { client, engine, initial } = await openWorker({ bodyXml: THREE_COLUMNS });
+  try {
+    const cells = initial.frame.payload.geometry!.objects.filter(object => object.kind === 'cell');
+    cells.forEach((cell, column) => expect(cell.cell).toMatchObject({ table: 'body#0', row: 0, column, rowspan: 1, colspan: 1, columns: 3 }));
+    const version = (response: { frame?: { payload: { documentVersion?: string } } | null }) => response.frame!.payload.documentVersion!;
+    const drag = (seq: number, base: number, expectVersion: string, columnEdge: number, deltaTwips: number) =>
+      client.edit(intent(seq, base, 'resizeObject', { handle: cells[0]!.handle, expectVersion, columnEdge, deltaTwips }));
+    const first = await drag(1, 0, initial.frame.payload.documentVersion!, 1, 600);
+    expect(first.outcomes[0]?.status).toBe('applied');
+    expect(engine.tablePayload('body', 0)).toHaveProperty('grid', [2040, 840, 1440]);
+    expect((engine.tablePayload('body', 0) as { tblPr: Record<string, unknown> }).tblPr).toMatchObject({ tableLayout: 'fixed' });
+    expect((engine.tablePayload('body', 0) as { tblPr: Record<string, unknown> }).tblPr.width ?? null).toBeNull();
+    const clamped = await drag(2, 1, version(first), 2, 5000);
+    expect(clamped.outcomes[0]?.status).toBe('applied');
+    expect(engine.tablePayload('body', 0)).toHaveProperty('grid', [2040, 1980, 300]);
+    const pinned = await drag(3, 2, version(clamped), 3, -5000);
+    expect(pinned.outcomes[0]?.status).toBe('noop');
+    const widened = await drag(4, 2, version(clamped), 3, 900);
+    expect(widened.outcomes[0]?.status).toBe('applied');
+    expect(engine.tablePayload('body', 0)).toHaveProperty('grid', [2040, 1980, 1200]);
+    expect((engine.tablePayload('body', 0) as { tblPr: Record<string, unknown> }).tblPr).toMatchObject({ tableLayout: 'fixed', width: 5220, widthType: 'dxa' });
+    const undone = await client.edit(intent(5, 3, 'undo', {}));
+    expect(undone.outcomes[0]?.status).toBe('applied');
+    expect(engine.tablePayload('body', 0)).toHaveProperty('grid', [2040, 1980, 300]);
+    expect((engine.tablePayload('body', 0) as { tblPr: Record<string, unknown> }).tblPr.width ?? null).toBeNull();
+    expect((await client.edit(intent(6, 4, 'undo', {}))).outcomes[0]?.status).toBe('applied');
+    expect(engine.tablePayload('body', 0)).toHaveProperty('grid', [2040, 840, 1440]);
+    expect((await client.edit(intent(7, 5, 'undo', {}))).outcomes[0]?.status).toBe('applied');
+    expect(engine.tablePayload('body', 0)).toHaveProperty('grid', [1440, 1440, 1440]);
+    expect((engine.tablePayload('body', 0) as { tblPr: Record<string, unknown> }).tblPr.tableLayout ?? null).toBeNull();
+    expect((await client.edit(intent(8, 6, 'redo', {}))).outcomes[0]?.status).toBe('applied');
+    expect(engine.tablePayload('body', 0)).toHaveProperty('grid', [2040, 840, 1440]);
+    const current = engine.proposalEngine.version();
+    expect((await drag(9, 5, current, 4, 100)).outcomes[0]).toMatchObject({ status: 'refused', reason: 'unsupported-object' });
+    for (const [index, payload] of [{ columnEdge: 0, deltaTwips: 100 }, { columnEdge: 1, deltaTwips: 1.5 }, { columnEdge: 1 },
+      { columnEdge: 1, deltaTwips: 100, widthTwips: 2000 }].entries()) {
+      expect((await client.edit(intent(10 + index, 5, 'resizeObject', { handle: cells[0]!.handle, expectVersion: current, ...payload } as never))).outcomes[0])
+        .toMatchObject({ status: 'refused', reason: 'invalid-payload' });
+    }
+    expect(engine.tablePayload('body', 0)).toHaveProperty('grid', [2040, 840, 1440]);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('worker column edge drags converge with a concurrent edit in a cell of the same table', async () => {
+  const { client, engine, initial } = await openWorker({ bodyXml: THREE_COLUMNS });
+  const remote = await createResidentEngineSession(undefined, 8302);
+  try {
+    remote.loadState(engine.encodeState());
+    const cell = initial.frame.payload.geometry!.objects.find(object => object.kind === 'cell')!;
+    const remoteVector = remote.encodeStateVector();
+    const story = 'body:t0:r0c1';
+    remote.insertText({ story, paraId: remote.geometryReader.paragraphSpans(story)[0]!.paraId, offset: 1 }, '+');
+    const resized = await client.edit(intent(1, 0, 'resizeObject', {
+      handle: cell.handle, expectVersion: initial.frame.payload.documentVersion!, columnEdge: 1, deltaTwips: 600,
+    }));
+    expect(resized.outcomes[0]?.status).toBe('applied');
+    const localVector = engine.encodeStateVector();
+    engine.applyUpdate(remote.encodeStateAsUpdate(localVector));
+    remote.applyUpdate(engine.encodeStateAsUpdate(remoteVector));
+    for (const peer of [engine, remote]) {
+      expect(peer.tablePayload('body', 0)).toHaveProperty('grid', [2040, 840, 1440]);
+      expect(peer.paragraphs(story)[0]?.text).toBe('B+');
+    }
+  } finally {
+    remote.destroy();
+    client.destroy();
+  }
+}, TIMEOUT);
+
+test('a cell holding only a block control has a working object handle', async () => {
+  const cellXml = (content: string) => `<w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>${content}</w:tc>`;
+  const text = (value: string) => `<w:p><w:r><w:t>${value}</w:t></w:r></w:p>`;
+  const bodyXml = '<w:p/><w:tbl><w:tblPr><w:tblLayout w:type="fixed"/></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>' +
+    `<w:tr>${cellXml(text('A'))}${cellXml(`<w:sdt><w:sdtPr><w:id w:val="9"/></w:sdtPr><w:sdtContent>${text('B')}</w:sdtContent></w:sdt>`)}</w:tr></w:tbl><w:p/>`;
+  const { client, engine, initial } = await openWorker({ bodyXml });
+  try {
+    const cell = initial.frame.payload.geometry!.objects.find(object => object.kind === 'cell' && object.story === 'body:t0:r0c1');
+    if (!cell) throw new Error('Control-only cell has no object');
+    const resized = await client.edit(intent(1, 0, 'resizeObject', {
+      handle: cell.handle, expectVersion: initial.frame.payload.documentVersion!, columnEdge: 1, deltaTwips: 200,
+    }));
+    expect(resized.outcomes[0]?.status).toBe('applied');
+    expect(engine.tablePayload('body', 0)).toHaveProperty('grid', [2200, 1800]);
+    expect(engine.paragraphs('body:t0:r0c1:sdt0')[0]?.text).toBe('B');
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('worker row border drags set an at-least height in one undo step and never start below the stored height', async () => {
+  const { client, engine, initial } = await openWorker({ bodyXml: THREE_COLUMNS });
+  try {
+    const cell = initial.frame.payload.geometry!.objects.find(object => object.kind === 'cell')!;
+    const trPr = () => (engine.tablePayload('body', 0) as { rows: { trPr: Record<string, unknown> }[] }).rows[0]!.trPr;
+    const drag = (seq: number, paintedRowTwips: number, rowDeltaTwips: number) => client.edit(intent(seq, seq - 1, 'resizeObject', {
+      handle: cell.handle, expectVersion: engine.proposalEngine.version(), paintedRowTwips, rowDeltaTwips,
+    }));
+    expect((await drag(1, 300, 450)).outcomes[0]?.status).toBe('applied');
+    expect(trPr()).toMatchObject({ height: 750, heightRule: 'atLeast' });
+    expect((await drag(2, 100, 150)).outcomes[0]?.status).toBe('applied');
+    expect(trPr()).toMatchObject({ height: 900, heightRule: 'atLeast' });
+    expect((await drag(3, 900, 0)).outcomes[0]?.status).toBe('noop');
+    expect((await client.edit(intent(4, 3, 'undo', {}))).outcomes[0]?.status).toBe('applied');
+    expect(trPr()).toMatchObject({ height: 750 });
+    expect((await client.edit(intent(5, 4, 'undo', {}))).outcomes[0]?.status).toBe('applied');
+    expect(trPr().height ?? null).toBeNull();
+    expect(trPr().heightRule ?? null).toBeNull();
+    expect((await drag(6, 300, -5000)).outcomes[0]?.status).toBe('applied');
+    expect(trPr()).toMatchObject({ height: 15, heightRule: 'atLeast' });
+    const current = engine.proposalEngine.version();
+    for (const [index, payload] of [{ paintedRowTwips: 300 }, { rowDeltaTwips: 100 }, { paintedRowTwips: -1, rowDeltaTwips: 100 },
+      { paintedRowTwips: 300, rowDeltaTwips: 1.5 }, { paintedRowTwips: 300, rowDeltaTwips: 100, columnEdge: 1, deltaTwips: 100 },
+      { paintedRowTwips: 300, rowDeltaTwips: 100, widthTwips: 2000 }].entries()) {
+      expect((await client.edit(intent(7 + index, 6, 'resizeObject', { handle: cell.handle, expectVersion: current, ...payload } as never))).outcomes[0])
+        .toMatchObject({ status: 'refused', reason: 'invalid-payload' });
+    }
+    expect(trPr()).toMatchObject({ height: 15 });
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('worker row border drags follow their cell when a peer inserts a row above', async () => {
+  const { client, engine, initial } = await openWorker({ bodyXml: THREE_COLUMNS });
+  const remote = await createResidentEngineSession(undefined, 8302);
+  try {
+    remote.loadState(engine.encodeState());
+    const cell = initial.frame.payload.geometry!.objects.find(object => object.kind === 'cell')!;
+    const vector = engine.encodeStateVector();
+    remote.insertRow({ story: 'body', tableIndex: 0, row: 0, column: 0 }, 'above');
+    engine.applyUpdate(remote.encodeStateAsUpdate(vector));
+    const resized = await client.edit(intent(1, 0, 'resizeObject', {
+      handle: cell.handle, expectVersion: engine.proposalEngine.version(), paintedRowTwips: 300, rowDeltaTwips: 450,
+    }));
+    expect(resized.outcomes[0]?.status).toBe('applied');
+    const rows = (engine.tablePayload('body', 0) as { rows: { trPr: Record<string, unknown> }[] }).rows;
+    expect(rows).toHaveLength(2);
+    expect(rows[0]!.trPr.height ?? null).toBeNull();
+    expect(rows[1]!.trPr).toMatchObject({ height: 750, heightRule: 'atLeast' });
+  } finally {
+    remote.destroy();
+    client.destroy();
+  }
+}, TIMEOUT);
+
 for (const kind of ['insertPageBreak', 'insertSectionBreak'] as const) {
   test(`worker safety refuses ${kind} in a cell before mutation and keeps commands usable`, async () => {
     const { client, engine, point } = await openWorker({ bodyXml: '<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="1440"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/>', prepare(engine) {
@@ -2568,6 +3230,62 @@ test('round two break sections preserve current and existing closing properties'
     expect((await client.edit(intent(2, 1, 'undo', {}))).outcomes[0]?.status).toBe('applied');
     expect(engine.paragraphs('body').map(paragraph => paragraph.text)).toEqual(['Seed', 'Tail']);
     expect(engine.sectionProperties().sections).toHaveLength(2);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('a section read limited to paragraphs matches the full read through typing and section edits', async () => {
+  const { client, engine } = await openWorker({ bodyXml: '<w:p w14:paraId="00000001"><w:pPr><w:tabs><w:tab w:val="right" w:pos="4320"/></w:tabs><w:sectPr><w:type w:val="continuous"/></w:sectPr></w:pPr><w:r><w:t>Seed</w:t></w:r></w:p><w:p><w:r><w:t>Tail</w:t></w:r></w:p>' });
+  try {
+    const expectLimitedMatchesFull = async () => {
+      const full = (await client.documentRead({ kind: 'sectionProperties' })).value;
+      const wanted = engine.paragraphs('body').slice(0, 1).map(({ paraId }) => ({ story: 'body', paraId }));
+      const limited = (await client.documentRead({ kind: 'sectionProperties', paragraphs: [...wanted, { story: 'body', paraId: 'missing' }] })).value;
+      expect(limited).toEqual({ ...full, paragraphs: full.paragraphs.filter(({ paraId }) => paraId === wanted[0]!.paraId) });
+      return limited;
+    };
+    expect((await expectLimitedMatchesFull()).paragraphs[0]!.tabs).toEqual([expect.objectContaining({ alignment: 'right' })]);
+    expect((await client.edit(intent(1, 0, 'insertText', { text: '!' }))).outcomes[0]?.status).toBe('applied');
+    expect((await expectLimitedMatchesFull()).sections).toHaveLength(2);
+    expect((await client.edit(intent(2, 1, 'insertSectionBreak', { type: 'nextPage' }))).outcomes[0]?.status).toBe('applied');
+    expect((await expectLimitedMatchesFull()).sections).toHaveLength(3);
+    expect((await client.edit(intent(3, 2, 'insertSectionBreak', { type: 'nextPage' }))).outcomes[0]?.status).toBe('applied');
+    expect((await expectLimitedMatchesFull()).sections).toHaveLength(4);
+    expect((await client.edit(intent(4, 3, 'undo', {}))).outcomes[0]?.status).toBe('applied');
+    expect((await expectLimitedMatchesFull()).sections).toHaveLength(3);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('a section read limited to paragraphs follows a remote paragraph id change', async () => {
+  const { client, engine } = await openWorker({ bodyXml: '<w:p w14:paraId="00000001"><w:pPr><w:sectPr><w:type w:val="continuous"/></w:sectPr></w:pPr><w:r><w:t>Seed</w:t></w:r></w:p><w:p><w:r><w:t>Tail</w:t></w:r></w:p>' });
+  const remote = await createYrsSession({ clientId: 8322 });
+  try {
+    const before = engine.paragraphs('body')[0]!.paraId;
+    expect((await client.documentRead({ kind: 'sectionProperties', paragraphs: [] })).value.sections[0]!.section).toBe(before);
+    remote.loadState(engine.encodeState());
+    remote.applyRawOps('body', [{ op: 'setEmbedAttr', index: remote.paragraphs('body')[0]!.text.length, key: 'paraId', value: 'remote-first' }]);
+    await client.applyRemoteUpdate(remote.encodeStateAsUpdate(engine.encodeStateVector()));
+    const after = engine.paragraphs('body')[0]!.paraId;
+    expect(after).not.toBe(before);
+    const full = (await client.documentRead({ kind: 'sectionProperties' })).value;
+    const limited = (await client.documentRead({ kind: 'sectionProperties', paragraphs: [] })).value;
+    expect(full.sections[0]!.section).toBe(after);
+    expect(limited.sections[0]!.section).toBe(after);
+    expect(limited.sections).toEqual(full.sections);
+  } finally { remote.destroy(); client.destroy(); }
+}, TIMEOUT);
+
+test('a section read limited to paragraphs follows a local paragraph id change', async () => {
+  const { client, engine } = await openWorker({ bodyXml: '<w:p w14:paraId="00000001"><w:pPr><w:sectPr><w:type w:val="continuous"/></w:sectPr></w:pPr><w:r><w:t>Seed</w:t></w:r></w:p><w:p><w:r><w:t>Tail</w:t></w:r></w:p>' });
+  try {
+    const before = engine.paragraphs('body')[0]!.paraId;
+    expect((await client.documentRead({ kind: 'sectionProperties', paragraphs: [] })).value.sections[0]!.section).toBe(before);
+    engine.applyRawOps('body', [{ op: 'setEmbedAttr', index: engine.paragraphs('body')[0]!.text.length, key: 'paraId', value: 'local-first' }]);
+    expect(engine.paragraphs('body')[0]!.paraId).toBe('local-first');
+    const full = (await client.documentRead({ kind: 'sectionProperties' })).value;
+    const limited = (await client.documentRead({ kind: 'sectionProperties', paragraphs: [] })).value;
+    expect(full.sections[0]!.section).toBe('local-first');
+    expect(limited.sections[0]!.section).toBe('local-first');
+    expect(limited.sections).toEqual(full.sections);
   } finally { client.destroy(); }
 }, TIMEOUT);
 
@@ -3441,12 +4159,16 @@ test('resident geometry, object rects and selection after inline controls match 
       .toEqual(sorted(images.map(position => located([queries.imageByPos(position, 'body')!.rect]))));
 
     const end = layout.find(block => block.paraId === '00000004')!.runs!.find(run => run.text === 'End')!;
-    const selected = await editWithFrame(client, intent(1, 0, 'select', { selection: {
+    const selection = {
       anchor: { story: 'body', paraId: '00000004', offset: 6 }, focus: { story: 'body', paraId: '00000004', offset: 9 },
-    } }));
+    };
+    const selected = await editWithFrame(client, intent(1, 0, 'select', { selection }));
     const expected = located(queries.rangeRects(end.pmStart!, end.pmEnd!));
     expect(expected.length).toBeGreaterThan(0);
-    expect(selected.frame!.payload.geometry!.selection).toEqual(expected);
+    expect(selected.frame!.payload.geometryKept).toBe(true);
+    expect(located(selected.frame!.payload.selectionRects!)).toEqual(expected);
+    const { readResidentFrameGeometry } = await import('./residentObjectGeometry');
+    expect((await readResidentFrameGeometry(engine, frame, selection, selected.frame!.payload.layoutRevision)).selection).toEqual(expected);
   } finally { queries.dispose(); client.destroy(); }
 }, TIMEOUT);
 
@@ -3467,6 +4189,32 @@ function cellPoint(engine: { paragraphs(story: string): { paraId: string; text: 
 function cellObjects(response: { frame?: DocxCommandFrame | null }) {
   return response.frame!.payload.geometry!.objects.filter((object) => object.kind === 'cell');
 }
+
+test('merging cells across a block control keeps the control through save and reopen', async () => {
+  const text = (value: string) => `<w:p><w:r><w:t>${value}</w:t></w:r></w:p>`;
+  const bodyXml = '<w:p/><w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>' +
+    `<w:tr><w:tc>${text('A')}</w:tc><w:tc><w:sdt><w:sdtPr><w:id w:val="9"/><w:tag w:val="keep"/></w:sdtPr><w:sdtContent>${text('B')}</w:sdtContent></w:sdt></w:tc></w:tr></w:tbl><w:p/>`;
+  const { client, engine } = await openWorker({ bodyXml });
+  let reopened: Awaited<ReturnType<typeof openWorker>> | undefined;
+  try {
+    const inside = cellPoint(engine, 'B');
+    expect(inside.story).toContain(':sdt');
+    expect((await client.edit(intent(1, 0, 'select', { selection: inside.selection }))).outcomes[0]?.status).toBe('noop');
+    const at = (column: number) => ({ story: 'body', tableIndex: 0, row: 0, column });
+    engine.setCellSelection({ anchor: at(0), head: at(1) });
+    expect((await client.edit(intent(2, 0, 'mergeTableCells', {}))).outcomes[0]?.status).toBe('applied');
+    const saved = await savedWorkerDocumentXml(client);
+    const control = /<w:sdt[ >][\s\S]*?<\/w:sdt>/.exec(saved)?.[0];
+    if (!control) throw new Error('Merge lost the block control');
+    expect(control).toContain('w:val="keep"');
+    expect(control).toContain('>B<');
+    expect(saved).toContain('>A<');
+    expect(saved.match(/<w:tc[ >]/g)).toHaveLength(1);
+    const body = /<w:body>([\s\S]*?)(?:<w:sectPr[\s\S]*)?<\/w:body>/.exec(saved)![1]!;
+    reopened = await openWorker({ bodyXml: body });
+    expect(cellPoint(reopened.engine, 'B').story).toContain(':sdt');
+  } finally { reopened?.client.destroy(); client.destroy(); }
+}, TIMEOUT);
 
 test('worker orders table structure commands with single version steps duplicates and refusals', async () => {
   const { client, engine, initial } = await openWorker({ bodyXml: TABLE_BODY });
@@ -3854,6 +4602,63 @@ test('worker geometry exposes picture rotation for resize admission', async () =
   } finally { client.destroy(); }
 }, TIMEOUT);
 
+test('typing a character used elsewhere still hints when its run chain lacks coverage', async () => {
+  const { worker, client, engine } = await openWorker({ bodyXml:
+    '<w:p w14:paraId="00000001"><w:r><w:t>A</w:t></w:r></w:p>' +
+    '<w:p w14:paraId="00000002"><w:r><w:rPr><w:rFonts w:ascii="Subset" w:hAnsi="Subset"/></w:rPr><w:t>א</w:t></w:r></w:p>',
+  });
+  const hints: unknown[] = [];
+  const receive = worker.onmessage!;
+  worker.onmessage = event => {
+    if (event.data.ok && event.data.fontRequirementsHint) hints.push(event.data.fontRequirementsHint);
+    receive(event);
+  };
+  try {
+    const data = (path: string) => new Uint8Array(readFileSync(resolve(process.cwd(), path)));
+    await client.edit(intent(1, 0, 'setFontEnvironment', {
+      faces: [
+        { family: 'Liberation Sans', data: data('crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf') },
+        { family: 'Subset', data: data('packages/fonts/assets/NotoSansHebrew-Regular.ttf') },
+      ], chains: { 'liberation sans|0|0': [0], 'subset|0|0': [1] }, families: ['Liberation Sans', 'Subset'],
+    }));
+    await client.fontRequirements(LAYOUT);
+    const at = { story: 'body', paraId: engine.paragraphs('body')[1]!.paraId, offset: 1 };
+    await client.edit(intent(2, 0, 'select', { selection: { anchor: at, focus: at } }));
+    expect(hints).toEqual([]);
+    await client.edit(intent(3, 0, 'insertText', { text: 'A' }));
+    expect(hints).toEqual([{ session: 'd1-command-worker', incarnation: 1, epoch: 1 }]);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+for (const coverage of [false, true]) test(`typing a character late in a paragraph that starts with an uncovered emoji hints when its run chain lacks it${coverage ? ' (coverage-only chain)' : ''}`, async () => {
+  const text = `\u{1F600}${'\u05d0'.repeat(300)}`;
+  const { worker, client, engine } = await openWorker({ bodyXml:
+    '<w:p w14:paraId="00000001"><w:r><w:t>A</w:t></w:r></w:p>' +
+    `<w:p w14:paraId="00000002"><w:r><w:rPr><w:rFonts w:ascii="Subset" w:hAnsi="Subset"/></w:rPr><w:t>${text}</w:t></w:r></w:p>`,
+  });
+  const hints: unknown[] = [];
+  const receive = worker.onmessage!;
+  worker.onmessage = event => {
+    if (event.data.ok && event.data.fontRequirementsHint) hints.push(event.data.fontRequirementsHint);
+    receive(event);
+  };
+  try {
+    const data = (path: string) => new Uint8Array(readFileSync(resolve(process.cwd(), path)));
+    await client.edit(intent(1, 0, 'setFontEnvironment', {
+      faces: [
+        { family: 'Liberation Sans', data: data('crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf') },
+        { family: 'Subset', data: data('packages/fonts/assets/NotoSansHebrew-Regular.ttf') },
+      ], chains: { 'liberation sans|0|0': [0], 'subset|0|0': [1], ...(coverage ? { '@betteroffice/fonts/coverage': [1] } : {}) }, families: ['Liberation Sans', 'Subset'],
+    }));
+    await client.fontRequirements(LAYOUT);
+    const at = { story: 'body', paraId: engine.paragraphs('body')[1]!.paraId, offset: [...text].reduce((n, c) => n + c.length, 0) };
+    await client.edit(intent(2, 0, 'select', { selection: { anchor: at, focus: at } }));
+    expect(hints).toEqual([]);
+    await client.edit(intent(3, 0, 'insertText', { text: '\u03a9' }));
+    expect(hints).toEqual([{ session: 'd1-command-worker', incarnation: 1, epoch: 1 }]);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
 test('an edit in a script without a fallback face in the requirements hints the host once until it asks again', async () => {
   const { worker, client } = await openWorker();
   const hints: unknown[] = [];
@@ -3906,4 +4711,9 @@ test('showing hidden text in a script without a fallback face hints, and require
   } finally {
     client.destroy();
   }
+}, TIMEOUT);
+
+test('worker command sessions name OffscreenCanvas when the runtime lacks it', async () => {
+  const factory = await residentWorkerFactory({ offscreenCanvas: undefined });
+  await expect(openWorker({ factory })).rejects.toThrow('DOCX worker editing paints frames and needs OffscreenCanvas');
 }, TIMEOUT);

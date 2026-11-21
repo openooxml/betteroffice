@@ -39,17 +39,21 @@ beforeAll(() =>
 const originalIdle = globalThis.requestIdleCallback;
 const originalCancelIdle = globalThis.cancelIdleCallback;
 let idleCallbacks = new Map<number, () => void>();
+let pageBuildIdle = new Set<number>();
 let nextIdle = 1;
 
 beforeEach(() => {
   idleCallbacks = new Map();
+  pageBuildIdle = new Set();
   globalThis.requestIdleCallback = ((callback: () => void) => {
     const id = nextIdle++;
     idleCallbacks.set(id, callback);
+    if (new Error().stack?.includes('pageBuildScheduler')) pageBuildIdle.add(id);
     return id;
   }) as typeof requestIdleCallback;
   globalThis.cancelIdleCallback = ((id: number) => {
     idleCallbacks.delete(id);
+    pageBuildIdle.delete(id);
   }) as typeof cancelIdleCallback;
 });
 
@@ -63,7 +67,12 @@ afterEach(() => {
 function runIdleCallbacks(timeRemaining = () => 50): void {
   const pending = [...idleCallbacks.values()];
   idleCallbacks.clear();
+  pageBuildIdle.clear();
   for (const callback of pending) (callback as IdleRequestCallback)({ didTimeout: false, timeRemaining });
+}
+
+async function waitForPageBuildIdle(): Promise<void> {
+  await waitFor(() => expect(pageBuildIdle.size).toBeGreaterThan(0));
 }
 
 async function settleWithIdle(
@@ -279,7 +288,7 @@ test('pages away from the viewport build in batches while the main thread idles'
     const unbuilt = () => result.current.frame!.displayList.pages.filter((page) => page.unbuilt);
     expect(unbuilt().length).toBeGreaterThan(0);
     for (let round = 0; round < 50 && unbuilt().length > 0; round += 1) {
-      await waitFor(() => expect(idleCallbacks.size).toBeGreaterThan(0));
+      await waitForPageBuildIdle();
       await act(async () => runIdleCallbacks());
     }
     expect(unbuilt()).toEqual([]);
@@ -304,7 +313,7 @@ test('default-mode idle page builds attach immediately without background work',
     await waitFor(() => expect(hook.result.current.frame).not.toBeNull());
     const worker = EngineWorker.last!;
     const before = hook.result.current.frame!;
-    await waitFor(() => expect(idleCallbacks.size).toBeGreaterThan(0));
+    await waitForPageBuildIdle();
     await act(async () => runIdleCallbacks());
     const builds = worker.posted.filter((request) => request.type === 'buildPages');
     expect(builds).toHaveLength(1);
@@ -343,7 +352,7 @@ test.each([
     const worker = EngineWorker.last!;
     const before = hook.result.current.frame!;
     worker.holdPageBuilds = true;
-    await waitFor(() => expect(idleCallbacks.size).toBeGreaterThan(0));
+    await waitForPageBuildIdle();
     await act(async () => runIdleCallbacks());
     expect(worker.heldPageBuilds).toHaveLength(1);
     const build = worker.posted.find((request) => request.type === 'buildPages')!;
@@ -411,7 +420,7 @@ test('background posting waits for idle budget and yields to a pending visible r
     await waitFor(() => expect(hook.result.current.frame).not.toBeNull());
     const worker = EngineWorker.last!;
     const builds = () => worker.posted.filter((entry) => entry.type === 'buildPages');
-    await waitFor(() => expect(idleCallbacks.size).toBeGreaterThan(0));
+    await waitForPageBuildIdle();
     await act(async () => runIdleCallbacks(() => 0));
     expect(builds()).toEqual([]);
     const last = hook.result.current.displayList!.pages.length - 1;
@@ -444,7 +453,7 @@ test('worker-open idle builds stop after the viewport margin', async () => {
     expect(pages().length).toBeGreaterThan(7);
     expect(pages().slice(0, 5).every((page) => !page.unbuilt)).toBe(true);
     for (let round = 0; round < 10 && pages().slice(0, 7).some((page) => page.unbuilt); round += 1) {
-      await waitFor(() => expect(idleCallbacks.size).toBeGreaterThan(0));
+      await waitForPageBuildIdle();
       await act(async () => runIdleCallbacks());
     }
     expect(pages().slice(0, 7).every((page) => !page.unbuilt)).toBe(true);
@@ -474,7 +483,7 @@ test('a visible request waits for a default-mode idle reply before building', as
     const worker = EngineWorker.last!;
     const builds = () => worker.posted.filter((entry) => entry.type === 'buildPages');
     worker.holdPageBuilds = true;
-    await waitFor(() => expect(idleCallbacks.size).toBeGreaterThan(0));
+    await waitForPageBuildIdle();
     const before = hook.result.current.frame!;
     await act(async () => runIdleCallbacks());
     expect(builds()).toHaveLength(1);
@@ -514,11 +523,11 @@ test('a settle wait promotes a worker-open background reply awaiting idle attach
     await waitFor(() => expect(hook.result.current.frame).not.toBeNull());
     const worker = EngineWorker.last!;
     const builds = () => worker.posted.filter((entry) => entry.type === 'buildPages');
-    await waitFor(() => expect(idleCallbacks.size).toBeGreaterThan(0));
+    await waitForPageBuildIdle();
     const before = hook.result.current.frame!;
     await act(async () => runIdleCallbacks());
     expect(builds()).toHaveLength(1);
-    await waitFor(() => expect(idleCallbacks.size).toBeGreaterThan(0));
+    await waitForPageBuildIdle();
     expect(hook.result.current.frame).toBe(before);
     let built = false;
     await act(async () => {
@@ -578,7 +587,7 @@ test('worker-open background frames publish atomically from idle without replaci
     const worker = EngineWorker.last!;
     worker.slicePageBuilds = true;
     const before = hook.result.current.frame!;
-    await waitFor(() => expect(idleCallbacks.size).toBeGreaterThan(0));
+    await waitForPageBuildIdle();
     await act(async () => runIdleCallbacks());
     expect(hook.result.current.frame).toBe(before);
     let checks = 0;
@@ -651,7 +660,7 @@ test('a full worker rebuild retains built pages until released and rebuilds evic
     const worker = EngineWorker.last!;
     const pages = () => result.current.frame!.displayList.pages;
     for (let round = 0; round < 50 && pages().some((page) => page.unbuilt); round += 1) {
-      await waitFor(() => expect(idleCallbacks.size).toBeGreaterThan(0));
+      await waitForPageBuildIdle();
       await act(async () => runIdleCallbacks());
     }
     expect(pages().every((page) => !page.unbuilt)).toBe(true);
@@ -752,7 +761,7 @@ test('an edit schedules idle rebuilds for formerly built pages away from the vie
         .filter((request) => request.type === 'buildPages');
     expect(rebuilds()).toEqual([]);
     for (let round = 0; round < 5 && rebuilds().length === 0; round += 1) {
-      await waitFor(() => expect(idleCallbacks.size).toBeGreaterThan(0));
+      await waitForPageBuildIdle();
       await act(async () => runIdleCallbacks());
     }
     expect(rebuilds()).toHaveLength(1);
@@ -914,7 +923,7 @@ test.each([false, true])(
       const bootstrap = worker.posted.find((request) => request.type === 'bootstrap')!;
       const adopted = result.current.frame!.frameEpoch;
       const pageBuilds = () => worker.posted.filter((request) => request.type === 'buildPages');
-      if (idle) await waitFor(() => expect(idleCallbacks.size).toBeGreaterThan(0));
+      if (idle) await waitForPageBuildIdle();
       await act(async () => {
         worker.postMessage({
           id: 0,
@@ -1362,7 +1371,7 @@ function renderReleaseFixture(workerOpen = true, caretAtStart = false) {
 
 async function idleUntil(done: () => boolean): Promise<void> {
   for (let round = 0; round < 50 && !done(); round += 1) {
-    await waitFor(() => expect(idleCallbacks.size).toBeGreaterThan(0));
+    await waitForPageBuildIdle();
     await act(async () => runIdleCallbacks());
   }
   expect(done()).toBe(true);
@@ -1535,7 +1544,7 @@ test('worker-open delays release while the caret is in the typing window', async
     await act(async () => result.current.setDisplayWindow(20, 22));
     await idleUntil(() => result.current.frame!.displayList.pages.slice(18, 24).every((page) => !page.unbuilt));
     await act(async () => result.current.notifyCaretInput());
-    await waitFor(() => expect(idleCallbacks.size).toBeGreaterThan(0));
+    await waitForPageBuildIdle();
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 75));
       runIdleCallbacks();

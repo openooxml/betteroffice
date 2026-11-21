@@ -1,5 +1,9 @@
 import os
-from typing import Any, Callable, Literal, final, overload
+from typing import TypedDict, Any, Callable, Literal, final, overload
+
+class PngTarget(TypedDict):
+    slide: int | str
+
 
 from .render import HitTestResult, PresentationInspection, ProposalDiffSlide
 
@@ -10,6 +14,10 @@ def decode_font_face(
     data: bytes, codec: str, *, dict: bytes | None = None, max_output: int | None = None
 ) -> tuple[bytes, bytes | None]:
     """Decode a font pack face and return font bytes and an optional transformed payload."""
+    ...
+
+def font_substitute(family: str) -> tuple[str | None, str] | None:
+    """The substitution table entry for an Office family name as (remote family, generic family)."""
     ...
 
 def inspect_presentation(
@@ -74,6 +82,8 @@ class TextRun:
     def font_family(self) -> str | None: ...
     @property
     def underline(self) -> str | None: ...
+    @property
+    def strike(self) -> str | None: ...
 
     @property
     def spacing_pt(self) -> float | None: ...
@@ -379,6 +389,7 @@ class Presentation:
     def propose_json(self, args: str) -> str: ...
     def proposals_json(self) -> str: ...
     def preview_proposal_json(self, id: str) -> str: ...
+    def proposal_slide_strip_json(self, id: str) -> str: ...
     @overload
     def accept_proposal(
         self, id: str, *, force: bool = False, receipt: Literal[False] = False,
@@ -402,6 +413,9 @@ class Presentation:
     def render_proposal(self, id: str, slide: int | str) -> DisplayList: ...
     def layout_proposal_diff_slide(
         self, id: str, slide: int | str,
+    ) -> ProposalDiffSlide: ...
+    def layout_proposal_diff_slide_by_id(
+        self, id: str, slide_id: str,
     ) -> ProposalDiffSlide: ...
     @staticmethod
     def open(data: bytes, *, limits: dict[str, int] | None = ...) -> Presentation: ...
@@ -466,6 +480,7 @@ class Presentation:
         color: str | None = ...,
         font_family: str | None = ...,
         underline: str | None = ...,
+        strike: str | None = ...,
         spacing_pt: float | None = ...,
         baseline_pct: float | None = ...,
         kern_pt: float | None = ...,
@@ -525,6 +540,7 @@ class Presentation:
         color: str | None = ...,
         font_family: str | None = ...,
         underline: str | None = ...,
+        strike: str | None = ...,
         spacing_pt: float | None = ...,
         baseline_pct: float | None = ...,
         kern_pt: float | None = ...,
@@ -543,6 +559,7 @@ class Presentation:
         color: str | None = ...,
         font_family: str | None = ...,
         underline: str | None = ...,
+        strike: str | None = ...,
         spacing_pt: float | None = ...,
         baseline_pct: float | None = ...,
     ) -> TextEdit: ...
@@ -588,14 +605,8 @@ class Presentation:
         self, slide: int | str, x: float, y: float,
     ) -> HitTestResult | None: ...
     def render_slide(self, slide: int | str) -> DisplayList: ...
-    def render_png(
-        self,
-        slide: int | str,
-        *,
-        scale: float = 1.0,
-        background: str = "slide",
-        max_shadow_pixels: int | None = None,
-    ) -> Png: ...
+    def render_png(self, target: PngTarget, *, scale: float = ...,
+                   background: str = ..., max_shadow_pixels: int | None = ...) -> Png: ...
     def save(self) -> bytes:
         """Serialize back to PPTX bytes, edits included."""
     def save_path(self, path: str | os.PathLike[str]) -> None:

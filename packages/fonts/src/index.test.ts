@@ -124,6 +124,14 @@ describe('resolution', () => {
     }
   });
 
+  test('emulated symbol families take the face that covers their marker stand-ins', () => {
+    for (const family of ['Wingdings', 'wingdings 2', 'Wingdings 3', ' Webdings ']) {
+      for (const office of ['powerpoint', 'word'] as const) {
+        expect(resolveLastResortFace(family, false, false, office).file).toBe('LiberationSans-Regular.ttf.zst');
+      }
+    }
+  });
+
   test('Google Sans retains the Carlito fallback', () => {
     expect(resolveMetricCompatFamily('Google Sans')).toBeUndefined();
     expect(resolveLastResortFace('Google Sans', false, false).file).toBe('Carlito-Regular.ttf.zst');
@@ -310,6 +318,19 @@ describe('resolution', () => {
     expect(resolveScriptFallbackFace('hebrew', true, false)?.file).toBe('NotoSansHebrew-Bold.ttf.zst');
   });
 
+  test('Naskh-styled Word families fall back to Noto Naskh Arabic in every style', () => {
+    for (const family of ['Simplified Arabic', 'Traditional Arabic', ' traditional ARABIC ']) {
+      for (const bold of [false, true]) for (const italic of [false, true]) {
+        expect(resolveScriptFallbackFace('arabic', bold, italic, family)?.file).toBe('NotoNaskhArabic-Regular.ttf.zst');
+      }
+      expect(resolveScriptFallbackFace('hebrew', false, false, family)?.file).toBe('NotoSansHebrew-Regular.ttf.zst');
+    }
+    expect(resolveScriptFallbackFace('arabic', false, false, 'Arial')?.file).toBe('NotoSansArabic-Regular.ttf.zst');
+    expect(resolveScriptFallbackFace('arabic', true, false, 'Arial')?.file).toBe('NotoSansArabic-Bold.ttf.zst');
+    expect(resolveScriptFallbackFace('arabic', false, false, 'Times New Roman')?.file)
+      .toBe('NotoSansArabic-Regular.ttf.zst');
+  });
+
   test('known heavy family names select the bold face and preserve italics', () => {
     for (const family of ['Arial Black', ' ARIAL-BLACK ', 'Arial Heavy', 'Arial ExtraBold']) {
       expect(resolveLastResortFace(family, false, false).file).toBe('LiberationSans-Bold.ttf.zst');
@@ -485,6 +506,31 @@ describe('loading', () => {
       else delete (globalThis as { location?: Location }).location;
     }
   });
+
+  test.skipIf(!existsSync(new URL('./decoder/fontpack.wasm', import.meta.url)))(
+    'a baseUrl holding only font assets decodes packed faces with the decoder shipped in the package',
+    async () => {
+      const realFetch = globalThis.fetch;
+      const host = globalThis.process as unknown as { getBuiltinModule?: (id: string) => unknown };
+      const original = host.getBuiltinModule;
+      const face = resolveMetricCompatFace('Calibri', false, false)!;
+      const decoderRequests: string[] = [];
+      host.getBuiltinModule = (id: string) => id === 'node:zlib' ? {} : original?.call(host, id);
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        if (!String(input).endsWith('.wasm')) return fontAssetResponse(input);
+        decoderRequests.push(String(input));
+        return new Response('missing', { status: 404 });
+      }) as unknown as typeof fetch;
+      try {
+        const bytes = await loadBundledFontBytes(face, { baseUrl: 'https://fonts-only.example/assets/' });
+        expect(bytes.byteLength).toBe(face.byteLength);
+        expect(decoderRequests).toEqual(['https://fonts-only.example/assets/decoder/fontpack.wasm']);
+      } finally {
+        globalThis.fetch = realFetch;
+        host.getBuiltinModule = original;
+      }
+    },
+  );
 
   test('explains that server-side provider bases must be absolute', () => {
     expect(() => createFontProvider({ baseUrl: 'fonts/' })).toThrow(

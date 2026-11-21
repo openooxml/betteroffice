@@ -10,6 +10,47 @@ use crate::{ColumnRange, RowRange, TableBand, TableSpec};
 
 pub const MAX_TOKENS: usize = 10_000;
 pub const MAX_FORMULA_BYTES: usize = 32_768;
+/// how many significant digits of a number literal excel keeps; the rest
+/// read as zeros.
+const LITERAL_DIGITS: usize = 15;
+/// the smallest literal excel refuses; 9.99999999999999E+307 is the largest
+/// it accepts.
+const LITERAL_LIMIT: f64 = 1e308;
+/// the smallest nonzero literal excel is known to accept: 1E-309 is taken
+/// and 1E-310 refused; where between the two the boundary lies is not known.
+const LITERAL_SMALLEST: f64 = 1e-309;
+
+/// a literal's value inside excel's range: past either end there is none,
+/// and one below the smallest normal double reads as 0, as Excel rewrites it.
+fn literal_in_range(value: f64) -> Option<f64> {
+    if value >= LITERAL_LIMIT || (value != 0.0 && value < LITERAL_SMALLEST) {
+        return None;
+    }
+    Some(if value < f64::MIN_POSITIVE {
+        0.0
+    } else {
+        value
+    })
+}
+
+/// a number literal as excel reads it: digits past the fifteenth significant
+/// one become zeros before the text is converted.
+fn literal_value(text: &str) -> Option<f64> {
+    let split = text.find(['e', 'E']).unwrap_or(text.len());
+    let (mantissa, exponent) = text.split_at(split);
+    let mut kept = String::with_capacity(text.len());
+    let mut significant = 0;
+    for c in mantissa.chars() {
+        if c.is_ascii_digit() && (significant > 0 || c != '0') {
+            significant += 1;
+            kept.push(if significant > LITERAL_DIGITS { '0' } else { c });
+        } else {
+            kept.push(c);
+        }
+    }
+    kept.push_str(exponent);
+    kept.parse().ok()
+}
 
 /// a positioned lexer/parser error, the single error type of `parse_formula`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,12 +162,38 @@ pub fn lex(input: &str) -> Result<Vec<Token>, ParseError> {
             "formula length exceeded cap",
         ));
     }
-    Lexer { input, pos: 0 }.run()
+    Lexer {
+        input,
+        pos: 0,
+        external_prefixes: false,
+    }
+    .run()
+}
+
+/// [`lex`] for rewriting formula text rather than evaluating it. It also
+/// reads the prefix excel stores before a reference into another workbook,
+/// `[1]` before `Sheet!A1` and `[1]!` before a name, as an
+/// [`TokKind::Ident`] spanning just that prefix, so the text around such a
+/// reference still tokenizes. The parser never sees these tokens.
+pub fn lex_for_rewrite(input: &str) -> Result<Vec<Token>, ParseError> {
+    if input.len() > MAX_FORMULA_BYTES {
+        return Err(ParseError::new(
+            MAX_FORMULA_BYTES,
+            "formula length exceeded cap",
+        ));
+    }
+    Lexer {
+        input,
+        pos: 0,
+        external_prefixes: true,
+    }
+    .run()
 }
 
 struct Lexer<'a> {
     input: &'a str,
     pos: usize,
+    external_prefixes: bool,
 }
 
 impl Lexer<'_> {
@@ -142,6 +209,8 @@ impl Lexer<'_> {
                 '"' => self.lex_string()?,
                 '#' => self.lex_error_literal()?,
                 '\'' => self.lex_quoted_sheet_ref()?,
+                '[' if self.workbook_function_end().is_some() => self.lex_workbook_function(),
+                '[' if self.external_prefix_end().is_some() => self.lex_external_prefix(),
                 '(' => self.punct(TokKind::LParen),
                 ')' => self.punct(TokKind::RParen),
                 ',' => self.punct(TokKind::Comma),
@@ -266,12 +335,10 @@ impl Lexer<'_> {
             }
         }
         let text = &self.input[start..self.pos];
-        let value = text
-            .parse::<f64>()
-            .map_err(|_| ParseError::new(start, format!("malformed number {text:?}")))?;
-        if !value.is_finite() {
-            return Err(ParseError::new(start, "number is outside the finite range"));
-        }
+        let value = literal_value(text)
+            .ok_or_else(|| ParseError::new(start, format!("malformed number {text:?}")))?;
+        let value = literal_in_range(value)
+            .ok_or_else(|| ParseError::new(start, "number is outside the range excel accepts"))?;
         Ok(TokKind::Num(value))
     }
 
@@ -306,6 +373,46 @@ impl Lexer<'_> {
             }
         }
         Err(ParseError::new(start, "unknown error literal"))
+    }
+
+    /// where `[1]!Foo` ends when one stands here before its `(`: the form
+    /// excel stores a call to a function of another workbook, an add-in's, in.
+    fn workbook_function_end(&self) -> Option<usize> {
+        let rest = self.input[self.pos..].strip_prefix('[')?;
+        let (index, name) = rest.split_once("]!")?;
+        let word = name
+            .find(|c: char| !c.is_alphanumeric() && !matches!(c, '_' | '.'))
+            .unwrap_or(name.len());
+        let named = !index.is_empty() && index.bytes().all(|b| b.is_ascii_digit()) && word > 0;
+        (named && name[word..].starts_with('('))
+            .then_some(self.pos + "[".len() + index.len() + "]!".len() + word)
+    }
+
+    /// where `[1]` or `[1]!` ends when one stands here and this lexer reads
+    /// the prefixes of references into other workbooks.
+    fn external_prefix_end(&self) -> Option<usize> {
+        if !self.external_prefixes {
+            return None;
+        }
+        let rest = self.input[self.pos..].strip_prefix('[')?;
+        let (index, after) = rest.split_once(']')?;
+        if index.is_empty() || !index.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let bang = usize::from(after.starts_with('!'));
+        Some(self.pos + "[".len() + index.len() + "]".len() + bang)
+    }
+
+    fn lex_external_prefix(&mut self) -> TokKind {
+        let start = self.pos;
+        self.pos = self.external_prefix_end().unwrap_or(self.pos);
+        TokKind::Ident(self.input[start..self.pos].to_string())
+    }
+
+    fn lex_workbook_function(&mut self) -> TokKind {
+        let start = self.pos;
+        self.pos = self.workbook_function_end().unwrap_or(self.pos);
+        TokKind::Ident(self.input[start..self.pos].to_string())
     }
 
     /// `'Quoted Sheet'!A1` or `'Quoted Sheet'!A1:B2`. `''` escapes a quote.
@@ -575,6 +682,33 @@ mod tests {
         lex(src).unwrap().into_iter().map(|t| t.kind).collect()
     }
 
+    /// Only the rewrite lexer reads the prefix of a reference into another
+    /// workbook, as one token spanning `[1]` or `[1]!`; the text around it
+    /// tokenizes as usual, and the evaluating lexer still refuses it.
+    #[test]
+    fn the_rewrite_lexer_reads_external_workbook_prefixes() {
+        for (source, prefix, rest) in [
+            ("[1]Data!$A$1+Sales[Amt]", "[1]", 3),
+            ("Sales[[#This Row],[Amt]]*[12]Rates!B2", "[12]", 1),
+            ("[3]!Total+1", "[3]!", 3),
+        ] {
+            assert!(lex(source).is_err(), "{source}");
+            let tokens = lex_for_rewrite(source).unwrap();
+            let at = tokens
+                .iter()
+                .position(|t| t.kind == TokKind::Ident(prefix.into()))
+                .unwrap();
+            assert_eq!(&source[tokens[at].start..tokens[at].end], prefix);
+            assert_eq!(tokens.len() - at - 1, rest, "{source}");
+        }
+        assert!(matches!(
+            lex_for_rewrite("Sales[Amt]").unwrap()[0].kind,
+            TokKind::TableRef { .. }
+        ));
+        assert!(lex_for_rewrite("[x]Data!A1").is_err());
+        assert!(lex_for_rewrite("[]Data!A1").is_err());
+    }
+
     #[test]
     fn lexes_numbers_and_operators() {
         assert_eq!(
@@ -763,6 +897,65 @@ mod tests {
 
     #[test]
     fn rejects_non_finite_number_literals() {
-        assert!(lex("1e999").unwrap_err().message.contains("finite"));
+        assert!(lex("1e999").unwrap_err().message.contains("range"));
+    }
+
+    fn number(src: &str) -> f64 {
+        match lex(src).unwrap()[0].kind {
+            TokKind::Num(value) => value,
+            ref other => panic!("{src} lexed as {other:?}"),
+        }
+    }
+
+    /// Excel 365 for Mac result: ATANH(0.9999999999999999) is ATANH of
+    /// 0.999999999999999, so the literal keeps fifteen significant digits.
+    #[test]
+    fn number_literals_keep_fifteen_significant_digits() {
+        assert_eq!(number("0.9999999999999999"), 0.999_999_999_999_999);
+        assert_eq!(number("9007199254740993"), 9_007_199_254_740_990.0);
+        assert_eq!(number("123456789012345678E2"), 1.234_567_890_123_45e19);
+        assert_eq!(
+            number("0.000001234567890123456789"),
+            1.234_567_890_123_45e-6
+        );
+        assert_eq!(number("1.00000000000000"), 1.0);
+        assert_eq!(number("0.1"), 0.1);
+    }
+
+    /// Excel 365 for Mac result: 9.99999999999999E+307 is accepted, a literal
+    /// of 1E+308 or more cannot be entered.
+    #[test]
+    fn number_literals_stop_below_1e308() {
+        assert_eq!(number("9.99999999999999E+307"), 9.999_999_999_999_99e307);
+        assert_eq!(number("9.9999999999999999E307"), 9.999_999_999_999_99e307);
+        for src in ["1E308", "1e+308", "1.5E308", "10E307", "1E309"] {
+            assert!(lex(src).is_err(), "{src}");
+        }
+    }
+
+    /// Excel 365 for Mac result: 2.2250738585072E-308*1, 1E-308*1, 100E-310*1,
+    /// 0.1E-307*1, 0.00001E-303*1, 9E-309*1 and 1E-309*1 are 0, Excel
+    /// rewriting the literal to 0; formulas holding 1E-310, 10E307 or 0.1E309
+    /// are refused, the limits going by the value; 0.1234567890123459 reads
+    /// as 0.123456789012345.
+    #[test]
+    fn literal_limits_go_by_the_value() {
+        for src in [
+            "2.2250738585072E-308",
+            "1E-308",
+            "100E-310",
+            "0.1E-307",
+            "0.00001E-303",
+            "9E-309",
+            "1E-309",
+            "0E-400",
+        ] {
+            assert_eq!(number(src).to_bits(), 0, "{src}");
+        }
+        assert_eq!(number("2.2250738585073E-308"), 2.225_073_858_507_3e-308);
+        assert_eq!(number("0.1234567890123459"), 0.123_456_789_012_345);
+        for src in ["1E-310", "10E307", "0.1E309"] {
+            assert!(lex(src).is_err(), "{src}");
+        }
     }
 }

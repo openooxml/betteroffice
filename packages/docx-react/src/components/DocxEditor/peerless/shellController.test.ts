@@ -1,6 +1,6 @@
 import { expect, mock, spyOn, test } from 'bun:test';
 import { createPeerlessShellController, LEGACY_SYNC_API_PROP } from './shellController';
-import { createPeerlessViewStore } from './viewStore';
+import { createPeerlessViewStore, type PeerlessViewSnapshot } from './viewStore';
 import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession';
 import { PLAIN_CONTEXT } from '../../../commands/testing';
 import { admitIntent, createInputAdmission } from './inputAdmission';
@@ -23,6 +23,146 @@ function fixture(presentedThroughSeq = 0) {
   const controller = createPeerlessShellController({ read: read as never, focus() {}, zoom: 1 });
   return { controller, binding, viewStore, flush, read };
 }
+
+function shellFixture() {
+  const base = fixture();
+  const identity = base.viewStore.getSnapshot().identity;
+  let view: PeerlessViewSnapshot = { ...base.viewStore.getSnapshot(), geometry: {
+    identity, documentVersion: '0', coversThroughSeq: 0, frameEpoch: 1, layoutRevision: 1,
+    layoutEpoch: 1, documentWidth: 600, layoutProvisional: false, reservations: { version: '0', key: '1' },
+    pages: [{ page: { pageId: '1', pageIndex: 0 }, bounds: { x: 0, y: 0, width: 600, height: 800 },
+      transform: [1, 0, 0, 1, 0, 0], displayPage: { pageIndex: 0, width: 600, height: 800, primitives: [] } }],
+    caret: null, selectionFocus: null, selectionRects: [], parts: [],
+    objects: { version: '0', frameEpoch: 1, layoutRevision: 1, objects: [], selection: [], unbuiltPages: [] },
+  } };
+  const listeners = new Set<() => void>();
+  const binding = { ...base.binding, viewStore: { ...base.viewStore, getSnapshot: () => view,
+    subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener); }; } } };
+  base.controller.attach(binding);
+  return { ...base, binding, present(next: PeerlessViewSnapshot) { view = next; for (const listener of listeners) listener(); } };
+}
+
+test('scoped plain-text paste starts reading before worker input admission', async () => {
+  const { controller, binding } = fixture();
+  const navigatorDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  const text = Promise.resolve('plain');
+  const readText = mock(() => text);
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { clipboard: { readText } } });
+  let clipboardText: Promise<string> | undefined;
+  let gesture = true;
+  controller.update({ read: async () => ({} as never), focus() {}, zoom: 1,
+    perform: async (_id, _args, read) => { clipboardText = read; return { ok: true, status: 'executed' }; } });
+  controller.attach(binding);
+  const scoped = controller.commands.scoped({ gesture: () => gesture, deny: () => null, subscribe: () => () => {} });
+  try {
+    const pending = scoped.execute('pasteAsPlainText', null);
+    expect(readText).toHaveBeenCalledTimes(1);
+    expect(clipboardText).toBeUndefined();
+    gesture = false;
+    expect(await pending).toMatchObject({ ok: true });
+    expect(clipboardText).toBe(text);
+    expect(await scoped.execute('pasteAsPlainText', null)).toMatchObject({
+      ok: false, failure: { code: 'unsupported-policy' },
+    });
+    expect(readText).toHaveBeenCalledTimes(1);
+  } finally {
+    controller.dispose();
+    if (navigatorDescriptor) Object.defineProperty(globalThis, 'navigator', navigatorDescriptor);
+    else Reflect.deleteProperty(globalThis, 'navigator');
+  }
+});
+
+test('shell snapshots retain paint-only frames while full subscribers see every newest view', () => {
+  const { controller, present } = shellFixture();
+  const shell = controller.getShellSnapshot();
+  const frames: PeerlessViewSnapshot[] = [];
+  const remove = controller.subscribe(() => { frames.push(controller.getSnapshot().view!); });
+  const shellListener = mock(() => {});
+  const refresh = spyOn(controller.commands, 'refresh');
+  const removeShell = controller.subscribeShell(shellListener);
+  for (let index = 0; index < 40; index++) {
+    const view = structuredClone(controller.getSnapshot().view!);
+    view.geometry!.frameEpoch++;
+    view.geometry!.objects!.frameEpoch++;
+    view.geometry!.pages[0]!.displayPage!.sectionIndex = index;
+    present(view);
+    expect(controller.getSnapshot().view).toBe(view);
+    expect(controller.getShellSnapshot()).toBe(shell);
+    expect(controller.getSnapshot().view!.geometry!.pages[0]!.displayPage!.sectionIndex).toBe(index);
+  }
+  expect(frames).toHaveLength(40);
+  expect(new Set(frames).size).toBe(40);
+  expect(shellListener).not.toHaveBeenCalled();
+  expect(refresh).not.toHaveBeenCalled();
+  remove(); removeShell();
+  present({ ...controller.getSnapshot().view!, version: 1 });
+  expect(frames).toHaveLength(40);
+  expect(shellListener).not.toHaveBeenCalled();
+  refresh.mockRestore();
+});
+
+const shellChanges: [string, (view: PeerlessViewSnapshot) => void][] = [
+  ['identity session', view => { view.identity.session = 'replacement'; }],
+  ['identity incarnation', view => { view.identity.incarnation++; }],
+  ['identity epoch', view => { view.identity.epoch++; }],
+  ['version', view => { view.version++; }],
+  ['throughSeq', view => { view.throughSeq++; }],
+  ['versionSinceSeq', view => { view.versionSinceSeq = 1; }],
+  ['presentedThroughSeq', view => { view.presentedThroughSeq++; }],
+  ['workerSelection', view => { view.workerSelection = { anchor: { story: 'body', paraId: 'p', offset: 0 }, focus: { story: 'body', paraId: 'p', offset: 1 } }; }],
+  ['anchors', view => { view.anchors = { anchor: Uint8Array.of(1), focus: Uint8Array.of(2) }; }],
+  ['editState', view => { view.editState!.canUndo = false; }],
+  ['provisionalCaret', view => { view.provisionalCaret = { source: 'click', throughSeq: 1, pageIndex: 0, rect: { x: 1, y: 2, width: 1, height: 12 } }; }],
+  ['geometry', view => { view.geometry = null; }],
+  ['documentVersion', view => { view.geometry!.documentVersion = '1'; }],
+  ['geometry identity', view => { view.geometry!.identity = { ...view.identity, epoch: 2 }; }],
+  ['coversThroughSeq', view => { view.geometry!.coversThroughSeq++; }],
+  ['layoutRevision', view => { view.geometry!.layoutRevision++; }],
+  ['layoutEpoch', view => { view.geometry!.layoutEpoch!++; }],
+  ['documentWidth', view => { view.geometry!.documentWidth!++; }],
+  ['layoutProvisional', view => { view.geometry!.layoutProvisional = true; }],
+  ['reservations', view => { view.geometry!.reservations!.key = '2'; }],
+  ['caret', view => { view.geometry!.caret = { x: 1, y: 2, width: 1, height: 12 }; }],
+  ['selectionFocus', view => { view.geometry!.selectionFocus = { x: 1, y: 2, width: 1, height: 12 }; }],
+  ['selectionRects', view => { view.geometry!.selectionRects = [{ x: 1, y: 2, width: 10, height: 12 }]; }],
+  ['parts', view => { view.geometry!.parts = [{ kind: 'header', story: 'hf:1', pageIndex: 0, pageId: '1', x: 0, y: 0, width: 600, height: 20 }]; }],
+  ['objects', view => { view.geometry!.objects!.unbuiltPages.push(0); }],
+  ['page count', view => { view.geometry!.pages = []; }],
+  ['page identity', view => { view.geometry!.pages[0]!.page.pageId = '2'; }],
+  ['page index', view => { view.geometry!.pages[0]!.page.pageIndex = 1; }],
+  ...(['x', 'y', 'width', 'height'] as const).map((key): [string, (view: PeerlessViewSnapshot) => void] =>
+    [`page bounds ${key}`, view => { view.geometry!.pages[0]!.bounds[key]++; }]),
+  ['page transform', view => { view.geometry!.pages = view.geometry!.pages.map(page => ({ ...page, transform: [2, 0, 0, 2, 0, 0] as const })); }],
+];
+
+for (const [name, change] of shellChanges) {
+  test(`shell snapshots change for ${name}`, () => {
+    const { controller, present } = shellFixture();
+    const previous = controller.getShellSnapshot();
+    const listener = mock(() => {});
+    controller.subscribeShell(listener);
+    const next = structuredClone(controller.getSnapshot().view!);
+    change(next);
+    present(next);
+    expect(controller.getShellSnapshot()).not.toBe(previous);
+    expect(listener).toHaveBeenCalledTimes(1);
+  });
+}
+
+test('shell snapshots change for status, preview, painted preview, error, mode and document replacement', () => {
+  const { controller, binding } = shellFixture();
+  let previous = controller.getShellSnapshot();
+  const changed = () => { expect(controller.getShellSnapshot()).not.toBe(previous); previous = controller.getShellSnapshot(); };
+  controller.opening('first'); changed();
+  const preview = { frame: new ArrayBuffer(0), documentPreview: true } as never;
+  controller.preview(preview); changed();
+  controller.previewPresented(preview); changed();
+  controller.failOpening(new Error('open failed')); changed();
+  controller.update({ read: async () => ({} as never), focus() {}, zoom: 1, mode: 'viewing' }); changed();
+  controller.attach(binding); changed();
+  controller.opening('second'); changed();
+  controller.attach(binding); changed();
+});
 
 test('font selection prepares measurement before formatting and rejects replacement', async () => {
   const { controller, binding, viewStore } = fixture();
@@ -183,6 +323,121 @@ test('worker highlightColor formats and clears through formatRange', async () =>
     expect(await controller.commands.store.execute('highlightColor', { color })).toMatchObject({ ok: true });
     expect(format).toHaveBeenLastCalledWith({ kind: 'formatRange', payload: { delta: { highlight: color === 'none' ? null : color } } }, { fence: true });
   }
+});
+
+function announceLikeTheEditor(controller: ReturnType<typeof fixture>['controller']) {
+  let seen: unknown = null;
+  controller.subscribeShell(() => {
+    const token = controller.getShellSnapshot().readyFor;
+    if (token === seen) return;
+    seen = token;
+    if (token) setTimeout(() => controller.announceReady(token));
+  });
+}
+
+const laterTurn = () => new Promise(resolve => setTimeout(resolve, 0));
+
+function paintFirstPage(viewStore: ReturnType<typeof fixture>['viewStore'], frameEpoch: number) {
+  viewStore.installFrameGeometry({ identity: viewStore.getSnapshot().identity, coversThroughSeq: 0,
+    frameEpoch, layoutRevision: frameEpoch, pages: [{ page: { pageId: '1', pageIndex: 0 },
+      bounds: { x: 0, y: 0, width: 600, height: 800 }, transform: [1, 0, 0, 1, 0, 0] }], caret: null, selectionRects: [] });
+}
+
+test('onReady receives the ref once, on a later turn after the first page paints', async () => {
+  const { controller, binding, viewStore } = fixture(-1);
+  const order: string[] = [];
+  const onReady = mock((_api: unknown) => { order.push('ready'); });
+  controller.update({ read: async () => ({} as never), focus() {}, zoom: 1, onReady,
+    onFirstPagePainted: () => { order.push('painted'); } } as Parameters<typeof controller.update>[0]);
+  announceLikeTheEditor(controller);
+  controller.opening();
+  controller.attach(binding);
+  await laterTurn();
+  expect(order).toEqual([]);
+  paintFirstPage(viewStore, 2);
+  expect(order).toEqual(['painted']);
+  expect(controller.getSnapshot().readyFor).toBe(binding);
+  await laterTurn();
+  expect(order).toEqual(['painted', 'ready']);
+  expect(onReady.mock.calls[0]![0]).toBe(controller.ref);
+  paintFirstPage(viewStore, 3);
+  controller.announceReady(binding);
+  await laterTurn();
+  expect(onReady).toHaveBeenCalledTimes(1);
+});
+
+test('onReady skips the preview paint and fires on a later turn once the opened document paints, when its reads resolve', async () => {
+  const { controller, binding, viewStore, read } = fixture(-1);
+  const order: string[] = [];
+  let identities!: Promise<unknown>;
+  const onReady = mock((api: typeof controller.ref) => { order.push('ready'); identities = api.getParagraphIdentities(); });
+  controller.update({ read: read as never, focus() {}, zoom: 1, onReady,
+    onFirstPagePainted: () => { order.push('painted'); } } as Parameters<typeof controller.update>[0]);
+  announceLikeTheEditor(controller);
+  controller.opening();
+  const preview = { frame: Uint8Array.of(1), documentPreview: true } as never;
+  controller.preview(preview);
+  controller.previewPresented(preview);
+  controller.painted();
+  expect(order).toEqual(['painted']);
+  expect(controller.getSnapshot().readyFor).toBeNull();
+  await laterTurn();
+  expect(order).toEqual(['painted']);
+  controller.attach(binding);
+  await laterTurn();
+  expect(order).toEqual(['painted']);
+  paintFirstPage(viewStore, 2);
+  expect(order).toEqual(['painted']);
+  await laterTurn();
+  expect(order).toEqual(['painted', 'ready']);
+  expect(onReady.mock.calls[0]![0]).toBe(controller.ref);
+  expect(await identities.then(() => 'resolved', (error: Error) => error.name)).toBe('resolved');
+  paintFirstPage(viewStore, 3);
+  await laterTurn();
+  expect(onReady).toHaveBeenCalledTimes(1);
+});
+
+test('onReady is not called when onFirstPagePainted closes the editor', async () => {
+  const { controller, binding, viewStore, read } = fixture(-1);
+  const onReady = mock((_api: unknown) => {});
+  const painted = mock(() => { controller.dispose(); });
+  controller.update({ read: read as never, focus() {}, zoom: 1, onReady,
+    onFirstPagePainted: painted } as Parameters<typeof controller.update>[0]);
+  announceLikeTheEditor(controller);
+  controller.opening();
+  controller.attach(binding);
+  paintFirstPage(viewStore, 2);
+  expect(painted).toHaveBeenCalledTimes(1);
+  await laterTurn();
+  expect(onReady).not.toHaveBeenCalled();
+});
+
+test('a document replaced inside onFirstPagePainted gets no onReady, and its replacement gets one on a later turn once it paints', async () => {
+  const first = fixture(-1);
+  const second = fixture(-1);
+  const { controller } = first;
+  const order: unknown[] = [];
+  let replace = true;
+  controller.update({ read: first.read as never, focus() {}, zoom: 1, onReady: (api: unknown) => { order.push(api); },
+    onFirstPagePainted: () => { order.push('painted'); if (replace) { replace = false; controller.opening({}); } } } as Parameters<typeof controller.update>[0]);
+  announceLikeTheEditor(controller);
+  controller.opening({});
+  controller.attach(first.binding);
+  paintFirstPage(first.viewStore, 2);
+  expect(replace).toBe(false);
+  await laterTurn();
+  expect(order).toEqual(['painted']);
+  expect(controller.getSnapshot().status).toBe('opening');
+  controller.attach(second.binding);
+  await laterTurn();
+  expect(order).toEqual(['painted']);
+  paintFirstPage(second.viewStore, 2);
+  expect(order).toEqual(['painted', 'painted']);
+  await laterTurn();
+  expect(order).toEqual(['painted', 'painted', controller.ref]);
+  paintFirstPage(second.viewStore, 3);
+  await laterTurn();
+  expect(order).toHaveLength(3);
 });
 
 test('worker insertBreak stays a loud sync-API failure', () => {
@@ -661,6 +916,66 @@ test('queries pin the native version and refuse commands after replacement', asy
   expect(await controller.applyQuery(query, { kind: 'setWatermark', payload: { watermark: null, expectVersion: query.version } }))
     .toMatchObject({ ok: false, failure: { code: 'document-replaced' } });
   expect(submit).toHaveBeenCalledTimes(1);
+});
+
+function versionedFixture() {
+  const base = fixture();
+  let native = 'native-0';
+  base.read.mockImplementation(async () => ({ status: 'ok', version: native, value: { version: native, paragraphs: [] } }));
+  const readAt = mock(async (_request: { kind: string }, version: string): Promise<{ status: 'ok'; version: string; value: unknown } | { status: 'superseded' }> =>
+    version === native ? { status: 'ok', version, value: { styles: [], fontFamilies: [] } } : { status: 'superseded' });
+  base.controller.update({ read: base.read as never, readAt: readAt as never, focus() {}, zoom: 1 });
+  base.controller.attach(base.binding);
+  const edit = (next: string) => {
+    native = next;
+    const view = base.viewStore.getSnapshot();
+    base.viewStore.acceptWorkerState(view.identity, { epoch: view.identity.epoch, version: view.version + 1, throughSeq: view.throughSeq + 1,
+      presentedThroughSeq: view.presentedThroughSeq, selection: null, editState: view.editState });
+  };
+  return { ...base, readAt, edit, moveWorker: (next: string) => { native = next; } };
+}
+
+test('queries at one document version share a single version probe', async () => {
+  const { controller, read, readAt, edit } = versionedFixture();
+  await Promise.all(Array.from({ length: 3 }, () => controller.query({ kind: 'toolbarMetadata' })));
+  for (let index = 0; index < 3; index++) await controller.query({ kind: 'toolbarMetadata' });
+  expect(readAt).toHaveBeenCalledTimes(6);
+  expect(read.mock.calls.length).toBeLessThanOrEqual(1);
+  edit('native-1');
+  for (let index = 0; index < 3; index++) expect((await controller.query({ kind: 'toolbarMetadata' })).version).toBe('native-1');
+  expect(readAt).toHaveBeenCalledTimes(9);
+  expect(read.mock.calls.length).toBeLessThanOrEqual(2);
+});
+
+test('a query whose document changes before the reply is refused, not applied to the newer document', async () => {
+  const { controller, readAt, edit } = versionedFixture();
+  await controller.query({ kind: 'toolbarMetadata' });
+  let reply!: () => void;
+  let asked!: () => void;
+  const reached = new Promise<void>(resolve => { asked = resolve; });
+  readAt.mockImplementationOnce((_request, version) => new Promise(resolve => {
+    asked();
+    reply = () => resolve({ status: 'ok', version, value: { styles: [], fontFamilies: [] } });
+  }));
+  const applied = mock((_query: unknown) => {});
+  const pending = controller.query({ kind: 'toolbarMetadata' }).then(applied);
+  await reached;
+  edit('native-1');
+  reply();
+  await expect(pending).rejects.toThrow('superseded');
+  expect(applied).not.toHaveBeenCalled();
+  const fresh = await controller.query({ kind: 'toolbarMetadata' });
+  expect(fresh.version).toBe('native-1');
+  expect(readAt.mock.calls.at(-1)![1]).toBe('native-1');
+});
+
+test('a query reads again at the worker version when the worker moved ahead of the view', async () => {
+  const { controller, readAt, moveWorker } = versionedFixture();
+  expect((await controller.query({ kind: 'toolbarMetadata' })).version).toBe('native-0');
+  moveWorker('native-1');
+  const query = await controller.query({ kind: 'toolbarMetadata' });
+  expect(query.version).toBe('native-1');
+  expect(readAt.mock.calls.at(-1)![1]).toBe('native-1');
 });
 
 test('part queries pin the native version and refuse commands after replacement', async () => {

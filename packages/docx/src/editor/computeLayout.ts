@@ -2,7 +2,8 @@ import { layoutMetaSummary, type LayoutMetaV1 } from '../yrs/layoutMeta';
 import type { ResidentMeasurementConfig } from '../layout/measure';
 import type { Layout, LayoutOptions, MeasuredBlock } from '../layout/pagination';
 import type { DisplayListHeadersFooters } from '../layout/render/rustDisplayList';
-import type { Document, NoteKind, SectionProperties } from '../types/document';
+import { getHeaderWatermarks } from '../docx/watermarkApi';
+import type { Document, NoteKind, SectionProperties, Watermark } from '../types/document';
 import type { YrsRenderEnv, YrsSession } from '../yrs';
 import { resolvedFinalSectionProperties } from './finalSection';
 
@@ -29,6 +30,7 @@ export interface ResidentRegionLayoutRequest {
     }>;
     settings?: Document['package']['settings'];
     watermark?: SectionProperties['watermark'];
+    headerWatermarks?: Record<string, Watermark>;
   };
   notes: {
     contents: Array<{
@@ -110,13 +112,16 @@ export function buildResidentRegionLayoutRequest(
       sections: orderedSections(document),
       settings: document?.package.settings,
       watermark: resolvedFinalSectionProperties(document?.package.document)?.watermark,
+      headerWatermarks: getHeaderWatermarks(document),
     },
     notes: { contents },
     renderEnv: {
+      fontTheme: document?.package.theme,
       compatibilityFlags: document?.package.settings?.compatibilityFlags,
       ...renderEnv,
       ...defaultParagraphStyleEnv(document, renderEnv),
       ...chainFontSizeEnv(document, renderEnv),
+      ...tableStyleEnv(document, renderEnv),
       tocStyleIds: [...new Set([
         ...(renderEnv.tocStyleIds ?? []),
         ...(document?.package.styles?.styles ?? [])
@@ -128,10 +133,26 @@ export function buildResidentRegionLayoutRequest(
   };
 }
 
+function tableStyleEnv(
+  document: Document | null,
+  renderEnv: YrsRenderEnv
+): Pick<YrsRenderEnv, 'tableStyleCellMargins' | 'defaultTableStyleId'> {
+  const tables = (document?.package.styles?.styles ?? []).filter((style) => style.type === 'table' && style.styleId);
+  const margins: NonNullable<YrsRenderEnv['tableStyleCellMargins']> = { ...(renderEnv.tableStyleCellMargins ?? {}) };
+  for (const style of tables) {
+    if (style.tblPr?.cellMargins && !(style.styleId in margins)) margins[style.styleId] = style.tblPr.cellMargins;
+  }
+  const defaultTableStyleId = renderEnv.defaultTableStyleId ?? tables.find((style) => style.default === true)?.styleId;
+  return {
+    ...(Object.keys(margins).length > 0 ? { tableStyleCellMargins: margins } : {}),
+    ...(defaultTableStyleId ? { defaultTableStyleId } : {}),
+  };
+}
+
 function chainFontSizeEnv(
   document: Document | null,
   renderEnv: YrsRenderEnv
-): Pick<YrsRenderEnv, 'paragraphStyleFontSizes' | 'hyperlinkStyleFontSizes' | 'docDefaultFontSize'> {
+): Pick<YrsRenderEnv, 'paragraphStyleFontSizes' | 'hyperlinkStyleFontSizes' | 'docDefaultFontSize' | 'docDefaultLanguage'> {
   const styles = document?.package.styles;
   if (!styles) return {};
   const docDefault = styles.docDefaults?.rPr?.fontSize ?? 20;
@@ -164,7 +185,19 @@ function chainFontSizeEnv(
     ...(renderEnv.docDefaultFontSize == null
       ? { docDefaultFontSize: docDefault / 2 }
       : {}),
+    ...(renderEnv.docDefaultLanguage == null ? docDefaultLanguage(styles.docDefaults?.rPr?.language) : {}),
   };
+}
+
+function docDefaultLanguage(
+  language: { latin?: string; eastAsia?: string; bidi?: string } | undefined
+): Pick<YrsRenderEnv, 'docDefaultLanguage'> {
+  const slots = Object.fromEntries(
+    (['latin', 'eastAsia', 'bidi'] as const)
+      .filter((slot) => typeof language?.[slot] === 'string' && language[slot] !== '')
+      .map((slot) => [slot, language![slot]])
+  );
+  return Object.keys(slots).length > 0 ? { docDefaultLanguage: slots } : {};
 }
 
 function defaultParagraphStyleEnv(
@@ -182,6 +215,20 @@ function defaultParagraphStyleEnv(
   );
   if (normal) return { defaultParagraphStyleId: 'Normal' };
   return {};
+}
+
+/** What a fresh editor renders a document with, before its view options. */
+export function documentRenderEnv(document: Document | null | undefined, colorScheme?: object): YrsRenderEnv {
+  const themeColors: Record<string, string> = {};
+  for (const [name, value] of Object.entries(colorScheme ?? document?.package.theme?.colorScheme ?? {})) {
+    if (typeof value === 'string') themeColors[name] = value;
+  }
+  return {
+    themeColors,
+    defaultTabStopTwips: document?.package.settings?.defaultTabStop ?? null,
+    numericIds: {},
+    mediaTokens: true,
+  };
 }
 
 export function getLayoutKernelInputs(layout: Layout):

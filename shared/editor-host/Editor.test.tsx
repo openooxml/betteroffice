@@ -219,7 +219,7 @@ afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
 });
 
-async function mount(format: "docx" | "xlsx" | "pptx" = "docx", collaborative = false, onChange = () => {}, readOnly = false, onLocalUpdate = () => {}, onSaveRequest?: () => Promise<boolean>) {
+async function mount(format: "docx" | "xlsx" | "pptx" = "docx", collaborative = false, onChange = () => {}, readOnly = false, onLocalUpdate = () => {}, onSaveRequest?: () => Promise<boolean>, remoteFonts?: "off") {
   const ready: { api?: EditorApi } = {};
   const errors: string[] = [];
   const saved: Uint8Array[] = [];
@@ -236,6 +236,7 @@ async function mount(format: "docx" | "xlsx" | "pptx" = "docx", collaborative = 
         onChange={onChange}
         onLocalUpdate={onLocalUpdate}
         onSaveRequest={onSaveRequest}
+        {...(remoteFonts ? { remoteFonts } : {})}
         onError={(error) => errors.push(error.message)}
         onReady={(api) => {
           if (api) ready.api = api;
@@ -401,6 +402,14 @@ test.each(["xlsx", "pptx"] as const)("%s readiness waits for opening and hydrati
 test("xlsx state vector uses the asynchronous collaboration API", async () => {
   const { api } = await mount("xlsx", true);
   expect(await api.encodeStateVector()).toEqual(Uint8Array.of(8));
+});
+
+test("the remote font source a host turns off reaches the spreadsheet editor, and is left to its default otherwise", async () => {
+  await mount("xlsx");
+  expect(workbookProps.remoteFonts).toBeUndefined();
+  cleanup();
+  await mount("xlsx", false, () => {}, false, () => {}, undefined, "off");
+  expect(workbookProps.remoteFonts).toBe("off");
 });
 
 test("pptx state vector comes from the live replica", async () => {

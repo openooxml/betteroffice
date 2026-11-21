@@ -4,14 +4,16 @@
  * ./loadWasmAsset.ts for the init contract and URL-geometry invariant.
  */
 
-import wasmInit, { initSync, unzip_docx, rezip_docx } from './generated/opc/ooxml_opc.js';
+import wasmInit, { initSync, engineKind, unzip_docx, rezip_docx } from './engineOpc';
+import { wasmAssetUrl } from './assetOpc';
 import { createWasmModuleState, type WasmAsyncInput } from './loadWasmAsset';
 import { residentEngine } from './residentEngine';
 
 const state = createWasmModuleState({
   label: 'ooxml-opc',
   preloadName: 'preloadOpcWasm',
-  assetUrl: () => new URL('./generated/opc/ooxml_opc_bg.wasm', import.meta.url),
+  assetUrl: wasmAssetUrl,
+  engineKind,
   initAsync: wasmInit,
   initSync,
 });

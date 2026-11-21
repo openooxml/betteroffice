@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
 import { preloadEditWasm, type EditSession } from '../wasm/edit';
-import { EditSession as WasmEditSession } from '../wasm/generated/edit/docx_edit';
+import { EditSession as EngineEditSession } from '../wasm/engineEdit';
 import { createYrsSession, type YrsRawOp, type YrsSession } from './index';
 import { computeProposalGeometryMirror, type ProposalGeometryReader } from './proposalGeometry';
 import type { DocxProposalSnapshot } from './proposals';
@@ -65,8 +65,8 @@ const ins = { ins: { id: 'owned' } };
 async function replica(main?: YrsSession): Promise<{ resident: ResidentEngineSession; raw: EditSession }> {
   const resident = await createResidentEngineSession();
   let raw: EditSession | undefined;
-  const version = WasmEditSession.prototype.version;
-  const capture = spyOn(WasmEditSession.prototype, 'version').mockImplementation(function (this: EditSession) {
+  const version = EngineEditSession.prototype.version;
+  const capture = spyOn(EngineEditSession.prototype, 'version').mockImplementation(function (this: EditSession) {
     raw = this;
     return version.call(this);
   });
@@ -385,8 +385,8 @@ describe('native proposal geometry outline parity', () => {
   test('legacy position outline for coercible non-string story refs and primitive row/cell shapes', async () => {
     for (const embed of [
       { kind: 'blockSdt', payload: { story: 42 } },
-      { kind: 'table', payload: { rows: [7] } },
-      { kind: 'table', payload: { rows: [{ cells: [false] }] } },
+      { kind: 'table', payload: { tblPr: {}, grid: [], rows: [7] } },
+      { kind: 'table', payload: { tblPr: {}, grid: [], rows: [{ cells: [false] }] } },
     ]) {
       const main = await createYrsSession({ clientId: 84107 });
       let resident: ResidentEngineSession | undefined;

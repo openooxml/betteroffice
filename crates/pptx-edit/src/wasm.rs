@@ -76,9 +76,19 @@ impl PptxDocument {
         self.inner.propose_json(args).map_err(to_js)
     }
 
+    #[wasm_bindgen(js_name = validateProposalJson)]
+    pub fn validate_proposal_json(&self, args: &str) -> Result<String, JsValue> {
+        self.inner.validate_proposal_json(args).map_err(to_js)
+    }
+
     #[wasm_bindgen(js_name = listProposalsJson)]
     pub fn list_proposals_json(&self) -> Result<String, JsValue> {
         self.inner.list_proposals_json().map_err(to_js)
+    }
+
+    #[wasm_bindgen(js_name = proposalSlideStripJson)]
+    pub fn proposal_slide_strip_json(&self, id: &str) -> Result<String, JsValue> {
+        self.inner.proposal_slide_strip_json(id).map_err(to_js)
     }
 
     #[wasm_bindgen(js_name = previewProposalJson)]
@@ -222,6 +232,13 @@ impl PptxDocument {
     #[wasm_bindgen(js_name = mediaBytes)]
     pub fn media_bytes(&self, part_path: &str) -> Result<Vec<u8>, JsValue> {
         self.inner.media_bytes(part_path).map_err(to_js)
+    }
+
+    #[wasm_bindgen(js_name = metafileSvg)]
+    pub fn metafile_svg(&self, part_path: &str) -> Option<Vec<u8>> {
+        self.session()
+            .metafile_svg(part_path)
+            .map(|svg| svg.to_vec())
     }
 
     /// Serializes the deck back to `.pptx` bytes, edits included.

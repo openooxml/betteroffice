@@ -134,6 +134,7 @@ function harness(ready = true, attach = true) {
     mergedRanges: mock((_sheet: number, _range: string) => [{ start: { row: 0, col: 0 }, end: { row: 0, col: 1 } }]),
     historyState: mock(() => ({ canUndo: state.canUndo, canRedo: state.canRedo, undoDepth: 1, redoDepth: 1 })),
     captureFormat: mock((_sheet: number, _range: string) => ({ rows: 1, columns: 1, formats: [] })),
+    readCells: mock((_request: unknown) => ({ ok: true, sheets: [{ editable: true }] })),
     patchRangeStyle: rawMutation, setNumberFormat: rawMutation, applyOps: rawMutation,
     undo: rawMutation, redo: rawMutation, acceptProposal: rawMutation, rejectProposal: rawMutation,
     editCell: rawMutation, save: rawMutation,
@@ -235,7 +236,7 @@ describe('peerless worker XLSX commands', () => {
     const { controller, coordinator, sent, ack, errors } = peerlessCommands();
     const capture = deferred<string>();
     let denied = false;
-    const scoped = controller.scoped({ deny: () => denied ? 'permission-denied' : null, subscribe: () => () => {} });
+    const scoped = controller.scoped({ gesture: () => false, deny: () => denied ? 'permission-denied' : null, subscribe: () => () => {} });
     const pasted = coordinator.clipboard(() => capture.promise, (value) => ({
       kind: 'editCell', payload: { args: [0, 0, 0, value] },
     }));
@@ -581,7 +582,7 @@ describe('worker XLSX commands', () => {
     const paint = deferred<void>();
     state.preview = paint.promise;
     let denied = false;
-    const store = controller.scoped({ deny: () => denied ? 'permission-denied' : null, subscribe: () => () => {} });
+    const store = controller.scoped({ gesture: () => false, deny: () => denied ? 'permission-denied' : null, subscribe: () => () => {} });
     const command = store.execute('bold', null);
     hydrate();
     await previewEntered.promise;
@@ -600,7 +601,8 @@ describe('worker XLSX commands', () => {
     expect(await store.execute('merge', { value: 'all' })).toMatchObject({ ok: false, failure: { code: 'multiple-cells-required' } });
     view.selection = { anchor: { row: 0, col: 0 }, focus: { row: 2, col: 1 } };
     state.collaborative = true;
-    expect(await store.execute('merge', { value: 'all' })).toMatchObject({ ok: false, failure: { code: 'collaboration-unsupported' } });
+    expect(await store.execute('merge', { value: 'all' })).toMatchObject({ ok: true });
+    expect(edits.applyOps).toHaveBeenCalledTimes(1);
     state.collaborative = false;
     expect(await store.execute('fontSize', { points: 0 })).toMatchObject({ ok: false, failure: { code: 'invalid-arguments' } });
     state.canUndo = false;

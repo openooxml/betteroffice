@@ -5,11 +5,17 @@
  */
 
 import type { TranslationKey } from '@betteroffice/docx-i18n';
-import { DOCX_COMMAND_DESCRIPTORS, formatChord } from '../../../commands/descriptors';
+import {
+  DOCX_COMMAND_DESCRIPTORS,
+  formatChord,
+  isMacPlatform,
+  shortcutMatchesPlatform,
+} from '../../../commands/descriptors';
 import type {
   DocxCommandArgs,
   DocxCommandId,
   DocxCommandShortcut,
+  DocxCommandStore,
 } from '../../../commands/types';
 import type { KeyboardShortcut, ShortcutCategory } from '../KeyboardShortcutsDialog';
 
@@ -182,6 +188,15 @@ const COMMAND_HELP: readonly CommandHelp[] = [
     category: 'formatting',
   }),
   help({
+    id: 'clearFormatting',
+    command: 'clearFormatting',
+    name: 'Clear Formatting',
+    nameKey: 'dialogs.keyboardShortcuts.shortcuts.clearFormatting',
+    description: 'Clear text formatting',
+    descriptionKey: 'dialogs.keyboardShortcuts.shortcuts.clearFormattingDescription',
+    category: 'formatting',
+  }),
+  help({
     id: 'superscript',
     command: 'superscript',
     name: 'Superscript',
@@ -251,16 +266,24 @@ const COMMAND_HELP: readonly CommandHelp[] = [
 ];
 
 /** Shortcuts of editor commands, as bound by the command descriptors. */
-export const COMMAND_SHORTCUTS: KeyboardShortcut[] = COMMAND_HELP.flatMap(
-  ({ command, args, ...entry }) => {
+export function getCommandShortcuts(
+  mac = isMacPlatform(),
+  store?: DocxCommandStore
+): KeyboardShortcut[] {
+  return COMMAND_HELP.flatMap(({ command, args, ...entry }) => {
     const key = JSON.stringify(args ?? null);
-    const chords = (DOCX_COMMAND_DESCRIPTORS[command].shortcuts as readonly DocxCommandShortcut[])
-      .filter((shortcut) => JSON.stringify(shortcut.args) === key)
+    const descriptor = store?.getDescriptor(command) ?? DOCX_COMMAND_DESCRIPTORS[command];
+    const chords = (descriptor.shortcuts as readonly DocxCommandShortcut[])
+      .filter(
+        (shortcut) => shortcutMatchesPlatform(shortcut, mac) && JSON.stringify(shortcut.args) === key
+      )
       .map((shortcut) => formatChord(shortcut.chord, false));
     if (chords.length === 0) return [];
     return [{ ...entry, keys: chords[0], ...(chords[1] ? { altKeys: chords[1] } : {}) }];
-  }
-);
+  });
+}
+
+export const COMMAND_SHORTCUTS: KeyboardShortcut[] = getCommandShortcuts();
 
 /** Keys the text input and the browser handle, outside the editor commands. */
 const INPUT_SHORTCUTS: KeyboardShortcut[] = [
@@ -453,22 +476,41 @@ export const DEFAULT_SHORTCUTS: KeyboardShortcut[] = [...COMMAND_SHORTCUTS, ...I
 /**
  * Get all default shortcuts
  */
-export function getDefaultShortcuts(): KeyboardShortcut[] {
-  return [...DEFAULT_SHORTCUTS];
+export function getDefaultShortcuts(store?: DocxCommandStore): KeyboardShortcut[] {
+  return [...getCommandShortcuts(undefined, store), ...inputShortcuts(store)];
+}
+
+const INPUT_COMMANDS: Readonly<Record<string, DocxCommandId>> = {
+  cut: 'cut',
+  copy: 'copy',
+  paste: 'paste',
+  'paste-plain': 'pasteAsPlainText',
+  'select-all': 'selectAll',
+};
+
+/** The input rows, with the chords `store` runs them on; a disabled one drops out. */
+function inputShortcuts(store: DocxCommandStore | undefined): KeyboardShortcut[] {
+  if (!store) return INPUT_SHORTCUTS;
+  return INPUT_SHORTCUTS.flatMap((shortcut) => {
+    const command = INPUT_COMMANDS[shortcut.id];
+    if (!command) return [shortcut];
+    const chord = store.getDescriptor(command).shortcuts[0]?.chord;
+    return chord ? [{ ...shortcut, keys: formatChord(chord, false) }] : [];
+  });
 }
 
 /**
  * Get shortcuts by category
  */
 export function getShortcutsByCategory(category: ShortcutCategory): KeyboardShortcut[] {
-  return DEFAULT_SHORTCUTS.filter((s) => s.category === category);
+  return getDefaultShortcuts().filter((s) => s.category === category);
 }
 
 /**
  * Get common/frequently used shortcuts
  */
 export function getCommonShortcuts(): KeyboardShortcut[] {
-  return DEFAULT_SHORTCUTS.filter((s) => s.common);
+  return getDefaultShortcuts().filter((s) => s.common);
 }
 
 /**

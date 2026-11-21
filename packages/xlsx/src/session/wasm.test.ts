@@ -32,6 +32,30 @@ function compileRequests(worker: WasmTestWorker) {
   return worker.requests.filter((message) => message.kind === 'wasm-compile');
 }
 
+test('keeps worker URLs and options statically evaluable', () => {
+  const source = createSourceFile('sessionWorker.browser.ts',
+    readFileSync(resolve(import.meta.dir, 'sessionWorker.browser.ts'), 'utf8'), ScriptTarget.Latest);
+  const workers: Array<Record<string, string>> = [];
+  function visit(node: Node): void {
+    if (isNewExpression(node) && isIdentifier(node.expression) && node.expression.text === 'Worker') {
+      expect(node.getText(source))
+        .toBe("new Worker(new URL('./xlsxSessionWorker.mjs', import.meta.url), { type: 'module' })");
+      expect(node.arguments?.[0]?.getText(source))
+        .toBe("new URL('./xlsxSessionWorker.mjs', import.meta.url)");
+      const options = node.arguments?.[1];
+      if (!options || !isObjectLiteralExpression(options)) throw new Error('Non-literal worker options');
+      workers.push(Object.fromEntries(options.properties.map((property) => {
+        if (!isPropertyAssignment(property) || !isIdentifier(property.name) ||
+          !isStringLiteral(property.initializer)) throw new Error('Non-literal worker option');
+        return [property.name.text, property.initializer.text];
+      })));
+    }
+    forEachChild(node, visit);
+  }
+  visit(source);
+  expect(workers).toEqual([{ type: 'module' }]);
+});
+
 describe.skipIf(engineKind === 'native')('workbook session wasm reuse', () => {
   test('loads and caches full and lean modules separately', async () => {
     const h = factory();
@@ -63,30 +87,6 @@ describe.skipIf(engineKind === 'native')('workbook session wasm reuse', () => {
     } finally {
       for (const spy of spies) spy.mockRestore();
     }
-  });
-
-  test('keeps worker URLs and options statically evaluable', () => {
-    const source = createSourceFile('client.ts',
-      readFileSync(resolve(import.meta.dir, 'client.ts'), 'utf8'), ScriptTarget.Latest);
-    const workers: Array<Record<string, string>> = [];
-    function visit(node: Node): void {
-      if (isNewExpression(node) && isIdentifier(node.expression) && node.expression.text === 'Worker') {
-        expect(node.getText(source))
-          .toBe("new Worker(new URL('./xlsxSessionWorker.mjs', import.meta.url), { type: 'module' })");
-        expect(node.arguments?.[0]?.getText(source))
-          .toBe("new URL('./xlsxSessionWorker.mjs', import.meta.url)");
-        const options = node.arguments?.[1];
-        if (!options || !isObjectLiteralExpression(options)) throw new Error('Non-literal worker options');
-        workers.push(Object.fromEntries(options.properties.map((property) => {
-          if (!isPropertyAssignment(property) || !isIdentifier(property.name) ||
-            !isStringLiteral(property.initializer)) throw new Error('Non-literal worker option');
-          return [property.name.text, property.initializer.text];
-        })));
-      }
-      forEachChild(node, visit);
-    }
-    visit(source);
-    expect(workers).toEqual([{ type: 'module' }]);
   });
 
   test('starts before open delivery and reuses the first worker module after disposal', async () => {

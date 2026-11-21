@@ -10,13 +10,14 @@ use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
 use xlsx_model::{Cell, CellRange, CellRef, ColId, ColStyle, Sheet, Workbook};
 
 use crate::axis::SheetAxes;
+use crate::future_functions::FormulaNames;
 use crate::package::{XmlAttribute, attributes, remove_attribute, set_attribute};
 use crate::read::{SharedStringCells, is_truthy};
 use crate::write::{
     SharedStringPlan, cell_value_markup, col_runs, fmt_num, fragment, shared_string_index,
     write_cell, write_col_run, write_cols, write_row,
 };
-use crate::xml::{attr, xml_err};
+use crate::xml::{attr, text_attribute, xml_err};
 use crate::{MAX_DEPTH, ParseError};
 
 #[cfg(test)]
@@ -35,6 +36,8 @@ mod style_match_tests;
 pub(crate) use style_match::{SourceStyles, StyleMatch, keeps_source_xf, retains_source_styles};
 pub use style_match::{keeps_source, keeps_source_conditional_formats};
 
+type SharedGroupEntry = (bool, Option<CellRange>, Option<(u32, u32)>);
+
 #[cfg(any(test, feature = "test-oracle"))]
 thread_local! {
     static EMISSION_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -51,6 +54,8 @@ pub(crate) struct SheetPatch<'a> {
     pub(crate) retained: &'a SharedStringCells,
     pub(crate) plan: Option<&'a SharedStringPlan>,
     pub(crate) styles: &'a StyleMatch<'a>,
+    /// The defined names this sheet's formulas resolve.
+    pub(crate) names: FormulaNames<'a>,
 }
 
 struct SourceElement {
@@ -177,7 +182,7 @@ impl SheetPatch<'_> {
         let dirty = self.dirty_formulas(source, &rows)?;
         let mut out = Vec::with_capacity(source.len());
         out.extend_from_slice(&element.prefix);
-        let mut source_rows = rows
+        let mut source_rows: Vec<_> = rows
             .iter()
             .filter_map(|row| {
                 self.axes
@@ -185,7 +190,11 @@ impl SheetPatch<'_> {
                     .current(row.index)
                     .map(|current| (current, row))
             })
-            .peekable();
+            .collect();
+        // a move makes the map non-monotone; the element is written in current
+        // order, so the rows it reuses are visited in that order too
+        source_rows.sort_unstable_by_key(|(current, _)| *current);
+        let mut source_rows = source_rows.into_iter().peekable();
         let mut cells = self.sheet.iter_cells().peekable();
         let mut originals = SourceCellCursor::new(self.original, self.original.iter_cells());
         let mut heights = self.sheet.row_heights.keys().copied().peekable();
@@ -377,6 +386,7 @@ impl SheetPatch<'_> {
             self.retained,
             self.plan,
             None,
+            self.names,
         )
         .map_err(xml_err)?;
         *out = writer.into_inner();
@@ -758,6 +768,7 @@ impl SheetPatch<'_> {
             self.sst_index,
             retained,
             self.sheet.array_formula(at),
+            self.names,
         )
         .map_err(xml_err)?;
         *out = writer.into_inner();
@@ -767,7 +778,8 @@ impl SheetPatch<'_> {
     fn dirty_formulas(&self, data: &[u8], rows: &[SourceRow]) -> Result<DirtyFormulas, ParseError> {
         let mut changed = self.changed_source_cells();
         let mut arrays = BTreeSet::new();
-        let mut groups: HashMap<u32, (bool, Option<CellRange>)> = HashMap::new();
+        let mut groups: HashMap<u32, SharedGroupEntry> = HashMap::new();
+        let mut members: HashMap<u32, Vec<CellRef>> = HashMap::new();
         let mut masters = Vec::new();
         for cell in rows.iter().flat_map(|row| &row.cells) {
             let Some(formula) = &cell.formula else {
@@ -787,12 +799,20 @@ impl SheetPatch<'_> {
             }
             match formula.group {
                 Some(group) => {
-                    let entry = groups.entry(group).or_insert((false, None));
+                    let entry = groups.entry(group).or_insert((false, None, None));
                     entry.0 |= self
                         .mapped(cell.at)
                         .is_none_or(|at| self.inverse(at) != Some(cell.at))
                         || (changed.contains(&key) && self.source_formula_changed(cell.at));
                     entry.0 |= arrays.contains(&key);
+                    if let Some(at) = self.mapped(cell.at) {
+                        let shift = (
+                            at.row.wrapping_sub(cell.at.row),
+                            at.col.wrapping_sub(cell.at.col),
+                        );
+                        entry.0 |= *entry.2.get_or_insert(shift) != shift;
+                        members.entry(group).or_default().push(at);
+                    }
                     if !entry.0
                         && formula.reference.is_some()
                         && let Some(at) = self.mapped(cell.at)
@@ -815,8 +835,13 @@ impl SheetPatch<'_> {
         Ok(DirtyFormulas {
             groups: groups
                 .into_iter()
-                .filter(|(_, (dirty, master))| {
-                    *dirty || !master.is_some_and(|reference| self.moves_uniformly(reference))
+                .filter(|(group, (dirty, master, _))| {
+                    let members = members.get(group).map_or(&[][..], Vec::as_slice);
+                    *dirty
+                        || !master
+                            .filter(|&reference| self.moves_uniformly(reference))
+                            .and_then(|reference| self.remap_range(reference))
+                            .is_some_and(|written| members.iter().all(|&at| written.contains(at)))
                 })
                 .map(|(group, _)| group)
                 .collect(),
@@ -1121,7 +1146,7 @@ fn write_start_tag(
 ) -> Result<(), ParseError> {
     let mut element = BytesStart::new(name);
     for attribute in attributes {
-        element.push_attribute((attribute.name.as_str(), attribute.value.as_str()));
+        element.push_attribute(text_attribute(&attribute.name, &attribute.value));
     }
     let mut writer = Writer::new(std::mem::take(out));
     let event = if empty {

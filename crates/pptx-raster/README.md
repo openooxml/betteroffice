@@ -37,7 +37,7 @@ so this crate shapes nothing: it resolves each run's `font_id` against the
 
 ## Native targets
 
-Build this crate for native targets; browser PNG export uses `slideToPng` in
+Build this crate for native targets; browser PNG export uses the presentation handle's `renderPng` in
 `@betteroffice/pptx`.
 
 ## SVG pictures

@@ -1,14 +1,17 @@
+import { usePluginGestures } from '../../../shared/plugin-host/usePluginGestures';
+import type { ResolvedFontProps } from './bundledFonts';
+import { ProposalSlideStrip } from './components/ProposalSlideStrip';
 import { installBrowserFonts, useFontWarning, useStableFonts as useStableFontFaces } from './fontFaces';
 import {
-  initWasm, openPresentation, paintSlide, presentationImageBlob, PRESENCE_LABEL_DURATION_MS, sizeCanvasForSlide,
-  slideToPng, StaleProposalError, PptxPeerNotReadyError,
+  decodePresentationImage, initWasm, metafileImageBytes, openPresentation, paintSlide, presentationImageBlob, PRESENCE_LABEL_DURATION_MS, sizeCanvasForSlide,
+  StaleProposalError, PptxPeerNotReadyError,
 } from '@betteroffice/pptx';
 import type {
   CanvasImageResolver, DeckSnapshot, HitTestResult, ParagraphAlignment, PptxCaretAnchor,
   PptxEditRefusal, PptxEditRequest, PptxEditResult, PptxPresencePeer, PresentationHandle, Proposal,
   ProposalDiffSlide, SlideDisplayList, StorySnapshot, TextBoxPrimitive, TextStylePatch,
 } from '@betteroffice/pptx';
-import type { PptxWorkerEditorRecovery } from '@betteroffice/pptx/worker';
+import { presentationStoryFormatting, type PptxWorkerEditorRecovery } from '@betteroffice/pptx/worker';
 import { useTranslation } from './i18n';
 import { ProposalCanvasOverlay, ProposalCanvasToolbar, ProposalNotesDiff, useProposalCanvas } from './components/ProposalCanvas';
 import {
@@ -46,6 +49,7 @@ import {
 import { PptxCommandContext } from './commands/PptxCommandProvider';
 import { inPluginChrome, pluginEventStore } from './commands/pluginEvents';
 import { useCommandShortcuts } from './commands/useCommandShortcuts';
+import { CLIPBOARD_IDS } from './commands/shortcutKeys';
 import {
   usePptxCommandBinding,
   type PptxExportOutcome,
@@ -89,7 +93,7 @@ import {
   limitPresence,
   type BoundedPresence,
 } from './presence-rendering';
-import { effectiveStyleFromSelection } from './textFormatting';
+import { effectiveStyleFromSelection, insertionStyle } from './textFormatting';
 import { useSyncedState } from './useSyncedState';
 import type { EffectiveTextStyle } from './textFormatting';
 import {
@@ -368,19 +372,21 @@ export function PptxEditorContent({
   readOnly = false,
   toolbar,
   showToolbar = true,
+  shortcuts,
+  onShortcutIssue,
   i18n,
   plugins,
   pluginGrants,
   onPluginError,
   backend,
   onWorkerReady,
-}: Omit<PptxInThreadEditorProps, 'experimentalWorkerOpen' | 'collaboration'> & PptxAsyncPresentationProps & {
+}: ResolvedFontProps<Omit<PptxInThreadEditorProps, 'experimentalWorkerOpen' | 'collaboration'>> & PptxAsyncPresentationProps & {
   collaboration?: PptxContentCollaborationOptions;
   collaborationIdentity?: object;
   backend?: (changed: () => void) => EditablePresentation;
   onWorkerReady?: (api: PptxWorkerEditorApi) => void;
 }) {
-  const { t } = useTranslation();
+  const { t, lang } = useTranslation();
   const decodeImageError = t('errors.decodeSlideImage');
   const collaborationClientId = collaboration?.clientId ?? clientId;
   const collaborationInitialUpdate = collaboration?.initialUpdate;
@@ -470,6 +476,7 @@ export function PptxEditorContent({
   initialZoomRef.current = initialZoom;
   const onErrorRef = useRef(onError);
   const rootRef = useRef<HTMLDivElement>(null);
+  usePluginGestures(rootRef);
   const stageRef = useRef<HTMLDivElement>(null);
   const canvasHostRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -550,6 +557,7 @@ export function PptxEditorContent({
     model?.slideIndex ?? 0
   );
   const [paintedReview, setPaintedReview] = useState<ProposalDiffSlide | null>(null);
+  const loadProposalSlide = useCallback((slideId: string) => handleRef.current!.layoutProposalDiffSlideById(canvasReview.selected!.id, slideId), [canvasReview.selected, model?.snapshot]);
   const resolveSlideImage = useMemo<CanvasImageResolver>(() => {
     if (!backend) return resolveImages(handleRef, imageCacheRef, decodeImageError);
     return Object.assign((assetId: string) => workerRef.current?.resolveImage(assetId) ?? Promise.resolve(null), {
@@ -585,6 +593,20 @@ export function PptxEditorContent({
   }, [readOnly]);
 
   onReadyRef.current = onReady;
+  // the opened presentation's onReady, released by its first painted slide.
+  const pendingReadyRef = useRef<{ handle: PresentationHandle; fire: () => void } | null>(null);
+  const releaseReady = useCallback((painted: PresentationHandle | null) => {
+    const ready = pendingReadyRef.current;
+    if (!ready || ready.handle !== painted || painted !== handleRef.current) return;
+    pendingReadyRef.current = null;
+    ready.fire();
+  }, []);
+  const shownHandleRef = useRef<PresentationHandle | null>(null);
+  const releaseShown = useCallback(() => {
+    const host = canvasHostRef.current;
+    if (!host || host.getClientRects().length === 0) return;
+    releaseReady(shownHandleRef.current);
+  }, [releaseReady]);
   readOnlyRef.current = readOnly;
   initialSlideRef.current = initialSlide;
   onChangeRef.current = onChange;
@@ -787,7 +809,7 @@ export function PptxEditorContent({
         !Number.isInteger(target.start) ||
         !Number.isInteger(target.end) ||
         target.start < 0 ||
-        target.end < target.start
+        target.end < 0
       ) {
         return false;
       }
@@ -796,7 +818,7 @@ export function PptxEditorContent({
       if (!shape?.textStories.some((story) => story.id === target.storyId)) return false;
       try {
         const story = handle.story(target.storyId);
-        if (target.end > story.length) return false;
+        if (target.start > story.length || target.end > story.length) return false;
         if (!showSlide(target.slide - 1, false)) return false;
         setSelection({
           shapeId: target.shapeId,
@@ -815,7 +837,14 @@ export function PptxEditorContent({
 
   const navigateProposalTarget = useCallback((slideId: string, shapeId: string | null, proposalId?: string) => {
     const index = modelRef.current?.snapshot.slides.findIndex((slide) => slide.id === slideId) ?? -1;
-    if (index < 0) return;
+    if (index < 0) {
+      if (!backend && proposalId) {
+        canvasReview.select(proposalId);
+        canvasReview.selectSlide(slideId, proposalId);
+        canvasReview.setEnabled(true);
+      }
+      return;
+    }
     const refreshed = refreshAt(index);
     const slide = refreshed?.snapshot.slides[refreshed.slideIndex];
     setSelection(null);
@@ -824,7 +853,7 @@ export function PptxEditorContent({
       if (proposalId) canvasReview.select(proposalId);
       canvasReview.setEnabled(true);
     }
-  }, [backend, refreshAt, canvasReview.select, canvasReview.setEnabled]);
+  }, [backend, refreshAt, canvasReview.select, canvasReview.selectSlide, canvasReview.setEnabled]);
 
   const refreshProposals = useCallback(() => {
     try {
@@ -917,7 +946,7 @@ export function PptxEditorContent({
     }
     return { ...on, target: { kind: 'slide' } };
   }, [model, selection, shapeSelection]);
-  const pluginHost = usePptxPluginHost({
+  const pluginHost = usePptxPluginHost({ locale: lang, focusRoot: stageRef,
     plugins,
     pluginGrants,
     onPluginError,
@@ -927,6 +956,7 @@ export function PptxEditorContent({
     handle: openedHandle,
     reviewing: canvasReview.reviewing,
     selection: pluginSelection,
+    textSelection: selection,
     pointAt: (frame, clientX, clientY) =>
       (backend ? workerRef.current?.frame(workerRef.current.active)?.displayList === frame :
         modelRef.current?.frame === frame) ? hostPointRef.current(clientX, clientY) : null,
@@ -1038,7 +1068,7 @@ export function PptxEditorContent({
             if (origin === 'remote') refreshAt(undefined, true, true);
           });
           const requestedSlide = initialSlideRef.current;
-          refreshAt(
+          const initial = refreshAt(
             worker ? worker.active : typeof requestedSlide === 'number' && Number.isInteger(requestedSlide)
               ? requestedSlide - 1
               : 0,
@@ -1047,7 +1077,7 @@ export function PptxEditorContent({
           );
           setLoading(false);
           if (!worker) setCollaborationReplica(handle);
-          setOpenedHandle(handle);
+          if (worker) setOpenedHandle(handle);
           const opened = handle;
           const api: PptxEditorApi = {
             clearSelection,
@@ -1088,7 +1118,22 @@ export function PptxEditorContent({
             () => readOnlyRef.current);
             owner.onFirstPaint = () => workerReadyRef.current?.(workerApi);
             setBackendRevision((value) => value + 1);
-          } else onReadyRef.current?.(api);
+          } else {
+            pendingReadyRef.current = {
+              handle: opened,
+              fire: () => {
+                if (disposed || handleRef.current !== opened) return;
+                try {
+                  onReadyRef.current?.(api);
+                } catch (value) {
+                  reportError(value);
+                  return;
+                }
+                setOpenedHandle(opened);
+              },
+            };
+            if (!initial) releaseReady(opened);
+          }
         } catch (value) {
           setLoading(false);
           reportError(value);
@@ -1102,6 +1147,7 @@ export function PptxEditorContent({
     );
     return () => {
       disposed = true;
+      if (pendingReadyRef.current?.handle === handle) pendingReadyRef.current = null;
       unsubscribeUpdates();
       if (worker) {
         const retired = worker;
@@ -1136,6 +1182,7 @@ export function PptxEditorContent({
     refresh,
     readOnlyRefusal,
     refreshAt,
+    releaseReady,
     reportError,
     selectText,
     setActiveTool,
@@ -1200,12 +1247,18 @@ export function PptxEditorContent({
     const canvas = canvasRef.current;
     const painted = model;
     const frame = backend ? workerFrame?.displayList : painted?.frame;
+    const owner = handleRef.current;
+    if (!backend && painted && !frame) releaseReady(owner);
     if (!canvas || !painted || !frame) return;
     if (backend && (!worker || !workerFrame || !worker.currentPaint(workerFrame, workerNavigation!))) return;
     const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+    if (!ctx) {
+      if (!backend) releaseReady(owner);
+      return;
+    }
     const dpr = window.devicePixelRatio || 1;
     presentFrame(null);
+    shownHandleRef.current = null;
     sizeCanvasForSlide(canvas, frame, dpr, scale);
     let cancelled = false;
     const images = worker && workerFrame ? worker.images.resolve(workerFrame) : null;
@@ -1218,9 +1271,15 @@ export function PptxEditorContent({
         const { snapshot, slideIndex, version } = painted;
         presentFrame({ frame, snapshot, slideIndex, version, scale, canvas });
         if (worker && workerFrame) worker.didPaint(workerFrame, workerNavigation!);
+        if (!backend) {
+          shownHandleRef.current = owner;
+          releaseShown();
+        }
       },
       (value: unknown) => {
-        if (current()) reportError(value);
+        if (!current()) return;
+        reportError(value);
+        if (!backend) releaseReady(owner);
       }
     );
     activePaintRef.current = images ? painting.finally(() => images.release()) : painting;
@@ -1228,7 +1287,11 @@ export function PptxEditorContent({
       cancelled = true;
     };
   }, [backend, worker, workerFrame, workerNavigation, workerSequence, decodeImageError, model?.frame,
-    model?.snapshot, model?.slideIndex, model?.version, presentFrame, reportError, resolveSlideImage, scale]);
+    model?.snapshot, model?.slideIndex, model?.version, presentFrame, releaseReady, releaseShown, reportError, resolveSlideImage, scale]);
+
+  useEffect(() => {
+    if (!backend) releaseShown();
+  }, [backend, viewport, releaseShown]);
 
   useEffect(() => {
     if (backend) return;
@@ -1363,7 +1426,17 @@ export function PptxEditorContent({
     const handle = handleRef.current;
     if (!handle || !selection) return;
     try {
-      const story = handle.story(selection.storyId);
+      const current = modelRef.current;
+      const slide = current?.snapshot.slides[current.slideIndex];
+      let story;
+      try {
+        story = slide ? presentationStoryFormatting(handle, {
+          slideId: slide.id, shapeId: selection.shapeId, storyId: selection.storyId,
+        })
+          : handle.story(selection.storyId);
+      } catch {
+        story = handle.story(selection.storyId);
+      }
       setTextStyle(
         effectiveStyleFromSelection(
           story,
@@ -2180,7 +2253,7 @@ export function PptxEditorContent({
       }
       if (isCharacter(input)) {
         if (start !== end) handle.deleteText(selection.storyId, start, end);
-        handle.insertText(selection.storyId, start, input.key, textStyleRef.current);
+        handle.insertText(selection.storyId, start, input.key, insertionStyle(textStyleRef.current));
         const next = start + input.key.length;
         return edited({ ...selection, anchor: next, focus: next });
       }
@@ -2207,7 +2280,8 @@ export function PptxEditorContent({
     const selection = selectionRef.current;
     const shapeStoryId = selection ? null : (selectedShapeNow()?.textStories[0]?.id ?? null);
     if (!handle || (!selection && !shapeStoryId)) return false;
-    setTextStyle((current) => ({ ...current, ...patch }));
+    setTextStyle((current) => ({ ...current, ...patch,
+      ...(patch.strike === 'noStrike' ? { strike: undefined } : {}) }));
     if (selection) {
       if (selection.anchor === selection.focus) return true;
       handle.formatText(
@@ -2585,30 +2659,20 @@ export function PptxEditorContent({
   // with, so the png matches what is on screen. Only capturing the slide waits
   // for accepted input; painting runs outside the input queue.
   const exportPng = async (): Promise<PptxExportOutcome> => {
-    let captured: { frame: SlideDisplayList; slideIndex: number; handle: PresentationHandle };
+    let captured: { slideIndex: number; handle: PresentationHandle };
     try {
       captured = await coordinator.run(() => {
         const current = modelRef.current;
         const handle = handleRef.current;
         if (!current?.frame || !handle) throw new PptxInputStale();
-        return { frame: current.frame, slideIndex: current.slideIndex, handle };
+        return { slideIndex: current.slideIndex, handle };
       });
     } catch (value) {
       return value instanceof PptxInputFailure ? 'input-failed' : 'replaced';
     }
-    const { frame, slideIndex, handle } = captured;
-    // Painting is async, so the deck can be replaced or disposed mid-export.
-    // Pin the handle the frame came from, behind its own decode cache, rather
-    // than reading whichever deck `handleRef` holds by the time an asset
-    // resolves.
-    const pinned = { current: handle };
-    const cache = { current: frameImages() };
+    const { slideIndex, handle } = captured;
     try {
-      const blob = await slideToPng(frame, {
-        scale: window.devicePixelRatio || 1,
-        resolveImage: resolveImages(pinned, cache, decodeImageError),
-      });
-      const bytes = new Uint8Array(await blob.arrayBuffer());
+      const bytes = await handle.renderPng({ slide: slideIndex }, { scale: window.devicePixelRatio || 1 });
       if (handleRef.current !== handle) return 'replaced';
       downloadBytes(bytes, pngName(fileName, slideIndex), 'image/png');
       return 'exported';
@@ -2616,8 +2680,6 @@ export function PptxEditorContent({
       if (handleRef.current !== handle) return 'replaced';
       reportError(value);
       return 'failed';
-    } finally {
-      cache.current.dispose();
     }
   };
   const shapeDragDelta =
@@ -2729,7 +2791,8 @@ export function PptxEditorContent({
   });
   const presentingRef = useRef(presenting);
   presentingRef.current = presenting;
-  useCommandShortcuts({ commands, containerRef: rootRef, suspended: () => presentingRef.current });
+  useCommandShortcuts({ commands, containerRef: rootRef, suspended: () => presentingRef.current,
+    shortcuts, onShortcutIssue, unsupported: CLIPBOARD_IDS });
 
   const toolbarRegion =
     !showToolbar || toolbar === null ? null : (
@@ -2822,7 +2885,12 @@ export function PptxEditorContent({
       </div>}
       <div ref={dockAreaRef} style={styles.workspace}>
         <aside style={styles.slideStrip} aria-label={t('slides.panelLabel')}>
-          {model?.snapshot.slides.map((slide, index) => {
+          {canvasReview.reviewing && canvasReview.selected && handleRef.current && canvasReview.diff ? (
+            <ProposalSlideStrip entries={handleRef.current.proposalSlideStrip(canvasReview.selected.id)}
+              selectedSlideId={canvasReview.previewSlideId ?? currentSlideId}
+              load={loadProposalSlide} decodeImage={decodePresentationImage}
+              resolveImage={resolveSlideImage} onSelect={canvasReview.selectSlide} />
+          ) : model?.snapshot.slides.map((slide, index) => {
             const slidePresence = remotePeersBySlide.get(slide.id);
             return (
               <button
@@ -3024,12 +3092,18 @@ export function PptxEditorContent({
                   {canvasReview.diff && <ProposalCanvasOverlay
                     key={`${canvasReview.diff.proposal.id}:${model.slideIndex}`}
                     diff={canvasReview.diff} current={model.snapshot} frame={model.frame}
-                    slideIndex={model.slideIndex} scale={scale} resolveImage={resolveSlideImage}
+                    slideIndex={model.slideIndex} scale={scale} resolveImage={resolveSlideImage} decodeImage={decodePresentationImage}
                     onPainted={setPaintedReview}
                     onTarget={(slideId, shapeId) => {
                       navigateProposalTarget(slideId, shapeId, canvasReview.selected?.id);
                       setProposalsOpen(true);
                     }} />}
+                </div>
+              ) : canvasReview.diff && model ? (
+                <div style={{ ...styles.canvasFrame, width: canvasReview.diff.frame.width * scale, height: canvasReview.diff.frame.height * scale }}>
+                  <ProposalCanvasOverlay diff={canvasReview.diff} current={model.snapshot} frame={canvasReview.diff.frame}
+                    slideIndex={0} scale={scale} resolveImage={resolveSlideImage} decodeImage={decodePresentationImage} onPainted={setPaintedReview}
+                    onTarget={(slideId, shapeId) => navigateProposalTarget(slideId, shapeId, canvasReview.selected?.id)} />
                 </div>
               ) : (
                 <div style={styles.empty}>
@@ -3388,7 +3462,11 @@ function resolveImages(
   cacheRef: { current: ReturnType<typeof frameImages> },
   errorMessage: string
 ): CanvasImageResolver {
-  return cacheRef.current.resolver((id) => handleRef.current?.mediaBytes(id), errorMessage);
+  return cacheRef.current.resolver((id) => {
+    const handle = handleRef.current;
+    const bytes = handle && metafileImageBytes(handle.mediaBytes(id), () => handle.metafileSvg(id));
+    return bytes?.byteLength ? bytes : undefined;
+  }, errorMessage);
 }
 
 function caretLinesFor(

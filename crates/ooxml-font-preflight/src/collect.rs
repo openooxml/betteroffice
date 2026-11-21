@@ -242,41 +242,26 @@ fn slot_use(text: &str, complex: bool, hint: Option<&str>) -> (bool, bool) {
     (east_asia, cs)
 }
 
-fn scripts(runs: &[Run<'_>]) -> Vec<String> {
-    let mut flags = [false; 5];
-    for (_, text) in runs {
-        for ch in text.as_deref().unwrap_or_default().chars() {
-            match ch as u32 {
-                0x0590..=0x05ff | 0xfb1d..=0xfb4f => flags[4] = true,
-                0x0600..=0x06ff
-                | 0x0750..=0x077f
-                | 0x0870..=0x08ff
-                | 0xfb50..=0xfdff
-                | 0xfe70..=0xfeff => flags[3] = true,
-                0x1100..=0x11ff
-                | 0x3130..=0x318f
-                | 0xa960..=0xa97f
-                | 0xac00..=0xd7ff
-                | 0xffa0..=0xffdc => flags[1] = true,
-                0x3040..=0x30ff | 0x31f0..=0x31ff | 0xff66..=0xff9f => flags[0] = true,
-                0x3000..=0x303f
-                | 0x3400..=0x4dbf
-                | 0x4e00..=0x9fff
-                | 0xf900..=0xfaff
-                | 0xfe30..=0xfe4f
-                | 0xff00..=0xff65
-                | 0x20000..=0x3ffff => flags[2] = true,
-                _ => {}
-            }
-        }
-    }
-    flags[2] &= !flags[0] && !flags[1];
-    ["cjk-jp", "cjk-kr", "cjk-sc", "arabic", "hebrew"]
-        .into_iter()
-        .zip(flags)
-        .filter(|(_, active)| *active)
-        .map(|(key, _)| key.to_owned())
-        .collect()
+fn scripts(runs: &[Run<'_>], paragraph_language: Option<&str>, shape: bool) -> Vec<String> {
+    ooxml_text::paragraph_scripts_with_languages(
+        runs.iter().map(|(props, text)| {
+            let language = if shape {
+                props.east_asia_language.as_deref().or(paragraph_language)
+            } else {
+                paragraph_language
+            };
+            (text.as_deref().unwrap_or_default(), language)
+        }),
+        false,
+    )
+    .into_iter()
+    .filter(|script| {
+        matches!(
+            script.as_str(),
+            "cjk-jp" | "cjk-kr" | "cjk-tc" | "cjk-sc" | "arabic" | "hebrew"
+        )
+    })
+    .collect()
 }
 
 #[cfg(test)]
@@ -317,7 +302,13 @@ pub(crate) struct Numbering<'a> {
 }
 
 impl<'a> Numbering<'a> {
-    pub(crate) fn new(root: &'a Node) -> Self {
+    pub(crate) fn new(root: &'a Node, complete: &mut bool) -> Self {
+        let canonical = |id: &str| {
+            id == "0"
+                || (!id.is_empty()
+                    && !id.starts_with('0')
+                    && id.bytes().all(|byte| byte.is_ascii_digit()))
+        };
         let mut numbering = Self {
             instances: BTreeMap::new(),
             abstracts: Vec::new(),
@@ -325,6 +316,9 @@ impl<'a> Numbering<'a> {
             by_style_link: BTreeMap::new(),
             markers: RefCell::new(BTreeMap::new()),
         };
+        let mut order: Vec<usize> = Vec::new();
+        let mut positions = BTreeMap::new();
+        let mut links = Vec::new();
         for node in &root.children {
             visited(1);
             match node.name {
@@ -332,22 +326,28 @@ impl<'a> Numbering<'a> {
                     let Some(id) = node.attr("numId") else {
                         continue;
                     };
-                    numbering.instances.entry(id).or_insert_with(|| {
-                        let mut overrides = BTreeMap::new();
-                        for child in &node.children {
-                            if child.name == "w:lvlOverride"
-                                && let Some(ilvl) = child.attr("ilvl")
-                            {
-                                overrides
-                                    .entry(ilvl)
-                                    .or_insert_with(|| child.child("w:lvl"));
-                            }
+                    if !canonical(id)
+                        || node.val("w:abstractNumId").is_some_and(|id| !canonical(id))
+                    {
+                        *complete = false;
+                    }
+                    let mut overrides = BTreeMap::new();
+                    for child in &node.children {
+                        if child.name == "w:lvlOverride"
+                            && let Some(ilvl) = child.attr("ilvl")
+                        {
+                            overrides
+                                .entry(ilvl)
+                                .or_insert_with(|| child.child("w:lvl"));
                         }
+                    }
+                    numbering.instances.insert(
+                        id,
                         NumInstance {
                             abstract_id: node.val("w:abstractNumId"),
                             overrides,
-                        }
-                    });
+                        },
+                    );
                 }
                 "w:abstractNum" => {
                     let index = numbering.abstracts.len();
@@ -366,14 +366,32 @@ impl<'a> Numbering<'a> {
                         has_levels,
                         style_link: node.val("w:numStyleLink"),
                     });
-                    if let Some(id) = node.attr("abstractNumId") {
-                        numbering.by_id.entry(id).or_insert(index);
+                    let id = node.attr("abstractNumId");
+                    if !id.is_some_and(canonical) {
+                        *complete = false;
                     }
-                    if let Some(link) = node.val("w:styleLink") {
-                        numbering.by_style_link.entry(link).or_insert(index);
+                    if let Some(id) = id {
+                        numbering.by_id.insert(id, index);
                     }
+                    if let Some(id) = id {
+                        match positions.get(id).copied() {
+                            Some(position) => order[position] = index,
+                            None => {
+                                positions.insert(id, order.len());
+                                order.push(index);
+                            }
+                        }
+                    }
+                    links.push(node.val("w:styleLink"));
                 }
                 _ => {}
+            }
+        }
+        for index in order {
+            if numbering.abstracts[index].has_levels
+                && let Some(link) = links[index]
+            {
+                numbering.by_style_link.entry(link).or_insert(index);
             }
         }
         numbering
@@ -501,34 +519,17 @@ impl<'a> Scan<'a> {
     fn paragraph_fonts(&mut self, node: &Node, table: &Props) -> bool {
         let ppr = node.child("w:pPr");
         let style_id = ppr.and_then(|node| node.val("w:pStyle"));
-        let style = if self.shape {
-            None
-        } else {
-            self.styles.get(style_id, "paragraph", self.complete)
-        };
-        let mut base = if self.shape {
-            Props::default()
-        } else {
-            self.styles.defaults.clone()
-        };
+        let style = self.styles.get(style_id, "paragraph", self.complete);
+        let mut base = self.styles.defaults.clone();
         base.merge(table, true);
         if let Some(style) = style {
             base.merge(&style.run, true);
         }
         let mut mark = base.clone();
-        if !self.shape
-            && let Some(character) = self.styles.get(None, "character", self.complete)
-        {
+        if let Some(character) = self.styles.get(None, "character", self.complete) {
             mark.merge(&character.run, true);
         }
-        let direct_mark = Props::parse(
-            if self.shape {
-                None
-            } else {
-                ppr.and_then(|node| node.child("w:rPr"))
-            },
-            self.theme,
-        );
+        let direct_mark = Props::parse(ppr.and_then(|node| node.child("w:rPr")), self.theme);
         if let Some(id) = direct_mark.style.as_deref() {
             let mut resolved = self.styles.defaults.clone();
             if let Some(character) = self.styles.get(None, "character", self.complete) {
@@ -572,12 +573,12 @@ impl<'a> Scan<'a> {
                 generated_label = false;
             }
         }
-        let scripts = scripts(&runs);
+        let scripts = scripts(&runs, mark.east_asia_language.as_deref(), self.shape);
         self.collector.name(&default, false, false, &scripts, true);
         for (index, (props, text)) in runs.iter().enumerate() {
             self.collector
                 .run(props, text.as_deref(), &default, &scripts);
-            if !(self.shape || generated_label && index == 0)
+            if !(generated_label && index == 0)
                 && (props.bold_cs != mark.bold_cs
                     || props.italic_cs != mark.italic_cs
                     || props.cs != mark.cs)
@@ -687,16 +688,19 @@ impl<'a> Scan<'a> {
                 }
                 "w:r" => {
                     let direct = Props::parse(child.child("w:rPr"), self.theme);
+                    let mut own_language = direct.east_asia_language.clone();
                     let mut props = base.clone();
-                    if !self.shape
-                        && let Some(id) = direct.style.as_deref()
+                    if let Some(id) = direct.style.as_deref()
                         && let Some(style) = self.styles.get(Some(id), "character", self.complete)
                     {
+                        own_language =
+                            own_language.or_else(|| style.run.east_asia_language.clone());
                         props.merge(&style.run, true);
                     }
                     props.merge(&direct, false);
                     if self.shape {
-                        props.rtl = None;
+                        props.east_asia_language =
+                            own_language.or_else(|| mark.east_asia_language.clone());
                     }
                     if props.hidden == Some(true) {
                         continue;
@@ -806,32 +810,35 @@ impl<'a> Scan<'a> {
             .or_else(|| style.and_then(|style| style.look.clone()))
             .unwrap_or_default();
         let rows = wrapped_children(node, "w:tr");
-        let columns = node
-            .child("w:tblGrid")
-            .map(|grid| {
-                grid.children
-                    .iter()
-                    .filter(|node| node.name == "w:gridCol")
-                    .count()
-            })
-            .filter(|&count| count > 0)
-            .unwrap_or_else(|| {
-                rows.iter()
-                    .map(|row| {
-                        wrapped_children(row, "w:tc")
-                            .into_iter()
-                            .map(|cell| {
-                                number(
-                                    cell.path(&["w:tcPr"])
-                                        .and_then(|node| node.val("w:gridSpan")),
-                                )
-                                .unwrap_or(1)
-                            })
-                            .fold(0usize, usize::saturating_add)
+        let grid = node.child("w:tblGrid").map_or(0, |grid| {
+            grid.children
+                .iter()
+                .filter(|node| node.name == "w:gridCol")
+                .count()
+        });
+        let columns = rows
+            .iter()
+            .map(|row| {
+                let omitted = ["w:gridBefore", "w:gridAfter"]
+                    .into_iter()
+                    .map(|name| {
+                        number(row.path(&["w:trPr"]).and_then(|node| node.val(name))).unwrap_or(0)
                     })
-                    .max()
-                    .unwrap_or(0)
-            });
+                    .fold(0usize, usize::saturating_add);
+                wrapped_children(row, "w:tc")
+                    .into_iter()
+                    .map(|cell| {
+                        number(
+                            cell.path(&["w:tcPr"])
+                                .and_then(|node| node.val("w:gridSpan")),
+                        )
+                        .unwrap_or(1)
+                    })
+                    .fold(omitted, usize::saturating_add)
+            })
+            .max()
+            .unwrap_or(0)
+            .max(grid);
         for (row_index, row) in rows.iter().enumerate() {
             if self.collector.limited {
                 break;

@@ -29,11 +29,13 @@ export type PptxAsyncEditorApi = Omit<PptxWorkerEditorApi,
   [K in keyof AsyncOperations]: (...args: Parameters<AsyncOperations[K]>) => Promise<ReturnType<AsyncOperations[K]>>;
 } & Pick<PptxAsyncEditorAccess, 'exportStructured' | 'exportMarkdown'> & {
   handleAsync(): Promise<PptxAsyncEditorAccess>;
-  /** Flushes pending input, then serializes the presentation to .pptx bytes. Does not call onSave or download. */
+  /** Flushes pending input, serializes the presentation to .pptx bytes and hands them to onSave. Does not download. */
   save(): Promise<Uint8Array>;
   /** @deprecated Use {@link save}, which is async on the default editor. */
   saveAsync(): Promise<Uint8Array>;
-  recoverySave(): Promise<{ bytes: Uint8Array; recovery: true; throughSeq: number; version: string }>;
+  /** `unrecoveredIntents` lists edits made just before the failure that recovery left out because their outcome is unknown. */
+  recoverySave(): Promise<{ bytes: Uint8Array; recovery: true; throughSeq: number; version: string;
+    unrecoveredIntents?: { seq: number; kind: string; reason: 'unknown-outcome' }[] }>;
 };
 
 const caller = { reportRefusal: false } as const;
@@ -54,6 +56,16 @@ export function peerlessPositionAtPoint(run: PeerlessPresentation, canvas: HTMLC
     y: (clientY - bounds.top) * frame.displayList.height / bounds.height };
   const hit = hitGeometry(indexGeometry(frame.displayList), point);
   return hit ? { ...hit, slide: frame.frame.slideIndex + 1, slideId: frame.frame.slideId } : null;
+}
+
+export function notifyingSaveApi(api: PptxAsyncEditorApi, saved: (bytes: Uint8Array) => void): PptxAsyncEditorApi {
+  const save = async () => { const bytes = await api.save(); saved(bytes); return bytes; };
+  const descriptors = Object.getOwnPropertyDescriptors(api);
+  return Object.defineProperties({}, {
+    ...descriptors,
+    save: { ...descriptors.save, value: save },
+    saveAsync: { ...descriptors.saveAsync, value: save },
+  }) as PptxAsyncEditorApi;
 }
 
 export function createPeerlessEditorApi(run: PeerlessPresentation, canvas: HTMLCanvasElement,
@@ -164,6 +176,8 @@ export function createPeerlessEditorApi(run: PeerlessPresentation, canvas: HTMLC
     ...mutations,
     encodeStateVector: () => read('encodeStateVector'),
     encodeStateAsUpdate: (vector) => read('encodeStateAsUpdate', vector),
+    proposalSlideStrip: (id) => read('proposalSlideStrip', id),
+    layoutProposalDiffSlideById: (id, slideId) => read('layoutProposalDiffSlideById', id, slideId),
     previewProposal: (id) => read('previewProposal', id), layoutSlide: (index) => read('layoutSlide', index),
     layoutProposalSlide: (id, index) => read('layoutProposalSlide', id, index), layoutProposalDiffSlide: (id, index) => read('layoutProposalDiffSlide', id, index),
     comments: () => read('comments'), snapshot: () => read('snapshot'), story: (id) => read('story', id), findText: api.findText,

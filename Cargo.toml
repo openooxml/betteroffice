@@ -11,10 +11,21 @@ homepage = "https://betteroffice.dev"
 repository = "https://github.com/openooxml/betteroffice"
 
 [workspace.dependencies]
+ooxml-raster = { package = "betteroffice-ooxml-raster", path = "crates/ooxml-raster", version = "0.5.1" }
+betteroffice-fonts-latin = { path = "crates/betteroffice-fonts-latin", version = "0.5.1" }
+betteroffice-fonts-intl = { path = "crates/betteroffice-fonts-intl", version = "0.5.1" }
+betteroffice-fonts-cjk-sc = { path = "crates/betteroffice-fonts-cjk-sc", version = "0.5.1" }
+betteroffice-fonts-cjk-tc = { path = "crates/betteroffice-fonts-cjk-tc", version = "0.5.1" }
+betteroffice-fonts-cjk-jp = { path = "crates/betteroffice-fonts-cjk-jp", version = "0.5.1" }
+betteroffice-fonts-cjk-kr = { path = "crates/betteroffice-fonts-cjk-kr", version = "0.5.1" }
+betteroffice-fonts-cjk-serif-sc = { path = "crates/betteroffice-fonts-cjk-serif-sc", version = "0.5.1" }
+betteroffice-fonts-cjk = { path = "crates/betteroffice-fonts-cjk", version = "0.5.1" }
+
+base-latin = { package = "betteroffice-base-latin", path = "crates/base-latin", version = "0.5.1" }
 betteroffice-fonts = { path = "crates/betteroffice-fonts", version = "0.5.1", default-features = false }
 quick-xml = "0.41"
 wasm-bindgen = "0.2"
-libm = "=0.2.15"
+libm = "=0.2.16"
 betteroffice-xlsx = { path = "crates/betteroffice-xlsx", version = "0.5.1", default-features = false }
 ooxml-opc = { package = "betteroffice-opc", path = "crates/ooxml-opc", version = "0.5.1" }
 xlsx-model = { package = "betteroffice-xlsx-model", path = "crates/xlsx-model", version = "0.5.1" }
@@ -35,7 +46,7 @@ docx-engine = { package = "betteroffice-docx-engine", path = "crates/docx-engine
 betteroffice-docx = { path = "crates/betteroffice-docx", version = "0.5.1" }
 pptx-parse = { package = "betteroffice-pptx-parse", path = "crates/pptx-parse", version = "0.5.1" }
 pptx-edit = { package = "betteroffice-pptx-edit", path = "crates/pptx-edit", version = "0.5.1" }
-pptx-engine = { package = "betteroffice-pptx-engine", path = "crates/pptx-engine" }
+pptx-engine = { package = "betteroffice-pptx-engine", path = "crates/pptx-engine", default-features = false }
 pptx-render = { package = "betteroffice-pptx-render", path = "crates/pptx-render", version = "0.5.1" }
 pptx-raster = { package = "betteroffice-pptx-raster", path = "crates/pptx-raster", version = "0.5.1" }
 betteroffice-pptx = { path = "crates/betteroffice-pptx", version = "0.5.1" }
@@ -49,9 +60,13 @@ vsdx-validate = { package = "betteroffice-vsdx-validate", path = "crates/vsdx-va
 vsdx-edit = { package = "betteroffice-vsdx-edit", path = "crates/vsdx-edit", version = "0.5.1" }
 betteroffice-vsdx = { path = "crates/betteroffice-vsdx", version = "0.5.1" }
 
+[profile.test]
+debug = "line-tables-only"
+
 [profile.release]
 opt-level = "s"
 lto = true
+codegen-units = 1
 
 [profile.fonts-decoder]
 inherits = "release"
@@ -61,9 +76,6 @@ panic = "abort"
 strip = "symbols"
 
 [profile.release.package.betteroffice-docx-layout]
-opt-level = 3
-
-[profile.release.package.betteroffice-docx-parse]
 opt-level = 3
 
 [profile.release.package.betteroffice-ooxml-font-preflight]
@@ -80,3 +92,6 @@ opt-level = 3
 
 [profile.release.package.yrs]
 opt-level = 3
+
+[patch.crates-io]
+yrs = { git = "https://github.com/openooxml/y-crdt.git", rev = "5349f4e11ec46a5ad842f08415b315cb6d5c53af" }

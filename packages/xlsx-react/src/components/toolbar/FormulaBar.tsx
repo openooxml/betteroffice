@@ -1,4 +1,4 @@
-import { parseHyperlinkLocation } from '@betteroffice/xlsx';
+import { parseHyperlinkLocation } from '@betteroffice/xlsx/headless';
 import type { CellAddr } from '@betteroffice/xlsx';
 import { createContext, useContext, useLayoutEffect, useRef, useState } from 'react';
 import type { CSSProperties, KeyboardEvent, Ref } from 'react';

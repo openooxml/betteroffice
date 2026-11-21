@@ -1,0 +1,1 @@
+{"type":"setTables","tables":[{"name":"Sales","sheet":2,"range":{"start":{"row":0,"col":0},"end":{"row":1,"col":1}},"header_rows":1,"totals_rows":0,"columns":["Year","Price"]}]}

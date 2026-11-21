@@ -25,6 +25,7 @@ export function PluginOverlays({
       ref={layerRef}
       {...PLUGIN_CHROME}
       className="xlsx-plugin-overlays"
+      data-plugin-overlays=""
       data-testid="plugin-overlays"
       style={{
         position: 'absolute',

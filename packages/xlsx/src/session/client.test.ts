@@ -91,6 +91,21 @@ test('ack delivery skips removed listeners and defers replacements until the nex
   } finally { offCurrent(); offRemoved(); await session.dispose(); }
 });
 
+test("the worker opens with recalculate: 'stale'", async () => {
+  const bytes = await volatileWorkbookBytes();
+  const read = { ranges: [{ sheetId: 'sheet:0', range: { kind: 'a1', a1: 'A1:B1' } }] } as const;
+  for (const recalculate of ['stale', 'all'] as const) {
+    const session = await createTestWorkbookSession(bytes, undefined, { calculation, wasm: wasmBytes.buffer, recalculate });
+    try {
+      const cells = await session.call.readCells(read);
+      if (!cells.ok) throw new Error(cells.failure.message);
+      expect(cells.ranges[0].cells[0].map((cell: XlsxCellRead) => cell.value)).toEqual(recalculate === 'stale'
+        ? [{ kind: 'number', value: 0 }, { kind: 'number', value: 0 }]
+        : [{ kind: 'number', value: calculation.nowSerial }, { kind: 'number', value: Math.floor(calculation.nowSerial) }]);
+    } finally { await session.dispose(); }
+  }
+});
+
 function crashableHost(): {
   wrap(transport: SessionTransport): SessionTransport;
   crash(): void;
@@ -197,6 +212,47 @@ test('recovery trims a checkpoint prefix and replays later commands', async () =
     try {
       expect((await reopened.call.cellInputs(0, 'A1:A4')).cells.map((row) => row[0].input))
         .toEqual(['first', 'second', 'third', 'fourth']);
+    } finally { await reopened.dispose(); }
+  } finally { opener.mockRestore(); await session.dispose(); }
+});
+
+test.each([
+  ['acceptProposal', 'before'], ['acceptProposal', 'after'],
+  ['rejectProposal', 'before'], ['rejectProposal', 'after'],
+] as const)('recovery replays %s for a host proposal staged %s the checkpoint', async (kind, staged) => {
+  const host = crashableHost();
+  const opener = recoveryWorker();
+  const session = await createTestWorkbookSession(await initialPaintBook(), host.wrap, { includeEditState: true, calculation });
+  let seq = 0;
+  const propose = async () => {
+    const status = await session.submit({ ...session.commandIdentity, seq: ++seq, basis: session.confirmedBasis,
+      kind: 'propose', payload: { args: ['host', null, [{ sheet: 0, row: 10, col: 0, input: '7' }]] } });
+    expect(status).toMatchObject({ status: 'applied', committed: false });
+    return (status.result as workbookWasm.Proposal).id;
+  };
+  try {
+    await session.submit({ ...session.commandIdentity, seq: ++seq, basis: session.confirmedBasis,
+      kind: 'setReadOnly', payload: { readOnly: true, allowHostProposals: true } });
+    let id = staged === 'before' ? await propose() : undefined;
+    const recovery = workbookSessionRecovery.get(session)!;
+    expect(await recovery.capture(() => true)).toBe(true);
+    const throughSeq = seq;
+    expect(recovery.throughSeq).toBe(throughSeq);
+    expect(recovery.retainedCommands).toBe(0);
+    id ??= await propose();
+    expect(await session.submit({ ...session.commandIdentity, seq: ++seq, basis: session.confirmedBasis,
+      kind, payload: { args: [id] } }))
+      .toMatchObject({ status: 'applied', committed: kind === 'acceptProposal' });
+    expect(await session.submit(recoveryCommand(session, ++seq, 10, 'blocked')))
+      .toMatchObject({ status: 'refused', reason: 'read-only' });
+    const expected = await session.save();
+    host.crash();
+    const bytes = await recovery.save(() => {});
+    expect(bytes).toEqual(expected);
+    expect(opener.mock.calls[0][2]?.throughSeq).toBe(throughSeq);
+    const reopened = await createTestWorkbookSession(bytes, undefined, { calculation });
+    try {
+      expect((await reopened.call.cellInputs(0, 'A11')).cells[0][0].input).toBe(kind === 'acceptProposal' ? '7' : '');
     } finally { await reopened.dispose(); }
   } finally { opener.mockRestore(); await session.dispose(); }
 });

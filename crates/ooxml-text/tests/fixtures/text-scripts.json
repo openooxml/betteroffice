@@ -1,0 +1,5197 @@
+{
+  "mixes": [
+    {
+      "scripts": [
+        "cjk-jp",
+        "tifinagh",
+        "malayalam",
+        "telugu",
+        "myanmar",
+        "mongolian"
+      ],
+      "text": "⵿ㇿഀ౿ꨀꩿ𑙠"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "arabic",
+        "hebrew",
+        "kannada"
+      ],
+      "text": "꥿؀ಀ᧟ݐיִ﹯"
+    },
+    {
+      "scripts": [],
+      "text": "꭯ "
+    },
+    {
+      "scripts": [
+        "arabic"
+      ],
+      "text": "ᢰﭐݿ䷀ݐ"
+    },
+    {
+      "scripts": [],
+      "text": "𑚀"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "thai",
+        "georgian"
+      ],
+      "text": "฀Ა　ｦ"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "cjk-kr",
+        "arabic",
+        "thai"
+      ],
+      "text": "﫿ﹰ฀ㇿꥠ"
+    },
+    {
+      "scripts": [
+        "telugu",
+        "khmer"
+      ],
+      "text": "︯౿᧿"
+    },
+    {
+      "scripts": [
+        "syriac"
+      ],
+      "text": "࡯ݏ"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "tifinagh",
+        "khmer"
+      ],
+      "text": "぀𑭠ⴰ𑫿᧿ក"
+    },
+    {
+      "scripts": [
+        "kannada",
+        "ethiopic",
+        "devanagari",
+        "cherokee",
+        "tibetan"
+      ],
+      "text": "ಀ﬜ሀ꣠᏿︯𒀀ༀ"
+    },
+    {
+      "scripts": [
+        "cjk-kr"
+      ],
+      "text": "꥿ᇿ𑙟"
+    },
+    {
+      "scripts": [
+        "armenian",
+        "myanmar",
+        "tifinagh"
+      ],
+      "text": "ᢰﬓꩠ⵿"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "mongolian"
+      ],
+      "text": "𿿿꯿᠀"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "cherokee",
+        "syriac"
+      ],
+      "text": "Ꭰࡠ･"
+    },
+    {
+      "scripts": [
+        "hebrew",
+        "tamil"
+      ],
+      "text": "஀׿"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "tamil",
+        "khmer",
+        "ethiopic"
+      ],
+      "text": "񀀀௿៿　﫿𞟿"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "myanmar",
+        "tibetan"
+      ],
+      "text": "㐀ꩿ︀񀀀ༀ𑜀"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "cjk-kr",
+        "thaana"
+      ],
+      "text": "㇯ㇰ𿿿퟿ހ"
+    },
+    {
+      "scripts": [
+        "georgian",
+        "myanmar",
+        "syriac",
+        "devanagari"
+      ],
+      "text": "ჿ㏿ꧠ࡯ॿꪀ"
+    },
+    {
+      "scripts": [
+        "myanmar",
+        "telugu",
+        "ethiopic"
+      ],
+      "text": "႟ ఀ﬒᎟"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "hebrew",
+        "gurmukhi",
+        "ethiopic"
+      ],
+      "text": "ﭐԯ਀ﭏ᎟ݿ"
+    },
+    {
+      "scripts": [
+        "myanmar"
+      ],
+      "text": "က"
+    },
+    {
+      "scripts": [
+        "myanmar"
+      ],
+      "text": "ⷠꬰ꧿႟﬜"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "thai"
+      ],
+      "text": "䶿฀㄰䷿"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "arabic",
+        "tifinagh",
+        "myanmar"
+      ],
+      "text": "﻿ⴰ䶿ꩠ؀"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "tamil",
+        "sinhala",
+        "cherokee"
+      ],
+      "text": "𑿀ᢰ𑇿꥟\u0000𠀀ꭰᨀ"
+    },
+    {
+      "scripts": [
+        "hebrew",
+        "myanmar",
+        "armenian",
+        "gurmukhi"
+      ],
+      "text": "ꩠיִ֏਀"
+    },
+    {
+      "scripts": [
+        "georgian",
+        "kannada"
+      ],
+      "text": "ⷠㄯ񀀀᐀Ⴀಀ"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "arabic",
+        "hebrew",
+        "devanagari",
+        "tibetan"
+      ],
+      "text": "ॿﭏༀ\u0000ﹰⷠヿ"
+    },
+    {
+      "scripts": [
+        "armenian",
+        "cherokee"
+      ],
+      "text": "ﬗ֏ꮿ𞠀"
+    },
+    {
+      "scripts": [
+        "khmer"
+      ],
+      "text": "᧠ㄯ"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "georgian"
+      ],
+      "text": "⳿ⷠ⴯︀𑈀ヿ"
+    },
+    {
+      "scripts": [
+        "hebrew",
+        "kannada"
+      ],
+      "text": "೿ﭏ𑇟"
+    },
+    {
+      "scripts": [
+        "armenian"
+      ],
+      "text": "ﬗ"
+    },
+    {
+      "scripts": [
+        "devanagari",
+        "bengali"
+      ],
+      "text": "꯿𑬀᲏㏿ॿঀ"
+    },
+    {
+      "scripts": [
+        "cherokee",
+        "devanagari",
+        "syriac",
+        "ethiopic",
+        "thaana"
+      ],
+      "text": "Ꭰॿࡠ⷟ހꨀ"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "devanagari"
+      ],
+      "text": "𑬀︯ԯ𑭟ݿ"
+    },
+    {
+      "scripts": [],
+      "text": ""
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "devanagari",
+        "ethiopic"
+      ],
+      "text": "　﬒꣠꬯"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "sinhala",
+        "gujarati"
+      ],
+      "text": "෿﬜𑛏૿𑫿︰　񀀀"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "gurmukhi"
+      ],
+      "text": "੿𠀀"
+    },
+    {
+      "scripts": [
+        "devanagari"
+      ],
+      "text": "ॿ"
+    },
+    {
+      "scripts": [],
+      "text": "ꀀ"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "hebrew",
+        "lao",
+        "ethiopic"
+      ],
+      "text": "יִ຀꬀ヿ"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "ethiopic",
+        "syriac",
+        "tamil"
+      ],
+      "text": "꬯ꦀԯ࡯𑿀豈"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "tamil",
+        "sinhala"
+      ],
+      "text": "߀ꥠ䶿㈀஀𑇠　"
+    },
+    {
+      "scripts": [
+        "cherokee"
+      ],
+      "text": "︀꫿𑾿Ꭰ"
+    },
+    {
+      "scripts": [
+        "devanagari"
+      ],
+      "text": "ॿ㏿"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "thaana"
+      ],
+      "text": "𠀀䷿޿"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "telugu"
+      ],
+      "text": "﷿౿"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "devanagari"
+      ],
+      "text": "가ऀ᧟ꦀ㐀\u0000⳿"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "armenian",
+        "myanmar",
+        "gurmukhi"
+      ],
+      "text": "ﬗ1ꩿ੿𠀀𑛐㐀က"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "arabic",
+        "ethiopic",
+        "khmer",
+        "georgian"
+      ],
+      "text": "﬜﷿ㇰ꬯៿ﭐჿ"
+    },
+    {
+      "scripts": [
+        "georgian"
+      ],
+      "text": "Ⴀ"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "hebrew",
+        "ethiopic"
+      ],
+      "text": "ꨀￜ֐𑫿ሀꥠ"
+    },
+    {
+      "scripts": [],
+      "text": "࡟"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "sinhala"
+      ],
+      "text": "෿䶿𑈀𑭠᧟ㄯ"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "arabic",
+        "georgian"
+      ],
+      "text": "߀ჿ⳿〿㄀꣟ﭐ䷀"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "oriya",
+        "georgian",
+        "malayalam"
+      ],
+      "text": "୿ꯀⴀ一ൿ᳀"
+    },
+    {
+      "scripts": [
+        "mongolian"
+      ],
+      "text": "𑙿"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "arabic",
+        "armenian"
+      ],
+      "text": "ﬓۿ﷿㐀𿿿"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "devanagari",
+        "armenian",
+        "bengali",
+        "syriac"
+      ],
+      "text": "ऀ㏿𞟟　︰ﬓঀݏ"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "telugu",
+        "lao"
+      ],
+      "text": "ఀ︀𞠀퟿຀"
+    },
+    {
+      "scripts": [
+        "armenian"
+      ],
+      "text": "᐀𑚀㆐ﬗ"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "sinhala",
+        "myanmar",
+        "bengali"
+      ],
+      "text": "ﬀ﷿ㄯ𑇿ꩿ৿"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "arabic",
+        "devanagari"
+      ],
+      "text": "﻿ꦀ￝鿿ऀ"
+    },
+    {
+      "scripts": [],
+      "text": "ꀀ꥟́"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "sinhala",
+        "ethiopic",
+        "mongolian"
+      ],
+      "text": "𑇠ㄯﭐⶀ𑙠"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "cjk-kr",
+        "arabic",
+        "cherokee",
+        "malayalam"
+      ],
+      "text": "ࣿﾟꭰꥠൿ"
+    },
+    {
+      "scripts": [
+        "cjk-kr"
+      ],
+      "text": "〿ￜ"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "syriac",
+        "ethiopic",
+        "devanagari",
+        "mongolian"
+      ],
+      "text": "ݏ𞟠𑜀﻿ॿ᠀"
+    },
+    {
+      "scripts": [],
+      "text": "𑭠"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "arabic",
+        "ethiopic",
+        "myanmar"
+      ],
+      "text": "᲏ሀﹰ𠀀႟‍ꧠ\u0000"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "tamil",
+        "ethiopic"
+      ],
+      "text": "𑿿꭯꬯꧟ﾠ䶿︰𠀀"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "khmer",
+        "ethiopic",
+        "devanagari",
+        "sinhala",
+        "tifinagh"
+      ],
+      "text": "៿⷟︀ヿ꣠񀀀𑇠⵿"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "devanagari",
+        "gurmukhi",
+        "georgian",
+        "kannada"
+      ],
+      "text": "𑬀਀ჿಀㇰ"
+    },
+    {
+      "scripts": [
+        "myanmar",
+        "armenian"
+      ],
+      "text": "ꨀကﬗ㈀"
+    },
+    {
+      "scripts": [],
+      "text": "᳀"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "arabic",
+        "tamil",
+        "myanmar"
+      ],
+      "text": "ￜࡰ𑿀𑛐꥿"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "devanagari"
+      ],
+      "text": "꣠ﾟㇰ"
+    },
+    {
+      "scripts": [],
+      "text": "᲏"
+    },
+    {
+      "scripts": [
+        "sinhala",
+        "myanmar"
+      ],
+      "text": "𑛏඀𑫿𑇟𑛿ⷠ"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "sinhala",
+        "tamil",
+        "lao"
+      ],
+      "text": "𑇠ᢰ௿؀຀䷿﻿᝿"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "thai",
+        "tibetan",
+        "sinhala"
+      ],
+      "text": "䷿᲏๿ༀ඀ㇰ\u0000"
+    },
+    {
+      "scripts": [
+        "cjk-sc"
+      ],
+      "text": "︰"
+    },
+    {
+      "scripts": [
+        "myanmar",
+        "gurmukhi"
+      ],
+      "text": "ꩿ꫿႟﬘੿⳿㈀"
+    },
+    {
+      "scripts": [
+        "armenian"
+      ],
+      "text": "ﬗꀀ"
+    },
+    {
+      "scripts": [
+        "mongolian",
+        "oriya",
+        "georgian"
+      ],
+      "text": "𑙿଀Ა"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "arabic",
+        "armenian",
+        "tifinagh"
+      ],
+      "text": "ﬓ一ݿヿⴰﾟ1"
+    },
+    {
+      "scripts": [],
+      "text": "꤀𞠀"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "myanmar",
+        "gurmukhi"
+      ],
+      "text": "𑛿･਀぀꩟･"
+    },
+    {
+      "scripts": [
+        "cjk-jp"
+      ],
+      "text": "぀"
+    },
+    {
+      "scripts": [
+        "arabic"
+      ],
+      "text": "⿿ݿ"
+    },
+    {
+      "scripts": [
+        "khmer",
+        "devanagari",
+        "sinhala",
+        "myanmar"
+      ],
+      "text": "កꣿ꥟𑬀඀က"
+    },
+    {
+      "scripts": [],
+      "text": "ᢰ"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "kannada",
+        "tifinagh"
+      ],
+      "text": "a𑫿ᄀಀⴰ"
+    },
+    {
+      "scripts": [
+        "myanmar",
+        "georgian",
+        "telugu"
+      ],
+      "text": "𑛿ჿఀ"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "sinhala",
+        "khmer",
+        "myanmar"
+      ],
+      "text": "𑇿ꦀﾟ᧠𑛐𞠀㆐"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "tamil",
+        "mongolian",
+        "khmer"
+      ],
+      "text": "1஀﻿ԯ𑙠៿"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "cjk-kr",
+        "khmer"
+      ],
+      "text": "ﾠ﹏﬘぀᧿ꦀ࡟"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "cjk-kr",
+        "lao"
+      ],
+      "text": "㆏ㇿ໿"
+    },
+    {
+      "scripts": [
+        "khmer",
+        "telugu",
+        "ethiopic"
+      ],
+      "text": "᧠౿ꀀ᎟ꀀ"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "arabic",
+        "thaana",
+        "oriya",
+        "myanmar"
+      ],
+      "text": "鿿䷿ㇰ޿ۿ଀ꩿ"
+    },
+    {
+      "scripts": [
+        "georgian"
+      ],
+      "text": "Ჿ"
+    },
+    {
+      "scripts": [
+        "gurmukhi",
+        "lao"
+      ],
+      "text": "੿຀ⷠ"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "syriac",
+        "devanagari"
+      ],
+      "text": "᲏･࡯꣠"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "georgian",
+        "armenian"
+      ],
+      "text": "Ა꥟⿿\u0000᐀﫿԰"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "arabic",
+        "mongolian",
+        "armenian",
+        "lao"
+      ],
+      "text": "𑙿﻿䶿ﬗ໿ꨀ"
+    },
+    {
+      "scripts": [
+        "cherokee"
+      ],
+      "text": "ꮿ"
+    },
+    {
+      "scripts": [
+        "bengali",
+        "myanmar",
+        "devanagari"
+      ],
+      "text": "ঀꧠ1﬘ऀ᧟\u0000"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "cjk-kr",
+        "lao",
+        "myanmar"
+      ],
+      "text": "ꬰꥠ຀㇯𑛐぀"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "malayalam",
+        "devanagari"
+      ],
+      "text": "ൿ㆐ꣿ𠀀〿"
+    },
+    {
+      "scripts": [
+        "sinhala"
+      ],
+      "text": "㆐ᢰ𑛏𑭠𑇠⳿"
+    },
+    {
+      "scripts": [
+        "cherokee"
+      ],
+      "text": "⳿᏿́"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "gujarati"
+      ],
+      "text": "࡟一૿"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "arabic",
+        "tamil",
+        "devanagari"
+      ],
+      "text": "௿ⷠ꧟𠀀ᄀﹰऀ"
+    },
+    {
+      "scripts": [
+        "sinhala"
+      ],
+      "text": "𑇠ㄯ"
+    },
+    {
+      "scripts": [
+        "devanagari"
+      ],
+      "text": "𑬀᝿"
+    },
+    {
+      "scripts": [
+        "cjk-jp"
+      ],
+      "text": "぀ 𠀀𞠀"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "khmer",
+        "armenian",
+        "cherokee"
+      ],
+      "text": "ក＀㆏ﬗ᏿"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "bengali"
+      ],
+      "text": "ঀ⳿ݿ﹐᐀"
+    },
+    {
+      "scripts": [
+        "thai",
+        "ethiopic",
+        "tamil"
+      ],
+      "text": "฀𞟠𑿿ꨀ"
+    },
+    {
+      "scripts": [
+        "armenian"
+      ],
+      "text": "ﬓ"
+    },
+    {
+      "scripts": [
+        "thai",
+        "mongolian",
+        "sinhala",
+        "tamil"
+      ],
+      "text": "\u0000๿᠀඀ꯀ𑿿"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "armenian",
+        "georgian",
+        "khmer"
+      ],
+      "text": "֏﷿ᨀ࡟ ꧟Ჿក"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "ethiopic",
+        "gujarati"
+      ],
+      "text": "︀ԯⶀ᧟ヿ૿ꪀ𑇟"
+    },
+    {
+      "scripts": [
+        "arabic"
+      ],
+      "text": "ۿ"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "lao"
+      ],
+      "text": "؀຀"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "arabic"
+      ],
+      "text": "぀ۿ "
+    },
+    {
+      "scripts": [
+        "telugu"
+      ],
+      "text": "㏿ᢰ1౿"
+    },
+    {
+      "scripts": [
+        "armenian"
+      ],
+      "text": "ﬗ"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "tamil",
+        "mongolian",
+        "devanagari",
+        "ethiopic"
+      ],
+      "text": "ꀀ௿𑙿︀ꣿ⷟ￜ"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "arabic",
+        "malayalam",
+        "kannada"
+      ],
+      "text": "ㇰ࡟꥟ࣿഀ꤀ಀ"
+    },
+    {
+      "scripts": [
+        "georgian",
+        "cherokee"
+      ],
+      "text": "ⴀꮿ"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "arabic",
+        "hebrew",
+        "sinhala",
+        "myanmar"
+      ],
+      "text": "぀𑇠יִꩠﹰݿ﬒"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "ethiopic",
+        "syriac",
+        "telugu",
+        "tamil"
+      ],
+      "text": "꬯퟿𑜀ࡠఀ1஀𞟟"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "bengali"
+      ],
+      "text": "߀䷿ঀ퟿ⷠ𒀀"
+    },
+    {
+      "scripts": [
+        "khmer"
+      ],
+      "text": "៿"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "mongolian",
+        "georgian"
+      ],
+      "text": "᢯᧟䶿꯿ჿ᲏〿"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "georgian"
+      ],
+      "text": "㈀ꥠႠ"
+    },
+    {
+      "scripts": [
+        "sinhala",
+        "ethiopic"
+      ],
+      "text": "඀꬯"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "arabic",
+        "tifinagh",
+        "ethiopic"
+      ],
+      "text": "﻿豈⵿́ࣿ𞟿"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "devanagari",
+        "mongolian"
+      ],
+      "text": "ꣿ᝿᠀ㇿ﹐"
+    },
+    {
+      "scripts": [
+        "khmer",
+        "cherokee",
+        "myanmar",
+        "georgian"
+      ],
+      "text": "កꮿက⴯"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "gujarati"
+      ],
+      "text": "︯઀1‍㄰ꯀ᧟꩟"
+    },
+    {
+      "scripts": [
+        "ethiopic"
+      ],
+      "text": "ሀሀ꬀"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "thaana",
+        "mongolian",
+        "armenian"
+      ],
+      "text": "ހ𑙿᠀ﾠﬗ＀䷀"
+    },
+    {
+      "scripts": [
+        "tamil"
+      ],
+      "text": "஀"
+    },
+    {
+      "scripts": [
+        "cherokee"
+      ],
+      "text": "ꭰ"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "khmer",
+        "thai"
+      ],
+      "text": "ᄀꬰ꫿᧠ꀀ๿"
+    },
+    {
+      "scripts": [
+        "syriac"
+      ],
+      "text": "࡯"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "georgian"
+      ],
+      "text": "￝⿿一ჿ﹯"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "oriya",
+        "ethiopic",
+        "georgian",
+        "devanagari"
+      ],
+      "text": "୿᎟ჿ꥟᎟𑙟ࣿऀ"
+    },
+    {
+      "scripts": [
+        "khmer",
+        "myanmar",
+        "ethiopic",
+        "lao"
+      ],
+      "text": "᲏៿႟䷀ሀ໿㏿́"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "arabic",
+        "sinhala",
+        "ethiopic",
+        "tamil",
+        "gurmukhi"
+      ],
+      "text": "඀𞟿ﹰꦀ꭯𑿀𠀀੿"
+    },
+    {
+      "scripts": [
+        "georgian"
+      ],
+      "text": "ᢰ﬘Ⴀ︀᳀﬜"
+    },
+    {
+      "scripts": [
+        "hebrew",
+        "myanmar"
+      ],
+      "text": "ﭏꩠ𑛿"
+    },
+    {
+      "scripts": [
+        "gurmukhi",
+        "tamil",
+        "khmer"
+      ],
+      "text": "਀௿៿"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "cherokee",
+        "georgian"
+      ],
+      "text": "ꬰ𞠀ᎠﹰᲿ"
+    },
+    {
+      "scripts": [
+        "syriac",
+        "devanagari",
+        "tibetan"
+      ],
+      "text": "܀꣠ԯ࿿"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "arabic",
+        "mongolian",
+        "georgian"
+      ],
+      "text": "᢯ࡰ퟿ꥠⴀ"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "oriya",
+        "ethiopic",
+        "myanmar"
+      ],
+      "text": "񀀀଀𞠀꬯　ꩠ"
+    },
+    {
+      "scripts": [
+        "sinhala"
+      ],
+      "text": "෿"
+    },
+    {
+      "scripts": [
+        "armenian",
+        "myanmar"
+      ],
+      "text": "ﬓꧠ"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "gujarati",
+        "tibetan"
+      ],
+      "text": "ｦ૿ༀ﫿ｦ"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "georgian"
+      ],
+      "text": "ⴀￜ́"
+    },
+    {
+      "scripts": [
+        "hebrew",
+        "ethiopic",
+        "sinhala",
+        "myanmar",
+        "mongolian"
+      ],
+      "text": "ⶀ඀ﭏꩠ᢯﹯"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "gujarati"
+      ],
+      "text": "﫿가㄀઀𑜀꣟"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "mongolian",
+        "gurmukhi",
+        "myanmar"
+      ],
+      "text": "᢯＀੿꧿ㄯ"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "georgian",
+        "ethiopic",
+        "tamil",
+        "devanagari"
+      ],
+      "text": "Ა𞟠᎟㆐𑿿ԯ꣠؀"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "syriac",
+        "armenian",
+        "tibetan",
+        "ethiopic"
+      ],
+      "text": "𿿿ࡠᇿ䷿ﬗ࿿꬀ࡠ"
+    },
+    {
+      "scripts": [
+        "syriac",
+        "mongolian",
+        "lao"
+      ],
+      "text": "ࡠ𑫿𑙠㄀໿㆐"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "lao",
+        "georgian",
+        "kannada"
+      ],
+      "text": "຀Ჿ೿鿿"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "arabic",
+        "devanagari",
+        "myanmar"
+      ],
+      "text": "ݿॿ᝿︰႟"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "devanagari"
+      ],
+      "text": "𒀀𑭟𑜀䷀‍1ヿ"
+    },
+    {
+      "scripts": [
+        "khmer"
+      ],
+      "text": "៿"
+    },
+    {
+      "scripts": [
+        "telugu",
+        "lao",
+        "tamil",
+        "mongolian",
+        "tibetan",
+        "ethiopic"
+      ],
+      "text": "౿㇯ᨀ໿௿𑙠࿿᎟"
+    },
+    {
+      "scripts": [
+        "gujarati",
+        "khmer"
+      ],
+      "text": "ㄯ઀᧠"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "arabic",
+        "georgian",
+        "gurmukhi"
+      ],
+      "text": "Ა꥿ݿ੿"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "syriac",
+        "ethiopic",
+        "devanagari",
+        "cherokee"
+      ],
+      "text": "䷀ݏㇰ⷟꣠ꮿ𒀀"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "arabic",
+        "mongolian",
+        "ethiopic"
+      ],
+      "text": "ݿ㆏豈𑙠᐀ￜaⶀ"
+    },
+    {
+      "scripts": [],
+      "text": "﬒"
+    },
+    {
+      "scripts": [
+        "ethiopic",
+        "georgian",
+        "syriac",
+        "telugu"
+      ],
+      "text": "䷀꬀︯Ა ݏఀ㆐"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "sinhala"
+      ],
+      "text": "꤀𞟟𒀀⳿𑇠ﾠ"
+    },
+    {
+      "scripts": [
+        "cjk-jp"
+      ],
+      "text": "ヿ"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "cjk-kr",
+        "devanagari"
+      ],
+      "text": "﹯🿿⳿꣠ﾟ꥿꯿"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "ethiopic",
+        "sinhala",
+        "devanagari",
+        "tamil",
+        "myanmar"
+      ],
+      "text": "᎟඀꣠ￜ䷿𑿿ꩠ"
+    },
+    {
+      "scripts": [
+        "sinhala"
+      ],
+      "text": "︯𑇠"
+    },
+    {
+      "scripts": [
+        "malayalam",
+        "armenian"
+      ],
+      "text": "ഀ⳿԰"
+    },
+    {
+      "scripts": [
+        "thaana",
+        "bengali"
+      ],
+      "text": "޿䷀㄀৿ꯀ"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "cjk-kr",
+        "arabic",
+        "ethiopic",
+        "khmer"
+      ],
+      "text": "1ｦ꬯가᧿ݿ㏿㐀"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "kannada",
+        "devanagari"
+      ],
+      "text": "೿ॿ䶿"
+    },
+    {
+      "scripts": [
+        "ethiopic"
+      ],
+      "text": "꬀"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "arabic"
+      ],
+      "text": "㆏𑙟ۿ\u0000"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "arabic",
+        "devanagari",
+        "armenian"
+      ],
+      "text": "꩟aㇰ𑭟𑫿ﬗݿݿ"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "hebrew",
+        "tamil"
+      ],
+      "text": "𑫿﹐𑿀؀֐"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "ethiopic",
+        "thai",
+        "sinhala"
+      ],
+      "text": "･𞟿〿฀᝿＀䷿𑇠"
+    },
+    {
+      "scripts": [
+        "kannada",
+        "mongolian"
+      ],
+      "text": "ಀ᢯᧟"
+    },
+    {
+      "scripts": [
+        "oriya"
+      ],
+      "text": "୿"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "lao",
+        "devanagari"
+      ],
+      "text": "໿ㇿꣿ𞟟㇯1𑇟"
+    },
+    {
+      "scripts": [
+        "myanmar"
+      ],
+      "text": "꣟᝿ꩿ 𑛐"
+    },
+    {
+      "scripts": [
+        "arabic"
+      ],
+      "text": "؀"
+    },
+    {
+      "scripts": [
+        "cherokee"
+      ],
+      "text": "ꮿ𑇟ﬀ"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "mongolian",
+        "tifinagh"
+      ],
+      "text": "𑙿⵿﫿"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "sinhala",
+        "malayalam"
+      ],
+      "text": "꧟𑫿𑇠ൿ﫿"
+    },
+    {
+      "scripts": [],
+      "text": "﹐"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "georgian"
+      ],
+      "text": "ⴀ𑫿߀؀䷀﹐𑚀"
+    },
+    {
+      "scripts": [
+        "cjk-sc"
+      ],
+      "text": "﫿"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "thaana"
+      ],
+      "text": "ހ﫿"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "cherokee",
+        "myanmar",
+        "gurmukhi"
+      ],
+      "text": "豈ꭰ﹏𑛿਀"
+    },
+    {
+      "scripts": [
+        "cjk-kr"
+      ],
+      "text": "ﾠ"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "thai",
+        "gurmukhi",
+        "tamil"
+      ],
+      "text": "฀੿஀︀ￜ〿꣟𑿀"
+    },
+    {
+      "scripts": [
+        "kannada",
+        "ethiopic",
+        "tibetan"
+      ],
+      "text": "೿꬀࿿🿿𑚀"
+    },
+    {
+      "scripts": [
+        "oriya",
+        "syriac",
+        "thai"
+      ],
+      "text": "଀񀀀ࡠ꤀฀﬜"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "syriac",
+        "mongolian",
+        "armenian"
+      ],
+      "text": "ݏ𑛏񀀀ﹰ᢯԰ﬓ"
+    },
+    {
+      "scripts": [
+        "cherokee",
+        "lao",
+        "devanagari"
+      ],
+      "text": "ꭰ໿㇯𑬀"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "tamil",
+        "kannada",
+        "armenian"
+      ],
+      "text": "퟿஀ಀ一԰"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "arabic",
+        "lao",
+        "myanmar",
+        "telugu",
+        "mongolian"
+      ],
+      "text": "ࣿ㆏຀𑛿౿᠀"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "myanmar",
+        "malayalam",
+        "syriac"
+      ],
+      "text": "ꪀ᝿ꩠ᐀﫿᲏ൿ࡯"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "myanmar",
+        "tamil"
+      ],
+      "text": "࡟᲏႟﹏஀"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "cjk-kr"
+      ],
+      "text": "㄰ㇿ𑭠"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "ethiopic",
+        "sinhala"
+      ],
+      "text": "㆏𞟿﫿෿ꥠ﹏⿿𑙟"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "hebrew",
+        "myanmar",
+        "tamil"
+      ],
+      "text": "׿･ꧠ́･︯௿"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "myanmar",
+        "thaana"
+      ],
+      "text": "꧿᧟޿؀⿿﻿"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "syriac"
+      ],
+      "text": "぀܀ㇿ￝𞠀＀ｦ꤀"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "cjk-kr",
+        "tamil",
+        "sinhala"
+      ],
+      "text": "ￜ𠀀஀ꪀￜ𑇠ヿ〿"
+    },
+    {
+      "scripts": [
+        "cjk-sc"
+      ],
+      "text": "﫿"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "sinhala",
+        "bengali",
+        "cherokee"
+      ],
+      "text": "﫿㏿𑇿꩟ঀꭰ𑫿"
+    },
+    {
+      "scripts": [
+        "sinhala"
+      ],
+      "text": "඀𞠀"
+    },
+    {
+      "scripts": [
+        "ethiopic"
+      ],
+      "text": "⷟"
+    },
+    {
+      "scripts": [
+        "ethiopic",
+        "syriac",
+        "gurmukhi"
+      ],
+      "text": "𑫿𞟿㆐񀀀ݏ਀"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "georgian",
+        "bengali",
+        "gujarati",
+        "cherokee"
+      ],
+      "text": "Ჿ৿઀ㇿꭰ䶿"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "kannada",
+        "ethiopic",
+        "myanmar"
+      ],
+      "text": "ಀ⷟೿豈ကㇿꀀ"
+    },
+    {
+      "scripts": [
+        "armenian",
+        "khmer",
+        "georgian"
+      ],
+      "text": "ﬗ᧿𑈀Ჿ"
+    },
+    {
+      "scripts": [
+        "cjk-sc"
+      ],
+      "text": "〿"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "myanmar",
+        "tibetan"
+      ],
+      "text": "𑛐ࡰ࿿"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "armenian",
+        "kannada",
+        "devanagari",
+        "georgian"
+      ],
+      "text": "֏ಀ𑇟＀𑭟ⴀ⿿"
+    },
+    {
+      "scripts": [
+        "tibetan",
+        "thai",
+        "myanmar",
+        "syriac",
+        "armenian"
+      ],
+      "text": "ༀ⳿ⷠ฀ꧠࡠ𑫿ﬗ"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "georgian",
+        "ethiopic",
+        "armenian",
+        "mongolian",
+        "malayalam"
+      ],
+      "text": "⴯ㇿ⷟԰︯᠀꫿ഀ"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "syriac"
+      ],
+      "text": "ﬀ＀܀꤀﬘㈀"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "telugu"
+      ],
+      "text": "ｦఀ"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "myanmar",
+        "tamil",
+        "tifinagh",
+        "bengali"
+      ],
+      "text": " ႟𑿿ⴰ﹯᳀ঀ鿿"
+    },
+    {
+      "scripts": [
+        "sinhala"
+      ],
+      "text": "𑈀䷀෿"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "arabic",
+        "tamil",
+        "gujarati"
+      ],
+      "text": "𑿿𞠀ࣿ　ݿ઀1ᢰ"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "arabic",
+        "lao"
+      ],
+      "text": "ݿ𒀀ﾠ໿ࣿ꤀퟿"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "armenian"
+      ],
+      "text": "ﬓヿa￝䷿"
+    },
+    {
+      "scripts": [
+        "georgian",
+        "devanagari"
+      ],
+      "text": "ԯ㆐ꯀꦀᲐ ᲏ॿ"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "ethiopic",
+        "mongolian",
+        "tamil"
+      ],
+      "text": "𑜀𞟠꫿᠀𑿿぀𒀀︯"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "ethiopic",
+        "bengali",
+        "tifinagh"
+      ],
+      "text": "가꬀🿿ⷠ৿ⴰ"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "oriya",
+        "myanmar",
+        "gurmukhi",
+        "syriac"
+      ],
+      "text": "㆏ￜ୿ꩠᄀ ਀܀"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "gurmukhi",
+        "ethiopic",
+        "georgian",
+        "cherokee",
+        "sinhala"
+      ],
+      "text": "਀ⶀ･ﾠᲐꮿ䷀𑇠"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "syriac",
+        "myanmar",
+        "devanagari"
+      ],
+      "text": "ݏ႟𑭟꧿𑛐぀"
+    },
+    {
+      "scripts": [
+        "malayalam",
+        "kannada"
+      ],
+      "text": "ഀ񀀀\u0000︯೿"
+    },
+    {
+      "scripts": [
+        "georgian",
+        "devanagari"
+      ],
+      "text": "ⴀ𞠀ꦀ꭯𑭟︯"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "tamil",
+        "myanmar"
+      ],
+      "text": "㈀ꥠ𑿀豈‍𑛐"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "arabic",
+        "syriac"
+      ],
+      "text": "᐀ᄀﭐ܀"
+    },
+    {
+      "scripts": [
+        "devanagari",
+        "myanmar"
+      ],
+      "text": "ॿ꧿"
+    },
+    {
+      "scripts": [
+        "armenian",
+        "bengali"
+      ],
+      "text": "﹐԰㏿᳀ঀ"
+    },
+    {
+      "scripts": [
+        "arabic"
+      ],
+      "text": "﬜ݐ"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "ethiopic",
+        "sinhala",
+        "thai",
+        "georgian",
+        "devanagari"
+      ],
+      "text": "ሀ඀฀ヿ⴯𑬀𞠀"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "tamil",
+        "bengali",
+        "ethiopic"
+      ],
+      "text": "一𑿀ঀ𑈀꬯"
+    },
+    {
+      "scripts": [
+        "georgian"
+      ],
+      "text": "ᢰ1Ჿ"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "kannada"
+      ],
+      "text": "ㇰ＀೿"
+    },
+    {
+      "scripts": [
+        "khmer"
+      ],
+      "text": "ⷠ𑚀꧟񀀀៿"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "thai"
+      ],
+      "text": "﷿𑙟๿"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "malayalam",
+        "mongolian",
+        "syriac"
+      ],
+      "text": "⿿ꥠൿ𑭠𑙠᢯᠀܀"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "kannada",
+        "myanmar"
+      ],
+      "text": "೿1ꨀ가𑛿"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "tamil",
+        "devanagari"
+      ],
+      "text": "𑿀࡟𑬀ꥠ𠀀ﬀ"
+    },
+    {
+      "scripts": [
+        "thai",
+        "ethiopic",
+        "devanagari"
+      ],
+      "text": "฀꬀ऀ"
+    },
+    {
+      "scripts": [],
+      "text": "㆐︀𑈀𑈀"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "arabic",
+        "telugu"
+      ],
+      "text": "𿿿𑭠＀1﷿﹯౿"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "hebrew",
+        "syriac"
+      ],
+      "text": "ﭏ࡯𑇟ㇿ"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "lao",
+        "kannada"
+      ],
+      "text": "໿ݐݿꯀ೿"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "syriac"
+      ],
+      "text": "一࡯"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "georgian",
+        "malayalam",
+        "myanmar"
+      ],
+      "text": "꥟ჿൿݐ𑫿⳿ꧠ"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "tamil",
+        "ethiopic",
+        "khmer",
+        "myanmar",
+        "armenian"
+      ],
+      "text": "ࣿ௿𞟠᧿︯က֏"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "ethiopic"
+      ],
+      "text": "꬯ⷠۿ"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "ethiopic",
+        "khmer",
+        "telugu",
+        "syriac",
+        "myanmar"
+      ],
+      "text": "　⷟៿ఀ𿿿܀ԯက"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "arabic",
+        "bengali",
+        "sinhala",
+        "gujarati"
+      ],
+      "text": "퟿৿඀𠀀︀઀﬜ࣿ"
+    },
+    {
+      "scripts": [
+        "armenian",
+        "devanagari"
+      ],
+      "text": "԰ऀ"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "tamil",
+        "khmer"
+      ],
+      "text": "஀ᄀ꯿ក"
+    },
+    {
+      "scripts": [
+        "ethiopic"
+      ],
+      "text": "𞟠"
+    },
+    {
+      "scripts": [
+        "myanmar"
+      ],
+      "text": "⿿꧿񀀀񀀀"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "syriac",
+        "ethiopic"
+      ],
+      "text": "ݏ　﹯ㄯ꬯𑈀"
+    },
+    {
+      "scripts": [
+        "tifinagh"
+      ],
+      "text": "㏿񀀀𑚀⵿"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "malayalam",
+        "georgian"
+      ],
+      "text": "ഀ𒀀꥟ⴀ꫿퟿"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "devanagari",
+        "telugu",
+        "lao",
+        "georgian"
+      ],
+      "text": "ࡰऀ౿໿ꀀऀ᧟ჿ"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "arabic",
+        "hebrew"
+      ],
+      "text": "ԯﾟ׿䷿ﭐ"
+    },
+    {
+      "scripts": [
+        "hebrew"
+      ],
+      "text": "ⷠꀀ֐"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "cjk-kr",
+        "khmer",
+        "mongolian",
+        "georgian",
+        "lao"
+      ],
+      "text": "ㇿ가ក﬜𑙿⴯໿"
+    },
+    {
+      "scripts": [
+        "hebrew",
+        "tibetan",
+        "bengali",
+        "tifinagh",
+        "myanmar",
+        "georgian"
+      ],
+      "text": "ༀ׿৿⵿က⴯"
+    },
+    {
+      "scripts": [
+        "tibetan"
+      ],
+      "text": "᳀ༀ"
+    },
+    {
+      "scripts": [
+        "oriya",
+        "armenian"
+      ],
+      "text": "﬜‍଀֏᧟"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "arabic",
+        "oriya"
+      ],
+      "text": "＀ࡰ୿꤀"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "lao",
+        "thai",
+        "mongolian"
+      ],
+      "text": "໿๿𑙿ࡰ"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "tamil",
+        "tibetan"
+      ],
+      "text": "஀㆏ༀ﬒"
+    },
+    {
+      "scripts": [
+        "georgian"
+      ],
+      "text": "﬒ⴀㄯ"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "hebrew",
+        "lao",
+        "cherokee"
+      ],
+      "text": "໿᏿ﾟיִ"
+    },
+    {
+      "scripts": [
+        "devanagari",
+        "tifinagh",
+        "myanmar"
+      ],
+      "text": "⵿꣠𑛿﹯"
+    },
+    {
+      "scripts": [
+        "thaana",
+        "syriac",
+        "oriya"
+      ],
+      "text": "﹐޿ࡠ୿䷀"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "devanagari"
+      ],
+      "text": "㄰ऀ꤀"
+    },
+    {
+      "scripts": [
+        "arabic"
+      ],
+      "text": "ࣿ"
+    },
+    {
+      "scripts": [
+        "hebrew",
+        "devanagari"
+      ],
+      "text": "ﭏ𑬀"
+    },
+    {
+      "scripts": [
+        "tibetan",
+        "tamil",
+        "thai"
+      ],
+      "text": "ༀ𑿀꯿﬜๿𑿀"
+    },
+    {
+      "scripts": [
+        "oriya"
+      ],
+      "text": "߀⳿୿"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "mongolian"
+      ],
+      "text": "᢯᐀ᄀ"
+    },
+    {
+      "scripts": [
+        "georgian"
+      ],
+      "text": "Ა꯿"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "arabic",
+        "mongolian",
+        "tifinagh"
+      ],
+      "text": "﫿ۿ᠀豈ⴰ㆐㐀"
+    },
+    {
+      "scripts": [
+        "khmer",
+        "lao"
+      ],
+      "text": "᧿຀"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "tamil"
+      ],
+      "text": "꥿𞠀𑿿"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "mongolian",
+        "tamil",
+        "thai"
+      ],
+      "text": "᢯஀ 〿𑫿๿"
+    },
+    {
+      "scripts": [
+        "sinhala",
+        "myanmar",
+        "ethiopic"
+      ],
+      "text": "𑇿ꧠሀ"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "georgian"
+      ],
+      "text": "꩟㆏￝Ა"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "syriac",
+        "tibetan",
+        "mongolian"
+      ],
+      "text": "𒀀﹐ݏༀ𑙠＀"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "bengali",
+        "syriac",
+        "georgian"
+      ],
+      "text": "꫿一৿㇯ࡠჿ𑫿"
+    },
+    {
+      "scripts": [
+        "cjk-kr"
+      ],
+      "text": "a﬜𑜀㆏"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "oriya",
+        "mongolian",
+        "tamil"
+      ],
+      "text": "㇯୿ﾟ񀀀𑙿஀ヿ"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "mongolian",
+        "gujarati",
+        "armenian",
+        "malayalam"
+      ],
+      "text": "᠀઀ﬗ鿿ൿ﬘"
+    },
+    {
+      "scripts": [
+        "tamil",
+        "devanagari"
+      ],
+      "text": "﹐𞟟𑿿\u0000꣟ॿ"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "malayalam",
+        "ethiopic"
+      ],
+      "text": "䶿ൿ𑙟𞟿1ഀᨀ"
+    },
+    {
+      "scripts": [
+        "cjk-jp"
+      ],
+      "text": "㈀ㇿ"
+    },
+    {
+      "scripts": [
+        "gurmukhi"
+      ],
+      "text": "਀"
+    },
+    {
+      "scripts": [
+        "cherokee"
+      ],
+      "text": "㄀ ᏿𑈀⳿"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "myanmar"
+      ],
+      "text": "ￜ﬒꧿ꧠ﬘　𿿿"
+    },
+    {
+      "scripts": [
+        "lao"
+      ],
+      "text": "຀"
+    },
+    {
+      "scripts": [
+        "cjk-sc"
+      ],
+      "text": "･"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "myanmar",
+        "telugu",
+        "ethiopic",
+        "khmer",
+        "thai"
+      ],
+      "text": "ㇿꨀꩠ𑚀౿꬀៿฀"
+    },
+    {
+      "scripts": [],
+      "text": "᝿"
+    },
+    {
+      "scripts": [
+        "thai"
+      ],
+      "text": "๿"
+    },
+    {
+      "scripts": [
+        "myanmar",
+        "malayalam",
+        "khmer"
+      ],
+      "text": "﬘ꧠൿ៿𑛐"
+    },
+    {
+      "scripts": [
+        "lao",
+        "syriac"
+      ],
+      "text": "𑇟຀꭯ꯀ࡯"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "cjk-kr",
+        "khmer"
+      ],
+      "text": "⿿ꪀ꥿ㇿ᧿"
+    },
+    {
+      "scripts": [
+        "ethiopic"
+      ],
+      "text": "𞟠"
+    },
+    {
+      "scripts": [
+        "tifinagh",
+        "mongolian",
+        "ethiopic",
+        "bengali"
+      ],
+      "text": "꣟ⴰ᠀᎟ঀሀ"
+    },
+    {
+      "scripts": [
+        "georgian",
+        "ethiopic",
+        "gurmukhi",
+        "devanagari",
+        "khmer"
+      ],
+      "text": "㆐ჿሀ﬘੿𑭟៿"
+    },
+    {
+      "scripts": [
+        "tamil",
+        "ethiopic",
+        "tibetan"
+      ],
+      "text": "𑿿⷟࿿"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "myanmar"
+      ],
+      "text": "﬜𑛿ݿ"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "arabic",
+        "syriac"
+      ],
+      "text": "܀﷿꥿･࡟ࣿ"
+    },
+    {
+      "scripts": [
+        "cjk-sc"
+      ],
+      "text": "豈"
+    },
+    {
+      "scripts": [
+        "thai",
+        "sinhala"
+      ],
+      "text": "฀𑇠1"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "devanagari",
+        "thaana"
+      ],
+      "text": "𑜀𑬀㇯ࣿހ"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "cjk-kr"
+      ],
+      "text": "ㇿᇿ"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "malayalam",
+        "gujarati"
+      ],
+      "text": "𠀀㈀㄰ꯀ񀀀 ഀ૿"
+    },
+    {
+      "scripts": [
+        "bengali"
+      ],
+      "text": "৿񀀀"
+    },
+    {
+      "scripts": [],
+      "text": "𑛏‍࡟"
+    },
+    {
+      "scripts": [
+        "tibetan",
+        "cherokee",
+        "sinhala",
+        "mongolian"
+      ],
+      "text": "࿿᲏᏿ﬀ඀䷀᠀"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "malayalam"
+      ],
+      "text": "﷿ഀ"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "cherokee",
+        "myanmar"
+      ],
+      "text": "鿿Ꭰ́䶿𑜀𑛿𑛿𠀀"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "tibetan",
+        "ethiopic",
+        "thai",
+        "devanagari"
+      ],
+      "text": "꯿࿿𞟿฀＀꣠"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "thaana",
+        "khmer",
+        "cherokee"
+      ],
+      "text": "1޿៿᏿぀㐀񀀀᧿"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "hebrew"
+      ],
+      "text": "꤀֐ۿ"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "arabic",
+        "hebrew"
+      ],
+      "text": "﻿﬜ｦ一぀יִ"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "georgian",
+        "cherokee"
+      ],
+      "text": "㏿﹯‍＀ ⴯᏿"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "ethiopic",
+        "syriac",
+        "khmer",
+        "cherokee"
+      ],
+      "text": "＀𞟿ｦݏ⳿៿ꮿ𑾿"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "mongolian",
+        "gurmukhi"
+      ],
+      "text": "᢯﬒ꦀ᐀ۿ੿"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "cjk-kr",
+        "gurmukhi"
+      ],
+      "text": "߀߀가਀ﾟ"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "myanmar"
+      ],
+      "text": "𿿿߀႟　𑛿"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "myanmar"
+      ],
+      "text": "𠀀𑛐"
+    },
+    {
+      "scripts": [
+        "myanmar",
+        "khmer"
+      ],
+      "text": "ကកԯ᧠"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "arabic",
+        "malayalam",
+        "armenian"
+      ],
+      "text": "ഀ᐀᲏㐀؀֏"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "georgian",
+        "khmer"
+      ],
+      "text": "񀀀Ა一៿‍㈀"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "arabic",
+        "myanmar"
+      ],
+      "text": "﷿ꩠ䶿㆏﷿᳀"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "khmer"
+      ],
+      "text": "鿿𞠀៿"
+    },
+    {
+      "scripts": [
+        "gujarati"
+      ],
+      "text": "઀"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "myanmar",
+        "cherokee",
+        "syriac"
+      ],
+      "text": "𑛐ꭰ𑈀ࡠݐ"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "arabic",
+        "tifinagh"
+      ],
+      "text": "⵿ﹰ﹯ﾟ"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "oriya",
+        "devanagari",
+        "khmer"
+      ],
+      "text": "୿𑭟꣠᧠ￜ　𿿿"
+    },
+    {
+      "scripts": [
+        "georgian",
+        "ethiopic",
+        "tibetan",
+        "devanagari",
+        "oriya"
+      ],
+      "text": "Ა⷟᲏﹐ༀꣿ୿"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "ethiopic"
+      ],
+      "text": "ㇿ񀀀᎟"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "georgian",
+        "tamil"
+      ],
+      "text": "𿿿㐀ⴀ௿𑙟\u0000"
+    },
+    {
+      "scripts": [
+        "hebrew",
+        "bengali",
+        "ethiopic",
+        "gurmukhi",
+        "cherokee",
+        "myanmar"
+      ],
+      "text": "৿᎟਀ꮿ﹐က꧿֐"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "cjk-kr",
+        "sinhala",
+        "tamil",
+        "devanagari",
+        "tibetan"
+      ],
+      "text": "඀௿ॿᇿㇰ一ༀ"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "syriac",
+        "myanmar"
+      ],
+      "text": "ㇰݏ𑫿㆐႟꤀꤀"
+    },
+    {
+      "scripts": [
+        "devanagari",
+        "lao",
+        "armenian",
+        "malayalam",
+        "ethiopic"
+      ],
+      "text": "꥟𑬀຀ﬗഀ⷟"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "cherokee"
+      ],
+      "text": "㏿ㇿ𑛏᏿𞟟"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "ethiopic"
+      ],
+      "text": "ꦀᇿ꬯"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "ethiopic",
+        "mongolian",
+        "myanmar"
+      ],
+      "text": "꧟ሀ𑜀‍᢯񀀀一𑛐"
+    },
+    {
+      "scripts": [
+        "tifinagh"
+      ],
+      "text": "𑜀⵿"
+    },
+    {
+      "scripts": [
+        "mongolian",
+        "tamil",
+        "ethiopic"
+      ],
+      "text": "𑙠𑿿⷟"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "arabic",
+        "mongolian",
+        "khmer",
+        "tibetan",
+        "devanagari"
+      ],
+      "text": "᢯᧿㐀ﹰ࿿⳿᲏𑭟"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "devanagari"
+      ],
+      "text": "᳀᳀︀𠀀ऀㇰ᧟"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "mongolian",
+        "myanmar",
+        "armenian"
+      ],
+      "text": "﻿㄀᠀꯿ꩠﬓ"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "hebrew",
+        "tifinagh",
+        "thai"
+      ],
+      "text": "񀀀⵿᧟יִ぀๿﬒䷀"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "lao",
+        "cherokee"
+      ],
+      "text": "⿿ᢰ຀Ꭰㇰ"
+    },
+    {
+      "scripts": [],
+      "text": "᝿"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "syriac",
+        "myanmar"
+      ],
+      "text": "ݏㇰㄯᢰ𞟟ㄯꩿ"
+    },
+    {
+      "scripts": [
+        "cjk-jp"
+      ],
+      "text": "ﾟ"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "sinhala",
+        "lao"
+      ],
+      "text": "﫿𑇠຀꧟𑙟㐀"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "myanmar",
+        "tamil",
+        "malayalam"
+      ],
+      "text": "꥿႟ꀀ𑿿ഀ"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "khmer",
+        "gujarati",
+        "kannada"
+      ],
+      "text": "꥿᧠૿ꦀﬀ･ಀ᧠"
+    },
+    {
+      "scripts": [],
+      "text": "﹐́᲏"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "mongolian",
+        "syriac"
+      ],
+      "text": "᲏᐀￝᢯࡯ݐ︯"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "armenian",
+        "mongolian"
+      ],
+      "text": "㄰㈀֏﬜᢯𞠀"
+    },
+    {
+      "scripts": [
+        "hebrew",
+        "thaana",
+        "devanagari",
+        "oriya",
+        "lao"
+      ],
+      "text": "޿ऀ୿𑭠׿׿຀ऀ"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "arabic",
+        "myanmar"
+      ],
+      "text": "ࣿ꥟𑙟ㇿ𑛐"
+    },
+    {
+      "scripts": [
+        "lao",
+        "georgian",
+        "thaana",
+        "ethiopic"
+      ],
+      "text": "꧟໿Აހሀ"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "gujarati",
+        "tibetan",
+        "tamil"
+      ],
+      "text": "઀ༀ௿〿ꀀ"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "khmer",
+        "thai"
+      ],
+      "text": "᧠ﹰ๿﬜𞠀𑭠"
+    },
+    {
+      "scripts": [
+        "mongolian",
+        "gurmukhi",
+        "sinhala"
+      ],
+      "text": "᠀਀𑚀඀"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "cherokee",
+        "tifinagh"
+      ],
+      "text": "㇯ꭰ　⵿ᢰ𑾿一"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "thai",
+        "thaana",
+        "devanagari"
+      ],
+      "text": "񀀀〿ㄯ฀𠀀޿ऀ𑙟"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "tifinagh",
+        "gurmukhi"
+      ],
+      "text": "⵿ヿ਀﹯"
+    },
+    {
+      "scripts": [
+        "sinhala",
+        "syriac",
+        "thai"
+      ],
+      "text": "𑇿񀀀ݏꦀ฀"
+    },
+    {
+      "scripts": [
+        "sinhala",
+        "georgian",
+        "myanmar",
+        "cherokee",
+        "ethiopic"
+      ],
+      "text": "𑇿Ჿ𑛿ꭰሀ㈀1"
+    },
+    {
+      "scripts": [],
+      "text": "ㄯᢰ"
+    },
+    {
+      "scripts": [
+        "ethiopic",
+        "armenian"
+      ],
+      "text": "﬒﹐꬀ﬓ꥟"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "mongolian",
+        "devanagari"
+      ],
+      "text": "𑙿ꦀꣿᢰヿ🿿"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "ethiopic",
+        "thaana",
+        "myanmar"
+      ],
+      "text": "꬀⷟ހ𑫿𑛿ꥠ⿿𠀀"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "mongolian",
+        "georgian"
+      ],
+      "text": "᲏𑙿𑭠〿ჿꯀ﬜🿿"
+    },
+    {
+      "scripts": [],
+      "text": "𑇟ꪀ‍"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "myanmar",
+        "kannada"
+      ],
+      "text": "㄰ကಀ"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "syriac"
+      ],
+      "text": "㐀ݏ㆐‍"
+    },
+    {
+      "scripts": [
+        "mongolian",
+        "cherokee",
+        "ethiopic",
+        "armenian",
+        "kannada"
+      ],
+      "text": "ԯ𑙿ꮿሀꬰ֏ಀꯀ"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "arabic",
+        "ethiopic",
+        "tamil",
+        "devanagari"
+      ],
+      "text": "﫿𞟠؀ⶀ𑿿ऀ"
+    },
+    {
+      "scripts": [
+        "hebrew",
+        "georgian",
+        "armenian",
+        "myanmar"
+      ],
+      "text": "֐Ჿﬓ꯿꧿"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "thaana"
+      ],
+      "text": "･޿"
+    },
+    {
+      "scripts": [
+        "malayalam",
+        "armenian"
+      ],
+      "text": "ഀ֏"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "myanmar"
+      ],
+      "text": "႟꤀㄰"
+    },
+    {
+      "scripts": [
+        "cjk-jp"
+      ],
+      "text": " ䷿aｦ䷿"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "ethiopic"
+      ],
+      "text": "ⶀۿ￝"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "devanagari",
+        "cherokee",
+        "myanmar"
+      ],
+      "text": "𑬀ꭰ𑛿＀㏿𞟟"
+    },
+    {
+      "scripts": [
+        "devanagari",
+        "khmer",
+        "sinhala"
+      ],
+      "text": "𑭟⳿ក𑇠𑾿"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "myanmar",
+        "khmer",
+        "syriac"
+      ],
+      "text": "႟豈᧿〿ݏ"
+    },
+    {
+      "scripts": [
+        "tifinagh"
+      ],
+      "text": "ⴰ"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "ethiopic",
+        "mongolian"
+      ],
+      "text": "꬀᠀﷿﷿"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "sinhala",
+        "devanagari"
+      ],
+      "text": "𑇿一ॿ᳀가"
+    },
+    {
+      "scripts": [
+        "khmer"
+      ],
+      "text": "ក᐀"
+    },
+    {
+      "scripts": [],
+      "text": "߀"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "malayalam",
+        "syriac",
+        "gujarati"
+      ],
+      "text": "᳀鿿ൿ܀𿿿꯿𞟟઀"
+    },
+    {
+      "scripts": [
+        "myanmar",
+        "telugu"
+      ],
+      "text": "႟౿"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "arabic",
+        "myanmar"
+      ],
+      "text": "᳀ꧠԯ･ㄯۿݐ〿"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "arabic",
+        "tamil"
+      ],
+      "text": "́ㄯ㄀가ݐ௿㈀豈"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "arabic",
+        "georgian",
+        "tifinagh"
+      ],
+      "text": "꣟　ⴀ⵿\u0000ݿ"
+    },
+    {
+      "scripts": [
+        "georgian",
+        "syriac",
+        "lao",
+        "ethiopic"
+      ],
+      "text": "́ꬰ⴯Ჿ᳀܀຀꬯"
+    },
+    {
+      "scripts": [
+        "cjk-sc"
+      ],
+      "text": "︰ꀀ "
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "ethiopic"
+      ],
+      "text": "𞟿ꪀ𑾿￝ￜ"
+    },
+    {
+      "scripts": [
+        "cjk-sc"
+      ],
+      "text": "︰"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "devanagari",
+        "georgian",
+        "armenian",
+        "ethiopic"
+      ],
+      "text": "ऀ⴯ݐᢰ֏᎟"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "arabic",
+        "malayalam"
+      ],
+      "text": "a㏿㐀ഀ⳿ۿ᲏"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "georgian",
+        "ethiopic",
+        "lao"
+      ],
+      "text": "Ჿ᎟຀𑾿﻿﬒"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "sinhala",
+        "ethiopic"
+      ],
+      "text": "꥿෿᝿꬀𑙟"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "tifinagh"
+      ],
+      "text": "꤀ۿ⵿ࡰ"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "myanmar"
+      ],
+      "text": "ࣿ1᲏ကﹰ"
+    },
+    {
+      "scripts": [
+        "khmer"
+      ],
+      "text": "ꬰ꥟ꪀ᳀᧿"
+    },
+    {
+      "scripts": [
+        "gurmukhi"
+      ],
+      "text": "਀"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "khmer",
+        "kannada"
+      ],
+      "text": "᧿೿︯＀"
+    },
+    {
+      "scripts": [
+        "myanmar"
+      ],
+      "text": "ꩠ﬜"
+    },
+    {
+      "scripts": [
+        "cjk-jp"
+      ],
+      "text": "ﾟ𑛏"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "ethiopic",
+        "oriya",
+        "mongolian",
+        "cherokee",
+        "malayalam"
+      ],
+      "text": "𑚀퟿꬯଀᢯ꯀ᏿ഀ"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "cjk-kr",
+        "arabic"
+      ],
+      "text": "ࡰ一ԯㇿ一𑇟ᄀ⿿"
+    },
+    {
+      "scripts": [
+        "cjk-kr"
+      ],
+      "text": "㇯가︯㈀"
+    },
+    {
+      "scripts": [
+        "hebrew",
+        "syriac",
+        "malayalam"
+      ],
+      "text": "ࡠൿ￝𒀀יִ"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "oriya",
+        "tamil"
+      ],
+      "text": "୿𑚀஀￝一‍"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "cjk-kr",
+        "oriya",
+        "kannada"
+      ],
+      "text": "ㇿ୿೿꥿ㇿꦀ"
+    },
+    {
+      "scripts": [
+        "ethiopic",
+        "myanmar"
+      ],
+      "text": "⷟꧿ꯀ"
+    },
+    {
+      "scripts": [
+        "hebrew"
+      ],
+      "text": "᝿ﭏ"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "arabic",
+        "tifinagh",
+        "khmer",
+        "myanmar",
+        "lao"
+      ],
+      "text": "⵿ⷠ᧿ꧠ﹐຀ᄀﭐ"
+    },
+    {
+      "scripts": [
+        "syriac"
+      ],
+      "text": "꥟ࡠ"
+    },
+    {
+      "scripts": [],
+      "text": "꩟䷀"
+    },
+    {
+      "scripts": [
+        "ethiopic",
+        "tibetan",
+        "oriya"
+      ],
+      "text": "ሀ𑜀ༀ୿"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "ethiopic",
+        "sinhala",
+        "thai"
+      ],
+      "text": "࡟ⶀ񀀀𞟿﹏𑇿฀"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "ethiopic"
+      ],
+      "text": "⷟ࡰ䷀᳀\u0000𞟠؀"
+    },
+    {
+      "scripts": [
+        "cjk-sc"
+      ],
+      "text": "︰"
+    },
+    {
+      "scripts": [
+        "mongolian"
+      ],
+      "text": "𑙿꤀"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "mongolian"
+      ],
+      "text": "᢯﬘ݿ‍"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "mongolian",
+        "lao"
+      ],
+      "text": "𑙠ﬀꥠ຀ￜ"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "hebrew",
+        "georgian",
+        "sinhala",
+        "tifinagh",
+        "myanmar"
+      ],
+      "text": "ⴀ𑇿⵿﻿￝יִ႟ "
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "georgian",
+        "devanagari",
+        "malayalam"
+      ],
+      "text": "Ჿ一꥿＀꣠ൿ"
+    },
+    {
+      "scripts": [
+        "thaana",
+        "armenian"
+      ],
+      "text": "﬜޿ﬗ᲏"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "lao"
+      ],
+      "text": "ᨀㇰ鿿﹐໿︯"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "hebrew",
+        "ethiopic"
+      ],
+      "text": "ꯀሀ֐꩟鿿࡟࡟"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "arabic",
+        "gurmukhi",
+        "ethiopic",
+        "mongolian"
+      ],
+      "text": "਀豈〿꬀ۿ꥿𑙠〿"
+    },
+    {
+      "scripts": [],
+      "text": "䷀"
+    },
+    {
+      "scripts": [
+        "georgian",
+        "malayalam"
+      ],
+      "text": "ჿഀ𑫿"
+    },
+    {
+      "scripts": [],
+      "text": "᐀"
+    },
+    {
+      "scripts": [
+        "mongolian",
+        "lao",
+        "tibetan",
+        "malayalam",
+        "cherokee"
+      ],
+      "text": "𑙠຀࿿ഀᎠ𑈀"
+    },
+    {
+      "scripts": [],
+      "text": "꯿﹯"
+    },
+    {
+      "scripts": [
+        "devanagari"
+      ],
+      "text": "𑬀"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "cjk-kr",
+        "hebrew",
+        "bengali"
+      ],
+      "text": "𿿿׿ヿﾠﾟঀ"
+    },
+    {
+      "scripts": [
+        "gurmukhi",
+        "tibetan"
+      ],
+      "text": "㄀਀ༀ"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "sinhala",
+        "myanmar"
+      ],
+      "text": "𑇿﻿႟ᢰ񀀀"
+    },
+    {
+      "scripts": [
+        "gujarati",
+        "armenian"
+      ],
+      "text": "઀﹯ﬓ"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "cherokee"
+      ],
+      "text": "ꭰ가"
+    },
+    {
+      "scripts": [
+        "cjk-sc"
+      ],
+      "text": "꫿･︯"
+    },
+    {
+      "scripts": [
+        "hebrew"
+      ],
+      "text": "֐"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "lao"
+      ],
+      "text": "a໿ﹰ"
+    },
+    {
+      "scripts": [],
+      "text": "￝"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "cherokee",
+        "lao",
+        "georgian"
+      ],
+      "text": "･Ꭰ໿Ა豈🿿ヿ"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "myanmar",
+        "lao",
+        "devanagari",
+        "gurmukhi"
+      ],
+      "text": "ꩿ໿﫿ꣿ𑛿਀ꯀ"
+    },
+    {
+      "scripts": [
+        "ethiopic"
+      ],
+      "text": "⳿ሀ"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "thai",
+        "georgian"
+      ],
+      "text": "ݿݐ๿ჿ࡟񀀀"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "arabic",
+        "armenian"
+      ],
+      "text": "𞟟꩟ﬗꥠݿ"
+    },
+    {
+      "scripts": [
+        "ethiopic"
+      ],
+      "text": "᲏ ﬒ ⶀ𑇟︯"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "kannada",
+        "gujarati"
+      ],
+      "text": "가೿઀"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "arabic",
+        "ethiopic"
+      ],
+      "text": "꬀𞟟ݐ﹐ㇰ"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "hebrew",
+        "gujarati",
+        "mongolian"
+      ],
+      "text": "﫿֐㄀૿᠀߀𑚀"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "cjk-kr",
+        "syriac",
+        "georgian"
+      ],
+      "text": "࡯ヿ1ⴀ　가"
+    },
+    {
+      "scripts": [],
+      "text": "ꪀ񀀀\u0000 "
+    },
+    {
+      "scripts": [
+        "kannada",
+        "mongolian"
+      ],
+      "text": "𒀀߀ಀ𑙠"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "ethiopic",
+        "armenian"
+      ],
+      "text": "᎟ꨀﬗ﻿"
+    },
+    {
+      "scripts": [
+        "khmer",
+        "armenian",
+        "ethiopic",
+        "myanmar"
+      ],
+      "text": "a㄀៿ﬓ𞟠က꫿ㄯ"
+    },
+    {
+      "scripts": [],
+      "text": "꤀"
+    },
+    {
+      "scripts": [
+        "ethiopic",
+        "myanmar"
+      ],
+      "text": "꬀𑛐𑛏𑾿"
+    },
+    {
+      "scripts": [],
+      "text": "𑫿᲏"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "ethiopic",
+        "mongolian"
+      ],
+      "text": "𞟟꣟᎟䷿᠀＀𿿿"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "myanmar",
+        "cherokee",
+        "sinhala",
+        "bengali",
+        "georgian"
+      ],
+      "text": "႟ꭰ෿႟᐀৿⴯︰"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "devanagari",
+        "thaana",
+        "khmer"
+      ],
+      "text": "𑚀ݿ᧟𑬀ހក"
+    },
+    {
+      "scripts": [
+        "hebrew"
+      ],
+      "text": "ㄯ֐́"
+    },
+    {
+      "scripts": [],
+      "text": "𒀀"
+    },
+    {
+      "scripts": [
+        "sinhala"
+      ],
+      "text": "𑙟ꨀ෿ㄯ"
+    },
+    {
+      "scripts": [
+        "myanmar"
+      ],
+      "text": "ꩿꬰ"
+    },
+    {
+      "scripts": [
+        "lao",
+        "ethiopic",
+        "devanagari"
+      ],
+      "text": "ԯ຀ㄯⶀꣿ"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "arabic",
+        "mongolian",
+        "devanagari"
+      ],
+      "text": "𑇟ࣿ﫿𑙠㐀﬜𑬀﬜"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "georgian"
+      ],
+      "text": "ﬀ﹏︰Ა"
+    },
+    {
+      "scripts": [
+        "hebrew",
+        "tamil",
+        "thai",
+        "ethiopic",
+        "georgian",
+        "cherokee",
+        "devanagari"
+      ],
+      "text": "𑿀๿ﭏⶀᲿꭰ꣠ꭰ"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "arabic",
+        "telugu",
+        "ethiopic"
+      ],
+      "text": "鿿퟿ࡰఀ⷟ࣿ"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "arabic",
+        "malayalam",
+        "tamil"
+      ],
+      "text": "⿿꧟ഀۿݐۿ஀𿿿"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "oriya"
+      ],
+      "text": "୿𑈀\u0000぀"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "sinhala"
+      ],
+      "text": "⿿﬒一꭯඀"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "hebrew",
+        "myanmar"
+      ],
+      "text": "׿ﾠꩿꯀ"
+    },
+    {
+      "scripts": [
+        "armenian"
+      ],
+      "text": "԰"
+    },
+    {
+      "scripts": [
+        "cjk-kr"
+      ],
+      "text": "ꀀᄀ𑜀"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "arabic",
+        "hebrew",
+        "myanmar"
+      ],
+      "text": "ꩠ᐀ﹰㇰﭏ﹏"
+    },
+    {
+      "scripts": [
+        "georgian",
+        "thai",
+        "tifinagh"
+      ],
+      "text": "Ჿ񀀀๿ᢰ⵿"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "tamil",
+        "devanagari"
+      ],
+      "text": "豈஀𑬀"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "cjk-kr",
+        "tamil",
+        "devanagari",
+        "tibetan"
+      ],
+      "text": "︀぀퟿𑾿௿𑬀﹯࿿"
+    },
+    {
+      "scripts": [
+        "tibetan"
+      ],
+      "text": "ༀ᲏"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "tibetan",
+        "mongolian"
+      ],
+      "text": "࿿𑙿䶿"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "myanmar",
+        "ethiopic"
+      ],
+      "text": "𑛿᎟႟ヿ"
+    },
+    {
+      "scripts": [],
+      "text": "𞟟"
+    },
+    {
+      "scripts": [
+        "cjk-jp"
+      ],
+      "text": "𞠀䶿︯񀀀ｦ𑙟"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "devanagari"
+      ],
+      "text": "꣠㏿𠀀"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "kannada",
+        "thai",
+        "mongolian"
+      ],
+      "text": "ಀ﻿๿꭯᢯"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "khmer",
+        "georgian",
+        "thaana"
+      ],
+      "text": "᧠ⴀ㇯＀ꥠᨀ޿᝿"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "tamil"
+      ],
+      "text": "ꦀ￝ヿ﹯஀"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "ethiopic",
+        "khmer",
+        "devanagari",
+        "cherokee",
+        "thaana"
+      ],
+      "text": "꬀៿ॿꭰﾟ޿"
+    },
+    {
+      "scripts": [
+        "myanmar",
+        "mongolian",
+        "sinhala",
+        "kannada"
+      ],
+      "text": "က᠀෿꥟𑇠᠀﹯ಀ"
+    },
+    {
+      "scripts": [
+        "armenian",
+        "sinhala",
+        "devanagari",
+        "tifinagh"
+      ],
+      "text": "֏𑇠㄀𑭟ⴰ"
+    },
+    {
+      "scripts": [
+        "cjk-kr"
+      ],
+      "text": "㄰"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "myanmar"
+      ],
+      "text": "ᄀꧠ"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "arabic",
+        "malayalam",
+        "telugu"
+      ],
+      "text": "＀ഀ౿﹏ﭐ꣟𿿿"
+    },
+    {
+      "scripts": [],
+      "text": "‍a"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "myanmar",
+        "tamil"
+      ],
+      "text": "ᢰꩠ㆐㏿\u0000𑿿぀"
+    },
+    {
+      "scripts": [
+        "sinhala",
+        "oriya",
+        "tamil",
+        "syriac",
+        "bengali"
+      ],
+      "text": "෿‍଀஀́ݏ৿"
+    },
+    {
+      "scripts": [
+        "telugu",
+        "gujarati",
+        "syriac"
+      ],
+      "text": "𑫿⿿ఀ઀㈀܀"
+    },
+    {
+      "scripts": [
+        "ethiopic",
+        "mongolian"
+      ],
+      "text": "ⶀ⷟᠀"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "syriac",
+        "khmer"
+      ],
+      "text": "＀ݏក"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "armenian",
+        "ethiopic",
+        "georgian"
+      ],
+      "text": "㄰𑙟֏ԯ꬯⳿ﬓⴀ"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "georgian"
+      ],
+      "text": "ﾟ⴯꯿"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "hebrew",
+        "ethiopic",
+        "devanagari"
+      ],
+      "text": "𞟠﷿꤀꭯ꣿ𞟠ﭏꀀ"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "ethiopic"
+      ],
+      "text": "꬯࡟ﹰ"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "mongolian"
+      ],
+      "text": "ꀀ᠀ꦀ･"
+    },
+    {
+      "scripts": [
+        "georgian"
+      ],
+      "text": "Ჿ"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "arabic",
+        "mongolian",
+        "devanagari"
+      ],
+      "text": "ꀀࡰﾟ㆐𑙠𑜀𑜀ॿ"
+    },
+    {
+      "scripts": [
+        "mongolian"
+      ],
+      "text": "𑙿"
+    },
+    {
+      "scripts": [],
+      "text": "︀"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "khmer",
+        "thai"
+      ],
+      "text": "𿿿៿䷿฀⳿\u0000︯꣟"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "devanagari"
+      ],
+      "text": "1ꣿ᝿񀀀ㇰ"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "arabic",
+        "syriac",
+        "georgian",
+        "oriya",
+        "malayalam",
+        "devanagari",
+        "armenian"
+      ],
+      "text": "࡯Ⴀｦ୿ഀ𑭟ۿﬗ"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "cherokee"
+      ],
+      "text": "ﭐ᏿ᢰ꫿"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "gurmukhi",
+        "cherokee",
+        "ethiopic",
+        "oriya"
+      ],
+      "text": "਀Ꭰ㆏𑜀᎟ꬰ᎟଀"
+    },
+    {
+      "scripts": [
+        "ethiopic",
+        "armenian",
+        "myanmar"
+      ],
+      "text": "ㄯ𞟠ﬓꧠ"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "devanagari",
+        "myanmar"
+      ],
+      "text": "؀𑬀ꧠ"
+    },
+    {
+      "scripts": [
+        "armenian",
+        "myanmar",
+        "tibetan"
+      ],
+      "text": "֏႟࿿"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "oriya",
+        "telugu"
+      ],
+      "text": "퟿଀౿"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "arabic",
+        "devanagari",
+        "lao"
+      ],
+      "text": "ﭐ꥿ऀ᝿຀㄀﹯"
+    },
+    {
+      "scripts": [
+        "myanmar"
+      ],
+      "text": "က"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "khmer",
+        "sinhala",
+        "syriac"
+      ],
+      "text": "᧟꭯៿𠀀෿𠀀߀ݏ"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "myanmar",
+        "tamil",
+        "lao",
+        "devanagari"
+      ],
+      "text": "ꩠ௿໿𑭟ﾠ꯿"
+    },
+    {
+      "scripts": [
+        "sinhala",
+        "myanmar",
+        "georgian",
+        "armenian"
+      ],
+      "text": "㄀෿ꩠ꧟Ა֏꣟"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "bengali",
+        "malayalam"
+      ],
+      "text": "৿ﾠഀ꧟"
+    },
+    {
+      "scripts": [],
+      "text": "ᨀꪀ"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "khmer",
+        "ethiopic"
+      ],
+      "text": "ۿ᧿𞟟𞟟ሀ꣟"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "hebrew",
+        "telugu",
+        "lao"
+      ],
+      "text": "ఀ𑇟ﾟ౿֐໿"
+    },
+    {
+      "scripts": [
+        "devanagari",
+        "tamil",
+        "bengali"
+      ],
+      "text": "𑜀𑬀𑿿ঀ𑾿"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "armenian",
+        "telugu",
+        "lao",
+        "myanmar",
+        "kannada"
+      ],
+      "text": "䷀֏౿໿𞠀𑛐ಀ･"
+    },
+    {
+      "scripts": [
+        "arabic"
+      ],
+      "text": "﷿࡟"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "hebrew",
+        "ethiopic"
+      ],
+      "text": "֐࡟𠀀⷟"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "ethiopic",
+        "khmer",
+        "georgian",
+        "cherokee"
+      ],
+      "text": "𑛏ሀ᧿ￜ⴯\u0000ꭰ"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "arabic",
+        "devanagari",
+        "kannada"
+      ],
+      "text": "ヿॿಀۿ"
+    },
+    {
+      "scripts": [
+        "tamil",
+        "telugu"
+      ],
+      "text": "𑿿ఀ񀀀㏿︀"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "georgian",
+        "cherokee",
+        "khmer"
+      ],
+      "text": "･ⴀ𑚀ꮿ𑭠᏿᧠"
+    },
+    {
+      "scripts": [
+        "syriac"
+      ],
+      "text": "ࡠ"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "telugu",
+        "syriac",
+        "thai",
+        "myanmar"
+      ],
+      "text": "౿𞠀𠀀︀ࡠ฀ꩠ"
+    },
+    {
+      "scripts": [],
+      "text": "㄀"
+    },
+    {
+      "scripts": [
+        "cherokee",
+        "myanmar"
+      ],
+      "text": "᐀᏿ꭰ𑛿﹐"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "hebrew",
+        "georgian",
+        "armenian"
+      ],
+      "text": "ￜ⴯֏׿꤀𑫿⳿"
+    },
+    {
+      "scripts": [
+        "georgian",
+        "tibetan"
+      ],
+      "text": "꭯꭯Ჿⴀༀ"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "myanmar",
+        "cherokee"
+      ],
+      "text": "鿿꭯㈀ꧠꭰ㄰Ꭰ"
+    },
+    {
+      "scripts": [
+        "armenian",
+        "tibetan"
+      ],
+      "text": "֏ༀ"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "arabic",
+        "georgian",
+        "ethiopic",
+        "sinhala"
+      ],
+      "text": "ᇿ㈀Ა᎟꬯෿ﹰ＀"
+    },
+    {
+      "scripts": [
+        "cjk-kr",
+        "hebrew"
+      ],
+      "text": "ﬀ࡟𑚀יִꀀ㄰"
+    },
+    {
+      "scripts": [
+        "cjk-sc",
+        "sinhala"
+      ],
+      "text": "︰𑇠⿿"
+    },
+    {
+      "scripts": [
+        "sinhala",
+        "khmer",
+        "mongolian"
+      ],
+      "text": "෿඀ꬰᢰ៿𑙿"
+    },
+    {
+      "scripts": [
+        "cjk-jp",
+        "thaana",
+        "mongolian"
+      ],
+      "text": "޿𞠀ﾟ﬒ᢰ᢯"
+    },
+    {
+      "scripts": [
+        "armenian",
+        "khmer"
+      ],
+      "text": "ﬗ᧠"
+    },
+    {
+      "scripts": [
+        "georgian"
+      ],
+      "text": "᳀᲏㈀㄀⴯"
+    },
+    {
+      "scripts": [
+        "arabic",
+        "tamil"
+      ],
+      "text": "𑿿ﹰꪀ㆐﷿ꬰ"
+    },
+    {
+      "scripts": [],
+      "text": "꩟"
+    }
+  ],
+  "ranges": [
+    [
+      0,
+      1327,
+      []
+    ],
+    [
+      1328,
+      1423,
+      [
+        "armenian"
+      ]
+    ],
+    [
+      1424,
+      1535,
+      [
+        "hebrew"
+      ]
+    ],
+    [
+      1536,
+      1791,
+      [
+        "arabic"
+      ]
+    ],
+    [
+      1792,
+      1871,
+      [
+        "syriac"
+      ]
+    ],
+    [
+      1872,
+      1919,
+      [
+        "arabic"
+      ]
+    ],
+    [
+      1920,
+      1983,
+      [
+        "thaana"
+      ]
+    ],
+    [
+      1984,
+      2143,
+      []
+    ],
+    [
+      2144,
+      2159,
+      [
+        "syriac"
+      ]
+    ],
+    [
+      2160,
+      2303,
+      [
+        "arabic"
+      ]
+    ],
+    [
+      2304,
+      2431,
+      [
+        "devanagari"
+      ]
+    ],
+    [
+      2432,
+      2559,
+      [
+        "bengali"
+      ]
+    ],
+    [
+      2560,
+      2687,
+      [
+        "gurmukhi"
+      ]
+    ],
+    [
+      2688,
+      2815,
+      [
+        "gujarati"
+      ]
+    ],
+    [
+      2816,
+      2943,
+      [
+        "oriya"
+      ]
+    ],
+    [
+      2944,
+      3071,
+      [
+        "tamil"
+      ]
+    ],
+    [
+      3072,
+      3199,
+      [
+        "telugu"
+      ]
+    ],
+    [
+      3200,
+      3327,
+      [
+        "kannada"
+      ]
+    ],
+    [
+      3328,
+      3455,
+      [
+        "malayalam"
+      ]
+    ],
+    [
+      3456,
+      3583,
+      [
+        "sinhala"
+      ]
+    ],
+    [
+      3584,
+      3711,
+      [
+        "thai"
+      ]
+    ],
+    [
+      3712,
+      3839,
+      [
+        "lao"
+      ]
+    ],
+    [
+      3840,
+      4095,
+      [
+        "tibetan"
+      ]
+    ],
+    [
+      4096,
+      4255,
+      [
+        "myanmar"
+      ]
+    ],
+    [
+      4256,
+      4351,
+      [
+        "georgian"
+      ]
+    ],
+    [
+      4352,
+      4607,
+      [
+        "cjk-kr"
+      ]
+    ],
+    [
+      4608,
+      5023,
+      [
+        "ethiopic"
+      ]
+    ],
+    [
+      5024,
+      5119,
+      [
+        "cherokee"
+      ]
+    ],
+    [
+      5120,
+      6015,
+      []
+    ],
+    [
+      6016,
+      6143,
+      [
+        "khmer"
+      ]
+    ],
+    [
+      6144,
+      6319,
+      [
+        "mongolian"
+      ]
+    ],
+    [
+      6320,
+      6623,
+      []
+    ],
+    [
+      6624,
+      6655,
+      [
+        "khmer"
+      ]
+    ],
+    [
+      6656,
+      7311,
+      []
+    ],
+    [
+      7312,
+      7359,
+      [
+        "georgian"
+      ]
+    ],
+    [
+      7360,
+      11519,
+      []
+    ],
+    [
+      11520,
+      11567,
+      [
+        "georgian"
+      ]
+    ],
+    [
+      11568,
+      11647,
+      [
+        "tifinagh"
+      ]
+    ],
+    [
+      11648,
+      11743,
+      [
+        "ethiopic"
+      ]
+    ],
+    [
+      11744,
+      12287,
+      []
+    ],
+    [
+      12288,
+      12351,
+      [
+        "cjk-sc"
+      ]
+    ],
+    [
+      12352,
+      12543,
+      [
+        "cjk-jp"
+      ]
+    ],
+    [
+      12544,
+      12591,
+      []
+    ],
+    [
+      12592,
+      12687,
+      [
+        "cjk-kr"
+      ]
+    ],
+    [
+      12688,
+      12783,
+      []
+    ],
+    [
+      12784,
+      12799,
+      [
+        "cjk-jp"
+      ]
+    ],
+    [
+      12800,
+      13311,
+      []
+    ],
+    [
+      13312,
+      19903,
+      [
+        "cjk-sc"
+      ]
+    ],
+    [
+      19904,
+      19967,
+      []
+    ],
+    [
+      19968,
+      40959,
+      [
+        "cjk-sc"
+      ]
+    ],
+    [
+      40960,
+      43231,
+      []
+    ],
+    [
+      43232,
+      43263,
+      [
+        "devanagari"
+      ]
+    ],
+    [
+      43264,
+      43359,
+      []
+    ],
+    [
+      43360,
+      43391,
+      [
+        "cjk-kr"
+      ]
+    ],
+    [
+      43392,
+      43487,
+      []
+    ],
+    [
+      43488,
+      43519,
+      [
+        "myanmar"
+      ]
+    ],
+    [
+      43520,
+      43615,
+      []
+    ],
+    [
+      43616,
+      43647,
+      [
+        "myanmar"
+      ]
+    ],
+    [
+      43648,
+      43775,
+      []
+    ],
+    [
+      43776,
+      43823,
+      [
+        "ethiopic"
+      ]
+    ],
+    [
+      43824,
+      43887,
+      []
+    ],
+    [
+      43888,
+      43967,
+      [
+        "cherokee"
+      ]
+    ],
+    [
+      43968,
+      44031,
+      []
+    ],
+    [
+      44032,
+      55295,
+      [
+        "cjk-kr"
+      ]
+    ],
+    [
+      57344,
+      63743,
+      []
+    ],
+    [
+      63744,
+      64255,
+      [
+        "cjk-sc"
+      ]
+    ],
+    [
+      64256,
+      64274,
+      []
+    ],
+    [
+      64275,
+      64279,
+      [
+        "armenian"
+      ]
+    ],
+    [
+      64280,
+      64284,
+      []
+    ],
+    [
+      64285,
+      64335,
+      [
+        "hebrew"
+      ]
+    ],
+    [
+      64336,
+      65023,
+      [
+        "arabic"
+      ]
+    ],
+    [
+      65024,
+      65071,
+      []
+    ],
+    [
+      65072,
+      65103,
+      [
+        "cjk-sc"
+      ]
+    ],
+    [
+      65104,
+      65135,
+      []
+    ],
+    [
+      65136,
+      65279,
+      [
+        "arabic"
+      ]
+    ],
+    [
+      65280,
+      65381,
+      [
+        "cjk-sc"
+      ]
+    ],
+    [
+      65382,
+      65439,
+      [
+        "cjk-jp"
+      ]
+    ],
+    [
+      65440,
+      65500,
+      [
+        "cjk-kr"
+      ]
+    ],
+    [
+      65501,
+      70111,
+      []
+    ],
+    [
+      70112,
+      70143,
+      [
+        "sinhala"
+      ]
+    ],
+    [
+      70144,
+      71263,
+      []
+    ],
+    [
+      71264,
+      71295,
+      [
+        "mongolian"
+      ]
+    ],
+    [
+      71296,
+      71375,
+      []
+    ],
+    [
+      71376,
+      71423,
+      [
+        "myanmar"
+      ]
+    ],
+    [
+      71424,
+      72447,
+      []
+    ],
+    [
+      72448,
+      72543,
+      [
+        "devanagari"
+      ]
+    ],
+    [
+      72544,
+      73663,
+      []
+    ],
+    [
+      73664,
+      73727,
+      [
+        "tamil"
+      ]
+    ],
+    [
+      73728,
+      124895,
+      []
+    ],
+    [
+      124896,
+      124927,
+      [
+        "ethiopic"
+      ]
+    ],
+    [
+      124928,
+      131071,
+      []
+    ],
+    [
+      131072,
+      262143,
+      [
+        "cjk-sc"
+      ]
+    ],
+    [
+      262144,
+      262144,
+      []
+    ]
+  ]
+}

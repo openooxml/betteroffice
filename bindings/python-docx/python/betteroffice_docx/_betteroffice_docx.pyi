@@ -1,5 +1,9 @@
 import os
-from typing import Any, Mapping, final
+from typing import TypedDict, Any, Mapping, final
+
+class PngTarget(TypedDict):
+    page: int
+
 
 __version__: str
 MAX_PIXMAP_DIM: int
@@ -9,6 +13,10 @@ def decode_font_face(
     data: bytes, codec: str, *, dict: bytes | None = None, max_output: int | None = None
 ) -> tuple[bytes, bytes | None]:
     """Decode a font pack face and return font bytes and an optional transformed payload."""
+    ...
+
+def font_substitute(family: str) -> tuple[str | None, str] | None:
+    """The substitution table entry for an Office family name as (remote family, generic family)."""
     ...
 
 class DocxError(Exception): ...
@@ -46,6 +54,9 @@ class TextRun:
         """Explicit RGB. A theme colour reads as `None`."""
     @property
     def style_id(self) -> str | None: ...
+    @property
+    def highlight(self) -> str | None:
+        """The `w:highlight` value as written, `"none"` included."""
 
 @final
 class Paragraph:
@@ -68,6 +79,14 @@ class TableCell:
     def tables(self) -> list[Table]: ...
     @property
     def text(self) -> str: ...
+    @property
+    def grid_span(self) -> int | None:
+        """Grid columns the cell spans when more than one, from `w:gridSpan`.
+
+        A cell alone in its row of a wider table reads that table's column count."""
+    @property
+    def v_merge(self) -> str | None:
+        """`"restart"` for the first cell of a vertical merge, `"continue"` for the cells below it."""
 
 @final
 class TableRow:
@@ -144,6 +163,8 @@ class Edit:
     @property
     def para_id(self) -> str | None: ...
     @property
+    def index(self) -> int | None: ...
+    @property
     def story(self) -> str | None: ...
     @property
     def start(self) -> int | None: ...
@@ -187,8 +208,61 @@ class Png:
     def bytes(self) -> bytes: ...
     @property
     def skipped_images(self) -> int: ...
+    @property
+    def skipped_effects(self) -> dict[str, int]: ...
     def write(self, path: str | os.PathLike[str]) -> None: ...
     def __len__(self) -> int: ...
+
+@final
+class KeptParagraph:
+    @property
+    def part(self) -> str: ...
+    @property
+    def ordinal(self) -> int: ...
+    @property
+    def para_id(self) -> str | None: ...
+    @property
+    def text(self) -> str: ...
+    @property
+    def scope(self) -> str: ...
+    @property
+    def dropped(self) -> list[str]: ...
+
+@final
+class KeptUnchanged:
+    @property
+    def structure(self) -> int: ...
+    @property
+    def paragraphs(self) -> list[KeptParagraph]: ...
+
+@final
+class DroppedParagraph:
+    @property
+    def ordinal(self) -> int: ...
+    @property
+    def para_id(self) -> str: ...
+    @property
+    def text(self) -> str: ...
+    @property
+    def dropped(self) -> list[str]: ...
+
+@final
+class DroppedStructure:
+    @property
+    def part(self) -> str: ...
+    @property
+    def dropped(self) -> list[str]: ...
+    @property
+    def paragraphs(self) -> list[DroppedParagraph]: ...
+
+@final
+class SaveReport:
+    @property
+    def bytes(self) -> bytes: ...
+    @property
+    def kept_unchanged(self) -> KeptUnchanged | None: ...
+    @property
+    def structure_dropped(self) -> list[DroppedStructure] | None: ...
 
 @final
 class Document:
@@ -218,6 +292,8 @@ class Document:
     def paragraph(self, paragraph: int | str) -> Paragraph: ...
     def replace_text(self, para_id: str, text: str) -> Edit: ...
     def replace_paragraph_text(self, para_id: str, text: str) -> Edit: ...
+    def replace_text_at(self, index: int, text: str) -> Edit: ...
+    def replace_paragraph_text_at(self, index: int, text: str) -> Edit: ...
     def export_structured(
         self,
         *,
@@ -258,7 +334,8 @@ class Document:
     def register_image(
         self, rel_id: str, data: bytes, *, scope: str = ..., part: str | None = ...
     ) -> None: ...
-    def render_png(self, display_list: DisplayList, page: int = ...) -> Png: ...
+    def render_png(self, target: PngTarget, *, scale: float = ...) -> Png: ...
+    def render_display_list_png(self, display_list: DisplayList, page: int = ...) -> Png: ...
     def save(
         self,
         *,
@@ -266,6 +343,13 @@ class Document:
         update_modified_date: bool = ...,
         modified_by: str | None = ...,
     ) -> bytes: ...
+    def save_report(
+        self,
+        *,
+        now: str | None = ...,
+        update_modified_date: bool = ...,
+        modified_by: str | None = ...,
+    ) -> SaveReport: ...
     def save_path(
         self,
         path: str | os.PathLike[str],

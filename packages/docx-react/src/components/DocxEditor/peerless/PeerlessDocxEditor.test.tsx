@@ -1,6 +1,6 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test';
-import { createRef, startTransition, Suspense, useEffect, useLayoutEffect, useState } from 'react';
+import { createRef, Profiler, startTransition, StrictMode, Suspense, useEffect, useLayoutEffect, useState } from 'react';
 import * as measurement from '@betteroffice/docx/layout';
 import * as utils from '@betteroffice/docx/utils';
 import * as yrs from '@betteroffice/docx/yrs';
@@ -39,11 +39,20 @@ import { createFramePresentation } from './framePresentation';
 import { inputs, proposalHost } from './workerProposalHost.testing';
 import { peerlessPreviewPaint } from './WorkerDocumentPreview';
 import * as clipboard from './clipboard';
+import * as clipboardHtml from '../internals/clipboardHtml';
+import * as pasteText from '../pasteOptions/pasteText';
 import * as reviewLayer from '../../sidebar/TrackedChangesReview';
 import * as sidebarView from '../../UnifiedSidebar';
+import type { ReactSidebarItem } from '../../../plugin-api/types';
 import { toast } from 'sonner';
 import { buildReportIssueUrl } from '../../reportIssue';
 import { ToolbarCommandButton } from '../../toolbar/ToolbarCommand';
+import * as toolbarView from '../DocxEditorToolbar';
+import { useEditorChrome } from '../../EditorToolbarContext';
+import { loadMenuList } from '../../../../../../shared/react-toolbar/menuListLoader';
+import * as focusTracker from '../../../../../../shared/plugin-host/focusTracker';
+
+await loadMenuList();
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -106,9 +115,29 @@ class FakeWorker {
   pendingReplies: DocxEngineWorkerResponse[] = [];
   outOfMemory = false;
   checkpoints: { state: Uint8Array; epoch: number; version: number; throughSeq: number }[] = [];
+  lastPaste: { version: number; length: number } | null = null;
+  selection: yrs.DocxCommandSelection | null = null;
 
   constructor() {
     workers.push(this);
+  }
+
+  paste(command: { kind: string; payload: unknown }, version: number): 'applied' | 'refused' | null {
+    if (command.kind !== 'pasteFragment' && command.kind !== 'replacePasteFragment') return null;
+    const payload = command.payload as { fragment: yrs.DocxClipboardFragment; merge?: boolean; plain?: boolean };
+    const text = payload.fragment.paragraphs.map(paragraph => paragraph.text).join('\n');
+    const last = this.lastPaste;
+    this.lastPaste = null;
+    if (command.kind === 'pasteFragment') {
+      this.text += text;
+      this.lastPaste = { version: version + 1, length: text.length };
+      return 'applied';
+    }
+    if (!last || last.version !== version) return 'refused';
+    const chosen = `${payload.merge ? '<merge>' : payload.plain ? '<plain>' : '<source>'}${text}`;
+    this.text = this.text.slice(0, this.text.length - last.length) + chosen;
+    this.lastPaste = { version: version + 1, length: chosen.length };
+    return 'applied';
   }
 
   documentVersion() {
@@ -125,7 +154,7 @@ class FakeWorker {
     } else if (message.type === 'checkpoint' && this.initial) {
       const { epoch, version, throughSeq } = this.initial;
       const checkpoint = { state: new TextEncoder().encode(this.text), epoch, version, throughSeq,
-        recoveryState: { selection: null, storedMarks: null, stickyPositions: [], cellSelection: null,
+        recoveryState: { selection: this.selection, storedMarks: null, stickyPositions: [], cellSelection: null,
           proposals: { previewVersion: 0, entries: [] }, selections: [] } };
       this.checkpoints.push(checkpoint);
       response = { id: message.id, ok: true, checkpoint: { ...checkpoint, state: checkpoint.state.slice() } };
@@ -162,9 +191,10 @@ class FakeWorker {
     } else if (message.type === 'requestFullFrame' && this.initial) {
       response = { id: message.id, ok: true, commandAck: { ...this.initial, frame: { ...commandFrame(this.initial.throughSeq + 1), coversThroughSeq: this.initial.throughSeq } } };
     } else if (message.type === 'commandInit') {
-      const { session, incarnation, epoch, version = 0, throughSeq = 0, readOnly, layoutRevision } = message.request;
+      const { session, incarnation, epoch, version = 0, throughSeq = 0, readOnly, layoutRevision, recoveryState } = message.request;
+      this.selection = recoveryState?.selection ?? null;
       const initial: DocxCommandInitReply = {
-        session, incarnation, epoch, version, throughSeq, outcomes: [], selection: null,
+        session, incarnation, epoch, version, throughSeq, outcomes: [], selection: this.selection,
         editState: {
           readOnly, toolbar: null, effectiveFormatting: null, storedMarks: null, ...this.documentVersion(),
           canUndo: false, canRedo: false, hyperlink: null, tableContext: null,
@@ -187,21 +217,28 @@ class FakeWorker {
       this.refuseNextEdit = false;
       const cancelled = command.afterSeq !== undefined && this.refused.has(command.afterSeq);
       if (refused || cancelled) this.refused.add(command.seq);
+      const pasted = refused || cancelled ? null : this.paste(command, state.version);
+      if (pasted === 'refused') this.refused.add(command.seq);
       const readOnly = !refused && !cancelled && command.kind === 'setReadOnly'
         ? (command.payload as { readOnly: boolean }).readOnly : state.editState.readOnly;
       if (!refused && !cancelled && command.kind === 'insertText') this.text += (command.payload as { text: string }).text;
+      if (pasted === 'applied') {
+        const caret = { story: 'body', paraId: 'a', offset: this.text.length };
+        this.selection = { anchor: caret, focus: caret };
+      }
       const ack = {
         session: state.session, incarnation: state.incarnation, epoch: state.epoch,
-        version: state.version + (!refused && !cancelled && command.kind === 'insertText' ? 1 : 0), throughSeq: command.seq,
+        version: state.version + ((!refused && !cancelled && command.kind === 'insertText') || pasted === 'applied' ? 1 : 0), throughSeq: command.seq,
         outcomes: [{
           seq: command.seq,
-          status: refused ? 'refused' as const : cancelled ? 'cancelled' as const :
-            command.kind === 'insertText' ? 'applied' as const : 'noop' as const,
+          status: refused ? 'refused' as const : cancelled ? 'cancelled' as const : pasted === 'refused' ? 'refused' as const :
+            command.kind === 'insertText' || pasted === 'applied' ? 'applied' as const : 'noop' as const,
           ...(refused ? { reason: readOnlyRefusal ? 'read-only' : 'stale-version' } :
-            cancelled ? { reason: 'dependency-refused' } : {}),
+            cancelled ? { reason: 'dependency-refused' } : pasted === 'refused' ? { reason: 'paste-changed' } : {}),
         }],
         editState: { ...state.editState, readOnly, ...this.documentVersion() },
         ...((command.kind === 'select' || (command.kind === 'navigate' && (command.payload as yrs.DocxCommandPayloads['navigate']).extend)) ? { selection: { anchor: { story: 'body', paraId: 'a', offset: 0 }, focus: { story: 'body', paraId: 'a', offset: 13 } } } : {}),
+        ...(pasted === 'applied' ? { selection: this.selection } : {}),
         ...(realSurface ? { frame: { ...commandFrame(command.seq + 1), coversThroughSeq: command.seq } } : {}),
       };
       this.initial = { ...state, ...ack };
@@ -371,14 +408,99 @@ beforeEach(() => {
   restorers.push(() => coreSession.mockRestore(), () => surface.mockRestore());
 });
 
-afterEach(() => {
+afterEach(async () => {
   cleanup();
+  await act(async () => { await new Promise<void>(resolve => setTimeout(resolve, 0)); });
   for (const restore of restorers.splice(0).reverse()) restore();
   resetEngineChoiceForTests();
 });
 afterAll(async () => {
   await act(async () => { await new Promise<void>((resolve) => setImmediate(resolve)); });
   if (ownsDom) await GlobalRegistrator.unregister();
+});
+
+async function shellRenderFixture(extra: Pick<DocxEditorProps, 'showHostProposalsInSidebar'> = {}) {
+  const h = proposalHost({ automatic: false });
+  const geometry = h.binding.viewStore.getSnapshot().geometry!;
+  h.binding.viewStore.installFrameGeometry({ ...geometry, frameEpoch: geometry.frameEpoch + 1,
+    pages: [{ page: { pageId: '1', pageIndex: 0 }, bounds: { x: 0, y: 0, width: 600, height: 800 },
+      transform: [1, 0, 0, 1, 0, 0], displayPage: { pageIndex: 0, width: 600, height: 800, primitives: [], sectionIndex: 0 } }] });
+  const probe = mock(() => { useEditorChrome(); return <div data-testid="toolbar-probe" />; });
+  const toolbar = spyOn(toolbarView, 'DocxEditorToolbar').mockImplementation(probe);
+  restorers.push(() => toolbar.mockRestore());
+  const view = render(<DocxEditor {...peerlessProps} {...extra} />);
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
+  await act(async () => { surface.mock.calls[0]![0].onReady!(h.binding); });
+  await act(async () => { await new Promise<void>(resolve => setImmediate(resolve)); });
+  return { h, view, probe, present: async (change: (geometry: PeerlessFrameGeometry) => void = () => {}) => {
+    const next = structuredClone(h.binding.viewStore.getSnapshot().geometry!);
+    next.frameEpoch++;
+    change(next);
+    await act(async () => { h.binding.viewStore.installFrameGeometry(next); });
+  } };
+}
+
+test('paint-only frame bursts keep the shell toolbar stable and point reads use the newest display page', async () => {
+  const { h, view, probe, present } = await shellRenderFixture();
+  const count = probe.mock.calls.length, surfaces = surface.mock.calls.length;
+  const initialPage = h.binding.viewStore.getSnapshot().geometry!.pages[0]!;
+  for (let index = 1; index <= 40; index++) {
+    await present(geometry => { geometry.pages[0]!.displayPage!.sectionIndex = index; });
+  }
+  expect(probe.mock.calls.length).toBe(count);
+  expect(surface.mock.calls.length - surfaces).toBeLessThanOrEqual(2);
+  const onPartPoint = surface.mock.calls.at(-1)![0].onPartPoint!;
+  const intent = { page: initialPage.page, x: 10, y: 5, clickCount: 2, frameEpoch: 1, layoutRevision: 1,
+    modifiers: { shift: false, alt: false, ctrl: false, meta: false } };
+  const query = spyOn(frameRender, 'findDisplayListHyperlinkAtPoint');
+  restorers.push(() => query.mockRestore());
+  await act(async () => { onPartPoint({ page: initialPage, x: 10, y: 100, clickCount: 1, intent: { ...intent, clickCount: 1 } }); });
+  expect(query.mock.calls.at(-1)![0].pages[0]!.sectionIndex).toBe(40);
+  view.unmount(); h.controller.dispose();
+});
+
+for (const [name, change] of [
+  ['page bounds', (geometry: PeerlessFrameGeometry) => { geometry.pages[0]!.bounds.width++; }],
+  ['caret', (geometry: PeerlessFrameGeometry) => { geometry.caret = { x: 10, y: 20, width: 1, height: 12 }; }],
+  ['selection', (geometry: PeerlessFrameGeometry) => { geometry.selectionRects = [{ x: 10, y: 20, width: 20, height: 12 }]; }],
+  ['layoutRevision', (geometry: PeerlessFrameGeometry) => { geometry.layoutRevision++; }],
+] as const) {
+  test(`${name} frames still render the shell and leave the toolbar alone`, async () => {
+    const { h, view, probe, present } = await shellRenderFixture();
+    const count = probe.mock.calls.length, surfaces = surface.mock.calls.length;
+    await present(change);
+    expect(surface.mock.calls.length).toBeGreaterThan(surfaces);
+    expect(probe.mock.calls.length).toBe(count);
+    view.unmount(); h.controller.dispose();
+  });
+}
+
+test('a shell showing host proposals still follows every frame', async () => {
+  const { h, view, present } = await shellRenderFixture({ showHostProposalsInSidebar: true });
+  const surfaces = surface.mock.calls.length;
+  await present();
+  expect(surface.mock.calls.length).toBeGreaterThan(surfaces);
+  view.unmount(); h.controller.dispose();
+});
+
+test('document edits still render the shell', async () => {
+  const { h, view } = await shellRenderFixture();
+  const surfaces = surface.mock.calls.length;
+  await act(async () => { await h.submit('insertText', { text: 'x' }, {}).ack; });
+  expect(surface.mock.calls.length).toBeGreaterThan(surfaces);
+  view.unmount(); h.controller.dispose();
+});
+
+test('the toolbar follows its own props and chrome configuration', async () => {
+  const { h, view, probe } = await shellRenderFixture();
+  const count = probe.mock.calls.length;
+  await act(async () => { view.rerender(<DocxEditor {...peerlessProps} documentName="renamed" />); });
+  expect(probe.mock.calls.length).toBeGreaterThan(count);
+  expect((probe.mock.calls.at(-1) as unknown as [{ documentName?: string }])[0].documentName).toBe('renamed');
+  const named = probe.mock.calls.length;
+  await act(async () => { view.rerender(<DocxEditor {...peerlessProps} documentName="renamed" showZoomControl={false} />); });
+  expect(probe.mock.calls.length).toBeGreaterThan(named);
+  view.unmount(); h.controller.dispose();
 });
 
 test('a mounted host receives four proposals and a versioned plugin proposal event', async () => {
@@ -523,6 +645,144 @@ test('scroll-only display window updates keep review rects, props and card rende
   }
   view.unmount();
   h.controller.dispose();
+});
+
+async function reviewCardRenderFixture() {
+  const h = proposalHost({ automatic: false });
+  const frame = h.binding.viewStore.getSnapshot().geometry!;
+  frame.pages = [{ page: { pageId: '0', pageIndex: 0 }, bounds: { x: 0, y: 0, width: 600, height: 800 },
+    transform: [1, 0, 0, 1, 0, 0], displayPage: { pageIndex: 0, width: 600, height: 800, primitives: [], sectionIndex: 0 } }];
+  const base = await h.readAt({ kind: 'reviewSnapshot', expectPreviewVersion: 0 }, h.snapshot().version) as { value: yrs.DocxReviewSnapshot };
+  let review: yrs.DocxReviewSnapshot = { ...base.value, uiComments: [noteComment(3, 'First note'), noteComment(4, 'Second note'),
+    noteComment(5, 'Comment reply', { parentId: 3 }), noteComment(6, 'Change reply', { parentId: 7 })],
+    commentIds: { first: 3, second: 4 }, commentGeometry: {
+      first: [{ pageIndex: 0, x: 30, y: 240, width: 50, height: 12 }],
+      second: [{ pageIndex: 0, x: 30, y: 340, width: 50, height: 12 }],
+    }, revisions: [7, 8].map(id => ({ revisionId: String(id), kind: 'insertion' as const, story: 'body', author: `Reviewer ${id}`,
+      date: '2026-10-01T00:00:00Z', preview: `Change ${id}`,
+      range: { story: 'body', start: { paraId: 'p0', offset: id }, end: { paraId: 'p0', offset: id + 1 } } })),
+    revisionGeometry: { 7: [{ pageIndex: 0, x: 30, y: 40, width: 50, height: 12 }], 8: [{ pageIndex: 0, x: 30, y: 140, width: 50, height: 12 }] } };
+  let entries = [7, 8].map(id => ({ revisionId: id, type: 'insertion' as const, text: `Change ${id}`, author: `Reviewer ${id}`, from: id, to: id + 1 }));
+  const readAt = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'documentReadAt').mockImplementation((async (request: { kind: string }, version: string) => {
+    const geometry = h.binding.viewStore.getSnapshot().geometry!;
+    return { status: 'ok', version, value: request.kind === 'sidebar'
+      ? structuredClone({ comments: [], revisions: entries.map(entry => ({ key: `revision-${entry.revisionId}`, start: { story: 'body', position: entry.from } })),
+        trackedChanges: { entries, commentToRevision: [] } })
+      : request.kind === 'reviewSnapshot' ? structuredClone({ ...review, version: h.snapshot().version, frameEpoch: geometry.frameEpoch,
+        layoutRevision: geometry.layoutRevision, proposals: { ...review.proposals, version: h.snapshot().version },
+        proposalGeometry: { ...review.proposalGeometry, version: h.snapshot().version } })
+      : request.kind === 'toolbarMetadata' ? { styles: [], fontFamilies: [] } : null };
+  }) as never);
+  const counts = new Map<string, number>();
+  const OriginalSidebar = sidebarView.UnifiedSidebar;
+  const wrappedRenders = new WeakMap<ReactSidebarItem['render'], ReactSidebarItem['render']>();
+  const wrappedItems = new WeakMap<ReactSidebarItem[], ReactSidebarItem[]>();
+  const column = spyOn(sidebarView, 'UnifiedSidebar').mockImplementation(props => {
+    let items = wrappedItems.get(props.items);
+    if (!items) {
+      items = props.items.map(item => {
+        let render = wrappedRenders.get(item.render);
+        if (!render) {
+          render = cardProps => <Profiler id={item.id} onRender={id => counts.set(id, (counts.get(id) ?? 0) + 1)}>{item.render(cardProps)}</Profiler>;
+          wrappedRenders.set(item.render, render);
+        }
+        return { ...item, render };
+      });
+      wrappedItems.set(props.items, items);
+    }
+    return <OriginalSidebar {...props} items={items} />;
+  });
+  restorers.push(() => readAt.mockRestore(), () => column.mockRestore());
+  const view = render(<DocxEditor {...peerlessProps} showToolbar={false} showHostProposalsInSidebar />);
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
+  await act(async () => { surface.mock.calls[0]![0].onReady!(h.binding); });
+  await waitFor(() => expect(view.container.querySelectorAll('.docx-review-card')).toHaveLength(4));
+  await act(async () => { await new Promise<void>(resolve => requestAnimationFrame(() => resolve())); });
+  const paint = async () => {
+    const next = structuredClone(h.binding.viewStore.getSnapshot().geometry!);
+    next.frameEpoch++;
+    const displayPage = next.pages[0]!.displayPage!;
+    displayPage.sectionIndex = (displayPage.sectionIndex ?? 0) + 1;
+    await act(async () => {
+      h.binding.viewStore.installFrameGeometry(next);
+      await new Promise<void>(resolve => setImmediate(resolve));
+    });
+  };
+  const edit = async (update: () => void) => {
+    await act(async () => {
+      update();
+      await h.submit('undo', {}, {}).ack;
+      const next = structuredClone(h.binding.viewStore.getSnapshot().geometry!);
+      next.frameEpoch++;
+      next.documentVersion = h.snapshot().version;
+      next.coversThroughSeq = h.binding.viewStore.getSnapshot().throughSeq;
+      h.binding.viewStore.installFrameGeometry(next);
+    });
+    await waitFor(() => expect(column.mock.calls.at(-1)![0].items).toHaveLength(4));
+    await act(async () => { await new Promise<void>(resolve => setImmediate(resolve)); });
+  };
+  return { h, view, counts, paint, edit, column, updateReview: (update: (value: yrs.DocxReviewSnapshot) => yrs.DocxReviewSnapshot) => { review = update(review); },
+    updateChange: () => { entries = entries.map(entry => entry.revisionId === 7 ? { ...entry, author: 'Edited reviewer', text: 'Edited change' } : entry); } };
+}
+
+test('forty paint-only scroll frames keep real tracked change and comment card renders flat', async () => {
+  const { h, view, counts, paint } = await reviewCardRenderFixture();
+  const before = new Map(counts);
+  expect([...before.keys()].sort()).toEqual(['comment-3', 'comment-4', 'tc-7-0', 'tc-8-1']);
+  for (let index = 0; index < 40; index++) {
+    await paint();
+    expect(counts).toEqual(before);
+  }
+  view.unmount(); h.controller.dispose();
+});
+
+test('real review cards update their data, replies, expansion and positions independently', async () => {
+  const { h, view, counts, edit, updateReview, updateChange } = await reviewCardRenderFixture();
+  const unchangedExcept = (before: Map<string, number>, id: string) => {
+    expect(counts.get(id)!).toBeGreaterThan(before.get(id)!);
+    for (const [other, count] of before) if (other !== id) expect(counts.get(other)).toBe(count);
+  };
+  let before = new Map(counts);
+  await edit(updateChange);
+  await waitFor(() => expect(view.container.querySelector('[data-revision-id="7"]')?.textContent).toContain('Edited reviewer'));
+  unchangedExcept(before, 'tc-7-0');
+  before = new Map(counts);
+  await edit(() => updateReview(value => ({ ...value, uiComments: value.uiComments!.map(comment => comment.id === 6 ? noteComment(6, 'Edited change reply', { parentId: 7 }) : comment) })));
+  await waitFor(() => expect(view.container.querySelector('[data-revision-id="7"]')?.textContent).toContain('Edited change reply'));
+  unchangedExcept(before, 'tc-7-0');
+  before = new Map(counts);
+  await edit(() => updateReview(value => ({ ...value, uiComments: value.uiComments!.map(comment => comment.id === 3 ? noteComment(3, 'Edited note') : comment) })));
+  await waitFor(() => expect(view.container.querySelector('[data-comment-id="3"]')?.textContent).toContain('Edited note'));
+  unchangedExcept(before, 'comment-3');
+  before = new Map(counts);
+  await edit(() => updateReview(value => ({ ...value, uiComments: value.uiComments!.map(comment => comment.id === 5 ? noteComment(5, 'Edited comment reply', { parentId: 3 }) : comment) })));
+  await waitFor(() => expect(view.container.querySelector('[data-comment-id="3"]')?.textContent).toContain('Edited comment reply'));
+  unchangedExcept(before, 'comment-3');
+  before = new Map(counts);
+  fireEvent.click(view.container.querySelector('[data-revision-id="7"]')!);
+  expect(view.container.querySelector('[data-revision-id="7"]')?.getAttribute('data-active')).toBe('true');
+  unchangedExcept(before, 'tc-7-0');
+  fireEvent.click(view.container.querySelector('[data-revision-id="7"]')!);
+  before = new Map(counts);
+  fireEvent.click(view.container.querySelector('[data-comment-id="3"]')!);
+  expect(view.container.querySelector('[data-comment-id="3"]')?.getAttribute('data-active')).toBe('true');
+  expect(view.container.querySelector('[data-comment-id="3"] .docx-review-input')).not.toBeNull();
+  unchangedExcept(before, 'comment-3');
+  fireEvent.click(view.container.querySelector('[data-comment-id="3"]')!);
+  before = new Map(counts);
+  const wrapper = () => view.container.querySelector<HTMLElement>('[data-comment-id="3"]')!.parentElement!;
+  const top = wrapper().style.top;
+  await edit(() => updateReview(value => ({ ...value, commentGeometry: { ...value.commentGeometry,
+    first: [{ pageIndex: 0, x: 30, y: 270, width: 50, height: 12 }] } })));
+  await waitFor(() => expect(wrapper().style.top).not.toBe(top));
+  expect(counts).toEqual(before);
+  fireEvent.click(view.container.querySelector('[data-revision-id="7"] .docx-review-accept')!);
+  await waitFor(() => expect(h.submit.mock.calls.filter(call => call[0] === 'acceptRevision').at(-1)?.[1])
+    .toEqual({ revisionId: '7', expectVersion: h.snapshot().version }));
+  fireEvent.click(view.container.querySelector('[data-revision-id="7"] .docx-review-reject')!);
+  await waitFor(() => expect(h.submit.mock.calls.filter(call => call[0] === 'rejectRevision').at(-1)?.[1])
+    .toEqual({ revisionId: '7', expectVersion: h.snapshot().version }));
+  view.unmount(); h.controller.dispose();
 });
 
 test('worker tracked change cards accept and reject through worker review commands', async () => {
@@ -827,6 +1087,42 @@ test('current comment geometry positions new and moved cards while another page 
   h.controller.dispose();
 });
 
+test('a zoom change after a paint-only frame reprojects comment cards before the review read returns', async () => {
+  const h = proposalHost({ automatic: false });
+  h.binding.viewStore.getSnapshot().geometry!.pages = [{ page: { pageId: '0', pageIndex: 0 },
+    bounds: { x: 0, y: 0, width: 600, height: 800 }, transform: [1, 0, 0, 1, 0, 0] as const }];
+  const base = await h.readAt({ kind: 'reviewSnapshot', expectPreviewVersion: 0 }, h.snapshot().version) as { value: yrs.DocxReviewSnapshot };
+  const review = { ...base.value, uiComments: [noteComment(3, 'Anchored note')], commentIds: { native: 3 },
+    commentGeometry: { native: [{ pageIndex: 0, x: 30, y: 40, width: 50, height: 12 }] } };
+  let hold: Promise<void> | null = null;
+  const readAt = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'documentReadAt').mockImplementation((async (request: { kind: string }, version: string) => {
+    if (request.kind === 'reviewSnapshot' && hold) await hold;
+    return { status: 'ok', version, value: request.kind === 'reviewSnapshot' ? review
+      : request.kind === 'toolbarMetadata' ? { styles: [], fontFamilies: [] } : null };
+  }) as never);
+  const column = spyOn(sidebarView, 'UnifiedSidebar');
+  restorers.push(() => readAt.mockRestore(), () => column.mockRestore());
+  const ref = createRef<DocxEditorRef>();
+  const view = render(<DocxEditor {...peerlessProps} ref={ref} showToolbar={false} />);
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
+  await act(async () => { surface.mock.calls[0]![0].onReady!(h.binding); });
+  const cardItem = () => column.mock.calls.at(-1)![0].items.find(item => item.id === 'comment-3');
+  await waitFor(() => expect(cardItem()?.fixedY).toBe(88));
+  let release!: () => void;
+  hold = new Promise<void>(resolve => { release = resolve; });
+  await act(async () => {
+    const frame = h.binding.viewStore.getSnapshot().geometry!;
+    h.binding.viewStore.installFrameGeometry({ ...frame, frameEpoch: frame.frameEpoch + 1 });
+  });
+  await act(async () => { ref.current!.setZoom(2); });
+  await waitFor(() => expect(cardItem()?.fixedY).toBe(64));
+  hold = null;
+  await act(async () => { release(); await new Promise<void>(resolve => setImmediate(resolve)); });
+  expect(cardItem()?.fixedY).toBe(64);
+  view.unmount();
+  h.controller.dispose();
+});
+
 test('controlled comments replace the worker comment projection in the sidebar and follow prop updates', async () => {
   const h = proposalHost({ automatic: false });
   h.binding.viewStore.getSnapshot().geometry!.pages = [{ page: { pageId: '0', pageIndex: 0 },
@@ -1073,6 +1369,77 @@ test('previewFirstPage previews a cut of the source before the whole source open
   expect(Buffer.from(cut.source.bytes!)).toEqual(Buffer.from(whole.source.bytes!));
 });
 
+test('a cut preview leaves the tracked paragraph mark a text item while the whole source names its face', async () => {
+  fontRequirements = [{ key: 'calibri|0|0', family: 'Calibri', bold: false, italic: false }];
+  const bundled = Uint8Array.of(21, 22).buffer;
+  render(<DocxEditor {...peerlessProps} previewFirstPage showToolbar={false} measurementFontProvider={{ resolve: () => async () => bundled }} />);
+  await waitFor(() => expect(requests.some(request => request.type === 'commandInit')).toBe(true));
+  const preview = requests.find(request => request.type === 'previewSource');
+  const init = requests.find(request => request.type === 'commandInit');
+  if (preview?.type !== 'previewSource' || init?.type !== 'commandInit') throw new Error('Worker did not preview');
+  const mark = '@betteroffice/fonts/paragraph-mark';
+  const chains = (extras: string) => JSON.parse(extras).fontChains as Record<string, number[]>;
+  const whole = chains(init.request.extras);
+  expect(Object.keys(chains(preview.preview.extras!))).toEqual(['calibri|0|0']);
+  expect(JSON.parse(preview.preview.layoutInput).measurement.fontChains).not.toHaveProperty(mark);
+  expect(whole[mark]).toEqual(whole['calibri|0|0']!.slice(0, 1));
+});
+
+const PARAGRAPH_MARK = '@betteroffice/fonts/paragraph-mark';
+const calibriRequirement = { key: 'calibri|0|0', family: 'Calibri', bold: false, italic: false };
+const arialRequirement = { key: 'arial|0|0', family: 'Arial', bold: false, italic: false };
+
+function fontEnvironmentChains() {
+  return requests.flatMap(request => request.type === 'edit' && request.command.kind === 'setFontEnvironment'
+    ? [(request.command.payload as yrs.DocxCommandPayloads['setFontEnvironment']).chains] : []);
+}
+
+const fontRequirementQueries = () => requests.filter(request => request.type === 'fontRequirements').length;
+
+async function hintFontRequirements(next: measurement.ResidentFontRequirement[]) {
+  fontRequirements = next;
+  const worker = workers[0]!;
+  const { session, incarnation, epoch } = worker.initial!;
+  const hint = () => act(async () => {
+    worker.onmessage?.({ data: { id: 0, ok: true, fontRequirementsHint: { session, incarnation, epoch } } } as MessageEvent<DocxEngineWorkerResponse>);
+  });
+  const asked = fontRequirementQueries();
+  await hint();
+  await waitFor(() => expect(fontRequirementQueries()).toBe(asked + 1), { timeout: 3000 });
+  await hint();
+  await waitFor(() => expect(fontRequirementQueries()).toBe(asked + 2), { timeout: 3000 });
+}
+
+test('an edit that drops the default family from the requirements sends no font environment and keeps the paragraph mark face', async () => {
+  fontRequirements = [calibriRequirement, arialRequirement];
+  const bundled = Uint8Array.of(21, 22).buffer;
+  render(<DocxEditor {...peerlessProps} measurementFontProvider={{ resolve: () => async () => bundled }} />);
+  await waitFor(() => expect(binding).toBeDefined());
+  const init = requests.find(request => request.type === 'commandInit');
+  if (init?.type !== 'commandInit') throw new Error('command initialization missing');
+  expect(JSON.parse(init.request.extras).fontChains).toHaveProperty(PARAGRAPH_MARK);
+  await hintFontRequirements([arialRequirement]);
+  expect(fontEnvironmentChains()).toHaveLength(0);
+});
+
+test('an edit that brings a picked default family into the requirements sends no font environment beyond the pick', async () => {
+  fontRequirements = [arialRequirement];
+  const bundled = Uint8Array.of(21, 22).buffer;
+  const ref = createRef<DocxEditorRef>();
+  render(<DocxEditor {...peerlessProps} ref={ref} measurementFontProvider={{ resolve: () => async () => bundled }} />);
+  await waitFor(() => expect(binding).toBeDefined());
+  const init = requests.find(request => request.type === 'commandInit');
+  if (init?.type !== 'commandInit') throw new Error('command initialization missing');
+  expect(JSON.parse(init.request.extras).fontChains).not.toHaveProperty(PARAGRAPH_MARK);
+  selectWorkerText();
+  await act(async () => { await ref.current!.commands.execute('fontFamily', { family: 'Calibri' }); });
+  await waitFor(() => expect(fontEnvironmentChains()).toHaveLength(1));
+  expect(fontEnvironmentChains()[0]).toHaveProperty('calibri|0|0');
+  await hintFontRequirements([arialRequirement, calibriRequirement]);
+  expect(fontEnvironmentChains()).toHaveLength(1);
+  expect(fontEnvironmentChains()[0]).not.toHaveProperty(PARAGRAPH_MARK);
+});
+
 test('a declined source cut previews the whole source before the command session', async () => {
   refuseCut = true;
   render(<DocxEditor {...peerlessProps} previewFirstPage showToolbar={false} />);
@@ -1280,6 +1647,20 @@ test('font callbacks follow worker readiness and a reverted provider is reapplie
   expect(coreSession).not.toHaveBeenCalled();
 });
 
+test('a 404 URL font reports a recoverable error after the peerless editor opens', async () => {
+  const fetchFont = spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 404 }));
+  restorers.push(() => fetchFont.mockRestore());
+  const onError = mock((_error: Error, _info?: DocxErrorInfo) => {});
+  const view = render(<DocxEditor {...peerlessProps} fonts={[{ family: 'Brand Sans', src: '/brand.woff2' }]} onError={onError} />);
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
+  await waitFor(() => expect(onError).toHaveBeenCalledWith(
+    expect.objectContaining({ message: 'DOCX font Brand Sans failed to load: 404' }), { recoverable: true }
+  ));
+  expect(fetchFont).toHaveBeenCalled();
+  expect(requests.filter(request => request.type === 'commandInit')).toHaveLength(1);
+  expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true');
+});
+
 test('custom fonts fetch bytes for worker faces without global CSS and wait for composition', async () => {
   const original = document.head.innerHTML;
   const fontBytes = new Uint8Array(16);
@@ -1288,10 +1669,10 @@ test('custom fonts fetch bytes for worker faces without global CSS and wait for 
   const measure = spyOn(measurement, 'createRustMeasureSource').mockImplementation(({ engine }) => {
     let embedded: { data: ArrayBuffer }[] = [];
     let slots: number[] = [];
-    return { setCompat() {}, setEmbeddedFaces(faces) { embedded = faces; },
+    return { setCompat() {}, setEmbeddedFaces(faces, appFaces = []) { embedded = [...faces, ...appFaces]; },
       async prepareFontRequirements() { slots = embedded.map(face => engine.registerFont(new Uint8Array(face.data))); return true; },
       measurementConfigForRequirements: () => ({ fontChains: { 'custom|0|0': slots }, defaults: { fontFamily: 'Custom', fontSize: 11 },
-        compat: { noLeading: false, doNotExpandShiftReturn: false }, authoritativeShaping: true }), clear() {} };
+        compat: { noLeading: false, doNotExpandShiftReturn: false }, authoritativeShaping: true }), coverageCheck: () => () => true, clear() {} };
   });
   restorers.push(() => fetchFont.mockRestore(), () => measure.mockRestore());
   const onFontsLoaded = mock(() => {});
@@ -1324,7 +1705,7 @@ test('a script typed after open loads its fallback face once and a covered scrip
   fontRequirements = [{ key: 'calibri|0|0', family: 'Calibri', bold: false, italic: false }];
   const measure = spyOn(measurement, 'createRustMeasureSource').mockImplementation(({ engine }) => {
     let chains: Record<string, number[]> = {};
-    return { setCompat() {}, setEmbeddedFaces() {}, clear() {},
+    return { setCompat() {}, setEmbeddedFaces() {}, coverageCheck: () => () => true, clear() {},
       async prepareFontRequirements(requirements) {
         chains = Object.fromEntries(requirements.map(({ key, scripts }) => [key, [key, ...scripts ?? []]
           .map(name => engine.registerFont(new TextEncoder().encode(name.padEnd(12))))]));
@@ -1376,7 +1757,7 @@ test('a requirements hint during a toolbar font pick waits for the pick instead 
   let picking = false;
   const measure = spyOn(measurement, 'createRustMeasureSource').mockImplementation(({ engine }) => {
     let chains: Record<string, number[]> = {};
-    return { setCompat() {}, setEmbeddedFaces() {}, clear() {},
+    return { setCompat() {}, setEmbeddedFaces() {}, coverageCheck: () => () => true, clear() {},
       async prepareFontRequirements(requirements) {
         if (requirements.some(({ key }) => key === 'picked|0|0')) { picking = true; await held; }
         chains = Object.fromEntries(requirements.map(({ key, scripts }) => [key, [key, ...scripts ?? []]
@@ -1417,7 +1798,7 @@ test('an aborted toolbar font pick whose loader never settles no longer holds fo
   let picking = false;
   const measure = spyOn(measurement, 'createRustMeasureSource').mockImplementation(({ engine }) => {
     let chains: Record<string, number[]> = {};
-    return { setCompat() {}, setEmbeddedFaces() {}, clear() {},
+    return { setCompat() {}, setEmbeddedFaces() {}, coverageCheck: () => () => true, clear() {},
       async prepareFontRequirements(requirements) {
         if (requirements.some(({ key }) => key === 'picked|0|0')) { picking = true; await new Promise(() => {}); }
         chains = Object.fromEntries(requirements.map(({ key, scripts }) => [key, [key, ...scripts ?? []]
@@ -1450,7 +1831,7 @@ test('a toolbar font pick the worker refuses leaves its fonts uncovered for the 
   fontRequirements = [{ key: 'calibri|0|0', family: 'Calibri', bold: false, italic: false }];
   const measure = spyOn(measurement, 'createRustMeasureSource').mockImplementation(({ engine }) => {
     let chains: Record<string, number[]> = {};
-    return { setCompat() {}, setEmbeddedFaces() {}, clear() {},
+    return { setCompat() {}, setEmbeddedFaces() {}, coverageCheck: () => () => true, clear() {},
       async prepareFontRequirements(requirements) {
         chains = Object.fromEntries(requirements.map(({ key, scripts }) => [key, [key, ...scripts ?? []]
           .map(name => engine.registerFont(new TextEncoder().encode(name.padEnd(12))))]));
@@ -1823,7 +2204,12 @@ test('a property-dialog command failure reports a recoverable error and keeps th
   const onError = mock((_error: Error, _info?: DocxErrorInfo) => {});
   const view = render(<DocxEditor {...peerlessProps} ref={ref} onError={onError} />);
   await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
-  const read = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'documentRead').mockRejectedValueOnce(failure);
+  const original = yrs.ResidentEngineWorkerClient.prototype.documentReadAt;
+  const read = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'documentReadAt').mockImplementation(function (
+    this: yrs.ResidentEngineWorkerClient, request: { kind: string; target?: { kind: string } }, token: string) {
+    return request.kind === 'properties' && request.target?.kind === 'watermark'
+      ? Promise.reject(failure) : original.call(this, request as never, token);
+  } as never);
   restorers.push(() => read.mockRestore());
   await act(async () => { expect(await ref.current!.commands.execute('watermark', null)).toMatchObject({ ok: false }); });
   expect(onError.mock.calls).toEqual([[failure, { recoverable: true }]]);
@@ -2506,13 +2892,77 @@ test('context paste refuses a target changed while clipboard permission is pendi
   const read = spyOn(navigator.clipboard, 'readText').mockImplementation(() => new Promise<string>((resolve) => { finish = resolve; }));
   restorers.push(() => read.mockRestore());
   fireEvent.contextMenu(view.getByTestId('docx-worker-paged-editor'));
-  fireEvent.click(view.getByRole('menuitem', { name: /^Paste/ }));
+  fireEvent.click(view.getByRole('menuitem', { name: /^Paste$/ }));
   await waitFor(() => expect(read).toHaveBeenCalled());
   snapshot.version += 1;
   await act(async () => finish('clipboard text'));
   expect(requests.filter((request) => request.type === 'edit')).toHaveLength(0);
   expect(onError).toHaveBeenCalledWith(expect.objectContaining({ message: 'Context menu target changed' }), { recoverable: true });
   expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true');
+});
+
+test('a keyboard paste hands its submission to the paste recorder', async () => {
+  const allowed = spyOn(clipboard, 'isPasteFragmentAllowed').mockImplementation(() => true);
+  restorers.push(() => allowed.mockRestore());
+  const view = render(<DocxEditor {...peerlessProps} showToolbar={false} />);
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
+  const recorded = mock((_fragment: yrs.DocxClipboardFragment, _submission?: unknown) => {});
+  const props = surface.mock.calls.at(-1)![0] as { pasteRecorder?: { current: unknown }; onPasteFragment?: (...args: unknown[]) => boolean };
+  if (props.pasteRecorder) props.pasteRecorder.current = recorded;
+  const bold: yrs.DocxClipboardFragment = { paragraphs: [{ text: 'Bold', runs: [{ text: 'Bold', format: { other: { bold: true } } }] }] };
+  let accepted: boolean | undefined;
+  act(() => { accepted = props.onPasteFragment?.(bold, 0); });
+  expect(accepted).toBe(true);
+  await waitFor(() => expect(requests.some(request => request.type === 'edit' && request.command.kind === 'pasteFragment')).toBe(true));
+  expect(recorded).toHaveBeenCalledTimes(1);
+  const [fragment, submission] = recorded.mock.calls[0]!;
+  expect(fragment).toEqual(bold);
+  expect((submission as { status?: unknown } | undefined)?.status).toBe('submitted');
+});
+
+test('replacing a paste checks the replacement fragment and submits only an allowed one', async () => {
+  const allowed = spyOn(clipboard, 'isPasteFragmentAllowed')
+    .mockImplementation((_commands, fragment) => fragment !== undefined && fragment.paragraphs[0]?.text !== 'Refused');
+  restorers.push(() => allowed.mockRestore());
+  const view = render(<DocxEditor {...peerlessProps} showToolbar={false} />);
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
+  const replace = surface.mock.calls.at(-1)![0].onReplacePasteFragment!;
+  const at = { story: 'body', paraId: 'a', offset: 4 };
+  const refused: yrs.DocxClipboardFragment = { paragraphs: [{ text: 'Refused', runs: [{ text: 'Refused', format: { other: { bold: true } } }] }] };
+  const kept: yrs.DocxClipboardFragment = { paragraphs: [{ text: 'Kept', runs: [{ text: 'Kept', format: { other: { bold: true } } }] }] };
+  const replacements = () => requests.filter(request => request.type === 'edit' && request.command.kind === 'replacePasteFragment');
+  expect(replace(refused, { anchor: at, focus: at })).toBe(false);
+  expect(allowed).toHaveBeenLastCalledWith(expect.anything(), refused);
+  let outcome: unknown = false;
+  await act(async () => { outcome = replace(kept, { anchor: at, focus: at }); });
+  expect(outcome).not.toBe(false);
+  expect(allowed).toHaveBeenLastCalledWith(expect.anything(), kept);
+  await waitFor(() => expect(replacements()).toHaveLength(1));
+  expect(replacements()[0]).toMatchObject({ command: { payload: { fragment: kept, selection: { anchor: at, focus: at } } } });
+});
+
+test('with paste options off a context menu paste of a fragment derives no plain text from it', async () => {
+  const bold: yrs.DocxClipboardFragment = { paragraphs: [{ text: 'Bold', runs: [{ text: 'Bold', format: { other: { bold: true } } }] }] };
+  const allowed = spyOn(clipboard, 'isPasteFragmentAllowed').mockImplementation(() => true);
+  const read = spyOn(clipboardHtml, 'readClipboardFragment').mockImplementation(async () => structuredClone(bold));
+  const readText = spyOn(navigator.clipboard, 'readText').mockImplementation(async () => 'Bold');
+  const derived = spyOn(pasteText, 'clipboardFragmentPlainText');
+  restorers.push(() => allowed.mockRestore(), () => read.mockRestore(), () => readText.mockRestore(), () => derived.mockRestore());
+  const view = render(<DocxEditor {...peerlessProps} pasteOptions={false} showToolbar={false} />);
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
+  fireEvent.contextMenu(view.getByTestId('docx-worker-paged-editor'));
+  fireEvent.click(view.getByRole('menuitem', { name: /^Paste$/ }));
+  await waitFor(() => expect(requests.some(request => request.type === 'edit' && request.command.kind === 'pasteFragment')).toBe(true));
+  expect(read).toHaveBeenCalledTimes(1);
+  expect(derived).not.toHaveBeenCalled();
+});
+
+test('suggesting mode offers no paste options and editing mode offers them', async () => {
+  const view = render(<DocxEditor {...peerlessProps} mode="suggesting" author="Writer" showToolbar={false} />);
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
+  expect(surface.mock.calls.at(-1)![0].pasteOptions).toBe(false);
+  view.rerender(<DocxEditor {...peerlessProps} mode="editing" author="Writer" showToolbar={false} />);
+  await waitFor(() => expect(surface.mock.calls.at(-1)![0].pasteOptions).not.toBe(false));
 });
 
 test('worker shell reserves the widest scaled page and retains host styling', async () => {
@@ -3014,6 +3464,175 @@ test('the real paged editor recovers the full checkpoint document and fails on a
   expect(view.getByRole('alert')).toBeDefined();
 });
 
+const PASTE_PREFIX = 'kept' + '.'.repeat(126);
+
+async function pasteOptionsSession() {
+  surface.mockRestore();
+  realSurface = true;
+  const allowed = spyOn(clipboard, 'isPasteFragmentAllowed').mockImplementation(() => true);
+  restorers.push(() => allowed.mockRestore());
+  const original = sessionHook.usePeerlessEditSession;
+  const hook = spyOn(sessionHook, 'usePeerlessEditSession').mockImplementation(options => {
+    const result = original(options);
+    if (result.binding) binding = result.binding;
+    return result;
+  });
+  restorers.push(() => hook.mockRestore());
+  await import('../pasteOptions/PasteOptionsControl');
+  const onError = mock((_error: Error) => {});
+  const view = render(<DocxEditor {...peerlessProps} onError={onError} showToolbar={false} />);
+  await waitFor(() => expect(binding).toBeDefined());
+  const first = workers[0]!;
+  for (let index = 0; index < 127; index++) {
+    await act(async () => {
+      const submitted = binding!.commands.submit({ kind: 'insertText', payload: { text: index === 0 ? 'kept' : '.' } });
+      if (submitted.status !== 'submitted') throw new Error('edit not submitted');
+      expect((await submitted.ticket.ack).status).toBe('applied');
+    });
+  }
+  await act(async () => { await new Promise<void>(resolve => setImmediate(resolve)); });
+  expect(first.text).toBe(PASTE_PREFIX);
+  expect(first.checkpoints).toHaveLength(0);
+  const textarea = view.container.querySelector<HTMLTextAreaElement>('textarea.paged-editor__input');
+  if (!textarea) throw new Error('worker editor input is missing');
+  const control = () => view.container.querySelector<HTMLElement>('[data-paste-options]');
+  const bold: yrs.DocxClipboardFragment = { paragraphs: [{ text: 'Bold', runs: [{ text: 'Bold', format: { other: { bold: true } } }] }] };
+  const html = clipboardHtml.clipboardFragmentHtml(bold);
+  return {
+    first, onError, textarea, control,
+    async paste() {
+      act(() => { fireEvent.paste(textarea, { clipboardData: { getData: (type: string) => type === 'text/html' ? html : 'Bold' } }); });
+      await waitFor(() => expect(first.text).toBe(`${PASTE_PREFIX}Bold`));
+      await waitFor(() => {
+        const snapshot = binding!.viewStore.getSnapshot();
+        expect(snapshot.workerSelection?.focus.offset).toBe(PASTE_PREFIX.length + 4);
+        expect((snapshot.geometry?.coversThroughSeq ?? -1) >= snapshot.throughSeq).toBe(true);
+      });
+      await act(async () => { await new Promise<void>(resolve => setImmediate(resolve)); });
+    },
+    showCaret() {
+      act(() => {
+        const snapshot = binding!.viewStore.getSnapshot();
+        const geometry = snapshot.geometry!;
+        binding!.viewStore.installFrameGeometry({ ...geometry, frameEpoch: geometry.frameEpoch + 0.5,
+          coversThroughSeq: snapshot.throughSeq, caret: { x: 10, y: 10, width: 1, height: 12 } });
+      });
+    },
+    async offer() {
+      this.showCaret();
+      await waitFor(() => expect(control() !== null).toBe(true));
+    },
+  };
+}
+
+test('a worker restart while Paste Options are offered removes the control without an error, and typing afterwards is applied', async () => {
+  const editor = await pasteOptionsSession();
+  await editor.paste();
+  await editor.offer();
+  await waitFor(() => expect(editor.first.checkpoints).toHaveLength(1));
+  const incarnation = binding!.viewStore.getSnapshot().identity.incarnation;
+  editor.first.outOfMemory = true;
+  await act(async () => { await binding!.session.submit('setReadOnly', { readOnly: false }).ack.catch(() => {}); });
+  expect(workers).toHaveLength(2);
+  await waitFor(() => {
+    const snapshot = binding!.viewStore.getSnapshot();
+    expect(snapshot.identity.incarnation).toBe(incarnation + 1);
+    expect(snapshot.geometry?.identity.incarnation).toBe(incarnation + 1);
+    expect(snapshot.version).toBe(128);
+    expect(snapshot.workerSelection?.focus.offset).toBe(PASTE_PREFIX.length + 4);
+  });
+  editor.showCaret();
+  await act(async () => { await new Promise<void>(resolve => setImmediate(resolve)); });
+  expect(editor.control() !== null).toBe(false);
+  act(() => {
+    editor.textarea.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'insertText', data: 'x' }));
+  });
+  await waitFor(() => expect(workers[1]!.text).toBe(`${PASTE_PREFIX}Boldx`));
+  expect(editor.onError).not.toHaveBeenCalled();
+});
+
+test('while a restarted worker is still opening the Paste Options control is gone and no choice reaches the new worker', async () => {
+  const editor = await pasteOptionsSession();
+  await editor.paste();
+  await editor.offer();
+  await waitFor(() => expect(editor.first.checkpoints).toHaveLength(1));
+  const incarnation = binding!.viewStore.getSnapshot().identity.incarnation;
+  holdInitial = true;
+  editor.first.outOfMemory = true;
+  let failed: Promise<unknown> = Promise.resolve();
+  act(() => { failed = binding!.session.submit('setReadOnly', { readOnly: false }).ack.catch(() => {}); });
+  await waitFor(() => expect(workers[1]?.pendingReplies.length ?? 0).toBeGreaterThan(0));
+  await act(async () => { await new Promise<void>(resolve => setImmediate(resolve)); });
+  expect(editor.control() !== null).toBe(false);
+  const reopened = workers[1]!;
+  await act(async () => {
+    for (const response of reopened.pendingReplies.splice(0)) reopened.onmessage?.({ data: response } as MessageEvent<DocxEngineWorkerResponse>);
+    await failed;
+  });
+  await waitFor(() => {
+    const snapshot = binding!.viewStore.getSnapshot();
+    expect(snapshot.identity.incarnation).toBe(incarnation + 1);
+    expect(snapshot.geometry?.identity.incarnation).toBe(incarnation + 1);
+    expect(snapshot.version).toBe(128);
+    expect(snapshot.workerSelection?.focus.offset).toBe(PASTE_PREFIX.length + 4);
+  });
+  expect(requests.filter(request => request.type === 'edit' && request.command.kind === 'replacePasteFragment')).toHaveLength(0);
+  expect(reopened.text).toBe(`${PASTE_PREFIX}Bold`);
+  expect(editor.onError).not.toHaveBeenCalled();
+});
+
+test('after a worker restart a new paste offers Paste Options again and the choice is applied by the replacement worker', async () => {
+  const editor = await pasteOptionsSession();
+  await editor.paste();
+  await editor.offer();
+  await waitFor(() => expect(editor.first.checkpoints).toHaveLength(1));
+  const incarnation = binding!.viewStore.getSnapshot().identity.incarnation;
+  act(() => { editor.first.onerror?.({ message: 'Worker crashed' } as ErrorEvent); });
+  await waitFor(() => expect(workers).toHaveLength(2));
+  const reopened = workers[1]!;
+  await waitFor(() => {
+    const snapshot = binding!.viewStore.getSnapshot();
+    expect(snapshot.identity.incarnation).toBe(incarnation + 1);
+    expect(snapshot.geometry?.identity.incarnation).toBe(incarnation + 1);
+    expect(snapshot.version).toBe(128);
+    expect(snapshot.workerSelection?.focus.offset).toBe(PASTE_PREFIX.length + 4);
+  });
+  expect(editor.first.terminate).toHaveBeenCalled();
+  expect(binding!.viewStore.getRecovering?.()).toBe(false);
+  editor.showCaret();
+  await act(async () => { await new Promise<void>(resolve => setImmediate(resolve)); });
+  expect(editor.control() !== null).toBe(false);
+  expect(reopened.text).toBe(`${PASTE_PREFIX}Bold`);
+  const bold: yrs.DocxClipboardFragment = { paragraphs: [{ text: 'Bold', runs: [{ text: 'Bold', format: { other: { bold: true } } }] }] };
+  const html = clipboardHtml.clipboardFragmentHtml(bold);
+  act(() => { fireEvent.paste(editor.textarea, { clipboardData: { getData: (type: string) => type === 'text/html' ? html : 'Bold' } }); });
+  await waitFor(() => expect(reopened.text).toBe(`${PASTE_PREFIX}BoldBold`));
+  await waitFor(() => {
+    const snapshot = binding!.viewStore.getSnapshot();
+    expect(snapshot.identity.incarnation).toBe(incarnation + 1);
+    expect(snapshot.workerSelection?.focus.offset).toBe(PASTE_PREFIX.length + 8);
+    expect((snapshot.geometry?.coversThroughSeq ?? -1) >= snapshot.throughSeq).toBe(true);
+  });
+  await act(async () => { await new Promise<void>(resolve => setImmediate(resolve)); });
+  await editor.offer();
+  const replacements = () => requests.filter(request => request.type === 'edit' && request.command.kind === 'replacePasteFragment');
+  expect(replacements()).toHaveLength(0);
+  act(() => { fireEvent.click(editor.control()!.querySelector('button')!); });
+  const textOnly = () => Array.from(editor.control()?.querySelectorAll('[role="menuitemradio"]') ?? [])
+    .find((item) => item.textContent?.includes('Keep Text Only'));
+  await waitFor(() => expect(textOnly() !== undefined).toBe(true));
+  act(() => { fireEvent.click(textOnly()!); });
+  await waitFor(() => expect(reopened.text).toBe(`${PASTE_PREFIX}Bold<plain>Bold`));
+  const sent = replacements();
+  expect(sent).toHaveLength(1);
+  const command = sent[0]!.type === 'edit' ? sent[0]!.command : null;
+  expect(command?.incarnation).toBe(incarnation + 1);
+  expect((command?.payload as { plain?: boolean }).plain).toBe(true);
+  expect(editor.first.text).toBe(`${PASTE_PREFIX}Bold`);
+  expect(binding!.viewStore.getRecovering?.()).toBe(false);
+  expect(editor.onError).not.toHaveBeenCalled();
+});
+
 test('a recovered worker receives plugin reservations versioned to its own document', async () => {
   surface.mockRestore();
   realSurface = true;
@@ -3105,3 +3724,251 @@ for (const refused of [false, true]) {
     else expect(onError).not.toHaveBeenCalled();
   });
 }
+
+function stubSearchMatch(query: string) {
+  const post = FakeWorker.prototype.postMessage;
+  const spy = spyOn(FakeWorker.prototype, 'postMessage').mockImplementation(function (this: FakeWorker, message) {
+    if (!('id' in message) || message.type !== 'documentRead' || message.read.kind !== 'searchText') return post.call(this, message);
+    requests.push(message);
+    const response = { id: message.id, ok: true, read: { version: 'worker-version', value: {
+      matches: [{ story: 'body', paraId: 'a', start: 0, displayFrom: 1, displayTo: 1 + query.length }], carried: -1 } } };
+    queueMicrotask(() => this.onmessage?.({ data: response } as MessageEvent<DocxEngineWorkerResponse>));
+  });
+  restorers.push(() => spy.mockRestore());
+}
+
+function settled<T>(promise: Promise<T>) {
+  return promise.then(value => value, (error: Error) => error.message);
+}
+
+test('the worker editor searches after a strict mode remount', async () => {
+  stubSearchMatch('Hello');
+  const ref = createRef<DocxEditorRef>();
+  render(<StrictMode><DocxEditor {...peerlessProps} ref={ref} /></StrictMode>);
+  await waitFor(() => expect(binding).toBeDefined());
+  let found!: Promise<unknown>;
+  await act(async () => {
+    found = settled(ref.current!.search('Hello'));
+    await found;
+  });
+  await expect(found).resolves.toEqual(expect.objectContaining({ query: 'Hello', total: 1, current: 0 }));
+});
+
+test('the worker editor runs commands after a strict mode remount', async () => {
+  const ref = createRef<DocxEditorRef>();
+  render(<StrictMode><DocxEditor {...peerlessProps} ref={ref} /></StrictMode>);
+  await waitFor(() => expect(binding).toBeDefined());
+  let result: unknown;
+  await act(async () => { result = await ref.current!.commands.execute('editingMode', { mode: 'viewing' }); });
+  expect(result).toMatchObject({ ok: true });
+  await waitFor(() => expect(binding!.admission.getSnapshot().readOnly).toBe(true));
+  expect(requests.some(request => request.type === 'edit' && request.command.kind === 'setReadOnly' &&
+    (request.command.payload as { readOnly: boolean }).readOnly)).toBe(true);
+});
+
+test('the worker editor applies typing after a strict mode remount', async () => {
+  surface.mockRestore();
+  realSurface = true;
+  const original = sessionHook.usePeerlessEditSession;
+  const hook = spyOn(sessionHook, 'usePeerlessEditSession').mockImplementation(options => {
+    const result = original(options);
+    if (result.binding) binding = result.binding;
+    return result;
+  });
+  restorers.push(() => hook.mockRestore());
+  const onDocumentChange = mock(() => {});
+  render(<StrictMode><DocxEditor {...peerlessProps} onDocumentChange={onDocumentChange} showToolbar={false} /></StrictMode>);
+  await waitFor(() => expect(binding).toBeDefined());
+  await act(async () => {
+    const submitted = binding!.commands.submit({ kind: 'insertText', payload: { text: 'x' } });
+    if (submitted.status !== 'submitted') throw new Error(`edit not submitted: ${JSON.stringify(submitted)}`);
+    expect((await submitted.ticket.ack).status).toBe('applied');
+  });
+  expect(workers.filter(worker => worker.initial).at(-1)!.text).toBe('x');
+  await waitFor(() => expect(onDocumentChange).toHaveBeenCalledTimes(1));
+});
+
+test('the worker editor completes layout after a strict mode remount', async () => {
+  const ref = createRef<DocxEditorRef>();
+  render(<StrictMode><DocxEditor {...peerlessProps} ref={ref} /></StrictMode>);
+  await waitFor(() => expect(binding).toBeDefined());
+  const view = binding!.viewStore.getSnapshot();
+  view.geometry = { identity: view.identity, coversThroughSeq: view.throughSeq, frameEpoch: 1, layoutRevision: 1,
+    pages: [], caret: null, selectionRects: [] };
+  let complete!: Promise<number | string>;
+  await act(async () => {
+    complete = settled(ref.current!.whenLayoutComplete({ timeoutMs: 2000 }));
+    await complete;
+  });
+  await expect(complete).resolves.toBe(0);
+});
+
+test('the worker editor keeps a search listener registered before a strict mode remount', async () => {
+  stubSearchMatch('Hello');
+  const listener = mock((_state: unknown) => {});
+  const editor = createRef<DocxEditorRef>() as { current: DocxEditorRef | null };
+  let registered = false;
+  const attach = (instance: DocxEditorRef | null) => {
+    editor.current = instance ?? editor.current;
+    if (instance && !registered) {
+      registered = true;
+      instance.onSearchChange(listener);
+    }
+  };
+  render(<StrictMode><DocxEditor {...peerlessProps} ref={attach} /></StrictMode>);
+  await waitFor(() => expect(binding).toBeDefined());
+  expect(registered).toBe(true);
+  let found!: Promise<unknown>;
+  await act(async () => {
+    found = settled(editor.current!.search('Hello'));
+    await found;
+  });
+  expect(listener).toHaveBeenCalledWith(expect.objectContaining({ query: 'Hello', total: 1 }));
+  await expect(found).resolves.toEqual(expect.objectContaining({ total: 1 }));
+});
+
+test('the worker editor keeps change listeners registered before a strict mode remount', async () => {
+  surface.mockRestore();
+  realSurface = true;
+  const original = sessionHook.usePeerlessEditSession;
+  const hook = spyOn(sessionHook, 'usePeerlessEditSession').mockImplementation(options => {
+    const result = original(options);
+    if (result.binding) binding = result.binding;
+    return result;
+  });
+  restorers.push(() => hook.mockRestore());
+  const documentListener = mock((_change: unknown) => {});
+  const selectionListener = mock((_selection: unknown) => {});
+  let registered = false;
+  const attach = (instance: DocxEditorRef | null) => {
+    if (instance && !registered) {
+      registered = true;
+      instance.onDocumentChange(documentListener);
+      instance.onSelectionChange(selectionListener);
+    }
+  };
+  render(<StrictMode><DocxEditor {...peerlessProps} ref={attach} showToolbar={false} /></StrictMode>);
+  await waitFor(() => expect(binding).toBeDefined());
+  expect(registered).toBe(true);
+  await act(async () => {
+    const edit = binding!.commands.submit({ kind: 'insertText', payload: { text: 'x' } });
+    if (edit.status === 'submitted') await edit.ticket.ack;
+    const at = { story: 'body', paraId: 'a', offset: 0 };
+    const select = binding!.commands.submit({ kind: 'select', payload: { selection: { anchor: at, focus: at } } });
+    if (select.status === 'submitted') await select.ticket.ack;
+  });
+  await waitFor(() => expect(documentListener).toHaveBeenCalledWith(expect.objectContaining({ version: expect.any(String) })));
+  await waitFor(() => expect(selectionListener).toHaveBeenCalledWith(expect.objectContaining({ hasSelection: true })));
+});
+
+test('a real unmount of the worker editor releases it within one task', async () => {
+  const ref = createRef<DocxEditorRef>();
+  const view = render(<DocxEditor {...peerlessProps} ref={ref} />);
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
+  const editor = ref.current!;
+  holdInitial = true;
+  let outcome = 'pending';
+  act(() => { editor.loadDocumentBuffer(Uint8Array.of(8, 9)).catch((error: Error) => { outcome = error.message; }); });
+  await waitFor(() => expect(requests.filter(({ type }) => type === 'commandInit')).toHaveLength(2));
+  view.unmount();
+  await Promise.resolve();
+  expect(outcome).toBe('pending');
+  await act(async () => { await new Promise<void>(resolve => setTimeout(resolve, 0)); });
+  expect(outcome).toBe('Editor was closed');
+  await expect(editor.commands.execute('editingMode', { mode: 'viewing' })).resolves
+    .toMatchObject({ ok: false, failure: { code: 'editor-unavailable' } });
+  await waitFor(() => expect(workers.at(-1)!.terminate).toHaveBeenCalled());
+});
+
+test('a plain mount opens the document once', async () => {
+  const view = render(<DocxEditor {...peerlessProps} />);
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
+  await act(async () => { await new Promise<void>(resolve => setTimeout(resolve, 0)); });
+  expect(workers).toHaveLength(1);
+  expect(requests.filter(({ type }) => type === 'openSource')).toHaveLength(1);
+  expect(requests.filter(({ type }) => type === 'commandInit')).toHaveLength(1);
+});
+
+function focusPanelPlugin(id: string) {
+  const seen: { context?: DocxPluginContext<null> } = {};
+  const plugin = defineDocxPlugin<null>({ id, createState: () => null, panel: {
+    title: 'Focus', placement: 'right', render: (props) => { seen.context = props.context; return <button data-testid={`${id}-button`} />; },
+  } });
+  return { plugin, seen };
+}
+
+function attachDocumentInput(root: HTMLElement) {
+  const input = document.createElement('textarea');
+  input.className = 'paged-editor__input';
+  root.append(input);
+  surface.mock.calls.at(-1)![0].inputRef!.current = input;
+  return input;
+}
+
+test('worker plugins see the document input focus apart from focus in other editor UI', async () => {
+  const { plugin, seen } = focusPanelPlugin('input-focus');
+  const view = render(<DocxEditor {...peerlessProps} showToolbar={false} plugins={[plugin]} />);
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
+  const editorSurface = view.getByTestId('docx-worker-paged-editor');
+  editorSurface.setAttribute('data-docx-worker-editor', 'true');
+  const input = attachDocumentInput(editorSurface);
+  const control = document.createElement('button');
+  editorSurface.append(control);
+  await waitFor(() => expect(seen.context).toBeDefined());
+  expect(seen.context!.snapshot.inputFocused).toBe(false);
+  await act(async () => { input.focus(); });
+  await waitFor(() => expect(seen.context!.snapshot).toMatchObject({ focused: true, inputFocused: true }));
+  await act(async () => { control.focus(); });
+  await waitFor(() => expect(seen.context!.snapshot).toMatchObject({ focused: true, inputFocused: false }));
+  await act(async () => { input.focus(); });
+  await waitFor(() => expect(seen.context!.snapshot.inputFocused).toBe(true));
+  await act(async () => { view.getByTestId('input-focus-button').focus(); });
+  await waitFor(() => expect(seen.context!.snapshot).toMatchObject({ focused: false, inputFocused: false }));
+});
+
+test('focusDocument from a worker plugin focuses its editor’s own input and refuses while an editor dialog is open', async () => {
+  const { plugin, seen } = focusPanelPlugin('focus-probe');
+  const view = render(<DocxEditor {...peerlessProps} showToolbar={false} plugins={[plugin]} />);
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
+  const editorSurface = view.getByTestId('docx-worker-paged-editor');
+  const decoy = document.createElement('textarea');
+  decoy.className = 'paged-editor__input';
+  editorSurface.append(decoy);
+  const input = attachDocumentInput(editorSurface);
+  const button = await waitFor(() => view.getByTestId('focus-probe-button'));
+  const dialog = document.createElement('div');
+  dialog.setAttribute('role', 'dialog');
+  editorSurface.append(dialog);
+  button.focus();
+  expect(seen.context!.focusDocument()).toMatchObject({ ok: false, failure: { code: 'unsupported-policy' } });
+  expect(document.activeElement).toBe(button);
+  dialog.remove();
+  expect(seen.context!.focusDocument()).toEqual({ ok: true });
+  expect(document.activeElement).toBe(input);
+});
+
+test('a worker editor without plugins tracks no focus and commits nothing when its input takes focus', async () => {
+  const track = spyOn(focusTracker, 'trackFocus');
+  restorers.push(() => track.mockRestore());
+  for (const plugins of [undefined, []]) {
+    let commits = 0;
+    const view = render(<Profiler id="editor" onRender={() => { commits += 1; }}>
+      <DocxEditor {...peerlessProps} showToolbar={false} plugins={plugins} />
+    </Profiler>);
+    await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
+    const input = attachDocumentInput(view.getByTestId('docx-worker-paged-editor'));
+    await act(async () => { await new Promise<void>((resolve) => setTimeout(resolve, 0)); });
+    const settled = commits;
+    await act(async () => { input.focus(); });
+    await act(async () => { input.blur(); });
+    await act(async () => { await new Promise<void>((resolve) => setTimeout(resolve, 0)); });
+    expect(commits).toBe(settled);
+    expect(track).not.toHaveBeenCalled();
+    view.unmount();
+  }
+  const { plugin } = focusPanelPlugin('tracked');
+  const view = render(<DocxEditor {...peerlessProps} showToolbar={false} plugins={[plugin]} />);
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
+  const input = attachDocumentInput(view.getByTestId('docx-worker-paged-editor'));
+  expect(track.mock.calls.some(([roots]) => roots().includes(input))).toBe(true);
+});

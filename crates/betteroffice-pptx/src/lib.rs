@@ -2,6 +2,10 @@
 
 /// The font pack decoder shared by every engine.
 pub use betteroffice_fonts as fonts;
+#[cfg(feature = "fonts")]
+pub use fonts::OpenOptions;
+#[cfg(not(feature = "fonts"))]
+pub use open_options::OpenOptions;
 
 mod error;
 mod presentation;
@@ -16,8 +20,8 @@ pub use presentation::{
 };
 #[cfg(feature = "raster")]
 pub use render::{
-    Background, MAX_IMAGE_BYTES, MAX_IMAGE_PIXELS, MAX_SLIDE_DIM, MAX_SLIDE_PIXELS, RenderOptions,
-    RenderedPng,
+    Background, MAX_IMAGE_BYTES, MAX_IMAGE_PIXELS, MAX_SLIDE_DIM, MAX_SLIDE_PIXELS, PngTarget,
+    RenderOptions, RenderedPng,
 };
 pub use types::*;
 
@@ -27,3 +31,6 @@ pub const MAX_COLLABORATION_BYTES: usize = pptx_edit::MAX_UPDATE_BYTES;
 pub const MAX_COLLABORATION_CLIENT_ID: u64 = pptx_edit::MAX_SAFE_CLIENT_ID;
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(not(feature = "fonts"))]
+mod open_options;

@@ -17,8 +17,8 @@ import type { PresentationSessionState } from './methods';
 
 const readMethods = [
   'snapshot', 'story', 'anchorCaret', 'resolveCaretAnchor', 'version', 'readContent', 'findText',
-  'validateEdits', 'searchText', 'isProposalsAvailable', 'listProposals', 'layoutSlide', 'hitTest',
-  'mediaBytes', 'comments', 'canUndo', 'canRedo', 'undoCaptureMode', 'onUpdate',
+  'validateEdits', 'searchText', 'proposalSlideStrip', 'layoutProposalDiffSlideById', 'isProposalsAvailable', 'listProposals', 'layoutSlide', 'hitTest',
+  'mediaBytes', 'metafileSvg', 'comments', 'canUndo', 'canRedo', 'undoCaptureMode', 'onUpdate',
 ] as const satisfies readonly (keyof PresentationHandle)[];
 
 export interface PptxWorkerEditorInteractionAccess {

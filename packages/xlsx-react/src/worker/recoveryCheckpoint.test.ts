@@ -9,14 +9,15 @@ function fakeSession(): WorkbookSession {
   return {
     ...testSessionCommands(),
     state: { format: 'xlsx', stage: 'ready', version: 0, dirty: false, sheets: [], activeSheet: 0 },
-    call: { version: unexpected, readCells: unexpected, findText: unexpected, validateEdits: unexpected,
+    call: { decodeFontFace: unexpected, version: unexpected, readCells: unexpected, findText: unexpected, validateEdits: unexpected,
       applyEdits: unexpected, command: unexpected, frame: unexpected, sheetView: unexpected,
-      cellGeometry: unexpected, cellInputs: unexpected, selectionData: unexpected, captureFormat: unexpected, sheets: unexpected,
-      calculationStatus: unexpected, save: unexpected,
+      cellGeometry: unexpected, cellInputs: unexpected, translateFormulas: unexpected, selectionData: unexpected, captureFormat: unexpected, sheets: unexpected,
+      calculationStatus: unexpected, save: unexpected, saveWithWarnings: unexpected,
       collaborationStateVector: unexpected, collaborationStateAsUpdate: unexpected, listDefinedNames: unexpected,
-      renderPng: unexpected, renderRangePng: unexpected, exportStructured: unexpected,
+      renderPng: unexpected, renderPngFonts: unexpected, exportStructured: unexpected,
       exportMarkdown: unexpected, printDisplayList: unexpected },
-    save: unexpected, on: () => () => {}, onFailure: () => () => {}, failure: undefined, dispose: async () => {},
+    save: unexpected, saveWithWarnings: unexpected, on: () => () => {}, onFailure: () => () => {}, failure: undefined,
+    dispose: async () => {},
   };
 }
 

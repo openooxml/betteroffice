@@ -19,6 +19,16 @@ impl UndoStack {
         Self::default()
     }
 
+    #[doc(hidden)]
+    pub fn recovery_stacks(&self) -> (&[Vec<Op>], &[Vec<Op>]) {
+        (&self.undo, &self.redo)
+    }
+
+    #[doc(hidden)]
+    pub fn from_recovery_stacks(undo: Vec<Vec<Op>>, redo: Vec<Vec<Op>>) -> Self {
+        Self { undo, redo }
+    }
+
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
     }

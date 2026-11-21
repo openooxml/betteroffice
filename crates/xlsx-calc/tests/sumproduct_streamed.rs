@@ -94,7 +94,7 @@ fn check_tail_accumulation(array: bool, overflow: bool) {
     put(&mut sheet, "D1", n(0.2));
     wb.sheets.push(sheet);
     let args: &[&str] = if overflow {
-        &["A1:A3+1e308"]
+        &["A1:A3+1e307*10"]
     } else {
         &["A1:A1000+0.1", "A1:A1000+C1:D1", "A1:A3*-0"]
     };

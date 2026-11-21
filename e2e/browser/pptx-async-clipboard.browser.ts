@@ -1,7 +1,7 @@
 import { test, expect, type Page, type TestInfo } from 'playwright/test';
 import { readFile } from 'node:fs/promises';
 import JSZip from 'jszip';
-import { expectRepaint, inspectDeck, painted, slideCanvas, type SavedDeck } from './pptx-async-helpers';
+import { expectRepaint, inputReady, inspectDeck, painted, slideCanvas, type SavedDeck } from './pptx-async-helpers';
 
 const input = (page: Page) => page.getByRole('textbox', { name: 'Slide text', exact: true });
 const slides = (page: Page) => page.getByRole('complementary', { name: 'Slides', exact: true }).getByRole('button');
@@ -61,6 +61,7 @@ async function save(page: Page, info: TestInfo, label: string) {
 }
 
 async function selectText(page: Page, row = 0) {
+  await inputReady(page);
   const canvas = await slideCanvas(page).boundingBox();
   if (!canvas) throw new Error('Slide canvas is missing');
   await page.mouse.click(canvas.x + canvas.width * 0.15, canvas.y + canvas.height * (row === 0 ? 0.22 : 0.58));

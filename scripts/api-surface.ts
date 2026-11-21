@@ -1,14 +1,24 @@
 #!/usr/bin/env bun
-// usage: bun scripts/api-surface.ts --write <xlsx|pptx> | bun scripts/api-surface.ts --check <xlsx|pptx>
+// usage: bun scripts/api-surface.ts --write <xlsx|pptx|docx> | bun scripts/api-surface.ts --check <xlsx|pptx|docx|xlsx-native|pptx-native>
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
+import { nativeBuildSource } from "./native-engine";
 
 interface FormatConfig {
   packageDir: string;
   packageName: string;
   entries: Record<string, string>;
+  /** Declarations of the -native package built from these sources: checked against the wasm package's snapshots. */
+  native?: "xlsx" | "pptx";
+  /** The package's tsconfig to read compiler options from, when not tsconfig.json. */
+  tsconfig?: string;
+  /**
+   * Snapshot every declaration file once under `files/`, with one index per
+   * entry listing the files it reaches, instead of one inlined copy per entry.
+   */
+  shared?: boolean;
 }
 
 interface DeclarationOptions {
@@ -38,6 +48,35 @@ export const FORMATS: Record<string, FormatConfig> = {
     },
   },
 };
+
+/**
+ * Every sub-path a package exports, mapped to the source its declarations come
+ * from: the `types` file `./dist/<path>.d.mts` is built from `src/<path>.ts`.
+ */
+export function entriesFromExports(packageDirAbs: string): Record<string, string> {
+  const manifest = JSON.parse(readFileSync(join(packageDirAbs, "package.json"), "utf8")) as {
+    exports: Record<string, string | { types?: string }>;
+  };
+  const entries: Record<string, string> = {};
+  for (const [entry, target] of Object.entries(manifest.exports)) {
+    const types = typeof target === "string" ? target : target.types;
+    const match = types?.match(/^\.\/dist\/(.+)\.d\.m?ts$/);
+    if (!match) throw new Error(`${entry}: no ./dist/<path>.d.mts types file to map to its source`);
+    entries[entry] = `src/${match[1]}.ts`;
+  }
+  return entries;
+}
+
+FORMATS.docx = {
+  packageDir: "packages/docx",
+  packageName: "@betteroffice/docx",
+  entries: entriesFromExports(join(import.meta.dir, "..", "packages/docx")),
+  tsconfig: "tsconfig.api.json",
+  shared: true,
+};
+
+FORMATS["xlsx-native"] = { ...FORMATS.xlsx, native: "xlsx" };
+FORMATS["pptx-native"] = { ...FORMATS.pptx, native: "pptx" };
 
 export function entryFileName(entry: string): string {
   if (entry === ".") return "index.api.d.ts";
@@ -129,12 +168,64 @@ export function buildSnapshot(
     `// Regenerate: bun scripts/api-surface.ts --write ${packageName.replace(/^@betteroffice\//, "")}`,
   ];
   for (const file of reachable) {
-    const content = (files.get(file) as string)
-      .replace(/\/\/# sourceMappingURL=.*$/gm, "")
-      .trim();
-    lines.push(`// ---- ${file} ----`, content, "");
+    lines.push(`// ---- ${file} ----`, declarationText(files, file), "");
   }
   return `${lines.join("\n").trim()}\n`;
+}
+
+function declarationText(files: Map<string, string>, file: string): string {
+  return (files.get(file) as string).replace(/\/\/# sourceMappingURL=.*$/gm, "").trim();
+}
+
+function setEntrySnapshot(snapshots: Map<string, string>, entry: string, content: string): void {
+  const name = entryFileName(entry);
+  if (snapshots.has(name)) throw new Error(`entry "${entry}" shares the snapshot ${name} with another entry`);
+  snapshots.set(name, content);
+}
+
+export function sharedFileName(file: string): string {
+  return `files/${file.replace(/\.d\.[cm]?ts$/, "")}.api.d.ts`;
+}
+
+/**
+ * One index per entry naming the declaration files it reaches, and each of
+ * those files snapshotted once under `files/`.
+ */
+export function buildSharedSnapshots(
+  packageName: string,
+  entries: Array<[entry: string, entryDeclaration: string]>,
+  files: Map<string, string>,
+  options: DeclarationOptions = {},
+): Map<string, string> {
+  const regenerate = `// Regenerate: bun scripts/api-surface.ts --write ${packageName.replace(/^@betteroffice\//, "")}`;
+  const snapshots = new Map<string, string>();
+  const sources = new Map<string, string>();
+  for (const [entry, entryDeclaration] of entries) {
+    const reachable = reachableFiles(entryDeclaration, files, options);
+    const lines = [
+      `// ${packageName} "${entry}" public API surface: the declaration files it reaches, each in files/`,
+      regenerate,
+    ];
+    for (const file of reachable) {
+      const name = sharedFileName(file);
+      const previous = sources.get(name);
+      if (previous !== undefined && previous !== file) throw new Error(`${previous} and ${file} share the snapshot ${name}`);
+      sources.set(name, file);
+      lines.push(name);
+    }
+    setEntrySnapshot(snapshots, entry, `${lines.join("\n")}\n`);
+  }
+  for (const [name, file] of [...sources].sort(([a], [b]) => a.localeCompare(b))) {
+    snapshots.set(name, `// ${packageName} declaration ${file}\n${regenerate}\n${declarationText(files, file)}\n`);
+  }
+  return snapshots;
+}
+
+function listSnapshots(apiDir: string): string[] {
+  if (!existsSync(apiDir)) return [];
+  return (readdirSync(apiDir, { recursive: true }) as string[])
+    .map((file) => file.replace(/\\/g, "/"))
+    .filter((file) => file.endsWith(".api.d.ts"));
 }
 
 function loadTypeScript(packageDirAbs: string) {
@@ -156,7 +247,7 @@ function emitDeclarations(config: FormatConfig, root: string) {
   const packageDirAbs = resolve(root, config.packageDir);
   const ts = loadTypeScript(packageDirAbs);
   const entryFiles = Object.values(config.entries).map((entry) => join(packageDirAbs, entry));
-  const configPath = ts.findConfigFile(packageDirAbs, ts.sys.fileExists, "tsconfig.json");
+  const configPath = ts.findConfigFile(packageDirAbs, ts.sys.fileExists, config.tsconfig ?? "tsconfig.json");
   let packageOptions = {};
   if (configPath) {
     const loaded = ts.readConfigFile(configPath, ts.sys.readFile);
@@ -191,7 +282,18 @@ function emitDeclarations(config: FormatConfig, root: string) {
     outDir: undefined,
     declarationDir: undefined,
   };
-  const program = ts.createProgram(entryFiles, options);
+  const host = ts.createCompilerHost(options);
+  if (config.native) {
+    const native = config.native;
+    const getSourceFile = host.getSourceFile;
+    host.getSourceFile = (fileName: string, languageVersion: unknown, ...rest: unknown[]) => {
+      const replaced = nativeBuildSource(native, fileName);
+      return replaced === undefined
+        ? getSourceFile.call(host, fileName, languageVersion, ...rest)
+        : ts.createSourceFile(fileName, replaced, languageVersion, true);
+    };
+  }
+  const program = ts.createProgram(entryFiles, options, host);
   const files = new Map<string, string>();
   const filePaths = new Map<string, string>();
   const addFile = (fileName: string, text: string) => {
@@ -228,10 +330,15 @@ export function generateSnapshots(format: string): Map<string, string> {
 
 export function generateSnapshotsForPackage(config: FormatConfig, root: string): Map<string, string> {
   const { files, options } = emitDeclarations(config, root);
+  if (config.shared) {
+    const entries = Object.entries(config.entries)
+      .map(([entry, sourceEntry]): [string, string] => [entry, entryDeclarationFor(config, entry, sourceEntry)]);
+    return buildSharedSnapshots(config.packageName, entries, files, options);
+  }
   const snapshots = new Map<string, string>();
   for (const [entry, sourceEntry] of Object.entries(config.entries)) {
     const declaration = entryDeclarationFor(config, entry, sourceEntry);
-    snapshots.set(entryFileName(entry), buildSnapshot(config.packageName, entry, declaration, files, options));
+    setEntrySnapshot(snapshots, entry, buildSnapshot(config.packageName, entry, declaration, files, options));
   }
   return snapshots;
 }
@@ -255,21 +362,24 @@ function main(): void {
   const mode = args.find((arg) => arg === "--write" || arg === "--check");
   const format = args.find((arg) => !arg.startsWith("--"));
   if (!mode || !format || !FORMATS[format]) {
-    console.error("usage: bun scripts/api-surface.ts --write xlsx | bun scripts/api-surface.ts --check xlsx");
+    console.error(`usage: bun scripts/api-surface.ts --write <format> | bun scripts/api-surface.ts --check <format>; formats: ${Object.keys(FORMATS).join(", ")}`);
     process.exit(2);
   }
   const config = FORMATS[format];
+  if (config.native && mode === "--write") {
+    console.error(`${format} declarations are checked against the ${config.packageName} snapshots; write those instead`);
+    process.exit(2);
+  }
   const root = join(import.meta.dir, "..");
   const apiDir = join(root, config.packageDir, "api");
   const snapshots = generateSnapshots(format);
   if (mode === "--write") {
     mkdirSync(apiDir, { recursive: true });
-    for (const existing of existsSync(apiDir) ? readdirSync(apiDir) : []) {
-      if (existing.endsWith(".api.d.ts") && !snapshots.has(existing)) {
-        rmSync(join(apiDir, existing));
-      }
+    for (const existing of listSnapshots(apiDir)) {
+      if (!snapshots.has(existing)) rmSync(join(apiDir, existing));
     }
     for (const [fileName, content] of snapshots) {
+      mkdirSync(dirname(join(apiDir, fileName)), { recursive: true });
       writeFileSync(join(apiDir, fileName), content);
     }
     console.log(`wrote ${snapshots.size} API surface snapshot(s) for ${format} to ${relative(root, apiDir)}`);
@@ -281,10 +391,10 @@ function main(): void {
     for (const [fileName, content] of snapshots) {
       const expectedPath = join(apiDir, fileName);
       const tempPath = join(tempDir, fileName);
+      mkdirSync(dirname(tempPath), { recursive: true });
       writeFileSync(tempPath, content);
       if (!existsSync(expectedPath)) {
         console.error(`missing API surface snapshot: ${relative(root, expectedPath)}`);
-        console.error("regenerate with: bun scripts/api-surface.ts --write xlsx");
         failed = true;
         continue;
       }
@@ -292,19 +402,19 @@ function main(): void {
       if (committed !== content) {
         console.error(`API surface changed: ${relative(root, expectedPath)}`);
         console.error(diffText(committed, content));
-        console.error("regenerate with: bun scripts/api-surface.ts --write xlsx");
         failed = true;
       }
     }
-    if (existsSync(apiDir)) {
-      for (const existing of readdirSync(apiDir)) {
-        if (existing.endsWith(".api.d.ts") && !snapshots.has(existing)) {
-          console.error(`stale API surface snapshot: ${join(relative(root, apiDir), existing)}`);
-          failed = true;
-        }
+    for (const existing of listSnapshots(apiDir)) {
+      if (!snapshots.has(existing)) {
+        console.error(`stale API surface snapshot: ${join(relative(root, apiDir), existing)}`);
+        failed = true;
       }
     }
-    if (failed) process.exit(1);
+    if (failed) {
+      console.error(`if the change is intended, regenerate with: bun scripts/api-surface.ts --write ${config.native ?? format}`);
+      process.exit(1);
+    }
     console.log(`API surface ok for ${format}`);
   } finally {
     rmSync(tempDir, { recursive: true, force: true });

@@ -132,11 +132,10 @@ export function paragraphAttrsToFormatting(
     if (attrs.styleId !== (orig.styleId || undefined)) {
       result.styleId = attrs.styleId || undefined;
     }
-    if (
-      !inherits('pageBreakBefore') &&
-      attrs.pageBreakBefore !== (orig.pageBreakBefore || undefined)
-    ) {
-      result.pageBreakBefore = attrs.pageBreakBefore || undefined;
+    const sourceOnOff = (key: 'pageBreakBefore' | 'bidi') =>
+      orig[key] === undefined ? attrs[key] || undefined : attrs[key] ?? undefined;
+    if (!inherits('pageBreakBefore')) {
+      result.pageBreakBefore = sourceOnOff('pageBreakBefore');
     }
     if (!inherits('widowControl') && attrs.widowControl !== (orig.widowControl ?? undefined)) {
       result.widowControl = attrs.widowControl ?? undefined;
@@ -156,8 +155,8 @@ export function paragraphAttrsToFormatting(
     if (attrs.cnfStyle != null && !sameValue(attrs.cnfStyle, orig.cnfStyle)) {
       result.cnfStyle = attrs.cnfStyle;
     }
-    if (!inherits('bidi') && attrs.bidi !== (orig.bidi || undefined)) {
-      result.bidi = attrs.bidi || undefined;
+    if (!inherits('bidi')) {
+      result.bidi = sourceOnOff('bidi');
     }
     return result;
   }
@@ -336,7 +335,7 @@ export function tableRowAttrsToFormatting(
     if (attrs.heightRule !== (orig.heightRule || undefined)) {
       result.heightRule = (attrs.heightRule as 'auto' | 'atLeast' | 'exact') || undefined;
     }
-    if (attrs.isHeader !== (orig.header || undefined)) {
+    if (!!attrs.isHeader !== !!orig.header) {
       result.header = attrs.isHeader || undefined;
     }
     return result;
@@ -408,12 +407,14 @@ export function tableCellAttrsToFormatting(
     return result;
   }
 
+  const fill =
+    (attrs.backgroundColor ?? null) !== (attrs._originalResolvedFill ?? null) ? attrs.backgroundColor : undefined;
   const hasFormatting =
     attrs.colspan > 1 ||
     attrs.rowspan > 1 ||
     attrs.width != null ||
     attrs.verticalAlign ||
-    attrs.backgroundColor ||
+    fill ||
     borders ||
     margins ||
     attrs.textDirection;
@@ -429,7 +430,7 @@ export function tableCellAttrsToFormatting(
         : undefined,
     verticalAlign: attrs.verticalAlign || undefined,
     textDirection: attrs.textDirection || undefined,
-    shading: attrs.backgroundColor ? { fill: { rgb: attrs.backgroundColor } } : undefined,
+    shading: fill ? { fill: { rgb: fill } } : undefined,
     borders,
     margins,
   };

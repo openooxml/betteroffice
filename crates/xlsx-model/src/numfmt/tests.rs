@@ -291,8 +291,39 @@ fn thousands_and_scaling() {
     assert_eq!(fv(0.0, "#,##0"), "0");
     assert_eq!(fv(1234567.0, "#,##0,"), "1,235");
     assert_eq!(fv(1234567890.0, "0,,"), "1235");
+    assert_eq!(fv(1234567.0, "0,.0"), "1234.6");
     assert_eq!(fv(5.0, "000"), "005");
     assert_eq!(fv(5.0, "00,000"), "00,005");
+}
+
+#[test]
+fn commas_after_fraction_digits_scale() {
+    assert_eq!(fv(1234567.0, "0.0,,\"M\""), "1.2M");
+    assert_eq!(fv(-1234567.0, "0.0,,\"M\""), "-1.2M");
+    assert_eq!(fv(1234.5678, "0.0,,\"M\""), "0.0M");
+    assert_eq!(fv(1234567.0, "#,##0.0,\"K\""), "1,234.6K");
+    assert_eq!(fv(1234567.0, "$#,##0.00,\"K\""), "$1,234.57K");
+    assert_eq!(fv(1234567.0, "0.00,,"), "1.23");
+    assert_eq!(fv(1234567.0, "0.0,\"K\";(0.0,,\"M\")"), "1234.6K");
+    assert_eq!(fv(-1234567.0, "0.0,\"K\";(0.0,,\"M\")"), "(1.2M)");
+    let tiers = "[>=1000000]0.0,,\"M\";[>=1000]0.0,\"K\";0";
+    assert_eq!(fv(1234567.0, tiers), "1.2M");
+    assert_eq!(fv(12345.0, tiers), "12.3K");
+    assert_eq!(fv(12.0, tiers), "12");
+    assert_eq!(fv(1234567.0, "0.0\",\""), "1234567.0,");
+    assert_eq!(fv(1234567.0, "0.0\\,"), "1234567.0,");
+    assert_eq!(displayed_precision(1234567.0, "0.0,,\"M\""), Some(-5));
+}
+
+#[test]
+fn commas_after_a_literal_do_not_scale() {
+    assert_eq!(fv(1234.0, "0.0\" kg\","), "1234.0 kg");
+    assert_eq!(fv(1234.0, "0\" kg\","), "1234 kg");
+    assert_eq!(fv(1234567.0, "0,\" kg\","), "1235 kg");
+    assert_eq!(fv(1234567.0, "0.0,\" kg\","), "1234.6 kg");
+    assert_eq!(fv(12.345, "0.0%,"), "1234.5%");
+    assert_eq!(fv(1234567.0, "0.0,%"), "123456.7%");
+    assert_eq!(fv(1234567.0, "#,##0,,\"M\""), "1M");
 }
 
 #[test]
@@ -328,6 +359,25 @@ fn rounding_is_half_away_from_zero() {
     assert_eq!(fv(-2.5, "0"), "-3");
     assert_eq!(fv(0.125, "0.00"), "0.13");
     assert_eq!(fv(2.674, "0.00"), "2.67");
+    assert_eq!(fv(1.005, "0.00"), "1.01");
+    assert_eq!(fv(-1.005, "0.00"), "-1.01");
+    assert_eq!(fv(2.675, "0.00"), "2.68");
+    assert_eq!(fv(3.5e-4, "0.00%"), "0.04%");
+    assert_eq!(fv(3.5e-4, "#,##0.00%"), "0.04%");
+    assert_eq!(fv(123456789012.345, "0.00"), "123456789012.35");
+    assert_eq!(fv(1e15 + 0.75, "0"), "1000000000000000");
+}
+
+#[test]
+fn every_section_rounds_at_fifteen_significant_digits() {
+    assert_eq!(fv(9007199254740993.0, "0"), "9007199254740990");
+    assert_eq!(fv(1.005, "0.00E+00"), "1.01E+00");
+    assert_eq!(fv(9.995, "0.00"), "10.00");
+    assert_eq!(fv(1e-20, "0.00"), "0.00");
+    assert_eq!(fv(1.005, "#.##"), "1.01");
+    let half = fv(1000000000000009.5, "0 ?/2");
+    assert_eq!(half, fv(1000000000000010.0, "0 ?/2"));
+    assert!(!half.contains("1/2"));
 }
 
 #[test]

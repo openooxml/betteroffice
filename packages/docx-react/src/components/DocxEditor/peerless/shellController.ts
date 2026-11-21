@@ -1,3 +1,4 @@
+import { paragraphSpacingAttrs } from '../../../commands/paragraphSpacing';
 import { createT, deepMerge, en, type LocaleStrings } from '@betteroffice/docx-i18n';
 import { WASM32_MEMORY_LIMIT_BYTES, type DocxEditRequest, type DocxEditResult, type ResidentEngineWorkerClient, type ResidentEngineWorkerFrame,
   type DocxFontEnvironment, type DocxFontEnvironmentEvent, type WasmModuleMemory } from '@betteroffice/docx/yrs';
@@ -18,6 +19,7 @@ import type { DocxCommandArgs, DocxCommandId, DocxCommandResult, DocxImageTransf
 import type { DocxCommentInsertion, DocxDocumentChange, DocxEditorProps, DocxEditorRef } from '../../DocxEditor';
 import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession';
 import type { PeerlessViewSnapshot } from './viewStore';
+import { sameShellView } from './shellSnapshot';
 import { readWorkerSelection } from './clipboard';
 import type { PeerlessInputIntent } from './inputEvents';
 import { flushAdmittedInput, type PeerlessAdmissionResult, type PeerlessFormattingIntent } from './inputAdmission';
@@ -45,7 +47,7 @@ const PROPOSAL_FAILURES = {
 } satisfies Record<Extract<DocxProposalResult, { ok: false }>['failure']['code'], true>;
 
 const FORMATTING_COMMANDS = new Set<DocxCommandId>(['bold', 'italic', 'underline', 'fontFamily', 'fontSize', 'textColor', 'highlightColor',
-  'strikethrough', 'superscript', 'subscript', 'clearFormatting', 'alignment', 'lineSpacing', 'setLtr', 'setRtl',
+  'strikethrough', 'superscript', 'subscript', 'clearFormatting', 'alignment', 'lineSpacing', 'paragraphSpacing', 'setLtr', 'setRtl',
   'bulletList', 'numberedList', 'indent', 'outdent', 'paragraphStyle']);
 
 export interface PeerlessWorkerQuery<K extends DocxDocumentRead['kind'] = DocxDocumentRead['kind']> {
@@ -58,7 +60,7 @@ export interface WorkerCommentDraft { binding: PeerlessEditSessionBinding; selec
 export type WorkerCommentAction = { kind: 'add'; draft: WorkerCommentDraft; text: string } | { kind: 'reply'; id: number; text: string } |
   { kind: 'resolve' | 'reopen' | 'delete'; id: number };
 
-interface Options extends Pick<DocxEditorProps, 'i18n' | 'theme' | 'mode' | 'readOnly' | 'allowHostProposals' | 'onDocumentChange' | 'onSelectionChange' | 'onCommentsChange' | 'onCommentAdd' | 'onCommentResolve' | 'onCommentDelete' | 'onCommentReply' | 'onError' | 'onSave' | 'showFileOpen' | 'showHelpMenu' | 'author' | 'onModeChange' | 'fontFamilies' | 'onFontsLoaded' | 'onFirstPagePainted' | 'onMemoryPressure' | 'memoryBudget'> {
+interface Options extends Pick<DocxEditorProps, 'i18n' | 'theme' | 'mode' | 'readOnly' | 'allowHostProposals' | 'onDocumentChange' | 'onSelectionChange' | 'onCommentsChange' | 'onCommentAdd' | 'onCommentResolve' | 'onCommentDelete' | 'onCommentReply' | 'onError' | 'onSave' | 'showFileOpen' | 'showHelpMenu' | 'author' | 'onModeChange' | 'fontFamilies' | 'onFontsLoaded' | 'onFirstPagePainted' | 'onReady' | 'onMemoryPressure' | 'memoryBudget'> {
   reviewTimeoutMs?: number;
   openTimeoutMs?: number;
   imagePropertiesAvailable?: boolean;
@@ -87,7 +89,7 @@ interface Options extends Pick<DocxEditorProps, 'i18n' | 'theme' | 'mode' | 'rea
   hostComments?: Comment[];
   commentsSidebar?: { open: boolean; control: DocxCommandEnvironment['sidebarControl']; toggle(): void };
   readPositionAtPoint?(x: number, y: number): Promise<import('../types').DocxPointPosition | null>;
-  perform?(id: DocxCommandId, args: unknown): Promise<DocxCommandResult>;
+  perform?(id: DocxCommandId, args: unknown, clipboardText?: Promise<string>): Promise<DocxCommandResult>;
   prepareFontFamily?(family: string): Promise<DocxFontEnvironment | void>;
   /** The worker accepted `environment` from {@link prepareFontFamily}. */
   fontEnvironmentApplied?(environment: DocxFontEnvironment): void;
@@ -102,9 +104,11 @@ export function createPeerlessShellController(initial: Options) {
   let options = initial;
   let binding: PeerlessEditSessionBinding | null = null;
   let unsubscribe: (() => void) | undefined;
-  let snapshot: { status: 'empty' | 'opening' | 'ready' | 'failed'; view: PeerlessViewSnapshot | null; error: Error | null; mode: NonNullable<DocxEditorProps['mode']>; preview: ResidentEngineWorkerFrame | null; previewPainted: boolean } =
-    { status: 'empty', view: null, error: null, mode: initial.mode ?? 'editing', preview: null, previewPainted: false };
+  let snapshot: { status: 'empty' | 'opening' | 'ready' | 'failed'; view: PeerlessViewSnapshot | null; error: Error | null; mode: NonNullable<DocxEditorProps['mode']>; preview: ResidentEngineWorkerFrame | null; previewPainted: boolean; readyFor: PeerlessEditSessionBinding | null } =
+    { status: 'empty', view: null, error: null, mode: initial.mode ?? 'editing', preview: null, previewPainted: false, readyFor: null };
   const listeners = new Set<() => void>();
+  let shellSnapshot = snapshot;
+  const shellListeners = new Set<() => void>();
   const waits = new Set<() => void>();
   let closed = false;
   const changes = new Set<(change: DocxDocumentChange) => void>();
@@ -116,6 +120,7 @@ export function createPeerlessShellController(initial: Options) {
   let fontFamilies: string[] = [];
   let metadata: { binding: PeerlessEditSessionBinding; version: number; value: DocxDocumentReadValues['toolbarMetadata'] } | null = null;
   let firstPainted = false;
+  let readyAnnounced = false;
   let workerMemory: WasmModuleMemory[] | null = null;
   let pressure: DocxMemoryPressureLevel = 'normal';
   let reviewValue: DocxReviewSnapshot | null = null;
@@ -125,6 +130,7 @@ export function createPeerlessShellController(initial: Options) {
   let revisions: { binding: PeerlessEditSessionBinding; key: string; value: WorkerRevisionState } | null = null;
   let documentKey: unknown;
   let generation = 0;
+  let nativeProbe: { binding: PeerlessEditSessionBinding; identity: PeerlessViewSnapshot['identity']; version: number; token: Promise<string> } | null = null;
   let borderPen: { style: string; size: number; color: { rgb: string } } = { style: 'single', size: 4, color: { rgb: '000000' } };
   const syncBorderPen = () => {
     const cellColor = snapshot.view?.editState?.tableContext?.cellBorderColor;
@@ -155,14 +161,28 @@ export function createPeerlessShellController(initial: Options) {
   };
   const reset = (status: typeof snapshot.status, error: Error | null = null) => {
     const selected = snapshot.view?.workerSelection;
-    fontRevision = 0; fontFamilies = []; metadata = null; revisions = null; firstPainted = false; workerMemory = null;
-    unsubscribe?.(); binding = null; reviewValue = null; reviewBinding = null; reviewIdentity = null;
-    batchResults.clear(); commentResults.clear(); appliedBatches.clear(); commentList = null; snapshot = { status, view: null, error, mode: mode(), preview: null, previewPainted: false }; publish();
+    fontRevision = 0; fontFamilies = []; metadata = null; revisions = null; firstPainted = false; readyAnnounced = false; workerMemory = null;
+    unsubscribe?.(); binding = null; reviewValue = null; reviewBinding = null; reviewIdentity = null; nativeProbe = null;
+    batchResults.clear(); commentResults.clear(); appliedBatches.clear(); commentList = null; snapshot = { status, view: null, error, mode: mode(), preview: null, previewPainted: false, readyFor: null }; publish();
     if (selected) selectionChanged(null);
   };
-  const publish = () => { snapshot = { ...snapshot, mode: mode() }; updateAuthor(); commands.refresh(); for (const listener of listeners) listener();
-    for (const wait of [...waits]) wait(); };
+  const publish = (frame = false) => {
+    snapshot = { ...snapshot, mode: mode() };
+    const shellChanged = !frame || shellSnapshot.status !== snapshot.status || shellSnapshot.error !== snapshot.error ||
+      shellSnapshot.mode !== snapshot.mode || shellSnapshot.preview !== snapshot.preview ||
+      shellSnapshot.previewPainted !== snapshot.previewPainted || shellSnapshot.readyFor !== snapshot.readyFor || !sameShellView(shellSnapshot.view, snapshot.view);
+    if (shellChanged) shellSnapshot = snapshot;
+    updateAuthor();
+    if (shellChanged) commands.refresh();
+    for (const listener of listeners) listener();
+    if (shellChanged) for (const listener of shellListeners) listener();
+    for (const wait of [...waits]) wait();
+  };
   const painted = () => { if (firstPainted) return; firstPainted = true; emit(options.onFirstPagePainted, undefined); };
+  const announceReady = (current: PeerlessEditSessionBinding) => {
+    if (readyAnnounced || closed || binding !== current || snapshot.readyFor !== current) return;
+    readyAnnounced = true; emit(options.onReady, ref);
+  };
   const reportMemory = () => {
     const stats = memoryStats();
     const next = memoryPressureLevel(stats, options.memoryBudget);
@@ -179,8 +199,8 @@ export function createPeerlessShellController(initial: Options) {
       mode: mode(), modeControl: options.mode ? options.onModeChange ? 'host' : 'fixed' : 'internal',
       sidebarOpen: options.commentsSidebar?.open ?? false, sidebarControl: options.commentsSidebar?.control ?? 'fixed', zoom: options.zoom, zoomWhileOpening: true, tableGridlines: options.tableGridlines === true, canOpen: options.showFileOpen !== false, canReportIssue: options.showHelpMenu !== false,
       bodyStory: (view?.workerSelection?.focus.story ?? 'body') === 'body' || view?.workerSelection?.focus.story.startsWith('body:') === true, pendingInput: false,
-      supportedCommands: new Set(['zoom', 'commentsSidebar', 'tableGridlines', 'open', 'save', 'print', 'reportIssue', 'undo', 'redo', 'find', 'replace', 'editingMode', 'pageSetup', 'watermark', 'imageProperties', 'imageWrap', 'imageTransform', 'insertTable', 'insertImage', 'tableAction',
-        'insertPageBreak', 'insertSectionBreakNextPage', 'insertSectionBreakContinuous', 'insertLink', 'reviewAccept', 'reviewReject', 'reviewNext', 'reviewPrevious', ...FORMATTING_COMMANDS]),
+      supportedCommands: new Set(['zoom', 'commentsSidebar', 'tableGridlines', 'open', 'save', 'print', 'reportIssue', 'undo', 'redo', 'find', 'replace', 'editingMode', 'pageSetup', 'paragraphSpacingDialog', 'watermark', 'imageProperties', 'imageWrap', 'imageTransform', 'insertTable', 'insertImage', 'tableAction',
+        'insertPageBreak', 'insertSectionBreakNextPage', 'insertSectionBreakContinuous', 'insertLink', 'reviewAccept', 'reviewReject', 'reviewNext', 'reviewPrevious', 'cut', 'copy', 'paste', 'pasteAsPlainText', 'selectAll', ...FORMATTING_COMMANDS]),
       tableActions: new Set(['selectTable', 'selectRow', 'selectColumn', 'addRowAbove', 'addRowBelow', 'addColumnLeft',
         'addColumnRight', 'deleteRow', 'deleteColumn', 'deleteTable', 'mergeCells', 'splitCell', 'cellFillColor',
         'borderAll', 'borderOutside', 'borderInside', 'borderNone', 'borderTop', 'borderBottom', 'borderLeft', 'borderRight',
@@ -367,15 +387,43 @@ export function createPeerlessShellController(initial: Options) {
     const current = ready();
     return settleCommand(current, current.commands.format(intent, { fence: true }));
   };
-  const query = async <K extends DocxDocumentRead['kind']>(request: DocxDocumentRead & { kind: K }): Promise<PeerlessWorkerQuery<K>> => {
+  const nativeVersion = (current: PeerlessEditSessionBinding, view: PeerlessViewSnapshot) => {
+    const known = nativeProbe;
+    if (known && known.binding === current && known.version === view.version && sameIdentity(known.identity, view.identity)) return { probe: known, cached: true };
+    const probe = { binding: current, identity: { ...view.identity }, version: view.version,
+      token: options.read({ kind: 'readParagraphs', request: { view: 'accepted', paraIds: [] } }).then(native => native.version) };
+    nativeProbe = probe;
+    probe.token.catch(() => { if (nativeProbe === probe) nativeProbe = null; });
+    return { probe, cached: false };
+  };
+  /** `selectionIndependent` reads are kept across selection-only acknowledgements: they are superseded only by a new document version. */
+  const query = async <K extends DocxDocumentRead['kind']>(request: DocxDocumentRead & { kind: K },
+    { selectionIndependent = false }: { selectionIndependent?: boolean } = {}): Promise<PeerlessWorkerQuery<K>> => {
     const current = await flush();
     const view = current.viewStore.getSnapshot();
-    const native = await options.read({ kind: 'readParagraphs', request: { view: 'accepted', paraIds: [] } });
-    if (current !== binding || !sameIdentity(view.identity, current.viewStore.getSnapshot().identity) || view.throughSeq !== current.viewStore.getSnapshot().throughSeq) throw new Error('Worker read was superseded');
-    const value = await readAt<K>(request, native.version);
-    if (view.throughSeq !== current.viewStore.getSnapshot().throughSeq) throw new Error('Worker read was superseded');
+    const moved = () => {
+      const latest = current.viewStore.getSnapshot();
+      return current !== binding || !sameIdentity(view.identity, latest.identity) ||
+        (selectionIndependent ? view.version !== latest.version : view.throughSeq !== latest.throughSeq);
+    };
+    const pinned = async () => {
+      const { probe, cached } = nativeVersion(current, view);
+      const token = await probe.token;
+      if (moved()) throw new Error('Worker read was superseded');
+      return { probe, cached, token };
+    };
+    const first = await pinned();
+    let token = first.token;
+    let value: DocxDocumentReadValues[K];
+    try { value = await readAt<K>(request, token); } catch (error) {
+      if (!first.cached || !(error instanceof WorkerReadSupersededError) || moved() || view.version !== current.viewStore.getSnapshot().version) throw error;
+      if (nativeProbe === first.probe) nativeProbe = null;
+      token = (await pinned()).token;
+      value = await readAt<K>(request, token);
+    }
+    if (moved()) throw new Error('Worker read was superseded');
     if (request.kind === 'reviewSnapshot') rememberComments(current, view, (value as DocxDocumentReadValues['reviewSnapshot'])?.uiComments);
-    const result = { version: native.version, value, selection: structuredClone(view.workerSelection) };
+    const result = { version: token, value, selection: structuredClone(view.workerSelection) };
     queryOrigins.set(result, { binding: current, identity: view.identity, version: view.version });
     return result;
   };
@@ -404,7 +452,8 @@ export function createPeerlessShellController(initial: Options) {
       }
       return operation();
     },
-    async perform(id, args) {
+    readClipboardText: () => navigator.clipboard.readText(),
+    async perform(id, args, _env, clipboardText) {
       if (id === 'editingMode') {
         const next = (args as { mode: NonNullable<DocxEditorProps['mode']> }).mode;
         if (options.mode) { emit(options.onModeChange, next); return { ok: true, status: 'requested' }; }
@@ -426,6 +475,7 @@ export function createPeerlessShellController(initial: Options) {
       if (id === 'clearFormatting') return format({ kind: 'clearFormatting', payload: {} });
       if (id === 'alignment') return format({ kind: 'setParagraphAttrs', payload: { attrs: { alignment: (args as DocxCommandArgs['alignment']).value } } });
       if (id === 'lineSpacing') return format({ kind: 'setParagraphAttrs', payload: { attrs: { lineSpacing: (args as DocxCommandArgs['lineSpacing']).value, lineSpacingRule: 'auto' } } });
+      if (id === 'paragraphSpacing') return format({ kind: 'setParagraphAttrs', payload: { attrs: paragraphSpacingAttrs(args as DocxCommandArgs['paragraphSpacing']) } });
       if (id === 'setLtr' || id === 'setRtl') return format({ kind: 'setParagraphAttrs', payload: { attrs: { bidi: id === 'setRtl' } } });
       if (id === 'bulletList' || id === 'numberedList') return format({ kind: 'toggleList', payload: { kind: id === 'bulletList' ? 'bullet' : 'numbered' } });
       if (id === 'indent' || id === 'outdent') return format({ kind: 'changeIndent', payload: { direction: id === 'indent' ? 'increase' : 'decrease' } });
@@ -590,7 +640,7 @@ export function createPeerlessShellController(initial: Options) {
         if (result && typeof result === 'object' && 'ok' in result) return result;
         return result === false ? { ok: false, failure: { code: 'command-failed', message: 'Image transform is unavailable.' } } : { ok: true, status: 'executed' };
       }
-      return options.perform?.(id, args) ?? { ok: false, failure: { code: 'unsupported-command', message: translate('commands.reasons.unsupportedCommand') } };
+      return options.perform?.(id, args, clipboardText) ?? { ok: false, failure: { code: 'unsupported-command', message: translate('commands.reasons.unsupportedCommand') } };
     },
     capture: (target) => {
       const current = capture();
@@ -981,6 +1031,10 @@ export function createPeerlessShellController(initial: Options) {
     review: async () => readReview(await flush()),
     getSnapshot: () => snapshot,
     subscribe,
+    /** @internal Stable across frames that change only paint epochs or display page content. */
+    getShellSnapshot: () => shellSnapshot,
+    /** @internal Notifies when shell state changes; full frame consumers use subscribe. */
+    subscribeShell(listener: () => void) { shellListeners.add(listener); return () => { shellListeners.delete(listener); }; },
     update(next: Options) { options = next; translate = translation(next); syncBorderPen();
       if (snapshot.mode !== mode()) publish(); else { updateAuthor(); commands.refresh(); }
       reportMemory();
@@ -999,6 +1053,7 @@ export function createPeerlessShellController(initial: Options) {
       snapshot = { ...snapshot, previewPainted: true }; publish();
     },
     painted,
+    announceReady,
     stalled(error: Error) {
       if (snapshot.status === 'opening') for (const fail of [...waiting]) fail(error);
     },
@@ -1052,8 +1107,9 @@ export function createPeerlessShellController(initial: Options) {
         const previous = snapshot.view;
         if (previous && !sameIdentity(previous.identity, view.identity)) fontRevision = 0;
         const ready = view.presentedThroughSeq >= 0;
+        const presented = ready && view.geometry?.pages.some(page => page.displayPage?.unbuilt !== true);
         snapshot = { ...snapshot, status: ready ? 'ready' : 'opening', view, error: null, mode: mode(),
-          preview: ready ? null : snapshot.preview };
+          preview: ready ? null : snapshot.preview, readyFor: presented || snapshot.readyFor === next ? next : null };
         syncBorderPen();
         const batch = view.editState?.batch;
         if (batch?.result.ok) {
@@ -1063,8 +1119,8 @@ export function createPeerlessShellController(initial: Options) {
             emit(own.applied, view);
           }
         }
-        publish();
-        if (ready && view.geometry?.pages.some(page => page.displayPage?.unbuilt !== true)) painted();
+        publish(true);
+        if (presented) painted();
         if (previous && view.version !== previous.version) {
           const change = { version: String(view.version) };
           emit(options.onDocumentChange, change);
@@ -1082,7 +1138,7 @@ export function createPeerlessShellController(initial: Options) {
       replace();
       reset('empty');
     },
-    dispose() { unsubscribe?.(); binding = null; batchResults.clear(); commentResults.clear(); appliedBatches.clear(); closed = true; publish(); commands.detach(commandBinding); listeners.clear(); changes.clear(); selections.clear(); },
+    dispose() { unsubscribe?.(); binding = null; batchResults.clear(); commentResults.clear(); appliedBatches.clear(); closed = true; publish(); commands.detach(commandBinding); listeners.clear(); shellListeners.clear(); changes.clear(); selections.clear(); },
   };
 }
 

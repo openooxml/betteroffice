@@ -12,7 +12,7 @@ use crate::formatting::{
 };
 use crate::relationships::RelationshipMap;
 use crate::styles::{DocDefaults, StyleMap, get_default_character_style};
-use crate::theme::{Theme, get_theme_color, resolve_theme_font_ref};
+use crate::theme::{Theme, get_theme_color, resolve_rfonts_theme_font, resolve_theme_font_ref};
 use crate::xml::{ParseBudget, ParseError, XmlElement, XmlNode};
 
 const MAX_FIELD_NESTING: usize = 32;
@@ -96,6 +96,8 @@ pub enum RunContent {
         dirty: Option<bool>,
         #[serde(rename = "formData", skip_serializing_if = "Option::is_none")]
         form_data: Option<FieldFormData>,
+        #[serde(skip)]
+        raw_form_data_xml: Option<String>,
     },
     #[serde(rename = "instrText")]
     InstrText { text: String },
@@ -278,10 +280,12 @@ pub fn parse_run(
             (&mut fonts.east_asia, &fonts.east_asia_theme),
             (&mut fonts.cs, &fonts.cs_theme),
         ] {
-            if explicit.as_deref().is_none_or(str::is_empty)
-                && let Some(reference) = reference
-            {
-                *explicit = Some(resolve_theme_font_ref(theme, reference));
+            if let Some(reference) = reference {
+                if let Some(font) = resolve_rfonts_theme_font(theme, reference) {
+                    *explicit = Some(font.to_owned());
+                } else if explicit.as_deref().is_none_or(str::is_empty) {
+                    *explicit = Some(resolve_theme_font_ref(theme, reference));
+                }
             }
         }
     }
@@ -336,15 +340,15 @@ fn parse_run_property_changes(
 ) -> Option<Vec<RunPropertyChange>> {
     let changes: Vec<_> = r_pr?
         .children_named("w", "rPrChange")
-        .filter_map(|change| {
+        .map(|change| {
             let previous = parse_inline_run_properties(change.child("w", "rPr"), theme);
             let current = current.cloned();
-            (previous.is_some() || current.is_some()).then(|| RunPropertyChange {
+            RunPropertyChange {
                 node_type: RunPropertyChangeType::RunPropertyChange,
                 info: parse_property_change_info(change),
                 previous_formatting: previous,
                 current_formatting: current,
-            })
+            }
         })
         .collect();
     (!changes.is_empty()).then_some(changes)
@@ -478,6 +482,10 @@ fn parse_field_char(element: &XmlElement) -> RunContent {
             .then_some(true),
         dirty: (element.parse_boolean_attribute(Some("w"), "dirty") == Some(true)).then_some(true),
         form_data: parse_field_form_data(element),
+        raw_form_data_xml: element
+            .child_elements()
+            .find(|child| child.name == "w:ffData")
+            .map(XmlElement::to_raw_inline_xml),
     }
 }
 
@@ -1008,6 +1016,104 @@ pub(crate) fn raw_foreign_inline(element: &crate::xml::XmlElement) -> Option<Inl
     })))
 }
 
+/// The source of a run holding two or more fields one after another, each beginning and ending
+/// inside it, beside only text, tabs, plain breaks and properties; its rendered page breaks are
+/// left out.
+pub(crate) fn field_run_source(element: &XmlElement) -> Option<String> {
+    if element.name != "w:r" {
+        return None;
+    }
+    let mut open = false;
+    let mut begins = 0usize;
+    for child in element.child_elements() {
+        match child.name.as_str() {
+            "w:fldChar" if child.child_elements().next().is_none() => {
+                let kind = child.attribute(Some("w"), "fldCharType")?;
+                match (kind, open) {
+                    ("begin", false) => {
+                        open = true;
+                        begins += 1;
+                    }
+                    ("separate", true) => {}
+                    ("end", true) => open = false,
+                    _ => return None,
+                }
+            }
+            "w:rPr" if plain_run_properties(child) => {}
+            "w:br" if child.attribute(Some("w"), "type").is_none() => {}
+            "w:instrText"
+            | "w:t"
+            | "w:tab"
+            | "w:cr"
+            | "w:noBreakHyphen"
+            | "w:softHyphen"
+            | "w:lastRenderedPageBreak" => {}
+            _ => return None,
+        }
+    }
+    if open || begins < 2 {
+        return None;
+    }
+    let mut run = element.clone();
+    run.children.retain(|node| !rendered_page_break(node));
+    Some(run.to_raw_inline_xml())
+}
+
+/// Keeps `source` on `field` with the digest of the field as parsed.
+pub(crate) fn keep_field_run(field: &mut ComplexField, source: String) {
+    field.source_run_digest = Some(field_run_digest(field));
+    field.source_run_xml = Some(source);
+}
+
+/// The digest of the model values the writer writes `field` from: its instruction, properties,
+/// flags, form field data, code and result. Empty properties count as none, a flag that is not
+/// set counts as off, and every zero counts as the same zero.
+pub(crate) fn field_run_digest(field: &ComplexField) -> String {
+    use sha2::{Digest, Sha256};
+
+    let formatting = field
+        .formatting
+        .as_ref()
+        .filter(|formatting| **formatting != TextFormatting::default());
+    let mut written = serde_json::to_value((
+        &field.instruction,
+        formatting,
+        field.fld_lock == Some(true),
+        field.dirty == Some(true),
+        &field.raw_form_data_xml,
+        &field.field_code,
+        &field.structured_code,
+        &field.field_result,
+        &field.structured_result,
+    ))
+    .expect("field model");
+    unsigned_zeros(&mut written);
+    format!("{:x}", Sha256::digest(written.to_string()))
+}
+
+fn unsigned_zeros(value: &mut serde_json::Value) {
+    use serde_json::Value;
+
+    if value.as_f64() == Some(0.0) {
+        *value = Value::from(0);
+    }
+    match value {
+        Value::Array(items) => items.iter_mut().for_each(unsigned_zeros),
+        Value::Object(object) => object.values_mut().for_each(unsigned_zeros),
+        _ => {}
+    }
+}
+
+fn plain_run_properties(properties: &XmlElement) -> bool {
+    properties
+        .child_elements()
+        .all(|property| property.name.starts_with("w:") && property.name != "w:rPrChange")
+}
+
+fn rendered_page_break(node: &XmlNode) -> bool {
+    matches!(node, XmlNode::Element(child) if child.name == "w:lastRenderedPageBreak")
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum InlineNode {
@@ -1158,9 +1264,45 @@ pub struct StructuredFieldContent {
     pub inline: Option<Vec<InlineNode>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blocks: Option<Vec<crate::block::BlockContent>>,
+    /// How many blocks of the story holding the field's paragraph this content spans after that
+    /// paragraph: the code's come first, then the result's. Raw blocks count, each with the
+    /// phase the field is in when it appears, so one before an external separator is code. The
+    /// count is relative to the field's paragraph in the parsed story; a reader checks it against
+    /// the story it reads before using it. Zero means the field spans paragraphs but its later
+    /// paragraphs are no longer tracked, so no block after the field's paragraph belongs to it.
+    #[serde(
+        rename = "blockCount",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub block_count: Option<usize>,
 }
 
 impl StructuredFieldContent {
+    /// Whether this content runs past the field's own paragraph.
+    pub fn spans_paragraphs(&self) -> bool {
+        self.blocks.is_some() || self.block_count.is_some()
+    }
+
+    /// [`Self::spans_paragraphs`] for content held as JSON.
+    pub fn value_spans_paragraphs(content: Option<&serde_json::Value>) -> bool {
+        let Some(content) = content else {
+            return false;
+        };
+        Self {
+            inline: None,
+            blocks: content
+                .get("blocks")
+                .filter(|blocks| !blocks.is_null())
+                .map(|_| Vec::new()),
+            block_count: content
+                .get("blockCount")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|count| usize::try_from(count).ok()),
+        }
+        .spans_paragraphs()
+    }
+
     /// Whether another field nests in this content, including one kept as plain runs.
     pub(crate) fn holds_field(&self) -> bool {
         self.inline.as_deref().is_some_and(inline_holds_field)
@@ -1222,6 +1364,15 @@ pub struct ComplexField {
     pub fld_lock: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dirty: Option<bool>,
+    #[serde(rename = "rawFormDataXml", skip_serializing_if = "Option::is_none")]
+    pub raw_form_data_xml: Option<String>,
+    /// The run holding this field and the fields and text beside it as read, written in place
+    /// of the field while the field digests to `source_run_digest`.
+    #[serde(rename = "sourceRunXml", skip_serializing_if = "Option::is_none")]
+    pub source_run_xml: Option<String>,
+    /// The digest of the field as parsed from `source_run_xml`.
+    #[serde(rename = "sourceRunDigest", skip_serializing_if = "Option::is_none")]
+    pub source_run_digest: Option<String>,
     #[serde(rename = "structuredCode", skip_serializing_if = "Option::is_none")]
     pub structured_code: Option<StructuredFieldContent>,
     #[serde(rename = "structuredResult", skip_serializing_if = "Option::is_none")]
@@ -1232,16 +1383,18 @@ pub struct ComplexField {
 
 impl ComplexField {
     /// Repeats the structured code and result in the field tree only when no other field nests
-    /// in either, so each level's content is stored once.
-    pub(crate) fn project_leaf_tree(&mut self) {
+    /// in either, so each level's content is stored once. `later` are the story blocks the field
+    /// spans after its paragraph.
+    pub(crate) fn project_leaf_tree(&mut self, later: &[crate::block::BlockContent]) {
         let Some(tree) = self.field_tree.as_mut() else {
             return;
         };
-        let leaf = !self
-            .structured_code
-            .iter()
-            .chain(&self.structured_result)
-            .any(StructuredFieldContent::holds_field);
+        let leaf = !crate::block::blocks_hold_field(later)
+            && !self
+                .structured_code
+                .iter()
+                .chain(&self.structured_result)
+                .any(StructuredFieldContent::holds_field);
         tree.code = self.structured_code.as_ref().filter(|_| leaf).cloned();
         tree.result = self.structured_result.as_ref().filter(|_| leaf).cloned();
     }
@@ -1308,6 +1461,7 @@ fn parse_simple_field_at_depth(
     let structured_result = (!structured.is_empty()).then(|| StructuredFieldContent {
         inline: Some(structured),
         blocks: None,
+        block_count: None,
     });
     let field_tree = structured_result
         .as_ref()
@@ -1864,7 +2018,10 @@ pub fn parse_sdt_properties(
                 properties.repeating_section_item = Some(true);
                 properties.sdt_type = "repeatingSectionItem".to_owned();
             }
-            "dataBinding" => {
+            "dataBinding"
+                if properties.data_binding.is_none()
+                    || element.matches_name("w", "dataBinding") =>
+            {
                 properties.data_binding = Some(SdtDataBinding {
                     xpath: sdt_attribute(element, "xpath").map(str::to_owned),
                     store_item_id: sdt_attribute(element, "storeItemID").map(str::to_owned),
@@ -2146,6 +2303,36 @@ fn parse_hyperlink_inline_sdt(
     })
 }
 
+/// The field-code part of a run that also carries a field character, as a run of its own.
+pub(crate) fn instruction_run(run: &Run) -> Run {
+    let mut code = run.clone();
+    code.content
+        .retain(|content| matches!(content, RunContent::InstrText { .. }));
+    code
+}
+
+pub(crate) fn field_runs(node: &InlineNode) -> Vec<&Run> {
+    match node {
+        InlineNode::Run(run) => vec![run],
+        InlineNode::Hyperlink(link) => link
+            .children
+            .iter()
+            .filter_map(|child| match child {
+                InlineNode::Run(run) => Some(run),
+                _ => None,
+            })
+            .collect(),
+        InlineNode::SimpleField(field) => field.content.iter().collect(),
+        InlineNode::BookmarkStart(_)
+        | InlineNode::BookmarkEnd(_)
+        | InlineNode::ComplexField(_)
+        | InlineNode::InlineSdt(_)
+        | InlineNode::Math(_)
+        | InlineNode::RawXml(_)
+        | InlineNode::Tracked(_) => Vec::new(),
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct OpenComplexField {
     instruction: String,
@@ -2153,10 +2340,12 @@ pub(crate) struct OpenComplexField {
     result_runs: Vec<Run>,
     structured_code: Vec<InlineNode>,
     structured_result: Vec<InlineNode>,
+    instruction_runs: Vec<Run>,
     children: Vec<StructuredFieldTree>,
     mode: FieldMode,
     fld_lock: bool,
     dirty: bool,
+    raw_form_data_xml: Option<String>,
     formatting: Option<TextFormatting>,
 }
 
@@ -2167,8 +2356,13 @@ impl OpenComplexField {
                 char_type,
                 fld_lock,
                 dirty,
+                raw_form_data_xml,
                 ..
-            } if char_type == "begin" => Some((*fld_lock == Some(true), *dirty == Some(true))),
+            } if char_type == "begin" => Some((
+                *fld_lock == Some(true),
+                *dirty == Some(true),
+                raw_form_data_xml.clone(),
+            )),
             _ => None,
         });
         Self {
@@ -2177,10 +2371,12 @@ impl OpenComplexField {
             result_runs: Vec::new(),
             structured_code: Vec::new(),
             structured_result: Vec::new(),
+            instruction_runs: Vec::new(),
             children: Vec::new(),
             mode: FieldMode::Code,
-            fld_lock: flags.is_some_and(|flags| flags.0),
-            dirty: flags.is_some_and(|flags| flags.1),
+            fld_lock: flags.as_ref().is_some_and(|flags| flags.0),
+            dirty: flags.as_ref().is_some_and(|flags| flags.1),
+            raw_form_data_xml: flags.and_then(|flags| flags.2),
             formatting: run.formatting.clone(),
         }
     }
@@ -2202,7 +2398,8 @@ impl OpenComplexField {
     /// A node inside an open field joins the field's structure in place; its
     /// runs flatten into the run-level view consumers read for text. Pushing
     /// it to the paragraph instead would reorder it before the field on save.
-    pub(crate) fn absorb(&mut self, node: InlineNode, runs: Vec<Run>) {
+    pub(crate) fn absorb(&mut self, node: InlineNode) {
+        let runs = field_runs(&node).into_iter().cloned();
         match self.mode {
             FieldMode::Code => {
                 self.code_runs.extend(runs);
@@ -2215,6 +2412,14 @@ impl OpenComplexField {
         }
     }
 
+    /// The instruction text of a run that also carries a field character; kept as a code run
+    /// only when the field code holds more than runs, so its position among them survives.
+    pub(crate) fn absorb_instruction(&mut self, run: &Run) {
+        let code = instruction_run(run);
+        self.instruction_runs.push(code.clone());
+        self.absorb(InlineNode::Run(code));
+    }
+
     pub(crate) fn absorb_nested(&mut self, field: ComplexField) {
         if let Some(tree) = &field.field_tree {
             self.children.push(StructuredFieldTree {
@@ -2225,18 +2430,39 @@ impl OpenComplexField {
                 display_mode: tree.display_mode.clone(),
             });
         }
-        self.absorb(InlineNode::ComplexField(Box::new(field)), Vec::new());
+        self.absorb(InlineNode::ComplexField(Box::new(field)));
     }
 
-    pub(crate) fn finish(self) -> ComplexField {
+    pub(crate) fn finish(mut self) -> ComplexField {
+        if !self.instruction_runs.is_empty()
+            && self
+                .structured_code
+                .iter()
+                .all(|node| matches!(node, InlineNode::Run(_)))
+        {
+            for code in std::mem::take(&mut self.instruction_runs) {
+                if let Some(at) = self.code_runs.iter().position(|run| *run == code) {
+                    self.code_runs.remove(at);
+                }
+                if let Some(at) = self
+                    .structured_code
+                    .iter()
+                    .position(|node| matches!(node, InlineNode::Run(run) if *run == code))
+                {
+                    self.structured_code.remove(at);
+                }
+            }
+        }
         let structured_code = (!self.structured_code.is_empty()).then(|| StructuredFieldContent {
             inline: Some(self.structured_code),
             blocks: None,
+            block_count: None,
         });
         let structured_result =
             (!self.structured_result.is_empty()).then(|| StructuredFieldContent {
                 inline: Some(self.structured_result),
                 blocks: None,
+                block_count: None,
             });
         let field_tree = StructuredFieldTree {
             version: Some(1.0),
@@ -2255,11 +2481,14 @@ impl OpenComplexField {
             formatting: self.formatting,
             fld_lock: self.fld_lock.then_some(true),
             dirty: self.dirty.then_some(true),
+            raw_form_data_xml: self.raw_form_data_xml,
+            source_run_xml: None,
+            source_run_digest: None,
             structured_code,
             structured_result,
             field_tree: Some(field_tree),
         };
-        field.project_leaf_tree();
+        field.project_leaf_tree(&[]);
         field
     }
 }
@@ -2301,7 +2530,7 @@ pub(crate) fn absorb_beyond_field_nesting(
             _ => {}
         }
     }
-    active.absorb(InlineNode::Run(run.clone()), vec![run]);
+    active.absorb(InlineNode::Run(run));
     Ok(None)
 }
 
@@ -2376,6 +2605,11 @@ fn parse_inline_container_at_depth(
         check_container_beyond_field_nesting(beyond_nesting, child, part)?;
         match child.local_name() {
             "r" => {
+                let source = if element.matches_name("w", "p") && fields.is_empty() {
+                    field_run_source(child)
+                } else {
+                    None
+                };
                 let run = parse_run(child, theme, styles, doc_defaults).run;
                 let mut has_begin = false;
                 let mut has_separate = false;
@@ -2407,11 +2641,14 @@ fn parse_inline_container_at_depth(
                 if let Some(active) = fields.last_mut() {
                     active.append_instruction(&instruction);
                     active.adopt_formatting(&run);
+                    if (has_begin || has_separate) && !instruction.is_empty() {
+                        active.absorb_instruction(&run);
+                    }
                     if has_separate {
                         active.switch_to_result();
                     }
                     if !has_begin && !has_separate && !has_end {
-                        active.absorb(InlineNode::Run(run.clone()), vec![run]);
+                        active.absorb(InlineNode::Run(run));
                     }
                     if has_end {
                         let completed = fields.pop().unwrap().finish();
@@ -2423,6 +2660,11 @@ fn parse_inline_container_at_depth(
                     }
                 } else {
                     output.push(InlineNode::Run(run));
+                }
+                if let Some(source) = source
+                    && let Some(InlineNode::ComplexField(field)) = output.last_mut()
+                {
+                    keep_field_run(field, source);
                 }
             }
             "hyperlink" => {
@@ -2437,15 +2679,7 @@ fn parse_inline_container_at_depth(
                     depth + 1,
                 )?;
                 if let Some(active) = fields.last_mut() {
-                    let runs: Vec<Run> = hyperlink
-                        .children
-                        .iter()
-                        .filter_map(|node| match node {
-                            InlineNode::Run(run) => Some(run.clone()),
-                            _ => None,
-                        })
-                        .collect();
-                    active.absorb(InlineNode::Hyperlink(Box::new(hyperlink)), runs);
+                    active.absorb(InlineNode::Hyperlink(Box::new(hyperlink)));
                 } else {
                     output.push(InlineNode::Hyperlink(Box::new(hyperlink)));
                 }
@@ -2456,7 +2690,7 @@ fn parse_inline_container_at_depth(
                 }
                 let node = InlineNode::BookmarkStart(parse_bookmark_start(child));
                 match fields.last_mut() {
-                    Some(active) => active.absorb(node, Vec::new()),
+                    Some(active) => active.absorb(node),
                     None => output.push(node),
                 }
             }
@@ -2466,7 +2700,7 @@ fn parse_inline_container_at_depth(
                 }
                 let node = InlineNode::BookmarkEnd(parse_bookmark_end(child));
                 match fields.last_mut() {
-                    Some(active) => active.absorb(node, Vec::new()),
+                    Some(active) => active.absorb(node),
                     None => output.push(node),
                 }
             }
@@ -2482,8 +2716,7 @@ fn parse_inline_container_at_depth(
                     depth + 1,
                 )?;
                 if let Some(active) = fields.last_mut() {
-                    let runs = field.content.clone();
-                    active.absorb(InlineNode::SimpleField(Box::new(field)), runs);
+                    active.absorb(InlineNode::SimpleField(Box::new(field)));
                 } else {
                     output.push(InlineNode::SimpleField(Box::new(field)));
                 }
@@ -2630,6 +2863,7 @@ fn parse_rich_simple_field(
     let structured_result = (!result.is_empty()).then(|| StructuredFieldContent {
         inline: Some(result),
         blocks: None,
+        block_count: None,
     });
     let field_tree = structured_result
         .as_ref()
@@ -2977,6 +3211,82 @@ mod tests {
             &projection.run.content[4],
             RunContent::Break { break_type: Some(kind), .. } if kind == "textWrapping"
         ));
+    }
+
+    #[test]
+    fn classic_and_w14_shadows_stay_apart() {
+        const MODERN: &str = r#"<w14:shadow w14:blurRad="38100" w14:dist="19050" w14:dir="2700000" w14:sx="100000" w14:sy="100000" w14:kx="0" w14:ky="0" w14:algn="tl"><w14:srgbClr w14:val="000000"><w14:alpha w14:val="60000"/></w14:srgbClr></w14:shadow>"#;
+        let formatting = |properties: &str| {
+            let run = root(&format!(
+                r#"<w:r><w:rPr>{properties}</w:rPr><w:t>A</w:t></w:r>"#
+            ));
+            parse_run(&run, None, None, None).run.formatting.unwrap()
+        };
+        let modern_shadow = TextShadow {
+            color: Some("#000000".to_owned()),
+            blur_radius: Some(4.0),
+            distance: Some(2.0),
+            direction: Some(45.0),
+        };
+
+        let classic = formatting("<w:shadow/>");
+        assert_eq!(classic.shadow, Some(true));
+        assert_eq!(classic.modern_effects, None);
+
+        let modern = formatting(MODERN);
+        assert_eq!(modern.shadow, None);
+        assert_eq!(
+            modern.modern_effects.unwrap().shadow,
+            Some(modern_shadow.clone())
+        );
+
+        let both = formatting(&format!("<w:shadow/>{MODERN}"));
+        assert_eq!(both.shadow, Some(true));
+        assert_eq!(both.modern_effects.unwrap().shadow, Some(modern_shadow));
+    }
+
+    #[test]
+    fn classic_and_w14_shadows_stay_apart_in_a_strict_part_declaring_strict_drawingml() {
+        let run = root(concat!(
+            r#"<w:r xmlns:w="http://purl.oclc.org/ooxml/wordprocessingml/main" "#,
+            r#"xmlns:a="http://purl.oclc.org/ooxml/drawingml/main" "#,
+            r#"xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml">"#,
+            r#"<w:rPr><w14:shadow w14:blurRad="38100"/></w:rPr><w:t>A</w:t></w:r>"#
+        ));
+        let formatting = parse_run(&run, None, None, None).run.formatting.unwrap();
+        assert_eq!(formatting.shadow, None);
+        assert_eq!(
+            formatting
+                .modern_effects
+                .unwrap()
+                .shadow
+                .unwrap()
+                .blur_radius,
+            Some(4.0)
+        );
+    }
+
+    #[test]
+    fn word_data_binding_wins_over_the_word_2013_binding() {
+        const WORD: &str = r#"<w:dataBinding w:xpath="/a" w:storeItemID="{1}"/>"#;
+        const WORD_2013: &str = r#"<w15:dataBinding w15:xpath="/b" w15:storeItemID="{2}"/>"#;
+        let binding = |properties: &str| {
+            let sdt = root(&format!(
+                r#"<w:sdt><w:sdtPr>{properties}</w:sdtPr></w:sdt>"#
+            ));
+            parse_sdt_properties(sdt.child("w", "sdtPr"), None, None)
+                .data_binding
+                .and_then(|binding| binding.xpath)
+        };
+        assert_eq!(
+            binding(&format!("{WORD}{WORD_2013}")).as_deref(),
+            Some("/a")
+        );
+        assert_eq!(
+            binding(&format!("{WORD_2013}{WORD}")).as_deref(),
+            Some("/a")
+        );
+        assert_eq!(binding(WORD_2013).as_deref(), Some("/b"));
     }
 
     #[test]

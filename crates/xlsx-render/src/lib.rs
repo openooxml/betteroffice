@@ -7,12 +7,15 @@ mod fmath;
 pub mod geometry;
 pub mod hit;
 pub mod number_format;
+mod picture;
 pub mod region;
+mod table_style;
+pub mod text_runs;
 pub mod wrap;
 
 pub use ooxml_drawingml::GeometryPathCommand;
 use std::sync::Arc;
-pub use xlsx_model::PatternType;
+pub use xlsx_model::{PatternType, RunUnderline};
 
 use hashbrown::HashMap;
 use ooxml_drawingml::chart::ChartSpace;
@@ -26,21 +29,30 @@ use xlsx_model::styles::{BorderEdge, BorderStyle, FormatCode, Stylesheet};
 use xlsx_model::value::CellValue;
 use xlsx_model::workbook::{ColumnDefaults, Hyperlink, Sheet};
 use xlsx_model::{
-    CellRange, CellRef, Fill, HAlign, MAX_COLS, MAX_ROWS, SheetChart, SheetId, VAlign, Workbook,
+    CellRange, CellRef, DifferentialFormat, Fill, HAlign, MAX_COLS, MAX_ROWS, RichRun, SheetChart,
+    SheetId, SheetPicture, Table, VAlign, Workbook,
 };
 
+use table_style::SheetTables;
+
 pub use chart::{
-    AnchorError, MAX_CHART_OPS_PER_FRAME, RenderError, ResolvedChartAnchor, chart_regions,
-    moved_chart_anchor, resolve_chart_anchor,
+    AnchorError, ChartResize, MAX_CHART_OPS_PER_FRAME, MIN_CHART_EXTENT_PX, RenderError,
+    ResolvedChartAnchor, chart_regions, moved_chart_anchor, resized_chart_anchor,
+    resolve_chart_anchor,
 };
 pub use display_list::{
-    Align, ChartA11yAttrs, ChartRegion, DisplayList, DrawCmd, GridMeta, HyperlinkRegion,
-    PathStroke, Rect, TextValign, TextWrap, border_dash, scaled,
+    Align, ChartA11yAttrs, ChartRegion, DisplayList, DrawCmd, GridMeta, HyperlinkRegion, ImageCrop,
+    PathStroke, Rect, TextRun, TextRunBaseline, TextValign, TextWrap, border_dash, scaled,
 };
 pub use geometry::{GridGeometry, PrintMetrics, autofit_relevant};
 pub use hit::chart_at_point;
 pub use number_format::{NumberFormatLayout, paint_number_format};
 pub use region::{viewport_for_range, viewport_for_used_range, viewport_for_used_range_within};
+pub use text_runs::{TextPiece, has_right_to_left, run_pieces, wrap_run_lines};
+
+/// The source runs of the text stored in a cell, as UTF-8 byte ranges into
+/// it, or `None` when it has none.
+pub type CellTextRuns<'r> = dyn Fn(CellRef) -> Option<&'r [RichRun]> + 'r;
 
 /// a scrolled window in pixels; `x`/`y` offset the non-frozen body.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -76,6 +88,11 @@ const GHOST_INS_HIGHLIGHT: &str = "#2e7d321a";
 const GHOST_CHAR_W_RATIO: f32 = 0.6;
 const GHOST_GAP_PX: f32 = 6.0;
 const GHOST_MIN_SCALE: f32 = 0.6;
+const GHOST_FIT_EPSILON_PX: f32 = 1e-3;
+
+/// Conditional-format effects by `(row, col)`, painted over the cells' own
+/// fill, font color, bold and italic.
+pub type CellFormats = BTreeMap<(u32, u32), Arc<DifferentialFormat>>;
 
 /// a pending edit rendered as a ghost pair in place of the cell's committed
 /// text: `old_text` struck in red, `new_text` in green.
@@ -94,12 +111,15 @@ struct GhostFont {
     bold: bool,
     italic: bool,
     underline: bool,
+    underline_style: Option<RunUnderline>,
 }
 
 #[derive(Clone, Copy)]
 struct AxisTrack {
     index: u32,
     raw_start: f32,
+    /// full track size in sheet px, before the frozen pane or the viewport clips it
+    raw_size: f32,
     start: f32,
     end: f32,
     pinned: bool,
@@ -154,6 +174,7 @@ impl AxisLayout {
                 tracks.push(AxisTrack {
                     index,
                     raw_start: start,
+                    raw_size: edge(index + 1) - start,
                     start,
                     end: edge(index + 1),
                     pinned: true,
@@ -184,6 +205,7 @@ impl AxisLayout {
                 tracks.push(AxisTrack {
                     index,
                     raw_start,
+                    raw_size: raw_end - raw_start,
                     start: if frozen > 0 {
                         raw_start.max(frozen_extent)
                     } else {
@@ -233,6 +255,12 @@ impl AxisLayout {
         std::iter::once(first.start)
             .chain(self.tracks.iter().map(|track| track.end))
             .collect()
+    }
+
+    /// full track sizes, parallel to `offsets`: independent of scroll and of a
+    /// frozen pane clipping the track's leading edge.
+    fn sizes(&self) -> Vec<f32> {
+        self.tracks.iter().map(|track| track.raw_size).collect()
     }
 
     fn contains(&self, index: u32) -> bool {
@@ -580,6 +608,9 @@ struct CellBox {
     y: f32,
     w: f32,
     h: f32,
+    /// the height of the whole row or merged area, also where a frozen pane
+    /// cuts `h`.
+    whole_h: f32,
     clip: Rect,
 }
 
@@ -591,6 +622,30 @@ pub fn build_display_list(
     viewport: &Viewport,
 ) -> Result<DisplayList, RenderError> {
     build_display_list_with_ghosts(wb, sheet, viewport, &[])
+}
+
+/// [`build_display_list`] with the source runs of each cell's text: a cell
+/// that paints its stored text as it is paints its runs.
+pub fn build_display_list_with_text_runs(
+    wb: &Workbook,
+    sheet: SheetId,
+    viewport: &Viewport,
+    text_runs: Option<&CellTextRuns<'_>>,
+) -> Result<DisplayList, RenderError> {
+    build_frame_with_text_runs(
+        wb,
+        sheet,
+        viewport,
+        &[],
+        &[],
+        |chart| {
+            Err::<ChartSpace, _>(RenderError::ChartSourceUnavailable {
+                part: chart.part.clone(),
+            })
+        },
+        None,
+        text_runs,
+    )
 }
 
 /// Builds a chart-placeholder display list with pending edit ghosts.
@@ -633,10 +688,11 @@ where
     F: FnMut(&SheetChart) -> Result<R, RenderError>,
     R: Into<Arc<ChartSpace>>,
 {
-    build_frame(wb, sheet, viewport, ghosts, resolver, None)
+    build_frame(wb, sheet, viewport, ghosts, &[], resolver, None)
 }
 
 #[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
 pub fn build_display_list_with_geometry<F, R>(
     wb: &Workbook,
     sheet: SheetId,
@@ -644,7 +700,76 @@ pub fn build_display_list_with_geometry<F, R>(
     ghosts: &[GhostEdit],
     geometry: &GridGeometry,
     max_cells: Option<u64>,
+    pictures: &[SheetPicture],
     resolver: F,
+) -> Result<DisplayList, RenderError>
+where
+    F: FnMut(&SheetChart) -> Result<R, RenderError>,
+    R: Into<Arc<ChartSpace>>,
+{
+    build_display_list_with_geometry_and_formats(
+        wb,
+        sheet,
+        viewport,
+        ghosts,
+        geometry,
+        max_cells,
+        pictures,
+        None,
+        resolver,
+        |_, _| CellFormats::new(),
+    )
+}
+
+/// [`build_display_list_with_geometry`] with the source runs of each cell's
+/// text.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn build_display_list_with_geometry_and_text_runs<F, R>(
+    wb: &Workbook,
+    sheet: SheetId,
+    viewport: &Viewport,
+    ghosts: &[GhostEdit],
+    geometry: &GridGeometry,
+    max_cells: Option<u64>,
+    pictures: &[SheetPicture],
+    text_runs: Option<&CellTextRuns<'_>>,
+    resolver: F,
+) -> Result<DisplayList, RenderError>
+where
+    F: FnMut(&SheetChart) -> Result<R, RenderError>,
+    R: Into<Arc<ChartSpace>>,
+{
+    build_display_list_with_geometry_and_formats(
+        wb,
+        sheet,
+        viewport,
+        ghosts,
+        geometry,
+        max_cells,
+        pictures,
+        text_runs,
+        resolver,
+        |_, _| CellFormats::new(),
+    )
+}
+
+/// [`build_display_list_with_geometry_and_text_runs`] whose `formats`
+/// receives the visible row and column ranges and returns the
+/// conditional-format effects of the cells inside them.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn build_display_list_with_geometry_and_formats<F, R>(
+    wb: &Workbook,
+    sheet: SheetId,
+    viewport: &Viewport,
+    ghosts: &[GhostEdit],
+    geometry: &GridGeometry,
+    max_cells: Option<u64>,
+    pictures: &[SheetPicture],
+    text_runs: Option<&CellTextRuns<'_>>,
+    resolver: F,
+    formats: impl FnOnce(&[Range<u32>], &[Range<u32>]) -> CellFormats,
 ) -> Result<DisplayList, RenderError>
 where
     F: FnMut(&SheetChart) -> Result<R, RenderError>,
@@ -655,10 +780,42 @@ where
         sheet,
         viewport,
         ghosts,
+        pictures,
         resolver,
         None,
         Some(geometry),
         max_cells,
+        text_runs,
+        formats,
+    )
+}
+
+/// [`build_print_display_list_with_charts`] with the source runs of each
+/// cell's text.
+#[allow(clippy::too_many_arguments)]
+pub fn build_print_display_list_with_text_runs<F, R>(
+    wb: &Workbook,
+    sheet: SheetId,
+    viewport: &Viewport,
+    metrics: &PrintMetrics,
+    gridlines: bool,
+    pictures: &[SheetPicture],
+    text_runs: Option<&CellTextRuns<'_>>,
+    resolver: F,
+) -> Result<DisplayList, RenderError>
+where
+    F: FnMut(&SheetChart) -> Result<R, RenderError>,
+    R: Into<Arc<ChartSpace>>,
+{
+    build_frame_with_text_runs(
+        wb,
+        sheet,
+        viewport,
+        &[],
+        pictures,
+        resolver,
+        Some((metrics, gridlines)),
+        text_runs,
     )
 }
 
@@ -668,19 +825,15 @@ pub fn build_print_display_list_with_charts<F, R>(
     viewport: &Viewport,
     metrics: &PrintMetrics,
     gridlines: bool,
+    pictures: &[SheetPicture],
     resolver: F,
 ) -> Result<DisplayList, RenderError>
 where
     F: FnMut(&SheetChart) -> Result<R, RenderError>,
     R: Into<Arc<ChartSpace>>,
 {
-    build_frame(
-        wb,
-        sheet,
-        viewport,
-        &[],
-        resolver,
-        Some((metrics, gridlines)),
+    build_print_display_list_with_text_runs(
+        wb, sheet, viewport, metrics, gridlines, pictures, None, resolver,
     )
 }
 
@@ -689,8 +842,27 @@ fn build_frame<F, R>(
     sheet: SheetId,
     viewport: &Viewport,
     ghosts: &[GhostEdit],
+    pictures: &[SheetPicture],
     resolver: F,
     print: Option<(&PrintMetrics, bool)>,
+) -> Result<DisplayList, RenderError>
+where
+    F: FnMut(&SheetChart) -> Result<R, RenderError>,
+    R: Into<Arc<ChartSpace>>,
+{
+    build_frame_with_text_runs(wb, sheet, viewport, ghosts, pictures, resolver, print, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_frame_with_text_runs<F, R>(
+    wb: &Workbook,
+    sheet: SheetId,
+    viewport: &Viewport,
+    ghosts: &[GhostEdit],
+    pictures: &[SheetPicture],
+    resolver: F,
+    print: Option<(&PrintMetrics, bool)>,
+    text_runs: Option<&CellTextRuns<'_>>,
 ) -> Result<DisplayList, RenderError>
 where
     F: FnMut(&SheetChart) -> Result<R, RenderError>,
@@ -707,10 +879,13 @@ where
         sheet,
         viewport,
         ghosts,
+        pictures,
         resolver,
         print,
         geometry.as_ref(),
         None,
+        text_runs,
+        |_, _| CellFormats::new(),
     )
 }
 
@@ -720,10 +895,13 @@ fn build_frame_with_geometry<F, R>(
     sheet: SheetId,
     viewport: &Viewport,
     ghosts: &[GhostEdit],
+    pictures: &[SheetPicture],
     mut resolver: F,
     print: Option<(&PrintMetrics, bool)>,
     geometry: Option<&GridGeometry>,
     max_cells: Option<u64>,
+    text_runs: Option<&CellTextRuns<'_>>,
+    formats: impl FnOnce(&[Range<u32>], &[Range<u32>]) -> CellFormats,
 ) -> Result<DisplayList, RenderError>
 where
     F: FnMut(&SheetChart) -> Result<R, RenderError>,
@@ -765,22 +943,36 @@ where
     .into();
     let pane_divider_color: Arc<str> = PANE_DIVIDER_COLOR.into();
     let print_font_family: Option<Arc<str>> = print.map(|(m, _)| m.font_family.as_str().into());
+    let fallback_font_family: Arc<str> = print_font_family.clone().unwrap_or_else(|| {
+        geometry::normal_font(styles)
+            .and_then(|font| font.name.as_deref())
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or("Calibri")
+            .into()
+    });
     let indent_step = geometry::indent_step_px(styles, print.map(|(m, _)| m));
-    let mut fx = FrameStyles::new(styles, sheet_ref);
+    let mut fx = FrameStyles::new(styles, sheet_ref, &wb.tables, sheet);
     let geom = geometry.expect("sheet geometry initialized");
     let (rows, cols, frozen_rows, frozen_cols) =
         viewport_axes(sheet_ref, viewport, geom, print.is_some(), max_cells);
     let paint_viewport = viewport_for_axes(viewport, &rows);
+    let formats = formats(&rows.ranges, &cols.ranges);
 
     let grid = GridMeta {
         start_row: rows.start(),
         start_col: cols.start(),
+        frozen_rows: (rows.frozen > 0).then_some(rows.frozen),
+        frozen_cols: (cols.frozen > 0).then_some(cols.frozen),
+        divider_x: cols.divider,
+        divider_y: rows.divider,
         hidden_row_spans: sheet_ref.hidden_row_spans(0..=MAX_ROWS - 1).collect(),
         hidden_col_spans: sheet_ref.hidden_col_spans(0..=MAX_COLS - 1).collect(),
         row_indices: rows.indices(),
         col_indices: cols.indices(),
         row_offsets: rows.offsets(),
         col_offsets: cols.offsets(),
+        row_sizes: rows.sizes(),
+        col_sizes: cols.sizes(),
     };
     let hyperlinks = sheet_ref
         .hyperlinks
@@ -831,7 +1023,8 @@ where
         .map(|g| (g.row, g.col))
         .collect();
 
-    let grid_commands = if print.is_some_and(|(_, gridlines)| !gridlines) {
+    let gridlines = print.map_or(!sheet_ref.format.hide_gridlines, |(_, gridlines)| gridlines);
+    let grid_commands = if !gridlines {
         Vec::new()
     } else {
         emit_grid_segments(
@@ -873,8 +1066,12 @@ where
         geom,
     );
 
-    for &(at, _) in &anchors {
-        let Some(fill) = &fx.xf_at(at).fill else {
+    let anchor_xfs: Vec<Arc<ResolvedXf>> = anchors
+        .iter()
+        .map(|&(at, _)| fx.xf_at(at).clone())
+        .collect();
+    for (&(at, _), xf) in anchors.iter().zip(&anchor_xfs) {
+        let Some(fill) = &xf.fill else {
             continue;
         };
         let Some(cell_box) = cell_box(geom, &rows, &cols, &merge_index, at) else {
@@ -894,6 +1091,25 @@ where
             },
         );
         commands.push(fill.command(clip, origin));
+    }
+
+    for (&(row, col), format) in &formats {
+        let at = CellRef::new(row, col);
+        if let Some(fill) = &format.fill
+            && merge_index
+                .covering(at)
+                .is_none_or(|merge| merge.start == at)
+            && let Some(cell_box) = cell_box(geom, &rows, &cols, &merge_index, at)
+        {
+            commands.push(DrawCmd::FillRect {
+                x: cell_box.clip.x,
+                y: cell_box.clip.y,
+                w: cell_box.clip.w,
+                h: cell_box.clip.h,
+                color: fill.as_str().into(),
+                clip: None,
+            });
+        }
     }
 
     if print.is_none() {
@@ -941,8 +1157,7 @@ where
         &merge_index,
         geom,
     );
-    for &(at, _) in &anchors {
-        let xf = fx.xf_at(at).clone();
+    for (&(at, _), xf) in anchors.iter().zip(&anchor_xfs) {
         let Some(border) = &xf.border else {
             continue;
         };
@@ -958,13 +1173,20 @@ where
         );
     }
 
-    for &(at, cell) in &anchors {
+    for (&(at, cell), xf) in anchors.iter().zip(&anchor_xfs) {
         if changed_ghost_cells.contains(&(at.row, at.col)) {
             continue;
         }
         let hyperlink = link_index.at(at);
-        let xf = &**fx.xf_at(at);
-        let primary = cell_display_text(xf, wb.date_system, cell, &text_color);
+        let xf = &**xf;
+        let conditional = formats.get(&(at.row, at.col));
+        let primary = cell_display_text(
+            xf,
+            wb.date_system,
+            cell,
+            conditional.and_then(|format| format.font_color.as_deref()),
+            &text_color,
+        );
         let hyperlink_only = primary.is_none();
         let Some((text, color, parts)) = primary.or_else(|| {
             hyperlink
@@ -992,13 +1214,44 @@ where
         let align = resolve_align(xf.h, &cell.value);
         let valign = xf.v;
         let wraps = xf.wrap;
-        let bold = font.is_some_and(|f| f.bold);
-        let italic = font.is_some_and(|f| f.italic);
+        let bold = conditional
+            .and_then(|format| format.bold)
+            .unwrap_or_else(|| font.is_some_and(|f| f.bold));
+        let italic = conditional
+            .and_then(|format| format.italic)
+            .unwrap_or_else(|| font.is_some_and(|f| f.italic));
         let underline = font.is_some_and(|f| f.underline);
+        let underline_style = font.and_then(|f| f.underline_style);
         let strike = font.is_some_and(|f| f.strike);
         let font_family = font
             .and_then(|f| f.family.clone())
-            .or_else(|| print_font_family.clone());
+            .or_else(|| Some(fallback_font_family.clone()));
+        let text = match font_family
+            .as_deref()
+            .and_then(ooxml_drawingml::SymbolFont::named)
+        {
+            Some(face) if parts.is_empty() && matches!(cell.value, CellValue::Text { .. }) => face
+                .display_text(&text)
+                .map_or(text, |symbol| symbol.text.into()),
+            _ => text,
+        };
+        let runs = match (text_runs, &cell.value) {
+            (Some(lookup), CellValue::Text { value })
+                if !hyperlink_only && parts.is_empty() && cell.formula.is_none() =>
+            {
+                match lookup(at) {
+                    Some(runs)
+                        if *text == **value
+                            && !has_right_to_left(&text)
+                            && resolve_text_rotation(xf.text_rotation) == (None, false) =>
+                    {
+                        text_runs::cell_runs(&text, runs, styles, hyperlink.is_some())
+                    }
+                    _ => Vec::new(),
+                }
+            }
+            _ => Vec::new(),
+        };
 
         let left_pad = print.map_or(TEXT_PAD_PX, |(m, _)| 3.0 * 96.0 / m.dpi);
         let right_pad = print.map_or(TEXT_PAD_PX, |(m, _)| 2.0 * 96.0 / m.dpi);
@@ -1014,8 +1267,26 @@ where
             Align::Right => cell_box.x + cell_box.w - right_pad - right_indent,
             Align::Center => cell_box.x + cell_box.w / 2.0,
         };
-        let ty = text_baseline(cell_box, size, valign, print.map(|(m, _)| m));
         let text_width = (cell_box.w - pad_width - left_indent - right_indent).max(0.0);
+        let print_dpi = print.map(|(m, _)| f64::from(m.dpi));
+        let run_size = (!runs.is_empty())
+            .then(|| text_runs::largest_size(size, &text, &runs))
+            .filter(|&run_size| {
+                rich_runs_have_room(
+                    &text,
+                    text_width,
+                    cell_box.whole_h,
+                    size,
+                    run_size,
+                    wraps,
+                    print.map(|(m, _)| m),
+                )
+            });
+        let (runs, line_size) = match run_size {
+            Some(run_size) => (runs, run_size),
+            None => (Vec::new(), size),
+        };
+        let ty = text_baseline(cell_box, line_size, valign, print.map(|(m, _)| m));
         let number_format = (!parts.is_empty() || matches!(cell.value, CellValue::Number { .. }))
             .then(|| NumberFormatLayout {
                 left: cell_box.x + left_pad + left_indent,
@@ -1089,13 +1360,14 @@ where
                     .iter()
                     .all(|part| part.kind == xlsx_model::numfmt::FormatPartKind::Padding)
             }))
-        .then(|| TextWrap {
-            width: text_width,
-            line_height: geometry::row_pt_to_px(geometry::line_pitch_pt(
-                f64::from(size),
-                print.map(|(m, _)| f64::from(m.dpi)),
-            )),
-            valign: resolve_rotation_valign(valign),
+        .then(|| {
+            let line_height = wrapped_line_height(line_size, print_dpi);
+            TextWrap {
+                width: text_width,
+                line_height,
+                valign: resolve_rotation_valign(valign),
+                max_lines: wrap::max_wrapped_lines(cell_box.whole_h + 1.0, line_height, line_size),
+            }
         });
         let number_format = number_format.filter(|_| wrap.is_none());
         let (tx, ty, clip, number_format) = if stacked {
@@ -1131,6 +1403,7 @@ where
             bold,
             italic,
             underline: hyperlink.is_some() || underline,
+            underline_style,
             strike,
             highlight: None,
             dashed_underline: false,
@@ -1143,6 +1416,7 @@ where
             rotation_valign,
             stacked,
             wrap,
+            runs,
         });
     }
 
@@ -1171,10 +1445,11 @@ where
             bold: false,
             italic: false,
             underline: true,
+            underline_style: None,
             strike: false,
             highlight: None,
             dashed_underline: false,
-            font_family: print_font_family.clone(),
+            font_family: Some(fallback_font_family.clone()),
             number_format: None,
             ghost: false,
             chart: false,
@@ -1183,6 +1458,7 @@ where
             rotation_valign: None,
             stacked: false,
             wrap: None,
+            runs: Vec::new(),
         });
     }
 
@@ -1202,6 +1478,7 @@ where
             bold: font.is_some_and(|font| font.bold),
             italic: font.is_some_and(|font| font.italic),
             underline: font.is_some_and(|font| font.underline),
+            underline_style: font.and_then(|font| font.underline_style),
         };
         let Some(bx) = cell_box(geom, &rows, &cols, &merge_index, at) else {
             continue;
@@ -1211,6 +1488,8 @@ where
     }
 
     let mut charts = Vec::new();
+    let mut pictures =
+        picture::PictureLayer::new(pictures, geom, &paint_viewport, frozen_rows, frozen_cols);
     chart::render_charts(
         sheet_ref,
         geom,
@@ -1220,7 +1499,9 @@ where
         &mut commands,
         &mut charts,
         &mut resolver,
+        &mut |chart, commands| pictures.paint_below(chart, commands),
     )?;
+    pictures.paint_rest(&mut commands);
 
     if let Some(x) = cols.divider {
         commands.push(DrawCmd::Line {
@@ -1299,6 +1580,7 @@ fn emit_ghost(
             bold: font.bold,
             italic: font.italic,
             underline: font.underline,
+            underline_style: font.underline_style,
             strike,
             highlight: Some(
                 if preview {
@@ -1318,6 +1600,7 @@ fn emit_ghost(
             rotation_valign: None,
             stacked: false,
             wrap: None,
+            runs: Vec::new(),
         });
     };
 
@@ -1347,7 +1630,7 @@ fn emit_ghost(
 
     let old_width = ghost_text_width(old, full_size);
     let new_width = ghost_text_width(new, full_size);
-    if old_width + GHOST_GAP_PX + new_width <= avail {
+    if old_width + GHOST_GAP_PX + new_width <= avail + GHOST_FIT_EPSILON_PX {
         let baseline = baseline_y(cy0, ch, full_size, None);
         line(
             x,
@@ -1409,11 +1692,11 @@ fn ghost_text_width(text: &str, size: f32) -> f32 {
 /// `text` unchanged when its estimate fits `budget`, else a truncated prefix
 /// ending in `…`.
 fn ellipsize(text: &str, budget: f32, size: f32) -> String {
-    if ghost_text_width(text, size) <= budget {
+    if ghost_text_width(text, size) <= budget + GHOST_FIT_EPSILON_PX {
         return text.to_string();
     }
     let char_w = size * geometry::PX_PER_PT as f32 * GHOST_CHAR_W_RATIO;
-    let keep = ((budget / char_w) as i32 - 1).max(0) as usize;
+    let keep = (((budget + GHOST_FIT_EPSILON_PX) / char_w) as i32 - 1).max(0) as usize;
     let prefix: String = text.chars().take(keep).collect();
     format!("{prefix}…")
 }
@@ -1430,7 +1713,11 @@ fn emit_inherited_fills(
     xlsx_model::open_timing! {
         let _timing = xlsx_model::open_timing::span("style_fills");
     }
-    if sheet.col_styles.is_empty() && sheet.row_styles.is_empty() && fx.xf(None).fill.is_none() {
+    if sheet.col_styles.is_empty()
+        && sheet.row_styles.is_empty()
+        && fx.tables.is_empty()
+        && fx.xf(None).fill.is_none()
+    {
         return;
     }
     xlsx_model::open_timing! {
@@ -1787,7 +2074,8 @@ fn spill_clip(
         let neighbour = CellRef::new(at.row, col);
         merges.covering(neighbour).is_none()
             && sheet.cell(neighbour).is_none_or(|cell| {
-                cell_display_text(fx.xf(cell.style), date_system, cell, default_color).is_none()
+                cell_display_text(fx.xf(cell.style), date_system, cell, None, default_color)
+                    .is_none()
             })
             && !draws_hyperlink_label(links, neighbour)
     };
@@ -1949,6 +2237,7 @@ fn cell_box(
         y: row.raw_start,
         w: col.raw_end - col.raw_start,
         h: row.raw_end - row.raw_start,
+        whole_h: geom.row_y(end_row.saturating_add(1)) - geom.row_y(at.row),
         clip: Rect {
             x: col.start,
             y: row.start,
@@ -1959,6 +2248,7 @@ fn cell_box(
 }
 
 /// everything the frame resolves once per xf id instead of once per cell.
+#[derive(Clone)]
 struct ResolvedXf {
     format_code: Arc<str>,
     font: Option<ResolvedFont>,
@@ -1971,6 +2261,35 @@ struct ResolvedXf {
     wrap_or_shrink: bool,
     wrap: bool,
     text_rotation: Option<u16>,
+}
+
+impl ResolvedXf {
+    /// This xf over a table style: each fill and font facet the cell leaves as
+    /// the normal style has takes the table's. A font without a color under a
+    /// normal font that has one is the cell's own automatic color and stays.
+    fn under_table(&self, table: &DifferentialFormat, normal: &ResolvedFont) -> Self {
+        let mut xf = self.clone();
+        if xf.fill.is_none() {
+            xf.fill = table
+                .fill
+                .as_deref()
+                .map(|color| ResolvedFill::Solid(color.into()));
+        }
+        let fontless = xf.font.is_none();
+        let font = xf.font.get_or_insert_with(ResolvedFont::default);
+        if (fontless || font.color == normal.color)
+            && let Some(color) = &table.font_color
+        {
+            font.color = Some(color.as_str().into());
+        }
+        if font.bold == normal.bold {
+            font.bold = table.bold.unwrap_or(font.bold);
+        }
+        if font.italic == normal.italic {
+            font.italic = table.italic.unwrap_or(font.italic);
+        }
+        xf
+    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -2033,16 +2352,19 @@ impl ResolvedFill {
     }
 }
 
+#[derive(Clone, Default)]
 struct ResolvedFont {
     size_pt: Option<f64>,
     family: Option<Arc<str>>,
     bold: bool,
     italic: bool,
     underline: bool,
+    underline_style: Option<RunUnderline>,
     strike: bool,
     color: Option<Arc<str>>,
 }
 
+#[derive(Clone)]
 struct ResolvedBorder {
     top: Option<ResolvedBorderEdge>,
     left: Option<ResolvedBorderEdge>,
@@ -2050,6 +2372,7 @@ struct ResolvedBorder {
     right: Option<ResolvedBorderEdge>,
 }
 
+#[derive(Clone)]
 struct ResolvedBorderEdge {
     width: f32,
     style: Option<Arc<str>>,
@@ -2062,28 +2385,53 @@ struct FrameStyles<'a> {
     styles: &'a Stylesheet,
     xfs: HashMap<u32, Arc<ResolvedXf>>,
     defaults: ColumnDefaults<'a>,
+    tables: SheetTables<'a>,
+    table_xfs: HashMap<(u32, usize, u16), Arc<ResolvedXf>>,
 }
 
 impl<'a> FrameStyles<'a> {
-    fn new(styles: &'a Stylesheet, sheet: &'a Sheet) -> Self {
+    fn new(styles: &'a Stylesheet, sheet: &'a Sheet, tables: &'a [Table], id: SheetId) -> Self {
         FrameStyles {
             styles,
             xfs: HashMap::new(),
             defaults: ColumnDefaults::new(sheet),
+            tables: SheetTables::new(tables, id),
+            table_xfs: HashMap::new(),
         }
     }
 
-    /// The xf a cell renders with: its own, or its row's or column's default.
+    /// The xf a cell renders with: its own, or its row's or column's default,
+    /// over the style of a table covering it.
     fn xf_at(&mut self, at: CellRef) -> &Arc<ResolvedXf> {
         let style = self.defaults.effective_style(at);
-        self.xf(style)
+        if self.tables.is_empty() {
+            return self.xf(style);
+        }
+        let Some((table, mask)) = self.tables.locate(at) else {
+            return self.xf(style);
+        };
+        let (styles, xfs, tables) = (self.styles, &mut self.xfs, &self.tables);
+        self.table_xfs
+            .entry((style.unwrap_or(0), table, mask))
+            .or_insert_with(|| {
+                let format = tables.format(table, mask);
+                let normal = Self::cached(xfs, styles, Some(0)).font.clone();
+                let xf = Self::cached(xfs, styles, style);
+                Arc::new(xf.under_table(&format, &normal.unwrap_or_default()))
+            })
     }
 
     fn xf(&mut self, style: Option<u32>) -> &Arc<ResolvedXf> {
-        let styles = self.styles;
+        Self::cached(&mut self.xfs, self.styles, style)
+    }
+
+    fn cached<'x>(
+        xfs: &'x mut HashMap<u32, Arc<ResolvedXf>>,
+        styles: &Stylesheet,
+        style: Option<u32>,
+    ) -> &'x Arc<ResolvedXf> {
         let style = style.unwrap_or(0);
-        self.xfs
-            .entry(style)
+        xfs.entry(style)
             .or_insert_with(|| Arc::new(Self::resolve(styles, Some(style))))
     }
 
@@ -2102,7 +2450,8 @@ impl<'a> FrameStyles<'a> {
                 family: font.name.as_deref().map(Arc::from),
                 bold: font.bold,
                 italic: font.italic,
-                underline: font.underline,
+                underline: font.underline != RunUnderline::None,
+                underline_style: font.underline_style(),
                 strike: font.strike,
                 color: font
                     .color
@@ -2178,11 +2527,13 @@ impl<'a> FrameStyles<'a> {
 }
 
 /// display string and resolved font color for a cell, or `None` when it renders
-/// nothing. a `[Red]`-style number-format color overrides the font color.
+/// nothing. a `[Red]`-style number-format color overrides `font_color`, which
+/// overrides the xf's font color.
 fn cell_display_text(
     xf: &ResolvedXf,
     date_system: xlsx_model::DateSystem,
     cell: &xlsx_model::Cell,
+    font_color: Option<&str>,
     default_color: &Arc<str>,
 ) -> Option<(Arc<str>, Arc<str>, Vec<xlsx_model::numfmt::FormatPart>)> {
     if matches!(cell.value, CellValue::Empty) {
@@ -2194,10 +2545,12 @@ fn cell_display_text(
     }
     let color = formatted.color.map_or_else(
         || {
-            xf.font
-                .as_ref()
-                .and_then(|font| font.color.clone())
-                .unwrap_or_else(|| default_color.clone())
+            font_color.map(Arc::from).unwrap_or_else(|| {
+                xf.font
+                    .as_ref()
+                    .and_then(|font| font.color.clone())
+                    .unwrap_or_else(|| default_color.clone())
+            })
         },
         Arc::from,
     );
@@ -2281,6 +2634,59 @@ fn resolve_rotation_valign(v: Option<VAlign>) -> TextValign {
         Some(VAlign::Center | VAlign::Justify | VAlign::Distributed) => TextValign::Center,
         Some(VAlign::Bottom) | None => TextValign::Bottom,
     }
+}
+
+/// Pixel step between the baselines of wrapped text `size_pt` tall.
+fn wrapped_line_height(size_pt: f32, print_dpi: Option<f64>) -> f32 {
+    geometry::row_pt_to_px(geometry::line_pitch_pt(f64::from(size_pt), print_dpi))
+}
+
+/// Whether a cell box `height` px tall, the whole row or merged area, has room
+/// for the layout of a rich cell whose largest run is `run_size`; without it
+/// the cell paints as plain text. Unwrapped, that run's ascent and descent as
+/// its baseline takes them must fit the box. Wrapped, in the box and a pixel
+/// as the line limit takes it, the lines row autofit counts for the text must
+/// fit at that run's pitch, and no fewer of them may show than in the cell's
+/// own `size`, up to that size's limit. Geometry that is not finite never fits.
+fn rich_runs_have_room(
+    text: &str,
+    width: f32,
+    height: f32,
+    size: f32,
+    run_size: f32,
+    wraps: bool,
+    print: Option<&PrintMetrics>,
+) -> bool {
+    if !wraps {
+        let extent = match print {
+            None => {
+                let size_px = run_size * geometry::PX_PER_PT as f32;
+                size_px * ASCENT_RATIO + size_px * DESCENT_RATIO
+            }
+            Some(metrics) => {
+                let ratio = run_size / metrics.font_size_pt * 96.0 / metrics.dpi;
+                metrics.font_ascent * ratio + metrics.font_descent * ratio
+            }
+        };
+        return extent <= height;
+    }
+    let height = height + 1.0;
+    let print_dpi = print.map(|metrics| f64::from(metrics.dpi));
+    let shown = wrap::estimated_line_count(text, width, f64::from(size));
+    let lines_fit = shown as f32 * wrapped_line_height(run_size, print_dpi) <= height;
+    if !lines_fit {
+        return false;
+    }
+    let limit = |pt: f32| wrap::max_wrapped_lines(height, wrapped_line_height(pt, print_dpi), pt);
+    let Some(rich) = limit(run_size) else {
+        return true;
+    };
+    let plain = limit(size);
+    if plain.is_some_and(|plain| rich >= plain) {
+        return true;
+    }
+    let shown = plain.map_or(shown, |plain| shown.min(plain as usize));
+    (rich as usize) >= shown
 }
 
 /// Alphabetic baseline in pixels for a point-sized cell font.
@@ -2426,6 +2832,9 @@ mod merged_grid_tests;
 
 #[cfg(test)]
 mod wrap_tests;
+
+#[cfg(test)]
+mod text_runs_tests;
 
 #[cfg(test)]
 mod tests {
@@ -3006,6 +3415,149 @@ mod tests {
         assert!(text.contains(&("Jump", HYPERLINK_COLOR, true)));
     }
 
+    fn screen_text_families(wb: &Workbook) -> Vec<(String, Option<String>)> {
+        build_display_list(
+            wb,
+            SheetId(0),
+            &Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: 400.0,
+                height: 120.0,
+            },
+        )
+        .unwrap()
+        .commands
+        .iter()
+        .filter_map(|command| match command {
+            DrawCmd::Text {
+                text, font_family, ..
+            } => Some((text.to_string(), font_family.as_deref().map(str::to_owned))),
+            _ => None,
+        })
+        .collect()
+    }
+
+    #[test]
+    fn screen_text_without_a_family_takes_the_normal_font_or_calibri() {
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.set_cell(CellRef::new(0, 0), text_cell("Plain"));
+        sheet.set_cell(CellRef::new(1, 0), text_cell("Website"));
+        sheet.hyperlinks.push(Hyperlink {
+            range: CellRange::parse_a1("A2").unwrap(),
+            external_target: Some("https://example.com".into()),
+            location: None,
+            tooltip: None,
+            display: None,
+        });
+        let mut wb = Workbook::default();
+        wb.sheets.push(sheet);
+        for (text, family) in screen_text_families(&wb) {
+            assert_eq!(family.as_deref(), Some("Calibri"), "{text}");
+        }
+        wb.styles.fonts.push(xlsx_model::styles::Font {
+            name: Some("Arial".into()),
+            size_pt: Some(10.0),
+            ..Default::default()
+        });
+        wb.styles.cell_xfs.push(xlsx_model::styles::Xf {
+            font: Some(0),
+            ..Default::default()
+        });
+        let families = screen_text_families(&wb);
+        assert_eq!(families.len(), 2);
+        for (text, family) in families {
+            assert_eq!(family.as_deref(), Some("Arial"), "{text}");
+        }
+    }
+
+    #[test]
+    fn screen_text_fallback_follows_the_grid_normal_font_and_covers_display_only_links() {
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.set_cell(CellRef::new(0, 0), text_cell("Plain"));
+        sheet.hyperlinks.push(Hyperlink {
+            range: CellRange::parse_a1("C3").unwrap(),
+            external_target: None,
+            location: Some("Sheet1!A1".into()),
+            tooltip: None,
+            display: Some("Jump".into()),
+        });
+        let mut wb = Workbook::default();
+        wb.sheets.push(sheet);
+        wb.styles.fonts.push(xlsx_model::styles::Font {
+            name: Some("Arial".into()),
+            size_pt: Some(10.0),
+            ..Default::default()
+        });
+        wb.styles.cell_xfs.push(xlsx_model::styles::Xf::default());
+        let families = screen_text_families(&wb);
+        assert_eq!(families.len(), 2);
+        for (text, family) in families {
+            assert_eq!(family.as_deref(), Some("Arial"), "{text}");
+        }
+    }
+
+    #[test]
+    fn text_commands_carry_the_font_underline_kind() {
+        let kinds = [
+            RunUnderline::None,
+            RunUnderline::Single,
+            RunUnderline::Double,
+            RunUnderline::SingleAccounting,
+            RunUnderline::DoubleAccounting,
+        ];
+        let mut sheet = Sheet::new("Sheet1");
+        let mut wb = Workbook::default();
+        for (index, underline) in kinds.into_iter().enumerate() {
+            let index = index as u32;
+            sheet.set_cell(
+                CellRef::new(index, 0),
+                Cell {
+                    style: Some(index),
+                    ..text_cell(&format!("t{index}"))
+                },
+            );
+            wb.styles.fonts.push(xlsx_model::styles::Font {
+                underline,
+                ..Default::default()
+            });
+            wb.styles.cell_xfs.push(xlsx_model::styles::Xf {
+                font: Some(index),
+                ..Default::default()
+            });
+        }
+        wb.sheets.push(sheet);
+        let viewport = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 400.0,
+            height: 200.0,
+        };
+        let drawn: Vec<_> = build_display_list(&wb, SheetId(0), &viewport)
+            .unwrap()
+            .commands
+            .into_iter()
+            .filter_map(|command| match command {
+                DrawCmd::Text {
+                    underline,
+                    underline_style,
+                    ..
+                } => Some((underline, underline_style)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            drawn,
+            [
+                (false, None),
+                (true, None),
+                (true, Some(RunUnderline::Double)),
+                (true, Some(RunUnderline::SingleAccounting)),
+                (true, Some(RunUnderline::DoubleAccounting)),
+            ]
+        );
+    }
+
     #[test]
     fn grid_meta_covers_visible_boundaries() {
         let mut wb = Workbook::default();
@@ -3055,6 +3607,18 @@ mod tests {
 
         assert_eq!(dl.grid.start_col, 0);
         assert_eq!(dl.grid.start_row, 0);
+        assert_eq!(dl.grid.frozen_cols, Some(1));
+        assert_eq!(dl.grid.frozen_rows, Some(1));
+        // the divider sits on the trailing edge of the frozen track, in the
+        // same viewport pixels the canvas draws it in.
+        assert_eq!(dl.grid.divider_x, Some(dc));
+        assert_eq!(dl.grid.divider_y, Some(dr));
+        // the wasm boundary serializes these camelCase and only when present.
+        let wire = serde_json::to_value(&dl).unwrap();
+        assert_eq!(wire["grid"]["frozenRows"], serde_json::json!(1));
+        assert_eq!(wire["grid"]["frozenCols"], serde_json::json!(1));
+        assert_eq!(wire["grid"]["dividerX"], serde_json::json!(dc));
+        assert_eq!(wire["grid"]["dividerY"], serde_json::json!(dr));
         assert_eq!(dl.grid.col_indices.as_deref(), Some(&[0, 3, 4, 5][..]));
         assert_eq!(dl.grid.row_indices.as_deref(), Some(&[0, 4, 5, 6][..]));
         assert_eq!(
@@ -3110,6 +3674,76 @@ mod tests {
                 if *y1 == dr && *y2 == dr && *width == PANE_DIVIDER_WIDTH
                     && &**color == PANE_DIVIDER_COLOR
         )));
+    }
+
+    #[test]
+    fn track_sizes_ignore_the_frozen_clip() {
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.col_widths.insert(0, 30.0);
+        sheet.freeze_pane = Some(FreezePane::new(1, 1, CellRef::new(2, 2)));
+        sheet.set_cell(CellRef::new(1, 1), text_cell("x"));
+        let mut wb = Workbook::default();
+        wb.sheets.push(sheet);
+
+        let dc = geometry::col_chars_to_px(geometry::DEFAULT_COL_WIDTH_CHARS);
+        let dr = geometry::row_pt_to_px(geometry::DEFAULT_ROW_HEIGHT_PT);
+        let frozen_w = geometry::col_chars_to_px(30.0);
+        let dl = build_display_list(
+            &wb,
+            SheetId(0),
+            &Viewport {
+                x: 20.0,
+                y: 5.0,
+                width: 400.0,
+                height: 300.0,
+            },
+        )
+        .unwrap();
+
+        // the frozen pane clips the body tracks' start in the offset arrays...
+        assert!((dl.grid.col_sizes[0] - frozen_w).abs() < 0.01);
+        assert!((dl.grid.col_sizes[1] - dc).abs() < 0.01);
+        assert!((dl.grid.row_sizes[0] - dr).abs() < 0.01);
+        assert!((dl.grid.row_sizes[1] - dr).abs() < 0.01);
+        assert!(dl.grid.col_offsets[2] - dl.grid.col_offsets[1] < dc - 1.0);
+        assert!(dl.grid.row_offsets[2] - dl.grid.row_offsets[1] < dr - 1.0);
+
+        // ...while the sizes report the full track extent.
+        assert_eq!(dl.grid.col_sizes.len(), dl.grid.col_offsets.len() - 1);
+        assert_eq!(dl.grid.row_sizes.len(), dl.grid.row_offsets.len() - 1);
+
+        // the wire serializes the size arrays camelCase.
+        let wire = serde_json::to_value(&dl).unwrap();
+        assert!(wire["grid"]["colSizes"][1].as_f64().unwrap() > (dc - 1.0) as f64);
+        assert!(wire["grid"]["rowSizes"][1].as_f64().unwrap() > (dr - 1.0) as f64);
+    }
+
+    #[test]
+    fn unfrozen_frames_emit_no_freeze_metadata() {
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.set_cell(CellRef::new(0, 0), text_cell("body"));
+        let mut wb = Workbook::default();
+        wb.sheets.push(sheet);
+        let dl = build_display_list(
+            &wb,
+            SheetId(0),
+            &Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: 400.0,
+                height: 200.0,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(dl.grid.frozen_rows, None);
+        assert_eq!(dl.grid.frozen_cols, None);
+        assert_eq!(dl.grid.divider_x, None);
+        assert_eq!(dl.grid.divider_y, None);
+        let wire = serde_json::to_value(&dl).unwrap();
+        for field in ["frozenRows", "frozenCols", "dividerX", "dividerY"] {
+            assert!(wire["grid"].get(field).is_none(), "{field} must be absent");
+        }
     }
 
     #[test]
@@ -3394,6 +4028,40 @@ mod tests {
         assert_eq!(lines[0].1, lines[1].1);
         assert!(lines[0].1 < FONT_SIZE_PT);
         assert!(lines[0].1 >= FONT_SIZE_PT * GHOST_MIN_SCALE);
+    }
+
+    fn default_cell_ghost_texts(old: &str, new: &str) -> Vec<String> {
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.set_cell(CellRef::new(0, 0), text_cell(old));
+        let mut wb = Workbook::default();
+        wb.sheets.push(sheet);
+
+        let vp = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 60.0,
+        };
+        let dl =
+            build_display_list_with_ghosts(&wb, SheetId(0), &vp, &[ghost(0, 0, old, new)]).unwrap();
+        text_cmds(&dl)
+            .into_iter()
+            .map(|(text, ..)| text.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn stacked_ghost_exactly_filling_a_default_column_stays_whole() {
+        let texts = default_cell_ghost_texts("$1,000.00", "$2,000.00");
+        assert_eq!(texts, vec!["$2,000.00", "$1,000.00"]);
+    }
+
+    #[test]
+    fn stacked_ghost_one_char_past_a_default_column_is_shortened() {
+        let texts = default_cell_ghost_texts("$1,000.00", "$20,000.00");
+        assert_eq!(texts.len(), 2);
+        assert!(texts[0].ends_with('…'));
+        assert_eq!(texts[1], "$1,000.00");
     }
 
     #[test]
@@ -3975,6 +4643,7 @@ mod tests {
             },
             &metrics,
             true,
+            &[],
             |_| {
                 Err::<std::sync::Arc<ooxml_drawingml::chart::ChartSpace>, _>(
                     RenderError::ChartSourceUnavailable {
@@ -4223,6 +4892,7 @@ mod tests {
             SheetId(0),
             &vp,
             &[],
+            &[],
             |chart| {
                 Err::<ChartSpace, _>(RenderError::ChartSourceUnavailable {
                     part: chart.part.clone(),
@@ -4301,6 +4971,7 @@ mod tests {
             SheetId(0),
             &vp,
             &[],
+            &[],
             |chart| {
                 Err::<ChartSpace, _>(RenderError::ChartSourceUnavailable {
                     part: chart.part.clone(),
@@ -4366,5 +5037,62 @@ mod tests {
         assert_px(xs[2] - xs[3], 12.0);
         let xs = indent_xs(Some(("Courier New", 11.0)), 1, None);
         assert_px(xs[1] - xs[0], 27.0);
+    }
+
+    #[test]
+    fn the_geometry_builder_without_formats_paints_no_conditional_format() {
+        let mut wb = Workbook::default();
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.set_cell(CellRef::new(0, 0), num_cell(5.0));
+        wb.sheets.push(sheet);
+        let geometry = GridGeometry::new(&wb.sheets[0], &wb.styles);
+        let viewport = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 100.0,
+        };
+        let resolver = |chart: &SheetChart| {
+            Err::<ChartSpace, _>(RenderError::ChartSourceUnavailable {
+                part: chart.part.clone(),
+            })
+        };
+        let red = |list: &DisplayList| {
+            list.commands
+                .iter()
+                .any(|command| {
+                    matches!(command, DrawCmd::FillRect { color, .. } if &**color == "#ff0000")
+                })
+        };
+        let plain = build_display_list_with_geometry(
+            &wb,
+            SheetId(0),
+            &viewport,
+            &[],
+            &geometry,
+            None,
+            &[],
+            resolver,
+        )
+        .unwrap();
+        let format = Arc::new(DifferentialFormat {
+            fill: Some("#ff0000".into()),
+            ..DifferentialFormat::default()
+        });
+        let formatted = build_display_list_with_geometry_and_formats(
+            &wb,
+            SheetId(0),
+            &viewport,
+            &[],
+            &geometry,
+            None,
+            &[],
+            None,
+            resolver,
+            |_, _| CellFormats::from([((0, 0), format)]),
+        )
+        .unwrap();
+        assert!(!red(&plain));
+        assert!(red(&formatted));
     }
 }

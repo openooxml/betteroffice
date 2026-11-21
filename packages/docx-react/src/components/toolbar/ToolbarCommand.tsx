@@ -14,7 +14,8 @@ import {
   docxCommandController,
   type DocxPendingCommand,
 } from '../../commands/createDocxCommandStore';
-import { commandShortcut, isPluginCommandId } from '../../commands/descriptors';
+import { isPluginCommandId } from '../../commands/descriptors';
+import { storeAriaShortcut, storeShortcutLabel } from '../../commands/shortcuts';
 import {
   useDocxChrome,
   useDocxCommand,
@@ -74,6 +75,8 @@ const COMMAND_ICONS: Partial<Record<DocxCommandId, string>> = {
   highlightColor: 'ink_highlighter',
   alignment: 'format_align_left',
   lineSpacing: 'format_line_spacing',
+  paragraphSpacing: 'format_line_spacing',
+  paragraphSpacingDialog: 'format_line_spacing',
   bulletList: 'format_list_bulleted',
   numberedList: 'format_list_numbered',
   indent: 'format_indent_increase',
@@ -194,7 +197,8 @@ function commandItem<K extends DocxCommandId>(
     id: key,
     label: t(store.getDescriptor(id).labelKey),
     icon: icon ? <MaterialSymbol name={icon} size={16} /> : undefined,
-    shortcut: commandShortcut(id, args) ?? undefined,
+    shortcut: storeShortcutLabel(store, id, t, args) ?? undefined,
+    ariaShortcut: storeAriaShortcut(store, id, args) ?? undefined,
     checked: state.active,
     disabled: !state.enabled,
     description: reasonOf(state),
@@ -240,6 +244,22 @@ function selectSubmenu<K extends DocxSelectCommandId>(
       onSelect: () => run(store, id, option.args),
     };
   });
+  if (id === 'lineSpacing') {
+    const spacing = store.getState('paragraphSpacing');
+    entries.push({ kind: 'separator', id: 'paragraph-spacing-separator' });
+    for (const side of ['before', 'after'] as const) {
+      const remove = (spacing.value?.[side] ?? 0) !== 0;
+      entries.push({
+        kind: 'item', id: `paragraph-spacing-${side}`,
+        label: t(side === 'before'
+          ? remove ? 'lineSpacing.removeBefore' : 'lineSpacing.addBefore'
+          : remove ? 'lineSpacing.removeAfter' : 'lineSpacing.addAfter'),
+        disabled: !spacing.enabled, description: reasonOf(spacing),
+        onSelect: () => run(store, 'paragraphSpacing', { [side]: remove ? 0 : 240 }),
+      });
+    }
+    entries.push(commandItem(store, t, 'paragraphSpacingDialog'));
+  }
   if (id === 'fontSize' && tools.prompt) {
     const prompt = tools.prompt;
     entries.push({
@@ -703,13 +723,14 @@ export function ToolbarCommandButton<K extends DocxCommandId | DocxPluginCommand
   props: ToolbarCommandButtonProps<K>
 ) {
   const { id, children, label, className } = props;
+  const store = useDocxCommands();
   const args = (props as { args?: unknown }).args;
   const command = useDocxCommand(id as DocxCommandId, args as never);
   const prepareSave = useEditorChrome()?.prepareSave;
   if (isPluginCommandId(id) && command.descriptor === null) return null;
   const icon = isPluginCommandId(id) ? undefined : iconFor(id, args);
   const name = label ?? command.label;
-  return (
+  const button = (
     <ToolbarButton
       active={command.state.active}
       disabled={!command.state.enabled}
@@ -717,6 +738,7 @@ export function ToolbarCommandButton<K extends DocxCommandId | DocxPluginCommand
       title={name}
       ariaLabel={name}
       shortcut={command.shortcut ?? undefined}
+      ariaShortcut={command.ariaShortcut ?? undefined}
       className={cn(!icon && !children && 'w-auto px-2 text-sm', className)}
       onClick={() => void command.execute()}
       onPointerEnter={id === 'save' ? prepareSave : undefined}
@@ -725,6 +747,11 @@ export function ToolbarCommandButton<K extends DocxCommandId | DocxPluginCommand
       {children ?? (icon ? <MaterialSymbol name={icon} size={ICON_SIZE} /> : name)}
     </ToolbarButton>
   );
+  return isPluginCommandId(id) ? (
+    <span data-plugin-activation={docxCommandController(store)?.pluginActivation(id)} style={{ display: 'contents' }}>
+      {button}
+    </span>
+  ) : button;
 }
 
 function styleOptionsFor(state: DocxCommandState<'paragraphStyle'>): StyleOption[] {
@@ -776,11 +803,12 @@ export function ToolbarCommandSelect<K extends DocxSelectCommandId>({
 }: ToolbarCommandSelectProps<K>) {
   const store = useDocxCommands();
   const state = useDocxCommandState(id) as DocxCommandState;
+  const paragraphSpacing = useDocxCommandState('paragraphSpacing');
   const wrapperRef = useRef<HTMLSpanElement>(null);
   useCommandOverflow(wrapperRef, id);
   const disabled = !state.enabled;
   const description = reasonOf(state);
-  const choose = <C extends DocxSelectCommandId>(
+  const choose = <C extends DocxCommandId>(
     command: C,
     args: DocxCommandArgs[C],
     focus: 'pointer' | 'always' = 'pointer'
@@ -847,6 +875,10 @@ export function ToolbarCommandSelect<K extends DocxSelectCommandId>({
         <LineSpacingPicker
           value={(state.value as number | null) ?? undefined}
           onChange={(value) => choose('lineSpacing', { value })}
+          spaceBefore={paragraphSpacing.value?.before}
+          spaceAfter={paragraphSpacing.value?.after}
+          onParagraphSpacingChange={(spacing) => choose('paragraphSpacing', spacing)}
+          onOpenOptions={() => choose('paragraphSpacingDialog', null)}
           disabled={disabled}
           description={description}
         />

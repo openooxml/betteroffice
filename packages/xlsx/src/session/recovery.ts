@@ -24,6 +24,7 @@ interface RecoveryMetadata {
   statuses: [number, CommandStatus][];
   selection: WorkbookCommandSelection;
   readOnly: boolean;
+  allowHostProposals?: boolean;
   sheetIds: string[];
   nextSheetId: number;
   sheetRevision: number;
@@ -41,30 +42,13 @@ export interface WorkbookRecovery extends RecoveryMetadata {
 const MAGIC = new Uint8Array([88, 76, 83, 88, 82, 69, 67, 86]);
 const CODEC_VERSION = 3;
 const HEADER_BYTES = 21;
-const ENGINE_CODECS = new Set([3, 5, 6, 7]);
+const ENGINE_CODEC_VERSION = 8;
 
 export function isCollaborativeWorkbookRecovery(engine: Uint8Array): boolean {
   const unsupported = (): never => { throw new TypeError('Unsupported workbook recovery checkpoint'); };
-  if (engine.length < 42 || !MAGIC.every((byte, index) => engine[index] === byte) || !ENGINE_CODECS.has(engine[8])) {
-    return unsupported();
-  }
-  // Engine metadata follows the codec header and SHA-256 digest.
-  let offset = 41;
-  let length = 0;
-  for (let shift = 0; shift <= 28; shift += 7) {
-    const byte = engine[offset++];
-    if (byte === undefined) return unsupported();
-    length += (byte & 0x7f) * 2 ** shift;
-    if (byte < 0x80) {
-      if (length > engine.length - offset) return unsupported();
-      try {
-        const metadata = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(engine.subarray(offset, offset + length)));
-        if (typeof metadata?.collaborative !== 'boolean') return unsupported();
-        return metadata.collaborative;
-      } catch { return unsupported(); }
-    }
-  }
-  return unsupported();
+  if (engine.length < 42 || !MAGIC.every((byte, index) => engine[index] === byte) ||
+    engine[8] !== ENGINE_CODEC_VERSION || engine[41] > 1) return unsupported();
+  return engine[41] === 1;
 }
 
 function checksum(bytes: Uint8Array, hash = 2166136261): number {
@@ -72,6 +56,7 @@ function checksum(bytes: Uint8Array, hash = 2166136261): number {
   return hash >>> 0;
 }
 
+/** Checkpoints are only restorable by the same engine version and codec. */
 export function encodeWorkbookRecovery(engine: Uint8Array, state: WorkbookCommandState,
   revision: number, versions: [number, string][], refusedSeqs: number[] = [],
   sessionState = { version: revision, dirty: revision > 0 },
@@ -89,6 +74,7 @@ export function encodeWorkbookRecovery(engine: Uint8Array, state: WorkbookComman
     throughSeq: state.throughSeq, revision, engineVersion: versions.find(([version]) => version === revision)![1],
     versions, bases: [...state.bases], refusedSeqs, refusedRanges: ledger.refusedRanges ?? refusedRanges,
     refusedOutcomes: ledger.refusedOutcomes ?? [], statuses: [...state.statuses], selection: state.selection, readOnly: state.readOnly,
+    allowHostProposals: state.allowHostProposals === true,
     sheetIds: state.sheetIds, nextSheetId: state.nextSheetId, sheetRevision: state.sheetRevision,
     calculation: state.calculation, formats: [...state.formats], hostVersion: sessionState.version, dirty: sessionState.dirty,
     ...(ledger.historySelections ? { historySelections: ledger.historySelections } : {}) };
@@ -108,6 +94,7 @@ export function encodeWorkbookRecovery(engine: Uint8Array, state: WorkbookComman
   return bytes;
 }
 
+/** Checkpoints are only restorable by the same engine version and codec. */
 export function decodeWorkbookRecovery(bytes: Uint8Array): WorkbookRecovery {
   const invalid = () => { throw new TypeError('Invalid workbook recovery checkpoint'); };
   if (bytes.length < HEADER_BYTES || !MAGIC.every((byte, index) => bytes[index] === byte)) invalid();
@@ -160,6 +147,7 @@ export function decodeWorkbookRecovery(bytes: Uint8Array): WorkbookRecovery {
   if (!value || !string(value.session) || !string(value.engineVersion) || !integer(value.epoch) || value.epoch === 0 ||
     ![value.throughSeq, value.revision, value.hostVersion, value.sheetRevision, value.nextSheetId].every(integer) ||
     typeof value.readOnly !== 'boolean' || typeof value.dirty !== 'boolean' ||
+    value.allowHostProposals !== undefined && typeof value.allowHostProposals !== 'boolean' ||
     !Array.isArray(value.sheetIds) || value.sheetIds.length === 0 || !value.sheetIds.every(string) ||
     new Set(value.sheetIds).size !== value.sheetIds.length ||
     value.sheetIds.some((id: string) => id.startsWith('command-sheet:') &&
@@ -197,7 +185,7 @@ export function decodeWorkbookRecovery(bytes: Uint8Array): WorkbookRecovery {
     engine.length === 0) invalid();
   if (value.calculation !== null && (!value.calculation || !Number.isFinite(value.calculation.nowSerial) ||
     !integer(value.calculation.randSeed) || value.calculation.randSeed > 0xffff_ffff)) invalid();
-  return { ...value, engine };
+  return { ...value, allowHostProposals: value.allowHostProposals === true, engine };
 }
 
 export function restoreWorkbookCommandState(handle: WorkbookHandle, recovery: WorkbookRecovery,
@@ -212,6 +200,7 @@ export function restoreWorkbookCommandState(handle: WorkbookHandle, recovery: Wo
     active.row < target.start.row || active.row > target.end.row ||
     active.col < target.start.col || active.col > target.end.col)) throw new TypeError('Invalid recovery selection');
   Object.assign(state, { throughSeq: recovery.throughSeq, readOnly: recovery.readOnly,
+    allowHostProposals: recovery.allowHostProposals === true,
     nextSheetId: recovery.nextSheetId, sheetRevision: recovery.sheetRevision,
     bases: new Map(recovery.bases), formats: new Map(recovery.formats), historyReset: recovery.historySelections === undefined,
     historySelections: structuredClone(recovery.historySelections ?? []).map((entry) => entry ?? undefined) });

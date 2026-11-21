@@ -9,7 +9,7 @@
  * image is already inline (clicking would no-op).
  */
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { WrapType } from '@betteroffice/docx/docx/wrapTypes';
 import {
   IMAGE_LAYOUT_OPTIONS,
@@ -103,20 +103,15 @@ export const ImageContextMenu: React.FC<ImageContextMenuProps> = ({
   const propertiesOffset = onOpenProperties ? 1 : 0;
   const totalNavigable = propertiesOffset + enabledLayout.length + navigableTextActions.length;
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!isOpen) return;
-    const handleClickOutside = (e: MouseEvent) => {
+    const handleClickOutside = (e: PointerEvent) => {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
         onClose();
       }
     };
-    const timer = setTimeout(() => {
-      document.addEventListener('mousedown', handleClickOutside);
-    }, 0);
-    return () => {
-      clearTimeout(timer);
-      document.removeEventListener('mousedown', handleClickOutside);
-    };
+    document.addEventListener('pointerdown', handleClickOutside, true);
+    return () => document.removeEventListener('pointerdown', handleClickOutside, true);
   }, [isOpen, onClose]);
 
   useEffect(() => {

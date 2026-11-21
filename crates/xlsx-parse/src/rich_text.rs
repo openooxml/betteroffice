@@ -5,7 +5,7 @@ use quick_xml::events::{BytesStart, Event};
 use xlsx_model::addr::MAX_ROWS;
 use xlsx_model::{CellRef, CellValue, Color, RichRun, RunBaseline, RunStyle, RunUnderline};
 
-use crate::read::parse_index;
+use crate::read::{parse_index, unescape_name};
 use crate::xml::{attr, local_name, next_event, reader, resolve_entity, xml_err};
 use crate::{ParseError, PreservedPackage};
 
@@ -241,12 +241,14 @@ fn read_item(
     let mut item_runs = 0;
     let mut saw_text = false;
     let mut saw_properties = false;
+    let mut pending = String::new();
     loop {
         match next_event(xml, buffer, depth)? {
             Event::Start(element) => {
                 let name = local_name(&element);
-                match (stack.last().map(Vec::as_slice), name.as_slice()) {
-                    (None, b"r") => {
+                let parent = stack.last().map(Vec::as_slice);
+                match (stack.len(), parent, name.as_slice()) {
+                    (0, _, b"r") => {
                         item_runs += 1;
                         if valid && (item_runs > MAX_RICH_TEXT_RUNS_PER_ITEM || !budget.run()) {
                             valid = false;
@@ -256,9 +258,13 @@ fn read_item(
                         saw_text = false;
                         saw_properties = false;
                     }
-                    (Some(b"r"), b"rPr") if !saw_properties && !saw_text => saw_properties = true,
-                    (Some(b"r"), b"t") if !saw_text => saw_text = true,
-                    (Some(b"rPr"), _) if valid => {
+                    (1, Some(b"r"), b"rPr") if !saw_properties && !saw_text => {
+                        saw_properties = true;
+                    }
+                    (1, Some(b"r"), b"t") if !saw_text => saw_text = true,
+                    (0, _, b"rPh" | b"phoneticPr") | (1, Some(b"rPh"), b"t") => {}
+                    (2, Some(b"rPr"), b"rPh" | b"phoneticPr") => valid = false,
+                    (2, Some(b"rPr"), _) if valid => {
                         if !read_property(&element, &mut style, budget)? {
                             valid = false;
                         }
@@ -268,19 +274,44 @@ fn read_item(
                 stack.push(name);
             }
             Event::Text(text) => {
-                let text = text.decode().map_err(xml_err)?;
-                read_text(&text, expected, &stack, &mut offset, &mut valid);
+                let text = text.xml10_content().map_err(xml_err)?;
+                item_text(
+                    &text,
+                    &mut pending,
+                    expected,
+                    &stack,
+                    &mut offset,
+                    &mut valid,
+                );
             }
             Event::CData(text) => {
-                let text = text.decode().map_err(xml_err)?;
-                read_text(&text, expected, &stack, &mut offset, &mut valid);
+                let text = text.xml10_content().map_err(xml_err)?;
+                item_text(
+                    &text,
+                    &mut pending,
+                    expected,
+                    &stack,
+                    &mut offset,
+                    &mut valid,
+                );
             }
             Event::GeneralRef(entity) => {
                 let text = resolve_entity(&entity.decode().map_err(xml_err)?)?;
-                read_text(&text, expected, &stack, &mut offset, &mut valid);
+                item_text(
+                    &text,
+                    &mut pending,
+                    expected,
+                    &stack,
+                    &mut offset,
+                    &mut valid,
+                );
             }
             Event::End(_) if *depth < target => break,
             Event::End(_) => {
+                if stack.last().map(Vec::as_slice) == Some(b"t") {
+                    let text = unescape_name(&std::mem::take(&mut pending));
+                    read_text(&text, expected, &stack, &mut offset, &mut valid);
+                }
                 if stack.pop().as_deref() == Some(b"r") && valid && saw_text {
                     match (u32::try_from(start), u32::try_from(offset)) {
                         (Ok(start), Ok(end)) => runs.push(RichRun::new(start, end, style.clone())),
@@ -305,6 +336,23 @@ fn read_item(
     )
 }
 
+/// Text inside a `<t>` waits for the element's end, so its `_xHHHH_` escapes are
+/// decoded over the whole value; anything else is read at once.
+fn item_text(
+    text: &str,
+    pending: &mut String,
+    expected: &str,
+    stack: &[Vec<u8>],
+    offset: &mut usize,
+    valid: &mut bool,
+) {
+    if stack.last().map(Vec::as_slice) == Some(b"t") {
+        pending.push_str(text);
+    } else {
+        read_text(text, expected, stack, offset, valid);
+    }
+}
+
 fn read_text(text: &str, expected: &str, stack: &[Vec<u8>], offset: &mut usize, valid: &mut bool) {
     if !matches!(stack.last().map(Vec::as_slice), Some(b"t")) {
         *valid = false;
@@ -324,8 +372,14 @@ fn read_property(
     style: &mut RunStyle,
     budget: &mut Budget,
 ) -> Result<bool, ParseError> {
-    let value = attr(element, b"val")?;
     let name = local_name(element);
+    if !matches!(
+        name.as_slice(),
+        b"rFont" | b"sz" | b"b" | b"i" | b"strike" | b"u" | b"vertAlign" | b"color"
+    ) {
+        return Ok(true);
+    }
+    let value = attr(element, b"val")?;
     for attribute in element.attributes() {
         let attribute = attribute.map_err(xml_err)?;
         let attribute = attribute.key.local_name();
@@ -415,7 +469,10 @@ fn read_property(
                     crate::styles::parse_color(element)?
                 };
                 style.color.is_some()
-                    && (tint.is_none() || matches!(style.color, Some(Color::Theme { .. })))
+                    && (matches!(style.color, Some(Color::Theme { .. }))
+                        || tint
+                            .and_then(|value| value.parse::<f64>().ok())
+                            .is_none_or(|value| value == 0.0))
             }
         }
         _ => false,
@@ -490,7 +547,7 @@ mod tests {
     fn invalid_items_do_not_charge_subsequent_runs_or_styles() {
         for (prefix, charged) in [
             ("<unsupported/>", 0),
-            ("<r><rPr><unsupported/></rPr><t>x</t></r>", 1),
+            (r#"<r><rPr><sz val="0"/></rPr><t>x</t></r>"#, 1),
             ("<r><t>mismatch</t></r>", 1),
         ] {
             let mut index = RichTextIndex::default();

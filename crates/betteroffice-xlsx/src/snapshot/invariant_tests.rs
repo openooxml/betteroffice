@@ -253,13 +253,15 @@ fn snapshot_initial_peer_matches_sheet_edit_history_and_live_reorder_refusal() {
         assert!(deleted_clock_total(&worker) > 1);
         for workbook in [&mut worker, &mut peer] {
             {
-                let mut txn = workbook.authority.snapshot_transaction_for_test();
+                let mut txn = workbook
+                    .authority_for_test()
+                    .snapshot_transaction_for_test();
                 let order = txn.get_array("xlsx:sheet-order").unwrap();
                 let key = order.get(&txn, 0).unwrap().cast::<String>().unwrap();
                 order.remove_range(&mut txn, 0, 1);
                 order.insert(&mut txn, 31, key);
             }
-            workbook.model = workbook.authority.materialize().unwrap();
+            workbook.model = workbook.authority_for_test().materialize().unwrap();
         }
         assert_edited_identity(&worker, &peer);
         assert_eq!(worker.model().sheets[31].name, "Renamed");
@@ -451,9 +453,9 @@ fn snapshot_refusal_leaves_the_non_snapshot_open_path_usable() {
         let mut worker = Workbook::open(&empty_worker().save().unwrap()).unwrap();
         let budget = SnapshotBudget::new(records, bytes).unwrap();
         let mut snapshot = decoded_snapshot(&encode(&worker, budget));
-        worker.authority.snapshot_skip_gc_for_test();
+        worker.authority_mut_for_test().snapshot_skip_gc_for_test();
         {
-            let mut txn = worker.authority.snapshot_transaction_for_test();
+            let mut txn = worker.authority_for_test().snapshot_transaction_for_test();
             let mut client = 1;
             while txn
                 .state_vector()
@@ -472,7 +474,10 @@ fn snapshot_refusal_leaves_the_non_snapshot_open_path_usable() {
             txn.apply_update(Update::decode_v1(&update).unwrap())
                 .unwrap();
         }
-        assert_eq!(worker.authority.materialize().unwrap(), *worker.model());
+        assert_eq!(
+            worker.authority_for_test().materialize().unwrap(),
+            *worker.model()
+        );
         let failure = WorkbookSnapshotEncoder::new(&worker, Some(context()), budget)
             .err()
             .unwrap();
@@ -867,7 +872,7 @@ fn snapshot_authority_schema_and_authored_model_agree_before_ready() {
         canonical_model(peer.model())
     );
     {
-        let mut txn = worker.authority.snapshot_transaction_for_test();
+        let mut txn = worker.authority_for_test().snapshot_transaction_for_test();
         txn.get_map("xlsx")
             .unwrap()
             .insert(&mut txn, "schemaVersion", 999_i64);
@@ -906,7 +911,7 @@ fn snapshot_authority_schema_and_authored_model_agree_before_ready() {
     })
     .unwrap();
     {
-        let mut txn = worker.authority.snapshot_transaction_for_test();
+        let mut txn = worker.authority_for_test().snapshot_transaction_for_test();
         let sheets = txn.get_map("xlsx:sheets").unwrap();
         let sheet = sheets
             .get(&txn, "sheet:0")
@@ -1029,6 +1034,7 @@ fn snapshot_charts_require_source_package_before_ready() {
     let budget = budgets()[0];
     let mut worker = worker(&source(false, false));
     assert!(!worker.model.sheets[0].charts.is_empty());
+    worker.authority_for_test();
     worker.source_package = None;
     worker.source_container = None;
     let chunks = encode(&worker, budget);
@@ -1273,6 +1279,7 @@ fn snapshot_anchor_reconstruction_visits_allocations_and_refusal_are_bounded() {
             chart
         })
         .collect();
+    original.authority_for_test();
     let Some(PackageSlot::Present(package)) = original.source_package.take() else {
         panic!("source package is not materialized");
     };
@@ -1455,6 +1462,7 @@ fn released_styles() -> (Vec<u8>, Vec<u8>) {
 fn released_reading_of(source: &[u8], released: &[u8]) -> Workbook {
     let mut opened = Workbook::open(source).unwrap();
     let mut workbook = Workbook::open(released).unwrap();
+    workbook.authority_for_test();
     workbook.source_package = opened.source_package.take();
     workbook.source_container = opened.source_container.take();
     workbook
@@ -1561,7 +1569,9 @@ fn marked_xfs_keep_main_snapshot_bytes_and_record_tags() {
     let mut styles = serde_json::to_value(&worker.model.styles).unwrap();
     styles.as_object_mut().unwrap().remove("xfs_with_extra_xml");
     worker.model.styles = serde_json::from_value(styles).unwrap();
-    worker.authority.clear_xf_xml_markers_for_test();
+    worker
+        .authority_mut_for_test()
+        .clear_xf_xml_markers_for_test();
     assert!(!worker.model().styles.xf_has_extra_xml(2));
     assert_eq!(marked, fixed_snapshot(&worker));
     assert_eq!(
@@ -1668,7 +1678,7 @@ fn restores_follow_custom_styles_relationship_and_ignore_unreferenced_malformed_
         assert!(!workbook.model().styles.xf_has_extra_xml(0));
         assert!(
             workbook
-                .authority
+                .authority_for_test()
                 .materialize()
                 .unwrap()
                 .styles
@@ -1704,7 +1714,7 @@ fn snapshots_ignore_malformed_source_styles_when_restoring_markers() {
     assert!(!restored.model().styles.xf_has_extra_xml(1));
     assert!(
         !restored
-            .authority
+            .authority_for_test()
             .materialize()
             .unwrap()
             .styles
@@ -1839,11 +1849,21 @@ fn format_facets_current_snapshot_saves_the_xfs_its_records_hold() {
 }
 
 /// A package whose conditional format paints bold italic text, and the same
-/// package as releases before italic read it. The format block carries an
-/// attribute the model does not hold, so only its source bytes keep it;
-/// `alternate` adds a second block inside an `mc:AlternateContent` branch,
-/// which a save cannot rewrite.
+/// package as releases before italic read it.
 fn released_italic(alternate: bool) -> (Vec<u8>, Vec<u8>) {
+    released_dxf(
+        alternate,
+        r#"<font><b/><i/><color rgb="FF9C0006"/></font>"#,
+        r#"<font><b/><color rgb="FF9C0006"/></font>"#,
+    )
+}
+
+/// A package whose conditional format paints with the dxf `source`, and the
+/// same package with the dxf `released`, as an earlier release read it. The
+/// format block carries an attribute the model does not hold, so only its
+/// source bytes keep it; `alternate` adds a second block inside an
+/// `mc:AlternateContent` branch, which a save cannot rewrite.
+fn released_dxf(alternate: bool, source: &str, released: &str) -> (Vec<u8>, Vec<u8>) {
     let block = concat!(
         r#"<conditionalFormatting sqref="A1:C1" pivot="0">"#,
         r#"<cfRule type="cellIs" dxfId="0" priority="1" operator="greaterThan">"#,
@@ -1869,16 +1889,14 @@ fn released_italic(alternate: bool) -> (Vec<u8>, Vec<u8>) {
         cells,
         false,
     );
-    let with = |font: &str| {
+    let with = |dxf: &str| {
         let mut parts = ooxml_opc::unzip_parts(&base).unwrap();
         for (name, bytes) in &mut parts {
             let text = String::from_utf8(bytes.clone()).unwrap();
             *bytes = match name.as_str() {
                 "xl/styles.xml" => text.replace(
                     "</cellStyles>",
-                    &format!(
-                        r#"</cellStyles><dxfs count="1"><dxf><font>{font}<color rgb="FF9C0006"/></font></dxf></dxfs>"#
-                    ),
+                    &format!(r#"</cellStyles><dxfs count="1"><dxf>{dxf}</dxf></dxfs>"#),
                 ),
                 "xl/worksheets/sheet1.xml" => {
                     text.replace("</sheetData>", &format!("</sheetData>{block}"))
@@ -1889,7 +1907,7 @@ fn released_italic(alternate: bool) -> (Vec<u8>, Vec<u8>) {
         }
         ooxml_opc::rezip_parts(&parts).unwrap()
     };
-    (with("<b/><i/>"), with("<b/>"))
+    (with(source), with(released))
 }
 
 #[test]
@@ -1921,6 +1939,53 @@ fn italic_released_snapshot_saves_the_source_italic() {
                 styles
             );
             let saved = reading().save().unwrap();
+            for name in ["xl/styles.xml", "xl/worksheets/sheet1.xml"] {
+                assert_eq!(part(&saved, name), part(&plain, name), "{name}");
+            }
+        }
+    }
+}
+
+#[test]
+fn released_fill_snapshot_and_state_keep_the_source_fill() {
+    let readings = [
+        (
+            r#"<fill><patternFill><bgColor rgb="FFFFC7CE"/></patternFill></fill>"#,
+            "",
+            None,
+            "#ffc7ce",
+        ),
+        (
+            r#"<fill><patternFill patternType="solid"><fgColor rgb="FF111111"/><bgColor rgb="FFFFC7CE"/></patternFill></fill>"#,
+            r#"<fill><patternFill patternType="solid"><fgColor rgb="FF111111"/></patternFill></fill>"#,
+            Some("#111111"),
+            "#111111",
+        ),
+    ];
+    for ((source, released, reading, current), alternate) in readings
+        .into_iter()
+        .flat_map(|reading| [(reading, false), (reading, true)])
+    {
+        let (source, released) = released_dxf(alternate, source, released);
+        let budget = SnapshotBudget::new(1, 64 * 1024).unwrap();
+        let plain = Workbook::open(&source).unwrap().save().unwrap();
+        let worker = released_reading_of(&source, &released);
+        assert_eq!(worker.model().styles.dxfs[0].fill.as_deref(), reading);
+        let restored = restore(&released_snapshot(&worker, budget), budget);
+        let state = Workbook::open_collaborative(&released, 77)
+            .unwrap()
+            .encode_state_as_update_v1();
+        let mut peer = Workbook::open_collaborative(&source, 78).unwrap();
+        peer.apply_update_v1(&state, context()).unwrap();
+        assert_eq!(
+            peer.model().sheets[0].conditional_formats[0].rules[0]
+                .format
+                .fill
+                .as_deref(),
+            Some(current)
+        );
+        for workbook in [restored, peer] {
+            let saved = workbook.save().unwrap();
             for name in ["xl/styles.xml", "xl/worksheets/sheet1.xml"] {
                 assert_eq!(part(&saved, name), part(&plain, name), "{name}");
             }

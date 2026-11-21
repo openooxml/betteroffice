@@ -2,6 +2,7 @@
 //! streaming and count-capped; missing parts resolve to defaults.
 
 use quick_xml::events::{BytesStart, Event};
+use xlsx_model::RunUnderline;
 use xlsx_model::styles::{
     Alignment, Border, BorderEdge, BorderStyle, Color, DifferentialFormat, Fill, Font, HAlign,
     PatternType, Protection, SavedPlain, Stylesheet, Theme, VAlign, Xf,
@@ -61,7 +62,7 @@ pub(crate) fn legacy_style_readings(
 ) -> Result<Vec<Stylesheet>, ParseError> {
     let mut readings = Vec::new();
     if let Some(bytes) = styles {
-        let (mut unfiltered, xfs) = parse_style_pools(bytes, true, &sheet.theme)?;
+        let (mut unfiltered, xfs) = parse_style_pools(bytes, true, true, &sheet.theme)?;
         unfiltered.theme = sheet.theme.clone();
         let mut held = unfiltered.clone();
         held.cell_xfs = xfs;
@@ -71,6 +72,16 @@ pub(crate) fn legacy_style_readings(
             }
             if &reading != sheet && legacy != Some(&reading) && !readings.contains(&reading) {
                 readings.push(reading);
+            }
+        }
+        let (released, _) = parse_style_pools(bytes, false, true, &sheet.theme)?;
+        if released.fonts != sheet.fonts {
+            for base in std::iter::once(sheet).chain(legacy) {
+                let mut reading = base.clone();
+                reading.fonts.clone_from(&released.fonts);
+                if !readings.contains(&reading) {
+                    readings.push(reading);
+                }
             }
         }
     }
@@ -93,7 +104,7 @@ enum Section {
 /// parse the style pools (numFmts, fonts, fills, borders, cellXfs). the theme is
 /// filled in by the caller.
 fn parse_styles(data: &[u8], theme: &Theme) -> Result<(Stylesheet, Vec<Xf>), ParseError> {
-    parse_style_pools(data, false, theme)
+    parse_style_pools(data, false, false, theme)
 }
 
 struct Scope {
@@ -107,6 +118,7 @@ struct Scope {
 fn parse_style_pools(
     data: &[u8],
     unfiltered: bool,
+    released_underline: bool,
     theme: &Theme,
 ) -> Result<(Stylesheet, Vec<Xf>), ParseError> {
     #[cfg(feature = "test-counters")]
@@ -136,6 +148,7 @@ fn parse_style_pools(
     let mut dxf_colors = Vec::new();
     let mut dxf_font_color = None;
     let mut dxf_fill_color = None;
+    let mut dxf_fill_sides: (Option<Color>, Option<Color>) = (None, None);
     let mut dxf_font = false;
     let mut dxf_fill = false;
     let mut dxf_solid = false;
@@ -241,6 +254,7 @@ fn parse_style_pools(
                     dxf = (ss.dxfs.len() < MAX_STYLE_ENTRIES).then(DifferentialFormat::default);
                     dxf_font_color = None;
                     dxf_fill_color = None;
+                    dxf_fill_sides = (None, None);
                     dxf_font = false;
                     dxf_fill = false;
                     dxf_solid = false;
@@ -259,22 +273,27 @@ fn parse_style_pools(
                     dxf_font_color = parse_color(&e)?;
                 }
                 b"patternFill" if dxf_fill && dxf.is_some() => {
-                    dxf_solid = attr(&e, b"patternType")?.as_deref() == Some("solid");
+                    dxf_solid =
+                        matches!(attr(&e, b"patternType")?.as_deref(), None | Some("solid"));
                 }
                 b"fgColor" if dxf_fill && dxf.is_some() => {
                     if dxf_solid {
                         dxf_fill_color = parse_color(&e)?;
+                        dxf_fill_sides.0 = dxf_fill_color.clone();
                     }
                 }
                 b"bgColor" if dxf_fill && dxf.is_some() => {
                     if dxf_solid && dxf_fill_color.is_none() {
                         dxf_fill_color = parse_color(&e)?;
+                        dxf_fill_sides.1 = dxf_fill_color.clone();
+                    } else if dxf_solid {
+                        dxf_fill_sides.1 = parse_color(&e).ok().flatten();
                     }
                 }
                 b"numFmt" if unfiltered || (section == Section::NumFmts && depth == 3) => {
                     if let (Some(id), Some(code)) = (
                         attr(&e, b"numFmtId")?.and_then(|v| v.parse::<u16>().ok()),
-                        attr(&e, b"formatCode")?,
+                        attr(&e, b"formatCode")?.map(|code| crate::read::unescape_name(&code)),
                     ) {
                         cap(ss.num_fmts.len())?;
                         ss.num_fmts.push((id, code));
@@ -294,7 +313,11 @@ fn parse_style_pools(
                 }
                 b"b" if font.is_some() => set_bool(&e, &mut font, |f| &mut f.bold)?,
                 b"i" if font.is_some() => set_bool(&e, &mut font, |f| &mut f.italic)?,
-                b"u" if font.is_some() => set_bool(&e, &mut font, |f| &mut f.underline)?,
+                b"u" if font.is_some() => {
+                    let val = attr(&e, b"val")?;
+                    font.as_mut().unwrap().underline =
+                        parse_underline(val.as_deref(), released_underline);
+                }
                 b"strike" if font.is_some() => set_bool(&e, &mut font, |f| &mut f.strike)?,
                 b"sz" if font.is_some() => {
                     if let Some(v) = attr(&e, b"val")?.and_then(|v| v.parse::<f64>().ok()) {
@@ -303,7 +326,7 @@ fn parse_style_pools(
                 }
                 b"name" if font.is_some() => {
                     if let Some(v) = attr(&e, b"val")? {
-                        font.as_mut().unwrap().name = Some(v);
+                        font.as_mut().unwrap().name = Some(crate::read::unescape_name(&v));
                     }
                 }
                 b"color" if font.is_some() => {
@@ -399,7 +422,11 @@ fn parse_style_pools(
                 b"dxf" if section == Section::Dxfs => {
                     if let Some(dxf) = dxf.take() {
                         ss.dxfs.push(dxf);
-                        dxf_colors.push((dxf_font_color.take(), dxf_fill_color.take()));
+                        dxf_colors.push((
+                            dxf_font_color.take(),
+                            dxf_fill_color.take(),
+                            std::mem::take(&mut dxf_fill_sides),
+                        ));
                     }
                 }
                 b"border" => {
@@ -441,9 +468,18 @@ fn parse_style_pools(
             _ => {}
         }
     }
-    for (index, (font, fill)) in dxf_colors.into_iter().enumerate() {
+    for (index, (font, fill, (foreground, background))) in dxf_colors.into_iter().enumerate() {
         ss.dxfs[index].font_color = font.as_ref().and_then(|color| ss.resolve_color(color));
         ss.dxfs[index].fill = fill.as_ref().and_then(|color| ss.resolve_color(color));
+        let foreground = foreground
+            .as_ref()
+            .and_then(|color| ss.resolve_color(color));
+        let background = background
+            .as_ref()
+            .and_then(|color| ss.resolve_color(color));
+        if foreground.is_some() && background.is_some() && foreground != background {
+            ss.note_dxf_fill_colors_differ(index as u32);
+        }
     }
     let xf = plain_xfs
         .into_iter()
@@ -666,6 +702,23 @@ fn set_bool(
     Ok(())
 }
 
+/// `ST_UnderlineValues`, single when `val` is omitted. `released` reads it as releases before
+/// underline kinds did: on only when `val` is omitted or truthy.
+fn parse_underline(val: Option<&str>, released: bool) -> RunUnderline {
+    let kind = match val {
+        _ if released => None,
+        Some("single") => Some(RunUnderline::Single),
+        Some("double") => Some(RunUnderline::Double),
+        Some("singleAccounting") => Some(RunUnderline::SingleAccounting),
+        Some("doubleAccounting") => Some(RunUnderline::DoubleAccounting),
+        _ => None,
+    };
+    kind.unwrap_or(match val.is_none_or(is_truthy) {
+        true => RunUnderline::Single,
+        false => RunUnderline::None,
+    })
+}
+
 /// begin a border edge if its `style` is a real weight (`none`/absent -> no
 /// edge).
 fn begin_edge(e: &BytesStart, kind: u8) -> Result<Option<(u8, BorderEdge)>, ParseError> {
@@ -877,6 +930,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn legacy_readings_hold_the_released_underline_reading() {
+        let xml = br#"<styleSheet><fonts><font><u/></font><font><u val="single"/></font><font><u val="double"/></font></fonts></styleSheet>"#;
+        let (sheet, legacy) = parse_stylesheet(Some(xml), None).unwrap();
+        let kinds =
+            |styles: &Stylesheet| styles.fonts.iter().map(|f| f.underline).collect::<Vec<_>>();
+        assert_eq!(
+            kinds(&sheet),
+            [
+                RunUnderline::Single,
+                RunUnderline::Single,
+                RunUnderline::Double
+            ]
+        );
+        let readings = legacy_style_readings(Some(xml), &sheet, legacy.as_ref(), false).unwrap();
+        let released = [RunUnderline::Single, RunUnderline::None, RunUnderline::None];
+        assert!(readings.iter().any(|reading| kinds(reading) == released));
+
+        let plain = br#"<styleSheet><fonts><font><u/></font><font><u val="none"/></font></fonts></styleSheet>"#;
+        let (sheet, legacy) = parse_stylesheet(Some(plain), None).unwrap();
+        let readings = legacy_style_readings(Some(plain), &sheet, legacy.as_ref(), false).unwrap();
+        assert!(readings.iter().all(|reading| reading.fonts == sheet.fonts));
+    }
+
+    #[test]
     fn format_facets_child_apply_flags_and_defaults() {
         for (flags, protected) in [
             ("", true),
@@ -911,5 +988,14 @@ mod tests {
             };
             assert_eq!(xf.protection, protected.then_some(protection));
         }
+    }
+
+    #[test]
+    fn differential_pattern_fill_without_a_pattern_type_is_solid() {
+        let xml = br#"<styleSheet><dxfs count="1"><dxf><font><color rgb="FF9C0006"/></font><fill><patternFill><bgColor rgb="FFFFC7CE"/></patternFill></fill></dxf></dxfs></styleSheet>"#;
+        let (styles, _) = parse_styles(xml, &Theme::default()).unwrap();
+        assert_eq!(styles.dxfs.len(), 1);
+        assert_eq!(styles.dxfs[0].font_color.as_deref(), Some("#9c0006"));
+        assert_eq!(styles.dxfs[0].fill.as_deref(), Some("#ffc7ce"));
     }
 }

@@ -8,7 +8,7 @@ import { createDisplayListQueries } from '../layout/render/displayListQueries';
 import { deriveDisplayListSelectedCellRects, type DisplayListTableRegion } from '../layout/render/displayListTables';
 import { loadRustDisplayListQueryEngine } from '../layout/render/rustDisplayList';
 import { readResidentRangeHighlights } from './residentRangeHighlights';
-import { embedSelected, imagePlacement, residentImagePaintOrders } from './residentObjectGeometry';
+import { embedSelected, imagePlacement, residentCellPlacement, residentImagePaintOrders, type ResidentCellPlacement } from './residentObjectGeometry';
 import { findImagePrimitiveByDocPos } from '../layout/render/displayListImages';
 
 export interface ResidentObjectRect {
@@ -18,6 +18,8 @@ export interface ResidentObjectRect {
   y: number;
   width: number;
   height: number;
+  /** Table cells only: this box is a header row's copy on a continuation page. */
+  repeatedHeader?: boolean;
 }
 
 export interface ResidentObjectGeometry {
@@ -32,6 +34,7 @@ export interface ResidentObjectGeometry {
   selected?: boolean;
   paintOrder?: number;
   nested?: boolean;
+  cell?: ResidentCellPlacement;
 }
 
 export interface ResidentFrameGeometry {
@@ -162,11 +165,13 @@ export async function readResidentFrameGeometry(
       const regions: DisplayListTableRegion[] = prefix === 'hf'
         ? [{ kind: 'header', rId: id }, { kind: 'footer', rId: id }] : [{ kind: 'body' }];
       const cellGeometry = new Map<string, ResidentObjectRect[]>();
+      const estimated = new Set<string>();
       for (const region of regions) for (const box of deriveDisplayListSelectedCellRects(list, cells, tableKeyOf, region)) {
         const key = `${box.tableKey}:${box.row}:${box.col}`;
+        if (!box.exact) estimated.add(key);
         const bounds = cellGeometry.get(key) ?? [];
         bounds.push({ pageId: frame.pages[box.pageIndex]!.pageId.toString(), pageIndex: box.pageIndex,
-          x: box.x, y: box.y, width: box.w, height: box.h });
+          x: box.x, y: box.y, width: box.w, height: box.h, ...(box.repeatedHeader ? { repeatedHeader: true } : {}) });
         cellGeometry.set(key, bounds);
       }
       for (const table of tables) for (const cell of table.cells) {
@@ -174,7 +179,8 @@ export async function readResidentFrameGeometry(
         const tableAt = projection.blockBoundaryAt(table.start);
         const boxes = cellGeometry.get(`${table.start}:${cell.row}:${cell.column}`) ?? [];
         if (at && tableAt && boxes.length) objects.push({ kind: 'cell', story: cell.story,
-          handle: issue(engine, 'cell', { story: cell.story, paraId: at.paraId, offset: 0 }, tableAt), rects: boxes });
+          handle: issue(engine, 'cell', { story: cell.story, paraId: at.paraId, offset: 0 }, tableAt), rects: boxes,
+          cell: residentCellPlacement(table, cell, !estimated.has(`${table.start}:${cell.row}:${cell.column}`)) });
       }
       for (const story of stories) {
         const spans = engine.geometryReader.paragraphSpans(story);

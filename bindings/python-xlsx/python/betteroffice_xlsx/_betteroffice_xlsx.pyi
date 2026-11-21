@@ -1,5 +1,21 @@
 import os
-from typing import final
+from typing import TypedDict, final
+
+class Viewport(TypedDict):
+    x: float
+    y: float
+    width: float
+    height: float
+
+class ViewportTarget(TypedDict):
+    sheet: int | str
+    viewport: Viewport
+
+class PngRangeTarget(TypedDict):
+    """A required range: "used", an A1 string, or an address dictionary."""
+    sheet: int | str
+    range: str | dict[str, object]
+
 
 __version__: str
 MAX_COLLABORATION_BYTES: int
@@ -8,6 +24,10 @@ def decode_font_face(
     data: bytes, codec: str, *, dict: bytes | None = None, max_output: int | None = None
 ) -> tuple[bytes, bytes | None]:
     """Decode a font pack face and return font bytes and an optional transformed payload."""
+    ...
+
+def font_substitute(family: str) -> tuple[str | None, str] | None:
+    """The substitution table entry for an Office family name as (remote family, generic family)."""
     ...
 
 class XlsxError(Exception): ...
@@ -20,6 +40,8 @@ class StaleProposalError(XlsxError):
     cells: list[str]
     targets: list[dict[str, object]]
 class NotCollaborativeError(XlsxError): ...
+class CollaborativeStructureError(XlsxError): ...
+class OperationError(XlsxError, ValueError): ...
 
 @final
 class CellError:
@@ -48,6 +70,8 @@ class Calculation:
     def cycles(self) -> int: ...
     @property
     def limited(self) -> int: ...
+    @property
+    def unevaluated(self) -> list[tuple[str, list[str]]]: ...
 
 @final
 class Mutation:
@@ -95,6 +119,8 @@ class Proposal:
     def note(self) -> str | None: ...
     @property
     def edits(self) -> list[ProposedEdit]: ...
+    @property
+    def stale_targets(self) -> list[str]: ...
 
 @final
 class Workbook:
@@ -121,6 +147,7 @@ class Workbook:
         value: str,
         *,
         now_serial: float | None = ...,
+        protected_sheets: str = ...,
     ) -> Mutation: ...
     @staticmethod
     def open_collaborative(
@@ -153,7 +180,16 @@ class Workbook:
         edits: list[tuple[str, str]],
         *,
         now_serial: float | None = ...,
+        protected_sheets: str = ...,
     ) -> Mutation: ...
+    def apply_ops_json(
+        self, transaction: str, *, now_serial: float | None = ...
+    ) -> Mutation: ...
+    def move_range_json(self, args: str, *, now_serial: float | None = ...) -> Mutation: ...
+    def edit_charts_json(self, edits: str, *, now_serial: float | None = ...) -> Mutation: ...
+    def move_chart_json(self, args: str, *, now_serial: float | None = ...) -> Mutation: ...
+    def capture_format_json(self, args: str) -> str: ...
+    def apply_format_json(self, args: str, *, now_serial: float | None = ...) -> Mutation: ...
     def propose(
         self,
         agent_id: str,
@@ -196,7 +232,13 @@ class Workbook:
     def merged_ranges(self, sheet: int | str, range: str) -> list[str]: ...
     def last_calculation(self) -> Calculation: ...
     def set_number_format(
-        self, sheet: int | str, range: str, format: str, *, now_serial: float | None = ...
+        self,
+        sheet: int | str,
+        range: str,
+        format: str,
+        *,
+        now_serial: float | None = ...,
+        protected_sheets: str = ...,
     ) -> Mutation: ...
     def set_style(
         self,
@@ -214,8 +256,10 @@ class Workbook:
         vertical_alignment: str | None = ...,
         text_wrapping: str | None = ...,
         now_serial: float | None = ...,
+        protected_sheets: str = ...,
     ) -> Mutation: ...
-    def render_png(
+    def render_png(self, target: ViewportTarget | PngRangeTarget, *, scale: float = ..., max_width: int | None = ..., max_height: int | None = ...) -> Png: ...
+    def render_sheet(
         self,
         sheet: int | str,
         *,
@@ -225,6 +269,7 @@ class Workbook:
         max_height: int | None = ...,
     ) -> Png: ...
     def save(self) -> bytes: ...
+    def _save_warnings_json(self) -> str: ...
     def save_path(self, path: str | os.PathLike[str]) -> None: ...
     def __len__(self) -> int: ...
 

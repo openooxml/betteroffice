@@ -51,6 +51,12 @@ export function documentXml(bytes: Uint8Array): string {
 }
 
 export function setupStructuralSaves() {
+  const save = setupStructuralPackageSaves();
+  return async (path: SavePath, source: Uint8Array, apply: (engine: Engine) => void): Promise<string> =>
+    documentXml(await save(path, source, apply));
+}
+
+export function setupStructuralPackageSaves() {
   const owned: Array<{ destroy(): void }> = [];
   let startWorker: (clientId?: number) => InProcessResidentWorker;
   beforeAll(async () => {
@@ -61,7 +67,7 @@ export function setupStructuralSaves() {
   afterEach(() => {
     for (const session of owned.splice(0)) session.destroy();
   });
-  return async (path: SavePath, source: Uint8Array, apply: (engine: Engine) => void): Promise<string> => {
+  return async (path: SavePath, source: Uint8Array, apply: (engine: Engine) => void): Promise<Uint8Array> => {
     if (path === 'worker-only') {
       const worker = startWorker(411);
       const client = new ResidentEngineWorkerClient(worker);
@@ -76,7 +82,7 @@ export function setupStructuralSaves() {
       apply(peer);
       resident.applyUpdate(peer.encodeStateAsUpdate());
       const saved = await client.save({ comments: [], host: hostSaveMetadata(host) });
-      return documentXml(new Uint8Array(saved.bytes));
+      return new Uint8Array(saved.bytes);
     }
     const session = await createYrsSession();
     owned.push(session);
@@ -87,7 +93,7 @@ export function setupStructuralSaves() {
       owned.push(draft);
       draft.openDocx(new Uint8Array(session.materializeDocx()!.originalBuffer!), false);
       draft.loadState(session.encodeState());
-      return documentXml((await saveYrsDocx(draft)).bytes);
+      return (await saveYrsDocx(draft)).bytes;
     }
     const host = session.openDocx(source.slice(), true).document;
     apply(session);
@@ -95,7 +101,7 @@ export function setupStructuralSaves() {
     dirty.add('body');
     const base = session.materializeDocx() as Document;
     const projected = yrsToDocument(session, mergeDocxHostMetadata(base, host), dirty.projectionOptions());
-    return documentXml(new Uint8Array(await saveEditorDocument(session, projected, [])));
+    return new Uint8Array(await saveEditorDocument(session, projected, []));
   };
 }
 

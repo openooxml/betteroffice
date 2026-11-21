@@ -27,13 +27,13 @@ thread_local! {
 }
 
 /// count one unit of array work in tests.
-fn step() {
+pub(crate) fn step() {
     #[cfg(test)]
     STEPS.with(|steps| steps.set(steps.get() + 1));
 }
 
 /// a copy of one cell of a block.
-fn copied(value: &CellValue) -> CellValue {
+pub(crate) fn copied(value: &CellValue) -> CellValue {
     #[cfg(test)]
     COPIES.with(|copies| copies.set(copies.get() + 1));
     value.clone()
@@ -46,13 +46,17 @@ pub const MAX_ARRAY_CELLS: usize = 1 << 20;
 /// a rectangular block of values, row-major.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Array {
-    rows: usize,
-    cols: usize,
-    values: Vec<CellValue>,
+    pub(crate) rows: usize,
+    pub(crate) cols: usize,
+    pub(crate) values: Vec<CellValue>,
 }
 
 impl Array {
-    fn new(rows: usize, cols: usize, values: Vec<CellValue>) -> Result<Self, ErrorValue> {
+    pub(crate) fn new(
+        rows: usize,
+        cols: usize,
+        values: Vec<CellValue>,
+    ) -> Result<Self, ErrorValue> {
         if rows == 0 || cols == 0 || rows.checked_mul(cols) != Some(values.len()) {
             return Err(ErrorValue::Value);
         }
@@ -97,7 +101,7 @@ impl Array {
         self.values
     }
 
-    fn row_values(&self, row: usize) -> &[CellValue] {
+    pub(crate) fn row_values(&self, row: usize) -> &[CellValue] {
         &self.values[row * self.cols..(row + 1) * self.cols]
     }
 
@@ -118,10 +122,12 @@ impl Array {
 /// scope the literal was written in.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Lambda {
-    params: Vec<String>,
+    pub(crate) name: Option<String>,
+    pub(crate) params: Vec<String>,
     body: Expr,
     /// budget one call costs beyond the cell it fills.
     cost: u64,
+    pub(crate) vector: Option<(bool, Vec<Rc<Lambda>>)>,
 }
 
 /// a `LET` name or `LAMBDA` parameter bound for the body being evaluated.
@@ -179,7 +185,7 @@ pub enum Value {
 }
 
 impl Value {
-    fn error(value: ErrorValue) -> Self {
+    pub(crate) fn error(value: ErrorValue) -> Self {
         Value::Scalar(err(value))
     }
 
@@ -250,14 +256,14 @@ const FREE_NODES: u64 = 8;
 
 /// inner-loop steps, a multiply-add or a separator probe, one budget unit pays
 /// for in the builtins whose work outgrows the cells they read and write.
-const STEPS_PER_UNIT: u64 = 16;
+pub(crate) const STEPS_PER_UNIT: u64 = 16;
 
 /// the budget units `steps` inner-loop steps cost.
 pub(crate) fn step_units(steps: u64) -> u64 {
     steps / STEPS_PER_UNIT
 }
 
-fn charge_steps(ctx: &EvalContext<'_>, steps: u64) -> Result<(), ErrorValue> {
+pub(crate) fn charge_steps(ctx: &EvalContext<'_>, steps: u64) -> Result<(), ErrorValue> {
     if !ctx.consume_cells(step_units(steps)) {
         return Err(ErrorValue::Num);
     }
@@ -311,15 +317,37 @@ fn reserved(rows: usize, cols: usize, values: Vec<CellValue>) -> Value {
     }
 }
 
+/// a block of numbers a builtin outside this module computes: paid for as
+/// `reserve` pays and charged `steps` inner-loop steps before `fill` runs; a
+/// non-finite cell is `#NUM!`.
+pub(crate) fn number_block(
+    ctx: &EvalContext<'_>,
+    rows: usize,
+    cols: usize,
+    steps: u64,
+    fill: impl FnOnce() -> Result<Vec<f64>, ErrorValue>,
+) -> Value {
+    result((|| {
+        reserve(ctx, rows, cols)?;
+        charge_steps(ctx, steps)?;
+        let cells = fill()?.into_iter().map(crate::functions::finite).collect();
+        Ok(reserved(rows, cols, cells))
+    })())
+}
+
 /// an output block being filled: its cells are paid for before any is
 /// computed, and each cell's text before the block keeps it.
-struct Cells<'c, 'a> {
+pub(crate) struct Cells<'c, 'a> {
     ctx: &'c EvalContext<'a>,
     values: Vec<CellValue>,
 }
 
 impl<'c, 'a> Cells<'c, 'a> {
-    fn reserve(ctx: &'c EvalContext<'a>, rows: usize, cols: usize) -> Result<Self, ErrorValue> {
+    pub(crate) fn reserve(
+        ctx: &'c EvalContext<'a>,
+        rows: usize,
+        cols: usize,
+    ) -> Result<Self, ErrorValue> {
         let count = reserve(ctx, rows, cols)?;
         Ok(Self {
             ctx,
@@ -327,7 +355,7 @@ impl<'c, 'a> Cells<'c, 'a> {
         })
     }
 
-    fn push(&mut self, value: CellValue) -> Result<(), ErrorValue> {
+    pub(crate) fn push(&mut self, value: CellValue) -> Result<(), ErrorValue> {
         if !self.ctx.keep_text(&value) {
             return Err(ErrorValue::Num);
         }
@@ -344,7 +372,7 @@ impl<'c, 'a> Cells<'c, 'a> {
         Ok(())
     }
 
-    fn block(self, rows: usize, cols: usize) -> Value {
+    pub(crate) fn block(self, rows: usize, cols: usize) -> Value {
         reserved(rows, cols, self.values)
     }
 }
@@ -382,7 +410,26 @@ fn array_value(expr: &Expr, ctx: &EvalContext<'_>) -> Value {
                 }
                 _ => binding.value(),
             },
-            None => resolved_values(expr, ctx),
+            None => match crate::eval::resolve_area(expr, ctx) {
+                Some(Ok(area)) => area_values(&used_extent(area, ctx), ctx),
+                Some(Err(error)) => Value::error(error),
+                None => {
+                    if scope.is_none()
+                        && let Some(rest) = crate::functions::strip_ascii_prefix(name, "_xleta.")
+                    {
+                        return eta_lambda(rest)
+                            .map_or_else(|| Value::error(ErrorValue::Name), Value::Lambda);
+                    }
+                    let scalar = evaluate(expr, ctx);
+                    if scalar == err(ErrorValue::Name)
+                        && scope.is_none()
+                        && let Some(lambda) = eta_lambda(name)
+                    {
+                        return Value::Lambda(lambda);
+                    }
+                    Value::Scalar(scalar)
+                }
+            },
         },
         Expr::ArrayLiteral { cols, values } => array_literal(*cols, values, ctx),
         Expr::Unary { op, expr } => map1(evaluate_array(expr, ctx), ctx, |v| {
@@ -489,7 +536,7 @@ fn used_extent(mut area: Area, ctx: &EvalContext<'_>) -> Area {
     area
 }
 
-fn area_values(area: &Area, ctx: &EvalContext<'_>) -> Value {
+pub(crate) fn area_values(area: &Area, ctx: &EvalContext<'_>) -> Value {
     match area.values_ref(ctx) {
         Ok(values) => {
             // reading the cells into a block copies their text
@@ -511,7 +558,11 @@ fn area_values(area: &Area, ctx: &EvalContext<'_>) -> Value {
 }
 
 /// read one argument as a block, whatever shape it has.
-fn argument(args: &[Expr], ctx: &EvalContext<'_>, index: usize) -> Result<Array, ErrorValue> {
+pub(crate) fn argument(
+    args: &[Expr],
+    ctx: &EvalContext<'_>,
+    index: usize,
+) -> Result<Array, ErrorValue> {
     let value = args
         .get(index)
         .map(|arg| evaluate_array(arg, ctx))
@@ -572,7 +623,7 @@ fn block_of(value: Value) -> Result<Array, ErrorValue> {
 }
 
 /// an optional scalar argument; omitted and blank arguments give `None`.
-fn optional(
+pub(crate) fn optional(
     args: &[Expr],
     ctx: &EvalContext<'_>,
     index: usize,
@@ -587,7 +638,7 @@ fn optional(
     }
 }
 
-fn optional_number(
+pub(crate) fn optional_number(
     args: &[Expr],
     ctx: &EvalContext<'_>,
     index: usize,
@@ -625,7 +676,7 @@ fn blank(value: &CellValue) -> bool {
 
 /// excel's dynamic-array ordering: blanks sort last whichever way the order
 /// runs, everything else by the usual cross-type ranking.
-fn order_values(a: &CellValue, b: &CellValue, descending: bool) -> std::cmp::Ordering {
+pub(crate) fn order_values(a: &CellValue, b: &CellValue, descending: bool) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     match (blank(a), blank(b)) {
         (true, true) => Ordering::Equal,
@@ -651,7 +702,7 @@ fn identity(slice: &[CellValue]) -> String {
             CellValue::Empty => key.push_str("n:0"),
             CellValue::Number { value } => {
                 key.push_str("n:");
-                key.push_str(&crate::eval::format_number(*value + 0.0));
+                key.push_str(&crate::eval::exact_number_text(*value + 0.0));
             }
             CellValue::Text { value } => {
                 key.push_str("t:");
@@ -700,7 +751,7 @@ fn lines(ctx: &EvalContext<'_>, data: &Array, picks: &[usize], by_row: bool) -> 
     })())
 }
 
-fn result(value: Result<Value, ErrorValue>) -> Value {
+pub(crate) fn result(value: Result<Value, ErrorValue>) -> Value {
     value.unwrap_or_else(Value::error)
 }
 
@@ -724,10 +775,7 @@ fn call(name: &str, func: Option<Func>, args: &[Expr], ctx: &EvalContext<'_>) ->
             lift(f, args, ctx, lifted_positions(&upper))
         }
         Some(f) => Value::Scalar(f.call(args, ctx)),
-        None => {
-            ctx.record_unsupported_function();
-            Value::error(ErrorValue::Name)
-        }
+        None => Value::error(crate::eval::unimplemented_call(name, ctx)),
     }
 }
 
@@ -799,6 +847,17 @@ fn lifted_positions(name: &str) -> Option<&'static [usize]> {
         "FORECAST" | "FORECAST.LINEAR" => &[0],
         "LARGE" | "SMALL" => &[1],
         "PERCENTILE" | "PERCENTILE.INC" | "QUARTILE" | "QUARTILE.INC" => &[1],
+        "IRR" => &[1],
+        "XIRR" => &[2],
+        "MIRR" => &[1, 2],
+        "XNPV" | "FVSCHEDULE" | "CELL" => &[0],
+        "T.TEST" | "TTEST" => &[2, 3],
+        "PERCENTILE.EXC" | "QUARTILE.EXC" => &[1],
+        "PERCENTRANK" | "PERCENTRANK.EXC" | "PERCENTRANK.INC" => &[1, 2],
+        "PROB" => &[2, 3],
+        "Z.TEST" | "ZTEST" => &[1, 2],
+        "DAVERAGE" | "DCOUNT" | "DCOUNTA" | "DGET" | "DMAX" | "DMIN" | "DPRODUCT" | "DSTDEV"
+        | "DSTDEVP" | "DSUM" | "DVAR" | "DVARP" => &[1],
         _ => return None,
     })
 }
@@ -809,89 +868,294 @@ fn lifts(name: &str) -> bool {
     matches!(
         name,
         "ABS"
+            | "ACCRINT"
+            | "ACCRINTM"
             | "ACOS"
+            | "ACOSH"
+            | "ACOT"
+            | "ACOTH"
+            | "AMORDEGRC"
+            | "AMORLINC"
+            | "ARABIC"
+            | "ASC"
             | "ASIN"
+            | "ASINH"
             | "ATAN"
             | "ATAN2"
+            | "ATANH"
+            | "BAHTTEXT"
+            | "BASE"
+            | "BESSELI"
+            | "BESSELJ"
+            | "BESSELK"
+            | "BESSELY"
+            | "BETA.DIST"
+            | "BETA.INV"
+            | "BETADIST"
+            | "BETAINV"
+            | "BIN2DEC"
+            | "BIN2HEX"
+            | "BIN2OCT"
+            | "BINOM.DIST"
+            | "BINOM.DIST.RANGE"
+            | "BINOM.INV"
+            | "BINOMDIST"
+            | "BITAND"
+            | "BITLSHIFT"
+            | "BITOR"
+            | "BITRSHIFT"
+            | "BITXOR"
             | "CEILING"
+            | "CEILING.MATH"
+            | "CEILING.PRECISE"
             | "CHAR"
+            | "CHIDIST"
+            | "CHIINV"
+            | "CHISQ.DIST"
+            | "CHISQ.DIST.RT"
+            | "CHISQ.INV"
+            | "CHISQ.INV.RT"
             | "CLEAN"
             | "CODE"
             | "COMBIN"
+            | "COMBINA"
+            | "COMPLEX"
+            | "CONFIDENCE"
+            | "CONFIDENCE.NORM"
+            | "CONFIDENCE.T"
             | "COS"
             | "COSH"
+            | "COT"
+            | "COTH"
+            | "COUPDAYBS"
+            | "COUPDAYS"
+            | "COUPDAYSNC"
+            | "COUPNCD"
+            | "COUPNUM"
+            | "COUPPCD"
+            | "CRITBINOM"
+            | "CSC"
+            | "CSCH"
             | "DATE"
             | "DATEDIF"
             | "DAY"
+            | "DAYS360"
+            | "DBCS"
+            | "DEC2BIN"
+            | "DEC2HEX"
+            | "DEC2OCT"
+            | "DECIMAL"
             | "DEGREES"
+            | "DELTA"
+            | "DISC"
+            | "DOLLAR"
+            | "DURATION"
             | "EDATE"
+            | "ENCODEURL"
             | "EOMONTH"
+            | "ERF"
+            | "ERF.PRECISE"
+            | "ERFC"
+            | "ERFC.PRECISE"
+            | "ERROR.TYPE"
             | "EVEN"
             | "EXACT"
             | "EXP"
+            | "EXPON.DIST"
+            | "EXPONDIST"
+            | "F.DIST"
+            | "F.DIST.RT"
+            | "F.INV"
+            | "F.INV.RT"
             | "FACT"
+            | "FACTDOUBLE"
+            | "FDIST"
             | "FIND"
+            | "FINDB"
+            | "FINV"
+            | "FISHER"
+            | "FISHERINV"
             | "FIXED"
             | "FLOOR"
+            | "FLOOR.MATH"
+            | "FLOOR.PRECISE"
+            | "GAMMA"
+            | "GAMMA.DIST"
+            | "GAMMA.INV"
+            | "GAMMADIST"
+            | "GAMMAINV"
+            | "GAMMALN"
+            | "GAMMALN.PRECISE"
+            | "GAUSS"
+            | "GESTEP"
+            | "HEX2BIN"
+            | "HEX2DEC"
+            | "HEX2OCT"
             | "HOUR"
+            | "HYPGEOM.DIST"
+            | "HYPGEOMDIST"
+            | "IMABS"
+            | "IMAGINARY"
+            | "IMARGUMENT"
+            | "IMCONJUGATE"
+            | "IMCOS"
+            | "IMCOSH"
+            | "IMCOT"
+            | "IMCSC"
+            | "IMCSCH"
+            | "IMDIV"
+            | "IMEXP"
+            | "IMLN"
+            | "IMLOG10"
+            | "IMLOG2"
+            | "IMPOWER"
+            | "IMREAL"
+            | "IMSEC"
+            | "IMSECH"
+            | "IMSIN"
+            | "IMSINH"
+            | "IMSQRT"
+            | "IMSUB"
+            | "IMTAN"
+            | "INFO"
             | "INT"
+            | "INTRATE"
             | "ISBLANK"
             | "ISERR"
             | "ISERROR"
             | "ISEVEN"
             | "ISLOGICAL"
             | "ISNA"
+            | "ISNONTEXT"
             | "ISNUMBER"
+            | "ISO.CEILING"
             | "ISODD"
             | "ISOWEEKNUM"
             | "ISTEXT"
             | "IFS"
+            | "JIS"
             | "LEFT"
+            | "LEFTB"
             | "LEN"
+            | "LENB"
             | "LN"
             | "LOG"
             | "LOG10"
+            | "LOGINV"
+            | "LOGNORM.DIST"
+            | "LOGNORM.INV"
+            | "LOGNORMDIST"
             | "LOWER"
+            | "MDURATION"
             | "MID"
+            | "MIDB"
             | "MINUTE"
             | "MOD"
             | "MONTH"
             | "MROUND"
             | "N"
+            | "NEGBINOM.DIST"
+            | "NEGBINOMDIST"
+            | "NORM.INV"
+            | "NORM.S.DIST"
+            | "NORM.S.INV"
+            | "NORMINV"
+            | "NORMSDIST"
+            | "NORMSINV"
             | "NOT"
             | "NUMBERVALUE"
+            | "OCT2BIN"
+            | "OCT2DEC"
+            | "OCT2HEX"
             | "ODD"
+            | "ODDFPRICE"
+            | "ODDFYIELD"
+            | "ODDLPRICE"
+            | "ODDLYIELD"
+            | "PERMUT"
+            | "PERMUTATIONA"
+            | "PHI"
+            | "POISSON"
+            | "POISSON.DIST"
             | "POWER"
+            | "PRICE"
+            | "PRICEDISC"
+            | "PRICEMAT"
             | "PROPER"
             | "QUOTIENT"
             | "RADIANS"
+            | "RECEIVED"
             | "REPLACE"
+            | "REPLACEB"
             | "REPT"
             | "RIGHT"
+            | "RIGHTB"
+            | "ROMAN"
             | "ROUND"
             | "ROUNDDOWN"
             | "ROUNDUP"
             | "SEARCH"
+            | "SEARCHB"
+            | "SEC"
+            | "SECH"
             | "SECOND"
             | "SIGN"
             | "SIN"
             | "SINH"
             | "SQRT"
+            | "SQRTPI"
+            | "STANDARDIZE"
             | "SUBSTITUTE"
             | "T"
+            | "T.DIST"
+            | "T.DIST.2T"
+            | "T.DIST.RT"
+            | "T.INV"
+            | "T.INV.2T"
             | "TAN"
             | "TANH"
+            | "TBILLEQ"
+            | "TBILLPRICE"
+            | "TBILLYIELD"
+            | "TDIST"
             | "TEXT"
             | "TEXTAFTER"
             | "TEXTBEFORE"
             | "TIME"
+            | "TINV"
             | "TRIM"
             | "TRUNC"
+            | "UNICHAR"
+            | "UNICODE"
             | "UPPER"
             | "VALUE"
+            | "VALUETOTEXT"
             | "WEEKDAY"
             | "WEEKNUM"
+            | "WEIBULL"
+            | "WEIBULL.DIST"
             | "YEAR"
+            | "_LONGTEXT"
+            | "RATE"
+            | "IPMT"
+            | "PPMT"
+            | "CUMIPMT"
+            | "CUMPRINC"
+            | "ISPMT"
+            | "DB"
+            | "DDB"
+            | "VDB"
+            | "SLN"
+            | "SYD"
+            | "EFFECT"
+            | "NOMINAL"
+            | "PDURATION"
+            | "RRI"
+            | "DOLLARDE"
+            | "DOLLARFR"
+            | "YIELD"
+            | "YIELDDISC"
+            | "YIELDMAT"
     )
 }
 
@@ -928,10 +1192,16 @@ fn lookup_array(name: &str) -> Option<ArrayFn> {
         "ANCHORARRAY" => anchorarray,
         "BYCOL" => bycol,
         "BYROW" => byrow,
+        "GROUPBY" => crate::functions::grouping::groupby,
         "LAMBDA" => lambda,
         "LET" => let_,
         "MAKEARRAY" => makearray,
         "MAP" => map,
+        "PIVOTBY" => crate::functions::grouping::pivotby,
+        "TRIMRANGE" => crate::functions::grouping::trimrange,
+        "_TRO_ALL" => crate::functions::grouping::trim_all,
+        "_TRO_LEADING" => crate::functions::grouping::trim_leading,
+        "_TRO_TRAILING" => crate::functions::grouping::trim_trailing,
         "REDUCE" => reduce,
         "SCAN" => scan,
         "TEXTSPLIT" => textsplit,
@@ -943,8 +1213,14 @@ fn lookup_array(name: &str) -> Option<ArrayFn> {
         "XMATCH" => xmatch,
         "LINEST" => linest,
         "TREND" => trend,
+        "GROWTH" => growth,
+        "LOGEST" => logest,
+        "MODE.MULT" => mode_mult,
         "FREQUENCY" => frequency,
         "MMULT" => mmult,
+        "MINVERSE" => crate::functions::math_extra::minverse,
+        "MUNIT" => crate::functions::math_extra::munit,
+        "RANDARRAY" => crate::functions::math_extra::randarray,
         "MAX" => max,
         "MIN" => min,
         "PRODUCT" => product,
@@ -990,6 +1266,7 @@ fn anchorarray(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
         return Value::error(ErrorValue::Ref);
     };
     let Some(range) = ctx.provider.spill_range(sid, *cell) else {
+        ctx.note_read(sid, *cell);
         return Value::Scalar(normalize_provider_value(ctx.provider.value(sid, *cell)));
     };
     let area = Area {
@@ -1014,8 +1291,8 @@ fn filter(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
             return Err(ErrorValue::Value);
         }
         let mut keep = Vec::new();
-        for position in 0..include.values.len() {
-            match to_bool(&include.values[position]) {
+        for (position, value) in include.values.iter().enumerate() {
+            match to_bool(value) {
                 Ok(true) => keep.push(position),
                 Ok(false) => {}
                 Err(error) => return Err(error),
@@ -1035,7 +1312,11 @@ fn filter(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
 
 /// charge a sort of `count` lines by `keys` keys for its comparisons before
 /// it runs.
-fn charge_sort(ctx: &EvalContext<'_>, count: usize, keys: usize) -> Result<(), ErrorValue> {
+pub(crate) fn charge_sort(
+    ctx: &EvalContext<'_>,
+    count: usize,
+    keys: usize,
+) -> Result<(), ErrorValue> {
     let depth = u64::from(usize::BITS - count.leading_zeros());
     charge_steps(ctx, (count as u64 * depth).saturating_mul(keys as u64))
 }
@@ -1266,7 +1547,10 @@ fn choose(args: &[Expr], ctx: &EvalContext<'_>, by_row: bool) -> Value {
 
 fn hstack(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
     result((|| {
-        let blocks = stack_arguments(args, ctx)?;
+        let blocks = match stack_arguments(args, ctx, true)? {
+            Stacked::Lambdas(lambdas) => return Ok(lambdas),
+            Stacked::Blocks(blocks) => blocks,
+        };
         let rows = blocks.iter().map(|block| block.rows).max().unwrap_or(1);
         let cols = blocks
             .iter()
@@ -1286,7 +1570,10 @@ fn hstack(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
 
 fn vstack(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
     result((|| {
-        let blocks = stack_arguments(args, ctx)?;
+        let blocks = match stack_arguments(args, ctx, false)? {
+            Stacked::Lambdas(lambdas) => return Ok(lambdas),
+            Stacked::Blocks(blocks) => blocks,
+        };
         let cols = blocks.iter().map(|block| block.cols).max().unwrap_or(1);
         let rows = blocks
             .iter()
@@ -1304,13 +1591,96 @@ fn vstack(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
     })())
 }
 
-fn stack_arguments(args: &[Expr], ctx: &EvalContext<'_>) -> Result<Vec<Array>, ErrorValue> {
+enum Stacked {
+    Blocks(Vec<Array>),
+    Lambdas(Value),
+}
+
+/// the functions of `values` laid side by side or stacked, one flat vector;
+/// it is paid for and held to the array limit before it is built.
+fn stack_lambdas(
+    values: Vec<Value>,
+    by_col: bool,
+    ctx: &EvalContext<'_>,
+) -> Result<Value, ErrorValue> {
+    let mut total: usize = 0;
+    for value in &values {
+        let len = match value {
+            Value::Lambda(lambda) => lambda.vector.as_ref().map_or(1, |(_, list)| list.len()),
+            _ => 1,
+        };
+        total = total.checked_add(len).ok_or(ErrorValue::Num)?;
+    }
+    if total > MAX_ARRAY_CELLS || !ctx.consume_cells(total as u64) {
+        return Err(ErrorValue::Num);
+    }
+    let mut out = Vec::with_capacity(total);
+    for value in values {
+        match value {
+            Value::Lambda(lambda) => match &lambda.vector {
+                None => out.push(lambda),
+                Some((dir, list)) if *dir == by_col => out.extend(list.iter().cloned()),
+                Some(_) => return Err(ErrorValue::Value),
+            },
+            Value::Scalar(CellValue::Error { value }) => return Err(value),
+            _ => return Err(ErrorValue::Value),
+        }
+    }
+    if out.len() == 1 {
+        return Ok(Value::Lambda(out.pop().unwrap()));
+    }
+    Ok(Value::Lambda(Rc::new(Lambda {
+        name: None,
+        params: Vec::new(),
+        body: Expr::Literal(CellValue::Empty),
+        cost: 0,
+        vector: Some((by_col, out)),
+    })))
+}
+
+fn stack_arguments(
+    args: &[Expr],
+    ctx: &EvalContext<'_>,
+    by_col: bool,
+) -> Result<Stacked, ErrorValue> {
     if args.is_empty() {
         return Err(ErrorValue::Value);
     }
-    (0..args.len())
-        .map(|index| argument(args, ctx, index))
-        .collect()
+    let mut values = Vec::with_capacity(args.len());
+    let mut functions = false;
+    for (index, arg) in args.iter().enumerate() {
+        let value = evaluate_array(arg, ctx);
+        let function = matches!(value, Value::Lambda(_));
+        if index == 0 {
+            functions = function;
+        } else if function != functions {
+            return Err(ErrorValue::Value);
+        }
+        if let Value::Scalar(CellValue::Error { value }) = value {
+            return Err(value);
+        }
+        if let Value::Lambda(lambda) = &value
+            && lambda
+                .vector
+                .as_ref()
+                .is_some_and(|(dir, _)| *dir != by_col)
+        {
+            return Err(ErrorValue::Value);
+        }
+        values.push(value);
+    }
+    if functions {
+        return stack_lambdas(values, by_col, ctx).map(Stacked::Lambdas);
+    }
+    let mut blocks = Vec::with_capacity(values.len());
+    for value in values {
+        match value {
+            Value::Scalar(value) => blocks.push(Array::new(1, 1, vec![value])?),
+            Value::Array(array) => blocks.push(array),
+            Value::Lambda(_) => return Err(ErrorValue::Value),
+        }
+    }
+    Ok(Stacked::Blocks(blocks))
 }
 
 fn tocol(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
@@ -1622,8 +1992,8 @@ fn whole_axis(arg: Option<&Expr>) -> bool {
     })
 }
 
-/// a single condition still picks one branch lazily; an array condition
-/// evaluates both and chooses per element.
+/// a single condition picks one branch lazily; an array condition chooses
+/// per element, evaluating only the branches some element picks.
 fn if_(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
     if !(2..=3).contains(&args.len()) {
         return Value::error(ErrorValue::Value);
@@ -1642,12 +2012,25 @@ fn if_(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
             Err(error) => Value::error(error),
         };
     }
-    let whenever = evaluate_array(&args[1], ctx);
+    let (rows, cols) = condition.dims();
+    let picks = |branch: bool| {
+        (0..rows).any(|row| {
+            (0..cols).any(|col| {
+                matches!(to_bool(&condition.broadcast(row, col)), Ok(picked) if picked == branch)
+            })
+        })
+    };
+    let unpicked = || Value::Scalar(CellValue::Empty);
+    let whenever = if picks(true) {
+        evaluate_array(&args[1], ctx)
+    } else {
+        unpicked()
+    };
     let otherwise = match args.get(2) {
-        Some(arg) => evaluate_array(arg, ctx),
+        Some(arg) if picks(false) => evaluate_array(arg, ctx),
+        Some(_) => unpicked(),
         None => Value::Scalar(CellValue::Bool { value: false }),
     };
-    let (rows, cols) = condition.dims();
     result((|| {
         let mut cells = Cells::reserve(ctx, rows, cols)?;
         for row in 0..rows {
@@ -1709,6 +2092,7 @@ fn fallback(args: &[Expr], ctx: &EvalContext<'_>, caught: fn(&CellValue) -> bool
     // an array primary still needs the fallback's shape, because a longer
     // fallback pads the primary and that padding is caught in turn
     let checkpoint = ctx.unsupported_checkpoint();
+    let called = ctx.uncomputable_checkpoint();
     let spent = ctx.budget_error_checkpoint();
     let other = evaluate_array(&args[1], ctx);
     // both sides answer elementwise, so a block shorter than its fallback
@@ -1720,6 +2104,7 @@ fn fallback(args: &[Expr], ctx: &EvalContext<'_>, caught: fn(&CellValue) -> bool
         // the fallback never reached the result, so neither its gaps nor what
         // it spent getting there may discard the answer
         ctx.handle_unsupported_since(checkpoint);
+        ctx.discard_uncomputable_since(called);
         ctx.handle_budget_errors_since(spent);
         return value;
     }
@@ -1797,9 +2182,7 @@ fn sum(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
 }
 
 fn product(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
-    aggregate(args, ctx, "PRODUCT", |values| {
-        num(values.iter().product::<f64>())
-    })
+    aggregate(args, ctx, "PRODUCT", crate::functions::stats::product_of)
 }
 
 fn average(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
@@ -2253,59 +2636,67 @@ fn indices(args: &[Expr], ctx: &EvalContext<'_>, name: &str, by_row: bool) -> Va
 /// more predictors. coefficients come back in reverse column order with the
 /// intercept last, which is excel's layout; `stats` adds four more rows.
 fn linest(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    fit_array(args, ctx, false)
+}
+
+/// LOGEST(known_y, [known_x], [const], [stats]): LINEST over ln y, the
+/// coefficients raised back to the m and b of y = b * m1^x1 * ...; the
+/// statistics stay those of the logarithmic fit, as excel reports them.
+fn logest(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    fit_array(args, ctx, true)
+}
+
+/// the known y values of a regression, as logarithms for the exponential
+/// fits, where a value that is not positive is `#NUM!`.
+fn regression_ys(
+    block: &Array,
+    ctx: &EvalContext<'_>,
+    exponential: bool,
+) -> Result<Vec<f64>, ErrorValue> {
+    let mut ys = Vec::with_capacity(output_cells(block.rows, block.cols)?);
+    for row in 0..block.rows {
+        for col in 0..block.cols {
+            let y = ctx.number(&block.at(row, col))?;
+            ys.push(match exponential {
+                false => y,
+                true if y > 0.0 => crate::fmath::ln(y),
+                true => return Err(ErrorValue::Num),
+            });
+        }
+    }
+    Ok(ys)
+}
+
+fn fit_array(args: &[Expr], ctx: &EvalContext<'_>, exponential: bool) -> Value {
     result((|| {
         if args.is_empty() || args.len() > 4 {
             return Err(ErrorValue::Value);
         }
         let ys_block = argument(args, ctx, 0)?;
-        let n = output_cells(ys_block.rows, ys_block.cols)?;
-        let mut ys = Vec::with_capacity(n);
-        for row in 0..ys_block.rows {
-            for col in 0..ys_block.cols {
-                ys.push(ctx.number(&ys_block.at(row, col))?);
-            }
-        }
+        let ys = regression_ys(&ys_block, ctx, exponential)?;
         // predictors as columns; a y vector laid out in rows means x is too
         let down = ys_block.cols == 1 && ys_block.rows > 1;
-        let xs: Vec<Vec<f64>> = match args.get(1) {
-            Some(_) => {
-                let xb = argument(args, ctx, 1)?;
-                let (vars, obs) = if down {
-                    (xb.cols, xb.rows)
-                } else {
-                    (xb.rows, xb.cols)
-                };
-                if obs != ys.len() {
-                    return Err(ErrorValue::Ref);
-                }
-                let mut columns = Vec::with_capacity(vars);
-                for v in 0..vars {
-                    let mut column = Vec::with_capacity(obs);
-                    for o in 0..obs {
-                        let cell = if down { xb.at(o, v) } else { xb.at(v, o) };
-                        column.push(ctx.number(&cell)?);
-                    }
-                    columns.push(column);
-                }
-                columns
-            }
-            None => vec![(1..=ys.len()).map(|i| i as f64).collect()],
+        let xs = known_x(args, ctx, ys.len(), down)?;
+        let flag = |index: usize, default: bool| match args.get(index) {
+            Some(arg) if !crate::functions::omitted(arg) => to_bool(&evaluate(arg, ctx)),
+            _ => Ok(default),
         };
-        let intercept = match args.get(2) {
-            Some(_) => to_bool(&evaluate(&args[2], ctx))?,
-            None => true,
-        };
-        let stats = match args.get(3) {
-            Some(_) => to_bool(&evaluate(&args[3], ctx))?,
-            None => false,
-        };
+        let intercept = flag(2, true)?;
+        let stats = flag(3, false)?;
         let vars = xs.len();
         let height = if stats { 5 } else { 1 };
         reserve(ctx, height, vars + 1)?;
         let fit = regress(ctx, &ys, &xs, intercept)?;
+        let coefficient = |value: f64| {
+            num(if exponential {
+                crate::fmath::exp(value)
+            } else {
+                value
+            })
+        };
         // excel emits the coefficients right to left, intercept last
-        let mut first: Vec<CellValue> = (0..vars).rev().map(|i| num(fit.beta[i])).collect();
-        first.push(num(fit.intercept));
+        let mut first: Vec<CellValue> = (0..vars).rev().map(|i| coefficient(fit.beta[i])).collect();
+        first.push(coefficient(fit.intercept));
         if !stats {
             return Ok(reserved(height, vars + 1, first));
         }
@@ -2341,25 +2732,47 @@ fn linest(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
 /// TREND(known_y, [known_x], [new_x], [const]): the least-squares line LINEST
 /// fits, evaluated at `new_x` (at the known predictors when it is omitted).
 fn trend(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    project(args, ctx, false)
+}
+
+/// GROWTH(known_y, [known_x], [new_x], [const]): the exponential curve LOGEST
+/// fits, evaluated at `new_x` (at the known predictors when it is omitted).
+fn growth(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    project(args, ctx, true)
+}
+
+/// MODE.MULT(number, ...): every most frequent value, as a column.
+fn mode_mult(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    result((|| {
+        let modes = crate::functions::statistics_extra::modes(args, ctx)?;
+        reserve(ctx, modes.len(), 1)?;
+        Ok(reserved(
+            modes.len(),
+            1,
+            modes.into_iter().map(num).collect(),
+        ))
+    })())
+}
+
+fn project(args: &[Expr], ctx: &EvalContext<'_>, exponential: bool) -> Value {
     result((|| {
         if args.is_empty() || args.len() > 4 {
             return Err(ErrorValue::Value);
         }
         let ys_block = argument(args, ctx, 0)?;
-        let n = output_cells(ys_block.rows, ys_block.cols)?;
-        let mut ys = Vec::with_capacity(n);
-        for row in 0..ys_block.rows {
-            for col in 0..ys_block.cols {
-                ys.push(ctx.number(&ys_block.at(row, col))?);
-            }
-        }
+        let ys = regression_ys(&ys_block, ctx, exponential)?;
         // predictors as columns; a y vector laid out in rows means x is too
         let down = ys_block.cols == 1 && ys_block.rows > 1;
         let xs = known_x(args, ctx, ys.len(), down)?;
         let intercept = optional_bool(args, ctx, 3, true)?;
         let fit = regress(ctx, &ys, &xs, intercept)?;
         let predict = |point: &[f64]| -> f64 {
-            fit.intercept + point.iter().zip(&fit.beta).map(|(x, b)| x * b).sum::<f64>()
+            let line = fit.intercept + point.iter().zip(&fit.beta).map(|(x, b)| x * b).sum::<f64>();
+            if exponential {
+                crate::fmath::exp(line)
+            } else {
+                line
+            }
         };
         let Some(new_block) = optional_block(args, ctx, 2)? else {
             reserve(ctx, ys_block.rows, ys_block.cols)?;
@@ -2441,7 +2854,7 @@ fn column_at(xs: &[Vec<f64>], observation: usize) -> Vec<f64> {
 }
 
 /// an optional block argument; an omitted or blank slot gives `None`.
-fn optional_block(
+pub(crate) fn optional_block(
     args: &[Expr],
     ctx: &EvalContext<'_>,
     index: usize,
@@ -2890,31 +3303,33 @@ fn lambda(args: &[Expr], _ctx: &EvalContext<'_>) -> Value {
     }
     let cost = (nodes(body) + params.len() as u64).saturating_sub(FREE_NODES);
     Value::Lambda(Rc::new(Lambda {
+        name: None,
         params,
         body: body.clone(),
         cost,
+        vector: None,
     }))
 }
 
 /// one argument of a lambda call: its value, plus the reference it stands for
 /// when the caller handed over part of a real range.
-type Argument = (Value, Option<Expr>);
+pub(crate) type Argument = (Value, Option<Expr>);
 
-fn plain(value: Value) -> Argument {
+pub(crate) fn plain(value: Value) -> Argument {
     (value, None)
 }
 
 fn callback(args: &[Expr], ctx: &EvalContext<'_>, index: usize) -> Result<Rc<Lambda>, ErrorValue> {
     match args.get(index).map(|arg| evaluate_array(arg, ctx)) {
-        Some(Value::Lambda(lambda)) => Ok(lambda),
+        Some(Value::Lambda(lambda)) if lambda.vector.is_none() => Ok(lambda),
         Some(Value::Scalar(CellValue::Error { value })) => Err(value),
         _ => Err(ErrorValue::Value),
     }
 }
 
 /// call a lambda with one value per parameter.
-fn invoke(lambda: &Lambda, argv: Vec<Argument>, ctx: &EvalContext<'_>) -> Value {
-    if lambda.params.len() != argv.len() {
+pub(crate) fn invoke(lambda: &Lambda, argv: Vec<Argument>, ctx: &EvalContext<'_>) -> Value {
+    if lambda.vector.is_some() || lambda.params.len() != argv.len() {
         return Value::error(ErrorValue::Value);
     }
     if !ctx.consume_cells(lambda.cost) {
@@ -3268,6 +3683,81 @@ fn next_char_width(source: &str, at: usize) -> usize {
         .map_or(1, char::len_utf8)
 }
 
+/// a function name without the `_xleta.`, `_xlfn.` and `_xlws.` prefixes a
+/// file writes before it.
+fn strip_eta_prefixes(mut name: &str) -> &str {
+    loop {
+        if let Some(rest) = crate::functions::strip_ascii_prefix(name, "_xleta.")
+            .or_else(|| crate::functions::strip_ascii_prefix(name, "_xlfn."))
+            .or_else(|| crate::functions::strip_ascii_prefix(name, "_xlws."))
+        {
+            name = rest;
+        } else {
+            return name;
+        }
+    }
+}
+
+/// an eta-reduced builtin such as `SUM` passed where a LAMBDA is expected:
+/// one parameter, or two for PERCENTOF's subset and total.
+fn eta_lambda(name: &str) -> Option<Rc<Lambda>> {
+    let bare = strip_eta_prefixes(name);
+    let upper = bare.to_ascii_uppercase();
+    if matches!(
+        upper.as_str(),
+        "LAMBDA"
+            | "LET"
+            | "ANCHORARRAY"
+            | "GROUPBY"
+            | "PIVOTBY"
+            | "BYROW"
+            | "BYCOL"
+            | "MAP"
+            | "REDUCE"
+            | "SCAN"
+            | "MAKEARRAY"
+    ) {
+        return None;
+    }
+    if upper == "PERCENTOF" {
+        return Some(Rc::new(Lambda {
+            name: Some(upper.clone()),
+            params: vec!["x".to_string(), "y".to_string()],
+            body: Expr::func_call(
+                upper,
+                vec![
+                    Expr::Name {
+                        scope: None,
+                        name: "x".to_string(),
+                    },
+                    Expr::Name {
+                        scope: None,
+                        name: "y".to_string(),
+                    },
+                ],
+            ),
+            cost: 0,
+            vector: None,
+        }));
+    }
+    if crate::functions::resolve(&upper).is_none() && lookup_array(&upper).is_none() {
+        return None;
+    }
+    Some(Rc::new(Lambda {
+        name: Some(upper.clone()),
+        params: vec!["x".to_string()],
+        body: Expr::func_call(
+            upper,
+            vec![Expr::Name {
+                scope: None,
+                name: "x".to_string(),
+            }],
+        ),
+        cost: 0,
+        vector: None,
+    }))
+}
+
 /// where an array formula's result lands and what it holds.
 pub struct Spill {
     pub range: CellRange,
@@ -3372,3 +3862,6 @@ pub fn evaluate_spill(
 pub fn evaluate_scalar(expr: &Expr, ctx: &EvalContext<'_>) -> CellValue {
     evaluate_array(expr, ctx).into_scalar()
 }
+
+#[cfg(test)]
+mod argument_shapes;

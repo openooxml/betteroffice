@@ -3,6 +3,8 @@ import type { Comment } from '@betteroffice/docx/types/content';
 import { readDocxFileFromInput, type DocxInput } from '@betteroffice/docx/utils';
 import {
   DocxWorkerSaveUnavailableError,
+  editorSaveKeptUnchanged,
+  editorSaveStructureDropped,
   saveEditorDocument,
   type YrsSession,
 } from '@betteroffice/docx/yrs';
@@ -182,7 +184,7 @@ export function useFileIO({
   fontFamilies?: ReadonlyMap<string, string>;
   comments: Comment[];
   documentName: string | undefined;
-  onSave: ((buffer: ArrayBuffer) => void) | undefined;
+  onSave: ((buffer: ArrayBuffer, info?: { keptUnchanged?: { structure: number; paragraphs: unknown[] }; structureDropped?: unknown[] }) => void) | undefined;
   onSaveRequest?: DocxEditorProps['onSaveRequest'];
   downloadOnSave?: boolean;
   onOpen: ((file: File) => void | Promise<void>) | undefined;
@@ -242,7 +244,8 @@ export function useFileIO({
             return buffer;
           };
           const buffer = await authority.save(task);
-          if (buffer) onSave?.(buffer);
+          if (buffer && initialSession) onSave?.(buffer, { keptUnchanged: editorSaveKeptUnchanged(initialSession), structureDropped: editorSaveStructureDropped(initialSession) });
+          else if (buffer) onSave?.(buffer);
           return buffer;
         }
         const { editor, session } = await flushedSession(pagedEditorRef, experimentalWorkerOpen);
@@ -256,7 +259,7 @@ export function useFileIO({
         }
         projected.originalBuffer = buffer;
 
-        onSave?.(buffer);
+        onSave?.(buffer, { keptUnchanged: editorSaveKeptUnchanged(session), structureDropped: editorSaveStructureDropped(session) });
         return buffer;
       } catch (error) {
         onError?.(pagedEditorRef.current?.getYrsSession() !== initialSession

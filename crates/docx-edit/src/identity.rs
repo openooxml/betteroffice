@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use docx_parse::paragraph_identity::{
     ParagraphOccurrence, allocate_paragraph_id_where, format_paragraph_id, parse_paragraph_id,
 };
-use docx_parse::paragraph_patch::{LegacyParagraphV1, ParagraphPatchV1};
+use docx_parse::paragraph_patch::{InheritanceStateV1, LegacyParagraphV1, ParagraphPatchV1};
 use docx_parse::serializer::S13TablePatch;
 use ooxml_opc::PackageBytes;
 use yrs::branch::Branch;
@@ -39,6 +39,7 @@ use yrs::{
 };
 
 use crate::bridge::run_size_provenance::ParagraphSizes;
+use crate::format::KeptReason;
 use crate::{
     EditCtx, EditResult, EditingDoc, KIND_KEY, PARA_ID, ParagraphId, STORIES, StoryId, map_string,
     pilcrows, story_ref,
@@ -67,8 +68,40 @@ fn fresh_generation() -> String {
 
 #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
 pub(crate) fn entropy() -> [u64; 2] {
-    let draw = || (js_sys::Math::random() * 9_007_199_254_740_992.0) as u64;
-    [draw() ^ ((js_sys::Date::now() as u64) << 11), draw()]
+    platform_random().unwrap_or_else(|| [fallback_draw(), fallback_draw()])
+}
+
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+pub(crate) fn fallback_draw() -> u64 {
+    combine_draws(js_sys::Math::random(), js_sys::Math::random())
+}
+
+/// One 64-bit word from two draws in `[0, 1)`: 32 high bits from `high`, 32 low bits from `low`.
+#[cfg_attr(not(all(feature = "wasm", target_arch = "wasm32")), allow(dead_code))]
+pub(crate) fn combine_draws(high: f64, low: f64) -> u64 {
+    let half = |draw: f64| (draw * 4_294_967_296.0).clamp(0.0, 4_294_967_295.0) as u64;
+    half(high) << 32 | half(low)
+}
+
+/// Full 64-bit words from `globalThis.crypto.getRandomValues`, or `None` when the host lacks it
+/// or its lookup or call fails.
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+pub(crate) fn platform_random<const N: usize>() -> Option<[u64; N]> {
+    use wasm_bindgen::JsCast;
+    let crypto = js_sys::Reflect::get(&js_sys::global(), &"crypto".into()).ok()?;
+    let fill = js_sys::Reflect::get(&crypto, &"getRandomValues".into())
+        .ok()?
+        .dyn_into::<js_sys::Function>()
+        .ok()?;
+    let buffer = js_sys::Uint8Array::new_with_length((N * 8) as u32);
+    let target: &wasm_bindgen::JsValue = buffer.as_ref();
+    fill.call1(&crypto, target).ok()?;
+    let bytes = buffer.to_vec();
+    Some(std::array::from_fn(|index| {
+        let mut word = [0u8; 8];
+        word.copy_from_slice(&bytes[index * 8..index * 8 + 8]);
+        u64::from_le_bytes(word)
+    }))
 }
 
 #[cfg(not(all(feature = "wasm", target_arch = "wasm32")))]
@@ -291,6 +324,15 @@ pub struct ParagraphSavePlan {
     pub patched_parts: Vec<(String, Vec<(u32, String)>)>,
     pub spliced_parts: Vec<SplicedPart>,
     pub section_spliced_parts: Vec<SplicedPart>,
+    /// Parts no paragraph of which can be spliced, because the parser does not read them as
+    /// written, whose changes are all run formatting: each is written from the model, or kept as
+    /// its source when that would drop structure.
+    pub whole_parts: Vec<SplicedPart>,
+    /// `(part path, ordinals)`: the paragraphs an edit changed or removed in a part with no splice
+    /// plan, which a whole write of it may rightly change. Parts are sorted by path in byte order
+    /// (`header10` before `header2`) and each part's ordinals ascend, so the list is the same in
+    /// every session.
+    pub touched_parts: Vec<(String, Vec<u32>)>,
 }
 
 /// A story part whose stories hold the paragraphs seeded from it that they still hold in the
@@ -312,6 +354,9 @@ pub struct SplicedPart {
     pub paragraph_patches: Vec<ParagraphPatchV1>,
     pub legacy_paragraphs: Vec<LegacyParagraphV1>,
     pub table_patches: Vec<S13TablePatch>,
+    /// The ordinals among `changed` whose text, embeds and paragraph properties are as seeded,
+    /// only their run formatting changed.
+    pub format_only: Vec<u32>,
 }
 
 impl Eq for SplicedPart {}
@@ -436,18 +481,24 @@ pub(crate) struct SourceIndex {
     #[serde(skip)]
     group_pictures: OnceLock<crate::bridge::GroupPictureSources>,
     #[serde(skip)]
+    render_theme: OnceLock<docx_parse::Theme>,
+    #[serde(skip)]
     run_size_sources: Mutex<BTreeMap<String, Option<Arc<ParagraphSizes>>>>,
     #[serde(skip)]
     run_size_paragraphs: Mutex<BTreeMap<usize, BTreeMap<u32, docx_parse::xml::XmlElement>>>,
     #[serde(skip)]
     run_size_seeded: OnceLock<SeededUnitDigests>,
+    /// Seeded digests of paragraphs read from the session while it was unchanged since seeding,
+    /// keyed like [`Self::run_size_seeded`].
+    #[serde(skip)]
+    run_size_unchanged: Mutex<BTreeMap<String, (String, [u8; 32])>>,
 }
 
 type SeededUnitDigests = BTreeMap<String, Option<(String, [u8; 32])>>;
 
 #[derive(Default)]
 struct SeedStates {
-    stories: HashMap<String, StoryState>,
+    stories: HashMap<String, Arc<StoryState>>,
     patch_table_styles: crate::seed::PatchTableStyles,
 }
 
@@ -509,6 +560,7 @@ impl SourceIndex {
             }
         }
         self.bytes = bytes;
+        self.render_theme = OnceLock::new();
         Ok(())
     }
 
@@ -526,8 +578,55 @@ impl SourceIndex {
             .clone()
     }
 
+    pub(crate) fn render_theme(&self) -> &docx_parse::Theme {
+        self.render_theme.get_or_init(|| {
+            ooxml_opc::RetainedPackage::from_bytes(self.bytes())
+                .ok()
+                .as_ref()
+                .and_then(crate::bridge::package_font_theme)
+                .unwrap_or_default()
+        })
+    }
+
     pub(crate) fn bytes(&self) -> PackageBytes {
         self.bytes.clone()
+    }
+
+    /// Whether any of `ordinals` in `part` is a paragraph [`rewriting_loses_source_runs`]; an
+    /// unreadable part or paragraph counts as one.
+    fn rewrite_loses_source_runs(
+        &self,
+        part: &SourcePart,
+        ordinals: &[u32],
+        loses: fn(&str) -> bool,
+    ) -> bool {
+        if ordinals.is_empty() {
+            return false;
+        }
+        let read = || -> Option<String> {
+            let package = ooxml_opc::RetainedPackage::from_bytes(self.bytes()).ok()?;
+            let position = package.parts().position(|(path, _)| path == part.path())?;
+            String::from_utf8(package.read(position).ok()?).ok()
+        };
+        let Some(xml) = read() else {
+            return true;
+        };
+        ordinals.iter().any(|&ordinal| {
+            let Some(start) = part
+                .occurrence(ordinal)
+                .map(|occurrence| occurrence.tag.start)
+            else {
+                return true;
+            };
+            docx_parse::serializer::element_span(&xml[start..], &[])
+                .is_none_or(|span| loses(&xml[start..][span]))
+        })
+    }
+
+    fn part_xml(&self, part: &SourcePart) -> Option<String> {
+        let package = ooxml_opc::RetainedPackage::from_bytes(self.bytes()).ok()?;
+        let position = package.parts().position(|(path, _)| path == part.path())?;
+        String::from_utf8(package.read(position).ok()?).ok()
     }
 
     fn paragraph_xml(&self, part: &SourcePart, ordinal: u32) -> Option<String> {
@@ -545,35 +644,66 @@ impl SourceIndex {
             return None;
         }
         self.view_of(key)?;
-        let seeded = self.run_size_seeded.get_or_init(|| {
-            #[cfg(test)]
-            RUN_SIZE_SEEDED_SNAPSHOTS.with(|count| count.set(count.get() + 1));
-            let mut units = BTreeMap::new();
-            for (story, state) in self.seed_states() {
-                for unit in &state.units {
-                    if let Some(key) = &unit.key {
-                        match units.entry(key.clone()) {
-                            std::collections::btree_map::Entry::Vacant(entry) => {
-                                entry.insert(Some((story.clone(), unit.digest)));
-                            }
-                            std::collections::btree_map::Entry::Occupied(mut entry) => {
-                                entry.insert(None);
+        let unchanged = self.run_size_unchanged.lock().unwrap().get(key).cloned();
+        let (seed_story, fingerprint) = match unchanged {
+            Some(seeded) => seeded,
+            None => {
+                let seeded = self.run_size_seeded.get_or_init(|| {
+                    #[cfg(test)]
+                    RUN_SIZE_SEEDED_SNAPSHOTS.with(|count| count.set(count.get() + 1));
+                    let mut units = BTreeMap::new();
+                    for (story, state) in self.seed_states() {
+                        for unit in &state.units {
+                            if let Some(key) = &unit.key {
+                                match units.entry(key.clone()) {
+                                    std::collections::btree_map::Entry::Vacant(entry) => {
+                                        entry.insert(Some((story.clone(), unit.digest)));
+                                    }
+                                    std::collections::btree_map::Entry::Occupied(mut entry) => {
+                                        entry.insert(None);
+                                    }
+                                }
                             }
                         }
                     }
-                }
+                    units
+                });
+                seeded.get(key)?.clone()?
             }
-            units
-        });
-        let (seed_story, fingerprint) = seeded.get(key)?.as_ref()?;
+        };
         if seed_story != story {
             return None;
         }
         let mut cache = self.run_size_sources.lock().unwrap();
         cache
             .entry(key.to_owned())
-            .or_insert_with(|| self.collect_run_sizes(key, *fingerprint).map(Arc::new))
+            .or_insert_with(|| self.collect_run_sizes(key, fingerprint).map(Arc::new))
             .clone()
+    }
+
+    /// Whether a paragraph read from the session now is what seeding recorded: no commit has
+    /// landed since seeding, seed states are not yet known, and the package was opened under
+    /// its own digest, so the session's stories are those a reseed would give.
+    pub(crate) fn reads_as_seeded(&self, doc: &EditingDoc) -> bool {
+        doc.unchanged_since_seeded()
+            && !self.seed_states_initialized()
+            && self.opened_under_own_digest()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reseed_for_tests(&self) {
+        self.seed_states();
+    }
+
+    /// Records the seeded digest of the paragraph `key` closes in `story`, read from a session
+    /// for which [`Self::reads_as_seeded`] holds, where `key` closes no other paragraph, so a
+    /// run size proof for it needs no seed states.
+    pub(crate) fn note_seeded_run_size(&self, key: &str, story: &str, fingerprint: [u8; 32]) {
+        self.run_size_unchanged
+            .lock()
+            .unwrap()
+            .entry(key.to_owned())
+            .or_insert_with(|| (story.to_owned(), fingerprint));
     }
 
     fn collect_run_sizes(&self, key: &str, fingerprint: [u8; 32]) -> Option<ParagraphSizes> {
@@ -688,9 +818,11 @@ impl SourceIndex {
             reseed_calls: std::sync::atomic::AtomicUsize::new(0),
             own_digest: OnceLock::new(),
             group_pictures: OnceLock::new(),
+            render_theme: OnceLock::new(),
             run_size_sources: Mutex::new(BTreeMap::new()),
             run_size_paragraphs: Mutex::new(BTreeMap::new()),
             run_size_seeded: OnceLock::new(),
+            run_size_unchanged: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -789,15 +921,22 @@ impl SourceIndex {
     }
 
     /// Every story as seeded; see [`StoryState`].
-    fn seed_states(&self) -> &HashMap<String, StoryState> {
-        &self.seed_states.get_or_init(|| self.reseeded()).stories
+    fn seed_states(&self) -> &HashMap<String, Arc<StoryState>> {
+        self.seed_states_or(|| self.reseeded())
     }
 
     /// [`Self::seed_states`], taken from `seeded` when not yet known: what a session's stories
     /// hold while unchanged since it seeded them from this package, which seeding a scratch
     /// document again would only repeat.
-    fn seed_states_or(&self, seeded: impl FnOnce() -> SeedStates) -> &HashMap<String, StoryState> {
-        &self.seed_states.get_or_init(seeded).stories
+    fn seed_states_or(
+        &self,
+        seeded: impl FnOnce() -> SeedStates,
+    ) -> &HashMap<String, Arc<StoryState>> {
+        if let Some(seeded) = self.seed_states.get() {
+            return &seeded.stories;
+        }
+        let seeded = seeded();
+        &self.seed_states.get_or_init(|| seeded).stories
     }
 
     /// Whether the package was opened under its own digest, the one seeding it again derives
@@ -815,8 +954,9 @@ impl SourceIndex {
         if crate::seed::seed_stories(&scratch, &self.bytes).is_err() {
             return SeedStates::default();
         }
+        let txn = scratch.yrs_doc().transact();
         SeedStates {
-            stories: story_states(&scratch),
+            stories: story_states_within(&scratch, &txn, None).unwrap_or_default(),
             patch_table_styles: scratch
                 .source_metadata()
                 .map(|metadata| metadata.patch_table_styles().clone())
@@ -857,7 +997,7 @@ pub(crate) fn source_index(source: &Mutex<Option<SourcePackage>>) -> Option<Arc<
 
 /// What a save projects from one story, compared with the story as seeded
 /// to decide whether its part saves as its source bytes.
-#[derive(Clone)]
+#[derive(Debug, PartialEq)]
 struct StoryState {
     root: String,
     /// Digest of every segment the projection reads: see [`story_fingerprint`].
@@ -869,9 +1009,120 @@ struct StoryState {
     comments: BTreeMap<String, Vec<(u32, u32)>>,
 }
 
+impl StoryState {
+    fn same_projection(&self, other: &Self) -> bool {
+        self.root == other.root
+            && self.fingerprint == other.fingerprint
+            && self.comments == other.comments
+            && self.units.len() == other.units.len()
+            && self
+                .units
+                .iter()
+                .zip(&other.units)
+                .all(|(unit, other)| unit.same_projection(other))
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct StoryStateCache {
+    generation: u64,
+    media: Option<Arc<docx_parse::media::MediaTable>>,
+    entries: HashMap<String, CachedStoryState>,
+}
+
+struct CachedStoryState {
+    revision: u64,
+    state: Arc<StoryState>,
+    pending_trim: bool,
+}
+
+impl StoryStateCache {
+    pub(crate) fn clear(&mut self) {
+        *self = Self {
+            generation: self.generation.wrapping_add(1),
+            ..Self::default()
+        };
+    }
+
+    fn has_media(&self, media: &Option<Arc<docx_parse::media::MediaTable>>) -> bool {
+        match (&self.media, media) {
+            (Some(before), Some(now)) => Arc::ptr_eq(before, now),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+
+    fn retain_patch_segments(
+        &mut self,
+        seeded: &HashMap<String, Arc<StoryState>>,
+        by_key: &UnitIndex<'_>,
+    ) {
+        if !self.entries.values().any(|cached| cached.pending_trim) {
+            return;
+        }
+        if !by_key.unique {
+            return;
+        }
+        for (story, cached) in &mut self.entries {
+            if !cached.pending_trim {
+                continue;
+            }
+            if let Some(seed) = seeded.get(story) {
+                if Arc::ptr_eq(&cached.state, seed) {
+                    cached.pending_trim = false;
+                    continue;
+                }
+                if cached.state.same_projection(seed) {
+                    cached.state = Arc::clone(seed);
+                    cached.pending_trim = false;
+                    continue;
+                }
+            }
+            let Some(state) = Arc::get_mut(&mut cached.state) else {
+                continue;
+            };
+            for unit in &mut state.units {
+                if let Some((_, seed)) = unit.key.as_deref().and_then(|key| by_key.get(key))
+                    && unit.digest == seed.digest
+                    && unit.content_digest == seed.content_digest
+                {
+                    if unit.same_projection(seed) {
+                        unit.projection = Arc::clone(&seed.projection);
+                    }
+                    unit.segments = None;
+                }
+            }
+            cached.pending_trim = false;
+        }
+    }
+
+    pub(crate) fn evict_root_changes(
+        cache: &Mutex<Self>,
+        txn: &TransactionMut<'_>,
+        events: &yrs::types::Events,
+    ) {
+        for event in events.iter() {
+            if let Event::Map(event) = event
+                && event.path().is_empty()
+            {
+                let mut cache = cache.lock().unwrap();
+                for story in event.keys(txn).keys() {
+                    cache.entries.remove(story.as_ref());
+                }
+            }
+        }
+    }
+}
+
 /// One paragraph's segments in a story, or the segments after its last pilcrow.
 #[derive(Clone, Debug, PartialEq)]
 struct UnitState {
+    projection: Arc<UnitProjection>,
+    segments: Option<Vec<crate::StorySegment>>,
+}
+
+#[derive(Debug, PartialEq)]
+struct UnitProjection {
     /// The session key of the pilcrow closing the unit.
     key: Option<String>,
     /// Digest of all the unit's segments.
@@ -883,24 +1134,211 @@ struct UnitState {
     section_digest: [u8; 32],
     /// Whether the unit holds anything besides those embeds and its pilcrow.
     inline: bool,
-    segments: Vec<crate::StorySegment>,
     markers: Vec<(u32, String, bool)>,
 }
 
+impl std::ops::Deref for UnitState {
+    type Target = UnitProjection;
+
+    fn deref(&self) -> &Self::Target {
+        &self.projection
+    }
+}
+
 impl UnitState {
+    fn same_projection(&self, other: &Self) -> bool {
+        self.projection.same_projection(&other.projection)
+    }
+
+    fn from_projection(
+        projection: UnitProjection,
+        segments: Vec<crate::StorySegment>,
+        seeded: Option<&UnitIndex<'_>>,
+    ) -> Self {
+        let seed = seeded
+            .and_then(|seeded| projection.key.as_deref().and_then(|key| seeded.get(key)))
+            .map(|(_, unit)| *unit);
+        let segments = if seed.is_some_and(|seed| {
+            projection.digest == seed.digest && projection.content_digest == seed.content_digest
+        }) {
+            None
+        } else {
+            Some(segments)
+        };
+        let projection = match seed {
+            Some(seed) if projection.same_projection(&seed.projection) => {
+                Arc::clone(&seed.projection)
+            }
+            _ => {
+                #[cfg(test)]
+                UNIT_PROJECTIONS.with(|count| count.set(count.get() + 1));
+                Arc::new(projection)
+            }
+        };
+        Self {
+            projection,
+            segments,
+        }
+    }
+
     fn has_blocks(&self) -> bool {
         use sha2::{Digest, Sha256};
         self.blocks != <[u8; 32]>::from(Sha256::new().finalize())
     }
 }
 
-fn story_states(doc: &EditingDoc) -> HashMap<String, StoryState> {
-    let txn = doc.yrs_doc().transact();
-    story_states_in(doc, &txn)
+impl UnitProjection {
+    fn same_projection(&self, other: &Self) -> bool {
+        self.key == other.key
+            && self.digest == other.digest
+            && self.blocks == other.blocks
+            && self.content_digest == other.content_digest
+            && self.section_digest == other.section_digest
+            && self.inline == other.inline
+    }
 }
 
-fn story_states_in(doc: &EditingDoc, txn: &Transaction<'_>) -> HashMap<String, StoryState> {
-    story_states_within(doc, txn, None).unwrap_or_default()
+#[derive(Clone, Copy)]
+struct SaveSeeds<'a> {
+    stories: &'a HashMap<String, Arc<StoryState>>,
+    units: &'a UnitIndex<'a>,
+}
+
+#[cfg(test)]
+fn story_states(doc: &EditingDoc) -> HashMap<String, Arc<StoryState>> {
+    let txn = doc.yrs_doc().transact();
+    story_states_in(doc, &txn, None)
+}
+
+fn story_states_in(
+    doc: &EditingDoc,
+    txn: &Transaction<'_>,
+    seeded: Option<SaveSeeds<'_>>,
+) -> HashMap<String, Arc<StoryState>> {
+    #[cfg(test)]
+    if doc.save_story_cache_disabled.load(Ordering::Relaxed) {
+        return story_states_within(doc, txn, None).unwrap_or_default();
+    }
+    let compacted = seeded.is_some_and(|seeded| seeded.units.unique);
+    let scan = doc.committed_scan(txn);
+    let revisions: Vec<_> = {
+        let revisions = doc.story_revisions.lock().unwrap();
+        scan.stories
+            .iter()
+            .map(|story| revisions.stamped.get(story.as_str()).copied())
+            .collect()
+    };
+    let media = doc.media_table();
+    let comments = scan
+        .stories
+        .iter()
+        .map(|story| crate::canonical::story_comment_anchors(txn, story));
+    let inputs: Vec<_> = scan.stories.iter().zip(revisions).zip(comments).collect();
+    let mut states = HashMap::new();
+    let mut missing = Vec::new();
+    let generation = {
+        let mut cache = doc.save_story_states.lock().unwrap();
+        if !cache.has_media(&media) {
+            cache.clear();
+            cache.media = media.clone();
+        }
+        cache
+            .entries
+            .retain(|story, _| scan.stories.binary_search(story).is_ok());
+        for ((story, revision), comments) in inputs {
+            if let Some(cached) = cache.entries.get(story)
+                && revision == Some(cached.revision)
+                && cached.state.root == scan.root(story)
+                && cached.state.comments == comments
+            {
+                states.insert(story.clone(), Arc::clone(&cached.state));
+            } else {
+                cache.entries.remove(story);
+                missing.push((story, revision, comments));
+            }
+        }
+        cache.generation
+    };
+    let mut computed = Vec::new();
+    for (story, revision, comments) in missing {
+        let Some((fingerprint, units, same_seed)) =
+            story_fingerprint_for_save(doc, txn, story, &comments, &mut None, seeded)
+        else {
+            continue;
+        };
+        let seed = seeded.and_then(|seeded| seeded.stories.get(story));
+        let state = match seed {
+            Some(seed)
+                if same_seed
+                    && fingerprint == seed.fingerprint
+                    && seed.root == scan.root(story)
+                    && seed.comments == comments =>
+            {
+                Arc::clone(seed)
+            }
+            _ => Arc::new(StoryState {
+                root: scan.root(story).to_owned(),
+                fingerprint,
+                units,
+                comments,
+            }),
+        };
+        if let Some(revision) = revision {
+            computed.push((story, revision));
+        }
+        states.insert(story.clone(), state);
+    }
+    if computed.is_empty() {
+        return states;
+    }
+    let current_scan = doc.committed_scan(txn);
+    let current_media = doc.media_table();
+    let current_revisions: Vec<_> = {
+        let revisions = doc.story_revisions.lock().unwrap();
+        computed
+            .iter()
+            .map(|(story, _)| revisions.stamped.get(story.as_str()).copied())
+            .collect()
+    };
+    let validated: Vec<_> = computed
+        .into_iter()
+        .zip(current_revisions)
+        .filter_map(|((story, revision), current)| {
+            let state = &states[story];
+            (current == Some(revision)
+                && current_scan.stories.binary_search(story).is_ok()
+                && state.root == current_scan.root(story)
+                && crate::canonical::story_comment_anchors(txn, story) == state.comments)
+                .then_some((story, revision))
+        })
+        .collect();
+    let mut cache = doc.save_story_states.lock().unwrap();
+    if cache.generation != generation
+        || !cache.has_media(&media)
+        || !cache.has_media(&current_media)
+    {
+        return states;
+    }
+    for (story, revision) in validated {
+        let state = &states[story];
+        if let Some(cached) = cache.entries.get(story)
+            && cached.revision == revision
+            && cached.state.root == state.root
+            && cached.state.comments == state.comments
+        {
+            states.insert(story.clone(), Arc::clone(&cached.state));
+        } else {
+            cache.entries.insert(
+                story.clone(),
+                CachedStoryState {
+                    revision,
+                    state: Arc::clone(state),
+                    pending_trim: !compacted,
+                },
+            );
+        }
+    }
+    states
 }
 
 /// [`story_states_in`] within `budget` bytes, when given one, of media URLs
@@ -910,7 +1348,7 @@ fn story_states_within(
     doc: &EditingDoc,
     txn: &Transaction<'_>,
     mut budget: Option<usize>,
-) -> Option<HashMap<String, StoryState>> {
+) -> Option<HashMap<String, Arc<StoryState>>> {
     let (scan, mut comments) = {
         let scan = doc.committed_scan(txn);
         let comments: HashMap<String, BTreeMap<String, Vec<(u32, u32)>>> = scan
@@ -934,12 +1372,12 @@ fn story_states_within(
             continue;
         };
         let root = scan.root(story).to_owned();
-        let state = StoryState {
+        let state = Arc::new(StoryState {
             root,
             fingerprint,
             units,
             comments,
-        };
+        });
         states.insert(story.clone(), state);
     }
     Some(states)
@@ -1217,6 +1655,9 @@ thread_local! {
     pub(crate) static STORY_FINGERPRINTS: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
+    static UNIT_PROJECTIONS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
     pub(crate) static RUN_SIZE_FINGERPRINTS: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
@@ -1313,137 +1754,378 @@ fn story_fingerprint_within(
     comments: &BTreeMap<String, Vec<(u32, u32)>>,
     budget: &mut Option<usize>,
 ) -> Option<([u8; 32], Vec<UnitState>)> {
-    use sha2::{Digest, Sha256};
-    #[cfg(test)]
-    STORY_FINGERPRINTS.with(|count| count.set(count.get() + 1));
-    let mut segments = doc.story_segments_in(txn, story).ok()?;
-    strip_display_only_keys(&mut segments);
-    if let Some(media) = doc.media_table() {
-        match budget.as_mut() {
-            None => crate::media::write_segment_data_urls(&mut segments, &media).ok()?,
-            Some(budget) => {
-                let written =
-                    crate::media::write_segment_data_urls_within(&mut segments, &media, budget);
-                if !written.ok()? {
-                    *budget = 0;
-                    return None;
+    story_fingerprint_for_save(doc, txn, story, comments, budget, None)
+        .map(|(fingerprint, units, _)| (fingerprint, units))
+}
+
+fn story_fingerprint_for_save(
+    doc: &EditingDoc,
+    txn: &Transaction<'_>,
+    story: &str,
+    comments: &BTreeMap<String, Vec<(u32, u32)>>,
+    budget: &mut Option<usize>,
+    seeded: Option<SaveSeeds<'_>>,
+) -> Option<([u8; 32], Vec<UnitState>, bool)> {
+    let mut fingerprint = StoryFingerprint::start(
+        doc,
+        txn,
+        story,
+        comments,
+        *budget,
+        seeded,
+        PRIME_SLICE_SEGMENTS,
+    )?;
+    fingerprint.advance(txn, budget, usize::MAX)?;
+    fingerprint.finish()
+}
+
+/// What a [`EditingDoc::prime_save_seed_states_slice`] call left: seed states known, more
+/// slices to go, or a prime this session declines.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrimeSlice {
+    Known,
+    Pending,
+    Declined,
+}
+
+/// Story segments read per slice.
+const PRIME_SLICE_SEGMENTS: usize = 512;
+/// What reading and closing a story, and taking each segment apart, count against a slice's
+/// `max_bytes`, beside the canonical bytes digested.
+const PRIME_STORY_COST: usize = 1024;
+const PRIME_SEGMENT_COST: usize = 64;
+/// The product worker's save seed caps (`residentEngineWorker.ts`).
+#[cfg_attr(not(test), allow(dead_code))]
+const SAVE_SEED_MAX_PARAGRAPHS: u32 = 4096;
+#[cfg_attr(not(test), allow(dead_code))]
+const SAVE_SEED_MAX_INFLATED_BYTES: u32 = 16 * 1024 * 1024;
+
+/// A save seed state prime in progress between slices.
+pub(crate) struct PrimeProgress {
+    epoch: u64,
+    max_paragraphs: u32,
+    phase: PrimePhase,
+    budget: Option<usize>,
+    stories: std::collections::VecDeque<String>,
+    roots: HashMap<String, String>,
+    anchors: HashMap<String, crate::canonical::CommentAnchors>,
+    comments: HashMap<String, BTreeMap<String, Vec<(u32, u32)>>>,
+    states: HashMap<String, Arc<StoryState>>,
+    current: Option<(String, StoryFingerprint<'static>)>,
+    scan: Option<ScanBuilder>,
+    kept: HashMap<String, Vec<crate::PendingSegment>>,
+}
+
+/// The setup step a prime takes next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrimePhase {
+    Scan,
+    Anchors,
+    Stories,
+}
+
+/// A story's [`story_fingerprint_for_save`], taken a few segments at a time.
+struct StoryFingerprint<'a> {
+    story: String,
+    seeded: Option<SaveSeeds<'a>>,
+    cursor: crate::StorySegmentCursor,
+    vanished: bool,
+    chunk: usize,
+    media: Option<Arc<docx_parse::media::MediaTable>>,
+    urls: crate::media::SegmentDataUrls,
+    text: usize,
+    segments: std::vec::IntoIter<crate::StorySegment>,
+    boundaries: std::iter::Peekable<std::vec::IntoIter<(u32, String, bool)>>,
+    units: Vec<UnitState>,
+    unit: UnitDigest,
+    blocks: sha2::Sha256,
+    block_content: Vec<serde_json::Value>,
+    inline_content: sha2::Sha256,
+    section_content: sha2::Sha256,
+    inline: bool,
+    unit_segments: Vec<crate::StorySegment>,
+    markers: Vec<(u32, String, bool)>,
+    block_positions: Vec<u32>,
+    start: u32,
+    position: u32,
+    bytes: Vec<u8>,
+    section_bytes: Vec<u8>,
+    /// The cost charged over every [`Self::advance`] call, counted as each segment goes in.
+    charged: u64,
+}
+
+impl<'a> StoryFingerprint<'a> {
+    fn start(
+        doc: &EditingDoc,
+        txn: &Transaction<'_>,
+        story: &str,
+        comments: &BTreeMap<String, Vec<(u32, u32)>>,
+        budget: Option<usize>,
+        seeded: Option<SaveSeeds<'a>>,
+        chunk: usize,
+    ) -> Option<Self> {
+        let cursor = || doc.story_segment_cursor_in(txn, story).ok();
+        Self::start_from(doc, story, comments, budget, seeded, chunk, cursor)
+    }
+
+    /// [`Self::start`] over the segments `cursor` gives.
+    fn start_from(
+        doc: &EditingDoc,
+        story: &str,
+        comments: &BTreeMap<String, Vec<(u32, u32)>>,
+        budget: Option<usize>,
+        seeded: Option<SaveSeeds<'a>>,
+        chunk: usize,
+        cursor: impl FnOnce() -> Option<crate::StorySegmentCursor>,
+    ) -> Option<Self> {
+        use sha2::Digest;
+        #[cfg(test)]
+        STORY_FINGERPRINTS.with(|count| count.set(count.get() + 1));
+        let cursor = cursor()?;
+        let mut boundaries: Vec<(u32, String, bool)> = comments
+            .iter()
+            .flat_map(|(key, anchors)| {
+                anchors.iter().flat_map(move |(start, end)| {
+                    [(*start, key.clone(), false), (*end, key.clone(), true)]
+                })
+            })
+            .collect();
+        boundaries.sort_unstable();
+        Some(Self {
+            story: story.to_owned(),
+            seeded,
+            cursor,
+            vanished: false,
+            chunk: chunk.max(1),
+            media: doc.media_table(),
+            urls: crate::media::SegmentDataUrls::new(budget),
+            text: 0,
+            segments: Vec::new().into_iter(),
+            boundaries: boundaries.into_iter().peekable(),
+            units: Vec::new(),
+            unit: UnitDigest::default(),
+            blocks: sha2::Sha256::new(),
+            block_content: Vec::new(),
+            inline_content: sha2::Sha256::new(),
+            section_content: sha2::Sha256::new(),
+            inline: false,
+            unit_segments: Vec::new(),
+            markers: Vec::new(),
+            block_positions: Vec::new(),
+            start: 0,
+            position: 0,
+            bytes: Vec::new(),
+            section_bytes: Vec::new(),
+            charged: 0,
+        })
+    }
+
+    /// Digests segments until about `max_bytes` canonical bytes went in, answering whether every
+    /// segment did and how many bytes this call digested; `None` where the whole story yields
+    /// none.
+    fn advance(
+        &mut self,
+        txn: &Transaction<'_>,
+        budget: &mut Option<usize>,
+        max_bytes: usize,
+    ) -> Option<(bool, usize)> {
+        use sha2::Digest;
+        let seeded_units = self
+            .seeded
+            .map(|seeded| seeded.units)
+            .filter(|units| units.unique);
+        let mut digested = 0usize;
+        while let Some(segment) = self.next_segment(txn, budget)? {
+            segment_canonical(&segment, &mut self.bytes, &mut self.section_bytes);
+            let segment_bytes = self.bytes.len() + PRIME_SEGMENT_COST;
+            digested = digested.saturating_add(segment_bytes);
+            self.charged = self.charged.saturating_add(segment_bytes as u64);
+            self.unit.segment(&self.bytes);
+            self.section_content.update(&self.section_bytes);
+            self.section_content.update(b"\n");
+            let block = matches!(&segment.content, crate::SegmentContent::OtherEmbed { kind, .. }
+                if matches!(kind.as_str(), "table" | "blockSdt"));
+            if !block {
+                self.inline_content.update(&self.bytes);
+                self.inline_content.update(b"\n");
+            }
+            self.position += match &segment.content {
+                crate::SegmentContent::Text(text) => {
+                    u32::try_from(text.encode_utf16().count()).ok()?
                 }
+                _ => 1,
+            };
+            if block {
+                self.block_positions.push(self.position - self.start - 1);
+            } else {
+                self.unit_segments.push(segment.clone());
+            }
+            match &segment.content {
+                crate::SegmentContent::Pilcrow(properties) => {
+                    let position = self.position;
+                    while let Some((at, key, end)) =
+                        self.boundaries.next_if(|(at, ..)| *at < position)
+                    {
+                        let marker = self.unit.marker(at - self.start, &key, end)?;
+                        let relative = at - self.start;
+                        let excluded =
+                            self.block_positions.partition_point(|&at| at < relative) as u32;
+                        self.markers.push((relative - excluded, key, end));
+                        self.section_content.update(&marker);
+                        self.inline_content.update(&marker);
+                    }
+                    self.start = self.position;
+                    self.block_positions.clear();
+                    self.units.push(UnitState::from_projection(
+                        UnitProjection {
+                            key: Some(properties.para_id.clone()),
+                            digest: std::mem::take(&mut self.unit).finish(),
+                            blocks: std::mem::take(&mut self.blocks).finalize().into(),
+                            block_content: std::mem::take(&mut self.block_content),
+                            content_digest: std::mem::take(&mut self.inline_content)
+                                .finalize()
+                                .into(),
+                            section_digest: std::mem::take(&mut self.section_content)
+                                .finalize()
+                                .into(),
+                            inline: std::mem::take(&mut self.inline),
+                            markers: std::mem::take(&mut self.markers),
+                        },
+                        std::mem::take(&mut self.unit_segments),
+                        seeded_units,
+                    ));
+                }
+                crate::SegmentContent::OtherEmbed { kind, .. }
+                    if matches!(kind.as_str(), "table" | "blockSdt") =>
+                {
+                    self.blocks.update(&self.bytes);
+                    self.blocks.update(b"\n");
+                    self.block_content.push(segment_value(&segment));
+                }
+                _ => self.inline = true,
+            }
+            if digested >= max_bytes {
+                let done = self.segments.as_slice().is_empty() && self.cursor.is_empty();
+                return Some((done, digested));
             }
         }
+        Some((true, digested))
     }
-    let mut boundaries: Vec<(u32, &str, bool)> = comments
-        .iter()
-        .flat_map(|(key, anchors)| {
-            anchors.iter().flat_map(move |(start, end)| {
-                [(*start, key.as_str(), false), (*end, key.as_str(), true)]
-            })
-        })
-        .collect();
-    boundaries.sort_unstable();
-    let mut boundaries = boundaries.into_iter().peekable();
-    let mut units = Vec::new();
-    let mut unit = UnitDigest::default();
-    let mut blocks = Sha256::new();
-    let mut block_content = Vec::new();
-    let mut inline_content = Sha256::new();
-    let mut section_content = Sha256::new();
-    let mut inline = false;
-    let mut unit_segments = Vec::new();
-    let mut markers = Vec::new();
-    let mut block_positions = Vec::new();
-    let mut start = 0u32;
-    let mut position = 0u32;
-    let mut bytes = Vec::new();
-    let mut section_bytes = Vec::new();
-    for segment in segments {
-        if let Some(budget) = budget.as_mut() {
-            let Some(rest) = budget.checked_sub(segment_text_len(&segment)) else {
-                *budget = 0;
+
+    /// The story's next segment, ready to digest.
+    fn next_segment(
+        &mut self,
+        txn: &Transaction<'_>,
+        budget: &mut Option<usize>,
+    ) -> Option<Option<crate::StorySegment>> {
+        if self.segments.as_slice().is_empty() {
+            let Some(mut chunk) = self.cursor.next_chunk(txn, self.chunk) else {
+                self.vanished = true;
                 return None;
             };
-            *budget = rest;
-        }
-        segment_canonical(&segment, &mut bytes, &mut section_bytes);
-        unit.segment(&bytes);
-        section_content.update(&section_bytes);
-        section_content.update(b"\n");
-        let block = matches!(&segment.content, crate::SegmentContent::OtherEmbed { kind, .. }
-            if matches!(kind.as_str(), "table" | "blockSdt"));
-        if !block {
-            inline_content.update(&bytes);
-            inline_content.update(b"\n");
-        }
-        position += match &segment.content {
-            crate::SegmentContent::Text(text) => u32::try_from(text.encode_utf16().count()).ok()?,
-            _ => 1,
-        };
-        if block {
-            block_positions.push(position - start - 1);
-        } else {
-            unit_segments.push(segment.clone());
-        }
-        match &segment.content {
-            crate::SegmentContent::Pilcrow(properties) => {
-                while let Some((at, key, end)) = boundaries.next_if(|(at, ..)| *at < position) {
-                    let marker = unit.marker(at - start, key, end)?;
-                    let relative = at - start;
-                    let excluded = block_positions.partition_point(|&at| at < relative) as u32;
-                    markers.push((relative - excluded, key.to_owned(), end));
-                    section_content.update(&marker);
-                    inline_content.update(&marker);
+            if chunk.is_empty() {
+                return Some(None);
+            }
+            strip_display_only_keys(&mut chunk);
+            if let Some(media) = self.media.clone() {
+                self.urls.write(&mut chunk, &media);
+                if self.urls.failed() || self.urls.spent() {
+                    return self.decline(txn, budget);
                 }
-                start = position;
-                block_positions.clear();
-                units.push(UnitState {
-                    key: Some(properties.para_id.clone()),
-                    digest: std::mem::take(&mut unit).finish(),
-                    blocks: std::mem::take(&mut blocks).finalize().into(),
-                    block_content: std::mem::take(&mut block_content),
-                    content_digest: std::mem::take(&mut inline_content).finalize().into(),
-                    section_digest: std::mem::take(&mut section_content).finalize().into(),
-                    inline: std::mem::take(&mut inline),
-                    segments: std::mem::take(&mut unit_segments),
-                    markers: std::mem::take(&mut markers),
-                });
             }
-            crate::SegmentContent::OtherEmbed { kind, .. }
-                if matches!(kind.as_str(), "table" | "blockSdt") =>
-            {
-                blocks.update(&bytes);
-                blocks.update(b"\n");
-                block_content.push(segment_value(&segment));
-            }
-            _ => inline = true,
+            self.segments = chunk.into_iter();
         }
+        let Some(segment) = self.segments.next() else {
+            return Some(None);
+        };
+        if let Some(left) = self.urls.budget() {
+            let text = self.text.saturating_add(segment_text_len(&segment));
+            let Some(rest) = left.checked_sub(text) else {
+                return self.decline(txn, budget);
+            };
+            self.text = text;
+            *budget = Some(rest);
+        }
+        Some(Some(segment))
     }
-    for (at, key, end) in boundaries {
-        let marker = unit.marker(at.saturating_sub(start), key, end)?;
-        let relative = at.saturating_sub(start);
-        let excluded = block_positions.partition_point(|&at| at < relative) as u32;
-        markers.push((relative.saturating_sub(excluded), key.to_owned(), end));
-        section_content.update(&marker);
-        inline_content.update(&marker);
-    }
-    let trailing = unit.finish();
-    let empty: [u8; 32] = Sha256::new().finalize().into();
-    if trailing != empty {
-        units.push(UnitState {
-            key: None,
-            digest: trailing,
-            blocks: blocks.finalize().into(),
-            block_content,
-            content_digest: inline_content.finalize().into(),
-            section_digest: section_content.finalize().into(),
-            inline,
-            segments: unit_segments,
-            markers,
+
+    /// Ends a story that yields nothing.
+    fn decline(
+        &mut self,
+        txn: &Transaction<'_>,
+        budget: &mut Option<usize>,
+    ) -> Option<Option<crate::StorySegment>> {
+        if budget.is_none() {
+            return None;
+        }
+        if let Some(media) = self.media.clone() {
+            while !self.urls.spent() {
+                let Some(mut chunk) = self.cursor.next_chunk(txn, self.chunk) else {
+                    self.vanished = true;
+                    return None;
+                };
+                if chunk.is_empty() {
+                    break;
+                }
+                strip_display_only_keys(&mut chunk);
+                self.urls.write(&mut chunk, &media);
+            }
+        }
+        *budget = Some(match self.urls.budget() {
+            Some(left) if self.urls.failed() => left,
+            _ => 0,
         });
+        None
     }
-    let mut hasher = Sha256::new();
-    for unit in &units {
-        hasher.update(unit.digest);
+
+    fn finish(mut self) -> Option<([u8; 32], Vec<UnitState>, bool)> {
+        use sha2::{Digest, Sha256};
+        let seeded_units = self
+            .seeded
+            .map(|seeded| seeded.units)
+            .filter(|units| units.unique);
+        for (at, key, end) in self.boundaries.by_ref() {
+            let marker = self.unit.marker(at.saturating_sub(self.start), &key, end)?;
+            let relative = at.saturating_sub(self.start);
+            let excluded = self.block_positions.partition_point(|&at| at < relative) as u32;
+            self.markers
+                .push((relative.saturating_sub(excluded), key, end));
+            self.section_content.update(&marker);
+            self.inline_content.update(&marker);
+        }
+        let trailing = self.unit.finish();
+        let empty: [u8; 32] = Sha256::new().finalize().into();
+        let mut units = self.units;
+        if trailing != empty {
+            units.push(UnitState::from_projection(
+                UnitProjection {
+                    key: None,
+                    digest: trailing,
+                    blocks: self.blocks.finalize().into(),
+                    block_content: self.block_content,
+                    content_digest: self.inline_content.finalize().into(),
+                    section_digest: self.section_content.finalize().into(),
+                    inline: self.inline,
+                    markers: self.markers,
+                },
+                self.unit_segments,
+                seeded_units,
+            ));
+        }
+        let mut hasher = Sha256::new();
+        let seed = self
+            .seeded
+            .and_then(|seeded| seeded.stories.get(&self.story));
+        let mut same_seed = seed.is_some_and(|seed| seed.units.len() == units.len());
+        for (index, unit) in units.iter().enumerate() {
+            hasher.update(unit.digest);
+            same_seed = same_seed
+                && seed.is_some_and(|seed| {
+                    Arc::ptr_eq(&unit.projection, &seed.units[index].projection)
+                });
+        }
+        Some((hasher.finalize().into(), units, same_seed))
     }
-    Some((hasher.finalize().into(), units))
 }
 
 #[cfg(all(test, feature = "wasm"))]
@@ -1523,6 +2205,15 @@ impl Pilcrow {
     }
 }
 
+/// How many paragraphs each session key closes across every story.
+pub(crate) fn paragraph_key_counts<T: ReadTxn>(txn: &T) -> HashMap<String, usize> {
+    let mut counts = HashMap::new();
+    for pilcrow in Scan::new(txn).pilcrows {
+        *counts.entry(pilcrow.key).or_insert(0) += 1;
+    }
+    counts
+}
+
 /// Every story and pilcrow, stories in sorted order, plus each nested story's parent.
 pub(crate) struct Scan {
     stories: Vec<String>,
@@ -1546,7 +2237,7 @@ impl Scan {
                 _ => None,
             })
             .collect();
-        texts.sort_by(|left, right| left.0.cmp(&right.0));
+        crate::sort::sort_by(&mut texts, &|left, right| left.0.cmp(&right.0));
         for (story, text) in texts {
             let mut content = false;
             for diff in text.diff(txn, YChange::identity) {
@@ -1601,6 +2292,167 @@ impl Scan {
             }
         }
         story
+    }
+}
+
+/// A [`Pilcrow`] read in an earlier slice, its map held as a hook.
+struct HookedPilcrow {
+    story: String,
+    key: String,
+    hook: yrs::Hook<MapRef>,
+    allocated: Option<String>,
+    source: Option<String>,
+    synthetic: bool,
+    content: bool,
+}
+
+impl HookedPilcrow {
+    fn new(pilcrow: Pilcrow) -> Self {
+        Self {
+            hook: yrs::SharedRef::hook(&pilcrow.map),
+            story: pilcrow.story,
+            key: pilcrow.key,
+            allocated: pilcrow.allocated,
+            source: pilcrow.source,
+            synthetic: pilcrow.synthetic,
+            content: pilcrow.content,
+        }
+    }
+
+    fn resolve<T: ReadTxn>(self, txn: &T) -> Option<Pilcrow> {
+        Some(Pilcrow {
+            map: self.hook.get(txn)?,
+            story: self.story,
+            key: self.key,
+            allocated: self.allocated,
+            source: self.source,
+            synthetic: self.synthetic,
+            content: self.content,
+        })
+    }
+}
+
+/// [`Scan::new`] taken a few segments at a time, holding no yrs reference between calls.
+struct ScanBuilder {
+    stories: Vec<String>,
+    next: usize,
+    current: Option<Vec<crate::PendingSegment>>,
+    position: usize,
+    content: bool,
+    pilcrows: Vec<HookedPilcrow>,
+    parents: HashMap<String, String>,
+    kept: HashMap<String, Vec<crate::PendingSegment>>,
+}
+
+impl ScanBuilder {
+    fn new<T: ReadTxn>(txn: &T) -> Self {
+        let mut stories: Vec<String> = match txn.get_map(STORIES) {
+            Some(stories) => crate::live_stories(&stories, txn)
+                .filter(|(_, value)| matches!(value, Out::YText(_)))
+                .map(|(id, _)| id.to_string())
+                .collect(),
+            None => Vec::new(),
+        };
+        crate::sort::sort_by(&mut stories, &|left, right| left.cmp(right));
+        Self {
+            stories,
+            next: 0,
+            current: None,
+            position: 0,
+            content: false,
+            pilcrows: Vec::new(),
+            parents: HashMap::new(),
+            kept: HashMap::new(),
+        }
+    }
+
+    /// Scans up to `limit` segments, answering whether all are; `None` once one fails to resolve.
+    fn advance<T: ReadTxn>(&mut self, txn: &T, limit: usize) -> Option<bool> {
+        let mut left = limit;
+        while let Some(story) = self.stories.get(self.next) {
+            if left == 0 {
+                return Some(false);
+            }
+            if self.current.is_none() {
+                let Out::YText(text) = txn.get_map(STORIES)?.get(txn, story)? else {
+                    return None;
+                };
+                let diff = text.diff(txn, YChange::identity);
+                self.current = Some(diff.into_iter().map(crate::PendingSegment::new).collect());
+                self.position = 0;
+                self.content = false;
+            }
+            let segments = self.current.as_deref().unwrap_or_default();
+            while left > 0 {
+                let Some(segment) = segments.get(self.position) else {
+                    break;
+                };
+                ooxml_opc::progress::tick();
+                self.position += 1;
+                left -= 1;
+                let Some(hook) = segment.map_hook() else {
+                    self.content = true;
+                    continue;
+                };
+                let map = hook.get(txn)?;
+                match map_string(&map, txn, KIND_KEY).as_deref() {
+                    Some(crate::PILCROW_KIND) => {
+                        let mut pilcrow = Pilcrow::read(story, map, txn);
+                        pilcrow.content = std::mem::take(&mut self.content);
+                        self.pilcrows.push(HookedPilcrow::new(pilcrow));
+                    }
+                    Some("table") => {
+                        let Some(Out::Any(Any::Array(rows))) = map.get(txn, "rows") else {
+                            continue;
+                        };
+                        for row in rows.iter() {
+                            let Any::Map(row) = row else { continue };
+                            let Some(Any::Array(cells)) = row.get("cells") else {
+                                continue;
+                            };
+                            for cell in cells.iter() {
+                                if let Any::Map(cell) = cell
+                                    && let Some(Any::String(child)) = cell.get("story")
+                                {
+                                    self.parents.insert(child.to_string(), story.clone());
+                                }
+                            }
+                        }
+                    }
+                    Some("blockSdt") => {
+                        if let Some(child) = map_string(&map, txn, "story") {
+                            self.parents.insert(child, story.clone());
+                        }
+                    }
+                    _ => self.content = true,
+                }
+            }
+            if self.position < segments.len() {
+                return Some(false);
+            }
+            let segments = self.current.take().unwrap_or_default();
+            self.kept.insert(story.clone(), segments);
+            self.next += 1;
+        }
+        Some(true)
+    }
+
+    /// The scan and each story's segments; `None` when a pilcrow's map no longer resolves.
+    fn finish<T: ReadTxn>(
+        self,
+        txn: &T,
+    ) -> Option<(Scan, HashMap<String, Vec<crate::PendingSegment>>)> {
+        let pilcrows = self
+            .pilcrows
+            .into_iter()
+            .map(|pilcrow| pilcrow.resolve(txn))
+            .collect::<Option<Vec<_>>>()?;
+        let scan = Scan {
+            stories: self.stories,
+            pilcrows,
+            parents: self.parents,
+        };
+        Some((scan, self.kept))
     }
 }
 
@@ -1842,13 +2694,13 @@ impl IdAllocator {
     }
 
     /// The next `clientId:counter` key no paragraph has carried.
-    pub(crate) fn session_key(&mut self, doc: &EditingDoc) -> String {
+    pub(crate) fn session_key<T: ReadTxn>(&mut self, doc: &EditingDoc, txn: &T) -> String {
         let mut guard = self.seen.lock().unwrap();
         let seen = guard
             .as_mut()
             .expect("IdAllocator::new builds the seen identities");
         loop {
-            let key = doc.next_id();
+            let key = doc.next_id(txn);
             if seen.keys.insert(key.clone()) {
                 return key;
             }
@@ -2136,8 +2988,10 @@ fn collisions(
             }
         }
     }
-    retired.sort_by(|left, right| (left.1.id, &left.1.owner).cmp(&(right.1.id, &right.1.owner)));
-    ordered.sort_by_key(|(order, _)| *order);
+    crate::sort::sort_by(&mut retired, &|left, right| {
+        (left.1.id, &left.1.owner).cmp(&(right.1.id, &right.1.owner))
+    });
+    crate::sort::sort_by_key(&mut ordered, &|(order, _)| *order);
     ordered.extend(retired);
     let mut groups: BTreeMap<u32, Vec<Claimant>> = BTreeMap::new();
     for (_, claimant) in ordered {
@@ -2322,6 +3176,7 @@ impl EditingDoc {
     /// shared seed needs, and is otherwise freshly minted. System-origin and
     /// outside undo.
     pub fn begin_opening(&self, generation: Option<&str>) {
+        self.save_story_states.lock().unwrap().clear();
         let generation = generation.map_or_else(fresh_generation, str::to_owned);
         let mut txn = self.transact_for(&EditCtx::system(""));
         txn.get_map(SESSION)
@@ -2350,7 +3205,7 @@ impl EditingDoc {
                 let mut names: Vec<String> = crate::live_stories(&stories, &txn)
                     .map(|(id, _)| id.to_owned())
                     .collect();
-                names.sort();
+                crate::sort::sort(&mut names);
                 names.first().and_then(|name| stories.get(&txn, name))
             })
         });
@@ -2459,7 +3314,7 @@ impl IdentityRepair {
                 renamed.push((index, pilcrow.key.clone(), key));
             }
         }
-        renamed.sort_by_key(|(index, _, _)| *index);
+        crate::sort::sort_by_key(&mut renamed, &|(index, _, _)| *index);
         let renamed_keys: HashMap<usize, &str> = renamed
             .iter()
             .map(|(index, _, key)| (*index, key.as_str()))
@@ -2899,6 +3754,10 @@ impl EditingDoc {
                     }
                 }
             }
+            let mut by_id: HashMap<u32, Vec<&str>> = HashMap::new();
+            for (holder, now) in &current {
+                by_id.entry(*now).or_default().push(holder.as_str());
+            }
             let captured: HashSet<(&str, u32)> = saved
                 .iter()
                 .filter_map(|(owner, id)| Some((owner.as_str(), parse_paragraph_id(id)?)))
@@ -2917,10 +3776,11 @@ impl EditingDoc {
                 };
                 let moved = current.get(owner).is_some_and(|now| *now != id);
                 let viewed = occurrence(owner);
-                let taken = current.iter().any(|(holder, now)| {
-                    *now == id
-                        && !captured.contains(&(holder.as_str(), id))
-                        && (viewed.is_none() || occurrence(holder) != viewed)
+                let taken = by_id.get(&id).is_some_and(|holders| {
+                    holders.iter().any(|&holder| {
+                        !captured.contains(&(holder, id))
+                            && (viewed.is_none() || occurrence(holder) != viewed)
+                    })
                 });
                 if moved || taken {
                     stale.push((owner.clone(), text.clone()));
@@ -2946,7 +3806,11 @@ impl EditingDoc {
     pub fn story_paragraph_ids(&self, story_id: &str) -> EditResult<Vec<Option<String>>> {
         let source = self.source_index();
         let txn = self.yrs_doc().transact();
-        let story = story_ref(&txn, story_id)?;
+        let story = match story_ref(&txn, story_id) {
+            Ok(story) => story,
+            Err(crate::EditError::CellHasNoStory(_)) => return Ok(vec![None]),
+            Err(error) => return Err(error),
+        };
         Ok(pilcrows(&story, &txn)
             .into_iter()
             .map(|(_, map)| {
@@ -3126,7 +3990,7 @@ impl EditingDoc {
         }
     }
 
-    fn live_save_seed_states(&self, stories: HashMap<String, StoryState>) -> SeedStates {
+    fn live_save_seed_states(&self, stories: HashMap<String, Arc<StoryState>>) -> SeedStates {
         SeedStates {
             stories,
             patch_table_styles: self
@@ -3143,44 +4007,292 @@ impl EditingDoc {
     /// counted at every use, would take more than that; returns whether they
     /// are known.
     pub fn prime_save_seed_states(&self, max_paragraphs: u32, max_inflated_bytes: u32) -> bool {
+        self.prime_save_seed_states_slice(max_paragraphs, max_inflated_bytes, u32::MAX)
+            == PrimeSlice::Known
+    }
+
+    /// [`Self::prime_save_seed_states`], a slice at a time: digests stories until about
+    /// `max_bytes` canonical bytes went in, then stops and keeps its progress for the next call.
+    /// A commit between slices drops the progress and declines, as a prime of the edited
+    /// session would.
+    pub fn prime_save_seed_states_slice(
+        &self,
+        max_paragraphs: u32,
+        max_inflated_bytes: u32,
+        max_bytes: u32,
+    ) -> PrimeSlice {
+        self.prime_save_seed_states_slice_with(
+            max_paragraphs,
+            max_inflated_bytes,
+            max_bytes,
+            PRIME_SLICE_SEGMENTS,
+        )
+    }
+
+    /// [`Self::prime_save_seed_states_slice`] with a given segments-per-slice count.
+    pub(crate) fn prime_save_seed_states_slice_with(
+        &self,
+        max_paragraphs: u32,
+        max_inflated_bytes: u32,
+        max_bytes: u32,
+        segments_per_slice: usize,
+    ) -> PrimeSlice {
+        let mut progress = self.prime_progress.lock().unwrap();
+        self.prime_last_slice_cost.store(0, Ordering::Relaxed);
+        let mut cost = 0u64;
+        let mut left = max_bytes as usize;
+        let outcome = self.prime_slice_step(
+            &mut progress,
+            max_paragraphs,
+            max_inflated_bytes,
+            max_bytes,
+            segments_per_slice,
+            &mut cost,
+            &mut left,
+        );
+        self.prime_last_slice_cost.store(cost, Ordering::Relaxed);
+        #[cfg(test)]
+        self.prime_last_slice_left
+            .store(left as u64, Ordering::Relaxed);
+        outcome
+    }
+
+    /// What the last [`Self::prime_save_seed_states_slice`] call charged against its
+    /// `max_bytes`, story and segment costs and any overshoot included; 0 for a call that
+    /// charged nothing.
+    pub fn prime_last_slice_cost(&self) -> u64 {
+        self.prime_last_slice_cost.load(Ordering::Relaxed)
+    }
+
+    fn prime_slice_step(
+        &self,
+        progress: &mut Option<PrimeProgress>,
+        max_paragraphs: u32,
+        max_inflated_bytes: u32,
+        max_bytes: u32,
+        segments_per_slice: usize,
+        cost: &mut u64,
+        left: &mut usize,
+    ) -> PrimeSlice {
+        let sliced = max_bytes != u32::MAX;
         let bytes = match self.source.lock().unwrap().as_ref() {
-            Some(SourcePackage::Ready(index)) if index.seed_states_initialized() => return true,
+            Some(SourcePackage::Ready(index)) if index.seed_states_initialized() => {
+                *progress = None;
+                return PrimeSlice::Known;
+            }
             Some(SourcePackage::Ready(index)) => index.bytes(),
             Some(SourcePackage::Pending(bytes, _)) => bytes.clone(),
-            None => return false,
+            None => {
+                *progress = None;
+                return PrimeSlice::Declined;
+            }
         };
-        if !self.unchanged_since_seeded() || self.media.lock().unwrap().is_none() {
-            return false;
-        }
-        if bytes.as_ref().len() as u64 > u64::from(max_inflated_bytes) {
-            return false;
-        }
-        let Ok(package) = ooxml_opc::RetainedPackage::from_bytes(bytes) else {
-            return false;
-        };
-        let inflated = package.parts().map(|(_, size)| size);
-        if inflated.fold(0u64, u64::saturating_add) > u64::from(max_inflated_bytes) {
-            return false;
-        }
         let txn = self.yrs_doc().transact();
-        if self.committed_scan(&txn).pilcrows.len() > max_paragraphs as usize {
-            return false;
+        let epoch = self.epoch.load(Ordering::Relaxed);
+        if progress
+            .as_ref()
+            .is_some_and(|progress| progress.epoch != epoch)
+        {
+            *progress = None;
+            return PrimeSlice::Declined;
         }
-        let Some(source) = self.source_index() else {
-            return false;
+        if progress.is_none() {
+            if !self.unchanged_since_seeded() || self.media.lock().unwrap().is_none() {
+                return PrimeSlice::Declined;
+            }
+            if bytes.as_ref().len() as u64 > u64::from(max_inflated_bytes) {
+                return PrimeSlice::Declined;
+            }
+            let Ok(package) = ooxml_opc::RetainedPackage::from_bytes(bytes) else {
+                return PrimeSlice::Declined;
+            };
+            let inflated = package.parts().map(|(_, size)| size);
+            if inflated.fold(0u64, u64::saturating_add) > u64::from(max_inflated_bytes) {
+                return PrimeSlice::Declined;
+            }
+            *progress = Some(PrimeProgress {
+                epoch,
+                max_paragraphs,
+                phase: PrimePhase::Scan,
+                budget: Some((max_inflated_bytes as usize).max(1)),
+                stories: std::collections::VecDeque::new(),
+                roots: HashMap::new(),
+                anchors: HashMap::new(),
+                comments: HashMap::new(),
+                states: HashMap::new(),
+                current: None,
+                scan: None,
+                kept: HashMap::new(),
+            });
+            if sliced {
+                return PrimeSlice::Pending;
+            }
+        }
+        let Some(state) = progress.as_mut() else {
+            return PrimeSlice::Declined;
         };
-        if source.seed_states_initialized() {
-            return true;
+        if state.phase == PrimePhase::Scan {
+            let limit = if sliced {
+                segments_per_slice.max(1)
+            } else {
+                usize::MAX
+            };
+            let cached = if state.scan.is_none() {
+                self.scan_cache
+                    .0
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .filter(|(cached, _)| *cached == epoch)
+                    .map(|(_, scan)| Arc::clone(scan))
+            } else {
+                None
+            };
+            let scan = match cached {
+                Some(scan) => scan,
+                None => {
+                    let builder = state.scan.get_or_insert_with(|| ScanBuilder::new(&txn));
+                    match builder.advance(&txn, limit) {
+                        Some(true) => {}
+                        Some(false) => return PrimeSlice::Pending,
+                        None => {
+                            *progress = None;
+                            return PrimeSlice::Declined;
+                        }
+                    }
+                    let finished = state.scan.take().and_then(|builder| builder.finish(&txn));
+                    let Some((scan, kept)) = finished else {
+                        *progress = None;
+                        return PrimeSlice::Declined;
+                    };
+                    let scan = Arc::new(scan);
+                    *self.scan_cache.0.lock().unwrap() = Some((epoch, Arc::clone(&scan)));
+                    state.kept = kept;
+                    scan
+                }
+            };
+            if scan.pilcrows.len() > state.max_paragraphs as usize {
+                *progress = None;
+                return PrimeSlice::Declined;
+            }
+            let Some(source) = self.source_index() else {
+                *progress = None;
+                return PrimeSlice::Declined;
+            };
+            if source.seed_states_initialized() {
+                *progress = None;
+                return PrimeSlice::Known;
+            }
+            if !source.opened_under_own_digest() {
+                *progress = None;
+                return PrimeSlice::Declined;
+            }
+            state.stories = scan.stories.iter().cloned().collect();
+            state.roots = scan
+                .stories
+                .iter()
+                .map(|story| (story.clone(), scan.root(story).to_owned()))
+                .collect();
+            state.phase = PrimePhase::Anchors;
+            if sliced {
+                return PrimeSlice::Pending;
+            }
         }
-        if !source.opened_under_own_digest() {
-            return false;
+        if state.phase == PrimePhase::Anchors {
+            state.anchors = crate::canonical::comment_anchors_by_story(&txn);
+            state.phase = PrimePhase::Stories;
+            if sliced {
+                return PrimeSlice::Pending;
+            }
         }
-        let budget = (max_inflated_bytes as usize).max(1);
-        let Some(stories) = story_states_within(self, &txn, Some(budget)) else {
-            return false;
-        };
-        source.seed_states_or(|| self.live_save_seed_states(stories));
-        true
+        loop {
+            if state.current.is_none() {
+                let Some(story) = state.stories.pop_front() else {
+                    let stories = std::mem::take(&mut state.states);
+                    *progress = None;
+                    let Some(source) = self.source_index() else {
+                        return PrimeSlice::Declined;
+                    };
+                    source.seed_states_or(|| self.live_save_seed_states(stories));
+                    return PrimeSlice::Known;
+                };
+                let anchors = state.anchors.remove(&story).unwrap_or_default();
+                let comments = crate::canonical::resolve_comment_anchors(&txn, &anchors);
+                *left = left.saturating_sub(PRIME_STORY_COST);
+                *cost = cost.saturating_add(PRIME_STORY_COST as u64);
+                let kept = state.kept.remove(&story);
+                let cursor = || match kept {
+                    Some(segments) => Some(crate::StorySegmentCursor::Diffs(segments.into_iter())),
+                    None => self.story_segment_cursor_in(&txn, &story).ok(),
+                };
+                match StoryFingerprint::start_from(
+                    self,
+                    &story,
+                    &comments,
+                    state.budget,
+                    None,
+                    segments_per_slice,
+                    cursor,
+                ) {
+                    Some(fingerprint) => {
+                        let large = fingerprint.cursor.len() > segments_per_slice;
+                        state.comments.insert(story.clone(), comments);
+                        state.current = Some((story, fingerprint));
+                        if large && sliced {
+                            return PrimeSlice::Pending;
+                        }
+                    }
+                    None => {
+                        if state.budget == Some(0) {
+                            *progress = None;
+                            return PrimeSlice::Declined;
+                        }
+                        if *left == 0 {
+                            return PrimeSlice::Pending;
+                        }
+                        continue;
+                    }
+                }
+            }
+            let Some((_, fingerprint)) = state.current.as_mut() else {
+                continue;
+            };
+            let before = fingerprint.charged;
+            let advanced = fingerprint.advance(&txn, &mut state.budget, (*left).max(1));
+            let charged = fingerprint.charged - before;
+            *cost = cost.saturating_add(charged);
+            *left = left.saturating_sub(usize::try_from(charged).unwrap_or(usize::MAX));
+            if fingerprint.vanished {
+                *progress = None;
+                return PrimeSlice::Declined;
+            }
+            if let Some((false, _)) = advanced {
+                return PrimeSlice::Pending;
+            }
+            let Some((story, fingerprint)) = state.current.take() else {
+                continue;
+            };
+            let comments = state.comments.remove(&story).unwrap_or_default();
+            if let Some((true, _)) = advanced {
+                if let Some((fingerprint, units, _)) = fingerprint.finish() {
+                    let root = state.roots.get(&story).cloned().unwrap_or_default();
+                    let story_state = Arc::new(StoryState {
+                        root,
+                        fingerprint,
+                        units,
+                        comments,
+                    });
+                    state.states.insert(story, story_state);
+                }
+            }
+            if state.budget == Some(0) {
+                *progress = None;
+                return PrimeSlice::Declined;
+            }
+            if *left == 0 {
+                return PrimeSlice::Pending;
+            }
+        }
     }
 
     /// The paragraph IDs a save of this session applies; see
@@ -3195,7 +4307,30 @@ impl EditingDoc {
         let txn = self.yrs_doc().transact();
         let assignments = source_assignments(&txn);
         let scan = self.committed_scan(&txn);
-        let live = story_states_in(self, &txn);
+        let by_key: HashMap<&str, &Pilcrow> = scan
+            .pilcrows
+            .iter()
+            .map(|pilcrow| (pilcrow.key.as_str(), pilcrow))
+            .collect();
+        let unchanged = self.unchanged_since_seeded() && source.opened_under_own_digest();
+        let ready = if unchanged {
+            source.seed_states.get().map(|seeded| &seeded.stories)
+        } else {
+            Some(source.seed_states())
+        };
+        let ready_units = ready.map(units_by_key);
+        let live = if by_key.len() == scan.pilcrows.len() {
+            story_states_in(
+                self,
+                &txn,
+                ready
+                    .zip(ready_units.as_ref())
+                    .map(|(stories, units)| SaveSeeds { stories, units }),
+            )
+        } else {
+            self.save_story_states.lock().unwrap().clear();
+            story_states_within(self, &txn, None).unwrap_or_default()
+        };
         let mut plan = ParagraphSavePlan {
             assignments: source
                 .unbacked()
@@ -3208,31 +4343,32 @@ impl EditingDoc {
             patched_parts: Vec::new(),
             spliced_parts: Vec::new(),
             section_spliced_parts: Vec::new(),
+            whole_parts: Vec::new(),
+            touched_parts: Vec::new(),
         };
         let metadata = self.source_metadata();
-        let seeded = if self.unchanged_since_seeded() && source.opened_under_own_digest() {
-            source.seed_states_or(|| self.live_save_seed_states(live.clone()))
+        let seeded = if let Some(ready) = ready {
+            ready
         } else {
-            source.seed_states()
+            source.seed_states_or(|| self.live_save_seed_states(live.clone()))
         };
-        let seeded_units = units_by_key(seeded);
+        let seeded_units = ready_units.unwrap_or_else(|| units_by_key(seeded));
         let live_units = units_by_key(&live);
-        let stories_of = |states: &HashMap<String, StoryState>, part: &SourcePart| {
+        let stories_of = |states: &HashMap<String, Arc<StoryState>>, part: &SourcePart| {
             part_stories(states, part)
                 .into_iter()
                 .map(|(story, state)| (story.clone(), (state.fingerprint, state.comments.clone())))
                 .collect::<BTreeMap<_, _>>()
         };
-        let by_key: HashMap<&str, &Pilcrow> = scan
-            .pilcrows
-            .iter()
-            .map(|pilcrow| (pilcrow.key.as_str(), pilcrow))
-            .collect();
         'parts: for (index, part) in source.parts.iter().enumerate() {
             if seeded.is_empty() {
                 continue;
             }
-            if let Some(mut spliced) = spliced_part(&source, index, seeded, &live, &by_key) {
+            if let Some((mut spliced, stale)) = spliced_part(&source, index, seeded, &live, &by_key)
+            {
+                let same_stories = part_stories(seeded, part)
+                    .keys()
+                    .eq(part_stories(&live, part).keys());
                 if part.as_written {
                     for &ordinal in &spliced.changed {
                         let key = &part.backed[&ordinal][0];
@@ -3252,21 +4388,106 @@ impl EditingDoc {
                             seeded_markers: &was.markers,
                             live_markers: &now.markers,
                         };
+                        if same_stories && formatting_alone(was, now) {
+                            spliced.format_only.push(ordinal);
+                        }
                         match crate::paragraph_patch_plan::diff_paragraph_v1(
-                            &was.segments,
-                            &now.segments,
+                            was.segments.as_deref().expect("seeded segments retained"),
+                            now.segments.as_deref().expect("changed segments retained"),
                             context,
                         ) {
-                            Ok(patch) => spliced.paragraph_patches.push(patch),
+                            Ok(mut patch) => {
+                                if stale.iter().any(|cell| {
+                                    story.strip_prefix(cell.as_str()).is_some_and(|rest| {
+                                        rest.is_empty() || rest.starts_with(':')
+                                    })
+                                }) {
+                                    patch.inheritance = InheritanceStateV1::Unknown;
+                                }
+                                spliced.paragraph_patches.push(patch);
+                            }
                             Err(legacy) => spliced.legacy_paragraphs.push(legacy),
                         }
                     }
-                    plan.spliced_parts.push(spliced);
-                } else if part.kind == SourceStoryKind::Body {
-                    plan.section_spliced_parts.push(spliced);
+                    let rewritten: Vec<u32> = spliced
+                        .legacy_paragraphs
+                        .iter()
+                        .map(|legacy| legacy.ordinal)
+                        .collect();
+                    let reformatted: Vec<u32> = spliced
+                        .paragraph_patches
+                        .iter()
+                        .filter(|patch| !patch.run_edits.is_empty())
+                        .map(|patch| patch.ordinal)
+                        .collect();
+                    let formatting_alone = !spliced.changed.is_empty()
+                        && spliced.format_only.len() == spliced.changed.len()
+                        && spliced.inserted.is_empty()
+                        && spliced.removed.is_empty()
+                        && spliced.table_patches.is_empty();
+                    if formatting_alone
+                        || !ends_with_inline_tail(seeded, part)
+                        || (!source.rewrite_loses_source_runs(
+                            part,
+                            &rewritten,
+                            rewriting_loses_source_runs,
+                        ) && !source.rewrite_loses_source_runs(
+                            part,
+                            &reformatted,
+                            reformatting_loses_fields,
+                        ))
+                    {
+                        plan.spliced_parts.push(spliced);
+                    }
+                } else {
+                    let formatted: Vec<u32> = spliced
+                        .changed
+                        .iter()
+                        .copied()
+                        .filter(|ordinal| !spliced.section_only.contains(ordinal))
+                        .collect();
+                    let formatting = formatted.iter().all(|ordinal| {
+                        let key = &part.backed[ordinal][0];
+                        let (_, was) = seeded_units[key.as_str()];
+                        let (_, now) = live_units[key.as_str()];
+                        formatting_alone(was, now)
+                    });
+                    if formatting && same_stories {
+                        spliced.format_only = formatted;
+                    }
+                    if formatting
+                        && same_stories
+                        && !spliced.changed.is_empty()
+                        && spliced.inserted.is_empty()
+                        && spliced.removed.is_empty()
+                        && spliced.table_patches.is_empty()
+                    {
+                        plan.whole_parts.push(spliced.clone());
+                    }
+                    if part.kind == SourceStoryKind::Body {
+                        plan.section_spliced_parts.push(spliced);
+                    }
                 }
             }
             if stories_of(seeded, part) != stories_of(&live, part) {
+                let mut touched: Vec<u32> = part
+                    .backed
+                    .iter()
+                    .filter(|(_, keys)| {
+                        keys.iter().any(|key| {
+                            seeded_units.get(key.as_str()).is_some_and(|(story, was)| {
+                                live_units.get(key.as_str()).is_none_or(|(now_story, now)| {
+                                    story != now_story
+                                        || was.blocks != now.blocks
+                                        || (was.digest != now.digest && !formatting_alone(was, now))
+                                })
+                            })
+                        })
+                    })
+                    .map(|(ordinal, _)| *ordinal)
+                    .collect();
+                crate::sort::sort(&mut touched);
+                plan.touched_parts.push((part.path().to_owned(), touched));
                 continue;
             }
             let mut patches = Vec::new();
@@ -3289,24 +4510,53 @@ impl EditingDoc {
             }
             plan.patched_parts.push((part.path().to_owned(), patches));
         }
+        crate::sort::sort_by(&mut plan.touched_parts, &|left, right| left.0.cmp(&right.0));
+        drop(live_units);
+        drop(live);
+        if self
+            .source_index()
+            .is_some_and(|current| Arc::ptr_eq(&source, &current))
+        {
+            self.save_story_states
+                .lock()
+                .unwrap()
+                .retain_patch_segments(seeded, &seeded_units);
+        }
         plan
     }
 }
 
-fn units_by_key(states: &HashMap<String, StoryState>) -> HashMap<&str, (&str, &UnitState)> {
-    states
-        .iter()
-        .flat_map(|(story, state)| {
-            state.units.iter().filter_map(move |unit| {
-                unit.key.as_deref().map(|key| (key, (story.as_str(), unit)))
-            })
-        })
-        .collect()
+struct UnitIndex<'a> {
+    by_key: HashMap<&'a str, (&'a str, &'a UnitState)>,
+    unique: bool,
+}
+
+impl<'a> std::ops::Deref for UnitIndex<'a> {
+    type Target = HashMap<&'a str, (&'a str, &'a UnitState)>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.by_key
+    }
+}
+
+fn units_by_key(states: &HashMap<String, Arc<StoryState>>) -> UnitIndex<'_> {
+    let mut by_key = HashMap::new();
+    let mut unique = true;
+    for (story, state) in states {
+        for unit in &state.units {
+            if let Some(key) = unit.key.as_deref()
+                && by_key.insert(key, (story.as_str(), unit)).is_some()
+            {
+                unique = false;
+            }
+        }
+    }
+    UnitIndex { by_key, unique }
 }
 
 /// The stories seeded from `part`, cells and content controls nested in them included.
 fn part_stories<'a>(
-    states: &'a HashMap<String, StoryState>,
+    states: &'a HashMap<String, Arc<StoryState>>,
     part: &SourcePart,
 ) -> BTreeMap<&'a String, &'a StoryState> {
     let prefix = match part.kind {
@@ -3320,6 +4570,7 @@ fn part_stories<'a>(
             part.roots.contains(&state.root)
                 || prefix.is_some_and(|prefix| state.root.starts_with(prefix))
         })
+        .map(|(story, state)| (story, state.as_ref()))
         .collect()
 }
 
@@ -3358,6 +4609,9 @@ struct RowSplices {
     inserted: HashMap<String, SpliceAnchor>,
     removed: HashSet<String>,
     tables: Vec<S13TablePatch>,
+    /// The cell stories of every table whose rows, cells or table properties changed: their
+    /// recorded style inheritance may no longer match the table.
+    stale: HashSet<String>,
 }
 
 fn simple_table_payload(
@@ -3465,6 +4719,13 @@ fn admit_row_splices(
         let new_rows = new_rows.as_array()?;
         let old_keys = old_rows.iter().map(cells).collect::<Option<Vec<_>>>()?;
         let new_keys = new_rows.iter().map(cells).collect::<Option<Vec<_>>>()?;
+        edits.stale.extend(
+            old_keys
+                .iter()
+                .chain(&new_keys)
+                .flatten()
+                .map(|story| (*story).to_owned()),
+        );
         let simple = patch_tables
             && old_keys == new_keys
             && simple_table_payload(&was[0]["payload"], before)
@@ -3613,10 +4874,10 @@ fn admit_row_splices(
 fn spliced_part(
     source: &SourceIndex,
     index: usize,
-    seeded: &HashMap<String, StoryState>,
-    live: &HashMap<String, StoryState>,
+    seeded: &HashMap<String, Arc<StoryState>>,
+    live: &HashMap<String, Arc<StoryState>>,
     by_key: &HashMap<&str, &Pilcrow>,
-) -> Option<SplicedPart> {
+) -> Option<(SplicedPart, HashSet<String>)> {
     let part = &source.parts[index];
     if part.kind == SourceStoryKind::Comment || part.backed.values().any(|views| views.len() != 1) {
         return None;
@@ -3695,7 +4956,9 @@ fn spliced_part(
         let (is_units, is_tail) = split_tail(&now.units);
         match (was_tail, is_tail) {
             (None, None) => {}
-            (Some(was), Some(is)) if was.content_digest == is.content_digest && !is.inline => {}
+            (Some(was), Some(is))
+                if was.content_digest == is.content_digest
+                    && (!is.inline || was.digest == is.digest) => {}
             _ => return None,
         }
         let was_keys: HashMap<&str, &UnitState> = was_units
@@ -3706,6 +4969,12 @@ fn spliced_part(
             .iter()
             .map(|unit| unit.key.as_deref())
             .collect::<Option<_>>()?;
+        if was_tail.is_some_and(|tail| tail.inline)
+            && (was_keys.len() != is_keys.len()
+                || was_keys.keys().any(|key| !is_keys.contains(key)))
+        {
+            return None;
+        }
         fn kept<'u>(units: &'u [UnitState], keep: impl Fn(&str) -> bool) -> Vec<&'u str> {
             units
                 .iter()
@@ -3837,19 +5106,23 @@ fn spliced_part(
     paragraphs.sort_unstable();
     changed.sort_unstable();
     removed.sort_unstable();
-    inserted.sort_by_key(|anchor| anchor.position());
-    Some(SplicedPart {
-        part: part.path().to_owned(),
-        sha256: part.sha256.clone(),
-        paragraphs,
-        changed,
-        section_only,
-        inserted,
-        removed,
-        paragraph_patches: Vec::new(),
-        legacy_paragraphs: Vec::new(),
-        table_patches: rows.tables,
-    })
+    crate::sort::sort_by_key(&mut inserted, &|anchor| anchor.position());
+    Some((
+        SplicedPart {
+            part: part.path().to_owned(),
+            sha256: part.sha256.clone(),
+            paragraphs,
+            changed,
+            section_only,
+            inserted,
+            removed,
+            paragraph_patches: Vec::new(),
+            legacy_paragraphs: Vec::new(),
+            table_patches: rows.tables,
+            format_only: Vec::new(),
+        },
+        rows.stale,
+    ))
 }
 
 fn last_block_paragraph(
@@ -3909,7 +5182,259 @@ fn last_block_paragraph(
     ordinals.into_iter().max()
 }
 
+/// Whether a run formatting patch of `xml`, one source paragraph, would drop field characters:
+/// the patch writer flattens a field nested in another field's result and field characters
+/// inside a hyperlink, as in a table of contents entry.
+fn reformatting_loses_fields(xml: &str) -> bool {
+    let mut hyperlinks = 0usize;
+    let mut fields = 0usize;
+    for tag in xml.split('<').skip(1) {
+        let tag = tag.split('>').next().unwrap_or_default();
+        let closing = tag.starts_with('/');
+        let name = tag
+            .trim_start_matches('/')
+            .split(|c: char| c.is_whitespace() || c == '/')
+            .next()
+            .unwrap_or_default();
+        match name.rsplit_once(':').map_or(name, |(_, local)| local) {
+            "hyperlink" if !tag.ends_with('/') => {
+                if closing {
+                    hyperlinks = hyperlinks.saturating_sub(1)
+                } else {
+                    hyperlinks += 1
+                }
+            }
+            "fldChar" if !closing => {
+                if hyperlinks > 0 {
+                    return true;
+                }
+                if tag.contains("\"begin\"") {
+                    fields += 1;
+                    if fields > 1 {
+                        return true;
+                    }
+                } else if tag.contains("\"end\"") {
+                    fields = fields.saturating_sub(1);
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Whether rewriting `xml`, one source paragraph, from the model would lose run content the
+/// model does not round-trip: alternate content with its fallback, a page or column break (also
+/// one inside a tracked insertion), a bookmark or permission anchor inside a hyperlink, a
+/// field nested in another field's result, or a hyperlink holding field characters. A part where
+/// such a paragraph would be rewritten from the model (a legacy paragraph) is written whole, as
+/// a part that cannot splice is.
+fn rewriting_loses_source_runs(xml: &str) -> bool {
+    source_rewrite_loss(xml, false).is_some()
+}
+
+/// The source paragraphs of a package, each part read once.
+pub(crate) struct SourceParagraphs {
+    index: Arc<SourceIndex>,
+    parts: HashMap<usize, Option<(String, Vec<std::ops::Range<usize>>)>>,
+}
+
+impl SourceParagraphs {
+    pub(crate) fn new(index: Arc<SourceIndex>) -> Self {
+        Self {
+            index,
+            parts: HashMap::new(),
+        }
+    }
+
+    /// Why saving the paragraph seeded as `key` rewritten from the model would lose content of
+    /// its source (see [`rewriting_loses_source_runs`]; a content control inside it counts too).
+    /// `None` for a paragraph with no source, or one that rewrites whole.
+    pub(crate) fn rewrite_loss(&mut self, key: &str) -> Option<KeptReason> {
+        let ((part, ordinal), _) = self.index.view_of(key)?;
+        let index = &self.index;
+        let source = &index.parts[part];
+        let Some((xml, cell_controls)) = self.parts.entry(part).or_insert_with(|| {
+            let xml = index.part_xml(source)?;
+            let controls = cell_control_spans(&xml)?;
+            Some((xml, controls))
+        }) else {
+            return Some(KeptReason::Unreadable);
+        };
+        let Some(start) = source
+            .occurrence(ordinal)
+            .map(|occurrence| occurrence.tag.start)
+        else {
+            return Some(KeptReason::Unreadable);
+        };
+        if cell_controls.iter().any(|span| span.contains(&start)) {
+            return Some(KeptReason::ContentControl);
+        }
+        let paragraph = xml
+            .get(start..)
+            .and_then(|rest| Some(&rest[docx_parse::serializer::element_span(rest, &[])?]));
+        match paragraph {
+            Some(paragraph) => source_rewrite_loss(paragraph, true),
+            None => Some(KeptReason::Unreadable),
+        }
+    }
+}
+
+/// The spans of `xml` taken by content controls that wrap a table cell (a `w:sdt` whose parent is
+/// a `w:tr`): rewriting a row drops such a wrapper, so the paragraphs inside one are kept.
+/// `None` on markup it cannot follow.
+fn cell_control_spans(xml: &str) -> Option<Vec<std::ops::Range<usize>>> {
+    let mut spans = Vec::new();
+    let mut open: Vec<(&str, usize)> = Vec::new();
+    let mut at = 0;
+    while let Some(found) = xml[at..].find('<') {
+        let start = at + found;
+        let rest = &xml[start..];
+        if let Some((_, close)) = [
+            ("<!--", "-->"),
+            ("<![CDATA[", "]]>"),
+            ("<?", "?>"),
+            ("<!", ">"),
+        ]
+        .into_iter()
+        .find(|(open, _)| rest.starts_with(open))
+        {
+            at = start + rest.find(close)? + close.len();
+            continue;
+        }
+        let end = start + rest.find('>')?;
+        let tag = &xml[start + 1..end];
+        at = end + 1;
+        let name = tag
+            .trim_start_matches('/')
+            .split(|c: char| c.is_whitespace() || c == '/')
+            .next()
+            .unwrap_or_default();
+        if tag.starts_with('/') {
+            let (opened, from) = open.pop()?;
+            if opened != name {
+                return None;
+            }
+            if name == "w:sdt" && open.last().is_some_and(|(parent, _)| *parent == "w:tr") {
+                spans.push(from..at);
+            }
+        } else if !tag.ends_with('/') {
+            open.push((name, start));
+        }
+    }
+    open.is_empty().then_some(spans)
+}
+
+fn source_rewrite_loss(xml: &str, content_controls: bool) -> Option<KeptReason> {
+    let mut hyperlinks = 0usize;
+    let mut fields = 0usize;
+    let mut rest = xml;
+    'scan: while let Some(at) = rest.find('<') {
+        rest = &rest[at..];
+        for (open, close) in [("<!--", "-->"), ("<![CDATA[", "]]>"), ("<?", "?>")] {
+            if rest.starts_with(open) {
+                let Some(end) = rest.find(close) else {
+                    return Some(KeptReason::Unreadable);
+                };
+                rest = &rest[end + close.len()..];
+                continue 'scan;
+            }
+        }
+        let Some(end) = rest.find('>') else {
+            return Some(KeptReason::Unreadable);
+        };
+        let tag = &rest[1..end];
+        rest = &rest[end + 1..];
+        let closing = tag.starts_with('/');
+        let empty = tag.ends_with('/');
+        let name = tag
+            .trim_start_matches('/')
+            .split(|c: char| c.is_whitespace() || c == '/')
+            .next()
+            .unwrap_or_default();
+        let local = name.rsplit_once(':').map_or(name, |(_, local)| local);
+        match local {
+            "AlternateContent" => return Some(KeptReason::AlternateContent),
+            "br" if tag.contains("\"page\"") || tag.contains("\"column\"") => {
+                return Some(KeptReason::Break);
+            }
+            "sdt" if content_controls => return Some(KeptReason::ContentControl),
+            "hyperlink" if !empty => {
+                if closing {
+                    hyperlinks = hyperlinks.saturating_sub(1);
+                } else {
+                    hyperlinks += 1;
+                }
+            }
+            "bookmarkStart" | "bookmarkEnd" | "permStart" | "permEnd" if hyperlinks > 0 => {
+                return Some(KeptReason::HyperlinkMarker);
+            }
+            "fldChar" if !closing => {
+                if hyperlinks > 0 {
+                    return Some(KeptReason::Field);
+                }
+                if tag.contains("\"begin\"") {
+                    fields += 1;
+                    if fields > 1 {
+                        return Some(KeptReason::Field);
+                    }
+                } else if tag.contains("\"end\"") {
+                    fields = fields.saturating_sub(1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// `units` without, and then with, the segments after the last pilcrow.
+/// Whether a story of `part` ends with inline content after its last pilcrow. Such a part
+/// splices only since the unchanged tail is accepted; before, it was always written whole.
+fn ends_with_inline_tail(seeded: &HashMap<String, Arc<StoryState>>, part: &SourcePart) -> bool {
+    part_stories(seeded, part)
+        .values()
+        .any(|state| split_tail(&state.units).1.is_some_and(|tail| tail.inline))
+}
+
+/// Whether a paragraph's change is of run formatting alone: its markers, content, paragraph
+/// properties and every other run attribute are as they were.
+fn formatting_alone(was: &UnitState, now: &UnitState) -> bool {
+    let (Some(seeded), Some(live)) = (was.segments.as_deref(), now.segments.as_deref()) else {
+        return false;
+    };
+    was.markers == now.markers
+        && segments_without_formatting(seeded) == segments_without_formatting(live)
+}
+
+/// A paragraph's segments without their run attributes, adjacent text joined, as text that
+/// changes formatting only splits or merges where the attributes differ.
+fn segments_without_formatting(
+    segments: &[crate::StorySegment],
+) -> Vec<(crate::SegmentContent, BTreeMap<String, yrs::Any>)> {
+    let mut contents: Vec<(crate::SegmentContent, BTreeMap<String, yrs::Any>)> = Vec::new();
+    for segment in segments {
+        let attributes: BTreeMap<String, yrs::Any> = segment
+            .attributes
+            .iter()
+            .filter(|(key, value)| {
+                !crate::format::FORMATTING_ATTRS.contains(&key.as_str())
+                    && **value != yrs::Any::Null
+            })
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        if let crate::SegmentContent::Text(text) = &segment.content
+            && let Some((crate::SegmentContent::Text(joined), last)) = contents.last_mut()
+            && *last == attributes
+        {
+            joined.push_str(text);
+        } else {
+            contents.push((segment.content.clone(), attributes));
+        }
+    }
+    contents
+}
+
 fn split_tail(units: &[UnitState]) -> (&[UnitState], Option<&UnitState>) {
     match units.split_last() {
         Some((tail, rest)) if tail.key.is_none() => (rest, Some(tail)),
@@ -3966,6 +5491,776 @@ mod tests {
         session
     }
 
+    fn save_plan_doc() -> EditingDoc {
+        let bytes = ooxml_opc::rezip_parts(&crate::seed::fixture::principal_parts()).unwrap();
+        let doc = EditingDoc::new(41);
+        crate::seed_from_docx(&doc, &bytes).unwrap();
+        doc
+    }
+
+    fn save_plans_agree(doc: &EditingDoc) {
+        let plan = doc.paragraph_save_plan();
+        assert_eq!(plan, doc.paragraph_save_plan());
+        let states = story_states(doc);
+        doc.save_story_states.lock().unwrap().clear();
+        doc.save_story_cache_disabled.store(true, Ordering::Relaxed);
+        let fresh_plan = doc.paragraph_save_plan();
+        doc.save_story_cache_disabled
+            .store(false, Ordering::Relaxed);
+        assert_eq!(plan, fresh_plan);
+        assert_eq!(plan, doc.paragraph_save_plan());
+        let txn = doc.yrs_doc().transact();
+        let mut fresh = story_states_within(doc, &txn, None).unwrap();
+        let source = doc.source_index().unwrap();
+        let seeded = units_by_key(source.seed_states());
+        for (story, state) in &mut fresh {
+            let state = Arc::get_mut(state).unwrap();
+            for (unit, cached) in state.units.iter_mut().zip(&states[story].units) {
+                if cached.segments.is_none() {
+                    let (_, seed) = seeded[unit.key.as_deref().unwrap()];
+                    assert_eq!(unit.digest, seed.digest);
+                    assert_eq!(unit.content_digest, seed.content_digest);
+                    assert!(seed.segments.is_some());
+                    unit.segments = None;
+                }
+            }
+        }
+        assert_eq!(states, fresh);
+    }
+
+    fn save_plan_media(bytes: Vec<u8>) -> docx_parse::media::MediaTable {
+        let package =
+            ooxml_opc::rezip_parts(&[("word/media/picture.png".to_owned(), bytes)]).unwrap();
+        docx_parse::media::MediaTable::new(
+            ooxml_opc::RetainedPackage::new(Arc::from(package)).unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn combined_draws_span_the_full_64_bit_range() {
+        assert!(combine_draws(0.999_999_999, 0.999_999_999) >= 1u64 << 53);
+        assert_eq!(combine_draws(0.0, 0.0), 0);
+        assert_eq!(combine_draws(0.5, 0.0), 1u64 << 63);
+        assert_eq!(combine_draws(0.0, 0.5), 1u64 << 31);
+        assert_eq!(
+            combine_draws(1.0 - f64::EPSILON, 1.0 - f64::EPSILON),
+            u64::MAX
+        );
+    }
+
+    #[test]
+    fn cached_save_plans_match_fresh_states_across_edits_undo_and_remote_updates() {
+        let doc = save_plan_doc();
+        save_plans_agree(&doc);
+        doc.insert_text(
+            &ctx(),
+            Position::new("body", 0),
+            "New ",
+            FormatPolicy::Plain,
+        )
+        .unwrap();
+        save_plans_agree(&doc);
+        {
+            let cache = doc.save_story_states.lock().unwrap();
+            let body = &cache.entries["body"].state;
+            assert!(body.units[0].segments.is_some());
+            assert!(
+                body.units
+                    .iter()
+                    .skip(1)
+                    .any(|unit| unit.segments.is_none())
+            );
+        }
+        doc.delete_range(&ctx(), StoryRange::new("body", 0, 4))
+            .unwrap();
+        save_plans_agree(&doc);
+        {
+            let source = doc.source_index().unwrap();
+            let cache = doc.save_story_states.lock().unwrap();
+            assert!(Arc::ptr_eq(
+                &cache.entries["body"].state,
+                &source.seed_states()["body"]
+            ));
+        }
+        doc.insert_text(
+            &ctx(),
+            Position::new("body", 0),
+            "Again ",
+            FormatPolicy::Plain,
+        )
+        .unwrap();
+        save_plans_agree(&doc);
+        doc.delete_range(&ctx(), StoryRange::new("body", 0, 6))
+            .unwrap();
+        save_plans_agree(&doc);
+
+        let cell = {
+            let txn = doc.yrs_doc().transact();
+            let scan = doc.committed_scan(&txn);
+            scan.stories
+                .iter()
+                .find(|story| crate::structured::source::cell_table(story).is_some())
+                .unwrap()
+                .clone()
+        };
+        for story in ["hf:rIdHeader1", "hf:rIdFooter1", "fn:1", cell.as_str()] {
+            doc.insert_text(
+                &ctx(),
+                Position::new(story, 0),
+                "Edited ",
+                FormatPolicy::Plain,
+            )
+            .unwrap();
+            save_plans_agree(&doc);
+        }
+        let para_id = doc.paragraphs("body").unwrap()[0].para_id.clone();
+        doc.set_paragraph_attr(&para_id, "alignment", Any::from("center"))
+            .unwrap();
+        save_plans_agree(&doc);
+        doc.apply_raw_ops(
+            "body",
+            vec![crate::RawOp::Format {
+                index: 0,
+                len: 1,
+                attrs: yrs::types::Attrs::from([("bold".into(), Any::Bool(true))]),
+            }],
+            &ctx(),
+        )
+        .unwrap();
+        save_plans_agree(&doc);
+
+        let comment = doc
+            .add_comment(
+                &[StoryRange::new("body", 0, 2)],
+                "Ada",
+                DATE,
+                Any::from("hi"),
+            )
+            .unwrap();
+        save_plans_agree(&doc);
+        doc.set_comment_ranges(&comment, &[StoryRange::new("hf:rIdHeader1", 1, 3)])
+            .unwrap();
+        save_plans_agree(&doc);
+        doc.apply_raw_ops(
+            "body",
+            vec![crate::RawOp::RemoveComment { id: comment }],
+            &ctx(),
+        )
+        .unwrap();
+        save_plans_agree(&doc);
+
+        doc.insert_embed(
+            &ctx(),
+            Position::new("body", 0),
+            "image",
+            vec![("src".to_owned(), Any::from("media:0"))],
+        )
+        .unwrap();
+        save_plans_agree(&doc);
+        let before = story_states(&doc)["body"].fingerprint;
+        doc.install_media(save_plan_media(vec![1, 2, 3, 4]));
+        save_plans_agree(&doc);
+        assert_ne!(before, story_states(&doc)["body"].fingerprint);
+
+        let mut undo = doc.undo_manager();
+        doc.insert_text(
+            &ctx(),
+            Position::new("body", 1),
+            "undo",
+            FormatPolicy::Plain,
+        )
+        .unwrap();
+        save_plans_agree(&doc);
+        assert!(undo.undo());
+        save_plans_agree(&doc);
+        assert!(undo.redo());
+        save_plans_agree(&doc);
+
+        let remote = EditingDoc::new(9);
+        remote
+            .apply_update_v1(&doc.encode_state_as_update_v1())
+            .unwrap();
+        remote
+            .insert_text(
+                &ctx(),
+                Position::new("hf:rIdHeader1", 0),
+                "Remote ",
+                FormatPolicy::Plain,
+            )
+            .unwrap();
+        doc.apply_update_v1(
+            &remote
+                .encode_diff_v1(&doc.encode_state_vector_v1())
+                .unwrap(),
+        )
+        .unwrap();
+        save_plans_agree(&doc);
+    }
+
+    #[test]
+    fn unchanged_save_plans_skip_fingerprints_and_body_edits_only_hash_body() {
+        let doc = save_plan_doc();
+        let plan = doc.paragraph_save_plan();
+        STORY_FINGERPRINTS.with(|count| count.set(0));
+        assert_eq!(plan, doc.paragraph_save_plan());
+        STORY_FINGERPRINTS.with(|count| assert_eq!(count.get(), 0));
+        doc.insert_text(&ctx(), Position::new("body", 0), "x", FormatPolicy::Plain)
+            .unwrap();
+        doc.paragraph_save_plan();
+        STORY_FINGERPRINTS.with(|count| assert_eq!(count.get(), 1));
+        save_plans_agree(&doc);
+    }
+
+    #[test]
+    fn save_plans_share_story_states_with_the_cache() {
+        let doc = save_plan_doc();
+        doc.insert_text(&ctx(), Position::new("body", 0), "x", FormatPolicy::Plain)
+            .unwrap();
+        doc.paragraph_save_plan();
+        let before = story_states(&doc);
+        {
+            let cache = doc.save_story_states.lock().unwrap();
+            for (story, state) in &before {
+                assert!(Arc::ptr_eq(state, &cache.entries[story].state));
+            }
+        }
+        doc.paragraph_save_plan();
+        let after = story_states(&doc);
+        for (story, state) in &before {
+            assert!(Arc::ptr_eq(state, &after[story]));
+        }
+    }
+
+    #[test]
+    fn edited_save_states_only_retain_changed_unit_segments_and_projections() {
+        let doc = save_plan_doc();
+        let source = doc.source_index().unwrap();
+        let seeded = source.seed_states();
+        let seeded_units = units_by_key(seeded);
+        assert!(seeded["body"].units.len() > 1);
+        assert!(
+            seeded["body"]
+                .units
+                .iter()
+                .any(|unit| !unit.block_content.is_empty())
+        );
+        let edited = doc.paragraphs("body").unwrap()[0].para_id.clone();
+        doc.insert_text(&ctx(), Position::new("body", 0), "x", FormatPolicy::Plain)
+            .unwrap();
+        let mut previous = None;
+        for _ in 0..2 {
+            UNIT_PROJECTIONS.with(|count| count.set(0));
+            let plan = doc.paragraph_save_plan();
+            UNIT_PROJECTIONS.with(|count| {
+                assert_eq!(count.get(), usize::from(previous.is_none()));
+            });
+            if let Some(previous) = &previous {
+                assert_eq!(previous, &plan);
+            }
+            previous = Some(plan);
+            let cache = doc.save_story_states.lock().unwrap();
+            let body = &cache.entries["body"];
+            assert!(!body.pending_trim);
+            let retained: Vec<_> = body
+                .state
+                .units
+                .iter()
+                .filter(|unit| {
+                    unit.segments
+                        .as_ref()
+                        .is_some_and(|segments| !segments.is_empty())
+                })
+                .map(|unit| unit.key.as_deref().unwrap())
+                .collect();
+            assert_eq!(retained, [edited.as_str()]);
+            for unit in &body.state.units {
+                let key = unit.key.as_deref().unwrap();
+                let (_, seed) = seeded_units[key];
+                if key == edited {
+                    assert!(!Arc::ptr_eq(&unit.projection, &seed.projection));
+                } else {
+                    assert!(unit.segments.is_none());
+                    assert!(Arc::ptr_eq(&unit.projection, &seed.projection));
+                }
+            }
+        }
+        save_plans_agree(&doc);
+    }
+
+    #[test]
+    fn uncached_save_plans_bypass_story_states() {
+        let doc = save_plan_doc();
+        doc.insert_text(&ctx(), Position::new("body", 0), "x", FormatPolicy::Plain)
+            .unwrap();
+        let plan = doc.paragraph_save_plan();
+        let stories = doc.save_story_states.lock().unwrap().entries.len();
+        doc.save_story_states.lock().unwrap().clear();
+        doc.save_story_cache_disabled.store(true, Ordering::Relaxed);
+        STORY_FINGERPRINTS.with(|count| count.set(0));
+        for _ in 0..2 {
+            assert_eq!(plan, doc.paragraph_save_plan());
+            assert!(doc.save_story_states.lock().unwrap().entries.is_empty());
+        }
+        STORY_FINGERPRINTS.with(|count| assert_eq!(count.get(), 2 * stories));
+        doc.save_story_cache_disabled
+            .store(false, Ordering::Relaxed);
+        save_plans_agree(&doc);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore]
+    fn save_plan_cache_bench() {
+        fn prepared(bytes: &[u8], bypass: bool) -> EditingDoc {
+            let doc = EditingDoc::new(41);
+            crate::seed_from_docx(&doc, bytes).unwrap();
+            let paragraphs: Vec<_> = doc
+                .paragraphs("body")
+                .unwrap()
+                .into_iter()
+                .filter(|paragraph| !paragraph.text.is_empty())
+                .collect();
+            let paragraph = &paragraphs[paragraphs.len() / 2];
+            let position = doc.paragraph_mark_position(&paragraph.para_id).unwrap();
+            doc.insert_text(&ctx(), position, "x", FormatPolicy::Plain)
+                .unwrap();
+            doc.save_story_cache_disabled
+                .store(bypass, Ordering::Relaxed);
+            doc
+        }
+
+        let Some(path) = std::env::var_os("BO_BENCH_DOCX") else {
+            return;
+        };
+        let bytes = std::fs::read(path).unwrap();
+        let mut samples: [Vec<f64>; 4] = std::array::from_fn(|_| Vec::with_capacity(15));
+        for round in 0..15 {
+            let modes = if round % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            };
+            for bypass in modes {
+                let doc = prepared(&bytes, bypass);
+                let started = std::time::Instant::now();
+                let first = doc.paragraph_save_plan();
+                let first_ms = started.elapsed().as_secs_f64() * 1000.0;
+                let started = std::time::Instant::now();
+                let repeat = doc.paragraph_save_plan();
+                let repeat_ms = started.elapsed().as_secs_f64() * 1000.0;
+                assert_eq!(first, repeat);
+                samples[usize::from(bypass)].push(first_ms);
+                samples[2 + usize::from(bypass)].push(repeat_ms);
+            }
+        }
+        let medians = samples.map(|mut samples| {
+            samples.sort_by(f64::total_cmp);
+            samples[7]
+        });
+        println!(
+            "PLANBENCH first_cache_ms={:.3} first_nocache_ms={:.3} repeat_cache_ms={:.3} repeat_nocache_ms={:.3}",
+            medians[0], medians[1], medians[2], medians[3]
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn progress_hooks_can_reenter_before_save_seed_states_are_initialized() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        thread_local! {
+            static TARGET: RefCell<Option<Rc<EditingDoc>>> = const { RefCell::new(None) };
+            static RESULT: RefCell<Option<ParagraphSavePlan>> = const { RefCell::new(None) };
+        }
+
+        fn reenter() {
+            ooxml_opc::progress::set_hook(None);
+            let doc = TARGET.with(|target| Rc::clone(target.borrow().as_ref().unwrap()));
+            let plan = doc.paragraph_save_plan();
+            RESULT.with(|result| *result.borrow_mut() = Some(plan));
+        }
+
+        struct ResetHook;
+
+        impl Drop for ResetHook {
+            fn drop(&mut self) {
+                ooxml_opc::progress::set_hook(None);
+                TARGET.with(|target| *target.borrow_mut() = None);
+                RESULT.with(|result| *result.borrow_mut() = None);
+            }
+        }
+
+        let _reset = ResetHook;
+        let body: String = (1..=ooxml_opc::progress::EVERY)
+            .map(|id| {
+                crate::engine::preview_fixture::paragraph(
+                    id,
+                    &crate::engine::preview_fixture::run("Seed"),
+                )
+            })
+            .collect();
+        let bytes = crate::engine::preview_fixture::document(&body);
+        let doc = Rc::new(EditingDoc::new(41));
+        crate::seed_from_docx(&doc, &bytes).unwrap();
+        doc.insert_text(&ctx(), Position::new("body", 0), "x", FormatPolicy::Plain)
+            .unwrap();
+        let source = doc.source_index().unwrap();
+        assert!(!source.seed_states_initialized());
+        {
+            let txn = doc.yrs_doc().transact();
+            doc.committed_scan(&txn);
+        }
+        TARGET.with(|target| *target.borrow_mut() = Some(Rc::clone(&doc)));
+        ooxml_opc::progress::set_hook(Some(reenter));
+        let plan = doc.paragraph_save_plan();
+        ooxml_opc::progress::set_hook(None);
+        let nested = RESULT.with(|result| result.borrow_mut().take().unwrap());
+        assert_eq!(plan, nested);
+        save_plans_agree(&doc);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn progress_hooks_can_reenter_save_planning_without_publishing_cleared_states() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        thread_local! {
+            static TARGET: RefCell<Option<(Rc<EditingDoc>, bool)>> = const {
+                RefCell::new(None)
+            };
+            static RESULT: RefCell<Option<(ParagraphSavePlan, Arc<StoryState>)>> = const {
+                RefCell::new(None)
+            };
+        }
+
+        fn reenter() {
+            ooxml_opc::progress::set_hook(None);
+            STORY_FINGERPRINTS.with(|count| assert_eq!(count.get(), 1));
+            let (doc, clear) = TARGET.with(|target| target.borrow().as_ref().unwrap().clone());
+            let plan = doc.paragraph_save_plan();
+            let state = Arc::clone(&doc.save_story_states.lock().unwrap().entries["body"].state);
+            if clear {
+                let media = doc.media_table();
+                let mut cache = doc.save_story_states.lock().unwrap();
+                cache.clear();
+                cache.media = media;
+            }
+            RESULT.with(|result| *result.borrow_mut() = Some((plan, state)));
+        }
+
+        struct ResetHook;
+
+        impl Drop for ResetHook {
+            fn drop(&mut self) {
+                ooxml_opc::progress::set_hook(None);
+                TARGET.with(|target| *target.borrow_mut() = None);
+                RESULT.with(|result| *result.borrow_mut() = None);
+            }
+        }
+
+        let _reset = ResetHook;
+        let body: String = (1..=ooxml_opc::progress::EVERY)
+            .map(|id| {
+                crate::engine::preview_fixture::paragraph(
+                    id,
+                    &crate::engine::preview_fixture::run("Seed"),
+                )
+            })
+            .collect();
+        let bytes = crate::engine::preview_fixture::document(&body);
+        let doc = Rc::new(EditingDoc::new(41));
+        crate::seed_from_docx(&doc, &bytes).unwrap();
+        doc.paragraph_save_plan();
+        doc.insert_text(
+            &ctx(),
+            Position::new("body", 0),
+            "New ",
+            FormatPolicy::Plain,
+        )
+        .unwrap();
+        {
+            let txn = doc.yrs_doc().transact();
+            doc.committed_scan(&txn);
+        }
+        for clear in [false, true] {
+            doc.save_story_states.lock().unwrap().clear();
+            TARGET.with(|target| *target.borrow_mut() = Some((Rc::clone(&doc), clear)));
+            STORY_FINGERPRINTS.with(|count| count.set(0));
+            ooxml_opc::progress::set_hook(Some(reenter));
+            let plan = doc.paragraph_save_plan();
+            ooxml_opc::progress::set_hook(None);
+            let (nested, state) = RESULT.with(|result| result.borrow_mut().take().unwrap());
+            assert_eq!(plan, nested);
+            {
+                let cache = doc.save_story_states.lock().unwrap();
+                if clear {
+                    assert!(cache.entries.is_empty());
+                } else {
+                    assert!(Arc::ptr_eq(&state, &cache.entries["body"].state));
+                }
+            }
+            save_plans_agree(&doc);
+        }
+    }
+
+    #[test]
+    fn duplicate_live_keys_use_full_save_states() {
+        let doc = save_plan_doc();
+        doc.insert_text(&ctx(), Position::new("body", 0), "x", FormatPolicy::Plain)
+            .unwrap();
+        doc.paragraph_save_plan();
+        let revision = doc.story_revisions.lock().unwrap().stamped["body"];
+        let key = {
+            let cache = doc.save_story_states.lock().unwrap();
+            let body = &cache.entries["body"].state;
+            body.units
+                .iter()
+                .find(|unit| unit.segments.is_none())
+                .unwrap()
+                .key
+                .clone()
+                .unwrap()
+        };
+        {
+            let mut txn = doc.yrs_doc().transact_mut();
+            let header = story_ref(&txn, "hf:rIdHeader1").unwrap();
+            let pilcrow = pilcrows(&header, &txn).remove(0).1;
+            pilcrow.insert(&mut txn, PARA_ID, key);
+        }
+        assert_eq!(
+            doc.story_revisions.lock().unwrap().stamped["body"],
+            revision
+        );
+        doc.paragraph_save_plan();
+        assert!(doc.save_story_states.lock().unwrap().entries.is_empty());
+    }
+
+    #[test]
+    fn embed_payload_kind_and_media_changes_invalidate_save_states() {
+        let session = save_seed_session();
+        let doc = session.engine.doc();
+        doc.insert_embed(
+            &ctx(),
+            Position::new("body", 0),
+            "image",
+            vec![("src".to_owned(), Any::from("media:0"))],
+        )
+        .unwrap();
+        doc.install_media(save_plan_media(vec![1, 2, 3, 4]));
+        save_plans_agree(doc);
+        let before = story_states(doc)["body"].fingerprint;
+        *doc.media.lock().unwrap() = Some(Arc::new(save_plan_media(vec![1, 2, 3, 5])));
+        save_plans_agree(doc);
+        assert_ne!(before, story_states(doc)["body"].fingerprint);
+        for (key, value) in [
+            ("horizontalRule", Any::Bool(true)),
+            ("src", Any::from("data:image/png;base64,AQIDBQ==")),
+            (KIND_KEY, Any::from("shape")),
+        ] {
+            let revision = doc.story_revisions.lock().unwrap().stamped["body"];
+            {
+                let mut txn = doc.yrs_doc().transact_mut();
+                let story = story_ref(&txn, "body").unwrap();
+                let embed = crate::ops::embed::embed_map_at(&story, &txn, 0).unwrap();
+                embed.insert(&mut txn, key, value);
+            }
+            assert!(doc.story_revisions.lock().unwrap().stamped["body"] > revision);
+            STORY_FINGERPRINTS.with(|count| count.set(0));
+            doc.paragraph_save_plan();
+            STORY_FINGERPRINTS.with(|count| assert_eq!(count.get(), 1));
+            save_plans_agree(doc);
+        }
+    }
+
+    #[test]
+    fn side_map_comment_changes_invalidate_save_states_without_story_stamps() {
+        let session = save_seed_session();
+        let doc = session.engine.doc();
+        save_plans_agree(doc);
+        let revision = doc.story_revisions.lock().unwrap().stamped["body"];
+        let mut before = story_states(doc)["body"].fingerprint;
+        let comment = doc
+            .add_comment(
+                &[StoryRange::new("body", 0, 2)],
+                "Ada",
+                DATE,
+                Any::from("hi"),
+            )
+            .unwrap();
+        for ranges in [Some((0, 2)), Some((1, 3)), None] {
+            if ranges != Some((0, 2)) {
+                let mut txn = doc.yrs_doc().transact_mut();
+                let comments = txn.get_map(crate::COMMENTS).unwrap();
+                if let Some((start, end)) = ranges {
+                    let story = story_ref(&txn, "body").unwrap();
+                    let start = crate::sticky_positions::sticky_index(
+                        &story,
+                        &txn,
+                        start,
+                        yrs::Assoc::After,
+                    )
+                    .unwrap();
+                    let end = crate::sticky_positions::sticky_index(
+                        &story,
+                        &txn,
+                        end,
+                        yrs::Assoc::Before,
+                    )
+                    .unwrap();
+                    let Out::YMap(entry) = comments.get(&txn, &comment).unwrap() else {
+                        unreachable!();
+                    };
+                    entry.insert(
+                        &mut txn,
+                        "anchors",
+                        Any::Array(Arc::from([crate::anchor_value("body", &start, &end)])),
+                    );
+                } else {
+                    comments.remove(&mut txn, &comment);
+                }
+            }
+            assert_eq!(
+                doc.story_revisions.lock().unwrap().stamped["body"],
+                revision
+            );
+            STORY_FINGERPRINTS.with(|count| count.set(0));
+            doc.paragraph_save_plan();
+            STORY_FINGERPRINTS.with(|count| assert_eq!(count.get(), 1));
+            let after = story_states(doc)["body"].fingerprint;
+            assert_ne!(before, after);
+            before = after;
+            save_plans_agree(doc);
+        }
+    }
+
+    #[test]
+    fn save_states_track_roots_and_prune_removed_or_unstamped_stories() {
+        let doc = save_plan_doc();
+        doc.create_story("nested", "Child", "Normal", "left")
+            .unwrap();
+        let embed = || crate::RawOp::InsertEmbed {
+            index: 0,
+            kind: "blockSdt".to_owned(),
+            payload: vec![("story".to_owned(), Any::from("nested"))],
+            attrs: Default::default(),
+        };
+        doc.apply_raw_ops("body", vec![embed()], &ctx()).unwrap();
+        save_plans_agree(&doc);
+        let revision = doc.story_revisions.lock().unwrap().stamped["nested"];
+        assert_eq!(story_states(&doc)["nested"].root, "body");
+        doc.apply_raw_ops(
+            "body",
+            vec![crate::RawOp::Delete { index: 0, len: 1 }],
+            &ctx(),
+        )
+        .unwrap();
+        doc.apply_raw_ops("hf:rIdHeader1", vec![embed()], &ctx())
+            .unwrap();
+        assert_eq!(
+            doc.story_revisions.lock().unwrap().stamped["nested"],
+            revision
+        );
+        assert_eq!(story_states(&doc)["nested"].root, "hf:rIdHeader1");
+        save_plans_agree(&doc);
+
+        doc.keep_deleted();
+        doc.delete_story("nested").unwrap();
+        assert!(
+            !doc.save_story_states
+                .lock()
+                .unwrap()
+                .entries
+                .contains_key("nested")
+        );
+        doc.paragraph_save_plan();
+        doc.create_story("nested", "Replacement", "Normal", "left")
+            .unwrap();
+        save_plans_agree(&doc);
+        doc.story_revisions.lock().unwrap().stamped.remove("nested");
+        for _ in 0..2 {
+            STORY_FINGERPRINTS.with(|count| count.set(0));
+            doc.paragraph_save_plan();
+            STORY_FINGERPRINTS.with(|count| assert_eq!(count.get(), 1));
+            assert!(
+                !doc.save_story_states
+                    .lock()
+                    .unwrap()
+                    .entries
+                    .contains_key("nested")
+            );
+        }
+    }
+
+    #[test]
+    fn removed_story_entries_release_cached_states_before_the_next_plan() {
+        let doc = save_plan_doc();
+        doc.create_story("transient", "Temporary", "Normal", "left")
+            .unwrap();
+        doc.paragraph_save_plan();
+        assert!(
+            doc.save_story_states
+                .lock()
+                .unwrap()
+                .entries
+                .contains_key("transient")
+        );
+        doc.delete_story("transient").unwrap();
+        assert!(
+            !doc.save_story_states
+                .lock()
+                .unwrap()
+                .entries
+                .contains_key("transient")
+        );
+    }
+
+    #[test]
+    fn budgeted_save_states_never_populate_the_story_cache() {
+        let doc = save_plan_doc();
+        {
+            let txn = doc.yrs_doc().transact();
+            assert!(story_states_within(&doc, &txn, Some(1)).is_none());
+            assert!(doc.save_story_states.lock().unwrap().entries.is_empty());
+            assert!(story_states_within(&doc, &txn, Some(usize::MAX)).is_some());
+            assert!(doc.save_story_states.lock().unwrap().entries.is_empty());
+        }
+        doc.paragraph_save_plan();
+        let txn = doc.yrs_doc().transact();
+        assert!(story_states_within(&doc, &txn, Some(1)).is_none());
+    }
+
+    #[test]
+    fn replacing_source_or_opening_state_drops_save_states() {
+        let session = save_seed_session();
+        let doc = session.engine.doc();
+        let bytes = doc.source_index().unwrap().bytes();
+        let resets: [fn(&EditingDoc); 4] = [
+            EditingDoc::mark_seeded,
+            EditingDoc::invalidate_projections,
+            |doc: &EditingDoc| doc.rotate_version(0),
+            |doc: &EditingDoc| doc.begin_opening(Some("reopened")),
+        ];
+        for reset in resets {
+            doc.paragraph_save_plan();
+            assert!(!doc.save_story_states.lock().unwrap().entries.is_empty());
+            reset(doc);
+            assert!(doc.save_story_states.lock().unwrap().entries.is_empty());
+        }
+        doc.paragraph_save_plan();
+        doc.retain_source_docx(bytes.as_ref());
+        assert!(doc.save_story_states.lock().unwrap().entries.is_empty());
+        doc.paragraph_save_plan();
+        doc.load_state_v1(&doc.encode_state_as_update_v1()).unwrap();
+        assert!(doc.save_story_states.lock().unwrap().entries.is_empty());
+        doc.paragraph_save_plan();
+        let media = Arc::downgrade(&doc.media_table().unwrap());
+        drop(session);
+        assert!(media.upgrade().is_none());
+    }
+
     #[test]
     fn priming_save_seed_states_preserves_the_plan_without_reseeding() {
         let primed = save_seed_session();
@@ -3976,6 +6271,16 @@ mod tests {
         assert!(primed.prime_save_seed_states(u32::MAX, u32::MAX));
         assert!(primed.prime_save_seed_states(u32::MAX, u32::MAX));
         assert!(source.seed_states_initialized());
+        assert!(
+            primed
+                .engine
+                .doc()
+                .save_story_states
+                .lock()
+                .unwrap()
+                .entries
+                .is_empty()
+        );
         for session in [&primed, &fallback] {
             session
                 .engine
@@ -4057,6 +6362,1102 @@ mod tests {
         assert_eq!(source.reseed_calls.load(Ordering::Relaxed), 0);
     }
 
+    fn prime_at_product_caps(doc: &EditingDoc) -> bool {
+        doc.prime_save_seed_states(SAVE_SEED_MAX_PARAGRAPHS, SAVE_SEED_MAX_INFLATED_BYTES)
+    }
+
+    fn assert_primed_edit_plans_without_reseed(doc: &EditingDoc) {
+        assert!(doc.unchanged_since_seeded());
+        assert!(prime_at_product_caps(doc));
+        let source = doc.source_index().unwrap();
+        assert!(source.seed_states_initialized());
+        doc.insert_text(
+            &ctx(),
+            Position::new("body", 0),
+            "New ",
+            FormatPolicy::Plain,
+        )
+        .unwrap();
+        doc.paragraph_save_plan();
+        assert_eq!(source.reseed_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn a_crate_seed_with_generation_primes_and_plans_an_edit_without_reseeding() {
+        let bytes = ooxml_opc::rezip_parts(&crate::seed::fixture::principal_parts()).unwrap();
+        let doc = EditingDoc::new(41);
+        crate::seed_from_docx_with_generation(&doc, &bytes, "crate").unwrap();
+        assert_primed_edit_plans_without_reseed(&doc);
+    }
+
+    #[test]
+    fn a_crate_seed_primes_and_plans_an_edit_without_reseeding() {
+        assert_primed_edit_plans_without_reseed(&save_plan_doc());
+    }
+
+    #[test]
+    fn a_crate_seed_primes_at_the_paragraph_cap_and_reseeds_once_past_it() {
+        use crate::seed::fixture;
+        for (paragraphs, primes) in [
+            (SAVE_SEED_MAX_PARAGRAPHS, true),
+            (SAVE_SEED_MAX_PARAGRAPHS + 1, false),
+        ] {
+            let body: String = (0..paragraphs)
+                .map(|index| {
+                    fixture::para(
+                        &format!("{:08X}", 0x0100_0000 + index),
+                        &fixture::run(&format!("Paragraph {index}")),
+                    )
+                })
+                .collect();
+            let doc = EditingDoc::new(41);
+            let bytes = fixture::Package::new(&body).bytes();
+            crate::seed_from_docx(&doc, &bytes).unwrap();
+            let source = doc.source_index().unwrap();
+            {
+                let txn = doc.yrs_doc().transact();
+                assert_eq!(doc.committed_scan(&txn).pilcrows.len() as u32, paragraphs);
+            }
+            assert!(doc.unchanged_since_seeded(), "{paragraphs}");
+            assert_eq!(prime_at_product_caps(&doc), primes, "{paragraphs}");
+            doc.insert_text(
+                &ctx(),
+                Position::new("body", 0),
+                "New ",
+                FormatPolicy::Plain,
+            )
+            .unwrap();
+            doc.paragraph_save_plan();
+            assert_eq!(
+                source.reseed_calls.load(Ordering::Relaxed),
+                usize::from(!primes),
+                "{paragraphs}"
+            );
+        }
+    }
+
+    fn principal_session() -> crate::session::EditSessionCore {
+        let bytes = ooxml_opc::rezip_parts(&crate::seed::fixture::principal_parts()).unwrap();
+        let session =
+            crate::session::EditSessionCore::new(41, crate::session::Host::deterministic());
+        session.open_docx(&bytes, true, None, None).unwrap();
+        session
+    }
+
+    fn assert_same_seed_states(left: &SourceIndex, right: &SourceIndex) {
+        let (left, right) = (left.seed_states(), right.seed_states());
+        assert_eq!(left.len(), right.len());
+        for (story, was) in right {
+            let is = &left[story];
+            assert!(
+                was.root == is.root
+                    && was.fingerprint == is.fingerprint
+                    && was.comments == is.comments
+                    && was.units == is.units,
+                "{story}"
+            );
+        }
+    }
+
+    #[test]
+    fn sliced_priming_records_the_one_shot_seed_states() {
+        let whole = principal_session();
+        assert!(whole.prime_save_seed_states(u32::MAX, u32::MAX));
+        let whole_source = whole.engine.doc().source_index().unwrap();
+        for max_bytes in [1, 64, 4096] {
+            let sliced = principal_session();
+            let doc = sliced.engine.doc();
+            let mut slices = 0;
+            loop {
+                match doc.prime_save_seed_states_slice(u32::MAX, u32::MAX, max_bytes) {
+                    PrimeSlice::Pending => slices += 1,
+                    PrimeSlice::Known => break,
+                    PrimeSlice::Declined => panic!("declined at {max_bytes}"),
+                }
+            }
+            if max_bytes < 4096 {
+                assert!(slices > 1, "{max_bytes}");
+            }
+            assert!(doc.prime_progress.lock().unwrap().is_none());
+            let source = doc.source_index().unwrap();
+            assert_eq!(source.reseed_calls.load(Ordering::Relaxed), 0);
+            assert_same_seed_states(&source, &whole_source);
+            assert_eq!(
+                sliced.paragraph_save_plan().unwrap(),
+                whole.paragraph_save_plan().unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn a_commit_between_prime_slices_declines_and_keeps_the_fallback() {
+        let session = principal_session();
+        let expected = principal_session();
+        let doc = session.engine.doc();
+        assert_eq!(
+            doc.prime_save_seed_states_slice(u32::MAX, u32::MAX, 1),
+            PrimeSlice::Pending
+        );
+        for session in [&session, &expected] {
+            session
+                .engine
+                .doc()
+                .insert_text(
+                    &ctx(),
+                    Position::new("body", 0),
+                    "New ",
+                    FormatPolicy::Plain,
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            doc.prime_save_seed_states_slice(u32::MAX, u32::MAX, 1),
+            PrimeSlice::Declined
+        );
+        assert!(doc.prime_progress.lock().unwrap().is_none());
+        let source = doc.source_index().unwrap();
+        assert!(!source.seed_states_initialized());
+        assert_eq!(
+            session.paragraph_save_plan().unwrap(),
+            expected.paragraph_save_plan().unwrap()
+        );
+    }
+
+    fn bytes_session(bytes: &[u8]) -> crate::session::EditSessionCore {
+        let session =
+            crate::session::EditSessionCore::new(41, crate::session::Host::deterministic());
+        session.open_docx(bytes, true, None, None).unwrap();
+        session
+    }
+
+    fn commented(id: u32, text: &str) -> String {
+        format!(
+            r#"<w:commentRangeStart w:id="{id}"/>{}<w:commentRangeEnd w:id="{id}"/><w:r><w:commentReference w:id="{id}"/></w:r>"#,
+            crate::seed::fixture::run(text)
+        )
+    }
+
+    fn commented_docx(body: &str, comments: u32) -> Vec<u8> {
+        use crate::seed::fixture;
+        let remarks: String = (1..=comments)
+            .map(|id| {
+                format!(
+                    r#"<w:comment w:id="{id}" w:author="Ann" w:date="2026-01-04T00:00:00Z">{}</w:comment>"#,
+                    fixture::para(&format!("{:08X}", 0x3000_0000 + id), &fixture::run("Remark"))
+                )
+            })
+            .collect();
+        fixture::Package::new(body)
+            .rel("rIdImage", "image", "media/image1.png")
+            .part(
+                "comments.xml",
+                "rIdComments",
+                "comments",
+                "comments",
+                &format!(
+                    r#"<w:comments {}>{remarks}</w:comments>"#,
+                    fixture::namespaces()
+                ),
+            )
+            .bytes()
+    }
+
+    fn multi_chunk_docx() -> Vec<u8> {
+        use crate::seed::fixture;
+        let control = |id: i32, content: &str| {
+            format!(
+                r#"<w:sdt><w:sdtPr><w:id w:val="{id}"/></w:sdtPr><w:sdtContent>{content}</w:sdtContent></w:sdt>"#
+            )
+        };
+        let table = format!(
+            r#"<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:tcPr/>{}</w:tc><w:tc><w:tcPr/>{}{}</w:tc></w:tr></w:tbl>"#,
+            fixture::para("20000001", &commented(2, "Commented cell")),
+            control(
+                -601,
+                &format!(
+                    "{}{}",
+                    control(
+                        -602,
+                        &fixture::para("20000002", &commented(3, "Nested control"))
+                    ),
+                    fixture::para("20000004", &fixture::run("Outer control"))
+                )
+            ),
+            fixture::para("20000003", &fixture::run("After the controls")),
+        );
+        let mut body = format!(
+            "{}{table}",
+            fixture::para("10000001", &commented(1, "Commented body"))
+        );
+        for index in 0..1500u32 {
+            body.push_str(&fixture::para(
+                &format!("{:08X}", 0x0100_0000 + index),
+                &fixture::run(&format!("Paragraph {index} of the long body")),
+            ));
+        }
+        body.push_str(&fixture::para(
+            "10000002",
+            &format!(
+                "{}{}",
+                fixture::run("Picture: "),
+                fixture::image("rIdImage", "Picture")
+            ),
+        ));
+        commented_docx(&body, 3)
+    }
+
+    fn prime_in_slices(
+        doc: &EditingDoc,
+        max_inflated_bytes: u32,
+        max_bytes: u32,
+        segments_per_slice: usize,
+    ) -> (PrimeSlice, usize) {
+        let mut slices = 0;
+        loop {
+            match doc.prime_save_seed_states_slice_with(
+                u32::MAX,
+                max_inflated_bytes,
+                max_bytes,
+                segments_per_slice,
+            ) {
+                PrimeSlice::Pending => slices += 1,
+                outcome => return (outcome, slices),
+            }
+        }
+    }
+
+    #[test]
+    fn sliced_priming_matches_one_shot_on_a_multi_chunk_body_with_media_and_comments() {
+        let bytes = multi_chunk_docx();
+        let whole = bytes_session(&bytes);
+        assert!(whole.prime_save_seed_states(u32::MAX, u32::MAX));
+        let whole_source = whole.engine.doc().source_index().unwrap();
+        assert!(whole_source.seed_states().len() >= 4);
+        for max_bytes in [1, 64, 4096, 65536] {
+            let sliced = bytes_session(&bytes);
+            let doc = sliced.engine.doc();
+            let mut slices = 0;
+            loop {
+                match doc.prime_save_seed_states_slice(u32::MAX, u32::MAX, max_bytes) {
+                    PrimeSlice::Pending => slices += 1,
+                    PrimeSlice::Known => break,
+                    PrimeSlice::Declined => panic!("declined at {max_bytes}"),
+                }
+            }
+            assert!(slices > 1, "{max_bytes}");
+            assert!(doc.prime_progress.lock().unwrap().is_none());
+            let source = doc.source_index().unwrap();
+            assert_eq!(source.reseed_calls.load(Ordering::Relaxed), 0);
+            assert_same_seed_states(&source, &whole_source);
+            assert_eq!(
+                sliced.paragraph_save_plan().unwrap(),
+                whole.paragraph_save_plan().unwrap()
+            );
+        }
+    }
+
+    fn one_shot_prime_cost(bytes: &[u8]) -> u64 {
+        let whole = bytes_session(bytes);
+        assert!(whole.prime_save_seed_states(u32::MAX, u32::MAX));
+        whole.engine.doc().prime_last_slice_cost()
+    }
+
+    /// The cost each story slice of a sliced prime charged, the last one answering `Known`.
+    fn story_slice_costs(doc: &EditingDoc, max_bytes: u32) -> Vec<u64> {
+        assert_eq!(doc.prime_last_slice_cost(), 0);
+        let mut setup = 0;
+        while prime_phase(doc) != Some(PrimePhase::Stories) {
+            assert_eq!(
+                doc.prime_save_seed_states_slice(u32::MAX, u32::MAX, max_bytes),
+                PrimeSlice::Pending,
+                "setup slice {setup} at {max_bytes}"
+            );
+            assert_eq!(doc.prime_last_slice_cost(), 0, "setup slice {setup}");
+            setup += 1;
+        }
+        assert!(setup >= 3, "{setup}");
+        let mut costs = Vec::new();
+        loop {
+            let outcome = doc.prime_save_seed_states_slice(u32::MAX, u32::MAX, max_bytes);
+            costs.push(doc.prime_last_slice_cost());
+            match outcome {
+                PrimeSlice::Pending => {
+                    let slice = costs.len();
+                    assert!(costs[slice - 1] > 0, "slice {slice} at {max_bytes}");
+                }
+                PrimeSlice::Known => break,
+                PrimeSlice::Declined => panic!("declined at {max_bytes}"),
+            }
+        }
+        assert_eq!(
+            doc.prime_save_seed_states_slice(u32::MAX, u32::MAX, max_bytes),
+            PrimeSlice::Known
+        );
+        assert_eq!(doc.prime_last_slice_cost(), 0);
+        costs
+    }
+
+    #[test]
+    fn prime_last_slice_cost_reports_what_each_slice_charged() {
+        let bytes = multi_chunk_docx();
+        let all = one_shot_prime_cost(&bytes);
+        assert!(all > 0);
+        for max_bytes in [1u32, 4096] {
+            let session = bytes_session(&bytes);
+            let costs = story_slice_costs(session.engine.doc(), max_bytes);
+            assert!(costs.len() > 2, "{} at {max_bytes}", costs.len());
+            assert_eq!(costs.iter().sum::<u64>(), all, "{max_bytes}");
+        }
+    }
+
+    #[test]
+    fn a_prime_slice_reports_its_overshoot_past_max_bytes() {
+        let bytes = multi_chunk_docx();
+        let session = bytes_session(&bytes);
+        let costs = story_slice_costs(session.engine.doc(), 1);
+        assert!(costs.iter().all(|&cost| cost > 1 || cost == 0), "{costs:?}");
+        assert!(
+            costs.iter().any(|&cost| cost > PRIME_STORY_COST as u64),
+            "{costs:?}"
+        );
+    }
+
+    #[test]
+    fn priming_many_tiny_stories_charges_story_cost_in_bounded_slices() {
+        use crate::seed::fixture;
+        let nested = 60u32;
+        let mut body = fixture::para("10000001", &commented(1, "Body"));
+        let mut rows = String::new();
+        for index in 0..nested {
+            body.push_str(&format!(
+                r#"<w:sdt><w:sdtPr><w:id w:val="{}"/></w:sdtPr><w:sdtContent>{}</w:sdtContent></w:sdt>"#,
+                -1000 - index as i32,
+                fixture::para(&format!("{:08X}", 0x0200_0000 + index), &fixture::run("C"))
+            ));
+            rows.push_str(&format!(
+                r#"<w:tr><w:tc><w:tcPr/>{}</w:tc></w:tr>"#,
+                fixture::para(&format!("{:08X}", 0x0300_0000 + index), &fixture::run("C"))
+            ));
+        }
+        body.push_str(&format!(
+            r#"<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>{rows}</w:tbl>"#
+        ));
+        body.push_str(&fixture::para("10000002", &fixture::run("After")));
+        let bytes = commented_docx(&body, 1);
+        let whole = bytes_session(&bytes);
+        assert!(whole.prime_save_seed_states(u32::MAX, u32::MAX));
+        let source = whole.engine.doc().source_index().unwrap();
+        let stories = source.seed_states().len() as u64;
+        assert!(stories > u64::from(nested), "{stories}");
+        let all = whole.engine.doc().prime_last_slice_cost();
+        assert!(all >= stories * PRIME_STORY_COST as u64, "{all}");
+        for max_bytes in [2048u32, 4096] {
+            let session = bytes_session(&bytes);
+            let costs = story_slice_costs(session.engine.doc(), max_bytes);
+            assert_eq!(costs.iter().sum::<u64>(), all, "{max_bytes}");
+            let bound = all.div_ceil(u64::from(max_bytes)) + 2;
+            assert!(costs.len() as u64 <= bound, "{} > {bound}", costs.len());
+        }
+    }
+
+    const WIDE_BUDGET: u32 = 1 << 30;
+
+    /// One prime slice: its outcome, the cost it reported and what it spent of `max_bytes`.
+    fn charged_slice(
+        doc: &EditingDoc,
+        paragraphs: u32,
+        inflated: u32,
+        max_bytes: u32,
+        segments_per_slice: usize,
+    ) -> (PrimeSlice, u64, u64) {
+        let outcome = doc.prime_save_seed_states_slice_with(
+            paragraphs,
+            inflated,
+            max_bytes,
+            segments_per_slice,
+        );
+        let left = doc.prime_last_slice_left.load(Ordering::Relaxed);
+        (
+            outcome,
+            doc.prime_last_slice_cost(),
+            u64::from(max_bytes) - left,
+        )
+    }
+
+    /// The story the prime is part way through, and what it charged so far.
+    fn current_charge(doc: &EditingDoc) -> Option<(String, u64)> {
+        let progress = doc.prime_progress.lock().unwrap();
+        let (story, fingerprint) = progress.as_ref()?.current.as_ref()?;
+        Some((story.clone(), fingerprint.charged))
+    }
+
+    fn unscanned_session(bytes: &[u8]) -> crate::session::EditSessionCore {
+        let session = bytes_session(bytes);
+        *session.engine.doc().scan_cache.0.lock().unwrap() = None;
+        session
+    }
+
+    fn prime_to_stories(doc: &EditingDoc, max_bytes: u32, segments_per_slice: usize) {
+        while prime_phase(doc) != Some(PrimePhase::Stories) {
+            let slice = charged_slice(doc, u32::MAX, u32::MAX, max_bytes, segments_per_slice);
+            assert_eq!(slice, (PrimeSlice::Pending, 0, 0));
+        }
+    }
+
+    #[test]
+    fn a_scan_slice_reports_the_nothing_it_charges() {
+        let session = unscanned_session(&multi_chunk_docx());
+        let doc = session.engine.doc();
+        let start = charged_slice(doc, u32::MAX, u32::MAX, WIDE_BUDGET, 7);
+        assert_eq!(start, (PrimeSlice::Pending, 0, 0));
+        let mut scan_slices = 0;
+        while prime_phase(doc) == Some(PrimePhase::Scan) {
+            let slice = charged_slice(doc, u32::MAX, u32::MAX, WIDE_BUDGET, 7);
+            assert_eq!(
+                slice,
+                (PrimeSlice::Pending, 0, 0),
+                "scan slice {scan_slices}"
+            );
+            scan_slices += 1;
+        }
+        assert!(scan_slices > 1, "{scan_slices}");
+        assert_eq!(prime_phase(doc), Some(PrimePhase::Anchors));
+    }
+
+    #[test]
+    fn the_anchors_slice_reports_the_nothing_it_charges() {
+        let session = unscanned_session(&multi_chunk_docx());
+        let doc = session.engine.doc();
+        while prime_phase(doc) != Some(PrimePhase::Anchors) {
+            let slice = charged_slice(doc, u32::MAX, u32::MAX, WIDE_BUDGET, 7);
+            assert_eq!(slice.0, PrimeSlice::Pending);
+        }
+        let anchors = charged_slice(doc, u32::MAX, u32::MAX, WIDE_BUDGET, 7);
+        assert_eq!(anchors, (PrimeSlice::Pending, 0, 0));
+        assert_eq!(prime_phase(doc), Some(PrimePhase::Stories));
+    }
+
+    #[test]
+    fn a_story_start_slice_reports_the_story_cost_it_charged() {
+        let session = bytes_session(&multi_chunk_docx());
+        let doc = session.engine.doc();
+        prime_to_stories(doc, WIDE_BUDGET, 7);
+        let mut starts = 0;
+        loop {
+            let (outcome, reported, spent) = charged_slice(doc, u32::MAX, u32::MAX, WIDE_BUDGET, 7);
+            assert_eq!(reported, spent);
+            match outcome {
+                PrimeSlice::Pending => {
+                    let started = current_charge(doc);
+                    assert!(started.as_ref().is_some_and(|(_, charged)| *charged == 0));
+                    assert!(reported >= PRIME_STORY_COST as u64, "{reported}");
+                    starts += 1;
+                }
+                PrimeSlice::Known => break,
+                PrimeSlice::Declined => panic!("declined"),
+            }
+        }
+        assert!(starts > 0, "{starts}");
+    }
+
+    #[test]
+    fn a_partial_story_slice_reports_what_its_story_charged() {
+        let max_bytes = 4096u32;
+        let session = bytes_session(&multi_chunk_docx());
+        let doc = session.engine.doc();
+        prime_to_stories(doc, max_bytes, 512);
+        let mut partials = 0;
+        loop {
+            let before = current_charge(doc);
+            let (outcome, reported, spent) = charged_slice(doc, u32::MAX, u32::MAX, max_bytes, 512);
+            let after = current_charge(doc);
+            if outcome == PrimeSlice::Pending
+                && let (Some((was, from)), Some((is, to))) = (&before, &after)
+                && was == is
+                && to > from
+            {
+                assert_eq!(reported, to - from, "{was}");
+                assert!(reported >= u64::from(max_bytes), "{reported}");
+                assert_eq!(spent, u64::from(max_bytes));
+                partials += 1;
+            }
+            match outcome {
+                PrimeSlice::Pending => assert!(reported > 0),
+                PrimeSlice::Known => break,
+                PrimeSlice::Declined => panic!("declined"),
+            }
+        }
+        assert!(partials > 1, "{partials}");
+    }
+
+    #[test]
+    fn a_story_finishing_slice_reports_what_it_charged() {
+        let bytes = multi_chunk_docx();
+        let session = bytes_session(&bytes);
+        let doc = session.engine.doc();
+        prime_to_stories(doc, WIDE_BUDGET, 512);
+        let mut total = 0;
+        loop {
+            let (outcome, reported, spent) =
+                charged_slice(doc, u32::MAX, u32::MAX, WIDE_BUDGET, 512);
+            assert_eq!(reported, spent);
+            total += reported;
+            match outcome {
+                PrimeSlice::Pending => {}
+                PrimeSlice::Known => {
+                    assert!(reported > 0);
+                    break;
+                }
+                PrimeSlice::Declined => panic!("declined"),
+            }
+        }
+        assert_eq!(total, one_shot_prime_cost(&bytes));
+    }
+
+    #[test]
+    fn a_known_slice_reports_the_nothing_it_charges() {
+        let session = bytes_session(&multi_chunk_docx());
+        let doc = session.engine.doc();
+        assert!(session.prime_save_seed_states(u32::MAX, u32::MAX));
+        assert!(doc.prime_last_slice_cost() > 0);
+        let known = charged_slice(doc, u32::MAX, u32::MAX, WIDE_BUDGET, 512);
+        assert_eq!(known, (PrimeSlice::Known, 0, 0));
+    }
+
+    #[test]
+    fn a_prime_slice_that_gives_up_mid_story_reports_what_it_hashed() {
+        use crate::seed::fixture;
+        let text: String = (0..40u32)
+            .map(|index| {
+                fixture::para(
+                    &format!("{:08X}", 0x0400_0000 + index),
+                    &fixture::run(&format!("Text paragraph {index} before the pictures")),
+                )
+            })
+            .collect();
+        let pictures: String = (0..10u32)
+            .map(|index| {
+                fixture::para(
+                    &format!("{:08X}", 0x0500_0000 + index),
+                    &fixture::image("rIdImage", "Picture"),
+                )
+            })
+            .collect();
+        let package = |body: &str| {
+            let mut parts = fixture::Package::new(body)
+                .rel("rIdImage", "image", "media/image1.png")
+                .parts();
+            for (name, bytes) in &mut parts {
+                if name == "word/media/image1.png" {
+                    bytes.resize(200_000, 0);
+                }
+            }
+            ooxml_opc::rezip_parts(&parts).unwrap()
+        };
+        let text_only = one_shot_prime_cost(&package(&text));
+        let bytes = package(&format!("{text}{pictures}"));
+        let session = bytes_session(&bytes);
+        let doc = session.engine.doc();
+        let source = doc.source_index().unwrap();
+        let packed = source.bytes().as_ref().len() as u64;
+        let opened = ooxml_opc::RetainedPackage::from_bytes(source.bytes()).unwrap();
+        let inflated = opened.parts().map(|(_, size)| size).sum::<u64>();
+        let size = u32::try_from(packed.max(inflated)).unwrap();
+        loop {
+            let slice = charged_slice(doc, u32::MAX, size, WIDE_BUDGET, 1);
+            assert_eq!(slice, (PrimeSlice::Pending, 0, 0));
+            if prime_phase(doc) == Some(PrimePhase::Stories) {
+                break;
+            }
+        }
+        let story = PRIME_STORY_COST as u64;
+        let start = charged_slice(doc, u32::MAX, size, WIDE_BUDGET, 1);
+        assert_eq!(start, (PrimeSlice::Pending, story, story));
+        assert_eq!(current_charge(doc), Some(("body".to_owned(), 0)));
+        let (outcome, reported, spent) = charged_slice(doc, u32::MAX, size, WIDE_BUDGET, 1);
+        assert_eq!(outcome, PrimeSlice::Declined);
+        assert_eq!(reported, spent);
+        assert_eq!(reported, text_only - story);
+        assert!(doc.prime_progress.lock().unwrap().is_none());
+        assert!(!source.seed_states_initialized());
+    }
+
+    #[test]
+    fn a_declined_slice_reports_what_it_charged() {
+        let bytes = multi_chunk_docx();
+        let session = bytes_session(&bytes);
+        let declined = charged_slice(session.engine.doc(), u32::MAX, 1, WIDE_BUDGET, 512);
+        assert_eq!(declined, (PrimeSlice::Declined, 0, 0));
+        let session = unscanned_session(&bytes);
+        let doc = session.engine.doc();
+        loop {
+            let (outcome, reported, spent) = charged_slice(doc, 1, u32::MAX, WIDE_BUDGET, 7);
+            assert_eq!((reported, spent), (0, 0));
+            if outcome != PrimeSlice::Pending {
+                assert_eq!(outcome, PrimeSlice::Declined);
+                break;
+            }
+        }
+        let session = bytes_session(&bytes);
+        let doc = session.engine.doc();
+        prime_to_stories(doc, 4096, 512);
+        let (outcome, reported, _) = charged_slice(doc, u32::MAX, u32::MAX, 4096, 512);
+        assert_eq!(outcome, PrimeSlice::Pending);
+        assert!(reported > 0);
+        edit_body(&session);
+        let declined = charged_slice(doc, u32::MAX, u32::MAX, 4096, 512);
+        assert_eq!(declined, (PrimeSlice::Declined, 0, 0));
+    }
+
+    #[test]
+    fn priming_any_number_of_segments_at_a_time_matches_one_shot() {
+        let bytes = multi_chunk_docx();
+        let whole = bytes_session(&bytes);
+        assert!(whole.prime_save_seed_states(u32::MAX, u32::MAX));
+        let whole_source = whole.engine.doc().source_index().unwrap();
+        let whole_plan = whole.paragraph_save_plan().unwrap();
+        for segments_per_slice in [1, 2, 3, 5, 7, 512] {
+            for max_bytes in [1, 4096, u32::MAX] {
+                let label = format!("{segments_per_slice} segments, {max_bytes} bytes");
+                let sliced = bytes_session(&bytes);
+                let doc = sliced.engine.doc();
+                let (outcome, slices) =
+                    prime_in_slices(doc, u32::MAX, max_bytes, segments_per_slice);
+                assert_eq!(outcome, PrimeSlice::Known, "{label}");
+                assert_eq!(slices == 0, max_bytes == u32::MAX, "{label}");
+                assert!(doc.prime_progress.lock().unwrap().is_none(), "{label}");
+                let source = doc.source_index().unwrap();
+                assert_eq!(source.reseed_calls.load(Ordering::Relaxed), 0, "{label}");
+                assert_same_seed_states(&source, &whole_source);
+                assert_eq!(sliced.paragraph_save_plan().unwrap(), whole_plan, "{label}");
+            }
+        }
+    }
+
+    #[test]
+    fn comment_anchors_decoded_once_resolve_as_each_story_does() {
+        let session = bytes_session(&multi_chunk_docx());
+        let doc = session.engine.doc();
+        let txn = doc.yrs_doc().transact();
+        let grouped = crate::canonical::comment_anchors_by_story(&txn);
+        let scan = doc.committed_scan(&txn);
+        let mut anchored = 0;
+        for story in &scan.stories {
+            let resolved = grouped
+                .get(story)
+                .map(|anchors| crate::canonical::resolve_comment_anchors(&txn, anchors))
+                .unwrap_or_default();
+            let expected = crate::canonical::story_comment_anchors(&txn, story);
+            assert_eq!(resolved, expected, "{story}");
+            anchored += usize::from(!resolved.is_empty());
+        }
+        assert!(anchored >= 2, "{anchored}");
+    }
+
+    #[test]
+    fn sliced_priming_declines_past_the_inflated_budget_a_segment_at_a_time() {
+        let session = save_seed_session();
+        let doc = session.engine.doc();
+        let source = doc.source_index().unwrap();
+        let packed = source.bytes().as_ref().len() as u32;
+        let package = ooxml_opc::RetainedPackage::from_bytes(source.bytes()).unwrap();
+        let inflated = package.parts().map(|(_, size)| size).sum::<u64>() as u32;
+        let size = packed.max(inflated);
+        assert!(size > 0);
+        assert_eq!(prime_in_slices(doc, size - 1, 1, 1).0, PrimeSlice::Declined);
+        assert!(doc.prime_progress.lock().unwrap().is_none());
+        assert!(!source.seed_states_initialized());
+        let (outcome, slices) = prime_in_slices(doc, size, 1, 1);
+        assert_eq!(outcome, PrimeSlice::Known);
+        assert!(slices > 3, "{slices}");
+        assert!(source.seed_states_initialized());
+        assert_eq!(source.reseed_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn a_commit_at_any_prime_slice_position_declines() {
+        use crate::seed::fixture;
+        let table = format!(
+            r#"<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:tcPr/>{}</w:tc></w:tr></w:tbl>"#,
+            fixture::para("20000001", &commented(2, "Cell")),
+        );
+        let bytes = commented_docx(
+            &format!(
+                "{}{table}{}",
+                fixture::para("10000001", &commented(1, "Body")),
+                fixture::para("10000002", &fixture::run("After"))
+            ),
+            2,
+        );
+        for segments_per_slice in [1, 512] {
+            let undisturbed = bytes_session(&bytes);
+            let (outcome, slices) =
+                prime_in_slices(undisturbed.engine.doc(), u32::MAX, 1, segments_per_slice);
+            assert_eq!(outcome, PrimeSlice::Known);
+            assert!(slices > 3, "{slices}");
+            let mut phases = Vec::new();
+            for committed_after in 1..=slices {
+                let session = bytes_session(&bytes);
+                let expected = bytes_session(&bytes);
+                let doc = session.engine.doc();
+                for _ in 0..committed_after {
+                    assert_eq!(
+                        doc.prime_save_seed_states_slice_with(
+                            u32::MAX,
+                            u32::MAX,
+                            1,
+                            segments_per_slice,
+                        ),
+                        PrimeSlice::Pending
+                    );
+                }
+                phases.push(
+                    doc.prime_progress
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .map(|progress| progress.phase),
+                );
+                for session in [&session, &expected] {
+                    session
+                        .engine
+                        .doc()
+                        .insert_text(
+                            &ctx(),
+                            Position::new("body", 0),
+                            "New ",
+                            FormatPolicy::Plain,
+                        )
+                        .unwrap();
+                }
+                assert_eq!(
+                    doc.prime_save_seed_states_slice_with(
+                        u32::MAX,
+                        u32::MAX,
+                        1,
+                        segments_per_slice,
+                    ),
+                    PrimeSlice::Declined,
+                    "{segments_per_slice}: {committed_after}"
+                );
+                assert!(doc.prime_progress.lock().unwrap().is_none());
+                let source = doc.source_index().unwrap();
+                assert!(!source.seed_states_initialized());
+                assert_eq!(source.reseed_calls.load(Ordering::Relaxed), 0);
+                assert_eq!(
+                    session.paragraph_save_plan().unwrap(),
+                    expected.paragraph_save_plan().unwrap()
+                );
+                assert_eq!(source.reseed_calls.load(Ordering::Relaxed), 1);
+            }
+            phases.dedup();
+            assert_eq!(
+                phases[..3],
+                [
+                    Some(PrimePhase::Scan),
+                    Some(PrimePhase::Anchors),
+                    Some(PrimePhase::Stories)
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn a_map_collected_behind_the_observer_declines_the_prime() {
+        let session = bytes_session(&multi_chunk_docx());
+        let doc = session.engine.doc();
+        let mut held = false;
+        for _ in 0..12_000 {
+            assert_eq!(
+                doc.prime_save_seed_states_slice_with(u32::MAX, u32::MAX, 1, 1),
+                PrimeSlice::Pending
+            );
+            held = doc
+                .prime_progress
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|progress| progress.current.as_ref())
+                .is_some_and(|(story, fingerprint)| {
+                    story == "body" && fingerprint.cursor.len() > 100
+                });
+            if held {
+                break;
+            }
+        }
+        assert!(held);
+        let epoch = doc.committed_epoch();
+        {
+            let mut txn = doc.yrs_doc().transact_mut();
+            txn.commit();
+            let body = crate::story_text(&txn, "body").unwrap();
+            let len = body.len(&txn);
+            body.remove_range(&mut txn, len - 5, 5);
+            txn.gc(None);
+        }
+        assert_eq!(doc.committed_epoch(), epoch);
+        assert_eq!(prime_in_slices(doc, u32::MAX, 1, 1).0, PrimeSlice::Declined);
+        assert!(doc.prime_progress.lock().unwrap().is_none());
+        let source = doc.source_index().unwrap();
+        assert!(!source.seed_states_initialized());
+    }
+
+    fn prime_phase(doc: &EditingDoc) -> Option<PrimePhase> {
+        doc.prime_progress
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|progress| progress.phase)
+    }
+
+    fn cached_scan(doc: &EditingDoc) -> Option<(u64, Arc<Scan>)> {
+        doc.scan_cache.0.lock().unwrap().clone()
+    }
+
+    fn same_cache(left: &Option<(u64, Arc<Scan>)>, right: &Option<(u64, Arc<Scan>)>) -> bool {
+        match (left, right) {
+            (None, None) => true,
+            (Some((left_epoch, left)), Some((right_epoch, right))) => {
+                left_epoch == right_epoch && Arc::ptr_eq(left, right)
+            }
+            _ => false,
+        }
+    }
+
+    fn prime_slice(doc: &EditingDoc, segments_per_slice: usize) -> PrimeSlice {
+        doc.prime_save_seed_states_slice_with(u32::MAX, u32::MAX, 1, segments_per_slice)
+    }
+
+    fn edit_body(session: &crate::session::EditSessionCore) {
+        session
+            .engine
+            .doc()
+            .insert_text(
+                &ctx(),
+                Position::new("body", 0),
+                "New ",
+                FormatPolicy::Plain,
+            )
+            .unwrap();
+    }
+
+    /// Each pending slice's phase in an undisturbed prime, and how many end in the scan.
+    fn prime_phases(bytes: &[u8], segments_per_slice: usize) -> (Vec<Option<PrimePhase>>, usize) {
+        let session = bytes_session(bytes);
+        let doc = session.engine.doc();
+        let mut phases = Vec::new();
+        loop {
+            match prime_slice(doc, segments_per_slice) {
+                PrimeSlice::Pending => phases.push(prime_phase(doc)),
+                outcome => {
+                    assert_eq!(outcome, PrimeSlice::Known, "{segments_per_slice}");
+                    break;
+                }
+            }
+        }
+        let scanning = phases
+            .iter()
+            .take_while(|phase| **phase == Some(PrimePhase::Scan))
+            .count();
+        (phases, scanning)
+    }
+
+    #[test]
+    fn a_scan_primed_in_slices_equals_a_whole_scan() {
+        let bytes = multi_chunk_docx();
+        for segments_per_slice in [1, 2, 7, 1 << 20] {
+            let session = bytes_session(&bytes);
+            let doc = session.engine.doc();
+            *doc.scan_cache.0.lock().unwrap() = None;
+            let epoch = doc.committed_epoch();
+            assert_eq!(prime_slice(doc, segments_per_slice), PrimeSlice::Pending);
+            let mut scan_slices = 0;
+            while prime_phase(doc) == Some(PrimePhase::Scan) {
+                assert!(cached_scan(doc).is_none(), "{segments_per_slice}");
+                assert_eq!(prime_slice(doc, segments_per_slice), PrimeSlice::Pending);
+                scan_slices += 1;
+            }
+            assert_eq!(prime_phase(doc), Some(PrimePhase::Anchors));
+            assert_eq!(
+                scan_slices > 1,
+                segments_per_slice < 1 << 20,
+                "{segments_per_slice}"
+            );
+            let (cached_epoch, cached) = cached_scan(doc).unwrap();
+            assert_eq!(cached_epoch, epoch);
+            let txn = doc.yrs_doc().transact();
+            let whole = Scan::new(&txn);
+            assert_eq!(
+                scan_view(&cached),
+                scan_view(&whole),
+                "{segments_per_slice}"
+            );
+            assert!(whole.pilcrows.len() > 1500 && !whole.parents.is_empty());
+            drop(txn);
+            assert_eq!(
+                prime_in_slices(doc, u32::MAX, 1, segments_per_slice).0,
+                PrimeSlice::Known
+            );
+        }
+    }
+
+    #[test]
+    fn an_edit_after_any_prime_slice_leaves_no_partial_scan() {
+        let bytes = multi_chunk_docx();
+        for segments_per_slice in [1, 7, 512] {
+            let (phases, scanning) = prime_phases(&bytes, segments_per_slice);
+            let positions: BTreeSet<usize> = [
+                1,
+                2,
+                scanning / 2,
+                scanning,
+                scanning + 1,
+                scanning + 2,
+                phases.len() / 2,
+                phases.len(),
+            ]
+            .into_iter()
+            .filter(|after| (1..=phases.len()).contains(after))
+            .collect();
+            for committed_after in positions {
+                let label = format!("{segments_per_slice}: {committed_after}");
+                let session = bytes_session(&bytes);
+                let doc = session.engine.doc();
+                *doc.scan_cache.0.lock().unwrap() = None;
+                for _ in 0..committed_after {
+                    assert_eq!(
+                        prime_slice(doc, segments_per_slice),
+                        PrimeSlice::Pending,
+                        "{label}"
+                    );
+                }
+                let phase = prime_phase(doc);
+                assert_eq!(phase, phases[committed_after - 1], "{label}");
+                if phase == Some(PrimePhase::Scan) {
+                    assert!(cached_scan(doc).is_none(), "{label}");
+                }
+                edit_body(&session);
+                let before = cached_scan(doc);
+                assert_eq!(
+                    prime_slice(doc, segments_per_slice),
+                    PrimeSlice::Declined,
+                    "{label}"
+                );
+                assert!(doc.prime_progress.lock().unwrap().is_none(), "{label}");
+                assert!(same_cache(&cached_scan(doc), &before), "{label}");
+                let source = doc.source_index().unwrap();
+                assert!(!source.seed_states_initialized(), "{label}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_declined_sliced_scan_leaves_the_save_scan_of_an_unprimed_session() {
+        let bytes = multi_chunk_docx();
+        for segments_per_slice in [1, 7] {
+            let (_, scanning) = prime_phases(&bytes, segments_per_slice);
+            let positions: BTreeSet<usize> = [1, 2, scanning / 2, scanning, scanning + 1]
+                .into_iter()
+                .filter(|after| *after >= 1)
+                .collect();
+            for committed_after in positions {
+                let label = format!("{segments_per_slice}: {committed_after}");
+                let primed = bytes_session(&bytes);
+                let unprimed = bytes_session(&bytes);
+                let doc = primed.engine.doc();
+                for _ in 0..committed_after {
+                    assert_eq!(
+                        prime_slice(doc, segments_per_slice),
+                        PrimeSlice::Pending,
+                        "{label}"
+                    );
+                }
+                edit_body(&primed);
+                edit_body(&unprimed);
+                assert_eq!(
+                    prime_slice(doc, segments_per_slice),
+                    PrimeSlice::Declined,
+                    "{label}"
+                );
+                assert_eq!(
+                    scan_view(&checked_scan(doc)),
+                    scan_view(&checked_scan(unprimed.engine.doc())),
+                    "{label}"
+                );
+                assert_eq!(
+                    primed.paragraph_save_plan().unwrap(),
+                    unprimed.paragraph_save_plan().unwrap(),
+                    "{label}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn priming_with_a_sliced_scan_records_the_one_shot_seed_states() {
+        let opens: [fn() -> crate::session::EditSessionCore; 2] =
+            [principal_session, || bytes_session(&multi_chunk_docx())];
+        for open in opens {
+            let whole = open();
+            assert!(whole.prime_save_seed_states(u32::MAX, u32::MAX));
+            let whole_source = whole.engine.doc().source_index().unwrap();
+            let whole_plan = whole.paragraph_save_plan().unwrap();
+            for segments_per_slice in [1, 2, 7, 1 << 20] {
+                for max_bytes in [1, u32::MAX - 1] {
+                    let label = format!("{segments_per_slice} segments, {max_bytes} bytes");
+                    let sliced = open();
+                    let doc = sliced.engine.doc();
+                    *doc.scan_cache.0.lock().unwrap() = None;
+                    let slice = || {
+                        doc.prime_save_seed_states_slice_with(
+                            u32::MAX,
+                            u32::MAX,
+                            max_bytes,
+                            segments_per_slice,
+                        )
+                    };
+                    assert_eq!(slice(), PrimeSlice::Pending, "{label}");
+                    let mut scan_slices = 0;
+                    while prime_phase(doc) == Some(PrimePhase::Scan) {
+                        assert_eq!(slice(), PrimeSlice::Pending, "{label}");
+                        scan_slices += 1;
+                    }
+                    assert_eq!(scan_slices > 1, segments_per_slice < 1 << 20, "{label}");
+                    let (outcome, _) =
+                        prime_in_slices(doc, u32::MAX, max_bytes, segments_per_slice);
+                    assert_eq!(outcome, PrimeSlice::Known, "{label}");
+                    assert!(doc.prime_progress.lock().unwrap().is_none(), "{label}");
+                    let source = doc.source_index().unwrap();
+                    assert_eq!(source.reseed_calls.load(Ordering::Relaxed), 0, "{label}");
+                    assert_same_seed_states(&source, &whole_source);
+                    let (epoch, cached) = cached_scan(doc).unwrap();
+                    assert_eq!(epoch, doc.committed_epoch(), "{label}");
+                    let txn = doc.yrs_doc().transact();
+                    assert_eq!(scan_view(&cached), scan_view(&Scan::new(&txn)), "{label}");
+                    drop(txn);
+                    assert_eq!(sliced.paragraph_save_plan().unwrap(), whole_plan, "{label}");
+                }
+            }
+            let reused = open();
+            let doc = reused.engine.doc();
+            let txn = doc.yrs_doc().transact();
+            let scan = doc.committed_scan(&txn);
+            drop(txn);
+            let before = cached_scan(doc);
+            assert_eq!(prime_slice(doc, 1), PrimeSlice::Pending);
+            assert_eq!(prime_phase(doc), Some(PrimePhase::Scan));
+            assert_eq!(prime_slice(doc, 1), PrimeSlice::Pending);
+            assert_eq!(prime_phase(doc), Some(PrimePhase::Anchors));
+            assert_eq!(prime_in_slices(doc, u32::MAX, 1, 1).0, PrimeSlice::Known);
+            assert!(same_cache(&cached_scan(doc), &before));
+            assert!(Arc::ptr_eq(&cached_scan(doc).unwrap().1, &scan));
+            let source = doc.source_index().unwrap();
+            assert_eq!(source.reseed_calls.load(Ordering::Relaxed), 0);
+            assert_same_seed_states(&source, &whole_source);
+            assert_eq!(reused.paragraph_save_plan().unwrap(), whole_plan);
+        }
+    }
+
     #[test]
     fn promoted_block_paragraphs_after_plain_and_offset_tables_splice_at_the_block_edge() {
         let xml = concat!(
@@ -4120,6 +7521,7 @@ mod tests {
                         },
                         at: TargetEdge::End,
                         paragraphs: vec![ParagraphInput {
+                            runs: None,
                             text: "Inserted".to_owned(),
                             style_id: None,
                         }],
@@ -4193,6 +7595,7 @@ mod tests {
                 at,
                 &[crate::ops::paragraph::ParagraphRecord {
                     text: "Inserted".to_owned(),
+                    runs: Vec::new(),
                     properties: Vec::new(),
                     run: Vec::new(),
                 }],
@@ -4226,10 +7629,11 @@ mod tests {
         ]);
         let (_, units) = story_fingerprint(&doc, "body", &comments).unwrap();
         assert_eq!(units.len(), 2);
-        for unit in units {
+        for mut unit in units {
+            let segments = unit.segments.take().unwrap();
             assert_eq!(
                 run_size_fingerprint(
-                    unit.segments.into_iter(),
+                    segments.into_iter(),
                     unit.markers
                         .iter()
                         .map(|(at, key, end)| (*at, key.as_str(), *end)),
@@ -5049,6 +8453,149 @@ mod tests {
         );
         let txn = left.yrs_doc().transact();
         assert!(claim(&claims(&txn), &current, &a).unwrap().published);
+    }
+
+    #[test]
+    fn recording_saved_ids_reports_moved_and_taken_pairs_and_publishes_the_rest() {
+        let base = EditingDoc::new(1);
+        for story in ["edited", "moved", "taken", "taker", "first", "second"] {
+            base.create_story(story, "one", "Normal", "left").unwrap();
+        }
+        base.create_story("body", "abc", "Normal", "left").unwrap();
+        let update = base.encode_state_as_update_v1();
+        let (left, right) = (EditingDoc::new(2), EditingDoc::new(3));
+        left.apply_update_v1(&update).unwrap();
+        right.apply_update_v1(&update).unwrap();
+        let key = |story: &str| base.paragraphs(story).unwrap()[0].para_id.clone();
+        let (edited, moved, taken, taker, first, second) = (
+            key("edited"),
+            key("moved"),
+            key("taken"),
+            key("taker"),
+            key("first"),
+            key("second"),
+        );
+
+        claim_id(&left, &edited, "0000E001", false);
+        left.insert_text(
+            &ctx(),
+            Position::new("edited", 0),
+            "typed",
+            FormatPolicy::Plain,
+        )
+        .unwrap();
+        left.split_paragraph(&ctx(), Position::new("body", 1), None)
+            .unwrap();
+        let deleted = left
+            .split_paragraph(&ctx(), Position::new("body", 3), None)
+            .unwrap()
+            .first_para_id;
+        let deleted_id = doc_identity(&left, &deleted).ooxml_para_id.unwrap();
+        left.delete_range(&ctx(), StoryRange::new("body", 1, 3))
+            .unwrap();
+        claim_id(&left, &moved, "0000B001", false);
+        claim_id(&left, &moved, "0000B002", false);
+        claim_id(&left, &taken, "0000C001", false);
+        claim_id(&right, &taker, "0000C001", true);
+        claim_id(&right, &first, "0000D001", true);
+        claim_id(&left, &second, "0000D001", true);
+        left.apply_update_v1(&right.encode_state_as_update_v1())
+            .unwrap();
+        assert_ne!(
+            doc_identity(&left, &taken).ooxml_para_id.as_deref(),
+            Some("0000C001")
+        );
+        assert_eq!(
+            doc_identity(&left, &first).ooxml_para_id.as_deref(),
+            Some("0000D001")
+        );
+        assert_eq!(
+            doc_identity(&left, &second).ooxml_para_id.as_deref(),
+            Some("0000D001")
+        );
+
+        let saved = vec![
+            (edited.clone(), "0000E001".to_owned()),
+            (deleted.clone(), deleted_id.clone()),
+            (moved.clone(), "0000B001".to_owned()),
+            (taken.clone(), "0000C001".to_owned()),
+            (first.clone(), "0000D001".to_owned()),
+            (second.clone(), "0000D001".to_owned()),
+            (first.clone(), "0000D001".to_owned()),
+        ];
+        let expected = vec![
+            (moved.clone(), "0000B001".to_owned()),
+            (taken.clone(), "0000C001".to_owned()),
+        ];
+        assert_eq!(left.record_saved_paragraph_ids(&saved), expected);
+
+        let published = |id: &str, owner: &str| {
+            let txn = left.yrs_doc().transact();
+            claim(&claims(&txn), id, owner).unwrap().published
+        };
+        assert!(published("0000E001", &edited));
+        assert!(published(&deleted_id, &deleted));
+        assert!(!published("0000B001", &moved));
+        assert!(!published("0000B002", &moved));
+        assert!(!published("0000C001", &taken));
+        assert!(published("0000C001", &taker));
+        assert!(published("0000D001", &first));
+        assert!(published("0000D001", &second));
+
+        let before = left.encode_state_vector_v1();
+        assert_eq!(left.record_saved_paragraph_ids(&saved), expected);
+        assert_eq!(left.encode_state_vector_v1(), before);
+    }
+
+    #[test]
+    fn a_saved_id_another_uncaptured_holder_shares_is_taken_without_moving() {
+        let base = EditingDoc::new(1);
+        for story in ["first", "second", "other"] {
+            base.create_story(story, "one", "Normal", "left").unwrap();
+        }
+        let update = base.encode_state_as_update_v1();
+        let (left, right) = (EditingDoc::new(2), EditingDoc::new(3));
+        left.apply_update_v1(&update).unwrap();
+        right.apply_update_v1(&update).unwrap();
+        let key = |story: &str| base.paragraphs(story).unwrap()[0].para_id.clone();
+        let (first, second, other) = (key("first"), key("second"), key("other"));
+        claim_id(&right, &first, "0000D001", true);
+        claim_id(&left, &second, "0000D001", true);
+        claim_id(&left, &other, "0000E001", false);
+        left.apply_update_v1(&right.encode_state_as_update_v1())
+            .unwrap();
+        for holder in [&first, &second] {
+            assert_eq!(
+                doc_identity(&left, holder).ooxml_para_id.as_deref(),
+                Some("0000D001")
+            );
+        }
+        let published = |id: &str, owner: &str| {
+            let txn = left.yrs_doc().transact();
+            claim(&claims(&txn), id, owner).unwrap().published
+        };
+
+        let taken_only = vec![
+            (first.clone(), "0000D001".to_owned()),
+            (other.clone(), "0000E001".to_owned()),
+        ];
+        assert_eq!(
+            left.record_saved_paragraph_ids(&taken_only),
+            [(first.clone(), "0000D001".to_owned())]
+        );
+        assert!(published("0000D001", &first));
+        assert!(published("0000D001", &second));
+        assert!(published("0000E001", &other));
+
+        let before = left.encode_state_vector_v1();
+        let both = vec![
+            (first.clone(), "0000D001".to_owned()),
+            (second.clone(), "0000D001".to_owned()),
+        ];
+        assert!(left.record_saved_paragraph_ids(&both).is_empty());
+        assert!(published("0000D001", &first));
+        assert!(published("0000D001", &second));
+        assert_eq!(left.encode_state_vector_v1(), before);
     }
 
     #[test]

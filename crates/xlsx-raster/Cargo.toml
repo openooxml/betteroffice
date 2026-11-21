@@ -14,9 +14,14 @@ categories = ["rendering", "graphics"]
 [lib]
 name = "xlsx_raster"
 
+[features]
+fonts = []
+
 [dependencies]
+image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png"] }
+ooxml-raster.workspace = true
+ooxml-text.workspace = true
 tiny-skia = "0.12"
-png = "0.18"
 rustybuzz = "0.20"
 unicode-segmentation = "1.12"
 xlsx-render.workspace = true
@@ -26,5 +31,6 @@ libm.workspace = true
 
 [dev-dependencies]
 xlsx-model.workspace = true
+xlsx-render = { workspace = true, features = ["test-counters"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

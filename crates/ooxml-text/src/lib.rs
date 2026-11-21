@@ -58,11 +58,18 @@ pub mod font_store;
 pub mod line_break;
 pub mod measure;
 pub mod outline;
+mod scripts;
 pub mod shape;
 pub mod word_fonts;
 pub mod word_metrics;
 
+#[cfg(all(target_arch = "wasm32", feature = "base-latin"))]
+compile_error!("Web consumers must load base Latin faces from font assets");
+
 pub use auto_space::{AUTO_SPACE_EM, AutoSpace};
+#[cfg(feature = "base-latin")]
+pub use base_latin::face as base_latin_face;
+pub const BASE_LATIN_FAMILY: &str = "BetterOffice Base Latin";
 pub use bidi::{
     BaseDirection, BidiParagraph, BidiRun, bidi_paragraphs, level_is_rtl, visual_order_for_levels,
 };
@@ -70,20 +77,29 @@ pub use caps::{
     BROWSER_SMALL_CAPS_ADVANCE_SCALE, WORD_SMALL_CAPS_ADVANCE_SCALE, uppercase_for_language,
 };
 pub use echo::{EchoGlyphSet, echo_glyph_set};
-pub use font_store::{FontError, FontId, FontMetrics, FontStore, RequestedLineMetrics};
+pub use font_store::{
+    FontError, FontId, FontMetrics, FontStore, OutlineUpdateError, RequestedLineMetrics,
+    covered_character,
+};
 pub use line_break::{
     BreakOpportunity, break_allowed_between, break_opportunities, presentation_break_opportunities,
 };
 pub use measure::{
-    FontChains, FontSlotUse, MeasureError, MeasureInput, MeasureRequest, ParagraphExtentOut,
-    TypesetRowOut, font_slot_use, measure_paragraph, measure_paragraph_json,
-    measure_paragraph_typed, min_content_width_typed,
+    FontChains, FontSlotUse, GlyphRunHead, GlyphRunWriter, MeasureError, MeasureInput,
+    MeasureRequest, MeasuredGlyph, MeasuredGlyphRun, ParagraphExtentOut, TypesetRowOut,
+    font_slot_characters, font_slot_use, measure_paragraph, measure_paragraph_json,
+    measure_paragraph_typed, min_content_width_typed, pack_glyph_runs, unpack_glyph_runs,
 };
 pub use ooxml_drawingml::symbol_font;
 pub use outline::{GlyphOutline, PathCmd};
+pub use scripts::{
+    han_script_for_language, is_joining_or_indic, paragraph_scripts_with_han_fallback,
+    paragraph_scripts_with_languages,
+};
 pub use shape::{ShapeDirection, ShapeFeature, ShapedGlyph, shape, shape_with_direction};
 pub use symbol_font::SymbolFont;
 pub use word_metrics::{
     CompatFlags, LineBox, LineSpacingRule, apply_spacing_rule, kern_enabled, kern_features,
-    line_is_justified, single_line_box, snap_line_box, snap_line_height, stretch_spaces,
+    ligature_features, line_is_justified, single_line_box, snap_line_box, snap_line_height,
+    stretch_spaces, word_typography_mask,
 };

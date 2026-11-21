@@ -33,6 +33,54 @@ function session(batched = false) {
     { [K in keyof WorkbookSessionEvents]: WorkbookSessionEvents[K] }>(pair.client, { methods: WORKBOOK_SESSION_METHODS });
 }
 
+function recoveryMetadata(bytes: Uint8Array, update: (value: Record<string, unknown>) => void): Uint8Array {
+  const header = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const length = header.getUint32(9, true);
+  const metadata = JSON.parse(new TextDecoder().decode(bytes.subarray(21, 21 + length)));
+  update(metadata);
+  const payload = new TextEncoder().encode(JSON.stringify(metadata));
+  const engine = bytes.subarray(21 + length);
+  const result = new Uint8Array(21 + payload.length + engine.length);
+  result.set(bytes.subarray(0, 21));
+  result.set(payload, 21);
+  result.set(engine, 21 + payload.length);
+  const resultHeader = new DataView(result.buffer);
+  resultHeader.setUint32(9, payload.length, true);
+  let hash = 2166136261;
+  for (const byte of [...result.subarray(0, 17), ...result.subarray(21)]) hash = Math.imul(hash ^ byte, 16777619);
+  resultHeader.setUint32(17, hash >>> 0, true);
+  return result;
+}
+
+test.each([false, true])('old checkpoints retain readOnly=%s with host proposals disabled', async (readOnly) => {
+  await initWasm(await readFile(new URL('../wasm/generated/xlsx_wasm_bg.wasm', import.meta.url)));
+  const original = session();
+  const replacement = session();
+  try {
+    const opened = await original.call.open(await workbookBytes(), { includeEditState: true });
+    const context = opened.commandContext!;
+    const input = (seq: number, kind: string, payload: WorkbookCommand['payload']): WorkbookSharedCommand => ({
+      session: context.session, incarnation: 1, seq, basis: { epoch: context.basis.epoch, version: 0 },
+      kind, payload: { payload },
+    });
+    await original.call.edit(input(1, 'setReadOnly', { readOnly }));
+    const checkpoint = await original.call.checkpoint();
+    checkpoint.state = recoveryMetadata(checkpoint.state, (value) => { delete value.allowHostProposals; });
+    expect(decodeWorkbookRecovery(checkpoint.state).allowHostProposals).toBe(false);
+    expect(await replacement.call.openRecovery(checkpoint)).toMatchObject({ editState: { readOnly } });
+    expect(await replacement.call.save()).toEqual(await original.call.save());
+    const edit = await replacement.call.edit(input(2, 'editCell', { args: [0, 0, 0, '7'] }));
+    expect(edit.outcomes).toMatchObject([{ seq: 2, status: readOnly ? 'refused' : 'applied',
+      ...(readOnly ? { reason: 'read-only' } : {}) }]);
+    if (readOnly) {
+      const proposal = await replacement.call.edit(input(3, 'propose', {
+        args: ['host', null, [{ sheet: 0, row: 0, col: 0, input: '9' }]],
+      }));
+      expect(proposal.outcomes).toMatchObject([{ seq: 3, status: 'refused', reason: 'read-only' }]);
+    }
+  } finally { await original.dispose(); await replacement.dispose(); }
+});
+
 test('checkpoint after N commands restores a fresh session boundary', async () => {
   await initWasm(await readFile(new URL('../wasm/generated/xlsx_wasm_bg.wasm', import.meta.url)));
   const original = session();
@@ -54,7 +102,7 @@ test('checkpoint after N commands restores a fresh session boundary', async () =
     const projection = { ...opened.editState!, ...edit.editState, ...format.editState, ...selected.editState, ...mode.editState };
     const saved = await original.call.save();
     const checkpoint = await original.call.checkpoint();
-    expect(decodeWorkbookRecovery(checkpoint.state).engine[8]).toBe(7);
+    expect(decodeWorkbookRecovery(checkpoint.state).engine[8]).toBe(8);
     expect(await original.call.version()).toBe(mode.engineVersion);
     await expect(replacement.call.openRecovery({ ...checkpoint, throughSeq: checkpoint.throughSeq - 1 }))
       .rejects.toThrow('envelope mismatch');
@@ -97,30 +145,24 @@ function handle(version = 'engine:0') {
   } as unknown as WorkbookHandle;
 }
 
-function engineHeader(metadata = '{"collaborative":false}', version = 3) {
-  const payload = new TextEncoder().encode(metadata);
-  const engine = new Uint8Array(42 + payload.length);
+function engineHeader(collaborative = false, version = 8) {
+  const engine = new Uint8Array(42);
   engine.set([88, 76, 83, 88, 82, 69, 67, 86, version]);
-  engine[41] = payload.length;
-  engine.set(payload, 42);
+  engine[41] = Number(collaborative);
   return engine;
 }
 
-test('recovery reads engine checkpoints from before and since patterned fills', () => {
-  for (const version of [3, 5]) expect(isCollaborativeWorkbookRecovery(engineHeader(undefined, version))).toBe(false);
+test('recovery reads collaboration flags from binary engine checkpoints', () => {
+  expect(isCollaborativeWorkbookRecovery(engineHeader(false))).toBe(false);
+  expect(isCollaborativeWorkbookRecovery(engineHeader(true))).toBe(true);
 });
 
 test.each([
-  ['unsupported codec', engineHeader(undefined, 4)],
+  ...[0, 1, 2, 3, 4, 5, 6, 7, 9, 255].map((codec) => [`unsupported codec ${codec}`, engineHeader(false, codec)] as const),
   ['invalid header', new Uint8Array(42)],
-  ['truncated header', engineHeader().slice(0, 41)],
-  ['truncated metadata', engineHeader().slice(0, -1)],
-  ['unterminated metadata length', new Uint8Array([...engineHeader().slice(0, 41), 128, 128, 128, 128, 128])],
-  ['malformed metadata', engineHeader('{')],
-  ['null metadata', engineHeader('null')],
-  ['missing collaboration mode', engineHeader('{}')],
-  ['invalid collaboration mode', engineHeader('{"collaborative":"false"}')],
-  ['invalid metadata encoding', engineHeader('{"collaborative":false,"value":"x"}').map((byte) => byte === 120 ? 255 : byte)],
+  ['truncated digest', engineHeader().slice(0, 40)],
+  ['missing flags', engineHeader().slice(0, 41)],
+  ['unknown flags', engineHeader().map((byte, index) => index === 41 ? 2 : byte)],
 ] as const)('recovery refuses %s before initialization', async (_name, engine) => {
   const opened = handle();
   const state = createWorkbookCommandState({ session: 'book', incarnation: 'first' },
@@ -162,6 +204,8 @@ test('checkpoint restores edited state and command metadata without a peer', asy
   const state = createWorkbookCommandState(identity, { epoch: 3, version: opened.version() }, selected, [selected.sheetId]);
   state.nextSheetId = 5;
   state.calculation = { nowSerial: 45000, randSeed: 12 };
+  state.readOnly = true;
+  state.allowHostProposals = true;
   state.formats.set('format:2', { rows: 1, columns: 1, formats: [{}] });
   const engine = new Uint8Array([7, 8, 9]);
   const host = createWorkbookCommandHost({ handle: opened, state, revision: 9,
@@ -176,9 +220,10 @@ test('checkpoint restores edited state and command metadata without a peer', asy
   expect(checkpoint).toMatchObject({ throughSeq: 2, version: 9, epoch: 3 });
   const recovery = decodeWorkbookRecovery(checkpoint.state);
   expect(recovery.engine).toEqual(engine);
+  expect(recovery).toMatchObject({ readOnly: true, allowHostProposals: true });
   const restored = restoreWorkbookCommandState(opened, recovery, { session: 'book', incarnation: 'replacement' });
   expect(restored).toMatchObject({ throughSeq: 2, nextSheetId: 5, calculation: state.calculation,
-    selection: selected, readOnly: false, historyReset: true, historySelections: [] });
+    selection: selected, readOnly: true, allowHostProposals: true, historyReset: true, historySelections: [] });
   expect(restored.formats).toEqual(state.formats);
   if (!state.editState) throw new Error('Missing captured edit state');
   expect(restored.editState).toEqual({ ...state.editState, historyReset: true });
@@ -196,6 +241,16 @@ test('checkpoint restores edited state and command metadata without a peer', asy
   expect(ack).toMatchObject({ throughSeq: 3, version: 9, engineVersion: 'engine:edited',
     editState: { canUndo: false, canRedo: false, historyReset: true } });
 });
+
+test.each([null, 0, 1, 'true', {}, []].map((permission) => [permission] as const))(
+  'recovery rejects malformed host proposal permission %j', (permission) => {
+    const opened = handle();
+    const state = createWorkbookCommandState({ session: 'book', incarnation: 'first' },
+      { epoch: 1, version: opened.version() }, { sheetId: 'sheet:0', range: { kind: 'a1', a1: 'A1' } }, ['sheet:0']);
+    const bytes = encodeWorkbookRecovery(new Uint8Array([1]), state, 0, [[0, opened.version()]]);
+    const malformed = recoveryMetadata(bytes, (value) => { value.allowHostProposals = permission; });
+    expect(() => decodeWorkbookRecovery(malformed)).toThrow('Invalid workbook recovery checkpoint');
+  });
 
 test('recovery refuses corrupt metadata before command admission', () => {
   const opened = handle();
@@ -252,18 +307,12 @@ test('recovery stores engine bytes without JSON expansion', () => {
   expect(decoded.engine.buffer).toBe(bytes.buffer);
 });
 
-test('engine checkpoints are read at codecs 3, 5, 6 and 7 and refused at any other', () => {
-  const engine = (codec: number, collaborative: boolean) => {
-    const metadata = new TextEncoder().encode(JSON.stringify({ collaborative }));
-    return new Uint8Array([...new TextEncoder().encode('XLSXRECV'), codec, ...new Uint8Array(32), metadata.length,
-      ...metadata]);
-  };
+test('old JSON engine checkpoints are refused before reading collaboration mode', () => {
+  const metadata = new TextEncoder().encode('{"collaborative":false}');
   for (const codec of [3, 5, 6, 7]) {
-    expect(isCollaborativeWorkbookRecovery(engine(codec, false))).toBe(false);
-    expect(isCollaborativeWorkbookRecovery(engine(codec, true))).toBe(true);
-  }
-  for (const codec of [2, 4, 8]) {
-    expect(() => isCollaborativeWorkbookRecovery(engine(codec, false))).toThrow('Unsupported workbook recovery checkpoint');
+    const engine = new Uint8Array([...new TextEncoder().encode('XLSXRECV'), codec, ...new Uint8Array(32),
+      metadata.length, ...metadata]);
+    expect(() => isCollaborativeWorkbookRecovery(engine)).toThrow('Unsupported workbook recovery checkpoint');
   }
 });
 
@@ -703,13 +752,11 @@ test('direct edits validate pending command settlements before synchronization',
   expect(() => host.validateDirectEdits()).toThrow('Direct edits require an unused command host');
 });
 
-test('cascade composition accepts released engine layouts and codecs six and seven', () => {
-  for (const codec of [3, 5, 6, 7]) {
-    for (const collaborative of [true, false]) {
-      expect(isCollaborativeWorkbookRecovery(engineHeader(JSON.stringify({ collaborative }), codec))).toBe(collaborative);
-    }
+test('cascade composition requires the binary engine codec', () => {
+  for (const collaborative of [true, false]) {
+    expect(isCollaborativeWorkbookRecovery(engineHeader(collaborative, 8))).toBe(collaborative);
   }
-  for (const codec of [2, 4, 8]) {
-    expect(() => isCollaborativeWorkbookRecovery(engineHeader(undefined, codec))).toThrow('Unsupported workbook recovery checkpoint');
+  for (const codec of [2, 3, 4, 5, 6, 7, 9]) {
+    expect(() => isCollaborativeWorkbookRecovery(engineHeader(false, codec))).toThrow('Unsupported workbook recovery checkpoint');
   }
 });

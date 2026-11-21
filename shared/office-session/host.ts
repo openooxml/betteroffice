@@ -8,6 +8,7 @@ import {
   SESSION_SUPERSEDED, SessionFailure, type MethodHandlers, type MethodPolicies, type MethodPolicy,
   type SessionEvents, type SessionMethods, type SessionScheduler,
 } from './types';
+import { isEngineTrap } from './trap';
 
 export interface SessionHostOptions<M extends SessionMethods, C> {
   handlers: MethodHandlers<M, C>;
@@ -40,8 +41,7 @@ function replyError(error: unknown): ReplyError {
 }
 
 function terminal(error: unknown): boolean {
-  return error instanceof SessionFailure ||
-    (typeof WebAssembly !== 'undefined' && error instanceof WebAssembly.RuntimeError);
+  return error instanceof SessionFailure || isEngineTrap(error);
 }
 
 function classify(error: unknown): SessionFailure {
@@ -62,6 +62,7 @@ export function createSessionHost<M extends SessionMethods, E extends SessionEve
   let unlisten = () => {};
   let unerror = () => {};
   let running: number | undefined;
+  const deferredCalls = new Set<number>();
   let reported = 0;
   const timeouts = new Set<ReturnType<typeof setTimeout>>();
   const tasks = new Set<{ cancel(): void }>();
@@ -261,9 +262,10 @@ export function createSessionHost<M extends SessionMethods, E extends SessionEve
         (context: C, ...args: unknown[]) => unknown;
       const value = await handler(options.context, ...message.args);
       if (isDeferredReply(value)) {
+        deferredCalls.add(message.id);
         void value.promise.then(
           (value) => resolve(message.id, value), (error) => reject(message.id, error)
-        );
+        ).finally(() => deferredCalls.delete(message.id));
       } else resolve(message.id, value);
     } catch (error) {
       reject(message.id, error);
@@ -307,9 +309,10 @@ export function createSessionHost<M extends SessionMethods, E extends SessionEve
     emit: (name, payload, transfer) => send({ protocol: 1, kind: 'event', name, payload }, transfer),
     progress() {
       const now = Date.now();
-      if (running === undefined || now - reported < PROGRESS_INTERVAL_MS) return;
+      const id = running ?? deferredCalls.values().next().value;
+      if (id === undefined || now - reported < PROGRESS_INTERVAL_MS) return;
       reported = now;
-      send({ protocol: 1, kind: 'progress', id: running });
+      send({ protocol: 1, kind: 'progress', id });
     },
   };
 }

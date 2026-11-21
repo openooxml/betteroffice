@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Iterator, Mapping, Sequence, Union
+from typing import Any, TypedDict, Iterator, Mapping, Sequence, Union
 
 from ._betteroffice_docx import (
     decode_font_face,
+    font_substitute,
     DisplayList,
+    DroppedParagraph,
+    DroppedStructure,
     Edit,
     EditError,
     ExportError,
     HeaderFooter,
+    KeptParagraph,
+    KeptUnchanged,
     Layout,
     LayoutError,
     MAX_PIXMAP_DIM,
@@ -20,6 +25,7 @@ from ._betteroffice_docx import (
     ParseError,
     Png,
     RenderError,
+    SaveReport,
     Section,
     Structure,
     Table,
@@ -32,15 +38,25 @@ from ._betteroffice_docx import (
 from ._betteroffice_docx import Document as _Document
 from ._betteroffice_docx import DocxError, __version__
 
+class PngTarget(TypedDict):
+    page: int
+
+
 __all__ = [
+    "PngTarget",
     "decode_font_face",
+    "font_substitute",
     "DisplayList",
     "Document",
     "DocxError",
+    "DroppedParagraph",
+    "DroppedStructure",
     "Edit",
     "EditError",
     "ExportError",
     "HeaderFooter",
+    "KeptParagraph",
+    "KeptUnchanged",
     "Layout",
     "LayoutError",
     "MAX_PIXMAP_DIM",
@@ -50,6 +66,7 @@ __all__ = [
     "ParseError",
     "Png",
     "RenderError",
+    "SaveReport",
     "Section",
     "Structure",
     "TWIPS_PER_INCH",
@@ -188,6 +205,14 @@ class Document:
         """Alias of ``replace_text``."""
         return self._inner.replace_paragraph_text(para_id, text)
 
+    def replace_text_at(self, index: int, text: str) -> Edit:
+        """Replace paragraph ``index``'s text; IndexError out of range, TypeError for a non-int."""
+        return self._inner.replace_text_at(index, text)
+
+    def replace_paragraph_text_at(self, index: int, text: str) -> Edit:
+        """Alias of ``replace_text_at``."""
+        return self._inner.replace_paragraph_text_at(index, text)
+
     def export_structured(
         self,
         *,
@@ -308,9 +333,12 @@ class Document:
         """
         self._inner.register_image(rel_id, _as_bytes(data), scope=scope, part=part)
 
-    def render_png(self, display_list: DisplayList, page: int = 0) -> Png:
+    def render_png(self, target: PngTarget, *, scale: float = 1.0) -> Png:
+        return self._inner.render_png(target, scale=scale)
+
+    def render_display_list_png(self, display_list: DisplayList, page: int = 0) -> Png:
         """Rasterize one display-list page to deterministic PNG bytes."""
-        return self._inner.render_png(display_list, page)
+        return self._inner.render_display_list_png(display_list, page)
 
     def save(
         self,
@@ -321,6 +349,18 @@ class Document:
     ) -> bytes:
         """Serialize back to DOCX bytes, edits included."""
         return self._inner.save(
+            now=now, update_modified_date=update_modified_date, modified_by=modified_by
+        )
+
+    def save_report(
+        self,
+        *,
+        now: "str | None" = None,
+        update_modified_date: bool = False,
+        modified_by: "str | None" = None,
+    ) -> SaveReport:
+        """``save``'s bytes with what the save kept as source bytes or dropped."""
+        return self._inner.save_report(
             now=now, update_modified_date=update_modified_date, modified_by=modified_by
         )
 

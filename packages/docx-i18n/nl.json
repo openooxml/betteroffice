@@ -32,6 +32,7 @@
     "ariaLabel": "Werkbalk voor opmaak",
     "file": "Bestand",
     "format": "Opmaak",
+    "layout": "Indeling",
     "insert": "Invoegen",
     "open": "Openen",
     "openShortcut": "Ctrl+O",
@@ -53,6 +54,16 @@
     "imageWrap": {
       "current": "Huidige"
     }
+  },
+  "layout": {
+    "margins": "Marges",
+    "normal": "Normaal",
+    "narrow": "Smal",
+    "moderate": "Gemiddeld",
+    "wide": "Breed",
+    "customMargins": "Aangepaste marges...",
+    "morePaperSizes": "Meer papierformaten...",
+    "indent": "Inspringing"
   },
   "formattingBar": {
     "groups": {
@@ -104,7 +115,12 @@
     "single": "Enkel",
     "double": "Dubbel",
     "lineSpacingTitle": "Regelafstand: {label}",
-    "paragraphSpacing": "Alinea-afstand"
+    "paragraphSpacing": "Alinea-afstand",
+    "addBefore": "Ruimte vóór alinea toevoegen",
+    "removeBefore": "Ruimte vóór alinea verwijderen",
+    "addAfter": "Ruimte na alinea toevoegen",
+    "removeAfter": "Ruimte na alinea verwijderen",
+    "options": "Opties voor regelafstand..."
   },
   "styles": {
     "selectAriaLabel": "Alineastijl selecteren",
@@ -417,6 +433,8 @@
         "strikethroughDescription": "Doorhalen in- of uitschakelen",
         "subscript": "Subscript",
         "subscriptDescription": "Subscript in- of uitschakelen",
+        "clearFormatting": "Alle opmaak wissen",
+        "clearFormattingDescription": "Tekstopmaak wissen",
         "superscript": "Superscript",
         "superscriptDescription": "Superscript in- of uitschakelen",
         "alignLeft": "Links uitlijnen",
@@ -470,7 +488,9 @@
         "pageUp": "Page Up",
         "pageDown": "Page Down",
         "ctrl": "Ctrl",
-        "del": "Del"
+        "del": "Del",
+        "shift": "Shift",
+        "alt": "Alt"
       }
     },
     "objectGeometry": {
@@ -478,6 +498,11 @@
       "top": "Boven (px)",
       "width": "Breedte (px)",
       "height": "Hoogte (px)"
+    },
+    "paragraphSpacing": {
+      "before": "Afstand vóór",
+      "after": "Afstand na",
+      "multiple": "Meerdere"
     }
   },
   "comments": {
@@ -505,6 +530,7 @@
     "paragraphMarkInserted": "Alinea-einde ingevoegd",
     "paragraphMarkDeleted": "Alinea-einde verwijderd",
     "paragraphPropertiesChanged": "Alinea-eigenschappen gewijzigd",
+    "runPropertiesChanged": "Tekstopmaak gewijzigd",
     "rowInserted": "Rij ingevoegd",
     "rowDeleted": "Rij verwijderd",
     "rowPropertiesChanged": "Rijeigenschappen gewijzigd",
@@ -515,6 +541,12 @@
     "tablePropertiesChanged": "Tabeleigenschappen gewijzigd",
     "tableInserted": "Tabel ingevoegd",
     "tableDeleted": "Tabel verwijderd"
+  },
+  "pasteOptions": {
+    "button": "Plakopties (Ctrl)",
+    "keepSource": "Bronopmaak behouden",
+    "merge": "Opmaak samenvoegen",
+    "textOnly": "Alleen tekst behouden"
   },
   "contextMenu": {
     "ariaLabel": "Menu voor AI-acties",
@@ -561,6 +593,8 @@
     "noDocumentLoaded": "Geen document geladen",
     "failedToLoad": "Kan dit document niet openen",
     "failedToLoadDescription": "Het bestand is mogelijk beschadigd, of gebruikt iets dat deze editor nog niet kan lezen.",
+    "failedToLoadDamaged": "Het bestand is beschadigd of is geen volledig Word-document.",
+    "failedToLoadUnsupported": "Dit document gebruikt iets dat deze editor nog niet kan lezen.",
     "editorUnavailable": "De editor kan niet worden geladen",
     "editorUnavailableDescription": "Controleer uw verbinding en laad de pagina opnieuw.",
     "reloadPage": "Pagina opnieuw laden",
@@ -701,6 +735,8 @@
     "failedToParse": "Kan document niet parseren",
     "linkRemoved": "Koppeling verwijderd",
     "linkCopied": "Koppeling gekopieerd naar klembord",
+    "pasteFailed": "Plakken kon niet worden voltooid. Er is niets gewijzigd.",
+    "cutRefused": "De selectie bevat objecten die niet kunnen worden geknipt. Er is niets gewijzigd.",
     "failedToSave": "Kan document niet opslaan",
     "documentInput": "Documentinvoer",
     "documentPreview": "Documentvoorbeeld",
@@ -753,7 +789,11 @@
     "leftIndent": "Inspringing links",
     "rightIndent": "Inspringing rechts",
     "topMargin": "Bovenmarge",
-    "bottomMargin": "Ondermarge"
+    "bottomMargin": "Ondermarge",
+    "leftMargin": "Linkermarge",
+    "rightMargin": "Rechtermarge",
+    "hangingIndent": "Verkeerd-om inspringen",
+    "markerValue": "{name}: {value}"
   },
   "print": {
     "label": "Afdrukken",
@@ -766,8 +806,13 @@
   },
   "a11y": {
     "pageLabel": "Pagina {number}",
+    "unbuiltPagesNotMirrored": "Pagina’s {from} tot en met {to} staan nog niet in de leesweergave.",
+    "goToPage": "Ga naar pagina {number}",
     "headerLabel": "Paginakoptekst",
     "footerLabel": "Paginavoettekst",
+    "chartNoData": "Geen gegevens",
+    "pictureName": "Afbeelding",
+    "bulletMarker": "opsommingsteken",
     "selected": "Geselecteerd",
     "selectionCleared": "Selectie gewist",
     "commentedText": "Tekst met opmerking",
@@ -826,7 +871,7 @@
       "targetChanged": "De inhoud waarvoor deze actie is geopend, is gewijzigd voordat deze kon worden toegepast.",
       "commandFailed": "De opdracht kon niet worden voltooid.",
       "permissionDenied": "De hosttoepassing heeft deze plug-in geen toestemming gegeven om deze opdracht te gebruiken.",
-      "unsupportedPolicy": "Plug-ins kunnen deze opdracht nog niet uitvoeren. Gebruik in plaats daarvan een bewerkingsbatch.",
+      "unsupportedPolicy": "Deze opdracht vereist een gebruikersactie in de eigen interface van de plug-in.",
       "pluginUnavailable": "De plug-in is niet meer actief.",
       "aborted": "De plug-inactie is geannuleerd voordat de opdracht werd uitgevoerd."
     }
@@ -835,6 +880,7 @@
     "toolbarGroup": "Plug-ins",
     "panelTabs": "Plug-inpanelen",
     "collapsePanel": "{title} samenvouwen",
-    "expandPanel": "{title} uitvouwen"
+    "expandPanel": "{title} uitvouwen",
+    "miniToolbar": "Opmaak van selectie"
   }
 }

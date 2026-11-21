@@ -1,11 +1,23 @@
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
-import { defineConfig } from 'vite';
+import { defineConfig, type Plugin } from 'vite';
+import { docxFontsPlugin } from '../../../scripts/office-quality/renderer.mjs';
 
 const root = resolve(import.meta.dirname, '../../..');
 const fromReact = createRequire(resolve(root, 'packages/docx-react/package.json'));
 const tailwind = fromReact('tailwindcss');
 const autoprefixer = fromReact('autoprefixer');
+
+const sourceSessionWorker: Plugin = {
+  name: 'source-session-worker',
+  enforce: 'pre',
+  resolveId(source, importer) {
+    if (source !== '#session-worker' || !importer) return null;
+    const format = /\/packages\/(docx|pptx|xlsx)\/src\//.exec(importer)?.[1];
+    if (!format) return null;
+    return resolve(root, 'packages', format, 'src', format === 'docx' ? 'yrs' : 'session', 'sessionWorker.missing.ts');
+  },
+};
 
 /** Serves the plugin-host harnesses against the package sources. */
 export default defineConfig({
@@ -13,6 +25,8 @@ export default defineConfig({
   optimizeDeps: { entries: ['*.html'] },
   define: { 'globalThis.__DOCX_PEERLESS_HARNESS__': JSON.stringify(process.env.DOCX_PEERLESS_HARNESS === '1') },
   plugins: [
+    sourceSessionWorker,
+    docxFontsPlugin(),
     {
       name: 'main-document-load-probe',
       enforce: 'pre',
@@ -47,6 +61,10 @@ export default defineConfig({
         replacement: resolve(root, 'packages/docx-react/src/index.ts'),
       },
       {
+        find: /^@betteroffice\/docx-react\/mini-toolbar$/,
+        replacement: resolve(root, 'packages/docx-react/src/mini-toolbar.ts'),
+      },
+      {
         find: /^@betteroffice\/docx-react\/styles\.css$/,
         replacement: resolve(root, 'packages/docx-react/src/styles/editor.css'),
       },
@@ -63,6 +81,10 @@ export default defineConfig({
       {
         find: /^@betteroffice\/pptx-i18n$/,
         replacement: resolve(root, 'packages/pptx-i18n/src/index.ts'),
+      },
+      {
+        find: /^@betteroffice\/pptx-i18n\/(editor|proposals)$/,
+        replacement: resolve(root, 'packages/pptx-i18n/src/$1.ts'),
       },
       { find: /^@betteroffice\/pptx$/, replacement: resolve(root, 'packages/pptx/src/index.ts') },
       { find: /^@betteroffice\/pptx\/(.*)$/, replacement: resolve(root, 'packages/pptx/src/$1') },
@@ -87,5 +109,5 @@ export default defineConfig({
     },
   },
   server: { fs: { allow: [root] } },
-  worker: { format: 'es' },
+  worker: { format: 'es', plugins: () => [sourceSessionWorker] },
 });

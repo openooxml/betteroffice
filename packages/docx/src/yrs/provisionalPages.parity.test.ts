@@ -16,6 +16,7 @@ import { extractEmbeddedFontFaces, getEmbeddedFontFaces } from '../utils/embedde
 import { decodeDocxHostJson, type YrsResidentWorkerSnapshot } from './index';
 import { createResidentEngineSession, type ResidentEngineSession } from './residentEngineSession';
 import { echoBackgroundPage } from './residentCommandPresentation';
+import type { ResidentFrameGeometry } from './residentObjectGeometry';
 import type {
   DocxCommandAck, DocxCommandEnvelope, DocxCommandFrame, DocxCommandSelection,
   DocxSelectionPointIntent, DocxCommandInitRequest,
@@ -54,12 +55,16 @@ beforeAll(async () => {
     '../wasm/loadWasmAsset': 'export const WASM32_MEMORY_LIMIT_BYTES = 2 ** 32; export const wasmModuleMemories = () => [];',
   };
   const result = await Bun.build({
-    entrypoints: [resolve(import.meta.dir, 'residentEngineWorker.ts')],
+    entrypoints: [resolve(import.meta.dir, 'docxWorker.browser.ts')],
     target: 'bun',
     format: 'iife',
     plugins: [{
       name: 'resident-worker-real-engine',
       setup(build) {
+        build.onLoad({ filter: /\/docxWorker\.browser\.ts$/ }, () => ({
+          contents: "import { startWorker } from './residentEngineWorker';\nstartWorker(self);\n",
+          loader: 'ts',
+        }));
         build.onLoad({ filter: /\/residentCommandPresentation\.ts$/ }, () => ({
           contents: `
             export const echoBackgroundPage = (...args) => testHarness.echoBackgroundPage(...args);
@@ -91,6 +96,7 @@ beforeAll(async () => {
     const performance = testHarness.clock ?? globalThis.performance;
     const setTimeout = testHarness.setTimer ?? globalThis.setTimeout;
     const clearTimeout = testHarness.clearTimer ?? globalThis.clearTimeout;
+    const OffscreenCanvas = class OffscreenCanvas {};
     ${await result.outputs[0].text()}
   `) as typeof startWorker;
 }, 30_000);
@@ -765,7 +771,35 @@ async function sendCommand(f: CommandFixture, seq: number, kind: string, payload
   expect(frame.revision).toBe(decodeFrameDelta(frame.payload.frame).frameEpoch);
   expect(frame.payload.caret.frameEpoch).toBe(frame.revision);
   f.acks.push(frame);
+  presentedGeometries.set(frame, presentedGeometry(f, frame));
   return { ...ack, frame };
+}
+
+const presentedGeometries = new WeakMap<DocxCommandFrame, ResidentFrameGeometry | undefined>();
+
+/** The object geometry main holds once `frame` is presented: its own, or the previous one with the selection moved. */
+function presentedGeometry(f: CommandFixture, frame: DocxCommandFrame): ResidentFrameGeometry | undefined {
+  const frames = [...f.w.frames, ...f.acks].filter((candidate) => candidate.revision <= frame.revision)
+    .sort((a, b) => a.revision - b.revision);
+  let geometry = f.initial.frame.payload.geometry;
+  for (const [index, candidate] of frames.entries()) {
+    const { payload } = candidate;
+    if (!payload.geometryKept) {
+      geometry = payload.geometry;
+      continue;
+    }
+    if (!geometry || geometry.version !== payload.documentVersion || geometry.layoutRevision !== payload.layoutRevision) {
+      geometry = undefined;
+      continue;
+    }
+    const retained = commandFramesAfter(f.frame, frames.slice(0, index + 1));
+    geometry = { ...geometry, frameEpoch: retained.frameEpoch,
+      selection: (payload.selectionRects ?? []).flatMap(({ pageIndex, x, y, width, height }) => {
+        const page = retained.pages[pageIndex];
+        return page && !page.page.unbuilt ? [{ pageId: page.pageId.toString(), pageIndex, x, y, width, height }] : [];
+      }) };
+  }
+  return geometry;
 }
 
 function selectionPositions(selection: DocxCommandSelection | null | undefined) {
@@ -817,18 +851,20 @@ function expectAnsweredSelectionParity(ack: DocxCommandAck, full: DocxCommandAck
   expect(payload.caret.selection).toEqual(reference.caret.selection);
   expect(payload.selectionRects).toEqual(reference.selectionRects);
   expect(payload.parts).toEqual(reference.parts);
+  const presented = presentedGeometries.get(ack.frame!);
+  const referenceGeometry = presentedGeometries.get(full.frame!);
   if (completed) {
-    const geometry = (value: typeof payload.geometry) => value && {
+    const geometry = (value: typeof presented) => value && {
       selection: value.selection,
       objects: value.objects.map(({ kind, story, rects }) => ({ kind, story, rects })),
       unbuiltPages: value.unbuiltPages,
     };
-    expect(payload.geometry).toBeDefined();
-    expect(geometry(payload.geometry)).toEqual(geometry(reference.geometry));
+    expect(presented).toBeDefined();
+    expect(geometry(presented)).toEqual(geometry(referenceGeometry));
   } else {
     expect(payload.caret.caretRect).not.toBeNull();
     expect(payload.selectionRects).toEqual([]);
-    expect(payload.geometry?.selection ?? []).toEqual(reference.geometry!.selection);
+    expect(presented?.selection ?? []).toEqual(referenceGeometry!.selection);
   }
 }
 
@@ -906,7 +942,7 @@ test('prefix inline image click answers with full object geometry', async () => 
     const point = { ...commandPoint(f), x: image.x + image.w / 2, y: image.y + image.h / 2 };
     const ack = await sendCommand(f, 1, 'selectPoint', point);
     const reference = await sendCommand(full, 1, 'selectPoint', point);
-    expect(reference.frame!.payload.geometry!.objects.some(object => object.kind === 'image')).toBe(true);
+    expect(presentedGeometries.get(reference.frame!)!.objects.some(object => object.kind === 'image')).toBe(true);
     expectAnsweredSelectionParity(ack, reference);
     expect(ack.frame!.payload.layoutProvisional).not.toBe(true);
     expect(f.calls).toContain('layoutDocumentWithRegionsRetained');

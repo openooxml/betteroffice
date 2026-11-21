@@ -4,8 +4,9 @@ import { resolve } from 'node:path';
 import { preloadEditWasm, setEditWasmHeapLimit } from './edit';
 import { wasmModuleMemories } from './loadWasmAsset';
 import { rezipContainer, unzipContainer } from './opc';
+import { engineKind } from './engineEdit';
 
-beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(
+beforeAll(() => preloadEditWasm(engineKind === 'native' ? undefined : new Uint8Array(readFileSync(
   resolve(import.meta.dir, 'generated/edit/docx_edit_bg.wasm')
 ))), 30_000);
 
@@ -16,11 +17,11 @@ test('the edit heap limit also caps OPC calls routed through the resident engine
     return seed >>> 24;
   });
   const archive = rezipContainer({ 'payload.bin': payload });
-  const before = wasmModuleMemories().find(({ label }) => label === 'docx-edit')!;
-  expect(before.liveBytes).toBeDefined();
+  const before = wasmModuleMemories().find(({ label }) => label === 'docx-edit');
+  if (engineKind === 'wasm') expect(before?.liveBytes).toBeDefined();
   expect(archive.byteLength).toBeGreaterThan(128 * 1024);
   try {
-    setEditWasmHeapLimit(before.liveBytes! + 128 * 1024);
+    setEditWasmHeapLimit(128 * 1024);
     expect(() => unzipContainer(archive)).toThrow();
     const capped = wasmModuleMemories().find(({ label }) => label === 'docx-edit')!;
     expect(capped.failedAllocationBytes).toBeGreaterThan(0);

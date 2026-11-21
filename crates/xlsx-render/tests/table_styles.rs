@@ -1,0 +1,320 @@
+use xlsx_model::{CellRef, Color, SheetId, Theme, Workbook};
+use xlsx_render::{DisplayList, DrawCmd, GridGeometry, Viewport, build_display_list};
+
+const STYLES: &str = r#"<styleSheet><fonts count="1"><font><sz val="11"/><color theme="1"/><name val="Calibri"/></font></fonts><fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFFFFF00"/></patternFill></fill></fills><borders count="1"><border/></borders><cellXfs count="2"><xf fontId="0" fillId="0" borderId="0"/><xf fontId="0" fillId="2" borderId="0" applyFill="1"/></cellXfs><dxfs count="2"><dxf><font><b/><color rgb="FFFFFFFF"/></font><fill><patternFill><bgColor rgb="FF195A82"/></patternFill></fill></dxf><dxf><fill><patternFill><bgColor rgb="FFFFF78C"/></patternFill></fill></dxf></dxfs><tableStyles count="1"><tableStyle name="Budget" pivot="0" count="2"><tableStyleElement type="headerRow" dxfId="0"/><tableStyleElement type="firstRowStripe" dxfId="1"/></tableStyle></tableStyles></styleSheet>"#;
+
+const PLAIN_STRIPES: &str = r#"<styleSheet><fonts count="1"><font><sz val="11"/><color theme="1"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border/></borders><cellXfs count="1"><xf fontId="0" fillId="0" borderId="0"/></cellXfs><dxfs count="2"><dxf><fill><patternFill><bgColor rgb="FFFFF78C"/></patternFill></fill></dxf><dxf/></dxfs><tableStyles count="3"><tableStyle name="Unset" pivot="0" count="2"><tableStyleElement type="firstRowStripe" dxfId="0"/><tableStyleElement type="secondRowStripe" size="3"/></tableStyle><tableStyle name="Blank" pivot="0" count="2"><tableStyleElement type="firstRowStripe" dxfId="0"/><tableStyleElement type="secondRowStripe" dxfId="1" size="3"/></tableStyle><tableStyle name="Duplicate" pivot="0" count="2"><tableStyleElement type="firstRowStripe" size="3"/><tableStyleElement type="firstRowStripe" dxfId="0"/></tableStyle></tableStyles></styleSheet>"#;
+
+const DECLARED_PRESET: &str = r#"<styleSheet><fonts count="1"><font><sz val="11"/><color theme="1"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border/></borders><cellXfs count="1"><xf fontId="0" fillId="0" borderId="0"/></cellXfs><tableStyles count="1" defaultTableStyle="TableStyleMedium2"><tableStyle name="TableStyleMedium2" pivot="0" count="0"/></tableStyles></styleSheet>"#;
+
+/// A sheet holding table `A1:C5`: a header row, three data rows with `B2`
+/// using xf `b2_style`, and a fifth row the table counts as totals when
+/// `totals` is set.
+fn workbook(style_info: &str, b2_style: u32, totals: bool) -> Workbook {
+    workbook_with(STYLES, style_info, b2_style, totals)
+}
+
+fn workbook_with(styles: &str, style_info: &str, b2_style: u32, totals: bool) -> Workbook {
+    workbook_styled(styles, style_info, None, b2_style, totals)
+}
+
+/// [`workbook_with`], with the cell of column A in row `a_style.0` (1-based) using
+/// xf `a_style.1` when one is given.
+fn workbook_styled(
+    styles: &str,
+    style_info: &str,
+    a_style: Option<(u32, u32)>,
+    b2_style: u32,
+    totals: bool,
+) -> Workbook {
+    let rels = |body: &str| {
+        format!(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{body}</Relationships>"#
+        )
+    };
+    let link = |id: &str, kind: &str, target: &str| {
+        format!(
+            r#"<Relationship Id="{id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/{kind}" Target="{target}"/>"#
+        )
+    };
+    let rows = (1..=5)
+        .map(|row| {
+            let style = if row == 2 { format!(r#" s="{b2_style}""#) } else { String::new() };
+            let own = match a_style {
+                Some((styled, xf)) if row == styled => format!(r#" s="{xf}""#),
+                _ => String::new(),
+            };
+            format!(
+                r#"<row r="{row}"><c r="A{row}"{own} t="inlineStr"><is><t>a{row}</t></is></c><c r="B{row}"{style}><v>{row}</v></c></row>"#
+            )
+        })
+        .collect::<String>();
+    let parts = [
+        (
+            "xl/workbook.xml",
+            r#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#.to_string(),
+        ),
+        (
+            "xl/_rels/workbook.xml.rels",
+            rels(&(link("rId1", "worksheet", "worksheets/sheet1.xml")
+                + &link("rId2", "styles", "styles.xml"))),
+        ),
+        ("xl/styles.xml", styles.to_string()),
+        (
+            "xl/worksheets/sheet1.xml",
+            format!("<worksheet><sheetData>{rows}</sheetData></worksheet>"),
+        ),
+        (
+            "xl/worksheets/_rels/sheet1.xml.rels",
+            rels(&link("rId1", "table", "../tables/table1.xml")),
+        ),
+        (
+            "xl/tables/table1.xml",
+            format!(
+                r#"<table id="1" name="T" displayName="T" ref="A1:C5" totalsRowCount="{}"><tableColumns count="3"><tableColumn id="1" name="a1"/><tableColumn id="2" name="1"/><tableColumn id="3" name="c"/></tableColumns>{style_info}</table>"#,
+                u8::from(totals)
+            ),
+        ),
+    ];
+    xlsx_parse::parse_workbook(&parts.map(|(path, xml)| (path.to_string(), xml.into_bytes())))
+        .unwrap()
+}
+
+fn info(name: &str, row_stripes: bool) -> String {
+    format!(
+        r#"<tableStyleInfo name="{name}" showFirstColumn="0" showLastColumn="0" showRowStripes="{}" showColumnStripes="0"/>"#,
+        u8::from(row_stripes)
+    )
+}
+
+fn render(wb: &Workbook) -> DisplayList {
+    let viewport = Viewport {
+        x: 0.0,
+        y: 0.0,
+        width: 400.0,
+        height: 200.0,
+    };
+    build_display_list(wb, SheetId(0), &viewport).unwrap()
+}
+
+/// The topmost fill under the middle of cell `at`, past the sheet background.
+fn fill_at(wb: &Workbook, list: &DisplayList, at: CellRef) -> Option<String> {
+    let geometry = GridGeometry::new(&wb.sheets[0], &wb.styles);
+    let x = (geometry.col_x(at.col) + geometry.col_x(at.col + 1)) / 2.0;
+    let y = (geometry.row_y(at.row) + geometry.row_y(at.row + 1)) / 2.0;
+    list.commands[1..]
+        .iter()
+        .filter_map(|command| match command {
+            DrawCmd::FillRect {
+                x: left,
+                y: top,
+                w,
+                h,
+                color,
+                ..
+            } if (*left..left + w).contains(&x) && (*top..top + h).contains(&y) => {
+                Some(color.to_string())
+            }
+            _ => None,
+        })
+        .next_back()
+}
+
+/// The color and boldness `text` draws with.
+fn text(list: &DisplayList, text: &str) -> (String, bool) {
+    list.commands
+        .iter()
+        .find_map(|command| match command {
+            DrawCmd::Text {
+                text: drawn,
+                color,
+                bold,
+                ..
+            } if &**drawn == text => Some((color.to_string(), *bold)),
+            _ => None,
+        })
+        .unwrap()
+}
+
+fn theme(idx: u8, tint: f64) -> Option<String> {
+    Color::Theme { idx, tint }.resolve(&Theme::default())
+}
+
+#[test]
+fn medium2_paints_its_header_and_banded_rows() {
+    let wb = workbook(&info("TableStyleMedium2", true), 0, false);
+    let list = render(&wb);
+    let band = theme(4, 0.7999816888943144);
+    assert_eq!(fill_at(&wb, &list, CellRef::new(0, 2)), theme(4, 0.0));
+    assert_eq!(text(&list, "a1"), ("#ffffff".into(), true));
+    assert_eq!(fill_at(&wb, &list, CellRef::new(1, 1)), band);
+    assert_eq!(fill_at(&wb, &list, CellRef::new(1, 2)), band);
+    assert_eq!(fill_at(&wb, &list, CellRef::new(2, 1)), None);
+    assert_eq!(fill_at(&wb, &list, CellRef::new(3, 2)), band);
+    assert_eq!(fill_at(&wb, &list, CellRef::new(1, 3)), None);
+    assert_eq!(text(&list, "a2"), ("#000000".into(), false));
+}
+
+#[test]
+fn turning_off_row_stripes_removes_the_banding() {
+    let wb = workbook(&info("TableStyleMedium2", false), 0, false);
+    let list = render(&wb);
+    assert_eq!(fill_at(&wb, &list, CellRef::new(0, 0)), theme(4, 0.0));
+    for row in 1..5 {
+        assert_eq!(fill_at(&wb, &list, CellRef::new(row, 1)), None);
+    }
+}
+
+#[test]
+fn a_workbook_defined_style_draws_its_dxfs() {
+    let wb = workbook(&info("Budget", true), 0, false);
+    let list = render(&wb);
+    assert_eq!(
+        fill_at(&wb, &list, CellRef::new(0, 1)),
+        Some("#195a82".into())
+    );
+    assert_eq!(text(&list, "a1"), ("#ffffff".into(), true));
+    assert_eq!(
+        fill_at(&wb, &list, CellRef::new(1, 0)),
+        Some("#fff78c".into())
+    );
+    assert_eq!(fill_at(&wb, &list, CellRef::new(2, 0)), None);
+}
+
+#[test]
+fn a_cell_fill_beats_the_table_style() {
+    let wb = workbook(&info("TableStyleMedium2", true), 1, false);
+    let list = render(&wb);
+    assert_eq!(
+        fill_at(&wb, &list, CellRef::new(1, 1)),
+        Some("#ffff00".into())
+    );
+    assert_eq!(
+        fill_at(&wb, &list, CellRef::new(1, 0)),
+        theme(4, 0.7999816888943144)
+    );
+}
+
+/// A `TableStyleMedium9` table whose header cell `A1` uses xf `a1_style` of
+/// [`own_header_styles`], or no xf at all.
+fn own_header(normal_color: &str, a1_style: Option<u32>) -> Workbook {
+    let styles = own_header_styles(normal_color);
+    let medium9 = info("TableStyleMedium9", true);
+    workbook_styled(&styles, &medium9, a1_style.map(|xf| (1, xf)), 0, false)
+}
+
+/// The fonts and fills of a cell that sets its own: the normal font holds
+/// `normal_color`, font 1 is bold with no color of its own, font 2 is bold in
+/// theme color 1, font 3 is bold and red, and xfs 1 to 3 put them on a light fill.
+fn own_header_styles(normal_color: &str) -> String {
+    format!(
+        r#"<styleSheet><fonts count="4"><font><sz val="11"/>{normal_color}<name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><color theme="1"/><name val="Calibri"/></font><font><b/><sz val="11"/><color rgb="FFFF0000"/><name val="Calibri"/></font></fonts><fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFDCE6F1"/></patternFill></fill></fills><borders count="1"><border/></borders><cellXfs count="4"><xf fontId="0" fillId="0" borderId="0"/><xf fontId="1" fillId="2" borderId="0" applyFont="1" applyFill="1"/><xf fontId="2" fillId="2" borderId="0" applyFont="1" applyFill="1"/><xf fontId="3" fillId="2" borderId="0" applyFont="1" applyFill="1"/></cellXfs></styleSheet>"#
+    )
+}
+
+#[test]
+fn a_header_font_without_a_color_keeps_it_when_the_normal_font_has_one() {
+    let wb = own_header(r#"<color theme="1"/>"#, Some(1));
+    let list = render(&wb);
+    assert_eq!(
+        fill_at(&wb, &list, CellRef::new(0, 0)),
+        Some("#dce6f1".into())
+    );
+    assert_eq!(text(&list, "a1"), ("#000000".into(), true));
+}
+
+#[test]
+fn a_header_font_in_the_normal_color_takes_the_table_color() {
+    let wb = own_header(r#"<color theme="1"/>"#, Some(2));
+    let list = render(&wb);
+    assert_eq!(text(&list, "a1"), ("#ffffff".into(), true));
+}
+
+#[test]
+fn a_header_font_without_a_color_takes_the_table_color_when_the_normal_font_has_none() {
+    let wb = own_header("", Some(1));
+    let list = render(&wb);
+    assert_eq!(text(&list, "a1"), ("#ffffff".into(), true));
+}
+
+#[test]
+fn a_header_font_in_another_color_keeps_it() {
+    let wb = own_header(r#"<color theme="1"/>"#, Some(3));
+    let list = render(&wb);
+    assert_eq!(text(&list, "a1"), ("#ff0000".into(), true));
+}
+
+#[test]
+fn a_header_cell_without_a_format_takes_the_table_color() {
+    let wb = own_header(r#"<color theme="1"/>"#, None);
+    let list = render(&wb);
+    assert_eq!(text(&list, "a1"), ("#ffffff".into(), true));
+}
+
+#[test]
+fn a_body_font_without_a_color_keeps_it_under_a_table_that_colors_its_text() {
+    let styles = own_header_styles(r#"<color theme="1"/>"#);
+    let dark1 = info("TableStyleDark1", true);
+    let wb = workbook_styled(&styles, &dark1, Some((3, 1)), 0, false);
+    let list = render(&wb);
+    assert_eq!(text(&list, "a3"), ("#000000".into(), true));
+    assert_eq!(text(&list, "a4"), ("#ffffff".into(), false));
+}
+
+#[test]
+fn a_total_row_draws_its_element() {
+    let wb = workbook(&info("TableStyleDark1", true), 0, true);
+    let list = render(&wb);
+    assert_eq!(
+        fill_at(&wb, &list, CellRef::new(4, 1)),
+        theme(1, 0.1499984740745262)
+    );
+    assert_eq!(text(&list, "a5"), ("#ffffff".into(), true));
+    assert_eq!(text(&list, "a4"), ("#ffffff".into(), false));
+}
+
+#[test]
+fn a_stripe_that_paints_nothing_keeps_its_size() {
+    for style in ["Unset", "Blank"] {
+        let wb = workbook_with(PLAIN_STRIPES, &info(style, true), 0, false);
+        let list = render(&wb);
+        assert_eq!(
+            fill_at(&wb, &list, CellRef::new(1, 1)),
+            Some("#fff78c".into()),
+            "{style}"
+        );
+        for row in 2..5 {
+            assert_eq!(
+                fill_at(&wb, &list, CellRef::new(row, 1)),
+                None,
+                "{style} row {row}"
+            );
+        }
+    }
+    let wb = workbook_with(PLAIN_STRIPES, &info("Duplicate", true), 0, false);
+    let list = render(&wb);
+    for (row, fill) in [
+        (1, Some("#fff78c")),
+        (2, None),
+        (3, Some("#fff78c")),
+        (4, None),
+    ] {
+        assert_eq!(
+            fill_at(&wb, &list, CellRef::new(row, 1)),
+            fill.map(String::from),
+            "Duplicate row {row}"
+        );
+    }
+}
+
+#[test]
+fn a_declaration_naming_a_preset_without_elements_draws_the_preset() {
+    let wb = workbook_with(DECLARED_PRESET, &info("TableStyleMedium2", true), 0, false);
+    let list = render(&wb);
+    assert_eq!(fill_at(&wb, &list, CellRef::new(0, 2)), theme(4, 0.0));
+    assert_eq!(text(&list, "a1"), ("#ffffff".into(), true));
+    assert_eq!(
+        fill_at(&wb, &list, CellRef::new(1, 1)),
+        theme(4, 0.7999816888943144)
+    );
+}

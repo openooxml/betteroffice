@@ -32,6 +32,7 @@
     "ariaLabel": "Barra de formatação",
     "file": "Arquivo",
     "format": "Formatar",
+    "layout": "Layout",
     "insert": "Inserir",
     "open": "Abrir",
     "openShortcut": "Ctrl+O",
@@ -53,6 +54,16 @@
     "imageWrap": {
       "current": "Atual"
     }
+  },
+  "layout": {
+    "margins": "Margens",
+    "normal": "Normal",
+    "narrow": "Estreita",
+    "moderate": "Moderada",
+    "wide": "Larga",
+    "customMargins": "Margens personalizadas...",
+    "morePaperSizes": "Mais tamanhos de papel...",
+    "indent": "Recuo"
   },
   "formattingBar": {
     "groups": {
@@ -104,7 +115,12 @@
     "single": "Simples",
     "double": "Duplo",
     "lineSpacingTitle": "Espaçamento entre linhas: {label}",
-    "paragraphSpacing": "Espaçamento entre parágrafos"
+    "paragraphSpacing": "Espaçamento entre parágrafos",
+    "addBefore": "Adicionar espaço antes do parágrafo",
+    "removeBefore": "Remover espaço antes do parágrafo",
+    "addAfter": "Adicionar espaço depois do parágrafo",
+    "removeAfter": "Remover espaço depois do parágrafo",
+    "options": "Opções de espaçamento entre linhas..."
   },
   "styles": {
     "selectAriaLabel": "Selecionar estilo de parágrafo",
@@ -417,6 +433,8 @@
         "strikethroughDescription": "Alternar tachado",
         "subscript": "Subscrito",
         "subscriptDescription": "Alternar subscrito",
+        "clearFormatting": "Limpar toda a formatação",
+        "clearFormattingDescription": "Limpar a formatação do texto",
         "superscript": "Sobrescrito",
         "superscriptDescription": "Alternar sobrescrito",
         "alignLeft": "Alinhar à esquerda",
@@ -470,7 +488,9 @@
         "pageUp": "Page Up",
         "pageDown": "Page Down",
         "ctrl": "Ctrl",
-        "del": "Del"
+        "del": "Del",
+        "shift": "Shift",
+        "alt": "Alt"
       }
     },
     "objectGeometry": {
@@ -478,6 +498,11 @@
       "top": "Superior (px)",
       "width": "Largura (px)",
       "height": "Altura (px)"
+    },
+    "paragraphSpacing": {
+      "before": "Espaçamento antes",
+      "after": "Espaçamento depois",
+      "multiple": "Múltiplos"
     }
   },
   "comments": {
@@ -505,6 +530,7 @@
     "paragraphMarkInserted": "Quebra de parágrafo inserida",
     "paragraphMarkDeleted": "Quebra de parágrafo excluída",
     "paragraphPropertiesChanged": "Propriedades do parágrafo alteradas",
+    "runPropertiesChanged": "Formatação do texto alterada",
     "rowInserted": "Linha inserida",
     "rowDeleted": "Linha excluída",
     "rowPropertiesChanged": "Propriedades da linha alteradas",
@@ -515,6 +541,12 @@
     "tablePropertiesChanged": "Propriedades da tabela alteradas",
     "tableInserted": "Tabela inserida",
     "tableDeleted": "Tabela excluída"
+  },
+  "pasteOptions": {
+    "button": "Opções de Colagem (Ctrl)",
+    "keepSource": "Manter Formatação de Origem",
+    "merge": "Mesclar Formatação",
+    "textOnly": "Manter Somente Texto"
   },
   "contextMenu": {
     "ariaLabel": "Menu de ações de IA",
@@ -561,6 +593,8 @@
     "noDocumentLoaded": "Nenhum documento carregado",
     "failedToLoad": "Falha ao carregar documento",
     "failedToLoadDescription": "O arquivo pode estar danificado ou usa algo que este editor ainda não consegue ler.",
+    "failedToLoadDamaged": "O arquivo está danificado ou não é um documento do Word completo.",
+    "failedToLoadUnsupported": "Este documento usa algo que este editor ainda não consegue ler.",
     "editorUnavailable": "O editor não pôde ser carregado",
     "editorUnavailableDescription": "Verifique sua conexão e recarregue a página.",
     "reloadPage": "Recarregar página",
@@ -701,6 +735,8 @@
     "failedToParse": "Falha ao analisar documento",
     "linkRemoved": "Link removido",
     "linkCopied": "Link copiado para a área de transferência",
+    "pasteFailed": "Não foi possível concluir a colagem. Nada foi alterado.",
+    "cutRefused": "A seleção contém objetos que não podem ser recortados. Nada foi alterado.",
     "failedToSave": "Falha ao salvar documento",
     "documentInput": "Entrada do documento",
     "documentPreview": "Visualização do documento",
@@ -753,7 +789,11 @@
     "leftIndent": "Recuo esquerdo",
     "rightIndent": "Recuo direito",
     "topMargin": "Margem superior",
-    "bottomMargin": "Margem inferior"
+    "bottomMargin": "Margem inferior",
+    "leftMargin": "Margem esquerda",
+    "rightMargin": "Margem direita",
+    "hangingIndent": "Recuo deslocado",
+    "markerValue": "{name}: {value}"
   },
   "print": {
     "label": "Imprimir",
@@ -766,8 +806,13 @@
   },
   "a11y": {
     "pageLabel": "Página {number}",
+    "unbuiltPagesNotMirrored": "As páginas de {from} a {to} ainda não estão na visualização de leitura.",
+    "goToPage": "Ir para a página {number}",
     "headerLabel": "Cabeçalho da página",
     "footerLabel": "Rodapé da página",
+    "chartNoData": "Sem dados",
+    "pictureName": "Imagem",
+    "bulletMarker": "marcador",
     "selected": "Selecionado",
     "selectionCleared": "Seleção limpa",
     "commentedText": "Texto comentado",
@@ -826,7 +871,7 @@
       "targetChanged": "O conteúdo para o qual esta ação foi aberta foi alterado antes que ela pudesse ser aplicada.",
       "commandFailed": "Não foi possível concluir o comando.",
       "permissionDenied": "O aplicativo host não permitiu que este plugin usasse este comando.",
-      "unsupportedPolicy": "Os plugins ainda não podem executar este comando. Use um lote de edições.",
+      "unsupportedPolicy": "Este comando exige uma ação do usuário na interface do próprio plugin.",
       "pluginUnavailable": "O plugin não está mais ativo.",
       "aborted": "A ação do plugin foi cancelada antes de o comando ser executado."
     }
@@ -835,6 +880,7 @@
     "toolbarGroup": "Plugins",
     "panelTabs": "Painéis de plugins",
     "collapsePanel": "Recolher {title}",
-    "expandPanel": "Expandir {title}"
+    "expandPanel": "Expandir {title}",
+    "miniToolbar": "Formatação da seleção"
   }
 }

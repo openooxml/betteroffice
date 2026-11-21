@@ -32,6 +32,7 @@
     "ariaLabel": "Outils de mise en forme",
     "file": "Fichier",
     "format": "Format",
+    "layout": "Disposition",
     "insert": "Insertion",
     "open": "Ouvrir",
     "openShortcut": "Ctrl+O",
@@ -53,6 +54,16 @@
     "imageWrap": {
       "current": "Actuel"
     }
+  },
+  "layout": {
+    "margins": "Marges",
+    "normal": "Normal",
+    "narrow": "Étroit",
+    "moderate": "Modéré",
+    "wide": "Large",
+    "customMargins": "Marges personnalisées...",
+    "morePaperSizes": "Autres tailles de papier...",
+    "indent": "Retrait"
   },
   "formattingBar": {
     "groups": {
@@ -104,7 +115,12 @@
     "single": "Simple",
     "double": "Double",
     "lineSpacingTitle": "Interligne : {label}",
-    "paragraphSpacing": "Espacement des paragraphes"
+    "paragraphSpacing": "Espacement des paragraphes",
+    "addBefore": "Ajouter un espace avant le paragraphe",
+    "removeBefore": "Supprimer l’espace avant le paragraphe",
+    "addAfter": "Ajouter un espace après le paragraphe",
+    "removeAfter": "Supprimer l’espace après le paragraphe",
+    "options": "Options d’interligne..."
   },
   "styles": {
     "selectAriaLabel": "Sélectionner le type de paragraphe",
@@ -417,6 +433,8 @@
         "strikethroughDescription": "Activer/désactiver le texte barré",
         "subscript": "Indice",
         "subscriptDescription": "Activer/désactiver l'indice",
+        "clearFormatting": "Effacer toute la mise en forme",
+        "clearFormattingDescription": "Effacer la mise en forme du texte",
         "superscript": "Exposant",
         "superscriptDescription": "Activer/désactiver l'exposant",
         "alignLeft": "Aligner à gauche",
@@ -470,7 +488,9 @@
         "pageUp": "Page préc.",
         "pageDown": "Page suiv.",
         "ctrl": "Ctrl",
-        "del": "Suppr"
+        "del": "Suppr",
+        "shift": "Maj",
+        "alt": "Alt"
       }
     },
     "objectGeometry": {
@@ -478,6 +498,11 @@
       "top": "Haut (px)",
       "width": "Largeur (px)",
       "height": "Hauteur (px)"
+    },
+    "paragraphSpacing": {
+      "before": "Espacement avant",
+      "after": "Espacement après",
+      "multiple": "Multiple"
     }
   },
   "comments": {
@@ -505,6 +530,7 @@
     "paragraphMarkInserted": "Saut de paragraphe inséré",
     "paragraphMarkDeleted": "Saut de paragraphe supprimé",
     "paragraphPropertiesChanged": "Propriétés de paragraphe modifiées",
+    "runPropertiesChanged": "Mise en forme du texte modifiée",
     "rowInserted": "Ligne insérée",
     "rowDeleted": "Ligne supprimée",
     "rowPropertiesChanged": "Propriétés de ligne modifiées",
@@ -515,6 +541,12 @@
     "tablePropertiesChanged": "Propriétés de tableau modifiées",
     "tableInserted": "Tableau inséré",
     "tableDeleted": "Tableau supprimé"
+  },
+  "pasteOptions": {
+    "button": "Options de collage (Ctrl)",
+    "keepSource": "Conserver la mise en forme source",
+    "merge": "Fusionner la mise en forme",
+    "textOnly": "Conserver uniquement le texte"
   },
   "contextMenu": {
     "ariaLabel": "Menu des actions IA",
@@ -561,6 +593,8 @@
     "noDocumentLoaded": "Aucun document chargé",
     "failedToLoad": "Échec du chargement du document",
     "failedToLoadDescription": "Le fichier est peut-être endommagé ou utilise un élément que cet éditeur ne peut pas encore lire.",
+    "failedToLoadDamaged": "Le fichier est endommagé ou n'est pas un document Word complet.",
+    "failedToLoadUnsupported": "Ce document utilise un élément que cet éditeur ne sait pas encore lire.",
     "editorUnavailable": "L’éditeur n’a pas pu se charger",
     "editorUnavailableDescription": "Vérifiez votre connexion, puis rechargez la page.",
     "reloadPage": "Recharger la page",
@@ -701,6 +735,8 @@
     "failedToParse": "Impossible d'analyser le document",
     "linkRemoved": "Lien supprimé",
     "linkCopied": "Lien copié dans le presse-papiers",
+    "pasteFailed": "Le collage n’a pas pu être effectué. Rien n’a été modifié.",
+    "cutRefused": "La sélection contient des objets qui ne peuvent pas être coupés. Rien n’a été modifié.",
     "failedToSave": "Échec de l'enregistrement du document",
     "documentInput": "Saisie dans le document",
     "documentPreview": "Aperçu du document",
@@ -753,7 +789,11 @@
     "leftIndent": "Retrait gauche",
     "rightIndent": "Retrait droit",
     "topMargin": "Marge supérieure",
-    "bottomMargin": "Marge inférieure"
+    "bottomMargin": "Marge inférieure",
+    "leftMargin": "Marge gauche",
+    "rightMargin": "Marge droite",
+    "hangingIndent": "Retrait négatif",
+    "markerValue": "{name} : {value}"
   },
   "print": {
     "label": "Imprimer",
@@ -766,8 +806,13 @@
   },
   "a11y": {
     "pageLabel": "Page {number}",
+    "unbuiltPagesNotMirrored": "Les pages {from} à {to} ne sont pas encore dans la vue de lecture.",
+    "goToPage": "Aller à la page {number}",
     "headerLabel": "En-tête de page",
     "footerLabel": "Pied de page",
+    "chartNoData": "Aucune donnée",
+    "pictureName": "Image",
+    "bulletMarker": "puce",
     "selected": "Sélectionné",
     "selectionCleared": "Sélection effacée",
     "commentedText": "Texte commenté",
@@ -826,7 +871,7 @@
       "targetChanged": "Le contenu pour lequel cette action a été ouverte a changé avant son application.",
       "commandFailed": "La commande n’a pas pu aboutir.",
       "permissionDenied": "L’application hôte n’a pas autorisé ce plugin à utiliser cette commande.",
-      "unsupportedPolicy": "Les plugins ne peuvent pas encore exécuter cette commande. Utilisez plutôt un lot de modifications.",
+      "unsupportedPolicy": "Cette commande nécessite une action utilisateur dans la propre interface du plugin.",
       "pluginUnavailable": "Le plugin n’est plus actif.",
       "aborted": "L’action du plugin a été annulée avant l’exécution de la commande."
     }
@@ -835,6 +880,7 @@
     "toolbarGroup": "Plugins",
     "panelTabs": "Panneaux des plugins",
     "collapsePanel": "Réduire {title}",
-    "expandPanel": "Développer {title}"
+    "expandPanel": "Développer {title}",
+    "miniToolbar": "Mise en forme de la sélection"
   }
 }

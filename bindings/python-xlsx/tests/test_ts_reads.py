@@ -116,9 +116,65 @@ def test_sheet_info_includes_the_requested_sheets_auto_filter(sample_bytes):
 
 def test_calculation_status_uses_camel_case_and_omits_false_budget(sample_bytes):
     workbook = bo.Workbook.open(sample_bytes)
-    assert workbook.calculation_status() == {"limitedCells": []}
+    assert workbook.calculation_status() == {"limitedCells": [], "unevaluatedCells": []}
     workbook.set(0, "H1", "=1+1")
-    assert workbook.calculation_status() == {"limitedCells": []}
+    assert workbook.calculation_status() == {"limitedCells": [], "unevaluatedCells": []}
+
+
+def test_uncomputable_formulas_keep_excel_values_and_are_reported(sample_bytes):
+    data = with_sheet_xml(
+        sample_bytes,
+        '<sheetData><row r="1">'
+        '<c r="A1" t="str"><f>IFERROR(_xlfn.WEBSERVICE("http://x"),"fallback")</f>'
+        "<v>live</v></c>"
+        '<c r="B1"><f>LEN(A1)*2</f><v>9</v></c>'
+        "</row></sheetData>",
+    )
+    workbook = bo.Workbook.open_recalculated(data)
+    assert workbook.value(0, "A1") == "live"
+    assert workbook.value(0, "B1") == pytest.approx(9.0)
+    reported = [("A1", ["WEBSERVICE"]), ("B1", ["WEBSERVICE"])]
+    assert workbook.last_calculation().unevaluated == reported
+    assert workbook.recalculate().unevaluated == reported
+    assert workbook.calculation_status()["unevaluatedCells"] == [
+        {"address": address, "functions": functions} for address, functions in reported
+    ]
+    calculation = workbook.read_cells({"ranges": []})["calculation"]
+    assert [(cell["a1"], cell["functions"]) for cell in calculation["unevaluatedCells"]] == reported
+    assert bo.Workbook.open(sample_bytes).recalculate().unevaluated == []
+
+
+def test_unknown_functions_keep_excel_values_and_are_reported_by_name(sample_bytes):
+    data = with_sheet_xml(
+        sample_bytes,
+        '<sheetData><row r="1">'
+        "<c r=\"A1\"><f>IFERROR(REPRO_UNKNOWN_FUNCTION(1),0)</f><v>42</v></c>"
+        '<c r="B1"><f>A1*2</f><v>9</v></c>'
+        "<c r=\"C1\"><f>_xlfn.FUTURE(1)</f><v>999</v></c>"
+        "<c r=\"D1\"><f>IFERROR(TYPO(1),0)</f></c>"
+        "<c r=\"E1\"><f>TYPO(1)</f></c>"
+        "</row></sheetData>",
+    )
+    reported = [
+        ("A1", ["REPRO_UNKNOWN_FUNCTION"]),
+        ("B1", ["REPRO_UNKNOWN_FUNCTION"]),
+        ("C1", ["FUTURE"]),
+        ("D1", ["TYPO"]),
+        ("E1", ["TYPO"]),
+    ]
+    assert bo.Workbook.open(data).last_calculation().unevaluated == reported
+    workbook = bo.Workbook.open(data)
+    assert workbook.recalculate().unevaluated == reported
+    assert workbook.value(0, "A1") == pytest.approx(42.0)
+    assert workbook.value(0, "B1") == pytest.approx(9.0)
+    assert workbook.value(0, "C1") == pytest.approx(999.0)
+    assert workbook.value(0, "D1") == pytest.approx(0.0)
+    assert repr(workbook.value(0, "E1")) == 'CellError("#NAME?")'
+    assert workbook.calculation_status()["unevaluatedCells"] == [
+        {"address": address, "functions": functions} for address, functions in reported
+    ]
+    calculation = workbook.read_cells({"ranges": []})["calculation"]
+    assert [(cell["a1"], cell["functions"]) for cell in calculation["unevaluatedCells"]] == reported
 
 
 def test_list_defined_names_defaults_pagination_and_scope():

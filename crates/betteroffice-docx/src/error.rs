@@ -1,8 +1,13 @@
 use std::fmt;
 
+const SUGGESTING_EDIT_UNSUPPORTED: &str =
+    "suggesting (tracked-change) edits are not supported by this call";
+
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
+    #[cfg(feature = "fonts")]
+    FontSource(betteroffice_fonts::FontError),
     Parse(docx_parse::ParseError),
     NotAWordDocument(String),
     Edit(docx_edit::EditError),
@@ -12,7 +17,14 @@ pub enum Error {
     ParagraphNotFound(String),
     /// More than one body paragraph has the ID.
     AmbiguousParagraph(String),
+    /// No body paragraph has the index.
+    ParagraphIndexOutOfRange {
+        index: usize,
+        len: usize,
+    },
     UnsupportedParagraphEdit(String),
+    /// The edit context is in suggesting mode, which the paragraph text edits cannot save.
+    SuggestingEditUnsupported,
     Font(String),
     Image(String),
     ResourceLimit(String),
@@ -34,6 +46,8 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            #[cfg(feature = "fonts")]
+            Self::FontSource(error) => error.fmt(formatter),
             Self::Parse(error) => error.fmt(formatter),
             Self::NotAWordDocument(message) => formatter.write_str(message),
             Self::Edit(error) => error.fmt(formatter),
@@ -44,12 +58,17 @@ impl fmt::Display for Error {
             Self::AmbiguousParagraph(id) => {
                 write!(formatter, "more than one paragraph has the ID {id:?}")
             }
+            Self::ParagraphIndexOutOfRange { index, len } => write!(
+                formatter,
+                "paragraph index {index} is out of range for {len} paragraphs"
+            ),
             Self::UnsupportedParagraphEdit(id) => {
                 write!(
                     formatter,
                     "paragraph {id:?} is not a plain single-run paragraph"
                 )
             }
+            Self::SuggestingEditUnsupported => formatter.write_str(SUGGESTING_EDIT_UNSUPPORTED),
             Self::Font(error) => formatter.write_str(error),
             Self::Image(error) => formatter.write_str(error),
             Self::ResourceLimit(error) => formatter.write_str(error),
@@ -74,6 +93,8 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            #[cfg(feature = "fonts")]
+            Self::FontSource(error) => Some(error),
             Self::Parse(error) => Some(error),
             Self::Edit(error) => Some(error),
             Self::Operation(error) => Some(error),
@@ -83,7 +104,9 @@ impl std::error::Error for Error {
             | Self::DisplayList(_)
             | Self::ParagraphNotFound(_)
             | Self::AmbiguousParagraph(_)
+            | Self::ParagraphIndexOutOfRange { .. }
             | Self::UnsupportedParagraphEdit(_)
+            | Self::SuggestingEditUnsupported
             | Self::Font(_)
             | Self::Image(_)
             | Self::ResourceLimit(_)
@@ -139,5 +162,12 @@ impl From<docx_edit::structured::ExportError> for Error {
             }
             docx_edit::structured::ExportError::Refused(failure) => Self::Export(failure),
         }
+    }
+}
+
+#[cfg(feature = "fonts")]
+impl From<betteroffice_fonts::FontError> for Error {
+    fn from(error: betteroffice_fonts::FontError) -> Self {
+        Self::FontSource(error)
     }
 }

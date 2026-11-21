@@ -37,8 +37,10 @@ import type { DocxProposalRegistryState } from './proposals';
 import type { WasmModuleMemory } from '../wasm/loadWasmAsset';
 import type { Comment } from '../types/content';
 import type { Document } from '../types/document';
+import { shipsWasmAsset } from '../wasm/assetEdit';
 import { editWasmModule } from './wasm/index';
 import { fontBytes, type FontDecoder } from '../../../../shared/office-session/fontDecoder';
+import { createSessionWorker } from './sessionWorker';
 
 /** @internal */
 export interface ResidentProposalReply
@@ -172,10 +174,7 @@ export interface ResidentEngineWorkerPort {
 }
 
 function spawnResidentEngineWorker(): ResidentEngineWorkerPort {
-  return new Worker(new URL('./docxWorker.mjs', import.meta.url), {
-    type: 'module',
-    name: 'betteroffice-docx-worker',
-  });
+  return createSessionWorker();
 }
 
 /** Dedicated-worker owner for resident input, pagination, and FrameDelta output. */
@@ -315,6 +314,10 @@ export class ResidentEngineWorkerClient implements DocxCommandClient {
             ? new DocxWorkerSaveUnavailableError(response.error)
             : response.code === 'cut-kept'
             ? new ResidentWorkerCutKeptError(response.error)
+            : response.code === 'invalid-selection'
+            ? new ResidentWorkerInvalidSelectionError(response.error)
+            : response.code === 'table-unavailable'
+            ? new ResidentWorkerTableUnavailableError(response.error)
             : residentWorkerError(response.error, response.residentUnavailable)
         );
       }
@@ -808,7 +811,7 @@ export class ResidentEngineWorkerClient implements DocxCommandClient {
   }
 
   async warm(hostModule = false): Promise<void> {
-    if (!hostModule) {
+    if (!hostModule || !shipsWasmAsset) {
       await this.request({ type: 'warm' });
       return;
     }
@@ -1270,6 +1273,16 @@ export class DocxWorkerSaveUnavailableError extends ResidentWorkerFailureError {
 
 /** A whole source failed to open and the worker still holds the source cut it was to replace. @internal */
 export class ResidentWorkerCutKeptError extends Error {}
+
+/** The worker refused a read of a selection it cannot answer, such as one across stories; the session stays usable. @internal */
+export class ResidentWorkerInvalidSelectionError extends Error {
+  readonly code = 'invalid-selection' as const;
+}
+
+/** The worker refused a read over a table a concurrent undo left without its properties, grid or rows; the session stays usable. @internal */
+export class ResidentWorkerTableUnavailableError extends Error {
+  readonly code = 'table-unavailable' as const;
+}
 
 /** The worker trapped because its wasm memory could not grow any further. */
 export class ResidentWorkerOutOfMemoryError extends ResidentWorkerUnavailableError {

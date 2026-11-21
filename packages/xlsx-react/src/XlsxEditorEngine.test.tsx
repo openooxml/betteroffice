@@ -5,8 +5,11 @@ import { StrictMode, useEffect, useState } from 'react';
 import type { XlsxInThreadEditorProps } from './XlsxEditor';
 import type { XlsxAsyncEditorApi } from './worker/createAsyncEditorApi';
 import { xlsxCommandController } from './commands/createXlsxCommandStore';
+import { defineXlsxPlugin } from './plugins/defineXlsxPlugin';
+import type { XlsxPluginError } from './plugins/types';
 import { LEGACY_SYNC_API } from './runtimeOptions';
 import { XlsxWorkerEditorChunkLoadError } from './worker/XlsxWorkerEditorChunkLoadError';
+import { MOUNTED } from './__fixtures__/mounted';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -149,17 +152,175 @@ describe('XlsxEditor engine dispatch', () => {
     const remount = render(<XlsxEditor legacySyncApi experimentalWorkerOpen file={file} />);
     await waitFor(() => expect(remount.getByTestId('worker-editor').getAttribute('data-backend')).toBe('legacy'));
     expect(warn).toHaveBeenCalledTimes(1);
-    expect(warn.mock.calls[0]?.[0]).toContain('removed in 0.6.0');
+    expect(warn.mock.calls[0]?.[0]).toContain('removed in 0.7.0');
+  });
+
+  it('mounts the hybrid editor for a read-only workbook that allows host proposals', async () => {
+    const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen readOnly allowHostProposals file={file} />);
+    await waitFor(() => expect(view.getByTestId('worker-editor').getAttribute('data-read-only')).toBe('true'));
+    expect(view.queryByTestId('worker-viewer')).toBeNull();
+    view.rerender(<XlsxEditor legacySyncApi experimentalWorkerOpen readOnly file={file} />);
+    expect(view.getByTestId('worker-editor')).toBeDefined();
+  });
+
+  it('mounts the hybrid viewer for a read-only workbook without host proposals', async () => {
+    const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen readOnly file={file} />);
+    await waitFor(() => expect(view.getByTestId('worker-viewer')).toBeDefined());
+    expect(view.queryByTestId('worker-editor')).toBeNull();
+  });
+
+  it('reports each plugin once in the legacy read-only worker viewer', async () => {
+    const plugins = ['acme.first', 'acme.second'].map((id) => defineXlsxPlugin({ id, createState: () => null }));
+    const errors: XlsxPluginError[] = [];
+    const view = render(<StrictMode><XlsxEditor legacySyncApi experimentalWorkerOpen readOnly file={file}
+      plugins={plugins} onPluginError={(error) => { errors.push(error); }} /></StrictMode>);
+    await waitFor(() => expect(errors).toHaveLength(2));
+    expect(view.getByTestId('worker-viewer')).toBeDefined();
+    expect(view.queryByTestId('worker-editor')).toBeNull();
+    expect(errors).toMatchObject(plugins.map((plugin) => ({
+      pluginId: plugin.id, generation: null, phase: 'definition', error: { code: 'unsupported-policy' },
+    })));
+    await act(async () => {
+      view.rerender(<StrictMode><XlsxEditor legacySyncApi experimentalWorkerOpen readOnly file={file}
+        plugins={plugins} onPluginError={(error) => { errors.push(error); }} /></StrictMode>);
+    });
+    expect(errors).toHaveLength(2);
+  });
+
+  it('reports once when the host rerenders with a new plugins array from onPluginError', async () => {
+    const errors: XlsxPluginError[] = [];
+    function Host() {
+      const [, setCount] = useState(0);
+      return <XlsxEditor legacySyncApi experimentalWorkerOpen readOnly file={file}
+        plugins={[defineXlsxPlugin({ id: 'acme.inline', createState: () => null })]}
+        onPluginError={(error) => { errors.push(error); setCount((value) => value + 1); }} />;
+    }
+    render(<Host />);
+    await waitFor(() => expect(errors).toHaveLength(1));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+    expect(errors).toHaveLength(1);
+  });
+
+  it('reports a plugin again in the legacy viewer after it is removed and re-added', async () => {
+    const [first, second] = ['acme.first', 'acme.second'].map((id) => defineXlsxPlugin({ id, createState: () => null }));
+    const errors: XlsxPluginError[] = [];
+    const onPluginError = (error: XlsxPluginError) => { errors.push(error); };
+    const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen readOnly file={file}
+      plugins={[first!, second!]} onPluginError={onPluginError} />);
+    await waitFor(() => expect(errors).toHaveLength(2));
+    await act(async () => {
+      view.rerender(<XlsxEditor legacySyncApi experimentalWorkerOpen readOnly file={file}
+        plugins={[first!]} onPluginError={onPluginError} />);
+    });
+    expect(errors).toHaveLength(2);
+    await act(async () => {
+      view.rerender(<XlsxEditor legacySyncApi experimentalWorkerOpen readOnly file={file}
+        plugins={[first!, second!]} onPluginError={onPluginError} />);
+    });
+    expect(errors).toHaveLength(3);
+    expect(errors[2]?.pluginId).toBe('acme.second');
+  });
+
+  it('reports plugins again in the legacy viewer when the file changes', async () => {
+    const plugins = ['acme.first', 'acme.second'].map((id) => defineXlsxPlugin({ id, createState: () => null }));
+    const errors: XlsxPluginError[] = [];
+    const onPluginError = (error: XlsxPluginError) => { errors.push(error); };
+    const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen readOnly file={file}
+      plugins={plugins} onPluginError={onPluginError} />);
+    await waitFor(() => expect(errors).toHaveLength(2));
+    await act(async () => {
+      view.rerender(<XlsxEditor legacySyncApi experimentalWorkerOpen readOnly file={new Uint8Array([4, 5, 6])}
+        plugins={plugins} onPluginError={onPluginError} />);
+    });
+    expect(view.getByTestId('worker-viewer')).toBeDefined();
+    expect(errors).toHaveLength(4);
+    expect(errors.slice(2).map((error) => error.pluginId)).toEqual(['acme.first', 'acme.second']);
+  });
+
+  it('reports a plugin again in the legacy viewer when its revision changes', async () => {
+    const errors: XlsxPluginError[] = [];
+    const onPluginError = (error: XlsxPluginError) => { errors.push(error); };
+    const withRevision = (revision?: string | number) =>
+      [defineXlsxPlugin({ id: 'acme.revised', revision, createState: () => null })];
+    const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen readOnly file={file}
+      plugins={withRevision(1)} onPluginError={onPluginError} />);
+    await waitFor(() => expect(errors).toHaveLength(1));
+    for (const [revision, count] of [[2, 2], ['2', 3], [undefined, 4], ['', 5], ['', 5]] as const) {
+      await act(async () => {
+        view.rerender(<XlsxEditor legacySyncApi experimentalWorkerOpen readOnly file={file}
+          plugins={withRevision(revision)} onPluginError={onPluginError} />);
+      });
+      expect(errors).toHaveLength(count);
+    }
+    expect(errors.every((error) => error.pluginId === 'acme.revised')).toBe(true);
+  });
+
+  it('reports duplicate id and revision entries once in the legacy viewer', async () => {
+    const plugins = [1, 2].map(() => defineXlsxPlugin({ id: 'acme.twin', revision: 1, createState: () => null }));
+    const errors: XlsxPluginError[] = [];
+    const onPluginError = (error: XlsxPluginError) => { errors.push(error); };
+    const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen readOnly file={file}
+      plugins={plugins} onPluginError={onPluginError} />);
+    await waitFor(() => expect(errors).toHaveLength(1));
+    await act(async () => {
+      view.rerender(<XlsxEditor legacySyncApi experimentalWorkerOpen readOnly file={file}
+        plugins={[...plugins]} onPluginError={onPluginError} />);
+    });
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.pluginId).toBe('acme.twin');
+  });
+
+  it('reports again in the legacy viewer for a new file opened after editor mode', async () => {
+    const plugins = ['acme.first', 'acme.second'].map((id) => defineXlsxPlugin({ id, createState: () => null }));
+    const errors: XlsxPluginError[] = [];
+    const onPluginError = (error: XlsxPluginError) => { errors.push(error); };
+    const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen readOnly file={file}
+      plugins={plugins} onPluginError={onPluginError} />);
+    await waitFor(() => expect(errors).toHaveLength(2));
+    await act(async () => {
+      view.rerender(<XlsxEditor legacySyncApi experimentalWorkerOpen file={file}
+        plugins={plugins} onPluginError={onPluginError} />);
+    });
+    await waitFor(() => expect(view.getByTestId('worker-editor')).toBeDefined());
+    expect(errors).toHaveLength(2);
+    await act(async () => {
+      view.rerender(<XlsxEditor legacySyncApi experimentalWorkerOpen readOnly file={new Uint8Array([4, 5, 6])}
+        plugins={plugins} onPluginError={onPluginError} />);
+    });
+    await waitFor(() => expect(view.getByTestId('worker-viewer')).toBeDefined());
+    expect(errors).toHaveLength(4);
+  });
+
+  it('logs unsupported legacy viewer plugins when onPluginError is absent', async () => {
+    const plugins = ['acme.first', 'acme.second'].map((id) => defineXlsxPlugin({ id, createState: () => null }));
+    const messages: unknown[][] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => { messages.push(args); };
+    try {
+      const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen readOnly file={file} plugins={plugins} />);
+      await waitFor(() => expect(messages).toHaveLength(2));
+      expect(view.getByTestId('worker-viewer')).toBeDefined();
+      expect(messages.map(([message]) => message)).toEqual(plugins.map((plugin) =>
+        `[XlsxEditor] plugin "${plugin.id}" failed (definition)`));
+      for (const [, error] of messages) expect(error).toMatchObject({ code: 'unsupported-policy' });
+      await act(async () => {
+        view.rerender(<XlsxEditor legacySyncApi experimentalWorkerOpen readOnly file={file} plugins={plugins} />);
+      });
+      expect(messages).toHaveLength(2);
+      view.unmount();
+    } finally {
+      console.error = originalError;
+    }
   });
 
   it('runs the in-thread engine for legacySyncApi without experimentalWorkerOpen', async () => {
     const view = render(<XlsxEditor legacySyncApi file={file} />);
-    await waitFor(() => expectInThread(view));
+    await waitFor(() => expectInThread(view), MOUNTED);
     view.rerender(<XlsxEditor legacySyncApi file={file} readOnly />);
     expectInThread(view);
     expect(mounts).not.toHaveBeenCalled();
     expect(warn).toHaveBeenCalledTimes(1);
-    expect(warn.mock.calls[0]?.[0]).toContain('removed in 0.6.0');
+    expect(warn.mock.calls[0]?.[0]).toContain('removed in 0.7.0');
   });
 
   it('keeps experimentalWorkerOpen=true on the async default', () => {
@@ -175,7 +336,7 @@ describe('XlsxEditor engine dispatch', () => {
       const ready = mock((_api: XlsxAsyncEditorApi) => {});
       const props = { file, onReady: ready, experimentalWorkerOpen: reason === 'experimentalWorkerOpen' ? false : undefined };
       const view = render(<XlsxEditor {...props} />);
-      await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+      await waitFor(() => expect(ready).toHaveBeenCalledTimes(1), MOUNTED);
       expectInThread(view);
       const api = ready.mock.calls[0]![0];
       expect(api.hydrated).toBe(true);
@@ -188,7 +349,7 @@ describe('XlsxEditor engine dispatch', () => {
       expect(host.open).toHaveBeenCalledTimes(1);
       view.unmount();
       render(<XlsxEditor {...props} />);
-      await waitFor(() => expect(ready).toHaveBeenCalledTimes(2));
+      await waitFor(() => expect(ready).toHaveBeenCalledTimes(2), MOUNTED);
       expect(warn).toHaveBeenCalledTimes(1);
       expect(warn.mock.calls[0]?.[0]).toContain('deprecated in-thread engine');
     });
@@ -204,7 +365,7 @@ describe('XlsxEditor engine dispatch', () => {
       const props = engine === 'legacy' ? { file, [LEGACY_SYNC_API]: true as const }
         : { file, experimentalWorkerOpen: false as const };
       const view = render(<XlsxEditor {...props} onReady={ready} />);
-      await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+      await waitFor(() => expect(ready).toHaveBeenCalledTimes(1), MOUNTED);
       expect(load).toHaveBeenCalledTimes(1);
       expect(host.open).toHaveBeenCalledTimes(1);
       await act(async () => { view.rerender(<XlsxEditor {...props} onReady={ready} readOnly plugins={[]} />); });
@@ -243,7 +404,7 @@ describe('XlsxEditor engine dispatch', () => {
         expect(ready).not.toHaveBeenCalled();
         failed.unmount();
         render(<XlsxEditor {...props} onReady={ready} onError={onError} />);
-        await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+        await waitFor(() => expect(ready).toHaveBeenCalledTimes(1), MOUNTED);
         expect(load).toHaveBeenCalledTimes(2);
         expect(onError).toHaveBeenCalledTimes(1);
       });
@@ -283,7 +444,7 @@ describe('XlsxEditor engine dispatch', () => {
     expect(view.queryByText('Opening workbook')).not.toBeNull();
     expect(host.open).not.toHaveBeenCalled();
     resolve();
-    await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(ready).toHaveBeenCalledTimes(1), MOUNTED);
     expect(view.queryByText('Opening workbook')).toBeNull();
     expect(load).toHaveBeenCalledTimes(1);
     expect(host.open).toHaveBeenCalledTimes(1);
@@ -308,12 +469,12 @@ describe('XlsxEditor engine dispatch', () => {
       const ready = mock((_api: XlsxAsyncEditorApi) => {});
       const props = { onReady: ready, experimentalWorkerOpen: reason === 'experimentalWorkerOpen' ? false : undefined };
       const view = render(<XlsxEditor {...props} file={file} />);
-      await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+      await waitFor(() => expect(ready).toHaveBeenCalledTimes(1), MOUNTED);
       const retired = ready.mock.calls[0]![0];
       const prepared = xlsxCommandController(retired.commands)!.prepare('undo');
       host.open.mockReturnValue(replacement);
       view.rerender(<XlsxEditor {...props} file={new Uint8Array([4, 5, 6])} />);
-      await waitFor(() => expect(ready).toHaveBeenCalledTimes(2));
+      await waitFor(() => expect(ready).toHaveBeenCalledTimes(2), MOUNTED);
       await expect(retired.whenHydrated()).rejects.toMatchObject({ code: 'document-replaced' });
       await expect(retired.commands.execute('undo', null)).rejects.toMatchObject({ code: 'document-replaced' });
       await expect(retired.commands.execute('bold', null)).rejects.toMatchObject({ code: 'document-replaced' });
@@ -343,7 +504,7 @@ describe('XlsxEditor engine dispatch', () => {
     inThreadWorkbook();
     const ready = mock((_api: xlsx.WorkbookHandle) => {});
     render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={file} onReady={(api) => ready(api.handle)} />);
-    await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(ready).toHaveBeenCalledTimes(1), MOUNTED);
     expect(ready.mock.calls[0]![0].version()).toBe('0');
     expect(warn).toHaveBeenCalledTimes(2);
   });
@@ -352,7 +513,7 @@ describe('XlsxEditor engine dispatch', () => {
     const host = inThreadWorkbook();
     const painting = inThreadPainting();
     const view = render(<XlsxEditor file={file} experimentalWorkerOpen={false} />);
-    await waitFor(() => expect(host.displayList).toHaveBeenCalled());
+    await waitFor(() => expect(host.displayList).toHaveBeenCalled(), MOUNTED);
     const failure = new Error('Rendering failed');
     host.displayList.mockImplementation(() => { throw failure; });
     act(() => fireEvent.scroll(view.getByTestId('xlsx-scroll')));

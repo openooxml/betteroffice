@@ -9,7 +9,7 @@ Rust/WebAssembly. Use it for document processing or a custom editor adapter.
 bun add @betteroffice/docx
 ```
 
-`@betteroffice/fonts` is an optional peer dependency for font assets.
+No peer dependencies. `@betteroffice/fonts` is installed with it as a dependency; the CJK and international font packs are optional.
 
 ## Usage
 
@@ -49,6 +49,22 @@ creating a session. Preserve the packaged asset URLs when bundling for a browser
 Core sessions expose synchronous editing and read methods after asynchronous creation. The React
 editor runs its engine in a Web Worker by default and exposes promise-returning document reads,
 edits, and exports. Release a direct session with `session.destroy()` when finished.
+
+## Worker sessions
+
+Node.js >= 20.16 / 22.3 runs worker sessions on `worker_threads`, keeping the process alive until the session is disposed. Outside browsers the DOCX worker opens, reads and saves documents; for headless editing use the in-thread edit session (`createYrsSession` from `@betteroffice/docx/yrs`, then `session.openDocx`), which is fully supported, because the worker editor session paints frames and needs `OffscreenCanvas`.
+
+## Page PNGs
+
+`session.renderPng({ page }, options?)` on a `YrsSession` from `@betteroffice/docx/yrs` draws a page as PNG bytes with the editor's layout and painter. `page` is 0-based. It lays out a private replica of the session, so an open editor is undisturbed, and reuses that layout until the document changes.
+
+```ts
+const png = await session.renderPng({ page: 0 }, { scale: 2 });
+```
+
+By default the export loads the complete bundled fonts on both engines, so script text and fonts the bundled set doesn't carry take the faces the native engine draws them with. A face whose optional font pack is not installed is skipped; a Latin or international face from an installed pack that cannot load rejects with `PngExportError` (`font-unavailable`) naming it. Pass `fontProvider`, such as the provider your editor measures with, to lay out with stand-ins or your own faces instead. Without a canvas it rejects with `PngExportError` (`canvas-unavailable`); `@betteroffice/docx-native` renders the same call natively. A worker cannot decode SVG or metafile pictures, so a page with them rejects there rather than lose them.
+
+`onDiagnostic` is also told, at most once per page and only when something was left out, `{ code: 'effects-skipped', page, effects }`: `page` is 0-based like the target, and `effects` lists kinds from `PNG_SKIPPED_EFFECT_KINDS` (`text.outline`, `text.emphasisMark`, `text.effect`, `text.modernEffects`, `text.shadow`, `text.leaderGlyphs`, `shape.effects`, `image.filter`, `image.effects`) in that order. A page reports a kind when one of its drawing primitives carries an effect of that kind that the engine does not draw on its normal path; a picture whose bytes cannot be loaded or decoded reports `picture-unavailable` and nothing else. The report describes each engine's normal path, not the pixels of the page, so a degenerate primitive carrying an effect (an empty crop, a run of spaces, a leader with no advance) still reports it. The engines draw different effects, so one page can report different kinds on the native and wasm engines.
 
 ## Undo grouping
 
@@ -149,7 +165,7 @@ Deprecated: `EditorPluginCore`, `PluginPanelProps`, `PanelConfig`, and `SidebarI
 
 ## Fonts for custom adapters
 
-See [font setup](https://docs.betteroffice.dev/docs/packages#fonts) for optional measurement assets.
+See [font setup](https://docs.betteroffice.dev/docs/packages#fonts) for the font packages and the optional packs.
 For browser font loading, `createFontLoadScope()` from `@betteroffice/docx/utils` isolates each
 editor's load notifications. `registerDocumentFaces(faces, scope)` registers embedded faces and
 returns their CSS family aliases when documents use different bytes under the same family name.

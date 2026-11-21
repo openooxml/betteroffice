@@ -7,7 +7,7 @@
  *
  * Margins shown as gray zones on the ruler edges.
  * Drag the boundary between gray/white to adjust page margins.
- * Drag tooltip shows value during any drag.
+ * A tooltip names the hovered, focused or dragged marker and its value.
  */
 
 import React, { useState, useRef, useCallback, useEffect } from 'react';
@@ -122,6 +122,7 @@ export function HorizontalRuler({
   const { t, lang } = useTranslation();
   const [dragging, setDragging] = useState<MarkerType | null>(null);
   const [hoveredMarker, setHoveredMarker] = useState<MarkerType | null>(null);
+  const [focusedMarker, setFocusedMarker] = useState<MarkerType | null>(null);
   const [dragValue, setDragValue] = useState<number | null>(null);
   const [dragPositionPx, setDragPositionPx] = useState<number | null>(null);
   const [tabDrag, setTabDrag] = useState<{ tab: TabStop; position: number; tabs: TabStop[] } | null>(null);
@@ -262,6 +263,35 @@ export function HorizontalRuler({
 
   const ticks = generateTicks(pageWidthTwips, zoom, unit);
 
+  const markerTip = (marker: MarkerType): { text: string; positionPx: number } | null => {
+    const live = dragging === marker ? dragValue : null;
+    const tip = (key: TranslationKey, twips: number, positionPx: number) => ({
+      text: t('ruler.markerValue', { name: t(key), value: formatValueForTooltip(twips, unit, lang, t) }),
+      positionPx: dragging === marker && dragPositionPx !== null ? dragPositionPx : positionPx,
+    });
+    switch (marker) {
+      case 'leftMargin':
+        return tip('ruler.leftMargin', live ?? leftMarginTwips, leftMarginPx);
+      case 'rightMargin':
+        return tip('ruler.rightMargin', live ?? rightMarginTwips, pageWidthPx - rightMarginPx);
+      case 'firstLineIndent': {
+        if (!showFirstLineIndent) return null;
+        const signed = live ?? effectiveFirstLineIndent;
+        return tip(signed < 0 ? 'ruler.hangingIndent' : 'ruler.firstLineIndent', Math.abs(signed), firstLinePosPx);
+      }
+      case 'leftIndent':
+        return paragraphEditable && onIndentLeftChange ? tip('ruler.leftIndent', live ?? indentLeft, leftIndentPosPx) : null;
+      case 'rightIndent':
+        return paragraphEditable && onIndentRightChange ? tip('ruler.rightIndent', live ?? indentRight, rightIndentPosPx) : null;
+    }
+  };
+  const activeMarker = dragging ?? hoveredMarker ?? focusedMarker;
+  const activeTip = activeMarker ? markerTip(activeMarker) : null;
+  const hoverMargin = (marker: MarkerType) => ({
+    onMouseEnter: () => setHoveredMarker(marker),
+    onMouseLeave: () => setHoveredMarker((current) => (current === marker ? null : current)),
+  });
+
   return (
     <div
       ref={rulerRef}
@@ -301,6 +331,7 @@ export function HorizontalRuler({
           cursor: editable ? 'ew-resize' : 'default',
           zIndex: 1,
         }}
+        {...hoverMargin('leftMargin')}
         onMouseDown={
           editable && onLeftMarginChange ? (e) => handleDragStart(e, 'leftMargin') : undefined
         }
@@ -317,6 +348,7 @@ export function HorizontalRuler({
           cursor: editable ? 'ew-resize' : 'default',
           zIndex: 1,
         }}
+        {...hoverMargin('rightMargin')}
         onMouseDown={
           editable && onRightMarginChange ? (e) => handleDragStart(e, 'rightMargin') : undefined
         }
@@ -341,7 +373,10 @@ export function HorizontalRuler({
           isHovered={hoveredMarker === 'firstLineIndent'}
           onMouseEnter={() => setHoveredMarker('firstLineIndent')}
           onMouseLeave={() => setHoveredMarker(null)}
+          onFocus={() => setFocusedMarker('firstLineIndent')}
+          onBlur={() => setFocusedMarker(null)}
           onMouseDown={(e) => handleDragStart(e, 'firstLineIndent')}
+          valueText={markerTip('firstLineIndent')?.text}
           label={t('ruler.firstLineIndent')}
         />
       )}
@@ -356,7 +391,10 @@ export function HorizontalRuler({
           isHovered={hoveredMarker === 'leftIndent'}
           onMouseEnter={() => setHoveredMarker('leftIndent')}
           onMouseLeave={() => setHoveredMarker(null)}
+          onFocus={() => setFocusedMarker('leftIndent')}
+          onBlur={() => setFocusedMarker(null)}
           onMouseDown={(e) => handleDragStart(e, 'leftIndent')}
+          valueText={markerTip('leftIndent')?.text}
           label={t('ruler.leftIndent')}
         />
       )}
@@ -371,7 +409,10 @@ export function HorizontalRuler({
           isHovered={hoveredMarker === 'rightIndent'}
           onMouseEnter={() => setHoveredMarker('rightIndent')}
           onMouseLeave={() => setHoveredMarker(null)}
+          onFocus={() => setFocusedMarker('rightIndent')}
+          onBlur={() => setFocusedMarker(null)}
           onMouseDown={(e) => handleDragStart(e, 'rightIndent')}
+          valueText={markerTip('rightIndent')?.text}
           label={t('ruler.rightIndent')}
         />
       )}
@@ -381,6 +422,7 @@ export function HorizontalRuler({
         <TabStopMarker
           key={tab.position}
           tabStop={tab}
+          unit={unit}
           positionPx={(onTabStopsChange ? leftMarginPx : 0) + twipsToPixels(tabDrag?.tab.position === tab.position ? tabDrag.position : tab.position) * zoom}
           onMouseDown={paragraphEditable && onTabStopsChange ? event => {
             event.preventDefault(); event.stopPropagation(); onDragStart?.();
@@ -390,13 +432,7 @@ export function HorizontalRuler({
         />
       ))}
 
-      {/* Drag tooltip */}
-      {dragging && dragValue !== null && dragPositionPx !== null && (
-        <DragTooltip
-          value={formatValueForTooltip(dragValue, unit, lang, t)}
-          positionPx={dragPositionPx}
-        />
-      )}
+      {activeTip && <MarkerTooltip value={activeTip.text} positionPx={activeTip.positionPx} />}
     </div>
   );
 }
@@ -457,8 +493,11 @@ interface IndentTriangleProps {
   isHovered: boolean;
   onMouseEnter: () => void;
   onMouseLeave: () => void;
+  onFocus: () => void;
+  onBlur: () => void;
   onMouseDown: (e: React.MouseEvent) => void;
   label: string;
+  valueText?: string;
 }
 
 function IndentTriangle({
@@ -469,8 +508,11 @@ function IndentTriangle({
   isHovered,
   onMouseEnter,
   onMouseLeave,
+  onFocus,
+  onBlur,
   onMouseDown,
   label,
+  valueText,
 }: IndentTriangleProps): React.ReactElement {
   const color = isDragging ? INDENT_ACTIVE_COLOR : isHovered ? INDENT_HOVER_COLOR : INDENT_COLOR;
   const triHeight = Math.round(TRI_SIZE * 1.6);
@@ -516,9 +558,12 @@ function IndentTriangle({
       style={containerStyle}
       onMouseEnter={onMouseEnter}
       onMouseLeave={onMouseLeave}
+      onFocus={onFocus}
+      onBlur={onBlur}
       onMouseDown={onMouseDown}
       role="slider"
       aria-label={label}
+      aria-valuetext={valueText}
       aria-orientation="horizontal"
       tabIndex={editable ? 0 : -1}
     >
@@ -527,7 +572,7 @@ function IndentTriangle({
   );
 }
 
-function DragTooltip({
+function MarkerTooltip({
   value,
   positionPx,
 }: {
@@ -536,10 +581,12 @@ function DragTooltip({
 }): React.ReactElement {
   return (
     <div
+      role="tooltip"
+      className="docx-ruler-tooltip"
       style={{
         position: 'absolute',
         left: formatPx(positionPx),
-        top: -22,
+        top: RULER_HEIGHT + 4,
         transform: 'translateX(-50%)',
         backgroundColor: 'var(--doc-text)',
         color: 'var(--doc-on-primary)',
@@ -560,6 +607,7 @@ function DragTooltip({
 interface TabStopMarkerProps {
   onMouseDown?: React.MouseEventHandler<HTMLDivElement>;
   tabStop: TabStop;
+  unit: 'inch' | 'cm';
   positionPx: number;
   onDoubleClick: () => void;
 }
@@ -584,6 +632,7 @@ const TAB_ALIGNMENT_KEYS: Record<TabStopAlignment, TranslationKey> = {
 
 function TabStopMarker({
   tabStop,
+  unit,
   positionPx,
   onDoubleClick,
   onMouseDown,
@@ -613,7 +662,7 @@ function TabStopMarker({
       onMouseDown={onMouseDown}
       title={t('ruler.tabStop', {
         alignment: t(TAB_ALIGNMENT_KEYS[tabStop.alignment]),
-        position: formatValueForTooltip(tabStop.position, 'inch', lang, t),
+        position: formatValueForTooltip(tabStop.position, unit, lang, t),
       })}
     >
       {TAB_SYMBOLS[tabStop.alignment] || 'L'}

@@ -29,6 +29,7 @@ fn text(x: f32, y: f32, s: &str, align: Align, clip: Rect) -> DrawCmd {
         bold: false,
         italic: false,
         underline: false,
+        underline_style: None,
         strike: false,
         highlight: None,
         dashed_underline: false,
@@ -41,6 +42,7 @@ fn text(x: f32, y: f32, s: &str, align: Align, clip: Rect) -> DrawCmd {
         rotation_valign: None,
         stacked: false,
         wrap: None,
+        runs: Vec::new(),
     }
 }
 
@@ -68,6 +70,7 @@ fn styled_text(
         bold,
         italic,
         underline,
+        underline_style: None,
         strike,
         highlight: None,
         dashed_underline: false,
@@ -80,6 +83,7 @@ fn styled_text(
         rotation_valign: None,
         stacked: false,
         wrap: None,
+        runs: Vec::new(),
     }
 }
 

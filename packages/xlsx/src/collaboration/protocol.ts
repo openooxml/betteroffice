@@ -1,4 +1,4 @@
-import { MAX_COLLABORATION_FRAME_BYTES } from '../../../../shared/collaboration-limits';
+import { DEFAULT_MAX_FRAME_BYTES, OPEN_SYNC_CLIENT } from './validation';
 import type { AwarenessPayload, AwarenessUpdate } from './types';
 import {
   MAX_AWARENESS_NAME_LENGTH,
@@ -6,7 +6,8 @@ import {
   normalizeAwarenessColor,
 } from './awareness';
 
-export const DEFAULT_MAX_FRAME_BYTES = MAX_COLLABORATION_FRAME_BYTES;
+export { DEFAULT_MAX_FRAME_BYTES, OPEN_SYNC_CLIENT } from './validation';
+
 export const DEFAULT_MAX_MESSAGES_PER_FRAME = 4096;
 export const DEFAULT_MAX_AWARENESS_STATES = 1024;
 
@@ -360,7 +361,6 @@ export function withoutDocumentFingerprint(payload: Uint8Array): Uint8Array {
   return payload.subarray(0, tagOffset);
 }
 
-export const OPEN_SYNC_CLIENT = Number.MAX_SAFE_INTEGER - 1;
 const OPEN_SYNC_ENTRY = BigInt(OPEN_SYNC_CLIENT);
 const MAX_STATE_VECTOR_ENTRIES = 65_536;
 

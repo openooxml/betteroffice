@@ -32,6 +32,7 @@
     "ariaLabel": "Biçimlendirme araç çubuğu",
     "file": "Dosya",
     "format": "Biçim",
+    "layout": "Düzen",
     "insert": "Ekle",
     "open": "Aç",
     "openShortcut": "Ctrl+O",
@@ -53,6 +54,16 @@
     "imageWrap": {
       "current": "Geçerli"
     }
+  },
+  "layout": {
+    "margins": "Kenar Boşlukları",
+    "normal": "Normal",
+    "narrow": "Dar",
+    "moderate": "Orta",
+    "wide": "Geniş",
+    "customMargins": "Özel kenar boşlukları...",
+    "morePaperSizes": "Diğer kağıt boyutları...",
+    "indent": "Girinti"
   },
   "formattingBar": {
     "groups": {
@@ -104,7 +115,12 @@
     "single": "Tek",
     "double": "Çift",
     "lineSpacingTitle": "Satır aralığı: {label}",
-    "paragraphSpacing": "Paragraf aralığı"
+    "paragraphSpacing": "Paragraf aralığı",
+    "addBefore": "Paragraftan Önce Boşluk Ekle",
+    "removeBefore": "Paragraftan Önceki Boşluğu Kaldır",
+    "addAfter": "Paragraftan Sonra Boşluk Ekle",
+    "removeAfter": "Paragraftan Sonraki Boşluğu Kaldır",
+    "options": "Satır Aralığı Seçenekleri..."
   },
   "styles": {
     "selectAriaLabel": "Paragraf stili seç",
@@ -417,6 +433,8 @@
         "strikethroughDescription": "Üstü çiziliyi aç/kapa",
         "subscript": "Alt simge",
         "subscriptDescription": "Alt simgeyi aç/kapa",
+        "clearFormatting": "Tüm Biçimlendirmeyi Temizle",
+        "clearFormattingDescription": "Metin biçimlendirmesini temizle",
         "superscript": "Üst simge",
         "superscriptDescription": "Üst simgeyi aç/kapa",
         "alignLeft": "Sola hizala",
@@ -470,7 +488,9 @@
         "pageUp": "Page Up",
         "pageDown": "Page Down",
         "ctrl": "Ctrl",
-        "del": "Del"
+        "del": "Del",
+        "shift": "Shift",
+        "alt": "Alt"
       }
     },
     "objectGeometry": {
@@ -478,6 +498,11 @@
       "top": "Üst (px)",
       "width": "Genişlik (px)",
       "height": "Yükseklik (px)"
+    },
+    "paragraphSpacing": {
+      "before": "Önceki Boşluk",
+      "after": "Sonraki Boşluk",
+      "multiple": "Çoklu"
     }
   },
   "comments": {
@@ -505,6 +530,7 @@
     "paragraphMarkInserted": "Eklenen paragraf işareti",
     "paragraphMarkDeleted": "Silinen paragraf işareti",
     "paragraphPropertiesChanged": "Değiştirilen paragraf özellikleri",
+    "runPropertiesChanged": "Değiştirilen metin biçimlendirmesi",
     "rowInserted": "Eklenen satır",
     "rowDeleted": "Silinen satır",
     "rowPropertiesChanged": "Değiştirilen satır özellikleri",
@@ -515,6 +541,12 @@
     "tablePropertiesChanged": "Değiştirilen tablo özellikleri",
     "tableInserted": "Eklenen tablo",
     "tableDeleted": "Silinen tablo"
+  },
+  "pasteOptions": {
+    "button": "Yapıştırma Seçenekleri (Ctrl)",
+    "keepSource": "Kaynak Biçimlendirmesini Koru",
+    "merge": "Biçimlendirmeyi Birleştir",
+    "textOnly": "Yalnızca Metni Koru"
   },
   "contextMenu": {
     "ariaLabel": "Yapay zekâ işlemleri menüsü",
@@ -561,6 +593,8 @@
     "noDocumentLoaded": "Yüklü belge yok",
     "failedToLoad": "Belge yüklenemedi",
     "failedToLoadDescription": "Dosya hasarlı olabilir veya bu düzenleyicinin henüz okuyamadığı bir şey kullanıyor olabilir.",
+    "failedToLoadDamaged": "Dosya hasarlı veya eksiksiz bir Word belgesi değil.",
+    "failedToLoadUnsupported": "Bu belge, bu düzenleyicinin henüz okuyamadığı bir şey kullanıyor.",
     "editorUnavailable": "Düzenleyici yüklenemedi",
     "editorUnavailableDescription": "Bağlantınızı denetleyip sayfayı yeniden yükleyin.",
     "reloadPage": "Sayfayı yeniden yükle",
@@ -701,6 +735,8 @@
     "failedToParse": "Belge ayrıştırılamadı",
     "linkRemoved": "Bağlantı kaldırıldı",
     "linkCopied": "Bağlantı panoya kopyalandı",
+    "pasteFailed": "Yapıştırma tamamlanamadı. Hiçbir şey değiştirilmedi.",
+    "cutRefused": "Seçim, kesilemeyen nesneler içeriyor. Hiçbir şey değiştirilmedi.",
     "failedToSave": "Belge kaydedilemedi",
     "documentInput": "Belge girişi",
     "documentPreview": "Belge önizlemesi",
@@ -753,7 +789,11 @@
     "leftIndent": "Sol girinti",
     "rightIndent": "Sağ girinti",
     "topMargin": "Üst kenar boşluğu",
-    "bottomMargin": "Alt kenar boşluğu"
+    "bottomMargin": "Alt kenar boşluğu",
+    "leftMargin": "Sol kenar boşluğu",
+    "rightMargin": "Sağ kenar boşluğu",
+    "hangingIndent": "Asılı girinti",
+    "markerValue": "{name}: {value}"
   },
   "print": {
     "label": "Yazdır",
@@ -766,8 +806,13 @@
   },
   "a11y": {
     "pageLabel": "Sayfa {number}",
+    "unbuiltPagesNotMirrored": "{from} ile {to} arasındaki sayfalar henüz okuma görünümünde değil.",
+    "goToPage": "{number}. sayfaya git",
     "headerLabel": "Sayfa üst bilgisi",
     "footerLabel": "Sayfa alt bilgisi",
+    "chartNoData": "Veri yok",
+    "pictureName": "Resim",
+    "bulletMarker": "madde işareti",
     "selected": "Seçildi",
     "selectionCleared": "Seçim temizlendi",
     "commentedText": "Yorum yapılan metin",
@@ -826,7 +871,7 @@
       "targetChanged": "Bu eylemin açıldığı içerik uygulanmadan önce değişti.",
       "commandFailed": "Komut tamamlanamadı.",
       "permissionDenied": "Ana uygulama bu eklentinin bu komutu kullanmasına izin vermedi.",
-      "unsupportedPolicy": "Eklentiler bu komutu henüz çalıştıramaz. Bunun yerine bir düzenleme toplu işlemi kullanın.",
+      "unsupportedPolicy": "Bu komut, eklentinin kendi arayüzünde bir kullanıcı işlemi gerektirir.",
       "pluginUnavailable": "Eklenti artık etkin değil.",
       "aborted": "Eklenti eylemi komut çalışmadan önce iptal edildi."
     }
@@ -835,6 +880,7 @@
     "toolbarGroup": "Eklentiler",
     "panelTabs": "Eklenti panelleri",
     "collapsePanel": "{title} daralt",
-    "expandPanel": "{title} genişlet"
+    "expandPanel": "{title} genişlet",
+    "miniToolbar": "Seçim biçimlendirmesi"
   }
 }

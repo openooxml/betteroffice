@@ -31,8 +31,10 @@ pub use pptx_edit::{
     UpdateSubscription,
 };
 pub use pptx_edit::{
-    Proposal, ProposalAcceptance, ProposalChange, ProposalEdit, ProposalError, ProposalPreview,
-    ProposalRequest, ProposalResult, ProposalTextChange, ProposalTextChangeKind,
+    Proposal, ProposalAcceptance, ProposalChange, ProposalChangeKind, ProposalEdit, ProposalError,
+    ProposalPreview, ProposalRequest, ProposalResult, ProposalShapeChange, ProposalShapeChangeKind,
+    ProposalShapeOrder, ProposalStripEntry, ProposalStripStatus, ProposalTextChange,
+    ProposalTextChangeKind,
 };
 pub use pptx_parse::{
     BlipEffect, Bullet, Comment, CommentAuthor, GraphicFrame, GraphicFrameData, GroupShape,
@@ -45,7 +47,7 @@ pub use pptx_parse::{
 pub use pptx_render::{
     CONTRACT_VERSION, CaretStop, FontSubstitution, GradientStop, GradientType, HitTestResult,
     ImageCrop, ImageEffect, Paint, PositionedGlyph, PositionedTextLine, PositionedTextRun,
-    Primitive, ProposalDiffSlide, RenderError, RenderedSlide, Stroke, SurfaceDisplayList,
-    TextAlign, TextAnchor, TextParagraph as DisplayTextParagraph, TextRun as DisplayTextRun,
-    Transform,
+    Primitive, ProposalDiffSlide, RenderError, RenderedSlide, ShapeAltText, Stroke,
+    SurfaceDisplayList, TextAlign, TextAnchor, TextLanguage, TextLink, TextLinkTarget,
+    TextParagraph as DisplayTextParagraph, TextRun as DisplayTextRun, Transform,
 };

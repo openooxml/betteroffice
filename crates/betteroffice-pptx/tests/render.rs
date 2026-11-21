@@ -58,7 +58,10 @@ fn renders_every_slide_of_the_demo_deck() {
     let presentation = deck();
     for index in 0..presentation.slides().len() {
         let rendered = presentation
-            .render_png(index, &RenderOptions::default())
+            .render_png(
+                betteroffice_pptx::PngTarget { slide: index },
+                &RenderOptions::default(),
+            )
             .unwrap();
         assert_eq!(rendered.bytes[..8], PNG_MAGIC);
         assert_eq!((rendered.width, rendered.height), (1280, 720));
@@ -71,7 +74,7 @@ fn renders_every_slide_of_the_demo_deck() {
 fn scale_multiplies_the_output_dimensions() {
     let rendered = deck()
         .render_png(
-            0,
+            betteroffice_pptx::PngTarget { slide: 0 },
             &RenderOptions {
                 scale: 2.0,
                 ..RenderOptions::default()
@@ -84,20 +87,26 @@ fn scale_multiplies_the_output_dimensions() {
 #[test]
 fn a_slide_past_the_deck_is_refused() {
     let error = deck()
-        .render_png(99, &RenderOptions::default())
+        .render_png(
+            betteroffice_pptx::PngTarget { slide: 99 },
+            &RenderOptions::default(),
+        )
         .unwrap_err();
     assert!(error.to_string().contains("outside the deck"), "{error}");
 }
 
 #[test]
 fn text_without_a_registered_font_needs_one_for_layout_and_png() {
-    let presentation = Presentation::open(FIXTURE).unwrap();
+    let presentation = Presentation::open_with_options(FIXTURE, &backstop_options()).unwrap();
     let Err(error) = presentation.render_slide(0) else {
         panic!("slide text laid out without a registered font");
     };
     assert!(error.to_string().contains("no font"), "{error}");
     let error = presentation
-        .render_png(0, &RenderOptions::default())
+        .render_png(
+            betteroffice_pptx::PngTarget { slide: 0 },
+            &RenderOptions::default(),
+        )
         .unwrap_err();
     assert!(error.to_string().contains("no font"), "{error}");
 }
@@ -123,13 +132,17 @@ fn nested_text_without_fonts_is_refused() {
     let group = r#"<p:grpSp><p:nvGrpSpPr><p:cNvPr id="2" name="Group"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="3000000" cy="1000000"/><a:chOff x="0" y="0"/><a:chExt cx="3000000" cy="1000000"/></a:xfrm></p:grpSpPr><p:sp><p:nvSpPr><p:cNvPr id="3" name="Text"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="3000000" cy="1000000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr sz="2400"/><a:t>Grouped text</a:t></a:r></a:p></p:txBody></p:sp></p:grpSp>"#;
     for content in [table, group] {
         let bytes = text_container_deck(content);
-        let mut presentation = Presentation::open(&bytes).unwrap();
+        let mut presentation =
+            Presentation::open_with_options(&bytes, &backstop_options()).unwrap();
         let Err(error) = presentation.render_slide(0) else {
             panic!("nested text rendered without a registered font");
         };
         assert!(error.to_string().contains("no font"), "{error}");
         let error = presentation
-            .render_png(0, &RenderOptions::default())
+            .render_png(
+                betteroffice_pptx::PngTarget { slide: 0 },
+                &RenderOptions::default(),
+            )
             .unwrap_err();
         assert!(error.to_string().contains("no font"), "{error}");
         presentation
@@ -163,7 +176,10 @@ fn a_text_free_slide_renders_png_without_fonts() {
     });
     assert!(!has_text);
     let png = presentation
-        .render_png(0, &RenderOptions::default())
+        .render_png(
+            betteroffice_pptx::PngTarget { slide: 0 },
+            &RenderOptions::default(),
+        )
         .unwrap();
     assert_eq!(png.bytes[..8], PNG_MAGIC);
 }
@@ -172,7 +188,7 @@ fn a_text_free_slide_renders_png_without_fonts() {
 fn a_scale_that_is_not_positive_is_refused() {
     let error = deck()
         .render_png(
-            0,
+            betteroffice_pptx::PngTarget { slide: 0 },
             &RenderOptions {
                 scale: 0.0,
                 ..RenderOptions::default()
@@ -186,7 +202,12 @@ fn a_scale_that_is_not_positive_is_refused() {
 /// bytes alone prove nothing: the pixels have to carry slide content.
 #[test]
 fn the_render_is_not_a_blank_surface() {
-    let rendered = deck().render_png(0, &RenderOptions::default()).unwrap();
+    let rendered = deck()
+        .render_png(
+            betteroffice_pptx::PngTarget { slide: 0 },
+            &RenderOptions::default(),
+        )
+        .unwrap();
     let decoder = png::Decoder::new(Cursor::new(&rendered.bytes));
     let mut reader = decoder.read_info().unwrap();
     let mut pixels = vec![0; reader.output_buffer_size().unwrap()];
@@ -210,10 +231,16 @@ fn the_render_is_not_a_blank_surface() {
 fn repeated_renders_are_byte_identical() {
     let presentation = deck();
     let first = presentation
-        .render_png(1, &RenderOptions::default())
+        .render_png(
+            betteroffice_pptx::PngTarget { slide: 1 },
+            &RenderOptions::default(),
+        )
         .unwrap();
     let second = presentation
-        .render_png(1, &RenderOptions::default())
+        .render_png(
+            betteroffice_pptx::PngTarget { slide: 1 },
+            &RenderOptions::default(),
+        )
         .unwrap();
     assert_eq!(first.bytes, second.bytes);
 }
@@ -229,7 +256,7 @@ fn dumps_slides_when_asked() {
     for index in 0..presentation.slides().len() {
         let rendered = presentation
             .render_png(
-                index,
+                betteroffice_pptx::PngTarget { slide: index },
                 &RenderOptions {
                     scale: 2.0,
                     ..RenderOptions::default()
@@ -264,7 +291,12 @@ fn lum_brightness_and_contrast_reach_the_bitmap() {
         }]
     );
 
-    let png = deck.render_png(0, &RenderOptions::default()).unwrap();
+    let png = deck
+        .render_png(
+            betteroffice_pptx::PngTarget { slide: 0 },
+            &RenderOptions::default(),
+        )
+        .unwrap();
     let mut reader = png::Decoder::new(Cursor::new(&png.bytes))
         .read_info()
         .unwrap();
@@ -323,7 +355,12 @@ fn blip_effects_render_on_slides_layouts_and_masters() {
             ..
         }]
     ));
-    let png = deck.render_png(0, &RenderOptions::default()).unwrap();
+    let png = deck
+        .render_png(
+            betteroffice_pptx::PngTarget { slide: 0 },
+            &RenderOptions::default(),
+        )
+        .unwrap();
     let mut reader = png::Decoder::new(Cursor::new(&png.bytes))
         .read_info()
         .unwrap();
@@ -351,7 +388,10 @@ fn blip_effects_render_on_slides_layouts_and_masters() {
 fn pictures_received_from_a_peer_render_before_save() {
     let presentation = deck();
     let before = presentation
-        .render_png(0, &RenderOptions::default())
+        .render_png(
+            betteroffice_pptx::PngTarget { slide: 0 },
+            &RenderOptions::default(),
+        )
         .unwrap();
     let peer = pptx_edit::DeckSession::open(FIXTURE, 12).unwrap();
     let slide_id = peer.snapshot().unwrap().slides[0].id.clone();
@@ -393,8 +433,50 @@ fn pictures_received_from_a_peer_render_before_save() {
         bytes
     );
     let rendered = presentation
-        .render_png(0, &RenderOptions::default())
+        .render_png(
+            betteroffice_pptx::PngTarget { slide: 0 },
+            &RenderOptions::default(),
+        )
         .unwrap();
     assert_eq!(rendered.skipped_images, 0);
     assert_ne!(rendered.bytes, before.bytes);
+}
+
+fn backstop_options() -> betteroffice_pptx::OpenOptions {
+    let options = betteroffice_pptx::OpenOptions::default();
+    #[cfg(feature = "fonts")]
+    let options = betteroffice_pptx::OpenOptions {
+        font_source: betteroffice_pptx::fonts::FontSource::Backstop,
+        ..options
+    };
+    options
+}
+
+#[test]
+fn png_targets_use_zero_based_indexes_with_default_scale() {
+    let deck = deck();
+    let target = betteroffice_pptx::PngTarget { slide: 0 };
+    let first = deck.render_png(target, &RenderOptions::default()).unwrap();
+    let second = deck
+        .render_png(
+            target,
+            &RenderOptions {
+                scale: 2.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        (second.width, second.height),
+        (first.width * 2, first.height * 2)
+    );
+    assert!(
+        deck.render_png(
+            betteroffice_pptx::PngTarget {
+                slide: deck.slides().len()
+            },
+            &RenderOptions::default()
+        )
+        .is_err()
+    );
 }

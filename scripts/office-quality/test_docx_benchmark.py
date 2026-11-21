@@ -1,4 +1,6 @@
+import hashlib
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -6,7 +8,10 @@ from unittest.mock import patch
 
 from PIL import Image, ImageDraw
 
-from docx_benchmark import CHANNELS, edge_adjust, measure_sample, sha256, validate_png
+from docx_benchmark import (CHANNELS, LAST_RELEASE_WITHOUT_REGISTRY_EXPORTS, edge_adjust, font_path_notes, main, measure_sample,
+                            semver_key, sha256, validate_font_paths, validate_png)
+
+FACES = ['a' * 64, 'b' * 64, 'a' * 64 + '~Calibri']
 
 
 class NativeBenchmarkTests(unittest.TestCase):
@@ -34,7 +39,7 @@ class NativeBenchmarkTests(unittest.TestCase):
                 self.assertFalse(output.exists())
                 self.assertIn(str(root / 'source.docx'), command)
                 self.image(output)
-                metadata = dict(status='ok', skipped_images=0, page=1, pages=2, dpi=96,
+                metadata = dict(status='ok', skipped_images=0, page=1, pages=2, dpi=96, faces=FACES,
                                 source_sha256=sample['metadata']['source']['sha256'], png_sha256=sha256(output))
                 return len(calls) * 100, json.dumps(metadata)
 
@@ -45,6 +50,86 @@ class NativeBenchmarkTests(unittest.TestCase):
             self.assertEqual(calls[:9], CHANNELS + ['commit', 'libreoffice', 'published'] + ['libreoffice', 'published', 'commit'])
             self.assertEqual(result['published']['elapsed_ms'], [600, 800, 1000, 1500, 1700])
             self.assertTrue(all(len(row['elapsed_ms']) == 5 for row in result.values()))
+            replayed = hashlib.sha256('\n'.join(FACES).encode()).hexdigest()
+            self.assertEqual([result[channel]['fonts_sha256'] for channel in CHANNELS[:2]], [replayed, replayed])
+            self.assertNotIn('fonts_sha256', result['libreoffice'])
+
+    def test_the_fonts_hash_covers_the_faces_each_native_render_replayed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sample = self.fixture(root)
+            runs = []
+
+            def execute(command, **kwargs):
+                channel = command[0]
+                output = root / 'timing' / ('source.png' if channel == 'libreoffice' else f'{channel}.png')
+                self.image(output)
+                runs.append(channel)
+                faces = FACES if channel == 'published' or runs.count(channel) == 1 else FACES[::-1]
+                return 1, json.dumps(dict(status='ok', skipped_images=0, page=1, pages=1, dpi=96, faces=faces,
+                                          source_sha256=sample['metadata']['source']['sha256'], png_sha256=sha256(output)))
+
+            with patch('docx_benchmark.execute', execute), patch('builtins.print'):
+                result = measure_sample(sample, root, {channel: Path(channel) for channel in CHANNELS[:2]},
+                                        root / 'manifest.json', 'libreoffice', 2)
+            self.assertEqual(result['published']['fonts_sha256'], hashlib.sha256('\n'.join(FACES).encode()).hexdigest())
+            self.assertEqual(result['commit']['status'], 'failed')
+            self.assertIn('different font faces', result['commit']['error'])
+
+    def test_faces_are_required_for_docx_native_timings_only(self):
+        for format, status in [('pptx', 'ok'), ('docx', 'failed')]:
+            with self.subTest(format=format), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                sample = self.fixture(root)
+                (root / f'source.{format}').write_bytes(b'fixture')
+                sample = dict(sample, format=format, metadata=dict(source=dict(sha256=sha256(root / f'source.{format}'))))
+
+                def execute(command, **kwargs):
+                    channel = command[0]
+                    output = root / 'timing' / ('source.png' if channel == 'libreoffice' else f'{channel}.png')
+                    self.image(output)
+                    return 1, json.dumps(dict(status='ok', skipped_images=0, page=1, pages=1, dpi=96,
+                                              source_sha256=sample['metadata']['source']['sha256'], png_sha256=sha256(output)))
+
+                with patch('docx_benchmark.execute', execute), patch('builtins.print'):
+                    result = measure_sample(sample, root, {channel: Path(channel) for channel in CHANNELS[:2]},
+                                            root / 'manifest.json', 'libreoffice', 2)
+                for channel in CHANNELS[:2]:
+                    self.assertEqual(result[channel]['status'], status)
+                    self.assertNotIn('fonts_sha256', result[channel])
+                if format == 'pptx':
+                    self.assertEqual(len(result['published']['elapsed_ms']), 2)
+                else:
+                    self.assertIn('no list of replayed font faces', result['commit']['error'])
+
+    def test_the_old_font_map_is_allowed_only_for_a_published_release_no_newer_than_the_last_without_the_registry_exports(self):
+        self.assertEqual(LAST_RELEASE_WITHOUT_REGISTRY_EXPORTS, '0.5.1')
+        old = dict(path='bench-manifest', version='0.5.1', last_release_without_registry_exports=LAST_RELEASE_WITHOUT_REGISTRY_EXPORTS)
+        commit = dict(path='product-registry', version='0.5.1')
+        self.assertEqual(validate_font_paths(dict(published=old, commit=commit), '0.5.1')['published'], old)
+        self.assertLess(semver_key('0.6.0-next.1'), semver_key('0.6.0'))
+        self.assertLess(semver_key('0.6.0-next.2'), semver_key('0.6.0-next.10'))
+        self.assertLess(semver_key('0.5.10'), semver_key('0.6.0'))
+        validate_font_paths(dict(published=dict(old, version='0.5.0'), commit=commit), '0.5.0')
+        for published, version, error in [
+            (dict(old, version='0.5.2'), '0.5.2', 'is newer than 0.5.1'),
+            (dict(old, version='0.6.0-next.1'), '0.6.0-next.1', 'is newer than 0.5.1'),
+            (dict(old, version='0.6.0'), '0.6.0', 'is newer than 0.5.1'),
+            (dict(old, version='0.10.0'), '0.10.0', 'is newer than 0.5.1'),
+            (dict(old, last_release_without_registry_exports='0.5.0'), '0.5.1', 'last release without'),
+            (dict(old, version='latest'), 'latest', 'Not a semver'),
+            (dict(old, path='system'), '0.5.1', 'Unknown font path'),
+            (old, '0.6.0', 'plan measures'),
+        ]:
+            with self.assertRaisesRegex(ValueError, error):
+                validate_font_paths(dict(published=published, commit=commit), version)
+        with self.assertRaisesRegex(ValueError, 'Invalid product font chain paths'):
+            validate_font_paths(dict(published=old, commit=dict(commit, path='bench-manifest')), '0.5.1')
+        notes = font_path_notes(dict(published=old, commit=commit), 'docx-cli-page1-v2')
+        self.assertIn('not comparable with runs before docx-cli-page1-v2', notes['commit'])
+        self.assertNotIn('old font map', notes['commit'])
+        self.assertIn('0.5.1 <= 0.5.1, the last release without the registry exports', notes['published'])
+        self.assertIn('not like for like until the next release', notes['published'])
 
     def test_failed_or_skipped_native_render_cannot_contribute_a_fast_time(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -64,6 +149,82 @@ class NativeBenchmarkTests(unittest.TestCase):
             self.assertEqual(result['commit']['status'], 'failed')
             self.assertNotIn('elapsed_ms', result['commit'])
             self.assertEqual(len(result['libreoffice']['elapsed_ms']), 5)
+
+    def test_the_shard_report_records_no_runner_name_no_runner_platform_and_no_font_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output, native = root / 'output', root / 'native'
+            (output / 'fixture').mkdir(parents=True)
+            (output / 'fixture' / 'source.docx').write_bytes(b'docx fixture')
+            for channel, source in [('published', 'b' * 40), ('commit', 'a' * 40)]:
+                binary = native / channel / 'docx-native-bench'
+                binary.parent.mkdir(parents=True)
+                binary.write_bytes(channel.encode())
+                (binary.parent / 'build.json').write_text(json.dumps(dict(source_sha=source, binary_sha256=sha256(binary))))
+            sample = dict(id='fixture', metadata=dict(source=dict(sha256=sha256(output / 'fixture' / 'source.docx')), reference_pages=[]))
+            (output / 'job.json').write_text(json.dumps(dict(
+                plan_sha256='c' * 64, shard=0, samples=[sample], source_sha='a' * 40, published_source_sha='b' * 40,
+                method='docx-cli-page1-v2', trials=1, published_version='0.5.1')))
+            environment = dict(QUALITY_OUTPUT=str(output), QUALITY_NATIVE=str(native), QUALITY_FONTS=str(root / 'manifest.json'),
+                               QUALITY_NATIVE_FONT_MAP='bench-manifest', RUNNER_NAME='host-a', SOFFICE='libreoffice')
+            with patch.dict(os.environ, environment), \
+                    patch('platform.platform', lambda *args, **kwargs: 'Linux-host-a-x86_64-with-glibc'), \
+                    patch('docx_benchmark.font_environment', lambda *args: 'f' * 64), \
+                    patch('docx_benchmark.execute', lambda command, **kwargs: (0, 'LibreOffice 26.2.3.2 ' + 'd' * 40)), \
+                    patch('docx_benchmark.measure_sample', lambda *args, **kwargs: {channel: dict(status='ok') for channel in CHANNELS}), \
+                    patch('docx_benchmark.libreoffice_fidelity', lambda *args: dict(status='ok')), \
+                    patch('docx_benchmark.summarize_font_paths', lambda *args: None), patch('builtins.print'):
+                os.environ.pop('QUALITY_CHAINS', None)
+                main()
+            report = json.loads((output / 'report.json').read_text())
+            self.assertNotIn('font_paths', report['benchmark'])
+            self.assertNotIn('name', report['runner'])
+            self.assertNotIn('platform', report['runner'])
+            self.assertNotIn('host-a', json.dumps(report))
+
+    def test_no_benchmark_producer_records_the_runner_platform_string(self):
+        for name in ['docx_benchmark.py', 'pptx_benchmark.py', 'xlsx_benchmark.py', 'timing.py']:
+            self.assertNotIn('platform.platform()', (Path(__file__).parent / name).read_text(), name)
+
+    def test_the_pptx_and_xlsx_shard_reports_record_no_runner_platform(self):
+        import pptx_benchmark
+        import xlsx_benchmark
+        for module, binary_name in [(pptx_benchmark, 'pptx-native-bench'), (xlsx_benchmark, 'xlsx-native-bench')]:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                output, native = root / 'output', root / 'native'
+                (output / 'fixture').mkdir(parents=True)
+                (output / 'fixture' / 'source.pptx').write_bytes(b'pptx fixture')
+                for channel, source in [('published', 'b' * 40), ('commit', 'a' * 40)]:
+                    binary = native / channel / binary_name
+                    binary.parent.mkdir(parents=True)
+                    binary.write_bytes(channel.encode())
+                    (binary.parent / 'build.json').write_text(json.dumps(dict(source_sha=source, binary_sha256=sha256(binary))))
+                sample = dict(id='fixture', metadata=dict(source=dict(sha256=sha256(output / 'fixture' / 'source.pptx')), reference_pages=[],
+                                                          calculation=dict(reference=dict(sha256='e' * 64))))
+                (output / 'job.json').write_text(json.dumps(dict(
+                    plan_sha256='c' * 64, shard=0, samples=[sample], source_sha='a' * 40, published_source_sha='b' * 40,
+                    method='fixture-v1', trials=1, published_version='0.5.1', absolute_tolerance=0, relative_tolerance=0)))
+                environment = dict(QUALITY_OUTPUT=str(output), QUALITY_NATIVE=str(native), QUALITY_FONTS=str(root / 'manifest.json'),
+                                   RUNNER_NAME='host-a', SOFFICE='libreoffice')
+                patches = [patch(f'{module.__name__}.execute', lambda command, **kwargs: (0, 'LibreOffice 26.2.3.2 ' + 'd' * 40)),
+                           patch(f'{module.__name__}.measure_sample', lambda *args, **kwargs: {channel: dict(status='ok') for channel in CHANNELS})]
+                if module is pptx_benchmark:
+                    patches += [patch('pptx_benchmark.font_environment', lambda *args: 'f' * 64),
+                                patch('pptx_benchmark.libreoffice_fidelity', lambda *args: dict(status='ok'))]
+                with patch.dict(os.environ, environment), \
+                        patch('platform.platform', lambda *args, **kwargs: 'Linux-host-a-x86_64-with-glibc'), patch('builtins.print'):
+                    for active in patches:
+                        active.start()
+                    try:
+                        module.main()
+                    finally:
+                        for active in patches:
+                            active.stop()
+                report = json.loads((output / 'report.json').read_text())
+                self.assertNotIn('platform', report['benchmark'], module.__name__)
+                self.assertNotIn('platform', report.get('runner', {}), module.__name__)
+                self.assertNotIn('host-a', json.dumps(report), module.__name__)
 
     def test_dimensions_and_nonblank_output_are_required(self):
         with tempfile.TemporaryDirectory() as directory:

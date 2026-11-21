@@ -21,6 +21,7 @@ import {
   type XlsxSelectionEnvironment,
 } from './evaluate';
 import type { InputCoordinator } from './inputCoordinator';
+import { isSheetProtectedError } from './workerInputErrors';
 import type {
   XlsxCommandArgs,
   XlsxCommandFailureCode,
@@ -49,6 +50,7 @@ export interface XlsxEditorBridge {
   handle(): WorkbookHandle | null;
   status(): XlsxCommandEnvironment['status'];
   readOnly(): boolean;
+  allowHostProposals?(): boolean;
   collaborative(): boolean;
   /** Bumped by every committed change, so cached engine reads stay current. */
   mutation(): number;
@@ -59,15 +61,18 @@ export interface XlsxEditorBridge {
   translate: TFunction;
   apply(result: EditResult): void;
   fail(error: unknown): void;
+  /** Shows why the engine refused an edit, such as a write to a protected sheet. */
+  refuse(code: XlsxCommandFailureCode): void;
   setZoom(scale: number): void;
   setProposalsPanelOpen(open: boolean): void;
+  setReplaceOpen?(open: boolean): void;
   setCapturedFormat(format: CapturedFormat | null, source: string | null): void;
   setBorderStyle(style: BorderStyle): void;
   setBorderColor(color: string): void;
   markStale(proposalId: string, cells: string[] | null): void;
   refreshProposals(): void;
   deliver(bytes: Uint8Array): void;
-  exportPng(): void;
+  exportPng(): Promise<void>;
   /** True once the canvas paints every committed change; false if it does not in time. */
   afterPaint(): Promise<boolean>;
   focusGrid(): void;
@@ -112,6 +117,12 @@ function readEngine(
     read.canRedo = history.canRedo;
   } catch {}
   return read;
+}
+
+/** Whether the sheet catalog lets users change `sheet`; protected sheets take no merges. */
+export function sheetEditable(handle: WorkbookHandle, sheet: number): boolean {
+  const catalog = handle.readCells({ ranges: [] });
+  return !catalog.ok || catalog.sheets[sheet]?.editable !== false;
 }
 
 function mergeOps(
@@ -202,6 +213,7 @@ export function useXlsxCommandBinding(
       return {
         status: current.status(),
         readOnly: current.readOnly(),
+        allowHostProposals: current.allowHostProposals?.(),
         collaborative: current.collaborative(),
         selection,
         canUndo: read?.canUndo ?? false,
@@ -238,10 +250,15 @@ export function useXlsxCommandBinding(
         ok: true,
         status: changed ? 'executed' : 'noop',
       });
+      const protectedSheet = (): XlsxCommandResult => {
+        current.refuse('sheet-protected');
+        return fail('sheet-protected');
+      };
       const attempt = (work: () => XlsxCommandResult): XlsxCommandResult => {
         try {
           return work();
         } catch (error) {
+          if (isSheetProtectedError(error)) return protectedSheet();
           current.fail(error);
           return fail('command-failed');
         }
@@ -343,6 +360,7 @@ export function useXlsxCommandBinding(
           if (!selection) return fail('cell-selection-required');
           const ops = mergeOps(selection.sheet, selection, bound.value);
           if (ops.length === 0) return done(false);
+          if (!sheetEditable(handle, selection.sheet)) return protectedSheet();
           return edit(() => handle.applyOps(ops));
         }
         case 'undo':
@@ -354,11 +372,16 @@ export function useXlsxCommandBinding(
             current.deliver(handle.save());
             return done();
           });
-        case 'exportPng':
-          return attempt(() => {
-            current.exportPng();
-            return done();
+        case 'exportPng': {
+          const generation = current.generation();
+          let exported: Promise<void>;
+          try { exported = current.exportPng(); } catch (error) { current.fail(error); return fail('command-failed'); }
+          return exported.then(() => bridgeRef.current.generation() !== generation ? fail('document-replaced') : done(), (error: unknown) => {
+            if (bridgeRef.current.generation() !== generation) return fail('document-replaced');
+            current.fail(error);
+            return fail('command-failed');
           });
+        }
         case 'print': {
           const generation = current.generation();
           return current.afterPaint().then((painted) => {
@@ -368,6 +391,9 @@ export function useXlsxCommandBinding(
             return done();
           });
         }
+        case 'findReplace':
+          current.setReplaceOpen?.(true);
+          return done(false);
         case 'zoom':
           if (env.zoom === bound.scale) return done(false);
           current.setZoom(bound.scale);
@@ -390,6 +416,7 @@ export function useXlsxCommandBinding(
               current.refreshProposals();
               return fail('proposal-stale');
             }
+            if (isSheetProtectedError(error)) return protectedSheet();
             current.fail(error);
             return fail('command-failed');
           }

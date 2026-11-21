@@ -1,0 +1,845 @@
+use std::collections::HashMap;
+use std::fmt;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
+
+use serde::Deserialize;
+
+use crate::catalog::{BundledFontFace, catalog};
+use crate::{
+    Decoded, FaceError, LastResortOffice, decode_font_face, resolve_bundled_family_face,
+    resolve_family_script_fallback_face, resolve_glyph_fallback_face, resolve_last_resort_choice,
+    resolve_script_fallback_face,
+};
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum FontPack {
+    Latin,
+    Intl,
+    Cjk,
+}
+
+impl FontPack {
+    pub fn is_compiled_in(self) -> bool {
+        match self {
+            Self::Latin => cfg!(feature = "fonts-latin"),
+            Self::Intl => cfg!(feature = "fonts-intl"),
+            Self::Cjk => cfg!(feature = "fonts-cjk"),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Latin => "latin",
+            Self::Intl => "intl",
+            Self::Cjk => "cjk",
+        }
+    }
+
+    pub fn feature(self) -> &'static str {
+        match self {
+            Self::Latin => "fonts-latin",
+            Self::Intl => "fonts-intl",
+            Self::Cjk => "fonts-cjk",
+        }
+    }
+}
+
+impl fmt::Display for FontPack {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum FontLoading {
+    #[default]
+    OnDemand,
+    Preload,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BundledFontOptions {
+    pub packs: Vec<FontPack>,
+    pub base_url: Option<PathBuf>,
+}
+
+impl Default for BundledFontOptions {
+    fn default() -> Self {
+        Self {
+            packs: [FontPack::Latin, FontPack::Intl, FontPack::Cjk]
+                .into_iter()
+                .filter(|pack| pack.is_compiled_in())
+                .collect(),
+            base_url: None,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub enum FontSource {
+    Bundled(BundledFontOptions),
+    Backstop,
+    Provider(Arc<dyn FontProvider>),
+}
+
+static DEFAULT_FONT_SOURCE: OnceLock<FontSource> = OnceLock::new();
+
+/// Sets the source that [`FontSource::default`] returns for the rest of the
+/// process, so every open path that takes default options uses it. Only the
+/// first call takes effect; a later call returns its source unchanged.
+#[doc(hidden)]
+pub fn set_default_font_source(source: FontSource) -> Result<(), FontSource> {
+    DEFAULT_FONT_SOURCE.set(source)
+}
+
+impl Default for FontSource {
+    fn default() -> Self {
+        DEFAULT_FONT_SOURCE
+            .get()
+            .cloned()
+            .unwrap_or_else(|| Self::Bundled(BundledFontOptions::default()))
+    }
+}
+
+impl fmt::Debug for FontSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Bundled(options) => f.debug_tuple("Bundled").field(options).finish(),
+            Self::Backstop => f.write_str("Backstop"),
+            Self::Provider(_) => f.write_str("Provider"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FontDefinition {
+    pub family: String,
+    pub data: Vec<u8>,
+    pub bold: bool,
+    pub italic: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct OpenOptions {
+    pub font_source: FontSource,
+    pub font_loading: FontLoading,
+    pub fonts: Vec<FontDefinition>,
+}
+
+#[doc(hidden)]
+pub struct FontManager {
+    provider: Option<Arc<dyn FontProvider>>,
+    packs: Option<Vec<FontPack>>,
+}
+
+impl FontManager {
+    pub fn new(source: &FontSource, loading: FontLoading) -> Result<Self, FontError> {
+        if let FontSource::Bundled(options) = source {
+            let bundled = BundledFonts::new(options.clone())?;
+            if loading == FontLoading::Preload {
+                bundled.preload()?;
+            }
+            return Ok(Self {
+                provider: Some(Arc::new(bundled)),
+                packs: Some(options.packs.clone()),
+            });
+        }
+        let provider = source.provider()?;
+        let packs = provider
+            .as_ref()
+            .and_then(|provider| provider.bundled_packs());
+        Ok(Self { provider, packs })
+    }
+
+    pub fn resolve(
+        &self,
+        family: &str,
+        bold: bool,
+        italic: bool,
+        scripts: &[String],
+        office: LastResortOffice,
+    ) -> Vec<FontFaceHandle> {
+        let (faces, _) = self.resolve_with_glyph_fallback(family, bold, italic, scripts, office);
+        faces
+    }
+
+    /// [`Self::resolve`] and the index of the face it resolved as the glyph fallback.
+    #[doc(hidden)]
+    pub fn resolve_with_glyph_fallback(
+        &self,
+        family: &str,
+        bold: bool,
+        italic: bool,
+        scripts: &[String],
+        office: LastResortOffice,
+    ) -> (Vec<FontFaceHandle>, Option<usize>) {
+        let Some(provider) = &self.provider else {
+            return (Vec::new(), None);
+        };
+        let mut faces = Vec::new();
+        let mut push = |face: FontFaceHandle| {
+            if !self.admits(&face) {
+                return None;
+            }
+            if faces.iter().any(|known: &FontFaceHandle| {
+                known.family == face.family
+                    && known.bold == face.bold
+                    && known.italic == face.italic
+            }) {
+                return None;
+            }
+            faces.push(face);
+            Some(faces.len() - 1)
+        };
+        let primary = provider.resolve_family(family, bold, italic);
+        let has_primary = primary.is_some();
+        if let Some(primary) = primary {
+            push(primary);
+        }
+        for script in scripts {
+            if let Some(face) =
+                provider.resolve_family_script_fallback(family, script, bold, italic)
+            {
+                push(face);
+            }
+        }
+        let glyph = provider
+            .resolve_glyph_fallback(family, bold, italic, office)
+            .and_then(&mut push);
+        let face = provider.resolve_last_resort(family, bold, italic, office);
+        if !face.only_if_primary_fails || !has_primary {
+            push(face);
+        }
+        (faces, glyph)
+    }
+
+    /// Whether [`Self::resolve`] puts a face of `family` itself first, ahead of
+    /// every fallback.
+    #[doc(hidden)]
+    pub fn resolves_family_face(&self, family: &str, bold: bool, italic: bool) -> bool {
+        self.provider.as_ref().is_some_and(|provider| {
+            provider
+                .resolve_family(family, bold, italic)
+                .is_some_and(|face| self.admits(&face))
+        })
+    }
+
+    /// Whether `face` comes from a pack this manager carries, or it limits none.
+    fn admits(&self, face: &FontFaceHandle) -> bool {
+        self.packs.as_ref().is_none_or(|packs| {
+            crate::resolve_bundled_family_face(&face.family, face.bold, face.italic)
+                .is_some_and(|entry| packs.contains(&entry.pack))
+        })
+    }
+}
+
+#[derive(Debug)]
+pub enum FontError {
+    MissingFontPack {
+        pack: FontPack,
+        action: String,
+    },
+    InvalidFontOptions(String),
+    Decode(FaceError),
+    InvalidFontData(String),
+    Io {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+}
+
+impl fmt::Display for FontError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingFontPack { pack, action } => {
+                write!(f, "missing font pack {pack}: {action}")
+            }
+            Self::InvalidFontOptions(message) => write!(f, "invalid font options: {message}"),
+            Self::Decode(error) => fmt::Display::fmt(error, f),
+            Self::InvalidFontData(message) => write!(f, "invalid font data: {message}"),
+            Self::Io { path, source } => write!(f, "cannot read font {}: {source}", path.display()),
+        }
+    }
+}
+
+impl std::error::Error for FontError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Decode(error) => Some(error),
+            Self::Io { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
+
+type FontLoader = dyn Fn() -> Result<Vec<u8>, FontError> + Send + Sync;
+
+#[derive(Clone)]
+pub struct FontFaceHandle {
+    pub family: String,
+    pub bold: bool,
+    pub italic: bool,
+    pub measure_as: Option<String>,
+    pub only_if_primary_fails: bool,
+    loader: Arc<FontLoader>,
+}
+
+impl fmt::Debug for FontFaceHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FontFaceHandle")
+            .field("family", &self.family)
+            .field("bold", &self.bold)
+            .field("italic", &self.italic)
+            .field("measure_as", &self.measure_as)
+            .field("only_if_primary_fails", &self.only_if_primary_fails)
+            .finish_non_exhaustive()
+    }
+}
+
+impl FontFaceHandle {
+    pub fn new(
+        family: impl Into<String>,
+        bold: bool,
+        italic: bool,
+        loader: impl Fn() -> Result<Vec<u8>, FontError> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            family: family.into(),
+            bold,
+            italic,
+            measure_as: None,
+            only_if_primary_fails: false,
+            loader: Arc::new(loader),
+        }
+    }
+
+    pub fn load(&self) -> Result<Vec<u8>, FontError> {
+        (self.loader)()
+    }
+}
+
+pub trait FontProvider: Send + Sync {
+    fn resolve_family(&self, family: &str, bold: bool, italic: bool) -> Option<FontFaceHandle>;
+    fn resolve_script_fallback(
+        &self,
+        script: &str,
+        bold: bool,
+        italic: bool,
+    ) -> Option<FontFaceHandle>;
+    /// Script fallback for text requesting `family`; defaults to `resolve_script_fallback`.
+    fn resolve_family_script_fallback(
+        &self,
+        _family: &str,
+        script: &str,
+        bold: bool,
+        italic: bool,
+    ) -> Option<FontFaceHandle> {
+        self.resolve_script_fallback(script, bold, italic)
+    }
+    fn resolve_glyph_fallback(
+        &self,
+        family: &str,
+        bold: bool,
+        italic: bool,
+        office: LastResortOffice,
+    ) -> Option<FontFaceHandle>;
+    fn resolve_last_resort(
+        &self,
+        family: &str,
+        bold: bool,
+        italic: bool,
+        office: LastResortOffice,
+    ) -> FontFaceHandle;
+    #[doc(hidden)]
+    fn bundled_packs(&self) -> Option<Vec<FontPack>> {
+        None
+    }
+}
+
+impl FontSource {
+    pub fn provider(&self) -> Result<Option<Arc<dyn FontProvider>>, FontError> {
+        match self {
+            Self::Provider(provider) => Ok(Some(Arc::clone(provider))),
+            Self::Bundled(options) => Ok(Some(Arc::new(BundledFonts::new(options.clone())?))),
+            Self::Backstop => Ok(None),
+        }
+    }
+}
+
+/// Why an installed font pack was left out.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FontPackProblem {
+    /// The pack's manifest names another release than this catalog's.
+    VersionMismatch {
+        expected: String,
+        found: Option<String>,
+    },
+    /// Files the catalog lists for the pack are not in its directory; `file` is the first of them by name.
+    MissingFile { file: String, missing: usize },
+    /// The pack's manifest cannot be read or parsed; `reason` is the error, left out of the message.
+    InvalidManifest { reason: String },
+}
+
+/// An installed font pack that cannot be used, so its faces are substituted.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FontPackDiagnostic {
+    pub pack: FontPack,
+    pub directory: PathBuf,
+    pub problem: FontPackProblem,
+}
+
+impl FontPackDiagnostic {
+    /// `version-mismatch`, `missing-file` or `invalid-manifest`.
+    pub fn reason(&self) -> &'static str {
+        match self.problem {
+            FontPackProblem::VersionMismatch { .. } => "version-mismatch",
+            FontPackProblem::MissingFile { .. } => "missing-file",
+            FontPackProblem::InvalidManifest { .. } => "invalid-manifest",
+        }
+    }
+}
+
+impl fmt::Display for FontPackDiagnostic {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let package = format!("@betteroffice/fonts-{}", self.pack.as_str());
+        match &self.problem {
+            FontPackProblem::VersionMismatch { expected, found } => write!(
+                f,
+                "{package} {} does not match the {expected} release the engine needs; its faces are substituted",
+                found.as_deref().unwrap_or("of unknown version"),
+            ),
+            FontPackProblem::MissingFile { file, missing } => write!(
+                f,
+                "{package} is missing {file}{}; its faces are substituted",
+                if *missing > 1 {
+                    format!(" and {} more files", missing - 1)
+                } else {
+                    String::new()
+                },
+            ),
+            FontPackProblem::InvalidManifest { .. } => write!(
+                f,
+                "{package} has an unreadable manifest; its faces are substituted"
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct BundledFonts {
+    options: BundledFontOptions,
+    directories: HashMap<FontPack, PathBuf>,
+    diagnostics: Vec<FontPackDiagnostic>,
+}
+
+impl BundledFonts {
+    pub fn new(mut options: BundledFontOptions) -> Result<Self, FontError> {
+        for (index, pack) in options.packs.iter().enumerate() {
+            if options.packs[..index].contains(pack) {
+                return Err(FontError::InvalidFontOptions(format!(
+                    "duplicate {pack} pack"
+                )));
+            }
+        }
+        if let Some(base) = &options.base_url {
+            if base.as_os_str().is_empty() || base.to_string_lossy().contains("://") {
+                return Err(FontError::InvalidFontOptions(
+                    "base_url must be a local directory".into(),
+                ));
+            }
+            if base.is_relative() {
+                options.base_url = Some(
+                    std::env::current_dir()
+                        .map_err(|source| FontError::Io {
+                            path: base.clone(),
+                            source,
+                        })?
+                        .join(base),
+                );
+            }
+        }
+        if options.base_url.is_none() {
+            for pack in &options.packs {
+                if !pack.is_compiled_in() {
+                    return Err(FontError::MissingFontPack {
+                        pack: *pack,
+                        action: format!("enable the `{}` Cargo feature", pack.feature()),
+                    });
+                }
+            }
+        }
+        Ok(Self {
+            options,
+            directories: HashMap::new(),
+            diagnostics: Vec::new(),
+        })
+    }
+
+    /// Installed packs [`Self::from_pack_directories`] left out, and why.
+    pub fn pack_diagnostics(&self) -> &[FontPackDiagnostic] {
+        &self.diagnostics
+    }
+
+    /// Every listed pack is installed: callers leave out the packs they cannot find. One that cannot be used,
+    /// including one whose directory is gone, is skipped with a diagnostic in [`Self::pack_diagnostics`].
+    #[doc(hidden)]
+    pub fn from_pack_directories(directories: Vec<(FontPack, PathBuf)>) -> Result<Self, FontError> {
+        for (index, (pack, directory)) in directories.iter().enumerate() {
+            if directories[..index].iter().any(|(known, _)| known == pack) {
+                return Err(FontError::InvalidFontOptions(format!(
+                    "duplicate {pack} pack"
+                )));
+            }
+            if directory.as_os_str().is_empty() || directory.to_string_lossy().contains("://") {
+                return Err(FontError::InvalidFontOptions(
+                    "pack directory must be a local directory".into(),
+                ));
+            }
+        }
+        let mut bundled = Self {
+            options: BundledFontOptions {
+                packs: Vec::new(),
+                base_url: None,
+            },
+            directories: HashMap::new(),
+            diagnostics: Vec::new(),
+        };
+        for (pack, mut directory) in directories {
+            if directory.is_relative() {
+                directory = std::env::current_dir()
+                    .map_err(|source| FontError::Io {
+                        path: directory.clone(),
+                        source,
+                    })?
+                    .join(directory);
+            }
+            match pack_problem(pack, &directory) {
+                Some(problem) => bundled.diagnostics.push(FontPackDiagnostic {
+                    pack,
+                    directory,
+                    problem,
+                }),
+                None => {
+                    bundled.options.packs.push(pack);
+                    bundled.directories.insert(pack, directory);
+                }
+            }
+        }
+        Ok(bundled)
+    }
+
+    pub fn preload(&self) -> Result<(), FontError> {
+        for face in &catalog().faces {
+            if self.options.packs.contains(&face.pack) {
+                load_decoded(&self.options, &self.directories, face)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn load_face(&self, face: &BundledFontFace) -> Result<Vec<u8>, FontError> {
+        let known = catalog()
+            .faces
+            .iter()
+            .find(|known| *known == face)
+            .ok_or_else(|| {
+                FontError::InvalidFontOptions("face is outside the bundled catalog".into())
+            })?;
+        Ok(load_decoded(&self.options, &self.directories, known)?
+            .font
+            .clone())
+    }
+
+    fn handle(&self, face: &'static BundledFontFace) -> FontFaceHandle {
+        let options = self.options.clone();
+        let directories = self.directories.clone();
+        let mut handle = FontFaceHandle::new(
+            &face.family,
+            face.weight == 700,
+            face.style == "italic",
+            move || Ok(load_decoded(&options, &directories, face)?.font.clone()),
+        );
+        if face.family == "Selawik" {
+            handle.measure_as = face.metric_compat_with.clone();
+        }
+        handle
+    }
+}
+
+/// Why the pack installed at `directory` cannot be used, or `None` when every face it should hold is there.
+fn pack_problem(pack: FontPack, directory: &Path) -> Option<FontPackProblem> {
+    let faces: Vec<_> = catalog()
+        .faces
+        .iter()
+        .filter(|face| face.pack == pack)
+        .collect();
+    let missing = |manifest: bool| {
+        let mut files: Vec<&str> = faces
+            .iter()
+            .filter(|face| !directory.join(&face.file).is_file())
+            .map(|face| face.file.as_str())
+            .collect();
+        if manifest {
+            files.push("manifest.json");
+        }
+        files.sort_unstable();
+        files.first().map(|file| FontPackProblem::MissingFile {
+            file: (*file).to_string(),
+            missing: files.len(),
+        })
+    };
+    let bytes = match std::fs::read(directory.join("manifest.json")) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return missing(true),
+        Err(error) => {
+            return Some(FontPackProblem::InvalidManifest {
+                reason: error.to_string(),
+            });
+        }
+    };
+    let manifest = match serde_json::from_slice::<serde_json::Value>(&bytes) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            return Some(FontPackProblem::InvalidManifest {
+                reason: error.to_string(),
+            });
+        }
+    };
+    let found = manifest.get("version").and_then(serde_json::Value::as_str);
+    if let Some(expected) = faces
+        .iter()
+        .map(|face| face.version.as_str())
+        .find(|version| Some(*version) != found)
+    {
+        return Some(FontPackProblem::VersionMismatch {
+            expected: expected.into(),
+            found: found.map(str::to_string),
+        });
+    }
+    missing(false)
+}
+
+impl FontProvider for BundledFonts {
+    fn resolve_family(&self, family: &str, bold: bool, italic: bool) -> Option<FontFaceHandle> {
+        resolve_bundled_family_face(family, bold, italic)
+            .filter(|face| self.options.packs.contains(&face.pack))
+            .map(|face| self.handle(face))
+    }
+
+    fn resolve_script_fallback(
+        &self,
+        script: &str,
+        bold: bool,
+        italic: bool,
+    ) -> Option<FontFaceHandle> {
+        resolve_script_fallback_face(script, bold, italic)
+            .filter(|face| self.options.packs.contains(&face.pack))
+            .map(|face| self.handle(face))
+    }
+
+    fn resolve_family_script_fallback(
+        &self,
+        family: &str,
+        script: &str,
+        bold: bool,
+        italic: bool,
+    ) -> Option<FontFaceHandle> {
+        resolve_family_script_fallback_face(family, script, bold, italic)
+            .filter(|face| self.options.packs.contains(&face.pack))
+            .map(|face| self.handle(face))
+    }
+
+    fn resolve_glyph_fallback(
+        &self,
+        family: &str,
+        bold: bool,
+        italic: bool,
+        office: LastResortOffice,
+    ) -> Option<FontFaceHandle> {
+        resolve_glyph_fallback_face(family, bold, italic, office)
+            .filter(|face| self.options.packs.contains(&face.pack))
+            .map(|face| self.handle(face))
+    }
+
+    fn resolve_last_resort(
+        &self,
+        family: &str,
+        bold: bool,
+        italic: bool,
+        office: LastResortOffice,
+    ) -> FontFaceHandle {
+        let choice = resolve_last_resort_choice(family, bold, italic, office);
+        let mut handle = self.handle(choice.face);
+        handle.only_if_primary_fails = choice.only_if_primary_fails;
+        handle
+    }
+
+    fn bundled_packs(&self) -> Option<Vec<FontPack>> {
+        Some(self.options.packs.clone())
+    }
+}
+
+#[derive(Eq, Hash, PartialEq)]
+struct CacheKey {
+    base: Option<PathBuf>,
+    directory: Option<PathBuf>,
+    pack: FontPack,
+    file: &'static str,
+}
+
+type FaceCell = Mutex<Option<Arc<Decoded>>>;
+type FaceCache = HashMap<CacheKey, Arc<FaceCell>>;
+
+fn missing(pack: FontPack, base: Option<&Path>, file: &str, version: &str) -> FontError {
+    let action = match base {
+        Some(base) => format!(
+            "deploy {}",
+            base.join(pack.as_str()).join(version).join(file).display()
+        ),
+        None => format!("enable the `{}` Cargo feature", pack.feature()),
+    };
+    FontError::MissingFontPack { pack, action }
+}
+
+fn encoded(
+    options: &BundledFontOptions,
+    directories: &HashMap<FontPack, PathBuf>,
+    face: &BundledFontFace,
+) -> Result<Vec<u8>, FontError> {
+    if !options.packs.contains(&face.pack) {
+        return Err(FontError::MissingFontPack {
+            pack: face.pack,
+            action: format!(
+                "select the {0} pack in BundledFontOptions and enable `{1}` or deploy its base_url files",
+                face.pack,
+                face.pack.feature()
+            ),
+        });
+    }
+    if let Some(directory) = directories.get(&face.pack) {
+        let path = directory.join(&face.file);
+        return std::fs::read(&path).map_err(|source| {
+            if source.kind() == std::io::ErrorKind::NotFound {
+                FontError::MissingFontPack {
+                    pack: face.pack,
+                    action: format!("deploy {}", path.display()),
+                }
+            } else {
+                FontError::Io { path, source }
+            }
+        });
+    }
+    if let Some(base) = &options.base_url {
+        let path = base
+            .join(face.pack.as_str())
+            .join(&face.version)
+            .join(&face.file);
+        return std::fs::read(&path).map_err(|source| {
+            if source.kind() == std::io::ErrorKind::NotFound {
+                missing(face.pack, Some(base), &face.file, &face.version)
+            } else {
+                FontError::Io { path, source }
+            }
+        });
+    }
+    let bytes: Option<&[u8]> = match face.pack {
+        FontPack::Latin => {
+            #[cfg(feature = "fonts-latin")]
+            {
+                betteroffice_fonts_latin::face(&face.file)
+            }
+            #[cfg(not(feature = "fonts-latin"))]
+            {
+                None
+            }
+        }
+        FontPack::Intl => {
+            #[cfg(feature = "fonts-intl")]
+            {
+                betteroffice_fonts_intl::face(&face.file)
+            }
+            #[cfg(not(feature = "fonts-intl"))]
+            {
+                None
+            }
+        }
+        FontPack::Cjk => {
+            #[cfg(feature = "fonts-cjk")]
+            {
+                betteroffice_fonts_cjk::face(&face.file)
+            }
+            #[cfg(not(feature = "fonts-cjk"))]
+            {
+                None
+            }
+        }
+    };
+    bytes
+        .map(<[u8]>::to_vec)
+        .ok_or_else(|| missing(face.pack, None, &face.file, &face.version))
+}
+
+fn load_decoded(
+    options: &BundledFontOptions,
+    directories: &HashMap<FontPack, PathBuf>,
+    face: &'static BundledFontFace,
+) -> Result<Arc<Decoded>, FontError> {
+    if !options.packs.contains(&face.pack) {
+        encoded(options, directories, face)?;
+    }
+    static CACHE: OnceLock<Mutex<FaceCache>> = OnceLock::new();
+    let cell = {
+        let mut cache = CACHE
+            .get_or_init(Mutex::default)
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        cache
+            .entry(CacheKey {
+                base: options.base_url.clone(),
+                directory: directories.get(&face.pack).cloned(),
+                pack: face.pack,
+                file: &face.file,
+            })
+            .or_default()
+            .clone()
+    };
+    let mut cached = cell.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(decoded) = cached.as_ref() {
+        return Ok(Arc::clone(decoded));
+    }
+    let dictionary = if let Some(file) = &face.dict {
+        let dict = catalog()
+            .faces
+            .iter()
+            .find(|candidate| candidate.pack == face.pack && &candidate.file == file)
+            .filter(|dict| dict.dict.is_none() && dict.codec == face.codec)
+            .ok_or_else(|| {
+                FontError::InvalidFontData(format!("invalid dictionary for {}", face.file))
+            })?;
+        Some(load_decoded(options, directories, dict)?)
+    } else {
+        None
+    };
+    let bytes = encoded(options, directories, face)?;
+    if bytes.len() != face.encoded_length {
+        return Err(FontError::InvalidFontData(format!(
+            "encoded length mismatch for {}",
+            face.file
+        )));
+    }
+    let dict = dictionary
+        .as_ref()
+        .map(|dict| dict.payload.as_deref().unwrap_or(&dict.font));
+    let decoded = decode_font_face(&bytes, &face.codec, dict, None).map_err(FontError::Decode)?;
+    if decoded.font.len() != face.byte_length {
+        return Err(FontError::InvalidFontData(format!(
+            "decoded length mismatch for {}",
+            face.file
+        )));
+    }
+    let decoded = Arc::new(decoded);
+    *cached = Some(Arc::clone(&decoded));
+    Ok(decoded)
+}

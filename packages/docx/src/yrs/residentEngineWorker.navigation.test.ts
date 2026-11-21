@@ -4,7 +4,7 @@ import { resolveReservations, validReservationsPayload } from './reservations';
 import * as queryModule from '../layout/render/displayListQueries';
 import type { DisplayPage } from '../layout/render/displayList';
 import { createDisplayListQueries, type DisplayListRect } from '../layout/render/displayListQueries';
-import { CANVAS_PAGE_GAP_PX } from '../layout/render/canvasPageMetrics';
+import { CANVAS_PAGE_GAP_PX, canvasPageStack } from '../layout/render/canvasPageMetrics';
 import { FRAME_DELTA_VERSION, retainedFramePageById, type RetainedFrame } from '../layout/render/frameDelta';
 import { loadRustDisplayListQueryEngine, type RustDisplayListQueryEngine } from '../layout/render/rustDisplayList';
 import type { YrsLoc, YrsStorySegment } from './index';
@@ -12,6 +12,8 @@ import { createResidentDocxCommandHooks } from './residentCommandActions';
 import { releaseResidentSelectionReads } from './residentCommandSelection';
 import { cellSelectionHeadPosition } from './residentCommandTableSelection';
 import { ResidentSessionFonts } from './residentFontEnvironment';
+import { releaseResidentDisplayListQueries, residentDisplayListQueries } from './residentDisplayListQueries';
+import { StagedEchoPages } from './residentStagedEcho';
 import type { DocxCommandApplyContext, DocxCommandEnvelope, DocxCommandIntent, DocxCommandHooks, DocxCommandHooksFactory, DocxCommandHostOptions, DocxCommandInitRequest } from './residentCommandProtocol';
 
 const releasesAfterTest: (() => void)[] = [];
@@ -92,8 +94,9 @@ function splitRowWorker(direction: 'up' | 'down', queryEngine?: RustDisplayListQ
   const parseFailures = source.indexOf('let queryParseFailures = 0;');
   const binding = source.slice(parseFailures < 0 ? source.indexOf('function bindResidentCommands(') : parseFailures,
     source.indexOf('function replacementCommandInit('));
+  let harnessQueries: typeof createDisplayListQueries | undefined;
   const dependencies = {
-    resolveReservations, validReservationsPayload, CANVAS_PAGE_GAP_PX,
+    resolveReservations, validReservationsPayload, CANVAS_PAGE_GAP_PX, canvasPageStack, offscreenDpr: 1, offscreenZoom: 1,
     cellSelectionHeadPosition,
     sessionFonts: null, ResidentSessionFonts, scope: {}, proposals: null, resetResidentObjectHandles() {},
     createProposalRegistry: () => ({ snapshot: () => ({ previewVersion: 0, proposals: [] }) }),
@@ -114,7 +117,7 @@ function splitRowWorker(direction: 'up' | 'down', queryEngine?: RustDisplayListQ
           ? [{ paraId: focus.paraId, length: 20 }, { paraId: 'next', length: 4 }] : [{ paraId: 'body', length: 1 }],
         paragraphIdCount: (story: string, paraId: string) => story === focus.story && [focus.paraId, 'next'].includes(paraId) ? 1 : 0,
         storySegments: (story: string): YrsStorySegment[] => story === 'body' ? [{
-          kind: 'embed', embedKind: 'table', payload: { rows: [{ cells: [{ story: focus.story }] }] }, attributes: {},
+          kind: 'embed', embedKind: 'table', payload: { tblPr: {}, grid: [], rows: [{ cells: [{ story: focus.story }] }] }, attributes: {},
         }, { kind: 'pilcrow', paraId: 'body', properties: {}, attributes: {} }] : [
           { kind: 'text', text: 'abcdefghijklmnopqrst', attributes: {} },
           { kind: 'pilcrow', paraId: focus.paraId, properties: {}, attributes: {} },
@@ -187,10 +190,14 @@ function splitRowWorker(direction: 'up' | 'down', queryEngine?: RustDisplayListQ
       };
     },
     loadRustDisplayListQueryEngine: async () => {}, loadedRustDisplayListQueryEngine: () => queryEngine,
+    residentDisplayListQueries: (owner: object, list: RetainedFrame['displayList']): queryModule.DisplayListQueries =>
+      residentDisplayListQueries(owner, list, options.productionHooks ? undefined : harnessQueries),
+    releaseResidentDisplayListQueries, StagedEchoPages,
     applyFrameDelta: (_frame: RetainedFrame, next: RetainedFrame) => next,
     decodeFrameDelta: (next: RetainedFrame) => next,
     retainedPageByKey: (current: RetainedFrame, pageId: string) => retainedFramePageById(current, BigInt(pageId)),
   };
+  harnessQueries = dependencies.createDisplayListQueries as unknown as typeof createDisplayListQueries;
   const worker = new Function(...Object.keys(dependencies),
     new Bun.Transpiler({ loader: 'ts' }).transformSync(`${reservations}\n${binding}`) +
     '\nlet hooks = bindResidentCommands(init); return { get hooks() { return hooks; }, rebind: () => { hooks = bindResidentCommands(init); }, release: () => { releaseCommandHost?.(); releaseCommandHost = null; }, changes: commandFrameChanges, install: (frame) => { retainedFrame = frame; } };'

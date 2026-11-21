@@ -243,6 +243,149 @@ fn cell_position(cell: AnchorCell, geometry: &GridGeometry) -> Result<(f64, f64)
     ))
 }
 
+/// Pixel movement of a chart frame's four edges, for a resize gesture. Each
+/// value slides that edge in content pixels: a positive value moves the left
+/// or right edge right and the top or bottom edge down, a negative one back.
+/// The engine turns the resulting rect into the anchor a save can write.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ChartResize {
+    pub left: f32,
+    pub top: f32,
+    pub right: f32,
+    pub bottom: f32,
+}
+
+impl ChartResize {
+    fn is_finite(self) -> bool {
+        [self.left, self.top, self.right, self.bottom]
+            .into_iter()
+            .all(f32::is_finite)
+    }
+
+    fn is_empty(self) -> bool {
+        self.left == 0.0 && self.top == 0.0 && self.right == 0.0 && self.bottom == 0.0
+    }
+}
+
+/// The smallest frame a resize may leave. A corner landing on the other would
+/// read back as an inverted anchor, which no save can write.
+pub const MIN_CHART_EXTENT_PX: f32 = 1.0;
+
+/// The anchor `anchor` would carry after its edges move by `edges` viewport
+/// pixels, clamped to the grid and to a 1x1px minimum. `None` for anything but
+/// a two-cell anchor: a one-cell anchor's size lives in `xdr:ext`, which a save
+/// never rewrites, and an absolute anchor carries its position in attributes.
+pub fn resized_chart_anchor(
+    anchor: ChartAnchor,
+    geometry: &GridGeometry,
+    edges: ChartResize,
+) -> Option<ChartAnchor> {
+    let ChartAnchor::TwoCell { from, to, edit_as } = anchor else {
+        return None;
+    };
+    if !edges.is_finite() {
+        return None;
+    }
+    if edges.is_empty() {
+        return Some(anchor);
+    }
+    let rect = resolve_chart_anchor(anchor, geometry, 0, 0).ok()?.rect;
+    let sheet_width = f64::from(geometry.col_x(MAX_COLS));
+    let sheet_height = f64::from(geometry.row_y(MAX_ROWS));
+    let (x1, x2) = clamp_resized_edges(
+        rect.x,
+        rect.x + rect.w,
+        sheet_width,
+        f64::from(edges.left),
+        f64::from(edges.right),
+    );
+    let (y1, y2) = clamp_resized_edges(
+        rect.y,
+        rect.y + rect.h,
+        sheet_height,
+        f64::from(edges.top),
+        f64::from(edges.bottom),
+    );
+    let new_from = anchor_cell_at(x1, y1, geometry)?;
+    let new_to = anchor_cell_at(x2, y2, geometry)?;
+    let ((from_col, from_col_off), (to_col, to_col_off)) = kept_marker_axis(
+        ((from.col, from.col_off), (to.col, to.col_off)),
+        (
+            (new_from.col, new_from.col_off),
+            (new_to.col, new_to.col_off),
+        ),
+        x1 == rect.x,
+        x2 == rect.x + rect.w,
+    );
+    let ((from_row, from_row_off), (to_row, to_row_off)) = kept_marker_axis(
+        ((from.row, from.row_off), (to.row, to.row_off)),
+        (
+            (new_from.row, new_from.row_off),
+            (new_to.row, new_to.row_off),
+        ),
+        y1 == rect.y,
+        y2 == rect.y + rect.h,
+    );
+    Some(ChartAnchor::TwoCell {
+        from: AnchorCell {
+            col: from_col,
+            col_off: from_col_off,
+            row: from_row,
+            row_off: from_row_off,
+        },
+        to: AnchorCell {
+            col: to_col,
+            col_off: to_col_off,
+            row: to_row,
+            row_off: to_row_off,
+        },
+        edit_as,
+    })
+}
+
+/// An edge that did not move keeps its marker as read, unless that would invert the axis.
+fn kept_marker_axis<T: Copy + PartialOrd>(
+    original: ((T, i64), (T, i64)),
+    resized: ((T, i64), (T, i64)),
+    start_still: bool,
+    end_still: bool,
+) -> ((T, i64), (T, i64)) {
+    let start = if start_still { original.0 } else { resized.0 };
+    let end = if end_still { original.1 } else { resized.1 };
+    if end > start { (start, end) } else { resized }
+}
+
+/// Applies one axis of a resize: both edges slide by their deltas, stay on the
+/// sheet, and keep at least [`MIN_CHART_EXTENT_PX`] between them. When a drag
+/// collapses the frame, the edge being dragged gives way first.
+fn clamp_resized_edges(
+    start: f64,
+    end: f64,
+    extent: f64,
+    start_delta: f64,
+    end_delta: f64,
+) -> (f64, f64) {
+    let min = f64::from(MIN_CHART_EXTENT_PX);
+    let mut start = (start + start_delta).clamp(0.0, extent);
+    let mut end = (end + end_delta).clamp(0.0, extent);
+    if end - start < min {
+        if start_delta != 0.0 && end_delta == 0.0 {
+            start = end - min;
+        } else {
+            end = start + min;
+        }
+        if end > extent {
+            end = extent;
+            start = (end - min).max(0.0);
+        }
+        if start < 0.0 {
+            start = 0.0;
+            end = min.min(extent);
+        }
+    }
+    (start, end)
+}
+
 /// The anchor `anchor` would carry after sliding `dx`/`dy` viewport pixels,
 /// clamped so it never leaves the grid. `None` for an absolute anchor, which
 /// is pinned to the sheet and whose position a save cannot rewrite.
@@ -381,14 +524,16 @@ fn visible_charts<'a>(
                 rect,
                 clip,
                 movable: !matches!(chart.anchor, ChartAnchor::Absolute { .. }),
+                resizable: matches!(chart.anchor, ChartAnchor::TwoCell { .. }),
             },
         });
     }
     Ok(visible)
 }
 
+/// `below` paints what the drawing stacks beneath each chart before it is drawn.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn render_charts<F, R>(
+pub(crate) fn render_charts<F, R, B>(
     sheet: &Sheet,
     geometry: &GridGeometry,
     viewport: &Viewport,
@@ -397,10 +542,12 @@ pub(crate) fn render_charts<F, R>(
     commands: &mut Vec<DrawCmd>,
     regions: &mut Vec<ChartRegion>,
     resolver: &mut F,
+    below: &mut B,
 ) -> Result<(), RenderError>
 where
     F: FnMut(&SheetChart) -> Result<R, RenderError>,
     R: Into<Arc<ChartSpace>>,
+    B: FnMut(&SheetChart, &mut Vec<DrawCmd>),
 {
     render_charts_with_budget(
         sheet,
@@ -411,12 +558,13 @@ where
         commands,
         regions,
         resolver,
+        below,
         MAX_CHART_OPS_PER_FRAME,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
-fn render_charts_with_budget<F, R>(
+fn render_charts_with_budget<F, R, B>(
     sheet: &Sheet,
     geometry: &GridGeometry,
     viewport: &Viewport,
@@ -425,11 +573,13 @@ fn render_charts_with_budget<F, R>(
     commands: &mut Vec<DrawCmd>,
     regions: &mut Vec<ChartRegion>,
     resolver: &mut F,
+    below: &mut B,
     max_ops: usize,
 ) -> Result<(), RenderError>
 where
     F: FnMut(&SheetChart) -> Result<R, RenderError>,
     R: Into<Arc<ChartSpace>>,
+    B: FnMut(&SheetChart, &mut Vec<DrawCmd>),
 {
     let mut remaining = max_ops;
     for visible in visible_charts(sheet, geometry, viewport, frozen_rows, frozen_cols)? {
@@ -442,6 +592,7 @@ where
         if remaining == 0 {
             return Err(RenderError::ChartOpBudgetExceeded { max: max_ops });
         }
+        below(chart, commands);
         let (label, placeholder) = match plot_one_chart(
             chart,
             rect,
@@ -846,7 +997,7 @@ fn has_primary_xy_axes(space: &ChartSpace) -> bool {
         })
 }
 
-fn viewport_geometry(
+pub(crate) fn viewport_geometry(
     anchor: ResolvedChartAnchor,
     geometry: &GridGeometry,
     viewport: &Viewport,
@@ -908,7 +1059,7 @@ fn intersect_f64(left: PlotRect, right: PlotRect) -> Option<PlotRect> {
     })
 }
 
-fn plot_rect_to_rect(rect: PlotRect) -> Option<Rect> {
+pub(crate) fn plot_rect_to_rect(rect: PlotRect) -> Option<Rect> {
     Some(Rect {
         x: finite_f32(rect.x).ok()?,
         y: finite_f32(rect.y).ok()?,
@@ -1030,6 +1181,7 @@ fn translate_op(op: PlotOp, chart_clip: Rect, end_aligned: bool) -> Result<Optio
                 bold: font.weight >= 600,
                 italic: false,
                 underline: false,
+                underline_style: None,
                 strike: false,
                 highlight: None,
                 dashed_underline: false,
@@ -1042,6 +1194,7 @@ fn translate_op(op: PlotOp, chart_clip: Rect, end_aligned: bool) -> Result<Optio
                 rotation_valign: None,
                 stacked: false,
                 wrap: None,
+                runs: Vec::new(),
             }))
         }
         PlotOp::Line {
@@ -1368,6 +1521,7 @@ mod tests {
             &mut commands,
             &mut a11y,
             &mut resolver,
+            &mut |_, _| {},
             1,
         )
         .unwrap_err();
@@ -1467,6 +1621,7 @@ mod tests {
                 &mut commands,
                 &mut a11y,
                 &mut resolver,
+                &mut |_, _| {},
                 max_ops,
             )
             .map(|()| (commands.len(), a11y.len()))
@@ -1811,6 +1966,7 @@ mod tests {
             &mut commands,
             &mut regions,
             &mut resolver,
+            &mut |_, _| {},
         )
         .unwrap();
         assert_eq!(regions.len(), 1);

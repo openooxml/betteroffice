@@ -636,7 +636,7 @@ pub(crate) fn revised_story(doc: &EditingDoc, stories: &BTreeSet<String>) -> Opt
     }
     let txn = doc.yrs_doc().transact();
     for story_id in stories {
-        let Ok(story) = story_ref(&txn, story_id) else {
+        let Some(story) = crate::story_text(&txn, story_id) else {
             continue;
         };
         let chunks = doc.chunk_snapshot(story_id, &story, &txn);
@@ -934,6 +934,10 @@ pub(crate) fn build_layout_map(
                         _ => NotePlacement::PageBottom,
                     };
                     let occurrence_id = format!("p{page_index}.{name}.{id}");
+                    let flow = match kind {
+                        LayoutNoteKind::Footnote => occurrence_id.clone(),
+                        LayoutNoteKind::Endnote => story.clone(),
+                    };
                     Occurrence {
                         record: StoryOccurrence {
                             id: occurrence_id.clone(),
@@ -953,7 +957,7 @@ pub(crate) fn build_layout_map(
                             },
                         },
                         root: story,
-                        flow: occurrence_id,
+                        flow,
                     }
                 }
             };
@@ -1321,7 +1325,7 @@ impl NodeIndex {
                         }
                     }
                     for texts in &mut node.texts {
-                        texts.sort_by_key(|entry| entry.start);
+                        crate::sort::sort_by_key(texts, &|entry| entry.start);
                     }
                     self.paragraphs
                         .insert((story.clone(), para_id.clone()), node);
@@ -1959,7 +1963,7 @@ impl<'a, 't, T: ReadTxn> Mapper<'a, 't, T> {
                 Geometry::Ranges(region.clone(), ranges),
             ));
         }
-        inlines.sort_by_key(|(position, ..)| *position);
+        crate::sort::sort_by_key(&mut inlines, &|(position, ..)| *position);
         for (_, id, anchor, slice, geometry) in inlines {
             self.fragment(
                 occurrence,

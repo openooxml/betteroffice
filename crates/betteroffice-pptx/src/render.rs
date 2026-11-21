@@ -11,6 +11,11 @@ pub use pptx_raster::{
     RenderedSlide as RenderedPng,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PngTarget {
+    pub slide: usize,
+}
+
 /// Glyph outlines and decoded assets shared across every slide one deck
 /// exports. Behind `Mutex`es so a [`Presentation`] holding one stays
 /// `Send + Sync`.
@@ -26,8 +31,8 @@ impl Presentation {
     /// [`Presentation::register_font`] took; a picture the backend cannot draw
     /// is skipped and counted rather than failing the render. Glyph outlines and
     /// decoded images are cached on the deck.
-    pub fn render_png(&self, slide_index: usize, options: &RenderOptions) -> Result<RenderedPng> {
-        let rendered = self.render_slide(slide_index)?;
+    pub fn render_png(&self, target: PngTarget, options: &RenderOptions) -> Result<RenderedPng> {
+        let rendered = self.render_slide(target.slide)?;
         let mut images: AssetMap<'_> = self
             .media()
             .iter()
@@ -46,8 +51,9 @@ impl Presentation {
             .map(|id| self.media_bytes(id).map(|bytes| (id, bytes)))
             .collect::<Result<_>>()?;
         images.extend(pending.iter().map(|(id, bytes)| (*id, bytes.as_slice())));
-        let resources = RenderResources::new(self.renderer().fonts(), &images)
-            .with_label_font(self.renderer().fallback_font());
+        let renderer = self.renderer();
+        let resources = RenderResources::new(renderer.fonts(), &images)
+            .with_label_font(renderer.fallback_font());
         let mut glyphs = self
             .caches()
             .glyphs

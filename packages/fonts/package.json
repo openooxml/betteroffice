@@ -10,15 +10,29 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
     },
     "./package.json": "./package.json",
     "./cdn": {
       "types": "./dist/cdn.d.ts",
-      "import": "./dist/cdn.js"
+      "import": "./dist/cdn.js",
+      "default": "./dist/cdn.js"
+    },
+    "./progressive": {
+      "types": "./dist/progressive.d.ts",
+      "import": "./dist/progressive.js",
+      "default": "./dist/progressive.js"
+    },
+    "./remote": {
+      "types": "./dist/remote.d.ts",
+      "import": "./dist/remote.js",
+      "default": "./dist/remote.js"
     }
   },
   "files": [
+    "assets/BetterOfficeBaseLatin-*.ttf.zst",
+    "assets/base-latin.json",
     "dist",
     "LICENSE",
     "LICENSES",
@@ -27,10 +41,11 @@
   "scripts": {
     "prebuild": "bun run --filter '@betteroffice/fonts-cjk' --filter '@betteroffice/fonts-intl' --filter '@betteroffice/fonts-latin' build",
     "build": "tsup && bun ../../scripts/build-fonts-decoder.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "export:catalog": "bun scripts/export-catalog.ts"
   },
   "peerDependencies": {
-    "@betteroffice/fonts-cjk": "workspace:*",
+    "@betteroffice/fonts-cjk": "workspace:^0",
     "@betteroffice/fonts-intl": "workspace:^0"
   },
   "peerDependenciesMeta": {

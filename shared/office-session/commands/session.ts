@@ -89,6 +89,16 @@ function limit(value: number | undefined, fallback: number): number {
   return value !== undefined && Number.isSafeInteger(value) && value > 0 ? value : fallback;
 }
 
+const ledgers = new WeakMap<object, () => readonly CommandEnvelope<unknown>[]>();
+
+/**
+ * @internal Envelopes the session submitted whose outcome has not arrived or is recorded as unknown, in seq order,
+ * including those still pending when the session terminated. Read-only; a session without recovery uses it to replay them elsewhere.
+ */
+export function sessionUnacknowledged<P>(session: object): readonly CommandEnvelope<P>[] {
+  return (ledgers.get(session)?.() ?? []) as readonly CommandEnvelope<P>[];
+}
+
 /** @internal Creates a worker-backed edit session with coverage reconciliation and ordered recovery. */
 export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable = {}>(
   options: WorkerEditSessionOptions<O, P, S, E, F, X, Q>
@@ -105,6 +115,11 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
   const pending = new Set<TicketRecord>();
   const listeners = new Set<(state: EditSessionState<S, E>) => void>();
   const log = new Map<number, LogEntry<P>>();
+  let unacknowledgedAtTermination: CommandEnvelope<P>[] | undefined;
+  function unacknowledgedEnvelopes(): CommandEnvelope<P>[] {
+    return [...log.values()].filter((entry) => entry.outcome === undefined || entry.outcome.reason === 'unknown-outcome')
+      .map((entry) => cloneData(entry.envelope)).sort((a, b) => a.seq - b.seq);
+  }
   const dependencies = new Map<number, Set<number>>();
   const cancellations = new Set<IterableIterator<number>>();
   let cancellationQueued = false;
@@ -121,7 +136,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
   let connection: ConnectionRecord<P, S, E, F> | undefined;
   let state: EditSessionState<S, E> = {
     epoch, version: initial.version, throughSeq: initial.throughSeq,
-    presentedThroughSeq: -1, selection: initial.selection, editState: initial.editState,
+    presentedThroughSeq: -1, selection: initial.selection, selectionCause: initial.cause, editState: initial.editState,
   };
   let disposed = false;
   let terminal: SessionFailure | undefined;
@@ -135,6 +150,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
   let disposal: Promise<void> | undefined;
   let recoveryAttempt = 0;
   let selectionThroughSeq = initial.throughSeq;
+  let selectionVersion = initial.version;
   let editStateThroughSeq = initial.throughSeq;
   let revisionsThroughSeq = initial.throughSeq;
   let knownSelection = initial.revisions?.selection ?? 0;
@@ -546,9 +562,11 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
           (ack.throughSeq === state.throughSeq && ack.version >= state.version)) {
           state = { ...state, throughSeq: ack.throughSeq, version: ack.version };
         }
-        if ('selection' in ack && ack.throughSeq >= selectionThroughSeq) {
-          state = { ...state, selection: ack.selection };
+        if ('selection' in ack && (ack.throughSeq > selectionThroughSeq ||
+          ack.throughSeq === selectionThroughSeq && ack.version >= selectionVersion)) {
+          state = { ...state, selection: ack.selection, selectionCause: ack.cause };
           selectionThroughSeq = ack.throughSeq;
+          selectionVersion = ack.version;
         }
         if ('editState' in ack && ack.throughSeq >= editStateThroughSeq) {
           state = { ...state, editState: ack.editState };
@@ -683,6 +701,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
       }
       settlePresentation(record, 'dropped');
     }
+    unacknowledgedAtTermination = unacknowledgedEnvelopes();
     log.clear();
     dependencies.clear();
     cancellations.clear();
@@ -803,9 +822,10 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
         }
         state = {
           epoch, version: opened.version, throughSeq: opened.throughSeq,
-          presentedThroughSeq: -1, selection: opened.selection, editState: opened.editState,
+          presentedThroughSeq: -1, selection: opened.selection, selectionCause: opened.cause, editState: opened.editState,
         };
         selectionThroughSeq = opened.throughSeq;
+        selectionVersion = opened.version;
         editStateThroughSeq = opened.throughSeq;
         revisionsThroughSeq = opened.throughSeq;
         knownSelection = opened.revisions?.selection ?? 0;
@@ -1253,6 +1273,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
       return disposal;
     },
   };
+  ledgers.set(session, () => unacknowledgedAtTermination ? cloneData(unacknowledgedAtTermination) : unacknowledgedEnvelopes());
   const first = attach(options.connection);
   acceptAck(first, initial);
   if (options.connection.client.failure) fail(options.connection.client.failure);

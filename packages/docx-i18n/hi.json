@@ -32,6 +32,7 @@
     "ariaLabel": "प्रारूपण टूलबार",
     "file": "फ़ाइल",
     "format": "प्रारूप",
+    "layout": "लेआउट",
     "insert": "डालें",
     "open": "खोलें",
     "openShortcut": "Ctrl+O",
@@ -53,6 +54,16 @@
     "imageWrap": {
       "current": "वर्तमान"
     }
+  },
+  "layout": {
+    "margins": "हाशिया",
+    "normal": "सामान्य",
+    "narrow": "संकीर्ण",
+    "moderate": "मध्यम",
+    "wide": "चौड़ा",
+    "customMargins": "कस्टम हाशिए...",
+    "morePaperSizes": "अधिक कागज़ आकार...",
+    "indent": "इंडेंट"
   },
   "formattingBar": {
     "groups": {
@@ -104,7 +115,12 @@
     "single": "एकल",
     "double": "दुगुना",
     "lineSpacingTitle": "पंक्ति रिक्ति: {label}",
-    "paragraphSpacing": "पैराग्राफ रिक्ति"
+    "paragraphSpacing": "पैराग्राफ रिक्ति",
+    "addBefore": "अनुच्छेद से पहले रिक्ति जोड़ें",
+    "removeBefore": "अनुच्छेद से पहले की रिक्ति हटाएँ",
+    "addAfter": "अनुच्छेद के बाद रिक्ति जोड़ें",
+    "removeAfter": "अनुच्छेद के बाद की रिक्ति हटाएँ",
+    "options": "पंक्ति रिक्ति विकल्प..."
   },
   "styles": {
     "selectAriaLabel": "पैराग्राफ शैली चुनें",
@@ -417,6 +433,8 @@
         "strikethroughDescription": "स्ट्राइकथ्रू टॉगल करें",
         "subscript": "सबस्क्रिप्ट",
         "subscriptDescription": "सबस्क्रिप्ट टॉगल करें",
+        "clearFormatting": "प्रारूपण साफ करें",
+        "clearFormattingDescription": "टेक्स्ट की फ़ॉर्मैटिंग साफ़ करें",
         "superscript": "सुपरस्क्रिप्ट",
         "superscriptDescription": "सुपरस्क्रिप्ट टॉगल करें",
         "alignLeft": "बाएं संरेखित करें",
@@ -470,7 +488,9 @@
         "pageUp": "Page Up",
         "pageDown": "Page Down",
         "ctrl": "Ctrl",
-        "del": "Del"
+        "del": "Del",
+        "shift": "Shift",
+        "alt": "Alt"
       }
     },
     "objectGeometry": {
@@ -478,6 +498,11 @@
       "top": "ऊपर (px)",
       "width": "चौड़ाई (px)",
       "height": "ऊंचाई (px)"
+    },
+    "paragraphSpacing": {
+      "before": "पहले की रिक्ति",
+      "after": "बाद की रिक्ति",
+      "multiple": "गुणक"
     }
   },
   "comments": {
@@ -505,6 +530,7 @@
     "paragraphMarkInserted": "डाला गया पैराग्राफ़ विराम",
     "paragraphMarkDeleted": "हटाया गया पैराग्राफ़ विराम",
     "paragraphPropertiesChanged": "पैराग्राफ़ गुण बदले गए",
+    "runPropertiesChanged": "टेक्स्ट प्रारूपण बदला गया",
     "rowInserted": "डाली गई पंक्ति",
     "rowDeleted": "हटाई गई पंक्ति",
     "rowPropertiesChanged": "पंक्ति के गुण बदले गए",
@@ -515,6 +541,12 @@
     "tablePropertiesChanged": "तालिका के गुण बदले गए",
     "tableInserted": "डाली गई तालिका",
     "tableDeleted": "हटाई गई तालिका"
+  },
+  "pasteOptions": {
+    "button": "पेस्ट विकल्प (Ctrl)",
+    "keepSource": "स्रोत स्वरूपण रखें",
+    "merge": "स्वरूपण मर्ज करें",
+    "textOnly": "केवल टेक्स्ट रखें"
   },
   "contextMenu": {
     "ariaLabel": "AI क्रियाएँ मेनू",
@@ -561,6 +593,8 @@
     "noDocumentLoaded": "कोई दस्तावेज़ लोड नहीं हुआ",
     "failedToLoad": "दस्तावेज़ लोड करने में विफल",
     "failedToLoadDescription": "फ़ाइल क्षतिग्रस्त हो सकती है, या इसमें कुछ ऐसा है जिसे यह संपादक अभी पढ़ नहीं सकता।",
+    "failedToLoadDamaged": "फ़ाइल क्षतिग्रस्त है या पूरा Word दस्तावेज़ नहीं है।",
+    "failedToLoadUnsupported": "यह दस्तावेज़ कुछ ऐसा उपयोग करता है जिसे यह संपादक अभी नहीं पढ़ सकता।",
     "editorUnavailable": "संपादक लोड नहीं हो सका",
     "editorUnavailableDescription": "अपना कनेक्शन जांचें, फिर पेज को फिर से लोड करें।",
     "reloadPage": "पेज फिर से लोड करें",
@@ -701,6 +735,8 @@
     "failedToParse": "दस्तावेज़ का विश्लेषण करने में विफल",
     "linkRemoved": "लिंक हटा दिया गया",
     "linkCopied": "लिंक क्लिपबोर्ड पर कॉपी किया गया",
+    "pasteFailed": "चिपकाना पूरा नहीं हो सका। कुछ भी नहीं बदला गया।",
+    "cutRefused": "चयन में ऐसे ऑब्जेक्ट हैं जिन्हें काटा नहीं जा सकता। कुछ भी नहीं बदला गया।",
     "failedToSave": "दस्तावेज़ सहेजने में विफल",
     "documentInput": "दस्तावेज़ इनपुट",
     "documentPreview": "दस्तावेज़ पूर्वावलोकन",
@@ -753,7 +789,11 @@
     "leftIndent": "बायां इंडेंट",
     "rightIndent": "दायां इंडेंट",
     "topMargin": "शीर्ष मार्जिन",
-    "bottomMargin": "तल मार्जिन"
+    "bottomMargin": "तल मार्जिन",
+    "leftMargin": "बायाँ मार्जिन",
+    "rightMargin": "दायाँ मार्जिन",
+    "hangingIndent": "हैंगिंग इंडेंट",
+    "markerValue": "{name}: {value}"
   },
   "print": {
     "label": "प्रिंट करें",
@@ -766,8 +806,13 @@
   },
   "a11y": {
     "pageLabel": "पेज {number}",
+    "unbuiltPagesNotMirrored": "पृष्ठ {from} से {to} अभी पठन दृश्य में नहीं हैं।",
+    "goToPage": "पृष्ठ {number} पर जाएँ",
     "headerLabel": "पेज हेडर",
     "footerLabel": "पेज फ़ुटर",
+    "chartNoData": "कोई डेटा नहीं",
+    "pictureName": "चित्र",
+    "bulletMarker": "बुलेट",
     "selected": "चयनित",
     "selectionCleared": "चयन साफ़ किया गया",
     "commentedText": "टिप्पणी किया गया टेक्स्ट",
@@ -826,7 +871,7 @@
       "targetChanged": "जिस सामग्री के लिए यह क्रिया खोली गई थी, वह लागू होने से पहले बदल गई।",
       "commandFailed": "कमांड पूरा नहीं किया जा सका।",
       "permissionDenied": "होस्ट एप्लिकेशन ने इस प्लगइन को इस कमांड का उपयोग करने की अनुमति नहीं दी है।",
-      "unsupportedPolicy": "प्लगइन अभी यह कमांड नहीं चला सकते। इसके बजाय संपादन बैच का उपयोग करें।",
+      "unsupportedPolicy": "इस कमांड के लिए प्लगइन के अपने इंटरफ़ेस में उपयोगकर्ता की कार्रवाई ज़रूरी है।",
       "pluginUnavailable": "प्लगइन अब सक्रिय नहीं है।",
       "aborted": "प्लगइन क्रिया कमांड चलने से पहले रद्द कर दी गई थी।"
     }
@@ -835,6 +880,7 @@
     "toolbarGroup": "प्लगइन",
     "panelTabs": "प्लगइन पैनल",
     "collapsePanel": "{title} समेटें",
-    "expandPanel": "{title} फैलाएं"
+    "expandPanel": "{title} फैलाएं",
+    "miniToolbar": "चयन का स्वरूपण"
   }
 }

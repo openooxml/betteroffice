@@ -4,7 +4,8 @@ use std::collections::HashMap;
 use std::io::Cursor;
 
 use ooxml_drawingml::GeometryPathCommand;
-use ooxml_text::{FontId, FontStore, PathCmd};
+use ooxml_raster::{GlyphCache, encode_png};
+use ooxml_text::{FontId, FontStore};
 use rustybuzz::ttf_parser;
 use tiny_skia::{
     Color, FillRule, FilterQuality, GradientStop, IntSize, LinearGradient, Paint, Path,
@@ -137,6 +138,7 @@ pub fn render_list(
             images,
             fonts,
             fallback: fallback.as_ref(),
+            glyphs: HashMap::new(),
             skipped_images: 0,
         };
         let mut top: Vec<&Primitive> = list.primitives.iter().collect();
@@ -194,13 +196,8 @@ fn shadow_color(value: &str) -> Option<Color> {
         8 => (&hex[..6], u8::from_str_radix(&hex[6..], 16).ok()?),
         _ => return None,
     };
-    let channel = |range: std::ops::Range<usize>| u8::from_str_radix(digits.get(range)?, 16).ok();
-    Some(Color::from_rgba8(
-        channel(0..2)?,
-        channel(2..4)?,
-        channel(4..6)?,
-        alpha,
-    ))
+    let [red, green, blue, _] = ooxml_raster::parse_hex_rgba(digits)?;
+    Some(Color::from_rgba8(red, green, blue, alpha))
 }
 
 fn parse_color(value: &str) -> Option<Color> {
@@ -208,13 +205,7 @@ fn parse_color(value: &str) -> Option<Color> {
     if hex.len() != 6 {
         return None;
     }
-    let channel = |range: std::ops::Range<usize>| u8::from_str_radix(hex.get(range)?, 16).ok();
-    Some(Color::from_rgba8(
-        channel(0..2)?,
-        channel(2..4)?,
-        channel(4..6)?,
-        255,
-    ))
+    ooxml_raster::parse_hex_color(hex)
 }
 
 struct Painter<'a, 'b> {
@@ -222,6 +213,7 @@ struct Painter<'a, 'b> {
     images: &'b HashMap<&'b str, &'b [u8]>,
     fonts: Option<&'b Renderer>,
     fallback: Option<&'b (FontStore, FontId)>,
+    glyphs: HashMap<u64, GlyphCache>,
     skipped_images: usize,
 }
 
@@ -434,15 +426,21 @@ impl<'b> Painter<'_, 'b> {
             return;
         };
         let mut pen = anchor_x;
+        let cache = self.glyphs.entry(face.store.id()).or_default();
         for glyph in &shaped {
-            let outline = face
-                .store
-                .outline_glyph(face.id, glyph.glyph_id as u16)
+            let cached = cache
+                .lookup(
+                    face.store,
+                    face.id,
+                    glyph.glyph_id,
+                    || Ok(glyph.glyph_id as u16),
+                    |commands| Ok(ooxml_raster::outline_path(commands)),
+                )
                 .ok()
-                .filter(|outline| outline.upem > 0);
-            if let Some(outline) = outline {
-                let scale = size_in / f32::from(outline.upem);
-                if let Some(path) = glyph_path(&outline.cmds) {
+                .filter(|cached| cached.upem > 0.0);
+            if let Some(cached) = cached {
+                let scale = size_in / cached.upem;
+                if let Some(path) = &cached.path {
                     let placed = Affine {
                         a: scale,
                         b: 0.0,
@@ -452,7 +450,7 @@ impl<'b> Painter<'_, 'b> {
                         f: baseline - glyph.y_offset,
                     };
                     self.pixmap.fill_path(
-                        &path,
+                        path,
                         paint,
                         FillRule::Winding,
                         tiny(space.compose(placed)),
@@ -521,13 +519,13 @@ impl<'b> Painter<'_, 'b> {
         let Some(rect) = Rect::from_xywh(x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0)) else {
             return;
         };
-        let unit = device_scale(outer).max(1.0);
+        let pixel = device_scale(outer) / vsdx_render::PIXELS_PER_INCH;
         let mut paint = Paint::default();
         paint.set_color(Color::from_rgba8(0x8a, 0x94, 0xa6, 255));
         paint.anti_alias = true;
         let stroke = Stroke {
-            width: unit,
-            dash: StrokeDash::new(vec![5.0 * unit, 4.0 * unit], 0.0),
+            width: pixel.max(1.0),
+            dash: StrokeDash::new(vec![4.0 * pixel, 3.0 * pixel], 0.0),
             ..Stroke::default()
         };
         self.pixmap.stroke_path(
@@ -542,11 +540,13 @@ impl<'b> Painter<'_, 'b> {
     fn decode(&mut self, asset_id: &str) -> Option<(Pixmap, (f32, f32))> {
         use image::ImageDecoder as _;
         let bytes = self.images.get(asset_id)?;
-        let decoder = image::ImageReader::new(Cursor::new(bytes))
+        let reader = image::ImageReader::new(Cursor::new(bytes))
             .with_guessed_format()
-            .ok()?
-            .into_decoder()
             .ok()?;
+        if reader.format() == Some(image::ImageFormat::Tiff) {
+            return None;
+        }
+        let decoder = reader.into_decoder().ok()?;
         let (declared_width, declared_height) = decoder.dimensions();
         let declared = u64::from(declared_width) * u64::from(declared_height);
         if declared == 0 || declared > MAX_IMAGE_PIXELS {
@@ -556,11 +556,7 @@ impl<'b> Painter<'_, 'b> {
         let (width, height) = (decoded.width(), decoded.height());
         let size = IntSize::from_wh(width, height)?;
         let mut data = decoded.into_raw();
-        for pixel in data.as_chunks_mut::<4>().0 {
-            let color =
-                tiny_skia::ColorU8::from_rgba(pixel[0], pixel[1], pixel[2], pixel[3]).premultiply();
-            *pixel = [color.red(), color.green(), color.blue(), color.alpha()];
-        }
+        ooxml_raster::premultiply_rgba(&mut data);
         Pixmap::from_vec(data, size).map(|pixmap| (pixmap, (width as f32, height as f32)))
     }
 }
@@ -594,33 +590,7 @@ fn underline_metrics(face: &Face<'_>) -> (f32, f32) {
 }
 
 fn build_path(path: &[GeometryPathCommand]) -> Option<Path> {
-    let mut builder = PathBuilder::new();
-    for command in path {
-        match command {
-            GeometryPathCommand::Move { x, y } => builder.move_to(*x as f32, *y as f32),
-            GeometryPathCommand::Line { x, y } => builder.line_to(*x as f32, *y as f32),
-            GeometryPathCommand::Quad { cpx, cpy, x, y } => {
-                builder.quad_to(*cpx as f32, *cpy as f32, *x as f32, *y as f32);
-            }
-            GeometryPathCommand::Cubic {
-                cp1x,
-                cp1y,
-                cp2x,
-                cp2y,
-                x,
-                y,
-            } => builder.cubic_to(
-                *cp1x as f32,
-                *cp1y as f32,
-                *cp2x as f32,
-                *cp2y as f32,
-                *x as f32,
-                *y as f32,
-            ),
-            GeometryPathCommand::Close => builder.close(),
-        }
-    }
-    builder.finish()
+    ooxml_raster::path_from_commands(path, |x, y| (x as f32, y as f32))
 }
 
 fn solid_paint(color: Color) -> Paint<'static> {
@@ -683,43 +653,6 @@ fn stroke_paint(stroke: &Option<VsStroke>) -> Option<(Paint<'_>, Stroke)> {
     ))
 }
 
-fn glyph_path(cmds: &[PathCmd]) -> Option<Path> {
-    let mut builder = PathBuilder::new();
-    for cmd in cmds {
-        match *cmd {
-            PathCmd::MoveTo { x, y } => builder.move_to(x, y),
-            PathCmd::LineTo { x, y } => builder.line_to(x, y),
-            PathCmd::QuadTo { cx, cy, x, y } => builder.quad_to(cx, cy, x, y),
-            PathCmd::CubicTo {
-                c1x,
-                c1y,
-                c2x,
-                c2y,
-                x,
-                y,
-            } => builder.cubic_to(c1x, c1y, c2x, c2y, x, y),
-            PathCmd::Close => builder.close(),
-        }
-    }
-    builder.finish()
-}
-
-fn encode_png(pixmap: Pixmap, width: u32, height: u32) -> Result<Vec<u8>, String> {
-    let pixels = pixmap.take_demultiplied();
-    let mut data = Vec::new();
-    {
-        let mut encoder = png::Encoder::new(&mut data, width, height);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        encoder.set_compression(png::Compression::Fast);
-        let mut writer = encoder.write_header().map_err(|error| error.to_string())?;
-        writer
-            .write_image_data(&pixels)
-            .map_err(|error| error.to_string())?;
-    }
-    Ok(data)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -762,6 +695,47 @@ mod tests {
             u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]),
             u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]),
         )
+    }
+
+    fn pixels(bytes: &[u8]) -> (u32, Vec<u8>) {
+        let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+        let mut reader = decoder.read_info().unwrap();
+        let mut buffer = vec![0; reader.output_buffer_size().unwrap()];
+        let info = reader.next_frame(&mut buffer).unwrap();
+        let channels = info.line_size / info.width as usize;
+        let gray = buffer[..info.buffer_size()]
+            .chunks(channels)
+            .map(|pixel| pixel[0].min(pixel[1]).min(pixel[2]))
+            .collect();
+        (info.width, gray)
+    }
+
+    #[test]
+    fn placeholders_are_a_thin_dashed_outline() {
+        let mut list = empty_list(4.0, 3.0);
+        list.primitives.push(Primitive::Placeholder {
+            id: "p".into(),
+            z_order: 0,
+            x: 1.0,
+            y: 1.0,
+            width: 2.0,
+            height: 1.0,
+            reason: String::new(),
+        });
+        let rendered = render_list(None, &list, &HashMap::new(), 1.0).unwrap();
+        let (width, gray) = pixels(&rendered.bytes);
+        let at = |x: u32, y: u32| gray[(y * width + x) as usize];
+        let (left, right, top, bottom) = (96, 288, 96, 192);
+        assert_eq!(at((left + right) / 2, (top + bottom) / 2), 255);
+        let inked: Vec<u32> = (top - 4..top + 5)
+            .filter(|&y| at(150, y) < 200 || at(153, y) < 200 || at(156, y) < 200)
+            .collect();
+        assert!(!inked.is_empty() && inked.len() <= 2, "edge rows {inked:?}");
+        let row = inked[0];
+        let marks: Vec<bool> = (left + 2..right - 2).map(|x| at(x, row) < 200).collect();
+        let runs = marks.windows(2).filter(|pair| pair[0] != pair[1]).count();
+        assert!(runs >= 40, "only {runs} dash edges along the top");
+        assert!(marks.iter().filter(|&&mark| mark).count() > marks.len() / 3);
     }
 
     #[test]
@@ -895,6 +869,36 @@ mod tests {
             transform: Affine::identity(),
         });
         let page = render_list(None, &list, &HashMap::new(), 1.0).unwrap();
+        assert_eq!(page.skipped_images, 1);
+    }
+
+    #[test]
+    fn a_tiff_is_skipped_even_when_the_image_crate_can_open_it() {
+        use image::ImageEncoder as _;
+        let mut data = Vec::new();
+        image::codecs::tiff::TiffEncoder::new(Cursor::new(&mut data))
+            .write_image(
+                &[255, 0, 0, 0, 255, 0],
+                2,
+                1,
+                image::ExtendedColorType::Rgb8,
+            )
+            .unwrap();
+        assert!(image::load_from_memory(&data).is_ok());
+        let mut list = empty_list(4.0, 4.0);
+        list.primitives.push(Primitive::Image {
+            id: "tiff".into(),
+            z_order: 0,
+            asset_id: "a".into(),
+            x: 0.0,
+            y: 0.0,
+            width: 2.0,
+            height: 1.0,
+            transform: Affine::identity(),
+        });
+        let mut images: HashMap<&str, &[u8]> = HashMap::new();
+        images.insert("a", &data);
+        let page = render_list(None, &list, &images, 1.0).unwrap();
         assert_eq!(page.skipped_images, 1);
     }
 
@@ -1036,5 +1040,32 @@ mod tests {
             "the registered face must reach the glyph painter"
         );
         ink_bounds(&registered);
+    }
+}
+
+#[cfg(test)]
+mod shared_helper_tests {
+    use super::*;
+
+    #[test]
+    fn colors_keep_separate_shadow_alpha_grammar() {
+        assert!(parse_color("#abcdef").is_some());
+        assert!(shadow_color("#abcdef").is_some());
+        assert_eq!(
+            shadow_color("#abcdef01"),
+            Some(Color::from_rgba8(171, 205, 239, 1))
+        );
+        for value in [
+            "#abc",
+            "#abcd",
+            "transparent",
+            "rgb(1,2,3)",
+            "abcdef",
+            "#gggggg",
+        ] {
+            assert!(parse_color(value).is_none());
+            assert!(shadow_color(value).is_none());
+        }
+        assert!(parse_color("#abcdef01").is_none());
     }
 }

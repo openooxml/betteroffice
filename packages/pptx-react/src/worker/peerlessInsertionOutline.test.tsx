@@ -102,7 +102,7 @@ test('existing text editing survives Escape and leaves with object selection and
     expect(h.client.state.selection).toEqual(selection);
     expect(outline(h.view).getAttribute('style')).toBe(style);
   } finally { submit.mockRestore(); }
-  fireEvent.click(h.view.getByRole('button', { name: '2' }));
+  fireEvent.click(h.view.getByRole('button', { name: 'Slide 2 of 2' }));
   await waitFor(() => expect(h.client.state.activeSlideId).toBe(h.client.state.slides[1]!.id));
   await waitFor(() => expect(h.view.queryByTestId('pptx-text-edit-outline') === null).toBe(true));
 });
@@ -145,7 +145,7 @@ for (const change of ['failure', 'tool', 'slide', 'readOnly', 'replacement', 'Es
       await waitFor(() => expect(replyControl.count()).toBeGreaterThan(0));
       outline(h.view);
       if (change === 'tool') await act(async () => { expect(await h.api.commands.execute('tool', { value: 'textBox' })).toMatchObject({ ok: true }); });
-      if (change === 'slide') fireEvent.click(h.view.getByRole('button', { name: '2' }));
+      if (change === 'slide') fireEvent.click(h.view.getByRole('button', { name: 'Slide 2 of 2' }));
       if (change === 'readOnly') h.view.rerender(h.ui(true));
       if (change === 'replacement') h.view.rerender(<div />);
       if (change === 'Escape') fireEvent.keyDown(h.view.getByRole('textbox', { name: 'Slide text' }), { key: 'Escape' });

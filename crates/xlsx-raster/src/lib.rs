@@ -3,9 +3,11 @@
 
 mod fmath;
 mod font;
+mod picture;
 use std::collections::{HashMap, hash_map::Entry};
 
 pub use font::measure_text;
+pub use picture::{ImageMap, MAX_FRAME_IMAGE_PIXELS, MAX_IMAGE_PIXELS};
 
 use tiny_skia::{
     Color, FillRule, IntRect, Mask, Paint, Path, PathBuilder, Pixmap, Rect, Stroke, StrokeDash,
@@ -14,17 +16,44 @@ use tiny_skia::{
 
 use xlsx_render::{Align, DisplayList, DrawCmd, GeometryPathCommand, Rect as DlRect};
 
+#[cfg(test)]
+thread_local! {
+    static RUN_PATHS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static PIECE_MEASURES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many text commands have entered the run path on this thread, and how
+/// many piece widths that path has measured.
+#[cfg(test)]
+fn run_counts() -> (usize, usize) {
+    (RUN_PATHS.get(), PIECE_MEASURES.get())
+}
+
+#[cfg(test)]
+fn count(counter: &'static std::thread::LocalKey<std::cell::Cell<usize>>) {
+    counter.set(counter.get() + 1);
+}
+
+#[cfg(not(feature = "fonts"))]
 /// paint a display list and encode it as png bytes.
 pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
+    render_png_with_images(dl, &ImageMap::new())
+}
+
+#[cfg(not(feature = "fonts"))]
+/// [`render_png`], painting each image command from `images`.
+pub fn render_png_with_images(dl: &DisplayList, images: &ImageMap<'_>) -> Result<Vec<u8>, String> {
     let w = (dl.width.ceil() as u32).max(1);
     let h = (dl.height.ceil() as u32).max(1);
     let mut pixmap = Pixmap::new(w, h).ok_or_else(|| "invalid pixmap size".to_string())?;
     pixmap.fill(Color::WHITE);
     let mut clip_surface = ClipSurface::default();
     let mut patterns = HashMap::new();
+    let mut pictures = picture::Pictures::new(images);
 
     for cmd in &dl.commands {
         match cmd {
+            DrawCmd::Image { .. } => pictures.paint(&mut pixmap, &mut clip_surface, cmd)?,
             DrawCmd::PatternFill {
                 x,
                 y,
@@ -213,6 +242,7 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
                 bold,
                 italic,
                 underline,
+                underline_style,
                 strike,
                 highlight,
                 dashed_underline,
@@ -225,7 +255,31 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
                 rotation_valign,
                 stacked,
                 wrap,
+                runs,
             } => {
+                if !runs.is_empty() {
+                    #[cfg(test)]
+                    count(&RUN_PATHS);
+                    if let Some(pieces) = xlsx_render::run_pieces(cmd) {
+                        let mut measured = PieceWidths::new(measure_piece);
+                        let lines = match wrap {
+                            Some(wrap) => wrapped_lines(*y, wrap, text, &pieces, &mut measured),
+                            None => vec![(*y, pieces)],
+                        };
+                        for (y, pieces) in lines {
+                            paint_pieces(
+                                &mut pixmap,
+                                &mut measured,
+                                (*x, y),
+                                *align,
+                                clip,
+                                text,
+                                &pieces,
+                            )?;
+                        }
+                        continue;
+                    }
+                }
                 let run = font::TextRun {
                     x: *x,
                     y: *y,
@@ -237,6 +291,7 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
                     bold: *bold,
                     italic: *italic,
                     underline: *underline,
+                    double_underline: double_underline(*underline_style),
                     strike: *strike,
                     highlight: highlight.as_deref().map(parse_color).transpose()?,
                     dashed_underline: *dashed_underline,
@@ -281,11 +336,12 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
                     let lines = xlsx_render::wrap::wrap_lines(text, wrap.width, |line| {
                         font::measure_text(line, *font_size)
                     });
-                    for (index, line) in lines.iter().enumerate() {
+                    let count = xlsx_render::wrap::wrapped_lines_kept(lines.len(), wrap);
+                    for (index, line) in lines.iter().take(count).enumerate() {
                         font::paint_text(
                             &mut pixmap,
                             &font::TextRun {
-                                y: xlsx_render::wrap::wrapped_line_y(*y, index, lines.len(), wrap),
+                                y: xlsx_render::wrap::wrapped_line_y(*y, index, count, wrap),
                                 text: line,
                                 ..run
                             },
@@ -298,19 +354,7 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
         }
     }
 
-    let pixels = pixmap.take_demultiplied();
-    let mut data = Vec::new();
-    {
-        let mut encoder = png::Encoder::new(&mut data, w, h);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        encoder.set_compression(png::Compression::Fast);
-        let mut writer = encoder.write_header().map_err(|e| e.to_string())?;
-        writer
-            .write_image_data(&pixels)
-            .map_err(|e| e.to_string())?;
-    }
-    Ok(data)
+    ooxml_raster::encode_png(pixmap, w, h)
 }
 
 /// paint a line honoring its dash/double style; a `double` without a rail width
@@ -613,65 +657,29 @@ fn clear(pixmap: &mut Pixmap, rect: IntRect) {
 }
 
 fn clipped_to_target(clip: DlRect, width: u32, height: u32) -> Option<DlRect> {
-    let left = clip.x.max(0.0);
-    let top = clip.y.max(0.0);
-    let right = (clip.x + clip.w).min(width as f32);
-    let bottom = (clip.y + clip.h).min(height as f32);
-    (left.is_finite()
-        && top.is_finite()
-        && right.is_finite()
-        && bottom.is_finite()
-        && right > left
-        && bottom > top)
-        .then_some(DlRect {
-            x: left,
-            y: top,
-            w: right - left,
-            h: bottom - top,
-        })
+    ooxml_raster::clipped_to_target(
+        ooxml_raster::RasterRect {
+            x: clip.x,
+            y: clip.y,
+            w: clip.w,
+            h: clip.h,
+        },
+        width,
+        height,
+    )
+    .map(|clip| DlRect {
+        x: clip.x,
+        y: clip.y,
+        w: clip.w,
+        h: clip.h,
+    })
 }
 
 fn build_path(commands: &[GeometryPathCommand]) -> Result<Path, String> {
-    let mut builder = PathBuilder::new();
-    for command in commands {
-        match command {
-            GeometryPathCommand::Move { x, y } => {
-                builder.move_to(path_coord(*x)?, path_coord(*y)?);
-            }
-            GeometryPathCommand::Line { x, y } => {
-                builder.line_to(path_coord(*x)?, path_coord(*y)?);
-            }
-            GeometryPathCommand::Quad { cpx, cpy, x, y } => {
-                builder.quad_to(
-                    path_coord(*cpx)?,
-                    path_coord(*cpy)?,
-                    path_coord(*x)?,
-                    path_coord(*y)?,
-                );
-            }
-            GeometryPathCommand::Cubic {
-                cp1x,
-                cp1y,
-                cp2x,
-                cp2y,
-                x,
-                y,
-            } => {
-                builder.cubic_to(
-                    path_coord(*cp1x)?,
-                    path_coord(*cp1y)?,
-                    path_coord(*cp2x)?,
-                    path_coord(*cp2y)?,
-                    path_coord(*x)?,
-                    path_coord(*y)?,
-                );
-            }
-            GeometryPathCommand::Close => builder.close(),
-        }
-    }
-    builder
-        .finish()
-        .ok_or_else(|| "path has no drawable commands".to_string())
+    ooxml_raster::try_path_from_commands(commands, |x, y| {
+        Ok::<_, String>((path_coord(x)?, path_coord(y)?))
+    })?
+    .ok_or_else(|| "path has no drawable commands".to_string())
 }
 
 fn path_coord(value: f64) -> Result<f32, String> {
@@ -682,6 +690,127 @@ fn path_coord(value: f64) -> Result<f32, String> {
         .ok_or_else(|| "path contains a non-finite coordinate".to_string())
 }
 
+#[cfg(not(feature = "fonts"))]
+fn measure_piece(piece: &xlsx_render::TextPiece, part: &str) -> f32 {
+    font::measure_text(part, piece.font_size)
+}
+
+#[cfg(not(feature = "fonts"))]
+fn paint_pieces(
+    pixmap: &mut Pixmap,
+    measured: &mut PieceWidths<impl FnMut(&xlsx_render::TextPiece, &str) -> f32>,
+    (x, y): (f32, f32),
+    align: Align,
+    clip: &DlRect,
+    text: &str,
+    pieces: &[xlsx_render::TextPiece],
+) -> Result<(), String> {
+    let widths: Vec<f32> = pieces
+        .iter()
+        .map(|piece| measured.width(piece, &text[piece.range.clone()]))
+        .collect();
+    let mut pen = aligned_left(x, align, widths.iter().sum());
+    for (piece, width) in pieces.iter().zip(widths) {
+        font::paint_text(
+            pixmap,
+            &font::TextRun {
+                x: pen,
+                y,
+                text: &text[piece.range.clone()],
+                font_size_pt: piece.font_size,
+                color: parse_color(&piece.color)?,
+                align: Align::Left,
+                clip,
+                bold: piece.bold,
+                italic: piece.italic,
+                underline: piece.underline,
+                double_underline: double_underline(piece.underline_style),
+                strike: piece.strike,
+                highlight: None,
+                dashed_underline: false,
+            },
+        );
+        pen += width;
+    }
+    Ok(())
+}
+
+/// The widths of the parts of one text command's pieces, each part measured
+/// once in its piece's face while the command's lines break and paint.
+struct PieceWidths<M> {
+    measure: M,
+    widths: HashMap<PieceFace, HashMap<String, f32>>,
+}
+
+/// A piece's family, bold, italic and size bits.
+type PieceFace = (Option<std::sync::Arc<str>>, bool, bool, u32);
+
+impl<M: FnMut(&xlsx_render::TextPiece, &str) -> f32> PieceWidths<M> {
+    fn new(measure: M) -> Self {
+        Self {
+            measure,
+            widths: HashMap::new(),
+        }
+    }
+
+    fn width(&mut self, piece: &xlsx_render::TextPiece, part: &str) -> f32 {
+        let face = (
+            piece.font_family.clone(),
+            piece.bold,
+            piece.italic,
+            piece.font_size.to_bits(),
+        );
+        let widths = self.widths.entry(face).or_default();
+        if let Some(&width) = widths.get(part) {
+            return width;
+        }
+        #[cfg(test)]
+        count(&PIECE_MEASURES);
+        let width = (self.measure)(piece, part);
+        widths.insert(part.to_owned(), width);
+        width
+    }
+}
+
+/// The baseline and pieces of each line a wrapped command keeps.
+fn wrapped_lines(
+    y: f32,
+    wrap: &xlsx_render::TextWrap,
+    text: &str,
+    pieces: &[xlsx_render::TextPiece],
+    measured: &mut PieceWidths<impl FnMut(&xlsx_render::TextPiece, &str) -> f32>,
+) -> Vec<(f32, Vec<xlsx_render::TextPiece>)> {
+    let lines = xlsx_render::wrap_run_lines(text, pieces, wrap.width, |piece, part| {
+        measured.width(piece, part)
+    });
+    let count = xlsx_render::wrap::wrapped_lines_kept(lines.len(), wrap);
+    lines
+        .into_iter()
+        .take(count)
+        .enumerate()
+        .map(|(index, line)| {
+            (
+                xlsx_render::wrap::wrapped_line_y(y, index, count, wrap),
+                line,
+            )
+        })
+        .collect()
+}
+
+/// The left edge of a line `width` wide anchored at `x` by `align`.
+fn aligned_left(x: f32, align: Align, width: f32) -> f32 {
+    match align {
+        Align::Left => x,
+        Align::Center => x - width / 2.0,
+        Align::Right => x - width,
+    }
+}
+
+fn double_underline(style: Option<xlsx_render::RunUnderline>) -> bool {
+    use xlsx_render::RunUnderline::{Double, DoubleAccounting};
+    matches!(style, Some(Double | DoubleAccounting))
+}
+
 /// parse a `#rrggbb` string into a tiny-skia color.
 fn parse_color(s: &str) -> Result<Color, String> {
     let hex = s
@@ -690,19 +819,7 @@ fn parse_color(s: &str) -> Result<Color, String> {
     if hex.len() != 6 && hex.len() != 8 {
         return Err(format!("bad color: {s}"));
     }
-    let byte = |i: usize| {
-        hex.as_bytes()
-            .get(i..i + 2)
-            .and_then(|pair| std::str::from_utf8(pair).ok())
-            .and_then(|pair| u8::from_str_radix(pair, 16).ok())
-            .ok_or_else(|| format!("bad color: {s}"))
-    };
-    Ok(Color::from_rgba8(
-        byte(0)?,
-        byte(2)?,
-        byte(4)?,
-        if hex.len() == 8 { byte(6)? } else { 255 },
-    ))
+    ooxml_raster::parse_hex_color(hex).ok_or_else(|| format!("bad color: {s}"))
 }
 
 #[cfg(test)]
@@ -1027,6 +1144,7 @@ mod tests {
                     bold: false,
                     italic: false,
                     underline: false,
+                    underline_style: None,
                     strike: false,
                     highlight: None,
                     dashed_underline: false,
@@ -1039,6 +1157,7 @@ mod tests {
                     rotation_valign: None,
                     stacked: false,
                     wrap: None,
+                    runs: Vec::new(),
                 },
             ],
             grid: xlsx_render::GridMeta::default(),
@@ -1077,6 +1196,7 @@ mod tests {
                 bold: false,
                 italic: false,
                 underline: false,
+                underline_style: None,
                 strike: false,
                 highlight: None,
                 dashed_underline: false,
@@ -1089,6 +1209,7 @@ mod tests {
                 rotation_valign: Some(xlsx_render::TextValign::Bottom),
                 stacked: false,
                 wrap: None,
+                runs: Vec::new(),
             }],
             grid: xlsx_render::GridMeta::default(),
             hyperlinks: Vec::new(),
@@ -1139,6 +1260,7 @@ mod tests {
                 bold: false,
                 italic: false,
                 underline,
+                underline_style: None,
                 strike: underline,
                 highlight: None,
                 dashed_underline: false,
@@ -1151,6 +1273,7 @@ mod tests {
                 rotation_valign: Some(xlsx_render::TextValign::Top),
                 stacked,
                 wrap: None,
+                runs: Vec::new(),
             }],
             grid: xlsx_render::GridMeta::default(),
             hyperlinks: Vec::new(),
@@ -1192,6 +1315,7 @@ mod tests {
 
     #[test]
     fn vertical_header_defaults_to_the_padded_right_edge() {
+        const COL_WIDTH: f64 = 3.54296875;
         let mut bounds = Vec::new();
         for horizontal in [
             None,
@@ -1209,7 +1333,7 @@ mod tests {
                 ..Default::default()
             });
             let mut sheet = xlsx_model::Sheet::new("Sheet1");
-            sheet.col_widths.insert(0, 3.54296875);
+            sheet.col_widths.insert(0, COL_WIDTH);
             sheet.row_heights.insert(0, 213.5);
             sheet.set_cell(
                 xlsx_model::CellRef::new(0, 0),
@@ -1240,8 +1364,12 @@ mod tests {
             bounds[1].0 < bounds[2].0 && bounds[2].0 < bounds[3].0,
             "{bounds:?}"
         );
+        let col_px = xlsx_render::geometry::col_chars_to_px(COL_WIDTH) as u32;
+        let padded_right = col_px - 2;
         assert!(
-            bounds[0].0 + bounds[0].2 > 30 && bounds[0].2 < 28,
+            bounds[0].0 + bounds[0].2 > col_px
+                && bounds[0].2 < padded_right
+                && bounds[0].2 + 4 >= padded_right,
             "{bounds:?}"
         );
         assert!(bounds.iter().all(|b| b.3 < 283), "{bounds:?}");
@@ -1309,6 +1437,112 @@ mod tests {
     }
 
     #[test]
+    fn wrapped_text_paints_at_most_the_lines_its_display_list_keeps() {
+        let cell = DlRect {
+            x: 0.0,
+            y: 0.0,
+            w: 60.0,
+            h: 100.0,
+        };
+        let bands = |max_lines: Option<u32>| {
+            let wrap = serde_json::json!({
+                "width": 30.0,
+                "lineHeight": 20.0,
+                "valign": "center",
+                "maxLines": max_lines,
+            });
+            let mut dl = text_dl("one two six", cell, false, None, false);
+            if let DrawCmd::Text { wrap: slot, .. } = &mut dl.commands[0] {
+                *slot = Some(serde_json::from_value(wrap).unwrap());
+            }
+            ink_row_bands(&dl).len()
+        };
+        let kept = [Some(1), Some(2), Some(u32::MAX), None].map(bands);
+        assert_eq!(kept, [1, 2, 4, 4]);
+    }
+
+    fn wrapped_row(row: u32, row_pt: f64, scroll: f32, zoom: f32) -> DisplayList {
+        let mut workbook = xlsx_model::Workbook::default();
+        workbook.styles.cell_xfs.push(xlsx_model::Xf {
+            alignment: Some(xlsx_model::Alignment {
+                v: Some(xlsx_model::VAlign::Center),
+                wrap_text: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let mut sheet = xlsx_model::Sheet::new("Sheet1");
+        sheet.col_widths.insert(0, 6.0);
+        sheet.row_heights.insert(row, row_pt);
+        if row > 0 {
+            let top_left = xlsx_model::CellRef::new(row, 0);
+            sheet.freeze_pane = Some(xlsx_model::FreezePane::new(row, 0, top_left));
+        }
+        sheet.set_cell(
+            xlsx_model::CellRef::new(row, 0),
+            xlsx_model::Cell {
+                value: xlsx_model::CellValue::Text {
+                    value: "xxxxx xxxx xxxx xxxx".into(),
+                },
+                style: Some(0),
+                ..Default::default()
+            },
+        );
+        workbook.sheets.push(sheet);
+        let dl = xlsx_render::build_display_list(
+            &workbook,
+            xlsx_model::SheetId(0),
+            &xlsx_render::Viewport {
+                x: 0.0,
+                y: scroll,
+                width: 60.0,
+                height: 100.0,
+            },
+        )
+        .unwrap();
+        xlsx_render::scaled(dl, zoom)
+    }
+
+    #[test]
+    fn a_row_scrolled_partly_under_a_frozen_row_keeps_its_wrapped_lines() {
+        let frozen =
+            xlsx_render::geometry::row_pt_to_px(xlsx_render::geometry::DEFAULT_ROW_HEIGHT_PT);
+        let lines = |scroll: f32| {
+            ink_row_bands(&wrapped_row(1, 40.0, scroll, 1.0))
+                .into_iter()
+                .filter(|&(_, bottom)| bottom as f32 > frozen + 2.0)
+                .count()
+        };
+        assert_eq!([lines(0.0), lines(6.0)], [3, 3]);
+    }
+
+    #[test]
+    fn a_wrapped_row_paints_the_same_lines_at_every_zoom() {
+        for zoom in [1u32, 2, 4] {
+            let widths = ink_band_widths(&wrapped_row(0, 24.5, 0.0, zoom as f32));
+            assert_eq!(widths.len(), 2, "zoom {zoom}: {widths:?}");
+            assert!(
+                widths[0] > widths[1] + 3 * zoom,
+                "zoom {zoom}: the first word should lead: {widths:?}"
+            );
+        }
+    }
+
+    fn ink_band_widths(dl: &DisplayList) -> Vec<u32> {
+        let pixels = Pixmap::decode_png(&render_png(dl).unwrap()).unwrap();
+        let dark = |x: u32, y: u32| pixels.pixel(x, y).unwrap().red() < 128;
+        ink_row_bands(dl)
+            .into_iter()
+            .map(|(top, bottom)| {
+                let ink: Vec<u32> = (0..pixels.width())
+                    .filter(|&x| (top..=bottom).any(|y| dark(x, y)))
+                    .collect();
+                ink.last().unwrap() - ink[0] + 1
+            })
+            .collect()
+    }
+
+    #[test]
     fn rotated_number_overflow_paints_hashes_along_its_direction() {
         let cell = DlRect {
             x: 0.0,
@@ -1357,6 +1591,53 @@ mod tests {
             bottom - top < 40,
             "combined cluster should occupy two lines, ink {top}..{bottom}"
         );
+    }
+
+    #[test]
+    fn underline_kinds_paint_one_or_two_lines() {
+        use xlsx_render::RunUnderline;
+
+        let cell = DlRect {
+            x: 0.0,
+            y: 0.0,
+            w: 160.0,
+            h: 80.0,
+        };
+        let underlined = |underline: bool, style: Option<RunUnderline>| {
+            let mut dl = text_dl("    ", cell, false, None, underline);
+            let DrawCmd::Text {
+                font_size,
+                underline_style,
+                strike,
+                ..
+            } = &mut dl.commands[0]
+            else {
+                unreachable!()
+            };
+            *font_size = 40.0;
+            *underline_style = style;
+            *strike = false;
+            dl
+        };
+        let bands = |underline: bool, style: Option<RunUnderline>| {
+            ink_row_bands(&underlined(underline, style)).len()
+        };
+        assert_eq!(bands(false, None), 0);
+        assert_eq!(bands(false, Some(RunUnderline::Double)), 0);
+        assert_eq!(bands(true, None), 1);
+        assert_eq!(bands(true, Some(RunUnderline::SingleAccounting)), 1);
+        assert_eq!(bands(true, Some(RunUnderline::Double)), 2);
+        assert_eq!(bands(true, Some(RunUnderline::DoubleAccounting)), 2);
+        for (accounting, plain) in [
+            (RunUnderline::SingleAccounting, None),
+            (RunUnderline::DoubleAccounting, Some(RunUnderline::Double)),
+        ] {
+            assert_eq!(
+                render_png(&underlined(true, Some(accounting))).unwrap(),
+                render_png(&underlined(true, plain)).unwrap(),
+                "{accounting:?} draws like {plain:?}"
+            );
+        }
     }
 
     #[test]
@@ -1593,5 +1874,52 @@ mod tests {
             clip: Some(full(40.0, 40.0)),
         };
         assert_eq!(render(40.0, 40.0, rails).pixel(10, 4).unwrap().red(), 0);
+    }
+}
+
+#[cfg(all(test, not(feature = "fonts")))]
+mod rich_text_tests;
+
+#[cfg(feature = "fonts")]
+mod native;
+#[cfg(feature = "fonts")]
+pub use native::{
+    RasterFonts, render_png, render_png_with_fonts, render_png_with_fonts_and_images,
+    render_png_with_images,
+};
+
+#[cfg(test)]
+mod shared_helper_tests {
+    use super::*;
+
+    #[test]
+    fn color_keeps_long_hex_only_grammar() {
+        for value in ["#abcdef", "#abcdef01"] {
+            assert!(parse_color(value).is_ok());
+        }
+        for value in [
+            "#abc",
+            "#abcd",
+            "transparent",
+            "rgb(1,2,3)",
+            "abcdef",
+            "#gggggg",
+        ] {
+            assert_eq!(parse_color(value), Err(format!("bad color: {value}")));
+        }
+    }
+
+    #[test]
+    fn path_keeps_empty_and_non_finite_errors() {
+        assert_eq!(
+            build_path(&[]).unwrap_err(),
+            "path has no drawable commands"
+        );
+        for value in [f64::NAN, f64::INFINITY, f64::MAX] {
+            assert_eq!(
+                build_path(&[GeometryPathCommand::Move { x: value, y: 0.0 }]).unwrap_err(),
+                "path contains a non-finite coordinate"
+            );
+        }
     }
 }

@@ -19,8 +19,11 @@ mod comments;
 mod deck;
 mod effects;
 mod inherit;
+mod metafile;
 mod model;
 mod outline_gradients;
+#[cfg(test)]
+mod owner_lookup_tests;
 pub mod paragraph;
 mod peer;
 mod proposal_diff;
@@ -32,9 +35,13 @@ mod search;
 mod source_run_properties;
 mod staging;
 mod story;
+mod story_owners;
 pub mod structured;
 mod table;
 mod target;
+#[cfg(feature = "test-counters")]
+#[doc(hidden)]
+pub mod test_counters;
 mod undo;
 
 pub use batch::{
@@ -45,6 +52,8 @@ pub use batch::{
 };
 #[doc(hidden)]
 pub use deck::baseline_snapshot;
+#[doc(hidden)]
+pub use metafile::MetafileSvgCache;
 pub use model::*;
 pub use ooxml_drawingml::{ColorValue, GradientFill, GradientStop, ShapeFill};
 #[doc(hidden)]
@@ -117,6 +126,8 @@ pub struct DeckSession {
     _epoch_observer: UpdateSubscription,
     state_update: RefCell<Option<(u64, Arc<Vec<u8>>)>>,
     remote_deletions: remote_cleanup::RemoteDeletions,
+    metafile_svgs: RefCell<MetafileSvgCache>,
+    story_owners: story_owners::StoryOwners,
 }
 
 fn watch_epoch(doc: &Doc) -> EditResult<(Arc<AtomicU64>, UpdateSubscription)> {
@@ -237,6 +248,8 @@ impl DeckSession {
             _epoch_observer,
             state_update: RefCell::new(None),
             remote_deletions: Default::default(),
+            metafile_svgs: Default::default(),
+            story_owners: Default::default(),
         })
     }
 
@@ -299,6 +312,7 @@ impl DeckSession {
             source_run_properties::SourceProperty::Spacing,
             source_run_properties::SourceProperty::Kern,
             source_run_properties::SourceProperty::Caps,
+            source_run_properties::SourceProperty::Strike,
             source_run_properties::SourceProperty::Color,
         ] {
             source_run_properties::import_source(&self, &mut import, property)?;
@@ -484,6 +498,7 @@ impl DeckSession {
     /// from now on, and local structural table undo and redo items are dropped.
     pub fn set_collaborative(&self) -> EditResult<()> {
         self.collaborative.set(true);
+        self.proposals.borrow_mut().previews.clear();
         let mut undo = self.undo.borrow_mut();
         let tables: Vec<_> = undo.tracked_tables().cloned().collect();
         for id in &tables {

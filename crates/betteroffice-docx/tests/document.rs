@@ -359,20 +359,34 @@ fn stories(document: &Document) -> [Vec<BlockContent>; 3] {
     ]
 }
 
+/// A model edit the writer never reads, so the save takes the full write.
+fn take_the_full_write(document: &mut Document) {
+    let BlockContent::Paragraph(paragraph) = &mut document.model_mut().body.content[0] else {
+        panic!("paragraph");
+    };
+    std::sync::Arc::make_mut(paragraph).list_rendering = Some(
+        serde_json::from_str(
+            r#"{"marker":"","level":0,"numId":0,"isBullet":false,"numFmt":"","levelNumFmts":[]}"#,
+        )
+        .unwrap(),
+    );
+}
+
 /// A chart the parser did read is placed by its `w:drawing`, which a save
 /// replays verbatim: the chart part, its relationship and the drawing all
 /// come back on reopen, in the body, a header and a footnote alike. The one
 /// finding is the note writer moving the root's chart binding onto the
 /// `w:footnote` element, as it does for any foreign markup in a note.
 #[test]
-fn a_chart_survives_a_save_in_every_story() {
+fn a_chart_survives_a_full_write_in_every_story() {
     let bytes = charted_story_docx(Some(BAR_CHART));
-    let document = Document::open(&bytes).unwrap();
+    let mut document = Document::open(&bytes).unwrap();
     assert!(!document.model().charts.is_empty());
     for story in stories(&document) {
         assert_eq!(chart_runs(&story), 1);
     }
 
+    take_the_full_write(&mut document);
     let saved = document.save().unwrap();
     let before = ooxml_opc::unzip_parts(&bytes).unwrap();
     let after = ooxml_opc::unzip_parts(&saved).unwrap();
@@ -397,6 +411,7 @@ fn a_chart_survives_a_save_in_every_story() {
         assert_eq!(chart_runs(&story), 1);
     }
 
+    take_the_full_write(&mut reopened);
     reopened
         .replace_paragraph_text("11111111", "Edited natively")
         .unwrap();
@@ -413,6 +428,45 @@ fn a_chart_survives_a_save_in_every_story() {
         saved_part(&edited, "word/charts/chart1.xml").as_bytes(),
         BAR_CHART
     );
+}
+
+#[test]
+fn an_unedited_save_keeps_a_chart_in_every_story() {
+    let bytes = charted_story_docx(Some(BAR_CHART));
+    let saved = Document::open(&bytes).unwrap().save().unwrap();
+    let before = ooxml_opc::unzip_parts(&bytes).unwrap();
+    let after = ooxml_opc::unzip_parts(&saved).unwrap();
+    assert_eq!(
+        ooxml_fidelity::roundtrip_findings(&before, &after).unwrap(),
+        Vec::<String>::new()
+    );
+    for path in [
+        "word/document.xml",
+        "word/header1.xml",
+        "word/footnotes.xml",
+        "word/charts/chart1.xml",
+    ] {
+        assert_eq!(
+            saved_part(&after, path),
+            saved_part(&before, path),
+            "{path}"
+        );
+    }
+    for path in [
+        "word/document.xml",
+        "word/header1.xml",
+        "word/footnotes.xml",
+    ] {
+        assert!(
+            saved_part(&after, path).contains(CHART_DRAWING),
+            "{path} lost its chart drawing"
+        );
+    }
+
+    let reopened = Document::open(&saved).unwrap();
+    for story in stories(&reopened) {
+        assert_eq!(chart_runs(&story), 1);
+    }
 }
 
 const TEXT_BOX_NAMESPACES: &str = concat!(
@@ -451,8 +505,9 @@ fn text_box_docx() -> Vec<u8> {
 }
 
 #[test]
-fn saving_keeps_shape_text_box_bodies_and_character_unit_indents() {
-    let document = Document::open(&text_box_docx()).unwrap();
+fn a_full_write_keeps_shape_text_box_bodies_and_character_unit_indents() {
+    let mut document = Document::open(&text_box_docx()).unwrap();
+    take_the_full_write(&mut document);
     let saved = document.save().unwrap();
     let parts = ooxml_opc::unzip_parts(&saved).unwrap();
     let xml = saved_part(&parts, "word/document.xml");
@@ -466,12 +521,40 @@ fn saving_keeps_shape_text_box_bodies_and_character_unit_indents() {
     assert_eq!(xml.matches(r#"w:firstLine="420""#).count(), 2);
     assert!(xml.contains(r#"<w:ind w:firstLine="0" w:firstLineChars="0"/>"#));
 
-    let reopened = Document::open(&saved).unwrap();
+    let mut reopened = Document::open(&saved).unwrap();
+    take_the_full_write(&mut reopened);
     let resaved = saved_part(
         &ooxml_opc::unzip_parts(&reopened.save().unwrap()).unwrap(),
         "word/document.xml",
     );
     assert_eq!(resaved, xml);
+}
+
+#[test]
+fn an_unedited_save_keeps_shape_text_box_bodies_and_character_unit_indents() {
+    let source = text_box_docx();
+    let saved = Document::open(&source).unwrap().save().unwrap();
+    let xml = saved_part(
+        &ooxml_opc::unzip_parts(&saved).unwrap(),
+        "word/document.xml",
+    );
+    assert_eq!(
+        xml,
+        saved_part(
+            &ooxml_opc::unzip_parts(&source).unwrap(),
+            "word/document.xml"
+        )
+    );
+
+    assert!(xml.matches("<w:txbxContent>").count() >= 2);
+    assert!(xml.contains("Choice callout"));
+    assert!(xml.contains("Inline callout"));
+    assert_eq!(xml.matches(r#"<wps:cNvSpPr txBox="1"/>"#).count(), 2);
+
+    assert_eq!(xml.matches(r#"w:firstLineChars="200""#).count(), 2);
+    assert_eq!(xml.matches(r#"w:firstLine="420""#).count(), 2);
+    assert!(xml.contains(r#"w:firstLineChars="0""#));
+    assert!(xml.contains(r#"w:firstLine="0""#));
 }
 
 #[test]
@@ -927,16 +1010,35 @@ const AUTHORED_IDS: [(&str, &[&str]); 2] = [
     ("word/header1.xml", &["0C000001"]),
 ];
 
-#[test]
-fn an_unedited_save_keeps_every_other_part_and_every_authored_paragraph_id() {
-    let input = word_docx(|_| {});
-    let document = Document::open(&input).unwrap();
-    let ids = paragraph_ids(&document);
-    for id in &ids {
-        assert_eq!(document.paragraph(id).unwrap().para_id.as_ref(), Some(id));
+/// `text` with its character references written out.
+fn decoded(text: &str) -> String {
+    let mut written = String::new();
+    let mut rest = text;
+    while let Some(at) = rest.find("&#") {
+        written.push_str(&rest[..at]);
+        let (reference, after) = rest[at + 2..].split_once(';').unwrap();
+        let code = match reference.strip_prefix(['x', 'X']) {
+            Some(hex) => u32::from_str_radix(hex, 16).unwrap(),
+            None => reference.parse().unwrap(),
+        };
+        written.push(char::from_u32(code).unwrap());
+        rest = after;
     }
+    written.push_str(rest);
+    written
+}
 
-    let saved = document.save().unwrap();
+fn decoded_ids(xml: &str) -> Vec<String> {
+    written_ids(xml)
+        .into_iter()
+        .map(|id| decoded(&id))
+        .collect()
+}
+
+#[test]
+fn an_unedited_save_keeps_every_part_and_every_authored_paragraph_id() {
+    let input = word_docx(|_| {});
+    let saved = Document::open(&input).unwrap().save().unwrap();
     let (before, after) = (
         ooxml_opc::unzip_parts(&input).unwrap(),
         ooxml_opc::unzip_parts(&saved).unwrap(),
@@ -946,40 +1048,47 @@ fn an_unedited_save_keeps_every_other_part_and_every_authored_paragraph_id() {
         after.iter().map(|(name, _)| name).collect::<Vec<_>>()
     );
     for ((name, source), (_, written)) in before.iter().zip(&after) {
-        match AUTHORED_IDS.iter().find(|(part, _)| part == name) {
-            Some((_, authored)) => assert_eq!(
-                written_ids(&String::from_utf8_lossy(written)),
+        if let Some((_, authored)) = AUTHORED_IDS.iter().find(|(part, _)| part == name) {
+            assert_eq!(
+                decoded_ids(&String::from_utf8_lossy(written)),
                 *authored,
                 "{name}"
-            ),
-            None => assert_eq!(written, source, "{name}"),
+            );
         }
+        assert_eq!(written, source, "{name}");
     }
-    assert!(!ids[1..].contains(&W14_ID.to_owned()));
 }
 
 #[test]
-fn repeated_ids_stay_addressable_across_save_and_reopen_cycles() {
+fn an_edit_keeps_repeated_ids_addressable_across_save_and_reopen_cycles() {
     let input = word_docx(|_| {});
     let ids = paragraph_ids(&Document::open(&input).unwrap());
     assert_eq!(
         ids.iter().collect::<std::collections::BTreeSet<_>>().len(),
         6
     );
+    let addressable = |document: &Document| {
+        for id in &ids {
+            assert_eq!(document.paragraph(id).unwrap().para_id.as_ref(), Some(id));
+        }
+    };
 
     let first = Document::open(&input).unwrap().save().unwrap();
     let reopened = Document::open(&first).unwrap();
     assert_eq!(paragraph_ids(&reopened), ids);
-    assert_eq!(reopened.save().unwrap(), first);
+    addressable(&reopened);
 
-    let mut cycled = input;
+    let mut cycled = input.clone();
     for (index, text) in [(2, "nested edit"), (4, "control edit"), (1, "second edit")] {
         let mut document = Document::open(&cycled).unwrap();
         assert_eq!(paragraph_ids(&document), ids);
+        addressable(&document);
         document.replace_paragraph_text(&ids[index], text).unwrap();
         cycled = document.save().unwrap();
     }
     let reopened = Document::open(&cycled).unwrap();
+    assert_eq!(paragraph_ids(&reopened), ids);
+    addressable(&reopened);
     assert_eq!(
         identified_texts(&reopened),
         [
@@ -992,10 +1101,19 @@ fn repeated_ids_stay_addressable_across_save_and_reopen_cycles() {
         ]
         .map(|(id, text)| (id.to_owned(), text.to_owned()))
     );
-    assert_eq!(reopened.save().unwrap(), cycled);
+
+    let xml = package_part(&cycled, "word/document.xml");
+    assert_eq!(decoded_ids(&xml), ids);
+    for untouched in [
+        word_paragraph(W14_ID, "first"),
+        word_paragraph("0B000002", ""),
+        word_paragraph("0B00000&#x33;", "third"),
+    ] {
+        assert!(xml.contains(&untouched), "{untouched}\n{xml}");
+    }
     assert_eq!(
-        written_ids(&package_part(&cycled, "word/document.xml")),
-        ids
+        package_part(&cycled, "word/header1.xml"),
+        package_part(&input, "word/header1.xml")
     );
 }
 
@@ -1013,22 +1131,22 @@ fn replace_in(parts: &mut [(String, String)], name: &str, from: &str, to: &str) 
     *xml = xml.replacen(from, to, 1);
 }
 
-#[test]
-fn fresh_ids_avoid_escaped_ids_in_every_part() {
-    let taken = paragraph_ids(&Document::open(&word_docx(|_| {})).unwrap())[1].clone();
-    let reference = escaped(&taken);
-    let variants: [(&str, PartsEdit<'_>); 3] = [
+/// The package holding `reference` in a later body paragraph, a header or a comment companion.
+fn escaped_id_variants(reference: &str) -> [(&'static str, PartsEdit<'_>); 3] {
+    [
         (
             "a later body paragraph",
-            Box::new(|parts| replace_in(parts, "word/document.xml", "0B00000&#x33;", &reference)),
+            Box::new(move |parts| {
+                replace_in(parts, "word/document.xml", "0B00000&#x33;", reference)
+            }),
         ),
         (
             "a header paragraph",
-            Box::new(|parts| replace_in(parts, "word/header1.xml", "0C000001", &reference)),
+            Box::new(move |parts| replace_in(parts, "word/header1.xml", "0C000001", reference)),
         ),
         (
             "a comment companion reference",
-            Box::new(|parts| {
+            Box::new(move |parts| {
                 parts.push((
                     "word/comments.xml".to_owned(),
                     format!(
@@ -1044,30 +1162,47 @@ fn fresh_ids_avoid_escaped_ids_in_every_part() {
                 ));
             }),
         ),
-    ];
+    ]
+}
+
+#[test]
+fn an_edit_gives_fresh_ids_that_avoid_escaped_ids_in_every_part() {
+    let taken = paragraph_ids(&Document::open(&word_docx(|_| {})).unwrap())[1].clone();
+    let reference = escaped(&taken);
+    let variants = escaped_id_variants(&reference);
     for (holder, edit) in &variants {
         let mut document = Document::open(&word_docx(edit)).unwrap();
         let ids = paragraph_ids(&document);
         assert!(!ids[1..5].contains(&taken), "{holder}: {ids:?}");
-        assert_eq!(
-            ids.iter().collect::<std::collections::BTreeSet<_>>().len(),
-            6,
-            "{holder}"
-        );
+        document.replace_paragraph_text(&ids[1], "edited").unwrap();
+        let saved = document.save().unwrap();
+
+        let written: Vec<String> = ooxml_opc::unzip_parts(&saved)
+            .unwrap()
+            .iter()
+            .flat_map(|(_, xml)| decoded_ids(&String::from_utf8_lossy(xml)))
+            .collect();
+        let mut seen = std::collections::BTreeSet::new();
+        for id in written.iter().filter(|id| id.as_str() != W14_ID) {
+            assert!(seen.insert(id), "{holder}: {written:?}");
+        }
         if *holder == "a later body paragraph" {
-            assert_eq!(ids[5], taken);
-            let mut authored = AUTHORED_IDS[0].1.to_vec();
-            authored[5] = &taken;
+            let xml = package_part(&saved, "word/document.xml");
+            assert!(xml.contains(&reference), "{xml}");
             assert_eq!(
-                written_ids(&package_part(
-                    &document.save().unwrap(),
-                    "word/document.xml"
-                )),
-                authored
+                decoded_ids(&xml),
+                [
+                    W14_ID,
+                    ids[1].as_str(),
+                    W14_ID,
+                    "0B000002",
+                    W14_ID,
+                    taken.as_str(),
+                ]
             );
         }
-        document.replace_paragraph_text(&ids[1], "edited").unwrap();
-        let reopened = Document::open(&document.save().unwrap()).unwrap();
+
+        let reopened = Document::open(&saved).unwrap();
         assert_eq!(paragraph_ids(&reopened), ids, "{holder}");
         assert_eq!(
             get_paragraph_text(reopened.paragraph(&ids[1]).unwrap()),
@@ -1132,4 +1267,393 @@ fn an_editing_session_reads_a_fresh_id_only_once_saved() {
     assert_eq!(edited.text, "second edit");
     assert_eq!(resolve(&ids[4]), AnchorResolution::Missing);
     assert!(matches!(resolve(W14_ID), AnchorResolution::Ambiguous(_)));
+}
+
+#[test]
+fn saving_an_edited_document_twice_gives_the_same_bytes() {
+    let mut document = Document::open(&sample_docx()).unwrap();
+    document
+        .replace_paragraph_text("11111111", "Edited natively")
+        .unwrap();
+
+    let first = document.save().unwrap();
+    let second = document.save().unwrap();
+    assert_eq!(first, second);
+}
+
+#[test]
+fn saving_between_edits_matches_applying_both_edits_before_one_save() {
+    let source = sample_docx();
+    let mut document = Document::open(&source).unwrap();
+    document
+        .replace_paragraph_text("11111111", "First edit")
+        .unwrap();
+    document.save().unwrap();
+    document
+        .replace_paragraph_text("33333333", "Second edit")
+        .unwrap();
+    let saved_between = document.save().unwrap();
+
+    let mut fresh = Document::open(&source).unwrap();
+    fresh
+        .replace_paragraph_text("11111111", "First edit")
+        .unwrap();
+    fresh
+        .replace_paragraph_text("33333333", "Second edit")
+        .unwrap();
+    assert_eq!(saved_between, fresh.save().unwrap());
+}
+
+fn plain_paragraph(text: &str) -> String {
+    format!("<w:p><w:r><w:t>{text}</w:t></w:r></w:p>")
+}
+
+/// A package with a styles part whose main part holds `body`.
+fn body_docx(body: &str) -> Vec<u8> {
+    const REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+    let parts = vec![
+        (
+            "[Content_Types].xml".to_owned(),
+            format!(
+                r#"{XML_DECLARATION}<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>"#
+            ),
+        ),
+        (
+            "_rels/.rels".to_owned(),
+            format!(
+                r#"{XML_DECLARATION}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="{REL}/officeDocument" Target="word/document.xml"/></Relationships>"#
+            ),
+        ),
+        (
+            "word/_rels/document.xml.rels".to_owned(),
+            format!(
+                r#"{XML_DECLARATION}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="{REL}/styles" Target="styles.xml"/></Relationships>"#
+            ),
+        ),
+        (
+            "word/document.xml".to_owned(),
+            format!(
+                r#"{XML_DECLARATION}<w:document {NAMESPACES}><w:body>{body}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>"#
+            ),
+        ),
+        (
+            "word/styles.xml".to_owned(),
+            format!(
+                r#"{XML_DECLARATION}<w:styles {NAMESPACES}><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style></w:styles>"#
+            ),
+        ),
+    ];
+    let parts: Vec<(String, Vec<u8>)> = parts
+        .into_iter()
+        .map(|(name, xml)| (name, xml.into_bytes()))
+        .collect();
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+/// Paragraphs without IDs: two in the body, one in a table cell, one in a
+/// content control and a closing one, in that order.
+fn unidentified_paragraphs() -> [String; 5] {
+    [
+        plain_paragraph("Opening line"),
+        plain_paragraph("Middle line"),
+        plain_paragraph("Cell words"),
+        plain_paragraph("Control words"),
+        plain_paragraph("Closing line"),
+    ]
+}
+
+fn unidentified_docx() -> Vec<u8> {
+    let [opening, middle, cell, control, closing] = unidentified_paragraphs();
+    body_docx(&format!(
+        r#"{opening}{middle}<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>{cell}</w:tc></w:tr></w:tbl><w:sdt><w:sdtPr><w:alias w:val="Clause"/></w:sdtPr><w:sdtContent>{control}</w:sdtContent></w:sdt>{closing}"#
+    ))
+}
+
+/// Asserts that `saved` is `source` with each of the paragraphs in `edits`,
+/// given in document order, replaced by one paragraph holding its new text.
+fn assert_only_paragraphs_changed(source: &str, saved: &str, edits: &[(&str, &str)]) {
+    let (mut source_rest, mut saved_rest) = (source, saved);
+    for (paragraph, text) in edits {
+        let at = source_rest
+            .find(paragraph)
+            .unwrap_or_else(|| panic!("{paragraph} is not in the source"));
+        let kept = &source_rest[..at];
+        assert!(
+            saved_rest.starts_with(kept),
+            "the bytes before the paragraph edited to {text:?} changed:\nsource: {kept}\nsaved: {saved_rest}"
+        );
+        saved_rest = &saved_rest[kept.len()..];
+        assert!(
+            saved_rest.starts_with("<w:p"),
+            "no paragraph where {text:?} was written: {saved_rest}"
+        );
+        let end = saved_rest
+            .find("</w:p>")
+            .map(|end| end + "</w:p>".len())
+            .unwrap_or_else(|| panic!("the paragraph edited to {text:?} is not closed"));
+        assert!(
+            saved_rest[..end].contains(&format!(">{text}<")),
+            "the edited paragraph lacks {text:?}: {}",
+            &saved_rest[..end]
+        );
+        saved_rest = &saved_rest[end..];
+        source_rest = &source_rest[at + paragraph.len()..];
+    }
+    assert_eq!(
+        saved_rest, source_rest,
+        "the bytes after the last edited paragraph changed"
+    );
+}
+
+fn assert_other_parts_kept(source: &[u8], saved: &[u8]) {
+    let (before, after) = (
+        ooxml_opc::unzip_parts(source).unwrap(),
+        ooxml_opc::unzip_parts(saved).unwrap(),
+    );
+    assert_eq!(
+        before.iter().map(|(name, _)| name).collect::<Vec<_>>(),
+        after.iter().map(|(name, _)| name).collect::<Vec<_>>(),
+        "the saved package has other parts"
+    );
+    for ((name, source), (_, written)) in before.iter().zip(&after) {
+        if name != "word/document.xml" {
+            assert_eq!(written, source, "{name} changed");
+        }
+    }
+}
+
+fn assert_index_edit_keeps_other_bytes(index: usize, text: &str) {
+    let source = unidentified_docx();
+    let paragraphs = unidentified_paragraphs();
+    let paragraph = paragraphs[index].as_str();
+    let mut document = Document::open(&source).unwrap();
+    let r = document.replace_paragraph_text_at(index, text);
+    assert!(r.is_ok(), "{r:?}");
+    let saved = document.save().unwrap();
+
+    let reopened = Document::open(&saved).unwrap();
+    assert_eq!(
+        get_paragraph_text(reopened.paragraphs()[index]),
+        text,
+        "paragraph {index}"
+    );
+    let saved_main = package_part(&saved, "word/document.xml");
+    assert!(
+        !saved_main.contains("w14:paraId"),
+        "the save wrote a paragraph ID: {saved_main}"
+    );
+    assert_only_paragraphs_changed(
+        &package_part(&source, "word/document.xml"),
+        &saved_main,
+        &[(paragraph, text)],
+    );
+    assert_other_parts_kept(&source, &saved);
+}
+
+#[test]
+fn editing_a_paragraph_without_an_id_by_index_keeps_every_other_byte() {
+    assert_index_edit_keeps_other_bytes(1, "Rewritten middle");
+}
+
+#[test]
+fn editing_a_table_cell_paragraph_by_index_keeps_every_other_byte() {
+    assert_index_edit_keeps_other_bytes(2, "Rewritten cell");
+}
+
+#[test]
+fn editing_a_content_control_paragraph_by_index_keeps_every_other_byte() {
+    assert_index_edit_keeps_other_bytes(3, "Rewritten control");
+}
+
+#[test]
+fn an_index_past_the_last_paragraph_is_refused() {
+    let mut document = Document::open(&unidentified_docx()).unwrap();
+    let len = document.paragraphs().len();
+    assert_eq!(len, 5);
+    let error = document
+        .replace_paragraph_text_at(len, "nowhere")
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            betteroffice_docx::Error::ParagraphIndexOutOfRange { index, len: 5 } if index == 5
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn a_suggesting_edit_by_id_is_refused() {
+    let mut document = Document::open(&word_docx(|_| {})).unwrap();
+    let before = document.save().unwrap();
+    let context =
+        betteroffice_docx::EditCtx::local("Reviewer", "2026-01-02T03:04:05.000Z").suggesting();
+    let result = document.replace_paragraph_text_with(W14_ID, "first edited", 1, &context);
+    assert!(matches!(
+        result,
+        Err(betteroffice_docx::Error::SuggestingEditUnsupported)
+    ));
+    assert_eq!(document.save().unwrap(), before);
+}
+
+#[test]
+fn a_suggesting_edit_by_index_is_refused() {
+    let mut document = Document::open(&unidentified_docx()).unwrap();
+    let before = document.save().unwrap();
+    let context =
+        betteroffice_docx::EditCtx::local("Reviewer", "2026-01-02T03:04:05.000Z").suggesting();
+    let result = document.replace_paragraph_text_at_with(1, "Rewritten middle", 1, &context);
+    assert!(matches!(
+        result,
+        Err(betteroffice_docx::Error::SuggestingEditUnsupported)
+    ));
+    assert_eq!(document.save().unwrap(), before);
+}
+
+#[test]
+fn edits_by_index_and_by_id_share_one_save() {
+    let paragraphs = [
+        word_paragraph("0A000001", "Identified first"),
+        plain_paragraph("Unidentified middle"),
+        word_paragraph("0A000002", "Identified last"),
+        plain_paragraph("Unidentified tail"),
+    ];
+    let source = body_docx(&paragraphs.concat());
+    let source_main = package_part(&source, "word/document.xml");
+    let mut document = Document::open(&source).unwrap();
+    assert_eq!(document.paragraphs()[1].para_id, None);
+
+    let r = document.replace_paragraph_text_at(1, "Middle by index");
+    assert!(r.is_ok(), "{r:?}");
+    let r = document.replace_paragraph_text("0A000002", "Last by id");
+    assert!(r.is_ok(), "{r:?}");
+    let saved = document.save().unwrap();
+
+    let reopened = Document::open(&saved).unwrap();
+    assert_eq!(
+        get_paragraph_text(reopened.paragraphs()[1]),
+        "Middle by index"
+    );
+    assert_eq!(
+        reopened.paragraph("0A000002").map(get_paragraph_text),
+        Some("Last by id".to_owned())
+    );
+    let saved_main = package_part(&saved, "word/document.xml");
+    assert_eq!(
+        saved_main.matches("w14:paraId").count(),
+        source_main.matches("w14:paraId").count(),
+        "the save changed the number of paragraph IDs: {saved_main}"
+    );
+    assert_only_paragraphs_changed(
+        &source_main,
+        &saved_main,
+        &[
+            (paragraphs[1].as_str(), "Middle by index"),
+            (paragraphs[2].as_str(), "Last by id"),
+        ],
+    );
+    assert_other_parts_kept(&source, &saved);
+}
+
+#[test]
+fn an_edit_by_index_mints_no_paragraph_id() {
+    let source = unidentified_docx();
+    let mut document = Document::open(&source).unwrap();
+    let r = document.replace_paragraph_text_at(1, "Rewritten middle");
+    assert!(r.is_ok(), "{r:?}");
+    let receipt = r.unwrap();
+    assert!(
+        receipt.new_para_ids.is_empty(),
+        "{:?}",
+        receipt.new_para_ids
+    );
+    assert!(
+        receipt.revision_ids.is_empty(),
+        "{:?}",
+        receipt.revision_ids
+    );
+    let range = receipt.range.expect("the receipt has a range");
+    assert_eq!(range.start.story, "body");
+    assert_eq!(range.start.offset, 0);
+    assert_eq!(
+        range.end.offset,
+        "Rewritten middle".encode_utf16().count() as u32
+    );
+    assert_eq!(document.paragraphs()[1].para_id, None);
+    let saved = document.save().unwrap();
+
+    let original = Document::open(&source).unwrap();
+    let reopened = Document::open(&saved).unwrap();
+    assert_eq!(
+        get_paragraph_text(reopened.paragraphs()[1]),
+        "Rewritten middle"
+    );
+    assert_eq!(
+        get_paragraph_text(reopened.paragraphs()[0]),
+        get_paragraph_text(original.paragraphs()[0])
+    );
+    assert_eq!(
+        get_paragraph_text(reopened.paragraphs()[2]),
+        get_paragraph_text(original.paragraphs()[2])
+    );
+}
+
+#[test]
+fn edits_by_index_of_two_paragraphs_without_ids_report_the_same_scratch_key() {
+    let source = unidentified_docx();
+    let mut document = Document::open(&source).unwrap();
+    let first = document
+        .replace_paragraph_text_at(0, "Rewritten opening")
+        .unwrap();
+    let last = document
+        .replace_paragraph_text_at(4, "Rewritten closing")
+        .unwrap();
+    assert!(first.new_para_ids.is_empty());
+    assert!(last.new_para_ids.is_empty());
+    let first_range = first.range.unwrap();
+    let last_range = last.range.unwrap();
+    assert_eq!(first_range.start.para, "1:0");
+    assert_eq!(first_range.end.para, "1:0");
+    assert_eq!(last_range.start.para, first_range.start.para);
+    assert_eq!(last_range.end.para, first_range.end.para);
+    let saved = document.save().unwrap();
+
+    let original = Document::open(&source).unwrap();
+    let reopened = Document::open(&saved).unwrap();
+    let mut expected: Vec<String> = original
+        .paragraphs()
+        .into_iter()
+        .map(get_paragraph_text)
+        .collect();
+    expected[0] = "Rewritten opening".to_owned();
+    expected[4] = "Rewritten closing".to_owned();
+    let texts: Vec<String> = reopened
+        .paragraphs()
+        .into_iter()
+        .map(get_paragraph_text)
+        .collect();
+    assert_eq!(texts, expected);
+    let saved_main = package_part(&saved, "word/document.xml");
+    assert!(!saved_main.contains("w14:paraId"));
+}
+
+#[test]
+fn an_edit_by_index_of_a_paragraph_with_an_id_reports_that_id() {
+    let source = sample_docx();
+    let mut by_index = Document::open(&source).unwrap();
+    let index = by_index
+        .paragraphs()
+        .iter()
+        .position(|paragraph| paragraph.para_id.as_deref() == Some("33333333"))
+        .unwrap();
+    let mut by_id = Document::open(&source).unwrap();
+
+    let receipt = by_index
+        .replace_paragraph_text_at(index, "Rewritten by index")
+        .unwrap();
+    let expected = by_id
+        .replace_paragraph_text("33333333", "Rewritten by index")
+        .unwrap();
+    assert_eq!(receipt, expected);
+    assert_eq!(by_index.save().unwrap(), by_id.save().unwrap());
 }

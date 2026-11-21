@@ -1,6 +1,5 @@
 import { validPipePayload, type PipeCommandPayload } from '../../../../shared/collaboration-pipe/protocol';
-import { validAwarenessCursor } from '../collaboration/awareness';
-import { DEFAULT_MAX_FRAME_BYTES } from '../collaboration/protocol';
+import { DEFAULT_MAX_FRAME_BYTES, validAwarenessCursor } from '../collaboration/validation';
 import type { AwarenessCursor } from '../collaboration/types';
 import type { XlsxRangeTarget } from '../edits';
 import type {
@@ -111,7 +110,7 @@ export type WorkbookCommandPayload<K extends WorkbookCommandKind> = K extends Wo
   : K extends 'collabPipe' ? PipeCommandPayload<AwarenessCursor>
   : K extends 'select' ? { selection: WorkbookCommandSelection }
   : K extends 'applyUpdate' ? { update: Uint8Array; updates?: Uint8Array[] }
-  : { readOnly: boolean };
+  : { readOnly: boolean; allowHostProposals?: boolean };
 
 export interface WorkbookCommandFrameRequest {
   sheet: number;
@@ -284,7 +283,8 @@ export function validateWorkbookCommandPayload(command: WorkbookCommand, pipeFra
       valid &&= payload.update instanceof Uint8Array && (payload.updates === undefined ||
         Array.isArray(payload.updates) && payload.updates.every((update) => update instanceof Uint8Array));
     }
-    else if (command.kind === 'setReadOnly') valid &&= typeof payload.readOnly === 'boolean';
+    else if (command.kind === 'setReadOnly') valid &&= typeof payload.readOnly === 'boolean' &&
+      (payload.allowHostProposals === undefined || typeof payload.allowHostProposals === 'boolean');
     else if (command.kind === 'applyOps' && 'toolbar' in payload) {
       valid &&= !('args' in payload) && record(payload.toolbar) &&
         (payload.toolbar.id === 'refreshProposals' ? payload.toolbar.target === undefined : target(payload.toolbar.target)) &&

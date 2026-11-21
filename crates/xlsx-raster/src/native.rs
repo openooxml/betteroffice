@@ -1,0 +1,530 @@
+use super::*;
+use std::sync::Arc;
+
+const MAX_FONT_BYTES: usize = 32 * 1024 * 1024;
+const MAX_FONT_FACES: usize = 256;
+const MAX_FONT_REGISTRATIONS: usize = 4_096;
+
+#[derive(Default)]
+pub struct RasterFonts {
+    faces: HashMap<(String, bool, bool), Vec<font::FontFace>>,
+    data: Vec<Arc<[u8]>>,
+    registered: Vec<(ooxml_text::FontId, font::FaceInfo)>,
+    stack: font::FontStack,
+    registrations: usize,
+}
+
+impl RasterFonts {
+    pub fn register_font(
+        &mut self,
+        family: &str,
+        bold: bool,
+        italic: bool,
+        data: Vec<u8>,
+        face_bold: bool,
+        face_italic: bool,
+    ) -> Result<(), String> {
+        if data.len() > MAX_FONT_BYTES {
+            return Err(format!("font exceeds {MAX_FONT_BYTES} bytes"));
+        }
+        self.register_shared_font(family, bold, italic, data.into(), face_bold, face_italic)
+    }
+
+    pub fn register_shared_font(
+        &mut self,
+        family: &str,
+        bold: bool,
+        italic: bool,
+        data: Arc<[u8]>,
+        face_bold: bool,
+        face_italic: bool,
+    ) -> Result<(), String> {
+        if data.len() > MAX_FONT_BYTES {
+            return Err(format!("font exceeds {MAX_FONT_BYTES} bytes"));
+        }
+        let key = (family.trim().to_lowercase(), bold, italic);
+        if self.faces.get(&key).is_some_and(|chain| {
+            chain.iter().any(|face| {
+                (face.bold, face.italic) == (face_bold, face_italic)
+                    && (Arc::ptr_eq(&face.data, &data) || face.data == data)
+            })
+        }) {
+            return Ok(());
+        }
+        if self.registrations >= MAX_FONT_REGISTRATIONS {
+            return Err(format!(
+                "more than {MAX_FONT_REGISTRATIONS} font registrations"
+            ));
+        }
+        let known = self
+            .data
+            .iter()
+            .position(|known| Arc::ptr_eq(known, &data) || known.as_ref() == data.as_ref());
+        let (data, (id, info)) = if let Some(index) = known {
+            (Arc::clone(&self.data[index]), self.registered[index])
+        } else {
+            if self.data.len() >= MAX_FONT_FACES {
+                return Err(format!("more than {MAX_FONT_FACES} font faces"));
+            }
+            let Some(info) = font::FaceInfo::read(&data) else {
+                return Err("invalid raster font".into());
+            };
+            let id = self
+                .stack
+                .store
+                .register_shared(Arc::clone(&data))
+                .map_err(|_| "invalid raster font".to_string())?;
+            self.data.push(Arc::clone(&data));
+            self.registered.push((id, info));
+            (data, (id, info))
+        };
+        self.faces.entry(key).or_default().push(font::FontFace {
+            data,
+            bold: face_bold,
+            italic: face_italic,
+            id,
+            info,
+        });
+        self.registrations += 1;
+        Ok(())
+    }
+
+    pub fn face_count(&self) -> usize {
+        self.data.len()
+    }
+
+    pub fn registration_count(&self) -> usize {
+        self.registrations
+    }
+
+    #[doc(hidden)]
+    pub fn shared_font_data(&self, data: &Arc<[u8]>) -> Option<Arc<[u8]>> {
+        self.data
+            .iter()
+            .find(|known| Arc::ptr_eq(known, data) || known.as_ref() == data.as_ref())
+            .map(Arc::clone)
+    }
+
+    pub fn font_data(&self, family: &str, bold: bool, italic: bool) -> Option<&[u8]> {
+        self.chain(family, bold, italic)
+            .first()
+            .map(|face| face.data.as_ref())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn chain_with_stack(
+        &self,
+        family: &str,
+        bold: bool,
+        italic: bool,
+    ) -> (&[font::FontFace], &font::FontStack) {
+        (self.chain(family, bold, italic), &self.stack)
+    }
+
+    fn chain(&self, family: &str, bold: bool, italic: bool) -> &[font::FontFace] {
+        self.faces
+            .get(&(family.trim().to_lowercase(), bold, italic))
+            .map_or(&[], Vec::as_slice)
+    }
+}
+
+pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
+    render_png_with_fonts(dl, &RasterFonts::default())
+}
+
+pub fn render_png_with_fonts(dl: &DisplayList, fonts: &RasterFonts) -> Result<Vec<u8>, String> {
+    render_png_with_fonts_and_images(dl, fonts, &ImageMap::new())
+}
+
+/// [`render_png`], painting each image command from `images`.
+pub fn render_png_with_images(dl: &DisplayList, images: &ImageMap<'_>) -> Result<Vec<u8>, String> {
+    render_png_with_fonts_and_images(dl, &RasterFonts::default(), images)
+}
+
+pub fn render_png_with_fonts_and_images(
+    dl: &DisplayList,
+    fonts: &RasterFonts,
+    images: &ImageMap<'_>,
+) -> Result<Vec<u8>, String> {
+    let w = (dl.width.ceil() as u32).max(1);
+    let h = (dl.height.ceil() as u32).max(1);
+    let mut pixmap = Pixmap::new(w, h).ok_or_else(|| "invalid pixmap size".to_string())?;
+    pixmap.fill(Color::WHITE);
+    let mut clip_surface = ClipSurface::default();
+    let mut patterns = HashMap::new();
+    let mut pictures = super::picture::Pictures::new(images);
+
+    for cmd in &dl.commands {
+        match cmd {
+            DrawCmd::Image { .. } => pictures.paint(&mut pixmap, &mut clip_surface, cmd)?,
+            DrawCmd::PatternFill {
+                x,
+                y,
+                w,
+                h,
+                pattern,
+                fg,
+                bg,
+                origin_x,
+                origin_y,
+                clip,
+            } => {
+                let tile = match patterns.entry((*pattern, fg.clone(), bg.clone())) {
+                    Entry::Occupied(entry) => entry.into_mut(),
+                    Entry::Vacant(entry) => {
+                        let mut tile =
+                            Pixmap::new(8, 8).ok_or_else(|| "invalid pattern tile".to_string())?;
+                        tile.fill(parse_color(bg)?);
+                        let foreground = parse_color(fg)?.to_color_u8().premultiply();
+                        for (y, row) in pattern.mask().into_iter().enumerate() {
+                            for x in 0..8 {
+                                if row & (1 << x) != 0 {
+                                    tile.pixels_mut()[y * 8 + x] = foreground;
+                                }
+                            }
+                        }
+                        entry.insert(tile)
+                    }
+                };
+                let Some(rect) = Rect::from_xywh(
+                    pixel_round(*x),
+                    pixel_round(*y),
+                    pixel_round(x + w) - pixel_round(*x),
+                    pixel_round(y + h) - pixel_round(*y),
+                ) else {
+                    continue;
+                };
+                let paint = Paint {
+                    shader: tiny_skia::Pattern::new(
+                        tile.as_ref(),
+                        tiny_skia::SpreadMode::Repeat,
+                        tiny_skia::FilterQuality::Nearest,
+                        1.0,
+                        Transform::from_translate(pixel_round(*origin_x), pixel_round(*origin_y)),
+                    ),
+                    anti_alias: false,
+                    ..Paint::default()
+                };
+                if let Some(clip) = clip {
+                    let bounds = reach(rect.left(), rect.top(), rect.right(), rect.bottom(), 1.0);
+                    clip_surface.paint(&mut pixmap, *clip, bounds, |target, transform, mask| {
+                        target.fill_rect(rect, &paint, transform, mask);
+                        Ok(())
+                    })?;
+                } else {
+                    pixmap.fill_rect(rect, &paint, Transform::identity(), None);
+                }
+            }
+            DrawCmd::FillRect {
+                x,
+                y,
+                w,
+                h,
+                color,
+                clip,
+            } => {
+                let rect = Rect::from_xywh(*x, *y, *w, *h)
+                    .ok_or_else(|| "invalid fill rectangle".to_string())?;
+                let mut paint = Paint::default();
+                paint.set_color(parse_color(color)?);
+                paint.anti_alias = true;
+                if let Some(clip) = clip {
+                    let bounds = reach(rect.left(), rect.top(), rect.right(), rect.bottom(), 1.0);
+                    clip_surface.paint(&mut pixmap, *clip, bounds, |target, transform, mask| {
+                        target.fill_rect(rect, &paint, transform, mask);
+                        Ok(())
+                    })?;
+                } else {
+                    pixmap.fill_rect(rect, &paint, Transform::identity(), None);
+                }
+            }
+            DrawCmd::Line {
+                x1,
+                y1,
+                x2,
+                y2,
+                width,
+                color,
+                style,
+                rail,
+                clip,
+            } => {
+                let paint =
+                    |target: &mut Pixmap, transform: Transform, mask: Option<&Mask>| match rail {
+                        Some(rail) if style.as_deref() == Some("double") => paint_double(
+                            target, *x1, *y1, *x2, *y2, *width, *rail, color, transform, mask,
+                        ),
+                        _ => paint_line(
+                            target, *x1, *y1, *x2, *y2, *width, color, style, transform, mask,
+                        ),
+                    };
+                if let Some(clip) = clip {
+                    let pen = width.abs().max(rail.map_or(0.0, f32::abs)).max(1.0);
+                    let bounds = reach(*x1, *y1, *x2, *y2, 2.0 * pen + 2.0);
+                    clip_surface.paint(&mut pixmap, *clip, bounds, paint)?;
+                } else {
+                    paint(&mut pixmap, Transform::identity(), None)?;
+                }
+            }
+            DrawCmd::Path {
+                commands,
+                fill,
+                stroke,
+                clip,
+            } => {
+                let path = build_path(commands)?;
+                let mut paint = Paint::default();
+                paint.set_color(parse_color(fill)?);
+                paint.anti_alias = true;
+                let stroke = if let Some(stroke) = stroke {
+                    let mut paint = Paint::default();
+                    paint.set_color(parse_color(&stroke.color)?);
+                    paint.anti_alias = true;
+                    Some((paint, stroke.width))
+                } else {
+                    None
+                };
+                let paint_path =
+                    |target: &mut Pixmap, transform: Transform, mask: Option<&Mask>| {
+                        target.fill_path(&path, &paint, FillRule::Winding, transform, mask);
+                        if let Some((stroke_paint, width)) = &stroke {
+                            target.stroke_path(
+                                &path,
+                                stroke_paint,
+                                &Stroke {
+                                    width: *width,
+                                    ..Stroke::default()
+                                },
+                                transform,
+                                mask,
+                            );
+                        }
+                        Ok(())
+                    };
+                if let Some(clip) = clip {
+                    let pen = stroke.as_ref().map_or(0.0, |(_, width)| width.abs());
+                    let area = path.bounds();
+                    let bounds = reach(
+                        area.left(),
+                        area.top(),
+                        area.right(),
+                        area.bottom(),
+                        2.0 * pen + 2.0,
+                    );
+                    clip_surface.paint(&mut pixmap, *clip, bounds, paint_path)?;
+                } else {
+                    pixmap.fill_path(
+                        &path,
+                        &paint,
+                        FillRule::Winding,
+                        Transform::identity(),
+                        None,
+                    );
+                    if let Some((stroke_paint, width)) = &stroke {
+                        pixmap.stroke_path(
+                            &path,
+                            stroke_paint,
+                            &Stroke {
+                                width: *width,
+                                ..Stroke::default()
+                            },
+                            Transform::identity(),
+                            None,
+                        );
+                    }
+                }
+            }
+            DrawCmd::Text {
+                x,
+                y,
+                text,
+                font_size,
+                color,
+                clip,
+                align,
+                bold,
+                italic,
+                underline,
+                underline_style,
+                strike,
+                highlight,
+                dashed_underline,
+                font_family,
+                number_format,
+                ghost: _,
+                chart: _,
+                rotation_deg,
+                rotation_box,
+                rotation_valign,
+                stacked,
+                wrap,
+                runs,
+            } => {
+                if !runs.is_empty() {
+                    #[cfg(test)]
+                    count(&RUN_PATHS);
+                    if let Some(pieces) = xlsx_render::run_pieces(cmd) {
+                        let mut measured = PieceWidths::new(piece_measure(fonts));
+                        let lines = match wrap {
+                            Some(wrap) => wrapped_lines(*y, wrap, text, &pieces, &mut measured),
+                            None => vec![(*y, pieces)],
+                        };
+                        for (y, pieces) in lines {
+                            paint_pieces(
+                                &mut pixmap,
+                                fonts,
+                                &mut measured,
+                                (*x, y),
+                                *align,
+                                clip,
+                                text,
+                                &pieces,
+                            )?;
+                        }
+                        continue;
+                    }
+                }
+                let run = font::TextRun {
+                    x: *x,
+                    y: *y,
+                    text,
+                    font_size_pt: *font_size,
+                    color: parse_color(color)?,
+                    align: *align,
+                    clip,
+                    bold: *bold,
+                    italic: *italic,
+                    underline: *underline,
+                    double_underline: double_underline(*underline_style),
+                    strike: *strike,
+                    highlight: highlight.as_deref().map(parse_color).transpose()?,
+                    dashed_underline: *dashed_underline,
+                    faces: fonts.chain(font_family.as_deref().unwrap_or("Calibri"), *bold, *italic),
+                    stack: &fonts.stack,
+                };
+                if *stacked {
+                    let cell = rotation_box.as_ref().unwrap_or(clip);
+                    font::paint_stacked_text(
+                        &mut pixmap,
+                        &run,
+                        cell,
+                        (*rotation_valign).unwrap_or(xlsx_render::TextValign::Bottom),
+                    );
+                } else if let Some(deg) = rotation_deg {
+                    let cell = rotation_box.as_ref().unwrap_or(clip);
+                    font::paint_rotated_text(
+                        &mut pixmap,
+                        &run,
+                        *deg,
+                        cell,
+                        (*rotation_valign).unwrap_or(xlsx_render::TextValign::Bottom),
+                        number_format.as_ref(),
+                    );
+                } else if let Some(layout) = number_format {
+                    xlsx_render::paint_number_format(
+                        text,
+                        layout,
+                        *align,
+                        |literal| {
+                            font::measure_text_with_fonts(run.faces, run.stack, literal, *font_size)
+                        },
+                        |literal, x| {
+                            font::paint_text(
+                                &mut pixmap,
+                                &font::TextRun {
+                                    x,
+                                    text: literal,
+                                    align: Align::Left,
+                                    ..run
+                                },
+                            )
+                        },
+                    );
+                } else if let Some(wrap) = wrap {
+                    let lines = xlsx_render::wrap::wrap_lines(text, wrap.width, |line| {
+                        font::measure_text_with_fonts(run.faces, run.stack, line, *font_size)
+                    });
+                    let count = xlsx_render::wrap::wrapped_lines_kept(lines.len(), wrap);
+                    for (index, line) in lines.iter().take(count).enumerate() {
+                        font::paint_text(
+                            &mut pixmap,
+                            &font::TextRun {
+                                y: xlsx_render::wrap::wrapped_line_y(*y, index, count, wrap),
+                                text: line,
+                                ..run
+                            },
+                        );
+                    }
+                } else {
+                    font::paint_text(&mut pixmap, &run);
+                }
+            }
+        }
+    }
+
+    ooxml_raster::encode_png(pixmap, w, h)
+}
+
+/// What part of a piece's text measures in the piece's faces.
+fn piece_measure(fonts: &RasterFonts) -> impl FnMut(&xlsx_render::TextPiece, &str) -> f32 {
+    move |piece: &xlsx_render::TextPiece, part: &str| {
+        font::measure_text_with_fonts(
+            piece_faces(fonts, piece),
+            &fonts.stack,
+            part,
+            piece.font_size,
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_pieces(
+    pixmap: &mut Pixmap,
+    fonts: &RasterFonts,
+    measured: &mut PieceWidths<impl FnMut(&xlsx_render::TextPiece, &str) -> f32>,
+    (x, y): (f32, f32),
+    align: Align,
+    clip: &DlRect,
+    text: &str,
+    pieces: &[xlsx_render::TextPiece],
+) -> Result<(), String> {
+    let widths: Vec<f32> = pieces
+        .iter()
+        .map(|piece| measured.width(piece, &text[piece.range.clone()]))
+        .collect();
+    let mut pen = aligned_left(x, align, widths.iter().sum());
+    for (piece, width) in pieces.iter().zip(widths) {
+        font::paint_text(
+            pixmap,
+            &font::TextRun {
+                faces: piece_faces(fonts, piece),
+                stack: &fonts.stack,
+                x: pen,
+                y,
+                text: &text[piece.range.clone()],
+                font_size_pt: piece.font_size,
+                color: parse_color(&piece.color)?,
+                align: Align::Left,
+                clip,
+                bold: piece.bold,
+                italic: piece.italic,
+                underline: piece.underline,
+                double_underline: double_underline(piece.underline_style),
+                strike: piece.strike,
+                highlight: None,
+                dashed_underline: false,
+            },
+        );
+        pen += width;
+    }
+    Ok(())
+}
+
+fn piece_faces<'f>(fonts: &'f RasterFonts, piece: &xlsx_render::TextPiece) -> &'f [font::FontFace] {
+    let family = piece.font_family.as_deref().unwrap_or("Calibri");
+    fonts.chain(family, piece.bold, piece.italic)
+}
+
+#[cfg(test)]
+#[path = "native_rich_text_tests.rs"]
+mod rich_text_tests;
