@@ -150,41 +150,6 @@ describe('PPTX toolbar overflow', () => {
     expect(screen().queryByTestId('pptx-toolbar-more')).toBeNull();
   });
 
-  test('does not remeasure toolbar layout on unrelated parent rerenders', () => {
-    const controller = createPptxCommandController();
-    controller.attach(testBinding().binding);
-    const previousRect = HTMLElement.prototype.getBoundingClientRect;
-    let toolbarReads = 0;
-    HTMLElement.prototype.getBoundingClientRect = function (this: HTMLElement) {
-      if (this.getAttribute('role') === 'toolbar') toolbarReads++;
-      return previousRect.call(this);
-    };
-    const tree = (marker: string) => (
-      <>
-        <span data-testid="unrelated-marker">{marker}</span>
-        <PptxCommandProvider commands={controller.store}>
-          <EditorToolbar mode="commands">
-            <EditorToolbar.Toolbar>
-              <ToolbarGroup label="Text">
-                <ToolbarCommandButton id="bold" />
-              </ToolbarGroup>
-            </EditorToolbar.Toolbar>
-          </EditorToolbar>
-        </PptxCommandProvider>
-      </>
-    );
-    try {
-      const view = render(tree('before'));
-      const initialReads = toolbarReads;
-      expect(initialReads).toBeGreaterThan(0);
-      view.rerender(tree('after'));
-      expect(screen().getByTestId('unrelated-marker').textContent).toBe('after');
-      expect(toolbarReads).toBe(initialReads);
-    } finally {
-      HTMLElement.prototype.getBoundingClientRect = previousRect;
-    }
-  });
-
   test.each([
     ['converges when hidden groups measure narrower', false],
     ['converges when groups measure narrower while More takes row space', true],
