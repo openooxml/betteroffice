@@ -319,6 +319,80 @@ fn suggested_bold_refuses_projected_field_code_and_result_without_mutation() {
     }
 }
 
+fn ref_field_paragraph(revision: &str) -> String {
+    format!(
+        concat!(
+            r#"<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
+            r#"<w:r><w:instrText xml:space="preserve"> REF entry \h </w:instrText></w:r>"#,
+            r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
+            r#"<w:hyperlink w:anchor="entry"><w:r><w:rPr><w:i/>{}</w:rPr><w:t>Entry</w:t></w:r></w:hyperlink>"#,
+            r#"<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"#,
+        ),
+        revision,
+    )
+}
+
+#[test]
+fn imported_field_result_reject_preserves_projection_and_italic() {
+    let engine = EngineSession::new(9315);
+    seed_from_docx(
+        engine.doc(),
+        &document(&ref_field_paragraph(
+            r#"<w:rPrChange w:id="41" w:author="Prior" w:date="2026-10-01T12:00:00Z"><w:rPr><w:b/></w:rPr></w:rPrChange>"#,
+        )),
+    )
+    .unwrap();
+    let before = engine.doc().story_segments("body").unwrap();
+    let runs = attrs(&engine);
+    assert_eq!(runs[0].0, "Entry");
+    assert_eq!(runs[0].1["fieldResult"]["index"], 0);
+    let revision = engine.doc().list_revisions().unwrap().remove(0);
+    assert_eq!(revision.change.kind, ChangeKind::RunPropertiesChanged);
+    engine
+        .doc()
+        .reject_change(
+            &suggesting(),
+            &ChangeTarget::Revision(revision.change.revision_id),
+        )
+        .unwrap();
+
+    let after = engine.doc().story_segments("body").unwrap();
+    assert_eq!(
+        after.iter().map(|segment| &segment.content).collect::<Vec<_>>(),
+        before.iter().map(|segment| &segment.content).collect::<Vec<_>>()
+    );
+    let rejected = attrs(&engine);
+    assert_eq!(rejected[0].0, "Entry");
+    assert_eq!(rejected[0].1["fieldResult"], runs[0].1["fieldResult"]);
+    assert_eq!(rejected[0].1["hyperlink"], runs[0].1["hyperlink"]);
+    assert_eq!(rejected[0].1["italic"], true);
+    assert!(!rejected[0].1["bold"].as_bool().unwrap_or(false));
+    assert!(rejected[0].1["rPrChange"].is_null());
+    assert!(engine.doc().list_revisions().unwrap().is_empty());
+}
+
+#[test]
+fn suggested_hyperlink_refuses_projected_field_result_without_mutation() {
+    let engine = EngineSession::new(9316);
+    seed_from_docx(engine.doc(), &document(&ref_field_paragraph(""))).unwrap();
+    let runs = attrs(&engine);
+    assert_eq!(runs[0].0, "Entry");
+    assert_eq!(runs[0].1["fieldResult"]["index"], 0);
+    let before = engine.doc().encode_state_as_update_v1();
+    let segments = engine.doc().story_segments("body").unwrap();
+    let result = engine.doc().set_hyperlink(
+        &suggesting(),
+        StoryRange::new("body", 0, 5),
+        Some(Any::from_json(r##"{"href":"#new-entry"}"##).unwrap()),
+    );
+
+    assert_eq!(result, Err(OpError::SuggestedFormattingOverContainer));
+    assert_eq!(engine.doc().encode_state_as_update_v1(), before);
+    assert_eq!(engine.doc().story_segments("body").unwrap(), segments);
+    assert_eq!(attrs(&engine), runs);
+    assert!(engine.doc().list_revisions().unwrap().is_empty());
+}
+
 #[test]
 fn plain_text_suggestions_and_plain_container_formatting_remain_supported() {
     let engine = EngineSession::new(9311);

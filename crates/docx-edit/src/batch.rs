@@ -4486,6 +4486,82 @@ mod direct_tests {
         docx_parse::serializer::write_docx_s13(request, &bytes).unwrap()
     }
 
+    fn assert_host_edit_refuses_suggested_bold(operation: &str) {
+        for direct in [false, true] {
+            let source = document();
+            source
+                .split_paragraph(
+                    &EditCtx::local("", ""),
+                    source.paragraph_mark_position("p").unwrap(),
+                    None,
+                )
+                .unwrap();
+            let doc = EditingDoc::new(9005);
+            crate::seed_from_docx(&doc, &raw_export(&source)).unwrap();
+            doc.set_direct_batches(direct);
+            let para_id = doc.paragraphs("body").unwrap()[0].para_id.clone();
+            doc.toggle_format(
+                &EditCtx::local("Ada", DATE).suggesting(),
+                StoryRange::new("body", 0, 5),
+                crate::SimpleFormat::Bold,
+            )
+            .unwrap();
+            let revisions = doc.list_revisions().unwrap();
+            assert_eq!(revisions.len(), 1);
+            assert_eq!(
+                revisions[0].change.kind,
+                crate::ChangeKind::RunPropertiesChanged
+            );
+            let before = doc.encode_state_as_update_v1();
+            let target = TextTarget::Search {
+                text: "Alpha".to_owned(),
+                within: SearchScope::Story {
+                    story: "body".to_owned(),
+                },
+                view: EditTextView::Accepted,
+            };
+            let step = EditStep::new(match operation {
+                "replace" => EditOperation::ReplaceText {
+                    target,
+                    text: "Hi".to_owned(),
+                    runs: None,
+                },
+                "delete" => EditOperation::DeleteText { target },
+                _ => EditOperation::DeleteParagraphs {
+                    story: "body".to_owned(),
+                    first_para_id: para_id.clone(),
+                    last_para_id: para_id,
+                },
+            });
+            let refusal = apply_text_steps(
+                &doc,
+                &[BatchStep::Edit(&step)],
+                &UndoSession::new(),
+                MAX_STAGING_BYTES,
+            )
+            .unwrap_err();
+
+            assert_eq!(refusal.failure.code, EditFailureCode::TrackedRevisionConflict);
+            assert_eq!(doc.encode_state_as_update_v1(), before);
+            assert_eq!(doc.list_revisions().unwrap(), revisions);
+        }
+    }
+
+    #[test]
+    fn host_replace_refuses_live_run_property_changes() {
+        assert_host_edit_refuses_suggested_bold("replace");
+    }
+
+    #[test]
+    fn host_delete_refuses_live_run_property_changes() {
+        assert_host_edit_refuses_suggested_bold("delete");
+    }
+
+    #[test]
+    fn host_delete_paragraphs_refuses_live_run_property_changes() {
+        assert_host_edit_refuses_suggested_bold("paragraphs");
+    }
+
     #[test]
     fn direct_executor_reuses_revisions_and_removes_owned_insertions() {
         for deleting in [false, true] {

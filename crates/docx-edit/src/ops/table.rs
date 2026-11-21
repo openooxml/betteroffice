@@ -4417,6 +4417,87 @@ mod tests {
     }
 
     #[test]
+    fn fragment_copy_remaps_run_property_changes_independently() {
+        let doc = fragment_doc();
+        let original = doc
+            .insert_table_fragment(
+                &direct(),
+                Position::new("body", 0),
+                &fragment_table(vec![fragment_cell("Hello")]),
+            )
+            .unwrap();
+        let original_story = &original.created_story_ids[0];
+        doc.toggle_format(
+            &suggesting(),
+            crate::StoryRange::new(original_story, 0, 5),
+            crate::SimpleFormat::Bold,
+        )
+        .unwrap();
+        let original_revision = doc
+            .list_revisions()
+            .unwrap()
+            .into_iter()
+            .find(|revision| {
+                revision.story == *original_story
+                    && revision.change.kind == crate::ChangeKind::RunPropertiesChanged
+            })
+            .unwrap();
+        let segments = doc.story_segments(original_story).unwrap();
+        assert_eq!(segments[0].attributes.get("bold"), Some(&Any::Bool(true)));
+        assert!(segments[0].attributes.contains_key("rPrChange"));
+        let mut copied_cell = fragment_cell("Hello");
+        copied_cell["content"][0]["attributes"] =
+            serde_json::to_value(&segments[0].attributes).unwrap();
+        let pasted = doc
+            .insert_table_fragment(
+                &direct(),
+                Position::new("body", 1),
+                &fragment_table(vec![copied_cell]),
+            )
+            .unwrap();
+        let pasted_story = &pasted.created_story_ids[0];
+        assert_ne!(pasted_story, original_story);
+        let pasted_revision = doc
+            .list_revisions()
+            .unwrap()
+            .into_iter()
+            .find(|revision| {
+                revision.story == *pasted_story
+                    && revision.change.kind == crate::ChangeKind::RunPropertiesChanged
+            })
+            .unwrap();
+
+        assert_ne!(
+            pasted_revision.change.revision_id,
+            original_revision.change.revision_id
+        );
+        doc.reject_change(
+            &direct(),
+            &crate::ChangeTarget::Revision(pasted_revision.change.revision_id.clone()),
+        )
+        .unwrap();
+        assert_eq!(
+            doc.selection_context(&crate::StoryRange::new(original_story, 0, 5))
+                .unwrap()
+                .bold,
+            crate::TriState::On
+        );
+        assert_eq!(
+            doc.selection_context(&crate::StoryRange::new(pasted_story, 0, 5))
+                .unwrap()
+                .bold,
+            crate::TriState::Off
+        );
+        let revisions = doc.list_revisions().unwrap();
+        assert!(revisions.contains(&original_revision));
+        assert!(
+            revisions
+                .iter()
+                .all(|revision| revision.change.revision_id != pasted_revision.change.revision_id)
+        );
+    }
+
+    #[test]
     fn fragment_insertion_mid_paragraph_splits() {
         let doc = EditingDoc::new(77);
         doc.create_story("body", "Seed", "Normal", "left").unwrap();
