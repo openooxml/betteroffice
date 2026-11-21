@@ -354,13 +354,16 @@ const typingAfter = (load: Loader) => async (bytes: Uint8Array<ArrayBuffer>) => 
   return opened.save();
 };
 
-/** Each route, and whether it writes the paragraph from the model rather than keeping its source. */
-const MARK_ROUTES: Array<[string, boolean, (bytes: Uint8Array<ArrayBuffer>) => Promise<string>]> = [
-  ['a full rewrite', true, fullRewrite],
-  ['native seed, a save without an edit', false, async (bytes) => (await nativeSeed(bytes)).save()],
-  ['native seed, typing after the run', true, typingAfter(nativeSeed)],
-  ['parseDocx and documentToYrs, a save without an edit', true, async (bytes) => (await parsedProjection(bytes)).save()],
-  ['parseDocx and documentToYrs, typing after the run', true, typingAfter(parsedProjection)],
+/**
+ * Each route, whether it writes the paragraph from the model rather than keeping its source, and
+ * the text it types at the end of the first paragraph.
+ */
+const MARK_ROUTES: Array<[string, boolean, (bytes: Uint8Array<ArrayBuffer>) => Promise<string>, string]> = [
+  ['a full rewrite', true, fullRewrite, ''],
+  ['native seed, a save without an edit', false, async (bytes) => (await nativeSeed(bytes)).save(), ''],
+  ['native seed, typing after the run', true, typingAfter(nativeSeed), 'Z'],
+  ['parseDocx and documentToYrs, a save without an edit', true, async (bytes) => (await parsedProjection(bytes)).save(), ''],
+  ['parseDocx and documentToYrs, typing after the run', true, typingAfter(parsedProjection), 'Z'],
 ];
 
 for (const [where, body, read, kept, before] of MARKED) {
@@ -385,11 +388,11 @@ const ONE_FIELD_RUN = '<w:r><w:fldChar w:fldCharType="begin"/><w:instrText xml:s
 const ONE_FIELD_BODY = `<w:p>${text('AB')}${ONE_FIELD_RUN}${text('CD')}</w:p>`;
 const oneFieldFixture = () => fixture(BODY.replace(RUN, ONE_FIELD_RUN));
 
-for (const [route, , save] of MARK_ROUTES) {
+for (const [route, , save, typed] of MARK_ROUTES) {
   test(`a run holding one field is written as read with its cached result: ${route}`, async () => {
     const xml = await save(fixture(ONE_FIELD_BODY));
     expect(xml).toContain(ONE_FIELD_RUN);
-    expect(around(xml, ONE_FIELD_RUN)?.[0]).toBe('AB');
+    expect(around(xml, ONE_FIELD_RUN)).toEqual(['AB', `CD${typed}`]);
   });
 }
 
@@ -418,11 +421,11 @@ const THEMED_RUNS: Array<[string, string]> = [
 ];
 
 for (const [name, run] of THEMED_RUNS) {
-  for (const [route, , save] of MARK_ROUTES) {
+  for (const [route, , save, typed] of MARK_ROUTES) {
     test(`a run holding ${name} with a theme font is written as read: ${route}`, async () => {
       const xml = await save(fixture(`<w:p>${text('AB')}${run}${text('CD')}</w:p>`, undefined, THEME));
       expect(xml).toContain(run);
-      expect(around(xml, run)?.[0]).toBe('AB');
+      expect(around(xml, run)).toEqual(['AB', `CD${typed}`]);
     });
   }
 }
@@ -435,10 +438,25 @@ for (const [name, run] of THEMED_RUNS) {
     const field = complexFieldOf(parsed, 0);
     const before = JSON.stringify(field);
     expect(field.sourceRunDigest).toHaveLength(64);
+    expect(parsed.package.document.sections?.[0]?.content[0]).toBe(parsed.package.document.content[0]);
     documentToYrs(await session(), parsed);
     expect(JSON.stringify(complexFieldOf(parsed, 0))).toBe(before);
+    const section = parsed.package.document.sections![0]!.content[0] as Paragraph;
+    expect(JSON.stringify(section.content.find((child) => child.type === 'complexField'))).toBe(before);
   });
 }
+
+test('documentToYrs gives back every field run digest as parsed when a re-stamp throws', async () => {
+  const [, run] = THEMED_RUNS[0]!;
+  const body = `<w:p>${text('AB')}${run}${text('CD')}</w:p><w:p>${text('EF')}${run}${text('GH')}</w:p>`;
+  const parsed = await parseDocx(fixture(body, undefined, THEME).buffer, { preloadFonts: false });
+  const digests = [complexFieldOf(parsed, 0).sourceRunDigest, complexFieldOf(parsed, 1).sourceRunDigest];
+  expect(digests.map((digest) => digest?.length)).toEqual([64, 64]);
+  Object.freeze(complexFieldOf(parsed, 0));
+  const opened = await session();
+  expect(() => documentToYrs(opened, parsed)).toThrow(TypeError);
+  expect([complexFieldOf(parsed, 0).sourceRunDigest, complexFieldOf(parsed, 1).sourceRunDigest]).toEqual(digests);
+});
 
 test('parseDocx and documentToYrs: an instruction edited before seeding a field with a theme font is written as main writes it', async () => {
   const [, run] = THEMED_RUNS[0]!;
