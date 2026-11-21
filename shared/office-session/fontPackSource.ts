@@ -6,7 +6,7 @@ const ATTACHED = Symbol.for('betteroffice.fontPackSource');
 
 /** Whether a font-pack responder is attached to `worker`, by any copy of this module. */
 export function hasFontPackSource(worker: object): boolean {
-  return (worker as { [ATTACHED]?: boolean })[ATTACHED] === true;
+  return (worker as unknown as Record<symbol, unknown>)[ATTACHED] === true;
 }
 
 /** A responder for requests that reach a handler without an attached responder. */
@@ -24,9 +24,9 @@ export function attachFontPackSource(
     if (responder.receive(event.data)) event.stopImmediatePropagation();
   };
   worker.addEventListener('message', receive);
-  (worker as { [ATTACHED]?: boolean })[ATTACHED] = true;
+  (worker as unknown as Record<symbol, unknown>)[ATTACHED] = true;
   return () => {
     worker.removeEventListener?.('message', receive);
-    delete (worker as { [ATTACHED]?: boolean })[ATTACHED];
+    delete (worker as unknown as Record<symbol, unknown>)[ATTACHED];
   };
 }

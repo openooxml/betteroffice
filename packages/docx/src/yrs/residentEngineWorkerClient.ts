@@ -1265,7 +1265,6 @@ export class ResidentEngineWorkerClient implements DocxCommandClient {
     this.ready = false;
     this.disarmWatchdog();
     this.detachFontPackSource?.();
-    this.fontPackFallback.dispose();
     this.worker.terminate();
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
