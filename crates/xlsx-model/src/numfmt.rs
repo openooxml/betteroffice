@@ -1668,7 +1668,7 @@ fn fractional_second_digits(toks: &[Tok]) -> u32 {
         let mut cnt = 0u32;
         let mut j = k + 1;
         while j < toks.len() && matches!(toks[j], Tok::Digit(_)) {
-            cnt += 1;
+            cnt = cnt.saturating_add(1);
             j += 1;
         }
         if cnt > 0 {
@@ -1766,6 +1766,9 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
 /// (year, month, day) for an integer serial. 1900 system: serial 60 is the
 /// phantom 1900-02-29, serial 0 is excel's 1900-01-00.
 fn serial_to_civil(serial: i64, ds: DateSystem) -> Option<(i64, i64, i64)> {
+    if serial > 1 << 40 {
+        return None;
+    }
     match ds {
         DateSystem::V1900 => {
             if serial < 0 {

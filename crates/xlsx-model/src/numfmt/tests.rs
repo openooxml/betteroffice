@@ -452,6 +452,11 @@ fn fractional_seconds_past_milliseconds_render_zeros() {
         assert_eq!(fv(time_serial(1.5), &format!("ss.{digits}")), format!("01.5{tail}"));
         assert_eq!(fv(time_serial(90.5), &format!("[ss].{digits}")), format!("90.5{tail}"));
     }
+    let huge = i64::MAX as f64 - 262_144.0;
+    for code in ["ss.000", "ss.000000000000000000", "[h]:mm:ss.0", "yyyy-mm-dd"] {
+        assert_eq!(fv(huge, code), "#######");
+        assert_eq!(fv04(huge, code), "#######");
+    }
 }
 
 #[test]
