@@ -198,25 +198,27 @@ pub(crate) fn capture_bookmark_source(shape: &mut Shape, source: &XmlElement) {
     }
     shape.drawing_xml = Some(source.to_bookmarked_raw_inline_xml());
     shape.drawing_run_xml = None;
+    let bodies = shape_text_bodies(shape);
+    let hashes: Vec<_> = bodies
+        .iter()
+        .map(|body| content_sha256(&body.content))
+        .collect();
     let mut model = serde_json::json!({
         "frame": crate::smart_art::frame_model(shape),
         "otherSha256": crate::smart_art::other_model_sha256(shape),
-        "textBoxContentSha256": shape_text_bodies(shape).iter().map(|body| content_sha256(&body.content)).collect::<Vec<_>>()
+        "textBoxContentSha256": hashes,
     });
-    if shape.children.is_some() {
+    if shape.children.is_some()
+        && let Some(drawing) = first_drawing(source)
+        && let Some((sources, _)) = crate::shape::group_text_box_sources(drawing)
+        && sources.len() == bodies.len()
+    {
         let mut containers = Vec::new();
-        content_paths(
-            first_drawing(source).unwrap_or(source),
-            &mut Vec::new(),
-            &mut containers,
-        );
-        let mask: Vec<bool> = shape_text_bodies(shape)
-            .iter()
-            .map(|body| !body.content.is_empty())
-            .collect();
-        let mapped = mask.iter().filter(|kept| **kept).count() == containers.len();
-        model["textBoxBodies"] = serde_json::json!(mapped.then_some(mask));
-        model["groupSha256"] = serde_json::json!(group_model_sha256(shape));
+        content_paths(drawing, &mut Vec::new(), &mut containers);
+        let mask: Vec<bool> = sources.values().map(Option::is_some).collect();
+        if mask.iter().filter(|kept| **kept).count() == containers.len() {
+            model["textBoxBodies"] = serde_json::json!(mask);
+        }
     }
     shape.drawing_model = Some(model);
 }

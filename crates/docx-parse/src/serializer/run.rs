@@ -801,6 +801,17 @@ pub fn serialize_shape_content(
     if let Some(xml) = super::smart_art::replay(shape, context, false)? {
         return Ok(xml);
     }
+    if shape.children.is_some()
+        && (shape.drawing_xml.is_some() || shape.drawing_run_xml.is_some())
+        && shape
+            .drawing_model
+            .as_ref()
+            .is_some_and(|model| model.get("textBoxContentSha256").is_some())
+    {
+        return Err(ParseError::Canonical(
+            "bookmarked group source could not be replayed".to_owned(),
+        ));
+    }
     let is_text_box = shape.text_box.unwrap_or(shape.shape_type == "textBox");
     let floating = shape
         .wrap
