@@ -254,7 +254,13 @@ fn run(direct: &Value, attrs: &Attrs, symbol: bool) -> Result<(), Failure> {
         ("contextualAlternates", "typography", "contextualAlternates"),
     ] {
         if let Some(value) = direct.get(source) {
-            check(key, value, attrs.get(key).and_then(|v| v.get(field)))?;
+            let seeded = attrs.get(key).and_then(|v| v.get(field));
+            let word = (field == "ligatures")
+                .then(|| seeded.and_then(Value::as_str))
+                .flatten()
+                .and_then(crate::formatting::word_ligatures)
+                .map(Value::from);
+            check(key, value, word.as_ref().or(seeded))?;
         }
     }
     if !symbol && let Some(font) = direct.get("fontFamily") {
