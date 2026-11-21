@@ -570,7 +570,10 @@ impl FragmentBuild {
             } else {
                 "revisionId"
             };
-            let id = self.revision_ids.entry(id).or_insert_with(|| doc.next_id(txn));
+            let id = self
+                .revision_ids
+                .entry(id)
+                .or_insert_with(|| doc.next_id(txn));
             let id = Any::from(id.as_str());
             if let Some(Any::Map(info)) = values.get_mut("info") {
                 Arc::make_mut(info).insert(key.to_owned(), id);

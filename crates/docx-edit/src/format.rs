@@ -2005,8 +2005,7 @@ pub(crate) fn previous_run_properties(attrs: &BTreeMap<String, Any>, change: &An
                 .unwrap_or_default(),
         };
         for (key, value) in previous {
-            if !PROTECTED_ATTRS.contains(&key.as_str())
-                && !STRUCTURAL_ATTRS.contains(&key.as_str())
+            if !PROTECTED_ATTRS.contains(&key.as_str()) && !STRUCTURAL_ATTRS.contains(&key.as_str())
             {
                 patch.insert(Arc::from(key), value);
             }

@@ -4616,7 +4616,10 @@ mod direct_tests {
             )
             .unwrap_err();
 
-            assert_eq!(refusal.failure.code, EditFailureCode::TrackedRevisionConflict);
+            assert_eq!(
+                refusal.failure.code,
+                EditFailureCode::TrackedRevisionConflict
+            );
             assert_eq!(doc.encode_state_as_update_v1(), before);
             assert_eq!(doc.list_revisions().unwrap(), revisions);
         }

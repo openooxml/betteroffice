@@ -358,8 +358,14 @@ fn imported_field_result_reject_preserves_projection() {
 
     let after = engine.doc().story_segments("body").unwrap();
     assert_eq!(
-        after.iter().map(|segment| &segment.content).collect::<Vec<_>>(),
-        before.iter().map(|segment| &segment.content).collect::<Vec<_>>()
+        after
+            .iter()
+            .map(|segment| &segment.content)
+            .collect::<Vec<_>>(),
+        before
+            .iter()
+            .map(|segment| &segment.content)
+            .collect::<Vec<_>>()
     );
     let rejected = attrs(&engine);
     assert_eq!(rejected[0].0, "Entry");

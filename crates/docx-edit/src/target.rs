@@ -924,7 +924,9 @@ impl StoryView {
                 }
                 ChunkKind::Text(text) => {
                     if chunk.attr_active(RPR_CHANGE) {
-                        current.suggested_formatting.push((chunk.start, chunk.end()));
+                        current
+                            .suggested_formatting
+                            .push((chunk.start, chunk.end()));
                     }
                     if stamped {
                         current.stamp(chunk.start, chunk.end());
@@ -947,7 +949,9 @@ impl StoryView {
                     }
                     current.embeds.push((kind.clone(), map.clone()));
                     if chunk.attr_active(RPR_CHANGE) {
-                        current.suggested_formatting.push((chunk.start, chunk.end()));
+                        current
+                            .suggested_formatting
+                            .push((chunk.start, chunk.end()));
                     }
                     if stamped {
                         current.stamp(chunk.start, chunk.end());
