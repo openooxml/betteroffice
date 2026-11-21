@@ -506,7 +506,7 @@ export function presentationShapeRectPreview(
   const context = presentationContexts.get(handle);
   if (!context) throw new Error('Presentation shape preview is unavailable');
   return context.jsonWasmCall(() => context.renderer.previewShapeRectJson(
-    context.doc, slideId, shapeId, rect.x, rect.y, rect.width, rect.height,
+    context.doc, { slideId, shapeId, ...rect },
   ));
 }
 

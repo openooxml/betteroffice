@@ -2,6 +2,15 @@
 /* eslint-disable */
 export interface DecodedFontFace { font: Uint8Array; payload?: Uint8Array; }
 
+export interface ShapeRectPreviewRequest {
+    slideId: string;
+    shapeId: string;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+}
+
 
 export class PptxDocument {
     private constructor();
@@ -174,7 +183,7 @@ export class PptxRenderer {
      */
     layoutSlideProfiledJson(document: PptxDocument, slide_index: number): string;
     constructor();
-    previewShapeRectJson(document: PptxDocument, slide_id: string, shape_id: string, x: number, y: number, width: number, height: number): string;
+    previewShapeRectJson(document: PptxDocument, request: ShapeRectPreviewRequest): string;
     registerFallbackFont(family: string, bold: boolean, italic: boolean, bytes: Uint8Array): number;
     registerFont(family: string, bold: boolean, italic: boolean, bytes: Uint8Array): number;
     /**
@@ -351,7 +360,7 @@ export interface InitOutput {
     readonly pptxrenderer_layoutSlideJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxrenderer_layoutSlideProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxrenderer_new: () => number;
-    readonly pptxrenderer_previewShapeRectJson: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number, number, number];
+    readonly pptxrenderer_previewShapeRectJson: (a: number, b: number, c: any) => [number, number, number, number];
     readonly pptxrenderer_registerFallbackFont: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
     readonly pptxrenderer_registerFont: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
     readonly pptxrenderer_requestedFontFacesJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
