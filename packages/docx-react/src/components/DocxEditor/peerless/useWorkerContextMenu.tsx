@@ -162,7 +162,7 @@ export function useWorkerContextMenu(options: {
     clipboardText?: Promise<string>,
   ) => {
     if (action === 'paste') {
-      const fragment = await readClipboardFragment();
+      const fragment = await readClipboardFragment({ formatted: true });
       if (fragment) {
         if (current !== options.binding()) throw new Error('Document was replaced');
         const latest = current.viewStore.getSnapshot();
