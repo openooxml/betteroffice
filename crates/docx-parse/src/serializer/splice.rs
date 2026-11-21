@@ -1509,6 +1509,42 @@ fn keeps_local_field_ranges(source: &str, written: &str) -> Option<bool> {
     )
 }
 
+/// Whether `written` leaves open or closes the same fields outside it as `source` does, so that
+/// writing it in place of `source` keeps every field around it. False where
+/// [`unpaired_field_characters`] is `None`.
+fn keeps_field_characters(source: &str, written: &str) -> bool {
+    unpaired_field_characters(source)
+        .is_some_and(|unpaired| unpaired_field_characters(written) == Some(unpaired))
+}
+
+/// The field characters in `xml` whose partners lie outside it: the ends of fields it does not
+/// begin and the begins of fields it does not end. A field begun and ended in `xml` counts in
+/// neither. `None` on a field character without a begin, separate or end type.
+fn unpaired_field_characters(xml: &str) -> Option<(usize, usize)> {
+    let mut ends = 0usize;
+    let mut begins = 0usize;
+    for tag in tags(xml)? {
+        if tag.end {
+            continue;
+        }
+        let local = tag
+            .name
+            .rsplit_once(':')
+            .map_or(tag.name, |(_, local)| local);
+        if local != "fldChar" {
+            continue;
+        }
+        match &*unescaped(xml, attribute(&tag, "w:fldCharType")?)? {
+            "begin" => begins += 1,
+            "separate" => {}
+            "end" if begins > 0 => begins -= 1,
+            "end" => ends += 1,
+            _ => return None,
+        }
+    }
+    Some((ends, begins))
+}
+
 /// Whether `xml`, one paragraph, holds both ends of everything in it that can pair across
 /// paragraphs, each opened before it is closed, and no field character or move. `None` where
 /// [`unpaired`] is.
@@ -3318,6 +3354,13 @@ pub(crate) fn replace_story_part(
         };
         let rank = u8::from(matches!(anchor, S13SpliceAnchor::Before(_)));
         edits.push((at..at, rank, xml));
+    }
+    if edits
+        .iter()
+        .any(|(range, _, xml)| !keeps_field_characters(&source[range.clone()], xml))
+    {
+        reasons.push("field: replacement changes the field characters around it".to_owned());
+        return None;
     }
     let edits = edits
         .iter()
