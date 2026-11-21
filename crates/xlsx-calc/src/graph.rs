@@ -129,21 +129,23 @@ pub struct UnevaluatedCell {
 const BAND_ROWS: u32 = 16;
 const MAX_RANGE_BANDS: u32 = 16;
 /// columns per block of a [`ReaderIndex`]'s tall ranges. a tall range is
-/// filed under every block its columns touch when it touches at most
-/// `MAX_TALL_BLOCKS` of them, and in one list per sheet otherwise.
+/// filed under each of its columns when it spans at most `BLOCK_COLUMNS`,
+/// under each block its columns touch when it touches at most
+/// `MAX_TALL_BLOCKS`, and in one list per sheet otherwise.
 const BLOCK_COLUMNS: u32 = 16;
 const MAX_TALL_BLOCKS: u32 = 64;
 
 /// the reverse edges into one sheet by cell: single-cell reads by address,
 /// short ranges by the band they start in, tall ones in a list, indexed by
-/// the column blocks of all but the widest.
+/// the columns or column blocks of all but the widest.
 pub(crate) struct ReaderIndex<'g> {
     graph: &'g DepGraph,
     sheet: SheetId,
     cells: HashMap<(RowId, ColId), Vec<NodeKey>>,
     bands: HashMap<u32, Vec<(CellRange, NodeKey)>>,
     tall: Vec<(CellRange, NodeKey)>,
-    tall_columns: HashMap<u32, Vec<usize>>,
+    tall_columns: HashMap<ColId, Vec<usize>>,
+    tall_blocks: HashMap<u32, Vec<usize>>,
     wide: Vec<usize>,
 }
 
@@ -163,20 +165,18 @@ impl ReaderIndex<'_> {
         let banded = (first..=band)
             .filter_map(|band| self.bands.get(&band))
             .flatten();
-        let narrow = self
-            .tall_columns
-            .get(&(cell.col / BLOCK_COLUMNS))
-            .map_or(&[][..], Vec::as_slice);
-        let (mut narrow, mut wide) = (narrow.iter().peekable(), self.wide.iter().peekable());
-        let tall = std::iter::from_fn(move || {
-            let next = match (narrow.peek(), wide.peek()) {
-                (Some(&&n), Some(&&w)) if n < w => narrow.next(),
-                (Some(_), Some(_)) | (None, Some(_)) => wide.next(),
-                (Some(_), None) => narrow.next(),
-                (None, None) => None,
-            };
-            next.map(|&at| &self.tall[at])
-        });
+        let mut candidates: Vec<usize> = [
+            self.tall_columns.get(&cell.col),
+            self.tall_blocks.get(&(cell.col / BLOCK_COLUMNS)),
+            Some(&self.wide),
+        ]
+        .into_iter()
+        .flatten()
+        .flatten()
+        .copied()
+        .collect();
+        candidates.sort_unstable();
+        let tall = candidates.into_iter().map(|at| &self.tall[at]);
         let ranged = banded
             .chain(tall)
             .filter(|(range, _)| range.contains(target));
@@ -592,6 +592,7 @@ impl DepGraph {
             bands: HashMap::new(),
             tall: Vec::new(),
             tall_columns: HashMap::new(),
+            tall_blocks: HashMap::new(),
             wide: Vec::new(),
         };
         for &(range, node) in self.by_sheet.get(&sheet).into_iter().flatten() {
@@ -608,9 +609,13 @@ impl DepGraph {
                     range.start.col / BLOCK_COLUMNS,
                     range.end.col / BLOCK_COLUMNS,
                 );
-                if last - first < MAX_TALL_BLOCKS {
+                if range.end.col - range.start.col < BLOCK_COLUMNS {
+                    for col in range.start.col..=range.end.col {
+                        index.tall_columns.entry(col).or_default().push(at);
+                    }
+                } else if last - first < MAX_TALL_BLOCKS {
                     for block in first..=last {
-                        index.tall_columns.entry(block).or_default().push(at);
+                        index.tall_blocks.entry(block).or_default().push(at);
                     }
                 } else {
                     index.wide.push(at);
