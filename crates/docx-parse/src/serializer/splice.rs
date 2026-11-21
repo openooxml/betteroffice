@@ -3358,6 +3358,7 @@ pub(crate) fn replace_story_part(
     if edits
         .iter()
         .any(|(range, _, xml)| !keeps_field_characters(&source[range.clone()], xml))
+        && unpaired_field_characters(&source) == Some((0, 0))
     {
         reasons.push("field: replacement changes the field characters around it".to_owned());
         return None;
@@ -7364,6 +7365,19 @@ mod tests {
                 &[1]
             ),
             Some(body(&format!("{opening}{edited_middle}{closing}{outside}")))
+        );
+    }
+
+    #[test]
+    fn replacing_a_paragraph_of_a_part_whose_fields_never_balanced_is_written_in_place() {
+        let dangling =
+            "<w:p><w:r><w:fldChar w:fldCharType=\"begin\"/><w:t>Dangling</w:t></w:r></w:p>";
+        let outside = "<w:p><w:r><w:t>Outside the field</w:t></w:r></w:p>";
+        let source = body(&format!("{dangling}{outside}"));
+        let edited = "<w:p><w:r><w:t>Edited</w:t></w:r></w:p>";
+        assert_eq!(
+            replaced(&source, &[edited, outside], &[0]),
+            Some(body(&format!("{edited}{outside}")))
         );
     }
 
