@@ -2001,9 +2001,8 @@ fn apply_para_delta(txn: &mut TransactionMut<'_>, map: &MapRef, delta: &ParaAttr
     for (key, value) in &delta.other {
         set_or_remove(txn, map, key, value.clone());
     }
-    let moved = before.is_some_and(|before| {
-        !crate::list_definitions::same_list(&before, &list_keys(txn, map))
-    });
+    let moved = before
+        .is_some_and(|before| !crate::list_definitions::same_list(&before, &list_keys(txn, map)));
     if moved {
         set_or_remove(txn, map, flag, None);
     }
