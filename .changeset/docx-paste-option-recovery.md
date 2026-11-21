@@ -3,4 +3,4 @@
 "@betteroffice/docx-i18n": patch
 ---
 
-Preserves Paste Options choices after the DOCX editor recovers. If a choice cannot be restored, the editor keeps the original paste, restores later edits, and lets you know.
+Preserves paste formatting choices and later edits when the DOCX editor recovers. If recovery fails, the editor explains that the file itself is undamaged.

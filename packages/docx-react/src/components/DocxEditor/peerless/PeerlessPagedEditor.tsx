@@ -1137,7 +1137,7 @@ export function PeerlessPagedEditor({ sessionOptions, zoom = 1, className, autoF
     return geometry;
   }, [options.prepareGeometry, canvasForPage]);
   const session = usePeerlessEditSession(useMemo(() => ({ ...options, rasterScale, canvasForPage: residentCanvasForPage, prepareGeometry }), [
-    options.source, options.openConnection, options.recovery, prepareGeometry, options.onError, options.onRecoverableError, options.onPasteOptionNotRestored,
+    options.source, options.openConnection, options.recovery, prepareGeometry, options.onError, options.onRecoverableError,
     residentCanvasForPage, rasterScale,
   ]));
   useLayoutEffect(() => {

@@ -1,8 +1,8 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, expect, mock, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { createDocxCommandConnection, DocxSourceWorkerClient, type DocxCommandCheckpoint } from '@betteroffice/docx/worker';
+import { createDocxCommandConnection, DocxSourceWorkerClient, type DocxCommandCheckpoint, type DocxCommandConnection } from '@betteroffice/docx/worker';
 import { residentWorkerFactory, type InProcessResidentWorker } from '@betteroffice/docx/yrs/__fixtures__/residentWorker';
 import { preloadEditWasm } from '@betteroffice/docx/yrs/wasm/index';
 import { preloadOpcWasm } from '@betteroffice/docx/wasm/opc';
@@ -30,11 +30,12 @@ type Resume = Parameters<NonNullable<UsePeerlessEditSessionOptions['recovery']>[
 async function open() {
   const bytes = new Uint8Array(await pagedDocx(1));
   const workers: InProcessResidentWorker[] = [];
-  const checkpoints: number[] = [];
+  const checkpoints: ReturnType<DocxCommandConnection['client']['call']['checkpoint']>[] = [];
+  const events: string[] = [];
   const phases: string[] = [];
-  const replay: { kind: string; reason?: string }[] = [];
-  const onPasteOptionNotRestored = mock(() => {});
+  const resumes: Resume[] = [];
   const connect = async (resume?: Resume) => {
+    if (resume) resumes.push(resume);
     const worker = startWorker(7140);
     workers.push(worker);
     const client = new DocxSourceWorkerClient(worker);
@@ -52,27 +53,20 @@ async function open() {
         measurement: { defaults: { fontSize: 11, fontFamily: 'Liberation Sans' }, fontChains: { 'liberation sans|0|0': [0] } }, renderEnv: {} }),
       layoutWithRegions: true, layoutRevision: 1, extras: '{}',
     });
-    const connection = await createDocxCommandConnection(client, initial);
-    const edit = connection.client.call.edit;
-    connection.client.call.edit = async command => {
-      const ack = await edit(command);
-      if (command.replay) replay.push({ kind: command.kind, reason: ack.outcomes[0]?.reason });
-      return ack;
-    };
-    return connection;
+    return createDocxCommandConnection(client, initial);
   };
   const hook = renderHook(() => usePeerlessEditSession({
     source: bytes, openConnection: () => connect(), canvasForPage: () => null, prepareGeometry: () => undefined,
     recovery: {
       reopen: connect,
-      checkpoint: async resident => {
-        const checkpoint = await resident.client.call.checkpoint();
-        checkpoints.push(checkpoint.throughSeq);
-        return checkpoint;
+      checkpoint: resident => {
+        events.push('checkpoint');
+        const rpc = resident.client.call.checkpoint();
+        checkpoints.push(rpc);
+        return rpc;
       },
       onRecovery: event => { phases.push(event.phase); },
     },
-    onPasteOptionNotRestored,
   }));
   await waitFor(() => expect(hook.result.current.status).toBe('ready'), { timeout: 10_000 });
   const binding = hook.result.current.binding!;
@@ -82,68 +76,99 @@ async function open() {
   }
   const outcomes = await Promise.all(prefix.map(ticket => ticket.ack));
   expect(outcomes.filter(outcome => outcome.status !== 'applied')).toEqual([]);
-  return { binding, workers, checkpoints, phases, replay, onPasteOptionNotRestored };
+  const { session, admission, viewStore } = binding;
+  const recorder: { current: PeerlessPasteRecorder | null } = { current: null };
+  const view = render(<PeerlessInput admission={admission} viewStore={viewStore} pasteRecorder={recorder}
+    onPasteOptionsLiveChange={dismiss => {
+      events.push(dismiss ? 'live' : 'dismiss');
+      binding.setPasteOptionsLive!(dismiss);
+    }}
+    onReplacePasteFragment={(fragment, selection, variant) => submitInputIntent(admission, {
+      kind: 'replacePasteFragment', payload: { fragment, selection,
+        ...(variant === 'plain' ? { plain: true as const } : variant === 'merge' ? { merge: true as const } : {}) },
+    }, { source: 'paste', fence: true })} />);
+  const present = async (throughSeq: number) => {
+    await act(async () => { await session.flush(); });
+    expect(session.state.throughSeq).toBe(throughSeq);
+    expect(session.state.version).toBe(throughSeq);
+    act(() => viewStore.installFrameGeometry({
+      identity: viewStore.getSnapshot().identity, coversThroughSeq: throughSeq, frameEpoch: throughSeq, layoutRevision: 1,
+      pages: [], selectionRects: [], caret: { x: 1, y: 1, width: 1, height: 14 },
+    }));
+  };
+  const rich = { paragraphs: [{ text: 'Rich', runs: [{ text: 'Rich', format: { other: { bold: true } } }] }] };
+  const paste = () => act(() => recorder.current!(rich, submitPasteFragment(admission, rich, { source: 'paste', fence: true }, () => {})));
+  const control = { name: 'Paste Options (Ctrl)' };
+  const choose = (name: string) => {
+    fireEvent.click(view.getByRole('button', control));
+    fireEvent.click(view.getByRole('menuitemradio', { name }));
+  };
+  const edit = () => fireEvent.input(view.getByRole('textbox'), { inputType: 'insertText', target: { value: '!' } });
+  const dismiss = () => fireEvent.pointerDown(document.body);
+  const checkpoint = async () => {
+    await waitFor(() => expect(checkpoints).toHaveLength(1));
+    return await checkpoints[0]!;
+  };
+  paste();
+  await present(128);
+  await view.findByRole('button', control);
+  expect(checkpoints).toHaveLength(0);
+  return { session, view, control, checkpoint, checkpoints, choose, present, paste, edit, dismiss, phases, workers, events, resumes };
 }
 
-const rich = { paragraphs: [{ text: 'Rich', runs: [{ text: 'Rich', format: { other: { bold: true } } }] }] };
-
-for (const clear of ['edit', 'dismiss']) {
-  test(`a due checkpoint waits through two Paste Options choices and runs on ${clear}`, async () => {
-    const { binding, checkpoints } = await open();
-    const { session, admission, viewStore } = binding;
-    const recorder: { current: PeerlessPasteRecorder | null } = { current: null };
-    const view = render(<PeerlessInput admission={admission} viewStore={viewStore} pasteRecorder={recorder}
-      onPasteOptionsLiveChange={binding.setPasteOptionsLive}
-      onReplacePasteFragment={(fragment, selection, variant) => submitInputIntent(admission, {
-        kind: 'replacePasteFragment', payload: { fragment, selection,
-          ...(variant === 'plain' ? { plain: true as const } : variant === 'merge' ? { merge: true as const } : {}) },
-      }, { source: 'paste', fence: true })} />);
-    const present = async (throughSeq: number) => {
-      await act(async () => { await session.flush(); });
-      expect(session.state.throughSeq).toBe(throughSeq);
-      act(() => viewStore.installFrameGeometry({
-        identity: viewStore.getSnapshot().identity, coversThroughSeq: throughSeq, frameEpoch: throughSeq, layoutRevision: 1,
-        pages: [], selectionRects: [], caret: { x: 1, y: 1, width: 1, height: 14 },
-      }));
-      expect(checkpoints).toEqual([]);
-    };
-    act(() => recorder.current!(rich, submitPasteFragment(admission, rich, { source: 'paste', fence: true }, () => {})));
-    await present(128);
-    const control = await view.findByRole('button', { name: 'Paste Options (Ctrl)' });
-    for (const [index, name] of ['Merge Formatting', 'Keep Text Only'].entries()) {
-      fireEvent.click(control);
-      fireEvent.click(view.getByRole('menuitemradio', { name }));
-      await present(129 + index);
-    }
-    if (clear === 'edit') {
-      fireEvent.input(view.getByRole('textbox'), { inputType: 'insertText', target: { value: '!' } });
-    } else {
-      fireEvent.pointerDown(document.body);
-    }
-    await waitFor(() => expect(checkpoints).toEqual([130]));
-    await act(async () => { await session.flush(); });
-    expect(session.state.throughSeq).toBe(clear === 'edit' ? 131 : 130);
-    expect(view.queryByRole('button', { name: 'Paste Options (Ctrl)' })).toBeNull();
+for (const clear of ['edit', 'dismiss'] as const) {
+  test(`a due checkpoint waits through both choices and runs on ${clear}`, async () => {
+    const editor = await open();
+    editor.choose('Merge Formatting');
+    await editor.present(129);
+    editor.choose('Keep Text Only');
+    await editor.present(130);
+    expect(editor.checkpoints).toHaveLength(0);
+    editor[clear]();
+    expect((await editor.checkpoint()).throughSeq).toBe(130);
+    await editor.present(clear === 'edit' ? 131 : 130);
+    expect(editor.view.queryByRole('button', editor.control)).toBeNull();
   }, 30_000);
 }
 
-test('an older checkpoint containing the paste keeps the original paste and replays dependent and later typing', async () => {
-  const { binding: { session }, workers, checkpoints, phases, replay, onPasteOptionNotRestored } = await open();
-  expect((await session.submit('pasteFragment', { fragment: rich }).ack).status).toBe('applied');
-  await waitFor(() => expect(checkpoints).toEqual([128]));
-  const choice = session.submit('replacePasteFragment', { fragment: { paragraphs: [{ text: 'Rich' }] }, plain: true });
-  expect((await choice.ack).status).toBe('applied');
-  expect((await session.submit('insertText', { text: 'After' }, { after: choice }).ack).status).toBe('applied');
-  expect((await session.submit('insertText', { text: 'Opt' }).ack).status).toBe('applied');
-  act(() => workers[0]!.onerror?.({ message: 'Worker stopped' } as ErrorEvent));
-  await waitFor(() => expect(phases).toEqual(['recovering', 'recovered']), { timeout: 10_000 });
-  expect(replay).toEqual([
-    { kind: 'replacePasteFragment', reason: 'paste-changed' },
-    { kind: 'insertText', reason: undefined }, { kind: 'insertText', reason: undefined },
-  ]);
-  expect(onPasteOptionNotRestored).toHaveBeenCalledTimes(1);
-  const restored = workers[1]!.sessions[0]!;
-  expect(restored.paragraphs('body')[0]!.text).toBe('Page 1' + 'i'.repeat(127) + 'RichAfterOpt');
-  expect(restored.storySegments('body').find(segment => segment.kind === 'text' && segment.text.includes('Rich')))
-    .toMatchObject({ attributes: { bold: true } });
+test('dismissing a submitted choice waits for its acknowledgement before checkpointing', async () => {
+  const editor = await open();
+  const worker = editor.workers[0]!;
+  const edits = () => worker.requests.filter(type => type === 'edit').length;
+  const sent = edits();
+  worker.hold();
+  fireEvent.click(editor.view.getByRole('button', editor.control));
+  act(() => {
+    fireEvent.click(editor.view.getByRole('menuitemradio', { name: 'Keep Text Only' }));
+    editor.dismiss();
+  });
+  await waitFor(() => expect(edits()).toBe(sent + 1));
+  expect(editor.checkpoints).toHaveLength(0);
+  expect(editor.session.state.throughSeq).toBe(128);
+  worker.release();
+  expect((await editor.checkpoint()).throughSeq).toBe(129);
+}, 30_000);
+
+test('the cap dismisses Paste Options before checkpointing and recovery restores all edits', async () => {
+  const editor = await open();
+  for (let seq = 129; seq <= 159; seq++) {
+    editor.paste();
+    await editor.present(seq);
+    expect(editor.view.getByRole('button', editor.control)).toBeTruthy();
+    expect(editor.checkpoints).toHaveLength(0);
+  }
+  editor.events.length = 0;
+  editor.choose('Keep Text Only');
+  await editor.present(160);
+  expect((await editor.checkpoint()).throughSeq).toBe(160);
+  expect(editor.events).toEqual(['dismiss', 'checkpoint']);
+  expect(editor.view.queryByRole('button', editor.control)).toBeNull();
+  expect(editor.view.queryByRole('menuitemradio')).toBeNull();
+  editor.edit();
+  await editor.present(161);
+  act(() => editor.workers[0]!.onerror?.({ message: 'Worker stopped' } as ErrorEvent));
+  await waitFor(() => expect(editor.phases).toEqual(['recovering', 'recovered']), { timeout: 10_000 });
+  expect(editor.resumes.map(resume => resume.checkpoint?.throughSeq)).toEqual([160]);
+  const restored = editor.workers[1]!.sessions[0]!;
+  expect(restored.paragraphs('body')[0]!.text).toBe('Page 1' + 'i'.repeat(127) + 'Rich'.repeat(32) + '!');
 }, 30_000);

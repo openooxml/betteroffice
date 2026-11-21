@@ -546,7 +546,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   }, [prepareSave]);
   const sourceGeneration = useMemo(() => ({}), [documentBuffer, parsedDocument, replaced ? replacement : null]);
   const [loaded, setLoaded] = useState<{ generation: object; source: Uint8Array } | null>(null);
-  const reportError = useCallback((error: Error, recoveryFailed = false) => { workerCollaboration.retire(); controller.fail(error, recoveryFailed); errorHandler.current?.(error); }, [controller, workerCollaboration.retire]);
+  const reportError = useCallback((error: Error, recoveryFailed?: boolean) => { workerCollaboration.retire(); controller.fail(error, recoveryFailed); errorHandler.current?.(error); }, [controller, workerCollaboration.retire]);
   const reportShellError = useCallback((error: Error) => { pluginHost.checkFocus(); reportError(error); }, [reportError, pluginHost]);
   const [previewJob, setPreviewJob] = useState<WorkerPreviewJob | null>(null);
   const onPreviewPresented = useCallback((frame: WorkerPreviewJob['frame']) => {
@@ -1104,12 +1104,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const sessionOptions = useMemo<UsePeerlessEditSessionOptions | null>(() => source ? {
     source, openConnection, recovery: workerCollaboration.openOptions ? undefined : recovery, canvasForPage, prepareGeometry, rescaleGeometry, onError: reportError,
     onRecoverableError: error => { controller.stalled(error); reportRecoverableError(error); },
-    onPasteOptionNotRestored: () => {
-      const message = t('editor.pasteOptionNotRestored');
-      toast(message);
-      reportRecoverableError(new Error(message));
-    },
-  } : null, [source, openConnection, recovery, workerCollaboration.openOptions, canvasForPage, prepareGeometry, rescaleGeometry, reportError, reportRecoverableError, controller, t]);
+  } : null, [source, openConnection, recovery, workerCollaboration.openOptions, canvasForPage, prepareGeometry, rescaleGeometry, reportError, reportRecoverableError, controller]);
   useEffect(() => {
     if (shellState.status !== 'ready' || !previewJob) return;
     setPreviewJob(null);

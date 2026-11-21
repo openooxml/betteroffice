@@ -1086,7 +1086,7 @@ export function createPeerlessShellController(initial: Options) {
     },
     memory(samples: WasmModuleMemory[]) { workerMemory = samples.map(sample => ({ ...sample })); reportMemory(); },
     empty() { replace(); documentKey = undefined; reset('empty'); },
-    fail(error: Error, recoveryFailed = false) { replace(); reset('failed', error, recoveryFailed); },
+    fail(error: Error, recoveryFailed = binding !== null) { replace(); reset('failed', error, recoveryFailed); },
     attach(next: PeerlessEditSessionBinding) {
       if (next === binding) return;
       unsubscribe?.(); binding = next;

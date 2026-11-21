@@ -54,7 +54,7 @@ export interface PeerlessInputProps {
   onClipboard?(cut: boolean, data?: DataTransfer | null): Promise<void>;
   onPasteFragment?(fragment: DocxClipboardFragment, inputTime: number): boolean;
   pasteOptions?: boolean;
-  onPasteOptionsLiveChange?(live: boolean): void;
+  onPasteOptionsLiveChange?(dismiss: (() => void) | null): void;
   onReplacePasteFragment?(fragment: DocxClipboardFragment, selection: DocxCommandSelection, variant?: 'plain' | 'merge'): PeerlessAdmissionResult | false;
   pasteRecorder?: RefObject<PeerlessPasteRecorder | null>;
   caretHostRef?: RefObject<HTMLDivElement | null>;
@@ -97,15 +97,14 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
   const setPasteRecord = useCallback((record: PasteRecord | null): void => {
     const wasLive = pasteRecordRef.current !== null;
     pasteRecordRef.current = record;
-    if (wasLive !== (record !== null)) onPasteOptionsLiveChange?.(record !== null);
+    if (wasLive !== (record !== null)) onPasteOptionsLiveChange?.(record ? pasteOptionsRef.current.dismiss : null);
   }, [onPasteOptionsLiveChange]);
   useLayoutEffect(() => () => setPasteRecord(null), [setPasteRecord]);
   const positionRef = useRef<(() => void) | null>(null);
   const dropPasteRecord = useCallback((record: PasteRecord): void => {
     if (pasteRecordRef.current !== record) return;
-    setPasteRecord(null);
     pasteOptionsRef.current.dismiss();
-  }, [setPasteRecord]);
+  }, []);
   const awaitPaste = useCallback((record: PasteRecord, submission: PeerlessAdmissionResult): void => {
     setPasteRecord(record);
     if (submission.status === 'submitted' && admission.getSnapshot().tail !== submission.ticket) {
@@ -164,7 +163,6 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
   pasteOptionsRef.current = pasteOptions;
   const recordPaste = useCallback<PeerlessPasteRecorder>((fragment, submission) => {
     pasteOptionsRef.current.dismiss();
-    setPasteRecord(null);
     if (callbacks.current.pasteOptions === false) return;
     if (viewStore.getRecovering?.() === true) return;
     const view = viewStore.getSnapshot();
@@ -174,7 +172,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       fragment: structuredClone(fragment), offered, ticket: null, end: null,
       version: view.version, incarnation: view.identity.incarnation, reveal: 'show',
     }, submission);
-  }, [awaitPaste, setPasteRecord, viewStore]);
+  }, [awaitPaste, viewStore]);
   const pasteRecorder = props.pasteRecorder;
   useLayoutEffect(() => {
     if (!pasteRecorder) return;
@@ -271,15 +269,13 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
   useLayoutEffect(() => {
     const record = pasteRecordRef.current;
     if (!record || record.incarnation === snapshot.identity.incarnation) return;
-    setPasteRecord(null);
     pasteOptionsRef.current.dismiss();
-  }, [snapshot.identity.incarnation, setPasteRecord]);
+  }, [snapshot.identity.incarnation]);
 
   useLayoutEffect(() => {
     if (!recovering) return;
-    setPasteRecord(null);
     pasteOptionsRef.current.dismiss();
-  }, [recovering, setPasteRecord]);
+  }, [recovering]);
 
   useLayoutEffect(() => {
     const record = pasteRecordRef.current;
@@ -295,10 +291,9 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
     if (!atEnd || snapshot.version !== record.version) {
       if (snapshot.version === record.version && typeof document !== 'undefined' &&
         pasteOptionsRef.current.controlRef.current?.contains(document.activeElement) === true) return;
-      setPasteRecord(null);
       pasteOptionsRef.current.dismiss();
     }
-  }, [snapshot.workerSelection, snapshot.version, setPasteRecord]);
+  }, [snapshot.workerSelection, snapshot.version]);
 
   useLayoutEffect(() => {
     const element = textarea.current;
@@ -317,7 +312,6 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       const normalized = normalizeInputEvent(event, state);
       state = normalized.state;
       if (normalized.intents.length > 0 && event.source !== 'paste') {
-        setPasteRecord(null);
         pasteOptionsRef.current.dismiss();
       }
       if (normalized.preventDefault) native.preventDefault();
@@ -456,7 +450,6 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
     };
     const paste = (event: ClipboardEvent) => {
       clearEscape();
-      setPasteRecord(null);
       pasteOptionsRef.current.dismiss();
       if (state.composing) return;
       event.preventDefault();
@@ -568,7 +561,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
         element.ownerDocument.removeEventListener('pointerdown', clearEscape, true);
       }
     };
-  }, [admission, viewStore, setPasteRecord]);
+  }, [admission, viewStore]);
 
   return <>
   <textarea

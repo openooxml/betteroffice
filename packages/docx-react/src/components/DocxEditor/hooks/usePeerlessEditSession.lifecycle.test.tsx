@@ -127,6 +127,57 @@ test('a requested frame arriving after unmount releases its transferred bitmaps'
   expectClosed(frame);
 });
 
+for (const request of ['requestFullFrame', 'requestViewport'] as const) {
+  test(`a terminal ${request} failure after ready reports a recovery failure`, async () => {
+    const { connection, options } = resident();
+    let reject!: (error: Error) => void;
+    connection[request] = () => new Promise<never>((_, no) => { reject = no; });
+    const onError = mock((_error: Error, _recoveryFailed?: boolean) => {});
+    const view = renderHook(() => usePeerlessEditSession({ ...options, onError }));
+    await waitFor(() => expect(view.result.current.status).toBe('ready'));
+    if (request === 'requestViewport') act(() => view.result.current.binding!.setDisplayWindow!(0, 2));
+    const failure = new SessionFailure('message', 'Invalid worker response');
+    await act(async () => { reject(failure); });
+    expect(onError).toHaveBeenCalledWith(failure, true);
+    expect(view.result.current).toMatchObject({ status: 'failed', recoveryFailed: true });
+  });
+}
+
+test('the byte cap counts from the command that first made a checkpoint due', async () => {
+  const { connection, options } = resident();
+  let throughSeq = 0;
+  connection.client.call.edit = async command => {
+    throughSeq = command.seq;
+    return { ...connection.initial, frame: undefined, throughSeq, version: throughSeq, outcomes: [{ seq: throughSeq, status: 'applied' }] };
+  };
+  const events: string[] = [];
+  const checkpoint = mock(() => {
+    events.push('checkpoint');
+    return Promise.resolve({ epoch: 1, throughSeq, version: throughSeq, state: new Uint8Array() });
+  });
+  connection.client.call.checkpoint = checkpoint;
+  const view = renderHook(() => usePeerlessEditSession({ ...options,
+    recovery: { reopen: async () => connection, checkpoint: resident => resident.client.call.checkpoint() } }));
+  await waitFor(() => expect(view.result.current.status).toBe('ready'));
+  const binding = view.result.current.binding!;
+  binding.setPasteOptionsLive!(() => {
+    events.push('dismiss');
+    binding.setPasteOptionsLive!(null);
+  });
+  const submit = async (bytes: number) => {
+    await act(async () => {
+      expect((await binding.session.submit('applyRemoteUpdate', { update: new ArrayBuffer(bytes) }).ack).status).toBe('applied');
+    });
+  };
+  await submit(1536 * 1024);
+  await submit(128 * 1024);
+  expect(events).toEqual([]);
+  await submit(128 * 1024);
+  await waitFor(() => expect(checkpoint).toHaveBeenCalledTimes(1));
+  expect(await checkpoint.mock.results[0]!.value).toMatchObject({ throughSeq: 3 });
+  expect(events).toEqual(['dismiss', 'checkpoint']);
+});
+
 test('a crashed worker respawns once with the viewport re-sent and a second crash fails the editor through onError', async () => {
   const first = resident();
   let rejectViewport!: (error: Error) => void;
@@ -164,7 +215,8 @@ test('a crashed worker respawns once with the viewport re-sent and a second cras
 for (const [kind, status, reason] of [
   ['insertText', 'refused', 'stale-version'], ['insertText', 'refused', 'stale-anchor'], ['insertText', 'refused', 'read-only'],
   ['insertText', 'refused', 'paste-changed'], ['replacePasteFragment', 'cancelled', 'paste-changed'],
-  ['replacePasteFragment', 'refused', 'stale-anchor'],
+  ['replacePasteFragment', 'refused', 'stale-anchor'], ['replacePasteFragment', 'refused', 'paste-changed'],
+  ['replacePasteFragment', 'refused', 'nothing-to-undo'], ['replacePasteFragment', 'noop', undefined],
 ] as const) {
   test(`recovery fails when a replayed ${kind} is ${status} with ${reason}`, async () => {
     const first = resident();
@@ -183,12 +235,12 @@ for (const [kind, status, reason] of [
     act(() => first.crash(new SessionFailure('crash', 'Worker stopped')));
     await waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
     expect(onError.mock.calls[0]![0]).toBeInstanceOf(SessionFailure);
-    expect(onError.mock.calls[0]![0].message).toContain(reason);
+    expect(onError.mock.calls[0]![0].message).toContain(reason ?? status);
     expect(phases).not.toContain('recovered');
     const result = view.result.current;
     if (result.status !== 'failed') throw new Error('Expected replay to fail');
     const page = render(<ParseError message={result.error.message} recoveryFailed={result.recoveryFailed} />);
-    expect(page.getByRole('alert').textContent).toContain('The editor stopped and could not restore your recent changes.');
+    expect(page.getByRole('alert').textContent).toContain('The editor stopped and could not restore your recent changes. The file itself is not damaged.');
     expect(page.getByRole('alert').textContent).not.toContain('The file may be damaged');
   });
 }

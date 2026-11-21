@@ -1,5 +1,5 @@
 import { expect, test, type Page } from 'playwright/test';
-import type { DocxEngineWorkerResponse } from '../../packages/docx/src/yrs/residentEngineWorkerProtocol';
+import type { DocxEngineWorkerRequest, DocxEngineWorkerResponse } from '../../packages/docx/src/yrs/residentEngineWorkerProtocol';
 import { pagedDocx } from '../../packages/docx-react/src/components/DocxEditor/__fixtures__/pagedDocx';
 import { pinnedEvaluate } from './pinned-evaluate';
 
@@ -7,7 +7,7 @@ interface RecoveryProbe {
   worker?: Worker;
   incarnation: number;
   version: number;
-  checkpoints: number[];
+  checkpoints: Promise<number>[];
 }
 
 declare global {
@@ -19,18 +19,32 @@ async function observeWorker(page: Page) {
     const probe: RecoveryProbe = { incarnation: 0, version: 0, checkpoints: [] };
     window.__pasteRecovery = probe;
     window.Worker = class extends Worker {
+      override postMessage(message: DocxEngineWorkerRequest, options?: Transferable[] | StructuredSerializeOptions) {
+        if (this === probe.worker && message.type === 'checkpoint') {
+          probe.checkpoints.push(new Promise((resolve, reject) => {
+            const reply = ({ data }: MessageEvent<DocxEngineWorkerResponse>) => {
+              if (data.id !== message.id) return;
+              this.removeEventListener('message', reply);
+              if (data.ok && data.checkpoint) resolve(data.checkpoint.version);
+              else reject(new Error('Checkpoint failed'));
+            };
+            this.addEventListener('message', reply);
+          }));
+        }
+        super.postMessage(message, Array.isArray(options) ? { transfer: options } : options);
+      }
       constructor(url: string | URL, options?: WorkerOptions) {
         super(url, options);
         this.addEventListener('message', ({ data }: MessageEvent<DocxEngineWorkerResponse>) => {
           if (!data.ok) return;
           if (data.commandInitial) {
+            if (data.commandInitial.incarnation === 1) probe.checkpoints = [];
             probe.worker = this;
             probe.incarnation = data.commandInitial.incarnation;
             probe.version = data.commandInitial.version;
           }
           if (this !== probe.worker) return;
           if (data.commandAck) probe.version = Math.max(probe.version, data.commandAck.version);
-          if (data.checkpoint) probe.checkpoints.push(data.checkpoint.version);
         });
       }
     };
@@ -50,7 +64,11 @@ for (const scenario of ['PASTE_ON_CHECKPOINT', 'PASTE_BEFORE_CHECKPOINT', 'CONTR
     await input.press('ControlOrMeta+End');
     const version = () => page.evaluate(() => window.__pasteRecovery.version);
     const reach = (next: number) => page.waitForFunction(next => window.__pasteRecovery.version >= next, next);
-    const boundary = scenario === 'PASTE_BEFORE_CHECKPOINT' ? 126 : 127;
+    const boundary = scenario === 'PASTE_BEFORE_CHECKPOINT' ? 124 : 127;
+    const checkpointVersion = async () => {
+      await page.waitForFunction(() => window.__pasteRecovery.checkpoints.length > 0);
+      return page.evaluate(() => window.__pasteRecovery.checkpoints[0]!);
+    };
     let prefix = 'Page 1';
     for (let current = await version(); current < boundary; current = await version()) {
       await page.keyboard.insertText('i');
@@ -62,6 +80,7 @@ for (const scenario of ['PASTE_ON_CHECKPOINT', 'PASTE_BEFORE_CHECKPOINT', 'CONTR
       await page.keyboard.insertText('x');
       prefix += 'x';
       await reach(128);
+      expect(await checkpointVersion()).toBe(128);
     } else {
       await pinnedEvaluate(page, () => navigator.clipboard.write([new ClipboardItem({
         'text/plain': new Blob(['Rich'], { type: 'text/plain' }),
@@ -78,15 +97,22 @@ for (const scenario of ['PASTE_ON_CHECKPOINT', 'PASTE_BEFORE_CHECKPOINT', 'CONTR
       };
       await expect(control).toBeVisible();
       expect(await version()).toBe(boundary + 1);
-      if (scenario === 'PASTE_BEFORE_CHECKPOINT') await choose('Merge Formatting');
-      expect(await version()).toBe(128);
+      if (scenario === 'PASTE_BEFORE_CHECKPOINT') {
+        for (const option of ['Merge Formatting', 'Keep Text Only', 'Keep Source Formatting', 'Merge Formatting']) {
+          await choose(option);
+        }
+        expect(await version()).toBe(129);
+      }
+      expect(await page.evaluate(() => window.__pasteRecovery.checkpoints.length)).toBe(0);
       await choose('Keep Text Only');
-      expect(await page.evaluate(() => window.__pasteRecovery.checkpoints)).toEqual([]);
+      expect(await version()).toBe(scenario === 'PASTE_BEFORE_CHECKPOINT' ? 130 : 129);
+      expect(await page.evaluate(() => window.__pasteRecovery.checkpoints.length)).toBe(0);
     }
+    const beforeTyping = await version();
     await page.keyboard.insertText('AfterOpt');
     const expected = prefix + 'AfterOpt';
     await expect(mirror).toContainText(expected);
-    await page.waitForFunction(() => window.__pasteRecovery.checkpoints.length > 0);
+    expect(await checkpointVersion()).toBe(beforeTyping);
     await page.evaluate(() => {
       const worker = window.__pasteRecovery.worker!;
       worker.dispatchEvent(new ErrorEvent('error', { message: 'Browser worker failure', error: new Error('Browser worker failure') }));
