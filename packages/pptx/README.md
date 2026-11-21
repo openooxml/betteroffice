@@ -92,6 +92,8 @@ by default and exposes promise-returning reads and exports.
 
 Node.js >= 20.16 / 22.3 runs worker sessions on `worker_threads`, keeping the process alive until the session is disposed.
 
+In browsers, Vite 8 and webpack bundle the worker with no configuration. Vite 7 and older need `worker: { format: 'es' }` in `vite.config`; without it the production build stops with `Invalid value "iife" for option "worker.format" - UMD and IIFE output formats are not supported for code-splitting builds`.
+
 `openPresentationSession(bytes, options?)` from `@betteroffice/pptx/worker` opens an asynchronous
 worker session; its API can change in minor releases.
 
