@@ -1410,7 +1410,10 @@ fn segment_value(segment: &crate::StorySegment) -> serde_json::Value {
     let content = match &segment.content {
         crate::SegmentContent::Text(text) => serde_json::json!({ "text": text }),
         crate::SegmentContent::Pilcrow(properties) => {
-            let saved = properties.values.iter().filter(|(key, _)| key.as_str() != DISPLAY_ONLY);
+            let saved = properties
+                .values
+                .iter()
+                .filter(|(key, _)| key.as_str() != DISPLAY_ONLY);
             serde_json::json!({ "pilcrow": ordered_map(saved) })
         }
         crate::SegmentContent::OtherEmbed { kind, payload } => {
@@ -1488,7 +1491,12 @@ fn segment_canonical(segment: &crate::StorySegment, entry: &mut Vec<u8>, section
             write_canonical_map(
                 section,
                 properties.values.iter(),
-                &["sectPr", "_sectionProperties", "sectionBreakType", DISPLAY_ONLY],
+                &[
+                    "sectPr",
+                    "_sectionProperties",
+                    "sectionBreakType",
+                    DISPLAY_ONLY,
+                ],
             );
             section.extend_from_slice(&entry[end..]);
         }

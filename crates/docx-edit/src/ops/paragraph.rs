@@ -1994,7 +1994,9 @@ fn apply_para_delta(txn: &mut TransactionMut<'_>, map: &MapRef, delta: &ParaAttr
         },
     );
     let flag = crate::list_definitions::LIST_LEVEL_INDENTS;
-    let named = ["numPr", crate::LIST_DEF].iter().any(|key| delta.other.contains_key(*key));
+    let named = ["numPr", crate::LIST_DEF]
+        .iter()
+        .any(|key| delta.other.contains_key(*key));
     let before = (named && !delta.other.contains_key(flag)).then(|| list_reference(txn, map));
     for (key, value) in &delta.other {
         set_or_remove(txn, map, key, value.clone());
