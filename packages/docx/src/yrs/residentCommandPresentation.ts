@@ -36,7 +36,16 @@ export function echoBackgroundPage(
 ): DisplayPage {
   const omitted = new Set(dependency.omittedPrimitiveIds.map(BigInt));
   const { rect } = dependency;
+  const finite = (value: number | undefined) => typeof value === 'number' && Number.isFinite(value) ? value : 0;
   const reaches = (primitive: DisplayPrimitive) => {
+    // each primitive paints inside its own clip (a table cell's), however far its box reaches
+    const clip = primitive.clipGroup?.clip;
+    if (clip) {
+      const x = finite(clip.x);
+      const y = finite(clip.y);
+      if (x - 1 >= rect.x + rect.width || x + Math.max(0, finite(clip.w)) + 1 <= rect.x ||
+        y - 1 >= rect.y + rect.height || y + Math.max(0, finite(clip.h)) + 1 <= rect.y) return false;
+    }
     if (primitive.kind === 'image' || primitive.kind === 'shape' || primitive.clipGroup ||
       (primitive.kind === 'glyphRun' || primitive.kind === 'text') && (primitive.rotationDeg || primitive.modernEffects ||
         primitive.textShadow)) return true;

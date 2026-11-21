@@ -222,8 +222,18 @@ export type ResidentEngineSession = Pick<
   mediaDataUrl(token: string): string | null;
   /** The pictures whose display copy is SVG, which a worker cannot decode. */
   svgMedia?(): DocxSvgMedia[];
-  /** @internal Typing echo model of one font at one shaping size; see `echo_glyph_set_json`. */
-  echoGlyphSetJson(fontId: number, size: number, kern: boolean, alphabet: string): string;
+  /**
+   * @internal Typing echo model of one font at one shaping size, shaped with `language`; see
+   * `echo_glyph_set_json`. With `known`, its pairs are only those with a character of
+   * `alphabet` from `known` on, for a caller holding the pairs of the first `known`.
+   */
+  echoGlyphSetJson(fontId: number, size: number, kern: boolean, alphabet: string, language?: string, known?: number): string;
+  /**
+   * @internal The faces the typing echo needs for the line `[lineStart, lineEnd)` of the paragraph
+   * whose text run holds display position `position`; see `echo_faces_json`. Undefined before a
+   * region pass or where no text run holds `position`.
+   */
+  echoFacesJson?(position: number, alphabet: string, lineStart: number, lineEnd: number): string | undefined;
   /** @internal */
   proposalEngine: DocxProposalSession & Pick<YrsSession, 'validateEdits'>;
   /** @internal */
@@ -1208,7 +1218,9 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
       return { frame, profile };
     },
     outlineGlyphJson: (fontId, glyphId) => session.outline_glyph_json(fontId, glyphId),
-    echoGlyphSetJson: (fontId, size, kern, alphabet) => session.echo_glyph_set_json(fontId, size, kern, alphabet),
+    echoGlyphSetJson: (fontId, size, kern, alphabet, language, known) =>
+      session.echo_glyph_set_json(fontId, size, kern, alphabet, language, known),
+    echoFacesJson: (position, alphabet, lineStart, lineEnd) => session.echo_faces_json(position, alphabet, lineStart, lineEnd),
     loadMediaSources: (json) => session.load_media_sources(json),
     loadNoteSeparators: (state) => session.load_note_separators(state),
     loadState: (update) => {

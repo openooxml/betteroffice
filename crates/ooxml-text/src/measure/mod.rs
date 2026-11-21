@@ -138,6 +138,7 @@ pub use packed_glyphs::{
     GlyphRunHead, GlyphRunWriter, MeasuredGlyph, MeasuredGlyphRun, pack_glyph_runs,
     unpack_glyph_runs,
 };
+pub use prepare::run_character_faces;
 
 use crate::font_store::{FontId, FontStore};
 

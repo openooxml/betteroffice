@@ -104,8 +104,18 @@ export type ResidentEngineSession = Pick<YrsSession, 'clientId' | 'applyDelete' 
     mediaDataUrl(token: string): string | null;
     /** The pictures whose display copy is SVG, which a worker cannot decode. */
     svgMedia?(): DocxSvgMedia[];
-    /** @internal Typing echo model of one font at one shaping size; see `echo_glyph_set_json`. */
-    echoGlyphSetJson(fontId: number, size: number, kern: boolean, alphabet: string): string;
+    /**
+     * @internal Typing echo model of one font at one shaping size, shaped with `language`; see
+     * `echo_glyph_set_json`. With `known`, its pairs are only those with a character of
+     * `alphabet` from `known` on, for a caller holding the pairs of the first `known`.
+     */
+    echoGlyphSetJson(fontId: number, size: number, kern: boolean, alphabet: string, language?: string, known?: number): string;
+    /**
+     * @internal The faces the typing echo needs for the line `[lineStart, lineEnd)` of the paragraph
+     * whose text run holds display position `position`; see `echo_faces_json`. Undefined before a
+     * region pass or where no text run holds `position`.
+     */
+    echoFacesJson?(position: number, alphabet: string, lineStart: number, lineEnd: number): string | undefined;
     /** @internal */
     proposalEngine: DocxProposalSession & Pick<YrsSession, 'validateEdits'>;
     /** @internal */

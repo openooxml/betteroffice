@@ -118,6 +118,27 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
     echoDisabledReason = reason;
     echoPainter.disable(reason);
   };
+  // Text sent without echo is not in the painter's draft. Later text echoes only on a context that
+  // covers it, or the echo would leave it out until the engine frame. Text that does not apply
+  // leaves nothing to cover.
+  const unechoed = new Map<CommandTicket, number | undefined>();
+  const markUnechoed = (ticket: CommandTicket) => {
+    unechoed.set(ticket, ticket.seq);
+    void ticket.ack.then((outcome) => {
+      if (!unechoed.has(ticket)) return;
+      if (outcome.status === 'applied' && outcome.seq !== undefined) unechoed.set(ticket, outcome.seq);
+      else unechoed.delete(ticket);
+    }, () => { unechoed.delete(ticket); });
+  };
+  const coversUnechoed = () => {
+    const through = echoPainter.contextThroughSeq;
+    for (const [ticket, known] of unechoed) {
+      const seq = ticket.seq ?? known;
+      if (seq === undefined || through === undefined || seq > through) return false;
+      unechoed.delete(ticket);
+    }
+    return true;
+  };
   const count = () => {
     originalUnackedIntents += 1;
     if (originalUnackedIntents > DOCX_ECHO_MAX_UNACKED_INTENTS) disableEcho('intent-cap');
@@ -291,7 +312,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
         barrier.tickets.push(echoTicket);
       }
       const after = target?.kind === 'predecessor' ? target.ticket : tail;
-      const preview = !echoDisabledReason && isText(intent) ? echoPainter.preview(intent) : undefined;
+      const preview = !echoDisabledReason && isText(intent) && coversUnechoed() ? echoPainter.preview(intent) : undefined;
       const echo = preview ? { ...preview, originalIntentCount: 1 } : undefined;
       const vertical = intent.kind === 'navigate' && (intent.payload.direction === 'up' || intent.payload.direction === 'down')
         ? intent.payload.direction : undefined;
@@ -355,6 +376,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
         ? defer(after, waitForSelection, send, vertical, false, tabDirection ? () => send(undefined, undefined, true) : undefined)
         : send(after) ?? defer(after, false, () => undefined);
       if (fence && barrier) barrier.ticket = ticket;
+      if (isText(intent) && !echo && !echoTicket && !fence) markUnechoed(ticket);
       track(ticket, isRevision(intent), tabDirection !== undefined);
       if (echoTicket) {
         const entry = echoTicket;

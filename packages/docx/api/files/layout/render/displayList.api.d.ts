@@ -458,6 +458,8 @@ export interface GlyphRunPrimitive extends DocAttrs {
         position?: number;
         scale?: number;
         canEmpty?: boolean;
+        /** East Asian auto-spacing the paragraph turns off: bit 1 against Latin letters, bit 2 against digits. */
+        autoSpaceOff?: number;
         /** Unstretched width of a line that justification stretches to `right`. */
         stretch?: number;
         /** Width a centered line centers in from `x`. */

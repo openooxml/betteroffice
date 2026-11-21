@@ -220,7 +220,8 @@ impl EditSessionCore {
                 )
                 .map_err(EngineError::message);
             };
-            if selection.story != "body" {
+            // the body and its table cells: their paragraphs take the body's display positions
+            if !crate::engine::body_or_body_cell_story(&selection.story) {
                 None
             } else {
                 let doc = self.engine.doc();

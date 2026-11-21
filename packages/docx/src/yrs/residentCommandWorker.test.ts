@@ -15,7 +15,11 @@ import { ResidentEngineWorkerClient } from './residentEngineWorkerClient';
 import { DocxSourceWorkerClient } from './residentSourceWorkerClient';
 import { createYrsSession } from './index';
 import { resolveReservations, type DocxReservation } from './reservations';
-import type { DocxCommandAck, DocxCommandEnvelope, DocxCommandFrame, DocxCommandInitRequest } from './residentCommandProtocol';
+import type {
+  DocxCommandAck, DocxCommandEchoContext, DocxCommandEnvelope, DocxCommandFrame, DocxCommandInitRequest, DocxEchoGlyphSet,
+} from './residentCommandProtocol';
+import type { GlyphRunPrimitive } from '../layout/render/displayList';
+import { indexEchoGlyphSet, placeEchoFaceGlyphs } from './residentEchoGlyphs';
 import type { DocxEngineWorkerResponse } from './residentEngineWorkerProtocol';
 import type { DocxReviewTarget } from './residentReview';
 import type { YrsContentControlValue } from './index';
@@ -103,7 +107,11 @@ function syntheticDocument(headersFooters = false, notes = false, controls = fal
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
-export async function openWorker(options: { collaboration?: boolean; headersFooters?: boolean; layoutWithRegions?: boolean; notes?: boolean; controls?: boolean; propertyImages?: boolean; objects?: boolean; imageMedia?: boolean; bodyXml?: string; sectPr?: string; comments?: string; displayWindow?: [number, number]; factory?: typeof startWorker; prepare?: (engine: Awaited<ReturnType<typeof createResidentEngineSession>>) => { story: string; paraId: string; offset: number }; commentsXml?: string; commentsExtendedXml?: string; headerXml?: string } = {}) {
+export async function openWorker(options: { collaboration?: boolean; headersFooters?: boolean; layoutWithRegions?: boolean; notes?: boolean; controls?: boolean; propertyImages?: boolean; objects?: boolean; imageMedia?: boolean; bodyXml?: string; sectPr?: string; comments?: string; displayWindow?: [number, number]; factory?: typeof startWorker; prepare?: (engine: Awaited<ReturnType<typeof createResidentEngineSession>>) => { story: string; paraId: string; offset: number }; commentsXml?: string; commentsExtendedXml?: string; headerXml?: string;
+  /** Also registers a Noto Sans KR subset: Liberation Sans falls back to it, and `Noto Sans KR` names it. */
+  korean?: boolean;
+  /** With `korean`, also a Dotum view of that subset (Dotum's line metrics), which `돋움` names. */
+  dotum?: boolean } = {}) {
   const worker = (options.factory ?? startWorker)(8301);
   const client = options.collaboration ? new DocxSourceWorkerClient(worker) : new ResidentEngineWorkerClient(worker);
   try {
@@ -122,11 +130,19 @@ export async function openWorker(options: { collaboration?: boolean; headersFoot
     const point = prepared ?? { story: 'body', paraId: read.paragraphs[0]!.paraId, offset: Math.min(4, engine.geometryReader.paragraphSpans('body')[0]!.length) };
     const fonts = [new Uint8Array(readFileSync(resolve(
       process.cwd(), 'crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf'
-    )))];
+    ))), ...options.korean ? [new Uint8Array(readFileSync(resolve(
+      process.cwd(), 'crates/ooxml-text/tests/fonts/NotoSansKR-Subset.otf'
+    )))] : []];
     const fontId = engine.registerFont(fonts[0]!);
+    const korean = options.korean ? engine.registerFont(fonts[1]!) : undefined;
     const measurement = {
       defaults: { fontSize: 11, fontFamily: 'Liberation Sans' },
-      fontChains: { 'liberation sans|0|0': [fontId] },
+      fontChains: korean === undefined ? { 'liberation sans|0|0': [fontId] } as Record<string, number[]> : {
+        'liberation sans|0|0': [fontId, korean], 'liberation sans|1|0': [fontId, korean],
+        'noto sans kr|0|0': [korean, fontId], 'noto sans kr|1|0': [korean, fontId],
+        // the Dotum view registers after both fonts, in the next slot
+        ...options.dotum ? { '돋움|0|0': [2, fontId], '돋움|1|0': [2, fontId] } : {},
+      },
     };
     let layoutInput = JSON.stringify({ ...JSON.parse(LAYOUT), measurement });
     if (options.notes) layoutInput = JSON.stringify({ ...JSON.parse(layoutInput), notes: { contents: [{ id: 1, noteKind: 'footnote', height: 0 }] } });
@@ -150,7 +166,8 @@ export async function openWorker(options: { collaboration?: boolean; headersFoot
     const init: DocxCommandInitRequest = {
       session: 'd1-command-worker', incarnation: 1, epoch: 1, readOnly: false,
       selection: { anchor: point, focus: point },
-      fonts, layoutInput, layoutWithRegions: options.layoutWithRegions ?? true, layoutRevision: 1, extras,
+      fonts: [...fonts, ...options.korean && options.dotum ? [{ substituteOf: 1, family: '돋움' }] : []],
+      layoutInput, layoutWithRegions: options.layoutWithRegions ?? true, layoutRevision: 1, extras,
       ...(options.displayWindow ? { displayWindow: options.displayWindow, retainBuiltPages: false } : {}),
     };
     const initial = await client.commandInit(init);
@@ -4100,6 +4117,235 @@ test('typing in a wrapped paragraph under an active display window carries echo 
     const removed = (await client.edit(intent(2, 1, 'deleteBackward', {}))).frame!.payload.echoContext;
     expect(removed).toBeDefined();
     expect(WRAPPED).toContain(removed!.text);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('typing after a paragraph that holds only a page break echoes the caret paragraph, not one character off', async () => {
+  const bodyXml = '<w:p w14:paraId="00000001"><w:r><w:t>Seed</w:t></w:r></w:p>' +
+    '<w:p w14:paraId="00000002"><w:r><w:br w:type="page"/></w:r></w:p>' +
+    '<w:p w14:paraId="00000003"><w:r><w:t>After a page break</w:t></w:r></w:p>';
+  const { client, engine } = await openWorker({ bodyXml, prepare: (engine) => {
+    const paraId = engine.paragraphs('body').find((paragraph) => paragraph.text.includes('After'))!.paraId;
+    return { story: 'body', paraId, offset: engine.geometryReader.locateParagraph('body', paraId).end -
+      engine.geometryReader.locateParagraph('body', paraId).start - 3 };
+  } });
+  try {
+    const typed = (await client.edit(intent(1, 0, 'insertText', { text: 'x' }))).frame!.payload.echoContext;
+    const paragraph = engine.paragraphs('body').find((paragraph) => paragraph.text.includes('After'))!;
+    // the page break leads this paragraph as a block embed: offsets count it, the paragraph text does not
+    expect(paragraph.text).toBe('After a page brxeak');
+    expect(typed?.text).toBe('After a page brxeak');
+    expect(typed!.boundaries[typed!.selection.focusGrapheme]!.utf16).toBe(16);
+    expect(typed!.selection.anchorGrapheme).toBe(typed!.selection.focusGrapheme);
+    expect(typed!.glyphs).toBeDefined();
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+/**
+ * What the main thread's echo paints for one more key on the context's line, by the same rules:
+ * typed characters take the faces the engine routes them to, the line keeps its line metrics faces,
+ * and each character advances by its own face's glyph set. Undefined where the echo declines.
+ */
+function predictEcho(context: DocxCommandEchoContext, sets: ReadonlyMap<string, DocxEchoGlyphSet>,
+  edit: { insert: string } | { deleteBackward: true }) {
+  const line = context.glyphs;
+  if (!line?.faces || !line.charFaces || line.shapingSize === undefined) return undefined;
+  const focus = context.boundaries.find((boundary) => boundary.grapheme === context.selection.focusGrapheme)!.utf16;
+  const chars = [...context.text];
+  const offsets = chars.reduce<number[]>((all, char) => [...all, all.at(-1)! + char.length], [0]);
+  const at = offsets.indexOf(focus);
+  let faces = [...line.charFaces];
+  let text: string;
+  if ('insert' in edit) {
+    const typed = [...edit.insert].map((char) => line.typed?.findIndex((chars) => chars.includes(char)) ?? -1);
+    if (typed.some((face) => face < 0) || !line.typedRun || at === 0 || offsets[at - 1]! < line.typedRun[0] ||
+      offsets[at - 1]! >= line.typedRun[1]) return undefined;
+    faces = [...faces.slice(0, at), ...typed, ...faces.slice(at)];
+    text = context.text.slice(0, focus) + edit.insert + context.text.slice(focus);
+  } else {
+    if (at === 0) return undefined;
+    faces.splice(at - 1, 1);
+    text = context.text.slice(0, offsets[at - 1]!) + context.text.slice(focus);
+  }
+  const metrics = (of: number[]) => [...new Set(of.map((face) => line.faces![face]!.metrics))].sort().join();
+  if (metrics(faces) !== metrics(line.charFaces as number[])) return undefined;
+  const indexed = line.faces.map((face) => indexEchoGlyphSet(sets.get(face.glyphSet)!));
+  const placement = placeEchoFaceGlyphs({ sets: indexed, charFaces: faces,
+    ...(line.nextFace === undefined ? {} : { nextFace: line.nextFace }),
+    ...(line.letterSpacing === undefined ? {} : { letterSpacing: line.letterSpacing }),
+    ...(line.autoSpaceOff === undefined ? {} : { autoSpaceOff: line.autoSpaceOff }),
+    size: line.shapingSize }, text, line.next, line.x);
+  if (!placement || placement.end > line.right - 1) return undefined;
+  return { text, y: line.y, glyphs: placement.glyphIds.map((id, index) =>
+    ({ id, x: placement.xs[index]!, fontId: line.faces![faces[index]!]!.fontId })) };
+}
+
+/** The glyphs the frame paints on the baseline `y` left of `right` for `text`, in document order. */
+function paintedLine(frame: RetainedFrame, page: number, y: number, text: string, right = Infinity) {
+  const runs = frame.pages[page]!.page.primitives.filter((primitive): primitive is GlyphRunPrimitive =>
+    primitive.kind === 'glyphRun' && primitive.docStart !== undefined && primitive.glyphs[0]?.y === y &&
+    primitive.glyphs[0].x < right)
+    .sort((a, b) => a.docStart! - b.docStart!);
+  expect(runs.map((run) => run.text).join('')).toBe(text);
+  return { text, y, glyphs: runs.flatMap((run) => run.glyphs.map((glyph) => ({ id: glyph.id, x: glyph.x, fontId: run.fontId }))) };
+}
+
+test('typed Hangul and Latin echo glyph for glyph where the engine then paints them, in mixed-font body and cell lines', async () => {
+  // Latin slots name the Latin font and the East Asian slot the Korean one, as Korean documents do
+  const korean = '<w:rFonts w:ascii="Liberation Sans" w:hAnsi="Liberation Sans" w:eastAsia="Noto Sans KR"/>';
+  const paragraph = (id: string, properties: string, text: string) =>
+    `<w:p w14:paraId="${id}"><w:r><w:rPr>${properties}</w:rPr><w:t xml:space="preserve">${text}</w:t></w:r></w:p>`;
+  const bodyXml = paragraph('00000001', korean, '가나 echo 한국 text') +
+    // two cells side by side: the other cell's text shares the line's baseline
+    '<w:tbl><w:tblGrid><w:gridCol w:w="3600"/><w:gridCol w:w="3600"/></w:tblGrid><w:tr>' +
+    '<w:tc><w:tcPr><w:tcW w:w="3600" w:type="dxa"/></w:tcPr>' +
+    paragraph('00000002', `${korean}<w:spacing w:val="-4"/>`, '표 시간 cell 가나') + '</w:tc>' +
+    '<w:tc><w:tcPr><w:tcW w:w="3600" w:type="dxa"/></w:tcPr>' + paragraph('00000004', korean, '옆 칸 side') + '</w:tc>' +
+    '</w:tr></w:tbl>' +
+    paragraph('00000003', korean, '가나다');
+  const { client, engine, initial } = await openWorker({ bodyXml, korean: true,
+    prepare: () => ({ story: 'body', paraId: '00000001', offset: 2 }) });
+  try {
+    const sets = new Map<string, DocxEchoGlyphSet>();
+    let frame: RetainedFrame | null = null;
+    let context: DocxCommandEchoContext | undefined;
+    let seq = 0;
+    const receive = (ack: Pick<DocxCommandAck, 'frame'>) => {
+      for (const set of ack.frame!.payload.echoGlyphSets ?? []) {
+        const base = set.extends === undefined ? undefined : sets.get(set.extends);
+        if (set.extends !== undefined && !base) throw new Error('a grown set arrived before its base');
+        sets.set(set.key, base ? { ...set, kerning: [...base.kerning, ...set.kerning],
+          unsafePairs: [...base.unsafePairs, ...set.unsafePairs], outlines: { ...base.outlines, ...set.outlines } } : set);
+      }
+      frame = applyFrameDeltaOwned(frame, decodeFrameDelta(ack.frame!.payload.frame));
+      context = ack.frame!.payload.echoContext;
+    };
+    receive(initial);
+    let version = 0;
+    const send = async (kind: string, payload: DocxCommandEnvelope['payload']) => {
+      seq += 1;
+      const ack = await editWithFrame(client, intent(seq, version, kind, payload));
+      expect(ack.outcomes[0]?.status).toBe(kind === 'select' ? 'noop' : 'applied');
+      version = ack.version;
+      receive(ack);
+    };
+    let echoed = 0;
+    const key = async (edit: { insert: string } | { deleteBackward: true }) => {
+      const predicted = context && predictEcho(context, sets, edit);
+      const page = context?.page.pageIndex ?? 0;
+      // a cell's line ends at its right edge; the next cell's text shares its baseline
+      const right = context?.glyphs?.right ?? Infinity;
+      await send('insert' in edit ? 'insertText' : 'deleteBackward', 'insert' in edit ? { text: edit.insert } : {});
+      if (!predicted) return false;
+      expect(paintedLine(frame!, page, predicted.y, predicted.text, right)).toEqual(predicted);
+      echoed += 1;
+      return true;
+    };
+    // the first key only brings the line's echo context
+    await send('insertText', { text: '나' });
+    expect(context?.glyphs?.faces?.length).toBeGreaterThan(1);
+    // Hangul after Hangul, Latin after Hangul (auto-spaced), a digit, a space, and backspaces
+    for (const edit of [{ insert: '한' }, { insert: 'e' }, { insert: '가' }, { insert: '1' }, { insert: ' ' },
+      { deleteBackward: true as const }, { deleteBackward: true as const }]) {
+      expect(await key(edit)).toBe(true);
+    }
+    // a table cell: its own story, clipped, with letter spacing
+    const cellParagraph = engine.paragraphs('body:t0:r0c0')[0]!.paraId;
+    const inCell = { story: 'body:t0:r0c0', paraId: cellParagraph, offset: 1 };
+    await send('select', { selection: { anchor: inCell, focus: inCell } });
+    await send('insertText', { text: '시' });
+    expect(context?.glyphs?.letterSpacing).toBe(Math.fround(-4 / 20 * 96 / 72));
+    // the echo paints inside the cell's clip, as the page raster does
+    const clipped = frame!.pages[0]!.page.primitives.find((primitive): primitive is GlyphRunPrimitive =>
+      primitive.kind === 'glyphRun' && primitive.clipGroup?.id?.endsWith(':t0:r0c0-r0-c0') === true);
+    expect(context?.glyphs?.clip).toEqual(clipped!.clipGroup!.clip as { x: number; y: number; w: number; h: number });
+    for (const edit of [{ insert: '간' }, { insert: 'c' }, { deleteBackward: true as const }]) {
+      expect(await key(edit)).toBe(true);
+    }
+    // a line of Hangul alone has no Latin line metrics face to type a letter with
+    const hangulLine = engine.paragraphs('body').find((paragraph) => paragraph.text === '가나다')!.paraId;
+    const inHangul = { story: 'body', paraId: hangulLine, offset: 3 };
+    await send('select', { selection: { anchor: inHangul, focus: inHangul } });
+    await send('insertText', { text: '다' });
+    expect(context?.glyphs?.typed?.join('')).toContain('가');
+    expect(context?.glyphs?.typed?.join('')).not.toContain('e');
+    expect(await key({ insert: '나' })).toBe(true);
+    expect(await key({ insert: 'e' })).toBe(false);
+    expect(echoed).toBe(11);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+/**
+ * Sends commands as the main thread does, holding the frame, the echo context and the glyph sets
+ * the worker ships, and checks every key the context predicts against the frame that follows.
+ */
+function echoParity(client: ResidentEngineWorkerClient, initial: Pick<DocxCommandAck, 'frame'>) {
+  const sets = new Map<string, DocxEchoGlyphSet>();
+  const state = {
+    frame: null as RetainedFrame | null, context: undefined as DocxCommandEchoContext | undefined, echoed: 0,
+    seq: 0, version: 0,
+  };
+  const receive = (ack: Pick<DocxCommandAck, 'frame'>) => {
+    for (const set of ack.frame!.payload.echoGlyphSets ?? []) {
+      const base = set.extends === undefined ? undefined : sets.get(set.extends);
+      if (set.extends !== undefined && !base) throw new Error('a grown set arrived before its base');
+      sets.set(set.key, base ? { ...set, kerning: [...base.kerning, ...set.kerning],
+        unsafePairs: [...base.unsafePairs, ...set.unsafePairs], outlines: { ...base.outlines, ...set.outlines } } : set);
+    }
+    state.frame = applyFrameDeltaOwned(state.frame, decodeFrameDelta(ack.frame!.payload.frame));
+    state.context = ack.frame!.payload.echoContext;
+  };
+  receive(initial);
+  const send = async (kind: string, payload: DocxCommandEnvelope['payload']) => {
+    state.seq += 1;
+    const ack = await editWithFrame(client, intent(state.seq, state.version, kind, payload));
+    expect(ack.outcomes[0]?.status).toBe(kind === 'select' ? 'noop' : 'applied');
+    state.version = ack.version;
+    receive(ack);
+  };
+  const key = async (edit: { insert: string } | { deleteBackward: true }) => {
+    const context = state.context;
+    const predicted = context && predictEcho(context, sets, edit);
+    const page = context?.page.pageIndex ?? 0;
+    // a cell's line ends at its right edge; the next cell's text shares its baseline
+    const right = context?.glyphs?.right ?? Infinity;
+    await send('insert' in edit ? 'insertText' : 'deleteBackward', 'insert' in edit ? { text: edit.insert } : {});
+    if (!predicted) return false;
+    expect(paintedLine(state.frame!, page, predicted.y, predicted.text, right)).toEqual(predicted);
+    state.echoed += 1;
+    return true;
+  };
+  return {
+    send, key,
+    get frame() { return state.frame; },
+    get context() { return state.context; },
+    get echoed() { return state.echoed; },
+  };
+}
+
+test('Hangul measured through a Dotum view of the face that draws it echoes glyph for glyph', async () => {
+  // Korean documents name a Latin font for Latin text and Dotum for Hangul; the Dotum substitute is
+  // the Korean face with Dotum's line metrics, which the display list draws through the Latin
+  // font's fallback, the face it views
+  const dotum = '<w:rFonts w:ascii="Liberation Sans" w:hAnsi="Liberation Sans" w:eastAsia="돋움"/>';
+  const { client, initial } = await openWorker({ korean: true, dotum: true,
+    bodyXml: `<w:p w14:paraId="00000001"><w:r><w:rPr>${dotum}</w:rPr><w:t xml:space="preserve">가나 echo 한국 text</w:t></w:r></w:p>`,
+    prepare: () => ({ story: 'body', paraId: '00000001', offset: 2 }) });
+  try {
+    const parity = echoParity(client, initial);
+    const { send, key } = parity;
+    await send('insertText', { text: '나' });
+    const glyphs = parity.context?.glyphs;
+    expect(glyphs?.faces?.length).toBeGreaterThan(1);
+    // Hangul takes its line metrics from the view and draws with the face it views
+    const hangul = glyphs!.faces!.find((face) => face.metrics !== face.fontId);
+    expect(hangul).toBeDefined();
+    expect(glyphs!.typed![glyphs!.faces!.indexOf(hangul!)]).toContain('가');
+    for (const edit of [{ insert: '한' }, { insert: 'e' }, { insert: '가' }, { insert: ' ' },
+      { deleteBackward: true as const }, { deleteBackward: true as const }]) {
+      expect(await key(edit)).toBe(true);
+    }
+    expect(parity.echoed).toBe(6);
   } finally { client.destroy(); }
 }, TIMEOUT);
 

@@ -1010,6 +1010,10 @@ pub struct EchoRunFacts {
     pub primary_font: bool,
     #[serde(default, skip_serializing_if = "echo_zero")]
     pub letter_spacing: f64,
+    /// East Asian auto-spacing the paragraph turns off: bit 1 `w:autoSpaceDE` (against Latin
+    /// letters), bit 2 `w:autoSpaceDN` (against digits). Both default to on.
+    #[serde(default, skip_serializing_if = "echo_no_bits")]
+    pub auto_space_off: u8,
     #[serde(default, skip_serializing_if = "echo_zero")]
     pub position: f64,
     #[serde(default = "echo_scale", skip_serializing_if = "echo_default_scale")]
@@ -1034,6 +1038,10 @@ fn echo_coordinate<S: serde::Serializer>(value: &f64, serializer: S) -> Result<S
 
 fn echo_zero(value: &f64) -> bool {
     *value == 0.0
+}
+
+fn echo_no_bits(value: &u8) -> bool {
+    *value == 0
 }
 
 fn echo_primary() -> bool {
@@ -5156,25 +5164,28 @@ impl<'a> ShapeFonts<'a> {
     /// don't belong to `store` fail at shape time and route their run back to
     /// the `TextRunPrimitive` fallback.
     fn build(input: &BuildInput, store: &'a ooxml_text::FontStore) -> Option<ShapeFonts<'a>> {
-        if input.font_chains.is_empty() {
+        Self::from_chains(&input.font_chains, store)
+    }
+
+    fn from_chains(
+        font_chains: &HashMap<String, Vec<u32>>,
+        store: &'a ooxml_text::FontStore,
+    ) -> Option<ShapeFonts<'a>> {
+        if font_chains.is_empty() {
             return None;
         }
-        let coverage_only: HashSet<_> = input
-            .font_chains
+        let coverage_only: HashSet<_> = font_chains
             .get("@betteroffice/fonts/coverage")
             .into_iter()
             .flatten()
             .copied()
             .collect();
-        let symbols_shape = input
-            .font_chains
-            .contains_key("@betteroffice/fonts/coverage-symbols");
-        let paragraph_mark = match input.font_chains.get(PARAGRAPH_MARK_FACE) {
+        let symbols_shape = font_chains.contains_key("@betteroffice/fonts/coverage-symbols");
+        let paragraph_mark = match font_chains.get(PARAGRAPH_MARK_FACE) {
             Some(ids) if ids.len() == 1 => Some(ooxml_text::FontId::from_u32(ids[0])),
             _ => None,
         };
-        let chains = input
-            .font_chains
+        let chains = font_chains
             .iter()
             .filter(|(k, _)| k.as_str() != PARAGRAPH_MARK_FACE)
             .map(|(k, ids)| {
@@ -5210,6 +5221,31 @@ impl<'a> ShapeFonts<'a> {
         );
         self.chains.get(&key)
     }
+}
+
+/// The face the display list shapes each character of `text` with in a glyph run of `family`
+/// (the default family when `None`), `bold` and `italic`, from the display input's
+/// `font_chains`: the face [`try_emit_glyph_runs`] resolves it to. `None` where the run has no
+/// usable chain and would paint as a text primitive instead.
+pub fn display_character_faces(
+    store: &ooxml_text::FontStore,
+    font_chains: &HashMap<String, Vec<u32>>,
+    family: Option<&str>,
+    bold: bool,
+    italic: bool,
+    text: &str,
+) -> Option<Vec<Option<ooxml_text::FontId>>> {
+    let fonts = ShapeFonts::from_chains(font_chains, store)?;
+    let family = family.unwrap_or(DEFAULT_FONT_FAMILY);
+    let chain = fonts.chain_for(family, bold, italic)?;
+    if chain.ids.is_empty() || chain.ids.iter().any(|&id| store.metrics(id).is_err()) {
+        return None;
+    }
+    Some(
+        text.chars()
+            .map(|ch| chain.resolve_with_style(store, ch, bold, italic, family))
+            .collect(),
+    )
 }
 
 fn text_paint_override(
@@ -9523,6 +9559,7 @@ fn try_emit_glyph_runs(
             kerning: fmt.kerning_min_pt.unwrap_or(0.0),
             primary_font: echo_font_route && chain.ids.first() == Some(&font),
             letter_spacing: fmt.letter_spacing.unwrap_or(0.0),
+            auto_space_off: u8::from(!auto_space.latin) | (u8::from(!auto_space.numeric) << 1),
             position: fmt.position_px.unwrap_or(0.0),
             scale: fmt.horizontal_scale.unwrap_or(100.0),
             can_empty: false,

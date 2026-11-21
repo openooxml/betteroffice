@@ -1364,6 +1364,21 @@ impl EditSession {
             .map_err(|error| map_error(env, error))
     }
 
+    #[napi(catch_unwind, js_name = "echo_faces_json")]
+    pub fn echo_faces_json(
+        &self,
+        env: Env,
+        position: f64,
+        alphabet: String,
+        line_start: f64,
+        line_end: f64,
+    ) -> Result<Either<String, Undefined>> {
+        let _call = EngineCall::new(env);
+        Ok(optional_result(self.document(env)?.echo_faces_json(
+            position, &alphabet, line_start, line_end,
+        )))
+    }
+
     #[napi(catch_unwind, js_name = "echo_glyph_set_json")]
     pub fn echo_glyph_set_json(
         &self,
@@ -1372,10 +1387,19 @@ impl EditSession {
         size: f64,
         kern: bool,
         alphabet: String,
+        language: Option<String>,
+        known: Option<u32>,
     ) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document(env)?
-            .echo_glyph_set_json(font_id, size as f32, kern, &alphabet)
+            .echo_glyph_set_json(
+                font_id,
+                size as f32,
+                kern,
+                language.as_deref(),
+                &alphabet,
+                known.unwrap_or(0) as usize,
+            )
             .map_err(|error| map_error(env, error))
     }
 

@@ -38,8 +38,39 @@ export declare function placeEchoGlyphs(glyphs: EchoGlyphIndex, text: string, ne
  * the line's width in that space, at half the free width and never left of `x`.
  */
 export declare function placeEchoLine(glyphs: EchoGlyphIndex, text: string, next: string, x: number, center?: number): EchoGlyphPlacement | undefined;
-/** Width of the leading letters and digits, which no line break can split. */
+/**
+ * Width of at most the least a line break moves of `text`: its leading letters and digits, which
+ * no line break splits, or else its first character (East Asian text breaks between any two), or
+ * nothing before a space, which hangs past the line above.
+ */
 export declare function leadingWordWidth(text: string, advances: readonly number[]): number;
+/** The compatibility jamo (U+3131–U+318E) that Korean input types. */
+export declare const DOCX_ECHO_JAMO: string;
+/** @internal How a line that mixes fonts, or spaces its letters, advances each character. */
+export interface EchoLineFaces {
+    /** Glyph set of each face. */
+    sets: readonly EchoGlyphIndex[];
+    /** Face of each code point of the placed text. */
+    charFaces: readonly number[];
+    /** Face of the character after the text; pairs only kern within one face. */
+    nextFace?: number;
+    /** Extra advance after every character, an f32 in px. */
+    letterSpacing?: number;
+    /** East Asian auto-spacing turned off: bit 1 against Latin letters, bit 2 against digits. */
+    autoSpaceOff?: number;
+    /** The f32 font size in px measurement sizes auto-spacing with. */
+    size: number;
+}
+/** Extra advance measurement adds to `left` before `right` (`AutoSpace::extra_px`), an f32. */
+export declare function echoAutoSpace(left: string, right: string, size: number, off?: number): number;
+/**
+ * Places `text` as the engine lays out a cluster-positioned line that mixes fonts: each character
+ * advances by its own face's shaped units (and the pair adjustment with the next character of the
+ * same face), scaled in f32, widened by measurement's East Asian auto-spacing and letter spacing
+ * in f32. Undefined when a character or a pair is outside its face's glyph set, or when letter
+ * spacing condenses a character to a negative advance.
+ */
+export declare function placeEchoFaceGlyphs(line: EchoLineFaces, text: string, next: string, x: number): EchoGlyphPlacement | undefined;
 /** @internal Ink extent of a glyph outline in font units; undefined for a blank glyph. */
 export declare function outlineBounds(json: string): {
     upem: number;

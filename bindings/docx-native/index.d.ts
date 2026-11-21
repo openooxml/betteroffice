@@ -68,7 +68,8 @@ export declare class EditSession {
   display_range_rects_region_json(region: string, partId: string, from: number, to: number): string
   display_range_rects_batch(region: string, partId: string, ranges: Float64Array): Float64Array
   outline_glyph_json(fontId: number, glyphId: number): string
-  echo_glyph_set_json(fontId: number, size: number, kern: boolean, alphabet: string): string
+  echo_faces_json(position: number, alphabet: string, lineStart: number, lineEnd: number): string | undefined
+  echo_glyph_set_json(fontId: number, size: number, kern: boolean, alphabet: string, language?: string | undefined | null, known?: number | undefined | null): string
   accept_change(targetJson: string): string
   add_comment(rangesJson: string, author: string, date: string, bodyJson: string): string
   add_undo_boundary(): void
