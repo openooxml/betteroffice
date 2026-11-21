@@ -18,7 +18,7 @@ it('clamps trackpad pinch scaling to the editor zoom range', () => {
   expect(pinchZoomScale(1, 10, WheelEvent.DOM_DELTA_PIXEL, 600)).toBeLessThan(1);
 });
 
-it('zooms only for trackpad pinch and keeps its canvas anchor stationary', async () => {
+it('keeps the latest pinch anchor pending through an earlier canvas paint', async () => {
   let renderedScale = 1;
   let requestedScale = 1;
   const setScale = mock((scale: number) => {
@@ -99,16 +99,104 @@ it('zooms only for trackpad pinch and keeps its canvas anchor stationary', async
     const pinch = wheel(true);
     viewport.dispatchEvent(pinch);
     expect(pinch.defaultPrevented).toBe(true);
+    const firstScale = pinchZoomScale(1, -50, WheelEvent.DOM_DELTA_PIXEL, 150);
     viewport.dispatchEvent(wheel(true));
     expect(setScale).not.toHaveBeenCalled();
     frames.shift()?.(0);
     expect(setScale).toHaveBeenCalledTimes(1);
     expect(viewport.scrollLeft).toBe(0);
     expect(viewport.scrollTop).toBe(0);
+    renderedScale = firstScale;
+    resize();
+    expect(viewport.scrollLeft).toBe(0);
+    expect(viewport.scrollTop).toBe(0);
     renderedScale = requestedScale;
     resize();
-    expect(viewport.scrollLeft).toBeCloseTo(230 * renderedScale - 240);
-    expect(viewport.scrollTop).toBeCloseTo(95 * renderedScale - 100);
+    expect(viewport.scrollLeft).toBeCloseTo(10 + 230 * renderedScale - 240);
+    expect(viewport.scrollTop).toBeCloseTo(5 + 95 * renderedScale - 100);
+  } finally {
+    animation.mockRestore();
+    globalThis.ResizeObserver = resizeObserver;
+  }
+});
+
+it('uses the resized oversized canvas geometry to keep the cursor anchor fixed', async () => {
+  let renderedScale = 1;
+  let requestedScale = 1;
+  const setScale = mock((scale: number) => {
+    requestedScale = scale;
+  });
+  let resize = () => {};
+  const resizeObserver = globalThis.ResizeObserver;
+  globalThis.ResizeObserver = class {
+    constructor(callback: ResizeObserverCallback) {
+      resize = () => callback([], this as unknown as ResizeObserver);
+    }
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  } as unknown as typeof ResizeObserver;
+  function Harness() {
+    const viewport = useRef<HTMLDivElement>(null);
+    const content = useRef<HTMLDivElement>(null);
+    usePptxPinchZoom(viewport, content, 1, setScale);
+    return <div ref={viewport} data-testid="viewport"><div ref={content} data-testid="content" /></div>;
+  }
+  const view = render(<Harness />);
+  await act(async () => {
+    await Promise.resolve();
+  });
+  const viewport = view.getByTestId('viewport');
+  const content = view.getByTestId('content');
+  Object.defineProperties(viewport, {
+    clientWidth: { configurable: true, value: 300 },
+    clientHeight: { configurable: true, value: 150 },
+  });
+  spyOn(content, 'getBoundingClientRect').mockImplementation(() => {
+    const width = 280 * renderedScale;
+    const height = 140 * renderedScale;
+    const left = 100 + (300 - width) / 2 - viewport.scrollLeft;
+    const top = 50 + (150 - height) / 2 - viewport.scrollTop;
+    return {
+      left,
+      top,
+      width,
+      height,
+      right: left + width,
+      bottom: top + height,
+      x: left,
+      y: top,
+      toJSON: () => ({}),
+    };
+  });
+  const frames: FrameRequestCallback[] = [];
+  const animation = spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+    frames.push(callback);
+    return frames.length;
+  });
+  const event = new Event('wheel', { bubbles: true, cancelable: true }) as WheelEvent;
+  Object.defineProperties(event, {
+    clientX: { value: 340 },
+    clientY: { value: 145 },
+    ctrlKey: { value: true },
+    metaKey: { value: false },
+    altKey: { value: false },
+    deltaY: { value: -50 },
+    deltaMode: { value: WheelEvent.DOM_DELTA_PIXEL },
+  });
+  try {
+    viewport.dispatchEvent(event);
+    frames.shift()?.(0);
+    renderedScale = requestedScale;
+    resize();
+
+    const resized = content.getBoundingClientRect();
+    const anchorX = (340 - 110) / 280;
+    const anchorY = (145 - 55) / 140;
+    expect(resized.left).toBeLessThan(100);
+    expect(resized.top).toBeLessThan(50);
+    expect(resized.left + anchorX * resized.width).toBeCloseTo(340);
+    expect(resized.top + anchorY * resized.height).toBeCloseTo(145);
   } finally {
     animation.mockRestore();
     globalThis.ResizeObserver = resizeObserver;

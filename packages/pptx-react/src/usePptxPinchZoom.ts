@@ -41,8 +41,8 @@ export function usePptxPinchZoom(
     baseHeight: number;
     anchorX: number;
     anchorY: number;
-    scrollLeft: number;
-    scrollTop: number;
+    clientX: number;
+    clientY: number;
   } | null>(null);
   scaleRef.current = scale;
   setScaleRef.current = setScale;
@@ -57,14 +57,14 @@ export function usePptxPinchZoom(
       if (!pending || !content) return;
       const after = content.getBoundingClientRect();
       if (
-        Math.abs(after.width - pending.width) < 0.5 &&
-        Math.abs(after.height - pending.height) < 0.5
+        Math.abs(after.width - pending.width) >= 0.5 ||
+        Math.abs(after.height - pending.height) >= 0.5
       ) {
         return;
       }
       pendingAnchorRef.current = null;
-      viewport.scrollLeft = pending.scrollLeft;
-      viewport.scrollTop = pending.scrollTop;
+      viewport.scrollLeft += after.left + pending.anchorX * after.width - pending.clientX;
+      viewport.scrollTop += after.top + pending.anchorY * after.height - pending.clientY;
       observer?.disconnect();
     };
     const observer =
@@ -82,7 +82,6 @@ export function usePptxPinchZoom(
       );
       if (next === scaleRef.current) return;
       const before = content.getBoundingClientRect();
-      const viewportRect = viewport.getBoundingClientRect();
       const currentScale = scaleRef.current;
       const pending = pendingAnchorRef.current;
       const baseWidth = pending?.baseWidth ??
@@ -95,19 +94,15 @@ export function usePptxPinchZoom(
         (before.height > 0 ? (event.clientY - before.top) / before.height : 0.5);
       const nextWidth = baseWidth * next;
       const nextHeight = baseHeight * next;
-      const centeredLeft = Math.max(0, (viewport.clientWidth - nextWidth) / 2);
-      const centeredTop = Math.max(0, (viewport.clientHeight - nextHeight) / 2);
       pendingAnchorRef.current = {
-        width: pending?.width ?? before.width,
-        height: pending?.height ?? before.height,
+        width: nextWidth,
+        height: nextHeight,
         baseWidth,
         baseHeight,
         anchorX,
         anchorY,
-        scrollLeft:
-          centeredLeft + anchorX * nextWidth - (event.clientX - viewportRect.left),
-        scrollTop:
-          centeredTop + anchorY * nextHeight - (event.clientY - viewportRect.top),
+        clientX: event.clientX,
+        clientY: event.clientY,
       };
       observer?.disconnect();
       observer?.observe(content);
