@@ -3,4 +3,4 @@
 '@betteroffice/agents': patch
 ---
 
-Saving a document whose comment ids are larger than JavaScript can count exactly no longer hangs when a new comment is added: the new comment takes the next free id, and a save with no free id left fails with an error.
+Saving a document no longer hangs when a new comment's id would have to follow a source comment id too large to extend; the save fails with an error saying so. Every other document saves its comment ids as before.
