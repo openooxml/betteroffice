@@ -50,15 +50,18 @@ test('missing injected packs keep optional faces unavailable', async () => {
 
 test('worker pack URLs retry failures and misses and resolve hrefs from the injected source', async () => {
   const hrefs = { 'path.zst': '/_next/static/media/path.zst', 'cdn.zst': 'https://CDN.example:443/./cdn.zst' };
+  const failure = new Error('Pack source unavailable');
   const source = mock(async (): Promise<Record<string, string> | undefined> => hrefs)
-    .mockRejectedValueOnce(new Error('Pack source unavailable')).mockResolvedValueOnce(undefined);
+    .mockImplementationOnce(async () => { throw failure; }).mockResolvedValueOnce(undefined);
   worker.setOptionalFontPacks(source);
   const location = Object.getOwnPropertyDescriptor(globalThis, 'location');
   Object.defineProperty(globalThis, 'location', { value: { href: 'https://worker.example/room/1' }, configurable: true });
   try {
-    const first = worker.optionalFontPackUrls('intl');
-    const concurrent = worker.optionalFontPackUrls('intl');
-    await Promise.all([first, concurrent].map((request) => expect(request).rejects.toThrow('Pack source unavailable')));
+    const replies = await Promise.allSettled([worker.optionalFontPackUrls('intl'), worker.optionalFontPackUrls('intl')]);
+    expect(replies).toEqual([
+      { status: 'rejected', reason: failure },
+      { status: 'rejected', reason: failure },
+    ]);
     expect(source).toHaveBeenCalledTimes(1);
     expect(await worker.optionalFontPackUrls('intl')).toBeUndefined();
     const absolute = { 'path.zst': 'https://worker.example/_next/static/media/path.zst', 'cdn.zst': 'https://cdn.example/cdn.zst' };

@@ -40,7 +40,9 @@ import type { Document } from '../types/document';
 import { shipsWasmAsset } from '../wasm/assetEdit';
 import { editWasmModule } from './wasm/index';
 import { fontBytes, type FontDecoder } from '../../../../shared/office-session/fontDecoder';
-import { attachFontPackSource, createPageFontPackResponder, hasFontPackSource } from '../../../../shared/office-session/fontPackSource';
+import {
+  attachFontPackSource, createPageFontPackResponder, getFontPackSourceDetach, hasFontPackSource,
+} from '../../../../shared/office-session/fontPackSource';
 import { isFontPackRequest } from '../../../../shared/office-session/optionalFontPacks';
 import { createSessionWorker } from './sessionWorker';
 
@@ -235,7 +237,8 @@ export class ResidentEngineWorkerClient implements DocxCommandClient {
 
   constructor(worker?: ResidentEngineWorkerPort) {
     this.worker = worker ?? spawnResidentEngineWorker();
-    this.detachFontPackSource = worker && 'addEventListener' in worker ? attachFontPackSource(worker as Worker) : undefined;
+    this.detachFontPackSource = worker && 'addEventListener' in worker
+      ? attachFontPackSource(worker as Worker) : getFontPackSourceDetach(this.worker);
     this.worker.onmessage = (event) => {
       if (isFontPackRequest(event.data)) {
         if (!hasFontPackSource(this.worker)) this.fontPackFallback.receive(event.data);

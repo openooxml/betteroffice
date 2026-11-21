@@ -70,13 +70,19 @@ class FakeWorker implements ResidentEngineWorkerPort {
 
 test('a custom port without addEventListener gets its font pack requests answered once', async () => {
   const port = new FakeWorker();
+  let resolveReply!: () => void;
+  const replied = new Promise<void>((resolve) => { resolveReply = resolve; });
+  const post = spyOn(port, 'postMessage').mockImplementation(() => { resolveReply(); });
   const client = new ResidentEngineWorkerClient(port);
-  const message = { protocol: 1, kind: 'font-pack-request', id: 'pack', pack: 'intl' };
-  expect(() => port.onmessage?.({ data: message } as unknown as MessageEvent<DocxEngineWorkerResponse>)).not.toThrow();
-  for (let turn = 0; turn < 50 && port.posted.length === 0; turn++) await new Promise((resolve) => setTimeout(resolve, 10));
-  const replies = port.posted as unknown as Array<{ kind?: string; id?: string }>;
-  expect(replies.map(({ kind, id }) => [kind, id])).toEqual([['font-pack-reply', 'pack']]);
-  client.destroy();
+  try {
+    const message = { protocol: 1, kind: 'font-pack-request', id: 'pack', pack: 'intl' };
+    port.onmessage!({ data: message } as unknown as MessageEvent<DocxEngineWorkerResponse>);
+    await replied;
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(post).toHaveBeenCalledWith(expect.objectContaining({ kind: 'font-pack-reply', id: 'pack' }));
+  } finally {
+    client.destroy();
+  }
 });
 
 test('font decoder RPC transfers exact copies and returns font and payload before open', async () => {

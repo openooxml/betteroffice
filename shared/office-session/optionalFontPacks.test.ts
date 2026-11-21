@@ -7,17 +7,30 @@ import {
   type FontPackReply, type FontPackRequest, type FontPackUrls, type OptionalFontPack,
 } from './optionalFontPacks';
 import { attachFontPackSource } from './fontPackSource';
+import { createWorkerTransport } from './transport';
 
-test('all three browser worker constructors attach a message listener before returning', () => {
+test('browser worker constructors attach a font pack listener that the transport removes', () => {
   const original = globalThis.Worker;
   const listen = mock((_type: string, _listener: EventListener) => {});
-  globalThis.Worker = class { addEventListener = listen; } as unknown as typeof Worker;
+  const remove = mock((_type: string, _listener: EventListener) => {});
+  const terminate = mock(() => {});
+  globalThis.Worker = class {
+    addEventListener = listen;
+    removeEventListener = remove;
+    terminate = terminate;
+  } as unknown as typeof Worker;
   try {
     for (const create of [createDocxWorker, createPptxWorker, createXlsxWorker]) {
       listen.mockClear();
-      create();
+      remove.mockClear();
+      terminate.mockClear();
+      const worker = create();
       expect(listen).toHaveBeenCalledTimes(1);
       expect(listen).toHaveBeenCalledWith('message', expect.any(Function));
+      createWorkerTransport(worker).close();
+      expect(listen).toHaveBeenCalledTimes(1);
+      expect(remove.mock.calls).toEqual(listen.mock.calls);
+      expect(terminate).toHaveBeenCalledTimes(1);
     }
   } finally {
     globalThis.Worker = original;
