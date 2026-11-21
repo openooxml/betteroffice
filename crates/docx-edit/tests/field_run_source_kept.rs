@@ -156,7 +156,9 @@ fn themed(bytes: &[u8]) -> Vec<u8> {
     for (path, xml) in &mut parts {
         if path == "[Content_Types].xml" {
             let types = String::from_utf8(std::mem::take(xml)).unwrap();
-            *xml = types.replace("</Types>", &format!("{THEME_TYPE}</Types>")).into_bytes();
+            *xml = types
+                .replace("</Types>", &format!("{THEME_TYPE}</Types>"))
+                .into_bytes();
         }
     }
     parts.extend([
