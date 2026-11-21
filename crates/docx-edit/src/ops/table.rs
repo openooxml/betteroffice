@@ -554,14 +554,9 @@ impl FragmentBuild {
                 | "pPrChange"
                 | "pPrIns"
                 | "pPrDel"
-                | "tblPrChange"
-                | "trPrChange"
-                | "tcPrChange"
                 | "trIns"
                 | "trDel"
                 | "cellMarker"
-                | "propertyChanges"
-                | "structuralChange"
         ) && let Some((id, ..)) = crate::queries::revision_parts(value)
             && let Any::Map(values) = value
         {
@@ -2219,9 +2214,10 @@ impl EditingDoc {
                 }
                 cells.push(data);
             }
-            let mut tr_pr = fresh_row_properties(build.properties(self, txn, &row.tr_pr));
+            let mut tr_pr = fresh_row_properties(row.tr_pr.clone());
             tr_pr.remove(TR_INS);
             tr_pr.remove(TR_DEL);
+            let mut tr_pr = build.properties(self, txn, &tr_pr);
             if let Some(stamp) = revision {
                 tr_pr.insert(TR_INS.to_owned(), stamp.clone());
             }
