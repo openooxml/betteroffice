@@ -1412,7 +1412,9 @@ fn plan_selection<T: ReadTxn>(
                 &requested,
             ));
         }
-        if paragraph.has_stamped_in(start, end) {
+        if paragraph.has_stamped_in(start, end)
+            || (!suggesting && paragraph.has_suggested_formatting_in(start, end))
+        {
             return Err(revision_conflict(
                 "the range overlaps a tracked change",
                 &requested,
@@ -1816,7 +1818,9 @@ fn plan_delete_paragraphs<T: ReadTxn>(
     views.check_story_writable(story_id, &requested)?;
     refuse_suggestion(step, &requested)?;
     if let Some(offset) = (first..=last).find(|index| {
-        story.structurally_revised(*index) || story.paragraphs[*index].has_revisions()
+        story.structurally_revised(*index)
+            || story.paragraphs[*index].has_revisions()
+            || story.paragraphs[*index].has_suggested_formatting()
     }) {
         return Err(revision_conflict(
             format!(
@@ -4560,6 +4564,100 @@ mod direct_tests {
     #[test]
     fn host_delete_paragraphs_refuses_live_run_property_changes() {
         assert_host_edit_refuses_suggested_bold("paragraphs");
+    }
+
+    fn assert_host_edit_keeps_suggested_bold(operation: &str) {
+        for direct in [false, true] {
+            let doc = EditingDoc::new(9005);
+            crate::seed_from_docx(&doc, &raw_export(&document())).unwrap();
+            doc.set_direct_batches(direct);
+            doc.toggle_format(
+                &EditCtx::local("Ada", DATE).suggesting(),
+                StoryRange::new("body", 0, 5),
+                crate::SimpleFormat::Bold,
+            )
+            .unwrap();
+            let revision = doc.list_revisions().unwrap().remove(0);
+            let target = |text: &str| TextTarget::Search {
+                text: text.to_owned(),
+                within: SearchScope::Story {
+                    story: "body".to_owned(),
+                },
+                view: EditTextView::Accepted,
+            };
+            let mut step = EditStep::new(match operation {
+                "insert" => EditOperation::InsertText {
+                    target: target("Alpha"),
+                    at: TargetEdge::End,
+                    text: "!".to_owned(),
+                    runs: None,
+                },
+                "replace" => EditOperation::ReplaceText {
+                    target: target(" beta gamma"),
+                    text: " next".to_owned(),
+                    runs: None,
+                },
+                "section" => EditOperation::SetSectionProperties {
+                    section: "final".to_owned(),
+                    properties: serde_json::json!({"orientation": "landscape"}),
+                },
+                "format" => EditOperation::FormatText {
+                    target: target("Alpha"),
+                    set: Some(serde_json::Map::from_iter([(
+                        "italic".to_owned(),
+                        Value::Bool(true),
+                    )])),
+                    clear: None,
+                    on_unsupported: OnUnsupported::default(),
+                },
+                _ => unreachable!(),
+            });
+            if matches!(operation, "replace" | "format") {
+                step.suggest = Some(EditSuggestion {
+                    author: "Ada".to_owned(),
+                    date: DATE.to_owned(),
+                });
+            }
+            let outcome = apply_text_steps(
+                &doc,
+                &[BatchStep::Edit(&step)],
+                &UndoSession::new(),
+                MAX_STAGING_BYTES,
+            )
+            .unwrap();
+            assert!(outcome.applied);
+            assert!(doc.list_revisions().unwrap().iter().any(|current| {
+                current.change.revision_id == revision.change.revision_id
+                    && current.change.kind == crate::ChangeKind::RunPropertiesChanged
+            }));
+            let context = doc
+                .selection_context(&StoryRange::new("body", 0, 5))
+                .unwrap();
+            assert_eq!(context.bold, crate::TriState::On);
+            if operation == "format" {
+                assert_eq!(context.italic, crate::TriState::On);
+            }
+        }
+    }
+
+    #[test]
+    fn host_insert_at_suggested_formatting_end_succeeds() {
+        assert_host_edit_keeps_suggested_bold("insert");
+    }
+
+    #[test]
+    fn host_suggested_replace_adjacent_to_suggested_formatting_succeeds() {
+        assert_host_edit_keeps_suggested_bold("replace");
+    }
+
+    #[test]
+    fn host_section_properties_over_suggested_formatting_succeed() {
+        assert_host_edit_keeps_suggested_bold("section");
+    }
+
+    #[test]
+    fn host_suggested_format_over_suggested_formatting_succeeds() {
+        assert_host_edit_keeps_suggested_bold("format");
     }
 
     #[test]
