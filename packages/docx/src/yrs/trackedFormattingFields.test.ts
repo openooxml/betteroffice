@@ -187,7 +187,7 @@ describe('tracked formatting in fields and copied content', () => {
     const originalRevision = required(session.listRevisions().find(revision =>
       revision.story === originalStory && revision.kind === 'rPrChange'
     ));
-    const anchor = required(session.paragraphs('body').findLast(paragraph => paragraph.text === ''));
+    const anchor = required([...session.paragraphs('body')].reverse().find(paragraph => paragraph.text === ''));
     const span = session.locateParagraph('body', anchor.paraId);
     const at = { paraId: anchor.paraId, offset: span.end - span.start };
     const cell = { story: 'body', tableIndex: 0, row: 0, column: 0 };
