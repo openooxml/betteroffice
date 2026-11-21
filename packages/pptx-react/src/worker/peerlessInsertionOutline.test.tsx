@@ -3,6 +3,7 @@ import JSZip from 'jszip';
 import { decodeCommandDisplayList, presentationSharedInputs } from '@betteroffice/pptx/worker';
 import type { ShapeRect, TextBoxPrimitive } from '@betteroffice/pptx';
 import { deck, open, replyControl, story, type } from './peerlessTestHarness';
+import { createPeerlessViewStore } from './peerlessViewStore';
 import { peerlessPainterFactories } from './usePeerlessPresentation';
 
 const { act, fireEvent, waitFor } = await import('@testing-library/react');
@@ -41,6 +42,23 @@ async function groupedDeck(bytes: Uint8Array) {
   const group = `<p:grpSp><p:nvGrpSpPr><p:cNvPr id="3" name="Group"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="9144000" cy="5143500"/><a:chOff x="0" y="0"/><a:chExt cx="9144000" cy="5143500"/></a:xfrm></p:grpSpPr>${child}</p:grpSp>`;
   zip.file(path, xml.replace(shape, group));
   return zip.generateAsync({ type: 'uint8array' });
+}
+
+function viewStore(client: Awaited<ReturnType<typeof open>>['client']) {
+  return createPeerlessViewStore(client, { paintFrame() {}, paintEcho() {}, restoreLine() {} });
+}
+
+function resizeBehindNotes(h: Awaited<ReturnType<typeof open>>, store: ReturnType<typeof viewStore>, signal?: AbortSignal) {
+  const { slideId, slideRevision, coversThroughSeq, documentEpoch, incarnation } = h.client.state.frame!;
+  const frame = { slideId, slideRevision, coversThroughSeq, documentEpoch, incarnation };
+  const at = { source: 'afterSeq' as const, seq: h.client.state.throughSeq };
+  const notes = store.dispatch({ kind: 'invoke', payload: {
+    method: 'setSlideNotes', args: [slideId, 'Updated notes'], inputTime: 1, undoGroup: 'notes',
+  } });
+  const resize = store.dispatch({ kind: 'setShapeRect', payload: {
+    at, frame, shapeId: h.box.shapeId, handle: 'e', delta: { x: 30, y: 0 }, inputTime: 2, undoGroup: 'resize',
+  } }, { signal, reportRefusal: false, waitForPredecessor: true });
+  return { notes, resize };
 }
 
 test('resize released before object selection commits once in order', async () => {
@@ -118,6 +136,93 @@ test('text input after cancelling a released resize survives the pending selecti
   expect((await story(h.api)).text).toBe('al!pha beta\nx\nalpha beta');
 });
 
+test('cancelling a released resize preserves queued clicks and typing', async () => {
+  const h = await open();
+  await editExisting(h);
+  const line = h.box.lines[0]!;
+  const textAt = h.point(line.caretStops[2]!.x, line.y + line.height / 2);
+  const edge = h.point(h.box.x + h.box.w, h.box.y + h.box.h / 2);
+  const input = h.view.getByRole('textbox', { name: 'Slide text' });
+  const since = h.commands.length;
+  replyControl.hold();
+  try {
+    act(() => {
+      fireEvent.pointerDown(h.view.getByTestId('pptx-resize-e'), edge);
+      fireEvent.pointerMove(h.stage, { ...edge, clientX: edge.clientX + 10, buttons: 1 });
+      fireEvent.pointerUp(h.stage, { ...edge, clientX: edge.clientX + 30 });
+      fireEvent.pointerDown(h.canvas, textAt);
+      fireEvent.pointerUp(h.stage, textAt);
+      type(input, '!');
+      fireEvent.keyDown(h.stage, { key: 'Escape' });
+      type(input, '?');
+    });
+    await waitFor(() => expect(replyControl.count()).toBeGreaterThan(0));
+  } finally {
+    await act(async () => { replyControl.release(); });
+  }
+  expect((await story(h.api)).text).toBe('al!?pha beta\nx\nalpha beta');
+  expect(h.commands.slice(since).filter((command) => command.kind === 'setShapeRect')).toHaveLength(0);
+});
+
+test('aborting a resize in the view queue keeps it off the worker', async () => {
+  const h = await open();
+  await h.select();
+  const store = viewStore(h.client);
+  const controller = new AbortController();
+  const since = h.commands.length;
+  replyControl.hold();
+  try {
+    const { notes, resize } = resizeBehindNotes(h, store, controller.signal);
+    expect(store.getSnapshot().waitingInputCount).toBe(1);
+    controller.abort();
+    await act(async () => { replyControl.release(); await notes; });
+    expect((await resize).outcomes[0]).toMatchObject({ status: 'cancelled', committed: false });
+    expect(h.commands.slice(since).map((command) => command.kind)).toEqual(['invoke']);
+  } finally {
+    await act(async () => { replyControl.release(); });
+    store.dispose();
+  }
+});
+
+test('shared input can submit without a cancellation method', async () => {
+  const h = await open();
+  const shared = presentationSharedInputs.get(h.client)!;
+  const cancel = Object.getOwnPropertyDescriptor(shared, 'cancel')!;
+  Reflect.deleteProperty(shared, 'cancel');
+  const store = viewStore(h.client);
+  try {
+    let status: string | undefined;
+    await act(async () => {
+      status = await Promise.resolve().then(() => store.dispatch({ kind: 'setChangeObserver', payload: {
+        enabled: false, inputTime: 1, undoGroup: 'observer',
+      } }, { signal: AbortSignal.abort() })).then((ack) => ack.outcomes[0]?.status, () => undefined);
+      await h.client.flush();
+    });
+    expect(status).toBe('noop');
+  } finally {
+    store.dispose();
+    Object.defineProperty(shared, 'cancel', cancel);
+  }
+});
+
+test('queued relative resize uses the updated selection predecessor', async () => {
+  const h = await open();
+  await h.select();
+  const store = viewStore(h.client);
+  const since = h.commands.length;
+  replyControl.hold();
+  try {
+    const { notes, resize } = resizeBehindNotes(h, store);
+    expect(store.getSnapshot().waitingInputCount).toBe(1);
+    await act(async () => { replyControl.release(); await notes; await resize; });
+    const [predecessor, command] = h.commands.slice(since);
+    expect(command).toMatchObject({ kind: 'setShapeRect', payload: { at: { source: 'afterSeq', seq: predecessor?.seq } } });
+  } finally {
+    await act(async () => { replyControl.release(); });
+    store.dispose();
+  }
+});
+
 test('a new shape gesture preserves an earlier released resize', async () => {
   const h = await open();
   await editExisting(h);
@@ -153,6 +258,36 @@ test('a new shape gesture preserves an earlier released resize', async () => {
   if (!saved.ok) throw new Error(saved.failure.message);
   expect(saved.slides[0]!.shapes[0]!.width)
     .toBe(6000000 + Math.round(30 * 9144000 / h.list.width));
+});
+
+test('a second handle press selects the shape after a released resize', async () => {
+  const h = await open();
+  await editExisting(h);
+  const edge = h.point(h.box.x + h.box.w, h.box.y + h.box.h / 2);
+  const since = h.commands.length;
+  const outcomes: Array<{ seq: number; status: string }> = [];
+  const unsubscribe = h.client.subscribe((ack) => { outcomes.push(...ack.outcomes); });
+  replyControl.hold();
+  try {
+    act(() => {
+      const handle = h.view.getByTestId('pptx-resize-e');
+      fireEvent.pointerDown(handle, edge);
+      fireEvent.pointerMove(h.stage, { ...edge, clientX: edge.clientX + 10, buttons: 1 });
+      fireEvent.pointerUp(h.stage, { ...edge, clientX: edge.clientX + 30 });
+      fireEvent.pointerDown(handle, edge);
+      fireEvent.pointerUp(h.stage, edge);
+    });
+    await waitFor(() => expect(replyControl.count()).toBeGreaterThan(0));
+    await act(async () => { replyControl.release(); });
+    await h.api.readContent();
+    const selections = h.commands.slice(since).filter((command) => command.kind === 'selectObject');
+    expect(selections).toHaveLength(2);
+    expect(outcomes.find((outcome) => outcome.seq === selections[1]?.seq)).toMatchObject({ status: 'applied' });
+    expect(h.view.queryByRole('alert')).toBeNull();
+  } finally {
+    unsubscribe();
+    await act(async () => { replyControl.release(); });
+  }
 });
 
 test('grouped child text hides resize handles while top-level text retains them', async () => {

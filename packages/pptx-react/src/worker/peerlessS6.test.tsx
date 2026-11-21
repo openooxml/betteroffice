@@ -185,6 +185,34 @@ test('text editing keeps resize handles active', async () => {
   expect(client.state.selection).toMatchObject({ kind: 'object', shapeId: box.shapeId });
 });
 
+test('text composition hides resize handles and retains input focus', async () => {
+  const { view, stage, canvas, box, point } = await open();
+  const line = box.lines[0]!;
+  const stop = line.caretStops.find((stop) => stop.position === 2)!;
+  const at = point(stop.x, line.y + line.height / 2);
+  act(() => { fireEvent.pointerDown(canvas, at); fireEvent.pointerUp(stage, at); });
+  await waitFor(() => expect(client.state.selection).toMatchObject({ storyId: box.storyId, focus: 2 }));
+  const handle = await waitFor(() => view.getByTestId('pptx-resize-e'));
+  const input = view.getByRole('textbox', { name: 'Slide text' });
+  const edge = point(box.x + box.w, box.y + box.h / 2);
+  const since = commands.length;
+  let defaultAllowed = true;
+  act(() => {
+    fireEvent.compositionStart(input);
+    fireEvent.compositionUpdate(input, { data: '漢' });
+    defaultAllowed = fireEvent.pointerDown(handle, edge);
+    fireEvent.pointerUp(stage, { ...edge, clientX: edge.clientX + 30 });
+  });
+  await waitFor(() => expect(view.queryAllByTestId(/pptx-resize-/)).toHaveLength(0));
+  expect(defaultAllowed).toBe(false);
+  expect(document.activeElement).toBe(input);
+  act(() => { fireEvent.compositionEnd(input, { data: '漢' }); });
+  await waitFor(() => expect(commands.slice(since).map((command) => command.kind))
+    .toEqual(['compositionStart', 'compositionCommit', 'compositionEnd']));
+  await bounded(client.flush());
+  await waitFor(() => expect(view.queryAllByTestId(/pptx-resize-/)).toHaveLength(8));
+});
+
 for (const kind of ['shape', 'text']) test(`empty_slide_space_clears_${kind}_selection`, async () => {
   const { view, stage, canvas, box, point, select, list } = await open();
   await select();
@@ -483,6 +511,16 @@ test('released text-edit resize precedes immediate text click and typing while s
   if (!saved.ok) throw new Error(saved.failure.message);
   expect(saved.stories[0]!.text).toBe('al!pha beta\nx\nalpha beta');
   expect(saved.slides[0]!.shapes[0]!.width).toBe(6000000 + Math.round(30 * 9144000 / list.width));
+});
+
+test('table cell text selection does not report resize capability', async () => {
+  const { stage, canvas, point, box } = await open(false, true);
+  const line = box.lines[0]!;
+  const stop = line.caretStops.find((stop) => stop.position === 1)!;
+  const at = point(stop.x, line.y + line.height / 2);
+  act(() => { fireEvent.pointerDown(canvas, at); fireEvent.pointerUp(stage, at); });
+  await bounded(client.flush());
+  expect(client.state.selection).toMatchObject({ shapeId: box.shapeId, storyId: box.storyId, focus: 1, canResize: false });
 });
 
 for (const cellIndex of [0, 1, 2, 3]) {

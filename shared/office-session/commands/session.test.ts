@@ -98,6 +98,23 @@ describe('worker edit session', () => {
     await h.session.dispose();
   });
 
+  it('sends a waiting resize before later independent commands', async () => {
+    const h = harness({ maxInFlight: 4 });
+    try {
+      const predecessor = h.session.submit('select', 'shape');
+      const resize = h.session.submit('resize', 'east', { after: predecessor, waitForAfter: true });
+      h.session.submit('undo', 'undo');
+      h.session.submit('remote', 'remote', { lane: 'collab' });
+      h.pump();
+      expect(h.calls.map(({ envelope }) => envelope.kind)).toEqual(['select']);
+      h.ack(0);
+      await predecessor.ack;
+      h.pump();
+      expect(h.calls.map(({ envelope }) => envelope.kind)).toEqual(['select', 'resize', 'undo', 'remote']);
+      expect(resize.seq).toBe(2);
+    } finally { await h.session.dispose(); }
+  });
+
   it('still lists the envelopes that were unacknowledged when a crash ended the session without recovery', async () => {
     const h = harness({ maxRecoveryAttempts: 0 });
     for (const value of ['a', 'b', 'c']) h.session.submit('insert', value);
