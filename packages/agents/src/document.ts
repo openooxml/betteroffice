@@ -661,7 +661,7 @@ export class DocxAgentDocument {
         this.session.applyLocalUpdate(update);
         applied = true;
       } finally { this.session.addUndoBoundary(); }
-      this.preserveReferences(before, this.session.version(), this.agentDecisionChanges(held, 'accepted', options.tracked ?? false));
+      this.preserveReferences(before, this.session.version(), this.agentDecisionChanges(held, 'accepted', options.tracked ?? false), held);
       this.checkDecisionReferences(before, held);
       return { id: held.value.id, status: this.settledStatus(held), tracked: options.tracked ?? false, changes: held.value.changes.length };
     } catch (error) {
@@ -987,7 +987,7 @@ export class DocxAgentDocument {
     return { epoch: this.indexedEpoch, paragraphs: this.paragraphs.map(p => ({ ...p })), decisions: new Map(this.editorDecisionRevisions) };
   }
 
-  private preserveReferences(before: ReturnType<DocxAgentDocument['captureReferences']>, version: string, changes: ProposalChange[] = []) {
+  private preserveReferences(before: ReturnType<DocxAgentDocument['captureReferences']>, version: string, changes: ProposalChange[] = [], accepted?: HeldProposal) {
     if (this.session.version() !== version) return;
     this.index();
     const touched = new Set(before.paragraphs.filter(previous => {
@@ -1025,6 +1025,7 @@ export class DocxAgentDocument {
         match.oldText = p.text.slice(start, end);
       }
       for (const held of this.proposals.values()) {
+        if (accepted && held !== accepted && held.value.status === 'pending' && changes.some(change => change.ref === p.ref)) continue;
         const target = held.targets.get(p.ref);
         if (target?.fingerprint !== previous.fingerprint) continue;
         target.fingerprint = p.fingerprint;

@@ -165,18 +165,50 @@ test('attached DOCX refuses a stale insertion after accepting a change to its co
     await doc.accept(first.id);
     const text = doc.read(summary.ref).text;
     expect(text).toBe('Quarterly report summary');
-    expect(doc.review(second.id).staleRefs).toEqual([]);
+    expect(doc.review(second.id).staleRefs).toEqual([summary.ref]);
     const state = owner.session.encodeState();
     const pending = owner.session.getProposals();
     await expect(doc.accept(second.id)).rejects.toMatchObject({
-      code: 'STALE_TARGET', message: 'Target text changed. Read fresh targets and create a new proposal.',
+      code: 'STALE_TARGET', details: { refs: [summary.ref] },
     });
     expect(doc.read(summary.ref).text).toBe(text);
     expect(owner.session.encodeState()).toEqual(state);
     expect(owner.session.getProposals()).toEqual(pending);
     expect(doc.review(second.id)).toMatchObject({ status: 'pending', records: [{ state: 'proposed' }] });
+    expect(doc.reject(second.id)).toEqual({ id: second.id, status: 'rejected' });
+    expect(doc.read(summary.ref).text).toBe(text);
   } finally { doc.close(); owner.close(); }
 });
+
+for (const sample of [
+  { text: 'one two two', oldText: 'one', newText: 'foo bar', secondOldText: 'one two two', secondNewText: 'one two TWO', expected: 'foo bar two two' },
+  { text: 'a b c', oldText: 'a', newText: 'a b', secondOldText: 'a b', secondNewText: 'a bX', expected: 'a b b c' },
+]) {
+  test(`attached DOCX refuses a pending proposal after accepting ${JSON.stringify(sample.oldText)} -> ${JSON.stringify(sample.newText)}`, async () => {
+    const zip = await JSZip.loadAsync(await fixture());
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace('Executive summary', sample.text));
+    const owner = await openDocx(await zip.generateAsync({ type: 'uint8array' }));
+    const doc = attachDocx(owner.session);
+    try {
+      const firstHit = doc.grep({ query: sample.oldText }).matches[0];
+      const secondHit = doc.grep({ query: sample.secondOldText }).matches[0];
+      const first = doc.propose({ author: 'Agent', edits: [{ match: firstHit.match, newText: sample.newText }] });
+      const second = doc.propose({ author: 'Agent', edits: [{ match: secondHit.match, newText: sample.secondNewText }] });
+      await doc.accept(first.id);
+      expect(doc.read(secondHit.ref).text).toBe(sample.expected);
+      const state = owner.session.encodeState();
+      const pending = owner.session.getProposals();
+      await expect(doc.accept(second.id)).rejects.toMatchObject({ code: 'STALE_TARGET', details: { refs: [secondHit.ref] } });
+      expect(doc.read(secondHit.ref).text).toBe(sample.expected);
+      expect(owner.session.encodeState()).toEqual(state);
+      expect(owner.session.getProposals()).toEqual(pending);
+      expect(doc.review(second.id)).toMatchObject({ status: 'pending', staleRefs: [secondHit.ref], records: [{ state: 'proposed' }] });
+      expect(doc.reject(second.id)).toEqual({ id: second.id, status: 'rejected' });
+      expect(doc.read(secondHit.ref).text).toBe(sample.expected);
+    } finally { doc.close(); owner.close(); }
+  });
+}
 
 test('attached DOCX sends the known trimmed offset for overlapping replacement text', async () => {
   for (const sample of [
@@ -903,7 +935,8 @@ for (const peer of [false, true]) {
       const second = await doc.proposeAsync({ author: 'Agent', edits: [{ match: hits[1].match, newText: 'final' }] });
       await doc.accept(first.id);
       expect(doc.read(hits[0].ref).revision).toBe(hits[0].revision);
-      expect(doc.review(second.id).staleRefs).toEqual([]);
+      expect(doc.review(second.id).staleRefs).toEqual(peer ? [] : [hits[1].ref]);
+      if (!peer) await expect(doc.accept(second.id)).rejects.toMatchObject({ code: 'STALE_TARGET' });
       expect(doc.grep({ query: 'draft', limit: 1, cursor: page.nextCursor! }).matches[0].start).toBe(hits[1].start + 4);
       await doc.rejectAsync(second.id);
       const reused = await doc.proposeAsync({ author: 'Agent', edits: [{ match: hits[1].match, newText: 'final' }] });
