@@ -5,4 +5,4 @@
 "@betteroffice/rust-crates": minor
 ---
 
-Office fonts we draw with a substitute, such as Aptos, Arial Narrow, Cambria and Verdana, now measure at the real font's glyph widths and line heights, so text breaks like Word and PowerPoint. Legacy names such as Tms Rmn and Helv also resolve. Rust `TextRunPrimitive` literals must set `substitute_scale`.
+Substituted Office fonts, including Aptos, Arial Narrow, Cambria and Verdana, measure at the real font's glyph widths and line heights, so text breaks like Word and PowerPoint. Legacy names such as Tms Rmn and Helv also resolve. Set `substitute_scale` in `TextRunPrimitive` literals.

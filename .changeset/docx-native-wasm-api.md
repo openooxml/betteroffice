@@ -2,4 +2,4 @@
 '@betteroffice/docx-native': minor
 ---
 
-Replaces the native facade with the same entry points and API as `@betteroffice/docx`, backed by the native engine by default. Import `@betteroffice/docx-native` for Node.js, Bun and Deno without WebAssembly initialization or assets. Use `parseDocx` in place of `openDocument`, `Document` and `DocxDocument`, and drop imports of the removed facade types `DocumentStructure`, `EditReceipt`, `FontFace`, `ImageResource`, `LayoutResult`, `OpenDocumentOptions`, `RenderedPage` and `SaveDocumentOptions`.
+`@betteroffice/docx-native` replaces its facade with `@betteroffice/docx`'s API and entry points, using native execution by default. Node.js, Bun and Deno imports need no WebAssembly initialization or assets. Replace `openDocument`, `Document` and `DocxDocument` with `parseDocx` and drop `DocumentStructure`, `EditReceipt`, `FontFace`, `ImageResource`, `LayoutResult`, `OpenDocumentOptions`, `RenderedPage` and `SaveDocumentOptions` imports.

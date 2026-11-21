@@ -8,4 +8,4 @@
 "@betteroffice/rust-crates": patch
 ---
 
-DOCX no longer loads Google Fonts by default. Unbundled families use one shared substitution table; XLSX fetches their look-alike from Bunny Fonts, only the character-range files the shown text needs, configurable with `remoteFonts` or `setRemoteFontProvider` ('bunny', 'google', a custom URL, 'off'). Python adds `font_substitute`. DOCX no longer fetches remote fonts, so `setRemoteFontProvider` and `setGoogleFontsEnabled` have no effect on documents.
+DOCX no longer defaults to Google Fonts. Unbundled families share one substitution table. XLSX fetches only substitutes' visible-text character-range files from Bunny Fonts via `remoteFonts` or `setRemoteFontProvider` ('bunny', 'google', custom URL, 'off'). Python adds `font_substitute`. In DOCX, `setRemoteFontProvider` and `setGoogleFontsEnabled` have no effect.
