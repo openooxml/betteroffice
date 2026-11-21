@@ -33,16 +33,17 @@ test('attached XLSX proposals belong to the engine and reflect editor decisions'
   } finally { agent.close(); owner.close(); }
 });
 
-test('XLSX proposal acceptance permits unrelated user edits', async () => {
+test('XLSX proposal acceptance refuses unrelated user edits', async () => {
   const owner = await openXlsx(await xlsxFixture());
   const book = attachXlsx(owner.handle);
   try {
     const cell = book.readCells({ sheet: 'sheet:0', range: 'B3' }).cells[0].cell;
     const proposal = book.proposeCells({ author: 'Agent', edits: [{ cell, input: '123' }] });
     book.handle.editCell(0, 100, 0, 'Unrelated');
-    expect(book.review(proposal.id).stale).toBe(false);
-    await book.accept(proposal.id);
-    expect(book.handle.cell(0, 2, 1).input).toBe('123');
+    expect(book.review(proposal.id).stale).toBe(true);
+    await expect(book.accept(proposal.id)).rejects.toMatchObject({ code: 'STALE_TARGET' });
+    expect(book.readCells({ sheet: 'sheet:0', range: 'B3' }).cells[0].value).toEqual({ kind: 'number', value: 100 });
+    expect(book.review(proposal.id).status).toBe('pending');
   } finally { book.close(); owner.close(); }
 });
 
@@ -440,26 +441,63 @@ for (const state of ['accepted', 'rejected'] as const) {
 }
 
 for (const tracked of [false, true]) {
-  test(`DOCX agent acceptance uses engine revisions with tracked=${tracked}`, async () => {
+  test(`DOCX agent acceptance applies local revisions with tracked=${tracked}`, async () => {
     const owner = await openDocx(await fixture());
     const doc = attachDocx(owner.session);
     try {
       const [hit] = doc.grep({ query: 'Executive summary' }).matches;
       const proposal = doc.propose({ author: 'Agent', edits: [{ match: hit.match, newText: 'Updated summary' }] });
       const revisionIds = doc.session.listRevisions().map(revision => revision.revisionId);
-      const dates = doc.session.listRevisions().map(revision => revision.date);
       expect(revisionIds.length).toBeGreaterThan(0);
-      await expect(doc.accept(proposal.id, { tracked, date: '2026-01-01T00:00:00Z' })).rejects.toMatchObject({ code: 'ACCEPT_DATE_UNSUPPORTED' });
-      expect(doc.review(proposal.id).status).toBe('pending');
-      expect(await doc.accept(proposal.id, { tracked })).toMatchObject({ id: proposal.id, status: 'accepted', tracked, changes: 1 });
+      const date = '2026-01-01T00:00:00Z';
+      expect(await doc.accept(proposal.id, { tracked, date })).toMatchObject({ id: proposal.id, status: 'accepted', tracked, changes: 1 });
       expect(doc.session.getProposals().proposals).toHaveLength(0);
-      expect(doc.session.listRevisions().map(revision => revision.revisionId)).toEqual(tracked ? revisionIds : []);
-      if (tracked) expect(doc.session.listRevisions().map(revision => revision.date)).toEqual(dates);
+      const revisions = doc.session.listRevisions();
+      expect(revisions.every(revision => !revisionIds.includes(revision.revisionId))).toBe(true);
+      if (tracked) {
+        expect(revisions.length).toBeGreaterThan(0);
+        expect(revisions.every(revision => Date.parse(revision.date ?? '') === Date.parse(date))).toBe(true);
+      } else expect(revisions).toEqual([]);
       const zip = await JSZip.loadAsync(await doc.export());
       const xml = await zip.file('word/document.xml')!.async('string');
       expect(xml).toContain('Updated');
       expect(/<w:ins\b/.test(xml)).toBe(tracked);
       expect(doc.review(proposal.id).status).toBe('accepted');
+    } finally { doc.close(); owner.close(); }
+  });
+}
+
+for (const phase of ['draft', 'local', 'withdraw'] as const) {
+  test(`attached DOCX keeps a failed ${phase} acceptance pending and retryable`, async () => {
+    const owner = await openDocx(await fixture());
+    let fail = true;
+    const session = new Proxy(owner.session, { get(target, key) {
+      if (key === (phase === 'local' ? 'applyLocalUpdate' : 'withdrawProposals')) return (...args: unknown[]) => {
+        if (fail && phase !== 'draft') { fail = false; throw new Error('accept refused'); }
+        return (Reflect.get(target, key) as (...args: unknown[]) => unknown)(...args);
+      };
+      return Reflect.get(target, key);
+    } });
+    const doc = attachDocx(session);
+    const applying = doc as unknown as { apply: (...args: unknown[]) => unknown };
+    const apply = applying.apply.bind(doc);
+    if (phase === 'draft') applying.apply = (...args) => {
+      if (fail) { fail = false; throw new Error('accept refused'); }
+      return apply(...args);
+    };
+    try {
+      const hit = doc.grep({ query: 'Executive summary' }).matches[0];
+      const proposal = doc.propose({ author: 'Agent', edits: [{ match: hit.match, newText: 'Updated summary' }] });
+      await expect(doc.accept(proposal.id)).rejects.toThrow('accept refused');
+      expect(doc.review(proposal.id).status).toBe('pending');
+      expect(owner.session.getProposals().proposals.map(record => record.state)).toEqual(['proposed']);
+      expect(doc.read(hit.ref).text).toBe('Executive summary');
+      await expect(doc.accept(proposal.id)).resolves.toMatchObject({ status: 'accepted' });
+      expect(owner.session.getProposals().proposals).toEqual([]);
+      expect(owner.session.listRevisions()).toEqual([]);
+      expect(doc.read(hit.ref).text).toBe('Updated summary');
+      expect(owner.session.undo()).toBe(true);
+      expect(doc.read(hit.ref).text).toBe('Executive summary');
     } finally { doc.close(); owner.close(); }
   });
 }

@@ -9,7 +9,6 @@ import { cleanupGuard } from './cleanup';
 import {
   DocumentToolError,
   TrackedRevisionConflictError,
-  AcceptDateUnsupportedError,
   ProposalDecidedInEditorError,
   unknownMatchError,
   type DocumentOptions,
@@ -587,8 +586,11 @@ export class DocxAgentDocument {
     if (!this.attached) return this.acceptHeadless(id, options);
     const held = this.proposal(id);
     this.checkEditorDecision(held);
-    if (options.date !== undefined) throw new AcceptDateUnsupportedError();
+    if (options.tracked && options.date !== undefined && !Number.isFinite(Date.parse(options.date))) {
+      throw new DocumentToolError('INVALID_ARGUMENT', 'Tracked acceptance requires an ISO date.');
+    }
     this.checkPending(held);
+    if (!this.proposalPeer) return this.acceptAttached(held, options);
     await Promise.resolve();
     this.synchronizeProposals(this.session.getProposals());
     this.checkEditorDecision(held);
@@ -597,6 +599,48 @@ export class DocxAgentDocument {
     try { await this.decideProposalAsync(held, 'accepted', options.tracked ?? false); }
     finally { this.session.addUndoBoundary(); }
     return { id, status: this.settledStatus(held), tracked: options.tracked ?? false, changes: held.value.changes.length };
+  }
+
+  private async acceptAttached(held: HeldProposal, options: { tracked?: boolean; date?: string }) {
+    const draft = await this.fork();
+    const release = cleanupGuard(() => draft.destroy());
+    let applied = false;
+    let before: ReturnType<DocxAgentDocument['captureReferences']> | undefined;
+    try {
+      this.checkPending(held);
+      before = this.captureReferences();
+      this.proposalDecision(held, 'accepted');
+      const revisions = new Set(draft.listRevisions().map(revision => revision.revisionId));
+      const vector = draft.encodeStateVector();
+      for (const record of held.engine) for (const revisionId of record.revisionIds) {
+        if (revisions.delete(revisionId)) draft.rejectChange({ revisionId });
+      }
+      const cleanup = draft.encodeStateAsUpdate(vector);
+      const cleanVector = draft.encodeStateVector();
+      this.apply(draft, held, options.tracked ? { name: held.value.author, date: options.date ?? new Date().toISOString().replace(/\.\d+Z$/, 'Z') } : undefined, true);
+      const update = draft.encodeStateAsUpdate(cleanVector);
+      this.checkPending(held);
+      this.checkDecisionReferences(before, held);
+      this.session.addUndoBoundary();
+      try {
+        this.session.applyHostUpdate(cleanup);
+        this.session.applyLocalUpdate(update);
+        applied = true;
+      } finally { this.session.addUndoBoundary(); }
+      this.decideProposal(held, 'accepted', true);
+      this.preserveReferences(before, this.session.version(), this.agentDecisionChanges(held, 'accepted', options.tracked ?? false));
+      this.checkDecisionReferences(before, held);
+      return { id: held.value.id, status: this.settledStatus(held), tracked: options.tracked ?? false, changes: held.value.changes.length };
+    } catch (error) {
+      if (applied) {
+        if (held.registered.size) this.session.undo();
+        else {
+          if (before) this.preserveReferences(before, this.session.version(), this.agentDecisionChanges(held, 'accepted', options.tracked ?? false));
+          if (error instanceof DocumentToolError) throw release.failed(new DocumentToolError(error.code, `The agent decision applied. ${error.message}`, { ...error.details, applied: true, id: held.value.id, status: this.settledStatus(held) }));
+        }
+      }
+      throw release.failed(error);
+    } finally { release.run(); }
   }
 
   reject(id: string) {
@@ -1297,13 +1341,34 @@ export class DocxAgentDocument {
     }
   }
 
-  private apply(draft: YrsSession, held: HeldProposal, author?: { name: string; date: string }) {
+  private apply(draft: YrsSession, held: HeldProposal, author?: { name: string; date: string }, previews = false) {
     const changes = held.value.changes.map(trimChange).sort((a, b) => a.ref.localeCompare(b.ref) || b.start - a.start);
     for (const change of changes) {
       if (!change.oldText && !change.newText) continue;
       const { story, paraId } = held.targets.get(change.ref)!;
-      draft.replaceRange({ story, start: { paraId, offset: change.start }, end: { paraId, offset: change.start + change.oldText.length } }, change.newText, author);
+      const start = previews ? this.previewOffset(draft, story, paraId, change.start) : change.start;
+      const end = previews ? this.previewOffset(draft, story, paraId, change.start + change.oldText.length) : change.start + change.oldText.length;
+      draft.replaceRange({ story, start: { paraId, offset: start }, end: { paraId, offset: end } }, change.newText, author);
     }
+  }
+
+  private previewOffset(draft: YrsSession, story: string, paraId: string, offset: number) {
+    const snapshot = this.proposalSnapshot ?? this.session.getProposals();
+    let paragraph: YrsStorySegment[] = [];
+    for (const segment of draft.storySegments(story)) {
+      if (segment.kind !== 'pilcrow') { paragraph.push(segment); continue; }
+      if (segment.paraId !== paraId) { paragraph = []; continue; }
+      let raw = 0, visible = 0;
+      for (const run of paragraph) {
+        const length = run.kind === 'text' ? run.text.length : 1;
+        const shown = this.projectSegments([run], snapshot).length > 0;
+        if (shown && offset < visible + length) return raw + offset - visible;
+        raw += length;
+        if (shown) visible += length;
+      }
+      return raw;
+    }
+    throw new DocumentToolError('STALE_TARGET', 'Target paragraph is missing. Read fresh targets.');
   }
 
   private async commit(version: number, edits: DocxAgentEdit[]) {
