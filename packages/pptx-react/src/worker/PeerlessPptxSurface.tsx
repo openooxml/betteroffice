@@ -24,6 +24,7 @@ import { PluginDock, useDockArea } from '../plugins/PluginPanels';
 import { PluginOverlays } from '../plugins/PluginOverlays';
 import { usePeerlessPluginHost } from './usePeerlessPluginHost';
 import { PeerlessSlideStrip } from './PeerlessSlideStrip';
+import { invalidateCommandFrameCanvas } from './commandFrameRasters';
 import { PeerlessNotes } from './PeerlessNotes';
 import { PeerlessRecovery } from './PeerlessRecovery';
 import { PresentationFailure } from '../components/PresentationFailure';
@@ -173,6 +174,7 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
     const ctx = surface.getContext('2d');
     ctx?.setTransform(1, 0, 0, 1, 0, 0);
     ctx?.clearRect(0, 0, surface.width, surface.height);
+    invalidateCommandFrameCanvas(surface);
   }, [empty]);
   const { toolbar, showToolbar } = props;
   const [zoom, setZoom] = useState<number | 'fit'>(() => initialPptxZoom(props.initialZoom));
