@@ -258,6 +258,7 @@ export const editsession_written_paragraph_ids: (a: number, b: number, c: number
 export const editsession_yrs_blocks_for_story: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const export_docx_markdown_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const export_docx_structured_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+export const field_run_digest: (a: number, b: number) => [number, number];
 export const find_docx_content_controls_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
 export const hit_test_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const hit_test_regions_by_handle: (a: number, b: number, c: number, d: number) => [number, number, number, number];

@@ -186,7 +186,7 @@ impl Presentation {
     }
 
     pub fn open_collaborative(bytes: &[u8], client_id: u64) -> Result<Self> {
-        Self::open_with_limits_internal(bytes, &ParseLimits::default(), client_id)
+        Self::open_collaborative_with_limits(bytes, client_id, &ParseLimits::default())
     }
 
     pub fn open_from_update(update: &[u8], client_id: u64, source: Option<&[u8]>) -> Result<Self> {
@@ -195,6 +195,7 @@ impl Presentation {
             Some(source) => session.attach_source_if_matching(source)?,
             None => session,
         };
+        session.set_collaborative()?;
         let presentation = Self {
             session,
             renderer: Mutex::new(SlideRenderer::new()),
@@ -228,7 +229,9 @@ impl Presentation {
         client_id: u64,
         limits: &ParseLimits,
     ) -> Result<Self> {
-        Self::open_with_limits_internal(bytes, limits, client_id)
+        let presentation = Self::open_with_limits_internal(bytes, limits, client_id)?;
+        presentation.session.set_collaborative()?;
+        Ok(presentation)
     }
 
     fn open_with_limits_internal(

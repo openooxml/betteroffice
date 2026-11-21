@@ -372,6 +372,9 @@ export class FileSession {
         this.#itemVersion = info.Version ?? null;
         const fetched = await this.#host.readFile({ wopiSrc: this.wopiSrc, accessToken: input.accessToken });
         const isBlank = fetched.byteLength === 0;
+        if (isBlank && info.Size > 0) {
+          throw new WopiHostError("invalidResponse", "GetFile returned no bytes for a non-empty file");
+        }
         const bytes = isBlank ? await blankDocument(this.#format) : fetched;
         if (isBlank) {
           this.#savedVersion = -1;
@@ -1197,11 +1200,14 @@ export class FileSession {
         } catch (err) {
           unauthorized = err instanceof WopiHostError && err.kind === "unauthorized";
         }
-        if (info?.Version && info.Version !== result.itemVersion) {
+        const ours = result.itemVersion === null && info?.Size === bytes.byteLength;
+        const written = result.itemVersion ?? (ours ? info?.Version : undefined) ?? null;
+        if (info?.Version && info.Version !== written) {
           return this.#saveCurrentConflict(current, tried);
         }
-        this.#itemVersion = result.itemVersion ?? this.#itemVersion;
-        if (info?.LastModifiedTime && info.Version === result.itemVersion) this.#lastModifiedTime = info.LastModifiedTime;
+        if (result.itemVersion === null && written !== null) this.#recordWritten(written);
+        this.#itemVersion = written ?? this.#itemVersion;
+        if (info?.LastModifiedTime && info.Version === written) this.#lastModifiedTime = info.LastModifiedTime;
         this.#savedVersion = Math.max(this.#savedVersion, versionAtStart);
         if (!this.dirty) this.#firstDirtyAt = null;
         if (unauthorized) this.#markTokenDead(current);

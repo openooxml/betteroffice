@@ -87,6 +87,10 @@ export declare function clipboardFragmentIsTextOnly(fragment: DocxClipboardFragm
 export declare function clipboardParagraphUnits(paragraph: DocxClipboardParagraph): Array<DocxClipboardRun | {
     image: Record<string, unknown>;
 }>;
+/** @internal A clipboard run with portable formatting and a validated link. */
+export declare function clipboardRun(text: string, attributes: Record<string, unknown>, themeColors?: Readonly<Record<string, string>>): DocxClipboardRun;
+/** @internal */
+export declare function clipboardHighlightName(name: string): string | undefined;
 /** @internal Strict shape and size check for a pasted or copied clipboard fragment. */
 export declare function validClipboardFragment(value: unknown): value is DocxClipboardFragment;
 /** @internal Sessions a table read needs: the raw payload plus story segments. */
