@@ -19,6 +19,8 @@ pub(crate) const RPR_CHANGE: &str = "rPrChange";
 
 pub(crate) const PROTECTED_ATTRS: [&str; 4] = [INS, DEL, HYPERLINK, RPR_CHANGE];
 
+const STRUCTURAL_ATTRS: [&str; 1] = ["fieldResult"];
+
 /// Word's closed highlight palette keyed by exact uppercase hex.
 const HIGHLIGHT_HEX_TO_NAME: [(&str, &str); 16] = [
     ("FFFF00", "yellow"),
@@ -1982,7 +1984,9 @@ impl EditingDoc {
 pub(crate) fn previous_run_properties(attrs: &BTreeMap<String, Any>, change: &Any) -> Attrs {
     let mut patch: Attrs = attrs
         .keys()
-        .filter(|key| !PROTECTED_ATTRS.contains(&key.as_str()))
+        .filter(|key| {
+            !PROTECTED_ATTRS.contains(&key.as_str()) && !STRUCTURAL_ATTRS.contains(&key.as_str())
+        })
         .map(|key| (Arc::from(key.as_str()), Any::Null))
         .collect();
     if let Any::Map(change) = change {
@@ -1997,7 +2001,9 @@ pub(crate) fn previous_run_properties(attrs: &BTreeMap<String, Any>, change: &An
                 .unwrap_or_default(),
         };
         for (key, value) in previous {
-            if !PROTECTED_ATTRS.contains(&key.as_str()) {
+            if !PROTECTED_ATTRS.contains(&key.as_str())
+                && !STRUCTURAL_ATTRS.contains(&key.as_str())
+            {
                 patch.insert(Arc::from(key), value);
             }
         }
