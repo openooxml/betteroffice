@@ -238,14 +238,16 @@ Supply a creation timestamp when adding a comment. Coordinates use EMUs.
 
 ## Fonts
 
-The DOCX, PPTX, XLSX and VSDX crates resolve each face from the fonts embedded in
-the document, then the faces you register with `register_font` or pass in
-`OpenOptions::fonts`, then the bundled packs, then a last resort. The packs are
+The DOCX and PPTX crates look for a face among the fonts embedded in
+the document first, then among the faces you register with `register_font` or pass in
+`OpenOptions::fonts`, and only then in the bundled packs and their last-resort face. The XLSX
+crate does the same without the first step: a workbook embeds no fonts. The packs are
 embedded through default features: `fonts-latin` (4.6 MB), `fonts-intl` (2.2 MB)
-and `fonts-cjk` (26.7 MB). Turn off default features to leave them out:
+and `fonts-cjk` (26.7 MB). Turn off default features to leave them out, and name
+the features you keep; `raster` is PNG rendering:
 
 ```bash
-cargo add betteroffice-docx --no-default-features --features fonts-latin
+cargo add betteroffice-docx --no-default-features --features raster,fonts-latin
 ```
 
 `open_with_options` reads the packs from a local directory or a provider you
@@ -267,14 +269,19 @@ let document = Document::open_with_options(&docx_bytes, &options)?;
 
 ## Rendering
 
-XLSX includes PNG rendering by default. `render_sheet` measures and draws cell
+PNG rendering is the `raster` feature, which the DOCX, PPTX and XLSX crates
+enable by default. `render_sheet` measures and draws cell
 text with the face resolved for each font family, with Carlito as the last
-resort. Enable the `raster` feature for native DOCX and PPTX PNG rendering:
+resort. With default features turned off, enable `raster` by name, together
+with a font pack:
 
 ```bash
-cargo add betteroffice-docx --features raster
-cargo add betteroffice-pptx --features raster
+cargo add betteroffice-docx --no-default-features --features raster,fonts-latin
+cargo add betteroffice-pptx --no-default-features --features raster,fonts-latin
 ```
+
+Without a font feature the PPTX crate has no faces of its own: rendering a slide
+that has text fails until you register a face with `register_font`.
 
 `render_slide` returns a display list and hit-test metadata. With the `raster` feature enabled, `render_png`
 produces PNG bytes and reads embedded images from the presentation. SVG pictures

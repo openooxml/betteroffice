@@ -9,7 +9,7 @@ Rust/WebAssembly. Use it for document processing or a custom editor adapter.
 bun add @betteroffice/docx
 ```
 
-No peer dependencies. `@betteroffice/fonts`, which holds the font assets, is installed with it as a dependency.
+No peer dependencies. `@betteroffice/fonts` is installed with it as a dependency; the CJK and international font packs are optional.
 
 ## Usage
 
@@ -52,7 +52,7 @@ edits, and exports. Release a direct session with `session.destroy()` when finis
 
 ## Worker sessions
 
-Node.js >= 20.16 / 22.3 runs worker sessions on `worker_threads`, keeping the process alive until the session is disposed. Outside browsers the DOCX worker opens, reads and saves documents; for headless editing use the in-thread edit session (`openDocx` / `EditSession`), which is fully supported, because the worker editor session paints frames and needs `OffscreenCanvas`.
+Node.js >= 20.16 / 22.3 runs worker sessions on `worker_threads`, keeping the process alive until the session is disposed. Outside browsers the DOCX worker opens, reads and saves documents; for headless editing use the in-thread edit session (`createYrsSession` from `@betteroffice/docx/yrs`, then `session.openDocx`), which is fully supported, because the worker editor session paints frames and needs `OffscreenCanvas`.
 
 ## Page PNGs
 
@@ -165,7 +165,7 @@ Deprecated: `EditorPluginCore`, `PluginPanelProps`, `PanelConfig`, and `SidebarI
 
 ## Fonts for custom adapters
 
-See [font setup](https://docs.betteroffice.dev/docs/packages#fonts) for optional measurement assets.
+See [font setup](https://docs.betteroffice.dev/docs/packages#fonts) for the font packages and the optional packs.
 For browser font loading, `createFontLoadScope()` from `@betteroffice/docx/utils` isolates each
 editor's load notifications. `registerDocumentFaces(faces, scope)` registers embedded faces and
 returns their CSS family aliases when documents use different bytes under the same family name.
