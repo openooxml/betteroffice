@@ -77,5 +77,5 @@ export const {
 /** The asset URLs of an installed optional font pack by file name, or undefined when the pack is not installed. */
 export async function optionalFontPackUrls(pack: 'intl' | 'cjk'): Promise<Record<string, string> | undefined> {
   const urls = await lookup(pack);
-  return urls && Object.fromEntries(Object.entries(urls).map(([file, url]) => [file, absoluteHref(url().href)]));
+  return urls && Object.fromEntries(Object.entries(urls).map(([file, url]) => [file, new URL(absoluteHref(url().href)).href]));
 }

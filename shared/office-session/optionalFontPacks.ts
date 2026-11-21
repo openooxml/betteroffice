@@ -95,8 +95,8 @@ export function createWorkerFontPacks(post: (message: FontPackRequest) => void, 
           Object.values(value.urls).every((href) => {
             try { return typeof href === 'string' && new URL(href).href === href; } catch { return false; }
           }));
-        request.finish(valid ? value.urls : undefined, value.error || !valid
-          ? new SessionFailure('message', value.error || 'Invalid optional font pack URLs') : undefined);
+        request.finish(valid ? value.urls : undefined, value.error !== undefined || !valid
+          ? new SessionFailure('message', value.error ?? 'Invalid optional font pack URLs') : undefined);
       }
       return true;
     },

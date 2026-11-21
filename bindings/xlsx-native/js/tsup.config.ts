@@ -7,7 +7,7 @@ import { buildWorkerStubs } from '../../../scripts/worker-stub';
 
 const source = '../../../packages/xlsx';
 const dist = '../dist';
-const external = ['node:*', '@betteroffice/fonts-cjk', '@betteroffice/fonts-intl', '@betteroffice/fonts-latin', '#session-worker'];
+const external = ['node:*', '@betteroffice/fonts', '@betteroffice/fonts/*', '@betteroffice/fonts-cjk', '@betteroffice/fonts-intl', '@betteroffice/fonts-latin', '#session-worker'];
 const browser = 'throw new Error("@betteroffice/xlsx-native runs on Node.js, Bun and Deno; use @betteroffice/xlsx in browsers");\n';
 
 export default defineConfig({
@@ -43,7 +43,7 @@ export default defineConfig({
   onSuccess: async () => {
     await buildWorkerStubs('xlsx', dist, {
       plugins: [nativeEnginePlugin('xlsx')],
-      external: [...external, '@betteroffice/fonts', '@betteroffice/fonts/*'],
+      external,
     });
     await rename(join(dist, 'xlsxSessionWorker.node.js'), join(dist, 'xlsxSessionWorker.node.mjs'));
     await writeFile(join(dist, 'package.json'), JSON.stringify({

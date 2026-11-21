@@ -32,7 +32,11 @@ test('the worker keeps its lazy pack responder through session listener handoff'
     postMessage(data: unknown): void { page.dispatchEvent(new MessageEvent('message', { data })); },
   });
   const imports = mock(async (pack: OptionalFontPack) => ({ [`${pack}.zst`]: `https://fonts.example/${pack}.zst` }));
+  const listen = spyOn(page, 'addEventListener');
   attachFontPackSource(page, imports);
+  attachFontPackSource(page, imports);
+  expect(listen).toHaveBeenCalledTimes(1);
+  listen.mockRestore();
   let source!: ReturnType<typeof createWorkerFontPacks>['source'];
   const dispose = installWorkerFontPacks(scope, (installed) => { source = installed; });
   const prepared = mock((_event: Event) => {});
@@ -142,6 +146,9 @@ test('the worker requests a pack again after an error or missing reply', async (
   const failed = packs.source('cjk');
   reply({ error: 'Import failed' });
   await expect(failed).rejects.toThrow('Import failed');
+  const emptyError = packs.source('cjk');
+  reply({ error: '' });
+  await expect(emptyError).rejects.toMatchObject({ code: 'message', message: '' });
   const missing = packs.source('cjk');
   reply({});
   expect(await missing).toBeUndefined();
@@ -150,7 +157,7 @@ test('the worker requests a pack again after an error or missing reply', async (
   reply({ urls });
   expect(await installed).toEqual(urls);
   expect(packs.source('cjk')).toBe(installed);
-  expect(requests).toHaveLength(3);
+  expect(requests).toHaveLength(4);
   packs.dispose();
 });
 

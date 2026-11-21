@@ -114,12 +114,15 @@ test('recovers after installing intl, resolves asset hrefs and reports missing a
     INTL_FONT_ASSET_URLS: {
       [face.file]: () => new URL(absolute),
       'another.zst': () => ({ href: relative }) as URL,
+      'cdn.zst': () => ({ href: 'https://CDN.example:443/./cdn.zst' }) as URL,
     },
   }));
   const location = Object.getOwnPropertyDescriptor(globalThis, 'location');
   Object.defineProperty(globalThis, 'location', { value: { href: 'https://app.example/room/1' }, configurable: true });
   try {
-    expect(await optionalFontPackUrls('intl')).toEqual({ [face.file]: absolute, 'another.zst': `https://app.example${relative}` });
+    expect(await optionalFontPackUrls('intl')).toEqual({
+      [face.file]: absolute, 'another.zst': `https://app.example${relative}`, 'cdn.zst': 'https://cdn.example/cdn.zst',
+    });
   } finally {
     if (location) Object.defineProperty(globalThis, 'location', location);
     else Reflect.deleteProperty(globalThis, 'location');

@@ -49,7 +49,7 @@ test('missing injected packs keep optional faces unavailable', async () => {
 });
 
 test('worker pack URLs retry failures and misses and resolve hrefs from the injected source', async () => {
-  const hrefs = { 'path.zst': '/_next/static/media/path.zst', 'cdn.zst': 'https://cdn.example/cdn.zst' };
+  const hrefs = { 'path.zst': '/_next/static/media/path.zst', 'cdn.zst': 'https://CDN.example:443/./cdn.zst' };
   const source = mock(async (): Promise<Record<string, string> | undefined> => hrefs)
     .mockRejectedValueOnce(new Error('Pack source unavailable')).mockResolvedValueOnce(undefined);
   worker.setOptionalFontPacks(source);
@@ -61,7 +61,7 @@ test('worker pack URLs retry failures and misses and resolve hrefs from the inje
     await Promise.all([first, concurrent].map((request) => expect(request).rejects.toThrow('Pack source unavailable')));
     expect(source).toHaveBeenCalledTimes(1);
     expect(await worker.optionalFontPackUrls('intl')).toBeUndefined();
-    const absolute = { ...hrefs, 'path.zst': 'https://worker.example/_next/static/media/path.zst' };
+    const absolute = { 'path.zst': 'https://worker.example/_next/static/media/path.zst', 'cdn.zst': 'https://cdn.example/cdn.zst' };
     expect(await worker.optionalFontPackUrls('intl')).toEqual(absolute);
     expect(await worker.optionalFontPackUrls('intl')).toEqual(absolute);
     expect(source).toHaveBeenCalledTimes(3);
