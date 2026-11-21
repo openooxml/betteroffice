@@ -4676,15 +4676,30 @@ class SaveContext {
     };
 
     const storyRawMarks = this.storyRawMarks(storyId);
-    const paragraphRawMarks = (end: number): RawMarkBoundary[] =>
-      storyRawMarks
-        .filter((mark) => mark.offset >= paragraphStart && mark.offset <= end)
-        .map((mark) => ({
-          id: mark.ordinal,
-          kind: 'start' as const,
-          offset: Math.max(0, mark.offset - inlineStart),
-          xml: mark.xml,
-        }));
+    const rawMarksInOrder = storyRawMarks.every(
+      (mark, index) => index === 0 || storyRawMarks[index - 1]!.offset <= mark.offset
+    );
+    let rawMarkCursor = 0;
+    const paragraphRawMarks = (end: number): RawMarkBoundary[] => {
+      let selected: readonly YrsRawMark[];
+      if (rawMarksInOrder) {
+        if (rawMarkCursor > 0 && storyRawMarks[rawMarkCursor - 1]!.offset >= paragraphStart) rawMarkCursor = 0;
+        while (rawMarkCursor < storyRawMarks.length && storyRawMarks[rawMarkCursor]!.offset < paragraphStart) {
+          rawMarkCursor += 1;
+        }
+        let last = rawMarkCursor;
+        while (last < storyRawMarks.length && storyRawMarks[last]!.offset <= end) last += 1;
+        selected = storyRawMarks.slice(rawMarkCursor, last);
+      } else {
+        selected = storyRawMarks.filter((mark) => mark.offset >= paragraphStart && mark.offset <= end);
+      }
+      return selected.map((mark) => ({
+        id: mark.ordinal,
+        kind: 'start' as const,
+        offset: Math.max(0, mark.offset - inlineStart),
+        xml: mark.xml,
+      }));
+    };
 
     const pushText = (text: string, attributes: Attrs): void => {
       let cursor = 0;
