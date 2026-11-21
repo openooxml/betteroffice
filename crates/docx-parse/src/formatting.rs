@@ -1781,12 +1781,24 @@ mod tests {
             ("standardDiscretional", "standardDiscretional"),
             ("contextualDiscretional", "contextualDiscretional"),
             ("historicalDiscretional", "historicalDiscretional"),
-            ("standardContextualDiscretional", "standardContextualDiscretional"),
-            ("standardHistoricalDiscretional", "standardHistoricalDiscretional"),
-            ("contextualHistoricalDiscretional", "contextualHistoricalDiscretional"),
+            (
+                "standardContextualDiscretional",
+                "standardContextualDiscretional",
+            ),
+            (
+                "standardHistoricalDiscretional",
+                "standardHistoricalDiscretional",
+            ),
+            (
+                "contextualHistoricalDiscretional",
+                "contextualHistoricalDiscretional",
+            ),
             ("discretionary", "discretional"),
             ("standardDiscretionary", "standardDiscretional"),
-            ("contextualHistoricalDiscretionary", "contextualHistoricalDiscretional"),
+            (
+                "contextualHistoricalDiscretionary",
+                "contextualHistoricalDiscretional",
+            ),
         ] {
             let xml = root(&format!(
                 r#"<w:rPr><w14:ligatures w14:val="{value}"/></w:rPr>"#
