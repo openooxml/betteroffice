@@ -40,7 +40,8 @@ import type { Document } from '../types/document';
 import { shipsWasmAsset } from '../wasm/assetEdit';
 import { editWasmModule } from './wasm/index';
 import { fontBytes, type FontDecoder } from '../../../../shared/office-session/fontDecoder';
-import { attachFontPackSource } from '../../../../shared/office-session/fontPackSource';
+import { attachFontPackSource, createPageFontPackResponder, hasFontPackSource } from '../../../../shared/office-session/fontPackSource';
+import { isFontPackRequest } from '../../../../shared/office-session/optionalFontPacks';
 import { createSessionWorker } from './sessionWorker';
 
 /** @internal */
@@ -228,12 +229,18 @@ export class ResidentEngineWorkerClient implements DocxCommandClient {
   private readonly collabListeners = new Set<(event: { updates: Uint8Array[]; inferences: Array<{ seq: number; insertion: CollaborationTextInsertion }>; clock?: number }) => void>();
   protected readonly worker: ResidentEngineWorkerPort;
   private readonly detachFontPackSource: (() => void) | undefined;
+  private readonly fontPackFallback = createPageFontPackResponder((message) =>
+    (this.worker.postMessage as (message: unknown) => void)(message));
   protected commandIdentity: { session: string; incarnation: number; epoch: number } | null = null;
 
   constructor(worker?: ResidentEngineWorkerPort) {
     this.worker = worker ?? spawnResidentEngineWorker();
     this.detachFontPackSource = worker && 'addEventListener' in worker ? attachFontPackSource(worker as Worker) : undefined;
     this.worker.onmessage = (event) => {
+      if (isFontPackRequest(event.data)) {
+        if (!hasFontPackSource(this.worker)) this.fontPackFallback.receive(event.data);
+        return;
+      }
       const response = event.data;
       if (response.ok && response.commandFrame) {
         const pushed = response.commandFrame;
@@ -1258,6 +1265,7 @@ export class ResidentEngineWorkerClient implements DocxCommandClient {
     this.ready = false;
     this.disarmWatchdog();
     this.detachFontPackSource?.();
+    this.fontPackFallback.dispose();
     this.worker.terminate();
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();

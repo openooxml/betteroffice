@@ -68,12 +68,14 @@ class FakeWorker implements ResidentEngineWorkerPort {
   }
 }
 
-test('a custom port can deliver plain message objects without Event methods', () => {
+test('a custom port without addEventListener gets its font pack requests answered once', async () => {
   const port = new FakeWorker();
   const client = new ResidentEngineWorkerClient(port);
   const message = { protocol: 1, kind: 'font-pack-request', id: 'pack', pack: 'intl' };
   expect(() => port.onmessage?.({ data: message } as unknown as MessageEvent<DocxEngineWorkerResponse>)).not.toThrow();
-  expect(port.posted).toEqual([]);
+  for (let turn = 0; turn < 50 && port.posted.length === 0; turn++) await new Promise((resolve) => setTimeout(resolve, 10));
+  const replies = port.posted as unknown as Array<{ kind?: string; id?: string }>;
+  expect(replies.map(({ kind, id }) => [kind, id])).toEqual([['font-pack-reply', 'pack']]);
   client.destroy();
 });
 
