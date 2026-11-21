@@ -25,7 +25,10 @@ impl SessionIds {
         if !self.floored.swap(true, Ordering::Relaxed) {
             self.counter.fetch_max(self.floor(txn), Ordering::Relaxed);
         }
-        let counter = self.counter.fetch_add(1, Ordering::Relaxed);
+        let counter = self
+            .counter
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+            .expect("session id counter exhausted");
         format!("{}:{counter}", self.client_id)
     }
 
@@ -103,8 +106,10 @@ fn note_any(any: &Any, prefix: &str, floor: &mut u64) {
     }
 }
 
-/// Raises `floor` past each `N` in `text` written as `prefix` then digits, where `prefix` does
-/// not continue a longer number.
+const MAX_FLOOR: u64 = 1 << 53;
+
+/// Raises `floor` past each `N` below [`MAX_FLOOR`] in `text` written as `prefix` then digits,
+/// where `prefix` does not continue a longer number.
 fn note(text: &str, prefix: &str, floor: &mut u64) {
     for (at, _) in text.match_indices(prefix) {
         if text[..at].ends_with(|c: char| c.is_ascii_digit()) {
@@ -114,15 +119,21 @@ fn note(text: &str, prefix: &str, floor: &mut u64) {
         let end = digits
             .find(|c: char| !c.is_ascii_digit())
             .unwrap_or(digits.len());
-        if let Ok(n) = digits[..end].parse::<u64>() {
-            *floor = (*floor).max(n.saturating_add(1));
+        if let Ok(n) = digits[..end].parse::<u64>()
+            && n < MAX_FLOOR
+        {
+            *floor = (*floor).max(n + 1);
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::note;
+    use std::sync::atomic::Ordering;
+
+    use yrs::{Any, ClientID, Doc, Map, Options, Transact};
+
+    use super::{SessionIds, note};
 
     fn floor(text: &str) -> u64 {
         let mut floor = 0;
@@ -138,5 +149,47 @@ mod tests {
         assert_eq!(floor("41:2:repeat:41:9"), 10);
         assert_eq!(floor("41:x"), 0);
         assert_eq!(floor("x41:5"), 6);
+    }
+
+    #[test]
+    fn numbers_at_the_cap_never_raise_the_floor() {
+        assert_eq!(floor("41:9007199254740991"), 1 << 53);
+        assert_eq!(floor("41:9007199254740992"), 0);
+        assert_eq!(floor("41:18446744073709551615"), 0);
+    }
+
+    fn drawn_after(body: &str) -> (String, String) {
+        let doc = Doc::with_options(Options::with_client_id(ClientID::new(41)));
+        let comments = doc.get_or_insert_map("comments");
+        {
+            let mut txn = doc.transact_mut();
+            comments.insert(&mut txn, "41:0", Any::String(body.into()));
+        }
+        let ids = SessionIds::new(41);
+        let txn = doc.transact();
+        (ids.draw(&txn), ids.draw(&txn))
+    }
+
+    #[test]
+    fn a_comment_body_never_makes_a_draw_repeat_a_live_id() {
+        let (first, second) = drawn_after("41:18446744073709551615");
+        assert_eq!((first.as_str(), second.as_str()), ("41:1", "41:2"));
+        let (first, second) = drawn_after("41:9007199254740991");
+        assert_eq!(
+            (first.as_str(), second.as_str()),
+            ("41:9007199254740992", "41:9007199254740993")
+        );
+        let (first, second) = drawn_after("41:5");
+        assert_eq!((first.as_str(), second.as_str()), ("41:6", "41:7"));
+    }
+
+    #[test]
+    #[should_panic(expected = "session id counter exhausted")]
+    fn the_counter_fails_loudly_instead_of_wrapping() {
+        let doc = Doc::with_options(Options::with_client_id(ClientID::new(41)));
+        let ids = SessionIds::new(41);
+        ids.floored.store(true, Ordering::Relaxed);
+        ids.counter.store(u64::MAX, Ordering::Relaxed);
+        ids.draw(&doc.transact());
     }
 }
