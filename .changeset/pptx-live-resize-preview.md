@@ -1,7 +1,7 @@
 ---
 '@betteroffice/pptx': minor
 '@betteroffice/pptx-native': minor
-'@betteroffice/pptx-react': patch
+'@betteroffice/pptx-react': minor
 '@betteroffice/rust-crates': patch
 ---
 
