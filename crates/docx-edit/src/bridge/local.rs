@@ -24,7 +24,8 @@ pub(crate) struct LocalLowering {
     pub(crate) table_embeds: HashMap<String, MapRef>,
     #[cfg(test)]
     pub(crate) materialized_text_units: u32,
-    #[cfg(test)]
+    /// Paragraphs whose seeds an edit dropped since this lowering recorded
+    /// them.
     discarded: BTreeSet<String>,
 }
 
@@ -427,7 +428,6 @@ impl LocalLowering {
 
     pub(super) fn replace_seeds(&mut self, pm: &std::ops::Range<u64>, replacement: Self) {
         self.seeds.retain(|_, seed| !pm.contains(&seed.pm_start));
-        #[cfg(test)]
         for id in replacement.seeds.keys() {
             self.discarded.remove(id);
         }
@@ -922,8 +922,13 @@ impl LocalLowering {
             work.set(counts);
         });
         self.seeds.remove(paragraph);
-        #[cfg(test)]
         self.discarded.insert(paragraph.to_owned());
+    }
+
+    /// Whether an edit dropped the seed of `paragraph` since this lowering
+    /// recorded it.
+    pub(crate) fn dropped(&self, paragraph: &str) -> bool {
+        self.discarded.contains(paragraph)
     }
 
     pub(crate) fn patch<T: ReadTxn>(
@@ -1377,6 +1382,12 @@ fn page_break_depends_on_paragraph<'a>(
         }
         _ => false,
     }
+}
+
+/// Whether legacy seeds can hold over a body of `blocks`: they need every
+/// block to shift.
+pub(crate) fn legacy_seeds_hold(blocks: &[Rc<LayoutBlock>]) -> bool {
+    blocks.iter().all(|block| shiftable(block))
 }
 
 fn shiftable(block: &LayoutBlock) -> bool {
