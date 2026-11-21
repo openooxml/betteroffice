@@ -11,7 +11,7 @@ fn field(code: &str, result: &str) -> String {
 }
 
 #[test]
-fn a_field_held_in_one_run_loses_its_cached_result_and_instruction_spacing_on_a_rewrite_as_on_main()
+fn a_field_held_in_one_run_keeps_its_cached_result_and_instruction_on_a_rewrite_as_on_main()
 {
     let cases = [
         ("page", field(" PAGE ", "1")),
@@ -73,10 +73,14 @@ fn a_field_held_in_one_run_loses_its_cached_result_and_instruction_spacing_on_a_
         .zip(paragraphs)
         .map(|((name, _), paragraph)| format!("{name}: {paragraph}"))
         .collect();
-    let expected = [
-        r#"page: <w:p w14:paraId="77777770"><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t>A</w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>PAGE</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"#,
-        r#"ref: <w:p w14:paraId="77777771"><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t>A</w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>REF target \h</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"#,
-        r#"date: <w:p w14:paraId="77777772"><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t>A</w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>DATE \@ &quot;d MMMM yyyy&quot;</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"#,
-    ];
+    let expected: Vec<String> = cases
+        .iter()
+        .enumerate()
+        .map(|(index, (name, run))| {
+            format!(
+                r#"{name}: <w:p w14:paraId="7777777{index}"><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t>A</w:t></w:r>{run}</w:p>"#
+            )
+        })
+        .collect();
     assert_eq!(out, expected);
 }
