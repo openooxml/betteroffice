@@ -2,7 +2,7 @@ import { expect, spyOn, test } from 'bun:test';
 import JSZip from 'jszip';
 import { decodeCommandDisplayList, presentationSharedInputs } from '@betteroffice/pptx/worker';
 import type { ShapeRect, TextBoxPrimitive } from '@betteroffice/pptx';
-import { deck, open, replyControl } from './peerlessTestHarness';
+import { deck, open, replyControl, story, type } from './peerlessTestHarness';
 import { peerlessPainterFactories } from './usePeerlessPresentation';
 
 const { act, fireEvent, waitFor } = await import('@testing-library/react');
@@ -86,6 +86,59 @@ test('pending released resize remains cancellable before object selection replie
   }
   await h.client.flush();
   expect(h.commands.filter((command) => command.kind === 'setShapeRect')).toHaveLength(0);
+});
+
+test('text input after cancelling a released resize survives the pending selection', async () => {
+  const h = await open();
+  await editExisting(h);
+  const line = h.box.lines[0]!;
+  const textAt = h.point(line.caretStops[2]!.x, line.y + line.height / 2);
+  const edge = h.point(h.box.x + h.box.w, h.box.y + h.box.h / 2);
+  const since = h.commands.length;
+  replyControl.hold();
+  try {
+    act(() => {
+      fireEvent.pointerDown(h.view.getByTestId('pptx-resize-e'), edge);
+      fireEvent.pointerMove(h.stage, { ...edge, clientX: edge.clientX + 10, buttons: 1 });
+      fireEvent.pointerUp(h.stage, { ...edge, clientX: edge.clientX + 30 });
+      fireEvent.keyDown(h.stage, { key: 'Escape' });
+      fireEvent.pointerDown(h.canvas, textAt);
+      fireEvent.pointerUp(h.stage, textAt);
+      type(h.view.getByRole('textbox', { name: 'Slide text' }), '!');
+    });
+    await waitFor(() => expect(replyControl.count()).toBeGreaterThan(0));
+    expect(h.commands.slice(since).map((command) => command.kind))
+      .toEqual(['selectObject', 'selectAtPoint', 'insertText']);
+  } finally {
+    await act(async () => { replyControl.release(); });
+  }
+  await h.client.flush();
+  expect(h.commands.slice(since).map((command) => command.kind))
+    .toEqual(['selectObject', 'selectAtPoint', 'insertText']);
+  expect((await story(h.api)).text).toBe('al!pha beta\nx\nalpha beta');
+});
+
+test('a new shape gesture preserves an earlier released resize', async () => {
+  const h = await open();
+  await editExisting(h);
+  const edge = h.point(h.box.x + h.box.w, h.box.y + h.box.h / 2);
+  const since = h.commands.length;
+  replyControl.hold();
+  try {
+    act(() => {
+      const handle = h.view.getByTestId('pptx-resize-e');
+      fireEvent.pointerDown(handle, edge);
+      fireEvent.pointerMove(h.stage, { ...edge, clientX: edge.clientX + 10, buttons: 1 });
+      fireEvent.pointerUp(h.stage, { ...edge, clientX: edge.clientX + 30 });
+      fireEvent.pointerDown(handle, edge);
+      fireEvent.pointerCancel(h.stage, edge);
+    });
+    await waitFor(() => expect(replyControl.count()).toBeGreaterThan(0));
+  } finally {
+    await act(async () => { replyControl.release(); });
+  }
+  await h.client.flush();
+  expect(h.commands.slice(since).filter((command) => command.kind === 'setShapeRect')).toHaveLength(1);
 });
 
 test('grouped child text hides resize handles while top-level text retains them', async () => {

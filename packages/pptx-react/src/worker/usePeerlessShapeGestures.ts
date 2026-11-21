@@ -73,19 +73,28 @@ export function usePeerlessShapeGestures(store: PeerlessViewStore | null, {
     for (const listener of previewListeners.current) listener();
   }, []);
 
-  const cancel = useCallback(() => {
+  const cancelActive = useCallback(() => {
     const current = gesture.current;
     if (store) setPeerlessGestureActive(store, 'shape', false);
     gesture.current = null;
     recent.current = null;
+    if (current) {
+      current.cancelled = true;
+      current.abort.abort();
+      outstanding.current.delete(current);
+      current.element.releasePointerCapture?.(current.pointerId);
+    }
+    setPreview(null);
+  }, [store, setPreview]);
+
+  const cancel = useCallback(() => {
+    cancelActive();
     for (const pending of outstanding.current) {
       pending.cancelled = true;
       pending.abort.abort();
     }
     outstanding.current.clear();
-    if (current) current.element.releasePointerCapture?.(current.pointerId);
-    setPreview(null);
-  }, [store, setPreview]);
+  }, [cancelActive]);
 
   useEffect(() => {
     setPreview(null);
@@ -149,7 +158,7 @@ export function usePeerlessShapeGestures(store: PeerlessViewStore | null, {
     const repeated = !handle && previous?.slideId === confirmed.frame.slideId && previous.shapeId === shapeId &&
       event.timeStamp >= previous.time && event.timeStamp - previous.time <= 600 &&
       Math.hypot(event.clientX - previous.x, event.clientY - previous.y) <= 6;
-    cancel();
+    cancelActive();
     const { slideId, slideRevision, coversThroughSeq, documentEpoch, incarnation } = confirmed.frame;
     const frame = { slideId, slideRevision, coversThroughSeq, documentEpoch, incarnation };
     const group = `shape-${++nextShapeGroup}`;
@@ -175,7 +184,7 @@ export function usePeerlessShapeGestures(store: PeerlessViewStore | null, {
     event.currentTarget.focus();
     event.currentTarget.setPointerCapture?.(event.pointerId);
     return true;
-  }, [store, presentation, canvas, cancel, position, paint]);
+  }, [store, presentation, canvas, cancelActive, position, paint]);
 
   const hoverCursor = useCallback((event: PointerEvent<HTMLElement>): string | null => {
     if (event.buttons !== 0 || (store && peerlessGestureActive(store))) return null;
@@ -259,9 +268,9 @@ export function usePeerlessShapeGestures(store: PeerlessViewStore | null, {
 
   const onPointerCancel = useCallback((event: PointerEvent<HTMLElement>): boolean => {
     if (gesture.current?.pointerId !== event.pointerId) return false;
-    cancel();
+    cancelActive();
     return true;
-  }, [cancel]);
+  }, [cancelActive]);
 
   const onKeyDown = useCallback((event: KeyboardEvent<HTMLElement>) => {
     if (event.key !== 'Escape' || !outstanding.current.size) return;

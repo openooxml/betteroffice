@@ -713,7 +713,11 @@ export function createPeerlessViewStore(
         if (intent.kind !== 'collabPipe') notify(presentation);
       } else send(input);
       if (signal) {
-        const abort = () => { if (input.ticket) sharedInput?.cancel(input.ticket); };
+        const abort = () => {
+          if (input.ticket && sharedInput?.cancel(input.ticket) && chainTailInput === input) {
+            chainTailInput = input.after;
+          }
+        };
         signal.addEventListener('abort', abort, { once: true });
         const cleanup = () => signal.removeEventListener('abort', abort);
         void operation.then(cleanup, cleanup);
