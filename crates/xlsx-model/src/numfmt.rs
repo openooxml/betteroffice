@@ -1573,7 +1573,7 @@ fn render_date_section(sec: &Section, serial: f64, ds: DateSystem) -> FormattedV
     if serial < 0.0 {
         return "#######".to_string().into();
     }
-    let secfrac = fractional_second_digits(&sec.toks);
+    let secfrac = fractional_second_digits(&sec.toks).min(MAX_FRACTIONAL_SECOND_DIGITS);
     let sub = 10i128.pow(secfrac);
     let total_subunits = (serial * 86400.0 * sub as f64).round() as i128;
     let day_span = 86_400i128 * sub;
@@ -1636,6 +1636,9 @@ fn render_date_section(sec: &Section, serial: f64, ds: DateSystem) -> FormattedV
                     let padded = format!("{frac_units:0width$}", width = secfrac as usize);
                     out.push('.');
                     out.push_str(&padded[..cnt.min(padded.len())]);
+                    for _ in padded.len()..cnt {
+                        out.push('0');
+                    }
                     i = j;
                     continue;
                 }
@@ -1653,6 +1656,8 @@ fn render_date_section(sec: &Section, serial: f64, ds: DateSystem) -> FormattedV
     }
     out
 }
+
+const MAX_FRACTIONAL_SECOND_DIGITS: u32 = 3;
 
 /// fractional-second precision: digit count directly after the first `.`.
 fn fractional_second_digits(toks: &[Tok]) -> u32 {
