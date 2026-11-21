@@ -668,6 +668,15 @@ interface HtmlRunState extends InlineFormatState {
   vertical?: 'super' | 'sub';
   link?: { href: string | null; tooltip: string | null };
   marker?: string;
+  pre?: boolean;
+}
+
+function memoized<T>(read: (value: string) => T): (value: string) => T {
+  const cache = new Map<string, T>();
+  return value => {
+    if (!cache.has(value)) cache.set(value, read(value));
+    return cache.get(value)!;
+  };
 }
 
 const CSS_COLORS: Readonly<Record<string, string>> = {
@@ -695,7 +704,16 @@ function formattedColor(value: string): string | null {
   return colorToHex(value);
 }
 
-function htmlRunState(parent: HtmlRunState, element: Element, style: Map<string, string>): HtmlRunState {
+interface HtmlValueReaders {
+  color: (value: string) => string | null;
+  fontFamily: (value: string) => string | null;
+}
+
+function htmlValueReaders(): HtmlValueReaders {
+  return { color: memoized(formattedColor), fontFamily: memoized(formattedFontFamily) };
+}
+
+function htmlRunState(parent: HtmlRunState, element: Element, style: Map<string, string>, read: HtmlValueReaders): HtmlRunState {
   const state = { ...parent };
   const tag = element.tagName.toUpperCase();
   applyInlineMarks(state, tag, style);
@@ -705,23 +723,26 @@ function htmlRunState(parent: HtmlRunState, element: Element, style: Map<string,
   if (vertical === 'super' || vertical === 'sub') state.vertical = vertical;
   else if (vertical === 'baseline') delete state.vertical;
   const color = style.get('color');
-  if (color) state.color = formattedColor(color);
+  if (color) state.color = read.color(color);
   const size = style.get('font-size');
   if (size) {
     const points = /^(?:\d+(?:\.\d*)?|\.\d+)(?:pt|px)$/i.test(size) ? fontSizeToPt(size) : null;
     state.fontSize = points !== null && points >= 1 && points <= 1638 ? points : null;
   }
   const family = style.get('font-family');
-  if (family) state.fontFamily = formattedFontFamily(family);
+  if (family) state.fontFamily = read.fontFamily(family);
   const background = style.get('background-color');
-  const rgb = background && formattedColor(background);
+  const rgb = background && read.color(background);
   if (rgb && (rgb !== 'FFFFFF' || parent.highlight)) state.highlight = rgb;
   const highlight = style.get('mso-highlight');
   if (highlight) state.highlight = clipboardHighlightName(highlight) ?? state.highlight;
   if (tag === 'A') state.link = { href: element.getAttribute('href'), tooltip: element.getAttribute('title') };
-  if (tag === 'SPAN' && style.get('mso-list')?.toLowerCase() === 'ignore') {
+  if (tag === 'SPAN' && parent.marker === undefined && style.get('mso-list')?.toLowerCase() === 'ignore') {
     state.marker = element.textContent?.trim() ?? '';
   }
+  const space = style.get('white-space')?.toLowerCase();
+  if (tag === 'PRE' || space === 'pre' || space === 'pre-wrap') state.pre = true;
+  else if (space === 'normal' || space === 'nowrap') delete state.pre;
   return state;
 }
 
@@ -769,62 +790,111 @@ function walkFormattedBody(
   const doc = body.ownerDocument;
   if (!index(doc.documentElement, -1)) return false;
   const styles = clipboardHtmlStyles(doc);
+  const read = htmlValueReaders();
   let runs: DocxClipboardRun[] = [];
   let lastFormat = '';
   let endsInSpace = false;
+  let afterBreak = false;
+  let emitted = 0;
+  let runBudget = MAX_FORMATTED_HTML_RUNS;
+  let textBudget = MAX_FORMATTED_HTML_TEXT;
+  const emit = (text: string, paragraphRuns?: DocxClipboardRun[]) => {
+    emitted++;
+    pushText(text, paragraphRuns);
+  };
   const flush = () => {
     if (endsInSpace) {
       const last = runs[runs.length - 1]!;
       last.text = last.text.slice(0, -1);
       if (!last.text) runs.pop();
     }
-    if (runs.length) pushText(runs.map(run => run.text).join(''), runs);
+    if (runs.length) emit(runs.map(run => run.text).join(''), runs);
     runs = [];
     endsInSpace = false;
   };
-  const append = (raw: string, state: HtmlRunState) => {
-    let text = normalizeTextPart(raw);
-    if ((!runs.length || endsInSpace) && text.startsWith(' ')) text = text.slice(1);
-    if (!text) return;
-    endsInSpace = text.endsWith(' ');
+  const lineBreak = () => {
+    if (!runs.length && afterBreak) emit('');
+    flush();
+    afterBreak = true;
+  };
+  const appendRun = (text: string, state: HtmlRunState): boolean => {
+    textBudget -= text.length;
+    if (textBudget < 0) return false;
+    afterBreak = false;
     const run = formattedRun(text, state);
     const last = runs.at(-1);
     const format = JSON.stringify(run.format!.other);
     if (last && lastFormat === format && last.href === run.href && last.tooltip === run.tooltip) last.text += run.text;
+    else if (--runBudget < 0) return false;
     else runs.push(run);
     lastFormat = format;
+    return true;
   };
-  const visit = (node: Node, parent: HtmlRunState, inBlock: boolean) => {
+  const append = (raw: string, state: HtmlRunState): boolean => {
+    if (state.pre) {
+      const lines = raw.replace(/\r\n?/g, '\n').split(NBSP).join(' ').split(/[\n\f\v  ]/);
+      for (const [index, line] of lines.entries()) {
+        if (index) lineBreak();
+        if (line && !appendRun(line, state)) return false;
+        endsInSpace = false;
+      }
+      return true;
+    }
+    let text = normalizeTextPart(raw);
+    if ((!runs.length || endsInSpace) && text.startsWith(' ')) text = text.slice(1);
+    if (!text) return true;
+    endsInSpace = text.endsWith(' ');
+    return appendRun(text, state);
+  };
+  const visit = (node: Node, parent: HtmlRunState, inBlock: boolean): boolean => {
     if (node.nodeType === 3) {
       const raw = (node as Text).data;
-      if (!inBlock && raw.includes(LINE_SEP)) {
-        raw.split(LINE_SEP).forEach((part, i) => {
-          if (i) flush();
-          append(part, parent);
-        });
-      } else append(raw, parent);
-      return;
+      if (!inBlock && !parent.pre && raw.includes(LINE_SEP)) {
+        for (const [index, part] of raw.split(LINE_SEP).entries()) {
+          if (index) flush();
+          if (!append(part, parent)) return false;
+        }
+        return true;
+      }
+      return append(raw, parent);
     }
-    if (node.nodeType !== 1) return;
+    if (node.nodeType !== 1) return true;
     const element = node as Element;
     const tag = element.tagName.toUpperCase();
-    if (SKIP_TAGS.has(tag) || tag === 'IMG') return;
-    if (tag === 'BR') { flush(); return; }
+    if (SKIP_TAGS.has(tag) || tag === 'IMG') return true;
+    if (tag === 'BR') {
+      lineBreak();
+      return true;
+    }
     if (tag === 'TABLE') {
       flush();
+      afterBreak = false;
       pushTable(parseTableElement(element as HTMLTableElement));
-      return;
+      return true;
     }
     const boundary = !inBlock && (isBlock(tag) || withTable.has(element) || withBlock.has(element));
-    if (boundary) flush();
-    const state = htmlRunState(parent, element, styles(element));
+    if (boundary) {
+      flush();
+      afterBreak = false;
+    }
+    const state = htmlRunState(parent, element, styles(element), read);
     const block = inBlock || (isBlock(tag) && !withTable.has(element) && !withBlock.has(element));
-    for (const child of element.childNodes) visit(child, state, block);
-    if (boundary) flush();
+    const before = emitted;
+    for (const child of element.childNodes) {
+      if (!visit(child, state, block)) return false;
+    }
+    if (boundary) {
+      flush();
+      afterBreak = false;
+      if (block && emitted === before && (element.querySelector('br') || element.textContent?.includes(NBSP))) emit('');
+    }
+    return true;
   };
-  const root = htmlRunState(blankInlineFormat(), doc.documentElement, styles(doc.documentElement));
-  const state = htmlRunState(root, body, styles(body));
-  for (const child of body.childNodes) visit(child, state, false);
+  const root = htmlRunState(blankInlineFormat(), doc.documentElement, styles(doc.documentElement), read);
+  const state = htmlRunState(root, body, styles(body), read);
+  for (const child of body.childNodes) {
+    if (!visit(child, state, false)) return false;
+  }
   flush();
   return true;
 }
@@ -881,10 +951,13 @@ function parseClipboardBody(body: HTMLElement, formatted: boolean): DocxClipboar
   };
   if (formatted) {
     if (!walkFormattedBody(body, pushText, pushTable)) return null;
-    const count = paragraphs.reduce((total, p) => total + (p.runs?.length ?? 0), 0);
-    if (count > MAX_FORMATTED_HTML_RUNS || !paragraphs.some(p => p.tables?.length ||
-      p.runs?.some(run => run.href || Object.keys(run.format!.other!).length))) return null;
-    const fragment = { paragraphs };
+    if (!paragraphs.some(p => p.runs?.some(run => run.href || Object.keys(run.format!.other!).length))) return null;
+    const blank = (p: DocxClipboardParagraph) => p.text === '' && !p.runs && !p.tables?.length;
+    let start = 0;
+    let end = paragraphs.length;
+    while (start < end && blank(paragraphs[start]!)) start++;
+    while (end > start && blank(paragraphs[end - 1]!)) end--;
+    const fragment = { paragraphs: paragraphs.slice(start, end) };
     return validClipboardFragment(fragment) ? fragment : null;
   }
   const collectInlineRaw = (node: Node, out: string[]) => {

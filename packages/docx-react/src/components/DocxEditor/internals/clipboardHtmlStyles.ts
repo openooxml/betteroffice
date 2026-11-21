@@ -2,6 +2,7 @@ type Declaration = { value: string; order: number };
 type Rules = Map<string, Map<string, Declaration>>;
 
 const STYLE_TEXT_LIMIT = 200_000;
+const DECLARATION_LIMIT = 512;
 const SELECTOR = /^([a-z][\w-]*)?(\.[\w-]+)?$/i;
 const RUN_PROPERTIES = new Set(['font-weight', 'font-style', 'font-size', 'font-family', 'text-decoration-line',
   'color', 'background-color', 'vertical-align', 'mso-highlight', 'mso-list']);
@@ -30,11 +31,11 @@ function readDeclarations(css: string): Map<string, string> {
     if (colon < 0) continue;
     let name = entry.slice(0, colon).trim().toLowerCase();
     const value = entry.slice(colon + 1).trim().replace(/!\s*important$/i, '').trimEnd();
-    if (!name || !value) continue;
+    if (!name || !value || value.length > DECLARATION_LIMIT) continue;
     if (name === 'text-decoration') name = 'text-decoration-line';
     if (name === 'background') name = 'background-color';
     if (name === 'font') {
-      const font = /^((?:(?:normal|italic|oblique|bold|[1-9]00|small-caps)\s+)*)((?:\d+(?:\.\d*)?|\.\d+)(?:pt|px))(?:\s*\/\s*\S+)?\s+(.+)$/i.exec(value);
+      const font = /^((?:(?:normal|italic|oblique|bold|[1-9]00|small-caps)\s+)*)((?:\d+(?:\.\d*)?|\.\d+)(?:pt|px))(?:\s*\/\s*\S+)?\s+(\S[\s\S]*)$/i.exec(value);
       if (!font) continue;
       const modifiers = font[1]!.trim().toLowerCase().split(/\s+/);
       declarations.set('font-weight', modifiers.find(word => /^(bold|[1-9]00)$/.test(word)) ?? 'normal');
