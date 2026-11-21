@@ -185,7 +185,7 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
   const toolbarVisible = showToolbar !== false && toolbar !== null;
   const editorToolbar = toolbar !== undefined || !props.readOnly;
   const { fit, previewFit, current } = useStageFit(stage, pending ?? presentation, chrome, toolbar, toolbarVisible, zoom);
-  usePptxPinchZoom(stage, canvas, fit?.scale ?? 1, setZoom);
+  usePptxPinchZoom(stage, canvas, fit?.scale ?? 1, setZoom, props.file);
   const callbacks = useRef(props);
   callbacks.current = props;
   const api = useRef<PptxAsyncEditorApi | null>(null);

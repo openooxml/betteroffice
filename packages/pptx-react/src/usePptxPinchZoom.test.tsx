@@ -38,7 +38,7 @@ it('keeps the latest pinch anchor pending through an earlier canvas paint', asyn
   function Harness() {
     const viewport = useRef<HTMLDivElement>(null);
     const content = useRef<HTMLDivElement>(null);
-    usePptxPinchZoom(viewport, content, 1, setScale);
+    usePptxPinchZoom(viewport, content, 1, setScale, 'presentation');
     return <div ref={viewport} data-testid="viewport"><div ref={content} data-testid="content" /></div>;
   }
   const view = render(<Harness />);
@@ -120,6 +120,81 @@ it('keeps the latest pinch anchor pending through an earlier canvas paint', asyn
   }
 });
 
+it('drops a pending pinch anchor when the presentation changes', async () => {
+  const setScale = mock(() => {});
+  let resize = () => {};
+  const resizeObserver = globalThis.ResizeObserver;
+  globalThis.ResizeObserver = class {
+    constructor(callback: ResizeObserverCallback) {
+      resize = () => callback([], this as unknown as ResizeObserver);
+    }
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  } as unknown as typeof ResizeObserver;
+  function Harness({ presentation }: { presentation: object }) {
+    const viewport = useRef<HTMLDivElement>(null);
+    const content = useRef<HTMLDivElement>(null);
+    usePptxPinchZoom(viewport, content, 1, setScale, presentation);
+    return <div ref={viewport} data-testid="viewport"><div ref={content} data-testid="content" /></div>;
+  }
+  const first = {};
+  const view = render(<Harness presentation={first} />);
+  await act(async () => {
+    await Promise.resolve();
+  });
+  const viewport = view.getByTestId('viewport');
+  const content = view.getByTestId('content');
+  Object.defineProperty(viewport, 'clientHeight', { configurable: true, value: 150 });
+  let rect = { left: 10, top: 5, width: 280, height: 140 };
+  spyOn(content, 'getBoundingClientRect').mockImplementation(() => ({
+    ...rect,
+    right: rect.left + rect.width,
+    bottom: rect.top + rect.height,
+    x: rect.left,
+    y: rect.top,
+    toJSON: () => ({}),
+  }));
+  const frames: FrameRequestCallback[] = [];
+  const animation = spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+    frames.push(callback);
+    return frames.length;
+  });
+  const wheel = () => {
+    const event = new Event('wheel', { bubbles: true, cancelable: true }) as WheelEvent;
+    Object.defineProperties(event, {
+      clientX: { value: 240 },
+      clientY: { value: 100 },
+      ctrlKey: { value: true },
+      metaKey: { value: false },
+      altKey: { value: false },
+      deltaY: { value: -50 },
+      deltaMode: { value: WheelEvent.DOM_DELTA_PIXEL },
+    });
+    return event;
+  };
+  try {
+    viewport.dispatchEvent(wheel());
+    view.rerender(<Harness presentation={{}} />);
+    frames.length = 0;
+    rect = { left: 20, top: 10, width: 560, height: 280 };
+    resize();
+    expect(viewport.scrollLeft).toBe(0);
+    expect(viewport.scrollTop).toBe(0);
+
+    viewport.dispatchEvent(wheel());
+    frames.shift()?.(0);
+    const next = pinchZoomScale(1, -50, WheelEvent.DOM_DELTA_PIXEL, 150);
+    rect = { ...rect, width: 560 * next, height: 280 * next };
+    resize();
+    expect(viewport.scrollLeft).toBeCloseTo(20 + 220 * next - 240);
+    expect(viewport.scrollTop).toBeCloseTo(10 + 90 * next - 100);
+  } finally {
+    animation.mockRestore();
+    globalThis.ResizeObserver = resizeObserver;
+  }
+});
+
 it('uses the resized oversized canvas geometry to keep the cursor anchor fixed', async () => {
   let renderedScale = 1;
   let requestedScale = 1;
@@ -139,7 +214,7 @@ it('uses the resized oversized canvas geometry to keep the cursor anchor fixed',
   function Harness() {
     const viewport = useRef<HTMLDivElement>(null);
     const content = useRef<HTMLDivElement>(null);
-    usePptxPinchZoom(viewport, content, 1, setScale);
+    usePptxPinchZoom(viewport, content, 1, setScale, 'presentation');
     return <div ref={viewport} data-testid="viewport"><div ref={content} data-testid="content" /></div>;
   }
   const view = render(<Harness />);

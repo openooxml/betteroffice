@@ -1238,7 +1238,7 @@ export function PptxEditorContent({
     );
   }, [model?.frame, viewport]);
   const scale = zoom === 'fit' ? fitScale : zoom;
-  usePptxPinchZoom(canvasHostRef, canvasRef, scale, setZoom);
+  usePptxPinchZoom(canvasHostRef, canvasRef, scale, setZoom, file);
   const worker = backend ? workerRef.current : null;
   const workerFrame = worker?.frame(worker.active);
   const workerNavigation = worker?.navigation;

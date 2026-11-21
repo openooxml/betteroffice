@@ -28,7 +28,8 @@ export function usePptxPinchZoom(
   viewportRef: RefObject<HTMLElement | null>,
   contentRef: RefObject<HTMLElement | null>,
   scale: number,
-  setScale: (scale: number) => void
+  setScale: (scale: number) => void,
+  presentation: unknown
 ) {
   const scaleRef = useRef(scale);
   const setScaleRef = useRef(setScale);
@@ -139,5 +140,5 @@ export function usePptxPinchZoom(
         anchorAnimationRef.current = null;
       }
     };
-  }, [contentRef, viewportRef]);
+  }, [contentRef, presentation, viewportRef]);
 }
