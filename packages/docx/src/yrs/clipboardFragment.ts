@@ -108,6 +108,16 @@ export function clipboardParagraphUnits(paragraph: DocxClipboardParagraph): Arra
 /** @internal Above this many formatted runs a paste inserts its text without run formatting. */
 export const MAX_PASTE_FORMATTED_RUNS = 500;
 
+/** @internal How many formatted runs the paragraphs of a fragment carry. */
+export function clipboardFragmentRunCount(fragment: DocxClipboardFragment): number {
+  return fragment.paragraphs.reduce((total, paragraph) => total + (paragraph.runs?.length ?? 0), 0);
+}
+
+function withinFormattedRunLimit(fragment: DocxClipboardFragment): DocxClipboardFragment {
+  if (clipboardFragmentRunCount(fragment) <= MAX_PASTE_FORMATTED_RUNS) return fragment;
+  return { paragraphs: fragment.paragraphs.map(({ runs: _runs, ...paragraph }) => paragraph) };
+}
+
 const MAX_FRAGMENT_CELLS = 10_000;
 const MAX_FRAGMENT_PARAGRAPHS = 1_000;
 const MAX_FRAGMENT_TEXT = 1_000_000;
@@ -976,10 +986,11 @@ function formatInsertedRun(
 export function applyClipboardFragment(
   engine: ClipboardPasteEngine,
   range: YrsStoryRange,
-  fragment: DocxClipboardFragment,
+  source: DocxClipboardFragment,
   suggesting?: YrsAuthor,
   keepInherited = false,
 ): YrsLoc {
+  const fragment = withinFormattedRunLimit(source);
   for (const paragraph of fragment.paragraphs) {
     for (const table of paragraph.tables ?? []) engine.validateTableFragment(table);
     for (const inline of paragraph.inlines ?? []) {

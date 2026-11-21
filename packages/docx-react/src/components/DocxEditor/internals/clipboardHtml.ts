@@ -1,5 +1,6 @@
 import {
   DOCX_CLIPBOARD_FRAGMENT_VERSION,
+  MAX_PASTE_FORMATTED_RUNS,
   clipboardFragmentHasPictures,
   clipboardHighlightName,
   clipboardParagraphUnits,
@@ -17,7 +18,7 @@ import { clipboardHtmlStyles, formattedFontFamily } from './clipboardHtmlStyles'
 
 export const MAX_FORMATTED_HTML_LENGTH = 2_000_000;
 export const MAX_FORMATTED_HTML_DEPTH = 200;
-export const MAX_FORMATTED_HTML_RUNS = 1_000;
+export const MAX_FORMATTED_HTML_RUNS = MAX_PASTE_FORMATTED_RUNS;
 export const MAX_FORMATTED_HTML_TEXT = 200_000;
 export const MAX_FORMATTED_HTML_PARAGRAPHS = 1_000;
 
