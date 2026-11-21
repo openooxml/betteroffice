@@ -887,6 +887,23 @@ mod tests {
     }
 
     #[test]
+    fn shape_rect_preview_refuses_grouped_children() {
+        let child = link_fixture::placeholder(2, "body", "<a:p/>", false);
+        let group = link_fixture::group(&child);
+        let source = link_fixture::deck(&[(&group, false)], "", "", "", None);
+        let session = pptx_edit::DeckSession::open(&source, 934).unwrap();
+        let slide = session.slide_scope(0).unwrap().slide;
+        let child_id = &slide.shapes[0].children[0].id;
+        let rect = pptx_edit::ShapeRect {
+            width: 100_000,
+            height: 100_000,
+            ..Default::default()
+        };
+        let preview = Renderer::new().preview_shape_rect_json(&session, &slide.id, child_id, rect);
+        assert!(preview.is_err());
+    }
+
+    #[test]
     fn only_internal_slide_links_depend_on_deck_order() {
         let shape = |paragraphs: &str| {
             link_fixture::placeholder(2, "body", paragraphs, false).replace(
