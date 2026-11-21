@@ -119,10 +119,7 @@ export interface SessionReads<Q extends QueryTable> {
   readonly stage: SessionStage;
 }
 /** @internal */
-export type WorkerEditSession<P, S, E, X, Q extends QueryTable = {}> = EditSession<P, S, E, X> & SessionReads<Q> & {
-  /** Cancels one unmerged command that has not received a sequence yet, plus its queued dependents. */
-  cancel(ticket: CommandTicket): boolean;
-};
+export type WorkerEditSession<P, S, E, X, Q extends QueryTable = {}> = EditSession<P, S, E, X> & SessionReads<Q>;
 /** @internal Per-kind payload view of the same session object. */
 export type CommandSession<C extends CommandTable, S, E, X, Q extends QueryTable = {}> =
   Omit<WorkerEditSession<CommandPayload<C>, S, E, X, Q>, 'submit'> & {

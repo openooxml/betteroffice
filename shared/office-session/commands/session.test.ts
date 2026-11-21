@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { SessionFailure } from '../types';
-import { createWorkerEditSession, sessionUnacknowledged } from './session';
+import { cancelWorkerEditTicket, createWorkerEditSession, sessionUnacknowledged } from './session';
 import type {
   Checkpoint, CommandAck, CommandConnection, CommandEnvelope, CommandOutcome,
   CommandTicket, EchoHooks, FrameEnvelope, WorkerEditSessionOptions,
@@ -89,7 +89,7 @@ describe('worker edit session', () => {
     const resize = h.session.submit('resize', 'east', { after: predecessor, waitForAfter: true });
     h.pump();
     expect(h.calls.map((call) => call.envelope.payload)).toEqual(['shape']);
-    expect(h.session.cancel(resize)).toBe(true);
+    expect(cancelWorkerEditTicket(h.session, resize)).toBe(true);
     expect(await resize.ack).toMatchObject({ seq: undefined, status: 'cancelled', reason: 'cancelled' });
     h.ack(0);
     await predecessor.ack;

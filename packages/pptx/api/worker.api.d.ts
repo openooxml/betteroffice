@@ -2378,6 +2378,8 @@ export type CommandLane = 'input' | 'collab' | 'background';
 export type SubmitOptions<X> = {
     lane?: CommandLane;
     after?: CommandTicket;
+    /** Keep this command unsent until its dependency settles. */
+    waitForAfter?: boolean;
     expectVersion?: boolean;
     inputTime?: number;
     lastInputTime?: number;
@@ -4825,6 +4827,6 @@ export { decodeCommandDisplayList, indexGeometry, indexHitGeometry, findLine, tr
 /** @internal */
 export type { CommandRect, CommandGeometryLine, CommandGeometryIndex, CommandHitGeometryIndex } from './session/commandGeometry';
 /** @internal */
-export type { PresentationCommandMutationMethods, PresentationCommandMutation, PresentationCommandAccessMethods, PresentationCommandAccessMethod, PresentationCommandAccessResult, PresentationCommandAck, PresentationCommandBasis, PresentationCommandClient, PresentationCommandEditState, PresentationCommandEnvelope, PresentationCommandEvents, PresentationCommandFailure, PresentationCommandFence, PresentationCommandFrame, PresentationCommandFrameTag, PresentationCommandMotion, PresentationCommandIdentity, PresentationCommandInput, PresentationCommandIntent, PresentationCommandKind, PresentationCommandMethods, PresentationCommandOpenOptions, PresentationCommandOpenResult, PresentationCommandOutcome, PresentationCommandPayloads, PresentationCommandReadResult, PresentationCommandRefusalReason, PresentationCommandSaveResult, PresentationCommandSelection, PresentationCommandSelected, PresentationCommandObjectSelection, PresentationCommandObjectTarget, PresentationCommandSelectionReference, PresentationCommandTextInput, PresentationCommandThumbnailRequest, PresentationCommandThumbnailResult, PresentationCommandToolbarContext, } from './session/commandProtocol';
+export type { PresentationCommandMutationMethods, PresentationCommandMutation, PresentationCommandAccessMethods, PresentationCommandAccessMethod, PresentationCommandAccessResult, PresentationCommandAck, PresentationCommandBasis, PresentationCommandClient, PresentationCommandEditState, PresentationCommandEnvelope, PresentationCommandEvents, PresentationCommandFailure, PresentationCommandFence, PresentationCommandFrame, PresentationCommandFrameTag, PresentationCommandMotion, PresentationCommandIdentity, PresentationCommandInput, PresentationCommandIntent, PresentationCommandKind, PresentationCommandMethods, PresentationCommandOpenOptions, PresentationCommandOpenResult, PresentationCommandOutcome, PresentationCommandPayloads, PresentationCommandReadResult, PresentationCommandRefusalReason, PresentationCommandSaveResult, PresentationCommandSelection, PresentationCommandSelected, PresentationCommandObjectSelection, PresentationCommandObjectTarget, PresentationCommandResizeHandle, PresentationCommandSelectionReference, PresentationCommandTextInput, PresentationCommandThumbnailRequest, PresentationCommandThumbnailResult, PresentationCommandToolbarContext, } from './session/commandProtocol';
 /** @internal */
 export { presentationCollaborationPipes } from './session/commandCollaboration';
