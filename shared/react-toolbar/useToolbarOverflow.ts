@@ -189,7 +189,7 @@ export function useToolbarOverflow(options: ToolbarOverflowOptions): ToolbarOver
 
   useLayoutEffect(() => {
     measure();
-  }, [measure]);
+  }, [hidden, measure]);
 
   useLayoutEffect(() => {
     const row = optionsRef.current.items.current;
