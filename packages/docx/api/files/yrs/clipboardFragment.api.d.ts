@@ -87,6 +87,10 @@ export declare function clipboardFragmentIsTextOnly(fragment: DocxClipboardFragm
 export declare function clipboardParagraphUnits(paragraph: DocxClipboardParagraph): Array<DocxClipboardRun | {
     image: Record<string, unknown>;
 }>;
+/** @internal Above this many formatted runs a paste inserts its text without run formatting. */
+export declare const MAX_PASTE_FORMATTED_RUNS = 300;
+/** @internal How many formatted runs the paragraphs of a fragment carry. */
+export declare function clipboardFragmentRunCount(fragment: DocxClipboardFragment): number;
 /** @internal A clipboard run with portable formatting and a validated link. */
 export declare function clipboardRun(text: string, attributes: Record<string, unknown>, themeColors?: Readonly<Record<string, string>>): DocxClipboardRun;
 /** @internal */
@@ -145,4 +149,4 @@ export declare function readClipboardSlice(reader: ClipboardTableReader, target:
  * set only their own bold, italic, underline and strikethrough.
  * @internal
  */
-export declare function applyClipboardFragment(engine: ClipboardPasteEngine, range: YrsStoryRange, fragment: DocxClipboardFragment, suggesting?: YrsAuthor, keepInherited?: boolean): YrsLoc;
+export declare function applyClipboardFragment(engine: ClipboardPasteEngine, range: YrsStoryRange, source: DocxClipboardFragment, suggesting?: YrsAuthor, keepInherited?: boolean): YrsLoc;
