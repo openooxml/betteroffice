@@ -156,3 +156,30 @@ def test_held_collaborative_sheets_follow_concurrent_appends(sample_bytes):
     left.apply_update(right.diff(left.state_vector()))
     assert left.value("Left", "A1") == "left value"
     assert left.value("Right", "A1") == "right value"
+
+
+def test_sheet_constructor_takes_a_current_index(workbook_with_extra_sheet):
+    wb = workbook_with_extra_sheet
+    last = wb.sheet_count - 1
+    wb.apply_ops([{"type": "moveSheet", "from": 0, "to": last}])
+    sheet = bo.Sheet(wb, 0)
+    assert sheet.index == 0
+    assert sheet.name == wb.sheet_names[0]
+
+
+def test_cell_writes_keep_one_history_anchor_per_undo_step(workbook_with_extra_sheet):
+    wb = workbook_with_extra_sheet
+    held = wb[wb.sheet_names[0]]
+    for row in range(1, 201):
+        held[f"A{row}"] = row
+    assert len(wb._sheet_history) == wb.history().undo_depth + 1
+    assert all(before is after for before, after in filter(None, wb._sheet_history))
+
+
+def test_collaborative_handles_read_the_engine_sheet_ids(sample_bytes):
+    wb = bo.Workbook.open_collaborative(sample_bytes, client_id=41)
+    assert wb._inner.sheet_ids == wb.sheet_info()["sheetIds"]
+    held = wb[0]
+    held["A1"] = "x"
+    assert held.index == 0
+    assert wb.value(0, "A1") == "x"

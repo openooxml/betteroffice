@@ -181,9 +181,16 @@ class Sheet:
 
     __slots__ = ("_key", "_workbook")
 
-    def __init__(self, workbook: "Workbook", key: SheetKey) -> None:
+    def __init__(self, workbook: "Workbook", index: int) -> None:
         self._workbook = workbook
-        self._key = key
+        self._key = workbook._current_sheet_keys()[index]
+
+    @classmethod
+    def _bound(cls, workbook: "Workbook", key: "int | str") -> "Sheet":
+        sheet = cls.__new__(cls)
+        sheet._workbook = workbook
+        sheet._key = key
+        return sheet
 
     @property
     def index(self) -> int:
@@ -222,11 +229,10 @@ class Sheet:
             return self.render_sheet(
                 scale=scale, range=range, max_width=max_width, max_height=max_height
             )
-        index = self.index
         if range is not None:
             raise TypeError("render_png takes a target or a range, not both")
         return self._workbook.render_png(
-            {"sheet": index, **target},
+            {"sheet": self.index, **target},
             scale=scale,
             max_width=max_width,
             max_height=max_height,
@@ -265,65 +271,69 @@ class Workbook:
         if self._sheet_keys is None:
             self._next_sheet_key = self._inner.sheet_count
             self._sheet_keys = list(range(self._next_sheet_key))
-            self._sheet_history: dict[int, tuple[list[int], list[int]]] = {}
+            self._sheet_history: "list[tuple[list[int], list[int]] | None]" = []
         return self._sheet_keys
 
-    def _current_sheet_keys(self) -> "Sequence[SheetKey]":
+    def _current_sheet_keys(self) -> "Sequence[int | str]":
         if self._inner.is_collaborative:
-            return self.sheet_info()["sheetIds"]
+            return self._inner.sheet_ids
         return self._standalone_sheet_keys()
 
     def _commit(
         self,
         call: Callable[[], _T],
         *,
-        transaction: "str | None" = None,
+        ops: "Sequence[object]" = (),
         history_step: "Literal['undo', 'redo'] | None" = None,
     ) -> _T:
         if self._inner.is_collaborative:
             return call()
 
         version = self.version()
-        before_history = self.history()
-        before_keys = self._standalone_sheet_keys().copy()
+        before_depth = self.history().undo_depth
+        before_keys = self._standalone_sheet_keys()
         result = call()
         if self.version() == version:
             return result
 
-        before_depth = before_history.undo_depth
         after_depth = self.history().undo_depth
+        history = self._sheet_history
         after_keys = before_keys
-        if history_step == "undo" and before_depth in self._sheet_history:
-            after_keys = self._sheet_history[before_depth][0]
-        elif history_step == "redo" and after_depth in self._sheet_history:
-            after_keys = self._sheet_history[after_depth][1]
-        elif transaction is not None:
-            after_keys = before_keys.copy()
-            for op in json.loads(transaction)["ops"]:
-                if isinstance(op, list):
-                    kind, *fields = op
+        if history_step == "undo":
+            anchor = history[before_depth] if before_depth < len(history) else None
+            if anchor is not None:
+                after_keys = anchor[0]
+        elif history_step == "redo":
+            anchor = history[after_depth] if after_depth < len(history) else None
+            if anchor is not None:
+                after_keys = anchor[1]
+        else:
+            for op in ops:
+                positional = isinstance(op, (list, tuple))
+                kind = op[0] if positional else op.get("type") if isinstance(op, Mapping) else None
+                if kind == "moveSheet":
+                    moved = op[1:3] if positional else (op["from"], op["to"])
+                    fields = [int(moved[0]), int(moved[1])]
+                elif kind in ("addSheet", "removeSheet"):
+                    fields = [int(op[1] if positional else op["index"])]
                 else:
-                    kind = op["type"]
-                    if kind == "moveSheet":
-                        fields = [op["from"], op["to"]]
-                    elif kind in ("addSheet", "removeSheet"):
-                        fields = [op["index"]]
-                    else:
-                        continue
+                    continue
+                if after_keys is before_keys:
+                    after_keys = before_keys.copy()
                 if kind == "addSheet":
                     after_keys.insert(fields[0], self._next_sheet_key)
                     self._next_sheet_key += 1
                 elif kind == "removeSheet":
                     after_keys.pop(fields[0])
-                elif kind == "moveSheet":
+                else:
                     after_keys.insert(fields[1], after_keys.pop(fields[0]))
 
         if len(after_keys) != self.sheet_count:
             raise RuntimeError("sheet handle keys do not match the workbook's sheet count")
         if history_step is None and after_depth > before_depth:
-            for depth in [depth for depth in self._sheet_history if depth > before_depth]:
-                del self._sheet_history[depth]
-            self._sheet_history[after_depth] = (before_keys, after_keys)
+            del history[before_depth + 1 :]
+            history.extend([None] * (after_depth - len(history)))
+            history.append((before_keys, after_keys))
         self._sheet_keys = after_keys
         return result
 
@@ -366,7 +376,7 @@ class Workbook:
     def sheet(self, key: SheetKey) -> Sheet:
         """A sheet by name or index. Raises if it does not exist."""
         index = self._inner.sheet_index(key)
-        return Sheet(self, self._current_sheet_keys()[index])
+        return Sheet._bound(self, self._current_sheet_keys()[index])
 
     def value(self, sheet: SheetKey, address: str) -> CellValue:
         """The value of a cell, recalculated only if the workbook has been."""
@@ -505,7 +515,7 @@ class Workbook:
         now_serial: "float | None" = None,
     ) -> Mutation:
         data = _as_bytes(update, max_length=MAX_COLLABORATION_BYTES)
-        return self._commit(lambda: self._inner.apply_update(data, now_serial=now_serial))
+        return self._inner.apply_update(data, now_serial=now_serial)
 
     @property
     def can_undo(self) -> bool:
@@ -555,10 +565,10 @@ class Workbook:
         structural op on a collaborative workbook :class:`CollaborativeStructureError`, each with
         the message TypeScript throws.
         """
-        transaction = _wire({"ops": list(ops)})
+        ops = list(ops)
+        transaction = _wire({"ops": ops})
         return self._commit(
-            lambda: self._inner.apply_ops_json(transaction, now_serial=now_serial),
-            transaction=transaction,
+            lambda: self._inner.apply_ops_json(transaction, now_serial=now_serial), ops=ops
         )
 
     def move_range(
@@ -826,7 +836,7 @@ class Workbook:
 
     def set_active_sheet(self, sheet: SheetKey) -> None:
         """Select a sheet and persist it as the workbook's active tab."""
-        self._commit(lambda: self._inner.set_active_sheet(sheet))
+        self._inner.set_active_sheet(sheet)
 
     def merged_ranges(self, sheet: SheetKey, range: str) -> "list[str]":
         return self._inner.merged_ranges(sheet, range)
@@ -895,7 +905,7 @@ class Workbook:
         return self.sheet(key)
 
     def __iter__(self) -> Iterator[Sheet]:
-        return (Sheet(self, key) for key in self._current_sheet_keys())
+        return (Sheet._bound(self, key) for key in self._current_sheet_keys())
 
     def __len__(self) -> int:
         return self.sheet_count
