@@ -1067,8 +1067,9 @@ pub(crate) fn keep_field_run(field: &mut ComplexField, source: String) {
 
 /// The digest of the model values the writer writes `field` from: its instruction, properties,
 /// flags, form field data, code and result. Empty properties count as none, a flag that is not
-/// set counts as off, and every zero counts as the same zero.
-pub(crate) fn field_run_digest(field: &ComplexField) -> String {
+/// set counts as off, and every zero counts as the same zero. The writer writes a field as its
+/// `source_run_xml` while this equals its `source_run_digest`.
+pub fn field_run_digest(field: &ComplexField) -> String {
     use sha2::{Digest, Sha256};
 
     let formatting = field

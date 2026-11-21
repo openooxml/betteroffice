@@ -426,3 +426,34 @@ for (const [name, run] of THEMED_RUNS) {
     });
   }
 }
+
+const themedFixture = (run: string) => fixture(`<w:p>${text('AB')}${run}${text('CD')}</w:p>`, undefined, THEME);
+
+for (const [name, run] of THEMED_RUNS) {
+  test(`documentToYrs gives back a field run with a theme font as parsed: ${name}`, async () => {
+    const parsed = await parseDocx(themedFixture(run).buffer, { preloadFonts: false });
+    const field = complexFieldOf(parsed, 0);
+    const before = JSON.stringify(field);
+    expect(field.sourceRunDigest).toHaveLength(64);
+    documentToYrs(await session(), parsed);
+    expect(JSON.stringify(complexFieldOf(parsed, 0))).toBe(before);
+  });
+}
+
+test('parseDocx and documentToYrs: an instruction edited before seeding a field with a theme font is written as main writes it', async () => {
+  const [, run] = THEMED_RUNS[0]!;
+  const written = async (edit: (field: ComplexField) => void) => {
+    const parsed = await parseDocx(themedFixture(run).buffer, { preloadFonts: false });
+    edit(complexFieldOf(parsed, 0));
+    return paragraphXml(await (await projectedSession(parsed)).save(), 0);
+  };
+  const saved = await written((field) => { field.instruction = 'DATE'; });
+  const main = await written((field) => {
+    field.instruction = 'DATE';
+    withoutSource(field);
+  });
+  expect(saved).toContain('AB');
+  expect(saved).toContain('DATE');
+  expect(saved).not.toContain(run);
+  expect(saved).toBe(main);
+});
