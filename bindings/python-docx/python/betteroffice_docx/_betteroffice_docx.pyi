@@ -263,12 +263,13 @@ class SaveReport:
     def kept_unchanged(self) -> KeptUnchanged | None: ...
     @property
     def structure_dropped(self) -> list[DroppedStructure] | None:
-        """Structure the save dropped, part by part. `None` means nothing was dropped only when
+        """Structure the save dropped from the body, header, footer and note parts it wrote whole,
+        part by part; comment parts are not checked. `None` means none was found only when
         `whole_model_write` is false; when it is true, `None` means this was not computed."""
     @property
     def whole_model_write(self) -> bool:
-        """The save rewrote every part from the model: structure the model does not carry may be
-        gone and is not itemised in `structure_dropped`."""
+        """The save had no session plan and wrote the document's stories from the model:
+        structure the model does not carry may be gone and is not itemised in `structure_dropped`."""
 
 @final
 class Document:
