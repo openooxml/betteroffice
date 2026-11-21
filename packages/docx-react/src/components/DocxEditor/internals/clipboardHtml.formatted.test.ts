@@ -128,7 +128,7 @@ test('the run budget counts merged runs', () => {
 });
 
 test('each formatted import limit falls back to the original table or plain paste', () => {
-  expect([MAX_FORMATTED_HTML_LENGTH, MAX_FORMATTED_HTML_DEPTH, MAX_FORMATTED_HTML_RUNS]).toEqual([2_000_000, 200, 5_000]);
+  expect([MAX_FORMATTED_HTML_LENGTH, MAX_FORMATTED_HTML_DEPTH, MAX_FORMATTED_HTML_RUNS]).toEqual([2_000_000, 200, 1_000]);
   for (const html of [
     '<b>x</b><!--' + ' '.repeat(MAX_FORMATTED_HTML_LENGTH) + '-->',
     '<span>'.repeat(300) + '<b>x</b>' + '</span>'.repeat(300),

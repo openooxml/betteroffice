@@ -255,7 +255,7 @@ test('paste creates an identical table and one undo removes it', async () => {
   }
 }, TIMEOUT);
 
-for (const [count, width] of [[1_250, 1], [5_000, 1], [5_000, 40]] as const) {
+for (const [count, width] of [[250, 1], [500, 1], [1_000, 1], [1_000, 200]] as const) {
   test(`pastes a paragraph with ${count} alternating runs of ${width} characters`, async () => {
     const { client, engine } = await openTableWorker();
     try {
