@@ -1292,6 +1292,7 @@ function commandFrameFailed(id: number, host: DocxCommandHost, error: unknown): 
     trapped(id, error as Error);
     return;
   }
+  if (isCommandOutcomeUnknownError(error) && isEngineTrap(error.cause)) commandEnginePoisoned = true;
   reply({ id, ok: false, terminal: true, error: error instanceof Error ? error.message : String(error),
     failureCode: error instanceof SessionFailure ? error.code : 'message' });
 }
@@ -4144,7 +4145,7 @@ function preloadSaveWasm(): Promise<void> {
 
 function canPreloadSaveWasm(): boolean {
   return !!session && !previewing && !sourcePreviewing && commandInit?.readOnly !== true &&
-    (!!openedSource || openedParsed) && !trap && !projectionFailure;
+    (!!openedSource || openedParsed) && !trap && !commandEnginePoisoned && !projectionFailure;
 }
 
 /**
