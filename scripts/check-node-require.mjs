@@ -4,9 +4,24 @@
 //   node scripts/check-node-require.mjs <package directory>...
 import { spawnSync } from 'node:child_process';
 import { readFileSync, realpathSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { importPlan } from './check-node-import.mjs';
+
+const require = createRequire(import.meta.url);
+const { satisfies } = createRequire(require.resolve('@changesets/cli'))('semver');
+
+/** The last Node releases of each line before require() of an ES module works without a flag. */
+export const REQUIRE_ESM_MISSING = ['18.20.8', '20.18.3', '21.7.3', '22.11.0'];
+
+/** The Node versions `manifest.engines.node` admits where its ES module entries cannot be required. */
+export function requireFloorProblems(manifest) {
+  const range = manifest.engines?.node;
+  if (typeof range !== 'string') return [];
+  return REQUIRE_ESM_MISSING.filter((version) => satisfies(version, range))
+    .map((version) => `${manifest.name}: engines.node "${range}" admits Node ${version}, where require() of an ES module fails with ERR_REQUIRE_ESM`);
+}
 
 const LOADED = 'betteroffice-entry-loaded';
 const done = `process.stdout.write(${JSON.stringify(LOADED)});`;
@@ -62,7 +77,7 @@ function main() {
   for (const directory of directories.map((entry) => resolve(entry))) {
     const manifest = JSON.parse(readFileSync(join(directory, 'package.json'), 'utf8'));
     const plan = importPlan(manifest);
-    failures.push(...plan.failures);
+    failures.push(...plan.failures, ...requireFloorProblems(manifest));
     const entries = plan.entries.filter((entry) => !entry.json);
     if (!entries.length) failures.push(`${manifest.name}: no package entries found to load`);
     for (const { specifier } of entries) {

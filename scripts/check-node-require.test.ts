@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { FORMS, errorCode, importOnlyExports } from './check-node-require.mjs';
+import { FORMS, errorCode, importOnlyExports, requireFloorProblems } from './check-node-require.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const manifest = (directory: string) => JSON.parse(readFileSync(`${root}${directory}/package.json`, 'utf8'));
@@ -50,4 +50,21 @@ test('CI loads the wasm packages and the native bindings in all three forms', ()
   const workflow = readFileSync(`${root}.github/workflows/ci.yml`, 'utf8');
   expect(workflow).toContain('run: node scripts/check-node-require.mjs packages/docx packages/xlsx packages/pptx\n');
   expect(workflow).toContain('node scripts/check-node-require.mjs $(node scripts/native-bindings.mjs --paths)\n');
+});
+
+test('an engines range that admits a Node without require() of ES modules is a problem', () => {
+  const problems = (node?: string) => requireFloorProblems({ name: 'p', ...(node === undefined ? {} : { engines: { node } }) });
+  expect(problems('^20.16.0 || >=22.3.0').map((line) => line.match(/Node (\S+),/)?.[1])).toEqual(['20.18.3', '22.11.0']);
+  expect(problems('>=18')).toHaveLength(4);
+  expect(problems('^20.19.0 || >=22.12.0')).toEqual([]);
+  expect(problems('>=22.12')).toEqual([]);
+  expect(problems()).toEqual([]);
+});
+
+test('the native roots declare the Node versions their require() needs', () => {
+  for (const format of ['docx', 'xlsx', 'pptx']) {
+    const native = manifest(`bindings/${format}-native`);
+    expect(native.engines.node).toBe('^20.19.0 || >=22.12.0');
+    expect(requireFloorProblems(native)).toEqual([]);
+  }
 });
