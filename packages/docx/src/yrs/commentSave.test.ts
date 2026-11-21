@@ -581,6 +581,27 @@ it('keeps the body and table-cell ranges of a generated document after an edit t
   }
 });
 
+it('keeps a source comment id past the exact integer range and gives a new comment a distinct id', async () => {
+  const huge = '10000000000000000';
+  const parts = new Map(Object.entries(unzipContainer(docx())));
+  for (const name of ['word/document.xml', 'word/comments.xml']) {
+    parts.set(name, toBytes(new TextDecoder().decode(parts.get(name)).replaceAll('w:id="1"', `w:id="${huge}"`)));
+  }
+  const session = await open(new Uint8Array(rezipPartsToArrayBuffer(parts)), 91210);
+  session.addComment([range(session, 2, 0, 7)], 'Editor', '2026-10-01T00:00:00Z', 'New');
+  const saved = unzipContainer((await saveYrsDocx(session)).bytes);
+  const document = new TextDecoder().decode(saved['word/document.xml']);
+  const comments = new TextDecoder().decode(saved['word/comments.xml']);
+  for (const marker of ['RangeStart', 'RangeEnd', 'Reference']) {
+    expect(document).toContain(`<w:comment${marker} w:id="${huge}"/>`);
+  }
+  const ids = [...comments.matchAll(/<w:comment w:id="(\d+)"/g)].map(match => match[1]!);
+  expect(ids).toContain(huge);
+  expect(new Set(ids).size).toBe(2);
+  const added = ids.find(id => id !== huge)!;
+  expect([...document.matchAll(/<w:comment(?:RangeStart|RangeEnd|Reference) w:id="(\d+)"/g)].map(match => match[1]).sort())
+    .toEqual([added, added, added, huge, huge, huge].sort());
+}, 30_000);
 
 describe('comment threads', () => {
   it('hydrates imported unanchored replies and saves without comment edits unchanged', async () => {
