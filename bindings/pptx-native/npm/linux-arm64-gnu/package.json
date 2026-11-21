@@ -1,6 +1,6 @@
 {
   "name": "@betteroffice/pptx-native-linux-arm64-gnu",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "cpu": [
     "arm64"
   ],
