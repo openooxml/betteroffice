@@ -23,7 +23,7 @@ const exceptions = {
   pendingRegistry: 'Only attached proposals enter the shared engine registry; DOCX editor saves contain their live tracked changes.',
   ownAcceptCursor: 'Attached cursors survive own acceptance; headless cursors retain their previous version expiry.',
   ownAcceptCell: 'Attached cell handles survive own acceptance; headless XLSX handles retain whole-workbook version expiry.',
-  unrelatedProposal: 'Attached XLSX proposals use target guards; headless XLSX proposals retain whole-workbook staleness.',
+  unrelatedProposal: 'XLSX proposals retain whole-workbook staleness.',
   diagnostics: 'Attached XLSX accept diagnostics come from engine acceptance, including cycleCells 0.',
   acceptDate: 'Attached DOCX refuses accept date; headless tracked acceptance keeps its supplied date.',
   trackedConflict: 'Attached DOCX refuses adjoining tracked revisions with their identity; headless keeps ordinary insertion beside a tracked run.',
@@ -205,7 +205,7 @@ async function runAgentScript(doc: ScriptDocument, format: Format, mode: Mode) {
   expect(await doc.exportRead(accepted.id)).toEqual(['approved alpha', 'draft beta', 'draft gamma']);
   await doc.accept(accepted.id);
   expect(doc.review(accepted.id)).toEqual({ status: 'accepted', stale: false });
-  expect(doc.review(rejected.id), exceptions.unrelatedProposal).toEqual({ status: 'pending', stale: format === 'xlsx' && !attached });
+  expect(doc.review(rejected.id), exceptions.unrelatedProposal).toEqual({ status: 'pending', stale: format === 'xlsx' });
   await doc.reject(rejected.id);
   expect(doc.review(rejected.id)).toEqual({ status: 'rejected', stale: false });
   if (attached) {

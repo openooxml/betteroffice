@@ -109,10 +109,9 @@ proposal operations in attached mode. DOCX editor decisions expire refs and save
 matches in touched paragraphs, including rejections that leave visible text unchanged.
 Using an expired target throws `STALE_TARGET`; grep again for fresh targets. Matches
 in untouched paragraphs stay valid. Editor decisions expire search cursors as user
-edits do. XLSX attached proposals use engine acceptance guards, including cell styles and
-dependent previews, so unrelated user edits need not stale a proposal. Stale
+edits do. XLSX proposals become stale after any workbook change. Stale
 acceptance throws `STALE_TARGET` and leaves the proposal pending without writing
-cells. Headless XLSX retains whole-workbook proposal staleness.
+cells.
 
 XLSX accept receipt diagnostic counts come from engine acceptance: `changedCells`
 counts reported dependent addresses, `cycleCells` is 0, `limitedCells` counts
