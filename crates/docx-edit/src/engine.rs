@@ -2455,6 +2455,8 @@ struct DisplayState {
     window: Option<std::ops::Range<usize>>,
     retain_built_pages: bool,
     windowed_incremental_builds: bool,
+    /// Body range rect indexes kept between batches while their pages are unchanged.
+    range_rect_pages: RefCell<docx_layout::hit::RangeRectPages>,
 }
 
 /// Engine observability snapshot.
@@ -12588,7 +12590,8 @@ impl EngineSession {
     }
 
     /// [`Self::display_range_rects_region_json`] for many `[from, to)` ranges of one region at
-    /// once, indexing each built body page's primitives a single time.
+    /// once, indexing each built body page's primitives a single time and keeping a page's
+    /// index for the next batch while the page is unchanged.
     pub fn display_range_rects_batch(
         &self,
         region: &str,
@@ -12596,34 +12599,21 @@ impl EngineSession {
         ranges: &[(i64, i64)],
     ) -> Result<Vec<Vec<docx_layout::hit::RangeRect>>, String> {
         let scope = docx_layout::hit::parse_region_scope(region, part_id)?;
-        self.with_display_list(|list| {
-            if scope != docx_layout::hit::RegionScope::Body {
-                return ranges
-                    .iter()
-                    .map(|&(from, to)| {
-                        docx_layout::hit::range_rects_in_region(list, scope, from, to)
-                    })
-                    .collect();
-            }
-            let pages: Vec<_> = list
-                .pages
+        let display = self.display.borrow();
+        let list = display
+            .list
+            .as_ref()
+            .ok_or_else(|| "resident display list is not built".to_owned())?;
+        if scope != docx_layout::hit::RegionScope::Body {
+            return Ok(ranges
                 .iter()
-                .enumerate()
-                .filter(|(_, page)| !page.primitives.is_empty())
-                .map(|(index, page)| docx_layout::hit::RangeRectIndex::new(&page.primitives, index))
-                .collect();
-            ranges
-                .iter()
-                .map(|&(from, to)| {
-                    let (low, high) = (from.min(to), from.max(to));
-                    pages
-                        .iter()
-                        .flat_map(|page| page.rects(low, high))
-                        .collect()
-                })
-                .collect()
-        })
-        .ok_or_else(|| "resident display list is not built".to_owned())
+                .map(|&(from, to)| docx_layout::hit::range_rects_in_region(list, scope, from, to))
+                .collect());
+        }
+        Ok(display
+            .range_rect_pages
+            .borrow_mut()
+            .rects(&list.pages, ranges))
     }
 
     /// Body, header/footer and note range geometry directly against the
@@ -15919,6 +15909,150 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                 }
             }
         }
+    }
+
+    #[test]
+    fn range_rect_batches_keeping_page_indexes_match_fresh_indexes_after_edits() {
+        docx_layout::clear_measure_fonts();
+        let font = docx_layout::register_measure_font(lowering_pages::FONT).unwrap();
+        let request = small_page_request(font);
+        let engine = paragraphs_engine(9612, 24);
+        engine.set_local_lowering(true);
+        engine.layout_document_with_regions_json(&request).unwrap();
+        engine.build_display_list_frame("{}", 0).unwrap();
+        let mut page_counts = Vec::new();
+        let mut check = |label: &str| {
+            let list = engine.with_display_list(Clone::clone).unwrap();
+            assert!(list.pages.len() > 2, "{label}: {} pages", list.pages.len());
+            page_counts.push(list.pages.len());
+            let fresh: Vec<_> = list
+                .pages
+                .iter()
+                .enumerate()
+                .filter(|(_, page)| !page.primitives.is_empty())
+                .map(|(index, page)| docx_layout::hit::RangeRectIndex::new(&page.primitives, index))
+                .collect();
+            let ranges: Vec<(i64, i64)> = (0..2400)
+                .step_by(3)
+                .flat_map(|from| [(from, from + 1), (from + 9, from), (from, from + 70)])
+                .collect();
+            let kept = engine
+                .display_range_rects_batch("body", "", &ranges)
+                .unwrap();
+            assert!(kept.iter().any(|rects| !rects.is_empty()));
+            for (&(from, to), rects) in ranges.iter().zip(kept) {
+                let (low, high) = (from.min(to), from.max(to));
+                let expected: Vec<_> = fresh
+                    .iter()
+                    .flat_map(|page| page.rects(low, high))
+                    .collect();
+                assert_eq!(rects, expected, "{label}: [{from}, {to})");
+            }
+        };
+        check("initial");
+        check("repeated");
+        let ctx = crate::EditCtx::local("", "");
+        let edits: [(&str, Box<dyn Fn()>); 7] = [
+            (
+                "typed",
+                Box::new(|| {
+                    engine
+                        .doc()
+                        .insert_text(
+                            &ctx,
+                            crate::Position::new("body", 70),
+                            "typed ",
+                            crate::FormatPolicy::Inherit,
+                        )
+                        .unwrap();
+                }),
+            ),
+            (
+                "deleted",
+                Box::new(|| {
+                    engine
+                        .doc()
+                        .delete_range(&ctx, crate::StoryRange::new("body", 72, 75))
+                        .unwrap();
+                }),
+            ),
+            (
+                "split",
+                Box::new(|| {
+                    engine
+                        .doc()
+                        .split_paragraph(&ctx, crate::Position::new("body", 140), None)
+                        .unwrap();
+                }),
+            ),
+            (
+                "merged",
+                Box::new(|| {
+                    let pilcrow = engine
+                        .doc()
+                        .paragraph_index("body")
+                        .unwrap()
+                        .para_at_clamped(300)
+                        .unwrap()
+                        .pilcrow;
+                    engine
+                        .doc()
+                        .delete_range(&ctx, crate::StoryRange::new("body", pilcrow, pilcrow + 1))
+                        .unwrap();
+                }),
+            ),
+            (
+                "grown",
+                Box::new(|| {
+                    engine
+                        .doc()
+                        .insert_text(
+                            &ctx,
+                            crate::Position::new("body", 30),
+                            &"longer words ".repeat(40),
+                            crate::FormatPolicy::Inherit,
+                        )
+                        .unwrap();
+                }),
+            ),
+            (
+                "shrunk",
+                Box::new(|| {
+                    engine
+                        .doc()
+                        .delete_range(&ctx, crate::StoryRange::new("body", 20, 700))
+                        .unwrap();
+                }),
+            ),
+            (
+                "typed late",
+                Box::new(|| {
+                    engine
+                        .doc()
+                        .insert_text(
+                            &ctx,
+                            crate::Position::new("body", 900),
+                            "x",
+                            crate::FormatPolicy::Inherit,
+                        )
+                        .unwrap();
+                }),
+            ),
+        ];
+        for (label, edit) in &edits {
+            edit();
+            engine
+                .layout_document_with_regions_after_edit(&request, Some("body"))
+                .unwrap();
+            let epoch = engine.display.borrow().binary_frame_epoch;
+            engine.build_display_list_frame("{}", epoch).unwrap();
+            check(label);
+        }
+        assert!(
+            page_counts.windows(2).any(|pair| pair[1] > pair[0])
+                && page_counts.windows(2).any(|pair| pair[1] < pair[0]),
+            "the edits add and remove pages: {page_counts:?}"
+        );
     }
 
     #[test]
