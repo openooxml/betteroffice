@@ -7264,6 +7264,66 @@ mod tests {
         );
     }
 
+    /// The replacing splice's save of `source` with `written` as the paragraphs the serializer
+    /// wrote, in order, and those at `changed` rewritten.
+    fn replaced(source: &str, written: &[&str], changed: &[u32]) -> Option<String> {
+        let ordinals: Vec<u32> = (0..written.len() as u32).collect();
+        let mut recorded = RecordedParagraphs::default();
+        for (&ordinal, xml) in ordinals.iter().zip(written) {
+            recorded.written.insert(ordinal, (*xml).to_owned());
+            recorded.order.push(Some(ordinal));
+        }
+        let serialized = format!(
+            "{SERIALIZED_ROOT}<w:body>{}</w:body></w:document>",
+            written.concat()
+        );
+        let part: S13SplicedPart = serde_json::from_value(json!({
+            "part": "word/document.xml", "sha256": "",
+            "paragraphs": ordinals, "changed": changed
+        }))
+        .unwrap();
+        let none = BTreeMap::new();
+        replace_story_part(
+            source,
+            &serialized,
+            &recorded,
+            &part,
+            &none,
+            &none,
+            &mut Vec::new(),
+            no_comments(),
+        )
+    }
+
+    #[test]
+    fn replacing_a_paragraph_of_a_field_spanning_paragraphs_keeps_the_field_balanced() {
+        let opening = "<w:p><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText xml:space=\"preserve\"> TOC </w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>First entry</w:t></w:r></w:p>";
+        let middle = "<w:p><w:r><w:t>Second entry</w:t></w:r></w:p>";
+        let closing = "<w:p><w:r><w:t>Third entry</w:t></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r></w:p>";
+        let outside = "<w:p><w:r><w:t>Outside the field</w:t></w:r></w:p>";
+        let source = body(&format!("{opening}{middle}{closing}{outside}"));
+        let written_opening = "<w:p><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText xml:space=\"preserve\"> TOC </w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>First entry</w:t></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r></w:p>";
+        let written_closing = "<w:p><w:r><w:t>Third entry</w:t></w:r></w:p>";
+        let edited_closing = "<w:p><w:r><w:t>Third entry, edited</w:t></w:r></w:p>";
+        assert_eq!(
+            replaced(
+                &source,
+                &[written_opening, middle, edited_closing, outside],
+                &[2]
+            ),
+            None
+        );
+        let edited_middle = "<w:p><w:r><w:t>Second entry, edited</w:t></w:r></w:p>";
+        assert_eq!(
+            replaced(
+                &source,
+                &[written_opening, edited_middle, written_closing, outside],
+                &[1]
+            ),
+            Some(body(&format!("{opening}{edited_middle}{closing}{outside}")))
+        );
+    }
+
     #[test]
     fn refuses_rewriting_a_paragraph_that_starts_inside_a_field() {
         let opening = "<w:p><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText xml:space=\"preserve\"> IF 1 = 1 </w:instrText></w:r></w:p>";
