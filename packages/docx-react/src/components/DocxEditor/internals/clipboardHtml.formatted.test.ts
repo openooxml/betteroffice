@@ -1,6 +1,6 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, expect, test } from 'bun:test';
-import { validClipboardFragment } from '@betteroffice/docx/yrs';
+import { MAX_PASTE_FORMATTED_RUNS, validClipboardFragment } from '@betteroffice/docx/yrs';
 import { mergeFormattingFragment } from '../pasteOptions/clipboardFragmentTransforms';
 import { clipboardFragmentPlainText, pasteOptionsOffered, plainTextClipboardFragment } from '../pasteOptions/pasteText';
 import {
@@ -128,7 +128,8 @@ test('the run budget counts merged runs', () => {
 });
 
 test('each formatted import limit falls back to the original table or plain paste', () => {
-  expect([MAX_FORMATTED_HTML_LENGTH, MAX_FORMATTED_HTML_DEPTH, MAX_FORMATTED_HTML_RUNS]).toEqual([2_000_000, 200, 1_000]);
+  expect([MAX_FORMATTED_HTML_LENGTH, MAX_FORMATTED_HTML_DEPTH]).toEqual([2_000_000, 200]);
+  expect(MAX_FORMATTED_HTML_RUNS).toBe(MAX_PASTE_FORMATTED_RUNS);
   for (const html of [
     '<b>x</b><!--' + ' '.repeat(MAX_FORMATTED_HTML_LENGTH) + '-->',
     '<span>'.repeat(300) + '<b>x</b>' + '</span>'.repeat(300),

@@ -8,6 +8,7 @@ import { residentWorkerFactory } from './__fixtures__/residentWorker';
 import { ResidentEngineWorkerClient } from './residentEngineWorkerClient';
 import type { DocxCommandEnvelope, DocxCommandInitRequest } from './residentCommandProtocol';
 import type { DocxClipboardFragment, DocxTableFragment } from './clipboardFragment';
+import { MAX_PASTE_FORMATTED_RUNS } from './clipboardFragment';
 import type { YrsCellLoc } from './index';
 import { createYrsSession } from './index';
 
@@ -255,24 +256,26 @@ test('paste creates an identical table and one undo removes it', async () => {
   }
 }, TIMEOUT);
 
-for (const [count, width] of [[250, 1], [500, 1], [1_000, 1], [1_000, 200]] as const) {
-  test(`pastes a paragraph with ${count} alternating runs of ${width} characters`, async () => {
+for (const count of [MAX_PASTE_FORMATTED_RUNS, MAX_PASTE_FORMATTED_RUNS + 2, 4_000]) {
+  test(`a paste of ${count} alternating runs ${count > MAX_PASTE_FORMATTED_RUNS ? 'drops' : 'keeps'} their formatting and stays fast`, async () => {
     const { client, engine } = await openTableWorker();
     try {
       const paragraph = engine.paragraphs('body').at(-1)!;
       const span = engine.geometryReader.locateParagraph('body', paragraph.paraId);
       const at = { story: 'body', paraId: paragraph.paraId, offset: span.end - span.start };
-      const runs = Array.from({ length: count }, (_, i) => i % 2 === 0
-        ? { text: 'a'.repeat(width), format: { other: { bold: true } } }
-        : { text: 'b'.repeat(width), format: { other: {} } });
-      const text = ('a'.repeat(width) + 'b'.repeat(width)).repeat(count / 2);
+      const words = Array.from({ length: count }, (_, i) => `w${String(i).padStart(4, '0')}${i + 1 < count ? ' ' : ''}`);
+      const runs = words.map((text, i) => ({ text, format: { other: i % 2 === 0 ? { bold: true } : { italic: true } } }));
+      const text = words.join('');
       const command = intent(1, 0, 'pasteFragment', { selection: { anchor: at, focus: at }, fragment: { paragraphs: [{ text, runs }] } });
       const start = performance.now();
       const pasted = await client.edit(command);
       const elapsed = performance.now() - start;
+      console.log(`PASTE_RUNS_MS runs=${count} chars=${text.length} ms=${Math.round(elapsed)}`);
       expect(pasted.outcomes[0]?.status).toBe('applied');
       expect(engine.paragraphs('body').at(-1)!.text).toBe(paragraph.text + text);
-      console.log(`PASTE_RUNS_MS runs=${count} chars=${count * width} ms=${Math.round(elapsed)}`);
+      const bold = engine.storySegments('body').some(segment => segment.kind === 'text' && segment.text.includes('w0000') && segment.attributes?.bold === true);
+      expect(bold).toBe(count <= MAX_PASTE_FORMATTED_RUNS);
+      expect(elapsed).toBeLessThan(count <= MAX_PASTE_FORMATTED_RUNS ? 1_000 : 2_000);
     } finally {
       client.destroy();
     }

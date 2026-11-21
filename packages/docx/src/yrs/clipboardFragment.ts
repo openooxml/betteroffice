@@ -105,6 +105,9 @@ export function clipboardParagraphUnits(paragraph: DocxClipboardParagraph): Arra
   return inlines.map(inline => 'image' in inline ? inline : runs[next++]!);
 }
 
+/** @internal Above this many formatted runs a paste inserts its text without run formatting. */
+export const MAX_PASTE_FORMATTED_RUNS = 500;
+
 const MAX_FRAGMENT_CELLS = 10_000;
 const MAX_FRAGMENT_PARAGRAPHS = 1_000;
 const MAX_FRAGMENT_TEXT = 1_000_000;
