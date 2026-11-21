@@ -301,6 +301,12 @@ export declare function export_docx_markdown_json(bytes: Uint8Array, options: st
 
 export declare function export_docx_structured_json(bytes: Uint8Array, options: string): string
 
+/**
+ * The digest the writer compares a complex field's `sourceRunDigest` with, or `null` when
+ * `field_json` is not a complex field.
+ */
+export declare function field_run_digest(fieldJson: string): string | null
+
 export declare function find_docx_content_controls_json(bytes: Uint8Array, query: string, options: string): string
 
 export declare function font_preflight(bytes: Uint8Array): string
