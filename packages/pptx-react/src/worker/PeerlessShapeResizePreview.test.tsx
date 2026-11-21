@@ -38,34 +38,50 @@ const frame = (width: number): SlideDisplayList => ({
   primitives: [],
 });
 
-it.each(['resolved', 'refused'])('keeps the last painted preview after release when a late request is %s', async (outcome) => {
-  const late = deferred<SlideDisplayList>();
-  const committedPaint = deferred<void>();
-  const previewShapeRect = mock(() => late.promise).mockResolvedValueOnce(frame(80));
+function resizeStage(previewShapeRect: () => Promise<SlideDisplayList>, committedPaint: Promise<void>) {
   const { frame: tag, target } = request(100);
   const selection = { ...target, kind: 'object', storyId: 'story', canMove: true, canResize: true,
     units: { x: 10000, y: 10000 }, rect: { x: 0, y: 0, width: 1000000, height: 1000000 } };
+  const snapshot = { selection: selection as typeof selection | null, editState: { readOnly: false },
+    confirmed: { frame: tag, displayList: frame(100) } };
+  const signals = { presentation: new Set<() => void>(), edit: new Set<() => void>(), visual: new Set<() => void>() };
+  const subscribe = (signal: keyof typeof signals) => (listener: () => void) => {
+    signals[signal].add(listener);
+    return () => { signals[signal].delete(listener); };
+  };
+  let prerendered = false;
   const store = {
-    getSnapshot: () => ({ selection, editState: { readOnly: false } }),
-    subscribePresentation: () => () => {}, subscribeEditState: () => () => {},
+    getSnapshot: () => snapshot, subscribePresentation: subscribe('presentation'), subscribeEditState: subscribe('edit'),
     dispatch: async () => ({ throughSeq: 1, outcomes: [{ seq: 1, committed: true }] }),
   } as unknown as PeerlessViewStore;
   const run = {
     current: true, selectionEnabled: true, require: () => {},
-    getVisualSnapshot: () => ({ view: { confirmed: { frame: tag, displayList: frame(100) } } }),
-    whenPaintedThrough: () => committedPaint.promise,
+    getVisualSnapshot: () => ({ view: snapshot }),
+    subscribeVisual: subscribe('visual'), pluginVisual: () => prerendered ? null : { view: snapshot },
+    whenPaintedThrough: () => committedPaint,
     client: { previewShapeRect },
     images: { pin: () => ({ ready: Promise.resolve(), resolve: () => null, release: () => {} }) },
   } as unknown as PeerlessPresentation;
-  function Stage() {
+  function Stage({ scale = 1 }: { scale?: number }) {
     const canvas = useRef<HTMLCanvasElement>(null);
     const gestures = usePeerlessShapeGestures(store, { canvas, presentation: run });
     return <div onPointerDown={gestures.onPointerDown} onPointerMove={gestures.onPointerMove} onPointerUp={gestures.onPointerUp}>
       <canvas ref={canvas} data-testid="slide" />
       <button data-pptx-resize="e">Resize</button>
-      <PeerlessShapeResizePreview run={run} preview={gestures.preview} scale={1} />
+      <PeerlessShapeResizePreview run={run} preview={gestures.preview} scale={scale} />
     </div>;
   }
+  const notify = (signal: keyof typeof signals) => { for (const listener of signals[signal]) listener(); };
+  return { Stage, snapshot, notify, presentPrerender: () => { prerendered = true; notify('visual'); } };
+}
+
+const point = (clientX: number) => ({ pointerId: 1, isPrimary: true, button: 0, clientX, clientY: 50 });
+
+it.each(['resolved', 'refused'])('keeps the last painted preview after release when a late request is %s', async (outcome) => {
+  const late = deferred<SlideDisplayList>();
+  const committedPaint = deferred<void>();
+  const previewShapeRect = mock(() => late.promise).mockResolvedValueOnce(frame(80));
+  const { Stage } = resizeStage(previewShapeRect, committedPaint.promise);
   const drawImage = mock(() => {});
   const context = { setTransform: () => {}, clearRect: () => {}, drawImage } as unknown as CanvasRenderingContext2D;
   const getContext = spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(context);
@@ -74,7 +90,6 @@ it.each(['resolved', 'refused'])('keeps the last painted preview after release w
     const view = render(<Stage />);
     const slide = view.getByTestId('slide');
     slide.getBoundingClientRect = () => new DOMRect(0, 0, 100, 100);
-    const point = (clientX: number) => ({ pointerId: 1, isPrimary: true, button: 0, clientX, clientY: 50 });
     await act(async () => { fireEvent.pointerDown(view.getByRole('button'), point(100)); });
     fireEvent.pointerMove(slide, point(80));
     await waitFor(() => expect(drawImage).toHaveBeenCalledTimes(1));
@@ -96,6 +111,32 @@ it.each(['resolved', 'refused'])('keeps the last painted preview after release w
     getContext.mockRestore();
   }
 });
+
+it.each(['slide switch', 'prerendered slide switch', 'read-only mode', 'selection loss', 'zoom'])(
+  'drops the released resize preview on %s while the committed paint is pending', async (change) => {
+    const { Stage, snapshot, notify, presentPrerender } = resizeStage(() => deferred<SlideDisplayList>().promise, deferred<void>().promise);
+    const view = render(<Stage />);
+    const slide = view.getByTestId('slide');
+    slide.getBoundingClientRect = () => new DOMRect(0, 0, 100, 100);
+    await act(async () => { fireEvent.pointerDown(view.getByRole('button'), point(100)); });
+    fireEvent.pointerMove(slide, point(80));
+    await act(async () => { fireEvent.pointerUp(slide, point(80)); });
+    expect(view.queryByTestId('pptx-shape-resize-preview')).not.toBeNull();
+    if (change === 'zoom') view.rerender(<Stage scale={2} />);
+    else act(() => {
+      if (change === 'slide switch') {
+        snapshot.confirmed = { ...snapshot.confirmed, frame: { ...snapshot.confirmed.frame, slideId: 'other' } };
+        notify('presentation');
+      } else if (change === 'read-only mode') {
+        snapshot.editState.readOnly = true;
+        notify('edit');
+      } else if (change === 'selection loss') {
+        snapshot.selection = null;
+        notify('presentation');
+      } else presentPrerender();
+    });
+    expect(view.queryByTestId('pptx-shape-resize-preview')).toBeNull();
+  });
 
 it('backs the resize preview with opaque white', () => {
   const value = { token: 'token', bounds: request(80).rect, request: request(80) };
@@ -213,6 +254,10 @@ it('uses the scale captured by each preview job and never lets an old pump paint
     await waitFor(() => expect(paint).toHaveBeenCalledTimes(1));
     expect(paint.mock.calls[0]![3]).toBe(2);
     expect(view.getByTestId('pptx-shape-resize-preview').style.width).toBe('160px');
+    view.rerender(<PeerlessShapeResizePreview run={run} preview={store} scale={3} />);
+    expect((view.getByTestId('pptx-shape-resize-preview') as HTMLCanvasElement).width).toBe(0);
+    await act(async () => { pending[2]!.resolve(frame(80)); });
+    expect(view.getByTestId('pptx-shape-resize-preview').style.width).toBe('240px');
   } finally {
     paint.mockRestore();
     getContext.mockRestore();

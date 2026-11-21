@@ -16,7 +16,7 @@ import { createSharedPresentationCommandClient } from '../../../pptx/src/session
 import { registerPresentationCommandHandlers } from '../../../pptx/src/session/commandHost';
 import * as wasm from '../../../pptx/src/wasm/loader';
 import { PptxEditor } from '../PptxEditor';
-import { peerlessPainterFactories, peerlessSessionOpener } from './usePeerlessPresentation';
+import { peerlessPainterFactories, peerlessSessionOpener, peerlessViewStoreFactory } from './usePeerlessPresentation';
 import * as i18n from '../i18n';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -319,6 +319,29 @@ test('text_resize_preview_stays_visible_until_the_committed_frame_is_painted', a
   });
   await waitFor(() => expect(paintedThroughSeq).toBe(client.state.throughSeq));
   await waitFor(() => expect(view.queryByTestId('pptx-shape-resize-preview')).toBeNull());
+});
+
+test('text_resize_preview_clears_when_the_committed_frame_rolls_back', async () => {
+  const factory = spyOn(peerlessViewStoreFactory, 'create');
+  restorers.push(() => factory.mockRestore());
+  const { view, stage, point, select, box } = await open();
+  await select();
+  const narrow = point(box.x + 45);
+  act(() => {
+    fireEvent.pointerDown(view.getByTestId('pptx-resize-e'), point(box.x + box.w));
+    fireEvent.pointerMove(stage, { ...narrow, buttons: 1 });
+  });
+  await waitFor(() => expect((view.getByTestId('pptx-shape-resize-preview') as HTMLCanvasElement).width).toBeGreaterThan(0));
+  const painter = spyOn(factory.mock.calls[0]![1], 'paintFrame').mockImplementation(() => { throw new Error('Paint failed'); });
+  restorers.push(() => painter.mockRestore());
+  await act(async () => {
+    fireEvent.pointerUp(stage, narrow);
+    await bounded(client.flush());
+  });
+  expect(painter).toHaveBeenCalled();
+  expect(commands.filter((command) => command.kind === 'setShapeRect')).toHaveLength(1);
+  expect(paintedThroughSeq).toBeLessThan(client.state.throughSeq);
+  expect(view.queryByTestId('pptx-shape-resize-preview')).toBeNull();
 });
 
 test('text_resize_preview_clears_when_the_commit_is_refused', async () => {
