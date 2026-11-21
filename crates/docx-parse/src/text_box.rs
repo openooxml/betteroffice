@@ -198,11 +198,46 @@ pub(crate) fn capture_bookmark_source(shape: &mut Shape, source: &XmlElement) {
     }
     shape.drawing_xml = Some(source.to_bookmarked_raw_inline_xml());
     shape.drawing_run_xml = None;
-    shape.drawing_model = Some(serde_json::json!({
+    let mut model = serde_json::json!({
         "frame": crate::smart_art::frame_model(shape),
         "otherSha256": crate::smart_art::other_model_sha256(shape),
         "textBoxContentSha256": shape_text_bodies(shape).iter().map(|body| content_sha256(&body.content)).collect::<Vec<_>>()
-    }));
+    });
+    if shape.children.is_some() {
+        let mut containers = Vec::new();
+        content_paths(
+            first_drawing(source).unwrap_or(source),
+            &mut Vec::new(),
+            &mut containers,
+        );
+        let mask: Vec<bool> = shape_text_bodies(shape)
+            .iter()
+            .map(|body| !body.content.is_empty())
+            .collect();
+        let mapped = mask.iter().filter(|kept| **kept).count() == containers.len();
+        model["textBoxBodies"] = serde_json::json!(mapped.then_some(mask));
+        model["groupSha256"] = serde_json::json!(group_model_sha256(shape));
+    }
+    shape.drawing_model = Some(model);
+}
+
+fn first_drawing(element: &XmlElement) -> Option<&XmlElement> {
+    if element.name == "w:drawing" {
+        return Some(element);
+    }
+    element.child_elements().find_map(first_drawing)
+}
+
+pub(crate) fn content_paths(element: &XmlElement, path: &mut Vec<u32>, paths: &mut Vec<Vec<u32>>) {
+    if element.name == "w:txbxContent" {
+        paths.push(path.clone());
+        return;
+    }
+    for (index, child) in element.child_elements().enumerate() {
+        path.push(index as u32);
+        content_paths(child, path, paths);
+        path.pop();
+    }
 }
 
 /// The group model without its frame, text-box text and media sources, which a replay
