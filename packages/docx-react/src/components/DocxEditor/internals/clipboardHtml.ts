@@ -773,6 +773,7 @@ function walkFormattedBody(
   body: HTMLElement,
   pushText: (text: string, runs?: DocxClipboardRun[]) => void,
   pushTable: (table: DocxTableFragment) => void,
+  paragraphCount: () => number,
 ): boolean {
   const withTable = new WeakSet<Element>();
   const withBlock = new WeakSet<Element>();
@@ -801,8 +802,9 @@ function walkFormattedBody(
   let runBudget = MAX_FORMATTED_HTML_RUNS;
   let textBudget = MAX_FORMATTED_HTML_TEXT;
   const emit = (text: string, paragraphRuns?: DocxClipboardRun[]) => {
-    if (++emitted > MAX_FORMATTED_HTML_PARAGRAPHS) failed = true;
-    else pushText(text, paragraphRuns);
+    emitted++;
+    pushText(text, paragraphRuns);
+    if (paragraphCount() > MAX_FORMATTED_HTML_PARAGRAPHS) failed = true;
   };
   const flush = () => {
     if (endsInSpace) {
@@ -838,7 +840,7 @@ function walkFormattedBody(
       for (const [index, line] of lines.entries()) {
         if (index) lineBreak();
         if (failed || (line && !appendRun(line, state))) return false;
-        endsInSpace = false;
+        if (line) endsInSpace = false;
       }
       return true;
     }
@@ -871,9 +873,9 @@ function walkFormattedBody(
     if (tag === 'TABLE') {
       flush();
       afterBreak = false;
-      if (++emitted > MAX_FORMATTED_HTML_PARAGRAPHS) return false;
+      emitted++;
       pushTable(parseTableElement(element as HTMLTableElement));
-      return !failed;
+      return paragraphCount() <= MAX_FORMATTED_HTML_PARAGRAPHS && !failed;
     }
     const boundary = !inBlock && (isBlock(tag) || withTable.has(element) || withBlock.has(element));
     if (boundary) {
@@ -953,7 +955,7 @@ function parseClipboardBody(body: HTMLElement, formatted: boolean): DocxClipboar
     }
   };
   if (formatted) {
-    if (!walkFormattedBody(body, pushText, pushTable)) return null;
+    if (!walkFormattedBody(body, pushText, pushTable, () => paragraphs.length)) return null;
     if (!paragraphs.some(p => p.runs?.some(run => run.href || Object.keys(run.format!.other!).length))) return null;
     const blank = (p: DocxClipboardParagraph) => p.text === '' && !p.runs && !p.tables?.length;
     let start = 0;

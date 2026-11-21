@@ -196,3 +196,14 @@ test('the paragraph budget counts blank lines', () => {
   expect(parseClipboardHtml(html(1_900_000), formatted)).toBeNull();
   expect(performance.now() - start).toBeLessThan(10_000);
 }, 60_000);
+
+test('a table and the text after it count as one paragraph of the budget', () => {
+  const count = MAX_FORMATTED_HTML_PARAGRAPHS;
+  const fragment = parseClipboardHtml(table + '<p><b>x</b></p>'.repeat(count), formatted);
+  expect(fragment?.paragraphs).toHaveLength(count);
+  expect(fragment!.paragraphs.every(p => p.runs?.[0]?.format?.other?.bold === true)).toBe(true);
+});
+
+test('an empty preformatted segment keeps the trailing space trim of the line before', () => {
+  imported('<p><b>A </b><span style="white-space:pre-wrap">&#10;B</span></p>', ['A', 'B']);
+});
