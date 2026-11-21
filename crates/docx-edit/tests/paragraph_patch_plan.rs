@@ -135,12 +135,12 @@ fn optional_typography_resolves_each_style_layer() {
         ("", "", "", "standard"),
         ("Empty", "", "", "historical"),
         ("Child", "", "", "contextual"),
-        ("Child", "CharChild", "", "discretionary"),
+        ("Child", "CharChild", "", "discretional"),
         ("Child", "CharChild", "none", "none"),
-        ("Child", "CharChild", "invalid", "discretionary"),
+        ("Child", "CharChild", "invalid", "discretional"),
     ] {
         let styles = format!(
-            r#"<w:styles {NS}><w:docDefaults><w:rPrDefault><w:rPr><w14:ligatures w14:val="historical"/><w14:cntxtAlts/></w:rPr></w:rPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:rPr><w14:ligatures w14:val="standard"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Empty"/><w:style w:type="paragraph" w:styleId="Base"><w:rPr><w14:ligatures w14:val="contextual"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Child"><w:basedOn w:val="Base"/></w:style><w:style w:type="character" w:styleId="CharBase"><w:rPr><w14:ligatures w14:val="discretionary"/><w14:cntxtAlts w14:val="0"/></w:rPr></w:style><w:style w:type="character" w:styleId="CharChild"><w:basedOn w:val="CharBase"/></w:style></w:styles>"#
+            r#"<w:styles {NS}><w:docDefaults><w:rPrDefault><w:rPr><w14:ligatures w14:val="historical"/><w14:cntxtAlts/></w:rPr></w:rPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:rPr><w14:ligatures w14:val="standard"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Empty"/><w:style w:type="paragraph" w:styleId="Base"><w:rPr><w14:ligatures w14:val="contextual"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Child"><w:basedOn w:val="Base"/></w:style><w:style w:type="character" w:styleId="CharBase"><w:rPr><w14:ligatures w14:val="discretional"/><w14:cntxtAlts w14:val="0"/></w:rPr></w:style><w:style w:type="character" w:styleId="CharChild"><w:basedOn w:val="CharBase"/></w:style></w:styles>"#
         );
         let paragraph_style = if p_style.is_empty() {
             String::new()

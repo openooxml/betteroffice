@@ -1,6 +1,6 @@
 ---
 "@betteroffice/rust-crates": patch
-"@betteroffice/pptx": patch
+"@betteroffice/pptx": minor
 "@betteroffice/agents": patch
 ---
 

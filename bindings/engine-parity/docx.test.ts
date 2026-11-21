@@ -2327,6 +2327,13 @@ const rows: Row<Docx>[] = [
       ]);
     },
   },
+  {
+    method: 'field_run_digest',
+    call: ({ engine }) => [
+      engine.field_run_digest(JSON.stringify({ type: 'complexField', instruction: 'PAGE', fieldType: 'PAGE', fieldCode: [], fieldResult: [] })),
+      engine.field_run_digest('{"type":"simpleField"}') ?? null,
+    ],
+  },
   { method: 'render_docx_markdown_json', call: ({ engine }) => engine.render_docx_markdown_json(structuredContent(engine), '{}') },
   defineRow({
     method: 'render_docx_markdown_with_pages_json',

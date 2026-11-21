@@ -1136,7 +1136,7 @@ pub(crate) fn raw_foreign_inline(element: &crate::xml::XmlElement) -> Option<Inl
     })))
 }
 
-/// The source of a run holding two or more fields one after another, each beginning and ending
+/// The source of a run holding one or more fields one after another, each beginning and ending
 /// inside it, beside only text, tabs, plain breaks and properties; its rendered page breaks are
 /// left out.
 pub(crate) fn field_run_source(element: &XmlElement) -> Option<String> {
@@ -1171,7 +1171,7 @@ pub(crate) fn field_run_source(element: &XmlElement) -> Option<String> {
             _ => return None,
         }
     }
-    if open || begins < 2 {
+    if open || begins == 0 {
         return None;
     }
     let mut run = element.clone();
@@ -1187,8 +1187,9 @@ pub(crate) fn keep_field_run(field: &mut ComplexField, source: String) {
 
 /// The digest of the model values the writer writes `field` from: its instruction, properties,
 /// flags, form field data, code and result. Empty properties count as none, a flag that is not
-/// set counts as off, and every zero counts as the same zero.
-pub(crate) fn field_run_digest(field: &ComplexField) -> String {
+/// set counts as off, and every zero counts as the same zero. The writer writes a field as its
+/// `source_run_xml` while this equals its `source_run_digest`.
+pub fn field_run_digest(field: &ComplexField) -> String {
     use sha2::{Digest, Sha256};
 
     let formatting = field
@@ -1490,7 +1491,8 @@ pub struct ComplexField {
     /// of the field while the field digests to `source_run_digest`.
     #[serde(rename = "sourceRunXml", skip_serializing_if = "Option::is_none")]
     pub source_run_xml: Option<String>,
-    /// The digest of the field as parsed from `source_run_xml`.
+    /// The digest of the field as stored. It equals the digest of the field as parsed from
+    /// `source_run_xml` until a loader has filled in the field's theme fonts.
     #[serde(rename = "sourceRunDigest", skip_serializing_if = "Option::is_none")]
     pub source_run_digest: Option<String>,
     #[serde(rename = "structuredCode", skip_serializing_if = "Option::is_none")]

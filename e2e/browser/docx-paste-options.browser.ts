@@ -92,3 +92,35 @@ test('typing after a paste removes the Paste Options control', async ({ page }, 
   await expect.poll(async () => (await savedParagraphs(page, info, 'typed')).map(paragraph => paragraph.text), { timeout: 30_000 })
     .toEqual(['Bold source', 'TargetBoldx']);
 });
+
+async function pasteOutsideHtml(page: Page, input: Locator): Promise<Locator> {
+  await pinnedEvaluate(page, () => navigator.clipboard.write([new ClipboardItem({
+    'text/plain': new Blob(['Outside'], { type: 'text/plain' }),
+    'text/html': new Blob(['<html><body><!--StartFragment--><p class="MsoNormal"><b>Out</b>side</p><!--EndFragment--></body></html>'], { type: 'text/html' }),
+  })]));
+  await input.press('ControlOrMeta+End');
+  await input.press('ControlOrMeta+v');
+  const control = page.getByRole('button', { name: 'Paste Options (Ctrl)' });
+  await expect(control).toBeVisible({ timeout: 30_000 });
+  return control;
+}
+
+test('formatted HTML from another application pastes with its bold and offers Paste Options', async ({ page }, info) => {
+  const input = await open(page);
+  await pasteOutsideHtml(page, input);
+  await expect.poll(() => savedParagraphs(page, info, 'outside-source'), { timeout: 30_000 }).toEqual([
+    { text: 'Bold source', bold: 'Bold' },
+    { text: 'TargetOutside', bold: 'Out' },
+  ]);
+});
+
+test('Keep Text Only after pasting formatted HTML from another application drops the bold', async ({ page }, info) => {
+  const input = await open(page);
+  const control = await pasteOutsideHtml(page, input);
+  await control.click();
+  await page.getByRole('menuitemradio', { name: 'Keep Text Only' }).click();
+  await expect.poll(() => savedParagraphs(page, info, 'outside-text-only'), { timeout: 30_000 }).toEqual([
+    { text: 'Bold source', bold: 'Bold' },
+    { text: 'TargetOutside', bold: '' },
+  ]);
+});

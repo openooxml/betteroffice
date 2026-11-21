@@ -164,11 +164,13 @@ const RUN_ATTRIBUTE_SHAPES: Readonly<Record<string, RunAttributeShape>> = {
   fontFamily: { ascii: fontName, hAnsi: fontName, eastAsia: fontName, cs: fontName },
   characterSpacing: { spacing: integer(-31680, 31680), position: integer(-3168, 3168), scale: integer(1, 600), kerning: integer(0, 3276) },
   typography: {
-    ligatures: oneOf('none', 'standard', 'contextual', 'historical', 'discretionary',
-      'standardContextual', 'standardHistorical', 'contextualHistorical', 'standardDiscretionary',
-      'contextualDiscretionary', 'historicalDiscretionary', 'standardContextualHistorical',
-      'standardContextualDiscretionary', 'standardHistoricalDiscretionary',
-      'contextualHistoricalDiscretionary', 'all'),
+    ligatures: oneOf('none', 'standard', 'contextual', 'historical', 'discretional',
+      'standardContextual', 'standardHistorical', 'contextualHistorical', 'standardDiscretional',
+      'contextualDiscretional', 'historicalDiscretional', 'standardContextualHistorical',
+      'standardContextualDiscretional', 'standardHistoricalDiscretional',
+      'contextualHistoricalDiscretional', 'all', 'discretionary', 'standardDiscretionary',
+      'contextualDiscretionary', 'historicalDiscretionary', 'standardContextualDiscretionary',
+      'standardHistoricalDiscretionary', 'contextualHistoricalDiscretionary'),
     contextualAlternates: value => typeof value === 'boolean',
   },
   emphasisMark: { type: oneOf('dot', 'comma', 'circle', 'underDot') },
@@ -224,10 +226,11 @@ function directRunAttributes(
   return direct;
 }
 
-function clipboardRun(
+/** @internal A clipboard run with portable formatting and a validated link. */
+export function clipboardRun(
   text: string,
   attributes: Record<string, unknown>,
-  themeColors: Readonly<Record<string, string>> | undefined,
+  themeColors?: Readonly<Record<string, string>>,
 ): DocxClipboardRun {
   const link = record(attributes.hyperlink);
   const href = typeof link?.href === 'string' && validHref(link.href) ? link.href : undefined;
@@ -238,6 +241,12 @@ function clipboardRun(
     ...(href ? { href } : {}),
     ...(tooltip ? { tooltip } : {}),
   };
+}
+
+/** @internal */
+export function clipboardHighlightName(name: string): string | undefined {
+  const lower = name.toLowerCase();
+  return HIGHLIGHT_NAMES.find(value => value.toLowerCase() === lower);
 }
 
 function validHref(value: unknown): value is string {

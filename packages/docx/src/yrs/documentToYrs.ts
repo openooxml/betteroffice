@@ -51,6 +51,7 @@ import { RAW_INLINE_KIND, noteYrsStoriesDirty } from './yrsToDocument';
 import { calculateRowSpans, type RowSpanInfo } from './tableRowSpans';
 import { recoverGroupedStorySeeds } from './groupedStorySeed';
 import { sessionMaterializedSource } from './sessionInternals';
+import { residentEngine } from '../wasm/residentEngine';
 import {
   blockSdtAttrsToPayload,
   blockSdtStoryId,
@@ -2358,9 +2359,54 @@ export function documentToYrs(
   options: YrsOpeningOptions = {}
 ): void {
   const restoreGroups = recoverGroupedStorySeeds(document, () => sessionMaterializedSource(session));
-  const restore = seedFontNames(document);
-  try { seedDocument(session, document, options); }
-  finally { restore(); restoreGroups(); }
+  const digests = new Map<ComplexField, string | undefined>();
+  let restore = () => {};
+  try {
+    const untouched = untouchedFieldRuns(document);
+    restore = seedFontNames(document);
+    restampFieldRuns(untouched, digests);
+    seedDocument(session, document, options);
+  } finally {
+    for (const [field, digest] of digests) if (field.sourceRunDigest !== digest) field.sourceRunDigest = digest;
+    restore();
+    restoreGroups();
+  }
+}
+
+/** The engine's digest of `field`, which the writer compares the field's `sourceRunDigest` with. */
+function fieldRunDigest(field: ComplexField): string | undefined {
+  const glue = residentEngine()?.glue as { field_run_digest?: (fieldJson: string) => string | null | undefined } | undefined;
+  return glue?.field_run_digest?.(JSON.stringify(field)) ?? undefined;
+}
+
+/** The complex fields of `document` that carry the run they were read from and still digest to it. */
+function untouchedFieldRuns(document: Document): ComplexField[] {
+  const fields: ComplexField[] = [];
+  const visit = (value: unknown): void => {
+    if (!value || typeof value !== 'object' || value instanceof ArrayBuffer || ArrayBuffer.isView(value)) return;
+    if (value instanceof Map) {
+      for (const child of value.values()) visit(child);
+      return;
+    }
+    const record = value as Record<string, unknown>;
+    if (record.type === 'complexField' && typeof record.sourceRunXml === 'string' && typeof record.sourceRunDigest === 'string') {
+      const field = record as unknown as ComplexField;
+      if (fieldRunDigest(field) === field.sourceRunDigest) fields.push(field);
+    }
+    for (const child of Object.values(record)) visit(child);
+  };
+  visit(document.package);
+  return fields;
+}
+
+/** Sets each field's digest to the digest of the field as it now is, inner fields first, recording each digest it replaces in `originals` first. */
+function restampFieldRuns(fields: ComplexField[], originals: Map<ComplexField, string | undefined>): void {
+  for (const field of [...fields].reverse()) {
+    const digest = fieldRunDigest(field);
+    if (digest === undefined || digest === field.sourceRunDigest) continue;
+    if (!originals.has(field)) originals.set(field, field.sourceRunDigest);
+    field.sourceRunDigest = digest;
+  }
 }
 
 function seedDocument(

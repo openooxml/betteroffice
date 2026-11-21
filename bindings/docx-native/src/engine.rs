@@ -3697,6 +3697,14 @@ pub fn render_docx_markdown_with_pages_json(
         .map_err(|error| map_error(env, error))
 }
 
+/// The digest the writer compares a complex field's `sourceRunDigest` with, or `undefined` when
+/// `field_json` is not a complex field.
+#[napi(catch_unwind, js_name = "field_run_digest")]
+pub fn field_run_digest(env: Env, field_json: String) -> Result<Either<String, Undefined>> {
+    let _call = EngineCall::function(env);
+    Ok(optional_result(docx_engine::field_run_digest(&field_json)))
+}
+
 #[napi(catch_unwind, js_name = "build_display_list_json")]
 pub fn build_display_list_json(env: Env, input: String) -> Result<String> {
     let _call = EngineCall::function(env);

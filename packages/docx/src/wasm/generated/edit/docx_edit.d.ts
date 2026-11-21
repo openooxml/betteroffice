@@ -1556,6 +1556,12 @@ export function export_docx_markdown_json(bytes: Uint8Array, options: string): s
 export function export_docx_structured_json(bytes: Uint8Array, options: string): string;
 
 /**
+ * The digest the writer compares a complex field's `sourceRunDigest` with, or `undefined` when
+ * `field_json` is not a complex field.
+ */
+export function field_run_digest(field_json: string): string | undefined;
+
+/**
  * The content controls of DOCX bytes that match `query` exactly.
  */
 export function find_docx_content_controls_json(bytes: Uint8Array, query: string, options: string): string;
@@ -2104,6 +2110,7 @@ export interface InitOutput {
     readonly editsession_yrs_blocks_for_story: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly export_docx_markdown_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly export_docx_structured_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly field_run_digest: (a: number, b: number) => [number, number];
     readonly find_docx_content_controls_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly hit_test_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly hit_test_regions_by_handle: (a: number, b: number, c: number, d: number) => [number, number, number, number];

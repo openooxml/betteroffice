@@ -208,26 +208,32 @@ pub struct TextFormatting {
 
 const MAX_TEXT_SCALE: f64 = 600.0;
 
-pub(crate) fn valid_ligatures(value: &str) -> bool {
-    matches!(
-        value,
-        "none"
-            | "standard"
-            | "contextual"
-            | "historical"
-            | "discretionary"
-            | "standardContextual"
-            | "standardHistorical"
-            | "contextualHistorical"
-            | "standardDiscretionary"
-            | "contextualDiscretionary"
-            | "historicalDiscretionary"
-            | "standardContextualHistorical"
-            | "standardContextualDiscretionary"
-            | "standardHistoricalDiscretionary"
-            | "contextualHistoricalDiscretionary"
-            | "all"
-    )
+pub(crate) fn word_ligatures(value: &str) -> Option<&'static str> {
+    Some(match value {
+        "none" => "none",
+        "standard" => "standard",
+        "contextual" => "contextual",
+        "historical" => "historical",
+        "discretional" | "discretionary" => "discretional",
+        "standardContextual" => "standardContextual",
+        "standardHistorical" => "standardHistorical",
+        "contextualHistorical" => "contextualHistorical",
+        "standardDiscretional" | "standardDiscretionary" => "standardDiscretional",
+        "contextualDiscretional" | "contextualDiscretionary" => "contextualDiscretional",
+        "historicalDiscretional" | "historicalDiscretionary" => "historicalDiscretional",
+        "standardContextualHistorical" => "standardContextualHistorical",
+        "standardContextualDiscretional" | "standardContextualDiscretionary" => {
+            "standardContextualDiscretional"
+        }
+        "standardHistoricalDiscretional" | "standardHistoricalDiscretionary" => {
+            "standardHistoricalDiscretional"
+        }
+        "contextualHistoricalDiscretional" | "contextualHistoricalDiscretionary" => {
+            "contextualHistoricalDiscretional"
+        }
+        "all" => "all",
+        _ => return None,
+    })
 }
 
 pub fn parse_run_properties(
@@ -311,7 +317,7 @@ pub fn parse_run_properties(
     value.ligatures = r_pr
         .child("w14", "ligatures")
         .and_then(|element| element.attribute(Some("w14"), "val"))
-        .filter(|value| valid_ligatures(value))
+        .and_then(word_ligatures)
         .map(str::to_owned);
     value.contextual_alternates = r_pr.child("w14", "cntxtAlts").map(|element| {
         !matches!(
@@ -1769,6 +1775,40 @@ mod tests {
     }
 
     #[test]
+    fn word_ligature_spellings_parse() {
+        for (value, expected) in [
+            ("discretional", "discretional"),
+            ("standardDiscretional", "standardDiscretional"),
+            ("contextualDiscretional", "contextualDiscretional"),
+            ("historicalDiscretional", "historicalDiscretional"),
+            (
+                "standardContextualDiscretional",
+                "standardContextualDiscretional",
+            ),
+            (
+                "standardHistoricalDiscretional",
+                "standardHistoricalDiscretional",
+            ),
+            (
+                "contextualHistoricalDiscretional",
+                "contextualHistoricalDiscretional",
+            ),
+            ("discretionary", "discretional"),
+            ("standardDiscretionary", "standardDiscretional"),
+            (
+                "contextualHistoricalDiscretionary",
+                "contextualHistoricalDiscretional",
+            ),
+        ] {
+            let xml = root(&format!(
+                r#"<w:rPr><w14:ligatures w14:val="{value}"/></w:rPr>"#
+            ));
+            let parsed = parse_run_properties(Some(&xml), None).unwrap();
+            assert_eq!(parsed.ligatures.as_deref(), Some(expected), "{value}");
+        }
+    }
+
+    #[test]
     fn optional_typography_parses_and_overlays_independently() {
         for (attribute, expected) in [
             ("", true),
@@ -1789,6 +1829,7 @@ mod tests {
             "",
             "STANDARD",
             "standardContextualHistoricalDiscretionary",
+            "standardContextualHistoricalDiscretional",
             "unknown",
         ] {
             let xml = root(&format!(

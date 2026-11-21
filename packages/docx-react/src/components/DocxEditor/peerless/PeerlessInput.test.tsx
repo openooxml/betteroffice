@@ -1500,6 +1500,21 @@ function mountPasteOptions() {
   };
 }
 
+test('pasting formatted external HTML submits its runs and shows Paste Options', async () => {
+  const paste = mountPasteOptions();
+  const end = { story: 'body', paraId: 'a', offset: 4 };
+  try {
+    pasteWith(paste.input, '<p><strong>Bold</strong></p>', 'Bold');
+    expect(paste.input.submitted).toEqual(['pasteFragment']);
+    expect(paste.input.entries[0]!.payload).toMatchObject({ fragment: boldFragment() });
+    await paste.settle(0, 'applied', { anchor: end, focus: end });
+    paste.present(1);
+    await waitFor(() => expect(paste.control()).not.toBeNull());
+  } finally {
+    paste.dispose();
+  }
+});
+
 test('a paste recorded from outside the input offers paste options until the next edit', async () => {
   const paste = mountPasteOptions();
   const end = { story: 'body', paraId: 'a', offset: 4 };

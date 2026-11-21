@@ -156,7 +156,7 @@ pub fn serialize_text_formatting(formatting: Option<&TextFormatting>) -> String 
     if let Some(value) = formatting
         .ligatures
         .as_deref()
-        .filter(|value| crate::formatting::valid_ligatures(value))
+        .and_then(crate::formatting::word_ligatures)
     {
         body.start_element("w14:ligatures")
             .attribute(
@@ -2121,6 +2121,35 @@ mod tests {
             let formatting = parse_run_properties(parsed.root(), None);
             assert_eq!(serialize_text_formatting(formatting.as_ref()), xml);
         }
+    }
+
+    #[test]
+    fn discretional_ligatures_round_trip_in_word_spelling() {
+        for (value, saved) in [
+            ("standardDiscretional", "standardDiscretional"),
+            ("standardDiscretionary", "standardDiscretional"),
+        ] {
+            let xml = format!(
+                r#"<w:rPr><w:b/><w14:ligatures xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" w14:val="{value}"/></w:rPr>"#
+            );
+            let limits = ParseLimits::default();
+            let parsed =
+                parse_xml(xml.as_bytes(), "run.xml", &mut ParseBudget::new(&limits)).unwrap();
+            let formatting = parse_run_properties(parsed.root(), None);
+            let written = serialize_text_formatting(formatting.as_ref());
+            assert!(
+                written.contains(&format!(r#"w14:val="{saved}""#)),
+                "{value}: {written}"
+            );
+        }
+        let formatting = TextFormatting {
+            ligatures: Some("historicalDiscretionary".to_owned()),
+            ..Default::default()
+        };
+        assert!(
+            serialize_text_formatting(Some(&formatting))
+                .contains(r#"w14:val="historicalDiscretional""#)
+        );
     }
 
     #[test]
