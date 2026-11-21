@@ -2,4 +2,4 @@
 "@betteroffice/fonts": minor
 ---
 
-Adds `@betteroffice/fonts/worker` for worker font loading with optional font packs supplied by the host. This entry is opt-in.
+Adds the `@betteroffice/fonts/worker` entry for loading fonts inside a worker, and `optionalFontPackUrls` for reading an installed optional font pack's asset URLs.
