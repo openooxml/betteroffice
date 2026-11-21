@@ -40,7 +40,8 @@ import { PptxEditor } from "@betteroffice/pptx-react";
 <PptxEditor file={bytes} fonts={[{ family: "Inter", bytes: fontBytes }]} />;
 ```
 
-`PptxEditor` requires at least one font face in `fonts` before it can lay out text.
+`fonts` is required and may be an empty array: by default `PptxEditor` loads bundled faces for
+the document families that `fonts` does not supply (`defaultFonts`, on unless you pass `false`).
 `onDocumentChange({ version })` fires
 alongside `onChange` after a committed edit; `downloadOnSave` (default: true
 only without `onSave`), `initialZoom`, `loadingIndicator` and `style` match
