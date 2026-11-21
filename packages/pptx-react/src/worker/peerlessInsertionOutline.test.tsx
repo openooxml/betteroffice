@@ -57,7 +57,7 @@ function resizeBehindNotes(h: Awaited<ReturnType<typeof open>>, store: ReturnTyp
     method: 'setSlideNotes', args: [slideId, 'Updated notes'], inputTime: 1, undoGroup: 'notes',
   } });
   const resize = store.dispatch({ kind: 'setShapeRect', payload: {
-    at, frame, shapeId: h.box.shapeId, handle: 'e', delta: { x: 30, y: 0 }, inputTime: 2, undoGroup: 'resize',
+    at, frame, shapeId: h.box.shapeId!, handle: 'e', delta: { x: 30, y: 0 }, inputTime: 2, undoGroup: 'resize',
   } }, { signal, reportRefusal: false, waitForPredecessor: true });
   return { notes, resize };
 }
