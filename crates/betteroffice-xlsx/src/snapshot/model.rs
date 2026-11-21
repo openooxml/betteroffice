@@ -261,7 +261,7 @@ fn write_header(w: &mut Writer, model: &Workbook) -> SnapshotResult<()> {
         sheets,
         date_system,
         full_precision,
-        iterate: _,
+        iterate,
         defined_names: _,
         shared_strings: _,
         styles: _,
@@ -297,7 +297,7 @@ fn write_header(w: &mut Writer, model: &Workbook) -> SnapshotResult<()> {
     } else {
         HEADER
     });
-    CalculationSettings(*date_system, Some(*full_precision)).write(w);
+    CalculationSettings(*date_system, Some(*full_precision), *iterate).write(w);
     w.var_usize(records);
     w.var_usize(cells);
     for count in counts {
@@ -616,6 +616,10 @@ pub(crate) struct ModelSnapshotBuilder {
 impl ModelSnapshotBuilder {
     pub(crate) fn full_precision_setting(&self) -> Option<bool> {
         self.full_precision
+    }
+
+    pub(crate) fn iterate_setting(&self) -> Option<bool> {
+        self.model.iterate.then_some(true)
     }
 
     #[cfg(test)]
@@ -1165,9 +1169,10 @@ impl ModelSnapshotBuilder {
         conditional: bool,
         auto_filters: bool,
     ) -> SnapshotResult<()> {
-        let CalculationSettings(date, precision) = CalculationSettings::read(r)?;
+        let CalculationSettings(date, precision, iterate) = CalculationSettings::read(r)?;
         self.model.date_system = date;
         self.model.full_precision = precision.unwrap_or(true);
+        self.model.iterate = iterate;
         self.full_precision = precision;
         self.remaining_records = r
             .var_usize()?

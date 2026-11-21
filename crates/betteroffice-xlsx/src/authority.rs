@@ -1068,7 +1068,12 @@ impl WorkbookAuthority {
         }
         let mut writer = Writer::new();
         base.bootstrap_client_id.write(&mut writer);
-        snapshot::CalculationSettings(base.date_system, base.full_precision).write(&mut writer);
+        snapshot::CalculationSettings(
+            base.date_system,
+            base.full_precision,
+            base.iterate,
+        )
+        .write(&mut writer);
         base.defined_names.write(&mut writer);
         base.fingerprint.write(&mut writer);
         base.fingerprints.write(&mut writer);
@@ -1164,6 +1169,10 @@ impl WorkbookAuthority {
         self.base.full_precision
     }
 
+    pub(crate) fn iterate_setting(&self) -> Option<bool> {
+        self.base.iterate.then_some(true)
+    }
+
     pub(crate) fn restore_iterate(&mut self, iterate: bool) {
         if self.base.iterate != iterate {
             Arc::make_mut(&mut self.base).iterate = iterate;
@@ -1187,12 +1196,13 @@ impl WorkbookAuthority {
         }
         let mut reader = Reader::new(bytes);
         let bootstrap_client_id = Codec::read(&mut reader)?;
-        let snapshot::CalculationSettings(date_system, full_precision) = Codec::read(&mut reader)?;
+        let snapshot::CalculationSettings(date_system, full_precision, iterate) =
+            Codec::read(&mut reader)?;
         let mut base = WorkbookBase {
             bootstrap_client_id,
             date_system,
             full_precision,
-            iterate: false,
+            iterate,
             defined_names: Codec::read(&mut reader)?,
             fingerprint: Codec::read(&mut reader)?,
             fingerprints: Codec::read(&mut reader)?,

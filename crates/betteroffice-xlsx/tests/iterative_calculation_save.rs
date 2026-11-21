@@ -47,6 +47,10 @@ const CACHED: &[(&str, &str)] = &[
 ];
 
 fn package(calc_pr: &str) -> Vec<u8> {
+    package_with_sheet(calc_pr, SHEET)
+}
+
+fn package_with_sheet(calc_pr: &str, sheet: &str) -> Vec<u8> {
     let parts = [
         ("[Content_Types].xml", CONTENT_TYPES.to_owned()),
         (
@@ -75,7 +79,9 @@ fn package(calc_pr: &str) -> Vec<u8> {
         ),
         (
             "xl/worksheets/sheet1.xml",
-            format!(r#"<worksheet xmlns="{MAIN}"><sheetData>{SHEET}</sheetData></worksheet>"#),
+            format!(
+                r#"<worksheet xmlns="{MAIN}"><sheetData>{sheet}</sheetData></worksheet>"#
+            ),
         ),
         ("xl/styles.xml", STYLES.to_owned()),
     ];
@@ -129,6 +135,20 @@ fn open_recalculated(source: &[u8]) -> Workbook {
     Workbook::open_recalculated(source, CalculationOptions::default()).unwrap()
 }
 
+fn restore_sessions(workbook: &Workbook) -> [(&'static str, Workbook); 2] {
+    let budget = SnapshotBudget::new(8, 65536).unwrap();
+    let mut encoder = WorkbookSnapshotEncoder::new(workbook, None, budget).unwrap();
+    let mut builder = WorkbookSnapshotBuilder::new();
+    while let Some(chunk) = encoder.next(workbook).unwrap() {
+        builder.push(&chunk).unwrap();
+    }
+    while !builder.advance(budget).unwrap().is_ready() {}
+    let snapshot = builder.finish().unwrap().into_parts().0;
+    let checkpoint = workbook.recovery_checkpoint(0, None).unwrap();
+    let (recovered, ..) = Workbook::restore_recovery_checkpoint(&checkpoint).unwrap();
+    [("snapshot", snapshot), ("recovery", recovered)]
+}
+
 #[test]
 fn full_calculation_keeps_iterative_caches() {
     let source = package(ITERATE_AND_RECALCULATE);
@@ -142,7 +162,16 @@ fn full_calculation_keeps_iterative_caches() {
         CellValue::Number { value: 10.0 },
         "the recalculated model shows the cached A1 value"
     );
-    assert_saved_values(&workbook.save().unwrap(), CACHED, "open_recalculated");
+    let saved = workbook.save().unwrap();
+    assert_saved_values(&saved, CACHED, "open_recalculated");
+    assert_eq!(saved, source);
+    let status = workbook.calculation_status();
+    let unevaluated: Vec<_> = status
+        .unevaluated_cells
+        .iter()
+        .map(|cell| cell.address.as_str())
+        .collect();
+    assert_eq!(unevaluated, ["A1", "E1", "F1"]);
 }
 
 #[test]
@@ -292,20 +321,9 @@ fn a_non_iterative_cycle_still_settles_at_zero() {
 }
 
 #[test]
-fn snapshot_and_recovery_restore_iterative_calculation_from_the_source() {
+fn snapshot_and_recovery_restore_iterative_calculation() {
     let workbook = open_recalculated(&package(ITERATE_AND_RECALCULATE));
-    let budget = SnapshotBudget::new(8, 65536).unwrap();
-    let mut encoder = WorkbookSnapshotEncoder::new(&workbook, None, budget).unwrap();
-    let mut builder = WorkbookSnapshotBuilder::new();
-    while let Some(chunk) = encoder.next(&workbook).unwrap() {
-        builder.push(&chunk).unwrap();
-    }
-    while !builder.advance(budget).unwrap().is_ready() {}
-    let snapshot = builder.finish().unwrap().into_parts().0;
-    let checkpoint = workbook.recovery_checkpoint(0, None).unwrap();
-    let (recovered, ..) = Workbook::restore_recovery_checkpoint(&checkpoint).unwrap();
-
-    for (mode, mut restored) in [("snapshot", snapshot), ("recovery", recovered)] {
+    for (mode, mut restored) in restore_sessions(&workbook) {
         assert!(restored.model().iterate, "{mode} restores iterate");
         restored
             .edit_cell(
@@ -320,12 +338,59 @@ fn snapshot_and_recovery_restore_iterative_calculation_from_the_source() {
             status
                 .unevaluated_cells
                 .iter()
-                .any(|cell| cell.address == "B1"),
-            "{mode} reports the reader of the edited cycle as unevaluated"
+                .any(|cell| cell.address == "A1" && cell.functions.is_empty()),
+            "{mode} reports the edited cycle member as unevaluated"
+        );
+        assert!(
+            status
+                .unevaluated_cells
+                .iter()
+                .all(|cell| matches!(cell.address.as_str(), "A1" | "E1" | "F1")),
+            "{mode} lists only cycle members as unevaluated"
         );
         assert_saved_values(
             &restored.save().unwrap(),
-            &[("B1", "20"), ("D1", "6"), ("E1", "20"), ("F1", "20")],
+            &[("B1", "0"), ("D1", "6"), ("E1", "20"), ("F1", "20")],
+            mode,
+        );
+    }
+}
+
+#[test]
+fn a_reader_recalculates_from_the_held_value_in_live_and_restored_sessions() {
+    let sheet = concat!(
+        r#"<row r="1"><c r="A1"><f>(A1+10)/2</f><v>10</v></c>"#,
+        r#"<c r="B1"><f>A1*2+C1</f><v>25</v></c><c r="C1"><v>5</v></c></row>"#,
+    );
+    let source = package_with_sheet(ITERATE_AND_RECALCULATE, sheet);
+    let workbook = open_recalculated(&source);
+    let restored = restore_sessions(&workbook);
+    for (mode, mut session) in [("live", workbook)].into_iter().chain(restored) {
+        assert!(session.model().iterate, "{mode} uses iterative calculation");
+        session
+            .edit_cell(
+                SheetId(0),
+                CellRef::new(0, 2),
+                "7",
+                CalculationOptions::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            session.model().value(SheetId(0), CellRef::new(0, 1)),
+            CellValue::Number { value: 27.0 },
+            "{mode} recalculates B1 from A1 and C1"
+        );
+        assert!(
+            session
+                .calculation_status()
+                .unevaluated_cells
+                .iter()
+                .all(|cell| cell.address == "A1"),
+            "{mode} reports only the cycle member as unevaluated"
+        );
+        assert_saved_values(
+            &session.save().unwrap(),
+            &[("A1", "10"), ("B1", "27"), ("C1", "7")],
             mode,
         );
     }
@@ -338,17 +403,22 @@ fn a_generated_workbook_saves_iterative_calculation() {
         sheets: vec![betteroffice_xlsx::Sheet::new("Sheet1")],
         ..Default::default()
     };
-    let saved = Workbook::from_model(model).unwrap().save().unwrap();
-    let parts = ooxml_opc::unzip_parts(&saved).unwrap();
-    let (_, workbook_xml) = parts
-        .iter()
-        .find(|(name, _)| name == "xl/workbook.xml")
-        .unwrap();
-    assert!(
-        std::str::from_utf8(workbook_xml)
-            .unwrap()
-            .contains(r#"iterate="1""#),
-        "calcPr asks for iterative calculation"
-    );
-    assert!(Workbook::open(&saved).unwrap().model().iterate);
+    let workbook = Workbook::from_model(model).unwrap();
+    let restored = restore_sessions(&workbook);
+    for (mode, session) in [("generated", workbook)].into_iter().chain(restored) {
+        assert!(session.model().iterate, "{mode} uses iterative calculation");
+        let saved = session.save().unwrap();
+        let parts = ooxml_opc::unzip_parts(&saved).unwrap();
+        let (_, workbook_xml) = parts
+            .iter()
+            .find(|(name, _)| name == "xl/workbook.xml")
+            .unwrap();
+        assert!(
+            std::str::from_utf8(workbook_xml)
+                .unwrap()
+                .contains(r#"iterate="1""#),
+            "{mode} saves iterative calculation in calcPr"
+        );
+        assert!(Workbook::open(&saved).unwrap().model().iterate);
+    }
 }

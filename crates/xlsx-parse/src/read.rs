@@ -295,6 +295,11 @@ pub fn workbook_iterate(data: &[u8]) -> Result<bool, ParseError> {
     parse_workbook_xml(data).map(|meta| meta.iterate)
 }
 
+/// the workbook's full precision and iterate settings.
+pub fn workbook_calculation_settings(data: &[u8]) -> Result<(bool, bool), ParseError> {
+    parse_workbook_xml(data).map(|meta| (meta.full_precision, meta.iterate))
+}
+
 fn parse_workbook_xml(data: &[u8]) -> Result<WorkbookMeta, ParseError> {
     let mut reader = reader(data);
     let mut buf = Vec::new();

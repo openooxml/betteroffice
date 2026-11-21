@@ -1996,6 +1996,7 @@ impl WorkbookSnapshotBuilder {
             .take()
             .ok_or_else(|| error("snapshot model builder is missing"))?;
         let full_precision = model_builder.full_precision_setting();
+        let iterate = model_builder.iterate_setting();
         let mut model = model_builder.finish()?;
         if model.styles.snapshot_field_counts() != style_counts
             || model.sheets.get(header.active_sheet.0 as usize).is_none()
@@ -2026,14 +2027,13 @@ impl WorkbookSnapshotBuilder {
             .transpose()
             .map_err(error)?;
         let source_bytes = source_container.as_ref().map(|source| source.as_bytes());
-        model.iterate = crate::snapshot::source_iterate(source_bytes);
-        authority.restore_iterate(model.iterate);
-        if full_precision.is_none() {
-            model.full_precision = match authority.full_precision_setting() {
-                Some(precision) => precision,
-                None => crate::snapshot::source_full_precision(source_bytes)?,
-            };
-        }
+        let (full_precision, iterate) = super::restore_calculation_settings(
+            source_bytes,
+            full_precision.or(authority.full_precision_setting()),
+            iterate.or(authority.iterate_setting()),
+        )?;
+        model.full_precision = full_precision;
+        model.iterate = iterate;
         if authority
             .full_precision_setting()
             .is_some_and(|precision| precision != model.full_precision)
@@ -2041,6 +2041,7 @@ impl WorkbookSnapshotBuilder {
             return Err(error("snapshot calculation precision differs"));
         }
         authority.restore_full_precision(model.full_precision);
+        authority.restore_iterate(model.iterate);
         if authority.reads_builtin_number_formats() {
             model.styles.read_builtin_number_formats();
         }

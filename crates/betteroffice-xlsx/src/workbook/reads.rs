@@ -163,8 +163,8 @@ pub struct CalculationStatus {
     pub unevaluated_cells: Vec<UnevaluatedStatus>,
 }
 
-/// A formula cell the engine could not compute. Iterative cycles, their
-/// readers, and uncomputable functions keep Excel's saved value or blank.
+/// A formula cell the engine could not compute. Iterative cycle members
+/// and uncomputable functions keep Excel's saved value or blank.
 /// Other gaps may show an engine result when the file saved none.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]

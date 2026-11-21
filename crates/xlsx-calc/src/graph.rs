@@ -101,24 +101,18 @@ pub(crate) struct Answer {
     pub(crate) value: CellValue,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub(crate) struct Gap {
     pub(crate) functions: Vec<String>,
     pub(crate) iterative: bool,
-}
-
-impl Gap {
-    pub(crate) fn propagates(&self) -> bool {
-        self.iterative || !self.functions.is_empty()
-    }
 }
 
 /// a formula cell whose result an engine gap reached, or that reads a cell an
 /// uncomputable or unknown function left so. an uncomputable function's cell
 /// is never written, keeping excel's cached value or a blank. an unknown
 /// function's keeps excel's cached value too, but with none the engine's
-/// answer stands: `#NAME?`, or what a handler made of it. an iterative cycle
-/// and its readers keep their values. other gaps keep the cached value or
+/// answer stands: `#NAME?`, or what a handler made of it. iterative cycle
+/// members keep their values. other gaps keep the cached value or
 /// show the computed error when the file stored none.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnevaluatedCell {
@@ -638,24 +632,16 @@ impl DepGraph {
 
     /// the formula cells left unevaluated, in address order.
     pub fn unevaluated_cells(&self) -> Vec<UnevaluatedCell> {
-        self.collect_unevaluated(|key, gap| UnevaluatedCell {
-            sheet: key.sheet,
-            cell: key.cell(),
-            functions: gap.functions.clone(),
-        })
-    }
-
-    pub(crate) fn unevaluated_gaps(&self) -> Vec<(SheetId, CellRef, Gap)> {
-        self.collect_unevaluated(|key, gap| (key.sheet, key.cell(), gap.clone()))
-    }
-
-    fn collect_unevaluated<T>(&self, project: impl Fn(NodeKey, &Gap) -> T) -> Vec<T> {
         self.unevaluated
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .iter()
             .filter(|(key, _)| self.deps.contains_key(key))
-            .map(|(&key, gap)| project(key, gap))
+            .map(|(key, gap)| UnevaluatedCell {
+                sheet: key.sheet,
+                cell: key.cell(),
+                functions: gap.functions.clone(),
+            })
             .collect()
     }
 
@@ -783,12 +769,25 @@ impl DepGraph {
         }
     }
 
-    pub(crate) fn unevaluated_gap(&self, sheet: SheetId, cell: CellRef) -> Option<Gap> {
+    pub(crate) fn is_iterative_gap(&self, sheet: SheetId, cell: CellRef) -> bool {
         self.unevaluated
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .get(&NodeKey::new(sheet, cell))
-            .cloned()
+            .is_some_and(|gap| gap.iterative)
+    }
+
+    /// the functions `cell` is held unevaluated with, if it is.
+    pub(crate) fn unevaluated_functions(
+        &self,
+        sheet: SheetId,
+        cell: CellRef,
+    ) -> Option<Vec<String>> {
+        self.unevaluated
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .get(&NodeKey::new(sheet, cell))
+            .map(|gap| gap.functions.clone())
     }
 
     pub(crate) fn set_unevaluated(&self, sheet: SheetId, cell: CellRef, gap: Option<Gap>) {
