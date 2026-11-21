@@ -81,7 +81,11 @@ export interface PeerlessViewStore {
   subscribePresentation(listener: () => void): () => void;
   subscribeStructure(listener: () => void): () => void;
   subscribeEditState(listener: () => void): () => void;
-  dispatch(intent: PresentationCommandIntent, options?: { reportRefusal?: boolean }): Promise<PresentationCommandAck>;
+  dispatch(intent: PresentationCommandIntent, options?: {
+    reportRefusal?: boolean;
+    signal?: AbortSignal;
+    waitForPredecessor?: boolean;
+  }): Promise<PresentationCommandAck>;
   fence(): Promise<void>;
   setSelection(selection: PresentationCommandSelection | null): void;
   setFocused(focused: boolean): void;
@@ -102,6 +106,7 @@ interface WaitingInput {
   chunks: string[];
   echoed: boolean;
   quiet: boolean;
+  waitForPredecessor: boolean;
   operation: Promise<PresentationCommandAck>;
   resolve(ack: PresentationCommandAck): void;
   reject(error: unknown): void;
@@ -589,7 +594,7 @@ export function createPeerlessViewStore(
       const predecessor = input.after?.ticket;
       if (predecessor?.seq !== undefined) intent = chainedIntent(intent, predecessor.seq);
       let submission: ReturnType<typeof sharedInput.submit>;
-      try { submission = sharedInput.submit(intent, input.basis, predecessor); }
+      try { submission = sharedInput.submit(intent, input.basis, predecessor, input.waitForPredecessor); }
       catch (error) { fail(error); input.reject(error); return; }
       input.ticket = submission.ticket;
       operation = submission.operation;
@@ -640,7 +645,7 @@ export function createPeerlessViewStore(
     subscribePresentation: (listener) => subscribe(presentation, listener),
     subscribeStructure: (listener) => subscribe(structure, listener),
     subscribeEditState: (listener) => subscribe(editState, listener),
-    dispatch(intent, { reportRefusal = true } = {}) {
+    dispatch(intent, { reportRefusal = true, signal, waitForPredecessor = false } = {}) {
       if (disposed) return Promise.reject(new PptxWorkerEditorDisposedError());
       if (failure) return Promise.reject(failure);
       if (view.inputFailure) view = { ...view, inputFailure: undefined };
@@ -686,7 +691,7 @@ export function createPeerlessViewStore(
       void operation.then(() => { captured.delete(operation); }, () => { captured.delete(operation); });
       const input: WaitingInput = { seq, intent, after, basisThroughSeq: view.presentedThroughSeq,
         basis: { epoch: identity.epoch, version: view.confirmed?.frame.version ?? client.state.version },
-        echoed, quiet: !reportRefusal, chunks: [], operation, resolve, reject };
+        echoed, quiet: !reportRefusal, waitForPredecessor, chunks: [], operation, resolve, reject };
       let target: PresentationCommandSelected | null | undefined;
       if (intent.kind === 'selectAtPoint' && !intent.payload.drag) {
         const hit = hitGeometry(geometry, intent.payload);
@@ -707,6 +712,13 @@ export function createPeerlessViewStore(
         view = { ...view, waitingInputCount: waiting.length };
         if (intent.kind !== 'collabPipe') notify(presentation);
       } else send(input);
+      if (signal) {
+        const abort = () => { if (input.ticket) sharedInput?.cancel(input.ticket); };
+        signal.addEventListener('abort', abort, { once: true });
+        const cleanup = () => signal.removeEventListener('abort', abort);
+        void operation.then(cleanup, cleanup);
+        if (signal.aborted) abort();
+      }
       return operation;
     },
     async fence() {

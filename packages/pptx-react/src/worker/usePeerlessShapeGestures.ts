@@ -21,6 +21,7 @@ interface ShapeGesture {
   selected: PresentationCommandObjectSelection | null;
   dragging: boolean;
   cancelled: boolean;
+  abort: AbortController;
 }
 
 export interface PeerlessShapePreview {
@@ -77,7 +78,10 @@ export function usePeerlessShapeGestures(store: PeerlessViewStore | null, {
     if (store) setPeerlessGestureActive(store, 'shape', false);
     gesture.current = null;
     recent.current = null;
-    for (const pending of outstanding.current) pending.cancelled = true;
+    for (const pending of outstanding.current) {
+      pending.cancelled = true;
+      pending.abort.abort();
+    }
     outstanding.current.clear();
     if (current) current.element.releasePointerCapture?.(current.pointerId);
     setPreview(null);
@@ -102,7 +106,10 @@ export function usePeerlessShapeGestures(store: PeerlessViewStore | null, {
       const current = gesture.current;
       setPeerlessGestureActive(store, 'shape', false);
       gesture.current = null;
-      for (const pending of outstanding.current) pending.cancelled = true;
+      for (const pending of outstanding.current) {
+        pending.cancelled = true;
+        pending.abort.abort();
+      }
       outstanding.current.clear();
       recent.current = null;
       current?.element.releasePointerCapture?.(current.pointerId);
@@ -156,7 +163,7 @@ export function usePeerlessShapeGestures(store: PeerlessViewStore | null, {
       start, client: { x: event.clientX, y: event.clientY }, delta: { x: 0, y: 0 },
       shapeId, dragThreshold: repeated ? 8 : 4,
       handle, object: operation, selected: handle && selected?.kind === 'object' ? selected : null,
-      dragging: false, cancelled: false };
+      dragging: false, cancelled: false, abort: new AbortController() };
     gesture.current = current;
     setPeerlessGestureActive(store, 'shape', true);
     outstanding.current.add(current);
@@ -222,13 +229,18 @@ export function usePeerlessShapeGestures(store: PeerlessViewStore | null, {
     };
     if (!current.selected) {
       if (current.handle) {
-        outstanding.current.delete(current);
         if (current.cancelled || !presentation?.current || store.getSnapshot().editState.readOnly) return true;
         const at = peerlessInputReference(store, true);
         if (at?.source === 'afterSeq') {
-          void store.dispatch({ kind: 'setShapeRect', payload: { at, frame: current.frame,
+          const resize = store.dispatch({ kind: 'setShapeRect', payload: { at, frame: current.frame,
             shapeId: current.shapeId, handle: current.handle, delta,
-            inputTime, undoGroup: current.group } }).catch(() => {});
+            inputTime, undoGroup: current.group } }, {
+            reportRefusal: false, signal: current.abort.signal, waitForPredecessor: true,
+          });
+          void resize.then(() => { outstanding.current.delete(current); },
+            () => { outstanding.current.delete(current); });
+        } else {
+          outstanding.current.delete(current);
         }
         return true;
       }

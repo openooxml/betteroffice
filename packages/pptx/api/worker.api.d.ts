@@ -1307,7 +1307,8 @@ import type { CommandTicket } from '../../../../shared/office-session/commands/t
 import type { PresentationCommandAck, PresentationCommandBasis, PresentationCommandClient, PresentationCommandIntent } from './commandProtocol';
 export interface PresentationSharedInput {
     subscribeSent(listener: () => void): () => void;
-    submit(intent: PresentationCommandIntent, basis: PresentationCommandBasis, after?: CommandTicket): {
+    cancel(ticket: CommandTicket): boolean;
+    submit(intent: PresentationCommandIntent, basis: PresentationCommandBasis, after?: CommandTicket, waitForAfter?: boolean): {
         ticket: CommandTicket;
         operation: Promise<PresentationCommandAck>;
     };

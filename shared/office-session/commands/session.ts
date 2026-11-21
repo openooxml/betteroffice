@@ -1042,7 +1042,8 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
     const after = entry.draft.options.after;
     if (!after) return true;
     const dependency = records.get(after);
-    return dependency !== undefined && dependency.seq !== undefined && !dependencyBlocked(after);
+    return dependency !== undefined && dependency.seq !== undefined &&
+      (!entry.draft.options.waitForAfter || dependency.ackSettled) && !dependencyBlocked(after);
   }
 
   function send(entry: OutboxEntry<P, X>, record: ConnectionRecord<P, S, E, F>): void {
@@ -1209,6 +1210,22 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
   const session: WorkerEditSession<P, S, E, X, Q> = {
     backend: 'worker', get state() { return state; }, submit, attachEcho, read, hold,
     get stage() { return disposed ? 'disposed' : terminal ? 'failed' : recovering ? 'recovering' : 'ready'; },
+    cancel(ticket) {
+      if (disposed || terminal) return false;
+      const target = outbox.entries.find((entry) => entry.tickets.includes(ticket));
+      if (!target || target.tickets.length !== 1) return false;
+      let cancelled = false;
+      presenter.event(() => {
+        const removed = outbox.remove((entry) => entry === target);
+        for (const entry of removed) {
+          const direct = entry === target;
+          cancelTickets(entry.tickets, direct ? 'cancelled' : 'dependency-refused');
+          cancelled ||= direct;
+        }
+        if (waitingReads.size) checkReads();
+      });
+      return cancelled;
+    },
     whenPresented(seq) {
       if (disposed || terminal) return Promise.resolve('dropped');
       const entry = log.get(seq) ?? presentations.get(seq);
