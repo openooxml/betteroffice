@@ -29,6 +29,9 @@ let client: PresentationCommandClient;
 let commands: PresentationCommandEnvelope[];
 let owner: PptxWorkerSession | undefined;
 let paintedThroughSeq = 0;
+let holdPaintCommits = false;
+let heldPaintCommits: (() => void)[] = [];
+let refuseResizeCommit = false;
 
 function bounded<T>(promise: Promise<T>): Promise<T> {
   let timer: ReturnType<typeof setTimeout>;
@@ -68,11 +71,17 @@ async function deck(small = false, table: boolean | 'empty' | 'mixed' | 'stacked
 beforeEach(() => {
   commands = [];
   paintedThroughSeq = 0;
+  holdPaintCommits = false;
+  heldPaintCommits = [];
+  refuseResizeCommit = false;
   const createPainter = peerlessPainterFactories.frame;
   const painter = spyOn(peerlessPainterFactories, 'frame').mockImplementation((canvas, options) =>
     createPainter(canvas, { ...options, onCommit(frame, view) {
-      options?.onCommit?.(frame, view);
-      paintedThroughSeq = frame.frame.coversThroughSeq;
+      const commit = () => {
+        options?.onCommit?.(frame, view);
+        paintedThroughSeq = frame.frame.coversThroughSeq;
+      };
+      if (holdPaintCommits) heldPaintCommits.push(commit); else commit();
     } }));
   restorers.push(() => painter.mockRestore()); owner = undefined;
   const worker = Object.getOwnPropertyDescriptor(globalThis, 'Worker');
@@ -104,7 +113,9 @@ beforeEach(() => {
     const command = registration.handlers.command;
     const received = spyOn(registration.handlers, 'command').mockImplementation((context, envelope) => {
       commands.push(envelope);
-      return command(context, envelope);
+      return command(context, refuseResizeCommit && envelope.kind === 'setShapeRect'
+        ? { ...envelope, payload: { ...envelope.payload,
+          target: { ...envelope.payload.target, shapeId: 'removed-target' } } } : envelope);
     });
     restorers.push(() => received.mockRestore());
     createSessionHost<PresentationCommandMethods, PresentationCommandEvents, null>(pair.host, {
@@ -285,19 +296,64 @@ test('text_resize_previews_reflow_before_one_release_commit', async () => {
   expect(commands.filter((command) => command.kind === 'setShapeRect')).toHaveLength(1);
 });
 
+test('text_resize_preview_stays_visible_until_the_committed_frame_is_painted', async () => {
+  const { view, stage, point, select, box } = await open();
+  await select();
+  const handle = view.getByTestId('pptx-resize-e');
+  const narrow = point(box.x + 45);
+  act(() => {
+    fireEvent.pointerDown(handle, point(box.x + box.w));
+    fireEvent.pointerMove(stage, { ...narrow, buttons: 1 });
+  });
+  await waitFor(() => expect(view.getByTestId('pptx-shape-resize-preview')).toBeDefined());
+  holdPaintCommits = true;
+  act(() => { fireEvent.pointerUp(stage, narrow); });
+  await waitFor(() => expect(commands.filter((command) => command.kind === 'setShapeRect')).toHaveLength(1));
+  await bounded(client.flush());
+  expect(heldPaintCommits).toHaveLength(1);
+  expect(paintedThroughSeq).toBeLessThan(client.state.throughSeq);
+  expect(view.getByTestId('pptx-shape-resize-preview')).toBeDefined();
+  act(() => {
+    holdPaintCommits = false;
+    for (const commit of heldPaintCommits.splice(0)) commit();
+  });
+  await waitFor(() => expect(paintedThroughSeq).toBe(client.state.throughSeq));
+  await waitFor(() => expect(view.queryByTestId('pptx-shape-resize-preview')).toBeNull());
+});
+
+test('text_resize_preview_clears_when_the_commit_is_refused', async () => {
+  const { view, stage, point, select, box } = await open();
+  await select();
+  const handle = view.getByTestId('pptx-resize-e');
+  const narrow = point(box.x + 45);
+  act(() => {
+    fireEvent.pointerDown(handle, point(box.x + box.w));
+    fireEvent.pointerMove(stage, { ...narrow, buttons: 1 });
+  });
+  await waitFor(() => expect(view.getByTestId('pptx-shape-resize-preview')).toBeDefined());
+  refuseResizeCommit = true;
+  act(() => { fireEvent.pointerUp(stage, narrow); });
+  await waitFor(() => expect(commands.filter((command) => command.kind === 'setShapeRect')).toHaveLength(1));
+  await waitFor(() => expect(view.queryByTestId('pptx-shape-resize-preview')).toBeNull());
+});
+
 test('cancel_gesture', async () => {
   const { stage, canvas, point, select, view } = await open();
   await select();
   const version = client.state.version;
   for (const target of [canvas, view.getByTestId('pptx-resize-se')]) {
     act(() => { fireEvent.pointerDown(target, point());
-      fireEvent.pointerMove(stage, { ...point(point().clientX + 40), buttons: 1 });
+      fireEvent.pointerMove(stage, { ...point(point().clientX + 40), buttons: 1 }); });
+    if (target !== canvas) expect(view.getByTestId('pptx-shape-resize-preview')).toBeDefined();
+    act(() => {
       fireEvent.keyDown(stage, { key: 'Escape' });
       fireEvent.pointerUp(stage, point(point().clientX + 50)); });
+    expect(view.queryByTestId('pptx-shape-resize-preview')).toBeNull();
     act(() => { fireEvent.pointerDown(target, point());
       fireEvent.pointerMove(stage, { ...point(point().clientX + 40), buttons: 1 });
       fireEvent.pointerCancel(stage, point());
       fireEvent.pointerUp(stage, point(point().clientX + 50)); });
+    expect(view.queryByTestId('pptx-shape-resize-preview')).toBeNull();
   }
   await bounded(client.flush());
   expect(client.state.version).toBe(version);

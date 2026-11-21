@@ -29,6 +29,7 @@ export interface PeerlessShapePreview {
   token: string;
   bounds: ShapeRect;
   request?: {
+    gesture: string;
     frame: PresentationCommandFrameTag;
     target: PresentationCommandObjectTarget;
     rect: ShapeRect;
@@ -127,7 +128,7 @@ export function usePeerlessShapeGestures(store: PeerlessViewStore | null, {
       store?.getSnapshot().editState.readOnly) return;
     const rect = peerlessGestureRect(current.selected, current.delta, current.handle);
     if (rect) setPreview({ token: current.selected.token, bounds: previewBounds(current.selected, rect, Boolean(current.handle)),
-      ...(current.handle && current.selected.storyId ? { request: { frame: current.frame,
+      ...(current.handle && current.selected.storyId ? { request: { gesture: current.group, frame: current.frame,
         target: { slideId: current.selected.slideId, shapeId: current.selected.shapeId, token: current.selected.token },
         rect } } : {}) });
   }, [store, setPreview]);
@@ -243,7 +244,11 @@ export function usePeerlessShapeGestures(store: PeerlessViewStore | null, {
     const commit = store.dispatch(current.handle ? { kind: 'setShapeRect', payload: { ...payload, rect } }
       : { kind: 'moveShape', payload: { ...payload, x: rect.x, y: rect.y } });
     if (!retained?.request) setPreview(null);
-    void commit.catch(() => {}).finally(() => {
+    void commit.then(async (ack) => {
+      const outcome = ack.outcomes.find((entry) => entry.seq === ack.throughSeq);
+      if (!outcome?.committed) return;
+      await presentation.whenPaintedThrough(outcome.seq);
+    }).catch(() => {}).finally(() => {
       if (previewValue.current === retained) setPreview(null);
     });
     return true;
