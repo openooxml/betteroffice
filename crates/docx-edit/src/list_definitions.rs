@@ -326,29 +326,31 @@ fn created_attrs(kind: ListKind, key: &str, level: f64) -> BTreeMap<String, Any>
 }
 
 /// The attributes that put a paragraph on the source list of its neighbour with `values`, at
-/// `level` when given, else at the neighbour's, when the list shows as `kind` there. At the
-/// neighbour's level the list attributes are the neighbour's; at another level the list qualifies
-/// only when `source` renders that level, and the attributes are those seeding stores for it.
+/// `level` when given, else at the neighbour's, when the list shows as `kind` there. The list
+/// qualifies only at a level `source` renders, where there is a `source`. At the neighbour's level
+/// the list attributes are the neighbour's; at another level they are those seeding stores for it.
 fn source_attrs(
     values: &BTreeMap<String, Any>,
     kind: ListKind,
     level: Option<f64>,
     source: Option<&SourceMetadata>,
 ) -> Option<BTreeMap<String, Any>> {
-    let num_pr = match (level, values.get("numPr")) {
-        (Some(level), Some(Any::Map(num_pr))) => {
-            let mut num_pr = (**num_pr).clone();
-            let moved = map_number(&num_pr, "ilvl").unwrap_or(0.0) != level;
-            num_pr.insert("ilvl".to_owned(), Any::Number(level));
-            Some((num_pr, moved))
-        }
-        _ => None,
+    let Some(Any::Map(theirs)) = values.get("numPr") else {
+        return None;
     };
-    let rendered = match (&num_pr, source) {
-        (Some((num_pr, true)), source) => Some(rendered_level(num_pr, source?)?),
-        _ => None,
+    let own = map_number(theirs, "ilvl").unwrap_or(0.0);
+    let target = level.unwrap_or(own);
+    let mut num_pr = (**theirs).clone();
+    num_pr.insert("ilvl".to_owned(), Any::Number(target));
+    let rendered = match source {
+        Some(source) => Some(rendered_level(&num_pr, source)?),
+        None => None,
     };
-    let from = rendered.as_ref().unwrap_or(values);
+    let from = match rendered.as_ref() {
+        Some(rendered) if target != own => rendered,
+        None if target != own => return None,
+        _ => values,
+    };
     if shown_kind(from) != kind {
         return None;
     }
@@ -356,7 +358,7 @@ fn source_attrs(
         .into_iter()
         .map(|key| (key.to_owned(), from.get(key).cloned().unwrap_or(Any::Null)))
         .collect();
-    if let Some((num_pr, _)) = num_pr {
+    if level.is_some() {
         attrs.insert("numPr".to_owned(), Any::from(num_pr));
     }
     attrs.insert(LIST_DEF.to_owned(), Any::Null);
@@ -385,7 +387,8 @@ fn joined_list(
     match resolve_list_identity(values)? {
         ListIdentity::Created { key, level: theirs } if definitions.contains_key(&key) => {
             let level = level.unwrap_or(theirs);
-            (definitions[&key].kind == kind).then(|| created_attrs(kind, &key, level))
+            (definitions[&key].kind == kind && numbering_level(level).is_some())
+                .then(|| created_attrs(kind, &key, level))
         }
         _ => source_attrs(values, kind, level, source),
     }
