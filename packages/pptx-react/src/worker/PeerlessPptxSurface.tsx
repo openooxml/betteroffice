@@ -191,7 +191,6 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
   const focus = useCallback(() => {
     inputRef.current?.focus();
   }, []);
-  const navigate = useCallback(() => { stage.current?.focus(); }, []);
   const selection = usePeerlessTextSelection(presentation?.store ?? null, { canvas, presentation, focus });
   const insertion = usePeerlessInsertion(presentation, canvas, focus);
   const [review, setReview] = useState<PeerlessReviewState>({ open: false, selectedId: null, diff: false, presenting: false });
@@ -309,7 +308,7 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
     <div ref={workspace} style={styles.workspace}>
       <PeerlessImagePicker input={picker} origin={pictureOrigin} onError={(error) => callbacks.current.onError?.(error)} />
       {chrome && slides && (slides.length > 0 || review.diff && review.selectedId) && <PeerlessSlideStrip run={chrome} commands={commands} previewFit={previewFit} current={current}
-        onNavigate={navigate} proposalId={review.diff ? review.selectedId : null} previewSlideId={review.slideVersion && review.slideVersion !== chrome.client.state.version ? null : review.slideId}
+        proposalId={review.diff ? review.selectedId : null} previewSlideId={review.slideVersion && review.slideVersion !== chrome.client.state.version ? null : review.slideId}
         onPreviewSlide={previewSlide} />}
       {plugins.managed && <PluginDock host={plugins.host} placement="left" activations={plugins.activations.filter((entry) => entry.plugin.panel?.placement === 'left')} available={available} />}
       <div ref={stage} role="application" aria-label={t('editor.appLabel')} tabIndex={0}
