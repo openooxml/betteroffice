@@ -444,6 +444,46 @@ describe('workspace dependency versions', () => {
     expect(result.held).toEqual([agents]);
   });
 
+  test('rejects a held package with an unavailable non-native dependency', async () => {
+    const native = natives[0]!;
+    const result = await check('--npm', () => versions('0.0.0'), {
+      packages: [fonts], natives: [native], later: [], platforms: [],
+      workspaces: workspaceFixture([
+        { ...fonts, dependencies: { [native.name]: 'workspace:*', [latin.name]: 'workspace:*' } },
+        native, latin
+      ])
+    });
+    expect(result.status).toBe(1);
+    expect(result.held).toEqual([fonts]);
+    expect(result.stderr).toContain(`${releaseTag(fonts)} depends on ${releaseTag(latin)}, which is neither in this release nor on npm`);
+  });
+
+  test('rejects a held package when the native manifest version does not satisfy its range', async () => {
+    const native = natives[0]!;
+    const result = await check('--npm', () => versions('0.0.0'), {
+      packages: [agents], natives: [native], later: [], platforms: [],
+      workspaces: workspaceFixture([{ ...agents, dependencies: { [native.name]: '0.0.0' } }, native])
+    });
+    expect(result.status).toBe(1);
+    expect(result.held).toEqual([agents]);
+    expect(result.stderr).toContain(`${releaseTag(agents)} depends on ${native.name}@0.0.0, but the native manifest version ${native.version} does not satisfy that range`);
+  });
+
+  test('rejects a held package that depends on another held package', async () => {
+    const native = natives[0]!;
+    const result = await check('--npm', () => versions('0.0.0'), {
+      packages: [fonts, latin], natives: [native], later: [], platforms: [],
+      workspaces: workspaceFixture([
+        { ...fonts, dependencies: { [native.name]: 'workspace:*', [latin.name]: '^0.0.0' } },
+        { ...latin, dependencies: { [native.name]: 'workspace:*' } },
+        native
+      ])
+    });
+    expect(result.status).toBe(1);
+    expect(result.held).toEqual([fonts, latin]);
+    expect(result.stderr).toContain(`${releaseTag(fonts)} depends on ${latin.name}@^0.0.0, which is also held`);
+  });
+
   test('fails when an immediate publish would depend on a held workspace version', async () => {
     const native = natives[0]!;
     const result = await check('--npm', () => versions('0.0.0'), {
@@ -819,7 +859,7 @@ describe('release wiring', () => {
   });
 
   test('packs pinned manifests before Changesets and hands the held list to the later job', () => {
-    const pack = steps.indexOf('Pack and hold packages that need native versions');
+    const pack = steps.indexOf('Pack and hold packages published after the release');
     expect(pack).toBeGreaterThan(steps.indexOf('Pin workspace deps for npm publish'));
     expect(pack + 1).toBe(steps.indexOf('Release PR or publish'));
     expect(release.jobs.release.outputs.held).toBe('${{ steps.npm-targets.outputs.held }}');

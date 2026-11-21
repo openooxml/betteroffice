@@ -143,8 +143,8 @@ jobs:
         run: bun scripts/rewrite-workspace-deps.ts
 
       # Pack the pinned manifests before marking them private for Changesets.
-      - name: Pack and hold packages that need native versions
-        if: steps.pending.outputs.publishing == 'true' && steps.npm-targets.outputs.held != '[]'
+      - name: Pack and hold packages published after the release
+        if: steps.pending.outputs.publishing == 'true' && steps.npm-targets.outputs.held != '' && steps.npm-targets.outputs.held != '[]'
         env:
           HELD_NPM_PACKAGES: ${{ steps.npm-targets.outputs.held }}
         run: node scripts/held-npm-packages.mjs --pack "$RUNNER_TEMP/held-npm"
@@ -165,7 +165,7 @@ jobs:
           NPM_CONFIG_PROVENANCE: "true"
 
       - name: Upload held npm tarballs
-        if: steps.pending.outputs.publishing == 'true' && steps.npm-targets.outputs.held != '[]'
+        if: steps.pending.outputs.publishing == 'true' && steps.npm-targets.outputs.held != '' && steps.npm-targets.outputs.held != '[]'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: held-npm
@@ -347,6 +347,8 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
 
       - uses: oven-sh/setup-bun@v2
         with:

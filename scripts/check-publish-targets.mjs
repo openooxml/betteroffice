@@ -296,6 +296,7 @@ export async function checkNpm({
 
   const immediate = packages.filter(({ name }) => !heldNames.has(name));
   const releaseVersions = new Map(immediate.map(({ name, version }) => [name, version]));
+  const nativeVersions = new Map(natives.map(({ name, version }) => [name, version]));
   const available = async (name, range, exact = false) => {
     const matches = (version) => exact ? version === range : satisfies(version, range);
     const version = releaseVersions.get(name);
@@ -304,13 +305,26 @@ export async function checkNpm({
     return Object.keys(body?.versions ?? {}).some(matches);
   };
   for (const { name, version, dependency, range } of dependencies) {
-    if (heldNames.has(name)) continue;
+    if (heldNames.has(name)) {
+      if (heldNames.has(dependency)) {
+        out.error(`${name}@${version} depends on ${dependency}@${range}, which is also held`);
+        failed = true;
+        continue;
+      }
+      const nativeVersion = nativeVersions.get(dependency);
+      if (nativeVersion !== undefined) {
+        if (!satisfies(nativeVersion, range)) {
+          out.error(`${name}@${version} depends on ${dependency}@${range}, but the native manifest version ${nativeVersion} does not satisfy that range`);
+          failed = true;
+        }
+        continue;
+      }
+    }
     if (await available(dependency, range)) continue;
     out.error(`${name}@${version} depends on ${dependency}@${range}, which is neither in this release nor on npm`);
     failed = true;
   }
-  for (const { dependent, name, version, file, line } of references ?? siblingReferences(immediate, workspaces)) {
-    if (heldNames.has(dependent)) continue;
+  for (const { dependent, name, version, file, line } of references ?? siblingReferences(packages, workspaces)) {
     if (await available(name, version, true)) continue;
     out.error(`${dependent} builds references to ${name}@${version} (${file}:${line}), which is neither in this release nor on npm`);
     failed = true;

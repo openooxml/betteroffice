@@ -35,6 +35,10 @@ function tarballPath(destination, { name, version }) {
   return join(destination, name, `${version}.tgz`);
 }
 
+function isPrerelease(version) {
+  return version.split('+')[0].includes('-');
+}
+
 function packHeld(entries, destination) {
   for (const entry of entries) {
     const { name, version, directory, manifest } = entry;
@@ -65,7 +69,7 @@ function ensureRelease(entry) {
   if (spawnSync('gh', ['release', 'view', tag], { stdio: 'ignore' }).status === 0) return;
   const changelog = join(directory, 'CHANGELOG.md');
   const notes = existsSync(changelog) ? releaseNotes(readFileSync(changelog, 'utf8'), version) : '';
-  const prerelease = version.split('+')[0].includes('-') ? ['--prerelease'] : [];
+  const prerelease = isPrerelease(version) ? ['--prerelease'] : [];
   execFileSync('gh', ['release', 'create', tag, '--verify-tag', '--title', tag, '--notes', notes, ...prerelease], {
     stdio: 'inherit'
   });
@@ -81,12 +85,19 @@ async function publishHeld(entries, workspaces, destination) {
     return;
   }
 
+  const preFile = new URL('../.changeset/pre.json', import.meta.url);
+  const preState = existsSync(preFile) ? JSON.parse(readFileSync(preFile, 'utf8')) : undefined;
+  const preTag = preState?.mode === 'pre' && typeof preState.tag === 'string' ? preState.tag.trim() : '';
+  const tag = preTag ? ['--tag', preTag] : [];
   const audit = await auditNpmPackages(entries);
   for (const [index, entry] of entries.entries()) {
     if (audit[index].state === 'published') {
       console.log(`${releaseTag(entry)} is already on npm.`);
     } else {
-      execFileSync('npm', ['publish', tarballPath(destination, entry), '--provenance', '--access', 'public'], {
+      if (isPrerelease(entry.version) && (!preTag || preTag.toLowerCase() === 'latest')) {
+        throw new Error(`Cannot publish ${releaseTag(entry)} without a prerelease tag in .changeset/pre.json.`);
+      }
+      execFileSync('npm', ['publish', tarballPath(destination, entry), '--provenance', '--access', 'public', ...tag], {
         stdio: 'inherit'
       });
     }
