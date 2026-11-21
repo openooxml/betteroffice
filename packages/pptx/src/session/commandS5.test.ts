@@ -86,6 +86,9 @@ test('overflowing text is hittable past its frame, over a shape beneath it', () 
       .toMatchObject({ kind: 'text', shapeId: 'box', position: 16 });
     expect(hitGeometry(index(source), { x: 2, y: 30 }, undefined, 1)).toMatchObject({ kind: 'text', position: 11 });
     expect(hitGeometry(index(source), { x: 50, y: 18 }, undefined, 1)).toEqual({ kind: 'shape', shapeId: 'box' });
+    box.lines[2] = line(13, 23, 50);
+    expect(hitGeometry(index(source), { x: 31, y: 47 }, undefined, 1)).toMatchObject({ kind: 'text', position: 16 });
+    box.lines[2] = line(13, 23, 40);
     delete box.overflow;
   }
 });
