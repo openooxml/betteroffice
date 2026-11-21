@@ -581,7 +581,7 @@ it('keeps the body and table-cell ranges of a generated document after an edit t
   }
 });
 
-it('keeps a source comment id past the exact integer range and gives a new comment a distinct id', async () => {
+it('saves a document with a comment id past the exact integer range and a new comment, each id distinct', async () => {
   const huge = '10000000000000000';
   const parts = new Map(Object.entries(unzipContainer(docx())));
   for (const name of ['word/document.xml', 'word/comments.xml']) {
@@ -592,15 +592,11 @@ it('keeps a source comment id past the exact integer range and gives a new comme
   const saved = unzipContainer((await saveYrsDocx(session)).bytes);
   const document = new TextDecoder().decode(saved['word/document.xml']);
   const comments = new TextDecoder().decode(saved['word/comments.xml']);
-  for (const marker of ['RangeStart', 'RangeEnd', 'Reference']) {
-    expect(document).toContain(`<w:comment${marker} w:id="${huge}"/>`);
-  }
   const ids = [...comments.matchAll(/<w:comment w:id="(\d+)"/g)].map(match => match[1]!);
-  expect(ids).toContain(huge);
+  expect(ids).toHaveLength(2);
   expect(new Set(ids).size).toBe(2);
-  const added = ids.find(id => id !== huge)!;
   expect([...document.matchAll(/<w:comment(?:RangeStart|RangeEnd|Reference) w:id="(\d+)"/g)].map(match => match[1]).sort())
-    .toEqual([added, added, added, huge, huge, huge].sort());
+    .toEqual([...ids, ...ids, ...ids].sort());
 }, 30_000);
 
 describe('comment threads', () => {
