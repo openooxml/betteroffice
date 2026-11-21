@@ -244,7 +244,10 @@ test('worker: a paragraph moved to another list by a paragraph-attribute write l
 }, TIMEOUT);
 
 test('worker: one toggle over plain paragraphs asks the engine for a list once and for each style once', async () => {
-  const arm = await openCommandEngine(undefined, { bytes: listDocument('C'), clientId: ++clientId });
+  const arm = await openCommandEngine(undefined, {
+    bytes: listDocument('C', { isolated: true, after: ['Third plain QA', 'Fourth plain QA', 'Fifth plain QA', 'Sixth plain QA'] }),
+    clientId: ++clientId,
+  });
   const paragraphs = () => arm.engine.paragraphs('body');
   const first = paragraphs()[0]!;
   const last = paragraphs()[paragraphs().length - 1]!;
