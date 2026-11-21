@@ -199,14 +199,14 @@ test('text composition hides resize handles and retains input focus', async () =
   let defaultAllowed = true;
   act(() => {
     fireEvent.compositionStart(input);
-    fireEvent.compositionUpdate(input, { data: '漢' });
+    fireEvent(input, Object.assign(new Event('compositionupdate', { bubbles: true }), { data: '漢' }));
     defaultAllowed = fireEvent.pointerDown(handle, edge);
     fireEvent.pointerUp(stage, { ...edge, clientX: edge.clientX + 30 });
   });
   await waitFor(() => expect(view.queryAllByTestId(/pptx-resize-/)).toHaveLength(0));
   expect(defaultAllowed).toBe(false);
   expect(document.activeElement).toBe(input);
-  act(() => { fireEvent.compositionEnd(input, { data: '漢' }); });
+  act(() => { fireEvent(input, Object.assign(new Event('compositionend', { bubbles: true }), { data: '漢' })); });
   await waitFor(() => expect(commands.slice(since).map((command) => command.kind))
     .toEqual(['compositionStart', 'compositionCommit', 'compositionEnd']));
   await bounded(client.flush());
