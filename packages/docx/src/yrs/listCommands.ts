@@ -4,7 +4,7 @@ import type { YrsAuthor, YrsParagraphAttrs, YrsSession, YrsStoryRange } from './
 export const LIST_OFF_ATTRS: Readonly<YrsParagraphAttrs> = Object.freeze({
   numPr: null, listIsBullet: null, listNumFmt: null, listMarker: null, listLevelNumFmts: null, listAbstractNumId: null,
   listStartOverride: null, listMarkerFontFamily: null, listMarkerSuffix: null, listMarkerHidden: null, listMarkerBold: null,
-  listMarkerItalic: null, listMarkerColor: null, listMarkerFontSize: null, other: Object.freeze({ listDef: null }),
+  listMarkerItalic: null, listMarkerColor: null, listMarkerFontSize: null, other: Object.freeze({ listDef: null, listLevelIndents: null }),
 });
 
 /** Whether a paragraph with `properties` is on a list shown as `kind`. */

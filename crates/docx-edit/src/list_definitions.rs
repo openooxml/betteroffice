@@ -17,6 +17,10 @@ pub const LIST_DEFINITIONS: &str = "listDefinitions";
 /// `{"key": <string>, "numId": <number>}`; honoured while `numPr.numId` still equals `numId`.
 pub const LIST_DEF: &str = "listDef";
 
+/// Paragraph attribute set on a paragraph put on its list in this session: layout takes its indents
+/// from the list level. Seeding never writes it and it is not saved.
+pub(crate) const LIST_LEVEL_INDENTS: &str = "listLevelIndents";
+
 /// The bullets of Word's default bullet list, in Symbol, Courier New and Wingdings, repeating.
 const BULLET_TEXTS: [&str; 3] = ["\u{f0b7}", "o", "\u{f0a7}"];
 
@@ -306,6 +310,7 @@ fn created_attrs(kind: ListKind, key: &str, level: f64) -> BTreeMap<String, Any>
     BTreeMap::from([
         ("numPr".to_owned(), Any::from(num_pr)),
         (LIST_DEF.to_owned(), Any::from(reference)),
+        (LIST_LEVEL_INDENTS.to_owned(), Any::Bool(true)),
         (
             "listIsBullet".to_owned(),
             Any::Bool(kind == ListKind::Bullet),
@@ -362,6 +367,7 @@ fn source_attrs(
         attrs.insert("numPr".to_owned(), Any::from(num_pr));
     }
     attrs.insert(LIST_DEF.to_owned(), Any::Null);
+    attrs.insert(LIST_LEVEL_INDENTS.to_owned(), Any::Bool(true));
     Some(attrs)
 }
 

@@ -1565,6 +1565,7 @@ pub(crate) fn plan_paragraph_style<T: ReadTxn>(
                 "numPr",
                 "numPrFromStyle",
                 crate::LIST_DEF,
+                crate::list_definitions::LIST_LEVEL_INDENTS,
                 "listNumFmt",
                 "listIsBullet",
                 "listMarker",

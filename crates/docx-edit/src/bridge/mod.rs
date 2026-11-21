@@ -5949,8 +5949,9 @@ fn lower_paragraph_spacing(
     }
 }
 
-/// The indent of the paragraph with `values`. A paragraph on a list takes what it has no value of
-/// its own for from the definition of its list level, and the indent of Word's default lists
+/// The indent of the paragraph with `values`. A paragraph on a list with no left indent of its own
+/// takes the indent of Word's default lists. One put on its list in this session instead takes
+/// what it has no value of its own for from the definition of its list level, and the default
 /// where the definition gives none or the paragraph states that indent in character units, which
 /// layout does not read.
 fn lower_paragraph_indent(
@@ -5971,7 +5972,14 @@ fn lower_paragraph_indent(
         .or_else(|| indent_map.and_then(|map| map_bool(map, "hanging")))
         .unwrap_or(false);
 
-    if let Some(list) = resolve_list_identity(values) {
+    let joined = true_property(values, crate::list_definitions::LIST_LEVEL_INDENTS).is_some();
+    if let (Some(list), None, false) = (resolve_list_identity(values), left, joined) {
+        left = Some((list.level() + 1.0) * 720.0);
+        if first_line.is_none() {
+            first_line = Some(-360.0);
+            hanging = true;
+        }
+    } else if let (Some(list), true) = (resolve_list_identity(values), joined) {
         let original = values.get("_originalFormatting").and_then(any_map);
         let in_characters = |key: &str| {
             [
