@@ -1,24 +1,56 @@
 import { expect, test } from 'bun:test';
 
-type Check = { problems: string[]; target: string | null };
-const validatePublishedWorker: ((source: string) => Promise<Check>) | undefined = await import('./worker-entry-check.mjs').then(
-  (module) => module.validatePublishedWorker,
-  () => undefined,
-);
+import { validateNativeWorker, validatePublishedWorker } from './worker-entry-check.mjs';
 
-test('a worker entry that only imports one literal path dynamically passes with that path as its target', async () => {
-  expect(validatePublishedWorker).toBeFunction();
-  expect(await validatePublishedWorker!("import('./x.js');")).toEqual({ problems: [], target: './x.js' });
+const fonts = "import '@betteroffice/fonts/worker';";
+
+test('a bundled worker may statically import the worker font entry', async () => {
+  expect(await validatePublishedWorker("import { createFontProvider } from '@betteroffice/fonts/worker'; globalThis.fonts = createFontProvider;"))
+    .toEqual({ problems: [], target: null });
 });
 
-test('a worker entry whose dynamic import target is not a string literal fails', async () => {
-  expect(validatePublishedWorker).toBeFunction();
-  const { problems, target } = await validatePublishedWorker!('const name = globalThis.start;\nimport(name);');
-  expect({ failed: problems.length > 0, target }).toEqual({ failed: true, target: null });
+test('literal dynamic imports fail even when nested or behind a comment', async () => {
+  for (const source of ["import('./x.js');", "globalThis.load = () => import /*c*/ ('./x.js');"]) {
+    expect((await validatePublishedWorker(source)).problems.length).toBeGreaterThan(0);
+  }
 });
 
-test('a worker entry with a static import behind a comment fails', async () => {
-  expect(validatePublishedWorker).toBeFunction();
-  const { problems } = await validatePublishedWorker!("import /*c*/ './x.js'; import('./y.js');");
-  expect(problems.length).toBeGreaterThan(0);
+test('nonliteral node-only imports remain permitted', async () => {
+  expect(await validatePublishedWorker(`${fonts} const name = globalThis.moduleName; globalThis.load = () => import(name);`))
+    .toEqual({ problems: [], target: null });
+});
+
+test('a browser worker requires exactly one static font import', async () => {
+  for (const source of ['', 'globalThis.ready = true;', `${fonts} import { createFontProvider } from '@betteroffice/fonts/worker'; globalThis.fonts = createFontProvider;`]) {
+    expect((await validatePublishedWorker(source)).problems.length).toBeGreaterThan(0);
+  }
+});
+
+test('other static imports and requires fail', async () => {
+  for (const source of ["import /*c*/ './x.js';", "import '@betteroffice/fonts';", "require('./x.js');"]) {
+    expect((await validatePublishedWorker(source)).problems.length).toBeGreaterThan(0);
+  }
+});
+
+test('only the docx sibling entry may import its canonical bundle', async () => {
+  const source = "import '../docxWorker.mjs';";
+  expect(await validatePublishedWorker(source, '../docxWorker.mjs')).toEqual({ problems: [], target: '../docxWorker.mjs' });
+  expect((await validatePublishedWorker(source)).problems.length).toBeGreaterThan(0);
+  expect((await validatePublishedWorker('', '../docxWorker.mjs')).problems.length).toBeGreaterThan(0);
+  expect((await validatePublishedWorker(`${source}globalThis.extra = true;`, '../docxWorker.mjs')).problems.length).toBeGreaterThan(0);
+  expect((await validatePublishedWorker(`${source}${fonts}`, '../docxWorker.mjs')).problems.length).toBeGreaterThan(0);
+});
+
+test('native workers allow bare static imports and bare dynamic font imports', async () => {
+  expect(await validateNativeWorker("import { createRequire } from 'node:module'; globalThis.require = createRequire; globalThis.fonts = () => import('@betteroffice/fonts'); globalThis.progressive = () => import('@betteroffice/fonts/progressive');"))
+    .toEqual({ problems: [], target: null });
+});
+
+test('native workers reject static and dynamic file imports and the browser font entry', async () => {
+  for (const source of [
+    "import './chunk.js';", "import '../chunk.js';", "import('./chunk.js');", "import /*c*/ ('../chunk.js');",
+    "import '/chunk.js';", "import { setOptionalFontPacks } from '@betteroffice/fonts/worker'; globalThis.install = setOptionalFontPacks;",
+  ]) {
+    expect((await validateNativeWorker(source)).problems.length).toBeGreaterThan(0);
+  }
 });

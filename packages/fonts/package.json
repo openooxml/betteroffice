@@ -14,6 +14,11 @@
       "default": "./dist/index.js"
     },
     "./package.json": "./package.json",
+    "./worker": {
+      "types": "./dist/worker.d.ts",
+      "import": "./dist/worker.js",
+      "default": "./dist/worker.js"
+    },
     "./cdn": {
       "types": "./dist/cdn.d.ts",
       "import": "./dist/cdn.js",

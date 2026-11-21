@@ -1,32 +1,48 @@
 import { build } from 'esbuild';
 
-const dynamicImport = /(?<![\w$.])import\s*\(/g;
-
-/** Parses `source` with esbuild; a problem for any static import or require, and unless it has exactly one dynamic import, whose argument is a string literal; `target` is that literal, else null. */
-export async function validatePublishedWorker(source) {
-  const imports = [];
+async function workerImports(source) {
+  let imports = [];
   let output;
   try {
     const result = await build({
       stdin: { contents: source, loader: 'js' },
       bundle: true, write: false, format: 'esm', platform: 'browser',
-      minifyWhitespace: true, legalComments: 'none', logLevel: 'silent',
+      minifyWhitespace: true, legalComments: 'none', logLevel: 'silent', metafile: true,
       plugins: [{ name: 'record-imports', setup(stub) {
-        stub.onResolve({ filter: /.*/ }, ({ path, kind }) => {
-          imports.push({ path, kind });
-          return { path, external: true };
-        });
+        stub.onResolve({ filter: /.*/ }, ({ path }) => ({ path, external: true }));
       } }],
     });
     output = result.outputFiles[0].text;
+    imports = Object.values(result.metafile.inputs).flatMap((entry) => entry.imports);
   } catch (error) {
-    return { problems: [`does not parse: ${error.message}`], target: null };
+    return { imports, output, problems: [`does not parse: ${error.message}`] };
   }
-  const problems = imports.filter(({ kind }) => kind !== 'dynamic-import')
-    .map(({ path, kind }) => `statically imports ${path} (${kind}); it must only import its code dynamically`);
-  const literal = imports.filter(({ kind }) => kind === 'dynamic-import').map(({ path }) => path);
-  const dynamic = output.match(dynamicImport)?.length ?? 0;
-  if (dynamic !== 1) problems.push(`has ${dynamic} dynamic imports; it must load its code with exactly one`);
-  else if (literal.length !== 1) problems.push('its dynamic import target is not a string literal');
-  return { problems, target: dynamic === 1 && literal.length === 1 ? literal[0] : null };
+  return { imports, output, problems: [] };
+}
+
+/** Validates the imports of a published browser worker. */
+export async function validatePublishedWorker(source, sibling = null) {
+  const { imports, output, problems } = await workerImports(source);
+  if (problems.length) return { problems, target: null };
+  for (const { path, kind } of imports) {
+    if (kind === 'dynamic-import') problems.push(`dynamically imports ${path}`);
+    else if (kind !== 'import-statement' || (path !== '@betteroffice/fonts/worker' && path !== sibling)) {
+      problems.push(`imports ${path} (${kind})`);
+    }
+  }
+  const statics = imports.filter(({ kind }) => kind === 'import-statement');
+  if (statics.length !== 1) problems.push(`has ${statics.length} static imports; it must have exactly one`);
+  const target = sibling && imports.some(({ path }) => path === sibling) ? sibling : null;
+  if (sibling && target === null) problems.push('sibling entry must statically import its canonical bundle');
+  if (target && output.trim() !== `import${JSON.stringify(target)};`) problems.push('sibling entry must contain only its static import');
+  return { problems, target };
+}
+
+export async function validateNativeWorker(source) {
+  const { imports, problems } = await workerImports(source);
+  for (const { path, kind } of imports) {
+    if (/^(?:\.{1,2}(?:\/|$)|\/|[A-Za-z]:[\\/])/.test(path)) problems.push(`imports relative or absolute path ${path} (${kind})`);
+    if (path === '@betteroffice/fonts/worker') problems.push('imports the browser worker font entry');
+  }
+  return { problems, target: null };
 }

@@ -4,6 +4,7 @@ import {
 } from '../../../../shared/office-session/client';
 import type { PptxPngOptions, PptxPngTarget } from '../wasm/pngOptions';
 import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
+import { withFontPackSource } from '../../../../shared/office-session/fontPackSource';
 import { createSessionWorker } from './sessionWorker';
 import type { Promisified, SessionFailure } from '../../../../shared/office-session/types';
 import type { PptxFontFace } from '../types';
@@ -184,6 +185,7 @@ export async function createPresentationSession(
   options: OpenPresentationSessionOptions,
   transport: SessionTransport
 ): Promise<PresentationSession> {
+  transport = withFontPackSource(transport);
   let document: ArrayBuffer;
   let input: PresentationSessionOpenOptions;
   let transfer: Transferable[];

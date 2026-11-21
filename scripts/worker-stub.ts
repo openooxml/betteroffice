@@ -1,37 +1,73 @@
-import { join, resolve } from 'node:path';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { build } from 'esbuild';
+import { build, type BuildOptions, type Plugin } from 'esbuild';
 
-export type WorkerStub = { entry: string; outfile: string; start: string };
+export type WorkerStub = { entry: string; outfile: string; sibling?: string };
+type WorkerBuildOptions = Pick<BuildOptions, 'plugins' | 'external'> & { browserFonts?: boolean };
 
 const packages = fileURLToPath(new URL('../packages/', import.meta.url));
+const fontPackInstaller = fileURLToPath(new URL('../shared/office-session/workerFontPacks.ts', import.meta.url));
+
+function workerFontsPlugin(): Plugin {
+  const namespace = 'worker-fonts';
+  return {
+    name: namespace,
+    setup(build) {
+      build.onResolve({ filter: /^@betteroffice\/fonts(?:\/progressive|\/worker)?$/ }, ({ path, kind, importer, namespace: from }) => {
+        if (path === '@betteroffice/fonts/worker') {
+          if (from === namespace || importer !== fontPackInstaller) return { path, external: true };
+        } else if (kind !== 'dynamic-import') return;
+        return { path: 'fonts', namespace };
+      });
+      build.onLoad({ filter: /.*/, namespace }, () => ({
+        contents: "export * from '@betteroffice/fonts/worker';",
+        resolveDir: dirname(fontPackInstaller),
+        loader: 'js',
+      }));
+    },
+  };
+}
 
 const WORKER_STUBS = {
-  xlsx: [{ entry: 'xlsx/src/session/worker.ts', outfile: 'xlsxSessionWorker.mjs', start: './xlsxWorkerStart.js' }],
-  pptx: [{ entry: 'pptx/src/session/worker.ts', outfile: 'pptxSessionWorker.mjs', start: './pptxWorkerStart.js' }],
+  xlsx: [{ entry: 'xlsx/src/session/worker.ts', outfile: 'xlsxSessionWorker.mjs' }],
+  pptx: [{ entry: 'pptx/src/session/worker.ts', outfile: 'pptxSessionWorker.mjs' }],
   docx: [
-    { entry: 'docx/src/yrs/docxWorker.browser.ts', outfile: 'docxWorker.mjs', start: './yrs/residentEngineWorker.mjs' },
-    { entry: 'docx/src/yrs/docxWorker.browser.ts', outfile: 'yrs/docxWorker.mjs', start: './residentEngineWorker.mjs' },
+    { entry: 'docx/src/yrs/docxWorker.browser.ts', outfile: 'docxWorker.mjs' },
+    { entry: 'docx/src/yrs/docxWorker.browser.ts', outfile: 'yrs/docxWorker.mjs', sibling: '../docxWorker.mjs' },
   ],
 } as const;
 
-/** The import-free worker stubs the `format` package and its native binding both write into their `outDir`. */
+/** Browser worker entries shared by the format packages and native bindings. */
 export function workerStubs(format: keyof typeof WORKER_STUBS, outDir: string): WorkerStub[] {
-  return WORKER_STUBS[format].map(({ entry, outfile, start }) => ({
-    entry: join(packages, entry),
-    outfile: join(outDir, outfile),
-    start,
+  return WORKER_STUBS[format].map((stub) => ({
+    ...stub,
+    entry: join(packages, stub.entry),
+    outfile: join(outDir, stub.outfile),
   }));
 }
 
-export async function buildWorkerStubs(format: keyof typeof WORKER_STUBS, outDir: string): Promise<void> {
-  for (const stub of workerStubs(format, outDir)) await buildWorkerStub(stub);
+export async function buildWorkerStubs(format: keyof typeof WORKER_STUBS, outDir: string, options: WorkerBuildOptions = {}): Promise<void> {
+  for (const stub of workerStubs(format, outDir)) await buildWorkerStub(stub, options);
 }
 
-export async function buildWorkerStub({ entry, outfile, start }: WorkerStub): Promise<void> {
-  const importer = resolve(entry);
+export async function buildWorkerStub({ entry, outfile, sibling }: WorkerStub, options: WorkerBuildOptions = {}): Promise<void> {
+  if (sibling && options.browserFonts) {
+    await mkdir(dirname(outfile), { recursive: true });
+    await writeFile(outfile, `import ${JSON.stringify(sibling)};\n`);
+    return;
+  }
+  const { browserFonts = false, plugins = [], external = [] } = options;
+  const originalEntry = resolve(entry);
   await build({
-    entryPoints: [entry],
+    ...(browserFonts ? {
+      stdin: {
+        contents: `import ${JSON.stringify(fontPackInstaller)}; import ${JSON.stringify(originalEntry)};`,
+        resolveDir: dirname(originalEntry),
+        sourcefile: 'browser-worker-entry.ts',
+        loader: 'ts' as const,
+      },
+    } : { entryPoints: [originalEntry] }),
     outfile,
     bundle: true,
     splitting: false,
@@ -39,12 +75,7 @@ export async function buildWorkerStub({ entry, outfile, start }: WorkerStub): Pr
     platform: 'browser',
     minify: true,
     logLevel: 'warning',
-    plugins: [{
-      name: 'worker-start',
-      setup(stub) {
-        stub.onResolve({ filter: /.*/ }, (args) =>
-          args.kind === 'dynamic-import' && resolve(args.importer) === importer ? { path: start, external: true } : undefined);
-      },
-    }],
+    plugins: browserFonts ? [workerFontsPlugin(), ...plugins] : plugins,
+    external,
   });
 }

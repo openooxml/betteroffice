@@ -41,6 +41,8 @@ import { shipsWasmAsset } from '../wasm/assetEdit';
 import { editWasmModule } from './wasm/index';
 import { fontBytes, type FontDecoder } from '../../../../shared/office-session/fontDecoder';
 import { createSessionWorker } from './sessionWorker';
+import { createFontPackResponder, type FontPackReply } from '../../../../shared/office-session/optionalFontPacks';
+import { importOptionalFontPack } from '../../../../shared/office-session/fontPackSource';
 
 /** @internal */
 export interface ResidentProposalReply
@@ -167,7 +169,7 @@ export interface ResidentEngineWorkerPort {
   onerror: ((event: ErrorEvent) => void) | null;
   onmessageerror: ((event: MessageEvent) => void) | null;
   postMessage(
-    message: DocxEngineWorkerRequest | DocxEngineWorkerHostModule,
+    message: DocxEngineWorkerRequest | DocxEngineWorkerHostModule | FontPackReply,
     transfer?: Transferable[]
   ): void;
   terminate(): void;
@@ -226,9 +228,15 @@ export class ResidentEngineWorkerClient implements DocxCommandClient {
   private readonly pipeListeners = new Set<(batches: readonly PipeOutputBatch[]) => void>();
   private readonly collabListeners = new Set<(event: { updates: Uint8Array[]; inferences: Array<{ seq: number; insertion: CollaborationTextInsertion }>; clock?: number }) => void>();
   protected commandIdentity: { session: string; incarnation: number; epoch: number } | null = null;
+  private readonly fontPacks: ReturnType<typeof createFontPackResponder>;
 
   constructor(protected readonly worker: ResidentEngineWorkerPort = spawnResidentEngineWorker()) {
+    this.fontPacks = createFontPackResponder((message) => this.worker.postMessage(message), importOptionalFontPack);
     this.worker.onmessage = (event) => {
+      if (this.fontPacks.receive(event.data)) {
+        event.stopImmediatePropagation();
+        return;
+      }
       const response = event.data;
       if (response.ok && response.commandFrame) {
         const pushed = response.commandFrame;
@@ -1253,6 +1261,7 @@ export class ResidentEngineWorkerClient implements DocxCommandClient {
     this.ready = false;
     this.disarmWatchdog();
     this.worker.terminate();
+    this.fontPacks.dispose();
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
     this.frameListeners.clear();

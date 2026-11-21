@@ -28,7 +28,7 @@ export default defineConfig((options) => ({
   },
   onSuccess: async () => {
     const out = options.outDir ?? 'dist';
-    await buildWorkerStubs('xlsx', out);
+    await buildWorkerStubs('xlsx', out, { browserFonts: true });
     await rename(join(out, 'xlsxSessionWorker.node.js'), join(out, 'xlsxSessionWorker.node.mjs'));
     await mkdir(join(out, 'generated'), { recursive: true });
     await mkdir(join(out, 'generated/preflight'), { recursive: true });

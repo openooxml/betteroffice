@@ -8,6 +8,7 @@ import {
   createSessionClient, requestWasmCompile, type SessionClient,
 } from '../../../../shared/office-session/client';
 import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
+import { withFontPackSource } from '../../../../shared/office-session/fontPackSource';
 import { createSessionWorker } from './sessionWorker';
 import { SessionFailure, type MethodPolicy, type Promisified } from '../../../../shared/office-session/types';
 import { PngExportError } from '../../../../shared/office-session/pngExportError';
@@ -286,6 +287,7 @@ export async function createWorkbookSession(
   options: OpenWorkbookSessionOptions,
   transport: SessionTransport
 ): Promise<WorkbookSession> {
+  transport = withFontPackSource(transport);
   const endpoints = new Map<number, { receive: Parameters<CollaborationPipeChannel<AwarenessCursor, AwarenessPeer>['open']>[0];
     lost: (reason: string) => void }>();
   let nextProvider = 0;

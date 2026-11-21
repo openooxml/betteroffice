@@ -6,7 +6,7 @@ import { build as esbuild } from 'esbuild';
 import { build as vite } from 'vite';
 import { build as vite7 } from 'vite-7';
 import { nextWebpack } from './check-webpack-exports.mjs';
-import { validatePublishedWorker } from './worker-entry-check.mjs';
+import { validateNativeWorker, validatePublishedWorker } from './worker-entry-check.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const cache = join(root, 'node_modules/.cache');
@@ -85,21 +85,36 @@ async function checkPublishedWorkerStubs() {
       failures.push(`${format} ${file} is missing`);
       continue;
     }
-    const { problems, target } = await validatePublishedWorker(contents);
+    const sibling = file === 'dist/yrs/docxWorker.mjs' ? '../docxWorker.mjs' : null;
+    const { problems, target } = await validatePublishedWorker(contents, sibling);
     failures.push(...problems.map(problem => `${format} ${file} ${problem}`));
     if (target !== null) {
       const resolved = resolve(dirname(path), target);
       const inside = !relative(dist, resolved).startsWith('..');
       if (!inside || !await access(resolved).then(() => true, () => false)) {
-        failures.push(`${format} ${file} dynamically imports ${target}, which is not a file in ${format}/dist`);
+        failures.push(`${format} ${file} imports ${target}, which is not a file in ${format}/dist`);
       }
     }
   }
-  assert.deepEqual(failures, [], `Published worker entries must import nothing statically and one file of their dist dynamically:\n${failures.join('\n')}`);
+  assert.deepEqual(failures, [], `Published worker entries must have exactly one static font or docx sibling import and no literal dynamic imports:\n${failures.join('\n')}`);
+}
+
+async function checkNativeWorkerBundles() {
+  const failures = [];
+  for (const [format, file] of publishedWorkers) {
+    const path = join(root, 'bindings', `${format}-native`, file);
+    const contents = await readFile(path, 'utf8').catch(() => null);
+    if (contents === null) continue;
+    const { problems } = await validateNativeWorker(contents);
+    failures.push(...problems.map(problem => `${format}-native ${file} ${problem}`));
+    if (contents.includes('font-pack-request')) failures.push(`${format}-native ${file} installs the browser font pack channel`);
+  }
+  assert.deepEqual(failures, [], `Native worker entries must bundle all file imports:\n${failures.join('\n')}`);
 }
 
 try {
   await checkPublishedWorkerStubs();
+  await checkNativeWorkerBundles();
   await writeFile(join(directory, 'package.json'), JSON.stringify({ private: true, type: 'module' }));
   const workers = {};
   for (const [format, worker] of Object.entries(formats)) {
@@ -145,8 +160,12 @@ try {
     });
     const inputs = Object.keys(alone.metafile.inputs);
     assert.ok(inputs.every(input => !/sessionWorker\.|nodeSession(?:Worker|Scope)/.test(input)), `${worker} bundles a module that constructs its own worker`);
-    assert.deepEqual(bare.filter(entry => !/^@betteroffice\/fonts(?:\/progressive)? \(dynamic-import\)$/.test(entry)), [],
+    assert.deepEqual(bare.filter(entry => entry !== '@betteroffice/fonts/worker (import-statement)'), [],
       `${worker} imports specifiers an unbundled browser worker cannot resolve`);
+    for (const output of alone.outputFiles) {
+      const { problems } = await validatePublishedWorker(output.text);
+      assert.deepEqual(problems, [], `${worker} retains a literal dynamic import`);
+    }
   }
   await checkOutput(esbuildDirectory);
 
