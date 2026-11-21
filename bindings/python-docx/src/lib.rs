@@ -971,8 +971,14 @@ pub struct PySaveReport {
     data: Vec<u8>,
     #[pyo3(get)]
     kept_unchanged: Option<PyKeptUnchanged>,
+    /// Structure the save dropped, part by part. `None` means nothing was dropped only when
+    /// `whole_model_write` is false; when it is true, `None` means this was not computed.
     #[pyo3(get)]
     structure_dropped: Option<Vec<PyDroppedStructure>>,
+    /// The save rewrote every part from the model: structure the model does not carry may be
+    /// gone and is not itemised in `structure_dropped`.
+    #[pyo3(get)]
+    whole_model_write: bool,
 }
 
 impl PySaveReport {
@@ -986,6 +992,7 @@ impl PySaveReport {
                     .map(PyDroppedStructure::from_core)
                     .collect()
             }),
+            whole_model_write: report.whole_model_write,
         }
     }
 }
@@ -999,12 +1006,13 @@ impl PySaveReport {
 
     fn __repr__(&self) -> String {
         format!(
-            "SaveReport(bytes={}, kept_unchanged={}, structure_dropped={})",
+            "SaveReport(bytes={}, kept_unchanged={}, structure_dropped={}, whole_model_write={})",
             self.data.len(),
             self.kept_unchanged
                 .as_ref()
                 .map_or(0, |kept| kept.structure),
-            self.structure_dropped.as_ref().map_or(0, Vec::len)
+            self.structure_dropped.as_ref().map_or(0, Vec::len),
+            if self.whole_model_write { "True" } else { "False" }
         )
     }
 }

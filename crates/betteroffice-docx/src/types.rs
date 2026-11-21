@@ -69,7 +69,12 @@ impl Default for SaveOptions {
 pub struct SaveReport {
     pub bytes: Vec<u8>,
     pub kept_unchanged: Option<KeptUnchanged>,
+    /// Structure the save dropped, part by part. `None` means nothing was dropped only when
+    /// `whole_model_write` is false; when it is true, `None` means this was not computed.
     pub structure_dropped: Option<Vec<DroppedStructure>>,
+    /// The save rewrote every part from the model: structure the model does not carry may be
+    /// gone and is not itemised in `structure_dropped`.
+    pub whole_model_write: bool,
 }
 
 /// Paragraphs a save wrote as their source bytes, counted, with the first ones described.
