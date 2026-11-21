@@ -33,16 +33,17 @@ test('attached XLSX proposals belong to the engine and reflect editor decisions'
   } finally { agent.close(); owner.close(); }
 });
 
-test('XLSX proposal acceptance permits unrelated user edits', async () => {
+test('XLSX proposal acceptance refuses unrelated user edits', async () => {
   const owner = await openXlsx(await xlsxFixture());
   const book = attachXlsx(owner.handle);
   try {
     const cell = book.readCells({ sheet: 'sheet:0', range: 'B3' }).cells[0].cell;
     const proposal = book.proposeCells({ author: 'Agent', edits: [{ cell, input: '123' }] });
     book.handle.editCell(0, 100, 0, 'Unrelated');
-    expect(book.review(proposal.id).stale).toBe(false);
-    await book.accept(proposal.id);
-    expect(book.handle.cell(0, 2, 1).input).toBe('123');
+    expect(book.review(proposal.id).stale).toBe(true);
+    await expect(book.accept(proposal.id)).rejects.toMatchObject({ code: 'STALE_TARGET' });
+    expect(book.readCells({ sheet: 'sheet:0', range: 'B3' }).cells[0].value).toEqual({ kind: 'number', value: 100 });
+    expect(book.review(proposal.id).status).toBe('pending');
   } finally { book.close(); owner.close(); }
 });
 
