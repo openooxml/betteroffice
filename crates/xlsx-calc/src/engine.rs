@@ -717,7 +717,7 @@ struct Readers<'g> {
 
 enum SheetReaders<'g> {
     Scanned(usize),
-    Indexed(ReaderIndex<'g>),
+    Indexed(Box<ReaderIndex<'g>>),
 }
 
 impl<'g> Readers<'g> {
@@ -733,7 +733,7 @@ impl<'g> Readers<'g> {
         if let SheetReaders::Scanned(lookups) = readers {
             *lookups += 1;
             if *lookups > SCANNED_LOOKUPS {
-                *readers = SheetReaders::Indexed(self.graph.reader_index(k.0));
+                *readers = SheetReaders::Indexed(Box::new(self.graph.reader_index(k.0)));
             }
         }
         match readers {
