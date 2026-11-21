@@ -112,8 +112,7 @@ function parses(href: string, base?: string): URL | undefined {
   }
 }
 
-function absoluteHref(url: URL): string {
-  const { href } = url;
+export function absoluteHref(href: string): string {
   if (parses(href)) return href;
   return parses(href, globalThis.location?.href)?.href ?? href;
 }
@@ -128,7 +127,7 @@ export function sliceSourceOf(face: ProgressiveFontFace): Promise<SliceSource> |
   if (source === undefined) {
     source = (async () => {
       const urls: Record<string, string> = {};
-      for (const { file } of [{ file: ref.index }, index.skeleton, index.core, ...index.chunks]) urls[file] = absoluteHref(await url(file));
+      for (const { file } of [{ file: ref.index }, index.skeleton, index.core, ...index.chunks]) urls[file] = absoluteHref((await url(file)).href);
       return { ref, urls, ...(timeoutMs === undefined ? {} : { timeoutMs }) };
     })();
     sources.set(face, source);

@@ -46,6 +46,14 @@ test('native workers allow bare static imports and bare dynamic font imports', a
     .toEqual({ problems: [], target: null });
 });
 
+test('the native DOCX sibling contains only the canonical worker import', async () => {
+  const sibling = '../docxWorker.mjs';
+  const source = `import '${sibling}';`;
+  expect(await validateNativeWorker(source, sibling)).toEqual({ problems: [], target: sibling });
+  expect((await validateNativeWorker(source)).problems.length).toBeGreaterThan(0);
+  expect((await validateNativeWorker(`${source}${fonts}`, sibling)).problems.length).toBeGreaterThan(0);
+});
+
 test('native workers reject static and dynamic file imports and the browser font entry', async () => {
   for (const source of [
     "import './chunk.js';", "import '../chunk.js';", "import('./chunk.js');", "import /*c*/ ('../chunk.js');",

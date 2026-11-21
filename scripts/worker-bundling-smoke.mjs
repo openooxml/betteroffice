@@ -105,11 +105,12 @@ async function checkNativeWorkerBundles() {
     const path = join(root, 'bindings', `${format}-native`, file);
     const contents = await readFile(path, 'utf8').catch(() => null);
     if (contents === null) continue;
-    const { problems } = await validateNativeWorker(contents);
+    const sibling = file === 'dist/yrs/docxWorker.mjs' ? '../docxWorker.mjs' : null;
+    const { problems } = await validateNativeWorker(contents, sibling);
     failures.push(...problems.map(problem => `${format}-native ${file} ${problem}`));
     if (contents.includes('font-pack-request')) failures.push(`${format}-native ${file} installs the browser font pack channel`);
   }
-  assert.deepEqual(failures, [], `Native worker entries must bundle all file imports:\n${failures.join('\n')}`);
+  assert.deepEqual(failures, [], `Native worker entries must bundle file imports or forward to the canonical worker:\n${failures.join('\n')}`);
 }
 
 try {

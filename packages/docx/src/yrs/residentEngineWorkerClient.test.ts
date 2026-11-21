@@ -68,6 +68,15 @@ class FakeWorker implements ResidentEngineWorkerPort {
   }
 }
 
+test('a custom port can deliver plain message objects without Event methods', () => {
+  const port = new FakeWorker();
+  const client = new ResidentEngineWorkerClient(port);
+  const message = { protocol: 1, kind: 'font-pack-request', id: 'pack', pack: 'intl' };
+  expect(() => port.onmessage?.({ data: message } as unknown as MessageEvent<DocxEngineWorkerResponse>)).not.toThrow();
+  expect(port.posted).toEqual([]);
+  client.destroy();
+});
+
 test('font decoder RPC transfers exact copies and returns font and payload before open', async () => {
   const port = new FakeWorker();
   const client = new ResidentEngineWorkerClient(port);

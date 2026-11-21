@@ -50,10 +50,14 @@ for (const format of formats) {
     const failures: string[] = [];
     for (const stub of stubs) {
       const contents = await readFile(stub.outfile, 'utf8');
-      const { problems } = await validateNativeWorker(contents);
+      const { problems } = await validateNativeWorker(contents, stub.sibling ?? null);
       failures.push(...problems.map((problem: string) => `${relative(out, stub.outfile)} ${problem}`));
       expect(contents).not.toMatch(/new URL\([^)]*\.wasm|WebAssembly\.instantiate|generated\//);
       expect(contents).not.toContain('font-pack-request');
+      if (stub.sibling) {
+        expect(contents).toBe('import "../docxWorker.mjs";\n');
+        continue;
+      }
       const parsed = await build({
         stdin: { contents },
         bundle: true,

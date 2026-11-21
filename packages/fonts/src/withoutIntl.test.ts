@@ -103,15 +103,27 @@ test('custom bases bypass the optional add-on and return owned buffers', async (
   expect(importIntl).not.toHaveBeenCalled();
 });
 
-test('recovers after installing intl and reports missing asset entries', async () => {
-  const { loadBundledFontBytes, resolveScriptFallbackFace } = await import('./index');
+test('recovers after installing intl, resolves asset hrefs and reports missing asset entries', async () => {
+  const { loadBundledFontBytes, optionalFontPackUrls, resolveScriptFallbackFace } = await import('./index');
   const face = resolveScriptFallbackFace('tifinagh', false, false)!;
+  const absolute = 'https://intl-installed.example/NotoSansTifinagh-Regular.ttf.zst';
+  const relative = '/_next/static/media/another.zst';
+  expect(await optionalFontPackUrls('intl')).toBeUndefined();
   await expect(loadBundledFontBytes(face)).rejects.toThrow('install @betteroffice/fonts-intl');
   importIntl.mockImplementation(() => ({
     INTL_FONT_ASSET_URLS: {
-      [face.file]: () => new URL('https://intl-installed.example/NotoSansTifinagh-Regular.ttf.zst'),
+      [face.file]: () => new URL(absolute),
+      'another.zst': () => ({ href: relative }) as URL,
     },
   }));
+  const location = Object.getOwnPropertyDescriptor(globalThis, 'location');
+  Object.defineProperty(globalThis, 'location', { value: { href: 'https://app.example/room/1' }, configurable: true });
+  try {
+    expect(await optionalFontPackUrls('intl')).toEqual({ [face.file]: absolute, 'another.zst': `https://app.example${relative}` });
+  } finally {
+    if (location) Object.defineProperty(globalThis, 'location', location);
+    else Reflect.deleteProperty(globalThis, 'location');
+  }
   globalThis.fetch = fontAssetResponse as typeof fetch;
   expect((await loadBundledFontBytes(face)).byteLength).toBe(face.byteLength);
   const other = resolveScriptFallbackFace('thai', false, false)!;

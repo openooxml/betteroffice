@@ -1,5 +1,4 @@
 import { SessionFailure } from './types';
-import { OFFICE_SESSION_SILENCE_MS } from './client';
 
 export type OptionalFontPack = 'intl' | 'cjk';
 export type FontPackUrls = Record<string, string>;
@@ -16,17 +15,18 @@ export function isFontPackRequest(message: unknown): message is FontPackRequest 
 
 export function createFontPackResponder(post: (message: FontPackReply) => void, source: OptionalFontPackSource) {
   const packs = new Map<OptionalFontPack, Promise<FontPackUrls | undefined>>();
-  let disposed = false;
   return {
     receive(message: unknown): boolean {
       if (!isFontPackRequest(message)) return false;
-      if (disposed) return true;
-      let pending = packs.get(message.pack);
+      const { pack } = message;
+      let pending = packs.get(pack);
       if (!pending) {
-        pending = Promise.resolve().then(() => source(message.pack));
-        packs.set(message.pack, pending);
+        pending = Promise.resolve().then(() => source(pack));
+        packs.set(pack, pending);
+        const forget = () => { packs.delete(pack); };
+        pending.then((urls) => { if (urls === undefined) forget(); }, forget);
       }
-      const reply = (value: FontPackReply) => { if (!disposed) { try { post(value); } catch {} } };
+      const reply = (value: FontPackReply) => { try { post(value); } catch {} };
       pending.then(
         (urls) => reply({ protocol: 1, kind: 'font-pack-reply', id: message.id, urls }),
         (error: unknown) => reply({ protocol: 1, kind: 'font-pack-reply', id: message.id,
@@ -34,7 +34,6 @@ export function createFontPackResponder(post: (message: FontPackReply) => void, 
       );
       return true;
     },
-    dispose() { disposed = true; packs.clear(); },
   };
 }
 
@@ -56,7 +55,7 @@ export function installWorkerFontPacks(
   };
 }
 
-export function createWorkerFontPacks(post: (message: FontPackRequest) => void, waitMs = OFFICE_SESSION_SILENCE_MS) {
+export function createWorkerFontPacks(post: (message: FontPackRequest) => void, waitMs = 15_000) {
   const channel = ++nextChannel;
   let nextId = 0;
   let disposed = false;
@@ -80,6 +79,8 @@ export function createWorkerFontPacks(post: (message: FontPackRequest) => void, 
         catch (error) { finish(undefined, new SessionFailure('message', String(error))); }
       });
       packs.set(pack, promise);
+      const forget = () => { packs.delete(pack); };
+      promise.then((urls) => { if (urls === undefined) forget(); }, forget);
     }
     return promise;
   };

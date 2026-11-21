@@ -45,7 +45,30 @@ test('missing injected packs keep optional faces unavailable', async () => {
   const face = worker.resolveScriptFallbackFace('cjk-sc', false, false)!;
   expect(await worker.bundledFaceInstalled(face)).toBe(false);
   expect(await worker.bundledFaceInstalled(face)).toBe(false);
-  expect(source).toHaveBeenCalledTimes(1);
+  expect(source).toHaveBeenCalledTimes(2);
+});
+
+test('worker pack URLs retry failures and misses and resolve hrefs from the injected source', async () => {
+  const hrefs = { 'path.zst': '/_next/static/media/path.zst', 'cdn.zst': 'https://cdn.example/cdn.zst' };
+  const source = mock(async (): Promise<Record<string, string> | undefined> => hrefs)
+    .mockRejectedValueOnce(new Error('Pack source unavailable')).mockResolvedValueOnce(undefined);
+  worker.setOptionalFontPacks(source);
+  const location = Object.getOwnPropertyDescriptor(globalThis, 'location');
+  Object.defineProperty(globalThis, 'location', { value: { href: 'https://worker.example/room/1' }, configurable: true });
+  try {
+    const first = worker.optionalFontPackUrls('intl');
+    const concurrent = worker.optionalFontPackUrls('intl');
+    await Promise.all([first, concurrent].map((request) => expect(request).rejects.toThrow('Pack source unavailable')));
+    expect(source).toHaveBeenCalledTimes(1);
+    expect(await worker.optionalFontPackUrls('intl')).toBeUndefined();
+    const absolute = { ...hrefs, 'path.zst': 'https://worker.example/_next/static/media/path.zst' };
+    expect(await worker.optionalFontPackUrls('intl')).toEqual(absolute);
+    expect(await worker.optionalFontPackUrls('intl')).toEqual(absolute);
+    expect(source).toHaveBeenCalledTimes(3);
+  } finally {
+    if (location) Object.defineProperty(globalThis, 'location', location);
+    else Reflect.deleteProperty(globalThis, 'location');
+  }
 });
 
 test('the published worker entry has types and no literal dynamic imports', async () => {
@@ -54,7 +77,9 @@ test('the published worker entry has types and no literal dynamic imports', asyn
   expect(source).not.toMatch(/\bimport\s*\(\s*['"`]/);
   expect(source).toMatch(/from\s+['"]@betteroffice\/fonts-latin['"]/);
   expect(source).not.toMatch(/(?:from\s*|import\s*\()\s*['"]@betteroffice\/fonts-(?:intl|cjk)['"]/);
-  expect(await readFile(new URL('../dist/worker.d.ts', import.meta.url), 'utf8')).toContain('setOptionalFontPacks');
+  const types = await readFile(new URL('../dist/worker.d.ts', import.meta.url), 'utf8');
+  expect(types).toContain('setOptionalFontPacks');
+  expect(types).toContain('optionalFontPackUrls');
 });
 
 test('the published entries recognize each other\'s missing-pack errors', async () => {

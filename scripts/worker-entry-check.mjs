@@ -38,7 +38,8 @@ export async function validatePublishedWorker(source, sibling = null) {
   return { problems, target };
 }
 
-export async function validateNativeWorker(source) {
+export async function validateNativeWorker(source, sibling = null) {
+  if (sibling) return validatePublishedWorker(source, sibling);
   const { imports, problems } = await workerImports(source);
   for (const { path, kind } of imports) {
     if (/^(?:\.{1,2}(?:\/|$)|\/|[A-Za-z]:[\\/])/.test(path)) problems.push(`imports relative or absolute path ${path} (${kind})`);

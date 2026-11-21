@@ -1,48 +1,65 @@
-import { expect, mock, test } from 'bun:test';
-import { createFontPackResponder, createWorkerFontPacks, installWorkerFontPacks, type OptionalFontPack } from './optionalFontPacks';
-import { withFontPackSource } from './fontPackSource';
-import type { SessionTransport } from './transport';
+import { expect, mock, spyOn, test } from 'bun:test';
+import { createSessionWorker as createDocxWorker } from '../../packages/docx/src/yrs/sessionWorker.browser';
+import { createSessionWorker as createPptxWorker } from '../../packages/pptx/src/session/sessionWorker.browser';
+import { createSessionWorker as createXlsxWorker } from '../../packages/xlsx/src/session/sessionWorker.browser';
+import {
+  createFontPackResponder, createWorkerFontPacks, installWorkerFontPacks,
+  type FontPackReply, type FontPackRequest, type FontPackUrls, type OptionalFontPack,
+} from './optionalFontPacks';
+import { attachFontPackSource } from './fontPackSource';
 
-function channel(): [SessionTransport, SessionTransport] {
-  const listeners = [new Set<(message: unknown) => void>(), new Set<(message: unknown) => void>()];
-  const endpoint = (side: number): SessionTransport => ({
-    post(message) { for (const listener of [...listeners[1 - side]!]) listener(message); },
-    listen(listener) { listeners[side]!.add(listener); return () => { listeners[side]!.delete(listener); }; },
-    onError() { return () => {}; },
-    close() { listeners[side]!.clear(); },
+test('all three browser worker constructors attach a message listener before returning', () => {
+  const original = globalThis.Worker;
+  const listen = mock((_type: string, _listener: EventListener) => {});
+  globalThis.Worker = class { addEventListener = listen; } as unknown as typeof Worker;
+  try {
+    for (const create of [createDocxWorker, createPptxWorker, createXlsxWorker]) {
+      listen.mockClear();
+      create();
+      expect(listen).toHaveBeenCalledTimes(1);
+      expect(listen).toHaveBeenCalledWith('message', expect.any(Function));
+    }
+  } finally {
+    globalThis.Worker = original;
+  }
+});
+
+test('the worker keeps its lazy pack responder through session listener handoff', async () => {
+  const page = Object.assign(new EventTarget(), {
+    postMessage(data: unknown): void { scope.dispatchEvent(new MessageEvent('message', { data })); },
   });
-  return [endpoint(0), endpoint(1)];
-}
-
-test('sessions import optional packs only on request and share concurrent and repeated imports', async () => {
-  const [page, worker] = channel();
+  const scope = Object.assign(new EventTarget(), {
+    postMessage(data: unknown): void { page.dispatchEvent(new MessageEvent('message', { data })); },
+  });
   const imports = mock(async (pack: OptionalFontPack) => ({ [`${pack}.zst`]: `https://fonts.example/${pack}.zst` }));
-  const client = withFontPackSource(page, imports);
+  attachFontPackSource(page, imports);
   let source!: ReturnType<typeof createWorkerFontPacks>['source'];
-  const scope = Object.assign(new EventTarget(), { postMessage: (message: unknown) => worker.post(message) });
-  const unlisten = worker.listen((message) => scope.dispatchEvent(new MessageEvent('message', { data: message })));
   const dispose = installWorkerFontPacks(scope, (installed) => { source = installed; });
-  const clientMessages: unknown[] = [];
-  const hostMessages: unknown[] = [];
-  client.listen((message) => clientMessages.push(message));
-  scope.addEventListener('message', (event) => hostMessages.push((event as MessageEvent).data));
-  await Promise.resolve();
-  expect(imports).not.toHaveBeenCalled();
-  expect(await Promise.all([source('intl'), source('intl')])).toEqual([
-    { 'intl.zst': 'https://fonts.example/intl.zst' }, { 'intl.zst': 'https://fonts.example/intl.zst' },
-  ]);
-  expect(imports).toHaveBeenCalledTimes(1);
-  await source('intl');
-  expect(imports).toHaveBeenCalledTimes(1);
-  await source('cjk');
-  await source('cjk');
-  expect(imports).toHaveBeenCalledTimes(2);
-  expect(clientMessages).toEqual([]);
-  expect(hostMessages).toEqual([]);
-  client.close();
-  dispose();
-  unlisten();
-  worker.close();
+  const prepared = mock((_event: Event) => {});
+  const session = mock((_event: Event) => {});
+  const host = mock((_event: Event) => {});
+  page.addEventListener('message', prepared);
+  scope.addEventListener('message', host);
+  try {
+    await Promise.resolve();
+    expect(imports).not.toHaveBeenCalled();
+    const first = source('intl');
+    expect(source('intl')).toBe(first);
+    page.removeEventListener('message', prepared);
+    page.addEventListener('message', session);
+    expect(await first).toEqual({ 'intl.zst': 'https://fonts.example/intl.zst' });
+    await source('intl');
+    await source('cjk');
+    await source('cjk');
+    expect(imports.mock.calls).toEqual([['intl'], ['cjk']]);
+    expect(prepared).not.toHaveBeenCalled();
+    expect(session).not.toHaveBeenCalled();
+    expect(host).not.toHaveBeenCalled();
+    scope.postMessage({ protocol: 1, kind: 'progress' });
+    expect(session).toHaveBeenCalledTimes(1);
+  } finally {
+    dispose();
+  }
 });
 
 test('the installer consumes replies before later boot and session listeners', async () => {
@@ -69,22 +86,71 @@ test('the installer consumes replies before later boot and session listeners', a
   dispose();
 });
 
-test('the page caches missing packs as well as installed packs', async () => {
-  const imports = mock(async () => undefined);
-  const replies: unknown[] = [];
+test('the page shares concurrent lookups and retries failed or missing packs', async () => {
+  const urls = { 'cjk.zst': 'https://fonts.example/cjk.zst' };
+  const imports = mock(async (): Promise<FontPackUrls | undefined> => urls)
+    .mockRejectedValueOnce(new Error('Import failed')).mockResolvedValueOnce(undefined);
+  const replies: FontPackReply[] = [];
   const responder = createFontPackResponder((reply) => replies.push(reply), imports);
-  for (const id of ['first', 'second']) responder.receive({ protocol: 1, kind: 'font-pack-request', id, pack: 'cjk' });
-  await new Promise<void>((resolve) => setTimeout(resolve, 0));
-  expect(imports).toHaveBeenCalledTimes(1);
-  expect(replies).toEqual(['first', 'second'].map((id) => ({ protocol: 1, kind: 'font-pack-reply', id, urls: undefined })));
-  responder.dispose();
+  const send = async (...ids: string[]) => {
+    for (const id of ids) responder.receive({ protocol: 1, kind: 'font-pack-request', id, pack: 'cjk' });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  };
+  await send('first', 'concurrent');
+  await send('missing');
+  await send('installed');
+  await send('cached');
+  expect(imports).toHaveBeenCalledTimes(3);
+  expect(replies).toEqual([
+    { protocol: 1, kind: 'font-pack-reply', id: 'first', error: 'Import failed' },
+    { protocol: 1, kind: 'font-pack-reply', id: 'concurrent', error: 'Import failed' },
+    { protocol: 1, kind: 'font-pack-reply', id: 'missing', urls: undefined },
+    { protocol: 1, kind: 'font-pack-reply', id: 'installed', urls },
+    { protocol: 1, kind: 'font-pack-reply', id: 'cached', urls },
+  ]);
 });
 
-test('a page that never answers cannot keep font loading pending', async () => {
-  const posted: unknown[] = [];
-  const packs = createWorkerFontPacks((message) => posted.push(message), 1);
-  expect(await packs.source('intl')).toBeUndefined();
-  expect(posted).toHaveLength(1);
+test('the worker retries after a 15-second timeout and ignores late replies', async () => {
+  const requests: FontPackRequest[] = [];
+  const packs = createWorkerFontPacks((message) => requests.push(message));
+  const timer = spyOn(globalThis, 'setTimeout');
+  try {
+    const first = packs.source('intl');
+    const [expire, delay] = timer.mock.calls.at(-1)!;
+    if (typeof expire !== 'function') throw new Error('Expected a timer callback');
+    expire();
+    expect(await first).toBeUndefined();
+    expect(delay).toBe(15_000);
+    const retry = packs.source('intl');
+    expect(requests).toHaveLength(2);
+    packs.receive({ protocol: 1, kind: 'font-pack-reply', id: requests[0]!.id });
+    const urls = { 'intl.zst': 'https://fonts.example/intl.zst' };
+    packs.receive({ protocol: 1, kind: 'font-pack-reply', id: requests[1]!.id, urls });
+    expect(await retry).toEqual(urls);
+  } finally {
+    packs.dispose();
+    timer.mockRestore();
+  }
+});
+
+test('the worker requests a pack again after an error or missing reply', async () => {
+  const requests: FontPackRequest[] = [];
+  const packs = createWorkerFontPacks((message) => requests.push(message));
+  const reply = (result: Pick<FontPackReply, 'urls' | 'error'>) => packs.receive({
+    protocol: 1, kind: 'font-pack-reply', id: requests.at(-1)!.id, ...result,
+  });
+  const failed = packs.source('cjk');
+  reply({ error: 'Import failed' });
+  await expect(failed).rejects.toThrow('Import failed');
+  const missing = packs.source('cjk');
+  reply({});
+  expect(await missing).toBeUndefined();
+  const installed = packs.source('cjk');
+  const urls = { 'cjk.zst': 'https://fonts.example/cjk.zst' };
+  reply({ urls });
+  expect(await installed).toEqual(urls);
+  expect(packs.source('cjk')).toBe(installed);
+  expect(requests).toHaveLength(3);
   packs.dispose();
 });
 

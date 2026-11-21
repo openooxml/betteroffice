@@ -52,7 +52,7 @@ export async function buildWorkerStubs(format: keyof typeof WORKER_STUBS, outDir
 }
 
 export async function buildWorkerStub({ entry, outfile, sibling }: WorkerStub, options: WorkerBuildOptions = {}): Promise<void> {
-  if (sibling && options.browserFonts) {
+  if (sibling) {
     await mkdir(dirname(outfile), { recursive: true });
     await writeFile(outfile, `import ${JSON.stringify(sibling)};\n`);
     return;
