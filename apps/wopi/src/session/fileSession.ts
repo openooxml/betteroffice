@@ -1197,7 +1197,8 @@ export class FileSession {
         } catch (err) {
           unauthorized = err instanceof WopiHostError && err.kind === "unauthorized";
         }
-        const written = result.itemVersion ?? info?.Version ?? null;
+        const ours = result.itemVersion === null && info?.Size === bytes.byteLength;
+        const written = result.itemVersion ?? (ours ? info?.Version : undefined) ?? null;
         if (info?.Version && info.Version !== written) {
           return this.#saveCurrentConflict(current, tried);
         }
