@@ -366,7 +366,14 @@ pub fn render_png_with_fonts_and_images(
                     if let Some(pieces) = xlsx_render::run_pieces(cmd) {
                         let mut measured = PieceWidths::new(piece_measure(fonts));
                         let lines = match wrap {
-                            Some(wrap) => wrapped_lines(*y, wrap, text, &pieces, &mut measured),
+                            Some(wrap) => wrapped_lines(
+                                *y,
+                                *font_size,
+                                wrap,
+                                text,
+                                &pieces,
+                                &mut measured,
+                            ),
                             None => vec![(*y, pieces)],
                         };
                         for (y, pieces) in lines {

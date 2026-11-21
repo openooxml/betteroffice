@@ -27,6 +27,7 @@ import { wrapLines, wrappedLineY } from './wrap';
 
 const STACKED_LINE_HEIGHT_RATIO = 1.2;
 const STACKED_ASCENT_RATIO = 0.8;
+const WRAPPED_ASCENT_PER_PT = (96 / 72) * 0.7;
 
 const ALIGN_TO_TEXT_ALIGN: Record<NonNullable<TextCmd['align']>, CanvasTextAlign> = {
   left: 'left',
@@ -383,8 +384,26 @@ function paintWrappedPieces(
   paint: PiecePaint,
 ): void {
   const lines = wrapRunLines(cmd.text, pieces, wrap.width, (piece, part) => measurePiece(ctx, paint, piece, part));
-  const count = Math.min(lines.length, wrap.maxLines ?? lines.length);
-  lines.slice(0, count).forEach((line, index) => paintPieces(ctx, cmd, line, wrappedLineY(cmd.y, index, count, wrap), paint));
+  const fontSize = cmd.fontSize;
+  if (!Number.isFinite(fontSize) || fontSize <= 0 || pieces.every((piece) => piece.cmd.fontSize === fontSize)) {
+    const count = Math.min(lines.length, wrap.maxLines ?? lines.length);
+    lines.slice(0, count).forEach((line, index) => {
+      paintPieces(ctx, cmd, line, wrappedLineY(cmd.y, index, count, wrap), paint);
+    });
+    return;
+  }
+
+  const metrics = lines.map((line) => {
+    const size = line.reduce((largest, piece) => Math.max(largest, piece.cmd.fontSize), line[0]?.cmd.fontSize ?? fontSize);
+    return { height: wrap.lineHeight * (size / fontSize), ascentDelta: (size - fontSize) * WRAPPED_ASCENT_PER_PT };
+  });
+  const extraHeight = metrics.reduce((sum, { height }) => sum + height, 0) - wrap.lineHeight;
+  let baseline = cmd.y - (wrap.valign === 'top' ? 0 : wrap.valign === 'center' ? extraHeight / 2 : extraHeight);
+  lines.forEach((line, index) => {
+    const { height, ascentDelta } = metrics[index]!;
+    paintPieces(ctx, cmd, line, baseline + ascentDelta, paint);
+    baseline += height;
+  });
 }
 
 /** `paintRun` for a piece painted left-aligned at `y`, `width` wide, in a font without highlight or dashed underline. */

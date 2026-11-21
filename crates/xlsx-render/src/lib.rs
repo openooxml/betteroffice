@@ -1269,19 +1269,29 @@ where
         };
         let text_width = (cell_box.w - pad_width - left_indent - right_indent).max(0.0);
         let print_dpi = print.map(|(m, _)| f64::from(m.dpi));
-        let run_size = (!runs.is_empty())
-            .then(|| text_runs::largest_size(size, &text, &runs))
-            .filter(|&run_size| {
-                rich_runs_have_room(
-                    &text,
-                    text_width,
-                    cell_box.whole_h,
-                    size,
-                    run_size,
-                    wraps,
-                    print.map(|(m, _)| m),
-                )
-            });
+        let variable_wrap = wraps
+            && size.is_finite()
+            && size > 0.0
+            && runs
+                .iter()
+                .any(|run| run.font_size.is_some_and(|run_size| run_size != size));
+        let run_size = if variable_wrap {
+            Some(size)
+        } else {
+            (!runs.is_empty())
+                .then(|| text_runs::largest_size(size, &text, &runs))
+                .filter(|&run_size| {
+                    rich_runs_have_room(
+                        &text,
+                        text_width,
+                        cell_box.whole_h,
+                        size,
+                        run_size,
+                        wraps,
+                        print.map(|(m, _)| m),
+                    )
+                })
+        };
         let (runs, line_size) = match run_size {
             Some(run_size) => (runs, run_size),
             None => (Vec::new(), size),
@@ -1366,7 +1376,11 @@ where
                 width: text_width,
                 line_height,
                 valign: resolve_rotation_valign(valign),
-                max_lines: wrap::max_wrapped_lines(cell_box.whole_h + 1.0, line_height, line_size),
+                max_lines: if variable_wrap {
+                    None
+                } else {
+                    wrap::max_wrapped_lines(cell_box.whole_h + 1.0, line_height, line_size)
+                },
             }
         });
         let number_format = number_format.filter(|_| wrap.is_none());

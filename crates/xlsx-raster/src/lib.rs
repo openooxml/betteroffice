@@ -16,6 +16,8 @@ use tiny_skia::{
 
 use xlsx_render::{Align, DisplayList, DrawCmd, GeometryPathCommand, Rect as DlRect};
 
+const WRAPPED_ASCENT_PER_PT: f32 = xlsx_render::geometry::PX_PER_PT as f32 * 0.7;
+
 #[cfg(test)]
 thread_local! {
     static RUN_PATHS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -263,7 +265,14 @@ pub fn render_png_with_images(dl: &DisplayList, images: &ImageMap<'_>) -> Result
                     if let Some(pieces) = xlsx_render::run_pieces(cmd) {
                         let mut measured = PieceWidths::new(measure_piece);
                         let lines = match wrap {
-                            Some(wrap) => wrapped_lines(*y, wrap, text, &pieces, &mut measured),
+                            Some(wrap) => wrapped_lines(
+                                *y,
+                                *font_size,
+                                wrap,
+                                text,
+                                &pieces,
+                                &mut measured,
+                            ),
                             None => vec![(*y, pieces)],
                         };
                         for (y, pieces) in lines {
@@ -775,6 +784,7 @@ impl<M: FnMut(&xlsx_render::TextPiece, &str) -> f32> PieceWidths<M> {
 /// The baseline and pieces of each line a wrapped command keeps.
 fn wrapped_lines(
     y: f32,
+    font_size: f32,
     wrap: &xlsx_render::TextWrap,
     text: &str,
     pieces: &[xlsx_render::TextPiece],
@@ -783,16 +793,52 @@ fn wrapped_lines(
     let lines = xlsx_render::wrap_run_lines(text, pieces, wrap.width, |piece, part| {
         measured.width(piece, part)
     });
-    let count = xlsx_render::wrap::wrapped_lines_kept(lines.len(), wrap);
+    if !font_size.is_finite()
+        || font_size <= 0.0
+        || pieces.iter().all(|piece| piece.font_size == font_size)
+    {
+        let count = xlsx_render::wrap::wrapped_lines_kept(lines.len(), wrap);
+        return lines
+            .into_iter()
+            .take(count)
+            .enumerate()
+            .map(|(index, line)| {
+                (
+                    xlsx_render::wrap::wrapped_line_y(y, index, count, wrap),
+                    line,
+                )
+            })
+            .collect();
+    }
+
+    let metrics: Vec<_> = lines
+        .iter()
+        .map(|line| {
+            let size = line
+                .iter()
+                .map(|piece| piece.font_size)
+                .reduce(f32::max)
+                .unwrap_or(font_size);
+            let height = wrap.line_height * (size / font_size);
+            let ascent_delta = (size - font_size) * WRAPPED_ASCENT_PER_PT;
+            (height, ascent_delta)
+        })
+        .collect();
+    let total_height: f32 = metrics.iter().map(|(height, _)| height).sum();
+    let extra_height = total_height - wrap.line_height;
+    let offset = match wrap.valign {
+        xlsx_render::TextValign::Top => 0.0,
+        xlsx_render::TextValign::Center => extra_height / 2.0,
+        xlsx_render::TextValign::Bottom => extra_height,
+    };
+    let mut baseline = y - offset;
     lines
         .into_iter()
-        .take(count)
-        .enumerate()
-        .map(|(index, line)| {
-            (
-                xlsx_render::wrap::wrapped_line_y(y, index, count, wrap),
-                line,
-            )
+        .zip(metrics)
+        .map(|(line, (height, ascent_delta))| {
+            let line_y = baseline + ascent_delta;
+            baseline += height;
+            (line_y, line)
         })
         .collect()
 }

@@ -686,6 +686,15 @@ describe('Canvas2D text runs', () => {
   const base = { op: 'text', x: 10, y: 20, text: 'ABCD', fontSize: 9, color: '#000000', clip, align: 'left' } as const;
   const px = 9 * (96 / 72);
   const redBold = { start: 0, end: 2, bold: true, color: '#ff0000' };
+  const mixedWrap = {
+    text: 'abcd abcd abcd abcd',
+    y: 2 + 11 * (96 / 72) * 0.7,
+    fontSize: 11,
+    fontFamily: 'Calibri',
+    clip: { x: 0, y: 0, w: 69, h: 80 },
+    wrap: { width: 65, lineHeight: 56 / 3, valign: 'top' },
+    runs: [{ start: 0, end: 5, fontSize: 20 }, { start: 5, end: 19, fontSize: 11 }],
+  } satisfies Partial<TextCmd>;
   const measure = (value: string, font: string) =>
     value.length * Number(/([\d.]+)px/.exec(font)?.[1] ?? 0) * (/(^| )bold /.test(font) ? 0.75 : 0.5);
 
@@ -725,7 +734,8 @@ describe('Canvas2D text runs', () => {
       },
     });
     paintDisplayList(context as unknown as CanvasRenderingContext2D, {
-      width: 200, height: 30, commands: cmds.map((cmd) => ({ ...base, ...cmd }) as TextCmd),
+      width: 200, height: Math.max(30, ...cmds.map((cmd) => cmd.clip ? cmd.clip.y + cmd.clip.h : 0)),
+      commands: cmds.map((cmd) => ({ ...base, ...cmd }) as TextCmd),
     }, 1);
     const fonts = calls.filter((call) => call[0] === 'set' && call[1] === 'font').map((call) => call[2]);
     return { calls, fills, measures, fonts };
@@ -800,16 +810,47 @@ describe('Canvas2D text runs', () => {
   it("wraps runs where their own fonts break the line and paints each line's pieces in those fonts", () => {
     const wrap = { width: 35, lineHeight: 16, valign: 'top' } as const;
     const runs = [redBold, { start: 3, end: 9, fontSize: 15 }];
+    const thirdY = 36 + 16 * (15 / 9) + 5.6;
     const { fills } = record({ text: 'AB CDE FG', wrap, runs });
     expect(fills).toEqual([
       { text: 'AB', x: 10, y: 20, font: 'bold 12px sans-serif', fillStyle: '#ff0000', textAlign: 'left' },
-      { text: 'CDE', x: 10, y: 36, font: '20px sans-serif', fillStyle: '#000000', textAlign: 'left' },
-      { text: 'FG', x: 10, y: 52, font: '20px sans-serif', fillStyle: '#000000', textAlign: 'left' },
+      { text: 'CDE', x: 10, y: 41.6, font: '20px sans-serif', fillStyle: '#000000', textAlign: 'left' },
+      { text: 'FG', x: 10, y: thirdY, font: '20px sans-serif', fillStyle: '#000000', textAlign: 'left' },
     ]);
     const centred = record({ text: 'AB CDE FG', wrap, runs, align: 'center', x: 100 }).fills;
     expect(centred.map((fill) => fill.x)).toEqual([100 - 18 / 2, 100 - 30 / 2, 100 - 20 / 2]);
     const kept = record({ text: 'AB CDE FG', wrap: { ...wrap, maxLines: 2 }, runs }).fills;
-    expect(kept.map((fill) => [fill.text, fill.y])).toEqual([['AB', 20], ['CDE', 36]]);
+    expect(kept).toEqual(fills);
+  });
+
+  it('paints all four words and uses the measured line sizes for vertical alignment', () => {
+    const { wrap, y } = mixedWrap;
+    const largeHeight = wrap.lineHeight * (20 / 11);
+    const ascentDelta = (20 - 11) * (96 / 72) * 0.7;
+    const extraHeight = largeHeight + 2 * wrap.lineHeight;
+    const top = [y + ascentDelta, y + largeHeight, y + largeHeight + wrap.lineHeight, y + extraHeight];
+    for (const [valign, shift] of [['top', 0], ['center', -extraHeight / 2], ['bottom', -extraHeight]] as const) {
+      const { fills } = record({ ...mixedWrap, wrap: { ...wrap, valign } });
+      expect(fills.map(({ text }) => text)).toEqual(['abcd', 'abcd', 'abcd', 'abcd']);
+      fills.forEach((fill, index) => expect(fill.y).toBeCloseTo(top[index]! + shift));
+    }
+  });
+
+  it('paints every mixed-size line through the short cell clip', () => {
+    const short = { ...mixedWrap.clip, h: 20 * (96 / 72) };
+    const { calls, fills } = record({ ...mixedWrap, clip: short });
+    const afterClear = calls.slice(calls.findIndex((call) => call[0] === 'clearRect') + 1);
+    expect(afterClear.slice(0, 4)).toEqual([['save'], ['beginPath'], ['rect', 0, 0, short.w, short.h], ['clip']]);
+    expect(fills.map(({ text }) => text)).toEqual(['abcd', 'abcd', 'abcd', 'abcd']);
+    expect(fills[3]!.y).toBeGreaterThan(short.h);
+  });
+
+  it('keeps the same-size wrap limit and baselines for plain text and runs', () => {
+    const cmd = { text: 'a\nb\nc', wrap: { width: 35, lineHeight: 16, valign: 'bottom', maxLines: 2 } } as const;
+    const plain = record(cmd).fills;
+    const rich = record({ ...cmd, runs: [{ start: 4, end: 5, fontSize: 9, color: '#ff0000' }] }).fills;
+    expect(plain.map(({ text, y }) => [text, y])).toEqual([['a', 4], ['b', 20]]);
+    expect(rich).toEqual(plain);
   });
 
   it('paints right-to-left text as without runs', () => {
@@ -883,8 +924,8 @@ describe('Canvas2D text runs', () => {
     const { fills, fonts, measures } = record({ text: 'AB CDE FG', wrap, runs });
     expect(fills.map(({ text, y, font }) => [text, y, font])).toEqual([
       ['AB', 20, 'bold 12px sans-serif'],
-      ['CDE', 36, '20px sans-serif'],
-      ['FG', 52, '20px sans-serif'],
+      ['CDE', 41.6, '20px sans-serif'],
+      ['FG', 36 + 16 * (15 / 9) + 5.6, '20px sans-serif'],
     ]);
     expect(fonts).toEqual([
       '12px sans-serif', 'bold 12px sans-serif', '12px sans-serif', '20px sans-serif', 'bold 12px sans-serif',

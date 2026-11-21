@@ -1,10 +1,13 @@
 use serde_json::{Value, json};
 use tiny_skia::Pixmap;
-use xlsx_model::{Cell, CellRef, CellValue, Color, RichRun, RunStyle, Sheet, SheetId, Workbook};
-use xlsx_render::{DisplayList, DrawCmd, GridMeta, Viewport};
+use xlsx_model::styles::{Alignment, Font, Xf};
+use xlsx_model::{
+    Cell, CellRef, CellValue, Color, RichRun, RunStyle, Sheet, SheetId, VAlign, Workbook,
+};
+use xlsx_render::{DisplayList, DrawCmd, GridMeta, Rect, Viewport};
 
-use super::{RasterFonts, render_png_with_fonts};
-use crate::font;
+use super::{RasterFonts, piece_measure, render_png_with_fonts};
+use crate::{PieceWidths, font, wrapped_lines};
 
 const WIDTH: f32 = 160.0;
 const HEIGHT: f32 = 60.0;
@@ -247,11 +250,143 @@ fn a_wrapped_command_paints_each_line_s_pieces_in_their_own_fonts() {
         let larger = json!({ "fontSize": 14.0, "color": "#0000ff" });
         let pieces = vec![
             piece(left(ab), 14.0, "AB", body),
-            piece(left(cde), 30.0, "CDE", larger.clone()),
-            piece(left(fg), 46.0, "FG", larger),
+            piece(left(cde), 30.0 + 2.8, "CDE", larger.clone()),
+            piece(left(fg), 30.0 + 16.0 * (14.0 / 11.0) + 2.8, "FG", larger),
         ];
         assert_eq!(png(&fonts, vec![painted]), png(&fonts, pieces), "{align}");
     }
+}
+
+fn mixed_wrap_list(row_height: f64, valign: VAlign) -> DisplayList {
+    let at = CellRef::new(0, 0);
+    let mut sheet = Sheet::new("Sheet1");
+    sheet.col_widths.insert(0, 10.0);
+    sheet.row_heights.insert(0, row_height);
+    sheet.set_cell(
+        at,
+        Cell {
+            value: CellValue::Text {
+                value: "abcd abcd abcd abcd".into(),
+            },
+            style: Some(0),
+            ..Cell::default()
+        },
+    );
+    let mut workbook = Workbook::default();
+    workbook.sheets.push(sheet);
+    workbook.styles.fonts.push(Font {
+        name: Some("Calibri".into()),
+        size_pt: Some(11.0),
+        ..Font::default()
+    });
+    workbook.styles.cell_xfs.push(Xf {
+        font: Some(0),
+        alignment: Some(Alignment {
+            v: Some(valign),
+            wrap_text: true,
+            ..Alignment::default()
+        }),
+        ..Xf::default()
+    });
+    let span = |start, end, size| {
+        let mut style = RunStyle::default();
+        style.name = Some("Calibri".into());
+        style.size_pt = Some(size);
+        RichRun::new(start, end, style)
+    };
+    let runs = [span(0, 5, 20.0), span(5, 19, 11.0)];
+    let lookup = |cell| (cell == at).then_some(&runs[..]);
+    let viewport = Viewport {
+        x: 0.0,
+        y: 0.0,
+        width: WIDTH,
+        height: 100.0,
+    };
+    xlsx_render::build_display_list_with_text_runs(&workbook, SheetId(0), &viewport, Some(&lookup))
+        .unwrap()
+}
+
+#[test]
+fn mixed_size_wrapped_cells_send_every_line_to_the_native_painter() {
+    let fonts = fonts();
+    for (height, valign) in [(60.0, VAlign::Bottom), (20.0, VAlign::Top)] {
+        let list = mixed_wrap_list(height, valign);
+        let cmd = list
+            .commands
+            .iter()
+            .find(|cmd| matches!(cmd, DrawCmd::Text { .. }))
+            .unwrap();
+        let DrawCmd::Text {
+            y,
+            text,
+            font_size,
+            wrap: Some(wrap),
+            clip,
+            ..
+        } = cmd
+        else {
+            panic!("A1 must wrap");
+        };
+        let wire = serde_json::to_value(cmd).unwrap();
+        assert!(wire["wrap"].get("maxLines").is_none());
+        assert_eq!(
+            *clip,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                w: list.grid.col_offsets[1],
+                h: list.grid.row_offsets[1],
+            }
+        );
+        let pieces = xlsx_render::run_pieces(cmd).unwrap();
+        let mut measured = PieceWidths::new(piece_measure(&fonts));
+        let lines = wrapped_lines(*y, *font_size, wrap, text, &pieces, &mut measured);
+        assert!(lines.len() >= 3);
+        let painted: Vec<String> = lines
+            .iter()
+            .map(|(_, line)| {
+                line.iter()
+                    .map(|piece| &text[piece.range.clone()])
+                    .collect()
+            })
+            .collect();
+        assert_eq!(painted.join(" "), "abcd abcd abcd abcd");
+
+        let last_y = lines.last().unwrap().0;
+        let raster = Pixmap::decode_png(&render_png_with_fonts(&list, &fonts).unwrap()).unwrap();
+        let has_text = |rows: std::ops::Range<u32>| {
+            rows.into_iter().any(|row| {
+                (2..clip.w as u32 - 1).any(|col| raster.pixel(col, row).unwrap().red() < 100)
+            })
+        };
+        if valign == VAlign::Top {
+            assert!(last_y > clip.h);
+            assert!(has_text(0..clip.h.floor() as u32));
+            assert!(!has_text(clip.h.ceil() as u32 + 1..raster.height()));
+        } else {
+            assert!(last_y < clip.h);
+            for (baseline, _) in lines {
+                let row = baseline as u32;
+                assert!(has_text(row.saturating_sub(8)..row));
+            }
+        }
+    }
+}
+
+#[test]
+fn single_size_wrapped_runs_keep_the_existing_native_line_limit_and_positions() {
+    let fonts = fonts();
+    let existing = json!({
+        "text": "a\nb\nc",
+        "wrap": { "width": 40.0, "lineHeight": 16.0, "valign": "bottom", "maxLines": 2 },
+    });
+    let painted = rich(
+        existing.clone(),
+        &[r##"{"start":4,"end":5,"fontSize":11.0,"color":"#ff0000"}"##],
+    );
+    assert!(xlsx_render::run_pieces(&painted).is_some());
+    let expected = png(&fonts, vec![text(existing)]);
+    assert_eq!(png(&fonts, vec![painted]), expected);
 }
 
 fn spill_list(neighbour: bool) -> DisplayList {

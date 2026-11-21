@@ -206,8 +206,8 @@ fn a_wrapped_command_paints_each_line_s_pieces_in_their_own_fonts() {
                 "AB",
                 json!({ "bold": true, "color": "#ff0000" }),
             ),
-            piece(left(cde), 30.0, "CDE", larger.clone()),
-            piece(left(fg), 46.0, "FG", larger),
+            piece(left(cde), 30.0 + 2.8, "CDE", larger.clone()),
+            piece(left(fg), 30.0 + 16.0 * (14.0 / 11.0) + 2.8, "FG", larger),
         ];
         assert_eq!(png(vec![painted]), png(pieces), "{align}");
     }
