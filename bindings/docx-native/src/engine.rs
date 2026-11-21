@@ -1625,7 +1625,8 @@ impl EditSession {
     #[napi(catch_unwind, js_name = "clear_update_event_observation")]
     pub fn clear_update_event_observation(&self, env: Env) -> Result<()> {
         let _call = EngineCall::release(env);
-        self.borrow_document_mut(env)?.clear_update_event_observation();
+        self.borrow_document_mut(env)?
+            .clear_update_event_observation();
         Ok(())
     }
 
