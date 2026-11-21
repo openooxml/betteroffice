@@ -460,7 +460,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       active = { id: ++nextEventId, phase: 'start', inputType: 'insertFromPaste', keyboard: false };
       const html = gesture === 'plain' ? '' : event.clipboardData?.getData('text/html') ?? '';
       if (html) {
-        const fragment = parseClipboardHtml(html);
+        const fragment = parseClipboardHtml(html, { formatted: true });
         if (fragment && callbacks.current.onPasteFragment?.(fragment, event.timeStamp) === true) {
           element.value = '';
           return;

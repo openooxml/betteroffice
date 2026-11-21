@@ -226,10 +226,11 @@ function directRunAttributes(
   return direct;
 }
 
-function clipboardRun(
+/** @internal A clipboard run with portable formatting and a validated link. */
+export function clipboardRun(
   text: string,
   attributes: Record<string, unknown>,
-  themeColors: Readonly<Record<string, string>> | undefined,
+  themeColors?: Readonly<Record<string, string>>,
 ): DocxClipboardRun {
   const link = record(attributes.hyperlink);
   const href = typeof link?.href === 'string' && validHref(link.href) ? link.href : undefined;
@@ -240,6 +241,12 @@ function clipboardRun(
     ...(href ? { href } : {}),
     ...(tooltip ? { tooltip } : {}),
   };
+}
+
+/** @internal */
+export function clipboardHighlightName(name: string): string | undefined {
+  const lower = name.toLowerCase();
+  return HIGHLIGHT_NAMES.find(value => value.toLowerCase() === lower);
 }
 
 function validHref(value: unknown): value is string {
