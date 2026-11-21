@@ -1994,34 +1994,30 @@ fn apply_para_delta(txn: &mut TransactionMut<'_>, map: &MapRef, delta: &ParaAttr
         },
     );
     let flag = crate::list_definitions::LIST_LEVEL_INDENTS;
-    let named = ["numPr", crate::LIST_DEF]
+    let named = crate::list_definitions::LIST_REFERENCE_KEYS
         .iter()
         .any(|key| delta.other.contains_key(*key));
-    let before = (named && !delta.other.contains_key(flag)).then(|| list_reference(txn, map));
+    let before = (named && !delta.other.contains_key(flag)).then(|| list_keys(txn, map));
     for (key, value) in &delta.other {
         set_or_remove(txn, map, key, value.clone());
     }
-    if before.is_some_and(|before| before != list_reference(txn, map)) {
+    let moved = before.is_some_and(|before| {
+        !crate::list_definitions::same_list(&before, &list_keys(txn, map))
+    });
+    if moved {
         set_or_remove(txn, map, flag, None);
     }
 }
 
-/// The list a pilcrow names: its `numPr.numId`, 0 read as none, and the key of its `listDef`.
-fn list_reference(txn: &TransactionMut<'_>, map: &MapRef) -> (Option<f64>, Option<String>) {
-    let num_id = match map.get(txn, "numPr") {
-        Some(Out::Any(Any::Map(num_pr))) => {
-            crate::bridge::map_number(&num_pr, "numId").filter(|id| *id != 0.0)
-        }
-        _ => None,
-    };
-    let key = match map.get(txn, crate::LIST_DEF) {
-        Some(Out::Any(Any::Map(reference))) => match reference.get("key") {
-            Some(Any::String(key)) => Some(key.to_string()),
+/// The attributes of the pilcrow `map` that name its list.
+fn list_keys(txn: &TransactionMut<'_>, map: &MapRef) -> BTreeMap<String, Any> {
+    crate::list_definitions::LIST_REFERENCE_KEYS
+        .into_iter()
+        .filter_map(|key| match map.get(txn, key) {
+            Some(Out::Any(value)) => Some((key.to_owned(), value)),
             _ => None,
-        },
-        _ => None,
-    };
-    (num_id, key)
+        })
+        .collect()
 }
 
 /// Mirrors the current values of `keys` into the pilcrow's `_originalFormatting`, the direct

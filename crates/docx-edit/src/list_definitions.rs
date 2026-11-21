@@ -157,6 +157,26 @@ pub(crate) fn numbered_level(values: &BTreeMap<String, Any>) -> Option<(f64, f64
     Some((num_id, map_number(num_pr, "ilvl").unwrap_or(0.0)))
 }
 
+/// The paragraph attributes that name the list a paragraph is on.
+pub(crate) const LIST_REFERENCE_KEYS: [&str; 2] = ["numPr", LIST_DEF];
+
+/// Whether paragraphs with the attributes `before` and `after` are on the same list, or both on
+/// none, at whatever level.
+pub(crate) fn same_list(before: &BTreeMap<String, Any>, after: &BTreeMap<String, Any>) -> bool {
+    match (resolve_list_identity(before), resolve_list_identity(after)) {
+        (None, None) => true,
+        (
+            Some(ListIdentity::Source { num_id: was, .. }),
+            Some(ListIdentity::Source { num_id: is, .. }),
+        ) => was == is,
+        (
+            Some(ListIdentity::Created { key: was, .. }),
+            Some(ListIdentity::Created { key: is, .. }),
+        ) => was == is,
+        _ => false,
+    }
+}
+
 /// The list a paragraph with the attributes `values` is on, or `None` when it is on no list.
 pub fn resolve_list_identity(values: &BTreeMap<String, Any>) -> Option<ListIdentity> {
     let (num_id, level) = numbered_level(values)?;
