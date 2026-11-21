@@ -72,6 +72,8 @@ export interface PeerlessPresentation {
   pluginVisual(): PeerlessVisualSnapshot | null;
   subscribeVisual(listener: () => void): () => void;
   require(): void;
+  /** Resolves after a visible stage frame covers the command sequence. */
+  whenPaintedThrough(throughSeq: number): Promise<void>;
   fit(value: SlideFit): void;
   /** Rasters a slide ahead of its expected activation, such as a press on its thumbnail; a later request replaces it. */
   prerenderSlide?(slideId: string): void;
@@ -262,6 +264,16 @@ export function usePeerlessPresentation(
         require();
         const next = changed;
         if (hydrated()) return;
+        await next;
+      }
+    }
+
+    async function whenPaintedThrough(throughSeq: number): Promise<void> {
+      while (true) {
+        require();
+        const next = changed;
+        if (firstPainted && paintedView && paintedView.confirmed === queuedFrame &&
+          paintedView.presentedThroughSeq >= throughSeq) return;
         await next;
       }
     }
@@ -600,7 +612,7 @@ export function usePeerlessPresentation(
           get inputEnabled() { return inputEnabled(); },
           get hydrated() { return hydrated(); },
           get failure() { return fatal; },
-          require, setReadOnly,
+          require, whenPaintedThrough, setReadOnly,
           setChangeObserver(enabled) {
             if (!current() || observedChanges === enabled) return;
             observedChanges = enabled;
