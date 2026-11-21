@@ -180,7 +180,7 @@ fn editing_outside_an_iterative_cycle_recalculates_the_acyclic_reader() {
 }
 
 #[test]
-fn editing_an_iterative_cycle_keeps_all_its_members_cached() {
+fn editing_an_iterative_cycle_keeps_its_other_members_cached() {
     let mut workbook = Workbook::open(&package(ITERATE_AND_RECALCULATE)).unwrap();
     workbook
         .edit_cell(
@@ -190,7 +190,20 @@ fn editing_an_iterative_cycle_keeps_all_its_members_cached() {
             CalculationOptions::default(),
         )
         .unwrap();
-    assert_saved_values(&workbook.save().unwrap(), CACHED, "after editing E1");
+    let saved = workbook.save().unwrap();
+    assert_saved_values(
+        &saved,
+        &[("A1", "10"), ("B1", "20"), ("D1", "6"), ("F1", "20")],
+        "after editing E1",
+    );
+    assert_eq!(
+        saved_values(&saved)
+            .into_iter()
+            .find(|(address, _)| address == "E1")
+            .and_then(|(_, value)| value),
+        None,
+        "the edited formula has no value the engine can compute, so it saves none"
+    );
     let status = workbook.calculation_status();
     assert_eq!(status.unevaluated_cells.len(), 2);
     for address in ["E1", "F1"] {
@@ -272,6 +285,10 @@ fn snapshot_and_recovery_restore_iterative_calculation_from_the_source() {
                 .any(|cell| cell.address == "B1"),
             "{mode} reports the reader of the edited cycle as unevaluated"
         );
-        assert_saved_values(&restored.save().unwrap(), CACHED, mode);
+        assert_saved_values(
+            &restored.save().unwrap(),
+            &[("B1", "20"), ("D1", "6"), ("E1", "20"), ("F1", "20")],
+            mode,
+        );
     }
 }

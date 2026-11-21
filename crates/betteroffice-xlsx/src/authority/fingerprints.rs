@@ -328,6 +328,7 @@ struct Data {
     prefixes: [Bytes; 2],
     styles: Vec<Bytes>,
     full_precision: bool,
+    iterate: bool,
     sheets: Vec<EncodedSheet>,
     encoded_bytes: usize,
 }
@@ -424,6 +425,7 @@ impl Data {
             prefixes: [without_names, with_names],
             styles,
             full_precision: model.full_precision,
+            iterate: model.iterate,
             sheets,
             encoded_bytes: limit - budget.0,
         })
@@ -435,6 +437,9 @@ impl Data {
         hasher.update(fingerprint_domain(version, reading));
         if !self.full_precision {
             hasher.update(b"fullPrecision=0");
+        }
+        if self.iterate {
+            hasher.update(b"iterate=1");
         }
         let prefix = &self.prefixes[usize::from(names)];
         let styles = &self.styles[style];
@@ -635,6 +640,9 @@ pub(super) fn compute(
             hasher.update(fingerprint_domain(key.1, key.6));
             if !model.full_precision {
                 hasher.update(b"fullPrecision=0");
+            }
+            if model.iterate {
+                hasher.update(b"iterate=1");
             }
             let base = if key.2 {
                 serde_json::to_vec(&(
