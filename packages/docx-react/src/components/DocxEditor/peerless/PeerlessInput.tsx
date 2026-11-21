@@ -9,7 +9,7 @@ import { clipboardFragmentPlainText, pasteOptionsOffered, plainTextClipboardFrag
 import { mergeFormattingFragment, type PasteFormattingOption } from '../pasteOptions/clipboardFragmentTransforms';
 import { beginComposition, updateComposition, endComposition, type PeerlessCompositionEndResult, type PeerlessCompositionState } from './composition';
 import type { CommandTicket } from '../../../../../../shared/office-session/commands/types';
-import { admitInputIntents, admitIntent, appliedTicket, submitFormattingIntent, type PeerlessAdmissionResult, type PeerlessInputAdmission } from './inputAdmission';
+import { admitInputIntents, admitIntent, appliedTicket, flushAdmittedInput, submitFormattingIntent, type PeerlessAdmissionResult, type PeerlessInputAdmission } from './inputAdmission';
 import { normalizeInputEvent, selectsAll, type PeerlessInputEvent, type PeerlessInputEventState } from './inputEvents';
 import type { PeerlessViewStore } from './viewStore';
 import { useTranslation } from '../../../i18n';
@@ -351,15 +351,32 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
         } }, { inputTime: event.timeStamp });
         return;
       }
+      const onClipboard = callbacks.current.onClipboard;
       if (event.key === 'Delete' && event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey &&
-        callbacks.current.onClipboard && !isReadOnly()) {
-        const selection = viewStore.getSnapshot().workerSelection;
-        const ranged = !!selection && (selection.anchor.story !== selection.focus.story ||
-          selection.anchor.paraId !== selection.focus.paraId || selection.anchor.offset !== selection.focus.offset);
-        if (ranged || admission.getSnapshot().pendingInputs > 0) {
+        onClipboard && !isReadOnly()) {
+        const { identity, workerSelection } = viewStore.getSnapshot();
+        if (admission.getSnapshot().pendingInputs > 0) {
           event.preventDefault();
           active = null;
-          void callbacks.current.onClipboard(true, null);
+          void flushAdmittedInput({ admission, session: admission.session }).then(() => {
+            const settled = viewStore.getSnapshot();
+            if (!mounted || isReadOnly() || settled.identity.epoch !== identity.epoch ||
+              settled.identity.incarnation !== identity.incarnation) return;
+            const selection = settled.workerSelection;
+            if (settled.editState?.tableContext?.hasMultiCellSelection || (selection && !caretPoint(selection))) {
+              void onClipboard(true, null);
+            } else if (selection) {
+              dispatch({ source: 'keydown', eventId: ++nextEventId, inputTime: event.timeStamp,
+                key: 'Delete', code: event.code, shift: false, alt: false, ctrl: false, meta: false,
+              }, event);
+            }
+          }, () => {});
+          return;
+        }
+        if (workerSelection && !caretPoint(workerSelection)) {
+          event.preventDefault();
+          active = null;
+          void onClipboard(true, null);
           return;
         }
       }

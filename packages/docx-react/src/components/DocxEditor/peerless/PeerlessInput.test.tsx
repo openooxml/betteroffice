@@ -1315,6 +1315,28 @@ test('copy and cut hand the event clipboardData to the adapter while the event i
   expect(seen).toEqual([clipboardData, clipboardData]);
 });
 
+test('Shift+Delete deletes forward when pending typing collapses the selection', async () => {
+  const cuts: boolean[] = [];
+  const input = mount(false, { onClipboard: async (cut) => { cuts.push(cut); } });
+  const start = { story: 'body', paraId: 'paragraph', offset: 0 };
+  const end = { ...start, offset: 2 };
+  try {
+    input.snapshot.workerSelection = input.session.state.selection = { anchor: start, focus: end };
+    beforeinput(input.textarea, 'insertText', 'x');
+    expect(fireEvent.keyDown(input.textarea, { key: 'Delete', shiftKey: true })).toBe(false);
+    expect(input.submitted).toEqual(['insertText']);
+
+    const caret = { ...start, offset: 1 };
+    await act(async () => {
+      input.entries[0]!.settle({ status: 'applied', seq: 1 }, { anchor: caret, focus: caret });
+    });
+    expect(input.submitted).toEqual(['insertText', 'deleteForward']);
+    expect(input.entries[1]!.payload).toEqual({});
+    expect(input.entries[1]!.options.fence).toBe(false);
+    expect(cuts).toEqual([]);
+  } finally { input.unmount(); input.admission.dispose(); }
+});
+
 test('worker input enables spelling and follows acknowledged caret geometry', () => {
   const input = mount();
   expect(input.textarea.getAttribute('spellcheck')).toBe('true');
