@@ -98,7 +98,13 @@ fn saved_values(bytes: &[u8]) -> Vec<(String, Option<String>)> {
         .skip(1)
         .map(|cell| {
             let body = cell.split("</c>").next().unwrap();
-            let address = body.split_once("r=\"").unwrap().1.split('"').next().unwrap();
+            let address = body
+                .split_once("r=\"")
+                .unwrap()
+                .1
+                .split('"')
+                .next()
+                .unwrap();
             let value = body
                 .split_once("<v>")
                 .and_then(|(_, rest)| rest.split_once("</v>"))
@@ -174,7 +180,13 @@ fn editing_outside_an_iterative_cycle_recalculates_the_acyclic_reader() {
     assert!(workbook.calculation_status().unevaluated_cells.is_empty());
     assert_saved_values(
         &workbook.save().unwrap(),
-        &[("A1", "10"), ("B1", "20"), ("D1", "8"), ("E1", "20"), ("F1", "20")],
+        &[
+            ("A1", "10"),
+            ("B1", "20"),
+            ("D1", "8"),
+            ("E1", "20"),
+            ("F1", "20"),
+        ],
         "after editing C1",
     );
 }
@@ -231,7 +243,13 @@ fn editing_a_reader_after_cached_open_uses_the_iterative_members_value() {
     assert!(workbook.calculation_status().unevaluated_cells.is_empty());
     assert_saved_values(
         &workbook.save().unwrap(),
-        &[("A1", "10"), ("B1", "30"), ("D1", "6"), ("E1", "20"), ("F1", "20")],
+        &[
+            ("A1", "10"),
+            ("B1", "30"),
+            ("D1", "6"),
+            ("E1", "20"),
+            ("F1", "20"),
+        ],
         "after editing B1",
     );
 }
@@ -241,7 +259,13 @@ fn a_non_iterative_cycle_still_settles_at_zero() {
     let workbook = open_recalculated(&package(r#"<calcPr fullCalcOnLoad="1"/>"#));
     assert_saved_values(
         &workbook.save().unwrap(),
-        &[("A1", "0"), ("B1", "0"), ("D1", "6"), ("E1", "0"), ("F1", "0")],
+        &[
+            ("A1", "0"),
+            ("B1", "0"),
+            ("D1", "6"),
+            ("E1", "0"),
+            ("F1", "0"),
+        ],
         "ordinary circular references",
     );
     let circular: Vec<_> = workbook
@@ -250,7 +274,11 @@ fn a_non_iterative_cycle_still_settles_at_zero() {
         .iter()
         .map(|address| address.cell.to_a1())
         .collect();
-    assert_eq!(circular, ["A1", "E1", "F1"], "only cycle members are circular");
+    assert_eq!(
+        circular,
+        ["A1", "E1", "F1"],
+        "only cycle members are circular"
+    );
 }
 
 #[test]

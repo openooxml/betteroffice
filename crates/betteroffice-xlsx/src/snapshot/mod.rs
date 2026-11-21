@@ -142,12 +142,11 @@ fn source_calculation_setting(
     let Some(source) = source else {
         return Ok(default);
     };
-    let parts = ooxml_opc::unzip_parts_where(
-        source,
-        ooxml_opc::MAX_TOTAL_UNCOMPRESSED_BYTES,
-        |name| name.trim_start_matches('/') == "xl/workbook.xml",
-    )
-    .map_err(SnapshotError::new)?;
+    let parts =
+        ooxml_opc::unzip_parts_where(source, ooxml_opc::MAX_TOTAL_UNCOMPRESSED_BYTES, |name| {
+            name.trim_start_matches('/') == "xl/workbook.xml"
+        })
+        .map_err(SnapshotError::new)?;
     let Some((_, workbook_xml)) = parts.first() else {
         return Ok(default);
     };

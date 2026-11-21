@@ -1171,7 +1171,10 @@ impl<'g> Pass<'g> {
 
     fn taint_reader(&mut self, reader: Key, gap: &Gap, answered: bool) {
         if answered {
-            note_functions(self.answered_reads.entry(reader).or_default(), &gap.functions);
+            note_functions(
+                self.answered_reads.entry(reader).or_default(),
+                &gap.functions,
+            );
         } else {
             let inherited = self.inherited.entry(reader).or_default();
             note_functions(&mut inherited.functions, &gap.functions);
@@ -4073,7 +4076,10 @@ mod tests {
         put_formula(&mut wb, other, "C1", "REPRO_UNKNOWN(Sheet1!A1)");
 
         let (_, result) = rebuild_and_recalc_all(&mut wb, None);
-        assert!(result.cycle_cells.is_empty(), "iterative cycles are unevaluated");
+        assert!(
+            result.cycle_cells.is_empty(),
+            "iterative cycles are unevaluated"
+        );
         for (at, cell, held) in [
             (sheet, "A1", num(10.0)),
             (sheet, "B1", num(20.0)),
@@ -4093,7 +4099,11 @@ mod tests {
                 at.0
             );
         }
-        assert_eq!(value(&wb, sheet, "D2"), num(81.0), "the spill cache is held");
+        assert_eq!(
+            value(&wb, sheet, "D2"),
+            num(81.0),
+            "the spill cache is held"
+        );
         assert_eq!(
             value(&wb, other, "C1"),
             CellValue::Empty,

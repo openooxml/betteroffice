@@ -166,7 +166,10 @@ impl ReaderIndex<'_> {
         let banded = (first..=band)
             .filter_map(|band| self.bands.get(&band))
             .flatten();
-        let narrow = self.tall_columns.get(&cell.col).map_or(&[][..], Vec::as_slice);
+        let narrow = self
+            .tall_columns
+            .get(&cell.col)
+            .map_or(&[][..], Vec::as_slice);
         let (mut narrow, mut wide) = (narrow.iter().peekable(), self.wide.iter().peekable());
         let tall = std::iter::from_fn(move || {
             let next = match (narrow.peek(), wide.peek()) {
