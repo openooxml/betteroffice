@@ -78,7 +78,7 @@ test('keep text only keeps a space typed at the end of a table cell', () => {
 
 test('keep text only is offered at 1000 lines of text and not at 1001', () => {
   const lines = (count: number): DocxClipboardFragment => ({
-    paragraphs: Array.from({ length: count }, () => ({ text: 'x', runs: [{ text: 'x', format: { other: { bold: true } } }] })),
+    paragraphs: Array.from({ length: count }, (_, index) => index === 0 ? { text: 'x', runs: [{ text: 'x', format: { other: { bold: true } } }] } : { text: 'x' }),
   });
   expect(pasteOptionsOffered(lines(1000))).toEqual(['keep-source', 'merge', 'text-only']);
   expect(pasteOptionsOffered(lines(1001))).toEqual(['keep-source', 'merge']);
