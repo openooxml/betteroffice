@@ -69,6 +69,7 @@ pub use group_pictures::GroupPictureSources;
 pub(crate) mod run_size_provenance;
 mod shapes;
 pub use shapes::ShapeStyles;
+pub(crate) use shapes::inline_wrap;
 
 pub use reservations::{Reservation, ReservationKind, ReservationSide, Reservations};
 
@@ -3305,7 +3306,7 @@ fn chart_drawing_anchored(chart: &Value) -> bool {
             .get("wrap")
             .and_then(|wrap| wrap.get("type"))
             .and_then(Value::as_str)
-            .is_some_and(|wrap_type| wrap_type != "inline")
+            .is_some_and(|wrap_type| !inline_wrap(Some(wrap_type)))
 }
 
 /// Replaces `+mj-*` and `+mn-*` typefaces in a chart's layout copy with the
