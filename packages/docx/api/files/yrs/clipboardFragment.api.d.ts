@@ -88,7 +88,7 @@ export declare function clipboardParagraphUnits(paragraph: DocxClipboardParagrap
     image: Record<string, unknown>;
 }>;
 /** @internal Above this many formatted runs a paste inserts its text without run formatting. */
-export declare const MAX_PASTE_FORMATTED_RUNS = 500;
+export declare const MAX_PASTE_FORMATTED_RUNS = 300;
 /** @internal How many formatted runs the paragraphs of a fragment carry. */
 export declare function clipboardFragmentRunCount(fragment: DocxClipboardFragment): number;
 /** @internal A clipboard run with portable formatting and a validated link. */
