@@ -4,6 +4,7 @@ import { basename, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build as esbuild } from 'esbuild';
 import { build as vite } from 'vite';
+import { build as vite7 } from 'vite-7';
 import { nextWebpack } from './check-webpack-exports.mjs';
 import { validatePublishedWorker } from './worker-entry-check.mjs';
 
@@ -150,15 +151,21 @@ try {
   await checkOutput(esbuildDirectory);
 
   await writeFile(join(directory, 'index.html'), '<script type="module" src="./app.mjs"></script>');
-  const viteDirectory = join(directory, 'vite');
-  await vite({
-    configFile: false, root: directory, logLevel: 'warn',
-    resolve: { conditions: ['browser', 'import', 'default'] },
-    worker: { format: 'es' },
-    build: { outDir: viteDirectory, emptyOutDir: true, assetsInlineLimit: 0, minify: false },
-  });
-  await checkOutput(viteDirectory);
-  await checkWorkerEntriesLoadOnce(viteDirectory);
+  const viteArms = [
+    ['vite', vite, { resolve: { conditions: ['browser', 'import', 'default'] }, worker: { format: 'es' } }],
+    ['vite-default', vite, {}],
+    ['vite-7', vite7, { resolve: { conditions: ['browser', 'import', 'default'] }, worker: { format: 'es' } }],
+    ['vite-7-default', vite7, {}],
+  ];
+  for (const [name, build, config] of viteArms) {
+    const viteDirectory = join(directory, name);
+    await build({
+      configFile: false, root: directory, logLevel: 'warn', ...config,
+      build: { outDir: viteDirectory, emptyOutDir: true, assetsInlineLimit: 0, minify: false },
+    }).catch((error) => { throw new Error(`${name} build failed: ${error.message}`, { cause: error }); });
+    await checkOutput(viteDirectory);
+    await checkWorkerEntriesLoadOnce(viteDirectory);
+  }
 
   const webpack = nextWebpack();
   const bundle = (context, app, output) => new Promise((done, fail) => webpack({
@@ -199,7 +206,7 @@ try {
     assert.ok(workerEntry(compilation, `/dist/${worker}.mjs`), `webpack did not emit ${worker} as its own worker entry chunk`);
   }
   await checkOutput(webpackDirectory, { namedWorkers: false });
-  console.log('esbuild, Vite and webpack browser worker bundles exclude Node worker code and private imports.');
+  console.log('esbuild, Vite (7 and 8, default and es workers) and webpack browser worker bundles exclude Node worker code and private imports.');
 } finally {
   await rm(directory, { recursive: true, force: true });
 }
