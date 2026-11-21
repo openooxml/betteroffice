@@ -12,6 +12,8 @@ export interface ProgressiveFontSource {
 export interface ProgressiveFontSpec {
   slot: number;
   source: ProgressiveFontSource;
+  /** Load every outline of the face once the editor is idle, so any character in it draws without waiting. */
+  fill?: boolean;
 }
 
 /** What the worker uses of a face `@betteroffice/fonts/progressive` opens. */
@@ -20,7 +22,18 @@ interface OutlineFace {
   bytes(): ArrayBuffer;
   ensureGlyphs(glyphIds: Iterable<number>): Promise<number>;
   complete(): boolean;
+  /** Absent from a `@betteroffice/fonts` release older than filling; such a face only loads as frames need it. */
+  chunks?(): readonly number[];
+  loadedChunks?(): ReadonlySet<number>;
+  ensureChunks?(chunks: Iterable<number>): Promise<number>;
+  chunksOfGlyphs?(glyphIds: Iterable<number>): readonly number[];
 }
+
+/**
+ * Opened faces by identity, kept by the worker across font environments: a face a fill loaded, or one frames
+ * loaded, is not fetched and decoded again when the host sends the fonts anew.
+ */
+export type SharedOutlineFaces = Map<string, Promise<OutlineFace>>;
 
 /** How long a frame waits for missing outlines before it paints without them and repaints later. */
 export const PROGRESSIVE_OUTLINE_WAIT_MS = 10_000;
@@ -28,14 +41,24 @@ export const PROGRESSIVE_OUTLINE_WAIT_MS = 10_000;
 /** Pauses before each retry of a chunk that failed to load. */
 const CHUNK_RETRY_DELAYS_MS = [250, 1_000, 4_000];
 
+/** A fill starts this long after the fonts land, so opening and the first frames go first. */
+export const FILL_DELAY_MS = 1_000;
+/** A fill loads its next chunks only once no frame has drawn for this long. */
+export const FILL_QUIET_MS = 300;
+/** Chunks a fill loads in one step, between which frames go first. */
+const FILL_BATCH = 8;
+
 interface Owner {
   /** The font id of every slot registered with these bytes; the engine may share one face among them. */
   ids: number[];
   open: () => Promise<OutlineFace>;
   face?: OutlineFace;
   installed: number;
+  /** The chunks the engine's bytes for these slots hold; the host registered them with the core (chunk 0). */
+  installedChunks: ReadonlySet<number>;
   complete: boolean;
   refused: boolean;
+  fill: boolean;
 }
 
 interface OutlineEngine {
@@ -88,9 +111,15 @@ export class ResidentProgressiveFonts {
   private readonly pending = new Set<Promise<unknown>>();
   private readonly lateListeners = new Set<() => void>();
   private readonly refusalListeners = new Set<(owner: number) => void>();
+  private readonly fillListeners = new Set<(owners: ReadonlySet<number>) => void>();
+  private readonly trapListeners = new Set<(error: Error) => void>();
   private warned = false;
   private late = 0;
   private disposed = false;
+  /** When a frame last asked for outlines; a fill waits for a quiet stretch after it. */
+  private lastFrame = -Infinity;
+  private fillTimer: ReturnType<typeof setTimeout> | undefined;
+  private filling: Promise<void> | undefined;
 
   /** Outline installs that arrived after the frame that needed them had painted. */
   get lateInstalls(): number {
@@ -105,6 +134,7 @@ export class ResidentProgressiveFonts {
     decode: (encoded: ArrayBuffer, maxOutput: number) => Promise<ArrayBuffer>,
     private readonly log: (message: string) => void = (message) => console.warn(message),
     loadModule: () => Promise<ProgressiveModule> = () => import('@betteroffice/fonts/progressive'),
+    shared: SharedOutlineFaces = new Map(),
   ) {
     const rootSlot = (slot: number): number => {
       let current = slot;
@@ -118,39 +148,60 @@ export class ResidentProgressiveFonts {
       const id = ids[spec.slot];
       if (id === null || id === undefined) continue;
       const face = `${spec.source.ref.indexSha256}|${spec.source.ref.index}`;
-      const shared = byFace.get(face);
-      const owner = shared ?? id;
-      if (shared === undefined) byFace.set(face, id);
-      else if (!this.owners.get(shared)!.ids.includes(id)) this.owners.get(shared)!.ids.push(id);
+      const known = byFace.get(face);
+      const owner = known ?? id;
+      if (known === undefined) byFace.set(face, id);
+      else {
+        const state = this.owners.get(known)!;
+        if (!state.ids.includes(id)) state.ids.push(id);
+        state.fill ||= spec.fill === true;
+      }
       for (let slot = 0; slot < ids.length; slot += 1) {
         const view = ids[slot];
         if (view !== null && view !== undefined && rootSlot(slot) === spec.slot) this.ownerOf.set(view, owner);
       }
-      if (shared !== undefined) continue;
+      if (known !== undefined) continue;
       let opening: Promise<OutlineFace> | undefined;
-      const open = () => opening ??= loadModule().then(undefined, (error: unknown) => {
-        throw new ProgressiveModuleUnavailable(error instanceof Error ? error.message : String(error));
-      }).then(({ openProgressiveFace, readFontAsset }) =>
-        openProgressiveFace(spec.source.ref, {
-          read: (file) => {
-            const url = spec.source.urls[file];
-            if (url === undefined) return Promise.reject(new Error(`Font slice ${file} has no URL`));
-            return readFontAsset(file, new URL(url), spec.source.timeoutMs);
-          },
-          decode,
-        })).catch((error: unknown) => {
-        opening = undefined;
-        throw error;
+      const open = (): Promise<OutlineFace> => {
+        if (opening) return opening;
+        let created = shared.get(face);
+        if (created === undefined) {
+          created = loadModule().then(undefined, (error: unknown) => {
+            throw new ProgressiveModuleUnavailable(error instanceof Error ? error.message : String(error));
+          }).then(({ openProgressiveFace, readFontAsset }) =>
+            openProgressiveFace(spec.source.ref, {
+              read: (file) => {
+                const url = spec.source.urls[file];
+                if (url === undefined) return Promise.reject(new Error(`Font slice ${file} has no URL`));
+                return readFontAsset(file, new URL(url), spec.source.timeoutMs);
+              },
+              decode,
+            }));
+          shared.set(face, created);
+        }
+        const attempt = created;
+        opening = attempt.catch((error: unknown) => {
+          opening = undefined;
+          if (shared.get(face) === attempt) shared.delete(face);
+          throw error;
+        });
+        return opening;
+      };
+      this.owners.set(owner, {
+        ids: [id], open, installed: 1, installedChunks: new Set([0]), complete: false, refused: false, fill: spec.fill === true,
       });
-      this.owners.set(owner, { ids: [id], open, installed: 1, complete: false, refused: false });
     }
   }
 
   /** Stops installing outlines, for fonts that were cleared or replaced; pending loads finish unused. */
   dispose(): void {
     this.disposed = true;
+    clearTimeout(this.fillTimer);
+    this.fillTimer = undefined;
     this.lateListeners.clear();
     this.refusalListeners.clear();
+    this.fillListeners.clear();
+    this.trapListeners.clear();
   }
 
   get size(): number {
@@ -178,6 +229,7 @@ export class ResidentProgressiveFonts {
    * or after `waitMs` with those installed so far; the rest install later.
    */
   async ensure(glyphs: Map<number, Set<number>>, waitMs = PROGRESSIVE_OUTLINE_WAIT_MS): Promise<Set<number>> {
+    this.lastFrame = performance.now();
     const wanted = new Map<number, Set<number>>();
     for (const [fontId, ids] of glyphs) {
       const owner = this.ownerOf.get(fontId);
@@ -190,8 +242,13 @@ export class ResidentProgressiveFonts {
     const changed = new Set<number>();
     let waiting = true;
     const work = Promise.all([...wanted].map(async ([owner, ids]) => {
+      const state = this.owners.get(owner)!;
+      const before = state.installed;
       await this.load(owner, ids);
-      if (this.install(owner)) {
+      // Outlines a fill loaded that this frame does not draw reach the engine with the fill's own install, so a
+      // frame during a fill rebuilds the face only for a glyph the engine lacks. A fill may have installed these
+      // outlines meanwhile; they changed for this frame all the same.
+      if ((!this.drawsInstalled(state, ids) && this.install(owner)) || state.installed > before) {
         changed.add(owner);
         if (!waiting) {
           this.late += 1;
@@ -218,6 +275,95 @@ export class ResidentProgressiveFonts {
   /** Settles once every outline requested so far is installed or has failed. */
   async whenInstalled(): Promise<void> {
     while (this.pending.size) await Promise.allSettled([...this.pending]);
+  }
+
+  /** Calls `listener` with the owner font ids a fill installed; glyph images cached from their earlier bytes go stale. */
+  onFilled(listener: (owners: ReadonlySet<number>) => void): () => void {
+    this.fillListeners.add(listener);
+    return () => {
+      this.fillListeners.delete(listener);
+    };
+  }
+
+  /**
+   * Loads every outline of the faces marked `fill`, a few chunks at a time while no frame draws, and installs each
+   * face once it is whole, so later text in it never waits for a chunk. Starts `FILL_DELAY_MS` after the first call;
+   * later calls while one is scheduled or running do nothing. A face that cannot fill keeps loading as frames need it.
+   */
+  scheduleFill(): void {
+    if (this.disposed || this.fillTimer !== undefined || this.filling) return;
+    if (![...this.owners.values()].some((state) => state.fill && !state.complete && !state.refused)) return;
+    this.fillTimer = setTimeout(() => {
+      this.fillTimer = undefined;
+      const filling: Promise<void> = this.fill().catch((error: unknown) => {
+        if (isEngineTrap(error) && this.trapListeners.size) {
+          for (const listener of [...this.trapListeners]) listener(error as Error);
+          return;
+        }
+        this.log(`[docx] filling sliced faces stopped: ${error instanceof Error ? error.message : String(error)}`);
+      }).finally(() => {
+        if (this.filling === filling) this.filling = undefined;
+      });
+      this.filling = filling;
+    }, FILL_DELAY_MS);
+  }
+
+  /** Calls `listener` with an engine trap a fill hit while installing outlines; the engine cannot go on. */
+  onTrapped(listener: (error: Error) => void): () => void {
+    this.trapListeners.add(listener);
+    return () => {
+      this.trapListeners.delete(listener);
+    };
+  }
+
+  /** Settles once a scheduled fill has run, or at once without one. */
+  async whenFilled(): Promise<void> {
+    while (!this.disposed && (this.fillTimer !== undefined || this.filling)) {
+      await (this.filling ?? new Promise((resolve) => setTimeout(resolve, 10)));
+    }
+  }
+
+  private async fill(): Promise<void> {
+    for (const [owner, state] of this.owners) {
+      if (!state.fill || state.complete || state.refused) continue;
+      try {
+        await this.quiet();
+        if (this.disposed || state.refused) return;
+        const face = state.face ??= await state.open();
+        const { chunks, loadedChunks, ensureChunks } = face;
+        if (!chunks || !loadedChunks || !ensureChunks) continue;
+        const missing = chunks.call(face).filter((chunk) => !loadedChunks.call(face).has(chunk));
+        for (let start = 0; start < missing.length; start += FILL_BATCH) {
+          await this.quiet();
+          if (this.disposed || state.refused) return;
+          await ensureChunks.call(face, missing.slice(start, start + FILL_BATCH));
+        }
+        await this.quiet();
+        if (this.disposed || state.refused) return;
+        if (this.install(owner)) {
+          const owners = new Set([owner]);
+          for (const listener of [...this.fillListeners]) listener(owners);
+        }
+      } catch (error) {
+        if (isEngineTrap(error)) throw error;
+        if (this.disposed) return;
+        if (error instanceof ProgressiveModuleUnavailable) {
+          this.refuse(owner, `the progressive font module is unavailable here: ${error.message}`);
+          continue;
+        }
+        this.log(`[docx] a sliced face could not load whole in the background; its outlines keep loading as frames need them: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  }
+
+  /** Resolves once no frame has asked for outlines for `FILL_QUIET_MS` and no frame's outlines are loading. */
+  private async quiet(): Promise<void> {
+    for (;;) {
+      if (this.disposed) return;
+      const idle = performance.now() - this.lastFrame;
+      if (idle >= FILL_QUIET_MS && this.pending.size === 0) return;
+      await new Promise((resolve) => setTimeout(resolve, Math.max(FILL_QUIET_MS - idle, 20)));
+    }
   }
 
   private track(work: Promise<unknown>): void {
@@ -253,6 +399,12 @@ export class ResidentProgressiveFonts {
     }
   }
 
+  /** Whether the engine's bytes already hold every outline these glyph ids draw from; unknown counts as no. */
+  private drawsInstalled(state: Owner, ids: Set<number>): boolean {
+    const chunks = state.face?.chunksOfGlyphs?.(ids);
+    return chunks !== undefined && chunks.every((chunk) => state.installedChunks.has(chunk));
+  }
+
   /** Installs the face's current outlines; on refusal stops progressive loading for it. True when outlines changed. */
   private install(owner: number): boolean {
     const state = this.owners.get(owner)!;
@@ -260,8 +412,11 @@ export class ResidentProgressiveFonts {
     if (!face || this.disposed || state.refused || face.revision <= state.installed) return false;
     try {
       const bytes = new Uint8Array(face.bytes());
+      // The chunks `bytes` holds; a face loading more meanwhile only adds to them.
+      const chunks = new Set(face.loadedChunks?.() ?? []);
       for (const id of state.ids) this.engine.updateFontOutlines(id, bytes);
       state.installed = face.revision;
+      state.installedChunks = chunks;
       state.complete = face.complete();
       return true;
     } catch (error) {

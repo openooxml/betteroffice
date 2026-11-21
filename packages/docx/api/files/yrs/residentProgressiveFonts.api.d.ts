@@ -15,6 +15,8 @@ export interface ProgressiveFontSource {
 export interface ProgressiveFontSpec {
     slot: number;
     source: ProgressiveFontSource;
+    /** Load every outline of the face once the editor is idle, so any character in it draws without waiting. */
+    fill?: boolean;
 }
 /** What the worker uses of a face `@betteroffice/fonts/progressive` opens. */
 interface OutlineFace {
@@ -22,9 +24,23 @@ interface OutlineFace {
     bytes(): ArrayBuffer;
     ensureGlyphs(glyphIds: Iterable<number>): Promise<number>;
     complete(): boolean;
+    /** Absent from a `@betteroffice/fonts` release older than filling; such a face only loads as frames need it. */
+    chunks?(): readonly number[];
+    loadedChunks?(): ReadonlySet<number>;
+    ensureChunks?(chunks: Iterable<number>): Promise<number>;
+    chunksOfGlyphs?(glyphIds: Iterable<number>): readonly number[];
 }
+/**
+ * Opened faces by identity, kept by the worker across font environments: a face a fill loaded, or one frames
+ * loaded, is not fetched and decoded again when the host sends the fonts anew.
+ */
+export type SharedOutlineFaces = Map<string, Promise<OutlineFace>>;
 /** How long a frame waits for missing outlines before it paints without them and repaints later. */
 export declare const PROGRESSIVE_OUTLINE_WAIT_MS = 10000;
+/** A fill starts this long after the fonts land, so opening and the first frames go first. */
+export declare const FILL_DELAY_MS = 1000;
+/** A fill loads its next chunks only once no frame has drawn for this long. */
+export declare const FILL_QUIET_MS = 300;
 interface OutlineEngine {
     updateFontOutlines(fontId: number, bytes: Uint8Array): void;
 }
@@ -51,12 +67,18 @@ export declare class ResidentProgressiveFonts {
     private readonly pending;
     private readonly lateListeners;
     private readonly refusalListeners;
+    private readonly fillListeners;
+    private readonly trapListeners;
     private warned;
     private late;
     private disposed;
+    /** When a frame last asked for outlines; a fill waits for a quiet stretch after it. */
+    private lastFrame;
+    private fillTimer;
+    private filling;
     /** Outline installs that arrived after the frame that needed them had painted. */
     get lateInstalls(): number;
-    constructor(specs: readonly ProgressiveFontSpec[], ids: readonly (number | null)[], substituteOf: readonly (number | undefined)[], engine: OutlineEngine, decode: (encoded: ArrayBuffer, maxOutput: number) => Promise<ArrayBuffer>, log?: (message: string) => void, loadModule?: () => Promise<ProgressiveModule>);
+    constructor(specs: readonly ProgressiveFontSpec[], ids: readonly (number | null)[], substituteOf: readonly (number | undefined)[], engine: OutlineEngine, decode: (encoded: ArrayBuffer, maxOutput: number) => Promise<ArrayBuffer>, log?: (message: string) => void, loadModule?: () => Promise<ProgressiveModule>, shared?: SharedOutlineFaces);
     /** Stops installing outlines, for fonts that were cleared or replaced; pending loads finish unused. */
     dispose(): void;
     get size(): number;
@@ -72,12 +94,29 @@ export declare class ResidentProgressiveFonts {
     ensure(glyphs: Map<number, Set<number>>, waitMs?: number): Promise<Set<number>>;
     /** Settles once every outline requested so far is installed or has failed. */
     whenInstalled(): Promise<void>;
+    /** Calls `listener` with the owner font ids a fill installed; glyph images cached from their earlier bytes go stale. */
+    onFilled(listener: (owners: ReadonlySet<number>) => void): () => void;
+    /**
+     * Loads every outline of the faces marked `fill`, a few chunks at a time while no frame draws, and installs each
+     * face once it is whole, so later text in it never waits for a chunk. Starts `FILL_DELAY_MS` after the first call;
+     * later calls while one is scheduled or running do nothing. A face that cannot fill keeps loading as frames need it.
+     */
+    scheduleFill(): void;
+    /** Calls `listener` with an engine trap a fill hit while installing outlines; the engine cannot go on. */
+    onTrapped(listener: (error: Error) => void): () => void;
+    /** Settles once a scheduled fill has run, or at once without one. */
+    whenFilled(): Promise<void>;
+    private fill;
+    /** Resolves once no frame has asked for outlines for `FILL_QUIET_MS` and no frame's outlines are loading. */
+    private quiet;
     private track;
     /**
      * Loads the chunks of `ids`, retrying a chunk that fails. Chunks that keep
      * failing leave their glyphs blank; the next frame drawing them asks again.
      */
     private load;
+    /** Whether the engine's bytes already hold every outline these glyph ids draw from; unknown counts as no. */
+    private drawsInstalled;
     /** Installs the face's current outlines; on refusal stops progressive loading for it. True when outlines changed. */
     private install;
     /** Stops progressive loading for `owner` and asks the host to reload it whole. */

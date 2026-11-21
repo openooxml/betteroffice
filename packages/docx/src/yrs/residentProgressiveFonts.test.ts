@@ -8,7 +8,9 @@ import {
 } from '../../../../shared/office-session/trap';
 import { createRustMeasureSource, type ResidentFontRequirement } from '../layout/measure/rustMeasureSource';
 import * as wasm from '../layout/wasm';
-import { glyphsByFont, ResidentProgressiveFonts, type ProgressiveFontSpec } from './residentProgressiveFonts';
+import {
+  FILL_QUIET_MS, glyphsByFont, ResidentProgressiveFonts, type ProgressiveFontSpec, type SharedOutlineFaces,
+} from './residentProgressiveFonts';
 
 const assets = new URL('../../../fonts-cjk/assets/', import.meta.url);
 const manifest = JSON.parse(readFileSync(new URL('manifest.json', assets), 'utf8')) as {
@@ -57,7 +59,8 @@ const glyphIn = (chunk: number) => {
 };
 
 function fonts(engine: (fontId: number, bytes: Uint8Array) => void = () => {},
-  specs: ProgressiveFontSpec[] = [spec], ids: number[] = [10, 11], substituteOf: (number | undefined)[] = [undefined, 0]) {
+  specs: ProgressiveFontSpec[] = [spec], ids: number[] = [10, 11], substituteOf: (number | undefined)[] = [undefined, 0],
+  shared?: SharedOutlineFaces) {
   const logs: string[] = [];
   const updates: Array<{ fontId: number; length: number }> = [];
   const resident = new ResidentProgressiveFonts(specs, ids, substituteOf, {
@@ -65,9 +68,13 @@ function fonts(engine: (fontId: number, bytes: Uint8Array) => void = () => {},
       engine(fontId, bytes);
       updates.push({ fontId, length: bytes.byteLength });
     },
-  }, decode, (message) => logs.push(message));
+  }, decode, (message) => logs.push(message), undefined, shared);
   return { resident, logs, updates };
 }
+
+const filling: ProgressiveFontSpec = { ...spec, fill: true };
+const chunkHits = () => index.chunks.filter((chunk) => hits.has(chunk.file)).length;
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 test('a page walk collects the glyph ids of every run, including nested regions', () => {
   const page = {
@@ -240,6 +247,117 @@ test('a worker that cannot load the progressive module has the face reloaded who
   expect(loads).toBe(1);
   expect(hits.size).toBe(0);
   expect(logs.filter((message) => message.includes('progressive font module is unavailable'))).toHaveLength(1);
+});
+
+test('a fill loads every chunk of a marked face once frames are quiet, installs it once, and later frames fetch nothing', async () => {
+  const { resident, updates, logs } = fonts(undefined, [filling]);
+  const filled: number[][] = [];
+  resident.onFilled((owners) => filled.push([...owners]));
+  resident.scheduleFill();
+  resident.scheduleFill();
+  await resident.whenFilled();
+  expect(index.chunks.every((chunk) => hits.get(chunk.file) === 1)).toBe(true);
+  expect(updates.map((update) => update.fontId)).toEqual([10]);
+  expect(filled).toEqual([[10]]);
+  expect(logs).toEqual([]);
+  hits.clear();
+  expect(await resident.ensure(new Map([[11, new Set([glyphIn(41), glyphIn(97)])]]))).toEqual(new Set());
+  expect(hits.size).toBe(0);
+  expect(updates).toHaveLength(1);
+});
+
+test('an engine trap while a fill installs its face reaches the trap listeners, not the log', async () => {
+  const thrown = new WebAssembly.RuntimeError('unreachable');
+  const { resident, logs } = fonts(() => {
+    throw thrown;
+  }, [filling]);
+  const trapped: Error[] = [];
+  resident.onTrapped((error) => trapped.push(error));
+  resident.scheduleFill();
+  await resident.whenFilled();
+  expect(trapped).toEqual([thrown]);
+  expect(logs).toEqual([]);
+});
+
+test('a face not marked to fill loads only as frames need it', async () => {
+  const { resident } = fonts();
+  resident.scheduleFill();
+  await resident.whenFilled();
+  expect(hits.size).toBe(0);
+});
+
+test('a fill waits while frames draw, so no frame waits for it', async () => {
+  const { resident } = fonts(undefined, [filling]);
+  resident.scheduleFill();
+  const frames: number[] = [];
+  const until = performance.now() + 1_600;
+  while (performance.now() < until) {
+    const started = performance.now();
+    await resident.ensure(new Map([[10, new Set([glyphIn(41)])]]));
+    frames.push(performance.now() - started);
+    await sleep(FILL_QUIET_MS / 3);
+  }
+  expect(chunkHits()).toBe(1);
+  expect(Math.max(...frames.slice(1))).toBeLessThan(FILL_QUIET_MS / 3);
+  await resident.whenFilled();
+  expect(chunkHits()).toBe(index.chunks.length);
+});
+
+test('frames during a fill rebuild the face only for a glyph whose outline the engine lacks', async () => {
+  const { resident, updates } = fonts(undefined, [filling]);
+  expect(await resident.ensure(new Map([[10, new Set([glyphIn(41)])]]))).toEqual(new Set([10]));
+  expect(updates).toHaveLength(1);
+  // Each batch's chunks arrive only once the next frame has drawn, as over a slow network: a quiet stretch between
+  // frames otherwise lets the fill load every batch and install the whole face.
+  let release = () => {};
+  const hold = () => {
+    gate = new Promise<void>((resolve) => { release = resolve; });
+  };
+  hold();
+  resident.scheduleFill();
+  // Frames a quiet stretch apart let the fill load a batch between them; each draws only the installed glyph.
+  while (chunkHits() < 17) {
+    await sleep(FILL_QUIET_MS + 50);
+    expect(await resident.ensure(new Map([[10, new Set([glyphIn(41)])]]))).toEqual(new Set());
+    const arrive = release;
+    hold();
+    arrive();
+  }
+  expect(updates).toHaveLength(1);
+  // A glyph the fill loaded but has not installed yet still reaches the engine before its frame paints.
+  const loadedByFill = index.chunks.map((chunk) => chunk.id).find((id) => id !== 41)!;
+  expect(await resident.ensure(new Map([[10, new Set([glyphIn(loadedByFill)])]]))).toEqual(new Set([10]));
+  expect(updates).toHaveLength(2);
+  gate = null;
+  release();
+  await resident.whenFilled();
+  expect(updates).toHaveLength(3);
+  expect(await resident.ensure(new Map([[11, new Set([glyphIn(41), glyphIn(loadedByFill)])]]))).toEqual(new Set());
+  expect(updates).toHaveLength(3);
+}, 20_000);
+
+test('a fill that fails logs and leaves the face loading as frames need it', async () => {
+  const { resident, logs, updates } = fonts(undefined, [filling]);
+  failing.add(chunkFile(41));
+  resident.scheduleFill();
+  await resident.whenFilled();
+  expect(logs.filter((message) => message.includes('could not load whole'))).toHaveLength(1);
+  expect(updates).toEqual([]);
+  expect(await resident.ensure(new Map([[10, new Set([glyphIn(41)])]]))).toEqual(new Set([10]));
+  expect(hits.get(chunkFile(41))).toBe(2);
+});
+
+test('a face filled under one font environment draws under the next without fetching again', async () => {
+  const shared: SharedOutlineFaces = new Map();
+  const first = fonts(undefined, [filling], undefined, undefined, shared);
+  first.resident.scheduleFill();
+  await first.resident.whenFilled();
+  first.resident.dispose();
+  hits.clear();
+  const next = fonts(undefined, [{ ...spec, slot: 1 }], [20, 21], [undefined, undefined], shared);
+  expect(await next.resident.ensure(new Map([[21, new Set([glyphIn(41)])]]))).toEqual(new Set([21]));
+  expect(hits.size).toBe(0);
+  expect(next.updates.map((update) => update.fontId)).toEqual([21]);
 });
 
 test('a tracked paragraph mark in Japanese text with no default face fetches no outline chunk and draws as text', async () => {

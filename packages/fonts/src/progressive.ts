@@ -25,8 +25,14 @@ export interface ProgressiveFontFace {
   ensureText(text: string): Promise<number>;
   /** The chunks `ensureText` needs for this text. */
   chunksOf(text: string): number[];
+  /** The chunks that hold these glyph ids' outlines, which `ensureGlyphs` loads; chunk 0 is the core, loaded from the start. */
+  chunksOfGlyphs(glyphIds: Iterable<number>): number[];
   /** The chunks `bytes` holds right now; it grows as chunks load. */
   loadedChunks(): ReadonlySet<number>;
+  /** Every outline chunk the face has, for loading it whole a few chunks at a time. */
+  chunks(): readonly number[];
+  /** Loads these chunks' outlines; resolves with a revision that includes them, or rejects if one fails to load. */
+  ensureChunks(chunks: Iterable<number>): Promise<number>;
   /** Calls `listener` with each new revision; returns an unsubscribe. */
   onUpdate(listener: (revision: number) => void): () => void;
   /** Whether every outline is loaded. */
@@ -159,6 +165,7 @@ export async function openProgressiveFace(ref: SliceRef, transport: SliceTranspo
   const [skeletonBytes, core] = await Promise.all([readFile(transport, index.skeleton), readFile(transport, index.core)]);
   const skeleton: SliceSkeleton = parseSkeleton(skeletonBytes);
   const files = new Map<number, SliceFile>(index.chunks.map((chunk) => [chunk.id!, chunk]));
+  const chunkIds: readonly number[] = Object.freeze([...files.keys()]);
   const outlines = new Map<number, Uint8Array>();
   const loaded = new Set<number>([0]);
   const pending = new Map<number, Promise<void>>();
@@ -212,6 +219,15 @@ export async function openProgressiveFace(ref: SliceRef, transport: SliceTranspo
     return next;
   };
 
+  const chunksOfGlyphs = (glyphIds: Iterable<number>): number[] => {
+    const chunks = new Set<number>();
+    for (const glyph of glyphIds) {
+      const chunk = skeleton.chunkOfGlyph(glyph);
+      if (chunk !== undefined) chunks.add(chunk);
+    }
+    return [...chunks];
+  };
+
   const face: ProgressiveFontFace = {
     get revision() {
       return revision;
@@ -220,13 +236,9 @@ export async function openProgressiveFace(ref: SliceRef, transport: SliceTranspo
       return skeleton.reassemble(outlines);
     },
     ensureGlyphs(glyphIds) {
-      const chunks: number[] = [];
-      for (const glyph of glyphIds) {
-        const chunk = skeleton.chunkOfGlyph(glyph);
-        if (chunk !== undefined) chunks.push(chunk);
-      }
-      return ensure(chunks);
+      return ensure(chunksOfGlyphs(glyphIds));
     },
+    chunksOfGlyphs,
     prefetch(text) {
       void ensure(textChunks(text, skeleton.chunkOfCodepoint)).catch(() => {});
     },
@@ -235,6 +247,8 @@ export async function openProgressiveFace(ref: SliceRef, transport: SliceTranspo
     },
     chunksOf: (text) => textChunks(text, skeleton.chunkOfCodepoint),
     loadedChunks: () => loaded,
+    chunks: () => chunkIds,
+    ensureChunks: (chunks) => ensure(chunks),
     onUpdate(listener) {
       listeners.add(listener);
       return () => {
