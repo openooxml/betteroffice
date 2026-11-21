@@ -1,6 +1,7 @@
 ---
 '@betteroffice/pptx': minor
 '@betteroffice/pptx-react': patch
+'@betteroffice/docx': minor
 '@betteroffice/xlsx': minor
 ---
 
