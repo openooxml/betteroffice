@@ -113,8 +113,9 @@ function Overlays({ run, commands, inputRef, preview, insertion, editor, onError
     ? geometry!.hits.filter(({ primitive }) => primitive.shapeId === selected.shapeId) : [];
   const rectangles = editedEntries.map(({ primitive, transforms }) => transformedRect(transforms,
     { x: primitive.x, y: primitive.y, width: primitive.w, height: primitive.h }));
-  const canResizeEdited = editedEntries.some(({ transforms }) => transforms[0]?.shapeId === selected?.shapeId) &&
-    editedEntries.every(({ transforms }) => transforms.every(({ transform }) => {
+  const canResizeEdited = editedEntries.some(({ transforms }) =>
+    transforms.length === 1 && transforms[0]?.shapeId === selected?.shapeId) &&
+    editedEntries.every(({ transforms }) => transforms.length === 1 && transforms.every(({ transform }) => {
       const rotation = ((transform?.rotationDeg ?? 0) % 360 + 360) % 360;
       return rotation === 0 && !transform?.flipH && !transform?.flipV;
     }));
