@@ -4,7 +4,7 @@ import { validClipboardFragment } from '@betteroffice/docx/yrs';
 import { mergeFormattingFragment } from '../pasteOptions/clipboardFragmentTransforms';
 import { clipboardFragmentPlainText, pasteOptionsOffered, plainTextClipboardFragment } from '../pasteOptions/pasteText';
 import {
-  clipboardFragmentHtml, MAX_FORMATTED_HTML_LENGTH, MAX_FORMATTED_HTML_DEPTH, MAX_FORMATTED_HTML_RUNS,
+  clipboardFragmentHtml, MAX_FORMATTED_HTML_LENGTH, MAX_FORMATTED_HTML_DEPTH, MAX_FORMATTED_HTML_RUNS, MAX_FORMATTED_HTML_TEXT,
   parseClipboardHtml,
 } from './clipboardHtml';
 
@@ -145,3 +145,41 @@ test('an internal payload has priority even in three megabytes of HTML', () => {
   const fragment = { paragraphs: [{ text: 'payload' }] };
   expect(parseClipboardHtml(clipboardFragmentHtml(fragment) + '<b>' + 'x'.repeat(3_000_000) + '</b>', formatted)).toEqual(fragment);
 });
+
+test('blank lines from line breaks and empty paragraphs are kept, but not at the ends', () => {
+  imported('<p><b>A</b><br><br>B</p>', ['A', '', 'B']);
+  imported('<p class="MsoNormal"><o:p>&nbsp;</o:p></p><p class="MsoNormal"><b>A</b></p>'
+    + '<p class="MsoNormal"><o:p>&nbsp;</o:p></p><p><br></p><p class="MsoNormal">B</p><p><br></p>', ['A', '', '', 'B']);
+});
+
+test('preformatted text keeps its spaces and line breaks', () => {
+  imported('<pre><b>A\n  B</b>\n\nC</pre>', ['A', '  B', '', 'C']);
+  imported('<p style="white-space:pre-wrap"><i>x  y</i></p>', ['x  y']);
+});
+
+test('plain text around a table with no formatting pastes as before', () => {
+  const html = '<p>Before</p>' + table + '<p>After</p>';
+  expect(parseClipboardHtml(html, formatted)).toEqual(parseClipboardHtml(html));
+});
+
+test('the text budget falls back to plain paste', () => {
+  expect(parseClipboardHtml('<p><b>' + 'x'.repeat(MAX_FORMATTED_HTML_TEXT + 1) + '</b></p>', formatted)).toBeNull();
+  imported('<p><b>' + 'x'.repeat(MAX_FORMATTED_HTML_TEXT) + '</b></p>', ['x'.repeat(MAX_FORMATTED_HTML_TEXT)]);
+});
+
+test('hostile styles and run counts stay linear', () => {
+  const timed = (html: string) => {
+    const start = performance.now();
+    const fragment = parseClipboardHtml(html, formatted);
+    return { fragment, ms: performance.now() - start };
+  };
+  const shorthand = timed('<p><b style="font:12px' + ' '.repeat(150_000) + 'Arial\nBlack">x</b></p>');
+  expect(shorthand.fragment?.paragraphs.map(p => p.text)).toEqual(['x']);
+  expect(shorthand.ms).toBeLessThan(2_000);
+  const fonts = timed('<style>b{font-family:' + 'serif,'.repeat(30_000) + 'Arial}</style>' + '<b>x</b>'.repeat(150_000));
+  expect(fonts.fragment?.paragraphs.map(p => p.text)).toEqual(['x'.repeat(150_000)]);
+  expect(fonts.ms).toBeLessThan(10_000);
+  const runs = timed('<p>' + '<b>x</b>y'.repeat(210_000) + '</p>');
+  expect(runs.fragment).toBeNull();
+  expect(runs.ms).toBeLessThan(10_000);
+}, 60_000);

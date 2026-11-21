@@ -255,24 +255,24 @@ test('paste creates an identical table and one undo removes it', async () => {
   }
 }, TIMEOUT);
 
-for (const count of [1_250, 5_000]) {
-  test(`pastes a paragraph with ${count} alternating runs`, async () => {
+for (const [count, width] of [[1_250, 1], [5_000, 1], [5_000, 40]] as const) {
+  test(`pastes a paragraph with ${count} alternating runs of ${width} characters`, async () => {
     const { client, engine } = await openTableWorker();
     try {
       const paragraph = engine.paragraphs('body').at(-1)!;
       const span = engine.geometryReader.locateParagraph('body', paragraph.paraId);
       const at = { story: 'body', paraId: paragraph.paraId, offset: span.end - span.start };
       const runs = Array.from({ length: count }, (_, i) => i % 2 === 0
-        ? { text: 'a', format: { other: { bold: true } } }
-        : { text: 'b', format: { other: {} } });
-      const text = 'ab'.repeat(count / 2);
+        ? { text: 'a'.repeat(width), format: { other: { bold: true } } }
+        : { text: 'b'.repeat(width), format: { other: {} } });
+      const text = ('a'.repeat(width) + 'b'.repeat(width)).repeat(count / 2);
       const command = intent(1, 0, 'pasteFragment', { selection: { anchor: at, focus: at }, fragment: { paragraphs: [{ text, runs }] } });
       const start = performance.now();
       const pasted = await client.edit(command);
       const elapsed = performance.now() - start;
       expect(pasted.outcomes[0]?.status).toBe('applied');
       expect(engine.paragraphs('body').at(-1)!.text).toBe(paragraph.text + text);
-      console.log(`PASTE_RUNS_MS ${elapsed}`);
+      console.log(`PASTE_RUNS_MS runs=${count} chars=${count * width} ms=${Math.round(elapsed)}`);
     } finally {
       client.destroy();
     }
