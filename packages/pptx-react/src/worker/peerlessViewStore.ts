@@ -653,7 +653,8 @@ export function createPeerlessViewStore(
       const predecessor = sharedInput ? chainTailInput?.ticket?.seq ?? selectionTailSeq : chainTail;
       const originalReference = 'at' in intent.payload ? intent.payload.at : undefined;
       const after = sharedInput && !wasKnown &&
-        ('at' in intent.payload || intent.kind === 'setSelection' || intent.kind === 'compositionEnd')
+        ('at' in intent.payload || intent.kind === 'setSelection' || intent.kind === 'compositionEnd' ||
+          intent.kind === 'selectObject')
         ? chainTailInput : originalReference && resultReferences.get(originalReference);
       if (!wasKnown && ('at' in intent.payload || intent.kind === 'setSelection' || intent.kind === 'compositionEnd')) {
         intent = chainedIntent(intent, predecessor);

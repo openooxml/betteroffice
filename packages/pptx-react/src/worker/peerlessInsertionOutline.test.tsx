@@ -123,6 +123,8 @@ test('a new shape gesture preserves an earlier released resize', async () => {
   await editExisting(h);
   const edge = h.point(h.box.x + h.box.w, h.box.y + h.box.h / 2);
   const since = h.commands.length;
+  const outcomes: Array<{ seq: number; status: string; committed?: boolean }> = [];
+  const unsubscribe = h.client.subscribe((ack) => { outcomes.push(...ack.outcomes); });
   replyControl.hold();
   try {
     act(() => {
@@ -131,14 +133,26 @@ test('a new shape gesture preserves an earlier released resize', async () => {
       fireEvent.pointerMove(h.stage, { ...edge, clientX: edge.clientX + 10, buttons: 1 });
       fireEvent.pointerUp(h.stage, { ...edge, clientX: edge.clientX + 30 });
       fireEvent.pointerDown(handle, edge);
-      fireEvent.pointerCancel(h.stage, edge);
+      fireEvent.pointerMove(h.stage, { ...edge, clientX: edge.clientX + 5, buttons: 1 });
     });
     await waitFor(() => expect(replyControl.count()).toBeGreaterThan(0));
+    await act(async () => { replyControl.releaseNext(); });
+    await waitFor(() => expect(h.commands.slice(since).some((command) => command.kind === 'setShapeRect')).toBe(true));
   } finally {
     await act(async () => { replyControl.release(); });
+    act(() => { fireEvent.pointerCancel(h.stage, edge); });
+    unsubscribe();
   }
   await h.client.flush();
-  expect(h.commands.slice(since).filter((command) => command.kind === 'setShapeRect')).toHaveLength(1);
+  const resize = h.commands.slice(since).filter((command) => command.kind === 'setShapeRect');
+  expect(resize).toHaveLength(1);
+  expect(outcomes.filter((outcome) => outcome.seq === resize[0]!.seq))
+    .toEqual([expect.objectContaining({ status: 'applied', committed: true })]);
+  const saved = (await h.client.read()).result;
+  expect(saved.ok).toBe(true);
+  if (!saved.ok) throw new Error(saved.failure.message);
+  expect(saved.slides[0]!.shapes[0]!.width)
+    .toBe(6000000 + Math.round(30 * 9144000 / h.list.width));
 });
 
 test('grouped child text hides resize handles while top-level text retains them', async () => {
