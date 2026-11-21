@@ -26,14 +26,16 @@ const fieldCharacter = (kind: string) => `<w:r><w:fldChar w:fldCharType="${kind}
 const paragraph = (id: string, content: string) => `<w:p w14:paraId="${id}">${content}</w:p>`;
 
 /** A table of contents whose field begins in its first entry's paragraph and ends in its last, then one paragraph after it. */
-const BODY =
+const PARAGRAPHS = [
   paragraph('0000001A', fieldCharacter('begin') +
     '<w:r><w:instrText xml:space="preserve"> TOC \\o "1-3" \\h \\z \\u </w:instrText></w:r>' +
-    fieldCharacter('separate') + run('Introduction')) +
-  paragraph('0000001B', run('Scope')) +
-  paragraph('0000001C', run('Terms')) +
-  paragraph('0000001D', run('Appendix') + fieldCharacter('end')) +
-  paragraph('0000001E', run(AFTER));
+    fieldCharacter('separate') + run('Introduction')),
+  paragraph('0000001B', run('Scope')),
+  paragraph('0000001C', run('Terms')),
+  paragraph('0000001D', run('Appendix') + fieldCharacter('end')),
+  paragraph('0000001E', run(AFTER)),
+];
+const BODY = PARAGRAPHS.join('');
 
 function fixture(): Uint8Array<ArrayBuffer> {
   const parts = new Map<string, Uint8Array>();
@@ -83,5 +85,36 @@ for (const [name, index, offset] of [['closing', 3, 1], ['opening', 0, 0], ['mid
     expect(lowest).toBe(0);
     expect(lastEnd).toBeLessThan(xml.indexOf(AFTER));
     expect(xml).toContain(TYPED);
+  });
+}
+
+/** The entries that do not lie in `xml` after its first field separate and before the first field end after that separate. */
+function entriesOutsideTheField(xml: string, entries: readonly string[]): string[] {
+  const separate = xml.indexOf('w:fldCharType="separate"');
+  const end = separate < 0 ? -1 : xml.indexOf('w:fldCharType="end"', separate);
+  return entries.filter((entry) => {
+    const at = xml.indexOf(entry);
+    return separate < 0 || end < 0 || at < separate || at > end;
+  });
+}
+
+for (const [name, index, offset, entries] of [
+  ['closing', 3, 1, ['Introduction', 'Scope', 'Terms', TYPED]],
+  ['opening', 0, 0, ['Introduction', 'Scope', 'Terms', 'Appendix']],
+] as const) {
+  test(`typing into the ${name} paragraph of a field spanning paragraphs keeps the field spanning them`, async () => {
+    const session = await createYrsSession({ clientId: 98200 + sessions.length });
+    sessions.push(session);
+    session.seedFromDocx(fixture());
+    const paragraphs = session.paragraphs('body');
+    expect(paragraphs.length).toBe(5);
+    session.insertText({ story: 'body', paraId: paragraphs[index]!.paraId, offset }, TYPED);
+    const saved = await saveYrsDocx(session, { updateModifiedDate: false });
+    const xml = new TextDecoder().decode(unzipContainer(saved.bytes)['word/document.xml']);
+    expect(xml).toContain(TYPED);
+    for (const [at, kept] of PARAGRAPHS.entries()) {
+      if (at !== index) expect(xml).toContain(kept);
+    }
+    expect(entriesOutsideTheField(xml, entries)).toEqual([]);
   });
 }

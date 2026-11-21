@@ -106,8 +106,9 @@ fn instruction(code: &str) -> String {
     format!(r#"<w:r><w:instrText xml:space="preserve">{code}</w:instrText></w:r>"#)
 }
 
-/// A table of contents whose field begins in its first entry's paragraph and ends in its last.
-fn table_of_contents() -> String {
+/// The paragraphs of a table of contents whose field begins in its first entry's paragraph and
+/// ends in its last.
+fn table_of_contents_paragraphs() -> [String; 4] {
     [
         paragraph(
             OPENING.id,
@@ -126,15 +127,43 @@ fn table_of_contents() -> String {
             &[run("Appendix"), field_character("end")].concat(),
         ),
     ]
-    .concat()
+}
+
+/// A table of contents whose field begins in its first entry's paragraph and ends in its last.
+fn table_of_contents() -> String {
+    table_of_contents_paragraphs().concat()
+}
+
+fn after_paragraph() -> String {
+    paragraph(AFTER.id, &run(AFTER_TEXT))
+}
+
+/// The table of contents followed by `after`.
+fn source_with(after: &str) -> Vec<u8> {
+    docx(&main_part(&format!("{}{after}", table_of_contents())))
 }
 
 fn spanning_source() -> Vec<u8> {
-    docx(&main_part(&format!(
-        "{}{}",
-        table_of_contents(),
-        paragraph(AFTER.id, &run(AFTER_TEXT))
-    )))
+    source_with(&after_paragraph())
+}
+
+/// The entries that do not lie in `saved` after its first field separate and before the first
+/// field end after that separate.
+fn entries_outside_the_field<'a>(saved: &str, entries: &[&'a str]) -> Vec<&'a str> {
+    let separate = saved.find(r#"w:fldCharType="separate""#);
+    let end = separate.and_then(|separate| {
+        saved[separate..]
+            .find(r#"w:fldCharType="end""#)
+            .map(|end| separate + end)
+    });
+    entries
+        .iter()
+        .copied()
+        .filter(|entry| match (separate, end, saved.find(entry)) {
+            (Some(separate), Some(end), Some(at)) => at < separate || at > end,
+            _ => true,
+        })
+        .collect()
 }
 
 /// What keeps the field characters of `xml` from being one begin, one separate and one end, with
@@ -214,10 +243,16 @@ fn edit_faults(replace: Replace, target: Target, text: &str) -> Vec<String> {
     faults
 }
 
-fn edited(target: Target, text: &str) -> String {
-    let mut document = Document::open(&spanning_source()).unwrap();
+/// The saved main part of the table of contents followed by `after`, once `text` replaced the
+/// text of `target`.
+fn saved_after_edit(after: &str, target: Target, text: &str) -> Result<String, Error> {
+    let mut document = Document::open(&source_with(after)).unwrap();
     document.replace_paragraph_text(target.id, text).unwrap();
-    saved_main_part(&document.save().unwrap())
+    document.save().map(|bytes| saved_main_part(&bytes))
+}
+
+fn edited(target: Target, text: &str) -> String {
+    saved_after_edit(&after_paragraph(), target, text).unwrap()
 }
 
 #[test]
@@ -225,6 +260,69 @@ fn replacing_the_closing_paragraph_of_a_spanning_field_saves_the_field_balanced(
     let saved = edited(CLOSING, "Appendix, edited");
     assert!(saved.contains("Appendix, edited"), "{saved}");
     assert_balanced(&saved, AFTER_TEXT);
+}
+
+#[test]
+fn replacing_the_closing_paragraph_of_a_spanning_field_keeps_the_field_spanning_its_paragraphs() {
+    let text = "Appendix, edited";
+    let saved = edited(CLOSING, text);
+    let [opening, middle, second_middle, _] = table_of_contents_paragraphs();
+    for kept in [opening, middle, second_middle, after_paragraph()] {
+        assert!(saved.contains(&kept), "source bytes differ in {kept}: {saved}");
+    }
+    let closing_end = format!("{text}</w:t></w:r>{}</w:p>", field_character("end"));
+    assert!(
+        saved.contains(&closing_end),
+        "the closing paragraph does not end in the field's end: {saved}"
+    );
+    assert_eq!(
+        entries_outside_the_field(&saved, &["Introduction", "Scope", "Terms", text]),
+        Vec::<&str>::new(),
+        "{saved}"
+    );
+    assert_balanced(&saved, AFTER_TEXT);
+}
+
+#[test]
+fn replacing_the_closing_paragraph_of_a_spanning_field_keeps_a_custom_xml_wrapper_after_it() {
+    let wrapped = format!(
+        r#"<w:customXml w:uri="urn:example:notes" w:element="note">{}</w:customXml>"#,
+        after_paragraph()
+    );
+    let saved = saved_after_edit(&wrapped, CLOSING, "Appendix, edited").unwrap();
+    assert!(saved.contains(&wrapped), "the custom XML wrapper is lost: {saved}");
+    assert_balanced(&saved, AFTER_TEXT);
+}
+
+#[test]
+fn replacing_the_closing_paragraph_of_a_spanning_field_saves_beside_an_untouched_form_field() {
+    let data = r#"<w:ffData xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="q:CT_FFData"><q:name q:val="T"/></w:ffData>"#;
+    let form_field = paragraph(
+        "0000001F",
+        &[
+            run("Label "),
+            format!(r#"<w:r><w:fldChar w:fldCharType="begin">{data}</w:fldChar></w:r>"#),
+            instruction(" FORMTEXT "),
+            field_character("separate"),
+            run("Ada"),
+            field_character("end"),
+        ]
+        .concat(),
+    );
+    let text = "Appendix, edited";
+    let after = format!("{}{form_field}", after_paragraph());
+    let saved = saved_after_edit(&after, CLOSING, text);
+    assert!(saved.is_ok(), "the save failed: {saved:?}");
+    let saved = saved.unwrap();
+    assert!(
+        saved.contains(&form_field),
+        "source bytes differ in the form field paragraph: {saved}"
+    );
+    assert_eq!(
+        entries_outside_the_field(&saved, &["Introduction", "Scope", "Terms", text]),
+        Vec::<&str>::new(),
+        "{saved}"
+    );
 }
 
 #[test]
