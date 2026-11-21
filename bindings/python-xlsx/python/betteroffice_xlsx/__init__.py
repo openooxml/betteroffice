@@ -565,10 +565,10 @@ class Workbook:
         structural op on a collaborative workbook :class:`CollaborativeStructureError`, each with
         the message TypeScript throws.
         """
-        ops = list(ops)
-        transaction = _wire({"ops": ops})
+        sent = _js_numbers(list(ops))
+        transaction = _wire_normalized({"ops": sent})
         return self._commit(
-            lambda: self._inner.apply_ops_json(transaction, now_serial=now_serial), ops=ops
+            lambda: self._inner.apply_ops_json(transaction, now_serial=now_serial), ops=sent
         )
 
     def move_range(
@@ -990,9 +990,11 @@ def _wire(value: object) -> str:
 
     Integral floats are written as integers; NaN and infinities raise ``ValueError``.
     """
-    return json.dumps(
-        _js_numbers(value), separators=(",", ":"), ensure_ascii=False, allow_nan=False
-    )
+    return _wire_normalized(_js_numbers(value))
+
+
+def _wire_normalized(value: object) -> str:
+    return json.dumps(value, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
 
 
 def _js_numbers(value: object) -> object:
