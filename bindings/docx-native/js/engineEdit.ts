@@ -17,6 +17,7 @@ type Engine = Pick<
   | 'decodeTiffPng'
   | 'export_docx_markdown_json'
   | 'export_docx_structured_json'
+  | 'field_run_digest'
   | 'find_docx_content_controls_json'
   | 'hit_test_json'
   | 'hit_test_regions_by_handle'
@@ -86,6 +87,7 @@ export const decodeFontFace = binding.decodeFontFace;
 export const decodeTiffPng = binding.decodeTiffPng;
 export const export_docx_markdown_json = binding.export_docx_markdown_json;
 export const export_docx_structured_json = binding.export_docx_structured_json;
+export const field_run_digest = binding.field_run_digest;
 export const find_docx_content_controls_json = binding.find_docx_content_controls_json;
 export const hit_test_json = binding.hit_test_json;
 export const hit_test_regions_by_handle = binding.hit_test_regions_by_handle;

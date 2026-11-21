@@ -2,6 +2,7 @@
 
 pub use docx_edit::RunInheritance;
 pub use docx_edit::engine::RetainedLayoutMeta;
+pub use docx_edit::field_run_digest;
 pub use docx_edit::session::{
     EditSessionCore as Document, EngineError, EngineErrorKind, EngineResult, Host,
     UpdateSubscription,
