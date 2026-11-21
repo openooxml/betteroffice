@@ -538,7 +538,7 @@ describe('xlsx native engine parity', () => {
   test('the default native open keeps iterative caches on save', async () => {
     const cells = '<row r="1">'
       + '<c r="A1"><f>(A1+10)/2</f><v>10</v></c><c r="B1"><f>A1*2</f><v>20</v></c>'
-      + '<c r="C1"><v>5</v></c><c r="D1"><f>C1+1</f><v>6</v></c>'
+      + '<c r="C1"><v>5</v></c><c r="D1"><f>C1+1</f><v>999</v></c>'
       + '<c r="E1"><f>F1/2+10</f><v>20</v></c><c r="F1"><f>E1</f><v>20</v></c></row>';
     const source = await calculationBook('<calcPr iterate="1" fullCalcOnLoad="1"/>', cells);
     const document = native.XlsxDocument.open(source) as EngineDocument;

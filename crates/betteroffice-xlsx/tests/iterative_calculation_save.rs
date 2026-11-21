@@ -211,10 +211,20 @@ fn editing_an_iterative_cycle_keeps_its_other_members_cached() {
     assert_eq!(
         saved_values(&saved)
             .into_iter()
-            .find(|(address, _)| address == "E1")
-            .and_then(|(_, value)| value),
-        None,
+            .find(|(address, _)| address == "E1"),
+        Some(("E1".to_owned(), None)),
         "the edited formula has no value the engine can compute, so it saves none"
+    );
+    let parts = ooxml_opc::unzip_parts(&saved).unwrap();
+    let (_, sheet) = parts
+        .iter()
+        .find(|(name, _)| name == "xl/worksheets/sheet1.xml")
+        .unwrap();
+    assert!(
+        std::str::from_utf8(sheet)
+            .unwrap()
+            .contains("<f>F1/2+20</f>"),
+        "the edited formula is saved"
     );
     let status = workbook.calculation_status();
     assert_eq!(status.unevaluated_cells.len(), 2);
@@ -319,4 +329,26 @@ fn snapshot_and_recovery_restore_iterative_calculation_from_the_source() {
             mode,
         );
     }
+}
+
+#[test]
+fn a_generated_workbook_saves_iterative_calculation() {
+    let model = betteroffice_xlsx::WorkbookModel {
+        iterate: true,
+        sheets: vec![betteroffice_xlsx::Sheet::new("Sheet1")],
+        ..Default::default()
+    };
+    let saved = Workbook::from_model(model).unwrap().save().unwrap();
+    let parts = ooxml_opc::unzip_parts(&saved).unwrap();
+    let (_, workbook_xml) = parts
+        .iter()
+        .find(|(name, _)| name == "xl/workbook.xml")
+        .unwrap();
+    assert!(
+        std::str::from_utf8(workbook_xml)
+            .unwrap()
+            .contains(r#"iterate="1""#),
+        "calcPr asks for iterative calculation"
+    );
+    assert!(Workbook::open(&saved).unwrap().model().iterate);
 }

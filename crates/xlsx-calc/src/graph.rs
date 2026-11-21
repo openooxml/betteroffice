@@ -134,19 +134,22 @@ pub struct UnevaluatedCell {
 /// one list per sheet otherwise.
 const BAND_ROWS: u32 = 16;
 const MAX_RANGE_BANDS: u32 = 16;
-/// columns a tall range may span and still be filed under each of them.
-const MAX_TALL_COLUMNS: u32 = 16;
+/// columns per block of a [`ReaderIndex`]'s tall ranges. a tall range is
+/// filed under every block its columns touch when it touches at most
+/// `MAX_TALL_BLOCKS` of them, and in one list per sheet otherwise.
+const BLOCK_COLUMNS: u32 = 16;
+const MAX_TALL_BLOCKS: u32 = 64;
 
 /// the reverse edges into one sheet by cell: single-cell reads by address,
 /// short ranges by the band they start in, tall ones in a list, indexed by
-/// the columns of the narrow ones.
+/// the column blocks of all but the widest.
 pub(crate) struct ReaderIndex<'g> {
     graph: &'g DepGraph,
     sheet: SheetId,
     cells: HashMap<(RowId, ColId), Vec<NodeKey>>,
     bands: HashMap<u32, Vec<(CellRange, NodeKey)>>,
     tall: Vec<(CellRange, NodeKey)>,
-    tall_columns: HashMap<ColId, Vec<usize>>,
+    tall_columns: HashMap<u32, Vec<usize>>,
     wide: Vec<usize>,
 }
 
@@ -168,7 +171,7 @@ impl ReaderIndex<'_> {
             .flatten();
         let narrow = self
             .tall_columns
-            .get(&cell.col)
+            .get(&(cell.col / BLOCK_COLUMNS))
             .map_or(&[][..], Vec::as_slice);
         let (mut narrow, mut wide) = (narrow.iter().peekable(), self.wide.iter().peekable());
         let tall = std::iter::from_fn(move || {
@@ -607,9 +610,13 @@ impl DepGraph {
             } else {
                 let at = index.tall.len();
                 index.tall.push((range, node));
-                if range.end.col - range.start.col < MAX_TALL_COLUMNS {
-                    for col in range.start.col..=range.end.col {
-                        index.tall_columns.entry(col).or_default().push(at);
+                let (first, last) = (
+                    range.start.col / BLOCK_COLUMNS,
+                    range.end.col / BLOCK_COLUMNS,
+                );
+                if last - first < MAX_TALL_BLOCKS {
+                    for block in first..=last {
+                        index.tall_columns.entry(block).or_default().push(at);
                     }
                 } else {
                     index.wide.push(at);
