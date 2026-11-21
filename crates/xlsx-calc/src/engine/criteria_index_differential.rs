@@ -1080,6 +1080,7 @@ fn criteria_index_spill_schedules_guard_before_later_readers() {
             replaced: HashMap::new(),
             rerun: Vec::new(),
             early: HashMap::new(),
+            iterative_read: false,
             watching: false,
             unwatched: Vec::new(),
         };
