@@ -259,15 +259,19 @@ class Workbook:
 
     def __init__(self, inner: _Workbook) -> None:
         self._inner = inner
-        if not inner.is_collaborative:
-            self._next_sheet_key = inner.sheet_count
+        self._sheet_keys: "list[int] | None" = None
+
+    def _standalone_sheet_keys(self) -> "list[int]":
+        if self._sheet_keys is None:
+            self._next_sheet_key = self._inner.sheet_count
             self._sheet_keys = list(range(self._next_sheet_key))
             self._sheet_history: dict[int, tuple[list[int], list[int]]] = {}
+        return self._sheet_keys
 
     def _current_sheet_keys(self) -> "Sequence[SheetKey]":
         if self._inner.is_collaborative:
             return self.sheet_info()["sheetIds"]
-        return self._sheet_keys
+        return self._standalone_sheet_keys()
 
     def _commit(
         self,
@@ -281,7 +285,7 @@ class Workbook:
 
         version = self.version()
         before_history = self.history()
-        before_keys = self._sheet_keys.copy()
+        before_keys = self._standalone_sheet_keys().copy()
         result = call()
         if self.version() == version:
             return result
