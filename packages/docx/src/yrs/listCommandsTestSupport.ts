@@ -60,6 +60,10 @@ const INDENTED_NUMBERING = numberingXml(
   abstractNumXml(0, '<w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="•"/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="1440" w:hanging="360"/></w:pPr></w:lvl>') +
   numXml(5, 0)
 );
+const LEFT_ONLY_NUMBERING = numberingXml(
+  abstractNumXml(0, '<w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="•"/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="1440"/></w:pPr></w:lvl>') +
+  numXml(5, 0)
+);
 /** List 5: the indented bullet list of `INDENTED_NUMBERING`. List 6: a bullet list whose level 0 gives no indent. */
 const CHARACTER_INDENT_NUMBERING = numberingXml(
   abstractNumXml(0, '<w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="•"/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="1440" w:hanging="360"/></w:pPr></w:lvl>') +
@@ -126,9 +130,10 @@ export const LIST_LAYOUT = JSON.stringify({
  * of the indented bullet list 5 and `UNINDENTED_ITEM` of the bullet list 6, whose level gives no indent.
  * K: `SINGLE_BULLET` of the one-level bullet list 1, directly above `PLAIN`. L: `HEADING`, numbered
  * by its style's indented list 1 with the style's left indent in character units, above
- * `UNINDENTED_ITEM` of the decimal list 6, whose level gives no indent.
+ * `UNINDENTED_ITEM` of the decimal list 6, whose level gives no indent. M: as H, with a list 5
+ * whose level gives a left indent and no hanging indent.
  */
-export type ListDocument = 'A' | 'B' | 'C' | 'D' | 'E' | 'F' | 'G' | 'H' | 'I' | 'J' | 'K' | 'L';
+export type ListDocument = 'A' | 'B' | 'C' | 'D' | 'E' | 'F' | 'G' | 'H' | 'I' | 'J' | 'K' | 'L' | 'M';
 export type ListKind = 'bullet' | 'numbered';
 export interface ListDocumentOptions {
   /** Puts `GAP` directly above `PLAIN`. */
@@ -144,6 +149,7 @@ export interface ListDocumentOptions {
 /** The `w:numId`s of the numbering each document opens with. */
 export const SOURCE_NUM_IDS: Readonly<Record<ListDocument, readonly string[]>> = {
   A: ['1', '2', '3'], B: ['1'], C: [], D: ['1'], E: ['1'], F: ['1', '2'], G: ['2', '7'], H: ['5'], I: ['2', '7'], J: ['5', '6'], K: ['1', '2'], L: ['1', '6'],
+  M: ['5'],
 };
 
 export async function preloadListWasm(): Promise<void> {
@@ -201,7 +207,7 @@ export function listDocument(doc: ListDocument, options: ListDocumentOptions = {
       CHARACTER_HEADING_NUMBERING, undefined, CHARACTER_HEADING_STYLES
     );
   }
-  if (doc === 'E' || doc === 'F' || doc === 'G' || doc === 'H' || doc === 'I' || doc === 'J' || doc === 'K') {
+  if (doc === 'E' || doc === 'F' || doc === 'G' || doc === 'H' || doc === 'I' || doc === 'J' || doc === 'K' || doc === 'M') {
     const opening = {
       E: item(HYBRID_BULLET, 1, 0) + item(HYBRID_NUMBER, 1, 2),
       F: item(SINGLE_BULLET, 1, 0) + item(DEEP_NUMBER, 2, 2),
@@ -211,10 +217,11 @@ export function listDocument(doc: ListDocument, options: ListDocumentOptions = {
       J: `<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="5"/></w:numPr><w:ind w:leftChars="200"/></w:pPr><w:r><w:t>${CHARACTER_ITEM}</w:t></w:r></w:p>` +
         item(UNINDENTED_ITEM, 6, 0),
       K: item(SINGLE_BULLET, 1, 0),
+      M: item(INDENTED_ITEM, 5, 0),
     }[doc];
     const numbering = {
       E: HYBRID_NUMBERING, F: SINGLE_LEVEL_NUMBERING, G: TWO_DECIMAL_NUMBERING, H: INDENTED_NUMBERING, I: DEEP_SEVEN_NUMBERING,
-      J: CHARACTER_INDENT_NUMBERING, K: SINGLE_LEVEL_NUMBERING,
+      J: CHARACTER_INDENT_NUMBERING, K: SINGLE_LEVEL_NUMBERING, M: LEFT_ONLY_NUMBERING,
     }[doc];
     return pack(`${XML}<w:document xmlns:w="${W}"><w:body>${opening}${added}${SECT}</w:body></w:document>`, numbering);
   }
@@ -895,6 +902,18 @@ export function listCommandScenarios(path: string, open: OpenListCommandDriver, 
     expect(character.marker).not.toBeNull();
     expect(propertiesOf(driver, CHARACTER_ITEM).numPr).toMatchObject({ numId: 5, ilvl: 0 });
     expect(propertiesOf(driver, UNINDENTED_ITEM).numPr).toMatchObject({ numId: 6, ilvl: 0 });
+  }, timeout);
+
+  test(`${path}: bullets below an item of a list whose level gives a left indent and no hanging indent lay the paragraph out as after reopening`, async () => {
+    const driver = await open('M');
+    driver.toggle('bullet', PLAIN);
+    const live = driver.left(PLAIN);
+    const item = driver.left(INDENTED_ITEM);
+    const reopened = await open('M', { saved: await driver.save() });
+    expect(live).toEqual(reopened.left(PLAIN));
+    expect(reopened.left(INDENTED_ITEM)).toEqual(item);
+    expect(propertiesOf(driver, PLAIN).numPr).toMatchObject({ numId: 5, ilvl: 0 });
+    expect(live.marker).not.toBeNull();
   }, timeout);
 
   test(`${path}: bullets below a bullet item indented to a level its list does not define start a list instead of copying that level`, async () => {

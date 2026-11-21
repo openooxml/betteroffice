@@ -1,5 +1,5 @@
 import { afterEach, beforeAll, expect, test } from 'bun:test';
-import type { YrsParagraphAttrs } from './index';
+import type { YrsParagraphAttrs, YrsSession } from './index';
 import { LIST_OFF_ATTRS } from './listCommands';
 import { createdListKey } from './listDefinitionSave';
 import {
@@ -208,6 +208,55 @@ test('worker: bullets off on a heading that was given a style without numbering 
   expect(heading().properties.numPr ?? null).toBeNull();
   expect(createdListKey(styled)).toBeDefined();
   expect(styled.pStyle).toBe('Normal');
+}, TIMEOUT);
+
+test('worker: a paragraph moved to another list by a paragraph-attribute write loses the list display attribute', async () => {
+  const open = async (doc: 'G' | 'J') => {
+    const arm = await openCommandEngine(undefined, { bytes: listDocument(doc), clientId: ++clientId });
+    const plain = () => arm.engine.paragraphs('body').find(entry => entry.text === PLAIN)!;
+    const at = () => selection(plain().paraId, 0);
+    const toggle = (kind: 'bullet' | 'numbered') =>
+      expect(execute(arm, command(arm, 'toggleList', { selection: at(), kind }))).toMatchObject({ status: 'applied' });
+    const write = (numPr: { numId: number; ilvl: number }) =>
+      expect(execute(arm, command(arm, 'setParagraphAttrs', { selection: at(), attrs: { numPr } }))).toMatchObject({ status: 'applied' });
+    return { plain, toggle, write };
+  };
+  const moved = await open('J');
+  moved.toggle('bullet');
+  const joined = moved.plain().properties;
+  moved.write({ numId: 5, ilvl: 0 });
+  const replaced = moved.plain().properties;
+  const nested = await open('G');
+  nested.toggle('numbered');
+  const level = nested.plain().properties;
+  nested.write({ numId: 7, ilvl: 0 });
+  const outdented = nested.plain().properties;
+  nested.write({ numId: 2, ilvl: 0 });
+  expect(replaced.numPr).toMatchObject({ numId: 5, ilvl: 0 });
+  expect(replaced.listLevelIndents ?? null).toBeNull();
+  expect(outdented.numPr).toMatchObject({ numId: 7, ilvl: 0 });
+  expect(outdented.listLevelIndents).toBe(true);
+  expect(nested.plain().properties.listLevelIndents ?? null).toBeNull();
+  expect(joined.numPr).toMatchObject({ numId: 6, ilvl: 0 });
+  expect(joined.listLevelIndents).toBe(true);
+  expect(level.numPr).toMatchObject({ numId: 7, ilvl: 1 });
+  expect(level.listLevelIndents).toBe(true);
+}, TIMEOUT);
+
+test('a session written before the style question still satisfies the session type', () => {
+  const adapter = {} as Omit<YrsSession, 'paragraphStyleNumbers'>;
+  const session: YrsSession = adapter;
+  expect(session.paragraphStyleNumbers).toBeUndefined();
+});
+
+test('worker: an engine without the style question takes a style-numbered heading off by the flag stored at load', async () => {
+  const arm = await openCommandEngine(undefined, { bytes: listDocument('D'), clientId: ++clientId });
+  const heading = () => arm.engine.paragraphs('body').find(entry => entry.text === HEADING)!;
+  Reflect.deleteProperty(arm.engine, 'paragraphStyleNumbers');
+  expect(execute(arm, command(arm, 'toggleList', { selection: selection(heading().paraId, 0), kind: 'numbered' })))
+    .toMatchObject({ status: 'applied' });
+  expect(heading().properties.numPr).toMatchObject({ numId: 0 });
+  expect('paragraphStyleNumbers' in arm.engine).toBe(false);
 }, TIMEOUT);
 
 test('the attributes that take a paragraph off its list are frozen and clear its marker formatting', () => {
