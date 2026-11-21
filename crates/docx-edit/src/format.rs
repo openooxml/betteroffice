@@ -798,7 +798,7 @@ pub(crate) fn is_active(attrs: Option<&Attrs>, key: &str) -> bool {
 /// a field, which it refuses.
 fn holds_suggestion_container<T: ReadTxn>(chunks: &[crate::ops::Chunk], txn: &T) -> bool {
     chunks.iter().any(|chunk| {
-        chunk.attrs.contains_key("fieldResult")
+        chunk.attr_active("fieldResult")
             || matches!(&chunk.kind, crate::ops::ChunkKind::Embed(Some(map))
                 if crate::map_string(map, txn, crate::KIND_KEY).as_deref() == Some("sdt")
                     || (crate::map_string(map, txn, crate::KIND_KEY).as_deref() == Some("field")
@@ -1570,7 +1570,7 @@ impl EditingDoc {
                 }
                 if [INS, DEL, RPR_CHANGE]
                     .iter()
-                    .any(|key| chunk.attrs.contains_key(*key))
+                    .any(|key| chunk.attr_active(key))
                 {
                     return Err(OpError::OverlapsTrackedChange);
                 }

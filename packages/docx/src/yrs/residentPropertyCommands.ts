@@ -119,12 +119,16 @@ export function propertyCommandTarget(engine: DocxWorkerCommandEngine, command: 
       if (range && command.payload.suggesting) {
         if (range.start.paraId !== range.end.paraId) return 'unsupported-suggesting';
         const index = engine.geometryReader.paragraphSpans(range.story).findIndex(span => span.paraId === range.start.paraId);
+        const caret = command.payload.displayText && range.start.offset === range.end.offset;
         let offset = 0;
         for (const segment of engine.paragraphSegments(range.story, [index])[0] ?? []) {
           const start = offset;
           offset += segment.kind === 'text' ? segment.text.length : 1;
+          if (caret && start <= range.start.offset && range.start.offset <= offset && segment.attributes.fieldResult != null) {
+            return 'unsupported-suggesting';
+          }
           if (Math.min(offset, range.end.offset) <= Math.max(start, range.start.offset)) continue;
-          if (segment.kind !== 'text' || ['ins', 'del', 'rPrChange', 'fieldResult'].some(key => Object.hasOwn(segment.attributes, key))) {
+          if (segment.kind !== 'text' || segment.attributes.fieldResult != null || ['ins', 'del', 'rPrChange'].some(key => Object.hasOwn(segment.attributes, key))) {
             return 'unsupported-suggesting';
           }
         }

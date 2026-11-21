@@ -7,7 +7,7 @@ import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
 import { preloadParseWasm } from '../wasm/parse';
 import { applyClipboardFragment, readClipboardSlice } from './clipboardFragment';
 import type { DocxEditStep, DocxTextTarget } from './edits';
-import { createYrsSession, saveYrsDocx, type YrsSession, type YrsStoryRange } from './index';
+import { createYrsSession, saveYrsDocx, SuggestedFormattingOverContainerError, type YrsSession, type YrsStoryRange } from './index';
 import type { TablePayload } from './storyPlainText';
 
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
@@ -140,14 +140,8 @@ describe('tracked formatting in fields and copied content', () => {
     const range = textRange(session, 'body', 'Entry');
     const beforeXml = await saveXml(session);
     const before = session.encodeState();
-    let refusal: unknown;
-    try {
-      session.setHyperlink(range, { href: '#new-entry' }, AUTHOR);
-    } catch (error) {
-      refusal = error;
-    }
-
-    expect(refusal).toBe('suggested character formatting cannot include fields or inline content controls');
+    expect(() => session.setHyperlink(range, { href: '#new-entry' }, AUTHOR))
+      .toThrow(SuggestedFormattingOverContainerError);
     expect(session.encodeState()).toEqual(before);
     expect(session.listRevisions()).toEqual([]);
     const xml = await saveXml(session);
