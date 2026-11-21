@@ -1517,32 +1517,151 @@ fn keeps_field_characters(source: &str, written: &str) -> bool {
         .is_some_and(|unpaired| unpaired_field_characters(written) == Some(unpaired))
 }
 
-/// The field characters in `xml` whose partners lie outside it: the ends of fields it does not
-/// begin and the begins of fields it does not end. A field begun and ended in `xml` counts in
-/// neither. `None` on a field character without a begin, separate or end type.
-fn unpaired_field_characters(xml: &str) -> Option<(usize, usize)> {
-    let mut ends = 0usize;
-    let mut begins = 0usize;
+/// The field characters in `xml` whose partners lie outside it, by type and in order: the
+/// separates and ends of fields it does not begin, then the begins of fields it does not end,
+/// each with the separates that follow it. A field begun and ended in `xml` is left out with
+/// everything in it, so the list is empty where every field in `xml` is whole. `None` on a
+/// field character without a begin, separate or end type.
+fn unpaired_field_characters(xml: &str) -> Option<Vec<&'static str>> {
+    let mut unpaired = Vec::new();
+    let mut open = Vec::new();
     for tag in tags(xml)? {
-        if tag.end {
-            continue;
-        }
-        let local = tag
-            .name
-            .rsplit_once(':')
-            .map_or(tag.name, |(_, local)| local);
-        if local != "fldChar" {
+        if tag.end || local_name(tag.name) != "fldChar" {
             continue;
         }
         match &*unescaped(xml, attribute(&tag, "w:fldCharType")?)? {
-            "begin" => begins += 1,
-            "separate" => {}
-            "end" if begins > 0 => begins -= 1,
-            "end" => ends += 1,
+            "begin" => {
+                open.push(unpaired.len());
+                unpaired.push("begin");
+            }
+            "separate" => unpaired.push("separate"),
+            "end" => match open.pop() {
+                Some(begin) => unpaired.truncate(begin),
+                None => unpaired.push("end"),
+            },
             _ => return None,
         }
     }
-    Some((ends, begins))
+    Some(unpaired)
+}
+
+fn local_name(name: &str) -> &str {
+    name.rsplit_once(':').map_or(name, |(_, local)| local)
+}
+
+/// `written`, one paragraph written in place of the paragraph `source`, changed to leave open or
+/// close the same fields outside it as `source` does. Where `source` closes fields begun before
+/// it with runs holding only their ends, last in the paragraph but for bookmark ends, and
+/// `written` closes none, those runs are appended to `written`. Where `source` leaves one field
+/// open and `written` writes it closed with a last run holding only its end, that run is
+/// removed. `None` for every other paragraph.
+fn carry_field_characters(source: &str, written: &str) -> Option<String> {
+    let wanted = unpaired_field_characters(source)?;
+    if wanted.is_empty() || !unpaired_field_characters(written)?.is_empty() {
+        return None;
+    }
+    let carried = if wanted.iter().all(|kind| *kind == "end") {
+        let source_tags = tags(source)?;
+        let (inner, elements) = paragraph_elements(&source_tags)?;
+        let mut runs = Vec::new();
+        for element in elements.iter().rev() {
+            let element = &inner[element.clone()];
+            if lone_field_end(source, element) {
+                runs.push(element.first()?.range.start..element.last()?.range.end);
+            } else if !matches!(
+                element,
+                [tag] if tag.empty && local_name(tag.name) == "bookmarkEnd"
+            ) {
+                break;
+            }
+        }
+        let before = &source[..runs.last()?.start];
+        if !unpaired_field_characters(before)?.is_empty() {
+            return None;
+        }
+        let written_tags = tags(written)?;
+        paragraph_elements(&written_tags)?;
+        let close = written_tags.last()?.range.start;
+        let mut carried = written[..close].to_owned();
+        for run in runs.iter().rev() {
+            carried.push_str(&source[run.clone()]);
+        }
+        carried.push_str(&written[close..]);
+        carried
+    } else if wanted.first() == Some(&"begin")
+        && wanted[1..].iter().all(|kind| *kind == "separate")
+    {
+        let written_tags = tags(written)?;
+        let (inner, elements) = paragraph_elements(&written_tags)?;
+        let last = &inner[elements.last()?.clone()];
+        if !lone_field_end(written, last) {
+            return None;
+        }
+        let run = last.first()?.range.start..last.last()?.range.end;
+        format!("{}{}", &written[..run.start], &written[run.end..])
+    } else {
+        return None;
+    };
+    let kept = unpaired_field_characters(&carried)? == wanted;
+    kept.then_some(carried)
+}
+
+/// The tags of `tags`, one `w:p` element, between its start and end tags, with the index ranges
+/// in them of the elements directly inside it. `None` where `tags` is not one paragraph.
+fn paragraph_elements<'t, 'a>(tags: &'t [Tag<'a>]) -> Option<(&'t [Tag<'a>], Vec<Range<usize>>)> {
+    let [open, inner @ .., close] = tags else {
+        return None;
+    };
+    if open.end || open.empty || local_name(open.name) != "p" || !close.end {
+        return None;
+    }
+    Some((inner, top_level_elements(inner)?))
+}
+
+/// The index ranges in `tags` of the elements at its top level. `None` where an end tag in
+/// `tags` closes nothing it opened or an element is left open.
+fn top_level_elements(tags: &[Tag<'_>]) -> Option<Vec<Range<usize>>> {
+    let mut elements = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0;
+    for (index, tag) in tags.iter().enumerate() {
+        if tag.end {
+            depth = depth.checked_sub(1)?;
+        } else if !tag.empty {
+            depth += 1;
+        }
+        if depth == 0 {
+            elements.push(start..index + 1);
+            start = index + 1;
+        }
+    }
+    (depth == 0).then_some(elements)
+}
+
+/// Whether `tags`, one element of `xml`, is a run holding only an empty field end character,
+/// after its properties if it has any.
+fn lone_field_end(xml: &str, tags: &[Tag<'_>]) -> bool {
+    let [open, inner @ .., close] = tags else {
+        return false;
+    };
+    let Some(elements) = top_level_elements(inner) else {
+        return false;
+    };
+    let character = match elements.as_slice() {
+        [character] => character,
+        [first, character] if local_name(inner[first.start].name) == "rPr" => character,
+        _ => return false,
+    };
+    let [tag] = &inner[character.clone()] else {
+        return false;
+    };
+    let kind = attribute(tag, "w:fldCharType")
+        .and_then(|value| unescaped(xml, value));
+    local_name(open.name) == "r"
+        && close.end
+        && tag.empty
+        && local_name(tag.name) == "fldChar"
+        && kind.as_deref() == Some("end")
 }
 
 /// Whether `xml`, one paragraph, holds both ends of everything in it that can pair across
@@ -3334,6 +3453,11 @@ pub(crate) fn replace_story_part(
                     xml = restored;
                 }
             }
+            if !keeps_field_characters(paragraph, &xml)
+                && let Some(carried) = carry_field_characters(paragraph, &xml)
+            {
+                xml = carried;
+            }
             edits.push((range, 2, xml));
         }
     }
@@ -3358,7 +3482,7 @@ pub(crate) fn replace_story_part(
     if edits
         .iter()
         .any(|(range, _, xml)| !keeps_field_characters(&source[range.clone()], xml))
-        && unpaired_field_characters(&source) == Some((0, 0))
+        && unpaired_field_characters(&source) == Some(Vec::new())
     {
         reasons.push("field: replacement changes the field characters around it".to_owned());
         return None;
