@@ -13,7 +13,7 @@ export interface DocxPngEngine {
   /** The font ids layout measured each family with, for engines that rasterize the list themselves. */
   fontChains: Record<string, number[]>;
   page: DisplayPage;
-  outlineGlyph(fontId: number, glyphId: number): string;
+  outlineGlyph(fontId: number, glyphId: number, syntheticBold?: boolean): string;
   media(token: string): { bytes: Uint8Array; mimeType: string } | null;
   /** The session, for engines that render PNG themselves. */
   session: unknown;

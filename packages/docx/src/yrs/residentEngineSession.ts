@@ -1207,7 +1207,8 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
       const profile = JSON.parse(session.apply_input_profile_json()) as YrsEngineApplyProfile;
       return { frame, profile };
     },
-    outlineGlyphJson: (fontId, glyphId) => session.outline_glyph_json(fontId, glyphId),
+    outlineGlyphJson: (fontId, glyphId, syntheticBold) =>
+      session.outline_glyph_json(fontId, glyphId, syntheticBold),
     echoGlyphSetJson: (fontId, size, kern, alphabet) => session.echo_glyph_set_json(fontId, size, kern, alphabet),
     loadMediaSources: (json) => session.load_media_sources(json),
     loadNoteSeparators: (state) => session.load_note_separators(state),

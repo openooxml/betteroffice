@@ -833,9 +833,10 @@ export class EditSession {
      * `{"upem":n,"cmds":[{"t":"M"|"L"|"Q"|"C"|"Z", …}]}` — commands in font
      * units, y-up. `font_id` comes from
      * [`EditSession::register_measure_font`] and `glyph_id` from shaping.
-     * Errors when the glyph cannot be extracted.
+     * `synthetic_bold` widens the contours of a regular face that has no bold
+     * cut without changing metrics. Errors when the glyph cannot be extracted.
      */
-    outline_glyph_json(font_id: number, glyph_id: number): string;
+    outline_glyph_json(font_id: number, glyph_id: number, synthetic_bold?: boolean | null): string;
     /**
      * The text each of `pages` shows in the retained layout, built or not, as
      * `[{"pageIndex","paragraphs":[{"text","level"?,"inTable"?}]}]`: body
@@ -1614,10 +1615,12 @@ export function open_display_list(display_list: string): number;
  * `{"upem":2048,"cmds":[{"t":"M","x":..,"y":..},{"t":"L","x":..,"y":..},
  * {"t":"Q","cx":..,"cy":..,"x":..,"y":..},
  * {"t":"C","c1x":..,"c1y":..,"c2x":..,"c2y":..,"x":..,"y":..},{"t":"Z"}]}`.
- * The canvas caches this per `(fontId, glyphId)` and scales by `size/upem`,
- * flipping y at draw time. `cmds` is empty for a blank glyph (space).
+ * The canvas caches normal and synthetic-bold outlines separately and scales
+ * them by `size/upem`, flipping y at draw time. Blank glyphs have no commands.
+ * `synthetic_bold` widens the contours of a regular face that has no bold cut
+ * (it does not change metrics); the widened path is lines only.
  */
-export function outline_glyph_json(font_id: number, glyph_id: number): string;
+export function outline_glyph_json(font_id: number, glyph_id: number, synthetic_bold?: boolean | null): string;
 
 export function paragraphPatchWriterVersion(): number;
 
@@ -1984,7 +1987,7 @@ export interface InitOutput {
     readonly editsession_open_docx: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
     readonly editsession_open_docx_preview: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_open_docx_preview_with_budget: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
-    readonly editsession_outline_glyph_json: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_outline_glyph_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_page_texts_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_paragraph_id_count: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly editsession_paragraph_identities: (a: number) => [number, number, number, number];
@@ -2107,7 +2110,7 @@ export interface InitOutput {
     readonly measure_paragraph_json: (a: number, b: number) => [number, number, number, number];
     readonly memory: WebAssembly.Memory;
     readonly open_display_list: (a: number, b: number) => [number, number, number];
-    readonly outline_glyph_json: (a: number, b: number) => [number, number, number, number];
+    readonly outline_glyph_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly paragraphPatchWriterVersion: () => number;
     readonly parse_docx_relationships: (a: number, b: number) => [number, number, number, number];
     readonly parse_docx_s2: (a: number, b: number) => [number, number, number, number];

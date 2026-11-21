@@ -40,7 +40,8 @@ function entry(id: number, value: PeerlessEchoIntent): EchoEntry<PeerlessEchoInt
 const scope = globalThis as { Path2D?: unknown };
 scope.Path2D = class { glyph?: number; moveTo(x: number) { this.glyph ??= x; } lineTo() {} closePath() {} };
 
-function setup(options: { requestFullFrame?(): void; onPaint?(predicted?: PeerlessPredictedCaret): void } = {}) {
+function setup(options: { requestFullFrame?(): void; onPaint?(predicted?: PeerlessPredictedCaret): void } = {},
+  echoGlyphSets: DocxEchoGlyphSet[] = [glyphSet], echo = context()) {
   const draws: unknown[][] = [];
   const texts: string[] = [];
   const transforms: number[][] = [];
@@ -59,7 +60,7 @@ function setup(options: { requestFullFrame?(): void; onPaint?(predicted?: Peerle
     mountedPages === undefined || mountedPages.has(item.pageId) ? canvas : null });
   const frame: DocxCommandFrame = { coversThroughSeq: 0, revision: 1, payload: {
     frame: new ArrayBuffer(0), caret: { frameEpoch: 1, caretRect: null }, layoutRevision: 1,
-    echoContext: context(), echoGlyphSets: [glyphSet], stagedPresentation: { frameEpoch: 1, pages: [
+    echoContext: echo, echoGlyphSets, stagedPresentation: { frameEpoch: 1, pages: [
       { page, frameEpoch: 1, bitmap, backgrounds: [{ id: 'background', rect, bitmap: background }] },
     ] },
   } };
@@ -83,6 +84,19 @@ test('ack contexts require the staged page epoch and paint with its retained bac
   painter.paint([entry(2, preview!)]);
   expect(paints()).toBe(1);
   expect(painted).toEqual([1]);
+});
+
+test('echo paints a synthetic-bold line from its widened set, one fill per glyph', () => {
+  const widened: DocxEchoGlyphSet = { ...glyphSet, key: 'widened', syntheticBold: true,
+    outlines: Object.fromEntries([...new Set(alphabet)].map((character) => [character.codePointAt(0)!,
+      JSON.stringify({ upem: 1000, cmds: [{ t: 'M', x: character.codePointAt(0)! + 0x10000, y: 0 },
+        { t: 'L', x: 0, y: 700 }, { t: 'Z' }] })])) };
+  const line = { ...context().glyphs!, glyphSet: 'widened', syntheticBold: true };
+  const { painter, texts } = setup({}, [widened], { ...context(), glyphs: line });
+  const preview = painter.preview({ kind: 'insertText', payload: { text: 'x' } });
+  expect(preview).toBeDefined();
+  painter.paint([entry(2, preview!)]);
+  expect([...texts.join('')]).toEqual(['a', 'b', 'x'].map((char) => String.fromCodePoint(char.codePointAt(0)! + 0x10000)));
 });
 
 test('echo paints only lines it can place exactly and asks once for a glyph set it lacks', () => {

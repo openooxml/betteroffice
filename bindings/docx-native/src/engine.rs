@@ -1357,10 +1357,16 @@ impl EditSession {
     }
 
     #[napi(catch_unwind, js_name = "outline_glyph_json")]
-    pub fn outline_glyph_json(&self, env: Env, font_id: u32, glyph_id: u32) -> Result<String> {
+    pub fn outline_glyph_json(
+        &self,
+        env: Env,
+        font_id: u32,
+        glyph_id: u32,
+        synthetic_bold: Option<bool>,
+    ) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document(env)?
-            .outline_glyph_json(font_id, glyph_id)
+            .outline_glyph_json_with_weight(font_id, glyph_id, synthetic_bold.unwrap_or(false))
             .map_err(|error| map_error(env, error))
     }
 
@@ -3731,9 +3737,15 @@ pub fn clear_measure_fonts(env: Env) -> Result<()> {
 }
 
 #[napi(catch_unwind, js_name = "outline_glyph_json")]
-pub fn outline_glyph_json(env: Env, font_id: u32, glyph_id: u32) -> Result<String> {
+pub fn outline_glyph_json(
+    env: Env,
+    font_id: u32,
+    glyph_id: u32,
+    synthetic_bold: Option<bool>,
+) -> Result<String> {
     let _call = EngineCall::function(env);
-    docx_engine::outline_glyph_json(font_id, glyph_id).map_err(|error| map_error(env, error))
+    docx_engine::outline_glyph_json_with_weight(font_id, glyph_id, synthetic_bold.unwrap_or(false))
+        .map_err(|error| map_error(env, error))
 }
 
 #[napi(catch_unwind, js_name = "open_display_list")]

@@ -387,7 +387,11 @@ export function measureParagraphJson(input: string): string {
   return layoutGlue().measure_paragraph_json(input);
 }
 
-type OutlineGlyphExport = (fontId: number, glyphId: number) => string;
+type OutlineGlyphExport = (
+  fontId: number,
+  glyphId: number,
+  syntheticBold?: boolean
+) => string;
 
 // Optional like the session exports: when the embedded wasm has no
 // `outline_glyph_json` this resolves to undefined, `outlineGlyphJson` throws,
@@ -402,14 +406,19 @@ function resolveOutlineGlyphExport(): OutlineGlyphExport | undefined {
  * `{"upem":2048,"cmds":[{"t":"M",…},{"t":"L",…},{"t":"Q",…},{"t":"C",…},{"t":"Z"}]}`
  * — commands in font units, y-up per the font convention. `fontId` is a
  * measurement FontStore id from {@link registerMeasureFont}, `glyphId` a glyph
- * index from shaping. Throws when the export is absent or the glyph cannot be
- * extracted; the canvas backend catches that and paints the run via
+ * index from shaping. `syntheticBold` asks for the widened outlines the canvas
+ * paints a regular face with. Throws when the export is absent or the glyph
+ * cannot be extracted; the canvas backend catches that and paints the run via
  * `fillText`, so text is never invisible.
  */
-export function outlineGlyphJson(fontId: number, glyphId: number): string {
+export function outlineGlyphJson(
+  fontId: number,
+  glyphId: number,
+  syntheticBold = false
+): string {
   const outlineExport = resolveOutlineGlyphExport();
   if (!outlineExport) {
     throw new Error('outline_glyph_json is not available in the embedded layout wasm yet');
   }
-  return outlineExport(fontId, glyphId);
+  return outlineExport(fontId, glyphId, syntheticBold);
 }

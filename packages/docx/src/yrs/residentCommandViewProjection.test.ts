@@ -203,22 +203,28 @@ test('projection echoes a cluster-positioned line as one style run within the co
 });
 
 type GlyphLineOptions = { shiftX?: number; caretLine?: number; later?: DisplayPage['primitives'];
-  x?: number; advance?: number; kerned?: boolean; kerning?: number; right?: number; lines?: string[] };
+  x?: number; advance?: number; kerned?: boolean; kerning?: number; right?: number; lines?: string[];
+  /** Requests bold on the caret line through a regular face; `mixed` leaves its first run at that weight. */
+  syntheticBold?: boolean; mixed?: boolean };
 
 function glyphLine(options: GlyphLineOptions = {}) {
   const lines = options.lines ?? ['ab ', 'cd'];
   const text = lines.join('');
+  const caretLine = options.caretLine ?? lines.length - 1;
   const runs: GlyphRunPrimitive[] = [];
   let doc = 1;
   lines.forEach((line, lineIndex) => {
     let x = options.x ?? 96;
     [...line].forEach((char, index) => {
       const kern = options.kerned && char === 'A' && line[index + 1] === 'V' ? -2 : 0;
+      const synthetic = options.syntheticBold === true && lineIndex === caretLine && !(options.mixed && index === 0);
       runs.push({ kind: 'glyphRun', text: char, size: 13.333, fontId: 1, color: '#000000',
         echo: { x: 96, right: options.right ?? 720,
           kern: (options.kerning ?? 0) > 0 && (options.kerning ?? 0) <= 20,
           kerning: (options.kerning ?? 0) / 2, primaryFont: true },
-        fallbackFont: '400 13.333px Calibri, sans-serif', docStart: doc, docEnd: doc + 1,
+        fallbackFont: `${options.syntheticBold && lineIndex === caretLine ? 700 : 400} 13.333px Calibri, sans-serif`,
+        docStart: doc, docEnd: doc + 1,
+        ...(synthetic ? { syntheticBold: true } : {}),
         glyphs: [{ id: char.charCodeAt(0), cluster: 0, y: 120 + lineIndex * 20, advance: 10 + kern,
           x: x + (options.shiftX && lineIndex === 1 && index === 1 ? options.shiftX : 0) }] });
       x += (options.advance ?? 10) + kern;
@@ -232,7 +238,6 @@ function glyphLine(options: GlyphLineOptions = {}) {
     pages: [{ pageId: 1n, pageIndex: 0, fingerprint: 1n,
       primitiveIds: new BigUint64Array(primitives.map((_, index) => BigInt(index + 1))), page }],
     damagedPageIds: new Set([1n]), removedPageIds: new Set(), displayList: { pages: [page] } };
-  const caretLine = options.caretLine ?? lines.length - 1;
   const lineStart = lines.slice(0, caretLine).join('').length;
   const caretGlyph = runs[lineStart + Math.min(1, lines[caretLine]!.length - 1)]!.glyphs[0]!;
   const engine = {
@@ -246,30 +251,41 @@ function glyphLine(options: GlyphLineOptions = {}) {
   } as unknown as DocxWorkerCommandEngine;
   const at = { story: 'body', paraId: 'p', offset: lineStart + 1 };
   const alphabet = 'abcdeAV ';
-  const glyphSet = (kern: boolean) => {
-    const set = { key: kern ? 'kern' : 'set', fontId: 1, alphabet, horizontal: 0.01,
+  const glyphSet = (kern: boolean, syntheticBold: boolean) => {
+    const set = { key: syntheticBold ? 'synthetic' : kern ? 'kern' : 'set', fontId: 1, alphabet, horizontal: 0.01,
       glyphIds: [...alphabet].map((char) => char.charCodeAt(0)), advances: [...alphabet].map(() => 1000),
-      kerning: kern ? [[5, 6, -200] as const] : [], unsafePairs: [], outlines: {} };
-    return { key: set.key, ink: { upem: 1000, xMin: 0, yMin: -200, yMax: 700, overhang: 0 }, glyphs: { set, horizontal: 0.01, advance: (units: number) => units * 0.01,
+      kerning: kern ? [[5, 6, -200] as const] : [], unsafePairs: [], outlines: {},
+      ...(syntheticBold ? { syntheticBold: true } : {}) };
+    // widened outlines reach past the advance, so the same line covers a wider repaint band
+    const ink = syntheticBold
+      ? { upem: 1000, xMin: -60, yMin: -200, yMax: 700, overhang: 60 }
+      : { upem: 1000, xMin: 0, yMin: -200, yMax: 700, overhang: 0 };
+    return { key: set.key, ink, glyphs: { set, horizontal: 0.01, advance: (units: number) => units * 0.01,
       chars: new Map([...alphabet].map((char, index) => [char, index])),
       kerning: new Map(set.kerning.map(([left, right, units]) => [left * alphabet.length + right, units])),
       unsafe: new Set<number>() } };
   };
   const sets: unknown[][] = [];
+  const inks: unknown[][] = [];
   const glyphs: EchoGlyphProvider = { pixelRatio: 1,
-    glyphSet(fontId, size, kern) {
-      sets.push([fontId, size, kern]);
-      return glyphSet(kern);
+    glyphSet(fontId, size, kern, syntheticBold) {
+      sets.push([fontId, size, kern, syntheticBold === true]);
+      return glyphSet(kern, syntheticBold === true);
     },
-    glyphInk: () => ({ upem: 1000, xMin: 0, xMax: 500, yMin: -200, yMax: 700 }),
+    glyphInk(fontId, glyphId, syntheticBold) {
+      inks.push([fontId, glyphId, syntheticBold === true]);
+      return syntheticBold
+        ? { upem: 1000, xMin: -60, xMax: 560, yMin: -1200, yMax: 700 }
+        : { upem: 1000, xMin: 0, xMax: 500, yMin: -200, yMax: 700 };
+    },
   };
-  return { engine, selection: { anchor: at, focus: at }, layout: { frame, layoutRevision: 2 }, glyphs, sets };
+  return { engine, selection: { anchor: at, focus: at }, layout: { frame, layoutRevision: 2 }, glyphs, sets, inks };
 }
 
 test('glyph line reproduces the engine placement of a wrapped continuation line', () => {
   const source = glyphLine();
   const context = projectCommandEchoContext(source);
-  expect(source.sets).toEqual([[1, Math.fround(960 / 72), false]]);
+  expect(source.sets).toEqual([[1, Math.fround(960 / 72), false, false]]);
   expect(context?.glyphs).toEqual({ glyphSet: 'set', fontId: 1, size: 13.333, color: '#000000', x: 96, y: 140,
     next: '', right: 720, previousSlack: 594, device: { x: 95, y: 129, width: 626, height: 15 }, pixelRatio: 1 });
   expect(context?.damage[0]?.rect).toEqual({ x: 95, y: 129, width: 626, height: 15 });
@@ -288,6 +304,32 @@ test('glyph line keeps only the glyph sets that reproduce the line spacing and k
     .toBe('kern');
   expect(projectCommandEchoContext(glyphLine({ lines: ['ab ', 'AVc'], kerned: true }))).toBeUndefined();
   expect(projectCommandEchoContext(glyphLine({ lines: ['ab ', 'AVc'], kerning: 2 }))).toBeUndefined();
+});
+
+test('glyph line keeps a synthetic-bold line on its widened glyph set', () => {
+  const source = glyphLine({ syntheticBold: true });
+  const context = projectCommandEchoContext(source);
+  expect(source.sets).toEqual([[1, Math.fround(960 / 72), false, true]]);
+  expect(context?.glyphs).toMatchObject({ glyphSet: 'synthetic', syntheticBold: true });
+  const plain = projectCommandEchoContext(glyphLine())!;
+  expect(plain.glyphs?.syntheticBold).toBeUndefined();
+  // the widened outlines set the ink, so the repaint band reaches past the regular line's
+  expect(context!.damage[0]!.rect.x).toBeLessThan(plain.damage[0]!.rect.x);
+  expect(context!.damage[0]!.rect.width).toBeGreaterThan(plain.damage[0]!.rect.width);
+});
+
+test('glyph line declines a line that mixes synthetic and real weight', () => {
+  expect(projectCommandEchoContext(glyphLine({ syntheticBold: true, mixed: true }))).toBeUndefined();
+});
+
+test('echo bounds a synthetic-bold run above its line by the widened ink', () => {
+  const above = (syntheticBold?: true): GlyphRunPrimitive => ({ kind: 'glyphRun', text: 'z', size: 13.333, fontId: 1,
+    color: '#000000', ...(syntheticBold ? { syntheticBold } : {}), fallbackFont: '400 13.333px Calibri, sans-serif',
+    docStart: 100, docEnd: 101, glyphs: [{ id: 122, cluster: 0, x: 300, y: 120, advance: 10 }] });
+  expect(projectCommandEchoContext(glyphLine({ later: [above()] }))?.glyphs).toBeDefined();
+  const source = glyphLine({ later: [above(true)] });
+  expect(projectCommandEchoContext(source)).toBeUndefined();
+  expect(source.inks).toContainEqual([1, 122, true]);
 });
 
 test('glyph line declines lines whose origin or stretch moves with their width', () => {

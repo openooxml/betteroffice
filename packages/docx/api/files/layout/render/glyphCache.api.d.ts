@@ -36,8 +36,12 @@ export interface GlyphOutline {
     /** the font's units-per-em; the backend scales the path by `size`/upem. */
     upem: number;
 }
-/** fetch a glyph's outline as JSON — `outlineGlyphJson` in production, a fake in tests. */
-export type GlyphOutlineProvider = (fontId: number, glyphId: number) => string;
+/**
+ * fetch a glyph's outline as JSON — `outlineGlyphJson` in production, a fake in
+ * tests. `syntheticBold` asks the source for the widened outlines a regular
+ * face is painted with instead of its own.
+ */
+export type GlyphOutlineProvider = (fontId: number, glyphId: number, syntheticBold?: boolean) => string;
 export interface GlyphCacheOptions {
     /** outline source; throws/invalid JSON propagate to the caller (fallback). */
     provider: GlyphOutlineProvider;
@@ -50,9 +54,10 @@ export interface GlyphCacheOptions {
     createPath?: () => Path2D;
 }
 /**
- * LRU cache keyed `(fontId, glyphId)` → `GlyphOutline`. `Map` preserves
- * insertion order, so the oldest key is `keys().next()` and touching an entry
- * is delete-then-set (reinsert at the tail).
+ * LRU cache keyed `(fontId, glyphId, syntheticBold)` → `GlyphOutline`. `Map`
+ * preserves insertion order, so the oldest key is `keys().next()` and touching
+ * an entry is delete-then-set (reinsert at the tail). The synthetic-bold
+ * variant is a distinct entry: its widened contour fills a different path.
  */
 export declare class GlyphCache {
     private readonly provider;
@@ -65,10 +70,11 @@ export declare class GlyphCache {
     /** Drops the cached outlines of these fonts, whose outline data changed. */
     invalidateFonts(fontIds: ReadonlySet<number>): void;
     /**
-     * Outline for one glyph, building and caching it on first request. Throws if
-     * the provider throws or returns unparseable JSON — the caller falls back.
+     * Outline for one glyph and weight variant, building and caching it on first
+     * request. Throws if the provider throws or returns unparseable JSON — the
+     * caller falls back.
      */
-    get(fontId: number, glyphId: number): GlyphOutline;
+    get(fontId: number, glyphId: number, syntheticBold?: boolean): GlyphOutline;
     private build;
 }
 /**

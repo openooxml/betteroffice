@@ -984,7 +984,7 @@ export interface YrsSession extends CollaborationReplica {
     displayRangeRectsOnPagesJson?(from: number, to: number, firstPage: number, lastPage: number): string;
     displayRangeRectsRegionJson(region: 'body' | 'header' | 'footer', rId: string, from: number, to: number): string;
     /** Read a glyph outline from the session's resident font store. */
-    outlineGlyphJson(fontId: number, glyphId: number): string;
+    outlineGlyphJson(fontId: number, glyphId: number, syntheticBold?: boolean): string;
     /** Hydrates from an encoded yrs v1 update (typically a peer's {@link encodeState} output). */
     loadState(update: Uint8Array): void;
     encodePeerMetadata(): Uint8Array;

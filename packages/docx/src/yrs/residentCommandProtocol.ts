@@ -223,6 +223,8 @@ export interface DocxEchoGlyphLine {
   fontId: number;
   size: number;
   color: string;
+  /** Bold requested from a regular face: `glyphSet` carries that face's widened outlines. */
+  syntheticBold?: boolean;
   x: number;
   y: number;
   /** The paragraph character after the line, which kerns with its last one; empty at the end. */
@@ -245,6 +247,8 @@ export interface DocxEchoGlyphLine {
 export interface DocxEchoGlyphSet {
   key: string;
   fontId: number;
+  /** The outlines are widened: a bold request painted from this regular face. */
+  syntheticBold?: boolean;
   alphabet: string;
   horizontal: number;
   glyphIds: readonly number[];

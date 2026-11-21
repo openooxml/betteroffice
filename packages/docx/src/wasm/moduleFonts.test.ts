@@ -57,6 +57,9 @@ test('module font exports coexist with an edit session in the same wasm instance
     expect(register_measure_font(font)).toBe(0);
     const moduleMeasurement = measure_paragraph_json(input(0));
     const moduleOutline = outline_glyph_json(0, 36);
+    const widened = outline_glyph_json(0, 36, true);
+    expect(widened).not.toBe(moduleOutline);
+    expect(session.outline_glyph_json(0, 36, true)).toBe(widened);
     expect(session.register_substitute_measure_font(0, 'Segoe UI Light')).toBe(2);
     expect(measure_paragraph_json(input(0))).toBe(moduleMeasurement);
     expect(outline_glyph_json(0, 36)).toBe(moduleOutline);
