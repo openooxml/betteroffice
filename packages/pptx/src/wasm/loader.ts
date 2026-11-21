@@ -499,6 +499,17 @@ export function presentationDisplayListJson(handle: PresentationHandle, slideInd
   return context.wasmCall(() => context.renderer.layoutSlideJson(context.doc, slideIndex));
 }
 
+/** @internal Renders one tentative shape rectangle without changing the presentation. */
+export function presentationShapeRectPreview(
+  handle: PresentationHandle, slideId: string, shapeId: string, rect: ShapeRect,
+): SlideDisplayList {
+  const context = presentationContexts.get(handle);
+  if (!context) throw new Error('Presentation shape preview is unavailable');
+  return context.jsonWasmCall(() => context.renderer.previewShapeRectJson(
+    context.doc, slideId, shapeId, rect.x, rect.y, rect.width, rect.height,
+  ));
+}
+
 export function isProposalsAvailable(): boolean {
   return typeof PptxDocument.prototype.proposeJson === 'function'
     && typeof PptxRenderer.prototype.layoutProposalSlideJson === 'function';

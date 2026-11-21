@@ -48,6 +48,7 @@ import { usePeerlessTextSelection } from './usePeerlessTextSelection';
 import { PeerlessShapeOverlay } from './PeerlessShapeOverlay';
 import { usePeerlessShapeGestures, type PeerlessShapePreviewStore } from './usePeerlessShapeGestures';
 import { usePeerlessContextMenu } from './usePeerlessContextMenu';
+import { PeerlessShapeResizePreview } from './PeerlessShapeResizePreview';
 
 function useStageFit(stage: RefObject<HTMLDivElement | null>, run: PeerlessPresentation | null,
   chrome: PeerlessPresentation | null,
@@ -138,6 +139,7 @@ function Overlays({ run, commands, inputRef, preview, insertion, editor, onError
       transform: `scale(${fit.scale})`, transformOrigin: '0 0' }}>
       <PeerlessCaret store={run.visual} />
     </div>
+    <PeerlessShapeResizePreview run={run} preview={preview} scale={fit.scale} />
     {!insertion && view.selection?.kind === 'object' && <PeerlessShapeOverlay selection={view.selection} preview={preview}
       scale={fit.scale} readOnly={view.editState.readOnly} />}
     {edited && <span data-testid="pptx-text-edit-outline" aria-hidden="true" style={{

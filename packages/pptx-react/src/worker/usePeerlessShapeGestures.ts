@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, type KeyboardEvent, type PointerEvent, type RefObject } from 'react';
 import type { ShapeRect } from '@betteroffice/pptx';
-import type { PresentationCommandFrameTag, PresentationCommandObjectSelection } from '@betteroffice/pptx/worker';
+import type {
+  PresentationCommandFrameTag, PresentationCommandObjectSelection, PresentationCommandObjectTarget,
+} from '@betteroffice/pptx/worker';
 import { MIN_SHAPE_SIZE_EMU, passedDragThreshold, RESIZE_HANDLES, resizeCommitDelta, resizedBounds,
   slidePoint, type ResizeHandle, type SlidePoint } from '../interactions';
 import { hitConfirmedGeometry, peerlessGestureActive, peerlessInputReference, setPeerlessGestureActive, type PeerlessViewStore } from './peerlessViewStore';
@@ -26,6 +28,11 @@ interface ShapeGesture {
 export interface PeerlessShapePreview {
   token: string;
   bounds: ShapeRect;
+  request?: {
+    frame: PresentationCommandFrameTag;
+    target: PresentationCommandObjectTarget;
+    rect: ShapeRect;
+  };
 }
 
 export interface PeerlessShapePreviewStore {
@@ -119,7 +126,10 @@ export function usePeerlessShapeGestures(store: PeerlessViewStore | null, {
     if (gesture.current !== current || current.cancelled || !current.dragging || !current.selected ||
       store?.getSnapshot().editState.readOnly) return;
     const rect = peerlessGestureRect(current.selected, current.delta, current.handle);
-    if (rect) setPreview({ token: current.selected.token, bounds: previewBounds(current.selected, rect, Boolean(current.handle)) });
+    if (rect) setPreview({ token: current.selected.token, bounds: previewBounds(current.selected, rect, Boolean(current.handle)),
+      ...(current.handle && current.selected.storyId ? { request: { frame: current.frame,
+        target: { slideId: current.selected.slideId, shapeId: current.selected.shapeId, token: current.selected.token },
+        rect } } : {}) });
   }, [store, setPreview]);
 
   const onPointerDown = useCallback((event: PointerEvent<HTMLElement>): boolean => {
@@ -201,15 +211,19 @@ export function usePeerlessShapeGestures(store: PeerlessViewStore | null, {
     recent.current = !current.handle && !dragging ? { slideId: current.frame.slideId, shapeId: current.shapeId,
       x: event.clientX, y: event.clientY, time: inputTime } : null;
     current.element.releasePointerCapture?.(current.pointerId);
-    setPreview(null);
     if (!dragging || delta.x === 0 && delta.y === 0) {
       outstanding.current.delete(current);
+      setPreview(null);
       return true;
     }
     outstanding.current.delete(current);
-    if (current.cancelled || !presentation?.current || store.getSnapshot().editState.readOnly) return true;
+    if (current.cancelled || !presentation?.current || store.getSnapshot().editState.readOnly) {
+      setPreview(null);
+      return true;
+    }
     const object = current.selected;
     if (!object) {
+      setPreview(null);
       const at = peerlessInputReference(store, true);
       if (at?.source === 'afterSeq' && !current.handle) {
         void store.dispatch({ kind: 'moveShape', payload: { at, frame: current.frame,
@@ -218,12 +232,20 @@ export function usePeerlessShapeGestures(store: PeerlessViewStore | null, {
       return true;
     }
     const rect = peerlessGestureRect(object, delta, current.handle);
-    if (!rect || Object.keys(rect).every((key) => rect[key as keyof ShapeRect] === object.rect![key as keyof ShapeRect])) return true;
+    if (!rect || Object.keys(rect).every((key) => rect[key as keyof ShapeRect] === object.rect![key as keyof ShapeRect])) {
+      setPreview(null);
+      return true;
+    }
     const payload = { frame: current.frame,
       target: { slideId: object.slideId, shapeId: object.shapeId, token: object.token },
       inputTime, undoGroup: current.group };
-    void store.dispatch(current.handle ? { kind: 'setShapeRect', payload: { ...payload, rect } }
-      : { kind: 'moveShape', payload: { ...payload, x: rect.x, y: rect.y } }).catch(() => {});
+    const retained = previewValue.current;
+    const commit = store.dispatch(current.handle ? { kind: 'setShapeRect', payload: { ...payload, rect } }
+      : { kind: 'moveShape', payload: { ...payload, x: rect.x, y: rect.y } });
+    if (!retained?.request) setPreview(null);
+    void commit.catch(() => {}).finally(() => {
+      if (previewValue.current === retained) setPreview(null);
+    });
     return true;
   }, [store, presentation, position, setPreview]);
 

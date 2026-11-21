@@ -229,6 +229,39 @@ impl PptxRenderer {
             .layout_proposal_diff_slide_json(document.session(), id, slide_index)
             .map_err(js_error)
     }
+
+    #[wasm_bindgen(js_name = previewShapeRectJson)]
+    pub fn preview_shape_rect_json(
+        &self,
+        document: &PptxDocument,
+        slide_id: &str,
+        shape_id: &str,
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+    ) -> Result<String, JsValue> {
+        let coordinate = |value: f64| -> Result<i64, JsValue> {
+            if value.is_finite()
+                && value.fract() == 0.0
+                && value >= i64::MIN as f64
+                && value <= i64::MAX as f64
+            {
+                Ok(value as i64)
+            } else {
+                Err(JsError::new("shape rectangle coordinates must be integers").into())
+            }
+        };
+        let rect = pptx_edit::ShapeRect {
+            x: coordinate(x)?,
+            y: coordinate(y)?,
+            width: coordinate(width)?,
+            height: coordinate(height)?,
+        };
+        self.inner
+            .preview_shape_rect_json(document.session(), slide_id, shape_id, rect)
+            .map_err(js_error)
+    }
 }
 
 impl Default for PptxRenderer {

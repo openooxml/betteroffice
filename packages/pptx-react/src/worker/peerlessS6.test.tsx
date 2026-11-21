@@ -4,7 +4,7 @@ import { afterAll, afterEach, beforeEach, expect, mock, spyOn } from 'bun:test';
 import { budgetedTest, budgetedWaitFor } from '../../../../shared/office-session/testing/loadBudget';
 import { readFile } from 'node:fs/promises';
 import JSZip from 'jszip';
-import type { TextBoxPrimitive } from '@betteroffice/pptx';
+import type { SlideDisplayList, TextBoxPrimitive } from '@betteroffice/pptx';
 import type {
   PptxWorkerSession, PresentationCommandClient, PresentationCommandEnvelope, PresentationCommandEvents,
   PresentationCommandMethods,
@@ -256,6 +256,33 @@ test('resize_minimum', async () => {
     rect: { x: 6100000 - 76200, y: 2500000 - 76200, width: 76200, height: 76200 } });
   await bounded(client.dispatch({ kind: 'undo', payload: { inputTime: 1, undoGroup: 'undo' } }));
   expect(client.state.editState.canUndo).toBe(false);
+});
+
+test('text_resize_previews_reflow_before_one_release_commit', async () => {
+  const { view, stage, point, select, box } = await open();
+  await select();
+  const original = client.previewShapeRect.bind(client);
+  let preview: SlideDisplayList | undefined;
+  const previews = spyOn(client, 'previewShapeRect').mockImplementation(async (...args) => {
+    preview = await original(...args);
+    return preview;
+  });
+  restorers.push(() => previews.mockRestore());
+  const handle = view.getByTestId('pptx-resize-e');
+  const narrow = point(box.x + 45);
+  act(() => {
+    fireEvent.pointerDown(handle, point(box.x + box.w));
+    fireEvent.pointerMove(stage, { ...narrow, buttons: 1 });
+  });
+  await waitFor(() => expect(previews).toHaveBeenCalled());
+  await waitFor(() => expect(preview).toBeDefined());
+  const previewText = preview!.primitives.find((primitive) => primitive.kind === 'textBox') as TextBoxPrimitive;
+  expect(previewText.lines.length).toBeGreaterThan(box.lines.length);
+  expect(commands.filter((command) => command.kind === 'setShapeRect')).toHaveLength(0);
+  act(() => { fireEvent.pointerUp(stage, narrow); });
+  await waitFor(() => expect(commands.filter((command) => command.kind === 'setShapeRect')).toHaveLength(1));
+  await bounded(client.flush());
+  expect(commands.filter((command) => command.kind === 'setShapeRect')).toHaveLength(1);
 });
 
 test('cancel_gesture', async () => {

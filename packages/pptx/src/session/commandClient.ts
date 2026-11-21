@@ -478,6 +478,16 @@ async function createCommandClient(
         return result;
       } catch (error) { return reject(error, position.seq); }
     },
+    async previewShapeRect(frame, target, rect) {
+      const error = unavailable();
+      if (error) throw error;
+      const bytes = await rpc.call.previewShapeRect({
+        ...identity, basis: { epoch: state.epoch, version: state.version }, frame, target, rect,
+      });
+      const retired = unavailable();
+      if (retired) throw retired;
+      return JSON.parse(new TextDecoder().decode(bytes));
+    },
     thumbnail(slideId, knownRevision) {
       const error = unavailable();
       if (error) return Promise.reject(error);

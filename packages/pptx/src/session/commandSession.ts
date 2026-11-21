@@ -186,6 +186,7 @@ export function createPptxWorkerSession(
       pendingIntents: () => opened.pendingIntents?.() ?? [],
       checkpoint: (options) => perform(() => opened.checkpoint!(options)),
       preparePicture: (bytes) => perform(() => opened.preparePicture!(bytes)),
+      previewShapeRect: (frame, target, rect) => perform(() => opened.previewShapeRect(frame, target, rect)),
       thumbnail: (slideId, knownRevision) => perform(() => opened.thumbnail(slideId, knownRevision)),
       subscribe: (listener) => opened.subscribe(listener),
       subscribeFrame: (listener) => opened.subscribeFrame(listener),
