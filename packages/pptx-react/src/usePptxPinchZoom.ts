@@ -1,9 +1,10 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useLayoutEffect, useRef } from 'react';
 import type { RefObject } from 'react';
 import { MAX_ZOOM, MIN_ZOOM } from './commands/evaluate';
 
 const MAX_WHEEL_DELTA = 50;
 const WHEEL_ZOOM_SENSITIVITY = 0.005;
+const ANCHOR_IDLE_MS = 300;
 
 export function pinchZoomScale(
   scale: number,
@@ -27,12 +28,15 @@ export function pinchZoomScale(
 export function usePptxPinchZoom(
   viewportRef: RefObject<HTMLElement | null>,
   contentRef: RefObject<HTMLElement | null>,
-  scale: number,
+  scale: number | null,
   setScale: (scale: number) => void,
   presentation: unknown
 ) {
   const scaleRef = useRef(scale);
+  const committedScaleRef = useRef(scale);
+  const presentationRef = useRef(presentation);
   const setScaleRef = useRef(setScale);
+  const cancelPendingRef = useRef<(() => void) | null>(null);
   const commitAnimationRef = useRef<number | null>(null);
   const anchorAnimationRef = useRef<number | null>(null);
   const pendingAnchorRef = useRef<{
@@ -44,9 +48,17 @@ export function usePptxPinchZoom(
     anchorY: number;
     clientX: number;
     clientY: number;
+    timeStamp: number;
   } | null>(null);
-  scaleRef.current = scale;
   setScaleRef.current = setScale;
+
+  useLayoutEffect(() => {
+    if (Object.is(presentationRef.current, presentation) && scale === committedScaleRef.current) return;
+    presentationRef.current = presentation;
+    committedScaleRef.current = scale;
+    scaleRef.current = scale;
+    cancelPendingRef.current?.();
+  }, [presentation, scale]);
 
   useEffect(() => {
     const viewport = viewportRef.current;
@@ -63,27 +75,39 @@ export function usePptxPinchZoom(
       ) {
         return;
       }
-      pendingAnchorRef.current = null;
+      clearAnchor();
       viewport.scrollLeft += after.left + pending.anchorX * after.width - pending.clientX;
       viewport.scrollTop += after.top + pending.anchorY * after.height - pending.clientY;
-      observer?.disconnect();
     };
     const observer =
       typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(applyAnchor);
+    const clearAnchor = () => {
+      pendingAnchorRef.current = null;
+      observer?.disconnect();
+    };
+    const commitScale = () => {
+      const currentScale = scaleRef.current;
+      if (currentScale === null) return;
+      committedScaleRef.current = currentScale;
+      setScaleRef.current(currentScale);
+    };
     const onWheel = (event: WheelEvent) => {
       if (!event.ctrlKey || event.metaKey || event.altKey || !event.cancelable) return;
       const content = contentRef.current;
-      if (!content) return;
+      const currentScale = scaleRef.current;
+      if (!content || currentScale === null) return;
       event.preventDefault();
+      if (pendingAnchorRef.current && event.timeStamp - pendingAnchorRef.current.timeStamp > ANCHOR_IDLE_MS) {
+        clearAnchor();
+      }
       const next = pinchZoomScale(
-        scaleRef.current,
+        currentScale,
         event.deltaY,
         event.deltaMode,
         viewport.clientHeight
       );
-      if (next === scaleRef.current) return;
+      if (next === currentScale) return;
       const before = content.getBoundingClientRect();
-      const currentScale = scaleRef.current;
       const pending = pendingAnchorRef.current;
       const baseWidth = pending?.baseWidth ??
         (currentScale > 0 ? before.width / currentScale : before.width);
@@ -104,18 +128,19 @@ export function usePptxPinchZoom(
         anchorY,
         clientX: event.clientX,
         clientY: event.clientY,
+        timeStamp: event.timeStamp,
       };
       observer?.disconnect();
       observer?.observe(content);
       scaleRef.current = next;
       if (!view) {
-        setScaleRef.current(next);
+        commitScale();
         return;
       }
       if (commitAnimationRef.current === null) {
         commitAnimationRef.current = view.requestAnimationFrame(() => {
           commitAnimationRef.current = null;
-          setScaleRef.current(scaleRef.current);
+          commitScale();
           if (anchorAnimationRef.current !== null) {
             view.cancelAnimationFrame(anchorAnimationRef.current);
           }
@@ -126,11 +151,8 @@ export function usePptxPinchZoom(
         });
       }
     };
-    viewport.addEventListener('wheel', onWheel, { passive: false });
-    return () => {
-      viewport.removeEventListener('wheel', onWheel);
-      observer?.disconnect();
-      pendingAnchorRef.current = null;
+    const cancelPending = () => {
+      clearAnchor();
       if (view && commitAnimationRef.current !== null) {
         view.cancelAnimationFrame(commitAnimationRef.current);
         commitAnimationRef.current = null;
@@ -139,6 +161,13 @@ export function usePptxPinchZoom(
         view.cancelAnimationFrame(anchorAnimationRef.current);
         anchorAnimationRef.current = null;
       }
+    };
+    cancelPendingRef.current = cancelPending;
+    viewport.addEventListener('wheel', onWheel, { passive: false });
+    return () => {
+      viewport.removeEventListener('wheel', onWheel);
+      cancelPending();
+      cancelPendingRef.current = null;
     };
   }, [contentRef, presentation, viewportRef]);
 }
