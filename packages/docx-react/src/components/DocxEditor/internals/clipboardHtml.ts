@@ -670,6 +670,7 @@ interface HtmlRunState extends InlineFormatState {
   link?: { href: string | null; tooltip: string | null };
   marker?: string;
   pre?: boolean;
+  preLine?: boolean;
 }
 
 function memoized<T>(read: (value: string) => T): (value: string) => T {
@@ -742,8 +743,16 @@ function htmlRunState(parent: HtmlRunState, element: Element, style: Map<string,
     state.marker = element.textContent?.trim() ?? '';
   }
   const space = style.get('white-space')?.toLowerCase();
-  if (tag === 'PRE' || space === 'pre' || space === 'pre-wrap') state.pre = true;
-  else if (space === 'normal' || space === 'nowrap') delete state.pre;
+  if (tag === 'PRE' || space === 'pre' || space === 'pre-wrap' || space === 'break-spaces') {
+    state.pre = true;
+    delete state.preLine;
+  } else if (space === 'pre-line') {
+    state.preLine = true;
+    delete state.pre;
+  } else if (space === 'normal' || space === 'nowrap') {
+    delete state.pre;
+    delete state.preLine;
+  }
   return state;
 }
 
@@ -841,6 +850,13 @@ function walkFormattedBody(
         if (index) lineBreak();
         if (failed || (line && !appendRun(line, state))) return false;
         if (line) endsInSpace = false;
+      }
+      return true;
+    }
+    if (state.preLine && /[\r\n]/.test(raw)) {
+      for (const [index, line] of raw.split(/\r\n?|\n/).entries()) {
+        if (index) lineBreak();
+        if (failed || !append(line, { ...state, preLine: false })) return false;
       }
       return true;
     }
