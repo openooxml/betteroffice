@@ -36,27 +36,32 @@ afterEach(() => {
   for (const session of sessions.splice(0)) session.destroy();
 });
 
-function fixture(body = BODY, styles?: string): Uint8Array<ArrayBuffer> {
+function fixture(body = BODY, styles?: string, theme?: string): Uint8Array<ArrayBuffer> {
   const section = '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>' +
     '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>';
   const parts = new Map<string, Uint8Array>();
   const add = (name: string, xml: string) => parts.set(name, toBytes(xml));
   const stylesType = styles === undefined ? '' : '<Override PartName="/word/styles.xml" ' +
     'ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>';
+  const themeType = theme === undefined ? '' : '<Override PartName="/word/theme/theme1.xml" ' +
+    'ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>';
   add('[Content_Types].xml',
     '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
     '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
     '<Default Extension="xml" ContentType="application/xml"/>' +
     '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>' +
-    `${stylesType}</Types>`);
+    `${stylesType}${themeType}</Types>`);
   add('_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
     `<Relationship Id="doc" Type="${R}/officeDocument" Target="word/document.xml"/></Relationships>`);
   add('word/document.xml', `<w:document xmlns:w="${W}"><w:body>${body}${section}</w:body></w:document>`);
-  if (styles !== undefined) {
+  const relationships = (styles === undefined ? '' : `<Relationship Id="styles" Type="${R}/styles" Target="styles.xml"/>`) +
+    (theme === undefined ? '' : `<Relationship Id="theme" Type="${R}/theme" Target="theme/theme1.xml"/>`);
+  if (relationships) {
     add('word/_rels/document.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
-      `<Relationship Id="styles" Type="${R}/styles" Target="styles.xml"/></Relationships>`);
-    add('word/styles.xml', styles);
+      `${relationships}</Relationships>`);
   }
+  if (styles !== undefined) add('word/styles.xml', styles);
+  if (theme !== undefined) add('word/theme/theme1.xml', theme);
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
@@ -401,4 +406,23 @@ for (const [route, save] of EDIT_ROUTES) {
     expect(saved).not.toContain(ONE_FIELD_RUN);
     expect(saved).toBe(main);
   });
+}
+
+const THEME = '<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements>' +
+  '<a:fontScheme name="Synthetic"><a:majorFont><a:latin typeface="Calibri Light"/></a:majorFont>' +
+  '<a:minorFont><a:latin typeface="Calibri"/></a:minorFont></a:fontScheme></a:themeElements></a:theme>';
+const THEME_FONT = '<w:rPr><w:rFonts w:asciiTheme="minorHAnsi"/></w:rPr>';
+const THEMED_RUNS: Array<[string, string]> = [
+  ['one field', ONE_FIELD_RUN.replace('<w:r>', `<w:r>${THEME_FONT}`)],
+  ['two fields', `<w:r>${THEME_FONT}${FIELDS}</w:r>`],
+];
+
+for (const [name, run] of THEMED_RUNS) {
+  for (const [route, , save] of MARK_ROUTES) {
+    test(`a run holding ${name} with a theme font is written as read: ${route}`, async () => {
+      const xml = await save(fixture(`<w:p>${text('AB')}${run}${text('CD')}</w:p>`, undefined, THEME));
+      expect(xml).toContain(run);
+      expect(around(xml, run)?.[0]).toBe('AB');
+    });
+  }
 }

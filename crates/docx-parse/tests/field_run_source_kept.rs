@@ -566,3 +566,43 @@ fn a_run_holding_one_field_moved_into_a_tracked_change_is_written_as_main_writes
         assert_eq!(saved, main);
     }
 }
+
+#[test]
+fn text_beside_one_field_in_its_run_is_held_only_in_the_kept_run() {
+    let field = field_with_result("PAGE", "1");
+    let source = run(&[text("Page "), field, text(" of")].concat());
+    for mut content in both_walkers(&package(&between(&source)), 0) {
+        assert_eq!(
+            kinds(&content),
+            ["run", "complexField", "run"],
+            "{content:?}"
+        );
+        content.iter_mut().for_each(without_source);
+        let model = Value::Array(content).to_string();
+        assert!(!model.contains("Page "), "{model}");
+        assert!(!model.contains(" of"), "{model}");
+    }
+}
+
+#[test]
+fn an_edited_field_with_text_beside_it_in_its_run_is_written_as_main_writes_it() {
+    let field = field_with_result("PAGE", "1");
+    let source = run(&[text("Page "), field, text(" of")].concat());
+    let bytes = package(&between(&source));
+    let (saved, main) = save_and_main(&bytes, |document| {
+        field_of(document)["instruction"] = json!("DATE");
+    });
+    assert!(!saved.contains(&source), "{saved}");
+    assert_eq!(saved, main);
+}
+
+#[test]
+fn an_edited_sibling_run_is_written_from_the_model_beside_a_field_run_kept_as_read() {
+    let source = one_field_run();
+    let bytes = package(&between(&format!("{}{source}", run(&text("Page ")))));
+    let xml = save(&bytes, |document| {
+        document["content"][0]["content"][1]["content"][0]["text"] = json!("Seite ");
+    });
+    assert!(!xml.contains("Page "), "{xml}");
+    assert_eq!(around(&xml, &source), pair("ABSeite ", "CD"), "{xml}");
+}
