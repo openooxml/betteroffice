@@ -9,16 +9,20 @@ export function planResidentListChanges(
   const paragraphs = engine.paragraphs(range.story);
   const start = paragraphs.findIndex(p => p.paraId === range.start.paraId);
   const end = paragraphs.findIndex(p => p.paraId === range.end.paraId);
+  const styleNumbers = new Map<unknown, boolean | undefined>();
   return paragraphs.slice(start, end + 1).flatMap(paragraph => {
     const properties = paragraph.properties;
+    const style = properties.pStyle ?? null;
     const numPr = properties.numPr as { numId?: number; ilvl?: number } | null | undefined;
     let attrs: YrsParagraphAttrs;
     if (numPr?.numId) {
       const level = numPr.ilvl ?? 0;
       if (action.direction === 'increase' && level >= 8) return [];
       if (action.direction === 'decrease' && level === 0 && action.preserveNumbering) return [];
-      attrs = action.direction === 'decrease' && level === 0
-        ? listOffAttrs(properties, engine.paragraphStyleNumbers?.(range.story, paragraph.paraId))
+      const off = action.direction === 'decrease' && level === 0;
+      if (off && !styleNumbers.has(style)) styleNumbers.set(style, engine.paragraphStyleNumbers?.(range.story, paragraph.paraId));
+      attrs = off
+        ? listOffAttrs(properties, styleNumbers.get(style))
         : { numPr: { numId: numPr.numId, ilvl: level + (action.direction === 'increase' ? 1 : -1) } };
       attrs = { ...attrs, indentLeft: null, indentFirstLine: null, other: { ...attrs.other, hangingIndent: null } };
     } else {

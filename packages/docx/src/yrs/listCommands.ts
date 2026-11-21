@@ -7,11 +7,16 @@ export const LIST_OFF_ATTRS: Readonly<YrsParagraphAttrs> = Object.freeze({
   listMarkerItalic: null, listMarkerColor: null, listMarkerFontSize: null, other: Object.freeze({ listDef: null, listLevelIndents: null }),
 });
 
-/** Whether a paragraph with `properties` is on a list shown as `kind`. */
-function isOnListOfKind(properties: Readonly<Record<string, unknown>>, kind: 'bullet' | 'numbered'): boolean {
+/** Whether a paragraph with `properties` is on a list. */
+function isOnList(properties: Readonly<Record<string, unknown>>): boolean {
   const numPr = properties.numPr;
   const numId = numPr !== null && typeof numPr === 'object' ? (numPr as { numId?: unknown }).numId : undefined;
-  if (typeof numId !== 'number' || numId === 0) return false;
+  return typeof numId === 'number' && numId !== 0;
+}
+
+/** Whether a paragraph with `properties` is on a list shown as `kind`. */
+function isOnListOfKind(properties: Readonly<Record<string, unknown>>, kind: 'bullet' | 'numbered'): boolean {
+  if (!isOnList(properties)) return false;
   const bullet = properties.listIsBullet === true || properties.listNumFmt === 'bullet';
   return bullet === (kind === 'bullet');
 }
@@ -54,10 +59,30 @@ export function applyListToggle(
   const start = paragraphs.findIndex(paragraph => paragraph.paraId === range.start.paraId);
   const end = paragraphs.findIndex(paragraph => paragraph.paraId === range.end.paraId);
   const lead = paragraphs[start]?.paraId;
+  const styleNumbers = styleNumbering(engine, range.story);
+  let first: YrsParagraphAttrs | undefined;
   for (const { paraId, properties } of paragraphs.slice(start, end + 1)) {
     const at = { story: range.story, start: { paraId, offset: 0 }, end: { paraId, offset: 0 } };
-    const attrs = remove ? listOffAttrs(properties, engine.paragraphStyleNumbers?.(range.story, paraId))
-      : engine.ensureListDefinition(range.story, paraId, kind, paraId === lead ? undefined : lead);
+    let attrs: YrsParagraphAttrs;
+    if (remove) attrs = listOffAttrs(properties, styleNumbers(paraId, properties));
+    else if (paraId === lead) attrs = first = engine.ensureListDefinition(range.story, paraId, kind);
+    else attrs = first && !isOnList(properties) ? first : engine.ensureListDefinition(range.story, paraId, kind, lead);
     engine.setParagraphAttrs(at, attrs, suggesting);
   }
+}
+
+/**
+ * The engine's answer to whether a paragraph's current style numbers it, asked once for each style:
+ * the answer depends on the style alone, and each question walks the story.
+ */
+function styleNumbering(
+  engine: Partial<Pick<YrsSession, 'paragraphStyleNumbers'>>,
+  story: string
+): (paraId: string, properties: Readonly<Record<string, unknown>>) => boolean | undefined {
+  const answers = new Map<unknown, boolean | undefined>();
+  return (paraId, properties) => {
+    const style = properties.pStyle ?? null;
+    if (!answers.has(style)) answers.set(style, engine.paragraphStyleNumbers?.(story, paraId));
+    return answers.get(style);
+  };
 }
