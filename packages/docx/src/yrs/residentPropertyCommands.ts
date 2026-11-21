@@ -128,7 +128,7 @@ export function propertyCommandTarget(engine: DocxWorkerCommandEngine, command: 
             return 'unsupported-suggesting';
           }
           if (Math.min(offset, range.end.offset) <= Math.max(start, range.start.offset)) continue;
-          if (segment.kind !== 'text' || segment.attributes.fieldResult != null || ['ins', 'del', 'rPrChange'].some(key => Object.hasOwn(segment.attributes, key))) {
+          if (segment.kind !== 'text' || segment.attributes.fieldResult != null || ['ins', 'del', 'rPrChange'].some(key => segment.attributes[key] != null)) {
             return 'unsupported-suggesting';
           }
         }
