@@ -212,7 +212,7 @@ fn native_progress() {
             let hook: Unknown = global.get_named_property("__betterofficeEngineProgress")?;
             if hook.get_type()? == ValueType::Function {
                 let hook: Function<(), Unknown> = unsafe { hook.cast()? };
-                hook.call(())?;
+                let _ = hook.call(());
             }
             Ok(())
         })();
