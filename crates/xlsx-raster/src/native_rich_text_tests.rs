@@ -4,10 +4,10 @@ use xlsx_model::styles::{Alignment, Font, Xf};
 use xlsx_model::{
     Cell, CellRef, CellValue, Color, RichRun, RunStyle, Sheet, SheetId, VAlign, Workbook,
 };
-use xlsx_render::{DisplayList, DrawCmd, GridMeta, Rect, Viewport};
+use xlsx_render::{DisplayList, DrawCmd, GridMeta, Rect, TextValign, Viewport};
 
 use super::{RasterFonts, piece_measure, render_png_with_fonts};
-use crate::{PieceWidths, font, wrapped_lines};
+use crate::{LINE_PAINTS, PieceWidths, clipped_to_target, font, wrapped_lines};
 
 const WIDTH: f32 = 160.0;
 const HEIGHT: f32 = 60.0;
@@ -307,7 +307,7 @@ fn mixed_wrap_list(row_height: f64, valign: VAlign) -> DisplayList {
 }
 
 #[test]
-fn mixed_size_wrapped_cells_send_every_line_to_the_native_painter() {
+fn mixed_size_wrapped_cells_send_visible_lines_to_the_native_painter() {
     let fonts = fonts();
     for (height, valign) in [(60.0, VAlign::Bottom), (20.0, VAlign::Top)] {
         let list = mixed_wrap_list(height, valign);
@@ -340,8 +340,15 @@ fn mixed_size_wrapped_cells_send_every_line_to_the_native_painter() {
         );
         let pieces = xlsx_render::run_pieces(cmd).unwrap();
         let mut measured = PieceWidths::new(piece_measure(&fonts));
-        let lines = wrapped_lines(*y, *font_size, wrap, text, &pieces, &mut measured);
-        assert!(lines.len() >= 3);
+        let lines = wrapped_lines(
+            *y,
+            *font_size,
+            wrap,
+            text,
+            &pieces,
+            &mut measured,
+            Some(*clip),
+        );
         let painted: Vec<String> = lines
             .iter()
             .map(|(_, line)| {
@@ -350,7 +357,12 @@ fn mixed_size_wrapped_cells_send_every_line_to_the_native_painter() {
                     .collect()
             })
             .collect();
-        assert_eq!(painted.join(" "), "abcd abcd abcd abcd");
+        let expected = if valign == VAlign::Top {
+            "abcd"
+        } else {
+            "abcd abcd abcd abcd"
+        };
+        assert_eq!(painted.join(" "), expected);
 
         let last_y = lines.last().unwrap().0;
         let raster = Pixmap::decode_png(&render_png_with_fonts(&list, &fonts).unwrap()).unwrap();
@@ -359,18 +371,138 @@ fn mixed_size_wrapped_cells_send_every_line_to_the_native_painter() {
                 (2..clip.w as u32 - 1).any(|col| raster.pixel(col, row).unwrap().red() < 100)
             })
         };
+        assert!(last_y < clip.h);
         if valign == VAlign::Top {
-            assert!(last_y > clip.h);
             assert!(has_text(0..clip.h.floor() as u32));
             assert!(!has_text(clip.h.ceil() as u32 + 1..raster.height()));
         } else {
-            assert!(last_y < clip.h);
             for (baseline, _) in lines {
                 let row = baseline as u32;
                 assert!(has_text(row.saturating_sub(8)..row));
             }
         }
     }
+}
+
+fn wrapped_baselines(cmd: &DrawCmd) -> Vec<f32> {
+    let DrawCmd::Text {
+        y,
+        text,
+        font_size,
+        wrap: Some(wrap),
+        clip,
+        ..
+    } = cmd
+    else {
+        panic!("command must wrap");
+    };
+    let pieces = xlsx_render::run_pieces(cmd).unwrap();
+    let mut measured = PieceWidths::new(|_: &xlsx_render::TextPiece, part: &str| part.len() as f32);
+    let clip = clipped_to_target(*clip, WIDTH as u32, HEIGHT as u32);
+    wrapped_lines(*y, *font_size, wrap, text, &pieces, &mut measured, clip)
+        .into_iter()
+        .map(|(y, _)| y)
+        .collect()
+}
+
+#[test]
+fn mixed_wrapped_lines_align_by_the_last_lines_ascent_and_descent() {
+    let ascent = 96.0 / 72.0 * 0.7;
+    let descent = 96.0 / 72.0 * 0.2;
+    let pitch = 20.0;
+    for last_size in [5.0, 24.0] {
+        for valign in [TextValign::Bottom, TextValign::Center] {
+            let single_baseline = |size| match valign {
+                TextValign::Bottom => HEIGHT - 2.0 - size * descent,
+                TextValign::Center => (HEIGHT + size * (ascent - descent)) / 2.0,
+                TextValign::Top => unreachable!(),
+            };
+            let cmd = text(json!({
+                "text": "A\nB",
+                "y": single_baseline(11.0),
+                "wrap": { "width": 40.0, "lineHeight": pitch, "valign": valign },
+                "runs": [{ "start": 2, "end": 3, "fontSize": last_size }],
+            }));
+            let baselines = wrapped_baselines(&cmd);
+            assert_eq!(baselines.len(), 2, "{valign:?} at {last_size}pt");
+            assert!(baselines[0] - 11.0 * ascent >= 0.0);
+            assert!(baselines[0] + 11.0 * descent <= HEIGHT);
+            let center_offset = if valign == TextValign::Center {
+                pitch / 2.0
+            } else {
+                0.0
+            };
+            let expected = single_baseline(last_size) + center_offset;
+            assert!((baselines[1] - expected).abs() < 1e-4, "{baselines:?}");
+            let single = text(json!({
+                "text": "B\nA",
+                "y": single_baseline(11.0),
+                "wrap": { "width": 40.0, "lineHeight": pitch, "valign": valign, "maxLines": 1 },
+                "runs": [{ "start": 0, "end": 1, "fontSize": last_size }],
+            }));
+            let baselines = wrapped_baselines(&single);
+            assert_eq!(baselines.len(), 1);
+            assert!((baselines[0] - single_baseline(last_size)).abs() < 1e-4);
+        }
+    }
+}
+
+#[test]
+fn mixed_wrapped_lines_are_limited_before_bottom_alignment() {
+    let cmd = rich(
+        json!({
+            "text": "A\nB\nC",
+            "y": 50.0,
+            "wrap": { "width": 40.0, "lineHeight": 16.0, "valign": "bottom", "maxLines": 2 },
+        }),
+        &[r#"{"start":0,"end":1,"fontSize":12.0}"#],
+    );
+    let baselines = wrapped_baselines(&cmd);
+    assert_eq!(baselines.len(), 2);
+    assert!((baselines[1] - 50.0).abs() < 1e-4);
+}
+
+#[test]
+fn uniform_run_sizes_different_from_the_base_use_the_old_baselines() {
+    let cmd = rich(
+        json!({
+            "text": "A\nB\nC",
+            "wrap": { "width": 40.0, "lineHeight": 16.0, "valign": "bottom", "maxLines": 2 },
+        }),
+        &[r#"{"start":0,"end":5,"fontSize":14.0}"#],
+    );
+    assert_eq!(wrapped_baselines(&cmd), [4.0, 20.0]);
+}
+
+#[test]
+fn a_zero_or_overflowing_pitch_uses_the_old_baselines() {
+    for (line_height, expected) in [(0.0, 20.0), (f32::MAX, f32::MAX)] {
+        let cmd = rich(
+            json!({
+                "text": "A\nB",
+                "fontSize": 1.0,
+                "wrap": { "width": 40.0, "lineHeight": line_height, "valign": "top" },
+            }),
+            &[r#"{"start":0,"end":1,"fontSize":11.0}"#],
+        );
+        assert_eq!(wrapped_baselines(&cmd), [20.0, expected]);
+    }
+}
+
+#[test]
+fn a_long_mixed_wrap_only_calls_the_native_painter_for_visible_lines() {
+    let cmd = rich(
+        json!({
+            "text": "a\n".repeat(2000),
+            "y": 12.0,
+            "clip": { "x": 0.0, "y": 0.0, "w": WIDTH, "h": 20.0 },
+            "wrap": { "width": 40.0, "lineHeight": 20.0, "valign": "top" },
+        }),
+        &[r#"{"start":0,"end":1,"fontSize":12.0}"#],
+    );
+    let before = LINE_PAINTS.get();
+    png(&fonts(), vec![cmd]);
+    assert_eq!(LINE_PAINTS.get() - before, 1);
 }
 
 #[test]

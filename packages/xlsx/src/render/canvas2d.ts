@@ -28,6 +28,7 @@ import { wrapLines, wrappedLineY } from './wrap';
 const STACKED_LINE_HEIGHT_RATIO = 1.2;
 const STACKED_ASCENT_RATIO = 0.8;
 const WRAPPED_ASCENT_PER_PT = (96 / 72) * 0.7;
+const WRAPPED_DESCENT_PER_PT = (96 / 72) * 0.2;
 
 const ALIGN_TO_TEXT_ALIGN: Record<NonNullable<TextCmd['align']>, CanvasTextAlign> = {
   left: 'left',
@@ -76,7 +77,12 @@ export function paintDisplayList(
   ctx.rect(0, 0, dl.width, dl.height);
   ctx.clip();
   ctx.clearRect(0, 0, dl.width, dl.height);
-  for (const cmd of dl.commands) paintCommand(ctx, cmd, dpr, origin, options);
+  const left = Math.max(0, -origin.x / dpr);
+  const top = Math.max(0, -origin.y / dpr);
+  const right = Math.min(dl.width, ((ctx.canvas?.width ?? Infinity) - origin.x) / dpr);
+  const bottom = Math.min(dl.height, ((ctx.canvas?.height ?? Infinity) - origin.y) / dpr);
+  const bounds = { x: left, y: top, w: right - left, h: bottom - top };
+  for (const cmd of dl.commands) paintCommand(ctx, cmd, dpr, origin, options, bounds);
   ctx.restore();
 }
 
@@ -85,7 +91,8 @@ function paintCommand(
   cmd: DrawCmd,
   dpr: number,
   origin: { x: number; y: number },
-  options: PaintOptions
+  options: PaintOptions,
+  bounds: Rect,
 ): void {
   switch (cmd.op) {
     case 'image':
@@ -107,7 +114,7 @@ function paintCommand(
       paintClipped(ctx, cmd.clip, () => paintPath(ctx, cmd));
       return;
     case 'text':
-      paintText(ctx, cmd);
+      paintText(ctx, cmd, bounds);
       return;
   }
 }
@@ -278,7 +285,7 @@ function strokeSegment(
 // this run so it never bleeds into later commands. underline/strike are drawn
 // as lines positioned off the measured run box, since canvas has no native
 // text-decoration.
-function paintText(ctx: CanvasRenderingContext2D, cmd: TextCmd): void {
+function paintText(ctx: CanvasRenderingContext2D, cmd: TextCmd, bounds: Rect): void {
   ctx.save();
   if (cmd.clip) {
     ctx.beginPath();
@@ -292,7 +299,7 @@ function paintText(ctx: CanvasRenderingContext2D, cmd: TextCmd): void {
   ctx.textBaseline = 'alphabetic';
   const pieces = cmd.runs?.length ? runPieces(cmd) : undefined;
   if (pieces && cmd.wrap) {
-    paintWrappedPieces(ctx, cmd, cmd.wrap, pieces, newPiecePaint(font));
+    paintWrappedPieces(ctx, cmd, cmd.wrap, pieces, newPiecePaint(font), bounds);
   } else if (pieces) {
     paintPieces(ctx, cmd, pieces, cmd.y, newPiecePaint(font));
   } else if (cmd.stacked) {
@@ -382,28 +389,62 @@ function paintWrappedPieces(
   wrap: TextWrap,
   pieces: TextPiece[],
   paint: PiecePaint,
+  bounds: Rect,
 ): void {
-  const lines = wrapRunLines(cmd.text, pieces, wrap.width, (piece, part) => measurePiece(ctx, paint, piece, part));
-  const fontSize = cmd.fontSize;
-  if (!Number.isFinite(fontSize) || fontSize <= 0 || pieces.every((piece) => piece.cmd.fontSize === fontSize)) {
-    const count = Math.min(lines.length, wrap.maxLines ?? lines.length);
-    lines.slice(0, count).forEach((line, index) => {
-      paintPieces(ctx, cmd, line, wrappedLineY(cmd.y, index, count, wrap), paint);
+  const wrapped = wrapRunLines(cmd.text, pieces, wrap.width, (piece, part) => measurePiece(ctx, paint, piece, part));
+  const lines = wrapped.slice(0, Math.max(0, wrap.maxLines ?? wrapped.length));
+  const layout = pieces.some((piece) => piece.cmd.fontSize !== pieces[0]!.cmd.fontSize)
+    ? wrappedLineMetrics(cmd.y, cmd.fontSize, wrap, lines)
+    : undefined;
+  if (!layout) {
+    lines.forEach((line, index) => {
+      paintPieces(ctx, cmd, line, wrappedLineY(cmd.y, index, lines.length, wrap), paint);
     });
     return;
   }
 
-  const metrics = lines.map((line) => {
+  const clip = cmd.clip ?? bounds;
+  const clipTop = Math.max(clip.y, bounds.y);
+  const clipBottom = Math.min(clip.y + clip.h, bounds.y + bounds.h);
+  const clipLeft = Math.max(clip.x, bounds.x);
+  const clipRight = Math.min(clip.x + clip.w, bounds.x + bounds.w);
+  if (clipTop >= clipBottom || clipLeft >= clipRight) return;
+
+  const { blockTop, metrics } = layout;
+  const baseSized = metrics.every(({ size }) => size === cmd.fontSize);
+  for (const [index, line] of lines.entries()) {
+    const { top, size } = metrics[index]!;
+    const ascent = size * WRAPPED_ASCENT_PER_PT;
+    const baseline = baseSized ? wrappedLineY(cmd.y, index, lines.length, wrap) : blockTop + (top + ascent);
+    const lineTop = baseSized ? baseline - ascent : blockTop + top;
+    if (lineTop >= clipBottom) break;
+    if (baseline + size * WRAPPED_DESCENT_PER_PT > clipTop) paintPieces(ctx, cmd, line, baseline, paint);
+  }
+}
+
+function wrappedLineMetrics(y: number, fontSize: number, wrap: TextWrap, lines: TextPiece[][]) {
+  if (!Number.isFinite(fontSize) || fontSize <= 0 || !Number.isFinite(wrap.lineHeight) || wrap.lineHeight <= 0) {
+    return undefined;
+  }
+
+  const metrics: { top: number; size: number }[] = [];
+  let totalHeight = 0;
+  for (const line of lines) {
     const size = line.reduce((largest, piece) => Math.max(largest, piece.cmd.fontSize), line[0]?.cmd.fontSize ?? fontSize);
-    return { height: wrap.lineHeight * (size / fontSize), ascentDelta: (size - fontSize) * WRAPPED_ASCENT_PER_PT };
-  });
-  const extraHeight = metrics.reduce((sum, { height }) => sum + height, 0) - wrap.lineHeight;
-  let baseline = cmd.y - (wrap.valign === 'top' ? 0 : wrap.valign === 'center' ? extraHeight / 2 : extraHeight);
-  lines.forEach((line, index) => {
-    const { height, ascentDelta } = metrics[index]!;
-    paintPieces(ctx, cmd, line, baseline + ascentDelta, paint);
-    baseline += height;
-  });
+    const height = wrap.lineHeight * (size / fontSize);
+    if (!Number.isFinite(height) || height <= 0) return undefined;
+    metrics.push({ top: totalHeight, size });
+    totalHeight += height;
+  }
+  const last = metrics[metrics.length - 1];
+  if (!last) return undefined;
+  const lastBaseline = last.top + last.size * WRAPPED_ASCENT_PER_PT;
+  const lastBottom = lastBaseline + last.size * WRAPPED_DESCENT_PER_PT;
+  if (!Number.isFinite(totalHeight) || !Number.isFinite(lastBottom)) return undefined;
+  const topAnchor = y - fontSize * WRAPPED_ASCENT_PER_PT;
+  const bottomAnchor = y + fontSize * WRAPPED_DESCENT_PER_PT - lastBottom;
+  const blockTop = wrap.valign === 'top' ? topAnchor : wrap.valign === 'center' ? topAnchor / 2 + bottomAnchor / 2 : bottomAnchor;
+  return Number.isFinite(blockTop) ? { blockTop, metrics } : undefined;
 }
 
 /** `paintRun` for a piece painted left-aligned at `y`, `width` wide, in a font without highlight or dashed underline. */

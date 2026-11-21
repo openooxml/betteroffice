@@ -453,6 +453,44 @@ fn a_single_size_wrapped_rich_cell_keeps_the_plain_wrap_layout() {
     assert_eq!(&without_runs(cmd), command(&plain, stored));
 }
 
+#[test]
+fn uniform_runs_of_a_different_size_keep_that_sizes_wrap_layout() {
+    let stored = "AB\nCD";
+    let source = [
+        rich_run(0, 2, |style| {
+            style.size_pt = Some(14.0);
+            style.bold = Some(true);
+        }),
+        rich_run(2, 5, |style| style.size_pt = Some(14.0)),
+    ];
+    let mut workbook = wrapped_workbook(stored);
+    let rich = with_runs(&workbook, &[("A1", &source)]);
+    workbook.styles.fonts[0].size_pt = Some(14.0);
+    let plain = build_display_list(&workbook, SheetId(0), &VIEW).unwrap();
+    let layout = |list: &DisplayList| match command(list, stored) {
+        DrawCmd::Text { y, wrap, .. } => (*y, *wrap),
+        _ => unreachable!(),
+    };
+    assert!(run_pieces(command(&rich, stored)).is_some());
+    assert!(layout(&rich).1.unwrap().max_lines.is_some());
+    assert_eq!(layout(&rich), layout(&plain));
+}
+
+#[test]
+fn mixed_runs_in_a_one_point_cell_keep_a_positive_line_height() {
+    let stored = "A\nB";
+    let source = [
+        rich_run(0, 2, |style| style.size_pt = Some(11.0)),
+        rich_run(2, 3, |style| style.size_pt = Some(14.0)),
+    ];
+    let mut workbook = wrapped_workbook(stored);
+    workbook.styles.fonts[0].size_pt = Some(1.0);
+    let rich = with_runs(&workbook, &[("A1", &source)]);
+    let cmd = command(&rich, stored);
+    assert!(run_pieces(cmd).is_some());
+    assert!(matches!(cmd, DrawCmd::Text { wrap: Some(wrap), .. } if wrap.line_height > 0.0));
+}
+
 fn with_y(command: &DrawCmd, baseline: f32) -> DrawCmd {
     let mut command = without_runs(command);
     if let DrawCmd::Text { y, .. } = &mut command {
@@ -765,39 +803,35 @@ fn sized_run(size: f64) -> [RichRun; 1] {
 
 #[test]
 fn run_sizes_at_the_edges_of_the_accepted_range() {
-    let smallest = f32::from_bits(1);
+    let stored = "least under most over";
     let cases = [
-        ("A1", "least", f64::from(smallest), Some(smallest)),
-        ("C1", "under", 1e-50, None),
-        ("E1", "most", f64::from(f32::MAX), None),
-        ("G1", "over", 1e39, None),
+        (0, 1, 1.0, Some(1.0)),
+        (1, 2, 0.999_999_99, None),
+        (2, 3, 409.0, Some(409.0)),
+        (3, 4, 409.000_001, None),
     ];
-    let cells = cases.map(|(address, value, ..)| (address, text(value)));
-    let workbook = workbook(Vec::from(cells));
-    let sources = cases.map(|(address, _, size, _)| (address, sized_run(size)));
-    let lookup: Vec<(&str, &[RichRun])> = sources
+    let workbook = wrapped_workbook(stored);
+    let source = cases.map(|(start, end, size, _)| {
+        rich_run(start, end, |style| style.size_pt = Some(size))
+    });
+    let list = with_runs(&workbook, &[("A1", &source)]);
+    let sizes: Vec<_> = runs_of(&list, stored)
         .iter()
-        .map(|(address, runs)| (*address, &runs[..]))
+        .map(|run| run.font_size)
         .collect();
-    let list = with_runs(&workbook, &lookup);
-    for (_, value, _, size) in cases {
-        assert_eq!(
-            runs_of(&list, value).first().and_then(|run| run.font_size),
-            size,
-            "{value}"
-        );
-    }
+    assert_eq!(sizes, cases.map(|(_, _, _, size)| size));
 }
 
 #[test]
-fn a_run_too_large_for_any_row_leaves_the_plain_command() {
-    let stored = "HI";
-    let workbook = workbook(vec![("A1", text(stored))]);
+fn a_wrapped_run_larger_than_excels_range_uses_the_base_size() {
+    let stored = "A\nB";
+    let workbook = wrapped_workbook(stored);
     let rich = with_runs(&workbook, &[("A1", &sized_run(f64::from(f32::MAX)))]);
-    let floats = command_floats(command(&rich, stored));
-    assert!(floats.iter().all(|value| value.is_finite()), "{floats:?}");
+    let cmd = command(&rich, stored);
+    assert_eq!(runs_of(&rich, stored)[0].font_size, None);
+    assert!(run_pieces(cmd).is_none());
     let plain = build_display_list(&workbook, SheetId(0), &VIEW).unwrap();
-    assert_eq!(command(&rich, stored), command(&plain, stored));
+    assert_eq!(&without_runs(cmd), command(&plain, stored));
 }
 
 #[test]
