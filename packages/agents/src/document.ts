@@ -662,6 +662,11 @@ export class DocxAgentDocument {
         applied = true;
       } finally { this.session.addUndoBoundary(); }
       this.preserveReferences(before, this.session.version(), this.agentDecisionChanges(held, 'accepted', options.tracked ?? false), held);
+      const edited = new Set([...held.targets.values()].map(({ story, paraId }) => `${story}\u0000${paraId}`));
+      for (const other of this.proposals.values()) {
+        if (other === held || other.value.status !== 'pending') continue;
+        for (const target of other.targets.values()) if (edited.has(`${target.story}\u0000${target.paraId}`)) target.fingerprint = '\u0000stale';
+      }
       this.checkDecisionReferences(before, held);
       return { id: held.value.id, status: this.settledStatus(held), tracked: options.tracked ?? false, changes: held.value.changes.length };
     } catch (error) {
