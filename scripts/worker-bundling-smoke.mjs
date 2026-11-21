@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { build as esbuild } from 'esbuild';
 import { build as vite } from 'vite';
 import { build as vite7 } from 'vite-7';
-import { nextWebpack } from './check-webpack-exports.mjs';
+import { linkPackages, nextWebpack, packageManifests } from './check-webpack-exports.mjs';
 import { validateNativeWorker, validatePublishedWorker } from './worker-entry-check.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -116,6 +116,9 @@ try {
   await checkPublishedWorkerStubs();
   await checkNativeWorkerBundles();
   await writeFile(join(directory, 'package.json'), JSON.stringify({ private: true, type: 'module' }));
+  await linkPackages(directory, packageManifests(
+    ['fonts', 'fonts-latin', 'fonts-intl', 'fonts-cjk'].map(format => `packages/${format}`),
+  ));
   const workers = {};
   for (const [format, worker] of Object.entries(formats)) {
     const source = join(root, 'packages', format);
@@ -193,36 +196,37 @@ try {
     output: { path: output, publicPath: 'auto', filename: '[name].js', chunkFilename: '[name].[contenthash].js' },
     resolve: { conditionNames: ['browser', 'import', 'module', 'default'] },
     optimization: { minimize: false },
-  }, (error, result) => {
-    if (error) return fail(error);
-    if (result.hasErrors()) return fail(new Error(result.toString({ all: false, errors: true })));
-    done(result.compilation);
-  }));
+  }, (error, result) => error ? fail(error) : done(result)));
   const workerEntry = (compilation, file) => {
     const { chunkGraph } = compilation;
     const initial = new Set(compilation.entrypoints.get('app').chunks);
-    for (const module of compilation.modules) {
-      const inner = (module.modules ? [...module.modules] : [module]).find(candidate => candidate.resource?.endsWith(file));
-      if (!inner || !inner.type.startsWith('javascript')) continue;
-      const chunks = [...chunkGraph.getModuleChunks(module)];
-      return chunks.some(chunk => !initial.has(chunk) && [...chunkGraph.getChunkEntryModulesIterable(chunk)].includes(module)) &&
-        !chunks.some(chunk => initial.has(chunk));
+    const matches = module => module.resource?.endsWith(file) && module.type.startsWith('javascript');
+    for (const chunk of initial) {
+      for (const module of chunkGraph.getChunkModulesIterable(chunk)) {
+        if (matches(module) || (module.modules && [...module.modules].some(matches))) return false;
+      }
     }
-    return false;
+    return [...compilation.chunks].some(chunk => !initial.has(chunk) &&
+      [...chunkGraph.getChunkEntryModulesIterable(chunk)].some(module => matches(module.rootModule ?? module)));
+  };
+  const assertWorkerEntry = (stats, file, expected, message) => {
+    const failed = stats.hasErrors();
+    const errors = failed ? stats.toString({ all: false, errors: true, errorDetails: true }) : '';
+    assert.ok(!failed && workerEntry(stats.compilation, file) === expected, errors ? `${message}\n${errors}` : message);
   };
   const fixture = join(directory, 'webpack-fixture');
   await mkdir(fixture, { recursive: true });
   await writeFile(join(fixture, 'fixtureWorker.mjs'), 'self.postMessage(1);\n');
   await writeFile(join(fixture, 'worker.mjs'), "new Worker(new URL('./fixtureWorker.mjs', import.meta.url), { type: 'module' });\n");
   await writeFile(join(fixture, 'plain.mjs'), "import './fixtureWorker.mjs';\nglobalThis.started = typeof Worker;\n");
-  assert.ok(workerEntry(await bundle(fixture, join(fixture, 'worker.mjs'), join(fixture, 'worker')), '/fixtureWorker.mjs'),
+  assertWorkerEntry(await bundle(fixture, join(fixture, 'worker.mjs'), join(fixture, 'worker')), '/fixtureWorker.mjs', true,
     'the webpack worker check misses a real worker entry');
-  assert.ok(!workerEntry(await bundle(fixture, join(fixture, 'plain.mjs'), join(fixture, 'plain')), '/fixtureWorker.mjs'),
+  assertWorkerEntry(await bundle(fixture, join(fixture, 'plain.mjs'), join(fixture, 'plain')), '/fixtureWorker.mjs', false,
     'the webpack worker check accepts a plain import');
   const webpackDirectory = join(directory, 'webpack');
-  const compilation = await bundle(directory, entry, webpackDirectory);
+  const stats = await bundle(directory, entry, webpackDirectory);
   for (const worker of Object.values(formats)) {
-    assert.ok(workerEntry(compilation, `/dist/${worker}.mjs`), `webpack did not emit ${worker} as its own worker entry chunk`);
+    assertWorkerEntry(stats, `/dist/${worker}.mjs`, true, `webpack did not emit ${worker} as its own worker entry chunk`);
   }
   await checkOutput(webpackDirectory, { namedWorkers: false });
   console.log('esbuild, Vite (7 and 8, default and es workers) and webpack browser worker bundles exclude Node worker code and private imports.');

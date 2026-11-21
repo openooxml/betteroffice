@@ -95,13 +95,13 @@ test('font pack replies correlate by unique id and preserve source failures', as
   const one = first.source('intl');
   const two = second.source('intl');
   expect(requests[0]!.id).not.toBe(requests[1]!.id);
-  const reply = (id: string) => ({ protocol: 1, kind: 'font-pack-reply', id, error: 'Unreadable font pack' });
-  first.receive(reply(requests[1]!.id));
-  const rejected = expect(one).rejects.toMatchObject({ code: 'message', message: 'Unreadable font pack' });
-  first.receive(reply(requests[0]!.id));
-  await rejected;
-  const disposed = expect(two).rejects.toMatchObject({ code: 'disposed' });
+  const reply = (id: string, error: string) => ({ protocol: 1, kind: 'font-pack-reply', id, error });
+  first.receive(reply(requests[1]!.id, 'Reply for a different channel'));
+  first.receive(reply(requests[0]!.id, 'Unreadable font pack'));
   second.dispose();
-  await disposed;
   first.dispose();
+  await Promise.all([
+    expect(one).rejects.toMatchObject({ code: 'message', message: 'Unreadable font pack' }),
+    expect(two).rejects.toMatchObject({ code: 'disposed' }),
+  ]);
 });

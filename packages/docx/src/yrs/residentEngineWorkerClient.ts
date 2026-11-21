@@ -169,7 +169,7 @@ export interface ResidentEngineWorkerPort {
   onerror: ((event: ErrorEvent) => void) | null;
   onmessageerror: ((event: MessageEvent) => void) | null;
   postMessage(
-    message: DocxEngineWorkerRequest | DocxEngineWorkerHostModule | FontPackReply,
+    message: DocxEngineWorkerRequest | DocxEngineWorkerHostModule,
     transfer?: Transferable[]
   ): void;
   terminate(): void;
@@ -231,7 +231,9 @@ export class ResidentEngineWorkerClient implements DocxCommandClient {
   private readonly fontPacks: ReturnType<typeof createFontPackResponder>;
 
   constructor(protected readonly worker: ResidentEngineWorkerPort = spawnResidentEngineWorker()) {
-    this.fontPacks = createFontPackResponder((message) => this.worker.postMessage(message), importOptionalFontPack);
+    this.fontPacks = createFontPackResponder((message) => {
+      (this.worker as ResidentEngineWorkerPort & { postMessage(reply: FontPackReply): void }).postMessage(message);
+    }, importOptionalFontPack);
     this.worker.onmessage = (event) => {
       if (this.fontPacks.receive(event.data)) {
         event.stopImmediatePropagation();

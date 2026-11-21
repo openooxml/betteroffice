@@ -1,4 +1,4 @@
-import { createFontPackResponder, isFontPackRequest, type OptionalFontPackSource } from './optionalFontPacks';
+import { createFontPackResponder, type OptionalFontPackSource } from './optionalFontPacks';
 import type { SessionTransport } from './transport';
 
 export const importOptionalFontPack: OptionalFontPackSource = async (pack) =>
@@ -6,10 +6,32 @@ export const importOptionalFontPack: OptionalFontPackSource = async (pack) =>
 
 export function withFontPackSource(transport: SessionTransport, source = importOptionalFontPack): SessionTransport {
   const responder = createFontPackResponder((message) => transport.post(message), source);
-  const unlisten = transport.listen((message) => { responder.receive(message); });
+  const listeners = new Set<(message: unknown) => void>();
+  let unlisten: (() => void) | undefined;
+  const stopListening = () => {
+    unlisten?.();
+    unlisten = undefined;
+  };
   return {
     ...transport,
-    listen: (listener) => transport.listen((message) => { if (!isFontPackRequest(message)) listener(message); }),
-    close() { responder.dispose(); unlisten(); transport.close(); },
+    listen(listener) {
+      const forward = (message: unknown) => listener(message);
+      listeners.add(forward);
+      unlisten ??= transport.listen((message) => {
+        if (responder.receive(message)) return;
+        for (const receive of [...listeners]) {
+          if (listeners.has(receive)) receive(message);
+        }
+      });
+      return () => {
+        if (listeners.delete(forward) && listeners.size === 0) stopListening();
+      };
+    },
+    close() {
+      responder.dispose();
+      listeners.clear();
+      stopListening();
+      transport.close();
+    },
   };
 }

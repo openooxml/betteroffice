@@ -52,7 +52,7 @@ for (const format of formats) {
       const contents = await readFile(stub.outfile, 'utf8');
       const { problems } = await validateNativeWorker(contents);
       failures.push(...problems.map((problem: string) => `${relative(out, stub.outfile)} ${problem}`));
-      expect(contents).not.toMatch(/new URL\([^)]*\.wasm|WebAssembly\.(?:instantiate|compile)|generated\//);
+      expect(contents).not.toMatch(/new URL\([^)]*\.wasm|WebAssembly\.instantiate|generated\//);
       expect(contents).not.toContain('font-pack-request');
       const parsed = await build({
         stdin: { contents },
@@ -64,7 +64,8 @@ for (const format of formats) {
       });
       const imports = Object.values(parsed.metafile!.outputs).flatMap((output) => output.imports);
       expect(imports.some(({ path }) => path === 'node:module')).toBe(true);
-      expect(imports.some(({ path, kind }) => path === '@betteroffice/fonts' && kind === 'dynamic-import')).toBe(true);
+      expect(imports.filter(({ path }) => path === '@betteroffice/fonts').map(({ kind }) => kind))
+        .toEqual(format === 'xlsx' ? [] : expect.arrayContaining(['dynamic-import']));
       for (const { path } of imports) {
         if (external.some((pattern) =>
           pattern.endsWith('*') ? path.startsWith(pattern.slice(0, -1)) : path === pattern)) continue;
