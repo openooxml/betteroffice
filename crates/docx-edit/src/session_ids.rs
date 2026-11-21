@@ -25,12 +25,19 @@ impl SessionIds {
         if !self.floored.swap(true, Ordering::Relaxed) {
             self.counter.fetch_max(self.floor(txn), Ordering::Relaxed);
         }
-        let counter = self
-            .counter
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-                (n < MAX_FLOOR).then_some(n + 1)
-            })
-            .expect("session id counter exhausted");
+        let mut counter = self.counter.load(Ordering::Relaxed);
+        loop {
+            assert!(counter < MAX_FLOOR, "session id counter exhausted");
+            match self.counter.compare_exchange_weak(
+                counter,
+                counter + 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(current) => counter = current,
+            }
+        }
         format!("{}:{counter}", self.client_id)
     }
 
