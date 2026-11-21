@@ -968,6 +968,34 @@ pub fn layout_document_incremental_ranges<F: PartialEq>(
         }
     }
 
+    // A segment's trailing pages that came out as their retained pages do once
+    // their positions move, and hold only clean blocks, are those retained pages
+    // and reported as retained: a page start inside a split block offers no
+    // checkpoint, so placement only meets the retained layout past it.
+    let settled: Vec<Vec<crate::types::Page>> = segments
+        .iter()
+        .map(
+            |(_, placed, converged)| match (dirty.as_deref(), converged) {
+                (
+                    Some(dirty),
+                    Some(Convergence::Skip { previous, .. } | Convergence::Suffix { previous, .. }),
+                ) if options
+                    .footnote_reserved_heights
+                    .as_ref()
+                    .is_none_or(|heights| heights.is_empty()) =>
+                {
+                    settled_trailing_pages(
+                        placed,
+                        &previous_layout.pages
+                            [..previous.page_index.min(previous_layout.pages.len())],
+                        &input.measured,
+                        dirty,
+                    )
+                }
+                _ => Vec::new(),
+            },
+        )
+        .collect();
     let mut retained = std::mem::take(&mut previous_layout.pages)
         .into_iter()
         .enumerate()
@@ -987,11 +1015,13 @@ pub fn layout_document_incremental_ranges<F: PartialEq>(
     take_retained(0, resume_page, &mut pages);
     let mut rebuilt_page_ranges = Vec::with_capacity(segments.len());
     let mut reused_ranges = Vec::new();
-    for (start_page, mut placed, converged) in segments {
+    for ((start_page, mut placed, converged), mut settled) in segments.into_iter().zip(settled) {
         debug_assert_eq!(pages.len(), start_page);
         let rebuilt_start = pages.len();
+        placed.truncate(placed.len() - settled.len());
         pages.append(&mut placed);
         rebuilt_page_ranges.push(rebuilt_start..pages.len());
+        pages.append(&mut settled);
         let reused_start = pages.len();
         let first_block = match &converged {
             Some(Convergence::Skip { previous, .. } | Convergence::Suffix { previous, .. }) => {
@@ -1565,6 +1595,95 @@ fn place<F: PartialEq>(
         placed_blocks,
         converged: None,
     })
+}
+
+/// The trailing run of `placed`'s pages, never its first, that each hold only
+/// blocks outside `dirty` and are, as placement gives them, the retained page
+/// at their place before the convergence point once refreshed as a retained
+/// page is: those refreshed retained pages, in page order.
+fn settled_trailing_pages(
+    placed: &[crate::types::Page],
+    retained_before_convergence: &[crate::types::Page],
+    measured: &[MeasuredBlock],
+    dirty: &[usize],
+) -> Vec<crate::types::Page> {
+    let mut settled: Vec<_> = placed
+        .iter()
+        .skip(1)
+        .rev()
+        .zip(retained_before_convergence.iter().rev())
+        .map_while(|(next, retained)| settled_as_retained(next, retained, measured, dirty))
+        .collect();
+    settled.reverse();
+    settled
+}
+
+/// `retained` refreshed from its blocks as a retained page after convergence
+/// is, when `next`, placed afresh, holds only blocks outside `dirty` and is
+/// that page as placement gives it, so its display is the retained one moved.
+fn settled_as_retained(
+    next: &crate::types::Page,
+    retained: &crate::types::Page,
+    measured: &[MeasuredBlock],
+    dirty: &[usize],
+) -> Option<crate::types::Page> {
+    if next.fragments.len() != retained.fragments.len() {
+        return None;
+    }
+    let first = next.fragments.first()?;
+    let (id, _) = fragment_source(first);
+    let start = measured
+        .iter()
+        .position(|block| block.block.block_id() == Some(id))?;
+    let walk = || ReusedBlocks {
+        next: start,
+        current: Some(start),
+    };
+    let (mut next_blocks, mut retained_blocks) = (walk(), walk());
+    let mut refreshed = retained.clone();
+    for (fragment, retained) in next.fragments.iter().zip(&mut refreshed.fragments) {
+        let block = next_blocks.block(fragment, measured)?;
+        let clean = next_blocks
+            .current
+            .is_some_and(|index| dirty.binary_search(&index).is_err());
+        if !clean
+            || !retained_blocks
+                .block(retained, measured)
+                .is_some_and(|retained| std::ptr::eq(retained, block))
+        {
+            return None;
+        }
+        refresh_reused_fragment(retained, block, true);
+    }
+    let shape_offsets_match =
+        next.fragments
+            .iter()
+            .zip(&refreshed.fragments)
+            .all(|pair| match pair {
+                (Fragment::Shape(next), Fragment::Shape(refreshed)) => {
+                    next.wrap_offset_x == refreshed.wrap_offset_x
+                }
+                _ => true,
+            });
+    // What placement gives a page; the section, region and note stamps that
+    // later passes add are a function of the page index and these.
+    let matches = shape_offsets_match
+        && next.number == refreshed.number
+        && next.float_bands == refreshed.float_bands
+        && next.opening_fragment_geometry == refreshed.opening_fragment_geometry
+        && next.margins == refreshed.margins
+        && next.body_margins == refreshed.body_margins
+        && next.body_anchor_margins == refreshed.body_anchor_margins
+        && next.size == refreshed.size
+        && next.orientation == refreshed.orientation
+        && next.region_section_index == refreshed.region_section_index
+        && next.footnote_reserved_height == refreshed.footnote_reserved_height
+        && next.columns == refreshed.columns
+        && next.parity_filler == refreshed.parity_filler
+        && serde_json::to_vec(&next.fragments).is_ok_and(|encoded| {
+            serde_json::to_vec(&refreshed.fragments).is_ok_and(|other| other == encoded)
+        });
+    matches.then_some(refreshed)
 }
 
 fn block_id_key(id: &crate::types::BlockId) -> String {
