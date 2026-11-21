@@ -73,6 +73,23 @@ test('top-level text box padding hit keeps shape selection', () => {
   }
 });
 
+test('overflowing text is hittable past its frame, over a shape beneath it', () => {
+  const source = list('alpha beta\nx\nalpha beta');
+  const box = source.primitives[0] as TextBoxPrimitive;
+  box.h = 20;
+  source.primitives = [{ kind: 'shape', objectId: 2, shapeId: 'below', x: 0, y: 30, w: 100, h: 40,
+    name: 'Below', geometry: 'rect', path: [] }, box];
+  for (const index of [indexGeometry, indexHitGeometry]) {
+    expect(hitGeometry(index(source), { x: 31, y: 50 }, undefined, 1)).toMatchObject({ kind: 'shape', shapeId: 'below' });
+    box.overflow = true;
+    expect(hitGeometry(index(source), { x: 31, y: 50 }, undefined, 1))
+      .toMatchObject({ kind: 'text', shapeId: 'box', position: 16 });
+    expect(hitGeometry(index(source), { x: 2, y: 30 }, undefined, 1)).toMatchObject({ kind: 'text', position: 11 });
+    expect(hitGeometry(index(source), { x: 50, y: 18 }, undefined, 1)).toEqual({ kind: 'shape', shapeId: 'box' });
+    delete box.overflow;
+  }
+});
+
 test('modifier_edges_worker', () => {
   const index = indexHitGeometry(list());
   const at = { ...selection, anchor: 2, focus: 2 };
