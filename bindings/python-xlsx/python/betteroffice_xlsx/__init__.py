@@ -9,7 +9,9 @@ import math
 import numbers
 import os
 import warnings
-from typing import Any, TypedDict, Iterable, Iterator, Mapping, Union
+from typing import (
+    Any, Callable, Iterable, Iterator, Literal, Mapping, Sequence, TypedDict, TypeVar, Union,
+)
 
 from ._betteroffice_xlsx import (
     decode_font_face,
@@ -167,6 +169,7 @@ __all__ = [
 
 CellValue = Union[None, bool, float, str, CellError]
 SheetKey = Union[int, str]
+_T = TypeVar("_T")
 
 
 class Sheet:
@@ -176,28 +179,31 @@ class Sheet:
     indexing reads the current value.
     """
 
-    __slots__ = ("_index", "_workbook")
+    __slots__ = ("_key", "_workbook")
 
-    def __init__(self, workbook: "Workbook", index: int) -> None:
+    def __init__(self, workbook: "Workbook", key: SheetKey) -> None:
         self._workbook = workbook
-        self._index = index
+        self._key = key
 
     @property
     def index(self) -> int:
-        return self._index
+        try:
+            return self._workbook._current_sheet_keys().index(self._key)
+        except ValueError:
+            raise KeyError("sheet was removed from the workbook") from None
 
     @property
     def name(self) -> str:
-        return self._workbook.sheet_names[self._index]
+        return self._workbook.sheet_names[self.index]
 
     def __getitem__(self, address: str) -> CellValue:
-        return self._workbook.value(self._index, address)
+        return self._workbook.value(self.index, address)
 
     def __setitem__(self, address: str, value: object) -> None:
-        self._workbook.set(self._index, address, value)
+        self._workbook.set(self.index, address, value)
 
     def formula(self, address: str) -> "str | None":
-        return self._workbook.formula(self._index, address)
+        return self._workbook.formula(self.index, address)
 
     def render_png(
         self,
@@ -216,10 +222,11 @@ class Sheet:
             return self.render_sheet(
                 scale=scale, range=range, max_width=max_width, max_height=max_height
             )
+        index = self.index
         if range is not None:
             raise TypeError("render_png takes a target or a range, not both")
         return self._workbook.render_png(
-            {"sheet": self._index, **target},
+            {"sheet": index, **target},
             scale=scale,
             max_width=max_width,
             max_height=max_height,
@@ -235,20 +242,86 @@ class Sheet:
     ) -> Png:
         """Render this sheet to PNG, framing its used range when no range is given."""
         return self._workbook.render_sheet(
-            self._index, scale=scale, range=range, max_width=max_width, max_height=max_height
+            self.index, scale=scale, range=range, max_width=max_width, max_height=max_height
         )
 
     def __repr__(self) -> str:
-        return f"Sheet({self.name!r})"
+        try:
+            return f"Sheet({self.name!r})"
+        except KeyError:
+            return "Sheet(<removed>)"
 
 
 class Workbook:
     """An XLSX workbook."""
 
-    __slots__ = ("_inner",)
+    __slots__ = ("_inner", "_sheet_keys", "_next_sheet_key", "_sheet_history")
 
     def __init__(self, inner: _Workbook) -> None:
         self._inner = inner
+        if not inner.is_collaborative:
+            self._next_sheet_key = inner.sheet_count
+            self._sheet_keys = list(range(self._next_sheet_key))
+            self._sheet_history: dict[int, tuple[list[int], list[int]]] = {}
+
+    def _current_sheet_keys(self) -> "Sequence[SheetKey]":
+        if self._inner.is_collaborative:
+            return self.sheet_info()["sheetIds"]
+        return self._sheet_keys
+
+    def _commit(
+        self,
+        call: Callable[[], _T],
+        *,
+        transaction: "str | None" = None,
+        history_step: "Literal['undo', 'redo'] | None" = None,
+    ) -> _T:
+        if self._inner.is_collaborative:
+            return call()
+
+        version = self.version()
+        before_history = self.history()
+        before_keys = self._sheet_keys.copy()
+        result = call()
+        if self.version() == version:
+            return result
+
+        before_depth = before_history.undo_depth
+        after_depth = self.history().undo_depth
+        after_keys = before_keys
+        if history_step == "undo" and before_depth in self._sheet_history:
+            after_keys = self._sheet_history[before_depth][0]
+        elif history_step == "redo" and after_depth in self._sheet_history:
+            after_keys = self._sheet_history[after_depth][1]
+        elif transaction is not None:
+            after_keys = before_keys.copy()
+            for op in json.loads(transaction)["ops"]:
+                if isinstance(op, list):
+                    kind, *fields = op
+                else:
+                    kind = op["type"]
+                    if kind == "moveSheet":
+                        fields = [op["from"], op["to"]]
+                    elif kind in ("addSheet", "removeSheet"):
+                        fields = [op["index"]]
+                    else:
+                        continue
+                if kind == "addSheet":
+                    after_keys.insert(fields[0], self._next_sheet_key)
+                    self._next_sheet_key += 1
+                elif kind == "removeSheet":
+                    after_keys.pop(fields[0])
+                elif kind == "moveSheet":
+                    after_keys.insert(fields[1], after_keys.pop(fields[0]))
+
+        if len(after_keys) != self.sheet_count:
+            raise RuntimeError("sheet handle keys do not match the workbook's sheet count")
+        if history_step is None and after_depth > before_depth:
+            for depth in range(before_depth + 1, before_depth + before_history.redo_depth + 1):
+                self._sheet_history.pop(depth, None)
+            self._sheet_history[after_depth] = (before_keys, after_keys)
+        self._sheet_keys = after_keys
+        return result
 
     @classmethod
     def open(cls, data: "bytes | bytearray | memoryview") -> "Workbook":
@@ -276,7 +349,7 @@ class Workbook:
         ``now_serial`` is the current date and time as a 1900 date-system
         serial (days since 1899-12-30), also for 1904 workbooks.
         """
-        return self._inner.recalculate(now_serial=now_serial)
+        return self._commit(lambda: self._inner.recalculate(now_serial=now_serial))
 
     @property
     def sheet_names(self) -> "list[str]":
@@ -288,7 +361,8 @@ class Workbook:
 
     def sheet(self, key: SheetKey) -> Sheet:
         """A sheet by name or index. Raises if it does not exist."""
-        return Sheet(self, self._inner.sheet_index(key))
+        index = self._inner.sheet_index(key)
+        return Sheet(self, self._current_sheet_keys()[index])
 
     def value(self, sheet: SheetKey, address: str) -> CellValue:
         """The value of a cell, recalculated only if the workbook has been."""
@@ -309,8 +383,11 @@ class Workbook:
     ) -> Mutation:
         """Set a cell from what a user would type. A locked cell on a protected sheet raises
         unless ``protected_sheets="allow"``, which keeps the protection."""
-        return self._inner.set(
-            sheet, address, _as_input(value), now_serial=now_serial, protected_sheets=protected_sheets
+        text = _as_input(value)
+        return self._commit(
+            lambda: self._inner.set(
+                sheet, address, text, now_serial=now_serial, protected_sheets=protected_sheets
+            )
         )
 
     def render_png(
@@ -423,10 +500,8 @@ class Workbook:
         *,
         now_serial: "float | None" = None,
     ) -> Mutation:
-        return self._inner.apply_update(
-            _as_bytes(update, max_length=MAX_COLLABORATION_BYTES),
-            now_serial=now_serial,
-        )
+        data = _as_bytes(update, max_length=MAX_COLLABORATION_BYTES)
+        return self._commit(lambda: self._inner.apply_update(data, now_serial=now_serial))
 
     @property
     def can_undo(self) -> bool:
@@ -440,10 +515,10 @@ class Workbook:
         return self._inner.history()
 
     def undo(self, *, now_serial: "float | None" = None) -> Mutation:
-        return self._inner.undo(now_serial=now_serial)
+        return self._commit(lambda: self._inner.undo(now_serial=now_serial), history_step="undo")
 
     def redo(self, *, now_serial: "float | None" = None) -> Mutation:
-        return self._inner.redo(now_serial=now_serial)
+        return self._commit(lambda: self._inner.redo(now_serial=now_serial), history_step="redo")
 
     def set_many(
         self,
@@ -455,11 +530,11 @@ class Workbook:
     ) -> Mutation:
         """Write many cells as one undo step; ``protected_sheets`` works as in :meth:`set`."""
         pairs = edits.items() if hasattr(edits, "items") else edits
-        return self._inner.set_many(
-            sheet,
-            [(address, _as_input(value)) for address, value in pairs],
-            now_serial=now_serial,
-            protected_sheets=protected_sheets,
+        inputs = [(address, _as_input(value)) for address, value in pairs]
+        return self._commit(
+            lambda: self._inner.set_many(
+                sheet, inputs, now_serial=now_serial, protected_sheets=protected_sheets
+            )
         )
 
     def apply_ops(
@@ -476,7 +551,11 @@ class Workbook:
         structural op on a collaborative workbook :class:`CollaborativeStructureError`, each with
         the message TypeScript throws.
         """
-        return self._inner.apply_ops_json(_wire({"ops": list(ops)}), now_serial=now_serial)
+        transaction = _wire({"ops": list(ops)})
+        return self._commit(
+            lambda: self._inner.apply_ops_json(transaction, now_serial=now_serial),
+            transaction=transaction,
+        )
 
     def move_range(
         self,
@@ -487,10 +566,8 @@ class Workbook:
         now_serial: "float | None" = None,
     ) -> Mutation:
         """Move ``source`` (A1) so its top-left lands on ``destination``, rewriting references."""
-        return self._inner.move_range_json(
-            _wire({"sheet": sheet, "source": source, "destination": destination}),
-            now_serial=now_serial,
-        )
+        args = _wire({"sheet": sheet, "source": source, "destination": destination})
+        return self._commit(lambda: self._inner.move_range_json(args, now_serial=now_serial))
 
     def set_hyperlink(
         self,
@@ -508,7 +585,8 @@ class Workbook:
             display=hyperlink.get("display"),
         )
         op = {"type": "setHyperlink", "sheet": sheet, "hyperlink": link}
-        return self._inner.apply_ops_json(_wire({"ops": [op]}), now_serial=now_serial)
+        transaction = _wire({"ops": [op]})
+        return self._commit(lambda: self._inner.apply_ops_json(transaction, now_serial=now_serial))
 
     def remove_hyperlink(
         self,
@@ -518,7 +596,8 @@ class Workbook:
         now_serial: "float | None" = None,
     ) -> Mutation:
         op = {"type": "removeHyperlink", "sheet": sheet, "range": range}
-        return self._inner.apply_ops_json(_wire({"ops": [op]}), now_serial=now_serial)
+        transaction = _wire({"ops": [op]})
+        return self._commit(lambda: self._inner.apply_ops_json(transaction, now_serial=now_serial))
 
     def edit_charts(
         self,
@@ -527,7 +606,8 @@ class Workbook:
         now_serial: "float | None" = None,
     ) -> Mutation:
         """Retitle charts or repoint their series, 1 to 32 edits as one undo step."""
-        return self._inner.edit_charts_json(_wire(list(edits)), now_serial=now_serial)
+        args = _wire(list(edits))
+        return self._commit(lambda: self._inner.edit_charts_json(args, now_serial=now_serial))
 
     def move_chart(
         self,
@@ -539,10 +619,8 @@ class Workbook:
         now_serial: "float | None" = None,
     ) -> Mutation:
         """Slide chart frame ``chart`` (a chart ``id``) by content pixels, clamped to the grid."""
-        return self._inner.move_chart_json(
-            _wire({"sheet": sheet, "chart": chart, "dx": dx, "dy": dy}),
-            now_serial=now_serial,
-        )
+        args = _wire({"sheet": sheet, "chart": chart, "dx": dx, "dy": dy})
+        return self._commit(lambda: self._inner.move_chart_json(args, now_serial=now_serial))
 
     def capture_format(self, sheet: int, range: str) -> CapturedFormat:
         """The formats of an A1 range, for :meth:`apply_format`."""
@@ -557,10 +635,8 @@ class Workbook:
         now_serial: "float | None" = None,
     ) -> Mutation:
         """Paint a captured format over an A1 range, tiling it."""
-        return self._inner.apply_format_json(
-            _wire({"sheet": sheet, "range": range, "format": format}),
-            now_serial=now_serial,
-        )
+        args = _wire({"sheet": sheet, "range": range, "format": format})
+        return self._commit(lambda: self._inner.apply_format_json(args, now_serial=now_serial))
 
     def propose(
         self,
@@ -592,8 +668,8 @@ class Workbook:
         force: bool = False,
         now_serial: "float | None" = None,
     ) -> Mutation:
-        return self._inner.accept_proposal(
-            proposal_id, force=force, now_serial=now_serial
+        return self._commit(
+            lambda: self._inner.accept_proposal(proposal_id, force=force, now_serial=now_serial)
         )
 
     def reject_proposal(self, proposal_id: str) -> bool:
@@ -679,7 +755,8 @@ class Workbook:
         Refusals come back as ``{"ok": False, "version", "failure"}``; a malformed request
         raises ``ValueError``.
         """
-        return json.loads(self._inner.apply_edits_json(json.dumps(request)))
+        args = json.dumps(request)
+        return json.loads(self._commit(lambda: self._inner.apply_edits_json(args)))
 
     def export_structured(
         self,
@@ -745,7 +822,7 @@ class Workbook:
 
     def set_active_sheet(self, sheet: SheetKey) -> None:
         """Select a sheet and persist it as the workbook's active tab."""
-        self._inner.set_active_sheet(sheet)
+        self._commit(lambda: self._inner.set_active_sheet(sheet))
 
     def merged_ranges(self, sheet: SheetKey, range: str) -> "list[str]":
         return self._inner.merged_ranges(sheet, range)
@@ -765,8 +842,10 @@ class Workbook:
         """One of automatic, text, number, percent, scientific, currency, date,
         time, or a custom pattern such as ``#,##0.00``. ``protected_sheets`` works as in
         :meth:`set`."""
-        return self._inner.set_number_format(
-            sheet, range, format, now_serial=now_serial, protected_sheets=protected_sheets
+        return self._commit(
+            lambda: self._inner.set_number_format(
+                sheet, range, format, now_serial=now_serial, protected_sheets=protected_sheets
+            )
         )
 
     def set_style(
@@ -789,28 +868,30 @@ class Workbook:
     ) -> Mutation:
         """Patch styling over a range. Omitted arguments are left as they are.
         ``protected_sheets`` works as in :meth:`set`."""
-        return self._inner.set_style(
-            sheet,
-            range,
-            bold=bold,
-            italic=italic,
-            strikethrough=strikethrough,
-            font_family=font_family,
-            font_size=font_size,
-            text_color=text_color,
-            fill_color=fill_color,
-            horizontal_alignment=horizontal_alignment,
-            vertical_alignment=vertical_alignment,
-            text_wrapping=text_wrapping,
-            now_serial=now_serial,
-            protected_sheets=protected_sheets,
+        return self._commit(
+            lambda: self._inner.set_style(
+                sheet,
+                range,
+                bold=bold,
+                italic=italic,
+                strikethrough=strikethrough,
+                font_family=font_family,
+                font_size=font_size,
+                text_color=text_color,
+                fill_color=fill_color,
+                horizontal_alignment=horizontal_alignment,
+                vertical_alignment=vertical_alignment,
+                text_wrapping=text_wrapping,
+                now_serial=now_serial,
+                protected_sheets=protected_sheets,
+            )
         )
 
     def __getitem__(self, key: SheetKey) -> Sheet:
         return self.sheet(key)
 
     def __iter__(self) -> Iterator[Sheet]:
-        return (Sheet(self, index) for index in range(self.sheet_count))
+        return (Sheet(self, key) for key in self._current_sheet_keys())
 
     def __len__(self) -> int:
         return self.sheet_count
