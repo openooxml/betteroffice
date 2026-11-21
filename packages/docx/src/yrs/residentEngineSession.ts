@@ -901,7 +901,8 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
     setParagraphAttrs: (range, attrs, author) => applyCommandMutation(range.story, () =>
       session.set_paragraph_attrs(...rangeArgs(range), JSON.stringify(attrs), author?.name, author?.date)),
     ensureListDefinition: (story, paraId, kind, lead) => applyCommandMutation(story, () =>
-      JSON.parse(session.ensure_list_definition(story, paraId, kind, lead))),
+      JSON.parse(lead === undefined ? session.ensure_list_definition(story, paraId, kind)
+        : session.ensure_list_definition_after(story, paraId, kind, lead))),
     applyParagraphStyle: (range, styleId, author) => applyCommandMutation(range.story, () =>
       session.apply_paragraph_style(...rangeArgs(range), styleId, author?.name, author?.date)),
     addComment: (ranges, author, date, body) => {

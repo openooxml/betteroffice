@@ -1737,7 +1737,11 @@ export function wrapSession(
     ensureListDefinition: (story, paraId, kind, lead) => {
       ensureUndo(story);
       const { listDef, ...attrs } = mutate(
-        () => JSON.parse(session.ensure_list_definition(story, paraId, kind, lead)) as YrsParagraphAttrs & { listDef?: unknown }
+        () => JSON.parse(
+          lead === undefined
+            ? session.ensure_list_definition(story, paraId, kind)
+            : session.ensure_list_definition_after(story, paraId, kind, lead)
+        ) as YrsParagraphAttrs & { listDef?: unknown }
       );
       return listDef === undefined ? attrs : { ...attrs, other: { ...attrs.other, listDef } };
     },

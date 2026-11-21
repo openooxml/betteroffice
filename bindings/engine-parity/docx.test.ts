@@ -2486,6 +2486,12 @@ const rows: Row<Docx>[] = [
     call: ({ session: s }) => s.ensure_list_definition('body', paraId(s, 'Second body'), 'bullet'),
   },
   defineRow({
+    method: 'EditSession.ensure_list_definition_after',
+    mutates: true,
+    setup: ({ session: s }: Docx) => s.set_paragraph_attrs(...span(s, 'First body', 0, 0), s.ensure_list_definition('body', paraId(s, 'First body'), 'bullet')),
+    call: ({ session: s }) => s.ensure_list_definition_after('body', paraId(s, 'Controls'), 'bullet', paraId(s, 'First body')),
+  }),
+  defineRow({
     method: 'EditSession.edit_text_resident',
     mutates: true,
     setup: ({ session: s }: Docx) => layout(s),

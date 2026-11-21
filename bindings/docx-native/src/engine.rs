@@ -2990,6 +2990,20 @@ impl EditSession {
         story: String,
         para_id: String,
         kind: String,
+    ) -> Result<String> {
+        let _call = EngineCall::new(env);
+        self.document(env)?
+            .ensure_list_definition(&story, &para_id, &kind)
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi(catch_unwind, js_name = "ensure_list_definition_after")]
+    pub fn ensure_list_definition_after(
+        &self,
+        env: Env,
+        story: String,
+        para_id: String,
+        kind: String,
         lead: Option<String>,
     ) -> Result<String> {
         let _call = EngineCall::new(env);
