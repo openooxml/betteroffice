@@ -655,6 +655,7 @@ export class DocxAgentDocument {
       const vector = draft.encodeStateVector();
       this.apply(draft, held, author);
       const update = draft.encodeStateAsUpdate(vector);
+      const others = [...this.proposals.values()].filter(other => other !== held && other.value.status === 'pending');
       this.session.addUndoBoundary();
       try {
         this.setLocalDecision(held, 'accepted');
@@ -663,8 +664,8 @@ export class DocxAgentDocument {
       } finally { this.session.addUndoBoundary(); }
       this.preserveReferences(before, this.session.version(), this.agentDecisionChanges(held, 'accepted', options.tracked ?? false), held);
       const edited = new Set([...held.targets.values()].map(({ story, paraId }) => `${story}\u0000${paraId}`));
-      for (const other of this.proposals.values()) {
-        if (other === held || other.value.status !== 'pending') continue;
+      for (const other of others) {
+        if (other.value.status !== 'pending') continue;
         for (const target of other.targets.values()) if (edited.has(`${target.story}\u0000${target.paraId}`)) target.fingerprint = '\u0000stale';
       }
       this.checkDecisionReferences(before, held);

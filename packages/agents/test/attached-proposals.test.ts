@@ -109,11 +109,11 @@ test('attached DOCX refuses a second proposal in a paragraph an accept edited ba
   const first = doc.propose({ author, edits: [{ ...target, start: 0, oldText: '', newText: 'a ' }, { ...target, start: 5, oldText: ' a', newText: '' }] });
   const second = doc.propose({ author, edits: [{ ...target, start: 2, oldText: 'a', newText: 'B' }] });
   await doc.accept(first.id);
-  expect(doc.session.paragraphs('body')[0]?.text).toBe('a a a a');
+  expect(doc.read(paragraphTarget(doc, 0).ref).text).toBe('a a a a');
   await expect(doc.accept(second.id)).rejects.toMatchObject({ code: 'STALE_TARGET' });
-  expect(doc.session.paragraphs('body')[0]?.text).toBe('a a a a');
+  expect(doc.read(paragraphTarget(doc, 0).ref).text).toBe('a a a a');
   expect(doc.review(second.id)).toMatchObject({ status: 'pending' });
   expect(doc.review(second.id).staleRefs.length).toBeGreaterThan(0);
   expect(doc.reject(second.id)).toMatchObject({ status: 'rejected' });
-  expect(doc.session.paragraphs('body')[0]?.text).toBe('a a a a');
+  expect(doc.read(paragraphTarget(doc, 0).ref).text).toBe('a a a a');
 }));
