@@ -487,6 +487,7 @@ fn first_difference(left: &WorkbookModel, right: &WorkbookModel) -> String {
             "calculation precision",
             left.full_precision != right.full_precision,
         ),
+        ("iterative calculation", left.iterate != right.iterate),
         ("defined names", left.defined_names != right.defined_names),
         (
             "shared strings",
@@ -782,11 +783,10 @@ impl Workbook {
         }
         pulse();
         if authority.full_precision_setting().is_none() {
-            let source = source.map(|bytes| ooxml_opc::SourceContainer::new(bytes.to_vec()));
-            let precision =
-                crate::snapshot::source_full_precision(source.as_ref()).map_err(invalid)?;
+            let precision = crate::snapshot::source_full_precision(source).map_err(invalid)?;
             authority.restore_full_precision(precision);
         }
+        authority.restore_iterate(crate::snapshot::source_iterate(source));
         let projection = authority.materialize().map_err(authority_error)?;
         pulse();
         let mut model = checkpoint.calculation.apply(projection)?;

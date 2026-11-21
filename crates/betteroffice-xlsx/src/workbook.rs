@@ -6416,6 +6416,13 @@ fn edit_cell_state(
             names.visible_from(Some(sheet)),
         )
     });
+    if workbook.iterate
+        && state.formula.is_some()
+        && let Some(previous) = workbook.sheet(sheet).and_then(|sheet| sheet.cell(cell))
+        && previous.formula.is_some()
+    {
+        state.value = previous.value.clone();
+    }
     state.style = written_cell_style(workbook, sheet, cell, input.is_empty());
     let format = inferred.map(|id| {
         let mut format = workbook.styles.cell_format(Some(style.unwrap_or(0)));

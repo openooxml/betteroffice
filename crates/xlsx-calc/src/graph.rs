@@ -84,7 +84,7 @@ pub struct DepGraph {
     /// formula cells the recalcs over this graph left unevaluated, with the
     /// uncomputable functions behind each, sorted; a recalc replaces the entry
     /// of every cell it evaluates.
-    unevaluated: std::sync::Mutex<BTreeMap<NodeKey, Vec<String>>>,
+    unevaluated: std::sync::Mutex<BTreeMap<NodeKey, Gap>>,
     /// the listed cells with no value of excel's to keep, with what a recalc
     /// wrote for them, so the next one writes them again. a cell holding
     /// anything else came from elsewhere, an undo or an op writing its value,
@@ -101,19 +101,31 @@ pub(crate) struct Answer {
     pub(crate) value: CellValue,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Gap {
+    pub(crate) functions: Vec<String>,
+    pub(crate) iterative: bool,
+}
+
+impl Gap {
+    pub(crate) fn propagates(&self) -> bool {
+        self.iterative || !self.functions.is_empty()
+    }
+}
+
 /// a formula cell whose result an engine gap reached, or that reads a cell an
 /// uncomputable or unknown function left so. an uncomputable function's cell
 /// is never written, keeping excel's cached value or a blank. an unknown
 /// function's keeps excel's cached value too, but with none the engine's
-/// answer stands: `#NAME?`, or what a handler made of it. a gap of this engine
-/// alone keeps the cached value, or shows the computed error when the file
-/// stored none.
+/// answer stands: `#NAME?`, or what a handler made of it. an iterative cycle
+/// and its readers keep their values. other gaps keep the cached value or
+/// show the computed error when the file stored none.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnevaluatedCell {
     pub sheet: SheetId,
     pub cell: CellRef,
     /// the uncomputable and unknown functions involved, sorted; empty when
-    /// only gaps of this engine were.
+    /// no uncomputable or unknown function was involved.
     pub functions: Vec<String>,
 }
 
@@ -590,16 +602,24 @@ impl DepGraph {
 
     /// the formula cells left unevaluated, in address order.
     pub fn unevaluated_cells(&self) -> Vec<UnevaluatedCell> {
+        self.collect_unevaluated(|key, gap| UnevaluatedCell {
+            sheet: key.sheet,
+            cell: key.cell(),
+            functions: gap.functions.clone(),
+        })
+    }
+
+    pub(crate) fn unevaluated_gaps(&self) -> Vec<(SheetId, CellRef, Gap)> {
+        self.collect_unevaluated(|key, gap| (key.sheet, key.cell(), gap.clone()))
+    }
+
+    fn collect_unevaluated<T>(&self, project: impl Fn(NodeKey, &Gap) -> T) -> Vec<T> {
         self.unevaluated
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .iter()
             .filter(|(key, _)| self.deps.contains_key(key))
-            .map(|(key, functions)| UnevaluatedCell {
-                sheet: key.sheet,
-                cell: key.cell(),
-                functions: functions.clone(),
-            })
+            .map(|(&key, gap)| project(key, gap))
             .collect()
     }
 
@@ -619,7 +639,13 @@ impl DepGraph {
             .lock()
             .unwrap_or_else(|err| err.into_inner());
         for cell in cells {
-            unevaluated.insert(NodeKey::new(cell.sheet, cell.cell), cell.functions);
+            unevaluated.insert(
+                NodeKey::new(cell.sheet, cell.cell),
+                Gap {
+                    functions: cell.functions,
+                    iterative: false,
+                },
+            );
         }
     }
 
@@ -721,12 +747,7 @@ impl DepGraph {
         }
     }
 
-    /// the functions `cell` is held unevaluated with, if it is.
-    pub(crate) fn unevaluated_functions(
-        &self,
-        sheet: SheetId,
-        cell: CellRef,
-    ) -> Option<Vec<String>> {
+    pub(crate) fn unevaluated_gap(&self, sheet: SheetId, cell: CellRef) -> Option<Gap> {
         self.unevaluated
             .lock()
             .unwrap_or_else(|err| err.into_inner())
@@ -734,22 +755,15 @@ impl DepGraph {
             .cloned()
     }
 
-    /// records what one evaluation found: `Some` marks the cell unevaluated
-    /// with those functions, `None` clears it.
-    pub(crate) fn set_unevaluated(
-        &self,
-        sheet: SheetId,
-        cell: CellRef,
-        functions: Option<Vec<String>>,
-    ) {
+    pub(crate) fn set_unevaluated(&self, sheet: SheetId, cell: CellRef, gap: Option<Gap>) {
         let mut unevaluated = self
             .unevaluated
             .lock()
             .unwrap_or_else(|err| err.into_inner());
         let key = NodeKey::new(sheet, cell);
-        match functions {
-            Some(functions) => {
-                unevaluated.insert(key, functions);
+        match gap {
+            Some(gap) => {
+                unevaluated.insert(key, gap);
             }
             None => {
                 unevaluated.remove(&key);

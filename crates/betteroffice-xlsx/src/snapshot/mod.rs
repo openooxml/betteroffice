@@ -126,21 +126,30 @@ impl SnapshotProgress {
     }
 }
 
-pub(crate) fn source_full_precision(
-    source: Option<&ooxml_opc::SourceContainer>,
+pub(crate) fn source_full_precision(source: Option<&[u8]>) -> SnapshotResult<bool> {
+    source_calculation_setting(source, true, xlsx_parse::workbook_full_precision)
+}
+
+pub(crate) fn source_iterate(source: Option<&[u8]>) -> bool {
+    source_calculation_setting(source, false, xlsx_parse::workbook_iterate).unwrap_or(false)
+}
+
+fn source_calculation_setting(
+    source: Option<&[u8]>,
+    default: bool,
+    read: impl FnOnce(&[u8]) -> Result<bool, xlsx_parse::ParseError>,
 ) -> SnapshotResult<bool> {
     let Some(source) = source else {
-        return Ok(true);
+        return Ok(default);
     };
     let parts = ooxml_opc::unzip_parts_where(
-        source.as_bytes(),
+        source,
         ooxml_opc::MAX_TOTAL_UNCOMPRESSED_BYTES,
         |name| name.trim_start_matches('/') == "xl/workbook.xml",
     )
     .map_err(SnapshotError::new)?;
     let Some((_, workbook_xml)) = parts.first() else {
-        return Ok(true);
+        return Ok(default);
     };
-    xlsx_parse::workbook_full_precision(workbook_xml)
-        .map_err(|failure| SnapshotError::new(failure.to_string()))
+    read(workbook_xml).map_err(|failure| SnapshotError::new(failure.to_string()))
 }

@@ -2025,10 +2025,13 @@ impl WorkbookSnapshotBuilder {
             .map(SourceBuilder::finish)
             .transpose()
             .map_err(error)?;
+        let source_bytes = source_container.as_ref().map(|source| source.as_bytes());
+        model.iterate = crate::snapshot::source_iterate(source_bytes);
+        authority.restore_iterate(model.iterate);
         if full_precision.is_none() {
             model.full_precision = match authority.full_precision_setting() {
                 Some(precision) => precision,
-                None => crate::snapshot::source_full_precision(source_container.as_ref())?,
+                None => crate::snapshot::source_full_precision(source_bytes)?,
             };
         }
         if authority

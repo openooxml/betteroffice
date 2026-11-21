@@ -61,6 +61,33 @@ function expectPlainBytes(bytes: Uint8Array) {
   expect(bytes.buffer.byteLength).toBe(bytes.byteLength);
 }
 
+async function calculationBook(calcPr: string, cells: string): Promise<Uint8Array> {
+  const main = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
+  const rels = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  const packageRels = 'http://schemas.openxmlformats.org/package/2006/relationships';
+  const zip = new JSZip();
+  zip.file('[Content_Types].xml',
+    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+    + '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+    + '<Default Extension="xml" ContentType="application/xml"/>'
+    + '<Override PartName="/xl/workbook.xml"'
+    + ' ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+    + '<Override PartName="/xl/worksheets/sheet1.xml"'
+    + ' ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+    + '</Types>');
+  zip.file('_rels/.rels', `<Relationships xmlns="${packageRels}">
+<Relationship Id="rId1" Type="${rels}/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>`);
+  zip.file('xl/workbook.xml', `<workbook xmlns="${main}" xmlns:r="${rels}">
+<sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets>${calcPr}</workbook>`);
+  zip.file('xl/_rels/workbook.xml.rels', `<Relationships xmlns="${packageRels}">
+<Relationship Id="rId1" Type="${rels}/worksheet" Target="worksheets/sheet1.xml"/>
+</Relationships>`);
+  zip.file('xl/worksheets/sheet1.xml',
+    `<worksheet xmlns="${main}"><sheetData>${cells}</sheetData></worksheet>`);
+  return zip.generateAsync({ type: 'uint8array' });
+}
+
 function pngPixels(bytes: Uint8Array): Uint8Array {
   const png = Buffer.from(bytes);
   expect([...png.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
@@ -481,15 +508,11 @@ describe('xlsx native engine parity', () => {
   });
 
   test('a flagged workbook with a stale array-formula cache saves the same calculated values on both engines', async () => {
-    const main = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
-    const rels = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
-    const zip = new JSZip();
-    zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>');
-    zip.file('_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rels}/officeDocument" Target="xl/workbook.xml"/></Relationships>`);
-    zip.file('xl/workbook.xml', `<workbook xmlns="${main}" xmlns:r="${rels}"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets><calcPr fullCalcOnLoad="1"/></workbook>`);
-    zip.file('xl/_rels/workbook.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rels}/worksheet" Target="worksheets/sheet1.xml"/></Relationships>`);
-    zip.file('xl/worksheets/sheet1.xml', `<worksheet xmlns="${main}"><sheetData><row r="2"><c r="C2"><f t="array" ref="C2:C3">1</f><v>1</v></c></row><row r="3"><c r="C3"><v>100</v></c></row></sheetData></worksheet>`);
-    const source = await zip.generateAsync({ type: 'uint8array' });
+    const source = await calculationBook(
+      '<calcPr fullCalcOnLoad="1"/>',
+      '<row r="2"><c r="C2"><f t="array" ref="C2:C3">1</f><v>1</v></c></row>'
+      + '<row r="3"><c r="C3"><v>100</v></c></row>',
+    );
     const opens: Array<[string, (engine: typeof WasmDocument) => EngineDocument]> = [
       ['open', engine => engine.open(source) as EngineDocument],
       ['openWithCalculationJson', engine => engine.openWithCalculationJson(source, context) as EngineDocument],
@@ -509,6 +532,24 @@ describe('xlsx native engine parity', () => {
         wasmDoc.free();
         nativeDoc.free();
       }
+    }
+  });
+
+  test('the default native open keeps iterative caches on save', async () => {
+    const cells = '<row r="1">'
+      + '<c r="A1"><f>(A1+10)/2</f><v>10</v></c><c r="B1"><f>A1*2</f><v>20</v></c>'
+      + '<c r="C1"><v>5</v></c><c r="D1"><f>C1+1</f><v>6</v></c>'
+      + '<c r="E1"><f>F1/2+10</f><v>20</v></c><c r="F1"><f>E1</f><v>20</v></c></row>';
+    const source = await calculationBook('<calcPr iterate="1" fullCalcOnLoad="1"/>', cells);
+    const document = native.XlsxDocument.open(source) as EngineDocument;
+    try {
+      const saved = await JSZip.loadAsync(document.saveBytes());
+      const sheet = await saved.file('xl/worksheets/sheet1.xml')!.async('string');
+      const caches = [...sheet.matchAll(/<c [^>]*>(.*?)<\/c>/g)]
+        .map((cell) => /<v>(.*?)<\/v>/.exec(cell[1])?.[1]);
+      expect(caches).toEqual(['10', '20', '5', '6', '20', '20']);
+    } finally {
+      document.free();
     }
   });
 

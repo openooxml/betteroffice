@@ -26,7 +26,7 @@ use crate::deps::reads_other_workbook;
 use crate::eval::{
     EvalContext, EvaluationBudget, HeldCells, MAX_RECALCULATION_CELL_VISITS, evaluate,
 };
-use crate::graph::{Answer, DepGraph, ReaderIndex, UnevaluatedCell};
+use crate::graph::{Answer, DepGraph, Gap, ReaderIndex, UnevaluatedCell};
 
 #[cfg(feature = "test-counters")]
 thread_local! {
@@ -804,24 +804,25 @@ fn run_recalc_with_budget(
         replaced: HashMap::new(),
         rerun: Vec::new(),
         early: HashMap::new(),
+        iterative_read: false,
         watching: false,
         unwatched: Vec::new(),
     };
     let mut pending = recompute;
     let mut anchors = Vec::new();
-    for cell in graph.unevaluated_cells() {
-        let at = key(cell.sheet, cell.cell);
-        pass.watching |= !cell.functions.is_empty();
-        if pending.contains(&at) || cell.functions.is_empty() {
+    for (sheet, cell, gap) in graph.unevaluated_gaps() {
+        let at = key(sheet, cell);
+        pass.watching |= gap.propagates();
+        if pending.contains(&at) || !gap.propagates() {
             continue;
         }
         let anchor = wb
-            .sheet(cell.sheet)
-            .is_some_and(|sheet| sheet.array_formula(cell.cell).is_some());
-        if anchor {
+            .sheet(sheet)
+            .is_some_and(|sheet| sheet.array_formula(cell).is_some());
+        if anchor && !gap.iterative {
             anchors.push(at);
         } else {
-            pass.taint_readers(at, &cell.functions, false);
+            pass.taint_readers(at, &gap, false);
         }
     }
     pending.extend(anchors);
@@ -953,7 +954,7 @@ struct Pass<'g> {
     readers: Readers<'g>,
     /// formulas reading a cell an uncomputable function left unevaluated,
     /// with those functions.
-    inherited: HashMap<Key, Vec<String>>,
+    inherited: HashMap<Key, Gap>,
     /// formulas reading a cell an unknown function reached that holds the
     /// engine's answer rather than a value of excel's, with those functions:
     /// what they compute from it stands, and they are listed.
@@ -969,7 +970,9 @@ struct Pass<'g> {
     rerun: Vec<Key>,
     /// by formula not yet evaluated this round, each formula that read it
     /// through a computed reference, with what the formula was held for then.
-    early: HashMap<Key, HashMap<Key, Option<Vec<String>>>>,
+    early: HashMap<Key, HashMap<Key, Option<Gap>>>,
+    /// whether the last evaluation read an iterative gap.
+    iterative_read: bool,
     /// whether an uncomputable call holds any cell yet, so formulas reading
     /// through computed references watch their reads; until one does, they
     /// read as every formula does.
@@ -987,9 +990,10 @@ struct RecalcWatch<'w> {
     graph: &'w DepGraph,
     budget: &'w EvaluationBudget,
     reader: Key,
-    early: RefCell<Vec<(Key, Option<Vec<String>>)>>,
+    early: RefCell<Vec<(Key, Option<Gap>)>>,
     /// the functions behind the engine's answers the reader read.
     answered: RefCell<Vec<String>>,
+    iterative: Flag<bool>,
 }
 
 impl<'w> RecalcWatch<'w> {
@@ -1004,6 +1008,7 @@ impl<'w> RecalcWatch<'w> {
                 reader,
                 early: RefCell::new(Vec::new()),
                 answered: RefCell::new(Vec::new()),
+                iterative: Flag::new(false),
             })
     }
 }
@@ -1014,8 +1019,8 @@ impl HeldCells for RecalcWatch<'_> {
         for source in holders(self.graph, sheet, at) {
             let held = self
                 .graph
-                .unevaluated_functions(source.0, cell_of(source))
-                .filter(|functions| !functions.is_empty());
+                .unevaluated_gap(source.0, cell_of(source))
+                .filter(Gap::propagates);
             if source != self.reader
                 && self
                     .budget
@@ -1025,12 +1030,13 @@ impl HeldCells for RecalcWatch<'_> {
             {
                 self.early.borrow_mut().push((source, held.clone()));
             }
-            if self.graph.answered(source.0, cell_of(source)).is_some() {
-                self.answered
-                    .borrow_mut()
-                    .extend(held.into_iter().flatten());
-            } else {
-                functions.extend(held.into_iter().flatten());
+            if let Some(held) = held {
+                if !held.iterative && self.graph.answered(source.0, cell_of(source)).is_some() {
+                    self.answered.borrow_mut().extend(held.functions);
+                } else {
+                    self.iterative.set(self.iterative.get() || held.iterative);
+                    functions.extend(held.functions);
+                }
             }
         }
         functions.sort_unstable();
@@ -1098,6 +1104,7 @@ impl<'g> Pass<'g> {
 
     /// keeps what `watch` saw of formulas this round had not evaluated yet.
     fn note_early(&mut self, watch: Option<RecalcWatch<'_>>) {
+        self.iterative_read = watch.as_ref().is_some_and(|watch| watch.iterative.get());
         let Some(watch) = watch else {
             return;
         };
@@ -1117,13 +1124,13 @@ impl<'g> Pass<'g> {
 
     /// `u` settled, held for `held`: each formula that read it through a
     /// computed reference before, when it was held otherwise, runs again.
-    fn release_early(&mut self, u: Key, held: Option<&[String]>) {
+    fn release_early(&mut self, u: Key, held: Option<&Gap>) {
         let Some(readers) = self.early.remove(&u) else {
             return;
         };
         let before = self.rerun.len();
         for (reader, seen) in readers {
-            if seen.as_deref() != held {
+            if seen.as_ref() != held {
                 self.rerun.push(reader);
             }
         }
@@ -1149,38 +1156,34 @@ impl<'g> Pass<'g> {
         }
     }
 
-    /// passes a cell's uncomputable functions on to the formulas that read it.
-    /// a gap of this engine alone passes nothing: what excel saved for the
-    /// cell is its value, so its readers recalculate from that. `answered`
-    /// says the cell holds the engine's answer: nothing of excel's rests on
-    /// it, so its readers recalculate from that too, and are listed.
-    fn taint_readers(&mut self, u: Key, functions: &[String], answered: bool) {
-        if functions.is_empty() {
+    /// passes an iterative or uncomputable gap on to its readers. readers of
+    /// an engine answer still recalculate from it and are listed.
+    fn taint_readers(&mut self, u: Key, gap: &Gap, answered: bool) {
+        if !gap.propagates() {
             return;
         }
         let mut readers = Vec::new();
         self.readers.dependents_of(u, &mut readers);
-        let tainted = match answered {
-            true => &mut self.answered_reads,
-            false => &mut self.inherited,
-        };
         for (sheet, cell) in readers {
-            note_functions(tainted.entry(key(sheet, cell)).or_default(), functions);
+            self.taint_reader(key(sheet, cell), gap, answered);
         }
     }
 
-    /// passes an anchor's uncomputable functions on to the formulas reading
-    /// the cells its result would fill, when the graph does not know that
-    /// rectangle, and runs them again in the next round.
-    fn taint_spill_readers(
-        &mut self,
-        u: Key,
-        range: CellRange,
-        functions: &[String],
-        answered: bool,
-    ) {
+    fn taint_reader(&mut self, reader: Key, gap: &Gap, answered: bool) {
+        if answered {
+            note_functions(self.answered_reads.entry(reader).or_default(), &gap.functions);
+        } else {
+            let inherited = self.inherited.entry(reader).or_default();
+            note_functions(&mut inherited.functions, &gap.functions);
+            inherited.iterative |= gap.iterative;
+        }
+    }
+
+    /// passes an anchor's gap to readers of a spill the graph does not know
+    /// yet and runs them again in the next round.
+    fn taint_spill_readers(&mut self, u: Key, range: CellRange, gap: &Gap, answered: bool) {
         let graph = self.graph;
-        if functions.is_empty()
+        if !gap.propagates()
             || range.start == range.end
             || graph.spill_of(u.0, cell_of(u)) == Some(range)
         {
@@ -1191,11 +1194,7 @@ impl<'g> Pass<'g> {
             if reader == u {
                 continue;
             }
-            let tainted = match answered {
-                true => &mut self.answered_reads,
-                false => &mut self.inherited,
-            };
-            note_functions(tainted.entry(reader).or_default(), functions);
+            self.taint_reader(reader, gap, answered);
             self.rerun.push(reader);
         }
         if !self.rerun.is_empty() {
@@ -1251,7 +1250,8 @@ impl<'g> Pass<'g> {
     /// the first of them runs again with that value. a cycle one of whose
     /// members holds or reached an uncomputable call settles at nothing: what
     /// it would settle at hangs on values no engine computes, so every member
-    /// keeps what it holds and is listed with the calls.
+    /// keeps what it holds and is listed with the calls. iterative cycles also
+    /// keep their values and are listed as unevaluated.
     fn settle(&mut self, wb: &mut Workbook, members: &[Key]) {
         self.budget.set_settling(true);
         let ids: HashMap<Key, usize> = members.iter().enumerate().map(|(id, &u)| (u, id)).collect();
@@ -1312,23 +1312,27 @@ impl<'g> Pass<'g> {
                     let u = members[member];
                     functions.extend(reached[member].iter().cloned());
                     functions.extend(self.graph.uncomputable_calls_at(u.0, cell_of(u)));
-                    functions.extend(self.inherited.get(&u).into_iter().flatten().cloned());
+                    if let Some(inherited) = self.inherited.get(&u) {
+                        functions.extend(inherited.functions.iter().cloned());
+                    }
                 }
                 functions.sort_unstable();
                 functions.dedup();
+                let iterate = wb.iterate;
                 for member in circular {
                     #[cfg(test)]
                     SCHEDULER_STEPS.with(|count| count.set(count.get() + 1));
                     let u = members[member];
                     settled[member] = true;
                     on_chain[member] = None;
-                    if !functions.is_empty() {
+                    if iterate || !functions.is_empty() {
                         let kept = Evaluated {
                             value: None,
                             limited: false,
                             gap: Some(functions.clone()),
                             reach: None,
                         };
+                        self.iterative_read = iterate;
                         self.write(wb, u, kept);
                         continue;
                     }
@@ -1352,6 +1356,7 @@ impl<'g> Pass<'g> {
     /// gap keeps a formula's value, what an earlier round of this recalc wrote
     /// for it is put back as it was before the recalc.
     fn write(&mut self, wb: &mut Workbook, u: Key, evaluated: Evaluated) {
+        let mut iterative = std::mem::take(&mut self.iterative_read);
         let Evaluated {
             mut value,
             limited,
@@ -1359,11 +1364,22 @@ impl<'g> Pass<'g> {
             mut reach,
         } = evaluated;
         if let Some(inherited) = self.inherited.get(&u) {
-            note_functions(gap.get_or_insert_with(Vec::new), inherited);
+            note_functions(gap.get_or_insert_with(Vec::new), &inherited.functions);
+            iterative |= inherited.iterative;
         }
-        let keeps = gap.as_ref().is_some_and(|functions| {
-            !functions.is_empty() && !answers(self.graph, wb, u, functions)
-        });
+        if wb.iterate && limited && !iterative {
+            iterative = self
+                .graph
+                .unevaluated_gap(u.0, cell_of(u))
+                .is_some_and(|previous| previous.iterative);
+        }
+        let keeps = iterative
+            || gap.as_ref().is_some_and(|functions| {
+                !functions.is_empty() && !answers(self.graph, wb, u, functions)
+            });
+        if iterative {
+            gap.get_or_insert_with(Vec::new);
+        }
         if let Some(reads) = self.answered_reads.get(&u) {
             note_functions(gap.get_or_insert_with(Vec::new), reads);
         }
@@ -1383,10 +1399,14 @@ impl<'g> Pass<'g> {
         {
             self.restore(wb, u, replaced);
         }
-        if let Some(functions) = &gap {
-            self.taint_readers(u, functions, answered);
+        let gap = gap.map(|functions| Gap {
+            functions,
+            iterative,
+        });
+        if let Some(gap) = &gap {
+            self.taint_readers(u, gap, answered);
             if let Some(range) = reach {
-                self.taint_spill_readers(u, range, functions, answered);
+                self.taint_spill_readers(u, range, gap, answered);
             }
         }
         let at = (u.0, cell_of(u));
@@ -1433,14 +1453,14 @@ impl<'g> Pass<'g> {
             Some(NodeValue::Refused) => self.refuse(wb, u, log.as_mut()),
             None => {}
         }
-        let held = gap.clone().filter(|functions| !functions.is_empty());
+        let held = gap.clone().filter(Gap::propagates);
         self.graph.set_unevaluated(u.0, at.1, gap);
         let wrote = answered.then(|| Answer {
             formula: wb.formula(u.0, at.1).unwrap_or_default().to_owned(),
             value: wb.value_cow(u.0, at.1).into_owned(),
         });
         self.graph.set_answered(u.0, at.1, wrote);
-        self.release_early(u, held.as_deref());
+        self.release_early(u, held.as_ref());
         if held.is_some() && !self.watching {
             self.watching = true;
             let unwatched = std::mem::take(&mut self.unwatched);
@@ -1830,8 +1850,8 @@ fn held_gap(graph: &DepGraph, u: Key, refused: bool, undated: bool) -> Option<Ve
         return None;
     }
     let mut held = graph.uncomputable_calls_at(u.0, cell_of(u));
-    if refused && let Some(listed) = graph.unevaluated_functions(u.0, cell_of(u)) {
-        held.extend(listed);
+    if refused && let Some(listed) = graph.unevaluated_gap(u.0, cell_of(u)) {
+        held.extend(listed.functions);
         held.sort_unstable();
         held.dedup();
         return Some(held);
@@ -4032,6 +4052,53 @@ mod tests {
         assert!(r.cycle_cells.is_empty());
         assert_eq!(value(&wb, s, "B1"), num(5.0));
         assert_eq!(value(&wb, s, "A1"), num(6.0));
+    }
+
+    #[test]
+    fn iterative_cycles_keep_caches_and_hold_their_readers() {
+        let (mut wb, sheet) = one_sheet();
+        wb.iterate = true;
+        wb.sheets.push(Sheet::new("Sheet2"));
+        let other = SheetId(1);
+        put_cached_formula(&mut wb, sheet, "A1", "B1+1", num(10.0));
+        put_cached_formula(&mut wb, sheet, "B1", "A1+1", num(20.0));
+        put_cached_formula(&mut wb, sheet, "C1", "A1*3", num(70.0));
+        put_cached_formula(&mut wb, sheet, "D1", "C1+SEQUENCE(2)", num(80.0));
+        put_num(&mut wb, sheet, "D2", 81.0);
+        wb.sheet_mut(sheet)
+            .unwrap()
+            .set_array_formula(a1("D1"), CellRange::parse_a1("D1:D2").unwrap());
+        put_cached_formula(&mut wb, other, "A1", "SUM(Sheet1!D2:D3)", num(90.0));
+        put_formula(&mut wb, other, "B1", "INDIRECT(\"Sheet1!D2\")");
+        put_formula(&mut wb, other, "C1", "REPRO_UNKNOWN(Sheet1!A1)");
+
+        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+        assert!(result.cycle_cells.is_empty(), "iterative cycles are unevaluated");
+        for (at, cell, held) in [
+            (sheet, "A1", num(10.0)),
+            (sheet, "B1", num(20.0)),
+            (sheet, "C1", num(70.0)),
+            (sheet, "D1", num(80.0)),
+            (other, "A1", num(90.0)),
+            (other, "B1", CellValue::Empty),
+        ] {
+            assert_eq!(value(&wb, at, cell), held, "sheet {} {cell}", at.0);
+            assert!(
+                result.unevaluated_cells.contains(&UnevaluatedCell {
+                    sheet: at,
+                    cell: a1(cell),
+                    functions: Vec::new(),
+                }),
+                "sheet {} {cell} is unevaluated",
+                at.0
+            );
+        }
+        assert_eq!(value(&wb, sheet, "D2"), num(81.0), "the spill cache is held");
+        assert_eq!(
+            value(&wb, other, "C1"),
+            CellValue::Empty,
+            "an unknown-function answer cannot replace an iterative reader's blank"
+        );
     }
 
     #[test]

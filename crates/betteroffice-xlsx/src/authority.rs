@@ -241,6 +241,7 @@ struct WorkbookBase {
     bootstrap_client_id: u64,
     date_system: DateSystem,
     full_precision: Option<bool>,
+    iterate: bool,
     defined_names: Vec<DefinedName>,
     fingerprint: String,
     fingerprints: Fingerprints,
@@ -324,6 +325,7 @@ impl WorkbookBase {
             bootstrap_client_id,
             date_system: model.date_system,
             full_precision: Some(model.full_precision),
+            iterate: model.iterate,
             defined_names: model.defined_names.clone(),
             fingerprint,
             fingerprints,
@@ -553,6 +555,7 @@ impl WorkbookBase {
             bootstrap_client_id,
             date_system: model.date_system,
             full_precision: Some(model.full_precision),
+            iterate: model.iterate,
             defined_names: model.defined_names.clone(),
             fingerprint,
             fingerprints: fingerprints.into(),
@@ -616,6 +619,7 @@ impl WorkbookBase {
             sheets: Vec::new(),
             date_system: self.date_system,
             full_precision: self.full_precision.unwrap_or(true),
+            iterate: self.iterate,
             defined_names: self.defined_names.clone(),
             shared_strings: self.shared_strings.clone(),
             styles: self.styles.clone(),
@@ -1160,6 +1164,12 @@ impl WorkbookAuthority {
         self.base.full_precision
     }
 
+    pub(crate) fn restore_iterate(&mut self, iterate: bool) {
+        if self.base.iterate != iterate {
+            Arc::make_mut(&mut self.base).iterate = iterate;
+        }
+    }
+
     /// `row_styles` reads the row defaults that follow the Yrs state; a state
     /// releases before them encoded ends there.
     pub(crate) fn restore_recovery_state(
@@ -1182,6 +1192,7 @@ impl WorkbookAuthority {
             bootstrap_client_id,
             date_system,
             full_precision,
+            iterate: false,
             defined_names: Codec::read(&mut reader)?,
             fingerprint: Codec::read(&mut reader)?,
             fingerprints: Codec::read(&mut reader)?,

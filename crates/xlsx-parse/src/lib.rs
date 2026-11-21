@@ -61,7 +61,7 @@ pub use pictures::sheet_pictures;
 pub use read::styles_part_name;
 pub use read::{
     LegacySheetDimensions, SharedStringCells, SourceCellFacts, cf_rule_attribute, parse_workbook,
-    workbook_full_precision,
+    workbook_full_precision, workbook_iterate,
 };
 pub use reference::UnpatchableReference;
 pub use rich_text::{MAX_RICH_TEXT_RUNS, MAX_RICH_TEXT_RUNS_PER_ITEM, MAX_RICH_TEXT_STYLE_BYTES};
