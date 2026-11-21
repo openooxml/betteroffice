@@ -139,6 +139,14 @@ struct EngineCall {
 
 impl EngineCall {
     fn new(env: Env) -> Self {
+        Self::enter(env)
+    }
+
+    fn release(env: Env) -> Self {
+        Self::enter(env)
+    }
+
+    fn enter(env: Env) -> Self {
         Self {
             env,
             previous_object: CURRENT_OBJECT.replace(std::ptr::null()),
@@ -322,6 +330,10 @@ impl PptxDocument {
 
     fn document_mut(&mut self, env: Env) -> Result<&mut Document> {
         enter_object(&self.failure, env)?;
+        self.inner_mut(env)
+    }
+
+    fn inner_mut(&mut self, env: Env) -> Result<&mut Document> {
         self.inner
             .as_mut()
             .ok_or_else(|| throw_error(&env, "PptxDocument was freed"))
@@ -379,7 +391,7 @@ impl PptxDocument {
 impl PptxDocument {
     #[napi(catch_unwind)]
     pub fn free(&mut self, env: Env) {
-        let _call = EngineCall::new(env);
+        let _call = EngineCall::release(env);
         self.inner = None;
     }
 
@@ -741,8 +753,8 @@ impl PptxDocument {
 
     #[napi(catch_unwind)]
     pub fn clear_update_observation(&mut self, env: Env) -> Result<()> {
-        let _call = EngineCall::new(env);
-        self.document_mut(env)?.clear_update_observation();
+        let _call = EngineCall::release(env);
+        self.inner_mut(env)?.clear_update_observation();
         Ok(())
     }
 
@@ -1186,7 +1198,7 @@ impl PptxRenderer {
 
     #[napi(catch_unwind)]
     pub fn free(&mut self, env: Env) {
-        let _call = EngineCall::new(env);
+        let _call = EngineCall::release(env);
         self.inner = None;
     }
 
