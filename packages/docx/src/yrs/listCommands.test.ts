@@ -1,6 +1,6 @@
 import { afterEach, beforeAll, expect, test } from 'bun:test';
-import type { YrsParagraphAttrs, YrsSession } from './index';
-import { LIST_OFF_ATTRS } from './listCommands';
+import { createYrsSession, type YrsParagraphAttrs, type YrsSession } from './index';
+import { applyListToggle, LIST_OFF_ATTRS, listOffAttrs } from './listCommands';
 import { createdListKey } from './listDefinitionSave';
 import {
   GAP, HEADING, LIST_LAYOUT, PLAIN, listCommandScenarios, listDocument, preloadListWasm, shownLeft, shownMarker,
@@ -274,6 +274,37 @@ test('worker: one toggle over plain paragraphs asks the engine for a list once a
   expect(styles).toBeLessThan(on.length);
   expect(on.length).toBeGreaterThan(3);
 }, TIMEOUT);
+
+for (const [doc, kind] of [['G', 'numbered'], ['G', 'bullet'], ['I', 'numbered'], ['D', 'numbered'], ['D', 'bullet'], ['A', 'bullet']] as const) {
+  test(`session: a ${kind} toggle over all of document ${doc} equals asking the engine for every paragraph`, async () => {
+    const opened: YrsSession[] = [];
+    try {
+      for (let index = 0; index < 2; index += 1) {
+        const session = await createYrsSession({ clientId: 7300 });
+        session.openDocx(listDocument(doc), true);
+        opened.push(session);
+      }
+      const [toggled, asked] = opened as [YrsSession, YrsSession];
+      const before = asked.paragraphs('body');
+      const lead = before[0]!.paraId;
+      const at = (paraId: string) => ({ story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 0 } });
+      applyListToggle(toggled, { ...at(lead), end: { paraId: before[before.length - 1]!.paraId, offset: 0 } }, kind);
+      const first = toggled.paragraphs('body')[0]!.properties.numPr as { numId?: unknown } | null | undefined;
+      const remove = !(typeof first?.numId === 'number' && first.numId !== 0);
+      for (const { paraId, properties } of before) {
+        asked.setParagraphAttrs(at(paraId), remove
+          ? listOffAttrs(properties, asked.paragraphStyleNumbers?.('body', paraId))
+          : asked.ensureListDefinition('body', paraId, kind, paraId === lead ? undefined : lead));
+      }
+      expect(toggled.paragraphs('body').map(entry => entry.properties))
+        .toEqual(asked.paragraphs('body').map(entry => entry.properties));
+      expect(toggled.createdListDefinitions()).toEqual(asked.createdListDefinitions());
+      expect(before.length).toBeGreaterThan(2);
+    } finally {
+      opened.forEach(session => session.destroy());
+    }
+  }, TIMEOUT);
+}
 
 test('a session written before the style question still satisfies the session type', () => {
   const adapter = {} as Omit<YrsSession, 'paragraphStyleNumbers'>;
