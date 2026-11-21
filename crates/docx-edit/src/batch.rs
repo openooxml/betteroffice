@@ -1967,7 +1967,10 @@ fn plan_style<T: ReadTxn>(
     guard(&step.expect, &paragraph.text, &requested)?;
     views.check_story_writable(&target.story, &requested)?;
     refuse_suggestion(step, &requested)?;
-    if story.structurally_revised(paragraph_index) || paragraph.has_revisions() {
+    if story.structurally_revised(paragraph_index)
+        || paragraph.has_revisions()
+        || paragraph.has_suggested_formatting()
+    {
         return Err(revision_conflict(
             "the paragraph carries a tracked change",
             &requested,
@@ -2518,7 +2521,10 @@ fn plan_block_fill<T: ReadTxn>(
         return Err(unsupported("the control holds raw XML blocks"));
     }
     for (position, paragraph) in view.paragraphs.iter().enumerate() {
-        if view.structurally_revised(position) || paragraph.has_revisions() {
+        if view.structurally_revised(position)
+            || paragraph.has_revisions()
+            || paragraph.has_suggested_formatting()
+        {
             return Err(revision_conflict(
                 "a paragraph of the control carries a tracked change",
                 &fill.resolved,
@@ -2923,7 +2929,9 @@ fn plan_format<T: ReadTxn>(
             &requested,
         ));
     }
-    if paragraph.has_stamped_in(start, end) {
+    if paragraph.has_stamped_in(start, end)
+        || (!ctx.is_suggesting() && paragraph.has_suggested_formatting_in(start, end))
+    {
         return Err(revision_conflict(
             "the range overlaps a tracked change",
             &requested,
@@ -4501,12 +4509,55 @@ mod direct_tests {
                 )
                 .unwrap();
             let doc = EditingDoc::new(9005);
-            crate::seed_from_docx(&doc, &raw_export(&source)).unwrap();
+            let mut parts = ooxml_opc::unzip_parts(&raw_export(&source)).unwrap();
+            if operation == "style" {
+                parts.push((
+                    "word/styles.xml".to_owned(),
+                    br#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="Heading 1"/><w:rPr><w:b/></w:rPr></w:style></w:styles>"#.to_vec(),
+                ));
+                parts.push((
+                    "word/_rels/document.xml.rels".to_owned(),
+                    br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>"#.to_vec(),
+                ));
+                let (_, types) = parts
+                    .iter_mut()
+                    .find(|(name, _)| name == "[Content_Types].xml")
+                    .unwrap();
+                *types = String::from_utf8(types.clone())
+                    .unwrap()
+                    .replace(
+                        "</Types>",
+                        r#"<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>"#,
+                    )
+                    .into_bytes();
+            }
+            if operation == "fill" {
+                let (_, body) = parts
+                    .iter_mut()
+                    .find(|(name, _)| name == "word/document.xml")
+                    .unwrap();
+                *body = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:sdt><w:sdtPr><w:tag w:val="note"/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>Alpha beta gamma</w:t></w:r></w:p></w:sdtContent></w:sdt><w:p/></w:body></w:document>"#.to_vec();
+            }
+            crate::seed_from_docx(&doc, &ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
             doc.set_direct_batches(direct);
-            let para_id = doc.paragraphs("body").unwrap()[0].para_id.clone();
+            let story = if operation == "fill" {
+                let txn = doc.yrs_doc().transact();
+                crate::content_controls::Inventory::build(&doc, &txn)
+                    .unwrap()
+                    .records
+                    .iter()
+                    .find_map(|record| match &record.site {
+                        Site::Block { child, .. } => Some(child.clone()),
+                        _ => None,
+                    })
+                    .unwrap()
+            } else {
+                "body".to_owned()
+            };
+            let para_id = doc.paragraphs(&story).unwrap()[0].para_id.clone();
             doc.toggle_format(
                 &EditCtx::local("Ada", DATE).suggesting(),
-                StoryRange::new("body", 0, 5),
+                StoryRange::new(&story, 0, 5),
                 crate::SimpleFormat::Bold,
             )
             .unwrap();
@@ -4531,11 +4582,31 @@ mod direct_tests {
                     runs: None,
                 },
                 "delete" => EditOperation::DeleteText { target },
-                _ => EditOperation::DeleteParagraphs {
+                "paragraphs" => EditOperation::DeleteParagraphs {
                     story: "body".to_owned(),
                     first_para_id: para_id.clone(),
                     last_para_id: para_id,
                 },
+                "format" => EditOperation::FormatText {
+                    target,
+                    set: Some(serde_json::Map::from_iter([(
+                        "italic".to_owned(),
+                        Value::Bool(true),
+                    )])),
+                    clear: None,
+                    on_unsupported: OnUnsupported::default(),
+                },
+                "style" => EditOperation::SetParagraphStyle {
+                    target: ParagraphTarget { story, para_id },
+                    style_id: "Heading1".to_owned(),
+                },
+                "fill" => EditOperation::SetContentControlText {
+                    target: ContentControlSelector::Tag {
+                        tag: "note".to_owned(),
+                    },
+                    text: "Updated".to_owned(),
+                },
+                _ => unreachable!(),
             });
             let refusal = apply_text_steps(
                 &doc,
@@ -4564,6 +4635,21 @@ mod direct_tests {
     #[test]
     fn host_delete_paragraphs_refuses_live_run_property_changes() {
         assert_host_edit_refuses_suggested_bold("paragraphs");
+    }
+
+    #[test]
+    fn host_format_refuses_live_run_property_changes() {
+        assert_host_edit_refuses_suggested_bold("format");
+    }
+
+    #[test]
+    fn host_style_refuses_live_run_property_changes() {
+        assert_host_edit_refuses_suggested_bold("style");
+    }
+
+    #[test]
+    fn host_block_fill_refuses_live_run_property_changes() {
+        assert_host_edit_refuses_suggested_bold("fill");
     }
 
     fn assert_host_edit_keeps_suggested_bold(operation: &str) {
