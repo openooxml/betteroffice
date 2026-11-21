@@ -115,6 +115,23 @@ pub(crate) fn word_text_chars(element: &XmlElement) -> usize {
         .sum()
 }
 
+/// The bytes one child's copy of `scopes` costs: their values and attributes, and a fixed
+/// amount per scope.
+pub(crate) fn scope_copy_bytes(scopes: &[DirectionScope]) -> usize {
+    scopes
+        .iter()
+        .map(|scope| {
+            scope.extra.iter().fold(
+                64usize.saturating_add(scope.val.as_ref().map_or(0, String::len)),
+                |sum, attribute| {
+                    sum.saturating_add(attribute.name.len())
+                        .saturating_add(attribute.value.len())
+                },
+            )
+        })
+        .fold(0usize, usize::saturating_add)
+}
+
 pub(crate) fn has_word_text(element: &XmlElement) -> bool {
     element.child_elements().any(|child| {
         matches!(child.local_name(), "t" | "delText" | "instrText") || has_word_text(child)
@@ -1790,11 +1807,14 @@ fn parse_hyperlink_at_depth(
         .map(|value| truncate_chars(value, 2048));
     let mut children = Vec::new();
     let mut structured = Vec::new();
-    let mut next_scope = 0u32;
-    let scoped = crate::block::direction_scoped_children(element, &mut || {
-        next_scope += 1;
-        next_scope - 1
-    });
+    let scoped = crate::block::direction_scoped_children(
+        element,
+        &mut crate::block::LocalScopes {
+            next: 0,
+            used: 0,
+            part,
+        },
+    )?;
     for (scopes, child) in scoped.into_iter().take(MAX_HYPERLINK_CHILDREN) {
         match child.local_name() {
             "r" => {

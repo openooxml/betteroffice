@@ -10,6 +10,8 @@ pub const MAX_NESTING_DEPTH: usize = 64;
 
 const MAX_GROUP_TEXT_BOX_BYTES: usize = 16 * 1024 * 1024;
 const MAX_GROUP_TEXT_BOX_NESTING: usize = 4;
+/// The bytes of `w:dir`/`w:bdo` data a document may copy onto the children inside them.
+pub(crate) const MAX_DIRECTION_SCOPE_BYTES: usize = 64 * 1024 * 1024;
 
 /// OOXML namespace URIs.
 pub mod namespaces {
@@ -99,6 +101,7 @@ pub struct ParseBudget<'a> {
     group_text_box_depth: usize,
     paragraph_runs: Vec<Option<usize>>,
     direction_scopes: u32,
+    direction_scope_bytes: usize,
     unmodeled_inline: Vec<(String, usize)>,
 }
 
@@ -125,6 +128,7 @@ impl<'a> ParseBudget<'a> {
             group_text_box_depth: 0,
             paragraph_runs: Vec::new(),
             direction_scopes: 0,
+            direction_scope_bytes: 0,
             unmodeled_inline: Vec::new(),
         }
     }
@@ -223,6 +227,21 @@ impl<'a> ParseBudget<'a> {
 
     pub(crate) fn end_direction_scopes(&mut self, enclosing: u32) {
         self.direction_scopes = enclosing;
+    }
+
+    /// Charge a copy of direction scope data onto one child, before it is made.
+    pub(crate) fn charge_direction_scope_bytes(
+        &mut self,
+        amount: usize,
+        part: &str,
+    ) -> Result<(), ParseError> {
+        charge(
+            &mut self.direction_scope_bytes,
+            amount,
+            MAX_DIRECTION_SCOPE_BYTES,
+            "directionScopeBytes",
+            part,
+        )
     }
 
     pub(crate) fn next_direction_scope(&mut self) -> u32 {

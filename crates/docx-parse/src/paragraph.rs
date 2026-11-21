@@ -3,7 +3,7 @@
 use ooxml_drawingml::SymbolFont;
 use serde::{Deserialize, Serialize};
 
-use crate::block::{StoryContext, direction_scoped_children};
+use crate::block::{BudgetScopes, StoryContext, direction_scoped_children};
 use crate::chart::{ChartPartsMap, DrawingChart, parse_chart_from_drawing};
 use crate::formatting::{
     ParagraphFormatting, ParagraphFrame, SpacingExplicit, parse_paragraph_properties,
@@ -15,7 +15,7 @@ use crate::inline::{
     StructuredFieldContent, StructuredFieldTree, absorb_beyond_field_nesting,
     check_container_beyond_field_nesting, field_depth_error, field_run_source, has_bookmark_id,
     keep_field_run, parse_bookmark_end, parse_bookmark_start, parse_field_type, parse_hyperlink,
-    parse_run, parse_sdt_properties, run_content_length,
+    parse_run, parse_sdt_properties, run_content_length, scope_copy_bytes,
 };
 use crate::media::MediaMap;
 use crate::numbering::{ListRendering, NumberingMap, compute_list_rendering};
@@ -589,8 +589,11 @@ fn parse_paragraph_contents(
     let mut fields: Vec<OpenComplexField> = Vec::new();
     let mut beyond_nesting = 0;
     let mut runs = Vec::new();
-    let children = direction_scoped_children(element, &mut || budget.next_direction_scope());
+    let children = direction_scoped_children(element, &mut BudgetScopes { budget, part })?;
     for (inner, child) in children {
+        if !scopes.is_empty() {
+            budget.charge_direction_scope_bytes(scope_copy_bytes(scopes), part)?;
+        }
         let scopes = [scopes, inner.as_slice()].concat();
         let normalized;
         let child = if tracked_context == TrackedContext::Deletion
@@ -1010,8 +1013,11 @@ fn parse_hyperlink_composed(
     )?;
     let mut children = Vec::new();
     let mut structured = Vec::new();
-    let scoped = direction_scoped_children(element, &mut || budget.next_direction_scope());
+    let scoped = direction_scoped_children(element, &mut BudgetScopes { budget, part })?;
     for (inner, child) in scoped.into_iter().take(10_000) {
+        if !scopes.is_empty() {
+            budget.charge_direction_scope_bytes(scope_copy_bytes(scopes), part)?;
+        }
         let scopes = [scopes, inner.as_slice()].concat();
         let node = match child.local_name() {
             "r" => {
