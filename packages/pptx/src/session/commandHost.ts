@@ -133,6 +133,7 @@ export function registerPresentationCommandHandlers(
     version: string; beforeText: string };
   type FormattingProjection = { formatting: TextStyleSnapshot; alignment: ParagraphAlignment | null };
   type CachedStory = { text: PptxStoryText; snapshot: StorySnapshot; echoRanges: { start: number; end: number }[];
+    canResize: boolean;
     table: PresentationCommandEditState['toolbar']['table'];
     formatting?: StorySnapshot;
     toolbar?: { story: StorySnapshot; selection: PresentationCommandSelection; marks: TextStyle;
@@ -346,8 +347,10 @@ export function registerPresentationCommandHandlers(
   function cacheStories(content: Extract<PresentationCommandReadResult, { ok: true }>): void {
     for (const slide of content.slides) notes.set(slide.id, slide.notes ?? '');
     const tables = new Map<string, NonNullable<PresentationCommandEditState['toolbar']['table']>>();
-    const visit = (shapes: readonly ShapeSnapshot[]) => {
+    const resize = new Map<string, boolean>();
+    const visit = (shapes: readonly ShapeSnapshot[], topLevel: boolean) => {
       for (const shape of shapes) {
+        for (const story of shape.textStories) resize.set(story.id, topLevel && canResizeShape(shape));
         const graphic = shape.graphic as { type?: string; grid?: unknown[] } | null;
         if (graphic?.type === 'table' && Array.isArray(graphic.grid) && graphic.grid.length) {
           const columns = graphic.grid.length;
@@ -355,10 +358,10 @@ export function registerPresentationCommandHandlers(
             shapeId: shape.id, row: Math.floor(index / columns), column: index % columns,
           }));
         }
-        visit(shape.children ?? []);
+        visit(shape.children ?? [], false);
       }
     };
-    for (const slide of content.slides) visit(slide.shapes ?? []);
+    for (const slide of content.slides) visit(slide.shapes ?? [], true);
     const sources = new Map(content.sources.map((source) => [source.storyId, source.paragraphs]));
     for (const story of content.stories) {
       const key = storyKey(story);
@@ -366,6 +369,7 @@ export function registerPresentationCommandHandlers(
       keys.add(key);
       slideStoryKeys.set(story.slideId, keys);
       stories.set(key, { text: story, snapshot: presentation().story(story.storyId), echoRanges: [],
+        canResize: resize.get(story.storyId) ?? false,
         table: tables.get(story.storyId) ?? null,
         source: new Map((sources.get(story.storyId) ?? []).map((paragraph) => {
           const live = story.paragraphs.find((value) => value.paragraphId === paragraph.paragraphId)!;
@@ -845,7 +849,9 @@ export function registerPresentationCommandHandlers(
     const reply = transferable<PresentationCommandAck>({ ...identity!, epoch: documentEpoch, throughSeq, version,
       ...(updates.length ? { updates } : {}),
       ...(observeChanges && commandOutcomes.some((outcome) => outcome.committed) ? { change: { ...identity!, throughSeq, version, snapshot: presentation().snapshot() } } : {}),
-      selection: objectSelection ?? (selection ? { ...selection } : null), editState: edit, outcomes: commandOutcomes,
+      selection: objectSelection ?? (selection
+        ? { ...selection, canResize: stories.get(storyKey(selection))?.canResize ?? false } : null),
+      editState: edit, outcomes: commandOutcomes,
       dirtySlideIds, activeSlideId, historyThroughSeq, ...slicedFonts?.ack(),
       ...(creation ? { creation } : {}), ...(editResult ? { editResult } : {}), ...(fontId !== undefined ? { fontId } : {}),
       ...(history ? { slides: metadata!.slides, size: metadata!.size } : {}),

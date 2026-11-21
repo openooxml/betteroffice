@@ -2,7 +2,7 @@ import { expect, spyOn, test } from 'bun:test';
 import JSZip from 'jszip';
 import { decodeCommandDisplayList, presentationSharedInputs } from '@betteroffice/pptx/worker';
 import type { ShapeRect, TextBoxPrimitive } from '@betteroffice/pptx';
-import { open, replyControl } from './peerlessTestHarness';
+import { deck, open, replyControl } from './peerlessTestHarness';
 import { peerlessPainterFactories } from './usePeerlessPresentation';
 
 const { act, fireEvent, waitFor } = await import('@testing-library/react');
@@ -31,6 +31,73 @@ async function editExisting(h: Awaited<ReturnType<typeof open>>) {
   await waitFor(() => expect(h.client.state.selection).toMatchObject({ shapeId: h.box.shapeId, anchor: 2, focus: 2 }));
   await waitFor(() => outline(h.view));
 }
+
+async function groupedDeck(bytes: Uint8Array) {
+  const zip = await JSZip.loadAsync(bytes);
+  const path = 'ppt/slides/slide1.xml';
+  const xml = await zip.file(path)!.async('string');
+  const shape = xml.match(/<p:sp>.*?<\/p:sp>/)![0];
+  const child = shape.replace('id="2" name="Text"', 'id="4" name="Child"');
+  const group = `<p:grpSp><p:nvGrpSpPr><p:cNvPr id="3" name="Group"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="9144000" cy="5143500"/><a:chOff x="0" y="0"/><a:chExt cx="9144000" cy="5143500"/></a:xfrm></p:grpSpPr>${child}</p:grpSp>`;
+  zip.file(path, xml.replace(shape, group));
+  return zip.generateAsync({ type: 'uint8array' });
+}
+
+test('resize released before object selection commits once in order', async () => {
+  const h = await open();
+  await editExisting(h);
+  const edge = h.point(h.box.x + h.box.w, h.box.y + h.box.h / 2);
+  const since = h.commands.length;
+  replyControl.hold();
+  try {
+    act(() => {
+      fireEvent.pointerDown(h.view.getByTestId('pptx-resize-e'), edge);
+      fireEvent.pointerMove(h.stage, { ...edge, clientX: edge.clientX + 10, buttons: 1 });
+      fireEvent.pointerUp(h.stage, { ...edge, clientX: edge.clientX + 30 });
+    });
+    await waitFor(() => expect(replyControl.count()).toBeGreaterThan(0));
+    expect(h.commands.slice(since).map((command) => command.kind)).toEqual(['selectObject']);
+    await act(async () => { replyControl.releaseNext(); });
+    await waitFor(() => expect(h.commands.slice(since).map((command) => command.kind))
+      .toEqual(['selectObject', 'setShapeRect']));
+    expect(h.commands.filter((command) => command.kind === 'setShapeRect')).toHaveLength(1);
+  } finally {
+    await act(async () => { replyControl.release(); });
+  }
+  await h.client.flush();
+  expect(h.commands.filter((command) => command.kind === 'setShapeRect')).toHaveLength(1);
+});
+
+test('pending released resize remains cancellable before object selection replies', async () => {
+  const h = await open();
+  await editExisting(h);
+  const edge = h.point(h.box.x + h.box.w, h.box.y + h.box.h / 2);
+  replyControl.hold();
+  try {
+    act(() => {
+      fireEvent.pointerDown(h.view.getByTestId('pptx-resize-e'), edge);
+      fireEvent.pointerMove(h.stage, { ...edge, clientX: edge.clientX + 10, buttons: 1 });
+      fireEvent.pointerUp(h.stage, { ...edge, clientX: edge.clientX + 30 });
+      fireEvent.keyDown(h.stage, { key: 'Escape' });
+    });
+    await waitFor(() => expect(replyControl.count()).toBeGreaterThan(0));
+  } finally {
+    await act(async () => { replyControl.release(); });
+  }
+  await h.client.flush();
+  expect(h.commands.filter((command) => command.kind === 'setShapeRect')).toHaveLength(0);
+});
+
+test('grouped child text hides resize handles while top-level text retains them', async () => {
+  const h = await open({ file: await groupedDeck(await deck()) });
+  const line = h.box.lines[0]!;
+  const at = h.point(line.caretStops[2]!.x, line.y + line.height / 2);
+  act(() => { fireEvent.pointerDown(h.canvas, at); fireEvent.pointerUp(h.stage, at); });
+  await waitFor(() => expect(h.client.state.selection).toMatchObject({
+    shapeId: h.box.shapeId, anchor: 2, focus: 2, canResize: false,
+  }));
+  await waitFor(() => outline(h.view, false));
+});
 
 for (const [start, end] of [[[200.123, 150.456], [400.789, 220.123]],
   [[900.123, 500.456], [980.789, 550.123]], [[200, 150], [201, 151]]] as const) {

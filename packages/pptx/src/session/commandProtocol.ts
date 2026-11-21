@@ -45,6 +45,8 @@ export interface PresentationCommandSelection extends PptxStoryTarget {
   focus: number;
   affinity: 'upstream' | 'downstream';
   goalX?: number;
+  /** Whether the selected story's owning shape is an eligible top-level resize target. */
+  canResize?: boolean;
 }
 
 export interface PresentationCommandObjectSelection extends Omit<PresentationCommandSelection, 'kind'> {

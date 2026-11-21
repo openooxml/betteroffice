@@ -208,24 +208,35 @@ export function usePeerlessShapeGestures(store: PeerlessViewStore | null, {
       outstanding.current.delete(current);
       return true;
     }
-    outstanding.current.delete(current);
-    if (current.cancelled || !presentation?.current || store.getSnapshot().editState.readOnly) return true;
-    const object = current.selected;
-    if (!object) {
+    const commit = (object: PresentationCommandObjectSelection) => {
+      outstanding.current.delete(current);
+      if (current.cancelled || !presentation?.current || store.getSnapshot().editState.readOnly) return;
+      const rect = peerlessGestureRect(object, delta, current.handle);
+      if (!rect || Object.keys(rect).every((key) =>
+        rect[key as keyof ShapeRect] === object.rect![key as keyof ShapeRect])) return;
+      const payload = { frame: current.frame,
+        target: { slideId: object.slideId, shapeId: object.shapeId, token: object.token },
+        inputTime, undoGroup: current.group };
+      void store.dispatch(current.handle ? { kind: 'setShapeRect', payload: { ...payload, rect } }
+        : { kind: 'moveShape', payload: { ...payload, x: rect.x, y: rect.y } }).catch(() => {});
+    };
+    if (!current.selected) {
+      if (current.handle) {
+        void current.object.then((object) => {
+          if (object) commit(object); else outstanding.current.delete(current);
+        });
+        return true;
+      }
+      outstanding.current.delete(current);
+      if (current.cancelled || !presentation?.current || store.getSnapshot().editState.readOnly) return true;
       const at = peerlessInputReference(store, true);
-      if (at?.source === 'afterSeq' && !current.handle) {
+      if (at?.source === 'afterSeq') {
         void store.dispatch({ kind: 'moveShape', payload: { at, frame: current.frame,
           shapeId: current.shapeId, delta, inputTime, undoGroup: current.group } }).catch(() => {});
       }
       return true;
     }
-    const rect = peerlessGestureRect(object, delta, current.handle);
-    if (!rect || Object.keys(rect).every((key) => rect[key as keyof ShapeRect] === object.rect![key as keyof ShapeRect])) return true;
-    const payload = { frame: current.frame,
-      target: { slideId: object.slideId, shapeId: object.shapeId, token: object.token },
-      inputTime, undoGroup: current.group };
-    void store.dispatch(current.handle ? { kind: 'setShapeRect', payload: { ...payload, rect } }
-      : { kind: 'moveShape', payload: { ...payload, x: rect.x, y: rect.y } }).catch(() => {});
+    commit(current.selected);
     return true;
   }, [store, presentation, position, setPreview]);
 
