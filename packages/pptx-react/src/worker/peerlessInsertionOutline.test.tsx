@@ -1,9 +1,10 @@
 import { expect, spyOn, test } from 'bun:test';
 import JSZip from 'jszip';
+import { collaborationPipeFor } from '@betteroffice/pptx/collaboration';
 import { decodeCommandDisplayList, presentationSharedInputs } from '@betteroffice/pptx/worker';
-import type { ShapeRect, TextBoxPrimitive } from '@betteroffice/pptx';
+import type { AsyncCollaborationReplica, ShapeRect, TextBoxPrimitive } from '@betteroffice/pptx';
 import { deck, open, replyControl, story, type } from './peerlessTestHarness';
-import { createPeerlessViewStore } from './peerlessViewStore';
+import { createPeerlessViewStore, peerlessInputReference } from './peerlessViewStore';
 import { peerlessPainterFactories } from './usePeerlessPresentation';
 
 const { act, fireEvent, waitFor } = await import('@testing-library/react');
@@ -214,9 +215,22 @@ test('queued relative resize uses the updated selection predecessor', async () =
   try {
     const { notes, resize } = resizeBehindNotes(h, store);
     expect(store.getSnapshot().waitingInputCount).toBe(1);
-    await act(async () => { replyControl.release(); await notes; await resize; });
+    await waitFor(() => expect(replyControl.count()).toBe(1));
+    await act(async () => { replyControl.releaseNext(); await notes; });
+    const { slideId, slideRevision, coversThroughSeq, documentEpoch, incarnation } = h.client.state.frame!;
+    const line = h.box.lines[0]!;
+    const click = store.dispatch({ kind: 'selectAtPoint', payload: {
+      frame: { slideId, slideRevision, coversThroughSeq, documentEpoch, incarnation },
+      x: line.caretStops[2]!.x, y: line.y + line.height / 2, extend: false, inputTime: 3, undoGroup: 'click',
+    } });
+    const typed = store.dispatch({ kind: 'insertText', payload: {
+      at: peerlessInputReference(store)!, text: '!', inputTime: 4, undoGroup: 'typing',
+    } });
+    await act(async () => { replyControl.release(); await Promise.all([resize, click, typed]); });
     const [predecessor, command] = h.commands.slice(since);
     expect(command).toMatchObject({ kind: 'setShapeRect', payload: { at: { source: 'afterSeq', seq: predecessor?.seq } } });
+    expect((await resize).outcomes[0]).toMatchObject({ status: 'applied', committed: true });
+    expect((await story(h.api)).text).toBe('al!pha beta\nx\nalpha beta');
   } finally {
     await act(async () => { replyControl.release(); });
     store.dispose();
@@ -260,9 +274,11 @@ test('a new shape gesture preserves an earlier released resize', async () => {
     .toBe(6000000 + Math.round(30 * 9144000 / h.list.width));
 });
 
-test('a second handle press selects the shape after a released resize', async () => {
+test('a second handle drag resizes the shape and preserves subsequent typing', async () => {
   const h = await open();
   await editExisting(h);
+  const line = h.box.lines[0]!;
+  const textAt = h.point(line.caretStops[2]!.x, line.y + line.height / 2);
   const edge = h.point(h.box.x + h.box.w, h.box.y + h.box.h / 2);
   const since = h.commands.length;
   const outcomes: Array<{ seq: number; status: string }> = [];
@@ -275,17 +291,95 @@ test('a second handle press selects the shape after a released resize', async ()
       fireEvent.pointerMove(h.stage, { ...edge, clientX: edge.clientX + 10, buttons: 1 });
       fireEvent.pointerUp(h.stage, { ...edge, clientX: edge.clientX + 30 });
       fireEvent.pointerDown(handle, edge);
-      fireEvent.pointerUp(h.stage, edge);
+      fireEvent.pointerMove(h.stage, { ...edge, clientX: edge.clientX + 10, buttons: 1 });
+      fireEvent.pointerUp(h.stage, { ...edge, clientX: edge.clientX + 20 });
+      fireEvent.pointerDown(h.canvas, textAt);
+      fireEvent.pointerUp(h.stage, textAt);
+      type(h.view.getByRole('textbox', { name: 'Slide text' }), '!');
+    });
+    await waitFor(() => expect(replyControl.count()).toBeGreaterThan(0));
+    await act(async () => { replyControl.release(); });
+    const saved = await story(h.api);
+    const commands = h.commands.slice(since);
+    const selections = commands.filter((command) => command.kind === 'selectObject');
+    const resizes = commands.filter((command) => command.kind === 'setShapeRect');
+    expect(selections).toHaveLength(2);
+    expect(outcomes.find((outcome) => outcome.seq === selections[1]?.seq)).toMatchObject({ status: 'applied' });
+    expect(resizes).toHaveLength(2);
+    expect(outcomes.filter((outcome) => resizes.some((resize) => resize.seq === outcome.seq))
+      .map((outcome) => outcome.status)).toEqual(['applied', 'applied']);
+    expect(saved.text).toBe('al!pha beta\nx\nalpha beta');
+    expect(h.view.queryByRole('alert')).toBeNull();
+  } finally {
+    unsubscribe();
+    await act(async () => { replyControl.release(); });
+  }
+});
+
+test('a collaboration cursor sent before pointer-up preserves resize and subsequent typing', async () => {
+  let replica!: AsyncCollaborationReplica;
+  const h = await open({ collaboration: { clientId: 1001, onReplica: (value) => { if (value) replica = value; } } });
+  await editExisting(h);
+  const endpoint = collaborationPipeFor(replica)!.open(() => {}, () => {});
+  const line = h.box.lines[0]!;
+  const textAt = h.point(line.caretStops[2]!.x, line.y + line.height / 2);
+  const edge = h.point(h.box.x + h.box.w, h.box.y + h.box.h / 2);
+  const outcomes: Array<{ seq: number; status: string; committed?: boolean }> = [];
+  const unsubscribe = h.client.subscribe((ack) => { outcomes.push(...ack.outcomes); });
+  try {
+    await endpoint.post([{ op: 'create', seq: 1, options: {} }], []);
+    const since = h.commands.length;
+    replyControl.hold();
+    act(() => { fireEvent.pointerDown(h.view.getByTestId('pptx-resize-e'), edge); });
+    const cursor = endpoint.post([{ op: 'cursor', seq: 2, cursor: { slideId: h.client.state.activeSlideId! },
+      broadcast: false }], []);
+    await waitFor(() => expect(replyControl.count()).toBe(2));
+    act(() => {
+      fireEvent.pointerMove(h.stage, { ...edge, clientX: edge.clientX + 10, buttons: 1 });
+      fireEvent.pointerUp(h.stage, { ...edge, clientX: edge.clientX + 30 });
+      fireEvent.pointerDown(h.canvas, textAt);
+      fireEvent.pointerUp(h.stage, textAt);
+      type(h.view.getByRole('textbox', { name: 'Slide text' }), '!');
+    });
+    await act(async () => { replyControl.release(); await cursor; });
+    const saved = await story(h.api);
+    const [selection, pipe, resize] = h.commands.slice(since);
+    expect([selection?.kind, pipe?.kind, resize?.kind]).toEqual(['selectObject', 'collabPipe', 'setShapeRect']);
+    expect(resize).toMatchObject({ afterSeq: selection?.seq });
+    expect(outcomes.find((outcome) => outcome.seq === pipe?.seq)).toMatchObject({ status: 'noop', committed: false });
+    expect(outcomes.find((outcome) => outcome.seq === resize?.seq)).toMatchObject({ status: 'applied', committed: true });
+    expect(saved.text).toBe('al!pha beta\nx\nalpha beta');
+  } finally {
+    unsubscribe();
+    await act(async () => { replyControl.release(); });
+    endpoint.close();
+  }
+});
+
+test('a point-based object selection keeps the frame the user clicked', async () => {
+  const h = await open();
+  await editExisting(h);
+  const { slideId, slideRevision, coversThroughSeq, documentEpoch, incarnation } = h.client.state.frame!;
+  const edge = h.point(h.box.x, h.box.y + h.box.h / 2);
+  const click = h.point();
+  const since = h.commands.length;
+  replyControl.hold();
+  try {
+    act(() => {
+      fireEvent.pointerDown(h.view.getByTestId('pptx-resize-w'), edge);
+      fireEvent.pointerMove(h.stage, { ...edge, clientX: edge.clientX + 10, buttons: 1 });
+      fireEvent.pointerUp(h.stage, { ...edge, clientX: edge.clientX + 30 });
+      fireEvent.pointerDown(h.canvas, click);
+      fireEvent.pointerUp(h.stage, click);
     });
     await waitFor(() => expect(replyControl.count()).toBeGreaterThan(0));
     await act(async () => { replyControl.release(); });
     await h.api.readContent();
-    const selections = h.commands.slice(since).filter((command) => command.kind === 'selectObject');
-    expect(selections).toHaveLength(2);
-    expect(outcomes.find((outcome) => outcome.seq === selections[1]?.seq)).toMatchObject({ status: 'applied' });
-    expect(h.view.queryByRole('alert')).toBeNull();
+    const [, resize, selection] = h.commands.slice(since);
+    expect(selection).toMatchObject({ kind: 'selectObject', afterSeq: resize?.seq, payload: {
+      scale: 1, frame: { slideId, slideRevision, coversThroughSeq, documentEpoch, incarnation },
+    } });
   } finally {
-    unsubscribe();
     await act(async () => { replyControl.release(); });
   }
 });

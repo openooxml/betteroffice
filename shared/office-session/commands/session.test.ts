@@ -115,6 +115,28 @@ describe('worker edit session', () => {
     } finally { await h.session.dispose(); }
   });
 
+  it('sends independent work after the final refusal batch clears a fence', async () => {
+    const h = harness({ maxInFlight: 1 });
+    try {
+      const predecessor = h.session.submit('select', 'shape');
+      h.pump();
+      const children = Array.from({ length: 130 }, (_, index) =>
+        h.session.submit('resize', 'east', { after: predecessor, waitForAfter: index === 129 }));
+      const independent = h.session.submit('undo', 'undo');
+      const flushed = h.session.flush();
+      h.pump();
+      h.ack(0, [{ seq: 1, status: 'refused' }]);
+      await predecessor.ack;
+      h.pump();
+      expect(await children[129]!.ack).toMatchObject({ status: 'cancelled', reason: 'dependency-refused' });
+      h.pump();
+      expect(h.calls.map(({ envelope }) => envelope.kind)).toEqual(['select', 'undo']);
+      h.ack(1);
+      expect(await independent.ack).toMatchObject({ status: 'applied' });
+      await flushed;
+    } finally { await h.session.dispose(); }
+  });
+
   it('still lists the envelopes that were unacknowledged when a crash ended the session without recovery', async () => {
     const h = harness({ maxRecoveryAttempts: 0 });
     for (const value of ['a', 'b', 'c']) h.session.submit('insert', value);
