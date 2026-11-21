@@ -3,7 +3,7 @@ import type { YrsParagraphAttrs } from './index';
 import { LIST_OFF_ATTRS } from './listCommands';
 import { createdListKey } from './listDefinitionSave';
 import {
-  GAP, LIST_LAYOUT, PLAIN, listCommandScenarios, listDocument, preloadListWasm, shownLeft, shownMarker,
+  GAP, HEADING, LIST_LAYOUT, PLAIN, listCommandScenarios, listDocument, preloadListWasm, shownLeft, shownMarker,
   type ListCommandDriver, type ListDocument, type ListDocumentOptions,
 } from './listCommandsTestSupport';
 import { closeCommandEngines, command, execute, openCommandEngine, selection, TIMEOUT } from './residentCommandTestSupport';
@@ -195,6 +195,19 @@ test('worker: bullets reusing the created list of a deleted paragraph are undone
   expect(reused).toEqual({ naming: [target], definitions: [key] });
   expect(deleted).toEqual({ texts: ['Opening paragraph QA', GAP, 'Middle paragraph QA', target], lists: 0, definitions: [key] });
   expect(key).toBeDefined();
+}, TIMEOUT);
+
+test('worker: bullets off on a heading that was given a style without numbering write no numId 0', async () => {
+  const arm = await openCommandEngine(undefined, { bytes: listDocument('D'), clientId: ++clientId });
+  const heading = () => arm.engine.paragraphs('body').find(entry => entry.text === HEADING)!;
+  const at = () => selection(heading().paraId, 0);
+  expect(execute(arm, command(arm, 'toggleList', { selection: at(), kind: 'bullet' }))).toMatchObject({ status: 'applied' });
+  expect(execute(arm, command(arm, 'applyParagraphStyle', { selection: at(), styleId: 'Normal' }))).toMatchObject({ status: 'applied' });
+  const styled = heading().properties;
+  expect(execute(arm, command(arm, 'toggleList', { selection: at(), kind: 'bullet' }))).toMatchObject({ status: 'applied' });
+  expect(heading().properties.numPr ?? null).toBeNull();
+  expect(createdListKey(styled)).toBeDefined();
+  expect(styled.pStyle).toBe('Normal');
 }, TIMEOUT);
 
 test('the attributes that take a paragraph off its list are frozen and clear its marker formatting', () => {

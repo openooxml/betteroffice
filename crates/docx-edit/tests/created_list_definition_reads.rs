@@ -726,6 +726,32 @@ fn a_created_list_no_paragraph_is_on_is_not_reused_for_the_other_kind() {
 }
 
 #[test]
+fn a_paragraph_does_not_join_a_neighbour_at_a_level_its_list_does_not_define() {
+    let doc = EditingDoc::new(723);
+    let body = levelled_body(&[("Top", 1, 0), ("Item", 2, 1)]);
+    seed_from_docx(&doc, &numbered_docx(&body, None, SINGLE_LEVEL_NUMBERING)).unwrap();
+    doc.set_paragraph_attr(&paragraph_id(&doc, "Top"), "numPr", num_pr(1.0, 1.0))
+        .unwrap();
+    create(&doc, "Item", ListKind::Bullet);
+    let written = attrs(&doc, "Item");
+    assert!(created_key(&doc, "Item").is_some(), "{written:?}");
+    assert_eq!(doc.created_list_definitions().len(), 1);
+}
+
+#[test]
+fn a_paragraph_on_no_list_does_not_join_a_neighbour_at_a_level_its_list_does_not_define() {
+    let doc = EditingDoc::new(724);
+    let body = levelled_body(&[("Top", 1, 0)]);
+    seed_from_docx(&doc, &numbered_docx(&body, None, SINGLE_LEVEL_NUMBERING)).unwrap();
+    doc.set_paragraph_attr(&paragraph_id(&doc, "Top"), "numPr", num_pr(1.0, 1.0))
+        .unwrap();
+    create(&doc, "End", ListKind::Bullet);
+    let written = attrs(&doc, "End");
+    assert!(created_key(&doc, "End").is_some(), "{written:?}");
+    assert_eq!(doc.created_list_definitions().len(), 1);
+}
+
+#[test]
 fn a_created_list_of_another_client_is_not_handed_out() {
     let doc = seeded(722, &[("Lead", None), ("Alpha", None), ("Gap", None)]);
     let root = doc.yrs_doc().get_or_insert_map(LIST_DEFINITIONS);

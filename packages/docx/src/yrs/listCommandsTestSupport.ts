@@ -21,6 +21,11 @@ const NUMBERED_HEADING_STYLES = STYLES.replace(
   '<w:pPr><w:outlineLvl w:val="0"/>',
   '<w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr><w:outlineLvl w:val="0"/>'
 );
+/** A Heading 1 style numbered by list 1 that gives its left indent in character units only. */
+const CHARACTER_HEADING_STYLES = STYLES.replace(
+  '<w:pPr><w:outlineLvl w:val="0"/>',
+  '<w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr><w:ind w:leftChars="200"/><w:outlineLvl w:val="0"/>'
+);
 const HEADING_NUMBERING = `${XML}<w:numbering xmlns:w="${W}"><w:abstractNum w:abstractNumId="0"><w:multiLevelType w:val="multilevel"/><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>`;
 const levelXml = (ilvl: number, format: string, text: string) =>
   `<w:lvl w:ilvl="${ilvl}"><w:start w:val="1"/><w:numFmt w:val="${format}"/><w:lvlText w:val="${text}"/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="${720 * (ilvl + 1)}" w:hanging="360"/></w:pPr></w:lvl>`;
@@ -61,6 +66,12 @@ const CHARACTER_INDENT_NUMBERING = numberingXml(
   abstractNumXml(1, '<w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="•"/><w:lvlJc w:val="left"/></w:lvl>') +
   numXml(5, 0) + numXml(6, 1)
 );
+/** List 1: decimal, its level 0 indented 1440 twips with a 360 twip hanging indent. List 6: decimal, its level 0 gives no indent. */
+const CHARACTER_HEADING_NUMBERING = numberingXml(
+  abstractNumXml(0, '<w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="1440" w:hanging="360"/></w:pPr></w:lvl>') +
+  abstractNumXml(1, '<w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/></w:lvl>') +
+  numXml(1, 0) + numXml(6, 1)
+);
 
 /** The paragraph the list commands are applied to; the last paragraph added to each document. */
 export const PLAIN = 'Plain paragraph QA';
@@ -77,7 +88,7 @@ const NESTED_DECIMAL = 'Nested level three';
 /** The item of the decimal list 3 of document A directly below a level 1 item of the bullet list 2. */
 const RESTARTED_ITEM = 'Restarted list with explicit indent override';
 /** The two headings of document D, numbered by their style. */
-const HEADING = 'Introduction heading QA';
+export const HEADING = 'Introduction heading QA';
 const NEXT_HEADING = 'Second heading QA';
 const SECOND_FOLLOWER = 'Second follower QA';
 const THIRD_FOLLOWER = 'Third follower QA';
@@ -113,8 +124,11 @@ export const LIST_LAYOUT = JSON.stringify({
  * at level 1 of the numbered list 7. H: `INDENTED_ITEM` of the indented bullet list 5. I: as G, with
  * a list 2 that defines level 0 only and `LIST_SEVEN_ITEM` at level 2 of list 7. J: `CHARACTER_ITEM`
  * of the indented bullet list 5 and `UNINDENTED_ITEM` of the bullet list 6, whose level gives no indent.
+ * K: `SINGLE_BULLET` of the one-level bullet list 1, directly above `PLAIN`. L: `HEADING`, numbered
+ * by its style's indented list 1 with the style's left indent in character units, above
+ * `UNINDENTED_ITEM` of the decimal list 6, whose level gives no indent.
  */
-export type ListDocument = 'A' | 'B' | 'C' | 'D' | 'E' | 'F' | 'G' | 'H' | 'I' | 'J';
+export type ListDocument = 'A' | 'B' | 'C' | 'D' | 'E' | 'F' | 'G' | 'H' | 'I' | 'J' | 'K' | 'L';
 export type ListKind = 'bullet' | 'numbered';
 export interface ListDocumentOptions {
   /** Puts `GAP` directly above `PLAIN`. */
@@ -129,7 +143,7 @@ export interface ListDocumentOptions {
 
 /** The `w:numId`s of the numbering each document opens with. */
 export const SOURCE_NUM_IDS: Readonly<Record<ListDocument, readonly string[]>> = {
-  A: ['1', '2', '3'], B: ['1'], C: [], D: ['1'], E: ['1'], F: ['1', '2'], G: ['2', '7'], H: ['5'], I: ['2', '7'], J: ['5', '6'],
+  A: ['1', '2', '3'], B: ['1'], C: [], D: ['1'], E: ['1'], F: ['1', '2'], G: ['2', '7'], H: ['5'], I: ['2', '7'], J: ['5', '6'], K: ['1', '2'], L: ['1', '6'],
 };
 
 export async function preloadListWasm(): Promise<void> {
@@ -180,7 +194,14 @@ export function listDocument(doc: ListDocument, options: ListDocumentOptions = {
       HEADING_NUMBERING, undefined, NUMBERED_HEADING_STYLES
     );
   }
-  if (doc === 'E' || doc === 'F' || doc === 'G' || doc === 'H' || doc === 'I' || doc === 'J') {
+  if (doc === 'L') {
+    const heading = `<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>${HEADING}</w:t></w:r></w:p>`;
+    return pack(
+      `${XML}<w:document xmlns:w="${W}"><w:body>${heading}${item(UNINDENTED_ITEM, 6, 0)}${added}${SECT}</w:body></w:document>`,
+      CHARACTER_HEADING_NUMBERING, undefined, CHARACTER_HEADING_STYLES
+    );
+  }
+  if (doc === 'E' || doc === 'F' || doc === 'G' || doc === 'H' || doc === 'I' || doc === 'J' || doc === 'K') {
     const opening = {
       E: item(HYBRID_BULLET, 1, 0) + item(HYBRID_NUMBER, 1, 2),
       F: item(SINGLE_BULLET, 1, 0) + item(DEEP_NUMBER, 2, 2),
@@ -189,10 +210,11 @@ export function listDocument(doc: ListDocument, options: ListDocumentOptions = {
       I: plain(SELECTION_LEAD) + item(LIST_TWO_ITEM, 2, 0) + item(LIST_SEVEN_ITEM, 7, 2),
       J: `<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="5"/></w:numPr><w:ind w:leftChars="200"/></w:pPr><w:r><w:t>${CHARACTER_ITEM}</w:t></w:r></w:p>` +
         item(UNINDENTED_ITEM, 6, 0),
+      K: item(SINGLE_BULLET, 1, 0),
     }[doc];
     const numbering = {
       E: HYBRID_NUMBERING, F: SINGLE_LEVEL_NUMBERING, G: TWO_DECIMAL_NUMBERING, H: INDENTED_NUMBERING, I: DEEP_SEVEN_NUMBERING,
-      J: CHARACTER_INDENT_NUMBERING,
+      J: CHARACTER_INDENT_NUMBERING, K: SINGLE_LEVEL_NUMBERING,
     }[doc];
     return pack(`${XML}<w:document xmlns:w="${W}"><w:body>${opening}${added}${SECT}</w:body></w:document>`, numbering);
   }
@@ -859,6 +881,41 @@ export function listCommandScenarios(path: string, open: OpenListCommandDriver, 
     expect(character.marker).not.toBeNull();
     expect(propertiesOf(driver, CHARACTER_ITEM).numPr).toMatchObject({ numId: 5, ilvl: 0 });
     expect(propertiesOf(driver, UNINDENTED_ITEM).numPr).toMatchObject({ numId: 6, ilvl: 0 });
+  }, timeout);
+
+  test(`${path}: bullets below a bullet item indented to a level its list does not define start a list instead of copying that level`, async () => {
+    const driver = await open('K');
+    driver.indent('increase', SINGLE_BULLET);
+    driver.toggle('bullet', PLAIN);
+    expect(keyOf(driver, PLAIN)).toBeDefined();
+    const bytes = await driver.save();
+    expect(savedLevel(bytes, PLAIN)).toMatchObject({ ilvl: '0', numFmt: 'bullet' });
+    const reopened = await open('K', { saved: bytes });
+    expect(reopened.marker(PLAIN) ?? '').not.toBe('');
+    expect(propertiesOf(driver, SINGLE_BULLET).numPr).toMatchObject({ numId: 1, ilvl: 1 });
+  }, timeout);
+
+  test(`${path}: a heading whose style gives its left indent in character units is laid out as an item of a list that gives no indent`, async () => {
+    const driver = await open('L');
+    const heading = driver.left(HEADING);
+    expect(heading).toEqual(driver.left(UNINDENTED_ITEM));
+    expect(heading.text).not.toBeNull();
+    expect(heading.marker).not.toBeNull();
+    expect(propertiesOf(driver, HEADING).numPr).toMatchObject({ numId: 1 });
+    expect(propertiesOf(driver, UNINDENTED_ITEM).numPr).toMatchObject({ numId: 6, ilvl: 0 });
+  }, timeout);
+
+  test(`${path}: numbering taken off a style-numbered heading a second time, after a save and a reopen, saves numId 0 again`, async () => {
+    const first = await open('D');
+    first.toggle('numbered', HEADING);
+    const reopened = await open('D', { saved: await first.save() });
+    reopened.toggle('numbered', HEADING);
+    const on = reopened.marker(HEADING) ?? '';
+    reopened.toggle('numbered', HEADING);
+    const saved = await reopened.save();
+    expect(savedList(saved, HEADING)).toMatchObject({ paragraphs: 1, numId: '0' });
+    expect((await open('D', { saved })).marker(HEADING) ?? '').toBe('');
+    expect(on).toMatch(/^\d+\.$/);
   }, timeout);
 
   for (const kind of KINDS) {
