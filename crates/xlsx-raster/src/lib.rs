@@ -265,14 +265,9 @@ pub fn render_png_with_images(dl: &DisplayList, images: &ImageMap<'_>) -> Result
                     if let Some(pieces) = xlsx_render::run_pieces(cmd) {
                         let mut measured = PieceWidths::new(measure_piece);
                         let lines = match wrap {
-                            Some(wrap) => wrapped_lines(
-                                *y,
-                                *font_size,
-                                wrap,
-                                text,
-                                &pieces,
-                                &mut measured,
-                            ),
+                            Some(wrap) => {
+                                wrapped_lines(*y, *font_size, wrap, text, &pieces, &mut measured)
+                            }
                             None => vec![(*y, pieces)],
                         };
                         for (y, pieces) in lines {
