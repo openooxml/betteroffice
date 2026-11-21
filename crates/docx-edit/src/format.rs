@@ -1556,9 +1556,13 @@ impl EditingDoc {
             crate::ops::code_point_range(&story, &txn, range.start, range.end);
         let len = range.end - range.start;
         if ctx.is_suggesting() {
+            let chunks = crate::ops::snapshot_range(&story, &txn, range.start, range.end);
+            if holds_suggestion_container(&chunks, &txn) {
+                return Err(OpError::SuggestedFormattingOverContainer);
+            }
             let mut runs = Vec::new();
             let mut changed = false;
-            for chunk in crate::ops::snapshot_range(&story, &txn, range.start, range.end) {
+            for chunk in chunks {
                 let start = chunk.start.max(range.start);
                 let end = chunk.end().min(range.end);
                 if start >= end {

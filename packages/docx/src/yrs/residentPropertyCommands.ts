@@ -124,7 +124,7 @@ export function propertyCommandTarget(engine: DocxWorkerCommandEngine, command: 
           const start = offset;
           offset += segment.kind === 'text' ? segment.text.length : 1;
           if (Math.min(offset, range.end.offset) <= Math.max(start, range.start.offset)) continue;
-          if (segment.kind !== 'text' || ['ins', 'del', 'rPrChange'].some(key => Object.hasOwn(segment.attributes, key))) {
+          if (segment.kind !== 'text' || ['ins', 'del', 'rPrChange', 'fieldResult'].some(key => Object.hasOwn(segment.attributes, key))) {
             return 'unsupported-suggesting';
           }
         }
