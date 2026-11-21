@@ -67,19 +67,30 @@ test('attached XLSX lists pending proposals without a trial accept per proposal'
   });
 });
 
-test('attached DOCX accept is one undo step that leaves earlier typing in place', () => withDocx(['', 'old'], async doc => {
+test('attached DOCX accept is one undo step that leaves earlier typing in place', () => withDocx(['', 'old', 'old2'], async doc => {
   const { session } = doc;
   const [{ paraId }] = session.paragraphs('body');
   session.addUndoBoundary();
   session.insertText({ story: 'body', paraId, offset: 0 }, 'hello');
   session.addUndoBoundary();
   expect(session.paragraphs('body')[0]?.text).toBe('hello');
-  const { id } = doc.propose({ author, edits: [{ ...paragraphTarget(doc, 1), start: 0, oldText: 'old', newText: 'new' }] });
+  const { id } = doc.propose({ author, edits: [
+    { ...paragraphTarget(doc, 1), start: 0, oldText: 'old', newText: 'new' },
+    { ...paragraphTarget(doc, 2), start: 0, oldText: 'old2', newText: 'new2' },
+  ] });
   await doc.accept(id);
-  expect(session.paragraphs('body').map(paragraph => paragraph.text)).toEqual(['hello', 'new']);
+  expect(session.paragraphs('body').map(paragraph => paragraph.text)).toEqual(['hello', 'new', 'new2']);
+  expect(session.canUndo()).toBe(true);
+  session.addUndoBoundary();
+  session.insertText({ story: 'body', paraId, offset: 0 }, 'X');
+  session.addUndoBoundary();
+  expect(session.paragraphs('body').map(paragraph => paragraph.text)).toEqual(['Xhello', 'new', 'new2']);
   expect(session.canUndo()).toBe(true);
   session.undo();
-  expect(session.paragraphs('body').map(paragraph => paragraph.text)).toEqual(['hello', 'old']);
+  expect(session.paragraphs('body').map(paragraph => paragraph.text)).toEqual(['hello', 'new', 'new2']);
+  expect(session.canUndo()).toBe(true);
+  session.undo();
+  expect(session.paragraphs('body').map(paragraph => paragraph.text)).toEqual(['hello', 'old', 'old2']);
   expect(session.canUndo()).toBe(true);
 }));
 

@@ -588,9 +588,9 @@ export class DocxAgentDocument {
 
   async accept(id: string, options: { tracked?: boolean; date?: string } = {}) {
     if (!this.attached) return this.acceptHeadless(id, options);
-    if (this.proposalPeer && options.date !== undefined) throw new AcceptDateUnsupportedError();
     const held = this.proposal(id);
     this.checkEditorDecision(held);
+    if (this.proposalPeer && options.date !== undefined) throw new AcceptDateUnsupportedError();
     if (options.tracked && options.date !== undefined && !Number.isFinite(Date.parse(options.date))) {
       throw new DocumentToolError('INVALID_ARGUMENT', 'Tracked acceptance requires an ISO date.');
     }
@@ -625,6 +625,8 @@ export class DocxAgentDocument {
       this.proposalResult(trial.withdrawProposals({ ids, expectVersion: trial.version(), expectPreviewVersion: snapshot.previewVersion, keepRevisions: false }), held.value.changes);
       this.apply(trial, held, author);
     } catch (error) { throw trialRelease.failed(error); } finally { trialRelease.run(); }
+    const draft = await this.fork();
+    const release = cleanupGuard(() => draft.destroy());
     let withdrawn = false;
     let applied = false;
     try {
@@ -639,36 +641,32 @@ export class DocxAgentDocument {
       }
       this.finishProposalOperation(result);
       const settled = this.proposalResult(result, held.value.changes);
-      this.preserveReferences(before, settled.version);
       this.checkDecisionReferences(before, held);
-      const draft = await this.fork();
-      const release = cleanupGuard(() => draft.destroy());
+      if (this.session.version() !== settled.version) throw new DocumentToolError('STALE_TARGET', 'The document changed after proposal withdrawal.', { id: held.value.id });
+      draft.applyUpdate(this.session.encodeStateAsUpdate(draft.encodeStateVector()));
+      const vector = draft.encodeStateVector();
+      this.apply(draft, held, author);
+      const update = draft.encodeStateAsUpdate(vector);
+      this.session.addUndoBoundary();
       try {
-        this.checkDecisionReferences(before, held);
-        if (this.session.version() !== settled.version) throw new DocumentToolError('STALE_TARGET', 'The document changed after proposal withdrawal.', { id: held.value.id });
-        const vector = draft.encodeStateVector();
-        this.apply(draft, held, author);
-        const update = draft.encodeStateAsUpdate(vector);
-        this.session.addUndoBoundary();
-        try {
-          this.session.applyLocalUpdate(update);
-          applied = true;
-          held.localDecision = 'accepted';
-          held.value.status = 'accepted';
-        } finally { this.session.addUndoBoundary(); }
-      } catch (error) { throw release.failed(error); } finally { release.run(); }
+        this.session.applyLocalUpdate(update);
+        applied = true;
+        held.localDecision = 'accepted';
+        held.value.status = 'accepted';
+      } finally { this.session.addUndoBoundary(); }
       this.preserveReferences(before, this.session.version(), this.agentDecisionChanges(held, 'accepted', options.tracked ?? false));
       this.checkDecisionReferences(before, held);
       return { id: held.value.id, status: this.settledStatus(held), tracked: options.tracked ?? false, changes: held.value.changes.length };
     } catch (error) {
       if (this.proposalOperation) this.finishProposalOperation();
       if (withdrawn) {
-        throw new DocumentToolError(error instanceof DocumentToolError ? error.code : 'ACCEPT_FAILED', error instanceof Error ? error.message : String(error), {
+        if (!applied) this.preserveReferences(before, this.session.version());
+        throw release.failed(new DocumentToolError(error instanceof DocumentToolError ? error.code : 'ACCEPT_FAILED', error instanceof Error ? error.message : String(error), {
           ...(error instanceof DocumentToolError ? error.details : undefined), withdrawn: true, id: held.value.id, status: this.settledStatus(held), ...(applied && { applied: true }),
-        });
+        }));
       }
-      throw error;
-    }
+      throw release.failed(error);
+    } finally { release.run(); }
   }
 
   reject(id: string) {
