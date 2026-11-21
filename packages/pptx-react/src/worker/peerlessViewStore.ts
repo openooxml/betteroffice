@@ -722,8 +722,8 @@ export function createPeerlessViewStore(
       const input: WaitingInput = { seq, intent, after, basisThroughSeq: view.presentedThroughSeq,
         basis: { epoch: identity.epoch, version: view.confirmed?.frame.version ?? client.state.version },
         echoed, quiet: !reportRefusal, chunks: [], operation, resolve, reject,
-        waitForPredecessor: waitForPredecessor || intent.kind === 'selectObject' &&
-          after?.intent.kind === 'setShapeRect' && after.waitForPredecessor };
+        waitForPredecessor: waitForPredecessor || intent.kind === 'selectObject' && after !== undefined &&
+          ('shapeId' in intent.payload || after.intent.kind === 'setShapeRect' && after.waitForPredecessor) };
       let target: PresentationCommandSelected | null | undefined;
       if (intent.kind === 'selectAtPoint' && !intent.payload.drag) {
         const hit = hitGeometry(geometry, intent.payload);
