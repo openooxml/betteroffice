@@ -15,7 +15,10 @@ fn package_bytes(body: &str, comments: Option<&str>) -> Vec<u8> {
         ("word/document.xml".to_owned(), format!("<w:document {NS}><w:body>{body}<w:sectPr/></w:body></w:document>").into_bytes()),
     ];
     if let Some(comments) = comments {
-        parts.push(("word/comments.xml".to_owned(), format!("<w:comments {NS}>{comments}</w:comments>").into_bytes()));
+        parts.push((
+            "word/comments.xml".to_owned(),
+            format!("<w:comments {NS}>{comments}</w:comments>").into_bytes(),
+        ));
     }
     ooxml_opc::rezip_parts(&parts).unwrap()
 }
@@ -45,7 +48,10 @@ fn comment_save_time(pairs: usize) -> Duration {
     let source = package_bytes(body, Some(&comment));
     let parsed = parse_docx_s9_wire(&source, S9ParseOptions::default()).unwrap();
     let mut package = serde_json::to_value(parsed.document.package).unwrap();
-    package["document"].as_object_mut().unwrap().remove("sections");
+    package["document"]
+        .as_object_mut()
+        .unwrap()
+        .remove("sections");
     if let Some(text) = package.pointer_mut("/document/content/0/content/1/content/0/text") {
         *text = Value::String("edited".to_owned());
     }

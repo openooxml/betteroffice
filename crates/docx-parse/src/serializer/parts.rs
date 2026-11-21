@@ -722,9 +722,8 @@ fn comment_bookmarks<'a>(
                 "duplicate block bookmark boundary for id {id}"
             )));
         }
-        let mut position = next_anchor[index].unwrap_or_else(|| {
-            previous_anchor[index].map_or(0, |position| position + 1)
-        });
+        let mut position = next_anchor[index]
+            .unwrap_or_else(|| previous_anchor[index].map_or(0, |position| position + 1));
         if let Some(counterpart) = present.get(&(id.clone(), !start)) {
             position = if start {
                 position.min(counterpart / 2)

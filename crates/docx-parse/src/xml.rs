@@ -2030,9 +2030,7 @@ fn append_element(
 ) -> Result<(), ParseError> {
     element.bookmark_hint = BookmarkHint(
         matches!(element.local_name(), "bookmarkStart" | "bookmarkEnd")
-            || element
-                .child_elements()
-                .any(|child| child.bookmark_hint.0),
+            || element.child_elements().any(|child| child.bookmark_hint.0),
     );
     if let Some(parent) = stack.last_mut() {
         parent.children.push(XmlNode::Element(element));
