@@ -27,7 +27,9 @@ impl SessionIds {
         }
         let counter = self
             .counter
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                (n < MAX_FLOOR).then_some(n + 1)
+            })
             .expect("session id counter exhausted");
         format!("{}:{counter}", self.client_id)
     }
@@ -174,13 +176,20 @@ mod tests {
     fn a_comment_body_never_makes_a_draw_repeat_a_live_id() {
         let (first, second) = drawn_after("41:18446744073709551615");
         assert_eq!((first.as_str(), second.as_str()), ("41:1", "41:2"));
-        let (first, second) = drawn_after("41:9007199254740991");
+        let (first, second) = drawn_after("41:9007199254740989");
         assert_eq!(
             (first.as_str(), second.as_str()),
-            ("41:9007199254740992", "41:9007199254740993")
+            ("41:9007199254740990", "41:9007199254740991")
         );
+        assert_eq!(floor(&second), 1 << 53);
         let (first, second) = drawn_after("41:5");
         assert_eq!((first.as_str(), second.as_str()), ("41:6", "41:7"));
+    }
+
+    #[test]
+    #[should_panic(expected = "session id counter exhausted")]
+    fn a_floor_at_the_cap_fails_loudly_instead_of_drawing_an_unseen_id() {
+        drawn_after("41:9007199254740991");
     }
 
     #[test]
