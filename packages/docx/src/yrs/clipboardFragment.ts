@@ -115,7 +115,18 @@ export function clipboardFragmentRunCount(fragment: DocxClipboardFragment): numb
 
 function withinFormattedRunLimit(fragment: DocxClipboardFragment): DocxClipboardFragment {
   if (clipboardFragmentRunCount(fragment) <= MAX_PASTE_FORMATTED_RUNS) return fragment;
-  return { paragraphs: fragment.paragraphs.map(({ runs: _runs, ...paragraph }) => paragraph) };
+  return {
+    paragraphs: fragment.paragraphs.map(({ runs: _runs, inlines, ...paragraph }) => {
+      if (!inlines) return paragraph;
+      const joined: DocxClipboardInline[] = [];
+      for (const inline of inlines) {
+        const last = joined.at(-1);
+        if ('text' in inline && last && 'text' in last) joined[joined.length - 1] = { text: last.text + inline.text };
+        else joined.push(inline);
+      }
+      return { ...paragraph, inlines: joined };
+    }),
+  };
 }
 
 const MAX_FRAGMENT_CELLS = 10_000;
