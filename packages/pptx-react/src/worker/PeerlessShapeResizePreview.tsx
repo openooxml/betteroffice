@@ -1,5 +1,5 @@
 import { paintSlide, sizeCanvasForSlide, type SlideDisplayList } from '@betteroffice/pptx';
-import { useCallback, useEffect, useRef, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useSyncExternalStore } from 'react';
 import type { PeerlessShapePreviewStore } from './usePeerlessShapeGestures';
 import type { PeerlessPresentation } from './usePeerlessPresentation';
 
@@ -22,7 +22,6 @@ export function PeerlessShapeResizePreview({ run, preview, scale }: {
   const request = snapshot?.request;
   const canvas = useRef<HTMLCanvasElement>(null);
   const currentScale = useRef(scale);
-  currentScale.current = scale;
   const desired = useRef<PreviewJob | null>(null);
   const running = useRef(false);
   const pumpRef = useRef<() => void>(() => {});
@@ -35,6 +34,13 @@ export function PeerlessShapeResizePreview({ run, preview, scale }: {
     target.style.width = '0px';
     target.style.height = '0px';
   }, []);
+
+  useLayoutEffect(() => {
+    if (currentScale.current === scale) return;
+    currentScale.current = scale;
+    clear();
+    preview.getSnapshot()?.retainCanvas?.release();
+  }, [clear, preview, scale]);
 
   const pump = useCallback(() => {
     if (running.current) return;

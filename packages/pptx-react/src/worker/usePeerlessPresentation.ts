@@ -167,6 +167,7 @@ export function usePeerlessPresentation(
     let queuedFrame: PeerlessConfirmedFrame | undefined;
     let visual: PeerlessVisualSnapshot | null = null;
     let prerenderPresented = false;
+    let rolledBackThroughSeq = -1;
     let cancelIdle: (() => void) | undefined;
     let draining = false;
     let changeSeq: number | undefined;
@@ -274,6 +275,7 @@ export function usePeerlessPresentation(
         const next = changed;
         if (firstPainted && paintedView && paintedView.confirmed === queuedFrame &&
           paintedView.presentedThroughSeq >= throughSeq) return;
+        if (rolledBackThroughSeq >= throughSeq) throw new Error('Slide paint was rolled back');
         await next;
       }
     }
@@ -500,6 +502,10 @@ export function usePeerlessPresentation(
             }, { commit: finish });
           },
           paintFrame,
+          onPaintRollback(throughSeq) {
+            rolledBackThroughSeq = Math.max(rolledBackThroughSeq, throughSeq);
+            signal();
+          },
           paintEcho: (view) => paintLocal(view),
           restoreLine: (view) => paintLocal(view, true),
           resync: () => framePainter?.resync?.(),

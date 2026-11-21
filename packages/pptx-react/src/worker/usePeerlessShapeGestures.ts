@@ -28,7 +28,7 @@ interface ShapeGesture {
 export interface PeerlessShapePreview {
   token: string;
   bounds: ShapeRect;
-  retainCanvas?: boolean;
+  retainCanvas?: { slideId: string; release(): void };
   request?: {
     gesture: string;
     frame: PresentationCommandFrameTag;
@@ -97,13 +97,20 @@ export function usePeerlessShapeGestures(store: PeerlessViewStore | null, {
     if (!store) return;
     const changed = () => {
       const current = gesture.current;
+      const preview = previewValue.current;
+      const slideId = current?.frame.slideId ?? preview?.retainCanvas?.slideId;
+      if (slideId === undefined) return;
+      const token = current ? current.selected?.token : preview?.token;
       const view = store.getSnapshot();
       const frame = view.confirmed?.frame;
-      if (current && (view.editState.readOnly || !frame || frame.slideId !== current.frame.slideId ||
-        frame.slideRevision !== current.frame.slideRevision ||
-        current.selected && (view.selection?.kind !== 'object' || view.selection.token !== current.selected.token))) cancel();
+      if (view.editState.readOnly || !frame || frame.slideId !== slideId ||
+        current && frame.slideRevision !== current.frame.slideRevision ||
+        token !== undefined && (view.selection?.kind !== 'object' || view.selection.token !== token)) cancel();
     };
     const unsubscribe = [store.subscribePresentation(changed), store.subscribeEditState(changed)];
+    if (presentation) unsubscribe.push(presentation.subscribeVisual(() => {
+      if (previewValue.current?.retainCanvas && !presentation.pluginVisual()) setPreview(null);
+    }));
     window.addEventListener('blur', cancel);
     return () => {
       window.removeEventListener('blur', cancel);
@@ -242,13 +249,14 @@ export function usePeerlessShapeGestures(store: PeerlessViewStore | null, {
       target: { slideId: object.slideId, shapeId: object.shapeId, token: object.token },
       inputTime, undoGroup: current.group };
     const preview = previewValue.current;
-    const retained = preview?.request ? { token: preview.token, bounds: preview.bounds, retainCanvas: true } : null;
+    const retained = preview?.request ? { token: preview.token, bounds: preview.bounds,
+      retainCanvas: { slideId: object.slideId, release: () => setPreview(null) } } : null;
     setPreview(retained);
     const commit = store.dispatch(current.handle ? { kind: 'setShapeRect', payload: { ...payload, rect } }
       : { kind: 'moveShape', payload: { ...payload, x: rect.x, y: rect.y } });
     void commit.then(async (ack) => {
       const outcome = ack.outcomes.find((entry) => entry.seq === ack.throughSeq);
-      if (!outcome?.committed) return;
+      if (!outcome?.committed || !retained || previewValue.current !== retained) return;
       await presentation.whenPaintedThrough(outcome.seq);
     }).catch(() => {}).finally(() => {
       if (previewValue.current === retained) setPreview(null);
