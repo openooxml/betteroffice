@@ -432,7 +432,27 @@ pub struct XmlElement {
     pub bookmark_replay_xml: Option<String>,
     /// Set when the part rebinds a standard prefix.
     pub(crate) matches_local_names: bool,
+    pub(crate) bookmark_hint: BookmarkHint,
 }
+
+/// Whether a subtree may hold a `bookmarkStart` or `bookmarkEnd`: `false` only where the
+/// parser saw none; elements built elsewhere keep `true`. Equality ignores it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct BookmarkHint(pub(crate) bool);
+
+impl Default for BookmarkHint {
+    fn default() -> Self {
+        Self(true)
+    }
+}
+
+impl PartialEq for BookmarkHint {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for BookmarkHint {}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ParsedColor {
@@ -1998,15 +2018,22 @@ fn decode_element(
         bookmark_xml: None,
         bookmark_replay_xml: None,
         matches_local_names: false,
+        bookmark_hint: BookmarkHint(false),
     })
 }
 
 fn append_element(
-    element: XmlElement,
+    mut element: XmlElement,
     stack: &mut [XmlElement],
     roots: &mut Vec<XmlElement>,
     part: &str,
 ) -> Result<(), ParseError> {
+    element.bookmark_hint = BookmarkHint(
+        matches!(element.local_name(), "bookmarkStart" | "bookmarkEnd")
+            || element
+                .child_elements()
+                .any(|child| child.bookmark_hint.0),
+    );
     if let Some(parent) = stack.last_mut() {
         parent.children.push(XmlNode::Element(element));
     } else {

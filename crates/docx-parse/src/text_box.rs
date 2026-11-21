@@ -265,6 +265,9 @@ pub(crate) fn has_bookmarked_text_box(element: &XmlElement) -> bool {
 }
 
 fn has_block_bookmarks(element: &XmlElement, in_text_box: bool) -> bool {
+    if !element.bookmark_hint.0 {
+        return false;
+    }
     let in_text_box = in_text_box || element.name == "w:txbxContent";
     if in_text_box && element.name == "w:p" {
         return contains_bookmark_boundary(element);
@@ -278,7 +281,7 @@ fn has_block_bookmarks(element: &XmlElement, in_text_box: bool) -> bool {
 fn contains_bookmark_boundary(element: &XmlElement) -> bool {
     element.child_elements().any(|child| {
         matches!(child.local_name(), "bookmarkStart" | "bookmarkEnd")
-            || contains_bookmark_boundary(child)
+            || (child.bookmark_hint.0 && contains_bookmark_boundary(child))
     })
 }
 

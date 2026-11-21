@@ -20,6 +20,12 @@ fn package_bytes(body: &str, comments: Option<&str>) -> Vec<u8> {
     ooxml_opc::rezip_parts(&parts).unwrap()
 }
 
+fn open_time(source: &[u8]) -> Duration {
+    let start = Instant::now();
+    parse_docx_s9_wire(source, S9ParseOptions::default()).unwrap();
+    start.elapsed()
+}
+
 fn best_of_two(mut run: impl FnMut() -> Duration) -> Duration {
     run().min(run())
 }
@@ -66,5 +72,30 @@ fn comment_block_bookmarks_save_in_linear_time() {
     assert!(
         large < small.max(Duration::from_millis(5)) * 24,
         "8x the bookmark pairs took {large:?} against {small:?}"
+    );
+}
+
+#[test]
+fn nested_alternate_content_without_bookmarks_opens_in_linear_time() {
+    let leaves = 100_000;
+    let flat = format!(
+        r#"<w:p><w:r><w:t>x</w:t></w:r></w:p><w:p><w:r><mc:AlternateContent><w:txbxContent>{}</w:txbxContent></mc:AlternateContent></w:r></w:p>"#,
+        "<a:x/>".repeat(leaves)
+    );
+    let nested = format!(
+        r#"<w:p><w:r><w:t>x</w:t></w:r></w:p><w:p><w:r>{}<w:txbxContent>{}{}{}</w:txbxContent>{}</w:r></w:p>"#,
+        "<mc:AlternateContent>".repeat(60),
+        "<w:customXml>".repeat(60),
+        "<a:x/>".repeat(leaves),
+        "</w:customXml>".repeat(60),
+        "</mc:AlternateContent>".repeat(60),
+    );
+    let flat = package_bytes(&flat, None);
+    let nested = package_bytes(&nested, None);
+    let flat_time = best_of_two(|| open_time(&flat));
+    let nested_time = best_of_two(|| open_time(&nested));
+    assert!(
+        nested_time < flat_time.max(Duration::from_millis(20)) * 10,
+        "nesting the same leaves took {nested_time:?} against {flat_time:?}"
     );
 }
