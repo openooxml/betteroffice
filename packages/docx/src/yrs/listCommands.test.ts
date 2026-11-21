@@ -171,7 +171,7 @@ test('worker: bullets reusing the created list of a deleted paragraph are undone
   }))).toMatchObject({ status: 'applied' });
   const undo = () => expect(execute(arm, command(arm, 'undo', {}))).toMatchObject({ status: 'applied' });
   toggle(PLAIN);
-  const key = createdListKey(paragraph(PLAIN).properties);
+  const key = createdListKey(paragraph(PLAIN).properties) ?? '';
   expect(execute(arm, command(arm, 'deleteBackward', { selection: {
     anchor: { story: 'body', paraId: paragraph(GAP).paraId, offset: GAP.length },
     focus: { story: 'body', paraId: paragraph(PLAIN).paraId, offset: PLAIN.length },
@@ -194,7 +194,7 @@ test('worker: bullets reusing the created list of a deleted paragraph are undone
   expect(undone.numPr ?? null).toBeNull();
   expect(reused).toEqual({ naming: [target], definitions: [key] });
   expect(deleted).toEqual({ texts: ['Opening paragraph QA', GAP, 'Middle paragraph QA', target], lists: 0, definitions: [key] });
-  expect(key).toBeDefined();
+  expect(key).not.toBe('');
 }, TIMEOUT);
 
 test('worker: bullets off on a heading that was given a style without numbering write no numId 0', async () => {
