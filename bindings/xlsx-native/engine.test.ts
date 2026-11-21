@@ -48,6 +48,8 @@ type EngineDocument = {
   undoJson(): string;
   readCellsJson(request: string): string;
   calculationStatusJson(): string;
+  documentVersion(): string;
+  clearUpdateObservation(): void;
   exportStructuredJson(options: string): string;
   saveBytes(): Uint8Array;
   free(): void;
@@ -419,22 +421,37 @@ describe('xlsx native engine parity', () => {
     }
   });
 
-  test('native opens report progress through the shared JS hook', async () => {
-    const zip = await JSZip.loadAsync(fixture);
-    const rows = ['<row r="1"><c r="A1"><v>1</v></c></row>'];
-    for (let row = 2; row <= 20_000; row++) {
-      rows.push(`<row r="${row}"><c r="A${row}"><f>A${row - 1}+1</f></c></row>`);
-    }
-    zip.file('xl/worksheets/sheet1.xml', `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${rows.join('')}</sheetData></worksheet>`);
-    const bytes = await zip.generateAsync({ type: 'uint8array' });
+  describe('engine callbacks', () => {
     const host = globalThis as typeof globalThis & { __betterofficeEngineProgress?: () => void };
-    const previous = host.__betterofficeEngineProgress;
-    try {
+    const recursiveUse = 'recursive use of an object detected which would lead to unsafe aliasing in rust';
+    let bytes: Uint8Array;
+
+    beforeAll(async () => {
+      const zip = await JSZip.loadAsync(fixture);
+      const rows = ['<row r="1"><c r="A1"><v>1</v></c></row>'];
+      for (let row = 2; row <= 20_000; row++) {
+        rows.push(`<row r="${row}"><c r="A${row}"><f>A${row - 1}+1</f></c></row>`);
+      }
+      zip.file('xl/worksheets/sheet1.xml', `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${rows.join('')}</sheetData></worksheet>`);
+      bytes = await zip.generateAsync({ type: 'uint8array' });
+    });
+
+    function withProgressHook<T>(hook: () => void, call: () => T): T {
+      const previous = host.__betterofficeEngineProgress;
+      host.__betterofficeEngineProgress = hook;
+      try {
+        return call();
+      } finally {
+        if (previous === undefined) delete host.__betterofficeEngineProgress;
+        else host.__betterofficeEngineProgress = previous;
+      }
+    }
+
+    test('native opens report progress through the shared JS hook', () => {
       for (const Document of [WasmDocument, native.XlsxDocument]) {
         let ticks = 0;
         const input = bytes.slice();
-        host.__betterofficeEngineProgress = () => { ticks++; input.fill(0); };
-        const doc = Document.open(input);
+        const doc = withProgressHook(() => { ticks++; input.fill(0); }, () => Document.open(input));
         try {
           expect(ticks).toBeGreaterThanOrEqual(4);
           expect(input.every((byte) => byte === 0)).toBe(true);
@@ -442,10 +459,98 @@ describe('xlsx native engine parity', () => {
           doc.free();
         }
       }
-    } finally {
-      if (previous === undefined) delete host.__betterofficeEngineProgress;
-      else host.__betterofficeEngineProgress = previous;
-    }
+    });
+
+    test.each(['free', 'documentVersion', 'clearUpdateObservation'] as const)(
+      'progress callbacks cannot call %s on a busy workbook', (method) => {
+        const engines = method === 'free' ? [native.XlsxDocument] : [WasmDocument, native.XlsxDocument];
+        for (const Document of engines) {
+          const doc = Document.open(bytes.slice()) as EngineDocument;
+          try {
+            const expected = doc.recalculateJson();
+            const version = doc.documentVersion();
+            let attempted = false;
+            let error: unknown;
+            const actual = withProgressHook(() => {
+              if (attempted) return;
+              attempted = true;
+              try {
+                doc[method]();
+              } catch (caught) {
+                error = caught;
+              }
+            }, () => doc.recalculateJson());
+            expect(attempted).toBe(true);
+            expect(error).toBeInstanceOf(Error);
+            expect((error as Error).message).toBe(recursiveUse);
+            expect(actual).toBe(expected);
+            expect(doc.documentVersion()).toBe(version);
+          } finally {
+            if (Document !== WasmDocument) doc.free();
+          }
+        }
+      },
+    );
+
+    test('a throwing progress hook leaves recalculation and subsequent reads unaffected', () => {
+      for (const Document of [WasmDocument, native.XlsxDocument]) {
+        const doc = Document.open(bytes.slice()) as EngineDocument;
+        try {
+          const expected = doc.recalculateJson();
+          const version = doc.documentVersion();
+          let ticks = 0;
+          const actual = withProgressHook(() => {
+            ticks++;
+            throw new Error('progress callback failed');
+          }, () => doc.recalculateJson());
+          expect(ticks).toBeGreaterThan(0);
+          expect(actual).toBe(expected);
+          expect(doc.documentVersion()).toBe(version);
+        } finally {
+          doc.free();
+        }
+      }
+    });
+
+    test('the clock can recalculate another workbook while the first remains busy', () => {
+      const doc = native.XlsxDocument.open(new Uint8Array(fixture)) as EngineDocument;
+      const other = native.XlsxDocument.open(new Uint8Array(fixture)) as EngineDocument;
+      try {
+        const expected = doc.recalculateJson();
+        const expectedOther = other.recalculateJson();
+        const now = Date.now;
+        let calls = 0;
+        let otherResult: string | undefined;
+        let error: unknown;
+        let actual: string;
+        Date.now = () => {
+          if (++calls === 1) {
+            otherResult = other.recalculateJson();
+          } else if (calls === 2) {
+            try {
+              doc.documentVersion();
+            } catch (caught) {
+              error = caught;
+            }
+          }
+          return now();
+        };
+        try {
+          actual = doc.recalculateJson();
+        } finally {
+          Date.now = now;
+        }
+        expect(calls).toBe(2);
+        expect(error).toBeInstanceOf(Error);
+        expect((error as Error).message).toBe(recursiveUse);
+        expect(otherResult).toBe(expectedOther);
+        expect(actual).toBe(expected);
+        expect(doc.calculationStatusJson()).toBe(expected);
+      } finally {
+        other.free();
+        doc.free();
+      }
+    });
   });
 
   test('wasm and native engines return identical results', () => {
