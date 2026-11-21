@@ -1101,8 +1101,8 @@ formats and patch styles. Targets name a sheet id from the current catalog and a
 A1 range or zero-based corners; value matrices and guards match the target
 exactly. Guards compare a cell's value, formula or display text before the
 batch, and steps may combine content with formatting on the same cells but not
-write one property twice. `findText` searches display text exactly and
-case-sensitively. Volatile functions see only `calculation.nowSerial`. Versions
+write one property twice. `findText` searches display text, ignoring case unless `matchCase` is set,
+and skips hidden sheets when no `sheetIds` are given. Volatile functions see only `calculation.nowSerial`. Versions
 and sheet ids belong to one session. Batches do not insert or delete rows,
 columns or sheets, merge cells or move charts, and refuse writes to merged-cell
 followers, array-formula cells and locked cells of protected sheets. Formats on
