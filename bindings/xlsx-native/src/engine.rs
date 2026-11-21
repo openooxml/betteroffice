@@ -125,10 +125,16 @@ fn enter_object(failure: &Failure, env: Env) -> Result<()> {
 
 fn register_object(failure: &Failure, env: Env) -> Result<()> {
     let object = std::ptr::from_ref(failure);
-    if ACTIVE_OBJECTS.with_borrow(|objects| objects.contains(&object)) {
+    let busy = ACTIVE_OBJECTS.with_borrow_mut(|objects| {
+        let busy = objects.contains(&object);
+        if !busy {
+            objects.push(object);
+        }
+        busy
+    });
+    if busy {
         return Err(throw_error(&env, RECURSIVE_USE));
     }
-    ACTIVE_OBJECTS.with_borrow_mut(|objects| objects.push(object));
     Ok(())
 }
 
@@ -166,11 +172,9 @@ impl EngineCall {
 impl Drop for EngineCall {
     fn drop(&mut self) {
         let object = ACTIVE_OBJECTS.with_borrow_mut(|objects| {
-            if objects.len() > self.object_depth {
-                objects.pop()
-            } else {
-                None
-            }
+            let object = objects.get(self.object_depth).copied();
+            objects.truncate(self.object_depth);
+            object
         });
         CURRENT_ENV.set(self.previous);
         let unwinding = std::thread::panicking();
@@ -212,7 +216,7 @@ fn native_progress() {
             let hook: Unknown = global.get_named_property("__betterofficeEngineProgress")?;
             if hook.get_type()? == ValueType::Function {
                 let hook: Function<(), Unknown> = unsafe { hook.cast()? };
-                let _ = hook.call(());
+                hook.call(())?;
             }
             Ok(())
         })();
