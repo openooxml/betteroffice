@@ -1335,6 +1335,32 @@ describe('docx native engine parity', () => {
     }
   });
 
+  for (const poison of [false, true]) {
+    test(`an observed native session clears both observers and frees ${poison ? 'after hitting its heap limit' : 'while healthy'}`, () => {
+      expect(native.set_wasm_heap_counting(true)).toBe(true);
+      const session = new native.EditSession(21);
+      try {
+        session.open_docx(fixture, true, 'opening');
+        session.start_update_event_observation();
+        session.set_update_observer(() => {});
+        if (poison) {
+          native.set_wasm_heap_limit(0);
+          const budget = caughtValue(() => session.open_docx(fixture, true, 'again'));
+          expect(isEngineTrap(budget)).toBe(true);
+          expectSameBudgetFailure(caughtValue(() => session.version()), budget);
+        }
+        expect(() => session.clear_update_event_observation()).not.toThrow();
+        expect(() => session.clear_update_observer()).not.toThrow();
+        expect(() => session.free()).not.toThrow();
+      } finally {
+        if (poison) native.set_wasm_heap_limit(Infinity);
+        session.free();
+      }
+      expect(() => session.clear_update_event_observation()).toThrow('EditSession was freed');
+      expect(() => session.clear_update_observer()).toThrow('EditSession was freed');
+    });
+  }
+
   test('a limit set while the thread is past it fails the next call that allocates', () => {
     const session = new native.EditSession(20);
     try {
