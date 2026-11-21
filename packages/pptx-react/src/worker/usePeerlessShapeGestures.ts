@@ -133,10 +133,11 @@ export function usePeerlessShapeGestures(store: PeerlessViewStore | null, {
     if (handle && !RESIZE_HANDLES.includes(handle)) return false;
     const selected = store.getSnapshot().selection;
     const scale = canvas.current.getBoundingClientRect().width / confirmed.displayList.width;
-    if (handle && (selected?.kind !== 'object' || !selected.canResize || store.getSnapshot().editState.readOnly)) return true;
+    if (handle && (!selected || selected.kind === 'object' && !selected.canResize ||
+      store.getSnapshot().editState.readOnly)) return true;
     const hit = handle ? null : hitConfirmedGeometry(store, start, scale);
     if (!handle && hit?.kind !== 'shape') return false;
-    const shapeId = handle && selected?.kind === 'object' ? selected.shapeId : hit!.shapeId;
+    const shapeId = handle ? selected!.shapeId : hit!.shapeId;
     const previous = recent.current;
     const repeated = !handle && previous?.slideId === confirmed.frame.slideId && previous.shapeId === shapeId &&
       event.timeStamp >= previous.time && event.timeStamp - previous.time <= 600 &&
@@ -146,8 +147,9 @@ export function usePeerlessShapeGestures(store: PeerlessViewStore | null, {
     const frame = { slideId, slideRevision, coversThroughSeq, documentEpoch, incarnation };
     const group = `shape-${++nextShapeGroup}`;
     const operation = handle && selected?.kind === 'object' ? Promise.resolve(selected)
-      : store.dispatch({ kind: 'selectObject', payload: { frame, x: start.x, y: start.y, scale,
-        inputTime: event.timeStamp, undoGroup: group } }).then((ack) =>
+      : store.dispatch({ kind: 'selectObject', payload: handle
+        ? { frame, shapeId, inputTime: event.timeStamp, undoGroup: group }
+        : { frame, x: start.x, y: start.y, scale, inputTime: event.timeStamp, undoGroup: group } }).then((ack) =>
         ack.outcomes.some((outcome) => outcome.status === 'refused' || outcome.status === 'cancelled') ||
         ack.selection?.kind !== 'object' ? null : ack.selection, () => null);
     const current: ShapeGesture = { pointerId: event.pointerId, element: event.currentTarget, frame, group,

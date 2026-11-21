@@ -153,7 +153,7 @@ async function open(small = false, table: boolean | 'empty' | 'mixed' | 'stacked
   return { view, stage, canvas, box, point, select, list };
 }
 
-test('shape_border', async () => {
+test('text editing keeps resize handles active', async () => {
   const { view, stage, canvas, box, point, select } = await open();
   await select();
   const line = box.lines[0]!;
@@ -162,7 +162,17 @@ test('shape_border', async () => {
     fireEvent.pointerUp(stage, point(stop.x, line.y + line.height / 2)); });
   await waitFor(() => expect(client.state.selection).toMatchObject({ storyId: box.storyId, focus: 2 }));
   expect(client.state.selection?.kind).not.toBe('object');
-  await waitFor(() => expect(view.queryByTestId('pptx-resize-nw')).toBeNull());
+  const handle = await waitFor(() => view.getByTestId('pptx-resize-e'));
+  const edge = point(box.x + box.w, box.y + box.h / 2);
+  act(() => { fireEvent.pointerDown(handle, edge); });
+  await waitFor(() => expect(client.state.selection).toMatchObject({ kind: 'object', shapeId: box.shapeId }));
+  act(() => {
+    fireEvent.pointerMove(stage, { ...edge, clientX: edge.clientX + 10, buttons: 1 });
+    fireEvent.pointerUp(stage, { ...edge, clientX: edge.clientX + 30 });
+  });
+  await waitFor(() => expect(commands.filter((command) => command.kind === 'setShapeRect')).toHaveLength(1));
+  await bounded(client.flush());
+  expect(client.state.selection).toMatchObject({ kind: 'object', shapeId: box.shapeId });
 });
 
 for (const kind of ['shape', 'text']) test(`empty_slide_space_clears_${kind}_selection`, async () => {

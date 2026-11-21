@@ -45,7 +45,7 @@ import {
 import { usePeerlessPresentation, type PeerlessPresentation } from './usePeerlessPresentation';
 import { createPeerlessEditorApi, notifyingSaveApi, type PptxAsyncEditorApi } from './createPeerlessEditorApi';
 import { usePeerlessTextSelection } from './usePeerlessTextSelection';
-import { PeerlessShapeOverlay } from './PeerlessShapeOverlay';
+import { PeerlessResizeHandles, PeerlessShapeOverlay } from './PeerlessShapeOverlay';
 import { usePeerlessShapeGestures, type PeerlessShapePreviewStore } from './usePeerlessShapeGestures';
 import { usePeerlessContextMenu } from './usePeerlessContextMenu';
 
@@ -109,10 +109,15 @@ function Overlays({ run, commands, inputRef, preview, insertion, editor, onError
   const { view, fit } = snapshot;
   const confirmed = view.confirmed!;
   const selected = view.selection;
-  const rectangles = selected && selected.kind !== 'object' && selected.slideId === confirmed.frame.slideId
-    ? geometry!.hits.filter(({ primitive }) => primitive.shapeId === selected.shapeId)
-      .map(({ primitive, transforms }) => transformedRect(transforms,
-        { x: primitive.x, y: primitive.y, width: primitive.w, height: primitive.h })) : [];
+  const editedEntries = selected && selected.kind !== 'object' && selected.slideId === confirmed.frame.slideId
+    ? geometry!.hits.filter(({ primitive }) => primitive.shapeId === selected.shapeId) : [];
+  const rectangles = editedEntries.map(({ primitive, transforms }) => transformedRect(transforms,
+    { x: primitive.x, y: primitive.y, width: primitive.w, height: primitive.h }));
+  const canResizeEdited = editedEntries.some(({ transforms }) => transforms[0]?.shapeId === selected?.shapeId) &&
+    editedEntries.every(({ transforms }) => transforms.every(({ transform }) => {
+      const rotation = ((transform?.rotationDeg ?? 0) % 360 + 360) % 360;
+      return rotation === 0 && !transform?.flipH && !transform?.flipV;
+    }));
   const x = Math.min(...rectangles.map((rect) => rect.x));
   const y = Math.min(...rectangles.map((rect) => rect.y));
   const edited = insertion ?? (rectangles.length ? { x, y,
@@ -140,6 +145,9 @@ function Overlays({ run, commands, inputRef, preview, insertion, editor, onError
     </div>
     {!insertion && view.selection?.kind === 'object' && <PeerlessShapeOverlay selection={view.selection} preview={preview}
       scale={fit.scale} readOnly={view.editState.readOnly} />}
+    {!insertion && edited && selected && selected.kind !== 'object' &&
+      <PeerlessResizeHandles bounds={edited} scale={fit.scale}
+        readOnly={view.editState.readOnly} canResize={canResizeEdited} />}
     {edited && <span data-testid="pptx-text-edit-outline" aria-hidden="true" style={{
       position: 'absolute', zIndex: 3, pointerEvents: 'none', border: '2px dashed #6b7280',
       boxSizing: 'border-box', boxShadow: '0 0 0 1px rgba(255, 255, 255, 0.9)',

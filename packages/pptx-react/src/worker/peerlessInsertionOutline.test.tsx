@@ -7,10 +7,10 @@ import { peerlessPainterFactories } from './usePeerlessPresentation';
 
 const { act, fireEvent, waitFor } = await import('@testing-library/react');
 
-function outline(view: Awaited<ReturnType<typeof open>>['view']) {
+function outline(view: Awaited<ReturnType<typeof open>>['view'], resizeHandles = true) {
   const elements = view.getAllByTestId('pptx-text-edit-outline');
   expect(elements).toHaveLength(1);
-  expect(view.queryAllByTestId(/pptx-resize-/)).toHaveLength(0);
+  expect(view.queryAllByTestId(/pptx-resize-/)).toHaveLength(resizeHandles ? 8 : 0);
   const element = elements[0]!;
   expect(element.style.border).toBe('2px dashed #6b7280');
   expect(element.style.boxShadow).toBe('0 0 0 1px rgba(255, 255, 255, 0.9)');
@@ -56,7 +56,7 @@ for (const [start, end] of [[[200.123, 150.456], [400.789, 220.123]],
       await waitFor(() => expect(replyControl.count()).toBeGreaterThan(0));
       expect(h.view.queryByTestId('pptx-insertion-preview') === null).toBe(true);
       expect(rect).toBeDefined();
-      const echo = outline(h.view);
+      const echo = outline(h.view, false);
       bounds(echo, { x: rect!.x * h.list.width / h.client.state.size.width,
         y: rect!.y * h.list.height / h.client.state.size.height,
         width: rect!.width * h.list.width / h.client.state.size.width,
@@ -143,7 +143,7 @@ for (const change of ['failure', 'tool', 'slide', 'readOnly', 'replacement', 'Es
         fireEvent.pointerUp(h.stage, h.point(400, 220));
       });
       await waitFor(() => expect(replyControl.count()).toBeGreaterThan(0));
-      outline(h.view);
+      outline(h.view, false);
       if (change === 'tool') await act(async () => { expect(await h.api.commands.execute('tool', { value: 'textBox' })).toMatchObject({ ok: true }); });
       if (change === 'slide') fireEvent.click(h.view.getByRole('button', { name: 'Slide 2 of 2' }));
       if (change === 'readOnly') h.view.rerender(h.ui(true));
@@ -182,7 +182,7 @@ test('existing rotated and flipped text uses the displayed shape bounds', async 
   const angle = Math.PI / 6;
   const width = Math.abs(h.box.w * Math.cos(angle)) + Math.abs(h.box.h * Math.sin(angle));
   const height = Math.abs(h.box.w * Math.sin(angle)) + Math.abs(h.box.h * Math.cos(angle));
-  await waitFor(() => bounds(outline(h.view), { x: h.box.x + (h.box.w - width) / 2,
+  await waitFor(() => bounds(outline(h.view, false), { x: h.box.x + (h.box.w - width) / 2,
     y: h.box.y + (h.box.h - height) / 2, width, height }, parseFloat(h.canvas.style.width) / h.list.width));
 });
 
@@ -217,7 +217,7 @@ test('textbox echo waits for display and yields to changed confirmed bounds', as
     await waitFor(() => expect(h.client.state.selection).toMatchObject({ anchor: 0, focus: 0 }));
     await waitFor(() => expect(paint).toBeDefined());
     const scale = parseFloat(h.canvas.style.width) / h.list.width;
-    bounds(outline(h.view), { x: 200, y: 150, width: 200, height: 70 }, scale);
+    bounds(outline(h.view, false), { x: 200, y: 150, width: 200, height: 70 }, scale);
     holding = false;
     await act(async () => { paint!(); });
     await waitFor(() => bounds(outline(h.view), { x: 200, y: 150, width: 300, height: 70 }, scale));
