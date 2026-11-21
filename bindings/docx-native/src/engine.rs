@@ -3018,11 +3018,12 @@ impl EditSession {
         env: Env,
         story: String,
         para_id: String,
-    ) -> Result<bool> {
+    ) -> Result<Either<bool, Undefined>> {
         let _call = EngineCall::new(env);
         self.document(env)?
             .paragraph_style_numbers(&story, &para_id)
             .map_err(|error| map_error(env, error))
+            .map(optional_result)
     }
 
     #[napi(catch_unwind, js_name = "created_list_definitions_json")]

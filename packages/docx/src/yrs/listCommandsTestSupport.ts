@@ -811,6 +811,20 @@ export function listCommandScenarios(path: string, open: OpenListCommandDriver, 
     expect(item.text ?? 0).toBeGreaterThan((before.text ?? Infinity) + 100);
   }, timeout);
 
+  test(`${path}: an item taken off its list and put back on it is laid out and saved as it was loaded`, async () => {
+    const driver = await open('H');
+    const before = driver.left(INDENTED_ITEM);
+    const original = savedParagraphProperties(await driver.save(), INDENTED_ITEM);
+    driver.toggle('bullet', PLAIN);
+    driver.toggle('bullet', INDENTED_ITEM);
+    expectOffList(driver, INDENTED_ITEM);
+    driver.toggle('bullet', INDENTED_ITEM);
+    expect(propertiesOf(driver, INDENTED_ITEM).numPr).toMatchObject({ numId: 5, ilvl: 0 });
+    expect(driver.left(INDENTED_ITEM)).toEqual(before);
+    expect(savedParagraphProperties(await driver.save(), INDENTED_ITEM)).toBe(original);
+    expect(before.marker).not.toBeNull();
+  }, timeout);
+
   test(`${path}: bullets on and off again below an item of a list with its own indent lay the paragraph out where it was, as after reopening`, async () => {
     const driver = await open('H');
     const before = driver.left(PLAIN);

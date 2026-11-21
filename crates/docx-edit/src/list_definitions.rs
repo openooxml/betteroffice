@@ -17,7 +17,7 @@ pub const LIST_DEFINITIONS: &str = "listDefinitions";
 /// `{"key": <string>, "numId": <number>}`; honoured while `numPr.numId` still equals `numId`.
 pub const LIST_DEF: &str = "listDef";
 
-/// Paragraph attribute set on a paragraph put on its list in this session: layout takes its indents
+/// Paragraph attribute set on a paragraph put on its list in the editor: layout takes its indents
 /// from the list level. Seeding never writes it and it is not saved.
 pub(crate) const LIST_LEVEL_INDENTS: &str = "listLevelIndents";
 
@@ -393,8 +393,7 @@ fn joined_list(
     match resolve_list_identity(values)? {
         ListIdentity::Created { key, level: theirs } if definitions.contains_key(&key) => {
             let level = level.unwrap_or(theirs);
-            (definitions[&key].kind == kind && numbering_level(level).is_some())
-                .then(|| created_attrs(kind, &key, level))
+            (definitions[&key].kind == kind).then(|| created_attrs(kind, &key, level))
         }
         _ => source_attrs(values, kind, level, source),
     }
@@ -486,9 +485,8 @@ impl EditingDoc {
     /// when it is of that kind and does not come from that paragraph's style, otherwise a
     /// definition of that kind this client created that no paragraph names, or failing that a
     /// definition created under a fresh key in [`LIST_DEFINITIONS`]. A paragraph already on a list
-    /// keeps its own level, and joins a neighbour's list only when that list has that level in
-    /// that kind; one on no list takes the level of the paragraph it joins, or level 0 on a new
-    /// list.
+    /// keeps its own level; one on no list takes the level of the paragraph it joins, or level 0
+    /// on a new list. A neighbour's list is joined only at a level it has in that kind.
     pub fn ensure_list_definition(
         &self,
         ctx: &EditCtx,

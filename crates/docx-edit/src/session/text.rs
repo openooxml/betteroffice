@@ -376,12 +376,16 @@ impl EditSessionCore {
     }
 
     /// Whether the style the paragraph has now, or the default paragraph style when it names none,
-    /// numbers it. `false` for a session without a source package.
-    pub fn paragraph_style_numbers(&self, story: &str, para_id: &str) -> EngineResult<bool> {
+    /// numbers it. `None` for a session without a source package, which holds no styles.
+    pub fn paragraph_style_numbers(
+        &self,
+        story: &str,
+        para_id: &str,
+    ) -> EngineResult<Option<bool>> {
         let span = find_para_span(self.engine.doc(), story, para_id)?;
         let styles = self.paragraph_style_resolver()?;
         let Some(styles) = styles.as_ref() else {
-            return Ok(false);
+            return Ok(None);
         };
         let current = self
             .engine
@@ -389,7 +393,7 @@ impl EditSessionCore {
             .selection_context(&StoryRange::new(story, span.pilcrow, span.pilcrow))
             .map_err(EngineError::message)?
             .style_id;
-        Ok(styles.paragraph_style_numbers(current.as_deref()))
+        Ok(Some(styles.paragraph_style_numbers(current.as_deref())))
     }
 
     #[allow(clippy::too_many_arguments)]

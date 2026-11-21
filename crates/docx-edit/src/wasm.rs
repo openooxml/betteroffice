@@ -1380,9 +1380,13 @@ impl EditSession {
     }
 
     /// Whether the style the paragraph has now, or the default paragraph style when it names none,
-    /// numbers it: its `numPr`, through `basedOn`, names a list other than 0. `false` for a session
-    /// without a source package.
-    pub fn paragraph_style_numbers(&self, story: &str, para_id: &str) -> Result<bool, JsValue> {
+    /// numbers it: its `numPr`, through `basedOn`, names a list other than 0. Undefined for a
+    /// session without a source package.
+    pub fn paragraph_style_numbers(
+        &self,
+        story: &str,
+        para_id: &str,
+    ) -> Result<Option<bool>, JsValue> {
         self.core
             .paragraph_style_numbers(story, para_id)
             .map_err(JsValue::from)

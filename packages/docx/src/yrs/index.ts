@@ -1657,10 +1657,10 @@ export interface YrsSession extends CollaborationReplica {
   ensureListDefinition(story: string, paraId: string, kind: 'bullet' | 'numbered', lead?: string): YrsParagraphAttrs;
   /**
    * Whether the style `paraId` has now, or the default paragraph style when it names none, numbers
-   * it. False for a session without a source package.
+   * it. Undefined for a session without a source package, which holds no styles.
    * @internal
    */
-  paragraphStyleNumbers(story: string, paraId: string): boolean;
+  paragraphStyleNumbers(story: string, paraId: string): boolean | undefined;
   /** The list definitions the editor created, by key. @internal */
   createdListDefinitions(): Array<{ key: string; kind: 'bullet' | 'numbered'; levelTexts: string[]; levelFormats: string[] }>;
   /** The keys of the created list definitions some paragraph is on. @internal */
