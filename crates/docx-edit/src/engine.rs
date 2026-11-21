@@ -25,6 +25,7 @@ use docx_layout::header_footer::{
 };
 use docx_layout::hit::{CaretRect, VerticalDirection};
 use docx_layout::measure_blocks::{ColumnWidthBand, FloatWidthPolicy, TableMeasurementFrame};
+use docx_layout::paragraph_spacing::PlacementSpacing;
 use docx_layout::paragraph_spacing::resolve_doc_grid_pitch;
 use docx_layout::paragraph_spacing::resolve_line_unit_spacing;
 use docx_layout::place::LayoutCheckpoint;
@@ -1528,10 +1529,187 @@ fn placed_column_measurement_frames(
 /// Wrap phases each pinned picture frame adds to the phase budget.
 const PIN_RECOVERY_PHASES: usize = 2;
 
+/// Whether pictures share the body with continuous sections, so a picture's
+/// paragraph measures in the frame of the section part it lands in.
+fn has_continuous_pictures(input: &LayoutInput) -> bool {
+    continuous_pictures(
+        &input.options,
+        input.measured.iter().map(|measured| &measured.block),
+    )
+}
+
+fn continuous_pictures<'a>(
+    options: &docx_layout::types::LayoutOptions,
+    blocks: impl Iterator<Item = &'a LayoutBlock> + Clone,
+) -> bool {
+    let has_continuous = options.body_break_type == Some(SectionBreakType::Continuous)
+        || blocks.clone().any(|block| {
+            matches!(
+                block,
+                LayoutBlock::SectionBreak(section)
+                    if section.break_type == Some(SectionBreakType::Continuous)
+            )
+        });
+    has_continuous
+        && blocks
+            .into_iter()
+            .any(|block| picture_paragraph(block).is_some())
+}
+
+/// The id of `block` when it is a paragraph holding a picture.
+fn picture_paragraph(block: &LayoutBlock) -> Option<Cow<'_, str>> {
+    match block {
+        LayoutBlock::Paragraph(paragraph)
+            if paragraph
+                .runs
+                .iter()
+                .any(|run| matches!(run, Run::Image(_))) =>
+        {
+            Some(block_key(&paragraph.id))
+        }
+        _ => None,
+    }
+}
+
+/// Whether a picture paragraph of `blocks` lies where `side_margin_changes`
+/// marks a continuous section that moved a side margin or changed the page
+/// width: only there does a picture take the frame it lands in.
+fn feeds_back_pictures<'a>(
+    blocks: impl IntoIterator<Item = &'a LayoutBlock>,
+    side_margin_changes: &[bool],
+) -> bool {
+    blocks
+        .into_iter()
+        .zip(side_margin_changes)
+        .any(|(block, &changed)| changed && picture_paragraph(block).is_some())
+}
+
+/// The frame and page width each picture paragraph of a body with continuous
+/// sections was measured in, by block id. A picture without an entry measured in
+/// no frame, as [`region_table_measurement_frames`] leaves every block.
+type PictureFrames = HashMap<String, (docx_layout::types::HorizontalFrame, f64)>;
+
+/// Gives each picture paragraph in `frames` that `side_margin_changes` marks the
+/// frame `pictures` records for it, or no frame when it records none.
+fn seed_picture_frames<'a>(
+    blocks: impl IntoIterator<Item = &'a LayoutBlock>,
+    frames: &mut [TableMeasurementFrame],
+    pictures: &PictureFrames,
+    side_margin_changes: &[bool],
+) {
+    for ((block, frame), &changed) in blocks.into_iter().zip(frames).zip(side_margin_changes) {
+        if !changed {
+            continue;
+        }
+        if let Some(id) = picture_paragraph(block) {
+            let placed = pictures.get(id.as_ref());
+            frame.horizontal_frame = placed.map(|(frame, _)| *frame);
+            frame.page_width = placed.map(|(_, width)| *width);
+        }
+    }
+}
+
+/// The frame and page width the first fragment of each picture paragraph that
+/// `side_margin_changes` marks lands in on `layout`.
+fn placed_pictures(
+    input: &LayoutInput,
+    layout: &Layout,
+    side_margin_changes: &[bool],
+) -> PictureFrames {
+    let ids: HashSet<_> = input
+        .measured
+        .iter()
+        .zip(side_margin_changes)
+        .filter(|(_, changed)| **changed)
+        .filter_map(|(measured, _)| picture_paragraph(&measured.block))
+        .collect();
+    let mut first = HashMap::new();
+    for page in &layout.pages {
+        for fragment in &page.fragments {
+            if let docx_layout::types::Fragment::Paragraph(fragment) = fragment {
+                let id = block_key(&fragment.block_id);
+                if ids.contains(&id) && !first.contains_key(id.as_ref()) {
+                    first.insert(id.into_owned(), (fragment.horizontal_frame, page.size.w));
+                }
+            }
+        }
+    }
+    first
+        .into_iter()
+        .filter_map(|(id, (frame, width))| Some((id, (frame?, width))))
+        .collect()
+}
+
+/// Whether [`stabilize_flow_wrapping`] settles nothing but pictures in continuous
+/// sections: no shape takes its side from the page and no columns differ in width.
+fn wraps_only_continuous_pictures(
+    input: &LayoutInput,
+    regions: &DocumentRegions,
+    side_margin_changes: &[bool],
+) -> bool {
+    has_continuous_pictures(input)
+        && feeds_back_pictures(
+            input.measured.iter().map(|measured| &measured.block),
+            side_margin_changes,
+        )
+        && !input.measured.iter().any(|measured| {
+            matches!(&measured.block, LayoutBlock::Shape(shape) if wraps_by_page_side(shape))
+        })
+        && !unequal_column_blocks(input, regions).contains(&true)
+}
+
+/// `frames`, with the frame and page width each picture paragraph that
+/// `side_margin_changes` marks lands in on `layout`.
+fn placed_picture_frames(
+    input: &LayoutInput,
+    layout: &Layout,
+    frames: &[TableMeasurementFrame],
+    side_margin_changes: &[bool],
+) -> Vec<TableMeasurementFrame> {
+    let mut placed_frames = frames.to_vec();
+    seed_picture_frames(
+        input.measured.iter().map(|measured| &measured.block),
+        &mut placed_frames,
+        &placed_pictures(input, layout, side_margin_changes),
+        side_margin_changes,
+    );
+    placed_frames
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Continuous-section picture checks against a pass's pagination: those
+    /// that settled, and those that settled and paginated again.
+    pub(crate) static PICTURE_SETTLES: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
+}
+
+/// The frames `frames` gives the picture paragraphs of `blocks`, by block id.
+fn picture_frames_of<'a>(
+    blocks: impl IntoIterator<Item = &'a LayoutBlock>,
+    frames: &[TableMeasurementFrame],
+) -> PictureFrames {
+    blocks
+        .into_iter()
+        .zip(frames)
+        .filter_map(|(block, frame)| {
+            let id = picture_paragraph(block)?;
+            Some((
+                id.into_owned(),
+                (frame.horizontal_frame?, frame.page_width?),
+            ))
+        })
+        .collect()
+}
+
+/// Re-measures the body until page-side shape offsets, unequal column widths
+/// and the frames of pictures in continuous sections are those its blocks were
+/// measured in. `pictures` holds the frames the pictures were measured in, and
+/// on return the frames they settled in.
 fn stabilize_flow_wrapping<F>(
     input: &mut LayoutInput,
     regions: &DocumentRegions,
     measurement: &docx_layout::measure_blocks::MeasurementConfig,
+    pictures: &mut PictureFrames,
     mut place: F,
 ) -> Result<bool, docx_layout::LayoutError>
 where
@@ -1550,57 +1728,54 @@ where
         .collect::<Vec<_>>();
     let unequal = unequal_column_blocks(input, regions);
     let has_unequal = unequal.iter().any(|unequal| *unequal);
-    let has_continuous = input.options.body_break_type == Some(SectionBreakType::Continuous)
-        || input.measured.iter().any(|measured| {
-            matches!(
-                &measured.block,
-                LayoutBlock::SectionBreak(section)
-                    if section.break_type == Some(SectionBreakType::Continuous)
-            )
-        });
-    let has_continuous_pictures = has_continuous
-        && input.measured.iter().any(|measured| {
-            matches!(
-                &measured.block,
-                LayoutBlock::Paragraph(paragraph)
-                    if paragraph.runs.iter().any(|run| matches!(run, Run::Image(_)))
-            )
-        });
-    if shapes.is_empty() && !has_unequal && !has_continuous_pictures {
+    let any_pictures = has_continuous_pictures(input);
+    if shapes.is_empty() && !has_unequal && !any_pictures {
+        pictures.clear();
         return Ok(false);
     }
-    let mut blocks = input
-        .measured
-        .iter()
-        .map(|measured| measured.block.clone())
-        .collect::<Vec<_>>();
+    // Re-measurement starts from the blocks as they were before placement, which
+    // zeroes paragraph spacing in place. Most calls settle on the first placement,
+    // so only that spacing is kept up front, and the blocks are copied when a
+    // phase first re-measures.
+    let spacing = PlacementSpacing::record(input.measured.iter().map(|measured| &measured.block));
+    let mut blocks: Option<Vec<LayoutBlock>> = None;
     let (mut widths, mut table_wrap_frames, side_margin_changes) =
-        region_frames_with_side_margin_changes(blocks.iter(), input, regions);
-    let pictures = if has_continuous_pictures {
-        input
-            .measured
-            .iter()
-            .enumerate()
-            .filter_map(|(index, measured)| match &measured.block {
-                LayoutBlock::Paragraph(paragraph)
-                    if side_margin_changes[index]
-                        && paragraph
-                            .runs
-                            .iter()
-                            .any(|run| matches!(run, Run::Image(_))) =>
-                {
-                    Some(index)
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
-    let has_continuous_floats = !pictures.is_empty();
+        region_frames_with_side_margin_changes(
+            input.measured.iter().map(|measured| &measured.block),
+            input,
+            regions,
+        );
+    // Only pictures in a continuous section that moved a side margin or changed
+    // the page width take the frame they land in; elsewhere they lay out as placed.
+    let has_continuous_floats = any_pictures
+        && feeds_back_pictures(
+            input.measured.iter().map(|measured| &measured.block),
+            &side_margin_changes,
+        );
+    if !has_continuous_floats {
+        pictures.clear();
+    }
     if shapes.is_empty() && !has_unequal && !has_continuous_floats {
         return Ok(false);
     }
+    if has_continuous_floats {
+        seed_picture_frames(
+            input.measured.iter().map(|measured| &measured.block),
+            &mut table_wrap_frames,
+            pictures,
+            &side_margin_changes,
+        );
+    }
+    let settled = |input: &LayoutInput, frames: &[TableMeasurementFrame]| {
+        if has_continuous_floats {
+            picture_frames_of(
+                input.measured.iter().map(|measured| &measured.block),
+                frames,
+            )
+        } else {
+            PictureFrames::new()
+        }
+    };
     let geometry = initial_float_page_geometry(input, regions);
     let mut previous_offsets = BTreeMap::new();
     let mut previous_bands = BTreeMap::new();
@@ -1614,7 +1789,18 @@ where
     } else {
         Vec::new()
     };
-    let mut pinned = BTreeSet::new();
+    let picture_indices = if has_continuous_floats {
+        input
+            .measured
+            .iter()
+            .enumerate()
+            .filter_map(|(index, measured)| picture_paragraph(&measured.block).map(|_| index))
+            .filter(|&index| side_margin_changes[index])
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let mut pinned = BTreeSet::<usize>::new();
     let mut touched = false;
     let max_phases = if has_unequal || has_continuous_floats {
         32 + input.measured.len()
@@ -1654,36 +1840,13 @@ where
                     })
             })
             .collect::<BTreeMap<_, _>>();
-        let mut next_wrap_frames = table_wrap_frames.clone();
-        if has_continuous_floats {
-            for (index, measured) in input.measured.iter().enumerate() {
-                let LayoutBlock::Paragraph(paragraph) = &measured.block else {
-                    continue;
-                };
-                if pinned.contains(&index) || !side_margin_changes[index] {
-                    continue;
-                }
-                if !paragraph
-                    .runs
-                    .iter()
-                    .any(|run| matches!(run, Run::Image(_)))
-                {
-                    continue;
-                }
-                let placed = layout.pages.iter().find_map(|page| {
-                    page.fragments.iter().find_map(|fragment| match fragment {
-                        docx_layout::types::Fragment::Paragraph(fragment)
-                            if fragment.block_id == paragraph.id =>
-                        {
-                            Some((fragment.horizontal_frame, page.size.w))
-                        }
-                        _ => None,
-                    })
-                });
-                next_wrap_frames[index].horizontal_frame = placed.and_then(|(frame, _)| frame);
-                next_wrap_frames[index].page_width =
-                    placed.and_then(|(frame, width)| frame.map(|_| width));
-            }
+        let mut next_wrap_frames = if has_continuous_floats {
+            placed_picture_frames(input, &layout, &table_wrap_frames, &side_margin_changes)
+        } else {
+            table_wrap_frames.clone()
+        };
+        for &index in &pinned {
+            next_wrap_frames[index] = table_wrap_frames[index];
         }
         let frames_changed = next_wrap_frames != table_wrap_frames;
         if offsets == previous_offsets
@@ -1691,6 +1854,7 @@ where
             && bands == previous_bands
             && !frames_changed
         {
+            *pictures = settled(input, &table_wrap_frames);
             return Ok(touched);
         }
         let repeated =
@@ -1705,7 +1869,7 @@ where
         let accept =
             has_unequal && !frames_changed && (repeated.is_some() || phase + 1 == max_phases);
         if let Some(first) = repeated.filter(|_| has_continuous_floats && !has_unequal) {
-            let cycling = pictures
+            let cycling = picture_indices
                 .iter()
                 .copied()
                 .filter(|index| {
@@ -1760,8 +1924,17 @@ where
         }
         widths = next_widths;
         table_wrap_frames = next_wrap_frames;
+        let blocks = blocks.get_or_insert_with(|| {
+            let mut blocks = input
+                .measured
+                .iter()
+                .map(|measured| measured.block.clone())
+                .collect::<Vec<_>>();
+            spacing.restore(&mut blocks);
+            blocks
+        });
         let measures = docx_layout::measure_blocks::measure_blocks_with_column_frames(
-            &mut blocks,
+            blocks,
             &widths,
             &table_wrap_frames,
             measurement,
@@ -1778,6 +1951,7 @@ where
         }
         touched = true;
         if accept {
+            *pictures = settled(input, &table_wrap_frames);
             return Ok(touched);
         }
         previous_offsets = offsets;
@@ -2234,6 +2408,10 @@ struct PaginationState {
     measured_float_geometry: Option<[f64; 5]>,
     measured_float_width_policy: Option<FloatWidthPolicy>,
     measured_with_floats: bool,
+    /// The frames the arena's continuous-section pictures were measured and
+    /// settled in, which the next pass measures its edited pictures in and settles
+    /// them against.
+    settled_picture_frames: PictureFrames,
     /// Pages whose note areas changed since the last display build.
     note_changed_pages: Vec<usize>,
     layout: Option<Layout>,
@@ -2557,6 +2735,10 @@ pub struct EngineSession {
     #[cfg(test)]
     force_legacy_lowering: Cell<bool>,
     certified_measurement_epoch: Cell<Option<u64>>,
+    /// Whether the last pass's continuous-section pictures landed in the frames
+    /// they measured in, so the next pass checks them against its own pagination
+    /// rather than a placement ahead of it. Either order lays out the same.
+    pictures_settled: Cell<bool>,
     measurement_patch_invalidated: Rc<Cell<bool>>,
     relayout_trigger: Rc<Cell<RelayoutTrigger>>,
     interactive_pending: Rc<Cell<bool>>,
@@ -5186,6 +5368,7 @@ impl EngineSession {
             #[cfg(test)]
             force_legacy_lowering: Cell::new(false),
             certified_measurement_epoch: Cell::new(None),
+            pictures_settled: Cell::new(false),
             measurement_patch_invalidated,
             relayout_trigger,
             interactive_pending,
@@ -5378,6 +5561,7 @@ impl EngineSession {
         pagination.set_font_dependencies(Vec::new(), None);
         pagination.measured_table_wrap_frames = Vec::new();
         pagination.measured_side_margin_changes = Vec::new();
+        pagination.settled_picture_frames = PictureFrames::new();
         pagination.measured_float_geometry = None;
         pagination.measured_float_width_policy = None;
         pagination.measured_with_floats = false;
@@ -7987,8 +8171,16 @@ impl EngineSession {
                         measured_spacing =
                             BlockSpacing::capture_blocks(blocks.iter(), Some(&regions));
                         apply_section_geometry(&mut input, &regions);
-                        let (widths, table_wrap_frames, side_margin_changes) =
+                        let (widths, mut table_wrap_frames, side_margin_changes) =
                             region_frames_with_side_margin_changes(blocks.iter(), &input, &regions);
+                        if !trigger.uses_region_path() {
+                            self.seed_settled_pictures(
+                                &input.options,
+                                blocks.shared().iter().map(Rc::as_ref),
+                                &mut table_wrap_frames,
+                                &side_margin_changes,
+                            );
+                        }
                         let geometry = initial_float_page_geometry(&input, &regions);
                         measured_widths.clone_from(&widths);
                         measured_table_wrap_frames.clone_from(&table_wrap_frames);
@@ -8069,8 +8261,16 @@ impl EngineSession {
                         }
                     }
                     apply_section_geometry_to_blocks(&mut blocks, &mut input.options, &regions);
-                    let (widths, table_wrap_frames) =
-                        region_table_measurement_frames(blocks.iter(), &input, &regions);
+                    let (widths, mut table_wrap_frames, side_margin_changes) =
+                        region_frames_with_side_margin_changes(blocks.iter(), &input, &regions);
+                    if !trigger.uses_region_path() {
+                        self.seed_settled_pictures(
+                            &input.options,
+                            blocks.iter(),
+                            &mut table_wrap_frames,
+                            &side_margin_changes,
+                        );
+                    }
                     let geometry = initial_float_page_geometry(&input, &regions);
                     match prefix {
                         // Floats whose zones only settle later, such as shapes that page-side
@@ -8224,6 +8424,22 @@ impl EngineSession {
         })
     }
 
+    /// Gives the pictures of a body with continuous sections the frames the last
+    /// pass settled them in, which the arena's retained pictures were measured in.
+    fn seed_settled_pictures<'a>(
+        &self,
+        options: &docx_layout::types::LayoutOptions,
+        blocks: impl Iterator<Item = &'a LayoutBlock> + Clone,
+        frames: &mut [TableMeasurementFrame],
+        side_margin_changes: &[bool],
+    ) {
+        let pagination = self.pagination.borrow();
+        let pictures = &pagination.settled_picture_frames;
+        if !pictures.is_empty() && continuous_pictures(options, blocks.clone()) {
+            seed_picture_frames(blocks, frames, pictures, side_margin_changes);
+        }
+    }
+
     fn stabilize_region_flow(
         &self,
         input: &mut LayoutInput,
@@ -8233,12 +8449,14 @@ impl EngineSession {
         passes: &mut RegionPlacementPasses,
         trigger: RelayoutTrigger,
     ) -> Result<bool, docx_layout::LayoutError> {
+        // The region path measures its pictures in no frame and settles them afresh.
+        let pictures = &mut PictureFrames::new();
         if !trigger.uses_region_path() {
-            return stabilize_flow_wrapping(input, regions, measurement, |input, _| {
+            return stabilize_flow_wrapping(input, regions, measurement, pictures, |input, _| {
                 docx_layout::place::layout_document(input)
             });
         }
-        stabilize_flow_wrapping(input, regions, measurement, |input, phase| {
+        stabilize_flow_wrapping(input, regions, measurement, pictures, |input, phase| {
             let mut fingerprints =
                 measured_fingerprints(input).map_err(docx_layout::LayoutError::Invalid)?;
             self.prepare_placement_fingerprints(
@@ -8258,6 +8476,73 @@ impl EngineSession {
                 &self.pagination.borrow(),
             )
         })
+    }
+
+    /// Settles the pictures in continuous sections against the pagination just
+    /// retained: when one landed in another frame than it measured in, the body
+    /// settles from its unplaced blocks, as before pagination, and paginates again
+    /// in full.
+    fn settle_continuous_pictures(
+        &self,
+        spacing: PlacementSpacing,
+        frames: &[TableMeasurementFrame],
+        side_margin_changes: &[bool],
+        pictures: &mut PictureFrames,
+        regions: &DocumentRegions,
+        measurement: &docx_layout::measure_blocks::MeasurementConfig,
+        revision_preview: Option<(u64, &BTreeMap<String, RevisionPreview>, bool)>,
+        cached_page_totals: bool,
+    ) -> Result<(), String> {
+        let (mut input, measured_spacing) = {
+            let mut pagination = self.pagination.borrow_mut();
+            let input = pagination
+                .input
+                .as_ref()
+                .expect("input retained after successful pagination");
+            let layout = pagination
+                .layout
+                .as_ref()
+                .expect("layout retained after successful pagination");
+            let settled =
+                placed_picture_frames(input, layout, frames, side_margin_changes) == frames;
+            #[cfg(test)]
+            PICTURE_SETTLES.with(|count| {
+                let (settled_count, again) = count.get();
+                count.set(if settled {
+                    (settled_count + 1, again)
+                } else {
+                    (settled_count, again + 1)
+                });
+            });
+            self.pictures_settled.set(settled);
+            if settled {
+                return Ok(());
+            }
+            // Without a retained input the next pagination is a full one.
+            (
+                pagination.input.take().expect("checked above"),
+                std::mem::take(&mut pagination.measured_spacing),
+            )
+        };
+        spacing.restore(
+            input
+                .measured
+                .iter_mut()
+                .map(|measured| &mut measured.block),
+        );
+        stabilize_flow_wrapping(&mut input, regions, measurement, pictures, |input, _| {
+            docx_layout::place::layout_document(input)
+        })
+        .map_err(layout_error_message)?;
+        let fingerprints = measured_fingerprints(&input)?;
+        self.layout_document_value_with_fingerprints(
+            input,
+            fingerprints,
+            measured_spacing,
+            revision_preview,
+            cached_page_totals,
+            RelayoutTrigger::Interactive,
+        )
     }
 
     /// Everything a region layout pass does after body measurement: header and
@@ -8318,13 +8603,50 @@ impl EngineSession {
         } else {
             None
         };
-        if resident_body
-            && stabilize_flow_wrapping(&mut input, &regions, &measurement, |input, _| {
-                docx_layout::place::layout_document(input)
-            })
-            .map_err(layout_error_message)?
-        {
-            block_fingerprints = None;
+        // The frames the last pass settled the pictures in, which prepare measured
+        // the edited blocks in too.
+        let mut pictures = std::mem::take(&mut self.pagination.borrow_mut().settled_picture_frames);
+        let seeded = !pictures.is_empty();
+        // Pictures in continuous sections settle against a placement of the whole
+        // body. Without notes, this pass's own pagination is such a placement: the
+        // pictures are checked against it, and settled and paginated again only when
+        // one lands in another frame than it measured in, which typing rarely makes.
+        let only_pictures = resident_body
+            && wraps_only_continuous_pictures(&input, &regions, &measured_side_margin_changes)
+            && input.measured.iter().all(|measured| {
+                collect_note_refs(std::slice::from_ref(&measured.block)).is_empty()
+            });
+        let settle_pictures = (only_pictures && self.pictures_settled.get()).then(|| {
+            let spacing =
+                PlacementSpacing::record(input.measured.iter().map(|measured| &measured.block));
+            let (_, mut frames, side_margin_changes) = region_frames_with_side_margin_changes(
+                input.measured.iter().map(|measured| &measured.block),
+                &input,
+                &regions,
+            );
+            seed_picture_frames(
+                input.measured.iter().map(|measured| &measured.block),
+                &mut frames,
+                &pictures,
+                &side_margin_changes,
+            );
+            // as the settling placement would leave the blocks
+            docx_layout::paragraph_spacing::apply_contextual_spacing_measured(&mut input.measured);
+            (spacing, frames, side_margin_changes)
+        });
+        if resident_body && settle_pictures.is_none() {
+            let touched = stabilize_flow_wrapping(
+                &mut input,
+                &regions,
+                &measurement,
+                &mut pictures,
+                |input, _| docx_layout::place::layout_document(input),
+            )
+            .map_err(layout_error_message)?;
+            self.pictures_settled.set(only_pictures && !touched);
+            if touched {
+                block_fingerprints = None;
+            }
         }
         let mut block_fingerprints = match block_fingerprints {
             // Header and footer extents widen the section breaks' margins after the
@@ -8365,6 +8687,11 @@ impl EngineSession {
                 matches!(&measured.block, LayoutBlock::Shape(shape) if wraps_by_page_side(shape))
             }))
         .then(|| input.clone());
+        // what the copy's pictures were measured in
+        let base_pictures = base_input
+            .as_ref()
+            .map(|_| pictures.clone())
+            .unwrap_or_default();
         let mut restamped_pages = Vec::new();
         self.pagination.borrow_mut().restore_flowed_tail();
         let (mut initial_layout, mut arena) = if refs.is_empty() {
@@ -8376,6 +8703,18 @@ impl EngineSession {
                 cached_page_totals,
                 RelayoutTrigger::Interactive,
             )?;
+            if let Some((spacing, frames, side_margin_changes)) = settle_pictures {
+                self.settle_continuous_pictures(
+                    spacing,
+                    &frames,
+                    &side_margin_changes,
+                    &mut pictures,
+                    &regions,
+                    &measurement,
+                    Some((revision_preview_key, &revision_preview, main_body)),
+                    cached_page_totals,
+                )?;
+            }
             let layout = self
                 .pagination
                 .borrow_mut()
@@ -8443,12 +8782,14 @@ impl EngineSession {
         let stabilized = stabilize_note_layout(
             |reserved| {
                 let mut copy;
-                let pass = match (&base_input, arena.as_mut()) {
+                let mut copied_pictures;
+                let (pass, pass_pictures) = match (&base_input, arena.as_mut()) {
                     (Some(base), _) => {
                         copy = base.clone();
-                        &mut copy
+                        copied_pictures = base_pictures.clone();
+                        (&mut copy, &mut copied_pictures)
                     }
-                    (None, Some(arena)) => arena,
+                    (None, Some(arena)) => (arena, &mut pictures),
                     (None, None) => {
                         return Err(docx_layout::LayoutError::Invalid(
                             "note passes without a body arena".to_owned(),
@@ -8457,9 +8798,13 @@ impl EngineSession {
                 };
                 pass.options.footnote_reserved_heights = reservation_options(reserved);
                 if resident_body {
-                    stabilize_flow_wrapping(pass, &regions, &measurement, |input, _| {
-                        docx_layout::place::layout_document(input)
-                    })?;
+                    stabilize_flow_wrapping(
+                        pass,
+                        &regions,
+                        &measurement,
+                        pass_pictures,
+                        |input, _| docx_layout::place::layout_document(input),
+                    )?;
                 }
                 let mut layout = docx_layout::place::layout_document(pass)?;
                 apply_document_regions_tracked(&mut layout, &regions, &mut restamped_pages);
@@ -8473,13 +8818,20 @@ impl EngineSession {
         )
         .map_err(layout_error_message)?;
         let notes_converged = stabilized.converged;
+        if base_input.is_some() {
+            pictures = base_pictures;
+        }
         if let Some(mut final_input) = base_input.or(arena) {
             final_input.options.footnote_reserved_heights =
                 reservation_options(&stabilized.reserved_heights);
             let reshaped = resident_body
-                && stabilize_flow_wrapping(&mut final_input, &regions, &measurement, |input, _| {
-                    docx_layout::place::layout_document(input)
-                })
+                && stabilize_flow_wrapping(
+                    &mut final_input,
+                    &regions,
+                    &measurement,
+                    &mut pictures,
+                    |input, _| docx_layout::place::layout_document(input),
+                )
                 .map_err(layout_error_message)?;
             let fingerprints = if reshaped {
                 measured_fingerprints(&final_input)?
@@ -8618,6 +8970,21 @@ impl EngineSession {
         }));
         // Only the region-measured arena may seed the next pass's reuse walk.
         let mut pagination = self.pagination.borrow_mut();
+        let mut measured_table_wrap_frames = measured_table_wrap_frames;
+        if seeded || !pictures.is_empty() {
+            // The pictures measured in the frames they settled in.
+            if let Some(input) = pagination.input.as_ref() {
+                seed_picture_frames(
+                    input.measured.iter().map(|measured| &measured.block),
+                    &mut measured_table_wrap_frames,
+                    &pictures,
+                    &measured_side_margin_changes,
+                );
+            }
+        }
+        if resident_body {
+            pagination.settled_picture_frames = pictures;
+        }
         pagination.measured_with =
             (resident_body && !provisional).then_some(measurement_fingerprint);
         pagination.lowered_from = lowered_from;
@@ -9223,6 +9590,7 @@ impl EngineSession {
         pagination.measured_widths = measured_widths;
         pagination.measured_table_wrap_frames = measured_table_wrap_frames;
         pagination.measured_side_margin_changes = measured_side_margin_changes;
+        pagination.settled_picture_frames = PictureFrames::new();
         pagination.measured_float_geometry = measured_float_geometry;
         pagination.measured_float_width_policy =
             pagination.measured_with.map(|_| float_width_policy);

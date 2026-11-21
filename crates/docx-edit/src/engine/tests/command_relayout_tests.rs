@@ -1278,6 +1278,132 @@ fn edits_beside_a_shape_placed_by_page_side_lay_out_as_a_full_recompute_does() {
     host.assert_matches_cold("typing beside the shape");
 }
 
+#[test]
+fn typing_ahead_of_pictures_in_continuous_sections_lays_out_as_a_full_recompute_does() {
+    use super::lowering_fixture::{Package, para, run};
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+    let section = |kind: &str, side: u32| {
+        format!(
+            r#"<w:sectPr>{kind}<w:pgSz w:w="5760" w:h="5760"/><w:pgMar w:top="360" w:right="{side}" w:bottom="360" w:left="{side}" w:header="200" w:footer="200" w:gutter="0"/></w:sectPr>"#
+        )
+    };
+    // A picture floated an inch from the page edge, which the text beside it
+    // wraps: where it falls in the paragraph depends on the frame.
+    let picture = |id: &str| {
+        let anchor = preview_pagination_anchor().replace(
+            r#"<wp:positionH relativeFrom="margin"><wp:align>left</wp:align>"#,
+            r#"<wp:positionH relativeFrom="page"><wp:posOffset>914400</wp:posOffset>"#,
+        );
+        para(
+            id,
+            &format!(
+                "{anchor}{}",
+                run("Text beside the picture wraps on its left side")
+            ),
+        )
+    };
+    // A first section, then a continuous one with narrower margins. Pictures in
+    // the continuous one take its frame only once placed, so each pass measures
+    // them in the frames the last one settled them in.
+    for in_first in [true, false] {
+        let (first, continuous) = if in_first {
+            (
+                format!("{}{}", picture("00001505"), picture("00001506")),
+                String::new(),
+            )
+        } else {
+            (
+                String::new(),
+                format!("{}{}", picture("00001535"), picture("00001536")),
+            )
+        };
+        let body = format!(
+            "{}{first}{}{}{continuous}{}{}",
+            filler_paragraphs(0x1500, 4),
+            para(
+                "00001510",
+                &format!(
+                    "<w:pPr>{}</w:pPr>{}",
+                    section("", 1440),
+                    run("First section ends")
+                ),
+            ),
+            filler_paragraphs(0x1520, 8),
+            filler_paragraphs(0x1540, 8),
+            section(r#"<w:type w:val="continuous"/>"#, 360),
+        );
+        let bytes = Package::new(&body)
+            .rel("image", "image", "media/image1.png")
+            .bytes();
+        let engine = seeded_engine(9747, &bytes);
+        let request = lowering_pages::region_request(&engine, &bytes, font).to_string();
+        let mut host = CommandHost::open_with(&engine, request).seeded(9747, bytes);
+        PICTURE_SETTLES.with(|count| count.set((0, 0)));
+        let at = paragraph_end(&engine, 1) - 3;
+        for (key, text) in ["a", "b", "c"].into_iter().enumerate() {
+            assert!(host.command("body", at + key as u32, at + key as u32, Some(text)));
+            host.assert_matches_cold(&format!("typing {text} ahead of the pictures"));
+        }
+        // Settled pictures are checked against each keystroke's pagination. Those in
+        // the continuous section settle ahead of the first keystroke's, which finds
+        // them in the frames they settled in at open. Pictures in the first section
+        // take no frame from their placement, so nothing settles them.
+        let expected = if in_first { (0, 0) } else { (2, 0) };
+        assert_eq!(
+            PICTURE_SETTLES.with(Cell::get),
+            expected,
+            "first section {in_first}"
+        );
+        if !in_first {
+            // A pass measuring its pictures in frames they did not settle in finds
+            // them placed elsewhere: it settles them and paginates again.
+            for (frame, _) in engine
+                .pagination
+                .borrow_mut()
+                .settled_picture_frames
+                .values_mut()
+            {
+                frame.margin_left += 48.0;
+                frame.column_x += 48.0;
+            }
+            PICTURE_SETTLES.with(|count| count.set((0, 0)));
+            let index = engine
+                .doc()
+                .paragraphs("body")
+                .unwrap()
+                .iter()
+                .position(|paragraph| paragraph.para_id == "00001535")
+                .unwrap();
+            let end = paragraph_end(&engine, index) - 3;
+            host.command("body", end, end, Some("d"));
+            host.assert_matches_cold("typing beside a picture measured in another frame");
+            assert_eq!(PICTURE_SETTLES.with(Cell::get), (0, 1));
+            assert!(!engine.pictures_settled.get());
+            // The picture's own paragraph measures in the frame it settled in, ahead
+            // of the pagination and then checked against it.
+            for (offset, text) in ["e", "f"].into_iter().enumerate() {
+                let at = end + 1 + offset as u32;
+                host.command("body", at, at, Some(text));
+                host.assert_matches_cold(&format!("typing {text} beside a settled picture"));
+            }
+            assert_eq!(PICTURE_SETTLES.with(Cell::get), (1, 1));
+        }
+        engine
+            .split_resident_paragraph(crate::Position::new("body", at))
+            .unwrap();
+        host.relayout(Some("body"));
+        host.assert_matches_cold("enter ahead of the pictures");
+        // Enough text to carry the pictures onto other pages.
+        let long = "pushes the pictures along ".repeat(40);
+        host.command("body", at, at, Some(&long));
+        host.assert_matches_cold("a long insert ahead of the pictures");
+        host.command("body", at, at + long.len() as u32, None);
+        host.assert_matches_cold("deleting the long insert");
+    }
+}
+
 /// Body filler, plain, nested, list-holding, SEQ-holding and (with `floating`)
 /// floating tables, with list items and SEQ fields around them, seeded as a
 /// host opens it.
