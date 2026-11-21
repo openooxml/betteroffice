@@ -1,7 +1,7 @@
 ---
-'@betteroffice/docx': patch
-'@betteroffice/rust-crates': patch
+'@betteroffice/docx': minor
+'@betteroffice/rust-crates': minor
 '@betteroffice/docx-native': patch
 ---
 
-Formatting a selection that spans a table, such as select all then bold, now formats the text in its cells. Paragraphs a save would lose content from stay unchanged, and edits and saves report which and why.
+Formatting selections spanning tables (select-all then bold) formats cell text. Paragraphs that would lose content on save stay unchanged. Edits and saves report which and why. Have `YrsSession` hosts and mocks return `YrsFormatReceipt` from `toggleMark`, `formatRange` and `clearFormatting`, and initialize new `S13ParagraphIds` and `S13SplicedPart` fields.
