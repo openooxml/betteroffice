@@ -48,6 +48,7 @@ import { usePeerlessTextSelection } from './usePeerlessTextSelection';
 import { PeerlessShapeOverlay } from './PeerlessShapeOverlay';
 import { usePeerlessShapeGestures, type PeerlessShapePreviewStore } from './usePeerlessShapeGestures';
 import { usePeerlessContextMenu } from './usePeerlessContextMenu';
+import { usePptxPinchZoom } from '../usePptxPinchZoom';
 
 function useStageFit(stage: RefObject<HTMLDivElement | null>, run: PeerlessPresentation | null,
   chrome: PeerlessPresentation | null,
@@ -97,7 +98,7 @@ function useStageFit(stage: RefObject<HTMLDivElement | null>, run: PeerlessPrese
     return value !== null && owner.current === run && value.run === run && run.current && Boolean(value.token.scale) &&
       value.token.generation === token.generation;
   }, []);
-  return { previewFit, current };
+  return { fit, previewFit, current };
 }
 
 function Overlays({ run, commands, inputRef, preview, insertion, editor, onError }: { run: PeerlessPresentation; commands: PptxCommandStore; inputRef: RefObject<HTMLTextAreaElement | null>; preview: PeerlessShapePreviewStore; insertion: ShapeRect | null; editor: RefObject<HTMLDivElement | null>; onError(error: Error): void }) {
@@ -183,7 +184,8 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
   }, [props.file]);
   const toolbarVisible = showToolbar !== false && toolbar !== null;
   const editorToolbar = toolbar !== undefined || !props.readOnly;
-  const { previewFit, current } = useStageFit(stage, pending ?? presentation, chrome, toolbar, toolbarVisible, zoom);
+  const { fit, previewFit, current } = useStageFit(stage, pending ?? presentation, chrome, toolbar, toolbarVisible, zoom);
+  usePptxPinchZoom(stage, canvas, fit?.scale ?? 1, setZoom);
   const callbacks = useRef(props);
   callbacks.current = props;
   const api = useRef<PptxAsyncEditorApi | null>(null);
