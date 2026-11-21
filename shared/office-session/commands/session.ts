@@ -90,6 +90,7 @@ function limit(value: number | undefined, fallback: number): number {
 }
 
 const ledgers = new WeakMap<object, () => readonly CommandEnvelope<unknown>[]>();
+const cancellers = new WeakMap<object, (ticket: CommandTicket) => boolean>();
 
 /**
  * @internal Envelopes the session submitted whose outcome has not arrived or is recorded as unknown, in seq order,
@@ -97,6 +98,11 @@ const ledgers = new WeakMap<object, () => readonly CommandEnvelope<unknown>[]>()
  */
 export function sessionUnacknowledged<P>(session: object): readonly CommandEnvelope<P>[] {
   return (ledgers.get(session)?.() ?? []) as readonly CommandEnvelope<P>[];
+}
+
+/** @internal Cancels one unmerged command and its queued dependents. */
+export function cancelWorkerEditTicket(session: object, ticket: CommandTicket): boolean {
+  return cancellers.get(session)?.(ticket) ?? false;
 }
 
 /** @internal Creates a worker-backed edit session with coverage reconciliation and ordered recovery. */
@@ -1042,7 +1048,8 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
     const after = entry.draft.options.after;
     if (!after) return true;
     const dependency = records.get(after);
-    return dependency !== undefined && dependency.seq !== undefined && !dependencyBlocked(after);
+    return dependency !== undefined && dependency.seq !== undefined &&
+      (!entry.draft.options.waitForAfter || dependency.ackSettled) && !dependencyBlocked(after);
   }
 
   function send(entry: OutboxEntry<P, X>, record: ConnectionRecord<P, S, E, F>): void {
@@ -1206,6 +1213,22 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
     });
   }
 
+  const cancel = (ticket: CommandTicket): boolean => {
+    if (disposed || terminal) return false;
+    const target = outbox.entries.find((entry) => entry.tickets.includes(ticket));
+    if (!target || target.tickets.length !== 1) return false;
+    let cancelled = false;
+    presenter.event(() => {
+      const removed = outbox.remove((entry) => entry === target);
+      for (const entry of removed) {
+        const direct = entry === target;
+        cancelTickets(entry.tickets, direct ? 'cancelled' : 'dependency-refused');
+        cancelled ||= direct;
+      }
+      if (waitingReads.size) checkReads();
+    });
+    return cancelled;
+  };
   const session: WorkerEditSession<P, S, E, X, Q> = {
     backend: 'worker', get state() { return state; }, submit, attachEcho, read, hold,
     get stage() { return disposed ? 'disposed' : terminal ? 'failed' : recovering ? 'recovering' : 'ready'; },
@@ -1274,6 +1297,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
     },
   };
   ledgers.set(session, () => unacknowledgedAtTermination ? cloneData(unacknowledgedAtTermination) : unacknowledgedEnvelopes());
+  cancellers.set(session, cancel);
   const first = attach(options.connection);
   acceptAck(first, initial);
   if (options.connection.client.failure) fail(options.connection.client.failure);

@@ -814,6 +814,8 @@ export interface PresentationCommandSelection extends PptxStoryTarget {
     focus: number;
     affinity: 'upstream' | 'downstream';
     goalX?: number;
+    /** Whether the selected story's owning shape is an eligible top-level resize target. */
+    canResize?: boolean;
 }
 export interface PresentationCommandObjectSelection extends Omit<PresentationCommandSelection, 'kind'> {
     kind: 'object';
@@ -842,6 +844,7 @@ export type PresentationCommandSelectionReference = {
     seq: number;
 };
 export type PresentationCommandMotion = 'left' | 'right' | 'wordLeft' | 'wordRight' | 'lineStart' | 'lineEnd' | 'storyStart' | 'storyEnd' | 'up' | 'down' | 'nextCell' | 'previousCell';
+export type PresentationCommandResizeHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
 export type PresentationCommandFrameTag = Pick<PresentationCommandFrame, 'slideId' | 'slideRevision' | 'coversThroughSeq' | 'documentEpoch' | 'incarnation'>;
 export interface PresentationCommandInput {
     inputTime: number;
@@ -912,9 +915,18 @@ export type PresentationCommandPayloads = {
     });
     setShapeRect: PresentationCommandInput & {
         frame: PresentationCommandFrameTag;
+    } & ({
         target: PresentationCommandObjectTarget;
         rect: ShapeRect;
-    };
+    } | {
+        at: PresentationCommandSelectionReference;
+        shapeId: string;
+        handle: PresentationCommandResizeHandle;
+        delta: {
+            x: number;
+            y: number;
+        };
+    });
     undo: PresentationCommandInput;
     redo: PresentationCommandInput;
     activateSlide: Partial<PresentationCommandInput> & {
@@ -1295,7 +1307,8 @@ import type { CommandTicket } from '../../../../shared/office-session/commands/t
 import type { PresentationCommandAck, PresentationCommandBasis, PresentationCommandClient, PresentationCommandIntent } from './commandProtocol';
 export interface PresentationSharedInput {
     subscribeSent(listener: () => void): () => void;
-    submit(intent: PresentationCommandIntent, basis: PresentationCommandBasis, after?: CommandTicket): {
+    cancel(ticket: CommandTicket): boolean;
+    submit(intent: PresentationCommandIntent, basis: PresentationCommandBasis, after?: CommandTicket, waitForAfter?: boolean): {
         ticket: CommandTicket;
         operation: Promise<PresentationCommandAck>;
     };
@@ -2365,6 +2378,8 @@ export type CommandLane = 'input' | 'collab' | 'background';
 export type SubmitOptions<X> = {
     lane?: CommandLane;
     after?: CommandTicket;
+    /** Keep this command unsent until its dependency settles. */
+    waitForAfter?: boolean;
     expectVersion?: boolean;
     inputTime?: number;
     lastInputTime?: number;
@@ -4812,6 +4827,6 @@ export { decodeCommandDisplayList, indexGeometry, indexHitGeometry, findLine, tr
 /** @internal */
 export type { CommandRect, CommandGeometryLine, CommandGeometryIndex, CommandHitGeometryIndex } from './session/commandGeometry';
 /** @internal */
-export type { PresentationCommandMutationMethods, PresentationCommandMutation, PresentationCommandAccessMethods, PresentationCommandAccessMethod, PresentationCommandAccessResult, PresentationCommandAck, PresentationCommandBasis, PresentationCommandClient, PresentationCommandEditState, PresentationCommandEnvelope, PresentationCommandEvents, PresentationCommandFailure, PresentationCommandFence, PresentationCommandFrame, PresentationCommandFrameTag, PresentationCommandMotion, PresentationCommandIdentity, PresentationCommandInput, PresentationCommandIntent, PresentationCommandKind, PresentationCommandMethods, PresentationCommandOpenOptions, PresentationCommandOpenResult, PresentationCommandOutcome, PresentationCommandPayloads, PresentationCommandReadResult, PresentationCommandRefusalReason, PresentationCommandSaveResult, PresentationCommandSelection, PresentationCommandSelected, PresentationCommandObjectSelection, PresentationCommandObjectTarget, PresentationCommandSelectionReference, PresentationCommandTextInput, PresentationCommandThumbnailRequest, PresentationCommandThumbnailResult, PresentationCommandToolbarContext, } from './session/commandProtocol';
+export type { PresentationCommandMutationMethods, PresentationCommandMutation, PresentationCommandAccessMethods, PresentationCommandAccessMethod, PresentationCommandAccessResult, PresentationCommandAck, PresentationCommandBasis, PresentationCommandClient, PresentationCommandEditState, PresentationCommandEnvelope, PresentationCommandEvents, PresentationCommandFailure, PresentationCommandFence, PresentationCommandFrame, PresentationCommandFrameTag, PresentationCommandMotion, PresentationCommandIdentity, PresentationCommandInput, PresentationCommandIntent, PresentationCommandKind, PresentationCommandMethods, PresentationCommandOpenOptions, PresentationCommandOpenResult, PresentationCommandOutcome, PresentationCommandPayloads, PresentationCommandReadResult, PresentationCommandRefusalReason, PresentationCommandSaveResult, PresentationCommandSelection, PresentationCommandSelected, PresentationCommandObjectSelection, PresentationCommandObjectTarget, PresentationCommandResizeHandle, PresentationCommandSelectionReference, PresentationCommandTextInput, PresentationCommandThumbnailRequest, PresentationCommandThumbnailResult, PresentationCommandToolbarContext, } from './session/commandProtocol';
 /** @internal */
 export { presentationCollaborationPipes } from './session/commandCollaboration';

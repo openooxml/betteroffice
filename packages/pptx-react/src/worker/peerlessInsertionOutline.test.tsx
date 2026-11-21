@@ -2,15 +2,15 @@ import { expect, spyOn, test } from 'bun:test';
 import JSZip from 'jszip';
 import { decodeCommandDisplayList, presentationSharedInputs } from '@betteroffice/pptx/worker';
 import type { ShapeRect, TextBoxPrimitive } from '@betteroffice/pptx';
-import { open, replyControl } from './peerlessTestHarness';
+import { deck, open, replyControl, story, type } from './peerlessTestHarness';
 import { peerlessPainterFactories } from './usePeerlessPresentation';
 
 const { act, fireEvent, waitFor } = await import('@testing-library/react');
 
-function outline(view: Awaited<ReturnType<typeof open>>['view']) {
+function outline(view: Awaited<ReturnType<typeof open>>['view'], resizeHandles = true) {
   const elements = view.getAllByTestId('pptx-text-edit-outline');
   expect(elements).toHaveLength(1);
-  expect(view.queryAllByTestId(/pptx-resize-/)).toHaveLength(0);
+  expect(view.queryAllByTestId(/pptx-resize-/)).toHaveLength(resizeHandles ? 8 : 0);
   const element = elements[0]!;
   expect(element.style.border).toBe('2px dashed #6b7280');
   expect(element.style.boxShadow).toBe('0 0 0 1px rgba(255, 255, 255, 0.9)');
@@ -31,6 +31,140 @@ async function editExisting(h: Awaited<ReturnType<typeof open>>) {
   await waitFor(() => expect(h.client.state.selection).toMatchObject({ shapeId: h.box.shapeId, anchor: 2, focus: 2 }));
   await waitFor(() => outline(h.view));
 }
+
+async function groupedDeck(bytes: Uint8Array) {
+  const zip = await JSZip.loadAsync(bytes);
+  const path = 'ppt/slides/slide1.xml';
+  const xml = await zip.file(path)!.async('string');
+  const shape = xml.match(/<p:sp>.*?<\/p:sp>/)![0];
+  const child = shape.replace('id="2" name="Text"', 'id="4" name="Child"');
+  const group = `<p:grpSp><p:nvGrpSpPr><p:cNvPr id="3" name="Group"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="9144000" cy="5143500"/><a:chOff x="0" y="0"/><a:chExt cx="9144000" cy="5143500"/></a:xfrm></p:grpSpPr>${child}</p:grpSp>`;
+  zip.file(path, xml.replace(shape, group));
+  return zip.generateAsync({ type: 'uint8array' });
+}
+
+test('resize released before object selection commits once in order', async () => {
+  const h = await open();
+  await editExisting(h);
+  const edge = h.point(h.box.x + h.box.w, h.box.y + h.box.h / 2);
+  const since = h.commands.length;
+  replyControl.hold();
+  try {
+    act(() => {
+      fireEvent.pointerDown(h.view.getByTestId('pptx-resize-e'), edge);
+      fireEvent.pointerMove(h.stage, { ...edge, clientX: edge.clientX + 10, buttons: 1 });
+      fireEvent.pointerUp(h.stage, { ...edge, clientX: edge.clientX + 30 });
+    });
+    await waitFor(() => expect(replyControl.count()).toBeGreaterThan(0));
+    expect(h.commands.slice(since).map((command) => command.kind)).toEqual(['selectObject']);
+    await act(async () => { replyControl.releaseNext(); });
+    await waitFor(() => expect(h.commands.slice(since).map((command) => command.kind))
+      .toEqual(['selectObject', 'setShapeRect']));
+    expect(h.commands.filter((command) => command.kind === 'setShapeRect')).toHaveLength(1);
+  } finally {
+    await act(async () => { replyControl.release(); });
+  }
+  await h.client.flush();
+  expect(h.commands.filter((command) => command.kind === 'setShapeRect')).toHaveLength(1);
+});
+
+test('pending released resize remains cancellable before object selection replies', async () => {
+  const h = await open();
+  await editExisting(h);
+  const edge = h.point(h.box.x + h.box.w, h.box.y + h.box.h / 2);
+  replyControl.hold();
+  try {
+    act(() => {
+      fireEvent.pointerDown(h.view.getByTestId('pptx-resize-e'), edge);
+      fireEvent.pointerMove(h.stage, { ...edge, clientX: edge.clientX + 10, buttons: 1 });
+      fireEvent.pointerUp(h.stage, { ...edge, clientX: edge.clientX + 30 });
+      fireEvent.keyDown(h.stage, { key: 'Escape' });
+    });
+    await waitFor(() => expect(replyControl.count()).toBeGreaterThan(0));
+  } finally {
+    await act(async () => { replyControl.release(); });
+  }
+  await h.client.flush();
+  expect(h.commands.filter((command) => command.kind === 'setShapeRect')).toHaveLength(0);
+});
+
+test('text input after cancelling a released resize survives the pending selection', async () => {
+  const h = await open();
+  await editExisting(h);
+  const line = h.box.lines[0]!;
+  const textAt = h.point(line.caretStops[2]!.x, line.y + line.height / 2);
+  const edge = h.point(h.box.x + h.box.w, h.box.y + h.box.h / 2);
+  const since = h.commands.length;
+  replyControl.hold();
+  try {
+    act(() => {
+      fireEvent.pointerDown(h.view.getByTestId('pptx-resize-e'), edge);
+      fireEvent.pointerMove(h.stage, { ...edge, clientX: edge.clientX + 10, buttons: 1 });
+      fireEvent.pointerUp(h.stage, { ...edge, clientX: edge.clientX + 30 });
+      fireEvent.keyDown(h.stage, { key: 'Escape' });
+      fireEvent.pointerDown(h.canvas, textAt);
+      fireEvent.pointerUp(h.stage, textAt);
+      type(h.view.getByRole('textbox', { name: 'Slide text' }), '!');
+    });
+    await waitFor(() => expect(replyControl.count()).toBeGreaterThan(0));
+    expect(h.commands.slice(since).map((command) => command.kind))
+      .toEqual(['selectObject', 'selectAtPoint', 'insertText']);
+  } finally {
+    await act(async () => { replyControl.release(); });
+  }
+  await h.client.flush();
+  expect(h.commands.slice(since).map((command) => command.kind))
+    .toEqual(['selectObject', 'selectAtPoint', 'insertText']);
+  expect((await story(h.api)).text).toBe('al!pha beta\nx\nalpha beta');
+});
+
+test('a new shape gesture preserves an earlier released resize', async () => {
+  const h = await open();
+  await editExisting(h);
+  const edge = h.point(h.box.x + h.box.w, h.box.y + h.box.h / 2);
+  const since = h.commands.length;
+  const outcomes: Array<{ seq: number; status: string; committed?: boolean }> = [];
+  const unsubscribe = h.client.subscribe((ack) => { outcomes.push(...ack.outcomes); });
+  replyControl.hold();
+  try {
+    act(() => {
+      const handle = h.view.getByTestId('pptx-resize-e');
+      fireEvent.pointerDown(handle, edge);
+      fireEvent.pointerMove(h.stage, { ...edge, clientX: edge.clientX + 10, buttons: 1 });
+      fireEvent.pointerUp(h.stage, { ...edge, clientX: edge.clientX + 30 });
+      fireEvent.pointerDown(handle, edge);
+      fireEvent.pointerMove(h.stage, { ...edge, clientX: edge.clientX + 5, buttons: 1 });
+    });
+    await waitFor(() => expect(replyControl.count()).toBeGreaterThan(0));
+    await act(async () => { replyControl.releaseNext(); });
+    await waitFor(() => expect(h.commands.slice(since).some((command) => command.kind === 'setShapeRect')).toBe(true));
+  } finally {
+    await act(async () => { replyControl.release(); });
+    act(() => { fireEvent.pointerCancel(h.stage, edge); });
+    unsubscribe();
+  }
+  await h.client.flush();
+  const resize = h.commands.slice(since).filter((command) => command.kind === 'setShapeRect');
+  expect(resize).toHaveLength(1);
+  expect(outcomes.filter((outcome) => outcome.seq === resize[0]!.seq))
+    .toEqual([expect.objectContaining({ status: 'applied', committed: true })]);
+  const saved = (await h.client.read()).result;
+  expect(saved.ok).toBe(true);
+  if (!saved.ok) throw new Error(saved.failure.message);
+  expect(saved.slides[0]!.shapes[0]!.width)
+    .toBe(6000000 + Math.round(30 * 9144000 / h.list.width));
+});
+
+test('grouped child text hides resize handles while top-level text retains them', async () => {
+  const h = await open({ file: await groupedDeck(await deck()) });
+  const line = h.box.lines[0]!;
+  const at = h.point(line.caretStops[2]!.x, line.y + line.height / 2);
+  act(() => { fireEvent.pointerDown(h.canvas, at); fireEvent.pointerUp(h.stage, at); });
+  await waitFor(() => expect(h.client.state.selection).toMatchObject({
+    shapeId: h.box.shapeId, anchor: 2, focus: 2, canResize: false,
+  }));
+  await waitFor(() => outline(h.view, false));
+});
 
 for (const [start, end] of [[[200.123, 150.456], [400.789, 220.123]],
   [[900.123, 500.456], [980.789, 550.123]], [[200, 150], [201, 151]]] as const) {
@@ -56,7 +190,7 @@ for (const [start, end] of [[[200.123, 150.456], [400.789, 220.123]],
       await waitFor(() => expect(replyControl.count()).toBeGreaterThan(0));
       expect(h.view.queryByTestId('pptx-insertion-preview') === null).toBe(true);
       expect(rect).toBeDefined();
-      const echo = outline(h.view);
+      const echo = outline(h.view, false);
       bounds(echo, { x: rect!.x * h.list.width / h.client.state.size.width,
         y: rect!.y * h.list.height / h.client.state.size.height,
         width: rect!.width * h.list.width / h.client.state.size.width,
@@ -143,7 +277,7 @@ for (const change of ['failure', 'tool', 'slide', 'readOnly', 'replacement', 'Es
         fireEvent.pointerUp(h.stage, h.point(400, 220));
       });
       await waitFor(() => expect(replyControl.count()).toBeGreaterThan(0));
-      outline(h.view);
+      outline(h.view, false);
       if (change === 'tool') await act(async () => { expect(await h.api.commands.execute('tool', { value: 'textBox' })).toMatchObject({ ok: true }); });
       if (change === 'slide') fireEvent.click(h.view.getByRole('button', { name: 'Slide 2 of 2' }));
       if (change === 'readOnly') h.view.rerender(h.ui(true));
@@ -182,7 +316,7 @@ test('existing rotated and flipped text uses the displayed shape bounds', async 
   const angle = Math.PI / 6;
   const width = Math.abs(h.box.w * Math.cos(angle)) + Math.abs(h.box.h * Math.sin(angle));
   const height = Math.abs(h.box.w * Math.sin(angle)) + Math.abs(h.box.h * Math.cos(angle));
-  await waitFor(() => bounds(outline(h.view), { x: h.box.x + (h.box.w - width) / 2,
+  await waitFor(() => bounds(outline(h.view, false), { x: h.box.x + (h.box.w - width) / 2,
     y: h.box.y + (h.box.h - height) / 2, width, height }, parseFloat(h.canvas.style.width) / h.list.width));
 });
 
@@ -217,7 +351,7 @@ test('textbox echo waits for display and yields to changed confirmed bounds', as
     await waitFor(() => expect(h.client.state.selection).toMatchObject({ anchor: 0, focus: 0 }));
     await waitFor(() => expect(paint).toBeDefined());
     const scale = parseFloat(h.canvas.style.width) / h.list.width;
-    bounds(outline(h.view), { x: 200, y: 150, width: 200, height: 70 }, scale);
+    bounds(outline(h.view, false), { x: 200, y: 150, width: 200, height: 70 }, scale);
     holding = false;
     await act(async () => { paint!(); });
     await waitFor(() => bounds(outline(h.view), { x: 200, y: 150, width: 300, height: 70 }, scale));

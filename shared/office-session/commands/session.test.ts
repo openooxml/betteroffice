@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { SessionFailure } from '../types';
-import { createWorkerEditSession, sessionUnacknowledged } from './session';
+import { cancelWorkerEditTicket, createWorkerEditSession, sessionUnacknowledged } from './session';
 import type {
   Checkpoint, CommandAck, CommandConnection, CommandEnvelope, CommandOutcome,
   CommandTicket, EchoHooks, FrameEnvelope, WorkerEditSessionOptions,
@@ -83,6 +83,21 @@ function harness(overrides: Partial<WorkerEditSessionOptions<string, string, str
 }
 
 describe('worker edit session', () => {
+  it('cancels a command waiting for its predecessor before assigning a sequence', async () => {
+    const h = harness();
+    const predecessor = h.session.submit('select', 'shape');
+    const resize = h.session.submit('resize', 'east', { after: predecessor, waitForAfter: true });
+    h.pump();
+    expect(h.calls.map((call) => call.envelope.payload)).toEqual(['shape']);
+    expect(cancelWorkerEditTicket(h.session, resize)).toBe(true);
+    expect(await resize.ack).toMatchObject({ seq: undefined, status: 'cancelled', reason: 'cancelled' });
+    h.ack(0);
+    await predecessor.ack;
+    h.pump();
+    expect(h.calls.map((call) => call.envelope.payload)).toEqual(['shape']);
+    await h.session.dispose();
+  });
+
   it('still lists the envelopes that were unacknowledged when a crash ended the session without recovery', async () => {
     const h = harness({ maxRecoveryAttempts: 0 });
     for (const value of ['a', 'b', 'c']) h.session.submit('insert', value);

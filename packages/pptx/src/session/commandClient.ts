@@ -5,7 +5,8 @@ import { createPresentationCollaborationPipe, presentationCollaborationPipes } f
 import { createSessionClient } from '../../../../shared/office-session/client';
 import type { SessionTransport } from '../../../../shared/office-session/transport';
 import { SessionFailure } from '../../../../shared/office-session/types';
-import { createWorkerEditSession, sessionUnacknowledged } from '../../../../shared/office-session/commands/session';
+import { cancelWorkerEditTicket, createWorkerEditSession,
+  sessionUnacknowledged } from '../../../../shared/office-session/commands/session';
 import type { CommandTicket } from '../../../../shared/office-session/commands/types';
 import type { PptxFontFace } from '../types';
 import type { DefaultFontInstallation, DefaultFontInstallRequest, DefaultFontPayload } from '../../../../shared/pptxDefaultFonts';
@@ -359,15 +360,17 @@ async function createCommandClient(
     requestFullFrame: async () => ({ ...latestSharedAck!, outcomes: [], frame: undefined }),
   }) : undefined;
   const sharedInput: PresentationSharedInput | undefined = editSession && {
+    cancel: (ticket) => cancelWorkerEditTicket(editSession, ticket),
     subscribeSent(listener) {
       if (!disposed) sentListeners.add(listener);
       return () => { sentListeners.delete(listener); };
     },
-    submit(intent, basis, after) {
+    submit(intent, basis, after, waitForAfter = false) {
       const reference = 'at' in intent.payload ? intent.payload.at : undefined;
       const predecessor = after ?? (reference?.source === 'afterSeq' ? tickets.get(reference.seq) : undefined);
       const ticket = editSession.submit(intent.kind, { intent, basis }, {
         ...(predecessor ? { after: predecessor } : {}),
+        ...(waitForAfter ? { waitForAfter: true } : {}),
       });
       if (ticket.seq !== undefined) {
         tickets.set(ticket.seq, ticket);
