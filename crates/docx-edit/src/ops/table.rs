@@ -515,36 +515,87 @@ struct FragmentBuild {
 
 impl FragmentBuild {
     fn attrs<T: ReadTxn>(&mut self, doc: &EditingDoc, txn: &T, attrs: &Attrs) -> Attrs {
-        let mut attrs = attrs.clone();
-        if let Some(Any::Array(changes)) = attrs.get_mut(crate::format::RPR_CHANGE) {
-            for change in Arc::make_mut(changes) {
-                let Some((id, ..)) = crate::queries::revision_parts(change) else {
-                    continue;
-                };
-                let Any::Map(values) = change else {
-                    continue;
-                };
-                let values = Arc::make_mut(values);
-                let id = self.revision_ids.entry(id).or_insert_with(|| doc.next_id(txn));
-                if let Some(Any::Map(info)) = values.get_mut("info") {
-                    let info = Arc::make_mut(info);
-                    let key = if info.contains_key("id") {
-                        "id"
-                    } else {
-                        "revisionId"
-                    };
-                    info.insert(key.to_owned(), Any::from(id.as_str()));
-                } else {
-                    let key = if values.contains_key("id") {
-                        "id"
-                    } else {
-                        "revisionId"
-                    };
-                    values.insert(key.to_owned(), Any::from(id.as_str()));
-                }
+        attrs
+            .iter()
+            .map(|(key, value)| (key.clone(), self.value(doc, txn, key, value)))
+            .collect()
+    }
+
+    fn properties<T: ReadTxn>(
+        &mut self,
+        doc: &EditingDoc,
+        txn: &T,
+        properties: &HashMap<String, Any>,
+    ) -> HashMap<String, Any> {
+        properties
+            .iter()
+            .map(|(key, value)| (key.clone(), self.value(doc, txn, key, value)))
+            .collect()
+    }
+
+    fn value<T: ReadTxn>(&mut self, doc: &EditingDoc, txn: &T, key: &str, value: &Any) -> Any {
+        let mut value = value.clone();
+        self.remap_revisions(doc, txn, key, &mut value);
+        value
+    }
+
+    fn remap_revisions<T: ReadTxn>(
+        &mut self,
+        doc: &EditingDoc,
+        txn: &T,
+        key: &str,
+        value: &mut Any,
+    ) {
+        if matches!(
+            key,
+            "ins"
+                | "del"
+                | "rPrChange"
+                | "pPrChange"
+                | "pPrIns"
+                | "pPrDel"
+                | "tblPrChange"
+                | "trPrChange"
+                | "tcPrChange"
+                | "trIns"
+                | "trDel"
+                | "cellMarker"
+                | "propertyChanges"
+                | "structuralChange"
+        ) && let Some((id, ..)) = crate::queries::revision_parts(value)
+            && let Any::Map(values) = value
+        {
+            let values = Arc::make_mut(values);
+            let identity = match values.get("info") {
+                Some(Any::Map(info)) => info.as_ref(),
+                _ => values,
+            };
+            let key = if identity.contains_key("id") {
+                "id"
+            } else {
+                "revisionId"
+            };
+            let id = self.revision_ids.entry(id).or_insert_with(|| doc.next_id(txn));
+            let id = Any::from(id.as_str());
+            if let Some(Any::Map(info)) = values.get_mut("info") {
+                Arc::make_mut(info).insert(key.to_owned(), id);
+            } else {
+                values.insert(key.to_owned(), id);
             }
         }
-        attrs
+        match value {
+            Any::Array(values) => {
+                for value in Arc::make_mut(values) {
+                    self.remap_revisions(doc, txn, key, value);
+                }
+            }
+            Any::Map(values) => {
+                for (key, value) in Arc::make_mut(values) {
+                    self.remap_revisions(doc, txn, key, value);
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -2156,7 +2207,7 @@ impl EditingDoc {
                 let rowspan = any_usize(cell.tc_pr.get("rowspan"), 1, "rowspan")?;
                 let colspan = any_usize(cell.tc_pr.get("colspan"), 1, "colspan")?;
                 let mut data = CellData {
-                    tc_pr: cell.tc_pr.clone(),
+                    tc_pr: build.properties(self, txn, &cell.tc_pr),
                     story: story_id,
                 };
                 set_spans(&mut data, rowspan, colspan);
@@ -2168,7 +2219,7 @@ impl EditingDoc {
                 }
                 cells.push(data);
             }
-            let mut tr_pr = fresh_row_properties(row.tr_pr.clone());
+            let mut tr_pr = fresh_row_properties(build.properties(self, txn, &row.tr_pr));
             tr_pr.remove(TR_INS);
             tr_pr.remove(TR_DEL);
             if let Some(stamp) = revision {
@@ -2176,7 +2227,7 @@ impl EditingDoc {
             }
             table_rows.push(RowData { tr_pr, cells });
         }
-        let mut tbl_pr = valid.tbl_pr.clone();
+        let mut tbl_pr = build.properties(self, txn, &valid.tbl_pr);
         if tbl_pr.is_empty() {
             tbl_pr.insert("width".to_owned(), Any::Number(9360.0));
             tbl_pr.insert("widthType".to_owned(), Any::from("dxa"));
@@ -2229,7 +2280,8 @@ impl EditingDoc {
                         story.insert_embed_with_attributes(txn, at, MapPrelim::default(), attrs);
                     map.insert(txn, KIND_KEY, part.kind);
                     for (key, value) in &part.payload {
-                        map.insert(txn, key.clone(), value.clone());
+                        let value = build.value(self, txn, key, value);
+                        map.insert(txn, key.clone(), value);
                     }
                     at += 1;
                 }
@@ -2240,7 +2292,8 @@ impl EditingDoc {
                     map.insert(txn, KIND_KEY, PILCROW_KIND);
                     map.insert(txn, PARA_ID, key.as_str());
                     for (prop_key, prop_value) in &part.props {
-                        map.insert(txn, prop_key.clone(), prop_value.clone());
+                        let value = build.value(self, txn, prop_key, prop_value);
+                        map.insert(txn, prop_key.clone(), value);
                     }
                     ids.bind(txn, &map, &key, ParagraphIdOrigin::Authored);
                     build.new_para_ids.push(key);
@@ -4521,6 +4574,91 @@ mod tests {
                 .bold,
             crate::TriState::Off
         );
+        let revisions = doc.list_revisions().unwrap();
+        assert!(revisions.contains(&original_revision));
+        assert!(
+            revisions
+                .iter()
+                .all(|revision| revision.change.revision_id != pasted_revision.change.revision_id)
+        );
+    }
+
+    #[test]
+    fn fragment_copy_remaps_paragraph_property_changes_independently() {
+        let doc = fragment_doc();
+        let original = doc
+            .insert_table_fragment(
+                &direct(),
+                Position::new("body", 0),
+                &fragment_table(vec![fragment_cell("Hello")]),
+            )
+            .unwrap();
+        let original_story = &original.created_story_ids[0];
+        doc.set_paragraph_attrs(
+            &suggesting(),
+            &crate::ParaSelector::One(original.new_para_ids[0].clone()),
+            &crate::ParaAttrDelta {
+                alignment: crate::Patch::Set("center".to_owned()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let original_revision = doc
+            .list_revisions()
+            .unwrap()
+            .into_iter()
+            .find(|revision| {
+                revision.story == *original_story
+                    && revision.change.kind == crate::ChangeKind::ParagraphPropertiesChanged
+            })
+            .unwrap();
+        let properties = |story: &str| {
+            doc.story_segments(story)
+                .unwrap()
+                .into_iter()
+                .find_map(|segment| match segment.content {
+                    crate::SegmentContent::Pilcrow(properties) => Some(properties.values),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let original_properties = properties(original_story);
+        let mut copied_cell = fragment_cell("Hello");
+        copied_cell["content"][1]["properties"] =
+            serde_json::to_value(&original_properties).unwrap();
+        let pasted = doc
+            .insert_table_fragment(
+                &direct(),
+                Position::new("body", 1),
+                &fragment_table(vec![copied_cell]),
+            )
+            .unwrap();
+        let pasted_story = &pasted.created_story_ids[0];
+        let pasted_revision = doc
+            .list_revisions()
+            .unwrap()
+            .into_iter()
+            .find(|revision| {
+                revision.story == *pasted_story
+                    && revision.change.kind == crate::ChangeKind::ParagraphPropertiesChanged
+            })
+            .unwrap();
+        assert_ne!(
+            pasted_revision.change.revision_id,
+            original_revision.change.revision_id
+        );
+        assert_eq!(properties(pasted_story)["alignment"], Any::from("center"));
+        doc.reject_change(
+            &direct(),
+            &crate::ChangeTarget::Revision(pasted_revision.change.revision_id.clone()),
+        )
+        .unwrap();
+        assert_eq!(properties(original_story), original_properties);
+        assert_ne!(
+            properties(pasted_story).get("alignment"),
+            Some(&Any::from("center"))
+        );
+        assert!(!properties(pasted_story).contains_key(crate::PPR_CHANGE));
         let revisions = doc.list_revisions().unwrap();
         assert!(revisions.contains(&original_revision));
         assert!(
