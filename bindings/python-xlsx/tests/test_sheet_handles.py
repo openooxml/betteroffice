@@ -183,3 +183,21 @@ def test_collaborative_handles_read_the_engine_sheet_ids(sample_bytes):
     held["A1"] = "x"
     assert held.index == 0
     assert wb.value(0, "A1") == "x"
+
+
+class _DestinationChangesAfterSend(dict):
+    def __getitem__(self, key):
+        return 0 if key == "to" else super().__getitem__(key)
+
+
+def test_held_sheet_follows_the_move_that_was_sent(workbook_with_extra_sheet):
+    wb = workbook_with_extra_sheet
+    first = wb.sheet_names[0]
+    held = wb[first]
+    last = wb.sheet_count - 1
+    wb.apply_ops([_DestinationChangesAfterSend({"type": "moveSheet", "from": 0, "to": last})])
+    assert wb.sheet_names[last] == first
+    assert held.index == last
+    held["A1"] = "Moved"
+    saved = bo.Workbook.open(wb.save())
+    assert saved.value(first, "A1") == "Moved"
