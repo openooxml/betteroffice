@@ -1749,7 +1749,7 @@ export function wrapSession(
       if (listLevelIndents !== undefined) other.listLevelIndents = listLevelIndents;
       return { ...attrs, other };
     },
-    paragraphStyleNumbers: (story, paraId) => session.paragraph_style_numbers(story, paraId),
+    paragraphStyleNumbers: (story, paraId) => session.paragraph_style_numbers?.(story, paraId),
     createdListDefinitions: () => JSON.parse(session.created_list_definitions_json()),
     listDefinitionKeysInUse: () => JSON.parse(session.list_definition_keys_in_use_json()),
     formatTextTarget: (target, delta) => {

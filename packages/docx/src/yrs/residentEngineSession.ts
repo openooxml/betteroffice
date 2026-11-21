@@ -905,7 +905,7 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
     ensureListDefinition: (story, paraId, kind, lead) => applyCommandMutation(story, () =>
       JSON.parse(lead === undefined ? session.ensure_list_definition(story, paraId, kind)
         : session.ensure_list_definition_after(story, paraId, kind, lead))),
-    paragraphStyleNumbers: (story, paraId) => session.paragraph_style_numbers(story, paraId),
+    paragraphStyleNumbers: (story, paraId) => session.paragraph_style_numbers?.(story, paraId),
     applyParagraphStyle: (range, styleId, author) => applyCommandMutation(range.story, () =>
       session.apply_paragraph_style(...rangeArgs(range), styleId, author?.name, author?.date)),
     addComment: (ranges, author, date, body) => {
