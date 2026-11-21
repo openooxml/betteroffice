@@ -12,6 +12,10 @@ import {
 } from '@betteroffice/docx/yrs';
 import type { YrsInlineFormatDelta } from '@betteroffice/docx/yrs';
 
+export const MAX_FORMATTED_HTML_LENGTH = 2_000_000;
+export const MAX_FORMATTED_HTML_DEPTH = 200;
+export const MAX_FORMATTED_HTML_RUNS = 5_000;
+
 const NBSP = '\u00a0';
 const LINE_SEP = '\u2028';
 
@@ -654,7 +658,7 @@ function parseTableElement(table: HTMLTableElement): DocxTableFragment {
 }
 
 /** Parsed table fragment from HTML, or null when the HTML holds no table. */
-export function parseClipboardHtml(html: string): DocxClipboardFragment | null {
+export function parseClipboardHtml(html: string, _options?: { formatted?: boolean }): DocxClipboardFragment | null {
   const parser = new DOMParser();
   const document_ = parser.parseFromString(html, 'text/html');
   const payloadElement = document_.querySelector('[data-betteroffice-docx]');
