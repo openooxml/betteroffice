@@ -316,6 +316,85 @@ test('a second handle drag resizes the shape and preserves subsequent typing', a
   }
 });
 
+test('a handle drag between two text inputs preserves the resize and both characters', async () => {
+  const h = await open();
+  await editExisting(h);
+  const line = h.box.lines[0]!;
+  const textAt = h.point(line.caretStops[1]!.x, line.y + line.height / 2);
+  const edge = h.point(h.box.x + h.box.w, h.box.y + h.box.h / 2);
+  const input = h.view.getByRole('textbox', { name: 'Slide text' });
+  const outcomes: Array<{ status: string }> = [];
+  const unsubscribe = h.client.subscribe((ack) => { outcomes.push(...ack.outcomes); });
+  replyControl.hold();
+  try {
+    act(() => { type(input, '!'); });
+    await waitFor(() => expect(replyControl.count()).toBe(1));
+    act(() => {
+      fireEvent.pointerDown(h.view.getByTestId('pptx-resize-e'), edge);
+      fireEvent.pointerMove(h.stage, { ...edge, clientX: edge.clientX + 10, buttons: 1 });
+      fireEvent.pointerUp(h.stage, { ...edge, clientX: edge.clientX + 30 });
+      fireEvent.pointerDown(h.canvas, textAt);
+      fireEvent.pointerUp(h.stage, textAt);
+      type(input, '?');
+    });
+    await act(async () => { replyControl.release(); });
+    const saved = await h.api.readContent();
+    expect(saved.ok).toBe(true);
+    if (!saved.ok) throw new Error(saved.failure.message);
+    expect(saved.slides[0]!.shapes[0]!.width)
+      .toBe(6000000 + Math.round(30 * 9144000 / h.list.width));
+    expect(outcomes.some((outcome) => outcome.status === 'refused')).toBe(false);
+    expect(saved.stories[0]!.text).toBe('a?l!pha beta\nx\nalpha beta');
+  } finally {
+    unsubscribe();
+    await act(async () => { replyControl.release(); });
+  }
+});
+
+test('a text click between two handle drags keeps both resizes and the typing after them', async () => {
+  const h = await open();
+  await editExisting(h);
+  const line = h.box.lines[0]!;
+  const textAt = h.point(line.caretStops[2]!.x, line.y + line.height / 2);
+  const edge = h.point(h.box.x + h.box.w, h.box.y + h.box.h / 2);
+  const since = h.commands.length;
+  const outcomes: Array<{ seq: number; status: string }> = [];
+  const unsubscribe = h.client.subscribe((ack) => { outcomes.push(...ack.outcomes); });
+  replyControl.hold();
+  try {
+    act(() => {
+      const handle = h.view.getByTestId('pptx-resize-e');
+      fireEvent.pointerDown(handle, edge);
+      fireEvent.pointerMove(h.stage, { ...edge, clientX: edge.clientX + 10, buttons: 1 });
+      fireEvent.pointerUp(h.stage, { ...edge, clientX: edge.clientX + 30 });
+      fireEvent.pointerDown(h.canvas, textAt);
+      fireEvent.pointerUp(h.stage, textAt);
+      fireEvent.pointerDown(h.view.getByTestId('pptx-resize-e'), edge);
+      fireEvent.pointerMove(h.stage, { ...edge, clientX: edge.clientX + 10, buttons: 1 });
+      fireEvent.pointerUp(h.stage, { ...edge, clientX: edge.clientX + 20 });
+      fireEvent.pointerDown(h.canvas, textAt);
+      fireEvent.pointerUp(h.stage, textAt);
+      type(h.view.getByRole('textbox', { name: 'Slide text' }), '!');
+    });
+    await waitFor(() => expect(replyControl.count()).toBeGreaterThan(0));
+    await act(async () => { replyControl.release(); });
+    const saved = await story(h.api);
+    const commands = h.commands.slice(since);
+    const selections = commands.filter((command) => command.kind === 'selectObject');
+    const resizes = commands.filter((command) => command.kind === 'setShapeRect');
+    expect(selections).toHaveLength(2);
+    expect(outcomes.find((outcome) => outcome.seq === selections[1]?.seq)).toMatchObject({ status: 'applied' });
+    expect(resizes).toHaveLength(2);
+    expect(outcomes.filter((outcome) => resizes.some((resize) => resize.seq === outcome.seq))
+      .map((outcome) => outcome.status)).toEqual(['applied', 'applied']);
+    expect(saved.text).toBe('al!pha beta\nx\nalpha beta');
+    expect(h.view.queryByRole('alert')).toBeNull();
+  } finally {
+    unsubscribe();
+    await act(async () => { replyControl.release(); });
+  }
+});
+
 test('a collaboration cursor sent before pointer-up preserves resize and subsequent typing', async () => {
   let replica!: AsyncCollaborationReplica;
   const h = await open({ collaboration: { clientId: 1001, onReplica: (value) => { if (value) replica = value; } } });
