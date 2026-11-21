@@ -282,6 +282,29 @@ for (const count of [MAX_PASTE_FORMATTED_RUNS, MAX_PASTE_FORMATTED_RUNS + 2, 4_0
   }, 300_000);
 }
 
+test('a paste over the formatted run limit with a picture inserts its text in one piece and stays fast', async () => {
+  const { client, engine } = await openTableWorker();
+  try {
+    const paragraph = engine.paragraphs('body').at(-1)!;
+    const span = engine.geometryReader.locateParagraph('body', paragraph.paraId);
+    const at = { story: 'body', paraId: paragraph.paraId, offset: span.end - span.start };
+    const data = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aD1sAAAAASUVORK5CYII=';
+    const words = Array.from({ length: 4_000 }, (_, i) => `w${String(i).padStart(4, '0')} `);
+    const runs = words.map((text, i) => ({ text, format: { other: i % 2 === 0 ? { bold: true } : { italic: true } } }));
+    const inlines = [...words.map(text => ({ text })), { image: { src: `data:image/png;base64,${data}`, alt: 'picture', width: 120, height: 60 } }];
+    const fragment = { paragraphs: [{ text: words.join(''), inlines, runs }] };
+    const start = performance.now();
+    const pasted = await client.edit(intent(1, 0, 'pasteFragment', { selection: { anchor: at, focus: at }, fragment }));
+    const elapsed = performance.now() - start;
+    console.log(`PASTE_RUNS_MS runs=4000 picture=1 ms=${Math.round(elapsed)}`);
+    expect(pasted.outcomes[0]?.status).toBe('applied');
+    expect(engine.paragraphs('body').at(-1)!.text.startsWith(paragraph.text + words.join(''))).toBe(true);
+    expect(elapsed).toBeLessThan(2_000);
+  } finally {
+    client.destroy();
+  }
+}, 300_000);
+
 test('replacePasteFragment swaps the paste variant in a single undo step', async () => {
   const { client, engine } = await openTableWorker();
   try {

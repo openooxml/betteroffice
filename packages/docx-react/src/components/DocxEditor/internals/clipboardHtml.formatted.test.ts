@@ -128,8 +128,7 @@ test('the run budget counts merged runs', () => {
 });
 
 test('each formatted import limit falls back to the original table or plain paste', () => {
-  expect([MAX_FORMATTED_HTML_LENGTH, MAX_FORMATTED_HTML_DEPTH]).toEqual([2_000_000, 200]);
-  expect(MAX_FORMATTED_HTML_RUNS).toBe(MAX_PASTE_FORMATTED_RUNS);
+  expect([MAX_FORMATTED_HTML_LENGTH, MAX_FORMATTED_HTML_DEPTH, MAX_FORMATTED_HTML_RUNS]).toEqual([2_000_000, 200, 5_000]);
   for (const html of [
     '<b>x</b><!--' + ' '.repeat(MAX_FORMATTED_HTML_LENGTH) + '-->',
     '<span>'.repeat(300) + '<b>x</b>' + '</span>'.repeat(300),
@@ -207,4 +206,12 @@ test('a table and the text after it count as one paragraph of the budget', () =>
 
 test('an empty preformatted segment keeps the trailing space trim of the line before', () => {
   imported('<p><b>A </b><span style="white-space:pre-wrap">&#10;B</span></p>', ['A', 'B']);
+});
+
+test('an import over the formatted run limit keeps its paragraphs and offers no options', () => {
+  const runs = Array.from({ length: MAX_PASTE_FORMATTED_RUNS + 2 }, (_, i) => i % 2 === 0 ? '<b>x</b>' : '<i>y</i>').join('');
+  const fragment = parseClipboardHtml(`<p>${runs}</p><p><br></p><pre>x\n  y</pre>${table}`, formatted)!;
+  expect(fragment.paragraphs.map(p => p.text)).toEqual(['xy'.repeat(MAX_PASTE_FORMATTED_RUNS / 2 + 1), '', 'x', '  y', '']);
+  expect(fragment.paragraphs.at(-1)!.tables).toHaveLength(1);
+  expect(pasteOptionsOffered(fragment)).toEqual([]);
 });
