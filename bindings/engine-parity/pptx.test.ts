@@ -608,7 +608,6 @@ const notYetCovered: string[] = [
   'PptxDocument.rejectProposalJson', 'PptxDocument.resolveCaretAnchorJson', 'PptxDocument.sessionMetadataJson', 'PptxDocument.setCollaborative',
   'PptxDocument.setShapeAdjustJson', 'PptxDocument.startUpdateObservation', 'PptxDocument.validateProposalJson',
   'PptxRenderer.layoutProposalDiffSlideByIdJson', 'PptxRenderer.layoutProposalDiffSlideJson', 'PptxRenderer.layoutProposalSlideJson',
-  'PptxRenderer.previewShapeRectJson',
   'compileSlideJson', 'decodeFontFace', 'decodeTiffPng',
 ];
 
@@ -649,7 +648,7 @@ describe('pptx native and wasm parity table', () => {
   });
 
   test('the not yet covered list only shrinks', () => {
-    expect(notYetCovered.length).toBe(26);
+    expect(notYetCovered.length).toBe(25);
   });
 
   for (const row of rows) {
