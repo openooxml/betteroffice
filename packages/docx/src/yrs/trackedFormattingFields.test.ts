@@ -113,20 +113,24 @@ function firstCellStory(session: YrsSession, tableIndex: number): string {
 }
 
 describe('tracked formatting in fields and copied content', () => {
-  it('keeps the REF field result and italic when rejecting an imported run property change', async () => {
+  it('keeps the REF field result when rejecting an imported run property change', async () => {
     const session = await open(fieldParagraph(
       `<w:rPrChange w:id="41" w:author="Prior" w:date="${DATE}"><w:rPr><w:b/></w:rPr></w:rPrChange>`
     ));
+    const before = required(session.storySegments('body').find(segment => segment.kind === 'text'));
     const revision = required(session.listRevisions().find(entry => entry.kind === 'rPrChange' && entry.author === 'Prior'));
     session.rejectChange({ revisionId: revision.revisionId });
+    const after = required(session.storySegments('body').find(segment => segment.kind === 'text'));
+    expect(after.attributes.fieldResult).toEqual(before.attributes.fieldResult);
+    expect(after.attributes.hyperlink).toEqual(before.attributes.hyperlink);
 
     const xml = await saveXml(session);
     const field = savedField(xml);
     expect(field.order).toEqual(['begin', 'separate', 'hyperlink', 'end']);
     expect(field.text).toBe('Entry');
     expect(field.result).toMatch(/<w:hyperlink(?=[\s>])[^>]*>[\s\S]*?<\/w:hyperlink>/);
-    expect(field.result).toMatch(/<w:i(?=[\s/>])/);
-    expect(field.result).not.toMatch(/<w:b(?=[\s/>])/);
+    expect(field.result).toMatch(/<w:b(?=[\s/>])/);
+    expect(field.result).not.toMatch(/<w:i(?=[\s/>])/);
     expect(xml).not.toContain('w:rPrChange');
     expect(session.listRevisions()).toEqual([]);
   });

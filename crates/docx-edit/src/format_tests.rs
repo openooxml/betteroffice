@@ -333,7 +333,7 @@ fn ref_field_paragraph(revision: &str) -> String {
 }
 
 #[test]
-fn imported_field_result_reject_preserves_projection_and_italic() {
+fn imported_field_result_reject_preserves_projection() {
     let engine = EngineSession::new(9315);
     seed_from_docx(
         engine.doc(),
@@ -365,8 +365,8 @@ fn imported_field_result_reject_preserves_projection_and_italic() {
     assert_eq!(rejected[0].0, "Entry");
     assert_eq!(rejected[0].1["fieldResult"], runs[0].1["fieldResult"]);
     assert_eq!(rejected[0].1["hyperlink"], runs[0].1["hyperlink"]);
-    assert_eq!(rejected[0].1["italic"], true);
-    assert!(!rejected[0].1["bold"].as_bool().unwrap_or(false));
+    assert_eq!(rejected[0].1["bold"], true);
+    assert!(rejected[0].1["italic"].is_null());
     assert!(rejected[0].1["rPrChange"].is_null());
     assert!(engine.doc().list_revisions().unwrap().is_empty());
 }
