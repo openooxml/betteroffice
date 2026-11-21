@@ -1,6 +1,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { withoutEffect } from '../../../../shared/office-session/testing/outcomes';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
 import { applyFrameDeltaOwned, decodeFrameDelta } from '../layout/render/frameDelta';
 import { encodeDisplayListFrameExtras, loadRustDisplayListQueryEngine, loadedRustDisplayListQueryEngine } from '../layout/render/rustDisplayList';
@@ -7006,7 +7007,7 @@ test('package_image_remains_decodable_after_edit_on_its_page', async () => {
     w.harness.resolvedImages.length = 0;
     const edited = await w.send({ type: 'edit', command: commandEnvelope(1) });
     if (!edited.ok) throw new Error(edited.error);
-    expect(edited.commandAck?.outcomes).toEqual([{ seq: 1, status: 'applied' }]);
+    expect(edited.commandAck?.outcomes.map(withoutEffect)).toEqual([{ seq: 1, status: 'applied' }]);
     expect(edited.commandAck?.frame?.coversThroughSeq).toBe(1);
     expect(w.harness.resolvedImages.length).toBeGreaterThan(0);
     expect(w.harness.resolvedImages.every((image) => image instanceof Surface)).toBe(true);

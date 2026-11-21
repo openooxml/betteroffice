@@ -29,6 +29,7 @@ are refused until then.
 | applyRemoteUpdate | none | engine.applyUpdate residentCollaboration.ts:114; afterRemoteMerge to repairCommandSelection Actions:1448 (setCellSelection :884 only on projection-live cells) | n/a | a merge can make a table unavailable; repair clears the cell selection (:841) and re-places the caret outside | none |
 | applyRemoteUpdateChunks | none | engine.applyUpdateChunks residentCollaboration.ts:113; same repair | n/a | as applyRemoteUpdate | none |
 | collabPipe | none | transport into the same merge path (residentCollaboration.ts:105) | n/a | as applyRemoteUpdate | none |
+| applyUpdate | none | engine.applyHostUpdate Actions:964, recovery replay only | n/a | integrates an update this document already took once | none |
 | applyEdits | none | proposalEngine.applyEdits via residentCommandBatches.ts:12; batch steps are text/paragraph/section only (batch.rs) | n/a | DeleteText/DeleteParagraphs remove a table embed whole; no payload read | explicit: story, paragraph, range and paragraphs targets per step; search and content-control targets resolve in Rust |
 | setRenderEnvironment | none | none | n/a | none | none |
 | setFontEnvironment | none | none | n/a | none | none |

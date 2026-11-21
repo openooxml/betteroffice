@@ -10,6 +10,7 @@ import { residentWorkerFactory } from './__fixtures__/residentWorker';
 import { DocxSourceWorkerClient as ResidentEngineWorkerClient } from './residentSourceWorkerClient';
 import { ResidentEngineWorkerClient as DefaultWorkerClient } from './residentEngineWorkerClient';
 import type { DocxCommandPayloads, DocxCommandInitRequest } from './residentCommandProtocol';
+import type { DocxClipboardFragment } from './clipboardFragment';
 import { applyFrameDelta, decodeFrameDelta } from '../layout/render/frameDelta';
 import { extractEmbeddedFontFaces } from '../utils/embeddedFonts';
 import { deobfuscateFont } from '../utils/fontDeobfuscation';
@@ -638,5 +639,45 @@ test('recovery keeps reservations from a replayed render-settings update', async
     expect(replayed.outcomes[0]?.status).toBe('noop');
     const recovered = (await clients[1]!.checkpoint()).recoveryState?.layoutReservations;
     expect(Object.values(recovered?.values ?? {})).toMatchObject([{ owner: 'layout', id: 'space', height: 50 }]);
+  } finally { clients.forEach(client => client.destroy()); }
+}, TIMEOUT);
+
+const RICH_PASTE: DocxClipboardFragment = { paragraphs: [{ text: 'Rich', runs: [{ text: 'Rich', format: { other: { bold: true } } }] }] };
+
+test('a raw replay of a paste and its choice into a second worker cannot resolve positions the first worker issued', async () => {
+  const bytes = source(1);
+  const workers = [startWorker(), startWorker()];
+  const clients = workers.map(worker => new ResidentEngineWorkerClient(worker));
+  const [first, second] = clients;
+  try {
+    await first!.openSource({ bytes });
+    const initial = await first!.commandInit(init());
+    const edit = (seq: number, version: number, kind: string, payload: object) => ({
+      session: initial.session, incarnation: 1, seq, basis: { epoch: 1, version }, kind, payload,
+    });
+    const typing = edit(1, 0, 'insertText', { text: 'kept' });
+    const typed = await first!.edit(typing);
+    expect(typed.outcomes[0]?.status).toBe('applied');
+    const at = typed.selection!.focus;
+    const paste = edit(2, typed.version, 'pasteFragment', { selection: { anchor: at, focus: at }, fragment: RICH_PASTE });
+    const pasted = await first!.edit(paste);
+    expect(pasted.outcomes[0]?.status).toBe('applied');
+    const end = pasted.selection!.focus;
+    const choice = edit(3, pasted.version, 'replacePasteFragment',
+      { selection: { anchor: end, focus: end }, fragment: structuredClone(RICH_PASTE), merge: true });
+    expect((await first!.edit(choice)).outcomes[0]?.status).toBe('applied');
+    expect(workers[0]!.sessions[0]!.paragraphs('body')[0]!.text).toBe('keptRichParagraph 1');
+    await second!.openSource({ bytes });
+    await second!.commandInit({ ...init(), incarnation: 2, replayAppliedSeqs: [1, 2, 3] });
+    const outcomes: unknown[] = [];
+    for (const command of [typing, paste, choice]) {
+      const outcome = (await second!.edit({ ...command, incarnation: 2, replay: true })).outcomes[0];
+      outcomes.push({ status: outcome?.status, reason: outcome?.reason });
+    }
+    expect(outcomes).toEqual([
+      { status: 'applied', reason: undefined },
+      { status: 'refused', reason: 'stale-anchor' },
+      { status: 'refused', reason: 'stale-anchor' },
+    ]);
   } finally { clients.forEach(client => client.destroy()); }
 }, TIMEOUT);

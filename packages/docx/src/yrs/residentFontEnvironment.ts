@@ -95,7 +95,7 @@ const FALLBACK_SCRIPT_TEXT = /[\u0590-\u06ff\u0750-\u077f\u0870-\u08ff\u1100-\u1
  */
 const FONT_RESHAPING_COMMANDS = new Set(['pasteFragment', 'replacePasteFragment', 'undo', 'redo', 'toggleMark', 'formatSelection', 'formatRange',
   'clearFormatting', 'applyParagraphStyle', 'acceptRevision', 'rejectRevision', 'setProposalStates', 'applyRemoteUpdate',
-  'applyRemoteUpdateChunks', 'collabPipe']);
+  'applyRemoteUpdateChunks', 'collabPipe', 'applyUpdate']);
 
 /** Fallback-script text in a string field, or a paragraph style set by a step such as `setParagraphStyle`. */
 function carriesFallbackScript(value: unknown, depth = 0): boolean {

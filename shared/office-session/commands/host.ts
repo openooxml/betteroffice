@@ -117,6 +117,12 @@ function copyOutcome(outcome: CommandOutcome): CommandOutcome {
   };
 }
 
+function retainedOutcome(outcome: CommandOutcome): CommandOutcome {
+  const copy = copyOutcome(outcome);
+  delete copy.effect;
+  return copy;
+}
+
 function unknownOutcome(seq: number, cause: unknown): CommandOutcomeUnknownError {
   const message = cause instanceof Error ? cause.message : String(cause);
   const data: Pick<CommandOutcomeUnknownError, 'name' | 'refusal'> = {
@@ -183,7 +189,7 @@ export function createCommandHost<P, S, E, F>(
   function checkRefusal(code: string, declared: readonly string[] = []): void {
     if (!options.checkRefusals || BASE_REFUSALS.includes(code as typeof BASE_REFUSALS[number]) ||
       declared.includes(code) || ['stale-epoch', 'stale-incarnation', 'wrong-session', 'stale-version',
-        'dependency-refused', 'unknown-outcome', 'disposed'].includes(code)) return;
+        'dependency-refused', 'unknown-outcome', 'disposed', 'replay-pending'].includes(code)) return;
     throw poisonWith(new TypeError(`Undeclared refusal: ${code}`));
   }
 
@@ -257,7 +263,7 @@ export function createCommandHost<P, S, E, F>(
     }
     throughSeq = outcome.seq;
     if (retainedLimit > 0) {
-      outcomes.set(outcome.seq, copyOutcome(outcome));
+      outcomes.set(outcome.seq, retainedOutcome(outcome));
       if (outcomes.size > retainedLimit) outcomes.delete(outcomes.keys().next().value!);
     }
     if (queryBarriers.size) {
@@ -350,6 +356,7 @@ export function createCommandHost<P, S, E, F>(
       const outcome = refusal(command.seq, 'stale-epoch');
       return ack(command.seq > throughSeq ? settle(outcome) : outcome);
     }
+    if (command.stream === true) return replayStream(command);
     if (command.seq <= throughSeq) {
       return withFrame(ack(outcomes.get(command.seq) ?? (prunedDuplicateReason === undefined
         ? { seq: command.seq, status: 'duplicate' }
@@ -401,9 +408,29 @@ export function createCommandHost<P, S, E, F>(
         ? { seq: command.seq, status: 'cancelled', committed: false, ...(result.reason === undefined ? {} : { reason: result.reason }) }
         : result.status === 'applied' && result.committed === false
           ? { seq: command.seq, status: 'applied', committed: false }
-          : { seq: command.seq, status: result.status };
+          : (result.status === 'applied' || result.status === 'noop') && result.effect !== undefined
+            ? { seq: command.seq, status: result.status, effect: result.effect }
+            : { seq: command.seq, status: result.status };
     const reply = ack(settle(outcome), result);
     return result.status === 'noop' && options.deferFrame?.(command, result) ? reply : withFrame(reply);
+  }
+
+  async function replayStream(command: CommandEnvelope<P>): Promise<CommandAck<S, E, F> | TransferResult<CommandAck<S, E, F>>> {
+    if (command.replay !== true || command.seq <= throughSeq) {
+      throw poisonWith(new SessionFailure('message', `Stream replay before command ${command.seq} is out of order`));
+    }
+    const before = checkedVersion(command.seq);
+    let result: ApplyResult<S, E>;
+    try {
+      result = await apply(command, { basis: command.basis, currentVersion: before, replayPreviouslyApplied: true });
+      if (!result || typeof result !== 'object' || (result.status !== 'noop' && result.status !== 'refused') ||
+        getVersion() !== before) {
+        throw new Error('Stream replay violated the command version contract');
+      }
+    } catch (error) {
+      throw poisonWith(unknownOutcome(command.seq, error));
+    }
+    return withFrame(ack(result.status === 'refused' ? refusal(command.seq, result.reason) : undefined, result));
   }
 
   const editPolicy: MethodPolicy = { lane: 'input', mutates: true, reframes: true, reorderable: false };

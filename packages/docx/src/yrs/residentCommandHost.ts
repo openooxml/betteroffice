@@ -1,9 +1,11 @@
 import { createCommandHost } from '../../../../shared/office-session/commands/host';
-import { isCommandEnvelope } from '../../../../shared/office-session/commands/types';
+import { isCommandEnvelope, type CommandEffect, type CommandStreamEntry } from '../../../../shared/office-session/commands/types';
 import { isTransferResult, transferable, type TransferResult } from '../../../../shared/office-session/protocol';
 import type {
   DocxCommandApplyContext,
   DocxCommandAck,
+  DocxCommandEffectState,
+  DocxCommandPayloads,
   DocxCommandFramePayload,
   DocxCommandPayload,
   DocxCommandReply,
@@ -20,6 +22,8 @@ const selectionDerivedEditStateFields = new Set([
 ]);
 
 const selectionStepKinds = new Set(['selectPoint', 'extendSelection', 'navigate']);
+
+const environmentKinds = new Set(['setRenderEnvironment', 'setFontEnvironment']);
 
 /** A pointer or keyboard step that moves the selection and leaves the document as it is. */
 export function isSelectionStepCommand(kind: string): boolean {
@@ -44,6 +48,57 @@ export function createResidentCommandHost(options: DocxCommandHostOptions): Docx
   let selectionCause: 'remote' | undefined;
   const selections = new Map<number, DocxCommandSelection | null>(structuredClone(init.recoveryState?.selections ?? []));
   const selectionLimit = Math.max(256, options.retainedOutcomes ?? 256);
+  const recording = options.recordUpdates === true && hooks.commandState !== undefined;
+  if (recording) hooks.issuedPositions?.();
+  let capture: Uint8Array[] | undefined;
+  let streamOrigin: CommandStreamEntry['origin'] = 'frame';
+  let streamSeq = throughSeq;
+  let streamIndex = 0;
+  let sealedIndex = 0;
+  let stream: CommandStreamEntry[] = [];
+
+  function captureEffect(
+    before: ReturnType<NonNullable<DocxCommandHooks['commandState']>>, updates: readonly Uint8Array[], noop: boolean
+  ): CommandEffect | undefined {
+    const after = hooks.commandState!();
+    const state = Object.fromEntries(Object.entries(after).filter(([key, value]) =>
+      !sameCommandState(before[key as keyof typeof before], value))) as DocxCommandEffectState;
+    const positions = hooks.issuedPositions?.();
+    if (positions?.length) state.stickyPositions = positions;
+    const changed = Object.keys(state).length > 0;
+    if (noop && !changed && updates.length === 0) return undefined;
+    const payload: DocxCommandPayloads['applyUpdate'] = {
+      updates: updates.map((update) => update.slice().buffer),
+      ...(changed ? { state: structuredClone(state) } : {}),
+      ...(noop ? { noop: true as const } : {}),
+    };
+    return { kind: 'applyUpdate', payload };
+  }
+
+  function appendStream(updates: readonly Uint8Array[], origin: CommandStreamEntry['origin'], at: number): void {
+    const buffers = updates.map((update) => update.slice().buffer);
+    const last = stream.at(-1);
+    if (last && last.throughSeq === at && last.origin === origin && last.index >= sealedIndex) {
+      (last.effect.payload as DocxCommandPayloads['applyUpdate']).updates.push(...buffers);
+      return;
+    }
+    const payload: DocxCommandPayloads['applyUpdate'] = { updates: buffers, noop: true };
+    stream.push({ throughSeq: at, index: streamIndex++, origin, effect: { kind: 'applyUpdate', payload } });
+  }
+
+  function takeStream(): CommandStreamEntry[] | undefined {
+    if (stream.length === 0) return undefined;
+    const entries = stream;
+    stream = [];
+    return entries;
+  }
+
+  function withStream(reply: DocxCommandReply): DocxCommandReply {
+    const entries = takeStream();
+    if (!entries) return reply;
+    if (!isTransferResult(reply)) return { ...reply, stream: entries };
+    return transferable({ ...reply.value, stream: entries }, reply.transfer);
+  }
   const shared = createCommandHost<
     DocxCommandPayload, DocxCommandSelection | null, DocxEditState, DocxCommandFramePayload
   >({
@@ -63,32 +118,51 @@ export function createResidentCommandHost(options: DocxCommandHostOptions): Docx
       };
       const selectionCommand = options.selectionAck && ['select', 'navigate', 'selectPoint', 'extendSelection', 'selectTableCells', 'navigateCell'].includes(command.kind);
       const previousEditState = selectionCommand ? structuredClone(selectionIndependentEditState(hooks.editState())) : undefined;
-      const preflight = await hooks.preflight(command, applyContext);
-      const result = preflight.status === 'ready'
-        ? await hooks.apply(preflight.prepared, applyContext) : preflight;
+      const replayed = command.kind === 'applyUpdate';
+      const before = recording && !replayed && !isSelectionStepCommand(command.kind) && !environmentKinds.has(command.kind)
+        ? structuredClone(hooks.commandState!()) : undefined;
+      const updates: Uint8Array[] = [];
+      capture = recording ? updates : undefined;
+      const result = await (async () => {
+        try {
+          const preflight = await hooks.preflight(command, applyContext);
+          return preflight.status === 'ready' ? await hooks.apply(preflight.prepared, applyContext) : preflight;
+        } finally {
+          capture = undefined;
+        }
+      })();
       selectionCause = 'cause' in result ? result.cause : undefined;
       if (result.status === 'applied') {
         if (version === Number.MAX_SAFE_INTEGER) throw new Error('Command version space is exhausted');
         version += 1;
       }
       const selection = hooks.selection();
-      if (result.status === 'applied' || result.status === 'noop') {
+      if (command.stream !== true && (result.status === 'applied' || result.status === 'noop')) {
         selections.set(command.seq, structuredClone(selection));
         if (selections.size > selectionLimit) selections.delete(selections.keys().next().value!);
       }
       const nextEditState = hooks.editState();
       selectionOnly = !!selectionCommand && result.status === 'noop' &&
         sameCommandState(previousEditState, selectionIndependentEditState(nextEditState));
-      return { ...result, selection, editState: nextEditState };
+      const settled = result.status === 'noop' || (result.status === 'applied' && result.committed !== false);
+      const effect = before && settled ? captureEffect(before, updates, result.status === 'noop') : undefined;
+      if (!replayed && !effect && updates.length) appendStream(updates, 'frame', command.seq);
+      return { ...result, selection, editState: nextEditState, ...(effect ? { effect } : {}) };
     },
     deferFrame: () => selectionOnly,
     frame: (input) => renderFrame({ ...input, full: false }),
-    snapshot: () => hooks.snapshot(),
+    snapshot: () => {
+      sealedIndex = streamIndex;
+      return hooks.snapshot();
+    },
   });
 
   function renderFrame(input: Parameters<DocxCommandHooks['frame']>[0]):
     Promise<Awaited<ReturnType<DocxCommandHooks['frame']>>> {
-    const result = frameTail.then(() => hooks.frame(input));
+    const result = frameTail.then(() => {
+      streamSeq = Math.max(streamSeq, input.coversThroughSeq);
+      return hooks.frame(input);
+    });
     frameTail = result.then(() => {}, () => {});
     return result;
   }
@@ -154,8 +228,9 @@ export function createResidentCommandHost(options: DocxCommandHostOptions): Docx
         const reply = await shared.handler(context, command);
         const ack = isTransferResult(reply) ? reply.value : reply;
         throughSeq = ack.throughSeq;
-        const packed = packState(reply, duplicate || ack.outcomes.some(({ status }) =>
-          status === 'refused' || status === 'cancelled' || status === 'duplicate'));
+        streamSeq = Math.max(streamSeq, throughSeq);
+        const packed = withStream(packState(reply, duplicate || ack.outcomes.some(({ status }) =>
+          status === 'refused' || status === 'cancelled' || status === 'duplicate')));
         if (selectionOnly) {
           const early = isTransferResult(packed) ? packed.value : packed;
           const echoContext = options.selectionAck!.echoContext();
@@ -175,11 +250,15 @@ export function createResidentCommandHost(options: DocxCommandHostOptions): Docx
     },
     checkpoint: (context) => serialize(async () => {
       const result = await shared.checkpoint(context);
-      if (!hooks.recoveryState) return result;
+      if (!hooks.recoveryState && !recording) return result;
       const checkpoint = isTransferResult(result) ? result.value : result;
-      const value = { ...checkpoint, recoveryState: structuredClone({
-        ...hooks.recoveryState(), selections: [...selections],
-      }) };
+      const value = {
+        ...checkpoint,
+        ...(recording ? { stream: sealedIndex } : {}),
+        ...(hooks.recoveryState ? { recoveryState: structuredClone({
+          ...hooks.recoveryState(), selections: [...selections],
+        }) } : {}),
+      };
       return isTransferResult(result) ? transferable(value, result.transfer) : value;
     }),
     checkpointPolicy: shared.checkpointPolicy,
@@ -189,6 +268,25 @@ export function createResidentCommandHost(options: DocxCommandHostOptions): Docx
       frameTail = result.then(() => {}, () => {});
       return result;
     },
+    withCommandWork(origin, run) {
+      const result = tail.then(async () => {
+        streamOrigin = origin;
+        streamSeq = Math.max(streamSeq, throughSeq);
+        try {
+          return await run();
+        } finally {
+          streamOrigin = 'frame';
+        }
+      });
+      tail = result.then(() => {}, () => {});
+      return result;
+    },
+    recordUpdate(update) {
+      if (!recording) return;
+      if (capture) capture.push(update);
+      else appendStream([update], streamOrigin, streamSeq);
+    },
+    takeStream,
     initial: () => serialize(fullAck),
     requestFullFrame: () => serialize(fullAck),
   };

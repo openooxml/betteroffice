@@ -2529,6 +2529,18 @@ const rows: Row<Docx>[] = [
     },
   }),
   defineRow({
+    method: 'EditSession.apply_verbatim_update',
+    mutates: true,
+    setup: (docx: Docx) => trackedRemote(docx, dependentChunks),
+    call: ({ session: s }, [first, later]) => {
+      s.apply_verbatim_update(later!);
+      const pending = s.has_pending_update();
+      if (!pending) throw new Error('an update missing its predecessor is not pending');
+      const applied = notUndoable(s, () => s.apply_verbatim_update(first!));
+      return { pending, ...applied, resolved: s.has_pending_update() };
+    },
+  }),
+  defineRow({
     method: 'EditSession.canvasSkippedEffects',
     setup: ({ session: s, fresh }: Docx) => {
       residentFrame(s);

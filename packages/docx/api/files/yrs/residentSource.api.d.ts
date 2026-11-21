@@ -20,7 +20,10 @@ export type DocxSourceOpenRequest = ({
     };
     mediaTokens?: boolean;
     heapLimitBytes?: number;
+    /** The seed's opening generation; with `clientId`, a seed of the same source writes the same ids as an earlier one. */
     generation?: string;
+    /** The client id the seed writes under; a fresh one when absent. */
+    clientId?: number;
     digest?: string;
     /**
      * One replica seeds from bytes; joiners pass `initialUpdate`. Two seeds merge by story last-writer-wins.

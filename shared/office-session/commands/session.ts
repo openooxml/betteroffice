@@ -3,13 +3,13 @@ import { cancelOutboxAfter, createOutbox, fenceOutbox } from './outbox';
 import { createPresenter } from './presenter';
 import { cloneData } from './clone';
 import { createBlockedLedger } from './ledger';
-import { isCommandAck, isCommandOutcomeUnknownError } from './types';
+import { isCommandAck, isCommandOutcomeUnknownError, isCommandStream } from './types';
 import { hasOwn } from '../protocol';
 import { isQueryReply, type ArgsOf, type Hold, type HoldReason, type QueryReply, type QueryTable,
   type Read, type ReadOptions, type RefusalOf, type ResultOf, type WorkerEditSession } from './spec';
 import type {
-  Checkpoint, CommandAck, CommandConnection, CommandDraft, CommandEnvelope,
-  CommandOutcome, CommandTicket, EditSessionState, OutboxEntry,
+  Checkpoint, CommandAck, CommandConnection, CommandDraft, CommandEffect, CommandEnvelope, CommandSeed,
+  CommandOutcome, CommandStreamEntry, CommandTicket, EditSessionState, OutboxEntry,
   FrameEnvelope, PresentationStatus, RecoveryEvent, SubmitOptions, TicketOutcome, WorkerEditSessionOptions,
 } from './types';
 
@@ -39,6 +39,15 @@ type LogEntry<P> = {
   presentationStatus?: PresentationStatus;
   rpcSettled: boolean;
   bytes: number;
+  effect?: true;
+};
+
+type StreamLogEntry<P> = {
+  incarnation: number;
+  index: number;
+  throughSeq: number;
+  envelope: CommandEnvelope<P>;
+  bytes: number;
 };
 
 type ConnectionRecord<P, S, E, F> = {
@@ -56,6 +65,7 @@ type ConnectionRecord<P, S, E, F> = {
   unsubscribe(): void;
   unsubscribeFrame?: () => void;
   unsubscribeAck?: () => void;
+  unsubscribeStream?: () => void;
 };
 
 function deferred<T>(): Deferred<T> {
@@ -85,6 +95,36 @@ function isCommittedApplied(outcome: TicketOutcome | undefined): boolean {
   return outcome?.status === 'applied' && outcome.committed !== false;
 }
 
+function binaryBytes(value: unknown): number {
+  if (!value || typeof value !== 'object') return 0;
+  let total = 0;
+  for (const item of Object.values(value)) {
+    if (item instanceof ArrayBuffer || ArrayBuffer.isView(item)) total += item.byteLength;
+    else if (Array.isArray(item)) {
+      for (const part of item) if (part instanceof ArrayBuffer || ArrayBuffer.isView(part)) total += part.byteLength;
+    }
+  }
+  return total;
+}
+
+function sameSeed(reopened: CommandSeed | undefined, recorded: CommandSeed): boolean {
+  if (!reopened || reopened.clientId !== recorded.clientId || reopened.generation !== recorded.generation ||
+    reopened.digest !== recorded.digest || reopened.stateVector.byteLength !== recorded.stateVector.byteLength) return false;
+  return reopened.stateVector.every((byte, index) => byte === recorded.stateVector[index]);
+}
+
+function streamOrder<P>(a: StreamLogEntry<P>, b: StreamLogEntry<P>): number {
+  return a.throughSeq - b.throughSeq || a.incarnation - b.incarnation || a.index - b.index;
+}
+
+const REPLAY_PENDING = 'Recovery replay left updates pending';
+
+function replayLeftPending(ack: CommandAck<unknown, unknown, unknown> | undefined): boolean {
+  const outcomes: unknown = ack?.outcomes;
+  return Array.isArray(outcomes) && outcomes.some((outcome: CommandOutcome | undefined) =>
+    outcome?.status === 'refused' && outcome.reason === 'replay-pending');
+}
+
 function limit(value: number | undefined, fallback: number): number {
   return value !== undefined && Number.isSafeInteger(value) && value > 0 ? value : fallback;
 }
@@ -104,6 +144,8 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
   options: WorkerEditSessionOptions<O, P, S, E, F, X, Q>
 ): WorkerEditSession<P, S, E, X, Q> {
   const initial = options.connection.initial;
+  const seed = initial.seed && { ...initial.seed, stateVector: initial.seed.stateVector.slice() };
+  let streamed = seed !== undefined;
   const maxAttempts = options.maxRecoveryAttempts === 0 ? 0 : limit(options.maxRecoveryAttempts, 2);
   const source = maxAttempts === 0 ? undefined : cloneData(options.source);
   const sessionId = initial.session;
@@ -115,6 +157,9 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
   const pending = new Set<TicketRecord>();
   const listeners = new Set<(state: EditSessionState<S, E>) => void>();
   const log = new Map<number, LogEntry<P>>();
+  const stream: StreamLogEntry<P>[] = [];
+  let streamCovered: { incarnation: number; index: number } | undefined;
+  let streamReceived = 0;
   let unacknowledgedAtTermination: CommandEnvelope<P>[] | undefined;
   function unacknowledgedEnvelopes(): CommandEnvelope<P>[] {
     return [...log.values()].filter((entry) => entry.outcome === undefined || entry.outcome.reason === 'unknown-outcome')
@@ -144,6 +189,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
   let pumpQueued = false;
   let checkpointBusy = false;
   let checkpointAttemptedAt = -1;
+  let checkpointAttemptedStream = -1;
   let framePainted = true;
   let frameCoverage = initial.throughSeq;
   let frameRevision = 0;
@@ -448,20 +494,65 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
     try {
       options.recovery.onRecovery?.({
         phase, incarnation, attempt: recoveryAttempt,
-        diverged: [...diverged].sort((a, b) => a - b), historyReset: checkpoint !== undefined, failure,
+        diverged: [...diverged].sort((a, b) => a - b), historyReset: checkpoint !== undefined || seed !== undefined, failure,
       });
     } catch {}
   }
 
-  function recordOutcome(entry: LogEntry<P>, outcome: CommandOutcome, replay: boolean, force = false): void {
+  function countedBytes(envelope: CommandEnvelope<P>): number {
+    const counted = options.commandBytes?.(envelope) ?? binaryBytes(envelope.payload);
+    return Number.isFinite(counted) && counted >= 0 ? counted : 0;
+  }
+
+  function recordEffect(entry: LogEntry<P>, effect: CommandEffect): void {
+    if (!checkpoint && !seed) return;
+    const { expectVersion: _expectVersion, ...original } = entry.envelope;
+    const envelope = cloneData<CommandEnvelope<P>>({ ...original, kind: effect.kind, payload: effect.payload as P });
+    const bytes = countedBytes(envelope);
+    retainedBytes += bytes - entry.bytes;
+    entry.envelope = envelope;
+    entry.bytes = bytes;
+    entry.effect = true;
+  }
+
+  function logStream(entries: readonly CommandStreamEntry[]): void {
+    if (maxAttempts === 0 || (!checkpoint && !seed)) return;
+    for (const entry of entries) {
+      if (streamCovered && streamCovered.incarnation === incarnation && entry.index < streamCovered.index) continue;
+      const envelope = cloneData<CommandEnvelope<P>>({
+        session: sessionId, incarnation, seq: entry.throughSeq + 1, basis: { epoch, version: state.version },
+        kind: entry.effect.kind, payload: entry.effect.payload as P, replay: true, stream: true,
+      });
+      const bytes = countedBytes(envelope);
+      stream.push({ incarnation, index: entry.index, throughSeq: entry.throughSeq, envelope, bytes });
+      appliedCount += 1;
+      retainedBytes += bytes;
+      streamReceived += 1;
+    }
+    stream.sort(streamOrder);
+  }
+
+  function pruneStream(covered: { incarnation: number; index: number } | undefined): void {
+    for (let position = stream.length - 1; position >= 0; position -= 1) {
+      const entry = stream[position]!;
+      if (entry.incarnation >= incarnation && (!covered || entry.index >= covered.index)) continue;
+      appliedCount -= 1;
+      retainedBytes -= entry.bytes;
+      stream.splice(position, 1);
+    }
+  }
+
+  function recordOutcome(entry: LogEntry<P>, reported: CommandOutcome, replay: boolean, force = false): void {
     if (entry.outcome && !replay && !force) return;
-    if (entry.outcome && outcome.status === 'duplicate') return;
+    if (entry.outcome && reported.status === 'duplicate') return;
+    const { effect, ...outcome } = reported;
     const previous = entry.outcome;
     const group = entry.group;
     if (!previous) unknownCount -= 1;
     if (isCommittedApplied(previous)) appliedCount -= 1;
     entry.outcome = outcome;
     if (isCommittedApplied(outcome)) appliedCount += 1;
+    if (effect && (isCommittedApplied(outcome) || outcome.status === 'noop')) recordEffect(entry, effect);
     inFlight.delete(outcome.seq);
     if (blocked(outcome)) blockSequence(outcome.seq);
     group.outcome = outcome;
@@ -556,6 +647,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
           const entry = log.get(outcome.seq);
           if (entry) recordOutcome(entry, outcome, replay);
         }
+        if (ack.stream) logStream(ack.stream);
         const boundary = log.get(ack.throughSeq);
         if (boundary) boundary.confirmedVersion = ack.version;
         if (ack.throughSeq > state.throughSeq ||
@@ -646,6 +738,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
     try { record.unsubscribe(); } catch {}
     try { record.unsubscribeFrame?.(); } catch {}
     try { record.unsubscribeAck?.(); } catch {}
+    try { record.unsubscribeStream?.(); } catch {}
     for (const request of reads) if (request.connection === record) {
       request.connection = undefined;
       request.attempt += 1;
@@ -681,7 +774,27 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
       if (record.active) record.unsubscribeAck = unsubscribeAck;
       else unsubscribeAck();
     }
+    if (record.active && next.client.onStream) {
+      const unsubscribeStream = next.client.onStream((entries) => acceptStream(record, entries));
+      if (record.active) record.unsubscribeStream = unsubscribeStream;
+      else unsubscribeStream();
+    }
     return record;
+  }
+
+  function acceptStream(record: ConnectionRecord<P, S, E, F>, entries: CommandStreamEntry[]): void {
+    if (!live(record)) return;
+    if (!isCommandStream(entries)) {
+      fail(new SessionFailure('message', 'Malformed command stream'));
+      return;
+    }
+    try {
+      logStream(entries);
+    } catch (error) {
+      terminate(failureFor(error));
+      return;
+    }
+    wake();
   }
 
   function terminate(failure: SessionFailure): void {
@@ -703,6 +816,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
     }
     unacknowledgedAtTermination = unacknowledgedEnvelopes();
     log.clear();
+    stream.length = 0;
     dependencies.clear();
     cancellations.clear();
     cancellationDone?.resolve();
@@ -794,6 +908,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
         const retainedCheckpoint = checkpoint && { ...checkpoint, state: checkpoint.state.slice() };
         const next = await options.recovery.reopen({
           source: cloneData(source!), checkpoint: retainedCheckpoint,
+          ...(!retainedCheckpoint && seed ? { seed: { clientId: seed.clientId, generation: seed.generation } } : {}),
           session: sessionId, incarnation, epoch,
           refusedSeqs: blockedSeqs.values(),
           replayAppliedSeqs: [...log.values()].filter((entry) => isCommittedApplied(entry.outcome)).map((entry) => entry.envelope.seq),
@@ -814,6 +929,9 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
           throw new SessionFailure('message', 'Reopened command connection has invalid initial state');
         }
         if (next.client.failure) throw next.client.failure;
+        if (!retainedCheckpoint && seed && !sameSeed(opened.seed, seed)) {
+          throw new SessionFailure('message', 'Recovery base differs from the opened document');
+        }
         presenter.reset();
         uncoveredPresentations.clear();
         for (const [seq, entry] of presentations) {
@@ -833,10 +951,47 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
         initialFrame = undefined;
         acceptAck(record, opened);
         const entries = [...log.values()].sort((a, b) => a.envelope.seq - b.envelope.seq);
-        let replayed = opened.throughSeq;
+        const loose = [...stream];
+        const items: Array<LogEntry<P> | StreamLogEntry<P>> = [];
         for (const entry of entries) {
+          while (loose.length && loose[0]!.throughSeq < entry.envelope.seq) items.push(loose.shift()!);
+          items.push(entry);
+        }
+        items.push(...loose);
+        let replayed = opened.throughSeq;
+        for (const item of items) {
           if (!live(record)) throw record.failure;
+          if ('index' in item) {
+            let ack: CommandAck<S, E, F>;
+            try {
+              ack = await replayCall(record, { ...item.envelope, incarnation, basis: { epoch, version: state.version } });
+            } catch (error) {
+              throw failureFor(error);
+            }
+            if (replayLeftPending(ack)) {
+              discardFrame(ack?.frame);
+              throw new SessionFailure('message', REPLAY_PENDING);
+            }
+            if (!isCommandAck(ack) || ack.outcomes.length) {
+              discardFrame(ack?.frame);
+              throw new SessionFailure('message', 'Stream replay acknowledgement carried an outcome');
+            }
+            acceptAck(record, ack, true);
+            if (!live(record)) {
+              if (disposed || terminal) return;
+              throw record.failure;
+            }
+            continue;
+          }
+          const entry = item;
           if (blocked(entry.outcome)) continue;
+          if (streamed && !entry.outcome && options.replayable?.(entry.envelope) === false) {
+            presenter.event(() => {
+              recordOutcome(entry, { seq: entry.envelope.seq, status: 'refused', reason: 'history-reset', committed: false }, true);
+            });
+            if (cancellationDone) await cancellationDone.promise;
+            continue;
+          }
           const envelope = { ...entry.envelope, incarnation, replay: true as const };
           let ack: CommandAck<S, E, F>;
           try {
@@ -844,6 +999,10 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
           } catch (error) {
             if (error instanceof SessionFailure) throw error;
             throw unknown(entry, error, true);
+          }
+          if (replayLeftPending(ack)) {
+            discardFrame(ack?.frame);
+            throw new SessionFailure('message', REPLAY_PENDING);
           }
           replayed = Math.max(replayed, entry.envelope.seq);
           acceptAck(record, ack, true);
@@ -859,8 +1018,10 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
         if (!live(record)) throw record.failure;
         record.seenSeq = replayed;
         record.seenMark = highSeq;
+        streamed = opened.seed !== undefined;
         recovering = false;
         checkpointAttemptedAt = -1;
+        checkpointAttemptedStream = -1;
         report('recovered');
         diverged.clear();
         if (waitingReads.size) checkReads();
@@ -952,7 +1113,8 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
   }
 
   function checkpointDue(): boolean {
-    if (maxAttempts === 0 || !options.recovery.checkpoint || state.throughSeq === checkpointAttemptedAt) return false;
+    if (maxAttempts === 0 || !options.recovery.checkpoint ||
+      (state.throughSeq === checkpointAttemptedAt && streamReceived === checkpointAttemptedStream)) return false;
     const applied = appliedCount;
     const bytes = retainedBytes;
     if (applied === 0 && bytes === 0) return false;
@@ -967,6 +1129,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
       value.version > state.version || (checkpoint &&
         (value.throughSeq < checkpoint.throughSeq || value.version < checkpoint.version))) return false;
     if (value.throughSeq === state.throughSeq && value.version !== state.version) return false;
+    if (value.stream !== undefined && (!Number.isSafeInteger(value.stream) || value.stream < 0)) return false;
     const boundary = log.get(value.throughSeq);
     const version = checkpoint?.throughSeq === value.throughSeq ? checkpoint.version :
       initial.throughSeq === value.throughSeq ? initial.version : boundary?.confirmedVersion;
@@ -980,6 +1143,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
   function takeCheckpoint(record: ConnectionRecord<P, S, E, F>): void {
     checkpointBusy = true;
     checkpointAttemptedAt = state.throughSeq;
+    checkpointAttemptedStream = streamReceived;
     const request = options.recovery.checkpoint!;
     let snapshot: Promise<Checkpoint>;
     try { snapshot = request(record.connection); }
@@ -994,6 +1158,8 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
       if (validCheckpoint(value)) {
         checkpoint = { ...value, state: value.state.slice() };
         pruneLog(value.throughSeq);
+        streamCovered = value.stream === undefined ? undefined : { incarnation, index: value.stream };
+        pruneStream(streamCovered);
       }
       checkpointBusy = false;
       wake();
@@ -1258,6 +1424,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
         settlePresentation(record, 'dropped');
       }
       log.clear();
+      stream.length = 0;
       dependencies.clear();
       cancellations.clear();
       cancellationDone?.resolve();

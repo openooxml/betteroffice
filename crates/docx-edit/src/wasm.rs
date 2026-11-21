@@ -1093,6 +1093,14 @@ impl EditSession {
         self.core.apply_host_update(update).map_err(JsValue::from)
     }
 
+    /// Applies an update this document emitted exactly as it was emitted: no identity repair,
+    /// outside undo history. Errors on a malformed update.
+    pub fn apply_verbatim_update(&self, update: &[u8]) -> Result<(), JsValue> {
+        self.core
+            .apply_verbatim_update(update)
+            .map_err(JsValue::from)
+    }
+
     /// Subscribes `callback(update: Uint8Array, isRemote: 0|1)` to every
     /// committed transaction. `update` is v1-encoded — feed it straight to
     /// [`EditSession::apply_update`] on a peer — and is copied out of wasm

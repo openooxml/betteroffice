@@ -10,7 +10,7 @@ import type { DocxReviewSnapshot, DocxReviewTarget, DocxReviewTargetRanges } fro
 import type { ResidentCommentInsertionRange } from './residentCommentProjection';
 import type { DocxToolbarMetadata } from './residentToolbarMetadata';
 import type { LayoutMetaV1 } from './layoutMeta';
-import type { Checkpoint } from '../../../../shared/office-session/commands/types';
+import type { Checkpoint, CommandStreamEntry } from '../../../../shared/office-session/commands/types';
 import type { ReplyError } from '../../../../shared/office-session/protocol';
 import type { SessionFailureCode } from '../../../../shared/office-session/types';
 import type {
@@ -428,6 +428,8 @@ export type DocxEngineWorkerResponse = (
       commandInitial?: DocxCommandInitReply;
       commandAck?: DocxCommandAck;
       commandFrame?: { session: string; incarnation: number; epoch: number; frame: DocxCommandFrame };
+      /** Stream entries the command session's document emitted outside commands since the last report. */
+      commandStream?: { session: string; incarnation: number; epoch: number; entries: CommandStreamEntry[] };
       fontEnvironmentEvent?: DocxFontEnvironmentEvent & { session: string; incarnation: number; epoch: number };
       /** An applied edit may need fonts the host's last font requirements lacked; sent once until the host asks again. */
       fontRequirementsHint?: { session: string; incarnation: number; epoch: number; wholeFaces?: true };

@@ -433,6 +433,19 @@ impl EditSessionCore {
         result
     }
 
+    /// Applies an update this document emitted exactly as it was emitted: no identity repair,
+    /// outside undo history. Errors on a malformed update.
+    pub fn apply_verbatim_update(&self, update: &[u8]) -> EngineResult<()> {
+        self.undo.add_undo_barrier();
+        let result = self
+            .engine
+            .doc()
+            .apply_verbatim_v1(update)
+            .map_err(EngineError::message);
+        self.undo.add_undo_barrier();
+        result
+    }
+
     pub fn observe_updates(
         &self,
         callback: impl Fn(&[u8], bool) + 'static,

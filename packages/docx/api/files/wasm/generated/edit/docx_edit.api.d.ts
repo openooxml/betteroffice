@@ -168,6 +168,11 @@ export class EditSession {
      */
     apply_update_with_inference(update: Uint8Array): string;
     /**
+     * Applies an update this document emitted exactly as it was emitted: no identity repair,
+     * outside undo history. Errors on a malformed update.
+     */
+    apply_verbatim_update(update: Uint8Array): void;
+    /**
      * Starts a new opening of the document; see [`EditingDoc::begin_opening`].
      */
     begin_opening(generation?: string | null): void;
@@ -1875,6 +1880,7 @@ export interface InitOutput {
     readonly editsession_apply_update: (a: number, b: number, c: number) => [number, number];
     readonly editsession_apply_update_chunks: (a: number, b: any) => [number, number];
     readonly editsession_apply_update_with_inference: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_apply_verbatim_update: (a: number, b: number, c: number) => [number, number];
     readonly editsession_begin_opening: (a: number, b: number, c: number) => void;
     readonly editsession_begin_region_layout: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_begin_shared_reads: (a: number) => void;

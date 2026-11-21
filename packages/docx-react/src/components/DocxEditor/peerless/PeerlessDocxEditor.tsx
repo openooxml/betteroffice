@@ -741,6 +741,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         opened = await client.openSource({ ...(input instanceof Uint8Array
           ? { bytes: input, ...(resume?.checkpoint ? { state: resume.checkpoint.state } : {}) } : { document: input }),
           heapLimitBytes: settings.current.workerLimitBytes, mediaTokens: settings.current.mediaTokens === true,
+          ...(resume?.seed ? { clientId: resume.seed.clientId, generation: resume.seed.generation } : {}),
           collaboration });
       } catch (error) {
         if (!painted) throw error;

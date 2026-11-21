@@ -13,6 +13,7 @@ import type {
   CommandEnvelope,
   CommandHost,
   CommandMethods,
+  CommandStreamEntry,
   EditSession,
   EchoHooks,
   FrameEnvelope,
@@ -288,6 +289,11 @@ export interface DocxCommandStagedPresentation {
 export interface DocxCommandPayloads {
   applyRemoteUpdate: { update: ArrayBuffer };
   applyRemoteUpdateChunks: { updates: ArrayBuffer[] };
+  /**
+   * @internal What a command or the worker did to the document, replayed by recovery only: the updates it emitted,
+   * applied as they are, and the command-local state it changed; `noop` replays without a version.
+   */
+  applyUpdate: { updates: ArrayBuffer[]; state?: DocxCommandEffectState; noop?: true };
   /** Transport events and calls for a collaboration provider this worker runs; frames stay undecoded until here. */
   collabPipe: PipeCommandPayload;
   applyEdits: { request: DocxEditRequest; suggesting?: YrsAuthor };
@@ -435,6 +441,9 @@ export interface DocxCommandRecoveryState {
   layoutReservations?: { values: DocxResolvedReservations; set?: DocxFrameReservations };
 }
 
+/** @internal Command-local state outside the document; `stickyPositions` lists only positions issued since the previous effect. */
+export type DocxCommandEffectState = Partial<Omit<DocxCommandRecoveryState, 'selections'>>;
+
 /** @internal */
 export interface DocxCommandCheckpoint extends Checkpoint {
   recoveryState?: DocxCommandRecoveryState;
@@ -516,6 +525,9 @@ export interface DocxCommandHooks {
     Promise<DocxCommandFrame | TransferResult<DocxCommandFrame>>;
   snapshot(): Uint8Array | Promise<Uint8Array>;
   recoveryState?(): Omit<DocxCommandRecoveryState, 'selections'>;
+  commandState?(): Omit<DocxCommandRecoveryState, 'selections' | 'stickyPositions'>;
+  /** Positions first issued since the previous call, which starts the tracking when it is the first. */
+  issuedPositions?(): [string, YrsStickyPosition][];
 }
 
 /** @internal Worker-owned layout access for ordered selection resolution. */
@@ -536,13 +548,15 @@ export interface DocxCommandHooksEnvironment {
     showTableGridlines?: boolean;
     reservations?: DocxResolvedReservations;
   }, set?: DocxFrameReservations | null): void;
+  /** Restores the worker-owned part of a replayed effect's state: comments and layout reservations. */
+  restoreCommandState?(state: DocxCommandEffectState): void;
 }
 
 export type DocxCommandHooksFactory = (
   engine: ResidentEngineSession,
   init: DocxCommandInitRequest,
   environment?: DocxCommandHooksEnvironment
-) => Pick<DocxCommandHooks, 'preflight' | 'apply' | 'selection' | 'editState' | 'recoveryState'> & {
+) => Pick<DocxCommandHooks, 'preflight' | 'apply' | 'selection' | 'editState' | 'recoveryState' | 'commandState' | 'issuedPositions'> & {
   /** Runs after the collaboration wrap applies a remote merge at `context.currentVersion`. */
   afterRemoteMerge?(context: DocxCommandApplyContext): { cause: 'remote' } | void;
 };
@@ -561,6 +575,8 @@ export interface DocxCommandHostOptions {
     echoContext(): DocxCommandEchoContext | undefined;
     deferFrame(ack: DocxCommandAck): void;
   };
+  /** Records the document's update stream for recovery to replay: each command's updates as its effect, others as stream entries. */
+  recordUpdates?: boolean;
 }
 
 export interface DocxCommandHost extends CommandHost<
@@ -568,6 +584,12 @@ export interface DocxCommandHost extends CommandHost<
 > {
   handler(context: unknown, envelope: DocxCommandEnvelope): Promise<DocxCommandReply>;
   withFrameWork<T>(run: () => Promise<T>): Promise<T>;
+  /** Runs `run` between commands; the updates it emits are stream entries of `origin`. */
+  withCommandWork?<T>(origin: CommandStreamEntry['origin'], run: () => Promise<T>): Promise<T>;
+  /** One update the document emitted, in emission order. */
+  recordUpdate?(update: Uint8Array): void;
+  /** Stream entries not yet reported, removed from the host. */
+  takeStream?(): CommandStreamEntry[] | undefined;
   initial(): Promise<DocxCommandInitReply | TransferResult<DocxCommandInitReply>>;
   requestFullFrame(): Promise<DocxCommandReply>;
 }
@@ -596,6 +618,8 @@ export interface DocxCommandClient {
   requestFullFrame(): Promise<DocxCommandAck>;
   requestViewport?(request: DocxCommandViewportRequest): Promise<void>;
   onFrame?(listener: (frame: DocxCommandFrame) => void): () => void;
+  /** Stream entries the worker reports outside acknowledgements, such as with a save. */
+  onStream?(listener: (entries: CommandStreamEntry[]) => void): () => void;
   onFailure(listener: ((error: Error) => void) | null): void;
   destroy(): void;
 }
@@ -634,6 +658,8 @@ export interface DocxWorkerCommandState {
   selection: DocxCommandSelection | null;
   storedMarks: DocxStoredMarks | null;
   stickyPositions: Map<string, YrsStickyPosition>;
+  /** Entries first set into `stickyPositions` since the host last took them; absent while the host does not track them. */
+  issuedPositions?: [string, YrsStickyPosition][];
   proposals?: DocxProposalRegistry;
   /** Host versions in `(from, to]`, all produced by applied remote merges and none by a local command. */
   remoteMerges?: { from: number; to: number };

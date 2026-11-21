@@ -1425,6 +1425,14 @@ impl EditSession {
             .map_err(|error| map_error(env, error))
     }
 
+    #[napi(catch_unwind, js_name = "apply_verbatim_update")]
+    pub fn apply_verbatim_update(&self, env: Env, update: Uint8Array) -> Result<()> {
+        let _call = EngineCall::new(env);
+        self.document_unclocked(env)?
+            .apply_verbatim_update(&update)
+            .map_err(|error| map_error(env, error))
+    }
+
     #[napi(catch_unwind, js_name = "apply_local_update")]
     pub fn apply_local_update(&self, env: Env, update: Uint8Array) -> Result<()> {
         let _call = EngineCall::new(env);

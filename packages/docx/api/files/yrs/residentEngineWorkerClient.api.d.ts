@@ -2,6 +2,7 @@
 // Regenerate: bun scripts/api-surface.ts --write docx
 import { type PipeOutputBatch } from '../../../../shared/collaboration-pipe/protocol';
 import type { LayoutMetaV1 } from './layoutMeta';
+import { type CommandStreamEntry } from '../../../../shared/office-session/commands/types';
 import type { DocxCommandAck, DocxCommandEnvelope, DocxCommandFrame, DocxCommandClient, DocxCommandCheckpoint, DocxCommandInitReply, DocxCommandInitRequest, DocxCommandViewportRequest, DocxHostImage } from './residentCommandProtocol';
 import type { YrsEngineApplyProfile, YrsResidentCaretSnapshot, YrsResidentWorkerSnapshot, YrsSelection } from './index';
 import type { CollaborationCursor } from '../collaboration/types';
@@ -151,6 +152,7 @@ export declare class ResidentEngineWorkerClient implements DocxCommandClient {
     private retainBuiltPages;
     private failureListener;
     private readonly frameListeners;
+    private readonly streamListeners;
     private readonly pipeListeners;
     private readonly collabListeners;
     protected commandIdentity: {
@@ -171,6 +173,7 @@ export declare class ResidentEngineWorkerClient implements DocxCommandClient {
     provideHostImages(images: DocxHostImage[]): Promise<void>;
     requestViewport(request: DocxCommandViewportRequest): Promise<void>;
     onFrame(listener: (frame: DocxCommandFrame) => void): () => void;
+    onStream(listener: (entries: CommandStreamEntry[]) => void): () => void;
     /** Output of the collaboration providers the worker runs, per provider, in order. */
     onCollabPipe(listener: (batches: readonly PipeOutputBatch[]) => void): () => void;
     onCollabUpdates(listener: (event: {

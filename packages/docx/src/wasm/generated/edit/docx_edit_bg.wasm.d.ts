@@ -34,6 +34,7 @@ export const editsession_apply_seed_raw_ops: (a: number, b: number, c: number, d
 export const editsession_apply_update: (a: number, b: number, c: number) => [number, number];
 export const editsession_apply_update_chunks: (a: number, b: any) => [number, number];
 export const editsession_apply_update_with_inference: (a: number, b: number, c: number) => [number, number, number, number];
+export const editsession_apply_verbatim_update: (a: number, b: number, c: number) => [number, number];
 export const editsession_begin_opening: (a: number, b: number, c: number) => void;
 export const editsession_begin_region_layout: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_begin_shared_reads: (a: number) => void;

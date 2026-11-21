@@ -175,6 +175,8 @@ export type ResidentEngineSession = Pick<
   | 'storiesChangedSince'
   | 'yrsBlocksForStory'
 > & {
+  /** Applies an update this document emitted, exactly as emitted and outside undo history. */
+  applyVerbatimUpdate?(update: Uint8Array): void;
   /** Moves an inline embed in one transaction. Internal: concurrent moves would duplicate it, so collaboration never reaches it. */
   moveEmbed(at: YrsLoc, to: YrsLoc): YrsReplaceReceipt;
   setUndoInputTime(span: readonly [first: number, last: number] | null): void;
@@ -1218,6 +1220,7 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
     },
     applyUpdate: (update) => mergeRemote(() => JSON.parse(session.apply_update_with_inference(update)) as CollaborationTextInsertion | null),
     applyUpdateChunks: (updates) => mergeRemote(() => session.apply_update_chunks([...updates])),
+    applyVerbatimUpdate: (update) => mergeRemote(() => session.apply_verbatim_update(update)),
     onUpdate: (listener) => {
       listeners.add(listener);
       ensureObserver();

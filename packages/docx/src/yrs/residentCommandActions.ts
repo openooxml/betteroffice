@@ -9,7 +9,8 @@ import { breakRefusedWhileSuggesting, leadingBlockCount } from './sectionBreak';
 import { tableBoundaryDeleteTarget } from './tableBoundaryDelete';
 import type { YrsInlineFormatDelta, YrsLoc, YrsParagraphAttrs, YrsRunMark, YrsSelectionContext, YrsStoryRange, YrsStorySegment } from './index';
 import {
-  commandSelectionRange, mintCommandSelection, readCommandSelection, registerCommandAnchorState, resolveCommandSelection,
+  commandSelectionRange, issueStickyPosition, mintCommandSelection, readCommandSelection, registerCommandAnchorState,
+  resolveCommandSelection,
 } from './residentCommandAnchors';
 import { projectDocxEditState, withStoredMarks } from './residentCommandEditState';
 import { resolveDocxSelectionIntent, selectResidentPartPage } from './residentCommandSelection';
@@ -33,6 +34,7 @@ import { PIPE_OPTION_KEYS, validPipeCursor, validPipePayload } from '../../../..
 import type {
   DocxCommandApplyContext,
   DocxCommandApplyResult,
+  DocxCommandEffectState,
   DocxCommandEnvelope,
   DocxCommandIntent,
   DocxCommandKind,
@@ -229,6 +231,9 @@ const DOCX_COMMAND_POLICIES = {
     } },
   collabPipe: { keys: ['provider', 'ops'], exact: true, session: 'collaboration', origin: 'remote',
     payload: (payload) => validPipePayload(payload, MAX_FRAME_BYTES, PIPE_SHAPE) },
+  applyUpdate: { keys: ['updates', 'state', 'noop'], exact: true,
+    payload: ({ updates, state, noop }) => Array.isArray(updates) && updates.every((update) => update instanceof ArrayBuffer) &&
+      (state === undefined || object(state)) && (noop === undefined || noop === true) },
   applyEdits: { keys: ['request', 'suggesting'], exact: true },
   setFontEnvironment: { keys: ['faces', 'chains', 'families', 'progressive'], exact: true },
   setContentControlValue: { keys: [] }, addRepeatingItem: { keys: [] }, removeRepeatingItem: { keys: [] },
@@ -557,6 +562,10 @@ export function preflightDocxCommand(
   const readOnly = state.readOnly && !context.replayPreviouslyApplied;
   const error = { reason: 'invalid-payload' };
   if (!validCommandIntent(command, error, environment)) return refuse(error.reason);
+  if (command.kind === 'applyUpdate') {
+    if (!engine.applyVerbatimUpdate || !context.replayPreviouslyApplied && command.replay !== true) return refuse('unsupported-command');
+    return { status: 'ready', prepared: { command, selection: state.selection, range: null } };
+  }
   if (commandPolicy(command.kind)?.origin === 'remote') {
     return { status: 'ready', prepared: { command, selection: state.selection, range: null } };
   }
@@ -968,6 +977,28 @@ function applyPreparedDocxCommand(
     const corrected = state.selection ? readCommandSelection(engine, state) : null;
     return { status, selection: corrected?.ok ? corrected.selection : null, editState: projectDocxEditState(engine, state, corrected, toolbar) };
   };
+  if (command.kind === 'applyUpdate') {
+    const since = engine.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
+    let pending = false;
+    for (const update of command.payload.updates) {
+      engine.applyVerbatimUpdate?.(new Uint8Array(update));
+      pending = engine.hasPendingUpdate();
+      if (pending) break;
+    }
+    engine.markProjectionStories(engine.storiesChangedSince(since).stories);
+    if (pending) {
+      const corrected = state.selection ? readCommandSelection(engine, state) : null;
+      return { status: 'refused', reason: 'replay-pending', selection: corrected?.ok ? corrected.selection : null,
+        editState: projectDocxEditState(engine, state, corrected) };
+    }
+    state.remoteMerges = undefined;
+    const restored = command.payload.state;
+    if (restored) {
+      restoreCommandState(engine, state, restored);
+      environment?.restoreCommandState?.(restored);
+    }
+    return result(command.payload.noop ? 'noop' : 'applied');
+  }
   if (command.kind === 'setRenderEnvironment') {
     const { reservations, ...rest } = command.payload;
     const current = reservations?.version === engine.proposalEngine.version();
@@ -1422,6 +1453,31 @@ function applyPreparedDocxCommand(
   return result(engine.proposalEngine.version() === version ? 'noop' : 'applied');
 }
 
+function restoreCommandState(
+  engine: DocxWorkerCommandEngine, state: DocxWorkerCommandState, restored: DocxCommandEffectState
+): void {
+  for (const [key, position] of restored.stickyPositions ?? []) issueStickyPosition(state, key, position);
+  if (restored.storedMarks !== undefined) state.storedMarks = structuredClone(restored.storedMarks);
+  if ('activePart' in restored) state.activePart = structuredClone(restored.activePart);
+  if (restored.proposals) {
+    state.proposals?.mirror({ version: engine.proposalEngine.version(), proposals: restored.proposals });
+    state.proposals?.mirror(null);
+  }
+  if (restored.selection !== undefined) {
+    state.selection = null;
+    if (restored.selection) {
+      const selected = {
+        anchor: { story: restored.selection.anchor.story, paraId: restored.selection.anchor.paraId, offset: restored.selection.anchor.offset },
+        focus: { story: restored.selection.focus.story, paraId: restored.selection.focus.paraId, offset: restored.selection.focus.offset },
+      };
+      if (!commandSelectionRange(engine, selected)) throw new Error('Invalid replayed command selection');
+      engine.setSelection(selected.anchor, selected.focus);
+      state.selection = mintCommandSelection(engine, state, selected);
+    }
+  }
+  if (restored.cellSelection !== undefined) writeCellSelection(engine, restored.cellSelection);
+}
+
 export const createResidentDocxCommandHooks: DocxCommandHooksFactory = (engine, init, environment) => {
   const recovery = init.recoveryState;
   const native = engine.selection();
@@ -1506,5 +1562,14 @@ export const createResidentDocxCommandHooks: DocxCommandHooksFactory = (engine, 
       stickyPositions: [...state.stickyPositions], cellSelection: readCellSelection(engine),
       proposals: state.proposals!.exportState(),
     }),
+    commandState: () => ({
+      selection: projected().selection, storedMarks: state.storedMarks, activePart: state.activePart,
+      cellSelection: readCellSelection(engine), proposals: state.proposals!.exportState(),
+    }),
+    issuedPositions: () => {
+      const entries = state.issuedPositions ?? [];
+      state.issuedPositions = [];
+      return entries;
+    },
   };
 };
