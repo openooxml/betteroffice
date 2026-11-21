@@ -746,7 +746,7 @@ fn homogeneous_source_replacement(
             return Some(());
         }
         match element.name.as_str() {
-            "w:p" | "w:hyperlink" | "w:smartTag" => {
+            "w:p" | "w:hyperlink" | "w:smartTag" | "w:dir" | "w:bdo" => {
                 for (index, child) in element.child_elements().enumerate() {
                     path.push(index as u32);
                     visit(source, child, path, before, range, cursor, properties)?;

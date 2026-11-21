@@ -188,6 +188,7 @@ export declare class EditSession {
   resolve_comment(commentId: string): string
   resolve_encoded_selection(story: string, anchor: Uint8Array, head: Uint8Array): string
   resolve_paragraph_anchor(anchorJson: string): string
+  resolve_raw_marks(): string
   resolve_sticky_position(story: string, position: Uint8Array): string
   revision_ids_at(story: string, paraId: string, offset: number): string
   revision_stamps_json(idsJson: string): string

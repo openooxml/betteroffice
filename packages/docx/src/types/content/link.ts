@@ -3,7 +3,7 @@
  * and field types (`w:fldSimple`, complex `w:fldChar` runs).
  */
 
-import type { Run } from './run';
+import type { DirectionScope, Run } from './run';
 import type { TextFormatting } from '../formatting';
 import type { InlineSdt } from './sdt';
 import type { MathEquation } from './math';
@@ -264,6 +264,11 @@ export interface ComplexField {
   structuredResult?: StructuredFieldContent;
   /** Parsed/versioned nested field tree. Undefined = legacy flat field. */
   fieldTree?: StructuredFieldTree;
+  /**
+   * The `w:dir` and `w:bdo` elements around every run read for the field, outermost first;
+   * written around its field characters where no code or result run carries its own.
+   */
+  directionScopes?: DirectionScope[];
 }
 
 export type Field = SimpleField | ComplexField;

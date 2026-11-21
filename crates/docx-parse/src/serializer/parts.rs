@@ -957,6 +957,7 @@ mod tests {
                     text: text.to_owned(),
                     preserve_space: None,
                 }],
+                direction_scopes: Vec::new(),
             }))],
             list_rendering: None,
             rendered_page_break_before: None,

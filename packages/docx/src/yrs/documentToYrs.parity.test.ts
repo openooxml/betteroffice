@@ -938,6 +938,53 @@ describe('DOCX engine seeding', () => {
     }
   });
 
+  it('seeds direction scopes identically and saves typing inside the wrapper', async () => {
+    const before = '<w:r><w:t xml:space="preserve">Before </w:t></w:r>';
+    const after = '<w:r><w:t xml:space="preserve"> after</w:t></w:r>';
+    const bytes = sequencePackage(`<w:p>${before}<w:dir w:val="rtl"><w:r><w:t>two</w:t></w:r></w:dir>${after}</w:p>`);
+    const parsed = await parseDocx(bytes.buffer, { preloadFonts: false });
+    const engine = await createYrsSession({ clientId: 47101 });
+    const projected = await createYrsSession({ clientId: 47101 });
+    try {
+      engine.seedFromDocx(bytes, { generation: 'direction' });
+      documentToYrs(projected, parsed, { generation: 'direction' });
+      expectEquivalentStories(engine, projected);
+      expect(engine.encodeState()).toEqual(projected.encodeState());
+      const paragraph = engine.paragraphs('body')[0]!;
+      engine.insertText({ story: 'body', paraId: paragraph.paraId, offset: 8 }, 'X');
+      const saved = unzipContainer((await saveYrsDocx(engine)).bytes);
+      const xml = new TextDecoder().decode(saved['word/document.xml']);
+      expect(xml).toMatch(/<w:dir w:val="rtl">(?:(?!<\/w:dir>)[\s\S])*tXwo/);
+    } finally {
+      engine.destroy();
+      projected.destroy();
+    }
+  });
+
+  it('seeds kept inline elements identically: empty ones as anchors, one holding runs as an embed', async () => {
+    const head = '<w:r><w:t xml:space="preserve">Head </w:t></w:r>';
+    const tail = '<w:r><w:t xml:space="preserve"> tail</w:t></w:r>';
+    const start = '<w:customXmlInsRangeStart w:id="7" w:author="Grace"/>';
+    const end = '<w:customXmlInsRangeEnd w:id="7"/>';
+    const bytes = sequencePackage(`<w:p>${start}${head}<w:zzz><w:r><w:t>inner</w:t></w:r></w:zzz><w:yyy/>${end}${tail}</w:p>`);
+    const parsed = await parseDocx(bytes.buffer, { preloadFonts: false });
+    const engine = await createYrsSession({ clientId: 47111 });
+    const projected = await createYrsSession({ clientId: 47111 });
+    try {
+      engine.seedFromDocx(bytes, { generation: 'raw-inlines' });
+      documentToYrs(projected, parsed, { generation: 'raw-inlines' });
+      for (const session of [engine, projected]) {
+        expect(session.storySegments('body').filter((segment) => segment.kind === 'embed')).toHaveLength(1);
+        expect(session.paragraphs('body')[0]!.text).toBe('Head  tail');
+      }
+      expectEquivalentStories(engine, projected);
+      expect(engine.encodeState()).toEqual(projected.encodeState());
+    } finally {
+      engine.destroy();
+      projected.destroy();
+    }
+  });
+
 });
 
 describe('fields spanning paragraphs', () => {

@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::chart::ChartPartsMap;
 use crate::inline::{
-    ComplexField, InlineNode, MathEquation, MathType, Run, RunContent, SdtProperties,
-    StructuredFieldContent, inline_holds_field, parse_sdt_properties,
+    ComplexField, DirectionScope, InlineNode, MathEquation, MathType, Run, RunContent,
+    SdtProperties, StructuredFieldContent, inline_holds_field, parse_sdt_properties,
 };
 use crate::media::MediaMap;
 use crate::numbering::NumberingMap;
@@ -565,9 +565,9 @@ impl StoryParser<'_, '_> {
             return Ok(());
         }
         let mut run_index = 0usize;
-        for run in transparent_children(source, false)
+        for (_, run) in direction_scoped_children(source, &mut || 0)
             .into_iter()
-            .filter(|child| child.local_name() == "r")
+            .filter(|(_, child)| child.local_name() == "r")
         {
             let target = runs.get(run_index).copied().flatten().unwrap_or(run_index);
             for child in run.child_elements() {
@@ -802,6 +802,39 @@ fn visit_transparent_children<'a>(
             visit(path, child);
         }
         path.pop();
+    }
+}
+
+/// `parent`'s inline children in document order, descending through `w:customXml`,
+/// `w:smartTag`, `w:dir` and `w:bdo`, each with the `w:dir`/`w:bdo` scopes around it inside
+/// `parent`, outermost first.
+pub(crate) fn direction_scoped_children<'a>(
+    parent: &'a XmlElement,
+    next_id: &mut impl FnMut() -> u32,
+) -> Vec<(Vec<DirectionScope>, &'a XmlElement)> {
+    let mut children = Vec::new();
+    visit_direction_scoped_children(parent, &mut Vec::new(), next_id, &mut children);
+    children
+}
+
+fn visit_direction_scoped_children<'a>(
+    parent: &'a XmlElement,
+    scopes: &mut Vec<DirectionScope>,
+    next_id: &mut impl FnMut() -> u32,
+    children: &mut Vec<(Vec<DirectionScope>, &'a XmlElement)>,
+) {
+    for child in parent.child_elements() {
+        if child.matches_name("w", "customXml") || child.matches_name("w", "smartTag") {
+            visit_direction_scoped_children(child, scopes, next_id, children);
+        } else if (child.matches_name("w", "dir") || child.matches_name("w", "bdo"))
+            && let Some(scope) = crate::inline::direction_scope(child, next_id())
+        {
+            scopes.push(scope);
+            visit_direction_scoped_children(child, scopes, next_id, children);
+            scopes.pop();
+        } else {
+            children.push((scopes.clone(), child));
+        }
     }
 }
 
