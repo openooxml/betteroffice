@@ -1337,6 +1337,81 @@ test('Shift+Delete deletes forward when pending typing collapses the selection',
   } finally { input.unmount(); input.admission.dispose(); }
 });
 
+test('Shift+Delete precedes navigation pressed while typing is pending', async () => {
+  const cuts: boolean[] = [];
+  const input = mount(false, { onClipboard: async (cut) => { cuts.push(cut); } });
+  const start = { story: 'body', paraId: 'paragraph', offset: 1 };
+  const afterTyping = { ...start, offset: 2 };
+  const selection = { anchor: afterTyping, focus: afterTyping };
+  try {
+    input.snapshot.workerSelection = input.session.state.selection = { anchor: start, focus: start };
+    beforeinput(input.textarea, 'insertText', 'x');
+    expect(fireEvent.keyDown(input.textarea, { key: 'Delete', shiftKey: true })).toBe(false);
+    fireEvent.keyUp(input.textarea, { key: 'Delete', shiftKey: true });
+    fireEvent.keyDown(input.textarea, { key: 'ArrowLeft' });
+    fireEvent.keyUp(input.textarea, { key: 'ArrowLeft' });
+    expect(input.submitted).toEqual(['insertText']);
+
+    await act(async () => {
+      input.entries[0]!.settle({ status: 'applied', seq: 1 }, selection);
+    });
+    expect(input.submitted.slice(0, 2)).toEqual(['insertText', 'deleteForward']);
+    const deletion = input.entries[1]!;
+    expect(deletion.payload).toEqual({});
+    expect(deletion.options.after).toBe(input.entries[0]!.ticket);
+    expect(input.session.state.selection).toEqual(selection);
+
+    await act(async () => {
+      deletion.settle({ status: 'applied', seq: 2 }, selection);
+    });
+    expect(input.submitted).toEqual(['insertText', 'deleteForward', 'navigate']);
+    expect(input.entries[2]!.payload).toEqual({ unit: 'character', direction: 'backward', extend: false });
+    expect(input.entries[2]!.options.after).toBe(deletion.ticket);
+    expect(cuts).toEqual([]);
+  } finally { input.unmount(); input.admission.dispose(); }
+});
+
+test('Shift+Delete keeps later typing behind a pending range cut', async () => {
+  const anchor = { story: 'body', paraId: 'paragraph', offset: 1 };
+  const focus = { ...anchor, offset: 2 };
+  const selection = { anchor, focus };
+  const cuts: boolean[] = [];
+  let finishCopy!: () => void;
+  const copying = new Promise<void>((resolve) => { finishCopy = resolve; });
+  const input = mount(false, { onClipboard: async (cut, _data, queuedCut) => {
+    cuts.push(cut);
+    await copying;
+    await queuedCut!.deleteSelection(selection);
+  } });
+  try {
+    input.snapshot.workerSelection = input.session.state.selection = { anchor, focus: anchor };
+    fireEvent.keyDown(input.textarea, { key: 'ArrowRight', shiftKey: true });
+    fireEvent.keyUp(input.textarea, { key: 'ArrowRight', shiftKey: true });
+    fireEvent.keyDown(input.textarea, { key: 'Delete', shiftKey: true });
+    fireEvent.keyUp(input.textarea, { key: 'Delete', shiftKey: true });
+    beforeinput(input.textarea, 'insertText', 'z');
+    expect(input.submitted).toEqual(['navigate']);
+
+    await act(async () => {
+      input.entries[0]!.settle({ status: 'applied', seq: 1 }, selection);
+    });
+    expect(cuts).toEqual([true]);
+    expect(input.submitted).toEqual(['navigate']);
+
+    await act(async () => { finishCopy(); });
+    expect(input.submitted).toEqual(['navigate', 'replaceSelection']);
+    const deletion = input.entries[1]!;
+    expect(deletion.payload).toEqual({ text: '', selection });
+    expect(deletion.options.after).toBe(input.entries[0]!.ticket);
+
+    await act(async () => {
+      deletion.settle({ status: 'applied', seq: 2 }, { anchor, focus: anchor });
+    });
+    expect(input.submitted).toEqual(['navigate', 'replaceSelection', 'insertText']);
+    expect(input.entries[2]!.options.after).toBe(deletion.ticket);
+  } finally { finishCopy(); input.unmount(); input.admission.dispose(); }
+});
+
 test('worker input enables spelling and follows acknowledged caret geometry', () => {
   const input = mount();
   expect(input.textarea.getAttribute('spellcheck')).toBe('true');

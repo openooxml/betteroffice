@@ -65,9 +65,7 @@ async function openAtCaret(page: Page) {
   return { input, mirror };
 }
 
-test('worker Shift+Delete deletes forward after pending typing without a notice', async ({ page }) => {
-  await holdTyping(page);
-  const { input, mirror } = await openAtCaret(page);
+async function watchNotices(page: Page) {
   let nativeAlert = false;
   page.on('dialog', async dialog => {
     nativeAlert ||= dialog.type() === 'alert';
@@ -82,15 +80,37 @@ test('worker Shift+Delete deletes forward after pending typing without a notice'
     }).observe(document.documentElement, { subtree: true, childList: true, characterData: true, attributes: true,
       attributeFilter: ['role', 'data-sonner-toast', 'hidden', 'class', 'style'] });
   });
+  return async () => {
+    expect(await page.evaluate(() => window.__docxShiftDelete.noticeShown)).toBe(false);
+    expect(nativeAlert).toBe(false);
+  };
+}
 
+test('worker Shift+Delete deletes forward after pending typing without a notice', async ({ page }) => {
+  await holdTyping(page);
+  const { input, mirror } = await openAtCaret(page);
+  const expectNoNotice = await watchNotices(page);
   await page.keyboard.type('x');
   await expect.poll(() => page.evaluate(() => window.__docxShiftDelete.typingHeld())).toBe(true);
   await input.press('Shift+Delete');
   await page.evaluate(() => window.__docxShiftDelete.releaseTyping());
 
   await expect(mirror).toHaveText('ax');
-  expect(await page.evaluate(() => window.__docxShiftDelete.noticeShown)).toBe(false);
-  expect(nativeAlert).toBe(false);
+  await expectNoNotice();
+});
+
+test('worker Shift+Delete precedes ArrowLeft while typing is pending', async ({ page }) => {
+  await holdTyping(page);
+  const { input, mirror } = await openAtCaret(page);
+  const expectNoNotice = await watchNotices(page);
+  await page.keyboard.type('x');
+  await expect.poll(() => page.evaluate(() => window.__docxShiftDelete.typingHeld())).toBe(true);
+  await input.press('Shift+Delete');
+  await input.press('ArrowLeft');
+  await page.evaluate(() => window.__docxShiftDelete.releaseTyping());
+
+  await expect(mirror).toHaveText('ax');
+  await expectNoNotice();
 });
 
 test('worker Shift+Delete deletes forward at a settled caret', async ({ page }) => {
