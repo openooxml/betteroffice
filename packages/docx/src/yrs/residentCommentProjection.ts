@@ -36,10 +36,7 @@ export function savedCommentIds(sourceIds: readonly number[], native: readonly P
     let id = /^\d+$/u.test(comment.id) ? Number(comment.id) : Number.NaN;
     if (!Number.isSafeInteger(id) || used.has(id)) {
       while (Number.isSafeInteger(next) && used.has(next)) next += 1;
-      if (!Number.isSafeInteger(next)) {
-        next = 0;
-        while (used.has(next)) next += 1;
-      }
+      if (!Number.isSafeInteger(next)) throw new RangeError('No free comment id is left after the source comment ids');
       id = next;
     }
     used.add(id);

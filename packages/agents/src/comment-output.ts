@@ -300,14 +300,15 @@ function withoutElements(part: XmlPart, elements: readonly XmlElement[]): string
 function commentIds(seeded: ReadonlySet<string>, comments: readonly CommentOutput[], identities: ReadonlyMap<string, DocxCommentSaveIdentity> = new Map()): Map<string, string> {
   const ids = new Map([...seeded].map(id => [id, id]));
   const used = new Set([...seeded].map(Number).concat([...identities.values()].map(identity => identity.id)));
-  let next = Math.max(0, ...used) + 1;
+  let next = Math.max(0, ...[...used].filter(Number.isSafeInteger)) + 1;
   for (const comment of comments) {
     if (ids.has(comment.id)) continue;
     const identity = identities.get(comment.id);
     if (identity) { ids.set(comment.id, String(identity.id)); continue; }
     let id = /^\d+$/u.test(comment.id) ? Number(comment.id) : Number.NaN;
     if (!Number.isSafeInteger(id) || used.has(id)) {
-      while (used.has(next)) next++;
+      while (Number.isSafeInteger(next) && used.has(next)) next++;
+      if (!Number.isSafeInteger(next)) throw new RangeError('No free comment id is left after the source comment ids');
       id = next;
     }
     used.add(id);
