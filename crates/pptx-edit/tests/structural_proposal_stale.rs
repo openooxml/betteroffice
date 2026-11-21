@@ -216,7 +216,7 @@ fn text_edit_after_staging_makes_delete_slide_stale() {
         .find(|candidate| candidate.id == story.id)
         .expect("the edited shape's story should survive");
     assert_eq!(kept_story.plain_text(), "Revised: Second slide");
-    assert!(matches!(result, Err(ProposalError::Stale(_))));
+    assert!(matches!(result, Err(ProposalError::Stale(ids)) if ids == [slide.id.clone()]));
 }
 
 #[test]
@@ -274,7 +274,7 @@ fn notes_edit_after_staging_blocks_delete_slide_accept() {
         .expect("deleteSlide removed the slide with edited notes");
     assert_eq!(kept.id, slide_id);
     assert_eq!(kept.notes, notes);
-    assert!(matches!(result, Err(ProposalError::Stale(_))));
+    assert!(matches!(result, Err(ProposalError::Stale(ids)) if ids == [slide_id.clone()]));
 }
 
 fn commented(flavor: CommentFlavor) -> (DeckSession, String, String) {
@@ -393,7 +393,7 @@ fn force_accept_deletes_a_slide_commented_after_staging() {
 
     assert!(matches!(
         session.accept_proposal(&proposal_id, false),
-        Err(ProposalError::Stale(_))
+        Err(ProposalError::Stale(ids)) if ids == [slide_id.clone()]
     ));
     assert!(session.accept_proposal(&proposal_id, true).unwrap().applied);
     assert!(
