@@ -3,4 +3,4 @@
 '@betteroffice/docx': patch
 ---
 
-Saving a comment that holds many bookmarks, and opening documents with deeply nested alternate content around many elements, no longer slow down quadratically.
+Saving a comment that holds many bookmarks no longer slows down quadratically with the number of bookmarks.

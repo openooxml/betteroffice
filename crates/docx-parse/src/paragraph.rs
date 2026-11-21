@@ -469,7 +469,6 @@ pub fn parse_document_paragraph_properties(
             bookmark_xml: None,
             bookmark_replay_xml: None,
             matches_local_names: run_properties.matches_local_names,
-            bookmark_hint: Default::default(),
         };
         value.run_properties = parse_run(&shell, theme, styles, None).run.formatting;
     }
@@ -1145,7 +1144,6 @@ pub(crate) fn normalize_deletion_element(element: &XmlElement) -> XmlElement {
         bookmark_xml: element.bookmark_xml.clone(),
         bookmark_replay_xml: element.bookmark_replay_xml.clone(),
         matches_local_names: element.matches_local_names,
-        bookmark_hint: element.bookmark_hint,
         children: element
             .children
             .iter()
