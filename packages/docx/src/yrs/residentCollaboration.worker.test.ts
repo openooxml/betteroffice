@@ -395,7 +395,7 @@ for (const failure of [
         const failed = replies.filter(reply => !reply.ok && reply.terminal);
         expect(failed).toHaveLength(1);
         expect(failed[0]?.collabUpdates?.clock).toBeUndefined();
-        expect(failed[0]?.collabUpdates?.updates.map(update => new Uint8Array(update))).toEqual(queued);
+        expect(failed[0]?.collabUpdates?.updates.map(update => [...new Uint8Array(update)])).toEqual(queued.map(update => [...update]));
         expect(delivered).toEqual(queued);
       } finally { diff.mockRestore(); vector.mockRestore(); }
     } finally { offQueued(); offDelivered(); client.destroy(); }
