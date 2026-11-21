@@ -10,7 +10,7 @@ import {
   type PeerlessEditSessionBinding,
   type UsePeerlessEditSessionOptions,
 } from '../hooks/usePeerlessEditSession';
-import { PeerlessInput, type PeerlessPasteRecorder } from './PeerlessInput';
+import { PeerlessInput, type PeerlessInputProps, type PeerlessPasteRecorder } from './PeerlessInput';
 import type { DocxClipboardFragment, DocxEditState } from '@betteroffice/docx/yrs';
 import type { PeerlessCompositionState } from './composition';
 import { captureSelectionIntent } from './selection';
@@ -270,7 +270,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, inputRef, onRe
   onRecoverableText(text: string): void;
   displayWindow: readonly [number, number];
   onDisplayWindowChange(start: number, end: number): void;
-  onClipboard?(cut: boolean): Promise<void>;
+  onClipboard?: PeerlessInputProps['onClipboard'];
   onPasteFragment?(fragment: DocxClipboardFragment, inputTime: number): boolean;
   pasteOptions?: boolean;
   onReplacePasteFragment?(fragment: DocxClipboardFragment, selection: import('@betteroffice/docx/yrs').DocxCommandSelection, variant?: 'plain' | 'merge'): PeerlessAdmissionResult | false;
@@ -1016,7 +1016,7 @@ export interface PeerlessPagedEditorProps {
   onReady?(binding: PeerlessEditSessionBinding): void;
   displayWindow?: readonly [number, number];
   onDisplayWindowChange?(window: readonly [number, number]): void;
-  onClipboard?(cut: boolean): Promise<void>;
+  onClipboard?: PeerlessInputProps['onClipboard'];
   onPasteFragment?(fragment: DocxClipboardFragment, inputTime: number): boolean;
   pasteOptions?: boolean;
   onReplacePasteFragment?(fragment: DocxClipboardFragment, selection: import('@betteroffice/docx/yrs').DocxCommandSelection, variant?: 'plain' | 'merge'): PeerlessAdmissionResult | false;
