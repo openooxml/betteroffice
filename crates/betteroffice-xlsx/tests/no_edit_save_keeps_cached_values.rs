@@ -386,6 +386,53 @@ fn keeps_unmodeled_array_members_without_scanning_formula_ranges() {
 }
 
 #[test]
+fn keeps_formula_less_cells_when_the_source_range_probe_budget_is_exhausted() {
+    const ROWS: u32 = 1_002;
+    const SHARED_REFS: u32 = 1_001;
+    let mut sheet_data = format!(
+        concat!(
+            r#"<row r="1"><c r="A1"><f>2+3</f></c>"#,
+            r#"<c r="B1"><f t="array" ref="B1:B2">_xlfn.SEQUENCE({})</f><v>1</v></c>"#,
+        ),
+        ROWS,
+    );
+    for index in 0..SHARED_REFS {
+        let col = col_to_letters(index + 2);
+        write!(
+            sheet_data,
+            r#"<c r="{col}1"><f t="shared" si="{index}" ref="{col}1:{col}{ROWS}">1</f><v>1</v></c>"#,
+        )
+        .unwrap();
+    }
+    sheet_data.push_str("</row>");
+    for row in 2..=ROWS {
+        write!(sheet_data, r#"<row r="{row}"><c r="B{row}" s="0"><v /></c></row>"#).unwrap();
+    }
+    let source = package_parts(&sheet_data, FULL_CALC);
+    let workbook = open_recalculated(&source);
+    for row in [2, ROWS] {
+        assert_eq!(
+            workbook.model().sheets[0]
+                .cell(CellRef::new(row - 1, 1))
+                .unwrap()
+                .value,
+            CellValue::Number {
+                value: f64::from(row),
+            },
+        );
+    }
+
+    xlsx_model::open_timing::begin();
+    let saved = saved_parts(&workbook);
+    let counts = xlsx_model::open_timing::finish().counts;
+    assert_eq!(counts.get("save_source_range_probes"), Some(&1_000_000));
+    assert_eq!(
+        sheet_xml(&saved),
+        sheet_xml(&source).replace("<f>2+3</f>", "<f>2+3</f><v>5</v>"),
+    );
+}
+
+#[test]
 fn keeps_every_part_byte_for_byte_when_all_caches_are_correct() {
     let source = package_parts(
         r#"<row r="1"><c r="A1"><f>2+3</f><v>5</v></c><c r="B1"><f>A1*2</f><v>10</v></c></row>"#,
@@ -393,6 +440,53 @@ fn keeps_every_part_byte_for_byte_when_all_caches_are_correct() {
     );
     let saved = saved_parts(&open_recalculated(&source));
     assert_eq!(saved, source);
+}
+
+#[test]
+fn keeps_a_grid_cache_when_a_worksheet_extension_reuses_the_address() {
+    let mut source = package_parts(
+        concat!(
+            r#"<row r="1"><c r="A1"><f>2+3</f><v>99</v></c>"#,
+            r#"<c r="B1"><f>4+5</f></c></row>"#,
+        ),
+        FULL_CALC,
+    );
+    insert_xml(
+        &mut source,
+        SHEET,
+        "</worksheet>",
+        concat!(
+            r#"<extLst><ext uri="urn:example"><x:sheetData xmlns:x="urn:example"><x:row r="1">"#,
+            r#"<x:c r="A1"><x:f>2+3</x:f><x:wrapper><x:v>99</x:v></x:wrapper></x:c>"#,
+            r#"</x:row></x:sheetData></ext></extLst>"#,
+        ),
+    );
+
+    let saved = saved_parts(&open_recalculated(&source));
+    assert_eq!(
+        sheet_xml(&saved),
+        sheet_xml(&source).replace("<f>4+5</f>", "<f>4+5</f><v>9</v>"),
+    );
+}
+
+#[test]
+fn keeps_a_cache_wrapped_in_alternate_content() {
+    let source = package_parts(
+        concat!(
+            r#"<row r="1"><c r="A1"><f>2+3</f>"#,
+            r#"<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">"#,
+            r#"<mc:Choice xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main" Requires="x14"><v>99</v></mc:Choice>"#,
+            r#"<mc:Fallback><v>99</v></mc:Fallback></mc:AlternateContent></c>"#,
+            r#"<c r="B1"><f>4+5</f></c></row>"#,
+        ),
+        FULL_CALC,
+    );
+
+    let saved = saved_parts(&open_recalculated(&source));
+    assert_eq!(
+        sheet_xml(&saved),
+        sheet_xml(&source).replace("<f>4+5</f>", "<f>4+5</f><v>9</v>"),
+    );
 }
 
 #[test]

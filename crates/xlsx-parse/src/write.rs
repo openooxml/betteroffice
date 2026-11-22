@@ -512,6 +512,8 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
     )
 }
 
+const SOURCE_RANGE_PROBE_LIMIT: u64 = 1_000_000;
+
 fn merge_source_caches(
     wb: &Workbook,
     package: &PreservedPackage,
@@ -582,11 +584,19 @@ fn merge_source_caches(
             .array_formulas()
             .map(|(_, range)| range)
             .chain(facts.additional_formula_ranges.iter().copied());
+        let mut covered = Vec::new();
+        let mut probes = 0;
         for range in source_ranges {
             if followers.is_empty() {
                 break;
             }
-            remove_covered_followers(&mut followers, range);
+            if !remove_covered_followers(&mut followers, range, &mut covered, &mut probes) {
+                followers.extend(covered);
+                break;
+            }
+        }
+        xlsx_model::open_timing! {
+            xlsx_model::open_timing::count("save_source_range_probes", probes);
         }
         for (row, col) in followers {
             let at = CellRef::new(row, col);
@@ -615,10 +625,19 @@ fn has_calculated_cache(value: &CellValue) -> bool {
     }
 }
 
-fn remove_covered_followers(followers: &mut BTreeSet<(RowId, ColId)>, range: CellRange) {
+fn remove_covered_followers(
+    followers: &mut BTreeSet<(RowId, ColId)>,
+    range: CellRange,
+    covered: &mut Vec<(RowId, ColId)>,
+    probes: &mut u64,
+) -> bool {
     let mut start = (range.start.row, range.start.col);
     let end = (range.end.row, range.end.col);
-    while start <= end {
+    while start <= end && !followers.is_empty() {
+        if *probes == SOURCE_RANGE_PROBE_LIMIT {
+            return false;
+        }
+        *probes += 1;
         let Some(&(row, col)) = followers.range(start..=end).next() else {
             break;
         };
@@ -629,8 +648,10 @@ fn remove_covered_followers(followers: &mut BTreeSet<(RowId, ColId)>, range: Cel
         } else {
             start = (row, col);
             followers.remove(&start);
+            covered.push(start);
         }
     }
+    true
 }
 
 #[doc(hidden)]

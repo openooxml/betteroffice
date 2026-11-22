@@ -263,7 +263,10 @@ impl SheetPatch<'_> {
             let Some(cell) = current else {
                 continue;
             };
-            if Some(cell) == original || !self.cell_facts.can_fill_source_cache(at, original) {
+            if Some(cell) == original
+                || !self.cell_facts.can_fill_source_cache(at, original)
+                || (source.formula.is_none() && cached_value_slot(data, source, true)?.is_none())
+            {
                 continue;
             }
 
@@ -1091,7 +1094,7 @@ impl SheetPatch<'_> {
 fn cached_value_slot(
     data: &[u8],
     cell: &SourceCell,
-    preserve_source_formula: bool,
+    preserve_source_caches: bool,
 ) -> Result<Option<Range<usize>>, ParseError> {
     let mut reader = Reader::from_reader(&data[cell.span.clone()]);
     reader.config_mut().expand_empty_elements = false;
@@ -1099,19 +1102,25 @@ fn cached_value_slot(
     let mut child_start = cell.tag.end;
     let mut formula_end = None;
     let mut value = None;
+    let mut in_value = false;
     loop {
         let before = cell.span.start + reader.buffer_position() as usize;
         let event = reader.read_event().map_err(xml_err)?;
         let after = cell.span.start + reader.buffer_position() as usize;
-        if !preserve_source_formula && let Event::Start(element) | Event::Empty(element) = &event {
-            if depth > 1 {
-                return Ok(None);
-            }
-            if depth == 1
-                && (!matches!(element.name().as_ref(), b"f" | b"v" | b"is")
-                    || attributes(element)?.iter().any(|attribute| {
-                        attribute.name == "xmlns" || attribute.name.starts_with("xmlns:")
-                    }))
+        if let Event::Start(element) | Event::Empty(element) = &event {
+            if preserve_source_caches {
+                if in_value
+                    || (depth == 1
+                        && !matches!(element.local_name().as_ref(), b"f" | b"v" | b"extLst"))
+                {
+                    return Ok(None);
+                }
+            } else if depth > 1
+                || (depth == 1
+                    && (!matches!(element.name().as_ref(), b"f" | b"v" | b"is")
+                        || attributes(element)?.iter().any(|attribute| {
+                            attribute.name == "xmlns" || attribute.name.starts_with("xmlns:")
+                        })))
             {
                 return Ok(None);
             }
@@ -1123,6 +1132,7 @@ fn cached_value_slot(
                     if element.local_name().as_ref() == b"is" {
                         return Ok(None);
                     }
+                    in_value = preserve_source_caches && element.local_name().as_ref() == b"v";
                 }
                 depth += 1;
             }
@@ -1138,6 +1148,7 @@ fn cached_value_slot(
                     break;
                 }
                 if depth == 1 {
+                    in_value = false;
                     match element.local_name().as_ref() {
                         b"f" if formula_end.replace(after).is_some() => return Ok(None),
                         b"v" if value.replace(child_start..after).is_some() => return Ok(None),
@@ -1145,11 +1156,15 @@ fn cached_value_slot(
                     }
                 }
             }
+            Event::Text(text) if in_value && !text.is_empty() => return Ok(None),
+            Event::CData(text) if in_value && !text.is_empty() => return Ok(None),
+            Event::GeneralRef(_) if in_value => return Ok(None),
             Event::Eof => break,
             _ => {}
         }
     }
-    Ok(formula_end.and_then(|end| match value {
+    let insertion = formula_end.or_else(|| preserve_source_caches.then_some(cell.tag.end));
+    Ok(insertion.and_then(|end| match value {
         Some(value) if value.start >= end => Some(value),
         None => Some(end..end),
         _ => None,
