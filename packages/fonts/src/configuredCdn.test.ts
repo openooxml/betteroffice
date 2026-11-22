@@ -736,6 +736,26 @@ test('configureFontCdn clears the cooldown and installed fonts remain available 
   }
 });
 
+test('independently loaded font CDN modules share the realm cooldown', async () => {
+  const page: typeof fontCdn = await import(new URL('./fontCdn.ts?page', import.meta.url).href);
+  const worker: typeof fontCdn = await import(new URL('./fontCdn.ts?worker', import.meta.url).href);
+  expect(page.loadImplicitFontAsset).not.toBe(worker.loadImplicitFontAsset);
+
+  const observed = observeCdnFailures();
+  const fetchFont = mock(async () => { throw new TypeError('Offline'); });
+  globalThis.fetch = fetchFont as unknown as typeof fetch;
+  const url = new URL(regularUrl);
+  const load = async (bytes: ArrayBuffer) => bytes;
+  try {
+    await expect(page.loadImplicitFontAsset(regular.file, url, 'latin', load)).rejects.toThrow('Offline');
+    await expect(worker.loadImplicitFontAsset(regular.file, url, 'latin', load)).rejects.toThrow('Offline');
+    expect(fetchFont).toHaveBeenCalledTimes(1);
+    expect(observed.warning).toHaveBeenCalledTimes(1);
+  } finally {
+    observed.restore();
+  }
+});
+
 test('a worker learns base failures independently across whole faces and CJK slices', async () => {
   const thread = new Worker(new URL('./testing/cdnWorker.ts', import.meta.url));
   const restore = withBrowserFontGlobals();
