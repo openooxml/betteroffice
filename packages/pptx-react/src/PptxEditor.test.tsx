@@ -25,7 +25,8 @@ import type {
 import type { PptxEditorApi, PptxEditorProps, PptxInThreadEditorProps, PptxWorkerViewerApi } from './PptxEditor';
 import { PptxEditor, pptxLegacyEditorLoader } from './PptxEditor';
 import { paintSelection, SelectionOverlay } from './PptxEditorContent';
-import { EditorToolbar, PptxCommandProvider, ToolbarCommandButton } from './index';
+import { definePptxPlugin, EditorToolbar, PptxCommandProvider, ToolbarCommandButton } from './index';
+import type { PptxPluginSelection } from './plugins/types';
 import { isMacPlatform } from './commands/descriptors';
 import { matchesChord } from '../../../shared/keyboard/match';
 import * as presenceRendering from './presence-rendering';
@@ -1188,6 +1189,55 @@ describe('PptxEditor host integration', () => {
 });
 
 describe('PptxEditor viewing transitions', () => {
+  it('turning readOnlySelection off during a text drag keeps the release from selecting', async () => {
+    const opened: PptxEditorApi[] = [];
+    let selection: PptxPluginSelection = null;
+    const plugin = definePptxPlugin({ id: 'test.selection', createState: () => null, onEvent(_context, event) {
+      if (event.type === 'selection-change') selection = event.selection;
+    } });
+    const props = { file: fixture, fonts: [{ family: 'Liberation Sans', bytes: fontBytes }], plugins: [plugin],
+      onReady: (api: PptxEditorApi) => opened.push(api) };
+    const view = render(<PptxEditor legacySyncApi experimentalWorkerOpen={false} {...props} readOnly />);
+    await waitFor(() => expect(opened).toHaveLength(1), { timeout: 15_000 });
+    const api = opened[0];
+    const canvas = view.getByTestId('pptx-slide-canvas');
+    const frame = api.handle.layoutSlide(0);
+    canvas.getBoundingClientRect = () => new DOMRect(0, 0, frame.width, frame.height);
+    canvas.setPointerCapture = () => {};
+    const textAt = (x: number, y: number) => {
+      const hit = api.getPositionAtPoint(x, y);
+      return hit?.kind === 'text' ? hit : null;
+    };
+    let point: { x: number; y: number; shapeId: string; storyId: string } | undefined;
+    for (let y = 0; y < frame.height && !point; y += 8) {
+      for (let x = 0; x < frame.width; x += 8) {
+        const hits = [[x, y], [x + 60, y], [x - 24, y], [x + 84, y], [x, y - 12], [x, y + 12]]
+          .map(([hx, hy]) => textAt(hx!, hy!));
+        const first = hits[0];
+        if (first && hits.every((hit) => hit?.storyId === first.storyId) && first.position !== hits[1]!.position) {
+          point = { x, y, shapeId: first.shapeId, storyId: first.storyId };
+          break;
+        }
+      }
+    }
+    expect(point).toBeDefined();
+    const range = () => selection?.target.kind === 'text' && selection.target.anchor !== selection.target.focus;
+    const at = (dx: number) => ({ isPrimary: true, button: 0, pointerId: 4, clientX: point!.x + dx, clientY: point!.y });
+    await act(async () => {
+      expect(api.selectText({ slide: 1, shapeId: point!.shapeId, storyId: point!.storyId, start: 0, end: 0 })).toBe(true);
+    });
+    fireEvent.pointerDown(canvas, at(0));
+    fireEvent.pointerMove(canvas, at(60));
+    await waitFor(() => expect(range()).toBe(true));
+    await act(async () => {
+      view.rerender(<PptxEditor legacySyncApi experimentalWorkerOpen={false} {...props} readOnly readOnlySelection={false} />);
+    });
+    await waitFor(() => expect(range()).toBe(false));
+    fireEvent.pointerUp(canvas, at(60));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+    expect(range()).toBe(false);
+  }, 60_000);
+
   it('keeps the document open and restores editing when viewing mode ends', async () => {
     const opened: PptxEditorApi[] = [];
     const onReady = (api: PptxEditorApi) => opened.push(api);

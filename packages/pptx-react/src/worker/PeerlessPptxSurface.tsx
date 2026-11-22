@@ -235,7 +235,7 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
   const shapes = usePeerlessShapeGestures(presentation?.store ?? null, { canvas, presentation });
   useEffect(() => {
     if (canvas.current) canvas.current.style.cursor = insertion.tool !== 'select' ? 'crosshair' : 'default';
-  }, [insertion.tool, review.diff]);
+  }, [insertion.tool, review.diff, selectable]);
   const save = useCallback(async () => {
     try {
       const value = api.current;

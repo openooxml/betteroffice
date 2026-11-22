@@ -585,6 +585,9 @@ export function PptxEditorContent({
   const selectable = !readOnly || readOnlySelection;
   useEffect(() => {
     if (selectable) return;
+    pointerGestureRef.current = null;
+    recentClickRef.current = null;
+    setDragPreview(null);
     setSelection(null);
     setShapeSelection(null);
     setHoverTarget(null);
