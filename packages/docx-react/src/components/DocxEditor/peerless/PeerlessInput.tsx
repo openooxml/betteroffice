@@ -127,35 +127,38 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       positionRef.current?.();
     });
   }, [admission, dropPasteRecord, setPasteRecord]);
-  /** Looks at the record again once the last command the admission tracks is answered. */
+  /**
+   * Looks at the record again once the last command the admission tracks is answered. Each command is waited
+   * for once: when it is answered and the admission is still busy, the next view update looks again.
+   */
   const awaitIdle = useCallback((record: PasteRecord): void => {
     const tail = admission.getSnapshot().tail;
     if (!tail || record.waiting === tail) return;
     record.waiting = tail;
     const again = () => {
       if (pasteRecordRef.current !== record || record.waiting !== tail) return;
-      record.waiting = null;
-      positionRef.current?.();
+      try {
+        positionRef.current?.();
+      } catch {
+        dropPasteRecord(record);
+      }
     };
     void tail.ack.then(again, again);
-  }, [admission]);
+  }, [admission, dropPasteRecord]);
   const choosePasteOption = useCallback((option: PasteFormattingOption): boolean => {
     const record = pasteRecordRef.current;
     if (!record || !record.offered.includes(option)) return false;
     const admitted = admission.getSnapshot();
     const view = viewStore.getSnapshot();
-    if (viewStore.getRecovering?.() === true || view.identity.incarnation !== record.incarnation) {
+    const caret = caretPoint(view.workerSelection);
+    if (viewStore.getRecovering?.() === true || view.identity.incarnation !== record.incarnation ||
+      (record.end && (view.version !== record.version || !caret || !samePoint(caret, record.end)))) {
       dropPasteRecord(record);
       return false;
     }
     if (!record.end || admitted.originalUnackedIntents !== 0 || admitted.pendingInputs !== 0) {
       record.queued = option;
       awaitIdle(record);
-      return false;
-    }
-    const caret = caretPoint(view.workerSelection);
-    if (view.version !== record.version || !caret || !samePoint(caret, record.end)) {
-      dropPasteRecord(record);
       return false;
     }
     const variant = option === 'merge'
@@ -253,7 +256,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
         }
       }
       const chosen = pasteRecordRef.current;
-      if (chosen?.queued && chosen.end) {
+      if (chosen?.queued && chosen.end && pasteOptionsRef.current.visible) {
         const admitted = admission.getSnapshot();
         if (admitted.originalUnackedIntents !== 0 || admitted.pendingInputs !== 0) awaitIdle(chosen);
         else {

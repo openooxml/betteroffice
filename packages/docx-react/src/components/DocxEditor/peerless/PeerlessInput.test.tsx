@@ -2183,6 +2183,84 @@ test('Paste Options appear when a command of the editor\'s own was sent behind t
   }
 });
 
+test('a waiting Paste Options choice does not spin on a command already answered while an earlier one is open', async () => {
+  const menu = mountPasteMenu({ replace: 'submit' });
+  try {
+    await menu.offer(boldFragment(), 'Bold', 'context menu');
+    sendFontEnvironment(menu.input);
+    sendFontEnvironment(menu.input);
+    menu.openMenu();
+    menu.choose('Keep Text Only');
+    await answer(menu.input, 2, 'noop');
+    await menu.idle();
+    expect(menu.control() !== null).toBe(true);
+    expect(menu.replaced).toEqual([]);
+    await answer(menu.input, 1, 'noop');
+    menu.present(menu.input.snapshot.version);
+    await waitFor(() => expect(menu.replaced.map(({ variant }) => variant)).toEqual(['plain']));
+  } finally {
+    menu.dispose();
+  }
+});
+
+test('a waiting Paste Options choice is not applied to a paste made after it', async () => {
+  const menu = mountPasteMenu({ replace: 'submit' });
+  try {
+    await menu.offer(boldFragment(), 'Bold', 'context menu');
+    sendFontEnvironment(menu.input);
+    menu.openMenu();
+    menu.choose('Keep Text Only');
+    pasteWith(menu.input, clipboardFragmentHtml(boldFragment()), 'Bold');
+    expect(menu.input.submitted).toEqual(['pasteFragment', 'setFontEnvironment', 'pasteFragment']);
+    await answer(menu.input, 1, 'noop');
+    await answer(menu.input, 2, 'applied', { anchor: PASTE_END, focus: PASTE_END });
+    menu.present(menu.input.snapshot.version + 1);
+    await waitFor(() => expect(menu.control() !== null).toBe(true));
+    await menu.idle();
+    expect(menu.input.submitted).toEqual(['pasteFragment', 'setFontEnvironment', 'pasteFragment']);
+    expect(menu.replaced).toEqual([]);
+  } finally {
+    menu.dispose();
+  }
+});
+
+test('a Paste Options choice waiting behind the choice before it is applied when a command of the editor\'s own passes in between', async () => {
+  const menu = mountPasteMenu({ replace: 'submit' });
+  try {
+    await menu.offer(boldFragment(), 'Bold', 'context menu');
+    menu.openMenu();
+    menu.choose('Merge Formatting');
+    sendFontEnvironment(menu.input);
+    menu.openMenu();
+    menu.choose('Keep Text Only');
+    await answer(menu.input, 1, 'applied', { anchor: PASTE_END, focus: PASTE_END });
+    menu.present(menu.input.snapshot.version + 1);
+    expect(menu.replaced.map(({ variant }) => variant)).toEqual(['merge']);
+    await answer(menu.input, 2, 'noop');
+    await waitFor(() => expect(menu.replaced.map(({ variant }) => variant)).toEqual(['merge', 'plain']));
+    expect(menu.control() !== null).toBe(true);
+  } finally {
+    menu.dispose();
+  }
+});
+
+test('a waiting Paste Options choice is dropped with the control when the document version moves', async () => {
+  const menu = mountPasteMenu({ replace: 'submit' });
+  try {
+    await menu.offer(boldFragment(), 'Bold', 'context menu');
+    sendFontEnvironment(menu.input);
+    menu.openMenu();
+    menu.choose('Keep Text Only');
+    menu.present(menu.input.snapshot.version + 1);
+    await answer(menu.input, 1, 'noop');
+    await menu.idle();
+    expect(menu.control() !== null).toBe(false);
+    expect(menu.replaced).toEqual([]);
+  } finally {
+    menu.dispose();
+  }
+});
+
 test('with paste options off a keyboard paste of an accepted fragment never reads the clipboard plain text', () => {
   const choices = mountPasteMenu({ pasteOptions: false, replace: 'refuse' });
   const reads: string[] = [];
