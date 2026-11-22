@@ -1,9 +1,8 @@
-/** An installed font pack that cannot be used, so its faces are substituted. */
+/** A font pack that cannot be used, so its faces are substituted. */
 export interface FontPackDiagnostic {
   /** The add-on package: `@betteroffice/fonts-latin`, `-intl` or `-cjk`. */
   pack: 'latin' | 'intl' | 'cjk';
-  /** `version-mismatch`: another release is installed; `missing-file`: files are absent; `invalid-manifest`: its manifest cannot be read. */
-  reason: 'version-mismatch' | 'missing-file' | 'invalid-manifest';
+  reason: 'version-mismatch' | 'missing-file' | 'invalid-manifest' | 'cdn-unavailable';
   /** A sentence naming the package and what is wrong. */
   detail: string;
 }

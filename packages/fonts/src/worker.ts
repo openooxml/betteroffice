@@ -1,4 +1,4 @@
-import { getFontCdnConfiguration } from '../../../shared/office-session/fontCdn';
+import { workerFontCdnConfiguration } from './fontCdn';
 import { createFontRuntime, type FontPackLookup } from './fontRuntime';
 import { workerFontAssets } from './workerAssets';
 
@@ -12,7 +12,7 @@ const lookup: FontPackLookup = async (pack) => {
       Object.fromEntries(Object.entries(assets.urls).map(([file, href]) => [file, () => new URL(href)])),
       null,
     ),
-    cdn: getFontCdnConfiguration() ?? assets?.cdn,
+    cdn: workerFontCdnConfiguration(assets),
   };
 };
 

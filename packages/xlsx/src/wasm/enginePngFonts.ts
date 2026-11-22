@@ -14,20 +14,6 @@ const loadFonts = (): Promise<Fonts> => (fontsModule ??= importFonts().catch((er
   throw error;
 }));
 
-const loaded = new Map<string, Promise<Uint8Array>>();
-
-function load(fonts: Fonts, face: BundledFontFace): Promise<Uint8Array> {
-  let pending = loaded.get(face.file);
-  if (!pending) {
-    const started = fonts.loadBundledFontBytes(face, undefined, { decoder: decodeFontFace, strict: true })
-      .then((buffer) => new Uint8Array(buffer));
-    started.catch(() => { if (loaded.get(face.file) === started) loaded.delete(face.file); });
-    loaded.set(face.file, started);
-    pending = started;
-  }
-  return pending;
-}
-
 /** An installed face, or undefined for one whose package is not installed. */
 async function installedFace(fonts: Fonts, face: BundledFontFace | undefined): Promise<BundledFontFace | undefined> {
   return face && await fonts.bundledFaceInstalled(face).catch(() => true) ? face : undefined;
@@ -41,7 +27,9 @@ async function firstFace(fonts: Fonts, font: PngRunFont): Promise<BundledFontFac
   const primary = await installedFace(fonts, fonts.resolveBundledFamilyFace(font.family, font.bold, font.italic));
   if (primary) return primary;
   const glyph = await installedFace(fonts, fonts.resolveGlyphFallbackFace(font.family, font.bold, font.italic, 'word'));
-  return glyph ?? fonts.resolveLastResortChoice(font.family, font.bold, font.italic, 'word').face;
+  if (glyph) return glyph;
+  const last = await installedFace(fonts, fonts.resolveLastResortChoice(font.family, font.bold, font.italic, 'word').face);
+  return last ?? fonts.BASE_LATIN_FONTS.find((face) => (face.weight === 700) === font.bold && (face.style === 'italic') === font.italic)!;
 }
 
 const sameFace = (a: BundledFontFace, b: BundledFontFace) => a.family === b.family && a.weight === b.weight && a.style === b.style;
@@ -105,10 +93,14 @@ export async function defaultSheetFaces(requests: readonly SheetFontRequest[], s
   signal?.throwIfAborted();
   const loading = loadFonts().then(async (manager) => {
     const chains = await sheetChains(manager, requests);
-    const bytes = (face: BundledFontFace, family: string) => load(manager, face).catch((error: unknown) => {
-      const reason = error instanceof Error ? error.message : String(error);
-      throw new PngExportError('font-unavailable', `${face.family} for ${family} could not load: ${reason}`);
-    });
+    const bytes = async (face: BundledFontFace, family: string) => {
+      try {
+        return new Uint8Array(await manager.loadBundledFontBytes(face, undefined, { decoder: decodeFontFace, strict: true }));
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        throw new PngExportError('font-unavailable', `${face.family} for ${family} could not load: ${reason}`);
+      }
+    };
     const own = (face: BundledFontFace) => ({ bold: face.weight === 700, italic: face.style === 'italic' });
     const shared = new Map<string, Promise<PngFontFace>>();
     const fallbackFace = (face: BundledFontFace, family: string) => {

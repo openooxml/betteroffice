@@ -2,6 +2,7 @@ import type { FontDecoder } from './decode';
 import { absoluteHref } from './assetHref';
 import { chunkEntries, parseSkeleton, textChunks, type SliceSkeleton } from './slices';
 import { sha256 } from './sha256';
+import { implicitCdnFailure, markImplicitCdnUnavailable } from './fontCdn';
 
 /**
  * A sliced face that loads its outlines as they are needed. Its layout tables
@@ -34,6 +35,10 @@ export interface ProgressiveFontFace {
   complete(): boolean;
 }
 
+type SliceAssetUrl = ((file: string) => Promise<URL>) & {
+  implicitCdn?(file: string): boolean;
+};
+
 /**
  * Where a sliced face's files are and how to decode them: what a font loader
  * carries as `slices`, which `openSlicedFace` from `@betteroffice/fonts/progressive` opens.
@@ -44,10 +49,12 @@ export interface SliceLocation {
   /** The asset base the files resolve against; part of the shared face's identity. */
   base: string;
   /** The URL of a pack file by its manifest path. */
-  url(file: string): Promise<URL>;
+  url: SliceAssetUrl;
   timeoutMs?: number;
   /** @internal Snapshot the asset URLs for one open and its outline loads. */
   prepareUrls?(): Promise<Pick<SliceLocation, 'base' | 'url' | 'timeoutMs'> & Partial<Pick<SliceLocation, 'decode'>>>;
+  /** @internal */
+  loadWholeForExport?(): Promise<ArrayBuffer>;
   /** @internal */
   requestTimeoutMs?(url: URL): number | undefined;
   /** Decompresses a zstd file to at most `maxOutput` bytes. */
@@ -88,7 +95,7 @@ export interface SliceTransport {
   /** The bytes of a pack file by its manifest path. */
   read(file: string): Promise<ArrayBuffer>;
   /** Where `read` fetches a pack file from, for another realm to fetch the same files. */
-  url?(file: string): Promise<URL>;
+  url?: SliceAssetUrl;
   /** The fetch timeout `read` uses, which another realm reading the same files keeps. */
   timeoutMs?: number;
   /** Decompresses a zstd file to at most `maxOutput` bytes. */
@@ -125,26 +132,42 @@ export function sliceSourceOf(face: ProgressiveFontFace): Promise<SliceSource> |
   return source;
 }
 
-async function readFile(transport: SliceTransport, entry: SliceFile): Promise<Uint8Array> {
-  const encoded = await transport.read(entry.file);
-  if (encoded.byteLength !== entry.encodedLength) {
-    throw new Error(`Font slice ${entry.file} has ${encoded.byteLength} encoded bytes; expected ${entry.encodedLength}`);
+async function checkAsset<T>(transport: SliceTransport, file: string, load: () => Promise<T>): Promise<T> {
+  if (!transport.url?.implicitCdn?.(file)) return load();
+  const failed = implicitCdnFailure('cjk');
+  if (failed) throw failed;
+  try { return await load(); }
+  catch (error) {
+    if (error instanceof WebAssembly.RuntimeError) throw error;
+    throw markImplicitCdnUnavailable('cjk', error);
   }
-  const decoded = await transport.decode(encoded, entry.byteLength);
-  if (decoded.byteLength !== entry.byteLength) {
-    throw new Error(`Font slice ${entry.file} has ${decoded.byteLength} bytes; expected ${entry.byteLength}`);
-  }
-  if (await sha256(decoded) !== entry.sha256) throw new Error(`Font slice ${entry.file} SHA-256 mismatch`);
-  return new Uint8Array(decoded);
+}
+
+function readFile(transport: SliceTransport, entry: SliceFile): Promise<Uint8Array> {
+  return checkAsset(transport, entry.file, async () => {
+    const encoded = await transport.read(entry.file);
+    if (encoded.byteLength !== entry.encodedLength) {
+      throw new Error(`Font slice ${entry.file} has ${encoded.byteLength} encoded bytes; expected ${entry.encodedLength}`);
+    }
+    const decoded = await transport.decode(encoded, entry.byteLength);
+    if (decoded.byteLength !== entry.byteLength) {
+      throw new Error(`Font slice ${entry.file} has ${decoded.byteLength} bytes; expected ${entry.byteLength}`);
+    }
+    if (await sha256(decoded) !== entry.sha256) throw new Error(`Font slice ${entry.file} SHA-256 mismatch`);
+    return new Uint8Array(decoded);
+  });
 }
 
 /** @internal Loads a sliced face's index, skeleton and core; chunks follow on demand. */
 export async function openProgressiveFace(ref: SliceRef, transport: SliceTransport): Promise<ProgressiveFontFace> {
   if (ref.format !== 1) throw new Error(`Unsupported font slice format ${ref.format}`);
-  const indexBytes = await transport.read(ref.index);
-  if (await sha256(indexBytes) !== ref.indexSha256) throw new Error(`Font slice index ${ref.index} SHA-256 mismatch`);
-  const index = JSON.parse(new TextDecoder().decode(indexBytes)) as SliceIndex;
-  if (index.format !== 1) throw new Error(`Unsupported font slice index format in ${ref.index}`);
+  const index = await checkAsset(transport, ref.index, async () => {
+    const indexBytes = await transport.read(ref.index);
+    if (await sha256(indexBytes) !== ref.indexSha256) throw new Error(`Font slice index ${ref.index} SHA-256 mismatch`);
+    const index = JSON.parse(new TextDecoder().decode(indexBytes)) as SliceIndex;
+    if (index.format !== 1) throw new Error(`Unsupported font slice index format in ${ref.index}`);
+    return index;
+  });
   const [skeletonBytes, core] = await Promise.all([readFile(transport, index.skeleton), readFile(transport, index.core)]);
   const skeleton: SliceSkeleton = parseSkeleton(skeletonBytes);
   const files = new Map<number, SliceFile>(index.chunks.map((chunk) => [chunk.id!, chunk]));

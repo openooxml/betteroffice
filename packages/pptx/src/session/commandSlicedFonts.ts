@@ -1,3 +1,5 @@
+import type { SliceLocation } from '@betteroffice/fonts';
+import { PngExportError } from '../../../../shared/office-session/pngExportError';
 import { readFontTraits } from '../../../../shared/fontTraits';
 import type { PaintFontCoverage } from '../render/canvas';
 
@@ -37,10 +39,12 @@ export function slicedFacesSupported(
   return /(?:Chrome|Chromium|Firefox)\//.test(userAgent) && !/\b(?:iPhone|iPad|iPod|CriOS|FxiOS)\b/.test(userAgent);
 }
 
+type WholeFaceLoader = (() => Promise<ArrayBuffer>) & { slices?: SliceLocation };
+
 interface Entry {
   family: string;
   face: SlicedFontFace;
-  whole(): Promise<ArrayBuffer>;
+  whole: WholeFaceLoader;
   wholeBytes?: ArrayBuffer;
   wholeLoad?: Promise<ArrayBuffer>;
   /** `chunks` is what the revision's bytes hold; a whole face holds everything. */
@@ -169,10 +173,21 @@ export function createSlicedFontFaces(quietMs = FILL_QUIET_MS) {
   }
 
   /** Every sliced family with its complete bytes, for paints that do not prepare their text. Rejects if one cannot load. */
-  function wholeFaces(names: readonly string[]): Promise<{ family: string; bytes: ArrayBuffer }[]> {
+  function wholeFaces(names: readonly string[], strict = false): Promise<{ family: string; bytes: ArrayBuffer }[]> {
     return Promise.all(names.flatMap((family) => {
       const entry = entries.get(keyOf(family)) ?? retired.get(keyOf(family))?.entry;
-      return entry ? [wholeBytes(entry).then((bytes) => ({ family: entry.family, bytes: bytes.slice(0) }))] : [];
+      if (!entry) return [];
+      const load = async () => {
+        try {
+          const bytes = await (strict ? entry.whole.slices?.loadWholeForExport?.() ?? wholeBytes(entry) : wholeBytes(entry));
+          return { family: entry.family, bytes: bytes.slice(0) };
+        } catch (error) {
+          if (!strict) throw error;
+          const reason = error instanceof Error ? error.message : String(error);
+          throw new PngExportError('font-unavailable', `${entry.family} could not load: ${reason}`);
+        }
+      };
+      return [load()];
     }));
   }
 
@@ -222,7 +237,7 @@ export function createSlicedFontFaces(quietMs = FILL_QUIET_MS) {
       for (;;) {
         const missing = exportFamilies().filter((family) => !complete.has(family));
         if (!missing.length) return byFamily;
-        for (const { family, bytes } of await wholeFaces(missing)) {
+        for (const { family, bytes } of await wholeFaces(missing, true)) {
           const whole = new Uint8Array(bytes);
           handle.replaceExportFace(family, whole, (face) => keepsExportFace(family, face));
           if (entries.has(keyOf(family))) byFamily.push({ family, bold: false, italic: false, bytes: whole });
@@ -240,7 +255,7 @@ export function createSlicedFontFaces(quietMs = FILL_QUIET_MS) {
       }));
       return faces.filter((face): face is NonNullable<typeof face> => face !== undefined);
     },
-    add(family: string, face: SlicedFontFace, whole: () => Promise<ArrayBuffer>): void {
+    add(family: string, face: SlicedFontFace, whole: WholeFaceLoader): void {
       if (!disposed && !entries.has(keyOf(family))) {
         entries.set(keyOf(family), { family, face, whole, installed: [] });
       }

@@ -1,4 +1,5 @@
 import type { BundledFontFace, BundledFontScript } from '@betteroffice/fonts';
+import { fontCdnCacheKey } from '../../../../shared/office-session/fontCdn';
 import { importFonts } from '../../../../shared/office-session/fontModules';
 import { PngExportError } from '../../../../shared/office-session/pngExportError';
 import type { RequestedFontFace } from '../../../../shared/pptxDefaultFonts';
@@ -19,6 +20,7 @@ const loadFonts = (): Promise<Fonts> => (fontsModule ??= importFonts().catch((er
 
 interface Exporter {
   renderer: PptxRenderer;
+  fontCdn: string | undefined;
   measured: ExportFace[];
   sources: Uint8Array[];
   faces: ExportFace[];
@@ -34,28 +36,16 @@ interface Exporter {
 const exporters = new WeakMap<object, Exporter>();
 /** Loading rounds an export waits through while edits keep asking for new faces. */
 const MAX_FONT_ROUNDS = 4;
-const loaded = new Map<string, Promise<Uint8Array>>();
 
 const familyKey = (family: string) => family.trim().toLowerCase();
 const faceKey = (family: string, bold: boolean, italic: boolean) => JSON.stringify([familyKey(family), bold, italic]);
 const isBold = (face: BundledFontFace) => face.weight === 700;
 const isItalic = (face: BundledFontFace) => face.style === 'italic';
 
-function load(fonts: Fonts, face: BundledFontFace): Promise<Uint8Array> {
-  let pending = loaded.get(face.file);
-  if (!pending) {
-    const started = fonts.loadBundledFontBytes(face, undefined, { decoder: decodeFontFace, strict: true }).then((buffer) => new Uint8Array(buffer));
-    started.catch(() => { if (loaded.get(face.file) === started) loaded.delete(face.file); });
-    loaded.set(face.file, started);
-    pending = started;
-  }
-  return pending;
-}
-
 /** A face the slide needs, or the error the native export gives when it cannot load. */
 async function needed(fonts: Fonts, face: BundledFontFace, family: string): Promise<Uint8Array> {
   try {
-    return await load(fonts, face);
+    return new Uint8Array(await fonts.loadBundledFontBytes(face, undefined, { decoder: decodeFontFace, strict: true }));
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     throw new PngExportError('font-unavailable', `${face.family} for ${family} could not load: ${reason}`);
@@ -72,9 +62,9 @@ function register(exporter: Exporter, face: PptxFontFace, fallback: boolean): vo
   (fallback ? exporter.fallback : exporter.primary).add(faceKey(face.family, bold, italic));
 }
 
-function create(measured: ExportFace[], added: ReadonlyArray<PptxFontFace>): Exporter {
+function create(measured: ExportFace[], added: ReadonlyArray<PptxFontFace>, fontCdn: string | undefined): Exporter {
   const exporter: Exporter = {
-    renderer: new PptxRenderer(), measured, sources: measured.map((face) => face.bytes), faces: [],
+    renderer: new PptxRenderer(), fontCdn, measured, sources: measured.map((face) => face.bytes), faces: [],
     owned: new Set(), primary: new Set(), fallback: new Set(), requested: new Set(),
     queue: Promise.resolve(), users: 0, released: false,
   };
@@ -115,6 +105,7 @@ async function resolve(fonts: Fonts, request: RequestedFontFace): Promise<Bundle
   push(await installedFace(fonts, fonts.resolveGlyphFallbackFace(request.family, request.bold, request.italic, 'powerpoint')));
   const last = fonts.resolveLastResortChoice(request.family, request.bold, request.italic, 'powerpoint');
   if (!last.onlyIfPrimaryFails || !primary) push(await installedFace(fonts, last.face));
+  if (!faces.length) push(fonts.BASE_LATIN_FONTS.find((face) => isBold(face) === request.bold && isItalic(face) === request.italic));
   return faces;
 }
 
@@ -189,13 +180,14 @@ export async function defaultFontLayout(
   slideIndex(document, slideId);
   const known = new Set(measured.map((face) => familyKey(face.family)));
   const supplied = added?.filter((face) => !known.has(familyKey(face.family))) ?? [];
+  const fontCdn = fontCdnCacheKey();
   let exporter = supplied.length ? undefined : exporters.get(document);
-  if (exporter && !current(exporter, measured)) {
+  if (exporter && (fontCdn === undefined || exporter.fontCdn !== fontCdn || !current(exporter, measured))) {
     releaseDefaultFontLayout(document);
     exporter = undefined;
   }
   if (!exporter) {
-    exporter = create(measured, supplied);
+    exporter = create(measured, supplied, fontCdn);
     if (supplied.length) exporter.released = true;
     else exporters.set(document, exporter);
   }

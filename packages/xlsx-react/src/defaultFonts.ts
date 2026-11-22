@@ -1,3 +1,4 @@
+import { fontCdnCacheKey } from '../../../shared/office-session/fontCdn';
 import { PngExportError, type DisplayList, type WorkbookSession, type XlsxFontFace, type XlsxPngFont } from '@betteroffice/xlsx';
 import type { BundledFontFace } from '@betteroffice/fonts';
 import type { RemoteFontProvider } from '@betteroffice/fonts/remote';
@@ -175,7 +176,7 @@ export function createDefaultFontPainter(
         absentFaces.clear();
         activeFontSet = fontSet;
       }
-      const key = JSON.stringify([fontFamily.trim().toLowerCase(), face.weight, face.style]);
+      const key = JSON.stringify([fontFamily.trim().toLowerCase(), face.weight, face.style, fontCdnCacheKey()]);
       if (absentFaces.has(key)) return false;
       let registration = registeredFaces.get(key);
       const shared = registration !== undefined;
@@ -214,11 +215,12 @@ export function createDefaultFontPainter(
     || typeof document === 'undefined' || typeof FontFace === 'undefined' || !document.fonts;
 
   function faceKeys(displayList: DisplayList) {
+    const fontCdn = fontCdnCacheKey();
     const faces = new Map<string, { fontFamily: string; bold: boolean; italic: boolean; characters: Set<string> }>();
     for (const command of displayList.commands) {
       if (command.op !== 'text' || !command.fontFamily || command.chart) continue;
       const { fontFamily, bold = false, italic = false } = command;
-      const key = JSON.stringify([fontFamily.trim().toLowerCase(), bold, italic]);
+      const key = JSON.stringify([fontFamily.trim().toLowerCase(), bold, italic, fontCdn]);
       let face = faces.get(key);
       if (!face) faces.set(key, face = { fontFamily, bold, italic, characters: new Set() });
       for (const character of command.text ?? '') face.characters.add(character);
@@ -342,7 +344,7 @@ export async function exportFaces(
 ): Promise<XlsxFontFace[]> {
   if (fonts.length === 0) return [];
   const bundled = await xlsxDefaultFontManager.load();
-  const source = bundled.createFontProvider(undefined, decoder ? { decoder, retain: false } : undefined);
+  const source = bundled.createFontProvider(undefined, { ...(decoder ? { decoder, retain: false } : {}), strict: true });
   const faces: XlsxFontFace[] = [];
   for (const font of fonts) {
     const face = bundled.resolveMetricCompatFace(font.family, font.bold, font.italic)
@@ -350,7 +352,8 @@ export async function exportFaces(
     const load = face && (source.resolve(font.family, font.bold, font.italic) ?? source.resolveFamily(font.family, font.bold, font.italic));
     if (!face || !load) continue;
     let bytes: ArrayBuffer;
-    try { bytes = await load(); } catch {
+    try { bytes = await load(); } catch (error) {
+      if (face.script?.startsWith('cjk-') && bundled.isMissingFontAddon?.(error)) continue;
       throw new PngExportError('font-unavailable', `The font "${font.family}" could not load, so the sheet was not exported with a substitute.`);
     }
     if (bytes.byteLength !== face.byteLength) continue;
