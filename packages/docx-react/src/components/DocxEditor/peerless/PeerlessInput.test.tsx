@@ -2261,6 +2261,59 @@ test('a waiting Paste Options choice is dropped with the control when the docume
   }
 });
 
+test('a Paste Options choice at a document version that is no longer the paste\'s is dismissed at once, also while a command is unanswered', async () => {
+  const menu = mountPasteMenu({ replace: 'submit' });
+  try {
+    await menu.offer(boldFragment(), 'Bold', 'context menu');
+    sendFontEnvironment(menu.input);
+    menu.openMenu();
+    menu.input.snapshot.version += 1;
+    menu.choose('Keep Text Only');
+    await waitFor(() => expect(menu.control() !== null).toBe(false));
+    await answer(menu.input, 1, 'noop');
+    await menu.idle();
+    expect(menu.replaced).toEqual([]);
+  } finally {
+    menu.dispose();
+  }
+});
+
+test('a waiting Paste Options choice waits once for an answered command while a composition holds another back, and is applied when both are over', async () => {
+  const menu = mountPasteMenu({ replace: 'submit' });
+  try {
+    await menu.offer(boldFragment(), 'Bold', 'context menu');
+    sendFontEnvironment(menu.input);
+    const awaited = menu.input.entries[1]!.ticket.ack;
+    let subscriptions = 0;
+    const then = awaited.then.bind(awaited) as unknown as (...handlers: unknown[]) => Promise<unknown>;
+    (awaited as { then: unknown }).then = (...handlers: unknown[]) => {
+      subscriptions += 1;
+      return then(...handlers);
+    };
+    const composition = menu.input.admission.reserveComposition();
+    expect(sendFontEnvironment(menu.input).status).toBe('held');
+    menu.openMenu();
+    menu.choose('Keep Text Only');
+    const armed = subscriptions;
+    expect(armed).toBeGreaterThanOrEqual(1);
+    await answer(menu.input, 1, 'noop');
+    await menu.idle();
+    expect(subscriptions).toBe(armed);
+    expect(menu.input.admission.getSnapshot().originalUnackedIntents).toBe(1);
+    expect(menu.control() !== null).toBe(true);
+    expect(menu.replaced).toEqual([]);
+    await act(async () => { menu.input.admission.settleComposition(composition.slot, null); });
+    expect(menu.input.submitted).toEqual(['pasteFragment', 'setFontEnvironment', 'setFontEnvironment']);
+    expect(menu.replaced).toEqual([]);
+    await answer(menu.input, 2, 'noop');
+    await waitFor(() => expect(menu.replaced.map(({ variant }) => variant)).toEqual(['plain']));
+    expect(subscriptions).toBe(armed);
+    expect(menu.control() !== null).toBe(true);
+  } finally {
+    menu.dispose();
+  }
+});
+
 test('with paste options off a keyboard paste of an accepted fragment never reads the clipboard plain text', () => {
   const choices = mountPasteMenu({ pasteOptions: false, replace: 'refuse' });
   const reads: string[] = [];

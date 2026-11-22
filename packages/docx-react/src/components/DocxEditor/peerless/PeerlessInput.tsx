@@ -36,6 +36,8 @@ type PasteRecord = {
   queued: PasteFormattingOption | null;
   /** The command whose answer the record is waiting for. */
   waiting: CommandTicket | null;
+  /** The composition whose end the record is waiting for. */
+  composition: number | null;
 };
 
 function samePoint(a: PastePoint, b: PastePoint): boolean {
@@ -128,31 +130,40 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
     });
   }, [admission, dropPasteRecord, setPasteRecord]);
   /**
-   * Looks at the record again once the last command the admission tracks is answered. Each command is waited
-   * for once: when it is answered and the admission is still busy, the next view update looks again.
+   * Looks at the record again when the admission may have become idle: once the last command it tracks is
+   * answered, and once a composition that holds commands back has ended. Each command and each composition is
+   * waited for once, so a wait cannot be set up again on something already over; until the next of them, or the
+   * next view update, the record stays as it is.
    */
   const awaitIdle = useCallback((record: PasteRecord): void => {
-    const tail = admission.getSnapshot().tail;
-    if (!tail || record.waiting === tail) return;
-    record.waiting = tail;
-    const again = () => {
-      if (pasteRecordRef.current !== record || record.waiting !== tail) return;
+    const look = (current: () => boolean) => () => {
+      if (pasteRecordRef.current !== record || !current()) return;
       try {
         positionRef.current?.();
       } catch {
-        dropPasteRecord(record);
+        const live = pasteRecordRef.current;
+        if (live) dropPasteRecord(live);
       }
     };
-    void tail.ack.then(again, again);
+    const { tail, compositionSlot } = admission.getSnapshot();
+    if (tail && record.waiting !== tail) {
+      record.waiting = tail;
+      const again = look(() => record.waiting === tail);
+      void tail.ack.then(again, again);
+    }
+    if (compositionSlot !== null && record.composition !== compositionSlot && admission.whenCompositionSettled) {
+      record.composition = compositionSlot;
+      const again = look(() => record.composition === compositionSlot);
+      void admission.whenCompositionSettled().then(again, again);
+    }
   }, [admission, dropPasteRecord]);
   const choosePasteOption = useCallback((option: PasteFormattingOption): boolean => {
     const record = pasteRecordRef.current;
     if (!record || !record.offered.includes(option)) return false;
     const admitted = admission.getSnapshot();
     const view = viewStore.getSnapshot();
-    const caret = caretPoint(view.workerSelection);
     if (viewStore.getRecovering?.() === true || view.identity.incarnation !== record.incarnation ||
-      (record.end && (view.version !== record.version || !caret || !samePoint(caret, record.end)))) {
+      (record.end && view.version !== record.version)) {
       dropPasteRecord(record);
       return false;
     }
@@ -161,13 +172,18 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       awaitIdle(record);
       return false;
     }
+    const caret = caretPoint(view.workerSelection);
+    if (!caret || !samePoint(caret, record.end)) {
+      dropPasteRecord(record);
+      return false;
+    }
     const variant = option === 'merge'
       ? mergeFormattingFragment(record.fragment)
       : option === 'text-only'
         ? plainTextClipboardFragment(clipboardFragmentPlainText(record.fragment))
         : structuredClone(record.fragment);
     const end = record.end;
-    const replacing: PasteRecord = { ...record, ticket: null, end: null, reveal: 'anchor', landed: null, queued: null, waiting: null };
+    const replacing: PasteRecord = { ...record, ticket: null, end: null, reveal: 'anchor', landed: null, queued: null, waiting: null, composition: null };
     setPasteRecord(replacing);
     const outcome = callbacks.current.onReplacePasteFragment?.(variant, {
       anchor: { ...end },
@@ -199,7 +215,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
     awaitPaste({
       fragment: structuredClone(fragment), offered, ticket: null, end: null,
       version: view.version, incarnation: view.identity.incarnation, reveal: 'show',
-      landed: null, queued: null, waiting: null,
+      landed: null, queued: null, waiting: null, composition: null,
     }, submission);
   }, [awaitPaste, viewStore]);
   const pasteRecorder = props.pasteRecorder;
@@ -256,7 +272,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
         }
       }
       const chosen = pasteRecordRef.current;
-      if (chosen?.queued && chosen.end && pasteOptionsRef.current.visible) {
+      if (chosen?.queued && chosen.end && callbacks.current.pasteOptions !== false) {
         const admitted = admission.getSnapshot();
         if (admitted.originalUnackedIntents !== 0 || admitted.pendingInputs !== 0) awaitIdle(chosen);
         else {
