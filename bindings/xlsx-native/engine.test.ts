@@ -630,10 +630,10 @@ describe('xlsx native engine parity', () => {
     }
   });
 
-  test('a flagged workbook keeps a stale array-formula cache on both engines', async () => {
+  test('a flagged workbook saves unchanged without an edit on both engines', async () => {
     const source = await calculationBook(
       '<calcPr fullCalcOnLoad="1"/>',
-      '<row r="2"><c r="C2"><f t="array" ref="C2:C3">1</f><v>1</v></c></row>'
+      '<row r="2"><c r="C2"><f t="array" ref="C2:C3">1</f><v>1</v></c><c r="D2"><f>2+3</f><v/></c></row>'
       + '<row r="3"><c r="C3"><v>100</v></c></row>',
     );
     const opens: Array<[string, (engine: typeof WasmDocument) => EngineDocument]> = [
@@ -647,10 +647,8 @@ describe('xlsx native engine parity', () => {
         const wasmSaved = new Uint8Array(wasmDoc.saveBytes());
         const nativeSaved = new Uint8Array(nativeDoc.saveBytes());
         expect(nativeSaved, name).toEqual(wasmSaved);
-        for (const saved of [wasmSaved, nativeSaved]) {
-          const sheet = await (await JSZip.loadAsync(saved)).file('xl/worksheets/sheet1.xml')!.async('string');
-          expect(sheet.match(/<c r="C3"[^>]*>.*?<\/c>/)?.[0], name).toContain('<v>100</v>');
-        }
+        expect(nativeSaved, name).toEqual(new Uint8Array(source));
+        expect(new Uint8Array(nativeDoc.saveBytes()), name).toEqual(new Uint8Array(source));
       } finally {
         wasmDoc.free();
         nativeDoc.free();
@@ -665,9 +663,7 @@ describe('xlsx native engine parity', () => {
     const source = await calculationBook('<calcPr fullCalcOnLoad="1"/>', cells);
     const document = native.XlsxDocument.open(source) as EngineDocument;
     try {
-      const saved = await JSZip.loadAsync(document.saveBytes());
-      const sheet = await saved.file('xl/worksheets/sheet1.xml')!.async('string');
-      expect(sheet).toContain(`<sheetData>${cells}</sheetData>`);
+      expect(new Uint8Array(document.saveBytes())).toEqual(new Uint8Array(source));
     } finally {
       document.free();
     }
@@ -681,11 +677,7 @@ describe('xlsx native engine parity', () => {
     const source = await calculationBook('<calcPr iterate="1" fullCalcOnLoad="1"/>', cells);
     const document = native.XlsxDocument.open(source) as EngineDocument;
     try {
-      const saved = await JSZip.loadAsync(document.saveBytes());
-      const sheet = await saved.file('xl/worksheets/sheet1.xml')!.async('string');
-      const caches = [...sheet.matchAll(/<c [^>]*>(.*?)<\/c>/g)]
-        .map((cell) => /<v>(.*?)<\/v>/.exec(cell[1])?.[1]);
-      expect(caches).toEqual(['10', '20', '5', '999', '20', '20']);
+      expect(new Uint8Array(document.saveBytes())).toEqual(new Uint8Array(source));
     } finally {
       document.free();
     }

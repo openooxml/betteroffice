@@ -52,11 +52,28 @@ describe('saving recalculated values', () => {
     }
   });
 
-  it('fills missing caches when the file asks for a full calculation', async () => {
+  it('returns the file unchanged on a save without edits when the file asks for a full calculation', async () => {
+    const cells = STALE_CELLS.replace('</row>', '<c r="C1"><f>1+1</f></c><c r="D1"><f>2+3</f><v/></c></row>');
+    const source = await book('<calcPr fullCalcOnLoad="1" forceFullCalc="1"/>', cells);
+    for (const options of [{}, { calculation: CALCULATION }, { recalculate: 'stale' }, { collaborative: true }] as const) {
+      const handle = openWorkbook(source, options);
+      try {
+        const { bytes, warnings } = handle.saveWithWarnings();
+        expect(new Uint8Array(handle.save())).toEqual(new Uint8Array(source));
+        expect(new Uint8Array(bytes)).toEqual(new Uint8Array(source));
+        expect(warnings).toEqual([]);
+      } finally {
+        handle.dispose();
+      }
+    }
+  });
+
+  it('saves the values recalculate() produced in a file that asks for a full calculation', async () => {
     const cells = STALE_CELLS.replace('</row>', '<c r="C1"><f>1+1</f></c></row>');
-    const handle = openWorkbook(await book('<calcPr fullCalcOnLoad="1" forceFullCalc="1"/>', cells), { calculation: CALCULATION });
+    const handle = openWorkbook(await book('<calcPr fullCalcOnLoad="1"/>', cells), { calculation: CALCULATION });
     try {
-      expect(await savedCaches(handle.save())).toEqual(['999', '999', '2']);
+      handle.recalculate();
+      expect(await savedCaches(handle.save())).toEqual(['5', '999', '2']);
     } finally {
       handle.dispose();
     }
@@ -69,8 +86,7 @@ describe('saving recalculated values', () => {
     const source = await book('<calcPr fullCalcOnLoad="1"/>', cells);
     const handle = openWorkbook(source);
     try {
-      const sheet = await (await JSZip.loadAsync(handle.save())).file('xl/worksheets/sheet1.xml')!.async('string');
-      expect(sheet).toContain(`<sheetData>${cells}</sheetData>`);
+      expect(new Uint8Array(handle.save())).toEqual(new Uint8Array(source));
     } finally {
       handle.dispose();
     }
@@ -84,7 +100,7 @@ describe('saving recalculated values', () => {
     const source = await book('<calcPr iterate="1" fullCalcOnLoad="1"/>', cells);
     const handle = openWorkbook(source);
     try {
-      expect(await savedCaches(handle.save())).toEqual(['10', '20', '5', '999', '20', '20']);
+      expect(new Uint8Array(handle.save())).toEqual(new Uint8Array(source));
     } finally {
       handle.dispose();
     }
