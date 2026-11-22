@@ -702,6 +702,7 @@ pub(crate) struct WorksheetCellFacts {
     pub(crate) source: SourceCellFacts,
     // The XML and model disagree about whether these cells hold a cache.
     cache_presence_overrides: BTreeSet<(u32, u32)>,
+    style_only_strings: BTreeSet<(u32, u32)>,
     pub(crate) additional_formula_ranges: Vec<CellRange>,
 }
 
@@ -709,6 +710,12 @@ impl WorksheetCellFacts {
     pub(crate) fn has_cached_value(&self, at: CellRef, cell: Option<&Cell>) -> bool {
         cell.is_some_and(|cell| cell.value != CellValue::Empty)
             ^ self.cache_presence_overrides.contains(&(at.row, at.col))
+    }
+
+    pub(crate) fn can_fill_source_cache(&self, at: CellRef, cell: Option<&Cell>) -> bool {
+        cell.is_some()
+            && !self.has_cached_value(at, cell)
+            && !self.style_only_strings.contains(&(at.row, at.col))
     }
 }
 
@@ -1317,9 +1324,18 @@ fn finalize_cell(
             Some(value) => CellValue::Text { value },
             None => CellValue::Empty,
         },
-        Some("str") => CellValue::Text {
-            value: unescape_name(&c.value_text.unwrap_or_default()),
-        },
+        Some("str") => {
+            if c.style.is_some()
+                && c.formula.is_none()
+                && c.value_text.is_none()
+                && c.inline_text.is_none()
+            {
+                facts.style_only_strings.insert(key);
+            }
+            CellValue::Text {
+                value: unescape_name(&c.value_text.unwrap_or_default()),
+            }
+        }
         Some("b") if c.value_text.as_deref() == Some("") => CellValue::Empty,
         Some("b") => CellValue::Bool {
             value: c.value_text.as_deref() == Some("1"),

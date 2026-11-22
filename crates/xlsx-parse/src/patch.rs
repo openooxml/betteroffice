@@ -263,7 +263,7 @@ impl SheetPatch<'_> {
             let Some(cell) = current else {
                 continue;
             };
-            if Some(cell) == original || self.cell_facts.has_cached_value(at, original) {
+            if Some(cell) == original || !self.cell_facts.can_fill_source_cache(at, original) {
                 continue;
             }
 

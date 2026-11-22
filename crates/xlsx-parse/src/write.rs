@@ -534,7 +534,7 @@ fn merge_source_caches(
             match sheet.cell(at) {
                 None => sheet.set_cell(at, source_cell.clone()),
                 Some(calculated) if calculated != source_cell => {
-                    if facts.has_cached_value(at, Some(source_cell))
+                    if !facts.can_fill_source_cache(at, Some(source_cell))
                         || !has_calculated_cache(&calculated.value)
                     {
                         sheet.set_cell(at, source_cell.clone());

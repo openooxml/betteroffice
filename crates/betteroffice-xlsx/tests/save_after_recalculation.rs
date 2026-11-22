@@ -334,10 +334,11 @@ fn a_stale_open_with_an_empty_cached_result_saves_dependents_from_the_calculated
 }
 
 #[test]
-fn a_flagged_array_formula_fills_its_uncached_member_and_keeps_every_other_part() {
+fn a_no_edit_cache_fill_keeps_the_uncached_array_member_and_every_other_part() {
     let source = package(
         concat!(
-            r#"<row r="2"><c r="C2"><f t="array" ref="C2:C4">1</f><v>1</v></c></row>"#,
+            r#"<row r="2"><c r="C2"><f t="array" ref="C2:C4">1</f><v>1</v></c>"#,
+            r#"<c r="D2"><f>2+3</f></c></row>"#,
             r#"<row r="3"><c r="C3"><v>100</v></c></row>"#,
             r#"<row r="4"><c r="C4"/></row>"#,
         ),
@@ -349,7 +350,7 @@ fn a_flagged_array_formula_fills_its_uncached_member_and_keeps_every_other_part(
         .unwrap();
     assert_eq!(
         saved_caches(&saved),
-        vec![Some("1".into()), Some("100".into()), Some("1".into())]
+        vec![Some("1".into()), Some("5".into()), Some("100".into()), None]
     );
     let before = ooxml_opc::unzip_parts(&source).unwrap();
     let after = ooxml_opc::unzip_parts(&saved).unwrap();
@@ -363,5 +364,14 @@ fn a_flagged_array_formula_fills_its_uncached_member_and_keeps_every_other_part(
         .filter(|((_, before), (_, after))| before != after)
         .map(|((name, _), _)| name.as_str())
         .collect();
-    assert_eq!(rewritten, vec!["xl/worksheets/sheet1.xml"]);
+    let sheet = "xl/worksheets/sheet1.xml";
+    assert_eq!(rewritten, vec![sheet]);
+    let (_, before_sheet) = before.iter().find(|(name, _)| name == sheet).unwrap();
+    let (_, after_sheet) = after.iter().find(|(name, _)| name == sheet).unwrap();
+    assert_eq!(
+        std::str::from_utf8(after_sheet).unwrap(),
+        std::str::from_utf8(before_sheet)
+            .unwrap()
+            .replace("<f>2+3</f>", "<f>2+3</f><v>5</v>"),
+    );
 }

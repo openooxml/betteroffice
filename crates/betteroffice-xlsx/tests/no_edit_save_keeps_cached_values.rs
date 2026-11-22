@@ -202,9 +202,7 @@ fn fills_a_spill_anchor_and_keeps_the_source_members_and_ref() {
     let saved = saved_parts(&open_recalculated(&source));
     assert_eq!(
         sheet_xml(&saved),
-        sheet_xml(&source)
-            .replacen("<v />", "<v>1</v>", 1)
-            .replacen("<v />", "<v>3</v>", 1),
+        sheet_xml(&source).replacen("<v />", "<v>1</v>", 1),
     );
 }
 
@@ -335,7 +333,7 @@ fn fills_typed_cells_without_a_source_value_element() {
 }
 
 #[test]
-fn keeps_the_cached_formula_and_fills_the_uncached_formula_and_array_member() {
+fn fills_the_uncached_formula_and_keeps_the_cached_formula_and_array_member() {
     let source = package_parts(
         concat!(
             r#"<row r="1"><c r="A1" t="n"><f t="array" ref="A1:A2" ca="1">1</f><v>10</v></c>"#,
@@ -347,12 +345,12 @@ fn keeps_the_cached_formula_and_fills_the_uncached_formula_and_array_member() {
     let saved = saved_parts(&open_recalculated(&source));
     let sheet = sheet_xml(&saved);
     assert_eq!(cell(sheet, "A1"), cell(sheet_xml(&source), "A1"));
-    assert!(cell(sheet, "A2").contains("<v>1</v>"));
+    assert_eq!(cell(sheet, "A2"), cell(sheet_xml(&source), "A2"));
     assert!(cell(sheet, "B1").contains("<v>9</v>"));
 }
 
 #[test]
-fn fills_existing_array_members_without_scanning_formula_ranges() {
+fn keeps_unmodeled_array_members_without_scanning_formula_ranges() {
     const COLS: u32 = 64;
     const ROWS: u32 = 8;
     let mut sheet_data = String::from(r#"<row r="1">"#);
@@ -382,9 +380,7 @@ fn fills_existing_array_members_without_scanning_formula_ranges() {
     let saved = ooxml_opc::unzip_parts(&saved.unwrap()).unwrap();
     let checks = counts.get("save_array_range_changes").copied().unwrap_or(0);
     assert_eq!(checks, 0);
-    let sheet = sheet_xml(&saved);
-    assert_eq!(cell(sheet, "A1"), cell(sheet_xml(&source), "A1"));
-    assert!(cell(sheet, "A8").contains("<v>1</v>"));
+    assert_eq!(sheet_xml(&saved), sheet_xml(&source));
 }
 
 #[test]
@@ -670,17 +666,24 @@ fn checks_changed_array_followers_in_row_order() {
 
 #[test]
 fn keeps_a_style_only_string_typed_cell_beside_an_array() {
-    let source = package_parts(
-        r#"<row r="1"><c r="A1"><f t="array" ref="A1:A2">_xlfn.SEQUENCE(3)</f><v>1</v></c><c r="B1" s="1" t="str"/></row><row r="2"><c r="A2"><v>2</v></c><c r="B2" s="1" t="str"/></row><row r="3"><c r="A3" s="1" t="str"/></row>"#,
-        FULL_CALC,
-    );
-    let workbook = open_recalculated(&source);
-    let saved = saved_parts(&workbook);
-    for address in ["B1", "B2", "A3"] {
-        assert_eq!(
-            cell(sheet_xml(&saved), address),
-            cell(sheet_xml(&source), address),
-            "{address}"
+    for reference in ["A1:A2", "A1:A3"] {
+        let source = package_parts(
+            &format!(
+                concat!(
+                    r#"<row r="1"><c r="A1"><f t="array" ref="{}">_xlfn.SEQUENCE(3)</f><v>1</v></c>"#,
+                    r#"<c r="B1" s="1" t="str"/><c r="C1"><f>2+3</f></c></row>"#,
+                    r#"<row r="2"><c r="A2"><v>2</v></c><c r="B2" s="1" t="str"/></row>"#,
+                    r#"<row r="3"><c r="A3" s="1" t="str"/></row>"#,
+                ),
+                reference,
+            ),
+            FULL_CALC,
         );
+        let saved = saved_parts(&open_recalculated(&source));
+        let sheet = sheet_xml(&saved);
+        for address in ["B1", "B2", "A3"] {
+            assert_eq!(cell(sheet, address), cell(sheet_xml(&source), address));
+        }
+        assert!(cell(sheet, "C1").contains("<v>5</v>"));
     }
 }
