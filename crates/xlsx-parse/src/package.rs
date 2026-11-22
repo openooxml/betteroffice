@@ -7,7 +7,7 @@ use quick_xml::{NsReader, Reader, Writer};
 use xlsx_model::sort::sort_by_shared;
 use xlsx_model::{CellRef, SheetId, Workbook};
 
-use crate::read::{SharedStringCells, SourceCellFacts};
+use crate::read::{SharedStringCells, SourceCellFacts, WorksheetCellFacts};
 use crate::reference::UnpatchableReference;
 use crate::xml::{
     PartNames, attr, collect_text, find_part, local_name, next_event, reader, resolve_part_name,
@@ -55,7 +55,7 @@ impl PreservedPackage {
         shared_string_cells: &[SharedStringCells],
         declined_parts: &[String],
         rich_shared_strings: BTreeSet<usize>,
-        cell_facts: Vec<SourceCellFacts>,
+        cell_facts: Vec<WorksheetCellFacts>,
     ) -> Result<Self, ParseError> {
         let mut cell_facts = cell_facts.into_iter();
         let workbook_xml = find_part(&parts, "xl/workbook.xml")
@@ -178,7 +178,7 @@ impl PreservedPackage {
         let holds_text_runs = !rich_shared_strings.is_empty()
             || sheets
                 .iter()
-                .any(|sheet| !sheet.cell_facts.rich_inline.is_empty());
+                .any(|sheet| !sheet.cell_facts.source.rich_inline.is_empty());
 
         Ok(Self {
             parts,
@@ -351,6 +351,7 @@ impl PreservedPackage {
         for (index, sheet) in self.sheets.iter().enumerate() {
             if sheet
                 .cell_facts
+                .source
                 .rich_inline
                 .keys()
                 .any(|&(row, col)| cell_moved(index, CellRef::new(row, col)))
@@ -570,7 +571,7 @@ impl PreservedPackage {
 
     /// Cell facts of source sheet `index` the model does not keep.
     pub fn source_cell_facts(&self, index: usize) -> Option<&SourceCellFacts> {
-        self.sheets.get(index).map(|sheet| &sheet.cell_facts)
+        self.sheets.get(index).map(|sheet| &sheet.cell_facts.source)
     }
 
     /// Whether source shared string `index` carried formatted runs, which the model
@@ -758,7 +759,7 @@ pub(crate) struct PreservedSheet {
     pub(crate) attributes: Vec<XmlAttribute>,
     pub(crate) template: XmlTemplate,
     pub(crate) shared_string_cells: SharedStringCells,
-    pub(crate) cell_facts: SourceCellFacts,
+    pub(crate) cell_facts: WorksheetCellFacts,
 }
 
 impl PreservedSheet {

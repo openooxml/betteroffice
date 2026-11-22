@@ -1773,25 +1773,27 @@ impl Workbook {
         match &self.source_package {
             Some(package) => {
                 let package = package.materialize()?;
-                let changed = self.edited_since_open
-                    || (self.recalculated_since_open
+                let preserve_source_caches =
+                    !self.edited_since_open
+                        && self.recalculated_since_open
                         && package.requests_full_calculation()
                         && self.model.sheets.iter().any(|sheet| {
                             sheet.iter_cells().any(|(_, cell)| cell.formula.is_some())
                         })
                         && (!self.model.iterate
-                            || self.model.sheets != package.original_workbook().sheets));
-                let parts = xlsx_parse::serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes(
+                            || self.model.sheets != package.original_workbook().sheets);
+                let parts = xlsx_parse::serialize_workbook_with_package_and_open_calculation(
                     &self.model,
                     package,
                     &self.preserved.origins,
                     &self.preserved.shared_string_cells,
                     &self.preserved.axes,
                     xlsx_parse::SaveEdits {
-                        changed,
+                        changed: self.edited_since_open,
                         moved_references: self.moved_references_since_open,
                     },
                     self.active_sheet,
+                    preserve_source_caches,
                 )?;
                 if parts
                     .iter()
@@ -2987,10 +2989,8 @@ impl Workbook {
     /// or, on the first calculation, formulas the file stored no result for. One that moves
     /// none of these leaves it. Such a recalculation also notifies observers with an empty
     /// [`UpdateOrigin::Recalculation`] event. It counts as an edit, so the next save writes
-    /// the recalculated values. The recalculation at open does not, except that a file
-    /// asking for a full calculation on load (`calcPr` `fullCalcOnLoad` or `forceFullCalc`)
-    /// saves the values it produced when it holds any formula; formulas the engine
-    /// cannot evaluate keep their cached results either way.
+    /// the recalculated values. On an unedited save, recalculation at open only fills
+    /// missing values when the file requests a full calculation.
     pub fn recalculate_all(&mut self, options: CalculationOptions) -> CalculationResult {
         let result = self.recalculate(options);
         self.edited_since_open = true;

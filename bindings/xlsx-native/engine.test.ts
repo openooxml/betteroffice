@@ -630,7 +630,7 @@ describe('xlsx native engine parity', () => {
     }
   });
 
-  test('a flagged workbook with a stale array-formula cache saves the same calculated values on both engines', async () => {
+  test('a flagged workbook keeps a stale array-formula cache on both engines', async () => {
     const source = await calculationBook(
       '<calcPr fullCalcOnLoad="1"/>',
       '<row r="2"><c r="C2"><f t="array" ref="C2:C3">1</f><v>1</v></c></row>'
@@ -649,12 +649,27 @@ describe('xlsx native engine parity', () => {
         expect(nativeSaved, name).toEqual(wasmSaved);
         for (const saved of [wasmSaved, nativeSaved]) {
           const sheet = await (await JSZip.loadAsync(saved)).file('xl/worksheets/sheet1.xml')!.async('string');
-          expect(sheet.match(/<c r="C3"[^>]*>.*?<\/c>/)?.[0], name).toContain('<v>1</v>');
+          expect(sheet.match(/<c r="C3"[^>]*>.*?<\/c>/)?.[0], name).toContain('<v>100</v>');
         }
       } finally {
         wasmDoc.free();
         nativeDoc.free();
       }
+    }
+  });
+
+  test('the default native open keeps cached array booleans on save', async () => {
+    const cells = '<row r="1"><c r="A1" t="b"><f t="array" ref="A1:A3">FALSE()</f><v>1</v></c></row>'
+      + '<row r="2"><c r="A2" t="b"><v>1</v></c></row>'
+      + '<row r="3"><c r="A3" t="b"><v>1</v></c></row>';
+    const source = await calculationBook('<calcPr fullCalcOnLoad="1"/>', cells);
+    const document = native.XlsxDocument.open(source) as EngineDocument;
+    try {
+      const saved = await JSZip.loadAsync(document.saveBytes());
+      const sheet = await saved.file('xl/worksheets/sheet1.xml')!.async('string');
+      expect(sheet).toContain(`<sheetData>${cells}</sheetData>`);
+    } finally {
+      document.free();
     }
   });
 
@@ -670,7 +685,7 @@ describe('xlsx native engine parity', () => {
       const sheet = await saved.file('xl/worksheets/sheet1.xml')!.async('string');
       const caches = [...sheet.matchAll(/<c [^>]*>(.*?)<\/c>/g)]
         .map((cell) => /<v>(.*?)<\/v>/.exec(cell[1])?.[1]);
-      expect(caches).toEqual(['10', '20', '5', '6', '20', '20']);
+      expect(caches).toEqual(['10', '20', '5', '999', '20', '20']);
     } finally {
       document.free();
     }

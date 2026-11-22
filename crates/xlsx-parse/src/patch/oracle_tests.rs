@@ -101,6 +101,7 @@ impl Case {
         run(&SheetPatch {
             sheet: &self.workbook.sheets[0],
             original: &self.original.sheets[0],
+            cell_facts: &crate::read::WorksheetCellFacts::default(),
             axes: &self.axes,
             workbook: &self.workbook,
             sst_index: &sst_index,
@@ -108,6 +109,7 @@ impl Case {
             plan: plan.as_ref(),
             styles: &styles,
             names: FormulaNames::default(),
+            preserve_source_caches: false,
         })
     }
 

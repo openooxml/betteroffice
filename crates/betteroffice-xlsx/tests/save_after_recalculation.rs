@@ -84,7 +84,7 @@ const STALE: &[(&str, &str, Option<&str>)] = &[
 ];
 
 #[test]
-fn a_file_asking_for_a_full_calculation_saves_the_values_calculated_at_open() {
+fn a_file_asking_for_a_full_calculation_fills_missing_caches_at_save() {
     for calc_pr in [
         r#"<calcPr fullCalcOnLoad="1" forceFullCalc="1"/>"#,
         r#"<calcPr fullCalcOnLoad="1"/>"#,
@@ -97,7 +97,7 @@ fn a_file_asking_for_a_full_calculation_saves_the_values_calculated_at_open() {
         ] {
             assert_eq!(
                 saved_caches(&workbook.save().unwrap()),
-                vec![Some("5".into()), Some("999".into()), Some("2".into())],
+                vec![Some("999".into()), Some("999".into()), Some("2".into())],
                 "{calc_pr}"
             );
         }
@@ -138,14 +138,14 @@ fn an_explicit_recalculation_saves_its_values_and_keeps_unevaluable_caches() {
 }
 
 #[test]
-fn recalculated_values_survive_a_recovery_checkpoint() {
+fn cache_preservation_survives_a_recovery_checkpoint() {
     let source = book(STALE, r#"<calcPr fullCalcOnLoad="1"/>"#);
     let workbook = Workbook::open_recalculated(&source, options()).unwrap();
     let checkpoint = workbook.recovery_checkpoint(0, None).unwrap();
     let (restored, ..) = Workbook::restore_recovery_checkpoint(&checkpoint).unwrap();
     assert_eq!(
         saved_caches(&restored.save().unwrap()),
-        vec![Some("5".into()), Some("999".into()), Some("2".into())]
+        vec![Some("999".into()), Some("999".into()), Some("2".into())]
     );
 }
 
@@ -334,9 +334,14 @@ fn a_stale_open_with_an_empty_cached_result_saves_dependents_from_the_calculated
 }
 
 #[test]
-fn a_flagged_array_formula_saves_its_calculated_range_and_keeps_every_other_part() {
+fn a_no_edit_cache_fill_keeps_the_uncached_array_member_and_every_other_part() {
     let source = package(
-        r#"<row r="2"><c r="C2"><f t="array" ref="C2:C3">1</f><v>1</v></c></row><row r="3"><c r="C3"><v>100</v></c></row>"#,
+        concat!(
+            r#"<row r="2"><c r="C2"><f t="array" ref="C2:C4">1</f><v>1</v></c>"#,
+            r#"<c r="D2"><f>2+3</f></c></row>"#,
+            r#"<row r="3"><c r="C3"><v>100</v></c></row>"#,
+            r#"<row r="4"><c r="C4"/></row>"#,
+        ),
         r#"<calcPr fullCalcOnLoad="1"/>"#,
     );
     let saved = Workbook::open_recalculated(&source, options())
@@ -345,7 +350,7 @@ fn a_flagged_array_formula_saves_its_calculated_range_and_keeps_every_other_part
         .unwrap();
     assert_eq!(
         saved_caches(&saved),
-        vec![Some("1".into()), Some("1".into())]
+        vec![Some("1".into()), Some("5".into()), Some("100".into()), None]
     );
     let before = ooxml_opc::unzip_parts(&source).unwrap();
     let after = ooxml_opc::unzip_parts(&saved).unwrap();
@@ -359,5 +364,14 @@ fn a_flagged_array_formula_saves_its_calculated_range_and_keeps_every_other_part
         .filter(|((_, before), (_, after))| before != after)
         .map(|((name, _), _)| name.as_str())
         .collect();
-    assert_eq!(rewritten, vec!["xl/worksheets/sheet1.xml"]);
+    let sheet = "xl/worksheets/sheet1.xml";
+    assert_eq!(rewritten, vec![sheet]);
+    let (_, before_sheet) = before.iter().find(|(name, _)| name == sheet).unwrap();
+    let (_, after_sheet) = after.iter().find(|(name, _)| name == sheet).unwrap();
+    assert_eq!(
+        std::str::from_utf8(after_sheet).unwrap(),
+        std::str::from_utf8(before_sheet)
+            .unwrap()
+            .replace("<f>2+3</f>", "<f>2+3</f><v>5</v>"),
+    );
 }

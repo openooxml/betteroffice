@@ -36,6 +36,10 @@ impl Default for SharedFormulas {
 }
 
 impl SharedFormulas {
+    pub(crate) fn ranges(&self) -> impl Iterator<Item = CellRange> + '_ {
+        self.masters.values().map(|master| master.range)
+    }
+
     pub(crate) fn record(
         &mut self,
         element: &BytesStart<'_>,

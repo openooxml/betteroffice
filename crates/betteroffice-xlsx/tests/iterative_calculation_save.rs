@@ -293,18 +293,15 @@ fn editing_a_reader_after_cached_open_uses_the_iterative_members_value() {
 
 #[test]
 fn a_non_iterative_cycle_still_settles_at_zero() {
-    let workbook = open_recalculated(&package(r#"<calcPr fullCalcOnLoad="1"/>"#));
-    assert_saved_values(
-        &workbook.save().unwrap(),
-        &[
-            ("A1", "0"),
-            ("B1", "0"),
-            ("D1", "6"),
-            ("E1", "0"),
-            ("F1", "0"),
-        ],
-        "ordinary circular references",
-    );
+    let source = package(r#"<calcPr fullCalcOnLoad="1"/>"#);
+    let workbook = open_recalculated(&source);
+    for col in [0, 1, 4, 5] {
+        assert_eq!(
+            workbook.model().value(SheetId(0), CellRef::new(0, col)),
+            CellValue::Number { value: 0.0 }
+        );
+    }
+    assert_eq!(workbook.save().unwrap(), source);
     let circular: Vec<_> = workbook
         .last_calculation()
         .cycle_cells
