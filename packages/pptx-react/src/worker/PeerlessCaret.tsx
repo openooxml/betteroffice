@@ -16,7 +16,7 @@ export function PeerlessCaret({ store }: { store: PeerlessVisualStore }) {
     ? findLine(indexGeometry(view.confirmed.displayList), view.selection) : null),
     [view.activeLine, view.confirmed, view.selection]);
   const insertion = view.editState?.toolbar?.formatting?.color;
-  const { color, halo } = useMemo(() => pptxCaretColors(view.confirmed?.displayList, active?.line,
+  const { caret: color } = useMemo(() => pptxCaretColors(view.confirmed?.displayList, active?.line,
     view.selection && view.selection.kind !== 'object' ? view.selection.focus : null, view.caret, insertion),
     [view.confirmed, active, view.selection, view.caret, insertion]);
   if (!view.confirmed) return null;
@@ -50,7 +50,7 @@ export function PeerlessCaret({ store }: { store: PeerlessVisualStore }) {
     clipPath: view.echo && active ? clipPolygon(active.transforms, echoLineClip(active)) : undefined,
   }}>
     <div data-testid="pptx-caret" aria-hidden="true" style={{
-      position: 'absolute', pointerEvents: 'none', background: color, boxShadow: halo ? `0 0 0 1px ${halo}` : undefined,
+      position: 'absolute', pointerEvents: 'none', background: color,
       left: x, top: y, width: 1, height, transform, transformOrigin: '0 0',
       visibility: eligible && visible ? 'visible' : 'hidden',
     }} />

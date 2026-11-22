@@ -109,6 +109,7 @@ import {
 import type { CaretLine, TextSelectionGranularity } from './textSelection';
 import { createWorkerEditorApi, type PptxWorkerEditorApi } from './worker/createWorkerEditorApi';
 import type { EditablePresentation } from './worker/useEditableSessionPresentation';
+import { pptxCaretColors } from './worker/caretColor';
 import { createWorkerInputCoordinator, type WorkerInputCoordinator } from './commands/workerInputCoordinator';
 import { currentContext, frameImages } from './viewer/sessionPaint';
 import { initialPptxZoom } from './initialPptxZoom';
@@ -3523,7 +3524,7 @@ export function paintSelection(
     ];
     if (line) {
       const x = caretX(line, start);
-      ctx.fillStyle = '#1d4ed8';
+      ctx.fillStyle = pptxCaretColors(frame, line, start, { x, y: line.y, width: 1.5, height: line.height }).caret;
       ctx.fillRect(x, line.y, 1.5, line.height);
     }
   }

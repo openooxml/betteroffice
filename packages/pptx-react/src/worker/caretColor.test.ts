@@ -17,7 +17,7 @@ const shape = (color: string, box = { x: 100, y: 80, w: 300, h: 80 }) =>
 
 test('caret takes the run colour on a white slide', () => {
   expect(pptxCaretColors(slide([]), line({ start: 0, end: 5, color: '#c00000' }), 3, caret))
-    .toEqual({ color: '#c00000', background: '#ffffff' });
+    .toEqual({ color: '#c00000', caret: '#000000', background: '#ffffff' });
 });
 
 test('caret at a run boundary follows the run before it', () => {
@@ -28,17 +28,17 @@ test('caret at a run boundary follows the run before it', () => {
 
 test('white text on a dark slide background keeps a white caret', () => {
   expect(pptxCaretColors(slide([], { kind: 'solid', color: '#0b1f3a' }), line({ start: 0, end: 5, color: '#ffffff' }), 2, caret))
-    .toEqual({ color: '#ffffff', background: '#0b1f3a' });
+    .toEqual({ color: '#ffffff', caret: '#ffffff', background: '#0b1f3a' });
 });
 
 test('white text on a dark shape fill keeps a white caret', () => {
   expect(pptxCaretColors(slide([shape('#202020')]), line({ start: 0, end: 5, color: '#ffffff' }), 2, caret))
-    .toEqual({ color: '#ffffff', background: '#202020' });
+    .toEqual({ color: '#ffffff', caret: '#ffffff', background: '#202020' });
 });
 
 test('fills that do not cover the caret are ignored', () => {
   expect(pptxCaretColors(slide([shape('#000000', { x: 500, y: 300, w: 50, h: 50 })]), line(), 0, caret))
-    .toEqual({ color: '#000000', background: '#ffffff' });
+    .toEqual({ color: '#000000', caret: '#000000', background: '#ffffff' });
 });
 
 test('dark slide with no run or unreadable text falls back to white', () => {
@@ -55,8 +55,8 @@ test('table cell shapes colour the caret background', () => {
 test('a gradient fill trusts the run colour, wherever the caret sits on it', () => {
   const gradient = { kind: 'gradient', gradientType: 'linear', angleDeg: 0, stops: [{ position: 0, color: '#000000' }, { position: 0.6, color: '#eeeeee' }, { position: 0.8, color: '#f8f8f8' }, { position: 1, color: '#ffffff' }] } satisfies Paint;
   const box = { kind: 'shape', objectId: 1, x: 100, y: 80, w: 300, h: 80, name: 'Box', geometry: 'rect', path: [], fill: gradient } as SlidePrimitive;
-  expect(pptxCaretColors(slide([box]), line({ start: 0, end: 5, color: '#ffffff' }), 2, caret)).toEqual({ color: '#ffffff', background: '#000000', halo: '#000000' });
-  expect(pptxCaretColors(slide([], gradient), line({ start: 0, end: 5, color: '#1f1f1f' }), 2, caret)).toEqual({ color: '#1f1f1f', background: '#ffffff', halo: '#ffffff' });
+  expect(pptxCaretColors(slide([box]), line({ start: 0, end: 5, color: '#ffffff' }), 2, caret)).toEqual({ color: '#ffffff', caret: '#ffffff', background: '#000000' });
+  expect(pptxCaretColors(slide([], gradient), line({ start: 0, end: 5, color: '#1f1f1f' }), 2, caret)).toEqual({ color: '#1f1f1f', caret: '#000000', background: '#ffffff' });
 });
 
 test('rotated or non-rectangular shapes and images make the fill unknown, so the run colour is trusted', () => {
@@ -78,28 +78,41 @@ test('an empty line over a shape of unknown extent reads against the last known 
   expect(pptxCaretColors(slide([ellipse]), line(), 0, caret).color).toBe('#000000');
 });
 
-test('an empty line over an unknown fill gets a haloed caret, in the insertion colour when known', () => {
+test('an empty line over an unknown fill follows the insertion colour when known', () => {
   const ellipse = { ...shape('#000000'), geometry: 'ellipse' } as SlidePrimitive;
-  expect(pptxCaretColors(slide([ellipse]), line(), 0, caret)).toEqual({ color: '#000000', background: '#ffffff', halo: '#ffffff' });
-  expect(pptxCaretColors(slide([ellipse]), line(), 0, caret, '#ffffff')).toEqual({ color: '#ffffff', background: '#000000', halo: '#000000' });
-  expect(pptxCaretColors(slide([]), line(), 0, caret, '#c00000')).toEqual({ color: '#c00000', background: '#ffffff' });
+  expect(pptxCaretColors(slide([ellipse]), line(), 0, caret)).toEqual({ color: '#000000', caret: '#ffffff', background: '#ffffff' });
+  expect(pptxCaretColors(slide([ellipse]), line(), 0, caret, '#ffffff')).toEqual({ color: '#ffffff', caret: '#ffffff', background: '#000000' });
+  expect(pptxCaretColors(slide([]), line(), 0, caret, '#c00000')).toEqual({ color: '#c00000', caret: '#000000', background: '#ffffff' });
   expect(pptxCaretColors(slide([], { kind: 'solid', color: '#000000' }), line(), 0, caret, '#000000').color).toBe('#ffffff');
-});
-
-test('a known solid fill never gets a halo', () => {
-  expect(pptxCaretColors(slide([shape('#202020')]), line({ start: 0, end: 5, color: '#ffffff' }), 2, caret).halo).toBeUndefined();
 });
 
 test('translucent fills are composited over what is beneath them', () => {
   const dark = { kind: 'solid', color: '#000000' } satisfies Paint;
-  expect(pptxCaretColors(slide([shape('#ffffff80')], dark), line(), 0, caret, '#808080')).toEqual({ color: '#000000', background: '#808080' });
-  expect(pptxCaretColors(slide([shape('#00000000')]), line({ start: 0, end: 5, color: '#1f1f1f' }), 2, caret)).toEqual({ color: '#1f1f1f', background: '#ffffff' });
+  expect(pptxCaretColors(slide([shape('#ffffff80')], dark), line(), 0, caret, '#808080')).toEqual({ color: '#000000', caret: '#000000', background: '#808080' });
+  expect(pptxCaretColors(slide([shape('#00000000')]), line({ start: 0, end: 5, color: '#1f1f1f' }), 2, caret)).toEqual({ color: '#1f1f1f', caret: '#000000', background: '#ffffff' });
 });
 
 test('a translucent fill over an image keeps the fill unknown', () => {
   const photo = { kind: 'image', objectId: 3, x: 100, y: 80, w: 300, h: 80 } as SlidePrimitive;
   expect(pptxCaretColors(slide([photo, shape('#ffffff00')]), line({ start: 0, end: 5, color: '#ffffff' }), 2, caret))
-    .toEqual({ color: '#ffffff', background: '#000000', halo: '#000000' });
+    .toEqual({ color: '#ffffff', caret: '#ffffff', background: '#000000' });
   expect(pptxCaretColors(slide([photo, shape('#202020')]), line({ start: 0, end: 5, color: '#ffffff' }), 2, caret))
-    .toEqual({ color: '#ffffff', background: '#202020' });
+    .toEqual({ color: '#ffffff', caret: '#ffffff', background: '#202020' });
+});
+
+test('the caret is black or white against the fill, whatever the text colour', () => {
+  const dark = { kind: 'solid', color: '#0b1f3a' } satisfies Paint;
+  expect(pptxCaretColors(slide([]), line({ start: 0, end: 5, color: '#315efb' }), 2, caret).caret).toBe('#000000');
+  expect(pptxCaretColors(slide([], dark), line({ start: 0, end: 5, color: '#c8f56a' }), 2, caret).caret).toBe('#ffffff');
+  expect(pptxCaretColors(slide([], dark), line({ start: 0, end: 5, color: '#6b7280' }), 2, caret).caret).toBe('#ffffff');
+});
+
+test('a rounded shape colours the caret by its own fill', () => {
+  const card = (color: string) => ({ ...shape(color), geometry: 'roundRect' }) as SlidePrimitive;
+  expect(pptxCaretColors(slide([card('#fff0ea')]), line({ start: 0, end: 4, color: '#e0603a' }), 2, caret).caret).toBe('#000000');
+  expect(pptxCaretColors(slide([card('#101828')]), line({ start: 0, end: 5, color: '#c8f56a' }), 2, caret).caret).toBe('#ffffff');
+});
+
+test('the fill, not the text, decides the caret where both shades would show', () => {
+  expect(pptxCaretColors(slide([shape('#808080')]), line({ start: 0, end: 5, color: '#ffffff' }), 2, caret).caret).toBe('#000000');
 });
