@@ -1565,6 +1565,7 @@ pub(crate) fn plan_paragraph_style<T: ReadTxn>(
                 "numPr",
                 "numPrFromStyle",
                 crate::LIST_DEF,
+                crate::list_definitions::LIST_LEVEL_INDENTS,
                 "listNumFmt",
                 "listIsBullet",
                 "listMarker",
@@ -1992,9 +1993,30 @@ fn apply_para_delta(txn: &mut TransactionMut<'_>, map: &MapRef, delta: &ParaAttr
             Any::Map(Arc::new(value))
         },
     );
+    let flag = crate::list_definitions::LIST_LEVEL_INDENTS;
+    let named = crate::list_definitions::LIST_REFERENCE_KEYS
+        .iter()
+        .any(|key| delta.other.contains_key(*key));
+    let before = (named && !delta.other.contains_key(flag)).then(|| list_keys(txn, map));
     for (key, value) in &delta.other {
         set_or_remove(txn, map, key, value.clone());
     }
+    let moved = before
+        .is_some_and(|before| !crate::list_definitions::same_list(&before, &list_keys(txn, map)));
+    if moved {
+        set_or_remove(txn, map, flag, None);
+    }
+}
+
+/// The attributes of the pilcrow `map` that name its list.
+fn list_keys(txn: &TransactionMut<'_>, map: &MapRef) -> BTreeMap<String, Any> {
+    crate::list_definitions::LIST_REFERENCE_KEYS
+        .into_iter()
+        .filter_map(|key| match map.get(txn, key) {
+            Some(Out::Any(value)) => Some((key.to_owned(), value)),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Mirrors the current values of `keys` into the pilcrow's `_originalFormatting`, the direct

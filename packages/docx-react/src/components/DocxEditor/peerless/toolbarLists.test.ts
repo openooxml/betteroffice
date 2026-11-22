@@ -21,3 +21,17 @@ for (const [id, intent] of [
     parity(id);
   });
 }
+
+test('worker list toggles show the kind of the list the paragraph is on', () => {
+  const { controller, context, parity } = toolbarFixture();
+  const active = () => [
+    controller.commands.store.getState('bulletList').active,
+    controller.commands.store.getState('numberedList').active,
+  ];
+  context({ paragraphProperties: { numPr: { numId: 1, ilvl: 0 }, listIsBullet: false, listNumFmt: 'decimal' } });
+  parity('bulletList');
+  expect(active()).toEqual([false, true]);
+  context({ paragraphProperties: { numPr: { numId: 2, ilvl: 0 }, listIsBullet: true, listNumFmt: 'bullet' } });
+  parity('numberedList');
+  expect(active()).toEqual([true, false]);
+});

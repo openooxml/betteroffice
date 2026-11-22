@@ -1402,12 +1402,19 @@ fn ordered_map<'a>(entries: impl Iterator<Item = (&'a String, &'a Any)>) -> serd
     )
 }
 
+/// The pilcrow key that is display state, no part of what a save compares or writes.
+const DISPLAY_ONLY: &str = crate::list_definitions::LIST_LEVEL_INDENTS;
+
 /// `segment` as the `[content, attributes]` value a unit keeps for a block embed, map keys sorted.
 fn segment_value(segment: &crate::StorySegment) -> serde_json::Value {
     let content = match &segment.content {
         crate::SegmentContent::Text(text) => serde_json::json!({ "text": text }),
         crate::SegmentContent::Pilcrow(properties) => {
-            serde_json::json!({ "pilcrow": ordered_map(properties.values.iter()) })
+            let saved = properties
+                .values
+                .iter()
+                .filter(|(key, _)| key.as_str() != DISPLAY_ONLY);
+            serde_json::json!({ "pilcrow": ordered_map(saved) })
         }
         crate::SegmentContent::OtherEmbed { kind, payload } => {
             serde_json::json!({ "embed": kind, "payload": ordered_map(payload.iter()) })
@@ -1476,7 +1483,7 @@ fn segment_canonical(segment: &crate::StorySegment, entry: &mut Vec<u8>, section
         }
         crate::SegmentContent::Pilcrow(properties) => {
             entry.extend_from_slice(b"[{\"pilcrow\":");
-            write_canonical_map(entry, properties.values.iter(), &[]);
+            write_canonical_map(entry, properties.values.iter(), &[DISPLAY_ONLY]);
             let end = entry.len();
             entry.push(b'}');
             write_canonical_attributes(entry, segment);
@@ -1484,7 +1491,12 @@ fn segment_canonical(segment: &crate::StorySegment, entry: &mut Vec<u8>, section
             write_canonical_map(
                 section,
                 properties.values.iter(),
-                &["sectPr", "_sectionProperties", "sectionBreakType"],
+                &[
+                    "sectPr",
+                    "_sectionProperties",
+                    "sectionBreakType",
+                    DISPLAY_ONLY,
+                ],
             );
             section.extend_from_slice(&entry[end..]);
         }

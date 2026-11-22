@@ -660,7 +660,11 @@ fn shape_paragraph(
         ..ParagraphAttrs::default()
     };
     super::lower_paragraph_spacing(&values, &mut attrs, env, false);
-    super::lower_paragraph_indent(&values, &mut attrs);
+    super::lower_paragraph_indent(
+        &values,
+        &crate::list_marker::ListState::default(),
+        &mut attrs,
+    );
     super::lower_paragraph_tabs(&values, &mut attrs);
     if let Some(bullet) = object(paragraph, "bullet") {
         attrs.list_marker = string_in(bullet, "text");

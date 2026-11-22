@@ -53,6 +53,8 @@ export interface CommandArm {
 
 export interface OpenedCommandArm extends CommandArm {
   resident: ResidentEngineSession;
+  /** The host metadata JSON opening the package returned, which a save of it takes. */
+  hostJson?: string;
 }
 
 export async function openCommandEngine(
@@ -147,13 +149,14 @@ export async function openCommandEngine(
   const engine = Object.assign({}, methods, resident);
   owned.push(engine);
   const bytes = options.bytes ?? new Uint8Array(rezipPartsToArrayBuffer(parts));
+  let hostJson: string | undefined;
   if (options.checkpoint) {
     raw.open_docx(bytes, false, undefined, undefined);
     engine.loadState(options.checkpoint);
   } else if (options.preview !== undefined) {
     if (engine.openDocxPreview(bytes, options.preview) === null) throw new Error('Synthetic preview was refused');
   } else {
-    engine.openDocx(bytes, undefined, 'd1-synthetic');
+    hostJson = engine.openDocx(bytes, undefined, 'd1-synthetic');
   }
   const first = engine.paragraphs('body')[0];
   if (!first) throw new Error('Synthetic document has no body paragraph');
@@ -168,7 +171,7 @@ export async function openCommandEngine(
     measurement: { defaults: { fontSize: 11, fontFamily: 'Liberation Sans' } },
     renderEnv: {},
   }));
-  return { engine, resident: engine, native: raw, state: stateAt(selected), version: 0, seq: 0 };
+  return { engine, resident: engine, native: raw, hostJson, state: stateAt(selected), version: 0, seq: 0 };
 }
 
 export function command<K extends DocxCommandKind>(

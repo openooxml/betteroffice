@@ -1352,8 +1352,8 @@ impl EditSession {
 
     /// The paragraph attributes, as JSON, that put a paragraph on a list of `kind`, `bullet` or
     /// `numbered`: its own list when that is of that kind, else the list of the paragraph directly
-    /// above, else below, else a list definition this call creates; a paragraph already on a list
-    /// keeps its own level.
+    /// above, else below, else a created list of that kind no paragraph names, else one this call
+    /// creates; a paragraph already on a list keeps its own level.
     pub fn ensure_list_definition(
         &self,
         story: &str,
@@ -1362,6 +1362,33 @@ impl EditSession {
     ) -> Result<String, JsValue> {
         self.core
             .ensure_list_definition(story, para_id, kind)
+            .map_err(JsValue::from)
+    }
+
+    /// As `ensure_list_definition` for a paragraph of a selection whose first paragraph is `lead`:
+    /// it goes on the list `lead` is on when that is of `kind`.
+    pub fn ensure_list_definition_after(
+        &self,
+        story: &str,
+        para_id: &str,
+        kind: &str,
+        lead: Option<String>,
+    ) -> Result<String, JsValue> {
+        self.core
+            .ensure_list_definition_after(story, para_id, kind, lead.as_deref())
+            .map_err(JsValue::from)
+    }
+
+    /// Whether the style the paragraph has now, or the default paragraph style when it names none,
+    /// numbers it: its `numPr`, through `basedOn`, names a list other than 0. Undefined for a
+    /// session without a source package.
+    pub fn paragraph_style_numbers(
+        &self,
+        story: &str,
+        para_id: &str,
+    ) -> Result<Option<bool>, JsValue> {
+        self.core
+            .paragraph_style_numbers(story, para_id)
             .map_err(JsValue::from)
     }
 

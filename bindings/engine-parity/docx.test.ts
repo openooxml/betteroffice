@@ -2493,6 +2493,12 @@ const rows: Row<Docx>[] = [
     call: ({ session: s }) => s.ensure_list_definition('body', paraId(s, 'Second body'), 'bullet'),
   },
   defineRow({
+    method: 'EditSession.ensure_list_definition_after',
+    mutates: true,
+    setup: ({ session: s }: Docx) => s.set_paragraph_attrs(...span(s, 'First body', 0, 0), s.ensure_list_definition('body', paraId(s, 'First body'), 'bullet')),
+    call: ({ session: s }) => s.ensure_list_definition_after('body', paraId(s, 'Controls'), 'bullet', paraId(s, 'First body')),
+  }),
+  defineRow({
     method: 'EditSession.edit_text_resident',
     mutates: true,
     setup: ({ session: s }: Docx) => layout(s),
@@ -3162,6 +3168,16 @@ const rows: Row<Docx>[] = [
     name: 'EditSession.next_paragraph_style (unknown paragraph)',
     throws: { name: 'string', reason: 'a paragraph id the story does not hold is refused' },
     call: ({ session: s }) => s.next_paragraph_style('body', '7FFFFFFF', 0),
+  },
+  {
+    method: 'EditSession.paragraph_style_numbers',
+    call: ({ session: s }) => ['Parity heading', 'First body'].map((prefix) => s.paragraph_style_numbers('body', paraId(s, prefix))),
+  },
+  {
+    method: 'EditSession.paragraph_style_numbers',
+    name: 'EditSession.paragraph_style_numbers (unknown paragraph)',
+    throws: { name: 'string', reason: 'a paragraph id the story does not hold is refused' },
+    call: ({ session: s }) => s.paragraph_style_numbers('body', '7FFFFFFF'),
   },
   {
     method: 'EditSession.paragraph_unit',

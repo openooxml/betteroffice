@@ -3001,6 +3001,35 @@ impl EditSession {
             .map_err(|error| map_error(env, error))
     }
 
+    #[napi(catch_unwind, js_name = "ensure_list_definition_after")]
+    pub fn ensure_list_definition_after(
+        &self,
+        env: Env,
+        story: String,
+        para_id: String,
+        kind: String,
+        lead: Option<String>,
+    ) -> Result<String> {
+        let _call = EngineCall::new(env);
+        self.document(env)?
+            .ensure_list_definition_after(&story, &para_id, &kind, lead.as_deref())
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi(catch_unwind, js_name = "paragraph_style_numbers")]
+    pub fn paragraph_style_numbers(
+        &self,
+        env: Env,
+        story: String,
+        para_id: String,
+    ) -> Result<Either<bool, Undefined>> {
+        let _call = EngineCall::new(env);
+        self.document(env)?
+            .paragraph_style_numbers(&story, &para_id)
+            .map_err(|error| map_error(env, error))
+            .map(optional_result)
+    }
+
     #[napi(catch_unwind, js_name = "created_list_definitions_json")]
     pub fn created_list_definitions_json(&self, env: Env) -> Result<String> {
         let _call = EngineCall::new(env);
