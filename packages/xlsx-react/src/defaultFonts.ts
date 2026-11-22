@@ -92,21 +92,20 @@ async function loadRemoteFace(
 }
 
 const PRELOAD_MAX_BYTES = 1.5 * 1024 * 1024;
-type FaceLoad = boolean | 'missing' | 'cdn-unavailable';
-const registeredFaces = new Map<string, Promise<FaceLoad>>();
+const registeredFaces = new Map<string, Promise<boolean | 'cdn-unavailable'>>();
 const pendingFaces = new Map<string, Set<symbol>>();
 let activeFontSet: FontFaceSet | undefined;
 
 function registerFace(
   face: BundledFontFace, family: string, load: () => Promise<ArrayBuffer>,
-  fontSet: FontFaceSet, owners: Set<symbol>, isMissingFontAddon?: (error: unknown) => boolean,
-): Promise<FaceLoad> {
+  fontSet: FontFaceSet, owners: Set<symbol>,
+): Promise<boolean | 'cdn-unavailable'> {
   const current = () => activeFontSet === fontSet && owners.size > 0;
   return (async () => {
     try {
       if (!current()) return false;
       const bytes = await load();
-      if (bytes.byteLength !== face.byteLength) return 'missing';
+      if (bytes.byteLength !== face.byteLength) return false;
       if (!current()) return false;
       const loaded = await new FontFace(family, bytes, {
         weight: String(face.weight), style: face.style,
@@ -115,11 +114,9 @@ function registerFace(
       fontSet.add(loaded);
       return true;
     } catch (error) {
-      if (isImplicitFontCdnError(error)) {
-        reportImplicitCdnFailure(error);
-        return 'cdn-unavailable';
-      }
-      return isMissingFontAddon?.(error) ? 'missing' : false;
+      if (!isImplicitFontCdnError(error)) return false;
+      reportImplicitCdnFailure(error);
+      return 'cdn-unavailable';
     }
   })();
 }
@@ -134,9 +131,7 @@ export function createDefaultFontPainter(
   const interests = new Set<Set<symbol>>();
   const loaded = new Set<string>();
   const settled = new Set<string>();
-  const missingFaces = new Set<string>();
-  const failedCdnFaces = new Set<string>();
-  const pending = new Map<string, Promise<void>>();
+  const pending = new Map<string, Promise<boolean>>();
   const remote = new Set<string>();
   const requested = new Map<string, Set<string>>();
   const attempted = new Map<string, Set<string>>();
@@ -152,7 +147,7 @@ export function createDefaultFontPainter(
   async function loadFace(
     fontFamily: string, bold: boolean, italic: boolean, text: string, onRemote: () => void, onPartial: () => void,
     retryShared = true, maxBytes = Infinity,
-  ): Promise<FaceLoad> {
+  ): Promise<boolean> {
     let owners: Set<symbol> | undefined;
     try {
       if (!provider) {
@@ -187,15 +182,15 @@ export function createDefaultFontPainter(
       owners = pendingFaces.get(key);
       if (!registration) {
         const load = source.resolve(fontFamily, bold, italic) ?? source.resolveFamily(fontFamily, bold, italic);
-        if (!load) return 'missing';
+        if (!load) return false;
         owners = new Set([owner]);
         pendingFaces.set(key, owners);
-        registration = registerFace(face, fontFamily, load, fontSet, owners, fonts.isMissingFontAddon);
+        registration = registerFace(face, fontFamily, load, fontSet, owners);
         registeredFaces.set(key, registration);
         const task = registration;
         const group = owners;
-        void task.then((result) => {
-          if (result !== true && registeredFaces.get(key) === task) registeredFaces.delete(key);
+        void task.then((success) => {
+          if (success !== true && registeredFaces.get(key) === task) registeredFaces.delete(key);
           if (pendingFaces.get(key) === group) pendingFaces.delete(key);
         });
       }
@@ -203,9 +198,9 @@ export function createDefaultFontPainter(
         owners.add(owner);
         interests.add(owners);
       }
-      const result = await registration;
-      if (result === false && shared && retryShared && !disposed) return await loadFace(fontFamily, bold, italic, text, onRemote, onPartial, false, maxBytes);
-      return result;
+      const success = await registration;
+      if (success === false && shared && retryShared && !disposed) return await loadFace(fontFamily, bold, italic, text, onRemote, onPartial, false, maxBytes);
+      return success === true;
     } catch { return false; }
     finally {
       if (owners) {
@@ -220,15 +215,13 @@ export function createDefaultFontPainter(
 
   function faceKeys(displayList: DisplayList) {
     const fontCdn = fontCdnCacheKey();
-    const faces = new Map<string, { id: string; fontFamily: string; bold: boolean; italic: boolean; characters: Set<string> }>();
+    const faces = new Map<string, { fontFamily: string; bold: boolean; italic: boolean; characters: Set<string> }>();
     for (const command of displayList.commands) {
       if (command.op !== 'text' || !command.fontFamily || command.chart) continue;
       const { fontFamily, bold = false, italic = false } = command;
-      const id = JSON.stringify([fontFamily.trim().toLowerCase(), bold, italic]);
-      if (failedCdnFaces.has(id)) continue;
-      const key = JSON.stringify([id, fontCdn]);
+      const key = JSON.stringify([fontFamily.trim().toLowerCase(), bold, italic, fontCdn]);
       let face = faces.get(key);
-      if (!face) faces.set(key, face = { id, fontFamily, bold, italic, characters: new Set() });
+      if (!face) faces.set(key, face = { fontFamily, bold, italic, characters: new Set() });
       for (const character of command.text ?? '') face.characters.add(character);
       if (command.numberFormat) face.characters.add('#');
       if (command.numberFormat?.general !== undefined) for (const character of '0123456789.-E+') face.characters.add(character);
@@ -255,30 +248,23 @@ export function createDefaultFontPainter(
     return true;
   }
 
-  function rememberFace(key: string, id: string, result: FaceLoad): void {
-    settled.add(key);
-    if (result === 'cdn-unavailable') failedCdnFaces.add(id);
-    else if (result === 'missing') missingFaces.add(key);
-    else if (result) loaded.add(key);
-  }
-
   async function load(displayList: DisplayList): Promise<void> {
     if (inactive()) return;
-    const batch: Promise<void>[] = [];
-    for (const [key, { id, fontFamily, bold, italic, characters }] of faceKeys(displayList)) {
-      if (pending.has(key) || missingFaces.has(key)) continue;
+    const batch: Promise<boolean>[] = [];
+    for (const [key, { fontFamily, bold, italic, characters }] of faceKeys(displayList)) {
+      if (pending.has(key)) continue;
       const text = loaded.has(key) ? missing(requested, key, characters) : [...characters].join('');
       if (loaded.has(key) && !(remote.has(key) && text)) continue;
       let partial = false;
-      const task = loadFace(fontFamily, bold, italic, text, () => { remote.add(key); }, () => { partial = true; }).then((result) => {
+      const task = loadFace(fontFamily, bold, italic, text, () => { remote.add(key); }, () => { partial = true; }).then((success) => {
         pending.delete(key);
-        const success = result === true;
         for (const record of success ? [attempted, requested] : [attempted]) {
           let known = record.get(key);
           if (!known) record.set(key, known = new Set());
           for (const character of text) known.add(character);
         }
-        rememberFace(key, id, result);
+        settled.add(key);
+        if (success) loaded.add(key);
         if (success || partial) changed = true;
         const latest = !disposed && remote.has(key) && lastPainted ? faceKeys(lastPainted).get(key) : undefined;
         if (latest && missing(attempted, key, latest.characters)) void load(lastPainted!).catch(() => {});
@@ -290,6 +276,7 @@ export function createDefaultFontPainter(
           unsettledPaint = false;
           options.onSettled?.();
         }
+        return success;
       });
       pending.set(key, task);
       batch.push(task);
@@ -305,11 +292,13 @@ export function createDefaultFontPainter(
      */
     preload(displayList: DisplayList, idle: () => boolean): void {
       void (async () => {
-        for (const [key, { id, fontFamily, bold, italic }] of faceKeys(displayList)) {
+        for (const [key, { fontFamily, bold, italic }] of faceKeys(displayList)) {
           if (inactive() || !idle()) return;
-          if (pending.has(key) || settled.has(key) || failedCdnFaces.has(id)) continue;
-          const result = await loadFace(fontFamily, bold, italic, '', () => {}, () => {}, true, PRELOAD_MAX_BYTES);
-          if (result !== false) rememberFace(key, id, result);
+          if (loaded.has(key) || pending.has(key) || settled.has(key)) continue;
+          if (await loadFace(fontFamily, bold, italic, '', () => {}, () => {}, true, PRELOAD_MAX_BYTES)) {
+            loaded.add(key);
+            settled.add(key);
+          }
         }
       })().catch(() => {});
     },

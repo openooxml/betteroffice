@@ -1,4 +1,3 @@
-import { fontAssetError, readImplicitFontBytes, type FontRequestPolicy } from './fontCdn';
 import type { BundledFontFace } from './manifest';
 
 interface NodeFsLike {
@@ -57,10 +56,9 @@ function readFileAsset(url: URL): ArrayBuffer | undefined {
 function validateByteLength(
   face: BundledFontFace,
   bytes: ArrayBuffer,
-  request?: FontRequestPolicy,
 ): ArrayBuffer {
   if (bytes.byteLength !== face.byteLength) {
-    throw fontAssetError(request,
+    throw new Error(
       `Bundled font ${face.file} has ${bytes.byteLength} bytes; expected ${face.byteLength}`,
     );
   }
@@ -70,17 +68,16 @@ function validateByteLength(
 export async function readFontBytes(
   file: string,
   url: URL,
-  request?: FontRequestPolicy,
+  timeoutMs?: number,
 ): Promise<ArrayBuffer> {
-  if (typeof request === 'string') return readImplicitFontBytes(file, url, request);
   const onDisk = readFileAsset(url);
   if (onDisk) return onDisk;
   const response = await fetch(
     url,
-    request === undefined
+    timeoutMs === undefined
       ? undefined
       : {
-          signal: AbortSignal.timeout(request),
+          signal: AbortSignal.timeout(timeoutMs),
           credentials: 'omit',
           referrerPolicy: 'no-referrer',
         },
@@ -96,13 +93,13 @@ const bytesCache = new Map<string, Promise<ArrayBuffer>>();
 export function loadFontBytes(
   face: BundledFontFace,
   url: URL,
-  request?: FontRequestPolicy,
+  timeoutMs?: number,
 ): Promise<ArrayBuffer> {
-  const key = `${url.href}|${face.byteLength}|${request ?? ''}`;
+  const key = `${url.href}|${face.byteLength}|${timeoutMs ?? ''}`;
   const cached = bytesCache.get(key);
   if (cached) return cached;
   const promise = (async () => {
-    return validateByteLength(face, await readFontBytes(face.file, url, request), request);
+    return validateByteLength(face, await readFontBytes(face.file, url, timeoutMs));
   })();
   promise.catch(() => {
     if (bytesCache.get(key) === promise) bytesCache.delete(key);

@@ -4,7 +4,7 @@ import cjkManifest from '../../fonts-cjk/assets/manifest.json';
 import baseLatinManifest from '../assets/base-latin.json';
 import { readFontBytes } from './bytes';
 import type { FontDecoder } from './decode';
-import { decodeFontAsset, fontAssetError, type FontRequestPolicy } from './fontCdn';
+import { loadImplicitFontAsset, type FontRequestPolicy } from './fontCdn';
 import type { BundledFontFace } from './manifest';
 import type { SliceRef } from './progressive';
 import { sha256 } from './sha256';
@@ -95,37 +95,43 @@ async function loadFace(
         || regular.codec !== entry.codec || regular.family !== entry.family)) {
         throw new Error(`Missing bundled font dictionary for ${face.file}`);
       }
-      const encodedBytes = readFontBytes(face.file, url, request).then((encoded) => {
+      const loadDictionary = () => regular === undefined ? undefined : loadFace(
+        { ...face, file: regular.file, byteLength: regular.byteLength },
+        manifest, resolveUrl, policy, wasmUrl, runtime,
+      );
+      const checkLength = (encoded: ArrayBuffer) => {
         if (encoded.byteLength !== entry.encodedLength) {
-          throw fontAssetError(request,
-            `Bundled font ${face.file} has ${encoded.byteLength} encoded bytes; expected ${entry.encodedLength}`,
-          );
+          throw new Error(`Bundled font ${face.file} has ${encoded.byteLength} encoded bytes; expected ${entry.encodedLength}`);
         }
         return encoded;
-      });
+      };
+      const decode = async (encoded: ArrayBuffer, prerequisite: DecodedFace | undefined) => {
+        const dictionary = prerequisite === undefined ? undefined
+          : (prerequisite.payload ?? prerequisite.font).slice(0);
+        const decoded = await decodeWith(wasmUrl, decoder)(encoded,
+          { codec: entry.codec, dict: dictionary, maxOutput: 64 * 1024 * 1024 });
+        if (decoded.font.byteLength !== face.byteLength) {
+          throw new Error(`Bundled font ${face.file} has ${decoded.font.byteLength} bytes; expected ${face.byteLength}`);
+        }
+        if (await sha256(decoded.font) !== entry.sha256) {
+          throw new Error(`Bundled font ${face.file} SHA-256 mismatch`);
+        }
+        if (entry.codec === 'woff2t+zstd' && decoded.payload === undefined) {
+          throw new Error(`Missing bundled font dictionary payload for ${face.file}`);
+        }
+        return decoded;
+      };
+      if (typeof request === 'string') {
+        return loadImplicitFontAsset(face.file, url, request, async (encoded, check) => {
+          await check(() => checkLength(encoded));
+          const prerequisite = await loadDictionary();
+          return check(() => decode(encoded, prerequisite));
+        });
+      }
       const [encoded, prerequisite] = await Promise.all([
-        encodedBytes,
-        regular === undefined ? undefined : loadFace(
-          { ...face, file: regular.file, byteLength: regular.byteLength },
-          manifest, resolveUrl, policy, wasmUrl, runtime,
-        ),
+        readFontBytes(face.file, url, request).then(checkLength), loadDictionary(),
       ]);
-      const dictionary = prerequisite === undefined ? undefined
-        : (prerequisite.payload ?? prerequisite.font).slice(0);
-      const decoded = await decodeFontAsset(request,
-        () => decodeWith(wasmUrl, decoder)(encoded, { codec: entry.codec, dict: dictionary, maxOutput: 64 * 1024 * 1024 }));
-      if (decoded.font.byteLength !== face.byteLength) {
-        throw fontAssetError(request,
-          `Bundled font ${face.file} has ${decoded.font.byteLength} bytes; expected ${face.byteLength}`,
-        );
-      }
-      if (await sha256(decoded.font) !== entry.sha256) {
-        throw fontAssetError(request, `Bundled font ${face.file} SHA-256 mismatch`);
-      }
-      if (entry.codec === 'woff2t+zstd' && decoded.payload === undefined) {
-        throw fontAssetError(request, `Missing bundled font dictionary payload for ${face.file}`);
-      }
-      return decoded;
+      return decode(encoded, prerequisite);
     })();
     cache.set(key, pending);
     const current = pending;

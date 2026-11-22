@@ -72,10 +72,10 @@ export function glyphsByFont(page: unknown, into = new Map<number, Set<number>>(
 interface ProgressiveModule {
   openProgressiveFace(ref: ProgressiveFontSource['ref'], transport: {
     read(file: string): Promise<ArrayBuffer>;
-    implicitCdn?(file: string): boolean;
+    url?: ((file: string) => Promise<URL>) & { implicitCdn?(file: string): boolean };
     decode(encoded: ArrayBuffer, maxOutput: number): Promise<ArrayBuffer>;
   }): Promise<OutlineFace>;
-  readFontAsset(file: string, url: URL, request?: number | 'cjk'): Promise<ArrayBuffer>;
+  readFontAsset(file: string, url: URL, timeoutMs?: number): Promise<ArrayBuffer>;
 }
 
 /**
@@ -130,16 +130,16 @@ export class ResidentProgressiveFonts {
       }
       if (shared !== undefined) continue;
       const implicitCdnFiles = new Set(spec.source.implicitCdnFiles);
-      const implicitCdn = (file: string) => implicitCdnFiles.has(file);
+      const url = Object.assign(async (file: string) => {
+        const href = spec.source.urls[file];
+        if (href === undefined) throw new Error(`Font slice ${file} has no URL`);
+        return new URL(href);
+      }, { implicitCdn: (file: string) => implicitCdnFiles.has(file) });
       let opening: Promise<OutlineFace> | undefined;
       const open = ({ openProgressiveFace, readFontAsset }: ProgressiveModule) => opening ??=
         openProgressiveFace(spec.source.ref, {
-          read: (file) => {
-            const url = spec.source.urls[file];
-            if (url === undefined) return Promise.reject(new Error(`Font slice ${file} has no URL`));
-            return readFontAsset(file, new URL(url), implicitCdn(file) ? 'cjk' : spec.source.timeoutMs);
-          },
-          implicitCdn,
+          read: async (file) => readFontAsset(file, await url(file), spec.source.timeoutMs),
+          url,
           decode,
         }).catch((error: unknown) => {
           opening = undefined;
@@ -266,10 +266,7 @@ export class ResidentProgressiveFonts {
         await state.face?.ensureGlyphs(ids);
         return;
       } catch (error) {
-        if (isImplicitFontCdnError(error)) {
-          this.refuse(owner);
-          return;
-        }
+        if (isImplicitFontCdnError(error)) return;
         const pause = CHUNK_RETRY_DELAYS_MS[attempt];
         if (pause === undefined) {
           this.log(`[docx] font outline chunks failed to load after ${attempt + 1} attempts; their glyphs stay blank until a frame needs them again: ${error instanceof Error ? error.message : String(error)}`);
@@ -299,12 +296,12 @@ export class ResidentProgressiveFonts {
   }
 
   /** Stops progressive loading for `owner` and asks the host to reload it whole. */
-  private refuse(owner: number, reason?: string): void {
+  private refuse(owner: number, reason: string): void {
     const state = this.owners.get(owner)!;
     if (state.refused) return;
     state.complete = true;
     state.refused = true;
-    if (reason !== undefined) this.log(`[docx] ${reason}`);
+    this.log(`[docx] ${reason}`);
     for (const listener of [...this.refusalListeners]) listener(owner);
   }
 

@@ -765,13 +765,12 @@ export class TextMeasureFontRegistry {
         try {
           face = await open(slices);
         } catch (error) {
-          if (isImplicitFontCdnError(error)) throw error;
-          this.warnFailure(
+          if (!isImplicitFontCdnError(error)) this.warnFailure(
             `[fontRegistry] sliced face for "${label}" failed to open; loading it whole: ` +
               `${error instanceof Error ? error.message : String(error)}`
           );
           const bytes = await (slices.loadWholeForExport?.() ?? (loader.readOnlyBytes ?? loader)()).catch((failure: unknown) => {
-            if (isImplicitFontCdnError(failure)) reportImplicitCdnFailure(failure);
+            if (!isImplicitFontCdnError(error) && isImplicitFontCdnError(failure)) reportImplicitCdnFailure(failure);
             throw failure;
           });
           return this.registerBuffer(bytes, undefined, loader);

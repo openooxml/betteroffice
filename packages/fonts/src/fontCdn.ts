@@ -1,7 +1,7 @@
 import { version as latinVersion } from '../../fonts-latin/package.json';
 import { version as intlVersion } from '../../fonts-intl/package.json';
 import { version as cjkVersion } from '../../fonts-cjk/package.json';
-import { isImplicitFontCdnError, type FontPackDiagnostic } from '../../../shared/fontPackDiagnostics';
+import type { FontPackDiagnostic } from '../../../shared/fontPackDiagnostics';
 import {
   getFontCdnConfiguration, JSDELIVR, setFontCdnConfiguration, STALL_MS, type FontCdnConfiguration,
 } from '../../../shared/office-session/fontCdn';
@@ -23,19 +23,85 @@ class ImplicitFontCdnError extends Error {
   }
 }
 
-export function fontAssetError(request: FontRequestPolicy | undefined, message: string): Error {
-  return typeof request === 'string' ? new ImplicitFontCdnError(request, message) : new Error(message);
+const COOLDOWN_MS = 60_000;
+
+type Failure = { error: ImplicitFontCdnError; until: number };
+
+interface ImplicitBase {
+  transfer: Promise<void>;
+  unavailable?: Failure;
+  invalid: Map<string, Failure>;
+  warnedUntil: number;
 }
 
-export async function decodeFontAsset<T>(request: FontRequestPolicy | undefined, decode: () => Promise<T>): Promise<T> {
-  try { return await decode(); }
-  catch (error) {
-    if (typeof request === 'string' && !isImplicitFontCdnError(error)) throw new ImplicitFontCdnError(request, error);
-    throw error;
+const implicitBases = new Map<string, ImplicitBase>();
+
+class HttpFontError extends Error {
+  constructor(file: string, readonly status: number) {
+    super(`Failed to fetch bundled font ${file}: HTTP ${status}`);
   }
 }
 
-export async function readImplicitFontBytes(file: string, url: URL, pack: Pack): Promise<ArrayBuffer> {
+type CheckFontAsset = <T>(check: () => T | Promise<T>) => Promise<T>;
+
+function coolingFailure(base: ImplicitBase, href: string): ImplicitFontCdnError | undefined {
+  const now = Date.now();
+  if (base.unavailable && now < base.unavailable.until) return base.unavailable.error;
+  const invalid = base.invalid.get(href);
+  if (invalid && now < invalid.until) return invalid.error;
+  if (invalid) base.invalid.delete(href);
+}
+
+export async function loadImplicitFontAsset<T>(
+  file: string, url: URL, pack: Pack, load: (bytes: ArrayBuffer, check: CheckFontAsset) => Promise<T>,
+): Promise<T> {
+  const key = url.origin + url.pathname.split('/assets/', 1)[0];
+  let state = implicitBases.get(key);
+  if (!state) {
+    state = { transfer: Promise.resolve(), invalid: new Map(), warnedUntil: 0 };
+    implicitBases.set(key, state);
+  }
+  const base = state;
+  const cooling = coolingFailure(base, url.href);
+  if (cooling) throw cooling;
+  const fail = (cause: unknown, scope: 'base' | 'url' | undefined): ImplicitFontCdnError => {
+    const error = new ImplicitFontCdnError(pack, cause);
+    if (implicitBases.get(key) !== base) return error;
+    const now = Date.now();
+    const until = now + COOLDOWN_MS;
+    if (scope === 'base') base.unavailable = { error, until };
+    if (scope === 'url') base.invalid.set(url.href, { error, until });
+    if (base.warnedUntil <= now) {
+      base.warnedUntil = until;
+      console.warn(error.diagnostic.detail);
+    }
+    return error;
+  };
+
+  const pending = base.transfer.then(async () => {
+    const cooling = coolingFailure(base, url.href);
+    if (cooling) throw cooling;
+    try {
+      const bytes = await readImplicitFontBytes(file, url);
+      return { bytes, unavailable: base.unavailable };
+    } catch (error) {
+      if (error instanceof HttpFontError) throw fail(error, error.status === 404 ? 'url' : undefined);
+      throw fail(error, 'base');
+    }
+  });
+  base.transfer = pending.then(() => {}, () => {});
+
+  const { bytes, unavailable } = await pending;
+  const data = await load(bytes, async (check) => {
+    try { return await check(); }
+    catch (error) { throw fail(error, 'url'); }
+  });
+  if (base.unavailable === unavailable) base.unavailable = undefined;
+  base.invalid.clear();
+  return data;
+}
+
+async function readImplicitFontBytes(file: string, url: URL): Promise<ArrayBuffer> {
   const controller = new AbortController();
   const { signal } = controller;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -54,9 +120,8 @@ export async function readImplicitFontBytes(file: string, url: URL, pack: Pack):
   const read = async () => {
     const response = await fetch(url, { signal, credentials: 'omit', referrerPolicy: 'no-referrer' });
     if (signal.aborted) throw signal.reason;
-    if (!response.ok && response.type !== 'opaque') {
-      throw new Error(`Failed to fetch bundled font ${file}: HTTP ${response.status}`);
-    }
+    if (response.type === 'opaque' || response.type === 'error') throw new Error(`No readable response for bundled font ${file}`);
+    if (!response.ok) throw new HttpFontError(file, response.status);
     arm();
     const body = response.body;
     if (typeof body?.getReader !== 'function') return response.arrayBuffer();
@@ -89,8 +154,6 @@ export async function readImplicitFontBytes(file: string, url: URL, pack: Pack):
   arm();
   try {
     return await Promise.race([read(), stalled]);
-  } catch (error) {
-    throw new ImplicitFontCdnError(pack, error);
   } finally {
     clearTimeout(timer);
   }
@@ -127,6 +190,7 @@ export function configureFontCdn(options: FontCdnOptions): void {
     }
     baseUrl = url.href;
   }
+  implicitBases.clear();
   setFontCdnConfiguration({ baseUrl, timeoutMs }, true);
 }
 

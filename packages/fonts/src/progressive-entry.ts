@@ -35,7 +35,7 @@ function openWithUrls(location: SliceLocation): Promise<ProgressiveFontFace> {
     cache = engineFaces.get(decoder) ?? new Map();
     engineFaces.set(decoder, cache);
   }
-  const key = `${ref.indexSha256}|${base}|${timeoutMs ?? ''}|${url.implicitCdn?.(ref.index) ?? false}`;
+  const key = `${ref.indexSha256}|${base}|${timeoutMs ?? ''}`;
   let pending = cache.get(key);
   if (pending === undefined) {
     pending = (async () => {
@@ -44,11 +44,9 @@ function openWithUrls(location: SliceLocation): Promise<ProgressiveFontFace> {
       return openProgressiveFace(ref, {
         read: async (file) => {
           const asset = file === ref.index ? indexUrl : await url(file);
-          const request = url.implicitCdn?.(file) ? 'cjk' : requestTimeoutMs ? requestTimeoutMs(asset) : timeoutMs;
-          return readFontAsset(file, asset, request);
+          return readFontAsset(file, asset, requestTimeoutMs ? requestTimeoutMs(asset) : timeoutMs);
         },
         url,
-        implicitCdn: url.implicitCdn,
         timeoutMs: transportTimeout,
         decode,
       });

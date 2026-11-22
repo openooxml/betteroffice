@@ -1,4 +1,4 @@
-import type { BundledFontLoader, BundledFontScript, BundledFontSource, ProgressiveFontFace, SliceLocation } from '@betteroffice/fonts';
+import type { BundledFontLoader, BundledFontScript } from '@betteroffice/fonts';
 import { importFonts, importProgressiveFonts } from '../../../../shared/office-session/fontModules';
 import { setFontCdnConfiguration, type FontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import { isImplicitFontCdnError, reportImplicitCdnFailure } from '../../../../shared/fontPackDiagnostics';
@@ -33,30 +33,6 @@ export const commandFontProvider = {
   },
 };
 
-function sessionFaceLoads<T>() {
-  const sessions = new WeakMap<BundledFontSource, WeakMap<BundledFontLoader, Promise<T>>>();
-  return (source: BundledFontSource, load: BundledFontLoader, start: () => Promise<T>): Promise<T> => {
-    let loads = sessions.get(source);
-    if (!loads) sessions.set(source, loads = new WeakMap());
-    const existing = loads.get(load);
-    if (existing) return existing;
-    const pending = Promise.resolve().then(start);
-    loads.set(load, pending);
-    const forget = () => { loads.delete(load); };
-    void pending.then(forget, (error: unknown) => {
-      if (isImplicitFontCdnError(error)) reportImplicitCdnFailure(error);
-      else forget();
-    });
-    return pending;
-  };
-}
-
-const loadWholeFace = sessionFaceLoads<ArrayBuffer>();
-const loadSlicedFace = sessionFaceLoads<ProgressiveFontFace>();
-
-const openSlicedFont = (source: BundledFontSource, load: BundledFontLoader, slices: SliceLocation) =>
-  loadSlicedFace(source, load, async () => (await importProgressiveFonts()).openSlicedFace(slices));
-
 /**
  * Starts loading the regular coverage face of each script before the deck is parsed. `provider` returns the
  * session's one font provider, the one later given to `createCommandDefaultFonts`, so a face started here is
@@ -71,10 +47,10 @@ export function prefetchCoverageFaces(
   void provider().then(async (source) => {
     for (const script of scripts) {
       const load = source.resolveScriptFallback(script as BundledFontScript, false, false);
-      if (!load) continue;
-      if (load.slices && sliced && (await import('./commandSlicedFonts')).slicedFacesSupported()) {
-        void openSlicedFont(source, load, load.slices).catch(() => {});
-      } else void loadWholeFace(source, load, load).catch(() => {});
+      if (load?.slices && sliced && (await import('./commandSlicedFonts')).slicedFacesSupported()) {
+        const { openSlicedFace } = await importProgressiveFonts();
+        void openSlicedFace(load.slices).catch(() => {});
+      } else void load?.().catch(() => {});
     }
   }).catch(() => {});
 }
@@ -136,8 +112,10 @@ export function createCommandDefaultFonts(
     const existing = pending.get(id);
     if (existing) return existing;
     if (!retryable(id) || suppliedFamily(face)) return Promise.resolve(undefined);
+    const previousAttempts = attempts.get(id);
+    const previousRetry = retryAt.get(id);
     attempted.add(id);
-    attempts.set(id, (attempts.get(id) ?? 0) + 1);
+    attempts.set(id, (previousAttempts ?? 0) + 1);
     retryAt.delete(id);
     const task = new Promise<DefaultFontFace | undefined>((resolve) => {
       let finished = false;
@@ -178,7 +156,8 @@ export function createCommandDefaultFonts(
         available = true;
         if (load.slices && sliced?.supported()) {
           try {
-            const opened = await openSlicedFont(source, load, load.slices);
+            const { openSlicedFace } = await importProgressiveFonts();
+            const opened = await openSlicedFace(load.slices);
             if (disposed || suppliedFamily(face)) return undefined;
             const skeleton = face.kind === 'coverage' ? await scriptFontFace(face.script, bold, italic, opened.bytes())
               : { family: face.family, bold: face.bold, italic: face.italic, bytes: opened.bytes() };
@@ -192,7 +171,10 @@ export function createCommandDefaultFonts(
             if (isImplicitFontCdnError(error)) throw error;
           }
         }
-        const bytes = await loadWholeFace(source, load, load);
+        const bytes = await load().catch((error: unknown) => {
+          if (isImplicitFontCdnError(error)) reportImplicitCdnFailure(error);
+          throw error;
+        });
         if (disposed || suppliedFamily(face)) return undefined;
         const loaded = face.kind === 'coverage'
           ? await scriptFontFace(face.script, bold, italic, bytes)
@@ -216,7 +198,15 @@ export function createCommandDefaultFonts(
         else finish(loaded);
       }, (error: unknown) => {
         pending.delete(id);
-        if (!isImplicitFontCdnError(error) && !disposed && !suppliedFamily(face)) failed(id);
+        if (isImplicitFontCdnError(error)) {
+          if (previousAttempts === undefined) {
+            attempted.delete(id);
+            attempts.delete(id);
+          } else {
+            attempts.set(id, previousAttempts);
+            if (previousRetry !== undefined) retryAt.set(id, previousRetry);
+          }
+        } else if (!disposed && !suppliedFamily(face)) failed(id);
         finish();
       });
     });

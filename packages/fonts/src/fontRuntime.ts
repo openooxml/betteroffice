@@ -168,7 +168,7 @@ export function createFontRuntime(lookup: FontPackLookup, {
         const current = localCdn ? { urls: assets.urls, cdn: localCdn() } : assets;
         const indexUrl = sliceAssetUrl(face, ref.index, current);
         return {
-          base: indexUrl.href,
+          base: typeof requestPolicy(indexUrl) === 'string' ? `${indexUrl.href}#implicit` : indexUrl.href,
           url: Object.assign(
             async (file: string) => file === ref.index ? indexUrl : sliceAssetUrl(face, file, current),
             { implicitCdn: (file: string) => current.cdn?.implicit === true && !current.urls?.[file] },
@@ -235,7 +235,7 @@ export function createFontRuntime(lookup: FontPackLookup, {
           baseUrl === undefined ? undefined : new URL('decoder/fontpack.wasm', baseUrl),
           undefined, runtime,
         )
-        : resolve(face).then((url) => loadFontBytes(face, url, requestPolicy(url))));
+        : resolve(face).then((url) => loadFontBytes(face, url, requestTimeout(url))));
     } catch (error) {
       if (baseUrl !== undefined || runtime?.strict) throw error;
       if (isImplicitFontCdnError(error)) {
