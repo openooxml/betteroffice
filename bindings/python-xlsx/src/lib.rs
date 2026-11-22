@@ -661,6 +661,11 @@ impl PyWorkbook {
         self.inner.sheet_count()
     }
 
+    #[getter]
+    fn sheet_ids(&self) -> Vec<String> {
+        self.inner.sheet_ids()
+    }
+
     fn sheet_index(&self, sheet: &Bound<'_, PyAny>) -> PyResult<usize> {
         self.resolve_sheet(sheet).map(|sheet| sheet.0 as usize)
     }

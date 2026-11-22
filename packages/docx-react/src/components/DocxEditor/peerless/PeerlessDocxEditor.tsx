@@ -52,7 +52,7 @@ import { workerRevisionCallbacks, workerRevisionRequest } from './workerRevision
 import { PluginDock } from '../../../plugins/PluginPanels';
 import { useIsDark } from '../hooks/useIsDark';
 import { copyWorkerSelection, createClipboardPrefetch, writeClipboardCapture, type ClipboardCapture, isPasteFragmentAllowed } from './clipboard';
-import { submitInputIntent, submitPasteFragment, type PeerlessAdmissionResult } from './inputAdmission';
+import { submitInputIntent, submitPasteFragment, type PeerlessAdmissionResult, type PeerlessQueuedCut } from './inputAdmission';
 import { DocxCutRefusedError } from '../internals/cutRefused';
 import type { DocxClipboardFragment, DocxCommandSelection, DocxReservationsPayload } from '@betteroffice/docx/yrs';
 import { useWorkerFileIO } from './useWorkerFileIO';
@@ -1111,7 +1111,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     releaseWorkerPreview(previewJob.client);
   }, [shellState.status, previewJob]);
   const clipboardReplay = useRef<{ capture: ClipboardCapture; written: boolean } | null>(null);
-  const onClipboard = useCallback(async (cut: boolean, data?: DataTransfer | null) => {
+  const onClipboard = useCallback(async (cut: boolean, data?: DataTransfer | null, queuedCut?: PeerlessQueuedCut) => {
     const current = active.current;
     if (!current) return;
     if (data && clipboardReplay.current) {
@@ -1119,8 +1119,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       return;
     }
     try {
-      const copied = await copyWorkerSelection({ binding: current.binding, cut, data, prefetched: current.clipboard?.take(),
-        isCurrent: () => active.current === current,
+      const copied = await copyWorkerSelection({ binding: current.binding, cut, data, prefetched: current.clipboard?.take(), queuedCut,
+        isCurrent: () => active.current === current && (!queuedCut || queuedCut.isCurrent()),
         readCapture: () => current.clipboard!.read(),
         writeNative: (capture) => {
           const input = host.current?.querySelector('.paged-editor__input');
@@ -1133,7 +1133,10 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
           return completed && replay.written;
         },
         readSelection: (selection) => controller.read({ kind: 'rawSelectionInfo', selection }),
-        readClipboardSlice: (selection, cells) => controller.read({ kind: 'clipboardSlice', selection, cells }),
+        readClipboardSlice: async (selection, cells) => {
+          const request = { kind: 'clipboardSlice' as const, selection, cells };
+          return queuedCut ? (await read<'clipboardSlice'>(request)).value : controller.read(request);
+        },
         write: (text) => navigator.clipboard.writeText(text),
         writeSlice: async (text, html) => {
           if (typeof ClipboardItem === 'undefined' || !navigator.clipboard.write) throw new Error('ClipboardItem unavailable');
@@ -1147,7 +1150,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       if (error instanceof DocxCutRefusedError) toast(t('editor.cutRefused'));
       reportRecoverableError(error instanceof Error ? error : new Error(String(error)));
     }
-  }, [controller, props.onCopy, props.onCut, reportRecoverableError, t]);
+  }, [controller, props.onCopy, props.onCut, read, reportRecoverableError, t]);
   const notifyPasteRefused = useCallback(() => { toast(t('editor.pasteFailed')); }, [t]);
   const pasteRecorder = useRef<PeerlessPasteRecorder | null>(null);
   const onPasteFragment = useCallback((fragment: DocxClipboardFragment, inputTime: number): boolean => {

@@ -3,7 +3,7 @@ import type { DocxClipboardFragment, DocxClipboardSlice, DocxCommandSelection, Y
 import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession';
 import { clipboardFragmentHtml } from '../internals/clipboardHtml';
 import { cutRefusalFrom, DocxCutRefusedError } from '../internals/cutRefused';
-import { flushAdmittedInput } from './inputAdmission';
+import { flushAdmittedInput, type PeerlessQueuedCut } from './inputAdmission';
 import type { PeerlessViewIdentity, PeerlessViewSnapshot } from './viewStore';
 
 interface SelectionRead {
@@ -175,6 +175,7 @@ export async function copyWorkerSelection(options: SelectionRead & { write(text:
   writeSlice?(text: string, html: string): Promise<void>;
   data?: DataTransfer | null; prefetched?: ClipboardCapture | null;
   readCapture?(): Promise<ClipboardCapture | null>;
+  queuedCut?: PeerlessQueuedCut;
   writeNative?(capture: ClipboardCapture): boolean }) {
   const { binding } = options;
   const identity = { ...binding.viewStore.getSnapshot().identity };
@@ -188,7 +189,9 @@ export async function copyWorkerSelection(options: SelectionRead & { write(text:
   } else if (options.readClipboardSlice || options.readCapture) {
     let sliceCaptured: ClipboardCapture | Awaited<ReturnType<typeof readWorkerClipboardSlice>>;
     try {
-      sliceCaptured = options.readCapture ? await options.readCapture()
+      sliceCaptured = options.queuedCut && options.readClipboardSlice
+        ? await readSnapshotSlice({ ...options, readClipboardSlice: options.readClipboardSlice }, binding.viewStore.getSnapshot())
+        : options.readCapture ? await options.readCapture()
         : await readWorkerClipboardSlice({ ...options, readClipboardSlice: options.readClipboardSlice! });
     } catch (error) {
       throw (options.cut ? cutRefusalFrom(error) : null) ?? error;
@@ -224,6 +227,7 @@ export async function copyWorkerSelection(options: SelectionRead & { write(text:
   if (binding.viewStore.getSnapshot().editState?.tableContext?.hasMultiCellSelection) return true;
   if (binding.viewStore.getSnapshot().version !== captured.version &&
     (!captured.selection.anchor.sticky || !captured.selection.focus.sticky)) return false;
+  if (options.queuedCut) return options.queuedCut.deleteSelection(captured.selection);
   const result = binding.commands.submit({ kind: 'replaceSelection', payload: { text: '', selection: captured.selection } },
     { source: 'paste', fence: true });
   if (result.status !== 'submitted') return false;

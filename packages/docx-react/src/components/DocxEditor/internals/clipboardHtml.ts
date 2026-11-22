@@ -17,7 +17,7 @@ import { clipboardHtmlStyles, formattedFontFamily } from './clipboardHtmlStyles'
 
 export const MAX_FORMATTED_HTML_LENGTH = 2_000_000;
 export const MAX_FORMATTED_HTML_DEPTH = 200;
-export const MAX_FORMATTED_HTML_RUNS = 1_000;
+export const MAX_FORMATTED_HTML_RUNS = 5_000;
 export const MAX_FORMATTED_HTML_TEXT = 200_000;
 export const MAX_FORMATTED_HTML_PARAGRAPHS = 1_000;
 
