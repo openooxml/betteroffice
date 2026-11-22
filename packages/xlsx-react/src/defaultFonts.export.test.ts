@@ -1,7 +1,7 @@
 import { afterEach, expect, mock, spyOn, test } from 'bun:test';
 import * as fonts from '@betteroffice/fonts';
 import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../shared/office-session/fontCdn';
-import { fontAssetResponse, fontRuntimeWithoutPacks, withBrowserFontGlobals } from '../../../shared/office-session/testing/fontAssets';
+import { fontAssetResponse, fontRuntimeWithoutPacks, withBrowserFontGlobals } from '../../fonts/src/fontAssets.test-support';
 import { exportFaces, xlsxDefaultFontManager } from './defaultFonts';
 import { editorExportFaces } from './useDefaultFonts';
 

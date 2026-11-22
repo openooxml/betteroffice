@@ -1,9 +1,9 @@
 import { parentPort } from 'node:worker_threads';
-import { fontAssetResponse, withBrowserFontGlobals } from '../../../../shared/office-session/testing/fontAssets';
-import type { FontCdnConfiguration } from '../fontCdn';
-import { openSlicedFace } from '../progressive-entry';
-import { createFontProvider, loadBundledFontBytes, resolveMetricCompatFace } from '../worker';
-import { setWorkerFontAssets } from '../workerAssets';
+import { fontAssetResponse, withBrowserFontGlobals } from './fontAssets.test-support';
+import type { FontCdnConfiguration } from './fontCdn';
+import { openSlicedFace } from './progressive-entry';
+import { createFontProvider, loadBundledFontBytes, resolveMetricCompatFace } from './worker';
+import { setWorkerFontAssets } from './workerAssets';
 
 const port = parentPort!;
 port.once('message', async (cdn: FontCdnConfiguration) => {

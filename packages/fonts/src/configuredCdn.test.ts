@@ -11,11 +11,12 @@ import { decodeFontFace, type FontDecoder } from './decode';
 import * as fontCdn from './fontCdn';
 import { createFontRuntime, type FontPackDiagnostic } from './fontRuntime';
 import { createPageFontPackResponder } from '../../../shared/office-session/fontPackSource';
-import { fontAssetResponse, withBrowserFontGlobals } from '../../../shared/office-session/testing/fontAssets';
+import { fontAssetResponse, withBrowserFontGlobals } from './fontAssets.test-support';
 import { openSlicedFace, sliceSourceOf } from './progressive-entry';
 import { parseSkeleton } from './slices';
 import { writeFontCdnTree } from '../../../scripts/fonts/cdn-tree';
 import { getFontCdnConfiguration, setFontCdnConfiguration, type FontCdnConfiguration } from '../../../shared/office-session/fontCdn';
+import { implicitFontCdnBases } from '../../../shared/office-session/fontCdnCooldown';
 import { createFontPackResponder, createWorkerFontPacks } from '../../../shared/office-session/optionalFontPacks';
 import { setWorkerFontAssets } from './workerAssets';
 import * as worker from './worker';
@@ -76,6 +77,7 @@ let previousConfiguration: FontCdnConfiguration | undefined;
 beforeEach(() => {
   previousConfiguration = getFontCdnConfiguration();
   setFontCdnConfiguration(undefined);
+  implicitFontCdnBases().clear();
 });
 
 afterEach(() => {
@@ -431,17 +433,12 @@ test('the CDN tree serves Latin, intl and sliced CJK faces from a local origin',
 
 const jsDelivr = 'https://cdn.jsdelivr.net/npm/';
 const implicitCdn = { baseUrl: jsDelivr, implicit: true } as const;
-const cdnFailureState = [
-  Symbol.for('betteroffice.fonts.cdn-warned'),
-  Symbol.for('betteroffice.fonts.cdn-unavailable'),
-];
 const stallMs = 10_000;
 const cooldownMs = 60_000;
 const regularHash = latin.faces.find(({ file }) => file === regular.file)!.sha256;
 const regularUrl = fontCdnAssetUrl(latin, regular.file).href;
 
 function observeCdnFailures() {
-  for (const key of cdnFailureState) Reflect.deleteProperty(globalThis, key);
   const warning = spyOn(console, 'warn').mockImplementation(() => {});
   const diagnostics: FontPackDiagnostic[] = [];
   const dispatch = Object.getOwnPropertyDescriptor(globalThis, 'dispatchEvent');
@@ -459,7 +456,6 @@ function observeCdnFailures() {
       if (dispatch) Object.defineProperty(globalThis, 'dispatchEvent', dispatch);
       else Reflect.deleteProperty(globalThis, 'dispatchEvent');
       warning.mockRestore();
-      for (const key of cdnFailureState) Reflect.deleteProperty(globalThis, key);
     },
   };
 }
@@ -757,7 +753,7 @@ test('independently loaded font CDN modules share the realm cooldown', async () 
 });
 
 test('a worker learns base failures independently across whole faces and CJK slices', async () => {
-  const thread = new Worker(new URL('./testing/cdnWorker.ts', import.meta.url));
+  const thread = new Worker(new URL('./cdnWorker.test-support.ts', import.meta.url));
   const restore = withBrowserFontGlobals();
   const observed = observeCdnFailures();
   const requests: string[] = [];

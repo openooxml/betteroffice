@@ -1,5 +1,5 @@
 import * as fonts from '@betteroffice/fonts';
-import { fontAssetResponse, withBrowserFontGlobals } from '../../../../shared/office-session/testing/fontAssets';
+import { fontAssetResponse, withBrowserFontGlobals } from '../../../fonts/src/fontAssets.test-support';
 import { createFontRuntime } from '../../../fonts/src/fontRuntime';
 import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import { expect, spyOn, test } from 'bun:test';
@@ -37,7 +37,6 @@ async function withoutPacks(run: () => Promise<void>) {
     installed.mockRestore();
     load.mockRestore();
     setFontCdnConfiguration(previous);
-    Reflect.deleteProperty(globalThis, Symbol.for('betteroffice.fonts.cdn-warned'));
   }
 }
 

@@ -2,7 +2,7 @@ import { afterEach, expect, spyOn, test } from 'bun:test';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
 import { isClientMessage, isHostMessage, type ClientMessage } from '../../../../shared/office-session/protocol';
 import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
-import { withBrowserFontGlobals } from '../../../../shared/office-session/testing/fontAssets';
+import { withBrowserFontGlobals } from '../../../fonts/src/fontAssets.test-support';
 import { defaultFontInstaller, type DefaultFontInstallation, type DefaultFontPayload } from '../../../../shared/pptxDefaultFonts';
 import * as progressive from '@betteroffice/fonts/progressive';
 import * as wasm from '../wasm/loader';

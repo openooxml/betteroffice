@@ -1,7 +1,7 @@
 import { afterEach, expect, mock, spyOn, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import * as fonts from '@betteroffice/fonts';
-import { fontAssetResponse, fontRuntimeWithoutPacks, withBrowserFontGlobals } from '../../../../shared/office-session/testing/fontAssets';
+import { fontAssetResponse, fontRuntimeWithoutPacks, withBrowserFontGlobals } from '../../../fonts/src/fontAssets.test-support';
 import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import * as progressive from '@betteroffice/fonts/progressive';
 import { configureFontCdn as configureTestFontCdn } from '../../../fonts/src/fontCdn';

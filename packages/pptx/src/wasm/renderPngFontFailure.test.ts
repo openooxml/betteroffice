@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import * as fonts from '@betteroffice/fonts';
 import { initWasm, openPresentation } from '../index';
-import { fontAssetResponse, fontRuntimeWithoutPacks, withBrowserFontGlobals } from '../../../../shared/office-session/testing/fontAssets';
+import { fontAssetResponse, fontRuntimeWithoutPacks, withBrowserFontGlobals } from '../../../fonts/src/fontAssets.test-support';
 import * as workerFonts from '../../../fonts/src/worker';
 import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import { createFontPackResponder, createWorkerFontPacks, setWorkerFontAssets } from '../../../../shared/office-session/optionalFontPacks';
@@ -119,7 +119,6 @@ async function withUninstalledPacks(run: () => Promise<void>) {
     load.mockRestore();
     provider.mockRestore();
     setFontCdnConfiguration(previous);
-    Reflect.deleteProperty(globalThis, Symbol.for('betteroffice.fonts.cdn-warned'));
   }
 }
 

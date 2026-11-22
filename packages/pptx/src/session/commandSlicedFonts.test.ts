@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test';
 import { resolveScriptFallbackFace } from '@betteroffice/fonts';
 import { openSlicedFace } from '../../../fonts/src/progressive-entry';
 import { configureFontCdn as configureTestFontCdn } from '../../../fonts/src/fontCdn';
-import { fontAssetResponse, fontRuntimeWithoutPacks, withBrowserFontGlobals } from '../../../../shared/office-session/testing/fontAssets';
+import { fontAssetResponse, fontRuntimeWithoutPacks, withBrowserFontGlobals } from '../../../fonts/src/fontAssets.test-support';
 import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import { prepareTextFamilies } from '../render/textFamilies';
 import { createSlicedFontFaces, slicedFacesSupported, type SlicedFontFace } from './commandSlicedFonts';

@@ -20,7 +20,7 @@ test.skipIf(engine === 'native')('T6: Node worker_threads export with Base Latin
     for (const format of ['pptx', 'xlsx'] as const) {
       process.env.BETTEROFFICE_TEST_NODE_WORKER_FORMAT = format;
       const worker = () => {
-        const thread = createSessionWorker(new URL('../../../../shared/office-session/testing/nodeFontWorker.ts', import.meta.url), { type: 'module' }, 'the in-thread test API');
+        const thread = createSessionWorker(new URL('./nodeFontWorker.test-support.ts', import.meta.url), { type: 'module' }, 'the in-thread test API');
         const post = thread.postMessage.bind(thread);
         thread.postMessage = ((message: unknown, transfer: Transferable[]) => {
           if (isClientMessage(message) && message.kind === 'call' && message.method === 'open') opened.push(message.args[1]);

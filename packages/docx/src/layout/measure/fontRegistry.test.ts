@@ -2,7 +2,7 @@ import { expect, mock, spyOn, test } from 'bun:test';
 import { createFontProvider, resolveLastResortFace } from '@betteroffice/fonts';
 import type { SliceLocation } from '@betteroffice/fonts/progressive';
 import { TextMeasureFontRegistry } from './fontRegistry';
-import { fontAssetResponse, fontRuntimeWithoutPacks, withBrowserFontGlobals } from '../../../../../shared/office-session/testing/fontAssets';
+import { fontAssetResponse, fontRuntimeWithoutPacks, withBrowserFontGlobals } from '../../../../fonts/src/fontAssets.test-support';
 import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../../shared/office-session/fontCdn';
 
 test("an unknown family asks the provider for Word's last-resort face", async () => {
@@ -68,7 +68,6 @@ test('DOCX drops a failed CJK slice without registering substitute bytes and ret
   } finally {
     fetch.mockRestore();
     warn.mockRestore();
-    Reflect.deleteProperty(globalThis, Symbol.for('betteroffice.fonts.cdn-warned'));
     restore();
     setFontCdnConfiguration(previous);
   }
