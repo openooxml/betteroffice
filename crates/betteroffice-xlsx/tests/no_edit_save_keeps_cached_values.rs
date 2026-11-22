@@ -347,6 +347,23 @@ fn add_chart(source: &mut Parts, path: &str) {
 }
 
 #[test]
+fn keeps_chart_caches_when_filling_a_referenced_cell() {
+    const CHART: &str = "xl/charts/chart1.xml";
+    let mut source = package_parts(r#"<row r="1"><c r="A1"><f>2+3</f></c></row>"#, FULL_CALC);
+    add_chart(&mut source, CHART);
+    let mut workbook = open_recalculated(&source);
+    assert_eq!(workbook.model().sheets[0].charts.len(), 1);
+    let saved = saved_parts(&workbook);
+    assert!(cell(sheet_xml(&saved), "A1").contains("<v>5</v>"));
+    assert_eq!(part(&saved, CHART), part(&source, CHART));
+
+    workbook.recalculate_all(CalculationOptions::default());
+    let saved = saved_parts(&workbook);
+    let chart = std::str::from_utf8(part(&saved, CHART)).unwrap();
+    assert!(chart.contains(r#"<c:pt idx="0"><c:v>5</c:v></c:pt>"#));
+}
+
+#[test]
 fn keeps_chart_caches_at_a_nonstandard_path_when_filling_a_referenced_cell() {
     const CHART: &str = "xl/visuals/chart1.xml";
     let mut source = package_parts(r#"<row r="1"><c r="A1"><f>2+3</f></c></row>"#, FULL_CALC);
