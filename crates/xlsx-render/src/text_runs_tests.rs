@@ -468,7 +468,9 @@ fn uniform_runs_of_a_different_size_keep_that_sizes_wrap_layout() {
     workbook.styles.fonts[0].size_pt = Some(14.0);
     let plain = build_display_list(&workbook, SheetId(0), &VIEW).unwrap();
     let layout = |list: &DisplayList| match command(list, stored) {
-        DrawCmd::Text { wrap: Some(wrap), .. } => (wrap.line_height, wrap.max_lines),
+        DrawCmd::Text {
+            wrap: Some(wrap), ..
+        } => (wrap.line_height, wrap.max_lines),
         _ => unreachable!(),
     };
     assert!(run_pieces(command(&rich, stored)).is_some());
