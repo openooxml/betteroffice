@@ -4,4 +4,4 @@
 '@betteroffice/rust-crates': patch
 ---
 
-Editing the first or last paragraph of a field that spans paragraphs, such as a table of contents, no longer saves the field without its end or with one end too many; the field keeps spanning its paragraphs.
+Editing the first or last paragraph of a field that spans paragraphs, such as a table of contents, no longer saves the field without its end or with one end too many.
