@@ -69,3 +69,13 @@ fn real_shaped_nested_scopes_over_many_runs_open_as_before() {
     assert_eq!(json.matches(r#""kind":"bdo""#).count(), 2_000);
     assert!(parse_docx_s5_projection(&bytes).is_ok());
 }
+
+#[test]
+fn direction_data_spread_over_links_each_under_the_budget_fails_the_projection() {
+    let link = format!(
+        r#"<w:hyperlink w:anchor="target">{}</w:hyperlink>"#,
+        heavy_scope(&runs(1_000))
+    );
+    let error = parse_docx_s5_projection(&package(&link.repeat(2))).err();
+    assert!(refused(&error), "{error:?}");
+}
