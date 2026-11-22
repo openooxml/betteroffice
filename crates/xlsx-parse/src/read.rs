@@ -913,7 +913,9 @@ fn parse_worksheet(
             _ => {}
         }
     }
-    facts.additional_formula_ranges.extend(shared_formulas.ranges());
+    facts
+        .additional_formula_ranges
+        .extend(shared_formulas.ranges());
     shared_formulas.resolve(&mut sheet)?;
     normalize_merges(&mut sheet.merges);
     sheet.conditional_formats = parse_conditional_formats(data, dxfs)?;

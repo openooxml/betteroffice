@@ -263,7 +263,9 @@ fn keeps_authored_blanks_outside_the_source_spill() {
             &mut source,
             "xl/styles.xml",
             "application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml",
-            &format!(r#"<styleSheet xmlns="{MAIN}"><cellXfs count="2">{xfs}</cellXfs></styleSheet>"#),
+            &format!(
+                r#"<styleSheet xmlns="{MAIN}"><cellXfs count="2">{xfs}</cellXfs></styleSheet>"#
+            ),
         );
 
         let workbook = open_recalculated(&source);
@@ -690,7 +692,9 @@ fn keeps_a_style_only_string_typed_cell_beside_an_array() {
             &mut source,
             "xl/styles.xml",
             "application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml",
-            &format!(r#"<styleSheet xmlns="{MAIN}"><cellXfs count="2">{xfs}</cellXfs></styleSheet>"#),
+            &format!(
+                r#"<styleSheet xmlns="{MAIN}"><cellXfs count="2">{xfs}</cellXfs></styleSheet>"#
+            ),
         );
         let saved = saved_parts(&open_recalculated(&source));
         let sheet = sheet_xml(&saved);
