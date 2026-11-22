@@ -1,4 +1,5 @@
 import { afterEach, expect, mock, spyOn, test } from 'bun:test';
+import { sleep } from 'bun';
 import { readFile } from 'node:fs/promises';
 import * as fonts from '@betteroffice/fonts';
 import { fontAssetResponse, fontRuntimeWithoutPacks, withBrowserFontGlobals } from '../../../fonts/src/fontAssets.test-support';
@@ -272,7 +273,7 @@ test('coverage prefetch and slide switches share a CDN failure and retry in the 
     register, () => {}, undefined, undefined, shared);
   try {
     prefetchCoverageFaces(['cjk-jp'], Promise.resolve(), shared);
-    await Bun.sleep(0);
+    await sleep(0);
     expect(requests).toHaveLength(1);
     expect(await manager.load('opening')).toEqual([]);
     expect(await manager.load('next')).toEqual([]);

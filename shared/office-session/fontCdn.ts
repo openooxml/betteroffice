@@ -10,20 +10,36 @@ type FontGlobals = {
   window?: { document?: unknown };
   process?: { versions?: { node?: string } };
   Deno?: unknown;
+  Bun?: unknown;
 };
+
+type Failure = { error: Error; until: number };
+
+export interface ImplicitFontCdnBase {
+  transfer: Promise<void>;
+  unavailable?: Failure;
+  invalid: Map<string, Failure>;
+  warnedUntil: number;
+}
 
 export const JSDELIVR = 'https://cdn.jsdelivr.net/npm/';
 export const STALL_MS = 10_000;
 const CONFIGURATION = Symbol.for('betteroffice.fonts.cdn');
 const CONFIGURED_HERE = Symbol.for('betteroffice.fonts.cdn.configured-here');
+const COOLDOWN = Symbol.for('betteroffice.fonts.cdn.cooldown');
 
 const scope = globalThis as FontGlobals & {
   [CONFIGURATION]?: FontCdnConfiguration;
   [CONFIGURED_HERE]?: true;
+  [COOLDOWN]?: Map<string, ImplicitFontCdnBase>;
 };
 
+export function implicitFontCdnBases(): Map<string, ImplicitFontCdnBase> {
+  return scope[COOLDOWN] ??= new Map();
+}
+
 function isServer(globals: FontGlobals): boolean {
-  return globals.process?.versions?.node !== undefined || globals.Deno !== undefined;
+  return globals.process?.versions?.node !== undefined || globals.Deno !== undefined || globals.Bun !== undefined;
 }
 
 export function isBrowserFontPage(globals: FontGlobals): boolean {

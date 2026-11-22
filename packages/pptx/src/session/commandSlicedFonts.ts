@@ -101,8 +101,8 @@ export function createSlicedFontFaces(quietMs = FILL_QUIET_MS) {
       entry.wholeLoad = undefined;
       throw error;
     });
-  const replacementBytes = (entry: Entry, sliceError?: unknown) => wholeBytes(entry).catch((error: unknown) => {
-    if (isImplicitFontCdnError(error) && !isImplicitFontCdnError(sliceError)) reportImplicitCdnFailure(error);
+  const replacementBytes = (entry: Entry) => wholeBytes(entry).catch((error: unknown) => {
+    if (isImplicitFontCdnError(error)) reportImplicitCdnFailure(error);
     throw error;
   });
   const latestOf = (entry: Entry) => entry.installed[entry.installed.length - 1];
@@ -125,8 +125,9 @@ export function createSlicedFontFaces(quietMs = FILL_QUIET_MS) {
     try {
       await entry.face.ensureText(text);
     } catch (error) {
+      if (isImplicitFontCdnError(error)) return latestOf(entry)?.family ?? entry.family;
       let bytes: ArrayBuffer;
-      try { bytes = await replacementBytes(entry, error); } catch { return entry.family; }
+      try { bytes = await replacementBytes(entry); } catch { return entry.family; }
       const latest = latestOf(entry);
       if (latest?.revision === WHOLE) return latest.family;
       try { return await install(entry, WHOLE, bytes, null); } catch { return entry.family; }
@@ -267,14 +268,15 @@ export function createSlicedFontFaces(quietMs = FILL_QUIET_MS) {
       if (!entry || disposed) return Promise.resolve(undefined);
       lastPaint = now();
       return (async () => {
-        let sliceError: unknown;
         if (!entry.wholeBytes) {
           try {
             const revision = await entry.face.ensureText(text);
             return revision === have ? { revision } : { revision, bytes: entry.face.bytes() };
-          } catch (error) { sliceError = error; }
+          } catch (error) {
+            if (isImplicitFontCdnError(error)) return undefined;
+          }
         }
-        const bytes = await replacementBytes(entry, sliceError).catch((error: unknown) => {
+        const bytes = await replacementBytes(entry).catch((error: unknown) => {
           if (!isImplicitFontCdnError(error)) throw error;
         });
         if (!bytes) return undefined;

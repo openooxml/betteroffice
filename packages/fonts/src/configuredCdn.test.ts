@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, jest, mock, spyOn, test } from 'bun:test';
+import * as Bun from 'bun';
 import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -15,8 +16,7 @@ import { fontAssetResponse, withBrowserFontGlobals } from './fontAssets.test-sup
 import { openSlicedFace, sliceSourceOf } from './progressive-entry';
 import { parseSkeleton } from './slices';
 import { writeFontCdnTree } from '../../../scripts/fonts/cdn-tree';
-import { getFontCdnConfiguration, setFontCdnConfiguration, type FontCdnConfiguration } from '../../../shared/office-session/fontCdn';
-import { implicitFontCdnBases } from '../../../shared/office-session/fontCdnCooldown';
+import { getFontCdnConfiguration, implicitFontCdnBases, setFontCdnConfiguration, type FontCdnConfiguration } from '../../../shared/office-session/fontCdn';
 import { createFontPackResponder, createWorkerFontPacks } from '../../../shared/office-session/optionalFontPacks';
 import { setWorkerFontAssets } from './workerAssets';
 import * as worker from './worker';

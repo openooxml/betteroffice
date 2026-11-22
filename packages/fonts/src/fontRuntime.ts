@@ -7,7 +7,7 @@ import type { SliceLocation } from './progressive';
 import { checkInstalledPacks } from './packDiagnostics';
 import { isImplicitFontCdnError, reportImplicitCdnFailure, type FontPackDiagnostic } from '../../../shared/fontPackDiagnostics';
 import {
-  fontCdnAssetUrl, fontCdnCacheKey,
+  checkImplicitSliceCooldown, fontCdnAssetUrl, fontCdnCacheKey,
   type FontCdnConfiguration, type FontRequestPolicy,
 } from './fontCdn';
 import type { FontAssetKind } from '../../../shared/office-session/optionalFontPacks';
@@ -227,7 +227,12 @@ export function createFontRuntime(lookup: FontPackLookup, {
     onCdnFailure?: () => void,
   ): Promise<ArrayBuffer> {
     const baseUrl = base instanceof Promise ? await base : base;
-    const resolve = (dependency: BundledFontFace) => assetUrl(dependency, baseUrl, skipImplicit);
+    const resolve = async (dependency: BundledFontFace) => {
+      const url = await assetUrl(dependency, baseUrl, skipImplicit);
+      const slices = runtime?.strict && typeof requestPolicy(url) === 'string' && sliceRefOf(dependency.file);
+      if (slices) checkImplicitSliceCooldown(new URL(slices.index, url));
+      return url;
+    };
     try {
       return await (isBaseLatinFont(face.file) || isLatinFont(face.file) || INTL_FILES.has(face.file) || CJK_FILES.has(face.file)
         ? packed(
