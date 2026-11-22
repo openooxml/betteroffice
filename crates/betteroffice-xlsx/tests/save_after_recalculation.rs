@@ -336,7 +336,11 @@ fn a_stale_open_with_an_empty_cached_result_saves_dependents_from_the_calculated
 #[test]
 fn a_flagged_array_formula_fills_its_uncached_member_and_keeps_every_other_part() {
     let source = package(
-        r#"<row r="2"><c r="C2"><f t="array" ref="C2:C4">1</f><v>1</v></c></row><row r="3"><c r="C3"><v>100</v></c></row>"#,
+        concat!(
+            r#"<row r="2"><c r="C2"><f t="array" ref="C2:C4">1</f><v>1</v></c></row>"#,
+            r#"<row r="3"><c r="C3"><v>100</v></c></row>"#,
+            r#"<row r="4"><c r="C4"/></row>"#,
+        ),
         r#"<calcPr fullCalcOnLoad="1"/>"#,
     );
     let saved = Workbook::open_recalculated(&source, options())

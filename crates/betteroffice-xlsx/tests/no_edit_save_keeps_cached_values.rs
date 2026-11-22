@@ -137,27 +137,96 @@ fn keeps_cached_cells_and_the_anchor_when_a_spill_shrinks() {
 }
 
 #[test]
-fn leaves_new_followers_outside_the_source_spill_absent_on_save() {
+fn fills_a_formula_with_a_spaced_empty_value() {
+    let mut source = package_parts(
+        concat!(
+            r#"<row r="15"><c r="B15" s="21"><f>COUNTA(B16:B30)</f><v /></c></row>"#,
+            r#"<row r="16"><c r="B16"><v>9</v></c></row>"#,
+        ),
+        FULL_CALC,
+    );
+    insert_xml(
+        &mut source,
+        WORKBOOK_RELS,
+        "</Relationships>",
+        &format!(r#"<Relationship Id="rId2" Type="{RELS}/styles" Target="styles.xml"/>"#),
+    );
+    let xfs = r#"<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>"#.repeat(22);
+    add_part(
+        &mut source,
+        "xl/styles.xml",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml",
+        &format!(r#"<styleSheet xmlns="{MAIN}"><cellXfs count="22">{xfs}</cellXfs></styleSheet>"#),
+    );
+    let saved = saved_parts(&open_recalculated(&source));
+    assert_eq!(
+        cell(sheet_xml(&saved), "B15"),
+        r#"<c r="B15" s="21"><f>COUNTA(B16:B30)</f><v>1</v></c>"#,
+    );
+}
+
+#[test]
+fn fills_formulas_with_self_closing_and_paired_empty_values() {
     let source = package_parts(
         concat!(
-            r#"<row r="1"><c r="A1"><f t="array" ref="A1:A2">_xlfn.SEQUENCE(3)</f><v>1</v></c></row>"#,
-            r#"<row r="2"><c r="A2"><v>2</v></c></row>"#,
+            r#"<row r="1"><c r="A1"><f>2+3</f><v/></c>"#,
+            r#"<c r="B1"><f>4+5</f><v></v></c>"#,
+            r#"<c r="C1" t="b"><f>FALSE()</f><v/></c></row>"#,
         ),
         FULL_CALC,
     );
     let saved = saved_parts(&open_recalculated(&source));
     let sheet = sheet_xml(&saved);
-    assert_eq!(cell(sheet, "A1"), cell(sheet_xml(&source), "A1"));
-    assert!(!sheet.contains(r#"<c r="A3""#));
+    assert!(cell(sheet, "A1").contains("<v>5</v>"));
+    assert!(cell(sheet, "B1").contains("<v>9</v>"));
+    assert!(cell(sheet, "C1").contains("<v>0</v>"));
+}
 
-    let reopened = open_recalculated(&saved);
-    let sheet = &reopened.model().sheets[0];
-    for row in 0..3 {
+#[test]
+fn fills_a_spill_anchor_and_keeps_the_source_members_and_ref() {
+    let source = package_parts(
+        concat!(
+            r#"<row r="2"><c r="P2"><f t="array" ref="P2:T19">_xlfn.SEQUENCE(18,5)</f><v /></c>"#,
+            r#"<c r="Q2" t="n"><v>13</v></c><c r="R2"><v /></c></row>"#,
+        ),
+        FULL_CALC,
+    );
+    let saved = saved_parts(&open_recalculated(&source));
+    assert_eq!(
+        sheet_xml(&saved),
+        sheet_xml(&source)
+            .replacen("<v />", "<v>1</v>", 1)
+            .replacen("<v />", "<v>3</v>", 1),
+    );
+}
+
+#[test]
+fn leaves_new_followers_inside_and_outside_the_source_spill_absent_on_save() {
+    for cache in ["<v>1</v>", "<v />"] {
+        let source = package_parts(
+            &format!(
+                concat!(
+                    r#"<row r="1"><c r="A1"><f t="array" ref="A1:A3">_xlfn.SEQUENCE(4)</f>{}</c></row>"#,
+                    r#"<row r="2"><c r="A2"><v>2</v></c></row>"#,
+                ),
+                cache,
+            ),
+            FULL_CALC,
+        );
+        let workbook = open_recalculated(&source);
+        let sheet = &workbook.model().sheets[0];
+        for row in 0..4 {
+            assert_eq!(
+                sheet.cell(CellRef::new(row, 0)).unwrap().value,
+                CellValue::Number {
+                    value: f64::from(row + 1),
+                }
+            );
+        }
+        let saved = saved_parts(&workbook);
         assert_eq!(
-            sheet.cell(CellRef::new(row, 0)).unwrap().value,
-            CellValue::Number {
-                value: f64::from(row + 1),
-            }
+            sheet_xml(&saved),
+            sheet_xml(&source).replace("<v />", "<v>1</v>"),
         );
     }
 }
@@ -174,12 +243,10 @@ fn fills_uncached_formula_cells_and_keeps_a_cached_array_member() {
     );
     let saved = saved_parts(&open_recalculated(&source));
     let sheet = sheet_xml(&saved);
-    for (address, value) in [("A1", 5), ("C1", 2)] {
+    for (address, value) in [("A1", 5), ("B1", 9), ("C1", 2)] {
         assert!(cell(sheet, address).contains(&format!("<v>{value}</v>")));
     }
-    for address in ["B1", "C2"] {
-        assert_eq!(cell(sheet, address), cell(sheet_xml(&source), address));
-    }
+    assert_eq!(cell(sheet, "C2"), cell(sheet_xml(&source), "C2"));
 }
 
 #[test]
@@ -200,10 +267,10 @@ fn fills_typed_cells_without_a_source_value_element() {
         let boolean = cell(sheet, address);
         assert!(boolean.contains(r#"t="b""#) && boolean.contains("<v>1</v>"));
     }
-    assert!(cell(sheet, "B1").contains("<v>calculated</v>"));
-    for address in ["C1", "D1"] {
-        assert_eq!(cell(sheet, address), cell(sheet_xml(&source), address));
+    for address in ["B1", "C1"] {
+        assert!(cell(sheet, address).contains("<v>calculated</v>"));
     }
+    assert_eq!(cell(sheet, "D1"), cell(sheet_xml(&source), "D1"));
 }
 
 #[test]
@@ -224,7 +291,7 @@ fn keeps_the_cached_formula_and_fills_the_uncached_formula_and_array_member() {
 }
 
 #[test]
-fn checks_only_changed_cells_in_each_array_range() {
+fn fills_existing_array_members_without_scanning_formula_ranges() {
     const COLS: u32 = 64;
     const ROWS: u32 = 8;
     let mut sheet_data = String::from(r#"<row r="1">"#);
@@ -237,6 +304,14 @@ fn checks_only_changed_cells_in_each_array_range() {
         .unwrap();
     }
     sheet_data.push_str("</row>");
+    for row in 2..=ROWS {
+        write!(sheet_data, r#"<row r="{row}">"#).unwrap();
+        for col in 0..COLS {
+            let col = col_to_letters(col);
+            write!(sheet_data, r#"<c r="{col}{row}"/>"#).unwrap();
+        }
+        sheet_data.push_str("</row>");
+    }
     let source = package_parts(&sheet_data, FULL_CALC);
     let workbook = open_recalculated(&source);
 
@@ -245,7 +320,7 @@ fn checks_only_changed_cells_in_each_array_range() {
     let counts = xlsx_model::open_timing::finish().counts;
     let saved = ooxml_opc::unzip_parts(&saved.unwrap()).unwrap();
     let checks = counts.get("save_array_range_changes").copied().unwrap_or(0);
-    assert_eq!(checks, u64::from(COLS * (ROWS - 1)));
+    assert_eq!(checks, 0);
     let sheet = sheet_xml(&saved);
     assert_eq!(cell(sheet, "A1"), cell(sheet_xml(&source), "A1"));
     assert!(cell(sheet, "A8").contains("<v>1</v>"));

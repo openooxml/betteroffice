@@ -530,42 +530,55 @@ fn merge_source_caches(
         };
         let facts = &preserved.cell_facts;
         for (at, source_cell) in source.iter_cells() {
-            let cached = facts.has_cached_value(at, Some(source_cell));
             match sheet.cell(at) {
                 None => sheet.set_cell(at, source_cell.clone()),
-                Some(_) if cached => {
-                    sheet.set_calculated_value(at, source_cell.value.clone());
+                Some(calculated) if calculated != source_cell => {
+                    if facts.has_cached_value(at, Some(source_cell))
+                        || calculated.value == CellValue::Empty
+                    {
+                        sheet.set_cell(at, source_cell.clone());
+                    } else if calculated.formula != source_cell.formula
+                        || calculated.style != source_cell.style
+                    {
+                        let mut cell = source_cell.clone();
+                        cell.value = calculated.value.clone();
+                        sheet.set_cell(at, cell);
+                    }
                 }
                 Some(_) => {}
             }
-            if cached && source_cell.formula.is_some() {
-                let source_range = source.array_formula(at);
-                if let Some(spill) = sheet.array_formula(at)
-                    && Some(spill) != source_range
-                {
-                    let extra = sheet
-                        .cells_in_range(spill)
-                        .map(|(follower, _)| follower)
-                        .filter(|&follower| {
-                            !source_range.is_some_and(|range| range.contains(follower))
-                                && source.cell(follower).is_none()
-                        })
-                        .collect::<Vec<_>>();
-                    for follower in extra {
-                        sheet.set_calculated_value(follower, CellValue::Empty);
-                    }
-                }
-                match source_range {
-                    Some(range) => sheet.set_array_formula(at, range),
-                    None => sheet.clear_array_formula(at),
-                }
-            }
         }
-        for &(row, col) in &facts.cache_presence_overrides {
-            let at = CellRef::new(row, col);
-            if source.cell(at).is_none() {
-                sheet.set_calculated_value(at, CellValue::Empty);
-            }
+        let mut source_cells = source.iter_cells().peekable();
+        let extra_cells = sheet
+            .iter_cells()
+            .map(|(at, _)| at)
+            .filter(|&at| {
+                let key = (at.row, at.col);
+                while source_cells
+                    .peek()
+                    .is_some_and(|(at, _)| (at.row, at.col) < key)
+                {
+                    source_cells.next();
+                }
+                source_cells
+                    .next_if(|(at, _)| (at.row, at.col) == key)
+                    .is_none()
+                    && (!facts.unmodeled_cells.contains(&key) || facts.has_cached_value(at, None))
+            })
+            .collect::<Vec<_>>();
+        for at in extra_cells {
+            sheet.set_cell(at, Cell::default());
+        }
+        let extra_anchors = sheet
+            .array_formulas()
+            .map(|(at, _)| at)
+            .filter(|&at| source.array_formula(at).is_none())
+            .collect::<Vec<_>>();
+        for at in extra_anchors {
+            sheet.clear_array_formula(at);
+        }
+        for (at, range) in source.array_formulas() {
+            sheet.set_array_formula(at, range);
         }
     }
     merged
@@ -828,6 +841,7 @@ pub fn serialize_workbook_with_package_and_open_calculation<'p>(
                     &style_match,
                     index,
                     &cf_plan,
+                    preserve_source_caches,
                 )?
             }
             Some(_) => continue,
@@ -3254,6 +3268,7 @@ fn patched_grid(
     shared_string_plan: Option<&SharedStringPlan>,
     styles: &StyleMatch<'_>,
     names: FormulaNames<'_>,
+    preserve_source_caches: bool,
 ) -> Result<(Option<Vec<u8>>, Vec<u8>), ParseError> {
     let mut sst_index: HashMap<&str, usize> = HashMap::with_capacity(wb.shared_strings.len());
     if shared_string_plan.is_none() {
@@ -3272,6 +3287,7 @@ fn patched_grid(
         plan: shared_string_plan,
         styles,
         names,
+        preserve_source_caches,
     };
     let columns = patch
         .cols(
@@ -3302,6 +3318,10 @@ fn patched_grid(
     };
     let sheet_data = match sheet_data {
         Some(sheet_data) => sheet_data,
+        None if preserve_source_caches => source
+            .template
+            .child("sheetData")
+            .map_or_else(|| b"<sheetData/>".to_vec(), |child| child.bytes.clone()),
         None => {
             if let Some(child) = source.template.child("sheetData")
                 && let Some(loss) = sheet_data_regeneration_loss(&child.bytes)
@@ -3345,6 +3365,7 @@ fn worksheet_xml_with_template(
     styles: &StyleMatch<'_>,
     sheet_index: usize,
     cf_plan: &CfPlan,
+    preserve_source_caches: bool,
 ) -> Result<WorksheetOutput, ParseError> {
     let defined = DefinedFunctionNames::new(&wb.defined_names);
     let names = defined.visible_from(Some(SheetId(sheet_index as u32)));
@@ -3375,6 +3396,7 @@ fn worksheet_xml_with_template(
             shared_string_plan,
             styles,
             names,
+            preserve_source_caches,
         )?),
         _ => None,
     };

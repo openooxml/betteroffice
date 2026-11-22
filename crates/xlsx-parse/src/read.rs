@@ -701,7 +701,8 @@ pub struct SourceCellFacts {
 pub(crate) struct WorksheetCellFacts {
     pub(crate) source: SourceCellFacts,
     // The XML and model disagree about whether these cells hold a cache.
-    pub(crate) cache_presence_overrides: BTreeSet<(u32, u32)>,
+    cache_presence_overrides: BTreeSet<(u32, u32)>,
+    pub(crate) unmodeled_cells: BTreeSet<(u32, u32)>,
 }
 
 impl WorksheetCellFacts {
@@ -1273,10 +1274,11 @@ fn finalize_cell(
         None => return Ok(()),
     };
     let key = (addr.row, addr.col);
-    let has_cache = c.value_text.is_some() || c.inline_text.is_some();
-    if c.formula.is_some() && !has_cache {
+    if c.formula.is_some() && c.value_text.is_none() && c.inline_text.is_none() {
         facts.source.uncached_formulas.insert(key);
     }
+    let has_cache = c.value_text.as_ref().is_some_and(|value| !value.is_empty())
+        || c.inline_text.is_some();
     let cached = c
         .value_text
         .as_deref()
@@ -1316,6 +1318,7 @@ fn finalize_cell(
         Some("str") => CellValue::Text {
             value: unescape_name(&c.value_text.unwrap_or_default()),
         },
+        Some("b") if c.value_text.as_deref() == Some("") => CellValue::Empty,
         Some("b") => CellValue::Bool {
             value: c.value_text.as_deref() == Some("1"),
         },
@@ -1365,6 +1368,8 @@ fn finalize_cell(
     }
     if retained {
         sheet.set_cell(addr, cell);
+    } else if sheet.cell(addr).is_none() {
+        facts.unmodeled_cells.insert(key);
     }
     Ok(())
 }
