@@ -626,6 +626,42 @@ describe('Canvas substitute widths', () => {
     expect(run.glyphs[0].advance).toBe(16);
   });
 
+  it('strokes and fills the widened glyph with a modern text outline', async () => {
+    const regularPath = { width: 2048, height: 2048 } as unknown as Path2D;
+    const widenedPath = { width: 2176, height: 2176 } as unknown as Path2D;
+    const glyphCache = {
+      get: (_fontId: number, _glyphId: number, syntheticBold?: boolean) => ({
+        path: syntheticBold ? widenedPath : regularPath,
+        upem: 2048,
+      }),
+    } as unknown as GlyphCache;
+    const run: GlyphRunPrimitive = {
+      kind: 'glyphRun', fontId: 1, size: 16, color: '#000000', text: '楷',
+      syntheticBold: true,
+      glyphs: [{ id: 1, x: 10, y: 20, cluster: 0, advance: 16 }],
+    };
+
+    for (const fillEnabled of [true, false]) {
+      const { ctx } = recordingContext(new Map());
+      const stroke = mock((_path: Path2D) => {});
+      ctx.stroke = stroke;
+      const fill = spyOn(ctx, 'fill');
+
+      await drawPrimitive(ctx, {
+        ...run,
+        modernEffects: {
+          textOutline: { color: '#ff0000', width: 1 },
+          textFill: fillEnabled ? undefined : { kind: 'none' },
+        },
+      }, { glyphCache });
+
+      expect(stroke).toHaveBeenCalledTimes(1);
+      expect(stroke.mock.calls[0][0]).toBe(widenedPath);
+      expect(fill).toHaveBeenCalledTimes(fillEnabled ? 1 : 0);
+      if (fillEnabled) expect(fill.mock.calls[0][0]).toBe(widenedPath);
+    }
+  });
+
   it('paints the glyph run stand-in when glyph outlines are unavailable', async () => {
     const { ctx } = recordingContext(new Map([['co-op', { width: 40, ascent: 12, descent: 4 }]]));
     const fillText = spyOn(ctx, 'fillText');
