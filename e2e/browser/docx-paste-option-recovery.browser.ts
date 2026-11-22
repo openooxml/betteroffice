@@ -12,6 +12,9 @@ interface RecoveryProbe {
   sent: number;
   acked: number;
   framed: number;
+  /** Every command sent, in order, and the outcome of each sequence number. */
+  commands: { seq: number; kind: string }[];
+  outcomes: Record<number, string>;
 }
 
 declare global {
@@ -20,7 +23,7 @@ declare global {
 
 async function observeWorker(page: Page) {
   await page.addInitScript(() => {
-    const probe: RecoveryProbe = { incarnation: 0, version: 0, checkpoints: [], sent: -1, acked: -1, framed: -1 };
+    const probe: RecoveryProbe = { incarnation: 0, version: 0, checkpoints: [], sent: -1, acked: -1, framed: -1, commands: [], outcomes: {} };
     window.__pasteRecovery = probe;
     window.Worker = class extends Worker {
       override postMessage(message: DocxEngineWorkerRequest, options?: Transferable[] | StructuredSerializeOptions) {
@@ -35,7 +38,10 @@ async function observeWorker(page: Page) {
             this.addEventListener('message', reply);
           }));
         }
-        if (this === probe.worker && message.type === 'edit') probe.sent = Math.max(probe.sent, message.command.seq);
+        if (this === probe.worker && message.type === 'edit') {
+          probe.sent = Math.max(probe.sent, message.command.seq);
+          probe.commands.push({ seq: message.command.seq, kind: message.command.kind });
+        }
         super.postMessage(message, Array.isArray(options) ? { transfer: options } : options);
       }
       constructor(url: string | URL, options?: WorkerOptions) {
@@ -55,6 +61,7 @@ async function observeWorker(page: Page) {
           const frame = data.commandAck?.frame ?? data.commandFrame?.frame;
           if (frame) probe.framed = Math.max(probe.framed, frame.coversThroughSeq);
           if (!data.commandAck) return;
+          for (const outcome of data.commandAck.outcomes) probe.outcomes[outcome.seq] = outcome.status;
           probe.version = Math.max(probe.version, data.commandAck.version);
           probe.acked = Math.max(probe.acked, data.commandAck.throughSeq);
         });
@@ -117,11 +124,16 @@ for (const scenario of ['PASTE_ON_CHECKPOINT', 'PASTE_BEFORE_CHECKPOINT', 'CONTR
       const choose = async (name: string) => {
         await settled();
         const before = await version();
+        const from = await page.evaluate(() => window.__pasteRecovery.commands.length);
         await control.click();
         await page.getByRole('menuitemradio', { name }).click();
         await expect(control).toHaveAttribute('aria-expanded', 'false');
         await expect(input).toBeFocused();
         await reach(before + 1);
+        expect(await page.evaluate(from => {
+          const probe = window.__pasteRecovery;
+          return probe.commands.slice(from).map(({ seq, kind }) => `${kind} ${probe.outcomes[seq]}`);
+        }, from), `the one command "${name}" sends`).toEqual(['replacePasteFragment applied']);
       };
       await expect(control).toBeVisible();
       expect(await version()).toBe(boundary + 1);
