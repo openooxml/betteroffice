@@ -1859,7 +1859,7 @@ mod tests {
         .map(|(path, xml)| (path.to_owned(), xml.into_bytes()))
         .collect();
         let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
-        let mut worker =
+        let worker =
             Session::open_with_calculation_json(&bytes, r#"{"nowSerial":45000.75,"randSeed":42}"#)
                 .unwrap();
         let hydration = worker.peer_hydration_json().unwrap();

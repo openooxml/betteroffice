@@ -2980,7 +2980,8 @@ impl Workbook {
     /// none of these leaves it. Such a recalculation also notifies observers with an empty
     /// [`UpdateOrigin::Recalculation`] event. It counts as an edit, so the next save writes
     /// the recalculated values. The recalculation at open does not: a save with no edit
-    /// and no change of the active sheet since open returns the source file unchanged.
+    /// since open, while the active sheet is the one the file stores, returns the source
+    /// file unchanged when its archive can be reused as read.
     pub fn recalculate_all(&mut self, options: CalculationOptions) -> CalculationResult {
         let result = self.recalculate(options);
         self.edited_since_open = true;
