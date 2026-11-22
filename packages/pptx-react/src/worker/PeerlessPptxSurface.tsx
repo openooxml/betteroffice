@@ -233,7 +233,7 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
   }, [presentation]);
   const shapes = usePeerlessShapeGestures(presentation?.store ?? null, { canvas, presentation });
   useEffect(() => {
-    if (canvas.current) canvas.current.style.cursor = insertion.tool !== 'select' ? 'crosshair' : 'default';
+    if (stage.current) stage.current.style.cursor = insertion.tool !== 'select' ? 'crosshair' : 'default';
   }, [insertion.tool, review.diff]);
   const save = useCallback(async () => {
     try {
@@ -339,11 +339,15 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
           if (!isKeyReleasedFromInput(event.nativeEvent)) peerlessHistoryKey(event, presentation.store);
           if (!event.defaultPrevented) navigatePeerlessSlide(event, presentation);
         }}
-        onPointerDown={(event) => { if (!pluginEventStore(event.nativeEvent) && !inPluginChrome(event.target) && !review.diff && !insertion.onPointerDown(event) && !shapes.onPointerDown(event)) selection.onPointerDown(event); }}
+        onPointerDown={(event) => {
+          if (pluginEventStore(event.nativeEvent) || inPluginChrome(event.target) || review.diff) return;
+          if (event.target instanceof Element) event.currentTarget.style.cursor = getComputedStyle(event.target).cursor;
+          if (!insertion.onPointerDown(event) && !shapes.onPointerDown(event)) selection.onPointerDown(event);
+        }}
         onPointerMove={(event) => {
           if (pluginEventStore(event.nativeEvent) || inPluginChrome(event.target) || review.diff) return;
           const cursor = insertion.tool === 'select' ? shapes.hoverCursor(event) : null;
-          if (cursor && canvas.current) canvas.current.style.cursor = cursor;
+          if (cursor) event.currentTarget.style.cursor = cursor;
           if (!insertion.onPointerMove(event) && !shapes.onPointerMove(event)) selection.onPointerMove(event);
         }}
         onPointerUp={(event) => { if (!pluginEventStore(event.nativeEvent) && !inPluginChrome(event.target) && !review.diff && !insertion.onPointerUp(event) && !shapes.onPointerUp(event)) selection.onPointerUp(event); }}
