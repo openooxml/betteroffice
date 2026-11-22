@@ -1,5 +1,3 @@
-import { absoluteHref } from './assetHref';
-
 interface NodeFsLike {
   readFileSync(path: string): Uint8Array;
 }
@@ -22,7 +20,7 @@ export async function readWasm(url: URL, builtinModule: <T>(name: string) => T |
 export function bundledDecoderUrl(): URL | undefined {
   try {
     const url = new URL('./decoder/fontpack.wasm', import.meta.url);
-    return new URL(absoluteHref(url.href));
+    return new URL(url.href, globalThis.location?.href);
   } catch {
     return undefined;
   }

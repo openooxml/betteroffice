@@ -160,29 +160,31 @@ test('one 15-second timeout settles all requests until a late reply from the pag
   const requests: FontPackRequest[] = [];
   const packs = createWorkerFontPacks((message) => requests.push(message));
   const other = createWorkerFontPacks(() => {});
-  const timer = spyOn(globalThis, 'setTimeout');
+  const timers: Array<{ run: () => void; delay: number }> = [];
+  const timeout = spyOn(globalThis, 'setTimeout').mockImplementation(((run: () => void, delay?: number) => {
+    timers.push({ run, delay: delay ?? 0 });
+    return timers.length as unknown as ReturnType<typeof setTimeout>;
+  }) as typeof setTimeout);
+  const clear = spyOn(globalThis, 'clearTimeout').mockImplementation((() => {}) as typeof clearTimeout);
   try {
     const first = packs.source('decoder');
     expect(packs.source('decoder')).toBe(first);
-    const [expire, delay] = timer.mock.calls.at(-1)!;
     const concurrent = packs.source('cjk');
-    if (typeof expire !== 'function') throw new Error('Expected a timer callback');
-    expire();
-    expect(delay).toBe(15_000);
+    expect(timers.map(({ delay }) => delay)).toEqual([15_000]);
+    timers[0]!.run();
     expect(await Promise.all([first, concurrent])).toEqual([undefined, undefined]);
     packs.receive({ protocol: 1, kind: 'font-pack-reply', id: 'unknown' });
-    const timers = timer.mock.calls.length;
+    const created = timers.length;
     for (const pack of ['base', 'latin', 'intl', 'cjk', 'decoder'] as const) {
       expect(await packs.source(pack)).toBeUndefined();
     }
-    expect(timer.mock.calls).toHaveLength(timers);
+    expect(timers).toHaveLength(created);
     expect(requests).toHaveLength(2);
 
     const independent = other.source('base');
-    const closed = expect(independent).rejects.toMatchObject({ code: 'disposed' });
     other.dispose();
-    await closed;
-    expect(timer.mock.calls).toHaveLength(timers + 1);
+    await expect(independent).rejects.toMatchObject({ code: 'disposed' });
+    expect(timers).toHaveLength(created + 1);
 
     packs.receive({ protocol: 1, kind: 'font-pack-reply', id: requests[0]!.id });
     const retry = packs.source('decoder');
@@ -193,7 +195,8 @@ test('one 15-second timeout settles all requests until a late reply from the pag
   } finally {
     other.dispose();
     packs.dispose();
-    timer.mockRestore();
+    timeout.mockRestore();
+    clear.mockRestore();
   }
 });
 

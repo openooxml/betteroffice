@@ -10,6 +10,12 @@ export type WorkerFontPackSource = (pack: FontAssetKind, options?: { fresh?: boo
 export type FontPackRequest = { protocol: 1; kind: 'font-pack-request'; id: string; pack: FontAssetKind };
 export type FontPackReply = FontPackAssets & { protocol: 1; kind: 'font-pack-reply'; id: string; error?: string };
 
+export class WorkerFontModuleUnavailableError extends TypeError {
+  constructor(specifier: string) {
+    super(`Failed to resolve module specifier '${specifier}'`);
+  }
+}
+
 function isAbsoluteHref(value: unknown): value is string {
   try {
     return typeof value === 'string' && new URL(value).href === value;
@@ -34,11 +40,12 @@ export function createFontPackResponder(
     receive(message: unknown): boolean {
       if (!isFontPackRequest(message)) return false;
       const { pack } = message;
-      const pageUrl = pack === 'base' ? globalThis.location?.href : undefined;
+      const pageUrl = globalThis.location?.href;
       let pending = packs.get(pack);
       if (!pending) {
         pending = Promise.resolve().then(async () => {
-          const urls = await source(pack);
+          const assets = await source(pack);
+          const urls = assets && Object.fromEntries(Object.entries(assets).map(([file, href]) => [file, new URL(href, pageUrl).href]));
           const cdn = pack === 'base' || pack === 'decoder' ? undefined : fontCdn?.();
           return cdn ? { urls, cdn } : { urls };
         });
@@ -48,7 +55,7 @@ export function createFontPackResponder(
       }
       const reply = (value: FontPackReply) => { try { post(value); } catch {} };
       pending.then(
-        (assets) => reply({ protocol: 1, kind: 'font-pack-reply', id: message.id, ...assets, ...(pageUrl ? { pageUrl } : {}) }),
+        (assets) => reply({ protocol: 1, kind: 'font-pack-reply', id: message.id, ...assets, ...(pack === 'base' && pageUrl ? { pageUrl } : {}) }),
         (error: unknown) => reply({ protocol: 1, kind: 'font-pack-reply', id: message.id,
           error: error instanceof Error ? error.message : String(error) }),
       );
@@ -80,8 +87,21 @@ export function createWorkerFontPacks(post: (message: FontPackRequest) => void, 
   let nextId = 0;
   let disposed = false;
   let unresponsive: Set<string> | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   const packs = new Map<FontAssetKind, Promise<FontPackAssets | undefined>>();
   const pending = new Map<string, { finish(assets?: FontPackAssets, error?: Error): void }>();
+
+  function startTimer(): void {
+    if (timer !== undefined) return;
+    const scheduled = setTimeout(() => {
+      if (timer !== scheduled) return;
+      unresponsive = new Set(pending.keys());
+      packs.clear();
+      for (const request of pending.values()) request.finish();
+    }, waitMs);
+    timer = scheduled;
+  }
+
   const source: WorkerFontPackSource = (pack, { fresh = false } = {}) => {
     if (disposed) return Promise.reject(new SessionFailure('disposed', 'Font pack channel is closed'));
     if (unresponsive) return Promise.resolve(undefined);
@@ -89,18 +109,17 @@ export function createWorkerFontPacks(post: (message: FontPackRequest) => void, 
     if (!promise) {
       const id = `font-pack:${channel}:${++nextId}`;
       promise = new Promise((resolve, reject) => {
-        const timer = setTimeout(() => {
-          unresponsive = new Set(pending.keys());
-          packs.clear();
-          for (const request of pending.values()) request.finish();
-        }, waitMs);
         const finish = (assets?: FontPackAssets, error?: Error) => {
-          clearTimeout(timer);
           pending.delete(id);
+          if (pending.size === 0) {
+            clearTimeout(timer);
+            timer = undefined;
+          }
           if (error) reject(error);
           else resolve(assets);
         };
         pending.set(id, { finish });
+        startTimer();
         try { post({ protocol: 1, kind: 'font-pack-request', id, pack }); }
         catch (error) { finish(undefined, new SessionFailure('message', String(error))); }
       });

@@ -1,4 +1,4 @@
-import intlSizes from './intl-sizes.json';
+import intlManifest from '../../fonts-intl/assets/manifest.json';
 import latinManifest from '../../fonts-latin/assets/manifest.json';
 import { BUNDLED_FONTS } from './manifest';
 
@@ -15,7 +15,7 @@ type AssetUrls = Record<string, () => URL>;
 
 const PACK_FILES: Record<Pack, string[]> = {
   latin: latinManifest.faces.map((face) => face.file),
-  intl: Object.keys(intlSizes),
+  intl: intlManifest.faces.map(({ file }) => file),
   cjk: BUNDLED_FONTS.filter((face) => face.script?.startsWith('cjk-')).map((face) => face.file),
 };
 const PACK_VERSION = latinManifest.version;

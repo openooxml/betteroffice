@@ -1,6 +1,7 @@
 export function absoluteHref(href: string): string {
   try {
-    return new URL(href).href;
+    new URL(href);
+    return href;
   } catch {
     try {
       return new URL(href, globalThis.location?.href).href;

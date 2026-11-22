@@ -1,10 +1,11 @@
+import { WorkerFontModuleUnavailableError } from '../../../shared/office-session/optionalFontPacks';
 import * as fonts from './worker';
 import * as progressive from './progressive-entry';
 import { workerFontAssets } from './workerAssets';
 
 async function requireFontPackage(specifier: string): Promise<void> {
   const base = await workerFontAssets('base');
-  if (!base?.urls) throw new TypeError(`Failed to resolve module specifier '${specifier}'`);
+  if (!base?.urls) throw new WorkerFontModuleUnavailableError(specifier);
 }
 
 export async function importFonts(): Promise<typeof fonts> {

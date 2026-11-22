@@ -1,5 +1,4 @@
 import { createFontRuntime, type FontAssetUrls, type FontPackLookup } from './fontRuntime';
-import { absoluteHref } from './assetHref';
 import { bundledDecoderUrl } from './decodeAssets';
 import { fontCdnConfiguration } from './fontCdn';
 import { BASE_LATIN_FONT_ASSET_URLS } from './base-latin';
@@ -81,12 +80,12 @@ export const {
   createFontProvider, decodeFontFaceOutsideEngine, checkFontPacks,
 } = createFontRuntime(lookup, { localCdn: fontCdnConfiguration });
 
-/** Absolute installed font asset URLs by file name, or undefined when the package is absent. */
+/** @internal Installed font asset URLs by file name, or undefined when the package is absent. */
 export async function fontAssetUrls(kind: FontAssetKind): Promise<Record<string, string> | undefined> {
   if (kind === 'decoder') {
     const url = bundledDecoderUrl();
     return url && { 'fontpack.wasm': url.href };
   }
   const installed = await installedUrls(kind);
-  return installed && Object.fromEntries(Object.entries(installed).map(([file, url]) => [file, new URL(absoluteHref(url().href)).href]));
+  return installed && Object.fromEntries(Object.entries(installed).map(([file, url]) => [file, url().href]));
 }

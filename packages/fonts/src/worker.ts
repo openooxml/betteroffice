@@ -8,7 +8,10 @@ export * from './manifest';
 const lookup: FontPackLookup = async (pack) => {
   const assets = await workerFontAssets(pack);
   return {
-    urls: assets?.urls && Object.fromEntries(Object.entries(assets.urls).map(([file, href]) => [file, () => new URL(href)])),
+    urls: assets?.urls && Object.setPrototypeOf(
+      Object.fromEntries(Object.entries(assets.urls).map(([file, href]) => [file, () => new URL(href)])),
+      null,
+    ),
     cdn: getFontCdnConfiguration() ?? assets?.cdn,
   };
 };

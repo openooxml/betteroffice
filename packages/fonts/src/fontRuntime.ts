@@ -97,7 +97,8 @@ export function createFontRuntime(lookup: FontPackLookup, {
       : INTL_FILES.has(file) ? 'intl' : script?.startsWith('cjk-') || CJK_FILES.has(file) ? 'cjk' : undefined;
     if (pack) {
       const { urls, cdn } = await lookup(pack);
-      if (urls && Object.prototype.hasOwnProperty.call(urls, file)) return urls[file]!();
+      const installed = urls?.[file];
+      if (installed) return installed();
       const fallback = cdnAssetUrl(face, file, cdn);
       if (fallback) return fallback;
       if (pack === 'latin' && !urls) {
@@ -120,7 +121,8 @@ export function createFontRuntime(lookup: FontPackLookup, {
   }
 
   function sliceAssetUrl(face: BundledFontFace, file: string, { urls, cdn }: FontPackAssets): URL {
-    if (urls && Object.prototype.hasOwnProperty.call(urls, file)) return urls[file]!();
+    const installed = urls?.[file];
+    if (installed) return installed();
     const fallback = cdnAssetUrl(face, file, cdn);
     if (fallback) return fallback;
     throw new MissingCjkAddonError(urls
