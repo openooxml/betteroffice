@@ -58,10 +58,12 @@ function validProgressiveSpecs(specs: unknown, faces: readonly DocxFontFace[]): 
     slots.add(spec.slot);
     const source = spec.source;
     if (!source || typeof source !== 'object' || !source.ref || typeof source.ref !== 'object') return false;
-    const { ref, urls, timeoutMs } = source;
+    const { ref, urls, timeoutMs, implicitCdnFiles } = source;
     return Number.isSafeInteger(ref.format) && text(ref.index) && hex(ref.indexSha256) &&
       !!urls && typeof urls === 'object' && !Array.isArray(urls) && Object.keys(urls).length <= 4096 &&
       validSliceUrls(urls) &&
+      (implicitCdnFiles === undefined || (Array.isArray(implicitCdnFiles) && implicitCdnFiles.length <= 4096 &&
+        implicitCdnFiles.every((file) => typeof file === 'string' && Object.prototype.hasOwnProperty.call(urls, file)))) &&
       (timeoutMs === undefined || (Number.isSafeInteger(timeoutMs) && timeoutMs > 0));
   });
 }

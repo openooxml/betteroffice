@@ -7,6 +7,11 @@ export interface FontPackDiagnostic {
   detail: string;
 }
 
+export function isImplicitFontCdnError(error: unknown): error is Error & { diagnostic: FontPackDiagnostic } {
+  return error instanceof Error &&
+    (error as { diagnostic?: FontPackDiagnostic }).diagnostic?.reason === 'cdn-unavailable';
+}
+
 const WARNED = Symbol.for('@betteroffice/font-pack-warnings');
 
 /**

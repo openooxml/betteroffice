@@ -16,17 +16,17 @@ type FontGlobals = {
 };
 
 const JSDELIVR = 'https://cdn.jsdelivr.net/npm/';
-const IMPLICIT_FONT_CDN_TIMEOUT_MS = 3000;
+const STALL_MS = 10_000;
 const CONFIGURATION = Symbol.for('betteroffice.fonts.cdn');
 const CONFIGURED_HERE = Symbol.for('betteroffice.fonts.cdn.configured-here');
-const UNAVAILABLE = Symbol.for('betteroffice.fonts.cdn-unavailable');
+const WARNED = Symbol.for('betteroffice.fonts.cdn-warned');
 
 type Pack = FontPackDiagnostic['pack'];
-type Failure = { error: Error; diagnostic: FontPackDiagnostic };
+export type FontRequestPolicy = number | Pack;
 type CdnScope = {
   [CONFIGURATION]?: FontCdnConfiguration;
   [CONFIGURED_HERE]?: true;
-  [UNAVAILABLE]?: Map<Pack, Failure>;
+  [WARNED]?: Set<Pack>;
 };
 
 const scope = globalThis as CdnScope & FontGlobals;
@@ -46,7 +46,7 @@ function configuredFontCdn(configuration: FontCdnConfiguration | undefined): Fon
 export function effectiveFontCdnConfiguration(): FontCdnConfiguration | undefined {
   const configured = scope[CONFIGURATION];
   if (configured) return configuredFontCdn(configured);
-  if (isBrowserFontPage(scope)) return { baseUrl: JSDELIVR, timeoutMs: IMPLICIT_FONT_CDN_TIMEOUT_MS, implicit: true };
+  if (isBrowserFontPage(scope)) return { baseUrl: JSDELIVR, timeoutMs: STALL_MS, implicit: true };
 }
 
 export function setFontCdnConfiguration(configuration: FontCdnConfiguration | undefined): void {
@@ -65,24 +65,92 @@ export function fontCdnCacheKey(): string | undefined {
   return configuration ? JSON.stringify([configuration.baseUrl, configuration.timeoutMs, configuration.implicit]) : '';
 }
 
-export function implicitCdnFailure(pack: Pack): Error | undefined {
-  return scope[UNAVAILABLE]?.get(pack)?.error;
+class ImplicitFontCdnError extends Error {
+  readonly diagnostic: FontPackDiagnostic;
+
+  constructor(pack: Pack, cause: unknown) {
+    const reason = cause instanceof Error ? cause.message : String(cause);
+    const detail = `Cannot load @betteroffice/fonts-${pack} from cdn.jsdelivr.net: ${reason}. To opt out, install @betteroffice/fonts-${pack} or call configureFontCdn({ baseUrl: false }).`;
+    super(detail);
+    this.name = 'ImplicitFontCdnError';
+    this.diagnostic = { pack, reason: 'cdn-unavailable', detail };
+  }
 }
 
-export function implicitCdnDiagnostics(): FontPackDiagnostic[] {
-  return [...scope[UNAVAILABLE]?.values() ?? []].map(({ diagnostic }) => diagnostic);
+export function fontAssetError(request: FontRequestPolicy | undefined, message: string): Error {
+  return typeof request === 'string' ? new ImplicitFontCdnError(request, message) : new Error(message);
 }
 
-export function markImplicitCdnUnavailable(pack: Pack, cause: unknown): Error {
-  const unavailable = scope[UNAVAILABLE] ??= new Map();
-  const failed = unavailable.get(pack);
-  if (failed) return failed.error;
-  const reason = cause instanceof Error ? cause.message : String(cause);
-  const detail = `Cannot load @betteroffice/fonts-${pack} from cdn.jsdelivr.net: ${reason}. To opt out, install @betteroffice/fonts-${pack} or call configureFontCdn({ baseUrl: false }).`;
-  const error = new Error(detail);
-  unavailable.set(pack, { error, diagnostic: { pack, reason: 'cdn-unavailable', detail } });
-  console.warn(detail);
-  return error;
+export function reportImplicitCdnFailure({ diagnostic }: { diagnostic: FontPackDiagnostic }): void {
+  const warned = scope[WARNED] ??= new Set();
+  if (!warned.has(diagnostic.pack)) {
+    warned.add(diagnostic.pack);
+    console.warn(diagnostic.detail);
+  }
+  if (typeof globalThis.dispatchEvent === 'function' && typeof CustomEvent === 'function') {
+    globalThis.dispatchEvent(new CustomEvent('betteroffice:font-pack-diagnostic', { detail: { ...diagnostic } }));
+  }
+}
+
+export async function readImplicitFontBytes(file: string, url: URL, pack: Pack): Promise<ArrayBuffer> {
+  const controller = new AbortController();
+  const { signal } = controller;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  let rejectStall!: (reason: unknown) => void;
+  const stalled = new Promise<never>((_, reject) => { rejectStall = reject; });
+  const arm = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      const error = new DOMException(`No font data received for ${STALL_MS} ms`, 'TimeoutError');
+      controller.abort(error);
+      rejectStall(error);
+      if (reader) void reader.cancel(error).catch(() => {});
+    }, STALL_MS);
+  };
+  const read = async () => {
+    const response = await fetch(url, { signal, credentials: 'omit', referrerPolicy: 'no-referrer' });
+    if (signal.aborted) throw signal.reason;
+    if (!response.ok && response.type !== 'opaque') {
+      throw new Error(`Failed to fetch bundled font ${file}: HTTP ${response.status}`);
+    }
+    arm();
+    const body = response.body;
+    if (typeof body?.getReader !== 'function') return response.arrayBuffer();
+    const streamReader = body.getReader();
+    reader = streamReader;
+    const chunks: Uint8Array[] = [];
+    let byteLength = 0;
+    try {
+      for (;;) {
+        const { done, value } = await streamReader.read();
+        if (signal.aborted) throw signal.reason;
+        if (done) break;
+        if (value.byteLength === 0) continue;
+        chunks.push(value);
+        byteLength += value.byteLength;
+        arm();
+      }
+    } finally {
+      streamReader.releaseLock();
+      reader = undefined;
+    }
+    const bytes = new Uint8Array(byteLength);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return bytes.buffer;
+  };
+  arm();
+  try {
+    return await Promise.race([read(), stalled]);
+  } catch (error) {
+    throw new ImplicitFontCdnError(pack, error);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export interface FontCdnOptions {

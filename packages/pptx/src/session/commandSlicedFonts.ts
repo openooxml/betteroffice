@@ -92,13 +92,14 @@ export function createSlicedFontFaces(quietMs = FILL_QUIET_MS) {
     return family;
   }
 
-  const wholeBytes = (entry: Entry): Promise<ArrayBuffer> => entry.wholeLoad ??= entry.whole().then((bytes) => {
-    entry.wholeBytes = bytes;
-    return bytes;
-  }, (error: unknown) => {
-    entry.wholeLoad = undefined;
-    throw error;
-  });
+  const wholeBytes = (entry: Entry, error?: unknown): Promise<ArrayBuffer> => entry.wholeLoad ??=
+    (entry.whole.slices?.loadAfterCdnFailure?.(error) ?? entry.whole()).then((bytes) => {
+      entry.wholeBytes = bytes;
+      return bytes;
+    }, (error: unknown) => {
+      entry.wholeLoad = undefined;
+      throw error;
+    });
   const latestOf = (entry: Entry) => entry.installed[entry.installed.length - 1];
 
   /** Installs what has loaded unless the latest revision already has it; the chunks and bytes are read together. */
@@ -118,9 +119,9 @@ export function createSlicedFontFaces(quietMs = FILL_QUIET_MS) {
   async function present(entry: Entry, text: string): Promise<string> {
     try {
       await entry.face.ensureText(text);
-    } catch {
+    } catch (error) {
       let bytes: ArrayBuffer;
-      try { bytes = await wholeBytes(entry); } catch { return entry.family; }
+      try { bytes = await wholeBytes(entry, error); } catch { return entry.family; }
       const latest = latestOf(entry);
       if (latest?.revision === WHOLE) return latest.family;
       try { return await install(entry, WHOLE, bytes, null); } catch { return entry.family; }
@@ -268,13 +269,16 @@ export function createSlicedFontFaces(quietMs = FILL_QUIET_MS) {
       if (!entry || disposed) return Promise.resolve(undefined);
       lastPaint = now();
       return (async () => {
+        let failure: unknown;
         if (!entry.wholeBytes) {
           try {
             const revision = await entry.face.ensureText(text);
             return revision === have ? { revision } : { revision, bytes: entry.face.bytes() };
-          } catch {}
+          } catch (error) {
+            failure = error;
+          }
         }
-        const bytes = await wholeBytes(entry);
+        const bytes = await wholeBytes(entry, failure);
         return have === WHOLE ? { revision: WHOLE } : { revision: WHOLE, bytes: bytes.slice(0) };
       })();
     },

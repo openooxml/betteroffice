@@ -32,7 +32,7 @@ export type BundledFontLoader = (() => Promise<ArrayBuffer>) & {
   /** Only stands in for a primary face that failed to load. */
   onlyIfPrimaryFails?: boolean;
   /** Locates a sliced face whose outlines load as they are needed. */
-  slices?: SliceLocation;
+  slices?: SliceLocation & { loadAfterCdnFailure?(error: unknown): Promise<ArrayBuffer> | undefined };
   /** @internal Precomputed base Latin coverage bits of the face. */
   coverage?: string;
   /** @internal The face's decoded bytes, shared with the font cache: read them, never change or transfer them. */
@@ -755,6 +755,8 @@ export class TextMeasureFontRegistry {
         try {
           face = await open(slices);
         } catch (error) {
+          const substitute = slices.loadAfterCdnFailure?.(error);
+          if (substitute) return this.registerBuffer(await substitute, undefined, loader);
           this.warnFailure(
             `[fontRegistry] sliced face for "${label}" failed to open; loading it whole: ` +
               `${error instanceof Error ? error.message : String(error)}`

@@ -151,6 +151,7 @@ export function createCommandDefaultFonts(
         }
         if (!load) return undefined;
         available = true;
+        let substitute: Promise<ArrayBuffer> | undefined;
         if (load.slices && sliced?.supported()) {
           try {
             const { openSlicedFace } = await importProgressiveFonts();
@@ -164,9 +165,11 @@ export function createCommandDefaultFonts(
                 chunksOf: (text) => opened.chunksOf(text), loadedChunks: () => opened.loadedChunks() }, load);
               return disposed ? undefined : skeleton;
             }
-          } catch {}
+          } catch (error) {
+            substitute = load.slices.loadAfterCdnFailure?.(error);
+          }
         }
-        const bytes = await load();
+        const bytes = await (substitute ?? load());
         if (disposed || suppliedFamily(face)) return undefined;
         const loaded = face.kind === 'coverage'
           ? await scriptFontFace(face.script, bold, italic, bytes)
