@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::hash::{DefaultHasher, Hasher as _};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -16,7 +16,8 @@ use docx_layout::footnotes::{
     FOOTNOTE_COLUMN_GAP_PX, NoteKind, NoteSeparatorHeights, OrderedMap, apply_note_presentation,
     assign_note_presentations, attach_note_areas, build_note_presentations,
     calculate_note_reserved_heights, collect_note_refs, map_note_anchors_to_pages,
-    map_notes_to_pages, reservation_surplus_pages, stabilize_note_layout, stamp_note_pages,
+    map_notes_to_pages, reservation_surplus_pages, stabilize_note_layout,
+    stabilize_note_layout_retiring, stamp_note_pages,
 };
 use docx_layout::header_footer::{
     HeaderFooterKind, HeaderFooterMetrics, HeaderFooterPayload, HeaderFooterType,
@@ -389,6 +390,10 @@ thread_local! {
     static BODY_MEASUREMENT_WORK: RefCell<(Vec<usize>, u64)> = const { RefCell::new((Vec::new(), 0)) };
     static HEADER_FOOTER_MEASUREMENTS: Cell<usize> = const { Cell::new(0) };
     static REGION_FULL_PASSES: Cell<usize> = const { Cell::new(0) };
+    /// Note passes of plain relayouts placed in full and resumed from a retained pass.
+    static NOTE_PASS_PLACEMENTS: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
+    /// Whether a resumed note pass is checked against a full placement.
+    static NOTE_PASS_FULL_CHECK: Cell<bool> = const { Cell::new(true) };
     /// Table patches applied in place and by copy.
     static TABLE_PATCHES: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
     static SHIFT_SAFETY_WORK: Cell<usize> = const { Cell::new(0) };
@@ -1528,6 +1533,34 @@ fn placed_column_measurement_frames(
 /// Wrap phases each pinned picture frame adds to the phase budget.
 const PIN_RECOVERY_PHASES: usize = 2;
 
+/// Whether [`stabilize_flow_wrapping`] may reshape `input`: it leaves an arena without
+/// page-side wrapping shapes, unequal columns or pictures beside continuous sections as it is.
+fn flow_wrapping_applies(input: &LayoutInput, regions: &DocumentRegions) -> bool {
+    input.measured.iter().any(|measured| {
+        matches!(&measured.block, LayoutBlock::Shape(shape) if wraps_by_page_side(shape))
+    }) || unequal_column_blocks(input, regions).contains(&true)
+        || continuous_pictures(input)
+}
+
+fn continuous_pictures(input: &LayoutInput) -> bool {
+    let has_continuous = input.options.body_break_type == Some(SectionBreakType::Continuous)
+        || input.measured.iter().any(|measured| {
+            matches!(
+                &measured.block,
+                LayoutBlock::SectionBreak(section)
+                    if section.break_type == Some(SectionBreakType::Continuous)
+            )
+        });
+    has_continuous
+        && input.measured.iter().any(|measured| {
+            matches!(
+                &measured.block,
+                LayoutBlock::Paragraph(paragraph)
+                    if paragraph.runs.iter().any(|run| matches!(run, Run::Image(_)))
+            )
+        })
+}
+
 fn stabilize_flow_wrapping<F>(
     input: &mut LayoutInput,
     regions: &DocumentRegions,
@@ -1550,22 +1583,7 @@ where
         .collect::<Vec<_>>();
     let unequal = unequal_column_blocks(input, regions);
     let has_unequal = unequal.iter().any(|unequal| *unequal);
-    let has_continuous = input.options.body_break_type == Some(SectionBreakType::Continuous)
-        || input.measured.iter().any(|measured| {
-            matches!(
-                &measured.block,
-                LayoutBlock::SectionBreak(section)
-                    if section.break_type == Some(SectionBreakType::Continuous)
-            )
-        });
-    let has_continuous_pictures = has_continuous
-        && input.measured.iter().any(|measured| {
-            matches!(
-                &measured.block,
-                LayoutBlock::Paragraph(paragraph)
-                    if paragraph.runs.iter().any(|run| matches!(run, Run::Image(_)))
-            )
-        });
+    let has_continuous_pictures = continuous_pictures(input);
     if shapes.is_empty() && !has_unequal && !has_continuous_pictures {
         return Ok(false);
     }
@@ -2239,6 +2257,8 @@ struct PaginationState {
     layout: Option<Layout>,
     checkpoints: Vec<LayoutCheckpoint>,
     region_placements: Vec<RegionPlacementState>,
+    /// The note passes of the last plain relayout.
+    note_passes: Option<RetainedNotePasses>,
     block_fingerprints: Vec<Fingerprint>,
     measured_spacing: Vec<BlockSpacing>,
     /// The flowed endnote blocks that end the last pass's arena, kept aside while the arena
@@ -4916,6 +4936,179 @@ fn region_reservation_restart_index(
         first = first.min(index);
     }
     (first < input.measured.len()).then_some(dirty.min(first))
+}
+
+/// Checks a note pass resumed from a retained pass against a full placement of its input.
+#[cfg(test)]
+fn assert_note_pass_matches_full(input: &LayoutInput, resumed: &Layout, regions: &DocumentRegions) {
+    let mut fresh = input.clone();
+    let mut full = docx_layout::place::layout_document(&mut fresh).unwrap();
+    apply_document_regions(&mut full, regions);
+    let sections = |layout: &Layout| {
+        layout
+            .pages
+            .iter()
+            .map(|page| page.region_section_index)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        sections(resumed),
+        sections(&full),
+        "resumed note pass sections"
+    );
+    assert_eq!(
+        serde_json::to_value(resumed).unwrap(),
+        serde_json::to_value(&full).unwrap(),
+        "resumed note pass"
+    );
+}
+
+/// The note passes of a plain relayout, kept so the next relayout places each pass from the
+/// pass that ran with the same options, as its final pass resumes from the retained layout.
+#[derive(Debug)]
+struct RetainedNotePasses {
+    /// The retained pagination's `layout_epoch` when the passes were kept. They were placed
+    /// from that pagination's arena, and describe it while no other pass replaced it.
+    layout_epoch: u64,
+    /// The placement fingerprints of that arena.
+    fingerprints: Vec<Fingerprint>,
+    passes: Vec<RetainedNotePass>,
+}
+
+#[derive(Debug)]
+struct RetainedNotePass {
+    options: u64,
+    layout: Layout,
+    checkpoints: Vec<LayoutCheckpoint>,
+}
+
+/// Pages the kept note passes of a relayout may hold together: every pass of a fixpoint that
+/// settles in a few passes over a few hundred pages, and the earliest passes of a longer
+/// document or a longer settling.
+const MAX_RETAINED_NOTE_PASS_PAGES: usize = 2048;
+
+/// Places the note passes of one plain relayout. A pass whose options a retained pass shares
+/// resumes from it where the final pass would resume from the retained layout (the same
+/// eligibility, dirty block and incremental placement), so it lays out what a full placement
+/// does; every other pass is placed in full. The note fixpoint still starts from no
+/// reservation and takes the passes it always took.
+struct NotePassPlacer {
+    previous: Option<RetainedNotePasses>,
+    /// The placement fingerprints of this relayout's arena, refined as the final pass refines
+    /// them; `None` when its passes neither resume nor are kept.
+    fingerprints: Option<Vec<Fingerprint>>,
+    /// The options and checkpoints of each placed pass whose layout is still in use.
+    placed: VecDeque<(u64, Vec<LayoutCheckpoint>)>,
+    kept: Vec<RetainedNotePass>,
+    kept_pages: usize,
+}
+
+impl NotePassPlacer {
+    /// Places `input`, reporting whether it resumed from a retained pass.
+    fn place(
+        &mut self,
+        input: &mut LayoutInput,
+        retained: &PaginationState,
+    ) -> Result<(Layout, bool), docx_layout::LayoutError> {
+        let options = options_fingerprint(input).map_err(docx_layout::LayoutError::Invalid)?;
+        let resumed = match self.resume(input, options, retained) {
+            Some(Ok(run)) => Some(run.checkpointed),
+            Some(Err(docx_layout::LayoutError::Unsupported(_))) | None => None,
+            Some(Err(error)) => return Err(error),
+        };
+        let incremental = resumed.is_some();
+        #[cfg(test)]
+        NOTE_PASS_PLACEMENTS.with(|counts| {
+            let (full, resumed) = counts.get();
+            counts.set(if incremental {
+                (full, resumed + 1)
+            } else {
+                (full + 1, resumed)
+            });
+        });
+        let run = match resumed {
+            Some(run) => run,
+            None => docx_layout::place::layout_document_checkpointed(input)?,
+        };
+        self.placed.push_back((options, run.checkpoints));
+        Ok((run.layout, incremental))
+    }
+
+    fn resume(
+        &mut self,
+        input: &mut LayoutInput,
+        options: u64,
+        retained: &PaginationState,
+    ) -> Option<Result<docx_layout::place::IncrementalLayout, docx_layout::LayoutError>> {
+        let next = self.fingerprints.as_ref()?;
+        let previous = self.previous.as_mut()?;
+        let index = previous
+            .passes
+            .iter()
+            .position(|pass| pass.options == options)?;
+        let mut pass = previous.passes.swap_remove(index);
+        if pass.checkpoints.is_empty()
+            || previous.fingerprints.len() != next.len()
+            || !incremental_structure_eligible(retained, input, None)
+        {
+            return None;
+        }
+        let dirty = previous
+            .fingerprints
+            .iter()
+            .zip(next)
+            .position(|(previous, next)| previous != next)?;
+        let dirty = section_start_of_first_changed_break(
+            &input.measured,
+            &previous.fingerprints,
+            next,
+            dirty,
+        );
+        Some(docx_layout::place::layout_document_incremental_ranges(
+            input,
+            &mut pass.layout,
+            &pass.checkpoints,
+            &previous.fingerprints,
+            next,
+            dirty,
+        ))
+    }
+
+    /// Takes back a placed layout the note fixpoint no longer uses, in placement order.
+    fn retire(&mut self, mut layout: Layout) {
+        let Some((options, checkpoints)) = self.placed.pop_front() else {
+            return;
+        };
+        if self.fingerprints.is_none()
+            || self.kept_pages + layout.pages.len() > MAX_RETAINED_NOTE_PASS_PAGES
+        {
+            return;
+        }
+        self.kept_pages += layout.pages.len();
+        // The fixpoint stamps its last layout's notes; a pass placed afresh carries none.
+        for page in &mut layout.pages {
+            page.footnote_ids = None;
+            page.footnote_columns = None;
+            page.note_areas = None;
+        }
+        self.kept.push(RetainedNotePass {
+            options,
+            layout,
+            checkpoints,
+        });
+    }
+
+    /// The passes to keep for a pagination whose arena has `fingerprints`.
+    fn keep(self, pagination: &PaginationState) -> Option<RetainedNotePasses> {
+        let fingerprints = self.fingerprints?;
+        (fingerprints == pagination.block_fingerprints && !self.kept.is_empty()).then(|| {
+            RetainedNotePasses {
+                layout_epoch: pagination.layout_epoch,
+                fingerprints,
+                passes: self.kept,
+            }
+        })
+    }
 }
 
 fn place_region_pass(
@@ -8367,6 +8560,46 @@ impl EngineSession {
         .then(|| input.clone());
         let mut restamped_pages = Vec::new();
         self.pagination.borrow_mut().restore_flowed_tail();
+        // Note passes resume from the last relayout's passes over an arena every pass shares
+        // and the final pass keeps: no page-side wrapping that reshapes it per pass, no
+        // prefix cut, and fingerprints refined as the final pass refines them.
+        let note_placer = if refs.is_empty() {
+            self.pagination.borrow_mut().note_passes = None;
+            None
+        } else {
+            let retained = self.pagination.borrow_mut().note_passes.take();
+            let pagination = self.pagination.borrow();
+            let fingerprints = (base_input.is_none()
+                && !provisional
+                && exact_cut.is_none()
+                && revision_preview_key == pagination.revision_preview_key
+                && !flow_wrapping_applies(&input, &regions))
+            .then(|| {
+                let mut fingerprints = block_fingerprints.clone();
+                self.prepare_placement_fingerprints_plain(
+                    &pagination,
+                    &input,
+                    &mut fingerprints,
+                    Some((revision_preview_key, &revision_preview, main_body)),
+                    pagination.options_fingerprint,
+                )
+                .map(|()| fingerprints)
+            })
+            .transpose()?;
+            let previous = retained.filter(|retained| {
+                fingerprints.is_some()
+                    && retained.layout_epoch == pagination.layout_epoch
+                    && retained.fingerprints == pagination.block_fingerprints
+            });
+            drop(pagination);
+            Some(RefCell::new(NotePassPlacer {
+                previous,
+                fingerprints,
+                placed: VecDeque::new(),
+                kept: Vec::new(),
+                kept_pages: 0,
+            }))
+        };
         let (mut initial_layout, mut arena) = if refs.is_empty() {
             self.layout_document_value_with_fingerprints(
                 input,
@@ -8384,8 +8617,18 @@ impl EngineSession {
                 .expect("layout retained after successful pagination");
             (layout, None)
         } else {
-            let layout =
-                docx_layout::place::layout_document(&mut input).map_err(layout_error_message)?;
+            let (layout, _resumed) = note_placer
+                .as_ref()
+                .expect("a note placer with notes")
+                .borrow_mut()
+                .place(&mut input, &self.pagination.borrow())
+                .map_err(layout_error_message)?;
+            #[cfg(test)]
+            if _resumed && NOTE_PASS_FULL_CHECK.with(Cell::get) {
+                let mut stamped = layout.clone();
+                apply_document_regions(&mut stamped, &regions);
+                assert_note_pass_matches_full(&input, &stamped, &regions);
+            }
             (layout, Some(input))
         };
         apply_document_regions_tracked(&mut initial_layout, &regions, &mut restamped_pages);
@@ -8440,7 +8683,13 @@ impl EngineSession {
             base_input.as_ref().or(arena.as_ref()),
             &flow,
         )?;
-        let stabilized = stabilize_note_layout(
+        if !flow.is_empty()
+            && let Some(placer) = &note_placer
+        {
+            // Flowed endnotes change the arena after the initial pass.
+            placer.borrow_mut().fingerprints = None;
+        }
+        let stabilized = stabilize_note_layout_retiring(
             |reserved| {
                 let mut copy;
                 let pass = match (&base_input, arena.as_mut()) {
@@ -8461,9 +8710,22 @@ impl EngineSession {
                         docx_layout::place::layout_document(input)
                     })?;
                 }
-                let mut layout = docx_layout::place::layout_document(pass)?;
+                let (mut layout, _resumed) = note_placer
+                    .as_ref()
+                    .expect("a note placer with notes")
+                    .borrow_mut()
+                    .place(pass, &self.pagination.borrow())?;
                 apply_document_regions_tracked(&mut layout, &regions, &mut restamped_pages);
+                #[cfg(test)]
+                if _resumed && NOTE_PASS_FULL_CHECK.with(Cell::get) {
+                    assert_note_pass_matches_full(pass, &layout, &regions);
+                }
                 Ok(layout)
+            },
+            |layout| {
+                if let Some(placer) = &note_placer {
+                    placer.borrow_mut().retire(layout);
+                }
             },
             &refs,
             &notes.contents,
@@ -8474,6 +8736,9 @@ impl EngineSession {
         .map_err(layout_error_message)?;
         let notes_converged = stabilized.converged;
         if let Some(mut final_input) = base_input.or(arena) {
+            if let Some(placer) = &note_placer {
+                placer.borrow_mut().retire(stabilized.layout);
+            }
             final_input.options.footnote_reserved_heights =
                 reservation_options(&stabilized.reserved_heights);
             let reshaped = resident_body
@@ -8495,6 +8760,12 @@ impl EngineSession {
                 RelayoutTrigger::Interactive,
             )?;
             restamped_pages.clear();
+            if let Some(placer) = note_placer {
+                let mut pagination = self.pagination.borrow_mut();
+                pagination.note_passes = (!reshaped)
+                    .then(|| placer.into_inner().keep(&pagination))
+                    .flatten();
+            }
         } else {
             self.pagination.borrow_mut().layout = Some(stabilized.layout);
         }
@@ -13185,6 +13456,8 @@ mod tests {
     mod preview_refresh_tests;
 
     mod command_relayout_tests;
+
+    mod note_pass_tests;
 
     #[test]
     fn the_paragraph_mark_face_leaves_the_font_set_fingerprint_alone() {
