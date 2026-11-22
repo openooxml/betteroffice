@@ -1767,22 +1767,54 @@ impl Workbook {
         warnings
     }
 
+    fn merge_source_caches(&self, original: &WorkbookModel) -> WorkbookModel {
+        let mut model = self.model.clone();
+        for (sheet, origin) in model.sheets.iter_mut().zip(&self.preserved.origins) {
+            let Some(source) = origin.and_then(|index| original.sheets.get(index)) else {
+                continue;
+            };
+            for (at, source_cell) in source.iter_cells() {
+                let cached = source_cell.value != CellValue::Empty;
+                match sheet.cell(at) {
+                    None => sheet.set_cell(at, source_cell.clone()),
+                    Some(_) if cached => {
+                        sheet.set_calculated_value(at, source_cell.value.clone());
+                    }
+                    Some(_) => {}
+                }
+                if cached && source_cell.formula.is_some() {
+                    // A resized range would regenerate the cached anchor's XML.
+                    match source.array_formula(at) {
+                        Some(range) => sheet.set_array_formula(at, range),
+                        None => sheet.clear_array_formula(at),
+                    }
+                }
+            }
+        }
+        model
+    }
+
     pub fn save(&self) -> Result<Vec<u8>> {
         validate_model_sheets(&self.model)?;
         validate_chart_source(&self.model, self.source_package.is_some())?;
         match &self.source_package {
             Some(package) => {
                 let package = package.materialize()?;
+                let original = package.original_workbook();
+                let merged = (!self.edited_since_open
+                    && self.recalculated_since_open
+                    && package.requests_full_calculation()
+                    && self.model.sheets.iter().any(|sheet| {
+                        sheet.iter_cells().any(|(_, cell)| cell.formula.is_some())
+                    })
+                    && (!self.model.iterate || self.model.sheets != original.sheets))
+                    .then(|| self.merge_source_caches(original));
                 let changed = self.edited_since_open
-                    || (self.recalculated_since_open
-                        && package.requests_full_calculation()
-                        && self.model.sheets.iter().any(|sheet| {
-                            sheet.iter_cells().any(|(_, cell)| cell.formula.is_some())
-                        })
-                        && (!self.model.iterate
-                            || self.model.sheets != package.original_workbook().sheets));
-                let parts = xlsx_parse::serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes(
-                    &self.model,
+                    || merged
+                        .as_ref()
+                        .is_some_and(|model| model.sheets != original.sheets);
+                let mut parts = xlsx_parse::serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes(
+                    merged.as_ref().unwrap_or(&self.model),
                     package,
                     &self.preserved.origins,
                     &self.preserved.shared_string_cells,
@@ -1793,6 +1825,20 @@ impl Workbook {
                     },
                     self.active_sheet,
                 )?;
+                if !self.edited_since_open {
+                    const CHARTS: &str = "xl/charts/";
+                    for (path, bytes) in &mut parts {
+                        if matches!(bytes, Cow::Owned(_))
+                            && path
+                                .trim_start_matches('/')
+                                .get(..CHARTS.len())
+                                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(CHARTS))
+                            && let Some(source) = package.part_bytes(path)
+                        {
+                            *bytes = Cow::Borrowed(source);
+                        }
+                    }
+                }
                 if parts
                     .iter()
                     .all(|(_, bytes)| matches!(bytes, Cow::Borrowed(_)))
@@ -2987,10 +3033,8 @@ impl Workbook {
     /// or, on the first calculation, formulas the file stored no result for. One that moves
     /// none of these leaves it. Such a recalculation also notifies observers with an empty
     /// [`UpdateOrigin::Recalculation`] event. It counts as an edit, so the next save writes
-    /// the recalculated values. The recalculation at open does not, except that a file
-    /// asking for a full calculation on load (`calcPr` `fullCalcOnLoad` or `forceFullCalc`)
-    /// saves the values it produced when it holds any formula; formulas the engine
-    /// cannot evaluate keep their cached results either way.
+    /// the recalculated values. On an unedited save, recalculation at open only fills
+    /// missing values when the file requests a full calculation.
     pub fn recalculate_all(&mut self, options: CalculationOptions) -> CalculationResult {
         let result = self.recalculate(options);
         self.edited_since_open = true;

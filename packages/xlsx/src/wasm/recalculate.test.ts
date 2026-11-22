@@ -52,10 +52,25 @@ describe('saving recalculated values', () => {
     }
   });
 
-  it('saves the values calculated at open when the file asks for a full calculation', async () => {
-    const handle = openWorkbook(await book('<calcPr fullCalcOnLoad="1" forceFullCalc="1"/>'), { calculation: CALCULATION });
+  it('fills missing caches when the file asks for a full calculation', async () => {
+    const cells = STALE_CELLS.replace('</row>', '<c r="C1"><f>1+1</f></c></row>');
+    const handle = openWorkbook(await book('<calcPr fullCalcOnLoad="1" forceFullCalc="1"/>', cells), { calculation: CALCULATION });
     try {
-      expect(await savedCaches(handle.save())).toEqual(['5', '999']);
+      expect(await savedCaches(handle.save())).toEqual(['999', '999', '2']);
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  it('keeps cached array booleans on a save without edits', async () => {
+    const cells = '<row r="1"><c r="A1" t="b"><f t="array" ref="A1:A3">FALSE()</f><v>1</v></c></row>'
+      + '<row r="2"><c r="A2" t="b"><v>1</v></c></row>'
+      + '<row r="3"><c r="A3" t="b"><v>1</v></c></row>';
+    const source = await book('<calcPr fullCalcOnLoad="1"/>', cells);
+    const handle = openWorkbook(source);
+    try {
+      const sheet = await (await JSZip.loadAsync(handle.save())).file('xl/worksheets/sheet1.xml')!.async('string');
+      expect(sheet).toContain(`<sheetData>${cells}</sheetData>`);
     } finally {
       handle.dispose();
     }
@@ -69,7 +84,7 @@ describe('saving recalculated values', () => {
     const source = await book('<calcPr iterate="1" fullCalcOnLoad="1"/>', cells);
     const handle = openWorkbook(source);
     try {
-      expect(await savedCaches(handle.save())).toEqual(['10', '20', '5', '6', '20', '20']);
+      expect(await savedCaches(handle.save())).toEqual(['10', '20', '5', '999', '20', '20']);
     } finally {
       handle.dispose();
     }

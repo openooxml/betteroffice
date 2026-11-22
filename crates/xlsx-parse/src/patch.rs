@@ -7,7 +7,7 @@ use std::ops::Range;
 use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::{Reader, Writer};
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
-use xlsx_model::{Cell, CellRange, CellRef, ColId, ColStyle, Sheet, Workbook};
+use xlsx_model::{Cell, CellRange, CellRef, CellValue, ColId, ColStyle, Sheet, Workbook};
 
 use crate::axis::SheetAxes;
 use crate::future_functions::FormulaNames;
@@ -849,14 +849,45 @@ impl SheetPatch<'_> {
                 .into_iter()
                 .filter(|(key, reference)| {
                     arrays.contains(key)
-                        || (reference.is_some() && changed.contains(key))
                         || reference.is_some_and(|reference| {
-                            !self.moves_uniformly(reference) || range_changed(reference, &changed)
+                            self.ranged_master_dirty(*key, reference, &changed)
                         })
                 })
                 .map(|(key, _)| key)
                 .collect(),
         })
+    }
+
+    fn ranged_master_dirty(
+        &self,
+        anchor: (u32, u32),
+        reference: CellRange,
+        changed: &BTreeSet<(u32, u32)>,
+    ) -> bool {
+        if changed.contains(&anchor) || !self.moves_uniformly(reference) {
+            return true;
+        }
+        let stable_array = self.axes.is_identity()
+            && self.original.array_formula(CellRef::new(anchor.0, anchor.1)) == Some(reference);
+        changed
+            .range((reference.start.row, 0)..=(reference.end.row, u32::MAX))
+            .filter(|&&(_, col)| (reference.start.col..=reference.end.col).contains(&col))
+            .any(|&(row, col)| !stable_array || !self.fills_empty_cache(CellRef::new(row, col)))
+    }
+
+    fn fills_empty_cache(&self, at: CellRef) -> bool {
+        let Some(cell) = self.sheet.cell(at) else {
+            return false;
+        };
+        cell.value != CellValue::Empty
+            && match self.original.cell(at) {
+                Some(source) => {
+                    source.value == CellValue::Empty
+                        && source.formula == cell.formula
+                        && self.styles.equivalent(source.style, cell.style)
+                }
+                None => cell.formula.is_none() && cell.style.is_none(),
+            }
     }
 
     fn source_formula_changed(&self, source: CellRef) -> bool {
@@ -975,12 +1006,6 @@ impl SheetPatch<'_> {
             self.axes.cols.source(at.col)?,
         ))
     }
-}
-
-fn range_changed(reference: CellRange, changed: &BTreeSet<(u32, u32)>) -> bool {
-    changed
-        .range((reference.start.row, 0)..=(reference.end.row, u32::MAX))
-        .any(|&(_, col)| col >= reference.start.col && col <= reference.end.col)
 }
 
 fn cached_value_slot(data: &[u8], cell: &SourceCell) -> Result<Option<Range<usize>>, ParseError> {

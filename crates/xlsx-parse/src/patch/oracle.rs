@@ -553,9 +553,8 @@ impl SheetPatch<'_> {
                 .into_iter()
                 .filter(|(key, reference)| {
                     arrays.contains(key)
-                        || (reference.is_some() && changed.contains(key))
                         || reference.is_some_and(|reference| {
-                            !self.moves_uniformly(reference) || range_changed(reference, &changed)
+                            self.ranged_master_dirty(*key, reference, &changed)
                         })
                 })
                 .map(|(key, _)| key)
