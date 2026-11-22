@@ -546,7 +546,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   }, [prepareSave]);
   const sourceGeneration = useMemo(() => ({}), [documentBuffer, parsedDocument, replaced ? replacement : null]);
   const [loaded, setLoaded] = useState<{ generation: object; source: Uint8Array } | null>(null);
-  const reportError = useCallback((error: Error) => { workerCollaboration.retire(); controller.fail(error); errorHandler.current?.(error); }, [controller, workerCollaboration.retire]);
+  const reportError = useCallback((error: Error, recoveryFailed?: boolean) => { workerCollaboration.retire(); controller.fail(error, recoveryFailed); errorHandler.current?.(error); }, [controller, workerCollaboration.retire]);
   const reportShellError = useCallback((error: Error) => { pluginHost.checkFocus(); reportError(error); }, [reportError, pluginHost]);
   const [previewJob, setPreviewJob] = useState<WorkerPreviewJob | null>(null);
   const onPreviewPresented = useCallback((frame: WorkerPreviewJob['frame']) => {
@@ -1523,7 +1523,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         }}
         onEdit={(displayText, href) => { void propertyDialogs.applyPopupLink(displayText, href, hyperlinkPopup?.tooltip).then(applied => { if (applied) setHyperlinkPopup(null); }); }}
         onRemove={() => { void propertyDialogs.removeLinkAtCaret().then(applied => { if (applied) { setHyperlinkPopup(null); toast(t('editor.linkRemoved')); } }); }} />
-      {shellState.status === 'failed' && shellState.error ? <ParseError message={shellState.error.message} /> : sessionOptions ? (
+      {shellState.status === 'failed' && shellState.error ? <ParseError message={shellState.error.message} recoveryFailed={shellState.recoveryFailed} /> : sessionOptions ? (
         <MirrorLinkRouteContext.Provider value={mirrorLinkRoute}><PeerlessPagedEditor sessionOptions={sessionOptions} zoom={zoom} onReady={onReady} autoFocus={!effectiveReadOnly} inputRef={documentInput}
           overlay={workerCollaboration.overlay(displayWindow)}
           displayWindow={displayWindow} onDisplayWindowChange={showWindow} onClipboard={onClipboard} onPasteFragment={onPasteFragment} pasteOptions={props.pasteOptions !== false && (props.mode ?? shellState.mode) !== 'suggesting'} onReplacePasteFragment={onReplacePasteFragment} pasteRecorder={pasteRecorder} highlights={searchState.highlights} onNavigateCell={controller.navigateCell} onPartPoint={onPartPoint} onDragSelectionChange={dragSelection} pictures={pictureMoves} tables={tableResize}

@@ -80,6 +80,7 @@ export interface PeerlessInputAdmissionOptions {
   session: DocxWorkerEditSession<PeerlessEchoIntent>;
   viewStore: PeerlessViewStore;
   echoPainter: PeerlessEchoPainter;
+  onDeferredPasteChoice?(ack: Promise<unknown>): void;
 }
 
 export async function flushAdmittedInput(binding: {
@@ -565,7 +566,13 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
       admissions.delete(admission);
     },
   };
-  admissions.set(admission, (intent, options, deletionExtension) => submit(intent, options, false, undefined, deletionExtension));
+  admissions.set(admission, (intent, options, deletionExtension) => {
+    const result = submit(intent, options, false, undefined, deletionExtension);
+    if (intent.kind === 'replacePasteFragment' && (result.status === 'held' || (result.status === 'submitted' && deferred.has(result.ticket)))) {
+      _options.onDeferredPasteChoice?.(appliedTicket(result));
+    }
+    return result;
+  });
   return admission;
 }
 

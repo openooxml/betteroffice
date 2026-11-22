@@ -593,6 +593,7 @@
     "noDocumentLoaded": "Yüklü belge yok",
     "failedToLoad": "Belge yüklenemedi",
     "failedToLoadDescription": "Dosya hasarlı olabilir veya bu düzenleyicinin henüz okuyamadığı bir şey kullanıyor olabilir.",
+    "recoveryFailedDescription": "Düzenleyici durdu ve son değişikliklerinizi geri yükleyemedi. Dosyanın kendisi zarar görmedi.",
     "failedToLoadDamaged": "Dosya hasarlı veya eksiksiz bir Word belgesi değil.",
     "failedToLoadUnsupported": "Bu belge, bu düzenleyicinin henüz okuyamadığı bir şey kullanıyor.",
     "editorUnavailable": "Düzenleyici yüklenemedi",

@@ -593,6 +593,7 @@
     "noDocumentLoaded": "未加载文档",
     "failedToLoad": "文档加载失败",
     "failedToLoadDescription": "文件可能已损坏，或使用了此编辑器尚无法读取的内容。",
+    "recoveryFailedDescription": "编辑器已停止运行，未能恢复您最近的更改。文件本身没有损坏。",
     "failedToLoadDamaged": "文件已损坏,或不是完整的 Word 文档。",
     "failedToLoadUnsupported": "此文档使用了此编辑器尚无法读取的内容。",
     "editorUnavailable": "编辑器无法加载",
