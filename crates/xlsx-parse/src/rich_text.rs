@@ -107,7 +107,7 @@ impl RichTextIndex {
             if budget.exhausted {
                 break;
             }
-            if source.cell_facts.rich_inline.is_empty() {
+            if source.cell_facts.source.rich_inline.is_empty() {
                 continue;
             }
             let Some(bytes) = package.part_bytes(&source.path) else {

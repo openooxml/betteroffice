@@ -500,12 +500,98 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
     edits: SaveEdits,
     active_sheet: SheetId,
 ) -> Result<SerializedParts<'p>, ParseError> {
+    serialize_workbook_with_package_and_open_calculation(
+        wb,
+        package,
+        origins,
+        shared_string_cells,
+        sheet_axes,
+        edits,
+        active_sheet,
+        false,
+    )
+}
+
+fn merge_source_caches(
+    wb: &Workbook,
+    package: &PreservedPackage,
+    origins: &[Option<usize>],
+) -> Workbook {
+    let mut merged = wb.clone();
+    for (sheet, origin) in merged.sheets.iter_mut().zip(origins) {
+        let Some((source, preserved)) = origin.and_then(|index| {
+            package
+                .original_workbook
+                .sheets
+                .get(index)
+                .zip(package.sheets.get(index))
+        }) else {
+            continue;
+        };
+        let facts = &preserved.cell_facts;
+        for (at, source_cell) in source.iter_cells() {
+            let cached = facts.has_cached_value(at, Some(source_cell));
+            match sheet.cell(at) {
+                None => sheet.set_cell(at, source_cell.clone()),
+                Some(_) if cached => {
+                    sheet.set_calculated_value(at, source_cell.value.clone());
+                }
+                Some(_) => {}
+            }
+            if cached && source_cell.formula.is_some() {
+                let source_range = source.array_formula(at);
+                if let Some(spill) = sheet.array_formula(at)
+                    && Some(spill) != source_range
+                {
+                    let extra = sheet
+                        .cells_in_range(spill)
+                        .map(|(follower, _)| follower)
+                        .filter(|&follower| {
+                            !source_range.is_some_and(|range| range.contains(follower))
+                                && source.cell(follower).is_none()
+                        })
+                        .collect::<Vec<_>>();
+                    for follower in extra {
+                        sheet.set_calculated_value(follower, CellValue::Empty);
+                    }
+                }
+                match source_range {
+                    Some(range) => sheet.set_array_formula(at, range),
+                    None => sheet.clear_array_formula(at),
+                }
+            }
+        }
+        for &(row, col) in &facts.cache_presence_overrides {
+            let at = CellRef::new(row, col);
+            if source.cell(at).is_none() {
+                sheet.set_calculated_value(at, CellValue::Empty);
+            }
+        }
+    }
+    merged
+}
+
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn serialize_workbook_with_package_and_open_calculation<'p>(
+    wb: &Workbook,
+    package: &'p PreservedPackage,
+    origins: &[Option<usize>],
+    shared_string_cells: &[SharedStringCells],
+    sheet_axes: &[Option<SheetAxes>],
+    mut edits: SaveEdits,
+    active_sheet: SheetId,
+    preserve_source_caches: bool,
+) -> Result<SerializedParts<'p>, ParseError> {
     validate_indexed_colors(&wb.styles)?;
     if origins.len() != wb.sheets.len() || shared_string_cells.len() != wb.sheets.len() {
         return Err(ParseError::Malformed(
             "sheet origin count does not match workbook".to_owned(),
         ));
     }
+    let merged = preserve_source_caches.then(|| merge_source_caches(wb, package, origins));
+    let wb = merged.as_ref().unwrap_or(wb);
+    edits.changed |= preserve_source_caches && wb.sheets != package.original_workbook.sheets;
     let edited = edits.changed;
     let claimed = claimed_origins(package, origins);
     let view_plan = views::ViewPlan::new(package, &claimed, active_sheet)?;
@@ -640,7 +726,14 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
             parts.remove(&relationship_part_path(&calc_chain.path));
         }
     }
-    let chart_refreshes = patch_chart_parts(wb, package, origins, sheet_axes, &mut parts)?;
+    let chart_refreshes = patch_chart_parts(
+        wb,
+        package,
+        origins,
+        sheet_axes,
+        &mut parts,
+        !preserve_source_caches,
+    )?;
 
     let shared_strings_stable = wb.shared_strings == package.original_workbook.shared_strings;
     let style_plan = style_derivation::StylePlan::new(wb, package, origins, sheet_axes)?;
@@ -893,6 +986,7 @@ fn patch_chart_parts(
     origins: &[Option<usize>],
     sheet_axes: &[Option<SheetAxes>],
     parts: &mut PartStore<'_>,
+    refresh_caches: bool,
 ) -> Result<Vec<(String, Vec<u8>)>, ParseError> {
     if let Some((drawing, _, first, second)) = crate::chart::conflicting_drawing_anchor(wb) {
         return Err(conflicting_shared_part(drawing, first, second));
@@ -950,6 +1044,9 @@ fn patch_chart_parts(
         let moved = claims.iter().any(|claim| {
             claim.refs != claim.original_refs.as_ref() || claim.chart.raw_xml.is_some()
         });
+        if !moved && !refresh_caches {
+            continue;
+        }
         let Some(source) = package.part_bytes(path) else {
             if moved {
                 return Err(missing_part(path));
@@ -975,8 +1072,9 @@ fn patch_chart_parts(
         } else {
             source.to_vec()
         };
-        if let Some(bytes) =
-            refreshed_chart_bytes(&rewritten, &claims, wb, &package.original_workbook)
+        if refresh_caches
+            && let Some(bytes) =
+                refreshed_chart_bytes(&rewritten, &claims, wb, &package.original_workbook)
             && bytes != rewritten
         {
             refreshes.push((path.to_owned(), bytes));
@@ -3166,6 +3264,7 @@ fn patched_grid(
     let patch = SheetPatch {
         sheet,
         original,
+        cell_facts: &source.cell_facts,
         axes,
         workbook: wb,
         sst_index: &sst_index,

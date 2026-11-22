@@ -1,4 +1,7 @@
+use std::fmt::Write;
+
 use betteroffice_xlsx::{CalculationOptions, CellRef, CellValue, SheetId, Workbook};
+use xlsx_model::addr::col_to_letters;
 
 const MAIN: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
 const RELS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
@@ -134,6 +137,32 @@ fn keeps_cached_cells_and_the_anchor_when_a_spill_shrinks() {
 }
 
 #[test]
+fn leaves_new_followers_outside_the_source_spill_absent_on_save() {
+    let source = package_parts(
+        concat!(
+            r#"<row r="1"><c r="A1"><f t="array" ref="A1:A2">_xlfn.SEQUENCE(3)</f><v>1</v></c></row>"#,
+            r#"<row r="2"><c r="A2"><v>2</v></c></row>"#,
+        ),
+        FULL_CALC,
+    );
+    let saved = saved_parts(&open_recalculated(&source));
+    let sheet = sheet_xml(&saved);
+    assert_eq!(cell(sheet, "A1"), cell(sheet_xml(&source), "A1"));
+    assert!(!sheet.contains(r#"<c r="A3""#));
+
+    let reopened = open_recalculated(&saved);
+    let sheet = &reopened.model().sheets[0];
+    for row in 0..3 {
+        assert_eq!(
+            sheet.cell(CellRef::new(row, 0)).unwrap().value,
+            CellValue::Number {
+                value: f64::from(row + 1),
+            }
+        );
+    }
+}
+
+#[test]
 fn fills_uncached_formula_cells_and_keeps_a_cached_array_member() {
     let source = package_parts(
         concat!(
@@ -145,10 +174,36 @@ fn fills_uncached_formula_cells_and_keeps_a_cached_array_member() {
     );
     let saved = saved_parts(&open_recalculated(&source));
     let sheet = sheet_xml(&saved);
-    for (address, value) in [("A1", 5), ("B1", 9), ("C1", 2)] {
+    for (address, value) in [("A1", 5), ("C1", 2)] {
         assert!(cell(sheet, address).contains(&format!("<v>{value}</v>")));
     }
-    assert_eq!(cell(sheet, "C2"), cell(sheet_xml(&source), "C2"));
+    for address in ["B1", "C2"] {
+        assert_eq!(cell(sheet, address), cell(sheet_xml(&source), address));
+    }
+}
+
+#[test]
+fn fills_typed_cells_without_a_source_value_element() {
+    let source = package_parts(
+        concat!(
+            r#"<row r="1"><c r="A1" t="b"><f>TRUE()</f></c>"#,
+            r#"<c r="B1" t="str"><f>"calculated"</f></c>"#,
+            r#"<c r="C1" t="str"><f>"calculated"</f><v/></c>"#,
+            r#"<c r="D1" t="b"><f t="array" ref="D1:D2" ca="1">TRUE()</f><v>0</v></c></row>"#,
+            r#"<row r="2"><c r="D2" t="b"/></row>"#,
+        ),
+        FULL_CALC,
+    );
+    let saved = saved_parts(&open_recalculated(&source));
+    let sheet = sheet_xml(&saved);
+    for address in ["A1", "D2"] {
+        let boolean = cell(sheet, address);
+        assert!(boolean.contains(r#"t="b""#) && boolean.contains("<v>1</v>"));
+    }
+    assert!(cell(sheet, "B1").contains("<v>calculated</v>"));
+    for address in ["C1", "D1"] {
+        assert_eq!(cell(sheet, address), cell(sheet_xml(&source), address));
+    }
 }
 
 #[test]
@@ -166,6 +221,34 @@ fn keeps_the_cached_formula_and_fills_the_uncached_formula_and_array_member() {
     assert_eq!(cell(sheet, "A1"), cell(sheet_xml(&source), "A1"));
     assert!(cell(sheet, "A2").contains("<v>1</v>"));
     assert!(cell(sheet, "B1").contains("<v>9</v>"));
+}
+
+#[test]
+fn checks_only_changed_cells_in_each_array_range() {
+    const COLS: u32 = 64;
+    const ROWS: u32 = 8;
+    let mut sheet_data = String::from(r#"<row r="1">"#);
+    for col in 0..COLS {
+        let col = col_to_letters(col);
+        write!(
+            sheet_data,
+            r#"<c r="{col}1"><f t="array" ref="{col}1:{col}{ROWS}" ca="1">1</f><v>10</v></c>"#,
+        )
+        .unwrap();
+    }
+    sheet_data.push_str("</row>");
+    let source = package_parts(&sheet_data, FULL_CALC);
+    let workbook = open_recalculated(&source);
+
+    xlsx_model::open_timing::begin();
+    let saved = workbook.save();
+    let counts = xlsx_model::open_timing::finish().counts;
+    let saved = ooxml_opc::unzip_parts(&saved.unwrap()).unwrap();
+    let checks = counts.get("save_array_range_changes").copied().unwrap_or(0);
+    assert_eq!(checks, u64::from(COLS * (ROWS - 1)));
+    let sheet = sheet_xml(&saved);
+    assert_eq!(cell(sheet, "A1"), cell(sheet_xml(&source), "A1"));
+    assert!(cell(sheet, "A8").contains("<v>1</v>"));
 }
 
 #[test]
@@ -236,38 +319,38 @@ fn saves_the_recalculated_value_after_an_unrelated_edit() {
     assert!(cell(sheet, "B1").contains("<v>8</v>"));
 }
 
-#[test]
-fn keeps_chart_caches_when_filling_a_referenced_cell() {
-    const CHART: &str = "xl/charts/chart1.xml";
-    let mut source = package_parts(r#"<row r="1"><c r="A1"><f>2+3</f></c></row>"#, FULL_CALC);
-    insert_xml(
-        &mut source,
-        SHEET,
-        "</worksheet>",
-        r#"<drawing r:id="rId1"/>"#,
-    );
+fn add_chart(source: &mut Parts, path: &str) {
+    insert_xml(source, SHEET, "</worksheet>", r#"<drawing r:id="rId1"/>"#);
     source.push((
         "xl/worksheets/_rels/sheet1.xml.rels".to_owned(),
         format!(r#"<Relationships xmlns="{PKG}"><Relationship Id="rId1" Type="{RELS}/drawing" Target="../drawings/drawing1.xml"/></Relationships>"#).into_bytes(),
     ));
     add_part(
-        &mut source,
+        source,
         "xl/drawings/drawing1.xml",
         "application/vnd.openxmlformats-officedocument.drawing+xml",
         &format!(
             r#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="{RELS}"><xdr:twoCellAnchor><xdr:from><xdr:col>2</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>8</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>10</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:graphicFrame><a:graphic><a:graphicData><c:chart r:id="rId1"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>"#
         ),
     );
+    let target = path.strip_prefix("xl/").unwrap();
     source.push((
         "xl/drawings/_rels/drawing1.xml.rels".to_owned(),
-        format!(r#"<Relationships xmlns="{PKG}"><Relationship Id="rId1" Type="{RELS}/chart" Target="../charts/chart1.xml"/></Relationships>"#).into_bytes(),
+        format!(r#"<Relationships xmlns="{PKG}"><Relationship Id="rId1" Type="{RELS}/chart" Target="../{target}"/></Relationships>"#).into_bytes(),
     ));
     add_part(
-        &mut source,
-        CHART,
+        source,
+        path,
         "application/vnd.openxmlformats-officedocument.drawingml.chart+xml",
         r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:barChart><c:ser><c:idx val="0"/><c:val><c:numRef><c:f>Sheet1!$A$1</c:f><c:numCache><c:formatCode>General</c:formatCode><c:ptCount val="1"/><c:pt idx="0"><c:v>999</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#,
     );
+}
+
+#[test]
+fn keeps_chart_caches_at_a_nonstandard_path_when_filling_a_referenced_cell() {
+    const CHART: &str = "xl/visuals/chart1.xml";
+    let mut source = package_parts(r#"<row r="1"><c r="A1"><f>2+3</f></c></row>"#, FULL_CALC);
+    add_chart(&mut source, CHART);
     let mut workbook = open_recalculated(&source);
     assert_eq!(workbook.model().sheets[0].charts.len(), 1);
     let saved = saved_parts(&workbook);
@@ -276,5 +359,43 @@ fn keeps_chart_caches_when_filling_a_referenced_cell() {
 
     workbook.recalculate_all(CalculationOptions::default());
     let saved = saved_parts(&workbook);
-    assert_ne!(part(&saved, CHART), part(&source, CHART));
+    let chart = std::str::from_utf8(part(&saved, CHART)).unwrap();
+    assert!(chart.contains(r#"<c:pt idx="0"><c:v>5</c:v></c:pt>"#));
+}
+
+#[test]
+fn switching_tabs_refreshes_chart_caches_for_an_unflagged_workbook() {
+    const CHART: &str = "xl/charts/chart1.xml";
+    let mut source = package_parts(
+        r#"<row r="1"><c r="A1"><f>2+3</f><v>999</v></c></row>"#,
+        "",
+    );
+    add_chart(&mut source, CHART);
+    insert_xml(
+        &mut source,
+        "xl/workbook.xml",
+        "</sheets>",
+        r#"<sheet name="Sheet2" sheetId="2" r:id="rId2"/>"#,
+    );
+    insert_xml(
+        &mut source,
+        WORKBOOK_RELS,
+        "</Relationships>",
+        &format!(
+            r#"<Relationship Id="rId2" Type="{RELS}/worksheet" Target="worksheets/sheet2.xml"/>"#
+        ),
+    );
+    add_part(
+        &mut source,
+        "xl/worksheets/sheet2.xml",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml",
+        &format!(r#"<worksheet xmlns="{MAIN}"><sheetData/></worksheet>"#),
+    );
+
+    let mut workbook = open_recalculated(&source);
+    workbook.set_active_sheet(SheetId(1)).unwrap();
+    let saved = saved_parts(&workbook);
+    assert!(cell(sheet_xml(&saved), "A1").contains("<v>5</v>"));
+    let chart = std::str::from_utf8(part(&saved, CHART)).unwrap();
+    assert!(chart.contains(r#"<c:pt idx="0"><c:v>5</c:v></c:pt>"#));
 }

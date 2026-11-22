@@ -43,7 +43,7 @@ pub(crate) struct IndexedWorkbook {
     pub(crate) workbook: Workbook,
     pub(crate) active_sheet: SheetId,
     pub(crate) shared_string_cells: Vec<SharedStringCells>,
-    pub(crate) cell_facts: Vec<SourceCellFacts>,
+    pub(crate) cell_facts: Vec<WorksheetCellFacts>,
     pub(crate) legacy_dimensions: Vec<LegacySheetDimensions>,
     /// The style table releases that needed an explicit `applyX` flag read,
     /// present only when it differs. A legacy collaboration fingerprint is the
@@ -105,7 +105,7 @@ pub(crate) fn parse_workbook_indexed(
             }
             sheets.push(sheet);
             shared_string_cells.push(SharedStringCells::new());
-            cell_facts.push(SourceCellFacts::default());
+            cell_facts.push(WorksheetCellFacts::default());
             legacy_dimensions.push(LegacySheetDimensions::default());
             continue;
         }
@@ -117,7 +117,7 @@ pub(crate) fn parse_workbook_indexed(
             .unwrap_or_default();
         let mut indices = SharedStringCells::new();
         let mut legacy = LegacySheetDimensions::default();
-        let mut facts = SourceCellFacts::default();
+        let mut facts = WorksheetCellFacts::default();
         let mut sheet = parse_worksheet(
             &entry.name,
             bytes,
@@ -697,6 +697,20 @@ pub struct SourceCellFacts {
     pub alternate_formulas: bool,
 }
 
+#[derive(Clone, Debug, Default)]
+pub(crate) struct WorksheetCellFacts {
+    pub(crate) source: SourceCellFacts,
+    // The XML and model disagree about whether these cells hold a cache.
+    pub(crate) cache_presence_overrides: BTreeSet<(u32, u32)>,
+}
+
+impl WorksheetCellFacts {
+    pub(crate) fn has_cached_value(&self, at: CellRef, cell: Option<&Cell>) -> bool {
+        cell.is_some_and(|cell| cell.value != CellValue::Empty)
+            ^ self.cache_presence_overrides.contains(&(at.row, at.col))
+    }
+}
+
 /// in-progress cell state accumulated between a `<c>` start and its end.
 #[derive(Default)]
 struct CellBuild {
@@ -719,7 +733,7 @@ fn parse_worksheet(
     relationships: &BTreeMap<String, Relationship>,
     shared_string_cells: &mut SharedStringCells,
     legacy: &mut LegacySheetDimensions,
-    facts: &mut SourceCellFacts,
+    facts: &mut WorksheetCellFacts,
     dxfs: &[DifferentialFormat],
 ) -> Result<Sheet, ParseError> {
     let mut reader = reader(data);
@@ -807,11 +821,11 @@ fn parse_worksheet(
                             if let Some(range) = array_ref.filter(|range| range.contains(origin)) {
                                 sheet.set_array_formula(origin, range);
                             } else if attr(&e, b"t")?.as_deref() == Some("array") {
-                                facts.dropped_array_ranges = true;
+                                facts.source.dropped_array_ranges = true;
                             }
                         }
                         c.formula = Some(text);
-                        facts.alternate_formulas |= alternate_depth > 0;
+                        facts.source.alternate_formulas |= alternate_depth > 0;
                     }
                 }
                 b"AlternateContent" => alternate_depth += 1,
@@ -1252,14 +1266,16 @@ fn finalize_cell(
     sheet: &mut Sheet,
     columns: &ColumnRuns,
     shared_string_cells: &mut SharedStringCells,
-    facts: &mut SourceCellFacts,
+    facts: &mut WorksheetCellFacts,
 ) -> Result<(), ParseError> {
     let addr = match c.addr {
         Some(a) => a,
         None => return Ok(()),
     };
-    if c.formula.is_some() && c.value_text.is_none() && c.inline_text.is_none() {
-        facts.uncached_formulas.insert((addr.row, addr.col));
+    let key = (addr.row, addr.col);
+    let has_cache = c.value_text.is_some() || c.inline_text.is_some();
+    if c.formula.is_some() && !has_cache {
+        facts.source.uncached_formulas.insert(key);
     }
     let cached = c
         .value_text
@@ -1270,13 +1286,13 @@ fn finalize_cell(
                 .as_deref()
                 .is_some_and(|text| !text.is_empty()));
     if (c.formula.is_some() || c.ty.is_some()) && !cached {
-        facts.blank_results.insert((addr.row, addr.col));
+        facts.source.blank_results.insert(key);
     }
     if c.inline_runs
         && c.ty.as_deref() == Some("inlineStr")
         && let Some(text) = &c.inline_text
     {
-        facts.rich_inline.insert((addr.row, addr.col), text.clone());
+        facts.source.rich_inline.insert(key, text.clone());
     }
     let value = match c.ty.as_deref() {
         Some("s") => {
@@ -1336,7 +1352,18 @@ fn finalize_cell(
         }
         cell.style = Some(0);
     }
-    if cell != Cell::default() {
+    let retained = cell != Cell::default();
+    let cache_presence_differs = has_cache != (cell.value != CellValue::Empty);
+    if (cache_presence_differs || !facts.cache_presence_overrides.is_empty())
+        && (retained || sheet.cell(addr).is_none())
+    {
+        if cache_presence_differs {
+            facts.cache_presence_overrides.insert(key);
+        } else {
+            facts.cache_presence_overrides.remove(&key);
+        }
+    }
+    if retained {
         sheet.set_cell(addr, cell);
     }
     Ok(())
