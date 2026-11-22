@@ -3412,8 +3412,17 @@ impl NoteItemIn {
 
     /// Whether the item shows the note's opening, where its label and backlink are.
     fn shows_start(&self) -> bool {
-        self.window()
-            .is_none_or(|window| window.block_start == 0 && window.line_start == 0)
+        crate::types::NoteWindow::shows_start(self.window())
+    }
+
+    /// Whether the region lists the item's backlink metadata.
+    fn has_backlink(&self) -> bool {
+        note_item_has_backlink(
+            self.window(),
+            self.anchor_doc_start,
+            self.anchor_doc_end,
+            self.display_label.as_deref(),
+        )
     }
 }
 
@@ -5994,12 +6003,7 @@ fn emit_note_regions(page: &PageIn, ctx: &RenderCtx<'_>) -> Vec<NoteRegion> {
             notes: area
                 .notes
                 .iter()
-                .filter(|note| {
-                    note.shows_start()
-                        && (note.anchor_doc_start.is_some()
-                            || note.anchor_doc_end.is_some()
-                            || note.display_label.is_some())
-                })
+                .filter(|note| note.has_backlink())
                 .map(|note| NoteRegionNote {
                     id: note.id,
                     anchor_doc_start: note.anchor_doc_start,
@@ -6016,6 +6020,70 @@ fn emit_note_regions(page: &PageIn, ctx: &RenderCtx<'_>) -> Vec<NoteRegion> {
         });
     }
     regions
+}
+
+/// Only notes whose opening the page shows, carrying anchor or label data, get backlink
+/// metadata in their region.
+fn note_item_has_backlink(
+    window: Option<crate::types::NoteWindow>,
+    anchor_doc_start: Option<i64>,
+    anchor_doc_end: Option<i64>,
+    label: Option<&str>,
+) -> bool {
+    crate::types::NoteWindow::shows_start(window)
+        && (anchor_doc_start.is_some() || anchor_doc_end.is_some() || label.is_some())
+}
+
+/// Rewrites the backlink anchors of `page`'s note regions to those `layout_page`'s note
+/// areas carry, as building the page from `layout_page` would emit them. Nothing else in a
+/// region reads where a note's reference sits, so after an edit that only moved references,
+/// the rewritten page is the page a rebuild would produce.
+///
+/// Returns `None`, leaving the page untouched, when its regions do not list `layout_page`'s
+/// backlinks one for one (by area, order and note id); otherwise whether an anchor changed.
+/// An unbuilt page shows no regions and has nothing to rewrite.
+pub fn refresh_note_region_anchors(
+    page: &mut DisplayPage,
+    layout_page: &crate::types::Page,
+) -> Option<bool> {
+    if page.unbuilt {
+        return Some(false);
+    }
+    let areas = layout_page.note_areas.as_deref().unwrap_or_default();
+    if areas.len() != page.note_areas.len() {
+        return None;
+    }
+    fn backlinks(
+        area: &crate::types::NoteAreaContract,
+    ) -> impl Iterator<Item = &crate::types::NoteLayoutItemContract> {
+        area.notes.iter().flatten().filter(|note| {
+            note_item_has_backlink(
+                crate::types::NoteWindow::of(note),
+                note.anchor_doc_start,
+                note.anchor_doc_end,
+                note.display_label.as_deref(),
+            )
+        })
+    }
+    for (area, region) in areas.iter().zip(&page.note_areas) {
+        if backlinks(area).count() != region.notes.len()
+            || backlinks(area)
+                .zip(&region.notes)
+                .any(|(note, shown)| note.id != shown.id)
+        {
+            return None;
+        }
+    }
+    let mut changed = false;
+    for (area, region) in areas.iter().zip(&mut page.note_areas) {
+        for (note, shown) in backlinks(area).zip(&mut region.notes) {
+            changed |= shown.anchor_doc_start != note.anchor_doc_start
+                || shown.anchor_doc_end != note.anchor_doc_end;
+            shown.anchor_doc_start = note.anchor_doc_start;
+            shown.anchor_doc_end = note.anchor_doc_end;
+        }
+    }
+    Some(changed)
 }
 
 fn measured_block_height(measured: &MeasuredBlockIn) -> f64 {
