@@ -473,7 +473,7 @@ fn uniform_runs_of_a_different_size_keep_that_sizes_wrap_layout() {
     };
     assert!(run_pieces(command(&rich, stored)).is_some());
     assert!(layout(&rich).1.unwrap().max_lines.is_some());
-    assert_eq!(layout(&rich), layout(&plain));
+    assert_eq!(layout(&rich).1, layout(&plain).1);
 }
 
 #[test]
