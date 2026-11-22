@@ -45,6 +45,7 @@ export function readPackManifest(value: unknown): PackManifest {
 const latin = readPackManifest(latinManifest);
 const intl = readPackManifest(intlManifest);
 const cjk = readPackManifest(cjkManifest);
+export const addonManifests = { latin, intl, cjk };
 const baseLatin = readPackManifest(baseLatinManifest);
 const baseLatinFiles = new Set(baseLatin.faces.map((face) => face.file));
 const latinFiles = new Set(latin.faces.map((face) => face.file));

@@ -1,3 +1,5 @@
+import { bundledDecoderUrl, readWasm } from './decodeAssets';
+
 export type FontDecoder = (
   bytes: ArrayBuffer | Uint8Array,
   options: { codec: string; dict?: ArrayBuffer | Uint8Array; maxOutput?: number },
@@ -8,14 +10,6 @@ interface NodeZlibLike {
     bytes: Uint8Array,
     options: { dictionary?: Uint8Array; maxOutputLength: number },
   ) => Uint8Array;
-}
-
-interface NodeFsLike {
-  readFileSync(path: string): Uint8Array;
-}
-
-interface NodeUrlLike {
-  fileURLToPath(url: string): string;
 }
 
 interface NodeBufferLike {
@@ -126,21 +120,10 @@ function contentSize(bytes: Uint8Array, maxOutput: number): number {
   return Number(size);
 }
 
-async function readWasm(url: URL): Promise<Uint8Array> {
-  let fs = builtinModule<NodeFsLike>('node:fs');
-  let nodeUrl = builtinModule<NodeUrlLike>('node:url');
-  if (!fs || !nodeUrl) {
-    const fsName = 'node:fs';
-    const urlName = 'node:url';
-    [fs, nodeUrl] = await Promise.all([import(fsName), import(urlName)]);
-  }
-  return fs!.readFileSync(nodeUrl!.fileURLToPath(url.href));
-}
-
 async function instantiate(url: URL): Promise<Decoder> {
   let instance: WebAssembly.Instance;
   if (url.protocol === 'file:') {
-    const result = await WebAssembly.instantiate(copy(await readWasm(url)), {});
+    const result = await WebAssembly.instantiate(copy(await readWasm(url, builtinModule)), {});
     instance = result.instance;
   } else {
     if (typeof fetch !== 'function') throw new Error('Cannot fetch font decoder wasm');
@@ -192,22 +175,12 @@ function missingDecoder(error: unknown): string | undefined {
   return code === 'ENOENT' ? 'no such file' : undefined;
 }
 
-function bundledDecoderUrl(): URL | undefined {
-  try {
-    return new URL('./decoder/fontpack.wasm', import.meta.url);
-  } catch {
-    return undefined;
-  }
-}
-
 async function loadDecoder(configured: URL | undefined): Promise<DecoderInstance> {
-  const urls: URL[] = [];
-  for (const url of [configured, bundledDecoderUrl()]) {
-    if (url !== undefined && !urls.some((other) => other.href === url.href)) urls.push(url);
-  }
   const misses: string[] = [];
   let cause: unknown;
-  for (const url of urls) {
+  for (const resolve of [() => configured, bundledDecoderUrl]) {
+    const url = await resolve();
+    if (url === undefined || (resolve === bundledDecoderUrl && url.href === configured?.href)) continue;
     const missing = missingDecoders.get(url.href);
     if (missing !== undefined) {
       misses.push(`${url.href} (${missing})`);

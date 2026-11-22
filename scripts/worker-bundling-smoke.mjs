@@ -96,7 +96,7 @@ async function checkPublishedWorkerStubs() {
       }
     }
   }
-  assert.deepEqual(failures, [], `Published worker entries must have exactly one static font or docx sibling import and no literal dynamic imports:\n${failures.join('\n')}`);
+  assert.deepEqual(failures, [], `Published worker bundles must be self-contained, with only the docx sibling forwarding import:\n${failures.join('\n')}`);
 }
 
 async function checkNativeWorkerBundles() {
@@ -164,11 +164,11 @@ try {
     });
     const inputs = Object.keys(alone.metafile.inputs);
     assert.ok(inputs.every(input => !/sessionWorker\.|nodeSession(?:Worker|Scope)/.test(input)), `${worker} bundles a module that constructs its own worker`);
-    assert.deepEqual(bare.filter(entry => entry !== '@betteroffice/fonts/worker (import-statement)'), [],
+    assert.deepEqual(bare, [],
       `${worker} imports specifiers an unbundled browser worker cannot resolve`);
     for (const output of alone.outputFiles) {
       const { problems } = await validatePublishedWorker(output.text);
-      assert.deepEqual(problems, [], `${worker} retains a literal dynamic import`);
+      assert.deepEqual(problems, [], `${worker} must be self-contained`);
     }
   }
   await checkOutput(esbuildDirectory);

@@ -1,4 +1,4 @@
-import { setOptionalFontPacks } from '@betteroffice/fonts/worker';
+import { setFontAssetSource } from '../../packages/fonts/src/worker';
 import { installWorkerFontPacks } from './optionalFontPacks';
 
-installWorkerFontPacks(self, setOptionalFontPacks);
+installWorkerFontPacks(self, setFontAssetSource);

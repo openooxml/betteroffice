@@ -1,5 +1,10 @@
 import { createFontRuntime, type FontAssetUrls, type FontPackLookup } from './fontRuntime';
-import { absoluteHref } from './progressive';
+import { absoluteHref } from './assetHref';
+import { bundledDecoderUrl } from './decodeAssets';
+import { fontCdnAssetUrl, fontCdnConfiguration } from './fontCdn';
+import { localFontAssets } from './localFontAssets';
+import { addonManifests } from './packed';
+import type { FontAssetKind } from '../../../shared/office-session/optionalFontPacks';
 
 export { configureFontCdn, fontCdnConfiguration, type FontCdnOptions, type FontCdnConfiguration } from './fontCdn';
 export * from './manifest';
@@ -72,10 +77,23 @@ const lookup: FontPackLookup = (pack) => {
 export const {
   bundledFaceInstalled, isMissingFontAddon, loadBundledFontBytes, registerBundledFontFace,
   createFontProvider, decodeFontFaceOutsideEngine, checkFontPacks,
-} = createFontRuntime(lookup);
+} = createFontRuntime(lookup, { local: localFontAssets });
 
-/** The asset URLs of an installed optional font pack by file name, or undefined when the pack is not installed. */
-export async function optionalFontPackUrls(pack: 'intl' | 'cjk'): Promise<Record<string, string> | undefined> {
-  const urls = await lookup(pack);
-  return urls && Object.fromEntries(Object.entries(urls).map(([file, url]) => [file, new URL(absoluteHref(url().href)).href]));
+/** Absolute font asset URLs by file name, or undefined when none are available. */
+export async function fontAssetUrls(kind: FontAssetKind): Promise<Record<string, string> | undefined> {
+  if (kind === 'decoder') {
+    const url = bundledDecoderUrl();
+    return url && { 'fontpack.wasm': url.href };
+  }
+  const installed = await lookup(kind);
+  const resolvers = kind === 'latin' ? { ...installed, ...localFontAssets.baseLatin } : installed;
+  const urls = Object.fromEntries(Object.entries(resolvers ?? {}).map(([file, url]) => [file, new URL(absoluteHref(url().href)).href]));
+  const { baseUrl } = fontCdnConfiguration();
+  if (baseUrl) {
+    const manifest = addonManifests[kind];
+    const files = manifest.faces.map(({ file }) => file);
+    if (kind === 'cjk') files.push(...(await import('./cjkSliceFiles')).cjkSliceFiles);
+    for (const file of files) urls[file] ??= fontCdnAssetUrl(manifest, file, baseUrl).href;
+  }
+  return Object.keys(urls).length ? urls : undefined;
 }

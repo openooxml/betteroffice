@@ -5,7 +5,6 @@ import { defineConfig } from 'tsup';
 export default defineConfig({
   entry: {
     index: 'src/index.ts',
-    worker: 'src/worker.ts',
     cdn: 'src/cdn.ts',
     progressive: 'src/progressive-entry.ts',
     remote: 'src/remote.ts',

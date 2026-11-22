@@ -1,32 +1,23 @@
-import * as latinAddon from '@betteroffice/fonts-latin';
-import { createFontRuntime, type FontAssetUrls } from './fontRuntime';
-import { absoluteHref } from './progressive';
+import type { FontPackSource } from '../../../shared/office-session/optionalFontPacks';
+import { createFontRuntime, type FontAssetUrls, type FontPackLookup } from './fontRuntime';
+import { setWorkerFontAssets, workerFontAssets, workerFontTimeout } from './workerAssets';
 
-export { configureFontCdn, fontCdnConfiguration, type FontCdnOptions, type FontCdnConfiguration } from './fontCdn';
+export { setFontCdnConfiguration as configureFontCdn } from '../../../shared/office-session/fontCdn';
 export * from './manifest';
 export * from './progressive-entry';
-export type { FontDecoder } from './decode';
-export type { BundledFontLoader, BundledFontSource } from './provider';
-export type { FontAssetOptions, FontPackDiagnostic } from './fontRuntime';
 
-export type OptionalFontPack = 'intl' | 'cjk';
-export type OptionalFontPackSource = (pack: OptionalFontPack) => Promise<Record<string, string> | undefined>;
+const requested = new Map<Parameters<FontPackLookup>[0], Promise<FontAssetUrls | undefined>>();
 
-let optionalFontPacks: OptionalFontPackSource = async () => undefined;
-const requested = new Map<OptionalFontPack, Promise<FontAssetUrls | undefined>>();
-
-export function setOptionalFontPacks(source: OptionalFontPackSource): void {
-  optionalFontPacks = source;
+export function setFontAssetSource(source: FontPackSource, timeout?: (url: URL) => number | undefined): void {
+  setWorkerFontAssets(source, timeout);
   requested.clear();
 }
 
-const latin = () => Promise.resolve(latinAddon.LATIN_FONT_ASSET_URLS);
-const lookup = (pack: 'latin' | OptionalFontPack): Promise<FontAssetUrls | undefined> => {
-  if (pack === 'latin') return latin();
+const lookup: FontPackLookup = (pack) => {
   let pending = requested.get(pack);
   if (!pending) {
-    pending = Promise.resolve().then(() => optionalFontPacks(pack)).then((urls) => urls &&
-      Object.fromEntries(Object.entries(urls).map(([file, href]) => [file, () => new URL(absoluteHref(href))])));
+    pending = Promise.resolve().then(() => workerFontAssets(pack)).then((urls) => urls &&
+      Object.fromEntries(Object.entries(urls).map(([file, href]) => [file, () => new URL(href)])));
     requested.set(pack, pending);
     const current = pending;
     const forget = () => { if (requested.get(pack) === current) requested.delete(pack); };
@@ -38,9 +29,7 @@ const lookup = (pack: 'latin' | OptionalFontPack): Promise<FontAssetUrls | undef
 export const {
   bundledFaceInstalled, isMissingFontAddon, loadBundledFontBytes, registerBundledFontFace,
   createFontProvider, decodeFontFaceOutsideEngine, checkFontPacks,
-} = createFontRuntime(lookup, (pack) => pack === 'latin' ? latin() : requested.get(pack) ?? Promise.resolve(undefined));
-
-export async function optionalFontPackUrls(pack: OptionalFontPack): Promise<Record<string, string> | undefined> {
-  const urls = await lookup(pack);
-  return urls && Object.fromEntries(Object.entries(urls).map(([file, url]) => [file, url().href]));
-}
+} = createFontRuntime(lookup, {
+  diagnostics: (pack) => requested.get(pack) ?? Promise.resolve(undefined),
+  timeout: workerFontTimeout,
+});

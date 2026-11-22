@@ -4,7 +4,7 @@ import { createSessionWorker as createPptxWorker } from '../../packages/pptx/src
 import { createSessionWorker as createXlsxWorker } from '../../packages/xlsx/src/session/sessionWorker.browser';
 import {
   createFontPackResponder, createWorkerFontPacks, installWorkerFontPacks,
-  type FontPackReply, type FontPackRequest, type FontPackUrls, type OptionalFontPack,
+  type FontAssetKind, type FontPackReply, type FontPackRequest, type FontPackUrls,
 } from './optionalFontPacks';
 import { attachFontPackSource } from './fontPackSource';
 import { createWorkerTransport } from './transport';
@@ -44,7 +44,7 @@ test('the worker keeps its lazy pack responder through session listener handoff'
   const scope = Object.assign(new EventTarget(), {
     postMessage(data: unknown): void { page.dispatchEvent(new MessageEvent('message', { data })); },
   });
-  const imports = mock(async (pack: OptionalFontPack) => ({ [`${pack}.zst`]: `https://fonts.example/${pack}.zst` }));
+  const imports = mock(async (pack: FontAssetKind) => ({ [`${pack}.zst`]: `https://fonts.example/${pack}.zst` }));
   const listen = spyOn(page, 'addEventListener');
   attachFontPackSource(page, imports);
   attachFontPackSource(page, imports);
@@ -68,7 +68,9 @@ test('the worker keeps its lazy pack responder through session listener handoff'
     await source('intl');
     await source('cjk');
     await source('cjk');
-    expect(imports.mock.calls).toEqual([['intl'], ['cjk']]);
+    await source('latin');
+    await source('decoder');
+    expect(imports.mock.calls).toEqual([['intl'], ['cjk'], ['latin'], ['decoder']]);
     expect(prepared).not.toHaveBeenCalled();
     expect(session).not.toHaveBeenCalled();
     expect(host).not.toHaveBeenCalled();
@@ -127,21 +129,55 @@ test('the page shares concurrent lookups and retries failed or missing packs', a
   ]);
 });
 
+test('the worker can continue after the page replies without font assets', async () => {
+  const requests: FontPackRequest[] = [];
+  const worker = createWorkerFontPacks((message) => { requests.push(message); page.receive(message); });
+  const page = createFontPackResponder(worker.receive, async () => undefined);
+  try {
+    const first = worker.source('latin');
+    expect(worker.source('latin')).toBe(first);
+    expect(await first).toBeUndefined();
+    expect(await worker.source('latin')).toBeUndefined();
+    expect(await worker.source('decoder')).toBeUndefined();
+    expect(requests.map(({ pack }) => pack)).toEqual(['latin', 'latin', 'decoder']);
+  } finally {
+    worker.dispose();
+  }
+});
+
+test('the page passes the configured CDN timeout for fallback URLs', async () => {
+  const urls = {
+    'installed.zst': 'https://app.example/font.zst',
+    'fallback.zst': 'https://cdn.example/root/cjk/1/fallback.zst',
+  };
+  const worker = createWorkerFontPacks((message) => { page.receive(message); });
+  const page = createFontPackResponder(worker.receive, async () => urls,
+    (pack) => ({ prefix: `https://cdn.example/root/${pack}/`, timeoutMs: 1234 }));
+  try {
+    expect(await worker.source('cjk')).toEqual(urls);
+    expect(worker.timeout(new URL(urls['fallback.zst']))).toBe(1234);
+    expect(worker.timeout(new URL(urls['installed.zst']))).toBeUndefined();
+  } finally {
+    worker.dispose();
+  }
+});
+
 test('the worker retries after a 15-second timeout and ignores late replies', async () => {
   const requests: FontPackRequest[] = [];
   const packs = createWorkerFontPacks((message) => requests.push(message));
   const timer = spyOn(globalThis, 'setTimeout');
   try {
-    const first = packs.source('intl');
+    const first = packs.source('decoder');
+    expect(packs.source('decoder')).toBe(first);
     const [expire, delay] = timer.mock.calls.at(-1)!;
     if (typeof expire !== 'function') throw new Error('Expected a timer callback');
     expire();
     expect(await first).toBeUndefined();
     expect(delay).toBe(15_000);
-    const retry = packs.source('intl');
+    const retry = packs.source('decoder');
     expect(requests).toHaveLength(2);
     packs.receive({ protocol: 1, kind: 'font-pack-reply', id: requests[0]!.id });
-    const urls = { 'intl.zst': 'https://fonts.example/intl.zst' };
+    const urls = { 'fontpack.wasm': 'https://fonts.example/fontpack.wasm' };
     packs.receive({ protocol: 1, kind: 'font-pack-reply', id: requests[1]!.id, urls });
     expect(await retry).toEqual(urls);
   } finally {

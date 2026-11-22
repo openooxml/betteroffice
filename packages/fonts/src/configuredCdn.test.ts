@@ -83,6 +83,40 @@ test('CDN loading starts disabled and preserves missing-pack errors', async () =
   await expect(fonts.loadBundledFontBytes(japanese, undefined, runtime)).rejects.toThrow('install @betteroffice/fonts-cjk');
 });
 
+test('the page lookup resolves every pack by file name and uses the configured CDN only for missing assets', async () => {
+  expect(await fonts.fontAssetUrls('intl')).toBeUndefined();
+  expect(await fonts.fontAssetUrls('cjk')).toBeUndefined();
+  const bundledLatin = await fonts.fontAssetUrls('latin');
+  const bundledDecoder = await fonts.fontAssetUrls('decoder');
+  expect(Object.keys(bundledLatin!).sort()).toEqual(fonts.BASE_LATIN_FONTS.map(({ file }) => file).sort());
+  expect(bundledDecoder).toEqual({ 'fontpack.wasm': new URL('./decoder/fontpack.wasm', import.meta.url).href });
+
+  fonts.configureFontCdn({ baseUrl: 'https://fonts.example/./root' });
+  const latinUrls = await fonts.fontAssetUrls('latin');
+  const intlUrls = await fonts.fontAssetUrls('intl');
+  const cjkUrls = await fonts.fontAssetUrls('cjk');
+  const cjkIndex = cjk.faces.find(({ file }) => file === japanese.file)!.slices!.index;
+  const cjkSlice = cjkIndex.replace('slices.json', 'c001.zst');
+  const thaiFile = fonts.resolveScriptFallbackFace('thai', false, false)!.file;
+  expect(latinUrls).toMatchObject({ ...bundledLatin, [regular.file]: `https://fonts.example/root/latin/${latin.version}/${regular.file}` });
+  expect(intlUrls?.[thaiFile]).toBe(`https://fonts.example/root/intl/${intl.version}/${thaiFile}`);
+  expect(cjkUrls?.[cjkIndex]).toBe(`https://fonts.example/root/cjk/${cjk.version}/${cjkIndex}`);
+  expect(cjkUrls?.[cjkSlice]).toBe(`https://fonts.example/root/cjk/${cjk.version}/${cjkSlice}`);
+  for (const face of cjk.faces) {
+    if (!face.slices) continue;
+    const index = await Bun.file(asset('cjk', face.slices.index)).json() as {
+      skeleton: { file: string }; core: { file: string }; chunks: { file: string }[];
+    };
+    for (const file of [face.file, face.slices.index, index.skeleton.file, index.core.file, ...index.chunks.map(({ file }) => file)]) {
+      expect(cjkUrls?.[file]).toBe(`https://fonts.example/root/cjk/${cjk.version}/${file}`);
+    }
+  }
+  expect(await fonts.fontAssetUrls('decoder')).toEqual(bundledDecoder);
+  for (const urls of [latinUrls, intlUrls, cjkUrls, bundledDecoder]) {
+    for (const href of Object.values(urls!)) expect(new URL(href).href).toBe(href);
+  }
+});
+
 test('session clients and separate package copies share font CDN configuration', async () => {
   fonts.configureFontCdn({ baseUrl: new URL('https://shared-fonts.example/root'), timeoutMs: 4321 });
   const configured = { baseUrl: 'https://shared-fonts.example/root/', timeoutMs: 4321 };
@@ -342,6 +376,9 @@ test('installed packs win over a configured CDN without changing their request p
   fonts.configureFontCdn({ baseUrl: 'https://unused.example/' });
   const requests: string[] = [];
   serveAssets(requests, (_url, options) => expect(options).toBeUndefined());
+  for (const [kind, file] of [
+    ['latin', regular.file], ['intl', fonts.resolveScriptFallbackFace('thai', false, false)!.file], ['cjk', japanese.file],
+  ] as const) expect((await fonts.fontAssetUrls(kind))?.[file]).toBe(asset(kind, file).href);
   for (const face of [regular, fonts.resolveScriptFallbackFace('thai', false, false)!, japanese]) {
     expect((await fonts.loadBundledFontBytes(face, undefined, runtime)).byteLength).toBe(face.byteLength);
   }

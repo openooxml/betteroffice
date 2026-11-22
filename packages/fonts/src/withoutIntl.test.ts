@@ -22,10 +22,11 @@ afterEach(() => {
 });
 
 test('does not import intl for Latin or unknown assets', async () => {
-  const { loadBundledFontBytes, resolveMetricCompatFace } = await import('./index');
+  const { fontAssetUrls, loadBundledFontBytes, resolveMetricCompatFace } = await import('./index');
   const face = resolveMetricCompatFace('Arial', false, false)!;
   globalThis.fetch = fontAssetResponse as typeof fetch;
   expect(importIntl).not.toHaveBeenCalled();
+  await fontAssetUrls('decoder');
   expect((await loadBundledFontBytes(face, { baseUrl: 'https://without-intl.example/' })).byteLength)
     .toBe(face.byteLength);
   await expect(loadBundledFontBytes({ ...face, file: 'Unlisted-Regular.ttf.zst' })).rejects.toThrow(
@@ -104,11 +105,11 @@ test('custom bases bypass the optional add-on and return owned buffers', async (
 });
 
 test('recovers after installing intl, resolves asset hrefs and reports missing asset entries', async () => {
-  const { loadBundledFontBytes, optionalFontPackUrls, resolveScriptFallbackFace } = await import('./index');
+  const { loadBundledFontBytes, fontAssetUrls, resolveScriptFallbackFace } = await import('./index');
   const face = resolveScriptFallbackFace('tifinagh', false, false)!;
   const absolute = 'https://intl-installed.example/NotoSansTifinagh-Regular.ttf.zst';
   const relative = '/_next/static/media/another.zst';
-  expect(await optionalFontPackUrls('intl')).toBeUndefined();
+  expect(await fontAssetUrls('intl')).toBeUndefined();
   await expect(loadBundledFontBytes(face)).rejects.toThrow('install @betteroffice/fonts-intl');
   importIntl.mockImplementation(() => ({
     INTL_FONT_ASSET_URLS: {
@@ -120,7 +121,7 @@ test('recovers after installing intl, resolves asset hrefs and reports missing a
   const location = Object.getOwnPropertyDescriptor(globalThis, 'location');
   Object.defineProperty(globalThis, 'location', { value: { href: 'https://app.example/room/1' }, configurable: true });
   try {
-    expect(await optionalFontPackUrls('intl')).toEqual({
+    expect(await fontAssetUrls('intl')).toEqual({
       [face.file]: absolute, 'another.zst': `https://app.example${relative}`, 'cdn.zst': 'https://cdn.example/cdn.zst',
     });
   } finally {

@@ -80,7 +80,7 @@ function checkOnDisk(pack: Pack, asset: URL): FontPackDiagnostic | null | undefi
  * the pack's manifest and files are checked on disk; in a browser only its asset list is compared with this
  * release, since checking the files would fetch them.
  */
-export async function checkInstalledPacks(importers: Record<Pack, () => Promise<AssetUrls | undefined>>): Promise<FontPackDiagnostic[]> {
+export async function checkInstalledPacks(importers: Record<Pack, () => Promise<AssetUrls | undefined>>, inspectDisk = true): Promise<FontPackDiagnostic[]> {
   const diagnostics: FontPackDiagnostic[] = [];
   for (const pack of ['latin', 'intl', 'cjk'] as const) {
     let urls: AssetUrls | undefined;
@@ -93,7 +93,7 @@ export async function checkInstalledPacks(importers: Record<Pack, () => Promise<
     if (!urls) continue;
     const listed = PACK_FILES[pack].filter((file) => file in urls);
     const first = listed[0] ?? Object.keys(urls)[0];
-    const onDisk = first === undefined ? undefined : checkOnDisk(pack, urls[first]!());
+    const onDisk = !inspectDisk || first === undefined ? undefined : checkOnDisk(pack, urls[first]!());
     if (onDisk !== undefined) {
       if (onDisk) diagnostics.push(onDisk);
       continue;

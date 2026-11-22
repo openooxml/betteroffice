@@ -24,7 +24,7 @@ const directory = await mkdtemp(join(tmpdir(), 'worker-stub-'));
 afterAll(() => rm(directory, { recursive: true, force: true }));
 
 for (const { name, entry, outfile, ...options } of stubs) {
-  test(`${name} worker bundles its start module without literal dynamic imports`, async () => {
+  test(`${name} worker bundles its start module and font runtime without imports`, async () => {
     expect(buildWorkerStub).toBeFunction();
     const file = join(directory, outfile);
     await buildWorkerStub!({ entry: join(packages, entry), outfile: file, ...options }, { browserFonts: true });
@@ -46,15 +46,20 @@ for (const { name, entry, outfile, ...options } of stubs) {
   });
 }
 
-test('only browser worker bundles redirect dynamic font imports and install the pack channel', async () => {
+test('only browser worker bundles inline font imports and install the pack channel', async () => {
   const entry = join(directory, 'font-imports.ts');
-  await writeFile(entry, `globalThis.fonts = () => import('@betteroffice/fonts');
+  await writeFile(entry, `import { resolveMetricCompatFace } from '@betteroffice/fonts';
+globalThis.resolveMetricCompatFace = resolveMetricCompatFace;
+globalThis.fonts = () => import('@betteroffice/fonts');
 globalThis.progressive = () => import('@betteroffice/fonts/progressive');`);
   const browser = join(directory, 'font-imports.browser.mjs');
   await buildWorkerStub!({ entry, outfile: browser }, { browserFonts: true });
   const source = await readFile(browser, 'utf8');
   expect((await validatePublishedWorker(source)).problems).toEqual([]);
   expect(source).toContain('font-pack-request');
+  expect(source).toContain('decodeFontFaceOutsideEngine');
+  expect(source).toContain('openSlicedFace');
+  expect(source).not.toMatch(/\blocation\??\.href\b/);
   const native = join(directory, 'font-imports.native.mjs');
   await buildWorkerStub!({ entry, outfile: native }, { external: ['@betteroffice/fonts', '@betteroffice/fonts/*'] });
   const plain = await readFile(native, 'utf8');
@@ -62,6 +67,7 @@ globalThis.progressive = () => import('@betteroffice/fonts/progressive');`);
   expect(plain).toContain('import("@betteroffice/fonts")');
   expect(plain).toContain('import("@betteroffice/fonts/progressive")');
   expect(plain).not.toContain('font-pack-request');
+  expect(plain).not.toContain('decodeFontFaceOutsideEngine');
 });
 
 test('a docx build into another directory writes both worker stubs there and none into the package dist', async () => {

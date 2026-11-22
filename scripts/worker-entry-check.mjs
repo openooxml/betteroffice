@@ -20,19 +20,31 @@ async function workerImports(source) {
   return { imports, output, problems: [] };
 }
 
-/** Validates the imports of a published browser worker. */
+/** Validates that a published browser worker is self-contained. */
 export async function validatePublishedWorker(source, sibling = null) {
   const { imports, output, problems } = await workerImports(source);
   if (problems.length) return { problems, target: null };
   for (const { path, kind } of imports) {
     if (kind === 'dynamic-import') problems.push(`dynamically imports ${path}`);
-    else if (kind !== 'import-statement' || (path !== '@betteroffice/fonts/worker' && path !== sibling)) {
+    else if (kind !== 'import-statement' || path !== sibling) {
       problems.push(`imports ${path} (${kind})`);
     }
   }
+  if (!imports.some(({ kind }) => kind === 'dynamic-import')) {
+    for (const [, keyword] of output.matchAll(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|(?<![\w$.])\b(import)\s*\(/gs)) {
+      if (!keyword) continue;
+      problems.push('contains a dynamic import');
+      break;
+    }
+  }
+  for (const [, path] of output.matchAll(/\bnew URL\(["'`]([^"'`]+)["'`],\s*import\.meta\.url\)/g)) {
+    if (!path.startsWith('./generated/') || /fontpack\.wasm|\.(?:zst|[ot]tf|woff2?)$|slices\.json/.test(path)) {
+      problems.push(`resolves ${path} relative to the worker module`);
+    }
+  }
   const statics = imports.filter(({ kind }) => kind === 'import-statement');
-  if (statics.length !== 1) problems.push(`has ${statics.length} static imports; it must have exactly one`);
-  const target = sibling && imports.some(({ path }) => path === sibling) ? sibling : null;
+  if (statics.length !== Number(sibling !== null)) problems.push(`has ${statics.length} static imports; expected ${Number(sibling !== null)}`);
+  const target = sibling && statics.some(({ path }) => path === sibling) ? sibling : null;
   if (sibling && target === null) problems.push('sibling entry must statically import its canonical bundle');
   if (target && output.trim() !== `import${JSON.stringify(target)};`) problems.push('sibling entry must contain only its static import');
   return { problems, target };

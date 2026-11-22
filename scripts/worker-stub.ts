@@ -8,23 +8,17 @@ type WorkerBuildOptions = Pick<BuildOptions, 'plugins' | 'external'> & { browser
 
 const packages = fileURLToPath(new URL('../packages/', import.meta.url));
 const fontPackInstaller = fileURLToPath(new URL('../shared/office-session/workerFontPacks.ts', import.meta.url));
+const fontSources = join(packages, 'fonts/src');
 
 function workerFontsPlugin(): Plugin {
-  const namespace = 'worker-fonts';
   return {
-    name: namespace,
+    name: 'worker-fonts',
     setup(build) {
-      build.onResolve({ filter: /^@betteroffice\/fonts(?:\/progressive|\/worker)?$/ }, ({ path, kind, importer, namespace: from }) => {
-        if (path === '@betteroffice/fonts/worker') {
-          if (from === namespace || importer !== fontPackInstaller) return { path, external: true };
-        } else if (kind !== 'dynamic-import') return;
-        return { path: 'fonts', namespace };
+      build.onResolve({ filter: /^@betteroffice\/fonts(?:\/progressive)?$/ }, () => ({ path: join(fontSources, 'worker.ts') }));
+      build.onResolve({ filter: /^@betteroffice\/fonts\/remote$/ }, () => ({ path: join(fontSources, 'remote.ts') }));
+      build.onResolve({ filter: /^\.\/(?:decodeAssets|assetHref)$/ }, ({ importer }) => {
+        if (dirname(importer) === fontSources) return { path: join(fontSources, 'workerAssets.ts') };
       });
-      build.onLoad({ filter: /.*/, namespace }, () => ({
-        contents: "export * from '@betteroffice/fonts/worker';",
-        resolveDir: dirname(fontPackInstaller),
-        loader: 'js',
-      }));
     },
   };
 }

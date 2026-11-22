@@ -1,4 +1,5 @@
 import type { FontDecoder } from './decode';
+import { absoluteHref } from './assetHref';
 import { chunkEntries, parseSkeleton, textChunks, type SliceSkeleton } from './slices';
 import { sha256 } from './sha256';
 
@@ -103,19 +104,6 @@ export interface SliceSource {
 
 const opened = new WeakMap<ProgressiveFontFace, [SliceRef, SliceIndex, SliceTransport]>();
 const sources = new WeakMap<ProgressiveFontFace, Promise<SliceSource>>();
-
-function parses(href: string, base?: string): URL | undefined {
-  try {
-    return new URL(href, base);
-  } catch {
-    return undefined;
-  }
-}
-
-export function absoluteHref(href: string): string {
-  if (parses(href)) return href;
-  return parses(href, globalThis.location?.href)?.href ?? href;
-}
 
 /** @internal The files of a face `openProgressiveFace` opened with a transport that names URLs. */
 export function sliceSourceOf(face: ProgressiveFontFace): Promise<SliceSource> | undefined {
