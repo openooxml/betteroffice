@@ -583,7 +583,7 @@ test('a worker provider applies its session CDN snapshot before creating loaders
 test('a PPTX worker font provider preserves the implicit CDN marker from session prefetch', async () => {
   const previous = getFontCdnConfiguration();
   const restore = withBrowserFontGlobals(false);
-  const inherited = { baseUrl: 'https://cdn.jsdelivr.net/npm/', timeoutMs: 3000, implicit: true } as const;
+  const inherited = { baseUrl: 'https://cdn.jsdelivr.net/npm/', timeoutMs: 10_000, implicit: true } as const;
   try {
     await commandFontProvider.load(inherited);
     expect(fonts.fontCdnConfiguration()).toEqual(inherited);

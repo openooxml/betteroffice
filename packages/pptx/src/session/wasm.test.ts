@@ -87,7 +87,7 @@ test('PPTX open sends the page default and omits it for a Node host', async () =
         const session = await h.client.openPresentationSession(new Uint8Array(), { wasm: h.module });
         try {
           if (page) expect(input(h.workers[0])).toMatchObject({
-            fontCdn: { baseUrl: 'https://cdn.jsdelivr.net/npm/', timeoutMs: 3000, implicit: true },
+            fontCdn: { baseUrl: 'https://cdn.jsdelivr.net/npm/', implicit: true },
           });
           else expect(input(h.workers[0])).not.toHaveProperty('fontCdn');
         } finally { await session.dispose(); }

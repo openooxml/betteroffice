@@ -86,7 +86,7 @@ for (const { kind } of ENGINES) {
         expect(requests.some((url) => url.endsWith(face.file))).toBe(true);
         expect(canvas.encoded).toBe(0);
       } finally {
-        Reflect.deleteProperty(globalThis, Symbol.for('betteroffice.fonts.cdn-unavailable'));
+        Reflect.deleteProperty(globalThis, Symbol.for('betteroffice.fonts.cdn-warned'));
         restore();
         setFontCdnConfiguration(previous);
       }

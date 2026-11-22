@@ -412,7 +412,7 @@ test('XLSX source and recovery opens send the page default and omit it for a Nod
           const session = await open(port.transport);
           try {
             if (page) expect(port.openedInputs[0]).toMatchObject({
-              fontCdn: { baseUrl: 'https://cdn.jsdelivr.net/npm/', timeoutMs: 3000, implicit: true },
+              fontCdn: { baseUrl: 'https://cdn.jsdelivr.net/npm/', implicit: true },
             });
             else expect(port.openedInputs[0]).not.toHaveProperty('fontCdn');
           } finally { await session.dispose(); }

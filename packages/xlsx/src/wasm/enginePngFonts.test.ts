@@ -37,7 +37,7 @@ async function withoutPacks(run: () => Promise<void>) {
     installed.mockRestore();
     load.mockRestore();
     setFontCdnConfiguration(previous);
-    Reflect.deleteProperty(globalThis, Symbol.for('betteroffice.fonts.cdn-unavailable'));
+    Reflect.deleteProperty(globalThis, Symbol.for('betteroffice.fonts.cdn-warned'));
   }
 }
 
