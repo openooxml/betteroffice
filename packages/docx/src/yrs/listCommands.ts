@@ -66,7 +66,7 @@ export function applyListToggle(
     let attrs: YrsParagraphAttrs;
     if (remove) attrs = listOffAttrs(properties, styleNumbers(paraId, properties));
     else if (paraId === lead) attrs = first = engine.ensureListDefinition(range.story, paraId, kind);
-    else attrs = first && !isOnList(properties) ? first : engine.ensureListDefinition(range.story, paraId, kind, lead);
+    else attrs = first && properties.numPr == null ? first : engine.ensureListDefinition(range.story, paraId, kind, lead);
     engine.setParagraphAttrs(at, attrs, suggesting);
   }
 }
