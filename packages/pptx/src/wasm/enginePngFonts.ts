@@ -167,6 +167,15 @@ function release(exporter: Exporter): void {
   if (exporter.users === 0) exporter.renderer.free();
 }
 
+function exportFontCdnKey(signal?: AbortSignal): Promise<string> {
+  if (!signal) return pngFontCdnCacheKey();
+  signal.throwIfAborted();
+  let abort!: () => void;
+  const cancelled = new Promise<never>((_, reject) => { abort = () => reject(signal.reason); });
+  signal.addEventListener('abort', abort, { once: true });
+  return Promise.race([pngFontCdnCacheKey(), cancelled]).finally(() => signal.removeEventListener('abort', abort));
+}
+
 /**
  * Lays the slide with `slideId` out again in an export renderer holding the faces the presentation registered, any
  * new family in `added`, and the bundled faces the slide asks for, as the native export does, so both measure alike.
@@ -180,7 +189,7 @@ export async function defaultFontLayout(
   slideIndex(document, slideId);
   const known = new Set(measured.map((face) => familyKey(face.family)));
   const supplied = added?.filter((face) => !known.has(familyKey(face.family))) ?? [];
-  const fontCdn = await pngFontCdnCacheKey();
+  const fontCdn = await exportFontCdnKey(signal);
   signal?.throwIfAborted();
   let exporter = supplied.length ? undefined : exporters.get(document);
   if (exporter && (exporter.fontCdn !== fontCdn || !current(exporter, measured))) {
