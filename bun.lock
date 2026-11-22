@@ -202,6 +202,8 @@
         "@betteroffice/docx-react": "workspace:*",
         "@betteroffice/fonts": "workspace:*",
         "@betteroffice/fonts-cjk": "workspace:*",
+        "@betteroffice/fonts-intl": "workspace:*",
+        "@betteroffice/fonts-latin": "workspace:*",
         "@betteroffice/pptx": "workspace:*",
         "@betteroffice/pptx-react": "workspace:*",
         "@betteroffice/xlsx": "workspace:*",
@@ -376,12 +378,10 @@
     "packages/fonts": {
       "name": "@betteroffice/fonts",
       "version": "0.4.2",
-      "dependencies": {
-        "@betteroffice/fonts-latin": "workspace:*",
-      },
       "devDependencies": {
         "@betteroffice/fonts-cjk": "workspace:*",
         "@betteroffice/fonts-intl": "workspace:*",
+        "@betteroffice/fonts-latin": "workspace:*",
         "@types/bun": "^1.0.0",
         "@types/node": "^26.0.0",
         "esbuild": "^0.28.1",
@@ -391,10 +391,12 @@
       "peerDependencies": {
         "@betteroffice/fonts-cjk": "workspace:^0",
         "@betteroffice/fonts-intl": "workspace:^0",
+        "@betteroffice/fonts-latin": "workspace:^0",
       },
       "optionalPeers": [
         "@betteroffice/fonts-cjk",
         "@betteroffice/fonts-intl",
+        "@betteroffice/fonts-latin",
       ],
     },
     "packages/fonts-cjk": {
