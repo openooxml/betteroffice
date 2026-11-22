@@ -122,7 +122,9 @@ function unknownOutcome(seq: number, cause: unknown): CommandOutcomeUnknownError
   const data: Pick<CommandOutcomeUnknownError, 'name' | 'refusal'> = {
     name: COMMAND_OUTCOME_UNKNOWN, refusal: { seq },
   };
-  return Object.assign(new Error(`Command ${seq} has an unknown outcome: ${message}`), data);
+  const error = Object.assign(new Error(`Command ${seq} has an unknown outcome: ${message}`), data);
+  Object.defineProperty(error, 'cause', { value: cause, writable: true, configurable: true });
+  return error;
 }
 
 /** An engine error from a read-only snapshot leaves the document intact; a trap does not. */

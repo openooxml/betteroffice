@@ -581,13 +581,16 @@ impl EditSession {
 
     fn document_mut_unclocked(&self, env: Env) -> Result<DocumentGuard<'_, RefMut<'_, Document>>> {
         enter_object(&self.failure, env)?;
-        let core = self.core.try_borrow_mut().map_err(|_| borrow_error(env))?;
-        let core = RefMut::filter_map(core, Option::as_mut)
-            .map_err(|_| throw_error(&env, "EditSession was freed"))?;
         Ok(DocumentGuard {
-            core,
+            core: self.borrow_document_mut(env)?,
             _delivery: UpdateDelivery(self),
         })
+    }
+
+    fn borrow_document_mut(&self, env: Env) -> Result<RefMut<'_, Document>> {
+        let core = self.core.try_borrow_mut().map_err(|_| borrow_error(env))?;
+        RefMut::filter_map(core, Option::as_mut)
+            .map_err(|_| throw_error(&env, "EditSession was freed"))
     }
 
     fn render_png_target_page(
@@ -1621,8 +1624,9 @@ impl EditSession {
 
     #[napi(catch_unwind, js_name = "clear_update_event_observation")]
     pub fn clear_update_event_observation(&self, env: Env) -> Result<()> {
-        let _call = EngineCall::new(env);
-        self.document_mut(env)?.clear_update_event_observation();
+        let _call = EngineCall::release(env);
+        self.borrow_document_mut(env)?
+            .clear_update_event_observation();
         Ok(())
     }
 
@@ -3289,8 +3293,8 @@ impl EditSession {
 
     #[napi(catch_unwind, js_name = "clear_update_observer")]
     pub fn clear_update_observer(&self, env: Env) -> Result<()> {
-        let _call = EngineCall::new(env);
-        let _core = self.document_mut(env)?;
+        let _call = EngineCall::release(env);
+        let _core = self.borrow_document_mut(env)?;
         self.clear_observer(env)
     }
 
