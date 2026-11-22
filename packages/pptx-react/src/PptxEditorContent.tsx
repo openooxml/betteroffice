@@ -371,6 +371,7 @@ export function PptxEditorContent({
   onSave,
   onSaveRequest,
   readOnly = false,
+  readOnlySelection = true,
   toolbar,
   showToolbar = true,
   shortcuts,
@@ -580,6 +581,14 @@ export function PptxEditorContent({
     setDragPreview(null);
     setTextBoxPreview(null);
   }, [canvasReview.reviewing]);
+
+  const selectable = !readOnly || readOnlySelection;
+  useEffect(() => {
+    if (selectable) return;
+    setSelection(null);
+    setShapeSelection(null);
+    setHoverTarget(null);
+  }, [selectable]);
 
   useEffect(() => {
     if (!readOnly) return;
@@ -2976,8 +2985,8 @@ export function PptxEditorContent({
                               ? 'move'
                               : 'default',
                     }}
-                    onPointerDown={canvasReview.reviewing ? undefined : pointerDown}
-                    onPointerMove={pointerMove}
+                    onPointerDown={canvasReview.reviewing || !selectable ? undefined : pointerDown}
+                    onPointerMove={selectable ? pointerMove : undefined}
                     onPointerUp={pointerUp}
                     onPointerLeave={pointerLeave}
                     onPointerCancel={cancelPointerGesture}

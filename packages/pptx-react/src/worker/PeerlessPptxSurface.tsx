@@ -178,6 +178,7 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
     invalidateCommandFrameCanvas(surface);
   }, [empty]);
   const { toolbar, showToolbar } = props;
+  const selectable = !props.readOnly || props.readOnlySelection !== false;
   const [zoom, setZoom] = useState<number | 'fit'>(() => initialPptxZoom(props.initialZoom));
   const initialZoom = useRef(props.initialZoom);
   initialZoom.current = props.initialZoom;
@@ -260,7 +261,12 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
   }, [presentation]);
   const commands = usePeerlessCommandBinding(presentation, { tool: insertion.tool, setTool: insertion.setTool,
     openPicture, save, focus, i18n: props.i18n, zoom, setZoom, review, proposals, setReview, exportPng });
-  const contextMenu = usePeerlessContextMenu(presentation, commands, stage, canvas, review.diff, focus);
+  useEffect(() => {
+    if (selectable || !presentation?.current || !presentation.store.getSnapshot().selection) return;
+    void presentation.store.dispatch({ kind: 'setSelection', payload: { selection: null,
+      inputTime: performance.now(), undoGroup: 'selection' } }).catch(() => {});
+  }, [selectable, presentation]);
+  const contextMenu = usePeerlessContextMenu(presentation, commands, stage, canvas, review.diff || !selectable, focus);
   const [workspace, available] = useDockArea(Boolean(props.plugins?.length));
   useCommandShortcuts({ commands: pptxCommandController(commands)!, containerRef: editor, editorInput: inputRef,
     suspended: () => review.presenting || Boolean(presentation?.store.getSnapshot().composition),
@@ -339,14 +345,14 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
           if (!isKeyReleasedFromInput(event.nativeEvent)) peerlessHistoryKey(event, presentation.store);
           if (!event.defaultPrevented) navigatePeerlessSlide(event, presentation);
         }}
-        onPointerDown={(event) => { if (!pluginEventStore(event.nativeEvent) && !inPluginChrome(event.target) && !review.diff && !insertion.onPointerDown(event) && !shapes.onPointerDown(event)) selection.onPointerDown(event); }}
+        onPointerDown={(event) => { if (!pluginEventStore(event.nativeEvent) && !inPluginChrome(event.target) && !review.diff && selectable && !insertion.onPointerDown(event) && !shapes.onPointerDown(event)) selection.onPointerDown(event); }}
         onPointerMove={(event) => {
-          if (pluginEventStore(event.nativeEvent) || inPluginChrome(event.target) || review.diff) return;
+          if (pluginEventStore(event.nativeEvent) || inPluginChrome(event.target) || review.diff || !selectable) return;
           const cursor = insertion.tool === 'select' ? shapes.hoverCursor(event) : null;
           if (cursor && canvas.current) canvas.current.style.cursor = cursor;
           if (!insertion.onPointerMove(event) && !shapes.onPointerMove(event)) selection.onPointerMove(event);
         }}
-        onPointerUp={(event) => { if (!pluginEventStore(event.nativeEvent) && !inPluginChrome(event.target) && !review.diff && !insertion.onPointerUp(event) && !shapes.onPointerUp(event)) selection.onPointerUp(event); }}
+        onPointerUp={(event) => { if (!pluginEventStore(event.nativeEvent) && !inPluginChrome(event.target) && !review.diff && selectable && !insertion.onPointerUp(event) && !shapes.onPointerUp(event)) selection.onPointerUp(event); }}
         onPointerCancel={(event) => { if (pluginEventStore(event.nativeEvent) || inPluginChrome(event.target)) return; insertion.onPointerCancel(event); if (!shapes.onPointerCancel(event)) selection.onPointerCancel(event); }}
         onLostPointerCapture={(event) => { if (pluginEventStore(event.nativeEvent) || inPluginChrome(event.target)) return; insertion.onPointerCancel(event); if (!shapes.onLostPointerCapture(event)) selection.onLostPointerCapture(event); }}>
         <div ref={slideFrame} style={styles.slideFrame}>

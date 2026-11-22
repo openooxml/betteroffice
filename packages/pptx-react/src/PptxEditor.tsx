@@ -190,6 +190,8 @@ export interface PptxInThreadEditorProps extends PptxEditorPluginProps {
   onSaveRequest?: () => boolean | void | Promise<boolean | void>;
   /** Blocks user edits; navigation and selection remain available. */
   readOnly?: boolean;
+  /** Whether users can select text and shapes while `readOnly`; defaults to true. */
+  readOnlySelection?: boolean;
   /**
    * Replaces the toolbar: omit it for the default controls, pass `null` for
    * none, or pass chrome composed from the toolbar parts, which also renders
