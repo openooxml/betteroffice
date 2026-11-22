@@ -1,6 +1,7 @@
-import { afterEach, beforeEach, expect, mock, test } from 'bun:test';
+import { afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test';
 import { resolveScriptFallbackFace } from '@betteroffice/fonts';
-import { openSlicedFace } from '@betteroffice/fonts/progressive';
+import { openSlicedFace } from '../../../fonts/src/progressive-entry';
+import { configureFontCdn as configureTestFontCdn } from '../../../fonts/src/fontCdn';
 import { fontAssetResponse, fontRuntimeWithoutPacks, withBrowserFontGlobals } from '../../../../shared/office-session/testing/fontAssets';
 import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import { prepareTextFamilies } from '../render/textFamilies';
@@ -54,46 +55,64 @@ function fakeFace(fail: () => boolean = () => false): SlicedFontFace & { asked: 
   };
 }
 
-test('T12: a failed CDN chunk never becomes a whole face and completeExport strictly loads the whole font', async () => {
+test('T12: a CDN chunk failure cools other chunks and whole-face export until the retry window', async () => {
   const previous = getFontCdnConfiguration();
+  configureTestFontCdn({ baseUrl: false });
   const restore = withBrowserFontGlobals();
   const fetch = globalThis.fetch;
   const sliced = createSlicedFontFaces();
   const load = fontRuntimeWithoutPacks().createFontProvider().resolveScriptFallback('cjk-jp', false, false)!;
+  const now = Date.now();
+  const clock = spyOn(Date, 'now').mockReturnValue(now);
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
   let fail = false;
   const failed: string[] = [];
   globalThis.fetch = (async (input: RequestInfo | URL) => {
     if (fail && String(input).includes('/fonts-cjk@')) {
       failed.push(String(input));
-      return new Response(null, { status: 503 });
+      throw new TypeError('Offline');
     }
     return fontAssetResponse(input);
   }) as typeof fetch;
   try {
     setFontCdnConfiguration(undefined);
     const opened = await openSlicedFace(load.slices!);
-    const text = [...'日本語漢字東京大阪京都'].find((character) =>
-      opened.chunksOf(character).some((chunk) => !opened.loadedChunks().has(chunk)))!;
-    expect(text).toBeDefined();
+    const textByChunk = new Map<number, string>();
+    for (let cp = 0x4e00; cp <= 0x9fff && textByChunk.size < 2; cp += 1) {
+      const text = String.fromCodePoint(cp);
+      const missing = opened.chunksOf(text).filter((chunk) => !opened.loadedChunks().has(chunk));
+      if (missing.length === 1) textByChunk.set(missing[0]!, text);
+    }
+    expect(textByChunk.size).toBe(2);
+    const [text, otherText] = [...textByChunk.values()] as [string, string];
     sliced.add('Noto Sans JP', opened, load);
     fail = true;
     const painted = await sliced.coverage.prepare('Noto Sans JP', text);
+    expect(failed).toHaveLength(1);
+    await expect(sliced.read('Noto Sans JP', text, null)).resolves.toBeUndefined();
+    await expect(sliced.read('Noto Sans JP', otherText, null)).resolves.toBeUndefined();
+    const korean = fontRuntimeWithoutPacks().createFontProvider().resolveScriptFallback('cjk-kr', false, false)!;
+    await expect(openSlicedFace(korean.slices!)).rejects.toThrow('Offline');
     const replaceExportFace = mock(() => {});
     await expect(sliced.completeExport({ replaceExportFace })).rejects.toMatchObject({
-      code: 'font-unavailable', message: expect.stringContaining('HTTP 503'),
+      code: 'font-unavailable', message: expect.stringContaining('Offline'),
     });
     expect(replaceExportFace).not.toHaveBeenCalled();
-    expect(failed.some((url) => url.endsWith(resolveScriptFallbackFace('cjk-jp', false, false)!.file))).toBe(true);
+    expect(failed).toHaveLength(1);
+    expect(failed[0]).not.toEndWith(resolveScriptFallbackFace('cjk-jp', false, false)!.file);
     expect(painted).toBe('Noto Sans JP');
     expect(sliced.loadedWhole('Noto Sans JP')).toBeUndefined();
     fail = false;
+    clock.mockReturnValue(now + 60_000);
     const read = await sliced.read('Noto Sans JP', text, null);
     expect(read?.revision).toBeGreaterThan(1);
     expect(read?.revision).not.toBe(Number.MAX_SAFE_INTEGER);
   } finally {
     sliced.dispose();
     globalThis.fetch = fetch;
-    Reflect.deleteProperty(globalThis, Symbol.for('betteroffice.fonts.cdn-warned'));
+    clock.mockRestore();
+    warn.mockRestore();
+    configureTestFontCdn({ baseUrl: false });
     restore();
     setFontCdnConfiguration(previous);
   }

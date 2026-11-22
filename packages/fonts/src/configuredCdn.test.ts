@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Worker } from 'node:worker_threads';
 import latin from '../../fonts-latin/assets/manifest.json';
 import intl from '../../fonts-intl/assets/manifest.json';
 import cjk from '../../fonts-cjk/assets/manifest.json';
@@ -78,6 +79,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  fonts.configureFontCdn({ baseUrl: false });
   setFontCdnConfiguration(previousConfiguration);
   setWorkerFontAssets(async () => undefined);
   globalThis.fetch = originalFetch;
@@ -434,6 +436,7 @@ const cdnFailureState = [
   Symbol.for('betteroffice.fonts.cdn-unavailable'),
 ];
 const stallMs = 10_000;
+const cooldownMs = 60_000;
 const regularHash = latin.faces.find(({ file }) => file === regular.file)!.sha256;
 const regularUrl = fontCdnAssetUrl(latin, regular.file).href;
 
@@ -469,6 +472,8 @@ function deferred<T>() {
 
 function cdnClock() {
   jest.useFakeTimers();
+  let now = Date.now();
+  const date = spyOn(Date, 'now').mockImplementation(() => now);
   const totalTimeout = spyOn(AbortSignal, 'timeout').mockImplementation((ms) => {
     const controller = new AbortController();
     setTimeout(() => controller.abort(new DOMException('Timed out', 'TimeoutError')), ms);
@@ -477,10 +482,12 @@ function cdnClock() {
   return {
     totalTimeout,
     async advance(ms: number) {
+      now += ms;
       jest.advanceTimersByTime(ms);
       await Bun.sleep(0);
     },
     restore() {
+      date.mockRestore();
       totalTimeout.mockRestore();
       jest.useRealTimers();
     },
@@ -594,7 +601,7 @@ test('a silent page leaves its worker with exactly the CDN sent at open', async 
 });
 
 for (const failure of ['blocked', 'HTTP 404', 'bad hash', 'bad length', 'corrupt compressed bytes'] as const) {
-  test(`implicit ${failure} substitutes two faces, warns once and retries the pack`, async () => {
+  test(`implicit ${failure} substitutes two faces, warns once and cools the failed scope`, async () => {
     const restore = withBrowserFontGlobals();
     const { warning, diagnostics, restore: stopObserving } = observeCdnFailures();
     const requests: string[] = [];
@@ -622,8 +629,9 @@ for (const failure of ['blocked', 'HTTP 404', 'bad hash', 'bad length', 'corrupt
       await expect(fonts.loadBundledFontBytes(regular, undefined, mode)).resolves.toEqual(await base(false, false)!());
       await expect(fonts.loadBundledFontBytes(bold, undefined, mode)).resolves.toEqual(await base(true, false)!());
       await expect(fonts.loadBundledFontBytes(regular, undefined, { ...mode, strict: true })).rejects.toThrow();
-      expect(requests.filter((url) => url === regularUrl).length).toBeGreaterThanOrEqual(2);
-      expect(requests).toContain(fontCdnAssetUrl(latin, bold.file).href);
+      expect(requests).toEqual(failure === 'blocked' ? [regularUrl] : [
+        regularUrl, fontCdnAssetUrl(latin, bold.file).href,
+      ]);
       expect(warning.mock.calls).toHaveLength(1);
       for (const detail of ['cdn.jsdelivr.net', 'install @betteroffice/fonts-latin', 'configureFontCdn({ baseUrl: false })']) {
         expect(warning.mock.calls[0]?.[0]).toContain(detail);
@@ -639,6 +647,116 @@ for (const failure of ['blocked', 'HTTP 404', 'bad hash', 'bad length', 'corrupt
     }
   });
 }
+
+test('concurrent faces and dictionaries share the network failure of their implicit base', async () => {
+  const restore = withBrowserFontGlobals();
+  const observed = observeCdnFailures();
+  const bold = fonts.resolveMetricCompatFace('Calibri', true, false)!;
+  const thai = fonts.resolveScriptFallbackFace('thai', false, false)!;
+  const requests: string[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    requests.push(String(input));
+    throw new TypeError('Offline');
+  }) as typeof fetch;
+  try {
+    const first = await Promise.allSettled([
+      fonts.loadBundledFontBytes(regular, undefined, runtime),
+      fonts.loadBundledFontBytes(bold, undefined, runtime),
+    ]);
+    expect(first.map(({ status }) => status)).toEqual(['rejected', 'rejected']);
+    expect(requests).toHaveLength(1);
+    await expect(fonts.loadBundledFontBytes(thai, undefined, runtime)).rejects.toThrow('Offline');
+    await expect(fonts.loadBundledFontBytes(thai, undefined, runtime)).rejects.toThrow('Offline');
+    expect(requests).toHaveLength(2);
+    expect(requests[1]).toBe(fontCdnAssetUrl(intl, thai.file).href);
+  } finally {
+    observed.restore();
+    restore();
+  }
+});
+
+test('a valid implicit load clears a 404 for a different URL on its base', async () => {
+  const restore = withBrowserFontGlobals();
+  const observed = observeCdnFailures();
+  const other = fonts.resolveMetricCompatFace('Times New Roman', false, false)!;
+  const otherUrl = fontCdnAssetUrl(latin, other.file).href;
+  const requests: string[] = [];
+  let available = false;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    requests.push(String(input));
+    return !available && String(input) === regularUrl
+      ? new Response(null, { status: 404 }) : fontAssetResponse(input);
+  }) as typeof fetch;
+  try {
+    await expect(fonts.loadBundledFontBytes(regular, undefined, runtime)).rejects.toThrow('HTTP 404');
+    available = true;
+    await expect(fonts.loadBundledFontBytes(regular, undefined, runtime)).rejects.toThrow('HTTP 404');
+    expect(requests).toEqual([regularUrl]);
+    await expect(fonts.loadBundledFontBytes(other, undefined, runtime)).resolves.toBeInstanceOf(ArrayBuffer);
+    await expect(fonts.loadBundledFontBytes(regular, undefined, runtime)).resolves.toBeInstanceOf(ArrayBuffer);
+    expect(requests).toEqual([regularUrl, otherUrl, regularUrl]);
+  } finally {
+    observed.restore();
+    restore();
+  }
+});
+
+test('configureFontCdn clears the cooldown and installed fonts remain available while it is active', async () => {
+  const restore = withBrowserFontGlobals();
+  const observed = observeCdnFailures();
+  const requests: string[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    if (!String(input).startsWith(jsDelivr)) return fontAssetResponse(input);
+    requests.push(String(input));
+    throw new TypeError('Offline');
+  }) as typeof fetch;
+  try {
+    await expect(fonts.loadBundledFontBytes(regular, undefined, runtime)).rejects.toThrow('Offline');
+    installed = true;
+    expect(hash(await fonts.loadBundledFontBytes(regular, undefined, runtime))).toBe(regularHash);
+    installed = false;
+    await expect(fonts.loadBundledFontBytes(regular, undefined, runtime)).rejects.toThrow('Offline');
+    expect(requests).toEqual([regularUrl]);
+    expect(observed.warning).toHaveBeenCalledTimes(1);
+
+    fonts.configureFontCdn({ baseUrl: false });
+    setFontCdnConfiguration(undefined);
+    await expect(fonts.loadBundledFontBytes(regular, undefined, runtime)).rejects.toThrow('Offline');
+    expect(requests).toEqual([regularUrl, regularUrl]);
+    expect(observed.warning).toHaveBeenCalledTimes(2);
+  } finally {
+    installed = false;
+    observed.restore();
+    restore();
+  }
+});
+
+test('a worker learns the same base failure independently and cools its next face', async () => {
+  const restore = withBrowserFontGlobals();
+  const observed = observeCdnFailures();
+  const requests: string[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    requests.push(String(input));
+    throw new TypeError('Offline');
+  }) as typeof fetch;
+  const thread = new Worker(new URL('./testing/cdnWorker.ts', import.meta.url));
+  try {
+    await expect(fonts.loadBundledFontBytes(regular, undefined, runtime)).rejects.toThrow('Offline');
+    const result = await new Promise<{ requests: string[]; statuses: string[]; warnings: number }>((resolve, reject) => {
+      thread.once('error', reject);
+      thread.once('message', resolve);
+      thread.postMessage(getFontCdnConfiguration());
+    });
+    expect(result.statuses).toEqual(['rejected', 'rejected', 'rejected']);
+    expect(result.requests).toEqual([regularUrl]);
+    expect(result.warnings).toBe(1);
+    expect(requests).toEqual([regularUrl]);
+  } finally {
+    await thread.terminate();
+    observed.restore();
+    restore();
+  }
+});
 
 test('a corrupt implicit CJK slice with the expected encoded length reports CDN failure', async () => {
   const restore = withBrowserFontGlobals();
@@ -715,7 +833,7 @@ test('T18: implicit CDN completes a stream that keeps making progress past the s
   }
 });
 
-test('T19: a stalled body substitutes once and the next load fetches the real face', async () => {
+test('T19: a stalled body cools the base until the retry window opens', async () => {
   const restore = withBrowserFontGlobals();
   const failure = observeCdnFailures();
   const clock = cdnClock();
@@ -742,11 +860,17 @@ test('T19: a stalled body substitutes once and the next load fetches the real fa
     await clock.advance(1);
     expect(signal.aborted).toBe(true);
     await expect(result).resolves.toEqual(fallback);
+    await clock.advance(cooldownMs - 1);
+    await expect(fonts.loadBundledFontBytes(regular, undefined, mode)).resolves.toEqual(fallback);
     expect(requests).toBe(1);
+    await clock.advance(1);
     expect(hash(await fonts.loadBundledFontBytes(regular, undefined, mode))).toBe(regularHash);
     expect(requests).toBe(2);
     expect(failure.warning).toHaveBeenCalledTimes(1);
-    expect(failure.diagnostics).toEqual([expect.objectContaining({ pack: 'latin', reason: 'cdn-unavailable' })]);
+    expect(failure.diagnostics).toEqual([
+      expect.objectContaining({ pack: 'latin', reason: 'cdn-unavailable' }),
+      expect.objectContaining({ pack: 'latin', reason: 'cdn-unavailable' }),
+    ]);
   } finally {
     clock.restore();
     failure.restore();

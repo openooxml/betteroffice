@@ -4,6 +4,7 @@ import * as fonts from '@betteroffice/fonts';
 import { fontAssetResponse, fontRuntimeWithoutPacks, withBrowserFontGlobals } from '../../../shared/office-session/testing/fontAssets';
 import type { FontDecoder } from '../../../shared/office-session/fontDecoder';
 import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../shared/office-session/fontCdn';
+import { configureFontCdn as configureTestFontCdn } from '../../fonts/src/fontCdn';
 import { createSessionHost } from '../../../shared/office-session/host';
 import { createInProcessPair } from '../../../shared/office-session/testing/inProcessTransport';
 import type { DisplayList, TextCmd } from '@betteroffice/xlsx';
@@ -728,30 +729,43 @@ test('an already absent editor face is tried again after changing the CDN', asyn
   } finally { painter.dispose(); setFontCdnConfiguration(previous); }
 });
 
-test('T14: repaints keep an implicit CDN failure settled until a new painter opens', async () => {
+test('T14: repaint, editing another face and reopening share the CDN cooldown', async () => {
   const { added } = browser();
   const previous = getFontCdnConfiguration();
+  configureTestFontCdn({ baseUrl: false });
   const restore = withBrowserFontGlobals();
   const runtime = fontRuntimeWithoutPacks();
   const load = spyOn(xlsxDefaultFontManager, 'load').mockResolvedValue({ ...fonts, ...runtime });
   const warn = spyOn(console, 'warn').mockImplementation(() => {});
-  let attempts = 0;
-  const fetch = spyOn(globalThis, 'fetch').mockImplementation((input) =>
-    String(input).includes('cdn.jsdelivr.net') && ++attempts === 1
-      ? Promise.resolve(new Response(null, { status: 503 })) : fontAssetResponse(input));
+  const now = Date.now();
+  const clock = spyOn(Date, 'now').mockReturnValue(now);
+  const requests: string[] = [];
+  let online = false;
+  const fetch = spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    if (String(input).includes('cdn.jsdelivr.net')) {
+      requests.push(String(input));
+      if (!online) throw new TypeError('Offline');
+    }
+    return fontAssetResponse(input);
+  });
   const first = createDefaultFontPainter(null, () => {});
   const second = createDefaultFontPainter(null, () => {});
   const frame = display({ family: 'Calibri' });
+  const edited = display({ family: 'Calibri' }, { family: 'Times New Roman' });
   try {
     setFontCdnConfiguration(undefined);
     await first.load(frame);
     expect(added).toHaveLength(0);
-    await first.load(frame);
-    expect(attempts).toBe(1);
+    expect(requests).toHaveLength(1);
     expect(first.paint(frame, () => {})).toBe(true);
-    first.dispose();
+    await first.load(edited);
     await second.load(frame);
-    expect(attempts).toBe(2);
+    expect(requests).toHaveLength(1);
+
+    online = true;
+    clock.mockReturnValue(now + 60_000);
+    await first.load(frame);
+    expect(requests).toHaveLength(2);
     expect(added.map(({ family }) => family)).toEqual(['Calibri']);
   } finally {
     first.dispose();
@@ -759,7 +773,8 @@ test('T14: repaints keep an implicit CDN failure settled until a new painter ope
     load.mockRestore();
     fetch.mockRestore();
     warn.mockRestore();
-    Reflect.deleteProperty(globalThis, Symbol.for('betteroffice.fonts.cdn-warned'));
+    clock.mockRestore();
+    configureTestFontCdn({ baseUrl: false });
     restore();
     setFontCdnConfiguration(previous);
   }
