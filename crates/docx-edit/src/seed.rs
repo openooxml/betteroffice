@@ -4778,12 +4778,13 @@ fn floating_run_content(content: &Value) -> bool {
     match string(field(Some(content), "type")) {
         Some("drawing") => {
             let wrap = field(field(Some(content), "image"), "wrap");
-            string(field(wrap, "type")).is_some_and(|kind| kind != "inline")
+            string(field(wrap, "type")).is_some_and(|kind| !crate::bridge::inline_wrap(Some(kind)))
         }
         Some("shape") => {
             let shape = field(Some(content), "shape");
-            field(shape, "wrap").is_some_and(|wrap| !wrap.is_null())
-                || field(shape, "position").is_some_and(|position| !position.is_null())
+            field(shape, "wrap").is_some_and(|wrap| {
+                !wrap.is_null() && !crate::bridge::inline_wrap(string(field(Some(wrap), "type")))
+            }) || field(shape, "position").is_some_and(|position| !position.is_null())
         }
         _ => false,
     }
