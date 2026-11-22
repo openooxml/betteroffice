@@ -1269,19 +1269,27 @@ where
         };
         let text_width = (cell_box.w - pad_width - left_indent - right_indent).max(0.0);
         let print_dpi = print.map(|(m, _)| f64::from(m.dpi));
-        let run_size = (!runs.is_empty())
-            .then(|| text_runs::largest_size(size, &text, &runs))
-            .filter(|&run_size| {
+        let run_sizes = (!runs.is_empty()).then(|| text_runs::size_range(size, &text, &runs));
+        let variable_wrap = wraps
+            && run_sizes.is_some_and(|(smallest, largest)| smallest < largest)
+            && size.is_finite()
+            && size > 0.0;
+        let run_size = run_sizes.and_then(|(_, largest)| {
+            if variable_wrap {
+                Some(size)
+            } else {
                 rich_runs_have_room(
                     &text,
                     text_width,
                     cell_box.whole_h,
                     size,
-                    run_size,
+                    largest,
                     wraps,
                     print.map(|(m, _)| m),
                 )
-            });
+                .then_some(largest)
+            }
+        });
         let (runs, line_size) = match run_size {
             Some(run_size) => (runs, run_size),
             None => (Vec::new(), size),
@@ -1361,12 +1369,19 @@ where
                     .all(|part| part.kind == xlsx_model::numfmt::FormatPartKind::Padding)
             }))
         .then(|| {
-            let line_height = wrapped_line_height(line_size, print_dpi);
+            let mut line_height = wrapped_line_height(line_size, print_dpi);
+            if variable_wrap && line_height == 0.0 {
+                line_height = size * geometry::PX_PER_PT as f32;
+            }
             TextWrap {
                 width: text_width,
                 line_height,
                 valign: resolve_rotation_valign(valign),
-                max_lines: wrap::max_wrapped_lines(cell_box.whole_h + 1.0, line_height, line_size),
+                max_lines: if variable_wrap {
+                    None
+                } else {
+                    wrap::max_wrapped_lines(cell_box.whole_h + 1.0, line_height, line_size)
+                },
             }
         });
         let number_format = number_format.filter(|_| wrap.is_none());

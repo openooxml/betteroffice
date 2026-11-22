@@ -172,8 +172,7 @@ pub fn has_right_to_left(text: &str) -> bool {
 /// `text`, colours resolved by `styles` as the cell font's is. A hyperlink
 /// keeps its colour and underline over the whole cell, so the runs of a
 /// hyperlink cell carry neither. A run keeps its size only when it is a
-/// positive finite number of points in the command's precision, the sizes row
-/// autofit accepts of a cell font.
+/// valid Excel font size in points.
 pub(crate) fn cell_runs(
     text: &str,
     runs: &[RichRun],
@@ -200,8 +199,8 @@ pub(crate) fn cell_runs(
                     .map(Arc::from),
                 font_size: style
                     .size_pt
-                    .map(|size| size as f32)
-                    .filter(|size| size.is_finite() && *size > 0.0),
+                    .filter(|size| (1.0..=409.0).contains(size))
+                    .map(|size| size as f32),
                 bold: style.bold,
                 italic: style.italic,
                 underline: underline.map(|kind| kind != RunUnderline::None),
@@ -223,13 +222,12 @@ pub(crate) fn cell_runs(
         .collect()
 }
 
-/// The largest size, in points, any of `text` paints at: a run's own or, for
-/// text a run without a size or no run covers, `size`.
-pub(crate) fn largest_size(size: f32, text: &str, runs: &[TextRun]) -> f32 {
+/// The smallest and largest sizes in the text, including any base-sized spans.
+pub(crate) fn size_range(size: f32, text: &str, runs: &[TextRun]) -> (f32, f32) {
     let units = text.encode_utf16().count() as u32;
     let mut covered = 0;
     let mut cursor = 0;
-    let mut largest = None::<f32>;
+    let mut range = None::<(f32, f32)>;
     for run in runs {
         let start = run.start.max(cursor);
         let end = run.end.min(units);
@@ -239,12 +237,16 @@ pub(crate) fn largest_size(size: f32, text: &str, runs: &[TextRun]) -> f32 {
         covered += end - start;
         cursor = end;
         let own = run.font_size.unwrap_or(size);
-        largest = Some(largest.map_or(own, |largest| largest.max(own)));
+        range = Some(range.map_or((own, own), |(smallest, largest)| {
+            (smallest.min(own), largest.max(own))
+        }));
     }
+    let (smallest, largest) = range.unwrap_or((size, size));
     if covered < units {
-        largest = Some(largest.map_or(size, |largest| largest.max(size)));
+        (smallest.min(size), largest.max(size))
+    } else {
+        (smallest, largest)
     }
-    largest.unwrap_or(size)
 }
 
 /// UTF-8 byte offsets of one text as UTF-16 code units, read forward from
