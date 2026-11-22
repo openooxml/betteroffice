@@ -21,8 +21,7 @@ const MAX_SAFE_DRAWING_NUMBER: f64 = 1_000_000_000_000.0;
 type BookmarkIndex = HashMap<*const XmlElement, bool>;
 
 struct Scope {
-    root: *const XmlElement,
-    index: Option<BookmarkIndex>,
+    index: BookmarkIndex,
 }
 
 thread_local! {
@@ -40,8 +39,7 @@ impl<'a> BookmarkScope<'a> {
                     return Self(None);
                 }
                 *scope = Some(Scope {
-                    root: from_ref(root),
-                    index: None,
+                    index: index_bookmark_boundaries(root),
                 });
                 Self(Some(root))
             })
@@ -311,15 +309,8 @@ pub(crate) fn contains_text_box(element: &XmlElement) -> bool {
 pub(crate) fn has_bookmarked_text_box(element: &XmlElement) -> bool {
     SCOPE
         .try_with(|slot| {
-            let mut scope = slot.borrow_mut();
-            let index = scope.as_mut().map(|scope| {
-                let root = scope.root;
-                &*scope.index.get_or_insert_with(|| {
-                    // SAFETY: The owning guard borrows the root until it clears the slot.
-                    index_bookmark_boundaries(unsafe { &*root })
-                })
-            });
-            has_block_bookmarks(element, false, index)
+            let scope = slot.borrow();
+            has_block_bookmarks(element, false, scope.as_ref().map(|scope| &scope.index))
         })
         .unwrap_or_else(|_| has_block_bookmarks(element, false, None))
 }
@@ -627,11 +618,7 @@ mod tests {
             SCOPE.with(|slot| {
                 let scope = slot.borrow();
                 let scope = scope.as_ref().unwrap();
-                assert_eq!(scope.root, from_ref(&paragraph));
-                assert_eq!(
-                    scope.index.as_ref().unwrap().get(&from_ref(pict)),
-                    Some(&bookmarked)
-                );
+                assert_eq!(scope.index.get(&from_ref(pict)), Some(&bookmarked));
             });
         }
     }

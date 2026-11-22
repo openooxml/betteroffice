@@ -1,7 +1,8 @@
 use docx_parse::serializer::{S13SaveRequest, write_docx_s13};
 use docx_parse::{
     HexIdAllocator, InlineNode, ParagraphContent, ParseBudget, ParseLimits, RunContent,
-    S9ParseOptions, XmlDocument, XmlElement, XmlNode, parse_docx_s9_wire, parse_paragraph, parse_xml,
+    S9ParseOptions, XmlDocument, XmlElement, XmlNode, parse_docx_s9_wire, parse_paragraph,
+    parse_xml,
 };
 use serde_json::{Value, json};
 
@@ -132,7 +133,14 @@ fn public_paragraph_parser_keeps_bookmarks_added_to_a_text_box() {
     };
     let original = parse(&edited);
     let mut boxed = &mut edited;
-    for name in ["w:r", "w:pict", "v:shape", "v:textbox", "w:txbxContent", "w:p"] {
+    for name in [
+        "w:r",
+        "w:pict",
+        "v:shape",
+        "v:textbox",
+        "w:txbxContent",
+        "w:p",
+    ] {
         boxed = boxed
             .children
             .iter_mut()
