@@ -1,9 +1,10 @@
-import { useContext } from 'react';
+import { Fragment, useContext } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import { PptxCommandContext } from '../commands/PptxCommandProvider';
 import { useTranslation } from '../i18n';
 import { PptxPluginToolbar } from '../plugins/PptxPluginToolbar';
-import { EditorToolbarContext, ToolbarModeContext } from './EditorToolbarContext';
+import type { PptxCommandId } from '../commands/types';
+import { EditorToolbarContext, HiddenToolbarCommandsContext, ToolbarModeContext } from './EditorToolbarContext';
 import { useLegacyToolbarStore } from './toolbar/legacyCommands';
 import { ShapeToolMenu, ToolbarCommand, ToolbarCommandButton } from './toolbar/ToolbarCommand';
 import { LegacyToolbarContent, ToolbarRail } from './toolbar/ToolbarOverflow';
@@ -126,61 +127,69 @@ export function rejectLegacyState(props: object, component: string): void {
   }
 }
 
-/** The default arrangement of built-in controls. */
+type DefaultControl = readonly [PptxCommandId, ReactNode];
+type DefaultGroup = readonly [label: string, controls: readonly DefaultControl[]];
+
+/** The default arrangement of built-in controls, less any the editor hides. */
 function DefaultToolbarItems() {
   const { t } = useTranslation();
+  const hidden = useContext(HiddenToolbarCommandsContext);
+  const sections: readonly (readonly DefaultGroup[])[] = [
+    [[t('toolbar.groups.history'), [
+      ['undo', <ToolbarCommandButton key="undo" id="undo" />],
+      ['redo', <ToolbarCommandButton key="redo" id="redo" />],
+    ]]],
+    [
+      [t('toolbar.groups.file'), [
+        ['save', <ToolbarCommandButton key="save" id="save" />],
+        ['exportPng', <ToolbarCommandButton key="exportPng" id="exportPng" />],
+      ]],
+      [t('toolbar.groups.slides'), [['insertSlide', <ToolbarCommand key="insertSlide" id="insertSlide" />]]],
+    ],
+    [[t('toolbar.groups.zoom'), [['zoom', <ToolbarCommand key="zoom" id="zoom" />]]]],
+    [[t('toolbar.groups.tools'), [
+      ['tool', <ToolbarCommandButton key="select" id="tool" args={{ value: 'select' }} />],
+      ['tool', <ToolbarCommandButton key="textBox" id="tool" args={{ value: 'textBox' }} />],
+      ['insertImage', <ToolbarCommandButton key="insertImage" id="insertImage" />],
+      ['tool', <ShapeToolMenu key="shape" />],
+    ]]],
+    [[t('toolbar.groups.font'), [
+      ['fontFamily', <ToolbarCommand key="fontFamily" id="fontFamily" />],
+      ['fontSizeStep', <ToolbarCommandButton key="decrease" id="fontSizeStep" args={{ direction: 'decrease' }} />],
+      ['fontSize', <ToolbarCommand key="fontSize" id="fontSize" />],
+      ['fontSizeStep', <ToolbarCommandButton key="increase" id="fontSizeStep" args={{ direction: 'increase' }} />],
+    ]]],
+    [[t('toolbar.groups.text'), [
+      ['bold', <ToolbarCommandButton key="bold" id="bold" />],
+      ['italic', <ToolbarCommandButton key="italic" id="italic" />],
+      ['underline', <ToolbarCommandButton key="underline" id="underline" />],
+      ['strikethrough', <ToolbarCommandButton key="strikethrough" id="strikethrough" />],
+      ['textColor', <ToolbarCommand key="textColor" id="textColor" />],
+    ]]],
+    [[t('toolbar.groups.alignment'), [['alignment', <ToolbarCommand key="alignment" id="alignment" />]]]],
+    [[t('toolbar.groups.shape'), [
+      ['shapeFill', <ToolbarCommand key="shapeFill" id="shapeFill" />],
+      ['shapeStrokeColor', <ToolbarCommand key="shapeStrokeColor" id="shapeStrokeColor" />],
+      ['shapeStrokeWidth', <ToolbarCommand key="shapeStrokeWidth" id="shapeStrokeWidth" />],
+      ['shapeAdjustment', <ToolbarCommand key="shapeAdjustment" id="shapeAdjustment" />],
+      ['zOrder', <ToolbarCommand key="zOrder" id="zOrder" />],
+    ]]],
+  ];
+  const visible = sections
+    .map((groups) => groups
+      .map(([label, controls]) => [label, controls.filter(([id]) => !hidden.has(id))] as const)
+      .filter(([, controls]) => controls.length > 0))
+    .filter((groups) => groups.length > 0);
   return (
     <>
-      <ToolbarGroup label={t('toolbar.groups.history')}>
-        <ToolbarCommandButton id="undo" />
-        <ToolbarCommandButton id="redo" />
-      </ToolbarGroup>
-      <ToolbarSeparator />
-      <ToolbarGroup label={t('toolbar.groups.file')}>
-        <ToolbarCommandButton id="save" />
-        <ToolbarCommandButton id="exportPng" />
-      </ToolbarGroup>
-      <ToolbarGroup label={t('toolbar.groups.slides')}>
-        <ToolbarCommand id="insertSlide" />
-      </ToolbarGroup>
-      <ToolbarSeparator />
-      <ToolbarGroup label={t('toolbar.groups.zoom')}>
-        <ToolbarCommand id="zoom" />
-      </ToolbarGroup>
-      <ToolbarSeparator />
-      <ToolbarGroup label={t('toolbar.groups.tools')}>
-        <ToolbarCommandButton id="tool" args={{ value: 'select' }} />
-        <ToolbarCommandButton id="tool" args={{ value: 'textBox' }} />
-        <ToolbarCommandButton id="insertImage" />
-        <ShapeToolMenu />
-      </ToolbarGroup>
-      <ToolbarSeparator />
-      <ToolbarGroup label={t('toolbar.groups.font')}>
-        <ToolbarCommand id="fontFamily" />
-        <ToolbarCommandButton id="fontSizeStep" args={{ direction: 'decrease' }} />
-        <ToolbarCommand id="fontSize" />
-        <ToolbarCommandButton id="fontSizeStep" args={{ direction: 'increase' }} />
-      </ToolbarGroup>
-      <ToolbarSeparator />
-      <ToolbarGroup label={t('toolbar.groups.text')}>
-        <ToolbarCommandButton id="bold" />
-        <ToolbarCommandButton id="italic" />
-        <ToolbarCommandButton id="underline" />
-        <ToolbarCommandButton id="strikethrough" />
-        <ToolbarCommand id="textColor" />
-      </ToolbarGroup>
-      <ToolbarSeparator />
-      <ToolbarGroup label={t('toolbar.groups.alignment')}>
-        <ToolbarCommand id="alignment" />
-      </ToolbarGroup>
-      <ToolbarSeparator />
-      <ToolbarGroup label={t('toolbar.groups.shape')}>
-        <ToolbarCommand id="shapeFill" />
-        <ToolbarCommand id="shapeStrokeColor" />
-        <ToolbarCommand id="shapeStrokeWidth" />
-        <ToolbarCommand id="shapeAdjustment" />
-        <ToolbarCommand id="zOrder" />
-      </ToolbarGroup>
+      {visible.map((groups, index) => (
+        <Fragment key={groups[0]![0]}>
+          {index > 0 && <ToolbarSeparator />}
+          {groups.map(([label, controls]) => (
+            <ToolbarGroup key={label} label={label}>{controls.map(([, control]) => control)}</ToolbarGroup>
+          ))}
+        </Fragment>
+      ))}
       <PptxPluginToolbar />
     </>
   );

@@ -32,7 +32,7 @@ import type {
 import { EditorToolbar } from './components/EditorToolbar';
 import { PresentButton } from './components/PresentButton';
 import { ProposalsButton } from './components/ProposalsButton';
-import { EditorChromeContext } from './components/EditorToolbarContext';
+import { EditorChromeContext, HiddenToolbarCommandsContext, useHiddenToolbarCommands } from './components/EditorToolbarContext';
 import type {
   PptxEditorTool,
   PptxShapePreset,
@@ -373,6 +373,7 @@ export function PptxEditorContent({
   readOnly = false,
   toolbar,
   showToolbar = true,
+  hiddenToolbarCommands,
   shortcuts,
   onShortcutIssue,
   i18n,
@@ -2716,6 +2717,7 @@ export function PptxEditorContent({
         ? 'loading'
         : 'empty';
   const proposalsAvailable = Boolean((!backend || worker?.hydrated) && handleRef.current?.isProposalsAvailable());
+  const hiddenCommands = useHiddenToolbarCommands(hiddenToolbarCommands);
   const liveGate = usePptxCommandBinding(commands, {
     handle: handleRef.current,
     handleRef,
@@ -2800,16 +2802,18 @@ export function PptxEditorContent({
     !showToolbar || toolbar === null ? null : (
       <div style={styles.toolbarShell}>
         <EditorChromeContext.Provider value>
-          {toolbar !== undefined ? (
-            <div style={styles.toolbar}>{toolbar}</div>
-          ) : !readOnly ? (
-            <>
-              <EditorToolbar mode="commands" style={styles.toolbar} />
-              {proposalsAvailable && (
-                <ProposalsButton buttonRef={proposalButtonRef} count={proposals.length} />
-              )}
-            </>
-          ) : null}
+          <HiddenToolbarCommandsContext.Provider value={hiddenCommands}>
+            {toolbar !== undefined ? (
+              <div style={styles.toolbar}>{toolbar}</div>
+            ) : !readOnly ? (
+              <>
+                <EditorToolbar mode="commands" style={styles.toolbar} />
+                {proposalsAvailable && !hiddenCommands.has('proposalsPanel') && (
+                  <ProposalsButton buttonRef={proposalButtonRef} count={proposals.length} />
+                )}
+              </>
+            ) : null}
+          </HiddenToolbarCommandsContext.Provider>
         </EditorChromeContext.Provider>
         {remotePeers.length > 0 ? (
           <div style={styles.presenceStrip} role="list" aria-label={t('presence.label')}>
@@ -2839,7 +2843,7 @@ export function PptxEditorContent({
             ) : null}
           </div>
         ) : null}
-        {toolbar === undefined && <PresentButton />}
+        {toolbar === undefined && !hiddenCommands.has('slideshow') && <PresentButton />}
       </div>
     );
 
