@@ -4,7 +4,7 @@
 //! that reserialization carries just the subset `read` models.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io;
 use std::iter::Peekable;
 use std::ops::Range;
@@ -500,181 +500,12 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
     edits: SaveEdits,
     active_sheet: SheetId,
 ) -> Result<SerializedParts<'p>, ParseError> {
-    serialize_workbook_with_package_and_open_calculation(
-        wb,
-        package,
-        origins,
-        shared_string_cells,
-        sheet_axes,
-        edits,
-        active_sheet,
-        false,
-    )
-}
-
-const SOURCE_RANGE_PROBE_LIMIT: u64 = 1_000_000;
-
-fn merge_source_caches(
-    wb: &Workbook,
-    package: &PreservedPackage,
-    origins: &[Option<usize>],
-) -> Workbook {
-    let mut merged = wb.clone();
-    for (sheet, origin) in merged.sheets.iter_mut().zip(origins) {
-        let Some((source, preserved)) = origin.and_then(|index| {
-            package
-                .original_workbook
-                .sheets
-                .get(index)
-                .zip(package.sheets.get(index))
-        }) else {
-            continue;
-        };
-        let facts = &preserved.cell_facts;
-        let mut followers = BTreeSet::new();
-        for (at, source_cell) in source.iter_cells() {
-            match sheet.cell(at) {
-                None => sheet.set_cell(at, source_cell.clone()),
-                Some(calculated) if calculated != source_cell => {
-                    if !facts.can_fill_source_cache(at, Some(source_cell))
-                        || !has_calculated_cache(&calculated.value)
-                    {
-                        sheet.set_cell(at, source_cell.clone());
-                    } else {
-                        if source_cell
-                            .formula
-                            .as_deref()
-                            .is_none_or(|formula| formula.trim().is_empty())
-                        {
-                            followers.insert((at.row, at.col));
-                        }
-                        if calculated.formula != source_cell.formula
-                            || calculated.style != source_cell.style
-                        {
-                            let mut cell = source_cell.clone();
-                            cell.value = calculated.value.clone();
-                            sheet.set_cell(at, cell);
-                        }
-                    }
-                }
-                Some(_) => {}
-            }
-        }
-        let mut source_cells = source.iter_cells().peekable();
-        let extra_cells = sheet
-            .iter_cells()
-            .filter_map(|(at, _)| {
-                let key = (at.row, at.col);
-                while source_cells
-                    .peek()
-                    .is_some_and(|(at, _)| (at.row, at.col) < key)
-                {
-                    source_cells.next();
-                }
-                source_cells
-                    .next_if(|(at, _)| (at.row, at.col) == key)
-                    .is_none()
-                    .then_some(at)
-            })
-            .collect::<Vec<_>>();
-        for at in extra_cells {
-            sheet.set_cell(at, Cell::default());
-        }
-        let source_ranges = source
-            .array_formulas()
-            .map(|(_, range)| range)
-            .chain(facts.additional_formula_ranges.iter().copied());
-        let mut covered = Vec::new();
-        let mut probes = 0;
-        for range in source_ranges {
-            if followers.is_empty() {
-                break;
-            }
-            if !remove_covered_followers(&mut followers, range, &mut covered, &mut probes) {
-                followers.extend(covered);
-                break;
-            }
-        }
-        xlsx_model::open_timing! {
-            xlsx_model::open_timing::count("save_source_range_probes", probes);
-        }
-        for (row, col) in followers {
-            let at = CellRef::new(row, col);
-            sheet.set_cell(at, source.cell(at).cloned().unwrap_or_default());
-        }
-        let extra_anchors = sheet
-            .array_formulas()
-            .map(|(at, _)| at)
-            .filter(|&at| source.array_formula(at).is_none())
-            .collect::<Vec<_>>();
-        for at in extra_anchors {
-            sheet.clear_array_formula(at);
-        }
-        for (at, range) in source.array_formulas() {
-            sheet.set_array_formula(at, range);
-        }
-    }
-    merged
-}
-
-fn has_calculated_cache(value: &CellValue) -> bool {
-    match value {
-        CellValue::Empty => false,
-        CellValue::Text { value } => !value.is_empty(),
-        _ => true,
-    }
-}
-
-fn remove_covered_followers(
-    followers: &mut BTreeSet<(RowId, ColId)>,
-    range: CellRange,
-    covered: &mut Vec<(RowId, ColId)>,
-    probes: &mut u64,
-) -> bool {
-    let mut start = (range.start.row, range.start.col);
-    let end = (range.end.row, range.end.col);
-    while start <= end && !followers.is_empty() {
-        if *probes == SOURCE_RANGE_PROBE_LIMIT {
-            return false;
-        }
-        *probes += 1;
-        let Some(&(row, col)) = followers.range(start..=end).next() else {
-            break;
-        };
-        if col < range.start.col {
-            start = (row, range.start.col);
-        } else if col > range.end.col {
-            start = (row + 1, range.start.col);
-        } else {
-            start = (row, col);
-            followers.remove(&start);
-            covered.push(start);
-        }
-    }
-    true
-}
-
-#[doc(hidden)]
-#[allow(clippy::too_many_arguments)]
-pub fn serialize_workbook_with_package_and_open_calculation<'p>(
-    wb: &Workbook,
-    package: &'p PreservedPackage,
-    origins: &[Option<usize>],
-    shared_string_cells: &[SharedStringCells],
-    sheet_axes: &[Option<SheetAxes>],
-    mut edits: SaveEdits,
-    active_sheet: SheetId,
-    preserve_source_caches: bool,
-) -> Result<SerializedParts<'p>, ParseError> {
     validate_indexed_colors(&wb.styles)?;
     if origins.len() != wb.sheets.len() || shared_string_cells.len() != wb.sheets.len() {
         return Err(ParseError::Malformed(
             "sheet origin count does not match workbook".to_owned(),
         ));
     }
-    let merged = preserve_source_caches.then(|| merge_source_caches(wb, package, origins));
-    let wb = merged.as_ref().unwrap_or(wb);
-    edits.changed |= preserve_source_caches && wb.sheets != package.original_workbook.sheets;
     let edited = edits.changed;
     let claimed = claimed_origins(package, origins);
     let view_plan = views::ViewPlan::new(package, &claimed, active_sheet)?;
@@ -809,14 +640,7 @@ pub fn serialize_workbook_with_package_and_open_calculation<'p>(
             parts.remove(&relationship_part_path(&calc_chain.path));
         }
     }
-    let chart_refreshes = patch_chart_parts(
-        wb,
-        package,
-        origins,
-        sheet_axes,
-        &mut parts,
-        !preserve_source_caches,
-    )?;
+    let chart_refreshes = patch_chart_parts(wb, package, origins, sheet_axes, &mut parts)?;
 
     let shared_strings_stable = wb.shared_strings == package.original_workbook.shared_strings;
     let style_plan = style_derivation::StylePlan::new(wb, package, origins, sheet_axes)?;
@@ -911,7 +735,6 @@ pub fn serialize_workbook_with_package_and_open_calculation<'p>(
                     &style_match,
                     index,
                     &cf_plan,
-                    preserve_source_caches,
                 )?
             }
             Some(_) => continue,
@@ -1070,7 +893,6 @@ fn patch_chart_parts(
     origins: &[Option<usize>],
     sheet_axes: &[Option<SheetAxes>],
     parts: &mut PartStore<'_>,
-    refresh_caches: bool,
 ) -> Result<Vec<(String, Vec<u8>)>, ParseError> {
     if let Some((drawing, _, first, second)) = crate::chart::conflicting_drawing_anchor(wb) {
         return Err(conflicting_shared_part(drawing, first, second));
@@ -1128,9 +950,6 @@ fn patch_chart_parts(
         let moved = claims.iter().any(|claim| {
             claim.refs != claim.original_refs.as_ref() || claim.chart.raw_xml.is_some()
         });
-        if !moved && !refresh_caches {
-            continue;
-        }
         let Some(source) = package.part_bytes(path) else {
             if moved {
                 return Err(missing_part(path));
@@ -1156,9 +975,8 @@ fn patch_chart_parts(
         } else {
             source.to_vec()
         };
-        if refresh_caches
-            && let Some(bytes) =
-                refreshed_chart_bytes(&rewritten, &claims, wb, &package.original_workbook)
+        if let Some(bytes) =
+            refreshed_chart_bytes(&rewritten, &claims, wb, &package.original_workbook)
             && bytes != rewritten
         {
             refreshes.push((path.to_owned(), bytes));
@@ -3338,7 +3156,6 @@ fn patched_grid(
     shared_string_plan: Option<&SharedStringPlan>,
     styles: &StyleMatch<'_>,
     names: FormulaNames<'_>,
-    preserve_source_caches: bool,
 ) -> Result<(Option<Vec<u8>>, Vec<u8>), ParseError> {
     let mut sst_index: HashMap<&str, usize> = HashMap::with_capacity(wb.shared_strings.len());
     if shared_string_plan.is_none() {
@@ -3357,7 +3174,6 @@ fn patched_grid(
         plan: shared_string_plan,
         styles,
         names,
-        preserve_source_caches,
     };
     let columns = patch
         .cols(
@@ -3388,10 +3204,6 @@ fn patched_grid(
     };
     let sheet_data = match sheet_data {
         Some(sheet_data) => sheet_data,
-        None if preserve_source_caches => source
-            .template
-            .child("sheetData")
-            .map_or_else(|| b"<sheetData/>".to_vec(), |child| child.bytes.clone()),
         None => {
             if let Some(child) = source.template.child("sheetData")
                 && let Some(loss) = sheet_data_regeneration_loss(&child.bytes)
@@ -3435,7 +3247,6 @@ fn worksheet_xml_with_template(
     styles: &StyleMatch<'_>,
     sheet_index: usize,
     cf_plan: &CfPlan,
-    preserve_source_caches: bool,
 ) -> Result<WorksheetOutput, ParseError> {
     let defined = DefinedFunctionNames::new(&wb.defined_names);
     let names = defined.visible_from(Some(SheetId(sheet_index as u32)));
@@ -3466,7 +3277,6 @@ fn worksheet_xml_with_template(
             shared_string_plan,
             styles,
             names,
-            preserve_source_caches,
         )?),
         _ => None,
     };

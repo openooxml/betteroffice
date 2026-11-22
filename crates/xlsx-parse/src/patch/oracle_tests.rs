@@ -109,7 +109,6 @@ impl Case {
             plan: plan.as_ref(),
             styles: &styles,
             names: FormulaNames::default(),
-            preserve_source_caches: false,
         })
     }
 

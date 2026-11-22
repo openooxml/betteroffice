@@ -251,7 +251,6 @@ fn patch_errors_keep_the_sheet_name_and_original_error() {
             plan: None,
             styles: &styles,
             names: FormulaNames::default(),
-            preserve_source_caches: false,
         };
         let template = &parsed.package.sheets[0].template;
         let original_error = if columns {

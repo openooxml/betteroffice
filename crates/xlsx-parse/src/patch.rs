@@ -57,7 +57,6 @@ pub(crate) struct SheetPatch<'a> {
     pub(crate) styles: &'a StyleMatch<'a>,
     /// The defined names this sheet's formulas resolve.
     pub(crate) names: FormulaNames<'a>,
-    pub(crate) preserve_source_caches: bool,
 }
 
 struct SourceElement {
@@ -175,15 +174,12 @@ impl SheetPatch<'_> {
     /// Patched `<sheetData>`; `None` when the source resists cell-by-cell patching.
     pub(crate) fn sheet_data(&self, source: &[u8]) -> Result<Option<Vec<u8>>, ParseError> {
         #[cfg(any(test, feature = "test-oracle"))]
-        if !self.preserve_source_caches && crate::save_oracle::use_legacy_save_path() {
+        if crate::save_oracle::use_legacy_save_path() {
             return self.sheet_data_oracle(source);
         }
         let Some((element, rows)) = scan_sheet_data(source)? else {
             return Ok(None);
         };
-        if self.preserve_source_caches {
-            return self.fill_source_caches(source, &rows).map(Some);
-        }
         let dirty = self.dirty_formulas(source, &rows)?;
         let mut out = Vec::with_capacity(source.len());
         out.extend_from_slice(&element.prefix);
@@ -247,40 +243,6 @@ impl SheetPatch<'_> {
         Ok(Some(out))
     }
 
-    fn fill_source_caches(&self, data: &[u8], rows: &[SourceRow]) -> Result<Vec<u8>, ParseError> {
-        let dirty = DirtyFormulas {
-            groups: HashSet::new(),
-            masters: HashSet::new(),
-        };
-        let mut out = Vec::with_capacity(data.len());
-        let mut cursor = 0;
-        let mut originals = SourceCellCursor::new(self.original, self.original.iter_cells());
-        let mut calculated = SourceCellCursor::new(self.sheet, self.sheet.iter_cells());
-        for source in rows.iter().flat_map(|row| &row.cells) {
-            let at = source.at;
-            let (original, _) = originals.at(at, at);
-            let (current, _) = calculated.at(at, at);
-            let Some(cell) = current else {
-                continue;
-            };
-            if Some(cell) == original
-                || !self.cell_facts.can_fill_source_cache(at, original)
-                || (source.formula.is_none() && cached_value_slot(data, source, true)?.is_none())
-            {
-                continue;
-            }
-
-            out.extend_from_slice(&data[cursor..source.span.start]);
-            if source.formula.is_none() {
-                self.emit_cell(&mut out, at, cell, original)?;
-            } else if !self.emit_cached_cell(&mut out, data, source, at, cell, original, &dirty)? {
-                out.extend_from_slice(&data[source.span.clone()]);
-            }
-            cursor = source.span.end;
-        }
-        out.extend_from_slice(&data[cursor..]);
-        Ok(out)
-    }
 
     /// Patched `<cols>`; `None` removes the element.
     pub(crate) fn cols(&self, source: Option<&[u8]>) -> Result<Option<Vec<u8>>, ParseError> {
@@ -724,12 +686,9 @@ impl SheetPatch<'_> {
         write_start_tag(out, &name, &attributes, false)?;
         self.emit_source_cell_content(out, data, source, at, slot.start)?;
         if let Some(value) = markup.value {
-            let value_name = name
-                .split_once(':')
-                .map(|(prefix, _)| format!("{prefix}:v"));
             let mut writer = Writer::new(std::mem::take(out));
             writer
-                .create_element(value_name.as_deref().unwrap_or("v"))
+                .create_element("v")
                 .write_text_content(BytesText::new(&value))
                 .map_err(xml_err)?;
             *out = writer.into_inner();
@@ -747,9 +706,6 @@ impl SheetPatch<'_> {
         let Some(formula) = &source.formula else {
             return Ok(None);
         };
-        if self.preserve_source_caches {
-            return cached_value_slot(data, source, true);
-        }
         let (name, attributes) = start_tag(&data[source.tag.clone()])?;
         if name != "c"
             || attributes
@@ -774,7 +730,7 @@ impl SheetPatch<'_> {
                 return Ok(None);
             }
         }
-        cached_value_slot(data, source, false)
+        cached_value_slot(data, source)
     }
 
     fn emit_cell(
@@ -1091,36 +1047,26 @@ impl SheetPatch<'_> {
     }
 }
 
-fn cached_value_slot(
-    data: &[u8],
-    cell: &SourceCell,
-    preserve_source_caches: bool,
-) -> Result<Option<Range<usize>>, ParseError> {
+fn cached_value_slot(data: &[u8], cell: &SourceCell) -> Result<Option<Range<usize>>, ParseError> {
     let mut reader = Reader::from_reader(&data[cell.span.clone()]);
     reader.config_mut().expand_empty_elements = false;
     let mut depth = 0_usize;
     let mut child_start = cell.tag.end;
     let mut formula_end = None;
     let mut value = None;
-    let mut in_value = false;
     loop {
         let before = cell.span.start + reader.buffer_position() as usize;
         let event = reader.read_event().map_err(xml_err)?;
         let after = cell.span.start + reader.buffer_position() as usize;
         if let Event::Start(element) | Event::Empty(element) = &event {
-            if preserve_source_caches {
-                if in_value
-                    || (depth == 1
-                        && !matches!(element.local_name().as_ref(), b"f" | b"v" | b"extLst"))
-                {
-                    return Ok(None);
-                }
-            } else if depth > 1
-                || (depth == 1
-                    && (!matches!(element.name().as_ref(), b"f" | b"v" | b"is")
-                        || attributes(element)?.iter().any(|attribute| {
-                            attribute.name == "xmlns" || attribute.name.starts_with("xmlns:")
-                        })))
+            if depth > 1 {
+                return Ok(None);
+            }
+            if depth == 1
+                && (!matches!(element.name().as_ref(), b"f" | b"v" | b"is")
+                    || attributes(element)?.iter().any(|attribute| {
+                        attribute.name == "xmlns" || attribute.name.starts_with("xmlns:")
+                    }))
             {
                 return Ok(None);
             }
@@ -1129,14 +1075,13 @@ fn cached_value_slot(
             Event::Start(element) => {
                 if depth == 1 {
                     child_start = before;
-                    if element.local_name().as_ref() == b"is" {
+                    if element.name().as_ref() == b"is" {
                         return Ok(None);
                     }
-                    in_value = preserve_source_caches && element.local_name().as_ref() == b"v";
                 }
                 depth += 1;
             }
-            Event::Empty(element) if depth == 1 => match element.local_name().as_ref() {
+            Event::Empty(element) if depth == 1 => match element.name().as_ref() {
                 b"f" if formula_end.replace(after).is_some() => return Ok(None),
                 b"v" if value.replace(before..after).is_some() => return Ok(None),
                 b"is" => return Ok(None),
@@ -1148,23 +1093,18 @@ fn cached_value_slot(
                     break;
                 }
                 if depth == 1 {
-                    in_value = false;
-                    match element.local_name().as_ref() {
+                    match element.name().as_ref() {
                         b"f" if formula_end.replace(after).is_some() => return Ok(None),
                         b"v" if value.replace(child_start..after).is_some() => return Ok(None),
                         _ => {}
                     }
                 }
             }
-            Event::Text(text) if in_value && !text.is_empty() => return Ok(None),
-            Event::CData(text) if in_value && !text.is_empty() => return Ok(None),
-            Event::GeneralRef(_) if in_value => return Ok(None),
             Event::Eof => break,
             _ => {}
         }
     }
-    let insertion = formula_end.or_else(|| preserve_source_caches.then_some(cell.tag.end));
-    Ok(insertion.and_then(|end| match value {
+    Ok(formula_end.and_then(|end| match value {
         Some(value) if value.start >= end => Some(value),
         None => Some(end..end),
         _ => None,
