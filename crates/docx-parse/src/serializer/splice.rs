@@ -7549,6 +7549,130 @@ mod tests {
     }
 
     #[test]
+    fn replacing_a_closing_paragraph_that_declares_the_prefix_of_its_field_end_is_declined() {
+        let opening = "<w:p><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText xml:space=\"preserve\"> TOC </w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>First entry</w:t></w:r></w:p>";
+        let closing = "<w:p xmlns:x=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:r><w:t>Second entry</w:t></w:r><x:r><x:fldChar w:fldCharType=\"end\"/></x:r></w:p>";
+        let outside = "<w:p><w:r><w:t>Outside the field</w:t></w:r></w:p>";
+        let source = body(&format!("{opening}{closing}{outside}"));
+        let written_opening = "<w:p><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText xml:space=\"preserve\"> TOC </w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>First entry</w:t></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r></w:p>";
+        let edited_closing = "<w:p><w:r><w:t>Second entry, edited</w:t></w:r></w:p>";
+        assert_eq!(
+            replaced(&source, &[written_opening, edited_closing, outside], &[1]),
+            None
+        );
+    }
+
+    #[test]
+    fn a_stray_field_separate_leaves_a_closing_paragraph_edit_declined() {
+        let opening = "<w:p><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText xml:space=\"preserve\"> TOC </w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>First entry</w:t></w:r></w:p>";
+        let closing = "<w:p><w:r><w:t>Second entry</w:t></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r><w:r><w:t>After the end</w:t></w:r></w:p>";
+        let stray = "<w:p><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>Stray</w:t></w:r></w:p>";
+        let outside = "<w:p><w:r><w:t>Outside the field</w:t></w:r></w:p>";
+        let source = body(&format!("{opening}{closing}{stray}{outside}"));
+        let edited_closing = "<w:p><w:r><w:t>Second entry, edited</w:t></w:r><w:r><w:t>After the end</w:t></w:r></w:p>";
+        assert_eq!(
+            replaced(&source, &[opening, edited_closing, stray, outside], &[1]),
+            None
+        );
+    }
+
+    #[test]
+    fn replacing_an_opening_paragraph_that_ends_in_another_whole_field_is_declined() {
+        let opening = "<w:p><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText xml:space=\"preserve\"> TOC </w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>First entry</w:t></w:r></w:p>";
+        let closing = "<w:p><w:r><w:t>Second entry</w:t></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r></w:p>";
+        let outside = "<w:p><w:r><w:t>Outside the field</w:t></w:r></w:p>";
+        let source = body(&format!("{opening}{closing}{outside}"));
+        let edited_opening = "<w:p><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText xml:space=\"preserve\"> TOC </w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>First entry, edited</w:t></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText xml:space=\"preserve\"> PAGE </w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r></w:p>";
+        let written_closing = "<w:p><w:r><w:t>Second entry</w:t></w:r></w:p>";
+        assert_eq!(
+            replaced(&source, &[edited_opening, written_closing, outside], &[0]),
+            None
+        );
+    }
+
+    #[test]
+    fn replacing_an_opening_paragraph_leaves_its_field_open_around_a_whole_inner_field() {
+        let opening = "<w:p><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText xml:space=\"preserve\"> TOC </w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>First entry</w:t></w:r><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r></w:p>";
+        let closing = "<w:p><w:r><w:t>Second entry</w:t></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r></w:p>";
+        let outside = "<w:p><w:r><w:t>Outside the field</w:t></w:r></w:p>";
+        let source = body(&format!("{opening}{closing}{outside}"));
+        let edited_opening = "<w:p><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText xml:space=\"preserve\"> TOC </w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>First entry, edited</w:t></w:r><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r></w:p>";
+        let left_open = "<w:p><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText xml:space=\"preserve\"> TOC </w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>First entry, edited</w:t></w:r><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r></w:p>";
+        let written_closing = "<w:p><w:r><w:t>Second entry</w:t></w:r></w:p>";
+        assert_eq!(
+            replaced(&source, &[edited_opening, written_closing, outside], &[0]),
+            Some(body(&format!("{left_open}{closing}{outside}")))
+        );
+    }
+
+    #[test]
+    fn replacing_a_closing_paragraph_whose_field_end_precedes_a_bookmark_end_is_declined() {
+        let opening = "<w:p><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText xml:space=\"preserve\"> TOC </w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>First entry</w:t></w:r></w:p>";
+        let closing = "<w:p><w:bookmarkStart w:id=\"1\" w:name=\"appendix\"/><w:r><w:t>Second entry</w:t></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r><w:bookmarkEnd w:id=\"1\"/></w:p>";
+        let outside = "<w:p><w:r><w:t>Outside the field</w:t></w:r></w:p>";
+        let source = body(&format!("{opening}{closing}{outside}"));
+        let written_opening = "<w:p><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText xml:space=\"preserve\"> TOC </w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>First entry</w:t></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r></w:p>";
+        let edited_closing = "<w:p><w:bookmarkStart w:id=\"1\" w:name=\"appendix\"/><w:r><w:t>Second entry, edited</w:t></w:r><w:bookmarkEnd w:id=\"1\"/></w:p>";
+        assert_eq!(
+            replaced(&source, &[written_opening, edited_closing, outside], &[1]),
+            None
+        );
+    }
+
+    #[test]
+    fn replacing_a_closing_paragraph_carries_its_field_end_with_the_run_properties() {
+        let opening = "<w:p><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText xml:space=\"preserve\"> TOC </w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>First entry</w:t></w:r></w:p>";
+        let closing = "<w:p><w:r><w:t>Second entry</w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:fldChar w:fldCharType=\"end\"/></w:r></w:p>";
+        let outside = "<w:p><w:r><w:t>Outside the field</w:t></w:r></w:p>";
+        let source = body(&format!("{opening}{closing}{outside}"));
+        let written_opening = "<w:p><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText xml:space=\"preserve\"> TOC </w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>First entry</w:t></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r></w:p>";
+        let edited_closing = "<w:p><w:r><w:t>Second entry, edited</w:t></w:r></w:p>";
+        let carried_closing = "<w:p><w:r><w:t>Second entry, edited</w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:fldChar w:fldCharType=\"end\"/></w:r></w:p>";
+        assert_eq!(
+            replaced(&source, &[written_opening, edited_closing, outside], &[1]),
+            Some(body(&format!("{opening}{carried_closing}{outside}")))
+        );
+    }
+
+    #[test]
+    fn replacing_a_closing_paragraph_whose_field_end_is_wrapped_is_declined() {
+        let opening = "<w:p><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText xml:space=\"preserve\"> TOC </w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>First entry</w:t></w:r></w:p>";
+        let outside = "<w:p><w:r><w:t>Outside the field</w:t></w:r></w:p>";
+        let written_opening = "<w:p><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText xml:space=\"preserve\"> TOC </w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>First entry</w:t></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r></w:p>";
+        let edited_closing = "<w:p><w:r><w:t>Second entry, edited</w:t></w:r></w:p>";
+        for (open, close) in [
+            ("<w:hyperlink w:anchor=\"entry\">", "</w:hyperlink>"),
+            ("<w:ins w:id=\"1\" w:author=\"Editor\">", "</w:ins>"),
+            ("<w:del w:id=\"1\" w:author=\"Editor\">", "</w:del>"),
+            ("<w:sdt><w:sdtContent>", "</w:sdtContent></w:sdt>"),
+        ] {
+            let closing = format!(
+                "<w:p><w:r><w:t>Second entry</w:t></w:r>{open}<w:r><w:fldChar w:fldCharType=\"end\"/></w:r>{close}</w:p>"
+            );
+            let source = body(&format!("{opening}{closing}{outside}"));
+            assert_eq!(
+                replaced(&source, &[written_opening, edited_closing, outside], &[1]),
+                None,
+                "{open}"
+            );
+        }
+    }
+
+    #[test]
+    fn replacing_a_paragraph_that_closes_one_spanning_field_and_opens_another_is_declined() {
+        let opening = "<w:p><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText xml:space=\"preserve\"> TOC </w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>First entry</w:t></w:r></w:p>";
+        let middle = "<w:p><w:r><w:t>Second entry</w:t></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText xml:space=\"preserve\"> TOC </w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>Next entry</w:t></w:r></w:p>";
+        let closing = "<w:p><w:r><w:t>Third entry</w:t></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r></w:p>";
+        let outside = "<w:p><w:r><w:t>Outside the field</w:t></w:r></w:p>";
+        let source = body(&format!("{opening}{middle}{closing}{outside}"));
+        let edited_middle = "<w:p><w:r><w:t>Second entry, edited</w:t></w:r><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText xml:space=\"preserve\"> TOC </w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>Next entry</w:t></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r></w:p>";
+        assert_eq!(
+            replaced(&source, &[opening, edited_middle, closing, outside], &[1]),
+            None
+        );
+    }
+
+    #[test]
     fn replacing_a_paragraph_of_a_part_whose_fields_never_balanced_is_written_in_place() {
         let dangling =
             "<w:p><w:r><w:fldChar w:fldCharType=\"begin\"/><w:t>Dangling</w:t></w:r></w:p>";

@@ -98,9 +98,9 @@ function entriesOutsideTheField(xml: string, entries: readonly string[]): string
   });
 }
 
-for (const [name, index, offset, entries] of [
-  ['closing', 3, 1, ['Introduction', 'Scope', 'Terms', TYPED]],
-  ['opening', 0, 0, ['Introduction', 'Scope', 'Terms', 'Appendix']],
+for (const [name, index, offset, entries, typedInside] of [
+  ['closing', 3, 1, ['Introduction', 'Scope', 'Terms', TYPED], true],
+  ['opening', 0, 0, ['Introduction', 'Scope', 'Terms', 'Appendix'], false],
 ] as const) {
   test(`typing into the ${name} paragraph of a field spanning paragraphs keeps the field spanning them`, async () => {
     const session = await createYrsSession({ clientId: 98200 + sessions.length });
@@ -116,5 +116,19 @@ for (const [name, index, offset, entries] of [
       if (at !== index) expect(xml).toContain(kept);
     }
     expect(entriesOutsideTheField(xml, entries)).toEqual([]);
+    const begin = xml.indexOf('w:fldCharType="begin"');
+    const separate = xml.indexOf('w:fldCharType="separate"');
+    const end = xml.indexOf('w:fldCharType="end"', separate);
+    const typed = xml.indexOf(TYPED);
+    expect(begin).toBeGreaterThan(-1);
+    expect(begin).toBeLessThan(separate);
+    expect(separate).toBeLessThan(end);
+    if (typedInside) {
+      expect(typed).toBeGreaterThan(separate);
+      expect(typed).toBeLessThan(end);
+    } else {
+      expect(typed).toBeGreaterThan(-1);
+      expect(typed).toBeLessThan(begin);
+    }
   });
 }
