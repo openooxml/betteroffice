@@ -1099,8 +1099,7 @@ fn cached_value_slot(
         let before = cell.span.start + reader.buffer_position() as usize;
         let event = reader.read_event().map_err(xml_err)?;
         let after = cell.span.start + reader.buffer_position() as usize;
-        if !preserve_source_formula && let Event::Start(element) | Event::Empty(element) = &event
-        {
+        if !preserve_source_formula && let Event::Start(element) | Event::Empty(element) = &event {
             if depth > 1 {
                 return Ok(None);
             }

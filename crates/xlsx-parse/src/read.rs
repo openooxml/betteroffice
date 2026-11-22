@@ -1277,8 +1277,8 @@ fn finalize_cell(
     if c.formula.is_some() && c.value_text.is_none() && c.inline_text.is_none() {
         facts.source.uncached_formulas.insert(key);
     }
-    let has_cache = c.value_text.as_ref().is_some_and(|value| !value.is_empty())
-        || c.inline_text.is_some();
+    let has_cache =
+        c.value_text.as_ref().is_some_and(|value| !value.is_empty()) || c.inline_text.is_some();
     let cached = c
         .value_text
         .as_deref()
