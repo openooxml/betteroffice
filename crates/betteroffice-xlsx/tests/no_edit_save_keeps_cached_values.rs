@@ -2,6 +2,10 @@ use std::fmt::Write;
 
 use betteroffice_xlsx::{CalculationOptions, CellRef, CellValue, SheetId, Workbook};
 use xlsx_model::addr::col_to_letters;
+use xlsx_parse::{
+    SaveEdits, parse_workbook_with_package,
+    serialize_workbook_with_package_and_origins_after_edits_and_active_sheet,
+};
 
 const MAIN: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
 const RELS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
@@ -69,6 +73,10 @@ fn sheet_xml(parts: &[(String, Vec<u8>)]) -> &str {
 fn cell<'a>(sheet: &'a str, address: &str) -> &'a str {
     let start = sheet.find(&format!(r#"<c r="{address}""#)).unwrap();
     let from_cell = &sheet[start..];
+    let tag_end = from_cell.find('>').unwrap() + 1;
+    if from_cell[..tag_end].ends_with("/>") {
+        return &from_cell[..tag_end];
+    }
     let end = from_cell.find("</c>").unwrap() + "</c>".len();
     &from_cell[..end]
 }
@@ -232,6 +240,59 @@ fn leaves_new_followers_inside_and_outside_the_source_spill_absent_on_save() {
 }
 
 #[test]
+fn keeps_authored_blanks_outside_the_source_spill() {
+    for blank in [r#"<c r="A3" s="1"/>"#, r#"<c r="A3"/>"#] {
+        let mut source = package_parts(
+            &format!(
+                concat!(
+                    r#"<row r="1"><c r="A1"><f t="array" ref="A1:A2">_xlfn.SEQUENCE(3)</f><v>1</v></c>"#,
+                    r#"<c r="B1"><f>2+3</f></c></row>"#,
+                    r#"<row r="2"><c r="A2"><v>2</v></c></row>"#,
+                    r#"<row r="3">{}</row>"#,
+                ),
+                blank,
+            ),
+            FULL_CALC,
+        );
+        insert_xml(
+            &mut source,
+            WORKBOOK_RELS,
+            "</Relationships>",
+            &format!(r#"<Relationship Id="rId2" Type="{RELS}/styles" Target="styles.xml"/>"#),
+        );
+        let xfs = r#"<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>"#.repeat(2);
+        add_part(
+            &mut source,
+            "xl/styles.xml",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml",
+            &format!(r#"<styleSheet xmlns="{MAIN}"><cellXfs count="2">{xfs}</cellXfs></styleSheet>"#),
+        );
+
+        let workbook = open_recalculated(&source);
+        assert_eq!(
+            workbook.model().sheets[0]
+                .cell(CellRef::new(2, 0))
+                .unwrap()
+                .value,
+            CellValue::Number { value: 3.0 },
+        );
+        let saved = saved_parts(&workbook);
+        let sheet = sheet_xml(&saved);
+        assert_eq!(cell(sheet, "A3"), blank);
+        assert!(cell(sheet, "B1").contains("<v>5</v>"));
+
+        let reopened = open_recalculated(&saved);
+        assert_eq!(
+            reopened.model().sheets[0]
+                .cell(CellRef::new(0, 0))
+                .unwrap()
+                .value,
+            CellValue::Number { value: 1.0 },
+        );
+    }
+}
+
+#[test]
 fn fills_uncached_formula_cells_and_keeps_a_cached_array_member() {
     let source = package_parts(
         concat!(
@@ -334,6 +395,29 @@ fn keeps_every_part_byte_for_byte_when_all_caches_are_correct() {
     );
     let saved = saved_parts(&open_recalculated(&source));
     assert_eq!(saved, source);
+}
+
+#[test]
+fn keeps_a_whitespace_cache_before_an_extension_value_element() {
+    for whitespace in ["  ", "&#32;&#32;"] {
+        let source = package_parts(
+            &format!(
+                concat!(
+                    r#"<row r="1"><c r="A1" t="str"><f>"  "</f><v>{}</v>"#,
+                    r#"<extLst><ext uri="urn:example"><x:v xmlns:x="urn:example"/></ext></extLst></c>"#,
+                    r#"<c r="B1"><f>2+3</f></c></row>"#,
+                ),
+                whitespace,
+            ),
+            FULL_CALC,
+        );
+        let saved = saved_parts(&open_recalculated(&source));
+        assert_eq!(
+            cell(sheet_xml(&saved), "A1"),
+            cell(sheet_xml(&source), "A1"),
+        );
+        assert!(cell(sheet_xml(&saved), "B1").contains("<v>5</v>"));
+    }
 }
 
 #[test]
@@ -512,4 +596,91 @@ fn fills_real_results_and_keeps_empty_string_results_as_the_source_wrote_them() 
         cell(sheet_xml(&saved), "B1"),
         cell(sheet_xml(&source), "B1")
     );
+}
+
+#[test]
+fn keeps_an_unmodeled_array_follower_when_its_result_is_an_empty_string() {
+    let source = package_parts(
+        concat!(
+            r#"<row r="1"><c r="A1"><f t="array" ref="A1:A2">""</f></c>"#,
+            r#"<c r="B1"><f>2+3</f></c></row>"#,
+            r#"<row r="2"><c r="A2" t="b"><v/></c></row>"#,
+        ),
+        FULL_CALC,
+    );
+    let workbook = open_recalculated(&source);
+    assert_eq!(
+        workbook.model().sheets[0]
+            .cell(CellRef::new(1, 0))
+            .unwrap()
+            .value,
+        CellValue::Text {
+            value: String::new(),
+        },
+    );
+    let saved = saved_parts(&workbook);
+    assert_eq!(
+        cell(sheet_xml(&saved), "A2"),
+        cell(sheet_xml(&source), "A2"),
+    );
+    assert!(cell(sheet_xml(&saved), "B1").contains("<v>5</v>"));
+}
+
+#[test]
+fn checks_changed_array_followers_in_row_order() {
+    let source = package_parts(
+        concat!(
+            r#"<row r="1"><c r="A1"><f t="array" ref="A1:C3" ca="1">1</f><v>1</v></c></row>"#,
+            r#"<row r="2"><c r="C2"><v>1</v></c>"#,
+            r#"<c r="E2"><f t="array" ref="E2:F3" ca="1">1</f><v>1</v></c></row>"#,
+            r#"<row r="3"><c r="B3"/></row>"#,
+            r#"<row r="5"><c r="A5"><f t="array" ref="A5:C5" ca="1">1</f><v>1</v></c></row>"#,
+        ),
+        FULL_CALC,
+    );
+    let mut parsed = parse_workbook_with_package(&source).unwrap();
+    for address in ["C2", "B3"] {
+        parsed.workbook.sheets[0].set_calculated_value(
+            CellRef::parse_a1(address).unwrap(),
+            CellValue::Number { value: 2.0 },
+        );
+    }
+    xlsx_model::open_timing::begin();
+    let saved = serialize_workbook_with_package_and_origins_after_edits_and_active_sheet(
+        &parsed.workbook,
+        &parsed.package,
+        &[Some(0)],
+        &[parsed.package.source_shared_string_cells(0)],
+        SaveEdits {
+            changed: true,
+            moved_references: false,
+        },
+        parsed.active_sheet,
+    );
+    let counts = xlsx_model::open_timing::finish().counts;
+    let saved = saved.unwrap();
+    let (_, sheet) = saved.iter().find(|(path, _)| path == SHEET).unwrap();
+    let sheet = std::str::from_utf8(sheet).unwrap();
+    assert!(cell(sheet, "A1").contains(r#"<f t="array" ref="A1:C3">1</f>"#));
+    for address in ["E2", "A5"] {
+        assert_eq!(cell(sheet, address), cell(sheet_xml(&source), address));
+    }
+    assert_eq!(counts.get("save_array_range_changes"), Some(&1));
+}
+
+#[test]
+fn keeps_a_style_only_string_typed_cell_beside_an_array() {
+    let source = package_parts(
+        r#"<row r="1"><c r="A1"><f t="array" ref="A1:A2">_xlfn.SEQUENCE(3)</f><v>1</v></c><c r="B1" s="1" t="str"/></row><row r="2"><c r="A2"><v>2</v></c><c r="B2" s="1" t="str"/></row><row r="3"><c r="A3" s="1" t="str"/></row>"#,
+        FULL_CALC,
+    );
+    let workbook = open_recalculated(&source);
+    let saved = saved_parts(&workbook);
+    for address in ["B1", "B2", "A3"] {
+        assert_eq!(
+            cell(sheet_xml(&saved), address),
+            cell(sheet_xml(&source), address),
+            "{address}"
+        );
+    }
 }

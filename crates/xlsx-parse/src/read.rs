@@ -702,7 +702,7 @@ pub(crate) struct WorksheetCellFacts {
     pub(crate) source: SourceCellFacts,
     // The XML and model disagree about whether these cells hold a cache.
     cache_presence_overrides: BTreeSet<(u32, u32)>,
-    pub(crate) unmodeled_cells: BTreeSet<(u32, u32)>,
+    pub(crate) additional_formula_ranges: Vec<CellRange>,
 }
 
 impl WorksheetCellFacts {
@@ -715,6 +715,7 @@ impl WorksheetCellFacts {
 /// in-progress cell state accumulated between a `<c>` start and its end.
 #[derive(Default)]
 struct CellBuild {
+    depth: usize,
     addr: Option<CellRef>,
     ty: Option<String>,
     style: Option<u32>,
@@ -754,6 +755,29 @@ fn parse_worksheet(
 
     loop {
         match next_event(&mut reader, &mut buf, &mut depth)? {
+            Event::Start(e) if cur.is_some() => {
+                let Some(c) = cur.as_mut().filter(|cell| depth == cell.depth + 1) else {
+                    continue;
+                };
+                match local_name(&e).as_slice() {
+                    b"v" => c.value_text = Some(collect_text(&mut reader, &mut buf, &mut depth)?),
+                    b"f" => {
+                        let text = collect_text(&mut reader, &mut buf, &mut depth)?;
+                        if let Some(origin) = c.addr {
+                            shared_formulas.record(&e, origin, &text)?;
+                            record_array_formula(&e, origin, &mut sheet, facts)?;
+                        }
+                        c.formula = Some(text);
+                        facts.source.alternate_formulas |= alternate_depth > 0;
+                    }
+                    b"is" => {
+                        let (text, runs) = collect_string_item(&mut reader, &mut buf, &mut depth)?;
+                        c.inline_text = Some(text);
+                        c.inline_runs = runs;
+                    }
+                    _ => {}
+                }
+            }
             Event::Start(e) => match local_name(&e).as_slice() {
                 b"row" => {
                     let row = match attr(&e, b"r")? {
@@ -801,42 +825,14 @@ fn parse_worksheet(
                     col_cursor = addr.col;
                     let style = attr(&e, b"s")?.and_then(|v| v.parse::<u32>().ok());
                     cur = Some(CellBuild {
+                        depth,
                         addr: Some(addr),
                         ty: attr(&e, b"t")?,
                         style,
                         ..CellBuild::default()
                     });
                 }
-                b"v" => {
-                    let text = collect_text(&mut reader, &mut buf, &mut depth)?;
-                    if let Some(c) = cur.as_mut() {
-                        c.value_text = Some(text);
-                    }
-                }
-                b"f" => {
-                    let text = collect_text(&mut reader, &mut buf, &mut depth)?;
-                    let array_ref = array_formula_range(&e)?;
-                    if let Some(c) = cur.as_mut() {
-                        if let Some(origin) = c.addr {
-                            shared_formulas.record(&e, origin, &text)?;
-                            if let Some(range) = array_ref.filter(|range| range.contains(origin)) {
-                                sheet.set_array_formula(origin, range);
-                            } else if attr(&e, b"t")?.as_deref() == Some("array") {
-                                facts.source.dropped_array_ranges = true;
-                            }
-                        }
-                        c.formula = Some(text);
-                        facts.source.alternate_formulas |= alternate_depth > 0;
-                    }
-                }
                 b"AlternateContent" => alternate_depth += 1,
-                b"is" => {
-                    let (text, runs) = collect_string_item(&mut reader, &mut buf, &mut depth)?;
-                    if let Some(c) = cur.as_mut() {
-                        c.inline_text = Some(text);
-                        c.inline_runs = runs;
-                    }
-                }
                 b"mergeCell" => {
                     if let Some(r) = attr(&e, b"ref")? {
                         let range = CellRange::parse_a1(&r)
@@ -884,6 +880,7 @@ fn parse_worksheet(
                 }
                 _ => {}
             },
+            Event::End(_) if cur.as_ref().is_some_and(|cell| depth >= cell.depth) => {}
             Event::End(e) => {
                 let name = e.name();
                 match name.local_name().as_ref() {
@@ -909,6 +906,7 @@ fn parse_worksheet(
             _ => {}
         }
     }
+    facts.additional_formula_ranges.extend(shared_formulas.ranges());
     shared_formulas.resolve(&mut sheet)?;
     normalize_merges(&mut sheet.merges);
     sheet.conditional_formats = parse_conditional_formats(data, dxfs)?;
@@ -1085,23 +1083,27 @@ pub fn cf_rule_attribute(raw_xml: &str, name: &str) -> Option<String> {
     }
 }
 
-/// the rectangle an `<f t="array" ref="...">` fills. anything malformed or
-/// larger than the spill limit is read as an ordinary formula.
-fn array_formula_range(
+fn record_array_formula(
     element: &quick_xml::events::BytesStart,
-) -> Result<Option<CellRange>, ParseError> {
+    origin: CellRef,
+    sheet: &mut Sheet,
+    facts: &mut WorksheetCellFacts,
+) -> Result<(), ParseError> {
     if attr(element, b"t")?.as_deref() != Some("array") {
-        return Ok(None);
+        return Ok(());
     }
-    let Some(reference) = attr(element, b"ref")? else {
-        return Ok(None);
-    };
-    let Ok(range) = CellRange::parse_a1(&reference) else {
-        return Ok(None);
-    };
-    let rows = u64::from(range.end.row - range.start.row) + 1;
-    let cols = u64::from(range.end.col - range.start.col) + 1;
-    Ok((rows * cols <= xlsx_model::MAX_SPILL_CELLS as u64).then_some(range))
+    let range = attr(element, b"ref")?.and_then(|reference| CellRange::parse_a1(&reference).ok());
+    if let Some(range) = range.filter(|range| {
+        let rows = u64::from(range.end.row - range.start.row) + 1;
+        let cols = u64::from(range.end.col - range.start.col) + 1;
+        rows * cols <= xlsx_model::MAX_SPILL_CELLS as u64 && range.contains(origin)
+    }) {
+        sheet.set_array_formula(origin, range);
+    } else {
+        facts.source.dropped_array_ranges = true;
+        facts.additional_formula_ranges.extend(range);
+    }
+    Ok(())
 }
 
 fn parse_hyperlink(
@@ -1368,8 +1370,6 @@ fn finalize_cell(
     }
     if retained {
         sheet.set_cell(addr, cell);
-    } else if sheet.cell(addr).is_none() {
-        facts.unmodeled_cells.insert(key);
     }
     Ok(())
 }

@@ -4,7 +4,7 @@
 //! that reserialization carries just the subset `read` models.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::io;
 use std::iter::Peekable;
 use std::ops::Range;
@@ -529,21 +529,30 @@ fn merge_source_caches(
             continue;
         };
         let facts = &preserved.cell_facts;
+        let mut followers = BTreeSet::new();
         for (at, source_cell) in source.iter_cells() {
             match sheet.cell(at) {
                 None => sheet.set_cell(at, source_cell.clone()),
                 Some(calculated) if calculated != source_cell => {
                     if facts.has_cached_value(at, Some(source_cell))
-                        || calculated.value == CellValue::Empty
-                        || matches!(&calculated.value, CellValue::Text { value } if value.is_empty())
+                        || !has_calculated_cache(&calculated.value)
                     {
                         sheet.set_cell(at, source_cell.clone());
-                    } else if calculated.formula != source_cell.formula
-                        || calculated.style != source_cell.style
-                    {
-                        let mut cell = source_cell.clone();
-                        cell.value = calculated.value.clone();
-                        sheet.set_cell(at, cell);
+                    } else {
+                        if source_cell
+                            .formula
+                            .as_deref()
+                            .is_none_or(|formula| formula.trim().is_empty())
+                        {
+                            followers.insert((at.row, at.col));
+                        }
+                        if calculated.formula != source_cell.formula
+                            || calculated.style != source_cell.style
+                        {
+                            let mut cell = source_cell.clone();
+                            cell.value = calculated.value.clone();
+                            sheet.set_cell(at, cell);
+                        }
                     }
                 }
                 Some(_) => {}
@@ -552,8 +561,7 @@ fn merge_source_caches(
         let mut source_cells = source.iter_cells().peekable();
         let extra_cells = sheet
             .iter_cells()
-            .map(|(at, _)| at)
-            .filter(|&at| {
+            .filter_map(|(at, _)| {
                 let key = (at.row, at.col);
                 while source_cells
                     .peek()
@@ -564,11 +572,25 @@ fn merge_source_caches(
                 source_cells
                     .next_if(|(at, _)| (at.row, at.col) == key)
                     .is_none()
-                    && (!facts.unmodeled_cells.contains(&key) || facts.has_cached_value(at, None))
+                    .then_some(at)
             })
             .collect::<Vec<_>>();
         for at in extra_cells {
             sheet.set_cell(at, Cell::default());
+        }
+        let source_ranges = source
+            .array_formulas()
+            .map(|(_, range)| range)
+            .chain(facts.additional_formula_ranges.iter().copied());
+        for range in source_ranges {
+            if followers.is_empty() {
+                break;
+            }
+            remove_covered_followers(&mut followers, range);
+        }
+        for (row, col) in followers {
+            let at = CellRef::new(row, col);
+            sheet.set_cell(at, source.cell(at).cloned().unwrap_or_default());
         }
         let extra_anchors = sheet
             .array_formulas()
@@ -583,6 +605,32 @@ fn merge_source_caches(
         }
     }
     merged
+}
+
+fn has_calculated_cache(value: &CellValue) -> bool {
+    match value {
+        CellValue::Empty => false,
+        CellValue::Text { value } => !value.is_empty(),
+        _ => true,
+    }
+}
+
+fn remove_covered_followers(followers: &mut BTreeSet<(RowId, ColId)>, range: CellRange) {
+    let mut start = (range.start.row, range.start.col);
+    let end = (range.end.row, range.end.col);
+    while start <= end {
+        let Some(&(row, col)) = followers.range(start..=end).next() else {
+            break;
+        };
+        if col < range.start.col {
+            start = (row, range.start.col);
+        } else if col > range.end.col {
+            start = (row + 1, range.start.col);
+        } else {
+            start = (row, col);
+            followers.remove(&start);
+        }
+    }
 }
 
 #[doc(hidden)]

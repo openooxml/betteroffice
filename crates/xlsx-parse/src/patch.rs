@@ -898,7 +898,7 @@ impl SheetPatch<'_> {
         arrays: &BTreeSet<(u32, u32)>,
         changed: &BTreeSet<(u32, u32)>,
     ) -> HashSet<(u32, u32)> {
-        let mut changed_columns = None;
+        let mut changed_rows = None;
         masters
             .into_iter()
             .filter(|(anchor, reference)| {
@@ -909,12 +909,12 @@ impl SheetPatch<'_> {
                             || self.ranged_master_dirty(
                                 *anchor,
                                 reference,
-                                changed_columns.get_or_insert_with(|| {
-                                    let mut columns = BTreeMap::<u32, Vec<u32>>::new();
+                                changed_rows.get_or_insert_with(|| {
+                                    let mut rows = BTreeMap::<u32, Vec<u32>>::new();
                                     for &(row, col) in changed {
-                                        columns.entry(col).or_default().push(row);
+                                        rows.entry(row).or_default().push(col);
                                     }
-                                    columns
+                                    rows
                                 }),
                             )
                     })
@@ -927,27 +927,31 @@ impl SheetPatch<'_> {
         &self,
         anchor: (u32, u32),
         reference: CellRange,
-        changed_columns: &BTreeMap<u32, Vec<u32>>,
+        changed_rows: &BTreeMap<u32, Vec<u32>>,
     ) -> bool {
+        let mut rows = changed_rows
+            .range(reference.start.row..=reference.end.row)
+            .peekable();
+        if rows.peek().is_none() {
+            return false;
+        }
         let stable_array = self.axes.is_identity()
             && self
                 .original
                 .array_formula(CellRef::new(anchor.0, anchor.1))
                 == Some(reference);
-        changed_columns
-            .range(reference.start.col..=reference.end.col)
-            .any(|(&col, rows)| {
-                let start = rows.partition_point(|&row| row < reference.start.row);
-                rows[start..]
-                    .iter()
-                    .take_while(|&&row| row <= reference.end.row)
-                    .any(|&row| {
-                        xlsx_model::open_timing! {
-                            xlsx_model::open_timing::count("save_array_range_changes", 1);
-                        }
-                        !stable_array || !self.fills_empty_cache(CellRef::new(row, col))
-                    })
-            })
+        rows.any(|(&row, cols)| {
+            let start = cols.partition_point(|&col| col < reference.start.col);
+            cols[start..]
+                .iter()
+                .take_while(|&&col| col <= reference.end.col)
+                .any(|&col| {
+                    xlsx_model::open_timing! {
+                        xlsx_model::open_timing::count("save_array_range_changes", 1);
+                    }
+                    !stable_array || !self.fills_empty_cache(CellRef::new(row, col))
+                })
+        })
     }
 
     fn fills_empty_cache(&self, at: CellRef) -> bool {
