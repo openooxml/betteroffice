@@ -5182,14 +5182,32 @@ fn last_block_paragraph(
     ordinals.into_iter().max()
 }
 
+fn find_tag_end(tag: &str) -> Option<usize> {
+    if matches!(tag.as_bytes().get(1), Some(b'!' | b'?')) {
+        return tag.find('>');
+    }
+    let mut quote = None;
+    for (offset, byte) in tag.bytes().enumerate().skip(1) {
+        match (quote, byte) {
+            (None, b'\'' | b'"') => quote = Some(byte),
+            (Some(current), byte) if current == byte => quote = None,
+            (None, b'>') => return Some(offset),
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Whether a run formatting patch of `xml`, one source paragraph, would drop field characters:
 /// the patch writer flattens a field nested in another field's result and field characters
 /// inside a hyperlink, as in a table of contents entry.
 fn reformatting_loses_fields(xml: &str) -> bool {
     let mut hyperlinks = 0usize;
     let mut fields = 0usize;
-    for tag in xml.split('<').skip(1) {
-        let tag = tag.split('>').next().unwrap_or_default();
+    let mut tags = xml.match_indices('<').map(|(start, _)| start).peekable();
+    while let Some(start) = tags.next() {
+        let tag = &xml[start..tags.peek().copied().unwrap_or(xml.len())];
+        let tag = &tag[1..find_tag_end(tag).unwrap_or(tag.len())];
         let closing = tag.starts_with('/');
         let name = tag
             .trim_start_matches('/')
@@ -5302,7 +5320,7 @@ fn cell_control_spans(xml: &str) -> Option<Vec<std::ops::Range<usize>>> {
             at = start + rest.find(close)? + close.len();
             continue;
         }
-        let end = start + rest.find('>')?;
+        let end = start + find_tag_end(rest)?;
         let tag = &xml[start + 1..end];
         at = end + 1;
         let name = tag
@@ -5340,7 +5358,7 @@ fn source_rewrite_loss(xml: &str, content_controls: bool) -> Option<KeptReason> 
                 continue 'scan;
             }
         }
-        let Some(end) = rest.find('>') else {
+        let Some(end) = find_tag_end(rest) else {
             return Some(KeptReason::Unreadable);
         };
         let tag = &rest[1..end];
@@ -5535,6 +5553,48 @@ mod tests {
             ooxml_opc::RetainedPackage::new(Arc::from(package)).unwrap(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn cell_control_spans_include_tags_with_quoted_greater_than() {
+        for (double, single) in [("ab", "cd"), ("a>b", "c>d")] {
+            let control = format!(
+                r#"<w:sdt><w:sdtPr><w:alias w:val="{double}" w:other='{single}'/></w:sdtPr><w:sdtContent><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:sdtContent></w:sdt>"#
+            );
+            let xml = format!("<w:tr>{control}</w:tr>");
+            let start = "<w:tr>".len();
+            let spans = cell_control_spans(&xml).unwrap();
+            assert_eq!(spans.len(), 1);
+            assert_eq!(spans[0], start..start + control.len());
+        }
+    }
+
+    #[test]
+    fn source_rewrite_loss_reads_attributes_after_quoted_greater_than() {
+        for (double, single) in [("ab", "cd"), ("a>b", "c>d")] {
+            for (kind, expected) in [("page", Some(KeptReason::Break)), ("textWrapping", None)] {
+                let xml = format!(
+                    r#"<w:p><w:r><w:br w:label="{double}" w:other='{single}' w:type="{kind}"/></w:r></w:p>"#
+                );
+                assert_eq!(source_rewrite_loss(&xml, false), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn reformatting_loses_fields_reads_past_quoted_greater_than() {
+        for (double, single) in [("ab", "cd"), ("a>b", "c>d")] {
+            let link = format!(r#"<w:hyperlink w:tooltip="{double}" w:other='{single}'/>"#);
+            let field = format!(
+                r#"<w:r><w:fldChar w:label="{double}" w:other='{single}' w:fldCharType="begin"/></w:r>"#
+            );
+            let xml = format!("<w:p>{link}{field}</w:p>");
+            assert!(!reformatting_loses_fields(&xml));
+
+            let first = r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#;
+            let xml = format!("<w:p>{first}{field}</w:p>");
+            assert!(reformatting_loses_fields(&xml));
+        }
     }
 
     #[test]
