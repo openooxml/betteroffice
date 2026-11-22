@@ -66,9 +66,11 @@ const HANDLERS = {
   onReplace: () => false, onReplaceAll: () => 0,
 };
 
+const focused = () => document.activeElement?.getAttribute('aria-label') ?? document.activeElement?.tagName ?? 'nothing';
+
 test('the Find field has the focus as the dialog opens', () => {
-  const view = render(<FindReplaceDialog isOpen {...HANDLERS} />);
-  expect(document.activeElement).toBe(view.getByRole('textbox', { name: 'Find text' }));
+  render(<FindReplaceDialog isOpen {...HANDLERS} />);
+  expect(focused()).toBe('Find text');
 });
 
 test('opening with search text fills the Find field and selects that text at once', () => {
@@ -77,21 +79,21 @@ test('opening with search text fills the Find field and selects that text at onc
     view.rerender(<FindReplaceDialog isOpen {...HANDLERS} initialSearchText={text} />);
     const field = view.getByRole<HTMLInputElement>('textbox', { name: 'Find text' });
     expect(field.value).toBe(text);
-    expect(document.activeElement).toBe(field);
+    expect(focused()).toBe('Find text');
     expect([field.selectionStart, field.selectionEnd]).toEqual([0, text.length]);
     view.rerender(<FindReplaceDialog isOpen={false} {...HANDLERS} />);
   }
 });
 
 test('opened for replacing, the dialog still starts in the Find field', () => {
-  const view = render(<FindReplaceDialog isOpen replaceMode {...HANDLERS} />);
-  expect(document.activeElement).toBe(view.getByRole('textbox', { name: 'Find text' }));
+  render(<FindReplaceDialog isOpen replaceMode {...HANDLERS} />);
+  expect(focused()).toBe('Find text');
 });
 
 test('the Replace field has the focus as "+ Replace" shows it', () => {
   const view = render(<FindReplaceDialog isOpen {...HANDLERS} />);
   act(() => { fireEvent.click(view.getByRole('button', { name: '+ Replace' })); });
-  expect(document.activeElement).toBe(view.getByRole('textbox', { name: 'Replace text' }));
+  expect(focused()).toBe('Replace text');
 });
 
 test('letters typed right after the shortcut that opens the dialog go to the Find field, not to the document', () => {
