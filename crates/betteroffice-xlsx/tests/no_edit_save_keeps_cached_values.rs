@@ -406,7 +406,11 @@ fn keeps_formula_less_cells_when_the_source_range_probe_budget_is_exhausted() {
     }
     sheet_data.push_str("</row>");
     for row in 2..=ROWS {
-        write!(sheet_data, r#"<row r="{row}"><c r="B{row}" s="0"><v /></c></row>"#).unwrap();
+        write!(
+            sheet_data,
+            r#"<row r="{row}"><c r="B{row}" s="0"><v /></c></row>"#
+        )
+        .unwrap();
     }
     let source = package_parts(&sheet_data, FULL_CALC);
     let workbook = open_recalculated(&source);
