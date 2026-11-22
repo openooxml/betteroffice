@@ -27,8 +27,10 @@ import { wrapLines, wrappedLineY } from './wrap';
 
 const STACKED_LINE_HEIGHT_RATIO = 1.2;
 const STACKED_ASCENT_RATIO = 0.8;
-const WRAPPED_ASCENT_PER_PT = (96 / 72) * 0.7;
-const WRAPPED_DESCENT_PER_PT = (96 / 72) * 0.2;
+const PX_PER_PT = 96 / 72;
+const FIT_TOLERANCE = 1e-4;
+const WRAPPED_ASCENT_PER_PT = PX_PER_PT * 0.7;
+const WRAPPED_DESCENT_PER_PT = PX_PER_PT * 0.2;
 
 const ALIGN_TO_TEXT_ALIGN: Record<NonNullable<TextCmd['align']>, CanvasTextAlign> = {
   left: 'left',
@@ -393,8 +395,9 @@ function paintWrappedPieces(
 ): void {
   const wrapped = wrapRunLines(cmd.text, pieces, wrap.width, (piece, part) => measurePiece(ctx, paint, piece, part));
   const lines = wrapped.slice(0, Math.max(0, wrap.maxLines ?? wrapped.length));
+  const cellHeight = cmd.clip ? cmd.clip.h + 1 : Infinity;
   const layout = pieces.some((piece) => piece.cmd.fontSize !== pieces[0]!.cmd.fontSize)
-    ? wrappedLineMetrics(cmd.y, cmd.fontSize, wrap, lines)
+    ? wrappedLineMetrics(cmd.y, cmd.fontSize, wrap, lines, cellHeight)
     : undefined;
   if (!layout) {
     lines.forEach((line, index) => {
@@ -412,27 +415,31 @@ function paintWrappedPieces(
 
   const { blockTop, metrics } = layout;
   const baseSized = metrics.every(({ size }) => size === cmd.fontSize);
-  for (const [index, line] of lines.entries()) {
-    const { top, size } = metrics[index]!;
+  for (const [index, { top, size }] of metrics.entries()) {
     const ascent = size * WRAPPED_ASCENT_PER_PT;
-    const baseline = baseSized ? wrappedLineY(cmd.y, index, lines.length, wrap) : blockTop + (top + ascent);
+    const baseline = baseSized ? wrappedLineY(cmd.y, index, metrics.length, wrap) : blockTop + (top + ascent);
     const lineTop = baseSized ? baseline - ascent : blockTop + top;
     if (lineTop >= clipBottom) break;
-    if (baseline + size * WRAPPED_DESCENT_PER_PT > clipTop) paintPieces(ctx, cmd, line, baseline, paint);
+    if (baseline + size * WRAPPED_DESCENT_PER_PT > clipTop) paintPieces(ctx, cmd, lines[index]!, baseline, paint);
   }
 }
 
-function wrappedLineMetrics(y: number, fontSize: number, wrap: TextWrap, lines: TextPiece[][]) {
+function wrappedLineMetrics(y: number, fontSize: number, wrap: TextWrap, lines: TextPiece[][], cellHeight: number) {
   if (!Number.isFinite(fontSize) || fontSize <= 0 || !Number.isFinite(wrap.lineHeight) || wrap.lineHeight <= 0) {
     return undefined;
   }
 
   const metrics: { top: number; size: number }[] = [];
   let totalHeight = 0;
-  for (const line of lines) {
+  let baseSized = true;
+  for (const [index, line] of lines.entries()) {
     const size = line.reduce((largest, piece) => Math.max(largest, piece.cmd.fontSize), line[0]?.cmd.fontSize ?? fontSize);
     const height = wrap.lineHeight * (size / fontSize);
     if (!Number.isFinite(height) || height <= 0) return undefined;
+    baseSized &&= size === fontSize;
+    const topInLines = baseSized ? index : totalHeight / height;
+    const room = (cellHeight - size * PX_PER_PT / 2) / height + FIT_TOLERANCE;
+    if (index > 0 && Number.isFinite(cellHeight) && topInLines > room) break;
     metrics.push({ top: totalHeight, size });
     totalHeight += height;
   }

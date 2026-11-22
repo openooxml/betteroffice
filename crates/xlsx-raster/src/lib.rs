@@ -14,10 +14,13 @@ use tiny_skia::{
     Transform,
 };
 
-use xlsx_render::{Align, DisplayList, DrawCmd, GeometryPathCommand, Rect as DlRect};
+use xlsx_render::{
+    Align, DisplayList, DrawCmd, GeometryPathCommand, Rect as DlRect, geometry::PX_PER_PT,
+    wrap::FIT_TOLERANCE,
+};
 
-const WRAPPED_ASCENT_PER_PT: f32 = xlsx_render::geometry::PX_PER_PT as f32 * 0.7;
-const WRAPPED_DESCENT_PER_PT: f32 = xlsx_render::geometry::PX_PER_PT as f32 * 0.2;
+const WRAPPED_ASCENT_PER_PT: f32 = PX_PER_PT as f32 * 0.7;
+const WRAPPED_DESCENT_PER_PT: f32 = PX_PER_PT as f32 * 0.2;
 
 #[cfg(test)]
 thread_local! {
@@ -274,7 +277,8 @@ pub fn render_png_with_images(dl: &DisplayList, images: &ImageMap<'_>) -> Result
                                 text,
                                 &pieces,
                                 &mut measured,
-                                clipped_to_target(*clip, w, h),
+                                *clip,
+                                (w, h),
                             ),
                             None => vec![(*y, pieces)],
                         };
@@ -787,6 +791,7 @@ impl<M: FnMut(&xlsx_render::TextPiece, &str) -> f32> PieceWidths<M> {
 }
 
 /// The baseline and pieces of each line a wrapped command keeps.
+#[allow(clippy::too_many_arguments)]
 fn wrapped_lines(
     y: f32,
     font_size: f32,
@@ -794,7 +799,8 @@ fn wrapped_lines(
     text: &str,
     pieces: &[xlsx_render::TextPiece],
     measured: &mut PieceWidths<impl FnMut(&xlsx_render::TextPiece, &str) -> f32>,
-    clip: Option<DlRect>,
+    clip: DlRect,
+    target_size: (u32, u32),
 ) -> Vec<(f32, Vec<xlsx_render::TextPiece>)> {
     let mut lines = xlsx_render::wrap_run_lines(text, pieces, wrap.width, |piece, part| {
         measured.width(piece, part)
@@ -805,12 +811,14 @@ fn wrapped_lines(
         && pieces
             .iter()
             .any(|piece| piece.font_size != first.font_size)
-        && let Some((block_top, metrics)) = wrapped_line_metrics(y, font_size, wrap, &lines)
+        && let Some((block_top, metrics)) =
+            wrapped_line_metrics(y, font_size, wrap, &lines, clip.h + 1.0)
     {
-        let Some(clip) = clip else {
+        let Some(clip) = clipped_to_target(clip, target_size.0, target_size.1) else {
             return Vec::new();
         };
         let clip_bottom = clip.y + clip.h;
+        let count = metrics.len();
         let base_sized = metrics.iter().all(|(_, size)| *size == font_size);
         let mut visible = Vec::new();
         for (index, (line, (top, size))) in lines.into_iter().zip(metrics).enumerate() {
@@ -848,6 +856,7 @@ fn wrapped_line_metrics(
     font_size: f32,
     wrap: &xlsx_render::TextWrap,
     lines: &[Vec<xlsx_render::TextPiece>],
+    cell_height: f32,
 ) -> Option<(f32, Vec<(f32, f32)>)> {
     if !font_size.is_finite()
         || font_size <= 0.0
@@ -859,7 +868,9 @@ fn wrapped_line_metrics(
 
     let mut metrics = Vec::with_capacity(lines.len());
     let mut total_height = 0.0;
-    for line in lines {
+    let mut fit_top = 0.0;
+    let mut base_sized = true;
+    for (index, line) in lines.iter().enumerate() {
         if line.iter().any(|piece| piece.font_size.is_nan()) {
             return None;
         }
@@ -872,8 +883,21 @@ fn wrapped_line_metrics(
         if !height.is_finite() || height <= 0.0 {
             return None;
         }
+        let pitch = f64::from(height);
+        base_sized &= size == font_size;
+        let top_in_lines = if base_sized {
+            index as f64
+        } else {
+            fit_top / pitch
+        };
+        let room =
+            (f64::from(cell_height) - f64::from(size) * PX_PER_PT / 2.0) / pitch + FIT_TOLERANCE;
+        if index > 0 && cell_height.is_finite() && top_in_lines > room {
+            break;
+        }
         metrics.push((total_height, size));
         total_height += height;
+        fit_top += pitch;
     }
     let &(last_top, last_size) = metrics.last()?;
     let last_baseline = last_top + last_size * WRAPPED_ASCENT_PER_PT;
