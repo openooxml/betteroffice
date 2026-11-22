@@ -1,6 +1,7 @@
 import { afterEach, expect, mock, spyOn, test } from 'bun:test';
-import type { BundledFontFace } from '@betteroffice/fonts';
+import { configureFontCdn, type BundledFontFace } from '@betteroffice/fonts';
 import type { FontDecoder } from '../../../shared/office-session/fontDecoder';
+import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../shared/office-session/fontCdn';
 import { createSessionHost } from '../../../shared/office-session/host';
 import { createInProcessPair } from '../../../shared/office-session/testing/inProcessTransport';
 import type { DisplayList, TextCmd } from '@betteroffice/xlsx';
@@ -700,4 +701,23 @@ test('no painter work happens before a worker decoder exists', async () => {
   const { imported } = provider();
   await createDefaultFontPainter(undefined, () => {}).load(display({ family: 'Calibri' }));
   expect(imported).not.toHaveBeenCalled();
+});
+
+test('an already absent editor face is tried again after changing the CDN', async () => {
+  const { added } = browser();
+  const previous = getFontCdnConfiguration();
+  const load = mock(async (face: BundledFontFace) =>
+    new ArrayBuffer(getFontCdnConfiguration()?.baseUrl ? face.byteLength : 4));
+  provider(load);
+  const painter = createDefaultFontPainter(decoder(), () => {});
+  const frame = display({ family: 'MS Gothic' });
+  try {
+    configureFontCdn({ baseUrl: false });
+    await painter.load(frame);
+    expect(added).toHaveLength(0);
+    configureFontCdn({ baseUrl: 'https://editor-fonts.example/' });
+    await painter.load(frame);
+    expect(added).toHaveLength(1);
+    expect(load).toHaveBeenCalledTimes(2);
+  } finally { painter.dispose(); setFontCdnConfiguration(previous); }
 });

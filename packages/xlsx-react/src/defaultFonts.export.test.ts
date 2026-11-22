@@ -46,3 +46,22 @@ test('editors with default fonts off forward no faces and load no fonts', async 
   expect(await editorExportFaces([], null, undefined)).toBeUndefined();
   expect(load).not.toHaveBeenCalled();
 });
+
+test('spreadsheet editor PNG requests strict faces instead of accepting implicit substitutes', async () => {
+  const face = { family: 'Carlito', weight: 400, style: 'normal', byteLength: 3 };
+  const load = async () => new ArrayBuffer(3);
+  const strictLoad = mock(async (_face: unknown, _options: unknown, runtime?: { strict?: boolean }) => {
+    if (runtime?.strict) throw new Error('Implicit CDN offline');
+    return load();
+  });
+  spyOn(xlsxDefaultFontManager, 'load').mockResolvedValue({
+    bundledFaceInstalled: async () => true,
+    resolveMetricCompatFace: () => face,
+    createFontProvider: (_options: unknown, runtime?: { strict?: boolean }) => ({
+      resolve: () => () => strictLoad(face, undefined, runtime),
+    }),
+    loadBundledFontBytes: strictLoad,
+  } as never);
+  await expect(exportFaces([{ family: 'Calibri', bold: false, italic: false }], null))
+    .rejects.toMatchObject({ code: 'font-unavailable' });
+});

@@ -1,6 +1,8 @@
 import { afterEach, expect, mock, spyOn, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import * as fonts from '@betteroffice/fonts';
+import { withBrowserFontGlobals } from '../../../fonts/src/test-assets';
+import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import * as progressive from '@betteroffice/fonts/progressive';
 import type { DefaultFontFace } from '../../../../shared/pptxDefaultFonts';
 import { commandFontProvider, createCommandDefaultFonts, prefetchCoverageFaces } from './commandDefaultFonts';
@@ -576,4 +578,14 @@ test('a worker provider applies its session CDN snapshot before creating loaders
     expect(fonts.fontCdnConfiguration().baseUrl).toBe(false);
     expect(create).toHaveBeenCalledTimes(2);
   } finally { fonts.configureFontCdn({ baseUrl: false }); }
+});
+
+test('a PPTX worker font provider preserves the implicit CDN marker from session prefetch', async () => {
+  const previous = getFontCdnConfiguration();
+  const restore = withBrowserFontGlobals(false);
+  const inherited = { baseUrl: 'https://cdn.jsdelivr.net/npm/', timeoutMs: 3000, implicit: true } as const;
+  try {
+    await commandFontProvider.load(inherited);
+    expect(fonts.fontCdnConfiguration()).toEqual(inherited);
+  } finally { restore(); setFontCdnConfiguration(previous); }
 });

@@ -1,6 +1,8 @@
 import { afterEach, beforeAll, describe, expect, mock, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import * as fonts from '@betteroffice/fonts';
+import { fontAssetResponse, withBrowserFontGlobals } from '../../../fonts/src/test-assets';
+import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import { configureDefaultFonts, resolveCompleteFontProvider } from '../layout/measure';
 import { engineKind } from '../wasm/enginePng';
 import { createYrsSession, type YrsSession } from './index';
@@ -63,6 +65,33 @@ async function rejection(work: Promise<unknown>): Promise<{ name?: string; code?
 
 for (const { kind } of ENGINES) {
   describe.skipIf(engineKind !== kind)(`renderPng font packs on the ${kind} engine`, () => {
+    test('DOCX PNG rejects an implicit CDN failure before drawing', async () => {
+      const canvas = stubBrowser();
+      const previous = getFontCdnConfiguration();
+      const restore = withBrowserFontGlobals();
+      const face = fonts.resolveMetricCompatFace('Arial', false, false)!;
+      withheld.add(face.file);
+      const requests: string[] = [];
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        if (String(input).includes('cdn.jsdelivr.net')) {
+          requests.push(String(input));
+          return new Response(null, { status: 404 });
+        }
+        return fontAssetResponse(input);
+      }) as typeof fetch;
+      try {
+        setFontCdnConfiguration(undefined);
+        const error = await rejection(exported([{ family: 'Arial', text: 'Plain text' }]));
+        expect(error).toMatchObject({ name: 'PngExportError', code: 'font-unavailable', message: expect.stringContaining('HTTP 404') });
+        expect(requests.some((url) => url.endsWith(face.file))).toBe(true);
+        expect(canvas.encoded).toBe(0);
+      } finally {
+        Reflect.deleteProperty(globalThis, Symbol.for('betteroffice.fonts.cdn-unavailable'));
+        restore();
+        setFontCdnConfiguration(previous);
+      }
+    });
+
     test('an installed pack that cannot serve a face rejects the export naming the face and the family', async () => {
       stubBrowser();
       const face = fonts.resolveMetricCompatFace('Arial', false, false)!;

@@ -18,3 +18,18 @@ export async function fontAssetResponse(input: RequestInfo | URL): Promise<Respo
   const pack = latinFiles.has(file) ? 'fonts-latin' : cjkFiles.has(file) ? 'fonts-cjk' : 'fonts-intl';
   return new Response(await Bun.file(new URL(`../../${pack}/assets/${file}`, import.meta.url)).arrayBuffer());
 }
+
+export function withBrowserFontGlobals(page = true): () => void {
+  const document = page ? globalThis.document ?? {} : undefined;
+  const globals = { window: page ? { document } : undefined, document, process: undefined, Deno: undefined };
+  const previous = Object.keys(globals).map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)] as const);
+  for (const [key, value] of Object.entries(globals)) {
+    Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
+  }
+  return () => {
+    for (const [key, descriptor] of previous) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else Reflect.deleteProperty(globalThis, key);
+    }
+  };
+}

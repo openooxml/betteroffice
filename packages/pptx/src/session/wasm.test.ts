@@ -6,6 +6,7 @@ import {
   createSourceFile, forEachChild, isIdentifier, isNewExpression, isObjectLiteralExpression,
   isPropertyAssignment, isStringLiteral, ScriptTarget, type Node,
 } from 'typescript';
+import { withBrowserFontGlobals } from '../../../fonts/src/test-assets';
 import { engineKind } from '../wasm/engine';
 import { isClientMessage } from '../../../../shared/office-session/protocol';
 import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
@@ -71,6 +72,26 @@ test('session opens forward only configured font CDN state', async () => {
         if (configured) expect(input(h.workers[0])).toMatchObject({ fontCdn: configured });
         else expect(input(h.workers[0])).not.toHaveProperty('fontCdn');
       } finally { await session.dispose(); }
+    }
+  } finally { setFontCdnConfiguration(previous); }
+});
+
+test('PPTX open sends the page default and omits it for a Node host', async () => {
+  const previous = getFontCdnConfiguration();
+  setFontCdnConfiguration(undefined);
+  try {
+    for (const page of [false, true]) {
+      const h = factory();
+      const restore = page ? withBrowserFontGlobals() : () => {};
+      try {
+        const session = await h.client.openPresentationSession(new Uint8Array(), { wasm: h.module });
+        try {
+          if (page) expect(input(h.workers[0])).toMatchObject({
+            fontCdn: { baseUrl: 'https://cdn.jsdelivr.net/npm/', timeoutMs: 3000, implicit: true },
+          });
+          else expect(input(h.workers[0])).not.toHaveProperty('fontCdn');
+        } finally { await session.dispose(); }
+      } finally { restore(); }
     }
   } finally { setFontCdnConfiguration(previous); }
 });

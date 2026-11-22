@@ -1,0 +1,33 @@
+import { parentPort } from 'node:worker_threads';
+import { stubBrowser } from '../../../packages/docx/src/yrs/renderPngTestSupport';
+import type { SessionScope } from '../transport';
+
+const port = parentPort!;
+const fetchAsset = globalThis.fetch;
+globalThis.fetch = ((input, options) => {
+  const url = input instanceof Request ? input.url : String(input);
+  if (url.startsWith('https://cdn.jsdelivr.net/')) {
+    port.postMessage({ kind: 'unexpected-cdn-fetch', url });
+    return Promise.resolve(new Response(null, { status: 404 }));
+  }
+  return fetchAsset(input, options);
+}) as typeof fetch;
+
+stubBrowser();
+class Face {
+  constructor(readonly family: string) {}
+  load() { return Promise.resolve(this); }
+}
+const faces = new Set<Face>();
+const document = { fonts: {
+  add: (face: Face) => faces.add(face),
+  delete: (face: Face) => faces.delete(face),
+  load: async (font: string) => [...faces].filter(({ family }) => font.includes(`"${family}"`)),
+} };
+Object.assign(globalThis, { FontFace: Face, document, window: { document } });
+const scope = port as unknown as SessionScope;
+if (process.env.BETTEROFFICE_TEST_NODE_WORKER_FORMAT === 'pptx') {
+  (await import('../../../packages/pptx/src/session/workerStart')).startSessionWorker(scope);
+} else {
+  (await import('../../../packages/xlsx/src/session/workerStart')).startSessionWorker(scope);
+}

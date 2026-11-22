@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from 'bun:test';
+import { afterEach, beforeEach, expect, mock, test } from 'bun:test';
 import { prepareTextFamilies } from '../render/textFamilies';
 import { createSlicedFontFaces, slicedFacesSupported, type SlicedFontFace } from './commandSlicedFonts';
 
@@ -394,3 +394,20 @@ test('what a revision holds is a chunk set, so editing marked text retains nothi
   expect(face.loadedChunks().size).toBeLessThan(6);
 });
 
+
+test('completeExport rejects a sliced face whose strict whole-face load fails', async () => {
+  const sliced = createSlicedFontFaces();
+  const replaceExportFace = mock(() => {});
+  const whole = Object.assign(async () => new ArrayBuffer(4), { slices: {
+    ref: { format: 1, index: 'index.json', indexSha256: '' },
+    base: 'https://cdn.jsdelivr.net/',
+    url: async (file: string) => new URL(file, 'https://cdn.jsdelivr.net/'),
+    decode: async (bytes: ArrayBuffer) => bytes,
+    loadWholeForExport: async () => { throw new Error('Implicit CDN offline'); },
+  } });
+  sliced.add('Noto Sans JP', fakeFace(), whole);
+  await expect(sliced.completeExport({ replaceExportFace })).rejects.toMatchObject({
+    name: 'PngExportError', code: 'font-unavailable', message: expect.stringContaining('Implicit CDN offline'),
+  });
+  expect(replaceExportFace).not.toHaveBeenCalled();
+});
