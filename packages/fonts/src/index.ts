@@ -1,9 +1,8 @@
 import { createFontRuntime, type FontAssetUrls, type FontPackLookup } from './fontRuntime';
 import { absoluteHref } from './assetHref';
 import { bundledDecoderUrl } from './decodeAssets';
-import { fontCdnAssetUrl, fontCdnConfiguration } from './fontCdn';
-import { localFontAssets } from './localFontAssets';
-import { addonManifests } from './packed';
+import { fontCdnConfiguration } from './fontCdn';
+import { BASE_LATIN_FONT_ASSET_URLS } from './base-latin';
 import type { FontAssetKind } from '../../../shared/office-session/optionalFontPacks';
 
 export { configureFontCdn, fontCdnConfiguration, type FontCdnOptions, type FontCdnConfiguration } from './fontCdn';
@@ -61,8 +60,9 @@ function assetUrls(urls: FontAssetUrls, pack: string): FontAssetUrls {
 }
 
 const importers = { latin: importLatinAssetUrls, intl: importIntlAssetUrls, cjk: importCjkAssetUrls };
-const pending = new Map<Parameters<FontPackLookup>[0], Promise<FontAssetUrls | undefined>>();
-const lookup: FontPackLookup = (pack) => {
+const pending = new Map<keyof typeof importers, Promise<FontAssetUrls | undefined>>();
+function installedUrls(pack: Exclude<FontAssetKind, 'decoder'>): Promise<FontAssetUrls | undefined> {
+  if (pack === 'base') return Promise.resolve(BASE_LATIN_FONT_ASSET_URLS);
   let promise = pending.get(pack);
   if (!promise) {
     promise = importers[pack]();
@@ -72,28 +72,21 @@ const lookup: FontPackLookup = (pack) => {
     promise.then((urls) => { if (urls === undefined) forget(); }, forget);
   }
   return promise;
-};
+}
+
+const lookup: FontPackLookup = async (pack) => ({ urls: await installedUrls(pack), cdn: fontCdnConfiguration() });
 
 export const {
   bundledFaceInstalled, isMissingFontAddon, loadBundledFontBytes, registerBundledFontFace,
   createFontProvider, decodeFontFaceOutsideEngine, checkFontPacks,
-} = createFontRuntime(lookup, { local: localFontAssets });
+} = createFontRuntime(lookup, { localCdn: fontCdnConfiguration });
 
-/** Absolute font asset URLs by file name, or undefined when none are available. */
+/** Absolute installed font asset URLs by file name, or undefined when the package is absent. */
 export async function fontAssetUrls(kind: FontAssetKind): Promise<Record<string, string> | undefined> {
   if (kind === 'decoder') {
     const url = bundledDecoderUrl();
     return url && { 'fontpack.wasm': url.href };
   }
-  const installed = await lookup(kind);
-  const resolvers = kind === 'latin' ? { ...installed, ...localFontAssets.baseLatin } : installed;
-  const urls = Object.fromEntries(Object.entries(resolvers ?? {}).map(([file, url]) => [file, new URL(absoluteHref(url().href)).href]));
-  const { baseUrl } = fontCdnConfiguration();
-  if (baseUrl) {
-    const manifest = addonManifests[kind];
-    const files = manifest.faces.map(({ file }) => file);
-    if (kind === 'cjk') files.push(...(await import('./cjkSliceFiles')).cjkSliceFiles);
-    for (const file of files) urls[file] ??= fontCdnAssetUrl(manifest, file, baseUrl).href;
-  }
-  return Object.keys(urls).length ? urls : undefined;
+  const installed = await installedUrls(kind);
+  return installed && Object.fromEntries(Object.entries(installed).map(([file, url]) => [file, new URL(absoluteHref(url().href)).href]));
 }

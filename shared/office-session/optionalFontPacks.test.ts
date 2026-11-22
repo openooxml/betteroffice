@@ -64,13 +64,13 @@ test('the worker keeps its lazy pack responder through session listener handoff'
     expect(source('intl')).toBe(first);
     page.removeEventListener('message', prepared);
     page.addEventListener('message', session);
-    expect(await first).toEqual({ 'intl.zst': 'https://fonts.example/intl.zst' });
+    expect((await first)?.urls).toEqual({ 'intl.zst': 'https://fonts.example/intl.zst' });
     await source('intl');
     await source('cjk');
     await source('cjk');
     await source('latin');
     await source('decoder');
-    expect(imports.mock.calls).toEqual([['intl'], ['cjk'], ['latin'], ['decoder']]);
+    expect(imports.mock.calls).toEqual([['intl'], ['intl'], ['cjk'], ['cjk'], ['latin'], ['decoder']]);
     expect(prepared).not.toHaveBeenCalled();
     expect(session).not.toHaveBeenCalled();
     expect(host).not.toHaveBeenCalled();
@@ -95,7 +95,7 @@ test('the installer consumes replies before later boot and session listeners', a
   scope.dispatchEvent(new MessageEvent('message', { data: {
     protocol: 1, kind: 'font-pack-reply', id: requests[0]!.id, urls,
   } }));
-  expect(await pending).toEqual(urls);
+  expect(await pending).toEqual({ urls });
   scope.dispatchEvent(new MessageEvent('message', { data: { protocol: 1, kind: 'font-pack-reply', id: 'unknown' } }));
   expect(held).not.toHaveBeenCalled();
   expect(session).not.toHaveBeenCalled();
@@ -119,7 +119,7 @@ test('the page shares concurrent lookups and retries failed or missing packs', a
   await send('missing');
   await send('installed');
   await send('cached');
-  expect(imports).toHaveBeenCalledTimes(3);
+  expect(imports).toHaveBeenCalledTimes(4);
   expect(replies).toEqual([
     { protocol: 1, kind: 'font-pack-reply', id: 'first', error: 'Import failed' },
     { protocol: 1, kind: 'font-pack-reply', id: 'concurrent', error: 'Import failed' },
@@ -136,27 +136,21 @@ test('the worker can continue after the page replies without font assets', async
   try {
     const first = worker.source('latin');
     expect(worker.source('latin')).toBe(first);
-    expect(await first).toBeUndefined();
-    expect(await worker.source('latin')).toBeUndefined();
-    expect(await worker.source('decoder')).toBeUndefined();
+    expect(await first).toEqual({ urls: undefined });
+    expect(await worker.source('latin')).toEqual({ urls: undefined });
+    expect(await worker.source('decoder')).toEqual({ urls: undefined });
     expect(requests.map(({ pack }) => pack)).toEqual(['latin', 'latin', 'decoder']);
   } finally {
     worker.dispose();
   }
 });
 
-test('the page passes the configured CDN timeout for fallback URLs', async () => {
-  const urls = {
-    'installed.zst': 'https://app.example/font.zst',
-    'fallback.zst': 'https://cdn.example/root/cjk/1/fallback.zst',
-  };
+test('the page passes the configured CDN independently of the installed URL map', async () => {
+  const cdn = { baseUrl: 'https://cdn.example/root/', timeoutMs: 1234 };
   const worker = createWorkerFontPacks((message) => { page.receive(message); });
-  const page = createFontPackResponder(worker.receive, async () => urls,
-    (pack) => ({ prefix: `https://cdn.example/root/${pack}/`, timeoutMs: 1234 }));
+  const page = createFontPackResponder(worker.receive, async () => undefined, () => cdn);
   try {
-    expect(await worker.source('cjk')).toEqual(urls);
-    expect(worker.timeout(new URL(urls['fallback.zst']))).toBe(1234);
-    expect(worker.timeout(new URL(urls['installed.zst']))).toBeUndefined();
+    expect(await worker.source('cjk')).toEqual({ urls: undefined, cdn });
   } finally {
     worker.dispose();
   }
@@ -179,7 +173,7 @@ test('the worker retries after a 15-second timeout and ignores late replies', as
     packs.receive({ protocol: 1, kind: 'font-pack-reply', id: requests[0]!.id });
     const urls = { 'fontpack.wasm': 'https://fonts.example/fontpack.wasm' };
     packs.receive({ protocol: 1, kind: 'font-pack-reply', id: requests[1]!.id, urls });
-    expect(await retry).toEqual(urls);
+    expect(await retry).toEqual({ urls });
   } finally {
     packs.dispose();
     timer.mockRestore();
@@ -200,13 +194,16 @@ test('the worker requests a pack again after an error or missing reply', async (
   await expect(emptyError).rejects.toMatchObject({ code: 'message', message: '' });
   const missing = packs.source('cjk');
   reply({});
-  expect(await missing).toBeUndefined();
+  expect(await missing).toEqual({ urls: undefined });
   const installed = packs.source('cjk');
   const urls = { 'cjk.zst': 'https://fonts.example/cjk.zst' };
   reply({ urls });
-  expect(await installed).toEqual(urls);
-  expect(packs.source('cjk')).toBe(installed);
   expect(requests).toHaveLength(4);
+  expect(await installed).toEqual({ urls });
+  const next = packs.source('cjk');
+  expect(requests).toHaveLength(5);
+  reply({ urls });
+  expect(await next).toEqual({ urls });
   packs.dispose();
 });
 

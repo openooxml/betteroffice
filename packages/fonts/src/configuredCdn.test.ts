@@ -13,6 +13,9 @@ import { openSlicedFace, sliceSourceOf } from './progressive-entry';
 import { parseSkeleton } from './slices';
 import { writeFontCdnTree } from '../../../scripts/fonts/cdn-tree';
 import { getFontCdnConfiguration, setFontCdnConfiguration, type FontCdnConfiguration } from '../../../shared/office-session/fontCdn';
+import { createFontPackResponder, createWorkerFontPacks } from '../../../shared/office-session/optionalFontPacks';
+import { setWorkerFontAssets } from './workerAssets';
+import * as worker from './worker';
 
 let installed = false;
 for (const [name, manifest, exported] of [
@@ -71,6 +74,7 @@ beforeEach(() => {
 
 afterEach(() => {
   setFontCdnConfiguration(previousConfiguration);
+  setWorkerFontAssets(async () => undefined);
   globalThis.fetch = originalFetch;
 });
 
@@ -80,40 +84,61 @@ test('CDN loading starts disabled and preserves missing-pack errors', async () =
   expect(getFontCdnConfiguration()).toBeUndefined();
   expect(await fonts.bundledFaceInstalled(regular)).toBe(false);
   await expect(fonts.loadBundledFontBytes(regular, undefined, runtime)).rejects.toMatchObject({ name: 'MissingFontAddonError' });
-  await expect(fonts.loadBundledFontBytes(japanese, undefined, runtime)).rejects.toThrow('install @betteroffice/fonts-cjk');
+  setWorkerFontAssets(async () => ({ urls: undefined }));
+  for (const face of [japanese, fonts.resolveScriptFallbackFace('thai', false, false)!, regular]) {
+    const pageError = await fonts.loadBundledFontBytes(face, undefined, runtime).catch((error: unknown) => error);
+    const workerError = await worker.loadBundledFontBytes(face, undefined, runtime).catch((error: unknown) => error);
+    expect(pageError).toBeInstanceOf(Error);
+    expect((workerError as Error).constructor).toBe((pageError as Error).constructor);
+    expect((workerError as Error).message).toBe((pageError as Error).message);
+  }
 });
 
-test('the page lookup resolves every pack by file name and uses the configured CDN only for missing assets', async () => {
-  expect(await fonts.fontAssetUrls('intl')).toBeUndefined();
-  expect(await fonts.fontAssetUrls('cjk')).toBeUndefined();
-  const bundledLatin = await fonts.fontAssetUrls('latin');
-  const bundledDecoder = await fonts.fontAssetUrls('decoder');
-  expect(Object.keys(bundledLatin!).sort()).toEqual(fonts.BASE_LATIN_FONTS.map(({ file }) => file).sort());
-  expect(bundledDecoder).toEqual({ 'fontpack.wasm': new URL('./decoder/fontpack.wasm', import.meta.url).href });
-
-  fonts.configureFontCdn({ baseUrl: 'https://fonts.example/./root' });
-  const latinUrls = await fonts.fontAssetUrls('latin');
-  const intlUrls = await fonts.fontAssetUrls('intl');
-  const cjkUrls = await fonts.fontAssetUrls('cjk');
-  const cjkIndex = cjk.faces.find(({ file }) => file === japanese.file)!.slices!.index;
-  const cjkSlice = cjkIndex.replace('slices.json', 'c001.zst');
-  const thaiFile = fonts.resolveScriptFallbackFace('thai', false, false)!.file;
-  expect(latinUrls).toMatchObject({ ...bundledLatin, [regular.file]: `https://fonts.example/root/latin/${latin.version}/${regular.file}` });
-  expect(intlUrls?.[thaiFile]).toBe(`https://fonts.example/root/intl/${intl.version}/${thaiFile}`);
-  expect(cjkUrls?.[cjkIndex]).toBe(`https://fonts.example/root/cjk/${cjk.version}/${cjkIndex}`);
-  expect(cjkUrls?.[cjkSlice]).toBe(`https://fonts.example/root/cjk/${cjk.version}/${cjkSlice}`);
-  for (const face of cjk.faces) {
-    if (!face.slices) continue;
-    const index = await Bun.file(asset('cjk', face.slices.index)).json() as {
-      skeleton: { file: string }; core: { file: string }; chunks: { file: string }[];
-    };
-    for (const file of [face.file, face.slices.index, index.skeleton.file, index.core.file, ...index.chunks.map(({ file }) => file)]) {
-      expect(cjkUrls?.[file]).toBe(`https://fonts.example/root/cjk/${cjk.version}/${file}`);
-    }
+test('a worker sees CDN changes after a successful pack lookup and resolves CJK slices from the published index', async () => {
+  const channel = createWorkerFontPacks((message) => { page.receive(message); });
+  const page = createFontPackResponder(channel.receive, fonts.fontAssetUrls, getFontCdnConfiguration);
+  setWorkerFontAssets(channel.source);
+  const requests: string[] = [];
+  serveAssets(requests);
+  const provider = worker.createFontProvider(undefined, { decoder });
+  const location = provider.resolveScriptFallback('cjk-jp', false, false)!.slices!;
+  try {
+    fonts.configureFontCdn({ baseUrl: 'https://fonts.example/first', timeoutMs: 1234 });
+    expect(await worker.bundledFaceInstalled(japanese)).toBe(true);
+    const first = await openSlicedFace(location);
+    expect(requests).toContain(`https://fonts.example/first/cjk/${cjk.version}/${location.ref.index}`);
+    expect((await sliceSourceOf(first)!).timeoutMs).toBe(1234);
+    fonts.configureFontCdn({ baseUrl: 'https://fonts.example/second', timeoutMs: 4321 });
+    const second = await openSlicedFace(location);
+    await second.ensureText('日本語');
+    expect(requests).toContain(`https://fonts.example/second/cjk/${cjk.version}/${location.ref.index}`);
+    const source = (await sliceSourceOf(second)!)!;
+    expect(source.timeoutMs).toBe(4321);
+    expect(Object.keys(source.urls).some((file) => /\/c\d+\.zst$/.test(file))).toBe(true);
+    expect(Object.values(source.urls).every((url) => url.startsWith('https://fonts.example/second/'))).toBe(true);
+    fonts.configureFontCdn({ baseUrl: false });
+    expect(await worker.bundledFaceInstalled(japanese)).toBe(false);
+  } finally {
+    channel.dispose();
   }
-  expect(await fonts.fontAssetUrls('decoder')).toEqual(bundledDecoder);
-  for (const urls of [latinUrls, intlUrls, cjkUrls, bundledDecoder]) {
-    for (const href of Object.values(urls!)) expect(new URL(href).href).toBe(href);
+});
+
+test('an absent Latin add-on has no map or diagnostic even with built-in Latin and a configured CDN', async () => {
+  const channel = createWorkerFontPacks((message) => { page.receive(message); });
+  const page = createFontPackResponder(channel.receive, fonts.fontAssetUrls, getFontCdnConfiguration);
+  setWorkerFontAssets(channel.source);
+  try {
+    for (const baseUrl of [false, 'https://fonts.example/'] as const) {
+      fonts.configureFontCdn({ baseUrl });
+      expect(await fonts.fontAssetUrls('latin')).toBeUndefined();
+      const base = await fonts.fontAssetUrls('base');
+      expect(Object.keys(base!).sort()).toEqual(fonts.BASE_LATIN_FONTS.map(({ file }) => file).sort());
+      expect(await worker.bundledFaceInstalled(fonts.BASE_LATIN_FONTS[0]!)).toBe(true);
+      expect(await worker.bundledFaceInstalled(regular)).toBe(Boolean(baseUrl));
+      expect(await worker.checkFontPacks()).toEqual([]);
+    }
+  } finally {
+    channel.dispose();
   }
 });
 

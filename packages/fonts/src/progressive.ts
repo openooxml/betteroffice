@@ -46,6 +46,8 @@ export interface SliceLocation {
   /** The URL of a pack file by its manifest path. */
   url(file: string): Promise<URL>;
   timeoutMs?: number;
+  /** @internal Snapshot the asset URLs for one open and its outline loads. */
+  prepareUrls?(): Promise<Pick<SliceLocation, 'base' | 'url' | 'timeoutMs'> & Partial<Pick<SliceLocation, 'decode'>>>;
   /** @internal */
   requestTimeoutMs?(url: URL): number | undefined;
   /** Decompresses a zstd file to at most `maxOutput` bytes. */

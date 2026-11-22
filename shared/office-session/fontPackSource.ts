@@ -1,16 +1,14 @@
 import { getFontCdnConfiguration } from './fontCdn';
-import { createFontPackResponder, type FontAssetKind, type FontPackReply, type FontPackSource } from './optionalFontPacks';
+import { createFontPackResponder, type FontPackReply, type FontPackSource } from './optionalFontPacks';
 
 const importFontAssets: FontPackSource = async (pack) => {
   const fonts = await import('@betteroffice/fonts').catch(() => undefined);
   return fonts?.fontAssetUrls?.(pack);
 };
 
-function fontCdn(pack: Exclude<FontAssetKind, 'decoder'>) {
+function fontCdn() {
   const configuration = getFontCdnConfiguration();
-  if (configuration?.baseUrl) {
-    return { prefix: new URL(`${pack}/`, configuration.baseUrl).href, timeoutMs: configuration.timeoutMs };
-  }
+  if (configuration?.baseUrl) return configuration;
 }
 const ATTACHED = Symbol.for('betteroffice.fontPackSource');
 const DETACH = Symbol.for('betteroffice.fontPackSource.detach');

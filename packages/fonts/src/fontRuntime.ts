@@ -2,9 +2,11 @@ import type { FontDecoder } from './decode';
 import { BUNDLED_FONTS, resolveMetricCompatFace, type BundledFontFace } from './manifest';
 import { fontProvider, type BundledFontSource } from './provider';
 import { loadFontBytes } from './bytes';
-import { loadPackedFontBytes, readPackedFontBytes, isBaseLatinFont, isLatinFont, sliceDecoder, sliceRefOf } from './packed';
+import { loadPackedFontBytes, readPackedFontBytes, isBaseLatinFont, isLatinFont, packFor, sliceDecoder, sliceRefOf } from './packed';
 import type { SliceLocation } from './progressive';
 import { checkInstalledPacks, type FontPackDiagnostic } from './packDiagnostics';
+import { fontCdnAssetUrl, type FontCdnConfiguration } from './fontCdn';
+import type { FontAssetKind } from '../../../shared/office-session/optionalFontPacks';
 
 export interface FontAssetOptions {
   /**
@@ -27,23 +29,31 @@ class MissingFontAddonError extends Error {
 }
 
 class MissingCjkAddonError extends MissingFontAddonError {}
+class MissingIntlAddonError extends MissingFontAddonError {}
 
 export type FontAssetUrls = Record<string, () => URL>;
-export type FontPackLookup = (pack: 'latin' | 'intl' | 'cjk') => Promise<FontAssetUrls | undefined>;
+type FontPack = Exclude<FontAssetKind, 'decoder'>;
+type FontPackAssets = { urls?: FontAssetUrls; cdn?: FontCdnConfiguration };
+export type FontPackLookup = (pack: FontPack) => Promise<FontPackAssets>;
+type AssetBase = URL | (() => Promise<URL>) | undefined;
 
-interface LocalFontAssets {
-  baseLatin: FontAssetUrls;
-  resolveBase(base: string | URL): URL;
-  cdn(): {
-    base(face: BundledFontFace): string;
-    url(face: BundledFontFace, file: string): URL | undefined;
-    timeoutMs?: number;
-  };
+function resolveBase(baseUrl: string | URL, locationHref: string | undefined): URL {
+  const href = typeof baseUrl === 'string' ? baseUrl : baseUrl.href;
+  const base = href.endsWith('/') ? href : `${href}/`;
+  try {
+    return new URL(base, locationHref);
+  } catch {
+    throw new TypeError(`Font baseUrl must be absolute when no browser location exists: ${base}`);
+  }
 }
 
 export function createFontRuntime(lookup: FontPackLookup, {
-  diagnostics = lookup, local, timeout: sourceTimeout,
-}: { diagnostics?: FontPackLookup; local?: LocalFontAssets; timeout?: (url: URL) => number | undefined } = {}) {
+  inspectDisk = true, pageLocation, localCdn,
+}: {
+  inspectDisk?: boolean;
+  pageLocation?: () => Promise<string | undefined>;
+  localCdn?: () => FontCdnConfiguration;
+} = {}) {
   const CJK_FILES = new Set(
     BUNDLED_FONTS.filter((face) => face.script?.startsWith('cjk-')).map((face) => face.file),
   );
@@ -54,17 +64,25 @@ export function createFontRuntime(lookup: FontPackLookup, {
 
   const cdnTimeouts = new WeakMap<URL, number>();
 
-  function cdnAssetUrl(face: BundledFontFace, file = face.file, cdn = local?.cdn()): URL | undefined {
-    const url = cdn?.url(face, file);
-    if (url && cdn?.timeoutMs !== undefined) cdnTimeouts.set(url, cdn.timeoutMs);
+  function cdnAssetUrl(face: BundledFontFace, file: string, cdn: FontCdnConfiguration | undefined): URL | undefined {
+    if (!cdn?.baseUrl || isBaseLatinFont(face.file)) return undefined;
+    const pack = packFor(face);
+    if (!pack.faces.some((entry) => entry.file === face.file)) return undefined;
+    const url = fontCdnAssetUrl(pack, file, cdn.baseUrl);
+    cdnTimeouts.set(url, cdn.timeoutMs);
     return url;
   }
 
-  const requestTimeout = (url: URL) => cdnTimeouts.get(url) ?? sourceTimeout?.(url);
+  const requestTimeout = (url: URL) => cdnTimeouts.get(url);
 
-  function workerAssetUrl(urls: FontAssetUrls | undefined, file: string): URL {
-    if (urls && Object.prototype.hasOwnProperty.call(urls, file)) return urls[file]!();
-    throw new MissingFontAddonError(`Bundled font asset ${file} is unavailable from the page`);
+  function assetBase(baseUrl: string | URL | undefined): AssetBase {
+    if (baseUrl === undefined) return undefined;
+    if (!pageLocation) return resolveBase(baseUrl, globalThis.location?.href);
+    try {
+      return resolveBase(baseUrl, undefined);
+    } catch {
+      return async () => resolveBase(baseUrl, await pageLocation() ?? globalThis.location?.href);
+    }
   }
 
   async function assetUrl(
@@ -73,79 +91,78 @@ export function createFontRuntime(lookup: FontPackLookup, {
   ): Promise<URL> {
     const { file, script } = face;
     if (baseUrl !== undefined) return new URL(file, baseUrl);
-    if (!local) {
-      const pack = isBaseLatinFont(file) || isLatinFont(file) ? 'latin'
-        : INTL_FILES.has(file) ? 'intl' : CJK_FILES.has(file) ? 'cjk' : undefined;
-      return workerAssetUrl(pack && await lookup(pack), file);
-    }
-    const baseLatin = local.baseLatin[file];
-    if (baseLatin) return baseLatin();
-    if (isLatinFont(file)) {
-      const latin = await lookup('latin');
-      const resolveLatin = latin?.[file];
-      if (resolveLatin) return resolveLatin();
-      const cdn = cdnAssetUrl(face);
-      if (cdn) return cdn;
-      if (!latin) {
+    const pack = isBaseLatinFont(file) ? 'base' : isLatinFont(file) ? 'latin'
+      : INTL_FILES.has(file) ? 'intl' : script?.startsWith('cjk-') || CJK_FILES.has(file) ? 'cjk' : undefined;
+    if (pack) {
+      const { urls, cdn } = await lookup(pack);
+      if (urls && Object.prototype.hasOwnProperty.call(urls, file)) return urls[file]!();
+      const fallback = cdnAssetUrl(face, file, cdn);
+      if (fallback) return fallback;
+      if (pack === 'latin' && !urls) {
         throw new MissingFontAddonError(
           `Bundled font ${file} needs @betteroffice/fonts-latin - install @betteroffice/fonts-latin`,
         );
       }
-    }
-    if (INTL_FILES.has(file)) {
-      const intl = await lookup('intl');
-      const resolveIntl = intl?.[file];
-      if (resolveIntl) return resolveIntl();
-      const cdn = cdnAssetUrl(face);
-      if (cdn) return cdn;
-      if (!intl) {
-        throw new MissingFontAddonError(
+      if (pack === 'intl' && !urls) {
+        throw new MissingIntlAddonError(
           `Bundled font ${file} needs the optional intl add-on - install @betteroffice/fonts-intl`,
         );
       }
-    }
-    if (script?.startsWith('cjk-') || CJK_FILES.has(file)) {
-      const cjk = await lookup('cjk');
-      const resolveCjk = cjk?.[file];
-      if (resolveCjk) return resolveCjk();
-      const cdn = cdnAssetUrl(face);
-      if (cdn) return cdn;
-      throw new MissingCjkAddonError(cjk
-        ? `Bundled font ${file} needs a compressed @betteroffice/fonts-cjk release matching @betteroffice/fonts`
-        : `Bundled font ${file} needs the optional CJK add-on — install @betteroffice/fonts-cjk`);
+      if (pack === 'cjk') {
+        throw new MissingCjkAddonError(urls
+          ? `Bundled font ${file} needs a compressed @betteroffice/fonts-cjk release matching @betteroffice/fonts`
+          : `Bundled font ${file} needs the optional CJK add-on — install @betteroffice/fonts-cjk`);
+      }
     }
     throw new Error(`Unknown bundled font asset: ${file}`);
   }
 
-  async function sliceAssetUrl(
-    face: BundledFontFace, file: string, baseUrl: URL | undefined, cdn: ReturnType<LocalFontAssets['cdn']> | undefined,
-  ): Promise<URL> {
-    if (baseUrl !== undefined) return new URL(file, baseUrl);
-    const cjk = await lookup('cjk');
-    if (!local) return workerAssetUrl(cjk, file);
-    const resolve = cjk?.[file];
-    if (resolve) return resolve();
+  function sliceAssetUrl(face: BundledFontFace, file: string, { urls, cdn }: FontPackAssets): URL {
+    if (urls && Object.prototype.hasOwnProperty.call(urls, file)) return urls[file]!();
     const fallback = cdnAssetUrl(face, file, cdn);
     if (fallback) return fallback;
-    throw new MissingCjkAddonError(cjk
+    throw new MissingCjkAddonError(urls
       ? `Font slice ${file} needs a @betteroffice/fonts-cjk release matching @betteroffice/fonts`
       : `Font slice ${file} needs the optional CJK add-on — install @betteroffice/fonts-cjk`);
   }
 
   function sliceLocation(
     face: BundledFontFace,
-    baseUrl: URL | undefined,
+    base: AssetBase,
     runtime?: { decoder?: FontDecoder; retain?: boolean },
   ): SliceLocation | undefined {
     const ref = sliceRefOf(face.file);
-    const cdn = local?.cdn();
-    return ref && {
+    if (!ref) return undefined;
+    const baseUrl = base instanceof URL ? base : undefined;
+    const cdn = base === undefined ? localCdn?.() : undefined;
+    const decoderUrl = (url: URL | undefined) => url && new URL('decoder/fontpack.wasm', url);
+    return {
       ref,
-      base: baseUrl?.href ?? cdn?.base(face) ?? '',
-      url: (file) => sliceAssetUrl(face, file, baseUrl, cdn),
-      timeoutMs: baseUrl === undefined ? cdn?.timeoutMs : undefined,
+      base: baseUrl?.href ?? (cdn?.baseUrl ? fontCdnAssetUrl(packFor(face), '', cdn.baseUrl).href : ''),
+      timeoutMs: cdn?.baseUrl ? cdn.timeoutMs : undefined,
+      url: async (file) => {
+        const root = typeof base === 'function' ? await base() : base;
+        if (root) return new URL(file, root);
+        const assets = await lookup('cjk');
+        return sliceAssetUrl(face, file, cdn ? { urls: assets.urls, cdn } : assets);
+      },
+      prepareUrls: baseUrl || cdn ? undefined : async () => {
+        if (typeof base === 'function') {
+          const root = await base();
+          return { base: root.href, url: async (file: string) => new URL(file, root),
+            decode: sliceDecoder(decoderUrl(root), runtime?.decoder) };
+        }
+        const assets = await lookup('cjk');
+        return {
+          base: assets.cdn?.baseUrl || '',
+          url: async (file: string) => sliceAssetUrl(face, file, assets),
+          timeoutMs: assets.cdn?.baseUrl ? assets.cdn.timeoutMs : undefined,
+        };
+      },
       requestTimeoutMs: requestTimeout,
-      decode: sliceDecoder(baseUrl === undefined ? undefined : new URL('decoder/fontpack.wasm', baseUrl), runtime?.decoder),
+      decode: typeof base === 'function'
+        ? async (encoded, maxOutput) => sliceDecoder(decoderUrl(await base()), runtime?.decoder)(encoded, maxOutput)
+        : sliceDecoder(decoderUrl(baseUrl), runtime?.decoder),
       decoder: runtime?.decoder,
       retain: runtime?.retain,
     };
@@ -184,19 +201,16 @@ export function createFontRuntime(lookup: FontPackLookup, {
       /** @internal Reject when the CJK add-on is missing instead of loading a Latin face in its place. */ strict?: boolean;
     },
   ): Promise<ArrayBuffer> {
-    return bundledFontBytes(face, loadPackedFontBytes, options, runtime);
+    return bundledFontBytes(face, loadPackedFontBytes, assetBase(options?.baseUrl), runtime);
   }
 
-  function bundledFontBytes(
+  async function bundledFontBytes(
     face: BundledFontFace,
     packed: typeof loadPackedFontBytes,
-    options?: FontAssetOptions,
+    base: AssetBase,
     runtime?: Parameters<typeof loadBundledFontBytes>[2],
   ): Promise<ArrayBuffer> {
-    const baseUrl =
-      options?.baseUrl === undefined
-        ? undefined
-        : local?.resolveBase(options.baseUrl);
+    const baseUrl = typeof base === 'function' ? await base() : base;
     const bytes = isBaseLatinFont(face.file) || isLatinFont(face.file) || INTL_FILES.has(face.file) || CJK_FILES.has(face.file)
       ? packed(
         face,
@@ -217,7 +231,7 @@ export function createFontRuntime(lookup: FontPackLookup, {
           face.style === 'italic',
         )!,
         packed,
-        options,
+        baseUrl,
         runtime,
       );
     });
@@ -278,12 +292,11 @@ export function createFontRuntime(lookup: FontPackLookup, {
     options?: FontAssetOptions,
     runtime?: { decoder?: FontDecoder; /** @internal Entries this call creates are dropped once settled; concurrent requests still share one decode. */ retain?: boolean },
   ): BundledFontSource {
-    const baseUrl = options?.baseUrl === undefined ? undefined : local?.resolveBase(options.baseUrl);
-    const resolvedOptions = baseUrl === undefined ? undefined : { baseUrl };
+    const base = assetBase(options?.baseUrl);
     return fontProvider(
-      (face) => loadBundledFontBytes(face, resolvedOptions, runtime),
-      (face) => bundledFontBytes(face, readPackedFontBytes, resolvedOptions, runtime),
-      (face) => sliceLocation(face, baseUrl, runtime),
+      (face) => bundledFontBytes(face, loadPackedFontBytes, base, runtime),
+      (face) => bundledFontBytes(face, readPackedFontBytes, base, runtime),
+      (face) => sliceLocation(face, base, runtime),
     );
   }
 
@@ -307,7 +320,8 @@ export function createFontRuntime(lookup: FontPackLookup, {
    * a pack that is not installed is not reported.
    */
   function checkFontPacks(): Promise<FontPackDiagnostic[]> {
-    return checkInstalledPacks({ latin: () => diagnostics('latin'), intl: () => diagnostics('intl'), cjk: () => diagnostics('cjk') }, local !== undefined);
+    const installed = async (pack: FontPack) => (await lookup(pack)).urls;
+    return checkInstalledPacks({ latin: () => installed('latin'), intl: () => installed('intl'), cjk: () => installed('cjk') }, inspectDisk);
   }
 
   return { bundledFaceInstalled, isMissingFontAddon, loadBundledFontBytes, registerBundledFontFace, createFontProvider, decodeFontFaceOutsideEngine, checkFontPacks };

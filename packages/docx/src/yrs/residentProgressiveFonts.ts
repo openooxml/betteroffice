@@ -1,4 +1,5 @@
 import { isEngineTrap } from '../../../../shared/office-session/trap';
+import { importProgressiveFonts } from '../../../../shared/office-session/fontModules';
 
 /** A sliced face's pack files, as `sliceSourceOf` from `@betteroffice/fonts/progressive` describes them. */
 export interface ProgressiveFontSource {
@@ -104,7 +105,7 @@ export class ResidentProgressiveFonts {
     private readonly engine: OutlineEngine,
     decode: (encoded: ArrayBuffer, maxOutput: number) => Promise<ArrayBuffer>,
     private readonly log: (message: string) => void = (message) => console.warn(message),
-    loadModule: () => Promise<ProgressiveModule> = () => import('@betteroffice/fonts/progressive'),
+    loadModule: () => Promise<ProgressiveModule> = importProgressiveFonts,
   ) {
     const rootSlot = (slot: number): number => {
       let current = slot;
