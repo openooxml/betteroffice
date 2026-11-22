@@ -243,7 +243,6 @@ impl SheetPatch<'_> {
         Ok(Some(out))
     }
 
-
     /// Patched `<cols>`; `None` removes the element.
     pub(crate) fn cols(&self, source: Option<&[u8]>) -> Result<Option<Vec<u8>>, ParseError> {
         let Some(source) = source else {

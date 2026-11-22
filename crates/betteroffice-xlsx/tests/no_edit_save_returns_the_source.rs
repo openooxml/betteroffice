@@ -74,7 +74,9 @@ fn with_styles(mut parts: Parts, count: usize) -> Parts {
         &mut parts,
         "xl/styles.xml",
         "application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml",
-        &format!(r#"<styleSheet xmlns="{MAIN}"><cellXfs count="{count}">{xfs}</cellXfs></styleSheet>"#),
+        &format!(
+            r#"<styleSheet xmlns="{MAIN}"><cellXfs count="{count}">{xfs}</cellXfs></styleSheet>"#
+        ),
     );
     parts
 }
@@ -311,10 +313,7 @@ fn a_no_edit_save_of_a_full_calculation_workbook_returns_the_source_bytes() {
             );
         }
     }
-    assert_every_open_saves_the_source(
-        "wide arrays",
-        &package_parts(&wide_arrays(), FULL_CALC),
-    );
+    assert_every_open_saves_the_source("wide arrays", &package_parts(&wide_arrays(), FULL_CALC));
     assert_every_open_saves_the_source(
         "many shared ranges",
         &package_parts(&many_shared_ranges(), FULL_CALC),
@@ -528,8 +527,7 @@ fn add_chart(source: &mut Parts, path: &str) {
 #[test]
 fn a_no_edit_save_keeps_chart_caches_and_a_recalculation_refreshes_them() {
     for chart in ["xl/charts/chart1.xml", "xl/visuals/chart1.xml"] {
-        let mut source =
-            package_parts(r#"<row r="1"><c r="A1"><f>2+3</f></c></row>"#, FULL_CALC);
+        let mut source = package_parts(r#"<row r="1"><c r="A1"><f>2+3</f></c></row>"#, FULL_CALC);
         add_chart(&mut source, chart);
         assert_every_open_saves_the_source(chart, &source);
 
