@@ -141,8 +141,9 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       try {
         positionRef.current?.();
       } catch {
+        // The record, or the one a choice on it just put in its place, which carries the same fragment.
         const live = pasteRecordRef.current;
-        if (live) dropPasteRecord(live);
+        if (live && live.fragment === record.fragment) dropPasteRecord(live);
       }
     };
     const { tail, compositionSlot } = admission.getSnapshot();
@@ -275,7 +276,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       if (chosen?.queued && chosen.end && callbacks.current.pasteOptions !== false) {
         const admitted = admission.getSnapshot();
         if (admitted.originalUnackedIntents !== 0 || admitted.pendingInputs !== 0) awaitIdle(chosen);
-        else {
+        else if (!admitted.readOnly) {
           const option = chosen.queued;
           chosen.queued = null;
           pasteOptionsRef.current.choose(option);
