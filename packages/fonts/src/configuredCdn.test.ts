@@ -10,7 +10,7 @@ import { decodeFontFace, type FontDecoder } from './decode';
 import * as fontCdn from './fontCdn';
 import type { FontPackDiagnostic } from './fontRuntime';
 import { createPageFontPackResponder } from '../../../shared/office-session/fontPackSource';
-import { fontAssetResponse, withBrowserFontGlobals } from './test-assets';
+import { fontAssetResponse, withBrowserFontGlobals } from '../../../shared/office-session/testing/fontAssets';
 import { openSlicedFace, sliceSourceOf } from './progressive-entry';
 import { parseSkeleton } from './slices';
 import { writeFontCdnTree } from '../../../scripts/fonts/cdn-tree';

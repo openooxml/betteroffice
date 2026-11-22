@@ -6,7 +6,7 @@ import {
   createSourceFile, forEachChild, isIdentifier, isNewExpression, isObjectLiteralExpression,
   isPropertyAssignment, isStringLiteral, ScriptTarget, type Node,
 } from 'typescript';
-import { withBrowserFontGlobals } from '../../../fonts/src/test-assets';
+import { withBrowserFontGlobals } from '../../../../shared/office-session/testing/fontAssets';
 import { engineKind } from '../wasm/engine';
 import { isClientMessage } from '../../../../shared/office-session/protocol';
 import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';

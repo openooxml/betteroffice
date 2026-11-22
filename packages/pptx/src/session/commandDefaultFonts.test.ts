@@ -1,7 +1,7 @@
 import { afterEach, expect, mock, spyOn, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import * as fonts from '@betteroffice/fonts';
-import { withBrowserFontGlobals } from '../../../fonts/src/test-assets';
+import { withBrowserFontGlobals } from '../../../../shared/office-session/testing/fontAssets';
 import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import * as progressive from '@betteroffice/fonts/progressive';
 import type { DefaultFontFace } from '../../../../shared/pptxDefaultFonts';
@@ -29,7 +29,7 @@ function provider(
   const resolveLastResort = mock((_family: string, _bold: boolean, _italic: boolean, _office?: string) =>
     async (): Promise<ArrayBuffer> => { throw new Error('No substitute'); });
   const source = { resolve, resolveFamily, resolveScriptFallback, resolveLastResort };
-  const imported = spyOn(commandFontProvider, 'load').mockResolvedValue(source);
+  const imported = spyOn(commandFontProvider, 'load').mockImplementation(async () => ({ ...source }));
   restorers.push(() => imported.mockRestore());
   return { imported, resolve, resolveFamily, resolveScriptFallback, resolveLastResort };
 }

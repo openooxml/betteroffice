@@ -1,5 +1,5 @@
 import * as fonts from '@betteroffice/fonts';
-import { fontAssetResponse, withBrowserFontGlobals } from '../../../fonts/src/test-assets';
+import { fontAssetResponse, withBrowserFontGlobals } from '../../../../shared/office-session/testing/fontAssets';
 import { createFontRuntime } from '../../../fonts/src/fontRuntime';
 import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import { expect, spyOn, test } from 'bun:test';

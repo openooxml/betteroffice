@@ -1,7 +1,7 @@
 import { afterEach, beforeAll, describe, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import * as fonts from '@betteroffice/fonts';
-import { fontAssetResponse, fontRuntimeWithoutPacks, withBrowserFontGlobals } from '../../../fonts/src/test-assets';
+import { fontAssetResponse, fontRuntimeWithoutPacks, withBrowserFontGlobals } from '../../../../shared/office-session/testing/fontAssets';
 import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import { configureDefaultFonts, resolveCompleteFontProvider } from '../layout/measure';
 import { engineKind } from '../wasm/enginePng';

@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import * as fonts from '@betteroffice/fonts';
 import { initWasm, openPresentation } from '../index';
-import { fontAssetResponse, fontRuntimeWithoutPacks, withBrowserFontGlobals } from '../../../fonts/src/test-assets';
+import { fontAssetResponse, fontRuntimeWithoutPacks, withBrowserFontGlobals } from '../../../../shared/office-session/testing/fontAssets';
 import * as workerFonts from '../../../fonts/src/worker';
 import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import { createFontPackResponder, createWorkerFontPacks, setWorkerFontAssets } from '../../../../shared/office-session/optionalFontPacks';

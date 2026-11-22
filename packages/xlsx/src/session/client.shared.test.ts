@@ -1,6 +1,6 @@
 import { configureFontCdn } from '@betteroffice/fonts';
 import { expect, spyOn, test } from 'bun:test';
-import { withBrowserFontGlobals } from '../../../fonts/src/test-assets';
+import { withBrowserFontGlobals } from '../../../../shared/office-session/testing/fontAssets';
 import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import { isClientMessage, type ClientMessage } from '../../../../shared/office-session/protocol';
 import type { SessionTransport } from '../../../../shared/office-session/transport';

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, mock, test } from 'bun:test';
 import { resolveScriptFallbackFace } from '@betteroffice/fonts';
 import { openSlicedFace } from '@betteroffice/fonts/progressive';
-import { fontAssetResponse, fontRuntimeWithoutPacks, withBrowserFontGlobals } from '../../../fonts/src/test-assets';
+import { fontAssetResponse, fontRuntimeWithoutPacks, withBrowserFontGlobals } from '../../../../shared/office-session/testing/fontAssets';
 import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import { prepareTextFamilies } from '../render/textFamilies';
 import { createSlicedFontFaces, slicedFacesSupported, type SlicedFontFace } from './commandSlicedFonts';

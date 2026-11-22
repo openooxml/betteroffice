@@ -1,7 +1,7 @@
 import { parentPort } from 'node:worker_threads';
-import { stubBrowser } from '../../../docx/src/yrs/renderPngTestSupport';
-import { setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
-import type { SessionScope } from '../../../../shared/office-session/transport';
+import { stubBrowser } from '../../../packages/docx/src/yrs/renderPngTestSupport';
+import { setFontCdnConfiguration } from '../fontCdn';
+import type { SessionScope } from '../transport';
 
 const port = parentPort!;
 Bun.plugin({
@@ -41,7 +41,7 @@ const document = { fonts: {
 Object.assign(globalThis, { FontFace: Face, document, window: { document } });
 const scope = port as unknown as SessionScope;
 if (process.env.BETTEROFFICE_TEST_NODE_WORKER_FORMAT === 'pptx') {
-  (await import('../../../pptx/src/session/workerStart')).startSessionWorker(scope);
+  (await import('../../../packages/pptx/src/session/workerStart')).startSessionWorker(scope);
 } else {
-  (await import('./workerStart')).startSessionWorker(scope);
+  (await import('../../../packages/xlsx/src/session/workerStart')).startSessionWorker(scope);
 }

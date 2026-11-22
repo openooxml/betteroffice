@@ -1,7 +1,7 @@
 import { afterEach, expect, mock, spyOn, test } from 'bun:test';
 import { configureFontCdn, type BundledFontFace } from '@betteroffice/fonts';
 import * as fonts from '@betteroffice/fonts';
-import { fontAssetResponse, fontRuntimeWithoutPacks, withBrowserFontGlobals } from '../../fonts/src/test-assets';
+import { fontAssetResponse, fontRuntimeWithoutPacks, withBrowserFontGlobals } from '../../../shared/office-session/testing/fontAssets';
 import type { FontDecoder } from '../../../shared/office-session/fontDecoder';
 import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../shared/office-session/fontCdn';
 import { createSessionHost } from '../../../shared/office-session/host';
@@ -113,7 +113,7 @@ test('registers Carlito regular and bold as Calibri and repaints once after the 
     { family: 'Calibri', weight: '400', style: 'normal' },
     { family: 'Calibri', weight: '700', style: 'normal' },
   ]);
-  expect(source.create).toHaveBeenCalledWith(undefined, { decoder: decode, retain: false });
+  expect(source.create).toHaveBeenCalledWith(undefined, { decoder: decode, retain: false, strict: true });
   expect(decode).toHaveBeenCalledTimes(2);
   expect(repaint).toHaveBeenCalledTimes(1);
   await fonts.load(list);
@@ -699,7 +699,7 @@ test('the in-thread editor lets the font manager decode with its own decoder', a
   browser();
   const { create } = provider();
   await createDefaultFontPainter(null, () => {}).load(display({ family: 'Calibri' }));
-  expect(create).toHaveBeenCalledWith(undefined, undefined);
+  expect(create).toHaveBeenCalledWith(undefined, { strict: true });
 });
 
 test('no painter work happens before a worker decoder exists', async () => {
@@ -746,9 +746,9 @@ test('T14: repaints keep an implicit CDN failure settled until a new painter ope
     setFontCdnConfiguration(undefined);
     await first.load(frame);
     expect(added).toHaveLength(0);
-    expect(first.paint(frame, () => {})).toBe(true);
     await first.load(frame);
     expect(attempts).toBe(1);
+    expect(first.paint(frame, () => {})).toBe(true);
     first.dispose();
     await second.load(frame);
     expect(attempts).toBe(2);
