@@ -289,6 +289,30 @@ for (const committed of [false, true]) {
   });
 }
 
+test('a shift-click queued behind refused invokes with no selection is sent as a plain click', async () => {
+  const client = new FakeCommandClient();
+  client.state.selection = null;
+  const store = createPeerlessViewStore(client, { paintFrame() {}, paintEcho() {}, restoreLine() {} });
+  try {
+    for (const notes of ['n', 'm']) {
+      void store.dispatch({ kind: 'invoke', payload: { method: 'setSlideNotes', args: ['slide', notes],
+        inputTime: 1, undoGroup: 'notes' } }).catch(() => {});
+    }
+    const at = peerlessInputReference(store, true)!;
+    void store.dispatch({ kind: 'selectAtPoint', payload: { at, x: 25, y: 45, extend: true, inputTime: 2,
+      undoGroup: 'pointer-1', frame: { slideId: 'slide', slideRevision: 0, coversThroughSeq: 0, documentEpoch: 1,
+        incarnation: 'worker' } } }).catch(() => {});
+    for (const seq of [1, 2]) {
+      client.ack(seq, { selection: null, outcomes: [{ seq, status: 'refused', reason: 'invalid-payload', committed: false }] });
+      await Promise.resolve();
+    }
+    const click = client.envelopes[client.envelopes.length - 1];
+    expect(click).toMatchObject({ kind: 'selectAtPoint', payload: { extend: false } });
+    expect('at' in click.payload).toBe(false);
+    expect(click.afterSeq).toBeUndefined();
+  } finally { store.dispose(); }
+});
+
 test('refusals returned to the dispatching caller stay off onError', async () => {
   const client = new FakeCommandClient();
   const onError = mock((_error: Error) => {});

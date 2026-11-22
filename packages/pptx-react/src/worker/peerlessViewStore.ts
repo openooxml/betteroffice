@@ -587,7 +587,8 @@ export function createPeerlessViewStore(
     if ('at' in intent.payload && intent.payload.at?.source === 'afterSeq' && intent.payload.at.seq <= initial.throughSeq) {
       const { at: _unsent, ...payload } = intent.payload;
       const confirmed = intent.kind === 'setSelection' || intent.kind === 'compositionEnd' ? null : confirmedReference();
-      intent = { ...intent, payload: confirmed ? { ...payload, at: confirmed } : payload } as PresentationCommandIntent;
+      intent = { ...intent, payload: confirmed ? { ...payload, at: confirmed }
+        : intent.kind === 'selectAtPoint' ? { ...payload, extend: false } : payload } as PresentationCommandIntent;
     }
     let operation: Promise<PresentationCommandAck> | undefined;
     if (sharedInput) {
