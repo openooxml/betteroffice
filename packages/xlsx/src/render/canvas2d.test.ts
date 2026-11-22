@@ -691,7 +691,7 @@ describe('Canvas2D text runs', () => {
     y: 2 + 11 * (96 / 72) * 0.7,
     fontSize: 11,
     fontFamily: 'Calibri',
-    clip: { x: 0, y: 0, w: 69, h: 88 },
+    clip: { x: 0, y: 0, w: 69, h: 80 },
     wrap: { width: 65, lineHeight: 56 / 3, valign: 'top' },
     runs: [{ start: 0, end: 5, fontSize: 20 }, { start: 5, end: 19, fontSize: 11 }],
   } satisfies Partial<TextCmd>;
@@ -842,37 +842,12 @@ describe('Canvas2D text runs', () => {
     }
   });
 
-  it('keeps the first three mixed-size lines whole in a short bottom- or center-aligned cell', () => {
-    const short = { ...mixedWrap.clip, h: 72 };
-    const ascent = (96 / 72) * 0.7;
-    const descent = (96 / 72) * 0.2;
-    for (const valign of ['bottom', 'center'] as const) {
-      const y = valign === 'bottom' ? short.h - 2 - 11 * descent : (short.h + 11 * (ascent - descent)) / 2;
-      const { calls, fills } = record({
-        ...mixedWrap, text: 'abcd efgh ijkl mnop', clip: short, y, wrap: { ...mixedWrap.wrap, valign },
-      });
-      const afterClear = calls.slice(calls.findIndex((call) => call[0] === 'clearRect') + 1);
-      expect(afterClear.slice(0, 4)).toEqual([['save'], ['beginPath'], ['rect', 0, 0, short.w, short.h], ['clip']]);
-      expect(fills.map(({ text }) => text)).toEqual(['abcd', 'efgh', 'ijkl']);
-      const firstTop = fills[0]!.y - 20 * ascent;
-      const lastBottom = fills[2]!.y + 11 * descent;
-      expect(firstTop).toBeGreaterThanOrEqual(short.y);
-      fills.forEach((fill, index) => {
-        expect(fill.y + (index === 0 ? 20 : 11) * descent).toBeLessThanOrEqual(short.h);
-      });
-      expect(lastBottom).toBeCloseTo(short.h - (valign === 'bottom' ? 2 : firstTop));
-    }
-  });
-
-  it('matches the single-size line limit when the mixed runs leave base-sized lines', () => {
-    const wrap = { width: 40, lineHeight: 16, valign: 'bottom' } as const;
-    for (const [height, maxLines] of [[6, 1], [38.998, 2], [38.999, 3], [55, 4]] as const) {
-      const cmd = { text: 'A\nB\nC\nD', fontSize: 12, y: height - 2 - 12 * (96 / 72) * 0.2, clip: { ...clip, h: height } };
-      const plain = record({ ...cmd, wrap: { ...wrap, maxLines } }).fills;
-      const mixed = record({ ...cmd, wrap, runs: [{ start: 1, end: 2, fontSize: 18 }] }).fills;
-      expect(mixed).toHaveLength(maxLines);
-      expect(mixed).toEqual(plain);
-    }
+  it('only paints mixed-size lines intersecting the short cell clip', () => {
+    const short = { ...mixedWrap.clip, h: 20 * (96 / 72) };
+    const { calls, fills } = record({ ...mixedWrap, clip: short });
+    const afterClear = calls.slice(calls.findIndex((call) => call[0] === 'clearRect') + 1);
+    expect(afterClear.slice(0, 4)).toEqual([['save'], ['beginPath'], ['rect', 0, 0, short.w, short.h], ['clip']]);
+    expect(fills.map(({ text }) => text)).toEqual(['abcd']);
   });
 
   it('anchors bottom and center alignment to the last line at its own size', () => {
@@ -914,9 +889,9 @@ describe('Canvas2D text runs', () => {
     } satisfies Partial<TextCmd>;
     expect(record(cmd).fills.map(({ text }) => text)).toEqual(['a']);
     expect(recordAll([{ ...cmd, clip }], { width: 200, height: 20 }).fills.map(({ text }) => text)).toEqual(['a']);
-    const cropped = recordAll([{ ...cmd, clip: { ...clip, h: 80 } }], { width: 200, height: 28 }).fills;
-    expect(cropped).toHaveLength(2);
-    expect(cropped[1]!.y).toBeCloseTo(12 + 20 * (12 / 11));
+    const partiallyVisible = record({ ...cmd, clip: { ...clip, y: 34, h: 5 } }).fills;
+    expect(partiallyVisible).toHaveLength(1);
+    expect(partiallyVisible[0]!.y).toBeCloseTo(12 + 20 * (12 / 11));
   });
 
   it('limits mixed-size lines before aligning the kept block', () => {

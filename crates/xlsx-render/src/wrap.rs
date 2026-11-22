@@ -256,7 +256,7 @@ pub fn wrapped_line_y(y: f32, index: usize, count: usize, wrap: &TextWrap) -> f3
 
 /// share of a line by which a wrapped line may pass the cell's height and
 /// still count as fitting.
-pub const FIT_TOLERANCE: f64 = 1e-4;
+const FIT_TOLERANCE: f64 = 1e-4;
 
 /// the most wrapped lines excel paints in a row or merged area `height` px
 /// tall: those whose top half is inside it, to a ten-thousandth of a line, at

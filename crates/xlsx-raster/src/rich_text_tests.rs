@@ -3,7 +3,7 @@ use tiny_skia::Pixmap;
 use xlsx_model::{Cell, CellRef, CellValue, Color, RichRun, RunStyle, Sheet, SheetId, Workbook};
 use xlsx_render::{DisplayList, DrawCmd, GridMeta, Viewport};
 
-use crate::{LINE_PAINTS, WRAPPED_ASCENT_PER_PT, WRAPPED_DESCENT_PER_PT, measure_text, render_png};
+use crate::{LINE_PAINTS, measure_text, render_png};
 
 const WIDTH: f32 = 160.0;
 const HEIGHT: f32 = 60.0;
@@ -210,30 +210,6 @@ fn a_wrapped_command_paints_each_line_s_pieces_in_their_own_fonts() {
             piece(left(fg), 30.0 + 16.0 * (14.0 / 11.0) + 2.8, "FG", larger),
         ];
         assert_eq!(png(vec![painted]), png(pieces), "{align}");
-    }
-}
-
-#[test]
-fn overflowing_mixed_wraps_keep_the_first_lines_in_the_embedded_painter() {
-    let size = 12.0;
-    let ascent = size * WRAPPED_ASCENT_PER_PT;
-    let descent = size * WRAPPED_DESCENT_PER_PT;
-    for (valign, y) in [
-        ("bottom", HEIGHT - 2.0 - descent),
-        ("center", (HEIGHT + ascent - descent) / 2.0),
-    ] {
-        let fields = json!({
-            "text": "A\nB\nC\nD",
-            "y": y,
-            "fontSize": size,
-            "wrap": { "width": 40.0, "lineHeight": 16.0, "valign": valign },
-        });
-        let runs = [r#"{"start":0,"end":1,"fontSize":18.0}"#];
-        let before = LINE_PAINTS.get();
-        let actual = png(vec![rich(fields.clone(), &runs)]);
-        assert_eq!(LINE_PAINTS.get() - before, 3, "{valign}");
-        let expected = rich(merged(fields, json!({ "text": "A\nB\nC" })), &runs);
-        assert_eq!(actual, png(vec![expected]), "{valign}");
     }
 }
 

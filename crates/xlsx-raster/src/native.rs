@@ -373,8 +373,7 @@ pub fn render_png_with_fonts_and_images(
                                 text,
                                 &pieces,
                                 &mut measured,
-                                *clip,
-                                (w, h),
+                                clipped_to_target(*clip, w, h),
                             ),
                             None => vec![(*y, pieces)],
                         };

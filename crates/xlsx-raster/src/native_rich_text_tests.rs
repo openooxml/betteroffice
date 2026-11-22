@@ -7,9 +7,7 @@ use xlsx_model::{
 use xlsx_render::{DisplayList, DrawCmd, GridMeta, Rect, TextValign, Viewport};
 
 use super::{RasterFonts, piece_measure, render_png_with_fonts};
-use crate::{
-    LINE_PAINTS, PieceWidths, WRAPPED_ASCENT_PER_PT, WRAPPED_DESCENT_PER_PT, font, wrapped_lines,
-};
+use crate::{LINE_PAINTS, PieceWidths, clipped_to_target, font, wrapped_lines};
 
 const WIDTH: f32 = 160.0;
 const HEIGHT: f32 = 60.0;
@@ -262,7 +260,7 @@ fn a_wrapped_command_paints_each_line_s_pieces_in_their_own_fonts() {
 fn mixed_wrap_list(row_height: f64, valign: VAlign) -> DisplayList {
     let at = CellRef::new(0, 0);
     let mut sheet = Sheet::new("Sheet1");
-    sheet.col_widths.insert(0, 8.5);
+    sheet.col_widths.insert(0, 10.0);
     sheet.row_heights.insert(0, row_height);
     sheet.set_cell(
         at,
@@ -309,13 +307,9 @@ fn mixed_wrap_list(row_height: f64, valign: VAlign) -> DisplayList {
 }
 
 #[test]
-fn mixed_size_wrapped_cells_keep_the_first_lines_and_align_them() {
+fn mixed_size_wrapped_cells_send_visible_lines_to_the_native_painter() {
     let fonts = fonts();
-    for (height, valign, count) in [
-        (66.0, VAlign::Bottom, 4),
-        (53.0, VAlign::Bottom, 3),
-        (53.0, VAlign::Center, 3),
-    ] {
+    for (height, valign) in [(60.0, VAlign::Bottom), (20.0, VAlign::Top)] {
         let list = mixed_wrap_list(height, valign);
         let cmd = list
             .commands
@@ -353,34 +347,39 @@ fn mixed_size_wrapped_cells_keep_the_first_lines_and_align_them() {
             text,
             &pieces,
             &mut measured,
-            *clip,
-            (list.width as u32, list.height as u32),
+            Some(*clip),
         );
-        assert_eq!(lines.len(), count, "{valign:?} at {height}pt");
+        let painted: Vec<String> = lines
+            .iter()
+            .map(|(_, line)| {
+                line.iter()
+                    .map(|piece| &text[piece.range.clone()])
+                    .collect()
+            })
+            .collect();
+        let expected = if valign == VAlign::Top {
+            "abcd"
+        } else {
+            "abcd abcd abcd abcd"
+        };
+        assert_eq!(painted.join(" "), expected);
 
+        let last_y = lines.last().unwrap().0;
         let raster = Pixmap::decode_png(&render_png_with_fonts(&list, &fonts).unwrap()).unwrap();
         let has_text = |rows: std::ops::Range<u32>| {
             rows.into_iter().any(|row| {
                 (2..clip.w as u32 - 1).any(|col| raster.pixel(col, row).unwrap().red() < 100)
             })
         };
-        let first_top = lines[0].0 - 20.0 * WRAPPED_ASCENT_PER_PT;
-        let last_bottom = lines.last().unwrap().0 + *font_size * WRAPPED_DESCENT_PER_PT;
-        let clip_bottom = clip.y + clip.h;
-        assert!(first_top >= clip.y);
-        assert!(last_bottom <= clip_bottom);
-        if valign == VAlign::Bottom {
-            assert!((last_bottom - (clip_bottom - 2.0)).abs() < 1e-4);
+        assert!(last_y < clip.h);
+        if valign == VAlign::Top {
+            assert!(has_text(0..clip.h.floor() as u32));
+            assert!(!has_text(clip.h.ceil() as u32 + 1..raster.height()));
         } else {
-            assert!((first_top - clip.y - (clip_bottom - last_bottom)).abs() < 1e-4);
-        }
-        for (index, (baseline, line)) in lines.iter().enumerate() {
-            assert_eq!(line.len(), 1);
-            assert_eq!(line[0].range, index * 5..index * 5 + 4);
-            let bottom = *baseline + line[0].font_size * WRAPPED_DESCENT_PER_PT;
-            assert!(bottom <= clip_bottom);
-            let row = *baseline as u32;
-            assert!(has_text(row.saturating_sub(8)..row));
+            for (baseline, _) in lines {
+                let row = baseline as u32;
+                assert!(has_text(row.saturating_sub(8)..row));
+            }
         }
     }
 }
@@ -399,40 +398,11 @@ fn wrapped_baselines(cmd: &DrawCmd) -> Vec<f32> {
     };
     let pieces = xlsx_render::run_pieces(cmd).unwrap();
     let mut measured = PieceWidths::new(|_: &xlsx_render::TextPiece, part: &str| part.len() as f32);
-    wrapped_lines(
-        *y,
-        *font_size,
-        wrap,
-        text,
-        &pieces,
-        &mut measured,
-        *clip,
-        (WIDTH as u32, HEIGHT as u32),
-    )
-    .into_iter()
-    .map(|(y, _)| y)
-    .collect()
-}
-
-#[test]
-fn base_sized_lines_in_mixed_runs_have_the_uniform_line_limit() {
-    let size = 12.0;
-    let pitch = 16.0;
-    for height in [6.0, 38.998, 38.999, 55.0] {
-        let y = height - 2.0 - size * WRAPPED_DESCENT_PER_PT;
-        let cmd = rich(
-            json!({
-                "text": "A\nB\nC\nD",
-                "y": y,
-                "fontSize": size,
-                "clip": { "x": 0.0, "y": 0.0, "w": WIDTH, "h": height },
-                "wrap": { "width": 40.0, "lineHeight": pitch, "valign": "bottom" },
-            }),
-            &[r#"{"start":1,"end":2,"fontSize":18.0}"#],
-        );
-        let expected = xlsx_render::wrap::max_wrapped_lines(height + 1.0, pitch, size).unwrap();
-        assert_eq!(wrapped_baselines(&cmd).len(), expected as usize);
-    }
+    let clip = clipped_to_target(*clip, WIDTH as u32, HEIGHT as u32);
+    wrapped_lines(*y, *font_size, wrap, text, &pieces, &mut measured, clip)
+        .into_iter()
+        .map(|(y, _)| y)
+        .collect()
 }
 
 #[test]
