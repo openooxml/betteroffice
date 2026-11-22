@@ -101,7 +101,7 @@ pub struct ParseBudget<'a> {
     group_text_box_depth: usize,
     paragraph_runs: Vec<Option<usize>>,
     direction_scopes: u32,
-    direction_scope_bytes: usize,
+    direction_scope_bytes: std::cell::Cell<usize>,
     unmodeled_inline: Vec<(String, usize)>,
 }
 
@@ -128,7 +128,7 @@ impl<'a> ParseBudget<'a> {
             group_text_box_depth: 0,
             paragraph_runs: Vec::new(),
             direction_scopes: 0,
-            direction_scope_bytes: 0,
+            direction_scope_bytes: std::cell::Cell::new(0),
             unmodeled_inline: Vec::new(),
         }
     }
@@ -229,19 +229,23 @@ impl<'a> ParseBudget<'a> {
         self.direction_scopes = enclosing;
     }
 
-    /// Charge a copy of direction scope data onto one child, before it is made.
+    /// Charge a copy of direction scope data onto one child, before it is made. Every walk of
+    /// the document charges this one counter, including walks that only hold a shared borrow.
     pub(crate) fn charge_direction_scope_bytes(
-        &mut self,
+        &self,
         amount: usize,
         part: &str,
     ) -> Result<(), ParseError> {
+        let mut used = self.direction_scope_bytes.get();
         charge(
-            &mut self.direction_scope_bytes,
+            &mut used,
             amount,
             MAX_DIRECTION_SCOPE_BYTES,
             "directionScopeBytes",
             part,
-        )
+        )?;
+        self.direction_scope_bytes.set(used);
+        Ok(())
     }
 
     pub(crate) fn next_direction_scope(&mut self) -> u32 {

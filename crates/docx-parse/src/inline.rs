@@ -1813,7 +1813,7 @@ fn parse_hyperlink_at_depth(
         element,
         &mut crate::block::LocalScopes {
             next: 0,
-            used: 0,
+            budget,
             part,
         },
     )?;

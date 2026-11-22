@@ -840,30 +840,22 @@ impl DirectionScopeBudget for BudgetScopes<'_, '_> {
     }
 }
 
-/// Ids counted from zero and a budget of its own, for a walk outside the document's budget.
-pub(crate) struct LocalScopes<'p> {
+/// Ids counted from zero, with copies charged to the document's parse budget.
+pub(crate) struct LocalScopes<'b, 'l> {
     pub(crate) next: u32,
-    pub(crate) used: usize,
-    pub(crate) part: &'p str,
+    pub(crate) budget: &'b ParseBudget<'l>,
+    pub(crate) part: &'b str,
 }
 
-impl DirectionScopeBudget for LocalScopes<'_> {
+impl DirectionScopeBudget for LocalScopes<'_, '_> {
     fn next_id(&mut self) -> u32 {
         self.next += 1;
         self.next - 1
     }
 
     fn charge_copy(&mut self, scopes: &[DirectionScope]) -> Result<(), ParseError> {
-        self.used = self
-            .used
-            .saturating_add(crate::inline::scope_copy_bytes(scopes));
-        if self.used > crate::xml::MAX_DIRECTION_SCOPE_BYTES {
-            return Err(ParseError::ResourceLimit {
-                kind: "directionScopeBytes",
-                part: self.part.to_owned(),
-            });
-        }
-        Ok(())
+        self.budget
+            .charge_direction_scope_bytes(crate::inline::scope_copy_bytes(scopes), self.part)
     }
 }
 
