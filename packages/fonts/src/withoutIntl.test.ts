@@ -122,7 +122,7 @@ test('recovers after installing intl, resolves asset hrefs and reports missing a
   Object.defineProperty(globalThis, 'location', { value: { href: 'https://app.example/room/1' }, configurable: true });
   try {
     expect(await fontAssetUrls('intl')).toEqual({
-      [face.file]: absolute, 'another.zst': `https://app.example${relative}`, 'cdn.zst': 'https://cdn.example/cdn.zst',
+      [face.file]: absolute, 'another.zst': relative, 'cdn.zst': 'https://CDN.example:443/./cdn.zst',
     });
   } finally {
     if (location) Object.defineProperty(globalThis, 'location', location);

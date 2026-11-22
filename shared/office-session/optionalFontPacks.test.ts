@@ -270,3 +270,27 @@ test('a page that never answers costs one bounded wait per worker, not one per r
     clear.mockRestore();
   }
 });
+
+test('the page responder resolves relative hrefs against the page and replies with canonical absolute hrefs', async () => {
+  const replies: FontPackReply[] = [];
+  const responder = createFontPackResponder((reply) => { replies.push(reply); }, async () => ({
+    'face.zst': 'https://intl-installed.example/face.zst',
+    'another.zst': '/_next/static/media/another.zst',
+    'cdn.zst': 'https://CDN.example:443/./cdn.zst',
+  }));
+  const location = Object.getOwnPropertyDescriptor(globalThis, 'location');
+  Object.defineProperty(globalThis, 'location', { value: { href: 'https://app.example/room/1' }, configurable: true });
+  try {
+    expect(responder.receive({ protocol: 1, kind: 'font-pack-request', id: 'intl-1', pack: 'intl' })).toBe(true);
+    for (let turn = 0; turn < 20 && replies.length === 0; turn++) await Promise.resolve();
+  } finally {
+    if (location) Object.defineProperty(globalThis, 'location', location);
+    else Reflect.deleteProperty(globalThis, 'location');
+  }
+  expect(replies).toHaveLength(1);
+  expect(replies[0]!.urls).toEqual({
+    'face.zst': 'https://intl-installed.example/face.zst',
+    'another.zst': 'https://app.example/_next/static/media/another.zst',
+    'cdn.zst': 'https://cdn.example/cdn.zst',
+  });
+});
