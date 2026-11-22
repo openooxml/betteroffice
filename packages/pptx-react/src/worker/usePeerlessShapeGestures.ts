@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, type KeyboardEvent, type PointerEvent, type RefObject } from 'react';
 import type { ShapeRect } from '@betteroffice/pptx';
-import type { PresentationCommandFrameTag, PresentationCommandObjectSelection } from '@betteroffice/pptx/worker';
+import type {
+  PresentationCommandFrameTag, PresentationCommandObjectSelection, PresentationCommandObjectTarget,
+} from '@betteroffice/pptx/worker';
 import { MIN_SHAPE_SIZE_EMU, passedDragThreshold, RESIZE_HANDLES, resizeCommitDelta, resizedBounds,
   slidePoint, type ResizeHandle, type SlidePoint } from '../interactions';
 import { hitConfirmedGeometry, peerlessGestureActive, peerlessInputReference, setPeerlessGestureActive, type PeerlessViewStore } from './peerlessViewStore';
@@ -27,6 +29,13 @@ interface ShapeGesture {
 export interface PeerlessShapePreview {
   token: string;
   bounds: ShapeRect;
+  retainCanvas?: { slideId: string; release(): void };
+  request?: {
+    gesture: string;
+    frame: PresentationCommandFrameTag;
+    target: PresentationCommandObjectTarget;
+    rect: ShapeRect;
+  };
 }
 
 export interface PeerlessShapePreviewStore {
@@ -101,13 +110,20 @@ export function usePeerlessShapeGestures(store: PeerlessViewStore | null, {
     if (!store) return;
     const changed = () => {
       const current = gesture.current;
+      const preview = previewValue.current;
+      const slideId = current?.frame.slideId ?? preview?.retainCanvas?.slideId;
+      if (slideId === undefined) return;
+      const token = current ? current.selected?.token : preview?.token;
       const view = store.getSnapshot();
       const frame = view.confirmed?.frame;
-      if (current && (view.editState.readOnly || !frame || frame.slideId !== current.frame.slideId ||
-        frame.slideRevision !== current.frame.slideRevision ||
-        current.selected && (view.selection?.kind !== 'object' || view.selection.token !== current.selected.token))) cancel();
+      if (view.editState.readOnly || !frame || frame.slideId !== slideId ||
+        current && frame.slideRevision !== current.frame.slideRevision ||
+        token !== undefined && (view.selection?.kind !== 'object' || view.selection.token !== token)) cancel();
     };
     const unsubscribe = [store.subscribePresentation(changed), store.subscribeEditState(changed)];
+    if (presentation) unsubscribe.push(presentation.subscribeVisual(() => {
+      if (previewValue.current?.retainCanvas && !presentation.pluginVisual()) setPreview(null);
+    }));
     window.addEventListener('blur', cancel);
     return () => {
       window.removeEventListener('blur', cancel);
@@ -135,7 +151,10 @@ export function usePeerlessShapeGestures(store: PeerlessViewStore | null, {
     if (gesture.current !== current || current.cancelled || !current.dragging || !current.selected ||
       store?.getSnapshot().editState.readOnly) return;
     const rect = peerlessGestureRect(current.selected, current.delta, current.handle);
-    if (rect) setPreview({ token: current.selected.token, bounds: previewBounds(current.selected, rect, Boolean(current.handle)) });
+    if (rect) setPreview({ token: current.selected.token, bounds: previewBounds(current.selected, rect, Boolean(current.handle)),
+      ...(current.handle && current.selected.storyId ? { request: { gesture: current.group, frame: current.frame,
+        target: { slideId: current.selected.slideId, shapeId: current.selected.shapeId, token: current.selected.token },
+        rect } } : {}) });
   }, [store, setPreview]);
 
   const onPointerDown = useCallback((event: PointerEvent<HTMLElement>): boolean => {
@@ -223,28 +242,53 @@ export function usePeerlessShapeGestures(store: PeerlessViewStore | null, {
     recent.current = !current.handle && !dragging ? { slideId: current.frame.slideId, shapeId: current.shapeId,
       x: event.clientX, y: event.clientY, time: inputTime } : null;
     current.element.releasePointerCapture?.(current.pointerId);
-    setPreview(null);
     if (!dragging || delta.x === 0 && delta.y === 0) {
       outstanding.current.delete(current);
+      setPreview(null);
       return true;
     }
     const commit = (object: PresentationCommandObjectSelection) => {
       outstanding.current.delete(current);
-      if (current.cancelled || !presentation?.current || store.getSnapshot().editState.readOnly) return;
+      if (current.cancelled || !presentation?.current || store.getSnapshot().editState.readOnly) {
+        setPreview(null);
+        return;
+      }
       const rect = peerlessGestureRect(object, delta, current.handle);
       if (!rect || Object.keys(rect).every((key) =>
-        rect[key as keyof ShapeRect] === object.rect![key as keyof ShapeRect])) return;
+        rect[key as keyof ShapeRect] === object.rect![key as keyof ShapeRect])) {
+        setPreview(null);
+        return;
+      }
       const payload = { frame: current.frame,
         target: { slideId: object.slideId, shapeId: object.shapeId, token: object.token },
         inputTime, undoGroup: current.group };
-      void store.dispatch(current.handle ? { kind: 'setShapeRect', payload: { ...payload, rect } }
-        : { kind: 'moveShape', payload: { ...payload, x: rect.x, y: rect.y } }).catch(() => {});
+      const preview = previewValue.current;
+      const retained = preview?.request ? { token: preview.token, bounds: preview.bounds,
+        retainCanvas: { slideId: object.slideId, release: () => setPreview(null) } } : null;
+      setPreview(retained);
+      const operation = store.dispatch(current.handle ? { kind: 'setShapeRect', payload: { ...payload, rect } }
+        : { kind: 'moveShape', payload: { ...payload, x: rect.x, y: rect.y } });
+      void operation.then(async (ack) => {
+        const outcome = ack.outcomes.find((entry) => entry.seq === ack.throughSeq);
+        if (!outcome?.committed || !retained || previewValue.current !== retained) return;
+        await presentation.whenPaintedThrough(outcome.seq);
+      }).catch(() => {}).finally(() => {
+        if (previewValue.current === retained) setPreview(null);
+      });
     };
     if (!current.selected) {
       if (current.handle) {
-        if (current.cancelled || !presentation?.current || store.getSnapshot().editState.readOnly) return true;
+        if (current.cancelled || !presentation?.current || store.getSnapshot().editState.readOnly) {
+          outstanding.current.delete(current);
+          setPreview(null);
+          return true;
+        }
         const at = peerlessInputReference(store, true);
         if (at?.source === 'afterSeq') {
+          const preview = previewValue.current;
+          const retained = preview?.request ? { token: preview.token, bounds: preview.bounds,
+            retainCanvas: { slideId: current.frame.slideId, release: () => setPreview(null) } } : null;
+          setPreview(retained);
           const resize = store.dispatch({ kind: 'setShapeRect', payload: { at, frame: current.frame,
             shapeId: current.shapeId, handle: current.handle, delta,
             inputTime, undoGroup: current.group } }, {
@@ -252,12 +296,21 @@ export function usePeerlessShapeGestures(store: PeerlessViewStore | null, {
           });
           void resize.then(() => { outstanding.current.delete(current); },
             () => { outstanding.current.delete(current); });
+          void resize.then(async (ack) => {
+            const outcome = ack.outcomes.find((entry) => entry.seq === ack.throughSeq);
+            if (current.abort.signal.aborted || !outcome?.committed || !retained || previewValue.current !== retained) return;
+            await presentation.whenPaintedThrough(outcome.seq);
+          }).catch(() => {}).finally(() => {
+            if (previewValue.current === retained) setPreview(null);
+          });
         } else {
           outstanding.current.delete(current);
+          setPreview(null);
         }
         return true;
       }
       outstanding.current.delete(current);
+      setPreview(null);
       if (current.cancelled || !presentation?.current || store.getSnapshot().editState.readOnly) return true;
       const at = peerlessInputReference(store, true);
       if (at?.source === 'afterSeq') {

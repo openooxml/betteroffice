@@ -93,6 +93,16 @@ pub struct DecodedFontFace {
     pub payload: Option<Uint8Array>,
 }
 
+#[napi(object)]
+pub struct ShapeRectPreviewRequest {
+    pub slide_id: String,
+    pub shape_id: String,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
 /// Decodes one font pack face using this engine's linked decoder.
 #[napi(
     catch_unwind,
@@ -1500,6 +1510,47 @@ impl PptxRenderer {
         let document = document.document(env)?;
         renderer
             .layout_proposal_diff_slide_json(document.session(), &id, slide_index)
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi(catch_unwind, js_name = "previewShapeRectJson")]
+    pub fn preview_shape_rect_json(
+        &self,
+        env: Env,
+        document: &PptxDocument,
+        request: ShapeRectPreviewRequest,
+    ) -> Result<String> {
+        let coordinate = |value: f64| {
+            if value.is_finite()
+                && value.fract() == 0.0
+                && value >= i64::MIN as f64
+                && value <= i64::MAX as f64
+            {
+                Ok(value as i64)
+            } else {
+                Err(throw_error(
+                    &env,
+                    "shape rectangle coordinates must be integers",
+                ))
+            }
+        };
+        let rect = pptx_edit::ShapeRect {
+            x: coordinate(request.x)?,
+            y: coordinate(request.y)?,
+            width: coordinate(request.width)?,
+            height: coordinate(request.height)?,
+        };
+        let _call = EngineCall::new(env);
+        let renderer = self.renderer(env)?;
+        let _document_call = EngineCall::new(env);
+        let document = document.document(env)?;
+        renderer
+            .preview_shape_rect_json(
+                document.session(),
+                &request.slide_id,
+                &request.shape_id,
+                rect,
+            )
             .map_err(|error| map_error(env, error))
     }
 }

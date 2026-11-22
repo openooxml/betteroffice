@@ -23,7 +23,10 @@ import {
   presentationDeleteTextJoiningParagraphs, type PresentationCommandReadResult,
   type PresentationHandle, type PresentationHistoryReceipt,
 } from '../wasm/loader';
-import { buildCommandFrame, commandFrameMedia, commandFrameMediaBytes, parseCommandDisplayList } from './commandFrame';
+import {
+  buildCommandFrame, commandFrameMedia, commandFrameMediaBytes, parseCommandDisplayList,
+  parseCommandShapeRectPreview,
+} from './commandFrame';
 import type { WorkerSlideFrame, WorkerSlideRender } from './workerRender';
 import { prepareCommandOperation } from './commandOperations';
 import type { createCommandDefaultFonts } from './commandDefaultFonts';
@@ -1835,6 +1838,26 @@ export function registerPresentationCommandHandlers(
       TransferResult<PresentationCommandAck> | Promise<TransferResult<PresentationCommandAck>> {
       return runCommand(command);
     },
+    previewShapeRect(_, request) {
+      const opened = presentation();
+      if (!matches(request)) throw new Error('Presentation shape preview identity differs');
+      const { basis, frame: tag, target, rect } = request;
+      if (!basis || basis.epoch !== documentEpoch || basis.version !== version ||
+        opened.version() !== version || !objectFrame(tag) || tag.slideId !== target?.slideId) {
+        throw new Error('stale-basis');
+      }
+      const object = transformTarget(target);
+      if (!object || object.slideId !== tag.slideId || object.shapeId !== target.shapeId) {
+        throw new Error('bad-target');
+      }
+      if (!rect || ![rect.x, rect.y, rect.width, rect.height].every(Number.isSafeInteger) ||
+        rect.width <= 0 || rect.height <= 0) throw new Error('invalid-payload');
+      if (!object.rect || !object.canResize) throw new Error('unsupported');
+      const displayList = new TextEncoder().encode(JSON.stringify(
+        parseCommandShapeRectPreview(opened, target.slideId, target.shapeId, rect),
+      )).buffer;
+      return transferable(displayList, [displayList]);
+    },
     edit(_, command): TransferResult<PresentationSharedAck> | Promise<TransferResult<PresentationSharedAck>> {
       presentation();
       if (!isCommandEnvelope(command as unknown)) {
@@ -2002,6 +2025,7 @@ export function registerPresentationCommandHandlers(
     openCommandEditor: { lane: 'interactive' },
     command: (command) => ({ lane: command.kind === 'collabPipe' ? 'collab' : 'input',
       mutates: true, userInput: command.kind !== 'collabPipe' }),
+    previewShapeRect: { lane: 'interactive' },
     edit: (command) => ({ lane: command.kind === 'collabPipe' ? 'collab' : 'input',
       mutates: true, userInput: command.kind !== 'collabPipe' }),
     checkpoint: { lane: 'interactive' },

@@ -785,7 +785,7 @@ import type { SessionFailure } from '../../../../shared/office-session/types';
 import type { PresentationHandle } from '../wasm/loader';
 import type { PptxPngOptions, PptxPngTarget } from '../wasm/pngOptions';
 import type { PptxEditRequest, PptxEditResult, PptxReadRequest, PptxReadResult, PptxStoryTarget } from '../edits';
-import type { DeckSnapshot, ParagraphAlignment, ShapeRect, ShapeDraft, PresetShapeDraft, ShapeReceipt, TextStyle, TextStyleSnapshot } from '../types';
+import type { DeckSnapshot, ParagraphAlignment, ShapeRect, ShapeDraft, PresetShapeDraft, ShapeReceipt, SlideDisplayList, TextStyle, TextStyleSnapshot } from '../types';
 import type { PresentationSessionOpenOptions, PresentationSlideSummary, PresentationWireFrame } from './methods';
 import type { SlicedFontRead } from './commandSlicedFonts';
 import type { DefaultFontFace } from '../../../../shared/pptxDefaultFonts';
@@ -1166,6 +1166,12 @@ export interface PresentationCommandThumbnailRequest extends PresentationCommand
     slideId: string;
     knownRevision?: number;
 }
+export interface PresentationShapeRectPreviewRequest extends PresentationCommandIdentity {
+    basis: PresentationCommandBasis;
+    frame: PresentationCommandFrameTag;
+    target: PresentationCommandObjectTarget;
+    rect: ShapeRect;
+}
 export type PresentationCommandThumbnailResult = PresentationCommandIdentity & {
     epoch: number;
     slideId: string;
@@ -1198,6 +1204,7 @@ export type PresentationCommandMethods = FontDecoderMethods & {
     wholeCoverageFonts(have: string[]): DefaultFontFace[];
     openCommandEditor(bytes: ArrayBuffer, options: PresentationCommandOpenOptions): PresentationCommandOpenResult;
     command(envelope: PresentationCommandEnvelope): PresentationCommandAck;
+    previewShapeRect(request: PresentationShapeRectPreviewRequest): ArrayBuffer;
     thumbnailFrame(request: PresentationCommandThumbnailRequest): PresentationCommandThumbnailResult;
     flushCommandEditor(fence: PresentationCommandFence): PresentationCommandAck;
     saveCommandEditor(fence: PresentationCommandFence): PresentationCommandSaveResult;
@@ -1238,6 +1245,7 @@ export interface PresentationCommandClient {
     }): Promise<PresentationCommandSaveResult>;
     preparePicture?(bytes: ArrayBuffer): Promise<ArrayBuffer>;
     read(request?: PptxReadRequest): Promise<PresentationCommandReadResult>;
+    previewShapeRect(frame: PresentationCommandFrameTag, target: PresentationCommandObjectTarget, rect: ShapeRect): Promise<SlideDisplayList>;
     thumbnail(slideId: string, knownRevision?: number): Promise<PresentationCommandThumbnailResult>;
     subscribe(listener: (ack: PresentationCommandAck) => void): () => void;
     subscribeFrame(listener: (frame: PresentationCommandFrame) => void): () => void;
@@ -1253,6 +1261,7 @@ export declare const PRESENTATION_COMMAND_METHODS: {
     wholeCoverageFonts: true;
     openCommandEditor: true;
     command: true;
+    previewShapeRect: true;
     thumbnailFrame: true;
     flushCommandEditor: true;
     saveCommandEditor: true;
@@ -4040,6 +4049,15 @@ export {};
 /* eslint-disable */
 export interface DecodedFontFace { font: Uint8Array; payload?: Uint8Array; }
 
+export interface ShapeRectPreviewRequest {
+    slideId: string;
+    shapeId: string;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+}
+
 
 export class PptxDocument {
     private constructor();
@@ -4212,6 +4230,7 @@ export class PptxRenderer {
      */
     layoutSlideProfiledJson(document: PptxDocument, slide_index: number): string;
     constructor();
+    previewShapeRectJson(document: PptxDocument, request: ShapeRectPreviewRequest): string;
     registerFallbackFont(family: string, bold: boolean, italic: boolean, bytes: Uint8Array): number;
     registerFont(family: string, bold: boolean, italic: boolean, bytes: Uint8Array): number;
     /**
@@ -4388,6 +4407,7 @@ export interface InitOutput {
     readonly pptxrenderer_layoutSlideJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxrenderer_layoutSlideProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxrenderer_new: () => number;
+    readonly pptxrenderer_previewShapeRectJson: (a: number, b: number, c: any) => [number, number, number, number];
     readonly pptxrenderer_registerFallbackFont: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
     readonly pptxrenderer_registerFont: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
     readonly pptxrenderer_requestedFontFacesJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
@@ -4740,6 +4760,8 @@ export declare function presentationDeleteTextJoiningParagraphs(handle: Presenta
 export declare function presentationMetadata(handle: PresentationHandle): PresentationMetadata;
 /** @experimental */
 export declare function presentationDisplayListJson(handle: PresentationHandle, slideIndex: number): string;
+/** @internal Renders one tentative shape rectangle without changing the presentation. */
+export declare function presentationShapeRectPreview(handle: PresentationHandle, slideId: string, shapeId: string, rect: ShapeRect): SlideDisplayList;
 export declare function isProposalsAvailable(): boolean;
 export declare function initWasm(input?: WasmInitInput): Promise<void>;
 export declare function isWasmAvailable(): boolean;

@@ -5,6 +5,7 @@ import { createSessionClient } from '../../../../shared/office-session/client';
 import { createSessionHost } from '../../../../shared/office-session/host';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
 import * as wasm from '../wasm/loader';
+import type { ShapeRect } from '../types';
 import { registerPresentationCommandHandlers } from './commandHost';
 import { PRESENTATION_COMMAND_METHODS, type PresentationCommandAck, type PresentationCommandEnvelope,
   type PresentationCommandEvents, type PresentationCommandIntent, type PresentationCommandMethods } from './commandProtocol';
@@ -64,6 +65,12 @@ async function open(bytes?: Uint8Array) {
         return bounded(rpc.call.command({ ...identity, seq, basis: { epoch: state.epoch, version: state.version },
           ...(afterSeq === undefined ? {} : { afterSeq }), ...(intent as PresentationCommandIntent) } as PresentationCommandEnvelope));
       },
+      preview(state: PresentationCommandAck, frame: NonNullable<PresentationCommandAck['frame']>,
+        target: { slideId: string; shapeId: string; token: string }, rect: ShapeRect) {
+        return bounded(rpc.call.previewShapeRect({ ...identity,
+          basis: { epoch: state.epoch, version: state.version }, frame, target, rect }));
+      },
+      read(seq: number) { return bounded(rpc.call.readEditor({ ...identity, seq })); },
       async dispose() { try { await bounded(rpc.dispose()); } finally { opened.mockRestore(); registration.dispose(); pair.client.close(); } },
     };
   } catch (error) {
@@ -169,6 +176,29 @@ test('shape_identity_selection_checks_target_and_frame', async () => {
       ...input, frame: { ...missing.frame, incarnation: 'other' }, shapeId: session.story.shapeId,
     } });
     expect(stale.outcomes[0]).toMatchObject({ status: 'refused', reason: 'stale-basis', committed: false });
+  } finally { await session.dispose(); }
+});
+
+test('shape rectangle previews refuse stale targets and never advance command sequencing', async () => {
+  const session = await open();
+  try {
+    const selected = await session.command(session.state, 1, { kind: 'selectObject', payload: {
+      ...input, frame: session.state.frame, shapeId: session.story.shapeId,
+    } });
+    const object = selected.selection;
+    if (object?.kind !== 'object' || !selected.frame || !object.rect) throw new Error('Object selection required');
+    const target = { slideId: object.slideId, shapeId: object.shapeId, token: object.token };
+    const rect = { ...object.rect, width: Math.max(76_200, Math.floor(object.rect.width / 2)) };
+    const first = await session.preview(selected, selected.frame, target, rect);
+    const second = await session.preview(selected, selected.frame, target, rect);
+    expect(new Uint8Array(second)).toEqual(new Uint8Array(first));
+    await expect(session.preview(selected, selected.frame, { ...target, token: `${target.token}-stale` }, rect))
+      .rejects.toThrow('bad-target');
+    await expect(session.preview(selected, { ...selected.frame, incarnation: 'stale' }, target, rect))
+      .rejects.toThrow('stale-basis');
+    const after = await session.read(1);
+    expect(after.throughSeq).toBe(1);
+    expect(after.version).toBe(selected.version);
   } finally { await session.dispose(); }
 });
 

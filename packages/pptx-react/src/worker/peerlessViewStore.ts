@@ -69,6 +69,7 @@ export type PeerlessPaintCheckpoint = (() => void) & { commit?(): void };
 
 export interface PeerlessViewPainters {
   checkpoint?(pixels?: boolean): PeerlessPaintCheckpoint;
+  onPaintRollback?(throughSeq: number): void;
   paintFrame(frame: PeerlessConfirmedFrame, view: PeerlessViewSnapshot,
     media?: PresentationCommandFrame['media']): void;
   paintEcho(view: PeerlessViewSnapshot): void;
@@ -515,6 +516,7 @@ export function createPeerlessViewStore(
       if (!saved) throw error;
       ({ view, geometry, echoContext, echoCharacters, compositionVisible } = saved);
       rollback?.();
+      painters.onPaintRollback?.(frame.coversThroughSeq);
       return false;
     }
     rollback?.commit?.();
