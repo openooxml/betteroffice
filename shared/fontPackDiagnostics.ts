@@ -12,6 +12,20 @@ export function isImplicitFontCdnError(error: unknown): error is Error & { diagn
     (error as { diagnostic?: FontPackDiagnostic }).diagnostic?.reason === 'cdn-unavailable';
 }
 
+const CDN_WARNED = Symbol.for('betteroffice.fonts.cdn-warned');
+
+export function reportImplicitCdnFailure({ diagnostic }: { diagnostic: FontPackDiagnostic }): void {
+  const scope = globalThis as { [CDN_WARNED]?: Set<FontPackDiagnostic['pack']> };
+  const warned = scope[CDN_WARNED] ??= new Set();
+  if (!warned.has(diagnostic.pack)) {
+    warned.add(diagnostic.pack);
+    console.warn(diagnostic.detail);
+  }
+  if (typeof globalThis.dispatchEvent === 'function' && typeof CustomEvent === 'function') {
+    globalThis.dispatchEvent(new CustomEvent('betteroffice:font-pack-diagnostic', { detail: { ...diagnostic } }));
+  }
+}
+
 const WARNED = Symbol.for('@betteroffice/font-pack-warnings');
 
 /**

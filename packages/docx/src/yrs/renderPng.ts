@@ -1,4 +1,4 @@
-import { fontCdnCacheKey } from '../../../../shared/office-session/fontCdn';
+import { fontCdnCacheKey, pngFontCdnCacheKey } from '../../../../shared/office-session/fontCdn';
 import { buildResidentRegionLayoutRequest, computeLayout, documentRenderEnv } from '../editor/computeLayout';
 import { createRustMeasureSource, type BundledFontProvider, type ResidentFontRequirement } from '../layout/measure';
 import { resolveCompleteFontSelection } from '../layout/measure/defaultFontProvider';
@@ -17,7 +17,7 @@ const exportFontRuntime = { decoder: decodeFontFace, strict: true };
 
 interface Held {
   version: string;
-  fontCdn: string | undefined;
+  fontCdn: string;
   fonts: ReadonlyArray<DocxPngFontFace> | undefined;
   fontProvider: BundledFontProvider | undefined;
   laidOut: Promise<{ copy: YrsSession; display: ReturnType<typeof openPagedDisplay>; fontChains: Record<string, number[]> }>;
@@ -92,11 +92,10 @@ export function createPngExporter(session: YrsSession) {
     }
   }
 
-  function current(fonts: Held['fonts'], fontProvider: Held['fontProvider']): Held {
+  function current(fonts: Held['fonts'], fontProvider: Held['fontProvider'], fontCdn: string): Held {
     const version = session.version();
-    const fontCdn = fontCdnCacheKey();
     if (held && held.version === version && held.fonts === fonts && held.fontProvider === fontProvider &&
-      fontCdn !== undefined && held.fontCdn === fontCdn) return held;
+      held.fontCdn === fontCdn) return held;
     release();
     const source = (engineKind === 'native' ? sessionSourcePackage(session)?.buffer : undefined) ?? session.materializeDocx()?.originalBuffer;
     if (!source) throw new Error('renderPng needs a session opened from DOCX bytes');
@@ -115,7 +114,9 @@ export function createPngExporter(session: YrsSession) {
       const index = pngPage(target);
       pngScale(options.scale);
       options.signal?.throwIfAborted();
-      const entry = current(options.fonts, options.fontProvider);
+      const fontCdn = options.fontProvider ? fontCdnCacheKey() : await untilAborted(pngFontCdnCacheKey(), options.signal);
+      assertAlive();
+      const entry = current(options.fonts, options.fontProvider, fontCdn);
       entry.users++;
       if (idle !== undefined) clearTimeout(idle);
       idle = undefined;

@@ -4,7 +4,7 @@ import cjkManifest from '../../fonts-cjk/assets/manifest.json';
 import baseLatinManifest from '../assets/base-latin.json';
 import { readFontBytes } from './bytes';
 import type { FontDecoder } from './decode';
-import { fontAssetError, type FontRequestPolicy } from './fontCdn';
+import { decodeFontAsset, fontAssetError, type FontRequestPolicy } from './fontCdn';
 import type { BundledFontFace } from './manifest';
 import type { SliceRef } from './progressive';
 import { sha256 } from './sha256';
@@ -112,7 +112,8 @@ async function loadFace(
       ]);
       const dictionary = prerequisite === undefined ? undefined
         : (prerequisite.payload ?? prerequisite.font).slice(0);
-      const decoded = await decodeWith(wasmUrl, decoder)(encoded, { codec: entry.codec, dict: dictionary, maxOutput: 64 * 1024 * 1024 });
+      const decoded = await decodeFontAsset(request,
+        () => decodeWith(wasmUrl, decoder)(encoded, { codec: entry.codec, dict: dictionary, maxOutput: 64 * 1024 * 1024 }));
       if (decoded.font.byteLength !== face.byteLength) {
         throw fontAssetError(request,
           `Bundled font ${face.file} has ${decoded.font.byteLength} bytes; expected ${face.byteLength}`,
@@ -122,7 +123,7 @@ async function loadFace(
         throw fontAssetError(request, `Bundled font ${face.file} SHA-256 mismatch`);
       }
       if (entry.codec === 'woff2t+zstd' && decoded.payload === undefined) {
-        throw new Error(`Missing bundled font dictionary payload for ${face.file}`);
+        throw fontAssetError(request, `Missing bundled font dictionary payload for ${face.file}`);
       }
       return decoded;
     })();

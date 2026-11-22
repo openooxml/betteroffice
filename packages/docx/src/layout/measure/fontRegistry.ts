@@ -7,6 +7,7 @@ export interface ProgressiveFontFace {
 }
 
 import { baseLatinAlias, baseLatinCandidate, coverageFromBits, symbolFamily, wordsCoverage, type FontCoverage } from './fontCoverage';
+import { isImplicitFontCdnError, reportImplicitCdnFailure } from '../../../../../shared/fontPackDiagnostics';
 
 const standInKey = Symbol.for('@betteroffice/docx/standInFamily');
 
@@ -32,7 +33,7 @@ export type BundledFontLoader = (() => Promise<ArrayBuffer>) & {
   /** Only stands in for a primary face that failed to load. */
   onlyIfPrimaryFails?: boolean;
   /** Locates a sliced face whose outlines load as they are needed. */
-  slices?: SliceLocation & { loadAfterCdnFailure?(error: unknown): Promise<ArrayBuffer> | undefined };
+  slices?: SliceLocation & { loadWholeForExport?(): Promise<ArrayBuffer> };
   /** @internal Precomputed base Latin coverage bits of the face. */
   coverage?: string;
   /** @internal The face's decoded bytes, shared with the font cache: read them, never change or transfer them. */
@@ -610,6 +611,15 @@ export class TextMeasureFontRegistry {
       retryable = true;
     }
 
+    if (ids.length === 0 && (loader || lastResort)) {
+      const base = bundled?.resolveBaseLatin?.(bold, italic);
+      if (base) {
+        const id = await this.registerLastResort(`${key}|base-latin`, base, family);
+        if (id !== null) ids.push(id);
+        else retryable = true;
+      }
+    }
+
     if (ids.length === 0) {
       this.warnFallback(
         family,
@@ -755,13 +765,16 @@ export class TextMeasureFontRegistry {
         try {
           face = await open(slices);
         } catch (error) {
-          const substitute = slices.loadAfterCdnFailure?.(error);
-          if (substitute) return this.registerBuffer(await substitute, undefined, loader);
+          if (isImplicitFontCdnError(error)) throw error;
           this.warnFailure(
             `[fontRegistry] sliced face for "${label}" failed to open; loading it whole: ` +
               `${error instanceof Error ? error.message : String(error)}`
           );
-          return this.registerBuffer(await (loader.readOnlyBytes ?? loader)(), undefined, loader);
+          const bytes = await (slices.loadWholeForExport?.() ?? (loader.readOnlyBytes ?? loader)()).catch((failure: unknown) => {
+            if (isImplicitFontCdnError(failure)) reportImplicitCdnFailure(failure);
+            throw failure;
+          });
+          return this.registerBuffer(bytes, undefined, loader);
         }
         const known = loader.coverage === undefined ? undefined
           : Object.assign(async () => face.bytes(), { coverage: loader.coverage });
@@ -824,7 +837,7 @@ export class TextMeasureFontRegistry {
           const base = await this.registerFaceLoader(loader, family);
           return this.measuredAs(base, loader.measureAs ?? family);
         } catch (error) {
-          this.warnFailure(
+          if (!isImplicitFontCdnError(error)) this.warnFailure(
             `[fontRegistry] bundled face for "${family}" failed to load or register; ` +
               `falling back: ${error instanceof Error ? error.message : String(error)}`
           );
@@ -894,7 +907,7 @@ export class TextMeasureFontRegistry {
             id = await this.registerFaceLoader(loader, script);
           } catch (error) {
             retryable = true;
-            this.warnFailure(
+            if (!isImplicitFontCdnError(error)) this.warnFailure(
               `[fontRegistry] script-fallback face for "${script}" failed to load or register; ` +
                 `falling back: ${error instanceof Error ? error.message : String(error)}`
             );

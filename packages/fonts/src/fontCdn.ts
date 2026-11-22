@@ -1,69 +1,15 @@
 import { version as latinVersion } from '../../fonts-latin/package.json';
 import { version as intlVersion } from '../../fonts-intl/package.json';
 import { version as cjkVersion } from '../../fonts-cjk/package.json';
-import type { FontPackDiagnostic } from '../../../shared/fontPackDiagnostics';
+import { isImplicitFontCdnError, type FontPackDiagnostic } from '../../../shared/fontPackDiagnostics';
+import {
+  getFontCdnConfiguration, JSDELIVR, setFontCdnConfiguration, STALL_MS, type FontCdnConfiguration,
+} from '../../../shared/office-session/fontCdn';
 
-export interface FontCdnConfiguration {
-  baseUrl: string | false;
-  timeoutMs: number;
-  implicit?: true;
-}
-
-type FontGlobals = {
-  window?: { document?: unknown };
-  process?: { versions?: { node?: string } };
-  Deno?: unknown;
-};
-
-const JSDELIVR = 'https://cdn.jsdelivr.net/npm/';
-const STALL_MS = 10_000;
-const CONFIGURATION = Symbol.for('betteroffice.fonts.cdn');
-const CONFIGURED_HERE = Symbol.for('betteroffice.fonts.cdn.configured-here');
-const WARNED = Symbol.for('betteroffice.fonts.cdn-warned');
+export { fontCdnCacheKey, isBrowserFontPage, workerFontCdnConfiguration, type FontCdnConfiguration } from '../../../shared/office-session/fontCdn';
 
 type Pack = FontPackDiagnostic['pack'];
 export type FontRequestPolicy = number | Pack;
-type CdnScope = {
-  [CONFIGURATION]?: FontCdnConfiguration;
-  [CONFIGURED_HERE]?: true;
-  [WARNED]?: Set<Pack>;
-};
-
-const scope = globalThis as CdnScope & FontGlobals;
-
-function isServer(globals: FontGlobals): boolean {
-  return globals.process?.versions?.node !== undefined || globals.Deno !== undefined;
-}
-
-export function isBrowserFontPage(globals: FontGlobals): boolean {
-  return globals.window?.document != null && !isServer(globals);
-}
-
-function configuredFontCdn(configuration: FontCdnConfiguration | undefined): FontCdnConfiguration | undefined {
-  if (configuration && !(configuration.implicit && isServer(scope))) return { ...configuration };
-}
-
-export function effectiveFontCdnConfiguration(): FontCdnConfiguration | undefined {
-  const configured = scope[CONFIGURATION];
-  if (configured) return configuredFontCdn(configured);
-  if (isBrowserFontPage(scope)) return { baseUrl: JSDELIVR, timeoutMs: STALL_MS, implicit: true };
-}
-
-export function setFontCdnConfiguration(configuration: FontCdnConfiguration | undefined): void {
-  if (configuration === undefined) delete scope[CONFIGURATION];
-  else scope[CONFIGURATION] = { ...configuration };
-  delete scope[CONFIGURED_HERE];
-}
-
-export function workerFontCdnConfiguration(reply: { cdn?: FontCdnConfiguration } | undefined): FontCdnConfiguration | undefined {
-  return configuredFontCdn(scope[CONFIGURED_HERE] || reply === undefined ? scope[CONFIGURATION] : reply.cdn);
-}
-
-export function fontCdnCacheKey(): string | undefined {
-  if (!isServer(scope) && !isBrowserFontPage(scope)) return undefined;
-  const configuration = effectiveFontCdnConfiguration();
-  return configuration ? JSON.stringify([configuration.baseUrl, configuration.timeoutMs, configuration.implicit]) : '';
-}
 
 class ImplicitFontCdnError extends Error {
   readonly diagnostic: FontPackDiagnostic;
@@ -81,14 +27,11 @@ export function fontAssetError(request: FontRequestPolicy | undefined, message: 
   return typeof request === 'string' ? new ImplicitFontCdnError(request, message) : new Error(message);
 }
 
-export function reportImplicitCdnFailure({ diagnostic }: { diagnostic: FontPackDiagnostic }): void {
-  const warned = scope[WARNED] ??= new Set();
-  if (!warned.has(diagnostic.pack)) {
-    warned.add(diagnostic.pack);
-    console.warn(diagnostic.detail);
-  }
-  if (typeof globalThis.dispatchEvent === 'function' && typeof CustomEvent === 'function') {
-    globalThis.dispatchEvent(new CustomEvent('betteroffice:font-pack-diagnostic', { detail: { ...diagnostic } }));
+export async function decodeFontAsset<T>(request: FontRequestPolicy | undefined, decode: () => Promise<T>): Promise<T> {
+  try { return await decode(); }
+  catch (error) {
+    if (typeof request === 'string' && !isImplicitFontCdnError(error)) throw new ImplicitFontCdnError(request, error);
+    throw error;
   }
 }
 
@@ -184,11 +127,10 @@ export function configureFontCdn(options: FontCdnOptions): void {
     }
     baseUrl = url.href;
   }
-  setFontCdnConfiguration({ baseUrl, timeoutMs });
-  scope[CONFIGURED_HERE] = true;
+  setFontCdnConfiguration({ baseUrl, timeoutMs }, true);
 }
 
 /** @internal */
 export function fontCdnConfiguration(): FontCdnConfiguration {
-  return effectiveFontCdnConfiguration() ?? { baseUrl: false, timeoutMs: 30_000 };
+  return getFontCdnConfiguration() ?? { baseUrl: false, timeoutMs: 30_000 };
 }

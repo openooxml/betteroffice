@@ -1,6 +1,7 @@
 import type { SliceLocation } from '@betteroffice/fonts';
 import { PngExportError } from '../../../../shared/office-session/pngExportError';
 import { readFontTraits } from '../../../../shared/fontTraits';
+import { isImplicitFontCdnError, reportImplicitCdnFailure } from '../../../../shared/fontPackDiagnostics';
 import type { PaintFontCoverage } from '../render/canvas';
 
 /** What the session needs from a progressive face. */
@@ -92,12 +93,13 @@ export function createSlicedFontFaces(quietMs = FILL_QUIET_MS) {
     return family;
   }
 
-  const wholeBytes = (entry: Entry, error?: unknown): Promise<ArrayBuffer> => entry.wholeLoad ??=
-    (entry.whole.slices?.loadAfterCdnFailure?.(error) ?? entry.whole()).then((bytes) => {
+  const wholeBytes = (entry: Entry): Promise<ArrayBuffer> => entry.wholeLoad ??=
+    (entry.whole.slices?.loadWholeForExport?.() ?? entry.whole()).then((bytes) => {
       entry.wholeBytes = bytes;
       return bytes;
     }, (error: unknown) => {
       entry.wholeLoad = undefined;
+      if (isImplicitFontCdnError(error)) reportImplicitCdnFailure(error);
       throw error;
     });
   const latestOf = (entry: Entry) => entry.installed[entry.installed.length - 1];
@@ -120,8 +122,9 @@ export function createSlicedFontFaces(quietMs = FILL_QUIET_MS) {
     try {
       await entry.face.ensureText(text);
     } catch (error) {
+      if (isImplicitFontCdnError(error)) return entry.family;
       let bytes: ArrayBuffer;
-      try { bytes = await wholeBytes(entry, error); } catch { return entry.family; }
+      try { bytes = await wholeBytes(entry); } catch { return entry.family; }
       const latest = latestOf(entry);
       if (latest?.revision === WHOLE) return latest.family;
       try { return await install(entry, WHOLE, bytes, null); } catch { return entry.family; }
@@ -269,16 +272,15 @@ export function createSlicedFontFaces(quietMs = FILL_QUIET_MS) {
       if (!entry || disposed) return Promise.resolve(undefined);
       lastPaint = now();
       return (async () => {
-        let failure: unknown;
         if (!entry.wholeBytes) {
           try {
             const revision = await entry.face.ensureText(text);
             return revision === have ? { revision } : { revision, bytes: entry.face.bytes() };
           } catch (error) {
-            failure = error;
+            if (isImplicitFontCdnError(error)) return undefined;
           }
         }
-        const bytes = await wholeBytes(entry, failure);
+        const bytes = await wholeBytes(entry);
         return have === WHOLE ? { revision: WHOLE } : { revision: WHOLE, bytes: bytes.slice(0) };
       })();
     },

@@ -5,9 +5,9 @@ import { loadFontBytes } from './bytes';
 import { loadPackedFontBytes, readPackedFontBytes, isBaseLatinFont, isLatinFont, packFor, sliceDecoder, sliceRefOf } from './packed';
 import type { SliceLocation } from './progressive';
 import { checkInstalledPacks } from './packDiagnostics';
-import { isImplicitFontCdnError, type FontPackDiagnostic } from '../../../shared/fontPackDiagnostics';
+import { isImplicitFontCdnError, reportImplicitCdnFailure, type FontPackDiagnostic } from '../../../shared/fontPackDiagnostics';
 import {
-  fontCdnAssetUrl, fontCdnCacheKey, reportImplicitCdnFailure,
+  fontCdnAssetUrl, fontCdnCacheKey,
   type FontCdnConfiguration, type FontRequestPolicy,
 } from './fontCdn';
 import type { FontAssetKind } from '../../../shared/office-session/optionalFontPacks';
@@ -177,8 +177,6 @@ export function createFontRuntime(lookup: FontPackLookup, {
         };
       },
       loadWholeForExport: () => bundledFontBytes(face, loadPackedFontBytes, base, { ...runtime, strict: true }),
-      loadAfterCdnFailure: (error) => !runtime?.strict && isImplicitFontCdnError(error)
-        ? substituteFontBytes(face, loadPackedFontBytes, runtime, true) : undefined,
       requestTimeoutMs: requestTimeout,
       decode: base instanceof Promise
         ? async (encoded, maxOutput) => sliceDecoder(decoderUrl(await base), runtime?.decoder)(encoded, maxOutput)

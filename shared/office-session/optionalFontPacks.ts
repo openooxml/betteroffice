@@ -10,6 +10,14 @@ export type WorkerFontPackSource = (pack: FontAssetKind, options?: { fresh?: boo
 export type FontPackRequest = { protocol: 1; kind: 'font-pack-request'; id: string; pack: FontAssetKind };
 export type FontPackReply = FontPackAssets & { protocol: 1; kind: 'font-pack-reply'; id: string; error?: string };
 
+let workerSource: WorkerFontPackSource = async () => undefined;
+
+export function setWorkerFontAssets(source: WorkerFontPackSource): void {
+  workerSource = source;
+}
+
+export const workerFontAssets: WorkerFontPackSource = (...args) => workerSource(...args);
+
 export class WorkerFontModuleUnavailableError extends TypeError {
   constructor(specifier: string) {
     super(`Failed to resolve module specifier '${specifier}'`);
@@ -46,7 +54,7 @@ export function createFontPackResponder(
         pending = Promise.resolve().then(async () => {
           const assets = await source(pack);
           const urls = assets && Object.fromEntries(Object.entries(assets).map(([file, href]) => [file, new URL(href, pageUrl).href]));
-          const cdn = pack === 'base' || pack === 'decoder' ? undefined : fontCdn?.();
+          const cdn = pack === 'decoder' ? undefined : fontCdn?.();
           return cdn ? { urls, cdn } : { urls };
         });
         packs.set(pack, pending);

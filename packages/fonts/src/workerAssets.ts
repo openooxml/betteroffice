@@ -1,16 +1,10 @@
-import type { WorkerFontPackSource } from '../../../shared/office-session/optionalFontPacks';
+import { workerFontAssets } from '../../../shared/office-session/optionalFontPacks';
 import { readWasmSync } from '../../../shared/office-session/readWasmAsset';
 
-let source: WorkerFontPackSource = async () => undefined;
-
-export function setWorkerFontAssets(next: WorkerFontPackSource): void {
-  source = next;
-}
-
-export const workerFontAssets: WorkerFontPackSource = (...args) => source(...args);
+export { setWorkerFontAssets, workerFontAssets } from '../../../shared/office-session/optionalFontPacks';
 
 export async function bundledDecoderUrl(): Promise<URL | undefined> {
-  const href = (await source('decoder'))?.urls?.['fontpack.wasm'];
+  const href = (await workerFontAssets('decoder'))?.urls?.['fontpack.wasm'];
   return href === undefined ? undefined : new URL(href);
 }
 

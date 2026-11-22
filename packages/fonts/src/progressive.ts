@@ -2,8 +2,8 @@ import type { FontDecoder } from './decode';
 import { absoluteHref } from './assetHref';
 import { chunkEntries, parseSkeleton, textChunks, type SliceSkeleton } from './slices';
 import { sha256 } from './sha256';
-import { fontAssetError, reportImplicitCdnFailure } from './fontCdn';
-import { isImplicitFontCdnError } from '../../../shared/fontPackDiagnostics';
+import { decodeFontAsset, fontAssetError } from './fontCdn';
+import { isImplicitFontCdnError, reportImplicitCdnFailure } from '../../../shared/fontPackDiagnostics';
 
 /**
  * A sliced face that loads its outlines as they are needed. Its layout tables
@@ -56,8 +56,6 @@ export interface SliceLocation {
   prepareUrls?(): Promise<Pick<SliceLocation, 'base' | 'url' | 'timeoutMs'> & Partial<Pick<SliceLocation, 'decode'>>>;
   /** @internal */
   loadWholeForExport?(): Promise<ArrayBuffer>;
-  /** @internal */
-  loadAfterCdnFailure?(error: unknown): Promise<ArrayBuffer> | undefined;
   /** @internal */
   requestTimeoutMs?(url: URL): number | undefined;
   /** Decompresses a zstd file to at most `maxOutput` bytes. */
@@ -160,7 +158,7 @@ function readFile(transport: SliceTransport, entry: SliceFile): Promise<Uint8Arr
     if (encoded.byteLength !== entry.encodedLength) {
       throw fontAssetError(request, `Font slice ${entry.file} has ${encoded.byteLength} encoded bytes; expected ${entry.encodedLength}`);
     }
-    const decoded = await transport.decode(encoded, entry.byteLength);
+    const decoded = await decodeFontAsset(request, () => transport.decode(encoded, entry.byteLength));
     if (decoded.byteLength !== entry.byteLength) {
       throw fontAssetError(request, `Font slice ${entry.file} has ${decoded.byteLength} bytes; expected ${entry.byteLength}`);
     }

@@ -1,5 +1,5 @@
 import type { BundledFontFace, BundledFontScript } from '@betteroffice/fonts';
-import { fontCdnCacheKey } from '../../../../shared/office-session/fontCdn';
+import { pngFontCdnCacheKey } from '../../../../shared/office-session/fontCdn';
 import { importFonts } from '../../../../shared/office-session/fontModules';
 import { PngExportError } from '../../../../shared/office-session/pngExportError';
 import type { RequestedFontFace } from '../../../../shared/pptxDefaultFonts';
@@ -20,7 +20,7 @@ const loadFonts = (): Promise<Fonts> => (fontsModule ??= importFonts().catch((er
 
 interface Exporter {
   renderer: PptxRenderer;
-  fontCdn: string | undefined;
+  fontCdn: string;
   measured: ExportFace[];
   sources: Uint8Array[];
   faces: ExportFace[];
@@ -62,7 +62,7 @@ function register(exporter: Exporter, face: PptxFontFace, fallback: boolean): vo
   (fallback ? exporter.fallback : exporter.primary).add(faceKey(face.family, bold, italic));
 }
 
-function create(measured: ExportFace[], added: ReadonlyArray<PptxFontFace>, fontCdn: string | undefined): Exporter {
+function create(measured: ExportFace[], added: ReadonlyArray<PptxFontFace>, fontCdn: string): Exporter {
   const exporter: Exporter = {
     renderer: new PptxRenderer(), fontCdn, measured, sources: measured.map((face) => face.bytes), faces: [],
     owned: new Set(), primary: new Set(), fallback: new Set(), requested: new Set(),
@@ -180,9 +180,10 @@ export async function defaultFontLayout(
   slideIndex(document, slideId);
   const known = new Set(measured.map((face) => familyKey(face.family)));
   const supplied = added?.filter((face) => !known.has(familyKey(face.family))) ?? [];
-  const fontCdn = fontCdnCacheKey();
+  const fontCdn = await pngFontCdnCacheKey();
+  signal?.throwIfAborted();
   let exporter = supplied.length ? undefined : exporters.get(document);
-  if (exporter && (fontCdn === undefined || exporter.fontCdn !== fontCdn || !current(exporter, measured))) {
+  if (exporter && (exporter.fontCdn !== fontCdn || !current(exporter, measured))) {
     releaseDefaultFontLayout(document);
     exporter = undefined;
   }
