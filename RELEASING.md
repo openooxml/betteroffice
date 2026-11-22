@@ -109,7 +109,10 @@ Repository roots are private so `changeset publish` skips them. The dispatch-onl
 environment `npm-<format>`, refusing `NPM_TOKEN`.
 After a successful npm release, `release.yml`'s `native-npm` job dispatches that
 workflow for formats whose root version is missing and waits for every run.
-`RELEASE_SKIP_NATIVE=true` disables this job.
+The release holds packages that need a native version missing from npm. The
+`held-npm` job publishes their tarballs after the required native versions appear.
+`RELEASE_SKIP_NATIVE=true` disables native publishing and leaves held packages
+unpublished while the required versions are missing.
 
 Trusted Publishing cannot create a package: each of these names has to be on npm
 before the release that publishes it. Unless `RELEASE_SKIP_NATIVE` is `true`,

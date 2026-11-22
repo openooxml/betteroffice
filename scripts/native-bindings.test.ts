@@ -234,6 +234,13 @@ describe('native package release wiring', () => {
     );
   });
 
+  test('publishes held packages after the release and native publishing', () => {
+    const job = release.jobs['held-npm'];
+    expect(job.needs).toEqual(['release', 'native-npm']);
+    expect(job.permissions['id-token']).toBe('write');
+    expect(job.if).toContain("&& (needs.native-npm.result == 'success' || needs.native-npm.result == 'skipped')");
+  });
+
   test('release dispatches and waits for the dedicated publisher', () => {
     const job = release.jobs['native-npm'];
     expect(job.needs).toBe('release');
