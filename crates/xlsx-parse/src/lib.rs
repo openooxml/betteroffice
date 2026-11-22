@@ -73,9 +73,9 @@ pub use styles::legacy_style_reads;
 #[doc(hidden)]
 pub use styles::source_style_xml_markers;
 #[doc(hidden)]
-pub use write::{FragmentFailure, FragmentFailureReason, FragmentKind, PreservedFragmentFailure};
-#[doc(hidden)]
 pub use write::serialize_workbook_with_package_and_open_calculation;
+#[doc(hidden)]
+pub use write::{FragmentFailure, FragmentFailureReason, FragmentKind, PreservedFragmentFailure};
 pub use write::{
     SaveEdits, SerializedParts, serialize_workbook, serialize_workbook_with_active_sheet,
     serialize_workbook_with_package_and_origins_after_edits,

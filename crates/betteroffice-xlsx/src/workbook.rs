@@ -1773,14 +1773,15 @@ impl Workbook {
         match &self.source_package {
             Some(package) => {
                 let package = package.materialize()?;
-                let preserve_source_caches = !self.edited_since_open
-                    && self.recalculated_since_open
-                    && package.requests_full_calculation()
-                    && self.model.sheets.iter().any(|sheet| {
-                        sheet.iter_cells().any(|(_, cell)| cell.formula.is_some())
-                    })
-                    && (!self.model.iterate
-                        || self.model.sheets != package.original_workbook().sheets);
+                let preserve_source_caches =
+                    !self.edited_since_open
+                        && self.recalculated_since_open
+                        && package.requests_full_calculation()
+                        && self.model.sheets.iter().any(|sheet| {
+                            sheet.iter_cells().any(|(_, cell)| cell.formula.is_some())
+                        })
+                        && (!self.model.iterate
+                            || self.model.sheets != package.original_workbook().sheets);
                 let parts = xlsx_parse::serialize_workbook_with_package_and_open_calculation(
                     &self.model,
                     package,

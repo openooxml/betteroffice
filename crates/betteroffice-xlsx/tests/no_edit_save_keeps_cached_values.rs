@@ -366,10 +366,7 @@ fn keeps_chart_caches_at_a_nonstandard_path_when_filling_a_referenced_cell() {
 #[test]
 fn switching_tabs_refreshes_chart_caches_for_an_unflagged_workbook() {
     const CHART: &str = "xl/charts/chart1.xml";
-    let mut source = package_parts(
-        r#"<row r="1"><c r="A1"><f>2+3</f><v>999</v></c></row>"#,
-        "",
-    );
+    let mut source = package_parts(r#"<row r="1"><c r="A1"><f>2+3</f><v>999</v></c></row>"#, "");
     add_chart(&mut source, CHART);
     insert_xml(
         &mut source,
