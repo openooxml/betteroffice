@@ -295,7 +295,7 @@ fn replacing_the_closing_paragraph_of_a_spanning_field_keeps_a_custom_xml_wrappe
 }
 
 #[test]
-fn replacing_the_closing_paragraph_of_a_spanning_field_saves_beside_an_untouched_form_field() {
+fn a_closing_paragraph_edit_beside_an_unwritable_form_field_is_refused_as_on_main() {
     let data = r#"<w:ffData xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="q:CT_FFData"><q:name q:val="T"/></w:ffData>"#;
     let form_field = paragraph(
         "0000001F",
@@ -309,19 +309,11 @@ fn replacing_the_closing_paragraph_of_a_spanning_field_saves_beside_an_untouched
         ]
         .concat(),
     );
-    let text = "Appendix, edited";
     let after = format!("{}{form_field}", after_paragraph());
-    let saved = saved_after_edit(&after, CLOSING, text);
-    assert!(saved.is_ok(), "the save failed: {saved:?}");
-    let saved = saved.unwrap();
+    let refusal = format!("{:?}", saved_after_edit(&after, CLOSING, "Appendix, edited"));
     assert!(
-        saved.contains(&form_field),
-        "source bytes differ in the form field paragraph: {saved}"
-    );
-    assert_eq!(
-        entries_outside_the_field(&saved, &["Introduction", "Scope", "Terms", text]),
-        Vec::<&str>::new(),
-        "{saved}"
+        refusal.starts_with("Err(") && refusal.contains("form field data"),
+        "{refusal}"
     );
 }
 
