@@ -328,7 +328,7 @@ impl EditSessionCore {
             .doc()
             .set_hyperlink(&ctx, StoryRange::new(story, start, end), hyperlink)
             .map(|_| ())
-            .map_err(EngineError::message)
+            .map_err(EngineError::from)
     }
 
     pub fn clear_formatting(
