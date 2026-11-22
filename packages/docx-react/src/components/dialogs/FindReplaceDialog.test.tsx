@@ -77,7 +77,7 @@ test('opening with search text fills the Find field and selects that text at onc
   const view = render(<FindReplaceDialog isOpen={false} {...HANDLERS} />);
   for (const text of ['word', 'another']) {
     view.rerender(<FindReplaceDialog isOpen {...HANDLERS} initialSearchText={text} />);
-    const field = view.getByRole<HTMLInputElement>('textbox', { name: 'Find text' });
+    const field = view.getByRole('textbox', { name: 'Find text' }) as HTMLInputElement;
     expect(field.value).toBe(text);
     expect(focused()).toBe('Find text');
     expect([field.selectionStart, field.selectionEnd]).toEqual([0, text.length]);
@@ -111,11 +111,11 @@ test('letters typed right after the shortcut that opens the dialog go to the Fin
     );
   }
   const view = render(<Host />);
-  const page = view.getByRole<HTMLTextAreaElement>('textbox', { name: 'Document' });
+  const page = view.getByRole('textbox', { name: 'Document' }) as HTMLTextAreaElement;
   page.focus();
   fireEvent.keyDown(page, { key: 'f', ctrlKey: true });
   const typedInto = document.activeElement as HTMLInputElement | HTMLTextAreaElement;
   fireEvent.change(typedInto, { target: { value: `${typedInto.value}zq` } });
-  expect(view.getByRole<HTMLInputElement>('textbox', { name: 'Find text' }).value).toBe('zq');
+  expect((view.getByRole('textbox', { name: 'Find text' }) as HTMLInputElement).value).toBe('zq');
   expect(page.value).toBe('Text');
 });
