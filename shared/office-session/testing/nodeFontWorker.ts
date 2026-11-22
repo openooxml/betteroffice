@@ -1,12 +1,24 @@
 import { parentPort } from 'node:worker_threads';
 import { stubBrowser } from '../../../packages/docx/src/yrs/renderPngTestSupport';
+import { setFontCdnConfiguration } from '../fontCdn';
 import type { SessionScope } from '../transport';
 
 const port = parentPort!;
+Bun.plugin({
+  name: 'uninstalled-font-packs',
+  setup(build) {
+    build.onResolve({ filter: /^@betteroffice\/fonts-(?:latin|intl|cjk)$/ }, ({ path }) => ({ path, namespace: 'uninstalled-font-pack' }));
+    build.onLoad({ filter: /.*/, namespace: 'uninstalled-font-pack' }, ({ path }) => ({
+      loader: 'object',
+      exports: { then: (_resolve: unknown, reject: (error: Error) => void) => reject(new Error(`Cannot find package '${path}'`)) },
+    }));
+  },
+});
+setFontCdnConfiguration({ baseUrl: 'https://stale-worker-cdn.example/', timeoutMs: 1000 });
 const fetchAsset = globalThis.fetch;
 globalThis.fetch = ((input, options) => {
   const url = input instanceof Request ? input.url : String(input);
-  if (url.startsWith('https://cdn.jsdelivr.net/')) {
+  if (url.startsWith('https://cdn.jsdelivr.net/') || url.startsWith('https://stale-worker-cdn.example/')) {
     port.postMessage({ kind: 'unexpected-cdn-fetch', url });
     return Promise.resolve(new Response(null, { status: 404 }));
   }
@@ -15,7 +27,9 @@ globalThis.fetch = ((input, options) => {
 
 stubBrowser();
 class Face {
-  constructor(readonly family: string) {}
+  constructor(readonly family: string, bytes: ArrayBuffer | ArrayBufferView) {
+    port.postMessage({ kind: 'font-face', byteLength: bytes.byteLength });
+  }
   load() { return Promise.resolve(this); }
 }
 const faces = new Set<Face>();

@@ -1,5 +1,7 @@
 import { afterEach, expect, mock, spyOn, test } from 'bun:test';
 import { configureFontCdn, type BundledFontFace } from '@betteroffice/fonts';
+import * as fonts from '@betteroffice/fonts';
+import { fontAssetResponse, fontRuntimeWithoutPacks, withBrowserFontGlobals } from '../../fonts/src/test-assets';
 import type { FontDecoder } from '../../../shared/office-session/fontDecoder';
 import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../shared/office-session/fontCdn';
 import { createSessionHost } from '../../../shared/office-session/host';
@@ -720,4 +722,38 @@ test('an already absent editor face is tried again after changing the CDN', asyn
     expect(added).toHaveLength(1);
     expect(load).toHaveBeenCalledTimes(2);
   } finally { painter.dispose(); setFontCdnConfiguration(previous); }
+});
+
+test('T14: a new painter retries a transient implicit CDN failure with the same configuration', async () => {
+  const { added } = browser();
+  const previous = getFontCdnConfiguration();
+  const restore = withBrowserFontGlobals();
+  const runtime = fontRuntimeWithoutPacks();
+  const load = spyOn(xlsxDefaultFontManager, 'load').mockResolvedValue({ ...fonts, ...runtime });
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  let attempts = 0;
+  const fetch = spyOn(globalThis, 'fetch').mockImplementation((input) =>
+    String(input).includes('cdn.jsdelivr.net') && ++attempts === 1
+      ? Promise.resolve(new Response(null, { status: 503 })) : fontAssetResponse(input));
+  const first = createDefaultFontPainter(null, () => {});
+  const second = createDefaultFontPainter(null, () => {});
+  const frame = display({ family: 'Calibri' });
+  try {
+    setFontCdnConfiguration(undefined);
+    await first.load(frame);
+    expect(added).toHaveLength(0);
+    first.dispose();
+    await second.load(frame);
+    expect(attempts).toBe(2);
+    expect(added.map(({ family }) => family)).toEqual(['Calibri']);
+  } finally {
+    first.dispose();
+    second.dispose();
+    load.mockRestore();
+    fetch.mockRestore();
+    warn.mockRestore();
+    Reflect.deleteProperty(globalThis, Symbol.for('betteroffice.fonts.cdn-warned'));
+    restore();
+    setFontCdnConfiguration(previous);
+  }
 });

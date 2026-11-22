@@ -593,7 +593,7 @@ test('a silent page leaves its worker with exactly the CDN sent at open', async 
   } finally { channel.dispose(); restoreWorker(); }
 });
 
-for (const failure of ['blocked', 'HTTP 404', 'bad hash', 'bad length'] as const) {
+for (const failure of ['blocked', 'HTTP 404', 'bad hash', 'bad length', 'corrupt compressed bytes'] as const) {
   test(`implicit ${failure} substitutes two faces, warns once and retries the pack`, async () => {
     const restore = withBrowserFontGlobals();
     const { warning, diagnostics, restore: stopObserving } = observeCdnFailures();
@@ -611,6 +611,10 @@ for (const failure of ['blocked', 'HTTP 404', 'bad hash', 'bad length'] as const
       if (failure === 'blocked') throw new TypeError('Failed to fetch');
       if (failure === 'HTTP 404') return new Response(null, { status: 404 });
       if (failure === 'bad length') return new Response(new Uint8Array(4));
+      if (failure === 'corrupt compressed bytes') {
+        const bytes = await (await fontAssetResponse(input)).arrayBuffer();
+        return new Response(new Uint8Array(bytes.byteLength));
+      }
       return fontAssetResponse(input);
     }) as typeof fetch;
     try {
@@ -635,6 +639,26 @@ for (const failure of ['blocked', 'HTTP 404', 'bad hash', 'bad length'] as const
     }
   });
 }
+
+test('a corrupt implicit CJK slice with the expected encoded length reports CDN failure', async () => {
+  const restore = withBrowserFontGlobals();
+  const observed = observeCdnFailures();
+  const provider = fonts.createFontProvider(undefined, { decoder, retain: false });
+  const slices = provider.resolveScriptFallback('cjk-jp', false, false)!.slices!;
+  const indexUrl = fontCdnAssetUrl(cjk, slices.ref.index);
+  try {
+    const { skeleton } = await (await fontAssetResponse(indexUrl)).json() as { skeleton: { file: string; encodedLength: number } };
+    globalThis.fetch = (async (input: RequestInfo | URL) => String(input).endsWith(skeleton.file)
+      ? new Response(new Uint8Array(skeleton.encodedLength)) : fontAssetResponse(input)) as typeof fetch;
+    await expect(openSlicedFace(slices)).rejects.toMatchObject({
+      diagnostic: { pack: 'cjk', reason: 'cdn-unavailable' },
+    });
+    expect(observed.warning).toHaveBeenCalledTimes(1);
+  } finally {
+    observed.restore();
+    restore();
+  }
+});
 
 test('an implicit CJK slice failure allows a later whole-face request and warns once', async () => {
   const restore = withBrowserFontGlobals();

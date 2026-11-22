@@ -1,4 +1,8 @@
 import { afterEach, beforeEach, expect, mock, test } from 'bun:test';
+import { resolveScriptFallbackFace } from '@betteroffice/fonts';
+import { openSlicedFace } from '@betteroffice/fonts/progressive';
+import { fontAssetResponse, fontRuntimeWithoutPacks, withBrowserFontGlobals } from '../../../fonts/src/test-assets';
+import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import { prepareTextFamilies } from '../render/textFamilies';
 import { createSlicedFontFaces, slicedFacesSupported, type SlicedFontFace } from './commandSlicedFonts';
 
@@ -49,6 +53,51 @@ function fakeFace(fail: () => boolean = () => false): SlicedFontFace & { asked: 
     },
   };
 }
+
+test('T12: a failed CDN chunk never becomes a whole face and completeExport strictly loads the whole font', async () => {
+  const previous = getFontCdnConfiguration();
+  const restore = withBrowserFontGlobals();
+  const fetch = globalThis.fetch;
+  const sliced = createSlicedFontFaces();
+  const load = fontRuntimeWithoutPacks().createFontProvider().resolveScriptFallback('cjk-jp', false, false)!;
+  let fail = false;
+  const failed: string[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    if (fail && String(input).includes('/fonts-cjk@')) {
+      failed.push(String(input));
+      return new Response(null, { status: 503 });
+    }
+    return fontAssetResponse(input);
+  }) as typeof fetch;
+  try {
+    setFontCdnConfiguration(undefined);
+    const opened = await openSlicedFace(load.slices!);
+    const text = [...'日本語漢字東京大阪京都'].find((character) =>
+      opened.chunksOf(character).some((chunk) => !opened.loadedChunks().has(chunk)))!;
+    expect(text).toBeDefined();
+    sliced.add('Noto Sans JP', opened, load);
+    fail = true;
+    const painted = await sliced.coverage.prepare('Noto Sans JP', text);
+    const replaceExportFace = mock(() => {});
+    await expect(sliced.completeExport({ replaceExportFace })).rejects.toMatchObject({
+      code: 'font-unavailable', message: expect.stringContaining('HTTP 503'),
+    });
+    expect(replaceExportFace).not.toHaveBeenCalled();
+    expect(failed.some((url) => url.endsWith(resolveScriptFallbackFace('cjk-jp', false, false)!.file))).toBe(true);
+    expect(painted).toBe('Noto Sans JP');
+    expect(sliced.loadedWhole('Noto Sans JP')).toBeUndefined();
+    fail = false;
+    const read = await sliced.read('Noto Sans JP', text, null);
+    expect(read?.revision).toBeGreaterThan(1);
+    expect(read?.revision).not.toBe(Number.MAX_SAFE_INTEGER);
+  } finally {
+    sliced.dispose();
+    globalThis.fetch = fetch;
+    Reflect.deleteProperty(globalThis, Symbol.for('betteroffice.fonts.cdn-warned'));
+    restore();
+    setFontCdnConfiguration(previous);
+  }
+}, 30_000);
 
 test.each([
   ['Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36', true],

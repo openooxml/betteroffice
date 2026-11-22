@@ -1,6 +1,8 @@
 import { afterEach, expect, spyOn, test } from 'bun:test';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
-import { isClientMessage, isHostMessage } from '../../../../shared/office-session/protocol';
+import { isClientMessage, isHostMessage, type ClientMessage } from '../../../../shared/office-session/protocol';
+import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
+import { withBrowserFontGlobals } from '../../../fonts/src/test-assets';
 import { defaultFontInstaller, type DefaultFontInstallation, type DefaultFontPayload } from '../../../../shared/pptxDefaultFonts';
 import * as progressive from '@betteroffice/fonts/progressive';
 import * as wasm from '../wasm/loader';
@@ -83,7 +85,7 @@ function connection(initial = ['active', 'target']) {
     messages.push(message); pair.host.post(message, transfer);
   } }, { initWasm: async () => {} });
   restorers.push(() => pair.client.close());
-  return { transport: pair.client, messages, registered, faces, replaced, pngFonts, changed: changed.promise, collect, layout, coverage,
+  return { transport: pair.client, messages, registered, faces, replaced, pngFonts, changed: changed.promise, collect, layout, coverage, provider,
     replace(value: string[]) { next = value; } };
 }
 
@@ -408,6 +410,39 @@ test('a session that does not ask for sliced faces loads, registers and exports 
   expect(JSON.stringify([sent, wire.messages]).toLowerCase()).not.toContain('sliced');
   expect(JSON.stringify([sent, wire.messages])).not.toContain('CoverageFont');
 });
+
+for (const opening of ['explicit', 'unset'] as const) {
+  test(`opening a command editor with ${opening} CDN config invalidates the prefetched implicit provider`, async () => {
+    const previous = getFontCdnConfiguration();
+    const restore = withBrowserFontGlobals(false);
+    const implicit = { baseUrl: 'https://cdn.jsdelivr.net/npm/', timeoutMs: 10_000, implicit: true } as const;
+    const fontCdn = opening === 'explicit' ? { baseUrl: implicit.baseUrl, timeoutMs: implicit.timeoutMs } : undefined;
+    const wire = connection(['target']);
+    const prefetched = deferred<void>();
+    wire.provider.mockImplementation(async (configuration) => {
+      setFontCdnConfiguration(configuration);
+      prefetched.resolve();
+      return { resolve: () => async () => bytes, resolveFamily: () => undefined, resolveScriptFallback: () => undefined,
+        resolveLastResort: () => { throw new Error('Unexpected substitution'); } };
+    });
+    const prefetch: ClientMessage = { protocol: 1, kind: 'call', id: 99, method: 'prefetchCoverageFonts',
+      args: [['arabic'], false, implicit] };
+    let client: PresentationCommandClient | undefined;
+    try {
+      wire.transport.post(prefetch);
+      await prefetched.promise;
+      client = await createPresentationCommandClient(Uint8Array.of(0),
+        { session: 'fonts', incarnation: 'worker', fontCdn, defaultFonts: opening === 'explicit' }, wire.transport);
+      expect(wire.provider.mock.calls.map(([configuration]) => configuration))
+        .toEqual(opening === 'explicit' ? [implicit, fontCdn] : [implicit]);
+      expect(getFontCdnConfiguration()).toEqual(fontCdn);
+    } finally {
+      await client?.dispose();
+      restore();
+      setFontCdnConfiguration(previous);
+    }
+  });
+}
 
 test('a session that asks for sliced faces tries them first', async () => {
   const wire = connection(['target']);

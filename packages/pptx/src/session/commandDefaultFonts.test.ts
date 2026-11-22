@@ -576,6 +576,8 @@ test('a worker provider applies its session CDN snapshot before creating loaders
     expect(fonts.fontCdnConfiguration()).toEqual(configured);
     await commandFontProvider.load({ baseUrl: false, timeoutMs: 30_000 });
     expect(fonts.fontCdnConfiguration().baseUrl).toBe(false);
+    await commandFontProvider.load(undefined);
+    expect(getFontCdnConfiguration()).toBeUndefined();
     expect(create).toHaveBeenCalledTimes(2);
   } finally { fonts.configureFontCdn({ baseUrl: false }); }
 });

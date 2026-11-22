@@ -3,9 +3,11 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import * as fonts from '@betteroffice/fonts';
 import { initWasm, openPresentation } from '../index';
-import { fontAssetResponse, withBrowserFontGlobals } from '../../../fonts/src/test-assets';
-import { createFontRuntime } from '../../../fonts/src/fontRuntime';
+import { fontAssetResponse, fontRuntimeWithoutPacks, withBrowserFontGlobals } from '../../../fonts/src/test-assets';
 import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
+import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
+import { createPresentationCommandClient } from '../session/commandClient';
+import { createPresentationSessionHost } from '../session/host';
 import { engineKind, PptxRenderer } from './engine';
 
 const root = resolve(import.meta.dir, '../../../..');
@@ -103,25 +105,58 @@ describe.skipIf(engineKind === 'native')('canvas renderPng while edits keep aski
 });
 
 async function withUninstalledPacks(run: () => Promise<void>) {
-  const runtime = createFontRuntime(async (pack) => ({
-    cdn: getFontCdnConfiguration(),
-    urls: pack === 'base' ? Object.fromEntries(Object.entries((await fonts.fontAssetUrls('base'))!)
-      .map(([file, href]) => [file, () => new URL(href)])) : undefined,
-  }));
+  const runtime = fontRuntimeWithoutPacks();
   const installed = spyOn(fonts, 'bundledFaceInstalled').mockImplementation(runtime.bundledFaceInstalled);
   const load = spyOn(fonts, 'loadBundledFontBytes').mockImplementation(runtime.loadBundledFontBytes);
+  const provider = spyOn(fonts, 'createFontProvider').mockImplementation(runtime.createFontProvider);
   const previous = getFontCdnConfiguration();
   setFontCdnConfiguration(undefined);
   try { await run(); }
   finally {
     installed.mockRestore();
     load.mockRestore();
+    provider.mockRestore();
     setFontCdnConfiguration(previous);
     Reflect.deleteProperty(globalThis, Symbol.for('betteroffice.fonts.cdn-warned'));
   }
 }
 
 describe.skipIf(engineKind === 'native')('PPTX PNG with uninstalled font packs', () => {
+  test('T12: renderCommandPng rejects a primary CDN failure without keeping the editor substitute', async () => withUninstalledPacks(async () => {
+    stubCanvas();
+    const handle = openPresentation(fixture, { clientId: 7307 });
+    const { slideId } = handle.insertSlide(0);
+    handle.addTextBox(slideId, { name: 'CDN', rect: { x: 100000, y: 100000, width: 3000000, height: 800000 },
+      text: 'CDN', style: { fontFamily: 'Calibri', fontSizePt: 18 } });
+    const bytes = handle.save();
+    handle.dispose();
+    const restoreGlobals = withBrowserFontGlobals();
+    const fetch = spyOn(globalThis, 'fetch').mockImplementation((input) => String(input).includes('cdn.jsdelivr.net')
+      ? Promise.resolve(new Response(null, { status: 404 })) : fontAssetResponse(input));
+    const register = spyOn(PptxRenderer.prototype, 'registerFont');
+    const encoded = spyOn(OffscreenCanvas.prototype, 'convertToBlob');
+    const pair = createInProcessPair();
+    createPresentationSessionHost(pair.host, { initWasm: async () => {} });
+    let client: Awaited<ReturnType<typeof createPresentationCommandClient>> | undefined;
+    try {
+      client = await createPresentationCommandClient(bytes, {
+        session: 'cdn-export', incarnation: 'test', fontCdn: getFontCdnConfiguration(),
+      }, pair.client);
+      const base = fonts.BASE_LATIN_FONTS.find(({ weight, style }) => weight === 400 && style === 'normal')!;
+      const substituted = register.mock.calls.some(([family, , , data]) => family === 'Calibri' && data.byteLength === base.byteLength);
+      await expect(client.renderPng!({ slide: 0 })).rejects.toMatchObject({ code: 'font-unavailable' });
+      expect(substituted).toBe(false);
+      expect(encoded).not.toHaveBeenCalled();
+    } finally {
+      await client?.dispose();
+      pair.client.close();
+      fetch.mockRestore();
+      register.mockRestore();
+      encoded.mockRestore();
+      restoreGlobals();
+    }
+  }), 30_000);
+
   test('PPTX PNG rejects an implicit CDN failure before encoding', async () => withUninstalledPacks(async () => {
     stubCanvas();
     const render = spyOn(OffscreenCanvas.prototype, 'convertToBlob');
@@ -166,15 +201,20 @@ describe.skipIf(engineKind === 'native')('PPTX PNG with uninstalled font packs',
       requests.push(String(input));
       return fontAssetResponse(input);
     }) as typeof fetch;
+    const restoreGlobals = withBrowserFontGlobals(false);
+    const register = spyOn(PptxRenderer.prototype, 'registerFont');
     try {
       const { slideId } = handle.insertSlide(0);
       handle.addTextBox(slideId, { name: 'CDN', rect: { x: 100000, y: 100000, width: 3000000, height: 800000 },
         text: 'CDN', style: { fontFamily: 'Calibri', fontSizePt: 18 } });
       fonts.configureFontCdn({ baseUrl: 'https://pptx-png-first.example/' });
       await handle.renderPng({ slide: 0 });
+      const count = register.mock.calls.length;
+      await handle.renderPng({ slide: 0 });
+      expect(register).toHaveBeenCalledTimes(count);
       fonts.configureFontCdn({ baseUrl: 'https://pptx-png-second.example/' });
       await handle.renderPng({ slide: 0 });
       expect(requests.some((url) => url.startsWith('https://pptx-png-second.example/'))).toBe(true);
-    } finally { globalThis.fetch = fetchAsset; handle.dispose(); }
+    } finally { register.mockRestore(); restoreGlobals(); globalThis.fetch = fetchAsset; handle.dispose(); }
   }));
 });

@@ -1,7 +1,9 @@
-import { expect, test } from 'bun:test';
+import { expect, mock, spyOn, test } from 'bun:test';
 import { createFontProvider, resolveLastResortFace } from '@betteroffice/fonts';
 import type { SliceLocation } from '@betteroffice/fonts/progressive';
 import { TextMeasureFontRegistry } from './fontRegistry';
+import { fontAssetResponse, fontRuntimeWithoutPacks, withBrowserFontGlobals } from '../../../../fonts/src/test-assets';
+import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../../shared/office-session/fontCdn';
 
 test("an unknown family asks the provider for Word's last-resort face", async () => {
   const offices: unknown[] = [];
@@ -19,6 +21,57 @@ test("an unknown family asks the provider for Word's last-resort face", async ()
   );
   expect(await registry.getFontIdChain('Lato', false, false)).toEqual([3]);
   expect(offices).toEqual(['word']);
+});
+
+test('DOCX layout uses Base Latin when neither the primary nor the last resort pack is installed', async () => {
+  const previous = getFontCdnConfiguration();
+  setFontCdnConfiguration(undefined);
+  const fetch = spyOn(globalThis, 'fetch').mockImplementation(fontAssetResponse);
+  const registerFont = mock((_bytes: Uint8Array) => 1);
+  const provider = fontRuntimeWithoutPacks().createFontProvider();
+  try {
+    const registry = new TextMeasureFontRegistry({ registerFont }, { bundled: provider });
+    expect(await registry.getFontIdChain('Calibri', false, false)).toEqual([1]);
+    expect(registerFont).toHaveBeenCalledWith(new Uint8Array(await provider.resolveBaseLatin!(false, false)!()));
+  } finally {
+    fetch.mockRestore();
+    setFontCdnConfiguration(previous);
+  }
+});
+
+test('DOCX drops a failed CJK slice without registering substitute bytes and retries the face', async () => {
+  const previous = getFontCdnConfiguration();
+  const restore = withBrowserFontGlobals();
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  const fetch = spyOn(globalThis, 'fetch').mockImplementation((input) => String(input).includes('cdn.jsdelivr.net')
+    ? Promise.resolve(new Response(null, { status: 404 })) : fontAssetResponse(input));
+  const installed: number[] = [];
+  let opens = 0;
+  try {
+    setFontCdnConfiguration(undefined);
+    const provider = fontRuntimeWithoutPacks().createFontProvider();
+    const load = provider.resolveScriptFallback('cjk-jp', false, false)!;
+    const registry = new TextMeasureFontRegistry({ registerFont: (bytes) => installed.push(bytes.byteLength) }, {
+      bundled: provider,
+      progressive: async () => {
+        if (++opens === 1) {
+          const { openSlicedFace } = await import('@betteroffice/fonts/progressive');
+          return openSlicedFace(load.slices!);
+        }
+        return { bytes: () => new ArrayBuffer(24) };
+      },
+    });
+    expect(await registry.getScriptFallbackIds(['cjk-jp'])).toEqual([]);
+    expect(installed).toEqual([]);
+    expect(await registry.getScriptFallbackIds(['cjk-jp'])).toEqual([1]);
+    expect(installed).toEqual([24]);
+  } finally {
+    fetch.mockRestore();
+    warn.mockRestore();
+    Reflect.deleteProperty(globalThis, Symbol.for('betteroffice.fonts.cdn-warned'));
+    restore();
+    setFontCdnConfiguration(previous);
+  }
 });
 
 test('shared loaders register fresh buffers once across families and script fallbacks', async () => {

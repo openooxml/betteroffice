@@ -3,13 +3,35 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { BunPlugin } from 'bun';
-import type { packageBoundary } from './package-boundary';
+import { packageBoundary } from './package-boundary';
 
 const packages = resolve(import.meta.dir, '../packages');
 const reactPackages = readdirSync(packages, { withFileTypes: true })
   .filter((entry) => entry.isDirectory() && entry.name.endsWith('-react'))
   .map((entry) => entry.name);
 type BoundaryPlugin = ReturnType<typeof packageBoundary>;
+
+test('the shared font CDN config resolves inside the PPTX package boundary', async () => {
+  const directory = join(packages, 'pptx');
+  const importer = resolve(directory, '../../shared/office-session/fontCdn.ts');
+  let resolveImport!: (path: string) => Promise<unknown>;
+  packageBoundary(directory).setup({
+    async resolve(path, { resolveDir }) {
+      return { path: Bun.resolveSync(path, resolveDir), namespace: 'file' };
+    },
+    onResolve(_, callback) {
+      resolveImport = (path) => callback({
+        path, importer, resolveDir: dirname(importer), namespace: 'file', kind: 'import-statement',
+      });
+    },
+  });
+  const source = readFileSync(importer, 'utf8');
+  const failures = await Promise.all([...source.matchAll(/\bfrom\s+['"]([^'"]+)['"]/g)].map(async ([, path]) => {
+    try { await resolveImport(path!); return []; }
+    catch (error) { return [String(error)]; }
+  }));
+  expect(failures.flat()).toEqual([]);
+});
 
 for (const name of reactPackages) {
   test(`${name} bundles without sibling package sources`, async () => {

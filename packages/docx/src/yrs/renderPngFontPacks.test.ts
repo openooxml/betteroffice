@@ -1,7 +1,7 @@
-import { afterEach, beforeAll, describe, expect, mock, test } from 'bun:test';
+import { afterEach, beforeAll, describe, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import * as fonts from '@betteroffice/fonts';
-import { fontAssetResponse, withBrowserFontGlobals } from '../../../fonts/src/test-assets';
+import { fontAssetResponse, fontRuntimeWithoutPacks, withBrowserFontGlobals } from '../../../fonts/src/test-assets';
 import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import { configureDefaultFonts, resolveCompleteFontProvider } from '../layout/measure';
 import { engineKind } from '../wasm/enginePng';
@@ -87,6 +87,50 @@ for (const { kind } of ENGINES) {
         expect(canvas.encoded).toBe(0);
       } finally {
         Reflect.deleteProperty(globalThis, Symbol.for('betteroffice.fonts.cdn-warned'));
+        restore();
+        setFontCdnConfiguration(previous);
+      }
+    });
+
+    test('DOCX PNG loads Base Latin with the optional packs absent in headless mode', async () => {
+      stubBrowser();
+      const previous = getFontCdnConfiguration();
+      const runtime = fontRuntimeWithoutPacks(new URL('https://docx-headless-base.example/'));
+      const provider = spyOn(fonts, 'createFontProvider').mockImplementation(runtime.createFontProvider);
+      const fetch = spyOn(globalThis, 'fetch').mockImplementation(fontAssetResponse);
+      try {
+        setFontCdnConfiguration(undefined);
+        await expect(exported([{ family: 'Calibri', text: 'Plain text' }])).resolves.toBeInstanceOf(Uint8Array);
+        const base = fonts.BASE_LATIN_FONTS.find(({ weight, style }) => weight === 400 && style === 'normal')!;
+        expect(fetch.mock.calls.some(([url]) => String(url).endsWith(base.file))).toBe(true);
+      } finally {
+        fetch.mockRestore();
+        provider.mockRestore();
+        setFontCdnConfiguration(previous);
+      }
+    });
+
+    test('T14: DOCX PNG reuses the browser worker layout until its CDN configuration changes', async () => {
+      stubBrowser();
+      const session = await createYrsSession();
+      const previous = getFontCdnConfiguration();
+      const restore = withBrowserFontGlobals(false);
+      const provider = spyOn(fonts, 'createFontProvider').mockImplementation(fontRuntimeWithoutPacks().createFontProvider);
+      const fetch = spyOn(globalThis, 'fetch').mockImplementation(fontAssetResponse);
+      try {
+        session.openDocx(runsDocument({ family: 'Calibri', text: 'Plain text' }), true);
+        fonts.configureFontCdn({ baseUrl: 'https://docx-png-first.example/' });
+        await session.renderPng({ page: 0 });
+        const providers = provider.mock.calls.length;
+        await session.renderPng({ page: 0 });
+        expect(provider).toHaveBeenCalledTimes(providers);
+        fonts.configureFontCdn({ baseUrl: 'https://docx-png-second.example/' });
+        await session.renderPng({ page: 0 });
+        expect(fetch.mock.calls.some(([url]) => String(url).startsWith('https://docx-png-second.example/'))).toBe(true);
+      } finally {
+        session.destroy();
+        fetch.mockRestore();
+        provider.mockRestore();
         restore();
         setFontCdnConfiguration(previous);
       }
