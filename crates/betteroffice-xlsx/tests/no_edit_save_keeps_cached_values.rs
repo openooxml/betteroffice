@@ -667,7 +667,7 @@ fn checks_changed_array_followers_in_row_order() {
 #[test]
 fn keeps_a_style_only_string_typed_cell_beside_an_array() {
     for reference in ["A1:A2", "A1:A3"] {
-        let source = package_parts(
+        let mut source = package_parts(
             &format!(
                 concat!(
                     r#"<row r="1"><c r="A1"><f t="array" ref="{}">_xlfn.SEQUENCE(3)</f><v>1</v></c>"#,
@@ -678,6 +678,19 @@ fn keeps_a_style_only_string_typed_cell_beside_an_array() {
                 reference,
             ),
             FULL_CALC,
+        );
+        insert_xml(
+            &mut source,
+            WORKBOOK_RELS,
+            "</Relationships>",
+            &format!(r#"<Relationship Id="rId2" Type="{RELS}/styles" Target="styles.xml"/>"#),
+        );
+        let xfs = r#"<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>"#.repeat(2);
+        add_part(
+            &mut source,
+            "xl/styles.xml",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml",
+            &format!(r#"<styleSheet xmlns="{MAIN}"><cellXfs count="2">{xfs}</cellXfs></styleSheet>"#),
         );
         let saved = saved_parts(&open_recalculated(&source));
         let sheet = sheet_xml(&saved);
