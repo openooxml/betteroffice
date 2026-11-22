@@ -23,6 +23,12 @@ const engineFaces = new WeakMap<FontDecoder, Map<string, Promise<ProgressiveFont
  * @public
  */
 export function openSlicedFace(location: SliceLocation): Promise<ProgressiveFontFace> {
+  return location.prepareUrls
+    ? location.prepareUrls().then((assets) => openWithUrls({ ...location, ...assets }))
+    : openWithUrls(location);
+}
+
+function openWithUrls(location: SliceLocation): Promise<ProgressiveFontFace> {
   const { ref, base, url, timeoutMs, requestTimeoutMs, decode, decoder, retain } = location;
   let cache = faces;
   if (decoder !== undefined) {

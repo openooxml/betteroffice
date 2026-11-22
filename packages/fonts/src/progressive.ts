@@ -1,4 +1,5 @@
 import type { FontDecoder } from './decode';
+import { absoluteHref } from './assetHref';
 import { chunkEntries, parseSkeleton, textChunks, type SliceSkeleton } from './slices';
 import { sha256 } from './sha256';
 
@@ -45,6 +46,8 @@ export interface SliceLocation {
   /** The URL of a pack file by its manifest path. */
   url(file: string): Promise<URL>;
   timeoutMs?: number;
+  /** @internal Snapshot the asset URLs for one open and its outline loads. */
+  prepareUrls?(): Promise<Pick<SliceLocation, 'base' | 'url' | 'timeoutMs'> & Partial<Pick<SliceLocation, 'decode'>>>;
   /** @internal */
   requestTimeoutMs?(url: URL): number | undefined;
   /** Decompresses a zstd file to at most `maxOutput` bytes. */
@@ -104,20 +107,6 @@ export interface SliceSource {
 const opened = new WeakMap<ProgressiveFontFace, [SliceRef, SliceIndex, SliceTransport]>();
 const sources = new WeakMap<ProgressiveFontFace, Promise<SliceSource>>();
 
-function parses(href: string, base?: string): URL | undefined {
-  try {
-    return new URL(href, base);
-  } catch {
-    return undefined;
-  }
-}
-
-function absoluteHref(url: URL): string {
-  const { href } = url;
-  if (parses(href)) return href;
-  return parses(href, globalThis.location?.href)?.href ?? href;
-}
-
 /** @internal The files of a face `openProgressiveFace` opened with a transport that names URLs. */
 export function sliceSourceOf(face: ProgressiveFontFace): Promise<SliceSource> | undefined {
   const entry = opened.get(face);
@@ -128,7 +117,7 @@ export function sliceSourceOf(face: ProgressiveFontFace): Promise<SliceSource> |
   if (source === undefined) {
     source = (async () => {
       const urls: Record<string, string> = {};
-      for (const { file } of [{ file: ref.index }, index.skeleton, index.core, ...index.chunks]) urls[file] = absoluteHref(await url(file));
+      for (const { file } of [{ file: ref.index }, index.skeleton, index.core, ...index.chunks]) urls[file] = absoluteHref((await url(file)).href);
       return { ref, urls, ...(timeoutMs === undefined ? {} : { timeoutMs }) };
     })();
     sources.set(face, source);

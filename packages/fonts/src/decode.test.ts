@@ -292,7 +292,9 @@ describe('internal font decoder', () => {
     test.skipIf(!hasWasm)('without native zstd or wasmUrl the default decoder url loads the built wasm', async () => {
       const deployment = mkdtempSync(join(tmpdir(), 'fonts-decoder-'));
       try {
-        copyFileSync(new URL('./decode.ts', import.meta.url), join(deployment, 'decode.ts'));
+        for (const file of ['decode.ts', 'decodeAssets.ts', 'assetHref.ts']) {
+          copyFileSync(new URL(file, import.meta.url), join(deployment, file));
+        }
         mkdirSync(join(deployment, 'decoder'));
         copyFileSync(wasmUrl, join(deployment, 'decoder/fontpack.wasm'));
         const { decodeFontBytes: decode } = await import(pathToFileURL(join(deployment, 'decode.ts')).href);

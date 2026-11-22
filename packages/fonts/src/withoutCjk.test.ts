@@ -26,6 +26,16 @@ test('a strict load rejects a missing CJK add-on instead of loading a Latin face
   await expect(loadBundledFontBytes(cjk, undefined, { strict: true })).rejects.toMatchObject({ name: 'MissingFontAddonError' });
 });
 
+test('the page lookup leaves CJK lazy and retries a missing add-on', async () => {
+  const { fontAssetUrls } = await import('./index');
+  await fontAssetUrls('decoder');
+  await fontAssetUrls('latin');
+  expect(importCjk).not.toHaveBeenCalled();
+  expect(await fontAssetUrls('cjk')).toBeUndefined();
+  expect(await fontAssetUrls('cjk')).toBeUndefined();
+  expect(importCjk).toHaveBeenCalledTimes(2);
+});
+
 test('missing CJK assets fall back without hiding unknown asset errors', async () => {
   const { BUNDLED_FONTS, loadBundledFontBytes, resolveMetricCompatFace } =
     await import('./index');

@@ -5,6 +5,7 @@ import { validPresenceCursor } from '../collaboration/presence';
 import type { PptxPresenceCursor } from '../collaboration/types';
 import { createPresentationCollaboration } from './collaboration';
 import { createMetafileSvg } from './metafileSvg';
+import { pngExportReply } from './pngExportReply';
 import { PptxDocument, engineKind } from '../wasm/engine';
 import { deferReply, transferable, type TransferResult } from '../../../../shared/office-session/protocol';
 import { isCommandEnvelope } from '../../../../shared/office-session/commands/types';
@@ -1918,11 +1919,7 @@ export function registerPresentationCommandHandlers(
       const rendered = slicedFonts ? slicedFonts.completeExport(opened).then((byFamily) =>
         opened.renderPng(target, { ...options, fonts: [...(options?.fonts ?? []), ...byFamily] }))
         : opened.renderPng(target, options ?? {});
-      return deferReply(rendered.then((bytes) => {
-        const buffer = bytes.buffer instanceof ArrayBuffer && bytes.byteOffset === 0 &&
-          bytes.byteLength === bytes.buffer.byteLength ? bytes.buffer : new Uint8Array(bytes).buffer;
-        return transferable(buffer, [buffer]);
-      }));
+      return pngExportReply(rendered);
     },
     accessCommandEditor(_, request, method, args) {
       fence(request);

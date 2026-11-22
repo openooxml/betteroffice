@@ -71,7 +71,7 @@ describe('native package registry', () => {
     }
   });
 
-  test('selects the Node worker variant through a private conditional import', () => {
+  test('selects the Node worker variant through a private conditional import', async () => {
     for (const format of ['xlsx', 'pptx', 'docx']) {
       const extension = format === 'docx' ? 'mjs' : 'js';
       const directory = format === 'docx' ? 'yrs' : 'session';
@@ -90,8 +90,12 @@ describe('native package registry', () => {
       expect(config.compilerOptions.paths['#session-scope']).toBeUndefined();
       const worker = format === 'docx' ? "'yrs/docxWorker" : `${format}SessionWorker`;
       for (const path of [`packages/${format}/tsup.config.ts`, `bindings/${format}-native/js/tsup.config.ts`]) {
-        const build = readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
-        expect(build).toMatch(/external: \[[^\]]*'#session-worker'\]/);
+        const url = new URL(`../${path}`, import.meta.url);
+        const build = readFileSync(url, 'utf8');
+        const { default: exported } = await import(fileURLToPath(url));
+        const configs = [typeof exported === 'function' ? await exported({}) : exported].flat();
+        expect(configs.length).toBeGreaterThan(0);
+        for (const config of configs) expect(config.external).toContain('#session-worker');
         expect(build).not.toContain('#session-scope');
         expect(build).toContain(`${worker}.node':`);
         expect(build).toContain("'sessionWorker.node':");
