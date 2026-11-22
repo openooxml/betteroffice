@@ -593,6 +593,7 @@
     "noDocumentLoaded": "Nie załadowano dokumentu",
     "failedToLoad": "Nie udało się załadować dokumentu",
     "failedToLoadDescription": "Plik może być uszkodzony albo zawiera elementy, których ten edytor jeszcze nie potrafi odczytać.",
+    "recoveryFailedDescription": "Edytor przestał działać i nie udało się przywrócić ostatnich zmian. Sam plik nie jest uszkodzony.",
     "failedToLoadDamaged": "Plik jest uszkodzony lub nie jest kompletnym dokumentem Word.",
     "failedToLoadUnsupported": "Ten dokument zawiera element, którego ten edytor nie potrafi jeszcze odczytać.",
     "editorUnavailable": "Nie udało się załadować edytora",

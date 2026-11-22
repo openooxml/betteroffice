@@ -112,6 +112,7 @@ import type { EditablePresentation } from './worker/useEditableSessionPresentati
 import { createWorkerInputCoordinator, type WorkerInputCoordinator } from './commands/workerInputCoordinator';
 import { currentContext, frameImages } from './viewer/sessionPaint';
 import { initialPptxZoom } from './initialPptxZoom';
+import { usePptxPinchZoom } from './usePptxPinchZoom';
 import { PresentationFailure } from './components/PresentationFailure';
 import { notesStyles } from './components/editorChromeStyles';
 import type {
@@ -1237,6 +1238,7 @@ export function PptxEditorContent({
     );
   }, [model?.frame, viewport]);
   const scale = zoom === 'fit' ? fitScale : zoom;
+  usePptxPinchZoom(canvasHostRef, canvasRef, scale, setZoom, file);
   const worker = backend ? workerRef.current : null;
   const workerFrame = worker?.frame(worker.active);
   const workerNavigation = worker?.navigation;

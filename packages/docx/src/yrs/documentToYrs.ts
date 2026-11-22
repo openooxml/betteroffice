@@ -47,10 +47,11 @@ import {
 } from './tableParagraphFormatting';
 import type { Style } from '../types/styles';
 import type { YrsOpeningOptions, YrsRawOp, YrsSession } from './index';
-import { noteYrsStoriesDirty } from './yrsToDocument';
+import { RAW_INLINE_KIND, noteYrsStoriesDirty } from './yrsToDocument';
 import { calculateRowSpans, type RowSpanInfo } from './tableRowSpans';
 import { recoverGroupedStorySeeds } from './groupedStorySeed';
 import { sessionMaterializedSource } from './sessionInternals';
+import { residentEngine } from '../wasm/residentEngine';
 import {
   blockSdtAttrsToPayload,
   blockSdtStoryId,
@@ -159,11 +160,45 @@ interface CommentMark {
   id: number;
 }
 
+/** A kept inline element written without content, before the unit at `unit`. */
+interface RawMark {
+  unit: number;
+  assoc: 'after' | 'before';
+  xml: string;
+}
+
 interface StoryPlan {
   storyId: string;
   units: InlineUnit[];
   commentMarks: CommentMark[];
+  rawMarks: RawMark[];
   commentCoverage: Map<number, Array<[number, number]>>;
+}
+
+/** Keeps a kept empty inline element by one sticky anchor; only seeding writes it. */
+interface RawMarkOp {
+  op: 'setRawMark';
+  id: string;
+  at: number;
+  assoc: RawMark['assoc'];
+  ordinal: number;
+  xml: string;
+}
+
+const EMPTY_ELEMENT = /^\s*<([^\s/>]+)(?:[^>"']|"[^"]*"|'[^']*')*?\/>\s*$/;
+
+/** A kept `w:` inline element; foreign markup takes no story unit and the save restores it from the base paragraph. */
+const KEPT_WORD_INLINE = /^\s*<w:/;
+
+/**
+ * The side a kept inline element's anchor sticks to when it is written without content: the unit
+ * before it for an element whose name ends in `End`, the unit after it otherwise. Null for an
+ * element holding content, which seeds as one {@link RAW_INLINE_KIND} embed.
+ */
+function rawMarkAssoc(xml: string): RawMark['assoc'] | null {
+  const name = EMPTY_ELEMENT.exec(xml)?.[1];
+  if (name === undefined) return null;
+  return name.endsWith('End') ? 'before' : 'after';
 }
 
 interface StoryOptions {
@@ -354,6 +389,8 @@ function marksToYrsAttrs(marks: readonly MarkDescriptor[]): YrsAttrs {
       attrs.rPrChange = mark.attrs.changes;
     } else if (mark.name === 'highlight') {
       attrs.highlight = mark.attrs.color;
+    } else if (mark.name === 'directionScopes') {
+      attrs.directionScopes = mark.attrs.scopes;
     } else if (mark.name === 'insertion' || mark.name === 'deletion') {
       attrs[mark.name === 'insertion' ? 'ins' : 'del'] = dropNulls({
         id: mark.attrs.revisionId,
@@ -367,10 +404,12 @@ function marksToYrsAttrs(marks: readonly MarkDescriptor[]): YrsAttrs {
   return attrs;
 }
 
+const SORTED_KEY_MARKS = new Set(['rPrChange', 'directionScopes']);
+
 function marksKey(marks: readonly MarkDescriptor[]): string {
   return marks
     .filter((mark) => mark.name !== 'hyperlink' && mark.name !== 'comment')
-    .map((mark) => `${mark.name}:${mark.name === 'rPrChange' ? stableStringify(mark.attrs) : JSON.stringify(mark.attrs)}`)
+    .map((mark) => `${mark.name}:${SORTED_KEY_MARKS.has(mark.name) ? stableStringify(mark.attrs) : JSON.stringify(mark.attrs)}`)
     .sort()
     .join('|');
 }
@@ -434,6 +473,9 @@ function runMarks(
       return { ...change, previousAttributes: marksToYrsAttrs(formattingToMarks(previous)) };
     });
     marks.push({ name: 'rPrChange', attrs: { changes } });
+  }
+  if (run.directionScopes?.length) {
+    marks.push({ name: 'directionScopes', attrs: { scopes: run.directionScopes } });
   }
   return marks;
 }
@@ -1374,10 +1416,11 @@ function paragraphUnits(
   styleResolver: StyleResolver | null,
   extraRunFormatting?: TextFormatting,
   tableParagraphFormatting?: ParagraphFormatting
-): { units: InlineUnit[]; commentMarks: CommentMark[]; ppr: Attrs; opaqueSequences: string[] } {
+): { units: InlineUnit[]; commentMarks: CommentMark[]; rawMarks: RawMark[]; ppr: Attrs; opaqueSequences: string[] } {
   const units: InlineUnit[] = [];
   const opaqueSequences: string[] = [];
   const commentMarks: CommentMark[] = [];
+  const rawMarks: RawMark[] = [];
   let boundaries: Attrs[] | undefined = [];
   const styleFormatting = paragraphStyleFormatting(paragraph, styleResolver, extraRunFormatting);
 
@@ -1414,13 +1457,23 @@ function paragraphUnits(
     } else if (content.type === 'mathEquation') {
       boundaries = undefined;
       units.push(embedUnit('math', mathPayload(content)));
-    } else if (content.type !== 'bookmarkStart' && content.type !== 'bookmarkEnd' && content.type !== 'rawXml') {
+    } else if (content.type === 'rawXml') {
+      if (KEPT_WORD_INLINE.test(content.xml)) {
+        const assoc = rawMarkAssoc(content.xml);
+        if (assoc) {
+          rawMarks.push({ unit: start, assoc, xml: content.xml });
+        } else {
+          units.push(embedUnit(RAW_INLINE_KIND, { xml: content.xml }));
+          boundaries?.push({ text: '\uFFFC', formatsRun: false });
+        }
+      }
+    } else if (content.type !== 'bookmarkStart' && content.type !== 'bookmarkEnd') {
       boundaries = undefined;
     }
     paragraphContentUnitCounts.set(content as object, units.length - start);
   }
   const attrs = paragraphAttrs(paragraph, styleResolver, units, boundaries, tableParagraphFormatting, extraRunFormatting);
-  return { units, commentMarks, ppr: paraAttrsToPpr(attrs), opaqueSequences };
+  return { units, commentMarks, rawMarks, ppr: paraAttrsToPpr(attrs), opaqueSequences };
 }
 
 type ParagraphToken = 'pageBreak' | 'visible';
@@ -2070,6 +2123,7 @@ function visitStory(
     storyId,
     units: [],
     commentMarks: [],
+    rawMarks: [],
     commentCoverage: new Map(),
   };
   context.plans.push(plan);
@@ -2106,6 +2160,9 @@ function visitStory(
       const unitBase = plan.units.length;
       plan.commentMarks.push(
         ...paragraph.commentMarks.map((mark) => ({ ...mark, unit: unitBase + mark.unit }))
+      );
+      plan.rawMarks.push(
+        ...paragraph.rawMarks.map((mark) => ({ ...mark, unit: unitBase + mark.unit }))
       );
       plan.units.push(...paragraph.units);
       plan.units.push(
@@ -2228,7 +2285,7 @@ function unitsToRawOps(units: readonly InlineUnit[]): YrsRawOp[] {
 }
 
 function seedPlan(session: YrsSession, plan: StoryPlan): void {
-  const ops = unitsToRawOps(plan.units);
+  const ops: Array<YrsRawOp | RawMarkOp> = unitsToRawOps(plan.units);
   for (const [id, ranges] of plan.commentCoverage) {
     ops.push({
       op: 'setComment',
@@ -2239,7 +2296,23 @@ function seedPlan(session: YrsSession, plan: StoryPlan): void {
       body: null,
     });
   }
-  session.applySeedRawOps(plan.storyId, ops);
+  let offset = 0;
+  let measured = 0;
+  plan.rawMarks.forEach((mark, ordinal) => {
+    for (; measured < Math.min(mark.unit, plan.units.length); measured += 1) {
+      const unit = plan.units[measured]!;
+      offset += unit.kind === 'text' ? unit.text.length : 1;
+    }
+    ops.push({
+      op: 'setRawMark',
+      id: `${plan.storyId}#${ordinal}`,
+      at: offset,
+      assoc: mark.assoc,
+      ordinal,
+      xml: mark.xml,
+    });
+  });
+  session.applySeedRawOps(plan.storyId, ops as readonly YrsRawOp[]);
 }
 
 function seedFontNames(document: Document): () => void {
@@ -2286,9 +2359,54 @@ export function documentToYrs(
   options: YrsOpeningOptions = {}
 ): void {
   const restoreGroups = recoverGroupedStorySeeds(document, () => sessionMaterializedSource(session));
-  const restore = seedFontNames(document);
-  try { seedDocument(session, document, options); }
-  finally { restore(); restoreGroups(); }
+  const digests = new Map<ComplexField, string | undefined>();
+  let restore = () => {};
+  try {
+    const untouched = untouchedFieldRuns(document);
+    restore = seedFontNames(document);
+    restampFieldRuns(untouched, digests);
+    seedDocument(session, document, options);
+  } finally {
+    for (const [field, digest] of digests) if (field.sourceRunDigest !== digest) field.sourceRunDigest = digest;
+    restore();
+    restoreGroups();
+  }
+}
+
+/** The engine's digest of `field`, which the writer compares the field's `sourceRunDigest` with. */
+function fieldRunDigest(field: ComplexField): string | undefined {
+  const glue = residentEngine()?.glue as { field_run_digest?: (fieldJson: string) => string | null | undefined } | undefined;
+  return glue?.field_run_digest?.(JSON.stringify(field)) ?? undefined;
+}
+
+/** The complex fields of `document` that carry the run they were read from and still digest to it. */
+function untouchedFieldRuns(document: Document): ComplexField[] {
+  const fields: ComplexField[] = [];
+  const visit = (value: unknown): void => {
+    if (!value || typeof value !== 'object' || value instanceof ArrayBuffer || ArrayBuffer.isView(value)) return;
+    if (value instanceof Map) {
+      for (const child of value.values()) visit(child);
+      return;
+    }
+    const record = value as Record<string, unknown>;
+    if (record.type === 'complexField' && typeof record.sourceRunXml === 'string' && typeof record.sourceRunDigest === 'string') {
+      const field = record as unknown as ComplexField;
+      if (fieldRunDigest(field) === field.sourceRunDigest) fields.push(field);
+    }
+    for (const child of Object.values(record)) visit(child);
+  };
+  visit(document.package);
+  return fields;
+}
+
+/** Sets each field's digest to the digest of the field as it now is, inner fields first, recording each digest it replaces in `originals` first. */
+function restampFieldRuns(fields: ComplexField[], originals: Map<ComplexField, string | undefined>): void {
+  for (const field of [...fields].reverse()) {
+    const digest = fieldRunDigest(field);
+    if (digest === undefined || digest === field.sourceRunDigest) continue;
+    if (!originals.has(field)) originals.set(field, field.sourceRunDigest);
+    field.sourceRunDigest = digest;
+  }
 }
 
 function seedDocument(

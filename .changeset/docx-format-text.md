@@ -5,4 +5,4 @@
 '@betteroffice/agents': minor
 ---
 
-Adds the `formatText` edit step (`set`, `clear` back to the styles, `onUnsupported`). The agents `format_text` tool gains strike, superscript/subscript, colour, highlight, size and font.
+Adds the `formatText` edit step (`set`, `clear` back to the styles, `onUnsupported`). The agents `format_text` tool gains strike, superscript/subscript, colour, highlight, size and font. `EditReceipt` literals must set `skipped`.

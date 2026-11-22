@@ -128,6 +128,7 @@ let repeatingFixture: Uint8Array;
 let effectFixture: Uint8Array;
 let embeddedFontFixture: Uint8Array;
 let pageTotalFixture: Uint8Array;
+let rawMarkFixture: Uint8Array;
 
 const SECOND_RUN = '<w:r><w:t xml:space="preserve">Second body paragraph, alpha again.</w:t></w:r>';
 
@@ -179,6 +180,13 @@ function effectParts(): Record<string, string> {
   return { 'word/document.xml': patched('word/document.xml', FINAL_RUN, '<w:r><w:rPr><w:effect w:val="shimmer"/></w:rPr><w:t>Final paragraph.</w:t></w:r>') };
 }
 
+const KEPT_MARKS_FINAL = '<w:r><w:t xml:space="preserve">Final </w:t></w:r><w:customXmlInsRangeStart w:id="7" w:author="Grace"/><w:r><w:t>paragraph</w:t></w:r>' +
+  '<w:customXmlInsRangeEnd w:id="7"/><w:r><w:t>.</w:t></w:r><w:subDoc r:id="rIdImage"/>';
+
+function rawMarkParts(): Record<string, string> {
+  return { 'word/document.xml': patched('word/document.xml', FINAL_RUN, KEPT_MARKS_FINAL) };
+}
+
 const PAGE_FIELD = '<w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple>';
 
 function pageTotalParts(): Record<string, string> {
@@ -214,6 +222,7 @@ beforeAll(async () => {
   effectFixture = await buildFixture(effectParts());
   embeddedFontFixture = await buildFixture(embeddedFontParts());
   pageTotalFixture = await buildFixture(pageTotalParts());
+  rawMarkFixture = await buildFixture(rawMarkParts());
 });
 
 // version() is "{nonce:016x}-{epoch}"; mint_nonce in crates/docx-edit/src/batch.rs mixes host entropy and the clock.
@@ -1198,6 +1207,20 @@ const rows: Row<Docx>[] = [
     mutates: true,
     setup: ({ session: s }: Docx) => addedComment(s),
     call: ({ session: s }, commentId) => s.resolve_comment(commentId),
+  }),
+  defineRow({
+    method: 'EditSession.resolve_raw_marks',
+    setup: ({ fresh }: Docx) => {
+      const f = fresh();
+      f.open_docx(rawMarkFixture, true, GENERATION);
+      return f;
+    },
+    call: (_, f) => {
+      const before = JSON.parse(f.resolve_raw_marks()) as unknown[];
+      if (before.length !== 3) throw new Error(`the kept marks resolved to ${before.length} entries, not 3`);
+      f.insert_text('body', paraId(f, 'Final'), 0, 'X');
+      return { before, after: JSON.parse(f.resolve_raw_marks()) as unknown[], paragraphs: f.paragraphs('body') };
+    },
   }),
   { method: 'EditSession.list_comments', call: ({ session: s }) => s.list_comments() },
   { method: 'EditSession.set_content_control_value', mutates: true, call: ({ session: s }) => s.set_content_control_value('8', JSON.stringify('Grace Hopper')) },
@@ -2304,6 +2327,13 @@ const rows: Row<Docx>[] = [
       ]);
     },
   },
+  {
+    method: 'field_run_digest',
+    call: ({ engine }) => [
+      engine.field_run_digest(JSON.stringify({ type: 'complexField', instruction: 'PAGE', fieldType: 'PAGE', fieldCode: [], fieldResult: [] })),
+      engine.field_run_digest('{"type":"simpleField"}') ?? null,
+    ],
+  },
   { method: 'render_docx_markdown_json', call: ({ engine }) => engine.render_docx_markdown_json(structuredContent(engine), '{}') },
   defineRow({
     method: 'render_docx_markdown_with_pages_json',
@@ -2485,6 +2515,12 @@ const rows: Row<Docx>[] = [
     mutates: true,
     call: ({ session: s }) => s.ensure_list_definition('body', paraId(s, 'Second body'), 'bullet'),
   },
+  defineRow({
+    method: 'EditSession.ensure_list_definition_after',
+    mutates: true,
+    setup: ({ session: s }: Docx) => s.set_paragraph_attrs(...span(s, 'First body', 0, 0), s.ensure_list_definition('body', paraId(s, 'First body'), 'bullet')),
+    call: ({ session: s }) => s.ensure_list_definition_after('body', paraId(s, 'Controls'), 'bullet', paraId(s, 'First body')),
+  }),
   defineRow({
     method: 'EditSession.edit_text_resident',
     mutates: true,
@@ -3155,6 +3191,16 @@ const rows: Row<Docx>[] = [
     name: 'EditSession.next_paragraph_style (unknown paragraph)',
     throws: { name: 'string', reason: 'a paragraph id the story does not hold is refused' },
     call: ({ session: s }) => s.next_paragraph_style('body', '7FFFFFFF', 0),
+  },
+  {
+    method: 'EditSession.paragraph_style_numbers',
+    call: ({ session: s }) => ['Parity heading', 'First body'].map((prefix) => s.paragraph_style_numbers('body', paraId(s, prefix))),
+  },
+  {
+    method: 'EditSession.paragraph_style_numbers',
+    name: 'EditSession.paragraph_style_numbers (unknown paragraph)',
+    throws: { name: 'string', reason: 'a paragraph id the story does not hold is refused' },
+    call: ({ session: s }) => s.paragraph_style_numbers('body', '7FFFFFFF'),
   },
   {
     method: 'EditSession.paragraph_unit',

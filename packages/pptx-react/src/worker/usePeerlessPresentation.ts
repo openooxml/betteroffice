@@ -72,6 +72,8 @@ export interface PeerlessPresentation {
   pluginVisual(): PeerlessVisualSnapshot | null;
   subscribeVisual(listener: () => void): () => void;
   require(): void;
+  /** Resolves after a visible stage frame covers the command sequence. */
+  whenPaintedThrough(throughSeq: number): Promise<void>;
   fit(value: SlideFit): void;
   /** Rasters a slide ahead of its expected activation, such as a press on its thumbnail; a later request replaces it. */
   prerenderSlide?(slideId: string): void;
@@ -165,6 +167,7 @@ export function usePeerlessPresentation(
     let queuedFrame: PeerlessConfirmedFrame | undefined;
     let visual: PeerlessVisualSnapshot | null = null;
     let prerenderPresented = false;
+    let rolledBackThroughSeq = -1;
     let cancelIdle: (() => void) | undefined;
     let draining = false;
     let changeSeq: number | undefined;
@@ -262,6 +265,17 @@ export function usePeerlessPresentation(
         require();
         const next = changed;
         if (hydrated()) return;
+        await next;
+      }
+    }
+
+    async function whenPaintedThrough(throughSeq: number): Promise<void> {
+      while (true) {
+        require();
+        const next = changed;
+        if (firstPainted && paintedView && paintedView.confirmed === queuedFrame &&
+          paintedView.presentedThroughSeq >= throughSeq) return;
+        if (rolledBackThroughSeq >= throughSeq) throw new Error('Slide paint was rolled back');
         await next;
       }
     }
@@ -488,6 +502,10 @@ export function usePeerlessPresentation(
             }, { commit: finish });
           },
           paintFrame,
+          onPaintRollback(throughSeq) {
+            rolledBackThroughSeq = Math.max(rolledBackThroughSeq, throughSeq);
+            signal();
+          },
           paintEcho: (view) => paintLocal(view),
           restoreLine: (view) => paintLocal(view, true),
           resync: () => framePainter?.resync?.(),
@@ -600,7 +618,7 @@ export function usePeerlessPresentation(
           get inputEnabled() { return inputEnabled(); },
           get hydrated() { return hydrated(); },
           get failure() { return fatal; },
-          require, setReadOnly,
+          require, whenPaintedThrough, setReadOnly,
           setChangeObserver(enabled) {
             if (!current() || observedChanges === enabled) return;
             observedChanges = enabled;

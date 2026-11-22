@@ -518,6 +518,46 @@ impl Renderer {
         })
         .map_err(engine_error)
     }
+
+    pub fn preview_shape_rect_json(
+        &self,
+        session: &pptx_edit::DeckSession,
+        slide_id: &str,
+        shape_id: &str,
+        rect: pptx_edit::ShapeRect,
+    ) -> Result<String, EngineError> {
+        const MAX_GEOMETRY: i64 = 1_000_000_000_000_000;
+        if rect.width <= 0
+            || rect.height <= 0
+            || [rect.x, rect.y, rect.width, rect.height]
+                .into_iter()
+                .any(|value| value.unsigned_abs() > MAX_GEOMETRY as u64)
+        {
+            return Err(EngineError::message("invalid shape rectangle"));
+        }
+        let slide_index = session
+            .slide_ids()
+            .map_err(engine_error)?
+            .iter()
+            .position(|id| id == slide_id)
+            .ok_or_else(|| EngineError::message("shape preview slide is unavailable"))?;
+        let mut scope = session.slide_scope(slide_index).map_err(engine_error)?;
+        let shape = scope
+            .slide
+            .shapes
+            .iter_mut()
+            .find(|shape| shape.id == shape_id)
+            .ok_or_else(|| EngineError::message("shape preview target is unavailable"))?;
+        shape.x = rect.x;
+        shape.y = rect.y;
+        shape.width = rect.width;
+        shape.height = rect.height;
+        let rendered = self
+            .renderer
+            .layout_scoped_slide(session.package(), &scope)
+            .map_err(engine_error)?;
+        serde_json::to_string(&rendered.display_list).map_err(engine_error)
+    }
 }
 
 impl Renderer {
@@ -760,6 +800,96 @@ mod tests {
     #[allow(dead_code)]
     mod link_fixture {
         include!("../../pptx-parse/tests/support/header_footer.rs");
+    }
+
+    #[test]
+    fn shape_rect_preview_reflows_text_without_changing_session_state() {
+        let session = pptx_edit::DeckSession::open(DECK, 934).unwrap();
+        let slide_id = session.slide_ids().unwrap()[0].clone();
+        let shape = session
+            .add_text_box(
+                &EditCtx::local("test"),
+                &slide_id,
+                &pptx_edit::ShapeDraft {
+                    name: "Preview text".to_owned(),
+                    rect: pptx_edit::ShapeRect {
+                        x: 100_000,
+                        y: 100_000,
+                        width: 5_000_000,
+                        height: 3_000_000,
+                    },
+                    text: "one two three four five six seven eight nine ten".to_owned(),
+                    style: TextStyle {
+                        font_family: Some("Liberation Sans".to_owned()),
+                        font_size_pt: Some(24.0),
+                        ..TextStyle::default()
+                    },
+                },
+            )
+            .unwrap();
+        let version = session.version();
+        let state_vector = session.encode_state_vector_v1();
+        let snapshot = session.snapshot().unwrap();
+        let can_undo = session.can_undo();
+        let mut renderer = Renderer::new();
+        renderer
+            .register_font("Liberation Sans", false, false, FONT)
+            .unwrap();
+        let preview = |x, y, width| {
+            let json = renderer
+                .preview_shape_rect_json(
+                    &session,
+                    &slide_id,
+                    &shape.shape_id,
+                    pptx_edit::ShapeRect {
+                        x,
+                        y,
+                        width,
+                        height: 3_000_000,
+                    },
+                )
+                .unwrap();
+            let list: pptx_render::SurfaceDisplayList = serde_json::from_str(&json).unwrap();
+            list.primitives
+                .iter()
+                .filter_map(|primitive| match primitive {
+                    pptx_render::Primitive::TextBox {
+                        shape_id: Some(id),
+                        x,
+                        y,
+                        lines,
+                        ..
+                    } if id == &shape.shape_id => Some((lines.len(), (*x, *y))),
+                    _ => None,
+                })
+                .next()
+                .unwrap()
+        };
+        let narrow = preview(600_000, 700_000, 1_200_000);
+        let wide = preview(100_000, 100_000, 5_000_000);
+        assert!(narrow.0 > wide.0);
+        assert_ne!(narrow.1, wide.1);
+        assert_eq!(session.version(), version);
+        assert_eq!(session.encode_state_vector_v1(), state_vector);
+        assert_eq!(session.snapshot().unwrap(), snapshot);
+        assert_eq!(session.can_undo(), can_undo);
+    }
+
+    #[test]
+    fn shape_rect_preview_refuses_grouped_children() {
+        let child = link_fixture::placeholder(2, "body", "<a:p/>", false);
+        let group = link_fixture::group(&child);
+        let source = link_fixture::deck(&[(&group, false)], "", "", "", None);
+        let session = pptx_edit::DeckSession::open(&source, 934).unwrap();
+        let slide = session.slide_scope(0).unwrap().slide;
+        let child_id = &slide.shapes[0].children[0].id;
+        let rect = pptx_edit::ShapeRect {
+            width: 100_000,
+            height: 100_000,
+            ..Default::default()
+        };
+        let preview = Renderer::new().preview_shape_rect_json(&session, &slide.id, child_id, rect);
+        assert!(preview.is_err());
     }
 
     #[test]

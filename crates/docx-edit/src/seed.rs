@@ -34,6 +34,10 @@ pub(crate) type PatchTableStyles = BTreeMap<String, (Option<Value>, Option<Value
 /// lacks this key and keeps cached SEQ results.
 pub(crate) const OPAQUE_SEQUENCES: &str = "opaqueSequences";
 
+/// `_kind` of the embed a kept inline element holding content seeds as: its `xml` is written back
+/// as it was, and it shows and searches as nothing.
+pub(crate) const RAW_INLINE_KIND: &str = "rawInline";
+
 /// Writes the first marker, so a seed keeps the operation ids an earlier seed of the same
 /// document gave its stories and session: replicas that seeded it before still converge.
 const SEQUENCE_METADATA_CLIENT: u64 = 0x1_0000_05e9;
@@ -151,7 +155,7 @@ fn seeded_sequence_fields<'a>(ops: impl IntoIterator<Item = &'a RawOp>) -> Optio
                 }
             }
             RawOp::Insert { .. } | RawOp::Format { .. } | RawOp::InsertEmbed { .. } => {}
-            RawOp::SetComment { .. } | RawOp::RemoveComment { .. } => {}
+            RawOp::SetComment { .. } | RawOp::RemoveComment { .. } | RawOp::SetRawMark { .. } => {}
             RawOp::Delete { .. } | RawOp::SetEmbedAttr { .. } => return None,
         }
     }
@@ -219,6 +223,7 @@ struct StoryPlan {
     story_id: String,
     units: Vec<InlineUnit>,
     comment_marks: Vec<CommentMark>,
+    raw_marks: Vec<RawMark>,
     comment_coverage: Vec<(String, Vec<(u32, u32)>)>,
     /// How many units [`StoryPlan::width`] has measured, and their width.
     measured: (usize, u32),
@@ -1943,6 +1948,14 @@ impl StyleResolver {
             .then(|| next.to_owned())
     }
 
+    /// Whether paragraph style `style_id`, or the default paragraph style when it is `None` or
+    /// unknown, numbers its paragraphs: its `numPr`, through `basedOn`, names a list other than 0.
+    pub(crate) fn paragraph_style_numbers(&self, style_id: Option<&str>) -> bool {
+        let style = self.resolve_paragraph_style(style_id);
+        let num_pr = field(style.paragraph.as_ref(), "numPr");
+        num_pr.is_some() && number(field(num_pr, "numId")) != Some(0.0)
+    }
+
     fn default_style(&self, style_type: &str) -> Option<&Value> {
         let id = match style_type {
             "paragraph" => self.default_paragraph.as_deref(),
@@ -2479,6 +2492,15 @@ fn marks_to_attrs(marks: &[Mark]) -> JsonObject {
                     .map(|(_, value)| value.clone())
                     .unwrap_or(Value::Null),
             );
+        } else if mark.name == crate::format::DIRECTION_SCOPES {
+            attrs.insert(
+                mark.name.clone(),
+                mark.attrs
+                    .iter()
+                    .find(|(key, _)| key == "scopes")
+                    .map(|(_, value)| value.clone())
+                    .unwrap_or(Value::Null),
+            );
         } else if mark.name == "insertion" || mark.name == "deletion" {
             let get = |name: &str| {
                 mark.attrs
@@ -2551,7 +2573,14 @@ fn embed_unit(kind: &str, payload: JsonObject, marks: &[Mark], pm_size: u32) -> 
 
 fn run_marks(run: &Value, style_formatting: Option<&Value>, styles: &StyleResolver) -> Vec<Mark> {
     let merged = styles.run_formatting(style_formatting, field(Some(run), "formatting"));
-    run_marks_from_formatting(run, style_formatting, styles, merged.as_ref())
+    let mut marks = run_marks_from_formatting(run, style_formatting, styles, merged.as_ref());
+    if let Some(Value::Array(scopes)) = field(Some(run), crate::format::DIRECTION_SCOPES)
+        && !scopes.is_empty()
+    {
+        let scopes = vec![("scopes".to_owned(), Value::Array(scopes.clone()))];
+        marks.push(mark(crate::format::DIRECTION_SCOPES, scopes));
+    }
+    marks
 }
 
 fn run_marks_from_formatting(
@@ -4636,10 +4665,59 @@ fn unmodelled_nodes(content: &Value, output: &mut Vec<String>) {
 struct ParagraphUnits {
     units: Vec<InlineUnit>,
     comment_marks: Vec<CommentMark>,
+    raw_marks: Vec<RawMark>,
     ppr: JsonObject,
     omitted: Vec<Omitted>,
     breaks: Vec<FlowBreak>,
     opaque_sequences: Vec<String>,
+}
+
+/// A kept inline element written without content, before the unit at `unit`.
+struct RawMark {
+    unit: usize,
+    assoc: yrs::Assoc,
+    xml: String,
+}
+
+/// Whether `xml` is a kept `w:` inline element. Foreign markup takes no story unit: the save
+/// restores it from the base paragraph.
+fn kept_word_inline(xml: &str) -> bool {
+    xml.trim_start().starts_with("<w:")
+}
+
+/// The side a kept inline element's anchor sticks to when it is written without content: the
+/// unit before it for an element whose name ends in `End`, the unit after it otherwise. `None`
+/// for an element holding content, which seeds as one embed.
+fn raw_mark_assoc(xml: &str) -> Option<yrs::Assoc> {
+    let tag = xml.trim().strip_prefix('<')?;
+    let mut quote = None;
+    let mut close = None;
+    for (index, ch) in tag.char_indices() {
+        match quote {
+            Some(open) if ch == open => quote = None,
+            Some(_) => {}
+            None if ch == '"' || ch == '\'' => quote = Some(ch),
+            None if ch == '>' => {
+                close = Some(index);
+                break;
+            }
+            None => {}
+        }
+    }
+    let close = close?;
+    let head = tag[..close].strip_suffix('/')?;
+    if close + 1 != tag.len() {
+        return None;
+    }
+    let name = head
+        .split(|ch: char| ch.is_whitespace() || ch == '/')
+        .next()
+        .filter(|name| !name.is_empty())?;
+    Some(if name.ends_with("End") {
+        yrs::Assoc::Before
+    } else {
+        yrs::Assoc::After
+    })
 }
 
 fn paragraph_units(
@@ -4653,11 +4731,13 @@ fn paragraph_units(
     let mut breaks = Vec::new();
     let mut opaque_sequences = Vec::new();
     let mut comment_marks = Vec::new();
+    let mut raw_marks = Vec::new();
     let mut boundaries = Some(Vec::new());
     let mut unit_counts = Vec::new();
     let style_formatting = paragraph_style_formatting(paragraph, styles, extra_run_formatting);
     for content in array(field(Some(paragraph), "content")) {
         let start = units.len();
+        let mut seeded_raw = false;
         match string(field(Some(content), "type")).unwrap_or_default() {
             "commentRangeStart" | "commentRangeEnd" => {
                 if let Some(id) = field(Some(content), "id") {
@@ -4733,12 +4813,33 @@ fn paragraph_units(
                 boundaries = None;
                 units.push(embed_unit("math", math_payload(content), &[], 1));
             }
-            "bookmarkStart" | "bookmarkEnd" | "rawXml" => {}
+            "rawXml"
+                if !kept_word_inline(string(field(Some(content), "xml")).unwrap_or_default()) => {}
+            "rawXml" => {
+                let xml = string(field(Some(content), "xml")).unwrap_or_default();
+                if let Some(assoc) = raw_mark_assoc(xml) {
+                    raw_marks.push(RawMark {
+                        unit: start,
+                        assoc,
+                        xml: xml.to_owned(),
+                    });
+                } else {
+                    seeded_raw = true;
+                    let payload = JsonObject::from([("xml".to_owned(), json!(xml))]);
+                    units.push(embed_unit(RAW_INLINE_KIND, payload, &[], 1));
+                    if let Some(run_boundaries) = &mut boundaries {
+                        run_boundaries.push(json!({ "text": "\u{fffc}", "formatsRun": false }));
+                    }
+                }
+            }
+            "bookmarkStart" | "bookmarkEnd" => {}
             _ => boundaries = None,
         }
         content_breaks(content, start, styles, source, &mut breaks, true, false);
         let mut elements = Vec::new();
-        unmodelled_nodes(content, &mut elements);
+        if !seeded_raw {
+            unmodelled_nodes(content, &mut elements);
+        }
         if !elements.is_empty() {
             let kind = string(field(Some(content), "type")).unwrap_or_default();
             let (unit, in_control) = match kind {
@@ -4760,6 +4861,7 @@ fn paragraph_units(
         ppr: para_attrs_to_ppr(attrs),
         units,
         comment_marks,
+        raw_marks,
         omitted,
         breaks,
         opaque_sequences,
@@ -4778,12 +4880,13 @@ fn floating_run_content(content: &Value) -> bool {
     match string(field(Some(content), "type")) {
         Some("drawing") => {
             let wrap = field(field(Some(content), "image"), "wrap");
-            string(field(wrap, "type")).is_some_and(|kind| kind != "inline")
+            string(field(wrap, "type")).is_some_and(|kind| !crate::bridge::inline_wrap(Some(kind)))
         }
         Some("shape") => {
             let shape = field(Some(content), "shape");
-            field(shape, "wrap").is_some_and(|wrap| !wrap.is_null())
-                || field(shape, "position").is_some_and(|position| !position.is_null())
+            field(shape, "wrap").is_some_and(|wrap| {
+                !wrap.is_null() && !crate::bridge::inline_wrap(string(field(Some(wrap), "type")))
+            }) || field(shape, "position").is_some_and(|position| !position.is_null())
         }
         _ => false,
     }
@@ -6404,6 +6507,7 @@ fn visit_story(
         story_id: story_id.clone(),
         units: Vec::new(),
         comment_marks: Vec::new(),
+        raw_marks: Vec::new(),
         comment_coverage: Vec::new(),
         measured: (0, 0),
     });
@@ -6497,6 +6601,7 @@ fn visit_story(
                 let ParagraphUnits {
                     mut units,
                     comment_marks,
+                    raw_marks,
                     mut ppr,
                     omitted,
                     breaks,
@@ -6578,6 +6683,12 @@ fn visit_story(
                 context.plans[plan_index]
                     .comment_marks
                     .extend(comment_marks.into_iter().map(|mark| CommentMark {
+                        unit: unit_base + mark.unit,
+                        ..mark
+                    }));
+                context.plans[plan_index]
+                    .raw_marks
+                    .extend(raw_marks.into_iter().map(|mark| RawMark {
                         unit: unit_base + mark.unit,
                         ..mark
                     }));
@@ -6958,9 +7069,25 @@ fn seed_plan_sharing(
     let StoryPlan {
         story_id,
         units,
+        raw_marks,
         comment_coverage,
         ..
     } = plan;
+    let mut marks = Vec::with_capacity(raw_marks.len());
+    let (mut offset, mut measured) = (0u32, 0usize);
+    for (ordinal, mark) in raw_marks.into_iter().enumerate() {
+        while measured < mark.unit.min(units.len()) {
+            offset += unit_width(&units[measured]);
+            measured += 1;
+        }
+        marks.push(RawOp::SetRawMark {
+            id: format!("{story_id}#{ordinal}"),
+            at: offset,
+            assoc: mark.assoc,
+            ordinal: ordinal as u32,
+            xml: mark.xml,
+        });
+    }
     let mut referenced_fonts = BTreeSet::new();
     let mut ops = units_to_raw_ops(units, &mut referenced_fonts, script_fonts, shared)?;
     if !comment_coverage.is_empty() {
@@ -6976,6 +7103,7 @@ fn seed_plan_sharing(
                 }),
         );
     }
+    ops.extend(marks);
     Ok((story_id, ops, referenced_fonts))
 }
 
@@ -7094,6 +7222,7 @@ fn lower_docx(
 /// [`lower_docx`], without the retained source JSON that only seeded payloads carry when
 /// `payloads` is `false`.
 fn resolve_seed_font_names(value: &mut Value, theme: &docx_parse::Theme) {
+    let untouched = untouched_field_run(value);
     match value {
         Value::Array(values) => {
             for value in values {
@@ -7125,9 +7254,47 @@ fn resolve_seed_font_names(value: &mut Value, theme: &docx_parse::Theme) {
         }
         _ => {}
     }
+    if untouched && let Some(digest) = kept_run_digest(value) {
+        value["sourceRunDigest"] = Value::String(digest);
+    }
+}
+
+/// The digest the writer compares a complex field's `sourceRunDigest` with, or `None` when
+/// `field_json` is not a complex field.
+pub fn field_run_digest(field_json: &str) -> Option<String> {
+    let complex: docx_parse::ComplexField = serde_json::from_str(field_json).ok()?;
+    Some(docx_parse::field_run_digest(&complex))
+}
+
+/// The digest of `value` when it is a complex field that carries the run it was read from.
+fn kept_run_digest(value: &Value) -> Option<String> {
+    if string(field(Some(value), "type")) != Some("complexField")
+        || field(Some(value), "sourceRunXml").is_none()
+    {
+        return None;
+    }
+    let complex: docx_parse::ComplexField = serde_json::from_value(value.clone()).ok()?;
+    Some(docx_parse::field_run_digest(&complex))
+}
+
+/// Whether `value` is a complex field that still digests to the digest it was read with.
+fn untouched_field_run(value: &Value) -> bool {
+    let stored = string(field(Some(value), "sourceRunDigest"));
+    stored.is_some() && kept_run_digest(value).as_deref() == stored
+}
+
+/// Whether `value` is a complex field object that carries a source run digest.
+fn ordered_field_run(value: &OrderedValue) -> bool {
+    let OrderedValue::Object(entries) = value else {
+        return false;
+    };
+    let kind = entries.iter().find(|(key, _)| key == "type");
+    matches!(kind, Some((_, OrderedValue::String(name))) if name == "complexField")
+        && entries.iter().any(|(key, _)| key == "sourceRunDigest")
 }
 
 fn resolve_seed_ordered_fonts(value: &mut OrderedValue, theme: &docx_parse::Theme) {
+    let untouched = ordered_field_run(value) && untouched_field_run(&value.value());
     match value {
         OrderedValue::Array(values) => {
             for value in values {
@@ -7166,6 +7333,13 @@ fn resolve_seed_ordered_fonts(value: &mut OrderedValue, theme: &docx_parse::Them
             }
         }
         _ => {}
+    }
+    if untouched
+        && let Some(digest) = kept_run_digest(&value.value())
+        && let OrderedValue::Object(entries) = value
+        && let Some((_, stored)) = entries.iter_mut().find(|(key, _)| key == "sourceRunDigest")
+    {
+        *stored = OrderedValue::String(digest);
     }
 }
 
@@ -10474,6 +10648,44 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    #[test]
+    fn a_kept_word_element_holding_content_is_one_unit_of_the_recorded_run_boundaries() {
+        let recorded = |raw: &str| {
+            let properties = paragraph_units(
+                &json!({"content":[
+                    {"type":"run","content":[{"type":"text","text":"Head "}]},
+                    {"type":"rawXml","xml":raw},
+                    {"type":"run","content":[{"type":"text","text":" Mid"}]},
+                    {"type":"run","content":[{"type":"break","breakType":"page"}]},
+                    {"type":"run","content":[{"type":"text","text":"End"}]}
+                ]}),
+                &StyleResolver::new(None),
+                None,
+                &BTreeMap::new(),
+            )
+            .ppr;
+            let boundaries = properties["_originalRunBoundaries"].as_array().unwrap();
+            let texts: Vec<_> = boundaries
+                .iter()
+                .map(|boundary| boundary["text"].as_str().unwrap().to_owned())
+                .collect();
+            let breaks: Vec<_> = boundaries
+                .iter()
+                .map(|boundary| boundary.get("breaks").cloned())
+                .collect();
+            (texts, breaks)
+        };
+        let page = Some(json!([{"offset": 0, "type": "page"}]));
+        let (texts, breaks) = recorded("<w:zzz><w:r><w:t>inner</w:t></w:r></w:zzz>");
+        assert_eq!(texts, ["Head ", "\u{fffc}", " Mid", "", "End"]);
+        assert_eq!(breaks, [None, None, None, page.clone(), None]);
+        for zero_units in [r#"<w:subDoc r:id="rId9"/>"#, r#"<x:foo xmlns:x="urn:x"/>"#] {
+            let (texts, breaks) = recorded(zero_units);
+            assert_eq!(texts, ["Head ", " Mid", "", "End"], "{zero_units}");
+            assert_eq!(breaks, [None, None, page.clone(), None], "{zero_units}");
+        }
     }
 
     #[test]

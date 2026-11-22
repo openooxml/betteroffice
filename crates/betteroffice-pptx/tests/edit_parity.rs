@@ -6,7 +6,6 @@ use betteroffice_pptx::{
 use pptx_edit::DeckSession;
 
 const FIXTURE: &[u8] = include_bytes!("../../../apps/demo/public/betteroffice-demo.pptx");
-const CLIENT_ID: u64 = 73;
 
 struct Pair {
     facade: Presentation,
@@ -16,9 +15,10 @@ struct Pair {
 
 impl Pair {
     fn open(bytes: &[u8]) -> Self {
+        let facade = Presentation::open(bytes).unwrap();
         let pair = Self {
-            facade: Presentation::open_collaborative(bytes, CLIENT_ID).unwrap(),
-            session: DeckSession::open(bytes, CLIENT_ID).unwrap(),
+            session: DeckSession::open(bytes, facade.client_id()).unwrap(),
+            facade,
             context: EditCtx::local("edit-parity"),
         };
         pair.assert_snapshot();

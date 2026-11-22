@@ -530,6 +530,24 @@ const rows: Row<Pptx>[] = [
     },
   },
   { method: 'PptxRenderer.layoutSlideJson', call: ({ doc, renderer }) => [0, 1].map((index) => renderer.layoutSlideJson(doc, index)) },
+  {
+    method: 'PptxRenderer.previewShapeRectJson',
+    call: ({ doc, renderer }) => {
+      const target = shape(doc, 'Body');
+      const before = JSON.parse(doc.snapshotJson()) as unknown;
+      const preview = JSON.parse(renderer.previewShapeRectJson(doc, {
+        slideId: target.slideId,
+        shapeId: target.shapeId,
+        x: 685800,
+        y: 1600200,
+        width: 5486400,
+        height: 1371600,
+      })) as unknown;
+      const after = JSON.parse(doc.snapshotJson()) as unknown;
+      expect(after).toStrictEqual(before);
+      return { preview, before, after };
+    },
+  },
   { method: 'PptxRenderer.exportSlideJson', call: ({ doc, renderer }) => renderer.exportSlideJson(doc, 0) },
   defineRow({
     method: 'PptxRenderer.hitTestJson',

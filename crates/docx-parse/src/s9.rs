@@ -773,6 +773,7 @@ fn parse_s9_package_impl(
         .then(|| extract_all_template_variables(&body.content));
     warnings.extend(media_warnings);
     warnings.extend(smart_art.warnings);
+    warnings.extend(budget.take_unmodeled_inline_warnings());
     let warnings = (!warnings.is_empty()).then_some(warnings);
 
     let mut document = S9DocumentWire {
@@ -1140,5 +1141,59 @@ mod tests {
             (None, Some(true))
         );
         assert_eq!(parsed.canonical_sha256.as_deref().unwrap().len(), 64);
+    }
+
+    #[test]
+    fn text_bearing_unmodeled_inline_elements_warn_once_per_document() {
+        let parts = vec![
+            (
+                "[Content_Types].xml".to_owned(),
+                br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec(),
+            ),
+            (
+                "word/document.xml".to_owned(),
+                br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>a</w:t></w:r><w:zzz><w:r><w:t>x</w:t></w:r></w:zzz></w:p><w:p><w:zzz><w:r><w:t>y</w:t></w:r></w:zzz><w:yyy/></w:p></w:body></w:document>"#.to_vec(),
+            ),
+        ];
+        let package = ooxml_opc::rezip_parts(&parts).unwrap();
+        let parsed = parse_docx_s9_wire(&package, S9ParseOptions::default()).unwrap();
+        let warnings = parsed.document.warnings.unwrap_or_default();
+        let unmodeled: Vec<_> = warnings
+            .iter()
+            .filter(|warning| warning.contains("DOCX_UNMODELED_INLINE"))
+            .collect();
+        assert_eq!(unmodeled.len(), 1, "{warnings:?}");
+        assert!(unmodeled[0].contains("w:zzz"), "{warnings:?}");
+        assert!(!unmodeled[0].contains("w:yyy"), "{warnings:?}");
+    }
+
+    #[test]
+    fn unmodeled_inline_warnings_name_only_the_elements_the_model_keeps() {
+        let parts = vec![
+            (
+                "[Content_Types].xml".to_owned(),
+                br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec(),
+            ),
+            (
+                "word/document.xml".to_owned(),
+                br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>a</w:t></w:r><w:zzz><w:r><w:t>x</w:t></w:r></w:zzz><w:ins w:id="1" w:author="Ann"><w:yyy><w:r><w:t>yy</w:t></w:r></w:yyy></w:ins><w:del w:id="2" w:author="Ann"><w:xxx><w:r><w:delText>xx</w:delText></w:r></w:xxx></w:del><w:sdt><w:sdtPr><w:id w:val="4"/></w:sdtPr><w:sdtContent><w:vvv><w:r><w:t>vv</w:t></w:r></w:vvv></w:sdtContent></w:sdt><w:fldSimple w:instr=" SUBJECT "><w:uuu><w:r><w:t>uu</w:t></w:r></w:uuu></w:fldSimple><w:hyperlink w:anchor="target"><w:ttt><w:r><w:t>t</w:t></w:r></w:ttt></w:hyperlink></w:p></w:body></w:document>"#.to_vec(),
+            ),
+        ];
+        let package = ooxml_opc::rezip_parts(&parts).unwrap();
+        let parsed = parse_docx_s9_wire(&package, S9ParseOptions::default()).unwrap();
+        let warnings = parsed.document.warnings.unwrap_or_default();
+        let unmodeled: Vec<_> = warnings
+            .iter()
+            .filter(|warning| warning.contains("DOCX_UNMODELED_INLINE"))
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            unmodeled,
+            [
+                "DOCX_UNMODELED_INLINE w:zzz chars=1",
+                "DOCX_UNMODELED_INLINE w:ttt chars=1"
+            ],
+            "{warnings:?}"
+        );
     }
 }

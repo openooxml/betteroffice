@@ -141,7 +141,7 @@ export class TrackedRevisionConflictError extends DocumentToolError {
 
 export class AcceptDateUnsupportedError extends DocumentToolError {
   constructor() {
-    super('ACCEPT_DATE_UNSUPPORTED', 'Attached DOCX acceptance cannot restamp revisions. Omit date.');
+    super('ACCEPT_DATE_UNSUPPORTED', 'DOCX acceptance with an editor edit peer cannot restamp revisions. Omit date.');
     this.name = 'AcceptDateUnsupportedError';
   }
 }

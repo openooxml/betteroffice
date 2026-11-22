@@ -10,6 +10,7 @@ import { deferReply, transferable, type TransferResult } from '../../../../share
 import { isCommandEnvelope } from '../../../../shared/office-session/commands/types';
 import { isEngineTrap } from '../../../../shared/office-session/trap';
 import { setFontCdnConfiguration, type FontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
+import { resizedShapeRect } from '../../../../shared/office-session/shapeResize';
 import { extendTextRange, graphemeBoundaries, textRangeAt } from '../../../../shared/textSelection';
 import { SessionFailure, type MethodHandlers, type MethodPolicies } from '../../../../shared/office-session/types';
 import type { PptxEditRequest, PptxEditResult, PptxStoryTarget, PptxStoryText, PptxTextField } from '../edits';
@@ -22,7 +23,10 @@ import {
   presentationDeleteTextJoiningParagraphs, type PresentationCommandReadResult,
   type PresentationHandle, type PresentationHistoryReceipt,
 } from '../wasm/loader';
-import { buildCommandFrame, commandFrameMedia, commandFrameMediaBytes, parseCommandDisplayList } from './commandFrame';
+import {
+  buildCommandFrame, commandFrameMedia, commandFrameMediaBytes, parseCommandDisplayList,
+  parseCommandShapeRectPreview,
+} from './commandFrame';
 import type { WorkerSlideFrame, WorkerSlideRender } from './workerRender';
 import { prepareCommandOperation } from './commandOperations';
 import type { createCommandDefaultFonts } from './commandDefaultFonts';
@@ -133,6 +137,7 @@ export function registerPresentationCommandHandlers(
     version: string; beforeText: string };
   type FormattingProjection = { formatting: TextStyleSnapshot; alignment: ParagraphAlignment | null };
   type CachedStory = { text: PptxStoryText; snapshot: StorySnapshot; echoRanges: { start: number; end: number }[];
+    canResize: boolean;
     table: PresentationCommandEditState['toolbar']['table'];
     formatting?: StorySnapshot;
     toolbar?: { story: StorySnapshot; selection: PresentationCommandSelection; marks: TextStyle;
@@ -346,19 +351,21 @@ export function registerPresentationCommandHandlers(
   function cacheStories(content: Extract<PresentationCommandReadResult, { ok: true }>): void {
     for (const slide of content.slides) notes.set(slide.id, slide.notes ?? '');
     const tables = new Map<string, NonNullable<PresentationCommandEditState['toolbar']['table']>>();
-    const visit = (shapes: readonly ShapeSnapshot[]) => {
+    const resize = new Map<string, boolean>();
+    const visit = (shapes: readonly ShapeSnapshot[], topLevel: boolean) => {
       for (const shape of shapes) {
         const graphic = shape.graphic as { type?: string; grid?: unknown[] } | null;
+        for (const story of shape.textStories) resize.set(story.id, graphic?.type !== 'table' && topLevel && canResizeShape(shape));
         if (graphic?.type === 'table' && Array.isArray(graphic.grid) && graphic.grid.length) {
           const columns = graphic.grid.length;
           (shape.textStories ?? []).forEach((story, index) => tables.set(story.id, {
             shapeId: shape.id, row: Math.floor(index / columns), column: index % columns,
           }));
         }
-        visit(shape.children ?? []);
+        visit(shape.children ?? [], false);
       }
     };
-    for (const slide of content.slides) visit(slide.shapes ?? []);
+    for (const slide of content.slides) visit(slide.shapes ?? [], true);
     const sources = new Map(content.sources.map((source) => [source.storyId, source.paragraphs]));
     for (const story of content.stories) {
       const key = storyKey(story);
@@ -366,6 +373,7 @@ export function registerPresentationCommandHandlers(
       keys.add(key);
       slideStoryKeys.set(story.slideId, keys);
       stories.set(key, { text: story, snapshot: presentation().story(story.storyId), echoRanges: [],
+        canResize: resize.get(story.storyId) ?? false,
         table: tables.get(story.storyId) ?? null,
         source: new Map((sources.get(story.storyId) ?? []).map((paragraph) => {
           const live = story.paragraphs.find((value) => value.paragraphId === paragraph.paragraphId)!;
@@ -845,7 +853,9 @@ export function registerPresentationCommandHandlers(
     const reply = transferable<PresentationCommandAck>({ ...identity!, epoch: documentEpoch, throughSeq, version,
       ...(updates.length ? { updates } : {}),
       ...(observeChanges && commandOutcomes.some((outcome) => outcome.committed) ? { change: { ...identity!, throughSeq, version, snapshot: presentation().snapshot() } } : {}),
-      selection: objectSelection ?? (selection ? { ...selection } : null), editState: edit, outcomes: commandOutcomes,
+      selection: objectSelection ?? (selection
+        ? { ...selection, canResize: stories.get(storyKey(selection))?.canResize ?? false } : null),
+      editState: edit, outcomes: commandOutcomes,
       dirtySlideIds, activeSlideId, historyThroughSeq, ...slicedFonts?.ack(),
       ...(creation ? { creation } : {}), ...(editResult ? { editResult } : {}), ...(fontId !== undefined ? { fontId } : {}),
       ...(history ? { slides: metadata!.slides, size: metadata!.size } : {}),
@@ -1011,9 +1021,14 @@ export function registerPresentationCommandHandlers(
       return object ? { kind: 'object', object } : 'bad-target';
     }
     if (command.kind === 'moveShape' || command.kind === 'setShapeRect') {
-      const relative = command.kind === 'moveShape' && 'delta' in command.payload ? command.payload : null;
-      if (relative && (relative.at.source !== 'afterSeq' || relative.at.seq !== throughSeq ||
-        !relative.delta || !Number.isFinite(relative.delta.x) || !Number.isFinite(relative.delta.y))) return 'invalid-payload';
+      const relativeMove = command.kind === 'moveShape' && 'delta' in command.payload ? command.payload : null;
+      const relativeResize = command.kind === 'setShapeRect' && 'delta' in command.payload ? command.payload : null;
+      const relative = relativeMove ?? relativeResize;
+      if (relative && (relative.at.source !== 'afterSeq' || relative.at.seq !== throughSeq &&
+        !(relativeResize?.frame && relativeResize.frame.coversThroughSeq <= relative.at.seq) ||
+        !relative.delta || !Number.isFinite(relative.delta.x) || !Number.isFinite(relative.delta.y) ||
+        relativeResize &&
+        !['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'].includes(relativeResize.handle))) return 'invalid-payload';
       const object = relative ? objectSelection?.shapeId === relative.shapeId
         ? transformTarget(objectSelection) : null : 'target' in command.payload ? transformTarget(command.payload.target) : null;
       if (!object) return 'bad-target';
@@ -1026,7 +1041,10 @@ export function registerPresentationCommandHandlers(
         ? { ...object.rect, x: object.rect.x + Math.round(relative.delta.x * object.units.x),
           y: object.rect.y + Math.round(relative.delta.y * object.units.y) }
         : 'x' in command.payload ? { ...object.rect, x: command.payload.x, y: command.payload.y } : null
-        : command.payload.rect;
+        : relativeResize ? resizedShapeRect(object.rect, relativeResize.handle, {
+          x: Math.round(relativeResize.delta.x * object.units.x),
+          y: Math.round(relativeResize.delta.y * object.units.y),
+        }, MIN_SHAPE_SIZE_EMU, object.aspectRatioLocked) : 'rect' in command.payload ? command.payload.rect : null;
       if (!rect || ![rect.x, rect.y, rect.width, rect.height].every(Number.isSafeInteger) ||
         rect.width <= 0 || rect.height <= 0 || !move &&
         (rect.width !== object.rect.width && rect.width < MIN_SHAPE_SIZE_EMU ||
@@ -1820,6 +1838,26 @@ export function registerPresentationCommandHandlers(
       TransferResult<PresentationCommandAck> | Promise<TransferResult<PresentationCommandAck>> {
       return runCommand(command);
     },
+    previewShapeRect(_, request) {
+      const opened = presentation();
+      if (!matches(request)) throw new Error('Presentation shape preview identity differs');
+      const { basis, frame: tag, target, rect } = request;
+      if (!basis || basis.epoch !== documentEpoch || basis.version !== version ||
+        opened.version() !== version || !objectFrame(tag) || tag.slideId !== target?.slideId) {
+        throw new Error('stale-basis');
+      }
+      const object = transformTarget(target);
+      if (!object || object.slideId !== tag.slideId || object.shapeId !== target.shapeId) {
+        throw new Error('bad-target');
+      }
+      if (!rect || ![rect.x, rect.y, rect.width, rect.height].every(Number.isSafeInteger) ||
+        rect.width <= 0 || rect.height <= 0) throw new Error('invalid-payload');
+      if (!object.rect || !object.canResize) throw new Error('unsupported');
+      const displayList = new TextEncoder().encode(JSON.stringify(
+        parseCommandShapeRectPreview(opened, target.slideId, target.shapeId, rect),
+      )).buffer;
+      return transferable(displayList, [displayList]);
+    },
     edit(_, command): TransferResult<PresentationSharedAck> | Promise<TransferResult<PresentationSharedAck>> {
       presentation();
       if (!isCommandEnvelope(command as unknown)) {
@@ -1987,6 +2025,7 @@ export function registerPresentationCommandHandlers(
     openCommandEditor: { lane: 'interactive' },
     command: (command) => ({ lane: command.kind === 'collabPipe' ? 'collab' : 'input',
       mutates: true, userInput: command.kind !== 'collabPipe' }),
+    previewShapeRect: { lane: 'interactive' },
     edit: (command) => ({ lane: command.kind === 'collabPipe' ? 'collab' : 'input',
       mutates: true, userInput: command.kind !== 'collabPipe' }),
     checkpoint: { lane: 'interactive' },

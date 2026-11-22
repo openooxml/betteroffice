@@ -593,6 +593,7 @@
     "noDocumentLoaded": "No document loaded",
     "failedToLoad": "Couldn't open this document",
     "failedToLoadDescription": "The file may be damaged, or it uses something this editor can't read yet.",
+    "recoveryFailedDescription": "The editor stopped and could not restore your recent changes. The file itself is not damaged.",
     "failedToLoadDamaged": "The file is damaged or isn't a complete Word document.",
     "failedToLoadUnsupported": "This document uses something this editor can't read yet.",
     "editorUnavailable": "The editor couldn't load",

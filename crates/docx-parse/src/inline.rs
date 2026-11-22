@@ -33,12 +33,109 @@ pub struct Run {
     #[serde(rename = "propertyChanges", skip_serializing_if = "Option::is_none")]
     pub property_changes: Option<Vec<RunPropertyChange>>,
     pub content: Vec<RunContent>,
+    /// The `w:dir` and `w:bdo` elements around the run, outermost first.
+    #[serde(
+        rename = "directionScopes",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub direction_scopes: Vec<DirectionScope>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RunType {
     #[serde(rename = "run")]
     Run,
+}
+
+/// One `w:dir` or `w:bdo` element. Runs inside the same element share its `id`, an ordinal
+/// unique within the paragraph.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectionScope {
+    pub kind: DirectionKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub val: Option<String>,
+    pub id: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra: Vec<crate::paragraph::RawAttribute>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DirectionKind {
+    Dir,
+    Bdo,
+}
+
+impl DirectionKind {
+    pub fn element(self) -> &'static str {
+        match self {
+            Self::Dir => "w:dir",
+            Self::Bdo => "w:bdo",
+        }
+    }
+}
+
+pub(crate) fn direction_scope(element: &XmlElement, id: u32) -> Option<DirectionScope> {
+    let kind = if element.matches_name("w", "dir") {
+        DirectionKind::Dir
+    } else if element.matches_name("w", "bdo") {
+        DirectionKind::Bdo
+    } else {
+        return None;
+    };
+    Some(DirectionScope {
+        kind,
+        val: element.attribute(Some("w"), "val").map(str::to_owned),
+        id,
+        extra: element
+            .attributes
+            .iter()
+            .filter(|(name, _)| !matches!(name.as_str(), "w:val" | "val"))
+            .map(|(name, value)| crate::paragraph::RawAttribute {
+                name: name.clone(),
+                value: value.clone(),
+            })
+            .collect(),
+    })
+}
+
+/// The characters in the `w:t`, `w:delText` and `w:instrText` descendants of `element`.
+pub(crate) fn word_text_chars(element: &XmlElement) -> usize {
+    element
+        .child_elements()
+        .map(|child| {
+            if matches!(child.local_name(), "t" | "delText" | "instrText") {
+                child.text_content().chars().count()
+            } else {
+                word_text_chars(child)
+            }
+        })
+        .sum()
+}
+
+/// The bytes one child's copy of `scopes` costs: their values and attributes, and a fixed
+/// amount per scope.
+pub(crate) fn scope_copy_bytes(scopes: &[DirectionScope]) -> usize {
+    scopes
+        .iter()
+        .map(|scope| {
+            scope.extra.iter().fold(
+                64usize.saturating_add(scope.val.as_ref().map_or(0, String::len)),
+                |sum, attribute| {
+                    sum.saturating_add(attribute.name.len())
+                        .saturating_add(attribute.value.len())
+                },
+            )
+        })
+        .fold(0usize, usize::saturating_add)
+}
+
+pub(crate) fn has_word_text(element: &XmlElement) -> bool {
+    element.child_elements().any(|child| {
+        matches!(child.local_name(), "t" | "delText" | "instrText") || has_word_text(child)
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -267,6 +364,7 @@ pub fn parse_run(
         formatting,
         property_changes,
         content: parse_run_contents(element),
+        direction_scopes: Vec::new(),
     };
     let mut resolved_formatting = resolve_run_formatting(&run, styles, doc_defaults);
     if theme.is_some()
@@ -992,6 +1090,28 @@ pub(crate) fn raw_foreign_node(
     Some(*raw)
 }
 
+/// A `w:` inline element no walker models, kept as raw XML. One holding text is recorded for
+/// the parse warnings when the model `kept` it.
+pub(crate) fn unmodeled_word_node(
+    element: &crate::xml::XmlElement,
+    budget: &mut crate::xml::ParseBudget<'_>,
+    kept: bool,
+) -> Option<RawInlineXml> {
+    if element.namespace_prefix() != Some("w") {
+        return None;
+    }
+    if kept && has_word_text(element) {
+        budget.record_unmodeled_inline(&element.name, word_text_chars(element));
+    }
+    Some(RawInlineXml {
+        node_type: RawInlineXmlType::RawXml,
+        xml: element.to_raw_inline_xml(),
+        source_ordinal: element
+            .first_paragraph_ordinal()
+            .filter(|_| budget.records_source_ordinals()),
+    })
+}
+
 /// Whether `element` is foreign markup the model keeps as raw XML, read from its name alone.
 pub(crate) fn is_foreign(element: &crate::xml::XmlElement) -> bool {
     is_foreign_name(&element.name)
@@ -1016,7 +1136,7 @@ pub(crate) fn raw_foreign_inline(element: &crate::xml::XmlElement) -> Option<Inl
     })))
 }
 
-/// The source of a run holding two or more fields one after another, each beginning and ending
+/// The source of a run holding one or more fields one after another, each beginning and ending
 /// inside it, beside only text, tabs, plain breaks and properties; its rendered page breaks are
 /// left out.
 pub(crate) fn field_run_source(element: &XmlElement) -> Option<String> {
@@ -1051,7 +1171,7 @@ pub(crate) fn field_run_source(element: &XmlElement) -> Option<String> {
             _ => return None,
         }
     }
-    if open || begins < 2 {
+    if open || begins == 0 {
         return None;
     }
     let mut run = element.clone();
@@ -1067,8 +1187,9 @@ pub(crate) fn keep_field_run(field: &mut ComplexField, source: String) {
 
 /// The digest of the model values the writer writes `field` from: its instruction, properties,
 /// flags, form field data, code and result. Empty properties count as none, a flag that is not
-/// set counts as off, and every zero counts as the same zero.
-pub(crate) fn field_run_digest(field: &ComplexField) -> String {
+/// set counts as off, and every zero counts as the same zero. The writer writes a field as its
+/// `source_run_xml` while this equals its `source_run_digest`.
+pub fn field_run_digest(field: &ComplexField) -> String {
     use sha2::{Digest, Sha256};
 
     let formatting = field
@@ -1370,7 +1491,8 @@ pub struct ComplexField {
     /// of the field while the field digests to `source_run_digest`.
     #[serde(rename = "sourceRunXml", skip_serializing_if = "Option::is_none")]
     pub source_run_xml: Option<String>,
-    /// The digest of the field as parsed from `source_run_xml`.
+    /// The digest of the field as stored. It equals the digest of the field as parsed from
+    /// `source_run_xml` until a loader has filled in the field's theme fonts.
     #[serde(rename = "sourceRunDigest", skip_serializing_if = "Option::is_none")]
     pub source_run_digest: Option<String>,
     #[serde(rename = "structuredCode", skip_serializing_if = "Option::is_none")]
@@ -1379,6 +1501,14 @@ pub struct ComplexField {
     pub structured_result: Option<StructuredFieldContent>,
     #[serde(rename = "fieldTree", skip_serializing_if = "Option::is_none")]
     pub field_tree: Option<StructuredFieldTree>,
+    /// The `w:dir` and `w:bdo` elements around every run read for the field, outermost first;
+    /// written around its field characters where no code or result run carries its own.
+    #[serde(
+        rename = "directionScopes",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub direction_scopes: Vec<DirectionScope>,
 }
 
 impl ComplexField {
@@ -1679,10 +1809,19 @@ fn parse_hyperlink_at_depth(
         .map(|value| truncate_chars(value, 2048));
     let mut children = Vec::new();
     let mut structured = Vec::new();
-    for child in element.child_elements().take(MAX_HYPERLINK_CHILDREN) {
+    let scoped = crate::block::direction_scoped_children(
+        element,
+        &mut crate::block::LocalScopes {
+            next: 0,
+            budget,
+            part,
+        },
+    )?;
+    for (scopes, child) in scoped.into_iter().take(MAX_HYPERLINK_CHILDREN) {
         match child.local_name() {
             "r" => {
-                let run = parse_run(child, theme, styles, doc_defaults).run;
+                let mut run = parse_run(child, theme, styles, doc_defaults).run;
+                run.direction_scopes = scopes;
                 children.push(InlineNode::Run(run.clone()));
                 structured.push(InlineNode::Run(run));
             }
@@ -2347,6 +2486,7 @@ pub(crate) struct OpenComplexField {
     dirty: bool,
     raw_form_data_xml: Option<String>,
     formatting: Option<TextFormatting>,
+    direction_scopes: Vec<DirectionScope>,
 }
 
 impl OpenComplexField {
@@ -2378,6 +2518,7 @@ impl OpenComplexField {
             dirty: flags.as_ref().is_some_and(|flags| flags.1),
             raw_form_data_xml: flags.and_then(|flags| flags.2),
             formatting: run.formatting.clone(),
+            direction_scopes: run.direction_scopes.clone(),
         }
     }
 
@@ -2389,6 +2530,16 @@ impl OpenComplexField {
         if self.formatting.is_none() {
             self.formatting.clone_from(&run.formatting);
         }
+    }
+
+    pub(crate) fn share_direction_scopes(&mut self, run: &Run) {
+        let shared = self
+            .direction_scopes
+            .iter()
+            .zip(&run.direction_scopes)
+            .take_while(|(open, scope)| open == scope)
+            .count();
+        self.direction_scopes.truncate(shared);
     }
 
     pub(crate) fn switch_to_result(&mut self) {
@@ -2487,6 +2638,7 @@ impl OpenComplexField {
             structured_code,
             structured_result,
             field_tree: Some(field_tree),
+            direction_scopes: self.direction_scopes,
         };
         field.project_leaf_tree(&[]);
         field
@@ -2641,6 +2793,7 @@ fn parse_inline_container_at_depth(
                 if let Some(active) = fields.last_mut() {
                     active.append_instruction(&instruction);
                     active.adopt_formatting(&run);
+                    active.share_direction_scopes(&run);
                     if (has_begin || has_separate) && !instruction.is_empty() {
                         active.absorb_instruction(&run);
                     }
@@ -3350,6 +3503,57 @@ mod tests {
         assert_eq!(link.href.as_deref(), Some("#safe"));
         assert_eq!(link.children.len(), 1);
         assert_eq!(link.structured_children, None);
+    }
+
+    #[test]
+    fn standalone_hyperlinks_read_runs_in_smart_tags_custom_xml_and_direction_elements() {
+        let limits = ParseLimits::default();
+        let budget = ParseBudget::new(&limits);
+        let run = "<w:r><w:t>link</w:t></w:r>";
+        for (wrapper, scope) in [
+            (
+                format!(r#"<w:smartTag w:element="place">{run}</w:smartTag>"#),
+                None,
+            ),
+            (
+                format!(r#"<w:customXml w:element="item">{run}</w:customXml>"#),
+                None,
+            ),
+            (
+                format!(r#"<w:dir w:val="rtl">{run}</w:dir>"#),
+                Some(DirectionScope {
+                    kind: DirectionKind::Dir,
+                    val: Some("rtl".to_owned()),
+                    id: 0,
+                    extra: Vec::new(),
+                }),
+            ),
+        ] {
+            let link = parse_hyperlink(
+                &root(&format!(
+                    r#"<w:hyperlink xmlns:w="w" w:anchor="target">{wrapper}</w:hyperlink>"#
+                )),
+                None,
+                None,
+                None,
+                None,
+                "word/document.xml",
+                &budget,
+            )
+            .unwrap();
+            let [InlineNode::Run(inner)] = link.children.as_slice() else {
+                panic!("{wrapper}: {:?}", link.children)
+            };
+            assert_eq!(
+                inner.content,
+                [RunContent::Text {
+                    text: "link".to_owned(),
+                    preserve_space: None,
+                }],
+                "{wrapper}"
+            );
+            assert_eq!(inner.direction_scopes, Vec::from_iter(scope), "{wrapper}");
+        }
     }
 
     #[test]

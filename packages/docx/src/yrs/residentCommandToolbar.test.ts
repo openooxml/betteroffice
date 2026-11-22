@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from 'bun:test';
+import { createdListKey } from './listDefinitionSave';
 import { closeCommandEngines, command, execute, openCommandEngine, selection, snapshot, texts, TIMEOUT } from './residentCommandTestSupport';
 
 afterEach(closeCommandEngines);
@@ -11,10 +12,14 @@ test('worker_selection_formatting_and_list_commands_cover_multiple_paragraphs', 
   expect(execute(arm, command(arm, 'formatSelection', { delta: { highlight: 'yellow', strike: true, fontSize: 14 } }))).toMatchObject({ status: 'applied', editState: { toolbar: { strike: true, highlight: 'yellow' } } });
   expect(execute(arm, command(arm, 'toggleList', { kind: 'bullet' }))).toMatchObject({ status: 'applied' });
   expect(arm.engine.paragraphs('body').map(p => p.properties.numPr)).toEqual([{ numId: 1, ilvl: 0 }, { numId: 1, ilvl: 0 }]);
+  const [key, secondKey] = arm.engine.paragraphs('body').map(p => createdListKey(p.properties));
+  expect(key).toBeDefined();
+  expect(secondKey).toBe(key);
   expect(execute(arm, command(arm, 'changeIndent', { direction: 'increase' }))).toMatchObject({ status: 'applied' });
   expect(arm.engine.paragraphs('body').map(p => p.properties.numPr)).toEqual([{ numId: 1, ilvl: 1 }, { numId: 1, ilvl: 1 }]);
+  expect(arm.engine.paragraphs('body').map(p => createdListKey(p.properties))).toEqual([key, key]);
   execute(arm, command(arm, 'toggleList', { kind: 'bullet' }));
-  expect(arm.engine.paragraphs('body').every(p => p.properties.numPr == null)).toBe(true);
+  expect(arm.engine.paragraphs('body').every(p => p.properties.numPr == null && p.properties.listDef == null)).toBe(true);
   expect(execute(arm, command(arm, 'changeIndent', { direction: 'increase' }))).toMatchObject({ status: 'applied' });
   expect(arm.engine.paragraphs('body').map(p => p.properties.indentLeft)).toEqual([720, 720]);
   expect(execute(arm, command(arm, 'changeIndent', { direction: 'decrease' }))).toMatchObject({ status: 'applied' });

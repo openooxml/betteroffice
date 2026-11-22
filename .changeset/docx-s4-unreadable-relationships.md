@@ -4,4 +4,4 @@
 '@betteroffice/rust-crates': minor
 ---
 
-`parse_docx_s4` no longer fails on an unreadable relationships part other than the document's own. It reports a warning and leaves that part's references unresolved.
+`parse_docx_s4` no longer fails on an unreadable relationships part other than the document's own. It reports a warning and leaves that part's references unresolved. Rust `S4Projection` literals must set `warnings`.

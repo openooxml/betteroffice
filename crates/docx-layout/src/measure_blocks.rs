@@ -30,9 +30,14 @@ const DEFAULT_CELL_PADDING_Y: f64 = 0.0;
 /// Zones one anchor frame may accumulate, matching the measurement layer's cap.
 const MAX_ACTIVE_ZONES: usize = 200;
 
-/// A shape the lowering placed by anchor rather than in the flow.
+/// A shape the lowering placed by anchor rather than in the flow; an `inline`
+/// wrap keeps it in the flow, as the bridge's `anchored_shape` decides.
 fn anchored_shape(shape: &ShapeBlock) -> bool {
-    shape.position.is_some() || shape.wrap_type.is_some()
+    shape.position.is_some()
+        || shape
+            .wrap_type
+            .as_deref()
+            .is_some_and(|wrap_type| wrap_type != "inline")
 }
 
 #[derive(Default)]

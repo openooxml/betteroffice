@@ -145,6 +145,7 @@ pub(crate) fn parse_workbook_indexed(
             sheets,
             date_system: meta.date_system,
             full_precision: meta.full_precision,
+            iterate: meta.iterate,
             defined_names: meta.defined_names,
             shared_strings,
             styles,
@@ -275,6 +276,7 @@ fn check_workbook_root(e: &quick_xml::events::BytesStart) -> Result<(), ParseErr
 
 struct WorkbookMeta {
     full_precision: bool,
+    iterate: bool,
     date_system: DateSystem,
     active_sheet: SheetId,
     sheets: Vec<SheetEntry>,
@@ -288,12 +290,23 @@ pub fn workbook_full_precision(data: &[u8]) -> Result<bool, ParseError> {
     parse_workbook_xml(data).map(|meta| meta.full_precision)
 }
 
+/// whether the workbook requests iterative calculation.
+pub fn workbook_iterate(data: &[u8]) -> Result<bool, ParseError> {
+    parse_workbook_xml(data).map(|meta| meta.iterate)
+}
+
+/// the workbook's full precision and iterate settings.
+pub fn workbook_calculation_settings(data: &[u8]) -> Result<(bool, bool), ParseError> {
+    parse_workbook_xml(data).map(|meta| (meta.full_precision, meta.iterate))
+}
+
 fn parse_workbook_xml(data: &[u8]) -> Result<WorkbookMeta, ParseError> {
     let mut reader = reader(data);
     let mut buf = Vec::new();
     let mut depth = 0;
     let mut date_system = DateSystem::V1900;
     let mut full_precision = true;
+    let mut iterate = false;
     let mut active_sheet = None;
     let mut sheets_depth = None;
     let mut sheets = Vec::new();
@@ -309,6 +322,7 @@ fn parse_workbook_xml(data: &[u8]) -> Result<WorkbookMeta, ParseError> {
                 b"calcPr" if depth == 2 => {
                     full_precision = attr(&e, b"fullPrecision")?
                         .is_none_or(|value| !matches!(value.as_str(), "0" | "false"));
+                    iterate = attr(&e, b"iterate")?.as_deref().is_some_and(is_truthy);
                 }
                 b"workbookPr" => {
                     if let Some(v) = attr(&e, b"date1904")?
@@ -364,6 +378,7 @@ fn parse_workbook_xml(data: &[u8]) -> Result<WorkbookMeta, ParseError> {
     }
     Ok(WorkbookMeta {
         full_precision,
+        iterate,
         date_system,
         active_sheet: active_sheet.unwrap_or(SheetId(0)),
         sheets,

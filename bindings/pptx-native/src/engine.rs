@@ -93,6 +93,16 @@ pub struct DecodedFontFace {
     pub payload: Option<Uint8Array>,
 }
 
+#[napi(object)]
+pub struct ShapeRectPreviewRequest {
+    pub slide_id: String,
+    pub shape_id: String,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
 /// Decodes one font pack face using this engine's linked decoder.
 #[napi(
     catch_unwind,
@@ -139,6 +149,14 @@ struct EngineCall {
 
 impl EngineCall {
     fn new(env: Env) -> Self {
+        Self::enter(env)
+    }
+
+    fn release(env: Env) -> Self {
+        Self::enter(env)
+    }
+
+    fn enter(env: Env) -> Self {
         Self {
             env,
             previous_object: CURRENT_OBJECT.replace(std::ptr::null()),
@@ -322,6 +340,10 @@ impl PptxDocument {
 
     fn document_mut(&mut self, env: Env) -> Result<&mut Document> {
         enter_object(&self.failure, env)?;
+        self.inner_mut(env)
+    }
+
+    fn inner_mut(&mut self, env: Env) -> Result<&mut Document> {
         self.inner
             .as_mut()
             .ok_or_else(|| throw_error(&env, "PptxDocument was freed"))
@@ -379,7 +401,7 @@ impl PptxDocument {
 impl PptxDocument {
     #[napi(catch_unwind)]
     pub fn free(&mut self, env: Env) {
-        let _call = EngineCall::new(env);
+        let _call = EngineCall::release(env);
         self.inner = None;
     }
 
@@ -741,8 +763,8 @@ impl PptxDocument {
 
     #[napi(catch_unwind)]
     pub fn clear_update_observation(&mut self, env: Env) -> Result<()> {
-        let _call = EngineCall::new(env);
-        self.document_mut(env)?.clear_update_observation();
+        let _call = EngineCall::release(env);
+        self.inner_mut(env)?.clear_update_observation();
         Ok(())
     }
 
@@ -1186,7 +1208,7 @@ impl PptxRenderer {
 
     #[napi(catch_unwind)]
     pub fn free(&mut self, env: Env) {
-        let _call = EngineCall::new(env);
+        let _call = EngineCall::release(env);
         self.inner = None;
     }
 
@@ -1488,6 +1510,47 @@ impl PptxRenderer {
         let document = document.document(env)?;
         renderer
             .layout_proposal_diff_slide_json(document.session(), &id, slide_index)
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi(catch_unwind, js_name = "previewShapeRectJson")]
+    pub fn preview_shape_rect_json(
+        &self,
+        env: Env,
+        document: &PptxDocument,
+        request: ShapeRectPreviewRequest,
+    ) -> Result<String> {
+        let coordinate = |value: f64| {
+            if value.is_finite()
+                && value.fract() == 0.0
+                && value >= i64::MIN as f64
+                && value <= i64::MAX as f64
+            {
+                Ok(value as i64)
+            } else {
+                Err(throw_error(
+                    &env,
+                    "shape rectangle coordinates must be integers",
+                ))
+            }
+        };
+        let rect = pptx_edit::ShapeRect {
+            x: coordinate(request.x)?,
+            y: coordinate(request.y)?,
+            width: coordinate(request.width)?,
+            height: coordinate(request.height)?,
+        };
+        let _call = EngineCall::new(env);
+        let renderer = self.renderer(env)?;
+        let _document_call = EngineCall::new(env);
+        let document = document.document(env)?;
+        renderer
+            .preview_shape_rect_json(
+                document.session(),
+                &request.slide_id,
+                &request.shape_id,
+                rect,
+            )
             .map_err(|error| map_error(env, error))
     }
 }

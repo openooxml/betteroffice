@@ -84,6 +84,7 @@ export const editsession_encode_sticky_position: (a: number, b: number, c: numbe
 export const editsession_encoded_selection: (a: number) => [number, number, number, number];
 export const editsession_end_shared_reads: (a: number) => void;
 export const editsession_ensure_list_definition: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
+export const editsession_ensure_list_definition_after: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
 export const editsession_export_markdown_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_export_snapshot_with_private_fonts_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
 export const editsession_export_structured_json: (a: number, b: number, c: number) => [number, number, number, number];
@@ -151,6 +152,7 @@ export const editsession_paragraph_id_count: (a: number, b: number, c: number, d
 export const editsession_paragraph_identities: (a: number) => [number, number, number, number];
 export const editsession_paragraph_save_plan: (a: number) => [number, number, number, number];
 export const editsession_paragraph_spans: (a: number, b: number, c: number) => [number, number, number, number];
+export const editsession_paragraph_style_numbers: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
 export const editsession_paragraph_unit: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
 export const editsession_paragraphs: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_part_metadata_json: (a: number) => [number, number];
@@ -179,6 +181,7 @@ export const editsession_resident_section_revision: (a: number) => [number, numb
 export const editsession_resolve_comment: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_resolve_encoded_selection: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
 export const editsession_resolve_paragraph_anchor: (a: number, b: number, c: number) => [number, number, number, number];
+export const editsession_resolve_raw_marks: (a: number) => [number, number, number, number];
 export const editsession_resolve_sticky_position: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_resume_region_layout: (a: number, b: number) => [number, number, number, number];
 export const editsession_retained_headers_footers_json: (a: number) => [number, number, number, number];
@@ -258,6 +261,7 @@ export const editsession_written_paragraph_ids: (a: number, b: number, c: number
 export const editsession_yrs_blocks_for_story: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const export_docx_markdown_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const export_docx_structured_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+export const field_run_digest: (a: number, b: number) => [number, number];
 export const find_docx_content_controls_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
 export const hit_test_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const hit_test_regions_by_handle: (a: number, b: number, c: number, d: number) => [number, number, number, number];

@@ -15,7 +15,7 @@ export function usePasteOptions(options: {
   focusEditor(): void;
   /** The editor input; a Ctrl tap opens the menu only from inside it or the control. */
   surface: RefObject<HTMLElement | null>;
-  /** Called when an outside pointer or a window resize hides the control, and each time the control is turned off. */
+  /** Clears the current paste record on dismissal. */
   onHide?(): void;
 }) {
   const { enabled } = options;
@@ -34,6 +34,7 @@ export function usePasteOptions(options: {
     setMenuOpen(false);
     setVisible(false);
     setAnchor(null);
+    callbacks.current.onHide?.();
   }, []);
 
   const show = useCallback((nextAnchor: PasteOptionsAnchor, nextOffered: readonly PasteFormattingOption[]) => {
@@ -100,19 +101,15 @@ export function usePasteOptions(options: {
 
   useEffect(() => {
     if (!visible) return;
-    const hide = () => {
-      dismiss();
-      callbacks.current.onHide?.();
-    };
     const pointer = (event: PointerEvent) => {
       const target = event.target;
       if (target instanceof Node && controlRef.current?.contains(target)) return;
-      hide();
+      dismiss();
     };
-    window.addEventListener('resize', hide);
+    window.addEventListener('resize', dismiss);
     document.addEventListener('pointerdown', pointer, true);
     return () => {
-      window.removeEventListener('resize', hide);
+      window.removeEventListener('resize', dismiss);
       document.removeEventListener('pointerdown', pointer, true);
     };
   }, [visible, dismiss]);
@@ -120,7 +117,6 @@ export function usePasteOptions(options: {
   useEffect(() => {
     if (enabled) return;
     dismiss();
-    callbacks.current.onHide?.();
   }, [enabled, dismiss]);
 
   return {

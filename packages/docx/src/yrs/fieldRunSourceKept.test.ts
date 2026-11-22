@@ -36,27 +36,32 @@ afterEach(() => {
   for (const session of sessions.splice(0)) session.destroy();
 });
 
-function fixture(body = BODY, styles?: string): Uint8Array<ArrayBuffer> {
+function fixture(body = BODY, styles?: string, theme?: string): Uint8Array<ArrayBuffer> {
   const section = '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>' +
     '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>';
   const parts = new Map<string, Uint8Array>();
   const add = (name: string, xml: string) => parts.set(name, toBytes(xml));
   const stylesType = styles === undefined ? '' : '<Override PartName="/word/styles.xml" ' +
     'ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>';
+  const themeType = theme === undefined ? '' : '<Override PartName="/word/theme/theme1.xml" ' +
+    'ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>';
   add('[Content_Types].xml',
     '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
     '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
     '<Default Extension="xml" ContentType="application/xml"/>' +
     '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>' +
-    `${stylesType}</Types>`);
+    `${stylesType}${themeType}</Types>`);
   add('_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
     `<Relationship Id="doc" Type="${R}/officeDocument" Target="word/document.xml"/></Relationships>`);
   add('word/document.xml', `<w:document xmlns:w="${W}"><w:body>${body}${section}</w:body></w:document>`);
-  if (styles !== undefined) {
+  const relationships = (styles === undefined ? '' : `<Relationship Id="styles" Type="${R}/styles" Target="styles.xml"/>`) +
+    (theme === undefined ? '' : `<Relationship Id="theme" Type="${R}/theme" Target="theme/theme1.xml"/>`);
+  if (relationships) {
     add('word/_rels/document.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
-      `<Relationship Id="styles" Type="${R}/styles" Target="styles.xml"/></Relationships>`);
-    add('word/styles.xml', styles);
+      `${relationships}</Relationships>`);
   }
+  if (styles !== undefined) add('word/styles.xml', styles);
+  if (theme !== undefined) add('word/theme/theme1.xml', theme);
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
@@ -349,13 +354,16 @@ const typingAfter = (load: Loader) => async (bytes: Uint8Array<ArrayBuffer>) => 
   return opened.save();
 };
 
-/** Each route, and whether it writes the paragraph from the model rather than keeping its source. */
-const MARK_ROUTES: Array<[string, boolean, (bytes: Uint8Array<ArrayBuffer>) => Promise<string>]> = [
-  ['a full rewrite', true, fullRewrite],
-  ['native seed, a save without an edit', false, async (bytes) => (await nativeSeed(bytes)).save()],
-  ['native seed, typing after the run', true, typingAfter(nativeSeed)],
-  ['parseDocx and documentToYrs, a save without an edit', true, async (bytes) => (await parsedProjection(bytes)).save()],
-  ['parseDocx and documentToYrs, typing after the run', true, typingAfter(parsedProjection)],
+/**
+ * Each route, whether it writes the paragraph from the model rather than keeping its source, and
+ * the text it types at the end of the first paragraph.
+ */
+const MARK_ROUTES: Array<[string, boolean, (bytes: Uint8Array<ArrayBuffer>) => Promise<string>, string]> = [
+  ['a full rewrite', true, fullRewrite, ''],
+  ['native seed, a save without an edit', false, async (bytes) => (await nativeSeed(bytes)).save(), ''],
+  ['native seed, typing after the run', true, typingAfter(nativeSeed), 'Z'],
+  ['parseDocx and documentToYrs, a save without an edit', true, async (bytes) => (await parsedProjection(bytes)).save(), ''],
+  ['parseDocx and documentToYrs, typing after the run', true, typingAfter(parsedProjection), 'Z'],
 ];
 
 for (const [where, body, read, kept, before] of MARKED) {
@@ -374,3 +382,96 @@ for (const [where, body, read, kept, before] of MARKED) {
     });
   }
 }
+
+const ONE_FIELD_RUN = '<w:r><w:fldChar w:fldCharType="begin"/><w:instrText xml:space="preserve"> PAGE </w:instrText>' +
+  '<w:fldChar w:fldCharType="separate"/><w:t>1</w:t><w:fldChar w:fldCharType="end"/></w:r>';
+const ONE_FIELD_BODY = `<w:p>${text('AB')}${ONE_FIELD_RUN}${text('CD')}</w:p>`;
+const oneFieldFixture = () => fixture(BODY.replace(RUN, ONE_FIELD_RUN));
+
+for (const [route, , save, typed] of MARK_ROUTES) {
+  test(`a run holding one field is written as read with its cached result: ${route}`, async () => {
+    const xml = await save(fixture(ONE_FIELD_BODY));
+    expect(xml).toContain(ONE_FIELD_RUN);
+    expect(around(xml, ONE_FIELD_RUN)).toEqual(['AB', `CD${typed}`]);
+  });
+}
+
+for (const [route, save] of EDIT_ROUTES) {
+  test(`${route}: an edited instruction on a run holding one field is written as main writes it`, async () => {
+    const edited = (field: ComplexField) => { field.instruction = 'DATE'; };
+    const saved = paragraphXml(await save((document) => edited(complexFieldOf(document, 1)), oneFieldFixture()), 1);
+    const main = paragraphXml(await save((document) => {
+      const field = complexFieldOf(document, 1);
+      edited(field);
+      withoutSource(field);
+    }, oneFieldFixture()), 1);
+    expect(saved).toContain('AB');
+    expect(saved).not.toContain(ONE_FIELD_RUN);
+    expect(saved).toBe(main);
+  });
+}
+
+const THEME = '<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements>' +
+  '<a:fontScheme name="Synthetic"><a:majorFont><a:latin typeface="Calibri Light"/></a:majorFont>' +
+  '<a:minorFont><a:latin typeface="Calibri"/></a:minorFont></a:fontScheme></a:themeElements></a:theme>';
+const THEME_FONT = '<w:rPr><w:rFonts w:asciiTheme="minorHAnsi"/></w:rPr>';
+const THEMED_RUNS: Array<[string, string]> = [
+  ['one field', ONE_FIELD_RUN.replace('<w:r>', `<w:r>${THEME_FONT}`)],
+  ['two fields', `<w:r>${THEME_FONT}${FIELDS}</w:r>`],
+];
+
+for (const [name, run] of THEMED_RUNS) {
+  for (const [route, , save, typed] of MARK_ROUTES) {
+    test(`a run holding ${name} with a theme font is written as read: ${route}`, async () => {
+      const xml = await save(fixture(`<w:p>${text('AB')}${run}${text('CD')}</w:p>`, undefined, THEME));
+      expect(xml).toContain(run);
+      expect(around(xml, run)).toEqual(['AB', `CD${typed}`]);
+    });
+  }
+}
+
+const themedFixture = (run: string) => fixture(`<w:p>${text('AB')}${run}${text('CD')}</w:p>`, undefined, THEME);
+
+for (const [name, run] of THEMED_RUNS) {
+  test(`documentToYrs gives back a field run with a theme font as parsed: ${name}`, async () => {
+    const parsed = await parseDocx(themedFixture(run).buffer, { preloadFonts: false });
+    const field = complexFieldOf(parsed, 0);
+    const before = JSON.stringify(field);
+    expect(field.sourceRunDigest).toHaveLength(64);
+    expect(parsed.package.document.sections?.[0]?.content[0]).toBe(parsed.package.document.content[0]);
+    documentToYrs(await session(), parsed);
+    expect(JSON.stringify(complexFieldOf(parsed, 0))).toBe(before);
+    const section = parsed.package.document.sections![0]!.content[0] as Paragraph;
+    expect(JSON.stringify(section.content.find((child) => child.type === 'complexField'))).toBe(before);
+  });
+}
+
+test('documentToYrs gives back every field run digest as parsed when a re-stamp throws', async () => {
+  const [, run] = THEMED_RUNS[0]!;
+  const body = `<w:p>${text('AB')}${run}${text('CD')}</w:p><w:p>${text('EF')}${run}${text('GH')}</w:p>`;
+  const parsed = await parseDocx(fixture(body, undefined, THEME).buffer, { preloadFonts: false });
+  const digests = [complexFieldOf(parsed, 0).sourceRunDigest, complexFieldOf(parsed, 1).sourceRunDigest];
+  expect(digests.map((digest) => digest?.length)).toEqual([64, 64]);
+  Object.freeze(complexFieldOf(parsed, 0));
+  const opened = await session();
+  expect(() => documentToYrs(opened, parsed)).toThrow(TypeError);
+  expect([complexFieldOf(parsed, 0).sourceRunDigest, complexFieldOf(parsed, 1).sourceRunDigest]).toEqual(digests);
+});
+
+test('parseDocx and documentToYrs: an instruction edited before seeding a field with a theme font is written as main writes it', async () => {
+  const [, run] = THEMED_RUNS[0]!;
+  const written = async (edit: (field: ComplexField) => void) => {
+    const parsed = await parseDocx(themedFixture(run).buffer, { preloadFonts: false });
+    edit(complexFieldOf(parsed, 0));
+    return paragraphXml(await (await projectedSession(parsed)).save(), 0);
+  };
+  const saved = await written((field) => { field.instruction = 'DATE'; });
+  const main = await written((field) => {
+    field.instruction = 'DATE';
+    withoutSource(field);
+  });
+  expect(saved).toContain('AB');
+  expect(saved).toContain('DATE');
+  expect(saved).not.toContain(run);
+  expect(saved).toBe(main);
+});

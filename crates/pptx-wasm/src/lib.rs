@@ -13,6 +13,16 @@ static EDITOR_CORE: [u8; 1] = [1];
 const DECODED_FONT_FACE: &str =
     r#"export interface DecodedFontFace { font: Uint8Array; payload?: Uint8Array; }"#;
 
+#[wasm_bindgen(typescript_custom_section)]
+const SHAPE_RECT_PREVIEW_REQUEST: &str = r#"export interface ShapeRectPreviewRequest {
+    slideId: string;
+    shapeId: string;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+}"#;
+
 /// Decodes one font pack face (codec "zstd" or "woff2t+zstd") with this engine's linked decoder.
 /// Returns owned bytes and an optional transformed payload. Non-zstd input passes through.
 /// The default output limit is 64 MiB; woff2t decoding is always capped at 64 MiB.
@@ -227,6 +237,54 @@ impl PptxRenderer {
     ) -> Result<String, JsValue> {
         self.inner
             .layout_proposal_diff_slide_json(document.session(), id, slide_index)
+            .map_err(js_error)
+    }
+
+    #[wasm_bindgen(js_name = previewShapeRectJson)]
+    pub fn preview_shape_rect_json(
+        &self,
+        document: &PptxDocument,
+        #[wasm_bindgen(unchecked_param_type = "ShapeRectPreviewRequest")] request: &JsValue,
+    ) -> Result<String, JsValue> {
+        let field = |name: &str| {
+            js_sys::Reflect::get(request, &JsValue::from_str(name)).map_err(|_| {
+                JsValue::from(JsError::new("shape rectangle preview request is invalid"))
+            })
+        };
+        let text = |name: &str| {
+            field(name)?.as_string().ok_or_else(|| {
+                JsValue::from(JsError::new("shape rectangle preview request is invalid"))
+            })
+        };
+        let coordinate = |value: f64| -> Result<i64, JsValue> {
+            if value.is_finite()
+                && value.fract() == 0.0
+                && value >= i64::MIN as f64
+                && value <= i64::MAX as f64
+            {
+                Ok(value as i64)
+            } else {
+                Err(JsError::new("shape rectangle coordinates must be integers").into())
+            }
+        };
+        let number = |name: &str| {
+            field(name)?
+                .as_f64()
+                .ok_or_else(|| {
+                    JsValue::from(JsError::new("shape rectangle coordinates must be integers"))
+                })
+                .and_then(coordinate)
+        };
+        let slide_id = text("slideId")?;
+        let shape_id = text("shapeId")?;
+        let rect = pptx_edit::ShapeRect {
+            x: number("x")?,
+            y: number("y")?,
+            width: number("width")?,
+            height: number("height")?,
+        };
+        self.inner
+            .preview_shape_rect_json(document.session(), &slide_id, &shape_id, rect)
             .map_err(js_error)
     }
 }

@@ -236,7 +236,7 @@ for (const mode of ['worker', 'legacy']) {
       expect(lastRun(again, 'AcrossTwo')).not.toContain('<w:i/>');
     });
 
-    test('external html pastes as plain text, as before', async ({ page }) => {
+    test('external html keeps its formatting in the worker editor and pastes as plain text in the in-thread editor', async ({ page }) => {
       const input = await open(page, mode);
       await page.evaluate(() => navigator.clipboard.write([new ClipboardItem({
         'text/plain': new Blob(['ExternalX'], { type: 'text/plain' }),
@@ -244,7 +244,8 @@ for (const mode of ['worker', 'legacy']) {
       })]));
       await pasteAtEnd(input);
       const { body } = await pasted(page, 'ExternalX', 1);
-      expect(lastRun(body, 'ExternalX')).not.toContain('<w:b/>');
+      if (mode === 'worker') expect(lastRun(body, 'ExternalX')).toContain('<w:b/>');
+      else expect(lastRun(body, 'ExternalX')).not.toContain('<w:b/>');
     });
 
     test('a crafted clipboard payload falls back to its plain text', async ({ page }) => {

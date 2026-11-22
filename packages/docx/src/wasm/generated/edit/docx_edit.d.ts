@@ -443,10 +443,15 @@ export class EditSession {
      */
     end_shared_reads(): void;
     /**
+     * As `ensure_list_definition` for a paragraph of a selection whose first paragraph is `lead`:
+     * it goes on the list `lead` is on when that is of `kind`.
+     */
+    ensure_list_definition_after(story: string, para_id: string, kind: string, lead?: string | null): string;
+    /**
      * The paragraph attributes, as JSON, that put a paragraph on a list of `kind`, `bullet` or
      * `numbered`: its own list when that is of that kind, else the list of the paragraph directly
-     * above, else below, else a list definition this call creates; a paragraph already on a list
-     * keeps its own level.
+     * above, else below, else a created list of that kind no paragraph names, else one this call
+     * creates; a paragraph already on a list keeps its own level.
      */
     ensure_list_definition(story: string, para_id: string, kind: string): string;
     /**
@@ -880,6 +885,12 @@ export class EditSession {
      */
     paragraph_spans(story: string): string;
     /**
+     * Whether the style the paragraph has now, or the default paragraph style when it names none,
+     * numbers it: its `numPr`, through `basedOn`, names a list other than 0. Undefined for a
+     * session without a source package.
+     */
+    paragraph_style_numbers(story: string, para_id: string): boolean | undefined;
+    /**
      * The index of the first paragraph of `story` that carries `para_id`, in
      * `paragraph_spans` order, or -1. Errors on an unknown story.
      */
@@ -1028,6 +1039,12 @@ export class EditSession {
      * anchor.
      */
     resolve_paragraph_anchor(anchor_json: string): string;
+    /**
+     * Where the kept empty inline elements of the source sit now:
+     * `[{"story","offset","ordinal","xml"}, …]` in story-global UTF-16
+     * units, by story, offset and source order.
+     */
+    resolve_raw_marks(): string;
     /**
      * Resolves sticky bytes from [`EditSession::encode_sticky_position`] back
      * to `{"story","paraId","offset"}`. Errors when the bytes are malformed
@@ -1550,6 +1567,12 @@ export function export_docx_markdown_json(bytes: Uint8Array, options: string): s
 export function export_docx_structured_json(bytes: Uint8Array, options: string): string;
 
 /**
+ * The digest the writer compares a complex field's `sourceRunDigest` with, or `undefined` when
+ * `field_json` is not a complex field.
+ */
+export function field_run_digest(field_json: string): string | undefined;
+
+/**
  * The content controls of DOCX bytes that match `query` exactly.
  */
 export function find_docx_content_controls_json(bytes: Uint8Array, query: string, options: string): string;
@@ -1923,6 +1946,7 @@ export interface InitOutput {
     readonly editsession_encoded_selection: (a: number) => [number, number, number, number];
     readonly editsession_end_shared_reads: (a: number) => void;
     readonly editsession_ensure_list_definition: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
+    readonly editsession_ensure_list_definition_after: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly editsession_export_markdown_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_export_snapshot_with_private_fonts_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly editsession_export_structured_json: (a: number, b: number, c: number) => [number, number, number, number];
@@ -1990,6 +2014,7 @@ export interface InitOutput {
     readonly editsession_paragraph_identities: (a: number) => [number, number, number, number];
     readonly editsession_paragraph_save_plan: (a: number) => [number, number, number, number];
     readonly editsession_paragraph_spans: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_paragraph_style_numbers: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly editsession_paragraph_unit: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly editsession_paragraphs: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_part_metadata_json: (a: number) => [number, number];
@@ -2018,6 +2043,7 @@ export interface InitOutput {
     readonly editsession_resolve_comment: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_resolve_encoded_selection: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly editsession_resolve_paragraph_anchor: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_resolve_raw_marks: (a: number) => [number, number, number, number];
     readonly editsession_resolve_sticky_position: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_resume_region_layout: (a: number, b: number) => [number, number, number, number];
     readonly editsession_retained_headers_footers_json: (a: number) => [number, number, number, number];
@@ -2097,6 +2123,7 @@ export interface InitOutput {
     readonly editsession_yrs_blocks_for_story: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly export_docx_markdown_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly export_docx_structured_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly field_run_digest: (a: number, b: number) => [number, number];
     readonly find_docx_content_controls_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly hit_test_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly hit_test_regions_by_handle: (a: number, b: number, c: number, d: number) => [number, number, number, number];

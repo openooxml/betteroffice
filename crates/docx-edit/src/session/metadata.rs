@@ -58,13 +58,26 @@ impl EditSessionCore {
 
     /// The paragraph attributes, as JSON, that put a paragraph on a list of `kind`, `bullet` or
     /// `numbered`: its own list when that is of that kind, else the list of the paragraph directly
-    /// above, else below, else a new one; a paragraph already on a list keeps its own level. See
-    /// [`crate::EditingDoc::ensure_list_definition`].
+    /// above, else below, else a created one no paragraph names, else a new one; a paragraph
+    /// already on a list keeps its own level. See [`crate::EditingDoc::ensure_list_definition`].
     pub fn ensure_list_definition(
         &self,
         story: &str,
         para_id: &str,
         kind: &str,
+    ) -> EngineResult<String> {
+        self.ensure_list_definition_after(story, para_id, kind, None)
+    }
+
+    /// As [`Self::ensure_list_definition`] for a paragraph of a selection whose first paragraph is
+    /// `lead`, which goes on the list `lead` is on when that is of `kind`. See
+    /// [`crate::EditingDoc::ensure_list_definition_after`].
+    pub fn ensure_list_definition_after(
+        &self,
+        story: &str,
+        para_id: &str,
+        kind: &str,
+        lead: Option<&str>,
     ) -> EngineResult<String> {
         let kind = match kind {
             "bullet" => ListKind::Bullet,
@@ -74,7 +87,7 @@ impl EditSessionCore {
         let attrs = self
             .engine
             .doc()
-            .ensure_list_definition(&EditCtx::local("", ""), story, para_id, kind)
+            .ensure_list_definition_after(&EditCtx::local("", ""), story, para_id, kind, lead)
             .map_err(EngineError::from)?;
         Ok(attrs_value(&attrs)?.to_string())
     }
