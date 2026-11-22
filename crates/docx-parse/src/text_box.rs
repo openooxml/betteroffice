@@ -198,11 +198,48 @@ pub(crate) fn capture_bookmark_source(shape: &mut Shape, source: &XmlElement) {
     }
     shape.drawing_xml = Some(source.to_bookmarked_raw_inline_xml());
     shape.drawing_run_xml = None;
-    shape.drawing_model = Some(serde_json::json!({
+    let bodies = shape_text_bodies(shape);
+    let hashes: Vec<_> = bodies
+        .iter()
+        .map(|body| content_sha256(&body.content))
+        .collect();
+    let mut model = serde_json::json!({
         "frame": crate::smart_art::frame_model(shape),
         "otherSha256": crate::smart_art::other_model_sha256(shape),
-        "textBoxContentSha256": shape_text_bodies(shape).iter().map(|body| content_sha256(&body.content)).collect::<Vec<_>>()
-    }));
+        "textBoxContentSha256": hashes,
+    });
+    if shape.children.is_some()
+        && let Some(drawing) = first_drawing(source)
+        && let Some((sources, _)) = crate::shape::group_text_box_sources(drawing)
+        && sources.len() == bodies.len()
+    {
+        let mut containers = Vec::new();
+        content_paths(drawing, &mut Vec::new(), &mut containers);
+        let mask: Vec<bool> = sources.values().map(Option::is_some).collect();
+        if mask.iter().filter(|kept| **kept).count() == containers.len() {
+            model["textBoxBodies"] = serde_json::json!(mask);
+        }
+    }
+    shape.drawing_model = Some(model);
+}
+
+fn first_drawing(element: &XmlElement) -> Option<&XmlElement> {
+    if element.name == "w:drawing" {
+        return Some(element);
+    }
+    element.child_elements().find_map(first_drawing)
+}
+
+pub(crate) fn content_paths(element: &XmlElement, path: &mut Vec<u32>, paths: &mut Vec<Vec<u32>>) {
+    if element.name == "w:txbxContent" {
+        paths.push(path.clone());
+        return;
+    }
+    for (index, child) in element.child_elements().enumerate() {
+        path.push(index as u32);
+        content_paths(child, path, paths);
+        path.pop();
+    }
 }
 
 /// The group model without its frame, text-box text and media sources, which a replay
