@@ -1,4 +1,6 @@
-import { afterAll, beforeEach, expect, test } from 'bun:test';
+import { afterAll, beforeEach, expect, spyOn, test } from 'bun:test';
+import { configureFontCdn } from '@betteroffice/fonts';
+import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import { readFileSync } from 'node:fs';
 import { decodeFontFace } from '../../../fonts/src/decode';
 import {
@@ -152,6 +154,54 @@ test('a chunk that fails to load is fetched again', async () => {
   expect(hits.get(chunkFile(60))).toBe(2);
   expect(updates).toHaveLength(1);
   expect(logs).toEqual([]);
+});
+
+test('resident outlines retry after an implicit CDN failure without refusing the face', async () => {
+  const previous = getFontCdnConfiguration();
+  configureFontCdn({ baseUrl: false });
+  const base = 'https://docx-cooldown.example/npm/@betteroffice/fonts-cjk@1/assets/';
+  const urls = Object.fromEntries(files.map((file) => [file, new URL(file, base).href]));
+  const { resident, updates } = fonts(undefined, [{ slot: 0, source: { ref, urls, implicitCdnFiles: files } }]);
+  const now = Date.now();
+  const clock = spyOn(Date, 'now').mockReturnValue(now);
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  let offline = true;
+  let requests = 0;
+  const file = chunkFile(60);
+  const fetch = spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input).slice(base.length);
+    if (path === file) {
+      requests += 1;
+      if (offline) throw new TypeError('Offline');
+    }
+    return new Response(Bun.file(new URL(path, assets)));
+  });
+  const refused: number[] = [];
+  resident.onRefused((id) => refused.push(id));
+  const wanted = new Map([[10, new Set([glyphIn(60)])]]);
+  try {
+    expect(await resident.ensure(wanted)).toEqual(new Set());
+    await resident.whenInstalled();
+    expect(requests).toBe(1);
+    expect(refused).toEqual([]);
+    expect(await resident.ensure(wanted)).toEqual(new Set());
+    await resident.whenInstalled();
+    expect(requests).toBe(1);
+
+    offline = false;
+    clock.mockReturnValue(now + 60_000);
+    await resident.ensure(wanted);
+    await resident.whenInstalled();
+    expect(requests).toBe(2);
+    expect(updates).toHaveLength(1);
+  } finally {
+    resident.dispose();
+    fetch.mockRestore();
+    warn.mockRestore();
+    clock.mockRestore();
+    configureFontCdn({ baseUrl: false });
+    setFontCdnConfiguration(previous);
+  }
 });
 
 test('an engine refusal is reported for a whole-face reload and is never retried with sliced outlines', async () => {

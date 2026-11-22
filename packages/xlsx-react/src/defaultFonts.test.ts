@@ -492,7 +492,7 @@ test('remote fonts off, bundled faces and locally installed families never reach
   expect(added.map((face) => (face as unknown as { family: string }).family)).toEqual(['Calibri']);
 });
 
-test('a painter remembers a missing CJK face without registering its Latin fallback', async () => {
+test('a painter retries a missing CJK face without registering its Latin fallback', async () => {
   const { added } = browser();
   const fallback = mock(async () => new ArrayBuffer(4));
   provider(fallback);
@@ -502,7 +502,7 @@ test('a painter remembers a missing CJK face without registering its Latin fallb
   try {
     await painter.load(frame);
     await painter.load(frame);
-    expect(fallback).toHaveBeenCalledTimes(1);
+    expect(fallback).toHaveBeenCalledTimes(2);
     expect(added).toHaveLength(0);
     expect(repaint).not.toHaveBeenCalled();
   } finally { painter.dispose(); }
