@@ -118,7 +118,11 @@ fn keeps_cached_cells_and_the_anchor_when_a_spill_shrinks() {
         FULL_CALC,
     );
     let workbook = open_recalculated(&source);
-    assert!(workbook.model().sheets[0].cell(CellRef::new(2, 0)).is_none());
+    assert!(
+        workbook.model().sheets[0]
+            .cell(CellRef::new(2, 0))
+            .is_none()
+    );
     let saved = saved_parts(&workbook);
     for address in ["A1", "A2", "A3"] {
         assert_eq!(
@@ -190,7 +194,9 @@ fn keeps_shared_string_indices_and_literal_cache_markup() {
         &mut source,
         WORKBOOK_RELS,
         "</Relationships>",
-        &format!(r#"<Relationship Id="rId2" Type="{RELS}/sharedStrings" Target="sharedStrings.xml"/>"#),
+        &format!(
+            r#"<Relationship Id="rId2" Type="{RELS}/sharedStrings" Target="sharedStrings.xml"/>"#
+        ),
     );
     add_part(
         &mut source,
@@ -233,11 +239,13 @@ fn saves_the_recalculated_value_after_an_unrelated_edit() {
 #[test]
 fn keeps_chart_caches_when_filling_a_referenced_cell() {
     const CHART: &str = "xl/charts/chart1.xml";
-    let mut source = package_parts(
-        r#"<row r="1"><c r="A1"><f>2+3</f></c></row>"#,
-        FULL_CALC,
+    let mut source = package_parts(r#"<row r="1"><c r="A1"><f>2+3</f></c></row>"#, FULL_CALC);
+    insert_xml(
+        &mut source,
+        SHEET,
+        "</worksheet>",
+        r#"<drawing r:id="rId1"/>"#,
     );
-    insert_xml(&mut source, SHEET, "</worksheet>", r#"<drawing r:id="rId1"/>"#);
     source.push((
         "xl/worksheets/_rels/sheet1.xml.rels".to_owned(),
         format!(r#"<Relationships xmlns="{PKG}"><Relationship Id="rId1" Type="{RELS}/drawing" Target="../drawings/drawing1.xml"/></Relationships>"#).into_bytes(),
@@ -246,7 +254,9 @@ fn keeps_chart_caches_when_filling_a_referenced_cell() {
         &mut source,
         "xl/drawings/drawing1.xml",
         "application/vnd.openxmlformats-officedocument.drawing+xml",
-        &format!(r#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="{RELS}"><xdr:twoCellAnchor><xdr:from><xdr:col>2</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>8</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>10</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:graphicFrame><a:graphic><a:graphicData><c:chart r:id="rId1"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>"#),
+        &format!(
+            r#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="{RELS}"><xdr:twoCellAnchor><xdr:from><xdr:col>2</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>8</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>10</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:graphicFrame><a:graphic><a:graphicData><c:chart r:id="rId1"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>"#
+        ),
     );
     source.push((
         "xl/drawings/_rels/drawing1.xml.rels".to_owned(),

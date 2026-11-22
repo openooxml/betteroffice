@@ -868,7 +868,10 @@ impl SheetPatch<'_> {
             return true;
         }
         let stable_array = self.axes.is_identity()
-            && self.original.array_formula(CellRef::new(anchor.0, anchor.1)) == Some(reference);
+            && self
+                .original
+                .array_formula(CellRef::new(anchor.0, anchor.1))
+                == Some(reference);
         changed
             .range((reference.start.row, 0)..=(reference.end.row, u32::MAX))
             .filter(|&&(_, col)| (reference.start.col..=reference.end.col).contains(&col))

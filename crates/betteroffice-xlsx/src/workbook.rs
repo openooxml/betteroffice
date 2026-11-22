@@ -1801,14 +1801,15 @@ impl Workbook {
             Some(package) => {
                 let package = package.materialize()?;
                 let original = package.original_workbook();
-                let merged = (!self.edited_since_open
-                    && self.recalculated_since_open
-                    && package.requests_full_calculation()
-                    && self.model.sheets.iter().any(|sheet| {
-                        sheet.iter_cells().any(|(_, cell)| cell.formula.is_some())
-                    })
-                    && (!self.model.iterate || self.model.sheets != original.sheets))
-                    .then(|| self.merge_source_caches(original));
+                let merged =
+                    (!self.edited_since_open
+                        && self.recalculated_since_open
+                        && package.requests_full_calculation()
+                        && self.model.sheets.iter().any(|sheet| {
+                            sheet.iter_cells().any(|(_, cell)| cell.formula.is_some())
+                        })
+                        && (!self.model.iterate || self.model.sheets != original.sheets))
+                        .then(|| self.merge_source_caches(original));
                 let changed = self.edited_since_open
                     || merged
                         .as_ref()
