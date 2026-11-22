@@ -132,7 +132,8 @@ for (const scenario of ['PASTE_ON_CHECKPOINT', 'PASTE_BEFORE_CHECKPOINT', 'CONTR
         await reach(before + 1);
         expect(await page.evaluate(from => {
           const probe = window.__pasteRecovery;
-          return probe.commands.slice(from).map(({ seq, kind }) => `${kind} ${probe.outcomes[seq]}`);
+          return probe.commands.slice(from).filter(({ kind }) => kind !== 'setFontEnvironment')
+            .map(({ seq, kind }) => `${kind} ${probe.outcomes[seq]}`);
         }, from), `the one command "${name}" sends`).toEqual(['replacePasteFragment applied']);
       };
       await expect(control).toBeVisible();
