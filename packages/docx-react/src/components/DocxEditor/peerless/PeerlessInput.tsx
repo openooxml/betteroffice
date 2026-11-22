@@ -30,6 +30,12 @@ type PasteRecord = {
   version: number;
   incarnation: number;
   reveal: 'show' | 'anchor' | null;
+  /** The paste's own caret and version, held while commands sent after it are unanswered. */
+  landed: { end: PastePoint; version: number } | null;
+  /** The option chosen while the editor was busy; a later choice replaces it. */
+  queued: PasteFormattingOption | null;
+  /** The command whose answer the record is waiting for. */
+  waiting: CommandTicket | null;
 };
 
 function samePoint(a: PastePoint, b: PastePoint): boolean {
@@ -121,15 +127,34 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       positionRef.current?.();
     });
   }, [admission, dropPasteRecord, setPasteRecord]);
+  /** Looks at the record again once the last command the admission tracks is answered. */
+  const awaitIdle = useCallback((record: PasteRecord): void => {
+    const tail = admission.getSnapshot().tail;
+    if (!tail || record.waiting === tail) return;
+    record.waiting = tail;
+    const again = () => {
+      if (pasteRecordRef.current !== record || record.waiting !== tail) return;
+      record.waiting = null;
+      positionRef.current?.();
+    };
+    void tail.ack.then(again, again);
+  }, [admission]);
   const choosePasteOption = useCallback((option: PasteFormattingOption): boolean => {
     const record = pasteRecordRef.current;
-    if (!record?.end || !record.offered.includes(option)) return false;
+    if (!record || !record.offered.includes(option)) return false;
     const admitted = admission.getSnapshot();
     const view = viewStore.getSnapshot();
+    if (viewStore.getRecovering?.() === true || view.identity.incarnation !== record.incarnation) {
+      dropPasteRecord(record);
+      return false;
+    }
+    if (!record.end || admitted.originalUnackedIntents !== 0 || admitted.pendingInputs !== 0) {
+      record.queued = option;
+      awaitIdle(record);
+      return false;
+    }
     const caret = caretPoint(view.workerSelection);
-    if (viewStore.getRecovering?.() === true || view.identity.incarnation !== record.incarnation ||
-      view.version !== record.version || !caret || !samePoint(caret, record.end) ||
-      admitted.originalUnackedIntents !== 0 || admitted.pendingInputs !== 0) {
+    if (view.version !== record.version || !caret || !samePoint(caret, record.end)) {
       dropPasteRecord(record);
       return false;
     }
@@ -139,7 +164,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
         ? plainTextClipboardFragment(clipboardFragmentPlainText(record.fragment))
         : structuredClone(record.fragment);
     const end = record.end;
-    const replacing: PasteRecord = { ...record, ticket: null, end: null, reveal: 'anchor' };
+    const replacing: PasteRecord = { ...record, ticket: null, end: null, reveal: 'anchor', landed: null, queued: null, waiting: null };
     setPasteRecord(replacing);
     const outcome = callbacks.current.onReplacePasteFragment?.(variant, {
       anchor: { ...end },
@@ -151,7 +176,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
     }
     awaitPaste(replacing, outcome);
     return true;
-  }, [admission, awaitPaste, dropPasteRecord, setPasteRecord, viewStore]);
+  }, [admission, awaitIdle, awaitPaste, dropPasteRecord, setPasteRecord, viewStore]);
   const pasteOptions = usePasteOptions({
     enabled: props.pasteOptions !== false && !readOnly,
     onChoose: choosePasteOption,
@@ -171,6 +196,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
     awaitPaste({
       fragment: structuredClone(fragment), offered, ticket: null, end: null,
       version: view.version, incarnation: view.identity.incarnation, reveal: 'show',
+      landed: null, queued: null, waiting: null,
     }, submission);
   }, [awaitPaste, viewStore]);
   const pasteRecorder = props.pasteRecorder;
@@ -202,14 +228,38 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       if (pasteRecord && (viewStore.getRecovering?.() === true || pasteRecord.incarnation !== state.identity.incarnation)) {
         dropPasteRecord(pasteRecord);
       } else if (pasteRecord && !pasteRecord.end && pasteSeq !== undefined && state.throughSeq >= pasteSeq) {
-        const tail = admission.getSnapshot().tail;
-        const own = state.throughSeq === pasteSeq && (tail === undefined || tail === pasteRecord.ticket);
+        const admitted = admission.getSnapshot();
+        const idle = admitted.originalUnackedIntents === 0 && admitted.pendingInputs === 0;
         const caret = caretPoint(state.workerSelection);
-        if (own && caret && state.version !== pasteRecord.version) {
-          pasteRecord.end = { ...caret };
-          pasteRecord.version = state.version;
-        } else if (!own || state.version !== pasteRecord.version) {
+        const landed = pasteRecord.landed;
+        if (landed) {
+          if (!idle) awaitIdle(pasteRecord);
+          else if (caret && samePoint(caret, landed.end) && state.version === landed.version) {
+            pasteRecord.end = landed.end;
+            pasteRecord.version = landed.version;
+            pasteRecord.landed = null;
+          } else dropPasteRecord(pasteRecord);
+        } else if (state.throughSeq === pasteSeq && caret && state.version !== pasteRecord.version) {
+          if (admitted.tail === undefined || admitted.tail === pasteRecord.ticket) {
+            pasteRecord.end = { ...caret };
+            pasteRecord.version = state.version;
+          } else {
+            // A command was sent behind the paste: its place counts only if that command leaves caret and version alone.
+            pasteRecord.landed = { end: { ...caret }, version: state.version };
+            awaitIdle(pasteRecord);
+          }
+        } else if (state.throughSeq !== pasteSeq || state.version !== pasteRecord.version) {
           dropPasteRecord(pasteRecord);
+        }
+      }
+      const chosen = pasteRecordRef.current;
+      if (chosen?.queued && chosen.end) {
+        const admitted = admission.getSnapshot();
+        if (admitted.originalUnackedIntents !== 0 || admitted.pendingInputs !== 0) awaitIdle(chosen);
+        else {
+          const option = chosen.queued;
+          chosen.queued = null;
+          pasteOptionsRef.current.choose(option);
         }
       }
       const geometry = state.geometry;
