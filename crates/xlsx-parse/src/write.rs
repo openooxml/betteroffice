@@ -535,6 +535,7 @@ fn merge_source_caches(
                 Some(calculated) if calculated != source_cell => {
                     if facts.has_cached_value(at, Some(source_cell))
                         || calculated.value == CellValue::Empty
+                        || matches!(&calculated.value, CellValue::Text { value } if value.is_empty())
                     {
                         sheet.set_cell(at, source_cell.clone());
                     } else if calculated.formula != source_cell.formula

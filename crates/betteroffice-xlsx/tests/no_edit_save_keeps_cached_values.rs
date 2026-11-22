@@ -488,3 +488,13 @@ fn switching_tabs_refreshes_chart_caches_for_an_unflagged_workbook() {
     let chart = std::str::from_utf8(part(&saved, CHART)).unwrap();
     assert!(chart.contains(r#"<c:pt idx="0"><c:v>5</c:v></c:pt>"#));
 }
+
+#[test]
+fn keeps_every_part_when_the_only_calculated_values_are_empty_strings() {
+    let source = package_parts(
+        r#"<row r="1"><c r="A1" s="0"><f>IFERROR(1/0,"")</f><v /></c><c r="B1"><f t="array" ref="B1">IFERROR(1/0,"")</f><v /></c></row>"#,
+        FULL_CALC,
+    );
+    let workbook = open_recalculated(&source);
+    assert_eq!(saved_parts(&workbook), source);
+}
