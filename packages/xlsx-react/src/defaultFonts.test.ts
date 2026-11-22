@@ -491,16 +491,20 @@ test('remote fonts off, bundled faces and locally installed families never reach
   expect(added.map((face) => (face as unknown as { family: string }).family)).toEqual(['Calibri']);
 });
 
-test('a missing CJK pack cannot install its Latin fallback under MS Gothic', async () => {
+test('a painter remembers a missing CJK face without registering its Latin fallback', async () => {
   const { added } = browser();
   const fallback = mock(async () => new ArrayBuffer(4));
   provider(fallback);
   const repaint = mock(() => {});
-  await createDefaultFontPainter(decoder(), repaint).load(display({ family: 'MS Gothic' }));
-  await createDefaultFontPainter(decoder(), repaint).load(display({ family: 'MS Gothic' }));
-  expect(fallback).toHaveBeenCalledTimes(1);
-  expect(added).toHaveLength(0);
-  expect(repaint).not.toHaveBeenCalled();
+  const painter = createDefaultFontPainter(decoder(), repaint);
+  const frame = display({ family: 'MS Gothic' });
+  try {
+    await painter.load(frame);
+    await painter.load(frame);
+    expect(fallback).toHaveBeenCalledTimes(1);
+    expect(added).toHaveLength(0);
+    expect(repaint).not.toHaveBeenCalled();
+  } finally { painter.dispose(); }
 });
 
 test('a missing intl pack leaves browser text untouched', async () => {
@@ -724,7 +728,7 @@ test('an already absent editor face is tried again after changing the CDN', asyn
   } finally { painter.dispose(); setFontCdnConfiguration(previous); }
 });
 
-test('T14: a new painter retries a transient implicit CDN failure with the same configuration', async () => {
+test('T14: repaints keep an implicit CDN failure settled until a new painter opens', async () => {
   const { added } = browser();
   const previous = getFontCdnConfiguration();
   const restore = withBrowserFontGlobals();
@@ -742,6 +746,9 @@ test('T14: a new painter retries a transient implicit CDN failure with the same 
     setFontCdnConfiguration(undefined);
     await first.load(frame);
     expect(added).toHaveLength(0);
+    expect(first.paint(frame, () => {})).toBe(true);
+    await first.load(frame);
+    expect(attempts).toBe(1);
     first.dispose();
     await second.load(frame);
     expect(attempts).toBe(2);

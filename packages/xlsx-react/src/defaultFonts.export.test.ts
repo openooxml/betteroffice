@@ -50,26 +50,23 @@ test('editors with default fonts off forward no faces and load no fonts', async 
   expect(load).not.toHaveBeenCalled();
 });
 
-test('T12: editor export rejects CDN failures and uses Base Latin for uninstalled Latin and intl packs with CDN off', async () => {
+test('T12: editor export rejects CDN failures and omits uninstalled faces with CDN off', async () => {
   const runtime = fontRuntimeWithoutPacks();
   spyOn(xlsxDefaultFontManager, 'load').mockResolvedValue({ ...fonts, ...runtime });
   const previous = getFontCdnConfiguration();
   const restore = withBrowserFontGlobals();
   const fetch = spyOn(globalThis, 'fetch').mockImplementation((input) =>
     String(input).includes('cdn.jsdelivr.net') ? Promise.resolve(new Response(null, { status: 404 })) : fontAssetResponse(input));
-  const requests = ['Calibri', 'Noto Sans Thai'].map((family) => ({ family, bold: false, italic: false }));
+  const requests = ['Calibri', 'Noto Sans Thai', 'MS Gothic'].map((family) => ({ family, bold: false, italic: false }));
   try {
     setFontCdnConfiguration(undefined);
     for (const request of requests) {
       await expect(exportFaces([request], null)).rejects.toMatchObject({ code: 'font-unavailable' });
     }
-    expect(fetch.mock.calls.filter(([url]) => String(url).includes('cdn.jsdelivr.net'))).toHaveLength(2);
+    expect(fetch.mock.calls.filter(([url]) => String(url).includes('cdn.jsdelivr.net'))).toHaveLength(requests.length);
     fonts.configureFontCdn({ baseUrl: false });
-    const exported = await exportFaces(requests, null).catch(() => []);
-    const base = fonts.BASE_LATIN_FONTS.find(({ weight, style }) => weight === 400 && style === 'normal')!;
-    expect(exported.map(({ family, bytes }) => [family, bytes.byteLength]))
-      .toEqual(requests.map(({ family }) => [family, base.byteLength]));
-    expect(fetch.mock.calls.filter(([url]) => String(url).includes('cdn.jsdelivr.net'))).toHaveLength(2);
+    await expect(exportFaces(requests, null)).resolves.toEqual([]);
+    expect(fetch.mock.calls.filter(([url]) => String(url).includes('cdn.jsdelivr.net'))).toHaveLength(requests.length);
   } finally {
     restore();
     setFontCdnConfiguration(previous);

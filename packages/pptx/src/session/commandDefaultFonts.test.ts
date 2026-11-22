@@ -246,6 +246,69 @@ test('a transient failure retries after backoff and registers the second load', 
   } finally { fonts.dispose(); }
 });
 
+function implicitCdnFailure() {
+  return Object.assign(new Error('Unavailable'), {
+    diagnostic: { pack: 'cjk', reason: 'cdn-unavailable', detail: 'Unavailable' },
+  });
+}
+
+for (const mode of ['whole', 'sliced'] as const) {
+  test(`a ${mode} implicit CDN failure stays settled for the rest of the session`, async () => {
+    const advance = retryClock();
+    const warn = spyOn(console, 'warn').mockImplementation(() => {});
+    restorers.push(() => warn.mockRestore(), () => { Reflect.deleteProperty(globalThis, Symbol.for('betteroffice.fonts.cdn-warned')); });
+    const load = mock(async () => bytes).mockRejectedValue(implicitCdnFailure());
+    const sliced = mode === 'sliced' ? createSlicedFontFaces() : undefined;
+    const open = spyOn(progressive, 'openSlicedFace').mockRejectedValue(implicitCdnFailure());
+    restorers.push(() => open.mockRestore());
+    if (sliced) {
+      const supported = spyOn(sliced, 'supported').mockReturnValue(true);
+      restorers.push(() => supported.mockRestore());
+    }
+    const loader = sliced ? Object.assign(load, { slices: { ref: { format: 1, index: 'x', indexSha256: '' } } }) : load;
+    provider(() => loader as never);
+    const register = mock(() => {});
+    const start = () => createCommandDefaultFonts([], () => [regular], register, () => {},
+      undefined, undefined, undefined, sliced);
+    const first = start();
+    const second = start();
+    const requested = sliced ? open : load;
+    try {
+      expect(await first.load('opening')).toEqual([]);
+      expect(await first.load()).toEqual([]);
+      expect(requested).toHaveBeenCalledTimes(1);
+      advance(60_000);
+      expect(first.hasPending('next')).toBe(false);
+      expect(await first.load('opening')).toEqual([]);
+      expect(requested).toHaveBeenCalledTimes(1);
+      first.dispose();
+      expect(await second.load('opening')).toEqual([]);
+      expect(requested).toHaveBeenCalledTimes(2);
+      expect(register).not.toHaveBeenCalled();
+    } finally { first.dispose(); second.dispose(); sliced?.dispose(); }
+  });
+}
+
+test('opening a slide reuses an implicit CDN failure from coverage prefetch', async () => {
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  restorers.push(() => warn.mockRestore(), () => { Reflect.deleteProperty(globalThis, Symbol.for('betteroffice.fonts.cdn-warned')); });
+  const load = mock(async () => bytes).mockRejectedValue(implicitCdnFailure());
+  provider(() => undefined, () => load);
+  const shared = commandFontProvider.load();
+  prefetchCoverageFaces(['cjk-jp'], Promise.resolve(), () => shared);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(load).toHaveBeenCalledTimes(1);
+  const register = mock(() => {});
+  const fonts = createCommandDefaultFonts([regular], () => [{ ...regular, scripts: ['cjk-jp'] }],
+    register, () => {}, undefined, undefined, () => shared);
+  try {
+    expect(await fonts.load('opening')).toEqual([]);
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(fonts.hasPending('next')).toBe(false);
+    expect(register).not.toHaveBeenCalled();
+  } finally { fonts.dispose(); }
+});
+
 test('rejected faces back off for two and eight seconds and stop after three attempts', async () => {
   const advance = retryClock();
   const load = mock(async (): Promise<ArrayBuffer> => { throw new Error('Unavailable'); });
