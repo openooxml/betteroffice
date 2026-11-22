@@ -278,19 +278,28 @@ test('worker: one toggle over plain paragraphs asks the engine for a list once a
   expect(on.length).toBeGreaterThan(3);
 }, TIMEOUT);
 
-for (const [doc, kind] of [['G', 'numbered'], ['G', 'bullet'], ['I', 'numbered'], ['D', 'numbered'], ['D', 'bullet'], ['A', 'bullet']] as const) {
-  test(`session: a ${kind} toggle over all of document ${doc} equals asking the engine for every paragraph`, async () => {
+const WRITTEN_AS_TEXT = 'List seven item QA';
+for (const [doc, kind, text] of [
+  ['G', 'numbered', null], ['G', 'bullet', null], ['I', 'numbered', null], ['D', 'numbered', null], ['D', 'bullet', null],
+  ['A', 'bullet', null], ['G', 'numbered', WRITTEN_AS_TEXT],
+] as const) {
+  const title = text ? ` with a list id written as text` : '';
+  test(`session: a ${kind} toggle over all of document ${doc}${title} equals asking the engine for every paragraph`, async () => {
     const opened: YrsSession[] = [];
     try {
+      const at = (paraId: string) => ({ story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 0 } });
       for (let index = 0; index < 2; index += 1) {
         const session = await createYrsSession({ clientId: 7300 });
         session.openDocx(listDocument(doc), true);
+        const written = text === null ? undefined : session.paragraphs('body').find(entry => entry.text === text);
+        if (written) session.setParagraphAttrs(at(written.paraId), { numPr: { numId: '7', ilvl: 1 } } as unknown as YrsParagraphAttrs);
         opened.push(session);
       }
       const [toggled, asked] = opened as [YrsSession, YrsSession];
       const before = asked.paragraphs('body');
       const lead = before[0]!.paraId;
-      const at = (paraId: string) => ({ story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 0 } });
+      expect(before.filter(entry => typeof (entry.properties.numPr as { numId?: unknown } | null)?.numId === 'string'))
+        .toHaveLength(text === null ? 0 : 1);
       applyListToggle(toggled, { ...at(lead), end: { paraId: before[before.length - 1]!.paraId, offset: 0 } }, kind);
       const first = toggled.paragraphs('body')[0]!.properties.numPr as { numId?: unknown } | null | undefined;
       const remove = !(typeof first?.numId === 'number' && first.numId !== 0);
