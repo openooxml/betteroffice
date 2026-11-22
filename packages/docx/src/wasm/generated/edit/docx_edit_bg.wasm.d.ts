@@ -181,6 +181,7 @@ export const editsession_resident_section_revision: (a: number) => [number, numb
 export const editsession_resolve_comment: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_resolve_encoded_selection: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
 export const editsession_resolve_paragraph_anchor: (a: number, b: number, c: number) => [number, number, number, number];
+export const editsession_resolve_raw_marks: (a: number) => [number, number, number, number];
 export const editsession_resolve_sticky_position: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_resume_region_layout: (a: number, b: number) => [number, number, number, number];
 export const editsession_retained_headers_footers_json: (a: number) => [number, number, number, number];

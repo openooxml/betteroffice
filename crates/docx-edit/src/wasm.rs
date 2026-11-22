@@ -2867,6 +2867,13 @@ impl EditSession {
     pub fn resolve_comment(&self, comment_id: &str) -> Result<String, JsValue> {
         self.core.resolve_comment(comment_id).map_err(JsValue::from)
     }
+
+    /// Where the kept empty inline elements of the source sit now:
+    /// `[{"story","offset","ordinal","xml"}, …]` in story-global UTF-16
+    /// units, by story, offset and source order.
+    pub fn resolve_raw_marks(&self) -> Result<String, JsValue> {
+        self.core.resolve_raw_marks().map_err(JsValue::from)
+    }
 }
 
 #[wasm_bindgen]

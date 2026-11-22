@@ -1218,6 +1218,7 @@ mod tests {
                 text: text.to_owned(),
                 preserve_space: None,
             }],
+            direction_scopes: Vec::new(),
         }))
     }
 
@@ -1227,6 +1228,7 @@ mod tests {
             formatting: None,
             property_changes: None,
             content: vec![RunContent::CommentReference { id: None }],
+            direction_scopes: Vec::new(),
         }));
         Comment {
             id: 0.0,

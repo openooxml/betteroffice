@@ -197,7 +197,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use yrs::updates::encoder::Encode;
-    use yrs::{Any, ClientID, ID, Text};
+    use yrs::{Any, ClientID, ID, Map, Text};
 
     use crate::{EditCtx, FormatPolicy, Position, RawOp, StoryRange, story_ref};
 
@@ -510,6 +510,193 @@ mod tests {
             .unwrap();
         assert_retained_positions(&doc, "body", &[position]);
         assert_matches_uncached(&doc, "body");
+    }
+
+    fn resolve_raw_marks_per_mark(doc: &EditingDoc) -> Vec<crate::ResolvedRawMark> {
+        let txn = doc.yrs_doc().transact();
+        let marks = txn.get_map(crate::RAW_INLINES).unwrap();
+        let mut resolved: Vec<_> = marks
+            .iter(&txn)
+            .filter_map(|(_, value)| {
+                let Out::Any(Any::Map(mark)) = value else {
+                    return None;
+                };
+                let text = |key: &str| match mark.get(key) {
+                    Some(Any::String(value)) => Some(value.to_string()),
+                    _ => None,
+                };
+                let story = text("story")?;
+                let xml = text("xml")?;
+                let Some(Any::Buffer(at)) = mark.get("at") else {
+                    return None;
+                };
+                let Some(Any::Number(ordinal)) = mark.get("ordinal") else {
+                    return None;
+                };
+                story_ref(&txn, &story).ok()?;
+                let offset = StickyIndex::decode_v1(at).ok()?.get_offset(&txn)?.index;
+                Some(crate::ResolvedRawMark {
+                    story,
+                    offset,
+                    ordinal: *ordinal as u32,
+                    xml,
+                })
+            })
+            .collect();
+        resolved.sort_by(|left, right| {
+            (&left.story, left.offset, left.ordinal).cmp(&(
+                &right.story,
+                right.offset,
+                right.ordinal,
+            ))
+        });
+        resolved
+    }
+
+    fn mark_every_unit(doc: &EditingDoc, story: &str, round: &str) {
+        let len = doc.story_len(story).unwrap();
+        let ops = (0..=len)
+            .flat_map(move |at| {
+                [Assoc::Before, Assoc::After]
+                    .into_iter()
+                    .enumerate()
+                    .filter(move |(_, assoc)| at < len || *assoc == Assoc::Before)
+                    .map(move |(side, assoc)| RawOp::SetRawMark {
+                        id: format!("{story}-{round}-{at}-{side}"),
+                        at,
+                        assoc,
+                        ordinal: at * 2 + side as u32,
+                        xml: format!("<w:bookmarkEnd w:id=\"{at}\"/>"),
+                    })
+            })
+            .collect();
+        doc.apply_raw_ops(story, ops, &EditCtx::local("", ""))
+            .unwrap();
+    }
+
+    fn assert_raw_marks_match_per_mark(doc: &EditingDoc) {
+        let expected = resolve_raw_marks_per_mark(doc);
+        assert!(!expected.is_empty());
+        assert_eq!(doc.resolve_raw_marks(), expected);
+    }
+
+    #[test]
+    fn raw_marks_resolve_as_each_mark_alone() {
+        for keep_deleted in [false, true] {
+            let doc = EditingDoc::new(1);
+            if keep_deleted {
+                doc.keep_deleted();
+            }
+            let long = "abcdefgh".repeat(6);
+            doc.create_story("body", &format!("ab😀cdef{long}"), "Normal", "left")
+                .unwrap();
+            doc.create_story("header:rId7", "", "Normal", "left")
+                .unwrap();
+            doc.create_story("footer:rId8", "x", "Normal", "left")
+                .unwrap();
+            doc.insert_text(
+                &EditCtx::local("", ""),
+                Position::new("body", 1),
+                "XY",
+                FormatPolicy::Explicit(BTreeMap::from([("bold".into(), Any::Bool(true))])),
+            )
+            .unwrap();
+            doc.split_paragraph(&EditCtx::local("", ""), Position::new("body", 9), None)
+                .unwrap();
+            doc.apply_raw_ops(
+                "body",
+                vec![
+                    RawOp::InsertEmbed {
+                        index: 0,
+                        kind: "break".into(),
+                        payload: Vec::new(),
+                        attrs: Default::default(),
+                    },
+                    RawOp::InsertEmbed {
+                        index: 5,
+                        kind: "break".into(),
+                        payload: Vec::new(),
+                        attrs: Default::default(),
+                    },
+                ],
+                &EditCtx::local("", ""),
+            )
+            .unwrap();
+            for story in ["body", "header:rId7", "footer:rId8"] {
+                mark_every_unit(&doc, story, "seed");
+            }
+            assert_raw_marks_match_per_mark(&doc);
+
+            doc.insert_text(
+                &EditCtx::local("", ""),
+                Position::new("body", 20),
+                "inside a run",
+                FormatPolicy::Plain,
+            )
+            .unwrap();
+            assert_raw_marks_match_per_mark(&doc);
+            doc.delete_range(&EditCtx::local("", ""), StoryRange::new("body", 2, 4))
+                .unwrap();
+            assert_raw_marks_match_per_mark(&doc);
+            doc.delete_range(&EditCtx::local("", ""), StoryRange::new("body", 14, 23))
+                .unwrap();
+            assert_raw_marks_match_per_mark(&doc);
+            doc.delete_range(&EditCtx::local("", ""), StoryRange::new("body", 0, 1))
+                .unwrap();
+            assert_raw_marks_match_per_mark(&doc);
+
+            let peer = EditingDoc::new(2);
+            peer.apply_update_v1(&doc.encode_state_as_update_v1())
+                .unwrap();
+            peer.insert_text(
+                &EditCtx::local("", ""),
+                Position::new("body", 3),
+                "R😀",
+                FormatPolicy::Plain,
+            )
+            .unwrap();
+            peer.delete_range(&EditCtx::local("", ""), StoryRange::new("body", 10, 14))
+                .unwrap();
+            doc.apply_update_v1(&peer.encode_state_as_update_v1())
+                .unwrap();
+            assert_raw_marks_match_per_mark(&doc);
+
+            mark_every_unit(&doc, "body", "late");
+            assert_raw_marks_match_per_mark(&doc);
+            let len = doc.story_len("body").unwrap();
+            doc.delete_range(
+                &EditCtx::local("", ""),
+                StoryRange::new("body", len - 6, len - 2),
+            )
+            .unwrap();
+            assert_raw_marks_match_per_mark(&doc);
+
+            doc.delete_story("footer:rId8").unwrap();
+            assert_raw_marks_match_per_mark(&doc);
+            doc.create_story("footer:rId8", "replacement", "Normal", "left")
+                .unwrap();
+            assert_raw_marks_match_per_mark(&doc);
+            mark_every_unit(&doc, "footer:rId8", "replaced");
+            assert_raw_marks_match_per_mark(&doc);
+        }
+    }
+
+    #[test]
+    fn raw_marks_follow_undone_and_redone_deletions() {
+        let doc = EditingDoc::new(1);
+        doc.create_story("body", "abcdefghijklmnop", "Normal", "left")
+            .unwrap();
+        mark_every_unit(&doc, "body", "seed");
+        let mut undo = doc.undo_manager();
+        doc.delete_range(&EditCtx::local("", ""), StoryRange::new("body", 3, 9))
+            .unwrap();
+        assert_raw_marks_match_per_mark(&doc);
+        assert!(undo.undo());
+        assert_raw_marks_match_per_mark(&doc);
+        assert!(undo.redo());
+        assert_raw_marks_match_per_mark(&doc);
+        assert!(undo.undo());
+        assert_raw_marks_match_per_mark(&doc);
     }
 
     #[test]

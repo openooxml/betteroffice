@@ -47,6 +47,7 @@ const RANGE_IN_CONTROL = shaped(
   `<w:sdt><w:sdtPr><w:id w:val="1234"/></w:sdtPr><w:sdtContent>${rangeStart(1)}${run('controlled')}${rangeEnd(1)}</w:sdtContent></w:sdt>` +
   reference(1)
 );
+const RANGE_IN_DIRECTION = shaped(`<w:dir w:val="rtl">${rangeStart(1)}${run('scoped')}${rangeEnd(1)}</w:dir>${reference(1)}`);
 const SECOND_COMMENT = `${rangeStart(2)}${run('noted')}${rangeEnd(2)}${reference(2)}`;
 const BESIDE_SECOND = shaped(`${IN_INSERTION}${reference(1)}${run(' and ')}${SECOND_COMMENT}`);
 const ORDINARY_RANGE = shaped(`${rangeStart(1)}${run('noted')}${rangeEnd(1)}${reference(1)}`);
@@ -245,6 +246,12 @@ for (const [route, save] of Object.entries(ROUTES)) {
     test('a letter typed in another paragraph leaves a comment range inside a content control as it was', async () => {
       const saved = await save(fixture(RANGE_IN_CONTROL, [1]), { type: OTHER_ID });
       expect(paragraphs(saved)[0]).toBe(RANGE_IN_CONTROL);
+      expect(typedNext(saved)).toBe('Other paragraphX');
+    }, TIMEOUT);
+
+    test('a letter typed in another paragraph leaves a comment range inside a direction element as it was', async () => {
+      const saved = await save(fixture(RANGE_IN_DIRECTION, [1]), { type: OTHER_ID });
+      expect(paragraphs(saved)[0]).toBe(RANGE_IN_DIRECTION);
       expect(typedNext(saved)).toBe('Other paragraphX');
     }, TIMEOUT);
 

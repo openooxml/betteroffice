@@ -55,7 +55,7 @@ use yrs::{Any, Map, MapRef, OffsetKind, Out, ReadTxn, Text, Transact};
 use super::{COMMENTS, DEL, EditError, EditingDoc, INS, decode_anchor, is_pilcrow, story_ref};
 use crate::list_definitions::{effective_list_state, resolve_list_identity, written_numbering};
 use crate::list_marker::{ListState, compute_list_marker};
-use crate::seed::synthesized_cell_width;
+use crate::seed::{RAW_INLINE_KIND, synthesized_cell_width};
 use crate::sticky_positions::sticky_offset;
 
 pub(crate) mod group_pictures;
@@ -1830,6 +1830,13 @@ fn walk_story_chunks<T: ReadTxn>(
                         provenance.as_ref(),
                     ),
                 });
+                story_index += 1;
+                paragraph_pm_units += 1;
+                at_block_boundary = false;
+            }
+            Out::YMap(raw)
+                if shared_map_string(raw, txn, "_kind").as_deref() == Some(RAW_INLINE_KIND) =>
+            {
                 story_index += 1;
                 paragraph_pm_units += 1;
                 at_block_boundary = false;

@@ -10,6 +10,8 @@ pub const MAX_NESTING_DEPTH: usize = 64;
 
 const MAX_GROUP_TEXT_BOX_BYTES: usize = 16 * 1024 * 1024;
 const MAX_GROUP_TEXT_BOX_NESTING: usize = 4;
+/// The bytes of `w:dir`/`w:bdo` data a document may copy onto the children inside them.
+pub(crate) const MAX_DIRECTION_SCOPE_BYTES: usize = 64 * 1024 * 1024;
 
 /// OOXML namespace URIs.
 pub mod namespaces {
@@ -98,6 +100,9 @@ pub struct ParseBudget<'a> {
     group_text_box_bytes: usize,
     group_text_box_depth: usize,
     paragraph_runs: Vec<Option<usize>>,
+    direction_scopes: u32,
+    direction_scope_bytes: std::cell::Cell<usize>,
+    unmodeled_inline: Vec<(String, usize)>,
 }
 
 impl<'a> ParseBudget<'a> {
@@ -122,6 +127,9 @@ impl<'a> ParseBudget<'a> {
             group_text_box_bytes: 0,
             group_text_box_depth: 0,
             paragraph_runs: Vec::new(),
+            direction_scopes: 0,
+            direction_scope_bytes: std::cell::Cell::new(0),
+            unmodeled_inline: Vec::new(),
         }
     }
 
@@ -210,6 +218,59 @@ impl<'a> ParseBudget<'a> {
 
     pub(crate) fn take_paragraph_runs(&mut self) -> Vec<Option<usize>> {
         std::mem::take(&mut self.paragraph_runs)
+    }
+
+    /// Starts the `w:dir`/`w:bdo` ordinals of a paragraph, returning the enclosing one's.
+    pub(crate) fn begin_direction_scopes(&mut self) -> u32 {
+        std::mem::take(&mut self.direction_scopes)
+    }
+
+    pub(crate) fn end_direction_scopes(&mut self, enclosing: u32) {
+        self.direction_scopes = enclosing;
+    }
+
+    /// Charge a copy of direction scope data onto one child, before it is made. Every walk of
+    /// the document charges this one counter, including walks that only hold a shared borrow.
+    pub(crate) fn charge_direction_scope_bytes(
+        &self,
+        amount: usize,
+        part: &str,
+    ) -> Result<(), ParseError> {
+        let mut used = self.direction_scope_bytes.get();
+        charge(
+            &mut used,
+            amount,
+            MAX_DIRECTION_SCOPE_BYTES,
+            "directionScopeBytes",
+            part,
+        )?;
+        self.direction_scope_bytes.set(used);
+        Ok(())
+    }
+
+    pub(crate) fn next_direction_scope(&mut self) -> u32 {
+        let id = self.direction_scopes;
+        self.direction_scopes = id.saturating_add(1);
+        id
+    }
+
+    pub(crate) fn record_unmodeled_inline(&mut self, name: &str, chars: usize) {
+        match self
+            .unmodeled_inline
+            .iter_mut()
+            .find(|(known, _)| *known == name)
+        {
+            Some((_, total)) => *total = total.saturating_add(chars),
+            None => self.unmodeled_inline.push((name.to_owned(), chars)),
+        }
+    }
+
+    /// One `DOCX_UNMODELED_INLINE` warning per text-bearing element name kept as raw XML.
+    pub(crate) fn take_unmodeled_inline_warnings(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.unmodeled_inline)
+            .into_iter()
+            .map(|(name, chars)| format!("DOCX_UNMODELED_INLINE {name} chars={chars}"))
+            .collect()
     }
 
     /// XML events charged so far.

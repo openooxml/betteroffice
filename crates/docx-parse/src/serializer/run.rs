@@ -2094,6 +2094,7 @@ mod tests {
                 text: " <hello> & ".to_owned(),
                 preserve_space: None,
             }],
+            direction_scopes: Vec::new(),
         };
         assert_eq!(
             serialize_run(&run, &mut context()).unwrap(),
@@ -2217,6 +2218,7 @@ mod tests {
                 text_box: None,
                 drawing_properties: None,
             }],
+            direction_scopes: Vec::new(),
         };
         let saved = serialize_deleted_run(&run, &mut context()).unwrap();
         assert!(saved.contains(xml));
@@ -2236,6 +2238,7 @@ mod tests {
                     preserve_space: None,
                 },
             ],
+            direction_scopes: Vec::new(),
         };
         assert_eq!(
             serialize_deleted_run(&run, &mut context()).unwrap(),
