@@ -134,8 +134,10 @@ fn assert_bookmark(xml: &str) {
 
 fn group_model(model: &mut Value) -> &mut Value {
     let host = &mut model["document"]["content"][1]["content"];
-    find_mut(host, &|value| value["id"] == "30" && value["children"].is_array())
-        .expect("group shape in the model")
+    find_mut(host, &|value| {
+        value["id"] == "30" && value["children"].is_array()
+    })
+    .expect("group shape in the model")
 }
 
 fn edit_text(model: &mut Value, before: &str) {
