@@ -116,3 +116,14 @@ test('a rounded shape colours the caret by its own fill', () => {
 test('the fill, not the text, decides the caret where both shades would show', () => {
   expect(pptxCaretColors(slide([shape('#808080')]), line({ start: 0, end: 5, color: '#ffffff' }), 2, caret).caret).toBe('#000000');
 });
+
+test('a shape colours the caret only where its outline covers it', () => {
+  const diamond = { ...shape('#000000'), geometry: 'diamond', path: [
+    { type: 'move', x: 0.5, y: 0 }, { type: 'line', x: 1, y: 0.5 }, { type: 'line', x: 0.5, y: 1 }, { type: 'line', x: 0, y: 0.5 }, { type: 'close' },
+  ] } as SlidePrimitive;
+  const text = line({ start: 0, end: 5, color: '#000000' });
+  expect(pptxCaretColors(slide([diamond]), text, 2, caret).caret).toBe('#000000');
+  expect(pptxCaretColors(slide([diamond]), text, 2, { ...caret, x: 250 }).caret).toBe('#ffffff');
+  const rotated = { ...diamond, transform: { rotationDeg: 30 } } as SlidePrimitive;
+  expect(pptxCaretColors(slide([rotated]), text, 2, caret).caret).toBe('#000000');
+});

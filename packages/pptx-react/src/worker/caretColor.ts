@@ -1,4 +1,4 @@
-import type { Paint, PositionedTextLine, SlideDisplayList, SlidePrimitive } from '@betteroffice/pptx';
+import type { GeometryPathCommand, Paint, PositionedTextLine, SlideDisplayList, SlidePrimitive } from '@betteroffice/pptx';
 import { transformedRect, type CommandRect } from '@betteroffice/pptx/worker';
 
 type Rgb = readonly [number, number, number];
@@ -80,11 +80,50 @@ function fillAt(primitives: readonly SlidePrimitive[], parents: readonly SlidePr
     if (primitive.kind === 'shape' && !paint) continue;
     const box = transformedRect(transforms, { x: primitive.x, y: primitive.y, width: primitive.w, height: primitive.h });
     if (!(x >= box.x && x < box.x + box.width && y >= box.y && y < box.y + box.height)) continue;
-    const exact = primitive.kind === 'shape' && primitive.geometry === 'rect' &&
-      transforms.every(({ transform }) => !transform?.rotationDeg && !transform?.flipH && !transform?.flipV);
-    fill = paint && exact ? paint : { color: fill.color, solid: false, estimate: paint?.estimate ?? null };
+    const upright = transforms.every(({ transform }) => !transform?.rotationDeg && !transform?.flipH && !transform?.flipV);
+    if (primitive.kind === 'shape' && upright && primitive.path.length &&
+      !pathCovers(primitive.path, (x - box.x) / box.width, (y - box.y) / box.height, primitive.evenOdd)) continue;
+    const exact = primitive.kind === 'shape' && primitive.geometry === 'rect' && upright;
+    fill = paint && exact ? paint : { color: fill.color, solid: false, estimate: upright ? paint?.estimate ?? null : null };
   }
   return fill;
+}
+
+/** Whether a path in unit box coordinates covers `(u, v)`, curves flattened. */
+function pathCovers(path: readonly GeometryPathCommand[], u: number, v: number, evenOdd = false): boolean {
+  let winding = 0;
+  let crossings = 0;
+  let start: [number, number] = [0, 0];
+  let at: [number, number] = [0, 0];
+  const edge = (to: [number, number]) => {
+    const [x0, y0] = at;
+    const [x1, y1] = to;
+    if ((y0 <= v) !== (y1 <= v) && u < x0 + (v - y0) / (y1 - y0) * (x1 - x0)) {
+      crossings += 1;
+      winding += y1 > y0 ? 1 : -1;
+    }
+    at = to;
+  };
+  const curve = (point: (t: number) => [number, number]) => {
+    for (let step = 1; step <= 16; step += 1) edge(point(step / 16));
+  };
+  for (const command of path) {
+    if (command.type === 'move') {
+      edge(start);
+      start = at = [command.x, command.y];
+    } else if (command.type === 'line') edge([command.x, command.y]);
+    else if (command.type === 'quad') {
+      const [x0, y0] = at;
+      curve((t) => [(1 - t) ** 2 * x0 + 2 * (1 - t) * t * command.cpx + t * t * command.x,
+        (1 - t) ** 2 * y0 + 2 * (1 - t) * t * command.cpy + t * t * command.y]);
+    } else if (command.type === 'cubic') {
+      const [x0, y0] = at;
+      curve((t) => [(1 - t) ** 3 * x0 + 3 * (1 - t) ** 2 * t * command.cp1x + 3 * (1 - t) * t * t * command.cp2x + t ** 3 * command.x,
+        (1 - t) ** 3 * y0 + 3 * (1 - t) ** 2 * t * command.cp1y + 3 * (1 - t) * t * t * command.cp2y + t ** 3 * command.y]);
+    } else edge(start);
+  }
+  edge(start);
+  return evenOdd ? crossings % 2 === 1 : winding !== 0;
 }
 
 const BLACK = '#000000';
