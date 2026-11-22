@@ -498,3 +498,18 @@ fn keeps_every_part_when_the_only_calculated_values_are_empty_strings() {
     let workbook = open_recalculated(&source);
     assert_eq!(saved_parts(&workbook), source);
 }
+
+#[test]
+fn fills_real_results_and_keeps_empty_string_results_as_the_source_wrote_them() {
+    let source = package_parts(
+        r#"<row r="1"><c r="A1"><f>2+3</f><v /></c><c r="B1"><f>IFERROR(1/0,"")</f><v /></c></row>"#,
+        FULL_CALC,
+    );
+    let workbook = open_recalculated(&source);
+    let saved = saved_parts(&workbook);
+    assert!(cell(sheet_xml(&saved), "A1").contains("<v>5</v>"));
+    assert_eq!(
+        cell(sheet_xml(&saved), "B1"),
+        cell(sheet_xml(&source), "B1")
+    );
+}
