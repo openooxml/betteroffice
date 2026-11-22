@@ -146,6 +146,7 @@ test('docx: text typed right after Mod+F and right after "+ Replace" goes into t
   await documentInput(page).press('ControlOrMeta+f');
   await page.keyboard.type('dog');
   await expect(findInput(page)).toHaveValue('dog');
+  await expectMatches(page, 1, 1);
   await dialog(page).getByRole('button', { name: '+ Replace', exact: true }).click();
   await page.keyboard.type('cow');
   await expect(replaceInput(page)).toHaveValue('cow');
