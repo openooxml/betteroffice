@@ -594,7 +594,7 @@ mod tests {
         }
         SCOPE.with(|slot| {
             let scope = slot.borrow();
-            let index = scope.as_ref().unwrap().index.as_ref().unwrap();
+            let index = &scope.as_ref().unwrap().index;
             assert_eq!(index.len(), 1);
             assert_eq!(index.get(&from_ref(&paragraph)), Some(&false));
         });
