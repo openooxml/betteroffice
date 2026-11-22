@@ -27,6 +27,7 @@ use crate::shape::{
 };
 use crate::smart_art::{SmartArtContext, is_smart_art_drawing, parse_smart_art_from_drawing};
 use crate::styles::{DocDefaults, StyleMap};
+use crate::text_box::with_bookmark_scope;
 use crate::theme::Theme;
 use crate::vml::{parse_horizontal_rule, vml_image_content, vml_image_contents};
 use crate::xml::{ParseBudget, ParseError, XmlElement, XmlNode, parse_javascript_integer_prefix};
@@ -412,21 +413,23 @@ pub(crate) fn parse_paragraph_with_story_context(
         group_text_boxes: Some(&mut enrich),
     });
     let enclosing_scopes = budget.begin_direction_scopes();
-    paragraph.content = parse_paragraph_contents(
-        element,
-        relationships,
-        theme,
-        styles,
-        doc_defaults,
-        part,
-        budget,
-        drawing.as_mut(),
-        depth,
-        false,
-        false,
-        context.watermark_claimed_separately,
-        &[],
-    )?;
+    paragraph.content = with_bookmark_scope(element, || {
+        parse_paragraph_contents(
+            element,
+            relationships,
+            theme,
+            styles,
+            doc_defaults,
+            part,
+            budget,
+            drawing.as_mut(),
+            depth,
+            false,
+            false,
+            context.watermark_claimed_separately,
+            &[],
+        )
+    })?;
     budget.end_direction_scopes(enclosing_scopes);
     apply_list_rendering(&mut paragraph, properties, styles, numbering);
     Ok(paragraph)

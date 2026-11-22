@@ -443,10 +443,15 @@ export class EditSession {
      */
     end_shared_reads(): void;
     /**
+     * As `ensure_list_definition` for a paragraph of a selection whose first paragraph is `lead`:
+     * it goes on the list `lead` is on when that is of `kind`.
+     */
+    ensure_list_definition_after(story: string, para_id: string, kind: string, lead?: string | null): string;
+    /**
      * The paragraph attributes, as JSON, that put a paragraph on a list of `kind`, `bullet` or
      * `numbered`: its own list when that is of that kind, else the list of the paragraph directly
-     * above, else below, else a list definition this call creates; a paragraph already on a list
-     * keeps its own level.
+     * above, else below, else a created list of that kind no paragraph names, else one this call
+     * creates; a paragraph already on a list keeps its own level.
      */
     ensure_list_definition(story: string, para_id: string, kind: string): string;
     /**
@@ -879,6 +884,12 @@ export class EditSession {
      * unknown story.
      */
     paragraph_spans(story: string): string;
+    /**
+     * Whether the style the paragraph has now, or the default paragraph style when it names none,
+     * numbers it: its `numPr`, through `basedOn`, names a list other than 0. Undefined for a
+     * session without a source package.
+     */
+    paragraph_style_numbers(story: string, para_id: string): boolean | undefined;
     /**
      * The index of the first paragraph of `story` that carries `para_id`, in
      * `paragraph_spans` order, or -1. Errors on an unknown story.
@@ -1935,6 +1946,7 @@ export interface InitOutput {
     readonly editsession_encoded_selection: (a: number) => [number, number, number, number];
     readonly editsession_end_shared_reads: (a: number) => void;
     readonly editsession_ensure_list_definition: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
+    readonly editsession_ensure_list_definition_after: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly editsession_export_markdown_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_export_snapshot_with_private_fonts_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly editsession_export_structured_json: (a: number, b: number, c: number) => [number, number, number, number];
@@ -2002,6 +2014,7 @@ export interface InitOutput {
     readonly editsession_paragraph_identities: (a: number) => [number, number, number, number];
     readonly editsession_paragraph_save_plan: (a: number) => [number, number, number, number];
     readonly editsession_paragraph_spans: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_paragraph_style_numbers: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly editsession_paragraph_unit: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly editsession_paragraphs: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_part_metadata_json: (a: number) => [number, number];

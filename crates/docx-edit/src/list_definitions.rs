@@ -17,6 +17,10 @@ pub const LIST_DEFINITIONS: &str = "listDefinitions";
 /// `{"key": <string>, "numId": <number>}`; honoured while `numPr.numId` still equals `numId`.
 pub const LIST_DEF: &str = "listDef";
 
+/// Paragraph attribute set on a paragraph put on its list in the editor: layout takes its indents
+/// from the list level. Seeding never writes it and it is not saved.
+pub(crate) const LIST_LEVEL_INDENTS: &str = "listLevelIndents";
+
 /// The bullets of Word's default bullet list, in Symbol, Courier New and Wingdings, repeating.
 const BULLET_TEXTS: [&str; 3] = ["\u{f0b7}", "o", "\u{f0a7}"];
 
@@ -151,6 +155,26 @@ pub(crate) fn numbered_level(values: &BTreeMap<String, Any>) -> Option<(f64, f64
     };
     let num_id = map_number(num_pr, "numId").filter(|id| *id != 0.0)?;
     Some((num_id, map_number(num_pr, "ilvl").unwrap_or(0.0)))
+}
+
+/// The paragraph attributes that name the list a paragraph is on.
+pub(crate) const LIST_REFERENCE_KEYS: [&str; 2] = ["numPr", LIST_DEF];
+
+/// Whether paragraphs with the attributes `before` and `after` are on the same list, or both on
+/// none, at whatever level.
+pub(crate) fn same_list(before: &BTreeMap<String, Any>, after: &BTreeMap<String, Any>) -> bool {
+    match (resolve_list_identity(before), resolve_list_identity(after)) {
+        (None, None) => true,
+        (
+            Some(ListIdentity::Source { num_id: was, .. }),
+            Some(ListIdentity::Source { num_id: is, .. }),
+        ) => was == is,
+        (
+            Some(ListIdentity::Created { key: was, .. }),
+            Some(ListIdentity::Created { key: is, .. }),
+        ) => was == is,
+        _ => false,
+    }
 }
 
 /// The list a paragraph with the attributes `values` is on, or `None` when it is on no list.
@@ -306,6 +330,7 @@ fn created_attrs(kind: ListKind, key: &str, level: f64) -> BTreeMap<String, Any>
     BTreeMap::from([
         ("numPr".to_owned(), Any::from(num_pr)),
         (LIST_DEF.to_owned(), Any::from(reference)),
+        (LIST_LEVEL_INDENTS.to_owned(), Any::Bool(true)),
         (
             "listIsBullet".to_owned(),
             Any::Bool(kind == ListKind::Bullet),
@@ -326,37 +351,48 @@ fn created_attrs(kind: ListKind, key: &str, level: f64) -> BTreeMap<String, Any>
 }
 
 /// The attributes that put a paragraph on the source list of its neighbour with `values`, at
-/// `level` when given, else at the neighbour's. At another level than the neighbour's, the list
-/// attributes are those seeding stores for that level as `source` renders it, when it does;
-/// otherwise they are the neighbour's.
+/// `level` when given, else at the neighbour's, when the list is of `kind` there. With a `source`
+/// the list qualifies only at a level `source` renders, and its kind and the list attributes are
+/// those seeding stores for that level; the neighbour's own are used only without a `source`, and
+/// then only at the neighbour's level.
 fn source_attrs(
     values: &BTreeMap<String, Any>,
+    kind: ListKind,
     level: Option<f64>,
     source: Option<&SourceMetadata>,
-) -> BTreeMap<String, Any> {
-    let num_pr = match (level, values.get("numPr")) {
-        (Some(level), Some(Any::Map(num_pr))) => {
-            let mut num_pr = (**num_pr).clone();
-            let moved = map_number(&num_pr, "ilvl").unwrap_or(0.0) != level;
-            num_pr.insert("ilvl".to_owned(), Any::Number(level));
-            Some((num_pr, moved))
-        }
-        _ => None,
+) -> Option<BTreeMap<String, Any>> {
+    let Some(Any::Map(theirs)) = values.get("numPr") else {
+        return None;
     };
-    let rendered = match (&num_pr, source) {
-        (Some((num_pr, true)), Some(source)) => rendered_level(num_pr, source),
-        _ => None,
+    let own = map_number(theirs, "ilvl").unwrap_or(0.0);
+    let target = level.unwrap_or(own);
+    let mut num_pr = (**theirs).clone();
+    num_pr.insert("ilvl".to_owned(), Any::Number(target));
+    let rendered = match source {
+        Some(source) => Some(rendered_level(&num_pr, source)?),
+        None => None,
     };
-    let from = rendered.as_ref().unwrap_or(values);
+    let from = match rendered.as_ref() {
+        Some(rendered) => rendered,
+        None if target != own => return None,
+        None => values,
+    };
+    if shown_kind(from) != kind {
+        return None;
+    }
     let mut attrs: BTreeMap<String, Any> = SOURCE_LIST_KEYS
         .into_iter()
         .map(|key| (key.to_owned(), from.get(key).cloned().unwrap_or(Any::Null)))
         .collect();
-    if let Some((num_pr, _)) = num_pr {
-        attrs.insert("numPr".to_owned(), Any::from(num_pr));
-    }
+    let written = if level.is_some() {
+        num_pr
+    } else {
+        (**theirs).clone()
+    };
+    attrs.insert("numPr".to_owned(), Any::from(written));
     attrs.insert(LIST_DEF.to_owned(), Any::Null);
-    attrs
+    attrs.insert(LIST_LEVEL_INDENTS.to_owned(), Any::Bool(true));
+    Some(attrs)
 }
 
 /// The list attributes seeding stores for a paragraph on the source list and level `num_pr`
@@ -368,9 +404,9 @@ fn rendered_level(
     crate::seed::rendered_list_attrs(source_list_rendering(num_pr, source)?)
 }
 
-/// The attributes that put a paragraph on the list of the paragraph with `values` when that list
-/// shows as `kind`, at `level` when given, else at that paragraph's; a paragraph naming a created
-/// list whose definition is absent is on the list its numId names.
+/// The attributes that put a paragraph on the list of the paragraph with `values`, at `level` when
+/// given, else at that paragraph's, when that list has that level and shows as `kind` there; a
+/// paragraph naming a created list whose definition is absent is on the list its numId names.
 fn joined_list(
     values: &BTreeMap<String, Any>,
     definitions: &BTreeMap<String, CreatedListDefinition>,
@@ -383,7 +419,7 @@ fn joined_list(
             let level = level.unwrap_or(theirs);
             (definitions[&key].kind == kind).then(|| created_attrs(kind, &key, level))
         }
-        _ => (shown_kind(values) == kind).then(|| source_attrs(values, level, source)),
+        _ => source_attrs(values, kind, level, source),
     }
 }
 
@@ -396,6 +432,48 @@ fn pilcrow_values<T: ReadTxn>(pilcrow: &MapRef, txn: &T) -> BTreeMap<String, Any
             _ => None,
         })
         .collect()
+}
+
+/// Adds to `keys` the key of every created definition `value` names in a [`LIST_DEF`] entry, at
+/// any depth.
+fn collect_list_keys(value: &Any, keys: &mut BTreeSet<String>) {
+    match value {
+        Any::Map(map) => {
+            let named = match map.get(LIST_DEF) {
+                Some(Any::Map(reference)) => reference.get("key"),
+                _ => None,
+            };
+            if let Some(Any::String(key)) = named {
+                keys.insert(key.to_string());
+            }
+            for value in map.values() {
+                collect_list_keys(value, keys);
+            }
+        }
+        Any::Array(values) => {
+            for value in values.iter() {
+                collect_list_keys(value, keys);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The keys of the created definitions the paragraphs of the live stories name, as the list they
+/// are on or in a record of their earlier properties.
+fn named_list_keys<T: ReadTxn>(txn: &T) -> BTreeSet<String> {
+    let mut keys = BTreeSet::new();
+    let Some(stories) = txn.get_map(crate::STORIES) else {
+        return keys;
+    };
+    let pilcrows = crate::live_stories(&stories, txn)
+        .filter_map(|(_, story)| story.cast::<TextRef>().ok())
+        .flat_map(|story| crate::pilcrows(&story, txn));
+    for (_, pilcrow) in pilcrows {
+        let values: HashMap<String, Any> = pilcrow_values(&pilcrow, txn).into_iter().collect();
+        collect_list_keys(&Any::from(values), &mut keys);
+    }
+    keys
 }
 
 impl EditingDoc {
@@ -429,9 +507,10 @@ impl EditingDoc {
     /// The attributes that put paragraph `para_id` of `story` on a list of `kind`: the list it is
     /// on when that is of that kind, else the list of the paragraph directly above, else below,
     /// when it is of that kind and does not come from that paragraph's style, otherwise a
+    /// definition of that kind this client created that no paragraph names, or failing that a
     /// definition created under a fresh key in [`LIST_DEFINITIONS`]. A paragraph already on a list
-    /// keeps its own level; one on
-    /// no list takes the level of the paragraph it joins, or level 0 on a new list.
+    /// keeps its own level; one on no list takes the level of the paragraph it joins, or level 0
+    /// on a new list. A neighbour's list is joined only at a level it has in that kind.
     pub fn ensure_list_definition(
         &self,
         ctx: &EditCtx,
@@ -439,15 +518,31 @@ impl EditingDoc {
         para_id: &str,
         kind: ListKind,
     ) -> EditResult<BTreeMap<String, Any>> {
-        let (joined, level) = {
+        self.ensure_list_definition_after(ctx, story, para_id, kind, None)
+    }
+
+    /// As [`Self::ensure_list_definition`] for a paragraph of a selection whose first paragraph
+    /// is `lead`: when `lead` is on a list of `kind`, the paragraph goes on that list before any
+    /// other is looked at, at its own level where that list has it in that kind, else at
+    /// `lead`'s.
+    pub fn ensure_list_definition_after(
+        &self,
+        ctx: &EditCtx,
+        story: &str,
+        para_id: &str,
+        kind: ListKind,
+        lead: Option<&str>,
+    ) -> EditResult<BTreeMap<String, Any>> {
+        let (joined, level, spare) = {
             let txn = self.yrs_doc().transact();
             let text = crate::story_ref(&txn, story)?;
             let pilcrows = crate::pilcrows(&text, &txn);
-            let index = pilcrows
-                .iter()
-                .position(|(_, pilcrow)| {
-                    crate::map_string(pilcrow, &txn, crate::PARA_ID).as_deref() == Some(para_id)
+            let position = |id: &str| {
+                pilcrows.iter().position(|(_, pilcrow)| {
+                    crate::map_string(pilcrow, &txn, crate::PARA_ID).as_deref() == Some(id)
                 })
+            };
+            let index = position(para_id)
                 .ok_or_else(|| EditError::ParagraphNotFound(para_id.to_owned()))?;
             let definitions = created_definitions(&txn);
             let metadata = self.source_metadata();
@@ -457,7 +552,16 @@ impl EditingDoc {
             let join = |values: &BTreeMap<String, Any>| {
                 joined_list(values, &definitions, kind, level, source)
             };
-            let joined = join(&own).or_else(|| {
+            let lead_at = match lead {
+                Some(lead) if lead != para_id => position(lead),
+                _ => None,
+            };
+            let led = lead_at
+                .map(|at| pilcrow_values(&pilcrows[at].1, &txn))
+                .and_then(|values| {
+                    join(&values).or_else(|| joined_list(&values, &definitions, kind, None, source))
+                });
+            let joined = led.or_else(|| join(&own)).or_else(|| {
                 [index.checked_sub(1), Some(index + 1)]
                     .into_iter()
                     .flatten()
@@ -466,10 +570,28 @@ impl EditingDoc {
                     .filter(|values| !numbered_by_style(values))
                     .find_map(|values| join(&values))
             });
-            (joined, level)
+            let own_keys = format!("{}:", self.client_id());
+            let mut spares = definitions
+                .values()
+                .filter(|definition| {
+                    definition.kind == kind && definition.key.starts_with(own_keys.as_str())
+                })
+                .peekable();
+            let spare = if joined.is_none() && spares.peek().is_some() {
+                let named = named_list_keys(&txn);
+                spares
+                    .find(|definition| !named.contains(&definition.key))
+                    .map(|definition| definition.key.clone())
+            } else {
+                None
+            };
+            (joined, level, spare)
         };
         if let Some(attrs) = joined {
             return Ok(attrs);
+        }
+        if let Some(key) = spare {
+            return Ok(created_attrs(kind, &key, level.unwrap_or(0.0)));
         }
         let mut txn = self.transact_for(ctx);
         let root = txn

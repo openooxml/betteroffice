@@ -45,6 +45,8 @@ export interface PresentationCommandSelection extends PptxStoryTarget {
   focus: number;
   affinity: 'upstream' | 'downstream';
   goalX?: number;
+  /** Whether the selected story's owning shape is an eligible top-level resize target. */
+  canResize?: boolean;
 }
 
 export interface PresentationCommandObjectSelection extends Omit<PresentationCommandSelection, 'kind'> {
@@ -72,6 +74,8 @@ export type PresentationCommandSelectionReference =
 
 export type PresentationCommandMotion = 'left' | 'right' | 'wordLeft' | 'wordRight'
   | 'lineStart' | 'lineEnd' | 'storyStart' | 'storyEnd' | 'up' | 'down' | 'nextCell' | 'previousCell';
+
+export type PresentationCommandResizeHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
 
 export type PresentationCommandFrameTag = Pick<PresentationCommandFrame,
   'slideId' | 'slideRevision' | 'coversThroughSeq' | 'documentEpoch' | 'incarnation'>;
@@ -106,8 +110,10 @@ export type PresentationCommandPayloads = {
   } & ({ target: PresentationCommandObjectTarget; x: number; y: number }
     | { at: PresentationCommandSelectionReference; shapeId: string; delta: { x: number; y: number } });
   setShapeRect: PresentationCommandInput & {
-    frame: PresentationCommandFrameTag; target: PresentationCommandObjectTarget; rect: ShapeRect;
-  };
+    frame: PresentationCommandFrameTag;
+  } & ({ target: PresentationCommandObjectTarget; rect: ShapeRect }
+    | { at: PresentationCommandSelectionReference; shapeId: string; handle: PresentationCommandResizeHandle;
+      delta: { x: number; y: number } });
   undo: PresentationCommandInput;
   redo: PresentationCommandInput;
   activateSlide: Partial<PresentationCommandInput> & { slideId: string };

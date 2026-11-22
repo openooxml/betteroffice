@@ -1,6 +1,6 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, expect, test } from 'bun:test';
-import { validClipboardFragment } from '@betteroffice/docx/yrs';
+import { MAX_PASTE_FORMATTED_RUNS, validClipboardFragment } from '@betteroffice/docx/yrs';
 import { mergeFormattingFragment } from '../pasteOptions/clipboardFragmentTransforms';
 import { clipboardFragmentPlainText, pasteOptionsOffered, plainTextClipboardFragment } from '../pasteOptions/pasteText';
 import {
@@ -128,7 +128,7 @@ test('the run budget counts merged runs', () => {
 });
 
 test('each formatted import limit falls back to the original table or plain paste', () => {
-  expect([MAX_FORMATTED_HTML_LENGTH, MAX_FORMATTED_HTML_DEPTH, MAX_FORMATTED_HTML_RUNS]).toEqual([2_000_000, 200, 1_000]);
+  expect([MAX_FORMATTED_HTML_LENGTH, MAX_FORMATTED_HTML_DEPTH, MAX_FORMATTED_HTML_RUNS]).toEqual([2_000_000, 200, 5_000]);
   for (const html of [
     '<b>x</b><!--' + ' '.repeat(MAX_FORMATTED_HTML_LENGTH) + '-->',
     '<span>'.repeat(300) + '<b>x</b>' + '</span>'.repeat(300),
@@ -167,22 +167,38 @@ test('the text budget falls back to plain paste', () => {
   imported('<p><b>' + 'x'.repeat(MAX_FORMATTED_HTML_TEXT) + '</b></p>', ['x'.repeat(MAX_FORMATTED_HTML_TEXT)]);
 });
 
+function fastestPair(first: string, second: string): [number, number] {
+  let a = Infinity;
+  let b = Infinity;
+  for (let round = 0; round < 3; round++) {
+    let start = performance.now();
+    parseClipboardHtml(first, formatted);
+    a = Math.min(a, performance.now() - start);
+    start = performance.now();
+    parseClipboardHtml(second, formatted);
+    b = Math.min(b, performance.now() - start);
+  }
+  return [Math.max(a, 1), Math.max(b, 1)];
+}
+
+function growth(html: (size: number) => string, size: number): number {
+  const [small, large] = fastestPair(html(size), html(size * 4));
+  const ratio = large / small;
+  console.log(`PARSE_GROWTH size=${size} ratio=${ratio.toFixed(2)}`);
+  return ratio;
+}
+
 test('hostile styles and run counts stay linear', () => {
-  const timed = (html: string) => {
-    const start = performance.now();
-    const fragment = parseClipboardHtml(html, formatted);
-    return { fragment, ms: performance.now() - start };
-  };
-  const shorthand = timed('<p><b style="font:12px' + ' '.repeat(150_000) + 'Arial\nBlack">x</b></p>');
-  expect(shorthand.fragment?.paragraphs.map(p => p.text)).toEqual(['x']);
-  expect(shorthand.ms).toBeLessThan(2_000);
-  const fonts = timed('<style>b{font-family:' + 'serif,'.repeat(30_000) + 'Arial}</style>' + '<b>x</b>'.repeat(150_000));
-  expect(fonts.fragment?.paragraphs.map(p => p.text)).toEqual(['x'.repeat(150_000)]);
-  expect(fonts.ms).toBeLessThan(10_000);
-  const runs = timed('<p>' + '<b>x</b>y'.repeat(210_000) + '</p>');
-  expect(runs.fragment).toBeNull();
-  expect(runs.ms).toBeLessThan(10_000);
-}, 60_000);
+  const shorthand = (spaces: number) => '<p><b style="font:12px' + ' '.repeat(spaces) + 'Arial\nBlack">x</b></p>';
+  expect(parseClipboardHtml(shorthand(150_000), formatted)?.paragraphs.map(p => p.text)).toEqual(['x']);
+  expect(growth(shorthand, 37_500)).toBeLessThan(10);
+  const fonts = (count: number) => '<style>b{font-family:' + 'serif,'.repeat(count / 5) + 'Arial}</style>' + '<b>x</b>'.repeat(count);
+  expect(parseClipboardHtml(fonts(150_000), formatted)?.paragraphs.map(p => p.text)).toEqual(['x'.repeat(150_000)]);
+  expect(growth(fonts, 37_500)).toBeLessThan(10);
+  const runs = (count: number) => '<p>' + '<b>x</b>y'.repeat(count) + '</p>';
+  expect(parseClipboardHtml(runs(210_000), formatted)).toBeNull();
+  expect(growth(runs, 52_500)).toBeLessThan(10);
+}, 120_000);
 
 test('a line break that opens a paragraph is a blank line', () => {
   imported('<p><b>A</b></p><p><br>B</p>', ['A', '', 'B']);
@@ -192,10 +208,11 @@ test('the paragraph budget counts blank lines', () => {
   const html = (count: number) => '<pre><b>A' + '\n'.repeat(count) + 'B</b></pre>';
   expect(parseClipboardHtml(html(MAX_FORMATTED_HTML_PARAGRAPHS), formatted)).toBeNull();
   imported(html(MAX_FORMATTED_HTML_PARAGRAPHS - 1), ['A', ...Array(MAX_FORMATTED_HTML_PARAGRAPHS - 2).fill(''), 'B']);
-  const start = performance.now();
   expect(parseClipboardHtml(html(1_900_000), formatted)).toBeNull();
-  expect(performance.now() - start).toBeLessThan(10_000);
-}, 60_000);
+  const [blank, control] = fastestPair(html(1_900_000), '<pre><b>A' + 'x'.repeat(1_900_000) + 'B</b></pre>');
+  console.log(`PARSE_VS_CONTROL ratio=${(blank / control).toFixed(2)}`);
+  expect(blank / control).toBeLessThan(5);
+}, 120_000);
 
 test('a table and the text after it count as one paragraph of the budget', () => {
   const count = MAX_FORMATTED_HTML_PARAGRAPHS;
@@ -206,4 +223,12 @@ test('a table and the text after it count as one paragraph of the budget', () =>
 
 test('an empty preformatted segment keeps the trailing space trim of the line before', () => {
   imported('<p><b>A </b><span style="white-space:pre-wrap">&#10;B</span></p>', ['A', 'B']);
+});
+
+test('an import over the formatted run limit keeps its paragraphs and offers no options', () => {
+  const runs = Array.from({ length: MAX_PASTE_FORMATTED_RUNS + 2 }, (_, i) => i % 2 === 0 ? '<b>x</b>' : '<i>y</i>').join('');
+  const fragment = parseClipboardHtml(`<p>${runs}</p><p><br></p><pre>x\n  y</pre>${table}`, formatted)!;
+  expect(fragment.paragraphs.map(p => p.text)).toEqual(['xy'.repeat(MAX_PASTE_FORMATTED_RUNS / 2 + 1), '', 'x', '  y', '']);
+  expect(fragment.paragraphs.at(-1)!.tables).toHaveLength(1);
+  expect(pasteOptionsOffered(fragment)).toEqual([]);
 });

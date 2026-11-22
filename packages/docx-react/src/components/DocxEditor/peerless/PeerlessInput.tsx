@@ -9,7 +9,7 @@ import { clipboardFragmentPlainText, pasteOptionsOffered, plainTextClipboardFrag
 import { mergeFormattingFragment, type PasteFormattingOption } from '../pasteOptions/clipboardFragmentTransforms';
 import { beginComposition, updateComposition, endComposition, type PeerlessCompositionEndResult, type PeerlessCompositionState } from './composition';
 import type { CommandTicket } from '../../../../../../shared/office-session/commands/types';
-import { admitInputIntents, admitIntent, appliedTicket, submitFormattingIntent, type PeerlessAdmissionResult, type PeerlessInputAdmission } from './inputAdmission';
+import { admitInputIntents, admitIntent, appliedTicket, submitFormattingIntent, type PeerlessAdmissionResult, type PeerlessInputAdmission, type PeerlessQueuedCut } from './inputAdmission';
 import { normalizeInputEvent, selectsAll, type PeerlessInputEvent, type PeerlessInputEventState } from './inputEvents';
 import type { PeerlessViewStore } from './viewStore';
 import { useTranslation } from '../../../i18n';
@@ -51,9 +51,10 @@ export interface PeerlessInputProps {
   onCompositionChange?(state: PeerlessCompositionState | null): void;
   onRecoverableText?(text: string): void;
   /** Fills `data` synchronously when the selection's clipboard payload is ready. */
-  onClipboard?(cut: boolean, data?: DataTransfer | null): Promise<void>;
+  onClipboard?(cut: boolean, data?: DataTransfer | null, queuedCut?: PeerlessQueuedCut): Promise<void>;
   onPasteFragment?(fragment: DocxClipboardFragment, inputTime: number): boolean;
   pasteOptions?: boolean;
+  onPasteOptionsLiveChange?(dismiss: (() => void) | null): void;
   onReplacePasteFragment?(fragment: DocxClipboardFragment, selection: DocxCommandSelection, variant?: 'plain' | 'merge'): PeerlessAdmissionResult | false;
   pasteRecorder?: RefObject<PeerlessPasteRecorder | null>;
   caretHostRef?: RefObject<HTMLDivElement | null>;
@@ -92,15 +93,18 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
     viewStore.subscribeRecovering?.(listener) ?? (() => {}), [viewStore]);
   const recovering = useSyncExternalStore(subscribeRecovering, getRecovering, getRecovering);
   const pasteRecordRef = useRef<PasteRecord | null>(null);
+  const { onPasteOptionsLiveChange } = props;
   const setPasteRecord = useCallback((record: PasteRecord | null): void => {
+    const wasLive = pasteRecordRef.current !== null;
     pasteRecordRef.current = record;
-  }, []);
+    if (wasLive !== (record !== null)) onPasteOptionsLiveChange?.(record ? pasteOptionsRef.current.dismiss : null);
+  }, [onPasteOptionsLiveChange]);
+  useLayoutEffect(() => () => setPasteRecord(null), [setPasteRecord]);
   const positionRef = useRef<(() => void) | null>(null);
   const dropPasteRecord = useCallback((record: PasteRecord): void => {
     if (pasteRecordRef.current !== record) return;
-    setPasteRecord(null);
     pasteOptionsRef.current.dismiss();
-  }, [setPasteRecord]);
+  }, []);
   const awaitPaste = useCallback((record: PasteRecord, submission: PeerlessAdmissionResult): void => {
     setPasteRecord(record);
     if (submission.status === 'submitted' && admission.getSnapshot().tail !== submission.ticket) {
@@ -159,7 +163,6 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
   pasteOptionsRef.current = pasteOptions;
   const recordPaste = useCallback<PeerlessPasteRecorder>((fragment, submission) => {
     pasteOptionsRef.current.dismiss();
-    setPasteRecord(null);
     if (callbacks.current.pasteOptions === false) return;
     if (viewStore.getRecovering?.() === true) return;
     const view = viewStore.getSnapshot();
@@ -169,7 +172,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       fragment: structuredClone(fragment), offered, ticket: null, end: null,
       version: view.version, incarnation: view.identity.incarnation, reveal: 'show',
     }, submission);
-  }, [awaitPaste, setPasteRecord, viewStore]);
+  }, [awaitPaste, viewStore]);
   const pasteRecorder = props.pasteRecorder;
   useLayoutEffect(() => {
     if (!pasteRecorder) return;
@@ -266,15 +269,13 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
   useLayoutEffect(() => {
     const record = pasteRecordRef.current;
     if (!record || record.incarnation === snapshot.identity.incarnation) return;
-    setPasteRecord(null);
     pasteOptionsRef.current.dismiss();
-  }, [snapshot.identity.incarnation, setPasteRecord]);
+  }, [snapshot.identity.incarnation]);
 
   useLayoutEffect(() => {
     if (!recovering) return;
-    setPasteRecord(null);
     pasteOptionsRef.current.dismiss();
-  }, [recovering, setPasteRecord]);
+  }, [recovering]);
 
   useLayoutEffect(() => {
     const record = pasteRecordRef.current;
@@ -290,10 +291,9 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
     if (!atEnd || snapshot.version !== record.version) {
       if (snapshot.version === record.version && typeof document !== 'undefined' &&
         pasteOptionsRef.current.controlRef.current?.contains(document.activeElement) === true) return;
-      setPasteRecord(null);
       pasteOptionsRef.current.dismiss();
     }
-  }, [snapshot.workerSelection, snapshot.version, setPasteRecord]);
+  }, [snapshot.workerSelection, snapshot.version]);
 
   useLayoutEffect(() => {
     const element = textarea.current;
@@ -312,7 +312,6 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       const normalized = normalizeInputEvent(event, state);
       state = normalized.state;
       if (normalized.intents.length > 0 && event.source !== 'paste') {
-        setPasteRecord(null);
         pasteOptionsRef.current.dismiss();
       }
       if (normalized.preventDefault) native.preventDefault();
@@ -351,15 +350,33 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
         } }, { inputTime: event.timeStamp });
         return;
       }
+      const onClipboard = callbacks.current.onClipboard;
       if (event.key === 'Delete' && event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey &&
-        callbacks.current.onClipboard && !isReadOnly()) {
-        const selection = viewStore.getSnapshot().workerSelection;
-        const ranged = !!selection && (selection.anchor.story !== selection.focus.story ||
-          selection.anchor.paraId !== selection.focus.paraId || selection.anchor.offset !== selection.focus.offset);
-        if (ranged || admission.getSnapshot().pendingInputs > 0) {
+        onClipboard && !isReadOnly()) {
+        const { identity, workerSelection } = viewStore.getSnapshot();
+        if (admission.getSnapshot().pendingInputs > 0) {
+          event.preventDefault();
+          active = { id: ++nextEventId, phase: 'start', inputType: 'deleteContentForward', keyboard: true };
+          state = { ...state, lastHandledEventId: active.id };
+          setPasteRecord(null);
+          pasteOptionsRef.current.dismiss();
+          admitIntent(admission, { kind: 'deleteForward', payload: {} }, {
+            inputTime: event.timeStamp, source: 'typing',
+            shiftDelete: {
+              isCurrent: () => {
+                const current = viewStore.getSnapshot().identity;
+                return mounted && current.session === identity.session && current.epoch === identity.epoch &&
+                  current.incarnation === identity.incarnation;
+              },
+              cut: (queuedCut) => onClipboard(true, null, queuedCut),
+            },
+          });
+          return;
+        }
+        if (workerSelection && !caretPoint(workerSelection)) {
           event.preventDefault();
           active = null;
-          void callbacks.current.onClipboard(true, null);
+          void onClipboard(true, null);
           return;
         }
       }
@@ -451,7 +468,6 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
     };
     const paste = (event: ClipboardEvent) => {
       clearEscape();
-      setPasteRecord(null);
       pasteOptionsRef.current.dismiss();
       if (state.composing) return;
       event.preventDefault();
@@ -563,7 +579,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
         element.ownerDocument.removeEventListener('pointerdown', clearEscape, true);
       }
     };
-  }, [admission, viewStore, setPasteRecord]);
+  }, [admission, viewStore]);
 
   return <>
   <textarea

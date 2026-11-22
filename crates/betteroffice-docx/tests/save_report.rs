@@ -85,6 +85,21 @@ fn assert_nothing_reported(report: &SaveReport) {
         "{:?}",
         report.structure_dropped
     );
+    assert!(!report.whole_model_write);
+}
+
+fn assert_whole_model_write(report: &SaveReport) {
+    assert!(report.whole_model_write);
+    assert!(
+        report.kept_unchanged.is_none(),
+        "{:?}",
+        report.kept_unchanged
+    );
+    assert!(
+        report.structure_dropped.is_none(),
+        "{:?}",
+        report.structure_dropped
+    );
 }
 
 #[test]
@@ -139,12 +154,30 @@ fn one_edited_paragraph_with_options_reports_the_bytes_save_with_options_writes(
 }
 
 #[test]
-fn a_whole_write_without_a_save_plan_reports_nothing() {
+fn a_whole_write_without_a_save_plan_says_so() {
     let mut document = open();
     document.replace_paragraph_text("0000000E", "X").unwrap();
     let report = report_of(&document);
-    assert_nothing_reported(&report);
+    assert_whole_model_write(&report);
     assert!(saved_main_part(&report.bytes).contains(">X<"));
+}
+
+#[test]
+fn a_model_edit_that_drops_a_smart_tag_does_not_report_nothing_dropped() {
+    let mut document = open();
+    document
+        .replace_paragraph_text("0000000D", "Delta edited.")
+        .unwrap();
+    document.model_mut();
+    let report = report_of(&document);
+    let saved = saved_main_part(&report.bytes);
+    assert!(saved.contains("Delta edited."), "{saved}");
+    assert!(!saved.contains("<w:smartTag"), "{saved}");
+    assert!(
+        report.whole_model_write || report.structure_dropped.is_some(),
+        "the save dropped w:smartTag and reported nothing dropped: {:?}",
+        report.structure_dropped
+    );
 }
 
 #[test]
@@ -158,7 +191,7 @@ fn a_whole_write_with_options_reports_the_bytes_save_with_options_writes() {
     };
     let report = document.save_report_with_options(options.clone()).unwrap();
     assert_eq!(report.bytes, document.save_with_options(options).unwrap());
-    assert_nothing_reported(&report);
+    assert_whole_model_write(&report);
 }
 
 /// A body whose text edit to 0000000D leaves it out of the save plan, written whole.

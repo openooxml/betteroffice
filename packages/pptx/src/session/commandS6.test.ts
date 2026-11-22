@@ -131,6 +131,29 @@ test('shape_transform_read_only_and_frame_basis', async () => {
   } finally { await session.dispose(); }
 });
 
+test('relative resize resolves the selected shape after its predecessor', async () => {
+  const session = await open();
+  try {
+    const selected = await session.command(session.state, 1, { kind: 'selectObject', payload: {
+      ...input, frame: session.state.frame, shapeId: session.story.shapeId,
+    } });
+    const object = selected.selection;
+    if (object?.kind !== 'object' || !object.rect) throw new Error('Object selection required');
+    const delta = { x: 30, y: 0 };
+    const resized = await session.command(selected, 2, { kind: 'setShapeRect', payload: {
+      ...input, at: { source: 'afterSeq', seq: 1 }, frame: selected.frame,
+      shapeId: object.shapeId, handle: 'e', delta,
+    } }, 1);
+    expect(resized.outcomes[0]).toMatchObject({ status: 'applied', committed: true });
+    expect(resized.selection).toMatchObject({ kind: 'object', rect: {
+      x: object.rect.x,
+      width: object.rect.width + Math.round(delta.x * object.units.x),
+    } });
+    expect(session.handle().snapshot().slides[0]!.shapes[0]!.width)
+      .toBe(object.rect.width + Math.round(delta.x * object.units.x));
+  } finally { await session.dispose(); }
+});
+
 test('shape_identity_selection_checks_target_and_frame', async () => {
   const session = await open();
   try {

@@ -1422,6 +1422,7 @@ pub(crate) fn parse_xml_strict(
     let mut roots = Vec::new();
     let mut stack: Vec<XmlElement> = Vec::new();
     let mut starts = Vec::new();
+    let mut bookmarks_below: Vec<bool> = Vec::new();
     let mut paragraphs = 0u32;
     let mut local_names = false;
     let mut number = |mut element: XmlElement, ancestors: &[XmlElement]| {
@@ -1461,6 +1462,7 @@ pub(crate) fn parse_xml_strict(
                 let element = number(element, &stack);
                 stack.push(element);
                 starts.push(offset);
+                bookmarks_below.push(false);
             }
             Event::Empty(start) => {
                 if stack.len() + 1 > budget.limits.max_xml_depth {
@@ -1473,7 +1475,11 @@ pub(crate) fn parse_xml_strict(
                 scope_name_matching(&mut element, &mut stack, &mut local_names);
                 let mut element = number(element, &stack);
                 retain_bookmark_xml(&mut element, xml, offset, reader.buffer_position() as usize);
-                retain_replayed_namespace_aliases(&mut element, &stack, part, budget)?;
+                let holds = is_bookmark_boundary(&element);
+                retain_replayed_namespace_aliases(&mut element, &stack, holds, part, budget)?;
+                if let Some(parent) = bookmarks_below.last_mut() {
+                    *parent |= holds;
+                }
                 append_element(element, &mut stack, &mut roots, part)?;
             }
             Event::End(_) => {
@@ -1483,8 +1489,12 @@ pub(crate) fn parse_xml_strict(
                     message: "unexpected closing element".to_owned(),
                 })?;
                 let start = starts.pop().unwrap();
+                let holds = bookmarks_below.pop().unwrap() || is_bookmark_boundary(&element);
                 retain_bookmark_xml(&mut element, xml, start, reader.buffer_position() as usize);
-                retain_replayed_namespace_aliases(&mut element, &stack, part, budget)?;
+                retain_replayed_namespace_aliases(&mut element, &stack, holds, part, budget)?;
+                if let Some(parent) = bookmarks_below.last_mut() {
+                    *parent |= holds;
+                }
                 append_element(element, &mut stack, &mut roots, part)?;
             }
             Event::Text(text) => {
@@ -1620,9 +1630,14 @@ pub(crate) fn canonical_namespace(prefix: &str) -> Option<&'static str> {
         .map(|standard| standard.transitional)
 }
 
+fn is_bookmark_boundary(element: &XmlElement) -> bool {
+    matches!(element.local_name(), "bookmarkStart" | "bookmarkEnd")
+}
+
 fn retain_replayed_namespace_aliases(
     element: &mut XmlElement,
     ancestors: &[XmlElement],
+    holds_bookmark: bool,
     part: &str,
     budget: &mut ParseBudget<'_>,
 ) -> Result<(), ParseError> {
@@ -1648,7 +1663,8 @@ fn retain_replayed_namespace_aliases(
             child.local_name() == "drawing" && crate::smart_art::is_smart_art_drawing(child)
         });
     let drawing = matches!(element.local_name(), "drawing" | "AlternateContent");
-    let bookmarked_drawing = drawing && crate::text_box::has_bookmarked_text_box(element);
+    let bookmarked_drawing =
+        drawing && holds_bookmark && crate::text_box::has_bookmarked_text_box(element);
     let text_box_drawing =
         drawing && !bookmarked_drawing && crate::text_box::contains_text_box(element);
     if !row

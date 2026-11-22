@@ -129,6 +129,7 @@ files/yrs/formattingError.api.d.ts
 files/yrs/index.api.d.ts
 files/yrs/inputPositionMap.api.d.ts
 files/yrs/layoutMeta.api.d.ts
+files/yrs/listCommands.api.d.ts
 files/yrs/pagedExport.api.d.ts
 files/yrs/paragraphIdentity.api.d.ts
 files/yrs/peerMetadata.api.d.ts

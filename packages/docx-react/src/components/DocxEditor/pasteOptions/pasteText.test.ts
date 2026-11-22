@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import type { DocxClipboardFragment, DocxTableFragment } from '@betteroffice/docx/yrs';
+import { MAX_PASTE_FORMATTED_RUNS, type DocxClipboardFragment, type DocxTableFragment } from '@betteroffice/docx/yrs';
 import { clipboardFragmentPlainText, pasteOptionsOffered, plainTextClipboardFragment } from './pasteText';
 
 const pasteOptionsApply = (fragment: DocxClipboardFragment): boolean => pasteOptionsOffered(fragment).length > 0;
@@ -78,8 +78,17 @@ test('keep text only keeps a space typed at the end of a table cell', () => {
 
 test('keep text only is offered at 1000 lines of text and not at 1001', () => {
   const lines = (count: number): DocxClipboardFragment => ({
-    paragraphs: Array.from({ length: count }, () => ({ text: 'x', runs: [{ text: 'x', format: { other: { bold: true } } }] })),
+    paragraphs: Array.from({ length: count }, (_, index) => index === 0 ? { text: 'x', runs: [{ text: 'x', format: { other: { bold: true } } }] } : { text: 'x' }),
   });
   expect(pasteOptionsOffered(lines(1000))).toEqual(['keep-source', 'merge', 'text-only']);
   expect(pasteOptionsOffered(lines(1001))).toEqual(['keep-source', 'merge']);
+});
+
+test('paste options are not offered for a paste over the formatted run limit', () => {
+  const fragment = (count: number): DocxClipboardFragment => {
+    const runs = Array.from({ length: count }, (_, i) => ({ text: 'x', format: { other: i % 2 === 0 ? { bold: true } : {} } }));
+    return { paragraphs: [{ text: 'x'.repeat(count), runs }] };
+  };
+  expect(pasteOptionsApply(fragment(MAX_PASTE_FORMATTED_RUNS))).toBe(true);
+  expect(pasteOptionsApply(fragment(MAX_PASTE_FORMATTED_RUNS + 1))).toBe(false);
 });

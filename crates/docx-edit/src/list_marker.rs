@@ -88,6 +88,35 @@ impl ListState {
         Some((self.created.get(&key)?, level))
     }
 
+    /// The left indent and the first-line indent, in twips, that the definition of the list the
+    /// paragraph with `values` is on gives the paragraph's level, the first-line one with whether
+    /// it hangs; `None` for what the definition leaves out. A list the editor created is indented
+    /// as its saved definition is.
+    pub(crate) fn level_indent(
+        &self,
+        values: &BTreeMap<String, Any>,
+    ) -> (Option<f64>, Option<(f64, bool)>) {
+        if let Some((definition, level)) = self.created_list(values) {
+            let format = definition
+                .kind
+                .level_format(numbering_level(level).unwrap_or(0));
+            let hanging = if format == "lowerRoman" { 180.0 } else { 360.0 };
+            return (Some((level + 1.0) * 720.0), Some((-hanging, true)));
+        }
+        let properties = numbered_level(values)
+            .and_then(|(num_id, level)| self.numbering.as_ref()?.get_level(num_id, level))
+            .and_then(|level| level.p_pr);
+        match properties {
+            Some(properties) => (
+                properties.indent_left,
+                properties
+                    .indent_first_line
+                    .map(|first| (first, properties.hanging_indent.unwrap_or(false))),
+            ),
+            None => (None, None),
+        }
+    }
+
     pub(crate) fn first_picture_bullet(&self) -> Option<&docx_parse::numbering::PictureBulletSize> {
         self.numbering
             .as_ref()?

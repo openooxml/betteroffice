@@ -10,7 +10,7 @@ import {
   type PeerlessEditSessionBinding,
   type UsePeerlessEditSessionOptions,
 } from '../hooks/usePeerlessEditSession';
-import { PeerlessInput, type PeerlessPasteRecorder } from './PeerlessInput';
+import { PeerlessInput, type PeerlessInputProps, type PeerlessPasteRecorder } from './PeerlessInput';
 import type { DocxClipboardFragment, DocxEditState } from '@betteroffice/docx/yrs';
 import type { PeerlessCompositionState } from './composition';
 import { captureSelectionIntent } from './selection';
@@ -270,7 +270,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, inputRef, onRe
   onRecoverableText(text: string): void;
   displayWindow: readonly [number, number];
   onDisplayWindowChange(start: number, end: number): void;
-  onClipboard?(cut: boolean): Promise<void>;
+  onClipboard?: PeerlessInputProps['onClipboard'];
   onPasteFragment?(fragment: DocxClipboardFragment, inputTime: number): boolean;
   pasteOptions?: boolean;
   onReplacePasteFragment?(fragment: DocxClipboardFragment, selection: import('@betteroffice/docx/yrs').DocxCommandSelection, variant?: 'plain' | 'merge'): PeerlessAdmissionResult | false;
@@ -840,6 +840,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, inputRef, onRe
       <PeerlessInput admission={binding.admission} viewStore={binding.viewStore} textareaRef={input} autoFocus={autoFocus}
         onCompositionChange={onCompositionChange} onRecoverableText={onRecoverableText} onClipboard={onClipboard} onPasteFragment={onPasteFragment}
         pasteOptions={pasteOptions} onReplacePasteFragment={onReplacePasteFragment} pasteRecorder={pasteRecorder}
+        onPasteOptionsLiveChange={binding.setPasteOptionsLive}
         caretHostRef={column} zoom={zoom} onNavigateCell={onNavigateCell} />
       <div data-docx-pages-host data-table-resize={tableAxis && (tableAxis === 'x' ? 'col' : 'row')} style={{ position: 'relative', width, height, transform: `scale(${zoom})`, transformOrigin: 'top left', touchAction: 'pan-x pan-y' }}
         onMouseDown={(event) => {
@@ -1016,7 +1017,7 @@ export interface PeerlessPagedEditorProps {
   onReady?(binding: PeerlessEditSessionBinding): void;
   displayWindow?: readonly [number, number];
   onDisplayWindowChange?(window: readonly [number, number]): void;
-  onClipboard?(cut: boolean): Promise<void>;
+  onClipboard?: PeerlessInputProps['onClipboard'];
   onPasteFragment?(fragment: DocxClipboardFragment, inputTime: number): boolean;
   pasteOptions?: boolean;
   onReplacePasteFragment?(fragment: DocxClipboardFragment, selection: import('@betteroffice/docx/yrs').DocxCommandSelection, variant?: 'plain' | 'merge'): PeerlessAdmissionResult | false;
@@ -1178,7 +1179,7 @@ export function PeerlessPagedEditor({ sessionOptions, zoom = 1, className, autoF
   return <div className={className} data-docx-worker-editor="true" aria-busy={session.status === 'opening'}>
     {session.status === 'ready' && <PeerlessReady binding={session.binding} canvasForPage={canvasForPage} zoom={pageZoom} autoFocus={autoFocus} inputRef={inputRef}
       onRecoverableText={retainText} displayWindow={pageWindow} onDisplayWindowChange={changeWindow} onClipboard={onClipboard} onPasteFragment={onPasteFragment} pasteOptions={pasteOptions} onReplacePasteFragment={onReplacePasteFragment} pasteRecorder={pasteRecorder} highlights={highlights} onNavigateCell={onNavigateCell} onPartPoint={onPartPoint} onDragSelectionChange={onDragSelectionChange} pageOverlays={pageOverlays} pageMirror={pageMirror} unbuiltPageMirror={unbuiltPageMirror} readPageTexts={readPageTexts} mirrorReadBlocked={mirrorReadBlocked} scrollToPage={scrollToPage} overlay={overlay} pictures={pictures} tables={tables} queryEngineReady={queryEngineReady} />}
-    {session.status === 'failed' && <div role="alert">{t('errors.failedToLoad')}</div>}
+    {session.status === 'failed' && <div role="alert">{t(session.recoveryFailed ? 'errors.recoveryFailedDescription' : 'errors.failedToLoad')}</div>}
     {recoverableText.map((text, index) => <div key={index} role="status">
       {t('editor.recoverableTextNotice')}
       <textarea aria-label={t('editor.recoverableText')} value={text} readOnly />

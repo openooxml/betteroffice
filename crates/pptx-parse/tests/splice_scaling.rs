@@ -49,35 +49,51 @@ fn table_slide(rows: usize) -> String {
     )
 }
 
-fn table_edit(row: usize, text: &str) -> DeckWrite {
-    let patch = ShapePatch {
-        texts: vec![TextWrite {
-            target: TextTarget::TableCell { row, cell: 0 },
-            autofit: None,
-            paragraphs: vec![ParagraphWrite {
-                source_index: Some(0),
-                source_paragraphs: Vec::new(),
-                preserved_xml: None,
-                rebuild: true,
-                properties_changed: false,
-                alignment: None,
-                level: 0,
-                bullet: None,
-                runs: vec![RunWrite {
-                    text: text.to_owned(),
-                    properties: RunProperties::default(),
-                }],
+fn text_edit(source_index: usize, target: TextTarget, text: &str) -> ShapeWrite {
+    let text = TextWrite {
+        target,
+        autofit: None,
+        paragraphs: vec![ParagraphWrite {
+            source_index: Some(0),
+            source_paragraphs: Vec::new(),
+            preserved_xml: None,
+            rebuild: true,
+            properties_changed: false,
+            alignment: None,
+            level: 0,
+            bullet: None,
+            runs: vec![RunWrite {
+                text: text.to_owned(),
+                properties: RunProperties::default(),
             }],
         }],
-        ..ShapePatch::default()
     };
+    ShapeWrite::Patch {
+        source_index,
+        patch: Box::new(ShapePatch {
+            texts: vec![text],
+            ..ShapePatch::default()
+        }),
+    }
+}
+
+fn shape_edit(source_index: usize, text: &str) -> ShapeWrite {
+    text_edit(source_index, TextTarget::Body, text)
+}
+
+fn table_edit(row: usize, text: &str) -> DeckWrite {
+    slide_edit(vec![text_edit(
+        0,
+        TextTarget::TableCell { row, cell: 0 },
+        text,
+    )])
+}
+
+fn slide_edit(shapes: Vec<ShapeWrite>) -> DeckWrite {
     DeckWrite {
         slides: vec![SlideWrite::Patch {
             part_path: "ppt/slides/slide1.xml".to_owned(),
-            shapes: vec![ShapeWrite::Patch {
-                source_index: 0,
-                patch: Box::new(patch),
-            }],
+            shapes,
             background: None,
             layout_part_path: None,
         }],
@@ -86,17 +102,21 @@ fn table_edit(row: usize, text: &str) -> DeckWrite {
     }
 }
 
-fn splice_work(rows: usize) -> SpliceWork {
-    let package = parse_pptx(&deck(&table_slide(rows))).unwrap();
-    let edit = table_edit(rows / 2, "Edited");
+fn save_slide(slide: &str, edit: &DeckWrite) -> (String, SpliceWork) {
+    let package = parse_pptx(&deck(slide)).unwrap();
     test_counters::take();
-    let saved = write_pptx_with_edits(&package, &edit).unwrap();
+    let saved = write_pptx_with_edits(&package, edit).unwrap();
     let work = test_counters::take();
-    let parts: BTreeMap<String, Vec<u8>> = ooxml_opc::unzip_parts(&saved)
+    let mut parts: BTreeMap<String, Vec<u8>> = ooxml_opc::unzip_parts(&saved)
         .unwrap()
         .into_iter()
         .collect();
-    let xml = String::from_utf8(parts["ppt/slides/slide1.xml"].clone()).unwrap();
+    let xml = String::from_utf8(parts.remove("ppt/slides/slide1.xml").unwrap()).unwrap();
+    (xml, work)
+}
+
+fn splice_work(rows: usize) -> SpliceWork {
+    let (xml, work) = save_slide(&table_slide(rows), &table_edit(rows / 2, "Edited"));
     let edited_row = TABLE_ROW.replace("<a:t>Same</a:t>", "<a:t>Edited</a:t>");
     assert_eq!(xml.matches(TABLE_ROW).count(), rows - 1, "{rows} rows");
     assert_eq!(xml.matches(edited_row.as_str()).count(), 1, "{rows} rows");
@@ -141,4 +161,54 @@ fn editing_one_row_of_a_large_table_splices_in_linear_work() {
         "{works:?}"
     );
     assert_doubles("hashed_nodes", &works, |work| work.hashed_nodes);
+}
+
+#[test]
+fn editing_both_ends_of_many_identical_shapes_splices_in_linear_work() {
+    let shape = |id: usize, text: &str, extensions: &str| {
+        format!(
+            r#"<p:sp><p:nvSpPr><p:cNvPr id='{id}' name='{text}'/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>{text}</a:t></a:r></a:p></p:txBody>{extensions}</p:sp>"#
+        )
+    };
+    let extensions = format!(
+        "<p:extLst>{}</p:extLst>",
+        r#"<p:ext uri="{X}"/>"#.repeat(50)
+    );
+    let first = shape(2, "A", "");
+    let identical = shape(3, "Same", &extensions);
+    let last = shape(4, "B", "");
+    let works = [200, 400, 800].map(|n| {
+        let slide = format!(
+            r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>{first}{}{last}</p:spTree></p:cSld></p:sld>"#,
+            identical.repeat(n)
+        );
+        let mut shapes = vec![shape_edit(0, "A1")];
+        shapes.extend((1..=n).map(|source_index| ShapeWrite::Keep { source_index }));
+        shapes.push(shape_edit(n + 1, "B1"));
+        let (xml, work) = save_slide(&slide, &slide_edit(shapes));
+        assert_eq!(work.budget_exhausted, 0, "{n} shapes: {work:?}");
+        assert_eq!(xml.matches(identical.as_str()).count(), n, "{n} shapes");
+        assert!(xml.contains("<a:t>A1</a:t>"), "{n} shapes");
+        assert!(xml.contains("<a:t>B1</a:t>"), "{n} shapes");
+        if n == 800 {
+            let elements = slide.matches("<p:").count() + slide.matches("<a:").count();
+            assert!(
+                work.budget_work < 64 * elements,
+                "{elements} elements: {work:?}"
+            );
+        }
+        work
+    });
+
+    assert!(works[2].dp_cells > works[1].dp_cells, "{works:?}");
+    for (name, counts) in [
+        ("budget_work", works.map(|work| work.budget_work)),
+        ("hashed_nodes", works.map(|work| work.hashed_nodes)),
+    ] {
+        let [small, middle, large] = counts;
+        let first = middle.saturating_sub(small);
+        let second = large.saturating_sub(middle);
+        assert!(first > 0 && second > 0, "{name}: {counts:?}");
+        assert!(second <= 22 * first / 10 + 64, "{name}: {counts:?}");
+    }
 }

@@ -129,6 +129,7 @@ export * from './inputPositionMap';
 export { subscribeYrsSelection, withYrsSelectionCause, yrsSelectionCause } from './selectionChanges';
 export * from './storyPlainText';
 export { tableBoundaryDeleteTarget } from './tableBoundaryDelete';
+export { applyListToggle, LIST_OFF_ATTRS, listOffAttrs } from './listCommands';
 export { isCellHasNoStoryRefusal } from './cellRefusal';
 export * from './clipboardFragment';
 export * from './stories';
@@ -1660,10 +1661,20 @@ export interface YrsSession extends CollaborationReplica {
   /**
    * The attributes that put `paraId` on a list of `kind`: its own list when that is of that kind,
    * else the list of the paragraph directly above, else below, when it is of that kind, otherwise a
-   * list definition this call creates. A paragraph already on a list keeps its own level.
+   * created list of that kind no paragraph names, or one this call creates. A paragraph already on
+   * a list keeps its own level, and joins a neighbour's list only where that list has it. With
+   * `lead`, the first paragraph of the selection `paraId` is in, it goes on the list `lead` is on
+   * when that is of `kind`.
    * @internal
    */
-  ensureListDefinition(story: string, paraId: string, kind: 'bullet' | 'numbered'): YrsParagraphAttrs;
+  ensureListDefinition(story: string, paraId: string, kind: 'bullet' | 'numbered', lead?: string): YrsParagraphAttrs;
+  /**
+   * Whether the style `paraId` has now, or the default paragraph style when it names none, numbers
+   * it. Undefined for a session without a source package, which holds no styles. A session
+   * without this member leaves the flag stored when the file was read to decide.
+   * @internal
+   */
+  paragraphStyleNumbers?(story: string, paraId: string): boolean | undefined;
   /** The list definitions the editor created, by key. @internal */
   createdListDefinitions(): Array<{ key: string; kind: 'bullet' | 'numbered'; levelTexts: string[]; levelFormats: string[] }>;
   /** The keys of the created list definitions some paragraph is on. @internal */

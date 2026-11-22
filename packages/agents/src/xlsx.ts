@@ -209,9 +209,6 @@ export class XlsxAgentWorkbook extends PrototypeDocument<CellChange, XlsxEditSte
     })).id;
   }
   protected override proposalStatus(id: string) { return this.handle.getProposalStatus(id); }
-  protected override proposalStale(id: string, _steps: XlsxEditStep[]) {
-    return this.handle.isProposalStale(id);
-  }
   protected override acceptProposal(id: string, steps: XlsxEditStep[]) {
     try {
       const version = this.currentVersion();

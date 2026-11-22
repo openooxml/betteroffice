@@ -8,6 +8,7 @@ import { residentWorkerFactory } from './__fixtures__/residentWorker';
 import { ResidentEngineWorkerClient } from './residentEngineWorkerClient';
 import type { DocxCommandEnvelope, DocxCommandInitRequest } from './residentCommandProtocol';
 import type { DocxClipboardFragment, DocxTableFragment } from './clipboardFragment';
+import { MAX_PASTE_FORMATTED_RUNS } from './clipboardFragment';
 import type { YrsCellLoc } from './index';
 import { createYrsSession } from './index';
 
@@ -255,27 +256,54 @@ test('paste creates an identical table and one undo removes it', async () => {
   }
 }, TIMEOUT);
 
-for (const [count, width] of [[250, 1], [500, 1], [1_000, 1], [1_000, 200]] as const) {
-  test(`pastes a paragraph with ${count} alternating runs of ${width} characters`, async () => {
-    const { client, engine } = await openTableWorker();
-    try {
-      const paragraph = engine.paragraphs('body').at(-1)!;
-      const span = engine.geometryReader.locateParagraph('body', paragraph.paraId);
-      const at = { story: 'body', paraId: paragraph.paraId, offset: span.end - span.start };
-      const runs = Array.from({ length: count }, (_, i) => i % 2 === 0
-        ? { text: 'a'.repeat(width), format: { other: { bold: true } } }
-        : { text: 'b'.repeat(width), format: { other: {} } });
-      const text = ('a'.repeat(width) + 'b'.repeat(width)).repeat(count / 2);
-      const command = intent(1, 0, 'pasteFragment', { selection: { anchor: at, focus: at }, fragment: { paragraphs: [{ text, runs }] } });
-      const start = performance.now();
-      const pasted = await client.edit(command);
-      const elapsed = performance.now() - start;
-      expect(pasted.outcomes[0]?.status).toBe('applied');
-      expect(engine.paragraphs('body').at(-1)!.text).toBe(paragraph.text + text);
-      console.log(`PASTE_RUNS_MS runs=${count} chars=${count * width} ms=${Math.round(elapsed)}`);
-    } finally {
-      client.destroy();
-    }
+const PICTURE = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aD1sAAAAASUVORK5CYII=';
+
+async function pasteAlternatingRuns(count: number, picture = false) {
+  const { client, engine } = await openTableWorker();
+  try {
+    const paragraph = engine.paragraphs('body').at(-1)!;
+    const span = engine.geometryReader.locateParagraph('body', paragraph.paraId);
+    const at = { story: 'body', paraId: paragraph.paraId, offset: span.end - span.start };
+    const words = Array.from({ length: count }, (_, i) => `w${String(i).padStart(4, '0')}${i + 1 < count ? ' ' : ''}`);
+    const runs = words.map((text, i) => ({ text, format: { other: i % 2 === 0 ? { bold: true } : { italic: true } } }));
+    const text = words.join('');
+    const inlines = picture
+      ? [...words.map(word => ({ text: word })), { image: { src: `data:image/png;base64,${PICTURE}`, alt: 'picture', width: 120, height: 60 } }]
+      : undefined;
+    const fragment = { paragraphs: [{ text, runs, ...(inlines ? { inlines } : {}) }] };
+    const inserts = spyOn(engine, 'insertText');
+    const formats = spyOn(engine, 'formatRange');
+    const clears = spyOn(engine, 'clearFormatting');
+    const start = performance.now();
+    const pasted = await client.edit(intent(1, 0, 'pasteFragment', { selection: { anchor: at, focus: at }, fragment }));
+    const ms = performance.now() - start;
+    const calls = { inserts: inserts.mock.calls.length, formats: formats.mock.calls.length + clears.mock.calls.length };
+    inserts.mockRestore();
+    formats.mockRestore();
+    clears.mockRestore();
+    console.log(`PASTE_RUNS_MS runs=${count} picture=${picture ? 1 : 0} ms=${Math.round(ms)} inserts=${calls.inserts} formats=${calls.formats}`);
+    expect(pasted.outcomes[0]?.status).toBe('applied');
+    expect(engine.paragraphs('body').at(-1)!.text.startsWith(paragraph.text + text)).toBe(true);
+    const bold = engine.storySegments('body').some(segment => segment.kind === 'text' && segment.text.includes('w0000') && segment.attributes?.bold === true);
+    return { bold, ...calls };
+  } finally {
+    client.destroy();
+  }
+}
+
+test('a paste keeps its run formatting up to the limit and drops it above', async () => {
+  const within = await pasteAlternatingRuns(MAX_PASTE_FORMATTED_RUNS);
+  expect(within.bold).toBe(true);
+  expect(within.inserts).toBe(MAX_PASTE_FORMATTED_RUNS);
+  expect((await pasteAlternatingRuns(MAX_PASTE_FORMATTED_RUNS + 2)).bold).toBe(false);
+}, 300_000);
+
+for (const picture of [false, true]) {
+  test(`a paste over the limit${picture ? ' with a picture' : ''} inserts its text in one call and formats nothing`, async () => {
+    const over = await pasteAlternatingRuns(4_000, picture);
+    expect(over.bold).toBe(false);
+    expect(over.inserts).toBe(1);
+    expect(over.formats).toBe(0);
   }, 300_000);
 }
 

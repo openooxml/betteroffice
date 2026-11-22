@@ -163,6 +163,7 @@ fn snapshot(segments: &[StorySegment]) -> Result<Snapshot, String> {
             }),
             SegmentContent::Pilcrow(pilcrow) => {
                 properties = attrs(&pilcrow.values)?;
+                properties.remove(crate::list_definitions::LIST_LEVEL_INDENTS);
                 if let Some(original) = properties
                     .get("_originalFormatting")
                     .and_then(Value::as_object)

@@ -593,6 +593,7 @@
     "noDocumentLoaded": "Chưa tải tài liệu nào",
     "failedToLoad": "Không thể mở tài liệu này",
     "failedToLoadDescription": "Tệp có thể bị hỏng, hoặc dùng thứ mà trình chỉnh sửa này chưa đọc được.",
+    "recoveryFailedDescription": "Trình chỉnh sửa đã ngừng hoạt động và không thể khôi phục những thay đổi gần đây của bạn. Tệp không bị hỏng.",
     "failedToLoadDamaged": "Tệp bị hỏng hoặc không phải là tài liệu Word hoàn chỉnh.",
     "failedToLoadUnsupported": "Tài liệu này dùng nội dung mà trình soạn thảo này chưa đọc được.",
     "editorUnavailable": "Trình chỉnh sửa không thể tải",

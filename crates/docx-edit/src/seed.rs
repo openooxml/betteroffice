@@ -1948,6 +1948,14 @@ impl StyleResolver {
             .then(|| next.to_owned())
     }
 
+    /// Whether paragraph style `style_id`, or the default paragraph style when it is `None` or
+    /// unknown, numbers its paragraphs: its `numPr`, through `basedOn`, names a list other than 0.
+    pub(crate) fn paragraph_style_numbers(&self, style_id: Option<&str>) -> bool {
+        let style = self.resolve_paragraph_style(style_id);
+        let num_pr = field(style.paragraph.as_ref(), "numPr");
+        num_pr.is_some() && number(field(num_pr, "numId")) != Some(0.0)
+    }
+
     fn default_style(&self, style_type: &str) -> Option<&Value> {
         let id = match style_type {
             "paragraph" => self.default_paragraph.as_deref(),
@@ -4872,12 +4880,13 @@ fn floating_run_content(content: &Value) -> bool {
     match string(field(Some(content), "type")) {
         Some("drawing") => {
             let wrap = field(field(Some(content), "image"), "wrap");
-            string(field(wrap, "type")).is_some_and(|kind| kind != "inline")
+            string(field(wrap, "type")).is_some_and(|kind| !crate::bridge::inline_wrap(Some(kind)))
         }
         Some("shape") => {
             let shape = field(Some(content), "shape");
-            field(shape, "wrap").is_some_and(|wrap| !wrap.is_null())
-                || field(shape, "position").is_some_and(|position| !position.is_null())
+            field(shape, "wrap").is_some_and(|wrap| {
+                !wrap.is_null() && !crate::bridge::inline_wrap(string(field(Some(wrap), "type")))
+            }) || field(shape, "position").is_some_and(|position| !position.is_null())
         }
         _ => false,
     }

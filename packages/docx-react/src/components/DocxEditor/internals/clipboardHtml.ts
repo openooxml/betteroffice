@@ -17,7 +17,7 @@ import { clipboardHtmlStyles, formattedFontFamily } from './clipboardHtmlStyles'
 
 export const MAX_FORMATTED_HTML_LENGTH = 2_000_000;
 export const MAX_FORMATTED_HTML_DEPTH = 200;
-export const MAX_FORMATTED_HTML_RUNS = 1_000;
+export const MAX_FORMATTED_HTML_RUNS = 5_000;
 export const MAX_FORMATTED_HTML_TEXT = 200_000;
 export const MAX_FORMATTED_HTML_PARAGRAPHS = 1_000;
 
@@ -836,13 +836,17 @@ function walkFormattedBody(
   };
   const append = (raw: string, state: HtmlRunState): boolean => {
     if (state.pre) {
-      const lines = raw.replace(/\r\n?/g, '\n').split(NBSP).join(' ').split(/[\n\f\v\u2028\u2029]/);
-      for (const [index, line] of lines.entries()) {
+      const text = raw.replace(/\r\n?/g, '\n').split(NBSP).join(' ');
+      const breaks = /[\n\f\v\u2028\u2029]/g;
+      for (let from = 0, index = 0; ; index++) {
+        const found = breaks.exec(text);
+        const line = text.slice(from, found ? found.index : text.length);
         if (index) lineBreak();
         if (failed || (line && !appendRun(line, state))) return false;
         if (line) endsInSpace = false;
+        if (!found) return true;
+        from = breaks.lastIndex;
       }
-      return true;
     }
     let text = normalizeTextPart(raw);
     if ((!runs.length || endsInSpace) && text.startsWith(' ')) text = text.slice(1);

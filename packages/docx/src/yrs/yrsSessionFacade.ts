@@ -476,7 +476,6 @@ export function wrapSession(
       let opened: string;
       try {
         forgetMaterializedSource(session);
-        forgetSavedListDefinitions(facade);
         opened = session.open_docx(
           source,
           seedStories,
@@ -486,6 +485,7 @@ export function wrapSession(
       } catch (error) {
         throw normalizeSeedError(error);
       }
+      forgetSavedListDefinitions(facade);
       proposals.reset();
       return opened;
     });
@@ -833,11 +833,11 @@ export function wrapSession(
       mutate(() => {
         try {
           forgetMaterializedSource(session);
-          forgetSavedListDefinitions(facade);
           bootstrap.call(session, state, metadata, bytes === undefined ? undefined : source);
         } catch (error) {
           throw peerMetadataFailure(error);
         }
+        forgetSavedListDefinitions(facade);
         session.set_media_tokens(options.mediaTokens === true);
         markDirty('all');
         resetMedia();
@@ -1736,13 +1736,22 @@ export function wrapSession(
     },
     styleLanguages: () => JSON.parse(session.style_languages_json()),
     patchStyleLanguagesXml: source => session.patch_style_languages_xml(source),
-    ensureListDefinition: (story, paraId, kind) => {
+    ensureListDefinition: (story, paraId, kind, lead) => {
       ensureUndo(story);
-      const { listDef, ...attrs } = mutate(
-        () => JSON.parse(session.ensure_list_definition(story, paraId, kind)) as YrsParagraphAttrs & { listDef?: unknown }
+      const { listDef, listLevelIndents, ...attrs } = mutate(
+        () => JSON.parse(
+          lead === undefined
+            ? session.ensure_list_definition(story, paraId, kind)
+            : session.ensure_list_definition_after(story, paraId, kind, lead)
+        ) as YrsParagraphAttrs & { listDef?: unknown; listLevelIndents?: unknown }
       );
-      return listDef === undefined ? attrs : { ...attrs, other: { ...attrs.other, listDef } };
+      if (listDef === undefined && listLevelIndents === undefined) return attrs;
+      const other: Record<string, unknown> = { ...attrs.other };
+      if (listDef !== undefined) other.listDef = listDef;
+      if (listLevelIndents !== undefined) other.listLevelIndents = listLevelIndents;
+      return { ...attrs, other };
     },
+    paragraphStyleNumbers: (story, paraId) => session.paragraph_style_numbers?.(story, paraId),
     createdListDefinitions: () => JSON.parse(session.created_list_definitions_json()),
     listDefinitionKeysInUse: () => JSON.parse(session.list_definition_keys_in_use_json()),
     formatTextTarget: (target, delta) => {
@@ -1849,8 +1858,8 @@ export function wrapSession(
       markDirty('all');
       const json = mutate(() => {
         forgetMaterializedSource(session);
-        forgetSavedListDefinitions(facade);
         const compared = session.compare_docx_json(original, revised, options);
+        forgetSavedListDefinitions(facade);
         proposals.reset();
         return compared;
       });

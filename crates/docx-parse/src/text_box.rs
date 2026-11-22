@@ -1,5 +1,9 @@
 //! Text-box drawing metadata and story-dispatch boundary.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::ptr::from_ref;
+
 use serde::{Deserialize, Serialize};
 
 use crate::drawingml::{
@@ -13,6 +17,48 @@ use crate::xml::XmlElement;
 
 const DEFAULT_MARGIN_EMU: f64 = 91_440.0;
 const MAX_SAFE_DRAWING_NUMBER: f64 = 1_000_000_000_000.0;
+
+type BookmarkIndex = HashMap<*const XmlElement, bool>;
+
+struct Scope {
+    index: BookmarkIndex,
+}
+
+thread_local! {
+    static SCOPE: RefCell<Option<Scope>> = const { RefCell::new(None) };
+}
+
+struct BookmarkScope<'a>(Option<&'a XmlElement>);
+
+impl<'a> BookmarkScope<'a> {
+    fn open(root: &'a XmlElement) -> Self {
+        SCOPE
+            .try_with(|slot| {
+                let mut scope = slot.borrow_mut();
+                if scope.is_some() {
+                    return Self(None);
+                }
+                *scope = Some(Scope {
+                    index: index_bookmark_boundaries(root),
+                });
+                Self(Some(root))
+            })
+            .unwrap_or(Self(None))
+    }
+}
+
+impl Drop for BookmarkScope<'_> {
+    fn drop(&mut self) {
+        if self.0.is_some() {
+            SCOPE.with(|slot| *slot.borrow_mut() = None);
+        }
+    }
+}
+
+pub(crate) fn with_bookmark_scope<T>(root: &XmlElement, parse: impl FnOnce() -> T) -> T {
+    let _scope = BookmarkScope::open(root);
+    parse()
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -198,11 +244,48 @@ pub(crate) fn capture_bookmark_source(shape: &mut Shape, source: &XmlElement) {
     }
     shape.drawing_xml = Some(source.to_bookmarked_raw_inline_xml());
     shape.drawing_run_xml = None;
-    shape.drawing_model = Some(serde_json::json!({
+    let bodies = shape_text_bodies(shape);
+    let hashes: Vec<_> = bodies
+        .iter()
+        .map(|body| content_sha256(&body.content))
+        .collect();
+    let mut model = serde_json::json!({
         "frame": crate::smart_art::frame_model(shape),
         "otherSha256": crate::smart_art::other_model_sha256(shape),
-        "textBoxContentSha256": shape_text_bodies(shape).iter().map(|body| content_sha256(&body.content)).collect::<Vec<_>>()
-    }));
+        "textBoxContentSha256": hashes,
+    });
+    if shape.children.is_some()
+        && let Some(drawing) = first_drawing(source)
+        && let Some((sources, _)) = crate::shape::group_text_box_sources(drawing)
+        && sources.len() == bodies.len()
+    {
+        let mut containers = Vec::new();
+        content_paths(drawing, &mut Vec::new(), &mut containers);
+        let mask: Vec<bool> = sources.values().map(Option::is_some).collect();
+        if mask.iter().filter(|kept| **kept).count() == containers.len() {
+            model["textBoxBodies"] = serde_json::json!(mask);
+        }
+    }
+    shape.drawing_model = Some(model);
+}
+
+fn first_drawing(element: &XmlElement) -> Option<&XmlElement> {
+    if element.name == "w:drawing" {
+        return Some(element);
+    }
+    element.child_elements().find_map(first_drawing)
+}
+
+pub(crate) fn content_paths(element: &XmlElement, path: &mut Vec<u32>, paths: &mut Vec<Vec<u32>>) {
+    if element.name == "w:txbxContent" {
+        paths.push(path.clone());
+        return;
+    }
+    for (index, child) in element.child_elements().enumerate() {
+        path.push(index as u32);
+        content_paths(child, path, paths);
+        path.pop();
+    }
 }
 
 /// The group model without its frame, text-box text and media sources, which a replay
@@ -261,25 +344,61 @@ pub(crate) fn contains_text_box(element: &XmlElement) -> bool {
 }
 
 pub(crate) fn has_bookmarked_text_box(element: &XmlElement) -> bool {
-    has_block_bookmarks(element, false)
+    SCOPE
+        .try_with(|slot| {
+            let scope = slot.borrow();
+            has_block_bookmarks(element, false, scope.as_ref().map(|scope| &scope.index))
+        })
+        .unwrap_or_else(|_| has_block_bookmarks(element, false, None))
 }
 
-fn has_block_bookmarks(element: &XmlElement, in_text_box: bool) -> bool {
+fn index_bookmark_boundaries(root: &XmlElement) -> BookmarkIndex {
+    let mut index = BookmarkIndex::new();
+    let mut pending = vec![(root, root.child_elements(), false)];
+    while let Some((element, children, contains_boundary)) = pending.last_mut() {
+        if let Some(child) = children.next() {
+            pending.push((child, child.child_elements(), false));
+        } else {
+            index.insert(from_ref(*element), *contains_boundary);
+            let subtree_has_boundary = *contains_boundary || is_bookmark_boundary(element);
+            pending.pop();
+            if let Some((_, _, parent_contains_boundary)) = pending.last_mut() {
+                *parent_contains_boundary |= subtree_has_boundary;
+            }
+        }
+    }
+    index
+}
+
+fn has_block_bookmarks(
+    element: &XmlElement,
+    in_text_box: bool,
+    index: Option<&BookmarkIndex>,
+) -> bool {
+    if index.is_some_and(|index| index.get(&from_ref(element)) == Some(&false)) {
+        return false;
+    }
     let in_text_box = in_text_box || element.name == "w:txbxContent";
     if in_text_box && element.name == "w:p" {
-        return contains_bookmark_boundary(element);
+        return contains_bookmark_boundary(element, index);
     }
     (in_text_box && crate::block::has_direct_block_bookmark(element))
         || element
             .child_elements()
-            .any(|child| has_block_bookmarks(child, in_text_box))
+            .any(|child| has_block_bookmarks(child, in_text_box, index))
 }
 
-fn contains_bookmark_boundary(element: &XmlElement) -> bool {
-    element.child_elements().any(|child| {
-        matches!(child.local_name(), "bookmarkStart" | "bookmarkEnd")
-            || contains_bookmark_boundary(child)
-    })
+fn contains_bookmark_boundary(element: &XmlElement, index: Option<&BookmarkIndex>) -> bool {
+    if index.is_some_and(|index| index.get(&from_ref(element)) == Some(&false)) {
+        return false;
+    }
+    element
+        .child_elements()
+        .any(|child| is_bookmark_boundary(child) || contains_bookmark_boundary(child, index))
+}
+
+fn is_bookmark_boundary(element: &XmlElement) -> bool {
+    matches!(element.local_name(), "bookmarkStart" | "bookmarkEnd")
 }
 
 pub(crate) fn source_xml(source: &XmlElement) -> String {
@@ -486,6 +605,59 @@ mod tests {
             .root()
             .unwrap()
             .clone()
+    }
+
+    #[test]
+    fn temporary_text_boxes_walk_inside_an_open_scope() {
+        let paragraph = root(r#"<w:p xmlns:w="w"/>"#);
+        let _scope = BookmarkScope::open(&paragraph);
+        let text_box = |bookmarked| {
+            let boundary = if bookmarked { "<w:bookmarkStart/>" } else { "" };
+            root(&format!(
+                r#"<w:pict xmlns:w="w"><w:txbxContent><w:p>{boundary}</w:p></w:txbxContent></w:pict>"#
+            ))
+        };
+
+        for first in [true, false] {
+            let mut temporary = Some(text_box(first));
+            let element = temporary.as_ref().unwrap();
+            let address = from_ref(element);
+            assert_eq!(has_bookmarked_text_box(element), first);
+            drop(temporary.take());
+
+            let element = temporary.insert(text_box(!first));
+            assert_eq!(from_ref(element), address);
+            assert_eq!(has_bookmarked_text_box(element), !first);
+        }
+        SCOPE.with(|slot| {
+            let scope = slot.borrow();
+            let index = &scope.as_ref().unwrap().index;
+            assert_eq!(index.len(), 1);
+            assert_eq!(index.get(&from_ref(&paragraph)), Some(&false));
+        });
+    }
+
+    #[test]
+    fn scoped_text_box_queries_match_unscoped_walks() {
+        for (boundary, bookmarked) in [("", false), ("<w:bookmarkEnd/>", true)] {
+            let paragraph = root(&format!(
+                r#"<w:p xmlns:w="w"><w:pict><w:txbxContent><w:p>{boundary}</w:p></w:txbxContent></w:pict></w:p>"#
+            ));
+            let pict = paragraph.child_by_full_name("w:pict").unwrap();
+            let unscoped = has_bookmarked_text_box(pict);
+            assert_eq!(unscoped, bookmarked);
+
+            let _scope = BookmarkScope::open(&paragraph);
+            {
+                let _nested = BookmarkScope::open(pict);
+                assert_eq!(has_bookmarked_text_box(pict), unscoped);
+            }
+            SCOPE.with(|slot| {
+                let scope = slot.borrow();
+                let scope = scope.as_ref().unwrap();
+                assert_eq!(scope.index.get(&from_ref(pict)), Some(&bookmarked));
+            });
+        }
     }
 
     #[test]
