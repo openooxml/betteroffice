@@ -201,10 +201,11 @@ export function createPptxWorkerSession(
     if (pipe) presentationCollaborationPipes.set(facade, pipe);
     const sharedInput = presentationSharedInputs.get(opened);
     if (sharedInput) presentationSharedInputs.set(facade, {
+      cancel: (ticket) => sharedInput.cancel?.(ticket) ?? false,
       subscribeSent: (listener) => sharedInput.subscribeSent(listener),
-      submit(intent, basis, after) {
+      submit(intent, basis, after, waitForAfter) {
         current();
-        const submission = sharedInput.submit(intent, basis, after);
+        const submission = sharedInput.submit(intent, basis, after, waitForAfter);
         return { ticket: submission.ticket, operation: perform(() => submission.operation) };
       },
     });

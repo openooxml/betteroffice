@@ -95,6 +95,8 @@ export type CommandLane = 'input' | 'collab' | 'background';
 export type SubmitOptions<X> = {
     lane?: CommandLane;
     after?: CommandTicket;
+    /** Keep this command unsent until its dependency settles. */
+    waitForAfter?: boolean;
     expectVersion?: boolean;
     inputTime?: number;
     lastInputTime?: number;
