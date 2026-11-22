@@ -11,7 +11,7 @@ export default defineConfig({
   },
   format: ['esm'],
   dts: { resolve: true },
-  splitting: true,
+  splitting: false,
   sourcemap: false,
   // scripts/build-fonts-decoder.ts writes decoder/ on its own, so a rebuild here must not delete it.
   clean: ['!decoder/**'],

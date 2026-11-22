@@ -5,6 +5,7 @@ import type { FontPackDiagnostic } from '../../../shared/fontPackDiagnostics';
 import {
   getFontCdnConfiguration, JSDELIVR, setFontCdnConfiguration, STALL_MS, type FontCdnConfiguration,
 } from '../../../shared/office-session/fontCdn';
+import { implicitFontCdnBases, type ImplicitFontCdnBase } from '../../../shared/office-session/fontCdnCooldown';
 
 export { fontCdnCacheKey, isBrowserFontPage, workerFontCdnConfiguration, type FontCdnConfiguration } from '../../../shared/office-session/fontCdn';
 
@@ -25,17 +26,6 @@ class ImplicitFontCdnError extends Error {
 
 const COOLDOWN_MS = 60_000;
 
-type Failure = { error: ImplicitFontCdnError; until: number };
-
-interface ImplicitBase {
-  transfer: Promise<void>;
-  unavailable?: Failure;
-  invalid: Map<string, Failure>;
-  warnedUntil: number;
-}
-
-const implicitBases = new Map<string, ImplicitBase>();
-
 class HttpFontError extends Error {
   constructor(file: string, readonly status: number) {
     super(`Failed to fetch bundled font ${file}: HTTP ${status}`);
@@ -44,7 +34,7 @@ class HttpFontError extends Error {
 
 type CheckFontAsset = <T>(check: () => T | Promise<T>) => Promise<T>;
 
-function coolingFailure(base: ImplicitBase, href: string): ImplicitFontCdnError | undefined {
+function coolingFailure(base: ImplicitFontCdnBase, href: string): Error | undefined {
   const now = Date.now();
   if (base.unavailable && now < base.unavailable.until) return base.unavailable.error;
   const invalid = base.invalid.get(href);
@@ -55,6 +45,7 @@ function coolingFailure(base: ImplicitBase, href: string): ImplicitFontCdnError 
 export async function loadImplicitFontAsset<T>(
   file: string, url: URL, pack: Pack, load: (bytes: ArrayBuffer, check: CheckFontAsset) => Promise<T>,
 ): Promise<T> {
+  const implicitBases = implicitFontCdnBases();
   const key = url.origin + url.pathname.split('/assets/', 1)[0];
   let state = implicitBases.get(key);
   if (!state) {
@@ -190,7 +181,7 @@ export function configureFontCdn(options: FontCdnOptions): void {
     }
     baseUrl = url.href;
   }
-  implicitBases.clear();
+  implicitFontCdnBases().clear();
   setFontCdnConfiguration({ baseUrl, timeoutMs }, true);
 }
 
