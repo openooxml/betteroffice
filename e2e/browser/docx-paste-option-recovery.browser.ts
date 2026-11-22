@@ -89,10 +89,28 @@ for (const scenario of ['PASTE_ON_CHECKPOINT', 'PASTE_BEFORE_CHECKPOINT', 'CONTR
       await input.press('ControlOrMeta+v');
       prefix += 'Rich';
       const control = page.getByRole('button', { name: 'Paste Options (Ctrl)' });
+      const openMenu = async () => {
+        if (await control.getAttribute('aria-expanded') !== 'true') await control.click();
+      };
+      /**
+       * Picks `name` and confirms on the menu that it is checked. The editor drops a pick, sending
+       * nothing, until it has taken up the paste before it, so an unchecked pick is made again.
+       */
       const choose = async (name: string) => {
         const before = await version();
-        await control.click();
-        await page.getByRole('menuitemradio', { name }).click();
+        const item = page.getByRole('menuitemradio', { name });
+        let taken = false;
+        for (let attempt = 0; attempt < 3 && !taken; attempt++) {
+          if (attempt) await page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
+          await openMenu();
+          if (await item.getAttribute('aria-checked') !== 'true') {
+            await item.click();
+            await openMenu();
+          }
+          taken = await item.getAttribute('aria-checked') === 'true';
+          await page.keyboard.press('Escape');
+        }
+        expect(taken, `Paste Options dropped "${name}" three times: the editor never took up the paste before it`).toBe(true);
         await reach(before + 1);
       };
       await expect(control).toBeVisible();
