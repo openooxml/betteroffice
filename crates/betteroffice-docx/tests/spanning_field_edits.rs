@@ -268,7 +268,10 @@ fn replacing_the_closing_paragraph_of_a_spanning_field_keeps_the_field_spanning_
     let saved = edited(CLOSING, text);
     let [opening, middle, second_middle, _] = table_of_contents_paragraphs();
     for kept in [opening, middle, second_middle, after_paragraph()] {
-        assert!(saved.contains(&kept), "source bytes differ in {kept}: {saved}");
+        assert!(
+            saved.contains(&kept),
+            "source bytes differ in {kept}: {saved}"
+        );
     }
     let closing_end = format!("{text}</w:t></w:r>{}</w:p>", field_character("end"));
     assert!(
@@ -290,7 +293,10 @@ fn replacing_the_closing_paragraph_of_a_spanning_field_keeps_a_custom_xml_wrappe
         after_paragraph()
     );
     let saved = saved_after_edit(&wrapped, CLOSING, "Appendix, edited").unwrap();
-    assert!(saved.contains(&wrapped), "the custom XML wrapper is lost: {saved}");
+    assert!(
+        saved.contains(&wrapped),
+        "the custom XML wrapper is lost: {saved}"
+    );
     assert_balanced(&saved, AFTER_TEXT);
 }
 
@@ -310,7 +316,10 @@ fn a_closing_paragraph_edit_beside_an_unwritable_form_field_is_refused_as_on_mai
         .concat(),
     );
     let after = format!("{}{form_field}", after_paragraph());
-    let refusal = format!("{:?}", saved_after_edit(&after, CLOSING, "Appendix, edited"));
+    let refusal = format!(
+        "{:?}",
+        saved_after_edit(&after, CLOSING, "Appendix, edited")
+    );
     assert!(
         refusal.starts_with("Err(") && refusal.contains("form field data"),
         "{refusal}"

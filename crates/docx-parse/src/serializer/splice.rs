@@ -1588,8 +1588,7 @@ fn carry_field_characters(source: &str, written: &str) -> Option<String> {
         }
         carried.push_str(&written[close..]);
         carried
-    } else if wanted.first() == Some(&"begin")
-        && wanted[1..].iter().all(|kind| *kind == "separate")
+    } else if wanted.first() == Some(&"begin") && wanted[1..].iter().all(|kind| *kind == "separate")
     {
         let written_tags = tags(written)?;
         let (inner, elements) = paragraph_elements(&written_tags)?;
@@ -1655,8 +1654,7 @@ fn lone_field_end(xml: &str, tags: &[Tag<'_>]) -> bool {
     let [tag] = &inner[character.clone()] else {
         return false;
     };
-    let kind = attribute(tag, "w:fldCharType")
-        .and_then(|value| unescaped(xml, value));
+    let kind = attribute(tag, "w:fldCharType").and_then(|value| unescaped(xml, value));
     local_name(open.name) == "r"
         && close.end
         && tag.empty
@@ -7480,7 +7478,9 @@ mod tests {
                 &[written_opening, middle, edited_closing, outside],
                 &[2]
             ),
-            Some(body(&format!("{opening}{middle}{carried_closing}{outside}")))
+            Some(body(&format!(
+                "{opening}{middle}{carried_closing}{outside}"
+            )))
         );
         let edited_middle = "<w:p><w:r><w:t>Second entry, edited</w:t></w:r></w:p>";
         assert_eq!(
