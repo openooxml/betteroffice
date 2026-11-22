@@ -802,7 +802,9 @@ fn wrapped_lines(
     let count = xlsx_render::wrap::wrapped_lines_kept(lines.len(), wrap);
     lines.truncate(count);
     if let Some(first) = pieces.first()
-        && pieces.iter().any(|piece| piece.font_size != first.font_size)
+        && pieces
+            .iter()
+            .any(|piece| piece.font_size != first.font_size)
         && let Some((block_top, metrics)) = wrapped_line_metrics(y, font_size, wrap, &lines)
     {
         let Some(clip) = clip else {

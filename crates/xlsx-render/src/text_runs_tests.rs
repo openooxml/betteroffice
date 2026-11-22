@@ -468,12 +468,12 @@ fn uniform_runs_of_a_different_size_keep_that_sizes_wrap_layout() {
     workbook.styles.fonts[0].size_pt = Some(14.0);
     let plain = build_display_list(&workbook, SheetId(0), &VIEW).unwrap();
     let layout = |list: &DisplayList| match command(list, stored) {
-        DrawCmd::Text { y, wrap, .. } => (*y, *wrap),
+        DrawCmd::Text { wrap: Some(wrap), .. } => (wrap.line_height, wrap.max_lines),
         _ => unreachable!(),
     };
     assert!(run_pieces(command(&rich, stored)).is_some());
-    assert!(layout(&rich).1.unwrap().max_lines.is_some());
-    assert_eq!(layout(&rich).1, layout(&plain).1);
+    assert!(layout(&rich).1.is_some());
+    assert_eq!(layout(&rich), layout(&plain));
 }
 
 #[test]
@@ -811,9 +811,8 @@ fn run_sizes_at_the_edges_of_the_accepted_range() {
         (3, 4, 409.000_001, None),
     ];
     let workbook = wrapped_workbook(stored);
-    let source = cases.map(|(start, end, size, _)| {
-        rich_run(start, end, |style| style.size_pt = Some(size))
-    });
+    let source =
+        cases.map(|(start, end, size, _)| rich_run(start, end, |style| style.size_pt = Some(size)));
     let list = with_runs(&workbook, &[("A1", &source)]);
     let sizes: Vec<_> = runs_of(&list, stored)
         .iter()
