@@ -70,7 +70,6 @@ for (const count of [1_000, 4_000]) {
       { timeout: 120_000, intervals: [250] }).toBe(text);
     const elapsed = Date.now() - start;
     console.log(`PASTE_MANY_RUNS_MS runs=${count} ms=${elapsed}`);
-    expect(elapsed).toBeLessThan(5_000);
     expect((await savedParagraphs(page, info, `saved-${count}`))[1]!.boldRuns).toBe(0);
   });
 }

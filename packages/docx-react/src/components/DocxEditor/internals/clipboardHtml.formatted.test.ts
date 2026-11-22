@@ -167,19 +167,23 @@ test('the text budget falls back to plain paste', () => {
   imported('<p><b>' + 'x'.repeat(MAX_FORMATTED_HTML_TEXT) + '</b></p>', ['x'.repeat(MAX_FORMATTED_HTML_TEXT)]);
 });
 
+function fastestPair(first: string, second: string): [number, number] {
+  let a = Infinity;
+  let b = Infinity;
+  for (let round = 0; round < 3; round++) {
+    let start = performance.now();
+    parseClipboardHtml(first, formatted);
+    a = Math.min(a, performance.now() - start);
+    start = performance.now();
+    parseClipboardHtml(second, formatted);
+    b = Math.min(b, performance.now() - start);
+  }
+  return [Math.max(a, 1), Math.max(b, 1)];
+}
+
 function growth(html: (size: number) => string, size: number): number {
-  const best = (input: string) => {
-    let fastest = Infinity;
-    for (let round = 0; round < 3; round++) {
-      const start = performance.now();
-      parseClipboardHtml(input, formatted);
-      fastest = Math.min(fastest, performance.now() - start);
-    }
-    return Math.max(fastest, 1);
-  };
-  const small = html(size);
-  const large = html(size * 4);
-  const ratio = best(large) / best(small);
+  const [small, large] = fastestPair(html(size), html(size * 4));
+  const ratio = large / small;
   console.log(`PARSE_GROWTH size=${size} ratio=${ratio.toFixed(2)}`);
   return ratio;
 }
@@ -205,6 +209,9 @@ test('the paragraph budget counts blank lines', () => {
   expect(parseClipboardHtml(html(MAX_FORMATTED_HTML_PARAGRAPHS), formatted)).toBeNull();
   imported(html(MAX_FORMATTED_HTML_PARAGRAPHS - 1), ['A', ...Array(MAX_FORMATTED_HTML_PARAGRAPHS - 2).fill(''), 'B']);
   expect(parseClipboardHtml(html(1_900_000), formatted)).toBeNull();
+  const [blank, control] = fastestPair(html(1_900_000), '<pre><b>A' + 'x'.repeat(1_900_000) + 'B</b></pre>');
+  console.log(`PARSE_VS_CONTROL ratio=${(blank / control).toFixed(2)}`);
+  expect(blank / control).toBeLessThan(5);
 }, 120_000);
 
 test('a table and the text after it count as one paragraph of the budget', () => {
