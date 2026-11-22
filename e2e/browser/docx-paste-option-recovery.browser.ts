@@ -8,10 +8,6 @@ interface RecoveryProbe {
   incarnation: number;
   version: number;
   checkpoints: Promise<number>[];
-  /** Sequence numbers: the last command sent, the last one acknowledged, the last one a frame covers. */
-  sent: number;
-  acked: number;
-  framed: number;
   /** Every command sent, in order, and the outcome of each sequence number. */
   commands: { seq: number; kind: string }[];
   outcomes: Record<number, string>;
@@ -23,7 +19,7 @@ declare global {
 
 async function observeWorker(page: Page) {
   await page.addInitScript(() => {
-    const probe: RecoveryProbe = { incarnation: 0, version: 0, checkpoints: [], sent: -1, acked: -1, framed: -1, commands: [], outcomes: {} };
+    const probe: RecoveryProbe = { incarnation: 0, version: 0, checkpoints: [], commands: [], outcomes: {} };
     window.__pasteRecovery = probe;
     window.Worker = class extends Worker {
       override postMessage(message: DocxEngineWorkerRequest, options?: Transferable[] | StructuredSerializeOptions) {
@@ -38,10 +34,7 @@ async function observeWorker(page: Page) {
             this.addEventListener('message', reply);
           }));
         }
-        if (this === probe.worker && message.type === 'edit') {
-          probe.sent = Math.max(probe.sent, message.command.seq);
-          probe.commands.push({ seq: message.command.seq, kind: message.command.kind });
-        }
+        if (this === probe.worker && message.type === 'edit') probe.commands.push({ seq: message.command.seq, kind: message.command.kind });
         super.postMessage(message, Array.isArray(options) ? { transfer: options } : options);
       }
       constructor(url: string | URL, options?: WorkerOptions) {
@@ -53,17 +46,10 @@ async function observeWorker(page: Page) {
             probe.worker = this;
             probe.incarnation = data.commandInitial.incarnation;
             probe.version = data.commandInitial.version;
-            probe.sent = -1;
-            probe.acked = data.commandInitial.throughSeq;
-            probe.framed = data.commandInitial.frame?.coversThroughSeq ?? -1;
           }
-          if (this !== probe.worker) return;
-          const frame = data.commandAck?.frame ?? data.commandFrame?.frame;
-          if (frame) probe.framed = Math.max(probe.framed, frame.coversThroughSeq);
-          if (!data.commandAck) return;
+          if (this !== probe.worker || !data.commandAck) return;
           for (const outcome of data.commandAck.outcomes) probe.outcomes[outcome.seq] = outcome.status;
           probe.version = Math.max(probe.version, data.commandAck.version);
-          probe.acked = Math.max(probe.acked, data.commandAck.throughSeq);
         });
       }
     };
@@ -108,21 +94,8 @@ for (const scenario of ['PASTE_ON_CHECKPOINT', 'PASTE_BEFORE_CHECKPOINT', 'CONTR
       await input.press('ControlOrMeta+v');
       prefix += 'Rich';
       const control = page.getByRole('button', { name: 'Paste Options (Ctrl)' });
-      /**
-       * The editor takes a pick only once it has taken up the paste before it, which is later than the
-       * worker's acknowledgement, and drops one made sooner without sending anything. So each pick waits
-       * until the last command sent is acknowledged and covered by a frame, with nothing sent for two frames.
-       */
-      const settled = () => expect.poll(() => page.evaluate(async () => {
-        const probe = window.__pasteRecovery;
-        const read = () => ({ sent: probe.sent, covered: probe.acked >= probe.sent && probe.framed >= probe.sent });
-        const first = read();
-        await new Promise<void>(done => requestAnimationFrame(() => requestAnimationFrame(() => done())));
-        const second = read();
-        return first.covered && second.covered && first.sent === second.sent;
-      })).toBe(true);
+      /** A pick is made as soon as the one before it is acknowledged: the editor has to take it then, too. */
       const choose = async (name: string) => {
-        await settled();
         const before = await version();
         const from = await page.evaluate(() => window.__pasteRecovery.commands.length);
         await control.click();
