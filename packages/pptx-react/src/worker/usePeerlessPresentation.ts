@@ -21,7 +21,7 @@ import { generateCollaborationClientId } from '../collaborationClientId';
 import { createCommandFrameImages, createCommandFramePainter, type CommandFrameImages } from './commandFramePainter';
 import { createLocalEchoPainter } from './localEchoPainter';
 import {
-  createPeerlessViewStore, installCoveringFrame, peerlessEchoStores,
+  createPeerlessViewStore, installCoveringFrame, peerlessEchoStores, PptxCommandRefusedError,
   type PeerlessConfirmedFrame, type PeerlessViewSnapshot, type PeerlessViewStore,
 } from './peerlessViewStore';
 
@@ -491,7 +491,8 @@ export function usePeerlessPresentation(
           paintEcho: (view) => paintLocal(view),
           restoreLine: (view) => paintLocal(view, true),
           resync: () => framePainter?.resync?.(),
-        }, { onError: (error) => callbacks.current.onError?.(new PptxWorkerEditorFailedError(error)) });
+        }, { onError: (error) => callbacks.current.onError?.(error instanceof PptxCommandRefusedError ? error
+          : new PptxWorkerEditorFailedError(error)) });
         const original = base;
         const getSnapshot = original.getSnapshot.bind(original);
         const subscribePresentation = original.subscribePresentation.bind(original);

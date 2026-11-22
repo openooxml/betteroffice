@@ -28,7 +28,7 @@ import { definePptxPlugin } from '../plugins/definePptxPlugin';
 import type { PptxGeometryTarget, PptxPluginContext, PptxPluginEvent, PptxPluginGeometry } from '../plugins/types';
 import type { PptxAsyncEditorApi } from './createPeerlessEditorApi';
 import * as peerlessEditorApi from './createPeerlessEditorApi';
-import type { PeerlessConfirmedFrame, PeerlessViewSnapshot } from './peerlessViewStore';
+import { PptxCommandRefusedError, type PeerlessConfirmedFrame, type PeerlessViewSnapshot } from './peerlessViewStore';
 import { peerlessPainterFactories, peerlessSessionOpener, type PeerlessPresentation } from './usePeerlessPresentation';
 import { PeerlessSlideStrip } from './PeerlessSlideStrip';
 import { UNAVAILABLE_PPTX_COMMANDS } from '../commands/createPptxCommandStore';
@@ -2115,8 +2115,8 @@ test('p5_refused_field_commit_allows_later_plain_composition', async () => {
     expect(await value.savedParagraphs()).toEqual(['A12B', 'abc語']);
     expect(value.outcomes.get(value.sent[value.sent.length - 2].seq)).toMatchObject({ status: 'applied', committed: true });
     expect(value.errors.mock.calls.map(([error]) => error)).toMatchObject([
-      { cause: { operation: 'compositionCommit', outcome: { reason: 'unsupported' } } },
-      { cause: { operation: 'compositionEnd', outcome: { reason: 'dependency-refused' } } },
+      { code: 'command-refused', operation: 'compositionCommit', outcome: { reason: 'unsupported' } },
+      { code: 'command-refused', operation: 'compositionEnd', outcome: { reason: 'dependency-refused' } },
     ]);
   } finally { await value.dispose(); }
 });
@@ -3207,6 +3207,27 @@ describe('peerless stage fit', () => {
       value.view.unmount();
       await flushStage(images.releaseAll);
     }
+  });
+
+  test('a refused click reaches onError as a non-fatal command refusal', async () => {
+    const value = session(true);
+    value.client.refuse = (intent) => intent.kind === 'selectAtPoint' ? 'invalid-payload' : undefined;
+    const errors = mock((_error: Error) => {});
+    const view = render(<PptxEditor fonts={[]} file={file} onError={errors} />);
+    try {
+      await flushStage(value.admit);
+      const canvas = view.getByTestId('pptx-slide-canvas');
+      const pointer = { pointerId: 1, isPrimary: true, button: 0, clientX: 20, clientY: 27.5 };
+      await flushStage(() => { fireEvent.pointerDown(canvas, pointer); fireEvent.pointerUp(canvas, pointer); });
+      await waitFor(() => expect(errors).toHaveBeenCalledTimes(1));
+      const error = errors.mock.calls[0][0];
+      expect(error).toBeInstanceOf(PptxCommandRefusedError);
+      expect(error).not.toBeInstanceOf(pptxWorker.PptxWorkerEditorFailedError);
+      expect(error).toMatchObject({ code: 'command-refused', operation: 'selectAtPoint',
+        outcome: { status: 'refused', reason: 'invalid-payload' } });
+      expect(view.getByRole('application').getAttribute('aria-readonly')).toBe('false');
+      expect(view.queryByTestId('pptx-error')).toBeNull();
+    } finally { view.unmount(); }
   });
 
   test('read_only_allows_selection_and_blocks_edits_until_mode_ack', async () => {
