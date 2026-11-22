@@ -341,7 +341,7 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
         }}
         onPointerDown={(event) => {
           if (pluginEventStore(event.nativeEvent) || inPluginChrome(event.target) || review.diff) return;
-          if (event.target instanceof Element) event.currentTarget.style.cursor = getComputedStyle(event.target).cursor;
+          if (insertion.tool === 'select' && event.target instanceof Element) event.currentTarget.style.cursor = getComputedStyle(event.target).cursor;
           if (!insertion.onPointerDown(event) && !shapes.onPointerDown(event)) selection.onPointerDown(event);
         }}
         onPointerMove={(event) => {

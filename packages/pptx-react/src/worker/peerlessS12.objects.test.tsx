@@ -123,4 +123,8 @@ test('the capturing stage keeps the cursor shown when a press starts', async () 
   expect(value.stage.style.cursor).toBe(getComputedStyle(handle).cursor);
   expect(value.stage.style.cursor).toContain('resize');
   act(() => { fireEvent.pointerUp(value.stage, value.point(value.box.x + value.box.w, value.box.y + value.box.h)); });
+  await act(async () => { await value.api.commands!.execute('tool', { value: 'shape:rect' }); });
+  act(() => { fireEvent.pointerDown(value.view.getByTestId('pptx-resize-se'), value.point(value.box.x + value.box.w, value.box.y + value.box.h)); });
+  expect(value.stage.style.cursor).toBe('crosshair');
+  act(() => { fireEvent.pointerCancel(value.stage, value.point(value.box.x + value.box.w, value.box.y + value.box.h)); });
 });
