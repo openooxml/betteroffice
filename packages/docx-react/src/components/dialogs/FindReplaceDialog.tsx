@@ -345,9 +345,9 @@ export function FindReplaceDialog({
     }
   }, [currentResult]);
 
-  // Initialize when dialog opens. Layout effects, so the Find field holds its text and the focus before
-  // the next key is read: text typed right after the shortcut that opened the dialog belongs to it.
+  // Initialize when dialog opens
   useLayoutEffect(() => {
+    focusReplaceRef.current = false;
     if (!isOpen) return;
     setSearchText(initialSearchText);
     setReplaceText('');

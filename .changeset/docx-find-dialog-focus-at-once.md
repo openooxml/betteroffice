@@ -2,4 +2,4 @@
 "@betteroffice/docx-react": patch
 ---
 
-The Find and Replace dialog takes the focus as it opens, and the Replace field as its row appears. Text typed right after the shortcut used to go into the document for the first tenth of a second.
+The Find and Replace dialog takes the focus as it opens and selects the text it starts with, and the Replace field takes the focus as its row appears. Text typed right after opening goes into the dialog.
