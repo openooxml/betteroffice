@@ -4,7 +4,7 @@ import { workerFontAssets } from './workerAssets';
 
 async function requireFontPackage(specifier: string): Promise<void> {
   const base = await workerFontAssets('base');
-  if (base && !base.urls) throw new TypeError(`Failed to resolve module specifier '${specifier}'`);
+  if (!base?.urls) throw new TypeError(`Failed to resolve module specifier '${specifier}'`);
 }
 
 export async function importFonts(): Promise<typeof fonts> {

@@ -6,7 +6,7 @@ export type FontPackUrls = Record<string, string>;
 export type FontPackSource = (pack: FontAssetKind) => Promise<FontPackUrls | undefined>;
 
 type FontPackAssets = { urls?: FontPackUrls; cdn?: FontCdnConfiguration; pageUrl?: string };
-export type WorkerFontPackSource = (pack: FontAssetKind) => Promise<FontPackAssets | undefined>;
+export type WorkerFontPackSource = (pack: FontAssetKind, options?: { fresh?: boolean }) => Promise<FontPackAssets | undefined>;
 export type FontPackRequest = { protocol: 1; kind: 'font-pack-request'; id: string; pack: FontAssetKind };
 export type FontPackReply = FontPackAssets & { protocol: 1; kind: 'font-pack-reply'; id: string; error?: string };
 
@@ -34,12 +34,11 @@ export function createFontPackResponder(
     receive(message: unknown): boolean {
       if (!isFontPackRequest(message)) return false;
       const { pack } = message;
+      const pageUrl = pack === 'base' ? globalThis.location?.href : undefined;
       let pending = packs.get(pack);
       if (!pending) {
         pending = Promise.resolve().then(async () => {
           const urls = await source(pack);
-          const pageUrl = pack === 'base' ? globalThis.location?.href : undefined;
-          if (pageUrl) return { urls, pageUrl };
           const cdn = pack === 'base' || pack === 'decoder' ? undefined : fontCdn?.();
           return cdn ? { urls, cdn } : { urls };
         });
@@ -49,7 +48,7 @@ export function createFontPackResponder(
       }
       const reply = (value: FontPackReply) => { try { post(value); } catch {} };
       pending.then(
-        (assets) => reply({ protocol: 1, kind: 'font-pack-reply', id: message.id, ...assets }),
+        (assets) => reply({ protocol: 1, kind: 'font-pack-reply', id: message.id, ...assets, ...(pageUrl ? { pageUrl } : {}) }),
         (error: unknown) => reply({ protocol: 1, kind: 'font-pack-reply', id: message.id,
           error: error instanceof Error ? error.message : String(error) }),
       );
@@ -80,15 +79,21 @@ export function createWorkerFontPacks(post: (message: FontPackRequest) => void, 
   const channel = ++nextChannel;
   let nextId = 0;
   let disposed = false;
+  let unresponsive: Set<string> | undefined;
   const packs = new Map<FontAssetKind, Promise<FontPackAssets | undefined>>();
   const pending = new Map<string, { finish(assets?: FontPackAssets, error?: Error): void }>();
-  const source: WorkerFontPackSource = (pack) => {
+  const source: WorkerFontPackSource = (pack, { fresh = false } = {}) => {
     if (disposed) return Promise.reject(new SessionFailure('disposed', 'Font pack channel is closed'));
-    let promise = packs.get(pack);
+    if (unresponsive) return Promise.resolve(undefined);
+    let promise = fresh ? undefined : packs.get(pack);
     if (!promise) {
       const id = `font-pack:${channel}:${++nextId}`;
       promise = new Promise((resolve, reject) => {
-        const timer = setTimeout(() => finish(), waitMs);
+        const timer = setTimeout(() => {
+          unresponsive = new Set(pending.keys());
+          packs.clear();
+          for (const request of pending.values()) request.finish();
+        }, waitMs);
         const finish = (assets?: FontPackAssets, error?: Error) => {
           clearTimeout(timer);
           pending.delete(id);
@@ -99,9 +104,11 @@ export function createWorkerFontPacks(post: (message: FontPackRequest) => void, 
         try { post({ protocol: 1, kind: 'font-pack-request', id, pack }); }
         catch (error) { finish(undefined, new SessionFailure('message', String(error))); }
       });
-      packs.set(pack, promise);
-      const forget = () => { packs.delete(pack); };
-      promise.then(forget, forget);
+      if (!fresh) {
+        packs.set(pack, promise);
+        const forget = () => { if (packs.get(pack) === promise) packs.delete(pack); };
+        promise.then(forget, forget);
+      }
     }
     return promise;
   };
@@ -110,7 +117,9 @@ export function createWorkerFontPacks(post: (message: FontPackRequest) => void, 
     receive(message: unknown): boolean {
       const value = message as Partial<FontPackReply> | null;
       if (value?.protocol !== 1 || value.kind !== 'font-pack-reply') return false;
-      const request = typeof value.id === 'string' ? pending.get(value.id) : undefined;
+      if (typeof value.id !== 'string') return true;
+      if (unresponsive?.has(value.id)) unresponsive = undefined;
+      const request = pending.get(value.id);
       if (request) {
         const valid = value.urls === undefined || (value.urls !== null && typeof value.urls === 'object' && !Array.isArray(value.urls) &&
           Object.values(value.urls).every(isAbsoluteHref));
@@ -128,6 +137,7 @@ export function createWorkerFontPacks(post: (message: FontPackRequest) => void, 
     },
     dispose() {
       disposed = true;
+      unresponsive = undefined;
       for (const request of pending.values()) request.finish(undefined, new SessionFailure('disposed', 'Font pack channel is closed'));
       packs.clear();
     },

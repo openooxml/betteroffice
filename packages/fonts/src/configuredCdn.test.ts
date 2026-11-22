@@ -94,6 +94,32 @@ test('CDN loading starts disabled and preserves missing-pack errors', async () =
   }
 });
 
+test('the worker CDN overrides the page CDN, including when explicitly disabled', async () => {
+  const pageCdn = { baseUrl: 'https://page-fonts.example/', timeoutMs: 4321 };
+  const channel = createWorkerFontPacks((message) => { page.receive(message); });
+  const page = createFontPackResponder(channel.receive, async () => undefined, () => pageCdn);
+  setWorkerFontAssets(channel.source);
+  const requests: string[] = [];
+  serveAssets(requests);
+  try {
+    await worker.loadBundledFontBytes(regular, undefined, runtime);
+    worker.configureFontCdn({ baseUrl: 'https://worker-fonts.example/', timeoutMs: 1234 });
+    await worker.loadBundledFontBytes(regular, undefined, runtime);
+    expect(requests).toEqual([
+      `https://page-fonts.example/latin/${latin.version}/${regular.file}`,
+      `https://worker-fonts.example/latin/${latin.version}/${regular.file}`,
+    ]);
+    const slices = worker.createFontProvider().resolveScriptFallback('cjk-jp', false, false)!.slices!;
+    const prepared = await slices.prepareUrls!();
+    expect(prepared.timeoutMs).toBe(1234);
+    expect((await prepared.url(slices.ref.index)).href).toBe(`https://worker-fonts.example/cjk/${cjk.version}/${slices.ref.index}`);
+    worker.configureFontCdn({ baseUrl: false });
+    await expect(worker.bundledFaceInstalled(regular)).resolves.toBe(false);
+  } finally {
+    channel.dispose();
+  }
+});
+
 test('a worker sees CDN changes after a successful pack lookup and resolves CJK slices from the published index', async () => {
   const channel = createWorkerFontPacks((message) => { page.receive(message); });
   const page = createFontPackResponder(channel.receive, fonts.fontAssetUrls, getFontCdnConfiguration);

@@ -7,7 +7,7 @@ export function setWorkerFontAssets(next: WorkerFontPackSource): void {
   source = next;
 }
 
-export const workerFontAssets: WorkerFontPackSource = (pack) => source(pack);
+export const workerFontAssets: WorkerFontPackSource = (...args) => source(...args);
 
 export async function bundledDecoderUrl(): Promise<URL | undefined> {
   const href = (await source('decoder'))?.urls?.['fontpack.wasm'];

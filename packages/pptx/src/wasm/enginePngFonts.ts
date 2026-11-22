@@ -14,8 +14,7 @@ let fontsModule: Promise<Fonts> | undefined;
 /** The font packages, loaded with the first export that needs them; a worker resolves them only this way. */
 const loadFonts = (): Promise<Fonts> => (fontsModule ??= importFonts().catch((error: unknown) => {
   fontsModule = undefined;
-  const reason = error instanceof Error ? error.message : String(error);
-  throw new PngExportError('font-unavailable', `Could not load @betteroffice/fonts: ${reason}`);
+  throw error;
 }));
 
 interface Exporter {

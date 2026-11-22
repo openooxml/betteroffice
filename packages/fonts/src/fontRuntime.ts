@@ -35,7 +35,7 @@ export type FontAssetUrls = Record<string, () => URL>;
 type FontPack = Exclude<FontAssetKind, 'decoder'>;
 type FontPackAssets = { urls?: FontAssetUrls; cdn?: FontCdnConfiguration };
 export type FontPackLookup = (pack: FontPack) => Promise<FontPackAssets>;
-type AssetBase = URL | (() => Promise<URL>) | undefined;
+type AssetBase = URL | Promise<URL> | undefined;
 
 function resolveBase(baseUrl: string | URL, locationHref: string | undefined): URL {
   const href = typeof baseUrl === 'string' ? baseUrl : baseUrl.href;
@@ -81,7 +81,9 @@ export function createFontRuntime(lookup: FontPackLookup, {
     try {
       return resolveBase(baseUrl, undefined);
     } catch {
-      return async () => resolveBase(baseUrl, await pageLocation() ?? globalThis.location?.href);
+      const pinned = pageLocation().then((href) => resolveBase(baseUrl, href));
+      void pinned.catch(() => {});
+      return pinned;
     }
   }
 
@@ -141,14 +143,14 @@ export function createFontRuntime(lookup: FontPackLookup, {
       base: baseUrl?.href ?? (cdn?.baseUrl ? fontCdnAssetUrl(packFor(face), '', cdn.baseUrl).href : ''),
       timeoutMs: cdn?.baseUrl ? cdn.timeoutMs : undefined,
       url: async (file) => {
-        const root = typeof base === 'function' ? await base() : base;
+        const root = base instanceof Promise ? await base : base;
         if (root) return new URL(file, root);
         const assets = await lookup('cjk');
         return sliceAssetUrl(face, file, cdn ? { urls: assets.urls, cdn } : assets);
       },
       prepareUrls: baseUrl || cdn ? undefined : async () => {
-        if (typeof base === 'function') {
-          const root = await base();
+        if (base instanceof Promise) {
+          const root = await base;
           return { base: root.href, url: async (file: string) => new URL(file, root),
             decode: sliceDecoder(decoderUrl(root), runtime?.decoder) };
         }
@@ -160,8 +162,8 @@ export function createFontRuntime(lookup: FontPackLookup, {
         };
       },
       requestTimeoutMs: requestTimeout,
-      decode: typeof base === 'function'
-        ? async (encoded, maxOutput) => sliceDecoder(decoderUrl(await base()), runtime?.decoder)(encoded, maxOutput)
+      decode: base instanceof Promise
+        ? async (encoded, maxOutput) => sliceDecoder(decoderUrl(await base), runtime?.decoder)(encoded, maxOutput)
         : sliceDecoder(decoderUrl(baseUrl), runtime?.decoder),
       decoder: runtime?.decoder,
       retain: runtime?.retain,
@@ -210,7 +212,7 @@ export function createFontRuntime(lookup: FontPackLookup, {
     base: AssetBase,
     runtime?: Parameters<typeof loadBundledFontBytes>[2],
   ): Promise<ArrayBuffer> {
-    const baseUrl = typeof base === 'function' ? await base() : base;
+    const baseUrl = base instanceof Promise ? await base : base;
     const bytes = isBaseLatinFont(face.file) || isLatinFont(face.file) || INTL_FILES.has(face.file) || CJK_FILES.has(face.file)
       ? packed(
         face,

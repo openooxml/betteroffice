@@ -156,25 +156,42 @@ test('the page passes the configured CDN independently of the installed URL map'
   }
 });
 
-test('the worker retries after a 15-second timeout and ignores late replies', async () => {
+test('one 15-second timeout settles all requests until a late reply from the page', async () => {
   const requests: FontPackRequest[] = [];
   const packs = createWorkerFontPacks((message) => requests.push(message));
+  const other = createWorkerFontPacks(() => {});
   const timer = spyOn(globalThis, 'setTimeout');
   try {
     const first = packs.source('decoder');
     expect(packs.source('decoder')).toBe(first);
     const [expire, delay] = timer.mock.calls.at(-1)!;
+    const concurrent = packs.source('cjk');
     if (typeof expire !== 'function') throw new Error('Expected a timer callback');
     expire();
-    expect(await first).toBeUndefined();
     expect(delay).toBe(15_000);
-    const retry = packs.source('decoder');
+    expect(await Promise.all([first, concurrent])).toEqual([undefined, undefined]);
+    packs.receive({ protocol: 1, kind: 'font-pack-reply', id: 'unknown' });
+    const timers = timer.mock.calls.length;
+    for (const pack of ['base', 'latin', 'intl', 'cjk', 'decoder'] as const) {
+      expect(await packs.source(pack)).toBeUndefined();
+    }
+    expect(timer.mock.calls).toHaveLength(timers);
     expect(requests).toHaveLength(2);
+
+    const independent = other.source('base');
+    const closed = expect(independent).rejects.toMatchObject({ code: 'disposed' });
+    other.dispose();
+    await closed;
+    expect(timer.mock.calls).toHaveLength(timers + 1);
+
     packs.receive({ protocol: 1, kind: 'font-pack-reply', id: requests[0]!.id });
+    const retry = packs.source('decoder');
+    expect(requests).toHaveLength(3);
     const urls = { 'fontpack.wasm': 'https://fonts.example/fontpack.wasm' };
-    packs.receive({ protocol: 1, kind: 'font-pack-reply', id: requests[1]!.id, urls });
+    packs.receive({ protocol: 1, kind: 'font-pack-reply', id: requests[2]!.id, urls });
     expect(await retry).toEqual({ urls });
   } finally {
+    other.dispose();
     packs.dispose();
     timer.mockRestore();
   }
@@ -223,4 +240,30 @@ test('font pack replies correlate by unique id and preserve source failures', as
     expect(one).rejects.toMatchObject({ code: 'message', message: 'Unreadable font pack' }),
     expect(two).rejects.toMatchObject({ code: 'disposed' }),
   ]);
+});
+
+test('a page that never answers costs one bounded wait per worker, not one per request', async () => {
+  const timers: Array<{ run: () => void; delay: number }> = [];
+  const timeout = spyOn(globalThis, 'setTimeout').mockImplementation(((run: () => void, delay?: number) => {
+    timers.push({ run, delay: delay ?? 0 });
+    return timers.length as unknown as ReturnType<typeof setTimeout>;
+  }) as typeof setTimeout);
+  const clear = spyOn(globalThis, 'clearTimeout').mockImplementation((() => {}) as typeof clearTimeout);
+  try {
+    const posted: FontPackRequest[] = [];
+    const channel = createWorkerFontPacks((request) => { posted.push(request); }, 15_000);
+    const first = [channel.source('base'), channel.source('latin'), channel.source('cjk')];
+    expect(timers.every(({ delay }) => delay === 15_000)).toBe(true);
+    timers[0]!.run();
+    expect(await Promise.all(first)).toEqual([undefined, undefined, undefined]);
+    const created = timers.length;
+    const sent = posted.length;
+    expect(await Promise.all([channel.source('base'), channel.source('intl'), channel.source('decoder')]))
+      .toEqual([undefined, undefined, undefined]);
+    expect(timers.length).toBe(created);
+    expect(posted.length).toBe(sent);
+  } finally {
+    timeout.mockRestore();
+    clear.mockRestore();
+  }
 });

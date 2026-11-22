@@ -1,3 +1,4 @@
+import { getFontCdnConfiguration } from '../../../shared/office-session/fontCdn';
 import { createFontRuntime, type FontPackLookup } from './fontRuntime';
 import { workerFontAssets } from './workerAssets';
 
@@ -8,7 +9,7 @@ const lookup: FontPackLookup = async (pack) => {
   const assets = await workerFontAssets(pack);
   return {
     urls: assets?.urls && Object.fromEntries(Object.entries(assets.urls).map(([file, href]) => [file, () => new URL(href)])),
-    cdn: assets?.cdn,
+    cdn: getFontCdnConfiguration() ?? assets?.cdn,
   };
 };
 
@@ -17,5 +18,5 @@ export const {
   createFontProvider, decodeFontFaceOutsideEngine, checkFontPacks,
 } = createFontRuntime(lookup, {
   inspectDisk: false,
-  pageLocation: async () => (await workerFontAssets('base'))?.pageUrl,
+  pageLocation: async () => (await workerFontAssets('base', { fresh: true }))?.pageUrl,
 });

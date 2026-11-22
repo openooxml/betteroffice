@@ -7,7 +7,9 @@ import { importFonts, importProgressiveFonts } from './workerFontModules';
 import { bundledDecoderUrl, readWasm, setWorkerFontAssets } from './workerAssets';
 import { fontAssetResponse } from './test-assets';
 import { decodeFontFace, type FontDecoder } from './decode';
-import type { FontAssetKind, WorkerFontPackSource } from '../../../shared/office-session/optionalFontPacks';
+import {
+  createFontPackResponder, createWorkerFontPacks, type FontAssetKind, type WorkerFontPackSource,
+} from '../../../shared/office-session/optionalFontPacks';
 import fontsPackage from '../package.json';
 import cjk from '../../fonts-cjk/assets/manifest.json';
 
@@ -69,9 +71,10 @@ test('missing intl and Latin add-ons keep their own errors and are retried', asy
 });
 
 test('absolute and page-relative base URLs override the pack source for worker faces and slices', async () => {
+  let pageUrl = 'https://page.example/documents/current';
   const source = mock<WorkerFontPackSource>(async (kind) => {
     expect(kind).toBe('base');
-    return { pageUrl: 'https://page.example/documents/current' };
+    return { pageUrl };
   });
   setWorkerFontAssets(source);
   const requests: string[] = [];
@@ -84,11 +87,66 @@ test('absolute and page-relative base URLs override the pack source for worker f
   expect((await worker.loadBundledFontBytes(face, { baseUrl: absolute }, { decoder })).byteLength).toBe(face.byteLength);
   expect(source).not.toHaveBeenCalled();
   const provider = worker.createFontProvider({ baseUrl: './custom' }, { decoder });
+  expect(source).toHaveBeenCalledTimes(1);
+  pageUrl = 'https://page.example/another/route';
   expect((await provider.resolve('Calibri', false, false)!()).byteLength).toBe(face.byteLength);
   const slices = provider.resolveScriptFallback('cjk-jp', false, false)!.slices!;
   expect((await slices.url(slices.ref.index)).href).toBe(`https://page.example/documents/custom/${slices.ref.index}`);
+  expect((await slices.prepareUrls!()).base).toBe('https://page.example/documents/custom/');
   expect(requests).toContain(`https://assets.example/custom/${face.file}`);
   expect(requests).toContain(`https://page.example/documents/custom/${face.file}`);
+  expect(source).toHaveBeenCalledTimes(1);
+});
+
+test('providers created across navigation pin separate page URLs while a base pack lookup is pending', async () => {
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'location');
+  const location = { href: 'https://page.example/first/document' };
+  Object.defineProperty(globalThis, 'location', { configurable: true, value: location });
+  const channel = createWorkerFontPacks((message) => { page.receive(message); });
+  const load = mock(async () => ({}));
+  const page = createFontPackResponder(channel.receive, load);
+  setWorkerFontAssets(channel.source);
+  try {
+    const first = worker.createFontProvider({ baseUrl: './custom' });
+    location.href = 'https://page.example/second/document';
+    const second = worker.createFontProvider({ baseUrl: './custom' });
+    location.href = 'https://page.example/third/document';
+    const sliceBase = async (provider: ReturnType<typeof worker.createFontProvider>) => {
+      const slices = provider.resolveScriptFallback('cjk-jp', false, false)!.slices!;
+      return (await slices.prepareUrls!()).base;
+    };
+    expect(await Promise.all([sliceBase(first), sliceBase(second)])).toEqual([
+      'https://page.example/first/custom/', 'https://page.example/second/custom/',
+    ]);
+    expect(load).toHaveBeenCalledTimes(1);
+  } finally {
+    channel.dispose();
+    if (original) Object.defineProperty(globalThis, 'location', original);
+    else Reflect.deleteProperty(globalThis, 'location');
+  }
+});
+
+test('a relative font root without a page URL rejects even with a worker script location', async () => {
+  const location = Object.getOwnPropertyDescriptor(globalThis, 'location');
+  Object.defineProperty(globalThis, 'location', { configurable: true, value: { href: 'https://worker.example/script/worker.js' } });
+  try {
+    for (const response of [{ urls: {} }, undefined]) {
+      setWorkerFontAssets(async () => response);
+      const options = { baseUrl: './custom' };
+      const provider = worker.createFontProvider(options, { decoder });
+      const face = worker.resolveMetricCompatFace('Calibri', false, false)!;
+      const slices = provider.resolveScriptFallback('cjk-jp', false, false)!.slices!;
+      for (const load of [provider.resolve('Calibri', false, false)!, () => slices.url(slices.ref.index),
+        () => worker.loadBundledFontBytes(face, options, { decoder })]) {
+        const error = await load().catch((reason: unknown) => reason);
+        expect(error).toBeInstanceOf(TypeError);
+        expect(error).toMatchObject({ message: 'Font baseUrl must be absolute when no browser location exists: ./custom/' });
+      }
+    }
+  } finally {
+    if (location) Object.defineProperty(globalThis, 'location', location);
+    else Reflect.deleteProperty(globalThis, 'location');
+  }
 });
 
 test('the decoder URL comes from its own request and retries misses', async () => {

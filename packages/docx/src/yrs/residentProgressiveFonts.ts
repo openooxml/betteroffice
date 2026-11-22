@@ -32,7 +32,7 @@ const CHUNK_RETRY_DELAYS_MS = [250, 1_000, 4_000];
 interface Owner {
   /** The font id of every slot registered with these bytes; the engine may share one face among them. */
   ids: number[];
-  open: () => Promise<OutlineFace>;
+  open: (module: ProgressiveModule) => Promise<OutlineFace>;
   face?: OutlineFace;
   installed: number;
   complete: boolean;
@@ -75,9 +75,6 @@ interface ProgressiveModule {
   readFontAsset(file: string, url: URL, timeoutMs?: number): Promise<ArrayBuffer>;
 }
 
-/** The progressive font module could not be loaded in this worker, as in a host that serves the packages without a bundler. */
-class ProgressiveModuleUnavailable extends Error {}
-
 /**
  * Sliced CJK faces registered from their skeleton and core. Before a page is
  * rasterized, the outlines of the glyphs it draws are fetched (each chunk
@@ -89,6 +86,7 @@ export class ResidentProgressiveFonts {
   private readonly pending = new Set<Promise<unknown>>();
   private readonly lateListeners = new Set<() => void>();
   private readonly refusalListeners = new Set<(owner: number) => void>();
+  private module?: Promise<ProgressiveModule>;
   private warned = false;
   private late = 0;
   private disposed = false;
@@ -105,7 +103,7 @@ export class ResidentProgressiveFonts {
     private readonly engine: OutlineEngine,
     decode: (encoded: ArrayBuffer, maxOutput: number) => Promise<ArrayBuffer>,
     private readonly log: (message: string) => void = (message) => console.warn(message),
-    loadModule: () => Promise<ProgressiveModule> = importProgressiveFonts,
+    private readonly loadModule: () => Promise<ProgressiveModule> = importProgressiveFonts,
   ) {
     const rootSlot = (slot: number): number => {
       let current = slot;
@@ -129,9 +127,7 @@ export class ResidentProgressiveFonts {
       }
       if (shared !== undefined) continue;
       let opening: Promise<OutlineFace> | undefined;
-      const open = () => opening ??= loadModule().then(undefined, (error: unknown) => {
-        throw new ProgressiveModuleUnavailable(error instanceof Error ? error.message : String(error));
-      }).then(({ openProgressiveFace, readFontAsset }) =>
+      const open = ({ openProgressiveFace, readFontAsset }: ProgressiveModule) => opening ??=
         openProgressiveFace(spec.source.ref, {
           read: (file) => {
             const url = spec.source.urls[file];
@@ -139,10 +135,10 @@ export class ResidentProgressiveFonts {
             return readFontAsset(file, new URL(url), spec.source.timeoutMs);
           },
           decode,
-        })).catch((error: unknown) => {
-        opening = undefined;
-        throw error;
-      });
+        }).catch((error: unknown) => {
+          opening = undefined;
+          throw error;
+        });
       this.owners.set(owner, { ids: [id], open, installed: 1, complete: false, refused: false });
     }
   }
@@ -176,22 +172,46 @@ export class ResidentProgressiveFonts {
   /**
    * Installs the outlines of `glyphs` (per font id) before a raster. Resolves
    * with the owner font ids whose outlines changed once they are installed,
-   * or after `waitMs` with those installed so far; the rest install later.
+   * or after `waitMs` of waiting for outlines once the module loads.
    */
   async ensure(glyphs: Map<number, Set<number>>, waitMs = PROGRESSIVE_OUTLINE_WAIT_MS): Promise<Set<number>> {
     const wanted = new Map<number, Set<number>>();
     for (const [fontId, ids] of glyphs) {
       const owner = this.ownerOf.get(fontId);
-      if (owner === undefined || ids.size === 0) continue;
+      if (owner === undefined || ids.size === 0 || this.owners.get(owner)!.complete) continue;
       const set = wanted.get(owner) ?? new Set<number>();
       for (const id of ids) set.add(id);
       wanted.set(owner, set);
     }
     if (wanted.size === 0 || this.disposed) return new Set();
+    const frame = this.ensureOutlines(wanted, waitMs);
+    this.track(frame);
+    return frame;
+  }
+
+  private async ensureOutlines(wanted: Map<number, Set<number>>, waitMs: number): Promise<Set<number>> {
+    const unopened = [...wanted.keys()].filter((owner) => !this.owners.get(owner)!.face);
+    let module: ProgressiveModule | undefined;
+    if (unopened.length) {
+      try {
+        module = await (this.module ??= this.loadModule().catch((error: unknown) => {
+          this.module = undefined;
+          throw error;
+        }));
+      } catch (error) {
+        if (this.disposed) return new Set();
+        const reason = error instanceof Error ? error.message : String(error);
+        for (const owner of unopened) {
+          this.refuse(owner, `the progressive font module is unavailable here: ${reason}`);
+          wanted.delete(owner);
+        }
+      }
+    }
+    if (wanted.size === 0 || this.disposed) return new Set();
     const changed = new Set<number>();
     let waiting = true;
     const work = Promise.all([...wanted].map(async ([owner, ids]) => {
-      await this.load(owner, ids);
+      await this.load(owner, ids, module);
       if (this.install(owner)) {
         changed.add(owner);
         if (!waiting) {
@@ -231,19 +251,15 @@ export class ResidentProgressiveFonts {
    * Loads the chunks of `ids`, retrying a chunk that fails. Chunks that keep
    * failing leave their glyphs blank; the next frame drawing them asks again.
    */
-  private async load(owner: number, ids: Set<number>): Promise<void> {
+  private async load(owner: number, ids: Set<number>, module: ProgressiveModule | undefined): Promise<void> {
     const state = this.owners.get(owner)!;
     if (state.complete || this.disposed) return;
     for (let attempt = 0; ; attempt += 1) {
       try {
-        state.face ??= await state.open();
-        await state.face.ensureGlyphs(ids);
+        if (!state.face && module) state.face = await state.open(module);
+        await state.face?.ensureGlyphs(ids);
         return;
       } catch (error) {
-        if (error instanceof ProgressiveModuleUnavailable) {
-          this.refuse(owner, `the progressive font module is unavailable here: ${error.message}`);
-          return;
-        }
         const pause = CHUNK_RETRY_DELAYS_MS[attempt];
         if (pause === undefined) {
           this.log(`[docx] font outline chunks failed to load after ${attempt + 1} attempts; their glyphs stay blank until a frame needs them again: ${error instanceof Error ? error.message : String(error)}`);
