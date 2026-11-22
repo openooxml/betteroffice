@@ -476,7 +476,6 @@ function cdnClock() {
     return controller.signal;
   });
   return {
-    totalTimeout,
     async advance(ms: number) {
       now += ms;
       jest.advanceTimersByTime(ms);
@@ -524,6 +523,7 @@ test('only a real browser page decides the default CDN', () => {
     ['module worker', { postMessage() {} }, false],
     ['jsdom under Node', { ...dom, process: node }, false],
     ['happy-dom under Bun', { ...dom, process: bun }, false],
+    ['Bun without a process global', { ...dom, Bun: {} }, false],
     ['Electron renderer with Node integration', { ...dom, process: electron }, false],
     ['Electron worker with Node integration', { process: electron, postMessage() {} }, false],
     ['Deno', { ...dom, Deno: {} }, false],
@@ -596,7 +596,7 @@ test('a silent page leaves its worker with exactly the CDN sent at open', async 
   } finally { channel.dispose(); restoreWorker(); }
 });
 
-for (const failure of ['blocked', 'HTTP 404', 'bad hash', 'bad length', 'corrupt compressed bytes'] as const) {
+for (const failure of ['blocked', 403, 404, 410, 429, 500, 502, 503, 504, 'bad hash', 'bad length', 'corrupt compressed bytes'] as const) {
   test(`implicit ${failure} substitutes two faces, warns once and cools the failed scope`, async () => {
     const restore = withBrowserFontGlobals();
     const { warning, diagnostics, restore: stopObserving } = observeCdnFailures();
@@ -612,7 +612,7 @@ for (const failure of ['blocked', 'HTTP 404', 'bad hash', 'bad length', 'corrupt
       if (!String(input).startsWith(jsDelivr)) return fontAssetResponse(input);
       requests.push(String(input));
       if (failure === 'blocked') throw new TypeError('Failed to fetch');
-      if (failure === 'HTTP 404') return new Response(null, { status: 404 });
+      if (typeof failure === 'number') return new Response(null, { status: failure });
       if (failure === 'bad length') return new Response(new Uint8Array(4));
       if (failure === 'corrupt compressed bytes') {
         const bytes = await (await fontAssetResponse(input)).arrayBuffer();
@@ -625,7 +625,8 @@ for (const failure of ['blocked', 'HTTP 404', 'bad hash', 'bad length', 'corrupt
       await expect(fonts.loadBundledFontBytes(regular, undefined, mode)).resolves.toEqual(await base(false, false)!());
       await expect(fonts.loadBundledFontBytes(bold, undefined, mode)).resolves.toEqual(await base(true, false)!());
       await expect(fonts.loadBundledFontBytes(regular, undefined, { ...mode, strict: true })).rejects.toThrow();
-      expect(requests).toEqual(failure === 'blocked' ? [regularUrl] : [
+      const baseFailure = failure === 'blocked' || (typeof failure === 'number' && failure !== 404 && failure !== 410);
+      expect(requests).toEqual(baseFailure ? [regularUrl] : [
         regularUrl, fontCdnAssetUrl(latin, bold.file).href,
       ]);
       expect(warning.mock.calls).toHaveLength(1);
@@ -643,6 +644,31 @@ for (const failure of ['blocked', 'HTTP 404', 'bad hash', 'bad length', 'corrupt
     }
   });
 }
+
+test.each(['aborted', 'opaque', 'error', 'non-OK'] as const)('an implicit %s response cancels its unread body', async (failure) => {
+  const observed = observeCdnFailures();
+  const clock = cdnClock();
+  const reply = deferred<Response>();
+  let cancelled = false;
+  const response = new Response(new ReadableStream({ cancel() { cancelled = true; } }), { status: 403 });
+  if (failure === 'opaque' || failure === 'error') Object.defineProperty(response, 'type', { value: failure });
+  globalThis.fetch = (async () => reply.promise) as typeof fetch;
+  try {
+    const rejected = expect(fontCdn.loadImplicitFontAsset('font', new URL(regularUrl), 'latin', async (bytes) => bytes))
+      .rejects.toThrow(failure === 'aborted' ? 'No font data' : failure === 'non-OK' ? 'HTTP 403' : 'No readable response');
+    if (failure === 'aborted') {
+      await clock.advance(0);
+      await clock.advance(stallMs);
+    }
+    reply.resolve(response);
+    await rejected;
+    await clock.advance(0);
+    expect(cancelled).toBe(true);
+  } finally {
+    clock.restore();
+    observed.restore();
+  }
+});
 
 test('concurrent faces and dictionaries share the network failure of their implicit base', async () => {
   const restore = withBrowserFontGlobals();
@@ -671,15 +697,17 @@ test('concurrent faces and dictionaries share the network failure of their impli
   }
 });
 
-test('a valid implicit load clears a 404 for a different URL on its base', async () => {
+test('a valid implicit load clears a 404 and re-arms the warning for its base', async () => {
   const restore = withBrowserFontGlobals();
   const observed = observeCdnFailures();
   const other = fonts.resolveMetricCompatFace('Times New Roman', false, false)!;
   const otherUrl = fontCdnAssetUrl(latin, other.file).href;
   const requests: string[] = [];
   let available = false;
+  let offline = false;
   globalThis.fetch = (async (input: RequestInfo | URL) => {
     requests.push(String(input));
+    if (offline) throw new TypeError('Offline');
     return !available && String(input) === regularUrl
       ? new Response(null, { status: 404 }) : fontAssetResponse(input);
   }) as typeof fetch;
@@ -691,6 +719,12 @@ test('a valid implicit load clears a 404 for a different URL on its base', async
     await expect(fonts.loadBundledFontBytes(other, undefined, runtime)).resolves.toBeInstanceOf(ArrayBuffer);
     await expect(fonts.loadBundledFontBytes(regular, undefined, runtime)).resolves.toBeInstanceOf(ArrayBuffer);
     expect(requests).toEqual([regularUrl, otherUrl, regularUrl]);
+    expect(observed.warning).toHaveBeenCalledTimes(1);
+    offline = true;
+    await expect(fonts.loadBundledFontBytes(other, undefined, runtime)).rejects.toThrow('Offline');
+    await expect(fonts.loadBundledFontBytes(regular, undefined, runtime)).rejects.toThrow('Offline');
+    expect(requests).toEqual([regularUrl, otherUrl, regularUrl, otherUrl]);
+    expect(observed.warning).toHaveBeenCalledTimes(2);
   } finally {
     observed.restore();
     restore();
@@ -1034,9 +1068,10 @@ test('T22: only the explicitly configured CDN applies a total timeout to a progr
     await clock.advance(0);
     await clock.advance(6_000);
     expect(implicitSignal.aborted).toBe(false);
-    await clock.advance(6_000);
+    await clock.advance(timeoutMs - 6_000);
+    expect(implicitSignal.aborted).toBe(false);
+    await clock.advance(12_000 - timeoutMs);
     expect(hash(await implicit)).toBe(regularHash);
-    expect(clock.totalTimeout.mock.calls).toEqual([[timeoutMs]]);
     expect(failure.warning).not.toHaveBeenCalled();
     expect(failure.diagnostics).toEqual([]);
   } finally {

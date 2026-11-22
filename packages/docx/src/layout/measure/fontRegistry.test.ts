@@ -1,6 +1,8 @@
 import { expect, mock, spyOn, test } from 'bun:test';
 import { createFontProvider, resolveLastResortFace } from '@betteroffice/fonts';
+import * as fonts from '@betteroffice/fonts';
 import type { SliceLocation } from '@betteroffice/fonts/progressive';
+import { configureDefaultFonts, resolveDefaultFontProvider } from './defaultFontProvider';
 import { TextMeasureFontRegistry } from './fontRegistry';
 import { fontAssetResponse, fontRuntimeWithoutPacks, withBrowserFontGlobals } from '../../../../fonts/src/fontAssets.test-support';
 import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../../shared/office-session/fontCdn';
@@ -39,34 +41,82 @@ test('DOCX layout uses Base Latin when neither the primary nor the last resort p
   }
 });
 
-test('DOCX drops a failed CJK slice without registering substitute bytes and retries the face', async () => {
+test('DOCX substitutes after a slice index 404 and fetches slices again only after cooldown', async () => {
   const previous = getFontCdnConfiguration();
   const restore = withBrowserFontGlobals();
   const warn = spyOn(console, 'warn').mockImplementation(() => {});
-  const fetch = spyOn(globalThis, 'fetch').mockImplementation((input) => String(input).includes('cdn.jsdelivr.net')
-    ? Promise.resolve(new Response(null, { status: 404 })) : fontAssetResponse(input));
+  const now = Date.now();
+  const clock = spyOn(Date, 'now').mockReturnValue(now);
+  const requests: string[] = [];
+  let failed = true;
+  const fetch = spyOn(globalThis, 'fetch').mockImplementation((input) => {
+    const url = String(input);
+    if (url.includes('cdn.jsdelivr.net')) {
+      requests.push(url);
+      if (failed) return Promise.resolve(new Response(null, { status: 404 }));
+    }
+    return fontAssetResponse(input);
+  });
   const installed: number[] = [];
-  let opens = 0;
   try {
     setFontCdnConfiguration(undefined);
-    const provider = fontRuntimeWithoutPacks().createFontProvider();
+    const provider = fontRuntimeWithoutPacks().createFontProvider(undefined, { retain: false });
     const load = provider.resolveScriptFallback('cjk-jp', false, false)!;
+    const { openSlicedFace } = await import('@betteroffice/fonts/progressive');
     const registry = new TextMeasureFontRegistry({ registerFont: (bytes) => installed.push(bytes.byteLength) }, {
       bundled: provider,
-      progressive: async () => {
-        if (++opens === 1) {
-          const { openSlicedFace } = await import('@betteroffice/fonts/progressive');
-          return openSlicedFace(load.slices!);
-        }
-        return { bytes: () => new ArrayBuffer(24) };
-      },
+      progressive: (slices) => openSlicedFace(slices as SliceLocation),
     });
+    const index = (await load.slices!.url(load.slices!.ref.index)).href;
+    expect(await registry.getScriptFallbackIds(['cjk-jp'])).toEqual([]);
+    expect(requests).toEqual([index]);
+    failed = false;
+    clock.mockReturnValue(now + 59_999);
     expect(await registry.getScriptFallbackIds(['cjk-jp'])).toEqual([]);
     expect(installed).toEqual([]);
+    expect(requests).toEqual([index]);
+    clock.mockReturnValue(now + 60_000);
     expect(await registry.getScriptFallbackIds(['cjk-jp'])).toEqual([1]);
-    expect(installed).toEqual([24]);
+    expect(registry.isProgressive(1)).toBe(true);
+    expect(requests.map((url) => url.slice(url.lastIndexOf('/') + 1)).sort()).toEqual([
+      'core.zst', 'skeleton.zst', 'slices.json', 'slices.json',
+    ]);
   } finally {
     fetch.mockRestore();
+    warn.mockRestore();
+    clock.mockRestore();
+    restore();
+    setFontCdnConfiguration(previous);
+  }
+}, 30_000);
+
+test.each(['script fallback', 'last resort'] as const)('DOCX warns once per CDN cooldown for a failed %s', async (kind) => {
+  const previous = getFontCdnConfiguration();
+  const restore = withBrowserFontGlobals();
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  const runtime = fontRuntimeWithoutPacks(new URL('https://docx-base.example/'));
+  const create = spyOn(fonts, 'createFontProvider').mockImplementation(runtime.createFontProvider);
+  const fetch = spyOn(globalThis, 'fetch').mockImplementation((input) => String(input).includes('cdn.jsdelivr.net')
+    ? Promise.resolve(new Response(null, { status: 404 })) : fontAssetResponse(input));
+  try {
+    configureDefaultFonts({});
+    setFontCdnConfiguration(undefined);
+    const provider = await resolveDefaultFontProvider({});
+    const strict = runtime.createFontProvider(undefined, { strict: true });
+    const registry = new TextMeasureFontRegistry({ registerFont: () => 1 }, { bundled: kind === 'script fallback' ? provider : {
+      resolve: () => undefined,
+      resolveLastResort: () => strict.resolveScriptFallback('arabic', false, false),
+      resolveBaseLatin: () => async () => new ArrayBuffer(16),
+    } });
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (kind === 'script fallback') expect(await registry.getScriptFallbackIds(['arabic'])).toEqual([]);
+      else expect(await registry.getFontIdChain('Unknown', false, false)).toEqual([1]);
+    }
+    expect(warn.mock.calls.map(([message]) => message)).toEqual([expect.stringContaining('cdn.jsdelivr.net')]);
+  } finally {
+    configureDefaultFonts({});
+    fetch.mockRestore();
+    create.mockRestore();
     warn.mockRestore();
     restore();
     setFontCdnConfiguration(previous);

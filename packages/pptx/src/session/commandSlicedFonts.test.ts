@@ -55,6 +55,17 @@ function fakeFace(fail: () => boolean = () => false): SlicedFontFace & { asked: 
   };
 }
 
+function unloadedChunkTexts(face: SlicedFontFace): [string, string] {
+  const textByChunk = new Map<number, string>();
+  for (let cp = 0x4e00; cp <= 0x9fff && textByChunk.size < 2; cp += 1) {
+    const text = String.fromCodePoint(cp);
+    const missing = face.chunksOf(text).filter((chunk) => !face.loadedChunks().has(chunk));
+    if (missing.length === 1) textByChunk.set(missing[0]!, text);
+  }
+  expect(textByChunk.size).toBe(2);
+  return [...textByChunk.values()] as [string, string];
+}
+
 test('T12: a CDN chunk failure cools other chunks and whole-face export until the retry window', async () => {
   const previous = getFontCdnConfiguration();
   configureTestFontCdn({ baseUrl: false });
@@ -77,14 +88,7 @@ test('T12: a CDN chunk failure cools other chunks and whole-face export until th
   try {
     setFontCdnConfiguration(undefined);
     const opened = await openSlicedFace(load.slices!);
-    const textByChunk = new Map<number, string>();
-    for (let cp = 0x4e00; cp <= 0x9fff && textByChunk.size < 2; cp += 1) {
-      const text = String.fromCodePoint(cp);
-      const missing = opened.chunksOf(text).filter((chunk) => !opened.loadedChunks().has(chunk));
-      if (missing.length === 1) textByChunk.set(missing[0]!, text);
-    }
-    expect(textByChunk.size).toBe(2);
-    const [text, otherText] = [...textByChunk.values()] as [string, string];
+    const [text, otherText] = unloadedChunkTexts(opened);
     sliced.add('Noto Sans JP', opened, load);
     fail = true;
     const painted = await sliced.coverage.prepare('Noto Sans JP', text);
@@ -113,6 +117,58 @@ test('T12: a CDN chunk failure cools other chunks and whole-face export until th
     clock.mockRestore();
     warn.mockRestore();
     configureTestFontCdn({ baseUrl: false });
+    restore();
+    setFontCdnConfiguration(previous);
+  }
+}, 30_000);
+
+test.each(['HTTP 404', 'SHA-256 mismatch'] as const)('a CDN chunk %s keeps installed outlines and blocks whole-face fallback', async (failure) => {
+  const previous = getFontCdnConfiguration();
+  const restore = withBrowserFontGlobals();
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  const family = 'Noto Sans JP';
+  const sliced = createSlicedFontFaces();
+  const load = fontRuntimeWithoutPacks().createFontProvider(undefined, { retain: false }).resolveScriptFallback('cjk-jp', false, false)!;
+  const location = load.slices!;
+  const requests: string[] = [];
+  let fail = false;
+  const fetch = spyOn(globalThis, 'fetch').mockImplementation((input) => {
+    const url = String(input);
+    if (fail && url.includes('/fonts-cjk@')) {
+      requests.push(url);
+      if (failure === 'HTTP 404' && /\/c\d+\.zst$/.test(url)) return Promise.resolve(new Response(null, { status: 404 }));
+    }
+    return fontAssetResponse(input);
+  });
+  try {
+    setFontCdnConfiguration(undefined);
+    const opened = await openSlicedFace({ ...location, async decode(encoded, maxOutput) {
+      const bytes = await location.decode(encoded, maxOutput);
+      if (fail && failure === 'SHA-256 mismatch') new Uint8Array(bytes)[0] ^= 1;
+      return bytes;
+    } });
+    const [first, next] = unloadedChunkTexts(opened);
+    sliced.add(family, opened, load);
+    const revision = await sliced.coverage.prepare(family, first);
+    expect(revision).toBe(`${family} r2`);
+    fail = true;
+    const list = { primitives: [{ kind: 'textBox', lines: [{ runs: [{ text: first + next, fontFamily: family }] }] }] };
+    const families = await prepareTextFamilies(list as never, sliced.coverage);
+    expect(families(family)).toBe(revision);
+    const [chunk] = requests;
+    expect(chunk).toMatch(/\/c\d+\.zst$/);
+    expect(requests).toEqual([chunk!]);
+    expect(added).toEqual([revision]);
+    expect(removed).toEqual([]);
+    await expect(sliced.read(family, next, null)).resolves.toBeUndefined();
+    await expect(sliced.completeExport({ replaceExportFace: () => {} })).rejects.toMatchObject({
+      code: 'font-unavailable', message: expect.stringContaining(failure),
+    });
+    expect(requests).toEqual([chunk!]);
+  } finally {
+    sliced.dispose();
+    fetch.mockRestore();
+    warn.mockRestore();
     restore();
     setFontCdnConfiguration(previous);
   }
