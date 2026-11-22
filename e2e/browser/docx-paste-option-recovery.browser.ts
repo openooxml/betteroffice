@@ -8,6 +8,10 @@ interface RecoveryProbe {
   incarnation: number;
   version: number;
   checkpoints: Promise<number>[];
+  /** Sequence numbers: the last command sent, the last one acknowledged, the last one a frame covers. */
+  sent: number;
+  acked: number;
+  framed: number;
 }
 
 declare global {
@@ -16,7 +20,7 @@ declare global {
 
 async function observeWorker(page: Page) {
   await page.addInitScript(() => {
-    const probe: RecoveryProbe = { incarnation: 0, version: 0, checkpoints: [] };
+    const probe: RecoveryProbe = { incarnation: 0, version: 0, checkpoints: [], sent: -1, acked: -1, framed: -1 };
     window.__pasteRecovery = probe;
     window.Worker = class extends Worker {
       override postMessage(message: DocxEngineWorkerRequest, options?: Transferable[] | StructuredSerializeOptions) {
@@ -31,6 +35,7 @@ async function observeWorker(page: Page) {
             this.addEventListener('message', reply);
           }));
         }
+        if (this === probe.worker && message.type === 'edit') probe.sent = Math.max(probe.sent, message.command.seq);
         super.postMessage(message, Array.isArray(options) ? { transfer: options } : options);
       }
       constructor(url: string | URL, options?: WorkerOptions) {
@@ -42,9 +47,16 @@ async function observeWorker(page: Page) {
             probe.worker = this;
             probe.incarnation = data.commandInitial.incarnation;
             probe.version = data.commandInitial.version;
+            probe.sent = -1;
+            probe.acked = data.commandInitial.throughSeq;
+            probe.framed = data.commandInitial.frame?.coversThroughSeq ?? -1;
           }
           if (this !== probe.worker) return;
-          if (data.commandAck) probe.version = Math.max(probe.version, data.commandAck.version);
+          const frame = data.commandAck?.frame ?? data.commandFrame?.frame;
+          if (frame) probe.framed = Math.max(probe.framed, frame.coversThroughSeq);
+          if (!data.commandAck) return;
+          probe.version = Math.max(probe.version, data.commandAck.version);
+          probe.acked = Math.max(probe.acked, data.commandAck.throughSeq);
         });
       }
     };
@@ -89,28 +101,26 @@ for (const scenario of ['PASTE_ON_CHECKPOINT', 'PASTE_BEFORE_CHECKPOINT', 'CONTR
       await input.press('ControlOrMeta+v');
       prefix += 'Rich';
       const control = page.getByRole('button', { name: 'Paste Options (Ctrl)' });
-      const openMenu = async () => {
-        if (await control.getAttribute('aria-expanded') !== 'true') await control.click();
-      };
       /**
-       * Picks `name` and confirms on the menu that it is checked. The editor drops a pick, sending
-       * nothing, until it has taken up the paste before it, so an unchecked pick is made again.
+       * The editor takes a pick only once it has taken up the paste before it, which is later than the
+       * worker's acknowledgement, and drops one made sooner without sending anything. So each pick waits
+       * until the last command sent is acknowledged and covered by a frame, with nothing sent for two frames.
        */
+      const settled = () => expect.poll(() => page.evaluate(async () => {
+        const probe = window.__pasteRecovery;
+        const read = () => ({ sent: probe.sent, covered: probe.acked >= probe.sent && probe.framed >= probe.sent });
+        const first = read();
+        await new Promise<void>(done => requestAnimationFrame(() => requestAnimationFrame(() => done())));
+        const second = read();
+        return first.covered && second.covered && first.sent === second.sent;
+      })).toBe(true);
       const choose = async (name: string) => {
+        await settled();
         const before = await version();
-        const item = page.getByRole('menuitemradio', { name });
-        let taken = false;
-        for (let attempt = 0; attempt < 3 && !taken; attempt++) {
-          if (attempt) await page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
-          await openMenu();
-          if (await item.getAttribute('aria-checked') !== 'true') {
-            await item.click();
-            await openMenu();
-          }
-          taken = await item.getAttribute('aria-checked') === 'true';
-          await page.keyboard.press('Escape');
-        }
-        expect(taken, `Paste Options dropped "${name}" three times: the editor never took up the paste before it`).toBe(true);
+        await control.click();
+        await page.getByRole('menuitemradio', { name }).click();
+        await expect(control).toHaveAttribute('aria-expanded', 'false');
+        await expect(input).toBeFocused();
         await reach(before + 1);
       };
       await expect(control).toBeVisible();
