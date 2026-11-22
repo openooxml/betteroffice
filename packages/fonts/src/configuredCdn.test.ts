@@ -429,13 +429,16 @@ test('the CDN tree serves Latin, intl and sliced CJK faces from a local origin',
 
 const jsDelivr = 'https://cdn.jsdelivr.net/npm/';
 const implicitCdn = { baseUrl: jsDelivr, implicit: true } as const;
-const cdnWarned = Symbol.for('betteroffice.fonts.cdn-warned');
+const cdnFailureState = [
+  Symbol.for('betteroffice.fonts.cdn-warned'),
+  Symbol.for('betteroffice.fonts.cdn-unavailable'),
+];
 const stallMs = 10_000;
 const regularHash = latin.faces.find(({ file }) => file === regular.file)!.sha256;
 const regularUrl = fontCdnAssetUrl(latin, regular.file).href;
 
 function observeCdnFailures() {
-  Reflect.deleteProperty(globalThis, cdnWarned);
+  for (const key of cdnFailureState) Reflect.deleteProperty(globalThis, key);
   const warning = spyOn(console, 'warn').mockImplementation(() => {});
   const diagnostics: FontPackDiagnostic[] = [];
   const dispatch = Object.getOwnPropertyDescriptor(globalThis, 'dispatchEvent');
@@ -453,7 +456,7 @@ function observeCdnFailures() {
       if (dispatch) Object.defineProperty(globalThis, 'dispatchEvent', dispatch);
       else Reflect.deleteProperty(globalThis, 'dispatchEvent');
       warning.mockRestore();
-      Reflect.deleteProperty(globalThis, cdnWarned);
+      for (const key of cdnFailureState) Reflect.deleteProperty(globalThis, key);
     },
   };
 }
