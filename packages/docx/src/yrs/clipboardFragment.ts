@@ -105,6 +105,30 @@ export function clipboardParagraphUnits(paragraph: DocxClipboardParagraph): Arra
   return inlines.map(inline => 'image' in inline ? inline : runs[next++]!);
 }
 
+/** @internal Above this many formatted runs a paste inserts its text without run formatting. */
+export const MAX_PASTE_FORMATTED_RUNS = 300;
+
+/** @internal How many formatted runs the paragraphs of a fragment carry. */
+export function clipboardFragmentRunCount(fragment: DocxClipboardFragment): number {
+  return fragment.paragraphs.reduce((total, paragraph) => total + (paragraph.runs?.length ?? 0), 0);
+}
+
+function withinFormattedRunLimit(fragment: DocxClipboardFragment): DocxClipboardFragment {
+  if (clipboardFragmentRunCount(fragment) <= MAX_PASTE_FORMATTED_RUNS) return fragment;
+  return {
+    paragraphs: fragment.paragraphs.map(({ runs: _runs, inlines, ...paragraph }) => {
+      if (!inlines) return paragraph;
+      const joined: DocxClipboardInline[] = [];
+      for (const inline of inlines) {
+        const last = joined.at(-1);
+        if ('text' in inline && last && 'text' in last) joined[joined.length - 1] = { text: last.text + inline.text };
+        else joined.push(inline);
+      }
+      return { ...paragraph, inlines: joined };
+    }),
+  };
+}
+
 const MAX_FRAGMENT_CELLS = 10_000;
 const MAX_FRAGMENT_PARAGRAPHS = 1_000;
 const MAX_FRAGMENT_TEXT = 1_000_000;
@@ -164,11 +188,13 @@ const RUN_ATTRIBUTE_SHAPES: Readonly<Record<string, RunAttributeShape>> = {
   fontFamily: { ascii: fontName, hAnsi: fontName, eastAsia: fontName, cs: fontName },
   characterSpacing: { spacing: integer(-31680, 31680), position: integer(-3168, 3168), scale: integer(1, 600), kerning: integer(0, 3276) },
   typography: {
-    ligatures: oneOf('none', 'standard', 'contextual', 'historical', 'discretionary',
-      'standardContextual', 'standardHistorical', 'contextualHistorical', 'standardDiscretionary',
-      'contextualDiscretionary', 'historicalDiscretionary', 'standardContextualHistorical',
-      'standardContextualDiscretionary', 'standardHistoricalDiscretionary',
-      'contextualHistoricalDiscretionary', 'all'),
+    ligatures: oneOf('none', 'standard', 'contextual', 'historical', 'discretional',
+      'standardContextual', 'standardHistorical', 'contextualHistorical', 'standardDiscretional',
+      'contextualDiscretional', 'historicalDiscretional', 'standardContextualHistorical',
+      'standardContextualDiscretional', 'standardHistoricalDiscretional',
+      'contextualHistoricalDiscretional', 'all', 'discretionary', 'standardDiscretionary',
+      'contextualDiscretionary', 'historicalDiscretionary', 'standardContextualDiscretionary',
+      'standardHistoricalDiscretionary', 'contextualHistoricalDiscretionary'),
     contextualAlternates: value => typeof value === 'boolean',
   },
   emphasisMark: { type: oneOf('dot', 'comma', 'circle', 'underDot') },
@@ -224,10 +250,11 @@ function directRunAttributes(
   return direct;
 }
 
-function clipboardRun(
+/** @internal A clipboard run with portable formatting and a validated link. */
+export function clipboardRun(
   text: string,
   attributes: Record<string, unknown>,
-  themeColors: Readonly<Record<string, string>> | undefined,
+  themeColors?: Readonly<Record<string, string>>,
 ): DocxClipboardRun {
   const link = record(attributes.hyperlink);
   const href = typeof link?.href === 'string' && validHref(link.href) ? link.href : undefined;
@@ -238,6 +265,12 @@ function clipboardRun(
     ...(href ? { href } : {}),
     ...(tooltip ? { tooltip } : {}),
   };
+}
+
+/** @internal */
+export function clipboardHighlightName(name: string): string | undefined {
+  const lower = name.toLowerCase();
+  return HIGHLIGHT_NAMES.find(value => value.toLowerCase() === lower);
 }
 
 function validHref(value: unknown): value is string {
@@ -964,10 +997,11 @@ function formatInsertedRun(
 export function applyClipboardFragment(
   engine: ClipboardPasteEngine,
   range: YrsStoryRange,
-  fragment: DocxClipboardFragment,
+  source: DocxClipboardFragment,
   suggesting?: YrsAuthor,
   keepInherited = false,
 ): YrsLoc {
+  const fragment = withinFormattedRunLimit(source);
   for (const paragraph of fragment.paragraphs) {
     for (const table of paragraph.tables ?? []) engine.validateTableFragment(table);
     for (const inline of paragraph.inlines ?? []) {

@@ -9,7 +9,7 @@ import { clipboardFragmentPlainText, pasteOptionsOffered, plainTextClipboardFrag
 import { mergeFormattingFragment, type PasteFormattingOption } from '../pasteOptions/clipboardFragmentTransforms';
 import { beginComposition, updateComposition, endComposition, type PeerlessCompositionEndResult, type PeerlessCompositionState } from './composition';
 import type { CommandTicket } from '../../../../../../shared/office-session/commands/types';
-import { admitInputIntents, admitIntent, appliedTicket, submitFormattingIntent, type PeerlessAdmissionResult, type PeerlessInputAdmission } from './inputAdmission';
+import { admitInputIntents, admitIntent, appliedTicket, submitFormattingIntent, type PeerlessAdmissionResult, type PeerlessInputAdmission, type PeerlessQueuedCut } from './inputAdmission';
 import { normalizeInputEvent, selectsAll, type PeerlessInputEvent, type PeerlessInputEventState } from './inputEvents';
 import type { PeerlessViewStore } from './viewStore';
 import { useTranslation } from '../../../i18n';
@@ -51,7 +51,7 @@ export interface PeerlessInputProps {
   onCompositionChange?(state: PeerlessCompositionState | null): void;
   onRecoverableText?(text: string): void;
   /** Fills `data` synchronously when the selection's clipboard payload is ready. */
-  onClipboard?(cut: boolean, data?: DataTransfer | null): Promise<void>;
+  onClipboard?(cut: boolean, data?: DataTransfer | null, queuedCut?: PeerlessQueuedCut): Promise<void>;
   onPasteFragment?(fragment: DocxClipboardFragment, inputTime: number): boolean;
   pasteOptions?: boolean;
   onReplacePasteFragment?(fragment: DocxClipboardFragment, selection: DocxCommandSelection, variant?: 'plain' | 'merge'): PeerlessAdmissionResult | false;
@@ -351,15 +351,33 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
         } }, { inputTime: event.timeStamp });
         return;
       }
+      const onClipboard = callbacks.current.onClipboard;
       if (event.key === 'Delete' && event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey &&
-        callbacks.current.onClipboard && !isReadOnly()) {
-        const selection = viewStore.getSnapshot().workerSelection;
-        const ranged = !!selection && (selection.anchor.story !== selection.focus.story ||
-          selection.anchor.paraId !== selection.focus.paraId || selection.anchor.offset !== selection.focus.offset);
-        if (ranged || admission.getSnapshot().pendingInputs > 0) {
+        onClipboard && !isReadOnly()) {
+        const { identity, workerSelection } = viewStore.getSnapshot();
+        if (admission.getSnapshot().pendingInputs > 0) {
+          event.preventDefault();
+          active = { id: ++nextEventId, phase: 'start', inputType: 'deleteContentForward', keyboard: true };
+          state = { ...state, lastHandledEventId: active.id };
+          setPasteRecord(null);
+          pasteOptionsRef.current.dismiss();
+          admitIntent(admission, { kind: 'deleteForward', payload: {} }, {
+            inputTime: event.timeStamp, source: 'typing',
+            shiftDelete: {
+              isCurrent: () => {
+                const current = viewStore.getSnapshot().identity;
+                return mounted && current.session === identity.session && current.epoch === identity.epoch &&
+                  current.incarnation === identity.incarnation;
+              },
+              cut: (queuedCut) => onClipboard(true, null, queuedCut),
+            },
+          });
+          return;
+        }
+        if (workerSelection && !caretPoint(workerSelection)) {
           event.preventDefault();
           active = null;
-          void callbacks.current.onClipboard(true, null);
+          void onClipboard(true, null);
           return;
         }
       }
@@ -460,7 +478,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       active = { id: ++nextEventId, phase: 'start', inputType: 'insertFromPaste', keyboard: false };
       const html = gesture === 'plain' ? '' : event.clipboardData?.getData('text/html') ?? '';
       if (html) {
-        const fragment = parseClipboardHtml(html);
+        const fragment = parseClipboardHtml(html, { formatted: true });
         if (fragment && callbacks.current.onPasteFragment?.(fragment, event.timeStamp) === true) {
           element.value = '';
           return;

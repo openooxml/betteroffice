@@ -1,7 +1,9 @@
 import {
   DOCX_CLIPBOARD_FRAGMENT_VERSION,
   clipboardFragmentHasPictures,
+  clipboardHighlightName,
   clipboardParagraphUnits,
+  clipboardRun,
   validClipboardFragment,
   type DocxClipboardFragment,
   type DocxClipboardParagraph,
@@ -11,6 +13,13 @@ import {
   type DocxTableFragmentCell,
 } from '@betteroffice/docx/yrs';
 import type { YrsInlineFormatDelta } from '@betteroffice/docx/yrs';
+import { clipboardHtmlStyles, formattedFontFamily } from './clipboardHtmlStyles';
+
+export const MAX_FORMATTED_HTML_LENGTH = 2_000_000;
+export const MAX_FORMATTED_HTML_DEPTH = 200;
+export const MAX_FORMATTED_HTML_RUNS = 5_000;
+export const MAX_FORMATTED_HTML_TEXT = 200_000;
+export const MAX_FORMATTED_HTML_PARAGRAPHS = 1_000;
 
 const NBSP = '\u00a0';
 const LINE_SEP = '\u2028';
@@ -327,8 +336,7 @@ function blankInlineFormat(): InlineFormatState {
   return { bold: false, italic: false, underline: false, strike: false, color: null, fontSize: null, fontFamily: null, highlight: null };
 }
 
-function applyInlineElement(state: InlineFormatState, element: Element, isCell: boolean): void {
-  const tag = element.tagName.toUpperCase();
+function applyInlineMarks(state: InlineFormatState, tag: string, style: Map<string, string>): void {
   let boldSpec: boolean | undefined;
   let italicSpec: boolean | undefined;
   let underlineSpec: boolean | undefined;
@@ -337,7 +345,6 @@ function applyInlineElement(state: InlineFormatState, element: Element, isCell: 
   if (tag === 'I' || tag === 'EM') italicSpec = true;
   if (tag === 'U' || tag === 'INS') underlineSpec = true;
   if (tag === 'S' || tag === 'STRIKE' || tag === 'DEL') strikeSpec = true;
-  const style = styleOf(element);
   const weight = fontWeightBold(style.get('font-weight'));
   if (weight !== undefined) boldSpec = weight;
   const fontStyle = (style.get('font-style') ?? '').trim().toLowerCase();
@@ -357,6 +364,11 @@ function applyInlineElement(state: InlineFormatState, element: Element, isCell: 
   if (italicSpec !== undefined) state.italic = italicSpec;
   if (underlineSpec !== undefined) state.underline = underlineSpec;
   if (strikeSpec !== undefined) state.strike = strikeSpec;
+}
+
+function applyInlineElement(state: InlineFormatState, element: Element, isCell: boolean): void {
+  const style = styleOf(element);
+  applyInlineMarks(state, element.tagName.toUpperCase(), style);
   const color = colorToHex(style.get('color'));
   if (color) state.color = color;
   const size = fontSizeToPt(style.get('font-size'));
@@ -653,8 +665,247 @@ function parseTableElement(table: HTMLTableElement): DocxTableFragment {
   };
 }
 
-/** Parsed table fragment from HTML, or null when the HTML holds no table. */
-export function parseClipboardHtml(html: string): DocxClipboardFragment | null {
+interface HtmlRunState extends InlineFormatState {
+  vertical?: 'super' | 'sub';
+  link?: { href: string | null; tooltip: string | null };
+  marker?: string;
+  pre?: boolean;
+}
+
+function memoized<T>(read: (value: string) => T): (value: string) => T {
+  const cache = new Map<string, T>();
+  return value => {
+    if (!cache.has(value)) cache.set(value, read(value));
+    return cache.get(value)!;
+  };
+}
+
+const CSS_COLORS: Readonly<Record<string, string>> = {
+  black: '000000', silver: 'C0C0C0', gray: '808080', white: 'FFFFFF',
+  maroon: '800000', red: 'FF0000', purple: '800080', fuchsia: 'FF00FF',
+  green: '008000', lime: '00FF00', olive: '808000', yellow: 'FFFF00',
+  navy: '000080', blue: '0000FF', teal: '008080', aqua: '00FFFF',
+  cyan: '00FFFF', magenta: 'FF00FF',
+};
+
+function formattedColor(value: string): string | null {
+  const lower = value.toLowerCase();
+  if (Object.hasOwn(CSS_COLORS, lower)) return CSS_COLORS[lower]!;
+  if (lower.startsWith('#')) return colorToHex(value);
+  const rgb = /^rgba?\(([^()]*)\)$/.exec(lower);
+  if (!rgb) return null;
+  const channels = rgb[1]!.split(',').map(channel => channel.trim());
+  if (channels.length !== 3 && channels.length !== 4) return null;
+  for (const [i, channel] of channels.entries()) {
+    if (!/^(?:\d+(?:\.\d*)?|\.\d+)%?$/.test(channel)) return null;
+    const number = Number.parseFloat(channel);
+    const max = channel.endsWith('%') ? 100 : i === 3 ? 1 : 255;
+    if (number > max || (i === 3 && number === 0)) return null;
+  }
+  return colorToHex(value);
+}
+
+interface HtmlValueReaders {
+  color: (value: string) => string | null;
+  fontFamily: (value: string) => string | null;
+}
+
+function htmlValueReaders(): HtmlValueReaders {
+  return { color: memoized(formattedColor), fontFamily: memoized(formattedFontFamily) };
+}
+
+function htmlRunState(parent: HtmlRunState, element: Element, style: Map<string, string>, read: HtmlValueReaders): HtmlRunState {
+  const state = { ...parent };
+  const tag = element.tagName.toUpperCase();
+  applyInlineMarks(state, tag, style);
+  if (tag === 'SUP') state.vertical = 'super';
+  if (tag === 'SUB') state.vertical = 'sub';
+  const vertical = style.get('vertical-align')?.toLowerCase();
+  if (vertical === 'super' || vertical === 'sub') state.vertical = vertical;
+  else if (vertical === 'baseline') delete state.vertical;
+  const color = style.get('color');
+  if (color) state.color = read.color(color);
+  const size = style.get('font-size');
+  if (size) {
+    const points = /^(?:\d+(?:\.\d*)?|\.\d+)(?:pt|px)$/i.test(size) ? fontSizeToPt(size) : null;
+    state.fontSize = points !== null && points >= 1 && points <= 1638 ? points : null;
+  }
+  const family = style.get('font-family');
+  if (family) state.fontFamily = read.fontFamily(family);
+  const background = style.get('background-color');
+  const rgb = background && read.color(background);
+  if (rgb && (rgb !== 'FFFFFF' || parent.highlight)) state.highlight = rgb;
+  const highlight = style.get('mso-highlight');
+  if (highlight) state.highlight = clipboardHighlightName(highlight) ?? state.highlight;
+  if (tag === 'A') state.link = { href: element.getAttribute('href'), tooltip: element.getAttribute('title') };
+  if (tag === 'SPAN' && parent.marker === undefined && style.get('mso-list')?.toLowerCase() === 'ignore') {
+    state.marker = element.textContent?.trim() ?? '';
+  }
+  const space = style.get('white-space')?.toLowerCase();
+  if (tag === 'PRE' || space === 'pre' || space === 'pre-wrap') state.pre = true;
+  else if (space === 'normal' || space === 'nowrap') delete state.pre;
+  return state;
+}
+
+function formattedRun(text: string, state: HtmlRunState): DocxClipboardRun {
+  const attrs: Record<string, unknown> = {};
+  if (state.bold) attrs.bold = true;
+  if (state.italic) attrs.italic = true;
+  if (state.underline) attrs.underline = { style: 'single' };
+  if (state.strike) attrs.strike = { double: false };
+  if (state.vertical === 'super') attrs.superscript = true;
+  if (state.vertical === 'sub') attrs.subscript = true;
+  if (state.color) attrs.textColor = { rgb: state.color };
+  if (state.fontSize !== null) attrs.fontSize = { size: Math.round(state.fontSize * 2) };
+  if (state.highlight) attrs.highlight = state.highlight;
+  if (state.link) attrs.hyperlink = state.link;
+  if (state.marker !== undefined) {
+    const font = state.fontFamily?.toLowerCase();
+    if (state.marker === '·' && font === 'symbol') text = text.replace('·', '•');
+    if (state.marker === '§' && font === 'wingdings') text = text.replace('§', '▪');
+  } else if (state.fontFamily) {
+    attrs.fontFamily = { ascii: state.fontFamily, hAnsi: state.fontFamily };
+  }
+  return clipboardRun(text, attrs);
+}
+
+function walkFormattedBody(
+  body: HTMLElement,
+  pushText: (text: string, runs?: DocxClipboardRun[]) => void,
+  pushTable: (table: DocxTableFragment) => void,
+  paragraphCount: () => number,
+): boolean {
+  const withTable = new WeakSet<Element>();
+  const withBlock = new WeakSet<Element>();
+  const isBlock = (tag: string) => BLOCK_TAGS.has(tag) || tag === 'PRE' || tag === 'BLOCKQUOTE';
+  const index = (element: Element, depth: number): boolean => {
+    if (depth > MAX_FORMATTED_HTML_DEPTH) return false;
+    const tag = element.tagName.toUpperCase();
+    if (tag === 'TABLE') withTable.add(element);
+    for (const child of element.children) {
+      if (!index(child, depth + 1)) return false;
+      if (withTable.has(child)) withTable.add(element);
+      if (withBlock.has(child) || isBlock(child.tagName.toUpperCase())) withBlock.add(element);
+    }
+    return true;
+  };
+  const doc = body.ownerDocument;
+  if (!index(doc.documentElement, -1)) return false;
+  const styles = clipboardHtmlStyles(doc);
+  const read = htmlValueReaders();
+  let runs: DocxClipboardRun[] = [];
+  let lastFormat = '';
+  let endsInSpace = false;
+  let afterBreak = false;
+  let emitted = 0;
+  let failed = false;
+  let runBudget = MAX_FORMATTED_HTML_RUNS;
+  let textBudget = MAX_FORMATTED_HTML_TEXT;
+  const emit = (text: string, paragraphRuns?: DocxClipboardRun[]) => {
+    emitted++;
+    pushText(text, paragraphRuns);
+    if (paragraphCount() > MAX_FORMATTED_HTML_PARAGRAPHS) failed = true;
+  };
+  const flush = () => {
+    if (endsInSpace) {
+      const last = runs[runs.length - 1]!;
+      last.text = last.text.slice(0, -1);
+      if (!last.text) runs.pop();
+    }
+    if (runs.length) emit(runs.map(run => run.text).join(''), runs);
+    runs = [];
+    endsInSpace = false;
+  };
+  const lineBreak = () => {
+    if (!runs.length && afterBreak) emit('');
+    flush();
+    afterBreak = true;
+  };
+  const appendRun = (text: string, state: HtmlRunState): boolean => {
+    textBudget -= text.length;
+    if (textBudget < 0) return false;
+    afterBreak = false;
+    const run = formattedRun(text, state);
+    const last = runs.at(-1);
+    const format = JSON.stringify(run.format!.other);
+    if (last && lastFormat === format && last.href === run.href && last.tooltip === run.tooltip) last.text += run.text;
+    else if (--runBudget < 0) return false;
+    else runs.push(run);
+    lastFormat = format;
+    return true;
+  };
+  const append = (raw: string, state: HtmlRunState): boolean => {
+    if (state.pre) {
+      const lines = raw.replace(/\r\n?/g, '\n').split(NBSP).join(' ').split(/[\n\f\v\u2028\u2029]/);
+      for (const [index, line] of lines.entries()) {
+        if (index) lineBreak();
+        if (failed || (line && !appendRun(line, state))) return false;
+        if (line) endsInSpace = false;
+      }
+      return true;
+    }
+    let text = normalizeTextPart(raw);
+    if ((!runs.length || endsInSpace) && text.startsWith(' ')) text = text.slice(1);
+    if (!text) return true;
+    endsInSpace = text.endsWith(' ');
+    return appendRun(text, state);
+  };
+  const visit = (node: Node, parent: HtmlRunState, inBlock: boolean): boolean => {
+    if (node.nodeType === 3) {
+      const raw = (node as Text).data;
+      if (!inBlock && !parent.pre && raw.includes(LINE_SEP)) {
+        for (const [index, part] of raw.split(LINE_SEP).entries()) {
+          if (index) flush();
+          if (!append(part, parent)) return false;
+        }
+        return true;
+      }
+      return append(raw, parent);
+    }
+    if (node.nodeType !== 1) return true;
+    const element = node as Element;
+    const tag = element.tagName.toUpperCase();
+    if (SKIP_TAGS.has(tag) || tag === 'IMG') return true;
+    if (tag === 'BR') {
+      lineBreak();
+      return !failed;
+    }
+    if (tag === 'TABLE') {
+      flush();
+      afterBreak = false;
+      emitted++;
+      pushTable(parseTableElement(element as HTMLTableElement));
+      return paragraphCount() <= MAX_FORMATTED_HTML_PARAGRAPHS && !failed;
+    }
+    const boundary = !inBlock && (isBlock(tag) || withTable.has(element) || withBlock.has(element));
+    if (boundary) {
+      flush();
+      afterBreak = true;
+    }
+    const state = htmlRunState(parent, element, styles(element), read);
+    const block = inBlock || (isBlock(tag) && !withTable.has(element) && !withBlock.has(element));
+    const before = emitted;
+    for (const child of element.childNodes) {
+      if (!visit(child, state, block)) return false;
+    }
+    if (boundary) {
+      flush();
+      afterBreak = false;
+      if (block && emitted === before && (element.querySelector('br') || element.textContent?.includes(NBSP))) emit('');
+    }
+    return !failed;
+  };
+  const root = htmlRunState(blankInlineFormat(), doc.documentElement, styles(doc.documentElement), read);
+  const state = htmlRunState(root, body, styles(body), read);
+  for (const child of body.childNodes) {
+    if (!visit(child, state, false)) return false;
+  }
+  flush();
+  return !failed;
+}
+
+/** Reads an internal payload or imports supported clipboard HTML. */
+export function parseClipboardHtml(html: string, options?: { formatted?: boolean }): DocxClipboardFragment | null {
   const parser = new DOMParser();
   const document_ = parser.parseFromString(html, 'text/html');
   const payloadElement = document_.querySelector('[data-betteroffice-docx]');
@@ -672,16 +923,26 @@ export function parseClipboardHtml(html: string): DocxClipboardFragment | null {
   }
   const body = document_.body;
   if (!body) return null;
+  if (options?.formatted === true) {
+    if (html.length <= MAX_FORMATTED_HTML_LENGTH) {
+      const fragment = parseClipboardBody(body, true);
+      if (fragment) return fragment;
+    }
+    if (!body.querySelector('table')) return null;
+  }
+  return parseClipboardBody(body, false);
+}
+
+function parseClipboardBody(body: HTMLElement, formatted: boolean): DocxClipboardFragment | null {
   const paragraphs: DocxClipboardParagraph[] = [];
   let activeTablePara: DocxClipboardParagraph | null = null;
-  const pushTextLines = (lines: string[]) => {
-    for (const line of lines) {
-      if (activeTablePara && activeTablePara.text === '') {
-        activeTablePara.text = line;
-        activeTablePara = null;
-      } else {
-        paragraphs.push({ text: line });
-      }
+  const pushText = (text: string, runs?: DocxClipboardRun[]) => {
+    if (activeTablePara && activeTablePara.text === '') {
+      activeTablePara.text = text;
+      if (runs) activeTablePara.runs = runs;
+      activeTablePara = null;
+    } else {
+      paragraphs.push(runs ? { text, runs } : { text });
     }
   };
   const pushTable = (table: DocxTableFragment) => {
@@ -693,6 +954,17 @@ export function parseClipboardHtml(html: string): DocxClipboardFragment | null {
       activeTablePara = paragraph;
     }
   };
+  if (formatted) {
+    if (!walkFormattedBody(body, pushText, pushTable, () => paragraphs.length)) return null;
+    if (!paragraphs.some(p => p.runs?.some(run => run.href || Object.keys(run.format!.other!).length))) return null;
+    const blank = (p: DocxClipboardParagraph) => p.text === '' && !p.runs && !p.tables?.length;
+    let start = 0;
+    let end = paragraphs.length;
+    while (start < end && blank(paragraphs[start]!)) start++;
+    while (end > start && blank(paragraphs[end - 1]!)) end--;
+    const fragment = { paragraphs: paragraphs.slice(start, end) };
+    return validClipboardFragment(fragment) ? fragment : null;
+  }
   const collectInlineRaw = (node: Node, out: string[]) => {
     if (node.nodeType === 8) return;
     if (node.nodeType === 3) {
@@ -716,7 +988,7 @@ export function parseClipboardHtml(html: string): DocxClipboardFragment | null {
       const raw = pendingInline.join('');
       pendingInline = [];
       const lines = raw.split(LINE_SEP).map(normalizeParagraphText).filter((line) => line !== '');
-      pushTextLines(lines);
+      for (const line of lines) pushText(line);
     };
     for (const node of nodes) {
       if (node.nodeType === 8) continue;
@@ -747,7 +1019,7 @@ export function parseClipboardHtml(html: string): DocxClipboardFragment | null {
         }
         flushPendingInline();
         const lines = blockLines(element);
-        pushTextLines(lines.filter((line) => line !== ''));
+        for (const line of lines) if (line !== '') pushText(line);
         continue;
       }
       if (containsTable(element)) {
@@ -771,7 +1043,7 @@ export function parseClipboardHtml(html: string): DocxClipboardFragment | null {
 }
 
 /** The rich content on the system clipboard, read through the async Clipboard API. */
-export async function readClipboardFragment(): Promise<DocxClipboardFragment | null> {
+export async function readClipboardFragment(options?: { formatted?: boolean }): Promise<DocxClipboardFragment | null> {
   if (typeof navigator === 'undefined' || !navigator.clipboard || !('read' in navigator.clipboard)) return null;
   let items: ClipboardItem[];
   try {
@@ -787,7 +1059,7 @@ export async function readClipboardFragment(): Promise<DocxClipboardFragment | n
     } catch {
       return null;
     }
-    return parseClipboardHtml(html);
+    return parseClipboardHtml(html, options);
   }
   return null;
 }

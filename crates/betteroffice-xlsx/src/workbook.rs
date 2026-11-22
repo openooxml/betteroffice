@@ -1929,6 +1929,11 @@ impl Workbook {
         self.model.sheets.len()
     }
 
+    /// The `sheet_ids` of [`Workbook::sheet_info`], without computing the rest of it.
+    pub fn sheet_ids(&self) -> Vec<String> {
+        self.sheet_keys()
+    }
+
     pub fn sheet_id(&self, name: &str) -> Option<SheetId> {
         self.model.sheet_by_name(name).map(|(id, _)| id)
     }

@@ -82,7 +82,11 @@ export interface PeerlessViewStore {
   subscribePresentation(listener: () => void): () => void;
   subscribeStructure(listener: () => void): () => void;
   subscribeEditState(listener: () => void): () => void;
-  dispatch(intent: PresentationCommandIntent, options?: { reportRefusal?: boolean }): Promise<PresentationCommandAck>;
+  dispatch(intent: PresentationCommandIntent, options?: {
+    reportRefusal?: boolean;
+    signal?: AbortSignal;
+    waitForPredecessor?: boolean;
+  }): Promise<PresentationCommandAck>;
   fence(): Promise<void>;
   setSelection(selection: PresentationCommandSelection | null): void;
   setFocused(focused: boolean): void;
@@ -97,12 +101,14 @@ interface WaitingInput {
   seq: number;
   ticket?: CommandTicket;
   after?: WaitingInput;
+  cancelled?: boolean;
   basis: PresentationCommandBasis;
   basisThroughSeq: number;
   intent: PresentationCommandIntent;
   chunks: string[];
   echoed: boolean;
   quiet: boolean;
+  waitForPredecessor: boolean;
   operation: Promise<PresentationCommandAck>;
   resolve(ack: PresentationCommandAck): void;
   reject(error: unknown): void;
@@ -400,16 +406,8 @@ export function createPeerlessViewStore(
       if (!input.quiet) refusals.push(new PptxCommandRefusedError(input.intent.kind, outcome));
       input.resolve({ ...ack, outcomes: [outcome] });
     }
-    if (!sharedInput) {
-      const sequences = new Map(waiting.map((input, index) => [input.seq, lastSentSeq + index + 1]));
-      for (const input of waiting) {
-        input.seq = sequences.get(input.seq)!;
-        const at = 'at' in input.intent.payload ? input.intent.payload.at : undefined;
-        if (at?.source === 'afterSeq' && sequences.has(at.seq)) input.intent = chainedIntent(input.intent, sequences.get(at.seq)!);
-      }
-      compatibilityNextSeq = lastSentSeq + waiting.length + 1;
-      chainTail = Math.max(selectionTailSeq, [...waiting].reverse().find((input) => !preservesSelection(input.intent))?.seq ?? 0);
-    } else if (chainTailInput && rejectedInputs.has(chainTailInput)) {
+    if (!sharedInput) resequenceWaiting();
+    else if (chainTailInput && rejectedInputs.has(chainTailInput)) {
       chainTailInput = [...waiting].reverse().find((input) => !preservesSelection(input.intent));
     }
     view = { ...view, appliedThroughSeq: ack.throughSeq, editState: ack.editState,
@@ -591,7 +589,7 @@ export function createPeerlessViewStore(
       const predecessor = input.after?.ticket;
       if (predecessor?.seq !== undefined) intent = chainedIntent(intent, predecessor.seq);
       let submission: ReturnType<typeof sharedInput.submit>;
-      try { submission = sharedInput.submit(intent, input.basis, predecessor); }
+      try { submission = sharedInput.submit(intent, input.basis, predecessor, input.waitForPredecessor); }
       catch (error) { fail(error); input.reject(error); return; }
       input.ticket = submission.ticket;
       operation = submission.operation;
@@ -637,21 +635,58 @@ export function createPeerlessViewStore(
     } finally { draining = false; }
   }
 
+  function resequenceWaiting(cancelled?: WaitingInput): void {
+    const sequences = new Map(waiting.map((input, index) => [input.seq, lastSentSeq + index + 1]));
+    const predecessor = cancelled && 'at' in cancelled.intent.payload ? cancelled.intent.payload.at : undefined;
+    for (const input of waiting) {
+      input.seq = sequences.get(input.seq)!;
+      const at = 'at' in input.intent.payload ? input.intent.payload.at : undefined;
+      if (at?.source !== 'afterSeq') continue;
+      const previous = at.seq === cancelled?.seq && predecessor?.source === 'afterSeq' ? predecessor.seq : at.seq;
+      const seq = sequences.get(previous) ?? previous;
+      if (seq !== at.seq) input.intent = chainedIntent(input.intent, seq);
+    }
+    compatibilityNextSeq = lastSentSeq + waiting.length + 1;
+    chainTail = Math.max(selectionTailSeq, [...waiting].reverse().find((input) => !preservesSelection(input.intent))?.seq ?? 0);
+  }
+
+  function cancelInput(input: WaitingInput): void {
+    const index = waiting.indexOf(input);
+    if (index < 0 && (!input.ticket || !sharedInput?.cancel?.(input.ticket))) return;
+    input.cancelled = true;
+    submitted.delete(input);
+    if (chainTailInput === input) chainTailInput = input.after;
+    for (const child of [...waiting, ...submitted.keys()]) {
+      if (child.after === input) child.after = input.after;
+    }
+    if (index < 0) return;
+    waiting.splice(index, 1);
+    if (!sharedInput) resequenceWaiting(input);
+    const outcome: PresentationCommandOutcome = { seq: sharedInput ? lastSentSeq + index + 1 : input.seq,
+      status: 'cancelled', committed: false };
+    input.resolve({ ...client.state, frame: undefined, outcomes: [outcome] });
+    view = { ...view, waitingInputCount: waiting.length };
+    notify(presentation);
+    drain();
+  }
+
   const store: PeerlessViewStore = {
     getSnapshot: () => view,
     subscribePresentation: (listener) => subscribe(presentation, listener),
     subscribeStructure: (listener) => subscribe(structure, listener),
     subscribeEditState: (listener) => subscribe(editState, listener),
-    dispatch(intent, { reportRefusal = true } = {}) {
+    dispatch(intent, { reportRefusal = true, signal, waitForPredecessor = false } = {}) {
       if (disposed) return Promise.reject(new PptxWorkerEditorDisposedError());
       if (failure) return Promise.reject(failure);
       if (view.inputFailure) view = { ...view, inputFailure: undefined };
       const wasKnown = known();
       const predecessor = sharedInput ? chainTailInput?.ticket?.seq ?? selectionTailSeq : chainTail;
       const originalReference = 'at' in intent.payload ? intent.payload.at : undefined;
-      const after = sharedInput && !wasKnown &&
-        ('at' in intent.payload || intent.kind === 'setSelection' || intent.kind === 'compositionEnd')
+      let after = sharedInput && !wasKnown &&
+        ('at' in intent.payload || intent.kind === 'setSelection' || intent.kind === 'compositionEnd' ||
+          intent.kind === 'selectObject')
         ? chainTailInput : originalReference && resultReferences.get(originalReference);
+      while (after?.cancelled) after = after.after;
       if (!wasKnown && ('at' in intent.payload || intent.kind === 'setSelection' || intent.kind === 'compositionEnd')) {
         intent = chainedIntent(intent, predecessor);
       }
@@ -688,7 +723,9 @@ export function createPeerlessViewStore(
       void operation.then(() => { captured.delete(operation); }, () => { captured.delete(operation); });
       const input: WaitingInput = { seq, intent, after, basisThroughSeq: view.presentedThroughSeq,
         basis: { epoch: identity.epoch, version: view.confirmed?.frame.version ?? client.state.version },
-        echoed, quiet: !reportRefusal, chunks: [], operation, resolve, reject };
+        echoed, quiet: !reportRefusal, chunks: [], operation, resolve, reject,
+        waitForPredecessor: waitForPredecessor || intent.kind === 'selectObject' && after !== undefined &&
+          ('shapeId' in intent.payload || after.intent.kind === 'setShapeRect' && after.waitForPredecessor) };
       let target: PresentationCommandSelected | null | undefined;
       if (intent.kind === 'selectAtPoint' && !intent.payload.drag) {
         const hit = hitGeometry(geometry, intent.payload);
@@ -709,6 +746,13 @@ export function createPeerlessViewStore(
         view = { ...view, waitingInputCount: waiting.length };
         if (intent.kind !== 'collabPipe') notify(presentation);
       } else send(input);
+      if (signal) {
+        const abort = () => cancelInput(input);
+        signal.addEventListener('abort', abort, { once: true });
+        const cleanup = () => signal.removeEventListener('abort', abort);
+        void operation.then(cleanup, cleanup);
+        if (signal.aborted) abort();
+      }
       return operation;
     },
     async fence() {
@@ -742,6 +786,7 @@ export function createPeerlessViewStore(
       view = { ...view, composition: { id, selection, text: '' } };
       void store.dispatch({ kind: 'compositionStart', payload: { compositionId: id,
         at, inputTime, undoGroup: id } }).catch(() => {});
+      notify(presentation);
     },
     updateComposition(text) {
       if (disposed || failure || !view.composition) return;
@@ -836,6 +881,7 @@ function chainedIntent(intent: PresentationCommandIntent, seq: number): Presenta
   const at = { source: 'afterSeq' as const, seq };
   switch (intent.kind) {
     case 'moveShape': return 'delta' in intent.payload ? { ...intent, payload: { ...intent.payload, at } } : intent;
+    case 'setShapeRect': return 'delta' in intent.payload ? { ...intent, payload: { ...intent.payload, at } } : intent;
     case 'insertText': return { ...intent, payload: { ...intent.payload, at } };
     case 'replaceText': return { ...intent, payload: { ...intent.payload, at } };
     case 'formatText': return { ...intent, payload: { ...intent.payload, at } };

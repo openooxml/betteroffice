@@ -2990,6 +2990,13 @@ pub fn render_docx_markdown_with_pages_json(
     crate::session::free::render_docx_markdown_with_pages_json(content, options).map_err(js_err)
 }
 
+/// The digest the writer compares a complex field's `sourceRunDigest` with, or `undefined` when
+/// `field_json` is not a complex field.
+#[wasm_bindgen]
+pub fn field_run_digest(field_json: &str) -> Option<String> {
+    crate::field_run_digest(field_json)
+}
+
 #[cfg(test)]
 impl EditSession {
     fn register_measure_font(&self, bytes: &[u8]) -> Result<u32, JsValue> {

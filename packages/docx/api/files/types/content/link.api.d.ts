@@ -174,10 +174,13 @@ export interface ComplexField {
     rawFormDataXml?: string;
     /**
      * The run holding this field and the fields and text beside it, as read, when one run holds
-     * two or more whole fields. Written in place of the field while the field is as parsed.
+     * one or more whole fields. Written in place of the field while the field is as parsed.
      */
     sourceRunXml?: string;
-    /** The digest of the field as parsed from `sourceRunXml`. */
+    /**
+     * The digest of the field as stored. It equals the digest of the field as parsed from
+     * `sourceRunXml` until a loader has filled in the field's theme fonts.
+     */
     sourceRunDigest?: string;
     /** Rich recursive code projection. Undefined = use `fieldCode`. */
     structuredCode?: StructuredFieldContent;

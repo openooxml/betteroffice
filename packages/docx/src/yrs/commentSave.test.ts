@@ -581,6 +581,15 @@ it('keeps the body and table-cell ranges of a generated document after an edit t
   }
 });
 
+it('refuses to save a new comment after a comment id too large to extend', async () => {
+  const parts = new Map(Object.entries(unzipContainer(docx())));
+  for (const name of ['word/document.xml', 'word/comments.xml']) {
+    parts.set(name, toBytes(new TextDecoder().decode(parts.get(name)).replaceAll('w:id="1"', 'w:id="10000000000000000"')));
+  }
+  const session = await open(new Uint8Array(rezipPartsToArrayBuffer(parts)), 91210);
+  session.addComment([range(session, 2, 0, 7)], 'Editor', '2026-10-01T00:00:00Z', 'New');
+  await expect(saveYrsDocx(session)).rejects.toThrow('The document holds a comment id too large to extend');
+}, 30_000);
 
 describe('comment threads', () => {
   it('hydrates imported unanchored replies and saves without comment edits unchanged', async () => {

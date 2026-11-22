@@ -32,6 +32,8 @@ let paintedThroughSeq = 0;
 let holdPaintCommits = false;
 let heldPaintCommits: (() => void)[] = [];
 let refuseResizeCommit = false;
+let selectObjectReplyBarrier: Promise<void> | undefined;
+let releaseSelectObjectReply: (() => void) | undefined;
 
 function bounded<T>(promise: Promise<T>): Promise<T> {
   let timer: ReturnType<typeof setTimeout>;
@@ -74,6 +76,8 @@ beforeEach(() => {
   holdPaintCommits = false;
   heldPaintCommits = [];
   refuseResizeCommit = false;
+  selectObjectReplyBarrier = undefined;
+  releaseSelectObjectReply = undefined;
   const createPainter = peerlessPainterFactories.frame;
   const painter = spyOn(peerlessPainterFactories, 'frame').mockImplementation((canvas, options) =>
     createPainter(canvas, { ...options, onCommit(frame, view) {
@@ -113,9 +117,17 @@ beforeEach(() => {
     const command = registration.handlers.command;
     const received = spyOn(registration.handlers, 'command').mockImplementation((context, envelope) => {
       commands.push(envelope);
-      return command(context, refuseResizeCommit && envelope.kind === 'setShapeRect'
-        ? { ...envelope, payload: { ...envelope.payload,
-          target: { ...envelope.payload.target, shapeId: 'removed-target' } } } : envelope);
+      const result = command(context, refuseResizeCommit && envelope.kind === 'setShapeRect'
+        ? { ...envelope, payload: 'target' in envelope.payload
+          ? { ...envelope.payload, target: { ...envelope.payload.target, shapeId: 'removed-target' } }
+          : { ...envelope.payload, shapeId: 'removed-target' } }
+        : envelope);
+      return envelope.kind === 'selectObject' && selectObjectReplyBarrier
+        ? Promise.resolve(result).then(async (reply) => {
+          await selectObjectReplyBarrier;
+          return reply;
+        })
+        : result;
     });
     restorers.push(() => received.mockRestore());
     createSessionHost<PresentationCommandMethods, PresentationCommandEvents, null>(pair.host, {
@@ -164,7 +176,7 @@ async function open(small = false, table: boolean | 'empty' | 'mixed' | 'stacked
   return { view, stage, canvas, box, point, select, list };
 }
 
-test('shape_border', async () => {
+test('text editing keeps resize handles active', async () => {
   const { view, stage, canvas, box, point, select } = await open();
   await select();
   const line = box.lines[0]!;
@@ -173,7 +185,45 @@ test('shape_border', async () => {
     fireEvent.pointerUp(stage, point(stop.x, line.y + line.height / 2)); });
   await waitFor(() => expect(client.state.selection).toMatchObject({ storyId: box.storyId, focus: 2 }));
   expect(client.state.selection?.kind).not.toBe('object');
-  await waitFor(() => expect(view.queryByTestId('pptx-resize-nw')).toBeNull());
+  const handle = await waitFor(() => view.getByTestId('pptx-resize-e'));
+  const edge = point(box.x + box.w, box.y + box.h / 2);
+  act(() => { fireEvent.pointerDown(handle, edge); });
+  await waitFor(() => expect(client.state.selection).toMatchObject({ kind: 'object', shapeId: box.shapeId }));
+  act(() => {
+    fireEvent.pointerMove(stage, { ...edge, clientX: edge.clientX + 10, buttons: 1 });
+    fireEvent.pointerUp(stage, { ...edge, clientX: edge.clientX + 30 });
+  });
+  await waitFor(() => expect(commands.filter((command) => command.kind === 'setShapeRect')).toHaveLength(1));
+  await bounded(client.flush());
+  expect(client.state.selection).toMatchObject({ kind: 'object', shapeId: box.shapeId });
+});
+
+test('text composition hides resize handles and retains input focus', async () => {
+  const { view, stage, canvas, box, point } = await open();
+  const line = box.lines[0]!;
+  const stop = line.caretStops.find((stop) => stop.position === 2)!;
+  const at = point(stop.x, line.y + line.height / 2);
+  act(() => { fireEvent.pointerDown(canvas, at); fireEvent.pointerUp(stage, at); });
+  await waitFor(() => expect(client.state.selection).toMatchObject({ storyId: box.storyId, focus: 2 }));
+  const handle = await waitFor(() => view.getByTestId('pptx-resize-e'));
+  const input = view.getByRole('textbox', { name: 'Slide text' });
+  const edge = point(box.x + box.w, box.y + box.h / 2);
+  const since = commands.length;
+  let defaultAllowed = true;
+  act(() => {
+    fireEvent.compositionStart(input);
+    fireEvent(input, Object.assign(new Event('compositionupdate', { bubbles: true }), { data: '漢' }));
+    defaultAllowed = fireEvent.pointerDown(handle, edge);
+    fireEvent.pointerUp(stage, { ...edge, clientX: edge.clientX + 30 });
+  });
+  await waitFor(() => expect(view.queryAllByTestId(/pptx-resize-/)).toHaveLength(0));
+  expect(defaultAllowed).toBe(false);
+  expect(document.activeElement).toBe(input);
+  act(() => { fireEvent(input, Object.assign(new Event('compositionend', { bubbles: true }), { data: '漢' })); });
+  await waitFor(() => expect(commands.slice(since).map((command) => command.kind))
+    .toEqual(['compositionStart', 'compositionCommit', 'compositionEnd']));
+  await bounded(client.flush());
+  await waitFor(() => expect(view.queryAllByTestId(/pptx-resize-/)).toHaveLength(8));
 });
 
 for (const kind of ['shape', 'text']) test(`empty_slide_space_clears_${kind}_selection`, async () => {
@@ -535,6 +585,50 @@ test('released_shape_drag_precedes_immediate_text_click_and_typing', async () =>
   if (!saved.ok) throw new Error(saved.failure.message);
   expect(saved.stories[0]!.text).toBe('al!pha beta\nx\nalpha beta');
   expect(saved.slides[0]!.shapes[0]!.x).toBe(100000 + Math.round(30 * 9144000 / list.width));
+});
+
+test('released text-edit resize precedes immediate text click and typing while selection is delayed', async () => {
+  const { stage, canvas, box, point, list, view } = await open();
+  const line = box.lines[0]!;
+  const stop = line.caretStops.find((stop) => stop.position === 2)!;
+  const textPoint = point(stop.x, line.y + line.height / 2);
+  act(() => { fireEvent.pointerDown(canvas, textPoint); fireEvent.pointerUp(stage, textPoint); });
+  await waitFor(() => expect(client.state.selection).toMatchObject({ storyId: box.storyId, focus: 2 }));
+  const handle = await waitFor(() => view.getByTestId('pptx-resize-e'));
+  selectObjectReplyBarrier = new Promise<void>((resolve) => { releaseSelectObjectReply = resolve; });
+  const since = commands.length;
+  const edge = point(box.x + box.w, box.y + box.h / 2);
+  const input = view.getByRole('textbox', { name: 'Slide text' });
+  act(() => {
+    fireEvent.pointerDown(handle, edge);
+    fireEvent.pointerMove(stage, { ...edge, clientX: edge.clientX + 10, buttons: 1 });
+    fireEvent.pointerUp(stage, { ...edge, clientX: edge.clientX + 30 });
+    fireEvent.pointerDown(canvas, textPoint);
+    fireEvent.pointerUp(stage, textPoint);
+    input.dispatchEvent(new InputEvent('beforeinput', { inputType: 'insertText', data: '!',
+      bubbles: true, cancelable: true }));
+  });
+  await waitFor(() => expect(commands.slice(since).map((command) => command.kind)).toEqual(['selectObject']));
+  await act(async () => { releaseSelectObjectReply!(); });
+  await bounded(client.flush());
+  const ordered = commands.slice(since);
+  expect(ordered.map((command) => command.kind)).toEqual(['selectObject', 'setShapeRect', 'selectAtPoint', 'insertText']);
+  expect(ordered.filter((command) => command.kind === 'setShapeRect')).toHaveLength(1);
+  const saved = (await client.read()).result;
+  expect(saved.ok).toBe(true);
+  if (!saved.ok) throw new Error(saved.failure.message);
+  expect(saved.stories[0]!.text).toBe('al!pha beta\nx\nalpha beta');
+  expect(saved.slides[0]!.shapes[0]!.width).toBe(6000000 + Math.round(30 * 9144000 / list.width));
+});
+
+test('table cell text selection does not report resize capability', async () => {
+  const { stage, canvas, point, box } = await open(false, true);
+  const line = box.lines[0]!;
+  const stop = line.caretStops.find((stop) => stop.position === 1)!;
+  const at = point(stop.x, line.y + line.height / 2);
+  act(() => { fireEvent.pointerDown(canvas, at); fireEvent.pointerUp(stage, at); });
+  await bounded(client.flush());
+  expect(client.state.selection).toMatchObject({ shapeId: box.shapeId, storyId: box.storyId, focus: 1, canResize: false });
 });
 
 for (const cellIndex of [0, 1, 2, 3]) {

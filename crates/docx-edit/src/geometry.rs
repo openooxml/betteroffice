@@ -5,9 +5,10 @@ use yrs::types::text::YChange;
 use yrs::{Any, Map, MapRef, Out, ReadTxn, Text, Transact};
 
 use crate::bridge::inline_sdt_size;
+use crate::empty_cells::{EmptyCell, named_cell_ids};
 use crate::{
-    EditingDoc, KIND_KEY, PARA_ID, STORIES, TableLocator, is_identity_key, is_pilcrow, map_string,
-    story_ref,
+    EditError, EditingDoc, KIND_KEY, PARA_ID, STORIES, TableLocator, is_identity_key, is_pilcrow,
+    map_string, story_ref, story_text,
 };
 
 #[derive(Debug, PartialEq, Serialize)]
@@ -80,18 +81,23 @@ impl EditingDoc {
         }
     }
 
-    /// The unavailable tables the outline walk meets from `root`: through the cells of complete
+    /// The unavailable tables the outline walk meets from `roots`: through the cells of complete
     /// tables and block controls' stories, as the editor's position projection walks. A story the
     /// walk names but cannot find reads as empty here. `Err` when the walk cannot finish.
-    pub(crate) fn unavailable_tables_under(&self, root: &str) -> Result<Vec<TableLocator>, ()> {
+    pub(crate) fn unavailable_tables_under(
+        &self,
+        roots: &[String],
+    ) -> Result<Vec<TableLocator>, ()> {
         let txn = self.doc.transact();
         let mut scan = Scan {
             active: true,
             ..Scan::default()
         };
-        build_story(&txn, &mut BTreeMap::new(), root, 0, 0, &mut scan)?;
-        if scan.incomplete {
-            return Err(());
+        for root in roots {
+            build_story(&txn, &mut BTreeMap::new(), root, 0, 0, &mut scan)?;
+            if scan.incomplete {
+                return Err(());
+            }
         }
         Ok(scan.found)
     }
@@ -112,6 +118,7 @@ struct Scan {
     active: bool,
     found: Vec<TableLocator>,
     incomplete: bool,
+    named_cells: Option<HashSet<String>>,
 }
 
 impl Scan {
@@ -163,15 +170,27 @@ fn build_story<T: ReadTxn>(
     if depth > 256 || content_start > MAX_POSITION {
         return scan.limit();
     }
-    let story = match story_ref(txn, story_id) {
-        Ok(story) => story,
-        Err(crate::EditError::CellHasNoStory(_)) => {
-            let cell = crate::empty_cells::EmptyCell::new(story_id);
-            let scratch = cell.doc().yrs_doc().transact();
-            return build_story(&scratch, outline, story_id, content_start, depth, scan);
+    let story = if scan.active {
+        story_text(txn, story_id)
+    } else {
+        match story_ref(txn, story_id) {
+            Ok(story) => Some(story),
+            Err(EditError::CellHasNoStory(_)) => None,
+            Err(_) => return Err(()),
         }
-        Err(_) if scan.active => return Ok(0),
-        Err(_) => return Err(()),
+    };
+    let Some(story) = story else {
+        if scan.active
+            && !scan
+                .named_cells
+                .get_or_insert_with(|| named_cell_ids(txn))
+                .contains(story_id)
+        {
+            return Ok(0);
+        }
+        let cell = EmptyCell::new(story_id);
+        let scratch = cell.doc().yrs_doc().transact();
+        return build_story(&scratch, outline, story_id, content_start, depth, scan);
     };
     outline.insert(
         story_id.to_owned(),
@@ -645,6 +664,29 @@ mod tests {
                 "body:t0:r1c0": {"contentStart": 17, "size": 0, "paragraphs": []}
             })
         );
+    }
+
+    #[test]
+    fn the_scan_reads_a_named_cell_without_its_story_as_an_empty_paragraph() {
+        let doc = EditingDoc::new(84013);
+        story(
+            &doc,
+            "body",
+            json!([
+                {"kind": "table", "tblPr": {}, "grid": [], "rows": [{"cells": [{"story": "cell"}]}]}
+            ]),
+        );
+        let txn = doc.yrs_doc().transact();
+        let mut outline = BTreeMap::new();
+        let mut scan = Scan {
+            active: true,
+            ..Scan::default()
+        };
+        build_story(&txn, &mut outline, "body", 0, 0, &mut scan).unwrap();
+        let cell = &outline["cell"];
+        assert_eq!(cell.size, 2);
+        assert_eq!(cell.paragraphs.len(), 1);
+        assert_eq!(cell.paragraphs[0].para_id, "cell#p0");
     }
 
     #[test]

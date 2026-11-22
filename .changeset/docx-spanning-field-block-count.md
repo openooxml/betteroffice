@@ -1,6 +1,6 @@
 ---
 '@betteroffice/docx': minor
-'@betteroffice/docx-native': patch
+'@betteroffice/docx-native': minor
 '@betteroffice/rust-crates': minor
 ---
 

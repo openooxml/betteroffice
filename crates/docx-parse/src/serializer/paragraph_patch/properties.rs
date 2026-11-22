@@ -799,13 +799,13 @@ fn run_leaf(
         "typography" if path.len() == 2 => {
             let (child, value) = match path[1].as_str() {
                 "ligatures" => {
-                    let value = string(value)?;
-                    if value
-                        .as_deref()
-                        .is_some_and(|value| !crate::formatting::valid_ligatures(value))
-                    {
-                        return Err(unsupported(path));
-                    }
+                    let value = string(value)?
+                        .map(|value| {
+                            crate::formatting::word_ligatures(&value)
+                                .map(str::to_owned)
+                                .ok_or_else(|| unsupported(path))
+                        })
+                        .transpose()?;
                     ("ligatures", value)
                 }
                 "contextualAlternates" => {

@@ -5,9 +5,9 @@ use yrs::{ReadTxn, Transact};
 
 use crate::staging::Adoption;
 use crate::{
-    DeckSession, DeckSnapshot, EditCtx, EditError, PictureDraft, PresetShapeDraft, ShapeDraft,
-    ShapeFill, ShapeRect, ShapeSnapshot, ShapeStroke, TableColumnWidth, TableInsertPosition,
-    TextParagraphDraft, TextStyle, TextStylePatch,
+    CommentSnapshot, DeckSession, DeckSnapshot, EditCtx, EditError, PictureDraft, PresetShapeDraft,
+    ShapeDraft, ShapeFill, ShapeRect, ShapeSnapshot, ShapeStroke, TableColumnWidth,
+    TableInsertPosition, TextParagraphDraft, TextStyle, TextStylePatch,
 };
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1493,6 +1493,14 @@ fn effective_background(
     })
 }
 
+fn slide_comments<'a>(snapshot: &'a DeckSnapshot, slide_id: &str) -> Vec<&'a CommentSnapshot> {
+    snapshot
+        .comments
+        .iter()
+        .filter(|comment| comment.slide_id == slide_id)
+        .collect()
+}
+
 fn stale_targets(
     snapshot: &DeckSnapshot,
     baseline: &ProposalBaseline,
@@ -1565,10 +1573,16 @@ fn stale_targets(
                 }
                 continue;
             }
-            ProposalEdit::DeleteSlide { slide_id }
-            | ProposalEdit::SetSlideLayout { slide_id, .. } => {
+            ProposalEdit::DeleteSlide { slide_id } => {
+                if original(slide_id).is_some()
+                    && slide_comments(snapshot, slide_id)
+                        != slide_comments(&baseline.snapshot, slide_id)
+                {
+                    stale.insert(slide_id.clone());
+                }
                 (Some(slide_id.as_str()), None, true)
             }
+            ProposalEdit::SetSlideLayout { slide_id, .. } => (Some(slide_id.as_str()), None, true),
             ProposalEdit::AddTextBox { slide_id, .. }
             | ProposalEdit::AddShape { slide_id, .. }
             | ProposalEdit::AddPicture { slide_id, .. } => (Some(slide_id.as_str()), None, false),

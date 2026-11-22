@@ -1,7 +1,7 @@
 ---
 '@betteroffice/docx': minor
 '@betteroffice/docx-native': patch
-'@betteroffice/rust-crates': patch
+'@betteroffice/rust-crates': minor
 ---
 
-Clear Formatting in the DOCX editor returns text to what its paragraph and table styles give, so headings stay bold. `formatText` clear `'all'` no longer changes a run's text direction. Paragraph patches gain an optional `inheritance` field.
+Clear Formatting in the DOCX editor returns text to what its paragraph and table styles give, so headings stay bold. `formatText` clear `'all'` no longer changes a run's text direction. Paragraph patches gain an optional `inheritance` field. Rust `ParagraphPatchV1` literals must set `inheritance`.

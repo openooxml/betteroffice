@@ -1,7 +1,7 @@
 ---
 "@betteroffice/docx": patch
 "@betteroffice/fonts": patch
-"@betteroffice/rust-crates": patch
+"@betteroffice/rust-crates": minor
 ---
 
-DOCX text that no loaded font covers falls back to bundled BetterOffice Base Latin faces, loaded on demand from `@betteroffice/fonts`. Native raster builds embed the faces. Private-use bullet aliases apply only to Symbol and Wingdings families.
+DOCX text that no loaded font covers falls back to bundled BetterOffice Base Latin faces, loaded on demand from `@betteroffice/fonts`. Native raster builds embed the faces. Private-use bullet aliases apply only to Symbol and Wingdings families. Rust `FontRequirement` literals must set `characters`.

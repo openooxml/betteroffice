@@ -4778,12 +4778,13 @@ fn floating_run_content(content: &Value) -> bool {
     match string(field(Some(content), "type")) {
         Some("drawing") => {
             let wrap = field(field(Some(content), "image"), "wrap");
-            string(field(wrap, "type")).is_some_and(|kind| kind != "inline")
+            string(field(wrap, "type")).is_some_and(|kind| !crate::bridge::inline_wrap(Some(kind)))
         }
         Some("shape") => {
             let shape = field(Some(content), "shape");
-            field(shape, "wrap").is_some_and(|wrap| !wrap.is_null())
-                || field(shape, "position").is_some_and(|position| !position.is_null())
+            field(shape, "wrap").is_some_and(|wrap| {
+                !wrap.is_null() && !crate::bridge::inline_wrap(string(field(Some(wrap), "type")))
+            }) || field(shape, "position").is_some_and(|position| !position.is_null())
         }
         _ => false,
     }
@@ -7094,6 +7095,7 @@ fn lower_docx(
 /// [`lower_docx`], without the retained source JSON that only seeded payloads carry when
 /// `payloads` is `false`.
 fn resolve_seed_font_names(value: &mut Value, theme: &docx_parse::Theme) {
+    let untouched = untouched_field_run(value);
     match value {
         Value::Array(values) => {
             for value in values {
@@ -7125,9 +7127,47 @@ fn resolve_seed_font_names(value: &mut Value, theme: &docx_parse::Theme) {
         }
         _ => {}
     }
+    if untouched && let Some(digest) = kept_run_digest(value) {
+        value["sourceRunDigest"] = Value::String(digest);
+    }
+}
+
+/// The digest the writer compares a complex field's `sourceRunDigest` with, or `None` when
+/// `field_json` is not a complex field.
+pub fn field_run_digest(field_json: &str) -> Option<String> {
+    let complex: docx_parse::ComplexField = serde_json::from_str(field_json).ok()?;
+    Some(docx_parse::field_run_digest(&complex))
+}
+
+/// The digest of `value` when it is a complex field that carries the run it was read from.
+fn kept_run_digest(value: &Value) -> Option<String> {
+    if string(field(Some(value), "type")) != Some("complexField")
+        || field(Some(value), "sourceRunXml").is_none()
+    {
+        return None;
+    }
+    let complex: docx_parse::ComplexField = serde_json::from_value(value.clone()).ok()?;
+    Some(docx_parse::field_run_digest(&complex))
+}
+
+/// Whether `value` is a complex field that still digests to the digest it was read with.
+fn untouched_field_run(value: &Value) -> bool {
+    let stored = string(field(Some(value), "sourceRunDigest"));
+    stored.is_some() && kept_run_digest(value).as_deref() == stored
+}
+
+/// Whether `value` is a complex field object that carries a source run digest.
+fn ordered_field_run(value: &OrderedValue) -> bool {
+    let OrderedValue::Object(entries) = value else {
+        return false;
+    };
+    let kind = entries.iter().find(|(key, _)| key == "type");
+    matches!(kind, Some((_, OrderedValue::String(name))) if name == "complexField")
+        && entries.iter().any(|(key, _)| key == "sourceRunDigest")
 }
 
 fn resolve_seed_ordered_fonts(value: &mut OrderedValue, theme: &docx_parse::Theme) {
+    let untouched = ordered_field_run(value) && untouched_field_run(&value.value());
     match value {
         OrderedValue::Array(values) => {
             for value in values {
@@ -7166,6 +7206,13 @@ fn resolve_seed_ordered_fonts(value: &mut OrderedValue, theme: &docx_parse::Them
             }
         }
         _ => {}
+    }
+    if untouched
+        && let Some(digest) = kept_run_digest(&value.value())
+        && let OrderedValue::Object(entries) = value
+        && let Some((_, stored)) = entries.iter_mut().find(|(key, _)| key == "sourceRunDigest")
+    {
+        *stored = OrderedValue::String(digest);
     }
 }
 
