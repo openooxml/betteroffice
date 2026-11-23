@@ -146,8 +146,12 @@ describe.skipIf(engineKind === 'native')('PPTX PNG with uninstalled font packs',
         code: 'font-unavailable', message: expect.stringContaining('Carlito for Calibri'),
       });
       expect(painted).toEqual([]);
-      const face = { family: 'Calibri', bytes };
-      await expect(handle.renderPng({ slide: slideId }, { scale: 2, fonts: [face] })).resolves.toEqual(new TextEncoder().encode('png'));
+      const calibri = { family: 'Calibri', bytes };
+      await expect(handle.renderPng({ slide: slideId }, { scale: 2, fonts: [calibri] })).rejects.toMatchObject({
+        code: 'font-unavailable', message: expect.stringContaining('Liberation Sans for Arial'),
+      });
+      const arial = { family: 'Arial', bold: true, bytes };
+      await expect(handle.renderPng({ slide: slideId }, { scale: 2, fonts: [calibri, arial] })).resolves.toEqual(new TextEncoder().encode('png'));
       expect(painted).toContainEqual({ text: 'Total', bytes });
     } finally {
       fetch.mockRestore();
