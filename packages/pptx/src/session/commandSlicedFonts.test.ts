@@ -60,7 +60,7 @@ function unloadedChunkTexts(face: SlicedFontFace): [string, string] {
   const textByChunk = new Map<number, string>();
   for (let cp = 0x4e00; cp <= 0x9fff && textByChunk.size < 2; cp += 1) {
     const text = String.fromCodePoint(cp);
-    const missing = face.chunksOf(text).filter((chunk) => !face.loadedChunks().has(chunk));
+    const missing = [...new Set(face.chunksOf(text))].filter((chunk) => !face.loadedChunks().has(chunk));
     if (missing.length === 1) textByChunk.set(missing[0]!, text);
   }
   expect(textByChunk.size).toBe(2);
@@ -73,7 +73,7 @@ test('T12: a CDN chunk failure cools other chunks and whole-face export until th
   const restore = withBrowserFontGlobals();
   const fetch = globalThis.fetch;
   const sliced = createSlicedFontFaces();
-  const load = fontRuntimeWithoutPacks().createFontProvider().resolveScriptFallback('cjk-jp', false, false)!;
+  const load = fontRuntimeWithoutPacks().createFontProvider(undefined, { retain: false }).resolveScriptFallback('cjk-jp', false, false)!;
   const now = Date.now();
   const clock = spyOn(Date, 'now').mockReturnValue(now);
   const warn = spyOn(console, 'warn').mockImplementation(() => {});

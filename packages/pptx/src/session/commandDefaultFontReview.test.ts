@@ -427,7 +427,7 @@ for (const opening of ['explicit', 'unset'] as const) {
         resolveLastResort: () => { throw new Error('Unexpected substitution'); } };
     });
     const prefetch: ClientMessage = { protocol: 1, kind: 'call', id: 99, method: 'prefetchCoverageFonts',
-      args: [['arabic'], false, implicit] };
+      args: [['cjk-jp'], false, implicit] };
     let client: PresentationCommandClient | undefined;
     try {
       wire.transport.post(prefetch);

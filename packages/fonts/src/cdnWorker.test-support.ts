@@ -41,8 +41,10 @@ port.once('message', async (cdn: FontCdnConfiguration) => {
   let text = '';
   for (let cp = 0x4e00; cp <= 0x9fff && !text; cp += 1) {
     const character = String.fromCodePoint(cp);
-    if (open.chunksOf(character).filter((chunk) => !open.loadedChunks().has(chunk)).length === 1) text = character;
+    const missing = new Set(open.chunksOf(character).filter((chunk) => !open.loadedChunks().has(chunk)));
+    if (missing.size === 1) text = character;
   }
+  if (!text) throw new Error('No character uses exactly one unloaded CJK chunk');
   cjkOffline = true;
   await Promise.allSettled([open.ensureText(text)]);
   await Promise.allSettled([open.ensureText(text), korean(), openSlicedFace(korean.slices!)]);
