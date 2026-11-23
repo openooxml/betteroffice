@@ -7,8 +7,7 @@ const importFontAssets: FontPackSource = async (pack) => {
 };
 
 function fontCdn() {
-  const configuration = getFontCdnConfiguration();
-  if (configuration?.baseUrl) return configuration;
+  return getFontCdnConfiguration();
 }
 const ATTACHED = Symbol.for('betteroffice.fontPackSource');
 const DETACH = Symbol.for('betteroffice.fontPackSource.detach');
