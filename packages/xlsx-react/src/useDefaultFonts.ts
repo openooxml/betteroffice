@@ -61,5 +61,6 @@ export async function editorExportFaces(
 ): Promise<XlsxFontFace[] | undefined> {
   if (defaultFonts === false || fonts.length === 0) return undefined;
   const { exportFaces } = await defaultFontPainterModule.load();
-  return exportFaces(fonts, decoder);
+  const faces = await exportFaces(fonts, decoder);
+  return faces.length ? faces : undefined;
 }

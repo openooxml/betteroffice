@@ -354,8 +354,7 @@ export async function exportFaces(
     if (!face || !load) continue;
     let bytes: ArrayBuffer;
     try { bytes = await load(); }
-    catch (error) {
-      if (bundled.isMissingFontAddon?.(error)) continue;
+    catch {
       throw new PngExportError('font-unavailable', `The font "${font.family}" could not load, so the sheet was not exported with a substitute.`);
     }
     if (bytes.byteLength !== face.byteLength) continue;

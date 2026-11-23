@@ -118,9 +118,9 @@ const hasPrimary = (exporter: Exporter, request: RequestedFontFace) =>
 const hasFallback = (exporter: Exporter, face: BundledFontFace) => exporter.fallback.has(faceKey(face.family, isBold(face), isItalic(face)));
 
 /** The requests of the slide's current version the export renderer has not served yet. */
-function missingRequests(exporter: Exporter, document: PptxDocument, slideId: string): RequestedFontFace[] {
+function missingRequests(exporter: Exporter, document: PptxDocument, slideId: string, suppliedFamilies: ReadonlySet<string>): RequestedFontFace[] {
   const { faces: requests } = JSON.parse(exporter.renderer.requestedFontFacesJson(document, slideId)) as { faces: RequestedFontFace[] };
-  return requests.filter((request) => !exporter.requested.has(requestKey(request)));
+  return requests.filter((request) => !suppliedFamilies.has(familyKey(request.family)) && !exporter.requested.has(requestKey(request)));
 }
 
 /**
@@ -189,6 +189,7 @@ export async function defaultFontLayout(
   slideIndex(document, slideId);
   const known = new Set(measured.map((face) => familyKey(face.family)));
   const supplied = added?.filter((face) => !known.has(familyKey(face.family))) ?? [];
+  const suppliedFamilies = new Set(supplied.map((face) => familyKey(face.family)));
   const fontCdn = await exportFontCdnKey(signal);
   signal?.throwIfAborted();
   let exporter = supplied.length ? undefined : exporters.get(document);
@@ -207,7 +208,7 @@ export async function defaultFontLayout(
     for (let round = 0; ; round += 1) {
       const version = document.documentVersion();
       slideIndex(document, slideId);
-      const wanted = missingRequests(held, document, slideId);
+      const wanted = missingRequests(held, document, slideId, suppliedFamilies);
       if (!wanted.length) break;
       if (round === MAX_FONT_ROUNDS) {
         throw new PngExportError('font-unavailable', 'the faces this slide needs kept changing while they loaded; export again');
