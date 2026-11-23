@@ -104,7 +104,7 @@ export function cellPosition(cell: TableCell): TableCellPosition {
   return { story: cell.story, index: cell.tableIndex + 1, row: cell.anchor.row + 1, column: cell.anchor.column + 1, rows: cell.rows, columns: cell.columns, ...(rowspan > 1 && { rowSpan: rowspan }), ...(colspan > 1 && { colSpan: colspan }) };
 }
 
-export function resolveStyle(styles: readonly ParagraphStyle[], wanted: string): string {
+export function resolveStyle(styles: readonly ParagraphStyle[], wanted: string, kind = 'Paragraph'): string {
   const key = (value: string) => value.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
   const target = key(wanted);
   const found = styles.find(style => style.id === wanted) ?? styles.find(style => key(style.id) === target || (style.name !== undefined && key(style.name) === target));
@@ -112,7 +112,7 @@ export function resolveStyle(styles: readonly ParagraphStyle[], wanted: string):
   const shared = (value: string) => { let length = 0; while (length < value.length && value[length] === target[length]) length++; return length; };
   const nearby = styles.map(style => ({ id: style.id, score: Math.max(shared(key(style.id)), shared(key(style.name ?? ''))) }))
     .sort((a, b) => b.score - a.score).slice(0, 12).map(style => style.id);
-  throw new DocumentToolError('UNKNOWN_STYLE', `Paragraph style "${wanted}" is not defined in this document. Use one of validStyles.`, { style: wanted, validStyles: nearby });
+  throw new DocumentToolError('UNKNOWN_STYLE', `${kind} style "${wanted}" is not defined in this document. Use one of validStyles.`, { style: wanted, validStyles: nearby });
 }
 
 export function lineText(text: string) {
@@ -188,6 +188,38 @@ export function insertTableRow(draft: YrsSession, target: DocxParagraphTarget, p
     if (texts[column]) draft.applyRawOps(cell, [{ op: 'insert', index: 0, text: texts[column], attrs }]);
     return { story: cell, paraId };
   });
+}
+
+const SINGLE_BORDER = { style: 'single', size: 4, color: { rgb: '000000' } };
+
+/** Inserts a table of `rows` after the body paragraph `target`, `width` twips wide, styled by `styleId` or else with single cell borders. */
+export function insertTable(draft: YrsSession, target: DocxParagraphTarget, rows: readonly (readonly string[])[], width: number, styleId?: string): DocxParagraphTarget[] {
+  const columns = Math.max(...rows.map(row => row.length));
+  const segments = draft.storySegments(target.story);
+  const mark = segments.findIndex(segment => segment.kind === 'pilcrow' && segment.paraId === target.paraId);
+  const next = segments[mark + 1];
+  const following = next && next.kind !== 'embed' ? segments.slice(mark + 1).find((segment): segment is Pilcrow => segment.kind === 'pilcrow') : undefined;
+  const anchor = draft.paragraphs(target.story).find(paragraph => paragraph.paraId === target.paraId)!;
+  const at = following ? { story: target.story, paraId: following.paraId, offset: 0 } : { ...target, offset: anchor.text.length };
+  const borders = styleId ? undefined : { top: SINGLE_BORDER, bottom: SINGLE_BORDER, left: SINGLE_BORDER, right: SINGLE_BORDER };
+  const column = Math.max(1, Math.floor(width / columns));
+  const table: Parameters<YrsSession['insertTableFragment']>[1] = {
+    tblPr: {
+      width: column * columns, widthType: 'dxa',
+      ...(styleId && { styleId, look: { firstRow: true, lastRow: false, firstColumn: true, lastColumn: false, noHBand: false, noVBand: true } }),
+    },
+    grid: Array.from({ length: columns }, () => column),
+    rows: rows.map(row => ({
+      trPr: {},
+      cells: Array.from({ length: columns }, (_, index) => ({
+        tcPr: { rowspan: 1, colspan: 1, ...(borders && { borders }) },
+        content: [...(row[index] ? [{ kind: 'text' as const, text: row[index] }] : []), { kind: 'pilcrow' as const }],
+      })),
+    })),
+  };
+  const receipt = draft.insertTableFragment(at, table);
+  const skipped = receipt.newParaIds.length - receipt.createdStoryIds.length;
+  return receipt.createdStoryIds.map((story, index) => ({ story, paraId: receipt.newParaIds[skipped + index] }));
 }
 
 export function deleteTableRow(draft: YrsSession, target: DocxParagraphTarget, parent: string): boolean {

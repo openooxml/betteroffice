@@ -114,7 +114,7 @@ const INSTRUCTION_SEGMENTS: readonly { formats: readonly OfficeFormat[]; text: s
   { formats: ['pptx'], text: 'add_slide creates an empty slide linked to a layout; add_text_box creates one shape. ' },
   { formats: ['pptx'], text: 'Use one body shape with set_paragraphs and bullet:true for a bullet list. ' },
   { formats: ['pptx'], text: 'PPTX comments: office_outline story comments lists IDs and slide anchors; pptx_edit adds and replies in either flavor; resolve needs modern comments. ' },
-  { formats: ['docx'], text: 'DOCX: docx_edit applies direct style, bold/italic/underline, paragraph, table-row, cell-merge, comment and section edits with the outline version; docx_read_runs returns paragraph revisions and run IDs for set_runs text edits that keep formatting; office_propose stages text replacements. ' },
+  { formats: ['docx'], text: 'DOCX: docx_edit applies direct style, bold/italic/underline, paragraph, table, table-row, cell-merge, comment and section edits with the outline version; docx_read_runs returns paragraph revisions and run IDs for set_runs text edits that keep formatting; office_propose stages text replacements. ' },
   { formats: ['docx', 'pptx'], text: 'DOCX/PPTX staged text edits use office_outline, office_grep, office_read and office_propose with {match,newText}. ' },
   { formats: ALL, text: 'Copy handles exactly; never calculate text offsets. ' },
   { formats: ALL, text: 'Accept applies in memory; office_verify checks reopening and office_export saves a new file. ' },
