@@ -7,7 +7,7 @@ import type { SliceLocation } from './progressive';
 import { checkInstalledPacks } from './packDiagnostics';
 import { isImplicitFontCdnError, reportImplicitCdnFailure, type FontPackDiagnostic } from '../../../shared/fontPackDiagnostics';
 import {
-  checkImplicitSliceCooldown, fontCdnAssetUrl, fontCdnCacheKey,
+  checkImplicitSliceCooldown, fontCdnAssetUrl, fontCdnCacheKey, implicitAssetCooldown,
   type FontCdnConfiguration, type FontRequestPolicy,
 } from './fontCdn';
 import type { FontAssetKind } from '../../../shared/office-session/optionalFontPacks';
@@ -37,6 +37,10 @@ type FontPackAssets = { urls?: FontAssetUrls; cdn?: FontCdnConfiguration };
 export type FontPackLookup = (pack: FontPack) => Promise<FontPackAssets>;
 type AssetBase = URL | Promise<URL> | undefined;
 type FontLoadOptions = { decoder?: FontDecoder; retain?: boolean; strict?: boolean };
+type RuntimeFontSource = BundledFontSource & {
+  /** @internal */
+  faceUnavailableUntil?(face: BundledFontFace): Promise<number | undefined>;
+};
 
 function resolveBase(baseUrl: string | URL, locationHref: string | undefined): URL {
   const href = typeof baseUrl === 'string' ? baseUrl : baseUrl.href;
@@ -209,6 +213,24 @@ export function createFontRuntime(lookup: FontPackLookup, {
     return (error as { [MISSING_ADDON]?: unknown } | null)?.[MISSING_ADDON] === true;
   }
 
+  async function faceUnavailableUntil(face: BundledFontFace, strict: boolean): Promise<number | undefined> {
+    const cooldown = async (dependency: BundledFontFace) => {
+      const url = await assetUrl(dependency, undefined);
+      if (typeof requestPolicy(url) !== 'string') return undefined;
+      const slices = strict && sliceRefOf(dependency.file);
+      return implicitAssetCooldown(url, slices ? new URL(slices.index, url) : undefined);
+    };
+    try {
+      const dictionary = packFor(face).faces.find(({ file }) => file === face.file)?.dict;
+      const faceUntil = await cooldown(face);
+      const dictionaryUntil = dictionary ? await cooldown({ ...face, file: dictionary }) : undefined;
+      return Math.max(faceUntil ?? 0, dictionaryUntil ?? 0) || undefined;
+    } catch (error) {
+      if (isMissingFontAddon(error)) return Infinity;
+      throw error;
+    }
+  }
+
   /** Loads font bytes into consumer-owned buffers with retryable failures. */
   function loadBundledFontBytes(
     face: BundledFontFace,
@@ -330,13 +352,15 @@ export function createFontRuntime(lookup: FontPackLookup, {
   function createFontProvider(
     options?: FontAssetOptions,
     runtime?: FontLoadOptions,
-  ): BundledFontSource {
+  ): RuntimeFontSource {
     const base = assetBase(options?.baseUrl);
-    return fontProvider(
+    const source: RuntimeFontSource = fontProvider(
       (face) => bundledFontBytes(face, loadPackedFontBytes, base, runtime),
       (face) => bundledFontBytes(face, readPackedFontBytes, base, runtime),
       (face) => sliceLocation(face, base, runtime),
     );
+    if (base === undefined) source.faceUnavailableUntil = (face) => faceUnavailableUntil(face, runtime?.strict === true);
+    return source;
   }
 
   /**

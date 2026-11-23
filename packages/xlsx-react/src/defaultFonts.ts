@@ -92,15 +92,14 @@ async function loadRemoteFace(
 }
 
 const PRELOAD_MAX_BYTES = 1.5 * 1024 * 1024;
-type FaceLoadResult = boolean | { retryAt: number };
-const registeredFaces = new Map<string, Promise<FaceLoadResult>>();
+const registeredFaces = new Map<string, Promise<boolean>>();
 const pendingFaces = new Map<string, Set<symbol>>();
 let activeFontSet: FontFaceSet | undefined;
 
 function registerFace(
   face: BundledFontFace, family: string, load: () => Promise<ArrayBuffer>,
-  fontSet: FontFaceSet, owners: Set<symbol>, isMissingFontAddon: (error: unknown) => boolean,
-): Promise<FaceLoadResult> {
+  fontSet: FontFaceSet, owners: Set<symbol>,
+): Promise<boolean> {
   const current = () => activeFontSet === fontSet && owners.size > 0;
   return (async () => {
     try {
@@ -115,11 +114,8 @@ function registerFace(
       fontSet.add(loaded);
       return true;
     } catch (error) {
-      if (isImplicitFontCdnError(error)) {
-        reportImplicitCdnFailure(error);
-        return { retryAt: error.retryAt ?? 0 };
-      }
-      return isMissingFontAddon(error) ? { retryAt: Infinity } : false;
+      if (isImplicitFontCdnError(error)) reportImplicitCdnFailure(error);
+      return false;
     }
   })();
 }
@@ -134,7 +130,6 @@ export function createDefaultFontPainter(
   const interests = new Set<Set<symbol>>();
   const loaded = new Set<string>();
   const settled = new Set<string>();
-  const retryAfter = new Map<string, number>();
   const pending = new Map<string, Promise<boolean>>();
   const remote = new Set<string>();
   const requested = new Map<string, Set<string>>();
@@ -151,7 +146,7 @@ export function createDefaultFontPainter(
   async function loadFace(
     fontFamily: string, bold: boolean, italic: boolean, text: string, onRemote: () => void, onPartial: () => void,
     retryShared = true, maxBytes = Infinity,
-  ): Promise<FaceLoadResult> {
+  ): Promise<boolean> {
     let owners: Set<symbol> | undefined;
     try {
       if (!provider) {
@@ -174,13 +169,16 @@ export function createDefaultFontPainter(
         return success;
       }
       if (face.byteLength > maxBytes) return false;
+      const cdn = fontCdnCacheKey();
+      if (source.faceUnavailableUntil && await source.faceUnavailableUntil(face) !== undefined) return false;
+      if (disposed || !document.fonts || cdn !== fontCdnCacheKey()) return false;
       const fontSet = document.fonts;
       if (activeFontSet !== fontSet) {
         registeredFaces.clear();
         pendingFaces.clear();
         activeFontSet = fontSet;
       }
-      const key = JSON.stringify([fontFamily.trim().toLowerCase(), face.weight, face.style, fontCdnCacheKey()]);
+      const key = JSON.stringify([fontFamily.trim().toLowerCase(), face.weight, face.style, cdn]);
       let registration = registeredFaces.get(key);
       const shared = registration !== undefined;
       owners = pendingFaces.get(key);
@@ -189,8 +187,7 @@ export function createDefaultFontPainter(
         if (!load) return false;
         owners = new Set([owner]);
         pendingFaces.set(key, owners);
-        registration = registerFace(face, fontFamily, load, fontSet, owners,
-          (error) => fonts.isMissingFontAddon?.(error) === true);
+        registration = registerFace(face, fontFamily, load, fontSet, owners);
         registeredFaces.set(key, registration);
         const task = registration;
         const group = owners;
@@ -245,15 +242,10 @@ export function createDefaultFontPainter(
     return text;
   }
 
-  function faceSettled(key: string): boolean {
-    const retryAt = retryAfter.get(key);
-    return settled.has(key) && (retryAt === undefined || Date.now() < retryAt);
-  }
-
   function isSettled(displayList: DisplayList): boolean {
     if (inactive()) return true;
     for (const [key, { characters }] of faceKeys(displayList)) {
-      if (!faceSettled(key) || (remote.has(key) && missing(attempted, key, characters))) return false;
+      if (!settled.has(key) || (remote.has(key) && missing(attempted, key, characters))) return false;
     }
     return true;
   }
@@ -263,16 +255,10 @@ export function createDefaultFontPainter(
     const batch: Promise<boolean>[] = [];
     for (const [key, { fontFamily, bold, italic, characters }] of faceKeys(displayList)) {
       if (pending.has(key)) continue;
-      if (retryAfter.has(key)) {
-        if (faceSettled(key)) continue;
-        retryAfter.delete(key);
-        settled.delete(key);
-      }
       const text = loaded.has(key) ? missing(requested, key, characters) : [...characters].join('');
       if (loaded.has(key) && !(remote.has(key) && text)) continue;
       let partial = false;
-      const task = loadFace(fontFamily, bold, italic, text, () => { remote.add(key); }, () => { partial = true; }).then((result) => {
-        const success = result === true;
+      const task = loadFace(fontFamily, bold, italic, text, () => { remote.add(key); }, () => { partial = true; }).then((success) => {
         pending.delete(key);
         for (const record of success ? [attempted, requested] : [attempted]) {
           let known = record.get(key);
@@ -280,7 +266,6 @@ export function createDefaultFontPainter(
           for (const character of text) known.add(character);
         }
         settled.add(key);
-        if (typeof result === 'object') retryAfter.set(key, result.retryAt);
         if (success) loaded.add(key);
         if (success || partial) changed = true;
         const latest = !disposed && remote.has(key) && lastPainted ? faceKeys(lastPainted).get(key) : undefined;
@@ -311,9 +296,8 @@ export function createDefaultFontPainter(
       void (async () => {
         for (const [key, { fontFamily, bold, italic }] of faceKeys(displayList)) {
           if (inactive() || !idle()) return;
-          if (loaded.has(key) || pending.has(key) || faceSettled(key)) continue;
+          if (loaded.has(key) || pending.has(key) || settled.has(key)) continue;
           if (await loadFace(fontFamily, bold, italic, '', () => {}, () => {}, true, PRELOAD_MAX_BYTES) === true) {
-            retryAfter.delete(key);
             loaded.add(key);
             settled.add(key);
           }
