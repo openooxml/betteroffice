@@ -3,7 +3,7 @@
 import type { BundledFontLoader, BundledFontProvider } from './fontRegistry';
 import type { FontDecoder } from '../../../../../shared/office-session/fontDecoder';
 import { importFonts } from '../../../../../shared/office-session/fontModules';
-import { isImplicitFontCdnError, reportImplicitCdnFailure } from '../../../../../shared/fontPackDiagnostics';
+import { isImplicitFontCdnError, reportImplicitCdnFailure } from '../../../../../shared/fontCdnDiagnostics';
 import { decodeFontFace } from '../../wasm/fontDecoder';
 
 export const IMPLICIT_FONT_COVERAGE = '@betteroffice/fonts/coverage';

@@ -1,4 +1,4 @@
-import { isImplicitFontCdnError } from '../../../../shared/fontPackDiagnostics';
+import { isImplicitFontCdnError } from '../../../../shared/fontCdnDiagnostics';
 import { isEngineTrap } from '../../../../shared/office-session/trap';
 import { importProgressiveFonts } from '../../../../shared/office-session/fontModules';
 

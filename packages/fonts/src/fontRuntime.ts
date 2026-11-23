@@ -5,7 +5,8 @@ import { loadFontBytes } from './bytes';
 import { loadPackedFontBytes, readPackedFontBytes, isBaseLatinFont, isLatinFont, packFor, sliceDecoder, sliceRefOf } from './packed';
 import type { SliceLocation } from './progressive';
 import { checkInstalledPacks } from './packDiagnostics';
-import { isImplicitFontCdnError, reportImplicitCdnFailure, type FontPackDiagnostic } from '../../../shared/fontPackDiagnostics';
+import { isImplicitFontCdnError, reportImplicitCdnFailure } from '../../../shared/fontCdnDiagnostics';
+import type { FontPackDiagnostic } from '../../../shared/fontPackDiagnostics';
 import {
   checkImplicitSliceCooldown, fontCdnAssetUrl, fontCdnCacheKey, implicitAssetCooldown,
   type FontCdnConfiguration, type FontRequestPolicy,

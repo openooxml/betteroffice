@@ -1,7 +1,7 @@
 import type { BundledFontLoader, BundledFontScript } from '@betteroffice/fonts';
 import { importFonts, importProgressiveFonts } from '../../../../shared/office-session/fontModules';
 import { setFontCdnConfiguration, type FontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
-import { isImplicitFontCdnError, reportImplicitCdnFailure } from '../../../../shared/fontPackDiagnostics';
+import { isImplicitFontCdnError, reportImplicitCdnFailure } from '../../../../shared/fontCdnDiagnostics';
 import { scriptFontFace } from './commandScriptFonts';
 import type { DefaultFontFace, DefaultFontLanding, RequestedFontFace } from '../../../../shared/pptxDefaultFonts';
 import { decodeFontFace } from '../wasm/loader';

@@ -1,7 +1,7 @@
 import { version as latinVersion } from '../../fonts-latin/package.json';
 import { version as intlVersion } from '../../fonts-intl/package.json';
 import { version as cjkVersion } from '../../fonts-cjk/package.json';
-import type { FontPackDiagnostic } from '../../../shared/fontPackDiagnostics';
+import type { FontCdnDiagnostic } from '../../../shared/fontCdnDiagnostics';
 import {
   getFontCdnConfiguration, implicitFontCdnBases, JSDELIVR, setFontCdnConfiguration, STALL_MS,
   type FontCdnConfiguration, type ImplicitFontCdnBase,
@@ -9,11 +9,11 @@ import {
 
 export { fontCdnCacheKey, isBrowserFontPage, workerFontCdnConfiguration, type FontCdnConfiguration } from '../../../shared/office-session/fontCdnRuntime';
 
-type Pack = FontPackDiagnostic['pack'];
+type Pack = FontCdnDiagnostic['pack'];
 export type FontRequestPolicy = number | Pack;
 
 class ImplicitFontCdnError extends Error {
-  readonly diagnostic: FontPackDiagnostic;
+  readonly diagnostic: FontCdnDiagnostic;
 
   constructor(pack: Pack, cause: unknown) {
     const reason = cause instanceof Error ? cause.message : String(cause);

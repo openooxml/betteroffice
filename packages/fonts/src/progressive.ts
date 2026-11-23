@@ -3,7 +3,7 @@ import { absoluteHref } from './assetHref';
 import { chunkEntries, parseSkeleton, textChunks, type SliceSkeleton } from './slices';
 import { sha256 } from './sha256';
 import { checkImplicitSliceCooldown, loadImplicitFontAsset } from './fontCdn';
-import { isImplicitFontCdnError, reportImplicitCdnFailure } from '../../../shared/fontPackDiagnostics';
+import { isImplicitFontCdnError, reportImplicitCdnFailure } from '../../../shared/fontCdnDiagnostics';
 
 /**
  * A sliced face that loads its outlines as they are needed. Its layout tables

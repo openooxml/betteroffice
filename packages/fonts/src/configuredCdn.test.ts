@@ -10,7 +10,8 @@ import intl from '../../fonts-intl/assets/manifest.json';
 import cjk from '../../fonts-cjk/assets/manifest.json';
 import { decodeFontFace, type FontDecoder } from './decode';
 import * as fontCdn from './fontCdn';
-import { createFontRuntime, type FontPackDiagnostic } from './fontRuntime';
+import { createFontRuntime } from './fontRuntime';
+import type { FontCdnDiagnostic } from '../../../shared/fontCdnDiagnostics';
 import { createPageFontPackResponder } from '../../../shared/office-session/fontPackSource';
 import { fontAssetResponse, withBrowserFontGlobals } from './fontAssets.test-support';
 import { openSlicedFace, sliceSourceOf } from './progressive-entry';
@@ -450,11 +451,11 @@ const regularUrl = fontCdnAssetUrl(latin, regular.file).href;
 
 function observeCdnFailures() {
   const warning = spyOn(console, 'warn').mockImplementation(() => {});
-  const diagnostics: FontPackDiagnostic[] = [];
+  const diagnostics: FontCdnDiagnostic[] = [];
   const dispatch = Object.getOwnPropertyDescriptor(globalThis, 'dispatchEvent');
   Object.defineProperty(globalThis, 'dispatchEvent', {
     configurable: true,
-    value(event: CustomEvent<FontPackDiagnostic>) {
+    value(event: CustomEvent<FontCdnDiagnostic>) {
       if (event.type === 'betteroffice:font-pack-diagnostic') diagnostics.push(event.detail);
       return true;
     },

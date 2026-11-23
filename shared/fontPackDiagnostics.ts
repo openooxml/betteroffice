@@ -1,21 +1,11 @@
-/** A font pack that cannot be used, so its faces are substituted. */
+/** An installed font pack that cannot be used, so its faces are substituted. */
 export interface FontPackDiagnostic {
   /** The add-on package: `@betteroffice/fonts-latin`, `-intl` or `-cjk`. */
   pack: 'latin' | 'intl' | 'cjk';
-  reason: 'version-mismatch' | 'missing-file' | 'invalid-manifest' | 'cdn-unavailable';
+  /** `version-mismatch`: another release is installed; `missing-file`: files are absent; `invalid-manifest`: its manifest cannot be read. */
+  reason: 'version-mismatch' | 'missing-file' | 'invalid-manifest';
   /** A sentence naming the package and what is wrong. */
   detail: string;
-}
-
-export function isImplicitFontCdnError(error: unknown): error is Error & { diagnostic: FontPackDiagnostic } {
-  return error instanceof Error &&
-    (error as { diagnostic?: FontPackDiagnostic }).diagnostic?.reason === 'cdn-unavailable';
-}
-
-export function reportImplicitCdnFailure({ diagnostic }: { diagnostic: FontPackDiagnostic }): void {
-  if (typeof globalThis.dispatchEvent === 'function' && typeof CustomEvent === 'function') {
-    globalThis.dispatchEvent(new CustomEvent('betteroffice:font-pack-diagnostic', { detail: { ...diagnostic } }));
-  }
 }
 
 const WARNED = Symbol.for('@betteroffice/font-pack-warnings');

@@ -8,7 +8,7 @@ export interface ProgressiveFontFace {
 
 import { baseLatinAlias, baseLatinCandidate, coverageFromBits, symbolFamily, wordsCoverage, type FontCoverage } from './fontCoverage';
 import { isImplicitFontProvider } from './defaultFontProvider';
-import { isImplicitFontCdnError, reportImplicitCdnFailure } from '../../../../../shared/fontPackDiagnostics';
+import { isImplicitFontCdnError, reportImplicitCdnFailure } from '../../../../../shared/fontCdnDiagnostics';
 
 const standInKey = Symbol.for('@betteroffice/docx/standInFamily');
 

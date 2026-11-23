@@ -1,5 +1,5 @@
 import { fontCdnCacheKey } from '../../../shared/office-session/fontCdnRuntime';
-import { isImplicitFontCdnError, reportImplicitCdnFailure } from '../../../shared/fontPackDiagnostics';
+import { isImplicitFontCdnError, reportImplicitCdnFailure } from '../../../shared/fontCdnDiagnostics';
 import { PngExportError, type DisplayList, type WorkbookSession, type XlsxFontFace, type XlsxPngFont } from '@betteroffice/xlsx';
 import type { BundledFontFace } from '@betteroffice/fonts';
 import type { RemoteFontProvider } from '@betteroffice/fonts/remote';

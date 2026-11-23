@@ -1,7 +1,6 @@
-import type { SliceLocation } from '@betteroffice/fonts';
 import { PngExportError } from '../../../../shared/office-session/pngExportError';
 import { readFontTraits } from '../../../../shared/fontTraits';
-import { isImplicitFontCdnError, reportImplicitCdnFailure } from '../../../../shared/fontPackDiagnostics';
+import { isImplicitFontCdnError, reportImplicitCdnFailure } from '../../../../shared/fontCdnDiagnostics';
 import type { PaintFontCoverage } from '../render/canvas';
 
 /** What the session needs from a progressive face. */
@@ -40,7 +39,7 @@ export function slicedFacesSupported(
   return /(?:Chrome|Chromium|Firefox)\//.test(userAgent) && !/\b(?:iPhone|iPad|iPod|CriOS|FxiOS)\b/.test(userAgent);
 }
 
-type WholeFaceLoader = (() => Promise<ArrayBuffer>) & { slices?: SliceLocation };
+type WholeFaceLoader = (() => Promise<ArrayBuffer>) & { slices?: { loadWholeForExport?: () => Promise<ArrayBuffer> } };
 
 interface Entry {
   family: string;
@@ -255,7 +254,7 @@ export function createSlicedFontFaces(quietMs = FILL_QUIET_MS) {
       }));
       return faces.filter((face): face is NonNullable<typeof face> => face !== undefined);
     },
-    add(family: string, face: SlicedFontFace, whole: WholeFaceLoader): void {
+    add(family: string, face: SlicedFontFace, whole: () => Promise<ArrayBuffer>): void {
       if (!disposed && !entries.has(keyOf(family))) {
         entries.set(keyOf(family), { family, face, whole, installed: [] });
       }
