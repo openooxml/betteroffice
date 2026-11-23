@@ -98,6 +98,40 @@ for (const { kind } of ENGINES) {
       }
     });
 
+    test('DOCX PNG draws with supplied font bytes offline and rejects missing families', async () => {
+      const canvas = stubBrowser();
+      const previous = getFontCdnConfiguration();
+      const restore = withBrowserFontGlobals();
+      const runtime = fontRuntimeWithoutPacks(new URL('https://docx-offline-export-base.example/'));
+      const provider = spyOn(fonts, 'createFontProvider').mockImplementation(runtime.createFontProvider);
+      const fetch = spyOnFontFetch(async (input) => {
+        if (String(input).includes('cdn.jsdelivr.net')) throw new TypeError('Offline');
+        return fontAssetResponse(input);
+      });
+      try {
+        setFontCdnConfiguration(undefined);
+        const bytes = new Uint8Array(readFileSync('crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf'));
+        const calibri = { family: 'Calibri', text: 'Total', paragraphFamily: 'Calibri' };
+        const arial = { family: 'Arial', text: 'Balance', paragraphFamily: 'Arial' };
+        const supplied = { fonts: [{ family: ' calibri ', bytes }] };
+        await expect(exported([calibri], supplied)).resolves.toBeInstanceOf(Uint8Array);
+        expect(fetch).not.toHaveBeenCalled();
+        if (kind === 'wasm') expect(canvas.fills).toBeGreaterThan(0);
+
+        await expect(exported([calibri])).rejects.toMatchObject({
+          code: 'font-unavailable', message: expect.stringContaining('Carlito for Calibri could not load'),
+        });
+        await expect(exported([calibri, arial], supplied)).rejects.toMatchObject({
+          code: 'font-unavailable', message: expect.stringContaining('Liberation Sans for Arial could not load'),
+        });
+      } finally {
+        fetch.mockRestore();
+        provider.mockRestore();
+        restore();
+        setFontCdnConfiguration(previous);
+      }
+    });
+
     test('DOCX PNG loads Base Latin with the optional packs absent in headless mode', async () => {
       stubBrowser();
       const previous = getFontCdnConfiguration();

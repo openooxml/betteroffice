@@ -42,6 +42,33 @@ test('DOCX layout uses Base Latin when neither the primary nor the last resort p
   }
 });
 
+test('DOCX warns once about the missing Latin pack with the CDN disabled', async () => {
+  const previous = getFontCdnConfiguration();
+  const restore = withBrowserFontGlobals();
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  const runtime = fontRuntimeWithoutPacks(new URL('https://docx-cdn-disabled-base.example/'));
+  const create = spyOn(fonts, 'createFontProvider').mockImplementation(runtime.createFontProvider);
+  const fetch = spyOnFontFetch(fontAssetResponse);
+  try {
+    fonts.configureFontCdn({ baseUrl: false });
+    const provider = await resolveDefaultFontProvider({});
+    const registry = new TextMeasureFontRegistry({ registerFont: () => 1 }, { bundled: provider });
+    expect(await registry.getFontIdChain('Calibri', false, false)).toEqual([1]);
+    expect(await registry.getFontIdChain('Calibri', false, false)).toEqual([1]);
+    expect(fetch.mock.calls.some(([url]) => String(url).includes('cdn.jsdelivr.net'))).toBe(false);
+    expect(warn.mock.calls).toEqual([[
+      '[fontRegistry] bundled face for "Calibri" failed to load or register; falling back: ' +
+      'Bundled font Carlito-Regular.ttf.zst needs @betteroffice/fonts-latin - install @betteroffice/fonts-latin',
+    ]]);
+  } finally {
+    fetch.mockRestore();
+    create.mockRestore();
+    warn.mockRestore();
+    restore();
+    setFontCdnConfiguration(previous);
+  }
+});
+
 test('DOCX substitutes after a slice index 404 and fetches slices again only after cooldown', async () => {
   const previous = getFontCdnConfiguration();
   const restore = withBrowserFontGlobals();
