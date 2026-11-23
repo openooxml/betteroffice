@@ -625,10 +625,7 @@ for (const failure of ['blocked', 403, 404, 410, 429, 500, 502, 503, 504, 'bad h
       await expect(fonts.loadBundledFontBytes(regular, undefined, mode)).resolves.toEqual(await base(false, false)!());
       await expect(fonts.loadBundledFontBytes(bold, undefined, mode)).resolves.toEqual(await base(true, false)!());
       await expect(fonts.loadBundledFontBytes(regular, undefined, { ...mode, strict: true })).rejects.toThrow();
-      const baseFailure = failure === 'blocked' || (typeof failure === 'number' && failure !== 404 && failure !== 410);
-      expect(requests).toEqual(baseFailure ? [regularUrl] : [
-        regularUrl, fontCdnAssetUrl(latin, bold.file).href,
-      ]);
+      expect(requests).toEqual([regularUrl]);
       expect(warning.mock.calls).toHaveLength(1);
       for (const detail of ['cdn.jsdelivr.net', 'install @betteroffice/fonts-latin', 'configureFontCdn({ baseUrl: false })']) {
         expect(warning.mock.calls[0]?.[0]).toContain(detail);
@@ -644,6 +641,48 @@ for (const failure of ['blocked', 403, 404, 410, 429, 500, 502, 503, 504, 'bad h
     }
   });
 }
+
+test.each([404, 'bad hash'] as const)('styled faces wait for a Regular dictionary with %s to recover', async (failure) => {
+  const restore = withBrowserFontGlobals();
+  const observed = observeCdnFailures();
+  const now = Date.now();
+  const clock = spyOn(Date, 'now').mockReturnValue(now);
+  const bold = fonts.resolveMetricCompatFace('Calibri', true, false)!;
+  const boldUrl = fontCdnAssetUrl(latin, bold.file).href;
+  const requests: string[] = [];
+  let broken = true;
+  const decode: FontDecoder = async (encoded, options) => {
+    const decoded = await decoder(encoded, options);
+    if (broken && failure === 'bad hash') new Uint8Array(decoded.font)[0] ^= 1;
+    return decoded;
+  };
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (!url.startsWith(jsDelivr)) return fontAssetResponse(input);
+    requests.push(url);
+    return broken && failure === 404 && url === regularUrl
+      ? new Response(null, { status: 404 }) : fontAssetResponse(input);
+  }) as typeof fetch;
+  const mode = { ...runtime, decoder: decode };
+  const reason = failure === 404 ? 'HTTP 404' : 'SHA-256 mismatch';
+  try {
+    await expect(fonts.loadBundledFontBytes(regular, undefined, mode)).rejects.toThrow(reason);
+    broken = false;
+    for (const time of [now, now + cooldownMs - 1]) {
+      clock.mockReturnValue(time);
+      await expect(fonts.loadBundledFontBytes(bold, undefined, mode)).rejects.toThrow(reason);
+      expect(requests).toEqual([regularUrl]);
+    }
+    expect(observed.warning).toHaveBeenCalledTimes(1);
+    clock.mockReturnValue(now + cooldownMs);
+    await expect(fonts.loadBundledFontBytes(bold, undefined, mode)).resolves.toBeInstanceOf(ArrayBuffer);
+    expect(requests).toEqual([regularUrl, boldUrl, regularUrl]);
+  } finally {
+    clock.mockRestore();
+    observed.restore();
+    restore();
+  }
+});
 
 test.each(['aborted', 'opaque', 'error', 'non-OK'] as const)('an implicit %s response cancels its unread body', async (failure) => {
   const observed = observeCdnFailures();
@@ -697,11 +736,13 @@ test('concurrent faces and dictionaries share the network failure of their impli
   }
 });
 
-test('a valid implicit load clears a 404 and re-arms the warning for its base', async () => {
+test('a valid implicit load preserves another URL’s 404 and warning suppression', async () => {
   const restore = withBrowserFontGlobals();
   const observed = observeCdnFailures();
   const other = fonts.resolveMetricCompatFace('Times New Roman', false, false)!;
   const otherUrl = fontCdnAssetUrl(latin, other.file).href;
+  const now = Date.now();
+  const clock = spyOn(Date, 'now').mockReturnValue(now);
   const requests: string[] = [];
   let available = false;
   let offline = false;
@@ -717,15 +758,23 @@ test('a valid implicit load clears a 404 and re-arms the warning for its base', 
     await expect(fonts.loadBundledFontBytes(regular, undefined, runtime)).rejects.toThrow('HTTP 404');
     expect(requests).toEqual([regularUrl]);
     await expect(fonts.loadBundledFontBytes(other, undefined, runtime)).resolves.toBeInstanceOf(ArrayBuffer);
-    await expect(fonts.loadBundledFontBytes(regular, undefined, runtime)).resolves.toBeInstanceOf(ArrayBuffer);
-    expect(requests).toEqual([regularUrl, otherUrl, regularUrl]);
+    await expect(fonts.loadBundledFontBytes(regular, undefined, runtime)).rejects.toThrow('HTTP 404');
+    expect(requests).toEqual([regularUrl, otherUrl]);
+    offline = true;
+    await expect(fonts.loadBundledFontBytes(other, undefined, runtime)).rejects.toThrow('Offline');
+    expect(requests).toEqual([regularUrl, otherUrl, otherUrl]);
     expect(observed.warning).toHaveBeenCalledTimes(1);
+
+    clock.mockReturnValue(now + cooldownMs);
+    offline = false;
+    await expect(fonts.loadBundledFontBytes(regular, undefined, runtime)).resolves.toBeInstanceOf(ArrayBuffer);
     offline = true;
     await expect(fonts.loadBundledFontBytes(other, undefined, runtime)).rejects.toThrow('Offline');
     await expect(fonts.loadBundledFontBytes(regular, undefined, runtime)).rejects.toThrow('Offline');
-    expect(requests).toEqual([regularUrl, otherUrl, regularUrl, otherUrl]);
+    expect(requests).toEqual([regularUrl, otherUrl, otherUrl, regularUrl, otherUrl]);
     expect(observed.warning).toHaveBeenCalledTimes(2);
   } finally {
+    clock.mockRestore();
     observed.restore();
     restore();
   }
@@ -848,25 +897,65 @@ test('the published configureFontCdn clears the progressive entry cooldown', asy
   }
 });
 
-test('a corrupt implicit CJK slice with the expected encoded length reports CDN failure', async () => {
+test.each(['index', 'skeleton', 'core', 'chunk'] as const)('an implicit CJK %s failure keeps its cooldown across successful requests', async (part) => {
   const restore = withBrowserFontGlobals();
   const observed = observeCdnFailures();
-  const provider = fonts.createFontProvider(undefined, { decoder, retain: false });
+  const now = Date.now();
+  const clock = spyOn(Date, 'now').mockReturnValue(now);
+  const provider = fonts.createFontProvider(undefined, runtime);
   const slices = provider.resolveScriptFallback('cjk-jp', false, false)!.slices!;
-  const indexUrl = fontCdnAssetUrl(cjk, slices.ref.index);
+  const url = (file: string) => fontCdnAssetUrl(cjk, file);
+  const requests: string[] = [];
+  let broken = true;
   try {
-    const { skeleton } = await (await fontAssetResponse(indexUrl)).json() as { skeleton: { file: string; encodedLength: number } };
-    globalThis.fetch = (async (input: RequestInfo | URL) => String(input).endsWith(skeleton.file)
-      ? new Response(new Uint8Array(skeleton.encodedLength)) : fontAssetResponse(input)) as typeof fetch;
-    await expect(openSlicedFace(slices)).rejects.toMatchObject({
-      diagnostic: { pack: 'cjk', reason: 'cdn-unavailable' },
-    });
+    const indexUrl = url(slices.ref.index);
+    const { skeleton, core, chunks } = await (await fontAssetResponse(indexUrl)).json() as {
+      skeleton: { file: string; encodedLength: number }; core: { file: string }; chunks: { file: string }[];
+    };
+    const files = [slices.ref.index, skeleton.file, core.file, chunks[0]!.file];
+    const prefix = files.slice(0, ['index', 'skeleton', 'core', 'chunk'].indexOf(part) + 1).map((file) => url(file).href);
+    const failedUrl = prefix.at(-1)!;
+    const other = url('manifest.json');
+    const missing = url('missing.zst');
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const href = String(input);
+      if (href.startsWith(jsDelivr)) requests.push(href);
+      if (href === missing.href) return new Response(null, { status: 404 });
+      if (broken && href === failedUrl) return part === 'skeleton'
+        ? new Response(new Uint8Array(skeleton.encodedLength)) : new Response(null, { status: 404 });
+      return fontAssetResponse(input);
+    }) as typeof fetch;
+    let load: () => Promise<unknown> = () => openSlicedFace(slices);
+    if (part === 'chunk') {
+      const face = await openSlicedFace(slices);
+      const encoded = await (await fontAssetResponse(url(skeleton.file))).arrayBuffer();
+      const parsed = parseSkeleton(new Uint8Array((await decoder(encoded, { codec: 'zstd' })).font));
+      let glyph = 0;
+      while (glyph < parsed.numGlyphs && parsed.chunkOfGlyph(glyph) !== 1) glyph++;
+      expect(glyph).toBeLessThan(parsed.numGlyphs);
+      load = () => face.ensureGlyphs([glyph]);
+    }
+    const error = { diagnostic: { pack: 'cjk', reason: 'cdn-unavailable' } };
+    await expect(load()).rejects.toMatchObject(error);
+    expect(requests).toEqual(prefix);
+    broken = false;
+    await fontCdn.loadImplicitFontAsset('manifest.json', other, 'cjk', async (bytes, check) =>
+      check(() => JSON.parse(new TextDecoder().decode(bytes))));
+    await expect(fontCdn.loadImplicitFontAsset('missing.zst', missing, 'cjk', async (bytes) => bytes)).rejects.toThrow('HTTP 404');
+    clock.mockReturnValue(now + cooldownMs - 1);
+    await expect(load()).rejects.toMatchObject(error);
+    await expect(slices.loadWholeForExport!()).rejects.toMatchObject(error);
+    expect(requests).toEqual([...prefix, other.href, missing.href]);
     expect(observed.warning).toHaveBeenCalledTimes(1);
+    clock.mockReturnValue(now + cooldownMs);
+    await expect(load()).resolves.toBeDefined();
+    expect(requests).toEqual([...prefix, other.href, missing.href, ...(part === 'chunk' ? [failedUrl] : files.slice(0, 3).map((file) => url(file).href))]);
   } finally {
+    clock.mockRestore();
     observed.restore();
     restore();
   }
-});
+}, 30_000);
 
 test('an implicit CJK slice failure allows a later whole-face request and warns once', async () => {
   const restore = withBrowserFontGlobals();

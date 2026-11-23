@@ -729,13 +729,56 @@ test('an already absent editor face is tried again after changing the CDN', asyn
   } finally { painter.dispose(); setFontCdnConfiguration(previous); }
 });
 
+test('repaints leave an uninstalled editor face settled until the CDN changes', async () => {
+  const { added } = browser();
+  const previous = getFontCdnConfiguration();
+  const runtime = fontRuntimeWithoutPacks();
+  const source = runtime.createFontProvider(undefined, { strict: true });
+  const resolve = spyOn(source, 'resolve');
+  const manager = spyOn(xlsxDefaultFontManager, 'load').mockResolvedValue({
+    ...fonts, createFontProvider: () => source,
+  });
+  const fetch = spyOn(globalThis, 'fetch').mockImplementation(fontAssetResponse);
+  const repaint = mock(() => {});
+  const onSettled = mock(() => {});
+  const painter = createDefaultFontPainter(null, repaint, { onSettled });
+  const frame = display({ family: 'Calibri' });
+  try {
+    configureFontCdn({ baseUrl: false });
+    await painter.load(frame);
+    for (let i = 0; i < 2; i++) {
+      expect(painter.paint(frame, () => {})).toBe(true);
+      await new Promise((done) => setTimeout(done, 0));
+    }
+    expect(fetch.mock.calls.filter(([input]) => !String(input).endsWith('.wasm'))).toHaveLength(0);
+    expect(resolve).toHaveBeenCalledTimes(1);
+    expect(repaint).not.toHaveBeenCalled();
+    expect(onSettled).not.toHaveBeenCalled();
+
+    configureFontCdn({ baseUrl: 'https://editor-fonts.example/' });
+    await painter.load(frame);
+    expect(fetch.mock.calls.filter(([input]) => !String(input).endsWith('.wasm'))).toHaveLength(1);
+    expect(resolve).toHaveBeenCalledTimes(2);
+    expect(added.map(({ family }) => family)).toEqual(['Calibri']);
+    expect(repaint).toHaveBeenCalledTimes(1);
+  } finally {
+    painter.dispose();
+    fetch.mockRestore();
+    manager.mockRestore();
+    resolve.mockRestore();
+    setFontCdnConfiguration(previous);
+  }
+});
+
 test('T14: repaint, editing another face and reopening share the CDN cooldown', async () => {
   const { added } = browser();
   const previous = getFontCdnConfiguration();
   configureTestFontCdn({ baseUrl: false });
   const restore = withBrowserFontGlobals();
   const runtime = fontRuntimeWithoutPacks();
-  const load = spyOn(xlsxDefaultFontManager, 'load').mockResolvedValue({ ...fonts, ...runtime });
+  const source = runtime.createFontProvider(undefined, { strict: true });
+  const resolve = spyOn(source, 'resolve');
+  const load = spyOn(xlsxDefaultFontManager, 'load').mockResolvedValue({ ...fonts, createFontProvider: () => source });
   const warn = spyOn(console, 'warn').mockImplementation(() => {});
   const now = Date.now();
   const clock = spyOn(Date, 'now').mockReturnValue(now);
@@ -748,7 +791,8 @@ test('T14: repaint, editing another face and reopening share the CDN cooldown', 
     }
     return fontAssetResponse(input);
   });
-  const first = createDefaultFontPainter(null, () => {});
+  const repaint = mock(() => {});
+  const first = createDefaultFontPainter(null, repaint);
   const second = createDefaultFontPainter(null, () => {});
   const frame = display({ family: 'Calibri' });
   const edited = display({ family: 'Calibri' }, { family: 'Times New Roman' });
@@ -757,20 +801,28 @@ test('T14: repaint, editing another face and reopening share the CDN cooldown', 
     await first.load(frame);
     expect(added).toHaveLength(0);
     expect(requests).toHaveLength(1);
+    clock.mockReturnValue(now + 59_999);
     expect(first.paint(frame, () => {})).toBe(true);
+    await new Promise((done) => setTimeout(done, 0));
+    expect(requests).toHaveLength(1);
+    expect(resolve).toHaveBeenCalledTimes(1);
+    expect(repaint).not.toHaveBeenCalled();
     await first.load(edited);
     await second.load(frame);
     expect(requests).toHaveLength(1);
+    expect(resolve).toHaveBeenCalledTimes(3);
 
     online = true;
     clock.mockReturnValue(now + 60_000);
     await first.load(frame);
     expect(requests).toHaveLength(2);
     expect(added.map(({ family }) => family)).toEqual(['Calibri']);
+    expect(repaint).toHaveBeenCalledTimes(1);
   } finally {
     first.dispose();
     second.dispose();
     load.mockRestore();
+    resolve.mockRestore();
     fetch.mockRestore();
     warn.mockRestore();
     clock.mockRestore();

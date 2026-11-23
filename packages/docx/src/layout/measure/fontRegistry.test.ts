@@ -123,6 +123,44 @@ test.each(['script fallback', 'last resort'] as const)('DOCX warns once per CDN 
   }
 });
 
+test.each(['disabled', 'unavailable'] as const)('DOCX leaves an absent script family to browser fallback when the CDN is %s', async (cdn) => {
+  const previous = getFontCdnConfiguration();
+  const restore = withBrowserFontGlobals();
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  const dispatch = globalThis.dispatchEvent;
+  const diagnostic = mock((_event: Event) => true);
+  globalThis.dispatchEvent = diagnostic;
+  const runtime = fontRuntimeWithoutPacks(new URL('https://docx-base.example/'));
+  const create = spyOn(fonts, 'createFontProvider').mockImplementation(runtime.createFontProvider);
+  const requests: string[] = [];
+  const fetch = spyOn(globalThis, 'fetch').mockImplementation((input) => {
+    const url = String(input);
+    if (!url.endsWith('.wasm')) requests.push(url);
+    return url.includes('cdn.jsdelivr.net') ? Promise.resolve(new Response(null, { status: 404 })) : fontAssetResponse(input);
+  });
+  const registerFont = mock(() => 1);
+  const family = 'MS Gothic';
+  try {
+    configureDefaultFonts({});
+    setFontCdnConfiguration(cdn === 'disabled' ? { baseUrl: false, timeoutMs: 30_000 } : undefined);
+    const provider = await resolveDefaultFontProvider({});
+    const registry = new TextMeasureFontRegistry({ registerFont }, { bundled: provider });
+    const ids = await registry.getFontIdChain(family, false, false);
+    expect(requests).toEqual(cdn === 'disabled' ? [] : [expect.stringContaining('/fonts-cjk@')]);
+    expect(diagnostic).toHaveBeenCalledTimes(cdn === 'disabled' ? 0 : 1);
+    expect(ids).toEqual([]);
+    expect(registerFont).not.toHaveBeenCalled();
+  } finally {
+    configureDefaultFonts({});
+    fetch.mockRestore();
+    create.mockRestore();
+    warn.mockRestore();
+    globalThis.dispatchEvent = dispatch;
+    restore();
+    setFontCdnConfiguration(previous);
+  }
+});
+
 test('shared loaders register fresh buffers once across families and script fallbacks', async () => {
   let loads = 0;
   let registrations = 0;
