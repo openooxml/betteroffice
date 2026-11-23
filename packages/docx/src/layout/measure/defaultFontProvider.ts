@@ -134,7 +134,7 @@ function implicitFontProvider(
     resolveBaseLatin?(bold: boolean, italic: boolean, family?: string): BundledFontLoader | undefined;
   } = {
     ...provider,
-    resolveBaseLatin: (bold, italic, family) => {
+    resolveBaseLatin: (bold: boolean, italic: boolean, family?: string) => {
       const loader = provider.resolveBaseLatin?.(bold, italic);
       return family === undefined ? loader : checkedFamilyFallback(loader, family, bold, italic);
     },
