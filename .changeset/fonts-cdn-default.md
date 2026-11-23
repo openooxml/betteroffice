@@ -5,4 +5,4 @@
 "@betteroffice/xlsx": minor
 ---
 
-Browser pages load uninstalled font packs from jsDelivr; under a strict content policy, allow cdn.jsdelivr.net, install the packs, or call `configureFontCdn({ baseUrl: false })`. `@betteroffice/fonts-latin` is now an optional peer. WASM packages under Node use Base Latin unless packs are installed.
+Browser pages load font packs that are not installed (`@betteroffice/fonts-intl`, `@betteroffice/fonts-cjk`) from jsDelivr; under a strict content policy, allow cdn.jsdelivr.net, install the packs, or call `configureFontCdn({ baseUrl: false })`. A blocked CDN substitutes as before, with one console warning per pack.

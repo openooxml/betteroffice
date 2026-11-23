@@ -46,8 +46,7 @@
   },
   "peerDependencies": {
     "@betteroffice/fonts-cjk": "workspace:^0",
-    "@betteroffice/fonts-intl": "workspace:^0",
-    "@betteroffice/fonts-latin": "workspace:^0"
+    "@betteroffice/fonts-intl": "workspace:^0"
   },
   "peerDependenciesMeta": {
     "@betteroffice/fonts-cjk": {
@@ -55,15 +54,11 @@
     },
     "@betteroffice/fonts-intl": {
       "optional": true
-    },
-    "@betteroffice/fonts-latin": {
-      "optional": true
     }
   },
   "devDependencies": {
     "@betteroffice/fonts-cjk": "workspace:*",
     "@betteroffice/fonts-intl": "workspace:*",
-    "@betteroffice/fonts-latin": "workspace:*",
     "@types/bun": "^1.0.0",
     "@types/node": "^26.0.0",
     "tsup": "^8.0.1",
@@ -95,5 +90,8 @@
   },
   "publishConfig": {
     "access": "public"
+  },
+  "dependencies": {
+    "@betteroffice/fonts-latin": "workspace:*"
   }
 }
