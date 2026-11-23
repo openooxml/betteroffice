@@ -264,6 +264,7 @@ export class TextMeasureFontRegistry {
   private viewBases = new Map<number, number>();
   private readonly progressive?: (slices: SliceLocation) => Promise<ProgressiveFontFace>;
   private readonly standInTail: boolean;
+  private readonly baseLatinStandIn: boolean;
 
   /** `progressive` opens sliced faces, which register from their skeleton and core. */
   constructor(sink: TextEngineFontSink, opts?: {
@@ -272,12 +273,14 @@ export class TextMeasureFontRegistry {
     progressive?: (slices: SliceLocation) => Promise<ProgressiveFontFace>;
     /** Explicit stand-ins always append the last-resort face. */
     standInTail?: boolean;
+    baseLatinStandIn?: boolean;
   }) {
     this.sink = sink;
     this.bundledSource = opts?.bundled;
     this.baseLatinSource = opts?.baseLatin;
     this.progressive = opts?.progressive;
     this.standInTail = opts?.standInTail === true;
+    this.baseLatinStandIn = opts?.baseLatinStandIn !== false;
   }
 
   /** The sliced faces registered from their skeleton and core, by font id. */
@@ -618,7 +621,8 @@ export class TextMeasureFontRegistry {
       retryable = true;
     }
 
-    if (ids.length === 0 && (loader || lastResort) && (!cdnUnavailable || !isImplicitFontProvider(bundled))) {
+    if (this.baseLatinStandIn && ids.length === 0 && (loader || lastResort) &&
+        (!cdnUnavailable || !isImplicitFontProvider(bundled))) {
       const provider = bundled as (BundledFontProvider & {
         resolveBaseLatin?(bold: boolean, italic: boolean, family?: string): BundledFontLoader | undefined;
       }) | undefined;

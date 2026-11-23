@@ -74,7 +74,7 @@ export function createPngExporter(session: YrsSession) {
         const failed = faceLoadFailure(recorded.failures);
         if (failed) throw failed;
       };
-      const measure = createRustMeasureSource({ engine: copy, ...(bundled ? { bundled } : {}) });
+      const measure = createRustMeasureSource({ engine: copy, bundled, baseLatinStandIn: engineKind !== 'native' });
       measure.setCompat(document.package.settings?.compatibilityFlags);
       measure.setEmbeddedFaces(await extractEmbeddedFontFaces(document), appFaces(fonts));
       const renderEnv = documentRenderEnv(document);
