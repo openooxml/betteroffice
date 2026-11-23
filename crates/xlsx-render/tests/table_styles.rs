@@ -15,6 +15,18 @@ fn workbook(style_info: &str, b2_style: u32, totals: bool) -> Workbook {
 }
 
 fn workbook_with(styles: &str, style_info: &str, b2_style: u32, totals: bool) -> Workbook {
+    workbook_styled(styles, style_info, None, b2_style, totals)
+}
+
+/// [`workbook_with`], with the cell of column A in row `a_style.0` (1-based) using
+/// xf `a_style.1` when one is given.
+fn workbook_styled(
+    styles: &str,
+    style_info: &str,
+    a_style: Option<(u32, u32)>,
+    b2_style: u32,
+    totals: bool,
+) -> Workbook {
     let rels = |body: &str| {
         format!(
             r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{body}</Relationships>"#
@@ -28,8 +40,12 @@ fn workbook_with(styles: &str, style_info: &str, b2_style: u32, totals: bool) ->
     let rows = (1..=5)
         .map(|row| {
             let style = if row == 2 { format!(r#" s="{b2_style}""#) } else { String::new() };
+            let own = match a_style {
+                Some((styled, xf)) if row == styled => format!(r#" s="{xf}""#),
+                _ => String::new(),
+            };
             format!(
-                r#"<row r="{row}"><c r="A{row}" t="inlineStr"><is><t>a{row}</t></is></c><c r="B{row}"{style}><v>{row}</v></c></row>"#
+                r#"<row r="{row}"><c r="A{row}"{own} t="inlineStr"><is><t>a{row}</t></is></c><c r="B{row}"{style}><v>{row}</v></c></row>"#
             )
         })
         .collect::<String>();
@@ -177,6 +193,72 @@ fn a_cell_fill_beats_the_table_style() {
         fill_at(&wb, &list, CellRef::new(1, 0)),
         theme(4, 0.7999816888943144)
     );
+}
+
+/// A `TableStyleMedium9` table whose header cell `A1` uses xf `a1_style` of
+/// [`own_header_styles`], or no xf at all.
+fn own_header(normal_color: &str, a1_style: Option<u32>) -> Workbook {
+    let styles = own_header_styles(normal_color);
+    let medium9 = info("TableStyleMedium9", true);
+    workbook_styled(&styles, &medium9, a1_style.map(|xf| (1, xf)), 0, false)
+}
+
+/// The fonts and fills of a cell that sets its own: the normal font holds
+/// `normal_color`, font 1 is bold with no color of its own, font 2 is bold in
+/// theme color 1, font 3 is bold and red, and xfs 1 to 3 put them on a light fill.
+fn own_header_styles(normal_color: &str) -> String {
+    format!(
+        r#"<styleSheet><fonts count="4"><font><sz val="11"/>{normal_color}<name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><color theme="1"/><name val="Calibri"/></font><font><b/><sz val="11"/><color rgb="FFFF0000"/><name val="Calibri"/></font></fonts><fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFDCE6F1"/></patternFill></fill></fills><borders count="1"><border/></borders><cellXfs count="4"><xf fontId="0" fillId="0" borderId="0"/><xf fontId="1" fillId="2" borderId="0" applyFont="1" applyFill="1"/><xf fontId="2" fillId="2" borderId="0" applyFont="1" applyFill="1"/><xf fontId="3" fillId="2" borderId="0" applyFont="1" applyFill="1"/></cellXfs></styleSheet>"#
+    )
+}
+
+#[test]
+fn a_header_font_without_a_color_keeps_it_when_the_normal_font_has_one() {
+    let wb = own_header(r#"<color theme="1"/>"#, Some(1));
+    let list = render(&wb);
+    assert_eq!(
+        fill_at(&wb, &list, CellRef::new(0, 0)),
+        Some("#dce6f1".into())
+    );
+    assert_eq!(text(&list, "a1"), ("#000000".into(), true));
+}
+
+#[test]
+fn a_header_font_in_the_normal_color_takes_the_table_color() {
+    let wb = own_header(r#"<color theme="1"/>"#, Some(2));
+    let list = render(&wb);
+    assert_eq!(text(&list, "a1"), ("#ffffff".into(), true));
+}
+
+#[test]
+fn a_header_font_without_a_color_takes_the_table_color_when_the_normal_font_has_none() {
+    let wb = own_header("", Some(1));
+    let list = render(&wb);
+    assert_eq!(text(&list, "a1"), ("#ffffff".into(), true));
+}
+
+#[test]
+fn a_header_font_in_another_color_keeps_it() {
+    let wb = own_header(r#"<color theme="1"/>"#, Some(3));
+    let list = render(&wb);
+    assert_eq!(text(&list, "a1"), ("#ff0000".into(), true));
+}
+
+#[test]
+fn a_header_cell_without_a_format_takes_the_table_color() {
+    let wb = own_header(r#"<color theme="1"/>"#, None);
+    let list = render(&wb);
+    assert_eq!(text(&list, "a1"), ("#ffffff".into(), true));
+}
+
+#[test]
+fn a_body_font_without_a_color_keeps_it_under_a_table_that_colors_its_text() {
+    let styles = own_header_styles(r#"<color theme="1"/>"#);
+    let dark1 = info("TableStyleDark1", true);
+    let wb = workbook_styled(&styles, &dark1, Some((3, 1)), 0, false);
+    let list = render(&wb);
+    assert_eq!(text(&list, "a3"), ("#000000".into(), true));
+    assert_eq!(text(&list, "a4"), ("#ffffff".into(), false));
 }
 
 #[test]

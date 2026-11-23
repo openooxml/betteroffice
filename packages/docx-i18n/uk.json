@@ -542,6 +542,12 @@
     "tableInserted": "Вставлено таблицю",
     "tableDeleted": "Видалено таблицю"
   },
+  "pasteOptions": {
+    "button": "Параметри вставлення (Ctrl)",
+    "keepSource": "Зберегти форматування джерела",
+    "merge": "Об'єднати форматування",
+    "textOnly": "Зберегти лише текст"
+  },
   "contextMenu": {
     "ariaLabel": "Меню дій ШІ",
     "textMenuAriaLabel": "Меню редагування тексту",
@@ -587,6 +593,7 @@
     "noDocumentLoaded": "Документ не завантажено",
     "failedToLoad": "Не вдалося відкрити цей документ",
     "failedToLoadDescription": "Можливо, файл пошкоджено або він містить елементи, які цей редактор ще не вміє читати.",
+    "recoveryFailedDescription": "Редактор припинив роботу й не зміг відновити ваші останні зміни. Сам файл не пошкоджено.",
     "failedToLoadDamaged": "Файл пошкоджено або це не повний документ Word.",
     "failedToLoadUnsupported": "У цьому документі є те, що цей редактор поки не вміє читати.",
     "editorUnavailable": "Не вдалося завантажити редактор",
@@ -874,6 +881,7 @@
     "toolbarGroup": "Плагіни",
     "panelTabs": "Панелі плагінів",
     "collapsePanel": "Згорнути {title}",
-    "expandPanel": "Розгорнути {title}"
+    "expandPanel": "Розгорнути {title}",
+    "miniToolbar": "Форматування виділення"
   }
 }

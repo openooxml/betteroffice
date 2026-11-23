@@ -303,7 +303,7 @@ fn visit(
         if node.word("pPr") {
             continue;
         }
-        if node.word("hyperlink") {
+        if node.word("hyperlink") || node.word("dir") || node.word("bdo") {
             visit(source, at, at, units, result)?;
         } else if node.word("smartTag") {
             visit(source, at, scope, units, result)?;

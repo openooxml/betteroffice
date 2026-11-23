@@ -54,6 +54,9 @@ class TextRun:
         """Explicit RGB. A theme colour reads as `None`."""
     @property
     def style_id(self) -> str | None: ...
+    @property
+    def highlight(self) -> str | None:
+        """The `w:highlight` value as written, `"none"` included."""
 
 @final
 class Paragraph:
@@ -76,6 +79,14 @@ class TableCell:
     def tables(self) -> list[Table]: ...
     @property
     def text(self) -> str: ...
+    @property
+    def grid_span(self) -> int | None:
+        """Grid columns the cell spans when more than one, from `w:gridSpan`.
+
+        A cell alone in its row of a wider table reads that table's column count."""
+    @property
+    def v_merge(self) -> str | None:
+        """`"restart"` for the first cell of a vertical merge, `"continue"` for the cells below it."""
 
 @final
 class TableRow:
@@ -251,7 +262,14 @@ class SaveReport:
     @property
     def kept_unchanged(self) -> KeptUnchanged | None: ...
     @property
-    def structure_dropped(self) -> list[DroppedStructure] | None: ...
+    def structure_dropped(self) -> list[DroppedStructure] | None:
+        """Structure the save dropped from the body, header, footer and note parts it wrote whole,
+        part by part; comment parts are not checked. `None` means none was found only when
+        `whole_model_write` is false; when it is true, `None` means this was not computed."""
+    @property
+    def whole_model_write(self) -> bool:
+        """The save had no session plan and wrote the document's stories from the model:
+        structure the model does not carry may be gone and is not itemised in `structure_dropped`."""
 
 @final
 class Document:

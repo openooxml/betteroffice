@@ -29,3 +29,46 @@ test('copying a link announces it in the editor locale', async () => {
   expect(onCopy).toHaveBeenCalledWith('https://example.com/');
   await waitFor(() => expect(view.getByText(de.editor!.linkCopied!)).toBeTruthy());
 });
+
+function editing(onEdit: (text: string, href: string) => void) {
+  const view = render(
+    <LocaleProvider i18n={de}>
+      <HyperlinkPopup data={data} onNavigate={() => {}} onCopy={() => {}} onEdit={onEdit} onRemove={() => {}} onClose={() => {}} />
+    </LocaleProvider>
+  );
+  fireEvent.click(view.getByTitle(de.hyperlinkPopup!.editLink!));
+  const [text, address] = view.getAllByRole('textbox') as HTMLInputElement[];
+  return { text: text!, address: address! };
+}
+
+test('an address typed after a late frame lands in the address field and leaves the text', () => {
+  const frames: FrameRequestCallback[] = [];
+  const requestFrame = globalThis.requestAnimationFrame;
+  globalThis.requestAnimationFrame = (callback) => frames.push(callback);
+  try {
+    const onEdit = mock((_text: string, _href: string) => {});
+    const { text, address } = editing(onEdit);
+    address.focus();
+    for (const frame of frames.splice(0)) frame(0);
+    const typedInto = document.activeElement as HTMLInputElement;
+    fireEvent.change(typedInto, { target: { value: 'https://example.com/popup' } });
+    expect([text.value, address.value]).toEqual(['Example', 'https://example.com/popup']);
+    fireEvent.keyDown(typedInto, { key: 'Enter' });
+    expect(onEdit.mock.calls).toEqual([['Example', 'https://example.com/popup']]);
+    expect(typedInto).toBe(address);
+  } finally {
+    globalThis.requestAnimationFrame = requestFrame;
+  }
+});
+
+test('entering edit mode puts the caret into the text field with its content selected, before any frame', () => {
+  const requestFrame = globalThis.requestAnimationFrame;
+  globalThis.requestAnimationFrame = () => 0;
+  try {
+    const { text } = editing(() => {});
+    expect(document.activeElement).toBe(text);
+    expect([text.selectionStart, text.selectionEnd]).toEqual([0, 'Example'.length]);
+  } finally {
+    globalThis.requestAnimationFrame = requestFrame;
+  }
+});

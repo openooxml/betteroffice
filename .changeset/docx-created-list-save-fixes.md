@@ -1,0 +1,7 @@
+---
+'@betteroffice/docx': minor
+'@betteroffice/docx-native': minor
+'@betteroffice/rust-crates': minor
+---
+
+Created-list saves no longer fail or write wrong packages for differently spelled relationships or numbering parts, keep ids clear of the document's, and write only definitions in use. The list ensure keeps levels and joins no neighbour's style list. New: `list_definition_keys_in_use`, `list_definition_keys_in_use_json`, `listDefinitionKeysInUse`.

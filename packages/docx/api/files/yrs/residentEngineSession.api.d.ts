@@ -101,6 +101,10 @@ export type ResidentEngineSession = Pick<YrsSession, 'clientId' | 'applyDelete' 
     /** Seeds the opened package's comment metadata, unless the session joined from a peer's state. */
     initializeComments(recovery?: ResidentCommentRecoveryState): void;
     commentRecoveryState?(): ResidentCommentRecoveryState;
+    /** The list a paragraph goes on for Bullets or Numbering; an engine without it refuses the list toggle. */
+    ensureListDefinition?: YrsSession['ensureListDefinition'];
+    /** Whether the style a paragraph has now numbers it; without it the flag stored at load decides. */
+    paragraphStyleNumbers?: YrsSession['paragraphStyleNumbers'];
     mediaDataUrl(token: string): string | null;
     /** The pictures whose display copy is SVG, which a worker cannot decode. */
     svgMedia?(): DocxSvgMedia[];

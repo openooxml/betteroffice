@@ -340,6 +340,7 @@ describe("release workflow WOPI image job", () => {
     expect(workflow.jobs.release!.outputs).toEqual({
       publishing: "${{ steps.pending.outputs.publishing }}",
       published: "${{ steps.changesets.outputs.published }}",
+      held: "${{ steps.npm-targets.outputs.held }}",
     });
     expect(caller.if).toBe(RELEASE_WOPI_IF);
     expect(caller.if).not.toContain("||");

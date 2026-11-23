@@ -5,7 +5,8 @@ import { createPresentationCollaborationPipe, presentationCollaborationPipes } f
 import { createSessionClient } from '../../../../shared/office-session/client';
 import type { SessionTransport } from '../../../../shared/office-session/transport';
 import { SessionFailure } from '../../../../shared/office-session/types';
-import { createWorkerEditSession, sessionUnacknowledged } from '../../../../shared/office-session/commands/session';
+import { cancelWorkerEditTicket, createWorkerEditSession,
+  sessionUnacknowledged } from '../../../../shared/office-session/commands/session';
 import type { CommandTicket } from '../../../../shared/office-session/commands/types';
 import type { PptxFontFace } from '../types';
 import type { DefaultFontInstallation, DefaultFontInstallRequest, DefaultFontPayload } from '../../../../shared/pptxDefaultFonts';
@@ -299,7 +300,7 @@ async function createCommandClient(
   const unpipe = rpc.on('collaborationPipe', receivePipe);
   const unfailure = rpc.onFailure(fail);
   const fence = (seq = sentThroughSeq) => ({ ...identity, seq });
-  type SharedPayload = { intent: PresentationCommandIntent; basis: PresentationCommandBasis };
+  type SharedPayload = { intent: PresentationCommandIntent; basis: PresentationCommandBasis; waitForAfter: boolean };
   const replies = new Map<number, PresentationCommandAck>();
   const unacknowledged = new Map<number, PresentationPendingIntent>();
   const tickets = new Map<number, CommandTicket>();
@@ -318,9 +319,24 @@ async function createCommandClient(
             if (error) return Promise.reject(error);
             sentThroughSeq = envelope.seq;
             notify(sentListeners, undefined);
-            const { basis, intent: draft } = envelope.payload;
+            let { basis, intent: draft } = envelope.payload;
             const reference = 'at' in draft.payload ? draft.payload.at : undefined;
             const afterSeq = envelope.afterSeq ?? (reference?.source === 'afterSeq' ? reference.seq : undefined);
+            if (afterSeq !== undefined && envelope.payload.waitForAfter &&
+              (draft.kind === 'selectObject' && 'shapeId' in draft.payload ||
+                draft.kind === 'setShapeRect' && 'delta' in draft.payload)) {
+              const frame = replies.get(afterSeq)?.frame ??
+                (afterSeq === latestSharedAck!.throughSeq ? latestSharedAck!.frame?.payload : undefined);
+              const previous = draft.payload.frame;
+              if (frame && frame.coversThroughSeq === afterSeq && frame.slideId === previous.slideId &&
+                frame.documentEpoch === previous.documentEpoch && frame.incarnation === previous.incarnation) {
+                const { slideId, slideRevision, coversThroughSeq, documentEpoch, incarnation } = frame;
+                draft = { ...draft, payload: { ...draft.payload, frame: {
+                  slideId, slideRevision, coversThroughSeq, documentEpoch, incarnation,
+                } } } as typeof draft;
+                basis = { epoch: documentEpoch, version: frame.version };
+              }
+            }
             const intent = afterSeq === undefined ? draft : withPredecessor(draft, afterSeq);
             const command = adapter!.envelope({ ...identity, seq: envelope.seq, basis, ...intent,
               ...(afterSeq === undefined ? {} : { afterSeq }) } as PresentationCommandEnvelope);
@@ -359,15 +375,17 @@ async function createCommandClient(
     requestFullFrame: async () => ({ ...latestSharedAck!, outcomes: [], frame: undefined }),
   }) : undefined;
   const sharedInput: PresentationSharedInput | undefined = editSession && {
+    cancel: (ticket) => cancelWorkerEditTicket(editSession, ticket),
     subscribeSent(listener) {
       if (!disposed) sentListeners.add(listener);
       return () => { sentListeners.delete(listener); };
     },
-    submit(intent, basis, after) {
+    submit(intent, basis, after, waitForAfter = false) {
       const reference = 'at' in intent.payload ? intent.payload.at : undefined;
       const predecessor = after ?? (reference?.source === 'afterSeq' ? tickets.get(reference.seq) : undefined);
-      const ticket = editSession.submit(intent.kind, { intent, basis }, {
+      const ticket = editSession.submit(intent.kind, { intent, basis, waitForAfter }, {
         ...(predecessor ? { after: predecessor } : {}),
+        ...(waitForAfter ? { waitForAfter: true } : {}),
       });
       if (ticket.seq !== undefined) {
         tickets.set(ticket.seq, ticket);
@@ -477,6 +495,16 @@ async function createCommandClient(
         install(result);
         return result;
       } catch (error) { return reject(error, position.seq); }
+    },
+    async previewShapeRect(frame, target, rect) {
+      const error = unavailable();
+      if (error) throw error;
+      const bytes = await rpc.call.previewShapeRect({
+        ...identity, basis: { epoch: state.epoch, version: state.version }, frame, target, rect,
+      });
+      const retired = unavailable();
+      if (retired) throw retired;
+      return JSON.parse(new TextDecoder().decode(bytes));
     },
     thumbnail(slideId, knownRevision) {
       const error = unavailable();

@@ -24439,6 +24439,10 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             ("comments", r#"<w:commentRangeStart w:id="0"/><w:r><w:t>Comment</w:t></w:r><w:commentRangeEnd w:id="0"/>"#.to_owned()),
             ("checkbox", r#"<w:sdt><w:sdtPr><w:id w:val="4"/><w14:checkbox><w14:checked w14:val="0"/></w14:checkbox></w:sdtPr><w:sdtContent><w:r><w:t>Box</w:t></w:r></w:sdtContent></w:sdt>"#.to_owned()),
             ("note", r#"<w:r><w:footnoteReference w:id="1"/></w:r>"#.to_owned()),
+            ("dir direction", r#"<w:dir w:val="rtl"><w:r><w:t>Inner</w:t></w:r></w:dir>"#.to_owned()),
+            ("bdo direction", r#"<w:bdo w:val="rtl"><w:r><w:t>Inner</w:t></w:r></w:bdo>"#.to_owned()),
+            ("nested direction", r#"<w:bdo w:val="ltr"><w:dir w:val="rtl"><w:r><w:t>Inner</w:t></w:r></w:dir></w:bdo>"#.to_owned()),
+            ("link direction", r#"<w:hyperlink w:anchor="target"><w:dir w:val="rtl"><w:r><w:t>Inner</w:t></w:r></w:dir></w:hyperlink>"#.to_owned()),
         ];
         for (name, content) in contents {
             let blocker = if content.starts_with("<w:pPr>") {
@@ -24468,6 +24472,17 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             }
             for paragraph in 0..5 {
                 let (engine, request) = local_patch_laid_out(&package.bytes(), 9613, enabled);
+                if name.ends_with("direction") {
+                    let texts: Vec<_> = engine
+                        .doc()
+                        .paragraphs("body")
+                        .unwrap()
+                        .into_iter()
+                        .map(|paragraph| paragraph.text)
+                        .collect();
+                    assert_eq!(texts[1], "BlockInner", "{name}");
+                    assert_eq!(texts[3], "BlockInner", "{name}");
+                }
                 if name == "duplicate" {
                     lowering_fixture::share_key(engine.doc(), "body", "10000004", "10000002");
                 } else if name == "sequence metadata" {

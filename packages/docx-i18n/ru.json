@@ -542,6 +542,12 @@
     "tableInserted": "Вставлена таблица",
     "tableDeleted": "Удалена таблица"
   },
+  "pasteOptions": {
+    "button": "Параметры вставки (Ctrl)",
+    "keepSource": "Сохранить форматирование источника",
+    "merge": "Объединить форматирование",
+    "textOnly": "Сохранить только текст"
+  },
   "contextMenu": {
     "ariaLabel": "Меню действий ИИ",
     "textMenuAriaLabel": "Меню редактирования текста",
@@ -587,6 +593,7 @@
     "noDocumentLoaded": "Документ не загружен",
     "failedToLoad": "Не удалось открыть этот документ",
     "failedToLoadDescription": "Возможно, файл повреждён или содержит то, что этот редактор пока не может прочитать.",
+    "recoveryFailedDescription": "Редактор прекратил работу и не смог восстановить ваши последние изменения. Сам файл не повреждён.",
     "failedToLoadDamaged": "Файл повреждён или не является полным документом Word.",
     "failedToLoadUnsupported": "В этом документе есть то, что этот редактор пока не умеет читать.",
     "editorUnavailable": "Не удалось загрузить редактор",
@@ -874,6 +881,7 @@
     "toolbarGroup": "Плагины",
     "panelTabs": "Панели плагинов",
     "collapsePanel": "Свернуть: {title}",
-    "expandPanel": "Развернуть: {title}"
+    "expandPanel": "Развернуть: {title}",
+    "miniToolbar": "Форматирование выделения"
   }
 }

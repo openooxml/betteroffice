@@ -1,6 +1,7 @@
 import type { ProgressiveFontSpec } from '../../yrs/residentProgressiveFonts';
 import type { CompatibilityFlags } from '../../docx/settingsParser';
 import type { FontDecoder } from '../../../../../shared/office-session/fontDecoder';
+import { importProgressiveFonts } from '../../../../../shared/office-session/fontModules';
 import { baseLatinAlias, baseLatinCandidate, charactersFromBits, symbolFamily, type FontCoverage } from './fontCoverage';
 import {
   excludeHostedFontFamilies,
@@ -140,7 +141,7 @@ export function createRustMeasureSource(options: {
       if (current === generation) implicit = isImplicitFontProvider(provider);
       return provider;
     }), standInTail: options.standIns === true, progressive: options.progressive
-      ? async (slices) => import('@betteroffice/fonts/progressive').then(async ({ openSlicedFace, sliceSourceOf }) => {
+      ? async (slices) => importProgressiveFonts().then(async ({ openSlicedFace, sliceSourceOf }) => {
         const face = await openSlicedFace(slices as Parameters<typeof openSlicedFace>[0]);
         if (!sliceSourceOf(face)) throw new Error('A sliced face opened without file URLs cannot load its outlines in the worker');
         return face;
@@ -153,7 +154,7 @@ export function createRustMeasureSource(options: {
     async progressiveFonts() {
       const specs: ProgressiveFontSpec[] = [];
       if (registry.progressiveFaces().size === 0) return specs;
-      const { sliceSourceOf } = await import('@betteroffice/fonts/progressive');
+      const { sliceSourceOf } = await importProgressiveFonts();
       for (const [slot, face] of registry.progressiveFaces()) {
         const source = await sliceSourceOf(face as Parameters<typeof sliceSourceOf>[0]);
         if (source) specs.push({ slot, source });

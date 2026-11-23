@@ -186,6 +186,7 @@ export function createPptxWorkerSession(
       pendingIntents: () => opened.pendingIntents?.() ?? [],
       checkpoint: (options) => perform(() => opened.checkpoint!(options)),
       preparePicture: (bytes) => perform(() => opened.preparePicture!(bytes)),
+      previewShapeRect: (frame, target, rect) => perform(() => opened.previewShapeRect(frame, target, rect)),
       thumbnail: (slideId, knownRevision) => perform(() => opened.thumbnail(slideId, knownRevision)),
       subscribe: (listener) => opened.subscribe(listener),
       subscribeFrame: (listener) => opened.subscribeFrame(listener),
@@ -201,10 +202,11 @@ export function createPptxWorkerSession(
     if (pipe) presentationCollaborationPipes.set(facade, pipe);
     const sharedInput = presentationSharedInputs.get(opened);
     if (sharedInput) presentationSharedInputs.set(facade, {
+      cancel: (ticket) => sharedInput.cancel?.(ticket) ?? false,
       subscribeSent: (listener) => sharedInput.subscribeSent(listener),
-      submit(intent, basis, after) {
+      submit(intent, basis, after, waitForAfter) {
         current();
-        const submission = sharedInput.submit(intent, basis, after);
+        const submission = sharedInput.submit(intent, basis, after, waitForAfter);
         return { ticket: submission.ticket, operation: perform(() => submission.operation) };
       },
     });

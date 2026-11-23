@@ -542,6 +542,12 @@
     "tableInserted": "Eklenen tablo",
     "tableDeleted": "Silinen tablo"
   },
+  "pasteOptions": {
+    "button": "Yapıştırma Seçenekleri (Ctrl)",
+    "keepSource": "Kaynak Biçimlendirmesini Koru",
+    "merge": "Biçimlendirmeyi Birleştir",
+    "textOnly": "Yalnızca Metni Koru"
+  },
   "contextMenu": {
     "ariaLabel": "Yapay zekâ işlemleri menüsü",
     "textMenuAriaLabel": "Metin düzenleme menüsü",
@@ -587,6 +593,7 @@
     "noDocumentLoaded": "Yüklü belge yok",
     "failedToLoad": "Belge yüklenemedi",
     "failedToLoadDescription": "Dosya hasarlı olabilir veya bu düzenleyicinin henüz okuyamadığı bir şey kullanıyor olabilir.",
+    "recoveryFailedDescription": "Düzenleyici durdu ve son değişikliklerinizi geri yükleyemedi. Dosyanın kendisi zarar görmedi.",
     "failedToLoadDamaged": "Dosya hasarlı veya eksiksiz bir Word belgesi değil.",
     "failedToLoadUnsupported": "Bu belge, bu düzenleyicinin henüz okuyamadığı bir şey kullanıyor.",
     "editorUnavailable": "Düzenleyici yüklenemedi",
@@ -874,6 +881,7 @@
     "toolbarGroup": "Eklentiler",
     "panelTabs": "Eklenti panelleri",
     "collapsePanel": "{title} daralt",
-    "expandPanel": "{title} genişlet"
+    "expandPanel": "{title} genişlet",
+    "miniToolbar": "Seçim biçimlendirmesi"
   }
 }

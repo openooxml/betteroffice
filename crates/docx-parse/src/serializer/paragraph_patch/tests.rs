@@ -1885,6 +1885,7 @@ fn model_run(text: &str) -> String {
         formatting: None,
         property_changes: None,
         content,
+        direction_scopes: Vec::new(),
     };
     let mut context =
         crate::serializer::SerializerContext::new(&crate::serializer::s10::SerializerDeterminism {

@@ -542,6 +542,12 @@
     "tableInserted": "已插入表格",
     "tableDeleted": "已删除表格"
   },
+  "pasteOptions": {
+    "button": "粘贴选项 (Ctrl)",
+    "keepSource": "保留源格式",
+    "merge": "合并格式",
+    "textOnly": "仅保留文本"
+  },
   "contextMenu": {
     "ariaLabel": "AI 操作菜单",
     "textMenuAriaLabel": "文本编辑菜单",
@@ -587,6 +593,7 @@
     "noDocumentLoaded": "未加载文档",
     "failedToLoad": "文档加载失败",
     "failedToLoadDescription": "文件可能已损坏，或使用了此编辑器尚无法读取的内容。",
+    "recoveryFailedDescription": "编辑器已停止运行，未能恢复您最近的更改。文件本身没有损坏。",
     "failedToLoadDamaged": "文件已损坏,或不是完整的 Word 文档。",
     "failedToLoadUnsupported": "此文档使用了此编辑器尚无法读取的内容。",
     "editorUnavailable": "编辑器无法加载",
@@ -874,6 +881,7 @@
     "toolbarGroup": "插件",
     "panelTabs": "插件面板",
     "collapsePanel": "折叠{title}",
-    "expandPanel": "展开{title}"
+    "expandPanel": "展开{title}",
+    "miniToolbar": "所选内容格式"
   }
 }

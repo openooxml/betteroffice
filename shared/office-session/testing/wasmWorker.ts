@@ -71,6 +71,7 @@ export async function sessionWasmFactory<Client>(clientPath: string, workerPath:
                 return { font: (bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)).slice().buffer };
               };
               export const presentationDisplayListJson = () => { throw new Error('presentationDisplayListJson is not stubbed'); };
+              export const presentationShapeRectPreview = () => { throw new Error('presentationShapeRectPreview is not stubbed'); };
               export const presentationMetadata = () => ({ slides: [], size: { width: 0, height: 0 } });
               export const presentationStoryFormatting = () => { throw new Error('presentationStoryFormatting is not stubbed'); };
               export const presentationDeleteTextJoiningParagraphs = () => { throw new Error('presentationDeleteTextJoiningParagraphs is not stubbed'); };

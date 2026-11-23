@@ -542,6 +542,12 @@
     "tableInserted": "Wstawiono tabelę",
     "tableDeleted": "Usunięto tabelę"
   },
+  "pasteOptions": {
+    "button": "Opcje wklejania (Ctrl)",
+    "keepSource": "Zachowaj formatowanie źródłowe",
+    "merge": "Scal formatowanie",
+    "textOnly": "Zachowaj tylko tekst"
+  },
   "contextMenu": {
     "ariaLabel": "Menu akcji AI",
     "textMenuAriaLabel": "Menu edycji tekstu",
@@ -587,6 +593,7 @@
     "noDocumentLoaded": "Nie załadowano dokumentu",
     "failedToLoad": "Nie udało się załadować dokumentu",
     "failedToLoadDescription": "Plik może być uszkodzony albo zawiera elementy, których ten edytor jeszcze nie potrafi odczytać.",
+    "recoveryFailedDescription": "Edytor przestał działać i nie udało się przywrócić ostatnich zmian. Sam plik nie jest uszkodzony.",
     "failedToLoadDamaged": "Plik jest uszkodzony lub nie jest kompletnym dokumentem Word.",
     "failedToLoadUnsupported": "Ten dokument zawiera element, którego ten edytor nie potrafi jeszcze odczytać.",
     "editorUnavailable": "Nie udało się załadować edytora",
@@ -874,6 +881,7 @@
     "toolbarGroup": "Wtyczki",
     "panelTabs": "Panele wtyczek",
     "collapsePanel": "Zwiń {title}",
-    "expandPanel": "Rozwiń {title}"
+    "expandPanel": "Rozwiń {title}",
+    "miniToolbar": "Formatowanie zaznaczenia"
   }
 }

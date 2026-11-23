@@ -79,10 +79,7 @@ impl EditingDoc {
     /// in story then ordinal order: through the cells of complete tables and block controls'
     /// stories. A root the document lacks reads as empty. `None` when a walk cannot finish.
     pub(crate) fn unavailable_tables_from(&self, roots: &[String]) -> Option<Vec<TableLocator>> {
-        let mut found = Vec::new();
-        for root in roots {
-            found.extend(self.unavailable_tables_under(root).ok()?);
-        }
+        let mut found = self.unavailable_tables_under(roots).ok()?;
         found.sort_by(|left, right| {
             (left.story.as_str(), left.table_index).cmp(&(right.story.as_str(), right.table_index))
         });
@@ -95,6 +92,7 @@ impl EditingDoc {
 mod tests {
     use yrs::{Text, Transact};
 
+    use crate::empty_cells::LIVE_TABLE_SCANS;
     use crate::{CellLoc, EditCtx, EditingDoc, Position, TableLocator};
 
     fn ctx() -> EditCtx {
@@ -215,6 +213,42 @@ mod tests {
         for key in super::PAYLOAD_KEYS {
             yrs::Map::remove(&table, &mut txn, key);
         }
+    }
+
+    #[test]
+    fn missing_comment_roots_share_at_most_one_live_table_scan() {
+        let doc = EditingDoc::new(83);
+        doc.create_story("body", "OneTwoThree", "Normal", "left")
+            .unwrap();
+        for offset in [6, 3] {
+            doc.split_paragraph(&ctx(), Position::new("body", offset), None)
+                .unwrap();
+        }
+        let mut roots = vec!["body".to_owned()];
+        roots.extend((0..50).map(|id| format!("comment:{id}")));
+        let scans = || LIVE_TABLE_SCANS.with(std::cell::Cell::get);
+
+        let start = scans();
+        assert_eq!(doc.unavailable_tables_from(&roots), Some(Vec::new()));
+        assert!(scans() - start <= 1);
+
+        for _ in 0..2 {
+            doc.insert_table(&ctx(), Position::new("body", 0), 1, 1)
+                .unwrap();
+        }
+        let start = scans();
+        assert_eq!(doc.unavailable_tables_from(&roots[..1]), Some(Vec::new()));
+        assert_eq!(scans() - start, 0);
+
+        let start = scans();
+        assert_eq!(doc.unavailable_tables_from(&roots), Some(Vec::new()));
+        assert!(scans() - start <= 1);
+
+        strip(&doc, "body");
+        assert_eq!(
+            doc.unavailable_tables_from(&roots),
+            Some(vec![TableLocator::new("body", 0)])
+        );
     }
 
     #[test]

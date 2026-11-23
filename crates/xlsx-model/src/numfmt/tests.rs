@@ -443,6 +443,34 @@ fn fractional_seconds() {
 }
 
 #[test]
+fn fractional_seconds_past_milliseconds_render_zeros() {
+    assert_eq!(fv(time_serial(1.2346), "ss.000"), "01.235");
+    assert_eq!(fv(time_serial(1.2346), "ss.0000"), "01.2350");
+    for zeros in [39, 128] {
+        let digits = "0".repeat(zeros);
+        let tail = "0".repeat(zeros - 1);
+        assert_eq!(
+            fv(time_serial(1.5), &format!("ss.{digits}")),
+            format!("01.5{tail}")
+        );
+        assert_eq!(
+            fv(time_serial(90.5), &format!("[ss].{digits}")),
+            format!("90.5{tail}")
+        );
+    }
+    let huge = i64::MAX as f64 - 262_144.0;
+    for code in [
+        "ss.000",
+        "ss.000000000000000000",
+        "[h]:mm:ss.0",
+        "yyyy-mm-dd",
+    ] {
+        assert_eq!(fv(huge, code), "#######");
+        assert_eq!(fv04(huge, code), "#######");
+    }
+}
+
+#[test]
 fn colors_named_and_indexed() {
     assert_eq!(color(5.0, "[Red]0"), Some("#FF0000".to_string()));
     assert_eq!(color(5.0, "[Blue]0"), Some("#0000FF".to_string()));

@@ -25,8 +25,8 @@ Node.js 20.16 or 22.3 and later, Bun or Deno.
 
 ## Native bindings, Rust and Python
 
-The Rust format crates bundle all three packs by default and resolve faces in the same order, with
-nothing fetched; see the [Rust guide](/docs/rust) to leave packs out or load them from your own
+The Rust format crates bundle all three packs by default and resolve faces from the same sources
+(the XLSX crate has no embedded step: a workbook embeds no fonts), with nothing fetched; see the [Rust guide](/docs/rust) to leave packs out or load them from your own
 location. `@betteroffice/pptx-native` installs the npm packs and reads each face from disk;
 `@betteroffice/docx-native` uses the same font manager as `@betteroffice/docx`. The
 [Python packages](/docs/python) install the packs as data wheels and read them from disk;

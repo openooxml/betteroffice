@@ -44,7 +44,7 @@ docx-edit = { package = "betteroffice-docx-edit", path = "../../crates/docx-edit
 docx-layout = { package = "betteroffice-docx-layout", path = "../../crates/docx-layout", features = ["base-latin"], optional = true }
 docx-parse = { package = "betteroffice-docx-parse", path = "../../crates/docx-parse", default-features = false, optional = true }
 docx-raster = { package = "betteroffice-docx-raster", path = "../../crates/docx-raster", optional = true }
-futures-util = { version = "=0.3.33", features = ["sink"] }
+futures-util = { version = "=0.3.34", features = ["sink"] }
 getrandom = "=0.4.3"
 image = { version = "=0.25.10", default-features = false, features = ["bmp", "gif", "jpeg", "png", "tiff", "webp"] }
 ooxml-drawingml = { package = "betteroffice-drawingml", path = "../../crates/ooxml-drawingml", optional = true, features = ["tiff"] }
@@ -56,7 +56,7 @@ rustybuzz = "=0.20.1"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.154"
 sha2 = "=0.10.9"
-tokio = { version = "=1.53.1", features = ["macros", "rt", "sync", "time"] }
+tokio = { version = "=1.54.1", features = ["macros", "rt", "sync", "time"] }
 tokio-tungstenite = { version = "=0.30.0", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 url = "=2.5.8"
 vello = "=0.10.0"

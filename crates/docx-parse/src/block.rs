@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::chart::ChartPartsMap;
 use crate::inline::{
-    ComplexField, InlineNode, MathEquation, MathType, Run, RunContent, SdtProperties,
-    StructuredFieldContent, inline_holds_field, parse_sdt_properties,
+    ComplexField, DirectionScope, InlineNode, MathEquation, MathType, Run, RunContent,
+    SdtProperties, StructuredFieldContent, inline_holds_field, parse_sdt_properties,
 };
 use crate::media::MediaMap;
 use crate::numbering::NumberingMap;
@@ -565,7 +565,7 @@ impl StoryParser<'_, '_> {
             return Ok(());
         }
         let mut run_index = 0usize;
-        for run in transparent_children(source, false)
+        for run in direction_scoped_elements(source)
             .into_iter()
             .filter(|child| child.local_name() == "r")
         {
@@ -802,6 +802,107 @@ fn visit_transparent_children<'a>(
             visit(path, child);
         }
         path.pop();
+    }
+}
+
+/// `parent`'s inline children in document order, descending through `w:customXml`,
+/// `w:smartTag`, `w:dir` and `w:bdo`, each with the `w:dir`/`w:bdo` scopes around it inside
+/// `parent`, outermost first.
+pub(crate) fn direction_scoped_children<'a>(
+    parent: &'a XmlElement,
+    scope_budget: &mut impl DirectionScopeBudget,
+) -> Result<Vec<(Vec<DirectionScope>, &'a XmlElement)>, ParseError> {
+    let mut children = Vec::new();
+    visit_direction_scoped_children(parent, &mut Vec::new(), scope_budget, &mut children)?;
+    Ok(children)
+}
+
+/// The scope ids of a walk and the budget its copies of scope data are charged to.
+pub(crate) trait DirectionScopeBudget {
+    fn next_id(&mut self) -> u32;
+    fn charge_copy(&mut self, scopes: &[DirectionScope]) -> Result<(), ParseError>;
+}
+
+/// Ids and charges from the document's parse budget.
+pub(crate) struct BudgetScopes<'b, 'l> {
+    pub(crate) budget: &'b mut ParseBudget<'l>,
+    pub(crate) part: &'b str,
+}
+
+impl DirectionScopeBudget for BudgetScopes<'_, '_> {
+    fn next_id(&mut self) -> u32 {
+        self.budget.next_direction_scope()
+    }
+
+    fn charge_copy(&mut self, scopes: &[DirectionScope]) -> Result<(), ParseError> {
+        self.budget
+            .charge_direction_scope_bytes(crate::inline::scope_copy_bytes(scopes), self.part)
+    }
+}
+
+/// Ids counted from zero, with copies charged to the document's parse budget.
+pub(crate) struct LocalScopes<'b, 'l> {
+    pub(crate) next: u32,
+    pub(crate) budget: &'b ParseBudget<'l>,
+    pub(crate) part: &'b str,
+}
+
+impl DirectionScopeBudget for LocalScopes<'_, '_> {
+    fn next_id(&mut self) -> u32 {
+        self.next += 1;
+        self.next - 1
+    }
+
+    fn charge_copy(&mut self, scopes: &[DirectionScope]) -> Result<(), ParseError> {
+        self.budget
+            .charge_direction_scope_bytes(crate::inline::scope_copy_bytes(scopes), self.part)
+    }
+}
+
+fn visit_direction_scoped_children<'a>(
+    parent: &'a XmlElement,
+    scopes: &mut Vec<DirectionScope>,
+    scope_budget: &mut impl DirectionScopeBudget,
+    children: &mut Vec<(Vec<DirectionScope>, &'a XmlElement)>,
+) -> Result<(), ParseError> {
+    for child in parent.child_elements() {
+        if child.matches_name("w", "customXml") || child.matches_name("w", "smartTag") {
+            visit_direction_scoped_children(child, scopes, scope_budget, children)?;
+        } else if (child.matches_name("w", "dir") || child.matches_name("w", "bdo"))
+            && let Some(scope) = crate::inline::direction_scope(child, scope_budget.next_id())
+        {
+            scopes.push(scope);
+            visit_direction_scoped_children(child, scopes, scope_budget, children)?;
+            scopes.pop();
+        } else {
+            if !scopes.is_empty() {
+                scope_budget.charge_copy(scopes)?;
+            }
+            children.push((scopes.clone(), child));
+        }
+    }
+    Ok(())
+}
+
+/// `parent`'s inline children in document order, descending as `direction_scoped_children`
+/// does, without their scopes.
+pub(crate) fn direction_scoped_elements(parent: &XmlElement) -> Vec<&XmlElement> {
+    let mut children = Vec::new();
+    visit_direction_scoped_elements(parent, &mut children);
+    children
+}
+
+fn visit_direction_scoped_elements<'a>(parent: &'a XmlElement, children: &mut Vec<&'a XmlElement>) {
+    for child in parent.child_elements() {
+        if child.matches_name("w", "customXml")
+            || child.matches_name("w", "smartTag")
+            || ((child.matches_name("w", "dir") || child.matches_name("w", "bdo"))
+                && crate::inline::direction_scope(child, 0).is_some())
+        {
+            visit_direction_scoped_elements(child, children);
+        } else {
+            children.push(child);
+        }
     }
 }
 

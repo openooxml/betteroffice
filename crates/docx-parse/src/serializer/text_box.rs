@@ -1,5 +1,6 @@
 use crate::block::BlockContent;
 use crate::shape::Shape;
+use crate::text_box::content_paths;
 use crate::xml::{ParseBudget, ParseError, ParseLimits, XmlElement, XmlNode, parse_xml};
 
 use super::context::SerializerContext;
@@ -41,18 +42,6 @@ fn at_path<'a>(element: &'a mut XmlElement, path: &[u32]) -> Option<&'a mut XmlE
         })
         .nth(index as usize)?;
     at_path(child, rest)
-}
-
-fn content_paths(element: &XmlElement, path: &mut Vec<u32>, paths: &mut Vec<Vec<u32>>) {
-    if element.name == "w:txbxContent" {
-        paths.push(path.clone());
-        return;
-    }
-    for (index, child) in element.child_elements().enumerate() {
-        path.push(index as u32);
-        content_paths(child, path, paths);
-        path.pop();
-    }
 }
 
 /// Whether the model still says what its retained source says, apart from text and media. A

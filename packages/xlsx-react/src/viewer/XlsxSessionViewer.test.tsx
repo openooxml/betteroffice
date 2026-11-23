@@ -579,8 +579,9 @@ describe('workbook session viewer', () => {
     const worker = Object.assign(new EventTarget(), {
       postMessage: mock((_message: unknown) => {}), terminate: mock(() => {}),
     });
+    const added = spyOn(worker, 'addEventListener');
     const removed = spyOn(worker, 'removeEventListener');
-    restorers.push(() => removed.mockRestore());
+    restorers.push(() => added.mockRestore(), () => removed.mockRestore());
     let opening!: Promise<WorkbookSession>;
     open(session().viewer).mockImplementationOnce((bytes, options) => {
       opening = openSession(bytes, { ...options, worker: () => worker as unknown as Worker });
@@ -593,9 +594,11 @@ describe('workbook session viewer', () => {
       view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen onReady={ready} onError={errors} />);
     });
     expect(worker.postMessage).toHaveBeenCalledTimes(1);
+    expect(added.mock.calls.map(([type]) => type)).toEqual(['message', 'message', 'error', 'messageerror']);
     view.unmount();
     expect(worker.terminate).toHaveBeenCalledTimes(1);
-    expect(removed.mock.calls.map(([type]) => type)).toEqual(['message', 'error', 'messageerror']);
+    expect(removed.mock.calls).toHaveLength(added.mock.calls.length);
+    for (const listener of added.mock.calls) expect(removed.mock.calls).toContainEqual(listener);
     await act(async () => { await opening.catch(() => {}); });
     expect(ready).not.toHaveBeenCalled();
     expect(errors).not.toHaveBeenCalled();

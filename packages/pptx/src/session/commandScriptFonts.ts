@@ -1,4 +1,5 @@
 import type { BundledFontScript } from '@betteroffice/fonts';
+import { importFonts } from '../../../../shared/office-session/fontModules';
 import type { DefaultFontFace } from '../../../../shared/pptxDefaultFonts';
 
 function hasFamily(bytes: ArrayBuffer, family: string): boolean {
@@ -37,7 +38,7 @@ function hasFamily(bytes: ArrayBuffer, family: string): boolean {
 export async function scriptFontFace(
   script: string, bold: boolean, italic: boolean, bytes: ArrayBuffer,
 ): Promise<DefaultFontFace | undefined> {
-  const { resolveScriptFallbackFace } = await import('@betteroffice/fonts');
+  const { resolveScriptFallbackFace } = await importFonts();
   const face = resolveScriptFallbackFace(script as BundledFontScript, bold, italic)
     ?? resolveScriptFallbackFace(script as BundledFontScript, false, false);
   if (!face || face.script !== script || !hasFamily(bytes, face.family)) return undefined;

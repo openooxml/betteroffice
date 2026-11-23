@@ -510,6 +510,91 @@ struct FragmentTable {
 struct FragmentBuild {
     created_story_ids: Vec<String>,
     new_para_ids: Vec<String>,
+    revision_ids: HashMap<String, String>,
+}
+
+impl FragmentBuild {
+    fn attrs<T: ReadTxn>(&mut self, doc: &EditingDoc, txn: &T, attrs: &Attrs) -> Attrs {
+        attrs
+            .iter()
+            .map(|(key, value)| (key.clone(), self.value(doc, txn, key, value)))
+            .collect()
+    }
+
+    fn properties<T: ReadTxn>(
+        &mut self,
+        doc: &EditingDoc,
+        txn: &T,
+        properties: &HashMap<String, Any>,
+    ) -> HashMap<String, Any> {
+        properties
+            .iter()
+            .map(|(key, value)| (key.clone(), self.value(doc, txn, key, value)))
+            .collect()
+    }
+
+    fn value<T: ReadTxn>(&mut self, doc: &EditingDoc, txn: &T, key: &str, value: &Any) -> Any {
+        let mut value = value.clone();
+        self.remap_revisions(doc, txn, key, &mut value);
+        value
+    }
+
+    fn remap_revisions<T: ReadTxn>(
+        &mut self,
+        doc: &EditingDoc,
+        txn: &T,
+        key: &str,
+        value: &mut Any,
+    ) {
+        if matches!(
+            key,
+            "ins"
+                | "del"
+                | "rPrChange"
+                | "pPrChange"
+                | "pPrIns"
+                | "pPrDel"
+                | "trIns"
+                | "trDel"
+                | "cellMarker"
+        ) && let Some((id, ..)) = crate::queries::revision_parts(value)
+            && let Any::Map(values) = value
+        {
+            let values = Arc::make_mut(values);
+            let identity = match values.get("info") {
+                Some(Any::Map(info)) => info.as_ref(),
+                _ => values,
+            };
+            let key = if identity.contains_key("id") {
+                "id"
+            } else {
+                "revisionId"
+            };
+            let id = self
+                .revision_ids
+                .entry(id)
+                .or_insert_with(|| doc.next_id(txn));
+            let id = Any::from(id.as_str());
+            if let Some(Any::Map(info)) = values.get_mut("info") {
+                Arc::make_mut(info).insert(key.to_owned(), id);
+            } else {
+                values.insert(key.to_owned(), id);
+            }
+        }
+        match value {
+            Any::Array(values) => {
+                for value in Arc::make_mut(values) {
+                    self.remap_revisions(doc, txn, key, value);
+                }
+            }
+            Any::Map(values) => {
+                for (key, value) in Arc::make_mut(values) {
+                    self.remap_revisions(doc, txn, key, value);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 fn json_shaped(value: &Value) -> bool {
@@ -2120,7 +2205,7 @@ impl EditingDoc {
                 let rowspan = any_usize(cell.tc_pr.get("rowspan"), 1, "rowspan")?;
                 let colspan = any_usize(cell.tc_pr.get("colspan"), 1, "colspan")?;
                 let mut data = CellData {
-                    tc_pr: cell.tc_pr.clone(),
+                    tc_pr: build.properties(self, txn, &cell.tc_pr),
                     story: story_id,
                 };
                 set_spans(&mut data, rowspan, colspan);
@@ -2135,12 +2220,13 @@ impl EditingDoc {
             let mut tr_pr = fresh_row_properties(row.tr_pr.clone());
             tr_pr.remove(TR_INS);
             tr_pr.remove(TR_DEL);
+            let mut tr_pr = build.properties(self, txn, &tr_pr);
             if let Some(stamp) = revision {
                 tr_pr.insert(TR_INS.to_owned(), stamp.clone());
             }
             table_rows.push(RowData { tr_pr, cells });
         }
-        let mut tbl_pr = valid.tbl_pr.clone();
+        let mut tbl_pr = build.properties(self, txn, &valid.tbl_pr);
         if tbl_pr.is_empty() {
             tbl_pr.insert("width".to_owned(), Any::Number(9360.0));
             tbl_pr.insert("widthType".to_owned(), Any::from("dxa"));
@@ -2176,36 +2262,37 @@ impl EditingDoc {
         let mut at = 0u32;
         let mut nested = 0usize;
         for segment in content {
+            let attrs = match segment {
+                FragmentSegment::Text(part) => &part.attrs,
+                FragmentSegment::TabBreak(part) => &part.attrs,
+                FragmentSegment::Pilcrow(part) => &part.attrs,
+                FragmentSegment::Table(part) => &part.attrs,
+            };
+            let attrs = build.attrs(self, txn, attrs);
             match segment {
                 FragmentSegment::Text(part) => {
-                    story.insert_with_attributes(txn, at, part.text.as_str(), part.attrs.clone());
+                    story.insert_with_attributes(txn, at, part.text.as_str(), attrs);
                     at += part.text.encode_utf16().count() as u32;
                 }
                 FragmentSegment::TabBreak(part) => {
-                    let map = story.insert_embed_with_attributes(
-                        txn,
-                        at,
-                        MapPrelim::default(),
-                        part.attrs.clone(),
-                    );
+                    let map =
+                        story.insert_embed_with_attributes(txn, at, MapPrelim::default(), attrs);
                     map.insert(txn, KIND_KEY, part.kind);
                     for (key, value) in &part.payload {
-                        map.insert(txn, key.clone(), value.clone());
+                        let value = build.value(self, txn, key, value);
+                        map.insert(txn, key.clone(), value);
                     }
                     at += 1;
                 }
                 FragmentSegment::Pilcrow(part) => {
                     let key = ids.session_key(self, txn);
-                    let map = story.insert_embed_with_attributes(
-                        txn,
-                        at,
-                        MapPrelim::default(),
-                        part.attrs.clone(),
-                    );
+                    let map =
+                        story.insert_embed_with_attributes(txn, at, MapPrelim::default(), attrs);
                     map.insert(txn, KIND_KEY, PILCROW_KIND);
                     map.insert(txn, PARA_ID, key.as_str());
                     for (prop_key, prop_value) in &part.props {
-                        map.insert(txn, prop_key.clone(), prop_value.clone());
+                        let value = build.value(self, txn, prop_key, prop_value);
+                        map.insert(txn, prop_key.clone(), value);
                     }
                     ids.bind(txn, &map, &key, ParagraphIdOrigin::Authored);
                     build.new_para_ids.push(key);
@@ -2214,10 +2301,8 @@ impl EditingDoc {
                 FragmentSegment::Table(part) => {
                     let slot = fresh_table_slot(used, story_id, nested);
                     nested += 1;
-                    let mut attrs = insertion_attrs(None, None);
-                    for (key, value) in part.attrs.iter() {
-                        attrs.insert(key.clone(), value.clone());
-                    }
+                    let mut embed_attrs = insertion_attrs(None, None);
+                    embed_attrs.extend(attrs);
                     self.insert_fragment_table_data(
                         txn,
                         ids,
@@ -2228,7 +2313,7 @@ impl EditingDoc {
                         slot,
                         &part.table,
                         revision,
-                        attrs,
+                        embed_attrs,
                         build,
                     )?;
                     at += 1;
@@ -4414,6 +4499,172 @@ mod tests {
         assert_eq!(receipt.after.offset, 1);
         let paragraphs = doc.paragraphs("body").unwrap();
         assert_eq!(receipt.after.para_id, paragraphs[0].para_id);
+    }
+
+    #[test]
+    fn fragment_copy_remaps_run_property_changes_independently() {
+        let doc = fragment_doc();
+        let original = doc
+            .insert_table_fragment(
+                &direct(),
+                Position::new("body", 0),
+                &fragment_table(vec![fragment_cell("Hello")]),
+            )
+            .unwrap();
+        let original_story = &original.created_story_ids[0];
+        doc.toggle_format(
+            &suggesting(),
+            crate::StoryRange::new(original_story, 0, 5),
+            crate::SimpleFormat::Bold,
+        )
+        .unwrap();
+        let original_revision = doc
+            .list_revisions()
+            .unwrap()
+            .into_iter()
+            .find(|revision| {
+                revision.story == *original_story
+                    && revision.change.kind == crate::ChangeKind::RunPropertiesChanged
+            })
+            .unwrap();
+        let segments = doc.story_segments(original_story).unwrap();
+        assert_eq!(segments[0].attributes.get("bold"), Some(&Any::Bool(true)));
+        assert!(segments[0].attributes.contains_key("rPrChange"));
+        let mut copied_cell = fragment_cell("Hello");
+        copied_cell["content"][0]["attributes"] =
+            serde_json::to_value(&segments[0].attributes).unwrap();
+        let pasted = doc
+            .insert_table_fragment(
+                &direct(),
+                Position::new("body", 1),
+                &fragment_table(vec![copied_cell]),
+            )
+            .unwrap();
+        let pasted_story = &pasted.created_story_ids[0];
+        assert_ne!(pasted_story, original_story);
+        let pasted_revision = doc
+            .list_revisions()
+            .unwrap()
+            .into_iter()
+            .find(|revision| {
+                revision.story == *pasted_story
+                    && revision.change.kind == crate::ChangeKind::RunPropertiesChanged
+            })
+            .unwrap();
+
+        assert_ne!(
+            pasted_revision.change.revision_id,
+            original_revision.change.revision_id
+        );
+        doc.reject_change(
+            &direct(),
+            &crate::ChangeTarget::Revision(pasted_revision.change.revision_id.clone()),
+        )
+        .unwrap();
+        assert_eq!(
+            doc.selection_context(&crate::StoryRange::new(original_story, 0, 5))
+                .unwrap()
+                .bold,
+            crate::TriState::On
+        );
+        assert_eq!(
+            doc.selection_context(&crate::StoryRange::new(pasted_story, 0, 5))
+                .unwrap()
+                .bold,
+            crate::TriState::Off
+        );
+        let revisions = doc.list_revisions().unwrap();
+        assert!(revisions.contains(&original_revision));
+        assert!(
+            revisions
+                .iter()
+                .all(|revision| revision.change.revision_id != pasted_revision.change.revision_id)
+        );
+    }
+
+    #[test]
+    fn fragment_copy_remaps_paragraph_property_changes_independently() {
+        let doc = fragment_doc();
+        let original = doc
+            .insert_table_fragment(
+                &direct(),
+                Position::new("body", 0),
+                &fragment_table(vec![fragment_cell("Hello")]),
+            )
+            .unwrap();
+        let original_story = &original.created_story_ids[0];
+        doc.set_paragraph_attrs(
+            &suggesting(),
+            &crate::ParaSelector::One(original.new_para_ids[0].clone()),
+            &crate::ParaAttrDelta {
+                alignment: crate::Patch::Set("center".to_owned()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let original_revision = doc
+            .list_revisions()
+            .unwrap()
+            .into_iter()
+            .find(|revision| {
+                revision.story == *original_story
+                    && revision.change.kind == crate::ChangeKind::ParagraphPropertiesChanged
+            })
+            .unwrap();
+        let properties = |story: &str| {
+            doc.story_segments(story)
+                .unwrap()
+                .into_iter()
+                .find_map(|segment| match segment.content {
+                    crate::SegmentContent::Pilcrow(properties) => Some(properties.values),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let original_properties = properties(original_story);
+        let mut copied_cell = fragment_cell("Hello");
+        copied_cell["content"][1]["properties"] =
+            serde_json::to_value(&original_properties).unwrap();
+        let pasted = doc
+            .insert_table_fragment(
+                &direct(),
+                Position::new("body", 1),
+                &fragment_table(vec![copied_cell]),
+            )
+            .unwrap();
+        let pasted_story = &pasted.created_story_ids[0];
+        let pasted_revision = doc
+            .list_revisions()
+            .unwrap()
+            .into_iter()
+            .find(|revision| {
+                revision.story == *pasted_story
+                    && revision.change.kind == crate::ChangeKind::ParagraphPropertiesChanged
+            })
+            .unwrap();
+        assert_ne!(
+            pasted_revision.change.revision_id,
+            original_revision.change.revision_id
+        );
+        assert_eq!(properties(pasted_story)["alignment"], Any::from("center"));
+        doc.reject_change(
+            &direct(),
+            &crate::ChangeTarget::Revision(pasted_revision.change.revision_id.clone()),
+        )
+        .unwrap();
+        assert_eq!(properties(original_story), original_properties);
+        assert_ne!(
+            properties(pasted_story).get("alignment"),
+            Some(&Any::from("center"))
+        );
+        assert!(!properties(pasted_story).contains_key(crate::PPR_CHANGE));
+        let revisions = doc.list_revisions().unwrap();
+        assert!(revisions.contains(&original_revision));
+        assert!(
+            revisions
+                .iter()
+                .all(|revision| revision.change.revision_id != pasted_revision.change.revision_id)
+        );
     }
 
     #[test]

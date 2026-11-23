@@ -1378,7 +1378,9 @@ impl EditSession {
     }
 
     /// The paragraph attributes, as JSON, that put a paragraph on a list of `kind`, `bullet` or
-    /// `numbered`, creating a list definition when no adjacent paragraph's list is of that kind.
+    /// `numbered`: its own list when that is of that kind, else the list of the paragraph directly
+    /// above, else below, else a created list of that kind no paragraph names, else one this call
+    /// creates; a paragraph already on a list keeps its own level.
     pub fn ensure_list_definition(
         &self,
         story: &str,
@@ -1390,9 +1392,41 @@ impl EditSession {
             .map_err(JsValue::from)
     }
 
+    /// As `ensure_list_definition` for a paragraph of a selection whose first paragraph is `lead`:
+    /// it goes on the list `lead` is on when that is of `kind`.
+    pub fn ensure_list_definition_after(
+        &self,
+        story: &str,
+        para_id: &str,
+        kind: &str,
+        lead: Option<String>,
+    ) -> Result<String, JsValue> {
+        self.core
+            .ensure_list_definition_after(story, para_id, kind, lead.as_deref())
+            .map_err(JsValue::from)
+    }
+
+    /// Whether the style the paragraph has now, or the default paragraph style when it names none,
+    /// numbers it: its `numPr`, through `basedOn`, names a list other than 0. Undefined for a
+    /// session without a source package.
+    pub fn paragraph_style_numbers(
+        &self,
+        story: &str,
+        para_id: &str,
+    ) -> Result<Option<bool>, JsValue> {
+        self.core
+            .paragraph_style_numbers(story, para_id)
+            .map_err(JsValue::from)
+    }
+
     /// The list definitions the editor created, by key, as JSON.
     pub fn created_list_definitions_json(&self) -> String {
         self.core.created_list_definitions_json()
+    }
+
+    /// The keys of the created list definitions some paragraph is on, as JSON.
+    pub fn list_definition_keys_in_use_json(&self) -> String {
+        self.core.list_definition_keys_in_use_json()
     }
 
     pub fn list_sections_json(&self) -> Result<String, JsValue> {
@@ -2860,6 +2894,13 @@ impl EditSession {
     pub fn resolve_comment(&self, comment_id: &str) -> Result<String, JsValue> {
         self.core.resolve_comment(comment_id).map_err(JsValue::from)
     }
+
+    /// Where the kept empty inline elements of the source sit now:
+    /// `[{"story","offset","ordinal","xml"}, …]` in story-global UTF-16
+    /// units, by story, offset and source order.
+    pub fn resolve_raw_marks(&self) -> Result<String, JsValue> {
+        self.core.resolve_raw_marks().map_err(JsValue::from)
+    }
 }
 
 #[wasm_bindgen]
@@ -3008,6 +3049,13 @@ pub fn render_docx_markdown_with_pages_json(
     options: &str,
 ) -> Result<String, JsValue> {
     crate::session::free::render_docx_markdown_with_pages_json(content, options).map_err(js_err)
+}
+
+/// The digest the writer compares a complex field's `sourceRunDigest` with, or `undefined` when
+/// `field_json` is not a complex field.
+#[wasm_bindgen]
+pub fn field_run_digest(field_json: &str) -> Option<String> {
+    crate::field_run_digest(field_json)
 }
 
 #[cfg(test)]

@@ -3,7 +3,9 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { checkCrates, checkNpm, checkPlan, nativeReleaseVersions, repositoryScan, unaskedMajors, siblingReferences, verifyPublished } from './check-publish-targets.mjs';
+import { checkCrates, checkNpm, checkPlan, missingHeldNatives, nativeReleaseVersions, repositoryScan, unaskedMajors, siblingReferences, verifyPublished } from './check-publish-targets.mjs';
+import { releaseNotes, releaseTag } from './held-npm-packages.mjs';
+import { platformPackageVersions } from './native-bindings.mjs';
 import { publishedCrates, publishedPackageVersions, workspaceEntries } from './published-packages.mjs';
 import { RUST_PUBLISH_CRATES } from './rust-crates.mjs';
 
@@ -12,8 +14,11 @@ const releaseWorkflow = fileURLToPath(new URL('../.github/workflows/release.yml'
 
 const release = Bun.YAML.parse(readFileSync(releaseWorkflow, 'utf8')) as any;
 const packages = publishedPackageVersions();
+const agents = packages.find(({ name }) => name === '@betteroffice/agents')!;
 const repository = repositoryScan(packages);
 const workspaceVersions = new Map(workspaceEntries().map(({ manifest }) => [manifest.name, manifest.version]));
+const platforms = platformPackageVersions();
+const platformVersions = new Map(platforms.map(({ name, version }) => [name, version]));
 const crates = RUST_PUBLISH_CRATES.map((crate) => crate.name);
 const fixtureDirectories: string[] = [];
 const fonts = { name: '@betteroffice/fonts', version: '1.2.3' };
@@ -66,6 +71,10 @@ async function check(
     packages?: typeof packages;
     workspaces?: ReturnType<typeof workspaceEntries>;
     later?: { name: string; version: string }[];
+    platforms?: { name: string; version: string }[];
+    natives?: { name: string; version: string }[];
+    holdNative?: boolean;
+    held?: typeof packages;
     references?: ReturnType<typeof siblingReferences>;
     maxWaitMs?: number;
   } = {}
@@ -73,20 +82,23 @@ async function check(
   const { server, origin } = registry(respond);
   const stdout: string[] = [];
   const stderr: string[] = [];
+  let held: typeof packages = [];
   const out = { log: (line: string) => stdout.push(line), error: (line: string) => stderr.push(line) };
   try {
     const started = performance.now();
     const npmOptions = {
       registry: origin, out, timeoutMs: options.timeoutMs,
-      packages: options.packages, workspaces: options.workspaces, later: options.later, references: options.references
+      packages: options.packages, workspaces: options.workspaces, later: options.later, platforms: options.platforms,
+      natives: options.natives, holdNative: options.holdNative, references: options.references,
+      onHeld: (entries: typeof packages) => { held = entries; }
     };
     const status =
       mode === '--npm'
         ? await checkNpm(npmOptions)
         : mode === '--verify-published'
-          ? await verifyPublished({ ...npmOptions, cdnBase: origin, maxWaitMs: options.maxWaitMs })
+          ? await verifyPublished({ ...npmOptions, cdnBase: origin, maxWaitMs: options.maxWaitMs, held: options.held })
           : await checkCrates({ registry: origin, out, timeoutMs: options.timeoutMs, bootstrap: options.bootstrap ?? false });
-    return { status, stdout: stdout.join('\n'), stderr: stderr.join('\n'), elapsed: performance.now() - started };
+    return { status, held, stdout: stdout.join('\n'), stderr: stderr.join('\n'), elapsed: performance.now() - started };
   } finally {
     server.stop(true);
   }
@@ -113,7 +125,9 @@ async function guard(
         CRATES_REGISTRY_URL: origin,
         CDN_BASE_URL: origin,
         GITHUB_ACTIONS: '',
+        GITHUB_OUTPUT: '',
         GITHUB_STEP_SUMMARY: '',
+        HELD_NPM_PACKAGES: '',
         ...env
       }
     });
@@ -163,7 +177,7 @@ describe('npm publish targets', () => {
 
   test('a package that exists at its release version passes', async () => {
     const result = await check('--npm', (name) => {
-      const version = workspaceVersions.get(name);
+      const version = workspaceVersions.get(name) ?? platformVersions.get(name);
       return version ? versions(version) : notFound();
     }, repository);
     expect(result.status).toBe(0);
@@ -191,40 +205,306 @@ describe('npm publish targets', () => {
   });
 });
 
+describe('native npm names the release publishes later', () => {
+  const root = { name: '@betteroffice/docx-native', version: '1.2.3' };
+  const platform = { name: '@betteroffice/docx-native-linux-x64-musl', version: '1.2.3' };
+  const native = { packages: [fonts, latin], later: [root], platforms: [platform] };
+  const missingLines = (stderr: string) => stderr.split('\n').filter((line) => line.endsWith(' is not on npm.'));
+
+  test.each([
+    ['platform package', platform.name],
+    ['root', root.name]
+  ])('a native %s that does not exist fails, by name', async (_kind, missing) => {
+    const result = await check('--npm', (name) => name === missing ? notFound() : versions('1.2.3'), {
+      ...native, workspaces: fontWorkspaces()
+    });
+    expect(result.status).toBe(1);
+    expect(missingLines(result.stderr)).toEqual([`${missing} is not on npm.`]);
+    expect(result.stderr).toContain('RELEASING.md, "Native packages"');
+    expect(result.stderr).not.toContain('Initial npm release of a new package');
+  });
+
+  test('native names on npm at the release version pass and print nothing of their own', async () => {
+    const result = await check('--npm', () => versions('1.2.3'), { ...native, workspaces: fontWorkspaces() });
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe('');
+    expect(result.stdout).toBe([
+      `${fonts.name}@${fonts.version} is on npm.`,
+      `${latin.name}@${latin.version} is on npm.`
+    ].join('\n'));
+  });
+
+  test('native names on npm only at an older version pass: the release publishes that version', async () => {
+    const result = await check('--npm', () => versions('0.0.0'), { ...native, workspaces: fontWorkspaces() });
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe('');
+    expect(result.stdout).toBe([
+      `${fonts.name}@${fonts.version} is a new version of a package on npm.`,
+      `${latin.name}@${latin.version} is a new version of a package on npm.`
+    ].join('\n'));
+  });
+
+  async function withSkipNative<T>(value: string | undefined, run: () => Promise<T>) {
+    const prior = process.env.RELEASE_SKIP_NATIVE;
+    if (value === undefined) delete process.env.RELEASE_SKIP_NATIVE;
+    else process.env.RELEASE_SKIP_NATIVE = value;
+    try {
+      return await run();
+    } finally {
+      if (prior === undefined) delete process.env.RELEASE_SKIP_NATIVE;
+      else process.env.RELEASE_SKIP_NATIVE = prior;
+    }
+  }
+
+  test.each(['true', 'TRUE', 'True'])('native names are neither required nor requested when RELEASE_SKIP_NATIVE is %s', async (value) => {
+    const requested: string[] = [];
+    const skipped = await withSkipNative(value, () => check('--npm', (name) => {
+      requested.push(name);
+      return name === fonts.name || name === latin.name ? versions('1.2.3') : notFound();
+    }, { packages: [fonts, latin], workspaces: fontWorkspaces() }));
+    expect(skipped.stderr).toBe('');
+    expect(skipped.status).toBe(0);
+    expect(requested.sort()).toEqual([fonts.name, latin.name].sort());
+  });
+
+  /** Runs the npm check against a fake registry and reports a rejection as `status: 'threw'`, keeping what it printed. */
+  async function settledNpmCheck(respond: RegistryResponder, options: Record<string, unknown>) {
+    const { server, origin } = registry(respond);
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const out = { log: (line: string) => stdout.push(line), error: (line: string) => stderr.push(line) };
+    try {
+      const status: number | 'threw' = await checkNpm({ ...options, registry: origin, out } as any);
+      return { status, stdout: stdout.join('\n'), stderr: stderr.join('\n'), error: undefined as string | undefined };
+    } catch (error) {
+      return { status: 'threw' as const, stdout: stdout.join('\n'), stderr: stderr.join('\n'), error: String(error) };
+    } finally {
+      server.stop(true);
+    }
+  }
+
+  test('a native name npm answers with a body that is not JSON exists', async () => {
+    const result = await settledNpmCheck((name) =>
+      name === platform.name ? new Response('<!doctype html>', { status: 200 }) : versions('1.2.3'), {
+      ...native, workspaces: fontWorkspaces()
+    });
+    expect(result).toEqual({
+      status: 0,
+      stdout: [`${fonts.name}@${fonts.version} is on npm.`, `${latin.name}@${latin.version} is on npm.`].join('\n'),
+      stderr: '',
+      error: undefined
+    });
+  }, FULL_SCAN_BUDGET_MS);
+
+  test('a native name npm answers with 200 and a body stream that fails exists', async () => {
+    const failedBody = () => new Response(new ReadableStream({ start(controller) { controller.error(new Error('stream failed')); } }), { status: 200 });
+    expect(await failedBody().body!.cancel().then(() => 'cancelled', (error: Error) => error.message)).toBe('stream failed');
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      return decodeURIComponent(url.pathname.slice(1)) === platform.name
+        ? Promise.resolve(failedBody())
+        : realFetch(input, init);
+    }) as unknown as typeof fetch;
+    try {
+      const result = await settledNpmCheck(() => versions('1.2.3'), { ...native, workspaces: fontWorkspaces() });
+      expect(result).toEqual({
+        status: 0,
+        stdout: [`${fonts.name}@${fonts.version} is on npm.`, `${latin.name}@${latin.version} is on npm.`].join('\n'),
+        stderr: '',
+        error: undefined
+      });
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  }, FULL_SCAN_BUDGET_MS);
+
+  test('a native name npm answers with a JSON null body exists', async () => {
+    const result = await check('--npm', (name) =>
+      name === platform.name ? Response.json(null) : versions('1.2.3'), {
+      ...native, workspaces: fontWorkspaces()
+    });
+    expect(result.stderr).toBe('');
+    expect(result.status).toBe(0);
+  });
+
+  test('a native lookup that keeps failing fails the check, naming the package', async () => {
+    const result = await settledNpmCheck((name) =>
+      name === platform.name
+        ? new Response('{"error":"unavailable"}', { status: 503, headers: { 'Retry-After': '0' } })
+        : versions('1.2.3'), {
+      ...native, workspaces: fontWorkspaces()
+    });
+    expect({ status: result.status, error: result.error }).toEqual({ status: 1, error: undefined });
+    expect(result.stderr).toContain(`${platform.name} could not be looked up on npm:`);
+    expect(result.stderr).toContain('503');
+  });
+
+  test('native names found missing are named even when a later lookup fails', async () => {
+    const failing = { name: '@betteroffice/docx-native-win32-arm64-msvc', version: '1.2.3' };
+    const result = await settledNpmCheck((name) => {
+      if (name === platform.name) return notFound();
+      if (name === failing.name) return new Response(null, { status: 503, headers: { 'Retry-After': '0' } });
+      return versions('1.2.3');
+    }, { ...native, platforms: [platform, failing], workspaces: fontWorkspaces() });
+    expect({ status: result.status, missing: missingLines(result.stderr), error: result.error }).toEqual({
+      status: 1, missing: [`${platform.name} is not on npm.`], error: undefined
+    });
+    expect(result.stderr).toContain('RELEASING.md, "Native packages"');
+    expect(result.stderr).toContain(`${failing.name} could not be looked up on npm:`);
+  });
+
+  test('the full repository scan asks npm once for every release package and every native name', async () => {
+    const requested: string[] = [];
+    const result = await withSkipNative(undefined, () => check('--npm', (name) => {
+      requested.push(name);
+      return versions(workspaceVersions.get(name) ?? platformVersions.get(name)!);
+    }));
+    expect(result.status).toBe(0);
+    expect(natives).toHaveLength(3);
+    expect(requested.sort()).toEqual([...packages, ...natives, ...platforms].map(({ name }) => name).sort());
+  }, FULL_SCAN_BUDGET_MS);
+
+  test('a full repository scan that skips native packages asks npm for no platform package, and for the roots only as dependencies', async () => {
+    const requested: string[] = [];
+    const result = await withSkipNative('true', () => check('--npm', (name) => {
+      requested.push(name);
+      return name === agents.name ? older(name) : published(name);
+    }));
+    expect(result.status).toBe(0);
+    expect(result.held).toEqual([]);
+    expect(requested.sort()).toEqual([...packages, ...natives].map(({ name }) => name).sort());
+  }, FULL_SCAN_BUDGET_MS);
+
+  test.each([
+    ['platform package', platforms[platforms.length - 1]!.name],
+    ['root', natives[0]!.name]
+  ])('a native %s of the repository that does not exist fails the full repository scan, by name', async (_kind, missing) => {
+    const result = await check('--npm', (name) =>
+      name === missing ? notFound() : versions(workspaceVersions.get(name) ?? platformVersions.get(name)!));
+    expect(result.status).toBe(1);
+    expect(missingLines(result.stderr)).toEqual([`${missing} is not on npm.`]);
+    expect(result.stderr).toContain('RELEASING.md, "Native packages"');
+  }, FULL_SCAN_BUDGET_MS);
+});
+
 describe('workspace dependency versions', () => {
-  test('dependencies on native roots the release publishes later pass before those roots are on npm', async () => {
+  test('holds agents when its new native versions are missing from npm', async () => {
     expect(natives.map(({ name }) => name).sort()).toEqual([
       '@betteroffice/docx-native', '@betteroffice/pptx-native', '@betteroffice/xlsx-native'
     ]);
     const result = await check('--npm', older, repository);
     expect(result.stderr).toBe('');
     expect(result.status).toBe(0);
+    expect(result.held).toEqual([agents]);
   });
 
-  test('dependencies on native roots fail when nothing publishes those roots later', async () => {
-    const without = await check('--npm', older, { ...repository, later: [] });
+  test('fails when agents would publish before its new native versions', async () => {
+    const without = await check('--npm', older, { ...repository, holdNative: false });
     expect(without.status).toBe(1);
-    expect(without.stderr).toContain('@betteroffice/agents@');
+    expect(without.held).toEqual([]);
+    for (const { name, version } of natives) {
+      expect(without.stderr).toContain(`${releaseTag(agents)} depends on ${name}@^${version}`);
+    }
   });
 
-  test('dependencies on native roots fail when the release skips native packages', async () => {
+  test('allows agents to publish when the native manifest versions are already on npm', async () => {
+    const result = await check('--npm', (name) =>
+      natives.some((native) => native.name === name) ? published(name) : older(name), repository);
+    expect(result.status).toBe(0);
+    expect(result.held).toEqual([]);
+  });
+
+  test('keeps agents held when the release skips native packages', async () => {
     const prior = process.env.RELEASE_SKIP_NATIVE;
     process.env.RELEASE_SKIP_NATIVE = 'true';
     try {
       const skipped = await check('--npm', older, repository);
-      expect(skipped.status).toBe(1);
-      expect(skipped.stderr).toContain('@betteroffice/agents@');
+      expect(skipped.status).toBe(0);
+      expect(skipped.held).toEqual([agents]);
     } finally {
       if (prior === undefined) delete process.env.RELEASE_SKIP_NATIVE;
       else process.env.RELEASE_SKIP_NATIVE = prior;
     }
   });
 
-  test('dependencies on native roots the release publishes later pass on the full repository scan', async () => {
+  test('holding applies only to unpublished versions', async () => {
+    const result = await check('--npm', (name) => name === agents.name ? published(name) : older(name), repository);
+    expect(result.status).toBe(0);
+    expect(result.held).toEqual([]);
+  });
+
+  test.each(['peerDependencies', 'optionalDependencies'])('holds native dependencies listed in %s', async (field) => {
+    const native = natives[0]!;
+    const result = await check('--npm', () => versions('0.0.0'), {
+      packages: [agents], natives: [native], later: [], platforms: [],
+      workspaces: workspaceFixture([{ ...agents, [field]: { [native.name]: 'workspace:*' } }, native])
+    });
+    expect(result.status).toBe(0);
+    expect(result.held).toEqual([agents]);
+  });
+
+  test('rejects a held package with an unavailable non-native dependency', async () => {
+    const native = natives[0]!;
+    const result = await check('--npm', () => versions('0.0.0'), {
+      packages: [fonts], natives: [native], later: [], platforms: [],
+      workspaces: workspaceFixture([
+        { ...fonts, dependencies: { [native.name]: 'workspace:*', [latin.name]: 'workspace:*' } },
+        native, latin
+      ])
+    });
+    expect(result.status).toBe(1);
+    expect(result.held).toEqual([fonts]);
+    expect(result.stderr).toContain(`${releaseTag(fonts)} depends on ${releaseTag(latin)}, which is neither in this release nor on npm`);
+  });
+
+  test('rejects a held package when the native manifest version does not satisfy its range', async () => {
+    const native = natives[0]!;
+    const result = await check('--npm', () => versions('0.0.0'), {
+      packages: [agents], natives: [native], later: [], platforms: [],
+      workspaces: workspaceFixture([{ ...agents, dependencies: { [native.name]: '0.0.0' } }, native])
+    });
+    expect(result.status).toBe(1);
+    expect(result.held).toEqual([agents]);
+    expect(result.stderr).toContain(`${releaseTag(agents)} depends on ${native.name}@0.0.0, but the native manifest version ${native.version} does not satisfy that range`);
+  });
+
+  test('rejects a held package that depends on another held package', async () => {
+    const native = natives[0]!;
+    const result = await check('--npm', () => versions('0.0.0'), {
+      packages: [fonts, latin], natives: [native], later: [], platforms: [],
+      workspaces: workspaceFixture([
+        { ...fonts, dependencies: { [native.name]: 'workspace:*', [latin.name]: '^0.0.0' } },
+        { ...latin, dependencies: { [native.name]: 'workspace:*' } },
+        native
+      ])
+    });
+    expect(result.status).toBe(1);
+    expect(result.held).toEqual([fonts, latin]);
+    expect(result.stderr).toContain(`${releaseTag(fonts)} depends on ${latin.name}@^0.0.0, which is also held`);
+  });
+
+  test('fails when an immediate publish would depend on a held workspace version', async () => {
+    const native = natives[0]!;
+    const result = await check('--npm', () => versions('0.0.0'), {
+      packages: [agents, fonts], natives: [native], later: [], platforms: [],
+      workspaces: workspaceFixture([
+        { ...agents, dependencies: { [native.name]: 'workspace:*' } },
+        { ...fonts, dependencies: { [agents.name]: 'workspace:*' } },
+        native
+      ])
+    });
+    expect(result.status).toBe(1);
+    expect(result.held).toEqual([agents]);
+    expect(result.stderr).toContain(`${releaseTag(fonts)} depends on ${releaseTag(agents)}`);
+  });
+
+  test('the full repository scan holds the same packages as the precomputed scan', async () => {
     const scanned = await check('--npm', older);
     expect(scanned.stderr).toBe('');
     expect(scanned.status).toBe(0);
     const precomputed = await check('--npm', older, repository);
+    expect(scanned.held).toEqual(precomputed.held);
     expect([precomputed.status, precomputed.stdout, precomputed.stderr]).toEqual([scanned.status, scanned.stdout, scanned.stderr]);
   }, FULL_SCAN_BUDGET_MS);
 
@@ -385,7 +665,7 @@ describe('sibling package references', () => {
 
   test('rejects current manifests minus fonts-latin when npm only has 0.0.0 of latin and intl', async () => {
     const result = await check('--npm', (name) =>
-      [latin.name, '@betteroffice/fonts-intl'].includes(name) ? versions('0.0.0') : published(name), {
+      [fonts.name, latin.name, '@betteroffice/fonts-intl'].includes(name) ? versions('0.0.0') : published(name), {
       ...repository,
       packages: packages.filter(({ name }) => name !== latin.name),
       references: repository.references.filter(({ dependent }) => dependent !== latin.name)
@@ -398,6 +678,20 @@ describe('sibling package references', () => {
 });
 
 describe('published npm and CDN targets', () => {
+  test('reports held versions without checking them on npm or the CDN', async () => {
+    const workspaces = workspaceFixture([fonts, agents]);
+    writeFileSync(join(workspaces[0]!.directory, 'src', 'index.ts'),
+      'import { version } from "../../agents/package.json";');
+    const requested: string[] = [];
+    const result = await check('--verify-published', (name, request) => {
+      requested.push(name);
+      return request.method === 'HEAD' ? new Response(null) : Response.json(fonts);
+    }, { packages: [fonts, agents], held: [agents], workspaces, maxWaitMs: 500 });
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain(`${releaseTag(agents)} is held for its native dependencies.`);
+    expect(requested.sort()).toEqual([`${fonts.name}/${fonts.version}`, `${releaseTag(fonts)}/package.json`].sort());
+  });
+
   test('reports every missing npm version using version-specific GETs', async () => {
     const requested: string[] = [];
     const result = await check('--verify-published', (name, request) => {
@@ -456,6 +750,49 @@ describe('published npm and CDN targets', () => {
     }, { packages: [fonts], workspaces: workspaceFixture([fonts]), maxWaitMs: 2_000 });
     expect(result.status).toBe(0);
     expect(calls).toBe(3);
+  });
+});
+
+describe('publishing held npm packages', () => {
+  test('rechecks only the required native versions and rejects an older version', async () => {
+    const missing = natives[0]!;
+    const requested: string[] = [];
+    const { server, origin } = registry((path) => {
+      requested.push(path);
+      return path === `${missing.name}/${missing.version}` ? notFound() : Response.json({});
+    });
+    try {
+      expect(await missingHeldNatives([agents], { registry: origin })).toEqual([missing]);
+      expect(requested.sort()).toEqual(natives.map(({ name, version }) => `${name}/${version}`).sort());
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test('waits for a native version that has just been published', async () => {
+    const native = natives[0]!;
+    const path = `${native.name}/${native.version}`;
+    const response = flaky((name, call) => name === path && call === 1 ? notFound() : Response.json({}));
+    const { server, origin } = registry(response.respond);
+    try {
+      expect(await missingHeldNatives([agents], { registry: origin, wait: true, maxWaitMs: 2_000 })).toEqual([]);
+      expect(response.calls.get(path)).toBe(2);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test('uses the scoped package name and full version for the tag and release title', () => {
+    expect(releaseTag({ name: '@betteroffice/agents', version: '0.3.0' })).toBe('@betteroffice/agents@0.3.0');
+    expect(releaseTag({ name: '@betteroffice/agents', version: '0.4.0-next.1' })).toBe('@betteroffice/agents@0.4.0-next.1');
+  });
+
+  test('uses only the matching changelog section for the release notes', () => {
+    const notes = ['### Patch Changes', '', '- Fix an issue.', '', '```md', '## Example', '```'].join('\n');
+    const changelog = ['# @betteroffice/agents', '## 0.3.0', '- Newer notes.', '## 0.2.0', notes, '## 0.1.0', '- Older notes.'].join('\r\n');
+    expect(releaseNotes(changelog, '0.2.0')).toBe(notes);
+    expect(releaseNotes(changelog, '0.1.0')).toBe('- Older notes.');
+    expect(releaseNotes(changelog, '0.2')).toBe('');
   });
 });
 
@@ -519,6 +856,19 @@ describe('release wiring', () => {
     const verify = steps.indexOf('Verify npm and CDN publish targets');
     expect(verify).toBeGreaterThan(steps.indexOf('Release PR or publish'));
     expect(verify).toBeLessThan(steps.indexOf('Trigger deploy'));
+  });
+
+  test('packs pinned manifests before Changesets and hands the held list to the later job', () => {
+    const pack = steps.indexOf('Pack and hold packages published after the release');
+    expect(pack).toBeGreaterThan(steps.indexOf('Pin workspace deps for npm publish'));
+    expect(pack + 1).toBe(steps.indexOf('Release PR or publish'));
+    expect(release.jobs.release.outputs.held).toBe('${{ steps.npm-targets.outputs.held }}');
+    const held = release.jobs['held-npm'];
+    expect(held.needs).toEqual(['release', 'native-npm']);
+    expect(held.if).toContain("needs.release.result == 'success' && needs.release.outputs.publishing == 'true'");
+    expect(held.if).toContain("needs.release.outputs.held != '' && needs.release.outputs.held != '[]'");
+    expect(held.if).toContain("needs.native-npm.result == 'success' || needs.native-npm.result == 'skipped'");
+    expect(held.permissions).toEqual({ contents: 'write', 'id-token': 'write' });
   });
 
   test('a verification miss reports without gating deploy, native or Python publishing', () => {
@@ -672,13 +1022,18 @@ describe('the mode argument', () => {
   }, SPAWN_BUDGET_MS);
 
   test('--npm scans the repository itself and reports what the precomputed scan reports', async () => {
-    const cli = await guard('--npm', older, { RELEASE_SKIP_NATIVE: 'true', NODE_OPTIONS: '', NODE_NO_WARNINGS: '1' });
+    const directory = mkdtempSync(join(tmpdir(), 'publish-output-'));
+    fixtureDirectories.push(directory);
+    const output = join(directory, 'output');
+    const cli = await guard('--npm', older, {
+      GITHUB_OUTPUT: output, RELEASE_SKIP_NATIVE: 'true', NODE_OPTIONS: '', NODE_NO_WARNINGS: '1'
+    });
     const prior = process.env.RELEASE_SKIP_NATIVE;
     process.env.RELEASE_SKIP_NATIVE = 'true';
     try {
       const precomputed = await check('--npm', older, repository);
-      expect(cli.status).toBe(1);
-      expect(cli.stderr).toContain('@betteroffice/agents@');
+      expect(cli.status).toBe(0);
+      expect(readFileSync(output, 'utf8')).toBe(`held=${JSON.stringify([agents])}\n`);
       expect([cli.status, cli.stdout.trimEnd(), cli.stderr.trimEnd()])
         .toEqual([precomputed.status, precomputed.stdout, precomputed.stderr]);
     } finally {

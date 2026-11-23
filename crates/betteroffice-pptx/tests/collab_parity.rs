@@ -125,10 +125,54 @@ fn joining_an_update_attaches_only_its_matching_source() {
 }
 
 #[test]
+fn collaborative_constructors_refuse_table_structure_edits_without_undo() {
+    let bytes = table_source();
+    let first = Presentation::open_collaborative(&bytes, 101).unwrap();
+    let joined =
+        Presentation::open_from_update(&first.encode_state_as_update_v1(), 202, None).unwrap();
+    let limited =
+        Presentation::open_collaborative_with_limits(&bytes, 303, &Default::default()).unwrap();
+    let snapshot = first.snapshot().unwrap();
+    let slide = &snapshot.slides[0];
+    let shape = slide
+        .shapes
+        .iter()
+        .find(|shape| shape.name == "Collaboration table")
+        .unwrap();
+    let context = EditCtx::local("wasm");
+    let insert_row = |presentation: &Presentation| {
+        presentation.insert_table_row(
+            &context,
+            &slide.id,
+            &shape.id,
+            0,
+            TableInsertPosition::After,
+            &[],
+        )
+    };
+
+    for replica in [&first, &joined, &limited] {
+        let before = replica.snapshot().unwrap();
+        assert!(replica.is_collaborative());
+        assert!(matches!(
+            insert_row(replica),
+            Err(Error::Edit(EditError::CollaborativeStructureOperation))
+        ));
+        assert!(!replica.can_undo());
+        assert!(!replica.undo());
+        assert_eq!(replica.snapshot().unwrap(), before);
+    }
+
+    let standalone = Presentation::open(&bytes).unwrap();
+    assert!(!standalone.is_collaborative());
+    assert_eq!(insert_row(&standalone).unwrap().row_count, 3);
+}
+
+#[test]
 fn shared_table_structure_refusals_match_the_ts_engine() {
     let bytes = table_source();
-    let presentation = Presentation::open_collaborative(&bytes, 101).unwrap();
-    let engine = Document::open_collaborative(&bytes, 101.0, host()).unwrap();
+    let presentation = Presentation::open(&bytes).unwrap();
+    let engine = Document::open_collaborative(&bytes, 1.0, host()).unwrap();
     let snapshot = presentation.snapshot().unwrap();
     let slide = &snapshot.slides[0];
     let shape = slide

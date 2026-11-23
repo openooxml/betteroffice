@@ -134,6 +134,14 @@ fn check(key: &str, direct: &Value, seeded: Option<&Value>) -> Result<(), Failur
     }
 }
 
+fn word_ligatures(field: &str, seeded: Option<&Value>) -> Option<Value> {
+    seeded
+        .and_then(Value::as_str)
+        .filter(|_| field == "ligatures")
+        .and_then(crate::formatting::word_ligatures)
+        .map(Value::from)
+}
+
 fn flag(key: &str, direct: &Value, seeded: &Attrs) -> Result<(), Failure> {
     let enabled = seeded.get(key) == Some(&Value::Bool(true));
     if direct.as_bool() == Some(enabled) {
@@ -254,7 +262,9 @@ fn run(direct: &Value, attrs: &Attrs, symbol: bool) -> Result<(), Failure> {
         ("contextualAlternates", "typography", "contextualAlternates"),
     ] {
         if let Some(value) = direct.get(source) {
-            check(key, value, attrs.get(key).and_then(|v| v.get(field)))?;
+            let seeded = attrs.get(key).and_then(|v| v.get(field));
+            let word = word_ligatures(field, seeded);
+            check(key, value, word.as_ref().or(seeded))?;
         }
     }
     if !symbol && let Some(font) = direct.get("fontFamily") {
@@ -397,11 +407,9 @@ fn paragraph(direct: &Value, attrs: &Attrs) -> Result<(), Failure> {
             if key == "color" && value.get("auto") == Some(&Value::Bool(true)) {
                 continue;
             }
-            check(
-                "defaultTextFormatting",
-                value,
-                attrs.get("defaultTextFormatting").and_then(|v| v.get(key)),
-            )?;
+            let seeded = attrs.get("defaultTextFormatting").and_then(|v| v.get(key));
+            let word = word_ligatures(key, seeded);
+            check("defaultTextFormatting", value, word.as_ref().or(seeded))?;
         }
     }
     Ok(())

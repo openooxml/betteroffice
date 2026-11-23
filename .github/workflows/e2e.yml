@@ -250,7 +250,7 @@ jobs:
 
       - name: Install the Chromium system packages
         run: |
-          echo 'Acquire::Retries "1"; Acquire::http::Timeout "20"; Acquire::https::Timeout "20"; DPkg::Lock::Timeout "60";' | sudo tee /etc/apt/apt.conf.d/80-ci-retries >/dev/null
+          echo 'Acquire::Retries "1"; Acquire::http::Timeout "20"; Acquire::https::Timeout "20"; DPkg::Lock::Timeout "60"; Acquire::AllowReleaseInfoChange::Label "true";' | sudo tee /etc/apt/apt.conf.d/80-ci-retries >/dev/null
           for attempt in 1 2 3; do
             if bunx playwright install-deps chromium; then exit 0; fi
             echo "::warning::Chromium system packages failed to install (attempt $attempt of 3)"

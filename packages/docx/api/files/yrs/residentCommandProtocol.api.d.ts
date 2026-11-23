@@ -428,6 +428,11 @@ export interface DocxCommandPayloads {
     pasteFragment: DocxSelectionIntent & {
         fragment: DocxClipboardFragment;
     };
+    replacePasteFragment: DocxSelectionIntent & {
+        fragment: DocxClipboardFragment;
+        plain?: true;
+        merge?: true;
+    };
     insertPageBreak: DocxSelectionIntent;
     insertSectionBreak: DocxSelectionIntent & {
         type: 'nextPage' | 'continuous' | 'oddPage' | 'evenPage';
@@ -799,6 +804,12 @@ export interface DocxWorkerCommandState {
         from: number;
         to: number;
     };
+    /** The range the latest paste replaced and the document version right after it; any later edit makes it stale. */
+    lastPaste?: {
+        range: YrsStoryRange;
+        version: string;
+        storedMarks: DocxStoredMarks | null;
+    } | null;
 }
 export type DocxWorkerCommandEngine = ResidentEngineSession & Pick<YrsSession, 'paragraphs' | 'selectionContext' | 'storySegments' | 'cellSelection' | 'tablePayload' | 'insertText' | 'insertLineBreak' | 'replaceRange' | 'deleteRange' | 'splitParagraph' | 'toggleMark' | 'formatRange' | 'clearFormatting' | 'setParagraphAttrs' | 'applyParagraphStyle' | 'insertColumn' | 'deleteRow' | 'deleteColumn' | 'deleteTable' | 'mergeCells' | 'splitCell' | 'setCellShading' | 'beginUndoCapture' | 'canUndo' | 'canRedo'>;
 export type ResolvedDocxCommandSelection = {

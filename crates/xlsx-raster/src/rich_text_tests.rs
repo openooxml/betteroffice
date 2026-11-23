@@ -3,7 +3,7 @@ use tiny_skia::Pixmap;
 use xlsx_model::{Cell, CellRef, CellValue, Color, RichRun, RunStyle, Sheet, SheetId, Workbook};
 use xlsx_render::{DisplayList, DrawCmd, GridMeta, Viewport};
 
-use crate::{measure_text, render_png};
+use crate::{LINE_PAINTS, measure_text, render_png};
 
 const WIDTH: f32 = 160.0;
 const HEIGHT: f32 = 60.0;
@@ -206,11 +206,27 @@ fn a_wrapped_command_paints_each_line_s_pieces_in_their_own_fonts() {
                 "AB",
                 json!({ "bold": true, "color": "#ff0000" }),
             ),
-            piece(left(cde), 30.0, "CDE", larger.clone()),
-            piece(left(fg), 46.0, "FG", larger),
+            piece(left(cde), 30.0 + 2.8, "CDE", larger.clone()),
+            piece(left(fg), 30.0 + 16.0 * (14.0 / 11.0) + 2.8, "FG", larger),
         ];
         assert_eq!(png(vec![painted]), png(pieces), "{align}");
     }
+}
+
+#[test]
+fn a_long_mixed_wrap_only_calls_the_embedded_painter_for_visible_lines() {
+    let cmd = rich(
+        json!({
+            "text": "a\n".repeat(2000),
+            "y": 52.0,
+            "clip": { "x": 0.0, "y": 40.0, "w": WIDTH, "h": 100.0 },
+            "wrap": { "width": 40.0, "lineHeight": 20.0, "valign": "top" },
+        }),
+        &[r#"{"start":0,"end":1,"fontSize":12.0}"#],
+    );
+    let before = LINE_PAINTS.get();
+    png(vec![cmd]);
+    assert_eq!(LINE_PAINTS.get() - before, 1);
 }
 
 fn spill_list(neighbour: bool) -> DisplayList {

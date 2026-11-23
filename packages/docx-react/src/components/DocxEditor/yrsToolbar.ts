@@ -3,12 +3,11 @@ import type { ColorValue, ParagraphAlignment } from '@betteroffice/docx/types/do
 import type {
   YrsInputPositionMap,
   YrsAuthor,
-  YrsParagraphAttrs,
   YrsSelectionContext,
   YrsSession,
   YrsStoryRange,
 } from '@betteroffice/docx/yrs';
-import { compareYrsLocs } from '@betteroffice/docx/yrs';
+import { applyListToggle, compareYrsLocs, listOffAttrs } from '@betteroffice/docx/yrs';
 import type { YrsStoredFormatting, YrsStoredFormattingAction } from './YrsInput';
 import type { TableContextInfo } from './types';
 import { currentYrsTableContext } from './yrsCommands';
@@ -128,33 +127,6 @@ function forEachSelectedParagraph(
   }
 }
 
-function setList(
-  session: YrsSession,
-  selection: YrsToolbarSelection,
-  numId: 1 | 2,
-  suggesting?: YrsAuthor
-): void {
-  const current = paragraphNumPr(selection.context.paragraphProperties.numPr);
-  const remove = current?.numId === numId;
-  forEachSelectedParagraph(session, selection, (range, properties) => {
-    const existing = paragraphNumPr(properties.numPr);
-    const attrs: YrsParagraphAttrs = remove
-      ? {
-          numPr: null,
-          listIsBullet: null,
-          listNumFmt: null,
-          listMarker: null,
-        }
-      : {
-          numPr: { numId, ilvl: existing?.ilvl ?? 0 },
-          listIsBullet: numId === 1,
-          listNumFmt: numId === 1 ? null : 'decimal',
-          listMarker: null,
-        };
-    session.setParagraphAttrs(range, attrs, suggesting);
-  });
-}
-
 function changeIndent(
   session: YrsSession,
   selection: YrsToolbarSelection,
@@ -181,10 +153,10 @@ function changeIndent(
       }, suggesting);
     } else if (direction === 'outdent') {
       session.setParagraphAttrs(startRange, {
-        numPr: null,
-        listIsBullet: null,
-        listNumFmt: null,
-        listMarker: null,
+        ...listOffAttrs(
+          selection.context.paragraphProperties,
+          session.paragraphStyleNumbers?.(selection.range.story, selection.context.paraId)
+        ),
         indentLeft: null,
         indentFirstLine: null,
         hangingIndent: null,
@@ -345,7 +317,7 @@ export function applyYrsToolbarFormatting(
     return true;
   }
   if (action === 'bulletList' || action === 'numberedList') {
-    setList(session, selection, action === 'bulletList' ? 1 : 2, suggesting);
+    applyListToggle(session, range, action === 'bulletList' ? 'bullet' : 'numbered', suggesting);
     return true;
   }
   if (action === 'indent' || action === 'outdent') {

@@ -3266,6 +3266,22 @@ impl<'a> Exporter<'a> {
             }
             "field" => self.field(ctx, payload, &base, depth),
             "image" => self.image(ctx, payload, &anchor, drawing_from_payload(payload, true)),
+            crate::seed::RAW_INLINE_KIND => {
+                let element =
+                    super::source::element_name(any_str(payload.get("xml")).unwrap_or_default());
+                let message = format!("An inline {element} is not represented in the export.");
+                self.note(
+                    DiagnosticCode::UnsupportedContent,
+                    Severity::Warning,
+                    Some(anchor.clone()),
+                    message,
+                );
+                InlineKind::Unsupported {
+                    element,
+                    alt_text: None,
+                    drawing: None,
+                }
+            }
             "opaqueDrawing" => {
                 let element =
                     super::source::element_name(any_str(payload.get("xml")).unwrap_or_default());

@@ -87,6 +87,14 @@ export declare function clipboardFragmentIsTextOnly(fragment: DocxClipboardFragm
 export declare function clipboardParagraphUnits(paragraph: DocxClipboardParagraph): Array<DocxClipboardRun | {
     image: Record<string, unknown>;
 }>;
+/** @internal Above this many formatted runs a paste inserts its text without run formatting. */
+export declare const MAX_PASTE_FORMATTED_RUNS = 300;
+/** @internal How many formatted runs the paragraphs of a fragment carry. */
+export declare function clipboardFragmentRunCount(fragment: DocxClipboardFragment): number;
+/** @internal A clipboard run with portable formatting and a validated link. */
+export declare function clipboardRun(text: string, attributes: Record<string, unknown>, themeColors?: Readonly<Record<string, string>>): DocxClipboardRun;
+/** @internal */
+export declare function clipboardHighlightName(name: string): string | undefined;
 /** @internal Strict shape and size check for a pasted or copied clipboard fragment. */
 export declare function validClipboardFragment(value: unknown): value is DocxClipboardFragment;
 /** @internal Sessions a table read needs: the raw payload plus story segments. */
@@ -136,7 +144,9 @@ export declare function readClipboardSlice(reader: ClipboardTableReader, target:
 /**
  * Pastes a fragment over a story range, returning the caret. Deletes a
  * non-collapsed range first, then replays each paragraph: splits for
- * paragraphs after the first, inserts tables, then text.
+ * paragraphs after the first, inserts tables, then text. With
+ * `keepInherited`, pasted runs keep the formatting at the paste point and
+ * set only their own bold, italic, underline and strikethrough.
  * @internal
  */
-export declare function applyClipboardFragment(engine: ClipboardPasteEngine, range: YrsStoryRange, fragment: DocxClipboardFragment, suggesting?: YrsAuthor): YrsLoc;
+export declare function applyClipboardFragment(engine: ClipboardPasteEngine, range: YrsStoryRange, source: DocxClipboardFragment, suggesting?: YrsAuthor, keepInherited?: boolean): YrsLoc;

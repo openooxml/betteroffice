@@ -690,6 +690,18 @@ fn comment_bookmarks<'a>(
             }
         })
         .collect();
+    let mut next_anchor = vec![None; anchors.len()];
+    let mut next = None;
+    for (index, anchor) in anchors.iter().enumerate().rev() {
+        next_anchor[index] = next;
+        next = (*anchor).or(next);
+    }
+    let mut previous_anchor = vec![None; anchors.len()];
+    let mut previous = None;
+    for (index, anchor) in anchors.iter().enumerate() {
+        previous_anchor[index] = previous;
+        previous = (*anchor).or(previous);
+    }
     let mut boundaries = Vec::new();
     let mut pairs: HashMap<String, [Option<usize>; 2]> = HashMap::new();
     for (index, block) in comment.block_content.iter().enumerate() {
@@ -710,19 +722,8 @@ fn comment_bookmarks<'a>(
                 "duplicate block bookmark boundary for id {id}"
             )));
         }
-        let mut position = anchors[index + 1..]
-            .iter()
-            .flatten()
-            .next()
-            .copied()
-            .unwrap_or_else(|| {
-                anchors[..index]
-                    .iter()
-                    .rev()
-                    .flatten()
-                    .next()
-                    .map_or(0, |position| position + 1)
-            });
+        let mut position = next_anchor[index]
+            .unwrap_or_else(|| previous_anchor[index].map_or(0, |position| position + 1));
         if let Some(counterpart) = present.get(&(id.clone(), !start)) {
             position = if start {
                 position.min(counterpart / 2)
@@ -957,6 +958,7 @@ mod tests {
                     text: text.to_owned(),
                     preserve_space: None,
                 }],
+                direction_scopes: Vec::new(),
             }))],
             list_rendering: None,
             rendered_page_break_before: None,
