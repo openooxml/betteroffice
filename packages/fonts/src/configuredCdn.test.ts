@@ -26,6 +26,7 @@ import * as worker from './worker';
 const { fontCdnAssetUrl } = fontCdn;
 
 let installed = false;
+let missingPackageMessage = (name: string) => `Cannot find package '@betteroffice/fonts-${name}'`;
 for (const [name, manifest, exported] of [
   ['latin', latin, 'LATIN_FONT_ASSET_URLS'],
   ['intl', intl, 'INTL_FONT_ASSET_URLS'],
@@ -34,7 +35,7 @@ for (const [name, manifest, exported] of [
   mock.module(`@betteroffice/fonts-${name}`, () => ({
     then(resolve: (addon: unknown) => void, reject: (error: unknown) => void) {
       Promise.resolve().then(async () => {
-        if (!installed) throw new Error(`Cannot find package '@betteroffice/fonts-${name}'`);
+        if (!installed) throw new Error(missingPackageMessage(name));
         const files = manifest.faces.map(({ file }) => file);
         if (name === 'cjk') {
           for (const face of cjk.faces) {
@@ -175,6 +176,35 @@ test('an absent Latin add-on has no map or diagnostic even with built-in Latin a
       expect(await worker.checkFontPacks()).toEqual([]);
     }
   } finally {
+    channel.dispose();
+  }
+});
+
+test('Vite 7 and 8 report absent optional packs to the page and workers', async () => {
+  const channel = createWorkerFontPacks((message) => { page.receive(message); });
+  const page = createFontPackResponder(channel.receive, fonts.fontAssetUrls, getFontCdnConfiguration);
+  setWorkerFontAssets(channel.source);
+  fonts.configureFontCdn({ baseUrl: false });
+  const previousMessage = missingPackageMessage;
+  try {
+    for (const suffix of ['', ' Is it installed?']) {
+      missingPackageMessage = (name) => `Could not resolve "@betteroffice/fonts-${name}" imported by "@betteroffice/fonts".${suffix}`;
+      for (const [pack, face] of [
+        ['latin', regular],
+        ['intl', fonts.resolveScriptFallbackFace('thai', false, false)!],
+        ['cjk', japanese],
+      ] as const) {
+        await expect(fonts.fontAssetUrls(pack)).resolves.toBeUndefined();
+        await expect(fonts.bundledFaceInstalled(face)).resolves.toBe(false);
+        await expect(worker.bundledFaceInstalled(face)).resolves.toBe(false);
+      }
+      await expect(worker.bundledFaceInstalled(fonts.BASE_LATIN_FONTS[0]!)).resolves.toBe(true);
+    }
+    const failure = 'Could not resolve "@betteroffice/fonts-latin" imported by "another-package".';
+    missingPackageMessage = () => failure;
+    await expect(fonts.fontAssetUrls('latin')).rejects.toThrow(failure);
+  } finally {
+    missingPackageMessage = previousMessage;
     channel.dispose();
   }
 });
