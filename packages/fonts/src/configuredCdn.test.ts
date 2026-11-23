@@ -947,11 +947,14 @@ test('the published configureFontCdn clears the progressive entry cooldown', asy
     await expect(progressive.openSlicedFace(slices)).rejects.toThrow(reason);
     const index = fontCdnAssetUrl(cjk, slices.ref.index).href;
     expect(requests).toEqual([index]);
+    expect(observed.warning.mock.calls).toEqual([[expect.stringContaining(reason)]]);
 
     published.configureFontCdn({ baseUrl: false });
     await expect(progressive.openSlicedFace(slices)).rejects.toThrow(reason);
     expect(requests).toEqual([index, index]);
-    expect(observed.warning.mock.calls.filter(([message]) => String(message).includes(reason))).toHaveLength(2);
+    expect(observed.warning.mock.calls).toEqual([
+      [expect.stringContaining(reason)], [expect.stringContaining(reason)],
+    ]);
   } finally {
     observed.restore();
     published.configureFontCdn({ baseUrl: false });
