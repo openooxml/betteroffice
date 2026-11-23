@@ -205,6 +205,8 @@ mod tests {
                     },
                     text: "text".to_owned(),
                     style: TextStyle::default(),
+                    autofit: None,
+                    text_insets: None,
                 },
             )
             .unwrap()
@@ -308,6 +310,8 @@ mod tests {
                     },
                     text: "group".to_owned(),
                     style: TextStyle::default(),
+                    autofit: None,
+                    text_insets: None,
                 },
             )
             .unwrap()

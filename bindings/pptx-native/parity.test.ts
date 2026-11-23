@@ -46,6 +46,7 @@ describe('pptx native/wasm package parity', () => {
       const textBox = presentation.addTextBox(slideId, {
         name: 'Parity text', rect: { x: 100000, y: 200000, width: 3000000, height: 1000000 },
         text: 'Initial', style: { fontFamily: 'Arial', fontSizePt: 18, color: '#123456' },
+        autofit: 'normal', textInsets: { left: 0, top: 0, right: 0, bottom: 0 },
       });
       const shape = presentation.snapshot().slides[0].shapes.find((candidate) => candidate.id === textBox.shapeId)!;
       const storyId = shape.textStories[0].id;

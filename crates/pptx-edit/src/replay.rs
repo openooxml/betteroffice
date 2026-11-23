@@ -315,7 +315,15 @@ impl WireOp {
                 ],
             )?,
             "addTextBox" if self.args.len() >= 2 => {
-                fields(&self.args[1], &["name", "rect", "text", "style"])?
+                fields(
+                    &self.args[1],
+                    &["name", "rect", "text", "style", "autofit", "textInsets"],
+                )?;
+                if let Some(insets) = self.args[1].get("textInsets")
+                    && !insets.is_null()
+                {
+                    fields(insets, &["left", "top", "right", "bottom"])?;
+                }
             }
             "addShape" if self.args.len() >= 2 => {
                 fields(&self.args[1], &["name", "geometry", "rect", "fill"])?
@@ -1410,5 +1418,60 @@ mod tests {
             assert_eq!(result["outcome"]["applied"], false);
         }
         assert_eq!(worker.replay_diagnostics(), before);
+    }
+
+    #[test]
+    fn add_text_box_replay_accepts_autofit_and_insets_and_rejects_unknown_inset_fields() {
+        let (worker, peer) = pair();
+        let slide = worker.snapshot().unwrap().slides[0].id.clone();
+        let rect = json!({"x": 100, "y": 200, "width": 300_000, "height": 400_000});
+        let bad = json!({
+            "sequence": 1,
+            "baseVersion": worker.version(),
+            "op": {
+                "method": "addTextBox",
+                "args": [slide, {
+                    "name": "Bad",
+                    "rect": rect,
+                    "text": "Box",
+                    "style": {},
+                    "textInsets": {"left": 0, "unknown": 1}
+                }]
+            }
+        });
+        assert!(worker.replay_json(&bad.to_string()).is_err());
+
+        let result = apply_pair(
+            &worker,
+            &peer,
+            &json!({
+                "method": "addTextBox",
+                "args": [slide, {
+                    "name": "Fitted",
+                    "rect": rect,
+                    "text": "Box",
+                    "style": {},
+                    "autofit": "normal",
+                    "textInsets": {"left": 0, "top": 0, "right": 0, "bottom": 0}
+                }]
+            }),
+        );
+        let shape_id = result["outcome"]["result"]["shapeId"].as_str().unwrap();
+        let shape = worker.snapshot().unwrap().slides[0]
+            .shapes
+            .iter()
+            .find(|shape| shape.id == shape_id)
+            .cloned()
+            .unwrap();
+        assert_eq!(shape.autofit, Some(crate::TextAutofitMode::Normal));
+        assert_eq!(
+            shape.text_insets,
+            Some(crate::TextInsets {
+                left: Some(0),
+                top: Some(0),
+                right: Some(0),
+                bottom: Some(0),
+            })
+        );
     }
 }

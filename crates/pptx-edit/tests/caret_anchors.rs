@@ -75,6 +75,8 @@ fn session_with_text(text: &str) -> (DeckSession, String) {
                 },
                 text: text.to_owned(),
                 style: TextStyle::default(),
+                autofit: None,
+                text_insets: None,
             },
         )
         .unwrap();

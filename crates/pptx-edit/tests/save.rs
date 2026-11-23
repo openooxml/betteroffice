@@ -391,6 +391,8 @@ fn added_shapes_survive_reopen() {
                     color: Some("#112233".to_owned()),
                     ..TextStyle::default()
                 },
+                autofit: None,
+                text_insets: None,
             },
         )
         .unwrap();
@@ -500,6 +502,8 @@ fn slide_insert_delete_and_move_survive_reopen() {
                 },
                 text: "Inserted slide".to_owned(),
                 style: TextStyle::default(),
+                autofit: None,
+                text_insets: None,
             },
         )
         .unwrap();

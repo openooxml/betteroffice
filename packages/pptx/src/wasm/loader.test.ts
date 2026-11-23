@@ -633,6 +633,58 @@ describe('PPTX wasm boundary', () => {
     }
   });
 
+  test('added text box autofit and textInsets fit on save with fonts', async () => {
+    const fonts = [{ family: 'Liberation Sans', bytes: fontBytes }];
+    const source = openPresentation(fixture, { clientId: 9303 });
+    try {
+      const slide = source.insertSlide(source.snapshot().slides.length);
+      const hero = source.addTextBox(slide.slideId, {
+        name: 'Autofit Hero',
+        rect: { x: 100_000, y: 100_000, width: 3_800_000, height: 96 * 9_525 },
+        text: '62%',
+        style: { fontFamily: 'Liberation Sans', fontSizePt: 88, bold: true },
+        autofit: 'normal',
+        textInsets: { left: 0, top: 0, right: 0, bottom: 0 },
+      });
+      const fixed = source.addTextBox(slide.slideId, {
+        name: 'Fixed Label',
+        rect: { x: 100_000, y: 1_200_000, width: 40 * 9_525, height: 32 * 9_525 },
+        text: '02',
+        style: { fontFamily: 'Liberation Sans', fontSizePt: 14 },
+        autofit: 'none',
+        textInsets: { left: 0, right: 0 },
+      });
+      const slides = source.snapshot().slides;
+      const shapes = slides[slides.length - 1]!.shapes;
+      expect(shapes.find((s) => s.id === hero.shapeId)?.autofit).toBe('normal');
+      expect(shapes.find((s) => s.id === hero.shapeId)?.textInsets).toEqual({
+        left: 0, top: 0, right: 0, bottom: 0,
+      });
+      expect(shapes.find((s) => s.id === fixed.shapeId)?.autofit).toBe('none');
+      expect(shapes.find((s) => s.id === fixed.shapeId)?.textInsets).toEqual({ left: 0, right: 0 });
+
+      const lastSlideXml = async (bytes: Uint8Array) => {
+        const zip = await JSZip.loadAsync(bytes);
+        const slideFiles = Object.keys(zip.files)
+          .filter((name) => /^ppt\/slides\/slide\d+\.xml$/.test(name))
+          .sort((a, b) => Number(a.match(/\d+/)![0]) - Number(b.match(/\d+/)![0]));
+        return zip.file(slideFiles[slideFiles.length - 1]!)!.async('string');
+      };
+
+      const plain = await lastSlideXml(source.save());
+      expect(plain).toContain('<a:bodyPr bIns="0" lIns="0" rIns="0" tIns="0"><a:normAutofit/></a:bodyPr>');
+      expect(plain).toContain('<a:bodyPr lIns="0" rIns="0"><a:noAutofit/></a:bodyPr>');
+
+      const fitted = await lastSlideXml(source.save({ fonts }));
+      const scaleMatch = fitted.match(/<a:normAutofit fontScale="(\d+)"/);
+      expect(scaleMatch).not.toBeNull();
+      expect(Number(scaleMatch![1])).toBeLessThan(100_000);
+      expect(fitted).toContain('<a:bodyPr lIns="0" rIns="0"><a:noAutofit/></a:bodyPr>');
+    } finally {
+      source.dispose();
+    }
+  });
+
   test('edits survive a save and reopen', () => {
     const source = openPresentation(fixture, { clientId: 9005 });
     const slide = source.snapshot().slides[0];

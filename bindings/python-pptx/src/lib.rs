@@ -1906,6 +1906,8 @@ impl PyPresentation {
                 kern_pt,
                 caps,
             )?,
+            autofit: None,
+            text_insets: None,
         };
         let receipt = self.committed(self.presentation.add_text_box(
             &self.edit_ctx(),

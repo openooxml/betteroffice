@@ -170,6 +170,8 @@ export interface ShapeSnapshot {
   /** Hides this shape and its descendants; omitted when false. */
   hidden?: boolean;
   textBox?: boolean;
+  autofit?: TextAutofitMode;
+  textInsets?: TextInsets;
   aspectRatioLocked?: boolean;
   geometry: string;
   adjustValues: Record<string, number>;
@@ -322,11 +324,23 @@ export interface TextReceipt {
   text: string;
 }
 
+export type TextAutofitMode = 'normal' | 'none';
+
+/** Text body margins (`a:bodyPr/@lIns`, `tIns`, `rIns`, `bIns`), in EMU. */
+export interface TextInsets {
+  left?: number;
+  top?: number;
+  right?: number;
+  bottom?: number;
+}
+
 export interface ShapeDraft {
   name: string;
   rect: ShapeRect;
   text: string;
   style: TextStyle;
+  autofit?: TextAutofitMode;
+  textInsets?: TextInsets;
 }
 
 export interface PresetShapeDraft {

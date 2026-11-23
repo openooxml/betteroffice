@@ -338,6 +338,8 @@ fn inline_diff_preserves_context_utf16_offsets_and_never_enters_the_document() {
                     font_size_pt: Some(24.0),
                     ..Default::default()
                 },
+                autofit: None,
+                text_insets: None,
             },
         )
         .unwrap();

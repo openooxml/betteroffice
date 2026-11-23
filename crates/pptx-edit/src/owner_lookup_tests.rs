@@ -77,6 +77,8 @@ fn add_box(session: &DeckSession, slide: &str) -> String {
                 },
                 text: "text".to_owned(),
                 style: TextStyle::default(),
+                autofit: None,
+                text_insets: None,
             },
         )
         .unwrap()

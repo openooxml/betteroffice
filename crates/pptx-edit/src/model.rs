@@ -155,6 +155,10 @@ pub struct ShapeSnapshot {
     pub hidden: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub text_box: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub autofit: Option<TextAutofitMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_insets: Option<TextInsets>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub aspect_ratio_locked: bool,
     pub geometry: String,
@@ -375,6 +379,43 @@ pub struct TextReceipt {
     pub text: String,
 }
 
+/// Text autofit mode (`a:normAutofit` or `a:noAutofit`) for an added text box.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TextAutofitMode {
+    Normal,
+    None,
+}
+
+impl TextAutofitMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::None => "none",
+        }
+    }
+}
+
+/// Text body margins (`a:bodyPr/@lIns`, `tIns`, `rIns`, `bIns`), in EMU.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextInsets {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub right: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bottom: Option<i64>,
+}
+
+impl TextInsets {
+    pub fn is_empty(&self) -> bool {
+        self.left.is_none() && self.top.is_none() && self.right.is_none() && self.bottom.is_none()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShapeDraft {
@@ -382,6 +423,10 @@ pub struct ShapeDraft {
     pub rect: ShapeRect,
     pub text: String,
     pub style: TextStyle,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub autofit: Option<TextAutofitMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_insets: Option<TextInsets>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

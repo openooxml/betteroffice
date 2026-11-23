@@ -135,7 +135,7 @@ fn deck_write(
                 shapes: slide
                     .shapes
                     .iter()
-                    .map(shape_add)
+                    .map(|shape| shape_add(shape, autofit))
                     .collect::<EditResult<Vec<_>>>()?,
                 background: slide.background.clone().map(Box::new),
             },
@@ -543,7 +543,7 @@ fn shape_writes(
                     )?),
                 }
             }
-            None => ShapeWrite::Add(Box::new(shape_add(shape)?)),
+            None => ShapeWrite::Add(Box::new(shape_add(shape, autofit)?)),
         };
         writes.push(write);
     }
@@ -853,7 +853,10 @@ fn color_from_hex(color: &str) -> ColorValue {
     }
 }
 
-fn shape_add(shape: &ShapeSnapshot) -> EditResult<ShapeAdd> {
+fn shape_add(
+    shape: &ShapeSnapshot,
+    autofit: &HashMap<String, TextAutofit>,
+) -> EditResult<ShapeAdd> {
     if shape.kind == ShapeKind::Picture {
         return picture_shape_add(shape);
     }
@@ -868,6 +871,21 @@ fn shape_add(shape: &ShapeSnapshot) -> EditResult<ShapeAdd> {
         .first()
         .map(|story| paragraph_writes(story, None))
         .transpose()?;
+    let story_autofit = shape
+        .text_stories
+        .first()
+        .and_then(|story| autofit.get(&story.id))
+        .copied();
+    let resolved_autofit = match shape.autofit {
+        Some(crate::TextAutofitMode::Normal) => {
+            Some(story_autofit.unwrap_or(TextAutofit::Normal {
+                font_scale: None,
+                line_space_reduction: None,
+            }))
+        }
+        Some(crate::TextAutofitMode::None) => Some(TextAutofit::None),
+        None => None,
+    };
     Ok(ShapeAdd {
         name: shape.name.clone(),
         geometry: shape.geometry.clone(),
@@ -879,6 +897,11 @@ fn shape_add(shape: &ShapeSnapshot) -> EditResult<ShapeAdd> {
         adjust_values: shape.adjust_values.clone(),
         fill: shape.fill.clone(),
         outline: shape.outline.clone(),
+        autofit: resolved_autofit,
+        inset_left: shape.text_insets.and_then(|insets| insets.left),
+        inset_top: shape.text_insets.and_then(|insets| insets.top),
+        inset_right: shape.text_insets.and_then(|insets| insets.right),
+        inset_bottom: shape.text_insets.and_then(|insets| insets.bottom),
         paragraphs,
         picture: None,
     })
@@ -905,6 +928,11 @@ fn picture_shape_add(shape: &ShapeSnapshot) -> EditResult<ShapeAdd> {
         adjust_values: BTreeMap::new(),
         fill: None,
         outline: None,
+        autofit: None,
+        inset_left: None,
+        inset_top: None,
+        inset_right: None,
+        inset_bottom: None,
         paragraphs: None,
         picture: Some(PictureAdd {
             media_bytes,

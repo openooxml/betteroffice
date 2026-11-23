@@ -1097,13 +1097,18 @@ fn collect_autofit_edited_shapes(
                 .master
                 .and_then(|master| find_placeholder(&master.shapes, placeholder))
         });
-        if matches!(
-            [original, layout, master]
-                .into_iter()
-                .flatten()
-                .find_map(|node| node_text(node)?.autofit.as_ref()),
-            Some(TextAutofit::Normal { .. })
-        ) {
+        let has_normal_autofit = match shape.autofit {
+            Some(pptx_edit::TextAutofitMode::Normal) => true,
+            Some(pptx_edit::TextAutofitMode::None) => false,
+            None => matches!(
+                [original, layout, master]
+                    .into_iter()
+                    .flatten()
+                    .find_map(|node| node_text(node)?.autofit.as_ref()),
+                Some(TextAutofit::Normal { .. })
+            ),
+        };
+        if has_normal_autofit {
             edited.insert(shape.id.clone());
             has_edits = true;
         }
@@ -1318,6 +1323,8 @@ impl<'a> TextScope<'a> {
     {
         BodyCascade {
             fit_to_box,
+            autofit_override: None,
+            insets_override: None,
             primary: nodes[0].and_then(node_text),
             layout: nodes[1].and_then(node_text),
             master: nodes[2].and_then(node_text),
@@ -2251,11 +2258,19 @@ impl<'a> LayoutBuilder<'a> {
                 ShapeKind::Group => unreachable!(),
             }
         }
-        let body_cascade = text_scope.cascade(
+        let mut body_cascade = text_scope.cascade(
             [original, layout_node, master_node],
             shape.placeholder.as_ref(),
             false,
         );
+        body_cascade.autofit_override = shape.autofit.map(|mode| match mode {
+            pptx_edit::TextAutofitMode::Normal => TextAutofit::Normal {
+                font_scale: None,
+                line_space_reduction: None,
+            },
+            pptx_edit::TextAutofitMode::None => TextAutofit::None,
+        });
+        body_cascade.insets_override = shape.text_insets;
         let text = match shape.kind {
             ShapeKind::GraphicFrame => None,
             ShapeKind::Shape | ShapeKind::Picture | ShapeKind::Group => {
@@ -2270,7 +2285,7 @@ impl<'a> LayoutBuilder<'a> {
                     );
                     content.refit_autofit =
                         matches!(body_cascade.autofit(), Some(TextAutofit::Normal { .. }))
-                            && body_cascade.primary.is_some_and(|body| {
+                            && body_cascade.primary.is_none_or(|body| {
                                 self.renderer.story_edited(story, body, self.theme)
                             });
                     content
@@ -2500,6 +2515,8 @@ impl<'a> LayoutBuilder<'a> {
                 content,
                 BodyCascade {
                     fit_to_box: fit_text,
+                    autofit_override: None,
+                    insets_override: None,
                     primary: Some(body),
                     layout: None,
                     master: None,
@@ -3675,6 +3692,8 @@ fn direct_cell_style(cell: &TableCell) -> TableCellStyle {
 fn cell_cascade<'a>(text: &'a TextBody, inherited: &'a TextBody) -> BodyCascade<'a> {
     BodyCascade {
         fit_to_box: false,
+        autofit_override: None,
+        insets_override: None,
         primary: Some(text),
         layout: None,
         master: Some(inherited),
@@ -3853,6 +3872,8 @@ fn text_transform(shape: Transform, flow: TextFlow) -> Transform {
 #[derive(Clone, Copy)]
 struct BodyCascade<'a> {
     fit_to_box: bool,
+    autofit_override: Option<TextAutofit>,
+    insets_override: Option<pptx_edit::TextInsets>,
     primary: Option<&'a TextBody>,
     layout: Option<&'a TextBody>,
     master: Option<&'a TextBody>,
@@ -3933,35 +3954,51 @@ impl<'a> BodyCascade<'a> {
         cascade_value(self.primary, self.layout, self.master, |body| body.wrap).unwrap_or(true)
     }
 
-    fn autofit(&self) -> Option<&TextAutofit> {
-        self.primary
-            .and_then(|body| body.autofit.as_ref())
-            .or_else(|| self.layout.and_then(|body| body.autofit.as_ref()))
-            .or_else(|| self.master.and_then(|body| body.autofit.as_ref()))
+    fn autofit(&self) -> Option<TextAutofit> {
+        self.autofit_override
+            .or_else(|| self.primary.and_then(|body| body.autofit))
+            .or_else(|| self.layout.and_then(|body| body.autofit))
+            .or_else(|| self.master.and_then(|body| body.autofit))
     }
 
     fn inset_left(&self) -> Option<i64> {
-        cascade_value(self.primary, self.layout, self.master, |body| {
-            body.inset_left
-        })
+        self.insets_override
+            .and_then(|insets| insets.left)
+            .or_else(|| {
+                cascade_value(self.primary, self.layout, self.master, |body| {
+                    body.inset_left
+                })
+            })
     }
 
     fn inset_top(&self) -> Option<i64> {
-        cascade_value(self.primary, self.layout, self.master, |body| {
-            body.inset_top
-        })
+        self.insets_override
+            .and_then(|insets| insets.top)
+            .or_else(|| {
+                cascade_value(self.primary, self.layout, self.master, |body| {
+                    body.inset_top
+                })
+            })
     }
 
     fn inset_right(&self) -> Option<i64> {
-        cascade_value(self.primary, self.layout, self.master, |body| {
-            body.inset_right
-        })
+        self.insets_override
+            .and_then(|insets| insets.right)
+            .or_else(|| {
+                cascade_value(self.primary, self.layout, self.master, |body| {
+                    body.inset_right
+                })
+            })
     }
 
     fn inset_bottom(&self) -> Option<i64> {
-        cascade_value(self.primary, self.layout, self.master, |body| {
-            body.inset_bottom
-        })
+        self.insets_override
+            .and_then(|insets| insets.bottom)
+            .or_else(|| {
+                cascade_value(self.primary, self.layout, self.master, |body| {
+                    body.inset_bottom
+                })
+            })
     }
 
     /// `a:endParaRPr`: what PowerPoint sizes a paragraph by when it carries no
@@ -6838,7 +6875,7 @@ fn autofit_size_pt(size_pt: f32, scale: f32) -> f32 {
 
 /// `a:normAutofit/@fontScale`, applied verbatim: PowerPoint stores the scale it
 /// computed when the text last changed and re-fits only on edit, never on render.
-fn autofit_font_scale(autofit: Option<&TextAutofit>) -> f32 {
+fn autofit_font_scale(autofit: Option<TextAutofit>) -> f32 {
     match autofit {
         Some(TextAutofit::Normal { font_scale, .. }) => {
             font_scale.unwrap_or(1.0).clamp(0.1, 1.0) as f32
@@ -6848,7 +6885,7 @@ fn autofit_font_scale(autofit: Option<&TextAutofit>) -> f32 {
 }
 
 /// `a:normAutofit/@lnSpcReduction`, subtracted from percentage line spacing.
-fn autofit_line_space_reduction(autofit: Option<&TextAutofit>) -> f32 {
+fn autofit_line_space_reduction(autofit: Option<TextAutofit>) -> f32 {
     match autofit {
         Some(TextAutofit::Normal {
             line_space_reduction,
@@ -13284,6 +13321,8 @@ mod tests {
             graphic: None,
             text_stories: Vec::new(),
             children: Vec::new(),
+            autofit: None,
+            text_insets: None,
         };
         let make_shapes = |count: u32| {
             let baseline: Vec<_> = (0..count)
@@ -13470,8 +13509,7 @@ mod tests {
                     let plain_bytes = plain.part_bytes(part).unwrap().to_vec();
                     let plain_autofit = node_text(find_node(&plain.slides[0].shapes, 2).unwrap())
                         .unwrap()
-                        .autofit
-                        .clone();
+                        .autofit;
                     contexts.push((session, plain_bytes, plain_autofit));
                 }
             }
@@ -13589,6 +13627,131 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn added_text_box_autofit_shrinks_live_and_persists_font_scale_with_custom_insets() {
+        let (session, _) = edited_autofit_session("Untouched", false, false);
+        let ctx = pptx_edit::EditCtx::local("autofit-added");
+        let new_slide = session.insert_slide(&ctx, 1, None).unwrap();
+
+        let hero = session
+            .add_text_box(
+                &ctx,
+                &new_slide.slide_id,
+                &pptx_edit::ShapeDraft {
+                    name: "Hero 62".to_owned(),
+                    rect: pptx_edit::ShapeRect {
+                        x: 104 * 9_525,
+                        y: 274 * 9_525,
+                        width: 404 * 9_525,
+                        height: 96 * 9_525,
+                    },
+                    text: "62%".to_owned(),
+                    style: pptx_edit::TextStyle {
+                        font_family: Some("Liberation Sans".to_owned()),
+                        font_size_pt: Some(88.0),
+                        bold: Some(true),
+                        ..pptx_edit::TextStyle::default()
+                    },
+                    autofit: Some(pptx_edit::TextAutofitMode::Normal),
+                    text_insets: Some(pptx_edit::TextInsets {
+                        left: Some(0),
+                        top: Some(0),
+                        right: Some(0),
+                        bottom: Some(0),
+                    }),
+                },
+            )
+            .unwrap();
+
+        let narrow = session
+            .add_text_box(
+                &ctx,
+                &new_slide.slide_id,
+                &pptx_edit::ShapeDraft {
+                    name: "Narrow Badge".to_owned(),
+                    rect: pptx_edit::ShapeRect {
+                        x: 600 * 9_525,
+                        y: 274 * 9_525,
+                        width: 40 * 9_525,
+                        height: 32 * 9_525,
+                    },
+                    text: "02".to_owned(),
+                    style: pptx_edit::TextStyle {
+                        font_family: Some("Liberation Sans".to_owned()),
+                        font_size_pt: Some(14.0),
+                        ..pptx_edit::TextStyle::default()
+                    },
+                    autofit: Some(pptx_edit::TextAutofitMode::None),
+                    text_insets: Some(pptx_edit::TextInsets {
+                        left: Some(0),
+                        top: Some(0),
+                        right: Some(0),
+                        bottom: Some(0),
+                    }),
+                },
+            )
+            .unwrap();
+
+        let renderer = renderer();
+        let snapshot = session.snapshot().unwrap();
+        let rendered = renderer
+            .layout_slide(session.package(), &snapshot, 1)
+            .unwrap();
+        let hero_story_id = format!("story:{}:0", hero.shape_id);
+        let expected_autofit = rendered.autofit.get(&hero_story_id).copied().unwrap();
+        assert!(
+            matches!(
+                expected_autofit,
+                TextAutofit::Normal {
+                    font_scale: Some(scale),
+                    ..
+                } if scale < 1.0
+            ),
+            "expected overflowing 88pt text in 96px box to shrink, got {expected_autofit:?}"
+        );
+
+        let narrow_lines: usize = rendered
+            .display_list
+            .primitives
+            .iter()
+            .filter_map(|primitive| match primitive {
+                Primitive::TextBox {
+                    shape_id, lines, ..
+                } if shape_id.as_deref() == Some(narrow.shape_id.as_str()) => Some(lines.len()),
+                _ => None,
+            })
+            .sum();
+        assert_eq!(narrow_lines, 1);
+
+        let saved = renderer.save(&session).unwrap();
+        let reopened = pptx_parse::parse_pptx(&saved).unwrap();
+        let hero_body = reopened.slides[1]
+            .shapes
+            .iter()
+            .find_map(|node| match node {
+                ShapeNode::Shape(shape) if shape.base.name == "Hero 62" => shape.text.as_ref(),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(hero_body.autofit, Some(expected_autofit));
+        assert_eq!(hero_body.inset_left, Some(0));
+        assert_eq!(hero_body.inset_top, Some(0));
+        assert_eq!(hero_body.inset_right, Some(0));
+        assert_eq!(hero_body.inset_bottom, Some(0));
+
+        let narrow_body = reopened.slides[1]
+            .shapes
+            .iter()
+            .find_map(|node| match node {
+                ShapeNode::Shape(shape) if shape.base.name == "Narrow Badge" => shape.text.as_ref(),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(narrow_body.autofit, Some(TextAutofit::None));
+        assert_eq!(narrow_body.inset_left, Some(0));
+        assert_eq!(narrow_body.inset_right, Some(0));
     }
 
     #[test]
@@ -14624,6 +14787,8 @@ mod tests {
             graphic: None,
             text_stories: Vec::new(),
             children: Vec::new(),
+            autofit: None,
+            text_insets: None,
         };
         let layout_shape = ShapeNode::Shape(pptx_parse::Shape {
             has_preset_geometry: true,

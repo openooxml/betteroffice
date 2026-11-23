@@ -120,6 +120,8 @@ fn two_sessions_converge_after_text_slide_and_shape_edits() {
                     bold: Some(true),
                     ..TextStyle::default()
                 },
+                autofit: None,
+                text_insets: None,
             },
         )
         .unwrap();
@@ -261,6 +263,8 @@ fn undo_deletion_preserves_concurrent_edits(delete_slide: bool) {
                         },
                         text: "Remote shape".to_owned(),
                         style: TextStyle::default(),
+                        autofit: None,
+                        text_insets: None,
                     },
                 )
                 .unwrap();
@@ -1167,6 +1171,8 @@ fn deleting_a_slide_converges_with_concurrent_edits_inserts_and_moves_around_it(
                 },
                 text: "added while deleted".to_owned(),
                 style: TextStyle::default(),
+                autofit: None,
+                text_insets: None,
             },
         )
         .unwrap();

@@ -134,6 +134,8 @@ impl FloatBitsWalk for pptx_edit::ShapeSnapshot {
             inherited,
             hidden,
             text_box,
+            autofit,
+            text_insets,
             aspect_ratio_locked,
             geometry,
             adjust_values,
@@ -167,6 +169,8 @@ impl FloatBitsWalk for pptx_edit::ShapeSnapshot {
         inherited.float_bits(out);
         hidden.float_bits(out);
         text_box.float_bits(out);
+        autofit.float_bits(out);
+        text_insets.float_bits(out);
         aspect_ratio_locked.float_bits(out);
         geometry.float_bits(out);
         adjust_values.float_bits(out);
@@ -182,6 +186,25 @@ impl FloatBitsWalk for pptx_edit::ShapeSnapshot {
         graphic.float_bits(out);
         text_stories.float_bits(out);
         children.float_bits(out);
+    }
+}
+
+impl FloatBitsWalk for pptx_edit::TextAutofitMode {
+    fn float_bits(&self, _out: &mut Vec<u64>) {}
+}
+
+impl FloatBitsWalk for pptx_edit::TextInsets {
+    fn float_bits(&self, out: &mut Vec<u64>) {
+        let Self {
+            left,
+            top,
+            right,
+            bottom,
+        } = self;
+        left.float_bits(out);
+        top.float_bits(out);
+        right.float_bits(out);
+        bottom.float_bits(out);
     }
 }
 

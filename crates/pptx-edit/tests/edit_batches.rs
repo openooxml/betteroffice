@@ -427,6 +427,8 @@ fn surrogates_and_overlapping_occurrences_are_never_split_or_guessed() {
                 },
                 text: "aaa".into(),
                 style: TextStyle::default(),
+                autofit: None,
+                text_insets: None,
             },
         )
         .unwrap();
