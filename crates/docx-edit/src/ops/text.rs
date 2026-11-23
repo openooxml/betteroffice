@@ -103,7 +103,14 @@ pub(crate) fn overlaid(base: &[(String, Any)], overlay: &[(String, Any)]) -> Vec
 }
 
 /// Resolves inherited, explicit, or plain insertion attributes.
-fn policy_attrs(chunks: &[Chunk], at: u32, policy: &FormatPolicy) -> Vec<(String, Any)> {
+fn policy_attrs<T: ReadTxn>(
+    chunks: &[Chunk],
+    at: u32,
+    policy: &FormatPolicy,
+    story_id: &str,
+    source_metadata: Option<&crate::seed::SourceMetadata>,
+    txn: &T,
+) -> Vec<(String, Any)> {
     match policy {
         FormatPolicy::Plain => Vec::new(),
         FormatPolicy::Explicit(map) => map
@@ -144,9 +151,74 @@ fn policy_attrs(chunks: &[Chunk], at: u32, policy: &FormatPolicy) -> Vec<(String
                     other.is_some_and(|other| other.attrs.get(HYPERLINK) == Some(&attrs[index].1));
                 if !same_on_other {
                     attrs.remove(index);
+                    strip_exited_hyperlink_style(
+                        &mut attrs,
+                        chunks,
+                        at,
+                        story_id,
+                        source_metadata,
+                        txn,
+                    );
                 }
             }
             attrs
+        }
+    }
+}
+
+fn strip_exited_hyperlink_style<T: ReadTxn>(
+    attrs: &mut Vec<(String, Any)>,
+    chunks: &[Chunk],
+    at: u32,
+    story_id: &str,
+    source: Option<&crate::seed::SourceMetadata>,
+    txn: &T,
+) {
+    let strip_run_style = attrs
+        .iter()
+        .find(|(key, _)| key == "runStyle")
+        .is_some_and(|(_, value)| crate::format::is_hyperlink_run_style(Some(value), source));
+    let restore_color = attrs
+        .iter()
+        .find(|(key, _)| key == "textColor")
+        .is_some_and(|(_, value)| crate::format::is_inherited_hyperlink_attr(Some(value)));
+    let restore_underline = attrs
+        .iter()
+        .find(|(key, _)| key == "underline")
+        .is_some_and(|(_, value)| crate::format::is_inherited_hyperlink_attr(Some(value)));
+    if !strip_run_style && !restore_color && !restore_underline {
+        return;
+    }
+    if strip_run_style {
+        attrs.retain(|(key, _)| key != "runStyle");
+    }
+    if restore_color || restore_underline {
+        let paragraph_style = chunks
+            .iter()
+            .find(|chunk| chunk.start >= at && matches!(chunk.kind, ChunkKind::Pilcrow(_)))
+            .and_then(|chunk| match &chunk.kind {
+                ChunkKind::Pilcrow(mark) => crate::map_string(mark, txn, "pStyle"),
+                _ => None,
+            });
+        let base = source
+            .and_then(|source| {
+                crate::format::styled_run_base(source, story_id, paragraph_style.as_deref(), None)
+                    .ok()
+            })
+            .unwrap_or_default();
+        for (should_restore, key) in [
+            (restore_color, "textColor"),
+            (restore_underline, "underline"),
+        ] {
+            if !should_restore {
+                continue;
+            }
+            attrs.retain(|(k, _)| k != key);
+            if let Some(value) = base.get(key)
+                && *value != Any::Null
+            {
+                attrs.push((key.to_owned(), value.clone()));
+            }
         }
     }
 }
@@ -157,6 +229,8 @@ fn insertion_attrs<T: ReadTxn>(
     chunks: &[Chunk],
     at: u32,
     policy: &FormatPolicy,
+    story_id: &str,
+    source: Option<&crate::seed::SourceMetadata>,
     txn: &T,
 ) -> Vec<(String, Any)> {
     if matches!(policy, FormatPolicy::Inherit) {
@@ -181,7 +255,7 @@ fn insertion_attrs<T: ReadTxn>(
             return crate::seed::mark_run_attrs(&defaults);
         }
     }
-    policy_attrs(chunks, at, policy)
+    policy_attrs(chunks, at, policy, story_id, source, txn)
 }
 
 fn stamped_attrs(formatting: Vec<(String, Any)>, ins: Option<Any>) -> Attrs {
@@ -485,7 +559,15 @@ impl EditingDoc {
                 })
                 .unwrap_or_else(|| self.next_id(txn))
         });
-        let formatting = insertion_attrs(&chunks, at.index, &policy, txn);
+        let source_metadata = self.source_metadata();
+        let formatting = insertion_attrs(
+            &chunks,
+            at.index,
+            &policy,
+            &at.story,
+            source_metadata.as_deref(),
+            txn,
+        );
         let ins = revision_id
             .as_ref()
             .map(|id| revision_value(id, &ctx.revision_author()));
@@ -704,7 +786,17 @@ impl EditingDoc {
                     .map(|(key, value)| (key.clone(), value.clone()))
                     .collect()
             })
-            .unwrap_or_else(|| insertion_attrs(&chunks, range.start, &FormatPolicy::Inherit, txn));
+            .unwrap_or_else(|| {
+                let source_metadata = self.source_metadata();
+                insertion_attrs(
+                    &chunks,
+                    range.start,
+                    &FormatPolicy::Inherit,
+                    &range.story,
+                    source_metadata.as_deref(),
+                    txn,
+                )
+            });
 
         let revision = revision_id
             .as_ref()
@@ -880,7 +972,15 @@ impl EditingDoc {
             adjacent_revision_id(&chunks, at.index, INS, &ctx.author)
                 .unwrap_or_else(|| self.next_id(&txn))
         });
-        let formatting = policy_attrs(&chunks, at.index, &FormatPolicy::Inherit);
+        let source_metadata = self.source_metadata();
+        let formatting = policy_attrs(
+            &chunks,
+            at.index,
+            &FormatPolicy::Inherit,
+            &at.story,
+            source_metadata.as_deref(),
+            &txn,
+        );
         let ins = revision_id
             .as_ref()
             .map(|id| revision_value(id, &ctx.revision_author()));
@@ -916,7 +1016,15 @@ impl EditingDoc {
             adjacent_revision_id(&chunks, at.index, INS, &ctx.author)
                 .unwrap_or_else(|| self.next_id(&txn))
         });
-        let formatting = policy_attrs(&chunks, at.index, &FormatPolicy::Inherit);
+        let source_metadata = self.source_metadata();
+        let formatting = policy_attrs(
+            &chunks,
+            at.index,
+            &FormatPolicy::Inherit,
+            &at.story,
+            source_metadata.as_deref(),
+            &txn,
+        );
         let ins = revision_id
             .as_ref()
             .map(|id| revision_value(id, &ctx.revision_author()));

@@ -4039,6 +4039,7 @@ class SaveContext {
   private readonly referenceRuns = new Map<number, Run>();
   private readonly commentParents = new Map<number, number>();
   private readonly hasCommentReferenceStyle: boolean;
+  private readonly hasHyperlinkStyle: boolean;
   private readonly baseStories: Map<string, readonly BlockContent[]>;
   private readonly baseChartDrawings = new Map<string, Map<string, string>>();
   private readonly comments: Map<string, Array<{ id: number; start: number; end: number }>>;
@@ -4107,6 +4108,8 @@ class SaveContext {
     }
     this.hasCommentReferenceStyle = (base.package.styles?.styles ?? [])
       .some(style => style.styleId === 'CommentReference' && style.type === 'character');
+    this.hasHyperlinkStyle = (base.package.styles?.styles ?? [])
+      .some(style => style.styleId?.toLowerCase() === 'hyperlink' && style.type === 'character');
     this.comments = commentRanges(session, base.package.document.comments, commentIds);
     this.base = base;
     this.savedComments = new Set((base.package.document.comments ?? []).map((comment) => comment.id));
@@ -4541,6 +4544,21 @@ class SaveContext {
     if (inherited === undefined) {
       const inheritance = this.inheritance();
       inherited = attrsToTextFormatting(inheritance.attributes(paragraphStyle, runStyle, tableRun));
+      if (runStyle === 'Hyperlink' && !this.hasHyperlinkStyle) {
+        inherited = {
+          ...inherited,
+          color: {
+            rgb: '0563C1',
+            themeColor: null as unknown as undefined,
+            themeTint: null as unknown as undefined,
+            themeShade: null as unknown as undefined,
+          },
+          underline: {
+            style: 'single',
+            color: null as unknown as undefined,
+          },
+        };
+      }
       this.inheritedRuns.set(key, inherited);
     }
     return inherited;

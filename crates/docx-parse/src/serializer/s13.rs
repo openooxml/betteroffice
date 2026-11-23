@@ -54,6 +54,8 @@ const FOOTER_CONTENT_TYPE: &str =
     "application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml";
 const NUMBERING_CONTENT_TYPE: &str =
     "application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml";
+const STYLES_CONTENT_TYPE: &str =
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml";
 const COMMENTS_CONTENT_TYPE: &str =
     "application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml";
 const COMMENTS_EXTENDED_CONTENT_TYPE: &str =
@@ -309,6 +311,7 @@ pub fn write_docx_s13_parts_with_report(
         let patched =
             build_source_patched_document_xml(&request.document, original, sources, &mut context)?;
         package.set_text("word/document.xml", patched);
+        ensure_hyperlink_style(&request, &mut package, &mut budget);
         update_core_part(&request.options, &mut package, context.now());
         let bytes = rezip_package(&package, source)?;
         return Ok((bytes, context.take_report()));
@@ -553,6 +556,7 @@ pub fn write_docx_s13_parts_with_report(
         }
     }
 
+    ensure_hyperlink_style(&request, &mut package, &mut budget);
     if request.selective.is_none() {
         ensure_header_footer_parts(&relationships, &mut package)?;
         ensure_numbering_part(request.numbering.as_ref(), &mut package);
@@ -2147,6 +2151,204 @@ fn ensure_numbering_part(numbering: Option<&NumberingDefinitions>, package: &mut
         if let Some(updated) = relationships.serialize() {
             package.set_text(path, updated);
         }
+    }
+}
+
+fn ensure_hyperlink_style(
+    request: &S13SaveRequest,
+    package: &mut Package,
+    budget: &mut crate::xml::ParseBudget,
+) {
+    if !request_uses_hyperlink_style(request) {
+        return;
+    }
+    let styles_path = "word/styles.xml";
+    if let Some(existing_xml) = package.text(styles_path) {
+        let parsed = crate::styles::parse_style_definitions(
+            existing_xml.as_bytes(),
+            None,
+            styles_path,
+            budget,
+        )
+        .ok();
+        if parsed.as_ref().is_some_and(|defs| {
+            defs.styles
+                .iter()
+                .any(|style| style.style_id.eq_ignore_ascii_case("Hyperlink"))
+        }) {
+            return;
+        }
+        let has_default_char_style = parsed.as_ref().is_some_and(|defs| {
+            defs.styles
+                .iter()
+                .any(|style| style.style_id == "DefaultParagraphFont")
+        });
+        let style_xml = hyperlink_style_element_xml(has_default_char_style);
+        let updated = append_before(&existing_xml, "</w:styles>", &style_xml).or_else(|| {
+            let start = existing_xml.find("<w:styles")?;
+            let end = existing_xml[start..].find("/>")? + start;
+            let mut xml = String::with_capacity(existing_xml.len() + style_xml.len() + 12);
+            xml.push_str(&existing_xml[..end]);
+            xml.push('>');
+            xml.push_str(&style_xml);
+            xml.push_str("</w:styles>");
+            xml.push_str(&existing_xml[end + 2..]);
+            Some(xml)
+        });
+        if let Some(updated) = updated {
+            package.set_text(styles_path, updated);
+        }
+        return;
+    }
+
+    let style_xml = hyperlink_style_element_xml(false);
+    package.set_text(
+        styles_path,
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n\
+             <w:styles xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\
+             {style_xml}</w:styles>"
+        ),
+    );
+    if let Some(content_types) = package.text("[Content_Types].xml")
+        && !content_types.contains("PartName=\"/word/styles.xml\"")
+    {
+        let entry = format!(
+            "<Override PartName=\"/word/styles.xml\" ContentType=\"{STYLES_CONTENT_TYPE}\"/>"
+        );
+        if let Some(updated) = append_before(&content_types, "</Types>", &entry) {
+            package.set_text("[Content_Types].xml", updated);
+        }
+    }
+    let rels_path = relationship_part_path(&package.document_path);
+    let mut relationships = RelationshipsIndex::parse(read_rels_or_stub(package, &rels_path));
+    if !relationships.xml_contains("Target=\"styles.xml\"") {
+        let relationship_id = relationships.next_id();
+        relationships.push_new(
+            relationship_id,
+            relationship_types::STYLES,
+            "styles.xml".to_owned(),
+            None,
+        );
+        if let Some(updated) = relationships.serialize() {
+            package.set_text(rels_path, updated);
+        }
+    }
+}
+
+fn hyperlink_style_element_xml(include_based_on: bool) -> String {
+    let based_on = if include_based_on {
+        "<w:basedOn w:val=\"DefaultParagraphFont\"/>"
+    } else {
+        ""
+    };
+    format!(
+        "<w:style w:type=\"character\" w:styleId=\"Hyperlink\">\
+         <w:name w:val=\"Hyperlink\"/>{based_on}\
+         <w:uiPriority w:val=\"99\"/><w:unhideWhenUsed/>\
+         <w:rPr><w:color w:val=\"0563C1\"/><w:u w:val=\"single\"/></w:rPr>\
+         </w:style>"
+    )
+}
+
+fn request_uses_hyperlink_style(request: &S13SaveRequest) -> bool {
+    if blocks_use_hyperlink_style(&request.document.content) {
+        return true;
+    }
+    for (_, part) in &request.header_entries {
+        if blocks_use_hyperlink_style(&part.content) {
+            return true;
+        }
+    }
+    for (_, part) in &request.footer_entries {
+        if blocks_use_hyperlink_style(&part.content) {
+            return true;
+        }
+    }
+    for note in request
+        .footnotes
+        .iter()
+        .chain(&request.endnotes)
+        .chain(&request.footnote_separators)
+        .chain(&request.endnote_separators)
+    {
+        if blocks_use_hyperlink_style(&note.content) {
+            return true;
+        }
+    }
+    if let Some(comments) = &request.document.comments {
+        for comment in comments {
+            if blocks_use_hyperlink_style(&comment.block_content)
+                || comment.content.iter().any(paragraph_uses_hyperlink_style)
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn blocks_use_hyperlink_style(blocks: &[BlockContent]) -> bool {
+    blocks.iter().any(|block| match block {
+        BlockContent::Paragraph(paragraph) => paragraph_uses_hyperlink_style(paragraph),
+        BlockContent::Table(table) => table.rows.iter().any(|row| {
+            row.cells
+                .iter()
+                .any(|cell| blocks_use_hyperlink_style(&cell.content))
+        }),
+        BlockContent::BlockSdt(sdt) => blocks_use_hyperlink_style(&sdt.content),
+        BlockContent::RawXml(_) => false,
+    })
+}
+
+fn paragraph_uses_hyperlink_style(paragraph: &Paragraph) -> bool {
+    paragraph.content.iter().any(|content| match content {
+        ParagraphContent::Inline(node) => inline_uses_hyperlink_style(node, false),
+        ParagraphContent::Tracked(change) => change
+            .content
+            .iter()
+            .any(|node| inline_uses_hyperlink_style(node, false)),
+        _ => false,
+    })
+}
+
+fn inline_uses_hyperlink_style(node: &InlineNode, in_hyperlink: bool) -> bool {
+    match node {
+        InlineNode::Hyperlink(link) => {
+            let children = link
+                .structured_children
+                .as_deref()
+                .unwrap_or(&link.children);
+            children
+                .iter()
+                .any(|child| inline_uses_hyperlink_style(child, true))
+        }
+        InlineNode::Run(run) => {
+            in_hyperlink
+                && run
+                    .formatting
+                    .as_ref()
+                    .and_then(|formatting| formatting.style_id.as_deref())
+                    == Some("Hyperlink")
+        }
+        InlineNode::InlineSdt(sdt) => sdt
+            .content
+            .iter()
+            .any(|child| inline_uses_hyperlink_style(child, in_hyperlink)),
+        InlineNode::Tracked(change) => change
+            .content
+            .iter()
+            .any(|child| inline_uses_hyperlink_style(child, in_hyperlink)),
+        InlineNode::ComplexField(field) => field
+            .structured_result
+            .as_ref()
+            .and_then(|result| result.inline.as_deref())
+            .is_some_and(|nodes| {
+                nodes
+                    .iter()
+                    .any(|child| inline_uses_hyperlink_style(child, in_hyperlink))
+            }),
+        _ => false,
     }
 }
 
@@ -5558,5 +5760,71 @@ mod tests {
         assert!(allocates(&written));
         let copied = spanning_field(json!([drawing_run("")]), json!([]));
         assert!(!allocates(&copied));
+    }
+
+    #[test]
+    fn saving_hyperlink_run_ensures_hyperlink_style_in_styles_xml() {
+        let styled_link_request = || -> S13SaveRequest {
+            serde_json::from_value(json!({
+                "determinism": determinism(),
+                "document": {
+                    "content": [{
+                        "type": "paragraph",
+                        "content": [{
+                            "type": "hyperlink",
+                            "href": "https://example.com",
+                            "children": [{
+                                "type": "run",
+                                "formatting": { "styleId": "Hyperlink" },
+                                "content": [{ "type": "text", "text": "Example" }]
+                            }]
+                        }]
+                    }]
+                }
+            }))
+            .expect("request")
+        };
+
+        // 1) Package without word/styles.xml gets a minimal word/styles.xml + content type + rel.
+        let bare = base_package(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Example</w:t></w:r></w:p></w:body></w:document>"#,
+        );
+        let saved_bare = write_docx_s13(styled_link_request(), &bare).expect("save bare");
+        let bare_parts = part_map(&saved_bare);
+        let styles_xml = String::from_utf8(bare_parts["word/styles.xml"].clone()).unwrap();
+        assert!(styles_xml.contains(r#"w:styleId="Hyperlink""#));
+        assert!(styles_xml.contains(r#"<w:color w:val="0563C1"/>"#));
+        assert!(styles_xml.contains(r#"<w:u w:val="single"/>"#));
+        let ct = String::from_utf8(bare_parts["[Content_Types].xml"].clone()).unwrap();
+        assert!(ct.contains(r#"PartName="/word/styles.xml""#));
+        let rels = String::from_utf8(bare_parts["word/_rels/document.xml.rels"].clone()).unwrap();
+        assert!(rels.contains(r#"Target="styles.xml""#));
+
+        // 2) Package with word/styles.xml lacking Hyperlink gets Hyperlink appended.
+        let mut with_styles_parts = part_map(&bare);
+        with_styles_parts.insert(
+            "word/styles.xml".to_owned(),
+            br#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="character" w:default="1" w:styleId="DefaultParagraphFont"><w:name w:val="Default Paragraph Font"/></w:style></w:styles>"#.to_vec(),
+        );
+        let with_styles =
+            ooxml_opc::rezip_parts(&with_styles_parts.into_iter().collect::<Vec<_>>())
+                .expect("zip with styles");
+        let saved_with_styles =
+            write_docx_s13(styled_link_request(), &with_styles).expect("save with styles");
+        let updated_styles =
+            String::from_utf8(part_map(&saved_with_styles)["word/styles.xml"].clone()).unwrap();
+        assert!(updated_styles.contains(r#"w:styleId="DefaultParagraphFont""#));
+        assert!(updated_styles.contains(r#"w:styleId="Hyperlink""#));
+        assert!(updated_styles.contains(r#"<w:basedOn w:val="DefaultParagraphFont"/>"#));
+
+        // 3) Package already defining Hyperlink keeps word/styles.xml untouched.
+        let custom_styles = br#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="character" w:styleId="Hyperlink"><w:name w:val="Hyperlink"/><w:rPr><w:color w:val="123456"/></w:rPr></w:style></w:styles>"#.to_vec();
+        let mut existing_parts = part_map(&bare);
+        existing_parts.insert("word/styles.xml".to_owned(), custom_styles.clone());
+        let with_existing = ooxml_opc::rezip_parts(&existing_parts.into_iter().collect::<Vec<_>>())
+            .expect("zip with existing");
+        let saved_existing =
+            write_docx_s13(styled_link_request(), &with_existing).expect("save existing");
+        assert_eq!(part_map(&saved_existing)["word/styles.xml"], custom_styles);
     }
 }

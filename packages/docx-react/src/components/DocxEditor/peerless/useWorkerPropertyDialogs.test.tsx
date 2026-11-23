@@ -202,6 +202,18 @@ test('bare caret link inserts display text and existing link removal uses its ex
     hyperlink: { href: 'https://example.com/new' }, displayText: 'New', expectVersion: 'captured-native' } });
 });
 
+test('bare caret link without display text inserts the URL as its text', async () => {
+  const { hook, applyQuery, selection, controller } = fixture();
+  selection.focus.offset = selection.anchor.offset;
+  controller.query = (async () => ({ version: 'captured-native', selection, value: { kind: 'hyperlink',
+    range: { story: 'body', start: selection.anchor, end: selection.focus }, hyperlink: null } })) as never;
+  controller.readAt = mock(async () => ({ selectedText: '' })) as never;
+  await act(async () => { await hook.result.current.openLink(); });
+  await act(async () => { await hook.result.current.element.props.children[2].props.onSubmit({ url: 'https://example.com/new', displayText: '' }); });
+  expect(applyQuery.mock.calls[0]![1]).toEqual({ kind: 'setHyperlink', payload: { selection,
+    hyperlink: { href: 'https://example.com/new' }, displayText: 'https://example.com/new', expectVersion: 'captured-native' } });
+});
+
 test('popup link edits and removal query the expanded current caret through the barrier', async () => {
   const { hook, applyQuery, selection, range } = fixture();
   selection.focus.offset = selection.anchor.offset;
