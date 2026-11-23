@@ -590,10 +590,9 @@ export class TextMeasureFontRegistry {
     const standsIn = standIn?.standsIn(family) === true;
     const noOtherFace = ids.length === 0;
     const tail = !standsIn || noOtherFace || this.standInTail;
-    const canUseFallback = () => !cdnUnavailable || !isImplicitFontProvider(bundled);
     let lastResort: BundledFontLoader | undefined;
     try {
-      if (tail && canUseFallback()) lastResort = bundled?.resolveLastResort?.(family, bold, italic, 'word');
+      if (tail && !cdnUnavailable) lastResort = bundled?.resolveLastResort?.(family, bold, italic, 'word');
     } catch (error) {
       retryable = true;
       this.warnFailure(
@@ -609,7 +608,7 @@ export class TextMeasureFontRegistry {
     }
 
     try {
-      const coverage = tail && canUseFallback() ? bundled?.resolveGlyphFallback?.(family, bold, italic, 'word') : undefined;
+      const coverage = tail && !cdnUnavailable ? bundled?.resolveGlyphFallback?.(family, bold, italic, 'word') : undefined;
       if (coverage) {
         const id = await fromCdn(this.registerLastResort(`${key}|coverage`, coverage, family));
         if (id !== null && !ids.includes(id)) ids.push(id);
@@ -619,7 +618,7 @@ export class TextMeasureFontRegistry {
       retryable = true;
     }
 
-    if (ids.length === 0 && (loader || lastResort) && canUseFallback()) {
+    if (ids.length === 0 && (loader || lastResort) && (!cdnUnavailable || !isImplicitFontProvider(bundled))) {
       const base = bundled?.resolveBaseLatin?.(bold, italic, family);
       if (base) {
         const id = await fromCdn(this.registerLastResort(`${key}|base-latin`, base, family));
