@@ -48,7 +48,9 @@ function resolvedFace(fonts: Fonts, method: PropertyKey, args: unknown[]): Resol
  * the provider and of its loaders is kept, and each loader is wrapped once. A font package too old to tell a pack
  * that is not installed from one that fails rejects with `font-unavailable`.
  */
-export function recordFaceLoads(provider: BundledFontProvider, fonts: Fonts): RecordedFontProvider {
+export function recordFaceLoads(
+  provider: BundledFontProvider, fonts: Fonts, suppliedFamilies?: ReadonlySet<string>,
+): RecordedFontProvider {
   if (typeof fonts.isMissingFontAddon !== 'function') {
     throw fontUnavailable('PNG export needs the @betteroffice/fonts release @betteroffice/docx depends on; this one is older.');
   }
@@ -94,6 +96,8 @@ export function recordFaceLoads(provider: BundledFontProvider, fonts: Fonts): Re
       let method = methods.get(key);
       if (!method) {
         method = (...args: unknown[]) => {
+          const family = key === 'resolveScriptFallback' ? args[3] : args[0];
+          if (typeof family === 'string' && suppliedFamilies?.has(family.trim().toLowerCase())) return undefined;
           const loader: unknown = value.apply(target, args);
           return typeof loader === 'function'
             ? watch(loader as BundledFontLoader, () => resolvedFace(fonts, key, args))
@@ -122,8 +126,10 @@ export function faceLoadFailure(failures: readonly FailedFaceLoad[]): ReturnType
 }
 
 /** `provider` wrapped by {@link recordFaceLoads}, with the font package it loads from. */
-export async function recordProviderFaceLoads(provider: BundledFontProvider): Promise<RecordedFontProvider> {
-  return recordFaceLoads(provider, await importFonts());
+export async function recordProviderFaceLoads(
+  provider: BundledFontProvider, suppliedFamilies: ReadonlySet<string>,
+): Promise<RecordedFontProvider> {
+  return recordFaceLoads(provider, await importFonts(), suppliedFamilies);
 }
 
 /** `work`'s result, or a rejection with the signal's reason as soon as it aborts; `work` itself runs on. */
