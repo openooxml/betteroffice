@@ -81,6 +81,7 @@ GDPR-compliant Google Fonts alternative; switch to Google Fonts or your own URL,
 fonts off. The spreadsheet editor paints with those fetched faces today; the document and
 presentation editors use a generic fallback for them until they measure with the fetched faces.
 You can also bundle the font packs yourself.
+Browser pages load uninstalled packs from jsDelivr unless you call `configureFontCdn({ baseUrl: false })`.
 
 **Headless engines (`-native`, Python, Rust).** All fonts are included by default, so nothing is
 fetched.
