@@ -542,6 +542,12 @@
     "tableInserted": "已插入表格",
     "tableDeleted": "已刪除表格"
   },
+  "pasteOptions": {
+    "button": "貼上選項 (Ctrl)",
+    "keepSource": "保留來源格式",
+    "merge": "合併格式",
+    "textOnly": "只保留文字"
+  },
   "contextMenu": {
     "ariaLabel": "AI 動作功能表",
     "textMenuAriaLabel": "文字編輯功能表",
@@ -587,6 +593,7 @@
     "noDocumentLoaded": "尚未載入文件",
     "failedToLoad": "無法開啟此文件",
     "failedToLoadDescription": "檔案可能已損毀，或使用了此編輯器尚無法讀取的功能。",
+    "recoveryFailedDescription": "編輯器已停止運作，無法還原您最近的變更。檔案本身並未損毀。",
     "failedToLoadDamaged": "檔案已損毀,或不是完整的 Word 文件。",
     "failedToLoadUnsupported": "此文件使用了此編輯器尚無法讀取的內容。",
     "editorUnavailable": "編輯器無法載入",
@@ -874,6 +881,7 @@
     "toolbarGroup": "外掛程式",
     "panelTabs": "外掛程式面板",
     "collapsePanel": "收合 {title}",
-    "expandPanel": "展開 {title}"
+    "expandPanel": "展開 {title}",
+    "miniToolbar": "所選內容格式"
   }
 }

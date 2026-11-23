@@ -13,8 +13,10 @@ use std::sync::{Arc, Mutex, Weak};
 use yrs::sync::time::Clock;
 use yrs::types::text::YChange;
 use yrs::types::{DeepObservable, Delta, EntryChange, Event};
+use yrs::updates::decoder::Decode;
 use yrs::{
-    Any, Doc, IdSet, Map, MapRef, Origin, Out, ReadTxn, Snapshot, Subscription, Text, Transact,
+    Any, Doc, IdSet, Map, MapRef, Origin, Out, ReadTxn, Snapshot, StickyIndex, Subscription, Text,
+    Transact,
 };
 
 use crate::identity::{IdentityRepair, IdentityWatch};
@@ -120,7 +122,7 @@ pub struct DocUndoManager {
     doc: Doc,
     identities: IdentityRepair,
     anchor_state: Arc<Mutex<AnchorState>>,
-    _anchors: Subscription,
+    _anchors: [Subscription; 2],
     _removals: Subscription,
     _history: [Subscription; 2],
     clock: Arc<CaptureClock>,
@@ -216,7 +218,7 @@ impl DocUndoManager {
         inner.expand_scope(doc.yrs_doc(), &margins);
         let anchor_root = comments.clone();
         let anchor_state = Arc::new(Mutex::new(AnchorState {
-            current: comment_boundaries(&doc.doc.transact()),
+            current: anchor_boundaries(&doc.doc.transact()),
             ..AnchorState::default()
         }));
         let changed_stories = Arc::new(Mutex::new(Vec::new()));
@@ -244,15 +246,24 @@ impl DocUndoManager {
                 *lock(&changed_stories) = changed;
             })
         };
-        let anchors = {
+        let raw_inlines = doc
+            .yrs_doc()
+            .transact()
+            .get_map(crate::RAW_INLINES)
+            .expect("raw inlines root is declared");
+        let observe_anchors = |root: &MapRef| {
             let state = Arc::clone(&anchor_state);
-            anchor_root.observe_deep(move |txn, _| {
-                let next = comment_boundaries(txn);
+            root.observe_deep(move |txn, _| {
+                let next = anchor_boundaries(txn);
                 let mut state = state.lock().unwrap();
+                if state.current == next {
+                    return;
+                }
                 state.pending = std::mem::replace(&mut state.current, next.clone());
                 merge_boundaries(&mut state.pending, &next);
             })
         };
+        let anchors = [observe_anchors(&anchor_root), observe_anchors(&raw_inlines)];
         let removals = {
             let state = Arc::clone(&anchor_state);
             let removed = removal_root.clone();
@@ -495,10 +506,10 @@ impl DocUndoManager {
             changed.sort();
             changed.dedup();
         }
-        self.restore_comment_boundaries();
+        self.restore_anchor_boundaries();
     }
 
-    fn restore_comment_boundaries(&self) {
+    fn restore_anchor_boundaries(&self) {
         let mut boundaries = self.anchor_state.lock().unwrap().current.clone();
         for item in self
             .inner
@@ -527,36 +538,19 @@ impl DocUndoManager {
             let snapshot = Snapshot::new(Default::default(), deleted);
             text.diff_range(&mut txn, Some(&snapshot), None, |_| ());
         }
-        let Some(comments) = txn.get_map(COMMENTS) else {
-            return;
-        };
-        let mut boundaries = comment_boundaries(&txn);
-        for (_, value) in comments.iter(&txn) {
-            let Out::YMap(comment) = value else {
+        let mut boundaries = anchor_boundaries(&txn);
+        for (story, sticky) in anchored_positions(&txn) {
+            let Some(story) = crate::story_text(&txn, &story) else {
                 continue;
             };
-            let Some(Out::Any(yrs::Any::Array(anchors))) = comment.get(&txn, "anchors") else {
+            let Some(offset) = sticky_offset(&sticky, &txn) else {
                 continue;
             };
-            for value in anchors.iter() {
-                let Ok(anchor) = crate::decode_anchor(value) else {
-                    continue;
-                };
-                let Some(story) = crate::story_text(&txn, &anchor.story) else {
-                    continue;
-                };
-                for sticky in [anchor.start, anchor.end] {
-                    let Some(offset) = sticky_offset(&sticky, &txn) else {
-                        continue;
-                    };
-                    let Some(current) = sticky_index(&story, &txn, offset.index, sticky.assoc)
-                    else {
-                        continue;
-                    };
-                    if let Some(id) = current.id() {
-                        boundaries[id.clock as usize % 2].insert(*id, 1);
-                    }
-                }
+            let Some(current) = sticky_index(&story, &txn, offset.index, sticky.assoc) else {
+                continue;
+            };
+            if let Some(id) = current.id() {
+                boundaries[id.clock as usize % 2].insert(*id, 1);
             }
         }
         let mut state = self.anchor_state.lock().unwrap();
@@ -598,7 +592,7 @@ impl DocUndoManager {
     pub fn clear(&mut self) {
         self.inner.clear_all();
         *self.anchor_state.lock().unwrap() = AnchorState {
-            current: comment_boundaries(&self.doc.transact()),
+            current: anchor_boundaries(&self.doc.transact()),
             ..AnchorState::default()
         };
     }
@@ -709,37 +703,58 @@ fn remember_history_boundaries(
     let mut boundaries = event.meta().0.lock().unwrap();
     merge_boundaries(&mut boundaries, &state.current);
     merge_boundaries(&mut boundaries, &state.pending);
-    state.current = comment_boundaries(txn);
+    state.current = anchor_boundaries(txn);
     merge_boundaries(&mut boundaries, &state.current);
     state.pending = Default::default();
     state.latest = Arc::downgrade(&event.meta().0);
 }
 
-fn comment_boundaries(txn: &impl ReadTxn) -> AnchorBoundaries {
+fn anchor_boundaries(txn: &impl ReadTxn) -> AnchorBoundaries {
     let mut boundaries = AnchorBoundaries::default();
-    let Some(comments) = txn.get_map(COMMENTS) else {
-        return boundaries;
-    };
-    for (_, value) in comments.iter(txn) {
-        let Out::YMap(comment) = value else {
-            continue;
-        };
-        let Some(Out::Any(yrs::Any::Array(anchors))) = comment.get(txn, "anchors") else {
-            continue;
-        };
-        for value in anchors.iter() {
-            let Ok(anchor) = crate::decode_anchor(value) else {
-                continue;
-            };
-            for sticky in [anchor.start, anchor.end] {
-                if let Some(id) = sticky.id() {
-                    // Separate adjacent ids so IdSet cannot merge away a boundary.
-                    boundaries[id.clock as usize % 2].insert(*id, 1);
-                }
-            }
+    for (_, sticky) in anchored_positions(txn) {
+        if let Some(id) = sticky.id() {
+            // Separate adjacent ids so IdSet cannot merge away a boundary.
+            boundaries[id.clock as usize % 2].insert(*id, 1);
         }
     }
     boundaries
+}
+
+/// Every sticky position the document anchors outside its text, by story: comment range bounds
+/// and kept empty inline marks.
+fn anchored_positions(txn: &impl ReadTxn) -> Vec<(String, StickyIndex)> {
+    let mut positions = Vec::new();
+    if let Some(comments) = txn.get_map(COMMENTS) {
+        for (_, value) in comments.iter(txn) {
+            let Out::YMap(comment) = value else {
+                continue;
+            };
+            let Some(Out::Any(Any::Array(anchors))) = comment.get(txn, "anchors") else {
+                continue;
+            };
+            for value in anchors.iter() {
+                let Ok(anchor) = crate::decode_anchor(value) else {
+                    continue;
+                };
+                positions.push((anchor.story.clone(), anchor.start));
+                positions.push((anchor.story, anchor.end));
+            }
+        }
+    }
+    if let Some(marks) = txn.get_map(crate::RAW_INLINES) {
+        for (_, value) in marks.iter(txn) {
+            let Out::Any(Any::Map(mark)) = value else {
+                continue;
+            };
+            if let Some(Any::String(story)) = mark.get("story")
+                && let Some(Any::Buffer(at)) = mark.get("at")
+                && let Ok(at) = StickyIndex::decode_v1(at)
+            {
+                positions.push((story.to_string(), at));
+            }
+        }
+    }
+    positions
 }
 
 /// The stories among those `visibility` would hide that a table still names once the pass is

@@ -62,6 +62,7 @@ interface ProgressiveModule {
 export declare class ResidentProgressiveFonts {
     private readonly engine;
     private readonly log;
+    private readonly loadModule;
     private readonly owners;
     private readonly ownerOf;
     private readonly pending;
@@ -69,6 +70,7 @@ export declare class ResidentProgressiveFonts {
     private readonly refusalListeners;
     private readonly fillListeners;
     private readonly trapListeners;
+    private module?;
     private warned;
     private late;
     private disposed;
@@ -89,9 +91,10 @@ export declare class ResidentProgressiveFonts {
     /**
      * Installs the outlines of `glyphs` (per font id) before a raster. Resolves
      * with the owner font ids whose outlines changed once they are installed,
-     * or after `waitMs` with those installed so far; the rest install later.
+     * or after `waitMs` of waiting for outlines once the module loads.
      */
     ensure(glyphs: Map<number, Set<number>>, waitMs?: number): Promise<Set<number>>;
+    private ensureOutlines;
     /** Settles once every outline requested so far is installed or has failed. */
     whenInstalled(): Promise<void>;
     /** Calls `listener` with the owner font ids a fill installed; glyph images cached from their earlier bytes go stale. */
@@ -109,6 +112,8 @@ export declare class ResidentProgressiveFonts {
     private fill;
     /** Resolves once no frame has asked for outlines for `FILL_QUIET_MS` and no frame's outlines are loading. */
     private quiet;
+    /** The progressive font module, loaded once; after a failed load the next caller tries again. */
+    private progressiveModule;
     private track;
     /**
      * Loads the chunks of `ids`, retrying a chunk that fails. Chunks that keep

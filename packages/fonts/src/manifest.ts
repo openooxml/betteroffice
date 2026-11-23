@@ -1,4 +1,4 @@
-import intlSizes from './intl-sizes.json';
+import intlManifest from '../../fonts-intl/assets/manifest.json';
 import latinManifest from '../../fonts-latin/assets/manifest.json';
 import baseLatinManifest from '../assets/base-latin.json';
 
@@ -107,6 +107,8 @@ function familyFaces(
   ];
 }
 
+const intlSizes = new Map(intlManifest.faces.map(({ file, byteLength }) => [file, byteLength]));
+
 function intlFamilyFaces(
   family: string,
   script: BundledFontScript,
@@ -114,7 +116,7 @@ function intlFamilyFaces(
 ): BundledFontFace[] {
   return (['Regular', 'Bold'] as const).flatMap<BundledFontFace>((style) => {
     const file = `${fileBase}-${style}.ttf.zst`;
-    const byteLength = (intlSizes as Record<string, number>)[file];
+    const byteLength = intlSizes.get(file);
     return byteLength === undefined ? [] : [{
       family,
       weight: style === 'Bold' ? 700 : 400,

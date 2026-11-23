@@ -1290,6 +1290,11 @@ function commandFrameFailed(id: number, host: DocxCommandHost, error: unknown): 
     replyFailure(id, new SessionFailure('disposed', 'Worker command document was replaced'));
     return;
   }
+  if (isEngineTrap(error)) {
+    trapped(id, error as Error);
+    return;
+  }
+  if (isCommandOutcomeUnknownError(error) && isEngineTrap(error.cause)) commandEnginePoisoned = true;
   reply({ id, ok: false, terminal: true, error: error instanceof Error ? error.message : String(error),
     failureCode: error instanceof SessionFailure ? error.code : 'message' });
 }
@@ -1462,6 +1467,7 @@ let paintedCaretKey: string | null = null;
 let caretStage: OffscreenCanvas | null = null;
 const intactBackBuffers = new Set<string>();
 let trap: Error | null = null;
+let commandEnginePoisoned = false;
 let projectionFailure: SessionFailure | null = null;
 // A bootstrap laid out only the body's first pages: the request to finish
 // it, then the finished layout until `completeLayout` hands it over.
@@ -1650,6 +1656,7 @@ function isUserInputCommand(kind: string): boolean {
     kind === 'setParagraphAttrs' || kind === 'applyParagraphStyle' || kind === 'formatSelection' || kind === 'toggleStrike' ||
     kind === 'toggleList' || kind === 'changeIndent' || kind === 'insertImage' || kind === 'insertTable' ||
     kind === 'pasteFragment' ||
+    kind === 'replacePasteFragment' ||
     kind === 'insertPageBreak' || kind === 'insertSectionBreak' ||
     kind === 'setTableBorders' || kind === 'setTableProperties';
 }
@@ -1693,25 +1700,27 @@ function replyDropped(response: DocxEngineWorkerResponse & { ok: true }): void {
 function replyFailure(id: number, error: unknown): void {
   // Once trapped, every failure is the trap's, answered once per request.
   const failure = trap ?? error;
-  if (!trap && projectionFailure) {
+  if (isEngineTrap(failure)) {
+    trapped(id, failure as Error);
+    return;
+  }
+  const unknownOutcome = isCommandOutcomeUnknownError(failure);
+  if (unknownOutcome && isEngineTrap(failure.cause)) commandEnginePoisoned = true;
+  if (projectionFailure) {
     reply({ id, ok: false, terminal: true, error: projectionFailure.message, failureCode: projectionFailure.code });
     return;
   }
-  if (isCommandOutcomeUnknownError(failure) || failure instanceof SessionFailure) {
-    const message = collaboration && isCommandOutcomeUnknownError(failure)
+  if (unknownOutcome || failure instanceof SessionFailure) {
+    const message = collaboration && unknownOutcome
       ? `Command ${failure.refusal.seq} has an unknown outcome` : failure.message;
     reply({
       id, ok: false, error: message,
       commandError: {
         name: failure.name, message,
-        ...(isCommandOutcomeUnknownError(failure) ? { refusal: failure.refusal } : {}),
+        ...(unknownOutcome ? { refusal: failure.refusal } : {}),
       },
       ...(failure instanceof SessionFailure ? { failureCode: failure.code } : {}),
     });
-    return;
-  }
-  if (isEngineTrap(failure)) {
-    trapped(id, failure as Error);
     return;
   }
   reply({
@@ -3625,6 +3634,7 @@ function destroySession(keepSurfaces = false): void {
   scheduler.cancel((task) => task.kind === 'saveSeedPrime');
   saveWarmupOwner = null;
   collaboration?.dispose(); collaboration = null;
+  commandEnginePoisoned = false;
   supersedeBackgroundPageBuild();
   fontRequirements = null;
   forgetRequirementsCache();
@@ -4148,7 +4158,7 @@ function preloadSaveWasm(): Promise<void> {
 
 function canPreloadSaveWasm(): boolean {
   return !!session && !previewing && !sourcePreviewing && commandInit?.readOnly !== true &&
-    (!!openedSource || openedParsed) && !trap && !projectionFailure;
+    (!!openedSource || openedParsed) && !trap && !commandEnginePoisoned && !projectionFailure;
 }
 
 /**
@@ -4305,9 +4315,19 @@ function reply(
   // A trap the raster painted past fails the request that would succeed, and
   // every request waiting on it, through the paths that answer failures.
   if (trap && response.ok) throw trap;
-  const drained = collaboration?.drain();
+  if (!response.ok && response.failureCode === 'trap') commandEnginePoisoned = true;
+  const canReadEngine = trap === null && !commandEnginePoisoned;
+  let drained;
+  try {
+    drained = collaboration?.drain(canReadEngine);
+  } catch (error) {
+    if (trap || !isEngineTrap(error)) throw error;
+    trapped(response.id, error as Error);
+    return;
+  }
   const { transfer: piped = [], ...collabUpdates } = drained ?? {};
+  const memories = memory ?? (canReadEngine ? wasmModuleMemories() : undefined);
   scope.postMessage({ ...response, ...(drained ? { collabUpdates: { ...collabUpdates,
     ...(commandInit ? { session: commandInit.session, incarnation: commandInit.incarnation, epoch: commandInit.epoch } : {}) } } : {}),
-    memory: memory ?? wasmModuleMemories() }, [...transfer, ...(drained?.updates ?? []), ...piped]);
+    ...(memories && { memory: memories }) }, [...transfer, ...(drained?.updates ?? []), ...piped]);
 }

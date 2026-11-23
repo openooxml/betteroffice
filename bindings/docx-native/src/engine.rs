@@ -581,13 +581,16 @@ impl EditSession {
 
     fn document_mut_unclocked(&self, env: Env) -> Result<DocumentGuard<'_, RefMut<'_, Document>>> {
         enter_object(&self.failure, env)?;
-        let core = self.core.try_borrow_mut().map_err(|_| borrow_error(env))?;
-        let core = RefMut::filter_map(core, Option::as_mut)
-            .map_err(|_| throw_error(&env, "EditSession was freed"))?;
         Ok(DocumentGuard {
-            core,
+            core: self.borrow_document_mut(env)?,
             _delivery: UpdateDelivery(self),
         })
+    }
+
+    fn borrow_document_mut(&self, env: Env) -> Result<RefMut<'_, Document>> {
+        let core = self.core.try_borrow_mut().map_err(|_| borrow_error(env))?;
+        RefMut::filter_map(core, Option::as_mut)
+            .map_err(|_| throw_error(&env, "EditSession was freed"))
     }
 
     fn render_png_target_page(
@@ -1621,8 +1624,9 @@ impl EditSession {
 
     #[napi(catch_unwind, js_name = "clear_update_event_observation")]
     pub fn clear_update_event_observation(&self, env: Env) -> Result<()> {
-        let _call = EngineCall::new(env);
-        self.document_mut(env)?.clear_update_event_observation();
+        let _call = EngineCall::release(env);
+        self.borrow_document_mut(env)?
+            .clear_update_event_observation();
         Ok(())
     }
 
@@ -2684,6 +2688,14 @@ impl EditSession {
             .map_err(|error| map_error(env, error))
     }
 
+    #[napi(catch_unwind, js_name = "resolve_raw_marks")]
+    pub fn resolve_raw_marks(&self, env: Env) -> Result<String> {
+        let _call = EngineCall::new(env);
+        self.document(env)?
+            .resolve_raw_marks()
+            .map_err(|error| map_error(env, error))
+    }
+
     #[napi(catch_unwind, js_name = "resolve_sticky_position")]
     pub fn resolve_sticky_position(
         &self,
@@ -2997,10 +3009,45 @@ impl EditSession {
             .map_err(|error| map_error(env, error))
     }
 
+    #[napi(catch_unwind, js_name = "ensure_list_definition_after")]
+    pub fn ensure_list_definition_after(
+        &self,
+        env: Env,
+        story: String,
+        para_id: String,
+        kind: String,
+        lead: Option<String>,
+    ) -> Result<String> {
+        let _call = EngineCall::new(env);
+        self.document(env)?
+            .ensure_list_definition_after(&story, &para_id, &kind, lead.as_deref())
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi(catch_unwind, js_name = "paragraph_style_numbers")]
+    pub fn paragraph_style_numbers(
+        &self,
+        env: Env,
+        story: String,
+        para_id: String,
+    ) -> Result<Either<bool, Undefined>> {
+        let _call = EngineCall::new(env);
+        self.document(env)?
+            .paragraph_style_numbers(&story, &para_id)
+            .map_err(|error| map_error(env, error))
+            .map(optional_result)
+    }
+
     #[napi(catch_unwind, js_name = "created_list_definitions_json")]
     pub fn created_list_definitions_json(&self, env: Env) -> Result<String> {
         let _call = EngineCall::new(env);
         Ok(self.document(env)?.created_list_definitions_json())
+    }
+
+    #[napi(catch_unwind, js_name = "list_definition_keys_in_use_json")]
+    pub fn list_definition_keys_in_use_json(&self, env: Env) -> Result<String> {
+        let _call = EngineCall::new(env);
+        Ok(self.document(env)?.list_definition_keys_in_use_json())
     }
 
     #[napi(catch_unwind, js_name = "set_document_property")]
@@ -3283,8 +3330,8 @@ impl EditSession {
 
     #[napi(catch_unwind, js_name = "clear_update_observer")]
     pub fn clear_update_observer(&self, env: Env) -> Result<()> {
-        let _call = EngineCall::new(env);
-        let _core = self.document_mut(env)?;
+        let _call = EngineCall::release(env);
+        let _core = self.borrow_document_mut(env)?;
         self.clear_observer(env)
     }
 
@@ -3681,6 +3728,14 @@ pub fn render_docx_markdown_with_pages_json(
     let _call = EngineCall::function(env);
     docx_engine::render_docx_markdown_with_pages_json(&content, &options)
         .map_err(|error| map_error(env, error))
+}
+
+/// The digest the writer compares a complex field's `sourceRunDigest` with, or `undefined` when
+/// `field_json` is not a complex field.
+#[napi(catch_unwind, js_name = "field_run_digest")]
+pub fn field_run_digest(env: Env, field_json: String) -> Result<Either<String, Undefined>> {
+    let _call = EngineCall::function(env);
+    Ok(optional_result(docx_engine::field_run_digest(&field_json)))
 }
 
 #[napi(catch_unwind, js_name = "build_display_list_json")]

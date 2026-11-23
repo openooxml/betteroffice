@@ -6,7 +6,7 @@ import type { PptxWorkerEditorApi } from './createWorkerEditorApi';
 import { useEditableSessionPresentation } from './useEditableSessionPresentation';
 
 export type PptxWorkerEditorProps = Omit<PptxInThreadEditorProps, 'onReady' | 'readOnly' | 'experimentalWorkerOpen' | 'collaboration'> & {
-  /** @deprecated Removed in 0.6.0. Omit for the async editor. */
+  /** @deprecated Removed in 0.7.0. Omit for the async editor. */
   [LEGACY_SYNC_API]: true;
   collaboration?: undefined;
   /** Edits in the worker; without it the legacy runtime runs in-thread. */

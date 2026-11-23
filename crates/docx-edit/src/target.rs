@@ -21,7 +21,7 @@ use crate::batch::{
     failure, refusal,
 };
 use crate::content_controls::Inventory;
-use crate::format::InlineFormatDelta;
+use crate::format::{InlineFormatDelta, RPR_CHANGE};
 use crate::ops::{ChunkKind, capture_pilcrow, utf16_len};
 use crate::policy::Ownership;
 use crate::queries::SelectionInfo;
@@ -471,8 +471,9 @@ pub(crate) struct ParagraphView {
     pub text: String,
     pub atoms: Vec<TextAtom>,
     spans: Vec<Span>,
-    /// Raw intervals of inline units carrying `ins` or `del`, visible or hidden.
+    /// Raw intervals of inline units carrying revisions, visible or hidden.
     stamped: Vec<(u32, u32)>,
+    suggested_formatting: Vec<(u32, u32)>,
     /// Story index after the previous paragraph mark.
     pub start: u32,
     /// Story index of the first inline unit, after any leading block embeds.
@@ -562,6 +563,19 @@ impl ParagraphView {
         self.spans
             .iter()
             .any(|span| span.stamped && span.view < end && start < span.view + span.len)
+    }
+
+    pub fn has_suggested_formatting_in(&self, start: u32, end: u32) -> bool {
+        start < end
+            && self.raw_ranges(start..end).any(|range| {
+                self.suggested_formatting
+                    .iter()
+                    .any(|(start, end)| *start < range.end && range.start < *end)
+            })
+    }
+
+    pub fn has_suggested_formatting(&self) -> bool {
+        !self.suggested_formatting.is_empty()
     }
 
     pub fn has_revisions(&self) -> bool {
@@ -675,6 +689,7 @@ struct ParagraphBuilder {
     atoms: Vec<TextAtom>,
     spans: Vec<Span>,
     stamped: Vec<(u32, u32)>,
+    suggested_formatting: Vec<(u32, u32)>,
     embeds: Vec<(String, Option<MapRef>)>,
     start: u32,
     node_start: u32,
@@ -688,6 +703,7 @@ impl ParagraphBuilder {
             atoms: Vec::new(),
             spans: Vec::new(),
             stamped: Vec::new(),
+            suggested_formatting: Vec::new(),
             embeds: Vec::new(),
             start,
             node_start: start,
@@ -859,6 +875,7 @@ impl StoryView {
             }
             let ins = chunk.attr_active(INS);
             let del = chunk.attr_active(DEL);
+            let stamped = ins || del;
             match &chunk.kind {
                 ChunkKind::Pilcrow(map) => {
                     if projection.joined_pilcrows.contains(&chunk.start) {
@@ -896,6 +913,7 @@ impl StoryView {
                         atoms: built.atoms,
                         spans: built.spans,
                         stamped: built.stamped,
+                        suggested_formatting: built.suggested_formatting,
                         start: built.start,
                         node_start: built.node_start,
                         pilcrow: chunk.start,
@@ -905,12 +923,17 @@ impl StoryView {
                     });
                 }
                 ChunkKind::Text(text) => {
-                    if ins || del {
+                    if chunk.attr_active(RPR_CHANGE) {
+                        current
+                            .suggested_formatting
+                            .push((chunk.start, chunk.end()));
+                    }
+                    if stamped {
                         current.stamp(chunk.start, chunk.end());
                     }
                     if visible(view, ins, del) {
                         current.text.push_str(text);
-                        current.push(chunk.start, chunk.len, ins || del, false);
+                        current.push(chunk.start, chunk.len, stamped, false);
                     }
                 }
                 ChunkKind::Embed(map) => {
@@ -925,7 +948,12 @@ impl StoryView {
                         continue;
                     }
                     current.embeds.push((kind.clone(), map.clone()));
-                    if ins || del {
+                    if chunk.attr_active(RPR_CHANGE) {
+                        current
+                            .suggested_formatting
+                            .push((chunk.start, chunk.end()));
+                    }
+                    if stamped {
                         current.stamp(chunk.start, chunk.end());
                     }
                     if visible(view, ins, del) {
@@ -936,7 +964,7 @@ impl StoryView {
                             drawings: control_drawings(&kind, map.as_ref(), txn, view),
                         });
                         current.text.push('\u{FFFC}');
-                        current.push(chunk.start, 1, ins || del, true);
+                        current.push(chunk.start, 1, stamped, true);
                     }
                 }
             }

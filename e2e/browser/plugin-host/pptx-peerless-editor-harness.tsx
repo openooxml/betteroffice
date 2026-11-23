@@ -5,6 +5,7 @@ import JSZip from 'jszip';
 import { EditorToolbar, PptxEditor, type PptxAsyncEditorApi, type PptxAsyncEditorProps, type PptxAsyncCollaborationOptions } from '@betteroffice/pptx-react';
 import type { AsyncCollaborationReplica, PptxFontFace } from '@betteroffice/pptx';
 import type { PresentationCommandClient } from '@betteroffice/pptx/worker';
+import { createSessionWorker } from '../../../packages/pptx/src/session/sessionWorker.browser';
 import { peerlessPainterFactories, peerlessSessionOpener } from '../../../packages/pptx-react/src/worker/usePeerlessPresentation';
 import type { PeerlessConfirmedFrame } from '../../../packages/pptx-react/src/worker/peerlessViewStore';
 import type { PeerlessEditorProbe } from './pptx-peerless-editor-probe';
@@ -18,7 +19,7 @@ function deferred<T>() {
 interface ReplyGate { held: boolean; queued: (() => void)[] }
 
 function gatedWorker(gate: ReplyGate): Worker {
-  const worker = new Worker(new URL('../../../packages/pptx/src/session/pptxSessionWorker.mjs', import.meta.url), { type: 'module' });
+  const worker = createSessionWorker();
   const add = worker.addEventListener.bind(worker);
   const remove = worker.removeEventListener.bind(worker);
   const wrappers = new Map<EventListenerOrEventListenerObject, EventListener>();

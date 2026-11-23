@@ -43,7 +43,7 @@ export interface ResidentCollaborationUpdates {
         insertion: CollaborationTextInsertion;
     }>;
     /** This session's own state-vector clock after the drained edits and merges. */
-    clock: number;
+    clock?: number;
     /** Output of the providers this worker runs, for the threads that own their transports. */
     pipe?: PipeOutputBatch[];
 }
@@ -51,7 +51,7 @@ type Hooks = ReturnType<DocxCommandHooksFactory>;
 export declare function createResidentCollaboration(engine: ResidentEngineSession, options?: {
     onPipeOutput?: () => void;
 }): {
-    drain(): (ResidentCollaborationUpdates & {
+    drain(readClock?: boolean): (ResidentCollaborationUpdates & {
         transfer: ArrayBuffer[];
     }) | undefined;
     wrap(hooks: Hooks): Hooks;

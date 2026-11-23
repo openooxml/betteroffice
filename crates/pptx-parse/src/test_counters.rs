@@ -6,6 +6,17 @@ pub struct SpliceWork {
     pub equal_calls: usize,
     pub hashed_nodes: usize,
     pub fragment_elements: usize,
+    pub budget_work: usize,
+    pub budget_peak_milli: usize,
+    pub budget_exhausted: usize,
+}
+
+impl SpliceWork {
+    pub(crate) fn record_budget_peak(&mut self, used: usize, weight: usize) {
+        let milli = (used as u128) * 1000 / (weight.max(1) as u128);
+        let milli = usize::try_from(milli).unwrap_or(usize::MAX);
+        self.budget_peak_milli = self.budget_peak_milli.max(milli);
+    }
 }
 
 thread_local! {

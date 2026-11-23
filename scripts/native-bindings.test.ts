@@ -71,7 +71,7 @@ describe('native package registry', () => {
     }
   });
 
-  test('selects the Node worker variant through a private conditional import', () => {
+  test('selects the Node worker variant through a private conditional import', async () => {
     for (const format of ['xlsx', 'pptx', 'docx']) {
       const extension = format === 'docx' ? 'mjs' : 'js';
       const directory = format === 'docx' ? 'yrs' : 'session';
@@ -90,8 +90,12 @@ describe('native package registry', () => {
       expect(config.compilerOptions.paths['#session-scope']).toBeUndefined();
       const worker = format === 'docx' ? "'yrs/docxWorker" : `${format}SessionWorker`;
       for (const path of [`packages/${format}/tsup.config.ts`, `bindings/${format}-native/js/tsup.config.ts`]) {
-        const build = readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
-        expect(build).toMatch(/external: \[[^\]]*'#session-worker'\]/);
+        const url = new URL(`../${path}`, import.meta.url);
+        const build = readFileSync(url, 'utf8');
+        const { default: exported } = await import(fileURLToPath(url));
+        const configs = [typeof exported === 'function' ? await exported({}) : exported].flat();
+        expect(configs.length).toBeGreaterThan(0);
+        for (const config of configs) expect(config.external).toContain('#session-worker');
         expect(build).not.toContain('#session-scope');
         expect(build).toContain(`${worker}.node':`);
         expect(build).toContain("'sessionWorker.node':");
@@ -232,6 +236,13 @@ describe('native package release wiring', () => {
     expect(steps.indexOf('Authenticate to crates.io')).toBeLessThan(
       steps.indexOf('Check crates.io publish targets')
     );
+  });
+
+  test('publishes held packages after the release and native publishing', () => {
+    const job = release.jobs['held-npm'];
+    expect(job.needs).toEqual(['release', 'native-npm']);
+    expect(job.permissions['id-token']).toBe('write');
+    expect(job.if).toContain("&& (needs.native-npm.result == 'success' || needs.native-npm.result == 'skipped')");
   });
 
   test('release dispatches and waits for the dedicated publisher', () => {
@@ -575,6 +586,7 @@ describe('native package release wiring', () => {
     expect(smoke.run).toContain('node scripts/node-worker-sessions-smoke.mjs --keep-alive');
     expect(smoke.run).toContain('bun scripts/worker-bundling-smoke.mjs');
     expect(smoke.run).toContain('node scripts/check-webpack-exports.mjs --node-import $(node scripts/native-bindings.mjs --paths)');
+    expect(smoke.run).toContain('\nnode scripts/check-node-require.mjs $(node scripts/native-bindings.mjs --paths)\n');
     expect(smoke.run).toContain('\ntimeout 300 bun scripts/node-worker-sessions-smoke.mjs\n');
     expect(smoke.run).toContain('\ntimeout 300 deno run --no-config --node-modules-dir=manual --allow-read --allow-env --allow-ffi scripts/node-worker-sessions-smoke.mjs\n');
     expect(smoke.run).not.toMatch(/(?:^|\n)(?:bun|deno run)[^\n]*node-worker-sessions-smoke/);

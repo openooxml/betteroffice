@@ -17,6 +17,7 @@ import type {
   YrsParagraphAttrs,
   YrsParagraphLength,
   YrsParagraphSpan,
+  YrsRawMark,
   YrsRegionLayoutProgress,
   YrsRenderEnv,
   YrsReplaceReceipt,
@@ -51,6 +52,7 @@ import type { Document, DocumentBody, SectionProperties } from '../types/documen
 import { resolvedFinalSectionProperties } from '../editor/finalSection';
 import { checkPeerMetadataHeader, PeerMetadataError } from './peerMetadata';
 import { noteYrsStoriesDirty } from './yrsToDocument';
+import { forgetSavedListDefinitions } from './listDefinitionSave';
 import type {
   DocxParagraphAnchorResult,
   DocxParagraphIdentityReceipt,
@@ -483,6 +485,7 @@ export function wrapSession(
       } catch (error) {
         throw normalizeSeedError(error);
       }
+      forgetSavedListDefinitions(facade);
       proposals.reset();
       return opened;
     });
@@ -834,6 +837,7 @@ export function wrapSession(
         } catch (error) {
           throw peerMetadataFailure(error);
         }
+        forgetSavedListDefinitions(facade);
         session.set_media_tokens(options.mediaTokens === true);
         markDirty('all');
         resetMedia();
@@ -1535,6 +1539,7 @@ export function wrapSession(
     resolveComment: (commentId) =>
       JSON.parse(session.resolve_comment(commentId)) as YrsResolvedCommentAnchor[],
     listComments: () => JSON.parse(session.list_comments()) as YrsCommentInfo[],
+    resolveRawMarks: () => JSON.parse(session.resolve_raw_marks()) as YrsRawMark[],
     storyIds: () => session.story_ids(),
     hasStory: (story) => !LONE_SURROGATE.test(story) && session.has_story(story),
     storyLength: (story) => session.story_len(story),
@@ -1731,14 +1736,24 @@ export function wrapSession(
     },
     styleLanguages: () => JSON.parse(session.style_languages_json()),
     patchStyleLanguagesXml: source => session.patch_style_languages_xml(source),
-    ensureListDefinition: (story, paraId, kind) => {
+    ensureListDefinition: (story, paraId, kind, lead) => {
       ensureUndo(story);
-      const { listDef, ...attrs } = mutate(
-        () => JSON.parse(session.ensure_list_definition(story, paraId, kind)) as YrsParagraphAttrs & { listDef?: unknown }
+      const { listDef, listLevelIndents, ...attrs } = mutate(
+        () => JSON.parse(
+          lead === undefined
+            ? session.ensure_list_definition(story, paraId, kind)
+            : session.ensure_list_definition_after(story, paraId, kind, lead)
+        ) as YrsParagraphAttrs & { listDef?: unknown; listLevelIndents?: unknown }
       );
-      return listDef === undefined ? attrs : { ...attrs, other: { ...attrs.other, listDef } };
+      if (listDef === undefined && listLevelIndents === undefined) return attrs;
+      const other: Record<string, unknown> = { ...attrs.other };
+      if (listDef !== undefined) other.listDef = listDef;
+      if (listLevelIndents !== undefined) other.listLevelIndents = listLevelIndents;
+      return { ...attrs, other };
     },
+    paragraphStyleNumbers: (story, paraId) => session.paragraph_style_numbers?.(story, paraId),
     createdListDefinitions: () => JSON.parse(session.created_list_definitions_json()),
+    listDefinitionKeysInUse: () => JSON.parse(session.list_definition_keys_in_use_json()),
     formatTextTarget: (target, delta) => {
       ensureUndo(targetStory(target));
       return mutate(
@@ -1844,6 +1859,7 @@ export function wrapSession(
       const json = mutate(() => {
         forgetMaterializedSource(session);
         const compared = session.compare_docx_json(original, revised, options);
+        forgetSavedListDefinitions(facade);
         proposals.reset();
         return compared;
       });

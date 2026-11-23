@@ -55,7 +55,7 @@ use yrs::{Any, Map, MapRef, OffsetKind, Out, ReadTxn, Text, Transact};
 use super::{COMMENTS, DEL, EditError, EditingDoc, INS, decode_anchor, is_pilcrow, story_ref};
 use crate::list_definitions::{effective_list_state, resolve_list_identity, written_numbering};
 use crate::list_marker::{ListState, compute_list_marker};
-use crate::seed::synthesized_cell_width;
+use crate::seed::{RAW_INLINE_KIND, synthesized_cell_width};
 use crate::sticky_positions::sticky_offset;
 
 pub(crate) mod group_pictures;
@@ -69,6 +69,7 @@ pub use group_pictures::GroupPictureSources;
 pub(crate) mod run_size_provenance;
 mod shapes;
 pub use shapes::ShapeStyles;
+pub(crate) use shapes::inline_wrap;
 
 pub use reservations::{Reservation, ReservationKind, ReservationSide, Reservations};
 
@@ -1833,6 +1834,13 @@ fn walk_story_chunks<T: ReadTxn>(
                 paragraph_pm_units += 1;
                 at_block_boundary = false;
             }
+            Out::YMap(raw)
+                if shared_map_string(raw, txn, "_kind").as_deref() == Some(RAW_INLINE_KIND) =>
+            {
+                story_index += 1;
+                paragraph_pm_units += 1;
+                at_block_boundary = false;
+            }
             _ => {
                 return Err(BridgeError::UnsupportedEmbed {
                     story: story_id.to_owned(),
@@ -3305,7 +3313,7 @@ fn chart_drawing_anchored(chart: &Value) -> bool {
             .get("wrap")
             .and_then(|wrap| wrap.get("type"))
             .and_then(Value::as_str)
-            .is_some_and(|wrap_type| wrap_type != "inline")
+            .is_some_and(|wrap_type| !inline_wrap(Some(wrap_type)))
 }
 
 /// Replaces `+mj-*` and `+mn-*` typefaces in a chart's layout copy with the
@@ -5614,7 +5622,7 @@ fn lower_paragraph_attrs(
     result.doc_grid_pitch_px = env
         .doc_grid_pitch_px
         .filter(|pitch| pitch.is_finite() && *pitch > 0.0);
-    lower_paragraph_indent(values, &mut result);
+    lower_paragraph_indent(values, list_state, &mut result);
     lower_paragraph_tabs(values, &mut result);
 
     result.has_source_content = true_property(values, "hasSourceContent");
@@ -5949,7 +5957,16 @@ fn lower_paragraph_spacing(
     }
 }
 
-fn lower_paragraph_indent(values: &BTreeMap<String, Any>, result: &mut ParagraphAttrs) {
+/// The indent of the paragraph with `values`. A paragraph on a list with no left indent of its own
+/// takes the indent of Word's default lists. One put on its list in this session instead takes
+/// what it has no value of its own for from the definition of its list level, and the default
+/// where the definition gives none or the paragraph states that indent in character units, which
+/// layout does not read.
+fn lower_paragraph_indent(
+    values: &BTreeMap<String, Any>,
+    list_state: &ListState,
+    result: &mut ParagraphAttrs,
+) {
     let indent_map = values.get("indent").and_then(any_map);
     let mut left = value_number(values.get("indentLeft"))
         .or_else(|| indent_map.and_then(|map| map_number(map, "left")));
@@ -5963,11 +5980,35 @@ fn lower_paragraph_indent(values: &BTreeMap<String, Any>, result: &mut Paragraph
         .or_else(|| indent_map.and_then(|map| map_bool(map, "hanging")))
         .unwrap_or(false);
 
-    if let (Some(list), None) = (resolve_list_identity(values), left) {
+    let joined = true_property(values, crate::list_definitions::LIST_LEVEL_INDENTS).is_some();
+    if let (Some(list), None, false) = (resolve_list_identity(values), left, joined) {
         left = Some((list.level() + 1.0) * 720.0);
         if first_line.is_none() {
             first_line = Some(-360.0);
             hanging = true;
+        }
+    } else if let (Some(list), true) = (resolve_list_identity(values), joined) {
+        let original = values.get("_originalFormatting").and_then(any_map);
+        let in_characters = |key: &str| {
+            [
+                values.get(key),
+                original.and_then(|original| original.get(key)),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|value| !matches!(value, Any::Null))
+        };
+        let (level_left, level_first) = list_state.level_indent(values);
+        let level_left = level_left.filter(|_| !in_characters("indentLeftChars"));
+        let level_first = level_first.filter(|_| !in_characters("indentFirstLineChars"));
+        let own_left = left.is_some();
+        left = left.or(level_left).or(Some((list.level() + 1.0) * 720.0));
+        if first_line.is_none() {
+            let default = (!own_left && level_left.is_none()).then_some((-360.0, true));
+            if let Some((first, hangs)) = level_first.or(default) {
+                first_line = Some(first);
+                hanging = hangs;
+            }
         }
     }
 

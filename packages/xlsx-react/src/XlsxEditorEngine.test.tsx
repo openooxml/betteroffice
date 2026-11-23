@@ -152,7 +152,7 @@ describe('XlsxEditor engine dispatch', () => {
     const remount = render(<XlsxEditor legacySyncApi experimentalWorkerOpen file={file} />);
     await waitFor(() => expect(remount.getByTestId('worker-editor').getAttribute('data-backend')).toBe('legacy'));
     expect(warn).toHaveBeenCalledTimes(1);
-    expect(warn.mock.calls[0]?.[0]).toContain('removed in 0.6.0');
+    expect(warn.mock.calls[0]?.[0]).toContain('removed in 0.7.0');
   });
 
   it('mounts the hybrid editor for a read-only workbook that allows host proposals', async () => {
@@ -320,7 +320,7 @@ describe('XlsxEditor engine dispatch', () => {
     expectInThread(view);
     expect(mounts).not.toHaveBeenCalled();
     expect(warn).toHaveBeenCalledTimes(1);
-    expect(warn.mock.calls[0]?.[0]).toContain('removed in 0.6.0');
+    expect(warn.mock.calls[0]?.[0]).toContain('removed in 0.7.0');
   });
 
   it('keeps experimentalWorkerOpen=true on the async default', () => {

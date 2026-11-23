@@ -583,8 +583,11 @@ impl Document {
                 bytes: self.source.clone(),
                 kept_unchanged: None,
                 structure_dropped: None,
+                whole_model_write: false,
             });
         }
+        let paragraph_ids = self.session_save_plan()?;
+        let whole_model_write = paragraph_ids.is_none();
         let request = S13SaveRequest {
             determinism,
             document: self.with_authored_ids(self.model.body.clone()),
@@ -601,13 +604,13 @@ impl Document {
                 modified_by: options.modified_by,
             },
             selective: None,
-            paragraph_ids: self.session_save_plan()?,
+            paragraph_ids,
         };
         #[cfg(test)]
         session_save_tests::count_package_write();
         let (bytes, report) =
             write_docx_s13_parts_with_report(request, &self.original_parts, None)?;
-        Ok(save_report(bytes, report))
+        Ok(save_report(bytes, report, whole_model_write))
     }
 
     /// The editing session's paragraph save plan for the current model, as the
@@ -1176,6 +1179,7 @@ pub fn render_docx_markdown(
 type RunTemplate = Option<(
     Option<docx_parse::TextFormatting>,
     Option<Vec<docx_parse::inline::RunPropertyChange>>,
+    Vec<docx_parse::DirectionScope>,
 )>;
 
 fn plain_run_template(paragraph: &Paragraph) -> Option<RunTemplate> {
@@ -1192,7 +1196,11 @@ fn plain_run_template(paragraph: &Paragraph) -> Option<RunTemplate> {
     {
         return None;
     }
-    Some(Some((run.formatting.clone(), run.property_changes.clone())))
+    Some(Some((
+        run.formatting.clone(),
+        run.property_changes.clone(),
+        run.direction_scopes.clone(),
+    )))
 }
 
 fn replace_plain_run(paragraph: &mut Paragraph, text: String, template: RunTemplate) {
@@ -1200,7 +1208,7 @@ fn replace_plain_run(paragraph: &mut Paragraph, text: String, template: RunTempl
         paragraph.content.clear();
         return;
     }
-    let (formatting, property_changes) = template.unwrap_or_default();
+    let (formatting, property_changes, direction_scopes) = template.unwrap_or_default();
     paragraph.content = vec![ParagraphContent::Inline(InlineNode::Run(Run {
         node_type: RunType::Run,
         formatting,
@@ -1209,6 +1217,7 @@ fn replace_plain_run(paragraph: &mut Paragraph, text: String, template: RunTempl
             preserve_space: (text.trim() != text).then_some(true),
             text,
         }],
+        direction_scopes,
     }))];
 }
 
@@ -1361,7 +1370,7 @@ fn utf16_len(text: &str) -> u32 {
     text.encode_utf16().count() as u32
 }
 
-fn save_report(bytes: Vec<u8>, report: S13SaveReport) -> SaveReport {
+fn save_report(bytes: Vec<u8>, report: S13SaveReport, whole_model_write: bool) -> SaveReport {
     let structure = report
         .kept_unchanged
         .values()
@@ -1374,6 +1383,7 @@ fn save_report(bytes: Vec<u8>, report: S13SaveReport) -> SaveReport {
         }),
         structure_dropped: (!report.structure_dropped.is_empty())
             .then_some(report.structure_dropped),
+        whole_model_write,
     }
 }
 
@@ -1421,6 +1431,7 @@ mod save_report_tests {
                 ],
                 structure_dropped: vec![dropped("word/footer1.xml"), dropped("word/document.xml")],
             },
+            false,
         );
         assert_eq!(report.bytes, [1, 2, 3]);
         let kept_unchanged = report.kept_unchanged.expect("kept is reported");
@@ -1455,9 +1466,11 @@ mod save_report_tests {
                 kept_unchanged: BTreeMap::from([("word/document.xml".to_owned(), 0)]),
                 ..S13SaveReport::default()
             },
+            false,
         );
         assert!(report.kept_unchanged.is_none());
         assert!(report.structure_dropped.is_none());
+        assert!(!report.whole_model_write);
     }
 }
 

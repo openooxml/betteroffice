@@ -1,18 +1,18 @@
 //! Lexical patching of a preserved worksheet's `<cols>` and `<sheetData>`.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::iter::Peekable;
 use std::ops::Range;
 
 use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::{Reader, Writer};
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
-use xlsx_model::{Cell, CellRange, CellRef, ColId, ColStyle, Sheet, Workbook};
+use xlsx_model::{Cell, CellRange, CellRef, CellValue, ColId, ColStyle, Sheet, Workbook};
 
 use crate::axis::SheetAxes;
 use crate::future_functions::FormulaNames;
 use crate::package::{XmlAttribute, attributes, remove_attribute, set_attribute};
-use crate::read::{SharedStringCells, is_truthy};
+use crate::read::{SharedStringCells, WorksheetCellFacts, is_truthy};
 use crate::write::{
     SharedStringPlan, cell_value_markup, col_runs, fmt_num, fragment, shared_string_index,
     write_cell, write_col_run, write_cols, write_row,
@@ -48,6 +48,7 @@ thread_local! {
 pub(crate) struct SheetPatch<'a> {
     pub(crate) sheet: &'a Sheet,
     pub(crate) original: &'a Sheet,
+    pub(crate) cell_facts: &'a WorksheetCellFacts,
     pub(crate) axes: &'a SheetAxes,
     pub(crate) workbook: &'a Workbook,
     pub(crate) sst_index: &'a HashMap<&'a str, usize>,
@@ -845,18 +846,86 @@ impl SheetPatch<'_> {
                 })
                 .map(|(group, _)| group)
                 .collect(),
-            masters: masters
-                .into_iter()
-                .filter(|(key, reference)| {
-                    arrays.contains(key)
-                        || (reference.is_some() && changed.contains(key))
-                        || reference.is_some_and(|reference| {
-                            !self.moves_uniformly(reference) || range_changed(reference, &changed)
-                        })
-                })
-                .map(|(key, _)| key)
-                .collect(),
+            masters: self.dirty_masters(masters, &arrays, &changed),
         })
+    }
+
+    fn dirty_masters(
+        &self,
+        masters: Vec<((u32, u32), Option<CellRange>)>,
+        arrays: &BTreeSet<(u32, u32)>,
+        changed: &BTreeSet<(u32, u32)>,
+    ) -> HashSet<(u32, u32)> {
+        let mut changed_rows = None;
+        masters
+            .into_iter()
+            .filter(|(anchor, reference)| {
+                arrays.contains(anchor)
+                    || reference.is_some_and(|reference| {
+                        changed.contains(anchor)
+                            || !self.moves_uniformly(reference)
+                            || self.ranged_master_dirty(
+                                *anchor,
+                                reference,
+                                changed_rows.get_or_insert_with(|| {
+                                    let mut rows = BTreeMap::<u32, Vec<u32>>::new();
+                                    for &(row, col) in changed {
+                                        rows.entry(row).or_default().push(col);
+                                    }
+                                    rows
+                                }),
+                            )
+                    })
+            })
+            .map(|(anchor, _)| anchor)
+            .collect()
+    }
+
+    fn ranged_master_dirty(
+        &self,
+        anchor: (u32, u32),
+        reference: CellRange,
+        changed_rows: &BTreeMap<u32, Vec<u32>>,
+    ) -> bool {
+        let mut rows = changed_rows
+            .range(reference.start.row..=reference.end.row)
+            .peekable();
+        if rows.peek().is_none() {
+            return false;
+        }
+        let stable_array = self.axes.is_identity()
+            && self
+                .original
+                .array_formula(CellRef::new(anchor.0, anchor.1))
+                == Some(reference);
+        rows.any(|(&row, cols)| {
+            let start = cols.partition_point(|&col| col < reference.start.col);
+            cols[start..]
+                .iter()
+                .take_while(|&&col| col <= reference.end.col)
+                .any(|&col| {
+                    xlsx_model::open_timing! {
+                        xlsx_model::open_timing::count("save_array_range_changes", 1);
+                    }
+                    !stable_array || !self.fills_empty_cache(CellRef::new(row, col))
+                })
+        })
+    }
+
+    fn fills_empty_cache(&self, at: CellRef) -> bool {
+        let Some(cell) = self.sheet.cell(at) else {
+            return false;
+        };
+        let original = self.original.cell(at);
+        cell.value != CellValue::Empty
+            && !self.cell_facts.has_cached_value(at, original)
+            && match original {
+                Some(source) => {
+                    source.formula == cell.formula
+                        && self.styles.equivalent(source.style, cell.style)
+                }
+                None => cell.formula.is_none() && cell.style.is_none(),
+            }
     }
 
     fn source_formula_changed(&self, source: CellRef) -> bool {
@@ -975,12 +1044,6 @@ impl SheetPatch<'_> {
             self.axes.cols.source(at.col)?,
         ))
     }
-}
-
-fn range_changed(reference: CellRange, changed: &BTreeSet<(u32, u32)>) -> bool {
-    changed
-        .range((reference.start.row, 0)..=(reference.end.row, u32::MAX))
-        .any(|&(_, col)| col >= reference.start.col && col <= reference.end.col)
 }
 
 fn cached_value_slot(data: &[u8], cell: &SourceCell) -> Result<Option<Range<usize>>, ParseError> {

@@ -33,7 +33,7 @@ The read projections compare these fields, with absent values as `null`:
 - `readEdited`: the edited paragraph's text, and the body story's text from the parsed model (on TypeScript after a save with the parity options and a re-parse); the story leaves out table cells. The editing session's own paragraph read is the accepted view (fields as an object character, tracked insertions included, a block content control's paragraph left out) and is not what this step compares.
 - `save` and `saveReport`: the parts record above; `saveReport` adds `keptUnchanged` and `structureDropped` of the same save.
 
-The Python binding exposes no run highlight or cell merge properties, so those steps list `"targets": ["ts", "rust"]` and Python skips them.
+No docx step has a `targets` list: every step in `steps` runs on TS, Rust and Python. The `engineSteps`, a save, its report, a reopen and the `paragraph` and `paragraphIds` reads of what was saved, run on Rust and Python only.
 
 For a new format, add its script, golden and `scripts/parity/<format>.ts` op table.
 Register the table in `harness.ts`, add Rust/Python tests and hook up native CI after its build.

@@ -1,3 +1,4 @@
+import { attachFontPackSource } from './fontPackSource';
 import { SessionFailure } from './types';
 
 /** Endpoint seam: ordered reliable delivery; ports and sockets may copy instead of transfer. */
@@ -58,7 +59,11 @@ function transportFor(scope: SessionScope, close: () => void): SessionTransport 
 
 /** Adapts an existing worker without constructing one. */
 export function createWorkerTransport(worker: Worker): SessionTransport {
-  return transportFor(worker, () => worker.terminate());
+  const detach = attachFontPackSource(worker);
+  return transportFor(worker, () => {
+    detach?.();
+    worker.terminate();
+  });
 }
 
 /** Adapts a worker scope or message port. */

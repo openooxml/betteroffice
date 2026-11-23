@@ -46,6 +46,8 @@ test.skipIf(process.env.BETTEROFFICE_NATIVE_TEST_HOOKS !== '1')('a panic mid-edi
     expect(thrown(() => hooks.panicAfterInsertForTest('body', paragraphId, 'Half applied '))).toHaveProperty('code', 'GenericFailure');
     expect(delivered).toBe(0);
     expect((thrown(() => document.version()) as Error).message).toBe(failedObject);
+    expect(() => document.clear_update_observer()).not.toThrow();
+    expect(delivered).toBe(0);
   } finally {
     expect(() => document.free()).not.toThrow();
   }

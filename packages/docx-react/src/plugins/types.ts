@@ -277,7 +277,7 @@ export interface DocxPluginGeometry {
    * {@link getAnchorGeometry} of every target, in order; it never answers `pending` and never
    * rejects. Selection targets wait for mapping or a display range for up to two seconds, then
    * answer `layout-unavailable`. Other targets await worker-only reads, batched in one tick; the
-   * hybrid editor, removed in 0.6.0, answers them right away, with `layout-unavailable` while reading.
+   * hybrid editor, removed in 0.7.0, answers them right away, with `layout-unavailable` while reading.
    * A target whose read failed answers `read-failed` and is read again only when this method asks
    * for it, so retry with backoff.
    * Answers come from the layout current when the reads land, so a newer layout gives its own

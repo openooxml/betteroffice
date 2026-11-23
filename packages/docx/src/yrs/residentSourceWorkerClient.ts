@@ -7,6 +7,7 @@ import type { WasmModuleMemory } from '../wasm/loadWasmAsset';
 import type { DocxEngineWorkerResponse } from './residentEngineWorkerProtocol';
 import type { Document } from '../types/document';
 import { retainEmbeddedFontFaces } from '../utils/embeddedFonts';
+import { isFontPackRequest } from '../../../../shared/office-session/optionalFontPacks';
 import type { DocxSvgMedia } from './residentCommandProtocol';
 
 export interface DocxEngineWorkerSourceOpened {
@@ -50,7 +51,7 @@ export class DocxSourceWorkerClient extends ResidentEngineWorkerClient {
     const receive = this.worker.onmessage!;
     this.worker.onmessage = event => {
       receive(event);
-      if (this.terminalError) return;
+      if (this.terminalError || isFontPackRequest(event.data)) return;
       const response = event.data;
       if (response.ok && response.commandFrame) {
         const pushed = response.commandFrame;

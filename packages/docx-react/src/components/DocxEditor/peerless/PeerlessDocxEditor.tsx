@@ -52,9 +52,9 @@ import { workerRevisionCallbacks, workerRevisionRequest } from './workerRevision
 import { PluginDock } from '../../../plugins/PluginPanels';
 import { useIsDark } from '../hooks/useIsDark';
 import { copyWorkerSelection, createClipboardPrefetch, writeClipboardCapture, type ClipboardCapture, isPasteFragmentAllowed } from './clipboard';
-import { submitPasteFragment } from './inputAdmission';
+import { submitInputIntent, submitPasteFragment, type PeerlessAdmissionResult, type PeerlessQueuedCut } from './inputAdmission';
 import { DocxCutRefusedError } from '../internals/cutRefused';
-import type { DocxClipboardFragment, DocxReservationsPayload } from '@betteroffice/docx/yrs';
+import type { DocxClipboardFragment, DocxCommandSelection, DocxReservationsPayload } from '@betteroffice/docx/yrs';
 import { useWorkerFileIO } from './useWorkerFileIO';
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
 import { yrsSelectionState } from '../hooks/useSelectionTracker';
@@ -85,6 +85,7 @@ import { fontEnvironmentForRegistrations, prepareWorkerFontEnvironment, uncovere
 import type { Document } from '@betteroffice/docx/types/document';
 import type { DocxFontEnvironment } from '@betteroffice/docx/yrs';
 import { PeerlessPagedEditor } from './PeerlessPagedEditor';
+import type { PeerlessPasteRecorder } from './PeerlessInput';
 import type { PeerlessPropertyIntent } from './inputEvents';
 import { useWorkerCollaboration } from './useWorkerCollaboration';
 import { geometryMatchesDocument, type PeerlessFrameGeometry, type PeerlessViewIdentity } from './viewStore';
@@ -547,7 +548,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   }, [prepareSave]);
   const sourceGeneration = useMemo(() => ({}), [documentBuffer, parsedDocument, replaced ? replacement : null]);
   const [loaded, setLoaded] = useState<{ generation: object; source: Uint8Array } | null>(null);
-  const reportError = useCallback((error: Error) => { workerCollaboration.retire(); controller.fail(error); errorHandler.current?.(error); }, [controller, workerCollaboration.retire]);
+  const reportError = useCallback((error: Error, recoveryFailed?: boolean) => { workerCollaboration.retire(); controller.fail(error, recoveryFailed); errorHandler.current?.(error); }, [controller, workerCollaboration.retire]);
   const reportShellError = useCallback((error: Error) => { pluginHost.checkFocus(); reportError(error); }, [reportError, pluginHost]);
   const [previewJob, setPreviewJob] = useState<WorkerPreviewJob | null>(null);
   const onPreviewPresented = useCallback((frame: WorkerPreviewJob['frame']) => {
@@ -1113,7 +1114,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     releaseWorkerPreview(previewJob.client);
   }, [shellState.status, previewJob]);
   const clipboardReplay = useRef<{ capture: ClipboardCapture; written: boolean } | null>(null);
-  const onClipboard = useCallback(async (cut: boolean, data?: DataTransfer | null) => {
+  const onClipboard = useCallback(async (cut: boolean, data?: DataTransfer | null, queuedCut?: PeerlessQueuedCut) => {
     const current = active.current;
     if (!current) return;
     if (data && clipboardReplay.current) {
@@ -1121,8 +1122,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       return;
     }
     try {
-      const copied = await copyWorkerSelection({ binding: current.binding, cut, data, prefetched: current.clipboard?.take(),
-        isCurrent: () => active.current === current,
+      const copied = await copyWorkerSelection({ binding: current.binding, cut, data, prefetched: current.clipboard?.take(), queuedCut,
+        isCurrent: () => active.current === current && (!queuedCut || queuedCut.isCurrent()),
         readCapture: () => current.clipboard!.read(),
         writeNative: (capture) => {
           const input = host.current?.querySelector('.paged-editor__input');
@@ -1135,7 +1136,10 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
           return completed && replay.written;
         },
         readSelection: (selection) => controller.read({ kind: 'rawSelectionInfo', selection }),
-        readClipboardSlice: (selection, cells) => controller.read({ kind: 'clipboardSlice', selection, cells }),
+        readClipboardSlice: async (selection, cells) => {
+          const request = { kind: 'clipboardSlice' as const, selection, cells };
+          return queuedCut ? (await read<'clipboardSlice'>(request)).value : controller.read(request);
+        },
         write: (text) => navigator.clipboard.writeText(text),
         writeSlice: async (text, html) => {
           if (typeof ClipboardItem === 'undefined' || !navigator.clipboard.write) throw new Error('ClipboardItem unavailable');
@@ -1149,16 +1153,27 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       if (error instanceof DocxCutRefusedError) toast(t('editor.cutRefused'));
       reportRecoverableError(error instanceof Error ? error : new Error(String(error)));
     }
-  }, [controller, props.onCopy, props.onCut, reportRecoverableError, t]);
+  }, [controller, props.onCopy, props.onCut, read, reportRecoverableError, t]);
   const notifyPasteRefused = useCallback(() => { toast(t('editor.pasteFailed')); }, [t]);
+  const pasteRecorder = useRef<PeerlessPasteRecorder | null>(null);
   const onPasteFragment = useCallback((fragment: DocxClipboardFragment, inputTime: number): boolean => {
     const current = active.current;
     if (!current) return false;
     if (!isPasteFragmentAllowed(controller.commands.store, fragment)) return false;
-    submitPasteFragment(current.binding.admission, fragment, { inputTime, source: 'paste', fence: true }, notifyPasteRefused);
+    const submission = submitPasteFragment(current.binding.admission, fragment, { inputTime, source: 'paste', fence: true }, notifyPasteRefused);
+    pasteRecorder.current?.(fragment, submission);
     props.onPaste?.();
     return true;
   }, [controller, notifyPasteRefused, props.onPaste]);
+  const onReplacePasteFragment = useCallback((fragment: DocxClipboardFragment, selection: DocxCommandSelection, variant?: 'plain' | 'merge'): PeerlessAdmissionResult | false => {
+    const current = active.current;
+    if (!current) return false;
+    if (!isPasteFragmentAllowed(controller.commands.store, fragment)) return false;
+    return submitInputIntent(current.binding.admission, { kind: 'replacePasteFragment', payload: {
+      fragment, selection, ...(variant === 'plain' ? { plain: true as const } : variant === 'merge' ? { merge: true as const } : {}),
+    } },
+      { inputTime: performance.now(), source: 'paste', fence: true });
+  }, [controller]);
   const selectionAnchor = useCallback(() => {
     const frame = controller.getSnapshot().view?.geometry;
     const rect = frame?.selectionRects[0];
@@ -1189,7 +1204,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const contextMenu = useWorkerContextMenu({ binding: () => active.current?.binding ?? null,
     environment: controller.environment, commands: controller.commands.store, clipboard: onClipboard,
     submit: controller.submit, onWrapImage: (handle, wrap) => propertyDialogs.applyImageWrap(wrap, handle),
-    onPaste: props.onPaste, onPasteRefused: notifyPasteRefused, onError: reportRecoverableError, beginAddComment: workerComments.beginAddComment, focusEditor: focus });
+    onPaste: props.onPaste, onPasteRefused: notifyPasteRefused, recordPaste: (fragment, submission) => pasteRecorder.current?.(fragment, submission), onError: reportRecoverableError, beginAddComment: workerComments.beginAddComment, focusEditor: focus });
   inputCommand.current = contextMenu.input;
   useLayoutEffect(() => {
     active.current?.clipboard?.dispose();
@@ -1511,10 +1526,10 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         }}
         onEdit={(displayText, href) => { void propertyDialogs.applyPopupLink(displayText, href, hyperlinkPopup?.tooltip).then(applied => { if (applied) setHyperlinkPopup(null); }); }}
         onRemove={() => { void propertyDialogs.removeLinkAtCaret().then(applied => { if (applied) { setHyperlinkPopup(null); toast(t('editor.linkRemoved')); } }); }} />
-      {shellState.status === 'failed' && shellState.error ? <ParseError message={shellState.error.message} /> : sessionOptions ? (
+      {shellState.status === 'failed' && shellState.error ? <ParseError message={shellState.error.message} recoveryFailed={shellState.recoveryFailed} /> : sessionOptions ? (
         <MirrorLinkRouteContext.Provider value={mirrorLinkRoute}><PeerlessPagedEditor sessionOptions={sessionOptions} zoom={zoom} onReady={onReady} autoFocus={!effectiveReadOnly} inputRef={documentInput}
           overlay={workerCollaboration.overlay(displayWindow)}
-          displayWindow={displayWindow} onDisplayWindowChange={showWindow} onClipboard={onClipboard} onPasteFragment={onPasteFragment} highlights={searchState.highlights} onNavigateCell={controller.navigateCell} onPartPoint={onPartPoint} onDragSelectionChange={dragSelection} pictures={pictureMoves} tables={tableResize}
+          displayWindow={displayWindow} onDisplayWindowChange={showWindow} onClipboard={onClipboard} onPasteFragment={onPasteFragment} pasteOptions={props.pasteOptions !== false && (props.mode ?? shellState.mode) !== 'suggesting'} onReplacePasteFragment={onReplacePasteFragment} pasteRecorder={pasteRecorder} highlights={searchState.highlights} onNavigateCell={controller.navigateCell} onPartPoint={onPartPoint} onDragSelectionChange={dragSelection} pictures={pictureMoves} tables={tableResize}
           pageMirror={props.pageMirror} unbuiltPageMirror={props.unbuiltPageMirror} readPageTexts={readPageTexts} mirrorReadBlocked={mirrorReadBlocked} scrollToPage={navigation.scrollToPage} pageOverlays={<>{partChrome}<WorkerContentControls controller={controller} onError={reportRecoverableError} /></>} /></MirrorLinkRouteContext.Provider>
       ) : hasSource ? null : placeholder ?? <DefaultPlaceholder />}
     </div>} />

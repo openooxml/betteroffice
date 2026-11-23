@@ -542,6 +542,12 @@
     "tableInserted": "डाली गई तालिका",
     "tableDeleted": "हटाई गई तालिका"
   },
+  "pasteOptions": {
+    "button": "पेस्ट विकल्प (Ctrl)",
+    "keepSource": "स्रोत स्वरूपण रखें",
+    "merge": "स्वरूपण मर्ज करें",
+    "textOnly": "केवल टेक्स्ट रखें"
+  },
   "contextMenu": {
     "ariaLabel": "AI क्रियाएँ मेनू",
     "textMenuAriaLabel": "टेक्स्ट संपादन मेनू",
@@ -587,6 +593,7 @@
     "noDocumentLoaded": "कोई दस्तावेज़ लोड नहीं हुआ",
     "failedToLoad": "दस्तावेज़ लोड करने में विफल",
     "failedToLoadDescription": "फ़ाइल क्षतिग्रस्त हो सकती है, या इसमें कुछ ऐसा है जिसे यह संपादक अभी पढ़ नहीं सकता।",
+    "recoveryFailedDescription": "संपादक बंद हो गया और आपके हाल के बदलावों को बहाल नहीं कर सका। फ़ाइल को कोई नुकसान नहीं हुआ है।",
     "failedToLoadDamaged": "फ़ाइल क्षतिग्रस्त है या पूरा Word दस्तावेज़ नहीं है।",
     "failedToLoadUnsupported": "यह दस्तावेज़ कुछ ऐसा उपयोग करता है जिसे यह संपादक अभी नहीं पढ़ सकता।",
     "editorUnavailable": "संपादक लोड नहीं हो सका",
@@ -874,6 +881,7 @@
     "toolbarGroup": "प्लगइन",
     "panelTabs": "प्लगइन पैनल",
     "collapsePanel": "{title} समेटें",
-    "expandPanel": "{title} फैलाएं"
+    "expandPanel": "{title} फैलाएं",
+    "miniToolbar": "चयन का स्वरूपण"
   }
 }

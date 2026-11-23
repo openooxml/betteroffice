@@ -7,7 +7,7 @@ BetterOffice editors synchronize through a Yrs CRDT. Each editor exposes its
 replica to a collaboration provider, which exchanges updates over a transport
 you supply. A relay routes those updates between peers in the same room.
 
-`DocxEditor` reads asynchronously by default; deprecated `legacySyncApi` keeps the synchronous API and is removed in 0.6.0. Passing `collaboration` keeps the default editor.
+`DocxEditor` reads asynchronously by default; deprecated `legacySyncApi` keeps the synchronous API and is removed in 0.7.0. Passing `collaboration` keeps the default editor.
 
 ## How updates flow
 
@@ -35,7 +35,7 @@ bun run --filter @betteroffice/collaboration-relay deploy
 ```
 
 Point your browser transport at the deployed Worker origin. The complete demo
-adapter is [`createRoomTransport`](https://github.com/openooxml/betteroffice/blob/main/apps/demo/app/collab/createRoomTransport.ts);
+adapter is [`createRoomTransport`](https://github.com/openooxml/betteroffice/blob/main/shared/editor-host/collaboration/createRoomTransport.ts);
 it handles WebSocket reconnects, binary ownership, and backpressure. If you write
 your own adapter, implement the `CollaborationTransport` exported by the format
 package. A `false` return from `send` means the adapter must emit `drain` when it

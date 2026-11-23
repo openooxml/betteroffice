@@ -2438,10 +2438,15 @@ fn workbook_xml(wb: &Workbook, active_sheet: SheetId) -> Result<Vec<u8>, ParseEr
                     Ok(())
                 })?;
                 write_defined_names(w, wb)?;
-                if !wb.full_precision {
-                    w.create_element("calcPr")
-                        .with_attribute(("fullPrecision", "0"))
-                        .write_empty()?;
+                if !wb.full_precision || wb.iterate {
+                    let mut calc_pr = w.create_element("calcPr");
+                    if wb.iterate {
+                        calc_pr = calc_pr.with_attribute(("iterate", "1"));
+                    }
+                    if !wb.full_precision {
+                        calc_pr = calc_pr.with_attribute(("fullPrecision", "0"));
+                    }
+                    calc_pr.write_empty()?;
                 }
                 Ok(())
             })?;
@@ -3161,6 +3166,7 @@ fn patched_grid(
     let patch = SheetPatch {
         sheet,
         original,
+        cell_facts: &source.cell_facts,
         axes,
         workbook: wb,
         sst_index: &sst_index,

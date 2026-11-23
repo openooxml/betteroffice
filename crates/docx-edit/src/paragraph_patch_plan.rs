@@ -163,6 +163,7 @@ fn snapshot(segments: &[StorySegment]) -> Result<Snapshot, String> {
             }),
             SegmentContent::Pilcrow(pilcrow) => {
                 properties = attrs(&pilcrow.values)?;
+                properties.remove(crate::list_definitions::LIST_LEVEL_INDENTS);
                 if let Some(original) = properties
                     .get("_originalFormatting")
                     .and_then(Value::as_object)
@@ -746,7 +747,7 @@ fn homogeneous_source_replacement(
             return Some(());
         }
         match element.name.as_str() {
-            "w:p" | "w:hyperlink" | "w:smartTag" => {
+            "w:p" | "w:hyperlink" | "w:smartTag" | "w:dir" | "w:bdo" => {
                 for (index, child) in element.child_elements().enumerate() {
                     path.push(index as u32);
                     visit(source, child, path, before, range, cursor, properties)?;

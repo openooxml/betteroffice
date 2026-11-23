@@ -22,7 +22,9 @@ describe('@betteroffice/pptx-native', () => {
         types: conditions.types,
         browser: './dist/browser.js',
         import: conditions.import,
+        default: conditions.import,
       });
+      expect(Object.keys(manifest.exports[name])).toEqual(['types', 'browser', 'import', 'default']);
     }
     expect(manifest.dependencies).toEqual({
       ...wasmManifest.dependencies,

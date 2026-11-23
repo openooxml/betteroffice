@@ -214,6 +214,9 @@ jobs:
       - name: Import every package entry in plain Node
         run: node scripts/check-node-import.mjs
 
+      - name: Load the core package entries by require and import
+        run: node scripts/check-node-require.mjs packages/docx packages/xlsx packages/pptx
+
       - name: Resolve every package entry with webpack
         run: node scripts/check-webpack-exports.mjs
 
@@ -739,6 +742,10 @@ jobs:
           bun scripts/worker-bundling-smoke.mjs
           # shellcheck disable=SC2046 # repository paths contain no spaces
           node scripts/check-webpack-exports.mjs --node-import $(node scripts/native-bindings.mjs --paths)
+          # shellcheck disable=SC2046 # repository paths contain no spaces
+          node scripts/check-node-require.mjs $(node scripts/native-bindings.mjs --paths)
+          # shellcheck disable=SC2046 # repository paths contain no spaces
+          node scripts/check-packed-license.mjs $(node scripts/native-bindings.mjs --paths)
           bun scripts/native-bindings-smoke.mjs
           smoke_dir=$(mktemp -d)
           trap 'rm -rf "$smoke_dir"' EXIT

@@ -2,6 +2,7 @@
 
 import type { BundledFontLoader, BundledFontProvider } from './fontRegistry';
 import type { FontDecoder } from '../../../../../shared/office-session/fontDecoder';
+import { importFonts } from '../../../../../shared/office-session/fontModules';
 import { decodeFontFace } from '../../wasm/fontDecoder';
 
 export const IMPLICIT_FONT_COVERAGE = '@betteroffice/fonts/coverage';
@@ -222,10 +223,10 @@ async function load(runtime: { decoder?: FontDecoder }, standIns: boolean): Prom
   const { baseUrl, fonts, load: loader } = options;
   try {
     if (fonts === undefined && loader === undefined && baseUrl === undefined) {
-      return implicitFontProvider(await import('@betteroffice/fonts'), runtime, standIns);
+      return implicitFontProvider(await importFonts(), runtime, standIns);
     }
     const module = fonts ?? (
-      (loader ? await loader() : await import('@betteroffice/fonts')) as BundledFontModule
+      (loader ? await loader() : await importFonts()) as BundledFontModule
     );
     return module.createFontProvider(baseUrl === undefined ? undefined : { baseUrl }, runtime);
   } catch (error) {
@@ -269,7 +270,7 @@ export async function resolveCompleteFontSelection(
   if (hasConfiguredFontSource() || options.baseUrl !== undefined) {
     return { provider: await resolveDefaultFontProvider(runtime), configured: true };
   }
-  return { provider: (await import('@betteroffice/fonts')).createFontProvider(undefined, runtime), configured: false };
+  return { provider: (await importFonts()).createFontProvider(undefined, runtime), configured: false };
 }
 
 /** @internal State the lazily loaded backstop provider resolves against. */

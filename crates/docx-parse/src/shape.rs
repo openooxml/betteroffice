@@ -1777,6 +1777,22 @@ pub(crate) const GROUP_SCENE_LIMIT_WARNING: &str = "BetterOffice did not show ev
 pub(crate) const GROUP_TEXT_BOX_NESTING_WARNING: &str = "BetterOffice did not show the text of group text boxes nested more than 4 levels inside other group text boxes.";
 pub(crate) const GROUP_TEXT_BOX_BUDGET_WARNING: &str = "BetterOffice did not show the text of some group text boxes nested inside other group text boxes: their copies passed the size limit for nested group text box text.";
 
+pub(crate) fn group_text_box_sources(
+    drawing: &XmlElement,
+) -> Option<(BTreeMap<TextBodyKey, Option<&XmlElement>>, bool)> {
+    let source = drawing
+        .child_elements()
+        .find(|node| matches!(node.name.as_str(), "wp:inline" | "wp:anchor"))?
+        .child_by_full_name("a:graphic")?
+        .child_by_full_name("a:graphicData")?
+        .child_elements()
+        .find(|node| is_scene_group(node.local_name()) || node.local_name() == "wpc")?;
+    let mut sources = BTreeMap::new();
+    let mut truncated = false;
+    collect_text_box_sources(source, &mut 0, &mut 0, 0, &mut sources, &mut truncated);
+    Some((sources, truncated))
+}
+
 pub(crate) fn enrich_group_text_boxes(
     shape: &mut Shape,
     drawing: &XmlElement,
@@ -1790,21 +1806,9 @@ pub(crate) fn enrich_group_text_boxes(
     let Some(root) = shape.scene.as_mut().and_then(|scene| scene.root.as_mut()) else {
         return Ok(warnings);
     };
-    let Some(source) = drawing
-        .child_elements()
-        .find(|node| matches!(node.name.as_str(), "wp:inline" | "wp:anchor"))
-        .and_then(|container| container.child_by_full_name("a:graphic"))
-        .and_then(|graphic| graphic.child_by_full_name("a:graphicData"))
-        .and_then(|data| {
-            data.child_elements()
-                .find(|node| is_scene_group(node.local_name()) || node.local_name() == "wpc")
-        })
-    else {
+    let Some((sources, truncated)) = group_text_box_sources(drawing) else {
         return Ok(warnings);
     };
-    let mut sources = BTreeMap::new();
-    let mut truncated = false;
-    collect_text_box_sources(source, &mut 0, &mut 0, 0, &mut sources, &mut truncated);
     if truncated {
         warnings.push(GROUP_SCENE_LIMIT_WARNING);
     }

@@ -97,10 +97,17 @@ pub(super) fn lower_shape_json(
     lower_shape(shape, format!("shape:{pm_start}"), env, Some(pm_start))
 }
 
+/// Whether a drawing's wrap type is `inline`, the one wrap that keeps a drawing
+/// in its paragraph's flow.
+pub(crate) fn inline_wrap(wrap_type: Option<&str>) -> bool {
+    wrap_type == Some("inline")
+}
+
 /// A `wp:anchor` shape rather than a `wp:inline` one. A malformed anchor can
 /// lose its position and keep only its wrap, so both spellings count.
 pub(super) fn anchored_shape(shape: &ShapeBlock) -> bool {
-    shape.position.is_some() || shape.wrap_type.is_some()
+    shape.position.is_some()
+        || (shape.wrap_type.is_some() && !inline_wrap(shape.wrap_type.as_deref()))
 }
 
 pub(super) fn inline_native_shape(shape: &ShapeBlock) -> bool {
@@ -653,7 +660,11 @@ fn shape_paragraph(
         ..ParagraphAttrs::default()
     };
     super::lower_paragraph_spacing(&values, &mut attrs, env, false);
-    super::lower_paragraph_indent(&values, &mut attrs);
+    super::lower_paragraph_indent(
+        &values,
+        &crate::list_marker::ListState::default(),
+        &mut attrs,
+    );
     super::lower_paragraph_tabs(&values, &mut attrs);
     if let Some(bullet) = object(paragraph, "bullet") {
         attrs.list_marker = string_in(bullet, "text");

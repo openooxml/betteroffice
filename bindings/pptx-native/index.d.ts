@@ -133,6 +133,7 @@ export declare class PptxRenderer {
   layoutProposalSlideJson(document: PptxDocument, id: string, slideIndex: number): string
   layoutProposalDiffSlideByIdJson(document: PptxDocument, id: string, slideId: string): string
   layoutProposalDiffSlideJson(document: PptxDocument, id: string, slideIndex: number): string
+  previewShapeRectJson(document: PptxDocument, request: ShapeRectPreviewRequest): string
 }
 
 export declare function compileSlideJson(slideJson: string): string
@@ -168,3 +169,12 @@ export declare function parsePptxJsonWithoutMedia(data: Uint8Array): string
 export declare function rendererVersion(): string
 
 export declare function renderPptxMarkdownJson(content: string, options: string): string
+
+export interface ShapeRectPreviewRequest {
+  slideId: string
+  shapeId: string
+  x: number
+  y: number
+  width: number
+  height: number
+}

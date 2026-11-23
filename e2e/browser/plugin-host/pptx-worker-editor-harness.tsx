@@ -7,6 +7,7 @@ import {
   PptxPeerNotReadyError, PptxWorkerEditorFailedError, type PptxWorkerEditorAccess, type PptxWorkerEditorSession,
 } from '@betteroffice/pptx/worker';
 import { createPresentationEditorSession } from '../../../packages/pptx/src/session/editorSession';
+import { createSessionWorker } from '../../../packages/pptx/src/session/sessionWorker.browser';
 import { workerEditorSessionOpener } from '../../../packages/pptx-react/src/worker/useEditableSessionPresentation';
 import { createWorkerTransport } from '../../../shared/office-session/transport';
 import { isClientMessage, isHostMessage } from '../../../shared/office-session/protocol';
@@ -66,7 +67,7 @@ let baseline: { canvas: HTMLCanvasElement; bytes: Uint8ClampedArray }[] = [];
 const errors: WorkerEditorProbe['errors'] = [];
 
 workerEditorSessionOpener.open = (bytes, options) => {
-  const worker = new Worker(new URL('../../../packages/pptx/src/session/pptxSessionWorker.mjs', import.meta.url), { type: 'module' });
+  const worker = createSessionWorker();
   const native = createWorkerTransport(worker);
   const methods = new Map<number, string>();
   const gate = { worker, hydration: owners.length === 0, replay: false, queued: [] as (() => void)[],

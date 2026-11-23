@@ -67,7 +67,7 @@ export default defineConfig((options) => [
       options.chunkNames = 'chunk-[hash]';
     },
     onSuccess: async () => {
-      await buildWorkerStubs('docx', options.outDir ?? 'dist');
+      await buildWorkerStubs('docx', options.outDir ?? 'dist', { browserFonts: true });
     },
   },
 ]);

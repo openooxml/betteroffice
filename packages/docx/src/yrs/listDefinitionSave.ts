@@ -1,5 +1,6 @@
 import { headerFooterAliasOf, markHeaderFooterAlias } from '../docx/headerFooterAliasProjection';
-import type { HeaderFooter, NumberingDefinitions, Paragraph } from '../types/document';
+import { parseRelationshipsXmlWithRust } from '../docx/rustParseFacade';
+import type { HeaderFooter, NumberingDefinitions, Paragraph, Relationship } from '../types/document';
 import type { YrsSession } from './index';
 
 /** The `w:numId` and `w:abstractNumId` a save gives a list definition the editor created. */
@@ -41,6 +42,8 @@ const assigned = new WeakMap<YrsSession, ReadonlyMap<string, DocxListDefinitionI
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
+const ascending = (left: string, right: string) => (left < right ? -1 : left > right ? 1 : 0);
+
 const highest = (values: Iterable<number>, floor: number): number => {
   let result = floor;
   for (const value of values) if (value > result) result = value;
@@ -72,17 +75,30 @@ export function createdListKey(properties: Record<string, unknown>): string | un
   return typeof listDef.key === 'string' && recorded === numId ? listDef.key : undefined;
 }
 
+/** `change`, a property change, with the `numPr` of its earlier formatting marked when that names a created list. */
+function markEarlierCreatedList<T>(change: T): T {
+  const previous = isRecord(change) ? change.previousFormatting : undefined;
+  if (!isRecord(previous) || !isRecord(previous.numPr)) return change;
+  const key = createdListKey(previous);
+  if (key === undefined) return change;
+  return { ...change, previousFormatting: { ...previous, numPr: { ...previous.numPr, [CREATED_LIST]: key } } };
+}
+
 /**
- * `paragraph`, projected from `properties`, with its `numPr` recognisable to a save as that of the
- * created list it is on; it keeps the numId earlier versions read until a save gives the list its
- * own.
+ * `paragraph`, projected from `properties`, with its `numPr`, and the earlier `numPr` of each of its
+ * property changes, recognisable to a save as that of the created list it names; each keeps the
+ * numId earlier versions read until a save gives the list its own.
  */
 export function markCreatedListParagraph(paragraph: Paragraph, properties: Record<string, unknown>): Paragraph {
   const key = createdListKey(properties);
   const numPr = paragraph.formatting?.numPr;
-  if (key === undefined || numPr === undefined) return paragraph;
-  const marked = { ...numPr, [CREATED_LIST]: key } as typeof numPr;
-  return { ...paragraph, formatting: { ...paragraph.formatting, numPr: marked } };
+  const changes = paragraph.propertyChanges?.map(markEarlierCreatedList);
+  const marked = changes?.some((change, index) => change !== paragraph.propertyChanges![index])
+    ? { ...paragraph, propertyChanges: changes }
+    : paragraph;
+  if (key === undefined || numPr === undefined) return marked;
+  const markedNumPr = { ...numPr, [CREATED_LIST]: key } as typeof numPr;
+  return { ...marked, formatting: { ...marked.formatting, numPr: markedNumPr } };
 }
 
 /**
@@ -128,6 +144,42 @@ export function withCreatedListIds<T>(value: T, numIds: ReadonlyMap<string, numb
 }
 
 /**
+ * What the `numPr`s of `value`, a projected document or any part of it, name: the keys of the
+ * created lists they mark and the numIds of those they leave unmarked.
+ */
+export function createdListReferences(value: unknown): { keys: Set<string>; numIds: Set<number> } {
+  const keys = new Set<string>();
+  const numIds = new Set<number>();
+  const seen = new Set<object>();
+  const visit = (node: unknown): void => {
+    if (node === null || typeof node !== 'object' || ArrayBuffer.isView(node) || node instanceof ArrayBuffer) return;
+    if (seen.has(node)) return;
+    seen.add(node);
+    if (node instanceof Map) {
+      for (const entry of node.values()) visit(entry);
+    } else if (Array.isArray(node)) {
+      for (const item of node) visit(item);
+    } else if ([Object.prototype, null].includes(Object.getPrototypeOf(node))) {
+      const record = node as Record<string, unknown>;
+      const key = record[CREATED_LIST];
+      if (typeof key === 'string') {
+        keys.add(key);
+        return;
+      }
+      for (const [name, entry] of Object.entries(record)) {
+        if (name === 'numPr' && isRecord(entry) && typeof entry[CREATED_LIST] !== 'string') {
+          const numId = engineNumber(entry.numId);
+          if (numId !== undefined && Number.isFinite(numId)) numIds.add(numId);
+        }
+        visit(entry);
+      }
+    }
+  };
+  visit(value);
+  return { keys, numIds };
+}
+
+/**
  * The ids a save gives the list definitions the editor created, by key, whatever order the keys
  * come in: a definition an earlier save numbered, in `previous`, keeps its ids, and every other
  * one takes the next ids free above the source's and those already given.
@@ -141,7 +193,7 @@ export function savedListDefinitionIds(
   let numId = highest([...source.numIds, ...given.map(ids => ids.numId)], 0) + 1;
   let abstractNumId = highest([...source.abstractNumIds, ...given.map(ids => ids.abstractNumId)], -1) + 1;
   const ids = new Map<string, DocxListDefinitionIds>();
-  for (const key of [...new Set(keys)].sort((left, right) => (left < right ? -1 : left > right ? 1 : 0))) {
+  for (const key of [...new Set(keys)].sort(ascending)) {
     const saved = previous.get(key);
     if (saved) {
       ids.set(key, saved);
@@ -188,21 +240,65 @@ function xmlText(value: string): string {
 
 const attributeValue = (value: string | number) => escapeXml(xmlText(String(value)));
 
-/** `<{prefix}{name} ...>` elements of `masked`, with where they start and end. */
-function elementsOf(masked: string, qualified: string): Array<{ index: number; start: string; body: string; end: number }> {
-  const found: Array<{ index: number; start: string; body: string; end: number }> = [];
-  for (const match of masked.matchAll(new RegExp(`<${qualified.replace(/\./g, '\\.')}(?=[\\s/>])[^>]*>`, 'g'))) {
+/** An element of a part, with the namespace its name is bound to where it stands. */
+interface ElementSpan {
+  /** The name as written, prefix included. */
+  name: string;
+  prefix: string;
+  local: string;
+  namespace: string | undefined;
+  /** The namespace bindings in scope inside the element, by prefix ('' for the default namespace). */
+  bindings: ReadonlyMap<string, string>;
+  start: string;
+  index: number;
+  bodyStart: number;
+  bodyEnd: number;
+  end: number;
+  selfClosing: boolean;
+  closed: boolean;
+}
+
+const TAG = /<(\/?)([\w.-]+(?::[\w.-]+)?)((?:\s+[\w.:-]+\s*=\s*(?:"[^"]*"|'[^']*'))*)\s*(\/?)>/g;
+const DECLARATION = /\sxmlns(?::([\w.-]+))?\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
+
+/** The root element of `masked` and its children, each with the namespace bindings in scope at it. */
+function rootAndChildren(masked: string): { root: ElementSpan; children: ElementSpan[] } | undefined {
+  const stack: ElementSpan[] = [];
+  const children: ElementSpan[] = [];
+  let root: ElementSpan | undefined;
+  for (const match of masked.matchAll(TAG)) {
+    const tag = match[0];
+    const [, closing, name, attributes, selfClosing] = match;
     const index = match.index ?? 0;
-    const after = index + match[0].length;
-    if (match[0].endsWith('/>')) {
-      found.push({ index, start: match[0], body: '', end: after });
+    if (closing) {
+      const open = stack.pop();
+      if (!open) break;
+      open.bodyEnd = index;
+      open.end = index + tag.length;
+      open.closed = true;
+      if (stack.length === 0) break;
       continue;
     }
-    const close = masked.indexOf(`</${qualified}>`, after);
-    const end = close < 0 ? masked.length : close + `</${qualified}>`.length;
-    found.push({ index, start: match[0], body: masked.slice(after, close < 0 ? masked.length : close), end });
+    const bindings = new Map<string, string>(stack.at(-1)?.bindings ?? []);
+    for (const declared of (attributes ?? '').matchAll(DECLARATION)) {
+      bindings.set(declared[1] ?? '', unescapeXml(declared[2] ?? declared[3] ?? ''));
+    }
+    const colon = name!.indexOf(':');
+    const prefix = colon < 0 ? '' : name!.slice(0, colon);
+    const span: ElementSpan = {
+      name: name!, prefix, local: name!.slice(colon + 1), namespace: bindings.get(prefix), bindings, start: tag, index,
+      bodyStart: index + tag.length, bodyEnd: index + tag.length, end: index + tag.length,
+      selfClosing: selfClosing === '/', closed: selfClosing === '/',
+    };
+    if (stack.length === 0) root = span;
+    if (stack.length === 1) children.push(span);
+    if (span.selfClosing) {
+      if (stack.length === 0) break;
+      continue;
+    }
+    stack.push(span);
   }
-  return found;
+  return root === undefined ? undefined : { root, children };
 }
 
 /** The value, in either quoting, of attribute `name` of the start tag `start`. */
@@ -224,12 +320,12 @@ const childValue = (xml: string, name: string) => {
 };
 
 /** The level formats and texts of an `abstractNum` body, by level, as the writer controls them. */
-function levelsOf(body: string, own: string): Array<{ format?: string; text?: string } | undefined> {
+function levelsOf(body: string): Array<{ format?: string; text?: string } | undefined> {
   const levels: Array<{ format?: string; text?: string } | undefined> = [];
-  for (const level of elementsOf(body, `${own}lvl`)) {
-    const index = numberAttribute(level.start, 'ilvl');
+  for (const level of body.matchAll(/(<(?:[\w.-]+:)?lvl(?=[\s/>])[^>]*(?<!\/)>)([\s\S]*?)<\/(?:[\w.-]+:)?lvl\s*>/g)) {
+    const index = numberAttribute(level[1] ?? '', 'ilvl');
     if (index === undefined || index >= LEVELS) continue;
-    levels[index] = { format: childValue(level.body, 'numFmt'), text: childValue(level.body, 'lvlText') };
+    levels[index] = { format: childValue(level[2] ?? '', 'numFmt'), text: childValue(level[2] ?? '', 'lvlText') };
   }
   return levels;
 }
@@ -238,140 +334,341 @@ function levelsOf(body: string, own: string): Array<{ format?: string; text?: st
 const looseIds = (xml: string, name: string) =>
   [...xml.matchAll(new RegExp(`(?:^|[\\s:])${name}\\s*=\\s*["'](\\d+)["']`, 'g'))].map(match => Number(match[1]));
 
+/** Every numId a `<{any prefix}numId>` element of `xml` names, in either quoting. */
+const referencedNumIds = (xml: string) =>
+  [...xml.matchAll(/<(?:[\w.-]+:)?numId(?=[\s/>])[^>]*>/g)].flatMap(match => {
+    const value = numberAttribute(match[0], 'val');
+    return value === undefined ? [] : [value];
+  });
+
 /** What a numbering part holds: its ids, the created lists it carries and where its elements are. */
 function scanNumbering(xml: string) {
   const masked = xml.replace(/<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>/g, match => ' '.repeat(match.length));
-  const root = /<(?:([\w.-]+):)?numbering\b[^>]*>/.exec(masked) ?? undefined;
-  const own = root?.[1] === undefined ? '' : `${root[1]}:`;
-  const abstractNums = elementsOf(masked, `${own}abstractNum`);
-  const nums = elementsOf(masked, `${own}num`);
-  const carriers: Array<{ key: string; abstractNumId: number; levels: ReturnType<typeof levelsOf> }> = [];
+  const tree = rootAndChildren(masked);
+  const root = tree?.root.local === 'numbering' ? tree.root : undefined;
+  const children = (tree?.children ?? []).filter(child => root !== undefined && child.namespace === root.namespace);
+  const named = (local: string) => children.filter(child => child.local === local);
+  const abstractNums = named('abstractNum');
+  const nums = named('num');
+  const cleanup = named('numIdMacAtCleanup')[0];
+  const body = (element: ElementSpan) => masked.slice(element.bodyStart, element.bodyEnd);
+  const carriers: Array<{ key: string; abstractNumId: number; levels: ReturnType<typeof levelsOf>; element: ElementSpan }> = [];
   const abstractNumIds: number[] = looseIds(xml, 'abstractNumId');
   for (const element of abstractNums) {
     const id = numberAttribute(element.start, 'abstractNumId');
     if (id === undefined) continue;
     abstractNumIds.push(id);
-    const value = childValue(element.body, 'name');
+    const value = childValue(body(element), 'name');
     if (value?.startsWith(CARRIER)) {
-      carriers.push({ key: value.slice(CARRIER.length), abstractNumId: id, levels: levelsOf(element.body, own) });
+      carriers.push({ key: value.slice(CARRIER.length), abstractNumId: id, levels: levelsOf(body(element)), element });
     }
   }
   const pointers = new Map<number, number>();
+  const lists: Array<{ numId: number; abstractNumId: number | undefined; element: ElementSpan }> = [];
   const numIds: number[] = looseIds(xml, 'numId');
   for (const element of nums) {
     const id = numberAttribute(element.start, 'numId');
     if (id === undefined) continue;
     numIds.push(id);
-    const pointer = childValue(element.body, 'abstractNumId');
-    if (pointer !== undefined && /^\d+$/.test(pointer) && !pointers.has(Number(pointer))) pointers.set(Number(pointer), id);
+    const pointer = childValue(body(element), 'abstractNumId');
+    const abstractNumId = pointer !== undefined && /^\d+$/.test(pointer) ? Number(pointer) : undefined;
+    lists.push({ numId: id, abstractNumId, element });
+    if (abstractNumId === undefined) continue;
+    abstractNumIds.push(abstractNumId);
+    if (!pointers.has(abstractNumId)) pointers.set(abstractNumId, id);
   }
-  return { masked, root, own, abstractNums, nums, carriers, pointers, numIds, abstractNumIds };
+  return { root, abstractNums, nums, cleanup, carriers, pointers, lists, numIds, abstractNumIds };
 }
 
-/** The abstractNumId of the abstractNum `scan` carries for `definition` with what the writer writes for it. */
-function carriedAbstractNum(
+/**
+ * How list elements are spelled in the numbering part `scan` reads: the prefix the root binds to
+ * its namespace, attributes qualified or not as its lists write them (qualified when it has none),
+ * and the declaration a qualified attribute needs when no prefix is bound on the root.
+ */
+function numberingSpelling(scan: ReturnType<typeof scanNumbering>): { element: string; attribute: string; declaration: string } {
+  const root = scan.root!;
+  const namespace = root.namespace ?? W;
+  const element = root.namespace === undefined ? 'w:' : root.prefix === '' ? '' : `${root.prefix}:`;
+  const declaration = root.namespace === undefined ? ` xmlns:w="${W}"` : '';
+  const sample = [...scan.abstractNums, ...scan.nums][0];
+  const sampleId = sample === undefined
+    ? undefined
+    : /\s(?:([\w.-]+):)?(?:abstractNumId|numId)\s*=/.exec(sample.start);
+  if (sampleId !== undefined && sampleId !== null && sampleId[1] === undefined) return { element, attribute: '', declaration };
+  if (element !== '') return { element, attribute: element, declaration };
+  const bound = [...root.bindings].find(([prefix, uri]) => prefix !== '' && uri === namespace)?.[0];
+  return bound === undefined
+    ? { element, attribute: 'w:', declaration: ` xmlns:w="${namespace}"` }
+    : { element, attribute: `${bound}:`, declaration };
+}
+
+/** The abstractNums `scan` carries for `definition` with what the writer writes for it, in part order. */
+function carriersOf(
   scan: ReturnType<typeof scanNumbering>,
   definition: ReturnType<YrsSession['createdListDefinitions']>[number]
-): number | undefined {
+): ReturnType<typeof scanNumbering>['carriers'] {
   const written = definition.levelTexts.slice(0, LEVELS).map((text, level) => ({
     format: xmlText(definition.levelFormats[level] ?? 'decimal'),
     text: xmlText(text),
   }));
-  return scan.carriers.find(carrier =>
+  return scan.carriers.filter(carrier =>
     carrier.key === definition.key &&
     carrier.levels.length === written.length &&
     written.every((level, index) => carrier.levels[index]?.format === level.format && carrier.levels[index]?.text === level.text)
-  )?.abstractNumId;
+  );
 }
 
-/** Where the numbering part of the package `parts` is, or goes, and whether a relationship names it. */
+/** Segments that name the parent folder, as the engine reads them. */
+const PARENT_SEGMENTS: ReadonlySet<string> = new Set(['..', '%2e%2e', '%2e.', '.%2e']);
+
+/** A relationship target that names no path inside the package. */
+export class RelationshipTargetError extends Error {}
+
+/**
+ * The package path, without a leading '/', that the relationship target `target` names when read
+ * against `owner`, the path of the part the relationships belong to or of their relationships part,
+ * as the engine resolves it: backslashes read as '/', a leading '/' starts at the package root,
+ * empty and '.' segments are dropped, and '..' leaves one folder. Throws, naming `target`, for a
+ * target that climbs above the package root, holds a NUL character or starts with a drive prefix.
+ */
+export function resolvedRelationshipTarget(owner: string, target: string): string {
+  const refused = () =>
+    new RelationshipTargetError(`The relationship target "${target}" of ${owner} is not a path inside the package`);
+  if (target.includes('\0') || (target.charCodeAt(0) < 0x80 && target[1] === ':')) throw refused();
+  const normalizedOwner = owner.replace(/\\/g, '/');
+  const normalizedTarget = target.replace(/\\/g, '/');
+  const directory = normalizedOwner.includes('/') ? normalizedOwner.slice(0, normalizedOwner.lastIndexOf('/')) : '';
+  const base = directory === '_rels' ? '' : directory.endsWith('/_rels') ? directory.slice(0, -'/_rels'.length) : directory;
+  const segments = normalizedTarget.startsWith('/') ? [] : base.split('/').filter(segment => segment !== '' && segment !== '.');
+  for (const segment of normalizedTarget.split('/')) {
+    if (segment === '' || segment === '.') continue;
+    if (PARENT_SEGMENTS.has(segment.toLowerCase())) {
+      if (segments.pop() === undefined) throw refused();
+    } else segments.push(segment);
+  }
+  return segments.join('/');
+}
+
+/** The relationships the relationships part `xml` at `path` holds, read by the engine's parser. */
+const relationshipsIn = (xml: string | undefined, path: string): Relationship[] =>
+  xml === undefined ? [] : [...parseRelationshipsXmlWithRust(xml, path).values()];
+
+/** Where the numbering part of the package `parts` is, or goes, and the relationships that name parts of the main document. */
 function numberingPart(parts: Readonly<Record<string, Uint8Array>>) {
-  const roots = decode(parts['_rels/.rels'])?.match(/<Relationship\b[^>]*>/g) ?? [];
-  const main = (roots
-    .find(entry => /\bType="[^"]*\/officeDocument"/.test(entry))
-    ?.match(/\bTarget="([^"]*)"/)?.[1] ?? 'word/document.xml').replace(/^\//, '');
+  const mainTarget = relationshipsIn(decode(parts['_rels/.rels']), '_rels/.rels')
+    .find(relationship => relationship.type.endsWith('/officeDocument'))?.target;
+  const main = mainTarget === undefined ? 'word/document.xml' : resolvedRelationshipTarget('_rels/.rels', mainTarget);
   const folder = main.slice(0, main.lastIndexOf('/') + 1);
   const relationshipsPath = `${folder}_rels/${main.slice(folder.length)}.rels`;
   const relationships = decode(parts[relationshipsPath]);
-  const related = (relationships?.match(/<Relationship\b[^>]*>/g) ?? [])
-    .find(entry => /\bType="[^"]*\/numbering"/.test(entry) && !/\bTargetMode="External"/.test(entry));
-  const target = related?.match(/\bTarget="([^"]*)"/)?.[1];
-  const path = target === undefined ? `${folder}numbering.xml` : target.startsWith('/') ? target.slice(1) : `${folder}${target}`;
-  return { folder, relationshipsPath, relationships, related: related !== undefined, path };
+  const listed = relationshipsIn(relationships, relationshipsPath);
+  const related = listed.find(relationship => relationship.type.endsWith('/numbering') && relationship.targetMode !== 'External');
+  const target = related?.target;
+  const path = target === undefined ? `${folder}numbering.xml` : resolvedRelationshipTarget(relationshipsPath, target);
+  return { folder, relationshipsPath, relationships, ids: listed.map(relationship => relationship.id), related: related !== undefined, path };
+}
+
+/** The numIds and abstractNumIds of a numbering part. */
+interface NumberingIds {
+  numIds: ReadonlySet<number>;
+  abstractNumIds: ReadonlySet<number>;
 }
 
 /**
- * The list definitions the editor created, `definitions` as `session` lists them, with the ids a
- * save into the package `parts` gives them: a definition the package already carries, under its key
- * and with what the writer writes for it, keeps the ids it has there; one an earlier save of the
- * session numbered keeps those while they are above every id of the package and of `model`, the
- * numbering of the session's source; every other one takes the next ids above those.
+ * The ids of the numbering of the package each session opened, read the first time a save of the
+ * session writes a created list: from its source package, or, when the session has none, from the
+ * package the first save that is written writes into.
  */
-export function savedListDefinitions(
+const openedIds = new WeakMap<YrsSession, NumberingIds>();
+
+/** Forgets the ids the saves of `session` gave its created lists and the ids of the package it opened. */
+export function forgetSavedListDefinitions(session: YrsSession): void {
+  assigned.delete(session);
+  openedIds.delete(session);
+}
+
+/** The ids the numbering part of the package `parts` holds, as this module reads them. */
+function packageNumberingIds(parts: Readonly<Record<string, Uint8Array>>): NumberingIds {
+  const scan = scanNumbering(decode(parts[numberingPart(parts).path]) ?? '');
+  return { numIds: new Set(scan.numIds), abstractNumIds: new Set(scan.abstractNumIds) };
+}
+
+/** `xml` with the elements `spans` blanked out, offsets kept. */
+const blankedOut = (xml: string, spans: readonly ElementSpan[]) =>
+  spans.reduce((rest, span) => `${rest.slice(0, span.index)}${' '.repeat(span.end - span.index)}${rest.slice(span.end)}`, xml);
+
+/**
+ * The list definitions the editor created, `definitions` as `session` lists them, with the ids a
+ * save into the package `parts` gives them, and `commit`, which records those ids for the later
+ * saves of the session once the save is written; nothing is recorded before. Keys are decided in
+ * ascending order, and no two keys take the same numId or abstractNumId. Ids an earlier save of the
+ * session gave a definition are kept while the package uses them for nothing but that definition's
+ * own carrier and no key decided before took them. A definition the session gave none adopts the
+ * ids of a carrier the package holds under its key, with what the writer writes for it, when the
+ * package the session opened, `opened` or else the first package a written save of it wrote into,
+ * and `model` do not hold those ids, no other key was given them, `referenced` does not name the
+ * numId and no key decided before took them. Every other definition takes the next ids above those
+ * of the package, of the opened package, of `model` and of every earlier save. The numIds reserved
+ * include every one an XML part of the main document's folder names, and `referenced`.
+ */
+export function plannedListDefinitions(
   session: YrsSession,
   definitions: ReturnType<YrsSession['createdListDefinitions']>,
   parts: Readonly<Record<string, Uint8Array>>,
-  model?: NumberingDefinitions
-): DocxSavedListDefinition[] {
-  if (definitions.length === 0) return [];
-  const scan = scanNumbering(decode(parts[numberingPart(parts).path]) ?? '');
-  const numIds = [...scan.numIds, ...(model?.nums ?? []).map(num => num.numId)];
-  const abstractNumIds = [...scan.abstractNumIds, ...(model?.abstractNums ?? []).map(abstract => abstract.abstractNumId)];
-  const highestNumId = highest(numIds, 0);
-  const highestAbstractNumId = highest(abstractNumIds, -1);
-  const previous = assigned.get(session) ?? new Map<string, DocxListDefinitionIds>();
-  const kept = new Map<string, DocxListDefinitionIds>();
-  for (const [key, ids] of previous) {
-    if (ids.numId > highestNumId && ids.abstractNumId > highestAbstractNumId) kept.set(key, ids);
+  model?: NumberingDefinitions,
+  referenced: Iterable<number> = [],
+  opened?: () => Readonly<Record<string, Uint8Array>> | undefined
+): { definitions: DocxSavedListDefinition[]; commit(): void } {
+  if (definitions.length === 0) return { definitions: [], commit: () => {} };
+  let source = openedIds.get(session);
+  let firstWritten: NumberingIds | undefined;
+  if (source === undefined) {
+    const openedParts = opened?.();
+    source = packageNumberingIds(openedParts ?? parts);
+    if (openedParts === undefined) firstWritten = source;
+    else openedIds.set(session, source);
   }
+  const located = numberingPart(parts);
+  const xml = decode(parts[located.path]) ?? '';
+  const scan = scanNumbering(xml);
+  const named = Object.keys(parts)
+    .filter(path => path.startsWith(located.folder) && path.toLowerCase().endsWith('.xml'))
+    .flatMap(path => referencedNumIds(decode(parts[path]) ?? ''));
+  const unmarked = [...referenced];
+  const previous = assigned.get(session) ?? new Map<string, DocxListDefinitionIds>();
+  const recorded = [...previous.values()];
+  const sourceNumIds = new Set([...source.numIds, ...(model?.nums ?? []).map(num => num.numId)]);
+  const sourceAbstractNumIds = new Set([
+    ...source.abstractNumIds, ...(model?.abstractNums ?? []).map(abstract => abstract.abstractNumId),
+  ]);
+  const numIds = [...scan.numIds, ...sourceNumIds, ...named, ...unmarked, ...recorded.map(ids => ids.numId)];
+  const abstractNumIds = [...scan.abstractNumIds, ...sourceAbstractNumIds, ...recorded.map(ids => ids.abstractNumId)];
+  const kept = new Map<string, DocxListDefinitionIds>();
   const carried = new Map<string, number>();
-  for (const definition of definitions) {
-    const abstractNumId = carriedAbstractNum(scan, definition);
-    if (abstractNumId === undefined) continue;
-    carried.set(definition.key, abstractNumId);
-    const numId = scan.pointers.get(abstractNumId);
-    if (numId !== undefined) kept.set(definition.key, { numId, abstractNumId });
+  const takenNumIds = new Set<number>();
+  const takenAbstractNumIds = new Set<number>();
+  const decided = new Set<string>();
+  for (const definition of [...definitions].sort((left, right) => ascending(left.key, right.key))) {
+    if (decided.has(definition.key)) continue;
+    decided.add(definition.key);
+    const carriers = carriersOf(scan, definition);
+    const given = previous.get(definition.key);
+    if (given !== undefined) {
+      const own = carriers.find(carrier => carrier.abstractNumId === given.abstractNumId &&
+        scan.lists.every(list => list.abstractNumId !== given.abstractNumId || list.numId === given.numId));
+      const lists = own === undefined ? [] : scan.lists.filter(list => list.abstractNumId === given.abstractNumId);
+      const rest = own === undefined ? scan : scanNumbering(blankedOut(xml, [own.element, ...lists.map(list => list.element)]));
+      const shared = [...previous].some(([key, ids]) =>
+        key !== definition.key && (ids.numId === given.numId || ids.abstractNumId === given.abstractNumId));
+      const free = !rest.numIds.includes(given.numId) && !rest.abstractNumIds.includes(given.abstractNumId) &&
+        !unmarked.includes(given.numId) && (own !== undefined || !named.includes(given.numId)) &&
+        !shared && !takenNumIds.has(given.numId) && !takenAbstractNumIds.has(given.abstractNumId);
+      if (free) {
+        kept.set(definition.key, given);
+        takenNumIds.add(given.numId);
+        takenAbstractNumIds.add(given.abstractNumId);
+      }
+      continue;
+    }
+    for (const carrier of carriers) {
+      const abstractNumId = carrier.abstractNumId;
+      const numId = scan.pointers.get(abstractNumId);
+      if (sourceAbstractNumIds.has(abstractNumId) || takenAbstractNumIds.has(abstractNumId) ||
+        recorded.some(ids => ids.abstractNumId === abstractNumId)) continue;
+      if (numId !== undefined && (sourceNumIds.has(numId) || takenNumIds.has(numId) || unmarked.includes(numId) ||
+        recorded.some(ids => ids.numId === numId))) continue;
+      carried.set(definition.key, abstractNumId);
+      takenAbstractNumIds.add(abstractNumId);
+      if (numId !== undefined) {
+        kept.set(definition.key, { numId, abstractNumId });
+        takenNumIds.add(numId);
+      }
+      break;
+    }
   }
   const ids = savedListDefinitionIds(
     { numIds, abstractNumIds },
     definitions.map(definition => definition.key),
     kept
   );
-  assigned.set(session, new Map([...previous, ...ids]));
-  return definitions.flatMap(definition => {
-    const saved = ids.get(definition.key);
-    if (!saved) return [];
-    return [{ ...definition, ...saved, abstractNumId: carried.get(definition.key) ?? saved.abstractNumId }];
+  const saved = definitions.flatMap(definition => {
+    const given = ids.get(definition.key);
+    if (!given) return [];
+    return [{ ...definition, ...given, abstractNumId: carried.get(definition.key) ?? given.abstractNumId }];
   });
+  const commit = () => {
+    if (firstWritten !== undefined && !openedIds.has(session)) openedIds.set(session, firstWritten);
+    assigned.set(session, new Map([
+      ...(assigned.get(session) ?? new Map<string, DocxListDefinitionIds>()),
+      ...saved.map(definition => [definition.key, { numId: definition.numId, abstractNumId: definition.abstractNumId }] as const),
+    ]));
+  };
+  return { definitions: saved, commit };
 }
 
-/** `xml` with `child` as the last child of its element `name`. */
-function appendChild(xml: string, name: string, child: string): string {
-  const close = xml.lastIndexOf(`</${name}>`);
-  if (close >= 0) return `${xml.slice(0, close)}${child}${xml.slice(close)}`;
-  const empty = new RegExp(`<${name}\\b[^>]*?/>`).exec(xml);
-  if (!empty) throw new Error(`The package part has no ${name} element`);
-  const open = `${empty[0].slice(0, -2).trimEnd()}>`;
-  return `${xml.slice(0, empty.index)}${open}${child}</${name}>${xml.slice(empty.index + empty[0].length)}`;
+/**
+ * The list definitions the editor created with the ids a save into `parts` gives them, as
+ * `plannedListDefinitions` decides them, those ids recorded for the later saves of `session` at once.
+ */
+export function savedListDefinitions(
+  session: YrsSession,
+  definitions: ReturnType<YrsSession['createdListDefinitions']>,
+  parts: Readonly<Record<string, Uint8Array>>,
+  model?: NumberingDefinitions,
+  referenced: Iterable<number> = [],
+  opened?: () => Readonly<Record<string, Uint8Array>> | undefined
+): DocxSavedListDefinition[] {
+  const planned = plannedListDefinitions(session, definitions, parts, model, referenced, opened);
+  planned.commit();
+  return planned.definitions;
 }
 
-function abstractNumXml(w: string, declaration: string, definition: DocxSavedListDefinition): string {
+/** `xml` with comments and CDATA sections blanked out, offsets kept. */
+const masked = (xml: string) => xml.replace(/<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>/g, match => ' '.repeat(match.length));
+
+/** The start tags of the `{any prefix}name` elements of `xml`, outside comments and CDATA. */
+const startTags = (xml: string, name: string) =>
+  [...masked(xml).matchAll(new RegExp(`<(?:[\\w.-]+:)?${name}(?=[\\s/>])[^>]*>`, 'g'))].map(match => match[0]);
+
+/**
+ * `xml` with the element `child` writes, given the prefix of the root element `name` (`r:` or ''),
+ * as the root's last child.
+ */
+function appendToRoot(xml: string, name: string, child: (prefix: string) => string): string {
+  const blanked = masked(xml);
+  const root = new RegExp(`<(?:([\\w.-]+):)?${name}(?=[\\s/>])[^>]*>`).exec(blanked);
+  if (!root) throw new Error(`The package part has no ${name} element`);
+  const prefix = root[1] === undefined ? '' : `${root[1]}:`;
+  const entry = child(prefix);
+  if (root[0].endsWith('/>')) {
+    const open = `${xml.slice(root.index, root.index + root[0].length - 2).trimEnd()}>`;
+    return `${xml.slice(0, root.index)}${open}${entry}</${prefix}${name}>${xml.slice(root.index + root[0].length)}`;
+  }
+  const close = blanked.lastIndexOf(`</${prefix}${name}`);
+  if (close < 0) throw new Error(`The package part has no ${name} end`);
+  return `${xml.slice(0, close)}${entry}${xml.slice(close)}`;
+}
+
+type NumberingSpelling = ReturnType<typeof numberingSpelling>;
+
+function abstractNumXml(spelling: NumberingSpelling, definition: DocxSavedListDefinition): string {
+  const { element: e, attribute: a, declaration } = spelling;
   const levels = definition.levelTexts.slice(0, LEVELS).map((value, level) => {
     const format = definition.levelFormats[level] ?? 'decimal';
     const right = format === 'lowerRoman';
     const font = definition.kind === 'bullet' ? BULLET_FONTS.get(value) : undefined;
-    const fonts = font === undefined ? '' : `<${w}rPr><${w}rFonts ${w}ascii="${font}" ${w}hAnsi="${font}" ${w}hint="default"/></${w}rPr>`;
-    return `<${w}lvl ${w}ilvl="${level}"><${w}start ${w}val="1"/><${w}numFmt ${w}val="${attributeValue(format)}"/>` +
-      `<${w}lvlText ${w}val="${attributeValue(value)}"/><${w}lvlJc ${w}val="${right ? 'right' : 'left'}"/>` +
-      `<${w}pPr><${w}ind ${w}left="${720 * (level + 1)}" ${w}hanging="${right ? 180 : 360}"/></${w}pPr>${fonts}</${w}lvl>`;
+    const fonts = font === undefined ? '' : `<${e}rPr><${e}rFonts ${a}ascii="${font}" ${a}hAnsi="${font}" ${a}hint="default"/></${e}rPr>`;
+    return `<${e}lvl ${a}ilvl="${level}"><${e}start ${a}val="1"/><${e}numFmt ${a}val="${attributeValue(format)}"/>` +
+      `<${e}lvlText ${a}val="${attributeValue(value)}"/><${e}lvlJc ${a}val="${right ? 'right' : 'left'}"/>` +
+      `<${e}pPr><${e}ind ${a}left="${720 * (level + 1)}" ${a}hanging="${right ? 180 : 360}"/></${e}pPr>${fonts}</${e}lvl>`;
   });
-  return `<${w}abstractNum${declaration} ${w}abstractNumId="${attributeValue(definition.abstractNumId)}">` +
-    `<${w}multiLevelType ${w}val="hybridMultilevel"/><${w}name ${w}val="${attributeValue(CARRIER + definition.key)}"/>` +
-    `${levels.join('')}</${w}abstractNum>`;
+  return `<${e}abstractNum${declaration} ${a}abstractNumId="${attributeValue(definition.abstractNumId)}">` +
+    `<${e}multiLevelType ${a}val="hybridMultilevel"/><${e}name ${a}val="${attributeValue(CARRIER + definition.key)}"/>` +
+    `${levels.join('')}</${e}abstractNum>`;
 }
 
-const numXml = (w: string, declaration: string, definition: DocxSavedListDefinition) =>
-  `<${w}num${declaration} ${w}numId="${attributeValue(definition.numId)}"><${w}abstractNumId ${w}val="${attributeValue(definition.abstractNumId)}"/></${w}num>`;
+const numXml = ({ element: e, attribute: a, declaration }: NumberingSpelling, definition: DocxSavedListDefinition) =>
+  `<${e}num${declaration} ${a}numId="${attributeValue(definition.numId)}"><${e}abstractNumId ${a}val="${attributeValue(definition.abstractNumId)}"/></${e}num>`;
 
 /**
  * Numbering part `xml`, or a new one when it is undefined, holding `definitions` after its own in
@@ -384,27 +681,25 @@ export function numberingWithListDefinitions(xml: string | undefined, definition
   const scan = scanNumbering(source);
   const root = scan.root;
   if (!root) throw new Error('The numbering part has no numbering element');
-  const bound = [...root[0].matchAll(/\sxmlns:([\w.-]+)\s*=\s*(["'])(.*?)\2/g)].find(match => match[3] === W)?.[1];
-  const w = bound === undefined ? 'w:' : `${bound}:`;
-  const declaration = bound === undefined ? ` xmlns:w="${W}"` : '';
+  const spelling = numberingSpelling(scan);
   const abstracts = definitions
-    .filter(definition => carriedAbstractNum(scan, definition) !== definition.abstractNumId)
-    .map(definition => abstractNumXml(w, declaration, definition))
+    .filter(definition => !carriersOf(scan, definition).some(carrier => carrier.abstractNumId === definition.abstractNumId))
+    .map(definition => abstractNumXml(spelling, definition))
     .join('');
   const nums = definitions
-    .filter(definition => scan.pointers.get(definition.abstractNumId) !== definition.numId)
-    .map(definition => numXml(w, declaration, definition))
+    .filter(definition => !scan.lists.some(list => list.numId === definition.numId && list.abstractNumId === definition.abstractNumId))
+    .map(definition => numXml(spelling, definition))
     .join('');
   if (abstracts === '' && nums === '') return source;
-  if (root[0].endsWith('/>')) {
-    const open = `${source.slice(root.index, root.index + root[0].length - 2).trimEnd()}>`;
-    return `${source.slice(0, root.index)}${open}${abstracts}${nums}</${scan.own}numbering>${source.slice(root.index + root[0].length)}`;
+  if (root.selfClosing) {
+    const open = `${source.slice(root.index, root.end - 2).trimEnd()}>`;
+    return `${source.slice(0, root.index)}${open}${abstracts}${nums}</${root.name}>${source.slice(root.end)}`;
   }
-  const close = scan.masked.lastIndexOf(`</${scan.own}numbering>`);
-  if (close < 0) throw new Error('The numbering part has no numbering end');
-  const cleanup = elementsOf(scan.masked, `${scan.own}numIdMacAtCleanup`)[0]?.index;
-  const lastAbstractNum = scan.abstractNums[scan.abstractNums.length - 1];
-  const lastNum = scan.nums[scan.nums.length - 1];
+  if (!root.closed) throw new Error('The numbering part has no numbering end');
+  const close = root.bodyEnd;
+  const cleanup = scan.cleanup?.index;
+  const lastAbstractNum = scan.abstractNums.at(-1);
+  const lastNum = scan.nums.at(-1);
   const abstractAt = lastAbstractNum?.end ?? scan.nums[0]?.index ?? cleanup ?? close;
   const numAt = Math.max(abstractAt, lastNum?.end ?? cleanup ?? close);
   return `${source.slice(0, abstractAt)}${abstracts}${source.slice(abstractAt, numAt)}${nums}${source.slice(numAt)}`;
@@ -424,16 +719,22 @@ export function writeListDefinitionParts(parts: Record<string, Uint8Array>, defi
   parts[located.path] = encoder.encode(written);
   if (!located.related) {
     const relationships = located.relationships ?? `${XML_DECLARATION}<Relationships xmlns="${RELATIONSHIPS}"></Relationships>`;
-    const taken = new Set([...relationships.matchAll(/\bId="([^"]*)"/g)].map(match => match[1]));
+    const taken = new Set([
+      ...located.ids,
+      ...startTags(relationships, 'Relationship').flatMap(tag => attributeOf(tag, 'Id') ?? []),
+    ]);
     let next = 1;
     while (taken.has(`rId${next}`)) next += 1;
-    const entry = `<Relationship Id="rId${next}" Type="${NUMBERING_RELATIONSHIP}" Target="${escapeXml(located.path.slice(located.folder.length))}"/>`;
-    parts[located.relationshipsPath] = encoder.encode(appendChild(relationships, 'Relationships', entry));
+    const target = escapeXml(located.path.slice(located.folder.length));
+    parts[located.relationshipsPath] = encoder.encode(appendToRoot(relationships, 'Relationships', prefix =>
+      `<${prefix}Relationship Id="rId${next}" Type="${NUMBERING_RELATIONSHIP}" Target="${target}"/>`));
   }
   const types = decode(parts['[Content_Types].xml']);
-  if (source === undefined && types !== undefined && !types.includes(`PartName="/${located.path}"`)) {
-    const entry = `<Override PartName="/${escapeXml(located.path)}" ContentType="${NUMBERING_CONTENT_TYPE}"/>`;
-    parts['[Content_Types].xml'] = encoder.encode(appendChild(types, 'Types', entry));
+  const named = `/${located.path}`.toLowerCase();
+  if (source === undefined && types !== undefined &&
+    !startTags(types, 'Override').some(tag => attributeOf(tag, 'PartName')?.toLowerCase() === named)) {
+    parts['[Content_Types].xml'] = encoder.encode(appendToRoot(types, 'Types', prefix =>
+      `<${prefix}Override PartName="/${escapeXml(located.path)}" ContentType="${NUMBERING_CONTENT_TYPE}"/>`));
   }
   return true;
 }

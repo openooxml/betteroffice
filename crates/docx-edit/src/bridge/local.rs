@@ -222,6 +222,7 @@ fn unsafe_value(key: &str, value: &Any) -> bool {
         "pPrDel",
         "pPrChange",
         crate::format::RPR_CHANGE,
+        crate::format::DIRECTION_SCOPES,
     ]
     .contains(&key)
         || ["trPrChange", "tcPrChange"].contains(&key)

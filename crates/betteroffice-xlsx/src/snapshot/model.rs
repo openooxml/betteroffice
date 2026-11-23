@@ -200,6 +200,7 @@ fn global_counts(model: &Workbook) -> [usize; 10] {
         sheets,
         date_system: _,
         full_precision: _,
+        iterate: _,
         defined_names,
         shared_strings,
         styles,
@@ -260,6 +261,7 @@ fn write_header(w: &mut Writer, model: &Workbook) -> SnapshotResult<()> {
         sheets,
         date_system,
         full_precision,
+        iterate,
         defined_names: _,
         shared_strings: _,
         styles: _,
@@ -295,7 +297,7 @@ fn write_header(w: &mut Writer, model: &Workbook) -> SnapshotResult<()> {
     } else {
         HEADER
     });
-    CalculationSettings(*date_system, Some(*full_precision)).write(w);
+    CalculationSettings(*date_system, Some(*full_precision), *iterate).write(w);
     w.var_usize(records);
     w.var_usize(cells);
     for count in counts {
@@ -614,6 +616,10 @@ pub(crate) struct ModelSnapshotBuilder {
 impl ModelSnapshotBuilder {
     pub(crate) fn full_precision_setting(&self) -> Option<bool> {
         self.full_precision
+    }
+
+    pub(crate) fn iterate_setting(&self) -> Option<bool> {
+        self.model.iterate.then_some(true)
     }
 
     #[cfg(test)]
@@ -1163,9 +1169,10 @@ impl ModelSnapshotBuilder {
         conditional: bool,
         auto_filters: bool,
     ) -> SnapshotResult<()> {
-        let CalculationSettings(date, precision) = CalculationSettings::read(r)?;
+        let CalculationSettings(date, precision, iterate) = CalculationSettings::read(r)?;
         self.model.date_system = date;
         self.model.full_precision = precision.unwrap_or(true);
+        self.model.iterate = iterate;
         self.full_precision = precision;
         self.remaining_records = r
             .var_usize()?
@@ -3466,6 +3473,7 @@ mod tests {
             sheets: vec![sheet, Sheet::new(""), Sheet::new("Last")],
             date_system: DateSystem::V1904,
             full_precision: true,
+            iterate: false,
             defined_names: vec![
                 DefinedName {
                     name: String::new(),
@@ -3573,6 +3581,7 @@ mod tests {
             sheets: vec![Sheet::new("Empty"), sheet, Sheet::new("Tail")],
             date_system: DateSystem::V1900,
             full_precision: true,
+            iterate: false,
             defined_names: Vec::new(),
             shared_strings: Vec::new(),
             styles: Stylesheet::default(),
@@ -3647,6 +3656,7 @@ mod tests {
             sheets: vec![Sheet::new("Empty"), sheet, Sheet::new("Gap"), tail],
             date_system: DateSystem::V1900,
             full_precision: true,
+            iterate: false,
             defined_names: Vec::new(),
             shared_strings: Vec::new(),
             styles: Stylesheet::default(),
@@ -3846,6 +3856,7 @@ mod tests {
             sheets: Vec::new(),
             date_system: DateSystem::V1900,
             full_precision: true,
+            iterate: false,
             defined_names: Vec::new(),
             shared_strings: vec!["x".repeat(400)],
             styles: Stylesheet::default(),
