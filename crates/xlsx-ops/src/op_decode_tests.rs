@@ -89,6 +89,7 @@ fn goldens() -> Vec<Golden> {
     let patch = StylePatch {
         bold: Some(true),
         italic: Some(true),
+        underline: None,
         strikethrough: Some(true),
         font_family: Some("Arial".into()),
         font_size: Some(12.5),

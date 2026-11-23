@@ -131,6 +131,7 @@ function style(value: unknown): boolean {
   return record(value) && optionalFields(value, {
     bold: (field) => typeof field === 'boolean',
     italic: (field) => typeof field === 'boolean',
+    underline: (field) => typeof field === 'boolean',
     strikethrough: (field) => typeof field === 'boolean',
     fontFamily: (field) => typeof field === 'string',
     fontSize: finite,
@@ -145,7 +146,7 @@ function style(value: unknown): boolean {
     verticalAlignment: oneOf(['top', 'middle', 'bottom']),
     textWrapping: oneOf(['overflow', 'wrap', 'clip']),
     clear: (field) => Array.isArray(field) && Array.from(field).every(oneOf([
-      'bold', 'italic', 'strikethrough', 'fontFamily', 'fontSize', 'textColor', 'fillColor',
+      'bold', 'italic', 'underline', 'strikethrough', 'fontFamily', 'fontSize', 'textColor', 'fillColor',
       'borders', 'horizontalAlignment', 'verticalAlignment', 'textWrapping',
     ])),
   });

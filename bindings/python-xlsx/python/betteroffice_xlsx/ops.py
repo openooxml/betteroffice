@@ -22,6 +22,7 @@ BorderStyle = Literal["solid", "dashed", "dotted", "double"]
 StyleProperty = Literal[
     "bold",
     "italic",
+    "underline",
     "strikethrough",
     "fontFamily",
     "fontSize",
@@ -135,6 +136,7 @@ class StylePatch(TypedDict, total=False):
 
     bold: bool
     italic: bool
+    underline: bool
     strikethrough: bool
     fontFamily: str
     fontSize: float
