@@ -1,4 +1,5 @@
 import { expect, mock, test } from 'bun:test';
+import { resolveScriptFallbackFace } from './manifest';
 
 let missingMessage = (pack: string) => `Cannot find package '@betteroffice/fonts-${pack}'`;
 for (const pack of ['intl', 'cjk']) {
@@ -28,4 +29,12 @@ test('other import failures of the optional packs still throw', async () => {
   }
   missingMessage = () => 'Unexpected token in fonts-intl';
   await expect(fontAssetUrls('intl')).rejects.toThrow('Unexpected token in fonts-intl');
+});
+
+test('a host loading an intl face under a Vite stub gets a missing add-on error', async () => {
+  const { isMissingFontAddon, loadBundledFontBytes } = await import('./index');
+  missingMessage = (pack) => `Could not resolve "@betteroffice/fonts-${pack}" imported by "@betteroffice/fonts".`;
+  const error = await loadBundledFontBytes(resolveScriptFallbackFace('thai', false, false)!).then(
+    () => undefined, (reason: unknown) => reason);
+  expect(isMissingFontAddon(error)).toBe(true);
 });
