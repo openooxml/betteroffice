@@ -609,6 +609,22 @@ pub(crate) fn last_pilcrow<T: ReadTxn>(story: &TextRef, txn: &T) -> Option<(u32,
     last
 }
 
+/// The `pStyle` on the pilcrow terminating the paragraph containing `at`.
+pub(crate) fn paragraph_style_at<T: ReadTxn>(story: &TextRef, txn: &T, at: u32) -> Option<String> {
+    let mut offset = 0;
+    for diff in story.diff(txn, YChange::identity) {
+        let len = out_len(&diff.insert);
+        if offset >= at
+            && let Out::YMap(map) = &diff.insert
+            && is_pilcrow(map, txn)
+        {
+            return map_string(map, txn, "pStyle");
+        }
+        offset += len;
+    }
+    None
+}
+
 /// Captures every pilcrow property except the schema discriminator, plus the paraId.
 pub(crate) fn capture_pilcrow<T: ReadTxn>(map: &MapRef, txn: &T) -> (String, Vec<(String, Any)>) {
     let para_id = map_string(map, txn, PARA_ID).unwrap_or_default();

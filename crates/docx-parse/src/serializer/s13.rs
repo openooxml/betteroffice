@@ -2162,12 +2162,24 @@ fn ensure_hyperlink_style(
     if !request_uses_hyperlink_style(request) {
         return;
     }
-    let styles_path = "word/styles.xml";
-    if let Some(existing_xml) = package.text(styles_path) {
+    let rels_path = relationship_part_path(&package.document_path);
+    let mut relationships = RelationshipsIndex::parse(read_rels_or_stub(package, &rels_path));
+    let existing_styles_target = relationships.entries.iter().find_map(|entry| {
+        (relationships.attr(&entry.relationship_type) == Some(relationship_types::STYLES))
+            .then(|| relationships.target(entry).map(decode_xml_entities))
+            .flatten()
+    });
+    let styles_path = existing_styles_target
+        .as_deref()
+        .and_then(|target| resolve_relative_path(&package.document_path, target).ok())
+        .or_else(|| resolve_relative_path(&package.document_path, "styles.xml").ok())
+        .unwrap_or_else(|| "word/styles.xml".to_owned());
+
+    if let Some(existing_xml) = package.text(&styles_path) {
         let parsed = crate::styles::parse_style_definitions(
             existing_xml.as_bytes(),
             None,
-            styles_path,
+            &styles_path,
             budget,
         )
         .ok();
@@ -2183,46 +2195,47 @@ fn ensure_hyperlink_style(
                 .iter()
                 .any(|style| style.style_id == "DefaultParagraphFont")
         });
-        let style_xml = hyperlink_style_element_xml(has_default_char_style);
-        let updated = append_before(&existing_xml, "</w:styles>", &style_xml).or_else(|| {
-            let start = existing_xml.find("<w:styles")?;
-            let end = existing_xml[start..].find("/>")? + start;
-            let mut xml = String::with_capacity(existing_xml.len() + style_xml.len() + 12);
-            xml.push_str(&existing_xml[..end]);
-            xml.push('>');
-            xml.push_str(&style_xml);
-            xml.push_str("</w:styles>");
-            xml.push_str(&existing_xml[end + 2..]);
-            Some(xml)
-        });
-        if let Some(updated) = updated {
-            package.set_text(styles_path, updated);
+        if let Some(updated) = append_hyperlink_style_xml(&existing_xml, has_default_char_style) {
+            package.set_text(&styles_path, updated);
+        }
+        if existing_styles_target.is_none() {
+            ensure_styles_package_metadata(package, &styles_path, &rels_path, &mut relationships);
         }
         return;
     }
 
-    let style_xml = hyperlink_style_element_xml(false);
+    let style_xml = hyperlink_style_element_xml("w", None, false);
     package.set_text(
-        styles_path,
+        &styles_path,
         format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n\
              <w:styles xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\
              {style_xml}</w:styles>"
         ),
     );
+    ensure_styles_package_metadata(package, &styles_path, &rels_path, &mut relationships);
+}
+
+fn ensure_styles_package_metadata(
+    package: &mut Package,
+    styles_path: &str,
+    rels_path: &str,
+    relationships: &mut RelationshipsIndex,
+) {
+    let part_name = format!("/{}", styles_path.trim_start_matches('/'));
     if let Some(content_types) = package.text("[Content_Types].xml")
-        && !content_types.contains("PartName=\"/word/styles.xml\"")
+        && !content_types.contains(&format!("PartName=\"{part_name}\""))
     {
-        let entry = format!(
-            "<Override PartName=\"/word/styles.xml\" ContentType=\"{STYLES_CONTENT_TYPE}\"/>"
-        );
+        let entry =
+            format!("<Override PartName=\"{part_name}\" ContentType=\"{STYLES_CONTENT_TYPE}\"/>");
         if let Some(updated) = append_before(&content_types, "</Types>", &entry) {
             package.set_text("[Content_Types].xml", updated);
         }
     }
-    let rels_path = relationship_part_path(&package.document_path);
-    let mut relationships = RelationshipsIndex::parse(read_rels_or_stub(package, &rels_path));
-    if !relationships.xml_contains("Target=\"styles.xml\"") {
+    let has_styles_rel = relationships.entries.iter().any(|entry| {
+        relationships.attr(&entry.relationship_type) == Some(relationship_types::STYLES)
+    });
+    if !has_styles_rel {
         let relationship_id = relationships.next_id();
         relationships.push_new(
             relationship_id,
@@ -2236,18 +2249,90 @@ fn ensure_hyperlink_style(
     }
 }
 
-fn hyperlink_style_element_xml(include_based_on: bool) -> String {
-    let based_on = if include_based_on {
-        "<w:basedOn w:val=\"DefaultParagraphFont\"/>"
+fn root_tag_span(xml: &str) -> Option<(usize, usize, &str)> {
+    let mut cursor = 0;
+    loop {
+        let start = xml[cursor..].find('<')? + cursor;
+        match xml.as_bytes().get(start + 1) {
+            Some(b'?') => cursor = xml[start..].find("?>")? + start + 2,
+            Some(b'!') if xml[start..].starts_with("<!--") => {
+                cursor = xml[start..].find("-->")? + start + 4;
+            }
+            Some(b'!') => cursor = find_tag_end(xml.as_bytes(), start)? + 1,
+            Some(_) => {
+                let end = find_tag_end(xml.as_bytes(), start)?;
+                let name_start = start + 1;
+                let mut name_end = name_start;
+                while name_end < end
+                    && !matches!(
+                        xml.as_bytes()[name_end],
+                        b' ' | b'\t' | b'\r' | b'\n' | b'/'
+                    )
+                {
+                    name_end += 1;
+                }
+                return Some((start, end, &xml[name_start..name_end]));
+            }
+            None => return None,
+        }
+    }
+}
+
+fn append_hyperlink_style_xml(existing_xml: &str, include_based_on: bool) -> Option<String> {
+    let (_, open_end, root_qname) = root_tag_span(existing_xml)?;
+    let declared = declared_prefix(existing_xml, &WORDPROCESSINGML_URIS, "");
+    let style_xml = if declared == "w" {
+        hyperlink_style_element_xml("w", None, include_based_on)
     } else {
-        ""
+        let root_tag = &existing_xml[..open_end];
+        let ns_uri = if root_tag.contains(WORDPROCESSINGML_URIS[1]) {
+            WORDPROCESSINGML_URIS[1]
+        } else {
+            WORDPROCESSINGML_URIS[0]
+        };
+        hyperlink_style_element_xml("w", Some(ns_uri), include_based_on)
+    };
+    let open_prefix = existing_xml[..open_end].trim_end();
+    if let Some(slash_idx) = open_prefix.strip_suffix('/').map(str::len) {
+        let mut xml =
+            String::with_capacity(existing_xml.len() + style_xml.len() + root_qname.len() + 6);
+        xml.push_str(&existing_xml[..slash_idx]);
+        xml.push('>');
+        xml.push_str(&style_xml);
+        xml.push_str("</");
+        xml.push_str(root_qname);
+        xml.push('>');
+        xml.push_str(&existing_xml[open_end + 1..]);
+        return Some(xml);
+    }
+    let close_prefix = format!("</{root_qname}");
+    let close_start = existing_xml.rfind(&close_prefix)?;
+    let mut xml = String::with_capacity(existing_xml.len() + style_xml.len());
+    xml.push_str(&existing_xml[..close_start]);
+    xml.push_str(&style_xml);
+    xml.push_str(&existing_xml[close_start..]);
+    Some(xml)
+}
+
+fn hyperlink_style_element_xml(
+    prefix: &str,
+    xmlns_uri: Option<&str>,
+    include_based_on: bool,
+) -> String {
+    let xmlns = xmlns_uri
+        .map(|uri| format!(" xmlns:{prefix}=\"{uri}\""))
+        .unwrap_or_default();
+    let based_on = if include_based_on {
+        format!("<{prefix}:basedOn {prefix}:val=\"DefaultParagraphFont\"/>")
+    } else {
+        String::new()
     };
     format!(
-        "<w:style w:type=\"character\" w:styleId=\"Hyperlink\">\
-         <w:name w:val=\"Hyperlink\"/>{based_on}\
-         <w:uiPriority w:val=\"99\"/><w:unhideWhenUsed/>\
-         <w:rPr><w:color w:val=\"0563C1\"/><w:u w:val=\"single\"/></w:rPr>\
-         </w:style>"
+        "<{prefix}:style{xmlns} {prefix}:type=\"character\" {prefix}:styleId=\"Hyperlink\">\
+         <{prefix}:name {prefix}:val=\"Hyperlink\"/>{based_on}\
+         <{prefix}:uiPriority {prefix}:val=\"99\"/><{prefix}:unhideWhenUsed/>\
+         <{prefix}:rPr><{prefix}:color {prefix}:val=\"0563C1\"/><{prefix}:u {prefix}:val=\"single\"/></{prefix}:rPr>\
+         </{prefix}:style>"
     )
 }
 
@@ -5826,5 +5911,83 @@ mod tests {
         let saved_existing =
             write_docx_s13(styled_link_request(), &with_existing).expect("save existing");
         assert_eq!(part_map(&saved_existing)["word/styles.xml"], custom_styles);
+
+        // 4) Non-word/ main document path creates styles.xml beside it and links cleanly.
+        let custom_doc_pkg = ooxml_opc::rezip_parts(&[
+            (
+                "[Content_Types].xml".to_owned(),
+                br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/custom/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec(),
+            ),
+            (
+                "_rels/.rels".to_owned(),
+                br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="custom/document.xml"/></Relationships>"#.to_vec(),
+            ),
+            (
+                "custom/document.xml".to_owned(),
+                br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Example</w:t></w:r></w:p></w:body></w:document>"#.to_vec(),
+            ),
+        ])
+        .expect("zip custom doc");
+        let saved_custom_doc =
+            write_docx_s13(styled_link_request(), &custom_doc_pkg).expect("save custom doc");
+        let custom_doc_parts = part_map(&saved_custom_doc);
+        assert!(custom_doc_parts.contains_key("custom/styles.xml"));
+        assert!(!custom_doc_parts.contains_key("word/styles.xml"));
+        let custom_ct = String::from_utf8(custom_doc_parts["[Content_Types].xml"].clone()).unwrap();
+        assert!(custom_ct.contains(r#"PartName="/custom/styles.xml""#));
+        let custom_rels =
+            String::from_utf8(custom_doc_parts["custom/_rels/document.xml.rels"].clone()).unwrap();
+        assert!(custom_rels.contains(r#"Target="styles.xml""#));
+
+        // 5) Default-namespace and custom-prefix styles roots both receive valid Hyperlink style.
+        for (label, root_xml) in [
+            (
+                "default-ns-open",
+                r#"<styles xmlns="http://schemas.openxmlformats.org/wordprocessingml/2006/main"></styles>"#,
+            ),
+            (
+                "default-ns-self-closing",
+                r#"<styles xmlns="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>"#,
+            ),
+            (
+                "custom-prefix",
+                r#"<ns0:styles xmlns:ns0="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><ns0:style ns0:type="character" ns0:default="1" ns0:styleId="DefaultParagraphFont"><ns0:name ns0:val="Default Paragraph Font"/></ns0:style></ns0:styles>"#,
+            ),
+        ] {
+            let mut parts = part_map(&bare);
+            parts.insert("word/styles.xml".to_owned(), root_xml.as_bytes().to_vec());
+            let pkg = ooxml_opc::rezip_parts(&parts.into_iter().collect::<Vec<_>>())
+                .expect("zip ns styles");
+            let saved = write_docx_s13(styled_link_request(), &pkg).expect(label);
+            let saved_styles = part_map(&saved)["word/styles.xml"].clone();
+            let limits = crate::ParseLimits::default();
+            let mut budget = crate::xml::ParseBudget::new(&limits);
+            let parsed = crate::styles::parse_style_definitions(
+                &saved_styles,
+                None,
+                "word/styles.xml",
+                &mut budget,
+            )
+            .expect(label);
+            let hyperlink = parsed
+                .styles
+                .iter()
+                .find(|s| s.style_id == "Hyperlink")
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{label}: missing Hyperlink in {}",
+                        String::from_utf8_lossy(&saved_styles)
+                    )
+                });
+            assert_eq!(
+                hyperlink
+                    .r_pr
+                    .as_ref()
+                    .and_then(|r| r.color.as_ref())
+                    .and_then(|c| c.rgb.as_deref()),
+                Some("0563C1"),
+                "{label}"
+            );
+        }
     }
 }

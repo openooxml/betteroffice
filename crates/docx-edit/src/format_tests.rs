@@ -1221,6 +1221,46 @@ fn set_hyperlink_reuses_document_style_preserves_custom_color_and_restores_headi
 }
 
 #[test]
+fn typing_after_mid_paragraph_hyperlink_restores_paragraph_style_color() {
+    let styles = concat!(
+        r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>"#,
+        r#"<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:rPr><w:color w:val="2F5496"/></w:rPr></w:style>"#,
+        r#"<w:style w:type="character" w:styleId="Hyperlink"><w:name w:val="Hyperlink"/><w:rPr><w:color w:val="0563C1"/><w:u w:val="single"/></w:rPr></w:style>"#,
+    );
+    let body = r#"<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Start link trailing text</w:t></w:r></w:p>"#;
+    let engine = EngineSession::new(9312);
+    seed_from_docx(engine.doc(), &document_with_styles(body, styles)).unwrap();
+    let ctx = EditCtx::local("", "");
+
+    engine
+        .doc()
+        .set_hyperlink(
+            &ctx,
+            StoryRange::new("body", 6, 10),
+            Some(Any::from_json(r#"{"href":"https://example.com"}"#).unwrap()),
+        )
+        .unwrap();
+    engine
+        .doc()
+        .insert_text(
+            &ctx,
+            crate::Position::new("body", 10),
+            "!",
+            FormatPolicy::Inherit,
+        )
+        .unwrap();
+
+    let runs = attrs(&engine);
+    assert_eq!(runs[1].0, "link");
+    assert_eq!(runs[1].1["textColor"]["rgb"], "0563C1");
+    assert_eq!(runs[2].0, "! trailing text");
+    assert!(runs[2].1["hyperlink"].is_null());
+    assert!(runs[2].1["runStyle"].is_null());
+    assert_eq!(runs[2].1["textColor"]["rgb"], "2F5496");
+    assert!(runs[2].1["underline"].is_null());
+}
+
+#[test]
 fn suggested_hyperlink_applies_default_style_and_rejection_clears_it() {
     let engine = engine();
     let receipt = engine

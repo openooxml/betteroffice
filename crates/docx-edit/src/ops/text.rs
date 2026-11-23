@@ -104,6 +104,7 @@ pub(crate) fn overlaid(base: &[(String, Any)], overlay: &[(String, Any)]) -> Vec
 
 /// Resolves inherited, explicit, or plain insertion attributes.
 fn policy_attrs<T: ReadTxn>(
+    story: &TextRef,
     chunks: &[Chunk],
     at: u32,
     policy: &FormatPolicy,
@@ -153,7 +154,7 @@ fn policy_attrs<T: ReadTxn>(
                     attrs.remove(index);
                     strip_exited_hyperlink_style(
                         &mut attrs,
-                        chunks,
+                        story,
                         at,
                         story_id,
                         source_metadata,
@@ -168,7 +169,7 @@ fn policy_attrs<T: ReadTxn>(
 
 fn strip_exited_hyperlink_style<T: ReadTxn>(
     attrs: &mut Vec<(String, Any)>,
-    chunks: &[Chunk],
+    story: &TextRef,
     at: u32,
     story_id: &str,
     source: Option<&crate::seed::SourceMetadata>,
@@ -193,13 +194,7 @@ fn strip_exited_hyperlink_style<T: ReadTxn>(
         attrs.retain(|(key, _)| key != "runStyle");
     }
     if restore_color || restore_underline {
-        let paragraph_style = chunks
-            .iter()
-            .find(|chunk| chunk.start >= at && matches!(chunk.kind, ChunkKind::Pilcrow(_)))
-            .and_then(|chunk| match &chunk.kind {
-                ChunkKind::Pilcrow(mark) => crate::map_string(mark, txn, "pStyle"),
-                _ => None,
-            });
+        let paragraph_style = crate::ops::paragraph_style_at(story, txn, at);
         let base = source
             .and_then(|source| {
                 crate::format::styled_run_base(source, story_id, paragraph_style.as_deref(), None)
@@ -226,6 +221,7 @@ fn strip_exited_hyperlink_style<T: ReadTxn>(
 /// [`policy_attrs`], except that inheriting into a paragraph without content takes its mark's run
 /// formatting, as Word types into an empty paragraph.
 fn insertion_attrs<T: ReadTxn>(
+    story: &TextRef,
     chunks: &[Chunk],
     at: u32,
     policy: &FormatPolicy,
@@ -255,7 +251,7 @@ fn insertion_attrs<T: ReadTxn>(
             return crate::seed::mark_run_attrs(&defaults);
         }
     }
-    policy_attrs(chunks, at, policy, story_id, source, txn)
+    policy_attrs(story, chunks, at, policy, story_id, source, txn)
 }
 
 fn stamped_attrs(formatting: Vec<(String, Any)>, ins: Option<Any>) -> Attrs {
@@ -561,6 +557,7 @@ impl EditingDoc {
         });
         let source_metadata = self.source_metadata();
         let formatting = insertion_attrs(
+            &story,
             &chunks,
             at.index,
             &policy,
@@ -789,6 +786,7 @@ impl EditingDoc {
             .unwrap_or_else(|| {
                 let source_metadata = self.source_metadata();
                 insertion_attrs(
+                    &story,
                     &chunks,
                     range.start,
                     &FormatPolicy::Inherit,
@@ -974,6 +972,7 @@ impl EditingDoc {
         });
         let source_metadata = self.source_metadata();
         let formatting = policy_attrs(
+            &story,
             &chunks,
             at.index,
             &FormatPolicy::Inherit,
@@ -1018,6 +1017,7 @@ impl EditingDoc {
         });
         let source_metadata = self.source_metadata();
         let formatting = policy_attrs(
+            &story,
             &chunks,
             at.index,
             &FormatPolicy::Inherit,
