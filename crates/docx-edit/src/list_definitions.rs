@@ -395,6 +395,19 @@ fn source_attrs(
     Some(attrs)
 }
 
+/// The attributes that put a paragraph on the list its paragraph style numbers it with, `num_pr`,
+/// as seeding stores a paragraph numbered by its style; `None` when `source` renders no such level.
+pub(crate) fn style_list_attrs(
+    num_pr: &HashMap<String, Any>,
+    source: &SourceMetadata,
+) -> Option<BTreeMap<String, Any>> {
+    let mut attrs = rendered_level(num_pr, source)?;
+    attrs.insert("numPr".to_owned(), Any::from(num_pr.clone()));
+    attrs.insert("numPrFromStyle".to_owned(), Any::from(num_pr.clone()));
+    attrs.insert(LIST_LEVEL_INDENTS.to_owned(), Any::Bool(true));
+    Some(attrs)
+}
+
 /// The list attributes seeding stores for a paragraph on the source list and level `num_pr`
 /// names, as `source` renders them; `None` when it renders no such level.
 fn rendered_level(

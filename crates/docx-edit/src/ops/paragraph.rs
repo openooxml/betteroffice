@@ -1559,30 +1559,30 @@ pub(crate) fn plan_paragraph_style<T: ReadTxn>(
             changes.push((key.to_owned(), wanted.cloned()));
         }
     }
-    if !direct_numbering {
-        if clears_numbering {
-            for key in [
-                "numPr",
-                "numPrFromStyle",
-                crate::LIST_DEF,
-                crate::list_definitions::LIST_LEVEL_INDENTS,
-                "listNumFmt",
-                "listIsBullet",
-                "listMarker",
-                "listMarkerHidden",
-                "listMarkerBold",
-                "listMarkerItalic",
-                "listMarkerColor",
-                "listLevelNumFmts",
-                "listAbstractNumId",
-                "listStartOverride",
-                "listMarkerFontFamily",
-                "listMarkerFontSize",
-                "listMarkerSuffix",
-            ] {
-                if present(properties.get(key)).is_some() {
-                    changes.push((key.to_owned(), None));
-                }
+    let styles_numbering = target.contains_key("numPr");
+    if !direct_numbering && (clears_numbering || styles_numbering) {
+        for key in [
+            "numPr",
+            "numPrFromStyle",
+            crate::LIST_DEF,
+            crate::list_definitions::LIST_LEVEL_INDENTS,
+            "listNumFmt",
+            "listIsBullet",
+            "listMarker",
+            "listMarkerHidden",
+            "listMarkerBold",
+            "listMarkerItalic",
+            "listMarkerColor",
+            "listLevelNumFmts",
+            "listAbstractNumId",
+            "listStartOverride",
+            "listMarkerFontFamily",
+            "listMarkerFontSize",
+            "listMarkerSuffix",
+        ] {
+            let wanted = present(target.get(key).copied());
+            if wanted != present(properties.get(key)) {
+                changes.push((key.to_owned(), wanted.cloned()));
             }
         }
     }
@@ -1598,7 +1598,7 @@ pub(crate) fn plan_paragraph_style<T: ReadTxn>(
         for key in crate::seed::style_resolved_keys() {
             direct.remove(formatting_key(key));
         }
-        if clears_numbering {
+        if clears_numbering || styles_numbering {
             direct.remove("numPr");
             direct.remove("numPrFromStyle");
         }

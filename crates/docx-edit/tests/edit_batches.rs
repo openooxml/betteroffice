@@ -1765,7 +1765,7 @@ fn paragraph_styles_apply_their_full_effect_in_rust() {
         assert_eq!(
             refusal.message,
             format!(
-                "style {style:?} defines list numbering; set_paragraph_style cannot apply a numbered style yet"
+                "style {style:?} names list numbering that the document's numbering part does not define"
             )
         );
         let refusal = refuse(
@@ -1782,7 +1782,7 @@ fn paragraph_styles_apply_their_full_effect_in_rust() {
         assert_eq!(
             refusal.message,
             format!(
-                "style {style:?} defines list numbering, which v1 batches do not apply; retaining numbering definitions for batches is a follow-up"
+                "style {style:?} names list numbering that the document's numbering part does not define"
             )
         );
     }
@@ -1855,6 +1855,67 @@ fn paragraph_styles_without_a_numbering_id_apply_like_plain_styles() {
         code(&doc, vec![set_style("00000001", "ListNumber")]),
         EditFailureCode::Unsupported
     );
+}
+
+#[test]
+fn numbered_styles_put_inserted_and_restyled_paragraphs_on_their_list() {
+    let mut parts = ooxml_opc::unzip_parts(&docx(&p("00000001", &r("plain")))).unwrap();
+    for (name, from, to) in [
+        (
+            "[Content_Types].xml",
+            "</Types>",
+            r#"<Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/></Types>"#,
+        ),
+        (
+            "word/_rels/document.xml.rels",
+            "</Relationships>",
+            r#"<Relationship Id="rIdNumbering" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/></Relationships>"#,
+        ),
+    ] {
+        let part = parts.iter_mut().find(|(part, _)| part == name).unwrap();
+        part.1 = String::from_utf8(part.1.clone())
+            .unwrap()
+            .replace(from, to)
+            .into_bytes();
+    }
+    parts.push((
+        "word/numbering.xml".to_owned(),
+        format!(
+            r#"<w:numbering {NS}><w:abstractNum w:abstractNumId="3"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="3"/></w:num></w:numbering>"#
+        )
+        .into_bytes(),
+    ));
+    let doc = open_package(&ooxml_opc::rezip_parts(&parts).unwrap());
+    let undo = UndoSession::new();
+    let applied = apply(
+        &doc,
+        &undo,
+        vec![insert_paragraphs(
+            "00000001",
+            TargetEdge::End,
+            vec![new_paragraph("step", Some("ListChild"))],
+        )],
+    );
+    apply(&doc, &undo, vec![set_style("00000001", "ListNumber")]);
+    let inserted = applied.receipts[0].new_paragraphs[0].para_id.clone();
+    for (id, style) in [(inserted.as_str(), "ListChild"), ("00000001", "ListNumber")] {
+        let listed = properties(&doc, id);
+        assert_eq!(listed.get("pStyle"), Some(&Any::from(style)), "{id}");
+        let Some(Any::Map(num_pr)) = listed.get("numPr") else {
+            panic!("{id} is numbered by its style: {listed:?}");
+        };
+        assert_eq!(number(num_pr.get("numId")), Some(1.0), "{id}");
+        assert_eq!(listed.get("numPrFromStyle"), listed.get("numPr"), "{id}");
+        assert_eq!(
+            listed.get("listNumFmt"),
+            Some(&Any::from("decimal")),
+            "{id}"
+        );
+        assert_eq!(listed.get("listMarker"), Some(&Any::from("%1.")), "{id}");
+    }
+    if let Some(Any::Map(original)) = properties(&doc, "00000001").get("_originalFormatting") {
+        assert!(!original.contains_key("numPr"));
+    }
 }
 
 fn open_numbered_restyle(body: &str) -> EditingDoc {
