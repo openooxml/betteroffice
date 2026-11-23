@@ -2,7 +2,7 @@ import latinManifest from '../../fonts-latin/assets/manifest.json';
 import intlManifest from '../../fonts-intl/assets/manifest.json';
 import cjkManifest from '../../fonts-cjk/assets/manifest.json';
 import baseLatinManifest from '../assets/base-latin.json';
-import { readFontBytes } from './bytes';
+import { readFontAsset } from './asset';
 import type { FontDecoder } from './decode';
 import type { BundledFontFace } from './manifest';
 import type { SliceRef } from './progressive';
@@ -95,7 +95,7 @@ async function loadFace(
         throw new Error(`Missing bundled font dictionary for ${face.file}`);
       }
       const [encoded, prerequisite] = await Promise.all([
-        readFontBytes(face.file, url, requestTimeoutMs),
+        readFontAsset(face.file, url, requestTimeoutMs),
         regular === undefined ? undefined : loadFace(
           { ...face, file: regular.file, byteLength: regular.byteLength },
           manifest, resolveUrl, timeoutMs, wasmUrl, runtime,

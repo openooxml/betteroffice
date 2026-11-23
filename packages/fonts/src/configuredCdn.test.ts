@@ -326,7 +326,7 @@ test('every sliced CDN file validates its bytes and failed chunks can retry', as
   expect(chunkGlyph).toBeLessThan(skeleton.numGlyphs);
   for (const target of [entry.slices!.index, index.skeleton.file, index.core.file, index.chunks[0]!.file]) {
     fonts.configureFontCdn({ baseUrl: `https://sliced-integrity.example/${encodeURIComponent(target)}/` });
-    const poisoned = new WeakSet<object>();
+    const poisoned = new Set<number>();
     let tamper = true;
     globalThis.fetch = (async (input: RequestInfo | URL) => {
       if (String(input).endsWith('.wasm')) return fontAssetResponse(input);
@@ -337,7 +337,7 @@ test('every sliced CDN file validates its bytes and failed chunks can retry', as
     }) as typeof fetch;
     const checked: FontDecoder = async (encoded, options) => {
       const response = await decoder(encoded, options);
-      if (tamper && poisoned.has(encoded)) new Uint8Array(response.font)[0] ^= 1;
+      if (tamper && poisoned.delete(encoded.byteLength)) new Uint8Array(response.font)[0] ^= 1;
       return response;
     };
     const fetchAsset = globalThis.fetch;
@@ -347,7 +347,7 @@ test('every sliced CDN file validates its bytes and failed chunks can retry', as
         const read = response.arrayBuffer.bind(response);
         response.arrayBuffer = async () => {
           const bytes = await read();
-          poisoned.add(bytes);
+          poisoned.add(bytes.byteLength);
           return bytes;
         };
       }
