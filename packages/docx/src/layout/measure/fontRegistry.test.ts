@@ -5,6 +5,7 @@ import type { SliceLocation } from '@betteroffice/fonts/progressive';
 import { configureDefaultFonts, resolveDefaultFontProvider } from './defaultFontProvider';
 import { TextMeasureFontRegistry } from './fontRegistry';
 import { fontAssetResponse, fontRuntimeWithoutPacks, withBrowserFontGlobals } from '../../../../fonts/src/fontAssets.test-support';
+import { spyOnFontFetch } from '../../../../fonts/src/fontFetch.test-support';
 import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../../shared/office-session/fontCdn';
 
 test("an unknown family asks the provider for Word's last-resort face", async () => {
@@ -28,7 +29,7 @@ test("an unknown family asks the provider for Word's last-resort face", async ()
 test('DOCX layout uses Base Latin when neither the primary nor the last resort pack is installed', async () => {
   const previous = getFontCdnConfiguration();
   setFontCdnConfiguration(undefined);
-  const fetch = spyOn(globalThis, 'fetch').mockImplementation(fontAssetResponse);
+  const fetch = spyOnFontFetch(fontAssetResponse);
   const registerFont = mock((_bytes: Uint8Array) => 1);
   const provider = fontRuntimeWithoutPacks().createFontProvider();
   try {
@@ -49,7 +50,7 @@ test('DOCX substitutes after a slice index 404 and fetches slices again only aft
   const clock = spyOn(Date, 'now').mockReturnValue(now);
   const requests: string[] = [];
   let failed = true;
-  const fetch = spyOn(globalThis, 'fetch').mockImplementation((input) => {
+  const fetch = spyOnFontFetch((input) => {
     const url = String(input);
     if (url.includes('cdn.jsdelivr.net')) {
       requests.push(url);
@@ -95,7 +96,7 @@ test('DOCX with configured fonts substitutes locally after its first implicit CD
   const restore = withBrowserFontGlobals();
   const runtime = fontRuntimeWithoutPacks();
   const requests: string[] = [];
-  const fetch = spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+  const fetch = spyOnFontFetch(async (input) => {
     const url = String(input);
     if (url.includes('cdn.jsdelivr.net')) {
       requests.push(url);
@@ -128,7 +129,7 @@ test.each(['script fallback', 'last resort'] as const)('DOCX warns once per CDN 
   const warn = spyOn(console, 'warn').mockImplementation(() => {});
   const runtime = fontRuntimeWithoutPacks(new URL('https://docx-base.example/'));
   const create = spyOn(fonts, 'createFontProvider').mockImplementation(runtime.createFontProvider);
-  const fetch = spyOn(globalThis, 'fetch').mockImplementation((input) => String(input).includes('cdn.jsdelivr.net')
+  const fetch = spyOnFontFetch((input) => String(input).includes('cdn.jsdelivr.net')
     ? Promise.resolve(new Response(null, { status: 404 })) : fontAssetResponse(input));
   try {
     configureDefaultFonts({});
@@ -165,7 +166,7 @@ test.each(['disabled', 'unavailable'] as const)('DOCX leaves an absent script fa
   const runtime = fontRuntimeWithoutPacks(new URL('https://docx-base.example/'));
   const create = spyOn(fonts, 'createFontProvider').mockImplementation(runtime.createFontProvider);
   const requests: string[] = [];
-  const fetch = spyOn(globalThis, 'fetch').mockImplementation((input) => {
+  const fetch = spyOnFontFetch((input) => {
     const url = String(input);
     if (!url.endsWith('.wasm')) requests.push(url);
     return url.includes('cdn.jsdelivr.net') ? Promise.resolve(new Response(null, { status: 404 })) : fontAssetResponse(input);

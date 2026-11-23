@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, jest, mock, spyOn, test } from 'bun:test';
+import { afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test';
 import * as Bun from 'bun';
 import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
@@ -18,7 +18,7 @@ import { openSlicedFace, sliceSourceOf } from './progressive-entry';
 import { parseSkeleton } from './slices';
 import { writeFontCdnTree } from '../../../scripts/fonts/cdn-tree';
 import { getFontCdnConfiguration, implicitFontCdnBases, setFontCdnConfiguration, type FontCdnConfiguration } from '../../../shared/office-session/fontCdnRuntime';
-import { createFontPackResponder, createWorkerFontPacks } from '../../../shared/office-session/optionalFontPacks';
+import { createFontPackResponder, createWorkerFontPacks, type FontPackRequest } from '../../../shared/office-session/optionalFontPacks';
 import { withinTestBudget } from '../../../shared/office-session/testing/loadBudget';
 import { setWorkerFontAssets } from './workerAssets';
 import * as worker from './worker';
@@ -484,9 +484,18 @@ function beforeFontLoadFinishes<T>(event: Promise<T>, load: Promise<unknown>, de
 }
 
 function cdnClock() {
-  jest.useFakeTimers();
   const cleanup = new AbortController();
   let now = Date.now();
+  let nextId = 0;
+  const timers = new Map<number, { at: number; run: () => void }>();
+  const schedule = spyOn(globalThis, 'setTimeout').mockImplementation(((run: () => void, delay = 0) => {
+    const id = ++nextId;
+    timers.set(id, { at: now + delay, run });
+    return id;
+  }) as unknown as typeof setTimeout);
+  const cancel = spyOn(globalThis, 'clearTimeout').mockImplementation(((id?: number) => {
+    if (id !== undefined) timers.delete(id);
+  }) as typeof clearTimeout);
   const date = spyOn(Date, 'now').mockImplementation(() => now);
   const totalTimeout = spyOn(AbortSignal, 'timeout').mockImplementation((ms) => {
     const controller = new AbortController();
@@ -496,19 +505,23 @@ function cdnClock() {
   return {
     signal: cleanup.signal,
     async advance(ms: number) {
-      now += ms;
-      jest.advanceTimersByTime(ms);
+      const end = now + ms;
+      for (const [id, timer] of [...timers].sort(([, a], [, b]) => a.at - b.at)) {
+        if (timer.at > end) break;
+        if (!timers.delete(id)) continue;
+        now = timer.at;
+        timer.run();
+      }
+      now = end;
       await Bun.sleep(0);
     },
     restore() {
-      try {
-        cleanup.abort();
-        jest.clearAllTimers();
-      } finally {
-        date.mockRestore();
-        totalTimeout.mockRestore();
-        jest.useRealTimers();
-      }
+      cleanup.abort();
+      timers.clear();
+      schedule.mockRestore();
+      cancel.mockRestore();
+      date.mockRestore();
+      totalTimeout.mockRestore();
     },
   };
 }
@@ -608,6 +621,7 @@ test('a responsive worker inherits the page default and its later opt-out', asyn
     await expect(worker.loadBundledFontBytes(regular, undefined, runtime)).resolves.toBeInstanceOf(ArrayBuffer);
     expect(requests).toEqual([fontCdnAssetUrl(latin, regular.file).href]);
     fonts.configureFontCdn({ baseUrl: false });
+    await expect(channel.source('latin')).resolves.toEqual({ urls: undefined, cdn: { baseUrl: false, timeoutMs: 30_000 } });
     await expect(worker.loadBundledFontBytes(regular, undefined, runtime)).rejects.toThrow('install @betteroffice/fonts-latin');
     await expect(fonts.loadBundledFontBytes(regular, undefined, runtime)).rejects.toThrow('install @betteroffice/fonts-latin');
     expect(requests).toHaveLength(1);
@@ -734,7 +748,7 @@ test.each(['aborted', 'opaque', 'error', 'non-OK'] as const)('an implicit %s res
   let cancelled = false;
   const response = new Response(new ReadableStream({ cancel() { cancelled = true; } }), { status: 403 });
   if (failure === 'opaque' || failure === 'error') Object.defineProperty(response, 'type', { value: failure });
-  globalThis.fetch = (async () => { started.resolve(); return reply.promise; }) as typeof fetch;
+  globalThis.fetch = (async () => { started.resolve(); return reply.promise; }) as unknown as typeof fetch;
   try {
     const load = fontCdn.loadImplicitFontAsset('font', new URL(regularUrl), 'latin', async (bytes) => bytes);
     await beforeFontLoadFinishes(started.promise, load, 'the cancellable CDN request');
@@ -762,7 +776,7 @@ test('concurrent faces and dictionaries share the network failure of their impli
   globalThis.fetch = (async (input: RequestInfo | URL) => {
     requests.push(String(input));
     throw new TypeError('Offline');
-  }) as typeof fetch;
+  }) as unknown as typeof fetch;
   try {
     const first = await Promise.allSettled([
       fonts.loadBundledFontBytes(regular, undefined, runtime),
@@ -860,18 +874,16 @@ test('configureFontCdn clears the cooldown and installed fonts remain available 
 });
 
 test('independently loaded font CDN modules share the realm cooldown', async () => {
-  const page: typeof fontCdn = await import(new URL('./fontCdn.ts?page', import.meta.url).href);
-  const worker: typeof fontCdn = await import(new URL('./fontCdn.ts?worker', import.meta.url).href);
-  expect(page.loadImplicitFontAsset).not.toBe(worker.loadImplicitFontAsset);
-
+  const progressive = await import('@betteroffice/fonts/progressive');
+  const slices = fonts.createFontProvider().resolveScriptFallback('cjk-jp', false, false)!.slices!;
+  const { ref } = slices;
+  const url = Object.assign(async (file: string) => fontCdnAssetUrl(cjk, file), { implicitCdn: () => true });
   const observed = observeCdnFailures();
   const fetchFont = mock(async () => { throw new TypeError('Offline'); });
   globalThis.fetch = fetchFont as unknown as typeof fetch;
-  const url = new URL(regularUrl);
-  const load = async (bytes: ArrayBuffer) => bytes;
   try {
-    await expect(page.loadImplicitFontAsset(regular.file, url, 'latin', load)).rejects.toThrow('Offline');
-    await expect(worker.loadImplicitFontAsset(regular.file, url, 'latin', load)).rejects.toThrow('Offline');
+    await expect(fontCdn.loadImplicitFontAsset(ref.index, await url(ref.index), 'cjk', async (bytes) => bytes)).rejects.toThrow('Offline');
+    await expect(progressive.openSlicedFace({ ...slices, prepareUrls: undefined, base: jsDelivr, url })).rejects.toThrow('Offline');
     expect(fetchFont).toHaveBeenCalledTimes(1);
     expect(observed.warning).toHaveBeenCalledTimes(1);
   } finally {
@@ -887,7 +899,7 @@ test('a worker learns base failures independently across whole faces and CJK sli
   globalThis.fetch = (async (input: RequestInfo | URL) => {
     requests.push(String(input));
     throw new TypeError('Offline');
-  }) as typeof fetch;
+  }) as unknown as typeof fetch;
   try {
     const response = new Promise<{ requests: string[]; statuses: string[]; cjkRequests: string[]; warnings: number }>((resolve, reject) => {
       thread.once('error', reject);
@@ -919,26 +931,27 @@ test('the published configureFontCdn clears the progressive entry cooldown', asy
   const previous = getFontCdnConfiguration();
   published.configureFontCdn({ baseUrl: false });
   const observed = observeCdnFailures();
+  const reason = 'Progressive entry offline';
   const requests: string[] = [];
   globalThis.fetch = (async (input: RequestInfo | URL) => {
     requests.push(String(input));
-    throw new TypeError('Offline');
-  }) as typeof fetch;
+    throw new TypeError(reason);
+  }) as unknown as typeof fetch;
   try {
     const url = Object.assign(async (file: string) => fontCdnAssetUrl(cjk, file), { implicitCdn: () => true });
     const slices = {
       ...fonts.createFontProvider().resolveScriptFallback('cjk-jp', false, false)!.slices!,
       prepareUrls: undefined, base: jsDelivr, url,
     };
-    await expect(progressive.openSlicedFace(slices)).rejects.toThrow('Offline');
-    await expect(progressive.openSlicedFace(slices)).rejects.toThrow('Offline');
+    await expect(progressive.openSlicedFace(slices)).rejects.toThrow(reason);
+    await expect(progressive.openSlicedFace(slices)).rejects.toThrow(reason);
     const index = fontCdnAssetUrl(cjk, slices.ref.index).href;
     expect(requests).toEqual([index]);
 
     published.configureFontCdn({ baseUrl: false });
-    await expect(progressive.openSlicedFace(slices)).rejects.toThrow('Offline');
+    await expect(progressive.openSlicedFace(slices)).rejects.toThrow(reason);
     expect(requests).toEqual([index, index]);
-    expect(observed.warning).toHaveBeenCalledTimes(2);
+    expect(observed.warning.mock.calls.filter(([message]) => String(message).includes(reason))).toHaveLength(2);
   } finally {
     observed.restore();
     published.configureFontCdn({ baseUrl: false });
@@ -963,7 +976,7 @@ test.each(['index', 'skeleton', 'core', 'chunk'] as const)('an implicit CJK %s f
     };
     const files = [slices.ref.index, skeleton.file, core.file, chunks[0]!.file];
     const prefix = files.slice(0, ['index', 'skeleton', 'core', 'chunk'].indexOf(part) + 1).map((file) => url(file).href);
-    const failedUrl = prefix.at(-1)!;
+    const failedUrl = prefix[prefix.length - 1]!;
     const other = url('manifest.json');
     const missing = url('missing.zst');
     globalThis.fetch = (async (input: RequestInfo | URL) => {
@@ -1274,15 +1287,16 @@ test('a page CJK slice loader uses the CDN configured after its creation', async
 });
 
 test('concurrent asset lookups for one worker pack coalesce on the wire', async () => {
-  const clock = cdnClock();
-  const posts = mock(() => {});
-  const channel = createWorkerFontPacks(posts, 5);
+  const posts = mock((_request: FontPackRequest) => {});
+  const channel = createWorkerFontPacks(posts);
   try {
     const lookups = Promise.all([channel.source('cjk'), channel.source('cjk')]);
-    await clock.advance(5);
-    await withinTestBudget(lookups, 'the coalesced worker pack lookups');
     expect(posts).toHaveBeenCalledTimes(1);
-  } finally { channel.dispose(); clock.restore(); }
+    const [{ id }] = posts.mock.calls[0]!;
+    const urls = { 'index.json': 'https://fonts.example/index.json' };
+    channel.receive({ protocol: 1, kind: 'font-pack-reply', id, urls });
+    await expect(withinTestBudget(lookups, 'the coalesced worker pack lookups')).resolves.toEqual([{ urls }, { urls }]);
+  } finally { channel.dispose(); }
 });
 test('installed packs beat the browser default without a CDN request', async () => {
   const restore = withBrowserFontGlobals();

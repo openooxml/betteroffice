@@ -2,6 +2,7 @@ import { afterEach, beforeAll, describe, expect, mock, spyOn, test } from 'bun:t
 import { readFileSync } from 'node:fs';
 import * as fonts from '@betteroffice/fonts';
 import { fontAssetResponse, fontRuntimeWithoutPacks, withBrowserFontGlobals } from '../../../fonts/src/fontAssets.test-support';
+import { spyOnFontFetch } from '../../../fonts/src/fontFetch.test-support';
 import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import { configureDefaultFonts, resolveCompleteFontProvider } from '../layout/measure';
 import { engineKind } from '../wasm/enginePng';
@@ -102,7 +103,7 @@ for (const { kind } of ENGINES) {
       const previous = getFontCdnConfiguration();
       const runtime = fontRuntimeWithoutPacks(new URL('https://docx-headless-base.example/'));
       const provider = spyOn(fonts, 'createFontProvider').mockImplementation(runtime.createFontProvider);
-      const fetch = spyOn(globalThis, 'fetch').mockImplementation(fontAssetResponse);
+      const fetch = spyOnFontFetch(fontAssetResponse);
       try {
         setFontCdnConfiguration(undefined);
         await expect(exported([{ family: 'Calibri', text: 'Plain text' }])).resolves.toBeInstanceOf(Uint8Array);
@@ -121,7 +122,7 @@ for (const { kind } of ENGINES) {
       const previous = getFontCdnConfiguration();
       const restore = withBrowserFontGlobals(false);
       const provider = spyOn(fonts, 'createFontProvider').mockImplementation(fontRuntimeWithoutPacks().createFontProvider);
-      const fetch = spyOn(globalThis, 'fetch').mockImplementation(fontAssetResponse);
+      const fetch = spyOnFontFetch(fontAssetResponse);
       try {
         session.openDocx(runsDocument({ family: 'Calibri', text: 'Plain text' }), true);
         fonts.configureFontCdn({ baseUrl: 'https://docx-png-first.example/' });

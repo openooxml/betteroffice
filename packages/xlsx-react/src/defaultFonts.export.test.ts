@@ -2,6 +2,7 @@ import { afterEach, expect, mock, spyOn, test } from 'bun:test';
 import * as fonts from '@betteroffice/fonts';
 import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../shared/office-session/fontCdn';
 import { fontAssetResponse, fontRuntimeWithoutPacks, withBrowserFontGlobals } from '../../fonts/src/fontAssets.test-support';
+import { spyOnFontFetch } from '../../fonts/src/fontFetch.test-support';
 import { exportFaces, xlsxDefaultFontManager } from './defaultFonts';
 import { editorExportFaces } from './useDefaultFonts';
 
@@ -52,10 +53,10 @@ test('editors with default fonts off forward no faces and load no fonts', async 
 
 test('T12: editor export rejects CDN failures and omits uninstalled faces with CDN off', async () => {
   const runtime = fontRuntimeWithoutPacks();
-  spyOn(xlsxDefaultFontManager, 'load').mockResolvedValue({ ...fonts, ...runtime });
+  spyOn(xlsxDefaultFontManager, 'load').mockResolvedValue({ ...fonts, default: fonts, ...runtime });
   const previous = getFontCdnConfiguration();
   const restore = withBrowserFontGlobals();
-  const fetch = spyOn(globalThis, 'fetch').mockImplementation((input) =>
+  const fetch = spyOnFontFetch((input) =>
     String(input).includes('cdn.jsdelivr.net') ? Promise.resolve(new Response(null, { status: 404 })) : fontAssetResponse(input));
   const requests = ['Calibri', 'Noto Sans Thai', 'MS Gothic'].map((family) => ({ family, bold: false, italic: false }));
   try {

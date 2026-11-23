@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 import * as fonts from '@betteroffice/fonts';
 import { initWasm, openPresentation } from '../index';
 import { fontAssetResponse, fontRuntimeWithoutPacks, withBrowserFontGlobals } from '../../../fonts/src/fontAssets.test-support';
+import { spyOnFontFetch } from '../../../fonts/src/fontFetch.test-support';
 import * as workerFonts from '../../../fonts/src/worker';
 import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import { createFontPackResponder, createWorkerFontPacks, setWorkerFontAssets } from '../../../../shared/office-session/optionalFontPacks';
@@ -45,9 +46,9 @@ function stubCanvas() {
   class Face { constructor(public family: string) {} load() { return Promise.resolve(this); } }
   const held: Face[] = [];
   const scope = globalThis as Record<string, unknown>;
-  const saved = { OffscreenCanvas: scope.OffscreenCanvas, FontFace: scope.FontFace, fonts: scope.fonts, Image: scope.Image, createImageBitmap: scope.createImageBitmap };
+  const saved = { document: scope.document, OffscreenCanvas: scope.OffscreenCanvas, FontFace: scope.FontFace, fonts: scope.fonts, Image: scope.Image, createImageBitmap: scope.createImageBitmap };
   Object.assign(scope, {
-    OffscreenCanvas: Canvas, FontFace: Face, Image: undefined,
+    document: undefined, OffscreenCanvas: Canvas, FontFace: Face, Image: undefined,
     createImageBitmap: () => Promise.reject(new Error('no decoder in this test')),
     fonts: {
       add(face: Face) { held.push(face); },
@@ -133,7 +134,7 @@ describe.skipIf(engineKind === 'native')('PPTX PNG with uninstalled font packs',
     const bytes = handle.save();
     handle.dispose();
     const restoreGlobals = withBrowserFontGlobals();
-    const fetch = spyOn(globalThis, 'fetch').mockImplementation((input) => String(input).includes('cdn.jsdelivr.net')
+    const fetch = spyOnFontFetch((input) => String(input).includes('cdn.jsdelivr.net')
       ? Promise.resolve(new Response(null, { status: 404 })) : fontAssetResponse(input));
     const register = spyOn(PptxRenderer.prototype, 'registerFont');
     const encoded = spyOn(OffscreenCanvas.prototype, 'convertToBlob');
@@ -188,7 +189,7 @@ describe.skipIf(engineKind === 'native')('PPTX PNG with uninstalled font packs',
       const { slideId } = handle.insertSlide(0);
       handle.addTextBox(slideId, { name: 'Base Latin', rect: { x: 100000, y: 100000, width: 3000000, height: 800000 },
         text: 'Base Latin', style: { fontFamily: 'Calibri', fontSizePt: 18 } });
-      await expect(handle.renderPng({ slide: 0 })).resolves.toEqual(new TextEncoder().encode('png'));
+      expect(await handle.renderPng({ slide: slideId })).toEqual(new TextEncoder().encode('png'));
       const base = fonts.BASE_LATIN_FONTS.find(({ weight, style }) => weight === 400 && style === 'normal')!;
       expect(register.mock.calls.some(([family, , , bytes]) => family === 'Calibri' && bytes.byteLength === base.byteLength)).toBe(true);
     } finally { register.mockRestore(); handle.dispose(); }

@@ -3,6 +3,7 @@ import { sleep } from 'bun';
 import { readFile } from 'node:fs/promises';
 import * as fonts from '@betteroffice/fonts';
 import { fontAssetResponse, fontRuntimeWithoutPacks, withBrowserFontGlobals } from '../../../fonts/src/fontAssets.test-support';
+import { spyOnFontFetch } from '../../../fonts/src/fontFetch.test-support';
 import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdnRuntime';
 import * as progressive from '@betteroffice/fonts/progressive';
 import { configureFontCdn as configureTestFontCdn } from '../../../fonts/src/fontCdn';
@@ -255,7 +256,7 @@ test('coverage prefetch and slide switches share a CDN failure and retry in the 
   const advance = retryClock();
   const requests: string[] = [];
   let online = false;
-  const fetch = spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+  const fetch = spyOnFontFetch(async (input) => {
     if (String(input).includes('cdn.jsdelivr.net')) {
       requests.push(String(input));
       if (!online) throw new TypeError('Offline');

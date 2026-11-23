@@ -9,8 +9,15 @@ export interface TextRange {
 
 export type TextSelectionGranularity = 'word' | 'paragraph';
 
-let wordSegmenter: Intl.Segmenter | undefined;
-let graphemeSegmenter: Intl.Segmenter | undefined;
+interface Segmenter {
+  segment(text: string): Iterable<{ index: number; segment: string; isWordLike?: boolean }>;
+}
+
+const { Segmenter } = Intl as typeof Intl & {
+  Segmenter: new (locale: undefined, options: { granularity: 'word' | 'grapheme' }) => Segmenter;
+};
+let wordSegmenter: Segmenter | undefined;
+let graphemeSegmenter: Segmenter | undefined;
 
 export function textRangeAt(
   text: string,
@@ -24,7 +31,7 @@ export function textRangeAt(
 
 export function wordRangeAt(text: string, index: number): TextRange {
   const position = clampedIndex(text, index);
-  wordSegmenter ??= new Intl.Segmenter(undefined, { granularity: 'word' });
+  wordSegmenter ??= new Segmenter(undefined, { granularity: 'word' });
   const segments = [...wordSegmenter.segment(text)];
   const selected =
     segments.find(
@@ -147,7 +154,7 @@ export function lineEdge(
 /** The next word boundary in `direction`, for a word-wise caret jump. */
 export function wordBoundary(text: string, index: number, direction: -1 | 1): number {
   const position = clampedIndex(text, index);
-  wordSegmenter ??= new Intl.Segmenter(undefined, { granularity: 'word' });
+  wordSegmenter ??= new Segmenter(undefined, { granularity: 'word' });
   const starts = [...wordSegmenter.segment(text)]
     .filter((segment) => segment.isWordLike)
     .flatMap((segment) => [segment.index, segment.index + segment.segment.length]);
@@ -179,6 +186,6 @@ export function caretLineIndex(
 }
 
 export function graphemeBoundaries(text: string): Set<number> {
-  graphemeSegmenter ??= new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+  graphemeSegmenter ??= new Segmenter(undefined, { granularity: 'grapheme' });
   return new Set([...[...graphemeSegmenter.segment(text)].map((segment) => segment.index), text.length]);
 }

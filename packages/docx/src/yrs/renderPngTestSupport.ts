@@ -25,7 +25,8 @@ export function stubBrowser() {
   class Canvas {
     constructor(public width: number, public height: number) {}
     getContext() {
-      if (calls.sizes.at(-1)?.[0] !== this.width || calls.sizes.at(-1)?.[1] !== this.height) calls.sizes.push([this.width, this.height]);
+      const last = calls.sizes[calls.sizes.length - 1];
+      if (last?.[0] !== this.width || last?.[1] !== this.height) calls.sizes.push([this.width, this.height]);
       return new Proxy({} as Record<string, unknown>, {
         get(target, property) {
           if (property === 'fill') return () => { calls.fills++; };

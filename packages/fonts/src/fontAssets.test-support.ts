@@ -23,17 +23,13 @@ export async function fontAssetResponse(input: RequestInfo | URL): Promise<Respo
 
 export function withBrowserFontGlobals(page = true): () => void {
   implicitFontCdnBases().clear();
-  const document = page ? globalThis.document ?? {} : undefined;
-  const globals = { window: page ? { document } : undefined, document, process: undefined, Deno: undefined, Bun: undefined };
-  const previous = Object.keys(globals).map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)] as const);
-  for (const [key, value] of Object.entries(globals)) {
-    Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
-  }
+  const key = Symbol.for('betteroffice.fonts.cdn.test-globals');
+  const scope = globalThis as Record<symbol, unknown>;
+  const previous = scope[key];
+  scope[key] = page ? { window: { document: {} } } : {};
   return () => {
     implicitFontCdnBases().clear();
-    for (const [key, descriptor] of previous) {
-      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
-      else Reflect.deleteProperty(globalThis, key);
-    }
+    if (previous === undefined) delete scope[key];
+    else scope[key] = previous;
   };
 }

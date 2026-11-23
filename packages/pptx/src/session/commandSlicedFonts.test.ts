@@ -3,6 +3,7 @@ import { resolveScriptFallbackFace } from '@betteroffice/fonts';
 import { openSlicedFace } from '../../../fonts/src/progressive-entry';
 import { configureFontCdn as configureTestFontCdn } from '../../../fonts/src/fontCdn';
 import { fontAssetResponse, fontRuntimeWithoutPacks, withBrowserFontGlobals } from '../../../fonts/src/fontAssets.test-support';
+import { spyOnFontFetch } from '../../../fonts/src/fontFetch.test-support';
 import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import { prepareTextFamilies } from '../render/textFamilies';
 import { createSlicedFontFaces, slicedFacesSupported, type SlicedFontFace } from './commandSlicedFonts';
@@ -132,7 +133,7 @@ test.each(['HTTP 404', 'SHA-256 mismatch'] as const)('a CDN chunk %s keeps insta
   const location = load.slices!;
   const requests: string[] = [];
   let fail = false;
-  const fetch = spyOn(globalThis, 'fetch').mockImplementation((input) => {
+  const fetch = spyOnFontFetch((input) => {
     const url = String(input);
     if (fail && url.includes('/fonts-cjk@')) {
       requests.push(url);

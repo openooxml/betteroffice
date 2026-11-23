@@ -1,14 +1,9 @@
-import { expect, mock, test } from 'bun:test';
+import { expect, test } from 'bun:test';
 import * as fonts from '@betteroffice/fonts';
+import { createFontRuntime } from '../../../fonts/src/fontRuntime';
 import { resolveCompleteFontProvider } from '../layout/measure';
 import type { BundledFontLoader, BundledFontProvider } from '../layout/measure/fontRegistry';
 import { faceLoadFailure, recordFaceLoads } from './enginePngFonts';
-
-mock.module('@betteroffice/fonts-intl', () => ({
-  then(_resolve: unknown, reject: (error: unknown) => void) {
-    Promise.resolve().then(() => reject(new Error("Cannot find package '@betteroffice/fonts-intl'")));
-  },
-}));
 
 const hosted = Symbol.for('@betteroffice/docx/hostedFontFamilies');
 const bytes = new ArrayBuffer(8);
@@ -62,7 +57,8 @@ test('a failed load is recorded with its face and family and still rejects, thro
 
 test('a face whose optional pack is not installed still rejects but is not recorded', async () => {
   const thai = fonts.BUNDLED_FONTS.find((face) => face.script === 'thai')!;
-  const absent = await fonts.loadBundledFontBytes(thai).then(() => undefined, (error: unknown) => error);
+  const { loadBundledFontBytes } = createFontRuntime(async () => ({}));
+  const absent = await loadBundledFontBytes(thai, undefined, { strict: true }).then(() => undefined, (error: unknown) => error);
   expect(fonts.isMissingFontAddon(absent)).toBe(true);
   expect(fonts.isMissingFontAddon(new Error(`Unknown bundled font asset: ${thai.file}`))).toBe(false);
   const { provider: watched, failures } = recordFaceLoads(providerOf(() => Promise.reject(absent)), fonts);

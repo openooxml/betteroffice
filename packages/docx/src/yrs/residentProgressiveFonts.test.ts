@@ -2,6 +2,7 @@ import { afterAll, beforeEach, expect, spyOn, test } from 'bun:test';
 import { configureFontCdn } from '@betteroffice/fonts';
 import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import { readFileSync } from 'node:fs';
+import { spyOnFontFetch } from '../../../fonts/src/fontFetch.test-support';
 import { decodeFontFace } from '../../../fonts/src/decode';
 import {
   NATIVE_ENGINE_OBJECT_FAILED,
@@ -161,14 +162,15 @@ test('resident outlines retry after an implicit CDN failure without refusing the
   configureFontCdn({ baseUrl: false });
   const base = 'https://docx-cooldown.example/npm/@betteroffice/fonts-cjk@1/assets/';
   const urls = Object.fromEntries(files.map((file) => [file, new URL(file, base).href]));
-  const { resident, updates } = fonts(undefined, [{ slot: 0, source: { ref, urls, implicitCdnFiles: files } }]);
+  const source = { ref, urls, implicitCdnFiles: files };
+  const { resident, updates } = fonts(undefined, [{ slot: 0, source }]);
   const now = Date.now();
   const clock = spyOn(Date, 'now').mockReturnValue(now);
   const warn = spyOn(console, 'warn').mockImplementation(() => {});
   let offline = true;
   let requests = 0;
   const file = chunkFile(60);
-  const fetch = spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+  const fetch = spyOnFontFetch(async (input) => {
     const path = String(input).slice(base.length);
     if (path === file) {
       requests += 1;

@@ -26,11 +26,13 @@ export const STALL_MS = 10_000;
 const CONFIGURATION = Symbol.for('betteroffice.fonts.cdn');
 const CONFIGURED_HERE = Symbol.for('betteroffice.fonts.cdn.configured-here');
 const COOLDOWN = Symbol.for('betteroffice.fonts.cdn.cooldown');
+const TEST_GLOBALS = Symbol.for('betteroffice.fonts.cdn.test-globals');
 
 const scope = globalThis as FontGlobals & {
   [CONFIGURATION]?: FontCdnConfiguration;
   [CONFIGURED_HERE]?: true;
   [COOLDOWN]?: Map<string, ImplicitFontCdnBase>;
+  [TEST_GLOBALS]?: FontGlobals;
 };
 
 export function implicitFontCdnBases(): Map<string, ImplicitFontCdnBase> {
@@ -46,13 +48,13 @@ export function isBrowserFontPage(globals: FontGlobals): boolean {
 }
 
 function configuredFontCdn(configuration: FontCdnConfiguration | undefined): FontCdnConfiguration | undefined {
-  if (configuration && !(configuration.implicit && isServer(scope))) return { ...configuration };
+  if (configuration && !(configuration.implicit && isServer(scope[TEST_GLOBALS] ?? scope))) return { ...configuration };
 }
 
 export function getFontCdnConfiguration(): FontCdnConfiguration | undefined {
   const configured = scope[CONFIGURATION];
   if (configured) return configuredFontCdn(configured);
-  if (isBrowserFontPage(scope)) return { baseUrl: JSDELIVR, timeoutMs: STALL_MS, implicit: true };
+  if (isBrowserFontPage(scope[TEST_GLOBALS] ?? scope)) return { baseUrl: JSDELIVR, timeoutMs: STALL_MS, implicit: true };
 }
 
 export function setFontCdnConfiguration(configuration: FontCdnConfiguration | undefined, configuredHere?: true): void {
@@ -71,7 +73,8 @@ export function fontCdnCacheKey(configuration: FontCdnConfiguration | null = get
 }
 
 export async function pngFontCdnCacheKey(): Promise<string> {
-  if (scope[CONFIGURED_HERE] || isServer(scope) || isBrowserFontPage(scope)) return fontCdnCacheKey();
+  const globals = scope[TEST_GLOBALS] ?? scope;
+  if (scope[CONFIGURED_HERE] || isServer(globals) || isBrowserFontPage(globals)) return fontCdnCacheKey();
   const reply = await workerFontAssets('base').catch(() => undefined);
   return fontCdnCacheKey(workerFontCdnConfiguration(reply) ?? null);
 }

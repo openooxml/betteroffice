@@ -2,6 +2,7 @@ import { afterEach, expect, mock, spyOn, test } from 'bun:test';
 import { configureFontCdn, type BundledFontFace } from '@betteroffice/fonts';
 import * as fonts from '@betteroffice/fonts';
 import { fontAssetResponse, fontRuntimeWithoutPacks, withBrowserFontGlobals } from '../../fonts/src/fontAssets.test-support';
+import { spyOnFontFetch } from '../../fonts/src/fontFetch.test-support';
 import type { FontDecoder } from '../../../shared/office-session/fontDecoder';
 import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../shared/office-session/fontCdn';
 import { withinTestBudget } from '../../../shared/office-session/testing/loadBudget';
@@ -737,9 +738,9 @@ test('repaints leave an uninstalled editor face settled until the CDN changes', 
   const source = runtime.createFontProvider(undefined, { strict: true });
   const resolve = spyOn(source, 'resolve');
   const manager = spyOn(xlsxDefaultFontManager, 'load').mockResolvedValue({
-    ...fonts, createFontProvider: () => source,
+    ...fonts, default: fonts, createFontProvider: () => source,
   });
-  const fetch = spyOn(globalThis, 'fetch').mockImplementation(fontAssetResponse);
+  const fetch = spyOnFontFetch(fontAssetResponse);
   const repainted = deferred<void>();
   const repaint = mock(() => repainted.resolve());
   const onSettled = mock(() => {});
@@ -781,13 +782,13 @@ test('T14: repaint, editing another face and reopening share the CDN cooldown', 
   const runtime = fontRuntimeWithoutPacks();
   const source = runtime.createFontProvider(undefined, { strict: true });
   const resolve = spyOn(source, 'resolve');
-  const load = spyOn(xlsxDefaultFontManager, 'load').mockResolvedValue({ ...fonts, createFontProvider: () => source });
+  const load = spyOn(xlsxDefaultFontManager, 'load').mockResolvedValue({ ...fonts, default: fonts, createFontProvider: () => source });
   const warn = spyOn(console, 'warn').mockImplementation(() => {});
   const now = Date.now();
   const clock = spyOn(Date, 'now').mockReturnValue(now);
   const requests: string[] = [];
   let online = false;
-  const fetch = spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+  const fetch = spyOnFontFetch(async (input) => {
     if (String(input).includes('cdn.jsdelivr.net')) {
       requests.push(String(input));
       if (!online) throw new TypeError('Offline');
