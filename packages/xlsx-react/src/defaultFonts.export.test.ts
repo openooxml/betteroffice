@@ -1,10 +1,14 @@
 import { afterEach, expect, mock, spyOn, test } from 'bun:test';
 import * as fonts from '@betteroffice/fonts';
+import type { XlsxPngOptions, XlsxPngTarget } from '@betteroffice/xlsx';
 import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../shared/office-session/fontCdn';
 import { fontAssetResponse, fontRuntimeWithoutPacks, withBrowserFontGlobals } from '../../fonts/src/fontAssets.test-support';
 import { spyOnFontFetch } from '../../fonts/src/fontFetch.test-support';
+import { createXlsxCommandController } from './commands/createXlsxCommandStore';
+import { createInThreadAsyncEditorApi } from './createInThreadAsyncEditorApi';
 import { exportFaces, xlsxDefaultFontManager } from './defaultFonts';
 import { editorExportFaces } from './useDefaultFonts';
+import type { XlsxEditorApi } from './XlsxEditor.types';
 
 afterEach(() => { mock.restore(); });
 
@@ -51,7 +55,7 @@ test('editors with default fonts off forward no faces and load no fonts', async 
   expect(load).not.toHaveBeenCalled();
 });
 
-test('T12: editor export rejects CDN failures and omits uninstalled faces with CDN off', async () => {
+test('T12: editor export rejects CDN failures and unavailable pack faces with CDN off', async () => {
   const runtime = fontRuntimeWithoutPacks();
   spyOn(xlsxDefaultFontManager, 'load').mockResolvedValue({ ...fonts, default: fonts, ...runtime });
   const previous = getFontCdnConfiguration();
@@ -66,10 +70,28 @@ test('T12: editor export rejects CDN failures and omits uninstalled faces with C
     }
     expect(fetch.mock.calls.filter(([url]) => String(url).includes('cdn.jsdelivr.net'))).toHaveLength(requests.length);
     fonts.configureFontCdn({ baseUrl: false });
-    await expect(exportFaces(requests, null)).resolves.toEqual([]);
+    for (const request of requests) {
+      await expect(exportFaces([request], null)).rejects.toMatchObject({
+        code: 'font-unavailable', message: expect.stringContaining(request.family),
+      });
+    }
     expect(fetch.mock.calls.filter(([url]) => String(url).includes('cdn.jsdelivr.net'))).toHaveLength(requests.length);
   } finally {
     restore();
     setFontCdnConfiguration(previous);
   }
+});
+
+test('an editor export with no resolved faces leaves core font selection enabled', async () => {
+  bundled(async () => new ArrayBuffer(3));
+  const png = new Uint8Array([1]);
+  const renderPng = mock(async (_target: XlsxPngTarget, _options?: XlsxPngOptions) => png);
+  const sync = {
+    commands: createXlsxCommandController().store,
+    flushPendingInput: async () => {},
+    handle: { renderPng, renderPngFonts: () => [{ family: 'Unbundled Sans', bold: false, italic: false }] },
+  } as unknown as XlsxEditorApi;
+  const api = createInThreadAsyncEditorApi(sync, false, () => {});
+  await expect(api.renderPng({ sheet: 0, range: 'A1' })).resolves.toBe(png);
+  expect(renderPng.mock.lastCall?.[1]?.fonts).toBeUndefined();
 });

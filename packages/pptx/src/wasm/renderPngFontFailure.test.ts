@@ -30,12 +30,17 @@ let restore: (() => void) | undefined;
 afterEach(() => { restore?.(); restore = undefined; });
 
 function stubCanvas() {
+  const painted: Array<{ text: string; bytes?: Uint8Array }> = [];
   class Canvas {
     getContext() {
       return new Proxy({} as Record<string, unknown>, {
         get(target, property) {
           if (property === 'createLinearGradient' || property === 'createRadialGradient' || property === 'createPattern') return () => ({ addColorStop: () => undefined });
           if (property === 'measureText') return (text: string) => ({ width: text.length });
+          if (property === 'fillText') return (text: string) => {
+            const face = held.find(({ family }) => String(target.font).endsWith(` ${family}`));
+            painted.push({ text, bytes: face && new Uint8Array(face.source) });
+          };
           return property in target ? target[property as string] : () => undefined;
         },
         set(target, property, value) { target[property as string] = value; return true; },
@@ -43,7 +48,7 @@ function stubCanvas() {
     }
     convertToBlob(request: { type: string }) { return Promise.resolve(new Blob(['png'], { type: request.type })); }
   }
-  class Face { constructor(public family: string) {} load() { return Promise.resolve(this); } }
+  class Face { constructor(public family: string, public source: ArrayBuffer) {} load() { return Promise.resolve(this); } }
   const held: Face[] = [];
   const scope = globalThis as Record<string, unknown>;
   const saved = { document: scope.document, OffscreenCanvas: scope.OffscreenCanvas, FontFace: scope.FontFace, fonts: scope.fonts, Image: scope.Image, createImageBitmap: scope.createImageBitmap };
@@ -57,6 +62,7 @@ function stubCanvas() {
     },
   });
   restore = () => { Object.assign(scope, saved); };
+  return painted;
 }
 
 describe.skipIf(engineKind === 'native')('canvas renderPng with a bundled face that cannot load', () => {
@@ -125,6 +131,31 @@ async function withUninstalledPacks(run: () => Promise<void>) {
 }
 
 describe.skipIf(engineKind === 'native')('PPTX PNG with uninstalled font packs', () => {
+  test('PPTX PNG paints with the supplied family when its pack CDN is blocked', async () => withUninstalledPacks(async () => {
+    const bytes = new Uint8Array(await readFile(resolve(root, 'crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf')));
+    const painted = stubCanvas();
+    const handle = openPresentation(fixture, { clientId: 7309 });
+    const restoreGlobals = withBrowserFontGlobals();
+    const fetch = spyOnFontFetch((input) => String(input).includes('cdn.jsdelivr.net')
+      ? Promise.resolve(new Response(null, { status: 404 })) : fontAssetResponse(input));
+    try {
+      const { slideId } = handle.insertSlide(0);
+      handle.addTextBox(slideId, { name: 'Total', rect: { x: 100000, y: 100000, width: 3000000, height: 800000 },
+        text: 'Total', style: { fontFamily: 'Calibri', fontSizePt: 18 } });
+      await expect(handle.renderPng({ slide: slideId }, { scale: 2 })).rejects.toMatchObject({
+        code: 'font-unavailable', message: expect.stringContaining('Carlito for Calibri'),
+      });
+      expect(painted).toEqual([]);
+      const face = { family: 'Calibri', bytes };
+      await expect(handle.renderPng({ slide: slideId }, { scale: 2, fonts: [face] })).resolves.toEqual(new TextEncoder().encode('png'));
+      expect(painted).toContainEqual({ text: 'Total', bytes });
+    } finally {
+      fetch.mockRestore();
+      restoreGlobals();
+      handle.dispose();
+    }
+  }));
+
   test('T12: renderCommandPng rejects a primary CDN failure without keeping the editor substitute', async () => withUninstalledPacks(async () => {
     stubCanvas();
     const handle = openPresentation(fixture, { clientId: 7307 });
