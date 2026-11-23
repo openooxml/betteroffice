@@ -5,4 +5,4 @@
 '@betteroffice/rust-crates': patch
 ---
 
-After `WorkbookHandle.recalculate()`, saved files carry the recalculated values; formulas the engine cannot evaluate keep the result the file stored. A save without edits, showing the stored active sheet, does not write the recalculation at open. Applying a collaborative update counts as an edit.
+After `WorkbookHandle.recalculate()`, saved files carry the recalculated values; formulas the engine cannot evaluate keep the result the file stored. A save without edits, showing the stored active sheet, does not write the recalculation at open; applying a collaborative update counts as an edit.
