@@ -980,7 +980,7 @@ export function registerPresentationCommandHandlers(
             if (side !== 'left' && side !== 'top' && side !== 'right' && side !== 'bottom') {
               return 'invalid-payload';
             }
-            if (value !== undefined && (!Number.isSafeInteger(value) || value < 0)) {
+            if (value !== undefined && (!Number.isSafeInteger(value) || value < 0 || value > 1_000_000_000_000_000)) {
               return 'invalid-payload';
             }
           }

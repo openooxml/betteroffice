@@ -367,6 +367,18 @@ test('insertion_preflight_refuses_without_mutation', async () => {
       expect(state.outcomes[0]).toMatchObject({ status: 'refused', committed: false });
       expect(state.version).toBe(session.state.version);
     }
+    for (const draft of [
+      { name: 'box', rect, text: 'hi', style: {}, textInsets: { left: 1_000_000_000_000_001 } },
+      { name: 'box', rect, text: 'hi', style: {}, textInsets: { left: -1 } },
+      { name: 'box', rect, text: 'hi', style: {}, autofit: 'invalid' as never },
+    ]) {
+      state = await session.command(state, ++seq, { kind: 'insertTextBox', payload: { ...input, slideId: session.story.slideId, draft } });
+      expect(state.outcomes[0]).toMatchObject({ status: 'refused', reason: 'invalid-payload', committed: false });
+      expect(state.version).toBe(session.state.version);
+    }
+    state = await session.command(state, ++seq, { kind: 'insertTextBox', payload: { ...input, slideId: session.story.slideId,
+      draft: { name: 'box', rect, text: 'ok', style: {}, autofit: 'normal', textInsets: { left: 0, top: 0, right: 0, bottom: 0 } } } });
+    expect(state.outcomes[0]).toMatchObject({ status: 'applied', committed: true });
     state = await session.command(state, ++seq, { kind: 'setReadOnly', payload: { ...input, readOnly: true } });
     state = await session.command(state, ++seq, { kind: 'insertTextBox', payload: { ...input, slideId: session.story.slideId,
       draft: { name: 'box', rect, text: '', style: {} } } });

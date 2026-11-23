@@ -4,6 +4,12 @@ from typing import TypedDict, Any, Callable, Literal, final, overload
 class PngTarget(TypedDict):
     slide: int | str
 
+class TextInsets(TypedDict, total=False):
+    left: int | None
+    top: int | None
+    right: int | None
+    bottom: int | None
+
 
 from .render import HitTestResult, PresentationInspection, ProposalDiffSlide
 
@@ -154,6 +160,10 @@ class Shape:
     def placeholder(self) -> str | None: ...
     @property
     def media_path(self) -> str | None: ...
+    @property
+    def autofit(self) -> Literal['normal', 'none'] | None: ...
+    @property
+    def text_insets(self) -> dict[str, int] | None: ...
     @property
     def stories(self) -> list[Story]: ...
     @property
@@ -485,6 +495,8 @@ class Presentation:
         baseline_pct: float | None = ...,
         kern_pt: float | None = ...,
         caps: Literal['none', 'small', 'all'] | None = ...,
+        autofit: Literal['normal', 'none'] | None = ...,
+        text_insets: TextInsets | dict[str, int | None] | None = ...,
     ) -> ShapeEdit: ...
     def add_shape(
         self,
