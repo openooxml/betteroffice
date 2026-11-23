@@ -130,7 +130,9 @@ function implicitFontProvider(
     const read = loader.readOnlyBytes;
     return Object.assign(() => after(loader), loader, read && { readOnlyBytes: () => after(read) });
   };
-  const implicit: BundledFontProvider = {
+  const implicit: BundledFontProvider & {
+    resolveBaseLatin?(bold: boolean, italic: boolean, family?: string): BundledFontLoader | undefined;
+  } = {
     ...provider,
     resolveBaseLatin: (bold, italic, family) => {
       const loader = provider.resolveBaseLatin?.(bold, italic);

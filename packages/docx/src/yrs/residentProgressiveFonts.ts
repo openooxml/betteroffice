@@ -7,7 +7,6 @@ export interface ProgressiveFontSource {
   ref: { format: number; index: string; indexSha256: string };
   /** Absolute URL of the index, skeleton, core and every chunk by manifest path. */
   urls: Record<string, string>;
-  implicitCdnFiles?: string[];
   timeoutMs?: number;
 }
 
@@ -72,7 +71,6 @@ export function glyphsByFont(page: unknown, into = new Map<number, Set<number>>(
 interface ProgressiveModule {
   openProgressiveFace(ref: ProgressiveFontSource['ref'], transport: {
     read(file: string): Promise<ArrayBuffer>;
-    url?: ((file: string) => Promise<URL>) & { implicitCdn?(file: string): boolean };
     decode(encoded: ArrayBuffer, maxOutput: number): Promise<ArrayBuffer>;
   }): Promise<OutlineFace>;
   readFontAsset(file: string, url: URL, timeoutMs?: number): Promise<ArrayBuffer>;
@@ -129,22 +127,25 @@ export class ResidentProgressiveFonts {
         if (view !== null && view !== undefined && rootSlot(slot) === spec.slot) this.ownerOf.set(view, owner);
       }
       if (shared !== undefined) continue;
-      const implicitCdnFiles = new Set(spec.source.implicitCdnFiles);
+      const source = spec.source as ProgressiveFontSource & { implicitCdnFiles?: string[] };
+      const implicitCdnFiles = new Set(source.implicitCdnFiles);
       const url = Object.assign(async (file: string) => {
         const href = spec.source.urls[file];
         if (href === undefined) throw new Error(`Font slice ${file} has no URL`);
         return new URL(href);
       }, { implicitCdn: (file: string) => implicitCdnFiles.has(file) });
       let opening: Promise<OutlineFace> | undefined;
-      const open = ({ openProgressiveFace, readFontAsset }: ProgressiveModule) => opening ??=
-        openProgressiveFace(spec.source.ref, {
-          read: async (file) => readFontAsset(file, await url(file), spec.source.timeoutMs),
+      const open = ({ openProgressiveFace, readFontAsset }: ProgressiveModule) => {
+        const transport = {
+          read: async (file: string) => readFontAsset(file, await url(file), spec.source.timeoutMs),
           url,
           decode,
-        }).catch((error: unknown) => {
+        };
+        return opening ??= openProgressiveFace(spec.source.ref, transport).catch((error: unknown) => {
           opening = undefined;
           throw error;
         });
+      };
       this.owners.set(owner, { ids: [id], open, installed: 1, complete: false, refused: false });
     }
   }

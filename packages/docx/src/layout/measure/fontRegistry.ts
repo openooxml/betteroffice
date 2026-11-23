@@ -34,7 +34,7 @@ export type BundledFontLoader = (() => Promise<ArrayBuffer>) & {
   /** Only stands in for a primary face that failed to load. */
   onlyIfPrimaryFails?: boolean;
   /** Locates a sliced face whose outlines load as they are needed. */
-  slices?: SliceLocation & { loadWholeForExport?(): Promise<ArrayBuffer> };
+  slices?: SliceLocation;
   /** @internal Precomputed base Latin coverage bits of the face. */
   coverage?: string;
   /** @internal The face's decoded bytes, shared with the font cache: read them, never change or transfer them. */
@@ -79,7 +79,7 @@ export type FontScript = 'cjk-sc' | 'cjk-tc' | 'cjk-jp' | 'cjk-kr' | 'arabic' | 
  */
 export interface BundledFontProvider {
   /** @internal */
-  resolveBaseLatin?(bold: boolean, italic: boolean, family?: string): BundledFontLoader | undefined;
+  resolveBaseLatin?(bold: boolean, italic: boolean): BundledFontLoader | undefined;
   /** Resolve a Word family to bundled metric-compatible face byte loaders, or undefined. */
   resolve(family: string, bold: boolean, italic: boolean): BundledFontLoader | undefined;
   /** Like {@link BundledFontProvider.resolve}, but also accepts bundled family names such as `"Gelasio"`, and leaves missing styles for browser synthesis. */
@@ -619,7 +619,10 @@ export class TextMeasureFontRegistry {
     }
 
     if (ids.length === 0 && (loader || lastResort) && (!cdnUnavailable || !isImplicitFontProvider(bundled))) {
-      const base = bundled?.resolveBaseLatin?.(bold, italic, family);
+      const provider = bundled as (BundledFontProvider & {
+        resolveBaseLatin?(bold: boolean, italic: boolean, family?: string): BundledFontLoader | undefined;
+      }) | undefined;
+      const base = provider?.resolveBaseLatin?.(bold, italic, family);
       if (base) {
         const id = await fromCdn(this.registerLastResort(`${key}|base-latin`, base, family));
         if (id !== null) ids.push(id);
@@ -777,7 +780,8 @@ export class TextMeasureFontRegistry {
             `[fontRegistry] sliced face for "${label}" failed to open; loading it whole: ` +
               `${error instanceof Error ? error.message : String(error)}`
           );
-          const bytes = await (slices.loadWholeForExport?.() ?? (loader.readOnlyBytes ?? loader)()).catch((failure: unknown) => {
+          const { loadWholeForExport } = slices as SliceLocation & { loadWholeForExport?(): Promise<ArrayBuffer> };
+          const bytes = await (loadWholeForExport?.call(slices) ?? (loader.readOnlyBytes ?? loader)()).catch((failure: unknown) => {
             if (isImplicitFontCdnError(failure)) reportImplicitCdnFailure(failure);
             throw failure;
           });
