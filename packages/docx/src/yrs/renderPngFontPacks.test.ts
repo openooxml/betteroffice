@@ -65,27 +65,33 @@ async function rejection(work: Promise<unknown>): Promise<{ name?: string; code?
 
 for (const { kind } of ENGINES) {
   describe.skipIf(engineKind !== kind)(`renderPng font packs on the ${kind} engine`, () => {
-    test('DOCX PNG rejects an implicit CDN failure before drawing', async () => {
+    test.each([
+      ['Calibri', 'latin', 'HTTP 404'],
+      ['MS Gothic', 'cjk', 'Offline'],
+    ] as const)('DOCX PNG rejects an implicit CDN failure for %s after one request', async (family, pack, reason) => {
       const canvas = stubBrowser();
       const previous = getFontCdnConfiguration();
       const restore = withBrowserFontGlobals();
-      const face = fonts.resolveMetricCompatFace('Arial', false, false)!;
-      withheld.add(face.file);
+      const provider = spyOn(fonts, 'createFontProvider').mockImplementation(fontRuntimeWithoutPacks().createFontProvider);
+      const face = fonts.resolveMetricCompatFace(family, false, false)!;
       const requests: string[] = [];
       globalThis.fetch = (async (input: RequestInfo | URL) => {
         if (String(input).includes('cdn.jsdelivr.net')) {
           requests.push(String(input));
+          if (pack === 'cjk') throw new TypeError(reason);
           return new Response(null, { status: 404 });
         }
         return fontAssetResponse(input);
       }) as typeof fetch;
       try {
         setFontCdnConfiguration(undefined);
-        const error = await rejection(exported([{ family: 'Arial', text: 'Plain text' }]));
-        expect(error).toMatchObject({ name: 'PngExportError', code: 'font-unavailable', message: expect.stringContaining('HTTP 404') });
-        expect(requests.some((url) => url.endsWith(face.file))).toBe(true);
+        const error = await rejection(exported([{ family, text: 'Plain text' }]));
+        expect(error).toMatchObject({ name: 'PngExportError', code: 'font-unavailable', message: expect.stringContaining(reason) });
+        expect(requests).toEqual([expect.stringContaining(`/fonts-${pack}@`)]);
+        expect(requests[0]).toEndWith(`/assets/${face.file}`);
         expect(canvas.encoded).toBe(0);
       } finally {
+        provider.mockRestore();
         restore();
         setFontCdnConfiguration(previous);
       }

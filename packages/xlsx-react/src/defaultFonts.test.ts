@@ -791,7 +791,8 @@ test('T14: repaint, editing another face and reopening share the CDN cooldown', 
     }
     return fontAssetResponse(input);
   });
-  const repaint = mock(() => {});
+  const repainted = deferred<void>();
+  const repaint = mock(() => repainted.resolve());
   const first = createDefaultFontPainter(null, repaint);
   const second = createDefaultFontPainter(null, () => {});
   const frame = display({ family: 'Calibri' });
@@ -808,14 +809,20 @@ test('T14: repaint, editing another face and reopening share the CDN cooldown', 
     expect(resolve).toHaveBeenCalledTimes(1);
     expect(repaint).not.toHaveBeenCalled();
     await first.load(edited);
-    await second.load(frame);
+    for (let i = 0; i < 2; i++) {
+      second.paint(frame, () => {});
+      await new Promise((done) => setTimeout(done, 0));
+    }
     expect(requests).toHaveLength(1);
-    expect(resolve).toHaveBeenCalledTimes(3);
+    expect(resolve).toHaveBeenCalledTimes(1);
 
     online = true;
     clock.mockReturnValue(now + 60_000);
-    await first.load(frame);
+    first.paint(frame, () => {});
+    first.paint(frame, () => {});
+    await repainted.promise;
     expect(requests).toHaveLength(2);
+    expect(resolve).toHaveBeenCalledTimes(2);
     expect(added.map(({ family }) => family)).toEqual(['Calibri']);
     expect(repaint).toHaveBeenCalledTimes(1);
   } finally {

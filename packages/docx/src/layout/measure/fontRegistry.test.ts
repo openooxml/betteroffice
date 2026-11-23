@@ -90,6 +90,38 @@ test('DOCX substitutes after a slice index 404 and fetches slices again only aft
   }
 }, 30_000);
 
+test('DOCX with configured fonts substitutes locally after its first implicit CDN failure', async () => {
+  const previous = getFontCdnConfiguration();
+  const restore = withBrowserFontGlobals();
+  const runtime = fontRuntimeWithoutPacks();
+  const requests: string[] = [];
+  const fetch = spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const url = String(input);
+    if (url.includes('cdn.jsdelivr.net')) {
+      requests.push(url);
+      throw new TypeError('Offline');
+    }
+    return fontAssetResponse(input);
+  });
+  try {
+    setFontCdnConfiguration(undefined);
+    configureDefaultFonts({ fonts: runtime });
+    const provider = await resolveDefaultFontProvider({});
+    const { openSlicedFace } = await import('@betteroffice/fonts/progressive');
+    const registry = new TextMeasureFontRegistry({ registerFont: () => 1 }, {
+      bundled: provider,
+      progressive: (slices) => openSlicedFace(slices as SliceLocation),
+    });
+    expect(await registry.getFontIdChain('MS Gothic', false, false)).toEqual([1]);
+    expect(requests).toEqual([expect.stringMatching(/\/fonts-cjk@.+\/slices\.json$/)]);
+  } finally {
+    configureDefaultFonts({});
+    fetch.mockRestore();
+    restore();
+    setFontCdnConfiguration(previous);
+  }
+});
+
 test.each(['script fallback', 'last resort'] as const)('DOCX warns once per CDN cooldown for a failed %s', async (kind) => {
   const previous = getFontCdnConfiguration();
   const restore = withBrowserFontGlobals();
