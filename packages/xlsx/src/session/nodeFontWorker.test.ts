@@ -15,12 +15,13 @@ async function textSlide(bytes: Uint8Array) {
   await initPptx(await Bun.file(new URL('../../../pptx/src/wasm/generated/pptx_wasm_bg.wasm', import.meta.url)).arrayBuffer());
   const deck = openPresentation(bytes);
   try {
-    const { slideId } = deck.insertSlide(0);
+    const index = 0;
+    const { slideId } = deck.insertSlide(index);
     deck.addTextBox(slideId, {
       name: 'Base Latin', rect: { x: 100000, y: 100000, width: 3000000, height: 800000 },
       text: 'Base Latin', style: { fontFamily: 'Calibri', fontSizePt: 18 },
     });
-    return { bytes: deck.save(), slideId };
+    return { bytes: deck.save(), index };
   } finally { deck.dispose(); }
 }
 
@@ -76,7 +77,7 @@ test.skipIf(engine === 'native')('T6: Node worker_threads export with Base Latin
           const slide = await textSlide(bytes);
           const pptx = await withinTestBudget(createPresentationSession(slide.bytes, {}, transport), 'PPTX worker open', budgetMs);
           session = pptx;
-          rendered.push(await withinTestBudget(pptx.call.renderPng({ slide: slide.slideId }), 'PPTX worker export', budgetMs));
+          rendered.push(await withinTestBudget(pptx.call.renderPng({ slide: slide.index }), 'PPTX worker export', budgetMs));
         } else {
           const xlsx = await withinTestBudget(createWorkbookSession(bytes, {}, transport), 'XLSX worker open', budgetMs);
           session = xlsx;
