@@ -55,10 +55,14 @@ export interface TextRun {
   text: string;
   bold?: boolean;
   rtl?: boolean;
+  paragraphFamily?: string;
 }
 
-const runXml = ({ family, text, bold, rtl }: TextRun) =>
-  `<w:p>${rtl ? '<w:pPr><w:bidi/></w:pPr>' : ''}<w:r><w:rPr><w:rFonts w:ascii="${family}" w:hAnsi="${family}" w:cs="${family}"/>${bold ? '<w:b/><w:bCs/>' : ''}${rtl ? '<w:rtl/>' : ''}</w:rPr><w:t>${text}</w:t></w:r></w:p>`;
+const runXml = ({ family, text, bold, rtl, paragraphFamily }: TextRun) => {
+  const paragraphFonts = paragraphFamily ? `<w:rPr><w:rFonts w:ascii="${paragraphFamily}" w:hAnsi="${paragraphFamily}"/></w:rPr>` : '';
+  const paragraphProperties = rtl || paragraphFonts ? `<w:pPr>${rtl ? '<w:bidi/>' : ''}${paragraphFonts}</w:pPr>` : '';
+  return `<w:p>${paragraphProperties}<w:r><w:rPr><w:rFonts w:ascii="${family}" w:hAnsi="${family}" w:cs="${family}"/>${bold ? '<w:b/><w:bCs/>' : ''}${rtl ? '<w:rtl/>' : ''}</w:rPr><w:t>${text}</w:t></w:r></w:p>`;
+};
 
 /** A one-section document with a paragraph per run. */
 export const runsDocument = (...runs: TextRun[]) => new Uint8Array(rezipPartsToArrayBuffer(new Map([

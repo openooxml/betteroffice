@@ -739,7 +739,8 @@ test('repaints leave an uninstalled editor face settled until the CDN changes', 
     ...fonts, createFontProvider: () => source,
   });
   const fetch = spyOn(globalThis, 'fetch').mockImplementation(fontAssetResponse);
-  const repaint = mock(() => {});
+  const repainted = deferred<void>();
+  const repaint = mock(() => repainted.resolve());
   const onSettled = mock(() => {});
   const painter = createDefaultFontPainter(null, repaint, { onSettled });
   const frame = display({ family: 'Calibri' });
@@ -751,14 +752,15 @@ test('repaints leave an uninstalled editor face settled until the CDN changes', 
       await new Promise((done) => setTimeout(done, 0));
     }
     expect(fetch.mock.calls.filter(([input]) => !String(input).endsWith('.wasm'))).toHaveLength(0);
-    expect(resolve).toHaveBeenCalledTimes(1);
+    expect(resolve).not.toHaveBeenCalled();
     expect(repaint).not.toHaveBeenCalled();
     expect(onSettled).not.toHaveBeenCalled();
 
     configureFontCdn({ baseUrl: 'https://editor-fonts.example/' });
-    await painter.load(frame);
+    expect(painter.paint(frame, () => {})).toBe(false);
+    await repainted.promise;
     expect(fetch.mock.calls.filter(([input]) => !String(input).endsWith('.wasm'))).toHaveLength(1);
-    expect(resolve).toHaveBeenCalledTimes(2);
+    expect(resolve).toHaveBeenCalledTimes(1);
     expect(added.map(({ family }) => family)).toEqual(['Calibri']);
     expect(repaint).toHaveBeenCalledTimes(1);
   } finally {

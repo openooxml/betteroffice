@@ -85,7 +85,7 @@ for (const { kind } of ENGINES) {
       }) as typeof fetch;
       try {
         setFontCdnConfiguration(undefined);
-        const error = await rejection(exported([{ family, text: 'Plain text' }]));
+        const error = await rejection(exported([{ family, text: 'Plain text', paragraphFamily: family }]));
         expect(error).toMatchObject({ name: 'PngExportError', code: 'font-unavailable', message: expect.stringContaining(reason) });
         expect(requests).toEqual([expect.stringContaining(`/fonts-${pack}@`)]);
         expect(requests[0]).toEndWith(`/assets/${face.file}`);
