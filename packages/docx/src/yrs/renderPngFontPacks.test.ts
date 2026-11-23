@@ -132,7 +132,7 @@ for (const { kind } of ENGINES) {
       }
     });
 
-    test('DOCX PNG loads Base Latin with the optional packs absent in headless mode', async () => {
+    test.each(['default', 'supplied'] as const)('DOCX PNG with absent optional packs and %s fonts', async (source) => {
       stubBrowser();
       const previous = getFontCdnConfiguration();
       const runtime = fontRuntimeWithoutPacks(new URL('https://docx-headless-base.example/'));
@@ -140,7 +140,26 @@ for (const { kind } of ENGINES) {
       const fetch = spyOnFontFetch(fontAssetResponse);
       try {
         setFontCdnConfiguration(undefined);
-        await expect(exported([{ family: 'Calibri', text: 'Plain text' }])).resolves.toBeInstanceOf(Uint8Array);
+        const calibri = { family: 'Calibri', text: 'Plain text', paragraphFamily: 'Calibri' };
+        if (source === 'supplied') {
+          const bytes = new Uint8Array(readFileSync('crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf'));
+          const png = await exported([calibri], { fonts: [{ family: 'Calibri', bytes }] });
+          expect(png).toBeInstanceOf(Uint8Array);
+          expect(png.byteLength).toBeGreaterThan(0);
+          expect(fetch).not.toHaveBeenCalled();
+          return;
+        }
+        if (kind === 'native') {
+          const error = await rejection(exported([calibri]));
+          expect(error.name).toBe('PngExportError');
+          expect(error.code).toBe('font-unavailable');
+          expect(error.message).toContain('missing font chain for `calibri|0|0`');
+          expect(fetch).not.toHaveBeenCalled();
+          return;
+        }
+        const png = await exported([calibri]);
+        expect(png).toBeInstanceOf(Uint8Array);
+        expect(png.byteLength).toBeGreaterThan(0);
         const base = fonts.BASE_LATIN_FONTS.find(({ weight, style }) => weight === 400 && style === 'normal')!;
         expect(fetch.mock.calls.some(([url]) => String(url).endsWith(base.file))).toBe(true);
       } finally {
