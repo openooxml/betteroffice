@@ -59,7 +59,7 @@ test('bundled descriptors wait for the prepared decoder and open with byte faces
   const { view, file, ready } = await mount([{ face: boldItalic, baseUrl }], { loadingIndicator: 'Loading fonts' });
   await waitFor(() => expect(load).toHaveBeenCalledTimes(1));
   expect(prepare).toHaveBeenCalledWith(file, { defaultFonts: false, activeSlideIndex: 0 });
-  expect(load).toHaveBeenCalledWith(boldItalic, { baseUrl }, { decoder, strict: false });
+  expect(load).toHaveBeenCalledWith(boldItalic, { baseUrl }, { decoder });
   expect(load.mock.calls.every((call) => call[2]?.decoder === decoder && !('retain' in call[2]!))).toBe(true);
   expect(opener).not.toHaveBeenCalled();
   expect(ready).not.toHaveBeenCalled();
@@ -108,7 +108,7 @@ test('mixed byte and bundled faces preserve both in input order', async () => {
   const fonts = opener.mock.calls[0]![1]!.fonts!;
   expect(fonts).toEqual([byteFace, { family: face.family, bold: false, italic: false, bytes: fontBytes }]);
   expect(fonts[0]).toBe(byteFace);
-  expect(load).toHaveBeenCalledWith(face, { baseUrl }, { decoder, strict: false });
+  expect(load).toHaveBeenCalledWith(face, { baseUrl }, { decoder });
 });
 
 test('the prepared decoder gets the default fonts and opening slide the editor will use', async () => {
@@ -208,7 +208,7 @@ test('an in-thread editor releases the prepared worker after decoding', async ()
   restorers.push(() => warn.mockRestore());
   const { ready } = await mount([{ face, baseUrl }], { experimentalWorkerOpen: false });
   await waitFor(() => expect(ready).toHaveBeenCalledTimes(1), MOUNTED);
-  expect(load).toHaveBeenCalledWith(face, { baseUrl }, { decoder, strict: false });
+  expect(load).toHaveBeenCalledWith(face, { baseUrl }, { decoder });
   expect(release).toHaveBeenCalledTimes(1);
   expect(opener).not.toHaveBeenCalled();
 });

@@ -295,7 +295,7 @@ async function loadPresentationFonts(runtime: { decoder: FontDecoder }): Promise
       const face =
         resolveMetricCompatFace("Arial", bold, italic) ??
         resolveLastResortFace("Arial", bold, italic);
-      const bytes = await loadBundledFontBytes(face, undefined, { ...runtime, strict: false });
+      const bytes = await loadBundledFontBytes(face, undefined, runtime);
       return {
         family: "Arial",
         bold,

@@ -54,7 +54,7 @@ async function layoutDocxPage(original: YrsSession) {
     const document = session.materializeDocx()!;
     const bundled = module.layout.hasConfiguredFontSource()
       ? await module.layout.resolveDefaultFontProvider()
-      : createFontProvider(undefined, { decoder: module.yrs.decodeFontFace, strict: false });
+      : createFontProvider(undefined, { decoder: module.yrs.decodeFontFace });
     const source = module.layout.createRustMeasureSource({ engine: session, bundled });
     source.setCompat(document.package.settings?.compatibilityFlags);
     source.setEmbeddedFaces(await module.utils.extractEmbeddedFontFaces(document));

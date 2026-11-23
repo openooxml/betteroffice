@@ -29,13 +29,7 @@ export const commandFontProvider = {
   async load(...configuration: [fontCdn?: FontCdnConfiguration]) {
     if (configuration.length) setFontCdnConfiguration(configuration[0]);
     const fonts = await importFonts();
-    const provider = fonts.createFontProvider(undefined, { decoder: sessionDecoder, strict: false });
-    let coverage: typeof provider | undefined;
-    return {
-      ...provider,
-      resolveScriptFallback: (...args: Parameters<typeof provider.resolveScriptFallback>) =>
-        (coverage ??= fonts.createFontProvider(undefined, { decoder: sessionDecoder, strict: true })).resolveScriptFallback(...args),
-    };
+    return fonts.createFontProvider(undefined, { decoder: sessionDecoder, strict: true });
   },
 };
 

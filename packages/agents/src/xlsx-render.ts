@@ -12,7 +12,7 @@ export async function renderXlsxRange(
 ): Promise<Uint8Array> {
   const { createCanvas, GlobalFonts } = await loadCanvas();
   const { module } = await engines.load('xlsx');
-  provider ??= createFontProvider(undefined, { decoder: module.decodeFontFace, strict: false });
+  provider ??= createFontProvider(undefined, { decoder: module.decodeFontFace });
   const active = handle.sheetInfo().activeSheet;
   let list: DisplayList;
   let fonts: ReturnType<WorkbookHandle['renderPngFonts']>;

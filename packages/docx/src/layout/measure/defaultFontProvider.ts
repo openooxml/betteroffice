@@ -54,7 +54,7 @@ function implicitFontProvider(
   runtime: { decoder?: FontDecoder },
   standIns: boolean
 ): BundledFontProvider {
-  const provider = manager.createFontProvider(undefined, { strict: false, ...runtime });
+  const provider = manager.createFontProvider(undefined, runtime);
   let scriptProvider: typeof provider | undefined;
   const providesFamily = (family: string) =>
     manager.resolveMetricCompatFamily(family) !== undefined ||
@@ -246,8 +246,7 @@ async function load(runtime: { decoder?: FontDecoder }, standIns: boolean): Prom
     const module = fonts ?? (
       (loader ? await loader() : await importFonts()) as BundledFontModule
     );
-    const providerRuntime = { strict: false, ...runtime };
-    return module.createFontProvider(baseUrl === undefined ? undefined : { baseUrl }, providerRuntime);
+    return module.createFontProvider(baseUrl === undefined ? undefined : { baseUrl }, runtime);
   } catch (error) {
     console.warn('[configureDefaultFonts] the configured font source failed to load', error);
     return undefined;

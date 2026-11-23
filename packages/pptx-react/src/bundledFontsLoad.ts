@@ -11,7 +11,7 @@ export function loadBundledFonts(file: Uint8Array, fonts: readonly (PptxFontFace
   const loaded = Promise.all(fonts.map(async (font): Promise<PptxFontFace | undefined> => {
     if (!('face' in font)) return font;
     try {
-      const bytes = await loadBundledFontBytes(font.face, { baseUrl: font.baseUrl }, { decoder, strict: false });
+      const bytes = await loadBundledFontBytes(font.face, { baseUrl: font.baseUrl }, { decoder });
       return { family: font.face.metricCompatWith ?? font.face.family, bold: font.face.weight === 700,
         italic: font.face.style === 'italic', bytes: new Uint8Array(bytes) };
     } catch {

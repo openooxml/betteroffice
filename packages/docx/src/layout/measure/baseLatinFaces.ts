@@ -59,7 +59,7 @@ export function resolveBaseLatinProvider(
   if (!pending) {
     const baseUrl = state.baseUrl;
     pending = importFonts().then(manager =>
-      manager.createFontProvider(baseUrl === undefined ? undefined : { baseUrl }, { strict: false, ...key }));
+      manager.createFontProvider(baseUrl === undefined ? undefined : { baseUrl }, key));
     const current = pending;
     pending.catch(() => { if (cache.get(key) === current) cache.delete(key); });
     cache.set(key, pending);

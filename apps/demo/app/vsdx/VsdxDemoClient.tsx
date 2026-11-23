@@ -217,7 +217,7 @@ async function loadDiagram(): Promise<Uint8Array> {
 }
 
 async function loadDiagramFonts(): Promise<VsdxFontFace[]> {
-  const runtime = { decoder: decodeFontFace, strict: false };
+  const runtime = { decoder: decodeFontFace };
   const initialization = initWasm();
   void initialization.catch(() => {});
   const styles = [

@@ -116,7 +116,7 @@ test('registers Carlito regular and bold as Calibri and repaints once after the 
     { family: 'Calibri', weight: '400', style: 'normal' },
     { family: 'Calibri', weight: '700', style: 'normal' },
   ]);
-  expect(source.create).toHaveBeenCalledWith(undefined, { decoder: decode, retain: false, strict: false });
+  expect(source.create).toHaveBeenCalledWith(undefined, { decoder: decode, retain: false, strict: true });
   expect(decode).toHaveBeenCalledTimes(2);
   expect(repaint).toHaveBeenCalledTimes(1);
   await fonts.load(list);
@@ -702,7 +702,7 @@ test('the in-thread editor lets the font manager decode with its own decoder', a
   browser();
   const { create } = provider();
   await createDefaultFontPainter(null, () => {}).load(display({ family: 'Calibri' }));
-  expect(create).toHaveBeenCalledWith(undefined, { strict: false });
+  expect(create).toHaveBeenCalledWith(undefined, { strict: true });
 });
 
 test('no painter work happens before a worker decoder exists', async () => {
@@ -735,7 +735,7 @@ test('repaints leave an uninstalled editor face settled until the CDN changes', 
   const { added } = browser();
   const previous = getFontCdnConfiguration();
   const runtime = fontRuntimeWithoutPacks();
-  const source = runtime.createFontProvider(undefined, { strict: false });
+  const source = runtime.createFontProvider(undefined, { strict: true });
   const resolve = spyOn(source, 'resolve');
   const manager = spyOn(xlsxDefaultFontManager, 'load').mockResolvedValue({
     ...fonts, default: fonts, createFontProvider: () => source,
@@ -780,7 +780,7 @@ test('T14: repaint, editing another face and reopening share the CDN cooldown', 
   configureTestFontCdn({ baseUrl: false });
   const restore = withBrowserFontGlobals();
   const runtime = fontRuntimeWithoutPacks();
-  const source = runtime.createFontProvider(undefined, { strict: false });
+  const source = runtime.createFontProvider(undefined, { strict: true });
   const resolve = spyOn(source, 'resolve');
   const load = spyOn(xlsxDefaultFontManager, 'load').mockResolvedValue({ ...fonts, default: fonts, createFontProvider: () => source });
   const warn = spyOn(console, 'warn').mockImplementation(() => {});

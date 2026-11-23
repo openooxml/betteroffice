@@ -5,6 +5,4 @@
 "@betteroffice/xlsx": minor
 ---
 
-Browsers fetch missing packs from jsDelivr by default. `@betteroffice/fonts-latin` is optional.
-
-Breaking: `loadBundledFontBytes` rejects instead of returning a substitute when a face is unavailable after a failed default CDN fetch or because `@betteroffice/fonts-intl` is absent.
+Browser pages load uninstalled font packs from jsDelivr; under a strict content policy, allow cdn.jsdelivr.net, install the packs, or call `configureFontCdn({ baseUrl: false })`. `@betteroffice/fonts-latin` is now an optional peer. WASM packages under Node use Base Latin unless packs are installed.
