@@ -1,4 +1,5 @@
 import { test } from 'bun:test';
+import { clearTimeout, setTimeout } from 'node:timers';
 
 /** @internal Under 24 busy loops, outside a stalled round, a whole editor test took at most 6682 ms (p90 at most 4249 ms); a wait inside one gets about 2.2x that. */
 export const EDITOR_WAIT_BUDGET_MS = 15_000;
@@ -9,6 +10,18 @@ export const EDITOR_TEST_BUDGET_MS = 20_000;
 /** @internal Thrown when a budgeted wait runs out before its condition holds. */
 export class BudgetExceededError extends Error {
   override name = 'BudgetExceededError';
+}
+
+export async function withinTestBudget<T>(work: Promise<T>, description: string, budgetMs = 3000): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new BudgetExceededError(`Timed out after ${budgetMs} ms waiting for ${description}`)), budgetMs);
+    });
+    return await Promise.race([work, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 type Body = (...args: any[]) => Promise<void> | void;

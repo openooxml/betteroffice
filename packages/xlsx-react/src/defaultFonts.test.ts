@@ -4,6 +4,7 @@ import * as fonts from '@betteroffice/fonts';
 import { fontAssetResponse, fontRuntimeWithoutPacks, withBrowserFontGlobals } from '../../fonts/src/fontAssets.test-support';
 import type { FontDecoder } from '../../../shared/office-session/fontDecoder';
 import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../shared/office-session/fontCdn';
+import { withinTestBudget } from '../../../shared/office-session/testing/loadBudget';
 import { configureFontCdn as configureTestFontCdn } from '../../fonts/src/fontCdn';
 import { createSessionHost } from '../../../shared/office-session/host';
 import { createInProcessPair } from '../../../shared/office-session/testing/inProcessTransport';
@@ -758,7 +759,7 @@ test('repaints leave an uninstalled editor face settled until the CDN changes', 
 
     configureFontCdn({ baseUrl: 'https://editor-fonts.example/' });
     expect(painter.paint(frame, () => {})).toBe(false);
-    await repainted.promise;
+    await withinTestBudget(repainted.promise, 'the repaint after CDN configuration');
     expect(fetch.mock.calls.filter(([input]) => !String(input).endsWith('.wasm'))).toHaveLength(1);
     expect(resolve).toHaveBeenCalledTimes(1);
     expect(added.map(({ family }) => family)).toEqual(['Calibri']);
@@ -822,7 +823,7 @@ test('T14: repaint, editing another face and reopening share the CDN cooldown', 
     clock.mockReturnValue(now + 60_000);
     first.paint(frame, () => {});
     first.paint(frame, () => {});
-    await repainted.promise;
+    await withinTestBudget(repainted.promise, 'the repaint after CDN cooldown');
     expect(requests).toHaveLength(2);
     expect(resolve).toHaveBeenCalledTimes(2);
     expect(added.map(({ family }) => family)).toEqual(['Calibri']);

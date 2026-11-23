@@ -1,5 +1,6 @@
 import { afterEach, expect, spyOn, test } from 'bun:test';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
+import { withinTestBudget } from '../../../../shared/office-session/testing/loadBudget';
 import { isClientMessage, isHostMessage, type ClientMessage } from '../../../../shared/office-session/protocol';
 import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import { withBrowserFontGlobals } from '../../../fonts/src/fontAssets.test-support';
@@ -430,7 +431,7 @@ for (const opening of ['explicit', 'unset'] as const) {
     let client: PresentationCommandClient | undefined;
     try {
       wire.transport.post(prefetch);
-      await prefetched.promise;
+      await withinTestBudget(prefetched.promise, 'the implicit CDN prefetch');
       client = await createPresentationCommandClient(Uint8Array.of(0),
         { session: 'fonts', incarnation: 'worker', fontCdn, defaultFonts: opening === 'explicit' }, wire.transport);
       expect(wire.provider.mock.calls.map(([configuration]) => configuration))

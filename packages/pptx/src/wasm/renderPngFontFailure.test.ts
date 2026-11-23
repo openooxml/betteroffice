@@ -8,6 +8,7 @@ import * as workerFonts from '../../../fonts/src/worker';
 import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import { createFontPackResponder, createWorkerFontPacks, setWorkerFontAssets } from '../../../../shared/office-session/optionalFontPacks';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
+import { withinTestBudget } from '../../../../shared/office-session/testing/loadBudget';
 import { createPresentationCommandClient } from '../session/commandClient';
 import { createPresentationSessionHost } from '../session/host';
 import { engineKind, PptxRenderer } from './engine';
@@ -205,14 +206,14 @@ describe.skipIf(engineKind === 'native')('PPTX PNG with uninstalled font packs',
     const reason = new Error('Export cancelled');
     const result = handle.renderPng({ slide: 0 }, { signal: controller.signal }).catch((error: unknown) => error);
     try {
-      await started;
+      await withinTestBudget(started, 'the PNG font pack request');
       controller.abort(reason);
       const nextTurn = new Promise((resolve) => setTimeout(() => resolve('still waiting for the page'), 0));
       expect(await Promise.race([result, nextTurn])).toBe(reason);
     } finally {
+      controller.abort(reason);
       channel.dispose();
       setWorkerFontAssets(async () => undefined);
-      await result;
       restoreGlobals();
       handle.dispose();
     }
