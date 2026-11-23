@@ -4,14 +4,15 @@ import { setFontCdnConfiguration } from '../../../../shared/office-session/fontC
 import type { SessionScope } from '../../../../shared/office-session/transport';
 
 const port = parentPort!;
+const optionalPackEntry = /[/\\](fonts-(?:latin|intl|cjk))[/\\]dist[/\\]index\.js$/;
 Bun.plugin({
   name: 'uninstalled-font-packs',
   setup(build) {
-    build.onResolve({ filter: /^@betteroffice\/fonts-(?:latin|intl|cjk)$/ }, ({ path }) => ({ path, namespace: 'uninstalled-font-pack' }));
-    build.onLoad({ filter: /.*/, namespace: 'uninstalled-font-pack' }, ({ path }) => ({
-      loader: 'object',
-      exports: { then: (_resolve: unknown, reject: (error: Error) => void) => reject(new Error(`Cannot find package '${path}'`)) },
-    }));
+    build.onLoad({ filter: optionalPackEntry }, ({ path }) => {
+      const [, pack] = optionalPackEntry.exec(path)!;
+      const message = `Cannot find package '@betteroffice/${pack}'`;
+      return { loader: 'js', contents: `throw new Error(${JSON.stringify(message)});` };
+    });
   },
 });
 setFontCdnConfiguration({ baseUrl: 'https://stale-worker-cdn.example/', timeoutMs: 1000 });
