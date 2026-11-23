@@ -542,6 +542,12 @@
     "tableInserted": "Tableau inséré",
     "tableDeleted": "Tableau supprimé"
   },
+  "pasteOptions": {
+    "button": "Options de collage (Ctrl)",
+    "keepSource": "Conserver la mise en forme source",
+    "merge": "Fusionner la mise en forme",
+    "textOnly": "Conserver uniquement le texte"
+  },
   "contextMenu": {
     "ariaLabel": "Menu des actions IA",
     "textMenuAriaLabel": "Menu d'édition de texte",
@@ -587,6 +593,7 @@
     "noDocumentLoaded": "Aucun document chargé",
     "failedToLoad": "Échec du chargement du document",
     "failedToLoadDescription": "Le fichier est peut-être endommagé ou utilise un élément que cet éditeur ne peut pas encore lire.",
+    "recoveryFailedDescription": "L’éditeur s’est arrêté et n’a pas pu restaurer vos dernières modifications. Le fichier lui-même est intact.",
     "failedToLoadDamaged": "Le fichier est endommagé ou n'est pas un document Word complet.",
     "failedToLoadUnsupported": "Ce document utilise un élément que cet éditeur ne sait pas encore lire.",
     "editorUnavailable": "L’éditeur n’a pas pu se charger",
@@ -874,6 +881,7 @@
     "toolbarGroup": "Plugins",
     "panelTabs": "Panneaux des plugins",
     "collapsePanel": "Réduire {title}",
-    "expandPanel": "Développer {title}"
+    "expandPanel": "Développer {title}",
+    "miniToolbar": "Mise en forme de la sélection"
   }
 }

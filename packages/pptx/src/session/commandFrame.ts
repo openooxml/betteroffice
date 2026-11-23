@@ -2,9 +2,9 @@ import { metafileImageBytes } from '../render/browserImage';
 import { transferable, type TransferResult } from '../../../../shared/office-session/protocol';
 import { MAX_TIFF_BYTES, isTiff } from '../../../../shared/media';
 import { graphemeBoundaries } from '../../../../shared/textSelection';
-import type { SlideDisplayList, SlidePrimitive } from '../types';
+import type { ShapeRect, SlideDisplayList, SlidePrimitive } from '../types';
 import {
-  decodeTiffImage, presentationDisplayListJson, type PresentationHandle,
+  decodeTiffImage, presentationDisplayListJson, presentationShapeRectPreview, type PresentationHandle,
 } from '../wasm/loader';
 import type { PresentationCommandFrame } from './commandProtocol';
 import type { MetafileSvg } from './metafileSvg';
@@ -15,6 +15,14 @@ type FrameTags = Omit<PresentationCommandFrame, 'displayList' | 'media'>;
 /** Lays out one slide as the command frame paints it, with caret stops on grapheme boundaries. */
 export function parseCommandDisplayList(handle: PresentationHandle, slideIndex: number): SlideDisplayList {
   const list = JSON.parse(presentationDisplayListJson(handle, slideIndex)) as SlideDisplayList;
+  normalizeCaretStops(list.primitives);
+  return list;
+}
+
+export function parseCommandShapeRectPreview(
+  handle: PresentationHandle, slideId: string, shapeId: string, rect: ShapeRect,
+): SlideDisplayList {
+  const list = presentationShapeRectPreview(handle, slideId, shapeId, rect);
   normalizeCaretStops(list.primitives);
   return list;
 }

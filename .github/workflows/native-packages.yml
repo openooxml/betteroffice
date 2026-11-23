@@ -109,3 +109,6 @@ jobs:
           for package in npm/*; do
             (cd "$package" && npm pack --dry-run)
           done
+
+      - name: Check the license in every tarball
+        run: node scripts/check-packed-license.mjs bindings/${{ matrix.binding }}-native

@@ -20,7 +20,7 @@ import {
 } from './crossStoryComments';
 import { createStyleResolver, type StyleResolver } from '../styles';
 import { hasTrackedControlContent } from '../utils/trackedControlContent';
-import { isRawXml } from '../types/content/rawXml';
+import { isRawXml, type RawXml } from '../types/content/rawXml';
 import { seededCellIndices } from './tableRowSpans';
 import { pixelsToEmu } from '../utils/units';
 import {
@@ -76,7 +76,7 @@ import type {
   HeaderFooter,
   SectionProperties,
 } from '../types/document';
-import type { YrsRunInheritance, YrsSession, YrsStorySegment, YrsTableInheritance } from './index';
+import type { YrsRawMark, YrsRunInheritance, YrsSession, YrsStorySegment, YrsTableInheritance } from './index';
 import { isUnavailableTablePayload, markGated, refuseUnavailableTables, tableUnavailableError } from './tableUnavailable';
 
 type Attrs = Record<string, unknown>;
@@ -239,6 +239,10 @@ interface CommentBoundary {
   offset: number;
 }
 
+interface RawMarkBoundary extends CommentBoundary {
+  xml: string;
+}
+
 interface BookmarkBoundary extends CommentBoundary {
   name?: string;
   colFirst?: number;
@@ -254,6 +258,8 @@ interface OriginalRunBoundary {
   formatting?: TextFormatting;
   propertyChanges?: Run['propertyChanges'];
   inline?: boolean;
+  /** False for the unit of a kept inline element seeded as an embed, which is no run. */
+  formatsRun?: boolean;
 }
 
 interface LiveParagraphBreaks {
@@ -642,7 +648,15 @@ function createTextRun(text: string, attributes: Attrs, format: RunFormatter): R
     ...runPropertyChanges(attributes, format),
     formatting: Object.keys(formatting).length > 0 ? formatting : undefined,
     content: runContentForText(text, () => directFormatting(attributes)),
+    ...directionScopes(attributes),
   };
+}
+
+function directionScopes(attributes: Attrs): Pick<Run, 'directionScopes'> {
+  const scopes = attributes.directionScopes;
+  return Array.isArray(scopes) && scopes.length > 0
+    ? { directionScopes: scopes as NonNullable<Run['directionScopes']> }
+    : {};
 }
 
 function runPropertyChanges(attributes: Attrs, format: RunFormatter): Pick<Run, 'propertyChanges'> {
@@ -817,6 +831,20 @@ function fieldFromPayload(
     dirty,
     fieldTree: { version: 1, displayMode },
   };
+}
+
+/** `_kind` of the embed a kept inline element holding content seeds as. @internal */
+export const RAW_INLINE_KIND = 'rawInline';
+
+/** Kept inline elements written back from their embed, one story unit each. */
+const rawInlineEmbeds = new WeakSet<RawXml>();
+
+function rawInlineFromPayload(payload: Attrs): RawXml | null {
+  const xml = asString(payload.xml);
+  if (xml === undefined) return null;
+  const raw: RawXml = { type: 'rawXml', xml };
+  rawInlineEmbeds.add(raw);
+  return raw;
 }
 
 function mathFromPayload(payload: Attrs): MathEquation {
@@ -1259,7 +1287,9 @@ function ordinaryContentForItem(
   format: RunFormatter
 ): ParagraphContent | null {
   const content = inlineContentForItem(item, recovery, format);
-  return content?.type === 'run' ? { ...content, ...runPropertyChanges(item.attributes, format) } : content;
+  return content?.type === 'run'
+    ? { ...content, ...runPropertyChanges(item.attributes, format), ...directionScopes(item.attributes) }
+    : content;
 }
 
 function inlineContentForItem(
@@ -1290,6 +1320,8 @@ function inlineContentForItem(
       );
     case 'math':
       return mathFromPayload(item.payload);
+    case RAW_INLINE_KIND:
+      return rawInlineFromPayload(item.payload);
     case 'sdt':
       return inlineSdtFromPayload(item.payload, recovery, format);
     case 'noteRef': {
@@ -1316,6 +1348,7 @@ function tabRun(attributes: Attrs, format: RunFormatter): Run {
     ...runPropertyChanges(attributes, format),
     content: [{ type: 'tab' }],
     ...(Object.keys(formatting).length > 0 ? { formatting } : {}),
+    ...directionScopes(attributes),
   };
 }
 
@@ -1442,6 +1475,10 @@ function restoreProjectedFieldResults(
     const group = children.get(index) ?? [];
     const attributes = { ...item.attributes };
     delete attributes.fieldResult;
+    if (item.kind === 'embed' && item.embedKind === 'noteRef') {
+      delete attributes.ins;
+      delete attributes.del;
+    }
     group.push({ ...item, attributes });
     children.set(index, group);
     groups.set(owner, children);
@@ -1467,6 +1504,8 @@ function restoreProjectedFieldResults(
       replacements.set(index, rebuilt);
     }
     if (replacements.size === 0) continue;
+    delete stored.sourceRunXml;
+    delete stored.sourceRunDigest;
     const inline = (stored.structuredResult?.inline ?? []).flatMap((child, index) => replacements.get(index) ?? [child]);
     const code = stored.structuredCode?.inline?.flatMap((child, index) => replacements.get(-index - 1) ?? [child]);
     stored.structuredResult = { ...stored.structuredResult, inline };
@@ -1523,12 +1562,19 @@ function buildParagraphContent(
   };
 
   for (const item of items) {
-    // A note reference is handled before tracked/link marks.
-    if (item.kind === 'embed' && item.embedKind === 'noteRef') {
+    // An untracked note reference is handled before link marks.
+    if (item.kind === 'embed' && item.embedKind === 'noteRef' && !item.attributes.ins && !item.attributes.del) {
       flushRun();
       flushHyperlink();
       const note = ordinaryContentForItem(item, recovery, format);
       if (note) content.push(note);
+      continue;
+    }
+    if (item.kind === 'embed' && item.embedKind === RAW_INLINE_KIND) {
+      flushRun();
+      flushHyperlink();
+      const kept = rawInlineFromPayload(item.payload);
+      if (kept) content.push(kept);
       continue;
     }
 
@@ -1586,7 +1632,7 @@ function buildParagraphContent(
           written = serializeRun({ ...nextRun, content: [] });
           formattingKeys.set(formatting, written);
         }
-        key = written;
+        key = nextRun.directionScopes ? written + stableStringify(nextRun.directionScopes) : written;
       }
       const source = item.sourceRun;
       const sameSource = source?.index === currentSource?.index;
@@ -1636,6 +1682,7 @@ function marksKeyToYrsAttrs(marksKey: string | undefined): Attrs | null {
     else if (name === 'boldCs' || name === 'italicCs') attrs[name] = value.value;
     else if (name === 'highlight') attrs.highlight = value.color;
     else if (name === 'rPrChange') attrs.rPrChange = value.changes;
+    else if (name === 'directionScopes') attrs.directionScopes = value.scopes;
     else if (name === 'insertion' || name === 'deletion') {
       attrs[name === 'insertion' ? 'ins' : 'del'] = dropNulls({
         id: value.revisionId,
@@ -1686,9 +1733,13 @@ function sourceBreakBoundaries(paragraph: Paragraph | undefined): OriginalRunBou
   const boundaries: OriginalRunBoundary[] = [];
   for (const child of paragraph?.content ?? []) {
     if (child.type !== 'run') {
+      if (child.type === 'rawXml') {
+        if (baseRawInlineUnits(child) > 0) boundaries.push({ text: '\uFFFC', formatsRun: false });
+        continue;
+      }
       if (
         child.type === 'commentRangeStart' || child.type === 'commentRangeEnd' ||
-        child.type === 'bookmarkStart' || child.type === 'bookmarkEnd' || child.type === 'rawXml'
+        child.type === 'bookmarkStart' || child.type === 'bookmarkEnd'
       ) continue;
       const span = inlineSpanText(child);
       if (span === null) return [];
@@ -1744,6 +1795,16 @@ function plainRunsText(children: readonly unknown[]): string | null {
   return text;
 }
 
+/**
+ * The content a recorded boundary stands for when its breaks are classified. A kept inline
+ * element's unit takes no flow token, as its live embed takes none.
+ */
+function boundarySource(boundary: OriginalRunBoundary): ParagraphContent {
+  return boundary.formatsRun === false
+    ? { type: 'rawXml', xml: '' }
+    : { type: 'run', content: boundaryContent(boundary, {}) };
+}
+
 function liveRunBoundaries(
   boundaries: OriginalRunBoundary[],
   live: LiveParagraphBreaks
@@ -1751,9 +1812,7 @@ function liveRunBoundaries(
   const count = boundaries.reduce((sum, boundary) =>
     sum + (noteMarkContent(boundary) ? 0 : (boundary.breaks?.length ?? 0)), 0);
   if (count === 0) return boundaries;
-  const source = boundaries.map((boundary): ParagraphContent => ({
-    type: 'run', content: boundaryContent(boundary, {}),
-  }));
+  const source = boundaries.map(boundarySource);
   const hoisted = count - trailingBlockBreaks({ type: 'paragraph', content: source }).length;
   const visible = flowTokens(source).includes('visible');
   let index = 0;
@@ -1785,6 +1844,24 @@ function paragraphBreaksAreLive(content: ParagraphContent[], live: LiveParagraph
     trailingBlockBreaks(paragraph).every((kind, index) => kind === live.trailing[index]);
 }
 
+/**
+ * Writes the leading page break the live paragraph holds first wherever its recorded place was
+ * not kept. The story's own break embeds around the paragraph reach the save without it.
+ */
+function withLiveLeadingPage(content: ParagraphContent[], live: LiveParagraphBreaks): ParagraphContent[] {
+  return live.leadingPage && flowTokens(content)[0] !== 'page'
+    ? [{ type: 'run', content: [{ type: 'break', breakType: 'page' }] }, ...content]
+    : content;
+}
+
+function holdsKeptWordInline(content: readonly ParagraphContent[]): boolean {
+  return content.some(child =>
+    child.type === 'rawXml' ? KEPT_WORD_INLINE.test(child.xml)
+      : child.type === 'hyperlink' ? holdsKeptWordInline(child.children as ParagraphContent[])
+        : false
+  );
+}
+
 function restoreRecordedBreaks(
   content: ParagraphContent[],
   items: InlineItem[],
@@ -1802,15 +1879,12 @@ function restoreRecordedBreaks(
     start += boundary.text.length;
   }
   if (breaks.length === 0) return content;
-  const source = boundaries.map((boundary): ParagraphContent => ({
-    type: 'run',
-    content: boundaryContent(boundary, {}),
-  }));
+  const source = boundaries.map(boundarySource);
   const trailing = trailingBlockBreaks({ type: 'paragraph', content: source });
   const hoisted = breaks.length - trailing.length;
   const visible = flowTokens(source).includes('visible');
   const kept = breaks.filter(
-    (entry, index) => index >= hoisted || (visible && entry.type === 'page')
+    (entry, index) => index >= hoisted || (visible && entry.type === 'page') || entry.offset > 0
   );
   const recorded = boundaries.map((boundary) => boundary.text).join('');
   const live = items
@@ -1977,6 +2051,7 @@ function restoreOriginalRuns(
     const run: Run = {
       type: 'run',
       content: boundaryContent(boundary, attrsToTextFormatting(restoredAttrs[index])),
+      ...directionScopes(restoredAttrs[index]),
     };
     const formatting = sourceMatches ? {
       ...boundary.formatting,
@@ -2059,6 +2134,8 @@ function paragraphContentLength(content: ParagraphContent): number {
     case 'moveFrom':
     case 'moveTo':
       return content.content.reduce((sum, child) => sum + paragraphContentLength(child), 0);
+    case 'rawXml':
+      return rawInlineEmbeds.has(content) ? 1 : 0;
     default:
       return 0;
   }
@@ -2270,16 +2347,47 @@ function restoreNestedOrdinals(content: ParagraphContent[], base: readonly Parag
   });
 }
 
-function restoreRawInlines(content: ParagraphContent[], base: Paragraph | undefined): ParagraphContent[] {
+const KEPT_WORD_INLINE = /^\s*<w:/;
+
+const EMPTY_INLINE = /^\s*<[^\s/>]+(?:[^>"']|"[^"]*"|'[^']*')*?\/>\s*$/;
+
+/** The story units a base paragraph's raw inline seeded as: one for a kept `w:` element holding content. */
+function baseRawInlineUnits(raw: RawXml): number {
+  return KEPT_WORD_INLINE.test(raw.xml) && !EMPTY_INLINE.test(raw.xml) ? 1 : 0;
+}
+
+/** Puts each foreign inline element of the base paragraph back at its offset: foreign markup seeds as nothing. */
+function restoreForeignInlines(content: ParagraphContent[], base: Paragraph | undefined): ParagraphContent[] {
   if (!base) return content;
   const length = content.reduce((sum, child) => sum + paragraphContentLength(child), 0);
   const boundaries: CommentBoundary[] = [];
   let offset = 0;
   for (const [index, child] of base.content.entries()) {
-    if (child.type === 'rawXml') boundaries.push({ id: index, kind: 'start', offset: Math.min(offset, length) });
-    offset += paragraphContentLength(child);
+    if (child.type !== 'rawXml') {
+      offset += paragraphContentLength(child);
+    } else if (KEPT_WORD_INLINE.test(child.xml)) {
+      offset += baseRawInlineUnits(child);
+    } else {
+      boundaries.push({ id: index, kind: 'start', offset: Math.min(offset, length) });
+    }
   }
   return insertBoundaries(content, boundaries, (boundary) => base.content[boundary.id]!);
+}
+
+/** Gives each kept inline element written back from its embed the source occurrence its base counterpart carries. */
+function restoreRawInlineOrdinals(content: ParagraphContent[], base: readonly ParagraphContent[]): void {
+  const ordinals = new Map<string, number>();
+  for (const child of base) {
+    if (child.type === 'rawXml' && child.sourceOrdinal !== undefined && !ordinals.has(child.xml)) {
+      ordinals.set(child.xml, child.sourceOrdinal);
+    }
+  }
+  if (ordinals.size === 0) return;
+  for (const child of content) {
+    if (child.type !== 'rawXml') continue;
+    const ordinal = ordinals.get(child.xml);
+    if (ordinal !== undefined) child.sourceOrdinal = ordinal;
+  }
 }
 
 function paragraphAttrs(properties: Attrs): ParagraphSaveAttrs {
@@ -2291,7 +2399,11 @@ function paragraphAttrs(properties: Attrs): ParagraphSaveAttrs {
   return attrs as ParagraphSaveAttrs;
 }
 
-function sourceRuns(content: readonly ParagraphContent[], intoFields = false): OriginalRunBoundary[] {
+/**
+ * The runs of `content` with the story units each seeds as, and one boundary per other node: a
+ * kept `w:` element holding content seeds one unit outside a hyperlink, as the seeds count it.
+ */
+function sourceRuns(content: readonly ParagraphContent[], intoFields = false, linked = false): OriginalRunBoundary[] {
   return content.flatMap((child): OriginalRunBoundary[] => {
     if (child.type === 'run') {
       return [{
@@ -2306,11 +2418,12 @@ function sourceRuns(content: readonly ParagraphContent[], intoFields = false): O
         formatting: child.formatting,
       }];
     }
-    if (child.type === 'hyperlink') return sourceRuns(child.children as ParagraphContent[], intoFields);
+    if (child.type === 'hyperlink') return sourceRuns(child.children as ParagraphContent[], intoFields, true);
     if (isTrackedWrapper(child) || child.type === 'inlineSdt' || (intoFields && child.type === 'simpleField')) {
-      return sourceRuns(child.content as ParagraphContent[], intoFields);
+      return sourceRuns(child.content as ParagraphContent[], intoFields, linked);
     }
-    return [{ text: '\ufffc'.repeat(paragraphContentLength(child)) }];
+    const units = child.type === 'rawXml' && !linked ? baseRawInlineUnits(child) : paragraphContentLength(child);
+    return [{ text: '\ufffc'.repeat(units) }];
   });
 }
 
@@ -2502,6 +2615,7 @@ function paragraphFromStory(
   properties: Attrs,
   items: InlineItem[],
   commentBoundaries: CommentBoundary[],
+  rawMarks: RawMarkBoundary[],
   baseParagraph: Paragraph | undefined,
   liveBreaks: LiveParagraphBreaks,
   recovery: ChartRecovery,
@@ -2552,9 +2666,18 @@ function paragraphFromStory(
     baseParagraph,
     liveBreaks
   );
+  const holdsKeptElement = rawMarks.length > 0 ||
+    items.some(item => item.kind === 'embed' && item.embedKind === RAW_INLINE_KIND) ||
+    (baseParagraph !== undefined && holdsKeptWordInline(baseParagraph.content));
+  if (holdsKeptElement) content = withLiveLeadingPage(content, liveBreaks);
   restoreLineBreaks(content, baseParagraph);
-  content = restoreRawInlines(content, baseParagraph);
+  content = restoreForeignInlines(content, baseParagraph);
+  content = insertBoundaries(content, rawMarks, (boundary) => ({
+    type: 'rawXml',
+    xml: (boundary as RawMarkBoundary).xml,
+  }));
   if (baseParagraph) {
+    restoreRawInlineOrdinals(content, baseParagraph.content);
     restoreNestedOrdinals(content, baseParagraph.content);
     restoreTextBoxBookmarks(content, baseParagraph.content);
   }
@@ -3929,6 +4052,7 @@ class SaveContext {
   private readonly repliedWithoutRange: Set<number>;
   /** Per story, the comment ranges of it and of the stories nested in it, which key its blocks. */
   private readonly subtreeComments = new Map<string, Map<string, unknown>>();
+  private rawMarks: Map<string, YrsRawMark[]> | null = null;
   private readonly memo: SessionProjectionMemo;
   private readonly styles: StyleResolver;
   private readonly syntheticDefaults: boolean;
@@ -4012,6 +4136,19 @@ class SaveContext {
         this.subtreeComments.set(owner, nested);
       }
     }
+  }
+
+  /** The kept empty inline elements of `storyId`, by offset and source order. */
+  private storyRawMarks(storyId: string): readonly YrsRawMark[] {
+    if (!this.rawMarks) {
+      this.rawMarks = new Map();
+      for (const mark of this.session.resolveRawMarks()) {
+        const marks = this.rawMarks.get(mark.story) ?? [];
+        marks.push(mark);
+        this.rawMarks.set(mark.story, marks);
+      }
+    }
+    return this.rawMarks.get(storyId) ?? [];
   }
 
   private storyIsClean(storyId: string): boolean {
@@ -4538,6 +4675,32 @@ class SaveContext {
       return boundaries;
     };
 
+    const storyRawMarks = this.storyRawMarks(storyId);
+    const rawMarksInOrder = storyRawMarks.every(
+      (mark, index) => index === 0 || storyRawMarks[index - 1]!.offset <= mark.offset
+    );
+    let rawMarkCursor = 0;
+    const paragraphRawMarks = (end: number): RawMarkBoundary[] => {
+      let selected: readonly YrsRawMark[];
+      if (rawMarksInOrder) {
+        if (rawMarkCursor > 0 && storyRawMarks[rawMarkCursor - 1]!.offset >= paragraphStart) rawMarkCursor = 0;
+        while (rawMarkCursor < storyRawMarks.length && storyRawMarks[rawMarkCursor]!.offset < paragraphStart) {
+          rawMarkCursor += 1;
+        }
+        let last = rawMarkCursor;
+        while (last < storyRawMarks.length && storyRawMarks[last]!.offset <= end) last += 1;
+        selected = storyRawMarks.slice(rawMarkCursor, last);
+      } else {
+        selected = storyRawMarks.filter((mark) => mark.offset >= paragraphStart && mark.offset <= end);
+      }
+      return selected.map((mark) => ({
+        id: mark.ordinal,
+        kind: 'start' as const,
+        offset: Math.max(0, mark.offset - inlineStart),
+        xml: mark.xml,
+      }));
+    };
+
     const pushText = (text: string, attributes: Attrs): void => {
       let cursor = 0;
       for (let index = 0; index < text.length; index += 1) {
@@ -4567,6 +4730,7 @@ class SaveContext {
         const baseParagraph = this.baseParagraphs.get(segment.paraId);
         if (baseParagraph) precedingBaseParagraphs.push(baseParagraph);
         const boundaries = paragraphCommentBoundaries(storyOffset);
+        const rawMarks = paragraphRawMarks(storyOffset);
         const source = sourceBreakBoundaries(baseParagraph);
         const sourceRuns = source.some(boundary => boundary.breaks?.length) ? source : undefined;
         const inputs = [
@@ -4579,6 +4743,7 @@ class SaveContext {
           breaks,
           liveTrailing,
           sourceRuns,
+          rawMarks,
         ] as const;
         const priorMemo =
           baseParagraph !== undefined ? projectedBlocks.get(baseParagraph) : undefined;
@@ -4600,6 +4765,7 @@ class SaveContext {
             baseParagraph ? segment.properties : this.copiedParagraphProperties(storyId, segment.properties, items, precedingBaseParagraphs),
             items,
             boundaries,
+            rawMarks,
             baseParagraph,
             { leading: breaks, trailing: liveTrailing, leadingPage: segment.properties.pageBreakBeforeRun === true },
             this.recovery(storyId),

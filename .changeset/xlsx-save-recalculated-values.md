@@ -5,4 +5,4 @@
 '@betteroffice/rust-crates': patch
 ---
 
-After a recalculation, saved files carry the recalculated values: the new `WorkbookHandle.recalculate()`, or opening a file that asks for a full calculation on load. Formulas the engine cannot evaluate keep the result the file stored. Without either, saved values stay byte for byte.
+After `WorkbookHandle.recalculate()`, saved files carry the recalculated values; formulas the engine cannot evaluate keep the result the file stored. A save without edits, showing the stored active sheet, does not write the recalculation at open; applying a collaborative update counts as an edit.

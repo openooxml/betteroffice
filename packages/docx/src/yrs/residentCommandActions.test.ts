@@ -1383,6 +1383,47 @@ test('suggested hyperlinks refuse existing revisions before changing links or di
   }
 }, TIMEOUT);
 
+test('suggested hyperlinks refuse field results in ranges and beside display text carets', async () => {
+  const arm = await openCommandEngine([], { bodyXml:
+    '<w:p w14:paraId="00000001"><w:r><w:t>left</w:t></w:r>' +
+    '<w:r><w:fldChar w:fldCharType="begin"/></w:r>' +
+    '<w:r><w:instrText xml:space="preserve"> REF entry \\h </w:instrText></w:r>' +
+    '<w:r><w:fldChar w:fldCharType="separate"/></w:r>' +
+    '<w:hyperlink w:anchor="entry"><w:r><w:t>Entry</w:t></w:r></w:hyperlink>' +
+    '<w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:t>right</w:t></w:r></w:p>',
+  });
+  const id = arm.engine.paragraphs('body')[0]!.paraId;
+  const before = snapshot(arm);
+  const segments = arm.engine.storySegments('body');
+  for (const [start, end] of [[4, 9], [4, 4], [6, 6], [9, 9]] as const) {
+    for (const displayText of start === end ? ['label'] : [undefined, 'label']) {
+      const intent = command(arm, 'setHyperlink', {
+        selection: selection(id, start, end), hyperlink: { href: '#target' }, displayText,
+        expectVersion: arm.engine.proposalEngine.version(), suggesting: { name: 'Ada', date: '2026-10-01T12:00:00Z' },
+      });
+      expect(propertyCommandTarget(arm.engine, intent as DocxCommandIntent)).toBe('unsupported-suggesting');
+      expect(execute(arm, intent)).toMatchObject({ status: 'refused', reason: 'unsupported-suggesting' });
+      expect(snapshot(arm)).toEqual(before);
+      expect(arm.engine.storySegments('body')).toEqual(segments);
+    }
+  }
+  const paragraphs = arm.engine.paragraphSegments('body', [0]);
+  const read = spyOn(arm.engine, 'paragraphSegments').mockReturnValue(paragraphs.map(segments =>
+    segments.map(segment => ({ ...segment, attributes: { ...segment.attributes, fieldResult: null } }))
+  ));
+  try {
+    for (const [start, end] of [[4, 9], [4, 4], [6, 6], [9, 9]] as const) {
+      const intent = command(arm, 'setHyperlink', {
+        selection: selection(id, start, end), hyperlink: { href: '#target' }, displayText: 'label',
+        expectVersion: arm.engine.proposalEngine.version(), suggesting: { name: 'Ada', date: '2026-10-01T12:00:00Z' },
+      });
+      expect(propertyCommandTarget(arm.engine, intent as DocxCommandIntent)).toBeNull();
+    }
+  } finally {
+    read.mockRestore();
+  }
+}, TIMEOUT);
+
 test('suggested hyperlink display text keeps its insertion revision and rejection restores the original', async () => {
   const arm = await openCommandEngine();
   const id = arm.engine.paragraphs('body')[0]!.paraId;

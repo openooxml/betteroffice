@@ -5,24 +5,26 @@ import type { CommandTicket, SubmitOptions, TicketOutcome } from '../../../../..
 import type { PeerlessEchoIntent, PeerlessEchoPainter } from './echoPainter';
 import type { PeerlessFrameGeometry, PeerlessViewSnapshot, PeerlessViewStore } from './viewStore';
 import { Activity } from 'react';
-import { PeerlessInput, type PeerlessInputProps } from './PeerlessInput';
+import { PeerlessInput, type PeerlessInputProps, type PeerlessPasteRecorder } from './PeerlessInput';
 import { clipboardFragmentHtml } from '../internals/clipboardHtml';
-import type { DocxClipboardFragment } from '@betteroffice/docx/yrs';
-import { admitIntent, createInputAdmission, submitFormattingIntent } from './inputAdmission';
+import type { DocxClipboardFragment, DocxTableFragment } from '@betteroffice/docx/yrs';
+import { admitIntent, createInputAdmission, submitFormattingIntent, submitInputIntent, submitPasteFragment, type PeerlessInputAdmission } from './inputAdmission';
+import { clipboardFragmentPlainText, plainTextClipboardFragment } from '../pasteOptions/pasteText';
 import { installCompositionEventPolyfill } from './compositionEventPolyfill.testing';
 import { PLAIN_CONTEXT } from '../../../commands/testing';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 const restoreCompositionEvent = installCompositionEventPolyfill();
-const { act, cleanup, fireEvent, render } = await import('@testing-library/react');
+const { act, cleanup, fireEvent, render, waitFor } = await import('@testing-library/react');
+await import('../pasteOptions/PasteOptionsControl');
 afterEach(cleanup);
 afterAll(async () => {
   restoreCompositionEvent();
   if (ownsDom) await GlobalRegistrator.unregister();
 });
 
-function mount(readOnly = false, callbacks: Pick<PeerlessInputProps, 'onCompositionChange' | 'onRecoverableText' | 'onClipboard' | 'onNavigateCell' | 'onPasteFragment' | 'caretHostRef' | 'zoom' | 'autoFocus'> = {}) {
+function mount(readOnly = false, callbacks: Pick<PeerlessInputProps, 'onCompositionChange' | 'onRecoverableText' | 'onClipboard' | 'onNavigateCell' | 'onPasteFragment' | 'pasteRecorder' | 'caretHostRef' | 'zoom' | 'autoFocus'> = {}) {
   const submitted: string[] = [];
   const entries: Array<{
     payload: DocxCommandPayload; options: SubmitOptions<PeerlessEchoIntent>; ticket: CommandTicket;
@@ -32,6 +34,8 @@ function mount(readOnly = false, callbacks: Pick<PeerlessInputProps, 'onComposit
   const waitForSubmitted = (count: number) => submitted.length >= count ? Promise.resolve()
     : new Promise<void>((resolve) => { waiters.push({ count, resolve }); });
   const listeners = new Set<() => void>();
+  const recoveringListeners = new Set<() => void>();
+  let recovering = false;
   const snapshot: PeerlessViewSnapshot = {
     identity: { session: 'test', incarnation: 1, epoch: 1 }, version: 0,
     throughSeq: 0, presentedThroughSeq: 0, workerSelection: null, anchors: null, geometry: null,
@@ -45,6 +49,13 @@ function mount(readOnly = false, callbacks: Pick<PeerlessInputProps, 'onComposit
       snapshot.geometry = geometry;
       for (const listener of listeners) listener();
     }, setProvisionalCaret() {}, dispose() {},
+    setRecovering(next) {
+      if (recovering === next) return;
+      recovering = next;
+      for (const listener of recoveringListeners) listener();
+    },
+    subscribeRecovering: (listener) => { recoveringListeners.add(listener); return () => { recoveringListeners.delete(listener); }; },
+    getRecovering: () => recovering,
   };
   const session: DocxWorkerEditSession<PeerlessEchoIntent> = {
     backend: 'worker', state: { epoch: 1, version: 0, throughSeq: 0,
@@ -1305,6 +1316,103 @@ test('copy and cut hand the event clipboardData to the adapter while the event i
   expect(seen).toEqual([clipboardData, clipboardData]);
 });
 
+test('Shift+Delete deletes forward when pending typing collapses the selection', async () => {
+  const cuts: boolean[] = [];
+  const input = mount(false, { onClipboard: async (cut) => { cuts.push(cut); } });
+  const start = { story: 'body', paraId: 'paragraph', offset: 0 };
+  const end = { ...start, offset: 2 };
+  try {
+    input.snapshot.workerSelection = input.session.state.selection = { anchor: start, focus: end };
+    beforeinput(input.textarea, 'insertText', 'x');
+    expect(fireEvent.keyDown(input.textarea, { key: 'Delete', shiftKey: true })).toBe(false);
+    expect(input.submitted).toEqual(['insertText']);
+
+    const caret = { ...start, offset: 1 };
+    await act(async () => {
+      input.entries[0]!.settle({ status: 'applied', seq: 1 }, { anchor: caret, focus: caret });
+    });
+    expect(input.submitted).toEqual(['insertText', 'deleteForward']);
+    expect(input.entries[1]!.payload).toEqual({});
+    expect(input.entries[1]!.options.fence).toBe(false);
+    expect(cuts).toEqual([]);
+  } finally { input.unmount(); input.admission.dispose(); }
+});
+
+test('Shift+Delete precedes navigation pressed while typing is pending', async () => {
+  const cuts: boolean[] = [];
+  const input = mount(false, { onClipboard: async (cut) => { cuts.push(cut); } });
+  const start = { story: 'body', paraId: 'paragraph', offset: 1 };
+  const afterTyping = { ...start, offset: 2 };
+  const selection = { anchor: afterTyping, focus: afterTyping };
+  try {
+    input.snapshot.workerSelection = input.session.state.selection = { anchor: start, focus: start };
+    beforeinput(input.textarea, 'insertText', 'x');
+    expect(fireEvent.keyDown(input.textarea, { key: 'Delete', shiftKey: true })).toBe(false);
+    fireEvent.keyUp(input.textarea, { key: 'Delete', shiftKey: true });
+    fireEvent.keyDown(input.textarea, { key: 'ArrowLeft' });
+    fireEvent.keyUp(input.textarea, { key: 'ArrowLeft' });
+    expect(input.submitted).toEqual(['insertText']);
+
+    await act(async () => {
+      input.entries[0]!.settle({ status: 'applied', seq: 1 }, selection);
+    });
+    expect(input.submitted.slice(0, 2)).toEqual(['insertText', 'deleteForward']);
+    const deletion = input.entries[1]!;
+    expect(deletion.payload).toEqual({});
+    expect(deletion.options.after).toBe(input.entries[0]!.ticket);
+    expect(input.session.state.selection).toEqual(selection);
+
+    await act(async () => {
+      deletion.settle({ status: 'applied', seq: 2 }, selection);
+    });
+    expect(input.submitted).toEqual(['insertText', 'deleteForward', 'navigate']);
+    expect(input.entries[2]!.payload).toEqual({ unit: 'character', direction: 'backward', extend: false });
+    expect(input.entries[2]!.options.after).toBe(deletion.ticket);
+    expect(cuts).toEqual([]);
+  } finally { input.unmount(); input.admission.dispose(); }
+});
+
+test('Shift+Delete keeps later typing behind a pending range cut', async () => {
+  const anchor = { story: 'body', paraId: 'paragraph', offset: 1 };
+  const focus = { ...anchor, offset: 2 };
+  const selection = { anchor, focus };
+  const cuts: boolean[] = [];
+  let finishCopy!: () => void;
+  const copying = new Promise<void>((resolve) => { finishCopy = resolve; });
+  const input = mount(false, { onClipboard: async (cut, _data, queuedCut) => {
+    cuts.push(cut);
+    await copying;
+    await queuedCut!.deleteSelection(selection);
+  } });
+  try {
+    input.snapshot.workerSelection = input.session.state.selection = { anchor, focus: anchor };
+    fireEvent.keyDown(input.textarea, { key: 'ArrowRight', shiftKey: true });
+    fireEvent.keyUp(input.textarea, { key: 'ArrowRight', shiftKey: true });
+    fireEvent.keyDown(input.textarea, { key: 'Delete', shiftKey: true });
+    fireEvent.keyUp(input.textarea, { key: 'Delete', shiftKey: true });
+    beforeinput(input.textarea, 'insertText', 'z');
+    expect(input.submitted).toEqual(['navigate']);
+
+    await act(async () => {
+      input.entries[0]!.settle({ status: 'applied', seq: 1 }, selection);
+    });
+    expect(cuts).toEqual([true]);
+    expect(input.submitted).toEqual(['navigate']);
+
+    await act(async () => { finishCopy(); });
+    expect(input.submitted).toEqual(['navigate', 'replaceSelection']);
+    const deletion = input.entries[1]!;
+    expect(deletion.payload).toEqual({ text: '', selection });
+    expect(deletion.options.after).toBe(input.entries[0]!.ticket);
+
+    await act(async () => {
+      deletion.settle({ status: 'applied', seq: 2 }, { anchor, focus: anchor });
+    });
+    expect(input.submitted).toEqual(['navigate', 'replaceSelection', 'insertText']);
+    expect(input.entries[2]!.options.after).toBe(deletion.ticket);
+  } finally { finishCopy(); input.unmount(); input.admission.dispose(); }
+});
+
 test('worker input enables spelling and follows acknowledged caret geometry', () => {
   const input = mount();
   expect(input.textarea.getAttribute('spellcheck')).toBe('true');
@@ -1435,5 +1543,940 @@ test('paste_fragment_callback_false_falls_back_to_text', () => {
   } finally {
     input.unmount();
     input.admission.dispose();
+  }
+});
+
+function boldFragment(): DocxClipboardFragment {
+  return { paragraphs: [{ text: 'Bold', runs: [{ text: 'Bold', format: { other: { bold: true } } }] }] };
+}
+
+function mountPasteOptions() {
+  const host = document.createElement('div');
+  host.style.position = 'relative';
+  document.body.appendChild(host);
+  let hostTop = 100;
+  const measured = { count: 0 };
+  host.getBoundingClientRect = () => {
+    measured.count += 1;
+    return { x: 0, y: hostTop, top: hostTop, bottom: hostTop + 600, left: 0, right: 600, width: 600, height: 600, toJSON() {} };
+  };
+  const recorder: { current: PeerlessPasteRecorder | null } = { current: null };
+  const admitted: { current: PeerlessInputAdmission | null } = { current: null };
+  const record = (fragment: DocxClipboardFragment) => {
+    recorder.current?.(fragment, submitPasteFragment(admitted.current!, fragment, { source: 'paste', fence: true }, () => {}));
+  };
+  const input = mount(false, {
+    caretHostRef: { current: host }, pasteRecorder: recorder,
+    onPasteFragment: (fragment) => { record(fragment); return true; },
+  });
+  admitted.current = input.admission;
+  const geometry: PeerlessFrameGeometry = {
+    identity: input.snapshot.identity, coversThroughSeq: 0, frameEpoch: 1, layoutRevision: 1,
+    pages: [], caret: { x: 80, y: 200, width: 1, height: 12 }, selectionRects: [],
+  };
+  act(() => { input.viewStore.installFrameGeometry(geometry); input.refresh(); });
+  let frameEpoch = 1;
+  const present = (version: number) => act(() => {
+    frameEpoch += 1;
+    input.snapshot.version = version;
+    input.viewStore.installFrameGeometry({ ...geometry, coversThroughSeq: input.snapshot.throughSeq, frameEpoch });
+    input.refresh();
+  });
+  const settle = (index: number, status: TicketOutcome['status'], selection?: DocxCommandSelection) => act(async () => {
+    input.entries[index]!.settle({ status, seq: index + 1 }, selection);
+  });
+  return {
+    input, recorder, record, present, settle, measured,
+    control: () => host.querySelector<HTMLElement>('[data-paste-options]'),
+    idle: () => act(() => new Promise<void>((resolve) => { setTimeout(resolve, 50); })),
+    moveHost: (top: number) => { hostTop = top; },
+    dispose() {
+      input.unmount();
+      input.admission.dispose();
+      host.remove();
+    },
+  };
+}
+
+test('pasting formatted external HTML submits its runs and shows Paste Options', async () => {
+  const paste = mountPasteOptions();
+  const end = { story: 'body', paraId: 'a', offset: 4 };
+  try {
+    pasteWith(paste.input, '<p><strong>Bold</strong></p>', 'Bold');
+    expect(paste.input.submitted).toEqual(['pasteFragment']);
+    expect(paste.input.entries[0]!.payload).toMatchObject({ fragment: boldFragment() });
+    await paste.settle(0, 'applied', { anchor: end, focus: end });
+    paste.present(1);
+    await waitFor(() => expect(paste.control()).not.toBeNull());
+  } finally {
+    paste.dispose();
+  }
+});
+
+test('a paste recorded from outside the input offers paste options until the next edit', async () => {
+  const paste = mountPasteOptions();
+  const end = { story: 'body', paraId: 'a', offset: 4 };
+  try {
+    expect(typeof paste.recorder.current).toBe('function');
+    act(() => paste.record({ paragraphs: [{ text: 'Plain' }] }));
+    await paste.settle(0, 'applied', { anchor: end, focus: end });
+    paste.present(1);
+    await paste.idle();
+    expect(paste.control() !== null).toBe(false);
+    act(() => paste.record(boldFragment()));
+    await paste.settle(1, 'applied', { anchor: end, focus: end });
+    paste.present(2);
+    await waitFor(() => expect(paste.control() !== null).toBe(true));
+    expect(paste.control()!.style.left).toBe('86px');
+    expect(paste.control()!.style.top).toBe('316px');
+    beforeinput(paste.input.textarea, 'insertText', 'x');
+    expect(paste.control() !== null).toBe(false);
+  } finally {
+    paste.dispose();
+  }
+});
+
+test('a selection change while a paste is pending leaves no Paste Options control', async () => {
+  const paste = mountPasteOptions();
+  const end = { story: 'body', paraId: 'a', offset: 4 };
+  const moved = { story: 'body', paraId: 'b', offset: 0 };
+  try {
+    act(() => paste.record(boldFragment()));
+    admitIntent(paste.input.admission, { kind: 'navigate', payload: { unit: 'document-boundary', direction: 'backward', extend: false } },
+      { source: 'selection' });
+    expect(paste.input.submitted).toEqual(['pasteFragment', 'navigate']);
+    await paste.settle(0, 'applied', { anchor: end, focus: end });
+    paste.present(1);
+    await paste.settle(1, 'applied', { anchor: moved, focus: moved });
+    paste.present(1);
+    await paste.idle();
+    expect(paste.control() !== null).toBe(false);
+  } finally {
+    paste.dispose();
+  }
+});
+
+test('a refused or cancelled paste leaves no Paste Options control, an applied one shows it', async () => {
+  for (const status of ['applied', 'refused', 'cancelled'] as const) {
+    const paste = mountPasteOptions();
+    const end = { story: 'body', paraId: 'a', offset: 4 };
+    try {
+      act(() => paste.record(boldFragment()));
+      await paste.settle(0, status, { anchor: end, focus: end });
+      paste.present(1);
+      await paste.idle();
+      expect(`${status}: ${paste.control() !== null}`).toBe(`${status}: ${status === 'applied'}`);
+    } finally {
+      paste.dispose();
+    }
+  }
+});
+
+test('a later command presented in the same frame as the paste leaves no Paste Options control', async () => {
+  const paste = mountPasteOptions();
+  const later = { story: 'body', paraId: 'b', offset: 9 };
+  try {
+    act(() => paste.record(boldFragment()));
+    paste.input.session.submit('navigate', { unit: 'document-boundary', direction: 'forward', extend: false });
+    expect(paste.input.submitted).toEqual(['pasteFragment', 'navigate']);
+    await act(async () => {
+      paste.input.entries[0]!.settle({ status: 'applied', seq: 1 });
+      paste.input.entries[1]!.settle({ status: 'applied', seq: 2 }, { anchor: later, focus: later });
+    });
+    paste.present(1);
+    await paste.idle();
+    expect(paste.control() !== null).toBe(false);
+  } finally {
+    paste.dispose();
+  }
+});
+
+test('the paste options control follows a window scroll only while it is shown', async () => {
+  const paste = mountPasteOptions();
+  const control = paste.control;
+  try {
+    pasteWith(paste.input, clipboardFragmentHtml(boldFragment()), 'Bold');
+    expect(paste.input.submitted).toEqual(['pasteFragment']);
+    const end = { story: 'body', paraId: 'a', offset: 4 };
+    await paste.settle(0, 'applied', { anchor: end, focus: end });
+    paste.present(1);
+    await waitFor(() => expect(control() !== null).toBe(true));
+    expect(control()!.style.left).toBe('86px');
+    expect(control()!.style.top).toBe('316px');
+    act(() => { paste.moveHost(20); fireEvent.scroll(window); });
+    expect(control()!.style.top).toBe('236px');
+    act(() => { fireEvent.pointerDown(document.body); });
+    expect(control() !== null).toBe(false);
+    paste.measured.count = 0;
+    act(() => { paste.moveHost(60); fireEvent.scroll(window); });
+    expect(paste.measured.count).toBe(0);
+    expect(control() !== null).toBe(false);
+  } finally {
+    paste.dispose();
+  }
+});
+
+function mountPasteChoices() {
+  const host = document.createElement('div');
+  host.style.position = 'relative';
+  document.body.appendChild(host);
+  host.getBoundingClientRect = () => ({ x: 0, y: 100, top: 100, bottom: 700, left: 0, right: 600, width: 600, height: 600, toJSON() {} });
+  const replaced: Array<{ fragment: DocxClipboardFragment; selection: DocxCommandSelection; variant: 'plain' | 'merge' | undefined }> = [];
+  const recorder: { current: PeerlessPasteRecorder | null } = { current: null };
+  const admitted: { current: PeerlessInputAdmission | null } = { current: null };
+  const callbacks: Pick<PeerlessInputProps, 'caretHostRef' | 'pasteRecorder' | 'onPasteFragment' | 'onReplacePasteFragment'> = {
+    caretHostRef: { current: host },
+    pasteRecorder: recorder,
+    onPasteFragment: (fragment) => {
+      recorder.current?.(fragment, submitPasteFragment(admitted.current!, fragment, { source: 'paste', fence: true }, () => {}));
+      return true;
+    },
+    onReplacePasteFragment: (fragment, selection, variant) => {
+      replaced.push({ fragment, selection, variant });
+      return false;
+    },
+  };
+  const input = mount(false, callbacks);
+  admitted.current = input.admission;
+  const geometry: PeerlessFrameGeometry = {
+    identity: input.snapshot.identity, coversThroughSeq: 0, frameEpoch: 1, layoutRevision: 1,
+    pages: [], caret: { x: 80, y: 200, width: 1, height: 12 }, selectionRects: [],
+  };
+  act(() => { input.viewStore.installFrameGeometry(geometry); input.refresh(); });
+  let frameEpoch = 1;
+  const present = (version: number) => act(() => {
+    frameEpoch += 1;
+    input.snapshot.version = version;
+    input.viewStore.installFrameGeometry({ ...geometry, coversThroughSeq: input.snapshot.throughSeq, frameEpoch });
+    input.refresh();
+  });
+  const settleLast = (status: TicketOutcome['status'], selection: DocxCommandSelection) => act(async () => {
+    const index = input.entries.length - 1;
+    input.entries[index]!.settle({ status, seq: index + 1 }, selection);
+  });
+  const end = { story: 'body', paraId: 'a', offset: 4 };
+  const control = () => host.querySelector<HTMLElement>('[data-paste-options]');
+  return {
+    input, replaced, end, control, present, settleLast,
+    async offer() {
+      pasteWith(input, clipboardFragmentHtml(boldFragment()), 'Bold');
+      expect(input.submitted.at(-1)).toBe('pasteFragment');
+      await settleLast('applied', { anchor: end, focus: end });
+      present(input.snapshot.version + 1);
+      await waitFor(() => expect(control() !== null).toBe(true));
+    },
+    dispose() {
+      input.unmount();
+      input.admission.dispose();
+      host.remove();
+    },
+  };
+}
+
+test('Backspace, undo and redo after a paste each remove the Paste Options control', async () => {
+  const edits: Array<[string, (textarea: HTMLTextAreaElement) => void, string]> = [
+    ['Backspace', (textarea) => {
+      fireEvent.keyDown(textarea, { key: 'Backspace' });
+      beforeinput(textarea, 'deleteContentBackward');
+      fireEvent.keyUp(textarea, { key: 'Backspace' });
+    }, 'deleteBackward'],
+    ['undo', (textarea) => {
+      fireEvent.keyDown(textarea, { key: 'z', ctrlKey: true });
+      fireEvent.keyUp(textarea, { key: 'z' });
+    }, 'undo'],
+    ['redo', (textarea) => {
+      fireEvent.keyDown(textarea, { key: 'y', ctrlKey: true });
+      fireEvent.keyUp(textarea, { key: 'y' });
+    }, 'redo'],
+  ];
+  for (const [name, edit, kind] of edits) {
+    const choices = mountPasteChoices();
+    try {
+      await choices.offer();
+      edit(choices.input.textarea);
+      expect(`${name}: ${choices.input.submitted.at(-1)} ${choices.control() !== null}`).toBe(`${name}: ${kind} false`);
+    } finally {
+      choices.dispose();
+    }
+  }
+});
+
+test('a formatting command that changes the document after the paste removes the Paste Options control', async () => {
+  const choices = mountPasteChoices();
+  try {
+    await choices.offer();
+    act(() => { submitFormattingIntent(choices.input.admission, { kind: 'toggleMark', payload: { mark: { type: 'bold' } } }); });
+    expect(choices.input.submitted.at(-1)).toBe('toggleMark');
+    await choices.settleLast('applied', { anchor: choices.end, focus: choices.end });
+    choices.present(choices.input.snapshot.version + 1);
+    expect(choices.control() !== null).toBe(false);
+  } finally {
+    choices.dispose();
+  }
+});
+
+test('a remote change that moves the document version removes the Paste Options control', async () => {
+  const choices = mountPasteChoices();
+  try {
+    await choices.offer();
+    const submitted = choices.input.submitted.length;
+    choices.present(choices.input.snapshot.version + 1);
+    expect(choices.input.submitted).toHaveLength(submitted);
+    expect(choices.control() !== null).toBe(false);
+  } finally {
+    choices.dispose();
+  }
+});
+
+test('a restarted worker at the same document version and caret removes the Paste Options control', async () => {
+  const choices = mountPasteChoices();
+  try {
+    await choices.offer();
+    const submitted = choices.input.submitted.length;
+    choices.input.snapshot.identity = { ...choices.input.snapshot.identity, incarnation: choices.input.snapshot.identity.incarnation + 1 };
+    choices.present(choices.input.snapshot.version);
+    expect(choices.input.snapshot.workerSelection?.focus).toEqual(choices.end);
+    expect(choices.input.submitted).toHaveLength(submitted);
+    expect(choices.control() !== null).toBe(false);
+  } finally {
+    choices.dispose();
+  }
+});
+
+test('switching the editor to read-only, as viewing mode does, removes the Paste Options control', async () => {
+  const choices = mountPasteChoices();
+  try {
+    await choices.offer();
+    act(() => { choices.input.admission.setReadOnly(true); });
+    expect(choices.control() !== null).toBe(false);
+  } finally {
+    choices.dispose();
+  }
+});
+
+test('a choice made after the selection moved away from the paste at the same document version replaces nothing', async () => {
+  const choices = mountPasteChoices();
+  const moved = { story: 'body', paraId: 'b', offset: 9 };
+  try {
+    await choices.offer();
+    fireEvent.click(choices.control()!.querySelector('button')!);
+    await waitFor(() => expect(document.activeElement?.closest('[data-paste-options]') != null).toBe(true));
+    choices.input.session.submit('navigate', { unit: 'document-boundary', direction: 'forward', extend: false });
+    await choices.settleLast('applied', { anchor: moved, focus: moved });
+    choices.present(choices.input.snapshot.version);
+    expect(choices.control() !== null).toBe(true);
+    const textOnly = Array.from(choices.control()!.querySelectorAll('[role="menuitemradio"]'))
+      .find((item) => item.textContent?.includes('Keep Text Only'));
+    expect(textOnly !== undefined).toBe(true);
+    fireEvent.click(textOnly!);
+    expect(choices.replaced).toEqual([]);
+  } finally {
+    choices.dispose();
+  }
+});
+
+const PASTE_OPTION_LABELS = ['Keep Source Formatting', 'Merge Formatting', 'Keep Text Only'] as const;
+
+function cellTableFragment(cellTexts: readonly string[]): DocxTableFragment {
+  const rows: DocxTableFragment['rows'] = [];
+  for (const text of cellTexts) rows.push({ trPr: {}, cells: [{ tcPr: {}, content: [{ kind: 'text', text }, { kind: 'pilcrow' }] }] });
+  return { tblPr: { width: 9360, widthType: 'dxa' }, grid: [], rows };
+}
+
+function mountPasteMenu(options: { pasteOptions?: boolean; replace: 'refuse' | 'submit' }) {
+  const host = document.createElement('div');
+  host.style.position = 'relative';
+  document.body.appendChild(host);
+  host.getBoundingClientRect = () => ({ x: 0, y: 100, top: 100, bottom: 700, left: 0, right: 600, width: 600, height: 600, toJSON() {} });
+  const replaced: Array<{ fragment: DocxClipboardFragment; variant: 'plain' | 'merge' | undefined }> = [];
+  const recorder: { current: PeerlessPasteRecorder | null } = { current: null };
+  const admitted: { current: PeerlessInputAdmission | null } = { current: null };
+  const submit = (fragment: DocxClipboardFragment) =>
+    submitPasteFragment(admitted.current!, fragment, { source: 'paste', fence: true }, () => {});
+  const callbacks: Pick<PeerlessInputProps, 'caretHostRef' | 'pasteRecorder' | 'pasteOptions' | 'onPasteFragment' | 'onReplacePasteFragment'> = {
+    caretHostRef: { current: host },
+    pasteRecorder: recorder,
+    ...(options.pasteOptions === undefined ? {} : { pasteOptions: options.pasteOptions }),
+    onPasteFragment: (fragment) => {
+      recorder.current?.(fragment, submit(fragment));
+      return true;
+    },
+    onReplacePasteFragment: (fragment, selection, variant) => {
+      replaced.push({ fragment, variant });
+      if (options.replace === 'refuse') return false;
+      return submitInputIntent(admitted.current!, { kind: 'replacePasteFragment', payload: {
+        fragment, selection, ...(variant === 'plain' ? { plain: true as const } : variant === 'merge' ? { merge: true as const } : {}),
+      } }, { source: 'paste', fence: true });
+    },
+  };
+  const input = mount(false, callbacks);
+  admitted.current = input.admission;
+  const geometry: PeerlessFrameGeometry = {
+    identity: input.snapshot.identity, coversThroughSeq: 0, frameEpoch: 1, layoutRevision: 1,
+    pages: [], caret: { x: 80, y: 200, width: 1, height: 12 }, selectionRects: [],
+  };
+  act(() => { input.viewStore.installFrameGeometry(geometry); input.refresh(); });
+  let frameEpoch = 1;
+  const present = (version: number) => act(() => {
+    frameEpoch += 1;
+    input.snapshot.version = version;
+    input.viewStore.installFrameGeometry({ ...geometry, coversThroughSeq: input.snapshot.throughSeq, frameEpoch });
+    input.refresh();
+  });
+  const end = { story: 'body', paraId: 'a', offset: 4 };
+  const control = () => host.querySelector<HTMLElement>('[data-paste-options]');
+  const menuItems = () => Array.from(control()?.querySelectorAll('[role="menuitemradio"]') ?? []);
+  const label = (item: Element) => PASTE_OPTION_LABELS.find((name) => item.textContent?.includes(name));
+  return {
+    input, replaced, control,
+    async offer(fragment: DocxClipboardFragment, plain: string, route: 'keyboard' | 'context menu') {
+      if (route === 'keyboard') pasteWith(input, clipboardFragmentHtml(fragment), plain);
+      else act(() => { recorder.current?.(fragment, submit(fragment)); });
+      expect(input.submitted.at(-1)).toBe('pasteFragment');
+      await act(async () => {
+        const index = input.entries.length - 1;
+        input.entries[index]!.settle({ status: 'applied', seq: index + 1 }, { anchor: end, focus: end });
+      });
+      present(input.snapshot.version + 1);
+      await waitFor(() => expect(control() !== null).toBe(true));
+    },
+    present,
+    openMenu() { fireEvent.click(control()!.querySelector('button')!); },
+    choose(name: typeof PASTE_OPTION_LABELS[number]) {
+      const item = menuItems().find((candidate) => label(candidate) === name);
+      expect(`${name}: ${item !== undefined}`).toBe(`${name}: true`);
+      fireEvent.click(item!);
+    },
+    offered: () => menuItems().map(label),
+    checked: () => menuItems().filter((item) => item.getAttribute('aria-checked') === 'true').map(label),
+    menuOpen: () => document.querySelector('[role="menu"]') !== null,
+    idle: () => act(() => new Promise<void>((resolve) => { setTimeout(resolve, 50); })),
+    dispose() {
+      input.unmount();
+      input.admission.dispose();
+      host.remove();
+    },
+  };
+}
+
+test('Ctrl tapped in a field outside the editor leaves the Paste Options menu closed and focus in that field', async () => {
+  const choices = mountPasteMenu({ replace: 'refuse' });
+  const outside = document.createElement('input');
+  document.body.appendChild(outside);
+  try {
+    await choices.offer(boldFragment(), 'Bold', 'keyboard');
+    act(() => { outside.focus(); });
+    expect(document.activeElement === outside).toBe(true);
+    fireEvent.keyDown(outside, { key: 'Control' });
+    fireEvent.keyUp(outside, { key: 'Control' });
+    expect(choices.menuOpen()).toBe(false);
+    expect(document.activeElement === outside).toBe(true);
+    expect(choices.control() !== null).toBe(true);
+  } finally {
+    outside.remove();
+    choices.dispose();
+  }
+});
+
+test('Ctrl tapped in the editor input opens the Paste Options menu', async () => {
+  const choices = mountPasteMenu({ replace: 'refuse' });
+  try {
+    await choices.offer(boldFragment(), 'Bold', 'keyboard');
+    act(() => { choices.input.textarea.focus(); });
+    fireEvent.keyDown(choices.input.textarea, { key: 'Control' });
+    fireEvent.keyUp(choices.input.textarea, { key: 'Control' });
+    expect(choices.menuOpen()).toBe(true);
+    expect(choices.offered()).toEqual([...PASTE_OPTION_LABELS]);
+  } finally {
+    choices.dispose();
+  }
+});
+
+for (const route of ['keyboard', 'context menu'] as const) {
+  test(`keep text only after a ${route} paste replaces with the text of the pasted fragment, not the clipboard plain text`, async () => {
+    const choices = mountPasteMenu({ replace: 'refuse' });
+    const fragment: DocxClipboardFragment = { paragraphs: [{ tables: [cellTableFragment(['new'])], text: '' }] };
+    try {
+      await choices.offer(fragment, 'oldnew', route);
+      choices.openMenu();
+      choices.choose('Keep Text Only');
+      expect(choices.replaced.map(({ fragment: replacement, variant }) => ({ variant, text: replacement.paragraphs.map(({ text }) => text) })))
+        .toEqual([{ variant: 'plain', text: ['new'] }]);
+    } finally {
+      choices.dispose();
+    }
+  });
+
+  test(`keep text only after a ${route} paste of a table keeps the leading spaces of a cell`, async () => {
+    const choices = mountPasteMenu({ replace: 'refuse' });
+    const fragment: DocxClipboardFragment = { paragraphs: [{ tables: [cellTableFragment(['  new'])], text: '' }] };
+    try {
+      await choices.offer(fragment, '  new', route);
+      choices.openMenu();
+      choices.choose('Keep Text Only');
+      expect(choices.replaced.map(({ fragment: replacement, variant }) => ({ variant, text: replacement.paragraphs.map(({ text }) => text) })))
+        .toEqual([{ variant: 'plain', text: ['  new'] }]);
+    } finally {
+      choices.dispose();
+    }
+  });
+}
+
+test('a paste whose text-only form is over the worker paragraph limit offers keep source and merge but not keep text only', async () => {
+  const choices = mountPasteMenu({ replace: 'refuse' });
+  const fragment: DocxClipboardFragment = { paragraphs: [0, 1].map((table) => ({
+    tables: [cellTableFragment(Array.from({ length: 501 }, (_, row) => `table ${table} row ${row}`))], text: '',
+  })) };
+  try {
+    expect(fragment.paragraphs).toHaveLength(2);
+    expect(plainTextClipboardFragment(clipboardFragmentPlainText(fragment)).paragraphs.length).toBeGreaterThan(1000);
+    await choices.offer(fragment, clipboardFragmentPlainText(fragment), 'context menu');
+    choices.openMenu();
+    expect(choices.offered()).toEqual(['Keep Source Formatting', 'Merge Formatting']);
+  } finally {
+    choices.dispose();
+  }
+});
+
+const PASTE_END = { story: 'body', paraId: 'a', offset: 4 };
+const FONT_ENVIRONMENT = { faces: [], chains: {}, families: ['Arial'] };
+
+/** The command the editor sends on its own after a paste that needs another font face. */
+function sendFontEnvironment(input: { admission: PeerlessInputAdmission }) {
+  return admitIntent(input.admission, { kind: 'setFontEnvironment', payload: FONT_ENVIRONMENT }, { fence: true });
+}
+
+function answer(input: ReturnType<typeof mount>, index: number, status: TicketOutcome['status'], selection?: DocxCommandSelection) {
+  return act(async () => { input.entries[index]!.settle({ status, seq: index + 1 }, selection); });
+}
+
+test('a Paste Options choice made while a command of the editor\'s own is unanswered is applied once it is answered', async () => {
+  const menu = mountPasteMenu({ replace: 'submit' });
+  try {
+    await menu.offer(boldFragment(), 'Bold', 'context menu');
+    sendFontEnvironment(menu.input);
+    menu.openMenu();
+    menu.choose('Keep Text Only');
+    expect(menu.control() !== null).toBe(true);
+    expect(menu.input.submitted).toEqual(['pasteFragment', 'setFontEnvironment']);
+    await answer(menu.input, 1, 'noop');
+    await waitFor(() => expect(menu.input.submitted).toEqual(['pasteFragment', 'setFontEnvironment', 'replacePasteFragment']));
+    expect(menu.replaced.map(({ variant }) => variant)).toEqual(['plain']);
+    expect(menu.control() !== null).toBe(true);
+    menu.openMenu();
+    expect(menu.checked()).toEqual(['Keep Text Only']);
+  } finally {
+    menu.dispose();
+  }
+});
+
+test('a Paste Options choice made while the choice before it is being applied is applied after it', async () => {
+  const menu = mountPasteMenu({ replace: 'submit' });
+  try {
+    await menu.offer(boldFragment(), 'Bold', 'context menu');
+    menu.openMenu();
+    menu.choose('Merge Formatting');
+    menu.openMenu();
+    menu.choose('Keep Text Only');
+    expect(menu.input.submitted).toEqual(['pasteFragment', 'replacePasteFragment']);
+    await answer(menu.input, 1, 'applied', { anchor: PASTE_END, focus: PASTE_END });
+    menu.present(menu.input.snapshot.version + 1);
+    await waitFor(() => expect(menu.input.submitted).toEqual(['pasteFragment', 'replacePasteFragment', 'replacePasteFragment']));
+    expect(menu.replaced.map(({ variant }) => variant)).toEqual(['merge', 'plain']);
+    expect(menu.control() !== null).toBe(true);
+  } finally {
+    menu.dispose();
+  }
+});
+
+test('of two Paste Options choices made while a command is unanswered only the later one is applied', async () => {
+  const menu = mountPasteMenu({ replace: 'submit' });
+  try {
+    await menu.offer(boldFragment(), 'Bold', 'context menu');
+    sendFontEnvironment(menu.input);
+    menu.openMenu();
+    menu.choose('Merge Formatting');
+    expect(menu.control() !== null).toBe(true);
+    menu.openMenu();
+    menu.choose('Keep Text Only');
+    await answer(menu.input, 1, 'noop');
+    await waitFor(() => expect(menu.input.submitted).toEqual(['pasteFragment', 'setFontEnvironment', 'replacePasteFragment']));
+    await menu.idle();
+    expect(menu.input.submitted).toEqual(['pasteFragment', 'setFontEnvironment', 'replacePasteFragment']);
+    expect(menu.replaced.map(({ variant }) => variant)).toEqual(['plain']);
+  } finally {
+    menu.dispose();
+  }
+});
+
+test('a waiting Paste Options choice is dropped with the control when the caret leaves the paste', async () => {
+  const menu = mountPasteMenu({ replace: 'submit' });
+  const moved = { story: 'body', paraId: 'b', offset: 9 };
+  try {
+    await menu.offer(boldFragment(), 'Bold', 'context menu');
+    sendFontEnvironment(menu.input);
+    menu.openMenu();
+    menu.choose('Keep Text Only');
+    menu.input.session.submit('navigate', { unit: 'document-boundary', direction: 'forward', extend: false });
+    await answer(menu.input, 2, 'applied', { anchor: moved, focus: moved });
+    menu.present(menu.input.snapshot.version);
+    await answer(menu.input, 1, 'noop');
+    await menu.idle();
+    expect(menu.control() !== null).toBe(false);
+    expect(menu.input.submitted).toEqual(['pasteFragment', 'setFontEnvironment', 'navigate']);
+    expect(menu.replaced).toEqual([]);
+  } finally {
+    menu.dispose();
+  }
+});
+
+test('a Paste Options choice waiting on a command that is never answered sends nothing and leaves the control as it was', async () => {
+  const menu = mountPasteMenu({ replace: 'submit' });
+  try {
+    await menu.offer(boldFragment(), 'Bold', 'context menu');
+    sendFontEnvironment(menu.input);
+    menu.openMenu();
+    menu.choose('Keep Text Only');
+    await menu.idle();
+    expect(menu.control() !== null).toBe(true);
+    expect(menu.input.submitted).toEqual(['pasteFragment', 'setFontEnvironment']);
+    expect(menu.replaced).toEqual([]);
+    menu.openMenu();
+    expect(menu.checked()).toEqual(['Keep Source Formatting']);
+  } finally {
+    menu.dispose();
+  }
+});
+
+test('the Paste Options control stays when a command of the editor\'s own was sent while a choice was being applied', async () => {
+  const menu = mountPasteMenu({ replace: 'submit' });
+  try {
+    await menu.offer(boldFragment(), 'Bold', 'context menu');
+    menu.openMenu();
+    menu.choose('Merge Formatting');
+    sendFontEnvironment(menu.input);
+    await answer(menu.input, 1, 'applied', { anchor: PASTE_END, focus: PASTE_END });
+    menu.present(menu.input.snapshot.version + 1);
+    expect(menu.control() !== null).toBe(true);
+    await answer(menu.input, 2, 'noop');
+    await menu.idle();
+    expect(menu.control() !== null).toBe(true);
+    menu.openMenu();
+    menu.choose('Keep Text Only');
+    expect(menu.input.submitted).toEqual(['pasteFragment', 'replacePasteFragment', 'setFontEnvironment', 'replacePasteFragment']);
+  } finally {
+    menu.dispose();
+  }
+});
+
+test('Paste Options appear when a command of the editor\'s own was sent behind the paste', async () => {
+  const paste = mountPasteOptions();
+  try {
+    act(() => paste.record(boldFragment()));
+    sendFontEnvironment(paste.input);
+    expect(paste.input.submitted).toEqual(['pasteFragment', 'setFontEnvironment']);
+    await paste.settle(0, 'applied', { anchor: PASTE_END, focus: PASTE_END });
+    paste.present(1);
+    await paste.settle(1, 'noop');
+    await waitFor(() => expect(paste.control() !== null).toBe(true));
+  } finally {
+    paste.dispose();
+  }
+});
+
+test('a waiting Paste Options choice does not spin on a command already answered while an earlier one is open', async () => {
+  const menu = mountPasteMenu({ replace: 'submit' });
+  try {
+    await menu.offer(boldFragment(), 'Bold', 'context menu');
+    sendFontEnvironment(menu.input);
+    sendFontEnvironment(menu.input);
+    menu.openMenu();
+    menu.choose('Keep Text Only');
+    await answer(menu.input, 2, 'noop');
+    await menu.idle();
+    expect(menu.control() !== null).toBe(true);
+    expect(menu.replaced).toEqual([]);
+    await answer(menu.input, 1, 'noop');
+    menu.present(menu.input.snapshot.version);
+    await waitFor(() => expect(menu.replaced.map(({ variant }) => variant)).toEqual(['plain']));
+  } finally {
+    menu.dispose();
+  }
+});
+
+test('a waiting Paste Options choice is not applied to a paste made after it', async () => {
+  const menu = mountPasteMenu({ replace: 'submit' });
+  try {
+    await menu.offer(boldFragment(), 'Bold', 'context menu');
+    sendFontEnvironment(menu.input);
+    menu.openMenu();
+    menu.choose('Keep Text Only');
+    pasteWith(menu.input, clipboardFragmentHtml(boldFragment()), 'Bold');
+    expect(menu.input.submitted).toEqual(['pasteFragment', 'setFontEnvironment', 'pasteFragment']);
+    await answer(menu.input, 1, 'noop');
+    await answer(menu.input, 2, 'applied', { anchor: PASTE_END, focus: PASTE_END });
+    menu.present(menu.input.snapshot.version + 1);
+    await waitFor(() => expect(menu.control() !== null).toBe(true));
+    await menu.idle();
+    expect(menu.input.submitted).toEqual(['pasteFragment', 'setFontEnvironment', 'pasteFragment']);
+    expect(menu.replaced).toEqual([]);
+  } finally {
+    menu.dispose();
+  }
+});
+
+test('a Paste Options choice waiting behind the choice before it is applied when a command of the editor\'s own passes in between', async () => {
+  const menu = mountPasteMenu({ replace: 'submit' });
+  try {
+    await menu.offer(boldFragment(), 'Bold', 'context menu');
+    menu.openMenu();
+    menu.choose('Merge Formatting');
+    sendFontEnvironment(menu.input);
+    menu.openMenu();
+    menu.choose('Keep Text Only');
+    await answer(menu.input, 1, 'applied', { anchor: PASTE_END, focus: PASTE_END });
+    menu.present(menu.input.snapshot.version + 1);
+    expect(menu.replaced.map(({ variant }) => variant)).toEqual(['merge']);
+    await answer(menu.input, 2, 'noop');
+    await waitFor(() => expect(menu.replaced.map(({ variant }) => variant)).toEqual(['merge', 'plain']));
+    expect(menu.control() !== null).toBe(true);
+  } finally {
+    menu.dispose();
+  }
+});
+
+test('a waiting Paste Options choice is dropped with the control when the document version moves', async () => {
+  const menu = mountPasteMenu({ replace: 'submit' });
+  try {
+    await menu.offer(boldFragment(), 'Bold', 'context menu');
+    sendFontEnvironment(menu.input);
+    menu.openMenu();
+    menu.choose('Keep Text Only');
+    menu.present(menu.input.snapshot.version + 1);
+    await answer(menu.input, 1, 'noop');
+    await menu.idle();
+    expect(menu.control() !== null).toBe(false);
+    expect(menu.replaced).toEqual([]);
+  } finally {
+    menu.dispose();
+  }
+});
+
+test('a Paste Options choice at a document version that is no longer the paste\'s is dismissed at once, also while a command is unanswered', async () => {
+  const menu = mountPasteMenu({ replace: 'submit' });
+  try {
+    await menu.offer(boldFragment(), 'Bold', 'context menu');
+    sendFontEnvironment(menu.input);
+    menu.openMenu();
+    menu.input.snapshot.version += 1;
+    menu.choose('Keep Text Only');
+    await waitFor(() => expect(menu.control() !== null).toBe(false));
+    await answer(menu.input, 1, 'noop');
+    await menu.idle();
+    expect(menu.replaced).toEqual([]);
+  } finally {
+    menu.dispose();
+  }
+});
+
+test('a waiting Paste Options choice waits once for an answered command while a composition holds another back, and is applied when both are over', async () => {
+  const menu = mountPasteMenu({ replace: 'submit' });
+  try {
+    await menu.offer(boldFragment(), 'Bold', 'context menu');
+    sendFontEnvironment(menu.input);
+    const awaited = menu.input.entries[1]!.ticket.ack;
+    let subscriptions = 0;
+    const then = awaited.then.bind(awaited) as unknown as (...handlers: unknown[]) => Promise<unknown>;
+    (awaited as { then: unknown }).then = (...handlers: unknown[]) => {
+      subscriptions += 1;
+      return then(...handlers);
+    };
+    const composition = menu.input.admission.reserveComposition();
+    expect(sendFontEnvironment(menu.input).status).toBe('held');
+    menu.openMenu();
+    menu.choose('Keep Text Only');
+    const armed = subscriptions;
+    expect(armed).toBeGreaterThanOrEqual(1);
+    await answer(menu.input, 1, 'noop');
+    await menu.idle();
+    expect(subscriptions).toBe(armed);
+    expect(menu.input.admission.getSnapshot().originalUnackedIntents).toBe(1);
+    expect(menu.control() !== null).toBe(true);
+    expect(menu.replaced).toEqual([]);
+    await act(async () => { menu.input.admission.settleComposition(composition.slot, null); });
+    expect(menu.input.submitted).toEqual(['pasteFragment', 'setFontEnvironment', 'setFontEnvironment']);
+    expect(menu.replaced).toEqual([]);
+    await answer(menu.input, 2, 'noop');
+    await waitFor(() => expect(menu.replaced.map(({ variant }) => variant)).toEqual(['plain']));
+    expect(subscriptions).toBe(armed);
+    expect(menu.control() !== null).toBe(true);
+  } finally {
+    menu.dispose();
+  }
+});
+
+test('with paste options off a keyboard paste of an accepted fragment never reads the clipboard plain text', () => {
+  const choices = mountPasteMenu({ pasteOptions: false, replace: 'refuse' });
+  const reads: string[] = [];
+  const html = clipboardFragmentHtml(boldFragment());
+  try {
+    fireEvent.paste(choices.input.textarea, { clipboardData: { getData: (type: string) => {
+      reads.push(type);
+      return type === 'text/html' ? html : 'Bold';
+    } } });
+    expect(choices.input.submitted).toEqual(['pasteFragment']);
+    expect(reads).toEqual(['text/html']);
+  } finally {
+    choices.dispose();
+  }
+});
+
+for (const hide of ['an outside click', 'a window resize'] as const) {
+  test(`after ${hide} hides the Paste Options control a frame at the same version and caret neither shows it nor lets a choice through`, async () => {
+    const choices = mountPasteMenu({ replace: 'refuse' });
+    try {
+      await choices.offer(boldFragment(), 'Bold', 'keyboard');
+      if (hide === 'an outside click') act(() => { fireEvent.pointerDown(document.body); });
+      else act(() => { fireEvent(window, new Event('resize')); });
+      expect(choices.control() !== null).toBe(false);
+      choices.present(choices.input.snapshot.version);
+      await choices.idle();
+      expect(choices.control() !== null).toBe(false);
+      act(() => { choices.input.textarea.focus(); });
+      fireEvent.keyDown(choices.input.textarea, { key: 'Control' });
+      fireEvent.keyUp(choices.input.textarea, { key: 'Control' });
+      expect(choices.menuOpen()).toBe(false);
+      expect(choices.replaced).toEqual([]);
+    } finally {
+      choices.dispose();
+    }
+  });
+}
+
+test('a second choice made while the first replacement is pending leaves the first choice checked', async () => {
+  const choices = mountPasteMenu({ replace: 'submit' });
+  try {
+    await choices.offer(boldFragment(), 'Bold', 'keyboard');
+    choices.openMenu();
+    choices.choose('Keep Text Only');
+    expect(choices.input.submitted.at(-1)).toBe('replacePasteFragment');
+    expect(choices.control() !== null).toBe(true);
+    choices.openMenu();
+    choices.choose('Merge Formatting');
+    expect(choices.replaced.map(({ variant }) => variant)).toEqual(['plain']);
+    expect(choices.input.submitted.filter((kind) => kind === 'replacePasteFragment')).toHaveLength(1);
+    choices.openMenu();
+    expect(choices.checked()).toEqual(['Keep Text Only']);
+  } finally {
+    choices.dispose();
+  }
+});
+
+function markRecovering(viewStore: PeerlessViewStore, during: () => void = () => {}) {
+  act(() => {
+    viewStore.setRecovering?.(true);
+    during();
+  });
+}
+
+test('a worker being reopened removes the Paste Options control', async () => {
+  const paste = mountPasteOptions();
+  const end = { story: 'body', paraId: 'a', offset: 4 };
+  try {
+    act(() => paste.record(boldFragment()));
+    await paste.settle(0, 'applied', { anchor: end, focus: end });
+    paste.present(1);
+    await waitFor(() => expect(paste.control() !== null).toBe(true));
+    markRecovering(paste.input.viewStore);
+    paste.present(1);
+    await paste.idle();
+    expect(paste.control() !== null).toBe(false);
+  } finally {
+    paste.dispose();
+  }
+});
+
+test('a choice clicked while the worker is being reopened submits nothing', async () => {
+  const choices = mountPasteMenu({ replace: 'submit' });
+  try {
+    await choices.offer(boldFragment(), 'Bold', 'keyboard');
+    choices.openMenu();
+    markRecovering(choices.input.viewStore, () => choices.choose('Keep Text Only'));
+    expect(choices.input.submitted.filter((kind) => kind === 'replacePasteFragment')).toEqual([]);
+    expect(choices.replaced).toEqual([]);
+  } finally {
+    choices.dispose();
+  }
+});
+
+test('a paste made while the worker is being reopened offers no Paste Options', async () => {
+  const paste = mountPasteOptions();
+  const end = { story: 'body', paraId: 'a', offset: 4 };
+  try {
+    markRecovering(paste.input.viewStore);
+    pasteWith(paste.input, clipboardFragmentHtml(boldFragment()), 'Bold');
+    expect(paste.input.submitted).toEqual(['pasteFragment']);
+    await paste.settle(0, 'applied', { anchor: end, focus: end });
+    paste.present(1);
+    await paste.idle();
+    expect(paste.control() !== null).toBe(false);
+  } finally {
+    paste.dispose();
+  }
+});
+
+test('Ctrl tapped in one editor\'s Paste Options control opens only that editor\'s menu', async () => {
+  const first = mountPasteMenu({ replace: 'refuse' });
+  const second = mountPasteMenu({ replace: 'refuse' });
+  try {
+    await first.offer(boldFragment(), 'Bold', 'keyboard');
+    await second.offer(boldFragment(), 'Bold', 'keyboard');
+    const button = second.control()!.querySelector('button')!;
+    act(() => { button.focus(); });
+    fireEvent.keyDown(button, { key: 'Control' });
+    fireEvent.keyUp(button, { key: 'Control' });
+    expect(second.offered()).toEqual([...PASTE_OPTION_LABELS]);
+    expect(first.offered()).toEqual([]);
+  } finally {
+    second.dispose();
+    first.dispose();
+  }
+});
+
+test('a pointer press in another editor\'s Paste Options control hides this editor\'s control', async () => {
+  const first = mountPasteMenu({ replace: 'refuse' });
+  const second = mountPasteMenu({ replace: 'refuse' });
+  try {
+    await first.offer(boldFragment(), 'Bold', 'keyboard');
+    await second.offer(boldFragment(), 'Bold', 'keyboard');
+    fireEvent.pointerDown(second.control()!.querySelector('button')!);
+    expect(first.control() !== null).toBe(false);
+    expect(second.control() !== null).toBe(true);
+  } finally {
+    second.dispose();
+    first.dispose();
+  }
+});
+
+test('a paste whose control was not yet shown shows none after viewing mode is entered and left', async () => {
+  const paste = mountPasteOptions();
+  const end = { story: 'body', paraId: 'a', offset: 4 };
+  try {
+    pasteWith(paste.input, clipboardFragmentHtml(boldFragment()), 'Bold');
+    expect(paste.input.submitted).toEqual(['pasteFragment']);
+    paste.input.snapshot.version = 1;
+    await paste.settle(0, 'applied', { anchor: end, focus: end });
+    await paste.idle();
+    expect(paste.control() !== null).toBe(false);
+    act(() => { paste.input.admission.setReadOnly(true); });
+    await paste.settle(1, 'applied');
+    act(() => { paste.input.admission.setReadOnly(false); });
+    await paste.settle(2, 'applied');
+    expect(paste.input.submitted).toEqual(['pasteFragment', 'setReadOnly', 'setReadOnly']);
+    paste.present(1);
+    await paste.idle();
+    expect(paste.control() !== null).toBe(false);
+  } finally {
+    paste.dispose();
   }
 });

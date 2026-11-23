@@ -265,7 +265,7 @@ async function cellValue(page: Page, xml: Record<string, string>) {
 }
 
 const slidePixels = (page: Page) => canvas(page, 'pptx').screenshot({
-  style: '[data-testid="pptx-text-edit-outline"], [data-testid="pptx-caret-clip"], [data-testid="pptx-shape-selection"] { visibility: hidden !important; }',
+  style: '[data-testid="pptx-text-edit-outline"], [data-testid="pptx-caret-clip"], [data-testid="pptx-shape-selection"], [data-pptx-resize] { visibility: hidden !important; }',
 });
 
 async function editRotateSave(page: Page, format: Format, info: TestInfo, double: boolean) {

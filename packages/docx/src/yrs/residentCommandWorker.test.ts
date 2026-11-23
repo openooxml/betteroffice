@@ -14,6 +14,7 @@ import { residentWorkerFactory } from './__fixtures__/residentWorker';
 import { ResidentEngineWorkerClient } from './residentEngineWorkerClient';
 import { DocxSourceWorkerClient } from './residentSourceWorkerClient';
 import { createYrsSession } from './index';
+import { createdListKey } from './listDefinitionSave';
 import { resolveReservations, type DocxReservation } from './reservations';
 import type { DocxCommandAck, DocxCommandEnvelope, DocxCommandFrame, DocxCommandInitRequest } from './residentCommandProtocol';
 import type { DocxEngineWorkerResponse } from './residentEngineWorkerProtocol';
@@ -2089,6 +2090,7 @@ test('toolbar_metadata_and_insertion_commands_are_versioned_worker_services', as
     const list = await client.edit(intent(2, 1, 'toggleList', { kind: 'numbered' }));
     expect(list.outcomes[0]?.status).toBe('applied');
     expect(list.editState?.toolbar?.paragraphProperties.numPr).toMatchObject({ numId: 2, ilvl: 0 });
+    expect(createdListKey(engine.paragraphs('body')[0]!.properties)).toBeDefined();
     const listedText = frameText(applyFrameDeltaOwned(null, decodeFrameDelta((await client.requestFullFrame()).frame!.payload.frame)));
     const table = await client.edit(intent(3, 2, 'insertTable', { selection: { anchor: point, focus: point }, rows: 2, columns: 2 }));
     expect(table.outcomes[0]?.status).toBe('applied');

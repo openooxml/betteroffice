@@ -382,6 +382,11 @@ export interface DocxCommandPayloads {
     pasteFragment: DocxSelectionIntent & {
         fragment: DocxClipboardFragment;
     };
+    replacePasteFragment: DocxSelectionIntent & {
+        fragment: DocxClipboardFragment;
+        plain?: true;
+        merge?: true;
+    };
     insertPageBreak: DocxSelectionIntent;
     insertSectionBreak: DocxSelectionIntent & {
         type: 'nextPage' | 'continuous' | 'oddPage' | 'evenPage';
@@ -763,6 +768,12 @@ export interface DocxWorkerCommandState {
     };
     /** What the last local typing command wrote, until the next local command that edits or selects. */
     typed?: DocxTypedText;
+    /** The range the latest paste replaced and the document version right after it; any later edit makes it stale. */
+    lastPaste?: {
+        range: YrsStoryRange;
+        version: string;
+        storedMarks: DocxStoredMarks | null;
+    } | null;
 }
 /** Sticky positions of the first and last characters one typing command wrote, and of the caret it left. */
 export interface DocxTypedText {

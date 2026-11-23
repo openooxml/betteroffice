@@ -5,6 +5,7 @@ import { nativeEnginePlugin } from '../../../scripts/native-engine';
 import { buildWorkerStubs } from '../../../scripts/worker-stub';
 
 const dist = '../dist';
+const external = ['node:*', '@betteroffice/fonts', '@betteroffice/fonts-cjk', '@betteroffice/fonts-intl', '@betteroffice/fonts-latin', '#session-worker'];
 
 export default defineConfig([
   {
@@ -63,7 +64,7 @@ export default defineConfig([
     treeshake: true,
     minify: true,
     injectStyle: false,
-    external: ['@betteroffice/fonts', '@betteroffice/fonts-cjk', '@betteroffice/fonts-intl', '@betteroffice/fonts-latin', '#session-worker'],
+    external,
     noExternal: ['@betteroffice/fonts/remote'],
     esbuildPlugins: [nativeEnginePlugin('docx')],
     esbuildOptions(options) {
@@ -71,7 +72,7 @@ export default defineConfig([
     },
     onSuccess: async () => {
       await writeFile('../dist/browser.js', 'throw new Error("use @betteroffice/docx in browsers");\n');
-      await buildWorkerStubs('docx', dist);
+      await buildWorkerStubs('docx', dist, { plugins: [nativeEnginePlugin('docx')], external: [...external, '@betteroffice/fonts/*'] });
       await writeFile('../dist/docxWorker.node.mjs', "import './yrs/docxWorker.node.mjs';\n");
     },
   },

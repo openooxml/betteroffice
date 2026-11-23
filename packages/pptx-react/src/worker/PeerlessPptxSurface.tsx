@@ -24,6 +24,7 @@ import { PluginDock, useDockArea } from '../plugins/PluginPanels';
 import { PluginOverlays } from '../plugins/PluginOverlays';
 import { usePeerlessPluginHost } from './usePeerlessPluginHost';
 import { PeerlessSlideStrip } from './PeerlessSlideStrip';
+import { invalidateCommandFrameCanvas } from './commandFrameRasters';
 import { PeerlessNotes } from './PeerlessNotes';
 import { PeerlessRecovery } from './PeerlessRecovery';
 import { PresentationFailure } from '../components/PresentationFailure';
@@ -45,9 +46,11 @@ import {
 import { usePeerlessPresentation, type PeerlessPresentation } from './usePeerlessPresentation';
 import { createPeerlessEditorApi, notifyingSaveApi, type PptxAsyncEditorApi } from './createPeerlessEditorApi';
 import { usePeerlessTextSelection } from './usePeerlessTextSelection';
-import { PeerlessShapeOverlay } from './PeerlessShapeOverlay';
+import { PeerlessResizeHandles, PeerlessShapeOverlay } from './PeerlessShapeOverlay';
 import { usePeerlessShapeGestures, type PeerlessShapePreviewStore } from './usePeerlessShapeGestures';
 import { usePeerlessContextMenu } from './usePeerlessContextMenu';
+import { PeerlessShapeResizePreview } from './PeerlessShapeResizePreview';
+import { usePptxPinchZoom } from '../usePptxPinchZoom';
 
 function useStageFit(stage: RefObject<HTMLDivElement | null>, run: PeerlessPresentation | null,
   chrome: PeerlessPresentation | null,
@@ -97,22 +100,30 @@ function useStageFit(stage: RefObject<HTMLDivElement | null>, run: PeerlessPrese
     return value !== null && owner.current === run && value.run === run && run.current && Boolean(value.token.scale) &&
       value.token.generation === token.generation;
   }, []);
-  return { previewFit, current };
+  return { fit, previewFit, current };
 }
 
 function Overlays({ run, commands, inputRef, preview, insertion, editor, onError }: { run: PeerlessPresentation; commands: PptxCommandStore; inputRef: RefObject<HTMLTextAreaElement | null>; preview: PeerlessShapePreviewStore; insertion: ShapeRect | null; editor: RefObject<HTMLDivElement | null>; onError(error: Error): void }) {
   const { t } = useTranslation();
   const snapshot = useSyncExternalStore(run.subscribeVisual, run.getVisualSnapshot, run.getVisualSnapshot);
+  const isComposing = () => Boolean(run.store.getSnapshot().composition);
+  const composing = useSyncExternalStore(run.store.subscribePresentation, isComposing, isComposing);
   const geometry = useMemo(() => snapshot?.view.confirmed ? indexGeometry(snapshot.view.confirmed.displayList) : null,
     [snapshot?.view.confirmed]);
   if (!snapshot?.view.confirmed) return null;
   const { view, fit } = snapshot;
   const confirmed = view.confirmed!;
   const selected = view.selection;
-  const rectangles = selected && selected.kind !== 'object' && selected.slideId === confirmed.frame.slideId
-    ? geometry!.hits.filter(({ primitive }) => primitive.shapeId === selected.shapeId)
-      .map(({ primitive, transforms }) => transformedRect(transforms,
-        { x: primitive.x, y: primitive.y, width: primitive.w, height: primitive.h })) : [];
+  const editedEntries = selected && selected.kind !== 'object' && selected.slideId === confirmed.frame.slideId
+    ? geometry!.hits.filter(({ primitive }) => primitive.shapeId === selected.shapeId) : [];
+  const rectangles = editedEntries.map(({ primitive, transforms }) => transformedRect(transforms,
+    { x: primitive.x, y: primitive.y, width: primitive.w, height: primitive.h }));
+  const canResizeEdited = selected?.kind !== 'object' && selected?.canResize === true && editedEntries.some(({ transforms }) =>
+    transforms.length === 1 && transforms[0]?.shapeId === selected?.shapeId) &&
+    editedEntries.every(({ transforms }) => transforms.length === 1 && transforms.every(({ transform }) => {
+      const rotation = ((transform?.rotationDeg ?? 0) % 360 + 360) % 360;
+      return rotation === 0 && !transform?.flipH && !transform?.flipV;
+    }));
   const x = Math.min(...rectangles.map((rect) => rect.x));
   const y = Math.min(...rectangles.map((rect) => rect.y));
   const edited = insertion ?? (rectangles.length ? { x, y,
@@ -138,8 +149,12 @@ function Overlays({ run, commands, inputRef, preview, insertion, editor, onError
       transform: `scale(${fit.scale})`, transformOrigin: '0 0' }}>
       <PeerlessCaret store={run.visual} />
     </div>
+    <PeerlessShapeResizePreview run={run} preview={preview} scale={fit.scale} />
     {!insertion && view.selection?.kind === 'object' && <PeerlessShapeOverlay selection={view.selection} preview={preview}
-      scale={fit.scale} readOnly={view.editState.readOnly} />}
+      scale={fit.scale} readOnly={view.editState.readOnly || composing} />}
+    {!composing && !insertion && edited && selected && selected.kind !== 'object' &&
+      <PeerlessResizeHandles bounds={edited} scale={fit.scale}
+        readOnly={view.editState.readOnly} canResize={canResizeEdited} />}
     {edited && <span data-testid="pptx-text-edit-outline" aria-hidden="true" style={{
       position: 'absolute', zIndex: 3, pointerEvents: 'none', border: '2px dashed #6b7280',
       boxSizing: 'border-box', boxShadow: '0 0 0 1px rgba(255, 255, 255, 0.9)',
@@ -173,6 +188,7 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
     const ctx = surface.getContext('2d');
     ctx?.setTransform(1, 0, 0, 1, 0, 0);
     ctx?.clearRect(0, 0, surface.width, surface.height);
+    invalidateCommandFrameCanvas(surface);
   }, [empty]);
   const { toolbar, showToolbar } = props;
   const [zoom, setZoom] = useState<number | 'fit'>(() => initialPptxZoom(props.initialZoom));
@@ -183,7 +199,8 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
   }, [props.file]);
   const toolbarVisible = showToolbar !== false && toolbar !== null;
   const editorToolbar = toolbar !== undefined || !props.readOnly;
-  const { previewFit, current } = useStageFit(stage, pending ?? presentation, chrome, toolbar, toolbarVisible, zoom);
+  const { fit, previewFit, current } = useStageFit(stage, pending ?? presentation, chrome, toolbar, toolbarVisible, zoom);
+  usePptxPinchZoom(stage, canvas, fit?.scale ?? null, setZoom, props.file);
   const callbacks = useRef(props);
   callbacks.current = props;
   const api = useRef<PptxAsyncEditorApi | null>(null);

@@ -16,7 +16,7 @@ const input = { inputTime: 1, undoGroup: 'typing' };
 
 function selection(story: PptxStoryText, anchor = 0, focus = anchor): PresentationCommandSelection {
   return { slideId: story.slideId, shapeId: story.shapeId, storyId: story.storyId,
-    anchor, focus, affinity: 'downstream' };
+    anchor, focus, affinity: 'downstream', canResize: true };
 }
 
 async function deck(): Promise<Uint8Array> {

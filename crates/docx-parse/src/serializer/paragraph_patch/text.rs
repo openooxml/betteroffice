@@ -1273,7 +1273,7 @@ mod tests {
             false,
         ) {
             Ok(lowered) => lowered,
-            Err(_) => panic!("lowering failed"),
+            Err(failure) => return Err((failure.code, failure.detail)),
         };
         for (cell, unit) in lowered.cells.iter_mut().zip(flatten(&seed)) {
             cell.unit = unit;
@@ -1501,6 +1501,145 @@ mod tests {
             );
             assert_eq!(output.matches("<w:r ").count(), 2);
             assert!(output.contains(middle));
+        }
+    }
+
+    fn direction_source(open: &str, close: &str) -> String {
+        format!(
+            "<w:p>{}{open}{}{}{close}{}</w:p>",
+            run("1", "Before ", ""),
+            run("2", "two", ""),
+            run("3", " runs", ""),
+            run("4", " after", "")
+        )
+    }
+
+    fn shown(xml: &str) -> String {
+        let mut text = String::new();
+        let mut rest = xml;
+        while let Some(start) = rest.find('<') {
+            let Some(end) = rest[start..].find('>') else {
+                break;
+            };
+            let tag = &rest[start + 1..start + end];
+            rest = &rest[start + end + 1..];
+            let name = tag.split([' ', '/']).next().unwrap_or_default();
+            if matches!(name, "w:t" | "w:delText") && !tag.ends_with('/') {
+                text.push_str(&rest[..rest.find('<').unwrap_or(rest.len())]);
+            }
+        }
+        text
+    }
+
+    fn region<'a>(xml: &'a str, open: &str, close: &str) -> &'a str {
+        let start = xml.find(open).map_or(xml.len(), |at| at + open.len());
+        let rest = &xml[start..];
+        rest.find(close).map_or("", |end| &rest[..end])
+    }
+
+    fn rewritten(paragraph: &str) -> String {
+        let limits = crate::xml::ParseLimits::default();
+        let mut budget = crate::xml::ParseBudget::new(&limits);
+        let document =
+            crate::xml::parse_xml(paragraph.as_bytes(), "word/document.xml", &mut budget).unwrap();
+        let mut ids = crate::paragraph::HexIdAllocator::from_sha256(&"0".repeat(64)).unwrap();
+        let paragraph = crate::paragraph::parse_paragraph(
+            document.root().unwrap(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            "word/document.xml",
+            &mut budget,
+            &mut ids,
+            None,
+            false,
+            0,
+        )
+        .unwrap();
+        let determinism = crate::serializer::s10::SerializerDeterminism {
+            seed: "0".repeat(64),
+            now: "2000-01-01T00:00:00.000Z".to_owned(),
+        };
+        let mut context = crate::serializer::context::SerializerContext::new(&determinism).unwrap();
+        crate::serializer::paragraph::serialize_paragraph(&paragraph, &mut context).unwrap()
+    }
+
+    #[test]
+    fn text_edits_inside_a_direction_scope_keep_the_wrapper_bytes() {
+        for (open, close) in [
+            (r#"<w:dir w:val="rtl">"#, "</w:dir>"),
+            (r#"<w:bdo w:val="rtl">"#, "</w:bdo>"),
+            (
+                r#"<w:bdo w:val="ltr"><w:dir w:val="rtl">"#,
+                "</w:dir></w:bdo>",
+            ),
+            (
+                r#"<w:hyperlink w:anchor="kept"><w:dir w:val="rtl">"#,
+                "</w:dir></w:hyperlink>",
+            ),
+        ] {
+            let written = try_replace_with_run_edits(
+                &direction_source(open, close),
+                vec![text("Before two runs after", json!({}))],
+                &[(8, 9, "W", json!({}))],
+                Vec::new(),
+            );
+            assert!(written.is_ok(), "{open}: {written:?}");
+            let output = written.unwrap();
+            assert_eq!(output.matches(open).count(), 1, "{output}");
+            assert_eq!(output.matches(close).count(), 1, "{output}");
+            assert_eq!(shown(&output), "Before tWo runs after", "{output}");
+            let inner = shown(region(&output, open, close));
+            assert_eq!(inner, "tWo runs", "{output}");
+        }
+    }
+
+    #[test]
+    fn edits_across_a_direction_scope_edge_keep_the_scope_and_every_text() {
+        let (open, close) = (r#"<w:dir w:val="rtl">"#, "</w:dir>");
+        for (from, to, value, parts, edited) in [
+            (
+                5,
+                9,
+                "Y",
+                ["BeforY", "o", " runs", " after"],
+                "BeforYo runs after",
+            ),
+            (
+                12,
+                17,
+                "-",
+                ["Before ", "two", " r-", "fter"],
+                "Before two r-fter",
+            ),
+        ] {
+            let written = try_replace_with_run_edits(
+                &direction_source(open, close),
+                vec![text("Before two runs after", json!({}))],
+                &[(from, to, value, json!({}))],
+                Vec::new(),
+            );
+            assert_eq!(
+                written,
+                Err((
+                    PatchErrorCode::UnsupportedStructure,
+                    "hyperlink: text edit crosses a wrapper".to_owned()
+                )),
+                "{value}"
+            );
+            let output = rewritten(&format!(
+                "<w:p xmlns:w=\"{WORD}\">{}{open}{}{}{close}{}</w:p>",
+                run("1", parts[0], ""),
+                run("2", parts[1], ""),
+                run("3", parts[2], ""),
+                run("4", parts[3], "")
+            ));
+            assert_eq!(shown(&output), edited, "{output}");
+            assert_eq!(output.matches(open).count(), 1, "{output}");
+            let inner = shown(region(&output, open, close));
+            assert_eq!(inner, parts[1..3].concat(), "{output}");
         }
     }
 

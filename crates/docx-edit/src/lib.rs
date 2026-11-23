@@ -187,7 +187,7 @@ pub use raw::RawOp;
 pub use read_state::{RevisionInfo, SelectionContextInfo, TriState};
 pub use search::{TextSearchError, TextSearchMatch};
 pub use seed::{
-    OPAQUE_SEED_BUDGET_BYTES, StyleResolver, is_opaque_seed_budget_error,
+    OPAQUE_SEED_BUDGET_BYTES, StyleResolver, field_run_digest, is_opaque_seed_budget_error,
     opaque_seed_budget_exceeded, seed_docx_preview, seed_from_docx, seed_from_docx_with_generation,
 };
 // Used by betteroffice-docx; not part of the stable API.
@@ -213,6 +213,8 @@ pub mod wasm_memory;
 const STORIES: &str = "stories";
 const REMOVED_STORIES: &str = "removed_stories";
 const COMMENTS: &str = "comments";
+/// Kept empty inline elements of the source, each by a sticky anchor into its story.
+const RAW_INLINES: &str = "rawInlines";
 const PILCROW_KIND: &str = "pilcrow";
 const KIND_KEY: &str = "_kind";
 const PARA_ID: &str = "paraId";
@@ -547,6 +549,16 @@ pub struct ResolvedCommentAnchor {
     pub end: u32,
 }
 
+/// A kept empty inline element of the source where its anchor now sits: `offset` in story units,
+/// `ordinal` its order among the story's kept elements in the source.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedRawMark {
+    pub story: StoryId,
+    pub offset: u32,
+    pub ordinal: u32,
+    pub xml: String,
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum EditError {
     StoryExists(String),
@@ -877,6 +889,7 @@ impl EditingDoc {
         doc.get_or_insert_map(STORIES);
         doc.get_or_insert_map(REMOVED_STORIES);
         doc.get_or_insert_map(COMMENTS);
+        doc.get_or_insert_map(RAW_INLINES);
         doc.get_or_insert_map(part_metadata::PART_METADATA);
         doc.get_or_insert_map(shape_styles::SHAPE_STYLES);
         doc.get_or_insert_map(document_properties::DOCUMENT_PROPERTIES);
@@ -2005,6 +2018,52 @@ impl EditingDoc {
             .collect()
     }
 
+    /// Where each kept empty inline element of a live story sits now, by story, offset and source
+    /// order. A deletion across one leaves it at the cut; undo follows its anchor to the restored
+    /// content.
+    pub fn resolve_raw_marks(&self) -> Vec<ResolvedRawMark> {
+        let txn = self.doc.transact();
+        let Some(marks) = txn.get_map(RAW_INLINES) else {
+            return Vec::new();
+        };
+        let mut resolved: Vec<ResolvedRawMark> = marks
+            .iter(&txn)
+            .filter_map(|(_, value)| {
+                let Out::Any(Any::Map(mark)) = value else {
+                    return None;
+                };
+                let text = |key: &str| match mark.get(key) {
+                    Some(Any::String(value)) => Some(value.to_string()),
+                    _ => None,
+                };
+                let story = text("story")?;
+                let xml = text("xml")?;
+                let Some(Any::Buffer(at)) = mark.get("at") else {
+                    return None;
+                };
+                let Some(Any::Number(ordinal)) = mark.get("ordinal") else {
+                    return None;
+                };
+                story_ref(&txn, &story).ok()?;
+                let offset = sticky_offset(&StickyIndex::decode_v1(at).ok()?, &txn)?.index;
+                Some(ResolvedRawMark {
+                    story,
+                    offset,
+                    ordinal: *ordinal as u32,
+                    xml,
+                })
+            })
+            .collect();
+        resolved.sort_by(|left, right| {
+            (&left.story, left.offset, left.ordinal).cmp(&(
+                &right.story,
+                right.offset,
+                right.ordinal,
+            ))
+        });
+        resolved
+    }
+
     pub fn story_len(&self, story_id: &str) -> EditResult<u32> {
         let txn = self.doc.transact();
         match story_ref(&txn, story_id) {
@@ -2635,6 +2694,15 @@ fn anchor_value(story: &str, start: &StickyIndex, end: &StickyIndex) -> Any {
         ("story".into(), Any::from(story)),
         ("start".into(), Any::from(start.encode_v1())),
         ("end".into(), Any::from(end.encode_v1())),
+    ])))
+}
+
+fn raw_mark_value(story: &str, at: &StickyIndex, ordinal: u32, xml: &str) -> Any {
+    Any::Map(Arc::new(HashMap::from([
+        ("story".into(), Any::from(story)),
+        ("at".into(), Any::from(at.encode_v1())),
+        ("ordinal".into(), Any::Number(f64::from(ordinal))),
+        ("xml".into(), Any::from(xml)),
     ])))
 }
 

@@ -330,6 +330,7 @@ export interface DocxCommandPayloads {
   setTableBorders: DocxSelectionIntent & { borders: YrsCellBorders };
   setTableProperties: DocxSelectionIntent & { op: 'patch'; patch: { width?: number | null; widthType?: string | null; justification?: 'left' | 'center' | 'right' | null }; expectVersion?: string };
   pasteFragment: DocxSelectionIntent & { fragment: DocxClipboardFragment };
+  replacePasteFragment: DocxSelectionIntent & { fragment: DocxClipboardFragment; plain?: true; merge?: true };
   insertPageBreak: DocxSelectionIntent;
   insertSectionBreak: DocxSelectionIntent & { type: 'nextPage' | 'continuous' | 'oddPage' | 'evenPage' };
   resizeObject: { handle: string; expectVersion: string } &
@@ -645,6 +646,8 @@ export interface DocxWorkerCommandState {
   remoteMerges?: { from: number; to: number };
   /** What the last local typing command wrote, until the next local command that edits or selects. */
   typed?: DocxTypedText;
+  /** The range the latest paste replaced and the document version right after it; any later edit makes it stale. */
+  lastPaste?: { range: YrsStoryRange; version: string; storedMarks: DocxStoredMarks | null } | null;
 }
 
 /** Sticky positions of the first and last characters one typing command wrote, and of the caret it left. */

@@ -945,6 +945,7 @@ fn direct_admissible<T: ReadTxn>(doc: &EditingDoc, txn: &T, steps: &[Planned]) -
             crate::STORIES,
             crate::REMOVED_STORIES,
             crate::COMMENTS,
+            crate::RAW_INLINES,
             crate::part_metadata::PART_METADATA,
             crate::shape_styles::SHAPE_STYLES,
             crate::document_properties::DOCUMENT_PROPERTIES,
@@ -1412,7 +1413,9 @@ fn plan_selection<T: ReadTxn>(
                 &requested,
             ));
         }
-        if paragraph.has_stamped_in(start, end) {
+        if paragraph.has_stamped_in(start, end)
+            || (!suggesting && paragraph.has_suggested_formatting_in(start, end))
+        {
             return Err(revision_conflict(
                 "the range overlaps a tracked change",
                 &requested,
@@ -1816,7 +1819,9 @@ fn plan_delete_paragraphs<T: ReadTxn>(
     views.check_story_writable(story_id, &requested)?;
     refuse_suggestion(step, &requested)?;
     if let Some(offset) = (first..=last).find(|index| {
-        story.structurally_revised(*index) || story.paragraphs[*index].has_revisions()
+        story.structurally_revised(*index)
+            || story.paragraphs[*index].has_revisions()
+            || story.paragraphs[*index].has_suggested_formatting()
     }) {
         return Err(revision_conflict(
             format!(
@@ -1963,7 +1968,10 @@ fn plan_style<T: ReadTxn>(
     guard(&step.expect, &paragraph.text, &requested)?;
     views.check_story_writable(&target.story, &requested)?;
     refuse_suggestion(step, &requested)?;
-    if story.structurally_revised(paragraph_index) || paragraph.has_revisions() {
+    if story.structurally_revised(paragraph_index)
+        || paragraph.has_revisions()
+        || paragraph.has_suggested_formatting()
+    {
         return Err(revision_conflict(
             "the paragraph carries a tracked change",
             &requested,
@@ -2514,7 +2522,10 @@ fn plan_block_fill<T: ReadTxn>(
         return Err(unsupported("the control holds raw XML blocks"));
     }
     for (position, paragraph) in view.paragraphs.iter().enumerate() {
-        if view.structurally_revised(position) || paragraph.has_revisions() {
+        if view.structurally_revised(position)
+            || paragraph.has_revisions()
+            || paragraph.has_suggested_formatting()
+        {
             return Err(revision_conflict(
                 "a paragraph of the control carries a tracked change",
                 &fill.resolved,
@@ -2919,7 +2930,9 @@ fn plan_format<T: ReadTxn>(
             &requested,
         ));
     }
-    if paragraph.has_stamped_in(start, end) {
+    if paragraph.has_stamped_in(start, end)
+        || (!ctx.is_suggesting() && paragraph.has_suggested_formatting_in(start, end))
+    {
         return Err(revision_conflict(
             "the range overlaps a tracked change",
             &requested,
@@ -4485,6 +4498,257 @@ mod direct_tests {
         }))
         .unwrap();
         docx_parse::serializer::write_docx_s13(request, &bytes).unwrap()
+    }
+
+    fn assert_host_edit_refuses_suggested_bold(operation: &str) {
+        for direct in [false, true] {
+            let source = document();
+            source
+                .split_paragraph(
+                    &EditCtx::local("", ""),
+                    source.paragraph_mark_position("p").unwrap(),
+                    None,
+                )
+                .unwrap();
+            let doc = EditingDoc::new(9005);
+            let mut parts = ooxml_opc::unzip_parts(&raw_export(&source)).unwrap();
+            if operation == "style" {
+                parts.push((
+                    "word/styles.xml".to_owned(),
+                    br#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="Heading 1"/><w:rPr><w:b/></w:rPr></w:style></w:styles>"#.to_vec(),
+                ));
+                parts.push((
+                    "word/_rels/document.xml.rels".to_owned(),
+                    br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>"#.to_vec(),
+                ));
+                let (_, types) = parts
+                    .iter_mut()
+                    .find(|(name, _)| name == "[Content_Types].xml")
+                    .unwrap();
+                *types = String::from_utf8(types.clone())
+                    .unwrap()
+                    .replace(
+                        "</Types>",
+                        r#"<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>"#,
+                    )
+                    .into_bytes();
+            }
+            if operation == "fill" {
+                let (_, body) = parts
+                    .iter_mut()
+                    .find(|(name, _)| name == "word/document.xml")
+                    .unwrap();
+                *body = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:sdt><w:sdtPr><w:tag w:val="note"/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>Alpha beta gamma</w:t></w:r></w:p></w:sdtContent></w:sdt><w:p/></w:body></w:document>"#.to_vec();
+            }
+            crate::seed_from_docx(&doc, &ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
+            doc.set_direct_batches(direct);
+            let story = if operation == "fill" {
+                let txn = doc.yrs_doc().transact();
+                crate::content_controls::Inventory::build(&doc, &txn)
+                    .unwrap()
+                    .records
+                    .iter()
+                    .find_map(|record| match &record.site {
+                        Site::Block { child, .. } => Some(child.clone()),
+                        _ => None,
+                    })
+                    .unwrap()
+            } else {
+                "body".to_owned()
+            };
+            let para_id = doc.paragraphs(&story).unwrap()[0].para_id.clone();
+            doc.toggle_format(
+                &EditCtx::local("Ada", DATE).suggesting(),
+                StoryRange::new(&story, 0, 5),
+                crate::SimpleFormat::Bold,
+            )
+            .unwrap();
+            let revisions = doc.list_revisions().unwrap();
+            assert_eq!(revisions.len(), 1);
+            assert_eq!(
+                revisions[0].change.kind,
+                crate::ChangeKind::RunPropertiesChanged
+            );
+            let before = doc.encode_state_as_update_v1();
+            let target = TextTarget::Search {
+                text: "Alpha".to_owned(),
+                within: SearchScope::Story {
+                    story: "body".to_owned(),
+                },
+                view: EditTextView::Accepted,
+            };
+            let step = EditStep::new(match operation {
+                "replace" => EditOperation::ReplaceText {
+                    target,
+                    text: "Hi".to_owned(),
+                    runs: None,
+                },
+                "delete" => EditOperation::DeleteText { target },
+                "paragraphs" => EditOperation::DeleteParagraphs {
+                    story: "body".to_owned(),
+                    first_para_id: para_id.clone(),
+                    last_para_id: para_id,
+                },
+                "format" => EditOperation::FormatText {
+                    target,
+                    set: Some(serde_json::Map::from_iter([(
+                        "italic".to_owned(),
+                        Value::Bool(true),
+                    )])),
+                    clear: None,
+                    on_unsupported: OnUnsupported::default(),
+                },
+                "style" => EditOperation::SetParagraphStyle {
+                    target: ParagraphTarget { story, para_id },
+                    style_id: "Heading1".to_owned(),
+                },
+                "fill" => EditOperation::SetContentControlText {
+                    target: ContentControlSelector::Tag {
+                        tag: "note".to_owned(),
+                    },
+                    text: "Updated".to_owned(),
+                },
+                _ => unreachable!(),
+            });
+            let refusal = apply_text_steps(
+                &doc,
+                &[BatchStep::Edit(&step)],
+                &UndoSession::new(),
+                MAX_STAGING_BYTES,
+            )
+            .unwrap_err();
+
+            assert_eq!(
+                refusal.failure.code,
+                EditFailureCode::TrackedRevisionConflict
+            );
+            assert_eq!(doc.encode_state_as_update_v1(), before);
+            assert_eq!(doc.list_revisions().unwrap(), revisions);
+        }
+    }
+
+    #[test]
+    fn host_replace_refuses_live_run_property_changes() {
+        assert_host_edit_refuses_suggested_bold("replace");
+    }
+
+    #[test]
+    fn host_delete_refuses_live_run_property_changes() {
+        assert_host_edit_refuses_suggested_bold("delete");
+    }
+
+    #[test]
+    fn host_delete_paragraphs_refuses_live_run_property_changes() {
+        assert_host_edit_refuses_suggested_bold("paragraphs");
+    }
+
+    #[test]
+    fn host_format_refuses_live_run_property_changes() {
+        assert_host_edit_refuses_suggested_bold("format");
+    }
+
+    #[test]
+    fn host_style_refuses_live_run_property_changes() {
+        assert_host_edit_refuses_suggested_bold("style");
+    }
+
+    #[test]
+    fn host_block_fill_refuses_live_run_property_changes() {
+        assert_host_edit_refuses_suggested_bold("fill");
+    }
+
+    fn assert_host_edit_keeps_suggested_bold(operation: &str) {
+        for direct in [false, true] {
+            let doc = EditingDoc::new(9005);
+            crate::seed_from_docx(&doc, &raw_export(&document())).unwrap();
+            doc.set_direct_batches(direct);
+            doc.toggle_format(
+                &EditCtx::local("Ada", DATE).suggesting(),
+                StoryRange::new("body", 0, 5),
+                crate::SimpleFormat::Bold,
+            )
+            .unwrap();
+            let revision = doc.list_revisions().unwrap().remove(0);
+            let target = |text: &str| TextTarget::Search {
+                text: text.to_owned(),
+                within: SearchScope::Story {
+                    story: "body".to_owned(),
+                },
+                view: EditTextView::Accepted,
+            };
+            let mut step = EditStep::new(match operation {
+                "insert" => EditOperation::InsertText {
+                    target: target("Alpha"),
+                    at: TargetEdge::End,
+                    text: "!".to_owned(),
+                    runs: None,
+                },
+                "replace" => EditOperation::ReplaceText {
+                    target: target(" beta gamma"),
+                    text: " next".to_owned(),
+                    runs: None,
+                },
+                "section" => EditOperation::SetSectionProperties {
+                    section: "final".to_owned(),
+                    properties: serde_json::json!({"orientation": "landscape"}),
+                },
+                "format" => EditOperation::FormatText {
+                    target: target("Alpha"),
+                    set: Some(serde_json::Map::from_iter([(
+                        "italic".to_owned(),
+                        Value::Bool(true),
+                    )])),
+                    clear: None,
+                    on_unsupported: OnUnsupported::default(),
+                },
+                _ => unreachable!(),
+            });
+            if matches!(operation, "replace" | "format") {
+                step.suggest = Some(EditSuggestion {
+                    author: "Ada".to_owned(),
+                    date: DATE.to_owned(),
+                });
+            }
+            let outcome = apply_text_steps(
+                &doc,
+                &[BatchStep::Edit(&step)],
+                &UndoSession::new(),
+                MAX_STAGING_BYTES,
+            )
+            .unwrap();
+            assert!(outcome.applied);
+            assert!(doc.list_revisions().unwrap().iter().any(|current| {
+                current.change.revision_id == revision.change.revision_id
+                    && current.change.kind == crate::ChangeKind::RunPropertiesChanged
+            }));
+            let context = doc
+                .selection_context(&StoryRange::new("body", 0, 5))
+                .unwrap();
+            assert_eq!(context.bold, crate::TriState::On);
+            if operation == "format" {
+                assert_eq!(context.italic, crate::TriState::On);
+            }
+        }
+    }
+
+    #[test]
+    fn host_insert_at_suggested_formatting_end_succeeds() {
+        assert_host_edit_keeps_suggested_bold("insert");
+    }
+
+    #[test]
+    fn host_suggested_replace_adjacent_to_suggested_formatting_succeeds() {
+        assert_host_edit_keeps_suggested_bold("replace");
+    }
+
+    #[test]
+    fn host_section_properties_over_suggested_formatting_succeed() {
+        assert_host_edit_keeps_suggested_bold("section");
+    }
+
+    #[test]
+    fn host_suggested_format_over_suggested_formatting_succeeds() {
+        assert_host_edit_keeps_suggested_bold("format");
     }
 
     #[test]

@@ -2363,7 +2363,6 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       shouldScrollCaretIntoView(caretRevealOrigin, selectionChanged, readOnly)
     ) {
       const delta = scrollIntoViewDelta(scrollViewport(scroller), nextTop, nextTop + nextHeight, 24);
-      if (delta !== 0) console.log('F76REVEAL ' + JSON.stringify({ t: Math.round(performance.now()), delta, from: scroller.scrollTop, origin: caretRevealOrigin, selectionChanged, first: previousStickySelection === undefined, intent: scrolledBeforeFirstCaretRef.current, freshCommit, layoutUpdateOrigin, pending: !!pendingReveal }));
       if (delta !== 0) scroller.scrollTop += delta;
     }
   }, [

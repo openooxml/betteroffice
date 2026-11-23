@@ -35,7 +35,10 @@ export function savedCommentIds(sourceIds: readonly number[], native: readonly P
     if (saved !== undefined) { ids.set(comment.id, saved); continue; }
     let id = /^\d+$/u.test(comment.id) ? Number(comment.id) : Number.NaN;
     if (!Number.isSafeInteger(id) || used.has(id)) {
-      while (used.has(next)) next += 1;
+      while (used.has(next)) {
+        if (!(next + 1 > next)) throw new RangeError('The document holds a comment id too large to extend; no new comment id can follow it');
+        next += 1;
+      }
       id = next;
     }
     used.add(id);

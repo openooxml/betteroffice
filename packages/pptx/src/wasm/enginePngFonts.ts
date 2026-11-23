@@ -1,4 +1,5 @@
 import type { BundledFontFace, BundledFontScript } from '@betteroffice/fonts';
+import { importFonts } from '../../../../shared/office-session/fontModules';
 import { PngExportError } from '../../../../shared/office-session/pngExportError';
 import type { RequestedFontFace } from '../../../../shared/pptxDefaultFonts';
 import type { PptxFontFace, SlideDisplayList } from '../types';
@@ -11,7 +12,7 @@ type Fonts = typeof import('@betteroffice/fonts');
 
 let fontsModule: Promise<Fonts> | undefined;
 /** The font packages, loaded with the first export that needs them; a worker resolves them only this way. */
-const loadFonts = (): Promise<Fonts> => (fontsModule ??= import('@betteroffice/fonts').catch((error: unknown) => {
+const loadFonts = (): Promise<Fonts> => (fontsModule ??= importFonts().catch((error: unknown) => {
   fontsModule = undefined;
   throw error;
 }));

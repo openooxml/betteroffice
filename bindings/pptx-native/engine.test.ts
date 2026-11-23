@@ -28,7 +28,9 @@ const bytes = () => new Uint8Array(fixture);
 const normalized = (json: string): unknown => JSON.parse(json.replace(/[0-9a-f]{16}-\d+/g, '<version>'));
 
 type Snapshot = {
-  slides: { id: string; shapes: { textStories: { id: string }[] }[] }[];
+  slides: { id: string; shapes: {
+    id: string; x: number; y: number; width: number; height: number; textStories: { id: string }[];
+  }[] }[];
 };
 
 let wasmMemory: WebAssembly.Memory;
@@ -125,6 +127,12 @@ function runScript(engine: Engine) {
     const story = doc.storyJson(JSON.stringify({ storyId: id }));
     const withKeys = renderer.snapshotWithLayoutKeysJson(doc);
     const slides = (JSON.parse(snapshot) as Snapshot).slides;
+    const shape = slides[0]!.shapes[0]!;
+    const preview = renderer.previewShapeRectJson(doc, {
+      slideId: slides[0]!.id, shapeId: shape.id,
+      x: shape.x + 1000, y: shape.y + 2000, width: shape.width + 3000, height: shape.height + 4000,
+    });
+    expect(normalized(doc.snapshotJson())).toEqual(normalized(snapshot));
     const layouts = slides.map((slide, index) => {
       const layout = renderer.layoutSlideJson(doc, index);
       const hit = renderer.hitTestJson(40.5, 40.25);
@@ -160,7 +168,7 @@ function runScript(engine: Engine) {
     return {
       json: {
         snapshot: normalized(snapshot), metadata: normalized(metadata), content: normalized(content),
-        story: normalized(story), withKeys: normalized(withKeys), layouts,
+        story: normalized(story), withKeys: normalized(withKeys), preview: normalized(preview), layouts,
         anchor: normalized(anchor), resolved: normalized(resolved), movedAnchor: normalized(movedAnchor),
         edited: normalized(edited), applied: normalized(applied),
         structured: normalized(structured), markdown: normalized(markdown), undone: normalized(undone),

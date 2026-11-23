@@ -542,6 +542,12 @@
     "tableInserted": "Tabel ingevoegd",
     "tableDeleted": "Tabel verwijderd"
   },
+  "pasteOptions": {
+    "button": "Plakopties (Ctrl)",
+    "keepSource": "Bronopmaak behouden",
+    "merge": "Opmaak samenvoegen",
+    "textOnly": "Alleen tekst behouden"
+  },
   "contextMenu": {
     "ariaLabel": "Menu voor AI-acties",
     "textMenuAriaLabel": "Menu voor tekstbewerking",
@@ -587,6 +593,7 @@
     "noDocumentLoaded": "Geen document geladen",
     "failedToLoad": "Kan dit document niet openen",
     "failedToLoadDescription": "Het bestand is mogelijk beschadigd, of gebruikt iets dat deze editor nog niet kan lezen.",
+    "recoveryFailedDescription": "De editor is gestopt en kon uw laatste wijzigingen niet herstellen. Het bestand zelf is niet beschadigd.",
     "failedToLoadDamaged": "Het bestand is beschadigd of is geen volledig Word-document.",
     "failedToLoadUnsupported": "Dit document gebruikt iets dat deze editor nog niet kan lezen.",
     "editorUnavailable": "De editor kan niet worden geladen",
@@ -874,6 +881,7 @@
     "toolbarGroup": "Plug-ins",
     "panelTabs": "Plug-inpanelen",
     "collapsePanel": "{title} samenvouwen",
-    "expandPanel": "{title} uitvouwen"
+    "expandPanel": "{title} uitvouwen",
+    "miniToolbar": "Opmaak van selectie"
   }
 }

@@ -1,4 +1,5 @@
 import type { BundledFontLoader, BundledFontScript } from '@betteroffice/fonts';
+import { importFonts, importProgressiveFonts } from '../../../../shared/office-session/fontModules';
 import type { FontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import { scriptFontFace } from './commandScriptFonts';
 import type { DefaultFontFace, DefaultFontLanding, RequestedFontFace } from '../../../../shared/pptxDefaultFonts';
@@ -25,7 +26,7 @@ const sessionDecoder = sessionFontDecoder(async (bytes, options) => {
 export const commandFontProvider = {
   /** @internal */
   async load(fontCdn?: FontCdnConfiguration) {
-    const fonts = await import('@betteroffice/fonts');
+    const fonts = await importFonts();
     if (fontCdn) fonts.configureFontCdn(fontCdn);
     return fonts.createFontProvider(undefined, { decoder: sessionDecoder });
   },
@@ -46,7 +47,7 @@ export function prefetchCoverageFaces(
     for (const script of scripts) {
       const load = source.resolveScriptFallback(script as BundledFontScript, false, false);
       if (load?.slices && sliced && (await import('./commandSlicedFonts')).slicedFacesSupported()) {
-        const { openSlicedFace } = await import('@betteroffice/fonts/progressive');
+        const { openSlicedFace } = await importProgressiveFonts();
         void openSlicedFace(load.slices).catch(() => {});
       } else void load?.().catch(() => {});
     }
@@ -152,7 +153,7 @@ export function createCommandDefaultFonts(
         available = true;
         if (load.slices && sliced?.supported()) {
           try {
-            const { openSlicedFace } = await import('@betteroffice/fonts/progressive');
+            const { openSlicedFace } = await importProgressiveFonts();
             const opened = await openSlicedFace(load.slices);
             if (disposed || suppliedFamily(face)) return undefined;
             const skeleton = face.kind === 'coverage' ? await scriptFontFace(face.script, bold, italic, opened.bytes())

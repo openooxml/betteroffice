@@ -549,17 +549,7 @@ impl SheetPatch<'_> {
                 })
                 .map(|(group, _)| group)
                 .collect(),
-            masters: masters
-                .into_iter()
-                .filter(|(key, reference)| {
-                    arrays.contains(key)
-                        || (reference.is_some() && changed.contains(key))
-                        || reference.is_some_and(|reference| {
-                            !self.moves_uniformly(reference) || range_changed(reference, &changed)
-                        })
-                })
-                .map(|(key, _)| key)
-                .collect(),
+            masters: self.dirty_masters(masters, &arrays, &changed),
         })
     }
 

@@ -1,12 +1,13 @@
 import { configureFontCdn } from '@betteroffice/fonts';
 import { expect, mock, test } from 'bun:test';
 import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
+import type { FontPackReply } from '../../../../shared/office-session/optionalFontPacks';
 import { isClientMessage, type ClientMessage } from '../../../../shared/office-session/protocol';
 import { createPptxWorkerSession } from './commandSession';
 import type { PresentationCommandOpenOptions, PresentationCommandOpenResult } from './commandProtocol';
 import { createPresentationCommandProjection } from './commandSharedAdapter';
 
-function heldWorker() {
+function heldWorker(onPost?: (message: unknown) => void) {
   const events = new EventTarget();
   const listeners = new Map<string, Set<EventListenerOrEventListenerObject>>();
   const calls: Extract<ClientMessage, { kind: 'call' }>[] = [];
@@ -14,6 +15,7 @@ function heldWorker() {
   const terminate = mock(() => {});
   const worker = {
     postMessage(message: unknown) {
+      onPost?.(message);
       if (!isClientMessage(message) || message.kind !== 'call') return;
       calls.push(message);
       arrivals.get(message.method)?.();
@@ -46,6 +48,7 @@ function heldWorker() {
     terminate,
   } as unknown as Worker;
   return { worker, terminate, calls,
+    dispatchMessage(data: unknown) { events.dispatchEvent(new MessageEvent('message', { data })); },
     listenerCount: () => [...listeners.values()].reduce((count, active) => count + active.size, 0),
     waitFor(method: string) {
       if (calls.some((call) => call.method === method)) return Promise.resolve();
@@ -53,6 +56,27 @@ function heldWorker() {
     },
   };
 }
+
+test('a host-supplied worker factory receives one reply per font pack request', async () => {
+  const replies: FontPackReply[] = [];
+  let resolveReply!: () => void;
+  const replied = new Promise<void>((resolve) => { resolveReply = resolve; });
+  const endpoint = heldWorker((message) => {
+    const reply = message as FontPackReply;
+    if (reply.kind === 'font-pack-reply') {
+      replies.push(reply);
+      resolveReply();
+    }
+  });
+  const session = createPptxWorkerSession(new Uint8Array(), { worker: () => endpoint.worker });
+  try {
+    await session.ready;
+    endpoint.dispatchMessage({ protocol: 1, kind: 'font-pack-request', id: 'intl-request', pack: 'intl' });
+    expect(session.failure).toBeUndefined();
+    await replied;
+    expect(replies).toEqual([expect.objectContaining({ protocol: 1, kind: 'font-pack-reply', id: 'intl-request' })]);
+  } finally { await session.dispose(); }
+});
 
 for (const method of ['edit', 'readEditor', 'thumbnailFrame'] as const) {
   test(`disposing with a pending ${method} call does not leak a rejection`, async () => {

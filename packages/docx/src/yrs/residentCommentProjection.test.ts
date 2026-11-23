@@ -31,6 +31,15 @@ test('saved comment ids keep source and free numeric ids and number the rest aft
     .toEqual([['1', 1], ['9201:0', 2], ['5', 5], ['01', 3]]);
 });
 
+test('saved comment ids refuse instead of looping when the next id cannot be counted', () => {
+  expect(() => savedCommentIds([1e16, 4], [{ id: '10000000000000000' }, { id: '9201:0' }]))
+    .toThrow('The document holds a comment id too large to extend');
+  expect(() => savedCommentIds([Number.NaN], [{ id: '9201:0' }])).toThrow(RangeError);
+  expect([...savedCommentIds([Number.MAX_SAFE_INTEGER], [{ id: '9201:0' }])]).toEqual([['9201:0', 2 ** 53]]);
+  expect(() => savedCommentIds([Number.MAX_SAFE_INTEGER], [{ id: '9201:0' }, { id: '9201:1' }])).toThrow(RangeError);
+  expect([...savedCommentIds([9007199254740994], [{ id: '9201:0' }])]).toEqual([['9201:0', 9007199254740996]]);
+}, 5000);
+
 test('saved comment ids preserve survivors and reserve identities of deleted comments', () => {
   const previous = new Map([['9201:0', 1], ['9201:1', 2]]);
   expect([...savedCommentIds([], [{ id: '9201:1' }, { id: '9201:2' }], previous)])

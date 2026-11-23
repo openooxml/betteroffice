@@ -88,6 +88,38 @@ def test_nested_tables_are_reachable_from_their_cell(nested_table_bytes: bytes) 
     assert len(document.tables()) == len(cell.tables) + 1
 
 
+def test_a_run_carries_its_highlight_as_written(highlight_and_merge_bytes: bytes) -> None:
+    runs = Document.open(highlight_and_merge_bytes).paragraph(0).runs
+
+    assert [run.text for run in runs] == ["marked", "cleared", "empty", "bold", "plain"]
+    assert [run.highlight for run in runs] == ["yellow", "none", None, None, None]
+
+
+def test_a_cell_carries_its_column_span_and_vertical_merge(
+    highlight_and_merge_bytes: bytes,
+) -> None:
+    (table,) = Document.open(highlight_and_merge_bytes).tables()
+    merges = [
+        [(cell.text, cell.grid_span, cell.v_merge) for cell in row.cells] for row in table.rows
+    ]
+
+    assert merges == [
+        [("wide", 2, None), ("tall", None, "restart")],
+        [("left", None, None), ("bare", None, None), ("below", None, "continue")],
+        [("single", None, None), ("middle", None, None), ("lower", None, "continue")],
+        [("alone", 3, None)],
+    ]
+    assert type(table.rows[0].cells[0].grid_span) is int
+
+
+def test_a_document_without_highlights_or_merges_reads_none(minimal_bytes: bytes) -> None:
+    document = Document.open(minimal_bytes)
+    (table,) = document.tables()
+
+    assert all(run.highlight is None for paragraph in document for run in paragraph.runs)
+    assert [(cell.grid_span, cell.v_merge) for cell in table.rows[0].cells] == [(None, None)] * 2
+
+
 def test_sections_and_headers(minimal_bytes: bytes) -> None:
     document = Document.open(minimal_bytes)
     first, second = document.sections()

@@ -6,6 +6,7 @@ import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
 import { residentWorkerFactory } from './__fixtures__/residentWorker';
 import { DocxSourceWorkerClient } from './residentSourceWorkerClient';
 import { createDocxCommandConnection } from './residentCommandConnection';
+import type { DocxEngineWorkerResponse } from './residentEngineWorkerProtocol';
 import { createDocxWorkerEditSession } from './createDocxWorkerEditSession';
 import { createYrsSession } from './index';
 import { closeCommandEngines, openCommandEngine, TIMEOUT } from './residentCommandTestSupport';
@@ -390,6 +391,39 @@ test('a composition types over its own text when a collaborator types at its car
     expect(b.engine.paragraphs('body')[0]!.text).toBe('Seed각X');
   } finally { a.session.dispose(); b.session.dispose(); }
 }, TIMEOUT);
+
+for (const failure of [
+  { method: 'encodeStateAsUpdate', error: new WebAssembly.RuntimeError('collaboration trap'), code: 'trap' },
+  { method: 'encodeStateVector', error: new Error('BetterOffice engine memory budget exceeded (16384 bytes over a 0-byte budget)'), code: 'out-of-memory' },
+] as const) {
+  test(`a ${failure.code} in ${failure.method} posts the failure with queued collaboration updates`, async () => {
+    const { client, engine, worker } = await openCommands(9201);
+    const queued: Uint8Array[] = [];
+    const delivered: Uint8Array[] = [];
+    const replies: DocxEngineWorkerResponse[] = [];
+    const receive = worker.onmessage!;
+    worker.onmessage = event => { replies.push(event.data); receive(event); };
+    const offQueued = engine.onUpdate(update => queued.push(update));
+    const offDelivered = client.onCollabUpdates(event => delivered.push(...event.updates));
+    try {
+      const paraId = engine.paragraphs('body')[0]!.paraId;
+      engine.insertText({ story: 'body', paraId, offset: 0 }, 'Before the failure ');
+      expect(queued.length).toBeGreaterThan(0);
+      const vector = spyOn(engine, 'encodeStateVector').mockImplementation(() => { throw failure.error; });
+      const diff = spyOn(engine, 'encodeStateAsUpdate');
+      if (failure.method === 'encodeStateAsUpdate') diff.mockImplementation(() => { throw failure.error; });
+      try {
+        await expect(client.documentRead({ kind: 'collabDiff' })).rejects.toMatchObject({ code: failure.code });
+        expect(vector).toHaveBeenCalledTimes(failure.method === 'encodeStateVector' ? 1 : 0);
+        const failed = replies.filter(reply => !reply.ok && reply.terminal);
+        expect(failed).toHaveLength(1);
+        expect(failed[0]?.collabUpdates?.clock).toBeUndefined();
+        expect(failed[0]?.collabUpdates?.updates.map(update => [...new Uint8Array(update)])).toEqual(queued.map(update => [...update]));
+        expect(delivered).toEqual(queued);
+      } finally { diff.mockRestore(); vector.mockRestore(); }
+    } finally { offQueued(); offDelivered(); client.destroy(); }
+  }, TIMEOUT);
+}
 
 test('presence reads are tied to the covering frame and unresolved anchors are marked', async () => {
   const a = await open(9201);

@@ -156,7 +156,7 @@ pub fn serialize_text_formatting(formatting: Option<&TextFormatting>) -> String 
     if let Some(value) = formatting
         .ligatures
         .as_deref()
-        .filter(|value| crate::formatting::valid_ligatures(value))
+        .and_then(crate::formatting::word_ligatures)
     {
         body.start_element("w14:ligatures")
             .attribute(
@@ -800,6 +800,17 @@ pub fn serialize_shape_content(
     }
     if let Some(xml) = super::smart_art::replay(shape, context, false)? {
         return Ok(xml);
+    }
+    if shape.children.is_some()
+        && (shape.drawing_xml.is_some() || shape.drawing_run_xml.is_some())
+        && shape
+            .drawing_model
+            .as_ref()
+            .is_some_and(|model| model.get("textBoxContentSha256").is_some())
+    {
+        return Err(ParseError::Canonical(
+            "bookmarked group source could not be replayed".to_owned(),
+        ));
     }
     let is_text_box = shape.text_box.unwrap_or(shape.shape_type == "textBox");
     let floating = shape
@@ -2083,6 +2094,7 @@ mod tests {
                 text: " <hello> & ".to_owned(),
                 preserve_space: None,
             }],
+            direction_scopes: Vec::new(),
         };
         assert_eq!(
             serialize_run(&run, &mut context()).unwrap(),
@@ -2120,6 +2132,35 @@ mod tests {
             let formatting = parse_run_properties(parsed.root(), None);
             assert_eq!(serialize_text_formatting(formatting.as_ref()), xml);
         }
+    }
+
+    #[test]
+    fn discretional_ligatures_round_trip_in_word_spelling() {
+        for (value, saved) in [
+            ("standardDiscretional", "standardDiscretional"),
+            ("standardDiscretionary", "standardDiscretional"),
+        ] {
+            let xml = format!(
+                r#"<w:rPr><w:b/><w14:ligatures xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" w14:val="{value}"/></w:rPr>"#
+            );
+            let limits = ParseLimits::default();
+            let parsed =
+                parse_xml(xml.as_bytes(), "run.xml", &mut ParseBudget::new(&limits)).unwrap();
+            let formatting = parse_run_properties(parsed.root(), None);
+            let written = serialize_text_formatting(formatting.as_ref());
+            assert!(
+                written.contains(&format!(r#"w14:val="{saved}""#)),
+                "{value}: {written}"
+            );
+        }
+        let formatting = TextFormatting {
+            ligatures: Some("historicalDiscretionary".to_owned()),
+            ..Default::default()
+        };
+        assert!(
+            serialize_text_formatting(Some(&formatting))
+                .contains(r#"w14:val="historicalDiscretional""#)
+        );
     }
 
     #[test]
@@ -2177,6 +2218,7 @@ mod tests {
                 text_box: None,
                 drawing_properties: None,
             }],
+            direction_scopes: Vec::new(),
         };
         let saved = serialize_deleted_run(&run, &mut context()).unwrap();
         assert!(saved.contains(xml));
@@ -2196,6 +2238,7 @@ mod tests {
                     preserve_space: None,
                 },
             ],
+            direction_scopes: Vec::new(),
         };
         assert_eq!(
             serialize_deleted_run(&run, &mut context()).unwrap(),

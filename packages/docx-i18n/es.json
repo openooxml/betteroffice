@@ -542,6 +542,12 @@
     "tableInserted": "Tabla insertada",
     "tableDeleted": "Tabla eliminada"
   },
+  "pasteOptions": {
+    "button": "Opciones de pegado (Ctrl)",
+    "keepSource": "Mantener formato de origen",
+    "merge": "Combinar formato",
+    "textOnly": "Mantener solo texto"
+  },
   "contextMenu": {
     "ariaLabel": "Menú de acciones de IA",
     "textMenuAriaLabel": "Menú de edición de texto",
@@ -587,6 +593,7 @@
     "noDocumentLoaded": "No se ha cargado ningún documento",
     "failedToLoad": "No se pudo abrir este documento",
     "failedToLoadDescription": "Es posible que el archivo esté dañado o que use algo que este editor aún no puede leer.",
+    "recoveryFailedDescription": "El editor se detuvo y no pudo recuperar los últimos cambios. El archivo no está dañado.",
     "failedToLoadDamaged": "El archivo está dañado o no es un documento de Word completo.",
     "failedToLoadUnsupported": "Este documento usa algo que este editor aún no puede leer.",
     "editorUnavailable": "No se pudo cargar el editor",
@@ -874,6 +881,7 @@
     "toolbarGroup": "Complementos",
     "panelTabs": "Paneles de complementos",
     "collapsePanel": "Contraer {title}",
-    "expandPanel": "Expandir {title}"
+    "expandPanel": "Expandir {title}",
+    "miniToolbar": "Formato de la selección"
   }
 }

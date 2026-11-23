@@ -46,11 +46,13 @@ interface ProgressiveModule {
 export declare class ResidentProgressiveFonts {
     private readonly engine;
     private readonly log;
+    private readonly loadModule;
     private readonly owners;
     private readonly ownerOf;
     private readonly pending;
     private readonly lateListeners;
     private readonly refusalListeners;
+    private module?;
     private warned;
     private late;
     private disposed;
@@ -67,9 +69,10 @@ export declare class ResidentProgressiveFonts {
     /**
      * Installs the outlines of `glyphs` (per font id) before a raster. Resolves
      * with the owner font ids whose outlines changed once they are installed,
-     * or after `waitMs` with those installed so far; the rest install later.
+     * or after `waitMs` of waiting for outlines once the module loads.
      */
     ensure(glyphs: Map<number, Set<number>>, waitMs?: number): Promise<Set<number>>;
+    private ensureOutlines;
     /** Settles once every outline requested so far is installed or has failed. */
     whenInstalled(): Promise<void>;
     private track;

@@ -37,9 +37,16 @@ export type PeerlessAdmissionTarget =
   | { kind: 'worker-selection'; snapshot: ReturnType<PeerlessViewStore['getSnapshot']>; suggesting?: YrsAuthor };
 
 /** @internal */
+export interface PeerlessQueuedCut {
+  isCurrent(): boolean;
+  deleteSelection(selection: DocxCommandSelection): Promise<boolean>;
+}
+
+/** @internal */
 export interface PeerlessAdmissionOptions extends Omit<SubmitOptions<PeerlessEchoIntent>, 'after' | 'echo'> {
   source?: 'typing' | 'paste' | 'formatting' | 'selection' | 'composition';
   tabDirection?: 'forward' | 'backward';
+  shiftDelete?: { isCurrent(): boolean; cut(queuedCut: PeerlessQueuedCut): Promise<void> };
   onSubmitted?(ticket: CommandTicket): void;
   hostProposal?: boolean;
 }
@@ -83,6 +90,7 @@ export interface PeerlessInputAdmissionOptions {
   session: DocxWorkerEditSession<PeerlessEchoIntent>;
   viewStore: PeerlessViewStore;
   echoPainter: PeerlessEchoPainter;
+  onDeferredPasteChoice?(ack: Promise<unknown>): void;
 }
 
 export async function flushAdmittedInput(binding: {
@@ -198,7 +206,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
   const defer = (
     after: CommandTicket | undefined,
     waitForSelection: boolean,
-    send: (predecessor: CommandTicket | undefined, goalX?: number) => CommandTicket | undefined,
+    send: (predecessor: CommandTicket | undefined, goalX?: number) => CommandTicket | undefined | Promise<CommandTicket | undefined>,
     verticalDirection?: 'up' | 'down',
     barrier = false,
     recover?: () => CommandTicket | undefined
@@ -235,7 +243,10 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
       if (failed && !recover) return cancel('dependency-refused');
       const goalX = verticalDirection ? await geometryGoal(value.ticket, verticalDirection) : undefined;
       if (disposed) return cancel();
-      backing = failed ? recover!() : send(value.ticket, goalX);
+      const sent = failed ? recover!() : send(value.ticket, goalX);
+      const resolved = sent instanceof Promise ? await sent : sent;
+      if (disposed) return cancel();
+      backing = resolved;
       resolveReady({ ticket: backing });
       if (backing) {
         void backing.ack.then(resolveAck, rejectAck);
@@ -260,7 +271,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
   ): PeerlessAdmissionResult => {
     if (disposed) throw disposedError();
     const environment = intent.kind === 'setRenderEnvironment' || intent.kind === 'setFontEnvironment';
-    const { source, tabDirection, onSubmitted, hostProposal, ...metadata } = options;
+    const { source, tabDirection, shiftDelete, onSubmitted, hostProposal, ...metadata } = options;
     const granted = isProposal(intent) && hostProposal === true;
     if (readOnly() && !environment && (!isSelection(intent) || deletionExtension) && !granted) {
       if (counted) releaseCount();
@@ -293,12 +304,13 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
       const fence = tabDirection !== undefined || 'suggesting' in intent.payload || metadata.fence || isSelection(intent) || !isText(intent) ||
         intent.kind === 'paragraphBreak' || intent.kind === 'lineBreak' || intent.kind === 'replaceSelection' ||
         source === 'paste' || source === 'composition';
-      if (fence) {
+      const fenceEcho = fence || shiftDelete !== undefined;
+      if (fenceEcho) {
         echoFence = source === 'composition' ? undefined : { tickets: [] };
         if (echoDisabledReason !== 'intent-cap') disableEcho('fence');
       }
       barrier = echoFence;
-      if (!fence && echoDisabledReason === 'fence' && barrier) {
+      if (!fenceEcho && echoDisabledReason === 'fence' && barrier) {
         echoTicket = {};
         barrier.tickets.push(echoTicket);
       }
@@ -307,7 +319,8 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
       const echo = preview ? { ...preview, originalIntentCount: 1 } : undefined;
       const vertical = intent.kind === 'navigate' && (intent.payload.direction === 'up' || intent.payload.direction === 'down')
         ? intent.payload.direction : undefined;
-      const send = (predecessor: CommandTicket | undefined, goalX?: number, recoverTab = false) => {
+      const send = (predecessor: CommandTicket | undefined, goalX?: number,
+        { recoverTab = false, cutSelection }: { recoverTab?: boolean; cutSelection?: DocxCommandSelection } = {}) => {
         const selection = workerSelection();
         if (tabDirection && latestEditState()?.tableContext) {
           const suggesting = 'suggesting' in intent.payload ? intent.payload.suggesting : undefined;
@@ -332,6 +345,10 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
           } else if (tabDirection === 'backward') return;
         }
         if (deletionExtension && !isCollapsed(selection)) return predecessor;
+        if (cutSelection) {
+          const suggesting = 'suggesting' in intent.payload ? intent.payload.suggesting : undefined;
+          intent = { kind: 'replaceSelection', payload: { text: '', selection: cutSelection, ...(suggesting ? { suggesting } : {}) } };
+        }
         if (intent.kind === 'navigate' && 'goalX' in intent.payload) {
           verticalGoal = hasImplicitVerticalGoal(intent) ? goalX : intent.payload.goalX;
           goalX = verticalGoal;
@@ -349,9 +366,10 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
             ? { ...intent.payload, goalX }
             : target?.kind === 'worker-selection' && target.snapshot.workerSelection && isText(intent)
               ? { ...intent.payload, selection: target.snapshot.workerSelection } : intent.payload;
+        const commandFence = !!fence || cutSelection !== undefined;
         const ticket = session.submit(intent.kind, payload, {
-          ...metadata, after: dependencyOf(predecessor), fence: !!fence,
-          coalesceKey: fence ? undefined : metadata.coalesceKey ?? intent.kind,
+          ...metadata, after: dependencyOf(predecessor), fence: commandFence,
+          coalesceKey: commandFence ? undefined : metadata.coalesceKey ?? intent.kind,
           echo,
         });
         if (echoTicket) echoTicket.ticket = ticket;
@@ -361,12 +379,31 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
         }
         return ticket;
       };
-      const waitForSelection = tabDirection !== undefined || intent.kind === 'formatRange' || isRevision(intent) || deletionExtension || vertical !== undefined;
-      const ticket = deletionExtension || vertical || (after && (waitForSelection || deferred.has(after))) ||
+      const sendShiftDelete = shiftDelete && ((predecessor: CommandTicket | undefined) => {
+        const isCurrent = () => !disposed && !readOnly() && shiftDelete.isCurrent();
+        if (!isCurrent()) return predecessor;
+        const selection = workerSelection();
+        if (!latestEditState()?.tableContext?.hasMultiCellSelection && (!selection || isCollapsed(selection))) {
+          return selection ? send(predecessor) : predecessor;
+        }
+        let deletion = predecessor;
+        return shiftDelete.cut({ isCurrent, async deleteSelection(selection) {
+          if (!isCurrent()) return false;
+          const ticket = send(predecessor, undefined, { cutSelection: selection });
+          if (!ticket) return false;
+          const outcome = await ticket.ack;
+          if (outcome.status === 'applied' || outcome.status === 'noop') deletion = ticket;
+          return outcome.status === 'applied' && outcome.committed !== false;
+        } }).then(() => deletion);
+      });
+      const waitForSelection = shiftDelete !== undefined || tabDirection !== undefined || intent.kind === 'formatRange' ||
+        isRevision(intent) || deletionExtension || vertical !== undefined;
+      const ticket = sendShiftDelete || deletionExtension || vertical || (after && (waitForSelection || deferred.has(after))) ||
         (intent.kind === 'formatRange' && !workerSelection())
-        ? defer(after, waitForSelection, send, vertical, false, tabDirection ? () => send(undefined, undefined, true) : undefined)
+        ? defer(after, waitForSelection, sendShiftDelete ?? send, vertical, false,
+          tabDirection ? () => send(undefined, undefined, { recoverTab: true }) : undefined)
         : send(after) ?? defer(after, false, () => undefined);
-      if (fence && barrier) barrier.ticket = ticket;
+      if (fenceEcho && barrier) barrier.ticket = ticket;
       track(ticket, isRevision(intent), tabDirection !== undefined);
       if (echoTicket) {
         const entry = echoTicket;
@@ -572,13 +609,19 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
       admissions.delete(admission);
     },
   };
-  admissions.set(admission, (intent, options, deletionExtension) => submit(intent, options, false, undefined, deletionExtension));
+  admissions.set(admission, (intent, options, deletionExtension) => {
+    const result = submit(intent, options, false, undefined, deletionExtension);
+    if (intent.kind === 'replacePasteFragment' && (result.status === 'held' || (result.status === 'submitted' && deferred.has(result.ticket)))) {
+      _options.onDeferredPasteChoice?.(appliedTicket(result));
+    }
+    return result;
+  });
   return admission;
 }
 
 /**
- * Submits a clipboard fragment paste and calls `onRefused` when the worker refuses it, so a paste
- * that does not land is never silent.
+ * Submits a clipboard fragment paste, returns its submission and calls `onRefused` when the worker
+ * refuses it, so a paste that does not land is never silent.
  * @internal
  */
 export function submitPasteFragment(
@@ -586,7 +629,7 @@ export function submitPasteFragment(
   fragment: DocxClipboardFragment,
   options: PeerlessAdmissionOptions,
   onRefused: () => void
-): void {
+): PeerlessAdmissionResult {
   const watch = (result: PeerlessAdmissionResult): void => {
     if (result.status === 'submitted') {
       void result.ticket.ack.then((outcome) => { if (outcome.status === 'refused') onRefused(); }, () => {});
@@ -594,7 +637,22 @@ export function submitPasteFragment(
       void result.released.then(watch, () => {});
     }
   };
-  watch(admitIntent(admission, { kind: 'pasteFragment', payload: { fragment } }, options));
+  const submission = admitIntent(admission, { kind: 'pasteFragment', payload: { fragment } }, options);
+  watch(submission);
+  return submission;
+}
+
+/**
+ * The submission's ticket once the worker applied it, or null when it was refused, cancelled, ignored or a no-op;
+ * a held submission counts as applied when its released admission is.
+ * @internal
+ */
+export function appliedTicket(submission: PeerlessAdmissionResult): Promise<CommandTicket | null> {
+  if (submission.status === 'submitted') {
+    return submission.ticket.ack.then((outcome) => outcome.status === 'applied' ? submission.ticket : null, () => null);
+  }
+  if (submission.status === 'held') return submission.released.then(appliedTicket, () => null);
+  return Promise.resolve(null);
 }
 
 /** @internal */
@@ -627,6 +685,15 @@ export function admitInputIntents(
   }
 }
 
+/** @internal Submits one input intent and returns its admission, for callers that act on the outcome. */
+export function submitInputIntent(
+  admission: PeerlessInputAdmission,
+  intent: PeerlessInputIntent,
+  options: PeerlessAdmissionOptions
+): PeerlessAdmissionResult {
+  return submitAdmission(admission, intent, options);
+}
+
 /** @internal */
 export function submitFormattingIntent(
   _admission: PeerlessInputAdmission,
@@ -642,6 +709,7 @@ type AdmissionIntent = PeerlessInputIntent | PeerlessFormattingIntent;
 const SUGGESTED = {
   insertText: true, replaceSelection: true, deleteBackward: true, deleteForward: true, paragraphBreak: true, lineBreak: true,
   pasteFragment: true,
+  replacePasteFragment: true,
   applyEdits: true, replaceMatches: true, insertImage: true, insertTable: true, insertPageBreak: true, insertSectionBreak: true,
   toggleMark: true, formatRange: true, clearFormatting: true, setParagraphAttrs: true, applyParagraphStyle: true,
   formatSelection: true, toggleStrike: true, toggleList: true, changeIndent: true, navigateCell: true,

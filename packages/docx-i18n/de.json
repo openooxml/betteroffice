@@ -542,6 +542,12 @@
     "tableInserted": "Tabelle eingefügt",
     "tableDeleted": "Tabelle gelöscht"
   },
+  "pasteOptions": {
+    "button": "Einfügeoptionen (Strg)",
+    "keepSource": "Ursprüngliche Formatierung beibehalten",
+    "merge": "Formatierung zusammenführen",
+    "textOnly": "Nur Text übernehmen"
+  },
   "contextMenu": {
     "ariaLabel": "KI-Aktionsmenü",
     "textMenuAriaLabel": "Textbearbeitungsmenü",
@@ -587,6 +593,7 @@
     "noDocumentLoaded": "Kein Dokument geladen",
     "failedToLoad": "Dokument konnte nicht geladen werden",
     "failedToLoadDescription": "Die Datei ist möglicherweise beschädigt oder verwendet etwas, das dieser Editor noch nicht lesen kann.",
+    "recoveryFailedDescription": "Der Editor wurde beendet und konnte Ihre letzten Änderungen nicht wiederherstellen. Die Datei selbst ist unbeschädigt.",
     "failedToLoadDamaged": "Die Datei ist beschädigt oder kein vollständiges Word-Dokument.",
     "failedToLoadUnsupported": "Dieses Dokument enthält etwas, das dieser Editor noch nicht lesen kann.",
     "editorUnavailable": "Der Editor konnte nicht geladen werden",
@@ -874,6 +881,7 @@
     "toolbarGroup": "Plugins",
     "panelTabs": "Plugin-Bereiche",
     "collapsePanel": "{title} einklappen",
-    "expandPanel": "{title} ausklappen"
+    "expandPanel": "{title} ausklappen",
+    "miniToolbar": "Formatierung der Auswahl"
   }
 }

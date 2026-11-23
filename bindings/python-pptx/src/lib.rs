@@ -1600,7 +1600,7 @@ impl PyPresentation {
 
     #[getter]
     fn is_collaborative(&self) -> bool {
-        self.collaborative || self.presentation.is_collaborative()
+        self.presentation.is_collaborative()
     }
 
     fn set_collaborative(&self) -> PyResult<()> {

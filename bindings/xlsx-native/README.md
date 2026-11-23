@@ -10,7 +10,7 @@ An installed font pack that cannot be used (another release, missing files, an u
 faces substituted; the process warns once per pack with code `BETTEROFFICE_FONT_PACK`, and `fontPackDiagnostics()`
 lists each one with the pack and the reason.
 
-Worker sessions on Node.js >= 20.16 / 22.3 run on `worker_threads`, keeping the process alive until the session is disposed.
+Worker sessions on Node.js >= 20.19 / 22.12 run on `worker_threads`, keeping the process alive until the session is disposed.
 
 ```sh
 npm install @betteroffice/xlsx-native

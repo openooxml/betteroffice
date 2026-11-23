@@ -228,6 +228,10 @@ export type ResidentEngineSession = Pick<
   /** Seeds the opened package's comment metadata, unless the session joined from a peer's state. */
   initializeComments(recovery?: ResidentCommentRecoveryState): void;
   commentRecoveryState?(): ResidentCommentRecoveryState;
+  /** The list a paragraph goes on for Bullets or Numbering; an engine without it refuses the list toggle. */
+  ensureListDefinition?: YrsSession['ensureListDefinition'];
+  /** Whether the style a paragraph has now numbers it; without it the flag stored at load decides. */
+  paragraphStyleNumbers?: YrsSession['paragraphStyleNumbers'];
   mediaDataUrl(token: string): string | null;
   /** The pictures whose display copy is SVG, which a worker cannot decode. */
   svgMedia?(): DocxSvgMedia[];
@@ -912,6 +916,10 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
       JSON.parse(session.clear_formatting(...rangeArgs(range), suggesting?.name, suggesting?.date))),
     setParagraphAttrs: (range, attrs, author) => applyCommandMutation(range.story, () =>
       session.set_paragraph_attrs(...rangeArgs(range), JSON.stringify(attrs), author?.name, author?.date)),
+    ensureListDefinition: (story, paraId, kind, lead) => applyCommandMutation(story, () =>
+      JSON.parse(lead === undefined ? session.ensure_list_definition(story, paraId, kind)
+        : session.ensure_list_definition_after(story, paraId, kind, lead))),
+    paragraphStyleNumbers: (story, paraId) => session.paragraph_style_numbers?.(story, paraId),
     applyParagraphStyle: (range, styleId, author) => applyCommandMutation(range.story, () =>
       session.apply_paragraph_style(...rangeArgs(range), styleId, author?.name, author?.date)),
     addComment: (ranges, author, date, body) => {

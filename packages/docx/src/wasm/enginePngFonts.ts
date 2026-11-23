@@ -1,4 +1,5 @@
 import type { BundledFontFace } from '@betteroffice/fonts';
+import { importFonts } from '../../../../shared/office-session/fontModules';
 import type { BundledFontLoader, BundledFontProvider } from '../layout/measure/fontRegistry';
 import { fontUnavailable } from '../layout/render/png';
 
@@ -122,7 +123,7 @@ export function faceLoadFailure(failures: readonly FailedFaceLoad[]): ReturnType
 
 /** `provider` wrapped by {@link recordFaceLoads}, with the font package it loads from. */
 export async function recordProviderFaceLoads(provider: BundledFontProvider): Promise<RecordedFontProvider> {
-  return recordFaceLoads(provider, await import('@betteroffice/fonts'));
+  return recordFaceLoads(provider, await importFonts());
 }
 
 /** `work`'s result, or a rejection with the signal's reason as soon as it aborts; `work` itself runs on. */

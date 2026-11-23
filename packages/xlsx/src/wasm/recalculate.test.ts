@@ -52,10 +52,55 @@ describe('saving recalculated values', () => {
     }
   });
 
-  it('saves the values calculated at open when the file asks for a full calculation', async () => {
-    const handle = openWorkbook(await book('<calcPr fullCalcOnLoad="1" forceFullCalc="1"/>'), { calculation: CALCULATION });
+  it('returns the file unchanged on a save without edits when the file asks for a full calculation', async () => {
+    const cells = STALE_CELLS.replace('</row>', '<c r="C1"><f>1+1</f></c><c r="D1"><f>2+3</f><v/></c></row>');
+    const source = await book('<calcPr fullCalcOnLoad="1" forceFullCalc="1"/>', cells);
+    for (const options of [{}, { calculation: CALCULATION }, { recalculate: 'stale' }, { collaborative: true }] as const) {
+      const handle = openWorkbook(source, options);
+      try {
+        const { bytes, warnings } = handle.saveWithWarnings();
+        expect(new Uint8Array(handle.save())).toEqual(new Uint8Array(source));
+        expect(new Uint8Array(bytes)).toEqual(new Uint8Array(source));
+        expect(warnings).toEqual([]);
+      } finally {
+        handle.dispose();
+      }
+    }
+  });
+
+  it('saves the values recalculate() produced in a file that asks for a full calculation', async () => {
+    const cells = STALE_CELLS.replace('</row>', '<c r="C1"><f>1+1</f></c></row>');
+    const handle = openWorkbook(await book('<calcPr fullCalcOnLoad="1"/>', cells), { calculation: CALCULATION });
     try {
-      expect(await savedCaches(handle.save())).toEqual(['5', '999']);
+      handle.recalculate();
+      expect(await savedCaches(handle.save())).toEqual(['5', '999', '2']);
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  it('keeps cached array booleans on a save without edits', async () => {
+    const cells = '<row r="1"><c r="A1" t="b"><f t="array" ref="A1:A3">FALSE()</f><v>1</v></c></row>'
+      + '<row r="2"><c r="A2" t="b"><v>1</v></c></row>'
+      + '<row r="3"><c r="A3" t="b"><v>1</v></c></row>';
+    const source = await book('<calcPr fullCalcOnLoad="1"/>', cells);
+    const handle = openWorkbook(source);
+    try {
+      expect(new Uint8Array(handle.save())).toEqual(new Uint8Array(source));
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  it('keeps iterative caches when the file asks for a full calculation', async () => {
+    const cells = '<row r="1">'
+      + '<c r="A1"><f>(A1+10)/2</f><v>10</v></c><c r="B1"><f>A1*2</f><v>20</v></c>'
+      + '<c r="C1"><v>5</v></c><c r="D1"><f>C1+1</f><v>999</v></c>'
+      + '<c r="E1"><f>F1/2+10</f><v>20</v></c><c r="F1"><f>E1</f><v>20</v></c></row>';
+    const source = await book('<calcPr iterate="1" fullCalcOnLoad="1"/>', cells);
+    const handle = openWorkbook(source);
+    try {
+      expect(new Uint8Array(handle.save())).toEqual(new Uint8Array(source));
     } finally {
       handle.dispose();
     }

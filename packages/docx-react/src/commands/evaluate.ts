@@ -271,6 +271,12 @@ function numberingOf(env: DocxCommandEnvironment): { numId?: number; ilvl?: numb
     : null;
 }
 
+function listKindOf(env: DocxCommandEnvironment): 'bullet' | 'numbered' | null {
+  if (!numberingOf(env)?.numId || !env.selection || env.selection === 'unsupported') return null;
+  const properties = env.selection.context.paragraphProperties;
+  return properties.listIsBullet === true || properties.listNumFmt === 'bullet' ? 'bullet' : 'numbered';
+}
+
 function documentGate(env: DocxCommandEnvironment): Gate {
   switch (env.status) {
     case 'unavailable':
@@ -574,11 +580,9 @@ function evaluate<K extends DocxCommandId>(
     case 'paragraphSpacingDialog':
       return { gate: textGate(env) };
     case 'bulletList':
-      return { gate: textGate(env), active: numberingOf(env)?.numId === 1 };
-    case 'numberedList': {
-      const numbering = numberingOf(env);
-      return { gate: textGate(env), active: numbering?.numId != null && numbering.numId !== 1 };
-    }
+      return { gate: textGate(env), active: listKindOf(env) === 'bullet' };
+    case 'numberedList':
+      return { gate: textGate(env), active: listKindOf(env) === 'numbered' };
     case 'indent':
       return { gate: textGate(env) };
     case 'outdent': {

@@ -63,7 +63,7 @@ type EditorRoute = { route: 'hybrid' | 'in-thread' | 'capability-fallback' | 'sy
 
 export function chooseDocxEditorRoute(props: RouteProps): EditorRoute {
   if (props[LEGACY_SYNC_API_PROP] === true) {
-    return { route: 'hybrid', warning: `[DocxEditor] ${LEGACY_SYNC_API_PROP}={true} selects the deprecated hybrid synchronous API, removed in 0.6.0.` };
+    return { route: 'hybrid', warning: `[DocxEditor] ${LEGACY_SYNC_API_PROP}={true} selects the deprecated hybrid synchronous API, removed in 0.7.0.` };
   }
   if (props.experimentalWorkerOpen === false) return { route: 'in-thread' };
   if (missingCapabilities().length) return { route: 'capability-fallback' };

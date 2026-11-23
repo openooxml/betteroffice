@@ -542,6 +542,12 @@
     "tableInserted": "تم إدراج جدول",
     "tableDeleted": "تم حذف جدول"
   },
+  "pasteOptions": {
+    "button": "خيارات اللصق (Ctrl)",
+    "keepSource": "الاحتفاظ بتنسيق المصدر",
+    "merge": "دمج التنسيق",
+    "textOnly": "الاحتفاظ بالنص فقط"
+  },
   "contextMenu": {
     "ariaLabel": "قائمة إجراءات الذكاء الاصطناعي",
     "textMenuAriaLabel": "قائمة تحرير النص",
@@ -587,6 +593,7 @@
     "noDocumentLoaded": "لم يتم تحميل أي مستند",
     "failedToLoad": "تعذر فتح هذا المستند",
     "failedToLoadDescription": "قد يكون الملف تالفًا، أو يستخدم شيئًا لا يستطيع هذا المحرر قراءته بعد.",
+    "recoveryFailedDescription": "توقف المحرر وتعذّر عليه استعادة تغييراتك الأخيرة. الملف نفسه سليم.",
     "failedToLoadDamaged": "الملف تالف أو ليس مستند Word كاملاً.",
     "failedToLoadUnsupported": "يستخدم هذا المستند شيئًا لا يستطيع هذا المحرر قراءته بعد.",
     "editorUnavailable": "تعذر تحميل المحرر",
@@ -874,6 +881,7 @@
     "toolbarGroup": "المكونات الإضافية",
     "panelTabs": "لوحات المكونات الإضافية",
     "collapsePanel": "طي {title}",
-    "expandPanel": "توسيع {title}"
+    "expandPanel": "توسيع {title}",
+    "miniToolbar": "تنسيق التحديد"
   }
 }

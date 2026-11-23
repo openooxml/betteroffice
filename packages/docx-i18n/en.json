@@ -542,6 +542,12 @@
     "tableInserted": "Inserted table",
     "tableDeleted": "Deleted table"
   },
+  "pasteOptions": {
+    "button": "Paste Options (Ctrl)",
+    "keepSource": "Keep Source Formatting",
+    "merge": "Merge Formatting",
+    "textOnly": "Keep Text Only"
+  },
   "contextMenu": {
     "ariaLabel": "AI actions menu",
     "textMenuAriaLabel": "Text editing menu",
@@ -587,6 +593,7 @@
     "noDocumentLoaded": "No document loaded",
     "failedToLoad": "Couldn't open this document",
     "failedToLoadDescription": "The file may be damaged, or it uses something this editor can't read yet.",
+    "recoveryFailedDescription": "The editor stopped and could not restore your recent changes. The file itself is not damaged.",
     "failedToLoadDamaged": "The file is damaged or isn't a complete Word document.",
     "failedToLoadUnsupported": "This document uses something this editor can't read yet.",
     "editorUnavailable": "The editor couldn't load",
@@ -874,6 +881,7 @@
     "toolbarGroup": "Plugins",
     "panelTabs": "Plugin panels",
     "collapsePanel": "Collapse {title}",
-    "expandPanel": "Expand {title}"
+    "expandPanel": "Expand {title}",
+    "miniToolbar": "Selection formatting"
   }
 }

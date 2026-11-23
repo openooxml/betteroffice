@@ -718,6 +718,40 @@ def test_render_sheet_frames_the_used_range(sample_bytes):
     assert workbook.render_sheet(0, range="A1:D12").bytes == workbook.render_png({"sheet": 0, "range": "A1:D12"}).bytes
 
 
+def test_a_sheet_renders_itself_without_a_target(sample_bytes):
+    workbook = bo.Workbook.open(sample_bytes)
+    summary = workbook["Summary"]
+    own = workbook.render_sheet(1)
+    assert own.bytes != workbook.render_sheet(0).bytes
+    assert summary.render_png().bytes == own.bytes
+    assert summary.render_png(scale=2.0).bytes == workbook.render_sheet(1, scale=2.0).bytes
+    ranged = workbook.render_sheet(1, range="A1:B2", max_width=40)
+    assert summary.render_png(range="A1:B2", max_width=40).bytes == ranged.bytes
+
+
+def test_a_sheet_fills_itself_into_a_target_without_a_sheet(sample_bytes):
+    workbook = bo.Workbook.open(sample_bytes)
+    summary = workbook["Summary"]
+    ranged = workbook.render_png({"sheet": 1, "range": "A1:B2"})
+    assert summary.render_png({"range": "A1:B2"}).bytes == ranged.bytes
+    viewport = {"x": 0, "y": 0, "width": 128, "height": 64}
+    framed = workbook.render_png({"sheet": 1, "viewport": viewport}, scale=2.0)
+    assert summary.render_png({"viewport": viewport}, scale=2.0).bytes == framed.bytes
+
+
+def test_a_sheet_renders_a_target_that_names_a_sheet_as_given(sample_bytes):
+    workbook = bo.Workbook.open(sample_bytes)
+    target = {"sheet": 0, "range": "A1:D12"}
+    expected = workbook.render_png(target, scale=2.0)
+    assert workbook["Summary"].render_png(target, scale=2.0).bytes == expected.bytes
+
+
+def test_a_sheet_refuses_a_target_together_with_a_range(sample_bytes):
+    sheet = bo.Workbook.open(sample_bytes)["Summary"]
+    with pytest.raises(TypeError):
+        sheet.render_png({"range": "A1:B2"}, range="A1:B2")
+
+
 def test_png_target_keeps_the_sheet_key_errors(sample_bytes):
     workbook = bo.Workbook.open(sample_bytes)
     with pytest.raises(IndexError):
@@ -742,3 +776,45 @@ def test_png_caps_do_not_hide_an_invalid_viewport(sample_bytes, width):
     target = {"sheet": 0, "viewport": {"x": 0, "y": 0, "width": width, "height": 64}}
     with pytest.raises(bo.RangeError):
         bo.Workbook.open(sample_bytes).render_png(target, max_width=40)
+
+
+def _full_calculation_book(cells: str) -> bytes:
+    main = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+    rels = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    package = "http://schemas.openxmlformats.org/package/2006/relationships"
+    parts = {
+        "[Content_Types].xml": '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>',
+        "_rels/.rels": f'<Relationships xmlns="{package}"><Relationship Id="rId1" Type="{rels}/officeDocument" Target="xl/workbook.xml"/></Relationships>',
+        "xl/workbook.xml": f'<workbook xmlns="{main}" xmlns:r="{rels}"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets><calcPr fullCalcOnLoad="1"/></workbook>',
+        "xl/_rels/workbook.xml.rels": f'<Relationships xmlns="{package}"><Relationship Id="rId1" Type="{rels}/worksheet" Target="worksheets/sheet1.xml"/></Relationships>',
+        "xl/worksheets/sheet1.xml": f'<worksheet xmlns="{main}"><sheetData>{cells}</sheetData></worksheet>',
+    }
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, xml in parts.items():
+            archive.writestr(name, xml)
+    return out.getvalue()
+
+
+def test_a_no_edit_save_returns_the_source_bytes(tmp_path):
+    source = _full_calculation_book(
+        '<row r="1"><c r="A1"><f>SUM(2,3)</f><v>999</v></c>'
+        '<c r="B1"><f>4+5</f></c><c r="C1"><f>1+1</f><v/></c></row>'
+    )
+    for workbook in (
+        bo.Workbook.open(source),
+        bo.Workbook.open_recalculated(source),
+        bo.Workbook.open_collaborative(source, recalculate=True),
+    ):
+        assert workbook.save() == source
+        assert workbook.save_with_warnings().bytes == source
+        path = tmp_path / "saved.xlsx"
+        workbook.save_path(path)
+        assert path.read_bytes() == source
+
+    recalculated = bo.Workbook.open_recalculated(source)
+    assert recalculated.value("Sheet1", "B1") == pytest.approx(9.0)
+    recalculated.recalculate()
+    with zipfile.ZipFile(io.BytesIO(recalculated.save())) as saved:
+        sheet = saved.read("xl/worksheets/sheet1.xml").decode()
+    assert "<v>5</v>" in sheet and "<v>9</v>" in sheet and "<v>2</v>" in sheet
