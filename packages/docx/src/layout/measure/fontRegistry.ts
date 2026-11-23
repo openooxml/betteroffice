@@ -7,6 +7,7 @@ export interface ProgressiveFontFace {
 }
 
 import { baseLatinAlias, baseLatinCandidate, coverageFromBits, symbolFamily, wordsCoverage, type FontCoverage } from './fontCoverage';
+import { isImplicitFontProvider } from './defaultFontProvider';
 import { isImplicitFontCdnError, reportImplicitCdnFailure } from '../../../../../shared/fontPackDiagnostics';
 
 const standInKey = Symbol.for('@betteroffice/docx/standInFamily');
@@ -78,7 +79,7 @@ export type FontScript = 'cjk-sc' | 'cjk-tc' | 'cjk-jp' | 'cjk-kr' | 'arabic' | 
  */
 export interface BundledFontProvider {
   /** @internal */
-  resolveBaseLatin?(bold: boolean, italic: boolean): BundledFontLoader | undefined;
+  resolveBaseLatin?(bold: boolean, italic: boolean, family?: string): BundledFontLoader | undefined;
   /** Resolve a Word family to bundled metric-compatible face byte loaders, or undefined. */
   resolve(family: string, bold: boolean, italic: boolean): BundledFontLoader | undefined;
   /** Like {@link BundledFontProvider.resolve}, but also accepts bundled family names such as `"Gelasio"`, and leaves missing styles for browser synthesis. */
@@ -589,9 +590,10 @@ export class TextMeasureFontRegistry {
     const standsIn = standIn?.standsIn(family) === true;
     const noOtherFace = ids.length === 0;
     const tail = !standsIn || noOtherFace || this.standInTail;
+    const canUseFallback = () => !cdnUnavailable || !isImplicitFontProvider(bundled);
     let lastResort: BundledFontLoader | undefined;
     try {
-      if (tail) lastResort = bundled?.resolveLastResort?.(family, bold, italic, 'word');
+      if (tail && canUseFallback()) lastResort = bundled?.resolveLastResort?.(family, bold, italic, 'word');
     } catch (error) {
       retryable = true;
       this.warnFailure(
@@ -607,7 +609,7 @@ export class TextMeasureFontRegistry {
     }
 
     try {
-      const coverage = tail ? bundled?.resolveGlyphFallback?.(family, bold, italic, 'word') : undefined;
+      const coverage = tail && canUseFallback() ? bundled?.resolveGlyphFallback?.(family, bold, italic, 'word') : undefined;
       if (coverage) {
         const id = await fromCdn(this.registerLastResort(`${key}|coverage`, coverage, family));
         if (id !== null && !ids.includes(id)) ids.push(id);
@@ -617,8 +619,8 @@ export class TextMeasureFontRegistry {
       retryable = true;
     }
 
-    if (ids.length === 0 && (loader || lastResort)) {
-      const base = bundled?.resolveBaseLatin?.(bold, italic);
+    if (ids.length === 0 && (loader || lastResort) && canUseFallback()) {
+      const base = bundled?.resolveBaseLatin?.(bold, italic, family);
       if (base) {
         const id = await fromCdn(this.registerLastResort(`${key}|base-latin`, base, family));
         if (id !== null) ids.push(id);

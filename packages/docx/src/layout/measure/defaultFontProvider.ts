@@ -132,6 +132,10 @@ function implicitFontProvider(
   };
   const implicit: BundledFontProvider = {
     ...provider,
+    resolveBaseLatin: (bold, italic, family) => {
+      const loader = provider.resolveBaseLatin?.(bold, italic);
+      return family === undefined ? loader : checkedFamilyFallback(loader, family, bold, italic);
+    },
     resolve: (family, bold, italic) => checked(
       manager.resolveMetricCompatFace(family, bold, italic) ?? manager.resolveBundledFamilyFace(family, bold, italic),
       (source) => source.resolve(family, bold, italic) ?? source.resolveFamily(family, bold, italic)

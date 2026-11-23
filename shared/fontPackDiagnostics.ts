@@ -7,7 +7,7 @@ export interface FontPackDiagnostic {
   detail: string;
 }
 
-export function isImplicitFontCdnError(error: unknown): error is Error & { diagnostic: FontPackDiagnostic } {
+export function isImplicitFontCdnError(error: unknown): error is Error & { diagnostic: FontPackDiagnostic; retryAt?: number } {
   return error instanceof Error &&
     (error as { diagnostic?: FontPackDiagnostic }).diagnostic?.reason === 'cdn-unavailable';
 }

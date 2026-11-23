@@ -15,7 +15,7 @@ export type FontRequestPolicy = number | Pack;
 class ImplicitFontCdnError extends Error {
   readonly diagnostic: FontPackDiagnostic;
 
-  constructor(pack: Pack, cause: unknown) {
+  constructor(pack: Pack, cause: unknown, readonly retryAt: number) {
     const reason = cause instanceof Error ? cause.message : String(cause);
     const detail = `Cannot load @betteroffice/fonts-${pack} from cdn.jsdelivr.net: ${reason}. To opt out, install @betteroffice/fonts-${pack} or call configureFontCdn({ baseUrl: false }).`;
     super(detail);
@@ -51,9 +51,17 @@ function coolingFailure(base: ImplicitFontCdnBase, href: string): Error | undefi
   if (invalid) base.invalid.delete(href);
 }
 
+export function checkImplicitUrlCooldown(url: URL): void {
+  const base = implicitFontCdnBases().get(baseKey(url));
+  const failure = base && coolingFailure(base, url.href);
+  if (failure) throw failure;
+}
+
 export function checkImplicitSliceCooldown(index: URL): void {
   const base = implicitFontCdnBases().get(baseKey(index));
   if (!base) return;
+  const indexFailure = coolingFailure(base, index.href);
+  if (indexFailure) throw indexFailure;
   const root = new URL('./', index).href;
   for (const href of base.invalid.keys()) {
     if (!href.startsWith(root)) continue;
@@ -64,7 +72,9 @@ export function checkImplicitSliceCooldown(index: URL): void {
 
 export async function loadImplicitFontAsset<T>(
   file: string, url: URL, pack: Pack, load: (bytes: ArrayBuffer, check: CheckFontAsset) => Promise<T>,
+  checkDependencies?: () => void,
 ): Promise<T> {
+  checkDependencies?.();
   const implicitBases = implicitFontCdnBases();
   const key = baseKey(url);
   let state = implicitBases.get(key);
@@ -76,10 +86,10 @@ export async function loadImplicitFontAsset<T>(
   const cooling = coolingFailure(base, url.href);
   if (cooling) throw cooling;
   const fail = (cause: unknown, invalidBytes = false): ImplicitFontCdnError => {
-    const error = new ImplicitFontCdnError(pack, cause);
-    if (implicitBases.get(key) !== base) return error;
     const now = Date.now();
     const until = now + COOLDOWN_MS;
+    const error = new ImplicitFontCdnError(pack, cause, until);
+    if (implicitBases.get(key) !== base) return error;
     if (failureScope(cause, invalidBytes) === 'base') base.unavailable = { error, until };
     else base.invalid.set(url.href, { error, until });
     if (base.warnedUntil <= now) {
@@ -92,6 +102,7 @@ export async function loadImplicitFontAsset<T>(
   const pending = base.transfer.then(async () => {
     const cooling = coolingFailure(base, url.href);
     if (cooling) throw cooling;
+    checkDependencies?.();
     try {
       const bytes = await readImplicitFontBytes(file, url);
       return { bytes, unavailable: base.unavailable };
@@ -108,9 +119,9 @@ export async function loadImplicitFontAsset<T>(
   });
   if (base.unavailable === unavailable) {
     base.unavailable = undefined;
-    base.warnedUntil = 0;
+    const now = Date.now();
+    if ([...base.invalid.values()].every(({ until }) => until <= now)) base.warnedUntil = 0;
   }
-  base.invalid.clear();
   return data;
 }
 

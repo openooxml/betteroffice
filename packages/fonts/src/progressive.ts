@@ -2,7 +2,7 @@ import type { FontDecoder } from './decode';
 import { absoluteHref } from './assetHref';
 import { chunkEntries, parseSkeleton, textChunks, type SliceSkeleton } from './slices';
 import { sha256 } from './sha256';
-import { loadImplicitFontAsset } from './fontCdn';
+import { checkImplicitSliceCooldown, loadImplicitFontAsset } from './fontCdn';
 import { isImplicitFontCdnError, reportImplicitCdnFailure } from '../../../shared/fontPackDiagnostics';
 
 /**
@@ -144,10 +144,12 @@ export function sliceSourceOf(face: ProgressiveFontFace): Promise<SliceSource> |
 
 async function readChecked<T>(
   transport: SliceTransport, file: string, validate: (bytes: ArrayBuffer) => Promise<T>,
+  checkCooldown?: (url: URL) => void,
 ): Promise<T> {
   if (!transport.url?.implicitCdn?.(file)) return validate(await transport.read(file));
   const url = await transport.url(file);
-  return loadImplicitFontAsset(file, url, 'cjk', (bytes, check) => check(() => validate(bytes)));
+  return loadImplicitFontAsset(file, url, 'cjk', (bytes, check) => check(() => validate(bytes)),
+    checkCooldown && (() => checkCooldown(url)));
 }
 
 async function reportSliceFailure<T>(pending: Promise<T>): Promise<T> {
@@ -180,9 +182,11 @@ export async function openProgressiveFace(ref: SliceRef, transport: SliceTranspo
     const index = JSON.parse(new TextDecoder().decode(indexBytes)) as SliceIndex;
     if (index.format !== 1) throw new Error(`Unsupported font slice index format in ${ref.index}`);
     return index;
-  }));
+  }, checkImplicitSliceCooldown));
+  const skeletonFile = readFile(transport, index.skeleton);
+  const sequential = transport.url?.implicitCdn?.(index.skeleton.file) || transport.url?.implicitCdn?.(index.core.file);
   const [skeletonBytes, core] = await reportSliceFailure(Promise.all([
-    readFile(transport, index.skeleton), readFile(transport, index.core),
+    skeletonFile, sequential ? skeletonFile.then(() => readFile(transport, index.core)) : readFile(transport, index.core),
   ]));
   const skeleton: SliceSkeleton = parseSkeleton(skeletonBytes);
   const files = new Map<number, SliceFile>(index.chunks.map((chunk) => [chunk.id!, chunk]));
