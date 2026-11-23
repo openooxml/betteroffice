@@ -1,4 +1,4 @@
-import { getFontCdnConfiguration } from './fontCdn';
+import { getFontCdnConfiguration } from './fontCdnRuntime';
 import { createFontPackResponder, type FontPackReply, type FontPackSource } from './optionalFontPacks';
 
 const importFontAssets: FontPackSource = async (pack) => {

@@ -1,4 +1,4 @@
-import { fontCdnCacheKey, pngFontCdnCacheKey } from '../../../../shared/office-session/fontCdn';
+import { fontCdnCacheKey, pngFontCdnCacheKey } from '../../../../shared/office-session/fontCdnRuntime';
 import { buildResidentRegionLayoutRequest, computeLayout, documentRenderEnv } from '../editor/computeLayout';
 import { createRustMeasureSource, type BundledFontProvider, type ResidentFontRequirement } from '../layout/measure';
 import { resolveCompleteFontSelection } from '../layout/measure/defaultFontProvider';

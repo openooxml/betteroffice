@@ -1,5 +1,5 @@
 import { SessionFailure } from './types';
-import type { FontCdnConfiguration } from './fontCdn';
+import type { FontCdnConfiguration } from './fontCdnRuntime';
 
 export type FontAssetKind = 'base' | 'latin' | 'intl' | 'cjk' | 'decoder';
 export type FontPackUrls = Record<string, string>;

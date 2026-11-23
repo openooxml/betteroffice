@@ -16,7 +16,7 @@ import { fontAssetResponse, withBrowserFontGlobals } from './fontAssets.test-sup
 import { openSlicedFace, sliceSourceOf } from './progressive-entry';
 import { parseSkeleton } from './slices';
 import { writeFontCdnTree } from '../../../scripts/fonts/cdn-tree';
-import { getFontCdnConfiguration, implicitFontCdnBases, setFontCdnConfiguration, type FontCdnConfiguration } from '../../../shared/office-session/fontCdn';
+import { getFontCdnConfiguration, implicitFontCdnBases, setFontCdnConfiguration, type FontCdnConfiguration } from '../../../shared/office-session/fontCdnRuntime';
 import { createFontPackResponder, createWorkerFontPacks } from '../../../shared/office-session/optionalFontPacks';
 import { setWorkerFontAssets } from './workerAssets';
 import * as worker from './worker';

@@ -1,5 +1,5 @@
 import type { BundledFontFace, BundledFontScript } from '@betteroffice/fonts';
-import { pngFontCdnCacheKey } from '../../../../shared/office-session/fontCdn';
+import { pngFontCdnCacheKey } from '../../../../shared/office-session/fontCdnRuntime';
 import { importFonts } from '../../../../shared/office-session/fontModules';
 import { PngExportError } from '../../../../shared/office-session/pngExportError';
 import type { RequestedFontFace } from '../../../../shared/pptxDefaultFonts';

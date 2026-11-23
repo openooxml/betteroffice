@@ -5,9 +5,9 @@ import type { FontPackDiagnostic } from '../../../shared/fontPackDiagnostics';
 import {
   getFontCdnConfiguration, implicitFontCdnBases, JSDELIVR, setFontCdnConfiguration, STALL_MS,
   type FontCdnConfiguration, type ImplicitFontCdnBase,
-} from '../../../shared/office-session/fontCdn';
+} from '../../../shared/office-session/fontCdnRuntime';
 
-export { fontCdnCacheKey, isBrowserFontPage, workerFontCdnConfiguration, type FontCdnConfiguration } from '../../../shared/office-session/fontCdn';
+export { fontCdnCacheKey, isBrowserFontPage, workerFontCdnConfiguration, type FontCdnConfiguration } from '../../../shared/office-session/fontCdnRuntime';
 
 type Pack = FontPackDiagnostic['pack'];
 export type FontRequestPolicy = number | Pack;

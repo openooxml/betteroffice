@@ -687,7 +687,7 @@ describe('sibling package references', () => {
     });
     const version = packages.find(({ name }) => name === latin.name)!.version;
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain(`${fonts.name}@${version} depends on ${latin.name}@${version}`);
+    expect(result.stderr).not.toContain(`${fonts.name}@${version} depends on ${latin.name}@${version}`);
     expect(result.stderr).toContain(`${fonts.name} builds references to ${latin.name}@${version}`);
   });
 });

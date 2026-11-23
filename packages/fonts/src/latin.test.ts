@@ -10,9 +10,10 @@ import { isLatinFont } from './packed';
 
 const latin = BUNDLED_FONTS.filter((face) => isLatinFont(face.file));
 
-test('ships Latin at the fixed version as a regular dependency', () => {
+test('ships Latin at the fixed version as an optional peer', () => {
   expect(latinPackage.version).toBe(fontsPackage.version);
-  expect(fontsPackage.dependencies['@betteroffice/fonts-latin']).toBe('workspace:*');
+  expect(fontsPackage.peerDependencies['@betteroffice/fonts-latin']).toBe('workspace:^0');
+  expect(fontsPackage.peerDependenciesMeta['@betteroffice/fonts-latin'].optional).toBe(true);
   expect(latinPackage.exports['.'].import).toBe('./dist/index.js');
   expect(latinPackage.files).toEqual(['dist', 'assets', 'LICENSE', 'LICENSES', 'README.md']);
   expect(pack.schema).toBe(1);

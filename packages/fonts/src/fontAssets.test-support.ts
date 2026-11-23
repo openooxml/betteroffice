@@ -1,6 +1,6 @@
 import { file } from 'bun';
 import baseLatinManifest from '../assets/base-latin.json';
-import { getFontCdnConfiguration, implicitFontCdnBases } from '../../../shared/office-session/fontCdn';
+import { getFontCdnConfiguration, implicitFontCdnBases } from '../../../shared/office-session/fontCdnRuntime';
 import { createFontRuntime } from './fontRuntime';
 import { fontAssetResponse as baseFontAssetResponse } from './test-assets';
 
