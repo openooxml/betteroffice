@@ -61,7 +61,7 @@ test('DOCX substitutes after a slice index 404 and fetches slices again only aft
   const installed: number[] = [];
   try {
     setFontCdnConfiguration(undefined);
-    const provider = fontRuntimeWithoutPacks().createFontProvider(undefined, { retain: false });
+    const provider = fontRuntimeWithoutPacks().createFontProvider(undefined, { retain: false, strict: false });
     const load = provider.resolveScriptFallback('cjk-jp', false, false)!;
     const { openSlicedFace } = await import('@betteroffice/fonts/progressive');
     const registry = new TextMeasureFontRegistry({ registerFont: (bytes) => installed.push(bytes.byteLength) }, {

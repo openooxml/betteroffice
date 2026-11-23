@@ -407,7 +407,7 @@ test('default providers retain the decoder of each editor runtime', async () => 
   expect(a).not.toBe(b);
   expect((await a!.resolve('Arial', false, false)!()).byteLength).toBe(4);
   expect((await b!.resolve('Arial', false, false)!()).byteLength).toBe(8);
-  expect(seen).toEqual([first, second]);
+  expect(seen).toEqual([{ ...first, strict: false }, { ...second, strict: false }]);
 });
 
 test('a Japanese preflight settles atomically when font sources are unavailable', async () => {

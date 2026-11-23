@@ -8,6 +8,8 @@ import { Worker } from 'node:worker_threads';
 import latin from '../../fonts-latin/assets/manifest.json';
 import intl from '../../fonts-intl/assets/manifest.json';
 import cjk from '../../fonts-cjk/assets/manifest.json';
+import baseLatin from '../assets/base-latin.json';
+import { BASE_LATIN_FONT_ASSET_URLS } from './base-latin';
 import { decodeFontFace, type FontDecoder } from './decode';
 import * as fontCdn from './fontCdn';
 import { createFontRuntime } from './fontRuntime';
@@ -501,6 +503,83 @@ function observeCdnFailures() {
   };
 }
 
+const thai = fonts.resolveScriptFallbackFace('thai', false, false)!;
+const arial = fonts.resolveMetricCompatFace('Arial', false, false)!;
+const loadCases = [
+  { name: 'failed default CDN fetch', face: regular, cdn: implicitCdn, missing: 'latin',
+    error: { name: 'ImplicitFontCdnError', diagnostic: { pack: 'latin', reason: 'cdn-unavailable' } },
+    hash: baseLatin.faces[0]!.sha256, warnings: 1 },
+  { name: 'absent intl pack', face: thai, cdn: undefined, missing: 'intl',
+    error: { name: 'MissingFontAddonError', message: expect.stringContaining('install @betteroffice/fonts-intl') },
+    hash: latin.faces.find(({ file }) => file === arial.file)!.sha256, warnings: 0 },
+  { name: 'absent CJK pack', face: japanese, cdn: undefined, missing: 'cjk', error: undefined,
+    hash: latin.faces.find(({ file }) => file === arial.file)!.sha256, warnings: 0 },
+  { name: 'installed intl pack', face: thai, cdn: implicitCdn, missing: undefined, error: undefined,
+    hash: intl.faces.find(({ file }) => file === thai.file)!.sha256, warnings: 0 },
+] as const;
+
+for (const entry of ['loadBundledFontBytes', 'registerBundledFontFace', 'provider loader', 'provider readOnlyBytes'] as const) {
+  for (const scenario of loadCases) {
+    test(`${entry} with ${scenario.name} in default and editor modes`, async () => {
+      const observed = observeCdnFailures();
+      const manager = createFontRuntime(async (pack) => {
+        if (pack === scenario.missing) return { cdn: scenario.cdn };
+        if (pack === 'base') return { urls: BASE_LATIN_FONT_ASSET_URLS };
+        const manifest = { latin, intl, cjk }[pack];
+        return { urls: Object.fromEntries(manifest.faces.map(({ file }) => [file, () => asset(pack, file)])), cdn: scenario.cdn };
+      });
+      const document = Object.getOwnPropertyDescriptor(globalThis, 'document');
+      const fontFace = Object.getOwnPropertyDescriptor(globalThis, 'FontFace');
+      const add = mock((_face: { bytes: ArrayBuffer }) => {});
+      if (entry === 'registerBundledFontFace') {
+        Object.defineProperty(globalThis, 'document', { configurable: true, value: { fonts: { add } } });
+        Object.defineProperty(globalThis, 'FontFace', { configurable: true, value: class {
+          constructor(_family: string, readonly bytes: ArrayBuffer) {}
+          async load() { return this; }
+        } });
+      }
+      globalThis.fetch = (async (input: RequestInfo | URL) => String(input).startsWith(jsDelivr)
+        ? new Response(null, { status: 503 }) : fontAssetResponse(input)) as typeof fetch;
+      const { face } = scenario;
+      const load = async (options: Parameters<typeof manager.loadBundledFontBytes>[2]) => {
+        if (entry === 'loadBundledFontBytes') return manager.loadBundledFontBytes(face, undefined, options);
+        if (entry === 'registerBundledFontFace') {
+          await manager.registerBundledFontFace(face, undefined, undefined, options);
+          return add.mock.calls.at(-1)![0].bytes;
+        }
+        const provider = manager.createFontProvider(undefined, options);
+        const loader = face.script ? provider.resolveScriptFallback(face.script, false, false)!
+          : provider.resolve('Calibri', false, false)!;
+        return (entry === 'provider readOnlyBytes' ? loader.readOnlyBytes! : loader)();
+      };
+      try {
+        const [editor, defaultLoad] = await Promise.allSettled([load({ decoder, strict: false }), load({ decoder })]);
+        expect(editor).toMatchObject({ status: 'fulfilled' });
+        if (editor.status === 'fulfilled') expect(hash(editor.value)).toBe(scenario.hash);
+        if (scenario.error) {
+          expect(defaultLoad).toMatchObject({ status: 'rejected', reason: scenario.error });
+          if (scenario.missing === 'intl' && defaultLoad.status === 'rejected') {
+            expect(manager.isMissingFontAddon(defaultLoad.reason)).toBe(true);
+          }
+        } else {
+          expect(defaultLoad).toMatchObject({ status: 'fulfilled' });
+          if (defaultLoad.status === 'fulfilled') expect(hash(defaultLoad.value)).toBe(scenario.hash);
+        }
+        expect(observed.warning).toHaveBeenCalledTimes(scenario.warnings);
+        expect(observed.diagnostics).toHaveLength(scenario.warnings);
+      } finally {
+        if (entry === 'registerBundledFontFace') {
+          if (document) Object.defineProperty(globalThis, 'document', document);
+          else Reflect.deleteProperty(globalThis, 'document');
+          if (fontFace) Object.defineProperty(globalThis, 'FontFace', fontFace);
+          else Reflect.deleteProperty(globalThis, 'FontFace');
+        }
+        observed.restore();
+      }
+    });
+  }
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((complete) => { resolve = complete; });
@@ -707,7 +786,7 @@ for (const failure of ['blocked', 403, 404, 410, 429, 500, 502, 503, 504, 'bad h
       return fontAssetResponse(input);
     }) as typeof fetch;
     try {
-      const mode = { decoder: decode, retain: false };
+      const mode = { decoder: decode, retain: false, strict: false };
       await expect(fonts.loadBundledFontBytes(regular, undefined, mode)).resolves.toEqual(await base(false, false)!());
       await expect(fonts.loadBundledFontBytes(bold, undefined, mode)).resolves.toEqual(await base(true, false)!());
       await expect(fonts.loadBundledFontBytes(regular, undefined, { ...mode, strict: true })).rejects.toThrow();
@@ -1064,7 +1143,7 @@ test('an implicit CJK slice failure allows a later whole-face request and warns 
     return fontAssetResponse(input);
   }) as typeof fetch;
   try {
-    const provider = fonts.createFontProvider(undefined, { decoder, retain: false });
+    const provider = fonts.createFontProvider(undefined, { decoder, retain: false, strict: false });
     const load = provider.resolveScriptFallback('cjk-jp', false, false)!;
     await expect(openSlicedFace(load.slices!)).rejects.toThrow('HTTP 404');
     await expect(load()).resolves.toEqual(await provider.resolveBaseLatin!(false, false)!());
@@ -1128,7 +1207,7 @@ test('T19: a stalled body cools the base until the retry window opens', async ()
     }));
   }) as typeof fetch;
   try {
-    const mode = { decoder: ((bytes, options) => decoder(bytes, options)) satisfies FontDecoder };
+    const mode = { decoder: ((bytes, options) => decoder(bytes, options)) satisfies FontDecoder, strict: false };
     const base = fonts.createFontProvider(undefined, mode).resolveBaseLatin!(false, false)!;
     const fallback = await base();
     const result = fonts.loadBundledFontBytes(regular, undefined, mode);
@@ -1172,7 +1251,7 @@ test('T20: the implicit stall budget starts before response headers', async () =
   try {
     const base = fonts.createFontProvider(undefined, runtime).resolveBaseLatin!(false, false)!;
     const fallback = await base();
-    const result = fonts.loadBundledFontBytes(regular, undefined, { decoder, retain: false });
+    const result = fonts.loadBundledFontBytes(regular, undefined, { decoder, retain: false, strict: false });
     const signal = await beforeFontLoadFinishes(started.promise, result, 'the request without headers');
     await clock.advance(stallMs - 1);
     expect(signal.aborted).toBe(false);
@@ -1207,7 +1286,7 @@ test('T21: an implicit response without a readable body gets one bounded body wa
   try {
     const base = fonts.createFontProvider(undefined, runtime).resolveBaseLatin!(false, false)!;
     const fallback = await base();
-    const result = fonts.loadBundledFontBytes(regular, undefined, { decoder, retain: false });
+    const result = fonts.loadBundledFontBytes(regular, undefined, { decoder, retain: false, strict: false });
     const signal = await beforeFontLoadFinishes(started.promise, result, 'the request without a readable body');
     await clock.advance(2_000);
     headers.resolve(response);
@@ -1293,7 +1372,7 @@ test('an explicit CDN remains retryable after the implicit CDN has failed', asyn
     throw failure;
   }) as typeof fetch;
   try {
-    await expect(fonts.loadBundledFontBytes(regular, undefined, { decoder, retain: false })).resolves.toBeInstanceOf(ArrayBuffer);
+    await expect(fonts.loadBundledFontBytes(regular, undefined, { decoder, retain: false, strict: false })).resolves.toBeInstanceOf(ArrayBuffer);
     fonts.configureFontCdn({ baseUrl: 'https://explicit.example/' });
     await expect(fonts.loadBundledFontBytes(regular, undefined, { decoder, retain: false })).rejects.toBe(failure);
     await expect(fonts.loadBundledFontBytes(regular, undefined, runtime)).rejects.toBe(failure);

@@ -57,6 +57,7 @@ test('the manager decodes packed faces with the worker engine', async () => {
   const create = spyOn(fonts, 'createFontProvider');
   restorers.push(() => create.mockRestore());
   await commandFontProvider.load();
+  expect(create).toHaveBeenCalledWith(undefined, expect.objectContaining({ strict: false }));
   const decoder = (create.mock.calls[0]![1] as { decoder: typeof decodeFontFace }).decoder;
   const packed = await readFile(new URL('../../../fonts-cjk/assets/NotoSansJP-Regular.otf.zst', import.meta.url));
   expect((await decoder(packed, { codec: 'zstd' })).font.byteLength).toBe((await notoSansJP()).byteLength);

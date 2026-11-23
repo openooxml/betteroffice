@@ -40,7 +40,7 @@ test('base Latin and the optional Latin pack have separate URL maps', async () =
   expect(source.mock.calls).toEqual([['latin'], ['base']]);
 });
 
-test('missing script add-ons load the Latin substitute unless strict loading is requested', async () => {
+test('worker loaders default to Latin for missing CJK and a typed error for missing intl', async () => {
   const fallback = worker.resolveMetricCompatFace('Arial', false, false)!;
   const source = mock(async (pack: FontAssetKind) => ({
     urls: pack === 'cjk' || pack === 'intl' ? undefined : await fonts.fontAssetUrls(pack),
@@ -51,7 +51,10 @@ test('missing script add-ons load the Latin substitute unless strict loading is 
   for (const [script, name] of [['cjk-sc', 'MissingCjkAddonError'], ['thai', 'MissingIntlAddonError']] as const) {
     const face = worker.resolveScriptFallbackFace(script, false, false)!;
     expect(await worker.bundledFaceInstalled(face)).toBe(false);
-    await expect(worker.loadBundledFontBytes(face, undefined, { decoder })).resolves.toEqual(expected);
+    await expect(worker.loadBundledFontBytes(face, undefined, { decoder, strict: false })).resolves.toEqual(expected);
+    const load = worker.loadBundledFontBytes(face, undefined, { decoder });
+    if (script === 'cjk-sc') await expect(load).resolves.toEqual(expected);
+    else await expect(load).rejects.toMatchObject({ name: 'MissingFontAddonError', message: expect.stringContaining('fonts-intl') });
     const strict = await worker.loadBundledFontBytes(face, undefined, { strict: true }).catch((error: unknown) => error);
     expect(strict).toBeInstanceOf(Error);
     expect((strict as Error).constructor.name).toBe(name);
