@@ -84,7 +84,7 @@ const STALE: &[(&str, &str, Option<&str>)] = &[
 ];
 
 #[test]
-fn a_file_asking_for_a_full_calculation_fills_missing_caches_at_save() {
+fn a_file_asking_for_a_full_calculation_saves_unchanged_without_an_edit() {
     for calc_pr in [
         r#"<calcPr fullCalcOnLoad="1" forceFullCalc="1"/>"#,
         r#"<calcPr fullCalcOnLoad="1"/>"#,
@@ -96,10 +96,11 @@ fn a_file_asking_for_a_full_calculation_fills_missing_caches_at_save() {
             Workbook::open_collaborative_recalculated(&source, 7, options()).unwrap(),
         ] {
             assert_eq!(
-                saved_caches(&workbook.save().unwrap()),
-                vec![Some("999".into()), Some("999".into()), Some("2".into())],
+                workbook.model().value(SheetId(0), CellRef::new(0, 2)),
+                CellValue::Number { value: 2.0 },
                 "{calc_pr}"
             );
+            assert_eq!(workbook.save().unwrap(), source, "{calc_pr}");
         }
     }
 }
@@ -138,15 +139,12 @@ fn an_explicit_recalculation_saves_its_values_and_keeps_unevaluable_caches() {
 }
 
 #[test]
-fn cache_preservation_survives_a_recovery_checkpoint() {
+fn a_no_edit_save_after_a_recovery_checkpoint_returns_the_source() {
     let source = book(STALE, r#"<calcPr fullCalcOnLoad="1"/>"#);
     let workbook = Workbook::open_recalculated(&source, options()).unwrap();
     let checkpoint = workbook.recovery_checkpoint(0, None).unwrap();
     let (restored, ..) = Workbook::restore_recovery_checkpoint(&checkpoint).unwrap();
-    assert_eq!(
-        saved_caches(&restored.save().unwrap()),
-        vec![Some("999".into()), Some("999".into()), Some("2".into())]
-    );
+    assert_eq!(restored.save().unwrap(), source);
 }
 
 const CACHED: &str = r#"<row r="1"><c r="A1"><v>5</v></c><c r="B1"><f>A1*2</f><v>999</v></c><c r="C1"><f>SUM(2,3)</f><v>7</v></c></row>"#;
@@ -334,7 +332,7 @@ fn a_stale_open_with_an_empty_cached_result_saves_dependents_from_the_calculated
 }
 
 #[test]
-fn a_no_edit_cache_fill_keeps_the_uncached_array_member_and_every_other_part() {
+fn a_no_edit_save_keeps_an_uncached_array_member_and_every_part() {
     let source = package(
         concat!(
             r#"<row r="2"><c r="C2"><f t="array" ref="C2:C4">1</f><v>1</v></c>"#,
@@ -348,30 +346,5 @@ fn a_no_edit_cache_fill_keeps_the_uncached_array_member_and_every_other_part() {
         .unwrap()
         .save()
         .unwrap();
-    assert_eq!(
-        saved_caches(&saved),
-        vec![Some("1".into()), Some("5".into()), Some("100".into()), None]
-    );
-    let before = ooxml_opc::unzip_parts(&source).unwrap();
-    let after = ooxml_opc::unzip_parts(&saved).unwrap();
-    assert_eq!(
-        before.iter().map(|(name, _)| name).collect::<Vec<_>>(),
-        after.iter().map(|(name, _)| name).collect::<Vec<_>>()
-    );
-    let rewritten: Vec<&str> = before
-        .iter()
-        .zip(&after)
-        .filter(|((_, before), (_, after))| before != after)
-        .map(|((name, _), _)| name.as_str())
-        .collect();
-    let sheet = "xl/worksheets/sheet1.xml";
-    assert_eq!(rewritten, vec![sheet]);
-    let (_, before_sheet) = before.iter().find(|(name, _)| name == sheet).unwrap();
-    let (_, after_sheet) = after.iter().find(|(name, _)| name == sheet).unwrap();
-    assert_eq!(
-        std::str::from_utf8(after_sheet).unwrap(),
-        std::str::from_utf8(before_sheet)
-            .unwrap()
-            .replace("<f>2+3</f>", "<f>2+3</f><v>5</v>"),
-    );
+    assert_eq!(saved, source);
 }

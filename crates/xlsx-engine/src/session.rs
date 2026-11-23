@@ -1829,6 +1829,46 @@ mod tests {
     }
 
     #[test]
+    fn a_full_calculation_file_saves_its_source_bytes_after_peer_hydration() {
+        const MAIN: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+        const RELS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+        const PKG: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
+        let parts: Vec<(String, Vec<u8>)> = [
+            (
+                "[Content_Types].xml",
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#.to_owned(),
+            ),
+            (
+                "_rels/.rels",
+                format!(r#"<Relationships xmlns="{PKG}"><Relationship Id="rId1" Type="{RELS}/officeDocument" Target="xl/workbook.xml"/></Relationships>"#),
+            ),
+            (
+                "xl/workbook.xml",
+                format!(r#"<workbook xmlns="{MAIN}" xmlns:r="{RELS}"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets><calcPr fullCalcOnLoad="1"/></workbook>"#),
+            ),
+            (
+                "xl/_rels/workbook.xml.rels",
+                format!(r#"<Relationships xmlns="{PKG}"><Relationship Id="rId1" Type="{RELS}/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#),
+            ),
+            (
+                "xl/worksheets/sheet1.xml",
+                format!(r#"<worksheet xmlns="{MAIN}"><sheetData><row r="1"><c r="A1"><f>SUM(2,3)</f><v>999</v></c><c r="B1"><f>4+5</f></c><c r="C1"><f>1+1</f><v/></c></row></sheetData></worksheet>"#),
+            ),
+        ]
+        .into_iter()
+        .map(|(path, xml)| (path.to_owned(), xml.into_bytes()))
+        .collect();
+        let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+        let worker =
+            Session::open_with_calculation_json(&bytes, r#"{"nowSerial":45000.75,"randSeed":42}"#)
+                .unwrap();
+        let hydration = worker.peer_hydration_json().unwrap();
+        let peer = Session::open_with_peer_hydration_json(&bytes, &hydration).unwrap();
+        assert_eq!(worker.save().unwrap(), bytes);
+        assert_eq!(peer.save().unwrap(), bytes);
+    }
+
+    #[test]
     fn open_recalculating_stale_keeps_cached_results_under_an_optional_context() {
         let bytes = formula_xlsx();
         let b1 = |session: &Session| {
