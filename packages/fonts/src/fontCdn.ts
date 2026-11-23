@@ -10,7 +10,6 @@ import {
 export { fontCdnCacheKey, isBrowserFontPage, workerFontCdnConfiguration, type FontCdnConfiguration } from '../../../shared/office-session/fontCdnRuntime';
 
 type Pack = FontCdnDiagnostic['pack'];
-export type FontRequestPolicy = number | Pack;
 
 class ImplicitFontCdnError extends Error {
   readonly diagnostic: FontCdnDiagnostic;
@@ -33,6 +32,22 @@ class HttpFontError extends Error {
 }
 
 type CheckFontAsset = <T>(check: () => T | Promise<T>) => Promise<T>;
+
+interface ImplicitFontRequest {
+  check(url: URL): void;
+  load<T>(
+    file: string, url: URL, decode: (bytes: ArrayBuffer, check: CheckFontAsset) => Promise<T>, checkDependencies?: () => void,
+  ): Promise<T>;
+}
+
+export type FontRequestPolicy = number | ImplicitFontRequest;
+
+export function implicitFontRequest(pack: Pack): ImplicitFontRequest {
+  return {
+    check: checkImplicitUrlCooldown,
+    load: (file, url, decode, checkDependencies) => loadImplicitFontAsset(file, url, pack, decode, checkDependencies),
+  };
+}
 
 function failureScope(cause: unknown, invalidBytes: boolean): 'base' | 'url' {
   if (invalidBytes || (cause instanceof HttpFontError && (cause.status === 404 || cause.status === 410))) return 'url';

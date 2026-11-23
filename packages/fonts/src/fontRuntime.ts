@@ -8,7 +8,7 @@ import { checkInstalledPacks } from './packDiagnostics';
 import { isImplicitFontCdnError, reportImplicitCdnFailure } from '../../../shared/fontCdnDiagnostics';
 import type { FontPackDiagnostic } from '../../../shared/fontPackDiagnostics';
 import {
-  checkImplicitSliceCooldown, fontCdnAssetUrl, fontCdnCacheKey, implicitAssetCooldown,
+  checkImplicitSliceCooldown, fontCdnAssetUrl, fontCdnCacheKey, implicitAssetCooldown, implicitFontRequest,
   type FontCdnConfiguration, type FontRequestPolicy,
 } from './fontCdn';
 import type { FontAssetKind } from '../../../shared/office-session/optionalFontPacks';
@@ -77,7 +77,7 @@ export function createFontRuntime(lookup: FontPackLookup, {
     const pack = packFor(face);
     if (!pack.faces.some((entry) => entry.file === face.file)) return undefined;
     const url = fontCdnAssetUrl(pack, file, cdn.implicit ? undefined : cdn.baseUrl);
-    cdnRequests.set(url, cdn.implicit ? kind : cdn.timeoutMs);
+    cdnRequests.set(url, cdn.implicit ? implicitFontRequest(kind) : cdn.timeoutMs);
     return url;
   }
 
@@ -173,7 +173,7 @@ export function createFontRuntime(lookup: FontPackLookup, {
         const current = localCdn ? { urls: assets.urls, cdn: localCdn() } : assets;
         const indexUrl = sliceAssetUrl(face, ref.index, current);
         return {
-          base: typeof requestPolicy(indexUrl) === 'string' ? `${indexUrl.href}#implicit` : indexUrl.href,
+          base: typeof requestPolicy(indexUrl) === 'object' ? `${indexUrl.href}#implicit` : indexUrl.href,
           url: Object.assign(
             async (file: string) => file === ref.index ? indexUrl : sliceAssetUrl(face, file, current),
             { implicitCdn: (file: string) => current.cdn?.implicit === true && !current.urls?.[file] },
@@ -217,7 +217,7 @@ export function createFontRuntime(lookup: FontPackLookup, {
   async function faceUnavailableUntil(face: BundledFontFace, strict: boolean): Promise<number | undefined> {
     const cooldown = async (dependency: BundledFontFace) => {
       const url = await assetUrl(dependency, undefined);
-      if (typeof requestPolicy(url) !== 'string') return undefined;
+      if (typeof requestPolicy(url) !== 'object') return undefined;
       const slices = strict && sliceRefOf(dependency.file);
       return implicitAssetCooldown(url, slices ? new URL(slices.index, url) : undefined);
     };
@@ -252,7 +252,7 @@ export function createFontRuntime(lookup: FontPackLookup, {
     const baseUrl = base instanceof Promise ? await base : base;
     const resolve = async (dependency: BundledFontFace) => {
       const url = await assetUrl(dependency, baseUrl, skipImplicit);
-      const slices = runtime?.strict && typeof requestPolicy(url) === 'string' && sliceRefOf(dependency.file);
+      const slices = runtime?.strict && typeof requestPolicy(url) === 'object' && sliceRefOf(dependency.file);
       if (slices) checkImplicitSliceCooldown(new URL(slices.index, url));
       return url;
     };

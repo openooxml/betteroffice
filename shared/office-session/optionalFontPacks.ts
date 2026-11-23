@@ -155,7 +155,7 @@ export function createWorkerFontPacks(post: (message: FontPackRequest) => void, 
         } else {
           const cdn = value.cdn;
           const validCdn = cdn && Number.isInteger(cdn.timeoutMs) && cdn.timeoutMs > 0 && cdn.timeoutMs <= 4_294_967_295 &&
-            isAbsoluteHref(cdn.baseUrl) && /^https?:\/\//.test(cdn.baseUrl);
+            (cdn.baseUrl === false || (isAbsoluteHref(cdn.baseUrl) && /^https?:\/\//.test(cdn.baseUrl)));
           const pageUrl = isAbsoluteHref(value.pageUrl) ? value.pageUrl : undefined;
           request.finish({ urls: value.urls, ...(validCdn ? { cdn } : {}), ...(pageUrl ? { pageUrl } : {}) });
         }

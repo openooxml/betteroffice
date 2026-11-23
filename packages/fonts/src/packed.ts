@@ -4,7 +4,7 @@ import cjkManifest from '../../fonts-cjk/assets/manifest.json';
 import baseLatinManifest from '../assets/base-latin.json';
 import { readFontBytes } from './bytes';
 import type { FontDecoder } from './decode';
-import { checkImplicitUrlCooldown, loadImplicitFontAsset, type FontRequestPolicy } from './fontCdn';
+import type { FontRequestPolicy } from './fontCdn';
 import type { BundledFontFace } from './manifest';
 import type { SliceRef } from './progressive';
 import { sha256 } from './sha256';
@@ -86,7 +86,8 @@ async function loadFace(
   const request = typeof policy === 'function' ? policy(url) : policy;
   const entry = manifest.faces.find((entry) => entry.file === face.file);
   if (entry === undefined) throw new Error(`Unknown bundled font asset: ${face.file}`);
-  const key = `${manifest.pack}|${manifest.version}|${url.href}|${entry.codec}|${entry.dict}|${entry.encodedLength}|${face.byteLength}|${entry.sha256}|${request ?? ''}|${wasmUrl?.href ?? ''}`;
+  const policyKey = typeof request === 'object' ? 'implicit' : request ?? '';
+  const key = `${manifest.pack}|${manifest.version}|${url.href}|${entry.codec}|${entry.dict}|${entry.encodedLength}|${face.byteLength}|${entry.sha256}|${policyKey}|${wasmUrl?.href ?? ''}`;
   let pending = cache.get(key);
   if (pending === undefined) {
     pending = (async () => {
@@ -99,8 +100,8 @@ async function loadFace(
       const dictionary = regular && { ...face, file: regular.file, byteLength: regular.byteLength };
       const dictionaryUrl = dictionary && await resolveUrl(dictionary);
       const dictionaryRequest = dictionaryUrl && (typeof policy === 'function' ? policy(dictionaryUrl) : policy);
-      const checkDictionary = dictionaryUrl && typeof dictionaryRequest === 'string'
-        ? () => checkImplicitUrlCooldown(dictionaryUrl) : undefined;
+      const checkDictionary = dictionaryUrl && typeof dictionaryRequest === 'object'
+        ? () => dictionaryRequest.check(dictionaryUrl) : undefined;
       const loadDictionary = () => dictionary && loadFace(
         dictionary, manifest, resolveUrl, policy, wasmUrl, runtime, dictionaryUrl,
       );
@@ -126,8 +127,8 @@ async function loadFace(
         }
         return decoded;
       };
-      if (typeof request === 'string') {
-        return loadImplicitFontAsset(face.file, url, request, async (encoded, check) => {
+      if (typeof request === 'object') {
+        return request.load(face.file, url, async (encoded, check) => {
           await check(() => checkLength(encoded));
           const prerequisite = await loadDictionary();
           return check(() => decode(encoded, prerequisite));
