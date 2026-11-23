@@ -125,8 +125,9 @@ export async function prepareFile(
       return { decoder: module.decodeFontFace, release() {} };
     });
   void decoder.catch(() => {});
-  const runtime: { decoder: FontDecoder } = {
+  const runtime: { decoder: FontDecoder; strict: false } = {
     decoder: async (encoded, options) => (await decoder).decoder(encoded, options),
+    strict: false,
   };
   const results = await Promise.allSettled([false, true].flatMap(bold => [false, true].map(async italic => {
     const face = resolveMetricCompatFace("Arial", bold, italic) ?? resolveLastResortFace("Arial", bold, italic);

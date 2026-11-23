@@ -37,7 +37,11 @@ type FontPack = Exclude<FontAssetKind, 'decoder'>;
 type FontPackAssets = { urls?: FontAssetUrls; cdn?: FontCdnConfiguration };
 export type FontPackLookup = (pack: FontPack) => Promise<FontPackAssets>;
 type AssetBase = URL | Promise<URL> | undefined;
-type FontLoadOptions = { decoder?: FontDecoder; retain?: boolean; strict?: boolean };
+type FontLoadOptions = {
+  decoder?: FontDecoder;
+  /** @internal */ retain?: boolean;
+  /** @internal */ strict?: boolean;
+};
 type RuntimeFontSource = BundledFontSource & {
   /** @internal */
   faceUnavailableUntil?(face: BundledFontFace): Promise<number | undefined>;
@@ -247,12 +251,12 @@ export function createFontRuntime(lookup: FontPackLookup, {
     base: AssetBase,
     runtime?: FontLoadOptions,
     skipImplicit = false,
-    onCdnFailure?: () => void,
+    onSubstitute?: (error: Error) => void,
   ): Promise<ArrayBuffer> {
     const baseUrl = base instanceof Promise ? await base : base;
     const resolve = async (dependency: BundledFontFace) => {
       const url = await assetUrl(dependency, baseUrl, skipImplicit);
-      const slices = runtime?.strict && typeof requestPolicy(url) === 'object' && sliceRefOf(dependency.file);
+      const slices = runtime?.strict !== false && typeof requestPolicy(url) === 'object' && sliceRefOf(dependency.file);
       if (slices) checkImplicitSliceCooldown(new URL(slices.index, url));
       return url;
     };
@@ -265,13 +269,15 @@ export function createFontRuntime(lookup: FontPackLookup, {
         )
         : resolve(face).then((url) => loadFontBytes(face, url, requestTimeout(url))));
     } catch (error) {
-      if (baseUrl !== undefined || runtime?.strict) throw error;
-      if (isImplicitFontCdnError(error)) {
+      if (baseUrl !== undefined || runtime?.strict === true) throw error;
+      if (runtime?.strict === false && isImplicitFontCdnError(error)) {
         reportImplicitCdnFailure(error);
-        onCdnFailure?.();
+        onSubstitute?.(error);
         return substituteFontBytes(face, packed, runtime, error.diagnostic.pack !== 'latin');
       }
-      if (error instanceof MissingCjkAddonError || error instanceof MissingIntlAddonError) {
+      if ((error instanceof MissingCjkAddonError && CJK_FILES.has(face.file)) ||
+          (runtime?.strict === false && error instanceof MissingIntlAddonError)) {
+        onSubstitute?.(error);
         return substituteFontBytes(face, packed, runtime, true);
       }
       throw error;
@@ -289,6 +295,7 @@ export function createFontRuntime(lookup: FontPackLookup, {
       const substitute = resolveMetricCompatFace(
         face.family.includes('Serif') ? 'Times New Roman' : 'Arial', heavy, face.style === 'italic',
       )!;
+      if (runtime?.strict !== false) return bundledFontBytes(substitute, packed, undefined, runtime);
       try { return await bundledFontBytes(substitute, packed, undefined, runtime, true); }
       catch (error) { if (!(error instanceof MissingFontAddonError)) throw error; }
     }
@@ -310,7 +317,7 @@ export function createFontRuntime(lookup: FontPackLookup, {
     face: BundledFontFace,
     cssFamily?: string,
     options?: FontAssetOptions,
-    runtime?: { decoder?: FontDecoder; /** @internal Entries this call creates are dropped once settled; concurrent requests still share one decode. */ retain?: boolean },
+    runtime?: FontLoadOptions,
   ): Promise<void> {
     if (
       typeof document === 'undefined' ||
@@ -325,16 +332,11 @@ export function createFontRuntime(lookup: FontPackLookup, {
       registrations = engineRegistrations.get(runtime.decoder) ?? new Map();
       engineRegistrations.set(runtime.decoder, registrations);
     }
-    const key = `${family}|${face.weight}|${face.style}|${fontCdnCacheKey()}`;
-    const existing = registrations.get(key);
+    const key = JSON.stringify([family, face.weight, face.style, fontCdnCacheKey()]);
+    const modeKey = `${key}|${runtime?.strict ?? ''}`;
+    const existing = registrations.get(key) ?? registrations.get(modeKey);
     if (existing) return existing;
-    let substituted = false;
-    const forget = () => {
-      if (registrations.get(key) === promise) registrations.delete(key);
-    };
-    const promise = (async () => {
-      const bytes = await bundledFontBytes(face, loadPackedFontBytes, assetBase(options?.baseUrl), runtime, false,
-        () => { substituted = true; });
+    const register = async (bytes: ArrayBuffer) => {
       // The family name goes through the FontFace API as a value, never
       // interpolated into a CSS string, so there is no CSS-injection sink here.
       const fontFace = new FontFace(family, bytes, {
@@ -343,9 +345,26 @@ export function createFontRuntime(lookup: FontPackLookup, {
       });
       await fontFace.load();
       document.fonts.add(fontFace);
+    };
+    let substitution: Error | undefined;
+    const promise = (async () => {
+      const bytes = await bundledFontBytes(face, loadPackedFontBytes, assetBase(options?.baseUrl), runtime, false,
+        (error) => { substitution = error; });
+      if (substitution) return register(bytes);
+      const exact = registrations.get(key);
+      if (exact) return exact;
+      const registering = register(bytes);
+      registrations.set(key, registering);
+      void registering.catch(() => {
+        if (registrations.get(key) === registering) registrations.delete(key);
+      });
+      return registering;
     })();
-    void promise.then(() => { if (substituted) forget(); }, forget);
-    registrations.set(key, promise);
+    const forget = () => {
+      if (registrations.get(modeKey) === promise) registrations.delete(modeKey);
+    };
+    void promise.then(() => { if (!(substitution instanceof MissingCjkAddonError)) forget(); }, forget);
+    registrations.set(modeKey, promise);
     return promise;
   }
 
@@ -360,7 +379,7 @@ export function createFontRuntime(lookup: FontPackLookup, {
       (face) => bundledFontBytes(face, readPackedFontBytes, base, runtime),
       (face) => sliceLocation(face, base, runtime),
     );
-    if (base === undefined) source.faceUnavailableUntil = (face) => faceUnavailableUntil(face, runtime?.strict === true);
+    if (base === undefined) source.faceUnavailableUntil = (face) => faceUnavailableUntil(face, runtime?.strict !== false);
     return source;
   }
 

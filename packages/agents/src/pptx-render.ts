@@ -39,7 +39,7 @@ async function registerPptxFonts(handle: PresentationHandle, slide: SlideSnapsho
 async function renderPptxSlideCanvas(handle: PresentationHandle, page: number, scale: number, provider?: BundledFontSource, theme?: PptxThemeFonts): Promise<RenderedPage> {
   const { createCanvas, GlobalFonts, loadImage } = await loadCanvas();
   const { module } = await engines.load('pptx');
-  provider ??= createFontProvider(undefined, { decoder: module.decodeFontFace });
+  provider ??= createFontProvider(undefined, { decoder: module.decodeFontFace, strict: false });
   const snapshot = handle.snapshot();
   const slide = snapshot.slides[page - 1]!;
   const warnings = new Set<string>(['Preview uses the presentation engine and bundled substitute fonts.']);
@@ -142,7 +142,7 @@ export function pptxFontFaces(slides: SlideSnapshot[], theme: PptxThemeFonts = {
 /** The bundled face for each style, and the glyph coverage faces they need. */
 export async function loadPptxFonts(
   faces: PptxFontStyle[],
-  provider: BundledFontSource = createFontProvider(),
+  provider: BundledFontSource = createFontProvider(undefined, { strict: false }),
 ): Promise<{ fonts: PptxFontFace[]; fallbackFonts: PptxFontFace[] }> {
   const fonts: PptxFontFace[] = [];
   const fallbackFonts: PptxFontFace[] = [];
