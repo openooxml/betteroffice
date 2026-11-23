@@ -223,10 +223,10 @@ pub fn preset_geometry_to_path(
         value if value.starts_with("star") => {
             star(star_preset(value)?, adjustments.get("adj").copied())
         }
-        "bentConnector2" => bent_connector(2, adjustments.get("adj1").copied()),
-        "bentConnector3" => bent_connector(3, adjustments.get("adj1").copied()),
-        "bentConnector4" => bent_connector(4, adjustments.get("adj1").copied()),
-        "bentConnector5" => bent_connector(5, adjustments.get("adj1").copied()),
+        "bentConnector2" => bent_connector(2, adjustments),
+        "bentConnector3" => bent_connector(3, adjustments),
+        "bentConnector4" => bent_connector(4, adjustments),
+        "bentConnector5" => bent_connector(5, adjustments),
         "curvedConnector2" => curved_connector(2),
         "curvedConnector3" => curved_connector(3),
         "curvedConnector4" => curved_connector(4),
@@ -1119,31 +1119,53 @@ fn orient(direction: &str, x: f64, y: f64) -> (f64, f64) {
     }
 }
 
-fn bent_connector(segments: usize, adjustment: Option<f64>) -> Vec<GeometryPathCommand> {
-    let bend = clamp_fraction(adjustment, 0.5);
-    if segments <= 2 {
-        return vec![
-            GeometryPathCommand::Move { x: 0.0, y: 0.0 },
-            GeometryPathCommand::Line { x: bend, y: 0.0 },
-            GeometryPathCommand::Line { x: bend, y: 1.0 },
-            GeometryPathCommand::Line { x: 1.0, y: 1.0 },
-        ];
-    }
-    let mut commands = vec![GeometryPathCommand::Move { x: 0.0, y: 0.0 }];
-    for i in 1..segments {
-        let fraction = i as f64 / segments as f64;
-        let (x, y) = if i % 2 == 1 {
-            (
-                if i == 1 { bend } else { fraction },
-                (i - 1) as f64 / segments as f64,
-            )
-        } else {
-            ((i - 1) as f64 / segments as f64, fraction)
-        };
-        commands.push(GeometryPathCommand::Line { x, y });
-    }
-    commands.push(GeometryPathCommand::Line { x: 1.0, y: 1.0 });
-    commands
+fn bent_connector(segments: usize, adjustments: &HashMap<String, f64>) -> Vec<GeometryPathCommand> {
+    // ECMA-376 leaves bentConnector adjusts unpinned (`fmla="val 50000"` with no
+    // `pin`), allowing `adj < 0` or `adj > 1` so U-turn and C-wrap connectors can
+    // route outside the endpoint bounding frame.
+    let adj = |name: &str| {
+        adjustments
+            .get(name)
+            .copied()
+            .filter(|v| v.is_finite())
+            .unwrap_or(0.5)
+    };
+    let points: Vec<(f64, f64)> = match segments {
+        0..=2 => vec![(0.0, 0.0), (1.0, 0.0), (1.0, 1.0)],
+        3 => {
+            let x1 = adj("adj1");
+            vec![(0.0, 0.0), (x1, 0.0), (x1, 1.0), (1.0, 1.0)]
+        }
+        4 => {
+            let x1 = adj("adj1");
+            let y2 = adj("adj2");
+            vec![(0.0, 0.0), (x1, 0.0), (x1, y2), (1.0, y2), (1.0, 1.0)]
+        }
+        _ => {
+            let x1 = adj("adj1");
+            let y2 = adj("adj2");
+            let x3 = adj("adj3");
+            vec![
+                (0.0, 0.0),
+                (x1, 0.0),
+                (x1, y2),
+                (x3, y2),
+                (x3, 1.0),
+                (1.0, 1.0),
+            ]
+        }
+    };
+    points
+        .into_iter()
+        .enumerate()
+        .map(|(i, (x, y))| {
+            if i == 0 {
+                GeometryPathCommand::Move { x, y }
+            } else {
+                GeometryPathCommand::Line { x, y }
+            }
+        })
+        .collect()
 }
 
 fn curved_connector(segments: usize) -> Vec<GeometryPathCommand> {
@@ -1153,8 +1175,8 @@ fn curved_connector(segments: usize) -> Vec<GeometryPathCommand> {
             GeometryPathCommand::Cubic {
                 cp1x: 0.5,
                 cp1y: 0.0,
-                cp2x: 0.5,
-                cp2y: 1.0,
+                cp2x: 1.0,
+                cp2y: 0.5,
                 x: 1.0,
                 y: 1.0,
             },
@@ -1431,6 +1453,116 @@ mod tests {
     }
 
     #[test]
+    fn bent_connectors_follow_ecma376_orthogonal_segments() {
+        for (name, expected_segments) in [
+            ("bentConnector2", 2usize),
+            ("bentConnector3", 3),
+            ("bentConnector4", 4),
+            ("bentConnector5", 5),
+        ] {
+            let cmds = preset_geometry_to_path(name, &HashMap::new(), 1.0).unwrap();
+            assert_eq!(cmds.len(), expected_segments + 1, "{name}");
+            let pts: Vec<(f64, f64)> = cmds
+                .into_iter()
+                .map(|c| match c {
+                    GeometryPathCommand::Move { x, y } | GeometryPathCommand::Line { x, y } => {
+                        (x, y)
+                    }
+                    other => panic!("{name}: unexpected command {other:?}"),
+                })
+                .collect();
+            assert_eq!(pts.first(), Some(&(0.0, 0.0)), "{name} start");
+            assert_eq!(pts.last(), Some(&(1.0, 1.0)), "{name} end");
+            for pair in pts.windows(2) {
+                let dx = (pair[1].0 - pair[0].0).abs();
+                let dy = (pair[1].1 - pair[0].1).abs();
+                assert!(
+                    dx < 1e-9 || dy < 1e-9,
+                    "{name}: non-orthogonal segment {:?} -> {:?}",
+                    pair[0],
+                    pair[1]
+                );
+            }
+        }
+        let b3 = preset_geometry_to_path("bentConnector3", &HashMap::new(), 1.0).unwrap();
+        assert_eq!(
+            b3,
+            vec![
+                GeometryPathCommand::Move { x: 0.0, y: 0.0 },
+                GeometryPathCommand::Line { x: 0.5, y: 0.0 },
+                GeometryPathCommand::Line { x: 0.5, y: 1.0 },
+                GeometryPathCommand::Line { x: 1.0, y: 1.0 },
+            ]
+        );
+        let b5 = preset_geometry_to_path(
+            "bentConnector5",
+            &HashMap::from([
+                ("adj1".to_owned(), 0.25),
+                ("adj2".to_owned(), 0.4),
+                ("adj3".to_owned(), 0.75),
+            ]),
+            1.0,
+        )
+        .unwrap();
+        assert_eq!(
+            b5,
+            vec![
+                GeometryPathCommand::Move { x: 0.0, y: 0.0 },
+                GeometryPathCommand::Line { x: 0.25, y: 0.0 },
+                GeometryPathCommand::Line { x: 0.25, y: 0.4 },
+                GeometryPathCommand::Line { x: 0.75, y: 0.4 },
+                GeometryPathCommand::Line { x: 0.75, y: 1.0 },
+                GeometryPathCommand::Line { x: 1.0, y: 1.0 },
+            ]
+        );
+    }
+
+    #[test]
+    fn bent_connector_supports_unpinned_detours() {
+        let detour = HashMap::from([("adj1".to_owned(), 1.5)]);
+        let b3 = preset_geometry_to_path("bentConnector3", &detour, 1.0).unwrap();
+        assert_eq!(
+            b3,
+            vec![
+                GeometryPathCommand::Move { x: 0.0, y: 0.0 },
+                GeometryPathCommand::Line { x: 1.5, y: 0.0 },
+                GeometryPathCommand::Line { x: 1.5, y: 1.0 },
+                GeometryPathCommand::Line { x: 1.0, y: 1.0 },
+            ]
+        );
+        let negative = HashMap::from([("adj1".to_owned(), -0.5)]);
+        let b3_neg = preset_geometry_to_path("bentConnector3", &negative, 1.0).unwrap();
+        assert_eq!(
+            b3_neg,
+            vec![
+                GeometryPathCommand::Move { x: 0.0, y: 0.0 },
+                GeometryPathCommand::Line { x: -0.5, y: 0.0 },
+                GeometryPathCommand::Line { x: -0.5, y: 1.0 },
+                GeometryPathCommand::Line { x: 1.0, y: 1.0 },
+            ]
+        );
+    }
+
+    #[test]
+    fn curved_connector2_curves_from_horizontal_to_vertical() {
+        let cmds = preset_geometry_to_path("curvedConnector2", &HashMap::new(), 1.0).unwrap();
+        assert_eq!(
+            cmds,
+            vec![
+                GeometryPathCommand::Move { x: 0.0, y: 0.0 },
+                GeometryPathCommand::Cubic {
+                    cp1x: 0.5,
+                    cp1y: 0.0,
+                    cp2x: 1.0,
+                    cp2y: 0.5,
+                    x: 1.0,
+                    y: 1.0,
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn normalized_adjustments_do_not_guess_raw_guide_units() {
         for shape in [
             "roundRect",
@@ -1441,7 +1573,6 @@ mod tests {
             "octagon",
             "rightArrow",
             "star5",
-            "bentConnector3",
             "plus",
         ] {
             let path = |value| {
