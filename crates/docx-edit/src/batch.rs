@@ -2010,7 +2010,10 @@ fn plan_style<T: ReadTxn>(
     let mut next = source
         .styled_paragraph(Some(style_id))
         .map_err(|message| invalid(message, &requested))?;
-    if !settle_style_numbering(&mut next.properties, source) {
+    if crate::ops::paragraph::keeps_direct_numbering(&paragraph.mark.properties) {
+        next.properties
+            .retain(|(key, _)| !matches!(key.as_str(), "numPr" | "numPrFromStyle"));
+    } else if !settle_style_numbering(&mut next.properties, source) {
         return Err(unsupported(
             format!("style {style_id:?} names list numbering {UNDEFINED_NUMBERING}"),
             &requested,

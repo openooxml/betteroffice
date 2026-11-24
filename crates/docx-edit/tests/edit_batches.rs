@@ -1885,7 +1885,7 @@ fn numbered_style_package(body: &str, extra_styles: &str) -> Vec<u8> {
     parts.push((
         "word/numbering.xml".to_owned(),
         format!(
-            r#"<w:numbering {NS}><w:abstractNum w:abstractNumId="3"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:pPr><w:ind w:left="1440" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="3"/></w:num></w:numbering>"#
+            r#"<w:numbering {NS}><w:abstractNum w:abstractNumId="3"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:pPr><w:ind w:left="1440" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="3"/></w:num><w:abstractNum w:abstractNumId="4"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1)"/><w:pPr><w:ind w:left="2880" w:hanging="720"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="2"><w:abstractNumId w:val="4"/></w:num></w:numbering>"#
         )
         .into_bytes(),
     ));
@@ -1966,6 +1966,27 @@ fn numbered_styles_give_inserted_paragraphs_the_indents_seeding_gives() {
             assert_eq!(present(&inserted), present(&seeded), "{style} {key}");
         }
     }
+}
+
+#[test]
+fn restyling_a_directly_numbered_paragraph_to_another_lists_style_keeps_its_own_list_indents() {
+    let styles = r#"<w:style w:type="paragraph" w:styleId="OtherList"><w:name w:val="Other List"/><w:pPr><w:numPr><w:numId w:val="2"/></w:numPr></w:pPr></w:style>"#;
+    let body = r#"<w:p w14:paraId="00000001"><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>direct</w:t></w:r></w:p>"#;
+    let doc = open_package(&numbered_style_package(body, styles));
+    let before = properties(&doc, "00000001");
+    apply(
+        &doc,
+        &UndoSession::new(),
+        vec![set_style("00000001", "OtherList")],
+    );
+    let after = properties(&doc, "00000001");
+    assert_eq!(after.get("pStyle"), Some(&Any::from("OtherList")));
+    let Some(Any::Map(num_pr)) = after.get("numPr") else {
+        panic!("the paragraph keeps its direct numbering: {after:?}");
+    };
+    assert_eq!(number(num_pr.get("numId")), Some(1.0));
+    assert_ne!(number(after.get("indentLeft")), Some(2880.0));
+    assert_eq!(after.get("listMarker"), before.get("listMarker"));
 }
 
 fn open_numbered_restyle(body: &str) -> EditingDoc {
