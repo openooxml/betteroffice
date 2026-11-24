@@ -29,7 +29,7 @@ export const commandFontProvider = {
   async load(...configuration: [fontCdn?: FontCdnConfiguration]) {
     if (configuration.length) setFontCdnConfiguration(configuration[0]);
     const fonts = await importFonts();
-    return fonts.createFontProvider(undefined, { decoder: sessionDecoder, strict: true });
+    return fonts.createFontProvider(undefined, { decoder: sessionDecoder, strict: 'except-optional-cdn-failure' });
   },
 };
 
@@ -168,7 +168,7 @@ export function createCommandDefaultFonts(
               return disposed ? undefined : skeleton;
             }
           } catch (error) {
-            if (isImplicitFontCdnError(error)) throw error;
+            if (isImplicitFontCdnError(error) && error.diagnostic.pack === 'latin') throw error;
           }
         }
         const bytes = await load().catch((error: unknown) => {
