@@ -1,5 +1,7 @@
 //! Bounded, resolver-free OOXML event/tree core.
 
+use std::sync::Arc;
+
 use indexmap::IndexMap;
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
@@ -493,7 +495,11 @@ pub struct XmlElement {
     pub bookmark_replay_xml: Option<String>,
     /// Set when the part rebinds a standard prefix.
     pub(crate) matches_local_names: bool,
+    /// In-scope prefixes that alias a standard namespace, each with that namespace's prefix.
+    pub(crate) prefix_aliases: Option<PrefixAliases>,
 }
+
+pub(crate) type PrefixAliases = Arc<[(String, &'static str)]>;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ParsedColor {
@@ -562,17 +568,33 @@ impl XmlElement {
         })
     }
 
+    /// Reads `namespace:name`, or the same attribute under a prefix aliasing that standard namespace.
     pub fn attribute(&self, namespace: Option<&str>, name: &str) -> Option<&str> {
         namespace
             .and_then(|namespace| {
-                self.attributes.iter().find_map(|(key, value)| {
-                    key.strip_prefix(namespace)
-                        .and_then(|rest| rest.strip_prefix(':'))
-                        .filter(|local| *local == name)
-                        .map(|_| value.as_str())
-                })
+                self.attributes
+                    .iter()
+                    .find_map(|(key, value)| {
+                        key.strip_prefix(namespace)
+                            .and_then(|rest| rest.strip_prefix(':'))
+                            .filter(|local| *local == name)
+                            .map(|_| value.as_str())
+                    })
+                    .or_else(|| self.aliased_attribute(namespace, name))
             })
             .or_else(|| self.attributes.get(name).map(String::as_str))
+    }
+
+    fn aliased_attribute(&self, namespace: &str, name: &str) -> Option<&str> {
+        let aliases = self.prefix_aliases.as_deref()?;
+        self.attributes.iter().find_map(|(key, value)| {
+            let (prefix, local) = key.split_once(':')?;
+            (local == name
+                && aliases
+                    .iter()
+                    .any(|(alias, standard)| alias == prefix && *standard == namespace))
+            .then_some(value.as_str())
+        })
     }
 
     pub fn attribute_any<'a>(&'a self, names: &[&str]) -> Option<&'a str> {
@@ -1425,6 +1447,7 @@ pub(crate) fn parse_xml_strict(
     let mut bookmarks_below: Vec<bool> = Vec::new();
     let mut paragraphs = 0u32;
     let mut local_names = false;
+    let mut prefixes = PrefixScope::default();
     let mut number = |mut element: XmlElement, ancestors: &[XmlElement]| {
         if element.name == "w:p" {
             element.paragraph_ordinal = Some(paragraphs);
@@ -1458,6 +1481,7 @@ pub(crate) fn parse_xml_strict(
                     });
                 }
                 let mut element = decode_element(&reader, start, part, budget)?;
+                prefixes.open(&mut element);
                 scope_name_matching(&mut element, &mut stack, &mut local_names);
                 let element = number(element, &stack);
                 stack.push(element);
@@ -1472,6 +1496,8 @@ pub(crate) fn parse_xml_strict(
                     });
                 }
                 let mut element = decode_element(&reader, start, part, budget)?;
+                prefixes.open(&mut element);
+                prefixes.close();
                 scope_name_matching(&mut element, &mut stack, &mut local_names);
                 let mut element = number(element, &stack);
                 retain_bookmark_xml(&mut element, xml, offset, reader.buffer_position() as usize);
@@ -1488,6 +1514,7 @@ pub(crate) fn parse_xml_strict(
                     offset: reader.buffer_position(),
                     message: "unexpected closing element".to_owned(),
                 })?;
+                prefixes.close();
                 let start = starts.pop().unwrap();
                 let holds = bookmarks_below.pop().unwrap() || is_bookmark_boundary(&element);
                 retain_bookmark_xml(&mut element, xml, start, reader.buffer_position() as usize);
@@ -1597,6 +1624,75 @@ fn rebinds_a_standard_prefix(element: &XmlElement) -> bool {
             })
         })
     })
+}
+
+/// The prefix bindings in scope while a part loads.
+#[derive(Default)]
+struct PrefixScope {
+    bindings: Vec<(String, String)>,
+    /// For each open element, where its own bindings start and the aliases in its scope.
+    scopes: Vec<(usize, Option<PrefixAliases>)>,
+}
+
+impl PrefixScope {
+    fn resolve(&self, prefix: &str) -> Option<&str> {
+        self.bindings
+            .iter()
+            .rev()
+            .find(|(bound, _)| bound == prefix)
+            .map(|(_, namespace)| namespace.as_str())
+    }
+
+    fn aliases(&self) -> Option<PrefixAliases> {
+        let mut aliases: Vec<(String, &'static str)> = Vec::new();
+        for (prefix, namespace) in self.bindings.iter().rev() {
+            if prefix.is_empty()
+                || aliases.iter().any(|(alias, _)| alias == prefix)
+                || self.resolve(prefix) != Some(namespace.as_str())
+                || STANDARD_NAMESPACES
+                    .iter()
+                    .any(|standard| standard.prefix == prefix)
+            {
+                continue;
+            }
+            let Some(standard) = STANDARD_NAMESPACES.iter().find(|standard| {
+                standard.transitional == namespace || standard.strict == Some(namespace.as_str())
+            }) else {
+                continue;
+            };
+            if self
+                .resolve(standard.prefix)
+                .is_none_or(|bound| bound == namespace)
+            {
+                aliases.push((prefix.clone(), standard.prefix));
+            }
+        }
+        (!aliases.is_empty()).then(|| aliases.into())
+    }
+
+    fn open(&mut self, element: &mut XmlElement) {
+        let mark = self.bindings.len();
+        self.bindings.extend(
+            element
+                .attributes
+                .iter()
+                .filter_map(namespace_declaration)
+                .map(|(prefix, namespace)| (prefix.to_owned(), namespace.to_owned())),
+        );
+        let aliases = if self.bindings.len() == mark {
+            self.scopes.last().and_then(|(_, aliases)| aliases.clone())
+        } else {
+            self.aliases()
+        };
+        element.prefix_aliases = aliases.clone();
+        self.scopes.push((mark, aliases));
+    }
+
+    fn close(&mut self) {
+        if let Some((mark, _)) = self.scopes.pop() {
+            self.bindings.truncate(mark);
+        }
+    }
 }
 
 fn scope_name_matching(element: &mut XmlElement, open: &mut [XmlElement], local_names: &mut bool) {
@@ -2075,6 +2171,7 @@ fn decode_element(
         bookmark_xml: None,
         bookmark_replay_xml: None,
         matches_local_names: false,
+        prefix_aliases: None,
     })
 }
 
@@ -2700,6 +2797,38 @@ mod tests {
         assert_eq!(root.children_named("w14", "shadow").count(), 1);
         assert_eq!(root.find_deep("w", "pict").unwrap().name, "wx:pict");
         assert_eq!(root.find_deep("w", "p").unwrap().name, "s:p");
+    }
+
+    #[test]
+    fn attributes_under_a_prefix_aliasing_a_standard_namespace_read_by_that_namespace() {
+        let doc = parse(&format!(
+            r#"<ns0:sectPr xmlns:ns0="{}" xmlns:ns4="{}" xmlns:x="urn:other"><ns0:headerReference ns0:type="first" ns4:id="rId7"/><ns0:footerReference x:id="rIdForeign"/><ns0:pgSz xmlns:ns4="urn:shadowed" ns4:id="rIdShadowed"/></ns0:sectPr>"#,
+            namespaces::W,
+            namespaces::R
+        ))
+        .unwrap();
+        let root = doc.root().unwrap();
+        let header = root.child("w", "headerReference").unwrap();
+        assert_eq!(header.name, "ns0:headerReference");
+        assert_eq!(header.attribute(Some("w"), "type"), Some("first"));
+        assert_eq!(header.attribute(Some("r"), "id"), Some("rId7"));
+        assert!(header.attributes.contains_key("ns4:id"));
+        let footer = root.child("w", "footerReference").unwrap();
+        assert_eq!(footer.attribute(Some("r"), "id"), None);
+        let page = root.child("w", "pgSz").unwrap();
+        assert_eq!(page.attribute(Some("r"), "id"), None);
+    }
+
+    #[test]
+    fn a_prefix_aliasing_a_namespace_whose_standard_prefix_is_rebound_stays_unread() {
+        let doc = parse(&format!(
+            r#"<w:sectPr xmlns:w="{}" xmlns:r="urn:other" xmlns:ns4="{}"><w:headerReference ns4:id="rId7"/></w:sectPr>"#,
+            namespaces::W,
+            namespaces::R
+        ))
+        .unwrap();
+        let header = doc.root().unwrap().child("w", "headerReference").unwrap();
+        assert_eq!(header.attribute(Some("r"), "id"), None);
     }
 
     #[test]

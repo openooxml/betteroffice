@@ -459,6 +459,12 @@ mod tests {
             classified(&format!(
                 "<w:body xmlns:w=\"{w}\" xmlns:q=\"{w}\"><w:sdt><w:sdtPr><w:lock q:val=\"contentLocked\"/></w:sdtPr><w:sdtContent/></w:sdt></w:body>"
             )),
+            [false]
+        );
+        assert_eq!(
+            classified(&format!(
+                "<w:body xmlns:w=\"{w}\"><w:sdt><w:sdtPr><x:lock xmlns:x=\"urn:other\" x:val=\"contentLocked\"/></w:sdtPr><w:sdtContent/></w:sdt></w:body>"
+            )),
             [true]
         );
         assert_eq!(
