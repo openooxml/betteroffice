@@ -637,6 +637,7 @@ fn layout_document_recording_columns(
     input: &mut Input,
     column_widths: Option<&mut Vec<(BlockId, f64)>>,
 ) -> Result<CheckpointedLayout, LayoutError> {
+    input.clamp_column_counts();
     let measured = &mut input.measured;
     let options = &input.options;
 

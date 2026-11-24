@@ -2277,6 +2277,27 @@ pub struct Input {
     pub options: LayoutOptions,
 }
 
+impl Input {
+    /// Sets every column count to [`ColumnLayout::column_count`]; counts from 1 to
+    /// [`MAX_COLUMNS`] are unchanged.
+    pub fn clamp_column_counts(&mut self) {
+        let clamp = |columns: &mut Option<ColumnLayout>| {
+            if let Some(columns) = columns {
+                columns.count = columns.column_count() as f64;
+            }
+        };
+        clamp(&mut self.options.columns);
+        for section in self.options.sections.iter_mut().flatten() {
+            clamp(&mut section.columns);
+        }
+        for measured in &mut self.measured {
+            if let LayoutBlock::SectionBreak(block) = &mut measured.block {
+                clamp(&mut block.columns);
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // fragments and pages (output)
 // ---------------------------------------------------------------------------

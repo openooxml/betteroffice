@@ -18,6 +18,14 @@ fn columns(count: f64) -> ColumnLayout {
     }
 }
 
+fn separated(count: f64) -> ColumnLayout {
+    ColumnLayout {
+        equal_width: None,
+        separator: Some(true),
+        ..columns(count)
+    }
+}
+
 fn input(columns: Option<ColumnLayout>) -> LayoutInput {
     let mut value: Value = serde_json::from_str(include_str!(
         "../../docx-layout/tests/fixtures/single-page-multi-paragraph.input.json"
@@ -93,5 +101,25 @@ fn layout_returns_for_a_nan_column_count() {
 
 #[test]
 fn layout_returns_for_an_infinite_column_count() {
-    assert_eq!(pages(Some(columns(f64::INFINITY))), pages(Some(columns(45.0))));
+    assert_eq!(
+        pages(Some(columns(f64::INFINITY))),
+        pages(Some(columns(45.0)))
+    );
+}
+
+#[test]
+fn layout_returns_for_a_huge_separated_column_count() {
+    assert_eq!(pages(Some(separated(1e9))), pages(Some(separated(45.0))));
+}
+
+#[test]
+fn clamping_leaves_valid_column_counts_unchanged() {
+    for count in 1..=MAX_COLUMNS {
+        for layout in [columns(count as f64), separated(count as f64)] {
+            let mut input = input(Some(layout));
+            let before = serde_json::to_string(&input).unwrap();
+            input.clamp_column_counts();
+            assert_eq!(serde_json::to_string(&input).unwrap(), before, "{count}");
+        }
+    }
 }

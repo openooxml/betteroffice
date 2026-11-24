@@ -28,10 +28,12 @@ fn save_after_inserting_duplicating_and_moving_slides() {
     deck.insert_slide(&ctx(), 0, None).unwrap();
     assert_eq!(saved_slides(&deck), count + 1);
     let ids = deck.slide_ids().unwrap();
-    deck.duplicate_slide(&ctx(), &ids[1], ids.len() as u32).unwrap();
+    deck.duplicate_slide(&ctx(), &ids[1], ids.len() as u32)
+        .unwrap();
     assert_eq!(saved_slides(&deck), count + 2);
     let ids = deck.slide_ids().unwrap();
-    deck.move_slide(&ctx(), &ids[0], (ids.len() - 1) as u32).unwrap();
+    deck.move_slide(&ctx(), &ids[0], (ids.len() - 1) as u32)
+        .unwrap();
     deck.delete_slide(&ctx(), &ids[1]).unwrap();
     assert_eq!(saved_slides(&deck), count + 1);
     assert_eq!(saved_slides(&deck), count + 1);
