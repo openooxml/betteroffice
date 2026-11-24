@@ -1,10 +1,13 @@
 import * as fonts from '@betteroffice/fonts';
 import { fontAssetResponse, withBrowserFontGlobals } from '../../../fonts/src/fontAssets.test-support';
+import { spyOnFontFetch } from '../../../fonts/src/fontFetch.test-support';
 import { createFontRuntime } from '../../../fonts/src/fontRuntime';
 import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
+import type { FontCdnDiagnostic } from '../../../../shared/fontCdnDiagnostics';
 import { expect, spyOn, test } from 'bun:test';
 import { BUNDLED_FONTS } from '@betteroffice/fonts';
 import cases from '../../../../crates/betteroffice-fonts/data/script-fallback-chains.json';
+import { textScripts } from '../../../../shared/office-session/textScripts';
 import { defaultSheetFaces } from './enginePngFonts';
 
 const arabicFaces = BUNDLED_FONTS.filter((face) => face.script === 'arabic');
@@ -22,10 +25,10 @@ for (const { family, bold, arabic } of cases) {
 
 const request = { font: { family: 'Calibri', bold: false, italic: false }, scripts: [] };
 
-async function withoutPacks(run: () => Promise<void>) {
+async function withoutPacks(run: () => Promise<void>, installedPack?: 'latin') {
   const runtime = createFontRuntime(async (pack) => ({
     cdn: getFontCdnConfiguration(),
-    urls: pack === 'base' ? Object.fromEntries(Object.entries((await fonts.fontAssetUrls('base'))!)
+    urls: pack === 'base' || pack === installedPack ? Object.fromEntries(Object.entries((await fonts.fontAssetUrls(pack))!)
       .map(([file, href]) => [file, () => new URL(href)])) : undefined,
   }));
   const installed = spyOn(fonts, 'bundledFaceInstalled').mockImplementation(runtime.bundledFaceInstalled);
@@ -51,6 +54,56 @@ test('XLSX PNG faces reject on an implicit CDN failure instead of painting a sub
     });
   } finally { globalThis.fetch = fetchAsset; restore(); }
 }));
+
+test.each([
+  { family: 'MS Gothic', text: 'q漢', pack: 'cjk' },
+  { family: 'Noto Sans Thai', text: 'qก', pack: 'intl' },
+])('XLSX PNG faces for $family match the absent pack when the default CDN is blocked', ({ family, text, pack }) => withoutPacks(async () => {
+  const restore = withBrowserFontGlobals();
+  const fetch = spyOnFontFetch(async (input) => {
+    if (String(input).includes('cdn.jsdelivr.net')) throw new TypeError('Failed to fetch');
+    return fontAssetResponse(input);
+  });
+  const warning = spyOn(console, 'warn').mockImplementation(() => {});
+  const diagnostics: FontCdnDiagnostic[] = [];
+  const dispatch = Object.getOwnPropertyDescriptor(globalThis, 'dispatchEvent');
+  Object.defineProperty(globalThis, 'dispatchEvent', {
+    configurable: true,
+    value(event: CustomEvent<FontCdnDiagnostic>) {
+      if (event.type === 'betteroffice:font-pack-diagnostic') diagnostics.push(event.detail);
+      return true;
+    },
+  });
+  const font = { family, bold: false, italic: false };
+  const signature = ({ faces, fallbacks }: Awaited<ReturnType<typeof defaultSheetFaces>>) => {
+    const summarize = ({ bytes, ...face }: (typeof faces)[number]) => ({ ...face, length: bytes.byteLength, hash: Bun.hash(bytes) });
+    return { faces: faces.map(summarize), fallbacks: fallbacks(font).map(summarize) };
+  };
+  const select = () => defaultSheetFaces([{ font, scripts: textScripts(text) }]).then(signature);
+  try {
+    fonts.configureFontCdn({ baseUrl: false });
+    const absent = await select();
+    expect(absent.faces).toEqual([expect.objectContaining({
+      family, length: fonts.resolveMetricCompatFace('Arial', false, false)!.byteLength,
+    })]);
+    expect(absent.fallbacks).toEqual([]);
+    setFontCdnConfiguration(undefined);
+    await expect(select()).resolves.toEqual(absent);
+    await expect(select()).resolves.toEqual(absent);
+    expect(fetch.mock.calls.filter(([url]) => String(url).includes('cdn.jsdelivr.net'))).toHaveLength(1);
+    expect(warning).toHaveBeenCalledTimes(1);
+    expect(diagnostics).toEqual([expect.objectContaining({ pack, reason: 'cdn-unavailable' })]);
+
+    fonts.configureFontCdn({ baseUrl: 'https://cdn.jsdelivr.net/npm/' });
+    await expect(select()).rejects.toMatchObject({ code: 'font-unavailable', message: expect.stringContaining('Failed to fetch') });
+  } finally {
+    if (dispatch) Object.defineProperty(globalThis, 'dispatchEvent', dispatch);
+    else Reflect.deleteProperty(globalThis, 'dispatchEvent');
+    warning.mockRestore();
+    fetch.mockRestore();
+    restore();
+  }
+}, 'latin'));
 
 test('XLSX PNG faces use Base Latin in headless mode without the Latin pack', async () => withoutPacks(async () => {
   const base = fonts.BASE_LATIN_FONTS.find(({ weight, style }) => weight === 400 && style === 'normal')!;

@@ -55,7 +55,7 @@ test('editors with default fonts off forward no faces and load no fonts', async 
   expect(load).not.toHaveBeenCalled();
 });
 
-test('T12: editor export rejects CDN failures and unavailable pack faces with CDN off', async () => {
+test('editor export omits optional faces when the default CDN fails', async () => {
   const runtime = fontRuntimeWithoutPacks();
   spyOn(xlsxDefaultFontManager, 'load').mockResolvedValue({ ...fonts, default: fonts, ...runtime });
   const previous = getFontCdnConfiguration();
@@ -63,11 +63,12 @@ test('T12: editor export rejects CDN failures and unavailable pack faces with CD
   const fetch = spyOnFontFetch((input) =>
     String(input).includes('cdn.jsdelivr.net') ? Promise.resolve(new Response(null, { status: 404 })) : fontAssetResponse(input));
   const requests = ['Calibri', 'Noto Sans Thai', 'MS Gothic'].map((family) => ({ family, bold: false, italic: false }));
+  const [calibri, ...optional] = requests;
   try {
     setFontCdnConfiguration(undefined);
-    for (const request of requests) {
-      await expect(exportFaces([request], null)).rejects.toMatchObject({ code: 'font-unavailable' });
-    }
+    await expect(exportFaces([calibri!], null)).rejects.toMatchObject({ code: 'font-unavailable' });
+    await expect(exportFaces(optional, null)).resolves.toEqual([]);
+    await expect(editorExportFaces(optional, null, undefined)).resolves.toBeUndefined();
     expect(fetch.mock.calls.filter(([url]) => String(url).includes('cdn.jsdelivr.net'))).toHaveLength(requests.length);
     fonts.configureFontCdn({ baseUrl: false });
     for (const request of requests) {
@@ -76,6 +77,12 @@ test('T12: editor export rejects CDN failures and unavailable pack faces with CD
       });
     }
     expect(fetch.mock.calls.filter(([url]) => String(url).includes('cdn.jsdelivr.net'))).toHaveLength(requests.length);
+    fonts.configureFontCdn({ baseUrl: 'https://cdn.jsdelivr.net/npm/' });
+    for (const request of optional) {
+      await expect(exportFaces([request], null)).rejects.toMatchObject({
+        code: 'font-unavailable', message: expect.stringContaining(request.family),
+      });
+    }
   } finally {
     restore();
     setFontCdnConfiguration(previous);
