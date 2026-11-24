@@ -27,7 +27,8 @@ export async function renderPng(engine: XlsxPngEngine, target: ResolvedPngTarget
   const { list, ...size } = pngDisplayList(engine, target, options);
   if (options.fonts !== undefined) return displayListToPng(list, { ...size, signal: options.signal, fonts: options.fonts });
   defaultFaces ??= await import('./enginePngFonts');
-  const { faces, fallbacks } = await defaultFaces.defaultSheetFaces(sheetFontRequests(list), options.signal);
+  const { reportedFontCdnErrors } = options as XlsxPngOptions & { reportedFontCdnErrors?: Set<Error> };
+  const { faces, fallbacks } = await defaultFaces.defaultSheetFaces(sheetFontRequests(list), options.signal, reportedFontCdnErrors);
   return displayListToPng(list, { ...size, signal: options.signal, fonts: faces, fallbacks });
 }
 

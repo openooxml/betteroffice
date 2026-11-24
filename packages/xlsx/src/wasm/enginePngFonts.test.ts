@@ -56,8 +56,8 @@ test('XLSX PNG faces reject on an implicit CDN failure instead of painting a sub
 }));
 
 test.each([
-  { family: 'MS Gothic', text: 'q漢', pack: 'cjk' },
-  { family: 'Noto Sans Thai', text: 'qก', pack: 'intl' },
+  { family: 'MS Gothic', text: 'q漢한', pack: 'cjk' },
+  { family: 'Noto Sans Thai', text: 'qกກ', pack: 'intl' },
 ])('XLSX PNG faces for $family match the absent pack when the default CDN is blocked', ({ family, text, pack }) => withoutPacks(async () => {
   const restore = withBrowserFontGlobals();
   const fetch = spyOnFontFetch(async (input) => {
@@ -88,11 +88,13 @@ test.each([
     })]);
     expect(absent.fallbacks).toEqual([]);
     setFontCdnConfiguration(undefined);
+    const diagnostic = expect.objectContaining({ pack, reason: 'cdn-unavailable' });
     await expect(select()).resolves.toEqual(absent);
+    expect(diagnostics).toEqual([diagnostic]);
     await expect(select()).resolves.toEqual(absent);
     expect(fetch.mock.calls.filter(([url]) => String(url).includes('cdn.jsdelivr.net'))).toHaveLength(1);
     expect(warning).toHaveBeenCalledTimes(1);
-    expect(diagnostics).toEqual([expect.objectContaining({ pack, reason: 'cdn-unavailable' })]);
+    expect(diagnostics).toEqual([diagnostic, diagnostic]);
 
     fonts.configureFontCdn({ baseUrl: 'https://cdn.jsdelivr.net/npm/' });
     await expect(select()).rejects.toMatchObject({ code: 'font-unavailable', message: expect.stringContaining('Failed to fetch') });

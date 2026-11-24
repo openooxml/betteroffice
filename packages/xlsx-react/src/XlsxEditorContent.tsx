@@ -2147,8 +2147,10 @@ export function XlsxEditorContent({
         height: scroll.clientHeight / zoom,
       },
     };
-    const fonts = await editorExportFaces(handle.renderPngFonts(target), null, defaultFonts);
-    const png = await handle.renderPng(target, { fonts });
+    const reportedFontCdnErrors = new Set<Error>();
+    const fonts = await editorExportFaces(handle.renderPngFonts(target), null, defaultFonts, reportedFontCdnErrors);
+    const options = { fonts, reportedFontCdnErrors };
+    const png = await handle.renderPng(target, options);
     downloadBytes(png, pngName(fileName), 'image/png');
   }, [activeSheetRef, defaultFonts, fileName, zoom]);
 

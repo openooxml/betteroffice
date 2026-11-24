@@ -58,9 +58,10 @@ export function useDefaultFonts(
 /** The faces a PNG export should paint `fonts` with, as the editor paints them; none when default fonts are off. */
 export async function editorExportFaces(
   fonts: readonly XlsxPngFont[], decoder: WorkbookSession['call']['decodeFontFace'] | null | undefined, defaultFonts: boolean | undefined,
+  reported?: Set<Error>,
 ): Promise<XlsxFontFace[] | undefined> {
   if (defaultFonts === false || fonts.length === 0) return undefined;
   const { exportFaces } = await defaultFontPainterModule.load();
-  const faces = await exportFaces(fonts, decoder);
+  const faces = await exportFaces(fonts, decoder, reported);
   return faces.length ? faces : undefined;
 }

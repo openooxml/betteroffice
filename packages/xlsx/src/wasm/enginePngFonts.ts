@@ -85,7 +85,9 @@ export interface DefaultSheetFaces {
  * style, so bold Calibri Light drawn with a regular face gets synthetic bold, and regular Arial Black its bold face,
  * as natively. An abort rejects at once without waiting for loads other exports may share.
  */
-export async function defaultSheetFaces(requests: readonly SheetFontRequest[], signal?: AbortSignal): Promise<DefaultSheetFaces> {
+export async function defaultSheetFaces(
+  requests: readonly SheetFontRequest[], signal?: AbortSignal, reported = new Set<Error>(),
+): Promise<DefaultSheetFaces> {
   signal?.throwIfAborted();
   const loading = loadFonts().then(async (manager) => {
     const unavailable = new Set<string>();
@@ -99,7 +101,10 @@ export async function defaultSheetFaces(requests: readonly SheetFontRequest[], s
       } catch (error) {
         if (isImplicitFontCdnError(error) && (error.diagnostic.pack === 'cjk' || error.diagnostic.pack === 'intl')) {
           unavailable.add(face.file);
-          reportImplicitCdnFailure(error);
+          if (!reported.has(error)) {
+            reported.add(error);
+            reportImplicitCdnFailure(error);
+          }
           return undefined;
         }
         const reason = error instanceof Error ? error.message : String(error);

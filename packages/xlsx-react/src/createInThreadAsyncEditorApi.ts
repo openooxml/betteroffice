@@ -91,8 +91,10 @@ export function createInThreadAsyncEditorApi(
       const captured = structuredClone(target);
       const wire = structuredClone(rest);
       return await read(async () => {
-        const fonts = wire.fonts ?? await editorExportFaces(handle.renderPngFonts(captured, wire), null, undefined);
-        return handle.renderPng(captured, { ...wire, fonts, signal });
+        const reportedFontCdnErrors = new Set<Error>();
+        const fonts = wire.fonts ?? await editorExportFaces(handle.renderPngFonts(captured, wire), null, undefined, reportedFontCdnErrors);
+        const renderOptions = { ...wire, fonts, signal, reportedFontCdnErrors };
+        return handle.renderPng(captured, renderOptions);
       });
     },
     exportStructured(options) {

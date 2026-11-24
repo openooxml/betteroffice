@@ -340,6 +340,7 @@ export function createDefaultFontPainter(
  */
 export async function exportFaces(
   fonts: readonly XlsxPngFont[], decoder: WorkbookSession['call']['decodeFontFace'] | null | undefined,
+  reported = new Set<Error>(),
 ): Promise<XlsxFontFace[]> {
   if (fonts.length === 0) return [];
   const bundled = await xlsxDefaultFontManager.load();
@@ -354,7 +355,10 @@ export async function exportFaces(
     try { bytes = await load(); }
     catch (error) {
       if (isImplicitFontCdnError(error) && (error.diagnostic.pack === 'cjk' || error.diagnostic.pack === 'intl')) {
-        reportImplicitCdnFailure(error);
+        if (!reported.has(error)) {
+          reported.add(error);
+          reportImplicitCdnFailure(error);
+        }
         continue;
       }
       throw new PngExportError('font-unavailable', `The font "${font.family}" could not load, so the sheet was not exported with a substitute.`);
