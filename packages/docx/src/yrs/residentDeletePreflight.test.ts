@@ -137,8 +137,11 @@ function expectDeletesMatchStoryScan(arm: CommandArm, label: string): void {
           });
           const where = `${label} ${kind} x${count}${suggesting ? ' suggesting' : ''} ${story} ${span.paraId}@${offset}`;
           const result = preflightDocxCommand(engine, arm.state, intent, context(arm, intent));
-          // A caret the selection resolution refuses (inside a surrogate pair, say) never reaches the delete.
-          if (result.status === 'refused' && result.reason !== 'unsupported-delete-target') {
+          // A caret the selection check refuses never reaches the delete. The check without
+          // `paragraphUnit` is the whole-story one, so it decides independently of the result.
+          const caret = { story, paraId: span.paraId, offset };
+          if (!commandSelectionRange({ geometryReader: engine.geometryReader }, { anchor: caret, focus: caret })) {
+            expect(result.status === 'refused' ? result.reason : result.status, where).toBe('invalid-selection');
             seen.unresolved++;
             continue;
           }
