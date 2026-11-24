@@ -1,4 +1,4 @@
-import type { RangeStylePatch, XlsxCellValue, XlsxEditStep, XlsxDefinedNameOp, ConditionalFormatInfo } from '@betteroffice/xlsx';
+import { translateFormulasOn, type CellPoint, type RangeStylePatch, type XlsxCellValue, type XlsxEditStep, type XlsxDefinedNameOp, type ConditionalFormatInfo } from '@betteroffice/xlsx';
 import { DocumentToolError } from './types';
 import { integer, plainText, textWindow, unwrap } from './prototype';
 import { address, corners, type XlsxAgentWorkbook } from './xlsx';
@@ -471,17 +471,30 @@ export function sortXlsx(book: XlsxAgentWorkbook, options: { version: string; sh
     }
     return a - b;
   });
+  const sourceRow = (dest: number) => dest < start ? dest : order[dest - start];
+  const moves: { formula: string; from: CellPoint; to: CellPoint }[] = [];
+  const sortedCells = rows.map((_, dest) => {
+    const source = sourceRow(dest);
+    return rows[source].map(({ value, formula }, col) => {
+      if (source !== dest && formula !== null) moves.push({ formula, from: { row: bounds.start.row + source, col: bounds.start.col + col }, to: { row: bounds.start.row + dest, col: bounds.start.col + col } });
+      return { value, formula };
+    });
+  });
+  if (moves.length) translateFormulasOn(book.unproxiedHandle, moves).forEach((result, index) => {
+    const { from, to } = moves[index];
+    if (!result.ok) throw new DocumentToolError('INVALID_SORT', `Cannot move the formula at ${address(from.row, from.col)}. ${result.error}`);
+    sortedCells[to.row - bounds.start.row][to.col - bounds.start.col].formula = result.formula;
+  });
   const captured = book.handle.captureFormat(sheet.index, options.range);
   const ops: unknown[] = [];
   for (let dest = start; dest < rows.length; dest++) {
-    const source = order[dest - start];
+    if (sourceRow(dest) === dest) continue;
     for (let col = 0; col < bounds.columns; col++) {
-      const cell = rows[source][col];
-      ops.push({ type: 'setCell', sheet: sheet.index, at: { row: bounds.start.row + dest, col: bounds.start.col + col }, cell: { value: cell.value, formula: cell.formula } });
+      ops.push({ type: 'setCell', sheet: sheet.index, at: { row: bounds.start.row + dest, col: bounds.start.col + col }, cell: sortedCells[dest][col] });
     }
   }
   const reorderFormats = <T>(formats: readonly T[]): T[] => Array.from({ length: rows.length }, (_, dest) => {
-    const source = dest < start ? dest : order[dest - start];
+    const source = sourceRow(dest);
     return formats.slice(source * bounds.columns, (source + 1) * bounds.columns);
   }).flat();
   const protectionAt = (formats: unknown[], index: number) => JSON.stringify((formats[index] as Record<string, unknown>).protection ?? null);
@@ -503,7 +516,7 @@ export function sortXlsx(book: XlsxAgentWorkbook, options: { version: string; sh
     ...(captured.sourceStyles && { sourceStyles: reorderFormats(captured.sourceStyles) }),
     ...(captured.sourceFormats && { sourceFormats: reorderFormats(captured.sourceFormats) }),
   };
-  if (ops.length) ops.push({ type: 'applyRangeFormat', sheet: sheet.index, range: { start: bounds.start, end: bounds.end }, format: sortedFormats });
+  if (start < rows.length) ops.push({ type: 'applyRangeFormat', sheet: sheet.index, range: { start: bounds.start, end: bounds.end }, format: sortedFormats });
   let result;
   try { book.checkVersion(options.version); result = book.handle.applyOps(ops); } catch (error) { failure(error); }
   const afterFormats = options.protectedSheets === 'allow' ? book.handle.captureFormat(sheet.index, options.range).formats : [];
@@ -511,10 +524,9 @@ export function sortXlsx(book: XlsxAgentWorkbook, options: { version: string; sh
     const at = corners(cell.slice(cell.lastIndexOf('!') + 1)).start;
     const dest = at.row - bounds.start.row;
     const col = at.col - bounds.start.col;
-    const source = dest < start ? dest : order[dest - start];
-    return JSON.stringify({ value: rows[dest][col].value, formula: rows[dest][col].formula }) !== JSON.stringify({ value: rows[source][col].value, formula: rows[source][col].formula }) || JSON.stringify(captured.formats[dest * bounds.columns + col]) !== JSON.stringify(afterFormats[dest * bounds.columns + col]);
+    return JSON.stringify({ value: rows[dest][col].value, formula: rows[dest][col].formula }) !== JSON.stringify(sortedCells[dest][col]) || JSON.stringify(captured.formats[dest * bounds.columns + col]) !== JSON.stringify(afterFormats[dest * bounds.columns + col]);
   }) : [];
-  return { ...(options.protectedSheets === 'allow' ? { protectedCells: result.applied ? changedProtectedCells : [] } : {}), baseVersion: options.version, version: book.handle.version(), applied: result.applied, sheet: sheet.sheetId, range: options.range, rows: order.slice(0, 100).map((source, index) => ({ from: bounds.start.row + source + 1, to: bounds.start.row + start + index + 1 })), rowCount: order.length, truncated: order.length > 100, formulaPolicy: 'Formula source moves unchanged with its row; references keep their original A1 addresses.', results: book.readCells({ sheet: sheet.sheetId, range: options.range, limit: 20 }) };
+  return { ...(options.protectedSheets === 'allow' ? { protectedCells: result.applied ? changedProtectedCells : [] } : {}), baseVersion: options.version, version: book.handle.version(), applied: result.applied, sheet: sheet.sheetId, range: options.range, rows: order.slice(0, 100).map((source, index) => ({ from: bounds.start.row + source + 1, to: bounds.start.row + start + index + 1 })), rowCount: order.length, truncated: order.length > 100, formulaPolicy: 'Formulas move with their rows as they do on paste, shifting relative row references and preserving $-anchored rows.', results: book.readCells({ sheet: sheet.sheetId, range: options.range, limit: 20 }) };
 }
 
 export async function previewXlsx(book: XlsxAgentWorkbook, options: { sheet: string; range: string; scale?: number }) {

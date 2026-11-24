@@ -37,14 +37,14 @@ export class XlsxAgentWorkbook extends PrototypeDocument<CellChange, XlsxEditSte
   private sheetCatalog: Array<{ sheetId: string; name: string }> = [];
   private nextSheet = 0;
 
-  private constructor(readonly handle: WorkbookHandle, readonly name = 'workbook.xlsx', private readonly ownsHandle = true, private readonly editPeer?: WorkbookEditPeer) {
+  private constructor(readonly handle: WorkbookHandle, readonly name = 'workbook.xlsx', private readonly ownsHandle = true, private readonly editPeer?: WorkbookEditPeer, readonly unproxiedHandle = handle) {
     super();
     this.catalog();
   }
 
   static attach(handle: WorkbookHandle, options: XlsxOptions = {}) {
     const attached = options.editPeer ? new Proxy(handle, { get: (target, key) => key === 'applyEdits' || key === 'applyOps' || key === 'propose' || key === 'acceptProposal' || key === 'rejectProposal' ? options.editPeer![key] : Reflect.get(target, key) }) : handle;
-    return new XlsxAgentWorkbook(attached, options.name, false, options.editPeer);
+    return new XlsxAgentWorkbook(attached, options.name, false, options.editPeer, handle);
   }
 
   catalog() {
