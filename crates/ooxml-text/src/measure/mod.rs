@@ -411,7 +411,7 @@ pub fn measure_paragraph_typed(
 
     if runs.is_empty() {
         if attrs.is_some_and(|a| a.suppress_empty_paragraph_height) {
-            return with_inline_marker(ParagraphExtentOut {
+            return Ok(ParagraphExtentOut {
                 kind: "paragraph",
                 lines: vec![zero_row()],
                 total_height: 0.0,
