@@ -10,6 +10,7 @@ import { createFontRuntime } from '../../../fonts/src/fontRuntime';
 import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
 import { isClientMessage, isHostMessage } from '../../../../shared/office-session/protocol';
+import { engineKind } from '../wasm/enginePng';
 import { defaultFontInstaller, type DefaultFontFace, type DefaultFontPayload } from '../../../../shared/pptxDefaultFonts';
 import { decodeFontFace, initWasm } from '../wasm/loader';
 import { PptxRenderer } from '../wasm/engine';
@@ -135,8 +136,12 @@ function stubPngCanvas() {
 
 async function expectPng(client: PresentationCommandClient, outcome: 'draws' | 'font-unavailable', painted: ReturnType<typeof stubPngCanvas>) {
   const png = client.renderPng!({ slide: 0 });
-  if (outcome === 'draws') {
-    await expect(png).resolves.toEqual(new TextEncoder().encode('png'));
+  if (outcome === 'draws' && engineKind === 'native') {
+    const bytes = await png;
+    expect(bytes.byteLength).toBeGreaterThan(8);
+    expect([...bytes.subarray(0, 4)]).toEqual([137, 80, 78, 71]);
+  } else if (outcome === 'draws') {
+    expect([...await png]).toEqual([...new TextEncoder().encode('png')]);
     expect(painted.mock.calls.map(([text]) => text).join('')).toContain('Xalpha');
   } else await expect(png).rejects.toMatchObject({ code: outcome });
 }
