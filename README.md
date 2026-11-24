@@ -58,6 +58,7 @@
 More packages:
 
 - **Agent tools:** [`@betteroffice/agents`](https://www.npmjs.com/package/@betteroffice/agents), the TypeScript SDK and `betteroffice-mcp` server.
+- **WOPI app (alpha):** a self-hosted container that serves the BetterOffice editors to a WOPI host (your file platform), so it can open DOCX, XLSX and PPTX files in them and save them back. See [WOPI app](https://docs.betteroffice.dev/docs/wopi) for running it and for setup notes for OpenCloud, Nextcloud and Seafile.
 - **Fonts:** [`@betteroffice/fonts`](https://www.npmjs.com/package/@betteroffice/fonts), [`@betteroffice/fonts-cjk`](https://www.npmjs.com/package/@betteroffice/fonts-cjk), [`@betteroffice/fonts-intl`](https://www.npmjs.com/package/@betteroffice/fonts-intl), [`@betteroffice/fonts-latin`](https://www.npmjs.com/package/@betteroffice/fonts-latin).
 - **i18n:** [`@betteroffice/docx-i18n`](https://www.npmjs.com/package/@betteroffice/docx-i18n), [`@betteroffice/xlsx-i18n`](https://www.npmjs.com/package/@betteroffice/xlsx-i18n), [`@betteroffice/pptx-i18n`](https://www.npmjs.com/package/@betteroffice/pptx-i18n).
 
