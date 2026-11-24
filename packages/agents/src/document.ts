@@ -1681,7 +1681,8 @@ export class DocxAgentDocument {
         if (edit.list && edit.paragraphs.some(({ style }) => style)) {
           throw new DocumentToolError('INVALID_ARGUMENT', 'list: continue takes the style of the anchor list item. Omit style.');
         }
-        const paragraphs = edit.paragraphs.map(({ text, style }) => {
+        const paragraphs = edit.paragraphs.map(({ text: plain, runs, style }) => {
+          const text = runs ? runs.map(run => run.text).join('') : plain!;
           lineText(text);
           const resolved = style ? resolveStyle(this.styles(), style) : undefined;
           return edit.before !== undefined ? (resolved ? { text, styleId: resolved } : { text }) : { text, styleId: resolved ?? fallback };
@@ -1694,10 +1695,21 @@ export class DocxAgentDocument {
         }
         return draft => {
           requireParagraph(draft, target);
-          if (edit.before !== undefined) return { result: {}, created: insertParagraphsBefore(draft, target, paragraphs, edit.runFormat) };
-          if (edit.list) return { result: {}, created: continueList(draft, target, paragraphs) };
-          if (edit.runFormat === 'anchor') return { result: {}, created: insertParagraphsWithAnchorFormat(draft, target, paragraphs) };
-          return { result: {}, created: hostEdit(draft, { op: 'insertParagraphs', target, at: 'end', paragraphs }).newParagraphs };
+          const created = edit.before !== undefined ? insertParagraphsBefore(draft, target, paragraphs, edit.runFormat)
+            : edit.list ? continueList(draft, target, paragraphs)
+              : edit.runFormat === 'anchor' ? insertParagraphsWithAnchorFormat(draft, target, paragraphs)
+                : hostEdit(draft, { op: 'insertParagraphs', target, at: 'end', paragraphs }).newParagraphs;
+          created.forEach(({ story, paraId }, index) => {
+            let offset = 0;
+            for (const { text, bold, italic, underline } of edit.paragraphs[index].runs ?? []) {
+              const start = offset;
+              offset += text.length;
+              if (text && [bold, italic, underline].some(mark => mark !== undefined)) {
+                draft.formatRange({ story, start: { paraId, offset: start }, end: { paraId, offset } }, { bold, italic, underline });
+              }
+            }
+          });
+          return { result: {}, created };
         };
       }
       case 'delete_paragraph':
