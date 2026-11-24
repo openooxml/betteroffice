@@ -268,12 +268,13 @@ async function expectPng(client: PresentationCommandClient, outcome: 'draws' | '
 }
 
 for (const [pack, family] of [['cjk', 'MS Gothic'], ['intl', 'Noto Sans Devanagari']] as const) {
-  for (const slicedFonts of [false, true]) {
-    test(`a blocked default ${pack} CDN matches an absent pack with sliced fonts ${slicedFonts}`, async () => {
+  for (const [cdnDisabled, slicedFonts] of [[false, false], [false, true], [true, false]] as const) {
+    test(`an absent ${pack} pack registers the Latin substitute with the CDN ${cdnDisabled ? 'disabled' : 'blocked'} and sliced fonts ${slicedFonts}`, async () => {
       const previous = getFontCdnConfiguration();
       const restoreBrowser = withBrowserFontGlobals();
       restorers.push(() => { restoreBrowser(); setFontCdnConfiguration(previous); });
       setFontCdnConfiguration(undefined);
+      if (cdnDisabled) fonts.configureFontCdn({ baseUrl: false });
       const cdn = getFontCdnConfiguration();
       const runtime = createFontRuntime(async (kind) => ({
         cdn: getFontCdnConfiguration(),
@@ -307,8 +308,8 @@ for (const [pack, family] of [['cjk', 'MS Gothic'], ['intl', 'Noto Sans Devanaga
       clients.push(client);
       const registrations = () => register.mock.calls.filter(([name]) => name === family)
         .map(([name, bold, italic, bytes]) => [name, bold, italic, digest(bytes)]);
-      expect(fetched).toHaveLength(1);
-      expect(fetched[0]).toContain(`/fonts-${pack}@`);
+      expect(fetched).toHaveLength(cdnDisabled ? 0 : 1);
+      if (!cdnDisabled) expect(fetched[0]).toContain(`/fonts-${pack}@`);
       expect(sliced).toHaveBeenCalledTimes(pack === 'cjk' && slicedFonts ? 1 : 0);
       expect(registrations()).toEqual([[family, false, false, expected]]);
 
@@ -321,7 +322,21 @@ for (const [pack, family] of [['cjk', 'MS Gothic'], ['intl', 'Noto Sans Devanaga
       expect(ack.outcomes[0].status).toBe('applied');
       expect(registrations()).toEqual([[family, false, false, expected]]);
       await expectPng(client, EXPORT_WITH_ABSENT_PACK, painted);
-      expect(warn.mock.calls.filter(([message]) => String(message).includes(`Cannot load @betteroffice/fonts-${pack}`))).toHaveLength(1);
+      expect(warn.mock.calls.filter(([message]) => String(message).includes(`Cannot load @betteroffice/fonts-${pack}`)))
+        .toHaveLength(cdnDisabled ? 0 : 1);
+
+      if (cdnDisabled) {
+        const resolve = (source: ReturnType<typeof runtime.createFontProvider>) =>
+          (source.resolve(family, false, false) ?? source.resolveFamily(family, false, false))!;
+        const strict = runtime.createFontProvider(undefined, { decoder: decodeFontFace, strict: true });
+        const missingAddon = await resolve(strict)().catch((error: unknown) => error);
+        expect(fonts.isMissingFontAddon(missingAddon)).toBe(true);
+        expect((missingAddon as Error).constructor.name).toBe(pack === 'cjk' ? 'MissingCjkAddonError' : 'MissingIntlAddonError');
+
+        fonts.configureFontCdn({ baseUrl: 'https://cdn.jsdelivr.net/npm/' });
+        const explicit = await commandFontProvider.load(getFontCdnConfiguration());
+        await expect(resolve(explicit)()).rejects.toThrow('Network disabled');
+      }
     });
   }
 }
