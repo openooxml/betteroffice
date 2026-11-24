@@ -117,7 +117,10 @@ fn note_any(any: &Any, prefix: &str, floor: &mut u64) {
 
 const MAX_FLOOR: u64 = 1 << 53;
 
-/// Raises `floor` past each `N` below [`MAX_FLOOR`] in `text` written as `prefix` then digits,
+/// Scanned numbers at or above this are never drawn, so they leave the floor alone.
+const SCAN_LIMIT: u64 = 1 << 52;
+
+/// Raises `floor` past each `N` below [`SCAN_LIMIT`] in `text` written as `prefix` then digits,
 /// where `prefix` does not continue a longer number.
 fn note(text: &str, prefix: &str, floor: &mut u64) {
     for (at, _) in text.match_indices(prefix) {
@@ -129,7 +132,7 @@ fn note(text: &str, prefix: &str, floor: &mut u64) {
             .find(|c: char| !c.is_ascii_digit())
             .unwrap_or(digits.len());
         if let Ok(n) = digits[..end].parse::<u64>()
-            && n < MAX_FLOOR
+            && n < SCAN_LIMIT
         {
             *floor = (*floor).max(n + 1);
         }
@@ -161,9 +164,10 @@ mod tests {
     }
 
     #[test]
-    fn numbers_at_the_cap_never_raise_the_floor() {
-        assert_eq!(floor("41:9007199254740991"), 1 << 53);
-        assert_eq!(floor("41:9007199254740992"), 0);
+    fn numbers_at_the_scan_limit_never_raise_the_floor() {
+        assert_eq!(floor("41:4503599627370495"), 1 << 52);
+        assert_eq!(floor("41:4503599627370496"), 0);
+        assert_eq!(floor("41:9007199254740991"), 0);
         assert_eq!(floor("41:18446744073709551615"), 0);
     }
 
@@ -183,20 +187,20 @@ mod tests {
     fn a_comment_body_never_makes_a_draw_repeat_a_live_id() {
         let (first, second) = drawn_after("41:18446744073709551615");
         assert_eq!((first.as_str(), second.as_str()), ("41:1", "41:2"));
-        let (first, second) = drawn_after("41:9007199254740989");
+        let (first, second) = drawn_after("41:4503599627370493");
         assert_eq!(
             (first.as_str(), second.as_str()),
-            ("41:9007199254740990", "41:9007199254740991")
+            ("41:4503599627370494", "41:4503599627370495")
         );
-        assert_eq!(floor(&second), 1 << 53);
+        assert_eq!(floor(&second), 1 << 52);
         let (first, second) = drawn_after("41:5");
         assert_eq!((first.as_str(), second.as_str()), ("41:6", "41:7"));
     }
 
     #[test]
-    #[should_panic(expected = "session id counter exhausted")]
-    fn a_floor_at_the_cap_fails_loudly_instead_of_drawing_an_unseen_id() {
-        drawn_after("41:9007199254740991");
+    fn a_comment_body_at_the_draw_cap_leaves_draws_below_it() {
+        let (first, second) = drawn_after("41:9007199254740991");
+        assert_eq!((first.as_str(), second.as_str()), ("41:1", "41:2"));
     }
 
     #[test]
