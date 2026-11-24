@@ -37,6 +37,21 @@ test('each loader is wrapped once, whichever method returns it', () => {
   expect(watched.resolveLastResort!('Arial', false, false, 'word')).toBe(loader);
 });
 
+test('supplied regular Arial keeps the Han script fallback', () => {
+  const loader: BundledFontLoader = async () => bytes;
+  const provider = { ...providerOf(loader), resolveScriptFallback: () => loader };
+  const supplied = [{ family: 'arial', bold: false, italic: false }];
+  const { provider: watched } = recordFaceLoads(provider, fonts, new Set(supplied.map((face) => face.family)));
+  expect(watched.resolveScriptFallback!('cjk-sc', false, false, 'Arial')).toBeFunction();
+});
+
+test('supplied bold Arial keeps the regular Arial face', () => {
+  const loader: BundledFontLoader = async () => bytes;
+  const supplied = [{ family: 'arial', bold: true, italic: false }];
+  const { provider: watched } = recordFaceLoads(providerOf(loader), fonts, new Set(supplied.map((face) => face.family)));
+  expect(watched.resolve('Arial', false, false)).toBeFunction();
+});
+
 test('a failed load is recorded with its face and family and still rejects, through the loader and its read-only bytes', async () => {
   const offline = new Error('offline');
   const inner: BundledFontLoader = Object.assign(() => Promise.reject(offline), { readOnlyBytes: () => Promise.reject(offline) });
