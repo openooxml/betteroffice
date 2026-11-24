@@ -1607,22 +1607,49 @@ fn settled_trailing_pages(
     measured: &[MeasuredBlock],
     dirty: &[usize],
 ) -> Vec<crate::types::Page> {
-    let mut settled: Vec<_> = placed
+    let pages = placed.get(1..).unwrap_or_default();
+    let mut settled: Vec<_> = pages
         .iter()
-        .skip(1)
+        .zip(first_blocks(pages, measured))
         .rev()
         .zip(retained_before_convergence.iter().rev())
-        .map_while(|(next, retained)| settled_as_retained(next, retained, measured, dirty))
+        .map_while(|((next, start), retained)| {
+            settled_as_retained(next, start?, retained, measured, dirty)
+        })
         .collect();
     settled.reverse();
     settled
 }
 
+/// The index in `measured` of the block of each page's first fragment. Pages hold blocks in
+/// document order, so each page's search starts at the block the page before it starts with and
+/// the pages share one scan; a block before that, which an out-of-order fragment could name, is
+/// looked for behind it.
+fn first_blocks(pages: &[crate::types::Page], measured: &[MeasuredBlock]) -> Vec<Option<usize>> {
+    let mut from = 0;
+    pages
+        .iter()
+        .map(|page| {
+            let (id, _) = fragment_source(page.fragments.first()?);
+            let named = |block: &MeasuredBlock| block.block.block_id() == Some(id);
+            let found = measured[from..]
+                .iter()
+                .position(named)
+                .map(|index| from + index)
+                .or_else(|| measured[..from].iter().position(named))?;
+            from = from.max(found);
+            Some(found)
+        })
+        .collect()
+}
+
 /// `retained` refreshed from its blocks as a retained page after convergence
 /// is, when `next`, placed afresh, holds only blocks outside `dirty` and is
 /// that page as placement gives it, so its display is the retained one moved.
+/// `start` is the index in `measured` of the block of `next`'s first fragment.
 fn settled_as_retained(
     next: &crate::types::Page,
+    start: usize,
     retained: &crate::types::Page,
     measured: &[MeasuredBlock],
     dirty: &[usize],
@@ -1630,11 +1657,6 @@ fn settled_as_retained(
     if next.fragments.len() != retained.fragments.len() {
         return None;
     }
-    let first = next.fragments.first()?;
-    let (id, _) = fragment_source(first);
-    let start = measured
-        .iter()
-        .position(|block| block.block.block_id() == Some(id))?;
     let walk = || ReusedBlocks {
         next: start,
         current: Some(start),
