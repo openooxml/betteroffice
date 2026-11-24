@@ -41,14 +41,14 @@ test('supplied regular Arial keeps the Han script fallback', () => {
   const loader: BundledFontLoader = async () => bytes;
   const provider = { ...providerOf(loader), resolveScriptFallback: () => loader };
   const supplied = [{ family: 'arial', bold: false, italic: false }];
-  const { provider: watched } = recordFaceLoads(provider, fonts, new Set(supplied.map((face) => face.family)));
+  const { provider: watched } = recordFaceLoads(provider, fonts, supplied);
   expect(watched.resolveScriptFallback!('cjk-sc', false, false, 'Arial')).toBeFunction();
 });
 
 test('supplied bold Arial keeps the regular Arial face', () => {
   const loader: BundledFontLoader = async () => bytes;
   const supplied = [{ family: 'arial', bold: true, italic: false }];
-  const { provider: watched } = recordFaceLoads(providerOf(loader), fonts, new Set(supplied.map((face) => face.family)));
+  const { provider: watched } = recordFaceLoads(providerOf(loader), fonts, supplied);
   expect(watched.resolve('Arial', false, false)).toBeFunction();
 });
 
