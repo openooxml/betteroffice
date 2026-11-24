@@ -2,4 +2,4 @@
 "@betteroffice/agents": patch
 ---
 
-`xlsx_sort` now moves formulas with their rows, so a formula that refers to its own row still does after the sort. Sorts that could leave moved formulas with stale results or change ambiguous references are refused.
+`xlsx_sort` now shifts relative row references when it moves formulas. If a formula cannot be moved safely, the sort reports the affected cell before applying any edits.

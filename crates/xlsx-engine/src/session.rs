@@ -109,7 +109,6 @@ struct FormulaMove {
     formula: String,
     from: CellRef,
     to: CellRef,
-    sheet: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -1050,35 +1049,17 @@ impl Session {
 
     /// Formulas, without their `=`, moved from one cell to another as a paste moves them: per
     /// item `{ ok: true, formula }`, or `{ ok: false, error }` when the paste would refuse it.
-    pub fn translate_formulas_json(
-        &self,
-        args: &str,
-        now_serial: Option<f64>,
-    ) -> Result<String, String> {
+    pub fn translate_formulas_json(args: &str) -> Result<String, String> {
         let moves: Vec<FormulaMove> =
             serde_json::from_str(args).map_err(|error| format!("bad translate args: {error}"))?;
-        let options = self.calculation_options(now_serial);
         let moved: Vec<MovedFormula> = moves
             .into_iter()
-            .map(|item| {
-                if let Some(sheet) = item.sheet
-                    && !self.workbook.can_calculate_moved_formula(
-                        SheetId(sheet),
-                        item.from,
-                        &item.formula,
-                        options,
-                    )
-                {
-                    return MovedFormula::Refused {
-                        ok: false,
-                        error: "The calculation engine did not evaluate it.",
-                    };
-                }
-                match moved_formula(&item.formula, item.from, item.to) {
+            .map(
+                |item| match moved_formula(&item.formula, item.from, item.to) {
                     Ok(formula) => MovedFormula::Moved { ok: true, formula },
                     Err(error) => MovedFormula::Refused { ok: false, error },
-                }
-            })
+                },
+            )
             .collect();
         serde_json::to_string(&moved).map_err(|error| error.to_string())
     }

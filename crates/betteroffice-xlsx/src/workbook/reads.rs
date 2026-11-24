@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use xlsx_parse::{DefinedFunctionNames, display_formula};
 
 use crate::{
-    CalculationOptions, CellEdit, CellRange, CellRef, DifferentialFormat, Error, Result, SheetId,
-    SheetInfo, Viewport, Workbook,
+    CellEdit, CellRange, CellRef, DifferentialFormat, Error, Result, SheetId, SheetInfo, Viewport,
+    Workbook,
 };
 
 /// Sheet metadata shared by binding payloads.
@@ -406,48 +406,5 @@ impl Workbook {
                 })
                 .collect(),
         }
-    }
-
-    #[doc(hidden)]
-    pub fn can_calculate_moved_formula(
-        &self,
-        sheet: SheetId,
-        at: CellRef,
-        formula: &str,
-        options: CalculationOptions,
-    ) -> bool {
-        let formula = super::stored_formula(self.model(), sheet, at).unwrap_or(formula);
-        let formula = formula.strip_prefix('=').unwrap_or(formula);
-        let Ok(expr) = xlsx_calc::parse_formula(formula) else {
-            return false;
-        };
-        if xlsx_calc::reads_other_workbook(&expr)
-            || (formula.contains(['[', ':'])
-                && xlsx_model::sheet_qualifier::sheet_qualifiers(formula)
-                    .iter()
-                    .any(|qualifier| {
-                        let text = &formula[qualifier.span.clone()];
-                        qualifier.bound
-                            && (qualifier.external
-                                || qualifier.first.starts_with('[')
-                                || (text.contains(':')
-                                    && (text.starts_with('\'')
-                                        || self.sheet_id(&qualifier.first).is_some())))
-                    }))
-        {
-            return false;
-        }
-        if self.model().defined_names.is_empty() && !formula.to_ascii_uppercase().contains("INDIRECT")
-        {
-            return true;
-        }
-        let mut context = xlsx_calc::EvalContext::new(self.model(), sheet);
-        context.cell = Some(at);
-        context.now_serial = options.now_serial;
-        context.rand_seed = Some(u64::from(self.rand_seed().unwrap_or_default()));
-        let _ = xlsx_calc::evaluate(&expr, &context);
-        !context.read_other_workbook()
-            && !context.has_unhandled_unsupported_function()
-            && !context.exhausted()
     }
 }

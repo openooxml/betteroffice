@@ -20,9 +20,23 @@ const doubled = { sheet: 'Sales', range: 'F2:F4', formulas: [['=B2*2'], ['=B3*2'
 const descending = { sheet: 'Sales', range: 'A1:F4', header: true, keys: [{ column: 'B', order: 'desc' }] } satisfies SortOptions;
 const movingC2 = { ...descending, range: 'B2:C3', header: false };
 const unevaluatedC2 = 'Cannot move the formula at C2. The calculation engine did not evaluate it. Exclude the cell from the sort or replace the formula with a value.';
+const protectedSortSheet = '<sheetData><row r="2"><c r="B2"><v>1</v></c><c r="C2"><f>E2</f><v>10</v></c><c r="D2"><f>B$2</f><v>1</v></c><c r="E2"><v>10</v></c></row><row r="3"><c r="B3"><v>2</v></c><c r="C3"><f>E3</f><v>20</v></c><c r="D3"><f>B$2</f><v>1</v></c><c r="E3"><v>20</v></c></row></sheetData><sheetProtection sheet="1"/>';
 
 function sortSheet(formula: string) {
   return `<sheetData><row r="1"><c r="E1"><v>1</v></c></row><row r="2"><c r="B2"><v>1</v></c><c r="C2">${formula}<v>42</v></c><c r="E2"><v>2</v></c></row><row r="3"><c r="B3"><v>2</v></c><c r="C3"><v>84</v></c><c r="E3"><v>3</v></c></row></sheetData>`;
+}
+
+async function workbookBytes(sheetData: string, definedNames = '') {
+  const zip = await JSZip.loadAsync(await implicitFontWorkbook());
+  const sheetPath = 'xl/worksheets/sheet1.xml';
+  const sheet = await zip.file(sheetPath)!.async('string');
+  zip.file(sheetPath, sheet.replace(/<sheetData>.*?<\/sheetData>/, () => sheetData));
+  if (definedNames) {
+    const workbookPath = 'xl/workbook.xml';
+    const workbook = await zip.file(workbookPath)!.async('string');
+    zip.file(workbookPath, workbook.replace('</sheets>', () => `</sheets><definedNames>${definedNames}</definedNames>`));
+  }
+  return zip.generateAsync({ type: 'uint8array' });
 }
 
 async function withWorkbook(run: (call: Call) => Promise<void>, sheetData = '<sheetData/>', definedNames = '') {
@@ -30,16 +44,7 @@ async function withWorkbook(run: (call: Call) => Promise<void>, sheetData = '<sh
   const client = new Client({ name: 'xlsx-sort-formulas', version: '1' });
   let server: Awaited<ReturnType<typeof createOfficeMcpServer>> | undefined;
   try {
-    const zip = await JSZip.loadAsync(await implicitFontWorkbook());
-    const sheetPath = 'xl/worksheets/sheet1.xml';
-    const sheet = await zip.file(sheetPath)!.async('string');
-    zip.file(sheetPath, sheet.replace(/<sheetData>.*?<\/sheetData>/, () => sheetData));
-    if (definedNames) {
-      const workbookPath = 'xl/workbook.xml';
-      const workbook = await zip.file(workbookPath)!.async('string');
-      zip.file(workbookPath, workbook.replace('</sheets>', () => `</sheets><definedNames>${definedNames}</definedNames>`));
-    }
-    await writeFile(join(root, 'book.xlsx'), await zip.generateAsync({ type: 'uint8array' }));
+    await writeFile(join(root, 'book.xlsx'), await workbookBytes(sheetData, definedNames));
     server = await createOfficeMcpServer({ root, formats: ['xlsx'] });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await server.connect(serverTransport);
@@ -175,6 +180,23 @@ test('XLSX sort matches calculation status to the correct sheet', async () => {
   } finally { book.close(); }
 });
 
+test('XLSX sort ignores an exhausted budget and limited formulas on another sheet', async () => {
+  const book = await openXlsx(await implicitFontWorkbook());
+  try {
+    book.editSheets({ version: book.handle.version(), edits: [{ action: 'add', name: 'Budget' }] });
+    book.writeRanges({ version: book.handle.version(), edits: [sales, doubled] });
+    for (let row = 0; row < 11; row++) book.handle.editCell(1, row, 21, '=ROWS(SEQUENCE(1000000+U1))');
+    book.handle.editCell(1, 0, 20, '1');
+    book.handle.setActiveSheet(0);
+    const status = book.handle.calculationStatus();
+    expect(status.budgetExhausted).toBe(true);
+    expect(status.limitedCells.length).toBeGreaterThan(0);
+    expect(status.limitedCells.every(cell => cell.startsWith('Budget!'))).toBe(true);
+    expect(book.sortRange({ ...descending, version: book.handle.version() }).applied).toBe(true);
+    expect(cellContents(book.readCells({ sheet: 'Sales', range: 'F2' }))).toEqual([{ a1: 'F2', formula: 'B2*2', value: { kind: 'number', value: 240 } }]);
+  } finally { book.close(); }
+});
+
 test('XLSX sort refuses moving formulas on an unsupported attached handle', () => withUnsupportedHandle((book, handle) => {
   const { sheet, range } = descending;
   const before = cellContents(book.readCells({ sheet, range }));
@@ -203,7 +225,7 @@ test('XLSX sort reorders values on an unsupported attached handle when no formul
 test('XLSX sort refuses a range that cuts through an array formula', () => withWorkbook(async call => {
   const before = await readRange(call, 'B2:F4');
   const refused = await call('xlsx_sort', { ...descending, range: 'B3:F4', header: false, version: before.version }, true);
-  expect(refused).toMatchObject({ code: 'locked-target', message: 'F3 is filled by an array formula' });
+  expect(refused).toEqual({ code: 'INVALID_SORT', message: 'F3 is filled by an array formula. Choose a sort range outside the array formula.' });
   const after = await readRange(call, 'B2:F4');
   expect(after.version).toBe(before.version);
   expect(cellContents(after)).toEqual(cellContents(before));
@@ -291,39 +313,52 @@ test('XLSX sort emits #REF! when a relative reference moves above row 1', () => 
   await expectFormulas(call, 'F4', [['B3', 110]]);
 }));
 
-test.each([
-  { formula: '[1]Sheet1!A1' },
-  { formula: "'[1]Sheet 1'!A1" },
-  { formula: '[Book.xlsx]Sheet1!A1' },
-  { formula: '[1]Rates!$A$1+ROW()' },
-  { formula: `INDIRECT("'[1]Rates'!A1")+E2` },
-  { formula: 'Rate+E2', names: `<definedName name="Rate">'[1]Rates'!$A$1</definedName>` },
-  { formula: 'REPRO_UNKNOWN_FUNCTION(E2)' },
-])('XLSX sort refuses to move unevaluated $formula', ({ formula, names }) => withWorkbook(async call => {
-  await expectFormulas(call, 'C2', [[formula, 42]]);
-  await expectSortRefused(call, movingC2, unevaluatedC2);
-}, sortSheet(`<f>${formula}</f>`), names));
+test.each(['[1]Sheet1!A1', "'[1]Rates'!A1", '[Book.xlsx]Sheet1!A1', "'Folder/[Book.xlsx]Rates'!A1", '[1]Rates!$A$1+E2'])(
+  'XLSX sort refuses to change a direct external reference in %s', formula => withWorkbook(async call => {
+    await expectSortRefused(call, movingC2, 'Cannot move the formula at C2. It refers to an external workbook. Exclude the cell from the sort or replace the formula with a value.');
+  }, sortSheet(`<f>${formula}</f>`)),
+);
 
-test.each([
-  { formula: 'SUM(Jan:Mar!B2)', sheets: ['Jan', 'Feb', 'Mar'] },
-  { formula: "SUM('Jan:Mar'!B2)", sheets: ['Jan', 'Feb', 'Mar'] },
-  { formula: 'SUM(Jan1:Mar1!$B$1)', sheets: ['Jan1', 'Feb1', 'Mar1'] },
-])('XLSX sort refuses to move 3D formula $formula', ({ formula, sheets }) => withWorkbook(async call => {
-  const { version } = await readRange(call, 'B2:C3');
-  const added = await call('xlsx_edit_sheets', { version, edits: sheets.map(name => ({ action: 'add', name })) });
-  const written = await call('xlsx_write_range', { version: added.version, edits: sheets.map(sheet => ({ sheet, range: 'B1:B3', values: [[14], [14], [28]] })) });
+test.each(["'[1]Rates'!$A$1", '[1]Rates!$A$1+ROW()'])('XLSX sort moves an unchanged external formula %s', formula => withWorkbook(async call => {
+  const { version } = await readRange(call, movingC2.range);
+  expect((await call('xlsx_sort', { ...movingC2, version })).applied).toBe(true);
+  expect((await readRange(call, 'C3')).cells[0].formula).toBe(formula);
+}, sortSheet(`<f>${formula}</f>`)));
+
+test('XLSX sort refuses to move an unevaluated formula', () => withWorkbook(async call => {
+  await expectFormulas(call, 'C2', [['REPRO_UNKNOWN_FUNCTION(E2)', 42]]);
+  await expectSortRefused(call, movingC2, unevaluatedC2);
+}, sortSheet('<f>REPRO_UNKNOWN_FUNCTION(E2)</f>')));
+
+test('XLSX sort refuses to move a calculation-limited formula', () => withWorkbook(async call => {
+  const { version } = await readRange(call, movingC2.range);
+  const added = await call('xlsx_edit_sheets', { version, edits: [{ action: 'add', name: 'Extent' }] });
+  const written = await call('xlsx_write_range', { version: added.version, edits: [
+    { sheet: 'Extent', range: 'XFD1048576', values: [[1]] },
+    { sheet: 'Sales', range: 'C2', formulas: [['=SUM(Extent!A1:XFD1048576)']] },
+  ] });
   expect(written.applied).toBe(true);
   await expectSortRefused(call, movingC2, unevaluatedC2);
-}, sortSheet(`<f>${formula}</f>`)));
+}, sortSheet('')));
 
 test('XLSX sort refuses to move a what-if data table anchor', () => withWorkbook(async call => {
   await expectFormulas(call, 'C2', [['', 42]]);
   await expectSortRefused(call, movingC2, 'Cannot move the formula at C2. It is a what-if data table. Exclude the cell from the sort.');
 }, sortSheet('<f t="dataTable" ref="C2:C3" r1="E1"/>')));
 
-test('XLSX sort refuses to move an imported cell-shaped defined name', () => withWorkbook(async call => {
+test.each(['', ' localSheetId="0"'])('XLSX sort refuses an imported cell-shaped defined name with scope %j', scope => withWorkbook(async call => {
   await expectSortRefused(call, movingC2, 'Cannot move the formula at C2. It uses the ambiguous defined name TAX2024. Rename the name or exclude the cell from the sort.');
-}, sortSheet('<f>SUM(tax2024)</f>'), '<definedName name="TAX2024">Sales!$E$1</definedName>'));
+}, sortSheet('<f>SUM(tax2024)</f>'), `<definedName name="TAX2024"${scope}>Sales!$E$1</definedName>`));
+
+test('XLSX sort translates a cell address matching a defined name local to another sheet', () => withWorkbook(async call => {
+  const { version } = await readRange(call, 'A1');
+  await call('xlsx_edit_sheets', { version, edits: [{ action: 'add', name: 'Rates' }] });
+  await writeAndSort(call, [
+    { sheet: 'Rates', range: 'B2:B3', values: [[1], [2]] },
+    { sheet: 'Rates', range: 'C2', formulas: [['=TAX2024+1']] },
+  ], { ...movingC2, sheet: 'Rates' });
+  expect(cellContents(await readRange(call, 'C3', 'Rates'))).toEqual([{ a1: 'C3', formula: 'TAX2025+1', value: { kind: 'number', value: 1 } }]);
+}, '<sheetData/>', '<definedName name="TAX2024" localSheetId="0">Sales!$E$1</definedName>'));
 
 test('XLSX sort ignores a cell-shaped defined name inside a string literal', () => withWorkbook(async call => {
   await writeAndSort(call, [sales, { sheet: 'Sales', range: 'F2', formulas: [['=B2+N("TAX2024")']] }], descending);
@@ -331,8 +366,15 @@ test('XLSX sort ignores a cell-shaped defined name inside a string literal', () 
 }, '<sheetData/>', '<definedName name="TAX2024">Sales!$E$1</definedName>'));
 
 test('XLSX sort ignores external reference syntax inside string literals and structured references', () => withWorkbook(async call => {
-  await writeAndSort(call, [sales, { sheet: 'Sales', range: 'F2:G2', formulas: [['=B2+N("[1]Sheet1!A1")', '=B2+IF(FALSE,Table1[Col],0)']] }], { ...descending, range: 'A1:G4' });
-  await expectFormulas(call, 'F4:G4', [['B4+N("[1]Sheet1!A1")', 100], ['B4+IF(FALSE,Table1[Col],0)', 100]]);
+  const structured = "IF(FALSE,Table1[Col']Rates!A1],0)";
+  await writeAndSort(call, [sales, { sheet: 'Sales', range: 'F2:G2', formulas: [['=B2+N("[1]Sheet1!A1")', `=B2+${structured}`]] }], { ...descending, range: 'A1:G4' });
+  await expectFormulas(call, 'F4:G4', [['B4+N("[1]Sheet1!A1")', 100], [`B4+${structured}`, 100]]);
+}));
+
+test('XLSX sort moves a structured reference with an escaped bracket verbatim', () => withWorkbook(async call => {
+  const formula = "Table1[Col']Rates!A1]";
+  await writeAndSort(call, [sales, { sheet: 'Sales', range: 'F2', formulas: [[`=${formula}`]] }], descending);
+  expect((await readRange(call, 'F4')).cells[0].formula).toBe(formula);
 }));
 
 test('XLSX sort refuses a translation that grows beyond 8192 characters', () => withWorkbook(async call => {
@@ -350,4 +392,22 @@ test('XLSX sort reports protected formula cells by their recalculated values', (
   const sorted = await call('xlsx_sort', { ...descending, range: 'B2:D3', header: false, version, protectedSheets: 'allow' });
   expect(sorted).toMatchObject({ applied: true, protectedCells: ['Sales!B2', 'Sales!D2', 'Sales!B3', 'Sales!D3'] });
   await expectFormulas(call, 'C2:D3', [['E2', 10], ['B$2', 2], ['E3', 20], ['B$2', 2]]);
-}, '<sheetData><row r="2"><c r="B2"><v>1</v></c><c r="C2"><f>E2</f><v>10</v></c><c r="D2"><f>B$2</f><v>1</v></c><c r="E2"><v>10</v></c></row><row r="3"><c r="B3"><v>2</v></c><c r="C3"><f>E3</f><v>20</v></c><c r="D3"><f>B$2</f><v>1</v></c><c r="E3"><v>20</v></c></row></sheetData><sheetProtection sheet="1"/>'));
+}, protectedSortSheet));
+
+test('XLSX sort succeeds with a truncated receipt when protected readback exceeds the limit', async () => {
+  const book = await openXlsx(await workbookBytes(protectedSortSheet));
+  try {
+    const { handle } = book;
+    const { readCells } = handle;
+    const version = handle.version();
+    handle.readCells = request => {
+      const current = handle.version();
+      if (current !== version && request.ranges.some(({ range }) => range.kind === 'a1' && range.a1 === movingC2.range)) return { ok: false, version: current, failure: { code: 'limit-exceeded', message: 'Read limit exceeded.' } };
+      return readCells(request);
+    };
+    const sorted = book.sortRange({ ...movingC2, version, protectedSheets: 'allow' });
+    expect(sorted).toMatchObject({ applied: true, truncated: true, protectedCells: [] });
+    expect(sorted.version).not.toBe(version);
+    expect(cellContents(book.readCells({ sheet: 'Sales', range: 'B2' }))).toEqual([{ a1: 'B2', formula: null, value: { kind: 'number', value: 2 } }]);
+  } finally { book.close(); }
+});
