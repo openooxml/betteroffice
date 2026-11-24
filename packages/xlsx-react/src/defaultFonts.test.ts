@@ -1,6 +1,12 @@
 import { afterEach, expect, mock, spyOn, test } from 'bun:test';
-import type { BundledFontFace } from '@betteroffice/fonts';
+import { configureFontCdn, type BundledFontFace } from '@betteroffice/fonts';
+import * as fonts from '@betteroffice/fonts';
+import { fontAssetResponse, fontRuntimeWithoutPacks, withBrowserFontGlobals } from '../../fonts/src/fontAssets.test-support';
+import { spyOnFontFetch } from '../../fonts/src/fontFetch.test-support';
 import type { FontDecoder } from '../../../shared/office-session/fontDecoder';
+import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../shared/office-session/fontCdn';
+import { withinTestBudget } from '../../../shared/office-session/testing/loadBudget';
+import { configureFontCdn as configureTestFontCdn } from '../../fonts/src/fontCdn';
 import { createSessionHost } from '../../../shared/office-session/host';
 import { createInProcessPair } from '../../../shared/office-session/testing/inProcessTransport';
 import type { DisplayList, TextCmd } from '@betteroffice/xlsx';
@@ -110,7 +116,7 @@ test('registers Carlito regular and bold as Calibri and repaints once after the 
     { family: 'Calibri', weight: '400', style: 'normal' },
     { family: 'Calibri', weight: '700', style: 'normal' },
   ]);
-  expect(source.create).toHaveBeenCalledWith(undefined, { decoder: decode, retain: false });
+  expect(source.create).toHaveBeenCalledWith(undefined, { decoder: decode, retain: false, strict: true });
   expect(decode).toHaveBeenCalledTimes(2);
   expect(repaint).toHaveBeenCalledTimes(1);
   await fonts.load(list);
@@ -488,16 +494,20 @@ test('remote fonts off, bundled faces and locally installed families never reach
   expect(added.map((face) => (face as unknown as { family: string }).family)).toEqual(['Calibri']);
 });
 
-test('a missing CJK pack cannot install its Latin fallback under MS Gothic', async () => {
+test('a painter retries a missing CJK face without registering its Latin fallback', async () => {
   const { added } = browser();
   const fallback = mock(async () => new ArrayBuffer(4));
   provider(fallback);
   const repaint = mock(() => {});
-  await createDefaultFontPainter(decoder(), repaint).load(display({ family: 'MS Gothic' }));
-  await createDefaultFontPainter(decoder(), repaint).load(display({ family: 'MS Gothic' }));
-  expect(fallback).toHaveBeenCalledTimes(1);
-  expect(added).toHaveLength(0);
-  expect(repaint).not.toHaveBeenCalled();
+  const painter = createDefaultFontPainter(decoder(), repaint);
+  const frame = display({ family: 'MS Gothic' });
+  try {
+    await painter.load(frame);
+    await painter.load(frame);
+    expect(fallback).toHaveBeenCalledTimes(2);
+    expect(added).toHaveLength(0);
+    expect(repaint).not.toHaveBeenCalled();
+  } finally { painter.dispose(); }
 });
 
 test('a missing intl pack leaves browser text untouched', async () => {
@@ -692,7 +702,7 @@ test('the in-thread editor lets the font manager decode with its own decoder', a
   browser();
   const { create } = provider();
   await createDefaultFontPainter(null, () => {}).load(display({ family: 'Calibri' }));
-  expect(create).toHaveBeenCalledWith(undefined, undefined);
+  expect(create).toHaveBeenCalledWith(undefined, { strict: true });
 });
 
 test('no painter work happens before a worker decoder exists', async () => {
@@ -700,4 +710,135 @@ test('no painter work happens before a worker decoder exists', async () => {
   const { imported } = provider();
   await createDefaultFontPainter(undefined, () => {}).load(display({ family: 'Calibri' }));
   expect(imported).not.toHaveBeenCalled();
+});
+
+test('an already absent editor face is tried again after changing the CDN', async () => {
+  const { added } = browser();
+  const previous = getFontCdnConfiguration();
+  const load = mock(async (face: BundledFontFace) =>
+    new ArrayBuffer(getFontCdnConfiguration()?.baseUrl ? face.byteLength : 4));
+  provider(load);
+  const painter = createDefaultFontPainter(decoder(), () => {});
+  const frame = display({ family: 'MS Gothic' });
+  try {
+    configureFontCdn({ baseUrl: false });
+    await painter.load(frame);
+    expect(added).toHaveLength(0);
+    configureFontCdn({ baseUrl: 'https://editor-fonts.example/' });
+    await painter.load(frame);
+    expect(added).toHaveLength(1);
+    expect(load).toHaveBeenCalledTimes(2);
+  } finally { painter.dispose(); setFontCdnConfiguration(previous); }
+});
+
+test('repaints leave an uninstalled editor face settled until the CDN changes', async () => {
+  const { added } = browser();
+  const previous = getFontCdnConfiguration();
+  const runtime = fontRuntimeWithoutPacks();
+  const source = runtime.createFontProvider(undefined, { strict: true });
+  const resolve = spyOn(source, 'resolve');
+  const manager = spyOn(xlsxDefaultFontManager, 'load').mockResolvedValue({
+    ...fonts, default: fonts, createFontProvider: () => source,
+  });
+  const fetch = spyOnFontFetch(fontAssetResponse);
+  const repainted = deferred<void>();
+  const repaint = mock(() => repainted.resolve());
+  const onSettled = mock(() => {});
+  const painter = createDefaultFontPainter(null, repaint, { onSettled });
+  const frame = display({ family: 'Calibri' });
+  try {
+    configureFontCdn({ baseUrl: false });
+    await painter.load(frame);
+    for (let i = 0; i < 2; i++) {
+      expect(painter.paint(frame, () => {})).toBe(true);
+      await new Promise((done) => setTimeout(done, 0));
+    }
+    expect(fetch.mock.calls.filter(([input]) => !String(input).endsWith('.wasm'))).toHaveLength(0);
+    expect(resolve).not.toHaveBeenCalled();
+    expect(repaint).not.toHaveBeenCalled();
+    expect(onSettled).not.toHaveBeenCalled();
+
+    configureFontCdn({ baseUrl: 'https://editor-fonts.example/' });
+    expect(painter.paint(frame, () => {})).toBe(false);
+    await withinTestBudget(repainted.promise, 'the repaint after CDN configuration');
+    expect(fetch.mock.calls.filter(([input]) => !String(input).endsWith('.wasm'))).toHaveLength(1);
+    expect(resolve).toHaveBeenCalledTimes(1);
+    expect(added.map(({ family }) => family)).toEqual(['Calibri']);
+    expect(repaint).toHaveBeenCalledTimes(1);
+  } finally {
+    painter.dispose();
+    fetch.mockRestore();
+    manager.mockRestore();
+    resolve.mockRestore();
+    setFontCdnConfiguration(previous);
+  }
+});
+
+test('T14: repaint, editing another face and reopening share the CDN cooldown', async () => {
+  const { added } = browser();
+  const previous = getFontCdnConfiguration();
+  configureTestFontCdn({ baseUrl: false });
+  const restore = withBrowserFontGlobals();
+  const runtime = fontRuntimeWithoutPacks();
+  const source = runtime.createFontProvider(undefined, { strict: true });
+  const resolve = spyOn(source, 'resolve');
+  const load = spyOn(xlsxDefaultFontManager, 'load').mockResolvedValue({ ...fonts, default: fonts, createFontProvider: () => source });
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  const now = Date.now();
+  const clock = spyOn(Date, 'now').mockReturnValue(now);
+  const requests: string[] = [];
+  let online = false;
+  const fetch = spyOnFontFetch(async (input) => {
+    if (String(input).includes('cdn.jsdelivr.net')) {
+      requests.push(String(input));
+      if (!online) throw new TypeError('Offline');
+    }
+    return fontAssetResponse(input);
+  });
+  const repainted = deferred<void>();
+  const repaint = mock(() => repainted.resolve());
+  const first = createDefaultFontPainter(null, repaint);
+  const second = createDefaultFontPainter(null, () => {});
+  const frame = display({ family: 'Calibri' });
+  const edited = display({ family: 'Calibri' }, { family: 'Times New Roman' });
+  try {
+    setFontCdnConfiguration(undefined);
+    await first.load(frame);
+    expect(added).toHaveLength(0);
+    expect(requests).toHaveLength(1);
+    clock.mockReturnValue(now + 59_999);
+    expect(first.paint(frame, () => {})).toBe(true);
+    await new Promise((done) => setTimeout(done, 0));
+    expect(requests).toHaveLength(1);
+    expect(resolve).toHaveBeenCalledTimes(1);
+    expect(repaint).not.toHaveBeenCalled();
+    await first.load(edited);
+    for (let i = 0; i < 2; i++) {
+      second.paint(frame, () => {});
+      await new Promise((done) => setTimeout(done, 0));
+    }
+    expect(requests).toHaveLength(1);
+    expect(resolve).toHaveBeenCalledTimes(1);
+
+    online = true;
+    clock.mockReturnValue(now + 60_000);
+    first.paint(frame, () => {});
+    first.paint(frame, () => {});
+    await withinTestBudget(repainted.promise, 'the repaint after CDN cooldown');
+    expect(requests).toHaveLength(2);
+    expect(resolve).toHaveBeenCalledTimes(2);
+    expect(added.map(({ family }) => family)).toEqual(['Calibri']);
+    expect(repaint).toHaveBeenCalledTimes(1);
+  } finally {
+    first.dispose();
+    second.dispose();
+    load.mockRestore();
+    resolve.mockRestore();
+    fetch.mockRestore();
+    warn.mockRestore();
+    clock.mockRestore();
+    configureTestFontCdn({ baseUrl: false });
+    restore();
+    setFontCdnConfiguration(previous);
+  }
 });

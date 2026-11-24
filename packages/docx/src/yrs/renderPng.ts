@@ -1,3 +1,4 @@
+import { fontCdnCacheKey, pngFontCdnCacheKey } from '../../../../shared/office-session/fontCdnRuntime';
 import { buildResidentRegionLayoutRequest, computeLayout, documentRenderEnv } from '../editor/computeLayout';
 import { createRustMeasureSource, type BundledFontProvider, type ResidentFontRequirement } from '../layout/measure';
 import { resolveCompleteFontSelection } from '../layout/measure/defaultFontProvider';
@@ -5,15 +6,18 @@ import type { EmbeddedFaceInput } from '../layout/measure/fontRegistry';
 import { fontUnavailable, pngPage, pngScale, type DocxPngFontFace, type DocxPngOptions, type DocxPngTarget } from '../layout/render/png';
 import { openPagedDisplay } from '../layout/render/rustDisplayList';
 import { extractEmbeddedFontFaces } from '../utils';
+import { decodeFontFace } from '../wasm/fontDecoder';
 import { engineKind, renderPng as renderEnginePng } from '../wasm/enginePng';
 import { faceLoadFailure, recordProviderFaceLoads, untilAborted } from '../wasm/enginePngFonts';
 import { createYrsSession, type YrsSession } from './index';
 import { sessionMediaSources, sessionSourcePackage } from './sessionInternals';
 
 const IDLE_RELEASE_MS = 30_000;
+const exportFontRuntime = { decoder: decodeFontFace, strict: true };
 
 interface Held {
   version: string;
+  fontCdn: string;
   fonts: ReadonlyArray<DocxPngFontFace> | undefined;
   fontProvider: BundledFontProvider | undefined;
   laidOut: Promise<{ copy: YrsSession; display: ReturnType<typeof openPagedDisplay>; fontChains: Record<string, number[]> }>;
@@ -59,9 +63,10 @@ export function createPngExporter(session: YrsSession) {
       copy.rebuildMediaSources();
       const document = copy.materializeDocx();
       if (!document) throw new Error('renderPng needs a session opened from DOCX bytes');
-      const complete = fontProvider ? undefined : await resolveCompleteFontSelection();
+      const complete = fontProvider ? undefined : await resolveCompleteFontSelection(exportFontRuntime);
+      const suppliedFamilies = new Set(fonts?.map((face) => face.family.trim().toLowerCase()));
       const recorded = complete?.provider && !complete.configured
-        ? await recordProviderFaceLoads(complete.provider) : undefined;
+        ? await recordProviderFaceLoads(complete.provider, suppliedFamilies) : undefined;
       const bundled = fontProvider ?? recorded?.provider ?? complete?.provider;
       const rejectFailedLoads = async () => {
         if (!recorded) return;
@@ -69,7 +74,7 @@ export function createPngExporter(session: YrsSession) {
         const failed = faceLoadFailure(recorded.failures);
         if (failed) throw failed;
       };
-      const measure = createRustMeasureSource({ engine: copy, ...(bundled ? { bundled } : {}) });
+      const measure = createRustMeasureSource({ engine: copy, bundled, baseLatinStandIn: engineKind !== 'native' });
       measure.setCompat(document.package.settings?.compatibilityFlags);
       measure.setEmbeddedFaces(await extractEmbeddedFontFaces(document), appFaces(fonts));
       const renderEnv = documentRenderEnv(document);
@@ -88,14 +93,15 @@ export function createPngExporter(session: YrsSession) {
     }
   }
 
-  function current(fonts: Held['fonts'], fontProvider: Held['fontProvider']): Held {
+  function current(fonts: Held['fonts'], fontProvider: Held['fontProvider'], fontCdn: string): Held {
     const version = session.version();
-    if (held && held.version === version && held.fonts === fonts && held.fontProvider === fontProvider) return held;
+    if (held && held.version === version && held.fonts === fonts && held.fontProvider === fontProvider &&
+      held.fontCdn === fontCdn) return held;
     release();
     const source = (engineKind === 'native' ? sessionSourcePackage(session)?.buffer : undefined) ?? session.materializeDocx()?.originalBuffer;
     if (!source) throw new Error('renderPng needs a session opened from DOCX bytes');
     const entry: Held = {
-      version, fonts, fontProvider, users: 0, stale: false,
+      version, fontCdn, fonts, fontProvider, users: 0, stale: false,
       laidOut: layOut(session.encodeState(), session.encodePeerMetadata(), sessionMediaSources(session), source, fonts, fontProvider),
     };
     entry.laidOut.catch(() => { if (held === entry) held = undefined; });
@@ -109,7 +115,9 @@ export function createPngExporter(session: YrsSession) {
       const index = pngPage(target);
       pngScale(options.scale);
       options.signal?.throwIfAborted();
-      const entry = current(options.fonts, options.fontProvider);
+      const fontCdn = options.fontProvider ? fontCdnCacheKey() : await untilAborted(pngFontCdnCacheKey(), options.signal);
+      assertAlive();
+      const entry = current(options.fonts, options.fontProvider, fontCdn);
       entry.users++;
       if (idle !== undefined) clearTimeout(idle);
       idle = undefined;

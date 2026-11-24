@@ -1,5 +1,5 @@
 import { SessionFailure } from './types';
-import type { FontCdnConfiguration } from './fontCdn';
+import type { FontCdnConfiguration } from './fontCdnRuntime';
 
 export type FontAssetKind = 'base' | 'latin' | 'intl' | 'cjk' | 'decoder';
 export type FontPackUrls = Record<string, string>;
@@ -9,6 +9,14 @@ type FontPackAssets = { urls?: FontPackUrls; cdn?: FontCdnConfiguration; pageUrl
 export type WorkerFontPackSource = (pack: FontAssetKind, options?: { fresh?: boolean }) => Promise<FontPackAssets | undefined>;
 export type FontPackRequest = { protocol: 1; kind: 'font-pack-request'; id: string; pack: FontAssetKind };
 export type FontPackReply = FontPackAssets & { protocol: 1; kind: 'font-pack-reply'; id: string; error?: string };
+
+let workerSource: WorkerFontPackSource = async () => undefined;
+
+export function setWorkerFontAssets(source: WorkerFontPackSource): void {
+  workerSource = source;
+}
+
+export const workerFontAssets: WorkerFontPackSource = (...args) => workerSource(...args);
 
 export class WorkerFontModuleUnavailableError extends TypeError {
   constructor(specifier: string) {
@@ -46,7 +54,7 @@ export function createFontPackResponder(
         pending = Promise.resolve().then(async () => {
           const assets = await source(pack);
           const urls = assets && Object.fromEntries(Object.entries(assets).map(([file, href]) => [file, new URL(href, pageUrl).href]));
-          const cdn = pack === 'base' || pack === 'decoder' ? undefined : fontCdn?.();
+          const cdn = pack === 'decoder' ? undefined : fontCdn?.();
           return cdn ? { urls, cdn } : { urls };
         });
         packs.set(pack, pending);
@@ -147,7 +155,7 @@ export function createWorkerFontPacks(post: (message: FontPackRequest) => void, 
         } else {
           const cdn = value.cdn;
           const validCdn = cdn && Number.isInteger(cdn.timeoutMs) && cdn.timeoutMs > 0 && cdn.timeoutMs <= 4_294_967_295 &&
-            isAbsoluteHref(cdn.baseUrl) && /^https?:\/\//.test(cdn.baseUrl);
+            (cdn.baseUrl === false || (isAbsoluteHref(cdn.baseUrl) && /^https?:\/\//.test(cdn.baseUrl)));
           const pageUrl = isAbsoluteHref(value.pageUrl) ? value.pageUrl : undefined;
           request.finish({ urls: value.urls, ...(validCdn ? { cdn } : {}), ...(pageUrl ? { pageUrl } : {}) });
         }

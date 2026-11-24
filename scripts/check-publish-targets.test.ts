@@ -23,6 +23,16 @@ const crates = RUST_PUBLISH_CRATES.map((crate) => crate.name);
 const fixtureDirectories: string[] = [];
 const fonts = { name: '@betteroffice/fonts', version: '1.2.3' };
 const latin = { name: '@betteroffice/fonts-latin', version: '1.2.3' };
+const intl = { name: '@betteroffice/fonts-intl', version: '1.2.3' };
+const cjk = { name: '@betteroffice/fonts-cjk', version: '1.2.3' };
+const fontPackNames = new Set([latin.name, intl.name, cjk.name]);
+
+function firstFontAsset(directory: string) {
+  return JSON.parse(readFileSync(join(directory, 'assets', 'manifest.json'), 'utf8')).faces[0].file as string;
+}
+
+const packagedAsset = new Map(workspaceEntries().filter(({ manifest }) => fontPackNames.has(manifest.name))
+  .map(({ directory, manifest }) => [manifest.name, firstFontAsset(directory)]));
 
 afterEach(() => {
   for (const directory of fixtureDirectories.splice(0)) rmSync(directory, { recursive: true, force: true });
@@ -34,6 +44,11 @@ function workspaceFixture(manifests: Array<{ name: string; version: string; [key
   return manifests.map((manifest) => {
     const directory = join(root, manifest.name.split('/').pop()!);
     mkdirSync(join(directory, 'src'), { recursive: true });
+    const file = packagedAsset.get(manifest.name);
+    if (file) {
+      mkdirSync(join(directory, 'assets'));
+      writeFileSync(join(directory, 'assets', 'manifest.json'), JSON.stringify({ faces: [{ file }, { file: 'ignored.zst' }] }));
+    }
     return { directory, manifest };
   });
 }
@@ -723,9 +738,27 @@ describe('published npm and CDN targets', () => {
     expect(result.stderr).toBe('');
     expect([...heads.entries()].sort()).toEqual([
       [`${latin.name}@${latin.version}/package.json`, 2],
+      [`${releaseTag(latin)}/assets/${packagedAsset.get(latin.name)}`, 2],
       [`${fonts.name}@${fonts.version}/package.json`, 2]
     ].sort());
     expect(result.elapsed).toBeGreaterThanOrEqual(200);
+  });
+
+  test('fails when any font pack is published without its first compressed asset', async () => {
+    const packs = [latin, intl, cjk];
+    const assets = packs.map((pack) => `${releaseTag(pack)}/assets/${packagedAsset.get(pack.name)}`);
+    const missing = assets[1]!;
+    const heads = new Set<string>();
+    const result = await check('--verify-published', (path, request) => {
+      if (request.method === 'GET') return Response.json({});
+      heads.add(path);
+      return path === missing ? notFound() : new Response(null);
+    }, { packages: packs, workspaces: workspaceFixture(packs), maxWaitMs: 500 });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(missing);
+    expect([...heads].sort()).toEqual([
+      ...packs.map((pack) => `${releaseTag(pack)}/package.json`), ...assets,
+    ].sort());
   });
 
   test('names CDN versions that stay missing within a shared retry budget', async () => {
@@ -1051,7 +1084,11 @@ describe('the mode argument', () => {
     });
     expect(result.status).toBe(0);
     expect(gets.sort()).toEqual(packages.map(({ name, version }) => `${name}/${version}`).sort());
-    expect(heads.sort()).toEqual(packages.map(({ name, version }) => `${name}@${version}/package.json`).sort());
+    expect(heads.sort()).toEqual(packages.flatMap((pack) => {
+      const tag = releaseTag(pack);
+      const asset = packagedAsset.get(pack.name);
+      return [`${tag}/package.json`, ...(asset ? [`${tag}/assets/${asset}`] : [])];
+    }).sort());
   }, SPAWN_BUDGET_MS);
 
   test('--verify-published on GitHub Actions annotates and summarizes what is missing', async () => {

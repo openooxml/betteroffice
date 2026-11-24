@@ -11,6 +11,7 @@ import { deferReply, transferable, type TransferResult } from '../../../../share
 import { isCommandEnvelope } from '../../../../shared/office-session/commands/types';
 import { isEngineTrap } from '../../../../shared/office-session/trap';
 import { setFontCdnConfiguration, type FontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
+import { fontCdnCacheKey } from '../../../../shared/office-session/fontCdnRuntime';
 import { resizedShapeRect } from '../../../../shared/office-session/shapeResize';
 import { extendTextRange, graphemeBoundaries, textRangeAt } from '../../../../shared/textSelection';
 import { SessionFailure, type MethodHandlers, type MethodPolicies } from '../../../../shared/office-session/types';
@@ -164,10 +165,19 @@ export function registerPresentationCommandHandlers(
   const gatedDefaultFonts: DefaultFontLanding[] = [];
   let fontProvider: ReturnType<FontModule['commandFontProvider']['load']> | undefined;
   let fontCdn: FontCdnConfiguration | undefined;
-  const sessionFontProvider = (fonts: FontModule) => () => (fontProvider ??= fonts.commandFontProvider.load(fontCdn).catch((error) => {
-    fontProvider = undefined;
-    throw error;
-  }));
+  function useFontCdn(configuration: FontCdnConfiguration | undefined): void {
+    if (fontCdnCacheKey(fontCdn ?? null) !== fontCdnCacheKey(configuration ?? null)) fontProvider = undefined;
+    fontCdn = configuration;
+    setFontCdnConfiguration(configuration);
+  }
+  const sessionFontProvider = (fonts: FontModule) => () => {
+    if (!fontProvider) {
+      const loading = fonts.commandFontProvider.load(fontCdn);
+      fontProvider = loading;
+      void loading.catch(() => { if (fontProvider === loading) fontProvider = undefined; });
+    }
+    return fontProvider;
+  };
   let requestedFonts: ((slideId?: string) => RequestedFontFace[]) | undefined;
   const suppliedFonts: { family: string }[] = [];
   let fontTimer: ReturnType<typeof setTimeout> | undefined;
@@ -1715,7 +1725,7 @@ export function registerPresentationCommandHandlers(
       if (disposed || handle || opening || !Array.isArray(scripts)) return;
       const coverage = scripts.filter((script): script is string => COVERAGE_SCRIPTS.has(script));
       if (!coverage.length) return;
-      fontCdn = configuration;
+      useFontCdn(configuration);
       void commandDefaultFontModule.load().then((fonts) => {
         if (!disposed) fonts.prefetchCoverageFaces(coverage, (options.initWasm ?? initWasm)(), sessionFontProvider(fonts), sliced === true);
       }).catch(() => {});
@@ -1739,14 +1749,11 @@ export function registerPresentationCommandHandlers(
         (input.slicedFonts !== undefined && typeof input.slicedFonts !== 'boolean')) {
         throw new TypeError('Invalid presentation command open options');
       }
-      if ((fontCdn?.baseUrl ?? false) !== (input.fontCdn?.baseUrl ?? false) ||
-        (fontCdn?.timeoutMs ?? 30_000) !== (input.fontCdn?.timeoutMs ?? 30_000)) fontProvider = undefined;
-      fontCdn = input.fontCdn;
+      useFontCdn(input.fontCdn);
       opening = true;
       const slicing = input.slicedFonts === true
         ? import('./commandSlicedFonts').then((sliced) => sliced.createSlicedFontFaces(), () => undefined) : undefined;
       try {
-        if (fontCdn) setFontCdnConfiguration(fontCdn);
         const wasmReady = (options.initWasm ?? initWasm)(input.wasm);
         let openingMetafiles: Promise<void> | undefined;
         let scanned: { openingSlideMetafile: boolean; packageMetafile: boolean } | undefined;

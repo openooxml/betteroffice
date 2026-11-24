@@ -1,16 +1,30 @@
 import { afterEach, beforeAll, expect, mock, spyOn, test } from 'bun:test';
+import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import JSZip from 'jszip';
+import * as fonts from '@betteroffice/fonts';
+import * as progressive from '@betteroffice/fonts/progressive';
+import { fontAssetResponse, withBrowserFontGlobals } from '../../../fonts/src/fontAssets.test-support';
+import { spyOnFontFetch } from '../../../fonts/src/fontFetch.test-support';
+import { createFontRuntime } from '../../../fonts/src/fontRuntime';
+import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
+import type { FontCdnDiagnostic } from '../../../../shared/fontCdnDiagnostics';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
 import { isClientMessage, isHostMessage } from '../../../../shared/office-session/protocol';
+import { engineKind } from '../wasm/enginePng';
 import { defaultFontInstaller, type DefaultFontFace, type DefaultFontPayload } from '../../../../shared/pptxDefaultFonts';
 import { decodeFontFace, initWasm } from '../wasm/loader';
 import { PptxRenderer } from '../wasm/engine';
 import type { SlideDisplayList } from '../types';
+import { openPresentationSession, type PresentationSession } from '../worker';
 import { createPresentationCommandClient, createSharedPresentationCommandClient } from './commandClient';
 import { commandFontProvider } from './commandDefaultFonts';
 import { createPresentationSessionHost } from './host';
 import type { PresentationCommandClient, PresentationCommandOpenOptions } from './commandProtocol';
+import * as sessionWorker from './sessionWorker';
+
+// Match main's measured WASM PNG behavior with the optional pack absent.
+const EXPORT_WITH_ABSENT_PACK: 'draws' | 'font-unavailable' = 'draws';
 
 async function notoSansJP(): Promise<ArrayBuffer> {
   const packed = await readFile(new URL('../../../fonts-cjk/assets/NotoSansJP-Regular.otf.zst', import.meta.url));
@@ -18,7 +32,7 @@ async function notoSansJP(): Promise<ArrayBuffer> {
 }
 
 const restorers: (() => void)[] = [];
-const clients: PresentationCommandClient[] = [];
+const clients: Array<PresentationCommandClient | PresentationSession> = [];
 let font: ArrayBuffer;
 
 function deferred<T>() {
@@ -98,6 +112,234 @@ afterEach(async () => {
   await Promise.all(clients.splice(0).map((client) => client.dispose()));
   for (const restore of restorers.splice(0).reverse()) restore();
 });
+
+function stubPngCanvas(encoded: BlobPart = 'png') {
+  const painted = mock((_text: string) => {});
+  class Canvas {
+    getContext() {
+      return new Proxy({ fillText: painted, measureText: (text: string) => ({ width: text.length }) }, {
+        get: (context, property) => Reflect.get(context, property) ?? (() => {}),
+      });
+    }
+    async convertToBlob() { return new Blob([encoded], { type: 'image/png' }); }
+  }
+  class Face { async load() { return this; } }
+  const globals = { document: undefined, OffscreenCanvas: Canvas, FontFace: Face, fonts: new Set(),
+    navigator: { userAgent: 'Chrome/149.0' } };
+  for (const [key, value] of Object.entries(globals)) {
+    const previous = Object.getOwnPropertyDescriptor(globalThis, key);
+    Object.defineProperty(globalThis, key, { configurable: true, value });
+    restorers.push(() => {
+      if (previous) Object.defineProperty(globalThis, key, previous);
+      else Reflect.deleteProperty(globalThis, key);
+    });
+  }
+  return painted;
+}
+
+function blockStandaloneFontCdn(latinInstalled: boolean) {
+  const previous = getFontCdnConfiguration();
+  const restoreBrowser = withBrowserFontGlobals();
+  setFontCdnConfiguration(undefined);
+  const runtime = createFontRuntime(async (pack) => ({
+    cdn: getFontCdnConfiguration(),
+    urls: pack === 'base' || (pack === 'latin' && latinInstalled)
+      ? Object.fromEntries(Object.entries((await fonts.fontAssetUrls(pack))!).map(([file, href]) =>
+        [file, () => new URL(href)])) : undefined,
+  }));
+  const installed = spyOn(fonts, 'bundledFaceInstalled').mockImplementation(runtime.bundledFaceInstalled);
+  const load = spyOn(fonts, 'loadBundledFontBytes').mockImplementation(runtime.loadBundledFontBytes);
+  const worker = spyOn(sessionWorker, 'createSessionWorker').mockImplementation(() => {
+    const pair = createInProcessPair();
+    createPresentationSessionHost(pair.host, { initWasm: async () => {} });
+    const target = new EventTarget();
+    pair.client.listen((data) => target.dispatchEvent(new MessageEvent('message', { data })));
+    return Object.assign(target, { postMessage: pair.client.post, terminate: pair.client.close }) as unknown as Worker;
+  });
+  const fetch = spyOnFontFetch(async (input) => {
+    if (new URL(String(input)).hostname === 'cdn.jsdelivr.net') throw new TypeError('Network disabled');
+    return fontAssetResponse(input);
+  });
+  const warning = spyOn(console, 'warn').mockImplementation(() => {});
+  restorers.push(() => {
+    warning.mockRestore();
+    fetch.mockRestore();
+    worker.mockRestore();
+    load.mockRestore();
+    installed.mockRestore();
+    restoreBrowser();
+    setFontCdnConfiguration(previous);
+  });
+  return { fetch, warning };
+}
+
+const standaloneWasmTest = test.skipIf(engineKind === 'native');
+
+standaloneWasmTest('standalone renderPng matches the absent CJK pack when the default CDN is blocked', async () => {
+  const { fetch, warning } = blockStandaloneFontCdn(true);
+  const png = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jxgQAAAABJRU5ErkJggg=='), (byte) => byte.charCodeAt(0));
+  const painted = stubPngCanvas(png);
+  const register = spyOn(PptxRenderer.prototype, 'registerFont');
+  restorers.push(() => register.mockRestore());
+  const diagnostics: FontCdnDiagnostic[] = [];
+  const dispatch = Object.getOwnPropertyDescriptor(globalThis, 'dispatchEvent');
+  Object.defineProperty(globalThis, 'dispatchEvent', {
+    configurable: true,
+    value(event: CustomEvent<FontCdnDiagnostic>) {
+      if (event.type === 'betteroffice:font-pack-diagnostic') diagnostics.push(event.detail);
+      return true;
+    },
+  });
+  restorers.push(() => {
+    if (dispatch) Object.defineProperty(globalThis, 'dispatchEvent', dispatch);
+    else Reflect.deleteProperty(globalThis, 'dispatchEvent');
+  });
+  const bytes = await deck(['MS Gothic'], 'q漢字');
+  fonts.configureFontCdn({ baseUrl: false });
+  const absent = await openPresentationSession(bytes);
+  clients.push(absent);
+  const expectedPng = await absent.call.renderPng({ slide: 0 });
+  const primary = () => register.mock.calls.filter(([family]) => family === 'MS Gothic').map(([, , , data]) => ({
+    size: data.byteLength, hash: createHash('sha256').update(data).digest('hex'),
+  }));
+  const expectedPrimary = primary();
+  const expectedText = painted.mock.calls.map(([text]) => text).join('');
+  register.mockClear();
+  painted.mockClear();
+
+  setFontCdnConfiguration(undefined);
+  const session = await openPresentationSession(bytes);
+  clients.push(session);
+  const { call } = session;
+  await expect(call.renderPng({ slide: 0 })).resolves.toEqual(expectedPng);
+  expect(expectedPng.byteLength).toBeGreaterThan(8);
+  expect(expectedPng.byteLength).toBeLessThan(64 * 1024);
+  expect([...expectedPng.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
+  const carlito = fonts.resolveLastResortChoice('MS Gothic', false, false, 'powerpoint').face!;
+  expect(expectedPrimary.map(({ size }) => size)).toEqual([carlito.byteLength]);
+  expect(primary()).toEqual(expectedPrimary);
+  expect(expectedText).toContain('q');
+  expect(expectedText).toContain('漢字');
+  expect(painted.mock.calls.map(([text]) => text).join('')).toBe(expectedText);
+
+  const diagnostic = expect.objectContaining({ pack: 'cjk', reason: 'cdn-unavailable' });
+  expect(diagnostics).toEqual([diagnostic]);
+  await expect(call.renderPng({ slide: 0 })).resolves.toEqual(expectedPng);
+  expect(diagnostics).toEqual([diagnostic, diagnostic]);
+  expect(fetch.mock.calls.map(([url]) => String(url)).filter((url) => url.includes('cdn.jsdelivr.net'))).toEqual([
+    expect.stringContaining('/fonts-cjk@'),
+  ]);
+  expect(warning.mock.calls.filter(([message]) => String(message).includes('Cannot load @betteroffice/fonts-cjk'))).toHaveLength(1);
+});
+
+standaloneWasmTest('standalone renderPng rejects when an explicit CJK CDN fails', async () => {
+  blockStandaloneFontCdn(true);
+  stubPngCanvas();
+  fonts.configureFontCdn({ baseUrl: 'https://cdn.jsdelivr.net/npm/' });
+  const bytes = await deck(['MS Gothic'], 'q漢字');
+  const session = await openPresentationSession(bytes);
+  clients.push(session);
+  await expect(session.call.renderPng({ slide: 0 })).rejects.toMatchObject({
+    code: 'font-unavailable', message: expect.stringContaining('Noto Sans JP for MS Gothic'),
+  });
+});
+
+standaloneWasmTest('standalone renderPng rejects when an implicit Latin CDN fails', async () => {
+  blockStandaloneFontCdn(false);
+  stubPngCanvas();
+  const bytes = await deck(['Calibri'], 'q');
+  const session = await openPresentationSession(bytes);
+  clients.push(session);
+  await expect(session.call.renderPng({ slide: 0 })).rejects.toMatchObject({
+    code: 'font-unavailable', message: expect.stringContaining('Cannot load @betteroffice/fonts-latin'),
+  });
+});
+
+async function expectPng(client: PresentationCommandClient, outcome: 'draws' | 'font-unavailable', painted: ReturnType<typeof stubPngCanvas>) {
+  const png = client.renderPng!({ slide: 0 });
+  if (outcome === 'draws' && engineKind === 'native') {
+    const bytes = await png;
+    expect(bytes.byteLength).toBeGreaterThan(8);
+    expect([...bytes.subarray(0, 4)]).toEqual([137, 80, 78, 71]);
+  } else if (outcome === 'draws') {
+    expect([...await png]).toEqual([...new TextEncoder().encode('png')]);
+    expect(painted.mock.calls.map(([text]) => text).join('')).toContain('Xalpha');
+  } else await expect(png).rejects.toMatchObject({ code: outcome });
+}
+
+for (const [pack, family] of [['cjk', 'MS Gothic'], ['intl', 'Noto Sans Devanagari']] as const) {
+  for (const [cdnDisabled, slicedFonts] of [[false, false], [false, true], [true, false]] as const) {
+    test(`an absent ${pack} pack registers the Latin substitute with the CDN ${cdnDisabled ? 'disabled' : 'blocked'} and sliced fonts ${slicedFonts}`, async () => {
+      const previous = getFontCdnConfiguration();
+      const restoreBrowser = withBrowserFontGlobals();
+      restorers.push(() => { restoreBrowser(); setFontCdnConfiguration(previous); });
+      setFontCdnConfiguration(undefined);
+      if (cdnDisabled) fonts.configureFontCdn({ baseUrl: false });
+      const cdn = getFontCdnConfiguration();
+      const runtime = createFontRuntime(async (kind) => ({
+        cdn: getFontCdnConfiguration(),
+        urls: kind === 'base' || kind === 'latin'
+          ? Object.fromEntries(Object.entries(await fonts.fontAssetUrls(kind) ?? {}).map(([file, href]) =>
+            [file, () => new URL(href)])) : undefined,
+      }));
+      const provider = spyOn(fonts, 'createFontProvider').mockImplementation(runtime.createFontProvider);
+      const installed = spyOn(fonts, 'bundledFaceInstalled').mockImplementation(runtime.bundledFaceInstalled);
+      const load = spyOn(fonts, 'loadBundledFontBytes').mockImplementation(runtime.loadBundledFontBytes);
+      const warn = spyOn(console, 'warn').mockImplementation(() => {});
+      const fetched: string[] = [];
+      const fetch = spyOnFontFetch(async (input) => {
+        const url = new URL(String(input));
+        if (url.hostname === 'cdn.jsdelivr.net') {
+          fetched.push(url.href);
+          throw new TypeError('Network disabled');
+        }
+        return fontAssetResponse(input);
+      });
+      const register = spyOn(PptxRenderer.prototype, 'registerFont');
+      const sliced = spyOn(progressive, 'openSlicedFace');
+      restorers.push(() => { provider.mockRestore(); installed.mockRestore(); load.mockRestore(); warn.mockRestore();
+        fetch.mockRestore(); register.mockRestore(); sliced.mockRestore(); });
+      const painted = stubPngCanvas();
+      const digest = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
+      const substitute = fonts.resolveMetricCompatFace('Arial', false, false)!;
+      const expected = digest(new Uint8Array(await runtime.loadBundledFontBytes(substitute, undefined, { decoder: decodeFontFace })));
+      const wire = connection();
+      const client = await createPresentationCommandClient(await deck([family]), { ...options, fontCdn: cdn, slicedFonts }, wire.transport);
+      clients.push(client);
+      const registrations = () => register.mock.calls.filter(([name]) => name === family)
+        .map(([name, bold, italic, bytes]) => [name, bold, italic, digest(bytes)]);
+      expect(fetched).toHaveLength(cdnDisabled ? 0 : 1);
+      if (!cdnDisabled) expect(fetched[0]).toContain(`/fonts-${pack}@`);
+      expect(sliced).toHaveBeenCalledTimes(pack === 'cjk' && slicedFonts ? 1 : 0);
+      expect(registrations()).toEqual([[family, false, false, expected]]);
+
+      const { result } = await client.read();
+      if (!result.ok) throw new Error(result.failure.message);
+      const { slideId, shapeId, storyId } = result.stories[0];
+      const ack = await client.dispatch({ kind: 'insertText', payload: { inputTime: 1, undoGroup: 'fonts', text: 'X',
+        style: { fontFamily: family, bold: false, italic: false },
+        at: { source: 'confirmed', selection: { slideId, shapeId, storyId, anchor: 0, focus: 0, affinity: 'downstream' } } } });
+      expect(ack.outcomes[0].status).toBe('applied');
+      expect(registrations()).toEqual([[family, false, false, expected]]);
+      await expectPng(client, EXPORT_WITH_ABSENT_PACK, painted);
+      expect(warn.mock.calls.filter(([message]) => String(message).includes(`Cannot load @betteroffice/fonts-${pack}`)))
+        .toHaveLength(cdnDisabled ? 0 : 1);
+
+      if (cdnDisabled) {
+        const resolve = (source: ReturnType<typeof runtime.createFontProvider>) =>
+          (source.resolve(family, false, false) ?? source.resolveFamily(family, false, false))!;
+        const strict = runtime.createFontProvider(undefined, { decoder: decodeFontFace, strict: true });
+        const missingAddon = await resolve(strict)().catch((error: unknown) => error);
+        expect(fonts.isMissingFontAddon(missingAddon)).toBe(true);
+        expect((missingAddon as Error).constructor.name).toBe(pack === 'cjk' ? 'MissingCjkAddonError' : 'MissingIntlAddonError');
+
+        fonts.configureFontCdn({ baseUrl: 'https://cdn.jsdelivr.net/npm/' });
+        const explicit = await commandFontProvider.load(getFontCdnConfiguration());
+        await expect(resolve(explicit)()).rejects.toThrow('Network disabled');
+      }
+    });
+  }
+}
 
 test('the initial ack waits for active fonts and main installation; background fonts arrive after ack', async () => {
   const active = deferred<ArrayBuffer>();

@@ -40,22 +40,26 @@ test('base Latin and the optional Latin pack have separate URL maps', async () =
   expect(source.mock.calls).toEqual([['latin'], ['base']]);
 });
 
-test('a missing CJK add-on loads the Latin substitute unless strict loading is requested', async () => {
-  const face = worker.resolveScriptFallbackFace('cjk-sc', false, false)!;
+test('missing script add-ons load the Latin substitute unless strict loading is requested', async () => {
   const fallback = worker.resolveMetricCompatFace('Arial', false, false)!;
-  const source = mock(async (pack: FontAssetKind) => ({ urls: pack === 'cjk' ? undefined : await fonts.fontAssetUrls(pack) }));
+  const source = mock(async (pack: FontAssetKind) => ({
+    urls: pack === 'cjk' || pack === 'intl' ? undefined : await fonts.fontAssetUrls(pack),
+  }));
   setWorkerFontAssets(source);
   globalThis.fetch = fontAssetResponse as typeof fetch;
-  expect(await worker.bundledFaceInstalled(face)).toBe(false);
-  expect(await worker.loadBundledFontBytes(face, undefined, { decoder })).toEqual(
-    await fonts.loadBundledFontBytes(fallback, undefined, { decoder }));
-  const strict = await worker.loadBundledFontBytes(face, undefined, { strict: true }).catch((error: unknown) => error);
-  expect(strict).toBeInstanceOf(Error);
-  expect((strict as Error).constructor.name).toBe('MissingCjkAddonError');
-  expect(fonts.isMissingFontAddon(strict)).toBe(true);
+  const expected = await fonts.loadBundledFontBytes(fallback, undefined, { decoder });
+  for (const [script, name] of [['cjk-sc', 'MissingCjkAddonError'], ['thai', 'MissingIntlAddonError']] as const) {
+    const face = worker.resolveScriptFallbackFace(script, false, false)!;
+    expect(await worker.bundledFaceInstalled(face)).toBe(false);
+    await expect(worker.loadBundledFontBytes(face, undefined, { decoder })).resolves.toEqual(expected);
+    const strict = await worker.loadBundledFontBytes(face, undefined, { strict: true }).catch((error: unknown) => error);
+    expect(strict).toBeInstanceOf(Error);
+    expect((strict as Error).constructor.name).toBe(name);
+    expect(fonts.isMissingFontAddon(strict)).toBe(true);
+  }
   const location = worker.createFontProvider().resolveScriptFallback('cjk-sc', false, false)!.slices!;
   const sliceError = await location.url(location.ref.index).catch((error: unknown) => error);
-  expect((sliceError as Error).constructor).toBe((strict as Error).constructor);
+  expect((sliceError as Error).constructor.name).toBe('MissingCjkAddonError');
 });
 
 test('missing intl and Latin add-ons keep their own errors and are retried', async () => {
@@ -63,7 +67,7 @@ test('missing intl and Latin add-ons keep their own errors and are retried', asy
   setWorkerFontAssets(source);
   const intl = worker.resolveScriptFallbackFace('thai', false, false)!;
   const latin = worker.resolveMetricCompatFace('Calibri', false, false)!;
-  const intlError = await worker.loadBundledFontBytes(intl).catch((error: unknown) => error);
+  const intlError = await worker.loadBundledFontBytes(intl, undefined, { strict: true }).catch((error: unknown) => error);
   expect((intlError as Error).constructor.name).toBe('MissingIntlAddonError');
   await expect(worker.loadBundledFontBytes(latin)).rejects.toMatchObject({ name: 'MissingFontAddonError' });
   await expect(worker.bundledFaceInstalled(intl)).resolves.toBe(false);

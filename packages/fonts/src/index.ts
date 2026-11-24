@@ -46,6 +46,8 @@ async function importCjkAssetUrls(): Promise<FontAssetUrls | undefined> {
 
 function missingAddon(error: unknown, pack: string): boolean {
   const message = (error as { message?: unknown } | null)?.message;
+  const viteMessage = `Could not resolve "@betteroffice/fonts-${pack}" imported by "@betteroffice/fonts".`;
+  if (message === viteMessage || message === `${viteMessage} Is it installed?`) return true;
   return typeof message === 'string' && new RegExp(
     `^(?:Cannot find (?:module|package)|Failed to resolve module specifier|Error resolving module specifier|The specifier|Module name,) ["'“]@betteroffice/fonts-${pack}["'”]`,
   ).test(message);
