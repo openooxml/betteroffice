@@ -1960,7 +1960,12 @@ fn settle_style_numbering(
     let Some(num_pr) = num_pr else {
         return true;
     };
-    let Some(list) = crate::list_definitions::style_list_attrs(&num_pr, source) else {
+    let style = properties.iter().find_map(|(key, value)| match value {
+        yrs::Any::String(id) if key == "pStyle" => Some(id.to_string()),
+        _ => None,
+    });
+    let style = style.as_deref().or(source.default_paragraph_style());
+    let Some(list) = crate::list_definitions::style_list_attrs(&num_pr, style, source) else {
         return false;
     };
     properties.retain(|(key, _)| !list.contains_key(key));

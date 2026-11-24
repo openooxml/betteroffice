@@ -1857,9 +1857,8 @@ fn paragraph_styles_without_a_numbering_id_apply_like_plain_styles() {
     );
 }
 
-#[test]
-fn numbered_styles_put_inserted_and_restyled_paragraphs_on_their_list() {
-    let mut parts = ooxml_opc::unzip_parts(&docx(&p("00000001", &r("plain")))).unwrap();
+fn numbered_style_package(body: &str, extra_styles: &str) -> Vec<u8> {
+    let mut parts = ooxml_opc::unzip_parts(&docx(body)).unwrap();
     for (name, from, to) in [
         (
             "[Content_Types].xml",
@@ -1871,6 +1870,11 @@ fn numbered_styles_put_inserted_and_restyled_paragraphs_on_their_list() {
             "</Relationships>",
             r#"<Relationship Id="rIdNumbering" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/></Relationships>"#,
         ),
+        (
+            "word/styles.xml",
+            "</w:styles>",
+            &format!("{extra_styles}</w:styles>"),
+        ),
     ] {
         let part = parts.iter_mut().find(|(part, _)| part == name).unwrap();
         part.1 = String::from_utf8(part.1.clone())
@@ -1881,11 +1885,16 @@ fn numbered_styles_put_inserted_and_restyled_paragraphs_on_their_list() {
     parts.push((
         "word/numbering.xml".to_owned(),
         format!(
-            r#"<w:numbering {NS}><w:abstractNum w:abstractNumId="3"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="3"/></w:num></w:numbering>"#
+            r#"<w:numbering {NS}><w:abstractNum w:abstractNumId="3"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:pPr><w:ind w:left="1440" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="3"/></w:num></w:numbering>"#
         )
         .into_bytes(),
     ));
-    let doc = open_package(&ooxml_opc::rezip_parts(&parts).unwrap());
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn numbered_styles_put_inserted_and_restyled_paragraphs_on_their_list() {
+    let doc = open_package(&numbered_style_package(&p("00000001", &r("plain")), ""));
     let undo = UndoSession::new();
     let applied = apply(
         &doc,
@@ -1915,6 +1924,47 @@ fn numbered_styles_put_inserted_and_restyled_paragraphs_on_their_list() {
     }
     if let Some(Any::Map(original)) = properties(&doc, "00000001").get("_originalFormatting") {
         assert!(!original.contains_key("numPr"));
+    }
+}
+
+#[test]
+fn numbered_styles_give_inserted_paragraphs_the_indents_seeding_gives() {
+    let styles = r#"<w:style w:type="paragraph" w:styleId="CharsList"><w:name w:val="Chars List"/><w:pPr><w:numPr><w:numId w:val="1"/></w:numPr><w:ind w:leftChars="200"/></w:pPr></w:style><w:style w:type="paragraph" w:styleId="FirstList"><w:name w:val="First List"/><w:basedOn w:val="ListNumber"/><w:pPr><w:ind w:firstLine="200"/></w:pPr></w:style>"#;
+    for style in ["ListNumber", "CharsList", "FirstList"] {
+        let body = format!(
+            "{}{}",
+            p("00000001", &r("plain")),
+            styled("00000002", style, &r("seeded"))
+        );
+        let doc = open_package(&numbered_style_package(&body, styles));
+        let applied = apply(
+            &doc,
+            &UndoSession::new(),
+            vec![insert_paragraphs(
+                "00000001",
+                TargetEdge::End,
+                vec![new_paragraph("inserted", Some(style))],
+            )],
+        );
+        let inserted = properties(&doc, &applied.receipts[0].new_paragraphs[0].para_id);
+        let seeded = properties(&doc, "00000002");
+        for key in [
+            "numPr",
+            "listMarker",
+            "listNumFmt",
+            "indentLeft",
+            "indentFirstLine",
+            "hangingIndent",
+            "listLevelIndents",
+        ] {
+            let present = |values: &std::collections::BTreeMap<String, Any>| {
+                values
+                    .get(key)
+                    .filter(|value| !matches!(value, Any::Null | Any::Undefined))
+                    .cloned()
+            };
+            assert_eq!(present(&inserted), present(&seeded), "{style} {key}");
+        }
     }
 }
 

@@ -354,6 +354,7 @@ test('set_paragraph_style to a style that defines list numbering puts the paragr
   const paragraph = byText(await saved.file('word/document.xml')!.async('string'), 'Plain paragraph');
   expect(paragraph).toContain('<w:pStyle w:val="NumberedHeading"/>');
   expect(paragraph).not.toContain('<w:numPr>');
+  expect(paragraph).not.toContain('<w:ind');
   expect(await saved.file('word/styles.xml')!.async('string')).toBe(source.styles);
   expect(await saved.file('word/numbering.xml')!.async('string')).toBe(NUMBERING);
 

@@ -11,11 +11,6 @@ async function open(bytes: Uint8Array) {
 }
 afterEach(() => { opened.splice(0).forEach(doc => doc.close()); });
 
-async function editCode(doc: DocxAgentDocument, edit: Parameters<DocxAgentDocument['edit']>[0]['edits'][number]) {
-  try { await doc.edit({ version: doc.list().version, edits: [edit] }); return 'ok'; }
-  catch (error) { return (error as { code: string }).code; }
-}
-
 const canonical = (xml: string) => xml.replace(/<([a-zA-Z0-9:]+)((?:\s+[a-zA-Z0-9:]+="[^"]*")+)\s*(\/?)>/g, (_all, tag: string, attrs: string, self: string) => {
   const sorted = [...attrs.matchAll(/([a-zA-Z0-9:]+)="([^"]*)"/g)].sort((a, b) => a[1].localeCompare(b[1])).map(match => ` ${match[1]}="${match[2]}"`).join('');
   return `<${tag}${sorted}${self}>`;

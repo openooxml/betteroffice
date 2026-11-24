@@ -76,6 +76,7 @@ test('insert_paragraphs with numbered styles adds bullet and numbered list items
     const paragraph = byText(xml, text);
     expect(paragraph).toContain(`<w:pStyle w:val="${style}"/>`);
     expect(paragraph).not.toContain('<w:numPr>');
+    expect(paragraph).not.toContain('<w:ind');
   }
   expect(await saved.file('word/styles.xml')!.async('string')).toBe(source.styles);
   const numbering = await saved.file('word/numbering.xml')!.async('string');
