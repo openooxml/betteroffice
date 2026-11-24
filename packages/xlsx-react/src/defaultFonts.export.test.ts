@@ -4,6 +4,7 @@ import type { XlsxPngOptions, XlsxPngTarget } from '@betteroffice/xlsx';
 import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../shared/office-session/fontCdn';
 import { fontAssetResponse, fontRuntimeWithoutPacks, withBrowserFontGlobals } from '../../fonts/src/fontAssets.test-support';
 import { spyOnFontFetch } from '../../fonts/src/fontFetch.test-support';
+import { createFontRuntime } from '../../fonts/src/fontRuntime';
 import { createXlsxCommandController } from './commands/createXlsxCommandStore';
 import { createInThreadAsyncEditorApi } from './createInThreadAsyncEditorApi';
 import { exportFaces, xlsxDefaultFontManager } from './defaultFonts';
@@ -71,9 +72,9 @@ test('editor export omits optional faces when the default CDN fails', async () =
     await expect(editorExportFaces(optional, null, undefined)).resolves.toBeUndefined();
     expect(fetch.mock.calls.filter(([url]) => String(url).includes('cdn.jsdelivr.net'))).toHaveLength(requests.length);
     fonts.configureFontCdn({ baseUrl: false });
-    for (const request of requests) {
-      await expect(exportFaces([request], null)).rejects.toMatchObject({
-        code: 'font-unavailable', message: expect.stringContaining(request.family),
+    for (const family of ['Calibri', 'Noto Sans Arabic', 'Noto Sans Hebrew']) {
+      await expect(exportFaces([{ family, bold: false, italic: false }], null)).rejects.toMatchObject({
+        code: 'font-unavailable', message: expect.stringContaining(family),
       });
     }
     expect(fetch.mock.calls.filter(([url]) => String(url).includes('cdn.jsdelivr.net'))).toHaveLength(requests.length);
@@ -83,6 +84,48 @@ test('editor export omits optional faces when the default CDN fails', async () =
         code: 'font-unavailable', message: expect.stringContaining(request.family),
       });
     }
+  } finally {
+    restore();
+    setFontCdnConfiguration(previous);
+  }
+});
+
+test('editor PNG export omits absent optional faces with the CDN disabled', async () => {
+  const runtime = createFontRuntime(async (pack) => {
+    const urls = pack === 'latin' ? await fonts.fontAssetUrls(pack) : undefined;
+    return {
+      cdn: getFontCdnConfiguration(),
+      urls: urls && Object.fromEntries(Object.entries(urls).map(([file, href]) => [file, () => new URL(href)])),
+    };
+  });
+  spyOn(xlsxDefaultFontManager, 'load').mockResolvedValue({ ...fonts, default: fonts, ...runtime });
+  const fetch = spyOnFontFetch(fontAssetResponse);
+  const previous = getFontCdnConfiguration();
+  const restore = withBrowserFontGlobals();
+  const target = { sheet: 0, range: 'A1' };
+  const optional = ['MS Gothic', 'Noto Sans Thai'].map((family) => ({ family, bold: false, italic: false }));
+  const calibri = { family: 'Calibri', bold: false, italic: false };
+  const png = new Uint8Array([1]);
+  const renderPng = mock(async (_target: XlsxPngTarget, _options?: XlsxPngOptions) => png);
+  const renderPngFonts = mock(() => optional);
+  const sync = {
+    commands: createXlsxCommandController().store,
+    flushPendingInput: async () => {},
+    handle: { renderPng, renderPngFonts },
+  } as unknown as XlsxEditorApi;
+  const api = createInThreadAsyncEditorApi(sync, false, () => {});
+  try {
+    fonts.configureFontCdn({ baseUrl: false });
+    await expect(api.renderPng(target)).resolves.toBe(png);
+    expect(renderPng.mock.lastCall).toEqual([target, { fonts: undefined, signal: undefined }]);
+    await expect(exportFaces(optional, null)).resolves.toEqual([]);
+    expect(fetch).not.toHaveBeenCalled();
+
+    renderPngFonts.mockReturnValue([...optional, calibri]);
+    await expect(api.renderPng(target)).resolves.toBe(png);
+    expect(renderPng.mock.lastCall?.[1]?.fonts?.map(({ bytes, ...face }) => ({ ...face, byteLength: bytes.byteLength })))
+      .toEqual([{ ...calibri, byteLength: fonts.resolveMetricCompatFace('Calibri', false, false)!.byteLength }]);
+    expect(fetch.mock.calls.filter(([url]) => String(url).startsWith('https:'))).toHaveLength(0);
   } finally {
     restore();
     setFontCdnConfiguration(previous);
