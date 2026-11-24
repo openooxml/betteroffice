@@ -2033,6 +2033,8 @@ pub struct TypesetRow {
     /// Extra first-line px after a marker overruns its hanging indent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub marker_tab_offset: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inline_list_marker: Option<ooxml_text::measure::InlineListMarker<f64>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_advances: Option<Vec<TypesetRunAdvance>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
