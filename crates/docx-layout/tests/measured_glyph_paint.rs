@@ -1,5 +1,6 @@
 //! Joining and Indic lines paint the glyphs measurement shaped them with.
 
+use betteroffice_fonts::{LastResortOffice, resolve_last_resort_face};
 use docx_layout::display_list::{
     DisplayList, GlyphRunPrimitive, Primitive, build_display_list_json_with_fonts,
 };
@@ -105,6 +106,67 @@ fn list_of(fixture: &Fixture, input: &Value) -> DisplayList {
 
 fn painted(fixture: &Fixture, built: &Built) -> DisplayList {
     list_of(fixture, &built.input)
+}
+
+#[test]
+fn bold_calibri_light_heading_uses_carlito_bold_advances() {
+    let mut store = FontStore::new();
+    let regular = store
+        .register(include_bytes!("../../../packages/fonts/assets/Carlito-Regular.ttf").to_vec())
+        .unwrap();
+    let bold = store
+        .register(include_bytes!("../../../packages/fonts/assets/Carlito-Bold.ttf").to_vec())
+        .unwrap();
+    let family = "Calibri Light";
+    let text = "Heading 1";
+    let size_pt = 16.0;
+    let face = resolve_last_resort_face(family, true, false, LastResortOffice::Word);
+    let base = match face.file.as_str() {
+        "Carlito-Bold.ttf.zst" => bold,
+        "Carlito-Regular.ttf.zst" => regular,
+        file => panic!("unexpected substitute for {family}: {file}"),
+    };
+    let substitute = store.register_named_substitute(base, family).unwrap();
+    let mut run = text_run(text, 1);
+    run["fontFamily"] = json!(family);
+    run["fontSize"] = json!(size_pt);
+    run["bold"] = json!(true);
+    let input = json!({
+        "block": { "kind": "paragraph", "runs": [run] },
+        "maxWidth": FRAG_WIDTH,
+        "fontChains": { "calibri light|1|0": [substitute.to_u32()] },
+        "authoritativeShaping": true,
+        "defaults": { "fontSize": size_pt, "fontFamily": family }
+    });
+    let measured: Value = serde_json::from_str(
+        &ooxml_text::measure_paragraph_json(&store, &input.to_string()).unwrap(),
+    )
+    .unwrap();
+    let lines = measured["lines"].as_array().unwrap();
+    assert_eq!(lines.len(), 1);
+    let runs = ooxml_text::unpack_glyph_runs(lines[0]["glyphRuns"].as_str().unwrap()).unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(
+        store.byte_owner(FontId::from_u32(runs[0].head.font_id)).unwrap(),
+        bold
+    );
+    let width_with = |id| {
+        shape_with_direction(
+            &store,
+            id,
+            text,
+            size_pt * 96.0 / 72.0,
+            &KERN_OFF,
+            ShapeDirection::Ltr,
+        )
+        .unwrap()
+        .iter()
+        .map(|glyph| f64::from(glyph.x_advance))
+        .sum::<f64>()
+    };
+    let width = lines[0]["width"].as_f64().unwrap();
+    assert!((width - width_with(bold)).abs() < 0.0001);
+    assert!((width - width_with(regular)).abs() > 0.0001);
 }
 
 #[test]
