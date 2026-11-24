@@ -452,7 +452,8 @@ impl Document {
 
     /// Formulas moved between cells as a paste moves them; see [`Session::translate_formulas_json`].
     pub fn translate_formulas_json(&self, args: &str) -> Result<String, EngineError> {
-        Session::translate_formulas_json(args).map_err(message)
+        let now_serial = (self.host.now_serial)()?;
+        self.session.translate_formulas_json(args, now_serial).map_err(message)
     }
 
     pub fn move_range_json(&mut self, args: &str) -> Result<String, EngineError> {

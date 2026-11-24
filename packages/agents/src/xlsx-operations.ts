@@ -442,26 +442,18 @@ function compare(a: XlsxCellValue, b: XlsxCellValue) {
   return String(a.value).toLowerCase().localeCompare(String(b.value).toLowerCase(), 'en');
 }
 
-function hasExternalWorkbookReference(formula: string) {
-  if (!formula.includes('[')) return false;
-  const tokens = /"(?:[^"]|"")*"|'(?:[^']|'')*'!?|\[/gu;
-  const qualifier = /(?<![\p{L}\p{N}_.\\\]])\[[^\[\]]+\][\p{L}\p{N}_.]*(?::[\p{L}\p{N}_.]+)?!/uy;
-  for (let match; (match = tokens.exec(formula));) {
-    const [token] = match;
-    if (token.startsWith("'") && token.endsWith('!') && /\[[^\[\]]+\]/u.test(token)) return true;
-    if (token !== '[') continue;
-    qualifier.lastIndex = match.index;
-    if (qualifier.test(formula)) return true;
-    let end = tokens.lastIndex;
-    for (let depth = 1; end < formula.length && depth; end++) {
-      const char = formula[end];
-      if (char === "'") end++;
-      else if (char === '[') depth++;
-      else if (char === ']') depth--;
+function cellShapedNames(book: XlsxAgentWorkbook) {
+  const names = new Set<string>();
+  for (let offset: number | null = 0; offset !== null;) {
+    const page = book.handle.listDefinedNames({ offset });
+    for (const item of page.items) {
+      const name = item.name.toUpperCase();
+      const match = /^([A-Z]{1,3})(\d+)$/.exec(name);
+      if (match && (match[1].length < 3 || match[1] <= 'XFD') && Number(match[2]) >= 1 && Number(match[2]) <= 1048576) names.add(name);
     }
-    tokens.lastIndex = end;
+    offset = page.nextOffset;
   }
-  return false;
+  return names;
 }
 
 export function sortXlsx(book: XlsxAgentWorkbook, options: { version: string; sheet: string; range: string; keys: Array<{ column: string; order: 'asc' | 'desc' }>; header?: boolean } & XlsxProtectionOptions) {
@@ -494,22 +486,38 @@ export function sortXlsx(book: XlsxAgentWorkbook, options: { version: string; sh
     return a - b;
   });
   const sourceRow = (dest: number) => dest < start ? dest : order[dest - start];
-  const moves: { formula: string; from: CellPoint; to: CellPoint }[] = [];
+  const moves: { formula: string; from: CellPoint; to: CellPoint; sheet: number }[] = [];
   const sortedCells = rows.map((_, dest) => {
     const source = sourceRow(dest);
     return rows[source].map(({ value, formula }, col) => {
-      if (source !== dest && formula !== null) moves.push({ formula, from: { row: bounds.start.row + source, col: bounds.start.col + col }, to: { row: bounds.start.row + dest, col: bounds.start.col + col } });
+      if (source !== dest && formula !== null) moves.push({ formula, from: { row: bounds.start.row + source, col: bounds.start.col + col }, to: { row: bounds.start.row + dest, col: bounds.start.col + col }, sheet: sheet.index });
       return { value, formula };
     });
   });
-  if (moves.length) book.translateFormulas(moves).forEach((result, index) => {
-    const { formula, from, to } = moves[index];
-    const cell = address(from.row, from.col);
-    if (!result.ok) throw new DocumentToolError('INVALID_SORT', `Cannot move the formula at ${cell}. ${result.error}`);
-    if (result.formula.length > 8192 && [...result.formula].length > 8192) throw new DocumentToolError('INVALID_SORT', `Cannot move the formula at ${cell}. The translated formula exceeds 8192 characters.`);
-    if (result.formula !== formula && hasExternalWorkbookReference(formula)) throw new DocumentToolError('INVALID_SORT', `Cannot move the formula at ${cell}. It refers to an external workbook.`);
-    sortedCells[to.row - bounds.start.row][to.col - bounds.start.col].formula = result.formula;
-  });
+  if (moves.length) {
+    moves.sort((a, b) => a.from.row - b.from.row || a.from.col - b.from.col);
+    const status = book.handle.calculationStatus();
+    const unresolved = new Set([...status.limitedCells, ...(status.unevaluatedCells ?? []).map(cell => cell.address)]);
+    const active = sheet.index === book.handle.sheetInfo().activeSheet;
+    const names = cellShapedNames(book);
+    for (const { formula, from } of moves) {
+      const cell = address(from.row, from.col);
+      if (formula === '') throw new DocumentToolError('INVALID_SORT', `Cannot move the formula at ${cell}. It is a what-if data table. Exclude the cell from the sort.`);
+      if (status.budgetExhausted) throw new DocumentToolError('INVALID_SORT', `Cannot move the formula at ${cell}. The calculation engine ran out of budget. Recalculate the workbook or exclude formulas from the sort.`);
+      if (unresolved.has(`${sheet.name}!${cell}`) || (active && unresolved.has(cell))) throw new DocumentToolError('INVALID_SORT', `Cannot move the formula at ${cell}. The calculation engine did not evaluate it. Exclude the cell from the sort or replace the formula with a value.`);
+      if (names.size) for (const token of formula.matchAll(/"(?:[^"]|"")*"|'(?:[^']|'')*'|\[(?:[^\[\]]|\[[^\]]*\])*\]|[\p{L}\p{N}_.$\\]+/gu)) {
+        const name = token[0].toUpperCase();
+        if (names.has(name) && !/^[!\[(]/u.test(formula.slice(token.index! + token[0].length).trimStart())) throw new DocumentToolError('INVALID_SORT', `Cannot move the formula at ${cell}. It uses the ambiguous defined name ${name}. Rename the name or exclude the cell from the sort.`);
+      }
+    }
+    book.translateFormulas(moves).forEach((result, index) => {
+      const { from, to } = moves[index];
+      const cell = address(from.row, from.col);
+      if (!result.ok) throw new DocumentToolError('INVALID_SORT', `Cannot move the formula at ${cell}. ${result.error} Exclude the cell from the sort or replace the formula with a value.`);
+      if (result.formula.length > 8192 && [...result.formula].length > 8192) throw new DocumentToolError('INVALID_SORT', `Cannot move the formula at ${cell}. The translated formula exceeds 8192 characters. Exclude the cell from the sort or shorten the formula.`);
+      sortedCells[to.row - bounds.start.row][to.col - bounds.start.col].formula = result.formula;
+    });
+  }
   const captured = book.handle.captureFormat(sheet.index, options.range);
   const ops: unknown[] = [];
   for (let dest = start; dest < rows.length; dest++) {

@@ -14,6 +14,7 @@ interface CellTarget { sheet: string; a1: string; before: XlsxCellRead; version:
 type FormulaMoves = Parameters<typeof translateFormulasOn>[1];
 
 function translateAttachedFormulas(handle: WorkbookHandle, items: FormulaMoves) {
+  if (!items.length) return [];
   for (const translate of new Set([engines.getIfLoaded('xlsx')?.module.translateFormulasOn, translateFormulasOn])) {
     if (!translate) continue;
     try { return translate(handle, items); }
@@ -21,7 +22,8 @@ function translateAttachedFormulas(handle: WorkbookHandle, items: FormulaMoves) 
       if (!(error instanceof TypeError) || error.message !== 'translateFormulasOn needs a workbook this package opened') throw error;
     }
   }
-  throw new DocumentToolError('INVALID_SORT', 'Formulas cannot be moved on this workbook handle.');
+  const { from } = items[0];
+  throw new DocumentToolError('INVALID_SORT', `Cannot move the formula at ${address(from.row, from.col)} on this workbook handle. Open the workbook with openXlsx or load its engine first.`);
 }
 
 export function address(row: number, col: number) {
