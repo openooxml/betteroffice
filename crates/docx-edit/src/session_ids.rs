@@ -1,4 +1,6 @@
 use std::collections::HashSet;
+use std::ops::Range;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use yrs::types::text::YChange;
@@ -10,6 +12,7 @@ pub(crate) struct SessionIds {
     counter: AtomicU64,
     floored: AtomicBool,
     unused: AtomicU64,
+    drawn: Mutex<Vec<Range<u64>>>,
 }
 
 impl SessionIds {
@@ -19,6 +22,7 @@ impl SessionIds {
             counter: AtomicU64::new(0),
             floored: AtomicBool::new(false),
             unused: AtomicU64::new(0),
+            drawn: Mutex::new(Vec::new()),
         }
     }
 
@@ -43,20 +47,34 @@ impl SessionIds {
                 Err(current) => counter = current,
             }
         }
+        let mut drawn = self.drawn.lock().unwrap();
+        match drawn.last_mut() {
+            Some(run) if run.end == counter => run.end += 1,
+            _ => drawn.push(counter..counter + 1),
+        }
+        drop(drawn);
         format!("{}:{counter}", self.client_id)
     }
 
-    /// The smallest `{client_id}:N` from the last one drawn here that no live id uses, for when
-    /// the floor has reached the cap.
+    /// The smallest `{client_id}:N` from the last one drawn here that no live id uses and this
+    /// session has not drawn, for when the floor has reached the cap.
     fn draw_unused<T: ReadTxn>(&self, txn: &T) -> String {
         let mut used = HashSet::new();
         self.scan(txn, &mut |n| {
             used.insert(n);
         });
+        let drawn = self.drawn.lock().unwrap();
         let mut next = self.unused.load(Ordering::Relaxed);
-        while used.contains(&next) {
-            next += 1;
+        loop {
+            if let Some(run) = drawn.iter().find(|run| run.contains(&next)) {
+                next = run.end;
+            } else if used.contains(&next) {
+                next += 1;
+            } else {
+                break;
+            }
         }
+        drop(drawn);
         assert!(next < MAX_FLOOR, "session id counter exhausted");
         self.unused.store(next + 1, Ordering::Relaxed);
         format!("{}:{next}", self.client_id)
@@ -75,6 +93,8 @@ impl SessionIds {
             .store(other.floored.load(Ordering::Relaxed), Ordering::Relaxed);
         self.unused
             .store(other.unused.load(Ordering::Relaxed), Ordering::Relaxed);
+        let drawn = other.drawn.lock().unwrap().clone();
+        *self.drawn.lock().unwrap() = drawn;
     }
 
     #[cfg(test)]
@@ -226,6 +246,22 @@ mod tests {
     fn a_floor_at_the_cap_draws_the_smallest_unused_ids() {
         let (first, second) = drawn_after("41:9007199254740991 41:1");
         assert_eq!((first.as_str(), second.as_str()), ("41:2", "41:3"));
+    }
+
+    #[test]
+    fn the_fallback_skips_ids_this_session_drew() {
+        let doc = Doc::with_options(Options::with_client_id(ClientID::new(41)));
+        let comments = doc.get_or_insert_map("comments");
+        {
+            let mut txn = doc.transact_mut();
+            comments.insert(&mut txn, "41:0", Any::String("note".into()));
+        }
+        let ids = SessionIds::new(41);
+        let txn = doc.transact();
+        assert_eq!(ids.draw(&txn), "41:1");
+        ids.counter.store(super::MAX_FLOOR, Ordering::Relaxed);
+        assert_eq!(ids.draw(&txn), "41:2");
+        assert_eq!(ids.draw(&txn), "41:3");
     }
 
     #[test]
