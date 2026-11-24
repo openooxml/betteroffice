@@ -290,7 +290,7 @@ fn heading_number_that_overruns_the_hanging_indent_uses_the_default_tab() {
 #[test]
 fn heading_zero_hanging_uses_the_numbering_level_tab() {
     let heading = Heading {
-        tab: Some(1134),
+        tab: Some(600),
         ..HEADING2
     };
     assert_ltr_positions(heading, render(heading));

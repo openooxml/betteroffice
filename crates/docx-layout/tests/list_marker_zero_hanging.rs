@@ -68,9 +68,12 @@ fn zero_hanging_marker_paints_at_first_line_indent_and_text_at_next_tab() {
                 Primitive::GlyphRun(run) if run.text == text && run.attrs.list_marker == marker => {
                     Some(run.glyphs[0].x)
                 }
+                Primitive::Text(run) if run.text == text && run.attrs.list_marker == marker => {
+                    run.x.as_f64()
+                }
                 _ => None,
             })
-            .unwrap()
+            .unwrap_or_else(|| panic!("no {text:?} run in {:?}", list.pages[0].primitives))
     };
     let marker_x = glyph_origin(number, Some(true));
     let text_x = glyph_origin("Beta", None);
