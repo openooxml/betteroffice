@@ -452,6 +452,12 @@ pub(crate) struct AnchorPages<'a> {
 
 impl<'a> AnchorPages<'a> {
     pub(crate) fn new(pages: &'a [Page], anchors: &OrderedMap<u32, Vec<i64>>) -> Self {
+        if anchors.is_empty() {
+            return Self {
+                pages,
+                by_note: HashMap::new(),
+            };
+        }
         let mut by_number = HashMap::new();
         for (index, page) in pages.iter().enumerate() {
             by_number.entry(page.number).or_insert(index);
@@ -2187,7 +2193,7 @@ mod tests {
         assert_eq!(marker.fmt.superscript, Some(true));
     }
 
-    /// [`map_note_anchors_to_pages`] as it scanned every page for each reference.
+    /// Reference implementation of [`map_note_anchors_to_pages`]: every page scanned for each reference.
     fn anchors_by_scan(pages: &[Page], refs: &[NoteRefLocation]) -> OrderedMap<u32, Vec<i64>> {
         let mut result = OrderedMap::new();
         for reference in refs {
@@ -2202,7 +2208,8 @@ mod tests {
         result
     }
 
-    /// The page of the first anchor entry holding `map_id`, as it was looked up by scanning.
+    /// Reference implementation of [`AnchorPages::page`]: the page of the first anchor entry holding
+    /// `map_id`, found by scanning the entries and the pages.
     fn page_by_scan<'a>(
         pages: &'a [Page],
         anchors: &OrderedMap<u32, Vec<i64>>,
@@ -2215,7 +2222,7 @@ mod tests {
         pages.iter().find(|page| page.number == page_number)
     }
 
-    /// The pages [`map_notes_to_pages`] puts the notes on, as scans found them.
+    /// Reference implementation of [`map_notes_to_pages`], built on the scans above.
     fn notes_to_pages_by_scan(
         pages: &[Page],
         refs: &[NoteRefLocation],
@@ -2257,7 +2264,8 @@ mod tests {
         result.entries
     }
 
-    /// The page and section each note is numbered on, as scans found them.
+    /// Reference implementation of the page and section each note is numbered on, built on the scans
+    /// above.
     fn presentation_pages_by_scan(
         pages: &[Page],
         refs: &[NoteRefLocation],
