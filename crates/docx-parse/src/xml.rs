@@ -589,11 +589,10 @@ impl XmlElement {
         let aliases = self.prefix_aliases.as_deref()?;
         self.attributes.iter().find_map(|(key, value)| {
             let (prefix, local) = key.split_once(':')?;
-            (local == name
-                && aliases
-                    .iter()
-                    .any(|(alias, standard)| alias == prefix && *standard == namespace))
-            .then_some(value.as_str())
+            let index = aliases
+                .binary_search_by(|(alias, _)| alias.as_str().cmp(prefix))
+                .ok()?;
+            (local == name && aliases[index].1 == namespace).then_some(value.as_str())
         })
     }
 
@@ -1481,7 +1480,7 @@ pub(crate) fn parse_xml_strict(
                     });
                 }
                 let mut element = decode_element(&reader, start, part, budget)?;
-                prefixes.open(&mut element);
+                prefixes.open(&mut element, part)?;
                 scope_name_matching(&mut element, &mut stack, &mut local_names);
                 let element = number(element, &stack);
                 stack.push(element);
@@ -1496,7 +1495,7 @@ pub(crate) fn parse_xml_strict(
                     });
                 }
                 let mut element = decode_element(&reader, start, part, budget)?;
-                prefixes.open(&mut element);
+                prefixes.open(&mut element, part)?;
                 prefixes.close();
                 scope_name_matching(&mut element, &mut stack, &mut local_names);
                 let mut element = number(element, &stack);
@@ -1626,12 +1625,17 @@ fn rebinds_a_standard_prefix(element: &XmlElement) -> bool {
     })
 }
 
+/// Most bindings one part may scan while rebuilding the aliases in its scopes.
+const MAX_PREFIX_ALIAS_WORK: usize = 1 << 20;
+
 /// The prefix bindings in scope while a part loads.
 #[derive(Default)]
 struct PrefixScope {
     bindings: Vec<(String, String)>,
     /// For each open element, where its own bindings start and the aliases in its scope.
     scopes: Vec<(usize, Option<PrefixAliases>)>,
+    /// Bindings scanned by rebuilds so far, charged against `MAX_PREFIX_ALIAS_WORK`.
+    work: usize,
 }
 
 impl PrefixScope {
@@ -1643,34 +1647,57 @@ impl PrefixScope {
             .map(|(_, namespace)| namespace.as_str())
     }
 
-    fn aliases(&self) -> Option<PrefixAliases> {
-        let mut aliases: Vec<(String, &'static str)> = Vec::new();
+    /// The aliases in scope, sorted by prefix.
+    fn aliases(&self) -> Vec<(String, &'static str)> {
+        let standard_bindings: Vec<Option<&str>> = STANDARD_NAMESPACES
+            .iter()
+            .map(|standard| self.resolve(standard.prefix))
+            .collect();
+        let mut seen = std::collections::HashSet::new();
+        let mut aliases = Vec::new();
         for (prefix, namespace) in self.bindings.iter().rev() {
-            if prefix.is_empty()
-                || aliases.iter().any(|(alias, _)| alias == prefix)
-                || self.resolve(prefix) != Some(namespace.as_str())
+            if !seen.insert(prefix.as_str())
+                || prefix.is_empty()
                 || STANDARD_NAMESPACES
                     .iter()
                     .any(|standard| standard.prefix == prefix)
             {
                 continue;
             }
-            let Some(standard) = STANDARD_NAMESPACES.iter().find(|standard| {
+            let Some(index) = STANDARD_NAMESPACES.iter().position(|standard| {
                 standard.transitional == namespace || standard.strict == Some(namespace.as_str())
             }) else {
                 continue;
             };
-            if self
-                .resolve(standard.prefix)
-                .is_none_or(|bound| bound == namespace)
-            {
-                aliases.push((prefix.clone(), standard.prefix));
+            if standard_bindings[index].is_none_or(|bound| bound == namespace) {
+                aliases.push((prefix.clone(), STANDARD_NAMESPACES[index].prefix));
             }
         }
-        (!aliases.is_empty()).then(|| aliases.into())
+        aliases.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        aliases
     }
 
-    fn open(&mut self, element: &mut XmlElement) {
+    /// Whether the bindings from `mark` on leave `inherited` as the aliases in scope.
+    fn keeps(&self, mark: usize, inherited: &[(String, &'static str)]) -> bool {
+        let outer = &self.bindings[..mark];
+        self.bindings[mark..].iter().all(|(prefix, namespace)| {
+            prefix.is_empty()
+                || outer
+                    .iter()
+                    .rev()
+                    .find(|(bound, _)| bound == prefix)
+                    .is_some_and(|(_, bound)| bound == namespace)
+                || !(STANDARD_NAMESPACES.iter().any(|standard| {
+                    standard.prefix == prefix
+                        || standard.transitional == namespace
+                        || standard.strict == Some(namespace.as_str())
+                }) || inherited
+                    .binary_search_by(|(alias, _)| alias.as_str().cmp(prefix))
+                    .is_ok())
+        })
+    }
+
+    fn open(&mut self, element: &mut XmlElement, part: &str) -> Result<(), ParseError> {
         let mark = self.bindings.len();
         self.bindings.extend(
             element
@@ -1679,13 +1706,27 @@ impl PrefixScope {
                 .filter_map(namespace_declaration)
                 .map(|(prefix, namespace)| (prefix.to_owned(), namespace.to_owned())),
         );
-        let aliases = if self.bindings.len() == mark {
-            self.scopes.last().and_then(|(_, aliases)| aliases.clone())
+        let inherited = self.scopes.last().and_then(|(_, aliases)| aliases.clone());
+        let aliases = if self.keeps(mark, inherited.as_deref().unwrap_or_default()) {
+            inherited
         } else {
-            self.aliases()
+            self.work = self.work.saturating_add(self.bindings.len());
+            if self.work > MAX_PREFIX_ALIAS_WORK {
+                return Err(ParseError::ResourceLimit {
+                    kind: "prefixAliases",
+                    part: part.to_owned(),
+                });
+            }
+            let aliases = self.aliases();
+            if aliases.as_slice() == inherited.as_deref().unwrap_or_default() {
+                inherited
+            } else {
+                (!aliases.is_empty()).then(|| aliases.into())
+            }
         };
         element.prefix_aliases = aliases.clone();
         self.scopes.push((mark, aliases));
+        Ok(())
     }
 
     fn close(&mut self) {
@@ -2829,6 +2870,53 @@ mod tests {
         .unwrap();
         let header = doc.root().unwrap().child("w", "headerReference").unwrap();
         assert_eq!(header.attribute(Some("r"), "id"), None);
+    }
+
+    fn many_aliases_root(children: &str) -> String {
+        let aliases: String = (0..1000)
+            .map(|index| format!(r#" xmlns:a{index}="{}""#, namespaces::W))
+            .collect();
+        format!(
+            r#"<w:body xmlns:w="{}"{aliases}>{children}</w:body>"#,
+            namespaces::W
+        )
+    }
+
+    #[test]
+    fn declarations_that_leave_the_aliases_alone_share_the_inherited_aliases() {
+        let children: String = (0..20_000)
+            .map(|index| {
+                format!(
+                    r#"<w:p xmlns:x{index}="urn:other{index}" xmlns:a0="{}"/>"#,
+                    namespaces::W
+                )
+            })
+            .collect();
+        let doc = parse(&many_aliases_root(&children)).unwrap();
+        let root = doc.root().unwrap();
+        let inherited = root.prefix_aliases.as_ref().unwrap();
+        assert_eq!(inherited.len(), 1000);
+        let paragraphs: Vec<_> = root.children_named("w", "p").collect();
+        assert_eq!(paragraphs.len(), 20_000);
+        assert!(paragraphs.iter().all(|paragraph| {
+            paragraph
+                .prefix_aliases
+                .as_ref()
+                .is_some_and(|aliases| Arc::ptr_eq(aliases, inherited))
+        }));
+    }
+
+    #[test]
+    fn aliases_rebuilt_past_the_part_budget_are_refused() {
+        let children = r#"<w:p xmlns:a0="urn:other"/>"#.repeat(2000);
+        let error = parse(&many_aliases_root(&children)).unwrap_err();
+        assert!(matches!(
+            error,
+            ParseError::ResourceLimit {
+                kind: "prefixAliases",
+                ..
+            }
+        ));
     }
 
     #[test]
