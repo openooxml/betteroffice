@@ -82,6 +82,16 @@ pub struct ColumnLayout {
     pub columns: Option<Vec<ColumnDefinition>>,
 }
 
+/// The most columns a section lays out.
+pub const MAX_COLUMNS: usize = 45;
+
+impl ColumnLayout {
+    /// `count` as laid out: at least one column and at most [`MAX_COLUMNS`].
+    pub fn column_count(&self) -> usize {
+        (self.count as usize).clamp(1, MAX_COLUMNS)
+    }
+}
+
 /// `w:type` on a section break: how the *next* section starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

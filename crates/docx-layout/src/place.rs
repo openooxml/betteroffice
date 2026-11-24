@@ -1083,7 +1083,7 @@ fn continuous_horizontal_frame(plan: &LayoutPlan, section_index: usize) -> bool 
         changed |= previous.margins.left != current.margins.left
             || previous.margins.right != current.margins.right
             || previous_columns.count != current_columns.count
-            || (0..current_columns.count as usize).any(|column| {
+            || (0..current_columns.column_count()).any(|column| {
                 let rectangle = |columns: &crate::types::ColumnLayout| {
                     crate::page_flow::column_rectangle_at(
                         current.page_size.w,

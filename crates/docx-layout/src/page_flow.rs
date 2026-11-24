@@ -164,7 +164,7 @@ pub(crate) fn unequal_column_rectangles(
     gap: f64,
     columns: impl Iterator<Item = (Option<f64>, Option<f64>)>,
 ) -> Vec<(f64, f64)> {
-    let count = count.clamp(1, 45);
+    let count = count.clamp(1, crate::types::MAX_COLUMNS);
     let mut widths = vec![0.0; count];
     let mut gaps = vec![if gap.is_finite() { gap.max(0.0) } else { 0.0 }; count];
     for (index, (width, space)) in columns.take(count).enumerate() {
