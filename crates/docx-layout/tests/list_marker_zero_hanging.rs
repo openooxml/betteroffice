@@ -92,5 +92,8 @@ fn zero_hanging_marker_paints_at_first_line_indent_and_text_at_next_tab() {
         (text_x - expected_text_x).abs() < 0.5,
         "text x {text_x} vs {expected_text_x}"
     );
-    assert!(text_x >= marker_x + marker_width, "text overlaps the marker");
+    assert!(
+        text_x >= marker_x + marker_width,
+        "text overlaps the marker"
+    );
 }

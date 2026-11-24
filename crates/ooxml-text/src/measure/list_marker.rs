@@ -143,8 +143,7 @@ pub(super) fn list_marker_tab_overrun(
     let Some(marker) = visible_marker(attrs) else {
         return Ok(0.0);
     };
-    let (natural_width, size_px) =
-        marker_text_width(store, input, attrs, marker, |_, _, _, _| {})?;
+    let (natural_width, size_px) = marker_text_width(store, input, attrs, marker, |_, _, _, _| {})?;
     let marker_end_px = indent_left - hanging + natural_width;
     if marker_end_px <= indent_left {
         return Ok(0.0);

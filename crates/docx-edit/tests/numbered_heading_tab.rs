@@ -170,7 +170,8 @@ fn render(heading: Heading) -> Geometry {
         let mut request = region_layout_request(&package, 0.0);
         request["measurement"] = measurement(&package);
         request["measurement"]["fontChains"] = font_chains.clone();
-        request["measurement"]["defaults"] = json!({"fontFamily": "Liberation Sans", "fontSize": 16});
+        request["measurement"]["defaults"] =
+            json!({"fontFamily": "Liberation Sans", "fontSize": 16});
         let engine = EngineSession::new(79102);
         seed_from_docx(engine.doc(), &bytes).unwrap();
         let output = engine
@@ -250,7 +251,10 @@ fn render(heading: Heading) -> Geometry {
 }
 
 fn near(actual: f64, expected: f64, name: &str) {
-    assert!((actual - expected).abs() < 0.5, "{name}: {actual} vs {expected}");
+    assert!(
+        (actual - expected).abs() < 0.5,
+        "{name}: {actual} vs {expected}"
+    );
 }
 
 fn assert_ltr_positions(heading: Heading, geometry: Geometry) {
@@ -264,8 +268,16 @@ fn assert_ltr_positions(heading: Heading, geometry: Geometry) {
         _ if heading.hanging > 0 && left > number_end => left,
         _ => ((number_end / DEFAULT_TAB).floor() + 1.0) * DEFAULT_TAB,
     };
-    assert_eq!(geometry.marker_x, geometry.fragment_x + first, "marker origin");
-    near(geometry.text_x, geometry.fragment_x + text_start, "text origin");
+    assert_eq!(
+        geometry.marker_x,
+        geometry.fragment_x + first,
+        "marker origin"
+    );
+    near(
+        geometry.text_x,
+        geometry.fragment_x + text_start,
+        "text origin",
+    );
     assert!(
         geometry.text_x + 0.001 >= geometry.marker_x + geometry.marker_width,
         "text at {} overlaps number ending at {}",

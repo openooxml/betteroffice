@@ -8595,7 +8595,11 @@ fn emit_line<'a>(
             prims.push(Primitive::Text(TextRunPrimitive {
                 text: String::new(),
                 paint_text: None,
-                x: px(if inline_marker.is_some() { pen_x } else { echo_x }),
+                x: px(if inline_marker.is_some() {
+                    pen_x
+                } else {
+                    echo_x
+                }),
                 baseline_y: px(baseline),
                 width: px(0.0),
                 paint_clip: None,
@@ -9319,11 +9323,19 @@ fn emit_inline_list_marker_glyphs(
     attrs: &DocAttrs,
     color: &str,
 ) -> bool {
-    let Some(shape) = marker.shape.as_deref().filter(|shape| !shape.runs.is_empty()) else {
+    let Some(shape) = marker
+        .shape
+        .as_deref()
+        .filter(|shape| !shape.runs.is_empty())
+    else {
         return false;
     };
     let font_id = ooxml_text::FontId::from_u32;
-    if shape.runs.iter().any(|run| store.metrics(font_id(run.font_id)).is_err()) {
+    if shape
+        .runs
+        .iter()
+        .any(|run| store.metrics(font_id(run.font_id)).is_err())
+    {
         return false;
     }
     let levels: Vec<_> = shape.runs.iter().map(|run| run.level).collect();
@@ -9364,7 +9376,10 @@ fn emit_inline_list_marker_glyphs(
             attrs.clone(),
             &None,
         );
-        primitive.attrs.font_features.clone_from(&attrs.font_features);
+        primitive
+            .attrs
+            .font_features
+            .clone_from(&attrs.font_features);
         prims.push(Primitive::GlyphRun(primitive));
     }
     true

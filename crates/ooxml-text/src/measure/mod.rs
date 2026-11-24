@@ -595,11 +595,15 @@ pub fn min_content_width_typed(
     let insets = line_insets(store, request, f32::INFINITY)?;
     let prepared = prepare::prepare_runs(store, request)?;
     let (widest, first) = line_filler::unbreakable_spans(&prepared, runs);
-    let marker_advance = insets.inline_list_marker.map_or(0.0, |marker| marker.advance);
-    Ok((insets.left
-        + insets.right
-        + widest.max(first + insets.first_line_offset + marker_advance))
-    .max(0.0))
+    let marker_advance = insets
+        .inline_list_marker
+        .map_or(0.0, |marker| marker.advance);
+    Ok(
+        (insets.left
+            + insets.right
+            + widest.max(first + insets.first_line_offset + marker_advance))
+        .max(0.0),
+    )
 }
 
 /// JSON boundary: a [`MeasureInput`] envelope in, a serialized
