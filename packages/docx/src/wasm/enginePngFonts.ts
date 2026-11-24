@@ -1,5 +1,7 @@
 import type { BundledFontFace } from '@betteroffice/fonts';
+import { isImplicitFontCdnError, reportImplicitCdnFailure } from '../../../../shared/fontCdnDiagnostics';
 import { importFonts } from '../../../../shared/office-session/fontModules';
+import { ImplicitFontAbsentError } from '../layout/measure/defaultFontProvider';
 import type { BundledFontLoader, BundledFontProvider } from '../layout/measure/fontRegistry';
 import { fontUnavailable } from '../layout/render/png';
 
@@ -67,6 +69,10 @@ export function recordFaceLoads(
           try {
             return await load();
           } catch (error) {
+            if (isImplicitFontCdnError(error) && error.diagnostic.pack !== 'latin') {
+              reportImplicitCdnFailure(error);
+              throw new ImplicitFontAbsentError(resolved().family);
+            }
             if (!fonts.isMissingFontAddon(error)) {
               failures.push({ ...resolved(), reason: error instanceof Error ? error.message : String(error) });
             }

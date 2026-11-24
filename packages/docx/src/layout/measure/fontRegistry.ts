@@ -7,7 +7,7 @@ export interface ProgressiveFontFace {
 }
 
 import { baseLatinAlias, baseLatinCandidate, coverageFromBits, symbolFamily, wordsCoverage, type FontCoverage } from './fontCoverage';
-import { isImplicitFontProvider } from './defaultFontProvider';
+import { ImplicitFontAbsentError, isImplicitFontProvider } from './defaultFontProvider';
 import { isImplicitFontCdnError, reportImplicitCdnFailure } from '../../../../../shared/fontCdnDiagnostics';
 
 const standInKey = Symbol.for('@betteroffice/docx/standInFamily');
@@ -853,6 +853,7 @@ export class TextMeasureFontRegistry {
           return this.measuredAs(base, loader.measureAs ?? family);
         } catch (error) {
           if (isImplicitFontCdnError(error)) throw error;
+          if (error instanceof ImplicitFontAbsentError) return null;
           this.warnFailure(
             `[fontRegistry] bundled face for "${family}" failed to load or register; ` +
               `falling back: ${error instanceof Error ? error.message : String(error)}`
@@ -883,6 +884,7 @@ export class TextMeasureFontRegistry {
           return this.measuredAs(await this.registerLoader(loader), family);
         } catch (error) {
           if (isImplicitFontCdnError(error)) throw error;
+          if (error instanceof ImplicitFontAbsentError) return null;
           this.warnFailure(
             `[fontRegistry] last-resort base face for "${family}" failed to load or register; ` +
               'falling back'
@@ -924,7 +926,7 @@ export class TextMeasureFontRegistry {
             id = await this.registerFaceLoader(loader, script);
           } catch (error) {
             retryable = true;
-            if (!isImplicitFontCdnError(error)) this.warnFailure(
+            if (!isImplicitFontCdnError(error) && !(error instanceof ImplicitFontAbsentError)) this.warnFailure(
               `[fontRegistry] script-fallback face for "${script}" failed to load or register; ` +
                 `falling back: ${error instanceof Error ? error.message : String(error)}`
             );
