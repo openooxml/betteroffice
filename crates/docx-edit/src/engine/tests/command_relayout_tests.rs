@@ -415,6 +415,28 @@ fn objects_package(objects: &[&str]) -> Vec<u8> {
                 cell(para(&id(2), &run("A right cell long enough to wrap"))),
             );
         }
+        if objects.contains(&"rich table") {
+            let nested = format!(
+                r#"<w:tbl><w:tblPr><w:tblW w:w="1200" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="1200"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="1200" w:type="dxa"/></w:tcPr>{}</w:tc></w:tr></w:tbl>"#,
+                para(&id(9), &run("Nested cell")),
+            );
+            body += &format!(
+                r#"<w:tbl><w:tblPr><w:tblW w:w="3000" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="1500"/><w:gridCol w:w="1500"/></w:tblGrid><w:tr>{}{}</w:tr></w:tbl>"#,
+                cell(para(
+                    &id(7),
+                    &format!(
+                        r#"{}<w:r><w:tab/></w:r>{}<w:r><w:br/></w:r>{}<w:fldSimple w:instr="PAGE"><w:r><w:t>1</w:t></w:r></w:fldSimple>"#,
+                        run("Tab"),
+                        run("then a break"),
+                        run("page "),
+                    ),
+                )),
+                cell(format!(
+                    "{nested}{}",
+                    para(&id(8), &run("After the nested table"))
+                )),
+            );
+        }
         if objects.contains(&"image") {
             body += &para(
                 &id(3),
@@ -862,6 +884,93 @@ fn typing_moves_unchanged_tables_instead_of_copying_them() {
                 );
                 host.assert_matches_cold(&label);
             }
+        }
+    }
+}
+
+/// The walk moves tables whose cells hold tab, line break and field runs and a nested table too,
+/// and each moved table takes every position of the table lowered now (test builds compare the
+/// two field for field), so the layout stays the one a full recompute builds.
+#[test]
+fn typing_moves_unchanged_tables_with_tabs_breaks_fields_and_nested_tables() {
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+    fn kinds(block: &LayoutBlock, found: &mut std::collections::BTreeSet<&'static str>) {
+        match block {
+            LayoutBlock::Table(table) => {
+                for block in table
+                    .rows
+                    .iter()
+                    .flat_map(|row| &row.cells)
+                    .flat_map(|cell| &cell.blocks)
+                {
+                    if matches!(block, LayoutBlock::Table(_)) {
+                        found.insert("nested table");
+                    }
+                    kinds(block, found);
+                }
+            }
+            LayoutBlock::Paragraph(paragraph) => {
+                for run in &paragraph.runs {
+                    found.insert(match run {
+                        Run::Text(_) => "text",
+                        Run::Tab(_) => "tab",
+                        Run::LineBreak(_) => "line break",
+                        Run::Field(_) => "field",
+                        _ => "other",
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    let engine = objects_engine(9742, &["rich table"]);
+    let mut host = CommandHost::open_with(&engine, small_page_request(font))
+        .seeded(9742, objects_package(&["rich table"]));
+    let tables: Vec<LayoutBlock> = engine
+        .pagination
+        .borrow()
+        .input
+        .as_ref()
+        .unwrap()
+        .measured
+        .iter()
+        .filter(|measured| matches!(measured.block, LayoutBlock::Table(_)))
+        .map(|measured| measured.block.clone())
+        .collect();
+    assert_eq!(tables.len(), 3);
+    for table in &tables {
+        assert!(positions_adoptable(table));
+        let mut found = std::collections::BTreeSet::new();
+        kinds(table, &mut found);
+        assert_eq!(
+            found,
+            std::collections::BTreeSet::from([
+                "field",
+                "line break",
+                "nested table",
+                "tab",
+                "text"
+            ])
+        );
+    }
+    for (place, paragraph) in [("ahead", 2), ("between", 8), ("after", 11)] {
+        let end = paragraph_end(&engine, paragraph);
+        for (key, start, end, text) in [
+            ("x", end, end, Some("x")),
+            ("y", end + 1, end + 1, Some("y")),
+            ("backspace", end + 1, end + 2, None),
+        ] {
+            let label = format!("{place}: {key}");
+            PLAIN_WALK_REUSE.with(|reuse| reuse.set((0, 0)));
+            assert!(host.command("body", start, end, text), "{label}");
+            assert_eq!(
+                PLAIN_WALK_REUSE.with(Cell::get),
+                (0, tables.len() as u64),
+                "{label}: (copied, moved) tables"
+            );
+            host.assert_matches_cold(&label);
         }
     }
 }
