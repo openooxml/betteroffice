@@ -354,6 +354,7 @@ export async function exportFaces(
     let bytes: ArrayBuffer;
     try { bytes = await load(); }
     catch (error) {
+      if (face.script && face.script !== 'arabic' && face.script !== 'hebrew' && bundled.isMissingFontAddon(error)) continue;
       if (isImplicitFontCdnError(error) && (error.diagnostic.pack === 'cjk' || error.diagnostic.pack === 'intl')) {
         if (!reported.has(error)) {
           reported.add(error);
