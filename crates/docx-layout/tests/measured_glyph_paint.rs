@@ -147,7 +147,9 @@ fn bold_calibri_light_heading_uses_carlito_bold_advances() {
     let runs = ooxml_text::unpack_glyph_runs(lines[0]["glyphRuns"].as_str().unwrap()).unwrap();
     assert_eq!(runs.len(), 1);
     assert_eq!(
-        store.byte_owner(FontId::from_u32(runs[0].head.font_id)).unwrap(),
+        store
+            .byte_owner(FontId::from_u32(runs[0].head.font_id))
+            .unwrap(),
         bold
     );
     let width_with = |id| {
