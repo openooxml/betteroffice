@@ -1,5 +1,5 @@
 import { editCharts, listCharts, readChartText, type XlsxChartEdit, type XlsxChartTextRead } from './xlsx-charts';
-import type { WorkbookHandle, XlsxCellRead, XlsxEditStep } from '@betteroffice/xlsx';
+import { translateFormulasOn, type WorkbookHandle, type XlsxCellRead, type XlsxEditStep } from '@betteroffice/xlsx';
 import { engines } from '#agents-engines';
 import type { WorkbookEditPeer } from '@betteroffice/xlsx/worker';
 import { DocumentToolError, type GrepOptions, type TextEdit } from './types';
@@ -11,6 +11,18 @@ export interface XlsxOptions extends PrototypeOptions { editPeer?: WorkbookEditP
 export interface CellEdit { cell: string; input: string }
 export interface CellChange { ref: string; sheet: string; a1: string; before: XlsxCellRead; input: string }
 interface CellTarget { sheet: string; a1: string; before: XlsxCellRead; version: string }
+type FormulaMoves = Parameters<typeof translateFormulasOn>[1];
+
+function translateAttachedFormulas(handle: WorkbookHandle, items: FormulaMoves) {
+  for (const translate of new Set([engines.getIfLoaded('xlsx')?.module.translateFormulasOn, translateFormulasOn])) {
+    if (!translate) continue;
+    try { return translate(handle, items); }
+    catch (error) {
+      if (!(error instanceof TypeError) || error.message !== 'translateFormulasOn needs a workbook this package opened') throw error;
+    }
+  }
+  throw new DocumentToolError('INVALID_SORT', 'Formulas cannot be moved on this workbook handle.');
+}
 
 export function address(row: number, col: number) {
   let letters = '';
@@ -37,14 +49,14 @@ export class XlsxAgentWorkbook extends PrototypeDocument<CellChange, XlsxEditSte
   private sheetCatalog: Array<{ sheetId: string; name: string }> = [];
   private nextSheet = 0;
 
-  private constructor(readonly handle: WorkbookHandle, readonly name = 'workbook.xlsx', private readonly ownsHandle = true, private readonly editPeer?: WorkbookEditPeer, readonly unproxiedHandle = handle) {
+  private constructor(readonly handle: WorkbookHandle, readonly translateFormulas: (items: FormulaMoves) => ReturnType<typeof translateFormulasOn>, readonly name = 'workbook.xlsx', private readonly ownsHandle = true, private readonly editPeer?: WorkbookEditPeer) {
     super();
     this.catalog();
   }
 
   static attach(handle: WorkbookHandle, options: XlsxOptions = {}) {
     const attached = options.editPeer ? new Proxy(handle, { get: (target, key) => key === 'applyEdits' || key === 'applyOps' || key === 'propose' || key === 'acceptProposal' || key === 'rejectProposal' ? options.editPeer![key] : Reflect.get(target, key) }) : handle;
-    return new XlsxAgentWorkbook(attached, options.name, false, options.editPeer, handle);
+    return new XlsxAgentWorkbook(attached, items => translateAttachedFormulas(handle, items), options.name, false, options.editPeer);
   }
 
   catalog() {
@@ -112,7 +124,8 @@ export class XlsxAgentWorkbook extends PrototypeDocument<CellChange, XlsxEditSte
   static async open(bytes: Uint8Array, options: PrototypeOptions = {}) {
     const engine = await engines.load('xlsx');
     await initialize('xlsx', engine.module.initWasm, options.wasm, engine.native);
-    return new XlsxAgentWorkbook(engine.module.openWorkbook(bytes), options.name);
+    const handle = engine.module.openWorkbook(bytes);
+    return new XlsxAgentWorkbook(handle, items => engine.module.translateFormulasOn(handle, items), options.name);
   }
 
   overview() {

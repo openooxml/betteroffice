@@ -4,20 +4,21 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import type { XlsxCellValue } from '@betteroffice/xlsx';
 import JSZip from 'jszip';
 import { createOfficeMcpServer } from '../src/mcp';
 import type { XlsxAgentWorkbook } from '../src/xlsx';
 import type { XlsxWriteEdit } from '../src/xlsx-operations';
 import { implicitFontWorkbook } from './format-fixtures';
 
-type Call = (name: string, args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+type Call = (name: string, args: Record<string, unknown>, expectError?: boolean) => Promise<Record<string, unknown>>;
 type SortOptions = Omit<Parameters<XlsxAgentWorkbook['sortRange']>[0], 'version'>;
 
 const sales = { sheet: 'Sales', range: 'A1:B4', values: [['Month', 'North'], ['Jan', 100], ['Feb', 110], ['Mar', 120]] };
 const doubled = { sheet: 'Sales', range: 'F2:F4', formulas: [['=B2*2'], ['=B3*2'], ['=B4*2']] };
 const descending = { sheet: 'Sales', range: 'A1:F4', header: true, keys: [{ column: 'B', order: 'desc' }] } satisfies SortOptions;
 
-async function withWorkbook(run: (call: Call) => Promise<void>) {
+async function withWorkbook(run: (call: Call) => Promise<void>, sheetData = '<sheetData/>') {
   const root = await mkdtemp(join(tmpdir(), 'xlsx-sort-formulas-'));
   const client = new Client({ name: 'xlsx-sort-formulas', version: '1' });
   let server: Awaited<ReturnType<typeof createOfficeMcpServer>> | undefined;
@@ -25,19 +26,19 @@ async function withWorkbook(run: (call: Call) => Promise<void>) {
     const zip = await JSZip.loadAsync(await implicitFontWorkbook());
     const sheetPath = 'xl/worksheets/sheet1.xml';
     const sheet = await zip.file(sheetPath)!.async('string');
-    zip.file(sheetPath, sheet.replace(/<sheetData>.*?<\/sheetData>/, '<sheetData/>'));
+    zip.file(sheetPath, sheet.replace(/<sheetData>.*?<\/sheetData>/, () => sheetData));
     await writeFile(join(root, 'book.xlsx'), await zip.generateAsync({ type: 'uint8array' }));
     server = await createOfficeMcpServer({ root, formats: ['xlsx'] });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await server.connect(serverTransport);
     await client.connect(clientTransport);
-    const call: Call = async (name, args) => {
+    const call: Call = async (name, args, expectError = false) => {
       const output = await client.callTool({ name, arguments: args });
-      expect(output.isError, JSON.stringify(output.structuredContent)).not.toBe(true);
+      expect(output.isError === true, JSON.stringify(output.structuredContent)).toBe(expectError);
       return output.structuredContent!;
     };
     const { document } = await call('office_open', { path: 'book.xlsx' });
-    await run((name, args) => call(name, { document, ...args }));
+    await run((name, args, expectError) => call(name, { document, ...args }, expectError));
   } finally {
     await client.close();
     await server?.close();
@@ -57,20 +58,29 @@ async function writeAndSort(call: Call, edits: XlsxWriteEdit[], options: SortOpt
   expect(sorted.applied).toBe(true);
 }
 
+async function expectSortRefused(call: Call, options: SortOptions, message: string) {
+  const before = await readRange(call, options.range, options.sheet);
+  const refused = await call('xlsx_sort', { ...options, version: before.version }, true);
+  expect(refused).toEqual({ code: 'INVALID_SORT', message });
+  const after = await readRange(call, options.range, options.sheet);
+  expect(after.version).toBe(before.version);
+  expect(after.cells.map(({ a1, formula, value }) => ({ a1, formula, value }))).toEqual(before.cells.map(({ a1, formula, value }) => ({ a1, formula, value })));
+}
+
 async function expectValues(call: Call, range: string, expected: (string | number | null)[]) {
   const { cells } = await readRange(call, range);
   expect(cells.map(cell => cell.formula)).toEqual(expected.map(() => null));
-  expect(cells.map(cell => cell.value)).toEqual(expected.map(value => {
+  expect(cells.map(cell => cell.value)).toEqual(expected.map((value): XlsxCellValue => {
     if (value === null) return { kind: 'empty' };
-    return { kind: typeof value === 'number' ? 'number' : 'text', value };
+    return typeof value === 'number' ? { kind: 'number', value } : { kind: 'text', value };
   }));
 }
 
 async function expectFormulas(call: Call, range: string, expected: [string, number | '#REF!'][]) {
   const { cells } = await readRange(call, range);
-  expect(cells.map(({ formula, value }) => ({ formula, value }))).toEqual(expected.map(([formula, value]) => ({
+  expect(cells.map(({ formula, value }) => ({ formula, value }))).toEqual(expected.map(([formula, value]): { formula: string; value: XlsxCellValue } => ({
     formula,
-    value: { kind: typeof value === 'number' ? 'number' : 'error', value },
+    value: typeof value === 'number' ? { kind: 'number', value } : { kind: 'error', value },
   })));
 }
 
@@ -163,3 +173,31 @@ test('XLSX sort emits #REF! when a relative reference moves above row 1', () => 
   await expectFormulas(call, 'F2', [['#REF!', '#REF!']]);
   await expectFormulas(call, 'F4', [['B3', 110]]);
 }));
+
+test.each(['[1]Sheet1!A1', "'[1]Sheet 1'!A1", '[Book.xlsx]Sheet1!A1'])('XLSX sort refuses to translate %s', formula => withWorkbook(async call => {
+  await expectFormulas(call, 'C2', [[formula, 42]]);
+  await expectSortRefused(call, { ...descending, range: 'B2:C3', header: false }, 'Cannot move the formula at C2. It refers to an external workbook.');
+}, `<sheetData><row r="2"><c r="B2"><v>1</v></c><c r="C2"><f>${formula}</f><v>42</v></c></row><row r="3"><c r="B3"><v>2</v></c></row></sheetData>`));
+
+test('XLSX sort ignores external reference syntax inside string literals and structured references', () => withWorkbook(async call => {
+  await writeAndSort(call, [sales, { sheet: 'Sales', range: 'F2:G2', formulas: [['=B2+N("[1]Sheet1!A1")', '=B2+IF(FALSE,Table1[Col],0)']] }], { ...descending, range: 'A1:G4' });
+  const { cells } = await readRange(call, 'F4:G4');
+  expect(cells.map(cell => cell.formula)).toEqual(['B4+N("[1]Sheet1!A1")', 'B4+IF(FALSE,Table1[Col],0)']);
+}));
+
+test('XLSX sort refuses a translation that grows beyond 8192 characters', () => withWorkbook(async call => {
+  const { version } = await readRange(call, 'B9:C10');
+  const written = await call('xlsx_write_range', { version, edits: [
+    { sheet: 'Sales', range: 'B9:B10', values: [[1], [2]] },
+    { sheet: 'Sales', range: 'C9', formulas: [[`=B9${' '.repeat(8188)}+0`]] },
+  ] });
+  expect(written.applied).toBe(true);
+  await expectSortRefused(call, { ...descending, range: 'B9:C10', header: false }, 'Cannot move the formula at C9. The translated formula exceeds 8192 characters.');
+}));
+
+test('XLSX sort reports protected formula cells by their recalculated values', () => withWorkbook(async call => {
+  const { version } = await readRange(call, 'B2:D3');
+  const sorted = await call('xlsx_sort', { ...descending, range: 'B2:D3', header: false, version, protectedSheets: 'allow' });
+  expect(sorted).toMatchObject({ applied: true, protectedCells: ['Sales!B2', 'Sales!D2', 'Sales!B3', 'Sales!D3'] });
+  await expectFormulas(call, 'C2:D3', [['E2', 10], ['B$2', 2], ['E3', 20], ['B$2', 2]]);
+}, '<sheetData><row r="2"><c r="B2"><v>1</v></c><c r="C2"><f>E2</f><v>10</v></c><c r="D2"><f>B$2</f><v>1</v></c><c r="E2"><v>10</v></c></row><row r="3"><c r="B3"><v>2</v></c><c r="C3"><f>E3</f><v>20</v></c><c r="D3"><f>B$2</f><v>1</v></c><c r="E3"><v>20</v></c></row></sheetData><sheetProtection sheet="1"/>'));

@@ -1,4 +1,4 @@
-import { translateFormulasOn, type CellPoint, type RangeStylePatch, type XlsxCellValue, type XlsxEditStep, type XlsxDefinedNameOp, type ConditionalFormatInfo } from '@betteroffice/xlsx';
+import type { CellPoint, RangeStylePatch, XlsxCellValue, XlsxEditStep, XlsxDefinedNameOp, ConditionalFormatInfo } from '@betteroffice/xlsx';
 import { DocumentToolError } from './types';
 import { integer, plainText, textWindow, unwrap } from './prototype';
 import { address, corners, type XlsxAgentWorkbook } from './xlsx';
@@ -442,6 +442,28 @@ function compare(a: XlsxCellValue, b: XlsxCellValue) {
   return String(a.value).toLowerCase().localeCompare(String(b.value).toLowerCase(), 'en');
 }
 
+function hasExternalWorkbookReference(formula: string) {
+  if (!formula.includes('[')) return false;
+  const tokens = /"(?:[^"]|"")*"|'(?:[^']|'')*'!?|\[/gu;
+  const qualifier = /(?<![\p{L}\p{N}_.\\\]])\[[^\[\]]+\][\p{L}\p{N}_.]*(?::[\p{L}\p{N}_.]+)?!/uy;
+  for (let match; (match = tokens.exec(formula));) {
+    const [token] = match;
+    if (token.startsWith("'") && token.endsWith('!') && /\[[^\[\]]+\]/u.test(token)) return true;
+    if (token !== '[') continue;
+    qualifier.lastIndex = match.index;
+    if (qualifier.test(formula)) return true;
+    let end = tokens.lastIndex;
+    for (let depth = 1; end < formula.length && depth; end++) {
+      const char = formula[end];
+      if (char === "'") end++;
+      else if (char === '[') depth++;
+      else if (char === ']') depth--;
+    }
+    tokens.lastIndex = end;
+  }
+  return false;
+}
+
 export function sortXlsx(book: XlsxAgentWorkbook, options: { version: string; sheet: string; range: string; keys: Array<{ column: string; order: 'asc' | 'desc' }>; header?: boolean } & XlsxProtectionOptions) {
   book.checkVersion(options.version);
   const protection = protectionRequest(book, options);
@@ -480,9 +502,12 @@ export function sortXlsx(book: XlsxAgentWorkbook, options: { version: string; sh
       return { value, formula };
     });
   });
-  if (moves.length) translateFormulasOn(book.unproxiedHandle, moves).forEach((result, index) => {
-    const { from, to } = moves[index];
-    if (!result.ok) throw new DocumentToolError('INVALID_SORT', `Cannot move the formula at ${address(from.row, from.col)}. ${result.error}`);
+  if (moves.length) book.translateFormulas(moves).forEach((result, index) => {
+    const { formula, from, to } = moves[index];
+    const cell = address(from.row, from.col);
+    if (!result.ok) throw new DocumentToolError('INVALID_SORT', `Cannot move the formula at ${cell}. ${result.error}`);
+    if (result.formula.length > 8192 && [...result.formula].length > 8192) throw new DocumentToolError('INVALID_SORT', `Cannot move the formula at ${cell}. The translated formula exceeds 8192 characters.`);
+    if (result.formula !== formula && hasExternalWorkbookReference(formula)) throw new DocumentToolError('INVALID_SORT', `Cannot move the formula at ${cell}. It refers to an external workbook.`);
     sortedCells[to.row - bounds.start.row][to.col - bounds.start.col].formula = result.formula;
   });
   const captured = book.handle.captureFormat(sheet.index, options.range);
@@ -519,14 +544,17 @@ export function sortXlsx(book: XlsxAgentWorkbook, options: { version: string; sh
   if (start < rows.length) ops.push({ type: 'applyRangeFormat', sheet: sheet.index, range: { start: bounds.start, end: bounds.end }, format: sortedFormats });
   let result;
   try { book.checkVersion(options.version); result = book.handle.applyOps(ops); } catch (error) { failure(error); }
-  const afterFormats = options.protectedSheets === 'allow' ? book.handle.captureFormat(sheet.index, options.range).formats : [];
-  const changedProtectedCells = options.protectedSheets === 'allow' ? protectedCells.filter(cell => {
+  const reportChanges = result.applied && protectedCells.length > 0;
+  const afterFormats = reportChanges ? book.handle.captureFormat(sheet.index, options.range).formats : [];
+  const afterCells = reportChanges ? unwrap(book.handle.readCells({ ranges: [target] })).ranges[0].cells : [];
+  const changedProtectedCells = reportChanges ? protectedCells.filter(cell => {
     const at = corners(cell.slice(cell.lastIndexOf('!') + 1)).start;
     const dest = at.row - bounds.start.row;
     const col = at.col - bounds.start.col;
-    return JSON.stringify({ value: rows[dest][col].value, formula: rows[dest][col].formula }) !== JSON.stringify(sortedCells[dest][col]) || JSON.stringify(captured.formats[dest * bounds.columns + col]) !== JSON.stringify(afterFormats[dest * bounds.columns + col]);
+    const before = rows[dest][col];
+    return before.formula !== sortedCells[dest][col].formula || JSON.stringify(before.value) !== JSON.stringify(afterCells[dest][col].value) || JSON.stringify(captured.formats[dest * bounds.columns + col]) !== JSON.stringify(afterFormats[dest * bounds.columns + col]);
   }) : [];
-  return { ...(options.protectedSheets === 'allow' ? { protectedCells: result.applied ? changedProtectedCells : [] } : {}), baseVersion: options.version, version: book.handle.version(), applied: result.applied, sheet: sheet.sheetId, range: options.range, rows: order.slice(0, 100).map((source, index) => ({ from: bounds.start.row + source + 1, to: bounds.start.row + start + index + 1 })), rowCount: order.length, truncated: order.length > 100, formulaPolicy: 'Formulas move with their rows as they do on paste, shifting relative row references and preserving $-anchored rows.', results: book.readCells({ sheet: sheet.sheetId, range: options.range, limit: 20 }) };
+  return { ...(options.protectedSheets === 'allow' ? { protectedCells: changedProtectedCells } : {}), baseVersion: options.version, version: book.handle.version(), applied: result.applied, sheet: sheet.sheetId, range: options.range, rows: order.slice(0, 100).map((source, index) => ({ from: bounds.start.row + source + 1, to: bounds.start.row + start + index + 1 })), rowCount: order.length, truncated: order.length > 100, formulaPolicy: 'Formulas move with their rows as they do on paste, shifting relative row references and preserving $-anchored rows.', results: book.readCells({ sheet: sheet.sheetId, range: options.range, limit: 20 }) };
 }
 
 export async function previewXlsx(book: XlsxAgentWorkbook, options: { sheet: string; range: string; scale?: number }) {
