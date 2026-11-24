@@ -86,8 +86,8 @@ describe('resolution', () => {
 
   for (const [family, regular, boldFile] of [
     ['Segoe UI', 'Regular', 'Bold'],
-    ['Segoe UI Light', 'Light', 'Light'],
-    ['Segoe UI Semilight', 'Semilight', 'Semilight'],
+    ['Segoe UI Light', 'Light', 'Bold'],
+    ['Segoe UI Semilight', 'Semilight', 'Bold'],
     ['Segoe UI Semibold', 'Semibold', 'Bold'],
   ]) {
     test(`${family} resolves to Selawik for every upright style`, () => {
@@ -98,6 +98,8 @@ describe('resolution', () => {
         expect(face?.file).toBe(file);
         expect(face?.style).toBe('normal');
         expect(resolveBundledFamilyFace(family, bold, false)?.file).toBe(file);
+        expect(resolveMetricCompatFace(family, bold, true)).toBeUndefined();
+        expect(resolveBundledFamilyFace(family, bold, true)).toBeUndefined();
         for (const office of ['word', 'powerpoint'] as const) {
           const base = resolveMetricCompatFace(office === 'word' ? 'Arial' : 'Calibri', bold, false)!;
           expect(resolveLastResortFace(family, bold, false, office).file).toBe(base.file);
@@ -450,17 +452,17 @@ describe('loading', () => {
     expect(provider.resolveLastResort('Arial', false, false, 'word').onlyIfPrimaryFails).toBe(true);
     expect(provider.resolveLastResort('Segoe UI', false, false, 'word').onlyIfPrimaryFails).toBeUndefined();
     expect(provider.resolveLastResort('Google Sans', false, false).onlyIfPrimaryFails).toBeUndefined();
-    const light = provider.resolveFamily('Segoe UI Light', true, false)!;
+    const boldLight = provider.resolveFamily('Segoe UI Light', true, false)!;
     const fallback = provider.resolveGlyphFallback!('Segoe UI', false, false)!;
     expect(loaded).toEqual([]);
     await provider.resolveLastResort('Google Sans', false, false)();
     expect(loaded).toEqual(['Carlito-Regular.ttf.zst']);
     expect(provider.resolveGlyphFallback!('Google Sans', false, false)).toBeUndefined();
     await regular();
-    await light();
+    await boldLight();
     await fallback();
     expect(loaded).toEqual([
-      'Carlito-Regular.ttf.zst', 'Selawik-Regular.ttf.zst', 'Selawik-Light.ttf.zst', 'Carlito-Regular.ttf.zst',
+      'Carlito-Regular.ttf.zst', 'Selawik-Regular.ttf.zst', 'Selawik-Bold.ttf.zst', 'Carlito-Regular.ttf.zst',
     ]);
     for (const office of ['powerpoint', 'word'] as const) {
       for (const family of ['Segoe UI', 'Segoe UI Light', 'Segoe UI Semilight', 'Segoe UI Semibold', 'Segoe UI Black']) {

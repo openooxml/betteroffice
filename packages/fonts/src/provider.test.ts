@@ -19,7 +19,7 @@ for (const [source, create] of [
         expect(provider.resolveFamily('Liberation Sans', bold, false)).toBe(coverage);
         expect(lastResort.onlyIfPrimaryFails).toBeUndefined();
         expect(provider.resolve(family, bold, false)!.measureAs)
-          .toBe(family === 'Segoe UI Semibold' && bold ? 'Segoe UI' : family);
+          .toBe(bold ? 'Segoe UI' : family);
         expect(coverage).not.toBe(provider.resolveGlyphFallback!(family, bold, false, 'powerpoint'));
         expect(coverage).not.toBe(create().resolveGlyphFallback!(family, bold, false, 'word'));
       });

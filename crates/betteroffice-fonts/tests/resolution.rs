@@ -75,6 +75,33 @@ fn replays_typescript_resolution_cases() {
 }
 
 #[test]
+fn named_segoe_ui_light_faces_follow_the_requested_style() {
+    for (family, regular) in [
+        ("Segoe UI Light", "Selawik-Light.ttf.zst"),
+        ("Segoe UI Semilight", "Selawik-Semilight.ttf.zst"),
+    ] {
+        for (bold, italic, expected) in [
+            (false, false, Some(regular)),
+            (true, false, Some("Selawik-Bold.ttf.zst")),
+            (false, true, None),
+            (true, true, None),
+        ] {
+            let label = format!("{family} bold={bold} italic={italic}");
+            assert_eq!(
+                resolve_metric_compat_face(family, bold, italic).map(|face| face.file.as_str()),
+                expected,
+                "metric-compatible face for {label}"
+            );
+            assert_eq!(
+                resolve_bundled_family_face(family, bold, italic).map(|face| face.file.as_str()),
+                expected,
+                "bundled family face for {label}"
+            );
+        }
+    }
+}
+
+#[test]
 fn light_variants_follow_the_requested_style_of_bold_capable_families() {
     for base in [
         "Calibri",
@@ -97,7 +124,9 @@ fn light_variants_follow_the_requested_style_of_bold_capable_families() {
         "Comic Sans MS",
     ] {
         assert_eq!(
-            resolve_metric_compat_face(base, true, false).unwrap().weight,
+            resolve_metric_compat_face(base, true, false)
+                .unwrap()
+                .weight,
             700
         );
         for suffix in &catalog().lighter_than_regular {

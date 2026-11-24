@@ -68,7 +68,11 @@ pub fn resolve_metric_compat_face(
             return None;
         }
         let key = key(word_family);
-        let target = if bold && key == "segoe ui semibold" {
+        let target = if bold
+            && matches!(
+                key.as_str(),
+                "segoe ui semibold" | "segoe ui light" | "segoe ui semilight"
+            ) {
             "segoe ui"
         } else {
             &key
@@ -169,7 +173,12 @@ pub fn resolve_family_script_fallback_face(
         .or_else(|| resolve_script_fallback_face(script, bold, italic))
 }
 
-fn variant(family: &str, bold: bool, italic: bool, heavy: bool) -> Option<&'static BundledFontFace> {
+fn variant(
+    family: &str,
+    bold: bool,
+    italic: bool,
+    heavy: bool,
+) -> Option<&'static BundledFontFace> {
     let family = family.trim_matches(whitespace);
     if family.ends_with('-') {
         return None;
