@@ -19,38 +19,53 @@ use super::{MeasureError, pt_to_px};
 /// ECMA-376 §17.6.13 default tab stop.
 const DEFAULT_TAB_STOP_TWIPS: f32 = 720.0;
 
-/// Marker footprint in pixels. Zero when the paragraph has no marker text or
-/// the marker is hidden; callers apply it only at zero hanging indent.
-pub(super) fn list_marker_inline_width(
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct InlineListMarker<T> {
+    pub width: T,
+    pub advance: T,
+}
+
+pub(super) fn measure_inline_list_marker(
     store: &FontStore,
     input: &MeasureRequest<'_>,
-    attrs: &AttrsIn,
-) -> Result<f32, MeasureError> {
-    let Some(marker) = visible_marker(attrs) else {
-        return Ok(0.0);
+) -> Result<Option<InlineListMarker<f32>>, MeasureError> {
+    let Some(attrs) = input.block.attrs.as_ref() else {
+        return Ok(None);
     };
-    let (natural_width, size_px) = marker_text_width(store, input, attrs, marker)?;
+    let hanging = attrs.indent.as_ref().and_then(|i| i.hanging);
+    if hanging.unwrap_or(0.0) != 0.0 {
+        return Ok(None);
+    }
+    let Some(marker) = visible_marker(attrs) else {
+        return Ok(None);
+    };
+    let (width, size_px) = marker_text_width(store, input, attrs, marker)?;
+    let space = if attrs.list_marker_suffix.as_deref() == Some("space") {
+        marker_text_width(store, input, attrs, " ")?.0
+    } else {
+        0.0
+    };
+    inline_list_marker(attrs, width, space, size_px).map(Some)
+}
 
-    match attrs.list_marker_suffix.as_deref() {
-        Some("nothing") => return Ok(natural_width),
-        Some("space") => {
-            let (space, _) = marker_text_width(store, input, attrs, " ")?;
-            return Ok(natural_width + space);
+pub fn inline_list_marker(
+    attrs: &AttrsIn,
+    width: f32,
+    space: f32,
+    size_px: f32,
+) -> Result<InlineListMarker<f32>, MeasureError> {
+    let advance = match attrs.list_marker_suffix.as_deref() {
+        Some("nothing") => width,
+        Some("space") => width + space,
+        _ => {
+            let indent = attrs.indent.as_ref();
+            let start = indent.and_then(|i| i.left).unwrap_or(0.0)
+                + indent.and_then(|i| i.first_line).unwrap_or(0.0);
+            marker_tab_stop(attrs, start + width, false)?
+                .map_or(width + size_px * 0.5, |stop| stop - start)
         }
-        _ => {}
-    }
-
-    let indent = attrs.indent.as_ref();
-    let indent_left = indent.and_then(|i| i.left).unwrap_or(0.0);
-    let first_line = indent.and_then(|i| i.first_line).unwrap_or(0.0);
-    let marker_start_px = indent_left + first_line;
-    let marker_end_px = marker_start_px + natural_width;
-    // Default suffix `tab`: body text aligns at the closest stop past the marker end.
-    match marker_tab_stop(attrs, marker_end_px)? {
-        Some(body_start) => Ok(body_start - marker_start_px),
-        // No tab grid at all: half-em visual gap after the marker.
-        None => Ok(natural_width + size_px * 0.5),
-    }
+    };
+    Ok(InlineListMarker { width, advance })
 }
 
 /// Extra first-line indent when a tab-suffixed marker overruns its hanging slot.
@@ -77,7 +92,7 @@ pub(super) fn list_marker_tab_overrun(
         return Ok(0.0);
     }
     let body_start =
-        marker_tab_stop(attrs, marker_end_px)?.unwrap_or(marker_end_px + size_px * 0.5);
+        marker_tab_stop(attrs, marker_end_px, true)?.unwrap_or(marker_end_px + size_px * 0.5);
     let overrun = body_start - indent_left;
     let indent_right = indent.and_then(|i| i.right).unwrap_or(0.0);
     let body_width = input.max_width - indent_left - indent_right;
@@ -143,7 +158,11 @@ fn marker_text_width(
 }
 
 /// Finds the closest marker tab stop, or none when no stops exist.
-fn marker_tab_stop(attrs: &AttrsIn, marker_end_px: f32) -> Result<Option<f32>, MeasureError> {
+fn marker_tab_stop(
+    attrs: &AttrsIn,
+    marker_end_px: f32,
+    include_equal: bool,
+) -> Result<Option<f32>, MeasureError> {
     let first_custom_past = attrs
         .tabs
         .as_deref()
@@ -151,7 +170,7 @@ fn marker_tab_stop(attrs: &AttrsIn, marker_end_px: f32) -> Result<Option<f32>, M
         .iter()
         .filter(|t| t.val != "clear" && t.val != "bar")
         .map(|t| twips_to_px(t.pos))
-        .filter(|&px| px >= marker_end_px)
+        .filter(|&px| px > marker_end_px || (include_equal && px == marker_end_px))
         .fold(None::<f32>, |acc, px| {
             Some(acc.map_or(px, |best| best.min(px)))
         });

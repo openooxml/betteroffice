@@ -134,6 +134,7 @@ pub use input::{
     RunLanguageSlotsIn, SpacingIn, TabStopIn,
 };
 pub use intrinsic::measure_intrinsic_widths;
+pub use list_marker::{InlineListMarker, inline_list_marker};
 pub use packed_glyphs::{
     GlyphRunHead, GlyphRunWriter, MeasuredGlyph, MeasuredGlyphRun, pack_glyph_runs,
     unpack_glyph_runs,
@@ -217,6 +218,8 @@ pub struct TypesetRowOut {
     /// Extra first-line px after a marker overruns its hanging indent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub marker_tab_offset: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inline_list_marker: Option<InlineListMarker<f32>>,
     /// Exact advances for run slices, emitted in visual paint order.
     /// `Some` only under `authoritativeShaping`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -396,6 +399,14 @@ pub fn measure_paragraph_typed(
         .iter()
         .map(|run| run.snap_to_grid != Some(false))
         .collect();
+    let with_inline_marker = |mut extent: ParagraphExtentOut| {
+        if let Some(line) = extent.lines.first_mut() {
+            line.inline_list_marker = list_marker::measure_inline_list_marker(store, request)
+                .ok()
+                .flatten();
+        }
+        extent
+    };
 
     if runs.is_empty() {
         if attrs.is_some_and(|a| a.suppress_empty_paragraph_height) {
@@ -422,7 +433,8 @@ pub fn measure_paragraph_typed(
             &request.compat,
             snap_pitch_px,
             (zones, paragraph_y_offset),
-        );
+        )
+        .map(with_inline_marker);
     }
 
     // ---- single whitespace-only text run measures like an empty paragraph ----
@@ -447,7 +459,8 @@ pub fn measure_paragraph_typed(
             &request.compat,
             snap_pitch_px,
             (zones, paragraph_y_offset),
-        );
+        )
+        .map(with_inline_marker);
     }
 
     let insets = line_insets(store, request)?;
@@ -469,8 +482,8 @@ pub fn measure_paragraph_typed(
         .map(|font| (font, mark_size_pt));
 
     let body_width = (request.max_width - insets.left - insets.right).max(1.0);
-    let first_line_width =
-        (body_width - insets.first_line_offset - insets.marker_inline_width).max(1.0);
+    let marker_advance = insets.inline_list_marker.map_or(0.0, |marker| marker.advance);
+    let first_line_width = (body_width - insets.first_line_offset - marker_advance).max(1.0);
 
     let mut extent = line_filler::fill(line_filler::FillParams {
         space_shrink_limit,
@@ -486,17 +499,18 @@ pub fn measure_paragraph_typed(
         compat: &request.compat,
         tabs: attrs.and_then(|a| a.tabs.as_deref()).unwrap_or(&[]),
         indent_left_px: insets.left,
-        first_line_offset_px: insets.first_line_offset,
+        first_line_offset_px: insets.first_line_offset + marker_advance,
         zones,
         paragraph_y_offset,
         authoritative_shaping: request.authoritative_shaping,
         snap_pitch_px,
         run_snaps: &run_snaps,
     })?;
-    if insets.marker_tab_overrun > 0.0
-        && let Some(line) = extent.lines.first_mut()
-    {
-        line.marker_tab_offset = Some(insets.marker_tab_overrun);
+    if let Some(line) = extent.lines.first_mut() {
+        if insets.marker_tab_overrun > 0.0 {
+            line.marker_tab_offset = Some(insets.marker_tab_overrun);
+        }
+        line.inline_list_marker = insets.inline_list_marker;
     }
     Ok(extent)
 }
@@ -507,8 +521,7 @@ struct LineInsets {
     right: f32,
     /// Offset of the first line's text from the left indent.
     first_line_offset: f32,
-    /// Width an inline (zero-hanging) list marker takes from the first line.
-    marker_inline_width: f32,
+    inline_list_marker: Option<InlineListMarker<f32>>,
     marker_tab_overrun: f32,
 }
 
@@ -519,11 +532,7 @@ fn line_insets(
     let attrs = request.block.attrs.as_ref();
     let indent = attrs.and_then(|a| a.indent.as_ref());
     let hanging = indent.and_then(|i| i.hanging).unwrap_or(0.0);
-    // Visible markers consume width only at zero hanging.
-    let marker_inline_width = match attrs {
-        Some(a) if hanging == 0.0 => list_marker::list_marker_inline_width(store, request, a)?,
-        _ => 0.0,
-    };
+    let inline_list_marker = list_marker::measure_inline_list_marker(store, request)?;
     let visible_marker = attrs.is_some_and(|a| {
         !a.list_marker_hidden
             && a.list_marker
@@ -545,7 +554,7 @@ fn line_insets(
         left: indent.and_then(|i| i.left).unwrap_or(0.0),
         right: indent.and_then(|i| i.right).unwrap_or(0.0),
         first_line_offset,
-        marker_inline_width,
+        inline_list_marker,
         marker_tab_overrun,
     })
 }
@@ -612,6 +621,7 @@ fn zero_row() -> TypesetRowOut {
         segments: None,
         float_skip_before: None,
         marker_tab_offset: None,
+        inline_list_marker: None,
         run_advances: None,
         cluster_advances: None,
         bidi_slices: None,

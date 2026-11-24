@@ -3160,6 +3160,8 @@ pub(crate) struct LineIn {
     #[serde(default)]
     marker_tab_offset: Option<f64>,
     #[serde(default)]
+    inline_list_marker: Option<ooxml_text::measure::InlineListMarker<f64>>,
+    #[serde(default)]
     run_advances: Vec<TypesetRunAdvanceIn>,
     #[serde(default)]
     cluster_advances: Vec<TypesetClusterAdvanceIn>,
@@ -7101,7 +7103,6 @@ pub(crate) fn emit_paragraph_fragment(
     let total_lines = measure.lines.len();
     let carried_from_prev = frag.carried_from_prev == Some(true);
     let alignment = attrs.and_then(|a| a.alignment.as_deref());
-    // A visible list marker occupies the first-line hanging indent.
     let has_list_marker = attrs
         .and_then(|a| a.list_marker.as_deref())
         .is_some_and(|m| !m.is_empty())
@@ -7361,7 +7362,7 @@ struct LineGeom<'a> {
     is_rtl: bool,
     alignment: Option<&'a str>,
     frag_pm_start: Option<i64>,
-    /// Whether the first line reserves the hanging indent for a list marker.
+    /// Whether the paragraph has a visible list marker.
     has_list_marker: bool,
     /// A trailing explicit line break allows the closing line to justify.
     para_ends_with_line_break: bool,
@@ -7746,13 +7747,16 @@ pub(crate) fn line_text_insets(
     first_line: f64,
     is_first_line: bool,
     has_list_marker: bool,
-    overrun: f64,
+    marker_advance: f64,
 ) -> (f64, f64) {
+    if is_first_line && has_list_marker && hanging == 0.0 {
+        return (indent_left, first_line + marker_advance);
+    }
     if indent_left < 0.0 || hanging < 0.0 || first_line < 0.0 {
         let text_indent = if !is_first_line {
             0.0
         } else if has_list_marker && hanging > 0.0 {
-            overrun
+            marker_advance
         } else {
             first_line - hanging
         };
@@ -7765,7 +7769,7 @@ pub(crate) fn line_text_insets(
     if is_first_line {
         if indent_left > 0.0 && has_hanging {
             text_indent = if has_list_marker {
-                (hanging - indent_left).max(0.0) + overrun
+                (hanging - indent_left).max(0.0) + marker_advance
             } else {
                 -hanging
             };
@@ -7821,31 +7825,40 @@ fn emit_line<'a>(
         .map(|items| items.iter().map(LinePaintItem::width).sum::<f64>());
 
     // The first line carries the hanging or first-line shift.
-    let has_hanging = geom.hanging > 0.0;
     let overrun = if geom.is_first_line
         && geom.has_list_marker
         && geom.indent_left > 0.0
-        && has_hanging
+        && geom.hanging > 0.0
         && !geom.is_rtl
     {
         line.marker_tab_offset.unwrap_or(0.0)
     } else {
         0.0
     };
+    let inline_marker = line
+        .inline_list_marker
+        .filter(|_| geom.is_first_line && geom.has_list_marker && geom.hanging == 0.0);
+    let inline_advance = inline_marker.map_or(0.0, |marker| marker.advance);
+    let rtl_inline = geom.is_rtl && inline_marker.is_some();
     let (pad_left, text_indent) = line_text_insets(
         geom.indent_left,
         geom.hanging,
-        geom.first_line,
+        if rtl_inline { 0.0 } else { geom.first_line },
         geom.is_first_line,
         geom.has_list_marker,
-        overrun,
+        if rtl_inline { 0.0 } else { overrun + inline_advance },
     );
 
     let left_offset = line.left_offset.unwrap_or(0.0);
     let right_offset = line.right_offset.unwrap_or(0.0);
-    let usable_width =
-        (geom.frag_width - pad_left - text_indent - geom.indent_right - left_offset - right_offset)
-            .max(0.0);
+    let trailing_indent = if rtl_inline {
+        geom.indent_right + geom.first_line + inline_advance
+    } else {
+        geom.indent_right
+    };
+    let available_width =
+        geom.frag_width - pad_left - text_indent - trailing_indent - left_offset - right_offset;
+    let usable_width = available_width.max(0.0);
 
     // distribute the measured line width over runs whose advance we don't know
     // individually: fixed-width runs (tabs, inline images) subtract first, the
@@ -7919,7 +7932,9 @@ fn emit_line<'a>(
         _ => 0.0,
     };
     // suppress the stretch shift on the paragraph's un-stretched closing line
-    let align_shift = if geom.alignment == Some("justify") && !geom.is_last_line {
+    let align_shift = if rtl_inline {
+        align_shift.min(available_width - effective_line_width)
+    } else if geom.alignment == Some("justify") && !geom.is_last_line {
         0.0
     } else {
         align_shift
@@ -7933,8 +7948,7 @@ fn emit_line<'a>(
     let baseline = geom.line_top + line.ascent;
 
     // Numbering is not part of the story text, so materialize the precomputed
-    // marker as its own first-line primitive. The hanging-indent slot is its
-    // authoritative horizontal extent; body text already begins after it.
+    // marker as its own first-line primitive.
     if geom.is_first_line
         && let Some(marker) = attrs
             .and_then(|attrs| attrs.list_marker.as_deref())
@@ -7944,22 +7958,41 @@ fn emit_line<'a>(
         let mut marker_format = RunFormattingIn::default();
         marker_format.bold = attrs.and_then(|attrs| attrs.list_marker_bold);
         marker_format.italic = attrs.and_then(|attrs| attrs.list_marker_italic);
+        let first_text = inline_marker.and_then(|_| {
+            block.runs.iter().find_map(|run| match run {
+                RunIn::Text(text) => Some(&text.fmt),
+                _ => None,
+            })
+        });
         marker_format.font_family = attrs.and_then(|attrs| {
             attrs
                 .list_marker_font_family
                 .clone()
+                .or_else(|| first_text.and_then(|fmt| fmt.font_family.clone()))
                 .or_else(|| attrs.default_font_family.clone())
         });
-        marker_format.font_size =
-            attrs.and_then(|attrs| attrs.list_marker_font_size.or(attrs.default_font_size));
-        let slot_width = if overrun > 0.0 {
+        marker_format.font_size = attrs.and_then(|attrs| {
+            attrs
+                .list_marker_font_size
+                .or_else(|| first_text.and_then(|fmt| fmt.font_size))
+                .or(attrs.default_font_size)
+        });
+        let slot_width = if let Some(marker) = inline_marker {
+            marker.advance
+        } else if overrun > 0.0 {
             geom.hanging + overrun
         } else if geom.hanging > 0.0 {
             geom.hanging
         } else {
             font_px_of(&marker_format)
         };
-        let marker_x = if geom.is_rtl {
+        let marker_x = if let Some(marker) = inline_marker {
+            if geom.is_rtl {
+                geom.frag_x + geom.frag_width - geom.indent_right - geom.first_line - marker.width
+            } else {
+                geom.frag_x + geom.indent_left + geom.first_line
+            }
+        } else if geom.is_rtl {
             pen_x + effective_line_width
         } else {
             pen_x - slot_width
@@ -8532,7 +8565,7 @@ fn emit_line<'a>(
             prims.push(Primitive::Text(TextRunPrimitive {
                 text: String::new(),
                 paint_text: None,
-                x: px(geom.frag_x + pad_left + text_indent + left_offset),
+                x: px(if rtl_inline { pen_x } else { echo_x }),
                 baseline_y: px(baseline),
                 width: px(0.0),
                 paint_clip: None,

@@ -124,6 +124,16 @@ impl ListState {
             .first_picture_bullet
             .as_ref()
     }
+
+    pub(crate) fn level_tabs(
+        &self,
+        values: &BTreeMap<String, Any>,
+    ) -> Option<Vec<docx_parse::TabStop>> {
+        let ListIdentity::Source { num_id, level } = resolve_list_identity(values)? else {
+            return None;
+        };
+        self.numbering.as_ref()?.get_level(num_id, level)?.p_pr?.tabs
+    }
 }
 
 /// The level a numbering property names, when it is one of the nine OOXML defines.
