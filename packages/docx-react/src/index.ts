@@ -100,6 +100,7 @@ export {
   type TitleBarRightProps,
   type ToolbarProps,
   type ToolbarReviewControlsProps,
+  type InsertMenuProps,
 } from './components/EditorToolbar';
 export {
   ToolbarButton,

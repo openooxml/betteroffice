@@ -17,6 +17,7 @@ export function CompactToolbar({ onShare }: { onShare(): void }) {
           <ToolbarCommandButton id="bold" />
         </ToolbarGroup>
         <ToolbarCommandButton id="undo" />
+        <EditorToolbar.InsertMenu />
         <EditorToolbar.Review />
         <ToolbarButton title="Copy link" onClick={onShare}>
           Copy link

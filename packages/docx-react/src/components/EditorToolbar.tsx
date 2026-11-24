@@ -15,6 +15,9 @@
  *     <EditorToolbar.Toolbar />
  *   </EditorToolbar>
  *
+ * A custom rail composes parts, e.g.
+ * `<EditorToolbar.Toolbar><EditorToolbar.InsertMenu />…</EditorToolbar.Toolbar>`.
+ *
  * Rendered outside `DocxEditor` (under a `DocxCommandProvider`), it supplies
  * its own styling root and locale, and its keyboard shortcuts reach the editor.
  */
@@ -30,6 +33,7 @@ import { TitleBar, Logo, DocumentName, MenuBar, TitleBarRight } from './TitleBar
 import type { TitleBarProps, LogoProps, DocumentNameProps, TitleBarRightProps } from './TitleBar';
 import { Toolbar, type ToolbarProps } from './Toolbar';
 import { ToolbarReviewControls, type ToolbarReviewControlsProps } from './toolbar/ToolbarReviewControls';
+import { InsertMenu, type InsertMenuProps } from './InsertMenu';
 import { useIsDark } from './DocxEditor/hooks/useIsDark';
 import { cn } from '../lib/utils';
 import { Z_INDEX } from '../styles/zIndex';
@@ -55,6 +59,7 @@ interface EditorToolbarComponent {
   TitleBarRight: typeof TitleBarRight;
   Toolbar: typeof Toolbar;
   Review: typeof ToolbarReviewControls;
+  InsertMenu: (props: InsertMenuProps) => React.JSX.Element;
 }
 
 function ExternalChrome({
@@ -112,6 +117,7 @@ EditorToolbar.MenuBar = MenuBar;
 EditorToolbar.TitleBarRight = TitleBarRight;
 EditorToolbar.Toolbar = Toolbar;
 EditorToolbar.Review = ToolbarReviewControls;
+EditorToolbar.InsertMenu = InsertMenu;
 
 export { EditorToolbar };
 export type {
@@ -121,4 +127,5 @@ export type {
   TitleBarRightProps,
   ToolbarProps,
   ToolbarReviewControlsProps,
+  InsertMenuProps,
 };
