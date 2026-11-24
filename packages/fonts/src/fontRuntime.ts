@@ -282,7 +282,7 @@ export function createFontRuntime(lookup: FontPackLookup, {
         if (implicitCdnFace && optional) substitutedCdnFaces.add(implicitCdnFace);
         return bytes;
       }
-      if (runtime?.strict) throw error;
+      if (runtime?.strict === true) throw error;
       if (error instanceof MissingCjkAddonError || error instanceof MissingIntlAddonError) {
         return substituteFontBytes(face, packed, runtime, true);
       }
