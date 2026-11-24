@@ -724,8 +724,9 @@ function lightVariantOf(
     return undefined;
   }
   const base = words.slice(0, -1).join(' ');
-  const face = resolveMetricCompatFace(base, bold, italic);
-  return face && (!bold || face.weight === 700) ? face : resolveMetricCompatFace(base, false, italic);
+  const ownBold = bold && resolveMetricCompatFamily(base) !== 'Selawik';
+  const face = resolveMetricCompatFace(base, ownBold, italic);
+  return face && (!ownBold || face.weight === 700) ? face : resolveMetricCompatFace(base, false, italic);
 }
 
 /**
@@ -844,6 +845,7 @@ function resolveBaseFace(
 ): BundledFontFace {
   const light = lightVariantOf(family, bold, italic);
   if (light && (!excludeSelawik || light.family !== 'Selawik')) return light;
+  if (light) bold = false;
   const heavy = heavyVariantOf(family, italic);
   if (heavy && (!excludeSelawik || heavy.family !== 'Selawik')) return heavy;
   if (EMULATED_SYMBOL_FAMILIES.has(family.trim().toLowerCase())) {

@@ -99,7 +99,8 @@ describe('resolution', () => {
         expect(face?.style).toBe('normal');
         expect(resolveBundledFamilyFace(family, bold, false)?.file).toBe(file);
         for (const office of ['word', 'powerpoint'] as const) {
-          const base = resolveMetricCompatFace(office === 'word' ? 'Arial' : 'Calibri', bold, false)!;
+          const coverageBold = / (Light|Semilight)$/.test(family) ? false : bold;
+          const base = resolveMetricCompatFace(office === 'word' ? 'Arial' : 'Calibri', coverageBold, false)!;
           expect(resolveLastResortFace(family, bold, false, office).file).toBe(base.file);
           expect(resolveGlyphFallbackFace(family, bold, false, office)?.file).toBe(base.file);
         }
@@ -165,7 +166,7 @@ describe('resolution', () => {
   });
 
   for (const base of [
-    'Calibri', 'Segoe UI', 'Segoe UI Semibold', 'Cambria', 'Arial', 'Times New Roman',
+    'Calibri', 'Cambria', 'Arial', 'Times New Roman',
     'Courier New', 'Georgia', 'Inter', 'Roboto', 'Source Sans Pro', 'DM Sans',
     'Open Sans', 'Montserrat', 'Poppins', 'Oswald', 'Heebo', 'Comic Sans MS',
   ]) {
@@ -173,13 +174,12 @@ describe('resolution', () => {
       expect(resolveMetricCompatFace(base, true, false)?.weight).toBe(700);
       for (const suffix of LIGHT_SUFFIXES) {
         const family = `${base} ${suffix}`;
-        const namedSelawik = family === 'Segoe UI Light' || family === 'Segoe UI Semilight';
         for (const [bold, italic] of [[true, false], [true, true], [false, false], [false, true]]) {
           const expected = resolveMetricCompatFace(base, bold, italic);
           expect(resolveLightVariantFace(family, bold, italic)).toBe(expected);
           for (const office of ['word', 'powerpoint'] as const) {
             const sans = office === 'word' ? 'Arial' : 'Calibri';
-            const face = (namedSelawik ? undefined : expected) ?? resolveMetricCompatFace(sans, bold, italic)!;
+            const face = expected ?? resolveMetricCompatFace(sans, bold, italic)!;
             expect(resolveLastResortFace(family, bold, italic, office)).toBe(face);
             expect(resolveLastResortChoice(family, bold, italic, office)).toEqual({ face, onlyIfPrimaryFails: false });
           }
@@ -206,6 +206,16 @@ describe('resolution', () => {
       }
     });
   }
+
+  test('lighter members of Segoe UI keep their light faces when bold', () => {
+    for (const base of ['Segoe UI', 'Segoe UI Semibold']) {
+      for (const suffix of LIGHT_SUFFIXES) {
+        for (const italic of [false, true]) {
+          expect(resolveLightVariantFace(`${base} ${suffix}`, true, italic)).toBe(resolveMetricCompatFace(base, false, italic));
+        }
+      }
+    }
+  });
 
   test('Word substitutes Arial for an unknown sans family, PowerPoint Calibri', () => {
     expect(resolveLastResortFace('Lato', false, false, 'word').file).toBe('LiberationSans-Regular.ttf.zst');
@@ -468,7 +478,8 @@ describe('loading', () => {
           expect(provider.resolve(family, bold, false)?.measureAs).toBe(
             family === 'Segoe UI Black' ? undefined : resolveMetricCompatFace(family, bold, false)!.metricCompatWith,
           );
-          const expected = resolveMetricCompatFace(office === 'word' ? 'Arial' : 'Calibri', bold, false)!;
+          const coverageBold = / (Light|Semilight)$/.test(family) ? false : bold;
+          const expected = resolveMetricCompatFace(office === 'word' ? 'Arial' : 'Calibri', coverageBold, false)!;
           expect(resolveGlyphFallbackFace(family, bold, false, office)).toBe(expected);
           await provider.resolveGlyphFallback!(family, bold, false, office)!();
           expect(loaded[loaded.length - 1]).toBe(expected.file);

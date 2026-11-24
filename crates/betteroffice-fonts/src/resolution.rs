@@ -169,7 +169,12 @@ pub fn resolve_family_script_fallback_face(
         .or_else(|| resolve_script_fallback_face(script, bold, italic))
 }
 
-fn variant(family: &str, bold: bool, italic: bool, heavy: bool) -> Option<&'static BundledFontFace> {
+fn variant(
+    family: &str,
+    bold: bool,
+    italic: bool,
+    heavy: bool,
+) -> Option<&'static BundledFontFace> {
     let family = family.trim_matches(whitespace);
     if family.ends_with('-') {
         return None;
@@ -194,6 +199,7 @@ fn variant(family: &str, bold: bool, italic: bool, heavy: bool) -> Option<&'stat
     if heavy {
         return resolve_metric_compat_face(&base, true, italic);
     }
+    let bold = bold && resolve_metric_compat_family(&base) != Some("Selawik");
     resolve_metric_compat_face(&base, bold, italic)
         .filter(|face| !bold || face.weight == 700)
         .or_else(|| resolve_metric_compat_face(&base, false, italic))
@@ -240,16 +246,20 @@ fn looks_mono(family: &str) -> bool {
 
 fn resolve_base_face(
     family: &str,
-    bold: bool,
+    mut bold: bool,
     italic: bool,
     office: LastResortOffice,
     exclude_glyph_fallback: bool,
 ) -> &'static BundledFontFace {
+    let light = resolve_light_variant_face(family, bold, italic);
     let allowed = |face: &&BundledFontFace| {
         !exclude_glyph_fallback || !catalog().glyph_fallback_families.contains(&face.family)
     };
-    if let Some(face) = resolve_light_variant_face(family, bold, italic).filter(allowed) {
+    if let Some(face) = light.filter(allowed) {
         return face;
+    }
+    if light.is_some() {
+        bold = false;
     }
     if let Some(face) = variant(family, bold, italic, true).filter(allowed) {
         return face;

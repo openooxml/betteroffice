@@ -78,8 +78,6 @@ fn replays_typescript_resolution_cases() {
 fn light_variants_follow_the_requested_style_of_bold_capable_families() {
     for base in [
         "Calibri",
-        "Segoe UI",
-        "Segoe UI Semibold",
         "Cambria",
         "Arial",
         "Times New Roman",
@@ -97,13 +95,13 @@ fn light_variants_follow_the_requested_style_of_bold_capable_families() {
         "Comic Sans MS",
     ] {
         assert_eq!(
-            resolve_metric_compat_face(base, true, false).unwrap().weight,
+            resolve_metric_compat_face(base, true, false)
+                .unwrap()
+                .weight,
             700
         );
         for suffix in &catalog().lighter_than_regular {
             let family = format!("{base} {suffix}");
-            let named_selawik =
-                base == "Segoe UI" && matches!(suffix.as_str(), "light" | "semilight");
             for (bold, italic) in [(true, false), (true, true), (false, false), (false, true)] {
                 let label = format!("{family} bold={bold} italic={italic}");
                 let expected = resolve_metric_compat_face(base, bold, italic);
@@ -117,24 +115,28 @@ fn light_variants_follow_the_requested_style_of_bold_capable_families() {
                     (LastResortOffice::PowerPoint, "Calibri"),
                 ] {
                     let fallback = || resolve_metric_compat_face(sans, bold, italic).unwrap();
-                    let last = if named_selawik {
-                        fallback()
-                    } else {
-                        expected.unwrap_or_else(fallback)
-                    };
+                    let last = expected.unwrap_or_else(fallback);
                     assert_eq!(
                         resolve_last_resort_face(&family, bold, italic, office),
                         last,
                         "{label} {office:?}"
                     );
-                    if named_selawik && !italic {
-                        assert_eq!(
-                            resolve_glyph_fallback_face(&family, bold, italic, office),
-                            Some(last),
-                            "{label} {office:?}"
-                        );
-                    }
                 }
+            }
+        }
+    }
+}
+
+#[test]
+fn lighter_members_of_segoe_ui_keep_their_light_faces_when_bold() {
+    for base in ["Segoe UI", "Segoe UI Semibold"] {
+        for suffix in &catalog().lighter_than_regular {
+            for italic in [false, true] {
+                assert_eq!(
+                    resolve_light_variant_face(&format!("{base} {suffix}"), true, italic),
+                    resolve_metric_compat_face(base, false, italic),
+                    "{base} {suffix} italic={italic}"
+                );
             }
         }
     }
