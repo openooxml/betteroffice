@@ -436,6 +436,7 @@ fn row_from_out(row: ooxml_text::TypesetRowOut) -> TypesetRow {
         inline_list_marker: row.inline_list_marker.map(|marker| InlineListMarker {
             width: normalize_output(marker.width),
             advance: normalize_output(marker.advance),
+            shape: marker.shape,
         }),
         run_advances: row.run_advances.map(|advances| {
             advances

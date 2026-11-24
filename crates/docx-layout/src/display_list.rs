@@ -7837,6 +7837,7 @@ fn emit_line<'a>(
     };
     let inline_marker = line
         .inline_list_marker
+        .as_ref()
         .filter(|_| geom.is_first_line && geom.has_list_marker && geom.hanging == 0.0);
     let inline_advance = inline_marker.map_or(0.0, |marker| marker.advance);
     let rtl_inline = geom.is_rtl && inline_marker.is_some();
@@ -7846,19 +7847,19 @@ fn emit_line<'a>(
         if rtl_inline { 0.0 } else { geom.first_line },
         geom.is_first_line,
         geom.has_list_marker,
-        if rtl_inline { 0.0 } else { overrun + inline_advance },
+        overrun,
     );
 
     let left_offset = line.left_offset.unwrap_or(0.0);
     let right_offset = line.right_offset.unwrap_or(0.0);
     let trailing_indent = if rtl_inline {
-        geom.indent_right + geom.first_line + inline_advance
+        geom.indent_right + geom.first_line
     } else {
         geom.indent_right
     };
-    let available_width =
+    let band_width =
         geom.frag_width - pad_left - text_indent - trailing_indent - left_offset - right_offset;
-    let usable_width = available_width.max(0.0);
+    let usable_width = (band_width - inline_advance).max(0.0);
 
     // distribute the measured line width over runs whose advance we don't know
     // individually: fixed-width runs (tabs, inline images) subtract first, the
@@ -7924,162 +7925,6 @@ fn emit_line<'a>(
     let effective_line_width =
         authoritative_width.unwrap_or(pool_width + fixed_width + field_fixed);
 
-    // Justified lines already fill the width, so they take no alignment shift.
-    let align_shift = match geom.alignment {
-        Some("center") => ((usable_width - effective_line_width) / 2.0).max(0.0),
-        Some("right") => (usable_width - effective_line_width).max(0.0),
-        None if geom.is_rtl => (usable_width - effective_line_width).max(0.0),
-        _ => 0.0,
-    };
-    // suppress the stretch shift on the paragraph's un-stretched closing line
-    let align_shift = if rtl_inline {
-        align_shift.min(available_width - effective_line_width)
-    } else if geom.alignment == Some("justify") && !geom.is_last_line {
-        0.0
-    } else {
-        align_shift
-    };
-
-    let echo_x = geom.frag_x + pad_left + text_indent + left_offset;
-    let mut pen_x = echo_x + align_shift;
-    let line_bottom = geom.line_top + line.line_height;
-    // Word hangs the baseline off the box top: whatever the spacing rule adds
-    // beyond ascent + descent is leading below the descent, never centered.
-    let baseline = geom.line_top + line.ascent;
-
-    // Numbering is not part of the story text, so materialize the precomputed
-    // marker as its own first-line primitive.
-    if geom.is_first_line
-        && let Some(marker) = attrs
-            .and_then(|attrs| attrs.list_marker.as_deref())
-            .filter(|marker| !marker.is_empty())
-        && attrs.and_then(|attrs| attrs.list_marker_hidden) != Some(true)
-    {
-        let mut marker_format = RunFormattingIn::default();
-        marker_format.bold = attrs.and_then(|attrs| attrs.list_marker_bold);
-        marker_format.italic = attrs.and_then(|attrs| attrs.list_marker_italic);
-        let first_text = inline_marker.and_then(|_| {
-            block.runs.iter().find_map(|run| match run {
-                RunIn::Text(text) => Some(&text.fmt),
-                _ => None,
-            })
-        });
-        marker_format.font_family = attrs.and_then(|attrs| {
-            attrs
-                .list_marker_font_family
-                .clone()
-                .or_else(|| first_text.and_then(|fmt| fmt.font_family.clone()))
-                .or_else(|| attrs.default_font_family.clone())
-        });
-        marker_format.font_size = attrs.and_then(|attrs| {
-            attrs
-                .list_marker_font_size
-                .or_else(|| first_text.and_then(|fmt| fmt.font_size))
-                .or(attrs.default_font_size)
-        });
-        let slot_width = if let Some(marker) = inline_marker {
-            marker.advance
-        } else if overrun > 0.0 {
-            geom.hanging + overrun
-        } else if geom.hanging > 0.0 {
-            geom.hanging
-        } else {
-            font_px_of(&marker_format)
-        };
-        let marker_x = if let Some(marker) = inline_marker {
-            if geom.is_rtl {
-                geom.frag_x + geom.frag_width - geom.indent_right - geom.first_line - marker.width
-            } else {
-                geom.frag_x + geom.indent_left + geom.first_line
-            }
-        } else if geom.is_rtl {
-            pen_x + effective_line_width
-        } else {
-            pen_x - slot_width
-        };
-        let marker_revision = attrs.and_then(|attrs| attrs.list_marker_revision);
-        let color = match marker_revision {
-            Some(RevisionKind::Ins) => REVISION_INS_COLOR,
-            Some(RevisionKind::Del) => REVISION_DEL_COLOR,
-            None | Some(RevisionKind::Format) => attrs
-                .and_then(|attrs| attrs.list_marker_color.as_deref())
-                .unwrap_or("#000000"),
-        };
-        let mut marker_attrs = block_ref.attrs();
-        marker_attrs.list_marker = Some(true);
-        let list_is_bullet = attrs.and_then(|attrs| attrs.list_is_bullet);
-        let symbol_face = attrs
-            .and_then(|attrs| attrs.list_marker_font_family.as_deref())
-            .is_some_and(|family| ooxml_text::SymbolFont::named(family).is_some());
-        let numbered = list_is_bullet != Some(true)
-            && marker.chars().any(char::is_alphanumeric)
-            && !symbol_face;
-        marker_attrs.list_marker_numbered = numbered.then_some(true);
-        marker_attrs.list_marker_bullet = (!numbered
-            && marker.chars().any(|c| !c.is_whitespace())
-            && !(list_is_bullet == Some(false) && symbol_face))
-            .then_some(true);
-        marker_attrs.list_marker_revision = marker_revision;
-        let shaped = !geom.is_rtl
-            && bidi_char_levels(marker, base_bidi_direction(false))
-                .iter()
-                .all(|level| level % 2 == 0)
-            && ctx.shape.is_some_and(|shape| {
-                try_emit_glyph_runs(
-                    prims,
-                    shape,
-                    marker,
-                    &marker_format,
-                    None,
-                    None,
-                    marker_x,
-                    baseline,
-                    &None,
-                    0,
-                    None,
-                    None,
-                    &marker_attrs,
-                    color,
-                    &None,
-                    ooxml_text::AutoSpace::from_options(Some(false), Some(false)),
-                )
-            });
-        if !shaped {
-            prims.push(Primitive::Text(TextRunPrimitive {
-                text: marker.to_owned(),
-                paint_text: text_paint_override(ctx.shape, marker, &marker_format).map(Box::new),
-                x: px(marker_x),
-                baseline_y: px(baseline),
-                width: px(slot_width),
-                paint_clip: None,
-                font: resolved_css_font(ctx.shape, marker, &marker_format),
-                scripts: boxed_scripts(scripts),
-                color: color.to_owned(),
-                letter_spacing: None,
-                word_spacing: None,
-                rtl: geom.is_rtl.then_some(true),
-                opacity: None,
-                rotation_deg: None,
-                horizontal_scale: horizontal_scale_of(&marker_format),
-                substitute_scale: text_substitute_scale(
-                    ctx.shape,
-                    marker,
-                    &marker_format,
-                    base_bidi_level(geom.is_rtl),
-                    false,
-                ),
-                all_caps: false,
-                small_caps: false,
-                hidden: false,
-                text_shadow: None,
-                text_outline: false,
-                emphasis_mark: None,
-                text_effect: None,
-                attrs: marker_attrs,
-            }));
-        }
-    }
-
     // Distribute justification slack across U+0020 clusters.
     let justified = geom.alignment == Some("justify")
         && ooxml_text::line_is_justified(
@@ -8089,6 +7934,7 @@ fn emit_line<'a>(
         );
     let mut word_space_px: Option<Number> = None;
     let mut word_space_extra = 0.0_f64;
+    let mut stretch = 0.0;
     if justified && (pool_estimate > 0.0 || authoritative_items.is_some()) {
         let slack = (usable_width - effective_line_width).max(0.0);
         if slack > 0.0 {
@@ -8118,9 +7964,193 @@ fn emit_line<'a>(
                 }
             }
             if space_count > 0 {
+                stretch = slack;
                 word_space_extra = slack / space_count as f64;
                 word_space_px = Some(px(word_space_extra));
             }
+        }
+    }
+
+    let band_slack = band_width - (inline_advance + effective_line_width + stretch);
+    let align_shift = match geom.alignment {
+        Some("center") => (band_slack / 2.0).max(0.0),
+        Some("right") => band_slack.max(0.0),
+        None if geom.is_rtl => band_slack.max(0.0),
+        Some("justify") if rtl_inline => band_slack.max(0.0),
+        _ => 0.0,
+    };
+    let echo_x = geom.frag_x
+        + pad_left
+        + text_indent
+        + left_offset
+        + if rtl_inline { 0.0 } else { inline_advance };
+    let mut pen_x = echo_x + align_shift;
+    let line_bottom = geom.line_top + line.line_height;
+    // Word hangs the baseline off the box top: whatever the spacing rule adds
+    // beyond ascent + descent is leading below the descent, never centered.
+    let baseline = geom.line_top + line.ascent;
+
+    // Numbering is not part of the story text, so materialize the precomputed
+    // marker as its own first-line primitive.
+    if geom.is_first_line
+        && let Some(marker) = attrs
+            .and_then(|attrs| attrs.list_marker.as_deref())
+            .filter(|marker| !marker.is_empty())
+        && attrs.and_then(|attrs| attrs.list_marker_hidden) != Some(true)
+    {
+        let mut marker_format = RunFormattingIn::default();
+        marker_format.bold = attrs.and_then(|attrs| attrs.list_marker_bold);
+        marker_format.italic = attrs.and_then(|attrs| attrs.list_marker_italic);
+        if let Some(shape) = inline_marker.and_then(|marker| marker.shape.as_deref()) {
+            marker_format.font_family = Some(shape.family.clone());
+            marker_format.font_size = Some(f64::from(shape.size_pt));
+        } else if let Some(attrs) = attrs {
+            let first_text = inline_marker.and_then(|_| {
+                block.runs.iter().find_map(|run| match run {
+                    RunIn::Text(text) => Some(&text.fmt),
+                    _ => None,
+                })
+            });
+            marker_format.font_family = attrs
+                .list_marker_font_family
+                .clone()
+                .or_else(|| first_text.and_then(|fmt| fmt.font_family.clone()))
+                .or_else(|| attrs.default_font_family.clone());
+            marker_format.font_size = attrs
+                .list_marker_font_size
+                .or_else(|| first_text.and_then(|fmt| fmt.font_size))
+                .or(attrs.default_font_size);
+        }
+        let slot_width = if let Some(marker) = inline_marker {
+            marker.width
+        } else if overrun > 0.0 {
+            geom.hanging + overrun
+        } else if geom.hanging > 0.0 {
+            geom.hanging
+        } else {
+            font_px_of(&marker_format)
+        };
+        let marker_x = if let Some(marker) = inline_marker {
+            if geom.is_rtl {
+                pen_x + effective_line_width + stretch + marker.advance - marker.width
+            } else {
+                pen_x - marker.advance
+            }
+        } else if geom.is_rtl {
+            pen_x + effective_line_width
+        } else {
+            pen_x - slot_width
+        };
+        let marker_revision = attrs.and_then(|attrs| attrs.list_marker_revision);
+        let color = match marker_revision {
+            Some(RevisionKind::Ins) => REVISION_INS_COLOR,
+            Some(RevisionKind::Del) => REVISION_DEL_COLOR,
+            None | Some(RevisionKind::Format) => attrs
+                .and_then(|attrs| attrs.list_marker_color.as_deref())
+                .unwrap_or("#000000"),
+        };
+        let mut marker_attrs = block_ref.attrs();
+        marker_attrs.list_marker = Some(true);
+        let list_is_bullet = attrs.and_then(|attrs| attrs.list_is_bullet);
+        let symbol_face = attrs
+            .and_then(|attrs| attrs.list_marker_font_family.as_deref())
+            .is_some_and(|family| ooxml_text::SymbolFont::named(family).is_some());
+        let numbered = list_is_bullet != Some(true)
+            && marker.chars().any(char::is_alphanumeric)
+            && !symbol_face;
+        marker_attrs.list_marker_numbered = numbered.then_some(true);
+        marker_attrs.list_marker_bullet = (!numbered
+            && marker.chars().any(|c| !c.is_whitespace())
+            && !(list_is_bullet == Some(false) && symbol_face))
+            .then_some(true);
+        marker_attrs.list_marker_revision = marker_revision;
+        if inline_marker.is_some() {
+            marker_attrs.font_features = primitive_features(
+                &[*b"liga", *b"clig", *b"calt"]
+                    .map(|tag| ooxml_text::ShapeFeature { tag, value: 1 }),
+            );
+        }
+        let shaped = if let Some(marker) = inline_marker {
+            ctx.shape.is_some_and(|fonts| {
+                emit_inline_list_marker_glyphs(
+                    prims,
+                    fonts.store,
+                    marker,
+                    &marker_format,
+                    marker_x,
+                    baseline,
+                    &marker_attrs,
+                    color,
+                )
+            })
+        } else {
+            !geom.is_rtl
+                && bidi_char_levels(marker, base_bidi_direction(false))
+                    .iter()
+                    .all(|level| level % 2 == 0)
+                && ctx.shape.is_some_and(|shape| {
+                    try_emit_glyph_runs(
+                        prims,
+                        shape,
+                        marker,
+                        &marker_format,
+                        None,
+                        None,
+                        marker_x,
+                        baseline,
+                        &None,
+                        0,
+                        None,
+                        None,
+                        &marker_attrs,
+                        color,
+                        &None,
+                        ooxml_text::AutoSpace::from_options(Some(false), Some(false)),
+                    )
+                })
+        };
+        if !shaped {
+            let width = px(if inline_marker.is_some() {
+                round3(marker_x + slot_width) - round3(marker_x)
+            } else {
+                slot_width
+            });
+            prims.push(Primitive::Text(TextRunPrimitive {
+                text: marker.to_owned(),
+                paint_text: text_paint_override(ctx.shape, marker, &marker_format).map(Box::new),
+                x: px(marker_x),
+                baseline_y: px(baseline),
+                width: width.clone(),
+                paint_clip: inline_marker.map(|_| ClipRect {
+                    x: Some(px(marker_x)),
+                    w: Some(width),
+                    ..ClipRect::default()
+                }),
+                font: resolved_css_font(ctx.shape, marker, &marker_format),
+                scripts: boxed_scripts(scripts),
+                color: color.to_owned(),
+                letter_spacing: None,
+                word_spacing: None,
+                rtl: geom.is_rtl.then_some(true),
+                opacity: None,
+                rotation_deg: None,
+                horizontal_scale: horizontal_scale_of(&marker_format),
+                substitute_scale: text_substitute_scale(
+                    ctx.shape,
+                    marker,
+                    &marker_format,
+                    base_bidi_level(geom.is_rtl),
+                    false,
+                ),
+                all_caps: false,
+                small_caps: false,
+                hidden: false,
+                text_shadow: None,
+                text_outline: false,
+                emphasis_mark: None,
+                text_effect: None,
+                attrs: marker_attrs,
+            }));
         }
     }
 
@@ -8565,7 +8595,7 @@ fn emit_line<'a>(
             prims.push(Primitive::Text(TextRunPrimitive {
                 text: String::new(),
                 paint_text: None,
-                x: px(if rtl_inline { pen_x } else { echo_x }),
+                x: px(if inline_marker.is_some() { pen_x } else { echo_x }),
                 baseline_y: px(baseline),
                 width: px(0.0),
                 paint_clip: None,
@@ -9276,6 +9306,68 @@ fn glyph_run_primitive(
         text_effect: fmt.text_effect.clone(),
         attrs,
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_inline_list_marker_glyphs(
+    prims: &mut Vec<Primitive>,
+    store: &ooxml_text::FontStore,
+    marker: &ooxml_text::measure::InlineListMarker<f64>,
+    fmt: &RunFormattingIn,
+    x: f64,
+    baseline: f64,
+    attrs: &DocAttrs,
+    color: &str,
+) -> bool {
+    let Some(shape) = marker.shape.as_deref().filter(|shape| !shape.runs.is_empty()) else {
+        return false;
+    };
+    let font_id = ooxml_text::FontId::from_u32;
+    if shape.runs.iter().any(|run| store.metrics(font_id(run.font_id)).is_err()) {
+        return false;
+    }
+    let levels: Vec<_> = shape.runs.iter().map(|run| run.level).collect();
+    let size_px = f64::from(shape.size_pt * 96.0 / 72.0);
+    let mut pen = x;
+    let right = x + marker.width;
+    for index in ooxml_text::visual_order_for_levels(&levels) {
+        let run = &shape.runs[index];
+        let glyphs = run
+            .glyphs
+            .iter()
+            .map(|glyph| {
+                let next = pen + f64::from(glyph.x_advance);
+                let placed = PlacedGlyph {
+                    id: glyph.glyph_id,
+                    x: round3(pen + f64::from(glyph.x_offset)),
+                    y: round3(baseline - f64::from(glyph.y_offset)),
+                    cluster: glyph.cluster,
+                    advance: round3(round3(next.min(right)) - round3(pen.min(right))),
+                    logical_order: None,
+                    bidi_level: None,
+                };
+                pen = next;
+                placed
+            })
+            .collect();
+        let mut primitive = glyph_run_primitive(
+            store,
+            font_id(run.font_id),
+            size_px,
+            run.text.clone(),
+            glyphs,
+            None,
+            fmt,
+            color,
+            &None,
+            run.level,
+            attrs.clone(),
+            &None,
+        );
+        primitive.attrs.font_features.clone_from(&attrs.font_features);
+        prims.push(Primitive::GlyphRun(primitive));
+    }
+    true
 }
 
 /// Shape one styled text slice into [`GlyphRunPrimitive`]s and push them, or

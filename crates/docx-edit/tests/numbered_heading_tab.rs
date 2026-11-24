@@ -66,7 +66,7 @@ fn document(heading: Heading) -> Vec<u8> {
             r#"w:firstLine="0""#.to_owned()
         };
         let tabs = current.tab.map_or_else(String::new, |position| {
-            format!(r#"<w:tabs><w:tab w:val="num" w:pos="{position}"/></w:tabs>"#)
+            format!(r#"<w:tabs><w:tab w:val="left" w:pos="{position}"/></w:tabs>"#)
         });
         let suffix = current.suffix.map_or_else(String::new, |suffix| {
             format!(r#"<w:suff w:val="{suffix}"/>"#)
@@ -81,10 +81,10 @@ fn document(heading: Heading) -> Vec<u8> {
             r#"<w:p w14:paraId="{para_id}"><w:pPr><w:pStyle w:val="{style}"/>{bidi}</w:pPr><w:r>{rtl}<w:t>{text}</w:t></w:r></w:p>"#
         ));
         styles.push_str(&format!(
-            r#"<w:style w:type="paragraph" w:styleId="{style}"><w:name w:val="heading {index}"/><w:pPr><w:numPr><w:ilvl w:val="{level}"/><w:numId w:val="1"/></w:numPr></w:pPr><w:rPr><w:rFonts w:ascii="Liberation Sans" w:hAnsi="Liberation Sans" w:cs="Liberation Sans"/><w:b/><w:bCs/><w:sz w:val="{half_points}"/><w:szCs w:val="{half_points}"/></w:rPr></w:style>"#
+            r#"<w:style w:type="paragraph" w:styleId="{style}"><w:name w:val="heading {index}"/><w:pPr><w:numPr><w:ilvl w:val="{level}"/><w:numId w:val="1"/></w:numPr>{tabs}</w:pPr><w:rPr><w:rFonts w:ascii="Liberation Sans" w:hAnsi="Liberation Sans" w:cs="Liberation Sans"/><w:b/><w:bCs/><w:sz w:val="{half_points}"/><w:szCs w:val="{half_points}"/></w:rPr></w:style>"#
         ));
         numbering.push_str(&format!(
-            r#"<w:lvl w:ilvl="{level}"><w:start w:val="{start}"/><w:numFmt w:val="decimal"/><w:pStyle w:val="{style}"/>{suffix}<w:lvlText w:val="{template}"/><w:lvlJc w:val="left"/><w:pPr>{tabs}<w:ind w:left="{left}" {indent}/></w:pPr></w:lvl>"#
+            r#"<w:lvl w:ilvl="{level}"><w:start w:val="{start}"/><w:numFmt w:val="decimal"/><w:pStyle w:val="{style}"/>{suffix}<w:lvlText w:val="{template}"/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="{left}" {indent}/></w:pPr></w:lvl>"#
         ));
     }
     styles.push_str("</w:styles>");
@@ -203,23 +203,42 @@ fn render(heading: Heading) -> Geometry {
                 run["listMarker"].as_bool() != Some(true) && run["lineIndex"].as_u64() == Some(line)
             })
         };
-        let width = |text| {
+        let marker_width = marker["width"].as_f64().unwrap_or_else(|| {
+            marker["glyphs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|glyph| glyph["advance"].as_f64().unwrap())
+                .sum()
+        });
+        let space_width = if heading.suffix == Some("space") {
             docx_layout::with_measure_fonts_ref(|store| {
                 let size = heading.points as f32 * 4.0 / 3.0;
-                shape(store, FontId::from_u32(font), text, size, &[])
+                shape(store, FontId::from_u32(font), " ", size, &[])
                     .unwrap()
                     .iter()
                     .map(|glyph| f64::from(glyph.x_advance))
                     .sum()
             })
+        } else {
+            0.0
         };
+        let text_x = x(body(0).next().expect("first line text"));
+        if heading.tab.is_some() {
+            let text_start = fragment["pmStart"].as_f64().unwrap() as i64 + 1;
+            let caret = engine
+                .with_display_list(|list| docx_layout::hit::caret_rect(list, text_start))
+                .flatten()
+                .expect("caret at the heading text start");
+            near(caret.x, text_x, "caret origin");
+        }
         Geometry {
             fragment_x: fragment["x"].as_f64().unwrap(),
             fragment_width: fragment["width"].as_f64().unwrap(),
             marker_x: x(marker),
-            marker_width: width(number),
-            space_width: width(" "),
-            text_x: x(body(0).next().expect("first line text")),
+            marker_width,
+            space_width,
+            text_x,
             text_right: body(0).map(right).reduce(f64::max).unwrap(),
             second_line_x: body(1).next().map(x),
         }
@@ -288,7 +307,7 @@ fn heading_number_that_overruns_the_hanging_indent_uses_the_default_tab() {
 }
 
 #[test]
-fn heading_zero_hanging_uses_the_numbering_level_tab() {
+fn heading_zero_hanging_uses_the_paragraph_tab() {
     let heading = Heading {
         tab: Some(600),
         ..HEADING2

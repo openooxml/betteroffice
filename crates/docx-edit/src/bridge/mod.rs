@@ -5623,6 +5623,7 @@ fn lower_paragraph_attrs(
         .doc_grid_pitch_px
         .filter(|pitch| pitch.is_finite() && *pitch > 0.0);
     lower_paragraph_indent(values, list_state, &mut result);
+    lower_paragraph_tabs(values, &mut result);
 
     result.has_source_content = true_property(values, "hasSourceContent");
     result.keep_next = true_property(values, "keepNext");
@@ -5707,19 +5708,6 @@ fn lower_paragraph_attrs(
         }
     }
     result.list_marker_suffix = value_string(values.get("listMarkerSuffix"));
-    let hanging = result.indent.as_ref().and_then(|indent| indent.hanging);
-    let level_tabs = if hanging.unwrap_or(0.0) == 0.0
-        && result.list_marker_hidden != Some(true)
-        && result
-            .list_marker
-            .as_deref()
-            .is_some_and(|marker| !marker.is_empty())
-    {
-        list_state.level_tabs(values)
-    } else {
-        None
-    };
-    lower_paragraph_tabs(values, level_tabs, &mut result);
     result.default_tab_stop_twips = env.default_tab_stop_twips;
     lower_paragraph_defaults(values, &mut result, env);
 
@@ -6036,39 +6024,20 @@ fn lower_paragraph_indent(
     }
 }
 
-fn lower_paragraph_tabs(
-    values: &BTreeMap<String, Any>,
-    level_tabs: Option<Vec<docx_parse::TabStop>>,
-    result: &mut ParagraphAttrs,
-) {
-    let tabs = match values.get("tabs") {
-        Some(Any::Array(tabs)) => &tabs[..],
-        _ => &[],
+fn lower_paragraph_tabs(values: &BTreeMap<String, Any>, result: &mut ParagraphAttrs) {
+    let Some(Any::Array(tabs)) = values.get("tabs") else {
+        return;
     };
-    let tabs: Vec<_> = tabs
+    let tabs: Vec<TabStop> = tabs
         .iter()
         .filter_map(|tab| {
             let Any::Map(tab) = tab else {
                 return None;
             };
-            Some(docx_parse::TabStop {
-                alignment: map_string(tab, "alignment")
-                    .or_else(|| map_string(tab, "val"))
-                    .unwrap_or_else(|| "left".to_owned()),
-                position: map_number(tab, "position").or_else(|| map_number(tab, "pos"))?,
-                leader: map_string(tab, "leader"),
-            })
-        })
-        .collect();
-    let tabs = if let Some(level_tabs) = level_tabs.filter(|tabs| !tabs.is_empty()) {
-        docx_parse::tabs::merge_tab_stops(Some(&level_tabs), Some(&tabs))
-    } else {
-        tabs
-    };
-    let tabs: Vec<_> = tabs
-        .into_iter()
-        .map(|tab| {
-            let val = match tab.alignment.as_str() {
+            let alignment = map_string(tab, "alignment")
+                .or_else(|| map_string(tab, "val"))
+                .unwrap_or_else(|| "left".to_owned());
+            let val = match alignment.as_str() {
                 "left" | "num" => "start",
                 "right" => "end",
                 "center" => "center",
@@ -6079,13 +6048,13 @@ fn lower_paragraph_tabs(
                 _ => "start",
             }
             .to_owned();
-            TabStop {
+            Some(TabStop {
                 val,
                 // Tab stops are the intentional existing-contract exception: layout consumes
                 // their authored twip positions directly and converts at measurement time.
-                pos: tab.position,
-                leader: tab.leader,
-            }
+                pos: map_number(tab, "position").or_else(|| map_number(tab, "pos"))?,
+                leader: map_string(tab, "leader"),
+            })
         })
         .collect();
     if !tabs.is_empty() {

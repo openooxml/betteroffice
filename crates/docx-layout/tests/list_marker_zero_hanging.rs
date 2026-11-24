@@ -1,7 +1,7 @@
 //! A measured zero-hanging list marker starts at the first-line indent.
 
 use docx_layout::display_list::{DisplayList, Primitive, build_display_list_json_with_fonts};
-use ooxml_text::{FontStore, measure_paragraph_json, shape};
+use ooxml_text::{FontStore, measure_paragraph_json};
 use serde_json::{Value, json};
 
 const FONT: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
@@ -60,28 +60,26 @@ fn zero_hanging_marker_paints_at_first_line_indent_and_text_at_next_tab() {
         &build_display_list_json_with_fonts(&input.to_string(), &store).unwrap(),
     )
     .unwrap();
-    let glyph_origin = |text, marker| {
+    let extent = |text, marker| {
         list.pages[0]
             .primitives
             .iter()
             .find_map(|primitive| match primitive {
                 Primitive::GlyphRun(run) if run.text == text && run.attrs.list_marker == marker => {
-                    Some(run.glyphs[0].x)
+                    Some((
+                        run.glyphs[0].x,
+                        run.glyphs.iter().map(|glyph| glyph.advance).sum::<f64>(),
+                    ))
                 }
                 Primitive::Text(run) if run.text == text && run.attrs.list_marker == marker => {
-                    run.x.as_f64()
+                    Some((run.x.as_f64().unwrap(), run.width.as_f64().unwrap()))
                 }
                 _ => None,
             })
             .unwrap_or_else(|| panic!("no {text:?} run in {:?}", list.pages[0].primitives))
     };
-    let marker_x = glyph_origin(number, Some(true));
-    let text_x = glyph_origin("Beta", None);
-    let marker_width: f64 = shape(&store, font, number, (points * 4.0 / 3.0) as f32, &[])
-        .unwrap()
-        .iter()
-        .map(|glyph| f64::from(glyph.x_advance))
-        .sum();
+    let (marker_x, marker_width) = extent(number, Some(true));
+    let (text_x, _) = extent("Beta", None);
     let tab = tab_twips / 15.0;
     let next_stop = ((left + first_line + marker_width) / tab).floor() + 1.0;
     let expected_text_x = fragment_x + next_stop * tab;

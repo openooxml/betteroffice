@@ -2207,6 +2207,25 @@ fn extent_weight(extent: &ParagraphExtent) -> usize {
                         .as_ref()
                         .map_or(0, |v| v.capacity() * size_of::<TypesetBidiSlice>())
                     + row.glyph_runs.as_ref().map_or(0, String::capacity)
+                    + row
+                        .inline_list_marker
+                        .as_ref()
+                        .and_then(|marker| marker.shape.as_deref())
+                        .map_or(0, |shape| {
+                            std::mem::size_of_val(shape)
+                                + shape.family.capacity()
+                                + shape.runs.capacity()
+                                    * size_of::<ooxml_text::measure::InlineListMarkerRun>()
+                                + shape
+                                    .runs
+                                    .iter()
+                                    .map(|run| {
+                                        run.text.capacity()
+                                            + run.glyphs.capacity()
+                                                * size_of::<ooxml_text::ShapedGlyph>()
+                                    })
+                                    .sum::<usize>()
+                        })
             })
             .sum::<usize>()
 }
@@ -2576,6 +2595,7 @@ fn synthetic_text_width(
 fn synthetic_inline_marker(
     paragraph: &ParagraphBlock,
     default_font_size: f64,
+    content_width: f64,
 ) -> Option<ooxml_text::measure::InlineListMarker<f64>> {
     let attrs = paragraph.attrs.as_ref()?;
     let marker = attrs
@@ -2604,11 +2624,13 @@ fn synthetic_inline_marker(
         marker.chars().count() as f32 * space,
         space,
         size_px,
+        content_width as f32,
     )
     .ok()?;
     Some(ooxml_text::measure::InlineListMarker {
         width: f64::from(marker.width),
         advance: f64::from(marker.advance),
+        shape: None,
     })
 }
 
@@ -2828,7 +2850,8 @@ fn synthetic_paragraph_extent(paragraph: &ParagraphBlock, content_width: f64) ->
         font_px,
         rule.as_ref(),
     ));
-    lines[0].inline_list_marker = synthetic_inline_marker(paragraph, default_font_size);
+    lines[0].inline_list_marker =
+        synthetic_inline_marker(paragraph, default_font_size, content_width);
 
     ParagraphExtent {
         total_height: spacing.and_then(|value| value.before).unwrap_or(0.0)
@@ -2871,7 +2894,7 @@ fn wrapped_synthetic_paragraph_extent(
     let left = indent.and_then(|indent| indent.left).unwrap_or(0.0);
     let hanging = indent.and_then(|indent| indent.hanging).unwrap_or(0.0);
     let first_line = indent.and_then(|indent| indent.first_line).unwrap_or(0.0);
-    let inline_marker = synthetic_inline_marker(paragraph, default_font_size);
+    let inline_marker = synthetic_inline_marker(paragraph, default_font_size, content_width);
     let marker_inset = |is_first_line| {
         let (inset_left, inset_first) = if inline_marker.is_some() {
             (left, first_line)
@@ -2884,7 +2907,7 @@ fn wrapped_synthetic_paragraph_extent(
             inset_first,
             is_first_line,
             true,
-            inline_marker.map_or(0.0, |marker| marker.advance),
+            inline_marker.as_ref().map_or(0.0, |marker| marker.advance),
         );
         padding + shift - left
     };
@@ -3763,23 +3786,25 @@ fn paragraph_content_width(
         .attrs
         .as_ref()
         .and_then(|attrs| attrs.indent.as_ref());
-    let edge = |value: Option<f64>| value.unwrap_or(0.0).max(0.0);
+    let edge = |value: Option<f64>| value.unwrap_or(0.0);
     let first_line = indent.map_or(0.0, |indent| edge(indent.first_line));
+    let sides = indent.map_or(0.0, |indent| edge(indent.left) + edge(indent.right));
     let extent = measure_paragraph(paragraph, budget, config)?;
     let widest = extent
         .lines
         .iter()
         .enumerate()
         .map(|(index, line)| {
-            line.width
+            sides + line.width
                 + if index == 0 {
-                    first_line + line.inline_list_marker.map_or(0.0, |marker| marker.advance)
+                    first_line
+                        + line.inline_list_marker.as_ref().map_or(0.0, |marker| marker.advance)
                 } else {
                     0.0
                 }
         })
         .fold(0.0_f64, f64::max);
-    Ok(widest + indent.map_or(0.0, |indent| edge(indent.left) + edge(indent.right)))
+    Ok(widest)
 }
 
 /// Per-column widest unwrapped content, for `columns` only; every other entry

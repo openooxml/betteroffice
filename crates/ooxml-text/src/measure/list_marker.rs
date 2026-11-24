@@ -10,7 +10,7 @@
 //! `w:defaultTabStop` grid line. With no grid at all — a zero default stop
 //! and no custom stops — the marker takes a half-em gap instead.
 
-use crate::font_store::FontStore;
+use crate::{FontId, FontStore, ShapedGlyph};
 
 use super::input::{AttrsIn, MeasureRequest};
 use super::tabs::twips_to_px;
@@ -19,15 +19,33 @@ use super::{MeasureError, pt_to_px};
 /// ECMA-376 §17.6.13 default tab stop.
 const DEFAULT_TAB_STOP_TWIPS: f32 = 720.0;
 
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct InlineListMarker<T> {
     pub width: T,
     pub advance: T,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape: Option<Box<InlineListMarkerShape>>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct InlineListMarkerShape {
+    pub family: String,
+    pub size_pt: f32,
+    pub runs: Vec<InlineListMarkerRun>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct InlineListMarkerRun {
+    pub text: String,
+    pub font_id: u32,
+    pub level: u8,
+    pub glyphs: Vec<ShapedGlyph>,
 }
 
 pub(super) fn measure_inline_list_marker(
     store: &FontStore,
     input: &MeasureRequest<'_>,
+    max_width: f32,
 ) -> Result<Option<InlineListMarker<f32>>, MeasureError> {
     let Some(attrs) = input.block.attrs.as_ref() else {
         return Ok(None);
@@ -39,13 +57,38 @@ pub(super) fn measure_inline_list_marker(
     let Some(marker) = visible_marker(attrs) else {
         return Ok(None);
     };
-    let (width, size_px) = marker_text_width(store, input, attrs, marker)?;
+    let (family, size_pt) = marker_face(input, attrs);
+    super::input::validate_pt_size(size_pt, "attrs.listMarkerFontSize")?;
+    let size_px = pt_to_px(size_pt);
+    let mut runs = Vec::new();
+    let width = marker_text_width(store, input, attrs, marker, |text, font, level, glyphs| {
+        runs.push(InlineListMarkerRun {
+            text: text.to_owned(),
+            font_id: store.canonical_face(font).to_u32(),
+            level,
+            glyphs,
+        });
+    });
+    let width = width.map_or_else(
+        |_| {
+            runs.clear();
+            marker.chars().count() as f32 * size_px
+        },
+        |(width, _)| width,
+    );
     let space = if attrs.list_marker_suffix.as_deref() == Some("space") {
-        marker_text_width(store, input, attrs, " ")?.0
+        marker_text_width(store, input, attrs, " ", |_, _, _, _| {})
+            .map_or(size_px, |(width, _)| width)
     } else {
         0.0
     };
-    inline_list_marker(attrs, width, space, size_px).map(Some)
+    let mut marker = inline_list_marker(attrs, width, space, size_px, max_width)?;
+    marker.shape = Some(Box::new(InlineListMarkerShape {
+        family: family.to_owned(),
+        size_pt,
+        runs,
+    }));
+    Ok(Some(marker))
 }
 
 pub fn inline_list_marker(
@@ -53,6 +96,7 @@ pub fn inline_list_marker(
     width: f32,
     space: f32,
     size_px: f32,
+    max_width: f32,
 ) -> Result<InlineListMarker<f32>, MeasureError> {
     let advance = match attrs.list_marker_suffix.as_deref() {
         Some("nothing") => width,
@@ -61,11 +105,19 @@ pub fn inline_list_marker(
             let indent = attrs.indent.as_ref();
             let start = indent.and_then(|i| i.left).unwrap_or(0.0)
                 + indent.and_then(|i| i.first_line).unwrap_or(0.0);
+            let available = max_width - start - indent.and_then(|i| i.right).unwrap_or(0.0);
+            let gap = (size_px * 0.5).min((available - width - size_px).max(0.0));
             marker_tab_stop(attrs, start + width, false)?
-                .map_or(width + size_px * 0.5, |stop| stop - start)
+                .map(|stop| stop - start)
+                .filter(|&advance| advance <= available - 1.0)
+                .unwrap_or(width + gap)
         }
     };
-    Ok(InlineListMarker { width, advance })
+    Ok(InlineListMarker {
+        width,
+        advance,
+        shape: None,
+    })
 }
 
 /// Extra first-line indent when a tab-suffixed marker overruns its hanging slot.
@@ -86,7 +138,8 @@ pub(super) fn list_marker_tab_overrun(
     let Some(marker) = visible_marker(attrs) else {
         return Ok(0.0);
     };
-    let (natural_width, size_px) = marker_text_width(store, input, attrs, marker)?;
+    let (natural_width, size_px) =
+        marker_text_width(store, input, attrs, marker, |_, _, _, _| {})?;
     let marker_end_px = indent_left - hanging + natural_width;
     if marker_end_px <= indent_left {
         return Ok(0.0);
@@ -112,13 +165,7 @@ fn visible_marker(attrs: &AttrsIn) -> Option<&str> {
         .filter(|marker| !attrs.list_marker_hidden && !marker.is_empty())
 }
 
-/// Measures marker text and returns its width and font size in pixels.
-fn marker_text_width(
-    store: &FontStore,
-    input: &MeasureRequest<'_>,
-    attrs: &AttrsIn,
-    text: &str,
-) -> Result<(f32, f32), MeasureError> {
+fn marker_face<'a>(input: &'a MeasureRequest<'_>, attrs: &'a AttrsIn) -> (&'a str, f32) {
     // Font precedence: level, first text run, paragraph, document.
     let first_text_run = input.block.runs.iter().find(|r| r.kind == "text");
     let family = attrs
@@ -132,6 +179,18 @@ fn marker_text_width(
         .or_else(|| first_text_run.and_then(|r| r.font_size))
         .or(attrs.default_font_size)
         .unwrap_or(input.defaults.font_size);
+    (family, size_pt)
+}
+
+/// Measures marker text and returns its width and font size in pixels.
+fn marker_text_width(
+    store: &FontStore,
+    input: &MeasureRequest<'_>,
+    attrs: &AttrsIn,
+    text: &str,
+    shaped_run: impl FnMut(&str, FontId, u8, Vec<ShapedGlyph>),
+) -> Result<(f32, f32), MeasureError> {
+    let (family, size_pt) = marker_face(input, attrs);
     super::input::validate_pt_size(size_pt, "attrs.listMarkerFontSize")?;
     let size_px = pt_to_px(size_pt);
 
@@ -153,6 +212,7 @@ fn marker_text_width(
         input.font_chains,
         (attrs.list_marker_bold, attrs.list_marker_italic, family),
         &[],
+        shaped_run,
     )?;
     Ok((natural_width, size_px))
 }

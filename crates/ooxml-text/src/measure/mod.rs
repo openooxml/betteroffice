@@ -134,7 +134,9 @@ pub use input::{
     RunLanguageSlotsIn, SpacingIn, TabStopIn,
 };
 pub use intrinsic::measure_intrinsic_widths;
-pub use list_marker::{InlineListMarker, inline_list_marker};
+pub use list_marker::{
+    InlineListMarker, InlineListMarkerRun, InlineListMarkerShape, inline_list_marker,
+};
 pub use packed_glyphs::{
     GlyphRunHead, GlyphRunWriter, MeasuredGlyph, MeasuredGlyphRun, pack_glyph_runs,
     unpack_glyph_runs,
@@ -401,16 +403,15 @@ pub fn measure_paragraph_typed(
         .collect();
     let with_inline_marker = |mut extent: ParagraphExtentOut| {
         if let Some(line) = extent.lines.first_mut() {
-            line.inline_list_marker = list_marker::measure_inline_list_marker(store, request)
-                .ok()
-                .flatten();
+            line.inline_list_marker =
+                list_marker::measure_inline_list_marker(store, request, request.max_width)?;
         }
-        extent
+        Ok(extent)
     };
 
     if runs.is_empty() {
         if attrs.is_some_and(|a| a.suppress_empty_paragraph_height) {
-            return Ok(ParagraphExtentOut {
+            return with_inline_marker(ParagraphExtentOut {
                 kind: "paragraph",
                 lines: vec![zero_row()],
                 total_height: 0.0,
@@ -434,7 +435,7 @@ pub fn measure_paragraph_typed(
             snap_pitch_px,
             (zones, paragraph_y_offset),
         )
-        .map(with_inline_marker);
+        .and_then(with_inline_marker);
     }
 
     // ---- single whitespace-only text run measures like an empty paragraph ----
@@ -460,10 +461,10 @@ pub fn measure_paragraph_typed(
             snap_pitch_px,
             (zones, paragraph_y_offset),
         )
-        .map(with_inline_marker);
+        .and_then(with_inline_marker);
     }
 
-    let insets = line_insets(store, request)?;
+    let insets = line_insets(store, request, request.max_width)?;
     let prepared = prepare::prepare_runs(store, request)?;
 
     // The paragraph mark sizes any line that ends up with no font-bearing
@@ -482,7 +483,10 @@ pub fn measure_paragraph_typed(
         .map(|font| (font, mark_size_pt));
 
     let body_width = (request.max_width - insets.left - insets.right).max(1.0);
-    let marker_advance = insets.inline_list_marker.map_or(0.0, |marker| marker.advance);
+    let marker_advance = insets
+        .inline_list_marker
+        .as_ref()
+        .map_or(0.0, |marker| marker.advance);
     let first_line_width = (body_width - insets.first_line_offset - marker_advance).max(1.0);
 
     let mut extent = line_filler::fill(line_filler::FillParams {
@@ -528,11 +532,12 @@ struct LineInsets {
 fn line_insets(
     store: &FontStore,
     request: &MeasureRequest<'_>,
+    max_width: f32,
 ) -> Result<LineInsets, MeasureError> {
     let attrs = request.block.attrs.as_ref();
     let indent = attrs.and_then(|a| a.indent.as_ref());
     let hanging = indent.and_then(|i| i.hanging).unwrap_or(0.0);
-    let inline_list_marker = list_marker::measure_inline_list_marker(store, request)?;
+    let inline_list_marker = list_marker::measure_inline_list_marker(store, request, max_width)?;
     let visible_marker = attrs.is_some_and(|a| {
         !a.list_marker_hidden
             && a.list_marker
@@ -586,12 +591,13 @@ pub fn min_content_width_typed(
     {
         return Ok(0.0);
     }
-    let insets = line_insets(store, request)?;
+    let insets = line_insets(store, request, f32::INFINITY)?;
     let prepared = prepare::prepare_runs(store, request)?;
     let (widest, first) = line_filler::unbreakable_spans(&prepared, runs);
+    let marker_advance = insets.inline_list_marker.map_or(0.0, |marker| marker.advance);
     Ok((insets.left
         + insets.right
-        + widest.max(first + insets.first_line_offset + insets.marker_inline_width))
+        + widest.max(first + insets.first_line_offset + marker_advance))
     .max(0.0))
 }
 
