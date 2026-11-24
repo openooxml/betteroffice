@@ -126,3 +126,28 @@ test('insert_table refuses an anchor inside a table cell', async () => {
   const error = await refusal(doc.edit({ version: doc.list().version, edits: [{ op: 'insert_table', after: item(doc, 'Q1').ref, rows: [['x']] }] }));
   expect(error.code).toBe('UNSUPPORTED_TARGET');
 }, 30_000);
+
+test('insert_table after a paragraph that follows a table keeps that paragraph whole', async () => {
+  const doc = await open(await editFixture());
+  const closing = doc.list({ limit: 100 }).items.find(entry => entry.text.endsWith('Closing note.'))!;
+  const receipt = await doc.edit({ version: doc.list().version, edits: [{ op: 'insert_table', after: closing.ref, rows: [['Last']] }] });
+  expect(doc.read(closing.ref).text.endsWith('Closing note.')).toBe(true);
+  expect(doc.read(receipt.results[0].refs![0]!).text).toBe('Last');
+  const bytes = await doc.export();
+  expect(blocks(await documentXml(bytes)).map(textOf).slice(-4)).toEqual(['Quarter|Revenue|Q1|1.0M', 'Closing note.', 'Last', '']);
+  expect((await doc.verify()).reopened).toBe(true);
+}, 30_000);
+
+test('insert_table takes the text width a set_section earlier in the batch leaves', async () => {
+  const doc = await open(await editFixture());
+  await doc.edit({
+    version: doc.list().version,
+    edits: [
+      { op: 'set_section', section: 1, margins: { left: 720, right: 720 } },
+      { op: 'insert_table', after: item(doc, 'Quarterly report').ref, rows: [['a', 'b']] },
+    ],
+  });
+  const table = tables(await documentXml(await doc.export()))[0]!;
+  expect(table).toContain('<w:tblW w:w="10800" w:type="dxa"/>');
+  expect(table).toContain('<w:gridCol w:w="5400"/><w:gridCol w:w="5400"/>');
+}, 30_000);

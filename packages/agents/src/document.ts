@@ -1710,10 +1710,9 @@ export class DocxAgentDocument {
         if (p.story !== 'body') throw new DocumentToolError('UNSUPPORTED_TARGET', 'Tables are inserted after a main body paragraph, not inside tables, content controls, headers, footers, notes or text boxes.');
         edit.rows.forEach(row => row.forEach(text => lineText(text)));
         const styleId = edit.style ? resolveStyle(this.tableStyles(), edit.style, 'Table') : undefined;
-        const width = this.textWidth(p);
         return draft => {
           requireParagraph(draft, target);
-          return { result: {}, created: insertTable(draft, target, edit.rows, width, styleId) };
+          return { result: {}, created: insertTable(draft, target, edit.rows, styleId) };
         };
       }
       case 'insert_table_row': {
@@ -1768,14 +1767,6 @@ export class DocxAgentDocument {
     return (this.session.materializeDocx()?.package.styles?.styles ?? [])
       .filter(style => style.type === 'table')
       .map(style => ({ id: style.styleId, name: style.name, isDefault: !!style.default }));
-  }
-
-  /** The text width in twips of the section holding body paragraph `p`. */
-  private textWidth(p: Paragraph): number {
-    const number = this.paragraphs.filter(paragraph => paragraph.story === 'body').indexOf(p) + 1;
-    const sections = this.session.listSections();
-    const { resolved } = sections.find(section => number >= section.firstParagraph && number <= section.lastParagraph) ?? sections.at(-1) ?? { resolved: {} as Record<string, number | undefined> };
-    return Math.max(720, (resolved.pageWidth ?? 12240) - (resolved.marginLeft ?? 1440) - (resolved.marginRight ?? 1440) - (resolved.gutter ?? 0));
   }
 
   private languageStyles(): ParagraphStyle[] {

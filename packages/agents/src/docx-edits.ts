@@ -192,15 +192,24 @@ export function insertTableRow(draft: YrsSession, target: DocxParagraphTarget, p
 
 const SINGLE_BORDER = { style: 'single', size: 4, color: { rgb: '000000' } };
 
-/** Inserts a table of `rows` after the body paragraph `target`, `width` twips wide, styled by `styleId` or else with single cell borders. */
-export function insertTable(draft: YrsSession, target: DocxParagraphTarget, rows: readonly (readonly string[])[], width: number, styleId?: string): DocxParagraphTarget[] {
+/** The text width in twips of the section holding body paragraph `paraId`. */
+function textWidth(draft: YrsSession, paraId: string): number {
+  const number = draft.paragraphs('body').findIndex(paragraph => paragraph.paraId === paraId) + 1;
+  const sections = draft.listSections();
+  const { resolved } = sections.find(section => number >= section.firstParagraph && number <= section.lastParagraph) ?? sections.at(-1) ?? { resolved: {} as Record<string, number | undefined> };
+  return Math.max(720, (resolved.pageWidth ?? 12240) - (resolved.marginLeft ?? 1440) - (resolved.marginRight ?? 1440) - (resolved.gutter ?? 0));
+}
+
+/** Inserts a table of `rows` after the body paragraph `target`, as wide as its section's text, styled by `styleId` or else with single cell borders. */
+export function insertTable(draft: YrsSession, target: DocxParagraphTarget, rows: readonly (readonly string[])[], styleId?: string): DocxParagraphTarget[] {
   const columns = Math.max(...rows.map(row => row.length));
+  const width = textWidth(draft, target.paraId);
   const segments = draft.storySegments(target.story);
   const mark = segments.findIndex(segment => segment.kind === 'pilcrow' && segment.paraId === target.paraId);
   const next = segments[mark + 1];
   const following = next && next.kind !== 'embed' ? segments.slice(mark + 1).find((segment): segment is Pilcrow => segment.kind === 'pilcrow') : undefined;
-  const anchor = draft.paragraphs(target.story).find(paragraph => paragraph.paraId === target.paraId)!;
-  const at = following ? { story: target.story, paraId: following.paraId, offset: 0 } : { ...target, offset: anchor.text.length };
+  const end = draft.paragraphSpans(target.story).find(span => span.paraId === target.paraId)!.length;
+  const at = following ? { story: target.story, paraId: following.paraId, offset: 0 } : { ...target, offset: end };
   const borders = styleId ? undefined : { top: SINGLE_BORDER, bottom: SINGLE_BORDER, left: SINGLE_BORDER, right: SINGLE_BORDER };
   const column = Math.max(1, Math.floor(width / columns));
   const table: Parameters<YrsSession['insertTableFragment']>[1] = {
