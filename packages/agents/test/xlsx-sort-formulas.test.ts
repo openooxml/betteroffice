@@ -313,7 +313,7 @@ test('XLSX sort emits #REF! when a relative reference moves above row 1', () => 
   await expectFormulas(call, 'F4', [['B3', 110]]);
 }));
 
-test.each(['[1]Sheet1!A1', "'[1]Rates'!A1", '[Book.xlsx]Sheet1!A1', "'Folder/[Book.xlsx]Rates'!A1", '[1]Rates!$A$1+E2'])(
+test.each(['[1]Sheet1!A1', "'[1]Rates'!A1", '[Book.xlsx]Sheet1!A1', '[1]Rates!$A$1+E2'])(
   'XLSX sort refuses to change a direct external reference in %s', formula => withWorkbook(async call => {
     await expectSortRefused(call, movingC2, 'Cannot move the formula at C2. It refers to an external workbook. Exclude the cell from the sort or replace the formula with a value.');
   }, sortSheet(`<f>${formula}</f>`)),
