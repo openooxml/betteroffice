@@ -336,9 +336,7 @@ export function createDefaultFontPainter(
 
 /**
  * The faces the editor paints `fonts` with, for a PNG export to paint the same:
- * the bundled metric-compatible or same-family face, fetched as the editor
- * fetches it. A face the editor would use but cannot fetch rejects with
- * `font-unavailable`, so the export never paints a substitute for it.
+ * the bundled metric-compatible or same-family face, fetched as the editor fetches it.
  */
 export async function exportFaces(
   fonts: readonly XlsxPngFont[], decoder: WorkbookSession['call']['decodeFontFace'] | null | undefined,
@@ -354,7 +352,11 @@ export async function exportFaces(
     if (!face || !load) continue;
     let bytes: ArrayBuffer;
     try { bytes = await load(); }
-    catch {
+    catch (error) {
+      if (isImplicitFontCdnError(error) && (error.diagnostic.pack === 'cjk' || error.diagnostic.pack === 'intl')) {
+        reportImplicitCdnFailure(error);
+        continue;
+      }
       throw new PngExportError('font-unavailable', `The font "${font.family}" could not load, so the sheet was not exported with a substitute.`);
     }
     if (bytes.byteLength !== face.byteLength) continue;
