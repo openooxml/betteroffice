@@ -3786,25 +3786,35 @@ fn paragraph_content_width(
         .attrs
         .as_ref()
         .and_then(|attrs| attrs.indent.as_ref());
-    let edge = |value: Option<f64>| value.unwrap_or(0.0);
-    let first_line = indent.map_or(0.0, |indent| edge(indent.first_line));
-    let sides = indent.map_or(0.0, |indent| edge(indent.left) + edge(indent.right));
     let extent = measure_paragraph(paragraph, budget, config)?;
+    if let Some(marker) = extent
+        .lines
+        .first()
+        .and_then(|line| line.inline_list_marker.as_ref())
+    {
+        let edge = |value: Option<f64>| value.unwrap_or(0.0);
+        let first_line = indent.map_or(0.0, |indent| edge(indent.first_line));
+        let sides = indent.map_or(0.0, |indent| edge(indent.left) + edge(indent.right));
+        let first_line_advance = first_line + marker.advance;
+        return Ok(extent
+            .lines
+            .iter()
+            .enumerate()
+            .map(|(index, line)| {
+                sides + line.width + if index == 0 { first_line_advance } else { 0.0 }
+            })
+            .fold(0.0_f64, f64::max));
+    }
+
+    let edge = |value: Option<f64>| value.unwrap_or(0.0).max(0.0);
+    let first_line = indent.map_or(0.0, |indent| edge(indent.first_line));
     let widest = extent
         .lines
         .iter()
         .enumerate()
-        .map(|(index, line)| {
-            sides + line.width
-                + if index == 0 {
-                    first_line
-                        + line.inline_list_marker.as_ref().map_or(0.0, |marker| marker.advance)
-                } else {
-                    0.0
-                }
-        })
+        .map(|(index, line)| line.width + if index == 0 { first_line } else { 0.0 })
         .fold(0.0_f64, f64::max);
-    Ok(widest)
+    Ok(widest + indent.map_or(0.0, |indent| edge(indent.left) + edge(indent.right)))
 }
 
 /// Per-column widest unwrapped content, for `columns` only; every other entry

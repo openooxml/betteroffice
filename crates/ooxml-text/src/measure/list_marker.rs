@@ -46,6 +46,7 @@ pub(super) fn measure_inline_list_marker(
     store: &FontStore,
     input: &MeasureRequest<'_>,
     max_width: f32,
+    allow_metric_fallback: bool,
 ) -> Result<Option<InlineListMarker<f32>>, MeasureError> {
     let Some(attrs) = input.block.attrs.as_ref() else {
         return Ok(None);
@@ -69,16 +70,20 @@ pub(super) fn measure_inline_list_marker(
             glyphs,
         });
     });
-    let width = width.map_or_else(
-        |_| {
+    let width = match width {
+        Ok((width, _)) => width,
+        Err(_) if allow_metric_fallback => {
             runs.clear();
             marker.chars().count() as f32 * size_px
-        },
-        |(width, _)| width,
-    );
+        }
+        Err(error) => return Err(error),
+    };
     let space = if attrs.list_marker_suffix.as_deref() == Some("space") {
-        marker_text_width(store, input, attrs, " ", |_, _, _, _| {})
-            .map_or(size_px, |(width, _)| width)
+        match marker_text_width(store, input, attrs, " ", |_, _, _, _| {}) {
+            Ok((width, _)) => width,
+            Err(_) if allow_metric_fallback => size_px,
+            Err(error) => return Err(error),
+        }
     } else {
         0.0
     };

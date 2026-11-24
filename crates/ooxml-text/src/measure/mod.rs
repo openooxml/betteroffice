@@ -404,7 +404,7 @@ pub fn measure_paragraph_typed(
     let with_inline_marker = |mut extent: ParagraphExtentOut| {
         if let Some(line) = extent.lines.first_mut() {
             line.inline_list_marker =
-                list_marker::measure_inline_list_marker(store, request, request.max_width)?;
+                list_marker::measure_inline_list_marker(store, request, request.max_width, true)?;
         }
         Ok(extent)
     };
@@ -537,7 +537,8 @@ fn line_insets(
     let attrs = request.block.attrs.as_ref();
     let indent = attrs.and_then(|a| a.indent.as_ref());
     let hanging = indent.and_then(|i| i.hanging).unwrap_or(0.0);
-    let inline_list_marker = list_marker::measure_inline_list_marker(store, request, max_width)?;
+    let inline_list_marker =
+        list_marker::measure_inline_list_marker(store, request, max_width, false)?;
     let visible_marker = attrs.is_some_and(|a| {
         !a.list_marker_hidden
             && a.list_marker

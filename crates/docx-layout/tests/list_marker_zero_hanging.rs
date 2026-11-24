@@ -60,12 +60,16 @@ fn zero_hanging_marker_paints_at_first_line_indent_and_text_at_next_tab() {
         &build_display_list_json_with_fonts(&input.to_string(), &store).unwrap(),
     )
     .unwrap();
-    let extent = |text, marker| {
+    let extent = |text: &str, marker: Option<bool>| {
         list.pages[0]
             .primitives
             .iter()
             .find_map(|primitive| match primitive {
-                Primitive::GlyphRun(run) if run.text == text && run.attrs.list_marker == marker => {
+                Primitive::GlyphRun(run)
+                    if !run.text.is_empty()
+                        && text.starts_with(run.text.as_str())
+                        && run.attrs.list_marker == marker =>
+                {
                     Some((
                         run.glyphs[0].x,
                         run.glyphs.iter().map(|glyph| glyph.advance).sum::<f64>(),

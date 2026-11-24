@@ -109,12 +109,16 @@ fn document(heading: Heading) -> Vec<u8> {
         ("[Content_Types].xml", types),
         (
             "_rels/.rels",
-            format!(r#"<Relationships xmlns="{PACKAGE_REL}"><Relationship Id="main" Type="{REL}/officeDocument" Target="word/document.xml"/></Relationships>"#),
+            format!(
+                r#"<Relationships xmlns="{PACKAGE_REL}"><Relationship Id="main" Type="{REL}/officeDocument" Target="word/document.xml"/></Relationships>"#
+            ),
         ),
         ("word/_rels/document.xml.rels", relationships),
         (
             "word/document.xml",
-            format!(r#"<w:document xmlns:w="{W}" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body>{body}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr></w:body></w:document>"#),
+            format!(
+                r#"<w:document xmlns:w="{W}" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body>{body}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr></w:body></w:document>"#
+            ),
         ),
         ("word/styles.xml", styles),
         ("word/numbering.xml", numbering),
