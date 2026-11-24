@@ -7,7 +7,8 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { XlsxCellValue } from '@betteroffice/xlsx';
 import JSZip from 'jszip';
 import { createOfficeMcpServer } from '../src/mcp';
-import type { XlsxAgentWorkbook } from '../src/xlsx';
+import { DocumentToolError } from '../src/types';
+import { attachXlsx, openXlsx, type XlsxAgentWorkbook } from '../src/xlsx';
 import type { XlsxWriteEdit } from '../src/xlsx-operations';
 import { implicitFontWorkbook } from './format-fixtures';
 
@@ -46,8 +47,27 @@ async function withWorkbook(run: (call: Call) => Promise<void>, sheetData = '<sh
   }
 }
 
+async function withUnsupportedHandle(run: (book: XlsxAgentWorkbook, handle: XlsxAgentWorkbook['handle']) => void) {
+  const owner = await openXlsx(await implicitFontWorkbook());
+  const { handle } = owner;
+  let book: XlsxAgentWorkbook | undefined;
+  try {
+    const written = owner.writeRanges({ version: handle.version(), edits: [sales, doubled] });
+    expect(written.applied).toBe(true);
+    book = attachXlsx(new Proxy(handle, {}));
+    run(book, handle);
+  } finally {
+    book?.close();
+    owner.close();
+  }
+}
+
 async function readRange(call: Call, range: string, sheet = 'Sales') {
   return await call('xlsx_read_range', { sheet, range }) as ReturnType<XlsxAgentWorkbook['readCells']>;
+}
+
+function cellContents({ cells }: ReturnType<XlsxAgentWorkbook['readCells']>) {
+  return cells.map(({ a1, formula, value }) => ({ a1, formula, value }));
 }
 
 async function writeAndSort(call: Call, edits: XlsxWriteEdit[], options: SortOptions) {
@@ -64,7 +84,7 @@ async function expectSortRefused(call: Call, options: SortOptions, message: stri
   expect(refused).toEqual({ code: 'INVALID_SORT', message });
   const after = await readRange(call, options.range, options.sheet);
   expect(after.version).toBe(before.version);
-  expect(after.cells.map(({ a1, formula, value }) => ({ a1, formula, value }))).toEqual(before.cells.map(({ a1, formula, value }) => ({ a1, formula, value })));
+  expect(cellContents(after)).toEqual(cellContents(before));
 }
 
 async function expectValues(call: Call, range: string, expected: (string | number | null)[]) {
@@ -91,6 +111,40 @@ test('XLSX sort updates own-row formulas when sorting numbers descending', () =>
   await expectValues(call, 'A2:B4', ['Mar', 120, 'Feb', 110, 'Jan', 100]);
   await expectFormulas(call, 'F2:F4', [['B2*2', 240], ['B3*2', 220], ['B4*2', 200]]);
 }));
+
+test('XLSX sort refuses moving formulas on an unsupported attached handle', () => withUnsupportedHandle((book, handle) => {
+  const { sheet, range } = descending;
+  const before = cellContents(book.readCells({ sheet, range }));
+  const version = handle.version();
+  let refusal: unknown;
+  try { book.sortRange({ ...descending, version }); }
+  catch (error) { refusal = error; }
+  expect(refusal).toBeInstanceOf(DocumentToolError);
+  expect(refusal).toMatchObject({ code: 'INVALID_SORT' });
+  expect(handle.version()).toBe(version);
+  expect(cellContents(book.readCells({ sheet, range }))).toEqual(before);
+}));
+
+test('XLSX sort reorders values on an unsupported attached handle when no formulas move', () => withUnsupportedHandle((book, handle) => {
+  const sorted = book.sortRange({ ...descending, range: 'A1:B4', version: handle.version() });
+  expect(sorted.applied).toBe(true);
+  const { cells } = book.readCells({ sheet: 'Sales', range: 'A1:B4' });
+  expect(cells.map(cell => cell.value)).toEqual([
+    { kind: 'text', value: 'Month' }, { kind: 'text', value: 'North' },
+    { kind: 'text', value: 'Mar' }, { kind: 'number', value: 120 },
+    { kind: 'text', value: 'Feb' }, { kind: 'number', value: 110 },
+    { kind: 'text', value: 'Jan' }, { kind: 'number', value: 100 },
+  ]);
+}));
+
+test('XLSX sort refuses a range that cuts through an array formula', () => withWorkbook(async call => {
+  const before = await readRange(call, 'B2:F4');
+  const refused = await call('xlsx_sort', { ...descending, range: 'B3:F4', header: false, version: before.version }, true);
+  expect(refused).toMatchObject({ code: 'locked-target', message: 'F3 is filled by an array formula' });
+  const after = await readRange(call, 'B2:F4');
+  expect(after.version).toBe(before.version);
+  expect(cellContents(after)).toEqual(cellContents(before));
+}, '<sheetData><row r="2"><c r="B2"><v>100</v></c><c r="F2"><f t="array" ref="F2:F3">B2:B3*2</f><v>200</v></c></row><row r="3"><c r="B3"><v>110</v></c><c r="F3"><v>220</v></c></row><row r="4"><c r="B4"><v>120</v></c></row></sheetData>'));
 
 test('XLSX sort updates own-row formulas when sorting text ascending', () => withWorkbook(async call => {
   await writeAndSort(call, [sales, doubled], { ...descending, keys: [{ column: 'A', order: 'asc' }] });
