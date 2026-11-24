@@ -548,7 +548,7 @@ export function resolveMetricCompatFace(
   if (family === 'Selawik') {
     if (italic) return undefined;
     const key = wordFamily.trim().toLowerCase();
-    const target = bold && ['segoe ui semibold', 'segoe ui light', 'segoe ui semilight'].includes(key) ? 'segoe ui' : key;
+    const target = bold && key === 'segoe ui semibold' ? 'segoe ui' : key;
     const weight = bold && target === 'segoe ui' ? 700 : 400;
     return BUNDLED_FONTS.find(
       (f) => f.metricCompatWith?.toLowerCase() === target && f.weight === weight,

@@ -73,7 +73,7 @@ describe('CDN font provider', () => {
     intercept({
       [`${baseUrl}Carlito-Regular.ttf.zst`]: new URL('../../fonts-latin/assets/Carlito-Regular.ttf.zst', import.meta.url).pathname,
       [`${baseUrl}Selawik-Regular.ttf.zst`]: new URL('../../fonts-latin/assets/Selawik-Regular.ttf.zst', import.meta.url).pathname,
-      [`${baseUrl}Selawik-Bold.ttf.zst`]: new URL('../../fonts-latin/assets/Selawik-Bold.ttf.zst', import.meta.url).pathname,
+      [`${baseUrl}Selawik-Semilight.ttf.zst`]: new URL('../../fonts-latin/assets/Selawik-Semilight.ttf.zst', import.meta.url).pathname,
     }, requested);
     const provider = createFontProvider({ baseUrl });
     const load = provider.resolve('Segoe UI Semilight', true, false)!;
@@ -81,7 +81,7 @@ describe('CDN font provider', () => {
     await provider.resolveLastResort('Google Sans', false, false)();
     expect(requested).toEqual([`${baseUrl}Carlito-Regular.ttf.zst`]);
     expect((await load()).byteLength).toBeGreaterThan(0);
-    expect(requested.slice(1).sort()).toEqual([`${baseUrl}Selawik-Regular.ttf.zst`, `${baseUrl}Selawik-Bold.ttf.zst`].sort());
+    expect(requested.slice(1).sort()).toEqual([`${baseUrl}Selawik-Regular.ttf.zst`, `${baseUrl}Selawik-Semilight.ttf.zst`].sort());
   });
 
   test('custom origins remain isolated and failed downloads can retry', async () => {

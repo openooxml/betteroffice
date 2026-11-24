@@ -291,9 +291,8 @@ for (const family of ['Segoe UI Light', 'Segoe UI Semilight', 'Segoe UI', 'Segoe
       expect(registered).toEqual([new Uint8Array(await provider.resolveLastResort(family, bold, true, 'word')())]);
       expect(resolveLastResortFace(family, bold, true, 'word').style).toBe('italic');
     });
-    const measureAs = bold ? 'Segoe UI' : family;
     for (const failPrimary of [false, true]) {
-      test(`${family} ${bold} upright uses ${failPrimary ? 'Liberation measurement views' : `Selawik with the ${measureAs} measurement view`}`, async () => {
+      test(`${family} ${bold} upright uses ${failPrimary ? 'Liberation measurement views' : 'Selawik with its own Segoe UI measurement view'}`, async () => {
         const provider = createFontProvider();
         const primary = provider.resolve(family, bold, false)!;
         const registered: Uint8Array[] = [];
@@ -321,9 +320,9 @@ for (const family of ['Segoe UI Light', 'Segoe UI Semilight', 'Segoe UI', 'Segoe
           expect(substitutes).toContainEqual([1, family]);
         } else {
           expect(chain).toEqual([101, 102]);
-          expect(registered[0]).toEqual(new Uint8Array(await provider.resolve(measureAs, bold, false)!()));
+          expect(registered[0]).toEqual(new Uint8Array(await primary()));
           expect(registered[1]).toEqual(lastResort);
-          expect(substitutes).toContainEqual([1, measureAs]);
+          expect(substitutes).toContainEqual([1, primary.measureAs ?? family]);
           expect(substitutes).toContainEqual([2, family]);
         }
       });
