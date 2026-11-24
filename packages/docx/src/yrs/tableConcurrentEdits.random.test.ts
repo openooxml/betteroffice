@@ -72,9 +72,7 @@ test('no live table names a hidden or missing cell story after any step of rando
     const RAW_OPS = new Set(['detachControl', 'detachTable', 'moveTable', 'shareCell', 'reattachControl']);
     const danglingLogged = new Set<string>();
     const danglingSeeds = new Set<number>();
-    // A remote undo right after split cells or a deleted column still leaves a missing cell story
-    // in this seed (seed 23 before text edits joined the mix).
-    const KNOWN_UNFIXED_VALID_SEEDS = new Set([41]);
+    const KNOWN_UNFIXED_VALID_SEEDS = new Set([23]);
     const familyTotals: Record<string, { danglingSteps: number; violations: number; projectionThrows: number; peerMissingSteps: number; invalidSeeds: number; peerSkipped: number; reused: number; built: number }> = {};
     const cacheCounts = () => (selection as { cellLocationCacheCounts?: () => { built: number; reused: number } }).cellLocationCacheCounts?.() ?? { built: 0, reused: 0 };
     /** Local edits that applied and left the cell structure key as it was, per family and op. */
@@ -138,40 +136,56 @@ test('no live table names a hidden or missing cell story after any step of rando
       const textStories = () => liveStories().filter((story) => {
         try { return engine.paragraphs(story).length > 0; } catch { return false; }
       });
+      /**
+       * The paragraphs of `story` in its own offset units, where an embed (a table, a note
+       * reference, an image) counts one: each paragraph's length and the ranges of its text runs.
+       */
+      const paragraphUnits = (story: string) => {
+        const found: { paraId: string; length: number; runs: [number, number][] }[] = [];
+        let offset = 0;
+        let runs: [number, number][] = [];
+        for (const segment of engine.geometryReader.storySegments(story)) {
+          if (segment.kind === 'pilcrow') { found.push({ paraId: segment.paraId, length: offset, runs }); offset = 0; runs = []; continue; }
+          if (segment.kind === 'text' && segment.text.length > 0) runs.push([offset, offset + segment.text.length]);
+          offset += units(segment);
+        }
+        return found;
+      };
       /** A paragraph of a random text story whose paragraphs `fits`. */
-      const paragraphIn = (fits: (paragraphs: { text: string }[]) => boolean = (paragraphs) => paragraphs.length > 0) => {
-        const story = pick(textStories().filter((id) => { try { return fits(engine.paragraphs(id)); } catch { return false; } }));
+      const paragraphIn = (fits: (paragraphs: ReturnType<typeof paragraphUnits>) => boolean = (paragraphs) => paragraphs.length > 0) => {
+        const story = pick(textStories().filter((id) => { try { return fits(paragraphUnits(id)); } catch { return false; } }));
         if (!story) return undefined;
-        const paragraphs = engine.paragraphs(story);
+        const paragraphs = paragraphUnits(story);
         const index = Math.floor(next() * paragraphs.length);
         return { story, paragraphs, index, paragraph: paragraphs[index]! };
       };
-      /** A range of one to two units inside one paragraph of a random text story. */
+      /** A range of one to two text units inside one text run of a paragraph of a random text story. */
       const textRange = () => {
-        const at = paragraphIn((paragraphs) => paragraphs.some((paragraph) => paragraph.text.length > 0));
-        const length = at?.paragraph.text.length ?? 0;
-        if (!at || length === 0) return undefined;
-        const start = Math.floor(next() * length);
-        const end = Math.min(length, start + 1 + Math.floor(next() * 2));
+        const at = paragraphIn((paragraphs) => paragraphs.some((paragraph) => paragraph.runs.length > 0));
+        if (!at) return undefined;
+        const [runStart, runEnd] = pick(at.paragraph.runs) ?? [0, 0];
+        if (runEnd === runStart) return undefined;
+        const start = runStart + Math.floor(next() * (runEnd - runStart));
+        const end = Math.min(runEnd, start + 1 + Math.floor(next() * 2));
         const paraId = at.paragraph.paraId;
         return { story: at.story, start: { paraId, offset: start }, end: { paraId, offset: end } };
       };
       const steps: Record<string, () => unknown> = {
         typeText: () => {
           const at = paragraphIn();
-          return at && engine.insertText({ story: at.story, paraId: at.paragraph.paraId, offset: Math.floor(next() * (at.paragraph.text.length + 1)) }, next() < 0.5 ? 'x' : '가');
+          return at && engine.insertText({ story: at.story, paraId: at.paragraph.paraId, offset: Math.floor(next() * (at.paragraph.length + 1)) }, next() < 0.5 ? 'x' : '가');
         },
         deleteText: () => { const range = textRange(); return range && engine.deleteRange(range); },
         replaceText: () => { const range = textRange(); return range && engine.replaceRange(range, next() < 0.5 ? '한' : 'yz'); },
         splitParagraph: () => {
           const at = paragraphIn();
-          return at && engine.splitParagraph({ story: at.story, paraId: at.paragraph.paraId, offset: Math.floor(next() * (at.paragraph.text.length + 1)) });
+          return at && engine.splitParagraph({ story: at.story, paraId: at.paragraph.paraId, offset: Math.floor(next() * (at.paragraph.length + 1)) });
         },
         mergeParagraphs: () => {
           const at = paragraphIn((paragraphs) => paragraphs.length > 1); if (!at) return undefined;
           const index = Math.min(at.index, at.paragraphs.length - 2);
           const [first, second] = [at.paragraphs[index]!, at.paragraphs[index + 1]!];
-          engine.deleteRange({ story: at.story, start: { paraId: first.paraId, offset: first.text.length }, end: { paraId: second.paraId, offset: 0 } });
+          engine.deleteRange({ story: at.story, start: { paraId: first.paraId, offset: first.length }, end: { paraId: second.paraId, offset: 0 } });
           // Across a block embed (a table, a block control) the delete leaves both paragraphs: not a merge.
           return engine.paragraphs(at.story).length < at.paragraphs.length ? true : undefined;
         },
