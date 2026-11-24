@@ -90,6 +90,12 @@ impl ColumnLayout {
     pub fn column_count(&self) -> usize {
         (self.count as usize).clamp(1, MAX_COLUMNS)
     }
+
+    /// This layout with `count` set to [`Self::column_count`].
+    pub fn clamped(mut self) -> Self {
+        self.count = self.column_count() as f64;
+        self
+    }
 }
 
 /// `w:type` on a section break: how the *next* section starts.
@@ -2282,9 +2288,7 @@ impl Input {
     /// [`MAX_COLUMNS`] are unchanged.
     pub fn clamp_column_counts(&mut self) {
         let clamp = |columns: &mut Option<ColumnLayout>| {
-            if let Some(columns) = columns {
-                columns.count = columns.column_count() as f64;
-            }
+            *columns = columns.take().map(ColumnLayout::clamped);
         };
         clamp(&mut self.options.columns);
         for section in self.options.sections.iter_mut().flatten() {

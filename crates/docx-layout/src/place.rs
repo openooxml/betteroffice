@@ -762,6 +762,7 @@ pub fn layout_document_incremental_ranges<F: PartialEq>(
     next_fingerprints: &[F],
     dirty_index: usize,
 ) -> Result<IncrementalLayout, LayoutError> {
+    input.clamp_column_counts();
     let options = &input.options;
     let page_size = options.page_size.clone().unwrap_or(DEFAULT_PAGE_SIZE);
     let margins = resolve_page_margins(options.margins.as_ref());

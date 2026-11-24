@@ -5568,8 +5568,9 @@ fn emit_column_separators(prims: &mut Vec<Primitive>, page: &PageIn) {
         return;
     }
 
-    let width = (content_width - (columns.count - 1) as f64 * columns.gap) / columns.count as f64;
-    for index in 0..columns.count - 1 {
+    let count = columns.count.min(crate::types::MAX_COLUMNS);
+    let width = (content_width - (count - 1) as f64 * columns.gap) / count as f64;
+    for index in 0..count - 1 {
         let x = page.margins.left
             + (index + 1) as f64 * width
             + index as f64 * columns.gap
