@@ -138,6 +138,27 @@ fn lighter_members_of_segoe_ui_keep_their_light_faces_when_bold() {
                     "{base} {suffix} italic={italic}"
                 );
             }
+            let family = format!("{base} {suffix}");
+            if resolve_metric_compat_family(&family).is_some() {
+                continue;
+            }
+            for bold in [false, true] {
+                for (office, sans) in [
+                    (LastResortOffice::Word, "Arial"),
+                    (LastResortOffice::PowerPoint, "Calibri"),
+                ] {
+                    assert_eq!(
+                        resolve_last_resort_face(&family, bold, false, office).family,
+                        "Selawik",
+                        "{family} bold={bold} {office:?}"
+                    );
+                    assert_eq!(
+                        resolve_glyph_fallback_face(&family, bold, false, office),
+                        resolve_metric_compat_face(sans, false, false),
+                        "{family} bold={bold} {office:?}"
+                    );
+                }
+            }
         }
     }
 }

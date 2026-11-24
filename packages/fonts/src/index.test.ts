@@ -213,6 +213,15 @@ describe('resolution', () => {
         for (const italic of [false, true]) {
           expect(resolveLightVariantFace(`${base} ${suffix}`, true, italic)).toBe(resolveMetricCompatFace(base, false, italic));
         }
+        const family = `${base} ${suffix}`;
+        if (resolveMetricCompatFamily(family)) continue;
+        for (const bold of [false, true]) {
+          for (const office of ['word', 'powerpoint'] as const) {
+            const sans = office === 'word' ? 'Arial' : 'Calibri';
+            expect(resolveLastResortFace(family, bold, false, office).family).toBe('Selawik');
+            expect(resolveGlyphFallbackFace(family, bold, false, office)).toBe(resolveMetricCompatFace(sans, false, false));
+          }
+        }
       }
     }
   });
