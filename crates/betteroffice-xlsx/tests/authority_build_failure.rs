@@ -460,7 +460,6 @@ fn non_finite_theme_tint_matches_authority_build() {
 fn thirty_thousand_long_hyperlinks_support_edit_undo_and_reopen() {
     let bytes = long_hyperlink_package(30_000, 300);
     let mut workbook = Workbook::open(&bytes).unwrap();
-    workbook.client_id();
     let applied = workbook
         .apply_edits(&EditRequest {
             expect_version: workbook.version(),
