@@ -373,10 +373,9 @@ test('invalid default font options are refused', async () => {
     { session: 'fonts', incarnation: 'worker', fonts: [], defaultFonts: 'no' as unknown as boolean }, wire.transport)).rejects.toThrow();
 });
 
-function setSlicedCapableBrowser() {
+function setBrowser(userAgent: string) {
   const original = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
-  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: {
-    userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36' } });
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { userAgent } });
   restorers.push(() => {
     if (original) Object.defineProperty(globalThis, 'navigator', original);
     else Reflect.deleteProperty(globalThis, 'navigator');
@@ -384,7 +383,7 @@ function setSlicedCapableBrowser() {
 }
 
 function slicedCapableBrowser() {
-  setSlicedCapableBrowser();
+  setBrowser(chromiumUserAgent);
   const open = spyOn(progressive, 'openSlicedFace').mockRejectedValue(new Error('Network disabled'));
   const load = Object.assign(async () => bytes, { slices: { ref: { format: 1, index: 'x', indexSha256: '' } } });
   spyOn(fontModule.commandFontProvider, 'load').mockResolvedValue({
@@ -421,43 +420,64 @@ function namedFont(family: string): ArrayBuffer {
   return font;
 }
 
-test('prepared CJK coverage follows sliced editor opening and fetches whole bytes on opt-out', async () => {
-  for (const slicedFonts of [true, false]) {
-    const wire = connection(['target']);
-    setSlicedCapableBrowser();
-    const requested = deferred<void>();
-    const font = namedFont('Noto Sans SC');
-    const ensureText = mock(async (_text: string) => 2);
-    const load = Object.assign(mock(async () => { requested.resolve(); return font; }), {
-      slices: { ref: { format: 1, index: 'sc', indexSha256: '' } },
+const chromiumUserAgent = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36';
+const safariUserAgent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/18.0 Safari/605.1.15';
+
+test.each([
+  ['Chromium with slices', chromiumUserAgent, true, true],
+  ['Chromium with opt-out', chromiumUserAgent, false, false],
+  ['Safari with slices requested', safariUserAgent, true, false],
+  ['a worker without page rendering capabilities', chromiumUserAgent, undefined, false],
+] as const)('prepared CJK coverage follows editor opening in %s', async (_, userAgent, slicedFonts, useSlices) => {
+  const wire = connection(['target']);
+  setBrowser(userAgent);
+  if (slicedFonts === undefined) {
+    const canvas = Object.getOwnPropertyDescriptor(globalThis, 'HTMLCanvasElement');
+    Object.defineProperty(globalThis, 'HTMLCanvasElement', { configurable: true, value: undefined });
+    restorers.push(() => {
+      if (canvas) Object.defineProperty(globalThis, 'HTMLCanvasElement', canvas);
+      else Reflect.deleteProperty(globalThis, 'HTMLCanvasElement');
     });
-    const open = spyOn(progressive, 'openSlicedFace').mockImplementation(async () => {
-      requested.resolve();
-      return { revision: 1, bytes: () => font.slice(0), ensureText, prefetch() {} } as never;
-    });
-    restorers.push(() => open.mockRestore());
-    wire.collect.mockReturnValue([{ ...regular, scripts: ['cjk-sc'] }]);
-    wire.provider.mockResolvedValue({
-      resolve: () => undefined, resolveFamily: () => undefined, resolveScriptFallback: () => load as never,
-      resolveLastResort: () => undefined as never,
-    });
-    const prefetch: ClientMessage = { protocol: 1, kind: 'call', id: 99, method: 'prefetchCoverageFonts',
-      args: slicedFonts ? [['cjk-sc']] : [['cjk-sc'], false] };
-    wire.transport.post(prefetch);
-    await withinTestBudget(requested.promise, 'prepared CJK coverage');
-    const { client } = await openWith(wire, { slicedFonts });
-    expect(wire.registered).toEqual(['Noto Sans SC']);
-    if (slicedFonts) {
-      expect(client.state.slicedFamilies).toEqual(['Noto Sans SC']);
-      const read = await client.readCoverageFont!('Noto Sans SC', '汉字', null);
-      expect(read).toEqual({ revision: 2, bytes: font });
-      expect(ensureText).toHaveBeenCalledWith('汉字');
-      expect(load).not.toHaveBeenCalled();
-    } else {
-      expect(client.state.slicedFamilies ?? []).toEqual([]);
-      expect(open).not.toHaveBeenCalled();
-      expect(load).toHaveBeenCalled();
-    }
+  }
+  const requested = deferred<void>();
+  const font = namedFont('Noto Sans SC');
+  const ensureText = mock(async (_text: string) => 2);
+  const load = Object.assign(mock(async () => { requested.resolve(); return font; }), {
+    slices: { ref: { format: 1, index: 'sc', indexSha256: '' } },
+  });
+  const open = spyOn(progressive, 'openSlicedFace').mockImplementation(async () => {
+    requested.resolve();
+    return { revision: 1, bytes: () => font.slice(0), ensureText, prefetch() {},
+      chunksOf: () => [], loadedChunks: () => new Set<number>() } as never;
+  });
+  restorers.push(() => open.mockRestore());
+  wire.collect.mockReturnValue([{ ...regular, scripts: ['cjk-sc'] }]);
+  wire.provider.mockResolvedValue({
+    resolve: () => undefined, resolveFamily: () => undefined, resolveScriptFallback: () => load as never,
+    resolveLastResort: () => undefined as never,
+  });
+  const prefetch: ClientMessage = { protocol: 1, kind: 'call', id: 99, method: 'prefetchCoverageFonts',
+    args: slicedFonts === undefined ? [['cjk-sc']] : [['cjk-sc'], slicedFonts] };
+  wire.transport.post(prefetch);
+  await withinTestBudget(requested.promise, 'prepared CJK coverage');
+  const prefetched = open.mock.calls.length ? 'sliced' : 'whole';
+  const { client } = await openWith(wire, { slicedFonts });
+  expect(wire.registered).toEqual(['Noto Sans SC']);
+  expect({
+    prefetched,
+    opened: client.state.slicedFamilies?.length ? 'sliced' : 'whole',
+  }).toEqual(useSlices ? { prefetched: 'sliced', opened: 'sliced' } : { prefetched: 'whole', opened: 'whole' });
+  if (useSlices) {
+    expect(client.state.slicedFamilies).toEqual(['Noto Sans SC']);
+    const read = await client.readCoverageFont!('Noto Sans SC', '汉字', null);
+    expect(read?.revision).toBe(2);
+    expect(new Uint8Array(read!.bytes!)).toEqual(new Uint8Array(font));
+    expect(ensureText).toHaveBeenCalledWith('汉字');
+    expect(load).not.toHaveBeenCalled();
+  } else {
+    expect(open).not.toHaveBeenCalled();
+    expect(load).toHaveBeenCalled();
+    expect(new Uint8Array(wire.faces[0]!.bytes)).toEqual(new Uint8Array(font));
   }
 });
 
