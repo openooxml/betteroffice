@@ -7,6 +7,7 @@ import { spyOnFontFetch } from '../../../fonts/src/fontFetch.test-support';
 import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdnRuntime';
 import * as progressive from '@betteroffice/fonts/progressive';
 import { configureFontCdn as configureTestFontCdn } from '../../../fonts/src/fontCdn';
+import type { FontCdnDiagnostic } from '../../../../shared/fontCdnDiagnostics';
 import type { DefaultFontFace } from '../../../../shared/pptxDefaultFonts';
 import { commandFontProvider, createCommandDefaultFonts, prefetchCoverageFaces } from './commandDefaultFonts';
 import { createSlicedFontFaces } from './commandSlicedFonts';
@@ -52,6 +53,23 @@ function retryClock() {
 }
 
 afterEach(() => { for (const restore of restorers.splice(0).reverse()) restore(); });
+
+function packDiagnostics(): FontCdnDiagnostic[] {
+  const diagnostics: FontCdnDiagnostic[] = [];
+  const dispatch = Object.getOwnPropertyDescriptor(globalThis, 'dispatchEvent');
+  Object.defineProperty(globalThis, 'dispatchEvent', {
+    configurable: true,
+    value(event: CustomEvent<FontCdnDiagnostic>) {
+      if (event.type === 'betteroffice:font-pack-diagnostic') diagnostics.push(event.detail);
+      return true;
+    },
+  });
+  restorers.push(() => {
+    if (dispatch) Object.defineProperty(globalThis, 'dispatchEvent', dispatch);
+    else Reflect.deleteProperty(globalThis, 'dispatchEvent');
+  });
+  return diagnostics;
+}
 
 test('the manager decodes packed faces with the worker engine', async () => {
   const create = spyOn(fonts, 'createFontProvider');
@@ -279,6 +297,80 @@ test.each([false, true])('an absent intl pack settles without fetching a substit
     create.mockRestore();
     fetch.mockRestore();
     warn.mockRestore();
+    restore();
+    setFontCdnConfiguration(previous);
+  }
+});
+
+test('primary and coverage misses emit one diagnostic per pack in each session', async () => {
+  const previous = getFontCdnConfiguration();
+  const restore = withBrowserFontGlobals(false);
+  const cdn = { baseUrl: 'https://cdn.jsdelivr.net/npm/', timeoutMs: 10_000, implicit: true } as const;
+  const runtime = fontRuntimeWithoutPacks(new URL('https://primary-coverage.example/'));
+  const create = spyOn(fonts, 'createFontProvider').mockImplementation(runtime.createFontProvider);
+  const fetch = spyOnFontFetch((input) => String(input).includes('/fonts-intl@')
+    ? Promise.resolve(new Response(null, { status: 403 })) : fontAssetResponse(input));
+  const warning = spyOn(console, 'warn').mockImplementation(() => {});
+  const diagnostics = packDiagnostics();
+  const primary = { ...regular, family: 'Noto Sans Devanagari' };
+  const diagnostic = expect.objectContaining({ pack: 'intl', reason: 'cdn-unavailable' });
+  try {
+    for (let session = 1; session <= 2; session += 1) {
+      const manager = createCommandDefaultFonts([regular], () => [primary, { ...regular, scripts: ['thai'] }],
+        () => {}, () => {}, undefined, undefined, () => commandFontProvider.load(cdn));
+      try {
+        expect(await manager.load()).toEqual([primary]);
+        expect(diagnostics).toEqual(Array(session).fill(diagnostic));
+      } finally { manager.dispose(); }
+    }
+    expect(fetch.mock.calls.filter(([url]) => String(url).includes('/fonts-intl@'))).toHaveLength(1);
+  } finally {
+    create.mockRestore();
+    fetch.mockRestore();
+    warning.mockRestore();
+    restore();
+    setFontCdnConfiguration(previous);
+  }
+});
+
+const slicedMisses = [403, 404, 410].flatMap<[number, boolean]>((status) => [[status, false], [status, true]]);
+
+test.each(slicedMisses)('a sliced HTTP %s miss skips the whole face and emits at most one diagnostic (implicit: %s)', async (status, implicit) => {
+  const previous = getFontCdnConfiguration();
+  const restore = withBrowserFontGlobals(false);
+  const runtime = fontRuntimeWithoutPacks();
+  const create = spyOn(fonts, 'createFontProvider').mockImplementation(runtime.createFontProvider);
+  const fetch = spyOnFontFetch(async () => new Response(null, { status }));
+  const warning = spyOn(console, 'warn').mockImplementation(() => {});
+  const diagnostics = packDiagnostics();
+  const sliced = createSlicedFontFaces();
+  const navigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { userAgent: 'Chrome/149.0' } });
+  const advance = retryClock();
+  const wanted = { ...regular, scripts: ['cjk-jp'] };
+  const cdn = implicit ? { baseUrl: 'https://cdn.jsdelivr.net/npm/', timeoutMs: 10_000, implicit }
+    : { baseUrl: 'https://sliced-miss.example/', timeoutMs: 10_000 };
+  let source: ReturnType<typeof commandFontProvider.load> | undefined;
+  const shared = () => (source ??= commandFontProvider.load(cdn));
+  const manager = createCommandDefaultFonts([regular], () => [wanted], () => {}, () => {},
+    undefined, undefined, shared, sliced);
+  try {
+    prefetchCoverageFaces(['cjk-jp'], Promise.resolve(), shared, true);
+    await sleep(0);
+    expect(await manager.load()).toEqual([]);
+    advance(60_001);
+    expect(manager.hasPending()).toBe(false);
+    expect(await manager.load()).toEqual([]);
+    expect(fetch.mock.calls.map(([url]) => String(url))).toEqual([expect.stringMatching(/\/slices\.json$/)]);
+    expect(diagnostics).toEqual(implicit ? [expect.objectContaining({ pack: 'cjk', reason: 'cdn-unavailable' })] : []);
+  } finally {
+    manager.dispose();
+    sliced.dispose();
+    if (navigator) Object.defineProperty(globalThis, 'navigator', navigator);
+    else Reflect.deleteProperty(globalThis, 'navigator');
+    create.mockRestore();
+    fetch.mockRestore();
+    warning.mockRestore();
     restore();
     setFontCdnConfiguration(previous);
   }
