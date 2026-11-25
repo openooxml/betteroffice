@@ -48,11 +48,11 @@ test.skipIf(engineKind === 'native')('command frames bound retries when the meta
   const converterUrl = metafileWasmAssetUrl().href;
   const originalFetch = globalThis.fetch;
   let attempts = 0;
-  const fetchSpy = spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+  const fetchSpy = spyOn(globalThis, 'fetch').mockImplementation((async (input: RequestInfo | URL, init?: RequestInit) => {
     if (String(input instanceof Request ? input.url : input) !== converterUrl) return originalFetch(input, init);
     attempts++;
     return new Response(null, { status: 404 });
-  });
+  }) as typeof fetch);
 
   let client: PresentationCommandClient | undefined;
   try {
@@ -83,11 +83,11 @@ test.skipIf(engineKind === 'native')('a command frame retries the converter afte
   const converterWasm = new Uint8Array(await readFile(converterUrl));
   const originalFetch = globalThis.fetch;
   let attempts = 0;
-  const fetchSpy = spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+  const fetchSpy = spyOn(globalThis, 'fetch').mockImplementation((async (input: RequestInfo | URL, init?: RequestInit) => {
     if (String(input instanceof Request ? input.url : input) !== converterUrl.href) return originalFetch(input, init);
     if (++attempts === 1) return new Response(null, { status: 404 });
     return new Response(converterWasm, { headers: { 'Content-Type': 'application/wasm' } });
-  });
+  }) as typeof fetch);
   let now = Date.now();
   const clock = spyOn(Date, 'now').mockImplementation(() => now);
   const pair = createInProcessPair();
