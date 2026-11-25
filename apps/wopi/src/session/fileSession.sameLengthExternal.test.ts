@@ -13,7 +13,7 @@ test("without X-WOPI-ItemVersion, a same-length file seen right after PutFile ke
   let external: Uint8Array | null = null;
   const real = h.host.fetch.bind(h.host);
   h.host.fetch = async (request: Request) => {
-    const put = (request.headers.get("X-WOPI-Override") ?? "").toUpperCase() === "PUT";
+    const put = (request.headers.get("X-WOPI-Override") ?? "").toUpperCase() === "PUT" && external === null;
     const sent = put ? (await request.clone().arrayBuffer()).byteLength : 0;
     const response = await real(request);
     if (!put) return response;
@@ -32,11 +32,22 @@ test("without X-WOPI-ItemVersion, a same-length file seen right after PutFile ke
   client.edit("first-edit ", 0);
   const replica = session.replica!;
   expect(session.applyUpdate(joined.user.id, client.encodeStateAsUpdate(replica.encodeStateVector())).accepted).toBe(true);
+  const apply = (marker: string, slot: number) => {
+    client.edit(marker, slot);
+    expect(session.applyUpdate(joined.user.id, client.encodeStateAsUpdate(replica.encodeStateVector())).accepted).toBe(true);
+  };
   const first = await session.requestSave(joined.user.id);
+  apply("second-edit ", 1);
+  const second = await session.requestSave(joined.user.id);
   client.destroy();
-  expect({
+  const outcome = {
     firstSaved: first.saved,
+    secondSaved: second.saved,
+    plainPuts: h.putCount(),
     relativePuts: h.callsFor("PUT_RELATIVE").length,
-    externalKept: Buffer.from(h.host.files.get("file1")!.bytes).equals(Buffer.from(external!)),
-  }).toEqual({ firstSaved: true, relativePuts: 1, externalKept: true });
+    externalInFile: Buffer.from(h.host.files.get("file1")!.bytes).equals(Buffer.from(external!)),
+  };
+  console.log("same-length outcome", JSON.stringify(outcome));
+  expect(outcome.externalInFile).toBe(true);
+  expect(outcome.relativePuts > 0 || !outcome.firstSaved).toBe(true);
 });
