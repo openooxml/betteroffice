@@ -679,7 +679,10 @@ fn a_header_rename_is_refused_when_an_untouched_sibling_is_invalid() {
     for (cell, caption) in [
         ("", "Rev"),
         (r#"<c r="C1"><v>7</v></c>"#, "Rev"),
-        (r#"<c r="C1" t="inlineStr"><is><t>Name</t></is></c>"#, "Name"),
+        (
+            r#"<c r="C1" t="inlineStr"><is><t>Name</t></is></c>"#,
+            "Name",
+        ),
     ] {
         let source = replace_part(
             &book(),
@@ -836,9 +839,8 @@ fn qualified_row_references_recalculate_after_a_rename() {
         edit(&mut workbook, "B3", "4");
         edit(&mut workbook, "C3", "=Table1[@Status]*2");
         let expected = [CellValue::Number { value: 8.0 }];
-        let values = |workbook: &Workbook| {
-            ["C3"].map(|address| workbook.model().value(SHEET1, at(address)))
-        };
+        let values =
+            |workbook: &Workbook| ["C3"].map(|address| workbook.model().value(SHEET1, at(address)));
         assert_eq!(values(&workbook), expected);
         edit(&mut workbook, "B1", caption);
         assert_eq!(values(&workbook), expected);
@@ -847,16 +849,14 @@ fn qualified_row_references_recalculate_after_a_rename() {
             assert_saved_headers(&workbook.save().unwrap(), ["Name", caption, "Rev"]);
         reopened.recalculate_all(CalculationOptions::default());
         assert_eq!(values(&reopened), expected);
-        for (address, formula) in [("C3", format!("Table1[@[{escaped}]]*2"))] {
-            assert_eq!(
-                reopened.model().sheets[0]
-                    .cell(at(address))
-                    .unwrap()
-                    .formula
-                    .as_deref(),
-                Some(formula.as_str())
-            );
-        }
+        assert_eq!(
+            reopened.model().sheets[0]
+                .cell(at("C3"))
+                .unwrap()
+                .formula
+                .as_deref(),
+            Some(format!("Table1[@[{escaped}]]*2").as_str())
+        );
         edit(&mut reopened, "B3", "5");
         assert_eq!(
             reopened.model().value(SHEET1, at("C3")),

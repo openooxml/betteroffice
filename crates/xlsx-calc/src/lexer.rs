@@ -274,7 +274,10 @@ pub fn rewrite_table_columns<'a>(
         }
         if table.is_empty()
             && index > 0
-            && matches!(&tokens[index - 1].kind, TokKind::Name { .. } | TokKind::Ident(_))
+            && matches!(
+                &tokens[index - 1].kind,
+                TokKind::Name { .. } | TokKind::Ident(_)
+            )
         {
             continue;
         }

@@ -99,7 +99,9 @@ impl PreservedPackage {
                 ))
             })?;
         let mut columns = table.columns.clone();
-        *columns.get_mut(column).ok_or_else(|| column_count_error(path))? = caption.to_owned();
+        *columns
+            .get_mut(column)
+            .ok_or_else(|| column_count_error(path))? = caption.to_owned();
         if columns != source.columns {
             let (path, bytes) =
                 self.validate_table_change(workbook, table, source, path, &columns, Some(column))?;
@@ -143,10 +145,10 @@ impl PreservedPackage {
     fn table_part_destination(&self, path: &str, table: &str) -> Result<(&str, &[u8]), ParseError> {
         reject_shared_part(self, path, table)?;
         let normalized = normalized_part_name(path);
-        let mut destinations = self
-            .parts
-            .iter()
-            .filter(|(path, _)| path.trim_start_matches('/').eq_ignore_ascii_case(&normalized));
+        let mut destinations = self.parts.iter().filter(|(path, _)| {
+            path.trim_start_matches('/')
+                .eq_ignore_ascii_case(&normalized)
+        });
         let (destination, bytes) = destinations
             .next()
             .ok_or_else(|| ParseError::MissingPart(path.to_owned()))?;
