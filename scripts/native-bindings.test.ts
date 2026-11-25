@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -399,13 +399,24 @@ describe('native package release wiring', () => {
     );
   });
 
-  test('dist builds GNU Linux binaries natively on pinned Ubuntu 24.04 images and checks their glibc floor', () => {
+  test('dist builds GNU Linux binaries with zig at the glibc floor and checks it', () => {
     const job = dist.jobs.bindings;
     expect(job.strategy.matrix.platform.filter((platform: any) => platform.target.endsWith('-linux-gnu'))).toEqual([
-      { os: 'ubuntu-24.04-arm', target: 'aarch64-unknown-linux-gnu' },
-      { os: 'ubuntu-24.04', target: 'x86_64-unknown-linux-gnu' }
+      { os: 'ubuntu-24.04-arm', target: 'aarch64-unknown-linux-gnu', zig: true },
+      { os: 'ubuntu-24.04', target: 'x86_64-unknown-linux-gnu', zig: true }
     ]);
     const build = job.steps.findIndex((step: any) => step.name === 'Build binding');
+    expect(job.steps[build - 1]).toEqual({
+      name: 'Pin the glibc floor',
+      if: "endsWith(matrix.platform.target, '-linux-gnu')",
+      shell: 'bash',
+      run: 'echo "CARGO=$PWD/scripts/cargo-glibc.sh" >> "$GITHUB_ENV"'
+    });
+    const wrapper = readFileSync(new URL('./cargo-glibc.sh', import.meta.url), 'utf8');
+    expect(wrapper).toContain('import { GLIBC_FLOOR }');
+    expect(wrapper).toContain('*-unknown-linux-gnu) arg="$arg.$floor"');
+    expect(wrapper).toContain('unset CARGO');
+    expect(statSync(new URL('./cargo-glibc.sh', import.meta.url)).mode & 0o111).not.toBe(0);
     expect(job.steps[build + 1]).toEqual({
       name: 'Check glibc floor',
       if: "endsWith(matrix.platform.target, '-linux-gnu')",

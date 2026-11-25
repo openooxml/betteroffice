@@ -27,8 +27,10 @@ jobs:
             target: x86_64-apple-darwin
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+            zig: true
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
+            zig: true
           - os: windows-latest
             target: x86_64-pc-windows-msvc
           - os: ubuntu-latest
@@ -58,7 +60,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: bindings
-          key: ${{ inputs.binding }}-native-${{ matrix.platform.target }}${{ endsWith(matrix.platform.target, '-linux-gnu') && format('-{0}', matrix.platform.os) || '' }}
+          key: ${{ inputs.binding }}-native-${{ matrix.platform.target }}${{ endsWith(matrix.platform.target, '-linux-gnu') && format('-zig-{0}', matrix.platform.os) || '' }}
 
       - uses: mlugg/setup-zig@v2
         if: matrix.platform.zig
@@ -72,6 +74,11 @@ jobs:
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
+
+      - name: Pin the glibc floor
+        if: endsWith(matrix.platform.target, '-linux-gnu')
+        shell: bash
+        run: echo "CARGO=$PWD/scripts/cargo-glibc.sh" >> "$GITHUB_ENV"
 
       - name: Build binding
         run: bunx napi build --cwd bindings/${{ inputs.binding }}-native --platform --target ${{ matrix.platform.target }} --release ${{ matrix.platform.zig && '--cross-compile' || '' }} -- --locked
