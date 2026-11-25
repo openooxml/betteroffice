@@ -36,6 +36,6 @@ test('connector line ends follow the first and last nonzero tangents', async () 
       strokePaint: { width: 2, headEnd: { type: 'triangle' }, tailEnd: { type: 'triangle' } },
     });
     expect(filled.map((points) => points.map(([x, y]) => [Math.round(x), Math.round(y)])))
-      .toEqual(expected);
+      .toEqual(expected.map((head) => head.map((point) => [...point])));
   }
 });
