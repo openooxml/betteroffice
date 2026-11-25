@@ -4450,7 +4450,8 @@ impl Workbook {
             self.update_sheet_info_cache(ops, &prior_styles);
             Some(staged.update)
         } else {
-            let update = if self.defers_staging() {
+            let deferred = self.defers_staging();
+            let update = if deferred {
                 self.defer_apply(ops, SyncOrigin::User)?;
                 None
             } else {
@@ -4462,7 +4463,7 @@ impl Workbook {
                     .map_err(authority_error)?
             };
             let transaction = Transaction::new(ops.to_vec(), Provenance::User);
-            self.apply_model_history(|undo, model| undo.commit(model, &transaction))?;
+            self.apply_model_history(deferred, |undo, model| undo.commit(model, &transaction))?;
             self.bump_model_epoch_keeping_results();
             self.queue_geometry_delta(delta);
             self.update_sheet_info_cache(ops, &prior_styles);
