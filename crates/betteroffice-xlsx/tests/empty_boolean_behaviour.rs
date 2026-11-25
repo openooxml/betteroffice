@@ -1,4 +1,4 @@
-use betteroffice_xlsx::{CalculationOptions, CellRef, SheetId, Workbook};
+use betteroffice_xlsx::{CalculationOptions, CellRef, CellValue, SheetId, Workbook};
 use xlsx_model::CellProvider;
 
 const MAIN: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
@@ -20,46 +20,25 @@ fn package(a1: &str) -> Vec<u8> {
     ooxml_opc::rezip_parts(&parts).unwrap()
 }
 
-fn saved_a1(saved: &[u8]) -> String {
-    let parts = ooxml_opc::unzip_parts(saved).unwrap();
-    let (_, sheet) = parts
-        .iter()
-        .find(|(name, _)| name == "xl/worksheets/sheet1.xml")
-        .unwrap();
-    let sheet = String::from_utf8_lossy(sheet).to_string();
-    sheet
-        .split("<c ")
-        .find(|cell| cell.contains(r#"r="A1""#))
-        .map(|cell| format!("<c {}", cell.split("</c>").next().unwrap_or(cell)))
-        .unwrap_or_default()
+#[test]
+fn a_plain_empty_boolean_reads_false() {
+    let workbook = Workbook::open(&package(r#"<c r="A1" t="b"><v></v></c>"#)).unwrap();
+    assert_eq!(
+        workbook.model().value(SheetId(0), CellRef::new(0, 0)),
+        CellValue::Bool { value: false }
+    );
 }
 
 #[test]
-fn empty_boolean_behaviour() {
-    for (case, a1) in [
-        ("value", r#"<c r="A1" t="b"><v></v></c>"#),
-        ("formula", r#"<c r="A1" t="b"><f>TRUE()</f><v/></c>"#),
-    ] {
-        let source = package(a1);
-        let at = CellRef::new(0, 0);
-        let opened = Workbook::open(&source).unwrap();
-        let stale =
-            Workbook::open_recalculating_stale(&source, CalculationOptions::default(), None)
-                .unwrap();
-        let mut edited = Workbook::open(&source).unwrap();
-        edited
-            .edit_cell(
-                SheetId(0),
-                CellRef::new(0, 1),
-                "2",
-                CalculationOptions::default(),
-            )
-            .unwrap();
-        println!(
-            "BEHAVIOUR {case} open={:?} default_open={:?} edited_save_a1={}",
-            opened.model().value(SheetId(0), at),
-            stale.model().value(SheetId(0), at),
-            saved_a1(&edited.save().unwrap())
-        );
-    }
+fn a_formula_boolean_with_an_empty_value_is_recalculated_on_the_recalculating_open() {
+    let workbook = Workbook::open_recalculating_stale(
+        &package(r#"<c r="A1" t="b"><f>TRUE()</f><v/></c>"#),
+        CalculationOptions::default(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        workbook.model().value(SheetId(0), CellRef::new(0, 0)),
+        CellValue::Bool { value: true }
+    );
 }
